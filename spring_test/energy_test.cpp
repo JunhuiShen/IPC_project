@@ -200,25 +200,27 @@ static inline Mat2 mul(const Mat2& A, const Mat2& B){
             A.a21*B.a11 + A.a22*B.a21,  A.a21*B.a12 + A.a22*B.a22
     };
 }
-// -- build projectors P, Q from segment direction s = x_{j+1} - x_j
-static inline void buildProjectors(const Vec2& xj, const Vec2& xk, Mat2& P, Mat2& Q){
+
+// ======================================================
+// LocalBarrierGrad
+// ======================================================
+// Build projectors T, P from segment direction s = x_{j+1} - x_j
+// T = uu^T and P = I - uu^T
+static inline void buildProjectors(const Vec2& xj, const Vec2& xk, Mat2& T, Mat2& P){
     Vec2 s{ xk.x - xj.x, xk.y - xj.y };
     double len2 = s.x*s.x + s.y*s.y;
-    // assume non-degenerate (your test already ensures this)
+    // Assume non-degenerate
     double inv = 1.0 / len2;
-    P = { s.x*s.x*inv, s.x*s.y*inv, s.x*s.y*inv, s.y*s.y*inv };
-    Q = { 1.0 - P.a11, -P.a12, -P.a21, 1.0 - P.a22 };
+    T = { s.x*s.x*inv, s.x*s.y*inv, s.x*s.y*inv, s.y*s.y*inv };
+    P = { 1.0 - T.a11, -T.a12, -T.a21, 1.0 - T.a22 };
 }
 
-// ==============================
-// LocalBarrierGrad
-// ==============================
 Vec2 localBarrierGrad(int who, const Vec &x, int node, int seg0, int seg1, double dhat) {
     Vec2 xi   = getXi(x, node);
     Vec2 xj   = getXi(x, seg0);
     Vec2 xk   = getXi(x, seg1);
 
-    double t; Vec2 p, r;
+    double t; Vec2 p{}, r{};
     double d = nodeSegmentDistance(xi, xj, xk, t, p, r);
     if (d >= dhat) return {0,0};
     d = std::max(d, 1e-12);
@@ -226,20 +228,18 @@ Vec2 localBarrierGrad(int who, const Vec &x, int node, int seg0, int seg1, doubl
     Vec2 n{ r.x/d, r.y/d };
     double bp = barrierGrad(d, dhat);
 
-    Mat2 P, Q; buildProjectors(xj, xk, P, Q);
+    Mat2 T{}, P{}; buildProjectors(xj, xk, T, P);
     Vec2 g_raw{ bp*n.x, bp*n.y };
 
     if (who == node) {
-        // ∇_{x_i} E = Q * (bp * n)
-        return mul(Q, g_raw);
-    } else if (who == seg0) {
-        // proper endpoint gradient needs projector-motion term (A); placeholder 0 for now
-        return {0,0};
-    } else if (who == seg1) {
+        // Gradient of {x_i} = P * (bp * n)
+        return mul(P, g_raw);
+    } else if (who == seg0 or who == seg1) {
         return {0,0};
     }
     return {0,0};
 }
+
 
 // ==============================
 // LocalBarrierHess (node block only)
@@ -249,7 +249,7 @@ Mat2 localBarrierHess(int who, const Vec &x, int node, int seg0, int seg1, doubl
     Vec2 xj   = getXi(x, seg0);
     Vec2 xk   = getXi(x, seg1);
 
-    double t; Vec2 p, r;
+    double t; Vec2 p{}, r{};
     double d = nodeSegmentDistance(xi, xj, xk, t, p, r);
     if (d >= dhat) return {0,0,0,0};
     d = std::max(d, 1e-12);
@@ -267,21 +267,20 @@ Mat2 localBarrierHess(int who, const Vec &x, int node, int seg0, int seg1, doubl
             bpp*ny*ny + (bp/d)*(1 - ny*ny)
     };
 
-    Mat2 P, Q; buildProjectors(xj, xk, P, Q);
+    Mat2 T{}, P{}; buildProjectors(xj, xk, T, P);
 
     if (who == node) {
-        // H_{ii} = Q K Q  (segment held fixed; Q constant)
-        Mat2 QK = mul(Q, K);
-        Mat2 H  = mul(QK, Q);
+        // H_{ii} = P K P
+        Mat2 PK = mul(P, K);
+        Mat2 H  = mul(PK, P);
         return H;
     } else {
-        // Endpoint blocks require projector derivatives (∂Q/∂x); not included here yet
         return {0,0,0,0};
     }
 }
 
 // ======================================================
-// Finite-diff Hessian from energy (stable)
+// Finite-difference Hessian from energy
 // ======================================================
 double barrierPairEnergy(const Vec& x,int node,int seg0,int seg1,double dhat){
     double t; Vec2 p,r;
@@ -417,7 +416,7 @@ void finiteDifferenceBarrierTest(){
 }
 
 // ---------------------------------------------------------
-//  Finite difference consistency test
+//  Finite-difference consistency test
 // ---------------------------------------------------------
 void finiteDifferenceBarrierScalarTest() {
     double dhat = 0.5;
@@ -639,10 +638,10 @@ void testBarrierSystem() {
 }
 
 //==============================================================
-// 1. Energy components for Psi(x)
+// Energy components for Psi
 //==============================================================
 
-// --- Gravity energy
+// Gravity energy
 double gravityEnergy(const Vec& x,
                      const std::vector<double>& mass,
                      const Vec2& g_accel)
@@ -656,7 +655,7 @@ double gravityEnergy(const Vec& x,
     return Eg;
 }
 
-// --- Total barrier energy (sum over all active pairs)
+// Total barrier energy
 double totalBarrierEnergy(const Vec& x,
                           const std::vector<BarrierPair>& barriers,
                           double dhat)
@@ -673,7 +672,7 @@ double totalBarrierEnergy(const Vec& x,
     return Eb;
 }
 
-// --- Full Psi energy
+// Full Psi energy
 double PsiEnergy(const Vec& x, const Vec& xhat,
                  const std::vector<double>& mass,
                  const std::vector<double>& L,
@@ -695,10 +694,10 @@ double PsiEnergy(const Vec& x, const Vec& xhat,
 }
 
 //==============================================================
-// 2. Local Gradient and Local Hessian of Psi(x)
+// Local Gradient and Local Hessian of Psi(x)
 //==============================================================
 
-// --- Local Gradient ∇_{x_i} Psi
+// Local Gradient ∇_{x_i} Psi
 Vec2 PsiLocalGrad(int i,
                   const Vec& x, const Vec& xhat,
                   const std::vector<double>& mass,
@@ -713,20 +712,20 @@ Vec2 PsiLocalGrad(int i,
     Vec2 xi = getXi(x, i), xhi = getXi(xhat, i);
     Vec2 gi{0.0, 0.0};
 
-    // (1) Mass term
+    // Mass term
     gi.x += mass[i] * (xi.x - xhi.x);
     gi.y += mass[i] * (xi.y - xhi.y);
 
-    // (2) Spring contribution
+    // Spring term
     Vec2 gs = localSpringGrad(i, x, k, L);
     gi.x += dt * dt * gs.x;
     gi.y += dt * dt * gs.y;
 
-    // (3) Gravity
+    // Gravity
     gi.x -= dt * dt * mass[i] * g_accel.x;
     gi.y -= dt * dt * mass[i] * g_accel.y;
 
-    // (4) Barrier forces
+    // Barrier forces
     for (const auto& c : barriers) {
         for (int who : {c.node, c.seg0, c.seg1}) {
             if (who != i) continue;
@@ -739,7 +738,7 @@ Vec2 PsiLocalGrad(int i,
     return gi;
 }
 
-// --- Local Hessian H_ii = ∂²Ψ/∂x_i∂x_i
+// Local Hessian
 Mat2 PsiLocalHess(int i,
                   const Vec& x,
                   const std::vector<double>& mass,
@@ -753,14 +752,14 @@ Mat2 PsiLocalHess(int i,
 
     Mat2 H{mass[i], 0, 0, mass[i]};
 
-    // (1) Spring term
+    // Spring term
     Mat2 Hs = localSpringHess(i, x, k, L);
     H.a11 += dt * dt * Hs.a11;
     H.a12 += dt * dt * Hs.a12;
     H.a21 += dt * dt * Hs.a21;
     H.a22 += dt * dt * Hs.a22;
 
-    // (2) Barrier term (node-block only)
+    // Barrier term
     for (const auto& c : barriers) {
         for (int who : {c.node, c.seg0, c.seg1}) {
             if (who != i) continue;
@@ -776,7 +775,7 @@ Mat2 PsiLocalHess(int i,
 }
 
 //==============================================================
-// 3. Finite-Difference validation for one node block
+// Finite-Difference validation for one node block
 //==============================================================
 void finiteDifferencePsiLocalTest()
 {

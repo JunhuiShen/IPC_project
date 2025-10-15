@@ -160,7 +160,7 @@ namespace fs = std::__fs::filesystem;
 std::vector<Vec2> residual_Psi(const Vec &x, const Vec &xhat, const std::vector<double> &mass,
         const std::vector<double> &L, double dt, double k, const Vec2 &g_accel,const std::vector<bool> &is_fixed)
 {
-    int N = mass.size();
+    int N = static_cast<int>(mass.size());
     std::vector<Vec2> r(N, {0.0,0.0});
     for (int i = 0; i < N; ++i) {
         Vec2 xi = getXi(x, i);
@@ -217,9 +217,8 @@ Vec2 mat2_mul(const Mat2 &A, const Vec2 &v) {
 std::pair<double,int> gauss_seidel_minimize(Vec &x, const Vec &xhat, const std::vector<double> &mass,
                                             const std::vector<double> &L, double dt, double k, const Vec2 &g_accel,
                                             const std::vector<bool> &is_fixed, int max_sweeps=200, double tol_abs=1e-10,
-                                            double omega=1.0)
-{
-    int N = mass.size();
+                                            double omega=1.0){
+    int N = static_cast<int>(mass.size());
 
     for (int sweep=0; sweep<max_sweeps; ++sweep) {
         for (int i=0;i<N;++i){
@@ -255,7 +254,7 @@ std::pair<double,int> gauss_seidel_minimize(Vec &x, const Vec &xhat, const std::
             Hspring.a22 *= dt*dt;
 
             // Full Hessian (mass + Hspring)
-            Mat2 Hii;
+            Mat2 Hii{};
             Hii.a11 = mass[i] + Hspring.a11;
             Hii.a12 = Hspring.a12;
             Hii.a21 = Hspring.a21;
@@ -281,8 +280,7 @@ std::pair<double,int> gauss_seidel_minimize(Vec &x, const Vec &xhat, const std::
 }
 
 // -------------------- OBJ export --------------------
-void export_obj(const std::string &filename, const Vec &x, const std::vector<std::pair<int,int>> &edges)
-{
+void export_obj(const std::string &filename, const Vec &x, const std::vector<std::pair<int,int>> &edges){
     std::ofstream out(filename);
     if (!out) {
         std::cerr << "Error: cannot write " << filename << "\n";
@@ -302,8 +300,7 @@ void export_obj(const std::string &filename, const Vec &x, const std::vector<std
 // -------------------------------------------------------------
 // Main simulation: the right spring swings while the left spring is kept fixed
 // -------------------------------------------------------------
-int main()
-{
+int main(){
     std::string outdir = "frames_spring_IP";
     fs::create_directory(outdir);
 
@@ -317,17 +314,17 @@ int main()
     double omega       = 1.0;
 
     // ---------------- Left chain (fixed) ----------------
-    const int N_left = 4;
+    const int N_left = 2;
     Vec x_left(2*N_left, 0.0);
     for (int i = 0; i < N_left; ++i)
-        setXi(x_left, i, { -0.8, -i * 1.0 });
+        setXi(x_left, i, { -0.5, -i * 1.0 });
 
     std::vector<std::pair<int,int>> edges_left;
     for (int i = 0; i < N_left - 1; ++i)
         edges_left.emplace_back(i, i + 1);
 
     // ---------------- Right chain (dynamic) -------------
-    const int N_right = 3;
+    const int N_right = 2;
     Vec x_right(2*N_right, 0.0), v_right(2*N_right, 0.0), xhat_right(2*N_right, 0.0);
     std::vector<double> mass_right(N_right, 0.05);
     std::vector<bool>   is_fixed_right(N_right, false);
@@ -341,7 +338,7 @@ int main()
         edges_right.emplace_back(i, i + 1);
 
     std::vector<double> L_right;
-    for (auto &e : edges_right)
+    for (std::pair<int,int> &e : edges_right)
         L_right.push_back(norm(x_right, e.first, e.second));
 
     // ==========================================================
