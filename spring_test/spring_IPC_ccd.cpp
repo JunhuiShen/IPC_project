@@ -188,27 +188,13 @@ double nodeSegmentDistance(const Vec2 &xi, const Vec2 &xj, const Vec2 &xjp1, dou
 // ======================================================
 // Compute signed point–segment distance
 // ======================================================
-double nodeSegmentSignedDistance(const Vec2 &xi, const Vec2 &xj, const Vec2 &xjp1, double &t, Vec2 &p, Vec2 &r){
-    double unsigned_d = nodeSegmentDistance(xi, xj, xjp1, t, p, r);
-
+double nodeSegmentSignedDistance(const Vec2 &xi, const Vec2 &xj, const Vec2 &xjp1){
     // Segment direction
     Vec2 seg = { xjp1.x - xj.x, xjp1.y - xj.y };
-    double seg_len2 = seg.x * seg.x + seg.y * seg.y;
-    if (seg_len2 < 1e-14) return unsigned_d;
-
-    // Compute normal only if projection inside segment
-    if (t > 1e-10 && t < 1.0 - 1e-10){
-        double seg_len = std::sqrt(seg_len2);
-        Vec2 n = { -seg.y / seg_len, seg.x / seg_len };
-        double signed_d = n.x * (xi.x - p.x) + n.y * (xi.y - p.y);
-        return signed_d;
-    } else {
-        // Outside region: sign not meaningful
-        return unsigned_d;
-    }
+    double seg_len = std::sqrt(seg.x*seg.x + seg.y*seg.y);
+    Vec2 n = { -seg.y / seg_len, seg.x / seg_len };
+    return n.x * (xi.x - xj.x) + n.y * (xi.y - xj.y);
 }
-
-
 
 // ==============================
 // LocalBarrierGrad
@@ -409,8 +395,48 @@ Mat2 PsiLocalHess(int i, const Vec& x, const std::vector<double>& mass, const st
             H.a22 += dt * dt * Hb.a22;
         }
     }
-
     return H;
+}
+
+// ============================================================
+// Continuous Collision Detection (CCD) for a node vs. fixed segment
+// ============================================================
+double  ccd_node_segment_update(const Vec2 &x, const Vec2& dx, const Vec2& x1, const Vec2& x2, double eta = 0.9){
+    // Compute tilde(x) from x and dx
+    Vec2 seg = { x2.x - x1.x, x2.y - x1.y };
+    double seg_len2 = seg.x * seg.x + seg.y * seg.y;
+
+    // Projection of x onto infinite line
+    double s_proj = ((x.x - x1.x) * seg.x + (x.y - x1.y) * seg.y) / seg_len2;
+    Vec2 x_tilde = { x1.x + s_proj * seg.x,
+                     x1.y + s_proj * seg.y };
+
+    // Compute tilde(w)
+    double step_len = std::sqrt(dx.x * dx.x + dx.y * dx.y);
+    Vec2 omega_tilde = {
+            (x_tilde.x - x.x) / step_len,
+            (x_tilde.y - x.y) / step_len
+    };
+    double omega_tilde_len = std::sqrt(omega_tilde.x * omega_tilde.x + omega_tilde.y * omega_tilde.y);
+
+
+    // Default full step
+    double omega_hat;
+
+    if (omega_tilde_len > 1.0) {
+        omega_hat = 1.0;
+    } else {
+        double s = ((x_tilde.x - x1.x) * seg.x + (x_tilde.y - x1.y) * seg.y) / seg_len2;
+        if (s >= 0.0 && s <= 1.0)
+            omega_hat = eta * omega_tilde_len;
+        else
+            omega_hat = 1.0;
+    }
+
+    if (omega_hat < 0.0) omega_hat = 0.0;
+    if (omega_hat > 1.0) omega_hat = 1.0;
+
+    return omega_hat;
 }
 
 // ==============================
@@ -455,7 +481,7 @@ std::pair<double,int> gauss_seidel_minimize_with_barrier_global(Vec &x_local, co
                                                                 const std::vector<BarrierPair> &barriers_global,
                                                                 double dhat, Vec &x_global,
                                                                 int global_offset, int max_sweeps = 200,
-                                                                double tol_abs = 1e-10, double omega = 1.0){
+                                                                double tol_abs = 1e-10, double omega = 1.0, double eta = 0.9){
     const int N_local = (int)mass_local.size();
 
     std::function<double(const std::vector<Vec2>&)> residual_norm2 = [&](const std::vector<Vec2> &r){
@@ -493,7 +519,7 @@ std::pair<double,int> gauss_seidel_minimize_with_barrier_global(Vec &x_local, co
 
             // Local Hessian (mass + spring)
             Mat2 Hi = PsiLocalHess(i, x_local, mass_local, L_local, dt, k, is_fixed_local, {}, dhat);{
-            // Add barrier Hessian block
+                // Add barrier Hessian block
                 Mat2 Hb_sum{0, 0, 0, 0};
                 for (const BarrierPair &c : barriers_global){
                     if (c.node != who_global && c.seg0 != who_global && c.seg1 != who_global)
@@ -515,11 +541,34 @@ std::pair<double,int> gauss_seidel_minimize_with_barrier_global(Vec &x_local, co
             Mat2 Hi_inv = matrix2d_inverse(Hi);
             Vec2 dx = mat2_mul(Hi_inv, gi);
 
+            // Apply the safe GS update
             Vec2 xi = getXi(x_local, i);
-            xi.x -= omega * dx.x;
-            xi.y -= omega * dx.y;
+
+            // CCD
+            double omega_hat = omega;
+            for (const BarrierPair &c : barriers_global) {
+                if (c.node != who_global && c.seg0 != who_global && c.seg1 != who_global)
+                    continue;
+
+                // Extract global geometry
+                Vec2 xi_ccd_start = getXi(x_global, c.node);
+                Vec2 xj = getXi(x_global, c.seg0);
+                Vec2 xk = getXi(x_global, c.seg1);
+
+                Vec2 ccd_dx {-dx.x, -dx.y};
+
+                // Apply CCD only for node–segment interactions
+                if (c.node == who_global) {
+                    double omega_c = ccd_node_segment_update(xi_ccd_start, ccd_dx, xj, xk, eta);
+                    omega_hat = std::min(omega_hat, omega_c);
+                }
+            }
+
+            xi.x -= omega_hat * dx.x;
+            xi.y -= omega_hat * dx.y;
             setXi(x_local, i, xi);
             setXi(x_global, who_global, xi);
+
         }
 
         // Compute residual norm for stopping criterion
@@ -547,21 +596,6 @@ std::pair<double,int> gauss_seidel_minimize_with_barrier_global(Vec &x_local, co
         }
 
         double rn = residual_norm2(r);
-
-        // Collision check
-        bool collision = false;
-        double min_signed_d = std::numeric_limits<double>::max();
-
-        for (const auto &c : barriers_global) {
-            Vec2 xi = getXi(x_global, c.node);
-            Vec2 xj = getXi(x_global, c.seg0);
-            Vec2 xk = getXi(x_global, c.seg1);
-            double t;
-            Vec2 p{}, rvec{};
-            double d_signed = nodeSegmentSignedDistance(xi, xj, xk, t, p, rvec);
-            min_signed_d = std::min(min_signed_d, d_signed);
-
-        }
 
         if (rn < tol_abs)
             return {rn, sweep + 1};
@@ -626,7 +660,7 @@ void export_obj(const std::string &filename, const Vec &x, const std::vector<std
 // Numerical Experiment: the left spring is fixed, while the right spring has only the initial node fixed
 // ==============================
 int main(){
-    std::string outdir = "frames_spring_IPC2";
+    std::string outdir = "frames_spring_IPC3";
     fs::create_directory(outdir);
 
     // -------------------------------------------------------------
@@ -635,11 +669,11 @@ int main(){
     double dt          = 1.0 / 30.0;
     Vec2   g_accel     = {0.0, -9.81};
     double k_spring    = 20.0;
-    int    total_frame = 200;
+    int    total_frame = 100;
     int    max_sweeps  = 300;
     double tol_abs     = 1e-8;
     double omega       = 1.0;
-    double dhat        = 0.2;  // barrier activation distance
+    double dhat        = 0.1;  // barrier activation distance
 
     // -------------------------------------------------------------
     // Left chain (fixed): on the line y = -x-1
@@ -695,8 +729,8 @@ int main(){
     // -------------------------------------------------------------
     // Main simulation loop
     // -------------------------------------------------------------
-    for (int frame = 1; frame <= total_frame; ++frame)
-    {
+    for (int frame = 1; frame <= total_frame; ++frame){
+
         // Predictor step: xhat = x + dt * v
         for (int i = 0; i < N_right; ++i) {
             Vec2 xi = getXi(x_right, i);
@@ -724,7 +758,7 @@ int main(){
         }
 
         // Gauss–Seidel minimization for the right chain
-        Vec xnew_right = xhat_right;
+        Vec xnew_right = x_right;
         for (int i=0;i<N_left;++i) {
             setXi(x_combined, i, getXi(x_left, i));
         }
@@ -759,30 +793,37 @@ int main(){
         for (int i = 0; i < N_right; ++i)
             setXi(x_combined, N_left + i, getXi(x_right, i));
 
+        // Compute signed distances for reporting
+        double min_signed_d = std::numeric_limits<double>::max();
+        bool collision = false;
+
+        for (const auto &c : barriers) {
+            // End-of-frame geometry (candidate state)
+            Vec2 xi_end = getXi(x_combined, c.node);
+            Vec2 xj     = getXi(x_combined, c.seg0);
+            Vec2 xk     = getXi(x_combined, c.seg1);
+
+            // Distances
+            double d_end = nodeSegmentSignedDistance(xi_end, xj, xk);
+
+            if (d_end < min_signed_d)
+                min_signed_d = d_end;
+
+            if (d_end < 0.0) {
+                collision = true;
+            }
+        }
+
         // Export frame
         std::ostringstream ss;
         ss << outdir << "/frame_" << std::setw(4)
            << std::setfill('0') << frame << ".obj";
         export_obj(ss.str(), x_combined, edges_combined);
 
-        // Compute signed distances for reporting
-        double min_signed_d = std::numeric_limits<double>::max();
-        bool collision = false;
-
-        for (const auto &c : barriers) {
-            Vec2 xi = getXi(x_combined, c.node);
-            Vec2 xj = getXi(x_combined, c.seg0);
-            Vec2 xk = getXi(x_combined, c.seg1);
-            double t; Vec2 p{}, rvec{};
-            double d_signed = nodeSegmentSignedDistance(xi, xj, xk, t, p, rvec);
-            min_signed_d = std::min(min_signed_d, d_signed);
-            if (d_signed < 0.0) collision = true;
-        }
 
         std::cout << "Frame " << std::setw(4) << frame
                   << " | residual=" << std::scientific << residual
                   << " | sweeps=" << sweeps
-                  << " | num barriers=" << barriers.size()
                   << " | signed_d=" << min_signed_d
                   << (collision ? "  COLLISION" : "")
                   << std::endl;
