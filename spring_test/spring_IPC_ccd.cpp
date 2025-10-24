@@ -23,6 +23,17 @@ struct Mat2 {
     double a11, a12, a21, a22;
 };
 
+struct Chain {
+    int N{}; // number of nodes
+    Vec x; // positions (2*N)
+    Vec v; // velocities (2*N)
+    Vec xhat;  // predicted positions (2*N)
+    std::vector<double> mass; // per-node masses
+    std::vector<bool> is_fixed; // per-node fixed flags
+    std::vector<double> rest_lengths; // rest spring lengths
+    std::vector<std::pair<int,int>> edges; // connectivity list
+};
+
 Vec2 getXi(const Vec &x, int i) {
     return {x[2*i], x[2*i+1]};
 }
@@ -41,6 +52,22 @@ double norm(const Vec &a, int i, int j){
     return std::sqrt(norm2(a,i,j));
 }
 
+// Vector multiplication
+static inline Vec2 mul(const Mat2& A, const Vec2& v){
+    return { A.a11*v.x + A.a12*v.y, A.a21*v.x + A.a22*v.y };
+}
+
+// Matrix-matrix multiplication
+static inline Mat2 mul(const Mat2& A, const Mat2& B){
+    return {
+            A.a11*B.a11 + A.a12*B.a21,  A.a11*B.a12 + A.a12*B.a22,
+            A.a21*B.a11 + A.a22*B.a21,  A.a21*B.a12 + A.a22*B.a22
+    };
+}
+
+// ======================================================
+// Spring energy
+// ======================================================
 // Local spring energy
 double springEnergy(const Vec &x, int i, int j, double k, double L) {
     double ell = norm(x,i,j);
@@ -55,7 +82,7 @@ double totalSpringEnergy(const Vec &x, double k, const std::vector<double> &L) {
 }
 
 // ======================================================
-// Local Gradient
+// Local Gradient of the spring energy
 // ======================================================
 
 // Analytic local spring gradient at node i
@@ -83,7 +110,7 @@ Vec2 localSpringGrad(int i, const Vec &x, double k, const std::vector<double> &L
 }
 
 // ======================================================
-// Local Hessian
+// Local Hessian of the spring energy
 // ======================================================
 
 // Analytic local spring Hessian (2x2 block at node i)
@@ -130,31 +157,33 @@ std::vector<BarrierPair> build_barrier_pairs(int N) {
     std::vector<BarrierPair> pairs;
     for (int i = 0; i < N; ++i) {
         for (int j = 0; j < N - 1; ++j) {
-            if (i == j || i == j + 1) continue; // skip self/adjacent
+            if (i == j or i == j + 1) continue; // skip self/adjacent
             pairs.push_back({i, j, j + 1});
         }
     }
     return pairs;
 }
 
-// Barrier energy and derivatives
+// Scalar barrier energy
 double barrierEnergy(double d, double dhat) {
     if (d >= dhat) return 0.0;
     return - (d - dhat) * (d - dhat) * std::log(d / dhat);
 }
 
+// Scalar barrier energy gradient
 double barrierGrad(double d, double dhat) {
     if (d >= dhat) return 0.0;
     return -2 * (d - dhat) * std::log(d / dhat) - (d - dhat) * (d - dhat) / d;
 }
 
+// Scalar barrier energy hessian
 double barrierHess(double d, double dhat) {
     if (d >= dhat) return 0.0;
     return -2 * std::log(d / dhat) - 4 * (d - dhat) / d + (d - dhat) * (d - dhat) / (d * d);
 }
 
 // ======================================================
-// Compute point–segment distance
+// Compute (signed) point–segment distance
 // ======================================================
 double nodeSegmentDistance(const Vec2 &xi, const Vec2 &xj, const Vec2 &xjp1, double &t, Vec2 &p, Vec2 &r){
     // Segment direction
@@ -185,35 +214,25 @@ double nodeSegmentDistance(const Vec2 &xi, const Vec2 &xj, const Vec2 &xjp1, dou
     return std::sqrt(r.x * r.x + r.y * r.y);
 }
 
-// ======================================================
-// Compute signed point–segment distance
-// ======================================================
 double nodeSegmentSignedDistance(const Vec2 &xi, const Vec2 &xj, const Vec2 &xjp1){
-    // Segment direction
+    double t;
+    Vec2 p{}, r{};
+    double d = nodeSegmentDistance(xi, xj, xjp1, t, p, r);
+
+    // Segment direction and unit normal
     Vec2 seg = { xjp1.x - xj.x, xjp1.y - xj.y };
-    double seg_len = std::sqrt(seg.x*seg.x + seg.y*seg.y);
+    double seg_len = std::sqrt(seg.x * seg.x + seg.y * seg.y);
     Vec2 n = { -seg.y / seg_len, seg.x / seg_len };
-    return n.x * (xi.x - xj.x) + n.y * (xi.y - xj.y);
-}
 
-// ==============================
-// LocalBarrierGrad
-// ==============================
-static inline Vec2 mul(const Mat2& A, const Vec2& v){
-    return { A.a11*v.x + A.a12*v.y, A.a21*v.x + A.a22*v.y };
-}
-static inline Mat2 mul(const Mat2& A, const Mat2& B){
-    return {
-            A.a11*B.a11 + A.a12*B.a21,  A.a11*B.a12 + A.a12*B.a22,
-            A.a21*B.a11 + A.a22*B.a21,  A.a21*B.a12 + A.a22*B.a22
-    };
+    // Sign based on which side xi lies
+    double side = n.x * (xi.x - xj.x) + n.y * (xi.y - xj.y);
+    return (side >= 0.0 ? d : -d);
 }
 
 // ======================================================
-// LocalBarrierGrad
+// LocalBarrierGrad for a node
 // ======================================================
-// Build projectors T, P from segment direction s = x_{j+1} - x_j
-// T = uu^T and P = I - uu^T
+// Build projectors T, P from segment direction s = x_{j+1} - x_j: T = uu^T and P = I - uu^T
 static inline void buildProjectors(const Vec2& xj, const Vec2& xk, Mat2& T, Mat2& P){
     Vec2 s{ xk.x - xj.x, xk.y - xj.y };
     double len2 = s.x*s.x + s.y*s.y;
@@ -236,7 +255,8 @@ Vec2 localBarrierGrad(int who, const Vec &x, int node, int seg0, int seg1, doubl
     Vec2 n{ r.x/d, r.y/d };
     double bp = barrierGrad(d, dhat);
 
-    Mat2 T{}, P{}; buildProjectors(xj, xk, T, P);
+    Mat2 T{}, P{};
+    buildProjectors(xj, xk, T, P);
     Vec2 g_raw{ bp*n.x, bp*n.y };
 
     if (who == node) {
@@ -248,9 +268,8 @@ Vec2 localBarrierGrad(int who, const Vec &x, int node, int seg0, int seg1, doubl
     return {0,0};
 }
 
-
 // ==============================
-// LocalBarrierHess (node block only)
+// LocalBarrierHess for a node
 // ==============================
 Mat2 localBarrierHess(int who, const Vec &x, int node, int seg0, int seg1, double dhat) {
     Vec2 xi   = getXi(x, node);
@@ -275,7 +294,8 @@ Mat2 localBarrierHess(int who, const Vec &x, int node, int seg0, int seg1, doubl
             bpp*ny*ny + (bp/d)*(1 - ny*ny)
     };
 
-    Mat2 T{}, P{}; buildProjectors(xj, xk, T, P);
+    Mat2 T{}, P{};
+    buildProjectors(xj, xk, T, P);
 
     if (who == node) {
         // H_{ii} = P K P
@@ -308,7 +328,8 @@ double totalBarrierEnergy(const Vec& x, const std::vector<BarrierPair>& barriers
     for (const BarrierPair& c : barriers) {
         double t;
         Vec2 p{}, r{};
-        double d = nodeSegmentDistance(getXi(x, c.node),getXi(x, c.seg0),getXi(x, c.seg1),t, p, r);
+        double d = nodeSegmentDistance(getXi(x, c.node),getXi(x, c.seg0),getXi(x, c.seg1),t,
+                                       p, r);
         Eb += barrierEnergy(d, dhat);
     }
     return Eb;
@@ -398,45 +419,118 @@ Mat2 PsiLocalHess(int i, const Vec& x, const std::vector<double>& mass, const st
     return H;
 }
 
-// ============================================================
-// Continuous Collision Detection (CCD) for a node vs. fixed segment
-// ============================================================
-double  ccd_node_segment_update(const Vec2 &x, const Vec2& dx, const Vec2& x1, const Vec2& x2, double eta = 0.9){
-    // Compute tilde(x) from x and dx
-    Vec2 seg = { x2.x - x1.x, x2.y - x1.y };
-    double seg_len2 = seg.x * seg.x + seg.y * seg.y;
+// =======================
+// 2D Point–Segment CCD
+// =======================
+bool ccd_point_segment_2d(const Vec2& x1, const Vec2& dx1, const Vec2& x2, const Vec2& dx2,
+                          const Vec2& x3, const Vec2& dx3, double& t_out, double eps = 1e-12){
 
-    // Projection of x onto infinite line
-    double s_proj = ((x.x - x1.x) * seg.x + (x.y - x1.y) * seg.y) / seg_len2;
-    Vec2 x_tilde = { x1.x + s_proj * seg.x,
-                     x1.y + s_proj * seg.y };
-
-    // Compute tilde(w)
-    double step_len = std::sqrt(dx.x * dx.x + dx.y * dx.y);
-    Vec2 omega_tilde = {
-            (x_tilde.x - x.x) / step_len,
-            (x_tilde.y - x.y) / step_len
+    // Vector computation
+    std::function<Vec2(const Vec2&, const Vec2&)> sub = [](const Vec2& a, const Vec2& b) -> Vec2 {
+        return {a.x - b.x, a.y - b.y};
     };
-    double omega_tilde_len = std::sqrt(omega_tilde.x * omega_tilde.x + omega_tilde.y * omega_tilde.y);
 
+    std::function<Vec2(const Vec2&, const Vec2&)> add = [](const Vec2& a, const Vec2& b) -> Vec2 {
+        return {a.x + b.x, a.y + b.y};
+    };
 
-    // Default full step
-    double omega_hat;
+    std::function<Vec2(const Vec2&, double)> mul = [](const Vec2& a, double s) -> Vec2 {
+        return {a.x * s, a.y * s};
+    };
 
-    if (omega_tilde_len > 1.0) {
-        omega_hat = 1.0;
-    } else {
-        double s = ((x_tilde.x - x1.x) * seg.x + (x_tilde.y - x1.y) * seg.y) / seg_len2;
-        if (s >= 0.0 && s <= 1.0)
-            omega_hat = eta * omega_tilde_len;
-        else
-            omega_hat = 1.0;
+    std::function<double(const Vec2&, const Vec2&)> dot = [](const Vec2& a, const Vec2& b) -> double {
+        return a.x * b.x + a.y * b.y;
+    };
+
+    std::function<double(const Vec2&, const Vec2&)> cross = [](const Vec2& a, const Vec2& b) -> double {
+        return a.x * b.y - a.y * b.x;
+    };
+
+    std::function<double(const Vec2&)> norm2 = [&](const Vec2& a) -> double {
+        return dot(a, a);
+    };
+
+    // Compute coefficients of f(t) = a t^2 + b t + c
+    Vec2 x21  = sub(x1, x2);
+    Vec2 x32  = sub(x3, x2);
+    Vec2 dx21 = sub(dx1, dx2);
+    Vec2 dx32 = sub(dx3, dx2);
+
+    double a = cross(dx32, dx21);
+    double b = cross(dx32, x21) + cross(x32, dx21);
+    double c = cross(x32, x21);
+
+    double t_candidates[2];
+    int num_roots = 0;
+
+    // Degenerate case if a = 0
+    if (std::fabs(a) < eps) {
+        if (std::fabs(b) < eps) return false;
+        double t = -c / b;
+        if (t >= 0.0 and t <= 1.0)
+            t_candidates[num_roots++] = t;
+    }
+    else {
+        double D = b * b - 4.0 * a * c;
+        if (D < 0.0) return false; // No real roots
+
+        double sqrtD = std::sqrt(std::max(D, 0.0));
+        double s = (b >= 0.0) ? 1.0 : -1.0;
+        double q = -0.5 * (b + s * sqrtD);
+
+        double t1 = q / a;
+        double t2 = c / q;
+
+        if (t1 >= 0.0 and t1 <= 1.0)
+            t_candidates[num_roots++] = t1;
+        if (t2 >= 0.0 and t2 <= 1.0)
+            t_candidates[num_roots++] = t2;
     }
 
-    if (omega_hat < 0.0) omega_hat = 0.0;
-    if (omega_hat > 1.0) omega_hat = 1.0;
+    if (num_roots == 0) return false;
 
-    return omega_hat;
+    // Choose earliest valid collision time
+    double t_star = t_candidates[0];
+    if (num_roots == 2 and t_candidates[1] < t_star)
+        t_star = t_candidates[1];
+
+    // Inside-segment test
+    Vec2 x1t = add(x1, mul(dx1, t_star));
+    Vec2 x2t = add(x2, mul(dx2, t_star));
+    Vec2 x3t = add(x3, mul(dx3, t_star));
+
+    Vec2 seg = sub(x3t, x2t);
+    Vec2 rel = sub(x1t, x2t);
+
+    double seg_len2 = norm2(seg);
+    if (seg_len2 < eps) return false; // Degenerate segment
+
+    double s = dot(rel, seg) / seg_len2;
+    if (s < 0.0 or s > 1.0) return false;
+
+    // Valid collision
+    t_out = t_star;
+    return true;
+}
+
+double ccd_get_safe_step(const Vec2& x1, const Vec2& dx1, const Vec2& x2, const Vec2& dx2,
+                         const Vec2& x3, const Vec2& dx3,double eta = 0.9) {
+
+    double t_hit; // Variable to store the time of impact
+
+    // Run the 2D CCD to find the exact time of impact.
+    bool collision_found = ccd_point_segment_2d(x1, dx1, x2, dx2, x3, dx3, t_hit);
+
+    if (collision_found) {
+        if (t_hit <= 1e-12) {
+            // Already in collision, don't move at all
+            return 0.0;
+        }
+        return eta * t_hit;
+    } else {
+        // No collision found in the [0, 1] interval
+        return 1.0;
+    }
 }
 
 // ==============================
@@ -466,178 +560,141 @@ Mat2 matrix2d_inverse(const Mat2 &H) {
     return Hi;
 }
 
-Vec2 mat2_mul(const Mat2 &A, const Vec2 &v) {
-    return { A.a11 * v.x + A.a12 * v.y, A.a21 * v.x + A.a22 * v.y };
-}
-
 // =====================================================
 //  Nonlinear Gauss–Seidel using local grad/hess
 // =====================================================
+
+// Compute local gradient + barrier
+Vec2 compute_local_gradient(int i, const Vec &x_local, const Vec &xhat_local, const std::vector<double> &mass_local,
+                            const std::vector<double> &L_local, double dt, double k, const Vec2 &g_accel,
+                            const std::vector<bool> &is_fixed_local, const std::vector<BarrierPair> &barriers_global,
+                            double dhat, const Vec &x_global, int global_offset){
+    Vec2 gi = PsiLocalGrad(i, x_local, xhat_local, mass_local, L_local, dt, k, g_accel,
+                           is_fixed_local, {}, dhat);
+
+    // Add barrier contributions
+    int who_global = global_offset + i;
+    Vec2 gbar{0.0, 0.0};
+    for (const auto &c : barriers_global) {
+        if (c.node != who_global and c.seg0 != who_global and c.seg1 != who_global)
+            continue;
+        Vec2 gb = localBarrierGrad(who_global, x_global, c.node, c.seg0, c.seg1, dhat);
+        gbar.x += gb.x; gbar.y += gb.y;
+    }
+
+    gi.x += dt * dt * gbar.x;
+    gi.y += dt * dt * gbar.y;
+    return gi;
+}
+
+// Compute local Hessian + barrier
+Mat2 compute_local_hessian(int i, const Vec &x_local, const std::vector<double> &mass_local,
+                           const std::vector<double> &L_local, double dt, double k,
+                           const std::vector<bool> &is_fixed_local, const std::vector<BarrierPair> &barriers_global,
+                           double dhat, const Vec &x_global, int global_offset){
+    Mat2 Hi = PsiLocalHess(i, x_local, mass_local, L_local, dt, k, is_fixed_local, {}, dhat);
+    int who_global = global_offset + i;
+
+    for (const auto &c : barriers_global) {
+        if (c.node != who_global and c.seg0 != who_global and c.seg1 != who_global)
+            continue;
+        Mat2 Hb = localBarrierHess(who_global, x_global, c.node, c.seg0, c.seg1, dhat);
+        Hi.a11 += dt * dt * Hb.a11;
+        Hi.a12 += dt * dt * Hb.a12;
+        Hi.a21 += dt * dt * Hb.a21;
+        Hi.a22 += dt * dt * Hb.a22;
+    }
+
+    return Hi;
+}
+
+double compute_safe_step(int who_global, const Vec2 &dx, const Vec &x_global,
+                         const std::vector<BarrierPair> &barriers_global, double eta){
+    double omega_hat = 1.0;
+    Vec2 dx_zero = {0.0, 0.0};
+
+    for (const auto &c : barriers_global) {
+        if (c.node != who_global)
+            continue;
+
+        Vec2 xi = getXi(x_global, c.node);
+        Vec2 xj = getXi(x_global, c.seg0);
+        Vec2 xk = getXi(x_global, c.seg1);
+
+        Vec2 dx_neg = {-dx.x, -dx.y};
+        double omega_c = ccd_get_safe_step(xi, dx_neg, xj, dx_zero, xk, dx_zero, eta);
+        omega_hat = std::min(1.0, omega_c);
+    }
+
+    return omega_hat;
+}
+
+double compute_residual(const Vec &x_local, const Vec &xhat_local, const std::vector<double> &mass_local,
+                        const std::vector<double> &L_local, double dt, double k, const Vec2 &g_accel,
+                        const std::vector<bool> &is_fixed_local, const std::vector<BarrierPair> &barriers_global,
+                        double dhat, const Vec &x_global, int global_offset){
+    const int N = (int)mass_local.size();
+    double sum = 0.0;
+
+    for (int i = 0; i < N; ++i) {
+        if (is_fixed_local[i]) continue;
+        Vec2 g = compute_local_gradient(i, x_local, xhat_local, mass_local, L_local, dt, k, g_accel,
+                                        is_fixed_local, barriers_global, dhat, x_global, global_offset);
+        sum += g.x * g.x + g.y * g.y;
+    }
+
+    return std::sqrt(sum);
+}
+
+
 std::pair<double,int> gauss_seidel_minimize_with_barrier_global(Vec &x_local, const Vec &xhat_local,
                                                                 const std::vector<double> &mass_local,
                                                                 const std::vector<double> &L_local,
                                                                 double dt, double k, const Vec2 &g_accel,
                                                                 const std::vector<bool> &is_fixed_local,
                                                                 const std::vector<BarrierPair> &barriers_global,
-                                                                double dhat, Vec &x_global,
-                                                                int global_offset, int max_sweeps = 200,
-                                                                double tol_abs = 1e-10, double omega = 1.0, double eta = 0.9){
+                                                                double dhat, Vec &x_global, int global_offset,
+                                                                int max_sweeps, double tol_abs, double eta){
     const int N_local = (int)mass_local.size();
 
-    std::function<double(const std::vector<Vec2>&)> residual_norm2 = [&](const std::vector<Vec2> &r){
-        double s = 0.0;
-        for (const Vec2 &v : r) {
-            s += v.x * v.x + v.y * v.y;
-        }
-        return std::sqrt(s);
-    };
-
-    for (int sweep = 0; sweep < max_sweeps; ++sweep){
-        // One Gauss–Seidel sweep over all local nodes
-        for (int i = 0; i < N_local; ++i){
+    for (int sweep = 0; sweep < max_sweeps; ++sweep) {
+        for (int i = 0; i < N_local; ++i) {
             if (is_fixed_local[i]) continue;
 
-            // Local gradient (mass + spring + gravity)
-            Vec2 gi = PsiLocalGrad( i, x_local, xhat_local, mass_local, L_local, dt, k, g_accel,is_fixed_local, {}, dhat);
+            Vec2 gi = compute_local_gradient(i, x_local, xhat_local, mass_local, L_local, dt, k, g_accel,
+                                             is_fixed_local, barriers_global, dhat, x_global, global_offset);
 
-            // Add barrier gradient using global geometry
+            Mat2 Hi = compute_local_hessian(i, x_local, mass_local, L_local, dt, k, is_fixed_local, barriers_global,
+                                            dhat, x_global, global_offset);
+
+            Vec2 dx = mul(matrix2d_inverse(Hi), gi);
+
             int who_global = global_offset + i;
-            Vec2 gbar{0.0, 0.0};
+            double omega = compute_safe_step(who_global, dx, x_global, barriers_global, eta);
 
-            for (const BarrierPair &c : barriers_global){
-                if (c.node != who_global && c.seg0 != who_global && c.seg1 != who_global)
-                    continue; // only relevant if this node participates
-
-                Vec2 gb = localBarrierGrad(who_global, x_global, c.node, c.seg0, c.seg1, dhat);
-                gbar.x += gb.x;
-                gbar.y += gb.y;
-            }
-
-            // Scale by dt^2
-            gi.x += dt * dt * gbar.x;
-            gi.y += dt * dt * gbar.y;
-
-            // Local Hessian (mass + spring)
-            Mat2 Hi = PsiLocalHess(i, x_local, mass_local, L_local, dt, k, is_fixed_local, {}, dhat);{
-                // Add barrier Hessian block
-                Mat2 Hb_sum{0, 0, 0, 0};
-                for (const BarrierPair &c : barriers_global){
-                    if (c.node != who_global && c.seg0 != who_global && c.seg1 != who_global)
-                        continue;
-
-                    Mat2 Hb = localBarrierHess(who_global, x_global, c.node, c.seg0, c.seg1, dhat);
-
-                    Hb_sum.a11 += Hb.a11; Hb_sum.a12 += Hb.a12;
-                    Hb_sum.a21 += Hb.a21; Hb_sum.a22 += Hb.a22;
-                }
-
-                Hi.a11 += dt * dt * Hb_sum.a11;
-                Hi.a12 += dt * dt * Hb_sum.a12;
-                Hi.a21 += dt * dt * Hb_sum.a21;
-                Hi.a22 += dt * dt * Hb_sum.a22;
-            }
-
-            // Solve and update local position
-            Mat2 Hi_inv = matrix2d_inverse(Hi);
-            Vec2 dx = mat2_mul(Hi_inv, gi);
-
-            // Apply the safe GS update
             Vec2 xi = getXi(x_local, i);
-
-            // CCD
-            double omega_hat = omega;
-            for (const BarrierPair &c : barriers_global) {
-                if (c.node != who_global && c.seg0 != who_global && c.seg1 != who_global)
-                    continue;
-
-                // Extract global geometry
-                Vec2 xi_ccd_start = getXi(x_global, c.node);
-                Vec2 xj = getXi(x_global, c.seg0);
-                Vec2 xk = getXi(x_global, c.seg1);
-
-                Vec2 ccd_dx {-dx.x, -dx.y};
-
-                // Apply CCD only for node–segment interactions
-                if (c.node == who_global) {
-                    double omega_c = ccd_node_segment_update(xi_ccd_start, ccd_dx, xj, xk, eta);
-                    omega_hat = std::min(omega_hat, omega_c);
-                }
-            }
-
-            xi.x -= omega_hat * dx.x;
-            xi.y -= omega_hat * dx.y;
+            xi.x -= omega * dx.x;
+            xi.y -= omega * dx.y;
             setXi(x_local, i, xi);
             setXi(x_global, who_global, xi);
-
         }
 
-        // Compute residual norm for stopping criterion
-        std::vector<Vec2> r(N_local, {0, 0});
-        for (int i = 0; i < N_local; ++i){
-            if (is_fixed_local[i]) continue;
-
-            Vec2 gi = PsiLocalGrad(i, x_local, xhat_local, mass_local, L_local,dt, k, g_accel,
-                                   is_fixed_local, {}, dhat);
-
-            int who_global = global_offset + i;
-            Vec2 gbar{0.0, 0.0};
-            for (const BarrierPair &c : barriers_global){
-                if (c.node != who_global && c.seg0 != who_global && c.seg1 != who_global)
-                    continue;
-
-                Vec2 gb = localBarrierGrad(who_global, x_global, c.node, c.seg0, c.seg1, dhat);
-                gbar.x += gb.x;
-                gbar.y += gb.y;
-            }
-
-            gi.x += dt * dt * gbar.x;
-            gi.y += dt * dt * gbar.y;
-            r[i] = gi;
-        }
-
-        double rn = residual_norm2(r);
-
+        double rn = compute_residual(x_local, xhat_local, mass_local, L_local, dt, k, g_accel, is_fixed_local,
+                                     barriers_global, dhat, x_global, global_offset);
         if (rn < tol_abs)
             return {rn, sweep + 1};
     }
 
-    // Return final residual if not converged
-    std::vector<Vec2> r(N_local, {0, 0});
-    for (int i = 0; i < N_local; ++i){
-        if (is_fixed_local[i]) continue;
-
-        Vec2 gi = PsiLocalGrad(i, x_local, xhat_local, mass_local, L_local,
-                               dt, k, g_accel, is_fixed_local, {}, dhat);
-
-        int who_global = global_offset + i;
-        Vec2 gbar{0.0, 0.0};
-        for (const BarrierPair &c : barriers_global){
-            if (c.node != who_global && c.seg0 != who_global && c.seg1 != who_global)
-                continue;
-
-            Vec2 gb = localBarrierGrad(who_global, x_global, c.node, c.seg0, c.seg1, dhat);
-            gbar.x += gb.x;
-            gbar.y += gb.y;
-        }
-
-        gi.x += dt * dt * gbar.x;
-        gi.y += dt * dt * gbar.y;
-        r[i] = gi;
-    }
-
-    double rn = 0.0;
-    for (Vec2 &v : r)
-        rn += v.x * v.x + v.y * v.y;
-    rn = std::sqrt(rn);
-
+    double rn = compute_residual(x_local, xhat_local, mass_local, L_local, dt, k, g_accel, is_fixed_local,
+                                 barriers_global, dhat, x_global, global_offset);
     return {rn, max_sweeps};
 }
+
 
 // =====================================================
 //  Export a Obj file
 // =====================================================
-void export_obj(const std::string &filename, const Vec &x, const std::vector<std::pair<int,int>> &edges)
-{
+void export_obj(const std::string &filename, const Vec &x, const std::vector<std::pair<int,int>> &edges){
     std::ofstream out(filename);
 
     if (!out) {
@@ -656,171 +713,159 @@ void export_obj(const std::string &filename, const Vec &x, const std::vector<std
     out.close();
 }
 
+// Export function
+void export_frame(const std::string& outdir, int frame, const Vec& x_combined,
+                  const std::vector<std::pair<int,int>>& edges_combined){
+    std::ostringstream ss;
+    ss << outdir << "/frame_" << std::setw(4)
+       << std::setfill('0') << frame << ".obj";
+    export_obj(ss.str(), x_combined, edges_combined);
+}
+
 // ==============================
 // Numerical Experiment: the left spring is fixed, while the right spring has only the initial node fixed
 // ==============================
-int main(){
-    std::string outdir = "frames_spring_IPC3";
-    fs::create_directory(outdir);
+Chain make_chain(Vec2 start, Vec2 end, int N, bool fix_first, bool fix_last, double mass_value) {
+    Chain c;
+    c.N = N;
 
-    // -------------------------------------------------------------
-    // Parameters
-    // -------------------------------------------------------------
-    double dt          = 1.0 / 30.0;
-    Vec2   g_accel     = {0.0, -9.81};
-    double k_spring    = 20.0;
-    int    total_frame = 100;
-    int    max_sweeps  = 300;
-    double tol_abs     = 1e-8;
-    double omega       = 1.0;
-    double dhat        = 0.1;  // barrier activation distance
+    // Allocate vectors
+    c.x.resize(2 * N);
+    c.v.resize(2 * N, 0.0);
+    c.xhat.resize(2 * N, 0.0);
+    c.mass.resize(N, mass_value);
+    c.is_fixed.resize(N, false);
 
-    // -------------------------------------------------------------
-    // Left chain (fixed): on the line y = -x-1
-    // -------------------------------------------------------------
-    const int N_left = 2;
-    Vec x_left(2 * N_left, 0.0);
-    setXi(x_left, 0, { -1.0,  0.0 });
-    setXi(x_left, 1, {  0.0, -1.0 });
+    // Fix endpoints if necessary
+    if (fix_first) c.is_fixed[0] = true;
+    if (fix_last)  c.is_fixed[N-1] = true;
 
-    std::vector<std::pair<int,int>> edges_left;
-    for (int i = 0; i < N_left - 1; ++i)
-        edges_left.emplace_back(i, i + 1);
+    // Place nodes linearly between start and end
+    for (int i = 0; i < N; ++i) {
+        double t = (N == 1) ? 0.0 : double(i) / (N - 1);
+        Vec2 xi{
+                start.x + t * (end.x - start.x),
+                start.y + t * (end.y - start.y)
+        };
+        setXi(c.x, i, xi);
+    }
 
+    // Build edge list and rest lengths
+    for (int i = 0; i < N - 1; ++i) {
+        c.edges.emplace_back(i, i + 1);
+        c.rest_lengths.push_back(norm(c.x, i, i + 1));
+    }
 
-    // -------------------------------------------------------------
-    // Right chain (dynamic): horizontal at y = 0.2
-    // -------------------------------------------------------------
-    const int N_right = 2;
-    Vec x_right(2 * N_right, 0.0);
-    Vec v_right(2 * N_right, 0.0);
-    Vec xhat_right(2 * N_right, 0.0);
+    return c;
+}
 
-    std::vector<double> mass_right(N_right, 0.05);
-    std::vector<bool> is_fixed_right(N_right, false);
-    is_fixed_right[0] = true; // pin first node
-
-    setXi(x_right, 0, { -1.2,  0.2 });
-    setXi(x_right, 1, { -0.2,  0.2 });
-
-    std::vector<std::pair<int,int>> edges_right;
-    for (int i = 0; i < N_right - 1; ++i)
-        edges_right.emplace_back(i, i + 1);
-
-    std::vector<double> L_right;
-    for (std::pair<int,int> &e : edges_right)
-        L_right.push_back(norm(x_right, e.first, e.second));
-
-    // -------------------------------------------------------------
-    // Combined geometry for OBJ export
-    // -------------------------------------------------------------
-    std::vector<std::pair<int,int>> edges_combined = edges_left;
-    for (std::pair<int,int> &e : edges_right)
-        edges_combined.emplace_back(e.first + N_left, e.second + N_left);
-
-    Vec x_combined(2 * (N_left + N_right), 0.0);
+void combine_positions(Vec& x_combined, const Vec& x_left, const Vec& x_right, int N_left, int N_right){
     for (int i = 0; i < N_left; ++i)
         setXi(x_combined, i, getXi(x_left, i));
     for (int i = 0; i < N_right; ++i)
         setXi(x_combined, N_left + i, getXi(x_right, i));
+}
 
-    export_obj(outdir + "/frame_0000.obj", x_combined, edges_combined);
+std::vector<BarrierPair> build_barriers(int N_left, int N_right, const std::vector<bool>& is_fixed_right){
+    std::vector<BarrierPair> barriers;
+    for (int i = 0; i < N_right; ++i) {
+        if (is_fixed_right[i]) continue;
+        for (int j = 0; j < N_left - 1; ++j) {
+            BarrierPair bp{};
+            bp.node = N_left + i; // global index of right node
+            bp.seg0 = j;          // global index of left segment start
+            bp.seg1 = j + 1;
+            barriers.push_back(bp);
+        }
+    }
+    return barriers;
+}
 
-    // -------------------------------------------------------------
+int main(){
+    std::string outdir = "frames_spring_IPC3";
+    fs::create_directory(outdir);
+
+    // Parameters
+    double dt = 1.0 / 30.0;
+    Vec2 g_accel = {0.0, -9.81};
+    double k_spring = 20.0;
+    int total_frame = 100;
+    int max_sweeps = 300;
+    double tol_abs = 1e-8;
+    double dhat = 0.2;
+    double eta = 0.9;
+
+    // Create chains
+    Chain left  = make_chain({-1.0, 0.0}, {0.0, -1.0}, 2, true, true, 0.05); // fully fixed
+    Chain right = make_chain({-1.2, 0.2}, {-0.2, 0.2}, 2, true, false, 0.05);
+
+    // Combined geometry for OBJ export
+    std::vector<std::pair<int,int>> edges_combined = left.edges;
+    for (auto &e : right.edges)
+        edges_combined.emplace_back(e.first + left.N, e.second + left.N);
+
+    Vec x_combined(2 * (left.N + right.N), 0.0);
+    combine_positions(x_combined, left.x, right.x, left.N, right.N);
+    export_frame(outdir, 0, x_combined, edges_combined);
+
     // Main simulation loop
-    // -------------------------------------------------------------
-    for (int frame = 1; frame <= total_frame; ++frame){
+    for (int frame = 1; frame <= total_frame; ++frame) {
 
         // Predictor step: xhat = x + dt * v
-        for (int i = 0; i < N_right; ++i) {
-            Vec2 xi = getXi(x_right, i);
-            Vec2 vi = getXi(v_right, i);
-            setXi(xhat_right, i, { xi.x + dt * vi.x, xi.y + dt * vi.y });
+        for (int i = 0; i < right.N; ++i) {
+            Vec2 xi = getXi(right.x, i);
+            Vec2 vi = getXi(right.v, i);
+            setXi(right.xhat, i, { xi.x + dt * vi.x, xi.y + dt * vi.y });
         }
 
         // Combine positions for barrier queries
-        for (int i = 0; i < N_left; ++i)
-            setXi(x_combined, i, getXi(x_left, i));
-        for (int i = 0; i < N_right; ++i)
-            setXi(x_combined, N_left + i, getXi(x_right, i));
+        combine_positions(x_combined, left.x, right.x, left.N, right.N);
 
-        // Build barrier pairs (right node vs. left segment)
-        std::vector<BarrierPair> barriers;
-        for (int i = 0; i < N_right; ++i) {
-            if (is_fixed_right[i]) continue;
-            for (int j = 0; j < N_left - 1; ++j) {
-                BarrierPair bp{};
-                bp.node = N_left + i; // global index of right node
-                bp.seg0 = j;          // global index of left segment start
-                bp.seg1 = j + 1;
-                barriers.push_back(bp);
-            }
-        }
+        // Defines contact pairs
+        std::vector<BarrierPair> barriers = build_barriers(left.N, right.N, right.is_fixed);
 
-        // Gauss–Seidel minimization for the right chain
-        Vec xnew_right = x_right;
-        for (int i=0;i<N_left;++i) {
-            setXi(x_combined, i, getXi(x_left, i));
-        }
-
-        for (int i=0;i<N_right;++i) {
-            setXi(x_combined, N_left+i, getXi(x_right, i));
-        }
-
-        std::pair<double, int> result = gauss_seidel_minimize_with_barrier_global( xnew_right, xhat_right,
-                                                                                   mass_right, L_right,
+        // Call Gauss–Seidel solver
+        Vec xnew_right = right.x;
+        std::pair<double, int> result = gauss_seidel_minimize_with_barrier_global( xnew_right, right.xhat,
+                                                                                   right.mass, right.rest_lengths,
                                                                                    dt, k_spring, g_accel,
-                                                                                   is_fixed_right,
+                                                                                   right.is_fixed,
                                                                                    barriers, dhat,
-                                                                                   x_combined, N_left,
-                                                                                   max_sweeps, tol_abs, omega);
+                                                                                   x_combined, left.N,
+                                                                                   max_sweeps, tol_abs, eta);
         double residual = result.first;
         int sweeps = result.second;
 
         // Velocity update using Backward Euler
-        for (int i = 0; i < N_right; ++i) {
-            if (is_fixed_right[i]) continue;
+        for (int i = 0; i < right.N; ++i) {
+            if (right.is_fixed[i]) continue;
             Vec2 xi_new = getXi(xnew_right, i);
-            Vec2 xi_old = getXi(x_right, i);
-            setXi(v_right, i, { (xi_new.x - xi_old.x) / dt,(xi_new.y - xi_old.y) / dt });
+            Vec2 xi_old = getXi(right.x, i);
+            setXi(right.v, i, { (xi_new.x - xi_old.x) / dt, (xi_new.y - xi_old.y) / dt });
         }
 
-        x_right = xnew_right;
+        right.x = xnew_right;
 
         // Combine geometry for OBJ export
-        for (int i = 0; i < N_left; ++i)
-            setXi(x_combined, i, getXi(x_left, i));
-        for (int i = 0; i < N_right; ++i)
-            setXi(x_combined, N_left + i, getXi(x_right, i));
+        combine_positions(x_combined, left.x, right.x, left.N, right.N);
 
         // Compute signed distances for reporting
         double min_signed_d = std::numeric_limits<double>::max();
         bool collision = false;
 
-        for (const auto &c : barriers) {
-            // End-of-frame geometry (candidate state)
+        for (const BarrierPair& c : barriers) {
             Vec2 xi_end = getXi(x_combined, c.node);
-            Vec2 xj     = getXi(x_combined, c.seg0);
-            Vec2 xk     = getXi(x_combined, c.seg1);
-
-            // Distances
+            Vec2 xj = getXi(x_combined, c.seg0);
+            Vec2 xk = getXi(x_combined, c.seg1);
             double d_end = nodeSegmentSignedDistance(xi_end, xj, xk);
-
-            if (d_end < min_signed_d)
-                min_signed_d = d_end;
-
-            if (d_end < 0.0) {
-                collision = true;
-            }
+            if (d_end < min_signed_d) min_signed_d = d_end;
+            if (d_end < 0.0) collision = true;
         }
 
         // Export frame
-        std::ostringstream ss;
-        ss << outdir << "/frame_" << std::setw(4)
-           << std::setfill('0') << frame << ".obj";
-        export_obj(ss.str(), x_combined, edges_combined);
+        export_frame(outdir, frame, x_combined, edges_combined);
 
-
+        // Print info
         std::cout << "Frame " << std::setw(4) << frame
                   << " | residual=" << std::scientific << residual
                   << " | sweeps=" << sweeps
@@ -831,4 +876,3 @@ int main(){
 
     return 0;
 }
-
