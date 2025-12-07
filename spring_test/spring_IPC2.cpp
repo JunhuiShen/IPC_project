@@ -1160,9 +1160,22 @@ namespace simulation {
         }
 
         for (int i = 0; i < 3; ++i) {
+            int pivrow = i;
+            for (int k = i + 1; k < 3; ++k)
+                if (std::fabs(A[k][i]) > std::fabs(A[pivrow][i]))
+                    pivrow = k;
+
+            if (std::fabs(A[pivrow][i]) < 1e-12)
+                continue;
+
+            if (pivrow != i)
+                for (int j = 0; j < 4; ++j)
+                    std::swap(A[i][j], A[pivrow][j]);
+
             double piv = A[i][i];
-            if (std::fabs(piv) < 1e-12) continue; // degeneracy: leave as-is
-            for (int j = i; j < 4; ++j) A[i][j] /= piv;
+            for (int j = i; j < 4; ++j)
+                A[i][j] /= piv;
+
             for (int k = 0; k < 3; ++k) {
                 if (k == i) continue;
                 double f = A[k][i];
@@ -1178,24 +1191,34 @@ namespace simulation {
     }
 
     // v_{p}^{n+1, (0)} = vhat + omega R (x_p^n - x_com)
-    void affine_predictor_step(Chain& c, double dt) {
+    void build_affine_initial_guess(const Chain &c, double dt, Vec &xinit, Vec &xhat_out) {
+        const int N = c.N;
+        xinit.resize(2 * N);
+        xhat_out.resize(2 * N);
+
         AffineParams ap = compute_affine_params(c);
 
         for (int i = 0; i < c.N; ++i) {
+            Vec2 xi = getXi(c.x, i);
 
             if (i == 0) {
-                // Pinned node: keep exactly at x^n
+                // For the pinned node (i=0), the prediction must be the current position.
+                setXi(xinit, i, xi);
+                setXi(xhat_out, i, xi);
                 continue;
             }
-
-            Vec2 xi = getXi(c.x, i);
 
             Vec2 d{xi.x - ap.xcom.x, xi.y - ap.xcom.y};
 
             // v = vhat + omega R d
-            Vec2 v_aff{ap.vhat.x - ap.omega * d.y,ap.vhat.y + ap.omega * d.x};
+            Vec2 v_aff{ap.vhat.x - ap.omega * d.y, ap.vhat.y + ap.omega * d.x};
 
-            setXi(c.x, i, {xi.x + dt * v_aff.x,xi.y + dt * v_aff.y});
+            Vec2 x_guess{ap.vhat.x - ap.omega * d.y,ap.vhat.y + ap.omega * d.x};
+
+            Vec2 x0{xi.x + dt * v_aff.x,xi.y + dt * v_aff.y};
+
+            setXi(xinit, i,   x0);
+            setXi(xhat_out,  i, x0);
         }
     }
 
@@ -1295,10 +1318,8 @@ namespace simulation {
             edges_combined.emplace_back(e.first + left.N, e.second + left.N);
 
         // Initialize combined data
-        Vec x_combined(2 * total_nodes, 0.0);
-        Vec v_combined(2 * total_nodes, 0.0);
-        Vec xnew_left = left.x;
-        Vec xnew_right = right.x;
+        Vec x_combined(2 * total_nodes);
+        Vec v_combined(2 * total_nodes);
 
         combine_positions(x_combined, left.x, right.x, left.N, right.N);
         export_frame(outdir, 0, x_combined, edges_combined);
@@ -1306,12 +1327,14 @@ namespace simulation {
         // Main simulation loop
         for (int frame = 1; frame <= total_frame; ++frame) {
 
+            Vec xnew_left, xnew_right;
+
             // Predictor step: xhat = x + dt * v
-            predictor_step(left, dt);
-            predictor_step(right, dt);
+            build_affine_initial_guess(left, dt, xnew_left, left.xhat);
+            build_affine_initial_guess(right, dt, xnew_right, right.xhat);
 
             // Combine positions for barrier queries
-            combine_positions(x_combined, left.x, right.x, left.N, right.N);
+            combine_positions(x_combined, xnew_left, xnew_right, left.N, right.N);
 
             // Combine chain velocities into one vector
             for (int i = 0; i < left.N; ++i)
@@ -1323,7 +1346,7 @@ namespace simulation {
             std::vector<BarrierPair> barrier_pairs = build_barrier_pairs(x_combined, v_combined, left.N, right.N, dt);
 
             // LEFT CHAIN
-            affine_predictor_step(left, dt);   // modifies left.x
+//            affine_predictor_step(left, dt);   // modifies left.x
 //            xnew_left = left.x;                // initial guess for solver
 //
 //            for (int i = 0; i < left.N; ++i) {
@@ -1341,7 +1364,7 @@ namespace simulation {
             update_velocity(left, xnew_left, dt);
 
             // Solve the right chain (global_offset = N+1)
-            affine_predictor_step(right, dt);  // modifies right.x
+//            affine_predictor_step(right, dt);  // modifies right.x
 //            xnew_right = right.x;
 //
 //            for (int i = 0; i < right.N; ++i) {
