@@ -1152,7 +1152,7 @@ namespace simulation {
             }
         }
 
-        // Solve the system by Gauss Elimination
+        // Solve the system by Gauss Elimination with partial pivoting
         double A[3][4];
         for (int i = 0; i < 3; ++i) {
             for (int j = 0; j < 3; ++j) A[i][j] = G[i][j];
@@ -1160,9 +1160,22 @@ namespace simulation {
         }
 
         for (int i = 0; i < 3; ++i) {
+            int pivrow = i;
+            for (int k = i + 1; k < 3; ++k)
+                if (std::fabs(A[k][i]) > std::fabs(A[pivrow][i]))
+                    pivrow = k;
+
+            if (std::fabs(A[pivrow][i]) < 1e-12)
+                continue;
+
+            if (pivrow != i)
+                for (int j = 0; j < 4; ++j)
+                    std::swap(A[i][j], A[pivrow][j]);
+
             double piv = A[i][i];
-            if (std::fabs(piv) < 1e-12) continue; // degeneracy: leave as-is
-            for (int j = i; j < 4; ++j) A[i][j] /= piv;
+            for (int j = i; j < 4; ++j)
+                A[i][j] /= piv;
+
             for (int k = 0; k < 3; ++k) {
                 if (k == i) continue;
                 double f = A[k][i];
