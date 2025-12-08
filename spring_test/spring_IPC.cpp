@@ -1179,7 +1179,7 @@ namespace simulation {
         double tol_abs = 1e-8;
         double dhat = 0.1;
         double eta = 0.9;
-        int number_of_segments = 11;
+        int number_of_nodes = 11;
 
         // Create chains
         Chain left = make_chain({-1.0, 0.0}, {4.0, -5.0}, number_of_segments,0.05); // y = -x - 1
