@@ -1195,14 +1195,14 @@ namespace simulation {
         // Initialize combined data
         Vec x_combined(2 * total_nodes, 0.0);
         Vec v_combined(2 * total_nodes, 0.0);
+        Vec xnew_left = left.x;
+        Vec xnew_right = right.x;
 
         combine_positions(x_combined, left.x, right.x, left.N, right.N);
         export_frame(outdir, 0, x_combined, edges_combined);
 
         // Main simulation loop
         for (int frame = 1; frame <= total_frame; ++frame) {
-
-            Vec xnew_left, xnew_right;
             
             // Predictor step: xhat = x + dt * v
             predictor_step(left, dt);
