@@ -1107,110 +1107,127 @@ namespace simulation {
     };
 
     // // Fit affine field V(X) = vhat + omega R (X - X_com)
-    AffineParams compute_affine_params(const Chain &c) {
-        const int N = c.N;
+    AffineParams compute_affine_params_global(const Chain& A, const Chain& B) {
 
-        // Center of mass
+        // Global center of mass
         Vec2 xcom{0.0, 0.0};
         double M = 0.0;
-        for (int i = 0; i < N; ++i) {
-            Vec2 xi = getXi(c.x, i);
-            xcom.x += c.mass[i] * xi.x;
-            xcom.y += c.mass[i] * xi.y;
-            M += c.mass[i];
-        }
-        if (M > 0.0) {
-            xcom.x /= M;
-            xcom.y /= M;
-        } else {
-            // degenerate fallback
-            xcom = getXi(c.x, 0);
-        }
+        auto accumulate_com = [&](const Chain& c) {
+            for (int i = 0; i < c.N; ++i) {
+                Vec2 xi = getXi(c.x, i);
+                xcom.x += c.mass[i] * xi.x;
+                xcom.y += c.mass[i] * xi.y;
+                M += c.mass[i];
+            }
+        };
+
+        accumulate_com(A);
+        accumulate_com(B);
+
+        xcom.x /= M;
+        xcom.y /= M;
 
         // Build the linear system Gc = b
         double G[3][3] = {{0.0}};
         double b[3] = {0.0, 0.0, 0.0};
 
-        for (int i = 0; i < N; ++i) {
-            Vec2 Xi = getXi(c.x, i);
-            Vec2 Vi = getXi(c.v, i);
-            Vec2 x_diff{Xi.x - xcom.x, Xi.y - xcom.y}; // X - X_com
+        auto accumulate_ls = [&](const Chain& c) {
+            for (int i = 0; i < c.N; ++i) {
+                Vec2 Xi = getXi(c.x, i);
+                Vec2 Vi = getXi(c.v, i);
+                Vec2 d{Xi.x - xcom.x, Xi.y - xcom.y};
 
-            // Basis vectors U_k(X - X_com)
-            Vec2 U1{-x_diff.y, x_diff.x};
-            Vec2 U2{1.0, 0.0};
-            Vec2 U3{0.0, 1.0};
-            Vec2 U[3] = {U1, U2, U3};
+                // Basis
+                Vec2 U1{-d.y, d.x};
+                Vec2 U2{1.0, 0.0};
+                Vec2 U3{0.0, 1.0};
+                Vec2 U[3] = {U1, U2, U3};
 
-            double w = c.mass[i];
+                double w = c.mass[i];
 
-            for (int k = 0; k < 3; ++k) {
-                b[k] += w * (U[k].x * Vi.x + U[k].y * Vi.y);
-                for (int j = 0; j < 3; ++j) {
-                    G[k][j] += w * (U[k].x * U[j].x + U[k].y * U[j].y);
+                for (int k = 0; k < 3; ++k) {
+                    b[k] += w * (U[k].x * Vi.x + U[k].y * Vi.y);
+                    for (int j = 0; j < 3; ++j) {
+                        G[k][j] += w * (U[k].x * U[j].x +
+                                        U[k].y * U[j].y);
+                    }
                 }
             }
+        };
+
+        accumulate_ls(A);
+        accumulate_ls(B);
+
+        // Solve the global system Gc = b by Gauss Elimination with partial pivoting
+        double Aaug[3][4];
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) Aaug[i][j] = G[i][j];
+            Aaug[i][3] = b[i];
         }
 
-        // Solve the system by Gauss Elimination with partial pivoting
-        double A[3][4];
         for (int i = 0; i < 3; ++i) {
-            for (int j = 0; j < 3; ++j) A[i][j] = G[i][j];
-            A[i][3] = b[i];
-        }
+            int piv = i;
+            for (int k = i+1; k < 3; ++k)
+                if (std::fabs(Aaug[k][i]) > std::fabs(Aaug[piv][i]))
+                    piv = k;
 
-        for (int i = 0; i < 3; ++i) {
-            int pivrow = i;
-            for (int k = i + 1; k < 3; ++k)
-                if (std::fabs(A[k][i]) > std::fabs(A[pivrow][i]))
-                    pivrow = k;
+            std::swap(Aaug[i], Aaug[piv]);
 
-            if (std::fabs(A[pivrow][i]) < 1e-12)
-                continue;
-
-            if (pivrow != i)
-                for (int j = 0; j < 4; ++j)
-                    std::swap(A[i][j], A[pivrow][j]);
-
-            double piv = A[i][i];
-            for (int j = i; j < 4; ++j)
-                A[i][j] /= piv;
+            double d0 = Aaug[i][i];
+            for (int j = i; j < 4; ++j) Aaug[i][j] /= d0;
 
             for (int k = 0; k < 3; ++k) {
                 if (k == i) continue;
-                double f = A[k][i];
+                double f = Aaug[k][i];
                 for (int j = i; j < 4; ++j)
-                    A[k][j] -= f * A[i][j];
+                    Aaug[k][j] -= f * Aaug[i][j];
             }
         }
 
-        double omega = A[0][3];
-        Vec2 vhat{A[1][3], A[2][3]};
+        double omega = Aaug[0][3];
+        Vec2 vhat{Aaug[1][3], Aaug[2][3]};
 
         return {omega, vhat, xcom};
     }
 
     // v_{p}^{n+1, (0)} = vhat + omega R (x_p^n - x_com)
-    void affine_predictor_step(Chain& c, double dt) {
-        AffineParams ap = compute_affine_params(c);
+//    void affine_predictor_step(Chain& c, double dt) {
+//        AffineParams ap = compute_affine_params(c);
+//
+//        for (int i = 0; i < c.N; ++i) {
+//
+//            if (i == 0) {
+//                // Pinned node: keep exactly at x^n
+//                continue;
+//            }
+//
+//            Vec2 xi = getXi(c.x, i);
+//
+//            Vec2 d{xi.x - ap.xcom.x, xi.y - ap.xcom.y};
+//
+//            // v = vhat + omega R d
+//            Vec2 v_aff{ap.vhat.x - ap.omega * d.y,ap.vhat.y + ap.omega * d.x};
+//
+//            setXi(c.x, i, {xi.x + dt * v_aff.x,xi.y + dt * v_aff.y});
+//        }
+//    }
 
-        for (int i = 0; i < c.N; ++i) {
-
+    void affine_initial_guess_global(const AffineParams& ap, Chain& c, Vec& xnew, double dt){
+        for (int i = 0; i < c.N; ++i){
+            Vec2 xi = getXi(c.x, i);
             if (i == 0) {
-                // Pinned node: keep exactly at x^n
+                setXi(xnew, i, xi);
                 continue;
             }
-
-            Vec2 xi = getXi(c.x, i);
-
             Vec2 d{xi.x - ap.xcom.x, xi.y - ap.xcom.y};
 
-            // v = vhat + omega R d
+            // v_aff = vhat + omega R d
             Vec2 v_aff{ap.vhat.x - ap.omega * d.y,ap.vhat.y + ap.omega * d.x};
 
-            setXi(c.x, i, {xi.x + dt * v_aff.x,xi.y + dt * v_aff.y});
+            setXi(xnew, i, {xi.x + dt * v_aff.x,xi.y + dt * v_aff.y});
         }
     }
+
 
     // Build barrier pairs using the broad-phase AABB
     std::vector<BarrierPair> build_barrier_pairs(const Vec &x_combined, const Vec &v_combined, int N_left, int N_right, double dt) {
@@ -1253,8 +1270,7 @@ namespace simulation {
             double min_y = std::min({x0.y, x1.y, x0.y + dt * v0.y, x1.y + dt * v1.y});
             double max_y = std::max({x0.y, x1.y, x0.y + dt * v0.y, x1.y + dt * v1.y});
 
-            AABB2 seg_box{{min_x, min_y},
-                          {max_x, max_y}};
+            AABB2 seg_box{{min_x, min_y},{max_x, max_y}};
             objects.push_back({seg_box, j, SEGMENT});
         }
 
@@ -1291,14 +1307,14 @@ namespace simulation {
         double k_spring = 20.0;
         int total_frame = 600;
         int max_iterations = 300;
-        double tol_abs = 1e-8;
+        double tol_abs = 1e-6;
         double dhat = 0.1;
         double eta = 0.9;
-        int number_of_segments = 11;
+        int number_of_nodes = 11;
 
         // Create chains
-        Chain left = make_chain({-1.0, 0.0}, {4.0, -5.0}, number_of_segments,0.05); // y = -x - 1
-        Chain right = make_chain({-1.5, 0.5}, {3.5, 0.5}, number_of_segments,0.05); // y = 0.5
+        Chain left = make_chain({-1.0, 0.0}, {4.0, -5.0}, number_of_nodes,0.05); // y = -x - 1
+        Chain right = make_chain({-1.5, 0.5}, {3.5, 0.5}, number_of_nodes,0.05); // y = 0.5
 
         // Combined geometry for OBJ export
         const int total_nodes = left.N + right.N;
@@ -1335,14 +1351,18 @@ namespace simulation {
             // Use the broad-phase AABB to build barrier pairs
             std::vector<BarrierPair> barrier_pairs = build_barrier_pairs(x_combined, v_combined, left.N, right.N, dt);
 
-            // LEFT CHAIN
-            affine_predictor_step(left, dt);   // modifies left.x
-//            xnew_left = left.x;                // initial guess for solver
-//
-//            for (int i = 0; i < left.N; ++i) {
-//                setXi(x_combined, i, getXi(left.x, i));
-//            }
+            // Initial guess
+            AffineParams ap = compute_affine_params_global(left, right);
+            affine_initial_guess_global(ap, left,  xnew_left,  dt);
+            affine_initial_guess_global(ap, right, xnew_right, dt);
 
+            // Sync x_combined to the affine initial guess
+            for (int i = 0; i < left.N; ++i)
+                setXi(x_combined, i, getXi(xnew_left, i));
+            for (int i = 0; i < right.N; ++i)
+                setXi(x_combined, left.N + i, getXi(xnew_right, i));
+
+            // Solve the left chain (global_offset = 0)
 //            xnew_left = left.x;
             auto [residual_left, iterations_left] = gauss_seidel_solver(xnew_left, left.xhat,
                                                                         left.mass, left.rest_lengths,
@@ -1353,13 +1373,13 @@ namespace simulation {
             // Velocity update for the left chain
             update_velocity(left, xnew_left, dt);
 
+            for (int i = 0; i < left.N; ++i)
+                setXi(x_combined, i, getXi(left.x, i));
+            for (int i = 0; i < right.N; ++i)
+                setXi(x_combined, left.N + i, getXi(xnew_right, i));
+
             // Solve the right chain (global_offset = N+1)
-            affine_predictor_step(right, dt);  // modifies right.x
-//            xnew_right = right.x;
-//
-//            for (int i = 0; i < right.N; ++i) {
-//                setXi(x_combined, left.N + i, getXi(right.x, i));
-//            }
+//            affine_initial_guess_into_xnew(right, xnew_right, dt);
 //            xnew_right = right.x;
             auto [residual_right, iterations_right] = gauss_seidel_solver(xnew_right, right.xhat,
                                                                           right.mass, right.rest_lengths,
