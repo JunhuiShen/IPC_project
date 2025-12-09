@@ -619,7 +619,7 @@ namespace physics {
             }
         }
 
-        constexpr double k_pin = 5000000.0;
+        constexpr double k_pin = 5e6;
 
         if (i == 0) {
             gi.x += dt * dt * k_pin * (xi.x - xhi.x);
@@ -657,7 +657,7 @@ namespace physics {
             }
         }
 
-        constexpr double k_pin = 5000000.0;
+        constexpr double k_pin = 5e6;
 
         if (i == 0) {
             H.a11 += dt * dt * k_pin;
@@ -1174,12 +1174,12 @@ namespace simulation {
         double dt = 1.0 / 30.0;
         Vec2 g_accel = {0.0, -9.81};
         double k_spring = 20.0;
-        int total_frame = 600;
-        int max_iterations = 300;
+        int total_frame = 150;
+        int max_iterations = 500;
         double tol_abs = 1e-8;
         double dhat = 0.1;
         double eta = 0.9;
-        int number_of_nodes = 11;
+        int number_of_segments = 11;
 
         // Create chains
         Chain left = make_chain({-1.0, 0.0}, {4.0, -5.0}, number_of_segments,0.05); // y = -x - 1
@@ -1203,7 +1203,7 @@ namespace simulation {
 
         // Main simulation loop
         for (int frame = 1; frame <= total_frame; ++frame) {
-            
+
             // Predictor step: xhat = x + dt * v
             predictor_step(left, dt);
             predictor_step(right, dt);

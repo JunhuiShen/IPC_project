@@ -619,7 +619,7 @@ namespace physics {
             }
         }
 
-        constexpr double k_pin = 5000000.0;
+        constexpr double k_pin = 5e6;
 
         if (i == 0) {
             gi.x += dt * dt * k_pin * (xi.x - xhi.x);
@@ -657,7 +657,7 @@ namespace physics {
             }
         }
 
-        constexpr double k_pin = 5000000.0;
+        constexpr double k_pin = 5e6;
 
         if (i == 0) {
             H.a11 += dt * dt * k_pin;
@@ -1190,35 +1190,10 @@ namespace simulation {
         return {omega, vhat, xcom};
     }
 
-    // v_{p}^{n+1, (0)} = vhat + omega R (x_p^n - x_com)
-//    void affine_predictor_step(Chain& c, double dt) {
-//        AffineParams ap = compute_affine_params(c);
-//
-//        for (int i = 0; i < c.N; ++i) {
-//
-//            if (i == 0) {
-//                // Pinned node: keep exactly at x^n
-//                continue;
-//            }
-//
-//            Vec2 xi = getXi(c.x, i);
-//
-//            Vec2 d{xi.x - ap.xcom.x, xi.y - ap.xcom.y};
-//
-//            // v = vhat + omega R d
-//            Vec2 v_aff{ap.vhat.x - ap.omega * d.y,ap.vhat.y + ap.omega * d.x};
-//
-//            setXi(c.x, i, {xi.x + dt * v_aff.x,xi.y + dt * v_aff.y});
-//        }
-//    }
-
     void affine_initial_guess_global(const AffineParams& ap, Chain& c, Vec& xnew, double dt){
         for (int i = 0; i < c.N; ++i){
             Vec2 xi = getXi(c.x, i);
-            if (i == 0) {
-                setXi(xnew, i, xi);
-                continue;
-            }
+
             Vec2 d{xi.x - ap.xcom.x, xi.y - ap.xcom.y};
 
             // v_aff = vhat + omega R d
@@ -1227,7 +1202,6 @@ namespace simulation {
             setXi(xnew, i, {xi.x + dt * v_aff.x,xi.y + dt * v_aff.y});
         }
     }
-
 
     // Build barrier pairs using the broad-phase AABB
     std::vector<BarrierPair> build_barrier_pairs(const Vec &x_combined, const Vec &v_combined, int N_left, int N_right, double dt) {
@@ -1305,9 +1279,9 @@ namespace simulation {
         double dt = 1.0 / 30.0;
         Vec2 g_accel = {0.0, -9.81};
         double k_spring = 20.0;
-        int total_frame = 600;
-        int max_iterations = 300;
-        double tol_abs = 1e-6;
+        int total_frame = 150;
+        int max_iterations = 500;
+        double tol_abs = 1e-8;
         double dhat = 0.1;
         double eta = 0.9;
         int number_of_nodes = 11;
@@ -1339,20 +1313,39 @@ namespace simulation {
             predictor_step(left, dt);
             predictor_step(right, dt);
 
-            // Combine positions for barrier queries
+            // Compute global affine parameters
+            AffineParams ap = compute_affine_params_global(left, right);
+
+            // Build CCD velocities FROM THE AFFINE FIELD
+            for (int i = 0; i < left.N; ++i) {
+                Vec2 xi = getXi(left.x, i);
+                Vec2 d{xi.x - ap.xcom.x, xi.y - ap.xcom.y};
+                Vec2 v_aff{ap.vhat.x - ap.omega * d.y,
+                           ap.vhat.y + ap.omega * d.x};
+                setXi(v_combined, i, v_aff);
+            }
+
+            for (int i = 0; i < right.N; ++i) {
+                Vec2 xi = getXi(right.x, i);
+                Vec2 d{xi.x - ap.xcom.x, xi.y - ap.xcom.y};
+                Vec2 v_aff{ap.vhat.x - ap.omega * d.y,
+                           ap.vhat.y + ap.omega * d.x};
+                setXi(v_combined, left.N + i, v_aff);
+            }
+
+            // Combine current positions
             combine_positions(x_combined, left.x, right.x, left.N, right.N);
 
-            // Combine chain velocities into one vector
+            // Sync x_combined to affine positions
             for (int i = 0; i < left.N; ++i)
-                setXi(v_combined, i, getXi(left.v, i));
+                setXi(x_combined, i, getXi(xnew_left, i));
             for (int i = 0; i < right.N; ++i)
-                setXi(v_combined, left.N + i, getXi(right.v, i));
+                setXi(x_combined, left.N + i, getXi(xnew_right, i));
 
             // Use the broad-phase AABB to build barrier pairs
             std::vector<BarrierPair> barrier_pairs = build_barrier_pairs(x_combined, v_combined, left.N, right.N, dt);
 
             // Initial guess
-            AffineParams ap = compute_affine_params_global(left, right);
             affine_initial_guess_global(ap, left,  xnew_left,  dt);
             affine_initial_guess_global(ap, right, xnew_right, dt);
 
@@ -1373,13 +1366,13 @@ namespace simulation {
             // Velocity update for the left chain
             update_velocity(left, xnew_left, dt);
 
+            // Update combined x for right solve: left = updated, right = affine guess
             for (int i = 0; i < left.N; ++i)
                 setXi(x_combined, i, getXi(left.x, i));
             for (int i = 0; i < right.N; ++i)
                 setXi(x_combined, left.N + i, getXi(xnew_right, i));
 
             // Solve the right chain (global_offset = N+1)
-//            affine_initial_guess_into_xnew(right, xnew_right, dt);
 //            xnew_right = right.x;
             auto [residual_right, iterations_right] = gauss_seidel_solver(xnew_right, right.xhat,
                                                                           right.mass, right.rest_lengths,
