@@ -951,8 +951,7 @@ namespace solver {
         return std::sqrt(sum);
     }
 
-    std::pair<double, int>
-    gauss_seidel_solver(Vec &x_local, const Vec &xhat_local, const std::vector<double> &mass_local,
+    std::pair<double, int> gauss_seidel_solver(Vec &x_local, const Vec &xhat_local, const std::vector<double> &mass_local,
                         const std::vector<double> &L_local, double dt, double k, const Vec2 &g_accel,
                         const std::vector<BarrierPair> &barriers_global,
                         double dhat, Vec &x_global, int global_offset, int max_iterations,
@@ -1029,14 +1028,10 @@ namespace io {
     }
 }
 
-namespace simulation {
+namespace chain_model{
     using namespace math;
-    using namespace solver;
-    using namespace io;
 
-    // ==============================
-    // Numerical Experiment
-    // ==============================
+    // Core data structure for a single chain
     struct Chain {
         int N{}; // number of nodes
         Vec x; // positions (2*N)
@@ -1078,9 +1073,16 @@ namespace simulation {
         for (int i = 0; i < N_right; ++i)
             setXi(x_combined, N_left + i, getXi(x_right, i));
     }
+}
 
-    // Node predictor and velocity update
-    void predictor_step(Chain &c, double dt) {
+namespace time_integrator{
+    using namespace chain_model;
+    using namespace math;
+    using namespace ccd;
+    using namespace physics;
+
+    // Build xhat
+    void build_xhat(Chain &c, double dt) {
         for (int i = 0; i < c.N; ++i) {
             Vec2 xi = getXi(c.x, i);
             Vec2 vi = getXi(c.v, i);
@@ -1096,6 +1098,12 @@ namespace simulation {
         }
         c.x = xnew;
     }
+}
+
+namespace collision{
+    using namespace math;
+    using namespace ccd;
+    using namespace physics;
 
     // Build barrier pairs using the broad-phase AABB
     std::vector<BarrierPair> build_barrier_pairs(const Vec &x_combined, const Vec &v_combined, int N_left, int N_right, double dt) {
@@ -1105,7 +1113,7 @@ namespace simulation {
         objects.reserve(total_nodes * 2);
 
         // Node AABBs
-        double r = 0.05; // small radius per node
+        double r = 0.1; // small radius per node
 
         for (int i = 0; i < total_nodes; ++i) {
             Vec2 x0 = getXi(x_combined, i);
@@ -1161,9 +1169,52 @@ namespace simulation {
 
         return barriers;
     }
+}
 
+namespace simulation_utility{
+    using namespace chain_model;
+    using namespace time_integrator;
+    using namespace solver;
+
+    // Combine node positions from new positions
+    void combine_positions_from_new(Vec &x_combined, const Vec &x_left_new, const Vec &x_right_new, int N_left, int N_right) {
+        for (int i = 0; i < N_left; ++i)
+            setXi(x_combined, i, getXi(x_left_new, i));
+        for (int i = 0; i < N_right; ++i)
+            setXi(x_combined, N_left + i, getXi(x_right_new, i));
+    }
+
+    // Compute the global residual of the global system
+    double compute_global_residual(const Vec &x_left_new, const Vec &x_right_new, const Chain &left, const Chain &right,
+                                   const Vec &x_combined, double dt, double k_spring, const Vec2 &g_accel,
+                                   const std::vector<BarrierPair> &barrier_pairs, double dhat) {
+        // We use compute_residual for each chain and combine
+        Vec xhat_dummy;
+        int N_left  = left.N;
+
+        // Left residual
+        double resL = solver::compute_residual(x_left_new,left.xhat,left.mass,left.rest_lengths,
+                                               dt, k_spring, g_accel,barrier_pairs, dhat,x_combined,0);
+
+        // Right residual
+        double resR = solver::compute_residual(x_right_new,right.xhat,right.mass,right.rest_lengths,
+                                               dt, k_spring, g_accel,barrier_pairs, dhat,x_combined,N_left);
+
+        return std::sqrt(resL * resL + resR * resR);
+    }
+}
+
+namespace simulation {
+    using namespace math;
+    using namespace solver;
+    using namespace io;
+    using namespace chain_model;
+    using namespace time_integrator;
+    using namespace collision;
+    using namespace simulation_utility;
+    
     // Main Simulation
-    int main() {
+    int sim() {
         using clock = std::chrono::high_resolution_clock;
         std::chrono::time_point<clock> t_start = clock::now();   // start timer
 
@@ -1174,22 +1225,23 @@ namespace simulation {
         double dt = 1.0 / 30.0;
         Vec2 g_accel = {0.0, -9.81};
         double k_spring = 20.0;
-        int total_frame = 150;
-        int max_iterations = 500;
-        double tol_abs = 1e-8;
+        int total_frame = 600;
+        int max_iterations_local = 500; // GS iterations per node
+        int max_iterations_global = 500; // block GS iterations per frame
+        double tol_abs = 1e-6;
         double dhat = 0.1;
         double eta = 0.9;
-        int number_of_segments = 11;
+        int number_of_nodes = 11;
 
         // Create chains
-        Chain left = make_chain({-1.0, 0.0}, {4.0, -5.0}, number_of_segments,0.05); // y = -x - 1
-        Chain right = make_chain({-1.5, 0.5}, {3.5, 0.5}, number_of_segments,0.05); // y = 0.5
+        Chain left = make_chain({-1.0, 0.0}, {4.0, -5.0}, number_of_nodes,0.05); // y = -x - 1
+        Chain right = make_chain({-1.5, 0.5}, {3.5, 0.5}, number_of_nodes,0.05); // y = 0.5
 
         // Combined geometry for OBJ export
         const int total_nodes = left.N + right.N;
 
         std::vector<std::pair<int, int>> edges_combined = left.edges;
-        for (std::pair<int, int> &e: right.edges)
+        for (std::pair<int, int> &e : right.edges)
             edges_combined.emplace_back(e.first + left.N, e.second + left.N);
 
         // Initialize combined data
@@ -1204,14 +1256,16 @@ namespace simulation {
         // Main simulation loop
         for (int frame = 1; frame <= total_frame; ++frame) {
 
-            // Predictor step: xhat = x + dt * v
-            predictor_step(left, dt);
-            predictor_step(right, dt);
+            // xhat = x + dt * v
+            build_xhat(left, dt);
+            build_xhat(right, dt);
 
-            // Combine positions for barrier queries
+            // Initial guess
+            xnew_left  = left.x;
+            xnew_right = right.x;
+
+            // Build combined positions and velocities for CCD
             combine_positions(x_combined, left.x, right.x, left.N, right.N);
-
-            // Combine chain velocities into one vector
             for (int i = 0; i < left.N; ++i)
                 setXi(v_combined, i, getXi(left.v, i));
             for (int i = 0; i < right.N; ++i)
@@ -1220,26 +1274,46 @@ namespace simulation {
             // Use the broad-phase AABB to build barrier pairs
             std::vector<BarrierPair> barrier_pairs = build_barrier_pairs(x_combined, v_combined, left.N, right.N, dt);
 
-            // Solve the left chain (global_offset = 0)
-            xnew_left = left.x;
-            auto [residual_left, iterations_left] = gauss_seidel_solver(xnew_left, left.xhat,
-                                                                        left.mass, left.rest_lengths,
-                                                                        dt, k_spring, g_accel,
-                                                                        barrier_pairs, dhat, x_combined,
-                                                                        0, max_iterations, tol_abs, eta);
+            double global_residual;
+            int    outer_iters     = 0;
+            int    iterations_left_last  = 0;
+            int    iterations_right_last = 0;
 
-            // Velocity update for the left chain
-            update_velocity(left, xnew_left, dt);
+            // Block GS solver on the global system
+            for (; outer_iters < max_iterations_global; ++outer_iters) {
+                // Keep x_combined consistent with current trial positions
+                combine_positions_from_new(x_combined, xnew_left, xnew_right, left.N, right.N);
 
-            // Solve the right chain (global_offset = N+1)
-            xnew_right = right.x;
-            auto [residual_right, iterations_right] = gauss_seidel_solver(xnew_right, right.xhat,
-                                                                          right.mass, right.rest_lengths,
-                                                                          dt, k_spring, g_accel,
-                                                                          barrier_pairs, dhat, x_combined,
-                                                                          left.N, max_iterations, tol_abs, eta);
+                // Solve the left chain (global_offset = 0)
+                auto [residual_left, iterations_left] = gauss_seidel_solver(xnew_left, left.xhat,
+                                                                            left.mass, left.rest_lengths,
+                                                                            dt, k_spring, g_accel,
+                                                                            barrier_pairs, dhat, x_combined,
+                                                                            0, max_iterations_local, tol_abs, eta);
 
-            // Velocity update for the right chain
+                iterations_left_last = iterations_left;
+
+                // Solve the right chain (global_offset = N+1)
+                auto [residual_right, iterations_right] = gauss_seidel_solver(xnew_right, right.xhat,
+                                                                              right.mass, right.rest_lengths,
+                                                                              dt, k_spring, g_accel,
+                                                                              barrier_pairs, dhat, x_combined,
+                                                                              left.N, max_iterations_local, tol_abs, eta);
+
+                iterations_right_last = iterations_right;
+
+                // Compute the global  residual
+                combine_positions_from_new(x_combined, xnew_left, xnew_right, left.N, right.N);
+
+                global_residual = compute_global_residual(xnew_left, xnew_right, left, right,
+                                                          x_combined, dt, k_spring, g_accel, barrier_pairs, dhat);
+
+                if (global_residual < tol_abs)
+                    break;
+            }
+
+            // Velocity update
+            update_velocity(left,  xnew_left,  dt);
             update_velocity(right, xnew_right, dt);
 
             // Export frame
@@ -1248,10 +1322,10 @@ namespace simulation {
 
             // Print info
             std::cout << "Frame " << std::setw(4) << frame
-                      << " | residualL=" << std::scientific << residual_left
-                      << " | residualR=" << std::scientific << residual_right
-                      << " | iterationsL=" << std::setw(3) << iterations_left
-                      << " | iterationsR=" << std::setw(3) << iterations_right
+                      << " | global_residual=" << std::scientific << global_residual
+                      << " | outerGS=" << std::setw(3) << outer_iters
+                      << " | iterationsL=" << std::setw(3) << iterations_left_last
+                      << " | iterationsR=" << std::setw(3) << iterations_right_last
                       << '\n';
         }
 
@@ -1265,5 +1339,5 @@ namespace simulation {
 }
 
 int main() {
-    return simulation::main();
+    return simulation::sim();
 }
