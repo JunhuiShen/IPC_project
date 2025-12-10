@@ -996,9 +996,7 @@ namespace solver {
 namespace io {
     using namespace math;
 
-    // =====================================================
-    //  Export a Obj file
-    // =====================================================
+    //  Export an Obj file
     void export_obj(const std::string &filename, const Vec &x, const std::vector<std::pair<int, int>> &edges) {
         std::ofstream out(filename);
 
