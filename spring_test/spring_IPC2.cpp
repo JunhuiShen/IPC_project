@@ -1116,6 +1116,7 @@ namespace chain_model{
             setXi(x_combined, N_left + i, getXi(x_right, i));
     }
 }
+
 namespace affine_initial_guess{
     using namespace math;
     using namespace chain_model;
@@ -1133,7 +1134,7 @@ namespace affine_initial_guess{
         // Global center of mass
         Vec2 xcom{0.0, 0.0};
         double M = 0.0;
-        auto accumulate_com = [&](const Chain& c) {
+        std::function<void(const Chain&)> accumulate_com = [&](const Chain& c) -> void {
             for (int i = 0; i < c.N; ++i) {
                 Vec2 xi = getXi(c.x, i);
                 xcom.x += c.mass[i] * xi.x;
@@ -1152,7 +1153,7 @@ namespace affine_initial_guess{
         double G[3][3] = {{0.0}};
         double b[3] = {0.0, 0.0, 0.0};
 
-        auto accumulate_ls = [&](const Chain& c) {
+        std::function<void(const Chain&)> accumulate_ls = [&](const Chain& c) -> void {
             for (int i = 0; i < c.N; ++i) {
                 Vec2 Xi = getXi(c.x, i);
                 Vec2 Vi = getXi(c.v, i);
@@ -1182,16 +1183,35 @@ namespace affine_initial_guess{
         accumulate_ls(B);
 
         // Solve the global system Gc = b by Gauss Elimination with partial pivoting
-        double Aaug[3][4];
-        for (int i = 0; i < 3; ++i) {
-            for (int j = 0; j < 3; ++j) Aaug[i][j] = G[i][j];
-            Aaug[i][3] = b[i];
-        }
+//        double Aaug[3][4];
+//        for (int i = 0; i < 3; ++i) {
+//            for (int j = 0; j < 3; ++j) Aaug[i][j] = G[i][j];
+//            Aaug[i][3] = b[i];
+//        }
+//
+//        solve_gauss_elimination(3, &Aaug[0][0]);
+//
+//        double omega = Aaug[0][3];
+//        Vec2 vhat{Aaug[1][3], Aaug[2][3]};
 
-        solve_gauss_elimination(3, &Aaug[0][0]);
+        // --- Solve the global system Gc = b using the diagonal observation ---
 
-        double omega = Aaug[0][3];
-        Vec2 vhat{Aaug[1][3], Aaug[2][3]};
+        // The diagonal elements G[k][k] are non-zero (mass/moment of inertia)
+        // If G[k][k] is zero, the system is likely degenerate (e.g., all mass pinned or zero mass).
+
+        // 1. Solve for omega (G[0][0] * omega = b[0])
+        double G00 = G[0][0];
+        double omega = (std::abs(G00) > 1e-12) ? b[0] / G00 : 0.0;
+
+        // 2. Solve for vhat_x (G[1][1] * vhat_x = b[1])
+        double G11 = G[1][1];
+        double vhat_x = (std::abs(G11) > 1e-12) ? b[1] / G11 : 0.0;
+
+        // 3. Solve for vhat_y (G[2][2] * vhat_y = b[2])
+        double G22 = G[2][2];
+        double vhat_y = (std::abs(G22) > 1e-12) ? b[2] / G22 : 0.0;
+
+        Vec2 vhat{vhat_x, vhat_y};
 
         return {omega, vhat, xcom};
     }
@@ -1248,7 +1268,7 @@ namespace collision{
         objects.reserve(total_nodes * 2);
 
         // Node AABBs
-        double r = 0.1; // small radius per node
+        double r = 0.05; // small radius per node
 
         for (int i = 0; i < total_nodes; ++i) {
             Vec2 x0 = getXi(x_combined, i);

@@ -1111,7 +1111,7 @@ namespace collision{
         objects.reserve(total_nodes * 2);
 
         // Node AABBs
-        double r = 0.1; // small radius per node
+        double r = 0.05; // small radius per node
 
         for (int i = 0; i < total_nodes; ++i) {
             Vec2 x0 = getXi(x_combined, i);
@@ -1210,7 +1210,7 @@ namespace simulation {
     using namespace time_integrator;
     using namespace collision;
     using namespace simulation_utility;
-    
+
     // Main Simulation
     int sim() {
         using clock = std::chrono::high_resolution_clock;
