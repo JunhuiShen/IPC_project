@@ -1182,32 +1182,17 @@ namespace affine_initial_guess{
         accumulate_ls(A);
         accumulate_ls(B);
 
-        // Solve the global system Gc = b by Gauss Elimination with partial pivoting
-//        double Aaug[3][4];
-//        for (int i = 0; i < 3; ++i) {
-//            for (int j = 0; j < 3; ++j) Aaug[i][j] = G[i][j];
-//            Aaug[i][3] = b[i];
-//        }
-//
-//        solve_gauss_elimination(3, &Aaug[0][0]);
-//
-//        double omega = Aaug[0][3];
-//        Vec2 vhat{Aaug[1][3], Aaug[2][3]};
+        // Solve the global system Gc = b using the diagonal observation assuming the diagonal elements G[k][k] are non-zero
 
-        // --- Solve the global system Gc = b using the diagonal observation ---
-
-        // The diagonal elements G[k][k] are non-zero (mass/moment of inertia)
-        // If G[k][k] is zero, the system is likely degenerate (e.g., all mass pinned or zero mass).
-
-        // 1. Solve for omega (G[0][0] * omega = b[0])
+        // Solve for omega (G[0][0] * omega = b[0])
         double G00 = G[0][0];
         double omega = (std::abs(G00) > 1e-12) ? b[0] / G00 : 0.0;
 
-        // 2. Solve for vhat_x (G[1][1] * vhat_x = b[1])
+        // Solve for vhat_x (G[1][1] * vhat_x = b[1])
         double G11 = G[1][1];
         double vhat_x = (std::abs(G11) > 1e-12) ? b[1] / G11 : 0.0;
 
-        // 3. Solve for vhat_y (G[2][2] * vhat_y = b[2])
+        // Solve for vhat_y (G[2][2] * vhat_y = b[2])
         double G22 = G[2][2];
         double vhat_y = (std::abs(G22) > 1e-12) ? b[2] / G22 : 0.0;
 
