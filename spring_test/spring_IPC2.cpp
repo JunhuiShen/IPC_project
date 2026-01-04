@@ -1184,15 +1184,17 @@ namespace affine_initial_guess{
 
         // Solve the global system Gc = b using the diagonal observation assuming the diagonal elements G[k][k] are non-zero
 
-        // Solve for omega (G[0][0] * omega = b[0])
+        // The diagonal elements G[k][k] are non-zero
+
+        // 1. Solve for omega (G[0][0] * omega = b[0])
         double G00 = G[0][0];
         double omega = (std::abs(G00) > 1e-12) ? b[0] / G00 : 0.0;
 
-        // Solve for vhat_x (G[1][1] * vhat_x = b[1])
+        // 2. Solve for vhat_x (G[1][1] * vhat_x = b[1])
         double G11 = G[1][1];
         double vhat_x = (std::abs(G11) > 1e-12) ? b[1] / G11 : 0.0;
 
-        // Solve for vhat_y (G[2][2] * vhat_y = b[2])
+        // 3. Solve for vhat_y (G[2][2] * vhat_y = b[2])
         double G22 = G[2][2];
         double vhat_y = (std::abs(G22) > 1e-12) ? b[2] / G22 : 0.0;
 
@@ -1485,7 +1487,7 @@ namespace simulation {
             // Print info
             std::cout << "Frame " << std::setw(4) << frame
                       << " | global_residual=" << std::scientific << global_residual
-                      << " | outerGS=" << std::setw(3) << outer_iters
+                      << " | outerGS=" << std::setw(3) << outer_iters + 1
                       << " | iterationsL=" << std::setw(3) << iterations_left_last
                       << " | iterationsR=" << std::setw(3) << iterations_right_last
                       << '\n';

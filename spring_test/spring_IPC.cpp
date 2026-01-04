@@ -1321,7 +1321,7 @@ namespace simulation {
             // Print info
             std::cout << "Frame " << std::setw(4) << frame
                       << " | global_residual=" << std::scientific << global_residual
-                      << " | outerGS=" << std::setw(3) << outer_iters
+                      << " | outerGS=" << std::setw(3) << outer_iters + 1
                       << " | iterationsL=" << std::setw(3) << iterations_left_last
                       << " | iterationsR=" << std::setw(3) << iterations_right_last
                       << '\n';
