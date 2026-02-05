@@ -311,10 +311,6 @@ Vec2 getV(const Vec& x, int node, int seg0) {
 double getTheta(const Vec2& u, const Vec2& v) {
     return u.x*v.x + u.y*v.y;
 }
-// Gets r = P v
-Vec2 getR(const Mat2& P, const Vec2& v) {
-    return {P.a11*v.x + P.a12*v.y, P.a21*v.x + P.a22*v.y};
-}
 
 // The gradient of projection matrix P w.r.t. x1 (but this one return -grad(P))
 Mat2x2x2 getGradJP_analytic(const Vec2& u, const Mat2& P, double L) {
@@ -472,17 +468,13 @@ Mat2 localBarrierHess(int who, const Vec &x, int node, int seg0, int seg1, doubl
     // ======================================================
     if (t <= 1e-6) {
         // Closest to x1 (point–point)
-        if (who == node)      return Hrr;
-        else if (who == seg0) return Hrr;             // same sign
-        else if (who == seg1) return {0,0,0,0};       // no coupling to x2
+        if (who == node or who == seg0)      return Hrr;
         else return {0,0,0,0};
     }
 
     if (t >= 1.0 - 1e-6) {
         // Closest to x2 (point–point)
-        if (who == node)      return Hrr;
-        else if (who == seg1) return Hrr;             // same sign (self-block)
-        else if (who == seg0) return {0,0,0,0};       // no coupling to x1
+        if (who == node or who == seg1)      return Hrr;
         else return {0,0,0,0};
     }
 
@@ -530,8 +522,8 @@ Mat2 localBarrierHess(int who, const Vec &x, int node, int seg0, int seg1, doubl
     // ======================================================
     // TENSOR TERM CALCULATION
     // ======================================================
-    Mat2 K1 = {0,0,0,0};
-    Mat2 K2 = {0,0,0,0};
+    Mat2 K1{};
+    Mat2 K2{};
 
     // K1 Term
     // K1 = [d(J1^T)/dx1] * f = [d(J_common^T)/dx1 + d(J_P^T)/dx1] * f
@@ -641,9 +633,11 @@ void runSpringGradFDTest(const char* title, Vec x, double k, const std::vector<d
 
     // analytic gradient
     vector<double> ga(x.size(),0.0);
-    for(int i=0;i<3;i++){
-        Vec2 g = localSpringGrad(i,x,k,L);
-        ga[2*i]=g.x; ga[2*i+1]=g.y;
+    int N = (int)L.size() + 1;
+    for(int i = 0; i < N; i++){
+        Vec2 g = localSpringGrad(i, x, k, L);
+        ga[2*i]   = g.x;
+        ga[2*i+1] = g.y;
     }
 
     vector<double> hs{1e-2,1e-3,1e-4,1e-5};
