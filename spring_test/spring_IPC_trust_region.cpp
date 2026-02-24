@@ -697,8 +697,7 @@ namespace ccd{
         }
 
         // Broad-phase sweep-and-prune on swept AABBs
-        template<typename Callback>
-        void broad_phase_ccd(std::vector<Object> &objects, Callback report) {
+        template<typename Callback> void broad_phase_ccd(std::vector<Object> &objects, Callback report) {
             const int n = static_cast<int>(objects.size());
 
             // Sort by x_min
@@ -883,23 +882,23 @@ namespace ccd{
             return true;
         }
 
-        double ccd_get_safe_step(const Vec2 &x1, const Vec2 &dx1, const Vec2 &x2, const Vec2 &dx2,
-                                 const Vec2 &x3, const Vec2 &dx3, double eta = 0.9) {
-
-            double t_hit;
-            bool collision_found = ccd_point_segment_2d(x1, dx1, x2, dx2, x3, dx3, t_hit);
-
-            if (collision_found) {
-                if (t_hit <= 1e-12) {
-                    // Already in collision, don't move at all
-                    return 0.0;
-                }
-                return eta * t_hit;
-            } else {
-                // No collision found in the [0, 1] interval
-                return 1.0;
-            }
-        }
+//        double ccd_get_safe_step(const Vec2 &x1, const Vec2 &dx1, const Vec2 &x2, const Vec2 &dx2,
+//                                 const Vec2 &x3, const Vec2 &dx3, double eta = 0.9) {
+//
+//            double t_hit;
+//            bool collision_found = ccd_point_segment_2d(x1, dx1, x2, dx2, x3, dx3, t_hit);
+//
+//            if (collision_found) {
+//                if (t_hit <= 1e-12) {
+//                    // Already in collision, don't move at all
+//                    return 0.0;
+//                }
+//                return eta * t_hit;
+//            } else {
+//                // No collision found in the [0, 1] interval
+//                return 1.0;
+//            }
+//        }
     }
 }
 
@@ -973,10 +972,13 @@ namespace solver {
         return Hi;
     }
 
-    // Per-node CCD
-    double compute_safe_step(int who_global, const Vec2 &dx, const Vec &x_global,
-                             const std::vector<BarrierPair> &barriers_now, double eta) {
-        double omega_hat = 1.0;
+    double compute_trust_region_weight(int who_global, const Vec2 &dx, const Vec &x_global,
+                                       const std::vector<BarrierPair> &barriers_now, double gamma) {
+
+        const double dx_norm = std::sqrt(dx.x * dx.x + dx.y * dx.y);
+        if (dx_norm < 1e-12) return 1.0;
+
+        double omega = 1.0;
 
         for (const BarrierPair &c : barriers_now) {
             if (who_global != c.node && who_global != c.seg0 && who_global != c.seg1)
@@ -986,18 +988,57 @@ namespace solver {
             Vec2 xj = get_xi(x_global, c.seg0);
             Vec2 xk = get_xi(x_global, c.seg1);
 
-            Vec2 dxi{0,0}, dxj{0,0}, dxk{0,0};
-            Vec2 full{-dx.x, -dx.y};
+            double s;
+            Vec2 p{}, r{};
+            double d0 = std::numeric_limits<double>::infinity();
 
-            if (who_global == c.node) dxi = full;
-            else if (who_global == c.seg0) dxj = full;
-            else if (who_global == c.seg1) dxk = full;
+            // GS micro-step: only who_global moves; all others fixed.
+            if (who_global == c.node) {
+                d0 = physics::node_segment_distance(xi, xj, xk, s, p, r);
+            } else if (who_global == c.seg0) {
+                d0 = physics::node_segment_distance(xj, xi, xk, s, p, r);
+            } else { // who_global == c.seg1
+                d0 = physics::node_segment_distance(xk, xi, xj, s, p, r);
+            }
 
-            omega_hat = std::min(omega_hat, ccd_get_safe_step(xi, dxi, xj, dxj, xk, dxk, eta));
+//            if (d0 < 1e-12)
+//                d0 = 1e-12;
+
+            // Clamp: ||omega * dx|| <= gamma * d0
+            double omega_c = std::min(1.0, (gamma * d0) / dx_norm);
+            omega = std::min(omega, omega_c);
+
+            if (omega <= 0.0) return 0.0;
         }
 
-        return omega_hat;
+        return omega;
     }
+
+//    // Per-node CCD
+//    double compute_safe_step(int who_global, const Vec2 &dx, const Vec &x_global,
+//                             const std::vector<BarrierPair> &barriers_now, double eta) {
+//        double omega_hat = 1.0;
+//
+//        for (const BarrierPair &c : barriers_now) {
+//            if (who_global != c.node && who_global != c.seg0 && who_global != c.seg1)
+//                continue;
+//
+//            Vec2 xi = get_xi(x_global, c.node);
+//            Vec2 xj = get_xi(x_global, c.seg0);
+//            Vec2 xk = get_xi(x_global, c.seg1);
+//
+//            Vec2 dxi{0,0}, dxj{0,0}, dxk{0,0};
+//            Vec2 full{-dx.x, -dx.y};
+//
+//            if (who_global == c.node) dxi = full;
+//            else if (who_global == c.seg0) dxj = full;
+//            else if (who_global == c.seg1) dxk = full;
+//
+//            omega_hat = std::min(omega_hat, ccd_get_safe_step(xi, dxi, xj, dxj, xk, dxk, eta));
+//        }
+//
+//        return omega_hat;
+//    }
 
     // Block description for chain
     struct BlockView {
@@ -1016,15 +1057,17 @@ namespace solver {
                                 double dt, double k, const Vec2& g_accel, double dhat, double eta) {
 
         Vec2 gi = compute_local_gradient(local_i,*b.x, *b.xhat,*b.mass, *b.L,
-                                                           dt, k, g_accel, barriers_now, dhat, x_global, b.offset);
+                                         dt, k, g_accel, barriers_now, dhat, x_global, b.offset);
 
         Mat2 Hi = compute_local_hessian(local_i, *b.x, *b.mass, *b.L, dt, k,
-                                                          barriers_now, dhat, x_global, b.offset);
+                                        barriers_now, dhat, x_global, b.offset);
 
         Vec2 dx = mul(matrix2d_inverse(Hi), gi);
 
         const int who_global = b.offset + local_i;
-        double omega = compute_safe_step(who_global, dx, x_global, barriers_now, eta);
+//        double omega = compute_safe_step(who_global, dx, x_global, barriers_now, eta);
+// TRUST-REGION clamp (no CCD)
+        double omega = compute_trust_region_weight(who_global, dx, x_global, barriers_now, eta);
 
         Vec2 xi = get_xi(*b.x, local_i);
         xi.x -= omega * dx.x;
@@ -1036,16 +1079,16 @@ namespace solver {
 
     // Global convergence residual where we use a frozen barrier set for consistency
     double compute_global_residual(const Vec &x_local, const Vec &xhat_local, const std::vector<double> &mass_local,
-                            const std::vector<double> &L_local, double dt, double k, const Vec2 &g_accel,
-                            const std::vector<BarrierPair> &barriers_global, double dhat, const Vec &x_global,
-                            int global_offset) {
+                                   const std::vector<double> &L_local, double dt, double k, const Vec2 &g_accel,
+                                   const std::vector<BarrierPair> &barriers_global, double dhat, const Vec &x_global,
+                                   int global_offset) {
 
         const int N = (int)mass_local.size();
         double r_inf = 0.0;
 
         for (int i = 0; i < N; ++i) {
             Vec2 g = compute_local_gradient(i, x_local, xhat_local, mass_local, L_local, dt, k, g_accel,
-                                                              barriers_global, dhat, x_global, global_offset);
+                                            barriers_global, dhat, x_global, global_offset);
 
             r_inf = std::max(r_inf, std::abs(g.x));
             r_inf = std::max(r_inf, std::abs(g.y));
@@ -1055,8 +1098,8 @@ namespace solver {
 
     // Global GS solver
     std::pair<double,int> global_gauss_seidel_solver( std::vector<BlockView>& blocks, Vec& x_global, double dt, double k,
-                                                const Vec2& g_accel, const BarrierBuilder& barrier_builder, double dhat,
-                                                int max_global_iters, double tol_abs, double eta) {
+                                                      const Vec2& g_accel, const BarrierBuilder& barrier_builder, double dhat,
+                                                      int max_global_iters, double tol_abs, double eta) {
         double r = 0.0;
 
         for (int it = 1; it < max_global_iters; ++it) {
@@ -1080,7 +1123,7 @@ namespace solver {
             r = 0.0;
             for (const BlockView& b : blocks) {
                 r = std::max(r, compute_global_residual(*b.x, *b.xhat,*b.mass, *b.L, dt, k, g_accel,
-                                                 barriers_eval, dhat, x_global, b.offset));
+                                                        barriers_eval, dhat, x_global, b.offset));
             }
 
             if (r < tol_abs)
@@ -1222,38 +1265,38 @@ namespace simulation {
     using namespace ccd::narrowphase_ccd;
     using namespace simulation_utility;
 
-    double compute_initial_guess_ccd_step(const Vec& x_combined, const Vec& v_combined,
-                                          const std::vector<BarrierPair>& barrier_pairs, double dt, double eta = 0.9){
-        double omega = 1.0;
-
-        for (const BarrierPair& c : barrier_pairs) {
-            Vec2 xi = get_xi(x_combined, c.node);
-            Vec2 xj = get_xi(x_combined, c.seg0);
-            Vec2 xk = get_xi(x_combined, c.seg1);
-
-            Vec2 vi = get_xi(v_combined, c.node);
-            Vec2 vj = get_xi(v_combined, c.seg0);
-            Vec2 vk = get_xi(v_combined, c.seg1);
-
-            // displacements over the step
-            Vec2 dxi = {dt * vi.x, dt * vi.y};
-            Vec2 dxj = {dt * vj.x, dt * vj.y};
-            Vec2 dxk = {dt * vk.x, dt * vk.y};
-
-            double omega_c = ccd_get_safe_step(xi, dxi, xj, dxj, xk, dxk, eta);
-            omega = std::min(omega, omega_c);
-            if (omega <= 0.0) return 0.0;
-        }
-
-        return omega;
-    }
+//    double compute_initial_guess_ccd_step(const Vec& x_combined, const Vec& v_combined,
+//                                          const std::vector<BarrierPair>& barrier_pairs, double dt, double eta = 0.9){
+//        double omega = 1.0;
+//
+//        for (const BarrierPair& c : barrier_pairs) {
+//            Vec2 xi = get_xi(x_combined, c.node);
+//            Vec2 xj = get_xi(x_combined, c.seg0);
+//            Vec2 xk = get_xi(x_combined, c.seg1);
+//
+//            Vec2 vi = get_xi(v_combined, c.node);
+//            Vec2 vj = get_xi(v_combined, c.seg0);
+//            Vec2 vk = get_xi(v_combined, c.seg1);
+//
+//            // displacements over the step
+//            Vec2 dxi = {dt * vi.x, dt * vi.y};
+//            Vec2 dxj = {dt * vj.x, dt * vj.y};
+//            Vec2 dxk = {dt * vk.x, dt * vk.y};
+//
+//            double omega_c = ccd_get_safe_step(xi, dxi, xj, dxj, xk, dxk, eta);
+//            omega = std::min(omega, omega_c);
+//            if (omega <= 0.0) return 0.0;
+//        }
+//
+//        return omega;
+//    }
 
     // Main Simulation
     int sim() {
         using clock = std::chrono::high_resolution_clock;
         std::chrono::time_point<clock> t_start = clock::now();
 
-        std::string outdir = "frames_spring_IPC4";
+        std::string outdir = "frames_spring_IPC5";
         fs::create_directory(outdir);
 
         // Parameters
@@ -1264,7 +1307,7 @@ namespace simulation {
         int max_global_iters = 500;
         double tol_abs = 1e-6;
         double dhat = 0.1;
-        double eta = 0.9;
+        double eta = 0.4;
         int number_of_nodes = 11;
 
         // Create chains
@@ -1311,27 +1354,27 @@ namespace simulation {
 
             // Barrier builder always from the current geometry
             BarrierBuilder barrier_builder = [&](const Vec& xg) {
-                        return build_barrier_pairs(xg, v_combined, left.N, right.N, dt);
-                    };
+                return build_barrier_pairs(xg, v_combined, left.N, right.N, dt);
+            };
 
-            // Initial CCD-safe guess
-            std::vector<BarrierPair> initial_barrier_pairs = barrier_builder(x_combined);
-            double omega0 = compute_initial_guess_ccd_step(x_combined, v_combined, initial_barrier_pairs, dt, eta);
+//            // Initial CCD-safe guess
+//            std::vector<BarrierPair> initial_barrier_pairs = barrier_builder(x_combined);
+//            double omega0 = compute_initial_guess_ccd_step(x_combined, v_combined, initial_barrier_pairs, dt, eta);
 
             xnew_left  = left.x;
             xnew_right = right.x;
 
-            for (int i = 0; i < left.N; ++i) {
-                Vec2 xi = get_xi(left.x, i);
-                Vec2 vi = get_xi(left.v, i);
-                set_xi(xnew_left, i, {xi.x + omega0 * dt * vi.x,xi.y + omega0 * dt * vi.y});
-            }
-
-            for (int i = 0; i < right.N; ++i) {
-                Vec2 xi = get_xi(right.x, i);
-                Vec2 vi = get_xi(right.v, i);
-                set_xi(xnew_right, i, {xi.x + omega0 * dt * vi.x,xi.y + omega0 * dt * vi.y});
-            }
+//            for (int i = 0; i < left.N; ++i) {
+//                Vec2 xi = get_xi(left.x, i);
+//                Vec2 vi = get_xi(left.v, i);
+//                set_xi(xnew_left, i, {xi.x + omega0 * dt * vi.x,xi.y + omega0 * dt * vi.y});
+//            }
+//
+//            for (int i = 0; i < right.N; ++i) {
+//                Vec2 xi = get_xi(right.x, i);
+//                Vec2 vi = get_xi(right.v, i);
+//                set_xi(xnew_right, i, {xi.x + omega0 * dt * vi.x,xi.y + omega0 * dt * vi.y});
+//            }
 
             // Sync combined state
             for (int i = 0; i < left.N; ++i)
