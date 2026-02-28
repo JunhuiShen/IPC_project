@@ -197,7 +197,7 @@ namespace physics {
     // ======================================================
     // Barrier energy
     // ======================================================
-    struct BarrierPair {
+    struct NodeSegmentPair {
         int node;   // i
         int seg0;   // j
         int seg1;   // j+1
@@ -592,7 +592,7 @@ namespace physics {
     // ==============================
     Vec2 psi_local_grad(int i, const Vec &x, const Vec &xhat, const std::vector<double> &mass,
                         const std::vector<double> &L, double dt, double k, const Vec2 &g_accel,
-                        const std::vector<BarrierPair> &barriers, double dhat) {
+                        const std::vector<NodeSegmentPair> &barriers, double dhat) {
 
         Vec2 xi = get_xi(x, i), xhi = get_xi(xhat, i);
         Vec2 gi{0.0, 0.0};
@@ -611,7 +611,7 @@ namespace physics {
         gi.y -= dt * dt * mass[i] * g_accel.y;
 
         // Barrier forces
-        for (const BarrierPair &c: barriers) {
+        for (const NodeSegmentPair &c: barriers) {
             for (int who: {c.node, c.seg0, c.seg1}) {
                 if (who != i) continue;
                 Vec2 gb = local_barrier_grad(i, x, c.node, c.seg0, c.seg1, dhat);
@@ -634,7 +634,7 @@ namespace physics {
     // Local hessian of the function Psi
     // ==============================
     Mat2 psi_local_hess(int i, const Vec &x, const std::vector<double> &mass, const std::vector<double> &L, double dt,
-                        double k, const std::vector<BarrierPair> &barriers,
+                        double k, const std::vector<NodeSegmentPair> &barriers,
                         double dhat) {
 
         Mat2 H{mass[i], 0, 0, mass[i]};
@@ -647,7 +647,7 @@ namespace physics {
         H.a22 += dt * dt * Hs.a22;
 
         // Barrier term (local node-block only)
-        for (const BarrierPair &c: barriers) {
+        for (const NodeSegmentPair &c: barriers) {
             for (int who: {c.node, c.seg0, c.seg1}) {
                 if (who != i) continue;
                 Mat2 Hb = local_barrier_hess(who, x, c.node, c.seg0, c.seg1, dhat);
@@ -741,16 +741,15 @@ namespace ccd{
         }
 
         // Build barrier pairs using the broad-phase swept AABB test
-        std::vector<BarrierPair> build_barrier_pairs(const Vec &x_combined, const Vec &v_combined, int N_left,
-                                                     int N_right, double dt) {
-            std::vector<BarrierPair> barriers;
+        std::vector<NodeSegmentPair> build_aabb_candidates(const Vec &x_combined, const Vec &v_combined, int N_left,
+                                                     int N_right, double dt, double radius = 0.1) {
+            std::vector<NodeSegmentPair> barriers;
             const int total_nodes = N_left + N_right;
 
             std::vector<Object> objects;
             objects.reserve(total_nodes * 2);
 
             // Node AABBs
-            double radius = 1.5; // small radius per node
 
             for (int i = 0; i < total_nodes; ++i) {
                 Vec2 x0 = get_xi(x_combined, i);
@@ -908,8 +907,8 @@ namespace solver {
     using namespace physics;
     using namespace ccd::narrowphase_ccd;
 
-    // Barrier builder
-    using BarrierBuilder = std::function<std::vector<physics::BarrierPair>(const Vec& x_global)>;
+    // We use the broad-phase builder used in two ways: barrier_pairs where we pass v_sweep = v_velocity and ccd_candidate_set where we pass v_sweep = v_newton
+    using CandidateBuilder = std::function<std::vector<physics::NodeSegmentPair>(const Vec& x_global, const Vec& v_sweep)>;
 
     // Inverse of any 2x2 matrix
     Mat2 matrix2d_inverse(const Mat2 &H) {
@@ -926,15 +925,16 @@ namespace solver {
     // Local gradient
     Vec2 compute_local_gradient(int i, const Vec &x_local, const Vec &xhat_local,
                                 const std::vector<double> &mass_local, const std::vector<double> &L_local,
-                                double dt, double k, const Vec2 &g_accel, const std::vector<BarrierPair> &barriers_now,
+                                double dt, double k, const Vec2 &g_accel,
+                                const std::vector<NodeSegmentPair> &barrier_pairs,
                                 double dhat, const Vec &x_global, int global_offset) {
 
-        Vec2 gi = psi_local_grad(i, x_local, xhat_local,mass_local, L_local,dt, k, g_accel,{}, dhat);
+        Vec2 gi = psi_local_grad(i, x_local, xhat_local, mass_local, L_local, dt, k, g_accel, {}, dhat);
 
         const int who_global = global_offset + i;
 
         Vec2 gbar{0.0, 0.0};
-        for (const BarrierPair &c : barriers_now) {
+        for (const NodeSegmentPair &c : barrier_pairs) {
             if (c.node != who_global && c.seg0 != who_global && c.seg1 != who_global)
                 continue;
 
@@ -951,14 +951,14 @@ namespace solver {
     // Local hessian
     Mat2 compute_local_hessian(int i, const Vec &x_local, const std::vector<double> &mass_local,
                                const std::vector<double> &L_local, double dt, double k,
-                               const std::vector<BarrierPair> &barriers_now, double dhat, const Vec &x_global,
-                               int global_offset) {
+                               const std::vector<NodeSegmentPair> &barrier_pairs,
+                               double dhat, const Vec &x_global, int global_offset) {
 
         Mat2 Hi = psi_local_hess(i, x_local, mass_local, L_local, dt, k, {}, dhat);
 
         const int who_global = global_offset + i;
 
-        for (const BarrierPair &c : barriers_now) {
+        for (const NodeSegmentPair &c : barrier_pairs) {
             if (c.node != who_global && c.seg0 != who_global && c.seg1 != who_global)
                 continue;
 
@@ -975,10 +975,10 @@ namespace solver {
 
     // Per-node CCD
     double compute_safe_step(int who_global, const Vec2 &dx, const Vec &x_global,
-                             const std::vector<BarrierPair> &barriers_now, double eta) {
+                             const std::vector<NodeSegmentPair> &ccd_candidate_set, double eta) {
         double omega_hat = 1.0;
 
-        for (const BarrierPair &c : barriers_now) {
+        for (const NodeSegmentPair &c : ccd_candidate_set) {
             if (who_global != c.node && who_global != c.seg0 && who_global != c.seg1)
                 continue;
 
@@ -987,9 +987,9 @@ namespace solver {
             Vec2 xk = get_xi(x_global, c.seg1);
 
             Vec2 dxi{0,0}, dxj{0,0}, dxk{0,0};
-            Vec2 full{-dx.x, -dx.y};
+            Vec2 full{-dx.x, -dx.y}; // test motion along -dx
 
-            if (who_global == c.node) dxi = full;
+            if (who_global == c.node)      dxi = full;
             else if (who_global == c.seg0) dxj = full;
             else if (who_global == c.seg1) dxk = full;
 
@@ -1001,30 +1001,39 @@ namespace solver {
 
     // Block description for chain
     struct BlockView {
-        Vec* x;  // Position
-        const Vec* xhat;  // Linear extrapolation
-        const std::vector<double>* mass;  // per-node mass
-        const std::vector<double>* L;  // Initial N-1 segment length vector
-        int offset;  // Global offset
-        int size() const {
-            return static_cast<int>(mass->size());
-        }
+        Vec* x;                       // unknown positions for this block
+        const Vec* xhat;              // linear extrapolation
+        const std::vector<double>* mass;
+        const std::vector<double>* L;
+        int offset;                   // global offset
+        int size() const { return static_cast<int>(mass->size()); }
     };
 
-    // Single-node update
-    inline void update_one_node(int local_i, const BlockView& b, Vec& x_global, const std::vector<BarrierPair>& barriers_now,
-                                double dt, double k, const Vec2& g_accel, double dhat, double eta) {
+    // Single-node updat
+    inline void update_one_node(int local_i, const BlockView& b, Vec& x_global,
+                                const std::vector<NodeSegmentPair>& barrier_pairs, const CandidateBuilder& pair_builder,
+                                const Vec& v_vel_global, double dt, double k, const Vec2& g_accel,
+                                double dhat, double eta) {
 
-        Vec2 gi = compute_local_gradient(local_i,*b.x, *b.xhat,*b.mass, *b.L,
-                                                           dt, k, g_accel, barriers_now, dhat, x_global, b.offset);
+        // Energy model
+        Vec2 gi = compute_local_gradient(local_i, *b.x, *b.xhat, *b.mass, *b.L,
+                                         dt, k, g_accel, barrier_pairs, dhat, x_global, b.offset);
 
-        Mat2 Hi = compute_local_hessian(local_i, *b.x, *b.mass, *b.L, dt, k,
-                                                          barriers_now, dhat, x_global, b.offset);
+        Mat2 Hi = compute_local_hessian(local_i, *b.x, *b.mass, *b.L,
+                                        dt, k, barrier_pairs, dhat, x_global, b.offset);
 
         Vec2 dx = mul(matrix2d_inverse(Hi), gi);
 
         const int who_global = b.offset + local_i;
-        double omega = compute_safe_step(who_global, dx, x_global, barriers_now, eta);
+
+        // Build Newton-swept AABB candidates for CCD
+        Vec v_newton(v_vel_global.size(), 0.0);
+        set_xi(v_newton, who_global, {-dx.x / dt, -dx.y / dt});
+
+        std::vector<NodeSegmentPair> ccd_candidate_set = pair_builder(x_global, v_newton);
+
+
+        double omega = compute_safe_step(who_global, dx, x_global, ccd_candidate_set , eta);
 
         Vec2 xi = get_xi(*b.x, local_i);
         xi.x -= omega * dx.x;
@@ -1034,18 +1043,18 @@ namespace solver {
         set_xi(x_global, who_global, xi);
     }
 
-    // Global convergence residual where we use a frozen barrier set for consistency
+    // Global convergence residual
     double compute_global_residual(const Vec &x_local, const Vec &xhat_local, const std::vector<double> &mass_local,
-                            const std::vector<double> &L_local, double dt, double k, const Vec2 &g_accel,
-                            const std::vector<BarrierPair> &barriers_global, double dhat, const Vec &x_global,
-                            int global_offset) {
+                                   const std::vector<double> &L_local, double dt, double k, const Vec2 &g_accel,
+                                   const std::vector<NodeSegmentPair> &barrier_pairs_eval, double dhat, const Vec &x_global,
+                                   int global_offset) {
 
         const int N = (int)mass_local.size();
         double r_inf = 0.0;
 
         for (int i = 0; i < N; ++i) {
             Vec2 g = compute_local_gradient(i, x_local, xhat_local, mass_local, L_local, dt, k, g_accel,
-                                                              barriers_global, dhat, x_global, global_offset);
+                                            barrier_pairs_eval, dhat, x_global, global_offset);
 
             r_inf = std::max(r_inf, std::abs(g.x));
             r_inf = std::max(r_inf, std::abs(g.y));
@@ -1054,33 +1063,39 @@ namespace solver {
     }
 
     // Global GS solver
-    std::pair<double,int> global_gauss_seidel_solver( std::vector<BlockView>& blocks, Vec& x_global, double dt, double k,
-                                                const Vec2& g_accel, const BarrierBuilder& barrier_builder, double dhat,
-                                                int max_global_iters, double tol_abs, double eta) {
+    std::pair<double,int> global_gauss_seidel_solver(std::vector<BlockView>& blocks,
+                                                     Vec& x_global, const Vec& v_vel_global,
+                                                     double dt, double k, const Vec2& g_accel,
+                                                     const CandidateBuilder& pair_builder,
+                                                     double dhat, int max_global_iters, double tol_abs,
+                                                     double eta) {
         double r = 0.0;
 
         for (int it = 1; it < max_global_iters; ++it) {
 
-            std::vector<BarrierPair> barriers_now = barrier_builder(x_global);
+            // Barrier active set for energy/grad/hess
+            std::vector<NodeSegmentPair> barrier_pairs = pair_builder(x_global, v_vel_global);
 
             // Node sweep
             for (const BlockView& b : blocks) {
                 for (int i = 0; i < b.size(); ++i) {
 
-                    update_one_node(i, b,x_global, barriers_now, dt, k, g_accel, dhat, eta);
+                    update_one_node(i, b, x_global, barrier_pairs, pair_builder, v_vel_global,
+                                    dt, k, g_accel, dhat, eta);
 
-                    // Immediate update on barrier pairs
-                    barriers_now = barrier_builder(x_global);
+                    // Refresh energy barrier set after each update
+                    barrier_pairs = pair_builder(x_global, v_vel_global);
                 }
             }
 
-            // Global residual
-            std::vector<BarrierPair> barriers_eval = barrier_builder(x_global);
+            // Residual evaluation
+            std::vector<NodeSegmentPair> barrier_eval = pair_builder(x_global, v_vel_global);
 
             r = 0.0;
             for (const BlockView& b : blocks) {
-                r = std::max(r, compute_global_residual(*b.x, *b.xhat,*b.mass, *b.L, dt, k, g_accel,
-                                                 barriers_eval, dhat, x_global, b.offset));
+                r = std::max(r, compute_global_residual(*b.x, *b.xhat, *b.mass, *b.L,
+                                                        dt, k, g_accel, barrier_eval, dhat,
+                                                        x_global, b.offset));
             }
 
             if (r < tol_abs)
@@ -1212,6 +1227,7 @@ namespace simulation_utility{
 
 }
 
+
 namespace simulation {
     using namespace math;
     using namespace solver;
@@ -1223,10 +1239,10 @@ namespace simulation {
     using namespace simulation_utility;
 
     double compute_initial_guess_ccd_step(const Vec& x_combined, const Vec& v_combined,
-                                          const std::vector<BarrierPair>& barrier_pairs, double dt, double eta = 0.9){
+                                          const std::vector<NodeSegmentPair>& barrier_pairs, double dt, double eta = 0.9){
         double omega = 1.0;
 
-        for (const BarrierPair& c : barrier_pairs) {
+        for (const NodeSegmentPair& c : barrier_pairs) {
             Vec2 xi = get_xi(x_combined, c.node);
             Vec2 xj = get_xi(x_combined, c.seg0);
             Vec2 xk = get_xi(x_combined, c.seg1);
@@ -1235,23 +1251,23 @@ namespace simulation {
             Vec2 vj = get_xi(v_combined, c.seg0);
             Vec2 vk = get_xi(v_combined, c.seg1);
 
-            // displacements over the step
             Vec2 dxi = {dt * vi.x, dt * vi.y};
             Vec2 dxj = {dt * vj.x, dt * vj.y};
             Vec2 dxk = {dt * vk.x, dt * vk.y};
 
             double omega_c = ccd_get_safe_step(xi, dxi, xj, dxj, xk, dxk, eta);
             omega = std::min(omega, omega_c);
-            if (omega <= 0.0) return 0.0;
+
+            if (omega <= 0.0)
+                return 0.0;
         }
 
         return omega;
     }
 
-    // Main Simulation
     int sim() {
         using clock = std::chrono::high_resolution_clock;
-        std::chrono::time_point<clock> t_start = clock::now();
+        auto t_start = clock::now();
 
         std::string outdir = "frames_spring_IPC4";
         fs::create_directory(outdir);
@@ -1268,16 +1284,15 @@ namespace simulation {
         int number_of_nodes = 11;
 
         // Create chains
-        Chain left  = make_chain({-1.0, 0.0}, {4.0, -5.0}, number_of_nodes, 0.05); // y = -x - 1
-        Chain right = make_chain({-1.5, 0.5}, {3.5, 0.5}, number_of_nodes, 0.05); // y = 0.5
+        Chain left  = make_chain({-1.0, 0.0}, {4.0, -5.0}, number_of_nodes, 0.05);
+        Chain right = make_chain({-1.5, 0.5}, {3.5, 0.5}, number_of_nodes, 0.05);
 
         const int total_nodes = left.N + right.N;
 
-        // Combined geometry for OBJ export
+        // Combined edges
         std::vector<std::pair<int, int>> edges_combined = left.edges;
-        for (std::pair<int, int> &e : right.edges){
+        for (auto &e : right.edges)
             edges_combined.emplace_back(e.first + left.N, e.second + left.N);
-        }
 
         // Global state
         Vec x_combined(2 * total_nodes, 0.0);
@@ -1289,9 +1304,10 @@ namespace simulation {
         combine_positions(x_combined, left.x, right.x, left.N, right.N);
         export_frame(outdir, 0, x_combined, edges_combined);
 
-        // Summary
         double max_global_residual = 0.0;
-        int max_global_iters_used = 0;
+
+        // Track average iterations
+        int sum_global_iters_used = 0;
 
         // Time stepping
         for (int frame = 1; frame <= total_frame; ++frame) {
@@ -1300,23 +1316,26 @@ namespace simulation {
             build_xhat(left, dt);
             build_xhat(right, dt);
 
-            // Map the current velocities to global vectors
+            // Map velocities to global vector
             for (int i = 0; i < left.N; ++i)
                 set_xi(v_combined, i, get_xi(left.v, i));
+
             for (int i = 0; i < right.N; ++i)
                 set_xi(v_combined, left.N + i, get_xi(right.v, i));
 
-            // Global positions
+            // Sync global positions
             combine_positions(x_combined, left.x, right.x, left.N, right.N);
 
-            // Barrier builder always from the current geometry
-            BarrierBuilder barrier_builder = [&](const Vec& xg) {
-                        return build_barrier_pairs(xg, v_combined, left.N, right.N, dt);
-                    };
+            // Pair builder
+            solver::CandidateBuilder pair_builder = [&](const Vec& xg, const Vec& v_sweep) {
+                return build_aabb_candidates(xg, v_sweep, left.N, right.N, dt);
+            };
 
-            // Initial CCD-safe guess
-            std::vector<BarrierPair> initial_barrier_pairs = barrier_builder(x_combined);
-            double omega0 = compute_initial_guess_ccd_step(x_combined, v_combined, initial_barrier_pairs, dt, eta);
+            // Initial CCD-safe explicit guess
+            std::vector<NodeSegmentPair> initial_barrier_pairs = pair_builder(x_combined, v_combined);
+
+            double omega0 = compute_initial_guess_ccd_step(
+                    x_combined, v_combined, initial_barrier_pairs, dt, eta);
 
             xnew_left  = left.x;
             xnew_right = right.x;
@@ -1324,41 +1343,45 @@ namespace simulation {
             for (int i = 0; i < left.N; ++i) {
                 Vec2 xi = get_xi(left.x, i);
                 Vec2 vi = get_xi(left.v, i);
-                set_xi(xnew_left, i, {xi.x + omega0 * dt * vi.x,xi.y + omega0 * dt * vi.y});
+                set_xi(xnew_left, i,
+                       {xi.x + omega0 * dt * vi.x,
+                        xi.y + omega0 * dt * vi.y});
             }
 
             for (int i = 0; i < right.N; ++i) {
                 Vec2 xi = get_xi(right.x, i);
                 Vec2 vi = get_xi(right.v, i);
-                set_xi(xnew_right, i, {xi.x + omega0 * dt * vi.x,xi.y + omega0 * dt * vi.y});
+                set_xi(xnew_right, i,
+                       {xi.x + omega0 * dt * vi.x,
+                        xi.y + omega0 * dt * vi.y});
             }
 
-            // Sync combined state
-            for (int i = 0; i < left.N; ++i)
-                set_xi(x_combined, i, get_xi(xnew_left, i));
-            for (int i = 0; i < right.N; ++i)
-                set_xi(x_combined, left.N + i, get_xi(xnew_right, i));
+            // Sync combined after explicit step
+            combine_positions_from_new(x_combined, xnew_left, xnew_right, left.N, right.N);
 
             // Build solver blocks
             std::vector<BlockView> blocks;
             blocks.push_back({&xnew_left,  &left.xhat,  &left.mass,  &left.rest_lengths,  0});
             blocks.push_back({&xnew_right, &right.xhat, &right.mass, &right.rest_lengths, left.N});
 
-            // Global solve
-            std::pair<double, int> result = global_gauss_seidel_solver(blocks,x_combined, dt, k_spring,
-                                                                       g_accel, barrier_builder, dhat,  max_global_iters, tol_abs, eta);
+            // Global nonlinear GS solve
+            std::pair<double, int> result = global_gauss_seidel_solver(blocks, x_combined, v_combined,
+                                               dt, k_spring, g_accel, pair_builder,
+                                               dhat, max_global_iters, tol_abs, eta);
 
             double global_residual = result.first;
             int iters_used = result.second;
 
             max_global_residual = std::max(max_global_residual, global_residual);
-            max_global_iters_used = std::max(max_global_iters_used, iters_used);
+
+            // Accumulate the iterations
+            sum_global_iters_used += iters_used;
 
             // Velocity update
             update_velocity(left,  xnew_left,  dt);
             update_velocity(right, xnew_right, dt);
 
-            // Export frame
+            // Export
             combine_positions(x_combined, left.x, right.x, left.N, right.N);
             export_frame(outdir, frame, x_combined, edges_combined);
 
@@ -1368,20 +1391,19 @@ namespace simulation {
                       << '\n';
         }
 
-        // Timing
-        std::chrono::time_point<clock> t_end = clock::now();
+        auto t_end = clock::now();
         std::chrono::duration<double> elapsed = t_end - t_start;
 
-        // Final Summary
+        const double avg_global_iters_used = (total_frame > 0) ? (static_cast<double>(sum_global_iters_used) / total_frame) : 0.0;
+
         std::cout << "\n===== Simulation Summary =====\n";
-        std::cout << "max_global_residual = " << std::scientific << max_global_residual << "\n";
-        std::cout << "max_global_iters    = " << max_global_iters_used << "\n";
-        std::cout << "total runtime       = " << elapsed.count() << " seconds\n";
+        std::cout << "max_global_residual  = " << std::scientific << max_global_residual << "\n";
+        std::cout << "avg_global_iters     = " << std::fixed << avg_global_iters_used << "\n";
+        std::cout << "total runtime        = " << elapsed.count() << " seconds\n";
 
         return 0;
     }
 }
-
 
 int main() {
     return simulation::sim();
