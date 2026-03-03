@@ -812,7 +812,7 @@ namespace ccd{
         }
     }
 
-// Narrow-phase CCD
+    // Narrow-phase CCD
     namespace narrowphase_ccd {
         using namespace math;
 
@@ -1068,8 +1068,30 @@ namespace solver {
                                                      double dt, double k, const Vec2& g_accel,
                                                      const CandidateBuilder& pair_builder,
                                                      double dhat, int max_global_iters, double tol_abs,
-                                                     double eta) {
-        double r = 0.0;
+                                                     double eta,
+                                                     std::vector<double>* residual_history /*= nullptr*/) {
+
+        // Residual history
+        auto eval_residual = [&]() {
+            std::vector<NodeSegmentPair> barrier_eval = pair_builder(x_global, v_vel_global);
+
+            double residual = 0.0;
+            for (const BlockView& b : blocks) {
+                residual = std::max(residual, compute_global_residual(*b.x, *b.xhat, *b.mass, *b.L,
+                                                                      dt, k, g_accel, barrier_eval, dhat,
+                                                                      x_global, b.offset));
+            }
+            return residual;
+        };
+
+        if (residual_history) residual_history->clear();
+
+        // Initial residual
+        double r = eval_residual();
+        if (residual_history) residual_history->push_back(r);
+
+        if (r < tol_abs)
+            return {r, 0};
 
         for (int it = 1; it < max_global_iters; ++it) {
 
@@ -1334,8 +1356,7 @@ namespace simulation {
             // Initial CCD-safe explicit guess
             std::vector<NodeSegmentPair> initial_barrier_pairs = pair_builder(x_combined, v_combined);
 
-            double omega0 = compute_initial_guess_ccd_step(
-                    x_combined, v_combined, initial_barrier_pairs, dt, eta);
+            double omega0 = compute_initial_guess_ccd_step(x_combined, v_combined, initial_barrier_pairs, dt, eta);
 
             xnew_left  = left.x;
             xnew_right = right.x;
@@ -1365,9 +1386,10 @@ namespace simulation {
             blocks.push_back({&xnew_right, &right.xhat, &right.mass, &right.rest_lengths, left.N});
 
             // Global nonlinear GS solve
+            std::vector<double> res_hist;
             std::pair<double, int> result = global_gauss_seidel_solver(blocks, x_combined, v_combined,
                                                dt, k_spring, g_accel, pair_builder,
-                                               dhat, max_global_iters, tol_abs, eta);
+                                               dhat, max_global_iters, tol_abs, eta, &res_hist);
 
             double global_residual = result.first;
             int iters_used = result.second;
@@ -1386,16 +1408,19 @@ namespace simulation {
             export_frame(outdir, frame, x_combined, edges_combined);
 
             std::cout << "Frame " << std::setw(4) << frame
-                      << " | global_residual=" << std::scientific << global_residual
-                      << " | global_iters=" << std::setw(3) << iters_used
+                      << " | initial_residual=" << std::scientific << res_hist.front()
+                      << " | final_residual="   << std::scientific << global_residual
+                      << " | global_iters="     << std::setw(3) << iters_used
                       << '\n';
         }
 
         auto t_end = clock::now();
         std::chrono::duration<double> elapsed = t_end - t_start;
 
-        const double avg_global_iters_used = (total_frame > 0) ? (static_cast<double>(sum_global_iters_used) / total_frame) : 0.0;
+        // Compute the average number of iterations
+        const double avg_global_iters_used = 1.0 * sum_global_iters_used / total_frame;
 
+        // Residual
         std::cout << "\n===== Simulation Summary =====\n";
         std::cout << "max_global_residual  = " << std::scientific << max_global_residual << "\n";
         std::cout << "avg_global_iters     = " << std::fixed << avg_global_iters_used << "\n";
