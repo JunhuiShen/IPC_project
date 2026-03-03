@@ -907,15 +907,10 @@ namespace collision_filtering{
     }
 
     // Step control policies
-    namespace step_control {
+    namespace trust_region {
 
         using namespace math;
         using namespace physics;
-
-        enum class Policy {
-            CCD,
-            TrustRegion
-        };
 
         // Trust-region rule
         static inline double trust_region_weight( const Vec2& xi,  const Vec2& dxi, const Vec2& xj,  const Vec2& dxj,
@@ -1080,7 +1075,7 @@ namespace solver {
             else if (who_global == c.seg0) dxj = full;
             else if (who_global == c.seg1) dxk = full;
 
-            omega = std::min(omega, collision_filtering::step_control::trust_region_weight(xi, dxi, xj, dxj, xk, dxk, eta));
+            omega = std::min(omega, collision_filtering::trust_region::trust_region_weight(xi, dxi, xj, dxj, xk, dxk, eta));
 
         }
 
