@@ -45,14 +45,11 @@ void set_xi(Vec &x, int i, const Vec2 &v) {
 
 // Core math and linear algebra
 namespace math {
-    double dist2(const Vec &a, int i, int j) {
+
+    double node_distance(const Vec &a, int i, int j) {
         double dx = a[2 * i] - a[2 * j];
         double dy = a[2 * i + 1] - a[2 * j + 1];
-        return dx * dx + dy * dy;
-    }
-
-    double norm(const Vec &a, int i, int j) {
-        return std::sqrt(dist2(a, i, j));
+        return std::sqrt(dx * dx + dy * dy);
     }
 
     // --- Vec2 Operations ---
@@ -84,7 +81,7 @@ namespace math {
 
     // Squared norm
     static inline double norm2(const Vec2 &a) {
-        return a.x * a.x + a.y * a.y;
+        return dot(a,a);
     }
 
     static inline double norm(const Vec2 &a)  {
@@ -99,7 +96,7 @@ namespace math {
     // --- Mat2 Operations ---
 
     // Matrix-matrix multiplication
-    static inline Mat2 mul(const Mat2 &A, const Mat2 &B) {
+    static inline Mat2 matmul(const Mat2 &A, const Mat2 &B) {
         return {
                 A.a11 * B.a11 + A.a12 * B.a21, A.a11 * B.a12 + A.a12 * B.a22,
                 A.a21 * B.a11 + A.a22 * B.a21, A.a21 * B.a12 + A.a22 * B.a22
@@ -124,18 +121,18 @@ namespace math {
 // --- Mixed Operations ---
 
 // Matrix-vector multiplication
-    static inline Vec2 mul(const Mat2 &A, const Vec2 &v) {
+    static inline Vec2 matvec(const Mat2 &A, const Vec2 &v) {
         return {A.a11 * v.x + A.a12 * v.y, A.a21 * v.x + A.a22 * v.y};
     }
 }
 
-// The force models of the spring and the barrier IPC potential and its analytic gradients and hessians.
+// ======================================================
+// The force models of the spring and the barrier IPC potential and its analytic gradients and hessians
+// ======================================================
 namespace physics {
     using namespace math;
 
-    // ======================================================
-    // Local Gradient of the spring energy
-    // ======================================================
+    // --- Local Gradient of the spring energy ---
 
     // Analytic local spring gradient at node i
     Vec2 local_spring_grad(int i, const Vec &x, double k, const std::vector<double> &L) {
@@ -161,9 +158,7 @@ namespace physics {
         return g_i;
     }
 
-    // ======================================================
-    // Local Hessian of the spring energy
-    // ======================================================
+    // --- Local Hessian of the spring energy ---
 
     // Analytic local spring Hessian (2x2 block at node i)
     Mat2 local_spring_hess(int i, const Vec &x, double k, const std::vector<double> &L) {
@@ -198,9 +193,7 @@ namespace physics {
         return H_ii;
     }
 
-    // ======================================================
-    // Barrier energy
-    // ======================================================
+
     struct NodeSegmentPair {
         int node;   // i
         int seg0;   // j
@@ -225,9 +218,7 @@ namespace physics {
         return -2 * std::log(d / dhat) - 4 * (d - dhat) / d + (d - dhat) * (d - dhat) / (d * d);
     }
 
-    // ======================================================
     // Compute the point–segment distance
-    // ======================================================
     double node_segment_distance(const Vec2 &xi, const Vec2 &xj, const Vec2 &xjp1, double &t, Vec2 &p, Vec2 &r) {
         // Segment direction
         Vec2 seg = {xjp1.x - xj.x, xjp1.y - xj.y};
@@ -257,9 +248,7 @@ namespace physics {
         return std::sqrt(r.x * r.x + r.y * r.y);
     }
 
-    // ======================================================
     // Local barrier gradient for a node
-    // ======================================================
     Vec2 local_barrier_grad(int who, const Vec &x, int node, int seg0, int seg1, double dhat) {
         Vec2 xi = get_xi(x, node);
         Vec2 x1 = get_xi(x, seg0);
@@ -306,7 +295,7 @@ namespace physics {
 
         // Interior branch
         if (who == node) {
-            return mul(P, f);
+            return matvec(P, f);
         }
 
         // Build the term [ (u^T v)I + v u^T - 2 (u^T v) u u^T ] / L
@@ -319,19 +308,17 @@ namespace physics {
         if (who == seg0) {
             // g1 = J1^T f = ( (T/L)^T - P^T ) f
             Mat2 J1_T = add(T_common_T, scale(P, -1.0)); // P is symmetric
-            return mul(J1_T, f); // Returns J1^T * f
+            return matvec(J1_T, f); // Returns J1^T * f
         } else if (who == seg1) {
             // g2 = J2^T f = ( -(T/L) )^T f = - (T/L)^T f
             Mat2 J2_T = scale(T_common_T, -1.0);
-            return mul(J2_T, f); // Returns J2^T * f
+            return matvec(J2_T, f); // Returns J2^T * f
         }
 
         return {0, 0};
     }
 
-    // ======================================================
-    // Analytic derivatives for Tensor Term
-    // ======================================================
+    // --- Analytic derivatives for Tensor Term ---
 
     // Gets v = r_p = x - x1
     Vec2 get_v(const Vec &x, int node, int seg0) {
@@ -468,9 +455,7 @@ namespace physics {
         return {dJ_dx, dJ_dy};
     }
 
-    // ==============================
     // Local barrier hessian for a node
-    // ==============================
     Mat2 local_barrier_hess(int who, const Vec &x, int node, int seg0, int seg1, double dhat) {
         Vec2 xi = get_xi(x, node);
         Vec2 x1 = get_xi(x, seg0);
@@ -535,7 +520,7 @@ namespace physics {
 
         // Helper: M^T * Hrr * M
         std::function<Mat2(const Mat2 &)> hessTerm = [&](const Mat2 &M) {
-            return mul(Mat2{M.a11, M.a21, M.a12, M.a22}, mul(Hrr, M)); // M^T * Hrr * M
+            return matmul(Mat2{M.a11, M.a21, M.a12, M.a22}, matmul(Hrr, M)); // M^T * Hrr * M
         };
 
         // Base Hessians (J^T Hrr J)
@@ -560,9 +545,9 @@ namespace physics {
 
         // Contract: (K1)_il = sum_k d(J1)_ki/dx1_l * f_k
         // Col 1 (l=0): (K1)_i0 = sum_k d(J1)_ki/dx1_x * f_k = (dJ1_dx^T) * f
-        Vec2 col1_K1 = mul(transpose(dJ1_dx), f);
+        Vec2 col1_K1 = matvec(transpose(dJ1_dx), f);
         // Col 2 (l=1): (K1)_i1 = sum_k d(J1)_ki/dx1_y * f_k = (dJ1_dy^T) * f
-        Vec2 col2_K1 = mul(transpose(dJ1_dy), f);
+        Vec2 col2_K1 = matvec(transpose(dJ1_dy), f);
 
         K1 = {col1_K1.x, col2_K1.x, col1_K1.y, col2_K1.y};
 
@@ -578,9 +563,9 @@ namespace physics {
 
         // Contract: (K2)_il = sum_k d(J2)_ki/dx2_l * f_k
         // Col 1 (l=0): (K2)_i0 = sum_k d(J2)_ki/dx2_x * f_k = (dJ2_dx^T) * f
-        Vec2 col1_K2 = mul(transpose(dJ2_dx), f);
+        Vec2 col1_K2 = matvec(transpose(dJ2_dx), f);
         // Col 2 (l=1): (K2)_i1 = sum_k d(J2)_ki/dx2_y * f_k = (dJ2_dy^T) * f
-        Vec2 col2_K2 = mul(transpose(dJ2_dy), f);
+        Vec2 col2_K2 = matvec(transpose(dJ2_dy), f);
 
         K2 = {col1_K2.x, col2_K2.x, col1_K2.y, col2_K2.y};
 
@@ -591,9 +576,7 @@ namespace physics {
         else return {0, 0, 0, 0};
     }
 
-    // ==============================
-    // Local gradient of the function Psi
-    // ==============================
+    // Per-node gradient of the incremental potential: inertia + gravity + spring + pin
     Vec2 psi_local_grad(int i, const Vec &x, const Vec &xhat, const std::vector<double> &mass,
                         const std::vector<double> &L, double dt, double k, const Vec2 &g_accel,
                         const std::vector<NodeSegmentPair> &barriers, double dhat) {
@@ -624,6 +607,7 @@ namespace physics {
             }
         }
 
+        // Large penalty stiffness for soft pin constraint
         constexpr double k_pin = 5e6;
 
         if (i == 0) {
@@ -634,9 +618,7 @@ namespace physics {
         return gi;
     }
 
-    // ==============================
-    // Local hessian of the function Psi
-    // ==============================
+    // Per-node hessian of the incremental potential: inertia + gravity + spring + pin
     Mat2 psi_local_hess(int i, const Vec &x, const std::vector<double> &mass, const std::vector<double> &L, double dt,
                         double k, const std::vector<NodeSegmentPair> &barriers,
                         double dhat) {
@@ -673,11 +655,13 @@ namespace physics {
     }
 }
 
-// CCD (broad phase and narrow phase)
+// ======================================================
+// Collision-free step filtering
+// ======================================================
 namespace collision_filtering{
 
-    // Broad-phase axis-aligned bounding box
-    namespace broadphase_aabb {
+    // Broad-phase: Swept AABB
+    namespace aabb {
         using namespace math;
         using namespace physics;
 
@@ -745,7 +729,7 @@ namespace collision_filtering{
             }
         }
 
-        // Build barrier pairs using the broad-phase swept AABB test
+        // Build barrier candidates using swept AABB
         std::vector<NodeSegmentPair> build_aabb_candidates(const Vec &x_combined, const Vec &v_combined, int N_left,
                                                      int N_right, double dt, double radius = 0.1) {
             std::vector<NodeSegmentPair> barriers;
@@ -754,8 +738,7 @@ namespace collision_filtering{
             std::vector<Object> objects;
             objects.reserve(total_nodes * 2);
 
-            // Node AABBs
-
+            // Node swept AABBs
             for (int i = 0; i < total_nodes; ++i) {
                 Vec2 x0 = get_xi(x_combined, i);
                 Vec2 v = get_xi(v_combined, i);
@@ -771,7 +754,7 @@ namespace collision_filtering{
                 objects.push_back({node_box, i, NODE});
             }
 
-            // Segment AABBs
+            // Segment swept AABBs
             for (int j = 0; j < total_nodes - 1; ++j) {
                 bool is_left = (j < N_left - 1);
                 bool is_right = (j >= N_left && j < N_left + N_right - 1);
@@ -792,7 +775,7 @@ namespace collision_filtering{
                 objects.push_back({seg_box, j, SEGMENT});
             }
 
-            // Overlap test
+            // Overlap test and generate candidate pairs
             broad_phase_ccd(objects, [&](const Object &A, const Object &B) {
                 const Object *nodeObj = (A.type == NODE) ? &A : (B.type == NODE) ? &B : nullptr;
                 const Object *segObj = (A.type == SEGMENT) ? &A : (B.type == SEGMENT) ? &B : nullptr;
@@ -803,10 +786,8 @@ namespace collision_filtering{
                 int seg1 = seg0 + 1;
                 if (seg1 >= total_nodes) return;
 
-                bool invalid =
-                        (node == seg0) ||
-                        (node == seg1) ||
-                        (seg0 < N_left - 1 && node < N_left) ||
+                // Skip invalid or self interactions
+                bool invalid = (node == seg0) || (node == seg1) || (seg0 < N_left - 1 && node < N_left) ||
                         (seg0 >= N_left && node >= N_left);
 
                 if (!invalid)
@@ -817,15 +798,15 @@ namespace collision_filtering{
         }
     }
 
-    // Narrow-phase CCD
-    namespace narrowphase_ccd {
+    // Narrow-phase: Exact CCD
+    namespace ccd {
         using namespace math;
 
-        // Narrow-phase 2D point–segment CCD
+        // Point–segment continuous collision detection
         bool ccd_point_segment_2d(const Vec2 &x1, const Vec2 &dx1, const Vec2 &x2, const Vec2 &dx2,
                                   const Vec2 &x3, const Vec2 &dx3, double &t_out, double eps = 1e-12) {
 
-            // Compute coefficients of f(t) = a t^2 + b t + c
+            // Compute the quadratic coefficients of f(t) = a t^2 + b t + c
             Vec2 x21 = sub(x1, x2);
             Vec2 x32 = sub(x3, x2);
             Vec2 dx21 = sub(dx1, dx2);
@@ -838,7 +819,7 @@ namespace collision_filtering{
             double t_candidates[2];
             int num_roots = 0;
 
-            // Degenerate case if a = 0
+            // Degenerate linear case if a = 0
             if (std::fabs(a) < eps) {
                 if (std::fabs(b) < eps) return false;
                 double t = -c / b;
@@ -887,6 +868,7 @@ namespace collision_filtering{
             return true;
         }
 
+        // CCD-based safe step computation
         double ccd_get_safe_step(const Vec2 &x1, const Vec2 &dx1, const Vec2 &x2, const Vec2 &dx2,
                                  const Vec2 &x3, const Vec2 &dx3, double eta = 0.9) {
 
@@ -906,16 +888,47 @@ namespace collision_filtering{
         }
     }
 
-    // Step control policies
+    // Trust-region method
     namespace trust_region {
 
         using namespace math;
         using namespace physics;
 
-        // Trust-region rule
-        static inline double trust_region_weight( const Vec2& xi,  const Vec2& dxi, const Vec2& xj,  const Vec2& dxj,
-                                                  const Vec2& xk,  const Vec2& dxk,
-                                                  double eta){
+        // Distance-based trust-region weight
+//        static inline double trust_region_weight( const Vec2& xi,  const Vec2& dxi, const Vec2& xj,  const Vec2& dxj,
+//                                                  const Vec2& xk,  const Vec2& dxk,
+//                                                  double eta){
+//            double s;
+//            Vec2 p{}, r{};
+//            double d0 = physics::node_segment_distance(xi, xj, xk, s, p, r);
+//
+//            constexpr double eps = 1e-12;
+//            d0 = std::max(d0, eps);
+//
+//            Vec2 dp{(1.0 - s) * dxj.x + s * dxk.x,
+//                    (1.0 - s) * dxj.y + s * dxk.y};
+//
+//            Vec2 drel{dxi.x - dp.x, dxi.y - dp.y};
+//
+//            double rnorm = norm(r);
+//            double approach;
+//
+//            if (rnorm > eps) {
+//                Vec2 n{r.x / rnorm, r.y / rnorm};
+//                approach = -(n.x * drel.x + n.y * drel.y);
+//            } else {
+//                approach = norm(dxi) + norm(dxj) + norm(dxk);
+//            }
+//
+//            if (approach <= eps)
+//                return 1.0;
+//
+//            return std::max(0.0, std::min(1.0, eta * d0 / approach));
+//        }
+
+        static inline double trust_region_weight(const Vec2& xi,  const Vec2& dxi, const Vec2& xj,  const Vec2& dxj,
+                                                 const Vec2& xk,  const Vec2& dxk, double eta){
+
             double s;
             Vec2 p{}, r{};
             double d0 = physics::node_segment_distance(xi, xj, xk, s, p, r);
@@ -923,42 +936,33 @@ namespace collision_filtering{
             constexpr double eps = 1e-12;
             d0 = std::max(d0, eps);
 
-            Vec2 dp{(1.0 - s) * dxj.x + s * dxk.x,
-                    (1.0 - s) * dxj.y + s * dxk.y};
+            const double M = norm(dxi) + norm(dxj) + norm(dxk);
 
-            Vec2 drel{dxi.x - dp.x, dxi.y - dp.y};
-
-            double rnorm = norm(r);
-            double approach;
-
-            if (rnorm > eps) {
-                Vec2 n{r.x / rnorm, r.y / rnorm};
-                approach = -(n.x * drel.x + n.y * drel.y);
-            } else {
-                approach = norm(dxi) + norm(dxj) + norm(dxk);
-            }
-
-            if (approach <= eps)
+            if (M <= eps)
                 return 1.0;
 
-            return std::max(0.0, std::min(1.0, eta * d0 / approach));
+            const double w = eta * d0 / M;
+            return std::max(0.0, std::min(1.0, w));
         }
     }
 
 }
 
+// ======================================================
+// Gauss-Seidel solver
+// ======================================================
 namespace solver {
     using namespace math;
     using namespace physics;
-    using namespace collision_filtering::narrowphase_ccd;
+    using namespace collision_filtering::ccd;
 
-    // Narrow phase collision filtering choice
+    // Select how Newton updates are filtered to maintain collision-free iterates
     enum class StepPolicy {
         CCD,
         TrustRegion
     };
 
-    // We use the broad-phase builder used in two ways: barrier_pairs where we pass v_sweep = v_velocity and ccd_candidate_set where we pass v_sweep = v_newton
+    // The broad-phase builder is used in two contexts: barrier_pairs: v_sweep = v_velocity and ccd_candidate_set: v_sweep = v_newton
     using CandidateBuilder = std::function<std::vector<physics::NodeSegmentPair>(const Vec& x_global, const Vec& v_sweep)>;
 
     // Inverse of any 2x2 matrix
@@ -973,7 +977,9 @@ namespace solver {
         };
     }
 
-    // Local gradient
+    // Gradient of the full incremental potential for node i.
+    // Local terms are computed with psi_local_grad() without barriers.
+    // Barrier contributions are added separately using AABB-generated barrier pairs.
     Vec2 compute_local_gradient(int i, const Vec &x_local, const Vec &xhat_local,
                                 const std::vector<double> &mass_local, const std::vector<double> &L_local,
                                 double dt, double k, const Vec2 &g_accel,
@@ -999,7 +1005,9 @@ namespace solver {
         return gi;
     }
 
-    // Local hessian
+    // Hessian of the full incremental potential for node i.
+    // Local terms are computed with psi_local_hess() without barriers.
+    // Barrier contributions are added separately using AABB-generated barrier pairs.
     Mat2 compute_local_hessian(int i, const Vec &x_local, const std::vector<double> &mass_local,
                                const std::vector<double> &L_local, double dt, double k,
                                const std::vector<NodeSegmentPair> &barrier_pairs,
@@ -1083,7 +1091,7 @@ namespace solver {
     }
 
     // Collision-free policy switch
-    double compute_safe_step_policy(StepPolicy policy, int who_global, const Vec2 &dx, const Vec &x_global,
+    double compute_safe_filtering_step_policy(StepPolicy policy, int who_global, const Vec2 &dx, const Vec &x_global,
                                     const std::vector<NodeSegmentPair> &candidate_set, double eta){
 
         if (policy == StepPolicy::CCD)
@@ -1102,11 +1110,11 @@ namespace solver {
         int size() const { return static_cast<int>(mass->size()); }
     };
 
-    // Single-node updat
+    // Performs one Newton step for a single node
     inline void update_one_node(int local_i, const BlockView& b, Vec& x_global,
                                 const std::vector<NodeSegmentPair>& barrier_pairs, const CandidateBuilder& pair_builder,
                                 const Vec& v_vel_global, double dt, double k, const Vec2& g_accel,
-                                double dhat, double eta, StepPolicy step_policy) {
+                                double dhat, double eta, StepPolicy filtering_step_policy) {
 
         // Energy model
         Vec2 gi = compute_local_gradient(local_i, *b.x, *b.xhat, *b.mass, *b.L,
@@ -1115,7 +1123,7 @@ namespace solver {
         Mat2 Hi = compute_local_hessian(local_i, *b.x, *b.mass, *b.L,
                                         dt, k, barrier_pairs, dhat, x_global, b.offset);
 
-        Vec2 dx = mul(matrix2d_inverse(Hi), gi);
+        Vec2 dx = matvec(matrix2d_inverse(Hi), gi);
 
         const int who_global = b.offset + local_i;
 
@@ -1125,7 +1133,7 @@ namespace solver {
 
         std::vector<NodeSegmentPair> ccd_candidate_set = pair_builder(x_global, v_newton);
 
-        double omega = compute_safe_step_policy(step_policy, who_global, dx, x_global, ccd_candidate_set, eta);
+        double omega = compute_safe_filtering_step_policy(filtering_step_policy, who_global, dx, x_global, ccd_candidate_set, eta);
 
         Vec2 xi = get_xi(*b.x, local_i);
         xi.x -= omega * dx.x;
@@ -1154,13 +1162,13 @@ namespace solver {
         return r_inf;
     }
 
-    // Global GS solver
+    // Nonlinear Gauss–Seidel solver.
     std::pair<double,int> global_gauss_seidel_solver(std::vector<BlockView>& blocks,
                                                      Vec& x_global, const Vec& v_vel_global,
                                                      double dt, double k, const Vec2& g_accel,
                                                      const CandidateBuilder& pair_builder,
                                                      double dhat, int max_global_iters, double tol_abs,
-                                                     double eta, StepPolicy step_policy,
+                                                     double eta, StepPolicy filtering_step_policy,
                                                      std::vector<double>* residual_history /*= nullptr*/) {
 
         // Residual history
@@ -1195,7 +1203,7 @@ namespace solver {
                 for (int i = 0; i < b.size(); ++i) {
 
                     update_one_node(i, b, x_global, barrier_pairs, pair_builder, v_vel_global,
-                                    dt, k, g_accel, dhat, eta, step_policy);
+                                    dt, k, g_accel, dhat, eta, filtering_step_policy);
 
                     // Refresh energy barrier set after each update
                     barrier_pairs = pair_builder(x_global, v_vel_global);
@@ -1220,13 +1228,13 @@ namespace solver {
     }
 }
 
+// ======================================================
 // Visualization utilities
-namespace io {
+// ======================================================
+namespace visualization {
     using namespace math;
 
-    // =====================================================
-    //  Export a Obj file
-    // =====================================================
+    //  Export an Obj file
     void export_obj(const std::string &filename, const Vec &x, const std::vector<std::pair<int, int>> &edges) {
         std::ofstream out(filename);
 
@@ -1256,6 +1264,9 @@ namespace io {
     }
 }
 
+// ======================================================
+// Build the chains
+// ======================================================
 namespace chain_model{
     using namespace math;
 
@@ -1288,14 +1299,17 @@ namespace chain_model{
         // Edges and rest lengths
         for (int i = 0; i < N - 1; ++i) {
             c.edges.emplace_back(i, i + 1);
-            c.rest_lengths.push_back(norm(c.x, i, i + 1));
+            c.rest_lengths.push_back(node_distance(c.x, i, i + 1));
         }
 
         return c;
     }
 }
 
-namespace time_integrator{
+// ======================================================
+// Update the per-step linear extrapolation and velocity after solve
+// ======================================================
+namespace state_update{
     using namespace chain_model;
     using namespace math;
 
@@ -1318,9 +1332,12 @@ namespace time_integrator{
     }
 }
 
-namespace simulation_utility{
+// ======================================================
+// Build and synchronize global position vectors from individual chains
+// ======================================================
+namespace state_assembly{
     using namespace chain_model;
-    using namespace time_integrator;
+    using namespace state_update;
     using namespace solver;
 
     // Combine node positions from new positions
@@ -1341,7 +1358,9 @@ namespace simulation_utility{
 
 }
 
+// ======================================================
 // Affine initial guess
+// ======================================================
 namespace affine_initial_guess{
     using namespace math;
     using namespace chain_model;
@@ -1407,7 +1426,7 @@ namespace affine_initial_guess{
         accumulate_ls(A);
         accumulate_ls(B);
 
-        // Solve the global system Gc = b using the diagonal observation assuming the diagonal elements G[k][k] are non-zero
+        // --- Solve the global system Gc = b using the diagonal observation assuming the diagonal elements G[k][k] are non-zero ---
 
         // Solve for omega (G[0][0] * omega = b[0])
         double G00 = G[0][0];
@@ -1445,20 +1464,25 @@ namespace affine_initial_guess{
     }
 }
 
+// ======================================================
 // Unified initial guess wrapper
+// ======================================================
 namespace initial_guess {
     using namespace math;
     using namespace chain_model;
     using namespace affine_initial_guess;
-
+    using namespace state_assembly;
     using physics::NodeSegmentPair;
-    using collision_filtering::broadphase_aabb::build_aabb_candidates;
-    using collision_filtering::narrowphase_ccd::ccd_get_safe_step;
+
+    using collision_filtering::aabb::build_aabb_candidates;
+    using collision_filtering::ccd::ccd_get_safe_step;
+    using collision_filtering::trust_region::trust_region_weight;
 
     enum class Type {
         Trivial,
         Affine,
-        CCD
+        CCD,
+        TrustRegion
     };
 
     // Use the CCD safe step for initial explicit guess
@@ -1483,10 +1507,42 @@ namespace initial_guess {
             double omega_c = ccd_get_safe_step(xi, dxi, xj, dxj, xk, dxk, eta);
             omega = std::min(omega, omega_c);
 
-            if (omega <= 0.0) return 0.0;
+            if (omega <= 0.0)
+                return 0.0;
         }
         return omega;
     }
+
+         double compute_initial_guess_trust_region_step(const Vec& x_combined, const Vec& v_combined,
+                                                       const std::vector<physics::NodeSegmentPair>& barrier_pairs,
+                                                       double dt, double eta = 0.9){
+
+            double omega = 1.0;
+
+            for (const auto& c : barrier_pairs) {
+
+                Vec2 xi = get_xi(x_combined, c.node);
+                Vec2 xj = get_xi(x_combined, c.seg0);
+                Vec2 xk = get_xi(x_combined, c.seg1);
+
+                Vec2 vi = get_xi(v_combined, c.node);
+                Vec2 vj = get_xi(v_combined, c.seg0);
+                Vec2 vk = get_xi(v_combined, c.seg1);
+
+                Vec2 dxi{dt * vi.x, dt * vi.y};
+                Vec2 dxj{dt * vj.x, dt * vj.y};
+                Vec2 dxk{dt * vk.x, dt * vk.y};
+
+                double omega_c = trust_region_weight(xi, dxi, xj, dxj, xk, dxk, eta);
+
+                omega = std::min(omega, omega_c);
+
+                if (omega <= 0.0)
+                    return 0.0;
+            }
+
+            return omega;
+        }
 
     // Placeholder: returns alpha in [0,1]
     inline double compute_ccd_alpha_placeholder(
@@ -1515,13 +1571,13 @@ namespace initial_guess {
         }
     }
 
-    // Apply one of the 3 guesses.
-    inline void apply(Type guess_type, Chain& left, Chain& right, Vec& xnew_left, Vec& xnew_right,
+    // Apply one of the guesses
+    inline void apply(Type initial_guess_type, Chain& left, Chain& right, Vec& xnew_left, Vec& xnew_right,
                       Vec& x_combined, Vec& v_combined, double dt, double dhat) {
         const int total_nodes = left.N + right.N;
 
         // Trivial initial guess
-        if (guess_type == Type::Trivial) {
+        if (initial_guess_type == Type::Trivial) {
             // xnew = x
             xnew_left  = left.x;
             xnew_right = right.x;
@@ -1530,12 +1586,12 @@ namespace initial_guess {
             build_v_combined_from_chain_velocities(v_combined, left, right);
 
             // x_combined from current x
-            simulation_utility::combine_positions(x_combined, left.x, right.x, left.N, right.N);
+            combine_positions(x_combined, left.x, right.x, left.N, right.N);
             return;
         }
 
         // Affine rotational initial guess
-        if (guess_type == Type::Affine) {
+        if (initial_guess_type == Type::Affine) {
             // Velocity is the affine field; xnew = x + dt * v_aff
             AffineParams ap = compute_affine_params_global(left, right);
             build_v_combined_from_affine(v_combined, left, right, ap);
@@ -1544,34 +1600,75 @@ namespace initial_guess {
             affine_initial_guess_global(ap, right, xnew_right, dt);
 
             // x_combined from current x
-            simulation_utility::combine_positions(x_combined, left.x, right.x, left.N, right.N);
+            combine_positions(x_combined, left.x, right.x, left.N, right.N);
             return;
         }
 
-        // CCD-projected predictor initial guess
-        if (guess_type == Type::CCD) {
-            simulation_utility::combine_positions(x_combined, left.x, right.x, left.N, right.N);
-
+        // CCD-projected initial guess
+        if (initial_guess_type == Type::CCD) {
+            // Build combined x and velocities from current state
+            state_assembly::combine_positions(x_combined, left.x, right.x, left.N, right.N);
             build_v_combined_from_chain_velocities(v_combined, left, right);
 
-            // Build barrier pairs for CCD alpha estimation
-            auto barrier_pairs = build_aabb_candidates(x_combined, v_combined, left.N, right.N, dt);
+            // Candidate pairs for the explicit predictor sweep
+            auto init_pairs = build_aabb_candidates(x_combined, v_combined, left.N, right.N, dt);
 
-            double alpha = compute_ccd_alpha_placeholder(x_combined, v_combined, dt, barrier_pairs, dhat);
-            alpha = (alpha < 0.0) ? 0.0 : (alpha > 1.0) ? 1.0 : alpha;
+            // Global CCD safe step omega0 in [0,1]
+            double omega0 = compute_initial_guess_ccd_step(x_combined, v_combined, init_pairs, dt, /*eta=*/0.9);
 
-            // xnew from the CCD step
+            // Apply the CCD-safe explicit step: xnew = x + omega0 * dt * v
             xnew_left  = left.x;
             xnew_right = right.x;
+
             for (int i = 0; i < left.N; ++i) {
                 Vec2 xi = get_xi(left.x, i);
                 Vec2 vi = get_xi(left.v, i);
-                set_xi(xnew_left, i, {xi.x + alpha * dt * vi.x, xi.y + alpha * dt * vi.y});
+                set_xi(xnew_left, i, {xi.x + omega0 * dt * vi.x, xi.y + omega0 * dt * vi.y});
             }
             for (int i = 0; i < right.N; ++i) {
                 Vec2 xi = get_xi(right.x, i);
                 Vec2 vi = get_xi(right.v, i);
-                set_xi(xnew_right, i, {xi.x + alpha * dt * vi.x, xi.y + alpha * dt * vi.y});
+                set_xi(xnew_right, i, {xi.x + omega0 * dt * vi.x, xi.y + omega0 * dt * vi.y});
+            }
+
+            // Keep x_combined consistent on return
+            combine_positions_from_new(x_combined, xnew_left, xnew_right, left.N, right.N);
+
+            return;
+        }
+
+        // Trust-region projected initial guess
+        if (initial_guess_type == Type::TrustRegion) {
+
+            combine_positions(x_combined, left.x, right.x, left.N, right.N);
+
+            build_v_combined_from_chain_velocities(v_combined, left, right);
+
+            // Build barrier pairs
+            auto barrier_pairs = build_aabb_candidates(x_combined, v_combined, left.N, right.N, dt);
+
+            // Compute the step size
+            double alpha = compute_initial_guess_trust_region_step(x_combined, v_combined, barrier_pairs, dt);
+            alpha = (alpha < 0.0) ? 0.0 : (alpha > 1.0) ? 1.0 : alpha;
+
+            // xnew from the trust region step
+            xnew_left  = left.x;
+            xnew_right = right.x;
+
+            for (int i = 0; i < left.N; ++i) {
+                Vec2 xi = get_xi(left.x, i);
+                Vec2 vi = get_xi(left.v, i);
+                set_xi(xnew_left, i,
+                       {xi.x + alpha * dt * vi.x,
+                        xi.y + alpha * dt * vi.y});
+            }
+
+            for (int i = 0; i < right.N; ++i) {
+                Vec2 xi = get_xi(right.x, i);
+                Vec2 vi = get_xi(right.v, i);
+                set_xi(xnew_right, i,
+                       {xi.x + alpha * dt * vi.x,
+                        xi.y + alpha * dt * vi.y});
             }
 
             return;
@@ -1579,15 +1676,18 @@ namespace initial_guess {
     }
 }
 
+// ======================================================
+// Main simulation
+// ======================================================
 namespace simulation {
     using namespace math;
     using namespace solver;
-    using namespace io;
+    using namespace visualization;
     using namespace chain_model;
-    using namespace time_integrator;
-    using namespace collision_filtering::broadphase_aabb;
-    using namespace collision_filtering::narrowphase_ccd;
-    using namespace simulation_utility;
+    using namespace state_update;
+    using namespace collision_filtering::aabb;
+    using namespace collision_filtering::ccd;
+    using namespace state_assembly;
     using namespace initial_guess;
 
     int sim() {
@@ -1608,11 +1708,11 @@ namespace simulation {
         double eta = 0.9;
         int number_of_nodes = 11;
 
-        // Choose the initial guess type (Trivial/Affine/CCD)
-        initial_guess::Type guess_type = initial_guess::Type::CCD;
+        // Choose the initial guess type (Trivial/Affine/CCD/TrustRegion)
+        Type initial_guess_type = Type::CCD;
 
         // Choose the collision-free step filtering policy (CCD/TrustRegion)
-        solver::StepPolicy step_policy = solver::StepPolicy::CCD;
+        StepPolicy filtering_step_policy = StepPolicy::CCD;
 
         // Create chains
         Chain left  = make_chain({-1.0, 0.0}, {4.0, -5.0}, number_of_nodes, 0.05);
@@ -1652,32 +1752,8 @@ namespace simulation {
 
             // Initial guess
             // Build x_combined from current positions, and v_combined according to the guess
-            initial_guess::apply(guess_type, left, right,xnew_left, xnew_right,
+            initial_guess::apply(initial_guess_type, left, right,xnew_left, xnew_right,
                                  x_combined, v_combined, dt, dhat);
-
-            // If CCD is selected, project the explicit guess using the collision-free step size omega0
-            if (guess_type == initial_guess::Type::CCD) {
-
-                std::vector<physics::NodeSegmentPair> init_pairs = pair_builder(x_combined, v_combined);
-
-                double omega0 = compute_initial_guess_ccd_step(x_combined, v_combined, init_pairs, dt, eta);
-
-                // Overwrite xnew_* with CCD-safe explicit step
-                xnew_left  = left.x;
-                xnew_right = right.x;
-
-                for (int i = 0; i < left.N; ++i) {
-                    Vec2 xi = get_xi(left.x, i);
-                    Vec2 vi = get_xi(left.v, i);
-                    set_xi(xnew_left, i, {xi.x + omega0 * dt * vi.x, xi.y + omega0 * dt * vi.y});
-                }
-
-                for (int i = 0; i < right.N; ++i) {
-                    Vec2 xi = get_xi(right.x, i);
-                    Vec2 vi = get_xi(right.v, i);
-                    set_xi(xnew_right, i, {xi.x + omega0 * dt * vi.x, xi.y + omega0 * dt * vi.y});
-                }
-            }
 
             // Sync combined after explicit guess
             combine_positions_from_new(x_combined, xnew_left, xnew_right, left.N, right.N);
@@ -1694,7 +1770,7 @@ namespace simulation {
             auto result = global_gauss_seidel_solver(blocks, x_combined, v_combined,
                                                      dt, k_spring, g_accel, pair_builder,
                                                      dhat, max_global_iters, tol_abs,
-                                                     eta, step_policy, &res_hist);
+                                                     eta, filtering_step_policy, &res_hist);
 
             double global_residual = result.first;
             int iters_used = result.second;
@@ -1723,9 +1799,9 @@ namespace simulation {
         double avg_global_iters_used = 1.0 * sum_global_iters_used / total_frame;
 
         std::cout << "\n===== Simulation Summary =====\n";
-        std::cout << "max_global_residual  = " << std::scientific << max_global_residual << "\n";
-        std::cout << "avg_global_iters     = " << std::fixed << avg_global_iters_used << "\n";
-        std::cout << "total runtime        = " << elapsed.count() << " seconds\n";
+        std::cout << "max_global_residual = " << std::scientific << max_global_residual << "\n";
+        std::cout << "avg_global_iters = " << std::fixed << avg_global_iters_used << "\n";
+        std::cout << "total runtime = " << elapsed.count() << " seconds\n";
 
         return 0;
     }
