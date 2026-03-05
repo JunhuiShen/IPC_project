@@ -731,7 +731,7 @@ namespace collision_filtering{
 
         // Build barrier candidates using swept AABB
         std::vector<NodeSegmentPair> build_aabb_candidates(const Vec &x_combined, const Vec &v_combined, int N_left,
-                                                     int N_right, double dt, double radius = 0.1) {
+                                                     int N_right, double dt, double dhat) {
             std::vector<NodeSegmentPair> barriers;
             const int total_nodes = N_left + N_right;
 
@@ -744,10 +744,10 @@ namespace collision_filtering{
                 Vec2 v = get_xi(v_combined, i);
                 Vec2 x1 = {x0.x + dt * v.x, x0.y + dt * v.y};
 
-                double min_x = std::min({x0.x - radius, x1.x - radius});
-                double max_x = std::max({x0.x + radius, x1.x + radius});
-                double min_y = std::min({x0.y - radius, x1.y - radius});
-                double max_y = std::max({x0.y + radius, x1.y + radius});
+                double min_x = std::min({x0.x - dhat, x1.x - dhat});
+                double max_x = std::max({x0.x + dhat, x1.x + dhat});
+                double min_y = std::min({x0.y - dhat, x1.y - dhat});
+                double max_y = std::max({x0.y + dhat, x1.y + dhat});
 
                 AABB2 node_box{{min_x, min_y},
                                {max_x, max_y}};
@@ -1611,7 +1611,7 @@ namespace initial_guess {
             build_v_combined_from_chain_velocities(v_combined, left, right);
 
             // Candidate pairs for the explicit predictor sweep
-            auto init_pairs = build_aabb_candidates(x_combined, v_combined, left.N, right.N, dt);
+            auto init_pairs = build_aabb_candidates(x_combined, v_combined, left.N, right.N, dt, dhat);
 
             // Global CCD safe step omega0 in [0,1]
             double omega0 = compute_initial_guess_ccd_step(x_combined, v_combined, init_pairs, dt, /*eta=*/0.9);
@@ -1645,7 +1645,7 @@ namespace initial_guess {
             build_v_combined_from_chain_velocities(v_combined, left, right);
 
             // Build barrier pairs
-            auto barrier_pairs = build_aabb_candidates(x_combined, v_combined, left.N, right.N, dt);
+            auto barrier_pairs = build_aabb_candidates(x_combined, v_combined, left.N, right.N, dt, dhat);
 
             // Compute the step size
             double alpha = compute_initial_guess_trust_region_step(x_combined, v_combined, barrier_pairs, dt);
@@ -1740,7 +1740,7 @@ namespace simulation {
 
         // Build active barrier pairs using AABB broad-phase
         solver::CandidateBuilder pair_builder = [&](const Vec& xg, const Vec& v_sweep) {
-            return build_aabb_candidates(xg, v_sweep, left.N, right.N, dt);
+            return build_aabb_candidates(xg, v_sweep, left.N, right.N, dt, dhat);
         };
 
         // Time stepping
