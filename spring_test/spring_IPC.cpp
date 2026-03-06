@@ -1322,6 +1322,7 @@ namespace state_update{
         }
     }
 
+    // Update node velocities from the new positions
     void update_velocity(Chain &c, const Vec &xnew, double dt) {
         for (int i = 0; i < c.N; ++i) {
             Vec2 xi_new = get_xi(xnew, i);
@@ -1330,137 +1331,13 @@ namespace state_update{
         }
         c.x = xnew;
     }
-}
 
-// ======================================================
-// Build and synchronize global position vectors from individual chains
-// ======================================================
-namespace state_assembly{
-    using namespace chain_model;
-    using namespace state_update;
-    using namespace solver;
-
-    // Combine node positions from new positions
-    void combine_positions_from_new(Vec &x_combined, const Vec &x_left_new, const Vec &x_right_new, int N_left, int N_right) {
-        for (int i = 0; i < N_left; ++i)
-            set_xi(x_combined, i, get_xi(x_left_new, i));
-        for (int i = 0; i < N_right; ++i)
-            set_xi(x_combined, N_left + i, get_xi(x_right_new, i));
-    }
-
-    // Combine node positions from both chains
+    // Combine the node positions of two chains into a single global position vector
     void combine_positions(Vec &x_combined, const Vec &x_left, const Vec &x_right, int N_left, int N_right) {
         for (int i = 0; i < N_left; ++i)
             set_xi(x_combined, i, get_xi(x_left, i));
         for (int i = 0; i < N_right; ++i)
             set_xi(x_combined, N_left + i, get_xi(x_right, i));
-    }
-
-}
-
-// ======================================================
-// Affine initial guess
-// ======================================================
-namespace affine_initial_guess{
-    using namespace math;
-    using namespace chain_model;
-
-    // Affine predictor structure
-    struct AffineParams {
-        double omega;
-        Vec2 vhat;
-        Vec2 xcom;
-    };
-
-    // Fit affine field V(X) = vhat + omega R (X - X_com)
-    AffineParams compute_affine_params_global(const Chain& A, const Chain& B) {
-
-        // Global center of mass
-        Vec2 xcom{0.0, 0.0};
-        double M = 0.0;
-        std::function<void(const Chain&)> accumulate_com = [&](const Chain& c) -> void {
-            for (int i = 0; i < c.N; ++i) {
-                Vec2 xi = get_xi(c.x, i);
-                xcom.x += c.mass[i] * xi.x;
-                xcom.y += c.mass[i] * xi.y;
-                M += c.mass[i];
-            }
-        };
-
-        accumulate_com(A);
-        accumulate_com(B);
-
-        xcom.x /= M;
-        xcom.y /= M;
-
-        // Build the linear system Gc = b
-        double G[3][3] = {{0.0}};
-        double b[3] = {0.0, 0.0, 0.0};
-
-        std::function<void(const Chain&)> accumulate_ls = [&](const Chain& c) -> void {
-            for (int i = 0; i < c.N; ++i) {
-                Vec2 Xi = get_xi(c.x, i);
-                Vec2 Vi = get_xi(c.v, i);
-                Vec2 d{Xi.x - xcom.x, Xi.y - xcom.y};
-
-                // Basis
-                Vec2 U1{-d.y, d.x};
-                Vec2 U2{1.0, 0.0};
-                Vec2 U3{0.0, 1.0};
-                Vec2 U[3] = {U1, U2, U3};
-
-                double w = c.mass[i];
-                if (&c == &A && i == 0) w = 0;  // exclude left[0]
-                if (&c == &B && i == 0) w = 0;  // if right chain also has a pinned node
-
-                for (int k = 0; k < 3; ++k) {
-                    b[k] += w * (U[k].x * Vi.x + U[k].y * Vi.y);
-                    for (int j = 0; j < 3; ++j) {
-                        G[k][j] += w * (U[k].x * U[j].x +
-                                        U[k].y * U[j].y);
-                    }
-                }
-            }
-        };
-
-        accumulate_ls(A);
-        accumulate_ls(B);
-
-        // --- Solve the global system Gc = b using the diagonal observation assuming the diagonal elements G[k][k] are non-zero ---
-
-        // Solve for omega (G[0][0] * omega = b[0])
-        double G00 = G[0][0];
-        double omega = (std::abs(G00) > 1e-12) ? b[0] / G00 : 0.0;
-
-        // Solve for vhat_x (G[1][1] * vhat_x = b[1])
-        double G11 = G[1][1];
-        double vhat_x = (std::abs(G11) > 1e-12) ? b[1] / G11 : 0.0;
-
-        // Solve for vhat_y (G[2][2] * vhat_y = b[2])
-        double G22 = G[2][2];
-        double vhat_y = (std::abs(G22) > 1e-12) ? b[2] / G22 : 0.0;
-
-        Vec2 vhat{vhat_x, vhat_y};
-
-        return {omega, vhat, xcom};
-    }
-
-    void affine_initial_guess_global(const AffineParams& ap, Chain& c, Vec& xnew, double dt){
-        for (int i = 0; i < c.N; ++i){
-            Vec2 xi = get_xi(c.x, i);
-
-            Vec2 d{xi.x - ap.xcom.x, xi.y - ap.xcom.y};
-
-            // v_aff = vhat + omega R d
-            Vec2 v_aff{ap.vhat.x - ap.omega * d.y,ap.vhat.y + ap.omega * d.x};
-
-            set_xi(xnew, i, {xi.x + dt * v_aff.x,xi.y + dt * v_aff.y});
-        }
-    }
-
-    inline Vec2 affine_velocity_at(const AffineParams& ap, const Vec2& x) {
-        Vec2 d{x.x - ap.xcom.x, x.y - ap.xcom.y};
-        return {ap.vhat.x - ap.omega * d.y, ap.vhat.y + ap.omega * d.x};
     }
 }
 
@@ -1470,8 +1347,7 @@ namespace affine_initial_guess{
 namespace initial_guess {
     using namespace math;
     using namespace chain_model;
-    using namespace affine_initial_guess;
-    using namespace state_assembly;
+    using namespace state_update;
     using physics::NodeSegmentPair;
 
     using collision_filtering::aabb::build_aabb_candidates;
@@ -1485,7 +1361,111 @@ namespace initial_guess {
         TrustRegion
     };
 
-    // Use the CCD safe step for initial explicit guess
+    // Affine initial guess
+    namespace affine_initial_guess{
+        using namespace math;
+        using namespace chain_model;
+
+        // Affine predictor structure
+        struct AffineParams {
+            double omega;
+            Vec2 vhat;
+            Vec2 xcom;
+        };
+
+        // Fit affine field V(X) = vhat + omega R (X - X_com)
+        AffineParams compute_affine_params_global(const Chain& A, const Chain& B) {
+
+            // Global center of mass
+            Vec2 xcom{0.0, 0.0};
+            double M = 0.0;
+            std::function<void(const Chain&)> accumulate_com = [&](const Chain& c) -> void {
+                for (int i = 0; i < c.N; ++i) {
+                    Vec2 xi = get_xi(c.x, i);
+                    xcom.x += c.mass[i] * xi.x;
+                    xcom.y += c.mass[i] * xi.y;
+                    M += c.mass[i];
+                }
+            };
+
+            accumulate_com(A);
+            accumulate_com(B);
+
+            xcom.x /= M;
+            xcom.y /= M;
+
+            // Build the linear system Gc = b
+            double G[3][3] = {{0.0}};
+            double b[3] = {0.0, 0.0, 0.0};
+
+            std::function<void(const Chain&)> accumulate_ls = [&](const Chain& c) -> void {
+                for (int i = 0; i < c.N; ++i) {
+                    Vec2 Xi = get_xi(c.x, i);
+                    Vec2 Vi = get_xi(c.v, i);
+                    Vec2 d{Xi.x - xcom.x, Xi.y - xcom.y};
+
+                    // Basis
+                    Vec2 U1{-d.y, d.x};
+                    Vec2 U2{1.0, 0.0};
+                    Vec2 U3{0.0, 1.0};
+                    Vec2 U[3] = {U1, U2, U3};
+
+                    double w = c.mass[i];
+                    if (&c == &A && i == 0) w = 0;  // exclude left[0]
+                    if (&c == &B && i == 0) w = 0;  // if right chain also has a pinned node
+
+                    for (int k = 0; k < 3; ++k) {
+                        b[k] += w * (U[k].x * Vi.x + U[k].y * Vi.y);
+                        for (int j = 0; j < 3; ++j) {
+                            G[k][j] += w * (U[k].x * U[j].x +
+                                            U[k].y * U[j].y);
+                        }
+                    }
+                }
+            };
+
+            accumulate_ls(A);
+            accumulate_ls(B);
+
+            // --- Solve the global system Gc = b using the diagonal observation assuming the diagonal elements G[k][k] are non-zero ---
+
+            // Solve for omega (G[0][0] * omega = b[0])
+            double G00 = G[0][0];
+            double omega = (std::abs(G00) > 1e-12) ? b[0] / G00 : 0.0;
+
+            // Solve for vhat_x (G[1][1] * vhat_x = b[1])
+            double G11 = G[1][1];
+            double vhat_x = (std::abs(G11) > 1e-12) ? b[1] / G11 : 0.0;
+
+            // Solve for vhat_y (G[2][2] * vhat_y = b[2])
+            double G22 = G[2][2];
+            double vhat_y = (std::abs(G22) > 1e-12) ? b[2] / G22 : 0.0;
+
+            Vec2 vhat{vhat_x, vhat_y};
+
+            return {omega, vhat, xcom};
+        }
+
+        void affine_initial_guess_global(const AffineParams& ap, Chain& c, Vec& xnew, double dt){
+            for (int i = 0; i < c.N; ++i){
+                Vec2 xi = get_xi(c.x, i);
+
+                Vec2 d{xi.x - ap.xcom.x, xi.y - ap.xcom.y};
+
+                // v_aff = vhat + omega R d
+                Vec2 v_aff{ap.vhat.x - ap.omega * d.y,ap.vhat.y + ap.omega * d.x};
+
+                set_xi(xnew, i, {xi.x + dt * v_aff.x,xi.y + dt * v_aff.y});
+            }
+        }
+
+        inline Vec2 affine_velocity_at(const AffineParams& ap, const Vec2& x) {
+            Vec2 d{x.x - ap.xcom.x, x.y - ap.xcom.y};
+            return {ap.vhat.x - ap.omega * d.y, ap.vhat.y + ap.omega * d.x};
+        }
+    }
+
+    // Use the CCD safe step for initial guess
     double compute_initial_guess_ccd_step(const Vec& x_combined, const Vec& v_combined,
                                           const std::vector<physics::NodeSegmentPair>& barrier_pairs,
                                           double dt, double eta = 0.9) {
@@ -1513,44 +1493,35 @@ namespace initial_guess {
         return omega;
     }
 
-         double compute_initial_guess_trust_region_step(const Vec& x_combined, const Vec& v_combined,
+    double compute_initial_guess_trust_region_step(const Vec& x_combined, const Vec& v_combined,
                                                        const std::vector<physics::NodeSegmentPair>& barrier_pairs,
                                                        double dt, double eta = 0.9){
 
-            double omega = 1.0;
+        double omega = 1.0;
 
-            for (const auto& c : barrier_pairs) {
+        for (const auto& c : barrier_pairs) {
 
-                Vec2 xi = get_xi(x_combined, c.node);
-                Vec2 xj = get_xi(x_combined, c.seg0);
-                Vec2 xk = get_xi(x_combined, c.seg1);
+            Vec2 xi = get_xi(x_combined, c.node);
+            Vec2 xj = get_xi(x_combined, c.seg0);
+            Vec2 xk = get_xi(x_combined, c.seg1);
 
-                Vec2 vi = get_xi(v_combined, c.node);
-                Vec2 vj = get_xi(v_combined, c.seg0);
-                Vec2 vk = get_xi(v_combined, c.seg1);
+            Vec2 vi = get_xi(v_combined, c.node);
+            Vec2 vj = get_xi(v_combined, c.seg0);
+            Vec2 vk = get_xi(v_combined, c.seg1);
 
-                Vec2 dxi{dt * vi.x, dt * vi.y};
-                Vec2 dxj{dt * vj.x, dt * vj.y};
-                Vec2 dxk{dt * vk.x, dt * vk.y};
+            Vec2 dxi{dt * vi.x, dt * vi.y};
+            Vec2 dxj{dt * vj.x, dt * vj.y};
+            Vec2 dxk{dt * vk.x, dt * vk.y};
 
-                double omega_c = trust_region_weight(xi, dxi, xj, dxj, xk, dxk, eta);
+            double omega_c = trust_region_weight(xi, dxi, xj, dxj, xk, dxk, eta);
 
-                omega = std::min(omega, omega_c);
+            omega = std::min(omega, omega_c);
 
-                if (omega <= 0.0)
-                    return 0.0;
+            if (omega <= 0.0)
+                return 0.0;
             }
 
             return omega;
-        }
-
-    // Placeholder: returns alpha in [0,1]
-    inline double compute_ccd_alpha_placeholder(
-            const Vec& /*x_combined*/, const Vec& /*v_combined*/, double /*dt*/,
-            const std::vector<NodeSegmentPair>& /*barrier_pairs*/,
-            double /*dhat*/) {
-        // TODO: replace with a real computation
-        return 1.0;
     }
 
     inline void build_v_combined_from_chain_velocities(Vec& v_combined, const Chain& left, const Chain& right) {
@@ -1560,7 +1531,7 @@ namespace initial_guess {
             set_xi(v_combined, left.N + i, get_xi(right.v, i));
     }
 
-    inline void build_v_combined_from_affine(Vec& v_combined, const Chain& left, const Chain& right, const AffineParams& ap) {
+    inline void build_v_combined_from_affine(Vec& v_combined, const Chain& left, const Chain& right, const affine_initial_guess::AffineParams& ap) {
         for (int i = 0; i < left.N; ++i) {
             Vec2 xi = get_xi(left.x, i);
             set_xi(v_combined, i, affine_velocity_at(ap, xi));
@@ -1593,7 +1564,7 @@ namespace initial_guess {
         // Affine rotational initial guess
         if (initial_guess_type == Type::Affine) {
             // Velocity is the affine field; xnew = x + dt * v_aff
-            AffineParams ap = compute_affine_params_global(left, right);
+            affine_initial_guess::AffineParams ap = affine_initial_guess::compute_affine_params_global(left, right);
             build_v_combined_from_affine(v_combined, left, right, ap);
 
             affine_initial_guess_global(ap, left,  xnew_left,  dt);
@@ -1607,7 +1578,7 @@ namespace initial_guess {
         // CCD-projected initial guess
         if (initial_guess_type == Type::CCD) {
             // Build combined x and velocities from current state
-            state_assembly::combine_positions(x_combined, left.x, right.x, left.N, right.N);
+            combine_positions(x_combined, left.x, right.x, left.N, right.N);
             build_v_combined_from_chain_velocities(v_combined, left, right);
 
             // Candidate pairs for the explicit predictor sweep
@@ -1632,7 +1603,7 @@ namespace initial_guess {
             }
 
             // Keep x_combined consistent on return
-            combine_positions_from_new(x_combined, xnew_left, xnew_right, left.N, right.N);
+            combine_positions(x_combined, xnew_left, xnew_right, left.N, right.N);
 
             return;
         }
@@ -1687,7 +1658,6 @@ namespace simulation {
     using namespace state_update;
     using namespace collision_filtering::aabb;
     using namespace collision_filtering::ccd;
-    using namespace state_assembly;
     using namespace initial_guess;
 
     int sim() {
@@ -1756,7 +1726,7 @@ namespace simulation {
                                  x_combined, v_combined, dt, dhat);
 
             // Sync combined after explicit guess
-            combine_positions_from_new(x_combined, xnew_left, xnew_right, left.N, right.N);
+            combine_positions(x_combined, xnew_left, xnew_right, left.N, right.N);
 
             // Build solver blocks
             std::vector<BlockView> blocks;
