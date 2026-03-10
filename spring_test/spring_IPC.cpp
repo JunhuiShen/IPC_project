@@ -10,6 +10,9 @@
 #include <algorithm>
 #include <numeric>
 #include <string>
+#include <functional>
+#include <unordered_map>
+#include <cstdint>
 
 // ======================================================
 // Prelim structure and functions
@@ -658,147 +661,696 @@ namespace physics {
 // ======================================================
 // Collision-free step filtering
 // ======================================================
-namespace collision_filtering{
+namespace collision_filtering {
 
-    // Broad-phase: Swept AABB
+    // ======================================================
+    // Broad-phase: AABB
+    // ======================================================
     namespace aabb {
         using namespace math;
         using namespace physics;
 
+        // ------------------------------------------------------
         // Broad-phase primitives
+        // ------------------------------------------------------
         struct AABB2 {
             Vec2 min, max;
         };
 
-        enum ObjectType {
-            NODE, SEGMENT
+        enum class ObjectType {
+            NODE,
+            SEGMENT
         };
 
         struct Object {
-            AABB2 box; // Bounding box
-            int id;  // Index (node or segment start)
-            ObjectType type;  // Type
+            AABB2 box;
+            int id;  // node index or segment start index
+            ObjectType type;
         };
 
-        // y-overlap
-        inline bool overlap_y(const AABB2 &A, const AABB2 &B) {
-            return !(A.max.y < B.min.y || A.min.y > B.max.y);
+        // Check overlap in the x-axis
+        inline bool overlap_x(const AABB2& A, const AABB2& B) {
+            return !(A.max.x < B.min.x or A.min.x > B.max.x);
         }
 
-        // Broad-phase sweep-and-prune on swept AABBs
-        template<typename Callback>
-        void broad_phase_ccd(std::vector<Object> &objects, Callback report) {
+        // Check overlap in the y-axis
+        inline bool overlap_y(const AABB2& A, const AABB2& B) {
+            return !(A.max.y < B.min.y or A.min.y > B.max.y);
+        }
+
+        // Check whether j can be the first node of a valid segment (j, j+1)
+        inline bool is_valid_segment_start(int j, int N_left, int N_right) {
+            const int total_nodes = N_left + N_right;
+            if (j < 0 or j >= total_nodes - 1)
+                return false;
+
+            bool is_left  = (j < N_left - 1);
+            bool is_right = (j >= N_left and j < N_left + N_right - 1);
+            return is_left or is_right;
+        }
+
+        // Check whether the node is an endpoint of the segment
+        inline bool is_invalid_node_segment_pair(int node, int seg0, int seg1) {
+            return (node == seg0) or (node == seg1);
+        }
+
+        // Build one swept node AABB
+        inline AABB2 build_node_box(const Vec& x_combined, const Vec& v_combined, int i, double dt, double dhat) {
+            Vec2 x0 = get_xi(x_combined, i);
+            Vec2 v  = get_xi(v_combined, i);
+            Vec2 x1{x0.x + dt * v.x, x0.y + dt * v.y};
+
+            double min_x = std::min(x0.x - dhat, x1.x - dhat);
+            double max_x = std::max(x0.x + dhat, x1.x + dhat);
+            double min_y = std::min(x0.y - dhat, x1.y - dhat);
+            double max_y = std::max(x0.y + dhat, x1.y + dhat);
+
+            return {{min_x, min_y}, {max_x, max_y}};
+        }
+
+        // Build one swept segment AABB
+        inline AABB2 build_segment_box(const Vec& x_combined, const Vec& v_combined, int seg0, double dt) {
+            Vec2 x0 = get_xi(x_combined, seg0);
+            Vec2 x1 = get_xi(x_combined, seg0 + 1);
+            Vec2 v0 = get_xi(v_combined, seg0);
+            Vec2 v1 = get_xi(v_combined, seg0 + 1);
+
+            double min_x = std::min({x0.x, x1.x, x0.x + dt * v0.x, x1.x + dt * v1.x});
+            double max_x = std::max({x0.x, x1.x, x0.x + dt * v0.x, x1.x + dt * v1.x});
+            double min_y = std::min({x0.y, x1.y, x0.y + dt * v0.y, x1.y + dt * v1.y});
+            double max_y = std::max({x0.y, x1.y, x0.y + dt * v0.y, x1.y + dt * v1.y});
+
+            return {{min_x, min_y}, {max_x, max_y}};
+        }
+
+        // ------------------------------------------------------
+        // One-shot sweep-and-prune broad phase
+        // ------------------------------------------------------
+
+        // Run sweep-and-prune on all objects and report overlapping node-segment candidates
+        template<typename Callback> void broad_phase_ccd(std::vector<Object>& objects, Callback report) {
             const int n = static_cast<int>(objects.size());
 
-            // Sort by x_min
             std::vector<int> order(n);
             std::iota(order.begin(), order.end(), 0);
             std::sort(order.begin(), order.end(), [&](int a, int b) {
-                return objects[a].box.min.x < objects[b].box.min.x;
+                if (objects[a].box.min.x != objects[b].box.min.x)
+                    return objects[a].box.min.x < objects[b].box.min.x;
+                if (objects[a].type != objects[b].type)
+                    return int(objects[a].type) < int(objects[b].type);
+                return objects[a].id < objects[b].id;
             });
 
-            // Active list
-            std::vector<int> A;
+            std::vector<int> active;
+            active.reserve(n);
 
-            // For each Bi in sorted order
-            for (int idx_i: order) {
-                const AABB2 &Bi = objects[idx_i].box;
+            for (int idx_i : order) {
+                const AABB2& Bi = objects[idx_i].box;
 
-                // Remove boxes whose xmax < Bi.xmin
-                A.erase(std::remove_if(A.begin(), A.end(), [&](int idx_j) {
-                    const AABB2 &Bj = objects[idx_j].box;
-                    return Bj.max.x < Bi.min.x;
-                }), A.end());
+                active.erase(std::remove_if(active.begin(), active.end(), [&](int idx_j) {
+                    return objects[idx_j].box.max.x < Bi.min.x;
+                }), active.end());
 
-                // Test against remaining boxes in the list
-                for (int idx_j: A) {
-                    const AABB2 &Bj = objects[idx_j].box;
+                for (int idx_j : active) {
+                    const Object& A = objects[idx_i];
+                    const Object& B = objects[idx_j];
 
-                    // Skip same-type pairs
-                    if (objects[idx_i].type == objects[idx_j].type)
+                    if (A.type == B.type)
                         continue;
 
-                    // Check overlaps in y-direction
-                    if (overlap_y(Bi, Bj)) {
-                        report(objects[idx_i], objects[idx_j]);
+                    if (overlap_y(A.box, B.box)) {
+                        report(A, B);
                     }
                 }
 
-                // Add Bi to the list
-                A.push_back(idx_i);
+                active.push_back(idx_i);
             }
         }
 
-        // Build barrier candidates using swept AABB
-        std::vector<NodeSegmentPair> build_aabb_candidates(const Vec &x_combined, const Vec &v_combined, int N_left,
-                                                     int N_right, double dt, double dhat) {
-            std::vector<NodeSegmentPair> barriers;
+        // Build all node-segment candidate pairs using a one-shot sweep-and-prune pass
+        inline std::vector<NodeSegmentPair> build_pairs_sweep_and_prune(const Vec& x_combined, const Vec& v_combined,
+                                                                        int N_left, int N_right, double dt, double dhat) {
+            std::vector<NodeSegmentPair> pairs;
             const int total_nodes = N_left + N_right;
 
             std::vector<Object> objects;
-            objects.reserve(total_nodes * 2);
+            objects.reserve(total_nodes + std::max(0, total_nodes - 1));
 
-            // Node swept AABBs
             for (int i = 0; i < total_nodes; ++i) {
-                Vec2 x0 = get_xi(x_combined, i);
-                Vec2 v = get_xi(v_combined, i);
-                Vec2 x1 = {x0.x + dt * v.x, x0.y + dt * v.y};
-
-                double min_x = std::min({x0.x - dhat, x1.x - dhat});
-                double max_x = std::max({x0.x + dhat, x1.x + dhat});
-                double min_y = std::min({x0.y - dhat, x1.y - dhat});
-                double max_y = std::max({x0.y + dhat, x1.y + dhat});
-
-                AABB2 node_box{{min_x, min_y},
-                               {max_x, max_y}};
-                objects.push_back({node_box, i, NODE});
+                objects.push_back({build_node_box(x_combined, v_combined, i, dt, dhat), i, ObjectType::NODE});
             }
 
-            // Segment swept AABBs
             for (int j = 0; j < total_nodes - 1; ++j) {
-                bool is_left = (j < N_left - 1);
-                bool is_right = (j >= N_left && j < N_left + N_right - 1);
-                if (!is_left && !is_right) continue;
-
-                Vec2 x0 = get_xi(x_combined, j);
-                Vec2 x1 = get_xi(x_combined, j + 1);
-                Vec2 v0 = get_xi(v_combined, j);
-                Vec2 v1 = get_xi(v_combined, j + 1);
-
-                double min_x = std::min({x0.x, x1.x, x0.x + dt * v0.x, x1.x + dt * v1.x});
-                double max_x = std::max({x0.x, x1.x, x0.x + dt * v0.x, x1.x + dt * v1.x});
-                double min_y = std::min({x0.y, x1.y, x0.y + dt * v0.y, x1.y + dt * v1.y});
-                double max_y = std::max({x0.y, x1.y, x0.y + dt * v0.y, x1.y + dt * v1.y});
-
-                AABB2 seg_box{{min_x, min_y},
-                              {max_x, max_y}};
-                objects.push_back({seg_box, j, SEGMENT});
+                if (!is_valid_segment_start(j, N_left, N_right)) continue;
+                objects.push_back({build_segment_box(x_combined, v_combined, j, dt), j, ObjectType::SEGMENT});
             }
 
-            // Overlap test and generate candidate pairs
-            broad_phase_ccd(objects, [&](const Object &A, const Object &B) {
-                const Object *nodeObj = (A.type == NODE) ? &A : (B.type == NODE) ? &B : nullptr;
-                const Object *segObj = (A.type == SEGMENT) ? &A : (B.type == SEGMENT) ? &B : nullptr;
-                if (!nodeObj || !segObj) return;
+            broad_phase_ccd(objects, [&](const Object& Node, const Object& Segment) {
+                const Object* nodeObj = (Node.type == ObjectType::NODE) ? &Node : &Segment;
+                const Object* segObj  = (Node.type == ObjectType::SEGMENT) ? &Node : &Segment;
 
                 int node = nodeObj->id;
                 int seg0 = segObj->id;
                 int seg1 = seg0 + 1;
+
                 if (seg1 >= total_nodes) return;
+                if (is_invalid_node_segment_pair(node, seg0, seg1)) return;
 
-                // Skip invalid or self interactions
-                bool invalid = (node == seg0) || (node == seg1) || (seg0 < N_left - 1 && node < N_left) ||
-                        (seg0 >= N_left && node >= N_left);
-
-                if (!invalid)
-                    barriers.push_back({node, seg0, seg1});
+                pairs.push_back({node, seg0, seg1});
             });
 
-            return barriers;
+            std::sort(pairs.begin(), pairs.end(), [](const NodeSegmentPair& a, const NodeSegmentPair& b) {
+                if (a.node != b.node) return a.node < b.node;
+                if (a.seg0 != b.seg0) return a.seg0 < b.seg0;
+                return a.seg1 < b.seg1;
+            });
+
+            pairs.erase(std::unique(pairs.begin(), pairs.end(), [](const NodeSegmentPair& a, const NodeSegmentPair& b) {
+                return a.node == b.node and a.seg0 == b.seg0 and a.seg1 == b.seg1;
+            }), pairs.end());
+
+            return pairs;
+        }
+
+        // ------------------------------------------------------
+        // Dynamic AABB cache
+        // ------------------------------------------------------
+
+        // The broad-phase cache stores swept AABBs for all nodes and valid segments, together with node–segment candidate pairs whose boxes overlap.
+        // During the Gauss–Seidel solve, nodes are updated one at a time.
+        // When a node moves, only a small subset of primitives can change, i.e., the moved node itself and the segments incident to that node.
+        // The algorithm therefore performs a local refresh.
+        // First, recompute the swept AABBs of the moved node and its adjacent segments.
+        // Second, repair their positions in the cached x-sorted orders using local adjacent swaps.
+        // Next, remove all cached pairs involving these modified primitives, since those pairs may have become invalid.
+        // Finally, rebuild candidate pairs locally by querying segments that may overlap the moved node and nodes that may overlap the updated segments.
+        // All other cached pairs remain unchanged. In this way, the broad phase is updated incrementally.
+        // Only objects whose bounding boxes changed are processed, while the rest of the spatial structure is reused.
+
+        // Build a hash key for a node-segment pair.
+        inline std::uint64_t pair_key(int node, int seg0) {
+            return (std::uint64_t(std::uint32_t(node)) << 32) | std::uint32_t(seg0);
+        }
+
+        struct BroadPhaseCache {
+            // Boxes
+            std::vector<AABB2> node_boxes; // node_boxes[i] = AABB for node i
+            std::vector<AABB2> segment_boxes; // segment_boxes[j] = AABB for segment starting at j
+            std::vector<char>  segment_valid; // segment_valid[j] tells whether j is a valid segment start
+
+            // Dynamic sorted orders by min.x and max.x
+            std::vector<int> node_order_min; // node ids sorted by node_boxes[node].min.x
+            std::vector<int> node_order_max; // node ids sorted by node_boxes[node].max.x
+            std::vector<int> seg_order_min; // segment ids sorted by segment_boxes[seg].min.x
+            std::vector<int> seg_order_max; // segment ids sorted by segment_boxes[seg].max.x
+
+            // Inverse maps that record the position of each object id in the sorted arrays
+            // For example, node_order_min[1] = 2 means position 1 holds node 2 and node_pos_min[2] = 1 means node 2 is at position 1
+            std::vector<int> node_pos_min;
+            std::vector<int> node_pos_max;
+            std::vector<int> seg_pos_min;
+            std::vector<int> seg_pos_max;
+
+            // Store the current broad-phase candidate set
+            std::vector<NodeSegmentPair> pairs;
+            std::unordered_map<std::uint64_t, std::size_t> pair_index;
+        };
+
+        // ------------------------------------------------------
+        // Pair cache helpers
+        // ------------------------------------------------------
+
+        // Remove all cached node-segment pairs
+        inline void clear_pairs(BroadPhaseCache& cache) {
+            cache.pairs.clear();
+            cache.pair_index.clear();
+        }
+
+        // Add a node-segment pair to the cache
+        inline void add_pair(BroadPhaseCache& cache, int node, int seg0) {
+            std::uint64_t key = pair_key(node, seg0);
+            if (cache.pair_index.find(key) != cache.pair_index.end())
+                return;
+
+            std::size_t idx = cache.pairs.size();
+            cache.pairs.push_back({node, seg0, seg0 + 1});
+            cache.pair_index[key] = idx;
+        }
+
+        // Erase the pair at a given cache index by swapping with the last element
+        inline void erase_pair_at(BroadPhaseCache& cache, std::size_t idx) {
+            const std::size_t last = cache.pairs.size() - 1;
+
+            NodeSegmentPair victim = cache.pairs[idx];
+            std::uint64_t victim_key = pair_key(victim.node, victim.seg0);
+
+            if (idx != last) {
+                cache.pairs[idx] = cache.pairs[last];
+                NodeSegmentPair moved = cache.pairs[idx];
+                cache.pair_index[pair_key(moved.node, moved.seg0)] = idx;
+            }
+
+            cache.pairs.pop_back();
+            cache.pair_index.erase(victim_key);
+        }
+
+        // Delete every cached pair containing that node
+        inline void remove_pairs_touching_node(BroadPhaseCache& cache, int node) {
+            for (std::size_t i = cache.pairs.size(); i > 0; --i) {
+                const NodeSegmentPair& p = cache.pairs[i - 1];
+                if (p.node == node) {
+                    erase_pair_at(cache, i - 1);
+                }
+            }
+        }
+
+        // Delete every cached pair containing that segment
+        inline void remove_pairs_touching_segment(BroadPhaseCache& cache, int seg0) {
+            for (std::size_t i = cache.pairs.size(); i > 0; --i) {
+                const NodeSegmentPair& p = cache.pairs[i - 1];
+                if (p.seg0 == seg0) {
+                    erase_pair_at(cache, i - 1);
+                }
+            }
+        }
+
+        // ------------------------------------------------------
+        // Sorting  helpers
+        // ------------------------------------------------------
+
+        // Compare two nodes by the min.x of their boxes
+        inline bool less_node_min(const BroadPhaseCache& cache, int a, int b) {
+            const AABB2& A = cache.node_boxes[a];
+            const AABB2& B = cache.node_boxes[b];
+            if (A.min.x != B.min.x) return A.min.x < B.min.x;
+            return a < b;
+        }
+
+        // Compare two nodes by the max.x of their boxes
+        inline bool less_node_max(const BroadPhaseCache& cache, int a, int b) {
+            const AABB2& A = cache.node_boxes[a];
+            const AABB2& B = cache.node_boxes[b];
+            if (A.max.x != B.max.x) return A.max.x < B.max.x;
+            return a < b;
+        }
+
+        // Compare two segments by the min.x of their boxes
+        inline bool less_seg_min(const BroadPhaseCache& cache, int a, int b) {
+            const AABB2& A = cache.segment_boxes[a];
+            const AABB2& B = cache.segment_boxes[b];
+            if (A.min.x != B.min.x) return A.min.x < B.min.x;
+            return a < b;
+        }
+
+        // Compare two segments by the max.x of their boxes
+        inline bool less_seg_max(const BroadPhaseCache& cache, int a, int b) {
+            const AABB2& A = cache.segment_boxes[a];
+            const AABB2& B = cache.segment_boxes[b];
+            if (A.max.x != B.max.x) return A.max.x < B.max.x;
+            return a < b;
+        }
+
+        // Swap two entries in an order array and update their inverse positions
+        inline void swap_in_order(std::vector<int>& order, std::vector<int>& pos, int i, int j) {
+            std::swap(order[i], order[j]);
+            pos[order[i]] = i;
+            pos[order[j]] = j;
+        }
+
+        // Repair the sorted order of nodes by min.x after one node's bounds changed
+        // Starting from the node’s current position, move it left or right using local adjacent swaps until the min.x ordering is restored
+        inline void repair_node_order_min(BroadPhaseCache& cache, int node) {
+            int p = cache.node_pos_min[node];
+            while (p > 0 && less_node_min(cache, cache.node_order_min[p], cache.node_order_min[p - 1])) {
+                swap_in_order(cache.node_order_min, cache.node_pos_min, p, p - 1);
+                --p;
+            }
+
+            while (p + 1 < (int)cache.node_order_min.size() &&
+                   less_node_min(cache, cache.node_order_min[p + 1], cache.node_order_min[p])) {
+                swap_in_order(cache.node_order_min, cache.node_pos_min, p, p + 1);
+                ++p;
+            }
+        }
+
+        // Repair the sorted order of nodes by max.x after one node's bounds changed
+        // The node is moved locally using adjacent swaps until the ordering is restored
+        inline void repair_node_order_max(BroadPhaseCache& cache, int node) {
+            int p = cache.node_pos_max[node];
+            while (p > 0 && less_node_max(cache, cache.node_order_max[p], cache.node_order_max[p - 1])) {
+                swap_in_order(cache.node_order_max, cache.node_pos_max, p, p - 1);
+                --p;
+            }
+            while (p + 1 < (int)cache.node_order_max.size() &&
+                   less_node_max(cache, cache.node_order_max[p + 1], cache.node_order_max[p])) {
+                swap_in_order(cache.node_order_max, cache.node_pos_max, p, p + 1);
+                ++p;
+            }
+        }
+
+        // Repair the sorted order of segments by min.x after one segment box changed
+        // The segment is repositioned using local adjacent swaps
+        inline void repair_seg_order_min(BroadPhaseCache& cache, int seg0) {
+            int p = cache.seg_pos_min[seg0];
+            while (p > 0 && less_seg_min(cache, cache.seg_order_min[p], cache.seg_order_min[p - 1])) {
+                swap_in_order(cache.seg_order_min, cache.seg_pos_min, p, p - 1);
+                --p;
+            }
+            while (p + 1 < (int)cache.seg_order_min.size() &&
+                   less_seg_min(cache, cache.seg_order_min[p + 1], cache.seg_order_min[p])) {
+                swap_in_order(cache.seg_order_min, cache.seg_pos_min, p, p + 1);
+                ++p;
+            }
+        }
+
+        // Repair the sorted order of segments by max.x after one segment box changed
+        // The segment is repositioned using local adjacent swaps
+        inline void repair_seg_order_max(BroadPhaseCache& cache, int seg0) {
+            int p = cache.seg_pos_max[seg0];
+            while (p > 0 && less_seg_max(cache, cache.seg_order_max[p], cache.seg_order_max[p - 1])) {
+                swap_in_order(cache.seg_order_max, cache.seg_pos_max, p, p - 1);
+                --p;
+            }
+            while (p + 1 < (int)cache.seg_order_max.size() &&
+                   less_seg_max(cache, cache.seg_order_max[p + 1], cache.seg_order_max[p])) {
+                swap_in_order(cache.seg_order_max, cache.seg_pos_max, p, p + 1);
+                ++p;
+            }
+        }
+
+        // ------------------------------------------------------
+        // Build sorted orders
+        // ------------------------------------------------------
+
+        // Build initial sorted orders and inverse maps for all node boxes
+        inline void build_node_orders(BroadPhaseCache& cache, int total_nodes) {
+            cache.node_order_min.resize(total_nodes);
+            cache.node_order_max.resize(total_nodes);
+            cache.node_pos_min.resize(total_nodes);
+            cache.node_pos_max.resize(total_nodes);
+
+            std::iota(cache.node_order_min.begin(), cache.node_order_min.end(), 0);
+            std::iota(cache.node_order_max.begin(), cache.node_order_max.end(), 0);
+
+            std::sort(cache.node_order_min.begin(), cache.node_order_min.end(),
+                      [&](int a, int b) { return less_node_min(cache, a, b); });
+            std::sort(cache.node_order_max.begin(), cache.node_order_max.end(),
+                      [&](int a, int b) { return less_node_max(cache, a, b); });
+
+            for (int p = 0; p < total_nodes; ++p) {
+                cache.node_pos_min[cache.node_order_min[p]] = p;
+                cache.node_pos_max[cache.node_order_max[p]] = p;
+            }
+        }
+
+        // Build initial sorted orders and inverse maps for all valid segment boxes
+        inline void build_segment_orders(BroadPhaseCache& cache, int total_nodes) {
+            const int nseg = std::max(0, total_nodes - 1);
+
+            cache.seg_order_min.clear();
+            cache.seg_order_max.clear();
+            cache.seg_pos_min.assign(nseg, -1);
+            cache.seg_pos_max.assign(nseg, -1);
+
+            for (int seg0 = 0; seg0 < nseg; ++seg0) {
+                if (!cache.segment_valid[seg0]) continue;
+                cache.seg_order_min.push_back(seg0);
+                cache.seg_order_max.push_back(seg0);
+            }
+
+            std::sort(cache.seg_order_min.begin(), cache.seg_order_min.end(),
+                      [&](int a, int b) { return less_seg_min(cache, a, b); });
+            std::sort(cache.seg_order_max.begin(), cache.seg_order_max.end(),
+                      [&](int a, int b) { return less_seg_max(cache, a, b); });
+
+            for (int p = 0; p < (int)cache.seg_order_min.size(); ++p) {
+                cache.seg_pos_min[cache.seg_order_min[p]] = p;
+            }
+            for (int p = 0; p < (int)cache.seg_order_max.size(); ++p) {
+                cache.seg_pos_max[cache.seg_order_max[p]] = p;
+            }
+        }
+
+        // ------------------------------------------------------
+        // Queries against dynamic orders
+        // ------------------------------------------------------
+
+        // Note that for AABB x-overlap between node box N and segment box S, both S.min.x <= N.max.x and S.max.x >= N.min.x must hold.
+
+        // Count how many segments have min.x <= x_max.
+        inline int count_segments_with_min_leq(const BroadPhaseCache& cache, double x_max) {
+            return int(std::upper_bound(cache.seg_order_min.begin(), cache.seg_order_min.end(), x_max,
+                                        [&](double value, int seg0) {
+                return value < cache.segment_boxes[seg0].min.x;
+            }) - cache.seg_order_min.begin());
+        }
+
+        // Find the first segment in seg_order_max whose segment.max.x >= x_min
+        inline int first_segment_with_max_geq(const BroadPhaseCache& cache, double x_min) {
+            return int(std::lower_bound(cache.seg_order_max.begin(), cache.seg_order_max.end(), x_min,
+                                        [&](int seg0, double value) {
+                return cache.segment_boxes[seg0].max.x < value;
+            }) - cache.seg_order_max.begin());
+        }
+
+        // Count how many nodes have min.x <= x_max
+        inline int count_nodes_with_min_leq(const BroadPhaseCache& cache, double x_max) {
+            return int(std::upper_bound(cache.node_order_min.begin(), cache.node_order_min.end(), x_max,
+                                        [&](double value, int node) {
+                return value < cache.node_boxes[node].min.x;
+            }) - cache.node_order_min.begin());
+        }
+
+        // Find the first node whose max.x is >= x_min
+        inline int first_node_with_max_geq(const BroadPhaseCache& cache, double x_min) {
+            return int(std::lower_bound(cache.node_order_max.begin(), cache.node_order_max.end(), x_min,
+                                        [&](int node, double value) {
+                return cache.node_boxes[node].max.x < value;
+            }) - cache.node_order_max.begin());
+        }
+
+        // Use segment x-orders to find possible overlaps for one node, then test exact overlap and add valid pairs
+        // The local rebuild scans the smaller of prefix from min-order and suffix from max-order
+        inline void rebuild_pairs_for_node(BroadPhaseCache& cache, int node, int N_left, int N_right) {
+            const int total_nodes = N_left + N_right;
+            if (node < 0 || node >= total_nodes) return;
+
+            const AABB2& node_box = cache.node_boxes[node]; // get this node’s x interval
+
+            // A segment overlaps in x iff its min.x <= node_box.max.x and its max.x >= node_box.min.x
+            // We need to find two possible candidate groups with the following:
+            // Prefix in seg_order_min means all segments with small enough min.x
+            // Suffix in seg_order_max means all segments with large enough max.x
+            // So that true x-overlapping segments are in the intersection of those two groups.
+            const int prefix_count = count_segments_with_min_leq(cache, node_box.max.x);
+            const int suffix_begin = first_segment_with_max_geq(cache, node_box.min.x);
+            const int suffix_count = int(cache.seg_order_max.size()) - suffix_begin;
+
+            // We then iterate the smaller side
+            // If only a few segments have min.x <= node.max.x, scan those
+            // Otherwise, scan the suffix of segments with max.x >= node.min.x
+            // Exact overlap is still confirmed with overlap_x and overlap_y
+            if (prefix_count <= suffix_count) {
+                for (int p = 0; p < prefix_count; ++p) {
+                    int seg0 = cache.seg_order_min[p];
+
+                    // For each scanned segment, do exact AABB test
+                    if (!cache.segment_valid[seg0]) continue;
+
+                    int seg1 = seg0 + 1;
+                    if (seg1 >= total_nodes) continue;
+                    if (is_invalid_node_segment_pair(node, seg0, seg1)) continue;
+
+                    const AABB2& seg_box = cache.segment_boxes[seg0];
+                    if (!overlap_x(node_box, seg_box)) continue;
+                    if (!overlap_y(node_box, seg_box)) continue;
+
+                    add_pair(cache, node, seg0);
+                }
+            } else {
+                for (int p = suffix_begin; p < (int)cache.seg_order_max.size(); ++p) {
+                    int seg0 = cache.seg_order_max[p];
+                    if (!cache.segment_valid[seg0]) continue;
+
+                    int seg1 = seg0 + 1;
+                    if (seg1 >= total_nodes) continue;
+                    if (is_invalid_node_segment_pair(node, seg0, seg1)) continue;
+
+                    const AABB2& seg_box = cache.segment_boxes[seg0];
+                    if (!overlap_x(node_box, seg_box)) continue;
+                    if (!overlap_y(node_box, seg_box)) continue;
+
+                    add_pair(cache, node, seg0);
+                }
+            }
+        }
+
+        // Use node x-orders to find possible overlaps for one segment, then test exact overlap and add valid pairs
+        // From the segment’s perspective we find nodes satisfying node.min.x <= seg.max.x and node.max.x >= seg.min.x
+        // We scan the smaller set, then perform exact x and y overlap tests
+        inline void rebuild_pairs_for_segment(BroadPhaseCache& cache, int seg0, int N_left, int N_right) {
+            const int total_nodes = N_left + N_right;
+            if (!is_valid_segment_start(seg0, N_left, N_right)) return;
+            if (!cache.segment_valid[seg0]) return;
+
+            const int seg1 = seg0 + 1;
+            const AABB2& seg_box = cache.segment_boxes[seg0];
+
+            const int prefix_count = count_nodes_with_min_leq(cache, seg_box.max.x);
+            const int suffix_begin = first_node_with_max_geq(cache, seg_box.min.x);
+            const int suffix_count = int(cache.node_order_max.size()) - suffix_begin;
+
+            if (prefix_count <= suffix_count) {
+                for (int p = 0; p < prefix_count; ++p) {
+                    int node = cache.node_order_min[p];
+                    if (is_invalid_node_segment_pair(node, seg0, seg1)) continue;
+
+                    const AABB2& node_box = cache.node_boxes[node];
+                    if (!overlap_x(node_box, seg_box)) continue;
+                    if (!overlap_y(node_box, seg_box)) continue;
+
+                    add_pair(cache, node, seg0);
+                }
+            } else {
+                for (int p = suffix_begin; p < (int)cache.node_order_max.size(); ++p) {
+                    int node = cache.node_order_max[p];
+                    if (is_invalid_node_segment_pair(node, seg0, seg1)) continue;
+
+                    const AABB2& node_box = cache.node_boxes[node];
+                    if (!overlap_x(node_box, seg_box)) continue;
+                    if (!overlap_y(node_box, seg_box)) continue;
+
+                    add_pair(cache, node, seg0);
+                }
+            }
+        }
+
+        // ------------------------------------------------------
+        // Initialization
+        // ------------------------------------------------------
+
+        // Initialize the broad-phase cache from scratch
+        inline BroadPhaseCache initialize_cache(const Vec& x_combined, const Vec& v_combined,
+                                                int N_left, int N_right, double dt, double dhat) {
+            BroadPhaseCache cache;
+            const int total_nodes = N_left + N_right;
+            const int nseg = std::max(0, total_nodes - 1);
+
+            cache.node_boxes.resize(total_nodes);
+            cache.segment_boxes.resize(nseg);
+            cache.segment_valid.assign(nseg, 0);
+
+            for (int i = 0; i < total_nodes; ++i) {
+                cache.node_boxes[i] = build_node_box(x_combined, v_combined, i, dt, dhat);
+            }
+
+            for (int j = 0; j < nseg; ++j) {
+                if (!is_valid_segment_start(j, N_left, N_right)) continue;
+                cache.segment_boxes[j] = build_segment_box(x_combined, v_combined, j, dt);
+                cache.segment_valid[j] = 1;
+            }
+
+            build_node_orders(cache, total_nodes);
+            build_segment_orders(cache, total_nodes);
+
+            clear_pairs(cache);
+            std::vector<NodeSegmentPair> initial_pairs =
+                    build_pairs_sweep_and_prune(x_combined, v_combined, N_left, N_right, dt, dhat);
+
+            for (const auto& p : initial_pairs) {
+                add_pair(cache, p.node, p.seg0);
+            }
+
+            return cache;
+        }
+
+        // ------------------------------------------------------
+        // Incremental box update
+        // ------------------------------------------------------
+
+        // Recompute one node AABB and fix its place in node x-orders
+        inline void update_node_box(BroadPhaseCache& cache, const Vec& x_combined, const Vec& v_combined,
+                                    int node, double dt, double dhat) {
+            cache.node_boxes[node] = build_node_box(x_combined, v_combined, node, dt, dhat);
+            repair_node_order_min(cache, node);
+            repair_node_order_max(cache, node);
+        }
+
+        // Recompute one segment AABB and fix its place in segment x-orders
+        inline void update_segment_box(BroadPhaseCache& cache, const Vec& x_combined,
+                                       const Vec& v_combined, int seg0,
+                                       int N_left, int N_right, double dt) {
+            if (!is_valid_segment_start(seg0, N_left, N_right)) return;
+            cache.segment_boxes[seg0] = build_segment_box(x_combined, v_combined, seg0, dt);
+            cache.segment_valid[seg0] = 1;
+            repair_seg_order_min(cache, seg0);
+            repair_seg_order_max(cache, seg0);
+        }
+
+        // ------------------------------------------------------
+        // Local pair refresh after one node moved
+        // ------------------------------------------------------
+
+        // Top-level local update that refreshes only the boxes, orders, and pairs affected by a moved node.
+        inline void refresh_pairs_for_moved_node(BroadPhaseCache& cache, const Vec& x_combined, const Vec& v_combined,
+                                                 int moved_node, int N_left, int N_right, double dt, double dhat) {
+
+            const int total_nodes = N_left + N_right;
+            if (moved_node < 0 || moved_node >= total_nodes) return;
+
+            // Recompute the moved node’s swept AABB and repair its position in the x-orders.
+            update_node_box(cache, x_combined, v_combined, moved_node, dt, dhat);
+
+            // Update the adjacent segment boxes, if those segments are valid
+            const int left_seg  = moved_node - 1;
+            const int right_seg = moved_node;
+
+            if (is_valid_segment_start(left_seg, N_left, N_right)) {
+                update_segment_box(cache, x_combined, v_combined, left_seg, N_left, N_right, dt);
+            }
+
+            if (is_valid_segment_start(right_seg, N_left, N_right)) {
+                update_segment_box(cache, x_combined, v_combined, right_seg, N_left, N_right, dt);
+            }
+
+            // Now all changed objects have correct new AABBs and the sorted x-orders are consistent again
+            // Note that any previously cached pair involving one of these changed objects may no longer be valid
+            // We thus delete everything involving the changed node or changed neighbor segments
+            remove_pairs_touching_node(cache, moved_node);
+
+            if (is_valid_segment_start(left_seg, N_left, N_right)) {
+                remove_pairs_touching_segment(cache, left_seg);
+            }
+            if (is_valid_segment_start(right_seg, N_left, N_right)) {
+                remove_pairs_touching_segment(cache, right_seg);
+            }
+
+            // Rebuild the candidate pairs involving the moved node and its adjacent segments
+            rebuild_pairs_for_node(cache, moved_node, N_left, N_right);
+
+            if (is_valid_segment_start(left_seg, N_left, N_right)) {
+                rebuild_pairs_for_segment(cache, left_seg, N_left, N_right);
+            }
+
+            if (is_valid_segment_start(right_seg, N_left, N_right)) {
+                rebuild_pairs_for_segment(cache, right_seg, N_left, N_right);
+            }
+        }
+
+        // ------------------------------------------------------
+        // Convenience wrapper for a one-shot full rebuild
+        // ------------------------------------------------------
+
+        // Build node-segment AABB candidates from scratch
+        inline std::vector<NodeSegmentPair> build_aabb_candidates(const Vec& x_combined, const Vec& v_combined,
+                                                                  int N_left, int N_right, double dt, double dhat) {
+            return build_pairs_sweep_and_prune(x_combined, v_combined, N_left, N_right, dt, dhat);
         }
     }
 
+    // ======================================================
     // Narrow-phase: Exact CCD
+    // ======================================================
     namespace ccd {
         using namespace math;
 
@@ -823,7 +1375,7 @@ namespace collision_filtering{
             if (std::fabs(a) < eps) {
                 if (std::fabs(b) < eps) return false;
                 double t = -c / b;
-                if (t >= 0.0 && t <= 1.0)
+                if (t >= 0.0 and t <= 1.0)
                     t_candidates[num_roots++] = t;
             } else {
                 double D = b * b - 4.0 * a * c;
@@ -836,9 +1388,9 @@ namespace collision_filtering{
                 double t1 = q / a;
                 double t2 = c / q;
 
-                if (t1 >= 0.0 && t1 <= 1.0)
+                if (t1 >= 0.0 and t1 <= 1.0)
                     t_candidates[num_roots++] = t1;
-                if (t2 >= 0.0 && t2 <= 1.0)
+                if (t2 >= 0.0 and t2 <= 1.0)
                     t_candidates[num_roots++] = t2;
             }
 
@@ -846,7 +1398,7 @@ namespace collision_filtering{
 
             // Choose earliest valid collision time
             double t_star = t_candidates[0];
-            if (num_roots == 2 && t_candidates[1] < t_star)
+            if (num_roots == 2 and t_candidates[1] < t_star)
                 t_star = t_candidates[1];
 
             // Inside-segment test
@@ -861,7 +1413,7 @@ namespace collision_filtering{
             if (seg_len2 < eps) return false; // Degenerate segment
 
             double s_param = dot(rel, seg) / seg_len2;
-            if (s_param < 0.0 || s_param > 1.0) return false;
+            if (s_param < 0.0 or s_param > 1.0) return false;
 
             // Valid collision
             t_out = t_star;
@@ -888,47 +1440,17 @@ namespace collision_filtering{
         }
     }
 
+    // ======================================================
     // Trust-region method
+    // ======================================================
     namespace trust_region {
-
         using namespace math;
         using namespace physics;
 
-        // Distance-based trust-region weight
-//        static inline double trust_region_weight( const Vec2& xi,  const Vec2& dxi, const Vec2& xj,  const Vec2& dxj,
-//                                                  const Vec2& xk,  const Vec2& dxk,
-//                                                  double eta){
-//            double s;
-//            Vec2 p{}, r{};
-//            double d0 = physics::node_segment_distance(xi, xj, xk, s, p, r);
-//
-//            constexpr double eps = 1e-12;
-//            d0 = std::max(d0, eps);
-//
-//            Vec2 dp{(1.0 - s) * dxj.x + s * dxk.x,
-//                    (1.0 - s) * dxj.y + s * dxk.y};
-//
-//            Vec2 drel{dxi.x - dp.x, dxi.y - dp.y};
-//
-//            double rnorm = norm(r);
-//            double approach;
-//
-//            if (rnorm > eps) {
-//                Vec2 n{r.x / rnorm, r.y / rnorm};
-//                approach = -(n.x * drel.x + n.y * drel.y);
-//            } else {
-//                approach = norm(dxi) + norm(dxj) + norm(dxk);
-//            }
-//
-//            if (approach <= eps)
-//                return 1.0;
-//
-//            return std::max(0.0, std::min(1.0, eta * d0 / approach));
-//        }
-
-        static inline double trust_region_weight(const Vec2& xi,  const Vec2& dxi, const Vec2& xj,  const Vec2& dxj,
-                                                 const Vec2& xk,  const Vec2& dxk, double eta){
-
+        static inline double trust_region_weight(const Vec2& xi, const Vec2& dxi,
+                                                 const Vec2& xj, const Vec2& dxj,
+                                                 const Vec2& xk, const Vec2& dxk,
+                                                 double eta) {
             double s;
             Vec2 p{}, r{};
             double d0 = physics::node_segment_distance(xi, xj, xk, s, p, r);
@@ -954,6 +1476,7 @@ namespace collision_filtering{
 namespace solver {
     using namespace math;
     using namespace physics;
+    using namespace collision_filtering::aabb;
     using namespace collision_filtering::ccd;
 
     // Select how Newton updates are filtered to maintain collision-free iterates
@@ -962,7 +1485,7 @@ namespace solver {
         TrustRegion
     };
 
-    // The broad-phase builder is used in two contexts: barrier_pairs: v_sweep = v_velocity and ccd_candidate_set: v_sweep = v_newton
+    // The broad-phase builder used for Newton-swept candidate sets as in ccd_candidate_set: v_sweep = v_newton
     using CandidateBuilder = std::function<std::vector<physics::NodeSegmentPair>(const Vec& x_global, const Vec& v_sweep)>;
 
     // Inverse of any 2x2 matrix
@@ -992,7 +1515,7 @@ namespace solver {
 
         Vec2 gbar{0.0, 0.0};
         for (const NodeSegmentPair &c : barrier_pairs) {
-            if (c.node != who_global && c.seg0 != who_global && c.seg1 != who_global)
+            if (c.node != who_global and c.seg0 != who_global and c.seg1 != who_global)
                 continue;
 
             Vec2 gb = local_barrier_grad(who_global, x_global, c.node, c.seg0, c.seg1, dhat);
@@ -1018,7 +1541,7 @@ namespace solver {
         const int who_global = global_offset + i;
 
         for (const NodeSegmentPair &c : barrier_pairs) {
-            if (c.node != who_global && c.seg0 != who_global && c.seg1 != who_global)
+            if (c.node != who_global and c.seg0 != who_global and c.seg1 != who_global)
                 continue;
 
             Mat2 Hb = local_barrier_hess(who_global, x_global, c.node, c.seg0, c.seg1, dhat);
@@ -1039,7 +1562,7 @@ namespace solver {
         double omega = 1.0;
 
         for (const NodeSegmentPair &c : ccd_candidate_set) {
-            if (who_global != c.node && who_global != c.seg0 && who_global != c.seg1)
+            if (who_global != c.node and who_global != c.seg0 and who_global != c.seg1)
                 continue;
 
             Vec2 xi = get_xi(x_global, c.node);
@@ -1049,7 +1572,7 @@ namespace solver {
             Vec2 dxi{0,0}, dxj{0,0}, dxk{0,0};
             Vec2 full{-dx.x, -dx.y};
 
-            if (who_global == c.node)      dxi = full;
+            if (who_global == c.node) dxi = full;
             else if (who_global == c.seg0) dxj = full;
             else if (who_global == c.seg1) dxk = full;
 
@@ -1069,7 +1592,7 @@ namespace solver {
         double omega = 1.0;
 
         for (const auto& c : candidate_set) {
-            if (who_global != c.node && who_global != c.seg0 && who_global != c.seg1)
+            if (who_global != c.node and who_global != c.seg0 and who_global != c.seg1)
                 continue;
 
             Vec2 xi = get_xi(x_global, c.node);
@@ -1079,7 +1602,7 @@ namespace solver {
             dxi = {0,0}; dxj = {0,0}; dxk = {0,0};
             Vec2 full{-dx.x, -dx.y};
 
-            if (who_global == c.node)      dxi = full;
+            if (who_global == c.node) dxi = full;
             else if (who_global == c.seg0) dxj = full;
             else if (who_global == c.seg1) dxk = full;
 
@@ -1096,7 +1619,7 @@ namespace solver {
 
         if (policy == StepPolicy::CCD)
             return compute_safe_step_ccd(who_global, dx, x_global, candidate_set, eta);
-        else
+        else if (policy == StepPolicy::TrustRegion)
             return compute_safe_step_trust_region(who_global, dx, x_global, candidate_set, eta);
     }
 
@@ -1111,29 +1634,31 @@ namespace solver {
     };
 
     // Performs one Newton step for a single node
-    inline void update_one_node(int local_i, const BlockView& b, Vec& x_global,
-                                const std::vector<NodeSegmentPair>& barrier_pairs, const CandidateBuilder& pair_builder,
-                                const Vec& v_vel_global, double dt, double k, const Vec2& g_accel,
-                                double dhat, double eta, StepPolicy filtering_step_policy) {
+    inline void update_one_node(int local_i, const BlockView& b, Vec& x_global, BroadPhaseCache& broad_cache,
+                                const CandidateBuilder& pair_builder, const Vec& v_vel_global,
+                                double dt, double k, const Vec2& g_accel, double dhat, double eta, StepPolicy filtering_step_policy,
+                                int N_left, int N_right) {
 
-        // Energy model
+        // Energy model uses current cached barrier pairs
         Vec2 gi = compute_local_gradient(local_i, *b.x, *b.xhat, *b.mass, *b.L,
-                                         dt, k, g_accel, barrier_pairs, dhat, x_global, b.offset);
+                                         dt, k, g_accel, broad_cache.pairs, dhat, x_global, b.offset);
 
         Mat2 Hi = compute_local_hessian(local_i, *b.x, *b.mass, *b.L,
-                                        dt, k, barrier_pairs, dhat, x_global, b.offset);
+                                        dt, k, broad_cache.pairs, dhat, x_global, b.offset);
 
         Vec2 dx = matvec(matrix2d_inverse(Hi), gi);
 
         const int who_global = b.offset + local_i;
 
-        // Build Newton-swept AABB candidates for CCD
+        // Build Newton-swept AABB candidates
         Vec v_newton(v_vel_global.size(), 0.0);
         set_xi(v_newton, who_global, {-dx.x / dt, -dx.y / dt});
 
         std::vector<NodeSegmentPair> ccd_candidate_set = pair_builder(x_global, v_newton);
 
-        double omega = compute_safe_filtering_step_policy(filtering_step_policy, who_global, dx, x_global, ccd_candidate_set, eta);
+        double omega = compute_safe_filtering_step_policy(
+                filtering_step_policy, who_global, dx, x_global, ccd_candidate_set, eta
+        );
 
         Vec2 xi = get_xi(*b.x, local_i);
         xi.x -= omega * dx.x;
@@ -1141,15 +1666,19 @@ namespace solver {
 
         set_xi(*b.x, local_i, xi);
         set_xi(x_global, who_global, xi);
+
+        // Incrementally refresh the energy broad phase after this node move
+        refresh_pairs_for_moved_node(broad_cache, x_global, v_vel_global, who_global,
+                                     N_left, N_right, dt, dhat);
     }
 
     // Global convergence residual
     double compute_global_residual(const Vec &x_local, const Vec &xhat_local, const std::vector<double> &mass_local,
                                    const std::vector<double> &L_local, double dt, double k, const Vec2 &g_accel,
-                                   const std::vector<NodeSegmentPair> &barrier_pairs_eval, double dhat, const Vec &x_global,
-                                   int global_offset) {
+                                   const std::vector<NodeSegmentPair> &barrier_pairs_eval, double dhat,
+                                   const Vec &x_global, int global_offset) {
 
-        const int N = (int)mass_local.size();
+        const int N = static_cast<int>(mass_local.size());
         double r_inf = 0.0;
 
         for (int i = 0; i < N; ++i) {
@@ -1171,20 +1700,26 @@ namespace solver {
                                                      double eta, StepPolicy filtering_step_policy,
                                                      std::vector<double>* residual_history /*= nullptr*/) {
 
-        // Residual history
-        auto eval_residual = [&]() {
-            std::vector<NodeSegmentPair> barrier_eval = pair_builder(x_global, v_vel_global);
+        const int N_left  = blocks[0].size();
+        const int N_right = blocks[1].size();
 
+        // Persistent broad-phase cache for the energy active set
+        BroadPhaseCache broad_cache = initialize_cache(x_global, v_vel_global, N_left, N_right, dt, dhat);
+
+        // Residual history
+        if (residual_history) residual_history->clear();
+
+        auto eval_residual = [&]() {
             double residual = 0.0;
             for (const BlockView& b : blocks) {
-                residual = std::max(residual, compute_global_residual(*b.x, *b.xhat, *b.mass, *b.L,
-                                                                      dt, k, g_accel, barrier_eval, dhat,
-                                                                      x_global, b.offset));
+                residual = std::max(residual, compute_global_residual(*b.x, *b.xhat, *b.mass,
+                                                                      *b.L, dt, k, g_accel, broad_cache.pairs,
+                                                                      dhat, x_global, b.offset)
+                );
             }
             return residual;
         };
 
-        if (residual_history) residual_history->clear();
 
         // Initial residual
         double r = eval_residual();
@@ -1195,30 +1730,18 @@ namespace solver {
 
         for (int it = 1; it < max_global_iters; ++it) {
 
-            // Barrier active set for energy/grad/hess
-            std::vector<NodeSegmentPair> barrier_pairs = pair_builder(x_global, v_vel_global);
-
             // Node sweep
             for (const BlockView& b : blocks) {
                 for (int i = 0; i < b.size(); ++i) {
 
-                    update_one_node(i, b, x_global, barrier_pairs, pair_builder, v_vel_global,
-                                    dt, k, g_accel, dhat, eta, filtering_step_policy);
-
-                    // Refresh energy barrier set after each update
-                    barrier_pairs = pair_builder(x_global, v_vel_global);
+                    update_one_node(i, b, x_global, broad_cache, pair_builder, v_vel_global,
+                                    dt, k, g_accel, dhat, eta, filtering_step_policy, N_left, N_right);
                 }
             }
 
             // Residual evaluation
-            std::vector<NodeSegmentPair> barrier_eval = pair_builder(x_global, v_vel_global);
-
-            r = 0.0;
-            for (const BlockView& b : blocks) {
-                r = std::max(r, compute_global_residual(*b.x, *b.xhat, *b.mass, *b.L,
-                                                        dt, k, g_accel, barrier_eval, dhat,
-                                                        x_global, b.offset));
-            }
+            r = eval_residual();
+            if (residual_history) residual_history->push_back(r);
 
             if (r < tol_abs)
                 return {r, it};
@@ -1722,8 +2245,7 @@ namespace simulation {
 
             // Initial guess
             // Build x_combined from current positions, and v_combined according to the guess
-            initial_guess::apply(initial_guess_type, left, right,xnew_left, xnew_right,
-                                 x_combined, v_combined, dt, dhat);
+            initial_guess::apply(initial_guess_type, left, right,xnew_left, xnew_right,x_combined, v_combined, dt, dhat);
 
             // Sync combined after explicit guess
             combine_positions(x_combined, xnew_left, xnew_right, left.N, right.N);
