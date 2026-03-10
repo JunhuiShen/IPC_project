@@ -82,11 +82,12 @@ namespace math {
         return a.x * b.y - a.y * b.x;
     }
 
-    // Squared norm
+    // Squared 2-norm
     static inline double norm2(const Vec2 &a) {
         return dot(a,a);
     }
 
+    // 2-norm
     static inline double norm(const Vec2 &a)  {
         return std::sqrt(norm2(a));
     }
