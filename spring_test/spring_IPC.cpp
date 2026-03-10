@@ -581,7 +581,7 @@ namespace physics {
 
     // Per-node gradient of the non-barrier part of the incremental potential
     // This includes inertia, spring forces, gravity, and pin constraint
-    // Barrier gradients are intentionally excluded here and are added separately in the solver using the current node–segment barrier pairs
+    // Barrier gradients are intentionally excluded here and are added separately in the solver using the barrier pairs
     Vec2 psi_local_grad_no_barrier(int i, const Vec &x, const Vec &xhat, const std::vector<double> &mass,
                                    const std::vector<double> &L, double dt, double k, const Vec2 &g_accel) {
 
