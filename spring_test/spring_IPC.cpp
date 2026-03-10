@@ -582,7 +582,7 @@ namespace physics {
     // Per-node gradient of the non-barrier part of the incremental potential
     // This includes inertia, spring forces, gravity, and pin constraint
     // Barrier gradients are intentionally excluded here and are added separately in the solver using the barrier pairs
-    Vec2 psi_local_grad_no_barrier(int i, const Vec &x, const Vec &xhat, const std::vector<double> &mass,
+    Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat, const std::vector<double> &mass,
                                    const std::vector<double> &L, double dt, double k, const Vec2 &g_accel) {
 
         Vec2 xi = get_xi(x, i), xhi = get_xi(xhat, i);
@@ -616,7 +616,7 @@ namespace physics {
     // Includes the block-local contributions from inertia, spring energy, and the pin constraint
     // Gravity contributes no Hessian
     // Barrier Hessians are excluded here and are added separately in the solver using the barrier pairs.
-    Mat2 psi_local_hess_no_barrier(int i, const Vec &x, const std::vector<double> &mass,
+    Mat2 local_hess_no_barrier(int i, const Vec &x, const std::vector<double> &mass,
                                    const std::vector<double> &L, double dt, double k) {
 
         // Inertia contribution
@@ -1484,7 +1484,7 @@ namespace solver {
     }
 
     // Gradient of the full incremental potential for node i.
-    // The block-local non-barrier terms are evaluated with psi_local_grad_no_barrier()
+    // The block-local non-barrier terms are evaluated with local_grad_no_barrier()
     // Barrier contributions are added separately from the current global node–segment barrier pair set
     Vec2 compute_local_gradient(int i, const Vec &x_local, const Vec &xhat_local,
                                 const std::vector<double> &mass_local, const std::vector<double> &L_local,
@@ -1492,7 +1492,7 @@ namespace solver {
                                 const std::vector<NodeSegmentPair> &barrier_pairs,
                                 double dhat, const Vec &x_global, int global_offset) {
 
-        Vec2 gi = psi_local_grad_no_barrier(i, x_local, xhat_local, mass_local, L_local, dt, k, g_accel);
+        Vec2 gi = local_grad_no_barrier(i, x_local, xhat_local, mass_local, L_local, dt, k, g_accel);
 
         const int who_global = global_offset + i;
 
@@ -1512,14 +1512,14 @@ namespace solver {
     }
 
     // Hessian of the full incremental potential for node i.
-    // The block-local non-barrier terms are evaluated with psi_local_hess_no_barrier()
+    // The block-local non-barrier terms are evaluated with local_hess_no_barrier()
     // Barrier contributions are added separately from the current global node–segment barrier pair set
     Mat2 compute_local_hessian(int i, const Vec &x_local, const std::vector<double> &mass_local,
                                const std::vector<double> &L_local, double dt, double k,
                                const std::vector<NodeSegmentPair> &barrier_pairs,
                                double dhat, const Vec &x_global, int global_offset) {
 
-        Mat2 Hi = psi_local_hess_no_barrier(i, x_local, mass_local, L_local, dt, k);
+        Mat2 Hi = local_hess_no_barrier(i, x_local, mass_local, L_local, dt, k);
 
         const int who_global = global_offset + i;
 
