@@ -1605,6 +1605,7 @@ namespace solver {
             return compute_safe_step_ccd(who_global, dx, x_global, candidate_set, eta);
         else if (policy == StepPolicy::TrustRegion)
             return compute_safe_step_trust_region(who_global, dx, x_global, candidate_set, eta);
+        throw std::runtime_error("Unknown StepPolicy");
     }
 
     // Block description for chain
