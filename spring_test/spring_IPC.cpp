@@ -729,17 +729,14 @@ namespace collision_filtering {
 
         // Build one swept node AABB for the barrier pair set
         // The node is padded by dhat so pairs within barrier distance are found.
-        inline AABB2 build_node_box_barrier(const Vec& x_combined, const Vec& v_combined, int i, double dt, double dhat) {
+        inline AABB2 build_node_box_barrier(const Vec& x_combined, const Vec& /*v_combined*/,
+                                            int i, double /*dt*/, double dhat) {
             Vec2 x0 = get_xi(x_combined, i);
-            Vec2 v  = get_xi(v_combined, i);
-            Vec2 x1{x0.x + dt * v.x, x0.y + dt * v.y};
 
-            double min_x = std::min(x0.x - dhat, x1.x - dhat);
-            double max_x = std::max(x0.x + dhat, x1.x + dhat);
-            double min_y = std::min(x0.y - dhat, x1.y - dhat);
-            double max_y = std::max(x0.y + dhat, x1.y + dhat);
-
-            return {{min_x, min_y}, {max_x, max_y}};
+            return {
+                    {x0.x - dhat, x0.y - dhat},
+                    {x0.x + dhat, x0.y + dhat}
+            };
         }
 
         // Build one swept node AABB for CCD
