@@ -648,8 +648,8 @@ namespace physics {
 namespace collision_filtering {
 
     // ======================================================
-    // Broad-phase: AABB
-    // ======================================================
+// Broad-phase: AABB
+// ======================================================
     namespace aabb {
         using namespace math;
         using namespace physics;
@@ -673,10 +673,10 @@ namespace collision_filtering {
         };
 
         struct BroadPhaseCache {
-            // Boxes
-            std::vector<AABB2> node_boxes; // node_boxes[i] = AABB for node i
+            // Boxes for the barrier active set
+            std::vector<AABB2> node_boxes;  // node_boxes[i] = barrier AABB for node i
             std::vector<AABB2> segment_boxes; // segment_boxes[j] = AABB for segment starting at j
-            std::vector<char>  segment_valid; // segment_valid[j] tells whether j is a valid segment start
+            std::vector<char>  segment_valid;  // segment_valid[j] tells whether j is a valid segment start
 
             // Dynamic sorted orders by min.x and max.x
             std::vector<int> node_order_min; // node ids sorted by node_boxes[node].min.x
@@ -691,7 +691,7 @@ namespace collision_filtering {
             std::vector<int> seg_pos_min;
             std::vector<int> seg_pos_max;
 
-            // Store the current broad-phase candidate set
+            // Store the current broad-phase candidate set for the barrier active set
             std::vector<NodeSegmentPair> pairs;
             std::unordered_map<std::uint64_t, std::size_t> pair_index;
         };
@@ -727,8 +727,9 @@ namespace collision_filtering {
             return (std::uint64_t(std::uint32_t(node)) << 32) | std::uint32_t(seg0);
         }
 
-        // Build one swept node AABB
-        inline AABB2 build_node_box(const Vec& x_combined, const Vec& v_combined, int i, double dt, double dhat) {
+        // Build one swept node AABB for the barrier pair set
+        // The node is padded by dhat so pairs within barrier distance are found.
+        inline AABB2 build_node_box_barrier(const Vec& x_combined, const Vec& v_combined, int i, double dt, double dhat) {
             Vec2 x0 = get_xi(x_combined, i);
             Vec2 v  = get_xi(v_combined, i);
             Vec2 x1{x0.x + dt * v.x, x0.y + dt * v.y};
@@ -737,6 +738,21 @@ namespace collision_filtering {
             double max_x = std::max(x0.x + dhat, x1.x + dhat);
             double min_y = std::min(x0.y - dhat, x1.y - dhat);
             double max_y = std::max(x0.y + dhat, x1.y + dhat);
+
+            return {{min_x, min_y}, {max_x, max_y}};
+        }
+
+        // Build one swept node AABB for CCD
+        // No dhat inflation because exact CCD only cares about true contact
+        inline AABB2 build_node_box_ccd(const Vec& x_combined, const Vec& v_combined, int i, double dt) {
+            Vec2 x0 = get_xi(x_combined, i);
+            Vec2 v  = get_xi(v_combined, i);
+            Vec2 x1{x0.x + dt * v.x, x0.y + dt * v.y};
+
+            double min_x = std::min(x0.x, x1.x);
+            double max_x = std::max(x0.x, x1.x);
+            double min_y = std::min(x0.y, x1.y);
+            double max_y = std::max(x0.y, x1.y);
 
             return {{min_x, min_y}, {max_x, max_y}};
         }
@@ -800,9 +816,12 @@ namespace collision_filtering {
             }
         }
 
-        // Build all node-segment candidate pairs using a one-shot sweep-and-prune pass
-        inline std::vector<NodeSegmentPair> build_pairs_sweep_and_prune(const Vec& x_combined, const Vec& v_combined,
-                                                                        int N_left, int N_right, double dt, double dhat) {
+        // Internal generic builder: node-box rule is injected so we can use either barrier boxes or CCD boxes without duplicating the broad-phase logic
+        template<typename NodeBoxBuilder> inline std::vector<NodeSegmentPair> build_pairs_sweep_and_prune_impl(
+                const Vec& x_combined, const Vec& v_combined,
+                int N_left, int N_right, double dt,
+                NodeBoxBuilder build_node_box_fn) {
+
             std::vector<NodeSegmentPair> pairs;
             const int total_nodes = N_left + N_right;
 
@@ -810,7 +829,7 @@ namespace collision_filtering {
             objects.reserve(total_nodes + std::max(0, total_nodes - 1));
 
             for (int i = 0; i < total_nodes; ++i) {
-                objects.push_back({build_node_box(x_combined, v_combined, i, dt, dhat), i, ObjectType::NODE});
+                objects.push_back({build_node_box_fn(x_combined, v_combined, i, dt), i, ObjectType::NODE});
             }
 
             for (int j = 0; j < total_nodes - 1; ++j) {
@@ -843,6 +862,30 @@ namespace collision_filtering {
             }), pairs.end());
 
             return pairs;
+        }
+
+        // Build all node-segment candidate pairs for the barrier active set
+        inline std::vector<NodeSegmentPair> build_pairs_sweep_and_prune(
+                const Vec& x_combined, const Vec& v_combined,
+                int N_left, int N_right, double dt, double dhat) {
+
+            auto node_box_fn = [dhat](const Vec& xg, const Vec& vg, int i, double dt_local) {
+                return build_node_box_barrier(xg, vg, i, dt_local, dhat);
+            };
+
+            return build_pairs_sweep_and_prune_impl(x_combined, v_combined, N_left, N_right, dt, node_box_fn);
+        }
+
+        // Build all node-segment candidate pairs for exact CCD
+        inline std::vector<NodeSegmentPair> build_ccd_pairs_sweep_and_prune(
+                const Vec& x_combined, const Vec& v_combined,
+                int N_left, int N_right, double dt) {
+
+            auto node_box_fn = [](const Vec& xg, const Vec& vg, int i, double dt_local) {
+                return build_node_box_ccd(xg, vg, i, dt_local);
+            };
+
+            return build_pairs_sweep_and_prune_impl(x_combined, v_combined, N_left, N_right, dt, node_box_fn);
         }
 
         // ------------------------------------------------------
@@ -919,7 +962,7 @@ namespace collision_filtering {
         }
 
         // ------------------------------------------------------
-        // Sorting  helpers
+        // Sorting helpers
         // ------------------------------------------------------
 
         // Compare two nodes by the min.x of their boxes
@@ -1085,32 +1128,32 @@ namespace collision_filtering {
         inline int count_segments_with_min_leq(const BroadPhaseCache& cache, double x_max) {
             return int(std::upper_bound(cache.seg_order_min.begin(), cache.seg_order_min.end(), x_max,
                                         [&](double value, int seg0) {
-                return value < cache.segment_boxes[seg0].min.x;
-            }) - cache.seg_order_min.begin());
+                                            return value < cache.segment_boxes[seg0].min.x;
+                                        }) - cache.seg_order_min.begin());
         }
 
         // Find the first segment in seg_order_max whose segment.max.x >= x_min
         inline int first_segment_with_max_geq(const BroadPhaseCache& cache, double x_min) {
             return int(std::lower_bound(cache.seg_order_max.begin(), cache.seg_order_max.end(), x_min,
                                         [&](int seg0, double value) {
-                return cache.segment_boxes[seg0].max.x < value;
-            }) - cache.seg_order_max.begin());
+                                            return cache.segment_boxes[seg0].max.x < value;
+                                        }) - cache.seg_order_max.begin());
         }
 
         // Count how many nodes have min.x <= x_max
         inline int count_nodes_with_min_leq(const BroadPhaseCache& cache, double x_max) {
             return int(std::upper_bound(cache.node_order_min.begin(), cache.node_order_min.end(), x_max,
                                         [&](double value, int node) {
-                return value < cache.node_boxes[node].min.x;
-            }) - cache.node_order_min.begin());
+                                            return value < cache.node_boxes[node].min.x;
+                                        }) - cache.node_order_min.begin());
         }
 
         // Find the first node whose max.x is >= x_min
         inline int first_node_with_max_geq(const BroadPhaseCache& cache, double x_min) {
             return int(std::lower_bound(cache.node_order_max.begin(), cache.node_order_max.end(), x_min,
                                         [&](int node, double value) {
-                return cache.node_boxes[node].max.x < value;
-            }) - cache.node_order_max.begin());
+                                            return cache.node_boxes[node].max.x < value;
+                                        }) - cache.node_order_max.begin());
         }
 
         // Use segment x-orders to find possible overlaps for one node, then test exact overlap and add valid pairs
@@ -1213,7 +1256,7 @@ namespace collision_filtering {
         // Initialization
         // ------------------------------------------------------
 
-        // Initialize the broad-phase cache from scratch
+        // Initialize the broad-phase cache from scratch for the barrier active set
         inline BroadPhaseCache initialize_cache(const Vec& x_combined, const Vec& v_combined,
                                                 int N_left, int N_right, double dt, double dhat) {
             BroadPhaseCache cache;
@@ -1225,7 +1268,7 @@ namespace collision_filtering {
             cache.segment_valid.assign(nseg, 0);
 
             for (int i = 0; i < total_nodes; ++i) {
-                cache.node_boxes[i] = build_node_box(x_combined, v_combined, i, dt, dhat);
+                cache.node_boxes[i] = build_node_box_barrier(x_combined, v_combined, i, dt, dhat);
             }
 
             for (int j = 0; j < nseg; ++j) {
@@ -1255,7 +1298,7 @@ namespace collision_filtering {
         // Recompute one node AABB and fix its place in node x-orders
         inline void update_node_box(BroadPhaseCache& cache, const Vec& x_combined, const Vec& v_combined,
                                     int node, double dt, double dhat) {
-            cache.node_boxes[node] = build_node_box(x_combined, v_combined, node, dt, dhat);
+            cache.node_boxes[node] = build_node_box_barrier(x_combined, v_combined, node, dt, dhat);
             repair_node_order_min(cache, node);
             repair_node_order_max(cache, node);
         }
@@ -1322,13 +1365,19 @@ namespace collision_filtering {
         }
 
         // ------------------------------------------------------
-        // Convenience wrapper for a one-shot full rebuild
+        // Convenience wrappers for one-shot full rebuilds
         // ------------------------------------------------------
 
-        // Build node-segment AABB candidates from scratch
-        inline std::vector<NodeSegmentPair> build_aabb_candidates(const Vec& x_combined, const Vec& v_combined,
+        // Build node-segment AABB candidates for the barrier active set
+        inline std::vector<NodeSegmentPair> build_barrier_candidates(const Vec& x_combined, const Vec& v_combined,
                                                                   int N_left, int N_right, double dt, double dhat) {
             return build_pairs_sweep_and_prune(x_combined, v_combined, N_left, N_right, dt, dhat);
+        }
+
+        // Build node-segment AABB candidates for exact CCD
+        inline std::vector<NodeSegmentPair> build_ccd_candidates(const Vec& x_combined, const Vec& v_combined,
+                                                                 int N_left, int N_right, double dt) {
+            return build_ccd_pairs_sweep_and_prune(x_combined, v_combined, N_left, N_right, dt);
         }
     }
 
@@ -1620,9 +1669,9 @@ namespace solver {
 
     // Performs one Newton step for a single node
     inline void update_one_node(int local_i, const BlockView& b, Vec& x_global, BroadPhaseCache& broad_cache,
-                                const CandidateBuilder& pair_builder, const Vec& v_vel_global,
-                                double dt, double k, const Vec2& g_accel, double dhat, double eta, StepPolicy filtering_step_policy,
-                                int N_left, int N_right) {
+                                const Vec& v_vel_global,
+                                double dt, double k, const Vec2& g_accel, double dhat, double eta,
+                                StepPolicy filtering_step_policy, int N_left, int N_right) {
 
         // Energy model uses current cached barrier pairs
         Vec2 gi = compute_local_gradient(local_i, *b.x, *b.xhat, *b.mass, *b.L,
@@ -1635,14 +1684,14 @@ namespace solver {
 
         const int who_global = b.offset + local_i;
 
-        // Build Newton-swept AABB candidates
+        // Build Newton-swept candidate set
         Vec v_newton(v_vel_global.size(), 0.0);
         set_xi(v_newton, who_global, {-dx.x / dt, -dx.y / dt});
 
-        std::vector<NodeSegmentPair> ccd_candidate_set = pair_builder(x_global, v_newton);
+        std::vector<NodeSegmentPair> filtering_candidate_set = build_ccd_candidates(x_global, v_newton, N_left, N_right, dt);
 
         double omega = compute_safe_filtering_step_policy(
-                filtering_step_policy, who_global, dx, x_global, ccd_candidate_set, eta
+                filtering_step_policy, who_global, dx, x_global, filtering_candidate_set, eta
         );
 
         Vec2 xi = get_xi(*b.x, local_i);
@@ -1652,7 +1701,7 @@ namespace solver {
         set_xi(*b.x, local_i, xi);
         set_xi(x_global, who_global, xi);
 
-        // Incrementally refresh the energy broad phase after this node move
+        // Incrementally refresh the dynamic barrier pairs after this node move
         refresh_pairs_for_moved_node(broad_cache, x_global, v_vel_global, who_global,
                                      N_left, N_right, dt, dhat);
     }
@@ -1680,10 +1729,10 @@ namespace solver {
     std::pair<double,int> global_gauss_seidel_solver(std::vector<BlockView>& blocks,
                                                      Vec& x_global, const Vec& v_vel_global,
                                                      double dt, double k, const Vec2& g_accel,
-                                                     const CandidateBuilder& pair_builder,
                                                      double dhat, int max_global_iters, double tol_abs,
                                                      double eta, StepPolicy filtering_step_policy,
                                                      std::vector<double>* residual_history /*= nullptr*/) {
+
 
         const int N_left  = blocks[0].size();
         const int N_right = blocks[1].size();
@@ -1719,7 +1768,7 @@ namespace solver {
             for (const BlockView& b : blocks) {
                 for (int i = 0; i < b.size(); ++i) {
 
-                    update_one_node(i, b, x_global, broad_cache, pair_builder, v_vel_global,
+                    update_one_node(i, b, x_global, broad_cache, v_vel_global,
                                     dt, k, g_accel, dhat, eta, filtering_step_policy, N_left, N_right);
                 }
             }
@@ -1858,7 +1907,8 @@ namespace initial_guess {
     using namespace state_update;
     using physics::NodeSegmentPair;
 
-    using collision_filtering::aabb::build_aabb_candidates;
+    using collision_filtering::aabb::build_barrier_candidates;   // barrier candidates
+    using collision_filtering::aabb::build_ccd_candidates; // exact CCD candidates
     using collision_filtering::ccd::ccd_get_safe_step;
     using collision_filtering::trust_region::trust_region_weight;
 
@@ -1975,11 +2025,11 @@ namespace initial_guess {
 
     // Use the CCD safe step for initial guess
     double compute_initial_guess_ccd_step(const Vec& x_combined, const Vec& v_combined,
-                                          const std::vector<physics::NodeSegmentPair>& barrier_pairs,
+                                          const std::vector<physics::NodeSegmentPair>& candidate_pairs,
                                           double dt, double eta = 0.9) {
         double omega = 1.0;
 
-        for (const auto& c : barrier_pairs) {
+        for (const auto& c : candidate_pairs) {
             Vec2 xi = get_xi(x_combined, c.node);
             Vec2 xj = get_xi(x_combined, c.seg0);
             Vec2 xk = get_xi(x_combined, c.seg1);
@@ -2002,12 +2052,12 @@ namespace initial_guess {
     }
 
     double compute_initial_guess_trust_region_step(const Vec& x_combined, const Vec& v_combined,
-                                                       const std::vector<physics::NodeSegmentPair>& barrier_pairs,
+                                                   const std::vector<physics::NodeSegmentPair>& candidate_pairs,
                                                        double dt, double eta = 0.9){
 
         double omega = 1.0;
 
-        for (const auto& c : barrier_pairs) {
+        for (const auto& c : candidate_pairs) {
 
             Vec2 xi = get_xi(x_combined, c.node);
             Vec2 xj = get_xi(x_combined, c.seg0);
@@ -2090,7 +2140,7 @@ namespace initial_guess {
             build_v_combined_from_chain_velocities(v_combined, left, right);
 
             // Candidate pairs for the explicit predictor sweep
-            auto init_pairs = build_aabb_candidates(x_combined, v_combined, left.N, right.N, dt, dhat);
+            auto init_pairs = build_ccd_candidates(x_combined, v_combined, left.N, right.N, dt);
 
             // Global CCD safe step omega0 in [0,1]
             double omega0 = compute_initial_guess_ccd_step(x_combined, v_combined, init_pairs, dt, /*eta=*/0.9);
@@ -2123,11 +2173,11 @@ namespace initial_guess {
 
             build_v_combined_from_chain_velocities(v_combined, left, right);
 
-            // Build barrier pairs
-            auto barrier_pairs = build_aabb_candidates(x_combined, v_combined, left.N, right.N, dt, dhat);
+            // Candidate pairs for the explicit predictor sweep
+            auto init_pairs = build_ccd_candidates(x_combined, v_combined, left.N, right.N, dt);
 
             // Compute the step size
-            double alpha = compute_initial_guess_trust_region_step(x_combined, v_combined, barrier_pairs, dt);
+            double alpha = compute_initial_guess_trust_region_step(x_combined, v_combined, init_pairs, dt);
             alpha = (alpha < 0.0) ? 0.0 : (alpha > 1.0) ? 1.0 : alpha;
 
             // xnew from the trust region step
@@ -2216,11 +2266,6 @@ namespace simulation {
         double max_global_residual = 0.0;
         int sum_global_iters_used = 0;
 
-        // Build active barrier pairs using AABB broad-phase
-        solver::CandidateBuilder pair_builder = [&](const Vec& xg, const Vec& v_sweep) {
-            return build_aabb_candidates(xg, v_sweep, left.N, right.N, dt, dhat);
-        };
-
         // Time stepping
         for (int frame = 1; frame <= total_frame; ++frame) {
 
@@ -2244,10 +2289,9 @@ namespace simulation {
             std::vector<double> res_hist;
 
             // Run the global Gauss-Seidel solver
-            auto result = global_gauss_seidel_solver(blocks, x_combined, v_combined,
-                                                     dt, k_spring, g_accel, pair_builder,
-                                                     dhat, max_global_iters, tol_abs,
-                                                     eta, filtering_step_policy, &res_hist);
+            auto result = global_gauss_seidel_solver(blocks, x_combined, v_combined, dt, k_spring, g_accel,
+                                                     dhat, max_global_iters, tol_abs, eta, filtering_step_policy, &res_hist);
+
 
             double global_residual = result.first;
             int iters_used = result.second;
