@@ -1368,12 +1368,6 @@ namespace collision_filtering {
         // Convenience wrappers for one-shot full rebuilds
         // ------------------------------------------------------
 
-        // Build node-segment AABB candidates for the barrier active set
-        inline std::vector<NodeSegmentPair> build_barrier_candidates(const Vec& x_combined, const Vec& v_combined,
-                                                                  int N_left, int N_right, double dt, double dhat) {
-            return build_pairs_sweep_and_prune(x_combined, v_combined, N_left, N_right, dt, dhat);
-        }
-
         // Build node-segment AABB candidates for exact CCD
         inline std::vector<NodeSegmentPair> build_ccd_candidates(const Vec& x_combined, const Vec& v_combined,
                                                                  int N_left, int N_right, double dt) {
@@ -1517,9 +1511,6 @@ namespace solver {
         CCD,
         TrustRegion
     };
-
-    // The broad-phase builder used for Newton-swept candidate sets as in ccd_candidate_set: v_sweep = v_newton
-    using CandidateBuilder = std::function<std::vector<physics::NodeSegmentPair>(const Vec& x_global, const Vec& v_sweep)>;
 
     // Inverse of any 2x2 matrix
     Mat2 matrix2d_inverse(const Mat2 &H) {
@@ -1907,7 +1898,6 @@ namespace initial_guess {
     using namespace state_update;
     using physics::NodeSegmentPair;
 
-    using collision_filtering::aabb::build_barrier_candidates;   // barrier candidates
     using collision_filtering::aabb::build_ccd_candidates; // exact CCD candidates
     using collision_filtering::ccd::ccd_get_safe_step;
     using collision_filtering::trust_region::trust_region_weight;
