@@ -583,8 +583,9 @@ namespace physics {
     // Per-node gradient of the non-barrier part of the incremental potential
     // This includes inertia, spring forces, gravity, and pin constraint
     // Barrier gradients are intentionally excluded here and are added separately in the solver using the barrier pairs
-    Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat, const std::vector<double> &mass,
-                                   const std::vector<double> &L, double dt, double k, const Vec2 &g_accel) {
+    Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat, const Vec &xpin,
+                               const std::vector<double> &mass,
+                               const std::vector<double> &L, double dt, double k, const Vec2 &g_accel) {
 
         Vec2 xi = get_xi(x, i), xhi = get_xi(xhat, i);
         Vec2 gi{0.0, 0.0};
@@ -606,8 +607,9 @@ namespace physics {
         constexpr double k_pin = 5e6;
 
         if (i == 0) {
-            gi.x += dt * dt * k_pin * (xi.x - xhi.x);
-            gi.y += dt * dt * k_pin * (xi.y - xhi.y);
+            Vec2 xpi = get_xi(xpin, i);
+            gi.x += dt * dt * k_pin * (xi.x - xpi.x);
+            gi.y += dt * dt * k_pin * (xi.y - xpi.y);
         }
 
         return gi;
@@ -1524,13 +1526,13 @@ namespace solver {
     // Gradient of the full incremental potential for node i.
     // The block-local non-barrier terms are evaluated with local_grad_no_barrier()
     // Barrier contributions are added separately from the current global node–segment barrier pair set
-    Vec2 compute_local_gradient(int i, const Vec &x_local, const Vec &xhat_local,
+    Vec2 compute_local_gradient(int i, const Vec &x_local, const Vec &xhat_local, const Vec &xpin_local,
                                 const std::vector<double> &mass_local, const std::vector<double> &L_local,
                                 double dt, double k, const Vec2 &g_accel,
                                 const std::vector<NodeSegmentPair> &barrier_pairs,
-                                double dhat, const Vec &x_global, int global_offset) {
+                                double dhat, const Vec &x_global, int global_offset){
 
-        Vec2 gi = local_grad_no_barrier(i, x_local, xhat_local, mass_local, L_local, dt, k, g_accel);
+        Vec2 gi = local_grad_no_barrier(i, x_local, xhat_local, xpin_local, mass_local, L_local, dt, k, g_accel);
 
         const int who_global = global_offset + i;
 
@@ -1649,6 +1651,7 @@ namespace solver {
     struct BlockView {
         Vec* x; // unknown positions for this block
         const Vec* xhat; // linear extrapolation
+        const Vec* xpin; // prescribed pin target positions
         const std::vector<double>* mass;
         const std::vector<double>* L;
         int offset; // global offset
@@ -1662,7 +1665,7 @@ namespace solver {
                                 StepPolicy filtering_step_policy, int N_left, int N_right) {
 
         // Energy model uses current cached barrier pairs
-        Vec2 gi = compute_local_gradient(local_i, *b.x, *b.xhat, *b.mass, *b.L,
+        Vec2 gi = compute_local_gradient(local_i, *b.x, *b.xhat, *b.xpin, *b.mass, *b.L,
                                          dt, k, g_accel, broad_cache.pairs, dhat, x_global, b.offset);
 
         Mat2 Hi = compute_local_hessian(local_i, *b.x, *b.mass, *b.L,
@@ -1695,7 +1698,8 @@ namespace solver {
     }
 
     // Global convergence residual
-    double compute_global_residual(const Vec &x_local, const Vec &xhat_local, const std::vector<double> &mass_local,
+    double compute_global_residual(const Vec &x_local, const Vec &xhat_local, const Vec &xpin_local,
+                                   const std::vector<double> &mass_local,
                                    const std::vector<double> &L_local, double dt, double k, const Vec2 &g_accel,
                                    const std::vector<NodeSegmentPair> &barrier_pairs_eval, double dhat,
                                    const Vec &x_global, int global_offset) {
@@ -1704,7 +1708,7 @@ namespace solver {
         double r_inf = 0.0;
 
         for (int i = 0; i < N; ++i) {
-            Vec2 g = compute_local_gradient(i, x_local, xhat_local, mass_local, L_local, dt, k, g_accel,
+            Vec2 g = compute_local_gradient(i, x_local, xhat_local, xpin_local, mass_local, L_local, dt, k, g_accel,
                                             barrier_pairs_eval, dhat, x_global, global_offset);
 
             r_inf = std::max(r_inf, std::abs(g.x));
@@ -1734,13 +1738,16 @@ namespace solver {
         auto eval_residual = [&]() {
             double residual = 0.0;
             for (const BlockView& b : blocks) {
-                residual = std::max(residual, compute_global_residual(*b.x, *b.xhat, *b.mass,
-                                                                      *b.L, dt, k, g_accel, broad_cache.pairs,
-                                                                      dhat, x_global, b.offset)
+                residual = std::max(
+                        residual,
+                        compute_global_residual(*b.x, *b.xhat, *b.xpin, *b.mass,
+                                                *b.L, dt, k, g_accel, broad_cache.pairs,
+                                                dhat, x_global, b.offset)
                 );
             }
             return residual;
         };
+
 
 
         // Initial residual
@@ -1818,13 +1825,15 @@ namespace chain_model{
     // Core data structure for a single chain
     struct Chain {
         int N{}; // number of nodes
-        Vec x; // positions (2*N)
-        Vec v; // velocities (2*N)
-        Vec xhat;  // predicted positions (2*N)
+        Vec x; // positions
+        Vec v; // velocities
+        Vec xhat; // predicted positions
+        Vec xpin; // prescribed pin target positions
         std::vector<double> mass; // per-node masses
         std::vector<double> rest_lengths; // rest spring lengths
         std::vector<std::pair<int, int>> edges; // connectivity list
     };
+
 
     Chain make_chain(Vec2 start, Vec2 end, int N, double mass_value) {
         Chain c;
@@ -1832,6 +1841,7 @@ namespace chain_model{
         c.x.resize(2 * N);
         c.v.assign(2 * N, 0.0);
         c.xhat.assign(2 * N, 0.0);
+        c.xpin.assign(2 * N, 0.0);
         c.mass.assign(N, mass_value);
 
         // Node positions
@@ -1840,6 +1850,9 @@ namespace chain_model{
             Vec2 xi{start.x + t * (end.x - start.x), start.y + t * (end.y - start.y)};
             set_xi(c.x, i, xi);
         }
+
+        // Default pin targets are the initial positions
+        c.xpin = c.x;
 
         // Edges and rest lengths
         for (int i = 0; i < N - 1; ++i) {
@@ -2233,6 +2246,10 @@ namespace simulation {
         Chain left  = make_chain({-1.0, 0.0}, {4.0, -5.0}, number_of_nodes, 0.05);
         Chain right = make_chain({-1.5, 0.5}, {3.5, 0.5}, number_of_nodes, 0.05);
 
+        // Prescribed pin target positions
+        set_xi(left.xpin, 0, get_xi(left.x, 0));
+        set_xi(right.xpin, 0, get_xi(right.x, 0));
+
         const int total_nodes = left.N + right.N;
 
         // Combined edges
@@ -2262,15 +2279,15 @@ namespace simulation {
 
             // Initial guess
             // Build x_combined from current positions, and v_combined according to the guess
-            initial_guess::apply(initial_guess_type, left, right,xnew_left, xnew_right,x_combined, v_combined, dt, dhat);
+            initial_guess::apply(initial_guess_type, left, right, xnew_left, xnew_right, x_combined, v_combined, dt, dhat);
 
             // Sync combined after explicit guess
             combine_positions(x_combined, xnew_left, xnew_right, left.N, right.N);
 
             // Build solver blocks
             std::vector<BlockView> blocks;
-            blocks.push_back({&xnew_left,  &left.xhat,  &left.mass,  &left.rest_lengths,  0});
-            blocks.push_back({&xnew_right, &right.xhat, &right.mass, &right.rest_lengths, left.N});
+            blocks.push_back({&xnew_left,  &left.xhat,  &left.xpin,  &left.mass,  &left.rest_lengths,  0});
+            blocks.push_back({&xnew_right, &right.xhat, &right.xpin, &right.mass, &right.rest_lengths, left.N});
 
             // Nonlinear GS solve
             std::vector<double> res_hist;
@@ -2278,7 +2295,6 @@ namespace simulation {
             // Run the global Gauss-Seidel solver
             auto result = global_gauss_seidel_solver(blocks, x_combined, v_combined, dt, k_spring, g_accel,
                                                      dhat, max_global_iters, tol_abs, eta, filtering_step_policy, &res_hist);
-
 
             double global_residual = result.first;
             int iters_used = result.second;
