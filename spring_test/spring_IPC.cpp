@@ -655,7 +655,7 @@ namespace collision_filtering {
         using namespace physics;
 
         // ------------------------------------------------------
-        // Broad-phase primitives
+        // Basic primitives and geometric helpers
         // ------------------------------------------------------
         struct AABB2 {
             Vec2 min, max;
@@ -670,6 +670,30 @@ namespace collision_filtering {
             AABB2 box;
             int id;  // node index or segment start index
             ObjectType type;
+        };
+
+        struct BroadPhaseCache {
+            // Boxes
+            std::vector<AABB2> node_boxes; // node_boxes[i] = AABB for node i
+            std::vector<AABB2> segment_boxes; // segment_boxes[j] = AABB for segment starting at j
+            std::vector<char>  segment_valid; // segment_valid[j] tells whether j is a valid segment start
+
+            // Dynamic sorted orders by min.x and max.x
+            std::vector<int> node_order_min; // node ids sorted by node_boxes[node].min.x
+            std::vector<int> node_order_max; // node ids sorted by node_boxes[node].max.x
+            std::vector<int> seg_order_min; // segment ids sorted by segment_boxes[seg].min.x
+            std::vector<int> seg_order_max; // segment ids sorted by segment_boxes[seg].max.x
+
+            // Inverse maps that record the position of each object id in the sorted arrays
+            // For example, node_order_min[1] = 2 means position 1 holds node 2 and node_pos_min[2] = 1 means node 2 is at position 1
+            std::vector<int> node_pos_min;
+            std::vector<int> node_pos_max;
+            std::vector<int> seg_pos_min;
+            std::vector<int> seg_pos_max;
+
+            // Store the current broad-phase candidate set
+            std::vector<NodeSegmentPair> pairs;
+            std::unordered_map<std::uint64_t, std::size_t> pair_index;
         };
 
         // Check overlap in the x-axis
@@ -696,6 +720,11 @@ namespace collision_filtering {
         // Check whether the node is an endpoint of the segment
         inline bool is_invalid_node_segment_pair(int node, int seg0, int seg1) {
             return (node == seg0) or (node == seg1);
+        }
+
+        // Build a hash key for a node-segment pair.
+        inline std::uint64_t pair_key(int node, int seg0) {
+            return (std::uint64_t(std::uint32_t(node)) << 32) | std::uint32_t(seg0);
         }
 
         // Build one swept node AABB
@@ -732,7 +761,7 @@ namespace collision_filtering {
         // ------------------------------------------------------
 
         // Run sweep-and-prune on all objects and report overlapping node-segment candidates
-        template<typename Callback> void broad_phase_ccd(std::vector<Object>& objects, Callback report) {
+        template<typename Callback> void broad_phase_aabb(std::vector<Object>& objects, Callback report) {
             const int n = static_cast<int>(objects.size());
 
             std::vector<int> order(n);
@@ -789,7 +818,7 @@ namespace collision_filtering {
                 objects.push_back({build_segment_box(x_combined, v_combined, j, dt), j, ObjectType::SEGMENT});
             }
 
-            broad_phase_ccd(objects, [&](const Object& Node, const Object& Segment) {
+            broad_phase_aabb(objects, [&](const Object& Node, const Object& Segment) {
                 const Object* nodeObj = (Node.type == ObjectType::NODE) ? &Node : &Segment;
                 const Object* segObj  = (Node.type == ObjectType::SEGMENT) ? &Node : &Segment;
 
@@ -830,35 +859,6 @@ namespace collision_filtering {
         // Finally, rebuild candidate pairs locally by querying segments that may overlap the moved node and nodes that may overlap the updated segments.
         // All other cached pairs remain unchanged. In this way, the broad phase is updated incrementally.
         // Only objects whose bounding boxes changed are processed, while the rest of the spatial structure is reused.
-
-        // Build a hash key for a node-segment pair.
-        inline std::uint64_t pair_key(int node, int seg0) {
-            return (std::uint64_t(std::uint32_t(node)) << 32) | std::uint32_t(seg0);
-        }
-
-        struct BroadPhaseCache {
-            // Boxes
-            std::vector<AABB2> node_boxes; // node_boxes[i] = AABB for node i
-            std::vector<AABB2> segment_boxes; // segment_boxes[j] = AABB for segment starting at j
-            std::vector<char>  segment_valid; // segment_valid[j] tells whether j is a valid segment start
-
-            // Dynamic sorted orders by min.x and max.x
-            std::vector<int> node_order_min; // node ids sorted by node_boxes[node].min.x
-            std::vector<int> node_order_max; // node ids sorted by node_boxes[node].max.x
-            std::vector<int> seg_order_min; // segment ids sorted by segment_boxes[seg].min.x
-            std::vector<int> seg_order_max; // segment ids sorted by segment_boxes[seg].max.x
-
-            // Inverse maps that record the position of each object id in the sorted arrays
-            // For example, node_order_min[1] = 2 means position 1 holds node 2 and node_pos_min[2] = 1 means node 2 is at position 1
-            std::vector<int> node_pos_min;
-            std::vector<int> node_pos_max;
-            std::vector<int> seg_pos_min;
-            std::vector<int> seg_pos_max;
-
-            // Store the current broad-phase candidate set
-            std::vector<NodeSegmentPair> pairs;
-            std::unordered_map<std::uint64_t, std::size_t> pair_index;
-        };
 
         // ------------------------------------------------------
         // Pair cache helpers
@@ -1610,11 +1610,11 @@ namespace solver {
 
     // Block description for chain
     struct BlockView {
-        Vec* x;                       // unknown positions for this block
-        const Vec* xhat;              // linear extrapolation
+        Vec* x; // unknown positions for this block
+        const Vec* xhat; // linear extrapolation
         const std::vector<double>* mass;
         const std::vector<double>* L;
-        int offset;                   // global offset
+        int offset; // global offset
         int size() const { return static_cast<int>(mass->size()); }
     };
 
@@ -1919,8 +1919,8 @@ namespace initial_guess {
                     Vec2 U[3] = {U1, U2, U3};
 
                     double w = c.mass[i];
-                    if (&c == &A && i == 0) w = 0;  // exclude left[0]
-                    if (&c == &B && i == 0) w = 0;  // if right chain also has a pinned node
+                    if (&c == &A and i == 0) w = 0;  // exclude left[0]
+                    if (&c == &B and i == 0) w = 0;  // if right chain also has a pinned node
 
                     for (int k = 0; k < 3; ++k) {
                         b[k] += w * (U[k].x * Vi.x + U[k].y * Vi.y);
