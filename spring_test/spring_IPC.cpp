@@ -1748,8 +1748,6 @@ namespace solver {
             return residual;
         };
 
-
-
         // Initial residual
         double r = eval_residual();
         if (residual_history) residual_history->push_back(r);
@@ -2230,7 +2228,7 @@ namespace simulation {
         Vec2 g_accel{0.0, -9.81};
         double k_spring = 20.0;
         int total_frame = 600;
-        int max_global_iters = 500;
+        int max_global_iters = 2000;
         double tol_abs = 1e-6;
         double dhat = 0.1;
         double eta = 0.9;
@@ -2242,13 +2240,34 @@ namespace simulation {
         // Choose the collision-free step filtering policy (CCD/TrustRegion)
         StepPolicy filtering_step_policy = StepPolicy::CCD;
 
-        // Create chains
-        Chain left  = make_chain({-1.0, 0.0}, {4.0, -5.0}, number_of_nodes, 0.05);
-        Chain right = make_chain({-1.5, 0.5}, {3.5, 0.5}, number_of_nodes, 0.05);
+        // Example 1
+        Chain left  = make_chain({-1.0, 0.0}, {4.0, -5.0}, number_of_nodes, 0.08);
+        Chain right = make_chain({-1.5, 0.5}, {3.5, 0.5}, number_of_nodes, 0.08);
 
-        // Prescribed pin target positions
         set_xi(left.xpin, 0, get_xi(left.x, 0));
         set_xi(right.xpin, 0, get_xi(right.x, 0));
+
+        // Initial velocity
+        for (int i = 0; i < left.N; ++i)
+            set_xi(left.v, i, { -0.0, 0.0});
+
+        for (int i = 0; i < right.N; ++i)
+            set_xi(right.v, i, {0.0, 0.0});
+
+//        // Example 2
+//        Chain left  = chain_model::make_chain({-0.1,  1.5}, {-0.1, -1.5}, number_of_nodes, 0.08);
+//        Chain right = chain_model::make_chain({ 0.1,  1.5}, { 0.1, -1.5}, number_of_nodes, 0.08);
+//
+//        // Prescribed pin target positions
+//        set_xi(left.xpin, 0, get_xi(left.x, 0));
+//        set_xi(right.xpin, 0, get_xi(right.x, 0));
+//
+//        // Initial velocity
+//        for (int i = 0; i < left.N; ++i)
+//            set_xi(left.v, i, { -5, 0.0});
+//
+//        for (int i = 0; i < right.N; ++i)
+//            set_xi(right.v, i, {5, 0.0});
 
         const int total_nodes = left.N + right.N;
 
@@ -2265,13 +2284,13 @@ namespace simulation {
         Vec xnew_right = right.x;
 
         combine_positions(x_combined, left.x, right.x, left.N, right.N);
-        export_frame(outdir, 0, x_combined, edges_combined);
+        export_frame(outdir, 1, x_combined, edges_combined);
 
         double max_global_residual = 0.0;
         int sum_global_iters_used = 0;
 
         // Time stepping
-        for (int frame = 1; frame <= total_frame; ++frame) {
+        for (int frame = 2; frame <= total_frame + 1; ++frame) {
 
             // Linear extrapolation
             build_xhat(left, dt);
