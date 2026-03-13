@@ -933,8 +933,7 @@ namespace collision_filtering {
 
         // One-shot trust-region candidate build for collision filtering
         inline std::vector<NodeSegmentPair> build_trust_region_candidates(const Vec& x_combined, const Vec& v_combined,
-                                                                          int N_left, int N_right, double dt,
-                                                                          double motion_pad) {
+                                                                          int N_left, int N_right, double dt, double motion_pad) {
             return build_aabb_candidates(x_combined, v_combined, N_left, N_right, dt,  /*node_pad=*/motion_pad, /*segment_pad=*/0.0);
         }
     }
@@ -1656,11 +1655,11 @@ namespace initial_guess {
     inline void build_v_combined_from_affine(Vec& v_combined, const Chain& left, const Chain& right, const affine_initial_guess::AffineParams& ap) {
         for (int i = 0; i < left.N; ++i) {
             Vec2 xi = get_xi(left.x, i);
-            set_xi(v_combined, i, affine_velocity_at(ap, xi));
+            set_xi(v_combined, i, affine_initial_guess::affine_velocity_at(ap, xi));
         }
         for (int i = 0; i < right.N; ++i) {
             Vec2 xi = get_xi(right.x, i);
-            set_xi(v_combined, left.N + i, affine_velocity_at(ap, xi));
+            set_xi(v_combined, left.N + i, affine_initial_guess::affine_velocity_at(ap, xi));
         }
     }
 
@@ -1685,8 +1684,9 @@ namespace initial_guess {
 
         // Affine rotational initial guess
         if (initial_guess_type == Type::Affine) {
+            using namespace affine_initial_guess;
             // Velocity is the affine field; xnew = x + dt * v_aff
-            affine_initial_guess::AffineParams ap = affine_initial_guess::compute_affine_params_global(left, right);
+            AffineParams ap = affine_initial_guess::compute_affine_params_global(left, right);
             build_v_combined_from_affine(v_combined, left, right, ap);
 
             affine_initial_guess_global(ap, left,  xnew_left,  dt);
@@ -1879,7 +1879,6 @@ namespace simulation {
             // Nonlinear GS solve
             std::vector<double> res_hist;
 
-            // Run the global Gauss-Seidel solver
             auto result = global_gauss_seidel_solver(blocks, x_combined, v_combined,
                                                      dt, k_spring, g_accel, dhat, max_global_iters, tol_abs,
                                                      eta, filtering_step_policy, &res_hist);
