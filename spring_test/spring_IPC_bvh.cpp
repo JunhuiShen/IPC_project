@@ -1816,10 +1816,10 @@ namespace simulation {
             eta = 0.4;
         }
         else if (initial_guess_type == Type::CCD && filtering_step_policy == StepPolicy::CCD){
-            eta = 0.4;
+            eta = 0.9;
         }
         else{
-            eta = 0.4;
+            eta = 0.9;
         }
 
         // Example: two vertical chains moving toward each other from opposite sides
