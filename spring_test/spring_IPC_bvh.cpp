@@ -1798,17 +1798,17 @@ namespace simulation {
         double dt = 1.0 / 30.0;
         Vec2 g_accel{0.0, -9.81};
         double k_spring = 20.0;
-        int total_frame = 120;
+        int total_frame = 150;
         int max_global_iters = 800;
         double tol_abs = 1e-6;
         double dhat = 0.1;
         int number_of_nodes = 11;
 
         // Choose the initial guess type (Trivial/Affine/CCD/TrustRegion)
-        Type initial_guess_type = Type::TrustRegion;
+        Type initial_guess_type = Type::CCD;
 
         // Choose the collision-free step filtering policy (CCD/TrustRegion)
-        StepPolicy filtering_step_policy = StepPolicy::TrustRegion;
+        StepPolicy filtering_step_policy = StepPolicy::CCD;
 
         double eta;
 
