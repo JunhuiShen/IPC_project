@@ -1,0 +1,11 @@
+# Build output
+2D_IPC/build/
+
+# Simulation frame output
+frames_*/
+*.obj
+
+# Compiled binaries and objects
+*.o
+*.a
+spring_IPC_bvh_orig

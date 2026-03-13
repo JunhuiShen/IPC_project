@@ -1,4 +1,0 @@
-/Users/amuseth/dev/Physical_simulation/spring_test/2D_IPC/build/CMakeFiles/ipc_core.dir
-/Users/amuseth/dev/Physical_simulation/spring_test/2D_IPC/build/CMakeFiles/simulation.dir
-/Users/amuseth/dev/Physical_simulation/spring_test/2D_IPC/build/CMakeFiles/edit_cache.dir
-/Users/amuseth/dev/Physical_simulation/spring_test/2D_IPC/build/CMakeFiles/rebuild_cache.dir
