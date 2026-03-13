@@ -278,7 +278,7 @@ namespace physics {
 
         // Barrier quantities
         Vec2 n{r.x / d, r.y / d}; // unit normal
-        double bp = barrier_grad(d, dhat);    //b'(d)
+        double bp = barrier_grad(d, dhat);  //b'(d)
         Vec2 f{bp * n.x, bp * n.y}; // f = b'(d) * n
         double u_dot_v = u.x * v.x + u.y * v.y;
 
@@ -1805,10 +1805,10 @@ namespace simulation {
         int number_of_nodes = 11;
 
         // Choose the initial guess type (Trivial/Affine/CCD/TrustRegion)
-        Type initial_guess_type = Type::CCD;
+        Type initial_guess_type = Type::TrustRegion;
 
         // Choose the collision-free step filtering policy (CCD/TrustRegion)
-        StepPolicy filtering_step_policy = StepPolicy::CCD;
+        StepPolicy filtering_step_policy = StepPolicy::TrustRegion;
 
         double eta;
 
@@ -1833,10 +1833,10 @@ namespace simulation {
 
         // Initial velocity
         for (int i = 0; i < left.N; ++i)
-            set_xi(left.v, i, { -5, 0.0});
+            set_xi(left.v, i, { -6, 0.0});
 
         for (int i = 0; i < right.N; ++i)
-            set_xi(right.v, i, {5, 0.0});
+            set_xi(right.v, i, {6, 0.0});
 
         const int total_nodes = left.N + right.N;
 
@@ -1853,13 +1853,13 @@ namespace simulation {
         Vec xnew_right = right.x;
 
         combine_positions(x_combined, left.x, right.x, left.N, right.N);
-        export_frame(outdir, 0, x_combined, edges_combined);
+        export_frame(outdir, 1, x_combined, edges_combined);
 
         double max_global_residual = 0.0;
         int sum_global_iters_used = 0;
 
         // Time stepping
-        for (int frame = 1; frame <= total_frame; ++frame) {
+        for (int frame = 2; frame <= total_frame + 1; ++frame) {
 
             // Linear extrapolation
             build_xhat(left, dt);
