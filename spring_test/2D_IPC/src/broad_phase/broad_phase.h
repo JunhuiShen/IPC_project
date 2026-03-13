@@ -1,0 +1,40 @@
+#pragma once
+
+#include "../ipc_math.h"
+#include "../physics.h"
+#include <vector>
+
+// ======================================================
+// BroadPhase — base class for broad-phase collision detection
+//
+// Manages a persistent barrier pair cache and provides
+// one-shot candidate builds for step filtering.
+// Swap implementations by swapping the subclass.
+// ======================================================
+
+class BroadPhase {
+public:
+    // Set up the persistent barrier pair cache (called once per timestep)
+    virtual void initialize(const Vec& x, const Vec& v,
+                            int N_left, int N_right, double dt, double dhat) = 0;
+
+    // Incremental update after one node moved (called per Newton step)
+    virtual void refresh(const Vec& x, const Vec& v,
+                         int moved_node, int N_left, int N_right,
+                         double dt, double node_pad, double seg_pad) = 0;
+
+    // Current barrier active-set pairs
+    virtual const std::vector<physics::NodeSegmentPair>& pairs() const = 0;
+
+    // One-shot candidate builds for step filtering
+    virtual std::vector<physics::NodeSegmentPair>
+        build_ccd_candidates(const Vec& x, const Vec& v,
+                             int N_left, int N_right, double dt) = 0;
+
+    virtual std::vector<physics::NodeSegmentPair>
+        build_trust_region_candidates(const Vec& x, const Vec& v,
+                                      int N_left, int N_right,
+                                      double dt, double motion_pad) = 0;
+
+    virtual ~BroadPhase() = default;
+};
