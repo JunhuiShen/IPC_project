@@ -1798,8 +1798,8 @@ namespace simulation {
         double dt = 1.0 / 30.0;
         Vec2 g_accel{0.0, -9.81};
         double k_spring = 20.0;
-        int total_frame = 600;
-        int max_global_iters = 500;
+        int total_frame = 120;
+        int max_global_iters = 800;
         double tol_abs = 1e-6;
         double dhat = 0.1;
         int number_of_nodes = 11;
@@ -1816,14 +1816,14 @@ namespace simulation {
             eta = 0.4;
         }
         else if (initial_guess_type == Type::CCD && filtering_step_policy == StepPolicy::CCD){
-            eta = 0.9;
+            eta = 0.4;
         }
         else{
-            eta = 0.9;
+            eta = 0.4;
         }
 
         // Example: two vertical chains moving toward each other from opposite sides
-        //  CCD can accept the full initial step, while trust region may limit it for large motions
+        // CCD can accept the full initial step, while trust region may limit it for large motions
         Chain left  = chain_model::make_chain({-0.1,  1.5}, {-0.1, -1.5}, number_of_nodes, 0.08);
         Chain right = chain_model::make_chain({ 0.1,  1.5}, { 0.1, -1.5}, number_of_nodes, 0.08);
 
@@ -1833,10 +1833,10 @@ namespace simulation {
 
         // Initial velocity
         for (int i = 0; i < left.N; ++i)
-            set_xi(left.v, i, { -2, 0.0});
+            set_xi(left.v, i, { -5, 0.0});
 
         for (int i = 0; i < right.N; ++i)
-            set_xi(right.v, i, {2, 0.0});
+            set_xi(right.v, i, {5, 0.0});
 
         const int total_nodes = left.N + right.N;
 
