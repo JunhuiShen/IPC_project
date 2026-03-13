@@ -8,4 +8,15 @@ frames_*/
 # Compiled binaries and objects
 *.o
 *.a
+
+# Executables (no extension)
+spring_IPC
+spring_IPC_bvh
 spring_IPC_bvh_orig
+bvh_box_leaf
+bvh_test
+bvh_viz
+
+# Output files
+*.svg
+*.zip
