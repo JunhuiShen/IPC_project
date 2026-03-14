@@ -922,24 +922,21 @@ namespace collision_filtering {
         inline BroadPhaseCache initialize_barrier_cache(const Vec& x_combined, const Vec& v_combined,
                                                         const std::vector<char>& segment_valid,
                                                         double dt, double dhat) {
-            return initialize_cache(x_combined, v_combined, segment_valid, dt,
-                    /*node_pad=*/dhat, /*segment_pad=*/0.0);
+            return initialize_cache(x_combined, v_combined, segment_valid, dt, /*node_pad=*/dhat, /*segment_pad=*/0.0);
         }
 
         // One-shot CCD candidate build for collision filtering
         inline std::vector<NodeSegmentPair> build_ccd_candidates(const Vec& x_combined, const Vec& v_combined,
                                                                  const std::vector<char>& segment_valid,
                                                                  double dt) {
-            return build_aabb_candidates(x_combined, v_combined, segment_valid, dt,
-                    /*node_pad=*/0.0, /*segment_pad=*/0.0);
+            return build_aabb_candidates(x_combined, v_combined, segment_valid, dt, /*node_pad=*/0.0, /*segment_pad=*/0.0);
         }
 
         // One-shot trust-region candidate build for collision filtering
         inline std::vector<NodeSegmentPair> build_trust_region_candidates(const Vec& x_combined, const Vec& v_combined,
                                                                           const std::vector<char>& segment_valid,
                                                                           double dt, double motion_pad) {
-            return build_aabb_candidates(x_combined, v_combined, segment_valid, dt,
-                    /*node_pad=*/motion_pad, /*segment_pad=*/0.0);
+            return build_aabb_candidates(x_combined, v_combined, segment_valid, dt, /*node_pad=*/motion_pad, /*segment_pad=*/0.0);
         }
     }
 
@@ -1080,6 +1077,14 @@ namespace solver {
         TrustRegion
     };
 
+    // ------------------------------------------------------
+    // CCD statistics
+    // ------------------------------------------------------
+    // ccd_total_tests: number of actual narrow-phase CCD evaluations performed
+    // ccd_total_collisions: number of those CCD evaluations that detected a collision
+    inline std::uint64_t ccd_total_tests = 0;
+    inline std::uint64_t ccd_total_collisions = 0;
+
     // Inverse of any 2x2 matrix
     Mat2 matrix2d_inverse(const Mat2 &H) {
         double det = H.a11 * H.a22 - H.a12 * H.a21;
@@ -1172,7 +1177,24 @@ namespace solver {
             else if (who_global == c.seg0) dxj = full;
             else if (who_global == c.seg1) dxk = full;
 
-            omega = std::min(omega, ccd_get_safe_step(xi, dxi, xj, dxj, xk, dxk, eta));
+            // Count one actual narrow-phase CCD test
+            double t_hit = 0.0;
+            bool collision_found = ccd_point_segment_2d(xi, dxi, xj, dxj, xk, dxk, t_hit);
+            ++ccd_total_tests;
+
+            double omega_c = 1.0;
+            if (collision_found) {
+                ++ccd_total_collisions;
+
+                if (t_hit <= 1e-12) {
+                    // Already in collision, don't move at all
+                    omega_c = 0.0;
+                } else {
+                    omega_c = eta * t_hit;
+                }
+            }
+
+            omega = std::min(omega, omega_c);
             if (omega <= 0.0) return 0.0;
         }
 
@@ -1330,8 +1352,7 @@ namespace solver {
                         residual,
                         compute_global_residual(*b.x, *b.xhat, *b.xpin,
                                                 *b.mass, *b.L, *b.is_pinned,
-                                                dt, k, g_accel,
-                                                barrier_cache.pairs, dhat,
+                                                dt, k, g_accel,barrier_cache.pairs, dhat,
                                                 x_global, b.offset)
                 );
             }
@@ -1473,24 +1494,6 @@ namespace state_update{
         }
         c.x = xnew;
     }
-
-    // Copy one block of node positions into the global position vector
-    void scatter_positions(Vec &x_combined, const Vec &x_block, int offset, int N_block) {
-        for (int i = 0; i < N_block; ++i)
-            set_xi(x_combined, offset + i, get_xi(x_block, i));
-    }
-
-    // Copy one chain's current positions into the global position vector
-    void scatter_chain_positions(Vec &x_combined, const Chain &c, int offset) {
-        scatter_positions(x_combined, c.x, offset, c.N);
-    }
-
-//    // Combine the node positions of an arbitrary list of chains into a single global position vector
-//    void combine_positions(Vec &x_combined, const std::vector<Chain> &chains, const std::vector<int> &offsets) {
-//        const int nblocks = static_cast<int>(chains.size());
-//        for (int b = 0; b < nblocks; ++b)
-//            scatter_chain_positions(x_combined, chains[b], offsets[b]);
-//    }
 }
 
 // ======================================================
@@ -1786,8 +1789,7 @@ namespace initial_guess {
                     }
 
                     Vec2 vi = get_xi(c.v, i);
-                    set_xi(xnew, i, {xi.x + omega0 * dt * vi.x,
-                                     xi.y + omega0 * dt * vi.y});
+                    set_xi(xnew, i, {xi.x + omega0 * dt * vi.x,xi.y + omega0 * dt * vi.y});
                 }
             }
 
@@ -1824,8 +1826,7 @@ namespace initial_guess {
                     }
 
                     Vec2 vi = get_xi(c.v, i);
-                    set_xi(xnew, i, {xi.x + alpha * dt * vi.x,
-                                     xi.y + alpha * dt * vi.y});
+                    set_xi(xnew, i, {xi.x + alpha * dt * vi.x, xi.y + alpha * dt * vi.y});
                 }
             }
 
@@ -1877,9 +1878,11 @@ namespace simulation {
         double dhat = 0.1;
         int number_of_nodes = 11;
 
-        // Choose example
-        ExampleType example_type = ExampleType::Example2;
-        // ExampleType example_type = ExampleType::Example2;
+        // Choose examples
+        // Example 1: two vertical chains moving toward each other
+        // Example 2: multiple chains fall onto a pinned ground segment
+//        ExampleType example_type = ExampleType::Example1;
+         ExampleType example_type = ExampleType::Example2;
 
         // Choose the initial guess type (Trivial/Affine/CCD/TrustRegion)
         Type initial_guess_type = Type::CCD;
@@ -1888,12 +1891,10 @@ namespace simulation {
         StepPolicy filtering_step_policy = StepPolicy::CCD;
 
         double eta;
-        if (initial_guess_type == Type::TrustRegion &&
-            filtering_step_policy == StepPolicy::TrustRegion) {
+        if (initial_guess_type == Type::TrustRegion && filtering_step_policy == StepPolicy::TrustRegion) {
             eta = 0.4;
         }
-        else if (initial_guess_type == Type::CCD &&
-                 filtering_step_policy == StepPolicy::CCD) {
+        else if (initial_guess_type == Type::CCD && filtering_step_policy == StepPolicy::CCD) {
             eta = 0.9;
         }
         else {
@@ -1902,40 +1903,37 @@ namespace simulation {
 
         int total_frame = 150;
 
-        // ------------------------------------------------------
-        // Build example as a list of chains
-        // ------------------------------------------------------
         std::vector<Chain> chains;
 
         // Example 1: two vertical chains moving toward each other
         if (example_type == ExampleType::Example1) {
             total_frame = 150;
 
-            Chain left  = chain_model::make_chain({-0.1,  1.5}, {-0.1, -1.5}, number_of_nodes, 0.05);
-            Chain right = chain_model::make_chain({ 0.1,  1.5}, { 0.1, -1.5}, number_of_nodes, 0.05);
+            Chain chain1 = chain_model::make_chain({-0.1,  1.5}, {-0.1, -1.5}, number_of_nodes, 0.05);
+            Chain chain2 = chain_model::make_chain({ 0.1,  1.5}, { 0.1, -1.5}, number_of_nodes, 0.05);
 
-            left.is_pinned[0] = 1;
-            right.is_pinned[0] = 1;
+            chain1.is_pinned[0] = 1;
+            chain2.is_pinned[0] = 1;
 
-            set_xi(left.xpin, 0, get_xi(left.x, 0));
-            set_xi(right.xpin, 0, get_xi(right.x, 0));
+            set_xi(chain1.xpin, 0, get_xi(chain1.x, 0));
+            set_xi(chain2.xpin, 0, get_xi(chain2.x, 0));
 
-            for (int i = 0; i < left.N; ++i)
-                set_xi(left.v, i, {-6.0, 0.0});
+            for (int i = 0; i < chain1.N; ++i)
+                set_xi(chain1.v, i, {-6.0, 0.0});
 
-            for (int i = 0; i < right.N; ++i)
-                set_xi(right.v, i, {6.0, 0.0});
+            for (int i = 0; i < chain2.N; ++i)
+                set_xi(chain2.v, i, {6.0, 0.0});
 
-            chains.push_back(left);
-            chains.push_back(right);
+            chains.push_back(chain1);
+            chains.push_back(chain2);
         }
-
-            // Example 2: two chains fall onto a pinned ground segment
+        // Example 2: multiple chains fall onto a pinned ground segment
         else if (example_type == ExampleType::Example2) {
             total_frame = 60;
 
-            Chain left   = chain_model::make_chain({-0.6, 1.4}, { 0.6, 0.8}, number_of_nodes, 0.05);
-            Chain right  = chain_model::make_chain({-0.2, 2.2}, { 1.0, 1.6}, number_of_nodes, 0.05);
+            Chain chain1 = chain_model::make_chain({-0.8, 1.2}, { 1.6, 0.0}, number_of_nodes, 0.05);
+            Chain chain2 = chain_model::make_chain({-0.4, 2.0}, { 2.0, 0.8}, number_of_nodes, 0.05);
+            Chain chain3 = chain_model::make_chain({ 0.0, 2.8}, { 2.4, 1.6}, number_of_nodes, 0.05);
             Chain ground = chain_model::make_chain({-2.0, -1.8}, {2.0, -1.8}, 2, 1.0);
 
             ground.is_pinned[0] = 1;
@@ -1944,23 +1942,25 @@ namespace simulation {
             set_xi(ground.xpin, 0, get_xi(ground.x, 0));
             set_xi(ground.xpin, 1, get_xi(ground.x, 1));
 
-            for (int i = 0; i < left.N; ++i)
-                set_xi(left.v, i, {0.0, 0.0});
+            for (int i = 0; i < chain1.N; ++i)
+                set_xi(chain1.v, i, {0.0, 0.0});
 
-            for (int i = 0; i < right.N; ++i)
-                set_xi(right.v, i, {0.0, 0.0});
+            for (int i = 0; i < chain2.N; ++i)
+                set_xi(chain2.v, i, {0.0, 0.0});
+
+            for (int i = 0; i < chain3.N; ++i)
+                set_xi(chain3.v, i, {0.0, 0.0});
 
             for (int i = 0; i < ground.N; ++i)
                 set_xi(ground.v, i, {0.0, 0.0});
 
-            chains.push_back(left);
-            chains.push_back(right);
+            chains.push_back(chain1);
+            chains.push_back(chain2);
+            chains.push_back(chain3);
             chains.push_back(ground);
         }
 
-        // ------------------------------------------------------
         // Global indexing data
-        // ------------------------------------------------------
         const int nblocks = static_cast<int>(chains.size());
 
         std::vector<int> offsets(nblocks, 0);
@@ -2006,15 +2006,8 @@ namespace simulation {
             std::vector<BlockView> blocks;
             blocks.reserve(nblocks);
             for (int b = 0; b < nblocks; ++b) {
-                blocks.push_back({
-                                         &xnew_blocks[b],
-                                         &chains[b].xhat,
-                                         &chains[b].xpin,
-                                         &chains[b].mass,
-                                         &chains[b].rest_lengths,
-                                         &chains[b].is_pinned,
-                                         offsets[b]
-                                 });
+                blocks.push_back({&xnew_blocks[b], &chains[b].xhat, &chains[b].xpin, &chains[b].mass,
+                                  &chains[b].rest_lengths, &chains[b].is_pinned, offsets[b]});
             }
             return blocks;
         };
@@ -2029,9 +2022,7 @@ namespace simulation {
         double max_global_residual = 0.0;
         int sum_global_iters_used = 0;
 
-        // ------------------------------------------------------
         // Time stepping
-        // ------------------------------------------------------
         for (int frame = 2; frame <= total_frame + 1; ++frame) {
 
             // Linear extrapolation
@@ -2042,9 +2033,7 @@ namespace simulation {
             std::vector<BlockRef> guess_blocks = make_guess_blocks();
 
             // Initial guess
-            initial_guess::apply(initial_guess_type, guess_blocks,
-                                 x_combined, v_combined, segment_valid,
-                                 dt, dhat, eta);
+            initial_guess::apply(initial_guess_type, guess_blocks,x_combined, v_combined, segment_valid, dt, dhat, eta);
 
             // Solver blocks
             std::vector<BlockView> blocks = make_solver_blocks();
@@ -2052,10 +2041,8 @@ namespace simulation {
             // Nonlinear GS solve
             std::vector<double> res_hist;
             auto result = global_gauss_seidel_solver(blocks, x_combined, v_combined,
-                                                     segment_valid,
-                                                     dt, k_spring, g_accel, dhat,
-                                                     max_global_iters, tol_abs,
-                                                     eta, filtering_step_policy, &res_hist);
+                                                     segment_valid, dt, k_spring, g_accel, dhat,
+                                                     max_global_iters, tol_abs, eta, filtering_step_policy, &res_hist);
 
             double global_residual = result.first;
             int iters_used = result.second;
@@ -2087,6 +2074,8 @@ namespace simulation {
         std::cout << "max_global_residual = " << std::scientific << max_global_residual << "\n";
         std::cout << "avg_global_iters = " << std::fixed << avg_global_iters_used << "\n";
         std::cout << "total runtime = " << elapsed.count() << " seconds\n";
+        std::cout << "ccd_total_tests = " << solver::ccd_total_tests << "\n";
+        std::cout << "ccd_total_collisions = " << solver::ccd_total_collisions << "\n";
 
         return 0;
     }
