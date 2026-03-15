@@ -334,7 +334,9 @@ namespace physics {
 
     Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat, const Vec &xpin,
                                const std::vector<double> &mass, const std::vector<double> &L,
+                               const std::vector<char> &is_pinned,
                                double dt, double k, const Vec2 &g_accel) {
+
         Vec2 xi = get_xi(x, i), xhi = get_xi(xhat, i);
         Vec2 gi{0.0, 0.0};
 
@@ -349,7 +351,8 @@ namespace physics {
         gi.y -= dt * dt * mass[i] * g_accel.y;
 
         constexpr double k_pin = 5e6;
-        if (i == 0) {
+
+        if (is_pinned[i]) {
             Vec2 xpi = get_xi(xpin, i);
             gi.x += dt * dt * k_pin * (xi.x - xpi.x);
             gi.y += dt * dt * k_pin * (xi.y - xpi.y);
@@ -359,8 +362,11 @@ namespace physics {
     }
 
     Mat2 local_hess_no_barrier(int i, const Vec &x,
-                               const std::vector<double> &mass, const std::vector<double> &L,
+                               const std::vector<double> &mass,
+                               const std::vector<double> &L,
+                               const std::vector<char> &is_pinned,
                                double dt, double k) {
+
         Mat2 H{mass[i], 0, 0, mass[i]};
 
         Mat2 Hs = local_spring_hess(i, x, k, L);
@@ -370,7 +376,8 @@ namespace physics {
         H.a22 += dt * dt * Hs.a22;
 
         constexpr double k_pin = 5e6;
-        if (i == 0) {
+
+        if (is_pinned[i]) {
             H.a11 += dt * dt * k_pin;
             H.a22 += dt * dt * k_pin;
         }

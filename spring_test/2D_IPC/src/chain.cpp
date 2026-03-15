@@ -8,6 +8,7 @@ Chain make_chain(Vec2 start, Vec2 end, int N, double mass_value) {
     c.xhat.assign(2 * N, 0.0);
     c.xpin.assign(2 * N, 0.0);
     c.mass.assign(N, mass_value);
+    c.is_pinned.assign(N, 0);
 
     for (int i = 0; i < N; ++i) {
         double t = (N == 1) ? 0.0 : double(i) / (N - 1);
@@ -41,8 +42,11 @@ void update_velocity(Chain& c, const Vec& xnew, double dt) {
     c.x = xnew;
 }
 
-void combine_positions(Vec& x_combined, const Vec& x_left, const Vec& x_right,
-                       int N_left, int N_right) {
-    for (int i = 0; i < N_left;  ++i) set_xi(x_combined, i,           get_xi(x_left,  i));
-    for (int i = 0; i < N_right; ++i) set_xi(x_combined, N_left + i,  get_xi(x_right, i));
+void scatter_positions(Vec& x_combined, const Vec& x_block, int offset, int N_block) {
+    for (int i = 0; i < N_block; ++i)
+        set_xi(x_combined, offset + i, get_xi(x_block, i));
+}
+
+void scatter_chain_positions(Vec& x_combined, const Chain& c, int offset) {
+    scatter_positions(x_combined, c.x, offset, c.N);
 }

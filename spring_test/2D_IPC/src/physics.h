@@ -12,9 +12,9 @@ namespace physics {
     using namespace math;
 
     struct NodeSegmentPair {
-        int node;   // i
-        int seg0;   // j
-        int seg1;   // j+1
+        int node;
+        int seg0;
+        int seg1;
     };
 
     // --- Spring energy ---
@@ -41,11 +41,15 @@ namespace physics {
     // --- Incremental potential (no barrier) ---
 
     Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat, const Vec &xpin,
-                               const std::vector<double> &mass, const std::vector<double> &L,
+                               const std::vector<double> &mass,
+                               const std::vector<double> &L,
+                               const std::vector<char> &is_pinned,
                                double dt, double k, const Vec2 &g_accel);
 
     Mat2 local_hess_no_barrier(int i, const Vec &x,
-                               const std::vector<double> &mass, const std::vector<double> &L,
+                               const std::vector<double> &mass,
+                               const std::vector<double> &L,
+                               const std::vector<char> &is_pinned,
                                double dt, double k);
 
-} // namespace physics
+}

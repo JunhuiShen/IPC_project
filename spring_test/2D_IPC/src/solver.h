@@ -6,22 +6,15 @@
 #include "step_filter/step_filter.h"
 #include <vector>
 
-// ======================================================
-// Nonlinear Gauss-Seidel solver
-//
-// Minimizes the incremental potential block-by-block.
-// BroadPhase and StepFilter are injected — swap either
-// without touching the solver.
-// ======================================================
-
-// Lightweight non-owning view into one chain's solver data
 struct BlockView {
     Vec*                        x;
     const Vec*                  xhat;
     const Vec*                  xpin;
     const std::vector<double>*  mass;
     const std::vector<double>*  L;
+    const std::vector<char>*    is_pinned;
     int                         offset;
+
     int size() const { return static_cast<int>(mass->size()); }
 };
 

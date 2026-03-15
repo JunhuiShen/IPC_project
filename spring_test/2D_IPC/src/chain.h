@@ -14,6 +14,7 @@ struct Chain {
     Vec xhat;         // predicted positions (linear extrapolation)
     Vec xpin;         // fixed pin targets
     std::vector<double> mass;
+    std::vector<char> is_pinned;
     std::vector<double> rest_lengths;
     std::vector<std::pair<int, int>> edges;
 };
@@ -27,6 +28,8 @@ void build_xhat(Chain& c, double dt);
 // v = (xnew - x) / dt, then x = xnew
 void update_velocity(Chain& c, const Vec& xnew, double dt);
 
-// Pack two chains' positions into a single flat vector
-void combine_positions(Vec& x_combined, const Vec& x_left, const Vec& x_right,
-                       int N_left, int N_right);
+// Copy one block of node positions into the global position vector
+void scatter_positions(Vec& x_combined, const Vec& x_block, int offset, int N_block);
+
+// Copy one chain's current positions into the global position vector
+void scatter_chain_positions(Vec& x_combined, const Chain& c, int offset);
