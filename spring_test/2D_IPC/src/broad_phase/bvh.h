@@ -64,22 +64,24 @@ void query_bvh  (const std::vector<BVHNode>& nodes, int nodeIdx,
 class BVHBroadPhase : public BroadPhase {
 public:
     void initialize(const Vec& x, const Vec& v,
-                    int N_left, int N_right, double dt, double dhat) override;
+                    const std::vector<char>& segment_valid,
+                    double dt, double dhat) override;
 
     void refresh(const Vec& x, const Vec& v,
-                 int moved_node, int N_left, int N_right,
+                 int moved_node,
                  double dt, double node_pad, double seg_pad) override;
 
     const std::vector<physics::NodeSegmentPair>& pairs() const override;
 
     std::vector<physics::NodeSegmentPair>
-        build_ccd_candidates(const Vec& x, const Vec& v,
-                             int N_left, int N_right, double dt) override;
+    build_ccd_candidates(const Vec& x, const Vec& v,
+                         const std::vector<char>& segment_valid,
+                         double dt) override;
 
     std::vector<physics::NodeSegmentPair>
-        build_trust_region_candidates(const Vec& x, const Vec& v,
-                                      int N_left, int N_right,
-                                      double dt, double motion_pad) override;
+    build_trust_region_candidates(const Vec& x, const Vec& v,
+                                  const std::vector<char>& segment_valid,
+                                  double dt, double motion_pad) override;
 
 public:
     struct Cache {
@@ -98,10 +100,8 @@ public:
     };
 
     Cache cache_;
-    int   N_left_  = 0;
-    int   N_right_ = 0;
 
     void build(const Vec& x, const Vec& v,
-               int N_left, int N_right, double dt,
-               double node_pad, double seg_pad);
+               const std::vector<char>& segment_valid,
+               double dt, double node_pad, double seg_pad);
 };

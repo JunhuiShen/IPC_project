@@ -16,11 +16,12 @@ class BroadPhase {
 public:
     // Set up the persistent barrier pair cache (called once per timestep)
     virtual void initialize(const Vec& x, const Vec& v,
-                            int N_left, int N_right, double dt, double dhat) = 0;
+                            const std::vector<char>& segment_valid,
+                            double dt, double dhat) = 0;
 
     // Incremental update after one node moved (called per Newton step)
     virtual void refresh(const Vec& x, const Vec& v,
-                         int moved_node, int N_left, int N_right,
+                         int moved_node,
                          double dt, double node_pad, double seg_pad) = 0;
 
     // Current barrier active-set pairs
@@ -28,13 +29,14 @@ public:
 
     // One-shot candidate builds for step filtering
     virtual std::vector<physics::NodeSegmentPair>
-        build_ccd_candidates(const Vec& x, const Vec& v,
-                             int N_left, int N_right, double dt) = 0;
+    build_ccd_candidates(const Vec& x, const Vec& v,
+                         const std::vector<char>& segment_valid,
+                         double dt) = 0;
 
     virtual std::vector<physics::NodeSegmentPair>
-        build_trust_region_candidates(const Vec& x, const Vec& v,
-                                      int N_left, int N_right,
-                                      double dt, double motion_pad) = 0;
+    build_trust_region_candidates(const Vec& x, const Vec& v,
+                                  const std::vector<char>& segment_valid,
+                                  double dt, double motion_pad) = 0;
 
     virtual ~BroadPhase() = default;
 };
