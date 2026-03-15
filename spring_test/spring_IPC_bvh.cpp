@@ -1850,7 +1850,7 @@ namespace simulation {
     using namespace collision_filtering::aabb;
     using namespace collision_filtering::ccd;
     using namespace initial_guess;
-
+    
     enum class ExampleType {
         Example1,
         Example2
