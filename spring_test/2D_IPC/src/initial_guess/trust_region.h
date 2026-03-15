@@ -5,23 +5,28 @@
 #include <vector>
 
 // ======================================================
-// TrustRegionGuess
+// Trust-region projected initial guess
 //
-// Limits the explicit step based on current separation:
-//   alpha = min over all pairs of eta * d0 / |dx_total|
-//   xnew  = x + alpha * dt * v
+// Matches the original monolithic implementation:
+// - operates on arbitrary blocks
+// - builds global x/v over all blocks
+// - uses global segment_valid
+// - preserves pinned nodes
 // ======================================================
 
 namespace initial_guess::trust_region {
-    double global_safe_step(const Vec& x, const Vec& v,
-                            const std::vector<physics::NodeSegmentPair>& pairs,
-                            double dt, double eta = 0.4);
-} // namespace initial_guess::trust_region
 
-class TrustRegionGuess : public InitialGuess {
-public:
-    void apply(Chain& left, Chain& right,
-               Vec& xnew_left, Vec& xnew_right,
-               Vec& x_combined, Vec& v_combined,
-               double dt, double eta) override;
-};
+    double global_safe_step(const Vec& x,
+                            const Vec& v,
+                            const std::vector<physics::NodeSegmentPair>& pairs,
+                            double dt,
+                            double eta = 0.4);
+
+    void apply(const std::vector<BlockRef>& blocks,
+               Vec& x_combined,
+               Vec& v_combined,
+               const std::vector<char>& segment_valid,
+               double dt,
+               double eta);
+
+} // namespace initial_guess::trust_region

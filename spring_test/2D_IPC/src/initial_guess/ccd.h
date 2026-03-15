@@ -5,23 +5,30 @@
 #include <vector>
 
 // ======================================================
-// CCDGuess
+// CCD initial guess
 //
-// Globally safe explicit step using CCD:
-//   omega = min over all pairs of eta * t_hit
+// Globally safe explicit step using CCD over an arbitrary
+// list of blocks/chains:
+//
+//   omega = min over all candidate pairs of eta * t_hit
 //   xnew  = x + omega * dt * v
+//
+// This matches the original monolithic code.
 // ======================================================
 
 namespace initial_guess::ccd {
-    double global_safe_step(const Vec& x, const Vec& v,
-                            const std::vector<physics::NodeSegmentPair>& pairs,
-                            double dt, double eta = 0.9);
-} // namespace initial_guess::ccd
 
-class CCDGuess : public InitialGuess {
-public:
-    void apply(Chain& left, Chain& right,
-               Vec& xnew_left, Vec& xnew_right,
-               Vec& x_combined, Vec& v_combined,
-               double dt, double eta) override;
-};
+    double global_safe_step(const Vec& x,
+                            const Vec& v,
+                            const std::vector<physics::NodeSegmentPair>& pairs,
+                            double dt,
+                            double eta = 0.9);
+
+    void apply(const std::vector<BlockRef>& blocks,
+               Vec& x_combined,
+               Vec& v_combined,
+               const std::vector<char>& segment_valid,
+               double dt,
+               double eta);
+
+} // namespace initial_guess::ccd

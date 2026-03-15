@@ -1,12 +1,19 @@
 #include "trivial.h"
 
-void TrivialGuess::apply(Chain& left, Chain& right,
-                         Vec& xnew_left, Vec& xnew_right,
-                         Vec& x_combined, Vec& v_combined,
-                         double dt, double eta) {
-    xnew_left  = left.x;
-    xnew_right = right.x;
-    for (int i = 0; i < left.N;  ++i) set_xi(v_combined, i,          get_xi(left.v,  i));
-    for (int i = 0; i < right.N; ++i) set_xi(v_combined, left.N + i, get_xi(right.v, i));
-    combine_positions(x_combined, left.x, right.x, left.N, right.N);
-}
+namespace initial_guess::trivial {
+
+    void apply(const std::vector<BlockRef>& blocks,
+               Vec& x_combined,
+               Vec& v_combined) {
+        const int total = total_nodes(blocks);
+        x_combined.assign(2 * total, 0.0);
+        v_combined.assign(2 * total, 0.0);
+
+        for (const auto& b : blocks)
+            *b.xnew = b.chain->x;
+
+        build_v_combined_from_chain_velocities(v_combined, blocks);
+        build_x_combined_from_current_positions(x_combined, blocks);
+    }
+
+} // namespace initial_guess::trivial
