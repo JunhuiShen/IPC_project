@@ -6,6 +6,7 @@
 #include "step_filter/ccd.h"
 #include "step_filter/trust_region.h"
 #include "initial_guess/initial_guess.h"
+#include "example.h"
 
 #include <iostream>
 #include <iomanip>
@@ -19,11 +20,6 @@ namespace fs = std::__fs::filesystem;
 using namespace math;
 
 namespace {
-
-    enum class ExampleType {
-        Example1,
-        Example2
-    };
 
     enum class StepPolicy {
         CCD,
@@ -70,78 +66,21 @@ int main() {
     // initial_guess::Type initial_guess_type = initial_guess::Type::Trivial;
     // initial_guess::Type initial_guess_type = initial_guess::Type::Affine;
 
-    // Monolithic-code eta rule:
-    // only use 0.4 when BOTH initial guess and step filtering are TrustRegion
     double eta;
-    if (initial_guess_type == initial_guess::Type::TrustRegion &&
-        filtering_step_policy == StepPolicy::TrustRegion) {
+    if (initial_guess_type == initial_guess::Type::TrustRegion && filtering_step_policy == StepPolicy::TrustRegion) {
         eta = 0.4;
-    } else if (initial_guess_type == initial_guess::Type::CCD &&
-               filtering_step_policy == StepPolicy::CCD) {
+    } else if (initial_guess_type == initial_guess::Type::CCD && filtering_step_policy == StepPolicy::CCD) {
         eta = 0.9;
     } else {
         eta = 0.9;
     }
 
-    int total_frames = 150;
-
     // ------------------------------------------------------
-    // Build example as a list of chains
+    // Build example
     // ------------------------------------------------------
-    std::vector<Chain> chains;
-
-    if (example_type == ExampleType::Example1) {
-        total_frames = 150;
-
-        Chain chain1 = make_chain({-0.1,  1.5}, {-0.1, -1.5}, number_of_nodes, 0.05);
-        Chain chain2 = make_chain({ 0.1,  1.5}, { 0.1, -1.5}, number_of_nodes, 0.05);
-
-        chain1.is_pinned[0] = 1;
-        chain2.is_pinned[0] = 1;
-
-        set_xi(chain1.xpin, 0, get_xi(chain1.x, 0));
-        set_xi(chain2.xpin, 0, get_xi(chain2.x, 0));
-
-        for (int i = 0; i < chain1.N; ++i)
-            set_xi(chain1.v, i, {-6.0, 0.0});
-
-        for (int i = 0; i < chain2.N; ++i)
-            set_xi(chain2.v, i, {6.0, 0.0});
-
-        chains.push_back(chain1);
-        chains.push_back(chain2);
-    }
-    else if (example_type == ExampleType::Example2) {
-        total_frames = 60;
-
-        Chain chain1 = make_chain({-0.8, 1.2}, { 1.6, 0.0}, number_of_nodes, 0.05);
-        Chain chain2 = make_chain({-0.4, 2.0}, { 2.0, 0.8}, number_of_nodes, 0.05);
-        Chain chain3 = make_chain({ 0.0, 2.8}, { 2.4, 1.6}, number_of_nodes, 0.05);
-        Chain ground = make_chain({-2.0, -1.8}, { 2.0, -1.8}, 2, 1.0);
-
-        ground.is_pinned[0] = 1;
-        ground.is_pinned[1] = 1;
-
-        set_xi(ground.xpin, 0, get_xi(ground.x, 0));
-        set_xi(ground.xpin, 1, get_xi(ground.x, 1));
-
-        for (int i = 0; i < chain1.N; ++i)
-            set_xi(chain1.v, i, {0.0, 0.0});
-
-        for (int i = 0; i < chain2.N; ++i)
-            set_xi(chain2.v, i, {0.0, 0.0});
-
-        for (int i = 0; i < chain3.N; ++i)
-            set_xi(chain3.v, i, {0.0, 0.0});
-
-        for (int i = 0; i < ground.N; ++i)
-            set_xi(ground.v, i, {0.0, 0.0});
-
-        chains.push_back(chain1);
-        chains.push_back(chain2);
-        chains.push_back(chain3);
-        chains.push_back(ground);
-    }
+    ExampleScene scene = build_example(example_type, number_of_nodes);
+    std::vector<Chain> chains = std::move(scene.chains);
+    int total_frames = scene.total_frames;
 
     // ------------------------------------------------------
     // Global indexing data
@@ -149,25 +88,27 @@ int main() {
     const int nblocks = static_cast<int>(chains.size());
 
     std::vector<int> offsets(nblocks, 0);
-    for (int b = 1; b < nblocks; ++b)
+    for (int b = 1; b < nblocks; ++b) {
         offsets[b] = offsets[b - 1] + chains[b - 1].N;
-
-    int total_nodes = 0;
-    for (const auto& c : chains)
-        total_nodes += c.N;
-
-    // Global valid-segment array
-    std::vector<char> segment_valid(std::max(0, total_nodes - 1), 0);
-    for (int b = 0; b < nblocks; ++b) {
-        for (int i = 0; i + 1 < chains[b].N; ++i)
-            segment_valid[offsets[b] + i] = 1;
     }
 
-    // Combined edge list (for export only)
+    int total_nodes = 0;
+    for (const auto& c : chains) {
+        total_nodes += c.N;
+    }
+
+    std::vector<char> segment_valid(std::max(0, total_nodes - 1), 0);
+    for (int b = 0; b < nblocks; ++b) {
+        for (int i = 0; i + 1 < chains[b].N; ++i) {
+            segment_valid[offsets[b] + i] = 1;
+        }
+    }
+
     std::vector<std::pair<int, int>> edges_combined;
     for (int b = 0; b < nblocks; ++b) {
-        for (const auto& e : chains[b].edges)
+        for (const auto& e : chains[b].edges) {
             edges_combined.emplace_back(e.first + offsets[b], e.second + offsets[b]);
+        }
     }
 
     // ------------------------------------------------------
@@ -176,16 +117,17 @@ int main() {
     Vec x_combined(2 * total_nodes, 0.0);
     Vec v_combined(2 * total_nodes, 0.0);
 
-    // Per-block unknowns
     std::vector<Vec> xnew_blocks(nblocks);
-    for (int b = 0; b < nblocks; ++b)
+    for (int b = 0; b < nblocks; ++b) {
         xnew_blocks[b] = chains[b].x;
+    }
 
     auto make_guess_blocks = [&]() {
         std::vector<initial_guess::BlockRef> guess_blocks;
         guess_blocks.reserve(nblocks);
-        for (int b = 0; b < nblocks; ++b)
+        for (int b = 0; b < nblocks; ++b) {
             guess_blocks.push_back({&chains[b], &xnew_blocks[b], offsets[b]});
+        }
         return guess_blocks;
     };
 
@@ -193,21 +135,15 @@ int main() {
         std::vector<BlockView> blocks;
         blocks.reserve(nblocks);
         for (int b = 0; b < nblocks; ++b) {
-            blocks.push_back({
-                                     &xnew_blocks[b],
-                                     &chains[b].xhat,
-                                     &chains[b].xpin,
-                                     &chains[b].mass,
-                                     &chains[b].rest_lengths,
-                                     &chains[b].is_pinned,
-                                     offsets[b]
-                             });
+            blocks.push_back({&xnew_blocks[b], &chains[b].xhat, &chains[b].xpin, &chains[b].mass,
+                              &chains[b].rest_lengths, &chains[b].is_pinned,offsets[b]
+            });
         }
         return blocks;
     };
 
     // ------------------------------------------------------
-    // Initial export: frame 1 is the initial configuration
+    // Initial export
     // ------------------------------------------------------
     {
         std::vector<initial_guess::BlockRef> guess_blocks = make_guess_blocks();
@@ -222,41 +158,27 @@ int main() {
     // Time stepping
     // ------------------------------------------------------
     for (int frame = 2; frame <= total_frames + 1; ++frame) {
-
-        // Linear extrapolation
-        for (int b = 0; b < nblocks; ++b)
+        for (int b = 0; b < nblocks; ++b) {
             build_xhat(chains[b], dt);
+        }
 
-        // Initial guess
         std::vector<initial_guess::BlockRef> guess_blocks = make_guess_blocks();
-        initial_guess::apply(initial_guess_type,
-                             guess_blocks,
-                             x_combined,
-                             v_combined,
-                             segment_valid,
-                             dt,
-                             dhat,
-                             eta);
+        initial_guess::apply(initial_guess_type,guess_blocks,x_combined,v_combined, segment_valid,
+                             dt, dhat, eta);
 
-        // Solver block views
         std::vector<BlockView> blocks = make_solver_blocks();
 
-        // Nonlinear GS solve
         std::vector<double> res_hist;
-        SolveResult result;
+        SolveResult result{};
 
         if (filtering_step_policy == StepPolicy::CCD) {
             CCDFilter filter;
-            result = solve(blocks, x_combined, v_combined,
-                           dt, k_spring, g_accel,
-                           dhat, max_global_iters, tol_abs, eta,
-                           *broad_phase, filter, &res_hist);
+            result = solve(blocks, x_combined, v_combined, dt, k_spring, g_accel,
+                           dhat, max_global_iters, tol_abs, eta, *broad_phase, filter, &res_hist);
         } else {
             TrustRegionFilter filter;
-            result = solve(blocks, x_combined, v_combined,
-                           dt, k_spring, g_accel,
-                           dhat, max_global_iters, tol_abs, eta,
-                           *broad_phase, filter, &res_hist);
+            result = solve(blocks, x_combined, v_combined, dt, k_spring, g_accel,
+                           dhat, max_global_iters, tol_abs, eta, *broad_phase, filter, &res_hist);
         }
 
         double global_residual = result.final_residual;
@@ -265,11 +187,10 @@ int main() {
         max_global_residual = std::max(max_global_residual, global_residual);
         sum_global_iters_used += iters_used;
 
-        // Velocity update
-        for (int b = 0; b < nblocks; ++b)
+        for (int b = 0; b < nblocks; ++b) {
             update_velocity(chains[b], xnew_blocks[b], dt);
+        }
 
-        // Export solved positions
         initial_guess::build_x_combined_from_current_positions(x_combined, guess_blocks);
         export_frame(outdir, frame, x_combined, edges_combined);
 
