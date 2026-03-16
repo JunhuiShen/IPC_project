@@ -5,7 +5,8 @@
 
 enum class ExampleType {
     Example1,
-    Example2
+    Example2,
+    Example3
 };
 
 struct ExampleScene {
