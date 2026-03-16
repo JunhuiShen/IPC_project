@@ -78,24 +78,6 @@ ExampleScene build_example(ExampleType example_type, int number_of_nodes){
             scene.chains.push_back(ground);
             break;
         }
-
-        // Example 3: upper chain falling onto pinned chain
-        case ExampleType::Example3:{
-            auto [l0, l1] = stretch_about_midpoint({-1.2, 0.2}, {1.2, 0.0}, stretch);
-            auto [u0, u1] = stretch_about_midpoint({-0.4, 1.8}, {1.6, 1.0}, stretch);
-
-            Chain lower = make_chain(l0, l1, number_of_nodes, 0.05);
-            Chain upper = make_chain(u0, u1, number_of_nodes, 0.05);
-
-            pin_node(lower, 0);
-            pin_node(lower, lower.N - 1);
-
-            set_uniform_velocity(lower, {0.0, 0.0});
-            set_uniform_velocity(upper, {0.0, 0.0});
-
-            scene.chains.push_back(lower);
-            scene.chains.push_back(upper);
-            break;
         }
 
         default:
