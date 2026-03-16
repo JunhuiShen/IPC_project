@@ -66,7 +66,7 @@ ExampleScene build_example(ExampleType example_type, int number_of_nodes) {
     }
     // Example 3: an upper free chain falls onto a lower pinned chain
     else if (example_type == ExampleType::Example3) {
-            total_frame = 80;
+            total_frame = 60;
 
             Chain lower = chain_model::make_chain({-1.2, 0.2}, {1.2, 0.0}, number_of_nodes, 0.05);
             Chain upper = chain_model::make_chain({-0.4, 1.8}, {1.6, 1.0}, number_of_nodes, 0.05);
