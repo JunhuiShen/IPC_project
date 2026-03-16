@@ -1850,10 +1850,11 @@ namespace simulation {
     using namespace collision_filtering::aabb;
     using namespace collision_filtering::ccd;
     using namespace initial_guess;
-    
+
     enum class ExampleType {
         Example1,
-        Example2
+        Example2,
+        Example3
     };
 
     int sim() {
@@ -1882,7 +1883,8 @@ namespace simulation {
         // Example 1: two vertical chains moving toward each other
         // Example 2: multiple chains fall onto a pinned ground segment
 //        ExampleType example_type = ExampleType::Example1;
-         ExampleType example_type = ExampleType::Example2;
+//         ExampleType example_type = ExampleType::Example2;
+        ExampleType example_type = ExampleType::Example3;
 
         // Choose the initial guess type (Trivial/Affine/CCD/TrustRegion)
         Type initial_guess_type = Type::CCD;
@@ -1958,6 +1960,30 @@ namespace simulation {
             chains.push_back(chain2);
             chains.push_back(chain3);
             chains.push_back(ground);
+        }
+        // Example 3: an upper free chain falls onto a lower pinned chain
+        else if (example_type == ExampleType::Example3) {
+            total_frame = 60;
+
+            Chain lower = chain_model::make_chain({-1.2, 0.2}, {1.2, 0.0}, number_of_nodes, 0.05);
+            Chain upper = chain_model::make_chain({-0.4, 1.8}, {1.6, 1.0}, number_of_nodes, 0.05);
+
+            // Pin both ends of the lower chain so it acts like a suspended obstacle
+            lower.is_pinned[0] = 1;
+            lower.is_pinned[lower.N - 1] = 1;
+
+            set_xi(lower.xpin, 0, get_xi(lower.x, 0));
+            set_xi(lower.xpin, lower.N - 1, get_xi(lower.x, lower.N - 1));
+
+            // Initial velocities
+            for (int i = 0; i < lower.N; ++i)
+                set_xi(lower.v, i, {0.0, 0.0});
+
+            for (int i = 0; i < upper.N; ++i)
+                set_xi(upper.v, i, {0.0, 0.0});
+
+            chains.push_back(lower);
+            chains.push_back(upper);
         }
 
         // Global indexing data
