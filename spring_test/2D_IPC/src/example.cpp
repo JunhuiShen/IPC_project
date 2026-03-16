@@ -6,7 +6,7 @@ ExampleScene build_example(ExampleType example_type, int number_of_nodes) {
 
     // Example 1: two vertical chains moving toward each other
     if (example_type == ExampleType::Example1) {
-        scene.total_frames = 150;
+        scene.total_frames = 60;
 
         Chain chain1 = make_chain({-0.1,  1.5}, {-0.1, -1.5}, number_of_nodes, 0.05);
         Chain chain2 = make_chain({ 0.1,  1.5}, { 0.1, -1.5}, number_of_nodes, 0.05);
