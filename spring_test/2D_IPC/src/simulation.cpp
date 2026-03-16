@@ -55,6 +55,7 @@ int main() {
     // ------------------------------------------------------
     // ExampleType example_type = ExampleType::Example1;
     ExampleType example_type = ExampleType::Example2;
+    // ExampleType example_type = ExampleType::Example3;
 
     auto broad_phase = std::make_unique<BVHBroadPhase>();
 
