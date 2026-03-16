@@ -1903,7 +1903,7 @@ namespace simulation {
             eta = 0.9;
         }
 
-        int total_frame = 150;
+        int total_frame = 60;
 
         std::vector<Chain> chains;
 
