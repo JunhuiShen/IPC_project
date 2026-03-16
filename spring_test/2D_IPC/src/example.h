@@ -10,7 +10,7 @@ enum class ExampleType {
 
 struct ExampleScene {
     std::vector<Chain> chains;
-    int total_frames = 150;
+    int total_frames = 60;
 };
 
 ExampleScene build_example(ExampleType example_type, int number_of_nodes);
