@@ -4,6 +4,7 @@
 ExampleScene build_example(ExampleType example_type, int number_of_nodes) {
     ExampleScene scene;
 
+    // Example 1: two vertical chains moving toward each other
     if (example_type == ExampleType::Example1) {
         scene.total_frames = 150;
 
@@ -27,6 +28,7 @@ ExampleScene build_example(ExampleType example_type, int number_of_nodes) {
         scene.chains.push_back(chain1);
         scene.chains.push_back(chain2);
     }
+    // Example 2: multiple chains fall onto a pinned ground segment
     else if (example_type == ExampleType::Example2) {
         scene.total_frames = 60;
 
@@ -62,6 +64,7 @@ ExampleScene build_example(ExampleType example_type, int number_of_nodes) {
         scene.chains.push_back(chain3);
         scene.chains.push_back(ground);
     }
+    // Example 3: an upper free chain falls onto a lower pinned chain
     else if (example_type == ExampleType::Example3) {
             total_frame = 80;
 
