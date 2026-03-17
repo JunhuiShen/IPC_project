@@ -48,7 +48,7 @@ int main() {
     const int max_global_iters = 5000;
     const double tol_abs = 1e-6;
     const double dhat = 0.1;
-    const int number_of_nodes = 100;
+    const int number_of_nodes = 100; // number of nodes per chain
 
     // ------------------------------------------------------
     // Strategy choices
