@@ -22,14 +22,12 @@ static std::pair<Vec2, Vec2> stretch_about_midpoint(const Vec2& a, const Vec2& b
     };
 }
 
-static void set_uniform_velocity(Chain& chain, const Vec2& v)
-{
+static void set_uniform_velocity(Chain& chain, const Vec2& v){
     for (int i = 0; i < chain.N; ++i)
         set_xi(chain.v, i, v);
 }
 
-static void pin_node(Chain& chain, int i)
-{
+static void pin_node(Chain& chain, int i){
     chain.is_pinned[i] = 1;
     set_xi(chain.xpin, i, get_xi(chain.x, i));
 }
@@ -42,8 +40,7 @@ ExampleScene build_example(ExampleType example_type, int number_of_nodes){
     ExampleScene scene;
     scene.total_frames = 120;
 
-    const double stretch =
-            std::sqrt(std::max(1.0, double(number_of_nodes - 1) / 10.0));
+    const double stretch = std::sqrt(std::max(1.0, double(number_of_nodes - 1) / 10.0));
 
     switch (example_type) {
 
