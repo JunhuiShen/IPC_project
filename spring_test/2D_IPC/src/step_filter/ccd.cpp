@@ -42,7 +42,6 @@ namespace step_filter::ccd {
         double t_star = t_candidates[0];
         if (num_roots == 2 && t_candidates[1] < t_star) t_star = t_candidates[1];
 
-        // Inside-segment test at t_star
         Vec2 x1t = add(x1, scale(dx1, t_star));
         Vec2 x2t = add(x2, scale(dx2, t_star));
         Vec2 x3t = add(x3, scale(dx3, t_star));
@@ -64,9 +63,13 @@ namespace step_filter::ccd {
                      const Vec2& x2, const Vec2& dx2,
                      const Vec2& x3, const Vec2& dx3,
                      double eta) {
+        ++total_tests;
+
         double t_hit;
         if (!point_segment_2d(x1, dx1, x2, dx2, x3, dx3, t_hit))
             return 1.0;
+
+        ++total_collisions;
         return (t_hit <= 1e-12) ? 0.0 : eta * t_hit;
     }
 

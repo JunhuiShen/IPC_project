@@ -1,6 +1,7 @@
 #pragma once
 
 #include "step_filter.h"
+#include <cstddef>
 
 // ======================================================
 // CCD step filter
@@ -12,11 +13,20 @@
 
 namespace step_filter::ccd {
 
-    // Low-level free functions (reusable without class instantiation)
-    bool   point_segment_2d(const Vec2& x1, const Vec2& dx1,
-                             const Vec2& x2, const Vec2& dx2,
-                             const Vec2& x3, const Vec2& dx3,
-                             double& t_out, double eps = 1e-12);
+    // Global CCD statistics
+    inline std::size_t total_tests = 0;
+    inline std::size_t total_collisions = 0;
+
+    inline void reset_stats() {
+        total_tests = 0;
+        total_collisions = 0;
+    }
+
+    // Low-level free functions
+    bool point_segment_2d(const Vec2& x1, const Vec2& dx1,
+                          const Vec2& x2, const Vec2& dx2,
+                          const Vec2& x3, const Vec2& dx3,
+                          double& t_out, double eps = 1e-12);
 
     double safe_step(const Vec2& x1, const Vec2& dx1,
                      const Vec2& x2, const Vec2& dx2,
