@@ -44,17 +44,18 @@ int main() {
     // ------------------------------------------------------
     const double dt = 1.0 / 30.0;
     const Vec2 g_accel{0.0, -9.81};
-    const double k_spring = 20.0;
     const int max_global_iters = 5000;
     const double tol_abs = 1e-6;
     const double dhat = 0.1;
+    double k_spring = 200;
     const int number_of_nodes = 100; // number of nodes per chain
 
     // ------------------------------------------------------
     // Strategy choices
     // ------------------------------------------------------
-//     const ExampleType example_type = ExampleType::Example1;
+//         const ExampleType example_type = ExampleType::Example1;
     const ExampleType example_type = ExampleType::Example2;
+
 
     auto broad_phase = std::make_unique<BVHBroadPhase>();
 
