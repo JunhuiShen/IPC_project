@@ -49,6 +49,7 @@ int main() {
     const double dhat = 0.1;
     double k_spring = 200;
     const int number_of_nodes = 100; // number of nodes per chain
+    double mass_density=1000.0; //kg/m^2, mass density of water
 
     // ------------------------------------------------------
     // Strategy choices

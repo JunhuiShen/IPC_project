@@ -1,15 +1,16 @@
 #include "chain.h"
 
-Chain make_chain(Vec2 start, Vec2 end, int N, double mass_value) {
+Chain make_chain(Vec2 start, Vec2 end, int N, double mass_density, double thickness) {
     Chain c;
     c.N = N;
     c.x.resize(2 * N);
     c.v.assign(2 * N, 0.0);
     c.xhat.assign(2 * N, 0.0);
     c.xpin.assign(2 * N, 0.0);
-    c.mass.assign(N, mass_value);
+    c.mass.resize(N);
     c.is_pinned.assign(N, 0);
 
+    //create chain geom
     for (int i = 0; i < N; ++i) {
         double t = (N == 1) ? 0.0 : double(i) / (N - 1);
         Vec2 xi{start.x + t * (end.x - start.x), start.y + t * (end.y - start.y)};
@@ -17,9 +18,17 @@ Chain make_chain(Vec2 start, Vec2 end, int N, double mass_value) {
         set_xi(c.xpin, i, xi);
     }
 
+    //create chain rest lengths
     for (int i = 0; i < N - 1; ++i) {
         c.edges.emplace_back(i, i + 1);
         c.rest_lengths.push_back(math::node_distance(c.x, i, i + 1));
+    }
+
+    //set nodal masses
+    for(int s=0;s<N-1;s++){
+        Vec2 edge=get_xi(c.x, s+1)-get_xi(c.x, s);
+        double segment_length=math::norm(edge);
+        double segment_mass=thickness*thickness*segment_length*mass_density;
     }
 
     return c;

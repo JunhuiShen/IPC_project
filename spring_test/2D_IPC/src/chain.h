@@ -20,7 +20,7 @@ struct Chain {
 };
 
 // Build a uniformly-spaced chain from start to end with N nodes
-Chain make_chain(Vec2 start, Vec2 end, int N, double mass_value);
+Chain make_chain(Vec2 start, Vec2 end, int N, double mass_value, double thickness=0.1);
 
 // xhat = x + dt * v
 void build_xhat(Chain& c, double dt);
