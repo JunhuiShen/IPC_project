@@ -29,7 +29,7 @@ Chain make_chain(Vec2 start, Vec2 end, int N, double mass_density, double thickn
         Vec2 edge=get_xi(c.x, s+1)-get_xi(c.x, s);
         double segment_length=math::norm(edge);
         double segment_mass=thickness*thickness*segment_length*mass_density;
-        c.mass[2*s]+=.5*segment_mass;c.mass[2*s+1]+=.5*segment_mass;
+        c.mass[s]+=.5*segment_mass;c.mass[s+1]+=.5*segment_mass;
     }
 
     return c;
