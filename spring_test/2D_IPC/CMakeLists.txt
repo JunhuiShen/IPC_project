@@ -17,6 +17,8 @@ add_library(ipc_core
     src/initial_guess/ccd.cpp
     src/initial_guess/trust_region.cpp
     src/solver.cpp
+    src/example.cpp
+    src/initial_guess/initial_guess.cpp
 )
 
 target_include_directories(ipc_core PUBLIC src)
