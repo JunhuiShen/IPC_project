@@ -79,6 +79,11 @@ public:
                          double dt) override;
 
     std::vector<physics::NodeSegmentPair>
+    build_ccd_candidates_for_node(int who, const Vec& x, const Vec& v_newton,
+                                  const std::vector<char>& segment_valid,
+                                  double dt) override;
+
+    std::vector<physics::NodeSegmentPair>
     build_trust_region_candidates(const Vec& x, const Vec& v,
                                   const std::vector<char>& segment_valid,
                                   double dt, double motion_pad) override;

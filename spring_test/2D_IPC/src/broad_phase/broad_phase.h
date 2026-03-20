@@ -33,6 +33,15 @@ public:
                          const std::vector<char>& segment_valid,
                          double dt) = 0;
 
+    // Efficient single-node CCD candidates using the existing BVH (no rebuild)
+    // Default falls back to full rebuild — override for performance.
+    virtual std::vector<physics::NodeSegmentPair>
+    build_ccd_candidates_for_node(int who, const Vec& x, const Vec& v_newton,
+                                  const std::vector<char>& segment_valid,
+                                  double dt) {
+        return build_ccd_candidates(x, v_newton, segment_valid, dt);
+    }
+
     virtual std::vector<physics::NodeSegmentPair>
     build_trust_region_candidates(const Vec& x, const Vec& v,
                                   const std::vector<char>& segment_valid,

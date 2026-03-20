@@ -69,16 +69,23 @@ void query_bvh(const std::vector<BVHNode>& nodes, int nodeIdx,
                const AABB& query, std::vector<int>& hits) {
     if (nodeIdx < 0) return;
 
-    const BVHNode& n = nodes[nodeIdx];
-    if (!aabb_intersects(n.bbox, query)) return;
+    // iterative stack-based traversal
+    int stack[64];
+    int top = 0;
+    stack[top++] = nodeIdx;
 
-    if (n.leafIndex >= 0) {
-        hits.push_back(n.leafIndex);
-        return;
+    while (top > 0) {
+        const BVHNode& n = nodes[stack[--top]];
+        if (!aabb_intersects(n.bbox, query)) continue;
+
+        if (n.leafIndex >= 0) {
+            hits.push_back(n.leafIndex);
+            continue;
+        }
+
+        stack[top++] = n.left;
+        stack[top++] = n.right;
     }
-
-    query_bvh(nodes, n.left, query, hits);
-    query_bvh(nodes, n.right, query, hits);
 }
 
 // ======================================================
@@ -275,6 +282,54 @@ std::vector<NSP> BVHBroadPhase::build_ccd_candidates(const Vec& x, const Vec& v,
     BVHBroadPhase tmp;
     tmp.build(x, v, segment_valid, dt, /*node_pad=*/0.0, /*seg_pad=*/0.0);
     return tmp.cache_.pairs;
+}
+
+std::vector<NSP> BVHBroadPhase::build_ccd_candidates_for_node(
+        int who, const Vec& x, const Vec& v_newton,
+        const std::vector<char>& segment_valid, double dt) {
+
+    std::vector<NSP> result;
+    if (cache_.seg_bvh_root < 0) return result;
+
+    const int total = static_cast<int>(x.size() / 2);
+
+    // 1. Node 'who' sweeps — query segment BVH for intersecting segments
+    AABB node_box = build_node_box(x, v_newton, who, dt, 0.0);
+    std::vector<int> hits;
+    query_bvh(cache_.seg_bvh_nodes, cache_.seg_bvh_root, node_box, hits);
+
+    for (int leaf_k : hits) {
+        int seg0 = cache_.seg_leaf_to_seg0[leaf_k];
+        int seg1 = seg0 + 1;
+        if (seg1 >= total) continue;
+        if (is_invalid_pair(who, seg0, seg1)) continue;
+        result.push_back({who, seg0, seg1});
+    }
+
+    // 2. Adjacent segments containing 'who' also sweep — scan all nodes against them
+    auto check_segment = [&](int seg0) {
+        if (!is_valid_segment_start(seg0, segment_valid)) return;
+        int seg1 = seg0 + 1;
+        AABB seg_box = build_segment_box(x, v_newton, seg0, dt, 0.0);
+        for (int node = 0; node < total; ++node) {
+            if (is_invalid_pair(node, seg0, seg1)) continue;
+            if (aabb_intersects(build_node_box(x, v_newton, node, dt, 0.0), seg_box))
+                result.push_back({node, seg0, seg1});
+        }
+    };
+
+    check_segment(who - 1);
+    check_segment(who);
+
+    // Deduplicate
+    std::sort(result.begin(), result.end(), [](const NSP& a, const NSP& b) {
+        return std::tie(a.node, a.seg0) < std::tie(b.node, b.seg0);
+    });
+    result.erase(std::unique(result.begin(), result.end(), [](const NSP& a, const NSP& b) {
+        return a.node == b.node && a.seg0 == b.seg0;
+    }), result.end());
+
+    return result;
 }
 
 std::vector<NSP> BVHBroadPhase::build_trust_region_candidates(const Vec& x, const Vec& v,

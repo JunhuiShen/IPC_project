@@ -23,9 +23,9 @@ static void pin_node(Chain& chain, int i){
 // Scene builder
 // ------------------------------------------------------
 
-ExampleScene build_example(ExampleType example_type, int number_of_nodes){
+ExampleScene build_example(ExampleType example_type, int number_of_nodes, double mass_density) {
     ExampleScene scene;
-    scene.total_frames = 60;
+    scene.total_frames = 120;
 
     switch (example_type) {
 
@@ -35,8 +35,8 @@ ExampleScene build_example(ExampleType example_type, int number_of_nodes){
         case ExampleType::Example1:
         {
 
-            Chain chain1 = make_chain({-0.1, 3.0}, {-0.1, -3.0}, number_of_nodes, 0.05);
-            Chain chain2 = make_chain({ 0.1, 3.0}, { 0.1, -3.0}, number_of_nodes, 0.05);
+            Chain chain1 = make_chain({-0.1, 3.0}, {-0.1, -3.0}, number_of_nodes, mass_density);
+            Chain chain2 = make_chain({ 0.1, 3.0}, { 0.1, -3.0}, number_of_nodes, mass_density);
 
             pin_node(chain1, 0);
             pin_node(chain2, 0);
@@ -55,8 +55,8 @@ ExampleScene build_example(ExampleType example_type, int number_of_nodes){
         case ExampleType::Example2:
         {
 
-            Chain chain1 = make_chain({ 2.5, -0.5}, {-1.8,  1.7}, number_of_nodes, 0.05);
-            Chain chain2 = make_chain({ 3.0,  0.3}, {-1.3,  2.5}, number_of_nodes, 0.05);
+            Chain chain1 = make_chain({ 2.5, -0.5}, {-1.8,  1.7}, number_of_nodes, mass_density);
+            Chain chain2 = make_chain({ 3.0,  0.3}, {-1.3,  2.5}, number_of_nodes, mass_density);
 
             Chain ground = make_chain({-3.0, -1.8}, { 3.0, -1.8}, 2, 1.0);
 

@@ -100,8 +100,8 @@ static void update_one_node(int local_i, const BlockView& b,
     std::vector<NodeSegmentPair> filtering_candidate_set;
 
     if (dynamic_cast<CCDFilter*>(&step_filter) != nullptr) {
-        filtering_candidate_set = broad_phase.build_ccd_candidates(
-                x_global, v_newton, segment_valid, dt
+        filtering_candidate_set = broad_phase.build_ccd_candidates_for_node(
+                who, x_global, v_newton, segment_valid, dt
         );
     } else {
         double motion_pad = norm(dx) / eta;

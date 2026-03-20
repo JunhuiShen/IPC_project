@@ -44,10 +44,10 @@ int main() {
     // ------------------------------------------------------
     const double dt = 1.0 / 30.0;
     const Vec2 g_accel{0.0, -9.81};
-    const int max_global_iters = 5000;
+    const int max_global_iters = 10000;
     const double tol_abs = 1e-6;
     const double dhat = 0.1;
-    double k_spring = 200;
+    double k_spring = 1000;
     const int number_of_nodes = 100; // number of nodes per chain
     double mass_density=1000.0; //kg/m^2, mass density of water
 
@@ -81,7 +81,7 @@ int main() {
     // ------------------------------------------------------
     // Build example
     // ------------------------------------------------------
-    ExampleScene scene = build_example(example_type, number_of_nodes);
+    ExampleScene scene = build_example(example_type, number_of_nodes, mass_density);
     std::vector<Chain> chains = std::move(scene.chains);
     const int total_frames = scene.total_frames;
 

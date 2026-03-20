@@ -1,5 +1,5 @@
 #include "chain.h"
-
+#include <iostream>
 Chain make_chain(Vec2 start, Vec2 end, int N, double mass_density, double thickness) {
     Chain c;
     c.N = N;
@@ -29,7 +29,8 @@ Chain make_chain(Vec2 start, Vec2 end, int N, double mass_density, double thickn
         Vec2 edge=get_xi(c.x, s+1)-get_xi(c.x, s);
         double segment_length=math::norm(edge);
         double segment_mass=thickness*thickness*segment_length*mass_density;
-        c.mass[s]+=.5*segment_mass;c.mass[s+1]+=.5*segment_mass;
+        c.mass[s] += .5*segment_mass; c.mass[s+1] += .5*segment_mass;
+        std::cout<<"segment "<<s<<" length="<<segment_length<<" mass="<<segment_mass<<"\n";
     }
 
     return c;
