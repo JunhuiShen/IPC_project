@@ -53,8 +53,8 @@ int main() {
     // ------------------------------------------------------
     // Strategy choices
     // ------------------------------------------------------
-//         const ExampleType example_type = ExampleType::Example1;
-    const ExampleType example_type = ExampleType::Example2;
+        const ExampleType example_type = ExampleType::Example1;
+    // const ExampleType example_type = ExampleType::Example2;
 
 
     auto broad_phase = std::make_unique<BVHBroadPhase>();
