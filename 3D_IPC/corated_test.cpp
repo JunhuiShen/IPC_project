@@ -5,8 +5,7 @@
 #include <cmath>
 
 // Tests
-void FiniteDifferenceGradientTest(const TriangleRest& rest, const TriangleDef& def_in, double mu,
-                                  double lambda, double eps = 1e-6) {
+void FiniteDifferenceGradientTest(const TriangleRest& rest, const TriangleDef& def_in, double mu, double lambda, double eps = 1e-6) {
     auto g = corotated_node_gradient(rest, def_in, mu, lambda);
 
     std::cout << std::setprecision(16);
@@ -45,8 +44,7 @@ void FiniteDifferenceGradientTest(const TriangleRest& rest, const TriangleDef& d
     std::cout << "Max rel err = " << max_rel_err << "\n\n";
 }
 
-void FiniteDifferenceHessianTest(const TriangleRest& rest, const TriangleDef& def, double mu,
-                                 double lambda, double eps = 1e-6) {
+void FiniteDifferenceHessianTest(const TriangleRest& rest, const TriangleDef& def, double mu, double lambda, double eps = 1e-6) {
     std::cout << std::setprecision(16);
     std::cout << "===== Node-gradient vs node-Hessian FD test =====\n";
 
@@ -86,10 +84,7 @@ void FiniteDifferenceHessianTest(const TriangleRest& rest, const TriangleDef& de
     std::cout << "Global max rel err = " << max_rel_err << "\n\n";
 }
 
-void ConvergenceTestEnergyGradient(const TriangleRest& rest,
-                                   const TriangleDef& def,
-                                   double mu,
-                                   double lambda) {
+void ConvergenceTestEnergyGradient(const TriangleRest& rest, const TriangleDef& def, double mu, double lambda) {
     std::cout << "\n===== Energy to Gradient convergence test =====\n";
 
     TriangleDef dx = ZeroTriangleDef();
@@ -130,8 +125,7 @@ void ConvergenceTestEnergyGradient(const TriangleRest& rest,
     }
 }
 
-void ConvergenceTestHessian(const TriangleRest& rest,
-                            const TriangleDef& def,
+void ConvergenceTestHessian(const TriangleRest& rest, const TriangleDef& def,
                             double mu,
                             double lambda) {
     std::cout << "\n===== Gradient to Hessian convergence test =====\n";
