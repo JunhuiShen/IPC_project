@@ -25,11 +25,50 @@ void export_obj(const std::string& filename,
         out << "l " << (e.first + 1) << " " << (e.second + 1) << "\n";
 }
 
+void export_geo(const std::string& filename,
+                const Vec& x,
+                const std::vector<std::pair<int,int>>& edges) {
+    std::ofstream out(filename);
+    if (!out) {
+        std::cerr << "Error: cannot write " << filename << "\n";
+        return;
+    }
+
+    const int N = static_cast<int>(x.size() / 2);
+    const int E = static_cast<int>(edges.size());
+
+    out << std::setprecision(17);
+
+    // ASCII PGEOMETRY format — supported by all Houdini versions
+    out << "PGEOMETRY V5\n";
+    out << "NPoints " << N << " NPrims " << E << "\n";
+    out << "NPointGroups 0 NPrimGroups 0\n";
+    out << "NPointAttrib 0 NVertexAttrib 0 NPrimAttrib 0 NAttrib 0\n";
+
+    for (int i = 0; i < N; ++i) {
+        Vec2 xi = get_xi(x, i);
+        out << xi.x << " " << xi.y << " 0 1\n";
+    }
+
+    // open polygon (< = not closed) with 2 vertices per edge
+    for (const auto& e : edges) {
+        out << "Poly 2 < " << e.first << " " << e.second << "\n";
+    }
+
+    out << "beginExtra\nendExtra\n";
+}
+
 void export_frame(const std::string& outdir,
                   int frame,
                   const Vec& x_combined,
-                  const std::vector<std::pair<int,int>>& edges_combined) {
+                  const std::vector<std::pair<int,int>>& edges_combined,
+                  OutputFormat format) {
     std::ostringstream ss;
-    ss << outdir << "/frame_" << std::setw(4) << std::setfill('0') << frame << ".obj";
-    export_obj(ss.str(), x_combined, edges_combined);
+    if (format == OutputFormat::GEO) {
+        ss << outdir << "/frame_" << std::setw(4) << std::setfill('0') << frame << ".geo";
+        export_geo(ss.str(), x_combined, edges_combined);
+    } else {
+        ss << outdir << "/frame_" << std::setw(4) << std::setfill('0') << frame << ".obj";
+        export_obj(ss.str(), x_combined, edges_combined);
+    }
 }

@@ -55,6 +55,7 @@ int main() {
     // Strategy choices
     // ------------------------------------------------------
         const ExampleType example_type = ExampleType::Example1;
+    const OutputFormat output_format = OutputFormat::GEO;
     // const ExampleType example_type = ExampleType::Example2;
 
 
@@ -150,7 +151,7 @@ int main() {
     {
         std::vector<initial_guess::BlockRef> guess_blocks = make_guess_blocks();
         initial_guess::build_x_combined_from_current_positions(x_combined, guess_blocks);
-        export_frame(outdir, 1, x_combined, edges_combined);
+        export_frame(outdir, 1, x_combined, edges_combined, output_format);
     }
 
     double max_global_residual = 0.0;
@@ -197,7 +198,7 @@ int main() {
         }
 
         initial_guess::build_x_combined_from_current_positions(x_combined, guess_blocks);
-        export_frame(outdir, frame, x_combined, edges_combined);
+        export_frame(outdir, frame, x_combined, edges_combined, output_format);
 
         std::cout << "Frame " << std::setw(4) << frame
                   << " | initial_residual=" << std::scientific << initial_residual
