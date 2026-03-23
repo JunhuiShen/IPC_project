@@ -23,5 +23,5 @@ target_link_libraries(corated_test
     GTest::gtest_main
 )
 
-include(CTest)
-add_test(NAME corated_test COMMAND corated_test)
+include(GoogleTest)
+gtest_discover_tests(corated_test)
