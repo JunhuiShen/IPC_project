@@ -62,10 +62,10 @@ int main() {
     auto broad_phase = std::make_unique<BVHBroadPhase>();
 
     const StepPolicy filtering_step_policy = StepPolicy::CCD;
-//     const StepPolicy filtering_step_policy = StepPolicy::TrustRegion;
+    // const StepPolicy filtering_step_policy = StepPolicy::TrustRegion;
 
     const initial_guess::Type initial_guess_type = initial_guess::Type::CCD;
-//     const initial_guess::Type initial_guess_type = initial_guess::Type::TrustRegion;
+    // const initial_guess::Type initial_guess_type = initial_guess::Type::TrustRegion;
     // const initial_guess::Type initial_guess_type = initial_guess::Type::Trivial;
     // const initial_guess::Type initial_guess_type = initial_guess::Type::Affine;
 
