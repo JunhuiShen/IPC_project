@@ -11,12 +11,12 @@ enable_testing()
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 find_package(GTest REQUIRED)
 
-add_executable(corated_test
-    corated_test.cpp
+add_executable(corotated_test
+    corotated_test.cpp
     corotated_energy.cpp
 )
 
-target_link_libraries(corated_test
+target_link_libraries(corotated_test
     PRIVATE
     Eigen3::Eigen
     GTest::gtest
@@ -24,4 +24,4 @@ target_link_libraries(corated_test
 )
 
 include(GoogleTest)
-gtest_discover_tests(corated_test)
+gtest_discover_tests(corotated_test)

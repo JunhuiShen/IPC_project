@@ -202,13 +202,14 @@ void set_dof(TriangleDef& def, int node, int comp, double value) {
     def.x[node](comp) = value;
 }
 
-// Main elasticity functions
+// Corotated elasticity energy function
 double corotated_energy(const TriangleRest& rest, const TriangleDef& def, double mu, double lambda) {
     const double A = rest_area(rest);
     const Mat32 F = deformation_gradient(rest, def);
     return A * PsiCorotated32(F, mu, lambda);
 }
 
+// Node-wise corotated elasticity gradient
 std::array<Vec3, 3> corotated_node_gradient(const TriangleRest& rest, const TriangleDef& def, double mu, double lambda) {
     const double A = rest_area(rest);
     const Mat32 F = deformation_gradient(rest, def);
@@ -229,6 +230,7 @@ std::array<Vec3, 3> corotated_node_gradient(const TriangleRest& rest, const Tria
     return g;
 }
 
+// Node-wise corotated elasticity hessian
 Mat99 corotated_node_hessian(const TriangleRest& rest, const TriangleDef& def, double mu, double lambda) {
     const double A = rest_area(rest);
     const Mat32 F = deformation_gradient(rest, def);
