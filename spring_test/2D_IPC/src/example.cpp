@@ -25,7 +25,6 @@ static void pin_node(Chain& chain, int i){
 
 ExampleScene build_example(ExampleType example_type, int number_of_nodes, double mass_density) {
     ExampleScene scene;
-    scene.total_frames = 120;
 
     switch (example_type) {
 

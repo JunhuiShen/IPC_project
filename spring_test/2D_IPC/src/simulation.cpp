@@ -7,6 +7,7 @@
 #include "step_filter/trust_region.h"
 #include "initial_guess/initial_guess.h"
 #include "example.h"
+#include "ipc_args.h"
 
 #include <algorithm>
 #include <chrono>
@@ -19,20 +20,15 @@
 namespace fs = std::__fs::filesystem;
 using namespace math;
 
-namespace {
+int main(int argc, char** argv) {
+    IPCArgs args;
+    if (!args.parse(argc, argv)) return 1;
+    args.validate();
 
-    enum class StepPolicy {
-        CCD,
-        TrustRegion
-    };
-
-} // namespace
-
-int main() {
     using clock = std::chrono::high_resolution_clock;
     auto t_start = clock::now();
 
-    const std::string outdir = "frames_spring_IPC_bvh";
+    const std::string outdir = args.outdir;
 
     if (fs::exists(outdir)) {
         fs::remove_all(outdir);
@@ -40,41 +36,27 @@ int main() {
     fs::create_directories(outdir);
 
     // ------------------------------------------------------
-    // Parameters
+    // Parameters (from command line / defaults)
     // ------------------------------------------------------
-    const double dt = 1.0 / 30.0;
-    const Vec2 g_accel{0.0, -9.81};
-    const int max_global_iters = 10000;
-    const double tol_abs = 1e-6;
-    const double dhat = 0.1;
-    double k_spring = 1000;
-    const int number_of_nodes = 100; // number of nodes per chain
-    double mass_density=1000.0; //kg/m^2, mass density of water
+    const double dt               = args.dt;
+    const Vec2   g_accel{args.gx, args.gy};
+    const int    max_global_iters = args.max_global_iters;
+    const double tol_abs          = args.tol_abs;
+    const double dhat             = args.dhat;
+    double       k_spring         = args.k_spring;
+    const int    number_of_nodes  = args.number_of_nodes;
+    double       mass_density     = args.mass_density;
+    double       eta              = args.eta;
 
     // ------------------------------------------------------
-    // Strategy choices
+    // Strategy choices (from command line / defaults)
     // ------------------------------------------------------
-    const ExampleType example_type = ExampleType::Example1;
-    const OutputFormat output_format = OutputFormat::GEO;
-    // const ExampleType example_type = ExampleType::Example2;
-
+    const ExampleType         example_type       = args.get_example_type();
+    const OutputFormat        output_format       = args.get_output_format();
+    const initial_guess::Type initial_guess_type  = args.get_initial_guess_type();
+    const bool                use_ccd            = args.use_ccd_step_policy();
 
     auto broad_phase = std::make_unique<BVHBroadPhase>();
-
-    const StepPolicy filtering_step_policy = StepPolicy::CCD;
-    // const StepPolicy filtering_step_policy = StepPolicy::TrustRegion;
-
-    const initial_guess::Type initial_guess_type = initial_guess::Type::CCD;
-    // const initial_guess::Type initial_guess_type = initial_guess::Type::TrustRegion;
-    // const initial_guess::Type initial_guess_type = initial_guess::Type::Trivial;
-    // const initial_guess::Type initial_guess_type = initial_guess::Type::Affine;
-
-    double eta = 0.9;
-    if (initial_guess_type == initial_guess::Type::TrustRegion && filtering_step_policy == StepPolicy::TrustRegion) {
-        eta = 0.4;
-    } else if (initial_guess_type == initial_guess::Type::CCD && filtering_step_policy == StepPolicy::CCD) {
-        eta = 0.9;
-    }
 
     // Reset CCD stats
     step_filter::ccd::reset_stats();
@@ -84,7 +66,7 @@ int main() {
     // ------------------------------------------------------
     ExampleScene scene = build_example(example_type, number_of_nodes, mass_density);
     std::vector<Chain> chains = std::move(scene.chains);
-    const int total_frames = scene.total_frames;
+    const int total_frames = args.total_frames;
 
     // ------------------------------------------------------
     // Global indexing data
@@ -174,7 +156,7 @@ int main() {
         std::vector<double> res_hist;
         SolveResult result{};
 
-        if (filtering_step_policy == StepPolicy::CCD) {
+        if (use_ccd) {
             CCDFilter filter;
             result = solve(blocks, x_combined, v_combined, dt, k_spring, g_accel,
                            dhat, max_global_iters, tol_abs, eta,
