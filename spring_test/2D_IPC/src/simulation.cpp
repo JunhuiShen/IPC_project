@@ -54,7 +54,7 @@ int main() {
     // ------------------------------------------------------
     // Strategy choices
     // ------------------------------------------------------
-        const ExampleType example_type = ExampleType::Example1;
+    const ExampleType example_type = ExampleType::Example1;
     const OutputFormat output_format = OutputFormat::GEO;
     // const ExampleType example_type = ExampleType::Example2;
 
