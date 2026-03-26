@@ -1,20 +1,18 @@
-# 3D IPC — Incremental Potential Contact Simulation
+# 3D IPC — Corotated Elasticity Simulation
 
-A 3D physics simulation of deformable triangle meshes using
-**Incremental Potential Contact (IPC)** and solved with a **nonlinear Gauss–Seidel solver**.
+A 3D physics simulation of deformable triangle meshes using a
+corotated elasticity model and solved with a nonlinear Gauss–Seidel solver.
 
-The simulator is designed for experimenting with different strategies for:
+The simulator is designed for experimenting with:
 
-- broad-phase collision candidate detection
-- collision-safe Newton step filtering
-- initial guess generation
-
-These components can be swapped to compare different algorithmic variants.
+- modular energy / gradient / Hessian assembly
+- local nonlinear solvers
+- different simulation setups and constraints
 
 ## Requirements
 
-- C++17 compiler (GCC 9+, Clang 10+, or MSVC 2019+)  
-- CMake 3.10+  
+- C++17 compiler (GCC 9+, Clang 10+, or MSVC 2019+)
+- CMake 3.10+
 - Eigen3
 
 ## Build
@@ -47,7 +45,7 @@ Per-frame statistics are printed to stdout:
     3D_IPC/
     ├── CMakeLists.txt
     ├── IPC_math.h / IPC_math.cpp
-    │   matrix utilities 
+    │   matrix utilities
     │
     ├── make_triangle.h / make_triangle.cpp
     │   mesh construction
@@ -55,7 +53,7 @@ Per-frame statistics are printed to stdout:
     │   update_velocity()
     │
     ├── physics.h / physics.cpp
-    │   energy assembly
+    │   global energy assembly
     │   gradient and Hessian accumulation
     │
     ├── solver.h / solver.cpp
@@ -66,7 +64,10 @@ Per-frame statistics are printed to stdout:
     │   export_frame()
     │
     ├── corotated_energy.h / corotated_energy.cpp
-    │   triangle-level constitutive model
+    │   project-level wrapper for triangle constitutive evaluation
+    │
+    ├── Corotated32.h / Corotated32.cpp
+    │   reference corotated 3x2 formulation used by corotated_energy
     │
     ├── simulation.cpp
     │   main simulation driver
@@ -75,17 +76,18 @@ Per-frame statistics are printed to stdout:
 
 ## Notes
 
-- corotated_energy implements element-level (triangle) physics  
-- physics assembles global energy, gradient, and Hessian  
-- solver performs nonlinear Gauss–Seidel iterations  
-- simulation.cpp controls time stepping and scene setup  
+- corotated_energy implements element-level (triangle) physics
+- physics assembles global energy, gradient, and Hessian
+- solver performs nonlinear Gauss–Seidel iterations
+- simulation.cpp controls time stepping and scene setup
 
 The corotated elasticity model in `corotated_energy.h/.cpp` is adapted from the
-TGSL `Corotated32` formulation, with a simplified Eigen-based implementation
-tailored for this project.
+TGSL `Corotated32` formulation. The reference files `Corotated32.h/.cpp` are
+included in this project, and `corotated_energy.cpp` wraps that formulation
+through a simplified project-level interface.
 
 ## Future Work
 
-- support larger meshes  
-- add collision handling (e.g. barrier potentials, axis-aligned bounding boxes, continuous collision detection, trust-region methods)  
-- improve visualization pipeline  
+- support larger meshes
+- add collision handling (e.g. barrier potentials, axis-aligned bounding boxes, continuous collision detection, trust-region methods)
+- improve visualization pipeline
