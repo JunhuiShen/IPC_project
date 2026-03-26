@@ -55,3 +55,38 @@ int build_single_triangle(RefMesh& ref_mesh, DeformedState& state, const Vec2& X
 void append_pin(std::vector<Pin>& pins, int vertex_index, const std::vector<Vec3>& x) {
     pins.push_back(Pin{vertex_index, x[vertex_index]});
 }
+
+int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, int nx, int ny, double width, double height, const Vec3& origin) {
+    int base = static_cast<int>(state.deformed_positions.size());
+
+    for (int j = 0; j <= ny; ++j) {
+        for (int i = 0; i <= nx; ++i) {
+            double u = static_cast<double>(i) / nx;
+            double v = static_cast<double>(j) / ny;
+
+            double x_ref = u * width;
+            double y_ref = v * height;
+
+            ref_mesh.ref_positions.push_back(Vec2(x_ref, y_ref));
+            state.deformed_positions.push_back(origin + Vec3(x_ref, y_ref, 0.0));
+        }
+    }
+
+    auto vid = [base, nx](int i, int j) {
+        return base + j * (nx + 1) + i;
+    };
+
+    for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+            int v00 = vid(i, j);
+            int v10 = vid(i + 1, j);
+            int v01 = vid(i, j + 1);
+            int v11 = vid(i + 1, j + 1);
+
+            ref_mesh.tris.push_back(Tri{{v00, v10, v11}});
+            ref_mesh.tris.push_back(Tri{{v00, v11, v01}});
+        }
+    }
+
+    return base;
+}

@@ -16,3 +16,5 @@ int build_single_triangle(RefMesh& ref_mesh, DeformedState& state, const Vec2& X
                           const Vec3& x0, const Vec3& x1, const Vec3& x2);
 
 void append_pin(std::vector<Pin>& pins, int vertex_index, const std::vector<Vec3>& x);
+
+int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, int nx, int ny, double width, double height, const Vec3& origin);
