@@ -1,8 +1,4 @@
-//
-// Created by Junhui Shen on 3/26/26.
-//
+#pragma once
+#include "corotated_energy.h"
 
-#ifndef INC_3D_IPC_IPC_MATH_H
-#define INC_3D_IPC_IPC_MATH_H
-
-#endif //INC_3D_IPC_IPC_MATH_H
+Mat33 matrix3d_inverse(const Mat33& H);

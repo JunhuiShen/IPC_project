@@ -8,20 +8,45 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 enable_testing()
 
-find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(GTest REQUIRED)
+
+add_library(corotated_energy_lib
+    corotated_energy.cpp
+)
+
+target_link_libraries(corotated_energy_lib
+    PUBLIC Eigen3::Eigen
+)
+
+target_include_directories(corotated_energy_lib
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+)
 
 add_executable(corotated_test
     corotated_test.cpp
-    corotated_energy.cpp
 )
 
 target_link_libraries(corotated_test
     PRIVATE
-    Eigen3::Eigen
+    corotated_energy_lib
     GTest::gtest
     GTest::gtest_main
 )
 
 include(GoogleTest)
 gtest_discover_tests(corotated_test)
+
+add_executable(3D_sim
+    IPC_math.cpp
+    make_triangle.cpp
+    physics.cpp
+    solver.cpp
+    visualization.cpp
+    simulation.cpp
+)
+
+target_link_libraries(3D_sim
+    PRIVATE
+    corotated_energy_lib
+)
