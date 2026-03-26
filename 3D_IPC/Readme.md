@@ -75,10 +75,14 @@ Per-frame statistics are printed to stdout:
 
 ## Notes
 
-- corotated_energy implements vertex-level physics
-- physics assembles global energy, gradient, and Hessian
-- solver performs nonlinear Gauss–Seidel iterations
-- simulation.cpp controls time stepping and scene setup
+- corotated_energy implements element-level (triangle) physics  
+- physics assembles global energy, gradient, and Hessian  
+- solver performs nonlinear Gauss–Seidel iterations  
+- simulation.cpp controls time stepping and scene setup  
+
+The corotated elasticity model in `corotated_energy.h/.cpp` is adapted from the
+TGSL `Corotated32` formulation, with a simplified Eigen-based implementation
+tailored for this project.
 
 ## Future Work
 
