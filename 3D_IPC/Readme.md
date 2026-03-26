@@ -1,18 +1,20 @@
-# 3D IPC — Corotated Elasticity Simulation
+# 3D IPC — Incremental Potential Contact Simulation
 
-A 3D physics simulation of deformable triangle meshes using a
-corotated elasticity model and solved with a nonlinear Gauss–Seidel solver.
+A 3D physics simulation of deformable triangle meshes using
+**Incremental Potential Contact (IPC)** and solved with a **nonlinear Gauss–Seidel solver**.
 
-The simulator is designed for experimenting with:
+The simulator is designed for experimenting with different strategies for:
 
-- modular energy / gradient / Hessian assembly
-- local nonlinear solvers
-- different simulation setups and constraints
+- broad-phase collision candidate detection
+- collision-safe Newton step filtering
+- initial guess generation
+
+These components can be swapped to compare different algorithmic variants.
 
 ## Requirements
 
-- C++17 compiler (GCC 9+, Clang 10+, or MSVC 2019+)
-- CMake 3.10+
+- C++17 compiler (GCC 9+, Clang 10+, or MSVC 2019+)  
+- CMake 3.10+  
 - Eigen3
 
 ## Build
