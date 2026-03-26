@@ -13,11 +13,11 @@ namespace fs = std::__fs::filesystem;
 int main() {
     SimParams params;
     params.dt = 1.0 / 30.0;
-    params.mu = 1.0;
-    params.lambda = 1.0;
-    params.density = 1.0;
+    params.mu = 200.0;
+    params.lambda = 200.0;
+    params.density = 1000.0;
     params.thickness = 0.1;
-    params.kpin = 1e7;
+    params.kpin = 1e5;
     params.gravity = Vec3(0.0, -9.81, 0.0);
     params.max_global_iters = 100;
     params.tol_abs = 1e-6;

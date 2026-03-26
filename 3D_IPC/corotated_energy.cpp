@@ -169,40 +169,6 @@ void dPdFCorotated32(const Mat32& F, double mu, double lambda, Mat66& dPdF) {
     dPdF += 2.0 * mu * (Mat66::Identity() - dRdF);
 }
 
-TriangleDef ZeroTriangleDef() {
-    TriangleDef out;
-    out.x[0].setZero();
-    out.x[1].setZero();
-    out.x[2].setZero();
-    return out;
-}
-
-TriangleDef add_scale(const TriangleDef& a, const TriangleDef& b, double s) {
-    TriangleDef out;
-    for (int i = 0; i < 3; ++i) out.x[i] = a.x[i] + s * b.x[i];
-    return out;
-}
-
-Vec9 flatten_def(const TriangleDef& def) {
-    Vec9 out;
-    for (int i = 0; i < 3; ++i) out.segment<3>(3 * i) = def.x[i];
-    return out;
-}
-
-Vec9 flatten_gradient(const std::array<Vec3, 3>& g) {
-    Vec9 out;
-    for (int i = 0; i < 3; ++i) out.segment<3>(3 * i) = g[i];
-    return out;
-}
-
-double get_dof(const TriangleDef& def, int node, int comp) {
-    return def.x[node](comp);
-}
-
-void set_dof(TriangleDef& def, int node, int comp, double value) {
-    def.x[node](comp) = value;
-}
-
 double corotated_energy(const TriangleRest& rest, const TriangleDef& def, double mu, double lambda) {
     const double A = rest_area(rest);
     const Mat32 F = deformation_gradient(rest, def);

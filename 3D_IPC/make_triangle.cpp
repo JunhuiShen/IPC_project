@@ -61,28 +61,35 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, int nx, int ny, d
 
     for (int j = 0; j <= ny; ++j) {
         for (int i = 0; i <= nx; ++i) {
+
+            // Normalize grid coordinates from 0 to 1)
             double u = static_cast<double>(i) / nx;
             double v = static_cast<double>(j) / ny;
 
+            // Scale to actual size
             double x_ref = u * width;
             double y_ref = v * height;
 
+            // Store reference (2D) and deformed (3D) positions
             ref_mesh.ref_positions.push_back(Vec2(x_ref, y_ref));
             state.deformed_positions.push_back(origin + Vec3(x_ref, y_ref, 0.0));
         }
     }
 
-    auto vid = [base, nx](int i, int j) {
+    // convert (col, row) → vertex index
+    auto vertex_index = [base, nx](int i, int j) {
         return base + j * (nx + 1) + i;
     };
 
+    // Create triangles
     for (int j = 0; j < ny; ++j) {
         for (int i = 0; i < nx; ++i) {
-            int v00 = vid(i, j);
-            int v10 = vid(i + 1, j);
-            int v01 = vid(i, j + 1);
-            int v11 = vid(i + 1, j + 1);
+            int v00 = vertex_index(i, j);
+            int v10 = vertex_index(i + 1, j);
+            int v01 = vertex_index(i, j + 1);
+            int v11 = vertex_index(i + 1, j + 1);
 
+            // Split square into two triangles
             ref_mesh.tris.push_back(Tri{{v00, v10, v11}});
             ref_mesh.tris.push_back(Tri{{v00, v11, v01}});
         }
