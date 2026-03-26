@@ -47,7 +47,7 @@ Per-frame statistics are printed to stdout:
     3D_IPC/
     ├── CMakeLists.txt
     ├── IPC_math.h / IPC_math.cpp
-    │   matrix utilities (e.g. 3x3 inverse)
+    │   matrix utilities 
     │
     ├── make_triangle.h / make_triangle.cpp
     │   mesh construction
