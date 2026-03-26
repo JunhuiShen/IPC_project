@@ -21,12 +21,19 @@ struct TriangleDef {
 };
 
 TriangleDef ZeroTriangleDef();
+
 TriangleDef add_scale(const TriangleDef& a, const TriangleDef& b, double s);
+
 Vec9 flatten_def(const TriangleDef& def);
+
 Vec9 flatten_gradient(const std::array<Vec3, 3>& g);
+
 double get_dof(const TriangleDef& def, int node, int comp);
+
 void set_dof(TriangleDef& def, int node, int comp, double value);
 
 double corotated_energy(const TriangleRest& rest, const TriangleDef& def, double mu, double lambda);
+
 std::array<Vec3, 3> corotated_node_gradient(const TriangleRest& rest, const TriangleDef& def, double mu, double lambda);
+
 Mat99 corotated_node_hessian(const TriangleRest& rest, const TriangleDef& def, double mu, double lambda);

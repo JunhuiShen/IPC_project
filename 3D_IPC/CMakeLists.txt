@@ -13,7 +13,6 @@ find_package(GTest REQUIRED)
 
 add_library(corotated_energy_lib
     corotated_energy.cpp
-    Corotated32.cpp
 )
 
 target_link_libraries(corotated_energy_lib
