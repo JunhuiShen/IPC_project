@@ -56,13 +56,14 @@ void append_pin(std::vector<Pin>& pins, int vertex_index, const std::vector<Vec3
     pins.push_back(Pin{vertex_index, x[vertex_index]});
 }
 
+// Total number of vertices is: (nx + 1) * (ny + 1) and total number of triangles is: 2 * nx * ny
 int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, int nx, int ny, double width, double height, const Vec3& origin) {
     int base = static_cast<int>(state.deformed_positions.size());
 
     for (int j = 0; j <= ny; ++j) {
         for (int i = 0; i <= nx; ++i) {
 
-            // Normalize grid coordinates from 0 to 1)
+            // Normalize grid coordinates from 0 to 1
             double u = static_cast<double>(i) / nx;
             double v = static_cast<double>(j) / ny;
 

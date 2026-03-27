@@ -13,6 +13,7 @@ find_package(GTest REQUIRED)
 
 add_library(corotated_energy_lib
     corotated_energy.cpp
+    IPC_math.cpp
 )
 
 target_link_libraries(corotated_energy_lib
@@ -47,6 +48,20 @@ add_executable(3D_sim
 )
 
 target_link_libraries(3D_sim
+    PRIVATE
+    corotated_energy_lib
+)
+
+add_executable(total_energy_fd_check
+    total_energy_fd_check.cpp
+    IPC_math.cpp
+    make_triangle.cpp
+    physics.cpp
+    solver.cpp
+    visualization.cpp
+)
+
+target_link_libraries(total_energy_fd_check
     PRIVATE
     corotated_energy_lib
 )

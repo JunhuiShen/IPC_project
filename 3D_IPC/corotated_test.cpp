@@ -1,3 +1,4 @@
+#include "IPC_math.h"
 #include "corotated_energy.h"
 #include <gtest/gtest.h>
 
