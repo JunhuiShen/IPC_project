@@ -40,7 +40,7 @@ gtest_discover_tests(corotated_test)
 
 add_executable(3D_sim
     IPC_math.cpp
-    make_triangle.cpp
+    make_shape.cpp
     physics.cpp
     solver.cpp
     visualization.cpp
@@ -55,7 +55,7 @@ target_link_libraries(3D_sim
 add_executable(total_energy_fd_check
     total_energy_fd_check.cpp
     IPC_math.cpp
-    make_triangle.cpp
+    make_shape.cpp
     physics.cpp
     solver.cpp
     visualization.cpp
