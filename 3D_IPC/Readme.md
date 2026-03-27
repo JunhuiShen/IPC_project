@@ -47,16 +47,16 @@ Per-frame statistics are printed to stdout:
     3D_IPC/
     ├── CMakeLists.txt
     ├── IPC_math.h / IPC_math.cpp
-    │   matrix utilities
+    │   matrix utilities and small helper functions
     │
-    ├── make_triangle.h / make_triangle.cpp
+    ├── make_shape.h / make_shape.cpp
     │   mesh construction
     │   build_xhat()
     │   update_velocity()
     │
     ├── physics.h / physics.cpp
-    │   global energy assembly
-    │   gradient and Hessian accumulation
+    │   global incremental potential
+    │   per-vertex gradient and Hessian accumulation
     │
     ├── solver.h / solver.cpp
     │   nonlinear Gauss–Seidel solver
@@ -66,13 +66,19 @@ Per-frame statistics are printed to stdout:
     │   export_frame()
     │
     ├── corotated_energy.h / corotated_energy.cpp
-    │   project-level wrapper for triangle constitutive evaluation
+    │   corotated 3x2 energy, per-vertex nodal gradient, and per-vertex nodal Hessian
     │
     ├── Corotated32.h / Corotated32.cpp
     │   reference corotated 3x2 formulation used by corotated_energy
     │
     ├── simulation.cpp
     │   main simulation driver
+    │
+    ├── corotated_test.cpp
+    │   GoogleTest finite-difference verification for the corotated element: energy-gradient consistency and gradient-Hessian consistency
+    │
+    └── total_energy_fd_check.cpp   (if you added it)
+    │   finite-difference verification for total system: energy-gradient consistency and gradient-Hessian consistency
     │
     └── Readme.md
 
