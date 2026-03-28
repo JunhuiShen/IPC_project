@@ -1,4 +1,4 @@
-#include "make_triangle.h"
+#include "make_shape.h"
 #include "physics.h"
 
 #include <Eigen/Dense>
