@@ -1,5 +1,6 @@
 #pragma once
 #include "physics.h"
+#include <unordered_map>
 #include <vector>
 
 TriangleRest make_rest_triangle(const RefMesh& ref_mesh, const Tri& tri);
@@ -18,3 +19,7 @@ int build_single_triangle(RefMesh& ref_mesh, DeformedState& state, const Vec2& X
 void append_pin(std::vector<Pin>& pins, int vertex_index, const std::vector<Vec3>& x);
 
 int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, int nx, int ny, double width, double height, const Vec3& origin);
+
+// Maps each vertex index to all positions in the flat index buffer where it appears.
+// e.g. for [0,1,2,1,2,5]: {0:[0], 1:[1,3], 2:[2,4], 5:[5]}
+std::unordered_map<int, std::vector<int>> build_incident_triangle_map(const std::vector<int>& indices);

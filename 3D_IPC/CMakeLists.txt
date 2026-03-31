@@ -71,6 +71,21 @@ target_link_libraries(3D_sim
     corotated_energy_lib
 )
 
+add_executable(make_shape_test
+    make_shape_test.cpp
+    make_shape.cpp
+    physics.cpp
+)
+
+target_link_libraries(make_shape_test
+    PRIVATE
+    corotated_energy_lib
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(make_shape_test)
+
 add_executable(total_energy_fd_check
     total_energy_fd_check.cpp
     make_shape.cpp

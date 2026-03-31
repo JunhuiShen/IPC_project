@@ -1,4 +1,5 @@
 #include "make_shape.h"
+#include <unordered_map>
 
 TriangleRest make_rest_triangle(const RefMesh& ref_mesh, const Tri& tri) {
     TriangleRest rest;
@@ -97,4 +98,11 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, int nx, int ny, d
     }
 
     return base;
+}
+
+std::unordered_map<int, std::vector<int>> build_incident_triangle_map(const std::vector<int>& indices) {
+    std::unordered_map<int, std::vector<int>> result;
+    for (int i = 0; i < static_cast<int>(indices.size()); ++i)
+        result[indices[i]].push_back(i);
+    return result;
 }
