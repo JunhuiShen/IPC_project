@@ -6,8 +6,11 @@
 //  Scalar barrier
 double scalar_barrier(double delta, double d_hat);
 
-//  Scalar barrier gradient
+//  Scalar barrier gradient  db/d(delta)
 double scalar_barrier_gradient(double delta, double d_hat);
+
+//  Scalar barrier hessian  d2b/d(delta)2
+double scalar_barrier_hessian(double delta, double d_hat);
 
 struct NodeTriangleBarrierResult{
     double energy{0.0};
@@ -22,9 +25,30 @@ struct NodeTriangleBarrierResult{
     NodeTriangleDistanceResult distance_result;
 };
 
+// 12x12 Hessian: rows/cols ordered as (x, x1, x2, x3) x (0,1,2)
+using Mat12 = Eigen::Matrix<double, 12, 12>;
+
+struct NodeTriangleBarrierHessianResult{
+    double energy{0.0};
+    double distance{0.0};
+
+    Vec3 grad_x  = Vec3::Zero();
+    Vec3 grad_x1 = Vec3::Zero();
+    Vec3 grad_x2 = Vec3::Zero();
+    Vec3 grad_x3 = Vec3::Zero();
+
+    Mat12 hessian = Mat12::Zero();     // d2PE / dy_{pk} dy_{ql}
+
+    NodeTriangleDistanceResult distance_result;
+};
+
 //  Barrier energy with node-triangle distance
 double node_triangle_barrier(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, double eps = 1.0e-12);
 
 //  Barrier energy gradient with node-triangle distance
 NodeTriangleBarrierResult node_triangle_barrier_gradient(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
                                                          double d_hat, double eps = 1.0e-12);
+
+//  Barrier energy hessian with node-triangle distance
+NodeTriangleBarrierHessianResult node_triangle_barrier_hessian(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
+                                                               double d_hat, double eps = 1.0e-12);

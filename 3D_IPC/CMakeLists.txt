@@ -26,19 +26,14 @@ target_include_directories(corotated_energy_lib
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-add_executable(corotated_test
-    corotated_test.cpp
+add_executable(corotated_energy_test
+    corotated_energy_test.cpp
 )
 
-target_link_libraries(corotated_test
+target_link_libraries(corotated_energy_test
     PRIVATE
     corotated_energy_lib
-    GTest::gtest
-    GTest::gtest_main
 )
-
-include(GoogleTest)
-gtest_discover_tests(corotated_test)
 
 add_executable(node_triangle_distance_test
     node_triangle_distance_test.cpp
@@ -86,15 +81,25 @@ target_link_libraries(make_shape_test
 
 gtest_discover_tests(make_shape_test)
 
-add_executable(total_energy_fd_check
-    total_energy_fd_check.cpp
+add_executable(total_energy_test
+    total_energy_test.cpp
     make_shape.cpp
     physics.cpp
     solver.cpp
     visualization.cpp
 )
 
-target_link_libraries(total_energy_fd_check
+target_link_libraries(total_energy_test
+    PRIVATE
+    corotated_energy_lib
+)
+    make_shape.cpp
+    physics.cpp
+    solver.cpp
+    visualization.cpp
+)
+
+target_link_libraries(total_energy_test
     PRIVATE
     corotated_energy_lib
 )
