@@ -1,7 +1,28 @@
 #pragma once
-#include "corotated_energy.h"
+
+#include <Eigen/Dense>
 #include <array>
 
+// Type aliases
+using Vec2  = Eigen::Vector2d;
+using Vec3  = Eigen::Vector3d;
+using Vec9  = Eigen::Matrix<double, 9, 1>;
+using Mat22 = Eigen::Matrix2d;
+using Mat32 = Eigen::Matrix<double, 3, 2>;
+using Mat33 = Eigen::Matrix3d;
+using Mat66 = Eigen::Matrix<double, 6, 6>;
+using Mat99 = Eigen::Matrix<double, 9, 9>;
+
+// Triangle definitions
+struct TriangleRest {
+    Vec2 X[3];
+};
+
+struct TriangleDef {
+    Vec3 x[3];
+};
+
+// Utility functions
 Mat33 matrix3d_inverse(const Mat33& H);
 
 TriangleDef ZeroTriangleDef();
