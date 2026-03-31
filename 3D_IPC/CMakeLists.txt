@@ -14,6 +14,8 @@ find_package(GTest REQUIRED)
 add_library(corotated_energy_lib
     corotated_energy.cpp
     IPC_math.cpp
+    node_triangle_distance.cpp
+    barrier_energy.cpp
 )
 
 target_link_libraries(corotated_energy_lib
@@ -38,8 +40,25 @@ target_link_libraries(corotated_test
 include(GoogleTest)
 gtest_discover_tests(corotated_test)
 
+add_executable(node_triangle_distance_test
+    node_triangle_distance_test.cpp
+)
+
+target_link_libraries(node_triangle_distance_test
+    PRIVATE
+    corotated_energy_lib
+)
+
+add_executable(barrier_energy_test
+    barrier_energy_test.cpp
+)
+
+target_link_libraries(barrier_energy_test
+    PRIVATE
+    corotated_energy_lib
+)
+
 add_executable(3D_sim
-    IPC_math.cpp
     make_shape.cpp
     physics.cpp
     solver.cpp
@@ -54,7 +73,6 @@ target_link_libraries(3D_sim
 
 add_executable(total_energy_fd_check
     total_energy_fd_check.cpp
-    IPC_math.cpp
     make_shape.cpp
     physics.cpp
     solver.cpp

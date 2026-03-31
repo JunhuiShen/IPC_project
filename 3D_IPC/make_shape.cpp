@@ -1,4 +1,4 @@
-#include "make_triangle.h"
+#include "make_shape.h"
 
 TriangleRest make_rest_triangle(const RefMesh& ref_mesh, const Tri& tri) {
     TriangleRest rest;
