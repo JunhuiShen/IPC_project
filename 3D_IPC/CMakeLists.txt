@@ -93,13 +93,3 @@ target_link_libraries(total_energy_test
     PRIVATE
     corotated_energy_lib
 )
-    make_shape.cpp
-    physics.cpp
-    solver.cpp
-    visualization.cpp
-)
-
-target_link_libraries(total_energy_test
-    PRIVATE
-    corotated_energy_lib
-)
