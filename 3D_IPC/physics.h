@@ -1,5 +1,6 @@
 #pragma once
 #include "corotated_energy.h"
+#include "barrier_energy.h"
 #include <vector>
 
 struct Tri { int v[3]; };
@@ -11,6 +12,7 @@ struct Pin {
 
 struct SimParams {
     double dt{}, mu{}, lambda{}, density{}, thickness{}, kpin{}, tol_abs{}, step_weight{};
+    double d_hat{0.0};          // barrier activation distance (0 = no barrier)
     Vec3 gravity = Vec3::Zero();
     int max_global_iters{};
 };
@@ -29,26 +31,24 @@ struct LumpedMass {
     std::vector<double> vertex_masses;
 };
 
-
 struct VertexAdjacency {
     std::vector<std::vector<int>> incident_triangle_indices;
 };
 
 double triangle_ref_area_2d(const RefMesh& ref_mesh, const Tri& tri);
 
-
 LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thickness);
 
 VertexAdjacency build_vertex_adjacency(const RefMesh& ref_mesh);
 
-double compute_incremental_potential(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const std::vector<Pin>& pins,
-                                     const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
+// No-barrier versions: inertia + elastic + gravity + pinning only.
+// The Gauss-Seidel solver will call these and add barrier contributions
+// separately for AABB-filtered contact pairs.
 
-Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj,
-                            const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
+double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
-Mat33 compute_local_hessian(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj,
-                            const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x);
+Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
-double compute_global_residual(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj,
-                               const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
+Mat33 compute_local_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x);
+
+double compute_global_residual(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);

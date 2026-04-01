@@ -19,6 +19,7 @@ add_library(corotated_energy_lib
     corotated_energy.cpp
     IPC_math.cpp
     node_triangle_distance.cpp
+    segment_segment_distance.cpp
     barrier_energy.cpp
 )
 
@@ -44,6 +45,15 @@ add_executable(node_triangle_distance_test
 )
 
 target_link_libraries(node_triangle_distance_test
+    PRIVATE
+    corotated_energy_lib
+)
+
+add_executable(segment_segment_distance_test
+    segment_segment_distance_test.cpp
+)
+
+target_link_libraries(segment_segment_distance_test
     PRIVATE
     corotated_energy_lib
 )

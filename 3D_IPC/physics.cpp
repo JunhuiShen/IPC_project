@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-double triangle_ref_area_2d(const RefMesh& ref_mesh, const Tri& tri) {
+double triangle_ref_area_2d(const RefMesh& ref_mesh, const Tri& tri){
     const Vec2& X0 = ref_mesh.ref_positions[tri.v[0]];
     const Vec2& X1 = ref_mesh.ref_positions[tri.v[1]];
     const Vec2& X2 = ref_mesh.ref_positions[tri.v[2]];
@@ -14,7 +14,7 @@ double triangle_ref_area_2d(const RefMesh& ref_mesh, const Tri& tri) {
     return 0.5 * std::abs(Dm_local.determinant());
 }
 
-LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thickness) {
+LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thickness){
     LumpedMass M;
     M.vertex_masses.assign(ref_mesh.ref_positions.size(), 0.0);
 
@@ -28,7 +28,7 @@ LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thi
     return M;
 }
 
-VertexAdjacency build_vertex_adjacency(const RefMesh& ref_mesh) {
+VertexAdjacency build_vertex_adjacency(const RefMesh& ref_mesh){
     VertexAdjacency adj;
     adj.incident_triangle_indices.resize(ref_mesh.ref_positions.size());
 
@@ -40,8 +40,7 @@ VertexAdjacency build_vertex_adjacency(const RefMesh& ref_mesh) {
     return adj;
 }
 
-double compute_incremental_potential(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const std::vector<Pin>& pins,
-                                     const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
+double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
     double E = 0.0, PE = 0.0, dt2 = params.dt * params.dt;
 
     for (int i = 0; i < static_cast<int>(x.size()); ++i) {
@@ -63,8 +62,7 @@ double compute_incremental_potential(const RefMesh& ref_mesh, const LumpedMass& 
     return E + dt2 * PE;
 }
 
-Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj,
-                            const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
+Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
     double dt2 = params.dt * params.dt;
     Vec3 g = Vec3::Zero();
 
@@ -85,8 +83,7 @@ Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const LumpedMass& l
     return g;
 }
 
-Mat33 compute_local_hessian(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj,
-                            const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x) {
+Mat33 compute_local_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x){
     double dt2 = params.dt * params.dt;
     Mat33 H = Mat33::Zero();
 
@@ -106,12 +103,11 @@ Mat33 compute_local_hessian(int vi, const RefMesh& ref_mesh, const LumpedMass& l
     return H;
 }
 
-double compute_global_residual(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj,
-                               const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
+double compute_global_residual(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
     double r_inf = 0.0;
 
     for (int i = 0; i < static_cast<int>(x.size()); ++i) {
-        Vec3 g = compute_local_gradient(i, ref_mesh, lumped_mass, adj, pins, params, x, xhat);
+        Vec3 g = compute_local_gradient_no_barrier(i, ref_mesh, lumped_mass, adj, pins, params, x, xhat);
         r_inf = std::max(r_inf, std::abs(g.x()));
         r_inf = std::max(r_inf, std::abs(g.y()));
         r_inf = std::max(r_inf, std::abs(g.z()));
@@ -119,4 +115,3 @@ double compute_global_residual(const RefMesh& ref_mesh, const LumpedMass& lumped
 
     return r_inf;
 }
-
