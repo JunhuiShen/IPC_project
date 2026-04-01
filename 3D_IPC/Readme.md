@@ -42,8 +42,7 @@ Output frames are written to `frames_sim3d/` as
     ./build/total_energy_test
     ./build/make_shape_test
 
-The first five tests use central finite differences to verify analytic gradients
-(slope 2) and Hessians (slope 2 or ratio ~4 for the slope-2 check).
+The first five tests use central finite differences to verify analytic gradients and Hessians.
 `make_shape_test` uses GoogleTest to verify mesh construction utilities.
 
 ## Console Output
@@ -74,7 +73,7 @@ Per-frame statistics are printed to stdout:
     │   node–triangle closest-point distance (7 regions + degenerate)
     │
     ├── segment_segment_distance.h / segment_segment_distance.cpp
-    │   segment–segment closest-point distance (9 regions + degenerate)
+    │   segment–segment closest-point distance (9 regions + parallel)
     │
     ├── barrier_energy.h / barrier_energy.cpp
     │   scalar barrier function b(delta; d_hat) and its derivatives
@@ -118,6 +117,7 @@ Per-frame statistics are printed to stdout:
 
 - corotated_energy implements element-level (triangle) physics
 - physics assembles global energy, gradient, and Hessian
+- barrier_energy provides per-pair barrier energy, gradient, and Hessian for both node–triangle and segment–segment primitives
 - solver performs nonlinear Gauss–Seidel iterations
 - simulation.cpp controls time stepping and scene setup
 
