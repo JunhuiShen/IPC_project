@@ -74,11 +74,11 @@ Per-frame statistics are printed to stdout:
     ├── simulation.cpp
     │   main simulation driver
     │
-    ├── corotated_test.cpp
+    ├── corotated_energy_test.cpp
     │   GoogleTest finite-difference verification for the corotated element
     │    energy-gradient consistency and gradient-Hessian consistency
     │
-    └── total_energy_fd_check.cpp   (if you added it)
+    └── total_energy_test.cpp   (if you added it)
     │   finite-difference verification for total system: 
     │    energy-gradient consistency and gradient-Hessian consistency
     │
