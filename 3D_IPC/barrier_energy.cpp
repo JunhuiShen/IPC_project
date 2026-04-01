@@ -3,10 +3,10 @@
 #include <cmath>
 #include <stdexcept>
 
-// ---------------------------------------------------------------------------
-//  Helper: recover edge parameter t from closest point q on segment [a, b]
-// ---------------------------------------------------------------------------
 
+//  t = ((q - a) · (b - a)) / ||b - a||^2
+//  q = a + t (b - a)
+//  t in [0, 1]
 double segment_parameter_from_closest_point(const Vec3& q, const Vec3& a, const Vec3& b){
     double denom = 0.0;
     double numer = 0.0;
@@ -23,19 +23,13 @@ double segment_parameter_from_closest_point(const Vec3& q, const Vec3& a, const 
     return clamp_scalar(numer / denom, 0.0, 1.0);
 }
 
-// ---------------------------------------------------------------------------
-//  Levi-Civita helper:  eps_{ijk}
-// ---------------------------------------------------------------------------
-
+//  eps_{ijk} = (i-j)(j-k)(k-i) / 2
 double levi_civita(int i, int j, int k){
-    // eps_{ijk} = (i-j)(j-k)(k-i) / 2  for i,j,k in {0,1,2}
     return 0.5 * (i - j) * (j - k) * (k - i);
 }
 
-// ---------------------------------------------------------------------------
-//  Scalar barrier
-// ---------------------------------------------------------------------------
-
+//  b(delta) = -(delta - d_hat)^2 log(delta / d_hat)
+//  b(delta) = 0  for delta >= d_hat
 double scalar_barrier(double delta, double d_hat){
     if (d_hat <= 0.0) throw std::runtime_error("scalar_barrier: d_hat must be positive.");
     if (delta >= d_hat) return 0.0;
@@ -45,10 +39,7 @@ double scalar_barrier(double delta, double d_hat){
     return -(s * s) * std::log(delta / d_hat);
 }
 
-// ---------------------------------------------------------------------------
-//  Scalar barrier gradient  db/d(delta)
-// ---------------------------------------------------------------------------
-
+//  b'(delta) = -2 (delta - d_hat) log(delta / d_hat) - (delta - d_hat)^2 / delta
 double scalar_barrier_gradient(double delta, double d_hat){
     if (d_hat <= 0.0) throw std::runtime_error("scalar_barrier_gradient: d_hat must be positive.");
     if (delta >= d_hat) return 0.0;
@@ -58,33 +49,23 @@ double scalar_barrier_gradient(double delta, double d_hat){
     return -2.0 * s * std::log(delta / d_hat) - (s * s) / delta;
 }
 
-// ---------------------------------------------------------------------------
-//  Scalar barrier hessian  d2b/d(delta)2
-// ---------------------------------------------------------------------------
-
+// b''(delta) = d_hat^2 / delta^2 + 2 d_hat / delta - 3 - 2 log(delta / d_hat)
 double scalar_barrier_hessian(double delta, double d_hat){
     if (d_hat <= 0.0) throw std::runtime_error("scalar_barrier_hessian: d_hat must be positive.");
     if (delta >= d_hat) return 0.0;
     if (delta <= 0.0) throw std::runtime_error("scalar_barrier_hessian: delta must be positive.");
 
-    // b''(delta; d_hat) = d_hat^2/delta^2 + 2*d_hat/delta - 3 - 2*ln(delta/d_hat)
     const double ratio = d_hat / delta;
     return ratio * ratio + 2.0 * ratio - 3.0 - 2.0 * std::log(delta / d_hat);
 }
 
-// ---------------------------------------------------------------------------
-//  Barrier energy with node-triangle distance
-// ---------------------------------------------------------------------------
-
+// E = b(delta), delta = node_triangle_distance(x, x1, x2, x3)
 double node_triangle_barrier(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, double eps){
     const NodeTriangleDistanceResult dr = node_triangle_distance(x, x1, x2, x3, eps);
     return scalar_barrier(dr.distance, d_hat);
 }
 
-// ---------------------------------------------------------------------------
-//  Barrier energy gradient with node-triangle distance (index notation)
-// ---------------------------------------------------------------------------
-
+// E(y) = b(delta(y)), dE/dy = b'(delta) * ddelta/dy
 NodeTriangleBarrierResult node_triangle_barrier_gradient(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, double eps){
     NodeTriangleBarrierResult out;
     out.distance_result = node_triangle_distance(x, x1, x2, x3, eps);
@@ -213,15 +194,9 @@ NodeTriangleBarrierResult node_triangle_barrier_gradient(const Vec3& x, const Ve
     return out;
 }
 
-// ===========================================================================
-//  Barrier energy hessian with node-triangle distance (index notation)
-//
-//  H_{pk,ql} = b''(delta) * (d delta/dy_{pk}) * (d delta/dy_{ql})
-//            + b'(delta)  * (d^2 delta / dy_{pk} dy_{ql})
-//
+//  H_{pk,ql} = b''(delta) * (d delta/dy_{pk}) * (d delta/dy_{ql}) + b'(delta)  * (d^2 delta / dy_{pk} dy_{ql})
 //  DOF ordering: p = 0..3 for (x, x1, x2, x3), k,l = 0..2 for spatial.
 //  Row/col index in 12x12:  3*p + k.
-// ===========================================================================
 
 NodeTriangleBarrierHessianResult node_triangle_barrier_hessian(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, double eps){
     NodeTriangleBarrierHessianResult out;
@@ -626,7 +601,7 @@ NodeTriangleBarrierHessianResult node_triangle_barrier_hessian(const Vec3& x, co
         }
 
         case NodeTriangleRegion::DegenerateTriangle:
-            // No Hessian for degenerate case — leave as zero
+            // No Hessian for degenerate case and leave as zero
             break;
     }
 
