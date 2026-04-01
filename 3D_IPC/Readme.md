@@ -4,7 +4,6 @@ A 3D physics simulation of deformable triangle meshes using
 **Incremental Potential Contact (IPC)** and solved with a **nonlinear Gauss–Seidel solver**.
 
 The simulator is designed for experimenting with different strategies for:
-
 - broad-phase collision candidate detection
 - collision-safe Newton step filtering
 - initial guess generation
@@ -13,15 +12,15 @@ These components can be swapped to compare different algorithmic variants.
 
 ## Requirements
 
-- C++17 compiler (GCC 9+, Clang 10+, or MSVC 2019+)  
-- CMake 3.10+  
+- C++17 compiler (GCC 9+, Clang 10+, or MSVC 2019+)
+- CMake 3.10+
 - Eigen3
 
 ## Build
 
     cd 3D_IPC
     cmake -B build
-    cmake --build build
+    cmake --build build  --clean-first
 
 ## Run
 
@@ -33,6 +32,16 @@ Output frames are written to `frames_sim3d/` as
     frame_0001.obj
     frame_0002.obj
     ...
+
+## Tests
+
+    ./build/corotated_energy_test
+    ./build/node_triangle_distance_test
+    ./build/segment_segment_distance_test
+    ./build/barrier_energy_test
+    ./build/total_energy_test
+
+All tests use central finite differences to verify analytic gradients (slope 2) and Hessians (slope 2 or ratio ~4 for the slope-2 check).
 
 ## Console Output
 
@@ -55,15 +64,19 @@ Per-frame statistics are printed to stdout:
     │   update_velocity()
     │
     ├── physics.h / physics.cpp
-    │   global incremental potential
-    │   per-vertex gradient and Hessian accumulation
+    │   incremental potential (no barrier): energy, per-vertex gradient, per-vertex Hessian
+    │   barrier terms are added
     │
-    ├── solver.h / solver.cpp
-    │   nonlinear Gauss–Seidel solver
+    ├── node_triangle_distance.h / node_triangle_distance.cpp
+    │   node–triangle closest-point distance (7 regions + degenerate)
     │
-    ├── visualization.h / visualization.cpp
-    │   export_obj()
-    │   export_frame()
+    ├── segment_segment_distance.h / segment_segment_distance.cpp
+    │   segment–segment closest-point distance (9 regions + degenerate)
+    │
+    ├── barrier_energy.h / barrier_energy.cpp
+    │   scalar barrier function b(delta; d_hat) and its derivatives
+    │   node–triangle barrier: energy, gradient (12-vector), Hessian (12x12)
+    │   segment–segment barrier: energy, gradient (12-vector), Hessian (12x12)
     │
     ├── corotated_energy.h / corotated_energy.cpp
     │   corotated 3x2 energy, per-vertex nodal gradient, and per-vertex nodal Hessian
@@ -71,16 +84,30 @@ Per-frame statistics are printed to stdout:
     ├── Corotated32.h / Corotated32.cpp
     │   reference corotated 3x2 formulation used by corotated_energy
     │
+    ├── solver.h / solver.cpp
+    │   nonlinear Gauss–Seidel solver 
+    │
+    ├── visualization.h / visualization.cpp
+    │   export_obj()
+    │   export_frame()
+    │
     ├── simulation.cpp
     │   main simulation driver
     │
     ├── corotated_energy_test.cpp
-    │   GoogleTest finite-difference verification for the corotated element
-    │    energy-gradient consistency and gradient-Hessian consistency
+    │   FD verification for corotated element energy, gradient, Hessian
     │
-    └── total_energy_test.cpp   (if you added it)
-    │   finite-difference verification for total system: 
-    │    energy-gradient consistency and gradient-Hessian consistency
+    ├── node_triangle_distance_test.cpp
+    │   distance computation tests for all 7 regions + degenerate
+    │
+    ├── segment_segment_distance_test.cpp
+    │   distance computation tests for all 9 regions + parallel + symmetry
+    │
+    ├── barrier_energy_test.cpp
+    │   FD convergence tests for scalar barrier, node–triangle barrier, and segment–segment barrier 
+    │
+    ├── total_energy_test.cpp
+    │   FD verification for full incremental potential including barrier terms
     │
     └── Readme.md
 
@@ -98,6 +125,8 @@ through a simplified project-level interface.
 
 ## Future Work
 
+- AABB broad-phase collision filtering
+- wire barrier terms into the Gauss–Seidel solver
+- CCD line search
 - support larger meshes
-- add collision handling (e.g. barrier potentials, axis-aligned bounding boxes, continuous collision detection, trust-region methods)
 - improve visualization pipeline
