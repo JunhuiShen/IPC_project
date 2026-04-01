@@ -40,8 +40,11 @@ Output frames are written to `frames_sim3d/` as
     ./build/segment_segment_distance_test
     ./build/barrier_energy_test
     ./build/total_energy_test
+    ./build/make_shape_test
 
-All tests use central finite differences to verify analytic gradients (slope 2) and Hessians (slope 2 or ratio ~4 for the slope-2 check).
+The first five tests use central finite differences to verify analytic gradients
+(slope 2) and Hessians (slope 2 or ratio ~4 for the slope-2 check).
+`make_shape_test` uses GoogleTest to verify mesh construction utilities.
 
 ## Console Output
 
