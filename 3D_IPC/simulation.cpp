@@ -2,6 +2,7 @@
 #include "physics.h"
 #include "solver.h"
 #include "visualization.h"
+#include "ipc_args.h"
 
 #include <chrono>
 #include <filesystem>
@@ -11,20 +12,12 @@
 
 namespace fs = std::__fs::filesystem;
 
-using VertexAdjacencyMap = std::unordered_map<int, std::vector<int>>;
+int main(int argc, char** argv) {
+    IPCArgs3D args;
+    if (!args.parse(argc, argv)) return 1;
 
-int main() {
-    SimParams params;
-    params.dt = 1.0 / 30.0;
-    params.mu = 10.0;
-    params.lambda = 10.0;
-    params.density = 1.0;
-    params.thickness = 0.1;
-    params.kpin = 1e7;
-    params.gravity = Vec3(0.0, -9.81, 0.0);
-    params.max_global_iters = 100;
-    params.tol_abs = 1e-6;
-    params.step_weight = 1.0;
+    SimParams params = args.to_sim_params();
+    const int num_frames = args.num_frames;
 
     RefMesh ref_mesh;
     DeformedState state;
@@ -33,33 +26,13 @@ int main() {
 
     clear_model(ref_mesh, state, X, pins);
 
-//    int tri0 = build_single_triangle(
-//            ref_mesh, state,
-//            Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.2, 1.0),
-//            Vec3(-1.5, 0.0, 0.2), Vec3(-0.5, 0.0, 0.4), Vec3(-1.3, 1.0, 0.3)
-//    );
-//
-//    int tri1 = build_single_triangle(
-//            ref_mesh, state,
-//            Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.2, 1.0),
-//            Vec3( 0.5, 0.0, 1.0), Vec3( 1.5, 0.0, -0.5), Vec3( 0.7, 1.0, 0.0)
-//    );
-//
-//    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
-//
-//    append_pin(pins, tri0 + 0, state.deformed_positions);
-//    append_pin(pins, tri1 + 0, state.deformed_positions);
-
-    int nx = 10;
-    int ny = 10;
-
-    int base = build_square_mesh(ref_mesh, state, X, nx, ny, 2.0, 2.0, Vec3(0.2, -0.1, 0.3));
+    int base = build_square_mesh(ref_mesh, state, X, args.nx, args.ny, args.width, args.height, Vec3(0.2, -0.1, 0.3));
 
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
 
     // pin top-left and top-right corners
-    append_pin(pins, base + ny * (nx + 1), state.deformed_positions);
-    append_pin(pins, base + ny * (nx + 1) + nx, state.deformed_positions);
+    append_pin(pins, base + args.ny * (args.nx + 1), state.deformed_positions);
+    append_pin(pins, base + args.ny * (args.nx + 1) + args.nx, state.deformed_positions);
 
     ref_mesh.build_lumped_mass(params.density, params.thickness);
     VertexAdjacencyMap adj = build_incident_triangle_map(ref_mesh.tris);
@@ -67,13 +40,12 @@ int main() {
     std::cout << "Vertices: " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() << "\n";
 
-    std::string outdir = "frames_sim3d";
+    const std::string& outdir = args.outdir;
     if (fs::exists(outdir)) fs::remove_all(outdir);
     fs::create_directories(outdir);
 
     export_frame(outdir, 0, state.deformed_positions, ref_mesh.tris);
 
-    const int num_frames = 100;
 
     using Clock = std::chrono::steady_clock;
     auto sim_start = Clock::now();
