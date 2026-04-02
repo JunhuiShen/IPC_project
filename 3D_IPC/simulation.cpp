@@ -26,9 +26,10 @@ int main() {
 
     RefMesh ref_mesh;
     DeformedState state;
+    std::vector<Vec2> X;
     std::vector<Pin> pins;
 
-    clear_model(ref_mesh, state, pins);
+    clear_model(ref_mesh, state, X, pins);
 
 //    int tri0 = build_single_triangle(
 //            ref_mesh, state,
@@ -50,7 +51,7 @@ int main() {
     int nx = 10;
     int ny = 10;
 
-    int base = build_square_mesh(ref_mesh,state, nx, ny, 2.0, 2.0,Vec3(0.2, -0.1, 0.3));
+    int base = build_square_mesh(ref_mesh, state, X, nx, ny, 2.0, 2.0, Vec3(0.2, -0.1, 0.3));
 
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
 

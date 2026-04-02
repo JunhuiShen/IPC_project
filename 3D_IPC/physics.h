@@ -23,7 +23,6 @@ struct DeformedState {
 };
 
 struct RefMesh {
-    std::vector<Vec2> ref_positions;
     std::vector<Tri> tris;
     std::vector<Mat22> Dm_inverse;
     std::vector<double> area;
@@ -31,18 +30,17 @@ struct RefMesh {
     size_t num_positions;
 
     inline void initialize(const std::vector<Vec2>& X){
-        //ref_positions=X;
-        compute_dm_inverse();
-        num_positions=X.size();
+        num_positions = X.size();
+        compute_dm_inverse(X);
     }
 
-    inline void compute_dm_inverse(){
+    inline void compute_dm_inverse(const std::vector<Vec2>& X){
         Dm_inverse.resize(tris.size());
         area.resize(tris.size());
         for(size_t t=0;t<tris.size();t++){
-            const Vec2& X0 = ref_positions[tris[t].v[0]];
-            const Vec2& X1 = ref_positions[tris[t].v[1]];
-            const Vec2& X2 = ref_positions[tris[t].v[2]];
+            const Vec2& X0 = X[tris[t].v[0]];
+            const Vec2& X1 = X[tris[t].v[1]];
+            const Vec2& X2 = X[tris[t].v[2]];
 
             Mat22 Dm_local;
             Dm_local.col(0) = X1 - X0;
@@ -53,7 +51,7 @@ struct RefMesh {
     }
 
     inline void build_lumped_mass(double density, double thickness) {
-        mass.assign(ref_positions.size(), 0.0);
+        mass.assign(num_positions, 0.0);
 
         for (size_t t=0;t<tris.size();t++) {
             double m = density * area[t] * thickness;
@@ -67,7 +65,7 @@ struct VertexAdjacency {
     std::vector<std::vector<int>> incident_triangle_indices;
 };
 
-double triangle_ref_area_2d(const RefMesh& ref_mesh, const Tri& tri);
+double triangle_ref_area_2d(const RefMesh& ref_mesh, const std::vector<Vec2>& X, const Tri& tri);
 
 VertexAdjacency build_vertex_adjacency(const RefMesh& ref_mesh);
 

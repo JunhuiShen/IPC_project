@@ -3,10 +3,10 @@
 #include <algorithm>
 #include <cmath>
 
-double triangle_ref_area_2d(const RefMesh& ref_mesh, const Tri& tri) {
-    const Vec2& X0 = ref_mesh.ref_positions[tri.v[0]];
-    const Vec2& X1 = ref_mesh.ref_positions[tri.v[1]];
-    const Vec2& X2 = ref_mesh.ref_positions[tri.v[2]];
+double triangle_ref_area_2d(const RefMesh& ref_mesh, const std::vector<Vec2>& X, const Tri& tri) {
+    const Vec2& X0 = X[tri.v[0]];
+    const Vec2& X1 = X[tri.v[1]];
+    const Vec2& X2 = X[tri.v[2]];
 
     Mat22 Dm_local;
     Dm_local.col(0) = X1 - X0;
@@ -17,7 +17,7 @@ double triangle_ref_area_2d(const RefMesh& ref_mesh, const Tri& tri) {
 
 VertexAdjacency build_vertex_adjacency(const RefMesh& ref_mesh) {
     VertexAdjacency adj;
-    adj.incident_triangle_indices.resize(ref_mesh.ref_positions.size());
+    adj.incident_triangle_indices.resize(ref_mesh.num_positions);
 
     for (int t = 0; t < static_cast<int>(ref_mesh.tris.size()); ++t) {
         const Tri& tri = ref_mesh.tris[t];

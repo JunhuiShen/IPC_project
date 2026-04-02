@@ -203,14 +203,15 @@ int main(){
 
     RefMesh ref_mesh;
     DeformedState state;
+    std::vector<Vec2> X;
     std::vector<Pin> pins;
 
-    clear_model(ref_mesh, state, pins);
+    clear_model(ref_mesh, state, X, pins);
 
     // Mesh A at z=0
-    build_square_mesh(ref_mesh, state, 1, 1, 1.0, 1.0, Vec3(0, 0, 0));
+    build_square_mesh(ref_mesh, state, X, 1, 1, 1.0, 1.0, Vec3(0, 0, 0));
     // Mesh B at z=0.4
-    build_square_mesh(ref_mesh, state, 1, 1, 1.0, 1.0, Vec3(0, 0, 0.4));
+    build_square_mesh(ref_mesh, state, X, 1, 1, 1.0, 1.0, Vec3(0, 0, 0.4));
 
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
 

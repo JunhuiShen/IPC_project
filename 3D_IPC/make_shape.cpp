@@ -1,11 +1,11 @@
 #include "make_shape.h"
 #include <unordered_map>
 
-TriangleRest make_rest_triangle(const RefMesh& ref_mesh, const Tri& tri) {
+TriangleRest make_rest_triangle(const std::vector<Vec2>& X, const Tri& tri) {
     TriangleRest rest;
-    rest.X[0] = ref_mesh.ref_positions[tri.v[0]];
-    rest.X[1] = ref_mesh.ref_positions[tri.v[1]];
-    rest.X[2] = ref_mesh.ref_positions[tri.v[2]];
+    rest.X[0] = X[tri.v[0]];
+    rest.X[1] = X[tri.v[1]];
+    rest.X[2] = X[tri.v[2]];
     return rest;
 }
 
@@ -29,21 +29,22 @@ void update_velocity(std::vector<Vec3>& v, const std::vector<Vec3>& xnew, const 
     for (int i = 0; i < n; ++i) v[i] = (xnew[i] - xold[i]) / dt;
 }
 
-void clear_model(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin>& pins) {
-    ref_mesh.ref_positions.clear();
+void clear_model(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, std::vector<Pin>& pins) {
+    X.clear();
     ref_mesh.tris.clear();
     state.deformed_positions.clear();
     state.velocities.clear();
     pins.clear();
 }
 
-int build_single_triangle(RefMesh& ref_mesh, DeformedState& state, const Vec2& X0, const Vec2& X1, const Vec2& X2,
+int build_single_triangle(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X,
+                          const Vec2& X0, const Vec2& X1, const Vec2& X2,
                           const Vec3& x0, const Vec3& x1, const Vec3& x2) {
     int base = static_cast<int>(state.deformed_positions.size());
 
-    ref_mesh.ref_positions.push_back(X0);
-    ref_mesh.ref_positions.push_back(X1);
-    ref_mesh.ref_positions.push_back(X2);
+    X.push_back(X0);
+    X.push_back(X1);
+    X.push_back(X2);
 
     state.deformed_positions.push_back(x0);
     state.deformed_positions.push_back(x1);
@@ -58,7 +59,7 @@ void append_pin(std::vector<Pin>& pins, int vertex_index, const std::vector<Vec3
 }
 
 // Total number of vertices is: (nx + 1) * (ny + 1) and total number of triangles is: 2 * nx * ny
-int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, int nx, int ny, double width, double height, const Vec3& origin) {
+int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin) {
     int base = static_cast<int>(state.deformed_positions.size());
 
     for (int j = 0; j <= ny; ++j) {
@@ -73,7 +74,7 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, int nx, int ny, d
             double y_ref = v * height;
 
             // Store reference (2D) and deformed (3D) positions
-            ref_mesh.ref_positions.push_back(Vec2(x_ref, y_ref));
+            X.push_back(Vec2(x_ref, y_ref));
             state.deformed_positions.push_back(origin + Vec3(x_ref, y_ref, 0.0));
         }
     }
@@ -97,7 +98,7 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, int nx, int ny, d
         }
     }
 
-    ref_mesh.initialize(ref_mesh.ref_positions);
+    ref_mesh.initialize(X);
 
     return base;
 }
