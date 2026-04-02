@@ -25,6 +25,24 @@ struct DeformedState {
 struct RefMesh {
     std::vector<Vec2> ref_positions;
     std::vector<Tri> tris;
+    std::vector<Mat22> Dm_inverse;
+    std::vector<double> area;
+
+    inline void compute_dm_inverse(){
+        Dm_inverse.resize(tris.size());
+        area.resize(tris.size());
+        for(size_t t=0;t<tris.size();t++){
+            const Vec2& X0 = ref_positions[tris[t].v[0]];
+            const Vec2& X1 = ref_positions[tris[t].v[1]];
+            const Vec2& X2 = ref_positions[tris[t].v[2]];
+
+            Mat22 Dm_local;
+            Dm_local.col(0) = X1 - X0;
+            Dm_local.col(1) = X2 - X0;
+            area[t]=0.5 * std::abs(Dm_local.determinant());
+            Dm_inverse[t]=Dm_local.inverse();
+        }
+    }
 };
 
 struct LumpedMass {

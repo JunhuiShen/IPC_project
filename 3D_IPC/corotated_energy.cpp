@@ -169,6 +169,63 @@ void dPdFCorotated32(const Mat32& F, double mu, double lambda, Mat66& dPdF) {
     dPdF += 2.0 * mu * (Mat66::Identity() - dRdF);
 }
 
+static std::array<Vec2, 3> shape_function_grad_from_inv(const Mat22& Dm_inv) {
+    std::array<Vec2, 3> grads;
+    grads[1] = Dm_inv.row(0).transpose();
+    grads[2] = Dm_inv.row(1).transpose();
+    grads[0] = -grads[1] - grads[2];
+    return grads;
+}
+
+double corotated_energy(double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda) {
+    const Mat32 F = Ds(def) * Dm_inv;
+    return ref_area * PsiCorotated32(F, mu, lambda);
+}
+
+std::array<Vec3, 3> corotated_node_gradient(double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda) {
+    const Mat32 F = Ds(def) * Dm_inv;
+    const Mat32 P = PCorotated32(F, mu, lambda);
+    const auto gradN = shape_function_grad_from_inv(Dm_inv);
+
+    std::array<Vec3, 3> g;
+    for (int i = 0; i < 3; ++i) {
+        g[i].setZero();
+        for (int gamma = 0; gamma < 3; ++gamma) {
+            double val = 0.0;
+            for (int beta = 0; beta < 2; ++beta)
+                val += P(gamma, beta) * gradN[i](beta);
+            g[i](gamma) = ref_area * val;
+        }
+    }
+    return g;
+}
+
+Mat99 corotated_node_hessian(double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda) {
+    const Mat32 F = Ds(def) * Dm_inv;
+    const auto gradN = shape_function_grad_from_inv(Dm_inv);
+
+    Mat66 dPdF;
+    dPdFCorotated32(F, mu, lambda, dPdF);
+
+    Mat99 H = Mat99::Zero();
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            for (int gamma = 0; gamma < 3; ++gamma) {
+                for (int delta = 0; delta < 3; ++delta) {
+                    double value = 0.0;
+                    for (int beta = 0; beta < 2; ++beta) {
+                        for (int eta = 0; eta < 2; ++eta) {
+                            value += dPdF(flatF(gamma, beta), flatF(delta, eta)) * gradN[i](beta) * gradN[j](eta);
+                        }
+                    }
+                    H(3 * i + gamma, 3 * j + delta) = ref_area * value;
+                }
+            }
+        }
+    }
+    return H;
+}
+
 double corotated_energy(const TriangleRest& rest, const TriangleDef& def, double mu, double lambda) {
     const double A = rest_area(rest);
     const Mat32 F = deformation_gradient(rest, def);
