@@ -56,8 +56,8 @@ double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const L
         PE += 0.5 * params.kpin * dx.squaredNorm();
     }
 
-    for (const Tri& tri : ref_mesh.tris)
-        PE += corotated_energy(make_rest_triangle(ref_mesh, tri), make_def_triangle(x, tri), params.mu, params.lambda);
+    for (size_t t = 0; t < ref_mesh.tris.size(); ++t)
+        PE += corotated_energy(ref_mesh.area[t], ref_mesh.Dm_inverse[t], make_def_triangle(x, ref_mesh.tris[t]), params.mu, params.lambda);
 
     return E + dt2 * PE;
 }

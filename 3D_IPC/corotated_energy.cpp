@@ -8,35 +8,11 @@ inline int flatF(int a, int b) {
     return 2 * a + b;
 }
 
-Mat22 Dm(const TriangleRest& tri) {
-    Mat22 out;
-    out.col(0) = tri.X[1] - tri.X[0];
-    out.col(1) = tri.X[2] - tri.X[0];
-    return out;
-}
-
 Mat32 Ds(const TriangleDef& tri) {
     Mat32 out;
     out.col(0) = tri.x[1] - tri.x[0];
     out.col(1) = tri.x[2] - tri.x[0];
     return out;
-}
-
-double rest_area(const TriangleRest& tri) {
-    return 0.5 * std::abs(Dm(tri).determinant());
-}
-
-Mat32 deformation_gradient(const TriangleRest& rest, const TriangleDef& def) {
-    return Ds(def) * Dm(rest).inverse();
-}
-
-std::array<Vec2, 3> shape_function_grad(const TriangleRest& rest) {
-    Mat22 Dm_inv = Dm(rest).inverse();
-    std::array<Vec2, 3> grads;
-    grads[1] = Dm_inv.row(0).transpose();
-    grads[2] = Dm_inv.row(1).transpose();
-    grads[0] = -grads[1] - grads[2];
-    return grads;
 }
 
 // Shared eigendecomposition cache
@@ -68,7 +44,7 @@ CorotatedCache32 buildCorotatedCache(const Mat32& F) {
     return c;
 }
 
-//  Cached low-level functions
+// Cached Psi functions
 double PsiCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, double lambda) {
     return mu * (F - cache.R).squaredNorm() + 0.5 * lambda * (cache.J - 1.0) * (cache.J - 1.0);
 }
@@ -142,20 +118,7 @@ void dPdFCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, d
     dPdF += 2.0 * mu * (Mat66::Identity() - dRdF);
 }
 
-//  Non-cached low-level functions
-double PsiCorotated32(const Mat32& F, double mu, double lambda) {
-    return PsiCorotated32(buildCorotatedCache(F), F, mu, lambda);
-}
-
-Mat32 PCorotated32(const Mat32& F, double mu, double lambda) {
-    return PCorotated32(buildCorotatedCache(F), F, mu, lambda);
-}
-
-void dPdFCorotated32(const Mat32& F, double mu, double lambda, Mat66& dPdF) {
-    dPdFCorotated32(buildCorotatedCache(F), F, mu, lambda, dPdF);
-}
-
-//  Shape-function helper
+// Shape-function helper
 static std::array<Vec2, 3> shape_function_grad_from_inv(const Mat22& Dm_inv) {
     std::array<Vec2, 3> grads;
     grads[1] = Dm_inv.row(0).transpose();
@@ -164,9 +127,10 @@ static std::array<Vec2, 3> shape_function_grad_from_inv(const Mat22& Dm_inv) {
     return grads;
 }
 
-// High-level: cached overloads
-double corotated_energy(const CorotatedCache32& cache, double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda) {
+// Cached corotated energy functions
+double corotated_energy(double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda) {
     const Mat32 F = Ds(def) * Dm_inv;
+    CorotatedCache32 cache = buildCorotatedCache(F);
     return ref_area * PsiCorotated32(cache, F, mu, lambda);
 }
 
@@ -213,112 +177,3 @@ Mat99 corotated_node_hessian(const CorotatedCache32& cache, double ref_area, con
     }
     return H;
 }
-
-// High-level: non-cached overloads
-double corotated_energy(double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda) {
-    const Mat32 F = Ds(def) * Dm_inv;
-    return ref_area * PsiCorotated32(F, mu, lambda);
-}
-
-std::array<Vec3, 3> corotated_node_gradient(double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda) {
-    const Mat32 F = Ds(def) * Dm_inv;
-    const Mat32 P = PCorotated32(F, mu, lambda);
-    const auto gradN = shape_function_grad_from_inv(Dm_inv);
-
-    std::array<Vec3, 3> g;
-    for (int i = 0; i < 3; ++i) {
-        g[i].setZero();
-        for (int gamma = 0; gamma < 3; ++gamma) {
-            double val = 0.0;
-            for (int beta = 0; beta < 2; ++beta)
-                val += P(gamma, beta) * gradN[i](beta);
-            g[i](gamma) = ref_area * val;
-        }
-    }
-    return g;
-}
-
-Mat99 corotated_node_hessian(double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda) {
-    const Mat32 F = Ds(def) * Dm_inv;
-    const auto gradN = shape_function_grad_from_inv(Dm_inv);
-
-    Mat66 dPdF;
-    dPdFCorotated32(F, mu, lambda, dPdF);
-
-    Mat99 H = Mat99::Zero();
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            for (int gamma = 0; gamma < 3; ++gamma) {
-                for (int delta = 0; delta < 3; ++delta) {
-                    double value = 0.0;
-                    for (int beta = 0; beta < 2; ++beta) {
-                        for (int eta = 0; eta < 2; ++eta) {
-                            value += dPdF(flatF(gamma, beta), flatF(delta, eta)) * gradN[i](beta) * gradN[j](eta);
-                        }
-                    }
-                    H(3 * i + gamma, 3 * j + delta) = ref_area * value;
-                }
-            }
-        }
-    }
-    return H;
-}
-
-// High-level: TriangleRest overloads
-double corotated_energy(const TriangleRest& rest, const TriangleDef& def, double mu, double lambda) {
-    const double A = rest_area(rest);
-    const Mat32 F = deformation_gradient(rest, def);
-    return A * PsiCorotated32(F, mu, lambda);
-}
-
-std::array<Vec3, 3> corotated_node_gradient(const TriangleRest& rest, const TriangleDef& def, double mu, double lambda) {
-    const double A = rest_area(rest);
-    const Mat32 F = deformation_gradient(rest, def);
-    const Mat32 P = PCorotated32(F, mu, lambda);
-    const auto gradN = shape_function_grad(rest);
-
-    std::array<Vec3, 3> g;
-    for (int i = 0; i < 3; ++i) {
-        g[i].setZero();
-        for (int gamma = 0; gamma < 3; ++gamma) {
-            double val = 0.0;
-            for (int beta = 0; beta < 2; ++beta) {
-                val += P(gamma, beta) * gradN[i](beta);
-            }
-            g[i](gamma) = A * val;
-        }
-    }
-    return g;
-}
-
-Mat99 corotated_node_hessian(const TriangleRest& rest, const TriangleDef& def, double mu, double lambda) {
-    const double A = rest_area(rest);
-    const Mat32 F = deformation_gradient(rest, def);
-    const auto gradN = shape_function_grad(rest);
-
-    Mat66 dPdF;
-    dPdFCorotated32(F, mu, lambda, dPdF);
-
-    Mat99 H = Mat99::Zero();
-
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            for (int gamma = 0; gamma < 3; ++gamma) {
-                for (int delta = 0; delta < 3; ++delta) {
-                    double value = 0.0;
-                    for (int beta = 0; beta < 2; ++beta) {
-                        for (int eta = 0; eta < 2; ++eta) {
-                            int row = flatF(gamma, beta);
-                            int col = flatF(delta, eta);
-                            value += dPdF(row, col) * gradN[i](beta) * gradN[j](eta);
-                        }
-                    }
-                    H(3 * i + gamma, 3 * j + delta) = A * value;
-                }
-            }
-        }
-    }
-
-    return H;
-}
-
