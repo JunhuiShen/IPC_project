@@ -3,15 +3,14 @@
 
 void update_one_vertex(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj,
                        const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& xhat, std::vector<Vec3>& x) {
-    Vec3 g = compute_local_gradient(vi, ref_mesh, lumped_mass, adj, pins, params, x, xhat);
-    Mat33 H = compute_local_hessian(vi, ref_mesh, lumped_mass, adj, pins, params, x);
+    auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, lumped_mass, adj, pins, params, x, xhat);
     Vec3 dx = matrix3d_inverse(H) * g;
     x[vi] -= params.step_weight * dx;
 }
 
 SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj,
                                         const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew,
-                                        const std::vector<Vec3>& xhat, std::vector<double>* residual_history) {
+                                        const std::vector<Vec3>& xhat, std::vector<double>* residual_history){
     if (residual_history) residual_history->clear();
 
     auto eval_residual = [&]() { return compute_global_residual(ref_mesh, lumped_mass, adj, pins, params, xnew, xhat); };

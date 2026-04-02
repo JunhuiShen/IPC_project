@@ -99,6 +99,8 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, int nx, int ny, d
         }
     }
 
+    ref_mesh.compute_dm_inverse();
+
     return base;
 }
 

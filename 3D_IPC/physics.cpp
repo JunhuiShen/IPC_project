@@ -14,7 +14,7 @@ double triangle_ref_area_2d(const RefMesh& ref_mesh, int tri_idx) {
     return 0.5 * std::abs(Dm_local.determinant());
 }
 
-LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thickness) {
+LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thickness){
     LumpedMass M;
     M.vertex_masses.assign(ref_mesh.ref_positions.size(), 0.0);
 
@@ -28,9 +28,7 @@ LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thi
     return M;
 }
 
-
-double compute_incremental_potential(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const std::vector<Pin>& pins,
-                                     const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
+double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
     double E = 0.0, PE = 0.0, dt2 = params.dt * params.dt;
 
     for (int i = 0; i < static_cast<int>(x.size()); ++i) {
@@ -47,58 +45,95 @@ double compute_incremental_potential(const RefMesh& ref_mesh, const LumpedMass& 
     }
 
     for (int t = 0; t < num_tris(ref_mesh); ++t)
-        PE += corotated_energy(make_rest_triangle(ref_mesh, t), make_def_triangle(x, ref_mesh, t), params.mu, params.lambda);
+        PE += corotated_energy(ref_mesh.area[t], ref_mesh.Dm_inverse[t], make_def_triangle(x, ref_mesh, t), params.mu, params.lambda);
 
     return E + dt2 * PE;
 }
 
-Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj,
-                            const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
+std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
+    double dt2 = params.dt * params.dt;
+    Vec3 g = Vec3::Zero();
+    Mat33 H = Mat33::Zero();
+
+    g += lumped_mass.vertex_masses[vi] * (x[vi] - xhat[vi]);
+    g += dt2 * (-lumped_mass.vertex_masses[vi] * params.gravity);
+    H += lumped_mass.vertex_masses[vi] * Mat33::Identity();
+
+    for (const Pin& pin : pins) {
+        if (pin.vertex_index == vi) {
+            g += dt2 * params.kpin * (x[vi] - pin.target_position);
+            H += dt2 * params.kpin * Mat33::Identity();
+        }
+    }
+
+    for (int ti : adj.at(vi)) {
+        const TriangleDef def = make_def_triangle(x, ref_mesh, ti);
+
+        Mat32 Ds_mat;
+        Ds_mat.col(0) = def.x[1] - def.x[0];
+        Ds_mat.col(1) = def.x[2] - def.x[0];
+        const Mat22& Dm_inv = ref_mesh.Dm_inverse[ti];
+        const Mat32 F = Ds_mat * Dm_inv;
+        const double A = ref_mesh.area[ti];
+
+        CorotatedCache32 cache = buildCorotatedCache(F);
+
+        auto node_g = corotated_node_gradient(cache, F, A, Dm_inv, params.mu, params.lambda);
+        Mat99 tri_H = corotated_node_hessian(cache, F, A, Dm_inv, params.mu, params.lambda);
+
+        for (int a = 0; a < 3; ++a) {
+            if (tri_vertex(ref_mesh, ti, a) == vi) {
+                g += dt2 * node_g[a];
+                H += dt2 * tri_H.block<3,3>(3 * a, 3 * a);
+            }
+        }
+    }
+
+    return {g, H};
+}
+
+Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
     double dt2 = params.dt * params.dt;
     Vec3 g = Vec3::Zero();
 
     g += lumped_mass.vertex_masses[vi] * (x[vi] - xhat[vi]);
     g += dt2 * (-lumped_mass.vertex_masses[vi] * params.gravity);
 
-    for (const Pin& pin : pins)
-        if (pin.vertex_index == vi) g += dt2 * params.kpin * (x[vi] - pin.target_position);
+    for (const Pin& pin : pins) {
+        if (pin.vertex_index == vi) {
+            g += dt2 * params.kpin * (x[vi] - pin.target_position);
+        }
+    }
 
     for (int ti : adj.at(vi)) {
-        auto node_g = corotated_node_gradient(make_rest_triangle(ref_mesh, ti), make_def_triangle(x, ref_mesh, ti), params.mu, params.lambda);
+        const TriangleDef def = make_def_triangle(x, ref_mesh, ti);
 
-        for (int a = 0; a < 3; ++a)
-            if (tri_vertex(ref_mesh, ti, a) == vi) g += dt2 * node_g[a];
+        Mat32 Ds_mat;
+        Ds_mat.col(0) = def.x[1] - def.x[0];
+        Ds_mat.col(1) = def.x[2] - def.x[0];
+        const Mat22& Dm_inv = ref_mesh.Dm_inverse[ti];
+        const Mat32 F = Ds_mat * Dm_inv;
+        const double A = ref_mesh.area[ti];
+
+        CorotatedCache32 cache = buildCorotatedCache(F);
+
+        auto node_g = corotated_node_gradient(cache, F, A, Dm_inv, params.mu, params.lambda);
+
+        for (int a = 0; a < 3; ++a) {
+            if (tri_vertex(ref_mesh, ti, a) == vi) {
+                g += dt2 * node_g[a];
+            }
+        }
     }
 
     return g;
 }
 
-Mat33 compute_local_hessian(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj,
-                            const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x) {
-    double dt2 = params.dt * params.dt;
-    Mat33 H = Mat33::Zero();
-
-    H += lumped_mass.vertex_masses[vi] * Mat33::Identity();
-
-    for (const Pin& pin : pins)
-        if (pin.vertex_index == vi) H += dt2 * params.kpin * Mat33::Identity();
-
-    for (int ti : adj.at(vi)) {
-        Mat99 tri_H = corotated_node_hessian(make_rest_triangle(ref_mesh, ti), make_def_triangle(x, ref_mesh, ti), params.mu, params.lambda);
-
-        for (int a = 0; a < 3; ++a)
-            if (tri_vertex(ref_mesh, ti, a) == vi) H += dt2 * tri_H.block<3,3>(3 * a, 3 * a);
-    }
-
-    return H;
-}
-
-double compute_global_residual(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj,
-                               const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
+double compute_global_residual(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
     double r_inf = 0.0;
 
     for (int i = 0; i < static_cast<int>(x.size()); ++i) {
-        Vec3 g = compute_local_gradient(i, ref_mesh, lumped_mass, adj, pins, params, x, xhat);
+        Vec3 g = compute_local_gradient_no_barrier(i, ref_mesh, lumped_mass, adj, pins, params, x, xhat);
         r_inf = std::max(r_inf, std::abs(g.x()));
         r_inf = std::max(r_inf, std::abs(g.y()));
         r_inf = std::max(r_inf, std::abs(g.z()));
@@ -106,4 +141,3 @@ double compute_global_residual(const RefMesh& ref_mesh, const LumpedMass& lumped
 
     return r_inf;
 }
-
