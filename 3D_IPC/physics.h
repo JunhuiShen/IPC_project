@@ -3,6 +3,9 @@
 #include "barrier_energy.h"
 #include <unordered_map>
 #include <vector>
+#include <cassert>
+
+struct Tri { int v[3]; };
 
 struct Pin {
     int vertex_index = -1;
@@ -30,19 +33,18 @@ struct RefMesh {
     size_t num_positions;
 
     inline void initialize(const std::vector<Vec2>& X){
-        //ref_positions=X;
-        compute_dm_inverse();
-        num_positions=X.size();
+        num_positions = X.size();
+        compute_dm_inverse(X);
     }
 
-    inline void compute_dm_inverse(){
+    inline void compute_dm_inverse(const std::vector<Vec2>& X){
         int nt = static_cast<int>(tris.size()) / 3;
         Dm_inverse.resize(nt);
         area.resize(nt);
         for(int t = 0; t < nt; t++){
-            const Vec2& X0 = ref_positions[tris[t*3+0]];
-            const Vec2& X1 = ref_positions[tris[t*3+1]];
-            const Vec2& X2 = ref_positions[tris[t*3+2]];
+            const Vec2& X0 = X[tris[t*3+0]];
+            const Vec2& X1 = X[tris[t*3+1]];
+            const Vec2& X2 = X[tris[t*3+2]];
 
             Mat22 Dm_local;
             Dm_local.col(0) = X1 - X0;
@@ -52,8 +54,13 @@ struct RefMesh {
         }
     }
 
+    inline void assert_valid() const {
+        assert(area.size() == Dm_inverse.size());
+        assert(mass.size() == num_positions);
+    }
+
     inline void build_lumped_mass(double density, double thickness) {
-        mass.assign(ref_positions.size(), 0.0);
+        mass.assign(num_positions, 0.0);
         int nt = static_cast<int>(tris.size()) / 3;
         for (int t = 0; t < nt; ++t) {
             double m = density * area[t] * thickness;

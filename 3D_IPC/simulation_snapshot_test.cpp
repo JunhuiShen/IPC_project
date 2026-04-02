@@ -38,7 +38,7 @@ static std::map<int, std::vector<Vec3>> load_golden(const std::string& path) {
 // ---------------------------------------------------------------------------
 // Same scene setup as simulation.cpp / dump_frames.cpp
 // ---------------------------------------------------------------------------
-static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin>& pins, VertexTriangleMap& adj, SimParams& params) {
+static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin>& pins, VertexTriangleMap& adj, SimParams& params, std::vector<Vec2> X) {
     params.dt           = 1.0 / 30.0;
     params.mu           = 10.0;
     params.lambda       = 10.0;
@@ -49,10 +49,10 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin
     params.max_global_iters = 100;
     params.tol_abs      = 1e-6;
     params.step_weight  = 1.0;
-
-    clear_model(ref_mesh, state, pins);
+    
+    clear_model(ref_mesh, state, X, pins);
     int nx = 10, ny = 10;
-    int base = build_square_mesh(ref_mesh, state, nx, ny, 2.0, 2.0, Vec3(0.2, -0.1, 0.3));
+    int base = build_square_mesh(ref_mesh, state, X, nx, ny, 2.0, 2.0, Vec3(0.2, -0.1, 0.3));
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
     append_pin(pins, base + ny * (nx + 1),      state.deformed_positions);
     append_pin(pins, base + ny * (nx + 1) + nx, state.deformed_positions);
@@ -69,8 +69,8 @@ TEST(SimulationSnapshot, First5FramesMatchGolden) {
     ASSERT_FALSE(golden.empty()) << "Golden file empty or missing";
 
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params;
-    build_scene(ref_mesh, state, pins, adj, params);
+    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    build_scene(ref_mesh, state, pins, adj, params, X);
 
     for (int frame = 1; frame <= 100; ++frame) {
         std::vector<Vec3> xhat;
