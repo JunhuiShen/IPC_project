@@ -365,6 +365,95 @@ void test_directional_derivative_convergence(){
 }
 
 // ===========================================================================
+//  Helpers for precomputed overload tests
+// ===========================================================================
+
+static double MakeRefArea(const TriangleRest& rest) {
+    Mat22 Dm;
+    Dm.col(0) = rest.X[1] - rest.X[0];
+    Dm.col(1) = rest.X[2] - rest.X[0];
+    return 0.5 * std::abs(Dm.determinant());
+}
+
+static Mat22 MakeDmInverse(const TriangleRest& rest) {
+    Mat22 Dm;
+    Dm.col(0) = rest.X[1] - rest.X[0];
+    Dm.col(1) = rest.X[2] - rest.X[0];
+    return Dm.inverse();
+}
+
+// ===========================================================================
+//  Precomputed overload tests: results must match original exactly
+// ===========================================================================
+
+void test_precomputed_energy_matches(){
+    std::cout << "=== Test 11: precomputed energy matches original ===\n";
+    const auto rest = MakeRestTriangle();
+    const auto def  = MakeDeformedTriangle();
+    const double A       = MakeRefArea(rest);
+    const Mat22  Dm_inv  = MakeDmInverse(rest);
+
+    const double E_orig = corotated_energy(rest, def, kMu, kLambda);
+    const double E_pre  = corotated_energy(A, Dm_inv, def, kMu, kLambda);
+
+    std::cout << "  E_orig=" << E_orig << "  E_pre=" << E_pre
+              << "  diff=" << std::abs(E_orig - E_pre) << "\n";
+    require(std::abs(E_orig - E_pre) < 1e-12, "precomputed energy does not match original");
+    std::cout << "  PASSED\n\n";
+}
+
+void test_precomputed_gradient_matches(){
+    std::cout << "=== Test 12: precomputed gradient matches original ===\n";
+    const auto rest = MakeRestTriangle();
+    const auto def  = MakeDeformedTriangle();
+    const double A       = MakeRefArea(rest);
+    const Mat22  Dm_inv  = MakeDmInverse(rest);
+
+    const auto g_orig = corotated_node_gradient(rest, def, kMu, kLambda);
+    const auto g_pre  = corotated_node_gradient(A, Dm_inv, def, kMu, kLambda);
+
+    for (int i = 0; i < 3; ++i) {
+        double diff = (g_orig[i] - g_pre[i]).norm();
+        std::cout << "  g[" << i << "] diff=" << std::scientific << diff << "\n";
+        require(diff < 1e-12, "precomputed gradient does not match original");
+    }
+    std::cout << "  PASSED\n\n";
+}
+
+void test_precomputed_hessian_matches(){
+    std::cout << "=== Test 13: precomputed hessian matches original ===\n";
+    const auto rest = MakeRestTriangle();
+    const auto def  = MakeDeformedTriangle();
+    const double A       = MakeRefArea(rest);
+    const Mat22  Dm_inv  = MakeDmInverse(rest);
+
+    const Mat99 H_orig = corotated_node_hessian(rest, def, kMu, kLambda);
+    const Mat99 H_pre  = corotated_node_hessian(A, Dm_inv, def, kMu, kLambda);
+
+    double max_diff = (H_orig - H_pre).cwiseAbs().maxCoeff();
+    std::cout << "  max |H_orig - H_pre| = " << std::scientific << max_diff << "\n";
+    require(max_diff < 1e-12, "precomputed hessian does not match original");
+    std::cout << "  PASSED\n\n";
+}
+
+void test_precomputed_rest_state(){
+    std::cout << "=== Test 14: precomputed rest state has zero energy and gradient ===\n";
+    const auto rest = MakeRestTriangle();
+    const auto def  = EmbedRestTriangle(rest);
+    const double A       = MakeRefArea(rest);
+    const Mat22  Dm_inv  = MakeDmInverse(rest);
+
+    const double E = corotated_energy(A, Dm_inv, def, kMu, kLambda);
+    const auto   g = corotated_node_gradient(A, Dm_inv, def, kMu, kLambda);
+
+    std::cout << "  E = " << std::scientific << E << "\n";
+    require(std::abs(E) < 1e-10, "precomputed rest energy should be zero");
+    for (int i = 0; i < 3; ++i)
+        require(g[i].norm() < 1e-10, "precomputed rest gradient should be zero");
+    std::cout << "  PASSED\n\n";
+}
+
+// ===========================================================================
 //  main
 // ===========================================================================
 
@@ -379,6 +468,10 @@ int main(){
     test_gradient_convergence();
     test_hessian_convergence();
     test_directional_derivative_convergence();
+    test_precomputed_energy_matches();
+    test_precomputed_gradient_matches();
+    test_precomputed_hessian_matches();
+    test_precomputed_rest_state();
 
     std::cout << "\n========================================\n"
               << "All corotated energy tests passed.\n"
