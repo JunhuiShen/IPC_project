@@ -134,8 +134,7 @@ double corotated_energy(double ref_area, const Mat22& Dm_inv, const TriangleDef&
     return ref_area * PsiCorotated32(cache, F, mu, lambda);
 }
 
-std::array<Vec3, 3> corotated_node_gradient(const CorotatedCache32& cache, double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda) {
-    const Mat32 F = Ds(def) * Dm_inv;
+std::array<Vec3, 3> corotated_node_gradient(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda) {
     const Mat32 P = PCorotated32(cache, F, mu, lambda);
     const auto gradN = shape_function_grad_from_inv(Dm_inv);
 
@@ -152,8 +151,7 @@ std::array<Vec3, 3> corotated_node_gradient(const CorotatedCache32& cache, doubl
     return g;
 }
 
-Mat99 corotated_node_hessian(const CorotatedCache32& cache, double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda) {
-    const Mat32 F = Ds(def) * Dm_inv;
+Mat99 corotated_node_hessian(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda) {
     const auto gradN = shape_function_grad_from_inv(Dm_inv);
 
     Mat66 dPdF;

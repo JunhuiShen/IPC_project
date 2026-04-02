@@ -140,7 +140,7 @@ void test_rest_state(){
 
     const Mat32 F = compute_F(tri.Dm_inv, def);
     const CorotatedCache32 cache = buildCorotatedCache(F);
-    const auto g = corotated_node_gradient(cache, tri.ref_area, tri.Dm_inv, def, kMu, kLambda);
+    const auto g = corotated_node_gradient(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda);
 
     std::cout << "  E = " << std::scientific << E << "\n";
     require(std::abs(E) < 1e-10, "rest energy should be zero");
@@ -167,7 +167,7 @@ void test_rotation_invariance(){
 
     const Mat32 F = compute_F(tri.Dm_inv, def1);
     const CorotatedCache32 cache = buildCorotatedCache(F);
-    const auto g = corotated_node_gradient(cache, tri.ref_area, tri.Dm_inv, def1, kMu, kLambda);
+    const auto g = corotated_node_gradient(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda);
 
     std::cout << "  E = " << std::scientific << E << "\n";
     require(std::abs(E) < 1e-10, "rotated rest energy should be zero");
@@ -208,7 +208,7 @@ void test_gradient_sum_zero(){
 
     const Mat32 F = compute_F(tri.Dm_inv, def);
     const CorotatedCache32 cache = buildCorotatedCache(F);
-    const auto g = corotated_node_gradient(cache, tri.ref_area, tri.Dm_inv, def, kMu, kLambda);
+    const auto g = corotated_node_gradient(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda);
     const Vec3 total = g[0] + g[1] + g[2];
 
     std::cout << "  |sum| = " << total.norm() << "\n";
@@ -227,7 +227,7 @@ void test_hessian_symmetry(){
 
     const Mat32 F = compute_F(tri.Dm_inv, def);
     const CorotatedCache32 cache = buildCorotatedCache(F);
-    const Mat99 H = corotated_node_hessian(cache, tri.ref_area, tri.Dm_inv, def, kMu, kLambda);
+    const Mat99 H = corotated_node_hessian(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda);
 
     double max_asym = (H - H.transpose()).cwiseAbs().maxCoeff();
     std::cout << "  max |H - H^T| = " << std::scientific << max_asym << "\n";
@@ -246,7 +246,7 @@ void test_hessian_translation_null(){
 
     const Mat32 F = compute_F(tri.Dm_inv, def);
     const CorotatedCache32 cache = buildCorotatedCache(F);
-    const Mat99 H = corotated_node_hessian(cache, tri.ref_area, tri.Dm_inv, def, kMu, kLambda);
+    const Mat99 H = corotated_node_hessian(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda);
 
     for (int axis = 0; axis < 3; ++axis) {
         Vec9 t = Vec9::Zero();
@@ -270,7 +270,7 @@ void test_gradient_convergence(){
 
     const Mat32 F = compute_F(tri.Dm_inv, def);
     const CorotatedCache32 cache = buildCorotatedCache(F);
-    const auto g = corotated_node_gradient(cache, tri.ref_area, tri.Dm_inv, def, kMu, kLambda);
+    const auto g = corotated_node_gradient(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda);
 
     std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
     bool all_passed = true;
@@ -311,7 +311,7 @@ void test_hessian_convergence(){
 
     const Mat32 F = compute_F(tri.Dm_inv, def);
     const CorotatedCache32 cache = buildCorotatedCache(F);
-    const Mat99 H = corotated_node_hessian(cache, tri.ref_area, tri.Dm_inv, def, kMu, kLambda);
+    const Mat99 H = corotated_node_hessian(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda);
 
     std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
     bool all_passed = true;
@@ -328,11 +328,11 @@ void test_hessian_convergence(){
 
                 Mat32 Fp = compute_F(tri.Dm_inv, dp);
                 CorotatedCache32 cp = buildCorotatedCache(Fp);
-                g_plus_list.push_back(corotated_node_gradient(cp, tri.ref_area, tri.Dm_inv, dp, kMu, kLambda));
+                g_plus_list.push_back(corotated_node_gradient(cp, Fp, tri.ref_area, tri.Dm_inv, kMu, kLambda));
 
                 Mat32 Fm = compute_F(tri.Dm_inv, dm);
                 CorotatedCache32 cm = buildCorotatedCache(Fm);
-                g_minus_list.push_back(corotated_node_gradient(cm, tri.ref_area, tri.Dm_inv, dm, kMu, kLambda));
+                g_minus_list.push_back(corotated_node_gradient(cm, Fm, tri.ref_area, tri.Dm_inv, kMu, kLambda));
             }
 
             for (int i = 0; i < 3; ++i) {
@@ -389,7 +389,7 @@ void test_directional_derivative_convergence(){
 
     const Mat32 F = compute_F(tri.Dm_inv, def);
     const CorotatedCache32 cache = buildCorotatedCache(F);
-    const auto g = corotated_node_gradient(cache, tri.ref_area, tri.Dm_inv, def, kMu, kLambda);
+    const auto g = corotated_node_gradient(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda);
     const double exact = flatten_gradient(g).dot(flatten_def(dx));
 
     std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
