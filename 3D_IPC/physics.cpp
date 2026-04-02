@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-double triangle_ref_area_2d(const RefMesh& ref_mesh, const Tri& tri){
+double triangle_ref_area_2d(const RefMesh& ref_mesh, const Tri& tri) {
     const Vec2& X0 = ref_mesh.ref_positions[tri.v[0]];
     const Vec2& X1 = ref_mesh.ref_positions[tri.v[1]];
     const Vec2& X2 = ref_mesh.ref_positions[tri.v[2]];
@@ -14,7 +14,7 @@ double triangle_ref_area_2d(const RefMesh& ref_mesh, const Tri& tri){
     return 0.5 * std::abs(Dm_local.determinant());
 }
 
-LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thickness){
+LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thickness) {
     LumpedMass M;
     M.vertex_masses.assign(ref_mesh.ref_positions.size(), 0.0);
 
@@ -28,7 +28,7 @@ LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thi
     return M;
 }
 
-VertexAdjacency build_vertex_adjacency(const RefMesh& ref_mesh){
+VertexAdjacency build_vertex_adjacency(const RefMesh& ref_mesh) {
     VertexAdjacency adj;
     adj.incident_triangle_indices.resize(ref_mesh.ref_positions.size());
 
@@ -40,7 +40,8 @@ VertexAdjacency build_vertex_adjacency(const RefMesh& ref_mesh){
     return adj;
 }
 
-double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
+double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const std::vector<Pin>& pins,
+                                     const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
     double E = 0.0, PE = 0.0, dt2 = params.dt * params.dt;
 
     for (int i = 0; i < static_cast<int>(x.size()); ++i) {

@@ -22,11 +22,23 @@ struct DeformedState {
     std::vector<Vec3> velocities;
 };
 
+struct LumpedMass {
+    std::vector<double> vertex_masses;
+};
+
 struct RefMesh {
     std::vector<Vec2> ref_positions;
     std::vector<Tri> tris;
     std::vector<Mat22> Dm_inverse;
     std::vector<double> area;
+    std::vector<double> mass;
+    size_t num_positions;
+
+    inline void initialize(const std::vector<Vec2>& X){
+        //ref_positions=X;
+        compute_dm_inverse();
+        num_positions=X.size();
+    }
 
     inline void compute_dm_inverse(){
         Dm_inverse.resize(tris.size());
@@ -43,10 +55,16 @@ struct RefMesh {
             Dm_inverse[t]=Dm_local.inverse();
         }
     }
-};
 
-struct LumpedMass {
-    std::vector<double> vertex_masses;
+    inline void build_lumped_mass(double density, double thickness) {
+        mass.assign(ref_positions.size(), 0.0);
+
+        for (size_t t=0;t<tris.size();t++) {
+            double m = density * area[t] * thickness;
+            double mv = m / 3.0;
+            for (int a : tris[t].v) mass[a] += mv;
+        }
+    }
 };
 
 struct VertexAdjacency {
