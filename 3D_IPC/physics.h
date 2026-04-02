@@ -22,10 +22,6 @@ struct DeformedState {
     std::vector<Vec3> velocities;
 };
 
-struct LumpedMass {
-    std::vector<double> vertex_masses;
-};
-
 struct RefMesh {
     std::vector<Vec2> ref_positions;
     std::vector<Tri> tris;
@@ -73,15 +69,13 @@ struct VertexAdjacency {
 
 double triangle_ref_area_2d(const RefMesh& ref_mesh, const Tri& tri);
 
-LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thickness);
-
 VertexAdjacency build_vertex_adjacency(const RefMesh& ref_mesh);
 
-double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
+double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
-std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
+std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
-Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
+Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
-double compute_global_residual(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
+double compute_global_residual(const RefMesh& ref_mesh, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 

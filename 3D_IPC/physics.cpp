@@ -14,19 +14,6 @@ double triangle_ref_area_2d(const RefMesh& ref_mesh, const Tri& tri) {
     return 0.5 * std::abs(Dm_local.determinant());
 }
 
-LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thickness) {
-    LumpedMass M;
-    M.vertex_masses.assign(ref_mesh.ref_positions.size(), 0.0);
-
-    for (const Tri& tri : ref_mesh.tris) {
-        double A = triangle_ref_area_2d(ref_mesh, tri);
-        double m = density * A * thickness;
-        double mv = m / 3.0;
-        for (int a : tri.v) M.vertex_masses[a] += mv;
-    }
-
-    return M;
-}
 
 VertexAdjacency build_vertex_adjacency(const RefMesh& ref_mesh) {
     VertexAdjacency adj;
@@ -40,17 +27,17 @@ VertexAdjacency build_vertex_adjacency(const RefMesh& ref_mesh) {
     return adj;
 }
 
-double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const std::vector<Pin>& pins,
+double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins,
                                      const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
     double E = 0.0, PE = 0.0, dt2 = params.dt * params.dt;
 
     for (int i = 0; i < static_cast<int>(x.size()); ++i) {
         Vec3 dx = x[i] - xhat[i];
-        E += 0.5 * lumped_mass.vertex_masses[i] * dx.squaredNorm();
+        E += 0.5 * ref_mesh.mass[i] * dx.squaredNorm();
     }
 
     for (int i = 0; i < static_cast<int>(x.size()); ++i)
-        PE += -lumped_mass.vertex_masses[i] * params.gravity.dot(x[i]);
+        PE += -ref_mesh.mass[i] * params.gravity.dot(x[i]);
 
     for (const Pin& pin : pins) {
         Vec3 dx = x[pin.vertex_index] - pin.target_position;
@@ -63,14 +50,14 @@ double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const L
     return E + dt2 * PE;
 }
 
-std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
+std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
     double dt2 = params.dt * params.dt;
     Vec3 g = Vec3::Zero();
     Mat33 H = Mat33::Zero();
 
-    g += lumped_mass.vertex_masses[vi] * (x[vi] - xhat[vi]);
-    g += dt2 * (-lumped_mass.vertex_masses[vi] * params.gravity);
-    H += lumped_mass.vertex_masses[vi] * Mat33::Identity();
+    g += ref_mesh.mass[vi] * (x[vi] - xhat[vi]);
+    g += dt2 * (-ref_mesh.mass[vi] * params.gravity);
+    H += ref_mesh.mass[vi] * Mat33::Identity();
 
     for (const Pin& pin : pins) {
         if (pin.vertex_index == vi) {
@@ -106,12 +93,12 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
     return {g, H};
 }
 
-Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
+Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
     double dt2 = params.dt * params.dt;
     Vec3 g = Vec3::Zero();
 
-    g += lumped_mass.vertex_masses[vi] * (x[vi] - xhat[vi]);
-    g += dt2 * (-lumped_mass.vertex_masses[vi] * params.gravity);
+    g += ref_mesh.mass[vi] * (x[vi] - xhat[vi]);
+    g += dt2 * (-ref_mesh.mass[vi] * params.gravity);
 
     for (const Pin& pin : pins) {
         if (pin.vertex_index == vi) {
@@ -144,11 +131,11 @@ Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const Lu
     return g;
 }
 
-double compute_global_residual(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
+double compute_global_residual(const RefMesh& ref_mesh, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
     double r_inf = 0.0;
 
     for (int i = 0; i < static_cast<int>(x.size()); ++i) {
-        Vec3 g = compute_local_gradient_no_barrier(i, ref_mesh, lumped_mass, adj, pins, params, x, xhat);
+        Vec3 g = compute_local_gradient_no_barrier(i, ref_mesh, adj, pins, params, x, xhat);
         r_inf = std::max(r_inf, std::abs(g.x()));
         r_inf = std::max(r_inf, std::abs(g.y()));
         r_inf = std::max(r_inf, std::abs(g.z()));

@@ -58,7 +58,7 @@ int main() {
     append_pin(pins, base + ny * (nx + 1), state.deformed_positions);
     append_pin(pins, base + ny * (nx + 1) + nx, state.deformed_positions);
 
-    LumpedMass lumped_mass = build_lumped_mass(ref_mesh, params.density, params.thickness);
+    ref_mesh.build_lumped_mass(params.density, params.thickness);
     VertexAdjacency adj = build_vertex_adjacency(ref_mesh);
 
     std::cout << "Vertices: " << state.deformed_positions.size() << "\n";
@@ -86,7 +86,7 @@ int main() {
 
         auto solver_start = Clock::now();
         SolverResult result = global_gauss_seidel_solver(
-                ref_mesh, lumped_mass, adj, pins, params, xnew, xhat
+                ref_mesh, adj, pins, params, xnew, xhat
         );
         auto solver_end = Clock::now();
 
