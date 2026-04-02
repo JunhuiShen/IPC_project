@@ -2,6 +2,7 @@
 #include "corotated_energy.h"
 #include "barrier_energy.h"
 #include <vector>
+#include <cassert>
 
 struct Tri { int v[3]; };
 
@@ -48,6 +49,11 @@ struct RefMesh {
             area[t]=0.5 * std::abs(Dm_local.determinant());
             Dm_inverse[t]=Dm_local.inverse();
         }
+    }
+
+    inline void assert_valid() const {
+        assert(area.size() == Dm_inverse.size());
+        assert(mass.size() == num_positions);
     }
 
     inline void build_lumped_mass(double density, double thickness) {
