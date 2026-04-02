@@ -1,8 +1,7 @@
 #pragma once
 #include "corotated_energy.h"
+#include <unordered_map>
 #include <vector>
-
-struct Tri { int v[3]; };
 
 struct Pin {
     int vertex_index = -1;
@@ -22,33 +21,37 @@ struct DeformedState {
 
 struct RefMesh {
     std::vector<Vec2> ref_positions;
-    std::vector<Tri> tris;
+    std::vector<int>  tris; // flat: every 3 ints = one triangle
 };
+
+inline int tri_vertex(const RefMesh& ref_mesh, int tri_idx, int local) {
+    return ref_mesh.tris[tri_idx * 3 + local];
+}
+
+inline int num_tris(const RefMesh& ref_mesh) {
+    return static_cast<int>(ref_mesh.tris.size()) / 3;
+}
 
 struct LumpedMass {
     std::vector<double> vertex_masses;
 };
 
+// Maps each vertex index to the list of triangle indices it belongs to
+using VertexTriangleMap = std::unordered_map<int, std::vector<int>>;
 
-struct VertexAdjacency {
-    std::vector<std::vector<int>> incident_triangle_indices;
-};
-
-double triangle_ref_area_2d(const RefMesh& ref_mesh, const Tri& tri);
+double triangle_ref_area_2d(const RefMesh& ref_mesh, int tri_idx);
 
 
 LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thickness);
 
-VertexAdjacency build_vertex_adjacency(const RefMesh& ref_mesh);
-
 double compute_incremental_potential(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const std::vector<Pin>& pins,
                                      const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
-Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj,
+Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj,
                             const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
-Mat33 compute_local_hessian(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj,
+Mat33 compute_local_hessian(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj,
                             const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x);
 
-double compute_global_residual(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj,
+double compute_global_residual(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj,
                                const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);

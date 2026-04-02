@@ -59,7 +59,7 @@ int main() {
     append_pin(pins, base + ny * (nx + 1) + nx, state.deformed_positions);
 
     LumpedMass lumped_mass = build_lumped_mass(ref_mesh, params.density, params.thickness);
-    VertexAdjacency adj = build_vertex_adjacency(ref_mesh);
+    VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);
 
     std::cout << "Vertices: " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() << "\n";

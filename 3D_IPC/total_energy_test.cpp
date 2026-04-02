@@ -28,7 +28,7 @@ double total_energy(const RefMesh& ref_mesh,const LumpedMass& M,const std::vecto
 }
 
 
-Vec3 local_gradient_fd(int vi,const RefMesh& ref_mesh,const LumpedMass& M,const VertexAdjacency& adj,const std::vector<Pin>& pins,const SimParams& params,const std::vector<Vec3>& x,const std::vector<Vec3>& xhat,double eps){
+Vec3 local_gradient_fd(int vi,const RefMesh& ref_mesh,const LumpedMass& M,const VertexTriangleMap& adj,const std::vector<Pin>& pins,const SimParams& params,const std::vector<Vec3>& x,const std::vector<Vec3>& xhat,double eps){
     Vec3 gfd=Vec3::Zero();
     for(int d=0;d<3;++d){
         auto xp=x,xm=x;
@@ -41,7 +41,7 @@ Vec3 local_gradient_fd(int vi,const RefMesh& ref_mesh,const LumpedMass& M,const 
     return gfd;
 }
 
-Mat33 local_hessian_fd(int vi,const RefMesh& ref_mesh,const LumpedMass& M,const VertexAdjacency& adj,const std::vector<Pin>& pins,const SimParams& params,const std::vector<Vec3>& x,const std::vector<Vec3>& xhat,double eps){
+Mat33 local_hessian_fd(int vi,const RefMesh& ref_mesh,const LumpedMass& M,const VertexTriangleMap& adj,const std::vector<Pin>& pins,const SimParams& params,const std::vector<Vec3>& x,const std::vector<Vec3>& xhat,double eps){
     Mat33 H=Mat33::Zero();
     for(int d=0;d<3;++d){
         auto xp=x,xm=x;
@@ -58,7 +58,7 @@ Mat33 local_hessian_fd(int vi,const RefMesh& ref_mesh,const LumpedMass& M,const 
 void slope2_check(const RefMesh& ref_mesh,const LumpedMass& M,const std::vector<Pin>& pins,const SimParams& params,const std::vector<Vec3>& x,const std::vector<Vec3>& xhat,int vi){
     std::cout<<"\n=== slope-2 check vertex "<<vi<<" ===\n";
 
-    VertexAdjacency adj=build_vertex_adjacency(ref_mesh);
+    VertexTriangleMap adj=build_incident_triangle_map(ref_mesh.tris);
 
     Vec3 g=compute_local_gradient(vi,ref_mesh,M,adj,pins,params,x,xhat);
     Mat33 H=compute_local_hessian(vi,ref_mesh,M,adj,pins,params,x);
@@ -118,7 +118,7 @@ int main(){
     append_pin(pins,base+3,state.deformed_positions);
 
     LumpedMass M=build_lumped_mass(ref_mesh,params.density,params.thickness);
-    VertexAdjacency adj=build_vertex_adjacency(ref_mesh);
+    VertexTriangleMap adj=build_incident_triangle_map(ref_mesh.tris);
 
     std::vector<Vec3> xhat=state.deformed_positions;
     std::vector<Vec3> x=state.deformed_positions;

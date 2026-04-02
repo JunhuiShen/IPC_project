@@ -3,9 +3,9 @@
 #include <unordered_map>
 #include <vector>
 
-TriangleRest make_rest_triangle(const RefMesh& ref_mesh, const Tri& tri);
+TriangleRest make_rest_triangle(const RefMesh& ref_mesh, int tri_idx);
 
-TriangleDef make_def_triangle(const std::vector<Vec3>& x, const Tri& tri);
+TriangleDef make_def_triangle(const std::vector<Vec3>& x, const RefMesh& ref_mesh, int tri_idx);
 
 void build_xhat(std::vector<Vec3>& xhat, const std::vector<Vec3>& x, const std::vector<Vec3>& v, double dt);
 

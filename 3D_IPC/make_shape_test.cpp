@@ -7,9 +7,9 @@ TEST(BuildIncidentTriangleMap, BasicExample) {
     auto map = build_incident_triangle_map(indices);
 
     EXPECT_EQ(map[0], (std::vector<int>{0}));
-    EXPECT_EQ(map[1], (std::vector<int>{1, 3}));
-    EXPECT_EQ(map[2], (std::vector<int>{2, 4}));
-    EXPECT_EQ(map[5], (std::vector<int>{5}));
+    EXPECT_EQ(map[1], (std::vector<int>{0, 1}));
+    EXPECT_EQ(map[2], (std::vector<int>{0, 1}));
+    EXPECT_EQ(map[5], (std::vector<int>{1}));
     EXPECT_EQ(map.size(), 4u);
 }
 
@@ -24,7 +24,7 @@ TEST(BuildIncidentTriangleMap, SingleTriangle) {
     auto map = build_incident_triangle_map(indices);
 
     EXPECT_EQ(map[0], (std::vector<int>{0}));
-    EXPECT_EQ(map[1], (std::vector<int>{1}));
-    EXPECT_EQ(map[2], (std::vector<int>{2}));
+    EXPECT_EQ(map[1], (std::vector<int>{0}));
+    EXPECT_EQ(map[2], (std::vector<int>{0}));
     EXPECT_EQ(map.size(), 3u);
 }

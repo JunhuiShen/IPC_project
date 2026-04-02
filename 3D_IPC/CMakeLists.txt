@@ -85,6 +85,26 @@ target_link_libraries(make_shape_test
 
 gtest_discover_tests(make_shape_test)
 
+add_executable(simulation_snapshot_test
+    simulation_snapshot_test.cpp
+    make_shape.cpp
+    physics.cpp
+    solver.cpp
+)
+
+target_compile_definitions(simulation_snapshot_test
+    PRIVATE GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+target_link_libraries(simulation_snapshot_test
+    PRIVATE
+    corotated_energy_lib
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(simulation_snapshot_test)
+
 add_executable(total_energy_test
     total_energy_test.cpp
     make_shape.cpp

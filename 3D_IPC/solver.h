@@ -8,9 +8,9 @@ struct SolverResult {
     int iterations = 0;
 };
 
-void update_one_vertex(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj,
+void update_one_vertex(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj,
                        const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& xhat, std::vector<Vec3>& x);
 
-SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj,
+SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj,
                                         const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew,
                                         const std::vector<Vec3>& xhat, std::vector<double>* residual_history = nullptr);

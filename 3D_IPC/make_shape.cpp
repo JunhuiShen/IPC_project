@@ -1,19 +1,19 @@
 #include "make_shape.h"
 #include <unordered_map>
 
-TriangleRest make_rest_triangle(const RefMesh& ref_mesh, const Tri& tri) {
+TriangleRest make_rest_triangle(const RefMesh& ref_mesh, int tri_idx) {
     TriangleRest rest;
-    rest.X[0] = ref_mesh.ref_positions[tri.v[0]];
-    rest.X[1] = ref_mesh.ref_positions[tri.v[1]];
-    rest.X[2] = ref_mesh.ref_positions[tri.v[2]];
+    rest.X[0] = ref_mesh.ref_positions[tri_vertex(ref_mesh, tri_idx, 0)];
+    rest.X[1] = ref_mesh.ref_positions[tri_vertex(ref_mesh, tri_idx, 1)];
+    rest.X[2] = ref_mesh.ref_positions[tri_vertex(ref_mesh, tri_idx, 2)];
     return rest;
 }
 
-TriangleDef make_def_triangle(const std::vector<Vec3>& x, const Tri& tri) {
+TriangleDef make_def_triangle(const std::vector<Vec3>& x, const RefMesh& ref_mesh, int tri_idx) {
     TriangleDef def;
-    def.x[0] = x[tri.v[0]];
-    def.x[1] = x[tri.v[1]];
-    def.x[2] = x[tri.v[2]];
+    def.x[0] = x[tri_vertex(ref_mesh, tri_idx, 0)];
+    def.x[1] = x[tri_vertex(ref_mesh, tri_idx, 1)];
+    def.x[2] = x[tri_vertex(ref_mesh, tri_idx, 2)];
     return def;
 }
 
@@ -49,7 +49,9 @@ int build_single_triangle(RefMesh& ref_mesh, DeformedState& state, const Vec2& X
     state.deformed_positions.push_back(x1);
     state.deformed_positions.push_back(x2);
 
-    ref_mesh.tris.push_back(Tri{{base + 0, base + 1, base + 2}});
+    ref_mesh.tris.push_back(base + 0);
+    ref_mesh.tris.push_back(base + 1);
+    ref_mesh.tris.push_back(base + 2);
     return base;
 }
 
@@ -92,8 +94,8 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, int nx, int ny, d
             int v11 = vertex_index(i + 1, j + 1);
 
             // Split square into two triangles
-            ref_mesh.tris.push_back(Tri{{v00, v10, v11}});
-            ref_mesh.tris.push_back(Tri{{v00, v11, v01}});
+            ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v10); ref_mesh.tris.push_back(v11);
+            ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v11); ref_mesh.tris.push_back(v01);
         }
     }
 
@@ -103,6 +105,6 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, int nx, int ny, d
 std::unordered_map<int, std::vector<int>> build_incident_triangle_map(const std::vector<int>& indices) {
     std::unordered_map<int, std::vector<int>> result;
     for (int i = 0; i < static_cast<int>(indices.size()); ++i)
-        result[indices[i]].push_back(i);
+        result[indices[i]].push_back(i / 3);
     return result;
 }
