@@ -329,16 +329,15 @@ static double triangle_ref_area_2d(const RefMesh& ref_mesh, const Tri& tri) {
     return 0.5 * std::abs(Dm_local.determinant());
 }
 
-static LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thickness) {
+static void build_lumped_mass(RefMesh& ref_mesh, double density, double thickness) {
     int n = static_cast<int>(ref_mesh.ref_positions.size());
-    LumpedMass M;
-    M.vertex_masses.assign(n, 0.0);
+    ref_mesh.mass.vertex_masses.assign(n, 0.0);
 
     for (const Tri& tri : ref_mesh.tris) {
         double A = triangle_ref_area_2d(ref_mesh, tri);
         double m = density * A * thickness;
         double m_v = m / 3.0;
-        for (int a : tri.v) M.vertex_masses[a] += m_v;
+        for (int a : tri.v) ref_mesh.mass.vertex_masses[a] += m_v;
     }
 
     return M;

@@ -38,8 +38,7 @@ static std::map<int, std::vector<Vec3>> load_golden(const std::string& path) {
 // ---------------------------------------------------------------------------
 // Same scene setup as simulation.cpp / dump_frames.cpp
 // ---------------------------------------------------------------------------
-static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin>& pins,
-                        LumpedMass& lumped_mass, VertexTriangleMap& adj, SimParams& params) {
+static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin>& pins, VertexTriangleMap& adj, SimParams& params) {
     params.dt           = 1.0 / 30.0;
     params.mu           = 10.0;
     params.lambda       = 10.0;
@@ -57,7 +56,7 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
     append_pin(pins, base + ny * (nx + 1),      state.deformed_positions);
     append_pin(pins, base + ny * (nx + 1) + nx, state.deformed_positions);
-    lumped_mass = build_lumped_mass(ref_mesh, params.density, params.thickness);
+    ref_mesh.build_lumped_mass(params.density, params.thickness);
     adj         = build_incident_triangle_map(ref_mesh.tris);
 }
 
@@ -70,14 +69,14 @@ TEST(SimulationSnapshot, First5FramesMatchGolden) {
     ASSERT_FALSE(golden.empty()) << "Golden file empty or missing";
 
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    LumpedMass lumped_mass; VertexTriangleMap adj; SimParams params;
-    build_scene(ref_mesh, state, pins, lumped_mass, adj, params);
+    VertexTriangleMap adj; SimParams params;
+    build_scene(ref_mesh, state, pins, adj, params);
 
     for (int frame = 1; frame <= 100; ++frame) {
         std::vector<Vec3> xhat;
         build_xhat(xhat, state.deformed_positions, state.velocities, params.dt);
         std::vector<Vec3> xnew = state.deformed_positions;
-        global_gauss_seidel_solver(ref_mesh, lumped_mass, adj, pins, params, xnew, xhat);
+        global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat);
         update_velocity(state.velocities, xnew, state.deformed_positions, params.dt);
         state.deformed_positions = xnew;
 

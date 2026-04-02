@@ -11,6 +11,8 @@
 
 namespace fs = std::__fs::filesystem;
 
+using VertexAdjacencyMap = std::unordered_map<int, std::vector<int>>;
+
 int main() {
     SimParams params;
     params.dt = 1.0 / 30.0;
@@ -58,8 +60,8 @@ int main() {
     append_pin(pins, base + ny * (nx + 1), state.deformed_positions);
     append_pin(pins, base + ny * (nx + 1) + nx, state.deformed_positions);
 
-    LumpedMass lumped_mass = build_lumped_mass(ref_mesh, params.density, params.thickness);
-    VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);
+    ref_mesh.build_lumped_mass(params.density, params.thickness);
+    VertexAdjacencyMap adj = build_incident_triangle_map(ref_mesh.tris);
 
     std::cout << "Vertices: " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() << "\n";
@@ -86,7 +88,7 @@ int main() {
 
         auto solver_start = Clock::now();
         SolverResult result = global_gauss_seidel_solver(
-                ref_mesh, lumped_mass, adj, pins, params, xnew, xhat
+                ref_mesh, adj, pins, params, xnew, xhat
         );
         auto solver_end = Clock::now();
 

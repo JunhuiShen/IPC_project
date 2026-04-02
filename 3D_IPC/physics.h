@@ -26,6 +26,14 @@ struct RefMesh {
     std::vector<int>  tris; // flat: every 3 ints = one triangle
     std::vector<Mat22> Dm_inverse;
     std::vector<double> area;
+    std::vector<double> mass;
+    size_t num_positions;
+
+    inline void initialize(const std::vector<Vec2>& X){
+        //ref_positions=X;
+        compute_dm_inverse();
+        num_positions=X.size();
+    }
 
     inline void compute_dm_inverse(){
         int nt = static_cast<int>(tris.size()) / 3;
@@ -43,6 +51,16 @@ struct RefMesh {
             Dm_inverse[t] = Dm_local.inverse();
         }
     }
+
+    inline void build_lumped_mass(double density, double thickness) {
+        mass.assign(ref_positions.size(), 0.0);
+        int nt = static_cast<int>(tris.size()) / 3;
+        for (int t = 0; t < nt; ++t) {
+            double m = density * area[t] * thickness;
+            double mv = m / 3.0;
+            for (int a = 0; a < 3; ++a) mass[tris[t * 3 + a]] += mv;
+        }
+    }
 };
 
 inline int tri_vertex(const RefMesh& ref_mesh, int tri_idx, int local) {
@@ -53,21 +71,15 @@ inline int num_tris(const RefMesh& ref_mesh) {
     return static_cast<int>(ref_mesh.tris.size()) / 3;
 }
 
-struct LumpedMass {
-    std::vector<double> vertex_masses;
-};
-
 // Maps each vertex index to the list of triangle indices it belongs to
 using VertexTriangleMap = std::unordered_map<int, std::vector<int>>;
 
 double triangle_ref_area_2d(const RefMesh& ref_mesh, int tri_idx);
 
-LumpedMass build_lumped_mass(const RefMesh& ref_mesh, double density, double thickness);
+double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
-double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
+std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
-std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
+Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
-Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
-
-double compute_global_residual(const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
+double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
