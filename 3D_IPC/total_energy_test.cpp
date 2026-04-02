@@ -57,7 +57,7 @@ double total_energy(const RefMesh& ref_mesh, const LumpedMass& M, const std::vec
 // =====================================================================
 
 Vec3 local_gradient(int vi, const RefMesh& ref_mesh, const LumpedMass& M, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const std::vector<NodeTrianglePair>& nt_pairs, const std::vector<SegmentSegmentPair>& ss_pairs){
-    Vec3 g = compute_local_gradient_no_barrier(vi, ref_mesh, M, adj, pins, params, x, xhat);
+    auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, M, adj, pins, params, x, xhat);
     double dt2 = params.dt * params.dt;
 
     for (const auto& p : nt_pairs) {
@@ -85,8 +85,8 @@ Vec3 local_gradient(int vi, const RefMesh& ref_mesh, const LumpedMass& M, const 
 //  Local Hessian (diagonal block): no_barrier base + barrier
 // =====================================================================
 
-Mat33 local_hessian(int vi, const RefMesh& ref_mesh, const LumpedMass& M, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<NodeTrianglePair>& nt_pairs, const std::vector<SegmentSegmentPair>& ss_pairs){
-    Mat33 H = compute_local_hessian_no_barrier(vi, ref_mesh, M, adj, pins, params, x);
+Mat33 local_hessian(int vi, const RefMesh& ref_mesh, const LumpedMass& M, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const std::vector<NodeTrianglePair>& nt_pairs, const std::vector<SegmentSegmentPair>& ss_pairs){
+    auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, M, adj, pins, params, x, xhat);
     double dt2 = params.dt * params.dt;
 
     for (const auto& p : nt_pairs) {
@@ -150,7 +150,7 @@ void slope2_check(int vi, const RefMesh& ref_mesh, const LumpedMass& M, const Ve
     std::cout << "\n=== slope-2 check vertex " << vi << " ===\n";
 
     Vec3 g = local_gradient(vi, ref_mesh, M, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
-    Mat33 H = local_hessian(vi, ref_mesh, M, adj, pins, params, x, nt_pairs, ss_pairs);
+    Mat33 H = local_hessian(vi, ref_mesh, M, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
 
     Vec3 dir(0.3, -0.5, 0.8); dir.normalize();
 
@@ -309,7 +309,7 @@ int main(){
         std::cout << "\n=== per-vertex Hessian check ===\n";
         double eps = 1e-6;
         for (int vi = 0; vi < (int)x.size(); ++vi) {
-            Mat33 H = local_hessian(vi, ref_mesh, M, adj, pins, params, x, nt_pairs, ss_pairs);
+            Mat33 H = local_hessian(vi, ref_mesh, M, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
             Mat33 Hfd = local_hessian_fd(vi, ref_mesh, M, adj, pins, params, x, xhat, nt_pairs, ss_pairs, eps);
             std::cout << "v " << vi << " err=" << (H - Hfd).lpNorm<Eigen::Infinity>() << "\n";
         }

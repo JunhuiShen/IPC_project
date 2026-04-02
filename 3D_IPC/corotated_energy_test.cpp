@@ -454,6 +454,88 @@ void test_precomputed_rest_state(){
 }
 
 // ===========================================================================
+//  Test 15: cached energy matches non-cached
+// ===========================================================================
+
+void test_cached_energy_matches(){
+    std::cout << "=== Test 15: cached energy matches non-cached ===\n";
+    const auto rest = MakeRestTriangle();
+    const auto def  = MakeDeformedTriangle();
+    const double A      = MakeRefArea(rest);
+    const Mat22  Dm_inv = MakeDmInverse(rest);
+
+    // Build cache from the same F that the non-cached path uses
+    Mat32 Ds_mat;
+    Ds_mat.col(0) = def.x[1] - def.x[0];
+    Ds_mat.col(1) = def.x[2] - def.x[0];
+    const Mat32 F = Ds_mat * Dm_inv;
+    const CorotatedCache32 cache = buildCorotatedCache(F);
+
+    const double E_plain  = corotated_energy(A, Dm_inv, def, kMu, kLambda);
+    const double E_cached = corotated_energy(cache, A, Dm_inv, def, kMu, kLambda);
+
+    std::cout << "  E_plain=" << E_plain << "  E_cached=" << E_cached
+              << "  diff=" << std::abs(E_plain - E_cached) << "\n";
+    require(std::abs(E_plain - E_cached) < 1e-12, "cached energy does not match");
+    std::cout << "  PASSED\n\n";
+}
+
+// ===========================================================================
+//  Test 16: cached gradient matches non-cached
+// ===========================================================================
+
+void test_cached_gradient_matches(){
+    std::cout << "=== Test 16: cached gradient matches non-cached ===\n";
+    const auto rest = MakeRestTriangle();
+    const auto def  = MakeDeformedTriangle();
+    const double A      = MakeRefArea(rest);
+    const Mat22  Dm_inv = MakeDmInverse(rest);
+
+    Mat32 Ds_mat;
+    Ds_mat.col(0) = def.x[1] - def.x[0];
+    Ds_mat.col(1) = def.x[2] - def.x[0];
+    const Mat32 F = Ds_mat * Dm_inv;
+    const CorotatedCache32 cache = buildCorotatedCache(F);
+
+    const auto g_plain  = corotated_node_gradient(A, Dm_inv, def, kMu, kLambda);
+    const auto g_cached = corotated_node_gradient(cache, A, Dm_inv, def, kMu, kLambda);
+
+    for (int i = 0; i < 3; ++i) {
+        double diff = (g_plain[i] - g_cached[i]).norm();
+        std::cout << "  g[" << i << "] diff=" << std::scientific << diff << "\n";
+        require(diff < 1e-12, "cached gradient does not match");
+    }
+    std::cout << "  PASSED\n\n";
+}
+
+// ===========================================================================
+//  Test 17: cached hessian matches non-cached
+// ===========================================================================
+
+void test_cached_hessian_matches(){
+    std::cout << "=== Test 17: cached hessian matches non-cached ===\n";
+    const auto rest = MakeRestTriangle();
+    const auto def  = MakeDeformedTriangle();
+    const double A      = MakeRefArea(rest);
+    const Mat22  Dm_inv = MakeDmInverse(rest);
+
+    Mat32 Ds_mat;
+    Ds_mat.col(0) = def.x[1] - def.x[0];
+    Ds_mat.col(1) = def.x[2] - def.x[0];
+    const Mat32 F = Ds_mat * Dm_inv;
+    const CorotatedCache32 cache = buildCorotatedCache(F);
+
+    const Mat99 H_plain  = corotated_node_hessian(A, Dm_inv, def, kMu, kLambda);
+    const Mat99 H_cached = corotated_node_hessian(cache, A, Dm_inv, def, kMu, kLambda);
+
+    double max_diff = (H_plain - H_cached).cwiseAbs().maxCoeff();
+    std::cout << "  max |H_plain - H_cached| = " << std::scientific << max_diff << "\n";
+    require(max_diff < 1e-12, "cached hessian does not match");
+    std::cout << "  PASSED\n\n";
+}
+
+
+// ===========================================================================
 //  main
 // ===========================================================================
 
@@ -472,6 +554,9 @@ int main(){
     test_precomputed_gradient_matches();
     test_precomputed_hessian_matches();
     test_precomputed_rest_state();
+    test_cached_energy_matches();
+    test_cached_gradient_matches();
+    test_cached_hessian_matches();
 
     std::cout << "\n========================================\n"
               << "All corotated energy tests passed.\n"

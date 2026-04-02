@@ -3,8 +3,7 @@
 
 void update_one_vertex(int vi, const RefMesh& ref_mesh, const LumpedMass& lumped_mass, const VertexAdjacency& adj,
                        const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& xhat, std::vector<Vec3>& x){
-    Vec3 g = compute_local_gradient_no_barrier(vi, ref_mesh, lumped_mass, adj, pins, params, x, xhat);
-    Mat33 H = compute_local_hessian_no_barrier(vi, ref_mesh, lumped_mass, adj, pins, params, x);
+    auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, lumped_mass, adj, pins, params, x, xhat);
     Vec3 dx = matrix3d_inverse(H) * g;
     x[vi] -= params.step_weight * dx;
 }
