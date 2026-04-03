@@ -45,10 +45,11 @@ int main(int argc, char** argv) {
     std::cout << "SS pairs:  " << barrier_pairs.ss.size() << "\n";
 
     const std::string& outdir = args.outdir;
+    const ExportFormat fmt = args.to_export_format();
     if (fs::exists(outdir)) fs::remove_all(outdir);
     fs::create_directories(outdir);
 
-    export_frame(outdir, 0, state.deformed_positions, ref_mesh.tris);
+    export_frame(outdir, 0, state.deformed_positions, ref_mesh.tris, fmt);
 
     using Clock = std::chrono::steady_clock;
     auto sim_start = Clock::now();
@@ -81,7 +82,7 @@ int main(int argc, char** argv) {
                   << " | solver_time = "      << std::fixed << std::setprecision(3)
                   << solver_ms << " ms\n";
 
-        export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris);
+        export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt);
     }
 
     auto sim_end = Clock::now();

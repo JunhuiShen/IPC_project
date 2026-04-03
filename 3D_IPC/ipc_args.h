@@ -2,6 +2,7 @@
 
 #include "args.h"
 #include "physics.h"
+#include "visualization.h"
 
 // ======================================================
 // IPCArgs3D — simulation parameters for 3D IPC
@@ -41,6 +42,7 @@ struct IPCArgs3D : ArgParser {
 
     // --- output ---
     std::string outdir  = "frames_sim3d";
+    std::string format  = "geo";
 
     IPCArgs3D() {
         add_double("fps",         fps,         30.0,      "Output frames per second");
@@ -67,6 +69,11 @@ struct IPCArgs3D : ArgParser {
         add_double("height",      height,      2.0,       "Mesh height");
 
         add_string("outdir",      outdir,      "frames_sim3d", "Output directory");
+        add_string("format",      format,      "geo",          "Output format: obj or geo");
+    }
+
+    ExportFormat to_export_format() const {
+        return (format == "geo") ? ExportFormat::GEO : ExportFormat::OBJ;
     }
 
     SimParams to_sim_params() const {
