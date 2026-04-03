@@ -36,8 +36,13 @@ int main(int argc, char** argv) {
     ref_mesh.build_lumped_mass(params.density, params.thickness);
     VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);
 
+    // Build full contact pair lists
+    const BarrierPairs barrier_pairs = build_barrier_pairs(ref_mesh);
+
     std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
+    std::cout << "NT pairs:  " << barrier_pairs.nt.size() << "\n";
+    std::cout << "SS pairs:  " << barrier_pairs.ss.size() << "\n";
 
     const std::string& outdir = args.outdir;
     if (fs::exists(outdir)) fs::remove_all(outdir);
@@ -58,7 +63,8 @@ int main(int argc, char** argv) {
             build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
 
             std::vector<Vec3> xnew = state.deformed_positions;
-            result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat);
+            result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat,
+                                                barrier_pairs.nt, barrier_pairs.ss);
 
             update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
             state.deformed_positions = xnew;
@@ -83,8 +89,8 @@ int main(int argc, char** argv) {
 
     std::cout << "\nSimulation finished.\n";
     std::cout << "Total simulation time: " << std::fixed << std::setprecision(3) << total_sim_ms    << " ms\n";
-    std::cout << "Total solver time:     "    << total_solver_ms << " ms\n";
-    std::cout << "Average solver time:   " << (total_solver_ms / num_frames)  << " ms/frame\n";
+    std::cout << "Total solver time:     " << total_solver_ms << " ms\n";
+    std::cout << "Average solver time:   " << (total_solver_ms / num_frames) << " ms/frame\n";
 
     return 0;
 }

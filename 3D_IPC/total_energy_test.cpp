@@ -23,19 +23,6 @@ std::vector<Vec3> unflatten_positions(const VecX& q){
 }
 
 // =====================================================================
-//  Contact pair types
-// =====================================================================
-
-struct NodeTrianglePair {
-    int node;
-    int tri_v[3];
-};
-
-struct SegmentSegmentPair {
-    int v[4];
-};
-
-// =====================================================================
 //  Total energy: no_barrier base + barrier for active pairs
 // =====================================================================
 

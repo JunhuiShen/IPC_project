@@ -10,9 +10,13 @@ struct SolverResult {
 
 void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                        const std::vector<Pin>& pins, const SimParams& params,
-                       const std::vector<Vec3>& xhat, std::vector<Vec3>& x);
+                       const std::vector<Vec3>& xhat, std::vector<Vec3>& x,
+                       const std::vector<NodeTrianglePair>& nt_pairs,
+                       const std::vector<SegmentSegmentPair>& ss_pairs);
 
 SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                                         const std::vector<Pin>& pins, const SimParams& params,
                                         std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
+                                        const std::vector<NodeTrianglePair>& nt_pairs,
+                                        const std::vector<SegmentSegmentPair>& ss_pairs,
                                         std::vector<double>* residual_history = nullptr);

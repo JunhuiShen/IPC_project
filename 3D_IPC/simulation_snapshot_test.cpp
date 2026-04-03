@@ -50,7 +50,7 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin
     params.max_global_iters = 100;
     params.tol_abs      = 1e-6;
     params.step_weight  = 1.0;
-    
+
     clear_model(ref_mesh, state, X, pins);
     int nx = 10, ny = 10;
     int base = build_square_mesh(ref_mesh, state, X, nx, ny, 2.0, 2.0, Vec3(0.2, -0.1, 0.3));
@@ -65,35 +65,39 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin
 // Snapshot test
 // ---------------------------------------------------------------------------
 TEST(SimulationSnapshot, First5FramesMatchGolden) {
-    const std::string golden_path = std::string(GOLDEN_DIR) + "/golden_frames.txt";
-    auto golden = load_golden(golden_path);
-    ASSERT_FALSE(golden.empty()) << "Golden file empty or missing";
+const std::string golden_path = std::string(GOLDEN_DIR) + "/golden_frames.txt";
+auto golden = load_golden(golden_path);
+ASSERT_FALSE(golden.empty()) << "Golden file empty or missing";
 
-    RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
-    build_scene(ref_mesh, state, pins, adj, params, X);
+RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
+VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+build_scene(ref_mesh, state, pins, adj, params, X);
 
-    for (int frame = 1; frame <= 100; ++frame) {
-        for (int sub = 0; sub < params.substeps; ++sub) {
-            std::vector<Vec3> xhat;
-            build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
-            std::vector<Vec3> xnew = state.deformed_positions;
-            global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat);
-            update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
-            state.deformed_positions = xnew;
-        }
+// No barrier for snapshot test — empty pair lists, d_hat stays 0
+const std::vector<NodeTrianglePair>   nt_pairs;
+const std::vector<SegmentSegmentPair> ss_pairs;
 
-        ASSERT_TRUE(golden.count(frame)) << "No golden data for frame " << frame;
-        const auto& expected = golden[frame];
-        ASSERT_EQ(state.deformed_positions.size(), expected.size());
+for (int frame = 1; frame <= 100; ++frame) {
+for (int sub = 0; sub < params.substeps; ++sub) {
+std::vector<Vec3> xhat;
+build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
+std::vector<Vec3> xnew = state.deformed_positions;
+global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, nt_pairs, ss_pairs);
+update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
+state.deformed_positions = xnew;
+}
 
-        for (int i = 0; i < (int)expected.size(); ++i) {
-            EXPECT_NEAR(state.deformed_positions[i].x(), expected[i].x(), kTol)
-                << "frame=" << frame << " vertex=" << i << " x mismatch";
-            EXPECT_NEAR(state.deformed_positions[i].y(), expected[i].y(), kTol)
-                << "frame=" << frame << " vertex=" << i << " y mismatch";
-            EXPECT_NEAR(state.deformed_positions[i].z(), expected[i].z(), kTol)
-                << "frame=" << frame << " vertex=" << i << " z mismatch";
-        }
-    }
+ASSERT_TRUE(golden.count(frame)) << "No golden data for frame " << frame;
+const auto& expected = golden[frame];
+ASSERT_EQ(state.deformed_positions.size(), expected.size());
+
+for (int i = 0; i < (int)expected.size(); ++i) {
+EXPECT_NEAR(state.deformed_positions[i].x(), expected[i].x(), kTol)
+<< "frame=" << frame << " vertex=" << i << " x mismatch";
+EXPECT_NEAR(state.deformed_positions[i].y(), expected[i].y(), kTol)
+<< "frame=" << frame << " vertex=" << i << " y mismatch";
+EXPECT_NEAR(state.deformed_positions[i].z(), expected[i].z(), kTol)
+<< "frame=" << frame << " vertex=" << i << " z mismatch";
+}
+}
 }
