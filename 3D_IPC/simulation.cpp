@@ -53,18 +53,21 @@ int main(int argc, char** argv) {
     double total_solver_ms = 0.0;
 
     for (int frame_index = 1; frame_index <= num_frames; ++frame_index) {
-        std::vector<Vec3> xhat;
-        build_xhat(xhat, state.deformed_positions, state.velocities, params.dt);
-
-        // Initial guess
-        std::vector<Vec3> xnew = state.deformed_positions;
-
         auto solver_start = Clock::now();
-        SolverResult result = global_gauss_seidel_solver(
-                ref_mesh, adj, pins, params, xnew, xhat
-        );
-        auto solver_end = Clock::now();
+        SolverResult result;
 
+        for (int sub = 0; sub < params.substeps; ++sub) {
+            std::vector<Vec3> xhat;
+            build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
+
+            std::vector<Vec3> xnew = state.deformed_positions;
+            result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat);
+
+            update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
+            state.deformed_positions = xnew;
+        }
+
+        auto solver_end = Clock::now();
         double solver_ms =
                 std::chrono::duration<double, std::milli>(solver_end - solver_start).count();
         total_solver_ms += solver_ms;
@@ -75,9 +78,6 @@ int main(int argc, char** argv) {
                   << " | global_iters = " << std::setw(3) << result.iterations
                   << " | solver_time = " << std::fixed << std::setprecision(3)
                   << solver_ms << " ms\n";
-
-        update_velocity(state.velocities, xnew, state.deformed_positions, params.dt);
-        state.deformed_positions = xnew;
 
         export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris);
     }

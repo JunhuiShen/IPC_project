@@ -13,10 +13,14 @@ struct Pin {
 };
 
 struct SimParams {
-    double dt{}, mu{}, lambda{}, density{}, thickness{}, kpin{}, tol_abs{}, step_weight{};
+    double fps{30.0};
+    int    substeps{1};
+    double mu{}, lambda{}, density{}, thickness{}, kpin{}, tol_abs{}, step_weight{};
     double d_hat{0.0};          // barrier activation distance (0 = no barrier)
     Vec3 gravity = Vec3::Zero();
     int max_global_iters{};
+
+    double dt() const { return 1.0 / (fps * static_cast<double>(substeps)); }
 };
 
 struct DeformedState {

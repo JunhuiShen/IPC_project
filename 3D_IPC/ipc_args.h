@@ -13,7 +13,8 @@
 struct IPCArgs3D : ArgParser {
 
     // --- time integration ---
-    double dt           = 1.0 / 30.0;
+    double fps          = 30.0;
+    int    substeps     = 1;
     int    num_frames   = 100;
 
     // --- physics ---
@@ -42,7 +43,8 @@ struct IPCArgs3D : ArgParser {
     std::string outdir  = "frames_sim3d";
 
     IPCArgs3D() {
-        add_double("dt",          dt,          1.0/30.0,  "Timestep size (seconds)");
+        add_double("fps",         fps,         30.0,      "Output frames per second");
+        add_int   ("substeps",    substeps,    1,         "Solver substeps per frame (solver_dt = 1/(fps*substeps))");
         add_int   ("num_frames",  num_frames,  100,       "Number of frames to simulate");
 
         add_double("mu",          mu,          10.0,      "First Lame parameter (shear modulus)");
@@ -69,7 +71,8 @@ struct IPCArgs3D : ArgParser {
 
     SimParams to_sim_params() const {
         SimParams p;
-        p.dt              = dt;
+        p.fps             = fps;
+        p.substeps        = substeps;
         p.mu              = mu;
         p.lambda          = lambda;
         p.density         = density;

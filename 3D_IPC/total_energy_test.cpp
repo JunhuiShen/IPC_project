@@ -42,7 +42,7 @@ struct SegmentSegmentPair {
 
 double total_energy(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const std::vector<NodeTrianglePair>& nt_pairs, const std::vector<SegmentSegmentPair>& ss_pairs){
     double E = compute_incremental_potential_no_barrier(ref_mesh, pins, params, x, xhat);
-    double dt2 = params.dt * params.dt;
+    double dt2 = params.dt() * params.dt();
 
     for (const auto& p : nt_pairs)
         E += dt2 * node_triangle_barrier(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat);
@@ -59,7 +59,7 @@ double total_energy(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const
 
 Vec3 local_gradient(int vi, const RefMesh& ref_mesh, const VertexAdjacencyMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const std::vector<NodeTrianglePair>& nt_pairs, const std::vector<SegmentSegmentPair>& ss_pairs){
     auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x, xhat);
-    double dt2 = params.dt * params.dt;
+    double dt2 = params.dt() * params.dt();
 
     for (const auto& p : nt_pairs) {
         if (vi != p.node && vi != p.tri_v[0] && vi != p.tri_v[1] && vi != p.tri_v[2]) continue;
@@ -88,7 +88,7 @@ Vec3 local_gradient(int vi, const RefMesh& ref_mesh, const VertexAdjacencyMap& a
 
 Mat33 local_hessian(int vi, const RefMesh& ref_mesh, const VertexAdjacencyMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const std::vector<NodeTrianglePair>& nt_pairs, const std::vector<SegmentSegmentPair>& ss_pairs){
     auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x, xhat);
-    double dt2 = params.dt * params.dt;
+    double dt2 = params.dt() * params.dt();
 
     for (const auto& p : nt_pairs) {
         int slot = -1;
@@ -190,7 +190,8 @@ int main(){
     // -----------------------------------------------------------------
 
     SimParams params;
-    params.dt = 1.0 / 30.0;
+    params.fps      = 30.0;
+    params.substeps = 1;
     params.mu = 100.0;
     params.lambda = 100.0;
     params.density = 1.0;

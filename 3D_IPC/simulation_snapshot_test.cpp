@@ -39,7 +39,8 @@ static std::map<int, std::vector<Vec3>> load_golden(const std::string& path) {
 // Same scene setup as simulation.cpp / dump_frames.cpp
 // ---------------------------------------------------------------------------
 static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin>& pins, VertexTriangleMap& adj, SimParams& params, std::vector<Vec2> X) {
-    params.dt           = 1.0 / 30.0;
+    params.fps          = 30.0;
+    params.substeps     = 1;
     params.mu           = 10.0;
     params.lambda       = 10.0;
     params.density      = 1.0;
@@ -73,12 +74,14 @@ TEST(SimulationSnapshot, First5FramesMatchGolden) {
     build_scene(ref_mesh, state, pins, adj, params, X);
 
     for (int frame = 1; frame <= 100; ++frame) {
-        std::vector<Vec3> xhat;
-        build_xhat(xhat, state.deformed_positions, state.velocities, params.dt);
-        std::vector<Vec3> xnew = state.deformed_positions;
-        global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat);
-        update_velocity(state.velocities, xnew, state.deformed_positions, params.dt);
-        state.deformed_positions = xnew;
+        for (int sub = 0; sub < params.substeps; ++sub) {
+            std::vector<Vec3> xhat;
+            build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
+            std::vector<Vec3> xnew = state.deformed_positions;
+            global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat);
+            update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
+            state.deformed_positions = xnew;
+        }
 
         ASSERT_TRUE(golden.count(frame)) << "No golden data for frame " << frame;
         const auto& expected = golden[frame];
