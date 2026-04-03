@@ -49,6 +49,7 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
                                         std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
                                         const std::vector<NodeTrianglePair>& nt_pairs,
                                         const std::vector<SegmentSegmentPair>& ss_pairs,
+                                        const std::vector<std::vector<int>>& color_groups,
                                         std::vector<double>* residual_history) {
     if (residual_history) residual_history->clear();
 
@@ -65,8 +66,9 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
     if (result.initial_residual < params.tol_abs) return result;
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
-        for (int vi = 0; vi < static_cast<int>(xnew.size()); ++vi)
-            update_one_vertex(vi, ref_mesh, adj, pins, params, xhat, xnew, nt_pairs, ss_pairs);
+        for (const auto& group : color_groups)
+            for (int vi : group)
+                update_one_vertex(vi, ref_mesh, adj, pins, params, xhat, xnew, nt_pairs, ss_pairs);
 
         result.final_residual = eval_residual();
         result.iterations     = iter;

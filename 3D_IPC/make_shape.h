@@ -24,3 +24,14 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
 // Maps each vertex to {triangle_index, local_node_index} pairs.
 // The local_node_index (0,1,2) is stored to avoid searching at call sites.
 VertexTriangleMap build_incident_triangle_map(const std::vector<int>& indices);
+
+// Maps each vertex to the set of other vertex indices it shares a triangle with.
+// e.g. if vertex 0 appears in triangles with vertices 1,3,5,7 → {0: [1,3,5,7]}
+// Used for graph coloring.
+std::unordered_map<int, std::vector<int>> build_vertex_adjacency_map(const std::vector<int>& tris);
+
+// Greedy graph coloring. Returns groups[color] = list of vertex indices with that color.
+// Vertices in the same group share no triangle and can be updated in parallel.
+std::vector<std::vector<int>> greedy_color(
+    const std::unordered_map<int, std::vector<int>>& adj,
+    int num_vertices);

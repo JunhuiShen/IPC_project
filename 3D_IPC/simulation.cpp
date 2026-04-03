@@ -35,6 +35,9 @@ int main(int argc, char** argv) {
 
     ref_mesh.build_lumped_mass(params.density, params.thickness);
     VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);
+    const auto color_groups = greedy_color(
+        build_vertex_adjacency_map(ref_mesh.tris),
+        static_cast<int>(state.deformed_positions.size()));
 
     // Build full contact pair lists
     const BarrierPairs barrier_pairs = build_barrier_pairs(ref_mesh);
@@ -65,7 +68,7 @@ int main(int argc, char** argv) {
 
             std::vector<Vec3> xnew = state.deformed_positions;
             result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat,
-                                                barrier_pairs.nt, barrier_pairs.ss);
+                                                barrier_pairs.nt, barrier_pairs.ss, color_groups);
 
             update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
             state.deformed_positions = xnew;

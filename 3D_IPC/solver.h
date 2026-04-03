@@ -19,4 +19,5 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
                                         std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
                                         const std::vector<NodeTrianglePair>& nt_pairs,
                                         const std::vector<SegmentSegmentPair>& ss_pairs,
+                                        const std::vector<std::vector<int>>& color_groups,
                                         std::vector<double>* residual_history = nullptr);

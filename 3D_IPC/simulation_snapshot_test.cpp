@@ -61,6 +61,10 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin
     adj         = build_incident_triangle_map(ref_mesh.tris);
 }
 
+static std::vector<std::vector<int>> build_color_groups(const RefMesh& ref_mesh, int num_vertices) {
+    return greedy_color(build_vertex_adjacency_map(ref_mesh.tris), num_vertices);
+}
+
 // ---------------------------------------------------------------------------
 // Snapshot test
 // ---------------------------------------------------------------------------
@@ -72,6 +76,7 @@ ASSERT_FALSE(golden.empty()) << "Golden file empty or missing";
 RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
 VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
 build_scene(ref_mesh, state, pins, adj, params, X);
+const auto color_groups = build_color_groups(ref_mesh, static_cast<int>(state.deformed_positions.size()));
 
 // No barrier for snapshot test — empty pair lists, d_hat stays 0
 const std::vector<NodeTrianglePair>   nt_pairs;
@@ -82,7 +87,7 @@ for (int sub = 0; sub < params.substeps; ++sub) {
 std::vector<Vec3> xhat;
 build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
 std::vector<Vec3> xnew = state.deformed_positions;
-global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, nt_pairs, ss_pairs);
+global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, nt_pairs, ss_pairs, color_groups);
 update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
 state.deformed_positions = xnew;
 }
