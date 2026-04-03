@@ -40,9 +40,10 @@ struct IPCArgs3D : ArgParser {
     double width        = 2.0;
     double height       = 2.0;
 
-    // --- output ---
-    std::string outdir  = "frames_sim3d";
-    std::string format  = "geo";
+    // --- output / restart ---
+    std::string outdir       = "frames_sim3d";
+    std::string format       = "geo";
+    int         restart_frame = -1;
 
     IPCArgs3D() {
         add_double("fps",         fps,         30.0,      "Output frames per second");
@@ -68,8 +69,9 @@ struct IPCArgs3D : ArgParser {
         add_double("width",       width,       2.0,       "Mesh width");
         add_double("height",      height,      2.0,       "Mesh height");
 
-        add_string("outdir",      outdir,      "frames_sim3d", "Output directory");
-        add_string("format",      format,      "geo",          "Output format: obj or geo");
+        add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
+        add_string("format",       format,        "geo",          "Output format: obj or geo");
+        add_int   ("restart_frame", restart_frame, -1,            "Frame to restart from (-1 = no restart)");
     }
 
     ExportFormat to_export_format() const {
@@ -90,6 +92,7 @@ struct IPCArgs3D : ArgParser {
         p.tol_abs         = tol_abs;
         p.step_weight     = step_weight;
         p.d_hat           = d_hat;
+        p.restart_frame   = restart_frame;
         return p;
     }
 };

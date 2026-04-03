@@ -58,7 +58,14 @@ int main(int argc, char** argv) {
     auto sim_start = Clock::now();
     double total_solver_ms = 0.0;
 
-    for (int frame_index = 1; frame_index <= num_frames; ++frame_index) {
+    //check if restarting
+    int frame_index=1;
+    if(params.restart_frame>0){
+        deserialize_state(outdir,params.restart_frame,state);
+        frame_index=params.restart_frame+1;
+    }
+    //start sim
+    for (frame_index = 1; frame_index <= num_frames; ++frame_index) {
         auto solver_start = Clock::now();
         SolverResult result;
 
@@ -86,6 +93,7 @@ int main(int argc, char** argv) {
                   << solver_ms << " ms\n";
 
         export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt);
+        serialize_state(outdir,frame_index,state);
     }
 
     auto sim_end = Clock::now();

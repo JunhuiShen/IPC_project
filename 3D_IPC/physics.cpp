@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <iostream>
 
 double triangle_ref_area_2d(const RefMesh& ref_mesh, int tri_idx) {
     const Vec2& X0 = ref_mesh.ref_positions[tri_vertex(ref_mesh, tri_idx, 0)];
@@ -175,4 +179,40 @@ double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap&
         r_inf = std::max(r_inf, g.cwiseAbs().maxCoeff());
     }
     return r_inf;
+}
+
+static std::string state_filename(const std::string& dir, int frame) {
+    std::ostringstream ss;
+    ss << dir << "/state_" << std::setw(4) << std::setfill('0') << frame << ".bin";
+    return ss.str();
+}
+
+void serialize_state(const std::string& dir, int frame, const DeformedState& state) {
+    std::ofstream out(state_filename(dir, frame), std::ios::binary);
+    if (!out) { std::cerr << "Error: cannot write state file for frame " << frame << "\n"; return; }
+
+    auto write_vec = [&](const std::vector<Vec3>& v) {
+        uint64_t n = v.size();
+        out.write(reinterpret_cast<const char*>(&n), sizeof(n));
+        out.write(reinterpret_cast<const char*>(v.data()), n * sizeof(Vec3));
+    };
+
+    write_vec(state.deformed_positions);
+    write_vec(state.velocities);
+}
+
+bool deserialize_state(const std::string& dir, int frame, DeformedState& state) {
+    std::ifstream in(state_filename(dir, frame), std::ios::binary);
+    if (!in) { std::cerr << "Error: cannot read state file for frame " << frame << "\n"; return false; }
+
+    auto read_vec = [&](std::vector<Vec3>& v) {
+        uint64_t n = 0;
+        in.read(reinterpret_cast<char*>(&n), sizeof(n));
+        v.resize(n);
+        in.read(reinterpret_cast<char*>(v.data()), n * sizeof(Vec3));
+    };
+
+    read_vec(state.deformed_positions);
+    read_vec(state.velocities);
+    return in.good();
 }

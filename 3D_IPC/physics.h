@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <vector>
 #include <cassert>
+#include <string>
 
 struct Tri { int v[3]; };
 
@@ -19,6 +20,8 @@ struct SimParams {
     double d_hat{0.0};
     Vec3 gravity = Vec3::Zero();
     int max_global_iters{};
+
+    int    restart_frame{-1};  // -1 = no restart
 
     double dt()  const { return 1.0 / (fps * static_cast<double>(substeps)); }
     double dt2() const { double d = dt(); return d * d; }  // cached square
@@ -120,3 +123,6 @@ Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const VertexTriangl
 double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                const std::vector<NodeTrianglePair>& nt_pairs, const std::vector<SegmentSegmentPair>& ss_pairs);
+
+void serialize_state(const std::string& dir, int frame, const DeformedState& state);
+bool deserialize_state(const std::string& dir, int frame, DeformedState& state);
