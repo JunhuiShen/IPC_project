@@ -14,6 +14,13 @@ enable_testing()
 
 find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(GTest REQUIRED)
+if(APPLE)
+    set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp")
+    set(OpenMP_CXX_LIB_NAMES "omp")
+    set(OpenMP_omp_LIBRARY /opt/homebrew/opt/libomp/lib/libomp.dylib)
+    include_directories(/opt/homebrew/opt/libomp/include)
+endif()
+find_package(OpenMP REQUIRED)
 
 add_library(corotated_energy_lib
     corotated_energy.cpp
@@ -78,6 +85,7 @@ add_executable(3D_sim
 target_link_libraries(3D_sim
     PRIVATE
     corotated_energy_lib
+    OpenMP::OpenMP_CXX
 )
 
 add_executable(make_shape_test
@@ -109,6 +117,7 @@ target_compile_definitions(simulation_snapshot_test
 target_link_libraries(simulation_snapshot_test
     PRIVATE
     corotated_energy_lib
+    OpenMP::OpenMP_CXX
     GTest::gtest
     GTest::gtest_main
 )
@@ -126,4 +135,5 @@ add_executable(total_energy_test
 target_link_libraries(total_energy_test
     PRIVATE
     corotated_energy_lib
+    OpenMP::OpenMP_CXX
 )
