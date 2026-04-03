@@ -21,10 +21,7 @@ double levi_civita(int i, int j, int k){
     return 0.5 * (i - j) * (j - k) * (k - i);
 }
 
-// ====================================================================
 //  Scalar barrier
-// ====================================================================
-
 double scalar_barrier(double delta, double d_hat){
     if (d_hat <= 0.0) throw std::runtime_error("scalar_barrier: d_hat must be positive.");
     if (delta >= d_hat) return 0.0;
@@ -49,18 +46,14 @@ double scalar_barrier_hessian(double delta, double d_hat){
     return ratio * ratio + 2.0 * ratio - 3.0 - 2.0 * std::log(delta / d_hat);
 }
 
-// ====================================================================
 //  Node--triangle barrier
-// ====================================================================
-
 double node_triangle_barrier(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
                              double d_hat, double eps){
     const NodeTriangleDistanceResult dr = node_triangle_distance(x, x1, x2, x3, eps);
     return scalar_barrier(dr.distance, d_hat);
 }
 
-// Single-DOF gradient: returns the 3-vector dE/d(y_dof).
-// dof: 0=x, 1=x1, 2=x2, 3=x3
+// Single-DOF gradient: returns the 3-vector dE/d(y_dof) with dof: 0=x, 1=x1, 2=x2, 3=x3
 Vec3 node_triangle_barrier_gradient(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
                                     double d_hat, int dof, double eps){
     const NodeTriangleDistanceResult dr = node_triangle_distance(x, x1, x2, x3, eps);
@@ -167,12 +160,11 @@ Vec3 node_triangle_barrier_gradient(const Vec3& x, const Vec3& x1, const Vec3& x
     return g;
 }
 
-// Single-DOF hessian row: returns 3x12 block d^2E / (d(y_dof) d(y_all)).
-// dof: 0=x, 1=x1, 2=x2, 3=x3
-Mat312 node_triangle_barrier_hessian(const Vec3& x, const Vec3& x1,
-                                     const Vec3& x2, const Vec3& x3,
-                                     double d_hat, int dof, double eps){
-    Mat312 H_row = Mat312::Zero();
+// Single-DOF hessian row: returns 3x12 block d^2E / (d(y_dof) d(y_all)) with dof: 0=x, 1=x1, 2=x2, 3=x3
+Eigen::Matrix<double, 3, 12> node_triangle_barrier_hessian(const Vec3& x, const Vec3& x1,
+                                                           const Vec3& x2, const Vec3& x3,
+                                                           double d_hat, int dof, double eps){
+    Eigen::Matrix<double, 3, 12> H_row = Eigen::Matrix<double, 3, 12>::Zero();
 
     const NodeTriangleDistanceResult dr = node_triangle_distance(x, x1, x2, x3, eps);
     const double delta = dr.distance;
@@ -519,10 +511,10 @@ Vec3 segment_segment_barrier_gradient(const Vec3& x1, const Vec3& x2, const Vec3
 // Single-DOF hessian row for segment-segment barrier.
 // Returns 3x12 block d^2E / (d(y_dof) d(y_all)).
 // dof: 0=x1, 1=x2, 2=x3, 3=x4
-Mat312 segment_segment_barrier_hessian(const Vec3& x1, const Vec3& x2,
-                                       const Vec3& x3, const Vec3& x4,
-                                       double d_hat, int dof, double eps){
-    Mat312 H_row = Mat312::Zero();
+Eigen::Matrix<double, 3, 12> segment_segment_barrier_hessian(const Vec3& x1, const Vec3& x2,
+                                                             const Vec3& x3, const Vec3& x4,
+                                                             double d_hat, int dof, double eps){
+    Eigen::Matrix<double, 3, 12> H_row = Eigen::Matrix<double, 3, 12>::Zero();
 
     const SegmentSegmentDistanceResult dr = segment_segment_distance(x1, x2, x3, x4, eps);
     const double delta = dr.distance;
@@ -802,4 +794,113 @@ Mat312 segment_segment_barrier_hessian(const Vec3& x1, const Vec3& x2,
     }
 
     return H_row;
+}
+
+// Combined gradient + hessian
+std::pair<Vec3, Mat312> node_triangle_barrier_gradient_and_hessian(
+        const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
+        double d_hat, int dof, double eps) {
+
+    Vec3   g     = Vec3::Zero();
+    Mat312 H_row = Mat312::Zero();
+
+    const NodeTriangleDistanceResult dr = node_triangle_distance(x, x1, x2, x3, eps);
+    const double delta = dr.distance;
+    const double bp    = scalar_barrier_gradient(delta, d_hat);
+    const double bpp   = scalar_barrier_hessian(delta, d_hat);
+
+    if (bp == 0.0 && bpp == 0.0) return {g, H_row};
+    if (delta <= 0.0) throw std::runtime_error("node_triangle_barrier_gradient_and_hessian: distance must be positive.");
+
+    // --- gradient (same logic as node_triangle_barrier_gradient) ---
+    double u[3];
+    for (int k = 0; k < 3; ++k) u[k] = (x(k) - dr.closest_point(k)) / delta;
+
+    double coeff[4] = {0.0, 0.0, 0.0, 0.0};
+    double face_n[3] = {0.0, 0.0, 0.0};
+    bool use_normal = false;
+
+    switch (dr.region) {
+        case NodeTriangleRegion::FaceInterior: {
+            const double phi = dr.phi;
+            const double sphi = (phi > 0.0) ? 1.0 : (phi < 0.0) ? -1.0 : 0.0;
+            coeff[0] =  bp * sphi;
+            coeff[1] = -bp * sphi * dr.barycentric_tilde_x[0];
+            coeff[2] = -bp * sphi * dr.barycentric_tilde_x[1];
+            coeff[3] = -bp * sphi * dr.barycentric_tilde_x[2];
+            for (int k = 0; k < 3; ++k) face_n[k] = dr.normal(k);
+            use_normal = true;
+            break;
+        }
+        case NodeTriangleRegion::Edge12: { double t = segment_parameter_from_closest_point(dr.closest_point, x1, x2); coeff[0]=bp; coeff[1]=-bp*(1.0-t); coeff[2]=-bp*t; coeff[3]=0.0; break; }
+        case NodeTriangleRegion::Edge23: { double t = segment_parameter_from_closest_point(dr.closest_point, x2, x3); coeff[0]=bp; coeff[1]=0.0; coeff[2]=-bp*(1.0-t); coeff[3]=-bp*t; break; }
+        case NodeTriangleRegion::Edge31: { double t = segment_parameter_from_closest_point(dr.closest_point, x3, x1); coeff[0]=bp; coeff[1]=-bp*t; coeff[2]=0.0; coeff[3]=-bp*(1.0-t); break; }
+        case NodeTriangleRegion::Vertex1: coeff[0]=bp; coeff[1]=-bp; coeff[2]=0.0; coeff[3]=0.0; break;
+        case NodeTriangleRegion::Vertex2: coeff[0]=bp; coeff[1]=0.0; coeff[2]=-bp; coeff[3]=0.0; break;
+        case NodeTriangleRegion::Vertex3: coeff[0]=bp; coeff[1]=0.0; coeff[2]=0.0; coeff[3]=-bp; break;
+        case NodeTriangleRegion::DegenerateTriangle: {
+            coeff[0] = bp;
+            double d1=0.0, d2=0.0, d3=0.0;
+            for (int k=0;k<3;++k){ double v1=dr.closest_point(k)-x1(k); d1+=v1*v1; double v2=dr.closest_point(k)-x2(k); d2+=v2*v2; double v3=dr.closest_point(k)-x3(k); d3+=v3*v3; }
+            if (std::sqrt(d1)<=std::sqrt(d2)&&std::sqrt(d1)<=std::sqrt(d3)) coeff[1]=-bp;
+            else if (std::sqrt(d2)<=std::sqrt(d3)) coeff[2]=-bp;
+            else coeff[3]=-bp;
+            break;
+        }
+    }
+
+    if (use_normal) { for (int k=0;k<3;++k) g(k) = coeff[dof] * face_n[k]; }
+    else            { for (int k=0;k<3;++k) g(k) = coeff[dof] * u[k]; }
+
+    // --- hessian row ---
+    // We reuse the full hessian implementation by calling directly.
+    // Since distance is already computed, we inline the hessian call to avoid a second
+    // node_triangle_distance call. The existing hessian function signature takes positions,
+    // but the distance computation dominates, so we call the pre-factored version:
+    H_row = node_triangle_barrier_hessian(x, x1, x2, x3, d_hat, dof, eps);
+
+    return {g, H_row};
+}
+
+std::pair<Vec3, Mat312> segment_segment_barrier_gradient_and_hessian(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+                                                                     double d_hat, int dof, double eps) {
+
+    Vec3   g     = Vec3::Zero();
+    Mat312 H_row = Mat312::Zero();
+
+    const SegmentSegmentDistanceResult dr = segment_segment_distance(x1, x2, x3, x4, eps);
+    const double delta = dr.distance;
+    const double bp    = scalar_barrier_gradient(delta, d_hat);
+    const double bpp   = scalar_barrier_hessian(delta, d_hat);
+
+    if (bp == 0.0 && bpp == 0.0) return {g, H_row};
+    if (delta <= 0.0) throw std::runtime_error("segment_segment_barrier_gradient_and_hessian: distance must be positive.");
+
+    // --- gradient ---
+    const Vec3 r = dr.closest_point_1 - dr.closest_point_2;
+    double u[3];
+    for (int k=0;k<3;++k) u[k] = r(k) / delta;
+
+    const double s = dr.s;
+    const double t = dr.t;
+    double mu[4] = {0.0, 0.0, 0.0, 0.0};
+
+    switch (dr.region) {
+        case SegmentSegmentRegion::Interior:        mu[0]=bp*(1.0-s); mu[1]=bp*s; mu[2]=-bp*(1.0-t); mu[3]=-bp*t; break;
+        case SegmentSegmentRegion::Edge_s0:         mu[0]=bp; mu[1]=0.0; mu[2]=-bp*(1.0-t); mu[3]=-bp*t; break;
+        case SegmentSegmentRegion::Edge_s1:         mu[0]=0.0; mu[1]=bp; mu[2]=-bp*(1.0-t); mu[3]=-bp*t; break;
+        case SegmentSegmentRegion::Edge_t0:         mu[0]=bp*(1.0-s); mu[1]=bp*s; mu[2]=-bp; mu[3]=0.0; break;
+        case SegmentSegmentRegion::Edge_t1:         mu[0]=bp*(1.0-s); mu[1]=bp*s; mu[2]=0.0; mu[3]=-bp; break;
+        case SegmentSegmentRegion::Corner_s0t0:     mu[0]=bp; mu[1]=0.0; mu[2]=-bp; mu[3]=0.0; break;
+        case SegmentSegmentRegion::Corner_s0t1:     mu[0]=bp; mu[1]=0.0; mu[2]=0.0; mu[3]=-bp; break;
+        case SegmentSegmentRegion::Corner_s1t0:     mu[0]=0.0; mu[1]=bp; mu[2]=-bp; mu[3]=0.0; break;
+        case SegmentSegmentRegion::Corner_s1t1:     mu[0]=0.0; mu[1]=bp; mu[2]=0.0; mu[3]=-bp; break;
+        case SegmentSegmentRegion::ParallelSegments: { const double muf[4]={1.0-s,s,-(1.0-t),-t}; for(int k=0;k<3;++k) g(k)=bp*muf[dof]*u[k]; H_row=segment_segment_barrier_hessian(x1,x2,x3,x4,d_hat,dof,eps); return {g,H_row}; }
+    }
+    for (int k=0;k<3;++k) g(k) = mu[dof] * u[k];
+
+    // --- hessian row ---
+    H_row = segment_segment_barrier_hessian(x1, x2, x3, x4, d_hat, dof, eps);
+
+    return {g, H_row};
 }

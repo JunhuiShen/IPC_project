@@ -1,7 +1,6 @@
 #pragma once
 #include "corotated_energy.h"
 #include "barrier_energy.h"
-#include <set>
 #include <unordered_map>
 #include <vector>
 #include <cassert>
@@ -21,7 +20,8 @@ struct SimParams {
     Vec3 gravity = Vec3::Zero();
     int max_global_iters{};
 
-    double dt() const { return 1.0 / (fps * static_cast<double>(substeps)); }
+    double dt()  const { return 1.0 / (fps * static_cast<double>(substeps)); }
+    double dt2() const { double d = dt(); return d * d; }  // cached square
 };
 
 struct DeformedState {
@@ -82,11 +82,11 @@ inline int num_tris(const RefMesh& ref_mesh) {
     return static_cast<int>(ref_mesh.tris.size()) / 3;
 }
 
-using VertexTriangleMap = std::unordered_map<int, std::vector<int>>;
+// Maps each vertex to {triangle_index, local_node_index} pairs.
+// Storing local_node_index eliminates the linear search in local_node() at call sites.
+using VertexTriangleMap = std::unordered_map<int, std::vector<std::pair<int,int>>>;
 
-// Barrier contact pair
-// DOF ordering: NT: 0=node, 1=tri_v[0], 2=tri_v[1], 3=tri_v[2]
-// SS: 0=v[0],  1=v[1],  2=v[2], 3=v[3]
+//  Barrier contact pair types
 struct NodeTrianglePair {
     int node;
     int tri_v[3];
@@ -101,20 +101,18 @@ struct BarrierPairs {
     std::vector<SegmentSegmentPair> ss;
 };
 
-// Build all NT and SS pairs, excluding self-incident ones
 BarrierPairs build_barrier_pairs(const RefMesh& ref_mesh);
 
-
+//  Physics functions
 double triangle_ref_area_2d(const RefMesh& ref_mesh, int tri_idx);
 
-double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const SimParams& params,
-                                                const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
+double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins,
+                                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
-// Elastic + inertia + pin gradient and diagonal Hessian (no barrier).
-std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
-                                                                     const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
+std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh,
+                                                                     const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+                                                                     const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
-// Full gradient including barrier terms, used for residual evaluation.
 Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                             const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                             const std::vector<NodeTrianglePair>& nt_pairs, const std::vector<SegmentSegmentPair>& ss_pairs);

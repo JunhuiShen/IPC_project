@@ -41,10 +41,15 @@ int build_single_triangle(RefMesh& ref_mesh, DeformedState& state, std::vector<V
                           const Vec2& X0, const Vec2& X1, const Vec2& X2,
                           const Vec3& x0, const Vec3& x1, const Vec3& x2) {
     int base = static_cast<int>(state.deformed_positions.size());
-    X.push_back(X0); X.push_back(X1); X.push_back(X2);
+
+    X.push_back(X0);
+    X.push_back(X1);
+    X.push_back(X2);
+
     state.deformed_positions.push_back(x0);
     state.deformed_positions.push_back(x1);
     state.deformed_positions.push_back(x2);
+
     ref_mesh.tris.push_back(base + 0);
     ref_mesh.tris.push_back(base + 1);
     ref_mesh.tris.push_back(base + 2);
@@ -55,36 +60,60 @@ void append_pin(std::vector<Pin>& pins, int vertex_index, const std::vector<Vec3
     pins.push_back(Pin{vertex_index, x[vertex_index]});
 }
 
+// Total number of vertices is: (nx + 1) * (ny + 1) and total number of triangles is: 2 * nx * ny
 int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin) {
     int base = static_cast<int>(state.deformed_positions.size());
 
     for (int j = 0; j <= ny; ++j) {
         for (int i = 0; i <= nx; ++i) {
+
+            // Normalize grid coordinates from 0 to 1
             double u = static_cast<double>(i) / nx;
             double v = static_cast<double>(j) / ny;
-            X.push_back(Vec2(u * width, v * height));
-            state.deformed_positions.push_back(origin + Vec3(u * width, v * height, 0.0));
+
+            // Scale to actual size
+            double x_ref = u * width;
+            double y_ref = v * height;
+
+            // Store reference (2D) and deformed (3D) positions
+            X.push_back(Vec2(x_ref, y_ref));
+            state.deformed_positions.push_back(origin + Vec3(x_ref, y_ref, 0.0));
         }
     }
 
-    auto vidx = [base, nx](int i, int j) { return base + j * (nx + 1) + i; };
+    // convert (col, row) → vertex index
+    auto vertex_index = [base, nx](int i, int j) {
+        return base + j * (nx + 1) + i;
+    };
 
+    // Create triangles
     for (int j = 0; j < ny; ++j) {
         for (int i = 0; i < nx; ++i) {
-            int v00 = vidx(i, j), v10 = vidx(i+1, j);
-            int v01 = vidx(i, j+1), v11 = vidx(i+1, j+1);
+            int v00 = vertex_index(i, j);
+            int v10 = vertex_index(i + 1, j);
+            int v01 = vertex_index(i, j + 1);
+            int v11 = vertex_index(i + 1, j + 1);
+
+            // Split square into two triangles
             ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v10); ref_mesh.tris.push_back(v11);
             ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v11); ref_mesh.tris.push_back(v01);
         }
     }
 
     ref_mesh.initialize(X);
+
     return base;
 }
 
-std::unordered_map<int, std::vector<int>> build_incident_triangle_map(const std::vector<int>& indices) {
-    std::unordered_map<int, std::vector<int>> result;
-    for (int i = 0; i < static_cast<int>(indices.size()); ++i)
-        result[indices[i]].push_back(i / 3);
+// Builds VertexTriangleMap: each vertex maps to {triangle_index, local_node_index} pairs.
+// Storing the local index (0,1,2) eliminates the linear search previously done by local_node().
+VertexTriangleMap build_incident_triangle_map(const std::vector<int>& indices) {
+    VertexTriangleMap result;
+    for (int i = 0; i < static_cast<int>(indices.size()); ++i) {
+        const int vertex     = indices[i];
+        const int tri_idx    = i / 3;
+        const int local_node = i % 3;
+        result[vertex].emplace_back(tri_idx, local_node);
+    }
     return result;
 }

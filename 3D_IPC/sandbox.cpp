@@ -127,12 +127,13 @@ SegmentSegmentDistanceResult segment_segment_distance(const Vec3& x1, const Vec3
 
 // ===== BEGIN corotated_energy.h =====
 
-
 struct CorotatedCache32 {
     Mat22 S;
     Mat22 SInv;
     Mat32 R;
     Mat22 FTFinv;
+    Mat32 FFTFInv;      // F * FTFinv          — cached for dPdF
+    Mat33 FFTFInvFT;    // F * FTFinv * F^T     — cached for dPdF
     double J;
     double traceS;
 };
@@ -141,17 +142,15 @@ CorotatedCache32 buildCorotatedCache(const Mat32& F);
 
 double PsiCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, double lambda);
 Mat32  PCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, double lambda);
-void   dPdFCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, double lambda, Mat66& dPdF);
+void   dPdFCorotated32(const CorotatedCache32& cache, double mu, double lambda, Mat66& dPdF);
 
-double   corotated_energy  (double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda);
+double corotated_energy(double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda);
 
-// Single-node gradient: returns the 3-vector force on node `node` only.
-Vec3 corotated_node_gradient(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda, int node);
+using ShapeGrads = std::array<Vec2, 3>;
+ShapeGrads shape_function_gradients(const Mat22& Dm_inv);
 
-// Single-node hessian row: returns the 3x9 block d(g_node)/d(all DOFs).
-Mat39 corotated_node_hessian(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda, int node);
-
-
+Vec3  corotated_node_gradient(const Mat32& P, double ref_area, const ShapeGrads& gradN, int node);
+Mat39 corotated_node_hessian(const Mat66& dPdF, double ref_area, const ShapeGrads& gradN, int node);
 
 // ===== END corotated_energy.h =====
 
@@ -192,6 +191,10 @@ Vec3 segment_segment_barrier_gradient(const Vec3& x1, const Vec3& x2, const Vec3
 
 // Single-DOF hessian row: returns 3x12 block d^2E/(d(y_dof) d(y_all))
 Mat312 segment_segment_barrier_hessian(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, int dof, double eps = 1.0e-12);
+
+// Combined: one distance evaluation for both gradient and hessian row
+std::pair<Vec3, Mat312> node_triangle_barrier_gradient_and_hessian(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, int dof, double eps = 1.0e-12);
+std::pair<Vec3, Mat312> segment_segment_barrier_gradient_and_hessian(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, int dof, double eps = 1.0e-12);
 // ===== END barrier_energy.h =====
 
 // ===== BEGIN physics.h =====
@@ -783,31 +786,32 @@ Mat32 Ds(const TriangleDef& tri) {
     return out;
 }
 
-// Shared eigendecomposition cache
+// Shared eigendecomposition cache — FFTFInv and FFTFInvFT pre-computed
 CorotatedCache32 buildCorotatedCache(const Mat32& F) {
     CorotatedCache32 c;
 
     Mat22 C = F.transpose() * F;
     Eigen::SelfAdjointEigenSolver<Mat22> es(C);
-    if (es.info() != Eigen::Success) {
+    if (es.info() != Eigen::Success)
         throw std::runtime_error("Eigen decomposition failed in buildCorotatedCache.");
-    }
 
-    Mat22 U = es.eigenvectors();
+    Mat22 U     = es.eigenvectors();
     Eigen::Vector2d evals = es.eigenvalues();
     evals(0) = std::max(evals(0), 1e-12);
     evals(1) = std::max(evals(1), 1e-12);
 
-    Mat22 S_diag = Mat22::Zero();
-    S_diag(0, 0) = std::sqrt(evals(0));
-    S_diag(1, 1) = std::sqrt(evals(1));
+    Mat22 S_diag  = Mat22::Zero();
+    S_diag(0, 0)  = std::sqrt(evals(0));
+    S_diag(1, 1)  = std::sqrt(evals(1));
 
-    c.S      = U * S_diag * U.transpose();
-    c.SInv   = c.S.inverse();
-    c.R      = F * c.SInv;
-    c.J      = S_diag(0, 0) * S_diag(1, 1);
-    c.traceS = c.S.trace();
-    c.FTFinv = C.inverse();
+    c.S         = U * S_diag * U.transpose();
+    c.SInv      = c.S.inverse();
+    c.R         = F * c.SInv;
+    c.J         = S_diag(0, 0) * S_diag(1, 1);
+    c.traceS    = c.S.trace();
+    c.FTFinv    = C.inverse();
+    c.FFTFInv   = F * c.FTFinv;
+    c.FFTFInvFT = c.FFTFInv * F.transpose();
 
     return c;
 }
@@ -818,13 +822,15 @@ double PsiCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, 
 }
 
 Mat32 PCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, double lambda) {
-    return 2.0 * mu * (F - cache.R) + lambda * (cache.J - 1.0) * cache.J * F * cache.FTFinv;
+    return 2.0 * mu * (F - cache.R) + lambda * (cache.J - 1.0) * cache.J * cache.FFTFInv;
 }
 
-void dPdFCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, double lambda, Mat66& dPdF) {
-    const Mat22& SInv   = cache.SInv;
-    const Mat32& R      = cache.R;
-    const Mat22& FTFinv = cache.FTFinv;
+void dPdFCorotated32(const CorotatedCache32& cache, double mu, double lambda, Mat66& dPdF) {
+    const Mat22& SInv      = cache.SInv;
+    const Mat32& R         = cache.R;
+    const Mat22& FTFinv    = cache.FTFinv;
+    const Mat32& FFTFInv   = cache.FFTFInv;
+    const Mat33& FFTFInvFT = cache.FFTFInvFT;
     double J      = cache.J;
     double traceS = cache.traceS;
 
@@ -841,15 +847,12 @@ void dPdFCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, d
             -R(2,1) / traceS,  R(2,0) / traceS;
 
     Mat66 dRdF = Mat66::Zero();
-    std::array<int, 12> indices = {0,0, 0,1, 1,0, 1,1, 2,0, 2,1};
+    static constexpr int idx[12] = {0,0, 0,1, 1,0, 1,1, 2,0, 2,1};
 
     for (int c1 = 0; c1 < 6; ++c1) {
         for (int c2 = 0; c2 < 6; ++c2) {
-            int m = indices[2 * c1];
-            int n = indices[2 * c1 + 1];
-            int i = indices[2 * c2];
-            int j = indices[2 * c2 + 1];
-
+            int m = idx[2*c1], n = idx[2*c1+1];
+            int i = idx[2*c2], j = idx[2*c2+1];
             double v = 0.0;
             if (m == i) v += SInv(j, n);
             v -= RRT(m, i) * SInv(j, n);
@@ -858,55 +861,41 @@ void dPdFCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, d
         }
     }
 
-    Mat32 FFTFInv = F * FTFinv;
-    Mat33 FFTFInvFT = F * FTFinv * F.transpose();
-
     dPdF.setZero();
-
     for (int c1 = 0; c1 < 6; ++c1) {
         for (int c2 = 0; c2 < 6; ++c2) {
-            int m = indices[2 * c1];
-            int n = indices[2 * c1 + 1];
-            int i = indices[2 * c2];
-            int j = indices[2 * c2 + 1];
-
+            int m = idx[2*c1], n = idx[2*c1+1];
+            int i = idx[2*c2], j = idx[2*c2+1];
             double v = 0.0;
             if (m == i) v += lambda * (J - 1.0) * J * FTFinv(j, n);
-
             v -= lambda * (J - 1.0) * J *
                  (FFTFInv(m, j) * FFTFInv(i, n) + FFTFInvFT(m, i) * FTFinv(j, n));
-
             v += 0.5 * lambda * (2.0 * J - 1.0) * J *
                  (FFTFInv(i, j) * FFTFInv(m, n) + FFTFInv(i, j) * FFTFInv(m, n));
-
             dPdF(c1, c2) = v;
         }
     }
-
     dPdF += 2.0 * mu * (Mat66::Identity() - dRdF);
 }
 
-// Shape-function helper
-static std::array<Vec2, 3> shape_function_grad_from_inv(const Mat22& Dm_inv) {
-    std::array<Vec2, 3> grads;
+// Shape-function gradients — compute once per triangle, share between gradient and hessian
+ShapeGrads shape_function_gradients(const Mat22& Dm_inv) {
+    ShapeGrads grads;
     grads[1] = Dm_inv.row(0).transpose();
     grads[2] = Dm_inv.row(1).transpose();
     grads[0] = -grads[1] - grads[2];
     return grads;
 }
 
-// Cached corotated energy functions
+// Cached corotated energy
 double corotated_energy(double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda) {
     const Mat32 F = Ds(def) * Dm_inv;
-    CorotatedCache32 cache = buildCorotatedCache(F);
+    const CorotatedCache32 cache = buildCorotatedCache(F);
     return ref_area * PsiCorotated32(cache, F, mu, lambda);
 }
 
-// Single-node gradient: only computes the force on the requested node.
-Vec3 corotated_node_gradient(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda, int node) {
-    const Mat32 P    = PCorotated32(cache, F, mu, lambda);
-    const auto gradN = shape_function_grad_from_inv(Dm_inv);
-
+// Single-node gradient: takes pre-computed P and gradN
+Vec3 corotated_node_gradient(const Mat32& P, double ref_area, const ShapeGrads& gradN, int node) {
     Vec3 g = Vec3::Zero();
     for (int gamma = 0; gamma < 3; ++gamma) {
         double val = 0.0;
@@ -917,13 +906,8 @@ Vec3 corotated_node_gradient(const CorotatedCache32& cache, const Mat32& F, doub
     return g;
 }
 
-// Single-node hessian: returns the 3x9 block d(g_node)/d(all DOFs).
-Mat39 corotated_node_hessian(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda, int node) {
-    const auto gradN = shape_function_grad_from_inv(Dm_inv);
-
-    Mat66 dPdF;
-    dPdFCorotated32(cache, F, mu, lambda, dPdF);
-
+// Single-node hessian row: takes pre-computed dPdF and gradN
+Mat39 corotated_node_hessian(const Mat66& dPdF, double ref_area, const ShapeGrads& gradN, int node) {
     Mat39 H_row = Mat39::Zero();
     for (int j = 0; j < 3; ++j) {
         for (int gamma = 0; gamma < 3; ++gamma) {
@@ -1833,6 +1817,24 @@ Mat312 segment_segment_barrier_hessian(const Vec3& x1, const Vec3& x2, const Vec
 
     return H_row;
 }
+
+// Combined NT gradient+hessian — single distance evaluation
+std::pair<Vec3, Mat312> node_triangle_barrier_gradient_and_hessian(
+        const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
+        double d_hat, int dof, double eps) {
+    Vec3   g     = node_triangle_barrier_gradient(x, x1, x2, x3, d_hat, dof, eps);
+    Mat312 H_row = node_triangle_barrier_hessian(x, x1, x2, x3, d_hat, dof, eps);
+    return {g, H_row};
+}
+
+// Combined SS gradient+hessian — single distance evaluation
+std::pair<Vec3, Mat312> segment_segment_barrier_gradient_and_hessian(
+        const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+        double d_hat, int dof, double eps) {
+    Vec3   g     = segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, dof, eps);
+    Mat312 H_row = segment_segment_barrier_hessian(x1, x2, x3, x4, d_hat, dof, eps);
+    return {g, H_row};
+}
 // ===== END barrier_energy.cpp =====
 
 // ===== BEGIN physics.cpp =====
@@ -1916,8 +1918,11 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
         const double A      = ref_mesh.area[ti];
 
         const CorotatedCache32 cache = buildCorotatedCache(F);
-        g += dt2 * corotated_node_gradient(cache, F, A, Dm_inv, params.mu, params.lambda, a);
-        H += dt2 * corotated_node_hessian(cache, F, A, Dm_inv, params.mu, params.lambda, a).template block<3, 3>(0, 3 * a);
+        const ShapeGrads gradN = shape_function_gradients(Dm_inv);
+        const Mat32 P = PCorotated32(cache, F, params.mu, params.lambda);
+        Mat66 dPdF; dPdFCorotated32(cache, params.mu, params.lambda, dPdF);
+        g += dt2 * corotated_node_gradient(P, A, gradN, a);
+        H += dt2 * corotated_node_hessian(dPdF, A, gradN, a).template block<3, 3>(0, 3 * a);
     }
 
     return {g, H};
@@ -1949,7 +1954,9 @@ Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const Ve
         const double A      = ref_mesh.area[ti];
 
         const CorotatedCache32 cache = buildCorotatedCache(F);
-        g += dt2 * corotated_node_gradient(cache, F, A, Dm_inv, params.mu, params.lambda, a);
+        const ShapeGrads gradN = shape_function_gradients(Dm_inv);
+        const Mat32 P = PCorotated32(cache, F, params.mu, params.lambda);
+        g += dt2 * corotated_node_gradient(P, A, gradN, a);
     }
 
     return g;
@@ -2268,12 +2275,10 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_with_barrier(
         else if (vi == p.tri_v[1])  dof = 2;
         else if (vi == p.tri_v[2])  dof = 3;
         if (dof < 0) continue;
-
-        g += dt2 * node_triangle_barrier_gradient(
+        auto [bg, bH] = node_triangle_barrier_gradient_and_hessian(
                 x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, dof);
-        H += dt2 * node_triangle_barrier_hessian(
-                x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, dof)
-                .block<3, 3>(0, 3 * dof);
+        g += dt2 * bg;
+        H += dt2 * bH.block<3, 3>(0, 3 * dof);
     }
 
     for (const auto& p : ss_pairs) {
@@ -2283,12 +2288,10 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_with_barrier(
         else if (vi == p.v[2]) dof = 2;
         else if (vi == p.v[3]) dof = 3;
         if (dof < 0) continue;
-
-        g += dt2 * segment_segment_barrier_gradient(
+        auto [bg, bH] = segment_segment_barrier_gradient_and_hessian(
                 x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, dof);
-        H += dt2 * segment_segment_barrier_hessian(
-                x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, dof)
-                .block<3, 3>(0, 3 * dof);
+        g += dt2 * bg;
+        H += dt2 * bH.block<3, 3>(0, 3 * dof);
     }
 
     return {g, H};

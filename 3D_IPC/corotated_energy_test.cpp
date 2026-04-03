@@ -77,9 +77,12 @@ using Mat99 = Eigen::Matrix<double, 9, 9>;
 Mat99 assemble_hessian(const CorotatedCache32& cache, const Mat32& F,
                        double ref_area, const Mat22& Dm_inv,
                        double mu, double lambda) {
+    Mat66 dPdF;
+    dPdFCorotated32(cache, mu, lambda, dPdF);
+    const ShapeGrads gradN = shape_function_gradients(Dm_inv);
     Mat99 H = Mat99::Zero();
     for (int node = 0; node < 3; ++node)
-        H.block<3, 9>(3 * node, 0) = corotated_node_hessian(cache, F, ref_area, Dm_inv, mu, lambda, node);
+        H.block<3, 9>(3 * node, 0) = corotated_node_hessian(dPdF, ref_area, gradN, node);
     return H;
 }
 
@@ -158,9 +161,13 @@ void test_rest_state(){
 
     std::cout << "  E = " << std::scientific << E << "\n";
     require(std::abs(E) < 1e-10, "rest energy should be zero");
-    for (int i = 0; i < 3; ++i) {
-        Vec3 g = corotated_node_gradient(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda, i);
-        require(g.norm() < 1e-10, "rest gradient should be zero");
+    {
+        const Mat32 P = PCorotated32(cache, F, kMu, kLambda);
+        const ShapeGrads gradN = shape_function_gradients(tri.Dm_inv);
+        for (int i = 0; i < 3; ++i) {
+            Vec3 g = corotated_node_gradient(P, tri.ref_area, gradN, i);
+            require(g.norm() < 1e-10, "rest gradient should be zero");
+        }
     }
     std::cout << "  PASSED\n\n";
 }
@@ -186,9 +193,13 @@ void test_rotation_invariance(){
 
     std::cout << "  E = " << std::scientific << E << "\n";
     require(std::abs(E) < 1e-10, "rotated rest energy should be zero");
-    for (int i = 0; i < 3; ++i) {
-        Vec3 g = corotated_node_gradient(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda, i);
-        require(g.norm() < 1e-10, "rotated rest gradient should be zero");
+    {
+        const Mat32 P = PCorotated32(cache, F, kMu, kLambda);
+        const ShapeGrads gradN = shape_function_gradients(tri.Dm_inv);
+        for (int i = 0; i < 3; ++i) {
+            Vec3 g = corotated_node_gradient(P, tri.ref_area, gradN, i);
+            require(g.norm() < 1e-10, "rotated rest gradient should be zero");
+        }
     }
     std::cout << "  PASSED\n\n";
 }
@@ -227,8 +238,12 @@ void test_gradient_sum_zero(){
     const CorotatedCache32 cache = buildCorotatedCache(F);
 
     Vec3 total = Vec3::Zero();
-    for (int i = 0; i < 3; ++i)
-        total += corotated_node_gradient(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda, i);
+    {
+        const Mat32 P = PCorotated32(cache, F, kMu, kLambda);
+        const ShapeGrads gradN = shape_function_gradients(tri.Dm_inv);
+        for (int i = 0; i < 3; ++i)
+            total += corotated_node_gradient(P, tri.ref_area, gradN, i);
+    }
 
     std::cout << "  |sum| = " << total.norm() << "\n";
     require(total.norm() < 1e-10, "nodal gradients should sum to zero");
@@ -293,8 +308,11 @@ void test_gradient_convergence(){
     std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
     bool all_passed = true;
 
+    const Mat32 P_base = PCorotated32(cache, F, kMu, kLambda);
+    const ShapeGrads gradN_base = shape_function_gradients(tri.Dm_inv);
+
     for (int i = 0; i < 3; ++i) {
-        Vec3 g = corotated_node_gradient(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda, i);
+        Vec3 g = corotated_node_gradient(P_base, tri.ref_area, gradN_base, i);
         for (int c = 0; c < 3; ++c) {
             double analytic = g(c);
 
@@ -348,17 +366,19 @@ void test_hessian_convergence(){
 
                 Mat32 Fp = compute_F(tri.Dm_inv, dp);
                 CorotatedCache32 cp = buildCorotatedCache(Fp);
+                const Mat32 Pp = PCorotated32(cp, Fp, kMu, kLambda);
+                const ShapeGrads gradNp = shape_function_gradients(tri.Dm_inv);
                 std::array<Vec3, 3> gp, gm;
-                for (int node = 0; node < 3; ++node) {
-                    gp[node] = corotated_node_gradient(cp, Fp, tri.ref_area, tri.Dm_inv, kMu, kLambda, node);
-                }
+                for (int node = 0; node < 3; ++node)
+                    gp[node] = corotated_node_gradient(Pp, tri.ref_area, gradNp, node);
                 g_plus_list.push_back(gp);
 
                 Mat32 Fm = compute_F(tri.Dm_inv, dm);
                 CorotatedCache32 cm = buildCorotatedCache(Fm);
-                for (int node = 0; node < 3; ++node) {
-                    gm[node] = corotated_node_gradient(cm, Fm, tri.ref_area, tri.Dm_inv, kMu, kLambda, node);
-                }
+                const Mat32 Pm = PCorotated32(cm, Fm, kMu, kLambda);
+                const ShapeGrads gradNm = shape_function_gradients(tri.Dm_inv);
+                for (int node = 0; node < 3; ++node)
+                    gm[node] = corotated_node_gradient(Pm, tri.ref_area, gradNm, node);
                 g_minus_list.push_back(gm);
             }
 
@@ -419,8 +439,12 @@ void test_directional_derivative_convergence(){
 
     // Flatten all three node gradients into a Vec9 for the dot product
     Vec9 g_flat = Vec9::Zero();
-    for (int i = 0; i < 3; ++i)
-        g_flat.segment<3>(3 * i) = corotated_node_gradient(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda, i);
+    {
+        const Mat32 P = PCorotated32(cache, F, kMu, kLambda);
+        const ShapeGrads gradN = shape_function_gradients(tri.Dm_inv);
+        for (int i = 0; i < 3; ++i)
+            g_flat.segment<3>(3 * i) = corotated_node_gradient(P, tri.ref_area, gradN, i);
+    }
     const double exact = g_flat.dot(flatten_def(dx));
 
     std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
