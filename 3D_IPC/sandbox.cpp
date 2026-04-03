@@ -26,14 +26,18 @@ namespace fs = std::__fs::filesystem;
 #include <array>
 
 // Type aliases
-using Vec2  = Eigen::Vector2d;
-using Vec3  = Eigen::Vector3d;
-using Vec9  = Eigen::Matrix<double, 9, 1>;
-using Mat22 = Eigen::Matrix2d;
-using Mat32 = Eigen::Matrix<double, 3, 2>;
-using Mat33 = Eigen::Matrix3d;
-using Mat66 = Eigen::Matrix<double, 6, 6>;
-using Mat99 = Eigen::Matrix<double, 9, 9>;
+using Vec2   = Eigen::Vector2d;
+using Vec3   = Eigen::Vector3d;
+using Vec6   = Eigen::Matrix<double, 6, 1>;
+using Vec9   = Eigen::Matrix<double, 9, 1>;
+using Vec12  = Eigen::Matrix<double, 12, 1>;
+using Mat22  = Eigen::Matrix2d;
+using Mat32  = Eigen::Matrix<double, 3, 2>;
+using Mat33  = Eigen::Matrix3d;
+using Mat39  = Eigen::Matrix<double, 3, 9>;
+using Mat66  = Eigen::Matrix<double, 6, 6>;
+using Mat312 = Eigen::Matrix<double, 3, 12>;
+using Mat12  = Eigen::Matrix<double, 12, 12>;
 
 // Triangle definitions
 struct TriangleRest {
@@ -52,8 +56,6 @@ TriangleDef ZeroTriangleDef();
 TriangleDef add_scale(const TriangleDef& a, const TriangleDef& b, double s);
 
 Vec9 flatten_def(const TriangleDef& def);
-
-Vec9 flatten_gradient(const std::array<Vec3, 3>& g);
 
 double get_dof(const TriangleDef& def, int node, int comp);
 
@@ -142,8 +144,12 @@ Mat32  PCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, do
 void   dPdFCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, double lambda, Mat66& dPdF);
 
 double   corotated_energy  (double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda);
-std::array<Vec3, 3> corotated_node_gradient(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda);
-Mat99 corotated_node_hessian (const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda);
+
+// Single-node gradient: returns the 3-vector force on node `node` only.
+Vec3 corotated_node_gradient(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda, int node);
+
+// Single-node hessian row: returns the 3x9 block d(g_node)/d(all DOFs).
+Mat39 corotated_node_hessian(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda, int node);
 
 
 
@@ -163,84 +169,29 @@ double scalar_barrier_hessian(double delta, double d_hat);
 
 // ====================================================================
 //  Node--triangle barrier
+//  DOF ordering: p = 0(x), 1(x1), 2(x2), 3(x3)
 // ====================================================================
-struct NodeTriangleBarrierResult{
-    double energy{0.0};
-    double distance{0.0};
-    double barrier_derivative{0.0};   // db/d(delta)
 
-    Vec3 grad_x  = Vec3::Zero();      // dPE/dx_k
-    Vec3 grad_x1 = Vec3::Zero();      // dPE/d(x1)_k
-    Vec3 grad_x2 = Vec3::Zero();      // dPE/d(x2)_k
-    Vec3 grad_x3 = Vec3::Zero();      // dPE/d(x3)_k
-
-    NodeTriangleDistanceResult distance_result;
-};
-
-// 12x12 Hessian: rows/cols ordered as (x, x1, x2, x3) x (0,1,2)
-using Mat12 = Eigen::Matrix<double, 12, 12>;
-
-struct NodeTriangleBarrierHessianResult{
-    double energy{0.0};
-    double distance{0.0};
-
-    Vec3 grad_x  = Vec3::Zero();
-    Vec3 grad_x1 = Vec3::Zero();
-    Vec3 grad_x2 = Vec3::Zero();
-    Vec3 grad_x3 = Vec3::Zero();
-
-    Mat12 hessian = Mat12::Zero();  // d2PE / dy_{pk} dy_{ql}
-
-    NodeTriangleDistanceResult distance_result;
-};
-
-//  Barrier energy with node-triangle distance
 double node_triangle_barrier(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, double eps = 1.0e-12);
 
-//  Barrier energy gradient with node-triangle distance
-NodeTriangleBarrierResult node_triangle_barrier_gradient(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
-                                                         double d_hat, double eps = 1.0e-12);
+// Single-DOF gradient: returns dE/d(y_dof)
+Vec3 node_triangle_barrier_gradient(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, int dof, double eps = 1.0e-12);
 
-//  Barrier energy hessian with node-triangle distance
-NodeTriangleBarrierHessianResult node_triangle_barrier_hessian(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
-                                                               double d_hat, double eps = 1.0e-12);
+// Single-DOF hessian row: returns 3x12 block d^2E/(d(y_dof) d(y_all))
+Mat312 node_triangle_barrier_hessian(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, int dof, double eps = 1.0e-12);
 
 // ====================================================================
 //  Segment--segment barrier
+//  DOF ordering: p = 0(x1), 1(x2), 2(x3), 3(x4)
 // ====================================================================
-
-struct SegmentSegmentBarrierResult{
-    double energy{0.0};
-    double distance{0.0};
-    double barrier_derivative{0.0}; // db/d(delta)
-
-    Vec3 grad_x1 = Vec3::Zero(); // dPE/d(x1)_k
-    Vec3 grad_x2 = Vec3::Zero();  // dPE/d(x2)_k
-    Vec3 grad_x3 = Vec3::Zero();  // dPE/d(x3)_k
-    Vec3 grad_x4 = Vec3::Zero();  // dPE/d(x4)_k
-
-    SegmentSegmentDistanceResult distance_result;
-};
-
-struct SegmentSegmentBarrierHessianResult{
-    double energy{0.0};
-    double distance{0.0};
-
-    Vec3 grad_x1 = Vec3::Zero();
-    Vec3 grad_x2 = Vec3::Zero();
-    Vec3 grad_x3 = Vec3::Zero();
-    Vec3 grad_x4 = Vec3::Zero();
-
-    Mat12 hessian = Mat12::Zero(); // d2PE / dy_{pk} dy_{ql}, ordered (x1,x2,x3,x4)
-
-    SegmentSegmentDistanceResult distance_result;
-};
 
 double segment_segment_barrier(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, double eps = 1.0e-12);
 
-SegmentSegmentBarrierResult segment_segment_barrier_gradient(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, double eps = 1.0e-12);
+// Single-DOF gradient: returns dE/d(y_dof)
+Vec3 segment_segment_barrier_gradient(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, int dof, double eps = 1.0e-12);
 
-SegmentSegmentBarrierHessianResult segment_segment_barrier_hessian(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, double eps = 1.0e-12);
+// Single-DOF hessian row: returns 3x12 block d^2E/(d(y_dof) d(y_all))
+Mat312 segment_segment_barrier_hessian(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, int dof, double eps = 1.0e-12);
 // ===== END barrier_energy.h =====
 
 // ===== BEGIN physics.h =====
@@ -421,12 +372,6 @@ TriangleDef add_scale(const TriangleDef& a, const TriangleDef& b, double s) {
 Vec9 flatten_def(const TriangleDef& def) {
     Vec9 out;
     for (int i = 0; i < 3; ++i) out.segment<3>(3 * i) = def.x[i];
-    return out;
-}
-
-Vec9 flatten_gradient(const std::array<Vec3, 3>& g) {
-    Vec9 out;
-    for (int i = 0; i < 3; ++i) out.segment<3>(3 * i) = g[i];
     return out;
 }
 
@@ -890,7 +835,7 @@ void dPdFCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, d
     Re(1,0) =  R(1,1); Re(1,1) = -R(1,0);
     Re(2,0) =  R(2,1); Re(2,1) = -R(2,0);
 
-    Eigen::Matrix<double, 6, 1> dcdF;
+    Vec6 dcdF;
     dcdF << -R(0,1) / traceS,  R(0,0) / traceS,
             -R(1,1) / traceS,  R(1,0) / traceS,
             -R(2,1) / traceS,  R(2,0) / traceS;
@@ -957,46 +902,42 @@ double corotated_energy(double ref_area, const Mat22& Dm_inv, const TriangleDef&
     return ref_area * PsiCorotated32(cache, F, mu, lambda);
 }
 
-std::array<Vec3, 3> corotated_node_gradient(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda) {
-    const Mat32 P = PCorotated32(cache, F, mu, lambda);
+// Single-node gradient: only computes the force on the requested node.
+Vec3 corotated_node_gradient(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda, int node) {
+    const Mat32 P    = PCorotated32(cache, F, mu, lambda);
     const auto gradN = shape_function_grad_from_inv(Dm_inv);
 
-    std::array<Vec3, 3> g;
-    for (int i = 0; i < 3; ++i) {
-        g[i].setZero();
-        for (int gamma = 0; gamma < 3; ++gamma) {
-            double val = 0.0;
-            for (int beta = 0; beta < 2; ++beta)
-                val += P(gamma, beta) * gradN[i](beta);
-            g[i](gamma) = ref_area * val;
-        }
+    Vec3 g = Vec3::Zero();
+    for (int gamma = 0; gamma < 3; ++gamma) {
+        double val = 0.0;
+        for (int beta = 0; beta < 2; ++beta)
+            val += P(gamma, beta) * gradN[node](beta);
+        g(gamma) = ref_area * val;
     }
     return g;
 }
 
-Mat99 corotated_node_hessian(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda) {
+// Single-node hessian: returns the 3x9 block d(g_node)/d(all DOFs).
+Mat39 corotated_node_hessian(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda, int node) {
     const auto gradN = shape_function_grad_from_inv(Dm_inv);
 
     Mat66 dPdF;
     dPdFCorotated32(cache, F, mu, lambda, dPdF);
 
-    Mat99 H = Mat99::Zero();
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            for (int gamma = 0; gamma < 3; ++gamma) {
-                for (int delta = 0; delta < 3; ++delta) {
-                    double value = 0.0;
-                    for (int beta = 0; beta < 2; ++beta) {
-                        for (int eta = 0; eta < 2; ++eta) {
-                            value += dPdF(flatF(gamma, beta), flatF(delta, eta)) * gradN[i](beta) * gradN[j](eta);
-                        }
-                    }
-                    H(3 * i + gamma, 3 * j + delta) = ref_area * value;
-                }
+    Mat39 H_row = Mat39::Zero();
+    for (int j = 0; j < 3; ++j) {
+        for (int gamma = 0; gamma < 3; ++gamma) {
+            for (int delta = 0; delta < 3; ++delta) {
+                double value = 0.0;
+                for (int beta = 0; beta < 2; ++beta)
+                    for (int eta = 0; eta < 2; ++eta)
+                        value += dPdF(flatF(gamma, beta), flatF(delta, eta))
+                                 * gradN[node](beta) * gradN[j](eta);
+                H_row(gamma, 3 * j + delta) = ref_area * value;
             }
         }
     }
-    return H;
+    return H_row;
 }
 // ===== END corotated_energy.cpp =====
 
@@ -1067,166 +1008,95 @@ double node_triangle_barrier(const Vec3& x, const Vec3& x1, const Vec3& x2, cons
     return scalar_barrier(dr.distance, d_hat);
 }
 
-// E(y) = b(delta(y)), dE/dy = b'(delta) * ddelta/dy
-NodeTriangleBarrierResult node_triangle_barrier_gradient(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, double eps){
-    NodeTriangleBarrierResult out;
-    out.distance_result = node_triangle_distance(x, x1, x2, x3, eps);
-    out.distance = out.distance_result.distance;
-    out.energy = scalar_barrier(out.distance, d_hat);
-    out.barrier_derivative = scalar_barrier_gradient(out.distance, d_hat);
-
-    if (out.barrier_derivative == 0.0) return out;
-
-    const NodeTriangleDistanceResult& dr = out.distance_result;
+// Single-DOF gradient: returns dE/d(y_dof). dof: 0=x, 1=x1, 2=x2, 3=x3
+Vec3 node_triangle_barrier_gradient(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, int dof, double eps){
+    const NodeTriangleDistanceResult dr = node_triangle_distance(x, x1, x2, x3, eps);
     const double delta = dr.distance;
-    const double bp = out.barrier_derivative;
+    const double bp    = scalar_barrier_gradient(delta, d_hat);
 
+    Vec3 g = Vec3::Zero();
+    if (bp == 0.0) return g;
     if (delta <= 0.0) throw std::runtime_error("node_triangle_barrier_gradient: distance must be positive.");
 
     double u[3];
     for (int k = 0; k < 3; ++k) u[k] = (x(k) - dr.closest_point(k)) / delta;
 
-    switch (dr.region) {
+    double coeff[4] = {0.0, 0.0, 0.0, 0.0};
+    double face_n[3] = {0.0, 0.0, 0.0};
+    bool use_normal = false;
 
+    switch (dr.region) {
         case NodeTriangleRegion::FaceInterior:
         {
             const double phi = dr.phi;
-            double sphi;
-            if      (phi > 0.0) sphi =  1.0;
-            else if (phi < 0.0) sphi = -1.0;
-            else                sphi =  0.0;
-
-            const double l1 = dr.barycentric_tilde_x[0];
-            const double l2 = dr.barycentric_tilde_x[1];
-            const double l3 = dr.barycentric_tilde_x[2];
-
-            for (int k = 0; k < 3; ++k) {
-                const double n_k = dr.normal(k);
-                out.grad_x(k)  =  bp * sphi * n_k;
-                out.grad_x1(k) = -bp * sphi * l1 * n_k;
-                out.grad_x2(k) = -bp * sphi * l2 * n_k;
-                out.grad_x3(k) = -bp * sphi * l3 * n_k;
-            }
+            const double sphi = (phi > 0.0) ? 1.0 : (phi < 0.0) ? -1.0 : 0.0;
+            coeff[0] =  bp * sphi;
+            coeff[1] = -bp * sphi * dr.barycentric_tilde_x[0];
+            coeff[2] = -bp * sphi * dr.barycentric_tilde_x[1];
+            coeff[3] = -bp * sphi * dr.barycentric_tilde_x[2];
+            for (int k = 0; k < 3; ++k) face_n[k] = dr.normal(k);
+            use_normal = true;
             break;
         }
-
         case NodeTriangleRegion::Edge12:
         {
             const double t = segment_parameter_from_closest_point(dr.closest_point, x1, x2);
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x(k)  =  bp * u[k];
-                out.grad_x1(k) = -bp * (1.0 - t) * u[k];
-                out.grad_x2(k) = -bp * t * u[k];
-                out.grad_x3(k) =  0.0;
-            }
+            coeff[0] =  bp; coeff[1] = -bp*(1.0-t); coeff[2] = -bp*t; coeff[3] = 0.0;
             break;
         }
-
         case NodeTriangleRegion::Edge23:
         {
             const double t = segment_parameter_from_closest_point(dr.closest_point, x2, x3);
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x(k)  =  bp * u[k];
-                out.grad_x1(k) =  0.0;
-                out.grad_x2(k) = -bp * (1.0 - t) * u[k];
-                out.grad_x3(k) = -bp * t * u[k];
-            }
+            coeff[0] = bp; coeff[1] = 0.0; coeff[2] = -bp*(1.0-t); coeff[3] = -bp*t;
             break;
         }
-
         case NodeTriangleRegion::Edge31:
         {
             const double t = segment_parameter_from_closest_point(dr.closest_point, x3, x1);
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x(k)  =  bp * u[k];
-                out.grad_x1(k) = -bp * t * u[k];
-                out.grad_x2(k) =  0.0;
-                out.grad_x3(k) = -bp * (1.0 - t) * u[k];
-            }
+            coeff[0] = bp; coeff[1] = -bp*t; coeff[2] = 0.0; coeff[3] = -bp*(1.0-t);
             break;
         }
-
         case NodeTriangleRegion::Vertex1:
-        {
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x(k) = bp * u[k]; out.grad_x1(k) = -bp * u[k];
-                out.grad_x2(k) = 0.0;      out.grad_x3(k) = 0.0;
-            }
-            break;
-        }
-
+            coeff[0] = bp; coeff[1] = -bp; coeff[2] = 0.0; coeff[3] = 0.0; break;
         case NodeTriangleRegion::Vertex2:
-        {
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x(k) = bp * u[k]; out.grad_x1(k) = 0.0;
-                out.grad_x2(k) = -bp * u[k]; out.grad_x3(k) = 0.0;
-            }
-            break;
-        }
-
+            coeff[0] = bp; coeff[1] = 0.0; coeff[2] = -bp; coeff[3] = 0.0; break;
         case NodeTriangleRegion::Vertex3:
-        {
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x(k) = bp * u[k]; out.grad_x1(k) = 0.0;
-                out.grad_x2(k) = 0.0; out.grad_x3(k) = -bp * u[k];
-            }
-            break;
-        }
-
+            coeff[0] = bp; coeff[1] = 0.0; coeff[2] = 0.0; coeff[3] = -bp; break;
         case NodeTriangleRegion::DegenerateTriangle:
         {
-            for (int k = 0; k < 3; ++k) out.grad_x(k) = bp * u[k];
-            // simplified fallback: assign to the closest vertex
-            double d1 = 0.0, d2 = 0.0, d3 = 0.0;
-            for (int k = 0; k < 3; ++k) {
-                double v1 = dr.closest_point(k) - x1(k); d1 += v1*v1;
-                double v2 = dr.closest_point(k) - x2(k); d2 += v2*v2;
-                double v3 = dr.closest_point(k) - x3(k); d3 += v3*v3;
+            coeff[0] = bp;
+            double d1=0,d2=0,d3=0;
+            for (int k=0;k<3;++k){
+                double v1=dr.closest_point(k)-x1(k); d1+=v1*v1;
+                double v2=dr.closest_point(k)-x2(k); d2+=v2*v2;
+                double v3=dr.closest_point(k)-x3(k); d3+=v3*v3;
             }
-            if (std::sqrt(d1) <= std::sqrt(d2) && std::sqrt(d1) <= std::sqrt(d3))
-                for (int k = 0; k < 3; ++k) out.grad_x1(k) = -bp * u[k];
-            else if (std::sqrt(d2) <= std::sqrt(d3))
-                for (int k = 0; k < 3; ++k) out.grad_x2(k) = -bp * u[k];
-            else
-                for (int k = 0; k < 3; ++k) out.grad_x3(k) = -bp * u[k];
+            if (std::sqrt(d1)<=std::sqrt(d2)&&std::sqrt(d1)<=std::sqrt(d3)) coeff[1]=-bp;
+            else if (std::sqrt(d2)<=std::sqrt(d3)) coeff[2]=-bp;
+            else coeff[3]=-bp;
             break;
         }
     }
 
-    return out;
+    if (use_normal) { for (int k=0;k<3;++k) g(k)=coeff[dof]*face_n[k]; }
+    else            { for (int k=0;k<3;++k) g(k)=coeff[dof]*u[k]; }
+    return g;
 }
 
-//  H_{pk,ql} = b''(delta) * (d delta/dy_{pk}) * (d delta/dy_{ql}) + b'(delta)  * (d^2 delta / dy_{pk} dy_{ql})
-//  DOF ordering: p = 0..3 for (x, x1, x2, x3), k,l = 0..2 for spatial.
-//  Row/col index in 12x12:  3*p + k.
+// Single-DOF hessian row: returns 3x12 block d^2E/(d(y_dof) d(y_all)). dof: 0=x,1=x1,2=x2,3=x3
+Mat312 node_triangle_barrier_hessian(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, int dof, double eps){
+    Mat312 H_row = Mat312::Zero();
 
-NodeTriangleBarrierHessianResult node_triangle_barrier_hessian(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, double eps){
-    NodeTriangleBarrierHessianResult out;
-
-    // --- energy and gradient via existing function ---
-    const auto gr = node_triangle_barrier_gradient(x, x1, x2, x3, d_hat, eps);
-    out.distance_result = gr.distance_result;
-    out.distance = gr.distance;
-    out.energy = gr.energy;
-    out.grad_x  = gr.grad_x;
-    out.grad_x1 = gr.grad_x1;
-    out.grad_x2 = gr.grad_x2;
-    out.grad_x3 = gr.grad_x3;
-
-    const double delta = gr.distance;
+    const NodeTriangleDistanceResult dr = node_triangle_distance(x, x1, x2, x3, eps);
+    const double delta = dr.distance;
     const double bp  = scalar_barrier_gradient(delta, d_hat);
     const double bpp = scalar_barrier_hessian(delta, d_hat);
 
-    if (bp == 0.0 && bpp == 0.0) return out;
-
-    const NodeTriangleDistanceResult& dr = gr.distance_result;
+    if (bp == 0.0 && bpp == 0.0) return H_row;
     if (delta <= 0.0) throw std::runtime_error("node_triangle_barrier_hessian: distance must be positive.");
 
-    // ---------------------------------------------------------------
-    //  Node positions packed into an array for index access:
-    //    Y[0] = x,  Y[1] = x1,  Y[2] = x2,  Y[3] = x3
-    // ---------------------------------------------------------------
     const Vec3* Y[4] = {&x, &x1, &x2, &x3};
+    const int p = dof;
 
     switch (dr.region) {
 
@@ -1244,36 +1114,29 @@ NodeTriangleBarrierHessianResult node_triangle_barrier_hessian(const Vec3& x, co
         case NodeTriangleRegion::Vertex2:
         case NodeTriangleRegion::Vertex3:
         {
-            // Determine which vertex a is
-            int a_idx; // index in Y: 1=x1, 2=x2, 3=x3
+            int a_idx;
             if      (dr.region == NodeTriangleRegion::Vertex1) a_idx = 1;
             else if (dr.region == NodeTriangleRegion::Vertex2) a_idx = 2;
             else                                               a_idx = 3;
 
-            // s_p for each of the 4 node groups
             double sp[4] = {0.0, 0.0, 0.0, 0.0};
-            sp[0] = 1.0;         // p = x
-            sp[a_idx] = -1.0;    // p = a
+            sp[0] = 1.0; sp[a_idx] = -1.0;
 
-            // u_k
+            if (sp[p] == 0.0) break;
+
             double u[3];
-            for (int k = 0; k < 3; ++k)
-                u[k] = (x(k) - (*Y[a_idx])(k)) / delta;
+            for (int k = 0; k < 3; ++k) u[k] = (x(k) - (*Y[a_idx])(k)) / delta;
 
-            // Fill 12x12 Hessian
             const double c1 = bpp;
             const double c2 = bp / delta;
 
-            for (int p = 0; p < 4; ++p) {
-                for (int q = 0; q < 4; ++q) {
-                    const double sq = sp[p] * sp[q];
-                    if (sq == 0.0) continue;
-                    for (int k = 0; k < 3; ++k) {
-                        for (int l = 0; l < 3; ++l) {
-                            double dkl = (k == l) ? 1.0 : 0.0;
-                            out.hessian(3*p+k, 3*q+l) =
-                                    sq * (c1 * u[k] * u[l] + c2 * (dkl - u[k] * u[l]));
-                        }
+            for (int q = 0; q < 4; ++q) {
+                if (sp[q] == 0.0) continue;
+                const double sq = sp[p] * sp[q];
+                for (int k = 0; k < 3; ++k) {
+                    for (int l = 0; l < 3; ++l) {
+                        double dkl = (k == l) ? 1.0 : 0.0;
+                        H_row(k, 3*q+l) = sq * (c1 * u[k] * u[l] + c2 * (dkl - u[k] * u[l]));
                     }
                 }
             }
@@ -1381,60 +1244,58 @@ NodeTriangleBarrierHessianResult node_triangle_barrier_hessian(const Vec3& x, co
             // H_{pk,ql} = b'' * (u_i r_{i,pk}) * (u_j r_{j,ql})
             //           + b' * d^2 delta / dy_{pk} dy_{ql}
 
-            for (int p = 0; p < 4; ++p) {
-                for (int k = 0; k < 3; ++k) {
-                    for (int q = 0; q < 4; ++q) {
-                        for (int l = 0; l < 3; ++l) {
+            for (int k = 0; k < 3; ++k) {
+                for (int q = 0; q < 4; ++q) {
+                    for (int l = 0; l < 3; ++l) {
 
-                            double dkl = (k == l) ? 1.0 : 0.0;
+                        double dkl = (k == l) ? 1.0 : 0.0;
 
-                            // alpha second derivatives
-                            double alpha_pk = omega[p]*e[k] + epsilon[p]*w[k];
-                            double alpha_ql = omega[q]*e[l] + epsilon[q]*w[l];
-                            double alpha_pkql = (omega[p]*epsilon[q] + omega[q]*epsilon[p]) * dkl;
+                        // alpha second derivatives
+                        double alpha_pk = omega[p]*e[k] + epsilon[p]*w[k];
+                        double alpha_ql = omega[q]*e[l] + epsilon[q]*w[l];
+                        double alpha_pkql = (omega[p]*epsilon[q] + omega[q]*epsilon[p]) * dkl;
 
-                            double beta_pk = 2.0*epsilon[p]*e[k];
-                            double beta_ql = 2.0*epsilon[q]*e[l];
-                            double beta_pkql = 2.0*epsilon[p]*epsilon[q]*dkl;
+                        double beta_pk = 2.0*epsilon[p]*e[k];
+                        double beta_ql = 2.0*epsilon[q]*e[l];
+                        double beta_pkql = 2.0*epsilon[p]*epsilon[q]*dkl;
 
-                            // t second derivative
-                            double t_pkql = alpha_pkql / beta
-                                            - (alpha_pk*beta_ql + alpha_ql*beta_pk + alpha*beta_pkql) / (beta*beta)
-                                            + 2.0*alpha*beta_pk*beta_ql / (beta*beta*beta);
+                        // t second derivative
+                        double t_pkql = alpha_pkql / beta
+                                        - (alpha_pk*beta_ql + alpha_ql*beta_pk + alpha*beta_pkql) / (beta*beta)
+                                        + 2.0*alpha*beta_pk*beta_ql / (beta*beta*beta);
 
-                            // q_{i,pk,ql} and sum for Hessian
-                            double ddelta_pk = 0.0;  // u_i * r_{i,pk}
-                            double ddelta_ql = 0.0;  // u_j * r_{j,ql}
-                            for (int i = 0; i < 3; ++i) {
-                                ddelta_pk += u[i] * r_d[p][k][i];
-                                ddelta_ql += u[i] * r_d[q][l][i];
-                            }
-
-                            // (1/delta)*(delta_{ij}-u_i*u_j)*r_{i,pk}*r_{j,ql}
-                            double proj_term = 0.0;
-                            for (int i = 0; i < 3; ++i) {
-                                for (int j = 0; j < 3; ++j) {
-                                    double dij = (i == j) ? 1.0 : 0.0;
-                                    proj_term += (dij - u[i]*u[j]) * r_d[p][k][i] * r_d[q][l][j];
-                                }
-                            }
-                            proj_term /= delta;
-
-                            // -u_i * q_{i,pk,ql}
-                            double uq_term = 0.0;
-                            for (int i = 0; i < 3; ++i) {
-                                double dik = (i == k) ? 1.0 : 0.0;
-                                double dil = (i == l) ? 1.0 : 0.0;
-                                double q_ipkql = t_pkql * e[i]
-                                                 + t_d[p][k] * epsilon[q] * dil
-                                                 + t_d[q][l] * epsilon[p] * dik;
-                                uq_term += u[i] * q_ipkql;
-                            }
-
-                            double d2delta = proj_term - uq_term;
-
-                            out.hessian(3*p+k, 3*q+l) = bpp * ddelta_pk * ddelta_ql + bp * d2delta;
+                        // q_{i,pk,ql} and sum for Hessian
+                        double ddelta_pk = 0.0;  // u_i * r_{i,pk}
+                        double ddelta_ql = 0.0;  // u_j * r_{j,ql}
+                        for (int i = 0; i < 3; ++i) {
+                            ddelta_pk += u[i] * r_d[p][k][i];
+                            ddelta_ql += u[i] * r_d[q][l][i];
                         }
+
+                        // (1/delta)*(delta_{ij}-u_i*u_j)*r_{i,pk}*r_{j,ql}
+                        double proj_term = 0.0;
+                        for (int i = 0; i < 3; ++i) {
+                            for (int j = 0; j < 3; ++j) {
+                                double dij = (i == j) ? 1.0 : 0.0;
+                                proj_term += (dij - u[i]*u[j]) * r_d[p][k][i] * r_d[q][l][j];
+                            }
+                        }
+                        proj_term /= delta;
+
+                        // -u_i * q_{i,pk,ql}
+                        double uq_term = 0.0;
+                        for (int i = 0; i < 3; ++i) {
+                            double dik = (i == k) ? 1.0 : 0.0;
+                            double dil = (i == l) ? 1.0 : 0.0;
+                            double q_ipkql = t_pkql * e[i]
+                                             + t_d[p][k] * epsilon[q] * dil
+                                             + t_d[q][l] * epsilon[p] * dik;
+                            uq_term += u[i] * q_ipkql;
+                        }
+
+                        double d2delta = proj_term - uq_term;
+
+                        H_row(k, 3*q+l) = bpp * ddelta_pk * ddelta_ql + bp * d2delta;
                     }
                 }
             }
@@ -1547,53 +1408,37 @@ NodeTriangleBarrierHessianResult node_triangle_barrier_hessian(const Vec3& x, co
             }
 
             // --- Compute H_{pk,ql} = b'' * phi_{,pk} * phi_{,ql} + s * b' * phi_{,pk,ql} ---
-            for (int p = 0; p < 4; ++p) {
-                for (int k = 0; k < 3; ++k) {
-                    for (int q = 0; q < 4; ++q) {
-                        for (int l = 0; l < 3; ++l) {
+            for (int k = 0; k < 3; ++k) {
+                for (int q = 0; q < 4; ++q) {
+                    for (int l = 0; l < 3; ++l) {
 
-                            double dkl = (k == l) ? 1.0 : 0.0;
+                        double dkl = (k == l) ? 1.0 : 0.0;
 
-                            // N_{i,pk,ql} = eps_{imn} (sig_a_p * delta_{mk} * sig_b_q * delta_{nl}
-                            //             + sig_a_q * delta_{ml} * sig_b_p * delta_{nk})
-                            //            = sig_a_p * sig_b_q * eps_{ikl} + sig_a_q * sig_b_p * eps_{ilk}
-                            // Since eps_{ilk} = -eps_{ikl}:
-                            //            = (sig_a_p * sig_b_q - sig_a_q * sig_b_p) * eps_{ikl}
-                            double coeff_N2 = sig_a[p] * sig_b[q] - sig_a[q] * sig_b[p];
+                        double coeff_N2 = sig_a[p] * sig_b[q] - sig_a[q] * sig_b[p];
 
-                            // eta_{,pk,ql} = n_i * N_{i,pk,ql}
-                            //              + (1/eta) * (delta_{ij} - n_i*n_j) * N_{i,pk} * N_{j,ql}
-                            double nN2 = 0.0;  // n_i * N_{i,pk,ql}
-                            for (int i = 0; i < 3; ++i)
-                                nN2 += n[i] * coeff_N2 * levi_civita(i, k, l);
+                        double nN2 = 0.0;
+                        for (int i = 0; i < 3; ++i)
+                            nN2 += n[i] * coeff_N2 * levi_civita(i, k, l);
 
-                            double proj_NN = 0.0;  // (delta_{ij}-n_i*n_j)*N_{i,pk}*N_{j,ql}
-                            for (int i = 0; i < 3; ++i)
-                                for (int j = 0; j < 3; ++j) {
-                                    double dij = (i == j) ? 1.0 : 0.0;
-                                    proj_NN += (dij - n[i]*n[j]) * Nd[p][k][i] * Nd[q][l][j];
-                                }
+                        double proj_NN = 0.0;
+                        for (int i = 0; i < 3; ++i)
+                            for (int j = 0; j < 3; ++j) {
+                                double dij = (i == j) ? 1.0 : 0.0;
+                                proj_NN += (dij - n[i]*n[j]) * Nd[p][k][i] * Nd[q][l][j];
+                            }
 
-                            double eta_pkql = nN2 + proj_NN / eta;
+                        double eta_pkql = nN2 + proj_NN / eta;
 
-                            // psi_{,pk,ql} = N_{i,pk,ql} * w_i
-                            //              + N_{i,pk} * sig_w_q * delta_{il}
-                            //              + N_{i,ql} * sig_w_p * delta_{ik}
-                            double psi_pkql = 0.0;
-                            for (int i = 0; i < 3; ++i)
-                                psi_pkql += coeff_N2 * levi_civita(i, k, l) * w[i];
-                            psi_pkql += sig_w[q] * Nd[p][k][l];  // N_{l,pk} * sig_w_q
-                            psi_pkql += sig_w[p] * Nd[q][l][k];  // N_{k,ql} * sig_w_p
+                        double psi_pkql = 0.0;
+                        for (int i = 0; i < 3; ++i)
+                            psi_pkql += coeff_N2 * levi_civita(i, k, l) * w[i];
+                        psi_pkql += sig_w[q] * Nd[p][k][l];
+                        psi_pkql += sig_w[p] * Nd[q][l][k];
 
-                            // phi_{,pk,ql} = psi_{,pk,ql}/eta
-                            //   - (psi_{,pk}*eta_{,ql} + psi_{,ql}*eta_{,pk} + psi*eta_{,pk,ql}) / eta^2
-                            //   + 2*psi*eta_{,pk}*eta_{,ql} / eta^3
-                            double phi_pkql = psi_pkql / eta - (psi_d[p][k]*eta_d[q][l] + psi_d[q][l]*eta_d[p][k] + psi*eta_pkql) / (eta*eta)
-                                              + 2.0*psi*eta_d[p][k]*eta_d[q][l] / (eta*eta*eta);
+                        double phi_pkql = psi_pkql / eta - (psi_d[p][k]*eta_d[q][l] + psi_d[q][l]*eta_d[p][k] + psi*eta_pkql) / (eta*eta)
+                                          + 2.0*psi*eta_d[p][k]*eta_d[q][l] / (eta*eta*eta);
 
-                            out.hessian(3*p+k, 3*q+l) = bpp * phi_d[p][k] * phi_d[q][l]
-                                                        + s * bp * phi_pkql;
-                        }
+                        H_row(k, 3*q+l) = bpp * phi_d[p][k] * phi_d[q][l] + s * bp * phi_pkql;
                     }
                 }
             }
@@ -1601,11 +1446,10 @@ NodeTriangleBarrierHessianResult node_triangle_barrier_hessian(const Vec3& x, co
         }
 
         case NodeTriangleRegion::DegenerateTriangle:
-            // No Hessian for degenerate case and leave as zero
             break;
     }
 
-    return out;
+    return H_row;
 }
 
 // =====================================================================
@@ -1618,21 +1462,14 @@ double segment_segment_barrier(const Vec3& x1, const Vec3& x2, const Vec3& x3, c
     return scalar_barrier(dr.distance, d_hat);
 }
 
-// E(y) = b(delta(y)), dE/dy_{pk} = b'(delta) * ddelta/dy_{pk}
-// DOF ordering: p = 0(x1), 1(x2), 2(x3), 3(x4), k = 0..2
-SegmentSegmentBarrierResult segment_segment_barrier_gradient(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, double eps){
-    SegmentSegmentBarrierResult out;
-    out.distance_result = segment_segment_distance(x1, x2, x3, x4, eps);
-    out.distance = out.distance_result.distance;
-    out.energy = scalar_barrier(out.distance, d_hat);
-    out.barrier_derivative = scalar_barrier_gradient(out.distance, d_hat);
-
-    if (out.barrier_derivative == 0.0) return out;
-
-    const auto& dr = out.distance_result;
+// Single-DOF gradient: returns dE/d(y_dof). dof: 0=x1,1=x2,2=x3,3=x4
+Vec3 segment_segment_barrier_gradient(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, int dof, double eps){
+    const SegmentSegmentDistanceResult dr = segment_segment_distance(x1, x2, x3, x4, eps);
     const double delta = dr.distance;
-    const double bp = out.barrier_derivative;
+    const double bp    = scalar_barrier_gradient(delta, d_hat);
 
+    Vec3 g = Vec3::Zero();
+    if (bp == 0.0) return g;
     if (delta <= 0.0) throw std::runtime_error("segment_segment_barrier_gradient: distance must be positive.");
 
     const Vec3 r = dr.closest_point_1 - dr.closest_point_2;
@@ -1641,149 +1478,52 @@ SegmentSegmentBarrierResult segment_segment_barrier_gradient(const Vec3& x1, con
 
     const double s = dr.s;
     const double t = dr.t;
+    double mu[4] = {0.0, 0.0, 0.0, 0.0};
 
     switch (dr.region) {
-
-        // Case 1: interior
-        // mu_1 = 1-s, mu_2 = s, mu_3 = -(1-t), mu_4 = -t
         case SegmentSegmentRegion::Interior:
-        {
-            const double mu[4] = {1.0-s, s, -(1.0-t), -t};
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x1(k) = bp * mu[0] * u[k];
-                out.grad_x2(k) = bp * mu[1] * u[k];
-                out.grad_x3(k) = bp * mu[2] * u[k];
-                out.grad_x4(k) = bp * mu[3] * u[k];
-            }
-            break;
-        }
-
-            // Cases 2-5: point-segment (one parameter clamped)
-            // These reduce to the node-triangle edge-interior gradient structure.
-        case SegmentSegmentRegion::Edge_s0:  // x1 vs (x3,x4), x2 inactive
-        {
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x1(k) =  bp * u[k];
-                out.grad_x2(k) =  0.0;
-                out.grad_x3(k) = -bp * (1.0 - t) * u[k];
-                out.grad_x4(k) = -bp * t * u[k];
-            }
-            break;
-        }
-
-        case SegmentSegmentRegion::Edge_s1:  // x2 vs (x3,x4), x1 inactive
-        {
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x1(k) =  0.0;
-                out.grad_x2(k) =  bp * u[k];
-                out.grad_x3(k) = -bp * (1.0 - t) * u[k];
-                out.grad_x4(k) = -bp * t * u[k];
-            }
-            break;
-        }
-
-        case SegmentSegmentRegion::Edge_t0:  // x3 vs (x1,x2), x4 inactive
-        {
-            // r = x3_closest - edge_closest = closest_point_2 - closest_point_1 = -u direction
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x1(k) =  bp * (1.0 - s) * u[k];
-                out.grad_x2(k) =  bp * s * u[k];
-                out.grad_x3(k) = -bp * u[k];
-                out.grad_x4(k) =  0.0;
-            }
-            break;
-        }
-
-        case SegmentSegmentRegion::Edge_t1:  // x4 vs (x1,x2), x3 inactive
-        {
-            // r = x4_closest - edge_closest = closest_point_2 - closest_point_1 = -u direction
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x1(k) =  bp * (1.0 - s) * u[k];
-                out.grad_x2(k) =  bp * s * u[k];
-                out.grad_x3(k) =  0.0;
-                out.grad_x4(k) = -bp * u[k];
-            }
-            break;
-        }
-
-            // Cases 6-9: vertex-vertex
-        case SegmentSegmentRegion::Corner_s0t0:  // x1 vs x3
-        {
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x1(k) =  bp * u[k]; out.grad_x2(k) = 0.0;
-                out.grad_x3(k) = -bp * u[k]; out.grad_x4(k) = 0.0;
-            }
-            break;
-        }
-
-        case SegmentSegmentRegion::Corner_s0t1:  // x1 vs x4
-        {
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x1(k) =  bp * u[k]; out.grad_x2(k) = 0.0;
-                out.grad_x3(k) = 0.0;        out.grad_x4(k) = -bp * u[k];
-            }
-            break;
-        }
-
-        case SegmentSegmentRegion::Corner_s1t0:  // x2 vs x3
-        {
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x1(k) = 0.0;        out.grad_x2(k) =  bp * u[k];
-                out.grad_x3(k) = -bp * u[k]; out.grad_x4(k) = 0.0;
-            }
-            break;
-        }
-
-        case SegmentSegmentRegion::Corner_s1t1:  // x2 vs x4
-        {
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x1(k) = 0.0;        out.grad_x2(k) =  bp * u[k];
-                out.grad_x3(k) = 0.0;        out.grad_x4(k) = -bp * u[k];
-            }
-            break;
-        }
-
+            mu[0]=bp*(1.0-s); mu[1]=bp*s; mu[2]=-bp*(1.0-t); mu[3]=-bp*t; break;
+        case SegmentSegmentRegion::Edge_s0:
+            mu[0]=bp; mu[1]=0.0; mu[2]=-bp*(1.0-t); mu[3]=-bp*t; break;
+        case SegmentSegmentRegion::Edge_s1:
+            mu[0]=0.0; mu[1]=bp; mu[2]=-bp*(1.0-t); mu[3]=-bp*t; break;
+        case SegmentSegmentRegion::Edge_t0:
+            mu[0]=bp*(1.0-s); mu[1]=bp*s; mu[2]=-bp; mu[3]=0.0; break;
+        case SegmentSegmentRegion::Edge_t1:
+            mu[0]=bp*(1.0-s); mu[1]=bp*s; mu[2]=0.0; mu[3]=-bp; break;
+        case SegmentSegmentRegion::Corner_s0t0:
+            mu[0]=bp; mu[1]=0.0; mu[2]=-bp; mu[3]=0.0; break;
+        case SegmentSegmentRegion::Corner_s0t1:
+            mu[0]=bp; mu[1]=0.0; mu[2]=0.0; mu[3]=-bp; break;
+        case SegmentSegmentRegion::Corner_s1t0:
+            mu[0]=0.0; mu[1]=bp; mu[2]=-bp; mu[3]=0.0; break;
+        case SegmentSegmentRegion::Corner_s1t1:
+            mu[0]=0.0; mu[1]=bp; mu[2]=0.0; mu[3]=-bp; break;
         case SegmentSegmentRegion::ParallelSegments:
         {
-            // Fallback: use mu weights from the resolved (s,t)
-            const double mu[4] = {1.0-s, s, -(1.0-t), -t};
-            for (int k = 0; k < 3; ++k) {
-                out.grad_x1(k) = bp * mu[0] * u[k];
-                out.grad_x2(k) = bp * mu[1] * u[k];
-                out.grad_x3(k) = bp * mu[2] * u[k];
-                out.grad_x4(k) = bp * mu[3] * u[k];
-            }
-            break;
+            const double muf[4] = {1.0-s, s, -(1.0-t), -t};
+            for (int k=0;k<3;++k) g(k) = bp * muf[dof] * u[k];
+            return g;
         }
     }
-
-    return out;
+    for (int k=0;k<3;++k) g(k) = mu[dof] * u[k];
+    return g;
 }
 
-// H_{pk,ql} = b'' * ddelta/dy_{pk} * ddelta/dy_{ql} + b' * d2delta/dy_{pk}dy_{ql}
-// DOF ordering: p = 0(x1), 1(x2), 2(x3), 3(x4), k,l = 0..2
-SegmentSegmentBarrierHessianResult segment_segment_barrier_hessian(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, double eps){
-    SegmentSegmentBarrierHessianResult out;
+// Single-DOF hessian row: returns 3x12 block. dof: 0=x1,1=x2,2=x3,3=x4
+Mat312 segment_segment_barrier_hessian(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, int dof, double eps){
+    Mat312 H_row = Mat312::Zero();
 
-    const auto gr = segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, eps);
-    out.distance_result = gr.distance_result;
-    out.distance = gr.distance;
-    out.energy = gr.energy;
-    out.grad_x1 = gr.grad_x1;
-    out.grad_x2 = gr.grad_x2;
-    out.grad_x3 = gr.grad_x3;
-    out.grad_x4 = gr.grad_x4;
+    const SegmentSegmentDistanceResult dr = segment_segment_distance(x1, x2, x3, x4, eps);
+    const double delta = dr.distance;
+    const double bp    = scalar_barrier_gradient(delta, d_hat);
+    const double bpp   = scalar_barrier_hessian(delta, d_hat);
 
-    const double delta = gr.distance;
-    const double bp  = scalar_barrier_gradient(delta, d_hat);
-    const double bpp = scalar_barrier_hessian(delta, d_hat);
-
-    if (bp == 0.0 && bpp == 0.0) return out;
-
-    const auto& dr = gr.distance_result;
+    if (bp == 0.0 && bpp == 0.0) return H_row;
     if (delta <= 0.0) throw std::runtime_error("segment_segment_barrier_hessian: distance must be positive.");
 
     const Vec3* Y[4] = {&x1, &x2, &x3, &x4};
+    const int p = dof;
 
     switch (dr.region) {
 
@@ -1811,15 +1551,15 @@ SegmentSegmentBarrierHessianResult segment_segment_barrier_hessian(const Vec3& x
             const double c1 = bpp;
             const double c2 = bp / delta;
 
-            for (int p = 0; p < 4; ++p) {
-                for (int q = 0; q < 4; ++q) {
-                    const double sq = sp[p] * sp[q];
-                    if (sq == 0.0) continue;
-                    for (int k = 0; k < 3; ++k) {
-                        for (int l = 0; l < 3; ++l) {
-                            double dkl = (k == l) ? 1.0 : 0.0;
-                            out.hessian(3*p+k, 3*q+l) = sq * (c1 * u[k] * u[l] + c2 * (dkl - u[k] * u[l]));
-                        }
+            if (sp[p] == 0.0) break;
+
+            for (int q = 0; q < 4; ++q) {
+                const double sq = sp[p] * sp[q];
+                if (sq == 0.0) continue;
+                for (int k = 0; k < 3; ++k) {
+                    for (int l = 0; l < 3; ++l) {
+                        double dkl = (k == l) ? 1.0 : 0.0;
+                        H_row(k, 3*q+l) = sq * (c1 * u[k] * u[l] + c2 * (dkl - u[k] * u[l]));
                     }
                 }
             }
@@ -1891,53 +1631,51 @@ SegmentSegmentBarrierHessianResult segment_segment_barrier_hessian(const Vec3& x
             }
 
             // Second derivatives and Hessian assembly
-            for (int p = 0; p < 4; ++p) {
-                for (int k = 0; k < 3; ++k) {
-                    for (int q = 0; q < 4; ++q) {
-                        for (int l = 0; l < 3; ++l) {
-                            double dkl = (k == l) ? 1.0 : 0.0;
+            for (int k = 0; k < 3; ++k) {
+                for (int q = 0; q < 4; ++q) {
+                    for (int l = 0; l < 3; ++l) {
+                        double dkl = (k == l) ? 1.0 : 0.0;
 
-                            double alpha_pk = omega[p]*e[k] + epsilon[p]*w[k];
-                            double alpha_ql = omega[q]*e[l] + epsilon[q]*w[l];
-                            double alpha_pkql = (omega[p]*epsilon[q] + omega[q]*epsilon[p]) * dkl;
+                        double alpha_pk = omega[p]*e[k] + epsilon[p]*w[k];
+                        double alpha_ql = omega[q]*e[l] + epsilon[q]*w[l];
+                        double alpha_pkql = (omega[p]*epsilon[q] + omega[q]*epsilon[p]) * dkl;
 
-                            double beta_pk = 2.0*epsilon[p]*e[k];
-                            double beta_ql = 2.0*epsilon[q]*e[l];
-                            double beta_pkql = 2.0*epsilon[p]*epsilon[q]*dkl;
+                        double beta_pk = 2.0*epsilon[p]*e[k];
+                        double beta_ql = 2.0*epsilon[q]*e[l];
+                        double beta_pkql = 2.0*epsilon[p]*epsilon[q]*dkl;
 
-                            double t_pkql = alpha_pkql / beta
-                                            - (alpha_pk*beta_ql + alpha_ql*beta_pk + alpha*beta_pkql) / (beta*beta)
-                                            + 2.0*alpha*beta_pk*beta_ql / (beta*beta*beta);
+                        double t_pkql = alpha_pkql / beta
+                                        - (alpha_pk*beta_ql + alpha_ql*beta_pk + alpha*beta_pkql) / (beta*beta)
+                                        + 2.0*alpha*beta_pk*beta_ql / (beta*beta*beta);
 
-                            double ddelta_pk = 0.0, ddelta_ql = 0.0;
-                            for (int i = 0; i < 3; ++i) {
-                                ddelta_pk += u[i] * r_d[p][k][i];
-                                ddelta_ql += u[i] * r_d[q][l][i];
-                            }
-
-                            double proj_term = 0.0;
-                            for (int i = 0; i < 3; ++i) {
-                                for (int j = 0; j < 3; ++j) {
-                                    double dij = (i == j) ? 1.0 : 0.0;
-                                    proj_term += (dij - u[i]*u[j]) * r_d[p][k][i] * r_d[q][l][j];
-                                }
-                            }
-                            proj_term /= delta;
-
-                            double uq_term = 0.0;
-                            for (int i = 0; i < 3; ++i) {
-                                double dik = (i == k) ? 1.0 : 0.0;
-                                double dil = (i == l) ? 1.0 : 0.0;
-                                double q_ipkql = t_pkql * e[i]
-                                                 + t_d[p][k] * epsilon[q] * dil
-                                                 + t_d[q][l] * epsilon[p] * dik;
-                                uq_term += u[i] * q_ipkql;
-                            }
-
-                            double d2delta = proj_term - uq_term;
-
-                            out.hessian(3*p+k, 3*q+l) = bpp * ddelta_pk * ddelta_ql + bp * d2delta;
+                        double ddelta_pk = 0.0, ddelta_ql = 0.0;
+                        for (int i = 0; i < 3; ++i) {
+                            ddelta_pk += u[i] * r_d[p][k][i];
+                            ddelta_ql += u[i] * r_d[q][l][i];
                         }
+
+                        double proj_term = 0.0;
+                        for (int i = 0; i < 3; ++i) {
+                            for (int j = 0; j < 3; ++j) {
+                                double dij = (i == j) ? 1.0 : 0.0;
+                                proj_term += (dij - u[i]*u[j]) * r_d[p][k][i] * r_d[q][l][j];
+                            }
+                        }
+                        proj_term /= delta;
+
+                        double uq_term = 0.0;
+                        for (int i = 0; i < 3; ++i) {
+                            double dik = (i == k) ? 1.0 : 0.0;
+                            double dil = (i == l) ? 1.0 : 0.0;
+                            double q_ipkql = t_pkql * e[i]
+                                             + t_d[p][k] * epsilon[q] * dil
+                                             + t_d[q][l] * epsilon[p] * dik;
+                            uq_term += u[i] * q_ipkql;
+                        }
+
+                        double d2delta = proj_term - uq_term;
+
+                        H_row(k, 3*q+l) = bpp * ddelta_pk * ddelta_ql + bp * d2delta;
                     }
                 }
             }
@@ -2033,76 +1771,56 @@ SegmentSegmentBarrierHessianResult segment_segment_barrier_hessian(const Vec3& x
             }
 
             // Second derivatives and Hessian
-            for (int p = 0; p < 4; ++p) {
-                for (int k = 0; k < 3; ++k) {
-                    for (int q = 0; q < 4; ++q) {
-                        for (int l = 0; l < 3; ++l) {
-                            double dkl = (k == l) ? 1.0 : 0.0;
+            for (int k = 0; k < 3; ++k) {
+                for (int q = 0; q < 4; ++q) {
+                    for (int l = 0; l < 3; ++l) {
+                        double dkl = (k == l) ? 1.0 : 0.0;
 
-                            // Second derivatives of A,B,C,D,E
-                            double A_pkql = 2.0 * sig_a[p] * sig_a[q] * dkl;
-                            double B_pkql = (sig_a[p]*sig_b[q] + sig_a[q]*sig_b[p]) * dkl;
-                            double C_pkql = 2.0 * sig_b[p] * sig_b[q] * dkl;
-                            double D_pkql = (sig_a[p]*sig_c[q] + sig_a[q]*sig_c[p]) * dkl;
-                            double E_pkql = (sig_b[p]*sig_c[q] + sig_b[q]*sig_c[p]) * dkl;
+                        double A_pkql = 2.0 * sig_a[p] * sig_a[q] * dkl;
+                        double B_pkql = (sig_a[p]*sig_b[q] + sig_a[q]*sig_b[p]) * dkl;
+                        double C_pkql = 2.0 * sig_b[p] * sig_b[q] * dkl;
+                        double D_pkql = (sig_a[p]*sig_c[q] + sig_a[q]*sig_c[p]) * dkl;
+                        double E_pkql = (sig_b[p]*sig_c[q] + sig_b[q]*sig_c[p]) * dkl;
 
-                            // nu second derivative
-                            double nu_pkql = B_pkql*E + Bd[p][k]*Ed[q][l] + Bd[q][l]*Ed[p][k] + B*E_pkql
-                                             - C_pkql*D - Cd[p][k]*Dd[q][l] - Cd[q][l]*Dd[p][k] - C*D_pkql;
+                        double nu_pkql = B_pkql*E + Bd[p][k]*Ed[q][l] + Bd[q][l]*Ed[p][k] + B*E_pkql
+                                         - C_pkql*D - Cd[p][k]*Dd[q][l] - Cd[q][l]*Dd[p][k] - C*D_pkql;
+                        double Delta_pkql = A_pkql*C + Ad[p][k]*Cd[q][l] + Ad[q][l]*Cd[p][k] + A*C_pkql
+                                            - 2.0*(Bd[p][k]*Bd[q][l] + B*B_pkql);
+                        double zeta_pkql = A_pkql*E + Ad[p][k]*Ed[q][l] + Ad[q][l]*Ed[p][k] + A*E_pkql
+                                           - B_pkql*D - Bd[p][k]*Dd[q][l] - Bd[q][l]*Dd[p][k] - B*D_pkql;
 
-                            // Delta second derivative
-                            double Delta_pkql = A_pkql*C + Ad[p][k]*Cd[q][l] + Ad[q][l]*Cd[p][k] + A*C_pkql
-                                                - 2.0*(Bd[p][k]*Bd[q][l] + B*B_pkql);
+                        double s_pkql = nu_pkql/Delta
+                                        - (nu_d[p][k]*Delta_d[q][l] + nu_d[q][l]*Delta_d[p][k] + nu*Delta_pkql)/(Delta*Delta)
+                                        + 2.0*nu*Delta_d[p][k]*Delta_d[q][l]/(Delta*Delta*Delta);
+                        double t_pkql = zeta_pkql/Delta
+                                        - (zeta_d[p][k]*Delta_d[q][l] + zeta_d[q][l]*Delta_d[p][k] + zeta*Delta_pkql)/(Delta*Delta)
+                                        + 2.0*zeta*Delta_d[p][k]*Delta_d[q][l]/(Delta*Delta*Delta);
 
-                            // zeta second derivative
-                            double zeta_pkql = A_pkql*E + Ad[p][k]*Ed[q][l] + Ad[q][l]*Ed[p][k] + A*E_pkql
-                                               - B_pkql*D - Bd[p][k]*Dd[q][l] - Bd[q][l]*Dd[p][k] - B*D_pkql;
-
-                            // s_{,pk,ql}
-                            double s_pkql = nu_pkql/Delta
-                                            - (nu_d[p][k]*Delta_d[q][l] + nu_d[q][l]*Delta_d[p][k] + nu*Delta_pkql)/(Delta*Delta)
-                                            + 2.0*nu*Delta_d[p][k]*Delta_d[q][l]/(Delta*Delta*Delta);
-
-                            // t_{,pk,ql}
-                            double t_pkql = zeta_pkql/Delta
-                                            - (zeta_d[p][k]*Delta_d[q][l] + zeta_d[q][l]*Delta_d[p][k] + zeta*Delta_pkql)/(Delta*Delta)
-                                            + 2.0*zeta*Delta_d[p][k]*Delta_d[q][l]/(Delta*Delta*Delta);
-
-                            // p_{i,pk,ql} = s_{,pk,ql}*a_i + s_{,pk}*sig_a_q*delta_{il} + s_{,ql}*sig_a_p*delta_{ik}
-                            // q_{i,pk,ql} = t_{,pk,ql}*b_i + t_{,pk}*sig_b_q*delta_{il} + t_{,ql}*sig_b_p*delta_{ik}
-                            // r_{i,pk,ql} = p_{i,pk,ql} - q_{i,pk,ql}
-
-                            // delta_{,pk} = u_i * r_{i,pk}
-                            double ddelta_pk = 0.0, ddelta_ql = 0.0;
-                            for (int i = 0; i < 3; ++i) {
-                                ddelta_pk += u[i] * r_d[p][k][i];
-                                ddelta_ql += u[i] * r_d[q][l][i];
-                            }
-
-                            // (1/delta)*(delta_{ij}-u_i*u_j)*r_{i,pk}*r_{j,ql}
-                            double proj_term = 0.0;
-                            for (int i = 0; i < 3; ++i) {
-                                for (int j = 0; j < 3; ++j) {
-                                    double dij = (i == j) ? 1.0 : 0.0;
-                                    proj_term += (dij - u[i]*u[j]) * r_d[p][k][i] * r_d[q][l][j];
-                                }
-                            }
-                            proj_term /= delta;
-
-                            // u_i * r_{i,pk,ql}
-                            double ur_term = 0.0;
-                            for (int i = 0; i < 3; ++i) {
-                                double dik = (i == k) ? 1.0 : 0.0;
-                                double dil = (i == l) ? 1.0 : 0.0;
-                                double p_ipkql = s_pkql * a[i] + s_d[p][k] * sig_a[q] * dil + s_d[q][l] * sig_a[p] * dik;
-                                double q_ipkql = t_pkql * b[i] + t_d_arr[p][k] * sig_b[q] * dil + t_d_arr[q][l] * sig_b[p] * dik;
-                                ur_term += u[i] * (p_ipkql - q_ipkql);
-                            }
-
-                            double d2delta = proj_term + ur_term;
-
-                            out.hessian(3*p+k, 3*q+l) = bpp * ddelta_pk * ddelta_ql + bp * d2delta;
+                        double ddelta_pk = 0.0, ddelta_ql = 0.0;
+                        for (int i = 0; i < 3; ++i) {
+                            ddelta_pk += u[i] * r_d[p][k][i];
+                            ddelta_ql += u[i] * r_d[q][l][i];
                         }
+
+                        double proj_term = 0.0;
+                        for (int i = 0; i < 3; ++i) {
+                            for (int j = 0; j < 3; ++j) {
+                                double dij = (i == j) ? 1.0 : 0.0;
+                                proj_term += (dij - u[i]*u[j]) * r_d[p][k][i] * r_d[q][l][j];
+                            }
+                        }
+                        proj_term /= delta;
+
+                        double ur_term = 0.0;
+                        for (int i = 0; i < 3; ++i) {
+                            double dik = (i == k) ? 1.0 : 0.0;
+                            double dil = (i == l) ? 1.0 : 0.0;
+                            double p_ipkql = s_pkql * a[i] + s_d[p][k] * sig_a[q] * dil + s_d[q][l] * sig_a[p] * dik;
+                            double q_ipkql = t_pkql * b[i] + t_d_arr[p][k] * sig_b[q] * dil + t_d_arr[q][l] * sig_b[p] * dik;
+                            ur_term += u[i] * (p_ipkql - q_ipkql);
+                        }
+
+                        H_row(k, 3*q+l) = bpp * ddelta_pk * ddelta_ql + bp * (proj_term + ur_term);
                     }
                 }
             }
@@ -2110,11 +1828,10 @@ SegmentSegmentBarrierHessianResult segment_segment_barrier_hessian(const Vec3& x
         }
 
         case SegmentSegmentRegion::ParallelSegments:
-            // No Hessian for parallel case, leave as zero
             break;
     }
 
-    return out;
+    return H_row;
 }
 // ===== END barrier_energy.cpp =====
 
@@ -2147,7 +1864,7 @@ VertexAdjacency build_vertex_adjacency(const RefMesh& ref_mesh) {
 }
 
 double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins,
-                                     const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
+                                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
     double E = 0.0, PE = 0.0, dt2 = params.dt * params.dt;
 
     for (int i = 0; i < static_cast<int>(x.size()); ++i) {
@@ -2171,7 +1888,7 @@ double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const s
 
 std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
     double dt2 = params.dt * params.dt;
-    Vec3 g = Vec3::Zero();
+    Vec3  g = Vec3::Zero();
     Mat33 H = Mat33::Zero();
 
     g += ref_mesh.mass[vi] * (x[vi] - xhat[vi]);
@@ -2187,26 +1904,20 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
 
     for (int ti : adj.incident_triangle_indices[vi]) {
         const Tri& tri = ref_mesh.tris[ti];
-        const TriangleDef def = make_def_triangle(x, tri);
+        int a = -1;
+        for (int j = 0; j < 3; ++j) if (tri.v[j] == vi) { a = j; break; }
 
+        const TriangleDef def = make_def_triangle(x, tri);
         Mat32 Ds_mat;
         Ds_mat.col(0) = def.x[1] - def.x[0];
         Ds_mat.col(1) = def.x[2] - def.x[0];
         const Mat22& Dm_inv = ref_mesh.Dm_inverse[ti];
-        const Mat32 F = Ds_mat * Dm_inv;
-        const double A = ref_mesh.area[ti];
+        const Mat32  F      = Ds_mat * Dm_inv;
+        const double A      = ref_mesh.area[ti];
 
-        CorotatedCache32 cache = buildCorotatedCache(F);
-
-        auto node_g = corotated_node_gradient(cache, F, A, Dm_inv, params.mu, params.lambda);
-        Mat99 tri_H = corotated_node_hessian(cache, F, A, Dm_inv, params.mu, params.lambda);
-
-        for (int a = 0; a < 3; ++a) {
-            if (tri.v[a] == vi) {
-                g += dt2 * node_g[a];
-                H += dt2 * tri_H.block<3,3>(3 * a, 3 * a);
-            }
-        }
+        const CorotatedCache32 cache = buildCorotatedCache(F);
+        g += dt2 * corotated_node_gradient(cache, F, A, Dm_inv, params.mu, params.lambda, a);
+        H += dt2 * corotated_node_hessian(cache, F, A, Dm_inv, params.mu, params.lambda, a).template block<3, 3>(0, 3 * a);
     }
 
     return {g, H};
@@ -2220,31 +1931,25 @@ Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const Ve
     g += dt2 * (-ref_mesh.mass[vi] * params.gravity);
 
     for (const Pin& pin : pins) {
-        if (pin.vertex_index == vi) {
+        if (pin.vertex_index == vi)
             g += dt2 * params.kpin * (x[vi] - pin.target_position);
-        }
     }
 
     for (int ti : adj.incident_triangle_indices[vi]) {
         const Tri& tri = ref_mesh.tris[ti];
-        const TriangleDef def = make_def_triangle(x, tri);
+        int a = -1;
+        for (int j = 0; j < 3; ++j) if (tri.v[j] == vi) { a = j; break; }
 
+        const TriangleDef def = make_def_triangle(x, tri);
         Mat32 Ds_mat;
         Ds_mat.col(0) = def.x[1] - def.x[0];
         Ds_mat.col(1) = def.x[2] - def.x[0];
         const Mat22& Dm_inv = ref_mesh.Dm_inverse[ti];
-        const Mat32 F = Ds_mat * Dm_inv;
-        const double A = ref_mesh.area[ti];
+        const Mat32  F      = Ds_mat * Dm_inv;
+        const double A      = ref_mesh.area[ti];
 
-        CorotatedCache32 cache = buildCorotatedCache(F);
-
-        auto node_g = corotated_node_gradient(cache, F, A, Dm_inv, params.mu, params.lambda);
-
-        for (int a = 0; a < 3; ++a) {
-            if (tri.v[a] == vi) {
-                g += dt2 * node_g[a];
-            }
-        }
+        const CorotatedCache32 cache = buildCorotatedCache(F);
+        g += dt2 * corotated_node_gradient(cache, F, A, Dm_inv, params.mu, params.lambda, a);
     }
 
     return g;
@@ -2252,14 +1957,10 @@ Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const Ve
 
 double compute_global_residual(const RefMesh& ref_mesh, const VertexAdjacency& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
     double r_inf = 0.0;
-
     for (int i = 0; i < static_cast<int>(x.size()); ++i) {
         Vec3 g = compute_local_gradient_no_barrier(i, ref_mesh, adj, pins, params, x, xhat);
-        r_inf = std::max(r_inf, std::abs(g.x()));
-        r_inf = std::max(r_inf, std::abs(g.y()));
-        r_inf = std::max(r_inf, std::abs(g.z()));
+        r_inf = std::max(r_inf, g.cwiseAbs().maxCoeff());
     }
-
     return r_inf;
 }
 // ===== END physics.cpp =====
@@ -2536,11 +2237,11 @@ double compute_incremental_potential_with_barrier(const RefMesh& ref_mesh,
     const double dt2 = params.dt * params.dt;
     for (const auto& p : nt_pairs) {
         E += dt2 * node_triangle_barrier(
-            x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat);
+                x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat);
     }
     for (const auto& p : ss_pairs) {
         E += dt2 * segment_segment_barrier(
-            x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat);
+                x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat);
     }
     return E;
 }
@@ -2561,45 +2262,33 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_with_barrier(
     const double dt2 = params.dt * params.dt;
 
     for (const auto& p : nt_pairs) {
-        int slot = -1;
-        if (vi == p.node)      slot = 0;
-        else if (vi == p.tri_v[0]) slot = 1;
-        else if (vi == p.tri_v[1]) slot = 2;
-        else if (vi == p.tri_v[2]) slot = 3;
-        if (slot < 0) continue;
+        int dof = -1;
+        if      (vi == p.node)      dof = 0;
+        else if (vi == p.tri_v[0])  dof = 1;
+        else if (vi == p.tri_v[1])  dof = 2;
+        else if (vi == p.tri_v[2])  dof = 3;
+        if (dof < 0) continue;
 
-        auto br = node_triangle_barrier_gradient(
-            x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat);
-        auto hr = node_triangle_barrier_hessian(
-            x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat);
-
-        if (slot == 0) g += dt2 * br.grad_x;
-        else if (slot == 1) g += dt2 * br.grad_x1;
-        else if (slot == 2) g += dt2 * br.grad_x2;
-        else if (slot == 3) g += dt2 * br.grad_x3;
-
-        H += dt2 * hr.hessian.block<3,3>(3 * slot, 3 * slot);
+        g += dt2 * node_triangle_barrier_gradient(
+                x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, dof);
+        H += dt2 * node_triangle_barrier_hessian(
+                x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, dof)
+                .block<3, 3>(0, 3 * dof);
     }
 
     for (const auto& p : ss_pairs) {
-        int slot = -1;
-        if (vi == p.v[0])      slot = 0;
-        else if (vi == p.v[1]) slot = 1;
-        else if (vi == p.v[2]) slot = 2;
-        else if (vi == p.v[3]) slot = 3;
-        if (slot < 0) continue;
+        int dof = -1;
+        if      (vi == p.v[0]) dof = 0;
+        else if (vi == p.v[1]) dof = 1;
+        else if (vi == p.v[2]) dof = 2;
+        else if (vi == p.v[3]) dof = 3;
+        if (dof < 0) continue;
 
-        auto br = segment_segment_barrier_gradient(
-            x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat);
-        auto hr = segment_segment_barrier_hessian(
-            x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat);
-
-        if (slot == 0) g += dt2 * br.grad_x1;
-        else if (slot == 1) g += dt2 * br.grad_x2;
-        else if (slot == 2) g += dt2 * br.grad_x3;
-        else if (slot == 3) g += dt2 * br.grad_x4;
-
-        H += dt2 * hr.hessian.block<3,3>(3 * slot, 3 * slot);
+        g += dt2 * segment_segment_barrier_gradient(
+                x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, dof);
+        H += dt2 * segment_segment_barrier_hessian(
+                x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, dof)
+                .block<3, 3>(0, 3 * dof);
     }
 
     return {g, H};
@@ -2616,7 +2305,7 @@ Vec3 compute_local_gradient_with_barrier(
         const std::vector<NodeTrianglePair>& nt_pairs,
         const std::vector<SegmentSegmentPair>& ss_pairs) {
     auto [g, H] = compute_local_gradient_and_hessian_with_barrier(
-        vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
+            vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
     return g;
 }
 
@@ -2632,7 +2321,7 @@ double compute_global_residual_with_barrier(
     double r_inf = 0.0;
     for (int i = 0; i < static_cast<int>(x.size()); ++i) {
         const Vec3 g = compute_local_gradient_with_barrier(
-            i, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
+                i, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
         r_inf = std::max(r_inf, std::abs(g.x()));
         r_inf = std::max(r_inf, std::abs(g.y()));
         r_inf = std::max(r_inf, std::abs(g.z()));
@@ -2651,7 +2340,7 @@ void update_one_vertex_with_barrier(
         const std::vector<SegmentSegmentPair>& ss_pairs,
         std::vector<Vec3>& x) {
     auto [g, H] = compute_local_gradient_and_hessian_with_barrier(
-        vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
+            vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
     const Vec3 dx = matrix3d_inverse(H) * g;
     x[vi] -= params.step_weight * dx;
 }
@@ -2670,7 +2359,7 @@ SolverResult global_gauss_seidel_solver_with_barrier(
 
     auto eval_residual = [&]() {
         return compute_global_residual_with_barrier(
-            ref_mesh, adj, pins, params, xnew, xhat, nt_pairs, ss_pairs);
+                ref_mesh, adj, pins, params, xnew, xhat, nt_pairs, ss_pairs);
     };
 
     SolverResult result;
@@ -2684,7 +2373,7 @@ SolverResult global_gauss_seidel_solver_with_barrier(
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         for (int vi = 0; vi < static_cast<int>(xnew.size()); ++vi) {
             update_one_vertex_with_barrier(
-                vi, ref_mesh, adj, pins, params, xhat, nt_pairs, ss_pairs, xnew);
+                    vi, ref_mesh, adj, pins, params, xhat, nt_pairs, ss_pairs, xnew);
         }
 
         result.final_residual = eval_residual();
@@ -2770,14 +2459,14 @@ int main() {
 
         auto solver_start = Clock::now();
         const SolverResult result = global_gauss_seidel_solver_with_barrier(
-            ref_mesh, adj, pins, params, nt_pairs, ss_pairs, xnew, xhat);
+                ref_mesh, adj, pins, params, nt_pairs, ss_pairs, xnew, xhat);
         auto solver_end = Clock::now();
 
         const double solver_ms = std::chrono::duration<double, std::milli>(solver_end - solver_start).count();
         total_solver_ms += solver_ms;
 
         const double total_energy = compute_incremental_potential_with_barrier(
-            ref_mesh, pins, params, xnew, xhat, nt_pairs, ss_pairs);
+                ref_mesh, pins, params, xnew, xhat, nt_pairs, ss_pairs);
 
         std::cout << "Frame " << std::setw(4) << frame_index
                   << " | initial_residual = " << std::scientific << result.initial_residual

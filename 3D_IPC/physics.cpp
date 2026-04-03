@@ -3,25 +3,29 @@
 #include <algorithm>
 #include <cmath>
 
+// Returns the local index (0,1,2) of vertex vi in triangle ti.
+// Guaranteed to find a match since ti comes from adj.at(vi).
+static inline int local_node(const RefMesh& ref_mesh, int ti, int vi) {
+    for (int a = 0; a < 3; ++a)
+        if (tri_vertex(ref_mesh, ti, a) == vi) return a;
+    return -1;
+}
+
 double triangle_ref_area_2d(const RefMesh& ref_mesh, int tri_idx) {
     const Vec2& X0 = ref_mesh.ref_positions[tri_vertex(ref_mesh, tri_idx, 0)];
     const Vec2& X1 = ref_mesh.ref_positions[tri_vertex(ref_mesh, tri_idx, 1)];
     const Vec2& X2 = ref_mesh.ref_positions[tri_vertex(ref_mesh, tri_idx, 2)];
-
     Mat22 Dm_local;
     Dm_local.col(0) = X1 - X0;
     Dm_local.col(1) = X2 - X0;
     return 0.5 * std::abs(Dm_local.determinant());
 }
 
-double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins,
-                                     const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
+double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
     double E = 0.0, PE = 0.0, dt2 = params.dt() * params.dt();
 
-    for (int i = 0; i < static_cast<int>(x.size()); ++i) {
-        Vec3 dx = x[i] - xhat[i];
-        E += 0.5 * ref_mesh.mass[i] * dx.squaredNorm();
-    }
+    for (int i = 0; i < static_cast<int>(x.size()); ++i)
+        E += 0.5 * ref_mesh.mass[i] * (x[i] - xhat[i]).squaredNorm();
 
     for (int i = 0; i < static_cast<int>(x.size()); ++i)
         PE += -ref_mesh.mass[i] * params.gravity.dot(x[i]);
@@ -37,9 +41,9 @@ double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const s
     return E + dt2 * PE;
 }
 
-std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
+std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
     double dt2 = params.dt() * params.dt();
-    Vec3 g = Vec3::Zero();
+    Vec3  g = Vec3::Zero();
     Mat33 H = Mat33::Zero();
 
     g += ref_mesh.mass[vi] * (x[vi] - xhat[vi]);
@@ -54,32 +58,25 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
     }
 
     for (int ti : adj.at(vi)) {
-        const TriangleDef def = make_def_triangle(x, ref_mesh, ti);
+        const int a = local_node(ref_mesh, ti, vi);
 
+        const TriangleDef def = make_def_triangle(x, ref_mesh, ti);
         Mat32 Ds_mat;
         Ds_mat.col(0) = def.x[1] - def.x[0];
         Ds_mat.col(1) = def.x[2] - def.x[0];
         const Mat22& Dm_inv = ref_mesh.Dm_inverse[ti];
-        const Mat32 F = Ds_mat * Dm_inv;
-        const double A = ref_mesh.area[ti];
+        const Mat32  F      = Ds_mat * Dm_inv;
+        const double A      = ref_mesh.area[ti];
 
-        CorotatedCache32 cache = buildCorotatedCache(F);
-
-        auto node_g = corotated_node_gradient(cache, F, A, Dm_inv, params.mu, params.lambda);
-        Mat99 tri_H = corotated_node_hessian(cache, F, A, Dm_inv, params.mu, params.lambda);
-
-        for (int a = 0; a < 3; ++a) {
-            if (tri_vertex(ref_mesh, ti, a) == vi) {
-                g += dt2 * node_g[a];
-                H += dt2 * tri_H.block<3,3>(3 * a, 3 * a);
-            }
-        }
+        const CorotatedCache32 cache = buildCorotatedCache(F);
+        g += dt2 * corotated_node_gradient(cache, F, A, Dm_inv, params.mu, params.lambda, a);
+        H += dt2 * corotated_node_hessian(cache, F, A, Dm_inv, params.mu, params.lambda, a).template block<3, 3>(0, 3 * a);
     }
 
     return {g, H};
 }
 
-Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
+Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
     double dt2 = params.dt() * params.dt();
     Vec3 g = Vec3::Zero();
 
@@ -87,44 +84,33 @@ Vec3 compute_local_gradient_no_barrier(int vi, const RefMesh& ref_mesh, const Ve
     g += dt2 * (-ref_mesh.mass[vi] * params.gravity);
 
     for (const Pin& pin : pins) {
-        if (pin.vertex_index == vi) {
+        if (pin.vertex_index == vi)
             g += dt2 * params.kpin * (x[vi] - pin.target_position);
-        }
     }
 
     for (int ti : adj.at(vi)) {
-        const TriangleDef def = make_def_triangle(x, ref_mesh, ti);
+        const int a = local_node(ref_mesh, ti, vi);
 
+        const TriangleDef def = make_def_triangle(x, ref_mesh, ti);
         Mat32 Ds_mat;
         Ds_mat.col(0) = def.x[1] - def.x[0];
         Ds_mat.col(1) = def.x[2] - def.x[0];
         const Mat22& Dm_inv = ref_mesh.Dm_inverse[ti];
-        const Mat32 F = Ds_mat * Dm_inv;
-        const double A = ref_mesh.area[ti];
+        const Mat32  F      = Ds_mat * Dm_inv;
+        const double A      = ref_mesh.area[ti];
 
-        CorotatedCache32 cache = buildCorotatedCache(F);
-
-        auto node_g = corotated_node_gradient(cache, F, A, Dm_inv, params.mu, params.lambda);
-
-        for (int a = 0; a < 3; ++a) {
-            if (tri_vertex(ref_mesh, ti, a) == vi) {
-                g += dt2 * node_g[a];
-            }
-        }
+        const CorotatedCache32 cache = buildCorotatedCache(F);
+        g += dt2 * corotated_node_gradient(cache, F, A, Dm_inv, params.mu, params.lambda, a);
     }
 
     return g;
 }
 
-double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat){
+double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
     double r_inf = 0.0;
-
     for (int i = 0; i < static_cast<int>(x.size()); ++i) {
         Vec3 g = compute_local_gradient_no_barrier(i, ref_mesh, adj, pins, params, x, xhat);
-        r_inf = std::max(r_inf, std::abs(g.x()));
-        r_inf = std::max(r_inf, std::abs(g.y()));
-        r_inf = std::max(r_inf, std::abs(g.z()));
+        r_inf = std::max(r_inf, g.cwiseAbs().maxCoeff());
     }
-
     return r_inf;
 }

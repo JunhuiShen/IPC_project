@@ -8,11 +8,11 @@ struct SolverResult {
     int iterations = 0;
 };
 
-using VertexAdjacencyMap = std::unordered_map<int, std::vector<int>>;
+void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+                       const std::vector<Pin>& pins, const SimParams& params,
+                       const std::vector<Vec3>& xhat, std::vector<Vec3>& x);
 
-void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexAdjacencyMap& adj,
-                       const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& xhat, std::vector<Vec3>& x);
-
-SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexAdjacencyMap& adj,
-                                        const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew,
-                                        const std::vector<Vec3>& xhat, std::vector<double>* residual_history = nullptr);
+SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+                                        const std::vector<Pin>& pins, const SimParams& params,
+                                        std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
+                                        std::vector<double>* residual_history = nullptr);

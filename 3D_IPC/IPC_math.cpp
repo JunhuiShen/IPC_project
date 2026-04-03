@@ -47,12 +47,6 @@ Vec9 flatten_def(const TriangleDef& def) {
     return out;
 }
 
-Vec9 flatten_gradient(const std::array<Vec3, 3>& g) {
-    Vec9 out;
-    for (int i = 0; i < 3; ++i) out.segment<3>(3 * i) = g[i];
-    return out;
-}
-
 double get_dof(const TriangleDef& def, int node, int comp) {
     return def.x[node](comp);
 }

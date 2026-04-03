@@ -17,9 +17,10 @@ double PsiCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, 
 Mat32  PCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, double lambda);
 void   dPdFCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, double lambda, Mat66& dPdF);
 
-double   corotated_energy  (double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda);
-std::array<Vec3, 3> corotated_node_gradient(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda);
-Mat99 corotated_node_hessian (const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda);
+double corotated_energy(double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda);
 
+// Single-node gradient: returns the 3-vector force on node only.
+Vec3 corotated_node_gradient(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda, int node);
 
-
+// Single-node hessian row: returns the 3x9 block d(g_node)/d(all DOFs).
+Mat39 corotated_node_hessian(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda, int node);

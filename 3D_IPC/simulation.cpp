@@ -30,15 +30,14 @@ int main(int argc, char** argv) {
 
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
 
-    // pin top-left and top-right corners
-    append_pin(pins, base + args.ny * (args.nx + 1), state.deformed_positions);
+    append_pin(pins, base + args.ny * (args.nx + 1),      state.deformed_positions);
     append_pin(pins, base + args.ny * (args.nx + 1) + args.nx, state.deformed_positions);
 
     ref_mesh.build_lumped_mass(params.density, params.thickness);
-    VertexAdjacencyMap adj = build_incident_triangle_map(ref_mesh.tris);
+    VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);
 
-    std::cout << "Vertices: " << state.deformed_positions.size() << "\n";
-    std::cout << "Triangles: " << ref_mesh.tris.size() << "\n";
+    std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
+    std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
 
     const std::string& outdir = args.outdir;
     if (fs::exists(outdir)) fs::remove_all(outdir);
@@ -46,10 +45,8 @@ int main(int argc, char** argv) {
 
     export_frame(outdir, 0, state.deformed_positions, ref_mesh.tris);
 
-
     using Clock = std::chrono::steady_clock;
     auto sim_start = Clock::now();
-
     double total_solver_ms = 0.0;
 
     for (int frame_index = 1; frame_index <= num_frames; ++frame_index) {
@@ -68,15 +65,14 @@ int main(int argc, char** argv) {
         }
 
         auto solver_end = Clock::now();
-        double solver_ms =
-                std::chrono::duration<double, std::milli>(solver_end - solver_start).count();
+        double solver_ms = std::chrono::duration<double, std::milli>(solver_end - solver_start).count();
         total_solver_ms += solver_ms;
 
         std::cout << "Frame " << std::setw(4) << frame_index
                   << " | initial_residual = " << std::scientific << result.initial_residual
-                  << " | final_residual = " << std::scientific << result.final_residual
-                  << " | global_iters = " << std::setw(3) << result.iterations
-                  << " | solver_time = " << std::fixed << std::setprecision(3)
+                  << " | final_residual = "   << std::scientific << result.final_residual
+                  << " | global_iters = "     << std::setw(3)    << result.iterations
+                  << " | solver_time = "      << std::fixed << std::setprecision(3)
                   << solver_ms << " ms\n";
 
         export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris);
@@ -86,10 +82,9 @@ int main(int argc, char** argv) {
     double total_sim_ms = std::chrono::duration<double, std::milli>(sim_end - sim_start).count();
 
     std::cout << "\nSimulation finished.\n";
-    std::cout << "Total simulation time: " << std::fixed << std::setprecision(3)
-              << total_sim_ms << " ms\n";
-    std::cout << "Total solver time:     " << total_solver_ms << " ms\n";
-    std::cout << "Average solver time:   " << (total_solver_ms / num_frames) << " ms/frame\n";
+    std::cout << "Total simulation time: " << std::fixed << std::setprecision(3) << total_sim_ms    << " ms\n";
+    std::cout << "Total solver time:     "    << total_solver_ms << " ms\n";
+    std::cout << "Average solver time:   " << (total_solver_ms / num_frames)  << " ms/frame\n";
 
     return 0;
 }

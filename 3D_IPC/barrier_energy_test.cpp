@@ -24,23 +24,52 @@ void require(bool cond, const std::string& msg){
     }
 }
 
-// ---------------------------------------------------------------------------
-//  FD helpers for scalar barrier
-// ---------------------------------------------------------------------------
+// ===========================================================================
+//  Assembly helpers: reconstruct full gradient / hessian from per-DOF calls
+// ===========================================================================
 
-double scalar_barrier_fd(double delta, double d_hat, double h){
-    return (scalar_barrier(delta + h, d_hat) - scalar_barrier(delta - h, d_hat)) / (2.0 * h);
+// Node-triangle: assemble 12-vector gradient from 4 per-DOF Vec3 calls
+Eigen::Matrix<double, 12, 1> nt_assemble_gradient(
+        const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat) {
+    Eigen::Matrix<double, 12, 1> g = Eigen::Matrix<double, 12, 1>::Zero();
+    for (int dof = 0; dof < 4; ++dof)
+        g.segment<3>(3*dof) = node_triangle_barrier_gradient(x, x1, x2, x3, d_hat, dof);
+    return g;
 }
 
-double scalar_barrier_gradient_fd(double delta, double d_hat, double h){
-    return (scalar_barrier_gradient(delta + h, d_hat) - scalar_barrier_gradient(delta - h, d_hat)) / (2.0 * h);
+// Node-triangle: assemble 12x12 hessian from 4 per-DOF 3x12 row blocks
+Mat12 nt_assemble_hessian(
+        const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat) {
+    Mat12 H = Mat12::Zero();
+    for (int dof = 0; dof < 4; ++dof)
+        H.block<3,12>(3*dof, 0) = node_triangle_barrier_hessian(x, x1, x2, x3, d_hat, dof);
+    return H;
 }
 
-// ---------------------------------------------------------------------------
-//  FD helper for node-triangle barrier energy (for gradient check)
-// ---------------------------------------------------------------------------
+// Segment-segment: assemble 12-vector gradient from 4 per-DOF Vec3 calls
+Eigen::Matrix<double, 12, 1> ss_assemble_gradient(
+        const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat) {
+    Eigen::Matrix<double, 12, 1> g = Eigen::Matrix<double, 12, 1>::Zero();
+    for (int dof = 0; dof < 4; ++dof)
+        g.segment<3>(3*dof) = segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, dof);
+    return g;
+}
 
-double node_triangle_barrier_fd(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, int which_vec, int comp, double h){
+// Segment-segment: assemble 12x12 hessian from 4 per-DOF 3x12 row blocks
+Mat12 ss_assemble_hessian(
+        const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat) {
+    Mat12 H = Mat12::Zero();
+    for (int dof = 0; dof < 4; ++dof)
+        H.block<3,12>(3*dof, 0) = segment_segment_barrier_hessian(x1, x2, x3, x4, d_hat, dof);
+    return H;
+}
+
+// ===========================================================================
+//  FD helpers for node-triangle barrier (gradient check)
+// ===========================================================================
+
+double node_triangle_barrier_fd(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
+                                double d_hat, int which_vec, int comp, double h){
     Vec3 xp = x, x1p = x1, x2p = x2, x3p = x3;
     Vec3 xm = x, x1m = x1, x2m = x2, x3m = x3;
     switch (which_vec) {
@@ -54,11 +83,9 @@ double node_triangle_barrier_fd(const Vec3& x, const Vec3& x1, const Vec3& x2, c
             - node_triangle_barrier(xm, x1m, x2m, x3m, d_hat)) / (2.0 * h);
 }
 
-// ---------------------------------------------------------------------------
-//  FD helper for node-triangle barrier gradient (for Hessian check)
-// ---------------------------------------------------------------------------
-
-double node_triangle_gradient_fd(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, int v1, int k, int v2, int l, double h){
+// FD helper for node-triangle gradient (for Hessian check)
+double node_triangle_gradient_fd(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
+                                 double d_hat, int v1, int k, int v2, int l, double h){
     Vec3 xp = x, x1p = x1, x2p = x2, x3p = x3;
     Vec3 xm = x, x1m = x1, x2m = x2, x3m = x3;
     switch (v1) {
@@ -68,28 +95,17 @@ double node_triangle_gradient_fd(const Vec3& x, const Vec3& x1, const Vec3& x2, 
         case 3: x3p(k) += h; x3m(k) -= h; break;
         default: std::exit(EXIT_FAILURE);
     }
-
-    auto gp = node_triangle_barrier_gradient(xp, x1p, x2p, x3p, d_hat);
-    auto gm = node_triangle_barrier_gradient(xm, x1m, x2m, x3m, d_hat);
-
-    auto get_grad = [](const NodeTriangleBarrierResult& r, int v, int c) -> double {
-        switch (v) {
-            case 0: return r.grad_x(c);
-            case 1: return r.grad_x1(c);
-            case 2: return r.grad_x2(c);
-            case 3: return r.grad_x3(c);
-            default: return 0.0;
-        }
-    };
-
-    return (get_grad(gp, v2, l) - get_grad(gm, v2, l)) / (2.0 * h);
+    Vec3 gp = node_triangle_barrier_gradient(xp, x1p, x2p, x3p, d_hat, v2);
+    Vec3 gm = node_triangle_barrier_gradient(xm, x1m, x2m, x3m, d_hat, v2);
+    return (gp(l) - gm(l)) / (2.0 * h);
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 //  FD helpers for segment-segment barrier
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
-double segment_segment_barrier_fd(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, int which_vec, int comp, double h){
+double segment_segment_barrier_fd(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+                                  double d_hat, int which_vec, int comp, double h){
     Vec3 x1p = x1, x2p = x2, x3p = x3, x4p = x4;
     Vec3 x1m = x1, x2m = x2, x3m = x3, x4m = x4;
     switch (which_vec) {
@@ -103,7 +119,8 @@ double segment_segment_barrier_fd(const Vec3& x1, const Vec3& x2, const Vec3& x3
             - segment_segment_barrier(x1m, x2m, x3m, x4m, d_hat)) / (2.0 * h);
 }
 
-double segment_segment_gradient_fd(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, int v1, int k, int v2, int l, double h){
+double segment_segment_gradient_fd(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+                                   double d_hat, int v1, int k, int v2, int l, double h){
     Vec3 x1p = x1, x2p = x2, x3p = x3, x4p = x4;
     Vec3 x1m = x1, x2m = x2, x3m = x3, x4m = x4;
     switch (v1) {
@@ -113,26 +130,14 @@ double segment_segment_gradient_fd(const Vec3& x1, const Vec3& x2, const Vec3& x
         case 3: x4p(k) += h; x4m(k) -= h; break;
         default: std::exit(EXIT_FAILURE);
     }
-
-    auto gp = segment_segment_barrier_gradient(x1p, x2p, x3p, x4p, d_hat);
-    auto gm = segment_segment_barrier_gradient(x1m, x2m, x3m, x4m, d_hat);
-
-    auto get_grad = [](const SegmentSegmentBarrierResult& r, int v, int c) -> double {
-        switch (v) {
-            case 0: return r.grad_x1(c);
-            case 1: return r.grad_x2(c);
-            case 2: return r.grad_x3(c);
-            case 3: return r.grad_x4(c);
-            default: return 0.0;
-        }
-    };
-
-    return (get_grad(gp, v2, l) - get_grad(gm, v2, l)) / (2.0 * h);
+    Vec3 gp = segment_segment_barrier_gradient(x1p, x2p, x3p, x4p, d_hat, v2);
+    Vec3 gm = segment_segment_barrier_gradient(x1m, x2m, x3m, x4m, d_hat, v2);
+    return (gp(l) - gm(l)) / (2.0 * h);
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 //  Convergence test infrastructure
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 struct TestPoint {
     std::string name;
@@ -148,7 +153,8 @@ struct SSTestPoint {
     SegmentSegmentRegion expected_region;
 };
 
-bool check_convergence(const std::string& label, double analytic, const std::vector<double>& hs, const std::vector<double>& errors, double noise_scale = 1e-10, bool verbose = true){
+bool check_convergence(const std::string& label, double analytic, const std::vector<double>& hs,
+                       const std::vector<double>& errors, double noise_scale = 1e-10, bool verbose = true){
     const double noise_floor = noise_scale * (1.0 + std::abs(analytic));
     bool saw_good_slope = false;
     bool all_below_noise = true;
@@ -168,7 +174,7 @@ bool check_convergence(const std::string& label, double analytic, const std::vec
             continue;
         }
         all_below_noise = false;
-        double slope = std::log(errors[i-1] / errors[i]) / std::log(hs[i-1] / hs[i]);
+        double slope = std::log(errors[i-1]/errors[i]) / std::log(hs[i-1]/hs[i]);
         if (verbose)
             std::cout << "    h=" << hs[i] << "  err=" << errors[i]
                       << "  slope=" << std::fixed << std::setprecision(2) << slope << "\n";
@@ -181,11 +187,9 @@ bool check_convergence(const std::string& label, double analytic, const std::vec
     }
 
     if (all_below_noise) {
-        if (verbose)
-            std::cout << "    (all errors below noise floor — exact match)\n";
+        if (verbose) std::cout << "    (all errors below noise floor — exact match)\n";
         return true;
     }
-
     if (!saw_good_slope) {
         std::cerr << "  FAIL: no reliable slope data for " << label << "\n";
         passed = false;
@@ -196,6 +200,13 @@ bool check_convergence(const std::string& label, double analytic, const std::vec
 // ===========================================================================
 //  Test 1: scalar_barrier_gradient convergence
 // ===========================================================================
+
+double scalar_barrier_fd(double delta, double d_hat, double h){
+    return (scalar_barrier(delta+h, d_hat) - scalar_barrier(delta-h, d_hat)) / (2.0*h);
+}
+double scalar_barrier_gradient_fd(double delta, double d_hat, double h){
+    return (scalar_barrier_gradient(delta+h, d_hat) - scalar_barrier_gradient(delta-h, d_hat)) / (2.0*h);
+}
 
 void test_scalar_barrier_gradient_convergence(){
     std::cout << "=== Test 1: scalar_barrier_gradient convergence ===\n";
@@ -230,35 +241,34 @@ void test_scalar_barrier_hessian_convergence(){
 void test_barrier_zero_outside_activation(){
     std::cout << "=== Test 3: barrier zero outside activation ===\n";
     const Vec3 x1(0,0,0), x2(1,0,0), x3(0,1,0), x(0.25,0.25,2.0);
-    const auto r = node_triangle_barrier_gradient(x, x1, x2, x3, 1.0);
-    require(approx(r.energy, 0.0), "inactive energy");
-    require(approx(r.barrier_derivative, 0.0), "inactive derivative");
-    for (int k = 0; k < 3; ++k) {
-        require(approx(r.grad_x(k), 0.0), "inactive grad");
-        require(approx(r.grad_x1(k), 0.0), "inactive grad");
-        require(approx(r.grad_x2(k), 0.0), "inactive grad");
-        require(approx(r.grad_x3(k), 0.0), "inactive grad");
+    const double d_hat = 1.0;
+    require(approx(node_triangle_barrier(x, x1, x2, x3, d_hat), 0.0), "inactive energy");
+    for (int dof = 0; dof < 4; ++dof) {
+        Vec3 g = node_triangle_barrier_gradient(x, x1, x2, x3, d_hat, dof);
+        for (int k = 0; k < 3; ++k)
+            require(approx(g(k), 0.0), "inactive grad dof=" + std::to_string(dof));
     }
     std::cout << "  PASSED\n\n";
 }
 
 // ===========================================================================
-//  Test 4: partition of force (node-triangle)
+//  Test 4: partition of force (node-triangle) — sum over all DOFs = zero
 // ===========================================================================
 
 void test_partition_of_force(){
     std::cout << "=== Test 4: partition of force ===\n";
 
-    auto check = [](const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, const std::string& label){
-        const auto r = node_triangle_barrier_gradient(x, x1, x2, x3, 1.0);
-        for (int k = 0; k < 3; ++k) {
-            double sum_k = r.grad_x(k) + r.grad_x1(k) + r.grad_x2(k) + r.grad_x3(k);
-            require(std::abs(sum_k) < 1e-12, label + ": total gradient should sum to zero");
-        }
+    auto check = [](const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
+                    const std::string& label){
+        Vec3 total = Vec3::Zero();
+        for (int dof = 0; dof < 4; ++dof)
+            total += node_triangle_barrier_gradient(x, x1, x2, x3, 1.0, dof);
+        for (int k = 0; k < 3; ++k)
+            require(std::abs(total(k)) < 1e-12, label + ": total gradient should sum to zero");
     };
 
     check(Vec3(0.25,0.25,0.3), Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), "face");
-    check(Vec3(0.5,-0.2,0.1), Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), "edge");
+    check(Vec3(0.5,-0.2,0.1),  Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), "edge");
     check(Vec3(-0.2,-0.3,0.1), Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), "vertex");
 
     std::cout << "  PASSED\n\n";
@@ -271,31 +281,21 @@ void test_partition_of_force(){
 void run_gradient_convergence_test(const TestPoint& tp){
     std::cout << "=== Gradient convergence: " << tp.name << " ===\n";
 
-    const auto r = node_triangle_barrier_gradient(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat);
-    require(r.distance_result.region == tp.expected_region,
-            tp.name + ": unexpected region " + to_string(r.distance_result.region));
-
-    std::cout << "  Region: " << to_string(r.distance_result.region)
-              << ",  delta = " << r.distance << "\n";
-
     const char* dof_names[4] = {"x", "x1", "x2", "x3"};
-    double analytic[4][3];
-    for (int k = 0; k < 3; ++k) {
-        analytic[0][k] = r.grad_x(k);
-        analytic[1][k] = r.grad_x1(k);
-        analytic[2][k] = r.grad_x2(k);
-        analytic[3][k] = r.grad_x3(k);
-    }
-
     std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
     bool all_passed = true;
 
     for (int v = 0; v < 4; ++v) {
+        Vec3 g = node_triangle_barrier_gradient(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, v);
         for (int k = 0; k < 3; ++k) {
-            if (std::abs(analytic[v][k]) < 1e-14) {
-                double fd_fine = node_triangle_barrier_fd(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, v, k, hs.back());
+            double analytic = g(k);
+
+            if (std::abs(analytic) < 1e-14) {
+                double fd_fine = node_triangle_barrier_fd(tp.x, tp.x1, tp.x2, tp.x3,
+                                                          tp.d_hat, v, k, hs.back());
                 if (std::abs(fd_fine) > 1e-8) {
-                    std::cerr << "  FAIL: " << dof_names[v] << "(" << k << ") analytic=0 but fd=" << fd_fine << "\n";
+                    std::cerr << "  FAIL: " << dof_names[v] << "(" << k
+                              << ") analytic=0 but fd=" << fd_fine << "\n";
                     all_passed = false;
                 }
                 continue;
@@ -303,10 +303,12 @@ void run_gradient_convergence_test(const TestPoint& tp){
 
             std::vector<double> errors;
             for (auto h : hs)
-                errors.push_back(std::abs(node_triangle_barrier_fd(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, v, k, h) - analytic[v][k]));
+                errors.push_back(std::abs(
+                        node_triangle_barrier_fd(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, v, k, h)
+                        - analytic));
 
             std::string label = std::string("d/d(") + dof_names[v] + ")_" + std::to_string(k);
-            if (!check_convergence(label, analytic[v][k], hs, errors, 1e-10)) all_passed = false;
+            if (!check_convergence(label, analytic, hs, errors, 1e-10)) all_passed = false;
         }
     }
 
@@ -321,18 +323,10 @@ void run_gradient_convergence_test(const TestPoint& tp){
 void run_hessian_convergence_test(const TestPoint& tp){
     std::cout << "=== Hessian convergence: " << tp.name << " ===\n";
 
-    const auto hr = node_triangle_barrier_hessian(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat);
-    require(hr.distance_result.region == tp.expected_region,
-            tp.name + ": unexpected region " + to_string(hr.distance_result.region));
-
-    std::cout << "  Region: " << to_string(hr.distance_result.region)
-              << ",  delta = " << hr.distance << "\n";
+    Mat12 H = nt_assemble_hessian(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat);
 
     // Symmetry check
-    double max_asym = 0.0;
-    for (int i = 0; i < 12; ++i)
-        for (int j = 0; j < 12; ++j)
-            max_asym = std::max(max_asym, std::abs(hr.hessian(i,j) - hr.hessian(j,i)));
+    double max_asym = (H - H.transpose()).cwiseAbs().maxCoeff();
     std::cout << "  Symmetry check: max |H - H^T| = " << std::scientific << max_asym << "\n";
     require(max_asym < 1e-12, tp.name + ": Hessian not symmetric");
 
@@ -345,8 +339,7 @@ void run_hessian_convergence_test(const TestPoint& tp){
         for (int k = 0; k < 3; ++k) {
             for (int v2 = 0; v2 < 4; ++v2) {
                 for (int l = 0; l < 3; ++l) {
-
-                    double analytic_val = hr.hessian(3*v1+k, 3*v2+l);
+                    double analytic_val = H(3*v1+k, 3*v2+l);
 
                     if (std::abs(analytic_val) < 1e-14) {
                         double fd_fine = node_triangle_gradient_fd(
@@ -369,7 +362,6 @@ void run_hessian_convergence_test(const TestPoint& tp){
 
                     std::string label = std::string("H(") + dof_names[v1] + std::to_string(k)
                                         + "," + dof_names[v2] + std::to_string(l) + ")";
-
                     if (!check_convergence(label, analytic_val, hs, errors, 1e-9, false)) {
                         check_convergence(label, analytic_val, hs, errors, 1e-9, true);
                         all_passed = false;
@@ -392,14 +384,12 @@ void run_hessian_convergence_test(const TestPoint& tp){
 void test_ss_barrier_zero_outside_activation(){
     std::cout << "=== SS Test: barrier zero outside activation ===\n";
     const Vec3 x1(0,0,0), x2(1,0,0), x3(0.5,-3,2), x4(0.5,3,2);
-    const auto r = segment_segment_barrier_gradient(x1, x2, x3, x4, 1.0);
-    require(approx(r.energy, 0.0), "ss inactive energy");
-    require(approx(r.barrier_derivative, 0.0), "ss inactive derivative");
-    for (int k = 0; k < 3; ++k) {
-        require(approx(r.grad_x1(k), 0.0), "ss inactive grad");
-        require(approx(r.grad_x2(k), 0.0), "ss inactive grad");
-        require(approx(r.grad_x3(k), 0.0), "ss inactive grad");
-        require(approx(r.grad_x4(k), 0.0), "ss inactive grad");
+    const double d_hat = 1.0;
+    require(approx(segment_segment_barrier(x1, x2, x3, x4, d_hat), 0.0), "ss inactive energy");
+    for (int dof = 0; dof < 4; ++dof) {
+        Vec3 g = segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, dof);
+        for (int k = 0; k < 3; ++k)
+            require(approx(g(k), 0.0), "ss inactive grad dof=" + std::to_string(dof));
     }
     std::cout << "  PASSED\n\n";
 }
@@ -411,17 +401,18 @@ void test_ss_barrier_zero_outside_activation(){
 void test_ss_partition_of_force(){
     std::cout << "=== SS Test: partition of force ===\n";
 
-    auto check = [](const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, const std::string& label){
-        const auto r = segment_segment_barrier_gradient(x1, x2, x3, x4, 2.0);
-        for (int k = 0; k < 3; ++k) {
-            double sum_k = r.grad_x1(k) + r.grad_x2(k) + r.grad_x3(k) + r.grad_x4(k);
-            require(std::abs(sum_k) < 1e-12, label + ": total gradient should sum to zero");
-        }
+    auto check = [](const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+                    const std::string& label){
+        Vec3 total = Vec3::Zero();
+        for (int dof = 0; dof < 4; ++dof)
+            total += segment_segment_barrier_gradient(x1, x2, x3, x4, 2.0, dof);
+        for (int k = 0; k < 3; ++k)
+            require(std::abs(total(k)) < 1e-12, label + ": total gradient should sum to zero");
     };
 
     check(Vec3(0,0,0), Vec3(1,0,0), Vec3(0.5,-1,0.5), Vec3(0.5,1,0.5), "interior");
-    check(Vec3(0,0,0), Vec3(1,0,0), Vec3(-1,-1,0.3), Vec3(-1,1,0.3), "edge_s0");
-    check(Vec3(0,0,0), Vec3(1,0,0), Vec3(-1,-1,0.3), Vec3(-1,-2,0.3), "corner");
+    check(Vec3(0,0,0), Vec3(1,0,0), Vec3(-1,-1,0.3),  Vec3(-1,1,0.3),  "edge_s0");
+    check(Vec3(0,0,0), Vec3(1,0,0), Vec3(-1,-1,0.3),  Vec3(-1,-2,0.3), "corner");
 
     std::cout << "  PASSED\n\n";
 }
@@ -433,31 +424,21 @@ void test_ss_partition_of_force(){
 void run_ss_gradient_convergence_test(const SSTestPoint& tp){
     std::cout << "=== SS Gradient convergence: " << tp.name << " ===\n";
 
-    const auto r = segment_segment_barrier_gradient(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat);
-    require(r.distance_result.region == tp.expected_region,
-            tp.name + ": unexpected region " + to_string(r.distance_result.region));
-
-    std::cout << "  Region: " << to_string(r.distance_result.region)
-              << ",  delta = " << r.distance << "\n";
-
     const char* dof_names[4] = {"x1", "x2", "x3", "x4"};
-    double analytic[4][3];
-    for (int k = 0; k < 3; ++k) {
-        analytic[0][k] = r.grad_x1(k);
-        analytic[1][k] = r.grad_x2(k);
-        analytic[2][k] = r.grad_x3(k);
-        analytic[3][k] = r.grad_x4(k);
-    }
-
     std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
     bool all_passed = true;
 
     for (int v = 0; v < 4; ++v) {
+        Vec3 g = segment_segment_barrier_gradient(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, v);
         for (int k = 0; k < 3; ++k) {
-            if (std::abs(analytic[v][k]) < 1e-14) {
-                double fd_fine = segment_segment_barrier_fd(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, v, k, hs.back());
+            double analytic = g(k);
+
+            if (std::abs(analytic) < 1e-14) {
+                double fd_fine = segment_segment_barrier_fd(
+                        tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, v, k, hs.back());
                 if (std::abs(fd_fine) > 1e-8) {
-                    std::cerr << "  FAIL: " << dof_names[v] << "(" << k << ") analytic=0 but fd=" << fd_fine << "\n";
+                    std::cerr << "  FAIL: " << dof_names[v] << "(" << k
+                              << ") analytic=0 but fd=" << fd_fine << "\n";
                     all_passed = false;
                 }
                 continue;
@@ -465,10 +446,12 @@ void run_ss_gradient_convergence_test(const SSTestPoint& tp){
 
             std::vector<double> errors;
             for (auto h : hs)
-                errors.push_back(std::abs(segment_segment_barrier_fd(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, v, k, h) - analytic[v][k]));
+                errors.push_back(std::abs(
+                        segment_segment_barrier_fd(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, v, k, h)
+                        - analytic));
 
             std::string label = std::string("d/d(") + dof_names[v] + ")_" + std::to_string(k);
-            if (!check_convergence(label, analytic[v][k], hs, errors, 1e-9)) all_passed = false;
+            if (!check_convergence(label, analytic, hs, errors, 1e-9)) all_passed = false;
         }
     }
 
@@ -483,18 +466,10 @@ void run_ss_gradient_convergence_test(const SSTestPoint& tp){
 void run_ss_hessian_convergence_test(const SSTestPoint& tp){
     std::cout << "=== SS Hessian convergence: " << tp.name << " ===\n";
 
-    const auto hr = segment_segment_barrier_hessian(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat);
-    require(hr.distance_result.region == tp.expected_region,
-            tp.name + ": unexpected region " + to_string(hr.distance_result.region));
-
-    std::cout << "  Region: " << to_string(hr.distance_result.region)
-              << ",  delta = " << hr.distance << "\n";
+    Mat12 H = ss_assemble_hessian(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat);
 
     // Symmetry check
-    double max_asym = 0.0;
-    for (int i = 0; i < 12; ++i)
-        for (int j = 0; j < 12; ++j)
-            max_asym = std::max(max_asym, std::abs(hr.hessian(i,j) - hr.hessian(j,i)));
+    double max_asym = (H - H.transpose()).cwiseAbs().maxCoeff();
     std::cout << "  Symmetry check: max |H - H^T| = " << std::scientific << max_asym << "\n";
     require(max_asym < 1e-12, tp.name + ": SS Hessian not symmetric");
 
@@ -507,8 +482,7 @@ void run_ss_hessian_convergence_test(const SSTestPoint& tp){
         for (int k = 0; k < 3; ++k) {
             for (int v2 = 0; v2 < 4; ++v2) {
                 for (int l = 0; l < 3; ++l) {
-
-                    double analytic_val = hr.hessian(3*v1+k, 3*v2+l);
+                    double analytic_val = H(3*v1+k, 3*v2+l);
 
                     if (std::abs(analytic_val) < 1e-14) {
                         double fd_fine = segment_segment_gradient_fd(
@@ -531,7 +505,6 @@ void run_ss_hessian_convergence_test(const SSTestPoint& tp){
 
                     std::string label = std::string("H(") + dof_names[v1] + std::to_string(k)
                                         + "," + dof_names[v2] + std::to_string(l) + ")";
-
                     if (!check_convergence(label, analytic_val, hs, errors, 1e-9, false)) {
                         check_convergence(label, analytic_val, hs, errors, 1e-9, true);
                         all_passed = false;
@@ -552,122 +525,74 @@ void run_ss_hessian_convergence_test(const SSTestPoint& tp){
 // ===========================================================================
 
 int main(){
-    // --- Scalar barrier tests ---
     test_scalar_barrier_gradient_convergence();
     test_scalar_barrier_hessian_convergence();
 
-    // --- Node-triangle tests ---
     test_barrier_zero_outside_activation();
     test_partition_of_force();
 
     std::vector<TestPoint> nt_test_points = {
             {"face_interior",
-                    Vec3(0.25, 0.25, 0.3),
-                    Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), 1.0,
+                    Vec3(0.25,0.25,0.3), Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), 1.0,
                     NodeTriangleRegion::FaceInterior},
-
             {"edge_12",
-                    Vec3(0.5, -0.2, 0.1),
-                    Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), 1.0,
+                    Vec3(0.5,-0.2,0.1), Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), 1.0,
                     NodeTriangleRegion::Edge12},
-
             {"edge_23",
-                    Vec3(0.7, 0.7, 0.1),
-                    Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), 1.0,
+                    Vec3(0.7,0.7,0.1), Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), 1.0,
                     NodeTriangleRegion::Edge23},
-
             {"edge_31",
-                    Vec3(-0.15, 0.5, 0.1),
-                    Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), 1.0,
+                    Vec3(-0.15,0.5,0.1), Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), 1.0,
                     NodeTriangleRegion::Edge31},
-
             {"vertex_1",
-                    Vec3(-0.2, -0.3, 0.1),
-                    Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), 1.0,
+                    Vec3(-0.2,-0.3,0.1), Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), 1.0,
                     NodeTriangleRegion::Vertex1},
-
             {"vertex_2",
-                    Vec3(1.4, -0.1, 0.1),
-                    Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), 1.0,
+                    Vec3(1.4,-0.1,0.1), Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), 1.0,
                     NodeTriangleRegion::Vertex2},
-
             {"vertex_3",
-                    Vec3(-0.1, 1.4, 0.1),
-                    Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), 1.0,
+                    Vec3(-0.1,1.4,0.1), Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), 1.0,
                     NodeTriangleRegion::Vertex3},
     };
 
-    for (const auto& tp : nt_test_points)
-        run_gradient_convergence_test(tp);
+    for (const auto& tp : nt_test_points) run_gradient_convergence_test(tp);
+    for (const auto& tp : nt_test_points) run_hessian_convergence_test(tp);
 
-    for (const auto& tp : nt_test_points)
-        run_hessian_convergence_test(tp);
-
-    // --- Segment-segment tests ---
     test_ss_barrier_zero_outside_activation();
     test_ss_partition_of_force();
 
     std::vector<SSTestPoint> ss_test_points = {
-            // Interior: skew segments, distance < d_hat
             {"ss_interior",
-                    Vec3(0,0,0), Vec3(1,0,0),
-                    Vec3(0.5,-1,0.5), Vec3(0.5,1,0.5), 2.0,
+                    Vec3(0,0,0), Vec3(1,0,0), Vec3(0.5,-1,0.5), Vec3(0.5,1,0.5), 2.0,
                     SegmentSegmentRegion::Interior},
-
-            // Edge s=0: x1 vs segment (x3,x4)
             {"ss_edge_s0",
-                    Vec3(0,0,0), Vec3(1,0,0),
-                    Vec3(-1,-1,0.3), Vec3(-1,1,0.3), 3.0,
+                    Vec3(0,0,0), Vec3(1,0,0), Vec3(-1,-1,0.3), Vec3(-1,1,0.3), 3.0,
                     SegmentSegmentRegion::Edge_s0},
-
-            // Edge s=1: x2 vs segment (x3,x4)
             {"ss_edge_s1",
-                    Vec3(0,0,0), Vec3(1,0,0),
-                    Vec3(2,-1,0.3), Vec3(2,1,0.3), 3.0,
+                    Vec3(0,0,0), Vec3(1,0,0), Vec3(2,-1,0.3), Vec3(2,1,0.3), 3.0,
                     SegmentSegmentRegion::Edge_s1},
-
-            // Edge t=0: x3 vs segment (x1,x2)
             {"ss_edge_t0",
-                    Vec3(0,0,0), Vec3(1,0,0),
-                    Vec3(0.5,0.3,0.3), Vec3(0.5,1.3,0.3), 2.0,
+                    Vec3(0,0,0), Vec3(1,0,0), Vec3(0.5,0.3,0.3), Vec3(0.5,1.3,0.3), 2.0,
                     SegmentSegmentRegion::Edge_t0},
-
-            // Edge t=1: x4 vs segment (x1,x2)
             {"ss_edge_t1",
-                    Vec3(0,0,0), Vec3(1,0,0),
-                    Vec3(0.5,-1.3,0.3), Vec3(0.5,-0.3,0.3), 2.0,
+                    Vec3(0,0,0), Vec3(1,0,0), Vec3(0.5,-1.3,0.3), Vec3(0.5,-0.3,0.3), 2.0,
                     SegmentSegmentRegion::Edge_t1},
-
-            // Corner s=0,t=0: x1 vs x3
             {"ss_corner_s0t0",
-                    Vec3(0,0,0), Vec3(1,0,0),
-                    Vec3(-0.5,-0.5,0.3), Vec3(-0.5,-1.5,0.3), 2.0,
+                    Vec3(0,0,0), Vec3(1,0,0), Vec3(-0.5,-0.5,0.3), Vec3(-0.5,-1.5,0.3), 2.0,
                     SegmentSegmentRegion::Corner_s0t0},
-
-            // Corner s=0,t=1: x1 vs x4
             {"ss_corner_s0t1",
-                    Vec3(0,0,0), Vec3(1,0,0),
-                    Vec3(-1.5,-1.5,0.3), Vec3(-0.5,-0.5,0.3), 2.0,
+                    Vec3(0,0,0), Vec3(1,0,0), Vec3(-1.5,-1.5,0.3), Vec3(-0.5,-0.5,0.3), 2.0,
                     SegmentSegmentRegion::Corner_s0t1},
-
-            // Corner s=1,t=0: x2 vs x3
             {"ss_corner_s1t0",
-                    Vec3(0,0,0), Vec3(1,0,0),
-                    Vec3(1.5,-0.5,0.3), Vec3(1.5,-1.5,0.3), 2.0,
+                    Vec3(0,0,0), Vec3(1,0,0), Vec3(1.5,-0.5,0.3), Vec3(1.5,-1.5,0.3), 2.0,
                     SegmentSegmentRegion::Corner_s1t0},
-
-            // Corner s=1,t=1: x2 vs x4
             {"ss_corner_s1t1",
-                    Vec3(0,0,0), Vec3(1,0,0),
-                    Vec3(2.5,-1.5,0.3), Vec3(1.5,-0.5,0.3), 2.0,
+                    Vec3(0,0,0), Vec3(1,0,0), Vec3(2.5,-1.5,0.3), Vec3(1.5,-0.5,0.3), 2.0,
                     SegmentSegmentRegion::Corner_s1t1},
     };
 
-    for (const auto& tp : ss_test_points)
-        run_ss_gradient_convergence_test(tp);
-
-    for (const auto& tp : ss_test_points)
-        run_ss_hessian_convergence_test(tp);
+    for (const auto& tp : ss_test_points) run_ss_gradient_convergence_test(tp);
+    for (const auto& tp : ss_test_points) run_ss_hessian_convergence_test(tp);
 
     std::cout << "\n========================================\n"
               << "All barrier energy tests passed.\n"

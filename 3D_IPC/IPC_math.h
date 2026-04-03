@@ -4,14 +4,18 @@
 #include <array>
 
 // Type aliases
-using Vec2  = Eigen::Vector2d;
-using Vec3  = Eigen::Vector3d;
-using Vec9  = Eigen::Matrix<double, 9, 1>;
-using Mat22 = Eigen::Matrix2d;
-using Mat32 = Eigen::Matrix<double, 3, 2>;
-using Mat33 = Eigen::Matrix3d;
-using Mat66 = Eigen::Matrix<double, 6, 6>;
-using Mat99 = Eigen::Matrix<double, 9, 9>;
+using Vec2   = Eigen::Vector2d;
+using Vec3   = Eigen::Vector3d;
+using Vec6   = Eigen::Matrix<double, 6, 1>;
+using Vec9   = Eigen::Matrix<double, 9, 1>;
+using Vec12  = Eigen::Matrix<double, 12, 1>;
+using Mat22  = Eigen::Matrix2d;
+using Mat32  = Eigen::Matrix<double, 3, 2>;
+using Mat33  = Eigen::Matrix3d;
+using Mat39  = Eigen::Matrix<double, 3, 9>;
+using Mat66  = Eigen::Matrix<double, 6, 6>;
+using Mat312 = Eigen::Matrix<double, 3, 12>;
+using Mat12  = Eigen::Matrix<double, 12, 12>;
 
 // Triangle definitions
 struct TriangleRest {
@@ -30,8 +34,6 @@ TriangleDef ZeroTriangleDef();
 TriangleDef add_scale(const TriangleDef& a, const TriangleDef& b, double s);
 
 Vec9 flatten_def(const TriangleDef& def);
-
-Vec9 flatten_gradient(const std::array<Vec3, 3>& g);
 
 double get_dof(const TriangleDef& def, int node, int comp);
 

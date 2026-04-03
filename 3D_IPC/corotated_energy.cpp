@@ -67,7 +67,7 @@ void dPdFCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, d
     Re(1,0) =  R(1,1); Re(1,1) = -R(1,0);
     Re(2,0) =  R(2,1); Re(2,1) = -R(2,0);
 
-    Eigen::Matrix<double, 6, 1> dcdF;
+    Vec6 dcdF;
     dcdF << -R(0,1) / traceS,  R(0,0) / traceS,
             -R(1,1) / traceS,  R(1,0) / traceS,
             -R(2,1) / traceS,  R(2,0) / traceS;
@@ -127,51 +127,52 @@ static std::array<Vec2, 3> shape_function_grad_from_inv(const Mat22& Dm_inv) {
     return grads;
 }
 
-// Cached corotated energy functions
+// Cached corotated energy
 double corotated_energy(double ref_area, const Mat22& Dm_inv, const TriangleDef& def, double mu, double lambda) {
     const Mat32 F = Ds(def) * Dm_inv;
     CorotatedCache32 cache = buildCorotatedCache(F);
     return ref_area * PsiCorotated32(cache, F, mu, lambda);
 }
 
-std::array<Vec3, 3> corotated_node_gradient(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda) {
-    const Mat32 P = PCorotated32(cache, F, mu, lambda);
+// Single-node gradient: only computes the force on the requested node.
+Vec3 corotated_node_gradient(const CorotatedCache32& cache, const Mat32& F,
+                             double ref_area, const Mat22& Dm_inv,
+                             double mu, double lambda, int node) {
+    const Mat32 P    = PCorotated32(cache, F, mu, lambda);
     const auto gradN = shape_function_grad_from_inv(Dm_inv);
 
-    std::array<Vec3, 3> g;
-    for (int i = 0; i < 3; ++i) {
-        g[i].setZero();
-        for (int gamma = 0; gamma < 3; ++gamma) {
-            double val = 0.0;
-            for (int beta = 0; beta < 2; ++beta)
-                val += P(gamma, beta) * gradN[i](beta);
-            g[i](gamma) = ref_area * val;
-        }
+    Vec3 g = Vec3::Zero();
+    for (int gamma = 0; gamma < 3; ++gamma) {
+        double val = 0.0;
+        for (int beta = 0; beta < 2; ++beta)
+            val += P(gamma, beta) * gradN[node](beta);
+        g(gamma) = ref_area * val;
     }
     return g;
 }
 
-Mat99 corotated_node_hessian(const CorotatedCache32& cache, const Mat32& F, double ref_area, const Mat22& Dm_inv, double mu, double lambda) {
+// Single-node hessian: returns the 3x9 block d(g_node)/d(all DOFs).
+// Row = component of `node` (0..2), col = 3*j + delta for node j, component delta.
+Mat39 corotated_node_hessian(const CorotatedCache32& cache, const Mat32& F,
+                             double ref_area, const Mat22& Dm_inv,
+                             double mu, double lambda, int node) {
     const auto gradN = shape_function_grad_from_inv(Dm_inv);
 
     Mat66 dPdF;
     dPdFCorotated32(cache, F, mu, lambda, dPdF);
 
-    Mat99 H = Mat99::Zero();
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            for (int gamma = 0; gamma < 3; ++gamma) {
-                for (int delta = 0; delta < 3; ++delta) {
-                    double value = 0.0;
-                    for (int beta = 0; beta < 2; ++beta) {
-                        for (int eta = 0; eta < 2; ++eta) {
-                            value += dPdF(flatF(gamma, beta), flatF(delta, eta)) * gradN[i](beta) * gradN[j](eta);
-                        }
-                    }
-                    H(3 * i + gamma, 3 * j + delta) = ref_area * value;
-                }
+    Mat39 H_row = Mat39::Zero();
+    for (int j = 0; j < 3; ++j) {
+        for (int gamma = 0; gamma < 3; ++gamma) {
+            for (int delta = 0; delta < 3; ++delta) {
+                double value = 0.0;
+                for (int beta = 0; beta < 2; ++beta)
+                    for (int eta = 0; eta < 2; ++eta)
+                        value += dPdF(flatF(gamma, beta), flatF(delta, eta))
+                                 * gradN[node](beta) * gradN[j](eta);
+                H_row(gamma, 3 * j + delta) = ref_area * value;
             }
         }
     }
-    return H;
+    return H_row;
 }

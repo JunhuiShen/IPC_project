@@ -1,26 +1,28 @@
 #include "solver.h"
 #include "IPC_math.h"
 
-using VertexAdjacencyMap = std::unordered_map<int, std::vector<int>>;
-
-void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexAdjacencyMap& adj,
-                       const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& xhat, std::vector<Vec3>& x){
+void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+                       const std::vector<Pin>& pins, const SimParams& params,
+                       const std::vector<Vec3>& xhat, std::vector<Vec3>& x){
     auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x, xhat);
     Vec3 dx = matrix3d_inverse(H) * g;
     x[vi] -= params.step_weight * dx;
 }
 
-SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexAdjacencyMap& adj,
-                                        const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew,
-                                        const std::vector<Vec3>& xhat, std::vector<double>* residual_history){
+SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+                                        const std::vector<Pin>& pins, const SimParams& params,
+                                        std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
+                                        std::vector<double>* residual_history){
     if (residual_history) residual_history->clear();
 
-    auto eval_residual = [&]() { return compute_global_residual(ref_mesh, adj, pins, params, xnew, xhat); };
+    auto eval_residual = [&]() {
+        return compute_global_residual(ref_mesh, adj, pins, params, xnew, xhat);
+    };
 
     SolverResult result;
     result.initial_residual = eval_residual();
-    result.final_residual = result.initial_residual;
-    result.iterations = 0;
+    result.final_residual   = result.initial_residual;
+    result.iterations       = 0;
 
     if (residual_history) residual_history->push_back(result.initial_residual);
     if (result.initial_residual < params.tol_abs) return result;
@@ -30,7 +32,7 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexAdj
             update_one_vertex(vi, ref_mesh, adj, pins, params, xhat, xnew);
 
         result.final_residual = eval_residual();
-        result.iterations = iter;
+        result.iterations     = iter;
 
         if (residual_history) residual_history->push_back(result.final_residual);
         if (result.final_residual < params.tol_abs) return result;
