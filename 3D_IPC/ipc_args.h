@@ -68,10 +68,10 @@ struct IPCArgs3D : ArgParser {
         add_double("step_weight", step_weight, 1.0,        "Newton step damping factor");
         add_double("d_hat",       d_hat,       0.2,        "Barrier activation distance (0 = off)");
 
-        add_int   ("nx",          nx,          2,          "Mesh subdivisions in x");
-        add_int   ("ny",          ny,          2,          "Mesh subdivisions in y");
-        add_double("width",       width,       0.4,        "Mesh width");
-        add_double("height",      height,      0.4,        "Mesh height");
+        add_int   ("nx",          nx,          10,          "Mesh subdivisions in x");
+        add_int   ("ny",          ny,          10,          "Mesh subdivisions in y");
+        add_double("width",       width,       1.0,        "Mesh width");
+        add_double("height",      height,      1.0,        "Mesh height");
 
         add_double("left_x",      left_x,      -0.45,      "Left sheet origin x");
         add_double("right_x",     right_x,     0.05,       "Right sheet origin x");
