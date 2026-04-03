@@ -79,7 +79,7 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
 
             // Store reference (2D) and deformed (3D) positions
             X.push_back(Vec2(x_ref, y_ref));
-            state.deformed_positions.push_back(origin + Vec3(x_ref, y_ref, 0.0));
+            state.deformed_positions.push_back(origin + Vec3(x_ref, 0.0, y_ref));
         }
     }
 
