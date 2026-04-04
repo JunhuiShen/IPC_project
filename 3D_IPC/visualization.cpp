@@ -86,13 +86,56 @@ void export_geo(const std::string& filename, const std::vector<Vec3>& x, const s
     out << "]\n";
 }
 
+void export_usd(const std::string& filename, const std::vector<Vec3>& x, const std::vector<int>& tris) {
+    std::ofstream out(filename);
+    if (!out) {
+        std::cerr << "Error: cannot write " << filename << "\n";
+        return;
+    }
+
+    int npoints = static_cast<int>(x.size());
+    int nprims  = static_cast<int>(tris.size()) / 3;
+
+    out << std::setprecision(10);
+    out << "#usda 1.0\n\n";
+    out << "def Mesh \"mesh\"\n{\n";
+
+    // Points
+    out << "    point3f[] points = [";
+    for (int i = 0; i < npoints; ++i) {
+        if (i > 0) out << ", ";
+        out << "(" << x[i].x() << ", " << x[i].y() << ", " << x[i].z() << ")";
+    }
+    out << "]\n";
+
+    // Face vertex counts (all triangles = 3)
+    out << "    int[] faceVertexCounts = [";
+    for (int i = 0; i < nprims; ++i) {
+        if (i > 0) out << ", ";
+        out << "3";
+    }
+    out << "]\n";
+
+    // Face vertex indices
+    out << "    int[] faceVertexIndices = [";
+    for (int i = 0; i < static_cast<int>(tris.size()); ++i) {
+        if (i > 0) out << ", ";
+        out << tris[i];
+    }
+    out << "]\n";
+
+    out << "}\n";
+}
+
 void export_frame(const std::string& outdir, int frame, const std::vector<Vec3>& x, const std::vector<int>& tris,
                   ExportFormat fmt) {
     std::ostringstream ss;
-    const char* ext = (fmt == ExportFormat::GEO) ? ".geo" : ".obj";
+    const char* ext = (fmt == ExportFormat::GEO) ? ".geo" : (fmt == ExportFormat::USD) ? ".usda" : ".obj";
     ss << outdir << "/frame_" << std::setw(4) << std::setfill('0') << frame << ext;
     if (fmt == ExportFormat::GEO)
         export_geo(ss.str(), x, tris);
+    else if (fmt == ExportFormat::USD)
+        export_usd(ss.str(), x, tris);
     else
         export_obj(ss.str(), x, tris);
 }

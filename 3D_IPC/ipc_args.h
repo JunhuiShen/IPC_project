@@ -29,7 +29,7 @@ struct IPCArgs3D : ArgParser {
     int    max_iters    = 500;
     double tol_abs      = 1e-6;
     double step_weight  = 1.0;
-    double d_hat        = 0.2;
+    double d_hat        = 0.0;
 
     // --- mesh ---
     int    nx           = 2;
@@ -66,7 +66,7 @@ struct IPCArgs3D : ArgParser {
         add_int   ("max_iters",   max_iters,   500,        "Max Gauss-Seidel iterations per frame");
         add_double("tol_abs",     tol_abs,     1e-6,       "Absolute convergence tolerance");
         add_double("step_weight", step_weight, 1.0,        "Newton step damping factor");
-        add_double("d_hat",       d_hat,       0.2,        "Barrier activation distance (0 = off)");
+        add_double("d_hat",       d_hat,       0.0,        "Barrier activation distance (0 = off)");
 
         add_int   ("nx",          nx,          10,          "Mesh subdivisions in x");
         add_int   ("ny",          ny,          10,          "Mesh subdivisions in y");
@@ -80,12 +80,14 @@ struct IPCArgs3D : ArgParser {
         add_double("right_z",     right_z,     0.02,       "Right sheet origin z");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
-        add_string("format",       format,        "geo",          "Output format: obj or geo");
+        add_string("format",       format,        "geo",          "Output format: obj, geo, or usd");
         add_int   ("restart_frame", restart_frame, -1,            "Frame to restart from (-1 = no restart)");
     }
 
     ExportFormat to_export_format() const {
-        return (format == "geo") ? ExportFormat::GEO : ExportFormat::OBJ;
+        if (format == "geo") return ExportFormat::GEO;
+        if (format == "usd") return ExportFormat::USD;
+        return ExportFormat::OBJ;
     }
 
     SimParams to_sim_params() const {
