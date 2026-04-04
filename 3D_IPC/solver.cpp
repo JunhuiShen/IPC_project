@@ -66,11 +66,9 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
     if (result.initial_residual < params.tol_abs) return result;
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
-        for (const auto& group : color_groups) {
-            #pragma omp parallel for schedule(static) if(group.size() >= 256)
-            for (int i = 0; i < static_cast<int>(group.size()); ++i)
-                update_one_vertex(group[i], ref_mesh, adj, pins, params, xhat, xnew, nt_pairs, ss_pairs);
-        }
+        for (const auto& group : color_groups)
+            for (int vi : group)
+                update_one_vertex(vi, ref_mesh, adj, pins, params, xhat, xnew, nt_pairs, ss_pairs);
 
         result.final_residual = eval_residual();
         result.iterations     = iter;

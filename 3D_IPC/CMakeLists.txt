@@ -130,6 +130,44 @@ target_link_libraries(simulation_snapshot_test
 
 gtest_discover_tests(simulation_snapshot_test)
 
+add_executable(generate_golden
+    generate_golden.cpp
+    make_shape.cpp
+    physics.cpp
+    solver.cpp
+)
+
+target_compile_definitions(generate_golden
+    PRIVATE GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+target_link_libraries(generate_golden
+    PRIVATE
+    corotated_energy_lib
+    OpenMP::OpenMP_CXX
+)
+
+add_executable(restart_test
+    restart_test.cpp
+    make_shape.cpp
+    physics.cpp
+    solver.cpp
+)
+
+target_compile_definitions(restart_test
+    PRIVATE GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+target_link_libraries(restart_test
+    PRIVATE
+    corotated_energy_lib
+    OpenMP::OpenMP_CXX
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(restart_test)
+
 add_executable(total_energy_test
     total_energy_test.cpp
     make_shape.cpp
