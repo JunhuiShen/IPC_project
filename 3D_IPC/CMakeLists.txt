@@ -168,6 +168,27 @@ target_link_libraries(restart_test
 
 gtest_discover_tests(restart_test)
 
+add_executable(parallel_serial_consistency_test
+    parallel_serial_consistency_test.cpp
+    make_shape.cpp
+    physics.cpp
+    solver.cpp
+)
+
+target_compile_definitions(parallel_serial_consistency_test
+    PRIVATE GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+target_link_libraries(parallel_serial_consistency_test
+    PRIVATE
+    corotated_energy_lib
+    OpenMP::OpenMP_CXX
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(parallel_serial_consistency_test)
+
 add_executable(total_energy_test
     total_energy_test.cpp
     make_shape.cpp
