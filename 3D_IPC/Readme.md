@@ -5,7 +5,7 @@ A 3D physics simulation of deformable triangle meshes using
 
 The simulator is designed for experimenting with different strategies for:
 - broad-phase collision candidate detection
-- Newton step-size filtering hooks (CCD integration in progress)
+- collision-free Newton step-size filtering
 - initial guess generation
 
 These components can be swapped to compare different algorithmic variants.
