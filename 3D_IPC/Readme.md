@@ -5,7 +5,7 @@ A 3D physics simulation of deformable triangle meshes using
 
 The simulator is designed for experimenting with different strategies for:
 - broad-phase collision candidate detection
-- collision-safe Newton step filtering
+- Newton step-size filtering hooks (CCD integration in progress)
 - initial guess generation
 
 These components can be swapped to compare different algorithmic variants.
@@ -28,11 +28,38 @@ These components can be swapped to compare different algorithmic variants.
 
     ./build/3D_sim
 
-Output frames are written to `frames_sim3d/` as
+Useful examples:
+
+    ./build/3D_sim --help
+    ./build/3D_sim --format obj --outdir frames_obj
+    ./build/3D_sim --format usd --outdir frames_usd
+    ./build/3D_sim --restart_frame 30 --outdir frames_sim3d
+
+By default, output frames are written to `frames_sim3d/` in Houdini `.geo` format:
+
+    frame_0000.geo
+    frame_0001.geo
+    frame_0002.geo
+    ...
+
+If `--format obj` is used:
 
     frame_0000.obj
     frame_0001.obj
     frame_0002.obj
+    ...
+
+If `--format usd` is used, files are written as USDA text (`.usda`):
+
+    frame_0000.usda
+    frame_0001.usda
+    frame_0002.usda
+    ...
+
+Per-frame restart snapshots are also written as:
+
+    state_0000.bin
+    state_0001.bin
     ...
 
 ## Tests
@@ -53,6 +80,16 @@ You can still run any executable directly (for example):
     ./build/simulation_snapshot_test
 
 The test suite includes both GoogleTest-based tests and standalone numerical verification executables.
+
+## CLI Arguments
+
+Arguments are parsed as `--key value` (and boolean flags can also be passed as just `--flag`):
+
+- Time integration: `fps`, `substeps`, `num_frames`
+- Physics: `mu`, `lambda`, `density`, `thickness`, `kpin`, `gx`, `gy`, `gz`
+- Solver: `max_iters`, `tol_abs`, `step_weight`, `d_hat`, `use_parallel`
+- Mesh/scene: `nx`, `ny`, `width`, `height`, `left_x`, `right_x`, `sheet_y`, `left_z`, `right_z`
+- Output/restart: `outdir`, `format` (`obj|geo|usd`), `restart_frame`
 
 ## Console Output
 
@@ -101,6 +138,8 @@ Per-frame statistics are printed to stdout:
     │
     ├── visualization.h / visualization.cpp
     │   export_obj()
+    │   export_geo()
+    │   export_usd()
     │   export_frame()
     │
     ├── simulation.cpp
