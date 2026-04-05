@@ -52,6 +52,7 @@ target_link_libraries(corotated_energy_test
     PRIVATE
     corotated_energy_lib
 )
+add_test(NAME corotated_energy_test COMMAND corotated_energy_test)
 
 add_executable(node_triangle_distance_test
     node_triangle_distance_test.cpp
@@ -61,6 +62,7 @@ target_link_libraries(node_triangle_distance_test
     PRIVATE
     corotated_energy_lib
 )
+add_test(NAME node_triangle_distance_test COMMAND node_triangle_distance_test)
 
 add_executable(segment_segment_distance_test
     segment_segment_distance_test.cpp
@@ -70,6 +72,7 @@ target_link_libraries(segment_segment_distance_test
     PRIVATE
     corotated_energy_lib
 )
+add_test(NAME segment_segment_distance_test COMMAND segment_segment_distance_test)
 
 add_executable(barrier_energy_test
     barrier_energy_test.cpp
@@ -79,6 +82,7 @@ target_link_libraries(barrier_energy_test
     PRIVATE
     corotated_energy_lib
 )
+add_test(NAME barrier_energy_test COMMAND barrier_energy_test)
 
 add_executable(broad_phase_test
     broad_phase_test.cpp
@@ -222,3 +226,4 @@ target_link_libraries(total_energy_test
     corotated_energy_lib
     OpenMP::OpenMP_CXX
 )
+add_test(NAME total_energy_test COMMAND total_energy_test)

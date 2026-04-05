@@ -60,12 +60,9 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
     x[vi] -= step * delta;
 }
 
-SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
-                                        const std::vector<Pin>& pins, const SimParams& params,
-                                        std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
-                                        BroadPhase& broad_phase,
-                                        const std::vector<Vec3>& v,
-                                        const std::vector<std::vector<int>>& color_groups,
+SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
+                                        std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, BroadPhase& broad_phase,
+                                        const std::vector<Vec3>& v, const std::vector<std::vector<int>>& color_groups,
                                         std::vector<double>* residual_history) {
     const double dt         = params.dt();
     const double dhat       = params.d_hat;

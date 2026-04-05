@@ -471,7 +471,8 @@ void BroadPhase::initialize(const std::vector<Vec3>& x, const std::vector<Vec3>&
     build(x, v, mesh, dt, /*node_pad=*/dhat, /*tri_pad=*/0.0, /*edge_pad=*/dhat * 0.5);
 }
 
-void BroadPhase::refresh(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, int moved_node, double dt, double node_pad, double tri_pad, double edge_pad) {
+void BroadPhase::refresh(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, int moved_node,
+                         double dt, double node_pad, double tri_pad, double edge_pad) {
     const int nv = static_cast<int>(cache_.node_boxes.size());
     if (moved_node < 0 || moved_node >= nv) return;
 
@@ -519,7 +520,8 @@ void BroadPhase::refresh(const std::vector<Vec3>& x, const std::vector<Vec3>& v,
     }
 }
 
-void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, std::vector<NodeTrianglePair>& out_nt, std::vector<SegmentSegmentPair>& out_ss) {
+void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt,
+                                      std::vector<NodeTrianglePair>& out_nt, std::vector<SegmentSegmentPair>& out_ss) {
     BroadPhase tmp;
     tmp.build(x, v, mesh, dt, /*node_pad=*/0.0, /*tri_pad=*/0.0, /*edge_pad=*/0.0);
 
