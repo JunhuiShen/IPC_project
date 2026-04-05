@@ -20,7 +20,7 @@ EXPECT_EQ(map[2], (std::vector<std::pair<int,int>>{{0, 2}, {1, 1}}));
 EXPECT_EQ(map[5], (std::vector<std::pair<int,int>>{{1, 2}}));
 EXPECT_EQ(map.size(), 4u);
 }
-
+  
 // ---------------------------------------------------------------------------
 // build_vertex_adjacency_map tests
 // ---------------------------------------------------------------------------

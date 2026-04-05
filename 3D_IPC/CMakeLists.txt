@@ -80,6 +80,20 @@ target_link_libraries(barrier_energy_test
     corotated_energy_lib
 )
 
+add_executable(broad_phase_test
+    broad_phase_test.cpp
+    broad_phase.cpp
+)
+
+target_link_libraries(broad_phase_test
+    PRIVATE
+    corotated_energy_lib
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(broad_phase_test)
+
 add_executable(3D_sim
     make_shape.cpp
     physics.cpp

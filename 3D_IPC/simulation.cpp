@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
 
     // Tiny asymmetry on the right sheet so the evolution is not perfectly symmetric.
     state.deformed_positions[base_right + 0] += Vec3(-0.02, 0.00, -0.01);
-    state.deformed_positions[base_right + args.nx] += Vec3(-0.02, 0.00, -0.01);
+    state.deformed_positions[base_right + 2] += Vec3(-0.02, 0.00, -0.01);
 
     // Pin inner-side top and bottom corners.
     const int left_bottom_right = base_left + args.nx;

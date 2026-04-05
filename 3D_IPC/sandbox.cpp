@@ -1381,36 +1381,55 @@ static std::vector<std::array<int, 2>> extract_patch_edges(const RefMesh& mesh, 
     return out;
 }
 
-static std::vector<NodeTrianglePair> build_inter_patch_node_triangle_pairs(
-        const RefMesh& mesh, const PatchInfo& a, const PatchInfo& b) {
-    std::vector<NodeTrianglePair> pairs;
-
-    for (int node = a.vertex_begin; node < a.vertex_end; ++node) {
-        for (int t = b.tri_begin; t < b.tri_end; ++t) {
-            pairs.push_back(NodeTrianglePair{node,
-                                             {tri_vertex(mesh, t, 0), tri_vertex(mesh, t, 1), tri_vertex(mesh, t, 2)}});
+static std::vector<std::array<int, 2>> extract_all_unique_edges(const RefMesh& mesh) {
+    std::set<std::pair<int, int>> edges;
+    for (int t = 0; t < num_tris(mesh); ++t) {
+        for (int e = 0; e < 3; ++e) {
+            int a = tri_vertex(mesh, t, e);
+            int b = tri_vertex(mesh, t, (e + 1) % 3);
+            if (a > b) std::swap(a, b);
+            edges.insert({a, b});
         }
     }
-    for (int node = b.vertex_begin; node < b.vertex_end; ++node) {
-        for (int t = a.tri_begin; t < a.tri_end; ++t) {
-            pairs.push_back(NodeTrianglePair{node,
-                                             {tri_vertex(mesh, t, 0), tri_vertex(mesh, t, 1), tri_vertex(mesh, t, 2)}});
+    std::vector<std::array<int, 2>> out;
+    out.reserve(edges.size());
+    for (const auto& [a, b] : edges) out.push_back({a, b});
+    return out;
+}
+
+static std::vector<NodeTrianglePair> build_all_nonincident_node_triangle_pairs(const RefMesh& mesh) {
+    std::vector<NodeTrianglePair> pairs;
+    const int nv = static_cast<int>(mesh.num_positions);
+    const int nt = num_tris(mesh);
+    pairs.reserve(static_cast<size_t>(nv) * static_cast<size_t>(nt));
+
+    for (int node = 0; node < nv; ++node) {
+        for (int t = 0; t < nt; ++t) {
+            const int v0 = tri_vertex(mesh, t, 0);
+            const int v1 = tri_vertex(mesh, t, 1);
+            const int v2 = tri_vertex(mesh, t, 2);
+            if (node == v0 || node == v1 || node == v2) continue;
+            pairs.push_back(NodeTrianglePair{node, {v0, v1, v2}});
         }
     }
     return pairs;
 }
 
-static std::vector<SegmentSegmentPair> build_inter_patch_segment_segment_pairs(
-        const RefMesh& mesh, const PatchInfo& a, const PatchInfo& b) {
-    const auto edges_a = extract_patch_edges(mesh, a);
-    const auto edges_b = extract_patch_edges(mesh, b);
+static std::vector<SegmentSegmentPair> build_all_nonincident_segment_segment_pairs(const RefMesh& mesh) {
+    const auto edges = extract_all_unique_edges(mesh);
+    const int ne = static_cast<int>(edges.size());
 
     std::vector<SegmentSegmentPair> pairs;
-    pairs.reserve(edges_a.size() * edges_b.size());
+    pairs.reserve(static_cast<size_t>(ne) * static_cast<size_t>(ne) / 2);
 
-    for (const auto& ea : edges_a) {
-        for (const auto& eb : edges_b) {
-            pairs.push_back(SegmentSegmentPair{{ea[0], ea[1], eb[0], eb[1]}});
+    for (int i = 0; i < ne; ++i) {
+        const int a0 = edges[i][0];
+        const int a1 = edges[i][1];
+        for (int j = i + 1; j < ne; ++j) {
+            const int b0 = edges[j][0];
+            const int b1 = edges[j][1];
+            if (a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1) continue;
+            pairs.push_back(SegmentSegmentPair{{a0, a1, b0, b1}});
         }
     }
     return pairs;
@@ -1604,7 +1623,7 @@ int main() {
     params.step_weight = 1.0;
 
     // Toggle this to compare no-barrier vs barrier runs.
-    params.d_hat = 0.2;
+    params.d_hat = 0.00;
 
     std::cout << "num_frames = " << params.num_frames << "\n";
     std::cout << "d_hat = " << params.d_hat
@@ -1618,20 +1637,20 @@ int main() {
 
     // Two separate sheets, side-by-side in x, with a small z offset.
     const PatchInfo left = build_square_patch(
-            mesh, state, 2, 2, 0.4, 0.4,
-            Vec3(-0.45, 0.20, 0.00)
+            mesh, state, 10, 10, 1.0, 1.0,
+            Vec3(-0.75, 0.20, 0.10)
     );
 
     const PatchInfo right = build_square_patch(
-            mesh, state, 2, 2, 0.4, 0.4,
-            Vec3(0.05, 0.20, 0.02)
+            mesh, state, 10, 10, 1.0, 1.0,
+            Vec3(0.75, 0.20, 0.10)
     );
 
     state.v.assign(state.x.size(), Vec3::Zero());
 
     // Tiny asymmetry so they do not evolve perfectly symmetrically.
-    state.x[right.vertex_begin + 0] += Vec3(-0.02, 0.00, -0.01);
-    state.x[right.vertex_begin + 2] += Vec3(-0.02, 0.00, -0.01);
+    state.x[right.vertex_begin + 0] += Vec3(-0.02, 0.00, 0.00);
+    state.x[right.vertex_begin + 2] += Vec3(-0.02, 0.00, 0.00);
 
     // Pin the inner-side top and bottom corners.
     append_pin(pins, patch_corner_index(left,  left.nx, left.ny), state.x);   // left top-right
@@ -1644,9 +1663,9 @@ int main() {
     mesh.build_lumped_mass(params.density, params.thickness);
     const VertexTriangleMap adj = build_incident_triangle_map(mesh.tris);
 
-    // Only cross-sheet contact pairs.
-    const auto nt_pairs = build_inter_patch_node_triangle_pairs(mesh, left, right);
-    const auto ss_pairs = build_inter_patch_segment_segment_pairs(mesh, left, right);
+    // Global contact pairs: include all pairs except incident ones.
+    const auto nt_pairs = build_all_nonincident_node_triangle_pairs(mesh);
+    const auto ss_pairs = build_all_nonincident_segment_segment_pairs(mesh);
 
     std::cout << "Vertices:  " << state.x.size() << "\n";
     std::cout << "Triangles: " << num_tris(mesh) << "\n";

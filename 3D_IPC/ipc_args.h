@@ -39,8 +39,8 @@ struct IPCArgs3D : ArgParser {
     double height       = 0.4;
 
     // --- scene placement ---
-    double left_x       = -0.45;
-    double right_x      = 0.05;
+    double left_x       = -0.75;
+    double right_x      = 0.75;
     double sheet_y      = 0.20;
     double left_z       = 0.00;
     double right_z      = 0.02;
@@ -75,8 +75,8 @@ struct IPCArgs3D : ArgParser {
         add_double("width",       width,       1.0,        "Mesh width");
         add_double("height",      height,      1.0,        "Mesh height");
 
-        add_double("left_x",      left_x,      -0.45,      "Left sheet origin x");
-        add_double("right_x",     right_x,     0.05,       "Right sheet origin x");
+        add_double("left_x",      left_x,      -0.75,      "Left sheet origin x");
+        add_double("right_x",     right_x,     0.75,       "Right sheet origin x");
         add_double("sheet_y",     sheet_y,     0.20,       "Shared sheet origin y");
         add_double("left_z",      left_z,      0.00,       "Left sheet origin z");
         add_double("right_z",     right_z,     0.02,       "Right sheet origin z");

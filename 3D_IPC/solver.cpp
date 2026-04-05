@@ -40,6 +40,8 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
         }
     }
 
+    // Mild diagonal regularization improves robustness for ill-conditioned local Hessians.
+    H += 1.0e-8 * Mat33::Identity();
     Vec3 dx = matrix3d_inverse(H) * g;
     x[vi] -= params.step_weight * dx;
 }
