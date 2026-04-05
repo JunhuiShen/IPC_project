@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <iostream>
@@ -26,6 +27,7 @@ struct ArgParser {
         std::string description;
         std::string default_str;
         std::function<bool(const std::string&)> setter; // returns false on bad input
+        std::function<std::string()> getter;
     };
 
     std::vector<Spec> specs;
@@ -39,7 +41,8 @@ struct ArgParser {
             [&field](const std::string& v) {
                 try { field = std::stod(v); return true; }
                 catch (...) { return false; }
-            }});
+            },
+            [&field]() { return std::to_string(field); }});
     }
 
     void add_int(const std::string& key, int& field,
@@ -49,7 +52,8 @@ struct ArgParser {
             [&field](const std::string& v) {
                 try { field = std::stoi(v); return true; }
                 catch (...) { return false; }
-            }});
+            },
+            [&field]() { return std::to_string(field); }});
     }
 
     void add_string(const std::string& key, std::string& field,
@@ -58,7 +62,8 @@ struct ArgParser {
         specs.push_back({key, desc, def,
             [&field](const std::string& v) {
                 field = v; return true;
-            }});
+            },
+            [&field]() { return field; }});
     }
 
     // bool: --flag sets true, --flag false/0 sets false
@@ -70,7 +75,8 @@ struct ArgParser {
                 if (v == "true"  || v == "1") { field = true;  return true; }
                 if (v == "false" || v == "0") { field = false; return true; }
                 return false;
-            }});
+            },
+            [&field]() { return field ? std::string("true") : std::string("false"); }});
     }
 
     // --- parsing ---
@@ -122,6 +128,30 @@ struct ArgParser {
             }
         }
         return true;
+    }
+
+    // Serialize all registered fields as "key=value\n" lines.
+    void serialize(const std::string& path) const {
+        std::ofstream out(path);
+        if (!out) { std::cerr << "Error: cannot write args file: " << path << "\n"; return; }
+        for (const auto& s : specs)
+            out << s.key << "=" << s.getter() << "\n";
+    }
+
+    // Deserialize by reading "key=value" lines and invoking each field's setter.
+    bool deserialize(const std::string& path) {
+        std::ifstream in(path);
+        if (!in) { std::cerr << "Error: cannot read args file: " << path << "\n"; return false; }
+        std::string line;
+        while (std::getline(in, line)) {
+            auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            std::string key = line.substr(0, eq);
+            std::string val = line.substr(eq + 1);
+            Spec* spec = find_spec(key);
+            if (spec) spec->setter(val);
+        }
+        return in.eof();
     }
 
     void print_usage(const std::string& program_name) const {
