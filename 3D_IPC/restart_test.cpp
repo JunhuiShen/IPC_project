@@ -1,5 +1,6 @@
 #include "make_shape.h"
 #include "physics.h"
+#include "simulation.h"
 #include "solver.h"
 #include <gtest/gtest.h>
 #include <fstream>
@@ -64,24 +65,6 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state,
     adj = build_incident_triangle_map(ref_mesh.tris);
 }
 
-static void advance_one_frame(DeformedState& state,
-                              const RefMesh& ref_mesh, const VertexTriangleMap& adj,
-                              const std::vector<Pin>& pins, const SimParams& params,
-                              const std::vector<std::vector<int>>& color_groups) {
-    const std::vector<NodeTrianglePair>   nt_pairs;
-    const std::vector<SegmentSegmentPair> ss_pairs;
-
-    for (int sub = 0; sub < params.substeps; ++sub) {
-        std::vector<Vec3> xhat;
-        build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
-        std::vector<Vec3> xnew = state.deformed_positions;
-        global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat,
-                                   nt_pairs, ss_pairs, color_groups);
-        update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
-        state.deformed_positions = xnew;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Restart test
 // ---------------------------------------------------------------------------
@@ -105,8 +88,11 @@ TEST(RestartTest, RestartFromFrame50MatchesGolden) {
         ASSERT_TRUE(deserialize_state(checkpoint_dir, kRestartFrame, state))
             << "Failed to deserialize state at frame " << kRestartFrame;
 
+        const std::vector<NodeTrianglePair>   nt_pairs;
+        const std::vector<SegmentSegmentPair> ss_pairs;
+
         for (int f = kRestartFrame + 1; f <= kTotalFrames; ++f) {
-            advance_one_frame(state, ref_mesh, adj, pins, params, color_groups);
+            advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, nt_pairs, ss_pairs);
 
             ASSERT_TRUE(golden.count(f)) << "No golden data for frame " << f;
             const auto& expected = golden[f];

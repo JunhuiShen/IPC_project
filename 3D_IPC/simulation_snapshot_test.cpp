@@ -1,5 +1,6 @@
 #include "make_shape.h"
 #include "physics.h"
+#include "simulation.h"
 #include "solver.h"
 #include <gtest/gtest.h>
 #include <fstream>
@@ -84,14 +85,7 @@ const std::vector<SegmentSegmentPair> ss_pairs;
 const auto color_groups = build_color_groups(ref_mesh, static_cast<int>(state.deformed_positions.size()));
 
 for (int frame = 1; frame <= 100; ++frame) {
-for (int sub = 0; sub < params.substeps; ++sub) {
-std::vector<Vec3> xhat;
-build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
-std::vector<Vec3> xnew = state.deformed_positions;
-global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, nt_pairs, ss_pairs, color_groups);
-update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
-state.deformed_positions = xnew;
-}
+advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, nt_pairs, ss_pairs);
 
 ASSERT_TRUE(golden.count(frame)) << "No golden data for frame " << frame;
 const auto& expected = golden[frame];

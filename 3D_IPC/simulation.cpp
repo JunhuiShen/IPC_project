@@ -1,5 +1,6 @@
 #include "make_shape.h"
 #include "physics.h"
+#include "simulation.h"
 #include "solver.h"
 #include "visualization.h"
 #include "ipc_args.h"
@@ -104,18 +105,8 @@ int main(int argc, char** argv) {
         auto solver_start = Clock::now();
         SolverResult result;
 
-        for (int sub = 0; sub < params.substeps; ++sub) {
-            std::vector<Vec3> xhat;
-            build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
-
-            std::vector<Vec3> xnew = state.deformed_positions;
-            result = global_gauss_seidel_solver(
-                    ref_mesh, adj, pins, params, xnew, xhat,
-                    barrier_pairs.nt, barrier_pairs.ss, color_groups);
-
-            update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
-            state.deformed_positions = xnew;
-        }
+        result = advance_one_frame(state, ref_mesh, adj, pins, params, color_groups,
+                                   barrier_pairs.nt, barrier_pairs.ss);
 
         auto solver_end = Clock::now();
         double solver_ms = std::chrono::duration<double, std::milli>(solver_end - solver_start).count();
