@@ -35,15 +35,22 @@ Output frames are written to `frames_sim3d/` as
 
 ## Tests
 
-    ./build/corotated_energy_test
-    ./build/node_triangle_distance_test
-    ./build/segment_segment_distance_test
-    ./build/barrier_energy_test
-    ./build/total_energy_test
-    ./build/make_shape_test
+Run the full suite with CTest:
 
-The first five tests use central finite differences to verify analytic gradients and Hessians.
-`make_shape_test` uses GoogleTest to verify mesh construction utilities.
+    cmake -B build
+    cmake --build build --clean-first
+    ctest --test-dir build --output-on-failure
+
+To list discovered tests:
+
+    ctest --test-dir build -N -V
+
+You can still run any executable directly (for example):
+
+    ./build/total_energy_test
+    ./build/simulation_snapshot_test
+
+The test suite includes both GoogleTest-based tests and standalone numerical verification executables.
 
 ## Console Output
 
@@ -123,8 +130,6 @@ Per-frame statistics are printed to stdout:
 
 ## Future Work
 
-- AABB broad-phase collision filtering
-- wire barrier terms into the Gauss–Seidel solver
 - CCD line search
 - support larger meshes
 - improve visualization pipeline
