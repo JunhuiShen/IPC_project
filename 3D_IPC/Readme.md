@@ -121,11 +121,6 @@ Per-frame statistics are printed to stdout:
 - solver performs nonlinear Gauss–Seidel iterations
 - simulation.cpp controls time stepping and scene setup
 
-The corotated elasticity model in `corotated_energy.h/.cpp` is adapted from the
-TGSL `Corotated32` formulation. The reference files `Corotated32.h/.cpp` are
-included in this project, and `corotated_energy.cpp` wraps that formulation
-through a simplified project-level interface.
-
 ## Future Work
 
 - AABB broad-phase collision filtering
