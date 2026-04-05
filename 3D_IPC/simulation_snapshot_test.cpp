@@ -2,6 +2,7 @@
 #include "physics.h"
 #include "simulation.h"
 #include "solver.h"
+#include "broad_phase.h"
 #include <gtest/gtest.h>
 #include <fstream>
 #include <map>
@@ -80,12 +81,11 @@ VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
 build_scene(ref_mesh, state, pins, adj, params, X);
 
 // No barrier — serial path
-const std::vector<NodeTrianglePair>   nt_pairs;
-const std::vector<SegmentSegmentPair> ss_pairs;
+BroadPhase broad_phase;
 const auto color_groups = build_color_groups(ref_mesh, static_cast<int>(state.deformed_positions.size()));
 
 for (int frame = 1; frame <= 100; ++frame) {
-advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, nt_pairs, ss_pairs);
+advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, broad_phase);
 
 ASSERT_TRUE(golden.count(frame)) << "No golden data for frame " << frame;
 const auto& expected = golden[frame];

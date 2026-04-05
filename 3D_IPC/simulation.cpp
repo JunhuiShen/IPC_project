@@ -4,6 +4,7 @@
 #include "solver.h"
 #include "visualization.h"
 #include "ipc_args.h"
+#include "broad_phase.h"
 
 #include <chrono>
 #include <filesystem>
@@ -64,8 +65,7 @@ int main(int argc, char** argv) {
             build_vertex_adjacency_map(ref_mesh.tris),
             static_cast<int>(state.deformed_positions.size()));
 
-    // Current project-wide pair builder.
-    const BarrierPairs barrier_pairs = build_barrier_pairs(ref_mesh);
+    BroadPhase broad_phase;
 
     std::cout << "num_frames = " << num_frames << "\n";
     std::cout << "d_hat = " << params.d_hat
@@ -73,8 +73,6 @@ int main(int argc, char** argv) {
               << "\n";
     std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
-    std::cout << "NT pairs:  " << barrier_pairs.nt.size() << "\n";
-    std::cout << "SS pairs:  " << barrier_pairs.ss.size() << "\n";
 
     const std::string& outdir = args.outdir;
     const ExportFormat fmt = args.to_export_format();
@@ -105,8 +103,7 @@ int main(int argc, char** argv) {
         auto solver_start = Clock::now();
         SolverResult result;
 
-        result = advance_one_frame(state, ref_mesh, adj, pins, params, color_groups,
-                                   barrier_pairs.nt, barrier_pairs.ss);
+        result = advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, broad_phase);
 
         auto solver_end = Clock::now();
         double solver_ms = std::chrono::duration<double, std::milli>(solver_end - solver_start).count();

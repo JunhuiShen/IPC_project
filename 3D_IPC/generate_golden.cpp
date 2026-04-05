@@ -1,6 +1,7 @@
 #include "make_shape.h"
 #include "physics.h"
 #include "solver.h"
+#include "broad_phase.h"
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -32,8 +33,7 @@ int main() {
     ref_mesh.build_lumped_mass(params.density, params.thickness);
     VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);
 
-    const std::vector<NodeTrianglePair>   nt_pairs;
-    const std::vector<SegmentSegmentPair> ss_pairs;
+    BroadPhase broad_phase;
     const auto color_groups = greedy_color(build_vertex_adjacency_map(ref_mesh.tris),
                                            static_cast<int>(state.deformed_positions.size()));
 
@@ -49,7 +49,7 @@ int main() {
             build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
             std::vector<Vec3> xnew = state.deformed_positions;
             global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat,
-                                       nt_pairs, ss_pairs, color_groups);
+                                       broad_phase, state.velocities, color_groups);
             update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
             state.deformed_positions = xnew;
         }

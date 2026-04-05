@@ -1,6 +1,7 @@
 #include "make_shape.h"
 #include "physics.h"
 #include "solver.h"
+#include "broad_phase.h"
 #include <gtest/gtest.h>
 #include <vector>
 
@@ -50,9 +51,6 @@ TEST(ParallelSerialConsistency, OneSweepMatchesSerialAtFrame50) {
 
     const auto color_groups = greedy_color(build_vertex_adjacency_map(ref_mesh.tris),
                                            static_cast<int>(state.deformed_positions.size()));
-    const std::vector<NodeTrianglePair>   nt_pairs;
-    const std::vector<SegmentSegmentPair> ss_pairs;
-
     // Params for the single-sweep comparison
     SimParams sweep_params = params;
     sweep_params.max_global_iters = 1;   // exactly one sweep
@@ -66,16 +64,18 @@ TEST(ParallelSerialConsistency, OneSweepMatchesSerialAtFrame50) {
     std::vector<Vec3> serial_x = state.deformed_positions;
     {
         SimParams p = sweep_params; p.use_parallel = false;
+        BroadPhase bp;
         global_gauss_seidel_solver(ref_mesh, adj, pins, p, serial_x, xhat,
-                                   nt_pairs, ss_pairs, color_groups);
+                                   bp, state.velocities, color_groups);
     }
 
     // --- Parallel: one sweep through color groups, vertices within group in parallel ---
     std::vector<Vec3> parallel_x = state.deformed_positions;
     {
         SimParams p = sweep_params; p.use_parallel = true;
+        BroadPhase bp;
         global_gauss_seidel_solver(ref_mesh, adj, pins, p, parallel_x, xhat,
-                                   nt_pairs, ss_pairs, color_groups);
+                                   bp, state.velocities, color_groups);
     }
 
     // --- Compare: should be identical since vertices in same color group are independent ---

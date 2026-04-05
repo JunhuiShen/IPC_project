@@ -2,6 +2,7 @@
 #include "physics.h"
 #include "simulation.h"
 #include "solver.h"
+#include "broad_phase.h"
 #include <gtest/gtest.h>
 #include <fstream>
 #include <map>
@@ -88,11 +89,10 @@ TEST(RestartTest, RestartFromFrame50MatchesGolden) {
         ASSERT_TRUE(deserialize_state(checkpoint_dir, kRestartFrame, state))
             << "Failed to deserialize state at frame " << kRestartFrame;
 
-        const std::vector<NodeTrianglePair>   nt_pairs;
-        const std::vector<SegmentSegmentPair> ss_pairs;
+        BroadPhase broad_phase;
 
         for (int f = kRestartFrame + 1; f <= kTotalFrames; ++f) {
-            advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, nt_pairs, ss_pairs);
+            advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, broad_phase);
 
             ASSERT_TRUE(golden.count(f)) << "No golden data for frame " << f;
             const auto& expected = golden[f];

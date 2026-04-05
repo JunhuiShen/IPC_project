@@ -4,12 +4,13 @@
 #include "physics.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <unordered_map>
 #include <vector>
 
-// Axis-aligned bounding box in 3D
+// Axis-aligned bounding box
 struct AABB {
     Vec3 min, max;
 
@@ -56,14 +57,8 @@ int  build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out);
 void refit_bvh(std::vector<BVHNode>& nodes, const std::vector<AABB>& boxes);
 void query_bvh(const std::vector<BVHNode>& nodes, int root, const AABB& query, std::vector<int>& hits);
 
-// ======================================================
-// BroadPhase3D
-//
-// Builds candidate node-triangle and segment-segment pairs
-// from swept AABBs over a motion interval.
-// ======================================================
-
-class BroadPhase3D {
+// Broad phase: builds candidate node-triangle and segment-segment pairs from swept AABBs over a motion interval
+class BroadPhase {
 public:
     struct Cache {
         std::vector<AABB> node_boxes;
@@ -72,23 +67,32 @@ public:
 
         std::vector<BVHNode> tri_bvh_nodes;
         std::vector<BVHNode> edge_bvh_nodes;
+        std::vector<int> tri_bvh_parent;
+        std::vector<int> edge_bvh_parent;
+        std::vector<int> tri_leaf_node;
+        std::vector<int> edge_leaf_node;
 
         int tri_root = -1;
         int edge_root = -1;
 
+        std::vector<std::array<int, 2>> edges;
+        std::vector<std::vector<int>> node_to_tris;
+        std::vector<std::vector<int>> node_to_edges;
+
         std::vector<NodeTrianglePair> nt_pairs;
         std::vector<SegmentSegmentPair> ss_pairs;
+
+        std::vector<int> nt_pair_tri;
+        std::vector<std::array<int, 2>> ss_pair_edges;
 
         std::unordered_map<std::uint64_t, std::size_t> nt_pair_index;
         std::unordered_map<std::uint64_t, std::size_t> ss_pair_index;
     };
 
-    // Build persistent broad-phase state for the current time step.
     void initialize(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double dhat);
 
-    // Refresh after one node moves.
-    // Baseline implementation may rebuild globally.
-    void refresh(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, int moved_node, double dt, double node_pad, double tri_pad, double edge_pad);
+    void refresh(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, int moved_node, double dt,
+                 double node_pad, double tri_pad, double edge_pad);
 
     const std::vector<NodeTrianglePair>& nt_pairs() const {
         return cache_.nt_pairs;
@@ -98,8 +102,8 @@ public:
         return cache_.ss_pairs;
     }
 
-    // One-shot CCD candidate generation using swept boxes.
-    void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, std::vector<NodeTrianglePair>& out_nt, std::vector<SegmentSegmentPair>& out_ss);
+    void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt,
+                              std::vector<NodeTrianglePair>& out_nt, std::vector<SegmentSegmentPair>& out_ss);
 
     static std::uint64_t nt_key(int node, int tri) {
         return (std::uint64_t(std::uint32_t(node)) << 32) |
@@ -112,7 +116,9 @@ public:
                std::uint32_t(e1);
     }
 
-    const Cache& cache() const { return cache_; }
+    const Cache& cache() const {
+        return cache_;
+    }
 
 private:
     Cache cache_;

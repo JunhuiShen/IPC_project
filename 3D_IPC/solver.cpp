@@ -1,10 +1,8 @@
 #include "solver.h"
 #include "IPC_math.h"
 
-void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
-                       const std::vector<Pin>& pins, const SimParams& params,
-                       const std::vector<Vec3>& xhat, std::vector<Vec3>& x,
-                       const std::vector<NodeTrianglePair>& nt_pairs,
+void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
+                       const std::vector<Vec3>& xhat, std::vector<Vec3>& x, const std::vector<NodeTrianglePair>& nt_pairs,
                        const std::vector<SegmentSegmentPair>& ss_pairs) {
     auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x, xhat);
 
@@ -40,21 +38,51 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
         }
     }
 
-    Vec3 dx = matrix3d_inverse(H) * g;
-    x[vi] -= params.step_weight * dx;
+    const Vec3 delta = matrix3d_inverse(H) * g;
+
+    // CCD hook point:
+    // Build a global swept-AABB candidate set using the local Newton trial displacement.
+    // For now, keep step_weight as the placeholder limiter until CCD TOI is integrated.
+    double step = params.step_weight;
+    if (params.d_hat > 0.0) {
+        std::vector<Vec3> trial_disp(x.size(), Vec3::Zero());
+        trial_disp[vi] = -delta;
+
+        BroadPhase ccd_broad_phase;
+        std::vector<NodeTrianglePair> ccd_nt;
+        std::vector<SegmentSegmentPair> ccd_ss;
+        ccd_broad_phase.build_ccd_candidates(x, trial_disp, ref_mesh, 1.0, ccd_nt, ccd_ss);
+
+        // Placeholder until CCD is wired into line search.
+        step = params.step_weight;
+    }
+
+    x[vi] -= step * delta;
 }
 
 SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                                         const std::vector<Pin>& pins, const SimParams& params,
                                         std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
-                                        const std::vector<NodeTrianglePair>& nt_pairs,
-                                        const std::vector<SegmentSegmentPair>& ss_pairs,
+                                        BroadPhase& broad_phase,
+                                        const std::vector<Vec3>& v,
                                         const std::vector<std::vector<int>>& color_groups,
                                         std::vector<double>* residual_history) {
+    const double dt         = params.dt();
+    const double dhat       = params.d_hat;
+    const bool   use_barrier = dhat > 0.0;
+    const double node_pad   = dhat;
+    const double tri_pad    = 0.0;
+    const double edge_pad   = dhat * 0.5;
+
+    if (use_barrier) {
+        broad_phase.initialize(xnew, v, ref_mesh, dt, dhat);
+    }
+
     if (residual_history) residual_history->clear();
 
     auto eval_residual = [&]() {
-        return compute_global_residual(ref_mesh, adj, pins, params, xnew, xhat, nt_pairs, ss_pairs);
+        return compute_global_residual(ref_mesh, adj, pins, params, xnew, xhat,
+                                       broad_phase.nt_pairs(), broad_phase.ss_pairs());
     };
 
     SolverResult result;
@@ -66,16 +94,24 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
     if (result.initial_residual < params.tol_abs) return result;
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
-        if (params.use_parallel) {
-            for (const auto& group : color_groups) {
+        for (const auto& group : color_groups) {
+            if (params.use_parallel) {
                 #pragma omp parallel for schedule(static) if(group.size() >= 256)
                 for (int i = 0; i < static_cast<int>(group.size()); ++i)
-                    update_one_vertex(group[i], ref_mesh, adj, pins, params, xhat, xnew, nt_pairs, ss_pairs);
+                    update_one_vertex(group[i], ref_mesh, adj, pins, params, xhat, xnew,
+                                      broad_phase.nt_pairs(), broad_phase.ss_pairs());
+                if (use_barrier) {
+                    for (int vi : group)
+                        broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
+                }
+            } else {
+                for (int vi : group) {
+                    update_one_vertex(vi, ref_mesh, adj, pins, params, xhat, xnew,
+                                      broad_phase.nt_pairs(), broad_phase.ss_pairs());
+                    if (use_barrier)
+                        broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
+                }
             }
-        } else {
-            for (const auto& group : color_groups)
-                for (int vi : group)
-                    update_one_vertex(vi, ref_mesh, adj, pins, params, xhat, xnew, nt_pairs, ss_pairs);
         }
 
         result.final_residual = eval_residual();

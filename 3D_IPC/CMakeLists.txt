@@ -99,6 +99,7 @@ add_executable(3D_sim
     physics.cpp
     solver.cpp
     visualization.cpp
+    broad_phase.cpp
     simulation.cpp
 )
 
@@ -128,6 +129,7 @@ add_executable(simulation_snapshot_test
     make_shape.cpp
     physics.cpp
     solver.cpp
+    broad_phase.cpp
 )
 
 target_compile_definitions(simulation_snapshot_test
@@ -149,6 +151,7 @@ add_executable(generate_golden
     make_shape.cpp
     physics.cpp
     solver.cpp
+    broad_phase.cpp
 )
 
 target_compile_definitions(generate_golden
@@ -166,6 +169,7 @@ add_executable(restart_test
     make_shape.cpp
     physics.cpp
     solver.cpp
+    broad_phase.cpp
 )
 
 target_compile_definitions(restart_test
@@ -187,6 +191,7 @@ add_executable(parallel_serial_consistency_test
     make_shape.cpp
     physics.cpp
     solver.cpp
+    broad_phase.cpp
 )
 
 target_compile_definitions(parallel_serial_consistency_test
@@ -209,6 +214,7 @@ add_executable(total_energy_test
     physics.cpp
     solver.cpp
     visualization.cpp
+    broad_phase.cpp
 )
 
 target_link_libraries(total_energy_test

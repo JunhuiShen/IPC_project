@@ -1,3 +1,561 @@
+#ifndef CCD_H
+#define CCD_H
+
+#include <algorithm>
+#include <cmath>
+#include <Eigen/Dense>
+#include <limits>
+
+namespace ccd {
+
+    using Vec3 = Eigen::Vector3d;
+    using Vec2 = Eigen::Vector2d;
+
+    inline Vec2 make_vec2(double x, double y) {
+        return Vec2(x, y);
+    }
+
+    inline Vec3 make_vec3(double x, double y, double z) {
+        return Vec3(x, y, z);
+    }
+
+    static constexpr double ccd_infinity  = std::numeric_limits<double>::infinity();
+    static constexpr double ccd_safety    = 0.9;
+    static constexpr double ccd_coeff_eps = 1e-12;
+    static constexpr double ccd_geom_eps  = 1e-10;
+
+    inline double safe_step(double t_hit) {
+        if (t_hit > 1.0) return 1.0;
+        return ccd_safety * std::max(0.0, t_hit);
+    }
+
+    double node_segment_2d(const Vec2& x, const Vec2& dx,
+                           const Vec2& x1, const Vec2& dx1,
+                           const Vec2& x2, const Vec2& dx2);
+
+    double node_triangle_3d(const Vec3& x, const Vec3& dx,
+                            const Vec3& x1, const Vec3& dx1,
+                            const Vec3& x2, const Vec3& dx2,
+                            const Vec3& x3, const Vec3& dx3);
+
+    double segment_segment_3d(const Vec3& x1, const Vec3& dx1,
+                              const Vec3& x2, const Vec3& dx2,
+                              const Vec3& x3, const Vec3& dx3,
+                              const Vec3& x4, const Vec3& dx4);
+
+} // namespace ccd
+
+#endif
+
+#include <array>
+#include <vector>
+
+namespace ccd {
+    namespace {
+        inline double cross2(const Vec2& a, const Vec2& b) {
+            return a.x() * b.y() - a.y() * b.x();
+        }
+
+        static constexpr double PI = 3.14159265358979323846;
+
+        inline double clamp01(double t) {
+            return std::max(0.0, std::min(1.0, t));
+        }
+
+        inline bool in_unit_interval(double t, double eps = 1e-12) {
+            return t >= -eps && t <= 1.0 + eps;
+        }
+
+        inline double filter_root(double t) {
+            return in_unit_interval(t) ? clamp01(t) : ccd_infinity;
+        }
+
+        inline void add_root(std::vector<double>& roots, double t) {
+            t = filter_root(t);
+            if (!std::isfinite(t)) return;
+            for (double r : roots) {
+                if (std::fabs(r - t) <= 1e-9) return;
+            }
+            roots.push_back(t);
+        }
+
+        inline double scale4(double a, double b, double c, double d) {
+            return std::max({1.0, std::fabs(a), std::fabs(b), std::fabs(c), std::fabs(d)});
+        }
+
+        inline bool near_zero(double v, double s = 1.0) {
+            return std::fabs(v) <= ccd_coeff_eps * s;
+        }
+
+        void solve_linear_all(double c, double d, std::vector<double>& roots) {
+            double s = std::max({1.0, std::fabs(c), std::fabs(d)});
+            if (near_zero(c, s)) return;
+            add_root(roots, -d / c);
+        }
+
+        void solve_quadratic_all(double a, double b, double c, std::vector<double>& roots) {
+            double s = scale4(a, b, c, 0.0);
+            if (near_zero(a, s)) {
+                solve_linear_all(b, c, roots);
+                return;
+            }
+
+            double D = b * b - 4.0 * a * c;
+            double tol = ccd_coeff_eps * s * s * 16.0;
+            if (D < -tol) return;
+            if (std::fabs(D) <= tol) {
+                add_root(roots, -b / (2.0 * a));
+                return;
+            }
+
+            double sqrtD = std::sqrt(std::max(0.0, D));
+            double signb = (b >= 0.0) ? 1.0 : -1.0;
+            double q = -0.5 * (b + signb * sqrtD);
+            add_root(roots, q / a);
+            if (!near_zero(q, s)) add_root(roots, c / q);
+        }
+
+        void solve_cubic_all(double a, double b, double c, double d, std::vector<double>& roots) {
+            double s = scale4(a, b, c, d);
+            if (near_zero(a, s)) {
+                solve_quadratic_all(b, c, d, roots);
+                return;
+            }
+
+            double inv_a = 1.0 / a;
+            double ba = b * inv_a;
+            double ca = c * inv_a;
+            double da = d * inv_a;
+            double shift = -ba / 3.0;
+            double p = ca - (ba * ba) / 3.0;
+            double q = (2.0 / 27.0) * ba * ba * ba - (ba * ca) / 3.0 + da;
+            double Delta = -4.0 * p * p * p - 27.0 * q * q;
+            double dtol = ccd_coeff_eps * std::max({1.0, std::fabs(p * p * p), std::fabs(q * q)}) * 64.0;
+
+            if (Delta > dtol) {
+                double m = 2.0 * std::sqrt(std::max(0.0, -p / 3.0));
+                if (near_zero(m)) {
+                    add_root(roots, shift);
+                } else {
+                    double w = (3.0 * q) / (p * m);
+                    w = std::max(-1.0, std::min(1.0, w));
+                    double theta = std::acos(w) / 3.0;
+                    for (int k = 0; k < 3; ++k) {
+                        double sk = m * std::cos(theta - 2.0 * PI * k / 3.0);
+                        add_root(roots, sk + shift);
+                    }
+                }
+            } else if (Delta < -dtol) {
+                double D = q * q / 4.0 + p * p * p / 27.0;
+                double sqrtD = std::sqrt(std::max(0.0, D));
+                double C = std::cbrt(-q / 2.0 + sqrtD);
+                double s0 = near_zero(C) ? 0.0 : (C - p / (3.0 * C));
+                add_root(roots, s0 + shift);
+            } else {
+                if (near_zero(p, std::max(1.0, std::fabs(p))) &&
+                    near_zero(q, std::max(1.0, std::fabs(q)))) {
+                    add_root(roots, shift);
+                } else if (!near_zero(p, std::max(1.0, std::fabs(p)))) {
+                    // Repeated-root case for depressed cubic:
+                    // double root = -3q/(2p)
+                    // simple root =  3q/p
+                    add_root(roots,  3.0 * q / p + shift);
+                    add_root(roots, -1.5 * q / p + shift);
+                } else {
+                    add_root(roots, shift);
+                }
+            }
+        }
+
+        Vec2 project_drop_axis(const Vec3& v, int drop_axis) {
+            if (drop_axis == 0) return make_vec2(v.y(), v.z());
+            if (drop_axis == 1) return make_vec2(v.x(), v.z());
+            return make_vec2(v.x(), v.y());
+        }
+
+        int dominant_drop_axis(const Vec3& n0, const Vec3& n1) {
+            Vec3 n = make_vec3(std::fabs(n0.x()) + std::fabs(n1.x()),
+                               std::fabs(n0.y()) + std::fabs(n1.y()),
+                               std::fabs(n0.z()) + std::fabs(n1.z()));
+            if (n.x() >= n.y() && n.x() >= n.z()) return 0;
+            if (n.y() >= n.x() && n.y() >= n.z()) return 1;
+            return 2;
+        }
+
+        bool inside_segment_2d_at(const Vec2& x, const Vec2& dx,
+                                  const Vec2& x1, const Vec2& dx1,
+                                  const Vec2& x2, const Vec2& dx2,
+                                  double t) {
+            Vec2 xt = x + dx * t;
+            Vec2 a = x1 + dx1 * t;
+            Vec2 b = x2 + dx2 * t;
+            Vec2 e = b - a;
+            double len2 = e.dot(e);
+            if (len2 <= ccd_geom_eps * ccd_geom_eps) {
+                return (xt - a).dot(xt - a) <= ccd_geom_eps * ccd_geom_eps;
+            }
+            double area = cross2(e, xt - a);
+            if (std::fabs(area) > ccd_geom_eps * std::sqrt(len2)) return false;
+            double s = (xt - a).dot(e) / len2;
+            return s >= -1e-8 && s <= 1.0 + 1e-8;
+        }
+
+        double earliest_scalar_between(double p0, double dp,
+                                       double a0, double da,
+                                       double b0, double db) {
+            auto h = [&](double t) {
+                double ra = (p0 - a0) + t * (dp - da);
+                double rb = (p0 - b0) + t * (dp - db);
+                return ra * rb;
+            };
+
+            if (h(0.0) <= ccd_geom_eps) return 0.0;
+
+            double qa = (dp - da) * (dp - db);
+            double qb = (p0 - a0) * (dp - db) + (p0 - b0) * (dp - da);
+            double qc = (p0 - a0) * (p0 - b0);
+
+            std::vector<double> roots;
+            solve_quadratic_all(qa, qb, qc, roots);
+            std::sort(roots.begin(), roots.end());
+            for (double r : roots) {
+                if (h(r) <= ccd_geom_eps) return r;
+                double t_after = std::min(1.0, r + 1e-9);
+                if (h(t_after) <= ccd_geom_eps) return r;
+            }
+            return ccd_infinity;
+        }
+
+        bool inside_triangle_3d_at(const Vec3& x, const Vec3& dx,
+                                   const Vec3& x1, const Vec3& dx1,
+                                   const Vec3& x2, const Vec3& dx2,
+                                   const Vec3& x3, const Vec3& dx3,
+                                   double t) {
+            Vec3 xt = x + dx * t;
+            Vec3 a = x1 + dx1 * t;
+            Vec3 b = x2 + dx2 * t;
+            Vec3 c = x3 + dx3 * t;
+            Vec3 e1 = b - a;
+            Vec3 e2 = c - a;
+            Vec3 w = xt - a;
+            Vec3 n = e1.cross(e2);
+            double n2 = n.squaredNorm();
+            if (n2 <= ccd_geom_eps * ccd_geom_eps) return false;
+            if (std::fabs(n.dot(w)) > ccd_geom_eps * std::sqrt(n2)) return false;
+
+            double d11 = e1.dot(e1);
+            double d12 = e1.dot(e2);
+            double d22 = e2.dot(e2);
+            double b1 = e1.dot(w);
+            double b2 = e2.dot(w);
+            double det = d11 * d22 - d12 * d12;
+            if (std::fabs(det) <= ccd_geom_eps * std::max({1.0, d11, d22})) return false;
+
+            double lam2 = (d22 * b1 - d12 * b2) / det;
+            double lam3 = (d11 * b2 - d12 * b1) / det;
+            double lam1 = 1.0 - lam2 - lam3;
+            return lam1 >= -1e-8 && lam2 >= -1e-8 && lam3 >= -1e-8;
+        }
+
+        bool point_in_triangle_projected(const Vec2& p, const Vec2& a, const Vec2& b, const Vec2& c) {
+            double e0 = cross2(b - a, p - a);
+            double e1 = cross2(c - b, p - b);
+            double e2 = cross2(a - c, p - c);
+            return (e0 >= -1e-10 && e1 >= -1e-10 && e2 >= -1e-10) ||
+                   (e0 <=  1e-10 && e1 <=  1e-10 && e2 <=  1e-10);
+        }
+
+        double node_triangle_coplanar_interval(const Vec3& x, const Vec3& dx,
+                                               const Vec3& x1, const Vec3& dx1,
+                                               const Vec3& x2, const Vec3& dx2,
+                                               const Vec3& x3, const Vec3& dx3) {
+            Vec3 n0 = (x2 - x1).cross(x3 - x1);
+            Vec3 n1 = (x2 + dx2 - x1 - dx1).cross(x3 + dx3 - x1 - dx1);
+            int drop = dominant_drop_axis(n0, n1);
+
+            auto coeff_edge = [&](const Vec2& a0, const Vec2& da,
+                                  const Vec2& b0, const Vec2& db,
+                                  const Vec2& p0, const Vec2& dp,
+                                  double out[3]) {
+                Vec2 u0 = b0 - a0;
+                Vec2 du = db - da;
+                Vec2 v0 = p0 - a0;
+                Vec2 dv = dp - da;
+                out[2] = cross2(du, dv);
+                out[1] = cross2(du, v0) + cross2(u0, dv);
+                out[0] = cross2(u0, v0);
+            };
+
+            Vec2 p0 = project_drop_axis(x, drop), dp = project_drop_axis(dx, drop);
+            Vec2 a0 = project_drop_axis(x1, drop), da = project_drop_axis(dx1, drop);
+            Vec2 b0 = project_drop_axis(x2, drop), db = project_drop_axis(dx2, drop);
+            Vec2 c0 = project_drop_axis(x3, drop), dc = project_drop_axis(dx3, drop);
+
+            if (point_in_triangle_projected(p0, a0, b0, c0)) return 0.0;
+
+            std::vector<double> roots;
+            double coeffs[3];
+            coeff_edge(a0, da, b0, db, p0, dp, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots);
+            coeff_edge(b0, db, c0, dc, p0, dp, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots);
+            coeff_edge(c0, dc, a0, da, p0, dp, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots);
+
+            std::sort(roots.begin(), roots.end());
+            for (double t : roots) {
+                Vec2 pt = p0 + dp * t;
+                Vec2 at = a0 + da * t;
+                Vec2 bt = b0 + db * t;
+                Vec2 ct = c0 + dc * t;
+                if (point_in_triangle_projected(pt, at, bt, ct)) return t;
+            }
+            return ccd_infinity;
+        }
+
+        bool segments_intersect_projected(const Vec2& a, const Vec2& b, const Vec2& c, const Vec2& d) {
+            auto orient = [](const Vec2& p, const Vec2& q, const Vec2& r) {
+                return cross2(q - p, r - p);
+            };
+            auto on_segment = [](const Vec2& p, const Vec2& q, const Vec2& r) {
+                return q.x() >= std::min(p.x(), r.x()) - 1e-10 && q.x() <= std::max(p.x(), r.x()) + 1e-10 &&
+                       q.y() >= std::min(p.y(), r.y()) - 1e-10 && q.y() <= std::max(p.y(), r.y()) + 1e-10;
+            };
+
+            double o1 = orient(a, b, c), o2 = orient(a, b, d);
+            double o3 = orient(c, d, a), o4 = orient(c, d, b);
+
+            auto sgn = [](double v) { return (v > 1e-10) - (v < -1e-10); };
+            int s1 = sgn(o1), s2 = sgn(o2), s3 = sgn(o3), s4 = sgn(o4);
+
+            if (s1 * s2 < 0 && s3 * s4 < 0) return true;
+            if (s1 == 0 && on_segment(a, c, b)) return true;
+            if (s2 == 0 && on_segment(a, d, b)) return true;
+            if (s3 == 0 && on_segment(c, a, d)) return true;
+            if (s4 == 0 && on_segment(c, b, d)) return true;
+            return false;
+        }
+
+        double collinear_segment_overlap_time(const Vec3& x1, const Vec3& dx1,
+                                              const Vec3& x2, const Vec3& dx2,
+                                              const Vec3& x3, const Vec3& dx3,
+                                              const Vec3& x4, const Vec3& dx4) {
+            Vec3 d0 = x2 - x1;
+            Vec3 d1 = x2 + dx2 - x1 - dx1;
+            double ax = std::fabs(d0.x()) + std::fabs(d1.x());
+            double ay = std::fabs(d0.y()) + std::fabs(d1.y());
+            double az = std::fabs(d0.z()) + std::fabs(d1.z());
+            int axis = (ax >= ay && ax >= az) ? 0 : (ay >= ax && ay >= az ? 1 : 2);
+
+            auto comp = [&](const Vec3& v) { return axis == 0 ? v.x() : (axis == 1 ? v.y() : v.z()); };
+
+            double A0 = comp(x1), dA = comp(dx1);
+            double B0 = comp(x2), dB = comp(dx2);
+            double C0 = comp(x3), dC = comp(dx3);
+            double D0 = comp(x4), dD = comp(dx4);
+
+            double best = ccd_infinity;
+            best = std::min(best, earliest_scalar_between(A0, dA, C0, dC, D0, dD));
+            best = std::min(best, earliest_scalar_between(B0, dB, C0, dC, D0, dD));
+            best = std::min(best, earliest_scalar_between(C0, dC, A0, dA, B0, dB));
+            best = std::min(best, earliest_scalar_between(D0, dD, A0, dA, B0, dB));
+            return best;
+        }
+
+        bool inside_segments_3d_at(const Vec3& x1, const Vec3& dx1,
+                                   const Vec3& x2, const Vec3& dx2,
+                                   const Vec3& x3, const Vec3& dx3,
+                                   const Vec3& x4, const Vec3& dx4,
+                                   double t) {
+            Vec3 a0 = x1 + dx1 * t, a1 = x2 + dx2 * t;
+            Vec3 b0 = x3 + dx3 * t, b1 = x4 + dx4 * t;
+
+            Vec3 u = a1 - a0;
+            Vec3 v = b1 - b0;
+            Vec3 w = b0 - a0;
+            Vec3 n = u.cross(v);
+            double n2 = n.squaredNorm();
+
+            if (n2 <= ccd_geom_eps * ccd_geom_eps) {
+                Vec3 crossw = w.cross(u);
+                if (crossw.squaredNorm() > 1e-16) return false;
+
+                Vec3 d0 = a1 - a0;
+                double ax = std::fabs(d0.x()), ay = std::fabs(d0.y()), az = std::fabs(d0.z());
+                int axis = (ax >= ay && ax >= az) ? 0 : (ay >= ax && ay >= az ? 1 : 2);
+                auto comp1d = [&](const Vec3& p) { return axis == 0 ? p.x() : (axis == 1 ? p.y() : p.z()); };
+
+                double A = comp1d(a0), B = comp1d(a1);
+                double C = comp1d(b0), D = comp1d(b1);
+                if (A > B) std::swap(A, B);
+                if (C > D) std::swap(C, D);
+                return A <= D + 1e-8 && C <= B + 1e-8;
+            }
+
+            if (std::fabs(w.dot(n)) > ccd_geom_eps * std::sqrt(n2)) return false;
+            double s = w.cross(v).dot(n) / n2;
+            double upar = w.cross(u).dot(n) / n2;
+            Vec3 pa = a0 + u * s;
+            Vec3 pb = b0 + v * upar;
+            if ((pa - pb).squaredNorm() > ccd_geom_eps * ccd_geom_eps) return false;
+            return s >= -1e-8 && s <= 1.0 + 1e-8 && upar >= -1e-8 && upar <= 1.0 + 1e-8;
+        }
+
+        double persistent_segment_segment_time(const Vec3& x1, const Vec3& dx1,
+                                               const Vec3& x2, const Vec3& dx2,
+                                               const Vec3& x3, const Vec3& dx3,
+                                               const Vec3& x4, const Vec3& dx4) {
+            Vec3 n0 = (x2 - x1).cross(x4 - x3);
+            Vec3 n1 = (x2 + dx2 - x1 - dx1).cross(x4 + dx4 - x3 - dx3);
+            if (n0.squaredNorm() <= ccd_geom_eps * ccd_geom_eps && n1.squaredNorm() <= ccd_geom_eps * ccd_geom_eps) {
+                return collinear_segment_overlap_time(x1, dx1, x2, dx2, x3, dx3, x4, dx4);
+            }
+            int drop = dominant_drop_axis(n0, n1);
+
+            Vec2 a0 = project_drop_axis(x1, drop), da = project_drop_axis(dx1, drop);
+            Vec2 b0 = project_drop_axis(x2, drop), db = project_drop_axis(dx2, drop);
+            Vec2 c0 = project_drop_axis(x3, drop), dc = project_drop_axis(dx3, drop);
+            Vec2 d0 = project_drop_axis(x4, drop), dd = project_drop_axis(dx4, drop);
+
+            if (segments_intersect_projected(a0, b0, c0, d0)) return 0.0;
+
+            auto orient_coeff = [](const Vec2& p0, const Vec2& dp,
+                                   const Vec2& q0, const Vec2& dq,
+                                   const Vec2& r0, const Vec2& dr,
+                                   double out[3]) {
+                Vec2 u0 = q0 - p0;
+                Vec2 du = dq - dp;
+                Vec2 v0 = r0 - p0;
+                Vec2 dv = dr - dp;
+                out[2] = cross2(du, dv);
+                out[1] = cross2(du, v0) + cross2(u0, dv);
+                out[0] = cross2(u0, v0);
+            };
+
+            std::vector<double> roots;
+            double coeffs[3];
+            orient_coeff(a0, da, b0, db, c0, dc, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots);
+            orient_coeff(a0, da, b0, db, d0, dd, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots);
+            orient_coeff(c0, dc, d0, dd, a0, da, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots);
+            orient_coeff(c0, dc, d0, dd, b0, db, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots);
+
+            std::sort(roots.begin(), roots.end());
+            for (double t : roots) {
+                Vec2 at = a0 + da * t, bt = b0 + db * t, ct = c0 + dc * t, dt = d0 + dd * t;
+                if (segments_intersect_projected(at, bt, ct, dt)) return t;
+            }
+
+            return collinear_segment_overlap_time(x1, dx1, x2, dx2, x3, dx3, x4, dx4);
+        }
+
+    } // namespace
+
+    double node_segment_2d(const Vec2& x, const Vec2& dx,
+                           const Vec2& x1, const Vec2& dx1,
+                           const Vec2& x2, const Vec2& dx2) {
+        if (inside_segment_2d_at(x, dx, x1, dx1, x2, dx2, 0.0)) return 0.0;
+
+        Vec2 dp = dx2 - dx1;
+        Vec2 dr = dx - dx1;
+        Vec2 p0 = x2 - x1;
+        Vec2 r0 = x - x1;
+
+        double a = cross2(dp, dr);
+        double b = cross2(dp, r0) + cross2(p0, dr);
+        double c = cross2(p0, r0);
+
+        std::vector<double> roots;
+        solve_quadratic_all(a, b, c, roots);
+        std::sort(roots.begin(), roots.end());
+        for (double t : roots) {
+            if (inside_segment_2d_at(x, dx, x1, dx1, x2, dx2, t)) return t;
+        }
+
+        double s = std::max({1.0, std::fabs(a), std::fabs(b), std::fabs(c)});
+        if (near_zero(a, s) && near_zero(b, s) && near_zero(c, s)) {
+            Vec2 e0 = x2 - x1;
+            Vec2 e1 = (x2 + dx2) - (x1 + dx1);
+            double sx = std::fabs(e0.x()) + std::fabs(e1.x());
+            double sy = std::fabs(e0.y()) + std::fabs(e1.y());
+            double best = (sx >= sy)
+                          ? earliest_scalar_between(x.x(), dx.x(), x1.x(), dx1.x(), x2.x(), dx2.x())
+                          : earliest_scalar_between(x.y(), dx.y(), x1.y(), dx1.y(), x2.y(), dx2.y());
+            if (std::isfinite(best) && inside_segment_2d_at(x, dx, x1, dx1, x2, dx2, best)) return best;
+        }
+
+        return ccd_infinity;
+    }
+
+    double node_triangle_3d(const Vec3& x, const Vec3& dx,
+                            const Vec3& x1, const Vec3& dx1,
+                            const Vec3& x2, const Vec3& dx2,
+                            const Vec3& x3, const Vec3& dx3) {
+        if (inside_triangle_3d_at(x, dx, x1, dx1, x2, dx2, x3, dx3, 0.0)) return 0.0;
+
+        Vec3 p0 = x2 - x1, dp = dx2 - dx1;
+        Vec3 q0 = x3 - x1, dq = dx3 - dx1;
+        Vec3 r0 = x - x1, dr = dx - dx1;
+
+        Vec3 p0xq0 = p0.cross(q0);
+        Vec3 dpxq0 = dp.cross(q0);
+        Vec3 p0xdq = p0.cross(dq);
+        Vec3 dpxdq = dp.cross(dq);
+
+        double d = p0xq0.dot(r0);
+        double c = dpxq0.dot(r0) + p0xdq.dot(r0) + p0xq0.dot(dr);
+        double b = dpxdq.dot(r0) + dpxq0.dot(dr) + p0xdq.dot(dr);
+        double a = dpxdq.dot(dr);
+
+        std::vector<double> roots;
+        solve_cubic_all(a, b, c, d, roots);
+        std::sort(roots.begin(), roots.end());
+        for (double t : roots) {
+            if (inside_triangle_3d_at(x, dx, x1, dx1, x2, dx2, x3, dx3, t)) return t;
+        }
+
+        double s = scale4(a, b, c, d);
+        if (near_zero(a, s) && near_zero(b, s) && near_zero(c, s) && near_zero(d, s)) {
+            double t = node_triangle_coplanar_interval(x, dx, x1, dx1, x2, dx2, x3, dx3);
+            if (std::isfinite(t) && inside_triangle_3d_at(x, dx, x1, dx1, x2, dx2, x3, dx3, t)) return t;
+        }
+
+        return ccd_infinity;
+    }
+
+    double segment_segment_3d(const Vec3& x1, const Vec3& dx1,
+                              const Vec3& x2, const Vec3& dx2,
+                              const Vec3& x3, const Vec3& dx3,
+                              const Vec3& x4, const Vec3& dx4) {
+        if (inside_segments_3d_at(x1, dx1, x2, dx2, x3, dx3, x4, dx4, 0.0)) return 0.0;
+
+        Vec3 p0 = x2 - x1, dp = dx2 - dx1;
+        Vec3 q0 = x4 - x3, dq = dx4 - dx3;
+        Vec3 r0 = x3 - x1, dr = dx3 - dx1;
+
+        Vec3 p0xq0 = p0.cross(q0);
+        Vec3 dpxq0 = dp.cross(q0);
+        Vec3 p0xdq = p0.cross(dq);
+        Vec3 dpxdq = dp.cross(dq);
+
+        double d = p0xq0.dot(r0);
+        double c = dpxq0.dot(r0) + p0xdq.dot(r0) + p0xq0.dot(dr);
+        double b = dpxdq.dot(r0) + dpxq0.dot(dr) + p0xdq.dot(dr);
+        double a = dpxdq.dot(dr);
+
+        std::vector<double> roots;
+        solve_cubic_all(a, b, c, d, roots);
+        std::sort(roots.begin(), roots.end());
+        for (double t : roots) {
+            if (inside_segments_3d_at(x1, dx1, x2, dx2, x3, dx3, x4, dx4, t)) return t;
+        }
+
+        double s = scale4(a, b, c, d);
+        if (near_zero(a, s) && near_zero(b, s) && near_zero(c, s) && near_zero(d, s)) {
+            double t = persistent_segment_segment_time(x1, dx1, x2, dx2, x3, dx3, x4, dx4);
+            if (std::isfinite(t) && inside_segments_3d_at(x1, dx1, x2, dx2, x3, dx3, x4, dx4, t)) return t;
+        }
+
+        return ccd_infinity;
+    }
+
+} // namespace ccd
 #include <Eigen/Dense>
 #include <algorithm>
 #include <array>
@@ -1397,42 +1955,523 @@ static std::vector<std::array<int, 2>> extract_all_unique_edges(const RefMesh& m
     return out;
 }
 
-static std::vector<NodeTrianglePair> build_all_nonincident_node_triangle_pairs(const RefMesh& mesh) {
-    std::vector<NodeTrianglePair> pairs;
-    const int nv = static_cast<int>(mesh.num_positions);
-    const int nt = num_tris(mesh);
-    pairs.reserve(static_cast<size_t>(nv) * static_cast<size_t>(nt));
+struct SweptAABB3 {
+    Vec3 min{Vec3::Zero()};
+    Vec3 max{Vec3::Zero()};
+};
 
-    for (int node = 0; node < nv; ++node) {
-        for (int t = 0; t < nt; ++t) {
-            const int v0 = tri_vertex(mesh, t, 0);
-            const int v1 = tri_vertex(mesh, t, 1);
-            const int v2 = tri_vertex(mesh, t, 2);
-            if (node == v0 || node == v1 || node == v2) continue;
-            pairs.push_back(NodeTrianglePair{node, {v0, v1, v2}});
-        }
-    }
-    return pairs;
+static SweptAABB3 make_swept_node_box(const std::vector<Vec3>& x, const std::vector<Vec3>& v, int node, double dt, double pad) {
+    SweptAABB3 box;
+    box.min = x[node].cwiseMin(x[node] + dt * v[node]);
+    box.max = x[node].cwiseMax(x[node] + dt * v[node]);
+    box.min.array() -= pad;
+    box.max.array() += pad;
+    return box;
 }
 
-static std::vector<SegmentSegmentPair> build_all_nonincident_segment_segment_pairs(const RefMesh& mesh) {
-    const auto edges = extract_all_unique_edges(mesh);
-    const int ne = static_cast<int>(edges.size());
+static SweptAABB3 make_swept_triangle_box(const std::vector<Vec3>& x, const std::vector<Vec3>& v, int a, int b, int c, double dt, double pad) {
+    SweptAABB3 box;
+    box.min = x[a].cwiseMin(x[a] + dt * v[a]).cwiseMin(x[b].cwiseMin(x[b] + dt * v[b])).cwiseMin(x[c].cwiseMin(x[c] + dt * v[c]));
+    box.max = x[a].cwiseMax(x[a] + dt * v[a]).cwiseMax(x[b].cwiseMax(x[b] + dt * v[b])).cwiseMax(x[c].cwiseMax(x[c] + dt * v[c]));
+    box.min.array() -= pad;
+    box.max.array() += pad;
+    return box;
+}
 
-    std::vector<SegmentSegmentPair> pairs;
-    pairs.reserve(static_cast<size_t>(ne) * static_cast<size_t>(ne) / 2);
+static SweptAABB3 make_swept_edge_box(const std::vector<Vec3>& x, const std::vector<Vec3>& v, int a, int b, double dt, double pad) {
+    SweptAABB3 box;
+    box.min = x[a].cwiseMin(x[a] + dt * v[a]).cwiseMin(x[b].cwiseMin(x[b] + dt * v[b]));
+    box.max = x[a].cwiseMax(x[a] + dt * v[a]).cwiseMax(x[b].cwiseMax(x[b] + dt * v[b]));
+    box.min.array() -= pad;
+    box.max.array() += pad;
+    return box;
+}
 
-    for (int i = 0; i < ne; ++i) {
-        const int a0 = edges[i][0];
-        const int a1 = edges[i][1];
-        for (int j = i + 1; j < ne; ++j) {
-            const int b0 = edges[j][0];
-            const int b1 = edges[j][1];
-            if (a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1) continue;
-            pairs.push_back(SegmentSegmentPair{{a0, a1, b0, b1}});
+static bool swept_aabb_intersects(const SweptAABB3& a, const SweptAABB3& b) {
+    return (a.min.array() <= b.max.array()).all() && (a.max.array() >= b.min.array()).all();
+}
+
+static Vec3 swept_aabb_extent(const SweptAABB3& b) {
+    return b.max - b.min;
+}
+
+static Vec3 swept_aabb_centroid(const SweptAABB3& b) {
+    return 0.5 * (b.min + b.max);
+}
+
+static SweptAABB3 merge_swept_aabb(const SweptAABB3& a, const SweptAABB3& b) {
+    SweptAABB3 out;
+    out.min = a.min.cwiseMin(b.min);
+    out.max = a.max.cwiseMax(b.max);
+    return out;
+}
+
+struct BVHNode3 {
+    SweptAABB3 box;
+    int left{-1};
+    int right{-1};
+    int leaf_primitive{-1};
+    int parent{-1};
+};
+
+static int build_bvh3(const std::vector<SweptAABB3>& boxes, std::vector<BVHNode3>& out_nodes) {
+    out_nodes.clear();
+    if (boxes.empty()) return -1;
+
+    std::vector<int> idx(boxes.size());
+    for (int i = 0; i < static_cast<int>(boxes.size()); ++i) idx[i] = i;
+
+    struct Task { int node_idx; int begin; int end; };
+    std::vector<Task> stack;
+    out_nodes.push_back(BVHNode3{});
+    stack.push_back(Task{0, 0, static_cast<int>(idx.size())});
+
+    while (!stack.empty()) {
+        const Task task = stack.back();
+        stack.pop_back();
+
+        SweptAABB3 node_box = boxes[idx[task.begin]];
+        for (int i = task.begin + 1; i < task.end; ++i) {
+            node_box = merge_swept_aabb(node_box, boxes[idx[i]]);
+        }
+        out_nodes[task.node_idx].box = node_box;
+
+        const int count = task.end - task.begin;
+        if (count == 1) {
+            out_nodes[task.node_idx].leaf_primitive = idx[task.begin];
+            continue;
+        }
+
+        const Vec3 e = swept_aabb_extent(node_box);
+        int axis = 0;
+        if (e.y() > e.x() && e.y() >= e.z()) axis = 1;
+        else if (e.z() > e.x() && e.z() >= e.y()) axis = 2;
+
+        const int mid = task.begin + count / 2;
+        std::nth_element(
+                idx.begin() + task.begin, idx.begin() + mid, idx.begin() + task.end,
+                [&](int a, int b) {
+                    return swept_aabb_centroid(boxes[a])[axis] < swept_aabb_centroid(boxes[b])[axis];
+                });
+
+        const int left = static_cast<int>(out_nodes.size());
+        out_nodes.push_back(BVHNode3{});
+        const int right = static_cast<int>(out_nodes.size());
+        out_nodes.push_back(BVHNode3{});
+
+        out_nodes[task.node_idx].left = left;
+        out_nodes[task.node_idx].right = right;
+        out_nodes[left].parent = task.node_idx;
+        out_nodes[right].parent = task.node_idx;
+
+        stack.push_back(Task{right, mid, task.end});
+        stack.push_back(Task{left, task.begin, mid});
+    }
+
+    return 0;
+}
+
+static void query_bvh3(const std::vector<BVHNode3>& nodes, int root, const SweptAABB3& box, std::vector<int>& hits) {
+    hits.clear();
+    if (root < 0) return;
+
+    std::vector<int> stack;
+    stack.push_back(root);
+    while (!stack.empty()) {
+        const int ni = stack.back();
+        stack.pop_back();
+        const BVHNode3& n = nodes[ni];
+        if (!swept_aabb_intersects(n.box, box)) continue;
+        if (n.leaf_primitive >= 0) {
+            hits.push_back(n.leaf_primitive);
+        } else {
+            stack.push_back(n.left);
+            stack.push_back(n.right);
         }
     }
-    return pairs;
+}
+
+static std::vector<int> build_leaf_node_map(const std::vector<BVHNode3>& nodes, int primitive_count) {
+    std::vector<int> leaf_node_of_primitive(primitive_count, -1);
+    for (int i = 0; i < static_cast<int>(nodes.size()); ++i) {
+        if (nodes[i].leaf_primitive >= 0) {
+            leaf_node_of_primitive[nodes[i].leaf_primitive] = i;
+        }
+    }
+    return leaf_node_of_primitive;
+}
+
+static void refit_bvh3_from_leaf(
+        std::vector<BVHNode3>& nodes,
+        const std::vector<SweptAABB3>& boxes,
+        int leaf_node_idx) {
+    if (leaf_node_idx < 0) return;
+    int ni = leaf_node_idx;
+    while (ni >= 0) {
+        BVHNode3& n = nodes[ni];
+        if (n.leaf_primitive >= 0) {
+            n.box = boxes[n.leaf_primitive];
+        } else {
+            n.box = merge_swept_aabb(nodes[n.left].box, nodes[n.right].box);
+        }
+        ni = n.parent;
+    }
+}
+
+struct BroadPhaseState {
+    std::vector<std::array<int, 2>> edges;
+    std::vector<std::vector<int>> incident_tris_by_vertex;
+    std::vector<std::vector<int>> incident_edges_by_vertex;
+
+    std::vector<SweptAABB3> node_boxes;
+    std::vector<SweptAABB3> tri_boxes;
+    std::vector<SweptAABB3> edge_boxes;
+
+    std::vector<BVHNode3> tri_bvh;
+    std::vector<BVHNode3> edge_bvh;
+    int tri_root{-1};
+    int edge_root{-1};
+    std::vector<int> tri_leaf_node_of_primitive;
+    std::vector<int> edge_leaf_node_of_primitive;
+
+    std::vector<NodeTrianglePair> nt_pairs;
+    std::vector<int> nt_pair_tri_indices;
+    std::unordered_map<std::uint64_t, std::size_t> nt_pair_index;
+
+    std::vector<SegmentSegmentPair> ss_pairs;
+    std::vector<std::array<int, 2>> ss_pair_edge_indices;
+    std::unordered_map<std::uint64_t, std::size_t> ss_pair_index;
+
+    double dt{0.0};
+    double d_hat{0.0};
+    bool use_ccd_filter{false};
+};
+
+static std::uint64_t nt_pair_key(int node, int tri) {
+    return (std::uint64_t(std::uint32_t(node)) << 32) | std::uint32_t(tri);
+}
+
+static std::uint64_t ss_pair_key(int e0, int e1) {
+    if (e0 > e1) std::swap(e0, e1);
+    return (std::uint64_t(std::uint32_t(e0)) << 32) | std::uint32_t(e1);
+}
+
+static bool edge_share_vertex(const std::array<int, 2>& a, const std::array<int, 2>& b) {
+    return a[0] == b[0] || a[0] == b[1] || a[1] == b[0] || a[1] == b[1];
+}
+
+static void remove_nt_pair_at(BroadPhaseState& bp, std::size_t idx) {
+    const std::size_t last = bp.nt_pairs.size() - 1;
+    const int removed_node = bp.nt_pairs[idx].node;
+    const int removed_tri = bp.nt_pair_tri_indices[idx];
+    bp.nt_pair_index.erase(nt_pair_key(removed_node, removed_tri));
+
+    if (idx != last) {
+        bp.nt_pairs[idx] = bp.nt_pairs[last];
+        bp.nt_pair_tri_indices[idx] = bp.nt_pair_tri_indices[last];
+        bp.nt_pair_index[nt_pair_key(bp.nt_pairs[idx].node, bp.nt_pair_tri_indices[idx])] = idx;
+    }
+
+    bp.nt_pairs.pop_back();
+    bp.nt_pair_tri_indices.pop_back();
+}
+
+static void remove_ss_pair_at(BroadPhaseState& bp, std::size_t idx) {
+    const std::size_t last = bp.ss_pairs.size() - 1;
+    const int e0_removed = bp.ss_pair_edge_indices[idx][0];
+    const int e1_removed = bp.ss_pair_edge_indices[idx][1];
+    bp.ss_pair_index.erase(ss_pair_key(e0_removed, e1_removed));
+
+    if (idx != last) {
+        bp.ss_pairs[idx] = bp.ss_pairs[last];
+        bp.ss_pair_edge_indices[idx] = bp.ss_pair_edge_indices[last];
+        bp.ss_pair_index[ss_pair_key(bp.ss_pair_edge_indices[idx][0], bp.ss_pair_edge_indices[idx][1])] = idx;
+    }
+
+    bp.ss_pairs.pop_back();
+    bp.ss_pair_edge_indices.pop_back();
+}
+
+static void remove_nt_pairs_for_node(BroadPhaseState& bp, int node) {
+    std::size_t i = 0;
+    while (i < bp.nt_pairs.size()) {
+        if (bp.nt_pairs[i].node == node) {
+            remove_nt_pair_at(bp, i);
+        } else {
+            ++i;
+        }
+    }
+}
+
+static void remove_nt_pairs_for_triangle(BroadPhaseState& bp, int tri_idx) {
+    std::size_t i = 0;
+    while (i < bp.nt_pairs.size()) {
+        if (bp.nt_pair_tri_indices[i] == tri_idx) {
+            remove_nt_pair_at(bp, i);
+        } else {
+            ++i;
+        }
+    }
+}
+
+static void remove_ss_pairs_for_edge(BroadPhaseState& bp, int edge_idx) {
+    std::size_t i = 0;
+    while (i < bp.ss_pairs.size()) {
+        const auto& e = bp.ss_pair_edge_indices[i];
+        if (e[0] == edge_idx || e[1] == edge_idx) {
+            remove_ss_pair_at(bp, i);
+        } else {
+            ++i;
+        }
+    }
+}
+
+static bool passes_nt_ccd(
+        const BroadPhaseState& bp,
+        const RefMesh& mesh,
+        const std::vector<Vec3>& x,
+        const std::vector<Vec3>& v,
+        int node,
+        int tri_idx) {
+    if (!bp.use_ccd_filter) return true;
+
+    const int v0 = tri_vertex(mesh, tri_idx, 0);
+    const int v1 = tri_vertex(mesh, tri_idx, 1);
+    const int v2 = tri_vertex(mesh, tri_idx, 2);
+
+    const double toi = ccd::node_triangle_3d(
+            ccd::make_vec3(x[node].x(), x[node].y(), x[node].z()),
+            ccd::make_vec3(bp.dt * v[node].x(), bp.dt * v[node].y(), bp.dt * v[node].z()),
+            ccd::make_vec3(x[v0].x(), x[v0].y(), x[v0].z()),
+            ccd::make_vec3(bp.dt * v[v0].x(), bp.dt * v[v0].y(), bp.dt * v[v0].z()),
+            ccd::make_vec3(x[v1].x(), x[v1].y(), x[v1].z()),
+            ccd::make_vec3(bp.dt * v[v1].x(), bp.dt * v[v1].y(), bp.dt * v[v1].z()),
+            ccd::make_vec3(x[v2].x(), x[v2].y(), x[v2].z()),
+            ccd::make_vec3(bp.dt * v[v2].x(), bp.dt * v[v2].y(), bp.dt * v[v2].z()));
+    return std::isfinite(toi);
+}
+
+static bool passes_ss_ccd(
+        const BroadPhaseState& bp,
+        const std::vector<std::array<int, 2>>& edges,
+        const std::vector<Vec3>& x,
+        const std::vector<Vec3>& v,
+        int e0,
+        int e1) {
+    if (!bp.use_ccd_filter) return true;
+
+    const int a0 = edges[e0][0];
+    const int a1 = edges[e0][1];
+    const int b0 = edges[e1][0];
+    const int b1 = edges[e1][1];
+
+    const double toi = ccd::segment_segment_3d(
+            ccd::make_vec3(x[a0].x(), x[a0].y(), x[a0].z()),
+            ccd::make_vec3(bp.dt * v[a0].x(), bp.dt * v[a0].y(), bp.dt * v[a0].z()),
+            ccd::make_vec3(x[a1].x(), x[a1].y(), x[a1].z()),
+            ccd::make_vec3(bp.dt * v[a1].x(), bp.dt * v[a1].y(), bp.dt * v[a1].z()),
+            ccd::make_vec3(x[b0].x(), x[b0].y(), x[b0].z()),
+            ccd::make_vec3(bp.dt * v[b0].x(), bp.dt * v[b0].y(), bp.dt * v[b0].z()),
+            ccd::make_vec3(x[b1].x(), x[b1].y(), x[b1].z()),
+            ccd::make_vec3(bp.dt * v[b1].x(), bp.dt * v[b1].y(), bp.dt * v[b1].z()));
+    return std::isfinite(toi);
+}
+
+static void add_nt_pair(
+        BroadPhaseState& bp,
+        const RefMesh& mesh,
+        const std::vector<Vec3>& x,
+        const std::vector<Vec3>& v,
+        int node,
+        int tri_idx) {
+    const std::uint64_t key = nt_pair_key(node, tri_idx);
+    if (bp.nt_pair_index.count(key)) return;
+    if (!passes_nt_ccd(bp, mesh, x, v, node, tri_idx)) return;
+
+    NodeTrianglePair p;
+    p.node = node;
+    p.tri_v[0] = tri_vertex(mesh, tri_idx, 0);
+    p.tri_v[1] = tri_vertex(mesh, tri_idx, 1);
+    p.tri_v[2] = tri_vertex(mesh, tri_idx, 2);
+
+    const std::size_t idx = bp.nt_pairs.size();
+    bp.nt_pairs.push_back(p);
+    bp.nt_pair_tri_indices.push_back(tri_idx);
+    bp.nt_pair_index[key] = idx;
+}
+
+static void add_ss_pair(
+        BroadPhaseState& bp,
+        const std::vector<Vec3>& x,
+        const std::vector<Vec3>& v,
+        int e0,
+        int e1) {
+    if (e0 > e1) std::swap(e0, e1);
+    const std::uint64_t key = ss_pair_key(e0, e1);
+    if (bp.ss_pair_index.count(key)) return;
+    if (!passes_ss_ccd(bp, bp.edges, x, v, e0, e1)) return;
+
+    const auto& a = bp.edges[e0];
+    const auto& b = bp.edges[e1];
+    SegmentSegmentPair p{{a[0], a[1], b[0], b[1]}};
+
+    const std::size_t idx = bp.ss_pairs.size();
+    bp.ss_pairs.push_back(p);
+    bp.ss_pair_edge_indices.push_back({e0, e1});
+    bp.ss_pair_index[key] = idx;
+}
+
+static void initialize_broad_phase_topology(BroadPhaseState& bp, const RefMesh& mesh) {
+    bp.edges = extract_all_unique_edges(mesh);
+
+    const int nv = static_cast<int>(mesh.num_positions);
+    const int nt = num_tris(mesh);
+    const int ne = static_cast<int>(bp.edges.size());
+
+    bp.incident_tris_by_vertex.assign(nv, {});
+    for (int t = 0; t < nt; ++t) {
+        for (int l = 0; l < 3; ++l) {
+            bp.incident_tris_by_vertex[tri_vertex(mesh, t, l)].push_back(t);
+        }
+    }
+
+    bp.incident_edges_by_vertex.assign(nv, {});
+    for (int e = 0; e < ne; ++e) {
+        bp.incident_edges_by_vertex[bp.edges[e][0]].push_back(e);
+        bp.incident_edges_by_vertex[bp.edges[e][1]].push_back(e);
+    }
+}
+
+static void broad_phase_initialize(
+        BroadPhaseState& bp,
+        const RefMesh& mesh,
+        const std::vector<Vec3>& x,
+        const std::vector<Vec3>& v,
+        double dt,
+        double d_hat,
+        bool use_ccd_filter) {
+    if (bp.edges.empty()) {
+        initialize_broad_phase_topology(bp, mesh);
+    }
+
+    bp.dt = dt;
+    bp.d_hat = d_hat;
+    bp.use_ccd_filter = use_ccd_filter;
+    bp.nt_pairs.clear();
+    bp.nt_pair_tri_indices.clear();
+    bp.nt_pair_index.clear();
+    bp.ss_pairs.clear();
+    bp.ss_pair_edge_indices.clear();
+    bp.ss_pair_index.clear();
+
+    if (d_hat <= 0.0) return;
+
+    const int nv = static_cast<int>(mesh.num_positions);
+    const int nt = num_tris(mesh);
+    const int ne = static_cast<int>(bp.edges.size());
+
+    bp.node_boxes.resize(nv);
+    bp.tri_boxes.resize(nt);
+    bp.edge_boxes.resize(ne);
+
+    for (int i = 0; i < nv; ++i) {
+        bp.node_boxes[i] = make_swept_node_box(x, v, i, dt, d_hat);
+    }
+    for (int t = 0; t < nt; ++t) {
+        const int a = tri_vertex(mesh, t, 0);
+        const int b = tri_vertex(mesh, t, 1);
+        const int c = tri_vertex(mesh, t, 2);
+        bp.tri_boxes[t] = make_swept_triangle_box(x, v, a, b, c, dt, d_hat);
+    }
+    for (int e = 0; e < ne; ++e) {
+        bp.edge_boxes[e] = make_swept_edge_box(x, v, bp.edges[e][0], bp.edges[e][1], dt, d_hat);
+    }
+
+    bp.tri_root = build_bvh3(bp.tri_boxes, bp.tri_bvh);
+    bp.edge_root = build_bvh3(bp.edge_boxes, bp.edge_bvh);
+    bp.tri_leaf_node_of_primitive = build_leaf_node_map(bp.tri_bvh, nt);
+    bp.edge_leaf_node_of_primitive = build_leaf_node_map(bp.edge_bvh, ne);
+
+    std::vector<int> hits;
+    for (int node = 0; node < nv; ++node) {
+        query_bvh3(bp.tri_bvh, bp.tri_root, bp.node_boxes[node], hits);
+        for (int t : hits) {
+            const int a = tri_vertex(mesh, t, 0);
+            const int b = tri_vertex(mesh, t, 1);
+            const int c = tri_vertex(mesh, t, 2);
+            if (node == a || node == b || node == c) continue;
+            add_nt_pair(bp, mesh, x, v, node, t);
+        }
+    }
+
+    for (int e = 0; e < ne; ++e) {
+        query_bvh3(bp.edge_bvh, bp.edge_root, bp.edge_boxes[e], hits);
+        for (int f : hits) {
+            if (f == e) continue;
+            if (edge_share_vertex(bp.edges[e], bp.edges[f])) continue;
+            add_ss_pair(bp, x, v, e, f);
+        }
+    }
+}
+
+static void broad_phase_refresh_after_vertex_move(
+        BroadPhaseState& bp,
+        const RefMesh& mesh,
+        const std::vector<Vec3>& x,
+        const std::vector<Vec3>& v,
+        int moved_node) {
+    if (bp.d_hat <= 0.0) return;
+
+    const int nv = static_cast<int>(mesh.num_positions);
+    bp.node_boxes[moved_node] = make_swept_node_box(x, v, moved_node, bp.dt, bp.d_hat);
+
+    for (int tri_idx : bp.incident_tris_by_vertex[moved_node]) {
+        const int a = tri_vertex(mesh, tri_idx, 0);
+        const int b = tri_vertex(mesh, tri_idx, 1);
+        const int c = tri_vertex(mesh, tri_idx, 2);
+        bp.tri_boxes[tri_idx] = make_swept_triangle_box(x, v, a, b, c, bp.dt, bp.d_hat);
+        refit_bvh3_from_leaf(bp.tri_bvh, bp.tri_boxes, bp.tri_leaf_node_of_primitive[tri_idx]);
+    }
+
+    for (int edge_idx : bp.incident_edges_by_vertex[moved_node]) {
+        const int a = bp.edges[edge_idx][0];
+        const int b = bp.edges[edge_idx][1];
+        bp.edge_boxes[edge_idx] = make_swept_edge_box(x, v, a, b, bp.dt, bp.d_hat);
+        refit_bvh3_from_leaf(bp.edge_bvh, bp.edge_boxes, bp.edge_leaf_node_of_primitive[edge_idx]);
+    }
+
+    remove_nt_pairs_for_node(bp, moved_node);
+    std::vector<int> hits;
+    query_bvh3(bp.tri_bvh, bp.tri_root, bp.node_boxes[moved_node], hits);
+    for (int t : hits) {
+        const int a = tri_vertex(mesh, t, 0);
+        const int b = tri_vertex(mesh, t, 1);
+        const int c = tri_vertex(mesh, t, 2);
+        if (moved_node == a || moved_node == b || moved_node == c) continue;
+        add_nt_pair(bp, mesh, x, v, moved_node, t);
+    }
+
+    for (int tri_idx : bp.incident_tris_by_vertex[moved_node]) {
+        remove_nt_pairs_for_triangle(bp, tri_idx);
+        const int a = tri_vertex(mesh, tri_idx, 0);
+        const int b = tri_vertex(mesh, tri_idx, 1);
+        const int c = tri_vertex(mesh, tri_idx, 2);
+        for (int node = 0; node < nv; ++node) {
+            if (node == a || node == b || node == c) continue;
+            if (!swept_aabb_intersects(bp.node_boxes[node], bp.tri_boxes[tri_idx])) continue;
+            add_nt_pair(bp, mesh, x, v, node, tri_idx);
+        }
+    }
+
+    for (int edge_idx : bp.incident_edges_by_vertex[moved_node]) {
+        remove_ss_pairs_for_edge(bp, edge_idx);
+        query_bvh3(bp.edge_bvh, bp.edge_root, bp.edge_boxes[edge_idx], hits);
+        for (int other_edge_idx : hits) {
+            if (other_edge_idx == edge_idx) continue;
+            if (edge_share_vertex(bp.edges[edge_idx], bp.edges[other_edge_idx])) continue;
+            add_ss_pair(bp, x, v, edge_idx, other_edge_idx);
+        }
+    }
 }
 
 // ============================================================
@@ -1566,17 +2605,20 @@ static void update_one_vertex(
 static SolverResult global_gauss_seidel_solver(
         const RefMesh& mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
         const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
-        const std::vector<NodeTrianglePair>& nt_pairs, const std::vector<SegmentSegmentPair>& ss_pairs) {
+        const std::vector<Vec3>& sweep_v, BroadPhaseState& broad_phase) {
     SolverResult result;
-    result.initial_residual = compute_global_residual(mesh, adj, pins, params, xnew, xhat, nt_pairs, ss_pairs);
+    result.initial_residual = compute_global_residual(
+            mesh, adj, pins, params, xnew, xhat, broad_phase.nt_pairs, broad_phase.ss_pairs);
     result.final_residual = result.initial_residual;
     if (result.initial_residual < params.tol_abs) return result;
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         for (int vi = 0; vi < static_cast<int>(xnew.size()); ++vi) {
-            update_one_vertex(vi, mesh, adj, pins, params, xhat, xnew, nt_pairs, ss_pairs);
+            update_one_vertex(vi, mesh, adj, pins, params, xhat, xnew, broad_phase.nt_pairs, broad_phase.ss_pairs);
+            broad_phase_refresh_after_vertex_move(broad_phase, mesh, xnew, sweep_v, vi);
         }
-        result.final_residual = compute_global_residual(mesh, adj, pins, params, xnew, xhat, nt_pairs, ss_pairs);
+        result.final_residual = compute_global_residual(
+                mesh, adj, pins, params, xnew, xhat, broad_phase.nt_pairs, broad_phase.ss_pairs);
         result.iterations = iter;
         if (result.final_residual < params.tol_abs) return result;
     }
@@ -1623,7 +2665,7 @@ int main() {
     params.step_weight = 1.0;
 
     // Toggle this to compare no-barrier vs barrier runs.
-    params.d_hat = 0.00;
+    params.d_hat = 0.10;
 
     std::cout << "num_frames = " << params.num_frames << "\n";
     std::cout << "d_hat = " << params.d_hat
@@ -1663,14 +2705,17 @@ int main() {
     mesh.build_lumped_mass(params.density, params.thickness);
     const VertexTriangleMap adj = build_incident_triangle_map(mesh.tris);
 
-    // Global contact pairs: include all pairs except incident ones.
-    const auto nt_pairs = build_all_nonincident_node_triangle_pairs(mesh);
-    const auto ss_pairs = build_all_nonincident_segment_segment_pairs(mesh);
+    // Broad phase over swept AABBs, initialized once per substep then
+    // maintained incrementally during Gauss-Seidel vertex updates.
+    BroadPhaseState broad_phase;
+    const bool use_ccd_filter = true;
+    broad_phase_initialize(broad_phase, mesh, state.x, state.v, params.dt(), params.d_hat, use_ccd_filter);
 
     std::cout << "Vertices:  " << state.x.size() << "\n";
     std::cout << "Triangles: " << num_tris(mesh) << "\n";
-    std::cout << "NT pairs:  " << nt_pairs.size() << "\n";
-    std::cout << "SS pairs:  " << ss_pairs.size() << "\n";
+    std::cout << "NT pairs:  " << broad_phase.nt_pairs.size() << "\n";
+    std::cout << "SS pairs:  " << broad_phase.ss_pairs.size() << "\n";
+    std::cout << "CCD filter: " << (use_ccd_filter ? "ON" : "OFF") << "\n";
 
     const std::string outdir = (params.d_hat > 0.0) ? "frames_clean_barrier_on" : "frames_clean_barrier_off";
     if (fs::exists(outdir)) fs::remove_all(outdir);
@@ -1690,7 +2735,8 @@ int main() {
             build_xhat(xhat, state.x, state.v, params.dt());
 
             std::vector<Vec3> xnew = state.x;
-            result = global_gauss_seidel_solver(mesh, adj, pins, params, xnew, xhat, nt_pairs, ss_pairs);
+            broad_phase_initialize(broad_phase, mesh, state.x, state.v, params.dt(), params.d_hat, use_ccd_filter);
+            result = global_gauss_seidel_solver(mesh, adj, pins, params, xnew, xhat, state.v, broad_phase);
             update_velocity(state.v, xnew, state.x, params.dt());
             state.x = xnew;
         }
