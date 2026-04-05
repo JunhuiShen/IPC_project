@@ -78,10 +78,10 @@ RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
 VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
 build_scene(ref_mesh, state, pins, adj, params, X);
 
-// No barrier, no coloring — serial path
+// No barrier — serial path
 const std::vector<NodeTrianglePair>   nt_pairs;
 const std::vector<SegmentSegmentPair> ss_pairs;
-const std::vector<std::vector<int>>   color_groups;
+const auto color_groups = build_color_groups(ref_mesh, static_cast<int>(state.deformed_positions.size()));
 
 for (int frame = 1; frame <= 100; ++frame) {
 for (int sub = 0; sub < params.substeps; ++sub) {

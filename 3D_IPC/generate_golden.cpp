@@ -33,7 +33,8 @@ int main() {
 
     const std::vector<NodeTrianglePair>   nt_pairs;
     const std::vector<SegmentSegmentPair> ss_pairs;
-    const std::vector<std::vector<int>>   color_groups;  // empty — serial path
+    const auto color_groups = greedy_color(build_vertex_adjacency_map(ref_mesh.tris),
+                                           static_cast<int>(state.deformed_positions.size()));
 
     std::ofstream out(std::string(GOLDEN_DIR) + "/golden_frames.txt");
     out << std::setprecision(15);
