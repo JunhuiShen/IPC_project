@@ -22,6 +22,7 @@ struct SimParams {
     int max_global_iters{};
 
     int    restart_frame{-1};  // -1 = no restart
+    bool   use_parallel{false};
 
     double dt()  const { return 1.0 / (fps * static_cast<double>(substeps)); }
     double dt2() const { double d = dt(); return d * d; }  // cached square

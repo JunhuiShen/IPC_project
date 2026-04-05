@@ -50,6 +50,7 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin
     params.max_global_iters = 100;
     params.tol_abs      = 1e-6;
     params.step_weight  = 1.0;
+    params.use_parallel = false;
 
     clear_model(ref_mesh, state, X, pins);
     int nx = 10, ny = 10;
@@ -76,11 +77,11 @@ ASSERT_FALSE(golden.empty()) << "Golden file empty or missing";
 RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
 VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
 build_scene(ref_mesh, state, pins, adj, params, X);
-const auto color_groups = build_color_groups(ref_mesh, static_cast<int>(state.deformed_positions.size()));
 
-// No barrier for snapshot test — empty pair lists, d_hat stays 0
+// No barrier, no coloring — serial path
 const std::vector<NodeTrianglePair>   nt_pairs;
 const std::vector<SegmentSegmentPair> ss_pairs;
+const std::vector<std::vector<int>>   color_groups;
 
 for (int frame = 1; frame <= 100; ++frame) {
 for (int sub = 0; sub < params.substeps; ++sub) {

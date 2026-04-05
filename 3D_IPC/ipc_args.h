@@ -12,7 +12,7 @@ struct IPCArgs3D : ArgParser {
 
     // --- time integration ---
     double fps          = 30.0;
-    int    substeps     = 1;
+    int    substeps     = 3;
     int    num_frames   = 60;
 
     // --- physics ---
@@ -26,10 +26,11 @@ struct IPCArgs3D : ArgParser {
     double gz           = 0.0;
 
     // --- solver ---
-    int    max_iters    = 500;
-    double tol_abs      = 1e-6;
-    double step_weight  = 1.0;
-    double d_hat        = 0.0;
+    int    max_iters     = 500;
+    double tol_abs       = 1e-6;
+    double step_weight   = 1.0;
+    double d_hat         = 0.0;
+    bool   use_parallel  = false;
 
     // --- mesh ---
     int    nx           = 2;
@@ -51,7 +52,7 @@ struct IPCArgs3D : ArgParser {
 
     IPCArgs3D() {
         add_double("fps",         fps,         30.0,       "Output frames per second");
-        add_int   ("substeps",    substeps,    1,          "Solver substeps per frame (solver_dt = 1/(fps*substeps))");
+        add_int   ("substeps",    substeps,    3,          "Solver substeps per frame (solver_dt = 1/(fps*substeps))");
         add_int   ("num_frames",  num_frames,  60,         "Number of frames to simulate");
 
         add_double("mu",          mu,          10.0,       "First Lame parameter (shear modulus)");
@@ -67,6 +68,7 @@ struct IPCArgs3D : ArgParser {
         add_double("tol_abs",     tol_abs,     1e-6,       "Absolute convergence tolerance");
         add_double("step_weight", step_weight, 1.0,        "Newton step damping factor");
         add_double("d_hat",       d_hat,       0.0,        "Barrier activation distance (0 = off)");
+        add_bool  ("use_parallel", use_parallel, false,    "Use parallel Gauss-Seidel (requires coloring)");
 
         add_int   ("nx",          nx,          10,          "Mesh subdivisions in x");
         add_int   ("ny",          ny,          10,          "Mesh subdivisions in y");
@@ -105,6 +107,7 @@ struct IPCArgs3D : ArgParser {
         p.step_weight      = step_weight;
         p.d_hat            = d_hat;
         p.restart_frame    = restart_frame;
+        p.use_parallel     = use_parallel;
         return p;
     }
 };
