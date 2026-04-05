@@ -15,6 +15,8 @@ These components can be swapped to compare different algorithmic variants.
 - C++17 compiler (GCC 9+, Clang 10+, or MSVC 2019+)
 - CMake 3.10+
 - Eigen3
+- OpenMP
+- GoogleTest
 
 ## Build
 
@@ -84,14 +86,15 @@ Per-frame statistics are printed to stdout:
     │
     ├── barrier_energy.h / barrier_energy.cpp
     │   scalar barrier function b(delta; d_hat) and its derivatives
-    │   node–triangle barrier: energy, gradient (12-vector), Hessian (12x12)
-    │   segment–segment barrier: energy, gradient (12-vector), Hessian (12x12)
+    │   node–triangle barrier: energy + per-DOF gradient/Hessian blocks
+    │   segment–segment barrier: energy + per-DOF gradient/Hessian blocks
     │
     ├── corotated_energy.h / corotated_energy.cpp
     │   corotated 3x2 energy, per-vertex nodal gradient, and per-vertex nodal Hessian
     │
-    ├── Corotated32.h / Corotated32.cpp
-    │   reference corotated 3x2 formulation used by corotated_energy
+    ├── broad_phase.h / broad_phase.cpp
+    │   swept-AABB broad phase with BVH queries
+    │   incremental refresh and local ancestor-only BVH refit
     │
     ├── solver.h / solver.cpp
     │   nonlinear Gauss–Seidel solver 
@@ -123,8 +126,9 @@ Per-frame statistics are printed to stdout:
 ## Notes
 
 - corotated_energy implements element-level (triangle) physics
-- physics assembles global energy, gradient, and Hessian
+- physics provides no-barrier local gradient/Hessian terms and residual helpers
 - barrier_energy provides per-pair barrier energy, gradient, and Hessian for both node–triangle and segment–segment primitives
+- broad_phase maintains barrier candidate pairs incrementally during sweeps
 - solver performs nonlinear Gauss–Seidel iterations
 - simulation.cpp controls time stepping and scene setup
 
