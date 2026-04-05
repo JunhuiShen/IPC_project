@@ -2,14 +2,11 @@
 #include "physics.h"
 #include "solver.h"
 #include <gtest/gtest.h>
-#include <filesystem>
 #include <fstream>
 #include <map>
 #include <sstream>
 #include <string>
 #include <vector>
-
-namespace fs = std::filesystem;
 
 static constexpr double kTol         = 1e-6;
 static constexpr int    kRestartFrame = 50;
@@ -69,10 +66,10 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state,
 
 static void advance_one_frame(DeformedState& state,
                               const RefMesh& ref_mesh, const VertexTriangleMap& adj,
-                              const std::vector<Pin>& pins, const SimParams& params) {
+                              const std::vector<Pin>& pins, const SimParams& params,
+                              const std::vector<std::vector<int>>& color_groups) {
     const std::vector<NodeTrianglePair>   nt_pairs;
     const std::vector<SegmentSegmentPair> ss_pairs;
-    const std::vector<std::vector<int>>   color_groups;  // empty — serial path
 
     for (int sub = 0; sub < params.substeps; ++sub) {
         std::vector<Vec3> xhat;
@@ -93,35 +90,23 @@ TEST(RestartTest, RestartFromFrame50MatchesGolden) {
     auto golden = load_golden(golden_path);
     ASSERT_FALSE(golden.empty()) << "Golden file empty or missing";
 
-    // Persistent checkpoint directory — shared with parallel_serial_consistency_test
-    const std::string tmpdir = std::string(GOLDEN_DIR) + "/frame_50_checkpoint";
-    fs::create_directories(tmpdir);
+    const std::string checkpoint_dir = std::string(GOLDEN_DIR) + "/frame_50_checkpoint";
 
-    // --- Phase 1: run frames 1..kRestartFrame, serialize at kRestartFrame ---
+    // Load the pre-committed checkpoint and run frames kRestartFrame+1..kTotalFrames
     {
         RefMesh ref_mesh; DeformedState state;
         std::vector<Pin> pins; VertexTriangleMap adj;
         SimParams params; std::vector<Vec2> X;
         build_scene(ref_mesh, state, pins, adj, params, X);
 
-        for (int f = 1; f <= kRestartFrame; ++f)
-            advance_one_frame(state, ref_mesh, adj, pins, params);
+        const auto color_groups = greedy_color(build_vertex_adjacency_map(ref_mesh.tris),
+                                               static_cast<int>(state.deformed_positions.size()));
 
-        serialize_state(tmpdir, kRestartFrame, state);
-    }
-
-    // --- Phase 2: deserialize frame kRestartFrame, run frames kRestartFrame+1..kTotalFrames ---
-    {
-        RefMesh ref_mesh; DeformedState state;
-        std::vector<Pin> pins; VertexTriangleMap adj;
-        SimParams params; std::vector<Vec2> X;
-        build_scene(ref_mesh, state, pins, adj, params, X);
-
-        ASSERT_TRUE(deserialize_state(tmpdir, kRestartFrame, state))
+        ASSERT_TRUE(deserialize_state(checkpoint_dir, kRestartFrame, state))
             << "Failed to deserialize state at frame " << kRestartFrame;
 
         for (int f = kRestartFrame + 1; f <= kTotalFrames; ++f) {
-            advance_one_frame(state, ref_mesh, adj, pins, params);
+            advance_one_frame(state, ref_mesh, adj, pins, params, color_groups);
 
             ASSERT_TRUE(golden.count(f)) << "No golden data for frame " << f;
             const auto& expected = golden[f];

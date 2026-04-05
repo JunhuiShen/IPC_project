@@ -1,6 +1,7 @@
 #include "make_shape.h"
 #include "physics.h"
 #include "solver.h"
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -36,6 +37,9 @@ int main() {
     const auto color_groups = greedy_color(build_vertex_adjacency_map(ref_mesh.tris),
                                            static_cast<int>(state.deformed_positions.size()));
 
+    const std::string checkpoint_dir = std::string(GOLDEN_DIR) + "/frame_50_checkpoint";
+    std::filesystem::create_directories(checkpoint_dir);
+
     std::ofstream out(std::string(GOLDEN_DIR) + "/golden_frames.txt");
     out << std::setprecision(15);
 
@@ -49,6 +53,9 @@ int main() {
             update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
             state.deformed_positions = xnew;
         }
+
+        if (frame == 50)
+            serialize_state(checkpoint_dir, 50, state);
 
         out << "frame " << frame << "\n";
         for (int i = 0; i < static_cast<int>(state.deformed_positions.size()); ++i)
