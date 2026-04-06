@@ -176,6 +176,40 @@ void export_aabb_list(const std::string& filename, const std::vector<AABB>& boxe
         write_aabb_wireframe(out, box, v_offset);
 }
 
+int export_bvh_level(const std::string& filename, const std::vector<BVHNode>& nodes, int root, int depth) {
+    if (root < 0 || nodes.empty()) return 0;
+
+    struct Entry { int idx; int d; };
+    std::vector<Entry> queue;
+    queue.push_back({root, 0});
+
+    std::vector<AABB> boxes;
+    for (int qi = 0; qi < static_cast<int>(queue.size()); ++qi) {
+        const auto [ni, d] = queue[qi];
+        const BVHNode& n = nodes[ni];
+        if (d == depth) {
+            boxes.push_back(n.bbox);
+        } else {
+            if (n.left  >= 0) queue.push_back({n.left,  d + 1});
+            if (n.right >= 0) queue.push_back({n.right, d + 1});
+        }
+    }
+
+    if (boxes.empty()) return 0;
+
+    std::ofstream out(filename);
+    if (!out) {
+        std::cerr << "Error: cannot write " << filename << "\n";
+        return 0;
+    }
+    out << std::setprecision(10);
+    int v_offset = 0;
+    for (const AABB& box : boxes)
+        write_aabb_wireframe(out, box, v_offset);
+
+    return static_cast<int>(boxes.size());
+}
+
 void export_broad_phase_boxes(const std::string& filename, const BroadPhase& bp) {
     std::ofstream out(filename);
     if (!out) {
