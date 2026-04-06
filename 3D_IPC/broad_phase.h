@@ -67,11 +67,15 @@ public:
 
         std::vector<BVHNode> tri_bvh_nodes;
         std::vector<BVHNode> edge_bvh_nodes;
+        std::vector<BVHNode> node_bvh_nodes;
+        std::vector<int> node_bvh_parent;
+        std::vector<int> node_leaf_node;
         std::vector<int> tri_bvh_parent;
         std::vector<int> edge_bvh_parent;
         std::vector<int> tri_leaf_node;
         std::vector<int> edge_leaf_node;
 
+        int node_root = -1;
         int tri_root = -1;
         int edge_root = -1;
 

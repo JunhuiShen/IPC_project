@@ -329,16 +329,18 @@ namespace {
 
     static inline void scan_triangle_against_all_nodes(BroadPhase::Cache& cache, int tri_idx, const RefMesh& mesh) {
         if (tri_idx < 0 || tri_idx >= static_cast<int>(cache.tri_boxes.size())) return;
+        if (cache.node_root < 0) return;
 
         const int a = tri_vertex(mesh, tri_idx, 0);
         const int b = tri_vertex(mesh, tri_idx, 1);
         const int c = tri_vertex(mesh, tri_idx, 2);
         const AABB& tri_box = cache.tri_boxes[tri_idx];
 
-        const int nv = static_cast<int>(cache.node_boxes.size());
-        for (int node = 0; node < nv; ++node) {
+        std::vector<int> hits;
+        query_bvh(cache.node_bvh_nodes, cache.node_root, tri_box, hits);
+
+        for (int node : hits) {
             if (node_in_triangle(node, a, b, c)) continue;
-            if (!aabb_intersects(cache.node_boxes[node], tri_box)) continue;
             add_nt_pair(cache, node, tri_idx, mesh);
         }
     }
@@ -453,6 +455,8 @@ void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, c
 
     c.tri_root = build_bvh(c.tri_boxes, c.tri_bvh_nodes);
     c.edge_root = build_bvh(c.edge_boxes, c.edge_bvh_nodes);
+    c.node_root = build_bvh(c.node_boxes, c.node_bvh_nodes);
+    build_bvh_topology(c.node_bvh_nodes, static_cast<int>(c.node_boxes.size()), c.node_bvh_parent, c.node_leaf_node);
     build_bvh_topology(c.tri_bvh_nodes, static_cast<int>(c.tri_boxes.size()), c.tri_bvh_parent, c.tri_leaf_node);
     build_bvh_topology(c.edge_bvh_nodes, static_cast<int>(c.edge_boxes.size()), c.edge_bvh_parent, c.edge_leaf_node);
 
@@ -498,6 +502,11 @@ void BroadPhase::refresh(const std::vector<Vec3>& x, const std::vector<Vec3>& v,
     if (cache_.edge_root >= 0) {
         refit_bvh_locally(cache_.edge_bvh_nodes, cache_.edge_boxes, cache_.edge_bvh_parent,
                           cache_.edge_leaf_node, incident_edges);
+    }
+    if (cache_.node_root >= 0) {
+        const std::vector<int> moved_only{moved_node};
+        refit_bvh_locally(cache_.node_bvh_nodes, cache_.node_boxes, cache_.node_bvh_parent,
+                          cache_.node_leaf_node, moved_only);
     }
 
     remove_nt_pairs_touching_node(cache_, moved_node);
