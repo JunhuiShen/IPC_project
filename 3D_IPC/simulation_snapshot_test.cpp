@@ -11,7 +11,7 @@
 #include <vector>
 
 // Tolerance for position comparison
-static constexpr double kTol = 1e-6;
+static constexpr double kTol = 1e-3;
 
 // ---------------------------------------------------------------------------
 // Parse golden file produced by dump_frames

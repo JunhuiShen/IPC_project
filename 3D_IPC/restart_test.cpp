@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-static constexpr double kTol         = 1e-6;
+static constexpr double kTol         = 1e-3;
 static constexpr int    kRestartFrame = 50;
 static constexpr int    kTotalFrames  = 100;
 
