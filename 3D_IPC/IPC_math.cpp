@@ -100,3 +100,36 @@ std::array<double, 3> triangle_plane_barycentric_coordinates(const Vec3& x, cons
 
     return {{lambda1, lambda2, lambda3}};
 }
+
+bool nearly_zero(double value, double eps) {
+    return std::abs(value) <= eps;
+}
+
+bool in_unit_interval(double t, double eps) {
+    return t >= -eps && t <= 1.0 + eps;
+}
+
+Vec3 point_at_linear_step(const Vec3& x, const Vec3& dx, double t) {
+    return x + t * dx;
+}
+
+bool point_in_triangle_on_plane(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double eps){
+    auto b = triangle_plane_barycentric_coordinates(x,x1,x2,x3,eps);
+    return b[0] >= -eps && b[1] >= -eps && b[2] >= -eps;
+}
+
+bool segment_segment_parameters_if_not_parallel(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double& s, double& u, double eps){
+    Vec3 a = x2 - x1;
+    Vec3 b = x4 - x3;
+    Vec3 c = x3 - x1;
+
+    Vec3 n = a.cross(b);
+    double denom = n.squaredNorm();
+
+    if (std::abs(denom) <= eps)
+        return false;
+
+    s = c.cross(b).dot(n) / denom;
+    u = c.cross(a).dot(n) / denom;
+    return true;
+}

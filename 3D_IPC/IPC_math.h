@@ -43,4 +43,14 @@ double clamp_scalar(double v, double lo, double hi);
 
 Vec3 segment_closest_point(const Vec3& x, const Vec3& a, const Vec3& b, double& t);
 
-std::array<double, 3> triangle_plane_barycentric_coordinates(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double eps = 1.0e-12);
+std::array<double, 3> triangle_plane_barycentric_coordinates(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double eps = 1e-12);
+
+bool nearly_zero(double value, double eps = 1e-12);
+
+bool in_unit_interval(double t, double eps = 1e-12);
+
+Vec3 point_at_linear_step(const Vec3& x, const Vec3& dx, double t);
+
+bool point_in_triangle_on_plane(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double eps = 1e-12);
+
+bool segment_segment_parameters_if_not_parallel(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double& s, double& u, double eps = 1e-12);

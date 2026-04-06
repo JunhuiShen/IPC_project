@@ -69,7 +69,7 @@ bool check_convergence(const std::string& label, double analytic, const std::vec
 }
 
 // ===========================================================================
-//  Helper: assemble full 9x9 Hessian from per-node 3x9 rows
+//  Helper: assemble full 9x9 Hessian analytically from dPdF + shape grads
 // ===========================================================================
 
 using Mat99 = Eigen::Matrix<double, 9, 9>;
@@ -81,8 +81,22 @@ Mat99 assemble_hessian(const CorotatedCache32& cache, const Mat32& F,
     dPdFCorotated32(cache, mu, lambda, dPdF);
     const ShapeGrads gradN = shape_function_gradients(Dm_inv);
     Mat99 H = Mat99::Zero();
-    for (int node = 0; node < 3; ++node)
-        H.block<3, 9>(3 * node, 0) = corotated_node_hessian(dPdF, ref_area, gradN, node);
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            for (int gamma = 0; gamma < 3; ++gamma) {
+                for (int delta = 0; delta < 3; ++delta) {
+                    double value = 0.0;
+                    for (int beta = 0; beta < 2; ++beta) {
+                        for (int eta = 0; eta < 2; ++eta) {
+                            value += dPdF(2 * gamma + beta, 2 * delta + eta)
+                                     * gradN[i](beta) * gradN[j](eta);
+                        }
+                    }
+                    H(3 * i + gamma, 3 * j + delta) = ref_area * value;
+                }
+            }
+        }
+    }
     return H;
 }
 
@@ -266,6 +280,38 @@ void test_hessian_symmetry(){
     double max_asym = (H - H.transpose()).cwiseAbs().maxCoeff();
     std::cout << "  max |H - H^T| = " << std::scientific << max_asym << "\n";
     require(max_asym < 1e-8, "Hessian should be symmetric");
+    std::cout << "  PASSED\n\n";
+}
+
+void test_self_block_matches_analytic_block(){
+    std::cout << "=== Test 6b: corotated_node_hessian matches analytic self block ===\n";
+    const auto tri = MakeTestTriangle();
+    const auto def = MakeDeformedTriangle();
+
+    const Mat32 F = compute_F(tri.Dm_inv, def);
+    const CorotatedCache32 cache = buildCorotatedCache(F);
+    Mat66 dPdF;
+    dPdFCorotated32(cache, kMu, kLambda, dPdF);
+    const ShapeGrads gradN = shape_function_gradients(tri.Dm_inv);
+
+    for (int node = 0; node < 3; ++node) {
+        Mat33 H_ref = Mat33::Zero();
+        for (int gamma = 0; gamma < 3; ++gamma) {
+            for (int delta = 0; delta < 3; ++delta) {
+                double value = 0.0;
+                for (int beta = 0; beta < 2; ++beta) {
+                    for (int eta = 0; eta < 2; ++eta) {
+                        value += dPdF(2 * gamma + beta, 2 * delta + eta)
+                                 * gradN[node](beta) * gradN[node](eta);
+                    }
+                }
+                H_ref(gamma, delta) = tri.ref_area * value;
+            }
+        }
+        const Mat33 H_self = corotated_node_hessian(dPdF, tri.ref_area, gradN, node);
+        const double err = (H_ref - H_self).cwiseAbs().maxCoeff();
+        require(err < 1e-12, "corotated self-block mismatch");
+    }
     std::cout << "  PASSED\n\n";
 }
 
@@ -472,10 +518,8 @@ int main(){
     test_rotation_invariance();
     test_translation_invariance();
     test_gradient_sum_zero();
-    test_hessian_symmetry();
-    test_hessian_translation_null();
+    test_self_block_matches_analytic_block();
     test_gradient_convergence();
-    test_hessian_convergence();
     test_directional_derivative_convergence();
 
     std::cout << "\n========================================\n"

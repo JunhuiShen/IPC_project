@@ -112,7 +112,7 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
         dPdFCorotated32(cache, params.mu, params.lambda, dPdF);
 
         g += dt2 * corotated_node_gradient(P, A, gradN, a);
-        H += dt2 * corotated_node_hessian(dPdF, A, gradN, a).template block<3, 3>(0, 3 * a);
+        H += dt2 * corotated_node_hessian(dPdF, A, gradN, a);
     }
 
     return {g, H};

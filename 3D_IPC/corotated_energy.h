@@ -29,5 +29,5 @@ ShapeGrads shape_function_gradients(const Mat22& Dm_inv);
 // Single-node gradient: returns the 3-vector force on node only.
 Vec3 corotated_node_gradient(const Mat32& P, double ref_area, const ShapeGrads& gradN, int node);
 
-// Single-node hessian row: returns the 3x9 block d(g_node)/d(all DOFs).
-Mat39 corotated_node_hessian(const Mat66& dPdF, double ref_area, const ShapeGrads& gradN, int node);
+// Single-node self hessian: returns d(g_node)/d(x_node), i.e. the 3x3 diagonal block.
+Mat33 corotated_node_hessian(const Mat66& dPdF, double ref_area, const ShapeGrads& gradN, int node);

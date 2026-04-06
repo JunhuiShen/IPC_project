@@ -37,14 +37,6 @@ Eigen::Matrix<double, 12, 1> nt_assemble_gradient(
     return g;
 }
 
-// Node-triangle: assemble 12x12 hessian from 4 per-DOF 3x12 row blocks
-Mat12 nt_assemble_hessian(
-        const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat) {
-    Mat12 H = Mat12::Zero();
-    for (int dof = 0; dof < 4; ++dof)
-        H.block<3,12>(3*dof, 0) = node_triangle_barrier_hessian(x, x1, x2, x3, d_hat, dof);
-    return H;
-}
 
 // Segment-segment: assemble 12-vector gradient from 4 per-DOF Vec3 calls
 Eigen::Matrix<double, 12, 1> ss_assemble_gradient(
@@ -55,14 +47,6 @@ Eigen::Matrix<double, 12, 1> ss_assemble_gradient(
     return g;
 }
 
-// Segment-segment: assemble 12x12 hessian from 4 per-DOF 3x12 row blocks
-Mat12 ss_assemble_hessian(
-        const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat) {
-    Mat12 H = Mat12::Zero();
-    for (int dof = 0; dof < 4; ++dof)
-        H.block<3,12>(3*dof, 0) = segment_segment_barrier_hessian(x1, x2, x3, x4, d_hat, dof);
-    return H;
-}
 
 // ===========================================================================
 //  FD helpers for node-triangle barrier (gradient check)
@@ -323,51 +307,43 @@ void run_gradient_convergence_test(const TestPoint& tp){
 void run_hessian_convergence_test(const TestPoint& tp){
     std::cout << "=== Hessian convergence: " << tp.name << " ===\n";
 
-    Mat12 H = nt_assemble_hessian(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat);
-
-    // Symmetry check
-    double max_asym = (H - H.transpose()).cwiseAbs().maxCoeff();
-    std::cout << "  Symmetry check: max |H - H^T| = " << std::scientific << max_asym << "\n";
-    require(max_asym < 1e-12, tp.name + ": Hessian not symmetric");
-
     const char* dof_names[4] = {"x", "x1", "x2", "x3"};
     std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
     bool all_passed = true;
     int tested = 0, skipped_zero = 0;
 
-    for (int v1 = 0; v1 < 4; ++v1) {
+    for (int v = 0; v < 4; ++v) {
+        const Mat33 H = node_triangle_barrier_hessian(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, v);
         for (int k = 0; k < 3; ++k) {
-            for (int v2 = 0; v2 < 4; ++v2) {
-                for (int l = 0; l < 3; ++l) {
-                    double analytic_val = H(3*v1+k, 3*v2+l);
+            for (int l = 0; l < 3; ++l) {
+                const double analytic_val = H(k, l);
 
-                    if (std::abs(analytic_val) < 1e-14) {
-                        double fd_fine = node_triangle_gradient_fd(
-                                tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, v1, k, v2, l, hs.back());
-                        if (std::abs(fd_fine) > 1e-6) {
-                            std::cerr << "  FAIL: H(" << dof_names[v1] << k << ","
-                                      << dof_names[v2] << l << ") analytic=0 but fd=" << fd_fine << "\n";
-                            all_passed = false;
-                        }
-                        skipped_zero++;
-                        continue;
-                    }
-
-                    std::vector<double> errors;
-                    for (auto h : hs) {
-                        double fd = node_triangle_gradient_fd(
-                                tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, v1, k, v2, l, h);
-                        errors.push_back(std::abs(fd - analytic_val));
-                    }
-
-                    std::string label = std::string("H(") + dof_names[v1] + std::to_string(k)
-                                        + "," + dof_names[v2] + std::to_string(l) + ")";
-                    if (!check_convergence(label, analytic_val, hs, errors, 1e-9, false)) {
-                        check_convergence(label, analytic_val, hs, errors, 1e-9, true);
+                if (std::abs(analytic_val) < 1e-14) {
+                    const double fd_fine = node_triangle_gradient_fd(
+                            tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, v, k, v, l, hs.back());
+                    if (std::abs(fd_fine) > 1e-6) {
+                        std::cerr << "  FAIL: H(" << dof_names[v] << k << ","
+                                  << dof_names[v] << l << ") analytic=0 but fd=" << fd_fine << "\n";
                         all_passed = false;
                     }
-                    tested++;
+                    skipped_zero++;
+                    continue;
                 }
+
+                std::vector<double> errors;
+                for (auto h : hs) {
+                    const double fd = node_triangle_gradient_fd(
+                            tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, v, k, v, l, h);
+                    errors.push_back(std::abs(fd - analytic_val));
+                }
+
+                const std::string label = std::string("H(") + dof_names[v] + std::to_string(k)
+                                        + "," + dof_names[v] + std::to_string(l) + ")";
+                if (!check_convergence(label, analytic_val, hs, errors, 1e-9, false)) {
+                    check_convergence(label, analytic_val, hs, errors, 1e-9, true);
+                    all_passed = false;
+                }
+                tested++;
             }
         }
     }
@@ -466,51 +442,43 @@ void run_ss_gradient_convergence_test(const SSTestPoint& tp){
 void run_ss_hessian_convergence_test(const SSTestPoint& tp){
     std::cout << "=== SS Hessian convergence: " << tp.name << " ===\n";
 
-    Mat12 H = ss_assemble_hessian(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat);
-
-    // Symmetry check
-    double max_asym = (H - H.transpose()).cwiseAbs().maxCoeff();
-    std::cout << "  Symmetry check: max |H - H^T| = " << std::scientific << max_asym << "\n";
-    require(max_asym < 1e-12, tp.name + ": SS Hessian not symmetric");
-
     const char* dof_names[4] = {"x1", "x2", "x3", "x4"};
     std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
     bool all_passed = true;
     int tested = 0, skipped_zero = 0;
 
-    for (int v1 = 0; v1 < 4; ++v1) {
+    for (int v = 0; v < 4; ++v) {
+        const Mat33 H = segment_segment_barrier_hessian(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, v);
         for (int k = 0; k < 3; ++k) {
-            for (int v2 = 0; v2 < 4; ++v2) {
-                for (int l = 0; l < 3; ++l) {
-                    double analytic_val = H(3*v1+k, 3*v2+l);
+            for (int l = 0; l < 3; ++l) {
+                const double analytic_val = H(k, l);
 
-                    if (std::abs(analytic_val) < 1e-14) {
-                        double fd_fine = segment_segment_gradient_fd(
-                                tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, v1, k, v2, l, hs.back());
-                        if (std::abs(fd_fine) > 1e-6) {
-                            std::cerr << "  FAIL: H(" << dof_names[v1] << k << ","
-                                      << dof_names[v2] << l << ") analytic=0 but fd=" << fd_fine << "\n";
-                            all_passed = false;
-                        }
-                        skipped_zero++;
-                        continue;
-                    }
-
-                    std::vector<double> errors;
-                    for (auto h : hs) {
-                        double fd = segment_segment_gradient_fd(
-                                tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, v1, k, v2, l, h);
-                        errors.push_back(std::abs(fd - analytic_val));
-                    }
-
-                    std::string label = std::string("H(") + dof_names[v1] + std::to_string(k)
-                                        + "," + dof_names[v2] + std::to_string(l) + ")";
-                    if (!check_convergence(label, analytic_val, hs, errors, 1e-9, false)) {
-                        check_convergence(label, analytic_val, hs, errors, 1e-9, true);
+                if (std::abs(analytic_val) < 1e-14) {
+                    const double fd_fine = segment_segment_gradient_fd(
+                            tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, v, k, v, l, hs.back());
+                    if (std::abs(fd_fine) > 1e-6) {
+                        std::cerr << "  FAIL: H(" << dof_names[v] << k << ","
+                                  << dof_names[v] << l << ") analytic=0 but fd=" << fd_fine << "\n";
                         all_passed = false;
                     }
-                    tested++;
+                    skipped_zero++;
+                    continue;
                 }
+
+                std::vector<double> errors;
+                for (auto h : hs) {
+                    const double fd = segment_segment_gradient_fd(
+                            tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, v, k, v, l, h);
+                    errors.push_back(std::abs(fd - analytic_val));
+                }
+
+                const std::string label = std::string("H(") + dof_names[v] + std::to_string(k)
+                                        + "," + dof_names[v] + std::to_string(l) + ")";
+                if (!check_convergence(label, analytic_val, hs, errors, 1e-9, false)) {
+                    check_convergence(label, analytic_val, hs, errors, 1e-9, true);
+                    all_passed = false;
+                }
+                tested++;
             }
         }
     }

@@ -16,11 +16,9 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
             else if (vi == p.tri_v[1])  dof = 2;
             else if (vi == p.tri_v[2])  dof = 3;
             if (dof < 0) continue;
-            // Combined call: one distance evaluation for both g and H
-            auto [bg, bH] = node_triangle_barrier_gradient_and_hessian(
-                    x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, dof);
+            auto [bg, bH] = node_triangle_barrier_gradient_and_hessian(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, dof);
             g += dt2 * bg;
-            H += dt2 * bH.block<3, 3>(0, 3 * dof);
+            H += dt2 * bH;
         }
 
         for (const auto& p : ss_pairs) {
@@ -30,18 +28,16 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
             else if (vi == p.v[2]) dof = 2;
             else if (vi == p.v[3]) dof = 3;
             if (dof < 0) continue;
-            // Combined call: one distance evaluation for both g and H
-            auto [bg, bH] = segment_segment_barrier_gradient_and_hessian(
-                    x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, dof);
+            auto [bg, bH] = segment_segment_barrier_gradient_and_hessian(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, dof);
             g += dt2 * bg;
-            H += dt2 * bH.block<3, 3>(0, 3 * dof);
+            H += dt2 * bH;
         }
     }
 
     const Vec3 delta = matrix3d_inverse(H) * g;
 
     // CCD hook point:
-    // Build a global swept-AABB candidate set using the local Newton trial displacement.
+    // Build a global swept-AABB candidate set using the local Newton trial displacement
     // For now, keep step_weight as the placeholder limiter until CCD TOI is integrated.
     double step = params.step_weight;
     if (params.d_hat > 0.0) {

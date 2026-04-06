@@ -116,7 +116,7 @@ double corotated_energy(double ref_area, const Mat22& Dm_inv, const TriangleDef&
     return ref_area * PsiCorotated32(cache, F, mu, lambda);
 }
 
-// Compute shape-function gradients once per triangle — shared by gradient and hessian.
+// Compute shape-function gradients once per triangle shared by gradient and hessian.
 ShapeGrads shape_function_gradients(const Mat22& Dm_inv) {
     ShapeGrads grads;
     grads[1] = Dm_inv.row(0).transpose();
@@ -137,19 +137,19 @@ Vec3 corotated_node_gradient(const Mat32& P, double ref_area, const ShapeGrads& 
     return g;
 }
 
-// Single-node hessian row
-Mat39 corotated_node_hessian(const Mat66& dPdF, double ref_area, const ShapeGrads& gradN, int node) {
-    Mat39 H_row = Mat39::Zero();
-    for (int j = 0; j < 3; ++j) {
-        for (int gamma = 0; gamma < 3; ++gamma) {
-            for (int delta = 0; delta < 3; ++delta) {
-                double value = 0.0;
-                for (int beta = 0; beta < 2; ++beta)
-                    for (int eta = 0; eta < 2; ++eta)
-                        value += dPdF(flatF(gamma, beta), flatF(delta, eta)) * gradN[node](beta) * gradN[j](eta);
-                H_row(gamma, 3 * j + delta) = ref_area * value;
+// Single-node self hessian
+Mat33 corotated_node_hessian(const Mat66& dPdF, double ref_area, const ShapeGrads& gradN, int node) {
+    Mat33 H = Mat33::Zero();
+    for (int gamma = 0; gamma < 3; ++gamma) {
+        for (int delta = 0; delta < 3; ++delta) {
+            double value = 0.0;
+            for (int beta = 0; beta < 2; ++beta) {
+                for (int eta = 0; eta < 2; ++eta) {
+                    value += dPdF(flatF(gamma, beta), flatF(delta, eta)) * gradN[node](beta) * gradN[node](eta);
+                }
             }
+            H(gamma, delta) = ref_area * value;
         }
     }
-    return H_row;
+    return H;
 }
