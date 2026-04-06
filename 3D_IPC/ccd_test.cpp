@@ -20,7 +20,7 @@ TEST(CCDNodeTriangleSingleMovingNode, InteriorHit) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_node_moves(x, dx, x1, x2, x3);
+    const CCDResult r = node_triangle_only_one_node_moves(x, dx, x1, x2, x3);
     EXPECT_TRUE(r.has_candidate_time);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
@@ -34,7 +34,7 @@ TEST(CCDNodeTriangleSingleMovingNode, PlaneCrossingButOutsideTriangle) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_node_moves(x, dx, x1, x2, x3);
+    const CCDResult r = node_triangle_only_one_node_moves(x, dx, x1, x2, x3);
     EXPECT_TRUE(r.has_candidate_time);
     EXPECT_FALSE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
@@ -48,7 +48,7 @@ TEST(CCDNodeTriangleSingleMovingNode, ParallelNoCrossing) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_node_moves(x, dx, x1, x2, x3);
+    const CCDResult r = node_triangle_only_one_node_moves(x, dx, x1, x2, x3);
     EXPECT_FALSE(r.has_candidate_time);
     EXPECT_FALSE(r.collision);
     EXPECT_FALSE(r.coplanar_entire_step);
@@ -62,7 +62,7 @@ TEST(CCDNodeTriangleSingleMovingNode, CoplanarEntireStep) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_node_moves(x, dx, x1, x2, x3);
+    const CCDResult r = node_triangle_only_one_node_moves(x, dx, x1, x2, x3);
     EXPECT_FALSE(r.has_candidate_time);
     EXPECT_FALSE(r.collision);
     EXPECT_TRUE(r.coplanar_entire_step);
@@ -76,7 +76,7 @@ TEST(CCDNodeTriangleSingleMovingNode, CandidateOutsideStepInterval) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_node_moves(x, dx, x1, x2, x3);
+    const CCDResult r = node_triangle_only_one_node_moves(x, dx, x1, x2, x3);
     EXPECT_FALSE(r.has_candidate_time);
     EXPECT_FALSE(r.collision);
     EXPECT_FALSE(r.coplanar_entire_step);
@@ -90,7 +90,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, InteriorHit) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_only_x1_moves(x1, dx1, x2, x3, x4);
+    const CCDResult r = segment_segment_only_one_node_moves(x1, dx1, x2, x3, x4);
     EXPECT_TRUE(r.has_candidate_time);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
@@ -104,7 +104,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, CoplanarCandidateButNoIntersection) {
     const Vec3 x3(1.5, -1.0, 0.0);
     const Vec3 x4(1.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_only_x1_moves(x1, dx1, x2, x3, x4);
+    const CCDResult r = segment_segment_only_one_node_moves(x1, dx1, x2, x3, x4);
     EXPECT_TRUE(r.has_candidate_time);
     EXPECT_FALSE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
@@ -118,7 +118,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, ParallelNoCrossing) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_only_x1_moves(x1, dx1, x2, x3, x4);
+    const CCDResult r = segment_segment_only_one_node_moves(x1, dx1, x2, x3, x4);
     EXPECT_FALSE(r.has_candidate_time);
     EXPECT_FALSE(r.collision);
     EXPECT_FALSE(r.coplanar_entire_step);
@@ -132,7 +132,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, CoplanarEntireStep) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_only_x1_moves(x1, dx1, x2, x3, x4);
+    const CCDResult r = segment_segment_only_one_node_moves(x1, dx1, x2, x3, x4);
     EXPECT_FALSE(r.has_candidate_time);
     EXPECT_FALSE(r.collision);
     EXPECT_TRUE(r.coplanar_entire_step);
@@ -146,7 +146,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, CandidateOutsideStepInterval) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_only_x1_moves(x1, dx1, x2, x3, x4);
+    const CCDResult r = segment_segment_only_one_node_moves(x1, dx1, x2, x3, x4);
     EXPECT_FALSE(r.has_candidate_time);
     EXPECT_FALSE(r.collision);
     EXPECT_FALSE(r.coplanar_entire_step);

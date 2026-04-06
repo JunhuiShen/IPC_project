@@ -1,5 +1,6 @@
 #include "solver.h"
 #include "IPC_math.h"
+#include "ccd.h"
 
 void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
                        const std::vector<Vec3>& xhat, std::vector<Vec3>& x, const std::vector<NodeTrianglePair>& nt_pairs,
@@ -36,21 +37,43 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
 
     const Vec3 delta = matrix3d_inverse(H) * g;
 
-    // CCD hook point:
-    // Build a global swept-AABB candidate set using the local Newton trial displacement
-    // For now, keep step_weight as the placeholder limiter until CCD TOI is integrated.
-    double step = params.step_weight;
+    double step = 1.0;
     if (params.d_hat > 0.0) {
+        const Vec3 dx = -delta;
+
         std::vector<Vec3> trial_disp(x.size(), Vec3::Zero());
-        trial_disp[vi] = -delta;
+        trial_disp[vi] = dx;
 
         BroadPhase ccd_broad_phase;
         std::vector<NodeTrianglePair> ccd_nt;
         std::vector<SegmentSegmentPair> ccd_ss;
         ccd_broad_phase.build_ccd_candidates(x, trial_disp, ref_mesh, 1.0, ccd_nt, ccd_ss);
 
-        // Placeholder until CCD is wired into line search.
-        step = params.step_weight;
+        double toi_min = 1.0;
+
+        for (const auto& p : ccd_nt) {
+            if (vi != p.node) continue;
+            auto r = node_triangle_only_one_node_moves(
+                x[p.node], dx, x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]]);
+            if (r.collision) toi_min = std::min(toi_min, r.t);
+        }
+
+        for (const auto& p : ccd_ss) {
+            CCDResult r;
+            if (vi == p.v[0])
+                r = segment_segment_only_one_node_moves(x[p.v[0]], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]]);
+            else if (vi == p.v[1])
+                r = segment_segment_only_one_node_moves(x[p.v[1]], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]]);
+            else if (vi == p.v[2])
+                r = segment_segment_only_one_node_moves(x[p.v[2]], dx, x[p.v[3]], x[p.v[0]], x[p.v[1]]);
+            else if (vi == p.v[3])
+                r = segment_segment_only_one_node_moves(x[p.v[3]], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]]);
+            else
+                continue;
+            if (r.collision) toi_min = std::min(toi_min, r.t);
+        }
+
+        step = 0.9 * toi_min;
     }
 
     x[vi] -= step * delta;

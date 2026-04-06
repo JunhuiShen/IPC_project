@@ -67,7 +67,7 @@ struct IPCArgs3D : ArgParser {
         add_int   ("max_iters",   max_iters,   500,        "Max Gauss-Seidel iterations per frame");
         add_double("tol_abs",     tol_abs,     1e-6,       "Absolute convergence tolerance");
         add_double("step_weight", step_weight, 1.0,        "Newton step damping factor");
-        add_double("d_hat",       d_hat,       0.0,        "Barrier activation distance (0 = off)");
+        add_double("d_hat",       d_hat,       0.05,        "Barrier activation distance (0 = off)");
         add_bool  ("use_parallel", use_parallel, false,    "Use parallel Gauss-Seidel (requires coloring)");
 
         add_int   ("nx",          nx,          10,          "Mesh subdivisions in x");

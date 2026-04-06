@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-CCDResult node_triangle_only_node_moves(const Vec3& x,  const Vec3& dx, const Vec3& x1, const Vec3& x2, const Vec3& x3, double eps) {
+CCDResult node_triangle_only_one_node_moves(const Vec3& x,  const Vec3& dx, const Vec3& x1, const Vec3& x2, const Vec3& x3, double eps) {
     CCDResult result;
 
     const Vec3 n = (x2 - x1).cross(x3 - x1);
@@ -32,7 +32,7 @@ CCDResult node_triangle_only_node_moves(const Vec3& x,  const Vec3& dx, const Ve
     return result;
 }
 
-CCDResult segment_segment_only_x1_moves(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double eps) {
+CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double eps) {
     CCDResult result;
 
     // Coplanarity condition f(t) = dot((x2-x1-t*dx1) x (x4-x3), (x3-x1-t*dx1)) = 0

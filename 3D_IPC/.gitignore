@@ -16,3 +16,9 @@ Makefile
 # Executables
 3D_sim
 simulation
+
+# Broad-phase / BVH debug OBJ dumps
+broad_phase_*_boxes.obj
+bvh_*_level_*.obj
+mesh_before.obj
+mesh_after.obj
