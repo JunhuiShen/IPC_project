@@ -34,6 +34,7 @@ add_library(corotated_energy_lib
     node_triangle_distance.cpp
     segment_segment_distance.cpp
     barrier_energy.cpp
+    ccd.cpp
 )
 
 target_link_libraries(corotated_energy_lib
@@ -83,6 +84,19 @@ target_link_libraries(barrier_energy_test
     corotated_energy_lib
 )
 add_test(NAME barrier_energy_test COMMAND barrier_energy_test)
+
+add_executable(ccd_test
+    ccd_test.cpp
+)
+
+target_link_libraries(ccd_test
+    PRIVATE
+    corotated_energy_lib
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(ccd_test)
 
 add_executable(broad_phase_test
     broad_phase_test.cpp
