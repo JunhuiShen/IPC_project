@@ -184,10 +184,14 @@ int export_bvh_level(const std::string& filename, const std::vector<BVHNode>& no
     queue.push_back({root, 0});
 
     std::vector<AABB> boxes;
+    bool any_at_depth = false;
     for (int qi = 0; qi < static_cast<int>(queue.size()); ++qi) {
         const auto [ni, d] = queue[qi];
         const BVHNode& n = nodes[ni];
         if (d == depth) {
+            any_at_depth = true;
+            boxes.push_back(n.bbox);
+        } else if (n.leafIndex >= 0) {
             boxes.push_back(n.bbox);
         } else {
             if (n.left  >= 0) queue.push_back({n.left,  d + 1});
@@ -195,7 +199,7 @@ int export_bvh_level(const std::string& filename, const std::vector<BVHNode>& no
         }
     }
 
-    if (boxes.empty()) return 0;
+    if (!any_at_depth) return 0;
 
     std::ofstream out(filename);
     if (!out) {

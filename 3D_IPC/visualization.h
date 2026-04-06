@@ -21,6 +21,7 @@ void export_broad_phase_boxes(const std::string& filename, const BroadPhase& bp)
 // Writes a flat list of AABBs as a wireframe OBJ.
 void export_aabb_list(const std::string& filename, const std::vector<AABB>& boxes);
 
-// Writes all BVH nodes at exactly a given depth as a wireframe OBJ.
+// Writes all BVH nodes at a given depth as a wireframe OBJ.
+// Leaf nodes shallower than depth are included since they cannot split further.
 // Returns the number of boxes written (0 means the depth is beyond the tree).
 int export_bvh_level(const std::string& filename, const std::vector<BVHNode>& nodes, int root, int depth);
