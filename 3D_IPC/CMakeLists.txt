@@ -212,6 +212,27 @@ target_link_libraries(parallel_serial_consistency_test
 
 gtest_discover_tests(parallel_serial_consistency_test)
 
+add_executable(visualization_test
+    visualization_test.cpp
+    make_shape.cpp
+    physics.cpp
+    broad_phase.cpp
+    visualization.cpp
+)
+
+target_compile_definitions(visualization_test
+    PRIVATE VIS_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+target_link_libraries(visualization_test
+    PRIVATE
+    corotated_energy_lib
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(visualization_test)
+
 add_executable(total_energy_test
     total_energy_test.cpp
     make_shape.cpp

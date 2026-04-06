@@ -4,6 +4,43 @@
 #include <iostream>
 #include <sstream>
 
+namespace {
+
+void write_aabb_wireframe(std::ofstream& out, const AABB& box, int& v_offset) {
+    const Vec3& lo = box.min;
+    const Vec3& hi = box.max;
+
+    out << "v " << lo.x() << " " << lo.y() << " " << lo.z() << "\n";
+    out << "v " << hi.x() << " " << lo.y() << " " << lo.z() << "\n";
+    out << "v " << hi.x() << " " << hi.y() << " " << lo.z() << "\n";
+    out << "v " << lo.x() << " " << hi.y() << " " << lo.z() << "\n";
+    out << "v " << lo.x() << " " << lo.y() << " " << hi.z() << "\n";
+    out << "v " << hi.x() << " " << lo.y() << " " << hi.z() << "\n";
+    out << "v " << hi.x() << " " << hi.y() << " " << hi.z() << "\n";
+    out << "v " << lo.x() << " " << hi.y() << " " << hi.z() << "\n";
+
+    const int b = v_offset + 1; // OBJ indices are 1-based
+    // bottom face
+    out << "l " << b+0 << " " << b+1 << "\n";
+    out << "l " << b+1 << " " << b+2 << "\n";
+    out << "l " << b+2 << " " << b+3 << "\n";
+    out << "l " << b+3 << " " << b+0 << "\n";
+    // top face
+    out << "l " << b+4 << " " << b+5 << "\n";
+    out << "l " << b+5 << " " << b+6 << "\n";
+    out << "l " << b+6 << " " << b+7 << "\n";
+    out << "l " << b+7 << " " << b+4 << "\n";
+    // verticals
+    out << "l " << b+0 << " " << b+4 << "\n";
+    out << "l " << b+1 << " " << b+5 << "\n";
+    out << "l " << b+2 << " " << b+6 << "\n";
+    out << "l " << b+3 << " " << b+7 << "\n";
+
+    v_offset += 8;
+}
+
+} // namespace
+
 void export_obj(const std::string& filename, const std::vector<Vec3>& x, const std::vector<int>& tris) {
     std::ofstream out(filename);
     if (!out) {
@@ -125,6 +162,43 @@ void export_usd(const std::string& filename, const std::vector<Vec3>& x, const s
     out << "]\n";
 
     out << "}\n";
+}
+
+void export_aabb_list(const std::string& filename, const std::vector<AABB>& boxes) {
+    std::ofstream out(filename);
+    if (!out) {
+        std::cerr << "Error: cannot write " << filename << "\n";
+        return;
+    }
+    out << std::setprecision(10);
+    int v_offset = 0;
+    for (const AABB& box : boxes)
+        write_aabb_wireframe(out, box, v_offset);
+}
+
+void export_broad_phase_boxes(const std::string& filename, const BroadPhase& bp) {
+    std::ofstream out(filename);
+    if (!out) {
+        std::cerr << "Error: cannot write " << filename << "\n";
+        return;
+    }
+
+    out << std::setprecision(10);
+
+    const BroadPhase::Cache& c = bp.cache();
+    int v_offset = 0;
+
+    out << "g node_boxes\n";
+    for (const AABB& box : c.node_boxes)
+        write_aabb_wireframe(out, box, v_offset);
+
+    out << "g tri_boxes\n";
+    for (const AABB& box : c.tri_boxes)
+        write_aabb_wireframe(out, box, v_offset);
+
+    out << "g edge_boxes\n";
+    for (const AABB& box : c.edge_boxes)
+        write_aabb_wireframe(out, box, v_offset);
 }
 
 void export_frame(const std::string& outdir, int frame, const std::vector<Vec3>& x, const std::vector<int>& tris,
