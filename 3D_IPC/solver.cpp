@@ -3,33 +3,22 @@
 #include "ccd.h"
 
 void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
-                       const std::vector<Vec3>& xhat, std::vector<Vec3>& x, const std::vector<NodeTrianglePair>& nt_pairs,
-                       const std::vector<SegmentSegmentPair>& ss_pairs) {
+                       const std::vector<Vec3>& xhat, std::vector<Vec3>& x, const BroadPhase::Cache& bp_cache) {
     auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x, xhat);
 
     if (params.d_hat > 0.0) {
         const double dt2 = params.dt2();
 
-        for (const auto& p : nt_pairs) {
-            int dof = -1;
-            if      (vi == p.node)      dof = 0;
-            else if (vi == p.tri_v[0])  dof = 1;
-            else if (vi == p.tri_v[1])  dof = 2;
-            else if (vi == p.tri_v[2])  dof = 3;
-            if (dof < 0) continue;
-            auto [bg, bH] = node_triangle_barrier_gradient_and_hessian(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, dof);
+        for (const auto& entry : bp_cache.vertex_nt[vi]) {
+            const auto& p = bp_cache.nt_pairs[entry.pair_index];
+            auto [bg, bH] = node_triangle_barrier_gradient_and_hessian(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
             g += dt2 * bg;
             H += dt2 * bH;
         }
 
-        for (const auto& p : ss_pairs) {
-            int dof = -1;
-            if      (vi == p.v[0]) dof = 0;
-            else if (vi == p.v[1]) dof = 1;
-            else if (vi == p.v[2]) dof = 2;
-            else if (vi == p.v[3]) dof = 3;
-            if (dof < 0) continue;
-            auto [bg, bH] = segment_segment_barrier_gradient_and_hessian(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, dof);
+        for (const auto& entry : bp_cache.vertex_ss[vi]) {
+            const auto& p = bp_cache.ss_pairs[entry.pair_index];
+            auto [bg, bH] = segment_segment_barrier_gradient_and_hessian(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
             g += dt2 * bg;
             H += dt2 * bH;
         }
@@ -44,32 +33,31 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
         std::vector<Vec3> trial_disp(x.size(), Vec3::Zero());
         trial_disp[vi] = dx;
 
-        BroadPhase ccd_broad_phase;
-        std::vector<NodeTrianglePair> ccd_nt;
-        std::vector<SegmentSegmentPair> ccd_ss;
-        ccd_broad_phase.build_ccd_candidates(x, trial_disp, ref_mesh, 1.0, ccd_nt, ccd_ss);
+        BroadPhase ccd_bp;
+        ccd_bp.build_ccd_candidates(x, trial_disp, ref_mesh, 1.0);
+        const auto& ccd_cache = ccd_bp.cache();
 
         double toi_min = 1.0;
 
-        for (const auto& p : ccd_nt) {
-            if (vi != p.node) continue;
+        for (const auto& entry : ccd_cache.vertex_nt[vi]) {
+            const auto& p = ccd_cache.nt_pairs[entry.pair_index];
+            if (entry.dof != 0) continue;  // only when vi is the moving node
             auto r = node_triangle_only_one_node_moves(
                 x[p.node], dx, x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]]);
             if (r.collision) toi_min = std::min(toi_min, r.t);
         }
 
-        for (const auto& p : ccd_ss) {
+        for (const auto& entry : ccd_cache.vertex_ss[vi]) {
+            const auto& p = ccd_cache.ss_pairs[entry.pair_index];
             CCDResult r;
-            if (vi == p.v[0])
+            if (entry.dof == 0)
                 r = segment_segment_only_one_node_moves(x[p.v[0]], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]]);
-            else if (vi == p.v[1])
+            else if (entry.dof == 1)
                 r = segment_segment_only_one_node_moves(x[p.v[1]], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]]);
-            else if (vi == p.v[2])
+            else if (entry.dof == 2)
                 r = segment_segment_only_one_node_moves(x[p.v[2]], dx, x[p.v[3]], x[p.v[0]], x[p.v[1]]);
-            else if (vi == p.v[3])
-                r = segment_segment_only_one_node_moves(x[p.v[3]], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]]);
             else
-                continue;
+                r = segment_segment_only_one_node_moves(x[p.v[3]], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]]);
             if (r.collision) toi_min = std::min(toi_min, r.t);
         }
 
@@ -98,7 +86,7 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
 
     auto eval_residual = [&]() {
         return compute_global_residual(ref_mesh, adj, pins, params, xnew, xhat,
-                                       broad_phase.nt_pairs(), broad_phase.ss_pairs());
+                                       broad_phase);
     };
 
     SolverResult result;
@@ -115,7 +103,7 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
                 #pragma omp parallel for schedule(static) if(group.size() >= 256)
                 for (int i = 0; i < static_cast<int>(group.size()); ++i)
                     update_one_vertex(group[i], ref_mesh, adj, pins, params, xhat, xnew,
-                                      broad_phase.nt_pairs(), broad_phase.ss_pairs());
+                                      broad_phase.cache());
                 if (use_barrier) {
                     for (int vi : group)
                         broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
@@ -123,7 +111,7 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
             } else {
                 for (int vi : group) {
                     update_one_vertex(vi, ref_mesh, adj, pins, params, xhat, xnew,
-                                      broad_phase.nt_pairs(), broad_phase.ss_pairs());
+                                      broad_phase.cache());
                     if (use_barrier)
                         broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
                 }

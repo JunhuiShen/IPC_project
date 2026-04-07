@@ -217,6 +217,27 @@ namespace {
         return box;
     }
 
+    using VPE = BroadPhase::Cache::VertexPairEntry;
+
+    static inline void remove_vertex_entry(std::vector<VPE>& vec, std::size_t pair_idx) {
+        for (std::size_t i = 0; i < vec.size(); ++i) {
+            if (vec[i].pair_index == pair_idx) {
+                vec[i] = vec.back();
+                vec.pop_back();
+                return;
+            }
+        }
+    }
+
+    static inline void update_vertex_entry(std::vector<VPE>& vec, std::size_t old_idx, std::size_t new_idx) {
+        for (auto& e : vec) {
+            if (e.pair_index == old_idx) {
+                e.pair_index = new_idx;
+                return;
+            }
+        }
+    }
+
     static inline void add_nt_pair(BroadPhase::Cache& cache, int node, int tri_idx, const RefMesh& mesh) {
         const std::uint64_t key = BroadPhase::nt_key(node, tri_idx);
         if (cache.nt_pair_index.count(key)) return;
@@ -227,9 +248,17 @@ namespace {
         p.tri_v[1] = tri_vertex(mesh, tri_idx, 1);
         p.tri_v[2] = tri_vertex(mesh, tri_idx, 2);
 
-        cache.nt_pair_index[key] = cache.nt_pairs.size();
+        const std::size_t idx = cache.nt_pairs.size();
+        cache.nt_pair_index[key] = idx;
         cache.nt_pairs.push_back(p);
         cache.nt_pair_tri.push_back(tri_idx);
+
+        if (!cache.vertex_nt.empty()) {
+            cache.vertex_nt[p.node].push_back({idx, 0});
+            cache.vertex_nt[p.tri_v[0]].push_back({idx, 1});
+            cache.vertex_nt[p.tri_v[1]].push_back({idx, 2});
+            cache.vertex_nt[p.tri_v[2]].push_back({idx, 3});
+        }
     }
 
     static inline void add_ss_pair(BroadPhase::Cache& cache, int e0, int e1) {
@@ -246,15 +275,39 @@ namespace {
         p.v[2] = cache.edges[b][0];
         p.v[3] = cache.edges[b][1];
 
-        cache.ss_pair_index[key] = cache.ss_pairs.size();
+        const std::size_t idx = cache.ss_pairs.size();
+        cache.ss_pair_index[key] = idx;
         cache.ss_pairs.push_back(p);
         cache.ss_pair_edges.push_back({a, b});
+
+        if (!cache.vertex_ss.empty()) {
+            cache.vertex_ss[p.v[0]].push_back({idx, 0});
+            cache.vertex_ss[p.v[1]].push_back({idx, 1});
+            cache.vertex_ss[p.v[2]].push_back({idx, 2});
+            cache.vertex_ss[p.v[3]].push_back({idx, 3});
+        }
     }
 
     static inline void erase_nt_pair_at(BroadPhase::Cache& cache, std::size_t idx) {
         const std::size_t last = cache.nt_pairs.size() - 1;
-        const int victim_node = cache.nt_pairs[idx].node;
+        const auto& victim = cache.nt_pairs[idx];
+        const int victim_node = victim.node;
         const int victim_tri = cache.nt_pair_tri[idx];
+
+        if (!cache.vertex_nt.empty()) {
+            remove_vertex_entry(cache.vertex_nt[victim.node], idx);
+            remove_vertex_entry(cache.vertex_nt[victim.tri_v[0]], idx);
+            remove_vertex_entry(cache.vertex_nt[victim.tri_v[1]], idx);
+            remove_vertex_entry(cache.vertex_nt[victim.tri_v[2]], idx);
+
+            if (idx != last) {
+                const auto& moved = cache.nt_pairs[last];
+                update_vertex_entry(cache.vertex_nt[moved.node], last, idx);
+                update_vertex_entry(cache.vertex_nt[moved.tri_v[0]], last, idx);
+                update_vertex_entry(cache.vertex_nt[moved.tri_v[1]], last, idx);
+                update_vertex_entry(cache.vertex_nt[moved.tri_v[2]], last, idx);
+            }
+        }
 
         if (idx != last) {
             cache.nt_pairs[idx] = cache.nt_pairs[last];
@@ -272,7 +325,23 @@ namespace {
 
     static inline void erase_ss_pair_at(BroadPhase::Cache& cache, std::size_t idx) {
         const std::size_t last = cache.ss_pairs.size() - 1;
+        const auto& victim = cache.ss_pairs[idx];
         const std::array<int, 2> victim_edges = cache.ss_pair_edges[idx];
+
+        if (!cache.vertex_ss.empty()) {
+            remove_vertex_entry(cache.vertex_ss[victim.v[0]], idx);
+            remove_vertex_entry(cache.vertex_ss[victim.v[1]], idx);
+            remove_vertex_entry(cache.vertex_ss[victim.v[2]], idx);
+            remove_vertex_entry(cache.vertex_ss[victim.v[3]], idx);
+
+            if (idx != last) {
+                const auto& moved = cache.ss_pairs[last];
+                update_vertex_entry(cache.vertex_ss[moved.v[0]], last, idx);
+                update_vertex_entry(cache.vertex_ss[moved.v[1]], last, idx);
+                update_vertex_entry(cache.vertex_ss[moved.v[2]], last, idx);
+                update_vertex_entry(cache.vertex_ss[moved.v[3]], last, idx);
+            }
+        }
 
         if (idx != last) {
             cache.ss_pairs[idx] = cache.ss_pairs[last];
@@ -288,26 +357,56 @@ namespace {
     }
 
     static inline void remove_nt_pairs_touching_node(BroadPhase::Cache& cache, int node) {
-        for (std::size_t i = cache.nt_pairs.size(); i > 0; --i) {
-            if (cache.nt_pairs[i - 1].node == node) {
-                erase_nt_pair_at(cache, i - 1);
+        if (cache.vertex_nt.empty()) return;
+        bool found = true;
+        while (found) {
+            found = false;
+            for (const auto& e : cache.vertex_nt[node]) {
+                if (e.dof == 0) {
+                    erase_nt_pair_at(cache, e.pair_index);
+                    found = true;
+                    break;
+                }
             }
         }
     }
 
-    static inline void remove_nt_pairs_touching_triangle(BroadPhase::Cache& cache, int tri_idx) {
-        for (std::size_t i = cache.nt_pair_tri.size(); i > 0; --i) {
-            if (cache.nt_pair_tri[i - 1] == tri_idx) {
-                erase_nt_pair_at(cache, i - 1);
+    static inline void remove_nt_pairs_touching_triangle(BroadPhase::Cache& cache, int tri_idx, const RefMesh& mesh) {
+        if (cache.vertex_nt.empty()) return;
+        const int verts[3] = {tri_vertex(mesh, tri_idx, 0), tri_vertex(mesh, tri_idx, 1), tri_vertex(mesh, tri_idx, 2)};
+        bool found = true;
+        while (found) {
+            found = false;
+            for (int v : verts) {
+                for (const auto& e : cache.vertex_nt[v]) {
+                    if (cache.nt_pair_tri[e.pair_index] == tri_idx) {
+                        erase_nt_pair_at(cache, e.pair_index);
+                        found = true;
+                        break;
+                    }
+                }
+                if (found) break;
             }
         }
     }
 
     static inline void remove_ss_pairs_touching_edge(BroadPhase::Cache& cache, int edge_idx) {
-        for (std::size_t i = cache.ss_pair_edges.size(); i > 0; --i) {
-            const auto& e = cache.ss_pair_edges[i - 1];
-            if (e[0] == edge_idx || e[1] == edge_idx) {
-                erase_ss_pair_at(cache, i - 1);
+        if (cache.vertex_ss.empty()) return;
+        const int v0 = cache.edges[edge_idx][0];
+        const int v1 = cache.edges[edge_idx][1];
+        bool found = true;
+        while (found) {
+            found = false;
+            for (int v : {v0, v1}) {
+                for (const auto& e : cache.vertex_ss[v]) {
+                    const auto& edges = cache.ss_pair_edges[e.pair_index];
+                    if (edges[0] == edge_idx || edges[1] == edge_idx) {
+                        erase_ss_pair_at(cache, e.pair_index);
+                        found = true;
+                        break;
+                    }
+                }
+                if (found) break;
             }
         }
     }
@@ -432,6 +531,9 @@ void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, c
     const int nv = static_cast<int>(x.size());
     const int nt = num_tris(mesh);
 
+    c.vertex_nt.resize(nv);
+    c.vertex_ss.resize(nv);
+
     build_unique_edges_and_adjacency(mesh, nv, c.edges, c.node_to_edges, c.node_to_tris);
     const int ne = static_cast<int>(c.edges.size());
 
@@ -511,7 +613,7 @@ void BroadPhase::refresh(const std::vector<Vec3>& x, const std::vector<Vec3>& v,
 
     remove_nt_pairs_touching_node(cache_, moved_node);
     for (int t : incident_tris) {
-        remove_nt_pairs_touching_triangle(cache_, t);
+        remove_nt_pairs_touching_triangle(cache_, t, mesh);
     }
 
     for (int e : incident_edges) {
@@ -529,11 +631,6 @@ void BroadPhase::refresh(const std::vector<Vec3>& x, const std::vector<Vec3>& v,
     }
 }
 
-void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt,
-                                      std::vector<NodeTrianglePair>& out_nt, std::vector<SegmentSegmentPair>& out_ss) {
-    BroadPhase tmp;
-    tmp.build(x, v, mesh, dt, /*node_pad=*/0.0, /*tri_pad=*/0.0, /*edge_pad=*/0.0);
-
-    out_nt = tmp.nt_pairs();
-    out_ss = tmp.ss_pairs();
+void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt) {
+    build(x, v, mesh, dt, /*node_pad=*/0.0, /*tri_pad=*/0.0, /*edge_pad=*/0.0);
 }

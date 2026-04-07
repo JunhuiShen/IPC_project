@@ -91,6 +91,13 @@ public:
 
         std::unordered_map<std::uint64_t, std::size_t> nt_pair_index;
         std::unordered_map<std::uint64_t, std::size_t> ss_pair_index;
+
+        struct VertexPairEntry {
+            std::size_t pair_index;
+            int dof;  // 0=node/v[0], 1=tri_v[0]/v[1], 2=tri_v[1]/v[2], 3=tri_v[2]/v[3]
+        };
+        std::vector<std::vector<VertexPairEntry>> vertex_nt;
+        std::vector<std::vector<VertexPairEntry>> vertex_ss;
     };
 
     void initialize(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double dhat);
@@ -106,8 +113,7 @@ public:
         return cache_.ss_pairs;
     }
 
-    void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt,
-                              std::vector<NodeTrianglePair>& out_nt, std::vector<SegmentSegmentPair>& out_ss);
+    void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt);
 
     static std::uint64_t nt_key(int node, int tri) {
         return (std::uint64_t(std::uint32_t(node)) << 32) |

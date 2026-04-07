@@ -502,11 +502,9 @@ v[5] = Vec3(0.0, 0.0, -1.0);
 const RefMesh mesh = make_mesh(x, {{0, 1, 2}, {3, 4, 5}});
 
 BroadPhase broad;
-std::vector<NodeTrianglePair> nt;
-std::vector<SegmentSegmentPair> ss;
-broad.build_ccd_candidates(x, v, mesh, 1.0, nt, ss);
+broad.build_ccd_candidates(x, v, mesh, 1.0);
 
-EXPECT_TRUE(contains_nt_pair(nt, 3, 0, 1, 2) || contains_nt_pair(nt, 4, 0, 1, 2) || contains_nt_pair(nt, 5, 0, 1, 2));
+EXPECT_TRUE(contains_nt_pair(broad.nt_pairs(), 3, 0, 1, 2) || contains_nt_pair(broad.nt_pairs(), 4, 0, 1, 2) || contains_nt_pair(broad.nt_pairs(), 5, 0, 1, 2));
 }
 
 TEST(BroadPhaseTest, SingleMeshSelfCollisionFoldDetectsNonIncidentPairs) {
@@ -536,11 +534,9 @@ v[5] = Vec3(0.0, 0.0, -0.5);
 const RefMesh mesh = make_mesh(x, {{0, 1, 2}, {3, 4, 5}});
 
 BroadPhase broad;
-std::vector<NodeTrianglePair> nt;
-std::vector<SegmentSegmentPair> ss;
-broad.build_ccd_candidates(x, v, mesh, 1.0, nt, ss);
+broad.build_ccd_candidates(x, v, mesh, 1.0);
 
-EXPECT_TRUE(contains_ss_pair(ss, EdgeKey(0, 1), EdgeKey(3, 4)));
+EXPECT_TRUE(contains_ss_pair(broad.ss_pairs(), EdgeKey(0, 1), EdgeKey(3, 4)));
 }
 
 TEST(BroadPhaseTest, CCDCandidatesDetectTangentialSkimmingMotion) {
@@ -556,11 +552,9 @@ v[5] = Vec3(1.0, 0.0, -0.03);
 const RefMesh mesh = make_mesh(x, {{0, 1, 2}, {3, 4, 5}});
 
 BroadPhase broad;
-std::vector<NodeTrianglePair> nt;
-std::vector<SegmentSegmentPair> ss;
-broad.build_ccd_candidates(x, v, mesh, 1.0, nt, ss);
+broad.build_ccd_candidates(x, v, mesh, 1.0);
 
-EXPECT_TRUE(contains_nt_pair(nt, 3, 0, 1, 2) || contains_nt_pair(nt, 4, 0, 1, 2) || contains_nt_pair(nt, 5, 0, 1, 2));
+EXPECT_TRUE(contains_nt_pair(broad.nt_pairs(), 3, 0, 1, 2) || contains_nt_pair(broad.nt_pairs(), 4, 0, 1, 2) || contains_nt_pair(broad.nt_pairs(), 5, 0, 1, 2));
 }
 
 TEST(BroadPhaseTest, InitializeMatchesBruteForceReference) {
@@ -602,11 +596,9 @@ build_two_sheet_scene(x, v, mesh);
 const double dt = 0.75;
 
 BroadPhase broad;
-std::vector<NodeTrianglePair> nt;
-std::vector<SegmentSegmentPair> ss;
-broad.build_ccd_candidates(x, v, mesh, dt, nt, ss);
+broad.build_ccd_candidates(x, v, mesh, dt);
 
-const PairSets got = pair_sets_from_vectors(nt, ss);
+const PairSets got = pair_sets_from_vectors(broad.nt_pairs(), broad.ss_pairs());
 const PairSets ref = brute_force_candidates(x, v, mesh, dt, 0.0, 0.0, 0.0);
 EXPECT_EQ(got.nt, ref.nt);
 EXPECT_EQ(got.ss, ref.ss);
@@ -673,11 +665,9 @@ broad.initialize(x, v, mesh, 1.0, 0.1);
 EXPECT_TRUE(broad.nt_pairs().empty());
 EXPECT_TRUE(broad.ss_pairs().empty());
 
-std::vector<NodeTrianglePair> nt;
-std::vector<SegmentSegmentPair> ss;
-broad.build_ccd_candidates(x, v, mesh, 1.0, nt, ss);
-EXPECT_TRUE(nt.empty());
-EXPECT_TRUE(ss.empty());
+broad.build_ccd_candidates(x, v, mesh, 1.0);
+EXPECT_TRUE(broad.nt_pairs().empty());
+EXPECT_TRUE(broad.ss_pairs().empty());
 }
 
 TEST(BroadPhaseTest, TriangleFreeMeshProducesNoPairs) {

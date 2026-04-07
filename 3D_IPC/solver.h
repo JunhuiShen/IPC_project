@@ -12,8 +12,7 @@ struct SolverResult {
 void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                        const std::vector<Pin>& pins, const SimParams& params,
                        const std::vector<Vec3>& xhat, std::vector<Vec3>& x,
-                       const std::vector<NodeTrianglePair>& nt_pairs,
-                       const std::vector<SegmentSegmentPair>& ss_pairs);
+                       const BroadPhase::Cache& bp_cache);
 
 SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                                         const std::vector<Pin>& pins, const SimParams& params,

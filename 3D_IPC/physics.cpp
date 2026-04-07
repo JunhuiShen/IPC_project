@@ -1,4 +1,5 @@
 #include "physics.h"
+#include "broad_phase.h"
 #include "make_shape.h"
 #include <algorithm>
 #include <cmath>
@@ -16,43 +17,6 @@ double triangle_ref_area_2d(const RefMesh& ref_mesh, int tri_idx) {
     Dm_local.col(0) = X1 - X0;
     Dm_local.col(1) = X2 - X0;
     return 0.5 * std::abs(Dm_local.determinant());
-}
-
-BarrierPairs build_barrier_pairs(const RefMesh& ref_mesh) {
-    BarrierPairs pairs;
-    const int nv = static_cast<int>(ref_mesh.num_positions);
-    const int nt = num_tris(ref_mesh);
-
-    for (int node = 0; node < nv; ++node) {
-        for (int ti = 0; ti < nt; ++ti) {
-            const int v0 = tri_vertex(ref_mesh, ti, 0);
-            const int v1 = tri_vertex(ref_mesh, ti, 1);
-            const int v2 = tri_vertex(ref_mesh, ti, 2);
-            if (node == v0 || node == v1 || node == v2) continue;
-            pairs.nt.push_back({node, {v0, v1, v2}});
-        }
-    }
-
-    std::set<std::pair<int,int>> unique_edges;
-    for (int ti = 0; ti < nt; ++ti) {
-        for (int e = 0; e < 3; ++e) {
-            int a = tri_vertex(ref_mesh, ti, e);
-            int b = tri_vertex(ref_mesh, ti, (e + 1) % 3);
-            if (a > b) std::swap(a, b);
-            unique_edges.insert({a, b});
-        }
-    }
-    std::vector<std::pair<int,int>> edges(unique_edges.begin(), unique_edges.end());
-    const int ne = static_cast<int>(edges.size());
-    for (int i = 0; i < ne; ++i) {
-        for (int j = i + 1; j < ne; ++j) {
-            const int a0 = edges[i].first, a1 = edges[i].second;
-            const int b0 = edges[j].first, b1 = edges[j].second;
-            if (a0==b0 || a0==b1 || a1==b0 || a1==b1) continue;
-            pairs.ss.push_back({{a0, a1, b0, b1}});
-        }
-    }
-    return pairs;
 }
 
 double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const SimParams& params,
@@ -120,8 +84,9 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
 
 Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                             const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                            const std::vector<NodeTrianglePair>& nt_pairs, const std::vector<SegmentSegmentPair>& ss_pairs) {
+                            const BroadPhase& broad_phase) {
     const double dt2 = params.dt2();
+    const auto& bp_cache = broad_phase.cache();
     Vec3 g = Vec3::Zero();
 
     g += ref_mesh.mass[vi] * (x[vi] - xhat[vi]);
@@ -148,34 +113,26 @@ Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const VertexTriangl
     }
 
     if (params.d_hat > 0.0) {
-        for (const auto& p : nt_pairs) {
-            int dof = -1;
-            if      (vi == p.node)      dof = 0;
-            else if (vi == p.tri_v[0])  dof = 1;
-            else if (vi == p.tri_v[1])  dof = 2;
-            else if (vi == p.tri_v[2])  dof = 3;
-            if (dof < 0) continue;
-            g += dt2 * node_triangle_barrier_gradient(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, dof);
+        for (const auto& entry : bp_cache.vertex_nt[vi]) {
+            const auto& p = bp_cache.nt_pairs[entry.pair_index];
+            g += dt2 * node_triangle_barrier_gradient(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
         }
 
-        for (const auto& p : ss_pairs) {
-            int dof = -1;
-            if      (vi == p.v[0]) dof = 0;
-            else if (vi == p.v[1]) dof = 1;
-            else if (vi == p.v[2]) dof = 2;
-            else if (vi == p.v[3]) dof = 3;
-            if (dof < 0) continue;
-            g += dt2 * segment_segment_barrier_gradient(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, dof);
+        for (const auto& entry : bp_cache.vertex_ss[vi]) {
+            const auto& p = bp_cache.ss_pairs[entry.pair_index];
+            g += dt2 * segment_segment_barrier_gradient(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
         }
     }
 
     return g;
 }
 
-double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const std::vector<NodeTrianglePair>& nt_pairs, const std::vector<SegmentSegmentPair>& ss_pairs) {
+double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+                               const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                               const BroadPhase& broad_phase) {
     double r_inf = 0.0;
     for (int i = 0; i < static_cast<int>(x.size()); ++i) {
-        Vec3 g = compute_local_gradient(i, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
+        Vec3 g = compute_local_gradient(i, ref_mesh, adj, pins, params, x, xhat, broad_phase);
         r_inf = std::max(r_inf, g.cwiseAbs().maxCoeff());
     }
     return r_inf;

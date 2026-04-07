@@ -4,6 +4,8 @@
 #include <unordered_map>
 #include <vector>
 #include <cassert>
+
+class BroadPhase;
 #include <string>
 
 struct Tri { int v[3]; };
@@ -100,13 +102,6 @@ struct SegmentSegmentPair {
     int v[4];
 };
 
-struct BarrierPairs {
-    std::vector<NodeTrianglePair>   nt;
-    std::vector<SegmentSegmentPair> ss;
-};
-
-BarrierPairs build_barrier_pairs(const RefMesh& ref_mesh);
-
 //  Physics functions
 double triangle_ref_area_2d(const RefMesh& ref_mesh, int tri_idx);
 
@@ -119,11 +114,11 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
 
 Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                             const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                            const std::vector<NodeTrianglePair>& nt_pairs, const std::vector<SegmentSegmentPair>& ss_pairs);
+                            const BroadPhase& broad_phase);
 
 double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                               const std::vector<NodeTrianglePair>& nt_pairs, const std::vector<SegmentSegmentPair>& ss_pairs);
+                               const BroadPhase& broad_phase);
 
 void serialize_state(const std::string& dir, int frame, const DeformedState& state);
 bool deserialize_state(const std::string& dir, int frame, DeformedState& state);
