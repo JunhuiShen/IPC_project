@@ -4,9 +4,12 @@
 #include "visualization.h"
 
 #include <gtest/gtest.h>
+#include <filesystem>
 #include <sstream>
 #include <string>
 #include <vector>
+
+namespace fs = std::__fs::filesystem;
 
 // Builds a small mesh, runs broad phase, and writes AABBs to OBJ files
 // for visual inspection in Houdini. This test always passes.
@@ -28,20 +31,19 @@ TEST(VisualizationTest, ExportBroadPhaseBoxes) {
     BroadPhase bp;
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, dt, dhat);
 
-    const std::string dir = VIS_OUTPUT_DIR;
+    const std::string dir = std::string(VIS_OUTPUT_DIR) + "/vis_debug";
+    fs::create_directories(dir);
     const BroadPhase::Cache& c = bp.cache();
     export_aabb_list(dir + "/broad_phase_node_boxes.obj", c.node_boxes);
     export_aabb_list(dir + "/broad_phase_tri_boxes.obj",  c.tri_boxes);
     export_aabb_list(dir + "/broad_phase_edge_boxes.obj", c.edge_boxes);
 
-    export_obj(std::string(VIS_OUTPUT_DIR) + "/mesh_before.obj",
-               state.deformed_positions, ref_mesh.tris);
+    export_obj(dir + "/mesh_before.obj", state.deformed_positions, ref_mesh.tris);
 
     std::vector<Vec3> x_after(nv);
     for (int i = 0; i < nv; ++i)
         x_after[i] = state.deformed_positions[i] + dt * state.velocities[i];
-    export_obj(std::string(VIS_OUTPUT_DIR) + "/mesh_after.obj",
-               x_after, ref_mesh.tris);
+    export_obj(dir + "/mesh_after.obj", x_after, ref_mesh.tris);
 
     SUCCEED();
 }
@@ -63,7 +65,8 @@ TEST(VisualizationTest, ExportBVHLevels) {
     BroadPhase bp;
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, 1.0 / 30.0, 0.05);
 
-    const std::string dir = VIS_OUTPUT_DIR;
+    const std::string dir = std::string(VIS_OUTPUT_DIR) + "/vis_debug";
+    fs::create_directories(dir);
     const BroadPhase::Cache& c = bp.cache();
 
     struct BVHDesc { const char* name; const std::vector<BVHNode>* nodes; int root; };
