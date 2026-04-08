@@ -102,16 +102,14 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
             if (params.use_parallel) {
                 #pragma omp parallel for schedule(static) if(group.size() >= 256)
                 for (int i = 0; i < static_cast<int>(group.size()); ++i)
-                    update_one_vertex(group[i], ref_mesh, adj, pins, params, xhat, xnew,
-                                      broad_phase.cache());
+                    update_one_vertex(group[i], ref_mesh, adj, pins, params, xhat, xnew, broad_phase.cache());
                 if (use_barrier) {
                     for (int vi : group)
                         broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
                 }
             } else {
                 for (int vi : group) {
-                    update_one_vertex(vi, ref_mesh, adj, pins, params, xhat, xnew,
-                                      broad_phase.cache());
+                    update_one_vertex(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase.cache());
                     if (use_barrier)
                         broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
                 }

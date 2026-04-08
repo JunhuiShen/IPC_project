@@ -632,5 +632,7 @@ void BroadPhase::refresh(const std::vector<Vec3>& x, const std::vector<Vec3>& v,
 }
 
 void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt) {
-    build(x, v, mesh, dt, /*node_pad=*/0.0, /*tri_pad=*/0.0, /*edge_pad=*/0.0);
+    // Tiny epsilon padding for borderline floating-point cases
+    constexpr double epsilon_pad = 1.0e-10;
+    build(x, v, mesh, dt, /*node_pad=*/epsilon_pad, /*tri_pad=*/epsilon_pad, /*edge_pad=*/epsilon_pad);
 }
