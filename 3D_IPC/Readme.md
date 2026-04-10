@@ -46,7 +46,7 @@ Per-frame restart snapshots are also written as `state_NNNN.bin`.
 
 ## Tests
 
-The test suite contains 203 GoogleTests covering every layer of the pipeline:
+The test suite contains GoogleTests covering every layer of the pipeline:
 
     cmake -B build
     cmake --build build --clean-first
