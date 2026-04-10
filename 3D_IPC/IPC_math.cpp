@@ -1,6 +1,7 @@
 #include "IPC_math.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 Mat33 matrix3d_inverse(const Mat33& H) {
@@ -132,4 +133,33 @@ bool segment_segment_parameters_if_not_parallel(const Vec3& x1, const Vec3& x2, 
     s = c.cross(b).dot(n) / denom;
     u = c.cross(a).dot(n) / denom;
     return true;
+}
+
+double cross_product_in_2d(const Vec2& a, const Vec2& b) {
+    return a.x() * b.y() - a.y() * b.x();
+}
+
+double max_abs_value_among_four_numbers(double a, double b, double c, double d) {
+    return std::max({1.0, std::fabs(a), std::fabs(b), std::fabs(c), std::fabs(d)});
+}
+
+double filter_root(double t, double eps) {
+    if (!in_unit_interval(t, eps)) return -1.0;
+    return clamp_scalar(t, 0.0, 1.0);
+}
+
+void add_root(std::vector<double>& roots, double t, double eps) {
+    t = filter_root(t, eps);
+    if (t < 0.0) return;
+    for (double r : roots)
+        if (std::fabs(r - t) <= 1e-9) return;
+    roots.push_back(t);
+}
+
+void add_root(SmallRoots& roots, double t, double eps) {
+    t = filter_root(t, eps);
+    if (t < 0.0) return;
+    for (int i = 0; i < roots.count; ++i)
+        if (std::fabs(roots.data[i] - t) <= 1e-9) return;
+    roots.push_back(t);
 }

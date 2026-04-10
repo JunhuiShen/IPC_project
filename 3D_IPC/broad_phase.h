@@ -115,6 +115,23 @@ public:
 
     void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt);
 
+    // Pre-compute and cache static mesh topology (edges, node_to_edges, node_to_tris).
+    // Call once when the mesh connectivity is known. Subsequent build/initialize calls reuse this.
+    void set_mesh_topology(const RefMesh& mesh, int nv);
+    bool has_topology() const { return topology_valid_; }
+
+    // Lightweight single-node CCD query: returns candidate pairs for vertex vi
+    // moving by dx, using the existing BVH trees (no rebuild).
+    // NT pairs: vi is always the node (dof 0).
+    // SS pairs: vi_dof indicates which dof vi occupies in the pair.
+    struct SingleNodeCCDResult {
+        struct NTPair { int node; int tri_v[3]; };
+        struct SSPair { int v[4]; int vi_dof; };
+        std::vector<NTPair> nt_pairs;
+        std::vector<SSPair> ss_pairs;
+    };
+    SingleNodeCCDResult query_single_node_ccd(const std::vector<Vec3>& x, int vi, const Vec3& dx, const RefMesh& mesh) const;
+
     static std::uint64_t nt_key(int node, int tri) {
         return (std::uint64_t(std::uint32_t(node)) << 32) |
                std::uint32_t(tri);
@@ -132,6 +149,15 @@ public:
 
 private:
     Cache cache_;
+    bool topology_valid_ = false;
+
+    // Cached topology — shared across all builds for the same mesh.
+    struct Topology {
+        std::vector<std::array<int, 2>> edges;
+        std::vector<std::vector<int>> node_to_edges;
+        std::vector<std::vector<int>> node_to_tris;
+    };
+    Topology topo_;
 
     void build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double node_pad, double tri_pad, double edge_pad);
 };

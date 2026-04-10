@@ -57,7 +57,7 @@ bool check_convergence(const std::string& label, double analytic, const std::vec
 
     if (all_below_noise) {
         if (verbose)
-            std::cout << "    (all errors below noise floor — exact match)\n";
+            std::cout << "    (all errors below noise floor -- exact match)\n";
         return true;
     }
 
@@ -187,7 +187,7 @@ void test_rest_state(){
 }
 
 // ===========================================================================
-//  Test 3: rotation invariance — rotated rest state has zero energy
+//  Test 3: rotation invariance -- rotated rest state has zero energy
 // ===========================================================================
 
 void test_rotation_invariance(){
@@ -509,6 +509,91 @@ void test_directional_derivative_convergence(){
 }
 
 // ===========================================================================
+//  Stress: near-degenerate triangle (area ≈ 0)
+// ===========================================================================
+
+void test_near_degenerate_triangle(){
+    std::cout << "=== Stress: near-degenerate triangle ===\n";
+
+    // Nearly collapsed: vertices almost collinear, area ~ 1e-10
+    Vec2 X0(0.0, 0.0), X1(1.0, 0.0), X2(0.5, 1e-10);
+    Mat22 Dm_local;
+    Dm_local.col(0) = X1 - X0;
+    Dm_local.col(1) = X2 - X0;
+    double ref_area = 0.5 * std::abs(Dm_local.determinant());
+    std::cout << "  ref_area = " << std::scientific << ref_area << "\n";
+    require(ref_area > 0.0, "area should be nonzero");
+
+    Mat22 Dm_inv = Dm_local.inverse();
+    require(std::isfinite(Dm_inv.norm()), "Dm_inv should be finite");
+
+    TriangleDef def;
+    def.x[0] = Vec3(0.0, 0.0, 0.0);
+    def.x[1] = Vec3(1.0, 0.0, 0.0);
+    def.x[2] = Vec3(0.5, 1e-10, 0.0);
+
+    double E = corotated_energy(ref_area, Dm_inv, def, kMu, kLambda);
+    std::cout << "  E (rest-ish) = " << std::scientific << E << "\n";
+    require(std::isfinite(E), "energy should be finite for near-degenerate triangle");
+
+    // Deform slightly and check gradient is finite
+    TriangleDef deformed = def;
+    deformed.x[2] = Vec3(0.5, 1e-10, 0.1);
+    double E2 = corotated_energy(ref_area, Dm_inv, deformed, kMu, kLambda);
+    require(std::isfinite(E2), "deformed energy should be finite");
+
+    const Mat32 F = compute_F(Dm_inv, deformed);
+    const CorotatedCache32 cache = buildCorotatedCache(F);
+    const Mat32 P = PCorotated32(cache, F, kMu, kLambda);
+    const ShapeGrads gradN = shape_function_gradients(Dm_inv);
+    for (int i = 0; i < 3; ++i) {
+        Vec3 g = corotated_node_gradient(P, ref_area, gradN, i);
+        require(std::isfinite(g.norm()), "gradient should be finite for near-degenerate triangle");
+    }
+
+    std::cout << "  E (deformed) = " << std::scientific << E2 << "\n";
+    std::cout << "  PASSED\n\n";
+}
+
+// ===========================================================================
+//  Stress: large coordinate values (coordinates ~ 1e6)
+// ===========================================================================
+
+void test_large_coordinates(){
+    std::cout << "=== Stress: large coordinate values ===\n";
+    const auto tri = MakeTestTriangle();
+
+    const double offset = 1e6;
+    TriangleDef def;
+    def.x[0] = Vec3(offset + 0.0, offset + 0.0, offset + 0.0);
+    def.x[1] = Vec3(offset + 1.2, offset + 0.1, offset + 0.0);
+    def.x[2] = Vec3(offset + 0.2, offset + 0.9, offset + 0.0);
+
+    // This is the rest triangle shifted by a large offset — energy should still be ~0
+    double E = corotated_energy(tri.ref_area, tri.Dm_inv, def, kMu, kLambda);
+    std::cout << "  E (shifted rest) = " << std::scientific << E << "\n";
+    // Translation invariance means this should be near-zero
+    require(std::abs(E) < 1e-4, "shifted rest energy should be near zero");
+
+    // Deform and check
+    TriangleDef deformed;
+    deformed.x[0] = Vec3(offset + 0.1, offset - 0.2, offset + 0.3);
+    deformed.x[1] = Vec3(offset + 1.4, offset + 0.2, offset - 0.1);
+    deformed.x[2] = Vec3(offset + 0.0, offset + 1.0, offset + 0.4);
+
+    double E2 = corotated_energy(tri.ref_area, tri.Dm_inv, deformed, kMu, kLambda);
+    require(std::isfinite(E2), "deformed energy at large coordinates should be finite");
+
+    // Compare with the same deformation at origin
+    const auto def_origin = MakeDeformedTriangle();
+    double E_origin = corotated_energy(tri.ref_area, tri.Dm_inv, def_origin, kMu, kLambda);
+    std::cout << "  E (large coords) = " << E2 << "  E (origin) = " << E_origin << "\n";
+    require(std::abs(E2 - E_origin) < 1e-4, "energy should match regardless of coordinate magnitude");
+
+    std::cout << "  PASSED\n\n";
+}
+
+// ===========================================================================
 //  main
 // ===========================================================================
 
@@ -521,6 +606,8 @@ int main(){
     test_self_block_matches_analytic_block();
     test_gradient_convergence();
     test_directional_derivative_convergence();
+    test_near_degenerate_triangle();
+    test_large_coordinates();
 
     std::cout << "\n========================================\n"
               << "All corotated energy tests passed.\n"

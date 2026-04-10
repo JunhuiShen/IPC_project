@@ -80,7 +80,7 @@ RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
 VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
 build_scene(ref_mesh, state, pins, adj, params, X);
 
-// No barrier — serial path
+// No barrier -- serial path
 BroadPhase broad_phase;
 const auto color_groups = build_color_groups(ref_mesh, static_cast<int>(state.deformed_positions.size()));
 

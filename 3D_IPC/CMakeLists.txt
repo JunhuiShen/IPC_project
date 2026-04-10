@@ -87,6 +87,11 @@ add_test(NAME barrier_energy_test COMMAND barrier_energy_test)
 
 add_executable(ccd_test
     ccd_test.cpp
+    make_shape.cpp
+    physics.cpp
+    solver.cpp
+    parallel_helper.cpp
+    broad_phase.cpp
 )
 
 target_link_libraries(ccd_test
@@ -116,6 +121,7 @@ add_executable(3D_sim
     make_shape.cpp
     physics.cpp
     solver.cpp
+    parallel_helper.cpp
     visualization.cpp
     broad_phase.cpp
     simulation.cpp
@@ -147,6 +153,7 @@ add_executable(simulation_snapshot_test
     make_shape.cpp
     physics.cpp
     solver.cpp
+    parallel_helper.cpp
     broad_phase.cpp
 )
 
@@ -169,6 +176,7 @@ add_executable(generate_golden
     make_shape.cpp
     physics.cpp
     solver.cpp
+    parallel_helper.cpp
     broad_phase.cpp
 )
 
@@ -187,6 +195,7 @@ add_executable(restart_test
     make_shape.cpp
     physics.cpp
     solver.cpp
+    parallel_helper.cpp
     broad_phase.cpp
 )
 
@@ -209,11 +218,8 @@ add_executable(parallel_serial_consistency_test
     make_shape.cpp
     physics.cpp
     solver.cpp
+    parallel_helper.cpp
     broad_phase.cpp
-)
-
-target_compile_definitions(parallel_serial_consistency_test
-    PRIVATE GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
 target_link_libraries(parallel_serial_consistency_test
@@ -249,11 +255,31 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/visualization_test.cpp")
     gtest_discover_tests(visualization_test)
 endif()
 
+add_executable(parallel_helper_test
+    parallel_helper_test.cpp
+    make_shape.cpp
+    physics.cpp
+    solver.cpp
+    parallel_helper.cpp
+    broad_phase.cpp
+)
+
+target_link_libraries(parallel_helper_test
+    PRIVATE
+    corotated_energy_lib
+    OpenMP::OpenMP_CXX
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(parallel_helper_test)
+
 add_executable(total_energy_test
     total_energy_test.cpp
     make_shape.cpp
     physics.cpp
     solver.cpp
+    parallel_helper.cpp
     visualization.cpp
     broad_phase.cpp
 )
@@ -264,3 +290,22 @@ target_link_libraries(total_energy_test
     OpenMP::OpenMP_CXX
 )
 add_test(NAME total_energy_test COMMAND total_energy_test)
+
+add_executable(ipc_math_test
+    ipc_math_test.cpp
+    make_shape.cpp
+    physics.cpp
+    solver.cpp
+    parallel_helper.cpp
+    broad_phase.cpp
+)
+
+target_link_libraries(ipc_math_test
+    PRIVATE
+    corotated_energy_lib
+    OpenMP::OpenMP_CXX
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(ipc_math_test)

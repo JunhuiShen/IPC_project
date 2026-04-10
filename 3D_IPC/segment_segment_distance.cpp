@@ -136,7 +136,7 @@ SegmentSegmentDistanceResult segment_segment_distance(const Vec3& x1, const Vec3
         return out;
     }
 
-    // Parallel / degenerate case: Delta ～ 0. Check all four boundary edges.
+    // Parallel / degenerate case: Delta ~ 0. Check all four boundary edges.
     out.region = SegmentSegmentRegion::ParallelSegments;
 
     double best_dist = std::numeric_limits<double>::max();

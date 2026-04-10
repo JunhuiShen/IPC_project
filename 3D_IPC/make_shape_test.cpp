@@ -9,7 +9,7 @@ static std::vector<int> sorted(std::vector<int> v) {
 }
 
 TEST(BuildIncidentTriangleMap, BasicExample) {
-// [0,1,2, 1,2,5] — two triangles
+// [0,1,2, 1,2,5] -- two triangles
 // New format: {tri_idx, local_node_index}
 std::vector<int> indices = {0, 1, 2, 1, 2, 5};
 auto map = build_incident_triangle_map(indices);
@@ -38,7 +38,7 @@ TEST(BuildVertexAdjacencyMap, SingleTriangle) {
 
 TEST(BuildVertexAdjacencyMap, TwoTrianglesSharedEdge) {
     // Triangles [0,1,2] and [1,2,5] share edge 1-2
-    // 0 → {1,2}   1 → {0,2,5}   2 → {0,1,5}   5 → {1,2}
+    // 0 -> {1,2}   1 -> {0,2,5}   2 -> {0,1,5}   5 -> {1,2}
     std::vector<int> tris = {0, 1, 2, 1, 2, 5};
     auto adj = build_vertex_adjacency_map(tris);
 
@@ -69,7 +69,7 @@ TEST(BuildVertexAdjacencyMap, EmptyInput) {
 // ---------------------------------------------------------------------------
 
 TEST(GreedyColor, SingleTriangle) {
-    // 3 vertices all adjacent to each other → need 3 colors
+    // 3 vertices all adjacent to each other -> need 3 colors
     std::vector<int> tris = {0, 1, 2};
     auto adj = build_vertex_adjacency_map(tris);
     auto groups = greedy_color(adj, 3);
@@ -116,7 +116,7 @@ TEST(GreedyColor, AllVerticesCovered) {
 }
 
 TEST(GreedyColor, FewColorsForGrid) {
-    // A 3x3 grid of quads (split into triangles) is planar → at most 4 colors by 4-color theorem
+    // A 3x3 grid of quads (split into triangles) is planar -> at most 4 colors by 4-color theorem
     // Build a small 2x2 quad grid manually (8 triangles, 9 vertices)
     std::vector<int> tris = {
         0,1,4, 0,4,3,   // quad (0,1,4,3)

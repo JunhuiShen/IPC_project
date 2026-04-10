@@ -171,7 +171,7 @@ bool check_convergence(const std::string& label, double analytic, const std::vec
     }
 
     if (all_below_noise) {
-        if (verbose) std::cout << "    (all errors below noise floor — exact match)\n";
+        if (verbose) std::cout << "    (all errors below noise floor -- exact match)\n";
         return true;
     }
     if (!saw_good_slope) {
@@ -236,7 +236,7 @@ void test_barrier_zero_outside_activation(){
 }
 
 // ===========================================================================
-//  Test 4: partition of force (node-triangle) — sum over all DOFs = zero
+//  Test 4: partition of force (node-triangle) -- sum over all DOFs = zero
 // ===========================================================================
 
 void test_partition_of_force(){
@@ -561,6 +561,106 @@ int main(){
 
     for (const auto& tp : ss_test_points) run_ss_gradient_convergence_test(tp);
     for (const auto& tp : ss_test_points) run_ss_hessian_convergence_test(tp);
+
+    // =====================================================================
+    //  Stress: barrier near activation boundary (distance ≈ d_hat)
+    // =====================================================================
+    {
+        std::cout << "=== Stress: NT barrier near activation boundary ===\n";
+        const Vec3 x1(0,0,0), x2(1,0,0), x3(0,1,0);
+        const double d_hat = 1.0;
+
+        // Just inside: distance = d_hat - 1e-8 → barrier should be small but positive
+        const double d_inside = d_hat - 1e-8;
+        const Vec3 x_inside(0.25, 0.25, d_inside);
+        double E_inside = node_triangle_barrier(x_inside, x1, x2, x3, d_hat);
+        require(E_inside > 0.0, "barrier should be positive just inside activation");
+        std::cout << "  just inside: E=" << std::scientific << E_inside << "\n";
+
+        // Just outside: distance = d_hat + 1e-8 → barrier should be exactly 0
+        const double d_outside = d_hat + 1e-8;
+        const Vec3 x_outside(0.25, 0.25, d_outside);
+        double E_outside = node_triangle_barrier(x_outside, x1, x2, x3, d_hat);
+        require(E_outside == 0.0, "barrier should be zero just outside activation");
+        std::cout << "  just outside: E=" << E_outside << "\n";
+
+        // Gradient should be continuous: just-inside gradient should be small
+        Vec3 g_inside = node_triangle_barrier_gradient(x_inside, x1, x2, x3, d_hat, 0);
+        std::cout << "  just inside gradient norm: " << g_inside.norm() << "\n";
+        require(g_inside.norm() < 1.0, "gradient at boundary should be moderate");
+
+        std::cout << "  PASSED\n\n";
+    }
+
+    // =====================================================================
+    //  Stress: SS barrier near activation boundary
+    // =====================================================================
+    {
+        std::cout << "=== Stress: SS barrier near activation boundary ===\n";
+        const double d_hat = 1.0;
+
+        // Interior region, distance ≈ d_hat
+        const double d_inside = d_hat - 1e-8;
+        const Vec3 x1(0,0,0), x2(1,0,0);
+        const Vec3 x3(0.5, -1, d_inside), x4(0.5, 1, d_inside);
+        double E = segment_segment_barrier(x1, x2, x3, x4, d_hat);
+        require(E > 0.0, "ss barrier should be positive just inside");
+
+        const Vec3 x3_out(0.5, -1, d_hat + 1e-8), x4_out(0.5, 1, d_hat + 1e-8);
+        double E_out = segment_segment_barrier(x1, x2, x3_out, x4_out, d_hat);
+        require(E_out == 0.0, "ss barrier should be zero just outside");
+
+        std::cout << "  inside=" << std::scientific << E << " outside=" << E_out << "\n";
+        std::cout << "  PASSED\n\n";
+    }
+
+    // =====================================================================
+    //  Stress: near-parallel segments in SS barrier
+    // =====================================================================
+    {
+        std::cout << "=== Stress: near-parallel segments SS barrier ===\n";
+        const double d_hat = 1.0;
+        // Two nearly parallel segments, small offset in z
+        const Vec3 x1(0,0,0), x2(1,0,0);
+        const Vec3 x3(0.1, 0.0, 0.3), x4(0.9, 1e-10, 0.3);
+
+        double E = segment_segment_barrier(x1, x2, x3, x4, d_hat);
+        require(std::isfinite(E), "near-parallel SS barrier should be finite");
+        require(E > 0.0, "near-parallel SS barrier should be positive (within d_hat)");
+
+        // Gradient should also be finite
+        for (int dof = 0; dof < 4; ++dof) {
+            Vec3 g = segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, dof);
+            require(std::isfinite(g.norm()), "near-parallel SS gradient should be finite for dof=" + std::to_string(dof));
+        }
+
+        // Hessian should be finite
+        for (int dof = 0; dof < 4; ++dof) {
+            Mat33 H = segment_segment_barrier_hessian(x1, x2, x3, x4, d_hat, dof);
+            require(std::isfinite(H.norm()), "near-parallel SS Hessian should be finite for dof=" + std::to_string(dof));
+        }
+
+        std::cout << "  E=" << std::scientific << E << "\n";
+        std::cout << "  PASSED\n\n";
+    }
+
+    // =====================================================================
+    //  Stress: near-parallel segments gradient convergence
+    //  At angle ~ 1e-10, the distance gradient is ill-conditioned so FD
+    //  convergence breaks down. We test a moderate near-parallel case
+    //  (angle ~ 0.01 rad) where convergence should still hold.
+    // =====================================================================
+    {
+        SSTestPoint tp;
+        tp.name = "ss_near_parallel_stress";
+        tp.x1 = Vec3(0,0,0);
+        tp.x2 = Vec3(1,0,0);
+        tp.x3 = Vec3(0.1, 0.3, 0.3);
+        tp.x4 = Vec3(0.9, 0.4, 0.3);
+        tp.d_hat = 1.0;
+        tp.expected_region = SegmentSegmentRegion::Interior;
+        run_ss_gradient_convergence_test(tp);
+    }
 
     std::cout << "\n========================================\n"
               << "All barrier energy tests passed.\n"

@@ -1,3 +1,4 @@
+// solver.h
 #pragma once
 #include "physics.h"
 #include "broad_phase.h"
@@ -9,10 +10,12 @@ struct SolverResult {
     int iterations = 0;
 };
 
+std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh);
+
 void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                        const std::vector<Pin>& pins, const SimParams& params,
                        const std::vector<Vec3>& xhat, std::vector<Vec3>& x,
-                       const BroadPhase::Cache& bp_cache);
+                       const BroadPhase& broad_phase, const PinMap* pin_map = nullptr);
 
 SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                                         const std::vector<Pin>& pins, const SimParams& params,
@@ -21,3 +24,7 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
                                         const std::vector<Vec3>& v,
                                         const std::vector<std::vector<int>>& color_groups,
                                         std::vector<double>* residual_history = nullptr);
+
+SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+                                                 const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, BroadPhase& broad_phase,
+                                                 const std::vector<Vec3>& v, std::vector<double>* residual_history = nullptr);

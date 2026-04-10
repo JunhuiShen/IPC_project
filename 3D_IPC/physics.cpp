@@ -43,7 +43,8 @@ double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const s
 
 std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                                                                      const std::vector<Pin>& pins, const SimParams& params,
-                                                                     const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
+                                                                     const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                                                     const PinMap* pin_map) {
     const double dt2 = params.dt2();
     Vec3  g = Vec3::Zero();
     Mat33 H = Mat33::Zero();
@@ -52,10 +53,20 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
     g += dt2 * (-ref_mesh.mass[vi] * params.gravity);
     H += ref_mesh.mass[vi] * Mat33::Identity();
 
-    for (const Pin& pin : pins) {
-        if (pin.vertex_index == vi) {
+    if (pin_map) {
+        const int pi = (*pin_map)[vi];
+        if (pi >= 0) {
+            const Pin& pin = pins[pi];
             g += dt2 * params.kpin * (x[vi] - pin.target_position);
             H += dt2 * params.kpin * Mat33::Identity();
+        }
+    } else {
+        for (const Pin& pin : pins) {
+            if (pin.vertex_index == vi) {
+                g += dt2 * params.kpin * (x[vi] - pin.target_position);
+                H += dt2 * params.kpin * Mat33::Identity();
+                break;
+            }
         }
     }
 
@@ -68,7 +79,7 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
         const Mat32  F      = Ds_mat * Dm_inv;
         const double A      = ref_mesh.area[ti];
 
-        // Build cache once — P, dPdF, gradN all share it
+        // Build cache once -- P, dPdF, gradN all share it
         const CorotatedCache32 cache = buildCorotatedCache(F);
         const ShapeGrads gradN = shape_function_gradients(Dm_inv);
         const Mat32 P = PCorotated32(cache, F, params.mu, params.lambda);
@@ -84,7 +95,7 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
 
 Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                             const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                            const BroadPhase& broad_phase) {
+                            const BroadPhase& broad_phase, const PinMap* pin_map) {
     const double dt2 = params.dt2();
     const auto& bp_cache = broad_phase.cache();
     Vec3 g = Vec3::Zero();
@@ -92,9 +103,18 @@ Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const VertexTriangl
     g += ref_mesh.mass[vi] * (x[vi] - xhat[vi]);
     g += dt2 * (-ref_mesh.mass[vi] * params.gravity);
 
-    for (const Pin& pin : pins) {
-        if (pin.vertex_index == vi)
-            g += dt2 * params.kpin * (x[vi] - pin.target_position);
+    if (pin_map) {
+        const int pi = (*pin_map)[vi];
+        if (pi >= 0) {
+            g += dt2 * params.kpin * (x[vi] - pins[pi].target_position);
+        }
+    } else {
+        for (const Pin& pin : pins) {
+            if (pin.vertex_index == vi) {
+                g += dt2 * params.kpin * (x[vi] - pin.target_position);
+                break;
+            }
+        }
     }
 
     for (const auto& [ti, a] : adj.at(vi)) {
@@ -129,10 +149,12 @@ Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const VertexTriangl
 
 double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                               const BroadPhase& broad_phase) {
+                               const BroadPhase& broad_phase, const PinMap* pin_map) {
+    const int nv = static_cast<int>(x.size());
     double r_inf = 0.0;
-    for (int i = 0; i < static_cast<int>(x.size()); ++i) {
-        Vec3 g = compute_local_gradient(i, ref_mesh, adj, pins, params, x, xhat, broad_phase);
+    #pragma omp parallel for reduction(max:r_inf) schedule(static)
+    for (int i = 0; i < nv; ++i) {
+        Vec3 g = compute_local_gradient(i, ref_mesh, adj, pins, params, x, xhat, broad_phase, pin_map);
         r_inf = std::max(r_inf, g.cwiseAbs().maxCoeff());
     }
     return r_inf;

@@ -83,7 +83,7 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
         }
     }
 
-    // convert (col, row) → vertex index
+    // convert (col, row) -> vertex index
     auto vertex_index = [base, nx](int i, int j) {
         return base + j * (nx + 1) + i;
     };
@@ -144,7 +144,7 @@ std::vector<std::vector<int>> greedy_color(
         color[v] = c;
     }
 
-    // Invert: color → list of vertices
+    // Invert: color -> list of vertices
     int num_colors = *std::max_element(color.begin(), color.end()) + 1;
     std::vector<std::vector<int>> groups(num_colors);
     for (int v = 0; v < num_vertices; ++v)

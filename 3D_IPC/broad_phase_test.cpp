@@ -790,3 +790,152 @@ broad.refresh(x, v, mesh, 4, 1.0, 0.0, 0.0, 0.0);
 
 EXPECT_TRUE(contains_ss_pair(broad.ss_pairs(), EdgeKey(0, 1), EdgeKey(3, 4)));
 }
+
+// ====================================================================
+//  query_single_node_ccd: verify it returns a superset of brute-force
+//  epsilon-padded CCD candidates for a single moving vertex.
+// ====================================================================
+
+static PairSets brute_force_single_node_ccd(const std::vector<Vec3>& x, int vi, const Vec3& dx, const RefMesh& mesh) {
+    constexpr double eps_pad = 1.0e-10;
+    PairSets out;
+    const int nt = num_tris(mesh);
+
+    AABB vi_box;
+    vi_box.expand(x[vi]);
+    vi_box.expand(x[vi] + dx);
+    vi_box.min.array() -= eps_pad;
+    vi_box.max.array() += eps_pad;
+
+    for (int t = 0; t < nt; ++t) {
+        const int a = tri_vertex(mesh, t, 0);
+        const int b = tri_vertex(mesh, t, 1);
+        const int c = tri_vertex(mesh, t, 2);
+        if (vi == a || vi == b || vi == c) continue;
+        AABB tri_box;
+        tri_box.expand(x[a]); tri_box.expand(x[b]); tri_box.expand(x[c]);
+        tri_box.min.array() -= eps_pad;
+        tri_box.max.array() += eps_pad;
+        if (aabb_intersects(vi_box, tri_box))
+            out.nt.insert(make_nt_key(vi, a, b, c));
+    }
+
+    const auto edges = build_unique_edges_ref(mesh);
+    const int ne = static_cast<int>(edges.size());
+    std::vector<int> vi_edges;
+    for (int e = 0; e < ne; ++e)
+        if (edges[e].a == vi || edges[e].b == vi) vi_edges.push_back(e);
+
+    for (int ei_idx : vi_edges) {
+        const auto& ei = edges[ei_idx];
+        AABB ei_box;
+        ei_box.expand(x[ei.a]); ei_box.expand(x[ei.b]);
+        if (ei.a == vi) ei_box.expand(x[ei.a] + dx);
+        if (ei.b == vi) ei_box.expand(x[ei.b] + dx);
+        ei_box.min.array() -= eps_pad;
+        ei_box.max.array() += eps_pad;
+        for (int ej = 0; ej < ne; ++ej) {
+            if (ej == ei_idx) continue;
+            if (share_vertex(ei, edges[ej])) continue;
+            AABB ej_box;
+            ej_box.expand(x[edges[ej].a]); ej_box.expand(x[edges[ej].b]);
+            ej_box.min.array() -= eps_pad;
+            ej_box.max.array() += eps_pad;
+            if (aabb_intersects(ei_box, ej_box))
+                out.ss.insert(make_ss_key(ei.a, ei.b, edges[ej].a, edges[ej].b));
+        }
+    }
+    return out;
+}
+
+static PairSets pairs_from_ccd_result(const BroadPhase::SingleNodeCCDResult& ccd) {
+    PairSets out;
+    for (const auto& p : ccd.nt_pairs)
+        out.nt.insert(make_nt_key(p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2]));
+    for (const auto& p : ccd.ss_pairs)
+        out.ss.insert(make_ss_key(p.v[0], p.v[1], p.v[2], p.v[3]));
+    return out;
+}
+
+TEST(QuerySingleNodeCCD, SupersetOfBruteForceForAllVertices) {
+    std::vector<Vec3> x = {
+        {0,0,0}, {1,0,0}, {2,0,0}, {3,0,0},
+        {0,1,0}, {1,1,0}, {2,1,0}, {3,1,0},
+        {0,2,0}, {1,2,0}, {2,2,0}, {3,2,0},
+        {0.5,0.3,0.03}, {1.5,0.3,0.03}, {2.5,0.3,0.03},
+        {0.5,1.3,0.03}, {1.5,1.3,0.03}, {2.5,1.3,0.03},
+    };
+    std::vector<std::array<int,3>> tris = {
+        {0,1,4}, {1,5,4}, {1,2,5}, {2,6,5}, {2,3,6}, {3,7,6},
+        {4,5,8}, {5,9,8}, {5,6,9}, {6,10,9}, {6,7,10}, {7,11,10},
+        {12,13,15}, {13,16,15}, {13,14,16}, {14,17,16},
+    };
+    RefMesh mesh = make_mesh(x, tris);
+    const int nv = static_cast<int>(x.size());
+    std::vector<Vec3> v(nv, Vec3::Zero());
+    v[0] = Vec3(0, -1, 0);
+
+    BroadPhase bp;
+    bp.initialize(x, v, mesh, 1.0/30.0, 0.1);
+
+    std::vector<Vec3> displacements = {
+        Vec3(0, 0, -0.5), Vec3(0.3, -0.2, 0), Vec3(0, 0, 0.5), Vec3(-1, -1, -1),
+    };
+
+    for (int vi = 0; vi < nv; ++vi) {
+        for (const Vec3& dx : displacements) {
+            const auto ccd = bp.query_single_node_ccd(x, vi, dx, mesh);
+            const auto result_pairs = pairs_from_ccd_result(ccd);
+            const auto brute = brute_force_single_node_ccd(x, vi, dx, mesh);
+
+            for (const auto& nt_key : brute.nt) {
+                EXPECT_TRUE(result_pairs.nt.count(nt_key))
+                    << "Missing NT pair for vi=" << vi
+                    << " node=" << nt_key.node << " tri=(" << nt_key.a << "," << nt_key.b << "," << nt_key.c << ")";
+            }
+            for (const auto& ss_key : brute.ss) {
+                EXPECT_TRUE(result_pairs.ss.count(ss_key))
+                    << "Missing SS pair for vi=" << vi
+                    << " e0=(" << ss_key.e0.a << "," << ss_key.e0.b
+                    << ") e1=(" << ss_key.e1.a << "," << ss_key.e1.b << ")";
+            }
+            for (const auto& p : ccd.nt_pairs) {
+                EXPECT_EQ(p.node, vi);
+                EXPECT_NE(p.node, p.tri_v[0]);
+                EXPECT_NE(p.node, p.tri_v[1]);
+                EXPECT_NE(p.node, p.tri_v[2]);
+            }
+            for (const auto& p : ccd.ss_pairs) {
+                EXPECT_FALSE(share_vertex(
+                    EdgeKey(p.v[0], p.v[1]), EdgeKey(p.v[2], p.v[3])));
+            }
+        }
+    }
+}
+
+TEST(QuerySingleNodeCCD, ConservativeAfterRefresh) {
+    std::vector<Vec3> x = {
+        {0,0,0}, {1,0,0}, {0,1,0},
+        {0.3,0.3,0.05}, {1.3,0.3,0.05}, {0.3,1.3,0.05},
+    };
+    std::vector<std::array<int,3>> tris = {{0,1,2}, {3,4,5}};
+    RefMesh mesh = make_mesh(x, tris);
+    const int nv = static_cast<int>(x.size());
+    std::vector<Vec3> v(nv, Vec3::Zero());
+
+    BroadPhase bp;
+    bp.initialize(x, v, mesh, 1.0/30.0, 0.1);
+
+    x[0] = Vec3(0.1, 0.1, 0.02);
+    bp.refresh(x, v, mesh, 0, 1.0/30.0, 0.1, 0.0, 0.05);
+
+    Vec3 dx(0, 0, -0.2);
+    const auto ccd = bp.query_single_node_ccd(x, 0, dx, mesh);
+    const auto result_pairs = pairs_from_ccd_result(ccd);
+    const auto brute = brute_force_single_node_ccd(x, 0, dx, mesh);
+
+    for (const auto& nt_key : brute.nt)
+        EXPECT_TRUE(result_pairs.nt.count(nt_key)) << "Missing NT pair after refresh";
+    for (const auto& ss_key : brute.ss)
+        EXPECT_TRUE(result_pairs.ss.count(ss_key)) << "Missing SS pair after refresh";
+}

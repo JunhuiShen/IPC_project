@@ -358,57 +358,46 @@ namespace {
 
     static inline void remove_nt_pairs_touching_node(BroadPhase::Cache& cache, int node) {
         if (cache.vertex_nt.empty()) return;
-        bool found = true;
-        while (found) {
-            found = false;
-            for (const auto& e : cache.vertex_nt[node]) {
-                if (e.dof == 0) {
-                    erase_nt_pair_at(cache, e.pair_index);
-                    found = true;
-                    break;
-                }
-            }
+        std::vector<std::size_t> to_delete;
+        for (const auto& e : cache.vertex_nt[node]) {
+            if (e.dof == 0) to_delete.push_back(e.pair_index);
         }
+        std::sort(to_delete.rbegin(), to_delete.rend());
+        for (std::size_t idx : to_delete) erase_nt_pair_at(cache, idx);
     }
 
     static inline void remove_nt_pairs_touching_triangle(BroadPhase::Cache& cache, int tri_idx, const RefMesh& mesh) {
         if (cache.vertex_nt.empty()) return;
         const int verts[3] = {tri_vertex(mesh, tri_idx, 0), tri_vertex(mesh, tri_idx, 1), tri_vertex(mesh, tri_idx, 2)};
-        bool found = true;
-        while (found) {
-            found = false;
-            for (int v : verts) {
-                for (const auto& e : cache.vertex_nt[v]) {
-                    if (cache.nt_pair_tri[e.pair_index] == tri_idx) {
-                        erase_nt_pair_at(cache, e.pair_index);
-                        found = true;
-                        break;
-                    }
-                }
-                if (found) break;
+        std::vector<std::size_t> to_delete;
+        for (int v : verts) {
+            for (const auto& e : cache.vertex_nt[v]) {
+                if (cache.nt_pair_tri[e.pair_index] == tri_idx)
+                    to_delete.push_back(e.pair_index);
             }
         }
+        std::sort(to_delete.begin(), to_delete.end());
+        to_delete.erase(std::unique(to_delete.begin(), to_delete.end()), to_delete.end());
+        for (auto it = to_delete.rbegin(); it != to_delete.rend(); ++it)
+            erase_nt_pair_at(cache, *it);
     }
 
     static inline void remove_ss_pairs_touching_edge(BroadPhase::Cache& cache, int edge_idx) {
         if (cache.vertex_ss.empty()) return;
         const int v0 = cache.edges[edge_idx][0];
         const int v1 = cache.edges[edge_idx][1];
-        bool found = true;
-        while (found) {
-            found = false;
-            for (int v : {v0, v1}) {
-                for (const auto& e : cache.vertex_ss[v]) {
-                    const auto& edges = cache.ss_pair_edges[e.pair_index];
-                    if (edges[0] == edge_idx || edges[1] == edge_idx) {
-                        erase_ss_pair_at(cache, e.pair_index);
-                        found = true;
-                        break;
-                    }
-                }
-                if (found) break;
+        std::vector<std::size_t> to_delete;
+        for (int v : {v0, v1}) {
+            for (const auto& e : cache.vertex_ss[v]) {
+                const auto& edges = cache.ss_pair_edges[e.pair_index];
+                if (edges[0] == edge_idx || edges[1] == edge_idx)
+                    to_delete.push_back(e.pair_index);
             }
         }
+        std::sort(to_delete.begin(), to_delete.end());
+        to_delete.erase(std::unique(to_delete.begin(), to_delete.end()), to_delete.end());
+        for (auto it = to_delete.rbegin(); it != to_delete.rend(); ++it)
+            erase_ss_pair_at(cache, *it);
     }
 
     static inline void query_node_against_triangles(BroadPhase::Cache& cache, int node, const RefMesh& mesh) {
@@ -525,6 +514,11 @@ namespace {
 }
 
 // Broad phase
+void BroadPhase::set_mesh_topology(const RefMesh& mesh, int nv) {
+    build_unique_edges_and_adjacency(mesh, nv, topo_.edges, topo_.node_to_edges, topo_.node_to_tris);
+    topology_valid_ = true;
+}
+
 void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double node_pad, double tri_pad, double edge_pad) {
     Cache c;
 
@@ -534,7 +528,10 @@ void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, c
     c.vertex_nt.resize(nv);
     c.vertex_ss.resize(nv);
 
-    build_unique_edges_and_adjacency(mesh, nv, c.edges, c.node_to_edges, c.node_to_tris);
+    if (!topology_valid_) set_mesh_topology(mesh, nv);
+    c.edges = topo_.edges;
+    c.node_to_edges = topo_.node_to_edges;
+    c.node_to_tris = topo_.node_to_tris;
     const int ne = static_cast<int>(c.edges.size());
 
     c.node_boxes.resize(nv);
@@ -635,4 +632,63 @@ void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vec
     // Tiny epsilon padding for borderline floating-point cases
     constexpr double epsilon_pad = 1.0e-10;
     build(x, v, mesh, dt, /*node_pad=*/epsilon_pad, /*tri_pad=*/epsilon_pad, /*edge_pad=*/epsilon_pad);
+}
+
+BroadPhase::SingleNodeCCDResult BroadPhase::query_single_node_ccd(
+        const std::vector<Vec3>& x, int vi, const Vec3& dx, const RefMesh& mesh) const {
+    constexpr double epsilon_pad = 1.0e-10;
+    SingleNodeCCDResult result;
+
+    // Build vi's swept AABB
+    AABB vi_box;
+    vi_box.expand(x[vi]);
+    vi_box.expand(x[vi] + dx);
+    vi_box.min.array() -= epsilon_pad;
+    vi_box.max.array() += epsilon_pad;
+
+    // Node-triangle: vi as node against all non-incident triangles
+    if (cache_.tri_root >= 0) {
+        std::vector<int> hits;
+        query_bvh(cache_.tri_bvh_nodes, cache_.tri_root, vi_box, hits);
+        for (int t : hits) {
+            const int a = tri_vertex(mesh, t, 0);
+            const int b = tri_vertex(mesh, t, 1);
+            const int c = tri_vertex(mesh, t, 2);
+            if (vi == a || vi == b || vi == c) continue;
+            result.nt_pairs.push_back({vi, {a, b, c}});
+        }
+    }
+
+    // Segment-segment: edges incident to vi against non-sharing edges
+    if (cache_.edge_root >= 0 && vi < static_cast<int>(cache_.node_to_edges.size())) {
+        for (int ei : cache_.node_to_edges[vi]) {
+            const int ea = cache_.edges[ei][0];
+            const int eb = cache_.edges[ei][1];
+
+            // Build swept AABB for this edge (only vi endpoint moves)
+            AABB edge_box;
+            edge_box.expand(x[ea]);
+            edge_box.expand(x[eb]);
+            if (ea == vi) edge_box.expand(x[ea] + dx);
+            if (eb == vi) edge_box.expand(x[eb] + dx);
+            edge_box.min.array() -= epsilon_pad;
+            edge_box.max.array() += epsilon_pad;
+
+            std::vector<int> hits;
+            query_bvh(cache_.edge_bvh_nodes, cache_.edge_root, edge_box, hits);
+            for (int ej : hits) {
+                if (ej == ei) continue;
+                const int oa = cache_.edges[ej][0];
+                const int ob = cache_.edges[ej][1];
+                if (ea == oa || ea == ob || eb == oa || eb == ob) continue;
+                // Deduplicate: if ej is also incident to vi, only emit when ei < ej
+                if ((oa == vi || ob == vi) && ei > ej) continue;
+
+                int vi_dof = (vi == ea) ? 0 : 1;
+                result.ss_pairs.push_back({{ea, eb, oa, ob}, vi_dof});
+            }
+        }
+    }
+
+    return result;
 }

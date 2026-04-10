@@ -74,7 +74,7 @@ void export_geo(const std::string& filename, const std::vector<Vec3>& x, const s
     out << "    \"primitivecount\", " << nprims << ",\n";
     out << "    \"info\", {},\n";
 
-    // Topology — must be an array, not an object
+    // Topology -- must be an array, not an object
     out << "    \"topology\",\n    [\n";
     out << "        \"pointref\",\n        [\n";
     out << "            \"indices\", [";
@@ -86,7 +86,7 @@ void export_geo(const std::string& filename, const std::vector<Vec3>& x, const s
     out << "        ]\n";
     out << "    ],\n";
 
-    // Attributes — must be an array, not an object
+    // Attributes -- must be an array, not an object
     out << "    \"attributes\",\n    [\n";
     out << "        \"pointattributes\",\n        [\n";
     out << "            [\n";

@@ -1,5 +1,6 @@
 #include "make_shape.h"
 #include "physics.h"
+#include "simulation.h"
 #include "solver.h"
 #include "broad_phase.h"
 #include <filesystem>
@@ -44,15 +45,7 @@ int main() {
     out << std::setprecision(15);
 
     for (int frame = 1; frame <= 100; ++frame) {
-        for (int sub = 0; sub < params.substeps; ++sub) {
-            std::vector<Vec3> xhat;
-            build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
-            std::vector<Vec3> xnew = state.deformed_positions;
-            global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat,
-                                       broad_phase, state.velocities, color_groups);
-            update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
-            state.deformed_positions = xnew;
-        }
+        advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, broad_phase);
 
         if (frame == 50)
             serialize_state(checkpoint_dir, 50, state);

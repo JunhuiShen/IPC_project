@@ -3,12 +3,11 @@
 A 3D physics simulation of deformable triangle meshes using
 **Incremental Potential Contact (IPC)** and solved with a **nonlinear Gauss–Seidel solver**.
 
-The simulator is designed for experimenting with different strategies for:
-- broad-phase collision candidate detection
-- collision-free Newton step-size filtering
-- initial guess generation
-
-These components can be swapped to compare different algorithmic variants.
+The simulation pipeline consists of:
+- **CCD-projected initial guess**: advances toward the inertial predictor using parallel cubic CCD
+- **Nonlinear Gauss–Seidel solver**: local 3x3 Newton solve per vertex with linear CCD step filtering
+- **Incremental broad phase**: swept-AABB BVH with local refit after each vertex commit
+- **Parallel solver**: certified-region conflict graph with greedy coloring for safe concurrent vertex updates
 
 ## Requirements
 
@@ -77,7 +76,7 @@ To list discovered tests:
 You can still run any executable directly (for example):
 
     ./build/total_energy_test
-    ./build/simulation_snapshot_test
+    ./build/ccd_test
 
 The test suite includes both GoogleTest-based tests and standalone numerical verification executables.
 
@@ -104,16 +103,17 @@ Per-frame statistics are printed to stdout:
     3D_IPC/
     ├── CMakeLists.txt
     ├── IPC_math.h / IPC_math.cpp
-    │   matrix utilities and small helper functions
+    │   type aliases, matrix utilities, small helper functions
     │
     ├── make_shape.h / make_shape.cpp
-    │   mesh construction
-    │   build_xhat()
-    │   update_velocity()
+    │   mesh construction, build_xhat(), update_velocity()
+    │   vertex adjacency map, greedy coloring
     │
     ├── physics.h / physics.cpp
     │   incremental potential (no barrier): energy, per-vertex gradient, per-vertex Hessian
-    │   barrier terms are added
+    │
+    ├── corotated_energy.h / corotated_energy.cpp
+    │   corotated 3x2 energy, per-vertex nodal gradient, and per-vertex nodal Hessian
     │
     ├── node_triangle_distance.h / node_triangle_distance.cpp
     │   node–triangle closest-point distance (7 regions + degenerate)
@@ -126,24 +126,32 @@ Per-frame statistics are printed to stdout:
     │   node–triangle barrier: energy + per-DOF gradient/Hessian blocks
     │   segment–segment barrier: energy + per-DOF gradient/Hessian blocks
     │
-    ├── corotated_energy.h / corotated_energy.cpp
-    │   corotated 3x2 energy, per-vertex nodal gradient, and per-vertex nodal Hessian
+    ├── ccd.h / ccd.cpp
+    │   linear CCD for single-node Gauss–Seidel sweeps
+    │   general cubic CCD for multi-vertex motion (initial guess)
+    │   full degeneracy handling: cubic → quadratic → linear → coplanar → collinear
     │
     ├── broad_phase.h / broad_phase.cpp
     │   swept-AABB broad phase with BVH queries
     │   incremental refresh and local ancestor-only BVH refit
     │
     ├── solver.h / solver.cpp
-    │   nonlinear Gauss–Seidel solver 
+    │   CCD-projected initial guess (parallel CCD evaluation)
+    │   serial nonlinear Gauss–Seidel solver
+    │   parallel Gauss–Seidel solver (certified-region conflict graph + colored commits)
+    │
+    ├── parallel_helper.h / parallel_helper.cpp
+    │   Jacobi prediction, certified regions, conflict graph
+    │   parallel commit computation and application
+    │
+    ├── simulation.h
+    │   advance_one_frame(): time stepping driver
     │
     ├── visualization.h / visualization.cpp
-    │   export_obj()
-    │   export_geo()
-    │   export_usd()
-    │   export_frame()
+    │   export_obj(), export_geo(), export_usd(), export_frame()
     │
-    ├── simulation.cpp
-    │   main simulation driver
+    ├── args.h / ipc_args.h
+    │   CLI argument parsing
     │
     ├── corotated_energy_test.cpp
     │   FD verification for corotated element energy, gradient, Hessian
@@ -155,7 +163,16 @@ Per-frame statistics are printed to stdout:
     │   distance computation tests for all 9 regions + parallel + symmetry
     │
     ├── barrier_energy_test.cpp
-    │   FD convergence tests for scalar barrier, node–triangle barrier, and segment–segment barrier 
+    │   FD convergence tests for scalar barrier, node–triangle barrier, and segment–segment barrier
+    │
+    ├── ccd_test.cpp
+    │   linear and general cubic CCD, degeneracy chain, stress tests, initial guess tests
+    │
+    ├── broad_phase_test.cpp
+    │   AABB, BVH, pair generation, CCD candidates, conservativeness, incremental refresh
+    │
+    ├── parallel_helper_test.cpp
+    │   Jacobi predictions, conflict graph, coloring, commits, solver correctness
     │
     ├── total_energy_test.cpp
     │   FD verification for full incremental potential including barrier terms
@@ -167,12 +184,7 @@ Per-frame statistics are printed to stdout:
 - corotated_energy implements element-level (triangle) physics
 - physics provides no-barrier local gradient/Hessian terms and residual helpers
 - barrier_energy provides per-pair barrier energy, gradient, and Hessian for both node–triangle and segment–segment primitives
+- ccd provides both linear (single-node) and general cubic (multi-vertex) continuous collision detection
 - broad_phase maintains barrier candidate pairs incrementally during sweeps
-- solver performs nonlinear Gauss–Seidel iterations
-- simulation.cpp controls time stepping and scene setup
-
-## Future Work
-
-- CCD line search
-- support larger meshes
-- improve visualization pipeline
+- solver performs nonlinear Gauss–Seidel iterations with CCD step filtering and CCD-projected initial guess
+- simulation.h controls time stepping and scene setup

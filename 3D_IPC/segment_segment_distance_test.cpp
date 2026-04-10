@@ -342,6 +342,48 @@ namespace {
         require(approx_vec(r.closest_point_2, Vec3(0.5, 0.0, 0.0)), "Touching: wrong closest_2");
     }
 
+    // Stress: nearly parallel segments (angle ~ 1e-10 radians)
+    void test_near_parallel_stress(){
+        std::cout << "--- Near-parallel stress ---\n";
+        const Vec3 x1(0,0,0), x2(1,0,0);
+        const Vec3 x3(0.1, 0.0, 0.3), x4(0.9, 1e-10, 0.3);
+
+        auto r = segment_segment_distance(x1, x2, x3, x4);
+        std::cout << "  distance = " << r.distance << "  s=" << r.s << "  t=" << r.t
+                  << "  region=" << to_string(r.region) << "\n";
+        require(std::isfinite(r.distance), "near-parallel distance should be finite");
+        require(r.distance > 0.0, "near-parallel distance should be positive");
+        require(r.distance < 0.31, "near-parallel distance should be ~0.3");
+        require(r.s >= 0.0 && r.s <= 1.0, "s should be in [0,1]");
+        require(r.t >= 0.0 && r.t <= 1.0, "t should be in [0,1]");
+    }
+
+    // Stress: large coordinates (shifted by 1e6)
+    void test_large_coordinates_stress(){
+        std::cout << "--- Large coordinates stress ---\n";
+        const double off = 1e6;
+        const Vec3 x1(off, off, off), x2(off+1, off, off);
+        const Vec3 x3(off+0.5, off-1, off+0.5), x4(off+0.5, off+1, off+0.5);
+
+        auto r = segment_segment_distance(x1, x2, x3, x4);
+        std::cout << "  distance = " << r.distance << "  region=" << to_string(r.region) << "\n";
+        require(std::isfinite(r.distance), "large-coord distance should be finite");
+        require(r.region == SegmentSegmentRegion::Interior, "should be interior region");
+        require(approx(r.distance, 0.5, 1e-6), "large-coord distance should be ~0.5");
+    }
+
+    // Stress: very short segment (length ~ 1e-10)
+    void test_very_short_segment_stress(){
+        std::cout << "--- Very short segment stress ---\n";
+        const Vec3 x1(0,0,0), x2(1,0,0);
+        const Vec3 x3(0.5, 0.5, 0.0), x4(0.5, 0.5, 1e-10);
+
+        auto r = segment_segment_distance(x1, x2, x3, x4);
+        std::cout << "  distance = " << r.distance << "  region=" << to_string(r.region) << "\n";
+        require(std::isfinite(r.distance), "short segment distance should be finite");
+        require(r.distance > 0.0, "short segment distance should be positive");
+    }
+
 } // namespace
 
 int main(){
@@ -359,6 +401,9 @@ int main(){
     test_degenerate_segment_case();
     test_symmetry();
     test_touching_case();
+    test_near_parallel_stress();
+    test_large_coordinates_stress();
+    test_very_short_segment_stress();
 
     std::cout << "\nAll segment-segment distance tests passed.\n";
     return 0;

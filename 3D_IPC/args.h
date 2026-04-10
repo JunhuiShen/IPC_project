@@ -8,7 +8,7 @@
 #include <sstream>
 
 // ======================================================
-// ArgParser — generic command-line argument parser
+// ArgParser -- generic command-line argument parser
 //
 // Usage:
 //   Derive a struct from ArgParser.

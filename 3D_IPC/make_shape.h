@@ -26,7 +26,7 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
 VertexTriangleMap build_incident_triangle_map(const std::vector<int>& indices);
 
 // Maps each vertex to the set of other vertex indices it shares a triangle with.
-// e.g. if vertex 0 appears in triangles with vertices 1,3,5,7 → {0: [1,3,5,7]}
+// e.g. if vertex 0 appears in triangles with vertices 1,3,5,7 -> {0: [1,3,5,7]}
 // Used for graph coloring.
 std::unordered_map<int, std::vector<int>> build_vertex_adjacency_map(const std::vector<int>& tris);
 

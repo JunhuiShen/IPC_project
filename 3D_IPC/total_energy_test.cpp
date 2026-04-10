@@ -10,6 +10,31 @@
 
 using VecX = Eigen::VectorXd;
 
+void require(bool cond, const std::string& msg){
+    if (!cond) {
+        std::cerr << "TEST FAILED: " << msg << std::endl;
+        std::exit(EXIT_FAILURE);
+    }
+}
+
+bool check_convergence(const std::string& label, const std::vector<double>& hs,
+                       const std::vector<double>& errors, double noise_floor = 1e-10){
+    bool saw_good_slope = false;
+    for (int i = 1; i < (int)errors.size(); ++i) {
+        if (errors[i] < noise_floor && errors[i-1] < noise_floor) continue;
+        if (errors[i] == 0.0) continue;
+        double slope = std::log(errors[i-1]/errors[i]) / std::log(hs[i-1]/hs[i]);
+        std::cout << "    h=" << hs[i] << "  err=" << errors[i]
+                  << "  slope=" << std::fixed << std::setprecision(2) << slope << "\n";
+        if (slope >= 1.8) saw_good_slope = true;
+    }
+    if (!saw_good_slope) {
+        std::cerr << "  FAIL: no slope >= 1.8 for " << label << "\n";
+        return false;
+    }
+    return true;
+}
+
 VecX flatten_positions(const std::vector<Vec3>& x){
     VecX q(3 * x.size());
     for (int i = 0; i < (int)x.size(); ++i) q.segment<3>(3*i) = x[i];
@@ -158,7 +183,7 @@ Mat33 local_hessian_fd(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
 //  Slope-2 check
 // =====================================================================
 
-void slope2_check(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+bool slope2_check(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                   const std::vector<Pin>& pins, const SimParams& params,
                   const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                   const std::vector<NodeTrianglePair>& nt_pairs,
@@ -180,11 +205,9 @@ void slope2_check(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
         Vec3 lin = g + h * H * dir;
         double err = (gh - lin).norm();
         errs.push_back(err);
-        std::cout << "h=" << h << " err=" << err << "\n";
     }
 
-    for (int i = 1; i < (int)errs.size(); ++i)
-        std::cout << "ratio=" << errs[i-1] / errs[i] << " (~4 expected)\n";
+    return check_convergence("slope-2 vertex " + std::to_string(vi), hs, errs);
 }
 
 // =====================================================================
@@ -287,7 +310,9 @@ int main(){
             g.segment<3>(3*vi) = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
 
         double an = g.dot(dir);
-        std::cout << "FD=" << fd << " analytic=" << an << " error=" << std::abs(fd - an) << "\n";
+        double err = std::abs(fd - an);
+        std::cout << "FD=" << fd << " analytic=" << an << " error=" << err << "\n";
+        require(err < 1e-4, "directional derivative error too large");
     }
 
     // -----------------------------------------------------------------
@@ -299,7 +324,9 @@ int main(){
         for (int vi = 0; vi < (int)x.size(); ++vi) {
             Vec3 g   = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
             Vec3 gfd = local_gradient_fd(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs, eps);
-            std::cout << "v " << vi << " err=" << (g - gfd).norm() << "\n";
+            double err = (g - gfd).norm();
+            std::cout << "v " << vi << " err=" << err << "\n";
+            require(err < 1e-4, "gradient mismatch at vertex " + std::to_string(vi));
         }
     }
 
@@ -312,16 +339,21 @@ int main(){
         for (int vi = 0; vi < (int)x.size(); ++vi) {
             Mat33 H   = local_hessian(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
             Mat33 Hfd = local_hessian_fd(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs, eps);
-            std::cout << "v " << vi << " err=" << (H - Hfd).lpNorm<Eigen::Infinity>() << "\n";
+            double err = (H - Hfd).lpNorm<Eigen::Infinity>();
+            std::cout << "v " << vi << " err=" << err << "\n";
+            require(err < 1e-3, "Hessian mismatch at vertex " + std::to_string(vi));
         }
     }
 
     // -----------------------------------------------------------------
     //  Slope-2 checks
     // -----------------------------------------------------------------
-    slope2_check(2, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
-    slope2_check(0, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
-    slope2_check(4, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
+    require(slope2_check(2, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs),
+            "slope-2 check failed for vertex 2");
+    require(slope2_check(0, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs),
+            "slope-2 check failed for vertex 0");
+    require(slope2_check(4, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs),
+            "slope-2 check failed for vertex 4");
 
     std::cout << "\n========================================\n"
               << "All total energy tests completed.\n"

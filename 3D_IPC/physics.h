@@ -26,8 +26,21 @@ struct SimParams {
     int    restart_frame{-1};  // -1 = no restart
     bool   use_parallel{false};
 
-    double dt()  const { return 1.0 / (fps * static_cast<double>(substeps)); }
-    double dt2() const { double d = dt(); return d * d; }  // cached square
+    double dt()  const {
+        if (cached_dt_ < 0.0) cached_dt_ = 1.0 / (fps * static_cast<double>(substeps));
+        return cached_dt_;
+    }
+    double dt2() const {
+        if (cached_dt2_ < 0.0) { double d = dt(); cached_dt2_ = d * d; }
+        return cached_dt2_;
+    }
+    // Call after changing fps or substeps at runtime (they are typically set once).
+    void invalidate_dt_cache() const { cached_dt_ = -1.0; cached_dt2_ = -1.0; }
+
+private:
+    mutable double cached_dt_ = -1.0;
+    mutable double cached_dt2_ = -1.0;
+public:
 };
 
 struct DeformedState {
@@ -102,6 +115,16 @@ struct SegmentSegmentPair {
     int v[4];
 };
 
+// Pin lookup: vertex_index -> index into pins vector, -1 if not pinned.
+using PinMap = std::vector<int>;
+
+inline PinMap build_pin_map(const std::vector<Pin>& pins, int nv) {
+    PinMap m(nv, -1);
+    for (int i = 0; i < static_cast<int>(pins.size()); ++i)
+        m[pins[i].vertex_index] = i;
+    return m;
+}
+
 //  Physics functions
 double triangle_ref_area_2d(const RefMesh& ref_mesh, int tri_idx);
 
@@ -110,15 +133,16 @@ double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const s
 
 std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh,
                                                                      const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                                                                     const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
+                                                                     const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                                                     const PinMap* pin_map = nullptr);
 
 Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                             const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                            const BroadPhase& broad_phase);
+                            const BroadPhase& broad_phase, const PinMap* pin_map = nullptr);
 
 double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                               const BroadPhase& broad_phase);
+                               const BroadPhase& broad_phase, const PinMap* pin_map = nullptr);
 
 void serialize_state(const std::string& dir, int frame, const DeformedState& state);
 bool deserialize_state(const std::string& dir, int frame, DeformedState& state);

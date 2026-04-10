@@ -5,7 +5,7 @@
 #include "visualization.h"
 
 // ======================================================
-// IPCArgs3D — simulation parameters for 3D IPC
+// IPCArgs3D -- simulation parameters for 3D IPC
 // ======================================================
 
 struct IPCArgs3D : ArgParser {
