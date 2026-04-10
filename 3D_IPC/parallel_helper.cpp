@@ -249,8 +249,26 @@ static double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, cons
 
     double toi_min = 1.0;
 
-    for (const auto& p : ccd.nt_pairs) {
-        CCDResult r = node_triangle_only_one_node_moves(x[p.node], dx, x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]]);
+    // vi as the lone moving node — only dx (vi's displacement) is non-zero.
+    for (const auto& p : ccd.nt_node_pairs) {
+        CCDResult r = node_triangle_only_one_node_moves(
+            x[p.node],     dx,
+            x[p.tri_v[0]], Vec3::Zero(),
+            x[p.tri_v[1]], Vec3::Zero(),
+            x[p.tri_v[2]], Vec3::Zero());
+        if (r.collision) toi_min = std::min(toi_min, r.t);
+    }
+
+    // vi as one moving triangle vertex — only the dx slot for the vi corner
+    // is non-zero. This is the same linear CCD; only the moving DOF differs.
+    for (const auto& p : ccd.nt_face_pairs) {
+        Vec3 dxv[3] = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
+        dxv[p.vi_local] = dx;
+        CCDResult r = node_triangle_only_one_node_moves(
+            x[p.node],     Vec3::Zero(),
+            x[p.tri_v[0]], dxv[0],
+            x[p.tri_v[1]], dxv[1],
+            x[p.tri_v[2]], dxv[2]);
         if (r.collision) toi_min = std::min(toi_min, r.t);
     }
 

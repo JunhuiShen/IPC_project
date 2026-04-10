@@ -120,16 +120,23 @@ public:
     void set_mesh_topology(const RefMesh& mesh, int nv);
     bool has_topology() const { return topology_valid_; }
 
-    // Lightweight single-node CCD query: returns candidate pairs for vertex vi
-    // moving by dx, using the existing BVH trees (no rebuild).
-    // NT pairs: vi is always the node (dof 0).
-    // SS pairs: vi_dof indicates which dof vi occupies in the pair.
+    // Lightweight single-node CCD query
+    //
+    //   nt_node_pairs : vi plays the lone-node role, paired with an external
+    //                   non-incident triangle.   (query: triangle BVH)
+    //   nt_face_pairs : vi is one corner of the triangle, paired with an
+    //                   external static node.    (query: node BVH)
+    //   ss_pairs      : vi is an endpoint of one edge, paired with a
+    //                   non-sharing edge.        (query: edge BVH)
     struct SingleNodeCCDResult {
-        struct NTPair { int node; int tri_v[3]; };
-        struct SSPair { int v[4]; int vi_dof; };
-        std::vector<NTPair> nt_pairs;
-        std::vector<SSPair> ss_pairs;
+        struct NTPair      { int node; int tri_v[3]; };
+        struct NTFacePair  { int node; int tri_v[3]; int vi_local; }; // vi_local in {0,1,2}
+        struct SSPair      { int v[4]; int vi_dof; };
+        std::vector<NTPair>     nt_node_pairs;
+        std::vector<NTFacePair> nt_face_pairs;
+        std::vector<SSPair>     ss_pairs;
     };
+    
     SingleNodeCCDResult query_single_node_ccd(const std::vector<Vec3>& x, int vi, const Vec3& dx, const RefMesh& mesh) const;
 
     static std::uint64_t nt_key(int node, int tri) {

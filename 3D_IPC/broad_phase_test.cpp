@@ -796,10 +796,17 @@ EXPECT_TRUE(contains_ss_pair(broad.ss_pairs(), EdgeKey(0, 1), EdgeKey(3, 4)));
 //  epsilon-padded CCD candidates for a single moving vertex.
 // ====================================================================
 
+// Brute-force AABB-overlap reference for query_single_node_ccd. Enumerates all
+// three pair classes that the production query is supposed to return:
+//   - NT node-role:  vi is the lone moving node, swept against any external triangle
+//   - NT face-role:  vi is one corner of an incident triangle, that triangle's
+//                    moving AABB swept against any external static node
+//   - SS:            an edge incident to vi swept against any non-sharing edge
 static PairSets brute_force_single_node_ccd(const std::vector<Vec3>& x, int vi, const Vec3& dx, const RefMesh& mesh) {
     constexpr double eps_pad = 1.0e-10;
     PairSets out;
     const int nt = num_tris(mesh);
+    const int nv = static_cast<int>(x.size());
 
     AABB vi_box;
     vi_box.expand(x[vi]);
@@ -807,6 +814,7 @@ static PairSets brute_force_single_node_ccd(const std::vector<Vec3>& x, int vi, 
     vi_box.min.array() -= eps_pad;
     vi_box.max.array() += eps_pad;
 
+    // NT node-role: vi vs every non-incident triangle
     for (int t = 0; t < nt; ++t) {
         const int a = tri_vertex(mesh, t, 0);
         const int b = tri_vertex(mesh, t, 1);
@@ -818,6 +826,31 @@ static PairSets brute_force_single_node_ccd(const std::vector<Vec3>& x, int vi, 
         tri_box.max.array() += eps_pad;
         if (aabb_intersects(vi_box, tri_box))
             out.nt.insert(make_nt_key(vi, a, b, c));
+    }
+
+    // NT face-role: each triangle containing vi (with its swept AABB driven by
+    // dx on vi's corner) vs every external static node
+    for (int t = 0; t < nt; ++t) {
+        const int a = tri_vertex(mesh, t, 0);
+        const int b = tri_vertex(mesh, t, 1);
+        const int c = tri_vertex(mesh, t, 2);
+        if (vi != a && vi != b && vi != c) continue;
+        AABB tri_box;
+        tri_box.expand(x[a]); tri_box.expand(x[b]); tri_box.expand(x[c]);
+        if (a == vi) tri_box.expand(x[a] + dx);
+        if (b == vi) tri_box.expand(x[b] + dx);
+        if (c == vi) tri_box.expand(x[c] + dx);
+        tri_box.min.array() -= eps_pad;
+        tri_box.max.array() += eps_pad;
+        for (int n = 0; n < nv; ++n) {
+            if (n == a || n == b || n == c) continue;
+            AABB n_box;
+            n_box.expand(x[n]);
+            n_box.min.array() -= eps_pad;
+            n_box.max.array() += eps_pad;
+            if (aabb_intersects(n_box, tri_box))
+                out.nt.insert(make_nt_key(n, a, b, c));
+        }
     }
 
     const auto edges = build_unique_edges_ref(mesh);
@@ -850,7 +883,9 @@ static PairSets brute_force_single_node_ccd(const std::vector<Vec3>& x, int vi, 
 
 static PairSets pairs_from_ccd_result(const BroadPhase::SingleNodeCCDResult& ccd) {
     PairSets out;
-    for (const auto& p : ccd.nt_pairs)
+    for (const auto& p : ccd.nt_node_pairs)
+        out.nt.insert(make_nt_key(p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2]));
+    for (const auto& p : ccd.nt_face_pairs)
         out.nt.insert(make_nt_key(p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2]));
     for (const auto& p : ccd.ss_pairs)
         out.ss.insert(make_ss_key(p.v[0], p.v[1], p.v[2], p.v[3]));
@@ -899,8 +934,18 @@ TEST(QuerySingleNodeCCD, SupersetOfBruteForceForAllVertices) {
                     << " e0=(" << ss_key.e0.a << "," << ss_key.e0.b
                     << ") e1=(" << ss_key.e1.a << "," << ss_key.e1.b << ")";
             }
-            for (const auto& p : ccd.nt_pairs) {
+            for (const auto& p : ccd.nt_node_pairs) {
                 EXPECT_EQ(p.node, vi);
+                EXPECT_NE(p.node, p.tri_v[0]);
+                EXPECT_NE(p.node, p.tri_v[1]);
+                EXPECT_NE(p.node, p.tri_v[2]);
+            }
+            for (const auto& p : ccd.nt_face_pairs) {
+                // The vi_local corner of the triangle must equal vi.
+                ASSERT_GE(p.vi_local, 0);
+                ASSERT_LE(p.vi_local, 2);
+                EXPECT_EQ(p.tri_v[p.vi_local], vi);
+                // The external node must not be one of the triangle's corners.
                 EXPECT_NE(p.node, p.tri_v[0]);
                 EXPECT_NE(p.node, p.tri_v[1]);
                 EXPECT_NE(p.node, p.tri_v[2]);
@@ -909,6 +954,113 @@ TEST(QuerySingleNodeCCD, SupersetOfBruteForceForAllVertices) {
                 EXPECT_FALSE(share_vertex(
                     EdgeKey(p.v[0], p.v[1]), EdgeKey(p.v[2], p.v[3])));
             }
+        }
+    }
+}
+
+// ====================================================================
+//  query_single_node_ccd: face-role NT pairs
+//
+//  Two non-touching triangles. When a corner of triangle A moves down
+//  toward triangle B's static node, query_single_node_ccd must report
+//  the (B-node, A-triangle) face-role pair from A's vi enumeration —
+//  the symmetric (B-node, A-triangle) node-role pair from B-node's
+//  enumeration is irrelevant because B-node is not the moving vertex.
+// ====================================================================
+TEST(QuerySingleNodeCCD, FaceRoleEnumerationFindsExternalNode) {
+    // Triangle A: corners 0,1,2 in the z=1 plane. Triangle B: corners 3,4,5
+    // in the z=0 plane. Initially the two triangles are far apart in z.
+    std::vector<Vec3> x = {
+        {0.0, 0.0, 1.0},  // 0  (the moving corner of triangle A)
+        {1.0, 0.0, 1.0},  // 1
+        {0.0, 1.0, 1.0},  // 2
+        {0.3, 0.3, 0.0},  // 3  (external static node we expect to find)
+        {1.3, 0.0, 0.0},  // 4
+        {0.0, 1.3, 0.0},  // 5
+    };
+    std::vector<std::array<int, 3>> tris = {{0, 1, 2}, {3, 4, 5}};
+    RefMesh mesh = make_mesh(x, tris);
+    const int nv = static_cast<int>(x.size());
+    std::vector<Vec3> v(nv, Vec3::Zero());
+
+    BroadPhase bp;
+    bp.initialize(x, v, mesh, 1.0/30.0, 0.1);
+
+    // vi = 0, the corner of triangle A. Move it straight down through node 3
+    // and through the plane of triangle B.
+    const int vi = 0;
+    const Vec3 dx(0.3, 0.3, -1.2);
+    const auto ccd = bp.query_single_node_ccd(x, vi, dx, mesh);
+
+    // The lone-node-role list contains (vi=0, triangle B): vi as the moving
+    // node piercing triangle B.
+    bool node_role_found = false;
+    for (const auto& p : ccd.nt_node_pairs) {
+        if (p.node == 0) {
+            const auto k = make_nt_key(p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2]);
+            if (k == make_nt_key(0, 3, 4, 5)) { node_role_found = true; break; }
+        }
+    }
+    EXPECT_TRUE(node_role_found)
+        << "expected lone-node-role pair (vi=0, tri B={3,4,5})";
+
+    // The face-role list contains (external node 3, triangle A): node 3 about
+    // to land in the swept face of triangle A as vi=0 (corner of A) moves.
+    bool face_role_found = false;
+    for (const auto& p : ccd.nt_face_pairs) {
+        if (p.node == 3) {
+            const auto k = make_nt_key(p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2]);
+            if (k == make_nt_key(3, 0, 1, 2)) {
+                EXPECT_EQ(p.tri_v[p.vi_local], vi)
+                    << "vi_local must point at the moving corner";
+                face_role_found = true;
+                break;
+            }
+        }
+    }
+    EXPECT_TRUE(face_role_found)
+        << "expected face-role pair (external node 3, tri A={0,1,2}) from vi=0";
+}
+
+// ====================================================================
+//  query_single_node_ccd: face-role pair must NOT be confused for a
+//  node-role pair. The moving vertex never appears as the lone node of
+//  a face-role entry, and the face-role list never contains pairs where
+//  the external node is one of the moving triangle's own corners.
+// ====================================================================
+TEST(QuerySingleNodeCCD, FaceRolePairWellFormed) {
+    std::vector<Vec3> x = {
+        {0.0, 0.0, 1.0}, {1.0, 0.0, 1.0}, {0.0, 1.0, 1.0},
+        {0.3, 0.3, 0.0}, {1.3, 0.0, 0.0}, {0.0, 1.3, 0.0},
+        {0.5, 0.5, 0.5},  // a stray bystander node
+    };
+    std::vector<std::array<int, 3>> tris = {{0, 1, 2}, {3, 4, 5}};
+    RefMesh mesh = make_mesh(x, tris);
+    const int nv = static_cast<int>(x.size());
+    std::vector<Vec3> v(nv, Vec3::Zero());
+
+    BroadPhase bp;
+    bp.initialize(x, v, mesh, 1.0/30.0, 0.5);  // generous d_hat to be inclusive
+
+    for (int vi = 0; vi < nv; ++vi) {
+        const Vec3 dx(0.1, -0.2, 0.3);
+        const auto ccd = bp.query_single_node_ccd(x, vi, dx, mesh);
+
+        for (const auto& p : ccd.nt_face_pairs) {
+            // vi must be the local-vi corner of the triangle.
+            ASSERT_GE(p.vi_local, 0);
+            ASSERT_LE(p.vi_local, 2);
+            EXPECT_EQ(p.tri_v[p.vi_local], vi)
+                << "face-role pair has vi_local pointing at non-vi corner";
+            // The external node must not be one of the triangle's corners
+            // (would be a self-pair).
+            EXPECT_NE(p.node, p.tri_v[0]);
+            EXPECT_NE(p.node, p.tri_v[1]);
+            EXPECT_NE(p.node, p.tri_v[2]);
+            // The face-role list and the node-role list should not double-list
+            // the same (node, triangle) pair against the same vi enumeration:
+            // a face-role pair has vi as a triangle corner, not as the lone node.
+            EXPECT_NE(p.node, vi);
         }
     }
 }

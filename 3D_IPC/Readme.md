@@ -54,8 +54,8 @@ The test suite contains GoogleTests covering every layer of the pipeline:
 
 | Test file | Count | What it covers |
 |-----------|-------|----------------|
-| `ccd_test` | 40 | Linear and cubic CCD, degeneracy chain, stress tests, initial guess |
-| `broad_phase_test` | 27 | AABB, BVH, pair generation, CCD candidates, conservativeness, incremental refresh, `query_single_node_ccd` vs brute-force |
+| `ccd_test` | 46 | Linear CCD (all four single-moving-DOF cases) and cubic CCD, degeneracy chain, stress tests, initial guess |
+| `broad_phase_test` | 34 | AABB, BVH, pair generation, CCD candidates, conservativeness, incremental refresh, `query_single_node_ccd` vs brute-force (covers both NT roles: lone-node and face-corner) |
 | `ipc_math_test` | 28 | `matrix3d_inverse`, `segment_closest_point`, `filter_root`, `add_root`/`SmallRoots`, barycentric coords, serialize/deserialize round-trip, `set_mesh_topology` caching |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
 | `parallel_helper_test` | 17 | Jacobi predictions, conflict graph, coloring, parallel commits, solver correctness |
@@ -128,7 +128,8 @@ Per-frame statistics are printed to stdout:
     │   segment–segment barrier: energy + per-DOF gradient/Hessian (with optional pre-computed distance)
     │
     ├── ccd.h / ccd.cpp
-    │   linear CCD for single-node Gauss–Seidel sweeps
+    │   linear node–triangle CCD covering every single-moving-DOF case
+    │   linear segment–segment CCD for single-moving-endpoint sweeps
     │   general cubic CCD for multi-vertex motion (initial guess)
     │   full degeneracy handling: cubic → quadratic → linear → coplanar → collinear
     │   stack-allocated SmallRoots for all polynomial solvers
@@ -137,7 +138,9 @@ Per-frame statistics are printed to stdout:
     │   swept-AABB broad phase with BVH queries
     │   incremental refresh and local ancestor-only BVH refit
     │   cached mesh topology (set_mesh_topology)
-    │   lightweight query_single_node_ccd for per-vertex CCD
+    │   lightweight query_single_node_ccd for per-vertex CCD, enumerating
+    │     both NT pair roles (vi as lone node, vi as a triangle corner)
+    │     plus edge-edge pairs incident to vi
     │
     ├── solver.h / solver.cpp
     │   CCD-projected initial guess (parallel CCD evaluation)
@@ -180,7 +183,7 @@ Per-frame statistics are printed to stdout:
 - corotated_energy implements element-level (triangle) physics
 - physics provides no-barrier local gradient/Hessian terms and residual helpers
 - barrier_energy provides per-pair barrier energy, gradient, and Hessian for both node–triangle and segment–segment primitives
-- ccd provides both linear (single-node) and general cubic (multi-vertex) continuous collision detection
-- broad_phase maintains barrier candidate pairs incrementally during sweeps
+- ccd provides both linear (any single-moving-DOF configuration) and general cubic (multi-vertex) continuous collision detection
+- broad_phase maintains barrier candidate pairs incrementally during sweeps, and `query_single_node_ccd` returns both node-triangle roles that a moving vi can play (`nt_node_pairs`: vi is the lone node; `nt_face_pairs`: vi is one of the triangle's corners, so the face deforms)
 - solver performs nonlinear Gauss–Seidel iterations with CCD step filtering and CCD-projected initial guess
 - simulation.h controls time stepping and scene setup

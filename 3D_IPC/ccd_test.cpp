@@ -15,6 +15,10 @@ void expect_no_flags(const CCDResult& r) {
 
 }  // namespace
 
+namespace {
+const Vec3 ZERO_DX(0.0, 0.0, 0.0);
+}  // namespace
+
 TEST(CCDNodeTriangleSingleMovingNode, InteriorHit) {
     const Vec3 x(0.25, 0.25, 1.0);
     const Vec3 dx(0.0, 0.0, -2.0);
@@ -22,7 +26,8 @@ TEST(CCDNodeTriangleSingleMovingNode, InteriorHit) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(x, dx, x1, x2, x3);
+    const CCDResult r = node_triangle_only_one_node_moves(
+        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX);
     EXPECT_TRUE(r.has_candidate_time);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
@@ -36,7 +41,8 @@ TEST(CCDNodeTriangleSingleMovingNode, PlaneCrossingButOutsideTriangle) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(x, dx, x1, x2, x3);
+    const CCDResult r = node_triangle_only_one_node_moves(
+        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX);
     EXPECT_TRUE(r.has_candidate_time);
     EXPECT_FALSE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
@@ -50,7 +56,8 @@ TEST(CCDNodeTriangleSingleMovingNode, ParallelNoCrossing) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(x, dx, x1, x2, x3);
+    const CCDResult r = node_triangle_only_one_node_moves(
+        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX);
     EXPECT_FALSE(r.has_candidate_time);
     EXPECT_FALSE(r.collision);
     EXPECT_FALSE(r.coplanar_entire_step);
@@ -64,7 +71,8 @@ TEST(CCDNodeTriangleSingleMovingNode, CoplanarEntireStep) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(x, dx, x1, x2, x3);
+    const CCDResult r = node_triangle_only_one_node_moves(
+        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX);
     EXPECT_FALSE(r.has_candidate_time);
     EXPECT_FALSE(r.collision);
     EXPECT_TRUE(r.coplanar_entire_step);
@@ -78,11 +86,109 @@ TEST(CCDNodeTriangleSingleMovingNode, CandidateOutsideStepInterval) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(x, dx, x1, x2, x3);
+    const CCDResult r = node_triangle_only_one_node_moves(
+        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX);
     EXPECT_FALSE(r.has_candidate_time);
     EXPECT_FALSE(r.collision);
     EXPECT_FALSE(r.coplanar_entire_step);
     EXPECT_TRUE(r.parallel_or_no_crossing);
+}
+
+// ===========================================================================
+// Linear CCD with a single moving TRIANGLE VERTEX (any of the three corners).
+// Same linear function as above; only the moving DOF differs.
+//
+// Setup uses triangle with vertices at (0,0,0), (2,0,0), (0,2,0). When the
+// chosen corner rises in +z with dz=2, geometry was hand-derived so the
+// moving plane sweeps across the static node x at exactly t=0.5.
+// ===========================================================================
+
+TEST(CCDNodeTriangleSingleMovingTriVertex, V0HitsStaticNode) {
+    const Vec3 x(0.5, 0.5, 0.5);
+    const Vec3 x1(0.0, 0.0, 0.0), dx1(0.0, 0.0, 2.0);
+    const Vec3 x2(2.0, 0.0, 0.0);
+    const Vec3 x3(0.0, 2.0, 0.0);
+
+    const CCDResult r = node_triangle_only_one_node_moves(
+        x, ZERO_DX, x1, dx1, x2, ZERO_DX, x3, ZERO_DX);
+    EXPECT_TRUE(r.has_candidate_time);
+    EXPECT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 0.5, kTol);
+    expect_no_flags(r);
+}
+
+TEST(CCDNodeTriangleSingleMovingTriVertex, V1HitsStaticNode) {
+    const Vec3 x(1.0, 0.5, 0.5);
+    const Vec3 x1(0.0, 0.0, 0.0);
+    const Vec3 x2(2.0, 0.0, 0.0), dx2(0.0, 0.0, 2.0);
+    const Vec3 x3(0.0, 2.0, 0.0);
+
+    const CCDResult r = node_triangle_only_one_node_moves(
+        x, ZERO_DX, x1, ZERO_DX, x2, dx2, x3, ZERO_DX);
+    EXPECT_TRUE(r.has_candidate_time);
+    EXPECT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 0.5, kTol);
+    expect_no_flags(r);
+}
+
+TEST(CCDNodeTriangleSingleMovingTriVertex, V2HitsStaticNode) {
+    const Vec3 x(0.5, 1.0, 0.5);
+    const Vec3 x1(0.0, 0.0, 0.0);
+    const Vec3 x2(2.0, 0.0, 0.0);
+    const Vec3 x3(0.0, 2.0, 0.0), dx3(0.0, 0.0, 2.0);
+
+    const CCDResult r = node_triangle_only_one_node_moves(
+        x, ZERO_DX, x1, ZERO_DX, x2, ZERO_DX, x3, dx3);
+    EXPECT_TRUE(r.has_candidate_time);
+    EXPECT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 0.5, kTol);
+    expect_no_flags(r);
+}
+
+TEST(CCDNodeTriangleSingleMovingTriVertex, MovingVertexCoincidesWithStaticNode) {
+    // Vertex x1 moves up through the static node x; at t=0.5, x1 == x exactly.
+    const Vec3 x(0.0, 0.0, 1.0);
+    const Vec3 x1(0.0, 0.0, 0.0), dx1(0.0, 0.0, 2.0);
+    const Vec3 x2(1.0, 0.0, 0.0);
+    const Vec3 x3(0.0, 1.0, 0.0);
+
+    const CCDResult r = node_triangle_only_one_node_moves(
+        x, ZERO_DX, x1, dx1, x2, ZERO_DX, x3, ZERO_DX);
+    EXPECT_TRUE(r.has_candidate_time);
+    EXPECT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 0.5, kTol);
+}
+
+TEST(CCDNodeTriangleSingleMovingTriVertex, OutsideTriangleAtCrossingTime) {
+    // Plane crossing at t=0.5, but the static node projects outside the
+    // (deformed) triangle, so no actual collision.
+    const Vec3 x(2.0, 2.0, -1.0);
+    const Vec3 x1(0.0, 0.0, 0.0), dx1(0.0, 0.0, 2.0);
+    const Vec3 x2(2.0, 0.0, 0.0);
+    const Vec3 x3(0.0, 2.0, 0.0);
+
+    const CCDResult r = node_triangle_only_one_node_moves(
+        x, ZERO_DX, x1, dx1, x2, ZERO_DX, x3, ZERO_DX);
+    EXPECT_TRUE(r.has_candidate_time);
+    EXPECT_FALSE(r.collision);
+    EXPECT_NEAR(r.t, 0.5, kTol);
+    expect_no_flags(r);
+}
+
+TEST(CCDNodeTriangleSingleMovingTriVertex, MatchesGeneralCubicCCD) {
+    // Cross-check: the linear single-vertex-moves form must agree with the
+    // full cubic node_triangle_general_ccd whenever only one DOF moves.
+    const Vec3 x(0.25, 0.25, 1.0);
+    const Vec3 x1(0.0, 0.0, 0.0);
+    const Vec3 x2(1.0, 0.0, 0.0), dx2(0.0, 0.0, 8.0);
+    const Vec3 x3(0.0, 1.0, 0.0);
+
+    const CCDResult lin = node_triangle_only_one_node_moves(
+        x, ZERO_DX, x1, ZERO_DX, x2, dx2, x3, ZERO_DX);
+    const double cub = node_triangle_general_ccd(
+        x, ZERO_DX, x1, ZERO_DX, x2, dx2, x3, ZERO_DX);
+    ASSERT_TRUE(lin.has_candidate_time);
+    EXPECT_NEAR(lin.t, cub, 1e-9);
 }
 
 TEST(CCDSegmentSegmentSingleMovingNode, InteriorHit) {
@@ -178,7 +284,8 @@ TEST(GeneralCCDNodeTriangle, ConsistentWithSingleNodeVersion) {
     const Vec3 x3(0.0, 1.0, 0.0);
     const Vec3 zero(0.0, 0.0, 0.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(x, dx, x1, x2, x3);
+    const CCDResult r = node_triangle_only_one_node_moves(
+        x, dx, x1, zero, x2, zero, x3, zero);
     double t = node_triangle_general_ccd(x, dx, x1, zero, x2, zero, x3, zero);
     ASSERT_TRUE(r.collision);
     EXPECT_NEAR(t, r.t, kTol);

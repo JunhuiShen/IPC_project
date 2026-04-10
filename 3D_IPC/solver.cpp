@@ -81,9 +81,25 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
 
         double toi_min = 1.0;
 
-        for (const auto& p : ccd.nt_pairs) {
+        // vi as the lone moving node
+        for (const auto& p : ccd.nt_node_pairs) {
             auto r = node_triangle_only_one_node_moves(
-                x[p.node], dx, x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]]);
+                x[p.node],     dx,
+                x[p.tri_v[0]], Vec3::Zero(),
+                x[p.tri_v[1]], Vec3::Zero(),
+                x[p.tri_v[2]], Vec3::Zero());
+            if (r.collision) toi_min = std::min(toi_min, r.t);
+        }
+
+        // vi as one moving triangle vertex
+        for (const auto& p : ccd.nt_face_pairs) {
+            Vec3 dxv[3] = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
+            dxv[p.vi_local] = dx;
+            auto r = node_triangle_only_one_node_moves(
+                x[p.node],     Vec3::Zero(),
+                x[p.tri_v[0]], dxv[0],
+                x[p.tri_v[1]], dxv[1],
+                x[p.tri_v[2]], dxv[2]);
             if (r.collision) toi_min = std::min(toi_min, r.t);
         }
 

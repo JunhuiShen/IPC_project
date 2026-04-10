@@ -646,7 +646,8 @@ BroadPhase::SingleNodeCCDResult BroadPhase::query_single_node_ccd(
     vi_box.min.array() -= epsilon_pad;
     vi_box.max.array() += epsilon_pad;
 
-    // Node-triangle: vi as node against all non-incident triangles
+    // Node-triangle (node role): vi plays the lone-node role against all
+    // non-incident triangles. Query the triangle BVH with vi's swept box.
     if (cache_.tri_root >= 0) {
         std::vector<int> hits;
         query_bvh(cache_.tri_bvh_nodes, cache_.tri_root, vi_box, hits);
@@ -655,7 +656,37 @@ BroadPhase::SingleNodeCCDResult BroadPhase::query_single_node_ccd(
             const int b = tri_vertex(mesh, t, 1);
             const int c = tri_vertex(mesh, t, 2);
             if (vi == a || vi == b || vi == c) continue;
-            result.nt_pairs.push_back({vi, {a, b, c}});
+            result.nt_node_pairs.push_back({vi, {a, b, c}});
+        }
+    }
+
+    // Node-triangle (face role): vi is one corner of a triangle whose face
+    // is swept by vi's motion. Query the node BVH with the per-triangle
+    // moving-AABB to find external nodes that could land inside the swept
+    // face.
+    if (cache_.node_root >= 0 && vi < static_cast<int>(cache_.node_to_tris.size())) {
+        for (int t : cache_.node_to_tris[vi]) {
+            const int a = tri_vertex(mesh, t, 0);
+            const int b = tri_vertex(mesh, t, 1);
+            const int c = tri_vertex(mesh, t, 2);
+
+            AABB tri_box;
+            tri_box.expand(x[a]);
+            tri_box.expand(x[b]);
+            tri_box.expand(x[c]);
+            if (a == vi) tri_box.expand(x[a] + dx);
+            if (b == vi) tri_box.expand(x[b] + dx);
+            if (c == vi) tri_box.expand(x[c] + dx);
+            tri_box.min.array() -= epsilon_pad;
+            tri_box.max.array() += epsilon_pad;
+
+            std::vector<int> hits;
+            query_bvh(cache_.node_bvh_nodes, cache_.node_root, tri_box, hits);
+            for (int X : hits) {
+                if (X == a || X == b || X == c) continue;
+                const int vi_local = (a == vi) ? 0 : ((b == vi) ? 1 : 2);
+                result.nt_face_pairs.push_back({X, {a, b, c}, vi_local});
+            }
         }
     }
 

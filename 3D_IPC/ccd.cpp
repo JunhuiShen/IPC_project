@@ -3,12 +3,18 @@
 #include <algorithm>
 #include <array>
 
-CCDResult node_triangle_only_one_node_moves(const Vec3& x,  const Vec3& dx, const Vec3& x1, const Vec3& x2, const Vec3& x3, double eps) {
+CCDResult node_triangle_only_one_node_moves(const Vec3& x,  const Vec3& dx, const Vec3& x1, const Vec3& dx1, 
+    const Vec3& x2, const Vec3& dx2, const Vec3& x3, const Vec3& dx3, double eps) {
     CCDResult result;
 
-    const Vec3 n = (x2 - x1).cross(x3 - x1);
-    const double d = n.dot(x - x1);
-    const double c = n.dot(dx);
+    // f(t) = ((x2(t)-x1(t)) x (x3(t)-x1(t))) . (x(t)-x1(t))
+    const Vec3 p0 = x2 - x1, dp = dx2 - dx1;
+    const Vec3 q0 = x3 - x1, dq = dx3 - dx1;
+    const Vec3 r0 = x  - x1, dr = dx  - dx1;
+
+    const Vec3 p0xq0 = p0.cross(q0);
+    const double d = p0xq0.dot(r0);
+    const double c = dp.cross(q0).dot(r0) + p0.cross(dq).dot(r0) + p0xq0.dot(dr);
 
     if (nearly_zero(c, eps)) {
         if (nearly_zero(d, eps)) {
@@ -28,8 +34,13 @@ CCDResult node_triangle_only_one_node_moves(const Vec3& x,  const Vec3& dx, cons
     result.has_candidate_time = true;
     result.t = clamp_scalar(t, 0.0, 1.0);
 
-    const Vec3 p = point_at_linear_step(x, dx, result.t);
-    result.collision = point_in_triangle_on_plane(p, x1, x2, x3, eps);
+    // Evaluate all four points at the candidate TOI and check that the static
+    // (or moving) node lies inside the (possibly deformed) triangle.
+    const Vec3 x_t  = x  + result.t * dx;
+    const Vec3 x1_t = x1 + result.t * dx1;
+    const Vec3 x2_t = x2 + result.t * dx2;
+    const Vec3 x3_t = x3 + result.t * dx3;
+    result.collision = point_in_triangle_on_plane(x_t, x1_t, x2_t, x3_t, eps);
     return result;
 }
 
