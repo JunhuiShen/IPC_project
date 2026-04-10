@@ -133,6 +133,7 @@ add_executable(3D_sim
     visualization.cpp
     broad_phase.cpp
     simulation.cpp
+    example.cpp
 )
 
 target_link_libraries(3D_sim

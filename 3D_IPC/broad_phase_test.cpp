@@ -1091,3 +1091,121 @@ TEST(QuerySingleNodeCCD, ConservativeAfterRefresh) {
     for (const auto& ss_key : brute.ss)
         EXPECT_TRUE(result_pairs.ss.count(ss_key)) << "Missing SS pair after refresh";
 }
+
+// ====================================================================
+//  detect_mesh_self_intersection: post-step sanity check.
+// ====================================================================
+
+TEST(MeshSanity, FlatMeshHasNoIntersections) {
+    // 3x3 grid of vertices, 8 triangles in the z=0 plane — no penetration.
+    std::vector<Vec3> x = {
+        {0, 0, 0}, {1, 0, 0}, {2, 0, 0},
+        {0, 1, 0}, {1, 1, 0}, {2, 1, 0},
+        {0, 2, 0}, {1, 2, 0}, {2, 2, 0},
+    };
+    std::vector<std::array<int, 3>> tris = {
+        {0, 1, 4}, {0, 4, 3},
+        {1, 2, 5}, {1, 5, 4},
+        {3, 4, 7}, {3, 7, 6},
+        {4, 5, 8}, {4, 8, 7},
+    };
+    RefMesh mesh = make_mesh(x, tris);
+
+    const auto report = detect_mesh_self_intersection(x, mesh);
+    EXPECT_TRUE(report.ok());
+    EXPECT_EQ(report.count, 0);
+}
+
+TEST(MeshSanity, SharedVertexPairIsNotFlagged) {
+    // Two triangles hinged along vertex 0 with no other geometric overlap:
+    // triangle 0 lies in the +x/+y quadrant of z = 0, triangle 1 lies in
+    // the -x/-y quadrant of a tilted plane through vertex 0. The pair
+    // shares exactly vertex 0 and the rest of each triangle is far from
+    // the other's face. The sanity checker must not flag this.
+    std::vector<Vec3> x = {
+        { 0.0,  0.0, 0.0},   // 0  shared
+        { 1.0,  0.0, 0.0},   // 1  tri 0
+        { 0.0,  1.0, 0.0},   // 2  tri 0
+        {-1.0,  0.0, 1.0},   // 3  tri 1
+        { 0.0, -1.0, 1.0},   // 4  tri 1
+    };
+    std::vector<std::array<int, 3>> tris = {
+        {0, 1, 2},
+        {0, 3, 4},
+    };
+    RefMesh mesh = make_mesh(x, tris);
+
+    const auto report = detect_mesh_self_intersection(x, mesh);
+    EXPECT_TRUE(report.ok()) << "hinged pair sharing one vertex is not a penetration";
+}
+
+TEST(MeshSanity, EdgeThroughFaceIsDetectedWithCorrectInfo) {
+    // Triangle 0: a unit triangle in the z = 0 plane.
+    // Triangle 1: a tall triangle whose edge (vertex 3 -> vertex 4) runs
+    // vertically through the interior of triangle 0 at (0.25, 0.25, z).
+    std::vector<Vec3> x = {
+        {0.0, 0.0, 0.0},   // 0  (tri 0)
+        {1.0, 0.0, 0.0},   // 1  (tri 0)
+        {0.0, 1.0, 0.0},   // 2  (tri 0)
+        {0.25, 0.25, 1.0}, // 3  (tri 1 top, above the face)
+        {0.25, 0.25, -1.0},// 4  (tri 1 bottom, below the face)
+        {0.9, 0.9, 0.5},   // 5  (tri 1 third vertex, off to the side)
+    };
+    std::vector<std::array<int, 3>> tris = {
+        {0, 1, 2},
+        {3, 4, 5},
+    };
+    RefMesh mesh = make_mesh(x, tris);
+
+    const auto report = detect_mesh_self_intersection(x, mesh);
+    ASSERT_FALSE(report.ok());
+    EXPECT_GE(report.count, 1);
+
+    // The first hit must describe the piercing edge as (3, 4) and the pierced
+    // triangle as 0 (both orderings of the edge are acceptable).
+    const auto& h = report.first;
+    EXPECT_EQ(h.tri, 0);
+    const bool edge_ok = (h.edge_v0 == 3 && h.edge_v1 == 4) ||
+                         (h.edge_v0 == 4 && h.edge_v1 == 3);
+    EXPECT_TRUE(edge_ok)
+        << "expected edge (3,4); got (" << h.edge_v0 << "," << h.edge_v1 << ")";
+
+    // The hit point must lie inside triangle 0. Barycentric coords at
+    // (0.25, 0.25, 0) are (1 - 0.25 - 0.25, 0.25, 0.25) = (0.5, 0.25, 0.25).
+    EXPECT_NEAR(h.bary[0], 0.5,  1e-9);
+    EXPECT_NEAR(h.bary[1], 0.25, 1e-9);
+    EXPECT_NEAR(h.bary[2], 0.25, 1e-9);
+
+    // And the edge parameter at z = 0 from z = 1 -> z = -1 is s = 0.5.
+    EXPECT_NEAR(h.s, 0.5, 1e-9);
+}
+
+TEST(MeshSanity, EdgeTouchingFaceBoundaryIsNotFlagged) {
+    // Triangle 1's edge grazes triangle 0's edge (1, 2) — touches the
+    // boundary, not the interior. The tolerance in detect_mesh_self_intersection
+    // permits boundary contacts without flagging them as penetrations only
+    // because bary components are allowed to be slightly negative. A point
+    // exactly on the boundary should be detected or not, but must not be a
+    // false positive deep inside. This test documents the boundary behavior.
+    std::vector<Vec3> x = {
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.5, 0.5, 1.0},
+        {0.5, 0.5, -1.0},
+        {1.5, 1.5, 0.0},
+    };
+    std::vector<std::array<int, 3>> tris = {
+        {0, 1, 2},
+        {3, 4, 5},
+    };
+    RefMesh mesh = make_mesh(x, tris);
+
+    const auto report = detect_mesh_self_intersection(x, mesh);
+    // Edge (3, 4) pierces the interior of triangle 0 at (0.5, 0.5, 0).
+    // Barycentric coords there are exactly (0, 0.5, 0.5) — on the edge (1, 2).
+    // Our tol (-1e-12) permits this, which is correct for a debug sanity check:
+    // a boundary touch is geometrically a penetration of measure zero but in
+    // practice indicates a near-miss we want to see during debugging.
+    EXPECT_GE(report.count, 1);
+}

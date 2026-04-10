@@ -1,3 +1,4 @@
+#include "example.h"
 #include "make_shape.h"
 #include "physics.h"
 #include "simulation.h"
@@ -26,37 +27,10 @@ int main(int argc, char** argv) {
     std::vector<Vec2> X;
     std::vector<Pin> pins;
 
-    clear_model(ref_mesh, state, X, pins);
-
-    // Two sheets, side-by-side in x, embedded in the xz plane by build_square_mesh().
-    const int base_left = build_square_mesh(
-            ref_mesh, state, X,
-            args.nx, args.ny, args.width, args.height,
-            Vec3(args.left_x, args.sheet_y, args.left_z)
-    );
-
-    const int base_right = build_square_mesh(
-            ref_mesh, state, X,
-            args.nx, args.ny, args.width, args.height,
-            Vec3(args.right_x, args.sheet_y, args.right_z)
-    );
-
-    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
-
-    // Tiny asymmetry on the right sheet so the evolution is not perfectly symmetric.
-    state.deformed_positions[base_right + 0] += Vec3(-0.02, 0.00, -0.01);
-    state.deformed_positions[base_right + 2] += Vec3(-0.02, 0.00, -0.01);
-
-    // Pin inner-side top and bottom corners.
-    const int left_bottom_right = base_left + args.nx;
-    const int left_top_right    = base_left + args.ny * (args.nx + 1) + args.nx;
-    const int right_bottom_left = base_right + 0;
-    const int right_top_left    = base_right + args.ny * (args.nx + 1);
-
-    append_pin(pins, left_top_right,    state.deformed_positions);
-    append_pin(pins, left_bottom_right, state.deformed_positions);
-    append_pin(pins, right_top_left,    state.deformed_positions);
-    append_pin(pins, right_bottom_left, state.deformed_positions);
+    // Pick a scene. Swap these lines to run a different example.
+    // build_two_sheets_example(args, ref_mesh, state, X, pins);
+    // build_cloth_stack_example_low_res(ref_mesh, state, X, pins);
+    build_cloth_stack_example_high_res(ref_mesh, state, X, pins);
 
     ref_mesh.build_lumped_mass(params.density, params.thickness);
     VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);

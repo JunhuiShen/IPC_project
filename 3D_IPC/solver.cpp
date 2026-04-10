@@ -4,6 +4,8 @@
 #include "make_shape.h"
 #include "parallel_helper.h"
 
+#include <cstdio>
+
 std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh) {
     const int nv = static_cast<int>(x.size());
 
@@ -162,6 +164,23 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
 
         result.final_residual = eval_residual();
         result.iterations     = iter;
+
+        // Post-iteration sanity check: brute-force scan for any edge-triangle
+        // penetration introduced during this sweep. Warn loudly if found — CCD
+        // should prevent this, so hitting it is a diagnostic for a broad-phase
+        // or narrow-phase gap.
+        if (use_barrier) {
+            const auto sanity = detect_mesh_self_intersection(xnew, ref_mesh);
+            if (!sanity.ok()) {
+                const auto& h = sanity.first;
+                std::fprintf(stderr,
+                    "[solver sanity] penetration detected after iter %d: "
+                    "%d hit(s); first: tri %d pierced by edge (%d, %d) of tri %d "
+                    "at s=%.4f bary=(%.3f, %.3f, %.3f)\n",
+                    iter, sanity.count, h.tri, h.edge_v0, h.edge_v1, h.other_tri,
+                    h.s, h.bary[0], h.bary[1], h.bary[2]);
+            }
+        }
 
         if (residual_history) residual_history->push_back(result.final_residual);
         if (result.final_residual < params.tol_abs) return result;

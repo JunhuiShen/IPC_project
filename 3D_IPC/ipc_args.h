@@ -13,7 +13,7 @@ struct IPCArgs3D : ArgParser {
     // --- time integration ---
     double fps          = 30.0;
     int    substeps     = 3;
-    int    num_frames   = 60;
+    int    num_frames   = 120;
 
     // --- physics ---
     double mu           = 10.0;
@@ -29,7 +29,7 @@ struct IPCArgs3D : ArgParser {
     int    max_iters     = 500;
     double tol_abs       = 1e-6;
     double step_weight   = 1.0;
-    double d_hat         = 0.0;
+    double d_hat         = 0.02;
     bool   use_parallel  = false;
 
     // --- mesh ---
@@ -53,7 +53,7 @@ struct IPCArgs3D : ArgParser {
     IPCArgs3D() {
         add_double("fps",         fps,         30.0,       "Output frames per second");
         add_int   ("substeps",    substeps,    3,          "Solver substeps per frame (solver_dt = 1/(fps*substeps))");
-        add_int   ("num_frames",  num_frames,  60,         "Number of frames to simulate");
+        add_int   ("num_frames",  num_frames,  120,        "Number of frames to simulate");
 
         add_double("mu",          mu,          10.0,       "First Lame parameter (shear modulus)");
         add_double("lambda",      lambda,      10.0,       "Second Lame parameter");
@@ -67,7 +67,7 @@ struct IPCArgs3D : ArgParser {
         add_int   ("max_iters",   max_iters,   500,        "Max Gauss-Seidel iterations per frame");
         add_double("tol_abs",     tol_abs,     1e-6,       "Absolute convergence tolerance");
         add_double("step_weight", step_weight, 1.0,        "Newton step damping factor");
-        add_double("d_hat",       d_hat,       0.05,        "Barrier activation distance (0 = off)");
+        add_double("d_hat",       d_hat,       0.02,        "Barrier activation distance (0 = off)");
         add_bool  ("use_parallel", use_parallel, false,    "Use parallel Gauss-Seidel (requires coloring)");
 
         add_int   ("nx",          nx,          10,          "Mesh subdivisions in x");

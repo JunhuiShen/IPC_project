@@ -57,6 +57,30 @@ int  build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out);
 void refit_bvh(std::vector<BVHNode>& nodes, const std::vector<AABB>& boxes);
 void query_bvh(const std::vector<BVHNode>& nodes, int root, const AABB& query, std::vector<int>& hits);
 
+// Sanity check: mesh self-intersection detection.
+//
+// Brute-force segment-triangle intersection test over every unique edge of
+// the mesh against every triangle, skipping pairs that share a vertex. Useful
+// as a post-step assertion after a Gauss-Seidel iteration or a committed
+// frame to catch any penetration that slipped past CCD. O(NE * NT); not a
+// production check, but cheap enough to run per-frame in debug builds.
+struct MeshIntersectionHit {
+    int    tri       = -1;   // pierced triangle index
+    int    other_tri = -1;   // triangle whose edge did the piercing
+    int    edge_v0   = -1;   // piercing edge endpoint (vertex index)
+    int    edge_v1   = -1;
+    double s         = 0.0;  // parameter along the piercing edge in [0, 1]
+    double bary[3]   = {0.0, 0.0, 0.0};  // barycentric coords on the pierced triangle
+};
+
+struct MeshSanityReport {
+    int                 count = 0;  // total number of edge-triangle intersections found
+    MeshIntersectionHit first{};    // details of the first hit (only valid when count > 0)
+    bool ok() const { return count == 0; }
+};
+
+MeshSanityReport detect_mesh_self_intersection(const std::vector<Vec3>& x, const RefMesh& mesh);
+
 // Broad phase: builds candidate node-triangle and segment-segment pairs from swept AABBs over a motion interval
 class BroadPhase {
 public:
