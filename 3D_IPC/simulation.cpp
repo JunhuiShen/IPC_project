@@ -27,10 +27,13 @@ int main(int argc, char** argv) {
     std::vector<Vec2> X;
     std::vector<Pin> pins;
 
-    // Pick a scene. Swap these lines to run a different example.
-    // build_two_sheets_example(args, ref_mesh, state, X, pins);
-    // build_cloth_stack_example_low_res(ref_mesh, state, X, pins);
-    build_cloth_stack_example_high_res(ref_mesh, state, X, pins);
+    if      (args.example == 1) build_two_sheets_example(args, ref_mesh, state, X, pins);
+    else if (args.example == 2) build_cloth_stack_example_low_res(ref_mesh, state, X, pins);
+    else if (args.example == 3) build_cloth_stack_example_high_res(ref_mesh, state, X, pins);
+    else {
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3.\n";
+        return 1;
+    }
 
     ref_mesh.build_lumped_mass(params.density, params.thickness);
     VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);
