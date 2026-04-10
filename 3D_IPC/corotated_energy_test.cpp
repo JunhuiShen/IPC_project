@@ -1,6 +1,8 @@
 #include "IPC_math.h"
 #include "corotated_energy.h"
 
+#include <gtest/gtest.h>
+
 #include <Eigen/Geometry>
 
 #include <algorithm>
@@ -16,12 +18,7 @@
 //  Utilities
 // ===========================================================================
 
-void require(bool cond, const std::string& msg){
-    if (!cond) {
-        std::cerr << "TEST FAILED: " << msg << std::endl;
-        std::exit(EXIT_FAILURE);
-    }
-}
+namespace {
 
 bool check_convergence(const std::string& label, double analytic, const std::vector<double>& hs, const std::vector<double>& errors, double noise_scale = 1e-10, bool verbose = true){
     const double noise_floor = noise_scale * (1.0 + std::abs(analytic));
@@ -146,26 +143,24 @@ Mat32 compute_F(const Mat22& Dm_inv, const TriangleDef& def){
     return Ds * Dm_inv;
 }
 
+}  // anonymous namespace
+
 // ===========================================================================
 //  Test 1: energy is finite
 // ===========================================================================
 
-void test_energy_is_finite(){
-    std::cout << "=== Test 1: energy is finite ===\n";
+TEST(CorotatedEnergy, EnergyIsFinite){
     const auto tri = MakeTestTriangle();
     const auto def = MakeDeformedTriangle();
     const double E = corotated_energy(tri.ref_area, tri.Dm_inv, def, kMu, kLambda);
-    require(std::isfinite(E), "energy is not finite");
-    std::cout << "  E = " << E << "\n";
-    std::cout << "  PASSED\n\n";
+    ASSERT_TRUE(std::isfinite(E)) << "energy is not finite";
 }
 
 // ===========================================================================
 //  Test 2: rest state has zero energy and zero gradient
 // ===========================================================================
 
-void test_rest_state(){
-    std::cout << "=== Test 2: rest state has zero energy and gradient ===\n";
+TEST(CorotatedEnergy, RestStateZeroEnergyAndGradient){
     const auto tri = MakeTestTriangle();
     const auto def = EmbedRestTriangle();
     const double E = corotated_energy(tri.ref_area, tri.Dm_inv, def, kMu, kLambda);
@@ -173,25 +168,22 @@ void test_rest_state(){
     const Mat32 F = compute_F(tri.Dm_inv, def);
     const CorotatedCache32 cache = buildCorotatedCache(F);
 
-    std::cout << "  E = " << std::scientific << E << "\n";
-    require(std::abs(E) < 1e-10, "rest energy should be zero");
+    EXPECT_NEAR(E, 0.0, 1e-10) << "rest energy should be zero";
     {
         const Mat32 P = PCorotated32(cache, F, kMu, kLambda);
         const ShapeGrads gradN = shape_function_gradients(tri.Dm_inv);
         for (int i = 0; i < 3; ++i) {
             Vec3 g = corotated_node_gradient(P, tri.ref_area, gradN, i);
-            require(g.norm() < 1e-10, "rest gradient should be zero");
+            EXPECT_LT(g.norm(), 1e-10) << "rest gradient should be zero (node " << i << ")";
         }
     }
-    std::cout << "  PASSED\n\n";
 }
 
 // ===========================================================================
 //  Test 3: rotation invariance -- rotated rest state has zero energy
 // ===========================================================================
 
-void test_rotation_invariance(){
-    std::cout << "=== Test 3: rotation invariance ===\n";
+TEST(CorotatedEnergy, RotationInvariance){
     const auto tri = MakeTestTriangle();
     const auto def0 = EmbedRestTriangle();
 
@@ -205,25 +197,22 @@ void test_rotation_invariance(){
     const Mat32 F = compute_F(tri.Dm_inv, def1);
     const CorotatedCache32 cache = buildCorotatedCache(F);
 
-    std::cout << "  E = " << std::scientific << E << "\n";
-    require(std::abs(E) < 1e-10, "rotated rest energy should be zero");
+    EXPECT_NEAR(E, 0.0, 1e-10) << "rotated rest energy should be zero";
     {
         const Mat32 P = PCorotated32(cache, F, kMu, kLambda);
         const ShapeGrads gradN = shape_function_gradients(tri.Dm_inv);
         for (int i = 0; i < 3; ++i) {
             Vec3 g = corotated_node_gradient(P, tri.ref_area, gradN, i);
-            require(g.norm() < 1e-10, "rotated rest gradient should be zero");
+            EXPECT_LT(g.norm(), 1e-10) << "rotated rest gradient should be zero (node " << i << ")";
         }
     }
-    std::cout << "  PASSED\n\n";
 }
 
 // ===========================================================================
 //  Test 4: translation invariance
 // ===========================================================================
 
-void test_translation_invariance(){
-    std::cout << "=== Test 4: translation invariance ===\n";
+TEST(CorotatedEnergy, TranslationInvariance){
     const auto tri = MakeTestTriangle();
     const auto def = MakeDeformedTriangle();
 
@@ -234,17 +223,14 @@ void test_translation_invariance(){
     const double E0 = corotated_energy(tri.ref_area, tri.Dm_inv, def, kMu, kLambda);
     const double E1 = corotated_energy(tri.ref_area, tri.Dm_inv, shifted, kMu, kLambda);
 
-    std::cout << "  E0 = " << E0 << ",  E1 = " << E1 << ",  diff = " << std::abs(E0 - E1) << "\n";
-    require(std::abs(E0 - E1) < 1e-10, "energy should be translation invariant");
-    std::cout << "  PASSED\n\n";
+    EXPECT_NEAR(E0, E1, 1e-10) << "energy should be translation invariant";
 }
 
 // ===========================================================================
 //  Test 5: nodal gradients sum to zero
 // ===========================================================================
 
-void test_gradient_sum_zero(){
-    std::cout << "=== Test 5: nodal gradients sum to zero ===\n";
+TEST(CorotatedEnergy, GradientSumZero){
     const auto tri = MakeTestTriangle();
     const auto def = MakeDeformedTriangle();
 
@@ -259,17 +245,14 @@ void test_gradient_sum_zero(){
             total += corotated_node_gradient(P, tri.ref_area, gradN, i);
     }
 
-    std::cout << "  |sum| = " << total.norm() << "\n";
-    require(total.norm() < 1e-10, "nodal gradients should sum to zero");
-    std::cout << "  PASSED\n\n";
+    EXPECT_LT(total.norm(), 1e-10) << "nodal gradients should sum to zero";
 }
 
 // ===========================================================================
 //  Test 6: Hessian symmetry
 // ===========================================================================
 
-void test_hessian_symmetry(){
-    std::cout << "=== Test 6: Hessian symmetry ===\n";
+TEST(CorotatedEnergy, HessianSymmetry){
     const auto tri = MakeTestTriangle();
     const auto def = MakeDeformedTriangle();
 
@@ -278,13 +261,10 @@ void test_hessian_symmetry(){
     const Mat99 H = assemble_hessian(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda);
 
     double max_asym = (H - H.transpose()).cwiseAbs().maxCoeff();
-    std::cout << "  max |H - H^T| = " << std::scientific << max_asym << "\n";
-    require(max_asym < 1e-8, "Hessian should be symmetric");
-    std::cout << "  PASSED\n\n";
+    EXPECT_LT(max_asym, 1e-8) << "Hessian should be symmetric";
 }
 
-void test_self_block_matches_analytic_block(){
-    std::cout << "=== Test 6b: corotated_node_hessian matches analytic self block ===\n";
+TEST(CorotatedEnergy, SelfBlockMatchesAnalytic){
     const auto tri = MakeTestTriangle();
     const auto def = MakeDeformedTriangle();
 
@@ -310,17 +290,15 @@ void test_self_block_matches_analytic_block(){
         }
         const Mat33 H_self = corotated_node_hessian(dPdF, tri.ref_area, gradN, node);
         const double err = (H_ref - H_self).cwiseAbs().maxCoeff();
-        require(err < 1e-12, "corotated self-block mismatch");
+        EXPECT_LT(err, 1e-12) << "corotated self-block mismatch at node " << node;
     }
-    std::cout << "  PASSED\n\n";
 }
 
 // ===========================================================================
 //  Test 7: Hessian has translation null modes
 // ===========================================================================
 
-void test_hessian_translation_null(){
-    std::cout << "=== Test 7: Hessian translation null modes ===\n";
+TEST(CorotatedEnergy, HessianTranslationNull){
     const auto tri = MakeTestTriangle();
     const auto def = MakeDeformedTriangle();
 
@@ -333,18 +311,15 @@ void test_hessian_translation_null(){
         for (int node = 0; node < 3; ++node)
             t(3 * node + axis) = 1.0;
         double res = (H * t).cwiseAbs().maxCoeff();
-        std::cout << "  axis " << axis << ": |H * t| = " << std::scientific << res << "\n";
-        require(res < 1e-8, "Hessian should have translation null mode");
+        EXPECT_LT(res, 1e-8) << "Hessian should have translation null mode (axis " << axis << ")";
     }
-    std::cout << "  PASSED\n\n";
 }
 
 // ===========================================================================
 //  Test 8: gradient convergence (slope = 2)
 // ===========================================================================
 
-void test_gradient_convergence(){
-    std::cout << "=== Test 8: gradient convergence (slope = 2) ===\n";
+TEST(CorotatedEnergy, GradientConvergence){
     const auto tri = MakeTestTriangle();
     const auto def = MakeDeformedTriangle();
 
@@ -379,16 +354,14 @@ void test_gradient_convergence(){
         }
     }
 
-    require(all_passed, "gradient convergence failed");
-    std::cout << "  PASSED\n\n";
+    EXPECT_TRUE(all_passed) << "gradient convergence failed";
 }
 
 // ===========================================================================
 //  Test 9: Hessian convergence (slope = 2)
 // ===========================================================================
 
-void test_hessian_convergence(){
-    std::cout << "=== Test 9: Hessian convergence (slope = 2) ===\n";
+TEST(CorotatedEnergy, HessianConvergence){
     const auto tri = MakeTestTriangle();
     const auto def = MakeDeformedTriangle();
 
@@ -460,16 +433,14 @@ void test_hessian_convergence(){
     }
 
     std::cout << "  Tested " << tested << " entries, skipped " << skipped << " zero entries\n";
-    require(all_passed, "Hessian convergence failed");
-    std::cout << "  PASSED\n\n";
+    EXPECT_TRUE(all_passed) << "Hessian convergence failed";
 }
 
 // ===========================================================================
 //  Test 10: directional derivative convergence (slope = 2)
 // ===========================================================================
 
-void test_directional_derivative_convergence(){
-    std::cout << "=== Test 10: directional derivative convergence (slope = 2) ===\n";
+TEST(CorotatedEnergy, DirectionalDerivativeConvergence){
     const auto tri = MakeTestTriangle();
     const auto def = MakeDeformedTriangle();
 
@@ -504,28 +475,24 @@ void test_directional_derivative_convergence(){
         errors.push_back(std::abs(fd - exact));
     }
 
-    require(check_convergence("directional", exact, hs, errors), "directional derivative convergence failed");
-    std::cout << "  PASSED\n\n";
+    EXPECT_TRUE(check_convergence("directional", exact, hs, errors)) << "directional derivative convergence failed";
 }
 
 // ===========================================================================
-//  Stress: near-degenerate triangle (area ≈ 0)
+//  Stress: near-degenerate triangle (area ~ 0)
 // ===========================================================================
 
-void test_near_degenerate_triangle(){
-    std::cout << "=== Stress: near-degenerate triangle ===\n";
-
+TEST(CorotatedEnergy, NearDegenerateTriangle){
     // Nearly collapsed: vertices almost collinear, area ~ 1e-10
     Vec2 X0(0.0, 0.0), X1(1.0, 0.0), X2(0.5, 1e-10);
     Mat22 Dm_local;
     Dm_local.col(0) = X1 - X0;
     Dm_local.col(1) = X2 - X0;
     double ref_area = 0.5 * std::abs(Dm_local.determinant());
-    std::cout << "  ref_area = " << std::scientific << ref_area << "\n";
-    require(ref_area > 0.0, "area should be nonzero");
+    ASSERT_TRUE(ref_area > 0.0) << "area should be nonzero";
 
     Mat22 Dm_inv = Dm_local.inverse();
-    require(std::isfinite(Dm_inv.norm()), "Dm_inv should be finite");
+    ASSERT_TRUE(std::isfinite(Dm_inv.norm())) << "Dm_inv should be finite";
 
     TriangleDef def;
     def.x[0] = Vec3(0.0, 0.0, 0.0);
@@ -533,14 +500,13 @@ void test_near_degenerate_triangle(){
     def.x[2] = Vec3(0.5, 1e-10, 0.0);
 
     double E = corotated_energy(ref_area, Dm_inv, def, kMu, kLambda);
-    std::cout << "  E (rest-ish) = " << std::scientific << E << "\n";
-    require(std::isfinite(E), "energy should be finite for near-degenerate triangle");
+    ASSERT_TRUE(std::isfinite(E)) << "energy should be finite for near-degenerate triangle";
 
     // Deform slightly and check gradient is finite
     TriangleDef deformed = def;
     deformed.x[2] = Vec3(0.5, 1e-10, 0.1);
     double E2 = corotated_energy(ref_area, Dm_inv, deformed, kMu, kLambda);
-    require(std::isfinite(E2), "deformed energy should be finite");
+    ASSERT_TRUE(std::isfinite(E2)) << "deformed energy should be finite";
 
     const Mat32 F = compute_F(Dm_inv, deformed);
     const CorotatedCache32 cache = buildCorotatedCache(F);
@@ -548,19 +514,15 @@ void test_near_degenerate_triangle(){
     const ShapeGrads gradN = shape_function_gradients(Dm_inv);
     for (int i = 0; i < 3; ++i) {
         Vec3 g = corotated_node_gradient(P, ref_area, gradN, i);
-        require(std::isfinite(g.norm()), "gradient should be finite for near-degenerate triangle");
+        ASSERT_TRUE(std::isfinite(g.norm())) << "gradient should be finite for near-degenerate triangle (node " << i << ")";
     }
-
-    std::cout << "  E (deformed) = " << std::scientific << E2 << "\n";
-    std::cout << "  PASSED\n\n";
 }
 
 // ===========================================================================
 //  Stress: large coordinate values (coordinates ~ 1e6)
 // ===========================================================================
 
-void test_large_coordinates(){
-    std::cout << "=== Stress: large coordinate values ===\n";
+TEST(CorotatedEnergy, LargeCoordinates){
     const auto tri = MakeTestTriangle();
 
     const double offset = 1e6;
@@ -569,11 +531,9 @@ void test_large_coordinates(){
     def.x[1] = Vec3(offset + 1.2, offset + 0.1, offset + 0.0);
     def.x[2] = Vec3(offset + 0.2, offset + 0.9, offset + 0.0);
 
-    // This is the rest triangle shifted by a large offset — energy should still be ~0
+    // This is the rest triangle shifted by a large offset -- energy should still be ~0
     double E = corotated_energy(tri.ref_area, tri.Dm_inv, def, kMu, kLambda);
-    std::cout << "  E (shifted rest) = " << std::scientific << E << "\n";
-    // Translation invariance means this should be near-zero
-    require(std::abs(E) < 1e-4, "shifted rest energy should be near zero");
+    EXPECT_NEAR(E, 0.0, 1e-4) << "shifted rest energy should be near zero";
 
     // Deform and check
     TriangleDef deformed;
@@ -582,35 +542,10 @@ void test_large_coordinates(){
     deformed.x[2] = Vec3(offset + 0.0, offset + 1.0, offset + 0.4);
 
     double E2 = corotated_energy(tri.ref_area, tri.Dm_inv, deformed, kMu, kLambda);
-    require(std::isfinite(E2), "deformed energy at large coordinates should be finite");
+    ASSERT_TRUE(std::isfinite(E2)) << "deformed energy at large coordinates should be finite";
 
     // Compare with the same deformation at origin
     const auto def_origin = MakeDeformedTriangle();
     double E_origin = corotated_energy(tri.ref_area, tri.Dm_inv, def_origin, kMu, kLambda);
-    std::cout << "  E (large coords) = " << E2 << "  E (origin) = " << E_origin << "\n";
-    require(std::abs(E2 - E_origin) < 1e-4, "energy should match regardless of coordinate magnitude");
-
-    std::cout << "  PASSED\n\n";
-}
-
-// ===========================================================================
-//  main
-// ===========================================================================
-
-int main(){
-    test_energy_is_finite();
-    test_rest_state();
-    test_rotation_invariance();
-    test_translation_invariance();
-    test_gradient_sum_zero();
-    test_self_block_matches_analytic_block();
-    test_gradient_convergence();
-    test_directional_derivative_convergence();
-    test_near_degenerate_triangle();
-    test_large_coordinates();
-
-    std::cout << "\n========================================\n"
-              << "All corotated energy tests passed.\n"
-              << "========================================\n";
-    return 0;
+    EXPECT_NEAR(E2, E_origin, 1e-4) << "energy should match regardless of coordinate magnitude";
 }

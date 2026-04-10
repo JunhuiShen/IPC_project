@@ -1,3 +1,5 @@
+#include <gtest/gtest.h>
+
 #include "make_shape.h"
 #include "physics.h"
 #include "barrier_energy.h"
@@ -10,30 +12,7 @@
 
 using VecX = Eigen::VectorXd;
 
-void require(bool cond, const std::string& msg){
-    if (!cond) {
-        std::cerr << "TEST FAILED: " << msg << std::endl;
-        std::exit(EXIT_FAILURE);
-    }
-}
-
-bool check_convergence(const std::string& label, const std::vector<double>& hs,
-                       const std::vector<double>& errors, double noise_floor = 1e-10){
-    bool saw_good_slope = false;
-    for (int i = 1; i < (int)errors.size(); ++i) {
-        if (errors[i] < noise_floor && errors[i-1] < noise_floor) continue;
-        if (errors[i] == 0.0) continue;
-        double slope = std::log(errors[i-1]/errors[i]) / std::log(hs[i-1]/hs[i]);
-        std::cout << "    h=" << hs[i] << "  err=" << errors[i]
-                  << "  slope=" << std::fixed << std::setprecision(2) << slope << "\n";
-        if (slope >= 1.8) saw_good_slope = true;
-    }
-    if (!saw_good_slope) {
-        std::cerr << "  FAIL: no slope >= 1.8 for " << label << "\n";
-        return false;
-    }
-    return true;
-}
+namespace {
 
 VecX flatten_positions(const std::vector<Vec3>& x){
     VecX q(3 * x.size());
@@ -207,156 +186,182 @@ bool slope2_check(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
         errs.push_back(err);
     }
 
-    return check_convergence("slope-2 vertex " + std::to_string(vi), hs, errs);
+    double noise_floor = 1e-10;
+    bool saw_good_slope = false;
+    for (int i = 1; i < (int)errs.size(); ++i) {
+        if (errs[i] < noise_floor && errs[i-1] < noise_floor) continue;
+        if (errs[i] == 0.0) continue;
+        double slope = std::log(errs[i-1]/errs[i]) / std::log(hs[i-1]/hs[i]);
+        std::cout << "    h=" << hs[i] << "  err=" << errs[i]
+                  << "  slope=" << std::fixed << std::setprecision(2) << slope << "\n";
+        if (slope >= 1.8) saw_good_slope = true;
+    }
+    if (!saw_good_slope) {
+        std::cerr << "  FAIL: no slope >= 1.8 for slope-2 vertex " << vi << "\n";
+    }
+    return saw_good_slope;
 }
 
+} // anonymous namespace
+
 // =====================================================================
-//  main
+//  Test fixture
 // =====================================================================
 
-int main(){
-    std::cout << std::setprecision(12);
-
+class TotalEnergyTest : public ::testing::Test {
+protected:
     SimParams params;
-    params.fps      = 30.0;
-    params.substeps = 1;
-    params.mu = 100.0;
-    params.lambda = 100.0;
-    params.density = 1.0;
-    params.thickness = 0.1;
-    params.kpin = 1e3;
-    params.gravity = Vec3(0, -9.81, 0);
-    params.max_global_iters = 50;
-    params.tol_abs = 1e-8;
-    params.step_weight = 1.0;
-    params.d_hat = 1.0;
-
     RefMesh ref_mesh;
     DeformedState state;
     std::vector<Vec2> X;
     std::vector<Pin> pins;
-
-    clear_model(ref_mesh, state, X, pins);
-
-    build_square_mesh(ref_mesh, state, X, 1, 1, 1.0, 1.0, Vec3(0, 0, 0));
-    build_square_mesh(ref_mesh, state, X, 1, 1, 1.0, 1.0, Vec3(0, 0, 0.4));
-
-    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
-
-    state.deformed_positions[0] += Vec3(0.02, -0.01,  0.03);
-    state.deformed_positions[1] += Vec3(-0.01, 0.03, -0.02);
-    state.deformed_positions[2] += Vec3(0.01,  0.02,  0.01);
-    state.deformed_positions[3] += Vec3(-0.02,-0.01,  0.02);
-    state.deformed_positions[4] += Vec3(0.02,  0.01, -0.02);
-    state.deformed_positions[5] += Vec3(-0.01, 0.02,  0.01);
-    state.deformed_positions[6] += Vec3(0.01, -0.01,  0.02);
-    state.deformed_positions[7] += Vec3(-0.02, 0.01, -0.01);
-
-    append_pin(pins, 6, state.deformed_positions);
-    append_pin(pins, 7, state.deformed_positions);
-
-    ref_mesh.build_lumped_mass(params.density, params.thickness);
-    VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);
-
-    std::vector<Vec3> xhat = state.deformed_positions;
-    std::vector<Vec3> x    = state.deformed_positions;
-
+    VertexTriangleMap adj;
+    std::vector<Vec3> xhat;
+    std::vector<Vec3> x;
     std::vector<NodeTrianglePair> nt_pairs;
-    nt_pairs.push_back({4, {0, 1, 3}});
-    nt_pairs.push_back({5, {0, 1, 3}});
-
     std::vector<SegmentSegmentPair> ss_pairs;
-    ss_pairs.push_back({{0, 1, 4, 5}});
-    ss_pairs.push_back({{0, 3, 4, 7}});
 
-    // -----------------------------------------------------------------
-    //  Barrier activation check
-    // -----------------------------------------------------------------
-    {
-        std::cout << "=== barrier activation check ===\n";
-        for (int i = 0; i < (int)nt_pairs.size(); ++i) {
-            const auto& p = nt_pairs[i];
-            auto dr = node_triangle_distance(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]]);
-            double e = node_triangle_barrier(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat);
-            std::cout << "NT pair " << i << ": distance=" << dr.distance
-                      << " barrier=" << e << " region=" << to_string(dr.region) << "\n";
-        }
-        for (int i = 0; i < (int)ss_pairs.size(); ++i) {
-            const auto& p = ss_pairs[i];
-            auto dr = segment_segment_distance(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]]);
-            double e = segment_segment_barrier(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat);
-            std::cout << "SS pair " << i << ": distance=" << dr.distance
-                      << " barrier=" << e << " region=" << to_string(dr.region) << "\n";
-        }
+    void SetUp() override {
+        std::cout << std::setprecision(12);
+
+        params.fps      = 30.0;
+        params.substeps = 1;
+        params.mu = 100.0;
+        params.lambda = 100.0;
+        params.density = 1.0;
+        params.thickness = 0.1;
+        params.kpin = 1e3;
+        params.gravity = Vec3(0, -9.81, 0);
+        params.max_global_iters = 50;
+        params.tol_abs = 1e-8;
+        params.step_weight = 1.0;
+        params.d_hat = 1.0;
+
+        clear_model(ref_mesh, state, X, pins);
+
+        build_square_mesh(ref_mesh, state, X, 1, 1, 1.0, 1.0, Vec3(0, 0, 0));
+        build_square_mesh(ref_mesh, state, X, 1, 1, 1.0, 1.0, Vec3(0, 0, 0.4));
+
+        state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+
+        state.deformed_positions[0] += Vec3(0.02, -0.01,  0.03);
+        state.deformed_positions[1] += Vec3(-0.01, 0.03, -0.02);
+        state.deformed_positions[2] += Vec3(0.01,  0.02,  0.01);
+        state.deformed_positions[3] += Vec3(-0.02,-0.01,  0.02);
+        state.deformed_positions[4] += Vec3(0.02,  0.01, -0.02);
+        state.deformed_positions[5] += Vec3(-0.01, 0.02,  0.01);
+        state.deformed_positions[6] += Vec3(0.01, -0.01,  0.02);
+        state.deformed_positions[7] += Vec3(-0.02, 0.01, -0.01);
+
+        append_pin(pins, 6, state.deformed_positions);
+        append_pin(pins, 7, state.deformed_positions);
+
+        ref_mesh.build_lumped_mass(params.density, params.thickness);
+        adj = build_incident_triangle_map(ref_mesh.tris);
+
+        xhat = state.deformed_positions;
+        x    = state.deformed_positions;
+
+        nt_pairs.push_back({4, {0, 1, 3}});
+        nt_pairs.push_back({5, {0, 1, 3}});
+
+        ss_pairs.push_back({{0, 1, 4, 5}});
+        ss_pairs.push_back({{0, 3, 4, 7}});
     }
+};
 
-    // -----------------------------------------------------------------
-    //  Directional derivative check
-    // -----------------------------------------------------------------
-    {
-        std::cout << "\n=== total energy directional derivative check ===\n";
+// -----------------------------------------------------------------
+//  Barrier activation check
+// -----------------------------------------------------------------
 
-        VecX q   = flatten_positions(x);
-        VecX dir = VecX::Random(q.size()); dir.normalize();
-        double eps = 1e-6;
-
-        auto xp = unflatten_positions(q + eps * dir);
-        auto xm = unflatten_positions(q - eps * dir);
-        double fd = (total_energy(ref_mesh, pins, params, xp, xhat, nt_pairs, ss_pairs)
-                     - total_energy(ref_mesh, pins, params, xm, xhat, nt_pairs, ss_pairs)) / (2.0 * eps);
-
-        VecX g(3 * x.size());
-        for (int vi = 0; vi < (int)x.size(); ++vi)
-            g.segment<3>(3*vi) = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
-
-        double an = g.dot(dir);
-        double err = std::abs(fd - an);
-        std::cout << "FD=" << fd << " analytic=" << an << " error=" << err << "\n";
-        require(err < 1e-4, "directional derivative error too large");
+TEST_F(TotalEnergyTest, BarrierActivation) {
+    for (int i = 0; i < (int)nt_pairs.size(); ++i) {
+        const auto& p = nt_pairs[i];
+        auto dr = node_triangle_distance(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]]);
+        double e = node_triangle_barrier(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat);
+        std::cout << "NT pair " << i << ": distance=" << dr.distance
+                  << " barrier=" << e << " region=" << to_string(dr.region) << "\n";
+        EXPECT_GT(dr.distance, 0.0) << "NT pair " << i << " has non-positive distance";
     }
-
-    // -----------------------------------------------------------------
-    //  Per-vertex gradient check
-    // -----------------------------------------------------------------
-    {
-        std::cout << "\n=== per-vertex gradient check ===\n";
-        double eps = 1e-6;
-        for (int vi = 0; vi < (int)x.size(); ++vi) {
-            Vec3 g   = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
-            Vec3 gfd = local_gradient_fd(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs, eps);
-            double err = (g - gfd).norm();
-            std::cout << "v " << vi << " err=" << err << "\n";
-            require(err < 1e-4, "gradient mismatch at vertex " + std::to_string(vi));
-        }
+    for (int i = 0; i < (int)ss_pairs.size(); ++i) {
+        const auto& p = ss_pairs[i];
+        auto dr = segment_segment_distance(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]]);
+        double e = segment_segment_barrier(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat);
+        std::cout << "SS pair " << i << ": distance=" << dr.distance
+                  << " barrier=" << e << " region=" << to_string(dr.region) << "\n";
+        EXPECT_GT(dr.distance, 0.0) << "SS pair " << i << " has non-positive distance";
     }
+}
 
-    // -----------------------------------------------------------------
-    //  Per-vertex Hessian check
-    // -----------------------------------------------------------------
-    {
-        std::cout << "\n=== per-vertex Hessian check ===\n";
-        double eps = 1e-6;
-        for (int vi = 0; vi < (int)x.size(); ++vi) {
-            Mat33 H   = local_hessian(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
-            Mat33 Hfd = local_hessian_fd(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs, eps);
-            double err = (H - Hfd).lpNorm<Eigen::Infinity>();
-            std::cout << "v " << vi << " err=" << err << "\n";
-            require(err < 1e-3, "Hessian mismatch at vertex " + std::to_string(vi));
-        }
+// -----------------------------------------------------------------
+//  Directional derivative check
+// -----------------------------------------------------------------
+
+TEST_F(TotalEnergyTest, DirectionalDerivative) {
+    VecX q   = flatten_positions(x);
+    VecX dir = VecX::Random(q.size()); dir.normalize();
+    double eps = 1e-6;
+
+    auto xp = unflatten_positions(q + eps * dir);
+    auto xm = unflatten_positions(q - eps * dir);
+    double fd = (total_energy(ref_mesh, pins, params, xp, xhat, nt_pairs, ss_pairs)
+                 - total_energy(ref_mesh, pins, params, xm, xhat, nt_pairs, ss_pairs)) / (2.0 * eps);
+
+    VecX g(3 * x.size());
+    for (int vi = 0; vi < (int)x.size(); ++vi)
+        g.segment<3>(3*vi) = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
+
+    double an = g.dot(dir);
+    double err = std::abs(fd - an);
+    std::cout << "FD=" << fd << " analytic=" << an << " error=" << err << "\n";
+    ASSERT_LT(err, 1e-4) << "directional derivative error too large";
+}
+
+// -----------------------------------------------------------------
+//  Per-vertex gradient check
+// -----------------------------------------------------------------
+
+TEST_F(TotalEnergyTest, PerVertexGradient) {
+    double eps = 1e-6;
+    for (int vi = 0; vi < (int)x.size(); ++vi) {
+        Vec3 g   = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
+        Vec3 gfd = local_gradient_fd(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs, eps);
+        double err = (g - gfd).norm();
+        std::cout << "v " << vi << " err=" << err << "\n";
+        ASSERT_LT(err, 1e-4) << "gradient mismatch at vertex " << vi;
     }
+}
 
-    // -----------------------------------------------------------------
-    //  Slope-2 checks
-    // -----------------------------------------------------------------
-    require(slope2_check(2, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs),
-            "slope-2 check failed for vertex 2");
-    require(slope2_check(0, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs),
-            "slope-2 check failed for vertex 0");
-    require(slope2_check(4, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs),
-            "slope-2 check failed for vertex 4");
+// -----------------------------------------------------------------
+//  Per-vertex Hessian check
+// -----------------------------------------------------------------
 
-    std::cout << "\n========================================\n"
-              << "All total energy tests completed.\n"
-              << "========================================\n";
-    return 0;
+TEST_F(TotalEnergyTest, PerVertexHessian) {
+    double eps = 1e-6;
+    for (int vi = 0; vi < (int)x.size(); ++vi) {
+        Mat33 H   = local_hessian(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
+        Mat33 Hfd = local_hessian_fd(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs, eps);
+        double err = (H - Hfd).lpNorm<Eigen::Infinity>();
+        std::cout << "v " << vi << " err=" << err << "\n";
+        ASSERT_LT(err, 1e-3) << "Hessian mismatch at vertex " << vi;
+    }
+}
+
+// -----------------------------------------------------------------
+//  Slope-2 checks
+// -----------------------------------------------------------------
+
+TEST_F(TotalEnergyTest, Slope2Vertex2) {
+    EXPECT_TRUE(slope2_check(2, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs))
+        << "slope-2 check failed for vertex 2";
+}
+
+TEST_F(TotalEnergyTest, Slope2Vertex0) {
+    EXPECT_TRUE(slope2_check(0, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs))
+        << "slope-2 check failed for vertex 0";
+}
+
+TEST_F(TotalEnergyTest, Slope2Vertex4) {
+    EXPECT_TRUE(slope2_check(4, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs))
+        << "slope-2 check failed for vertex 4";
 }

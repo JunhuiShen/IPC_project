@@ -46,7 +46,7 @@ Per-frame restart snapshots are also written as `state_NNNN.bin`.
 
 ## Tests
 
-The test suite contains **148 tests** covering every layer of the pipeline:
+The test suite contains 203 GoogleTests covering every layer of the pipeline:
 
     cmake -B build
     cmake --build build --clean-first
@@ -57,17 +57,17 @@ The test suite contains **148 tests** covering every layer of the pipeline:
 | `ccd_test` | 40 | Linear and cubic CCD, degeneracy chain, stress tests, initial guess |
 | `broad_phase_test` | 27 | AABB, BVH, pair generation, CCD candidates, conservativeness, incremental refresh, `query_single_node_ccd` vs brute-force |
 | `ipc_math_test` | 28 | `matrix3d_inverse`, `segment_closest_point`, `filter_root`, `add_root`/`SmallRoots`, barycentric coords, serialize/deserialize round-trip, `set_mesh_topology` caching |
+| `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
 | `parallel_helper_test` | 17 | Jacobi predictions, conflict graph, coloring, parallel commits, solver correctness |
+| `barrier_energy_test` | 14 | Scalar barrier, NT/SS gradient+Hessian FD convergence, activation boundary, near-parallel stress |
+| `corotated_energy_test` | 13 | Energy, rest state, rotation/translation invariance, gradient/Hessian FD convergence, stress |
 | `make_shape_test` | 11 | Adjacency maps, graph coloring |
-| `simulation_snapshot_test` | 1 | Golden-file regression (5-frame determinism) |
-| `restart_test` | 1 | Checkpoint resume matches golden |
+| `node_triangle_distance_test` | 9 | All 7 proximity regions + signed distance + degenerate |
+| `total_energy_test` | 7 | Barrier activation, directional derivative, per-vertex gradient/Hessian, slope-2 checks |
 | `parallel_serial_consistency_test` | 2 | Serial vs parallel solver agreement |
 | `visualization_test` | 2 | Debug OBJ export (no assertions — manual inspection) |
-| `corotated_energy_test` | 1 | FD convergence for elastic energy, gradient, Hessian |
-| `node_triangle_distance_test` | 1 | All 7 proximity regions + degenerate |
-| `segment_segment_distance_test` | 1 | All 9 Voronoi regions + parallel + stress |
-| `barrier_energy_test` | 1 | Scalar barrier, NT/SS gradient+Hessian FD convergence |
-| `total_energy_test` | 1 | Combined elastic+barrier FD convergence |
+| `simulation_snapshot_test` | 1 | Golden-file regression (5-frame determinism) |
+| `restart_test` | 1 | Checkpoint resume matches golden |
 
 To list all discovered tests:
 
