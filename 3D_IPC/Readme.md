@@ -56,7 +56,7 @@ The test suite contains GoogleTests covering every layer of the pipeline:
 |-----------|-------|----------------|
 | `ccd_test` | 46 | Linear CCD (all four single-moving-DOF cases) and cubic CCD, degeneracy chain, stress tests, initial guess |
 | `broad_phase_test` | 34 | AABB, BVH, pair generation, CCD candidates, conservativeness, incremental refresh, `query_single_node_ccd` vs brute-force (covers both NT roles: lone-node and face-corner) |
-| `ipc_math_test` | 28 | `matrix3d_inverse`, `segment_closest_point`, `filter_root`, `add_root`/`SmallRoots`, barycentric coords, serialize/deserialize round-trip, `set_mesh_topology` caching |
+| `ipc_math_test` | 27 | `matrix3d_inverse`, `segment_closest_point`, `filter_root`, `add_root`/`SmallRoots`, barycentric coords, serialize/deserialize round-trip, `set_mesh_topology` caching |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
 | `parallel_helper_test` | 17 | Jacobi predictions, conflict graph, coloring, parallel commits, solver correctness |
 | `barrier_energy_test` | 14 | Scalar barrier, NT/SS gradient+Hessian FD convergence, activation boundary, near-parallel stress |
