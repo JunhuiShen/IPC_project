@@ -149,7 +149,10 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
     result.iterations       = 0;
 
     if (residual_history) residual_history->push_back(result.initial_residual);
-    if (result.initial_residual < params.tol_abs) return result;
+    if (result.initial_residual < params.tol_abs) {
+        result.converged = true;
+        return result;
+    }
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         for (const auto& group : color_groups) {
@@ -183,7 +186,10 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
         }
 
         if (residual_history) residual_history->push_back(result.final_residual);
-        if (result.final_residual < params.tol_abs) return result;
+        if (result.final_residual < params.tol_abs) {
+            result.converged = true;
+            return result;
+        }
     }
 
     return result;
@@ -216,7 +222,10 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
     result.iterations       = 0;
 
     if (residual_history) residual_history->push_back(result.initial_residual);
-    if (result.initial_residual < params.tol_abs) return result;
+    if (result.initial_residual < params.tol_abs) {
+        result.converged = true;
+        return result;
+    }
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         // Phase 1: Jacobi prediction
@@ -255,7 +264,10 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         result.iterations     = iter;
 
         if (residual_history) residual_history->push_back(result.final_residual);
-        if (result.final_residual < params.tol_abs) return result;
+        if (result.final_residual < params.tol_abs) {
+            result.converged = true;
+            return result;
+        }
     }
 
     return result;

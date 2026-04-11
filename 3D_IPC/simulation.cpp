@@ -82,6 +82,13 @@ int main(int argc, char** argv) {
 
         result = advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, broad_phase);
 
+        if (!result.converged) {
+            std::cerr << "Error: solver failed to converge at frame " << frame_index
+                      << " (final_residual = " << result.final_residual
+                      << ", max_iters = " << params.max_global_iters << ")\n";
+            return 1;
+        }
+
         auto solver_end = Clock::now();
         double solver_ms = std::chrono::duration<double, std::milli>(solver_end - solver_start).count();
         total_solver_ms += solver_ms;

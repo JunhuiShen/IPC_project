@@ -113,8 +113,8 @@ void build_cloth_stack_example_high_res(RefMesh& ref_mesh,
     // Five densely-spaced cloths with initial downward velocity so layers
     // engage contact near-simultaneously -- the actual stress window.
     const int    stack_count   = 5;    // number of falling cloths in the stack
-    const int    small_nx      = 8;    // grid subdivisions along each cloth's x-axis (triangles = 2*nx*ny)
-    const int    small_ny      = 8;    // grid subdivisions along each cloth's y-axis
+    const int    small_nx      = 16;    // grid subdivisions along each cloth's x-axis (triangles = 2*nx*ny)
+    const int    small_ny      = 16;    // grid subdivisions along each cloth's y-axis
     const double small_w       = 0.35; // width of each falling cloth (meters, along x)
     const double small_h       = 0.35; // height of each falling cloth (meters, along z in world space)
     const double first_drop_y  = 0.25; // y-coordinate of the lowest falling cloth at t=0
