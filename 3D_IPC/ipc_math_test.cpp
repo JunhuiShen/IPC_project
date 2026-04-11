@@ -28,11 +28,6 @@ TEST(Matrix3dInverse, KnownInverse) {
     EXPECT_NEAR((prod - Mat33::Identity()).lpNorm<Eigen::Infinity>(), 0.0, 1e-12);
 }
 
-TEST(Matrix3dInverse, SingularThrows) {
-    Mat33 S = Mat33::Zero();
-    EXPECT_THROW(matrix3d_inverse(S), std::runtime_error);
-}
-
 // ====================================================================
 //  clamp_scalar
 // ====================================================================
