@@ -1,7 +1,11 @@
 #pragma once
 #include "corotated_energy.h"
+#include "bending_energy.h"
 #include "barrier_energy.h"
+#include <algorithm>
+#include <map>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <cassert>
 
@@ -19,6 +23,7 @@ struct SimParams {
     double fps{30.0};
     int    substeps{1};
     double mu{}, lambda{}, density{}, thickness{}, kpin{}, tol_abs{}, step_weight{};
+    double kB{0.0};  // bending (flexural) stiffness; 0 disables the bending term
     double d_hat{0.0};
     Vec3 gravity = Vec3::Zero();
     int max_global_iters{};
@@ -48,17 +53,36 @@ struct DeformedState {
     std::vector<Vec3> velocities;
 };
 
+// Discrete-shell hinge: two triangles sharing an edge. v[0] and v[1]
+// are the shared edge endpoints; v[2] and v[3] are the opposite-vertex
+// apices in the two triangles. The orientation convention (which
+// triangle is "A" and which is "B") is fixed by build_hinges() so that
+// the face normals m_A and m_B point the same way when the hinge is
+// flat (bar_theta = 0 at rest).
+struct Hinge {
+    int v[4];
+    double bar_theta;  // rest dihedral-angle complement (0 for flat 2D rest)
+    double c_e;        // geometric coefficient |e|^2 / (A_A + A_B)
+};
+
+// Map each vertex to {hinge_index, local_role} pairs, where local_role
+// is in {0,1,2,3} following the HingeDef convention.
+using VertexHingeMap = std::unordered_map<int, std::vector<std::pair<int,int>>>;
+
 struct RefMesh {
     std::vector<Vec2> ref_positions;
     std::vector<int>  tris; // flat: every 3 ints = one triangle
     std::vector<Mat22> Dm_inverse;
     std::vector<double> area;
     std::vector<double> mass;
+    std::vector<Hinge> hinges;
+    VertexHingeMap hinge_adj;
     size_t num_positions;
 
     inline void initialize(const std::vector<Vec2>& X){
         num_positions = X.size();
         compute_dm_inverse(X);
+        build_hinges(X);
     }
 
     inline void compute_dm_inverse(const std::vector<Vec2>& X){
@@ -80,6 +104,70 @@ struct RefMesh {
     inline void assert_valid() const {
         assert(area.size() == Dm_inverse.size());
         assert(mass.size() == num_positions);
+    }
+
+    inline void build_hinges(const std::vector<Vec2>& X) {
+        // For each undirected edge, collect the triangles that contain it
+        // along with the directed orientation (0 for v_min->v_max, 1 for
+        // v_max->v_min) and the opposite vertex (apex).
+        struct EdgeEntry { int tri; int dir; int apex; };
+        std::map<std::pair<int,int>, std::vector<EdgeEntry>> edge_map;
+
+        const int nt = static_cast<int>(tris.size()) / 3;
+        for (int t = 0; t < nt; ++t) {
+            const int v[3] = { tris[3*t+0], tris[3*t+1], tris[3*t+2] };
+            for (int k = 0; k < 3; ++k) {
+                const int va = v[k];
+                const int vb = v[(k+1)%3];
+                const int vc = v[(k+2)%3];
+                const int vmin = std::min(va, vb);
+                const int vmax = std::max(va, vb);
+                const int dir  = (va == vmin) ? 0 : 1;
+                edge_map[{vmin, vmax}].push_back({t, dir, vc});
+            }
+        }
+
+        hinges.clear();
+        hinge_adj.clear();
+        for (const auto& [edge, entries] : edge_map) {
+            if (entries.size() != 2) continue;  // boundary or non-manifold
+
+            // Pair the directed orientations so that the hinge's m_A and
+            // m_B are consistently oriented: tri A carries v[0]->v[1],
+            // tri B carries v[1]->v[0].
+            const EdgeEntry* triA = nullptr;
+            const EdgeEntry* triB = nullptr;
+            for (const auto& e : entries) {
+                if (e.dir == 0) triA = &e;
+                else            triB = &e;
+            }
+            if (triA == nullptr || triB == nullptr) continue;
+
+            Hinge h;
+            h.v[0] = edge.first;
+            h.v[1] = edge.second;
+            h.v[2] = triA->apex;
+            h.v[3] = triB->apex;
+
+            // c_e = |e|^2 / (A_A + A_B), equivalent to |e| / h_bar with
+            // h_bar = (h_A + h_B) / 2.
+            const Vec2& X0 = X[h.v[0]];
+            const Vec2& X1 = X[h.v[1]];
+            const Vec2& X2 = X[h.v[2]];
+            const Vec2& X3 = X[h.v[3]];
+            const Vec2 eVec = X1 - X0;
+            const double edge_len2 = eVec.squaredNorm();
+            const double areaA = 0.5 * std::abs(cross_product_in_2d(eVec, X2 - X0));
+            const double areaB = 0.5 * std::abs(cross_product_in_2d(eVec, X3 - X0));
+            const double area_sum = areaA + areaB;
+            h.c_e = (area_sum > 0.0) ? (edge_len2 / area_sum) : 0.0;
+            h.bar_theta = 0.0;  // flat 2D rest configuration
+
+            const int hidx = static_cast<int>(hinges.size());
+            hinges.push_back(h);
+            for (int k = 0; k < 4; ++k)
+                hinge_adj[h.v[k]].emplace_back(hidx, k);
+        }
     }
 
     inline void build_lumped_mass(double density, double thickness) {

@@ -30,6 +30,7 @@ find_package(OpenMP REQUIRED)
 
 add_library(corotated_energy_lib
     corotated_energy.cpp
+    bending_energy.cpp
     IPC_math.cpp
     node_triangle_distance.cpp
     segment_segment_distance.cpp
@@ -92,6 +93,18 @@ target_link_libraries(barrier_energy_test
     GTest::gtest_main
 )
 gtest_discover_tests(barrier_energy_test)
+
+add_executable(bending_energy_test
+    bending_energy_test.cpp
+)
+
+target_link_libraries(bending_energy_test
+    PRIVATE
+    corotated_energy_lib
+    GTest::gtest
+    GTest::gtest_main
+)
+gtest_discover_tests(bending_energy_test)
 
 add_executable(ccd_test
     ccd_test.cpp

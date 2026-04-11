@@ -38,6 +38,14 @@ double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const s
     for (int t = 0; t < num_tris(ref_mesh); ++t)
         PE += corotated_energy(ref_mesh.area[t], ref_mesh.Dm_inverse[t], make_def_triangle(x, ref_mesh, t), params.mu, params.lambda);
 
+    if (params.kB > 0.0) {
+        for (const Hinge& h : ref_mesh.hinges) {
+            HingeDef def;
+            for (int k = 0; k < 4; ++k) def.x[k] = x[h.v[k]];
+            PE += bending_energy(def, params.kB, h.c_e, h.bar_theta);
+        }
+    }
+
     return E + dt2 * PE;
 }
 
@@ -90,6 +98,19 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
         H += dt2 * corotated_node_hessian(dPdF, A, gradN, a);
     }
 
+    if (params.kB > 0.0) {
+        auto it = ref_mesh.hinge_adj.find(vi);
+        if (it != ref_mesh.hinge_adj.end()) {
+            for (const auto& [hi, role] : it->second) {
+                const Hinge& h = ref_mesh.hinges[hi];
+                HingeDef def;
+                for (int k = 0; k < 4; ++k) def.x[k] = x[h.v[k]];
+                g += dt2 * bending_node_gradient(def, params.kB, h.c_e, h.bar_theta, role);
+                H += dt2 * bending_node_hessian_psd(def, params.kB, h.c_e, h.bar_theta, role);
+            }
+        }
+    }
+
     return {g, H};
 }
 
@@ -130,6 +151,18 @@ Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const VertexTriangl
         const ShapeGrads gradN = shape_function_gradients(Dm_inv);
         const Mat32 P = PCorotated32(cache, F, params.mu, params.lambda);
         g += dt2 * corotated_node_gradient(P, A, gradN, a);
+    }
+
+    if (params.kB > 0.0) {
+        auto it = ref_mesh.hinge_adj.find(vi);
+        if (it != ref_mesh.hinge_adj.end()) {
+            for (const auto& [hi, role] : it->second) {
+                const Hinge& h = ref_mesh.hinges[hi];
+                HingeDef def;
+                for (int k = 0; k < 4; ++k) def.x[k] = x[h.v[k]];
+                g += dt2 * bending_node_gradient(def, params.kB, h.c_e, h.bar_theta, role);
+            }
+        }
     }
 
     if (params.d_hat > 0.0) {

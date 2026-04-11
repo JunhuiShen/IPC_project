@@ -365,3 +365,91 @@ TEST_F(TotalEnergyTest, Slope2Vertex4) {
     EXPECT_TRUE(slope2_check(4, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs))
         << "slope-2 check failed for vertex 4";
 }
+
+// =====================================================================
+//  Bending enabled: check the bending term is correctly wired into the
+//  total incremental potential and per-vertex gradient alongside elastic,
+//  barrier, pinning, gravity, and inertia.
+// =====================================================================
+//
+// NOTE: at non-rest configurations the bending Hessian block uses the
+// Gauss-Newton PSD approximation (see bending_node_hessian_psd), which
+// differs from the true Hessian by 2*k_B*c_e*delta * d^2 theta. We
+// therefore only check gradient consistency here; bending Hessian
+// consistency is covered at the rest state in bending_physics_test.cpp.
+
+TEST_F(TotalEnergyTest, PerVertexGradientWithBending) {
+    params.kB = 50.0;  // enable bending on top of the existing config
+
+    const double eps = 1e-6;
+    double max_err = 0.0;
+    int worst_vi = -1;
+
+    for (int vi = 0; vi < (int)x.size(); ++vi) {
+        Vec3 g   = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
+        Vec3 gfd = local_gradient_fd(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs, eps);
+        const double err = (g - gfd).norm();
+        if (err > max_err) { max_err = err; worst_vi = vi; }
+    }
+    std::cout << "bending: worst vertex=" << worst_vi << " err=" << max_err << "\n";
+    ASSERT_LT(max_err, 1e-4) << "gradient mismatch with bending enabled";
+}
+
+TEST_F(TotalEnergyTest, DirectionalDerivativeWithBending) {
+    params.kB = 50.0;
+
+    VecX q   = flatten_positions(x);
+    VecX dir = VecX::Random(q.size()); dir.normalize();
+    const double eps = 1e-6;
+
+    auto xp = unflatten_positions(q + eps * dir);
+    auto xm = unflatten_positions(q - eps * dir);
+    const double fd = (total_energy(ref_mesh, pins, params, xp, xhat, nt_pairs, ss_pairs)
+                       - total_energy(ref_mesh, pins, params, xm, xhat, nt_pairs, ss_pairs)) / (2.0 * eps);
+
+    VecX g(3 * x.size());
+    for (int vi = 0; vi < (int)x.size(); ++vi)
+        g.segment<3>(3*vi) = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
+
+    const double an = g.dot(dir);
+    const double err = std::abs(fd - an);
+    std::cout << "bending directional: FD=" << fd << " analytic=" << an << " err=" << err << "\n";
+    ASSERT_LT(err, 1e-4) << "directional derivative mismatch with bending enabled";
+}
+
+// =====================================================================
+//  Bending enabled at the rest configuration: in this regime delta = 0
+//  so the PSD Hessian coincides with the true Hessian and FD of the
+//  per-vertex gradient must match it, including the bending contribution.
+// =====================================================================
+
+TEST_F(TotalEnergyTest, PerVertexHessianWithBendingAtRest) {
+    // Rebuild the mesh in its flat rest configuration so that the dihedral
+    // complement is zero at every hinge. Keep barriers off so the only
+    // contributions are inertia + elastic + pin + gravity + bending.
+    clear_model(ref_mesh, state, X, pins);
+    build_square_mesh(ref_mesh, state, X, 2, 2, 1.0, 1.0, Vec3(0, 0, 0));
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+    ref_mesh.build_lumped_mass(params.density, params.thickness);
+    adj = build_incident_triangle_map(ref_mesh.tris);
+    xhat = state.deformed_positions;
+    x    = state.deformed_positions;
+
+    params.d_hat = 0.0;
+    params.kB    = 50.0;
+    nt_pairs.clear();
+    ss_pairs.clear();
+    pins.clear();
+
+    const double eps = 1e-5;
+    double max_err = 0.0;
+    int worst_vi = -1;
+    for (int vi = 0; vi < (int)x.size(); ++vi) {
+        Mat33 H   = local_hessian   (vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
+        Mat33 Hfd = local_hessian_fd(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs, eps);
+        const double err = (H - Hfd).cwiseAbs().maxCoeff();
+        if (err > max_err) { max_err = err; worst_vi = vi; }
+    }
+    std::cout << "bending rest: worst vertex=" << worst_vi << " err=" << max_err << "\n";
+    ASSERT_LT(max_err, 1e-3) << "Hessian mismatch at rest with bending enabled";
+}
