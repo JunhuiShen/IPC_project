@@ -2,6 +2,7 @@
 #include "physics.h"
 #include "solver.h"
 #include "broad_phase.h"
+#include "parallel_helper.h"
 #include <gtest/gtest.h>
 #include <vector>
 
@@ -12,9 +13,13 @@
 // directions for later colors), so results are close but not bit-identical.
 
 // Serial and parallel GS use different update orders (serial: vertex-by-vertex,
-// parallel: Jacobi prediction + colored batch commits), so results differ by O(h)
-// where h is the Newton step size. We check they're in the same ballpark.
-static constexpr double kTol = 5e-3;
+// parallel: Jacobi prediction + colored batch commits), so results differ by
+// O(h) where h is the Newton step size. The gap shrinks as the solvers
+// converge, so the multi-sweep tolerance is much tighter than the one-sweep
+// tolerance. Both are empirical ceilings with ~2x headroom over the measured
+// max vertex drift on the build_scene() mesh.
+static constexpr double kTolOneSweep   = 2e-3;   // measured ~1.27e-3
+static constexpr double kTolMultiSweep = 1e-4;   // measured ~3.49e-5
 
 static void build_scene(RefMesh& ref_mesh, DeformedState& state,
                         std::vector<Pin>& pins, VertexTriangleMap& adj,
@@ -94,9 +99,9 @@ TEST(ParallelSerialConsistency, OneSweepSerialVsParallelFromFreshState) {
 
     // Results should be close (not identical due to different update orders)
     for (int i = 0; i < static_cast<int>(serial_x.size()); ++i) {
-        EXPECT_NEAR(serial_x[i].x(), parallel_x[i].x(), kTol) << "vertex " << i << " x";
-        EXPECT_NEAR(serial_x[i].y(), parallel_x[i].y(), kTol) << "vertex " << i << " y";
-        EXPECT_NEAR(serial_x[i].z(), parallel_x[i].z(), kTol) << "vertex " << i << " z";
+        EXPECT_NEAR(serial_x[i].x(), parallel_x[i].x(), kTolOneSweep) << "vertex " << i << " x";
+        EXPECT_NEAR(serial_x[i].y(), parallel_x[i].y(), kTolOneSweep) << "vertex " << i << " y";
+        EXPECT_NEAR(serial_x[i].z(), parallel_x[i].z(), kTolOneSweep) << "vertex " << i << " z";
     }
 }
 
@@ -141,8 +146,73 @@ TEST(ParallelSerialConsistency, MultiSweepConvergesToSimilarState) {
 
     // Final states should be close
     for (int i = 0; i < static_cast<int>(serial_x.size()); ++i) {
-        EXPECT_NEAR(serial_x[i].x(), parallel_x[i].x(), kTol) << "vertex " << i << " x";
-        EXPECT_NEAR(serial_x[i].y(), parallel_x[i].y(), kTol) << "vertex " << i << " y";
-        EXPECT_NEAR(serial_x[i].z(), parallel_x[i].z(), kTol) << "vertex " << i << " z";
+        EXPECT_NEAR(serial_x[i].x(), parallel_x[i].x(), kTolMultiSweep) << "vertex " << i << " x";
+        EXPECT_NEAR(serial_x[i].y(), parallel_x[i].y(), kTolMultiSweep) << "vertex " << i << " y";
+        EXPECT_NEAR(serial_x[i].z(), parallel_x[i].z(), kTolMultiSweep) << "vertex " << i << " z";
+    }
+}
+
+// Compare global_gauss_seidel_solver and global_gauss_seidel_solver_parallel
+// directly with a forced per-vertex coloring in index order (each vertex in
+// its own color: {{0}, {1}, ..., {nv-1}}). The parallel solver normally
+// builds a dynamic conflict-graph coloring per iteration; we bypass that by
+// passing override_colors so both solvers walk 0, 1, ..., nv-1 in strict
+// sequence with a broad-phase refresh after every commit -- i.e. both run
+// as true Gauss-Seidel in the same order. Under this forcing the per-vertex
+// math is literally identical (same Newton direction, same CCD filter step,
+// same commit expression), so the resulting positions agree bit-for-bit.
+TEST(ParallelSerialConsistency, OneSweepForcedOrderSerialEqualsParallel) {
+    RefMesh ref_mesh; VertexTriangleMap adj;
+    std::vector<Pin> pins; SimParams params; std::vector<Vec2> X;
+    DeformedState state;
+    build_scene(ref_mesh, state, pins, adj, params, X);
+
+    const int nv = static_cast<int>(state.deformed_positions.size());
+
+    // Serial solver coloring: one big group listing every vertex in index
+    // order. The serial solver iterates groups in sequence and vertices
+    // within a group in list order, so this makes it walk 0..nv-1.
+    std::vector<std::vector<int>> serial_colors(1);
+    serial_colors[0].resize(nv);
+    for (int i = 0; i < nv; ++i) serial_colors[0][i] = i;
+
+    // Parallel solver coloring: one vertex per color in index order. The
+    // parallel solver commits colors sequentially and refreshes the broad
+    // phase at the end of each color, so a per-vertex coloring is the
+    // per-vertex Gauss-Seidel schedule.
+    std::vector<std::vector<int>> parallel_colors(nv);
+    for (int i = 0; i < nv; ++i) parallel_colors[i] = {i};
+
+    SimParams sweep_params = params;
+    sweep_params.max_global_iters = 1;
+    sweep_params.tol_abs          = 0.0;
+
+    std::vector<Vec3> xhat;
+    build_xhat(xhat, state.deformed_positions, state.velocities, sweep_params.dt());
+
+    // Serial
+    std::vector<Vec3> serial_x = state.deformed_positions;
+    {
+        BroadPhase bp;
+        global_gauss_seidel_solver(ref_mesh, adj, pins, sweep_params, serial_x, xhat,
+                                   bp, state.velocities, serial_colors);
+    }
+
+    // Parallel with the same sweep order
+    std::vector<Vec3> parallel_x = state.deformed_positions;
+    {
+        BroadPhase bp;
+        global_gauss_seidel_solver_parallel(ref_mesh, adj, pins, sweep_params, parallel_x, xhat,
+                                            bp, state.velocities, /*residual_history=*/nullptr,
+                                            &parallel_colors);
+    }
+
+    // Both solvers ran the identical per-vertex Gauss-Seidel schedule, so
+    // positions agree bit-for-bit. Any non-zero diff here is a real
+    // algorithmic divergence -- not round-off or scheduling noise.
+    for (int i = 0; i < nv; ++i) {
+        EXPECT_EQ(serial_x[i].x(), parallel_x[i].x()) << "vertex " << i << " x";
+        EXPECT_EQ(serial_x[i].y(), parallel_x[i].y()) << "vertex " << i << " y";
+        EXPECT_EQ(serial_x[i].z(), parallel_x[i].z()) << "vertex " << i << " z";
     }
 }

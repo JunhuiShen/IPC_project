@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 namespace fs = std::__fs::filesystem;
@@ -37,6 +38,34 @@ int main(int argc, char** argv) {
 
     ref_mesh.build_lumped_mass(params.density, params.thickness);
     VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);
+
+    // Validate d_hat against the minimum edge length in the mesh.
+    if (params.d_hat > 0.0) {
+        double min_edge_len = std::numeric_limits<double>::max();
+        const int nt = static_cast<int>(ref_mesh.tris.size()) / 3;
+        for (int t = 0; t < nt; ++t) {
+            const int v0 = ref_mesh.tris[3 * t + 0];
+            const int v1 = ref_mesh.tris[3 * t + 1];
+            const int v2 = ref_mesh.tris[3 * t + 2];
+            const auto& p0 = state.deformed_positions[v0];
+            const auto& p1 = state.deformed_positions[v1];
+            const auto& p2 = state.deformed_positions[v2];
+            min_edge_len = std::min(min_edge_len, (p1 - p0).norm());
+            min_edge_len = std::min(min_edge_len, (p2 - p1).norm());
+            min_edge_len = std::min(min_edge_len, (p0 - p2).norm());
+        }
+        const double d_hat_limit = 0.5 * min_edge_len;
+        if (params.d_hat > d_hat_limit) {
+            std::cerr << "Error: d_hat (" << params.d_hat
+                      << ") > 0.5 * minimum edge length (" << d_hat_limit
+                      << ", min_edge_len = " << min_edge_len
+                      << "). Barrier activation distance must not exceed half "
+                         "the shortest edge in the mesh.\n";
+            return 1;
+        }
+        std::cout << "min_edge_length = " << min_edge_len
+                  << " (d_hat limit = " << d_hat_limit << ")\n";
+    }
 
     const auto color_groups = greedy_color(
             build_vertex_adjacency_map(ref_mesh.tris),

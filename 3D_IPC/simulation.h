@@ -16,7 +16,10 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
 
         std::vector<Vec3> xnew = ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
 
-        result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
+        if (params.use_parallel)
+            result = global_gauss_seidel_solver_parallel(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
+        else
+            result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
         update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
         state.deformed_positions = xnew;
     }

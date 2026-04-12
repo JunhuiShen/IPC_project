@@ -154,10 +154,14 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
         return result;
     }
 
+    const int nv = static_cast<int>(xnew.size());
+
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
+        // Save positions before the sweep for the CCD sanity check.
+        std::vector<Vec3> x_before;
+        if (use_barrier) x_before = xnew;
+
         for (const auto& group : color_groups) {
-            // NOTE: naive omp parallel for on update_one_vertex is incorrect here.
-            // Vertices in the same color group may share CCD/barrier pair neighbors, causing race conditions.
             for (int vi : group) {
                 update_one_vertex(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm);
                 if (use_barrier)
@@ -168,20 +172,47 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
         result.final_residual = eval_residual();
         result.iterations     = iter;
 
-        // Post-iteration sanity check: brute-force scan for any edge-triangle
-        // penetration introduced during this sweep. Warn loudly if found — CCD
-        // should prevent this, so hitting it is a diagnostic for a broad-phase
-        // or narrow-phase gap.
+        // Post-iteration sanity check: CCD between x_before and xnew to detect
+        // any tunneling introduced during this sweep. A collision at toi < 1
+        // means CCD was violated — the per-vertex line-search should have
+        // prevented this.
         if (use_barrier) {
-            const auto sanity = detect_mesh_self_intersection(xnew, ref_mesh);
-            if (!sanity.ok()) {
-                const auto& h = sanity.first;
+            std::vector<Vec3> dx(nv);
+            for (int i = 0; i < nv; ++i) dx[i] = xnew[i] - x_before[i];
+
+            BroadPhase ccd_bp;
+            ccd_bp.build_ccd_candidates(x_before, dx, ref_mesh, 1.0);
+            const auto& ccd_cache = ccd_bp.cache();
+
+            double toi_min = 1.0;
+            int hit_type = 0;  // 0=none, 1=node-tri, 2=seg-seg
+
+            for (int i = 0; i < static_cast<int>(ccd_cache.nt_pairs.size()); ++i) {
+                const auto& p = ccd_cache.nt_pairs[i];
+                double t = node_triangle_general_ccd(
+                    x_before[p.node],     dx[p.node],
+                    x_before[p.tri_v[0]], dx[p.tri_v[0]],
+                    x_before[p.tri_v[1]], dx[p.tri_v[1]],
+                    x_before[p.tri_v[2]], dx[p.tri_v[2]]);
+                if (t < toi_min) { toi_min = t; hit_type = 1; }
+            }
+
+            for (int i = 0; i < static_cast<int>(ccd_cache.ss_pairs.size()); ++i) {
+                const auto& p = ccd_cache.ss_pairs[i];
+                double t = segment_segment_general_ccd(
+                    x_before[p.v[0]], dx[p.v[0]],
+                    x_before[p.v[1]], dx[p.v[1]],
+                    x_before[p.v[2]], dx[p.v[2]],
+                    x_before[p.v[3]], dx[p.v[3]]);
+                if (t < toi_min) { toi_min = t; hit_type = 2; }
+            }
+
+            if (toi_min < 1.0) {
                 std::fprintf(stderr,
-                    "[solver sanity] penetration detected after iter %d: "
-                    "%d hit(s); first: tri %d pierced by edge (%d, %d) of tri %d "
-                    "at s=%.4f bary=(%.3f, %.3f, %.3f)\n",
-                    iter, sanity.count, h.tri, h.edge_v0, h.edge_v1, h.other_tri,
-                    h.s, h.bary[0], h.bary[1], h.bary[2]);
+                    "[solver sanity] CCD violation after iter %d: "
+                    "earliest toi = %.6e (%s)\n",
+                    iter, toi_min,
+                    hit_type == 1 ? "node-triangle" : "segment-segment");
             }
         }
 
@@ -197,7 +228,8 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
 
 SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                                  const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
-                                                 BroadPhase& broad_phase, const std::vector<Vec3>& v, std::vector<double>* residual_history) {
+                                                 BroadPhase& broad_phase, const std::vector<Vec3>& v, std::vector<double>* residual_history,
+                                                 const std::vector<std::vector<int>>* override_colors) {
     const double dt          = params.dt();
     const double dhat        = params.d_hat;
     const bool   use_barrier = dhat > 0.0;
@@ -232,11 +264,19 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         std::vector<JacobiPrediction> predictions;
         build_jacobi_predictions(ref_mesh, adj, pins, params, xnew, xhat, broad_phase.cache(), predictions, &pm);
 
-        // Conflict graph and coloring
-        const auto conflict_graph = build_conflict_graph(ref_mesh, pins, broad_phase.cache(), predictions, &adj);
-        const auto color_groups = greedy_color_conflict_graph(conflict_graph, predictions);
+        // Conflict graph and coloring. Callers can bypass the dynamic
+        // greedy coloring by supplying override_colors -- used by tests to
+        // force a specific sweep order.
+        std::vector<std::vector<int>> local_color_groups;
+        const std::vector<std::vector<int>>* color_groups_ptr = override_colors;
+        if (!color_groups_ptr) {
+            const auto conflict_graph = build_conflict_graph(ref_mesh, pins, broad_phase.cache(), predictions, &adj);
+            local_color_groups = greedy_color_conflict_graph(conflict_graph, predictions);
+            color_groups_ptr = &local_color_groups;
+        }
+        const auto& color_groups = *color_groups_ptr;
 
-        // Phase 2: colored Gauss-Seidel 
+        // Phase 2: colored Gauss-Seidel
         for (std::size_t color_idx = 0; color_idx < color_groups.size(); ++color_idx) {
             const auto& group = color_groups[color_idx];
             if (group.empty()) continue;
