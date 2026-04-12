@@ -19,7 +19,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         for (int i = 0; i < static_cast<int>(xhat.size()); ++i)
             x_guess[i] = xhat[i] + dt2 * params.gravity;
 
-        std::vector<Vec3> xnew = ccd_initial_guess(state.deformed_positions, x_guess, ref_mesh);
+        std::vector<Vec3> xnew = ccd_initial_guess(state.deformed_positions,  x_guess, ref_mesh);
 
         result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
         update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
