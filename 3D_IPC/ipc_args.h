@@ -69,7 +69,7 @@ struct IPCArgs3D : ArgParser {
         add_double("gy",          gy,          -9.81,      "Gravity y-component");
         add_double("gz",          gz,          0.0,        "Gravity z-component");
 
-        add_int   ("max_iters",   max_iters,   500,        "Max Gauss-Seidel iterations per frame");
+        add_int   ("max_iters",   max_iters,   5000,        "Max Gauss-Seidel iterations per frame");
         add_double("tol_abs",     tol_abs,     1e-6,       "Absolute convergence tolerance (residual force)");
         add_double("step_weight", step_weight, 1.0,        "Newton step damping factor");
         add_double("d_hat",       d_hat,       0.01,       "Barrier activation distance (0 = off)");

@@ -259,20 +259,40 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         return result;
     }
 
+    // Skip refreshing vertices whose displacement since the last refresh is
+    // smaller than this. The broad-phase boxes carry a d_hat-scale safety pad,
+    // so sub-pad jitter does not change which barrier pairs are active and
+    // does not invalidate CCD's iter-start BVH.
+    const double refresh_skip_thresh2 = (0.05 * dhat) * (0.05 * dhat);
+
+    // Position snapshot at the last broad-phase refresh per vertex.
+    std::vector<Vec3> x_at_last_refresh = xnew;
+
+    // Coloring is cached across iterations and rebuilt periodically. The
+    // dependency structure is stable for many iterations, so rebuilding the
+    // conflict graph every step is wasted work.
+    std::vector<std::vector<int>> cached_color_groups;
+    bool cached_colors_valid = false;
+    constexpr int color_rebuild_interval = 8;
+
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         // Phase 1: Jacobi prediction
         std::vector<JacobiPrediction> predictions;
         build_jacobi_predictions(ref_mesh, adj, pins, params, xnew, xhat, broad_phase.cache(), predictions, &pm);
 
-        // Conflict graph and coloring. Callers can bypass the dynamic
-        // greedy coloring by supplying override_colors -- used by tests to
+        // Conflict graph and coloring. Callers can bypass the cached
+        // dynamic coloring by supplying override_colors -- used by tests to
         // force a specific sweep order.
-        std::vector<std::vector<int>> local_color_groups;
         const std::vector<std::vector<int>>* color_groups_ptr = override_colors;
         if (!color_groups_ptr) {
-            const auto conflict_graph = build_conflict_graph(ref_mesh, pins, broad_phase.cache(), predictions, &adj);
-            local_color_groups = greedy_color_conflict_graph(conflict_graph, predictions);
-            color_groups_ptr = &local_color_groups;
+            const bool need_rebuild = !cached_colors_valid ||
+                                      ((iter - 1) % color_rebuild_interval) == 0;
+            if (need_rebuild) {
+                const auto conflict_graph = build_conflict_graph(ref_mesh, pins, broad_phase.cache(), predictions, &adj);
+                cached_color_groups = greedy_color_conflict_graph(conflict_graph, predictions);
+                cached_colors_valid = true;
+            }
+            color_groups_ptr = &cached_color_groups;
         }
         const auto& color_groups = *color_groups_ptr;
 
@@ -284,7 +304,7 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
             const bool use_cached_prediction = (color_idx == 0);
             std::vector<ParallelCommit> commits(group.size());
 
-            #pragma omp parallel for schedule(static) if(params.use_parallel && group.size() >= 256)
+            #pragma omp parallel for schedule(static) if(params.use_parallel && group.size() >= 16)
             for (int local_idx = 0; local_idx < static_cast<int>(group.size()); ++local_idx) {
                 const int vi = group[local_idx];
                 commits[local_idx] = compute_parallel_commit_for_vertex(vi, use_cached_prediction, predictions[vi],
@@ -295,7 +315,10 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
 
             if (use_barrier) {
                 for (int vi : group) {
+                    const Vec3 d = xnew[vi] - x_at_last_refresh[vi];
+                    if (d.squaredNorm() < refresh_skip_thresh2) continue;
                     broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
+                    x_at_last_refresh[vi] = xnew[vi];
                 }
             }
         }
