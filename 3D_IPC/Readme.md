@@ -1,20 +1,38 @@
 # 3D IPC — Incremental Potential Contact Simulation
 
-A 3D physics simulation of deformable triangle meshes using
-**Incremental Potential Contact (IPC)** and solved with a **nonlinear Gauss–Seidel solver**.
+A 3D simulator for deformable triangle meshes (cloth / thin shells) built around
+**Incremental Potential Contact (IPC)**. Each time step optimizes an incremental
+potential with a **nonlinear Gauss–Seidel solver** (serial or parallel), using
+continuous collision detection to keep every intermediate state intersection-free.
 
-The simulation pipeline consists of:
-- **CCD-projected initial guess**: advances toward the inertial predictor using parallel cubic CCD
-- **Nonlinear Gauss–Seidel solver**: local 3x3 Newton solve per vertex with linear CCD step filtering
-- **Incremental broad phase**: swept-AABB BVH with local refit after each vertex commit
-- **Parallel solver**: certified-region conflict graph with greedy coloring for safe concurrent vertex updates
+## What the simulator does
+
+Per time step, the optimizer minimizes an incremental potential made of:
+
+- **Inertial term** — implicit Euler predictor against the current velocity field.
+- **Elastic term** — corotated membrane energy + Grinspun-style discrete-shell
+  hinge bending (`kB` controls bending stiffness; `kB = 0` disables it).
+- **IPC log-barrier contact** — node–triangle and segment–segment barriers built
+  from a swept-AABB BVH broad phase.
+- **Pin springs** — soft positional constraints for fixed vertices.
+
+The nonlinear solve is driven by:
+
+1. **CCD-projected initial guess** — advance toward the inertial predictor using
+   parallel cubic CCD so the starting iterate is already intersection-free.
+2. **Gauss–Seidel iterations** — local 3×3 Newton solve per vertex, each step
+   filtered by linear CCD and accepted only if the global residual drops.
+3. **Incremental broad phase** — swept-AABB BVH with local ancestor-only refit
+   after each accepted vertex update.
+4. **Parallel mode** (`--use_parallel`) — certified-region conflict graph with
+   greedy coloring so independent vertices can be committed concurrently.
 
 ## Requirements
 
-- C++17 compiler (GCC 9+, Clang 10+, or MSVC 2019+)
+- C++17 compiler (GCC 9+, Clang 10+, MSVC 2019+)
 - CMake 3.10+
 - Eigen3
-- OpenMP
+- OpenMP (on macOS: `brew install libomp`)
 - GoogleTest
 
 ## Build
@@ -25,165 +43,157 @@ The simulation pipeline consists of:
 
 ## Run
 
-    ./build/3D_sim
+    ./build/3D_sim                      # default scene (cloth stack, high-res)
+    ./build/3D_sim --help               # full argument list
 
-Useful examples:
+Built-in example scenes (`--example N`):
 
-    ./build/3D_sim --help
-    ./build/3D_sim --format obj --outdir frames_obj
-    ./build/3D_sim --format usd --outdir frames_usd
-    ./build/3D_sim --restart_frame 30 --outdir frames_sim3d
+| `--example` | Scene |
+|-------------|-------|
+| `1` | Two side-by-side pinned sheets |
+| `2` | Cloth stack, low-res (ground cloth + 3 small cloths) |
+| `3` | Cloth stack, high-res (ground cloth + 5 cloths, default) |
 
-By default, output frames are written to `frames_sim3d/` in Houdini `.geo` format:
+Common invocations:
 
-    frame_0000.geo
-    frame_0001.geo
-    ...
+    ./build/3D_sim --example 1                             # two pinned sheets
+    ./build/3D_sim --example 2 --use_parallel              # low-res stack, parallel solver
+    ./build/3D_sim --format obj --outdir frames_obj        # export .obj frames
+    ./build/3D_sim --format usd --outdir frames_usd        # export .usda frames
+    ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
 
-If `--format obj` is used, output is `.obj`. If `--format usd`, output is `.usda` text.
+Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
+(`frame_0000.geo`, `frame_0001.geo`, …). `--format obj` writes `.obj`;
+`--format usd` writes `.usda` text. A binary restart snapshot `state_NNNN.bin`
+is written alongside every frame.
 
-Per-frame restart snapshots are also written as `state_NNNN.bin`.
+Per-frame statistics are printed to stdout:
+
+    Frame    1 | initial_residual=... | final_residual=... | global_iters=... | solver_time=... ms
+
+## CLI reference
+
+Arguments are parsed as `--key value` (boolean flags can also be passed bare).
+See `./build/3D_sim --help` for defaults and full descriptions.
+
+| Group | Flags |
+|-------|-------|
+| Time integration | `fps`, `substeps`, `num_frames` |
+| Physics | `mu`, `lambda`, `density`, `thickness`, `kB`, `kpin`, `gx`, `gy`, `gz` |
+| Solver | `max_iters`, `tol_abs`, `step_weight`, `d_hat`, `use_parallel` |
+| Mesh geometry | `nx`, `ny`, `width`, `height`, `left_x`, `right_x`, `sheet_y`, `left_z`, `right_z` |
+| Scene | `example` (`1`, `2`, or `3`) |
+| Output / restart | `outdir`, `format` (`obj \| geo \| usd`), `restart_frame` |
+
+## Source layout
+
+Source files are grouped here by role, not listed alphabetically, so a new
+reader can jump to the layer they care about.
+
+### Program entry
+
+- `simulation.cpp` — `3D_sim` entry point: parses args, builds a scene from
+  `example.cpp`, runs the frame loop, handles restart, prints per-frame stats.
+- `simulation.h` — inline `advance_one_frame()` time-stepping driver.
+- `example.h` / `example.cpp` — built-in scene library selected by `--example`.
+- `args.h`, `ipc_args.h` — generic `--key value` argument parser and the
+  `IPCArgs3D` struct that defines every CLI flag and its default.
+- `visualization.h` / `visualization.cpp` — `export_obj`, `export_geo`,
+  `export_usd`, `export_frame`.
+
+### Mesh & physics state
+
+- `make_shape.h` / `make_shape.cpp` — mesh construction, `build_xhat()`,
+  `update_velocity()`, vertex adjacency, greedy graph coloring.
+- `physics.h` / `physics.cpp` — top-level incremental potential. Accumulates
+  inertial + elastic + (when `d_hat > 0`) barrier contributions into per-vertex
+  gradients and Hessians, exposes `PinMap` for O(1) pin lookup, and runs the
+  OpenMP-parallel global residual. Serialize/deserialize of simulation state
+  lives here.
+
+### Energy terms
+
+- `corotated_energy.h` / `corotated_energy.cpp` — corotated membrane energy on
+  each triangle, per-vertex nodal gradient and Hessian.
+- `bending_energy.h` / `bending_energy.cpp` — Grinspun-style discrete-shell
+  hinge bending over adjacent triangle pairs; per-node gradient and PSD
+  Gauss–Newton Hessian across all four hinge vertices. Enabled when `kB > 0`
+  and enumerated via the `hinge_adj` cache built in `physics.cpp`.
+- `barrier_energy.h` / `barrier_energy.cpp` — scalar IPC log barrier
+  `b(δ; d_hat)` and its derivatives, plus per-pair energy, gradient, and
+  Hessian for node–triangle and segment–segment primitives.
+
+### Geometric primitives
+
+- `IPC_math.h` / `IPC_math.cpp` — type aliases, 3×3 matrix utilities,
+  `SmallRoots` stack-allocated polynomial root container, miscellaneous helpers.
+- `node_triangle_distance.h` / `node_triangle_distance.cpp` — closest-point
+  distance covering all 7 Voronoi regions plus degenerate triangles.
+- `segment_segment_distance.h` / `segment_segment_distance.cpp` — closest-point
+  distance covering all 9 Voronoi regions plus parallel and degenerate cases.
+
+### Collision detection
+
+- `ccd.h` / `ccd.cpp` — linear node–triangle CCD for every single-moving-DOF
+  configuration, linear segment–segment CCD for single-moving-endpoint sweeps,
+  and general cubic CCD for multi-vertex motion (used by the initial guess).
+  Full degeneracy chain: cubic → quadratic → linear → coplanar → collinear.
+  All root solvers use the stack-allocated `SmallRoots` buffer.
+- `broad_phase.h` / `broad_phase.cpp` — swept-AABB broad phase backed by a BVH.
+  Caches mesh topology via `set_mesh_topology`, supports incremental refresh
+  and local ancestor-only BVH refit, and exposes `query_single_node_ccd` for
+  per-vertex CCD which enumerates both node–triangle roles a moving vertex
+  can play (lone node vs. triangle corner) as well as edge–edge pairs
+  incident to it.
+
+### Solver
+
+- `solver.h` / `solver.cpp` — CCD-projected initial guess, serial nonlinear
+  Gauss–Seidel solver, and the parallel Gauss–Seidel solver with
+  certified-region conflict graph and colored commits.
+- `parallel_helper.h` / `parallel_helper.cpp` — Jacobi prediction, certified
+  region computation, conflict graph construction, and parallel commit apply.
+
+### Tooling
+
+- `CMakeLists.txt` — builds the `3D_sim` binary plus every test executable and
+  `generate_golden`.
+- `generate_golden.cpp` — standalone utility that rewrites `golden_frames.txt`
+  and `frame_50_checkpoint`, which are the fixtures consumed by
+  `simulation_snapshot_test` and `restart_test`.
 
 ## Tests
 
-The test suite contains GoogleTests covering every layer of the pipeline:
+Every layer of the pipeline has a GoogleTest binary. To build and run them all:
 
     cmake -B build
     cmake --build build --clean-first
     ctest --test-dir build --output-on-failure
 
-| Test file | Count | What it covers |
-|-----------|-------|----------------|
-| `ccd_test` | 46 | Linear CCD (all four single-moving-DOF cases) and cubic CCD, degeneracy chain, stress tests, initial guess |
-| `broad_phase_test` | 34 | AABB, BVH, pair generation, CCD candidates, conservativeness, incremental refresh, `query_single_node_ccd` vs brute-force (covers both NT roles: lone-node and face-corner) |
-| `ipc_math_test` | 27 | `matrix3d_inverse`, `segment_closest_point`, `filter_root`, `add_root`/`SmallRoots`, barycentric coords, serialize/deserialize round-trip, `set_mesh_topology` caching |
+| Test binary | Cases | What it covers |
+|-------------|-------|----------------|
+| `ccd_test` | 47 | Linear CCD (all single-moving-DOF cases) and cubic CCD, degeneracy chain, stress, CCD-projected initial guess |
+| `broad_phase_test` | 38 | AABB, BVH, pair generation, CCD candidates, conservativeness, incremental refresh, `query_single_node_ccd` vs brute-force |
+| `ipc_math_test` | 27 | `matrix3d_inverse`, `segment_closest_point`, `filter_root`, `SmallRoots`, barycentric coords, serialize round-trip, topology caching |
+| `parallel_helper_test` | 26 | Jacobi predictions, certified regions, conflict graph, coloring, parallel commits, solver correctness |
+| `bending_energy_test` | 20 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
-| `parallel_helper_test` | 17 | Jacobi predictions, conflict graph, coloring, parallel commits, solver correctness |
-| `barrier_energy_test` | 14 | Scalar barrier, NT/SS gradient+Hessian FD convergence, activation boundary, near-parallel stress |
+| `barrier_energy_test` | 14 | Scalar barrier, NT/SS gradient/Hessian FD convergence, activation boundary, near-parallel stress |
 | `corotated_energy_test` | 13 | Energy, rest state, rotation/translation invariance, gradient/Hessian FD convergence, stress |
-| `make_shape_test` | 11 | Adjacency maps, graph coloring |
+| `make_shape_test` | 11 | Adjacency maps, greedy coloring |
+| `total_energy_test` | 10 | Combined elastic + barrier FD convergence, barrier activation, per-vertex gradient/Hessian, slope-2 checks |
 | `node_triangle_distance_test` | 9 | All 7 proximity regions + signed distance + degenerate |
-| `total_energy_test` | 7 | Barrier activation, directional derivative, per-vertex gradient/Hessian, slope-2 checks |
-| `parallel_serial_consistency_test` | 2 | Serial vs parallel solver agreement |
+| `parallel_serial_consistency_test` | 3 | Serial vs parallel solver agreement |
 | `visualization_test` | 2 | Debug OBJ export (no assertions — manual inspection) |
 | `simulation_snapshot_test` | 1 | Golden-file regression (5-frame determinism) |
 | `restart_test` | 1 | Checkpoint resume matches golden |
 
-To list all discovered tests:
+List every discovered test case:
 
     ctest --test-dir build -N -V
 
-You can also run any executable directly:
+Run any suite directly:
 
     ./build/ccd_test
-    ./build/ipc_math_test
-
-## CLI Arguments
-
-Arguments are parsed as `--key value` (boolean flags can also be passed as just `--flag`):
-
-- Time integration: `fps`, `substeps`, `num_frames`
-- Physics: `mu`, `lambda`, `density`, `thickness`, `kpin`, `gx`, `gy`, `gz`
-- Solver: `max_iters`, `tol_abs`, `step_weight`, `d_hat`, `use_parallel`
-- Mesh/scene: `nx`, `ny`, `width`, `height`, `left_x`, `right_x`, `sheet_y`, `left_z`, `right_z`
-- Output/restart: `outdir`, `format` (`obj|geo|usd`), `restart_frame`
-
-## Console Output
-
-Per-frame statistics are printed to stdout:
-
-    Frame    1 | initial_residual=... | final_residual=... | global_iters=... | solver_time=... ms
-    Frame    2 | initial_residual=... | final_residual=... | global_iters=... | solver_time=... ms
-    ...
-
-
-## Project Structure
-
-    3D_IPC/
-    ├── CMakeLists.txt
-    ├── IPC_math.h / IPC_math.cpp
-    │   type aliases, matrix utilities, SmallRoots, small helper functions
-    │
-    ├── make_shape.h / make_shape.cpp
-    │   mesh construction, build_xhat(), update_velocity()
-    │   vertex adjacency map, greedy coloring
-    │
-    ├── physics.h / physics.cpp
-    │   incremental potential (no barrier): energy, per-vertex gradient/Hessian
-    │   PinMap for O(1) pin lookup, OpenMP-parallel global residual
-    │   serialize/deserialize simulation state
-    │
-    ├── corotated_energy.h / corotated_energy.cpp
-    │   corotated 3x2 energy, per-vertex nodal gradient, and per-vertex nodal Hessian
-    │
-    ├── node_triangle_distance.h / node_triangle_distance.cpp
-    │   node–triangle closest-point distance (7 regions + degenerate)
-    │
-    ├── segment_segment_distance.h / segment_segment_distance.cpp
-    │   segment–segment closest-point distance (9 regions + parallel)
-    │
-    ├── barrier_energy.h / barrier_energy.cpp
-    │   scalar barrier function b(delta; d_hat) and its derivatives
-    │   node–triangle barrier: energy + per-DOF gradient/Hessian (with optional pre-computed distance)
-    │   segment–segment barrier: energy + per-DOF gradient/Hessian (with optional pre-computed distance)
-    │
-    ├── ccd.h / ccd.cpp
-    │   linear node–triangle CCD covering every single-moving-DOF case
-    │   linear segment–segment CCD for single-moving-endpoint sweeps
-    │   general cubic CCD for multi-vertex motion (initial guess)
-    │   full degeneracy handling: cubic → quadratic → linear → coplanar → collinear
-    │   stack-allocated SmallRoots for all polynomial solvers
-    │
-    ├── broad_phase.h / broad_phase.cpp
-    │   swept-AABB broad phase with BVH queries
-    │   incremental refresh and local ancestor-only BVH refit
-    │   cached mesh topology (set_mesh_topology)
-    │   lightweight query_single_node_ccd for per-vertex CCD, enumerating
-    │     both NT pair roles (vi as lone node, vi as a triangle corner)
-    │     plus edge-edge pairs incident to vi
-    │
-    ├── solver.h / solver.cpp
-    │   CCD-projected initial guess (parallel CCD evaluation)
-    │   serial nonlinear Gauss–Seidel solver
-    │   parallel Gauss–Seidel solver (certified-region conflict graph + colored commits)
-    │
-    ├── parallel_helper.h / parallel_helper.cpp
-    │   Jacobi prediction, certified regions, conflict graph
-    │   parallel commit computation and application
-    │
-    ├── simulation.h
-    │   advance_one_frame(): time stepping driver
-    │
-    ├── visualization.h / visualization.cpp
-    │   export_obj(), export_geo(), export_usd(), export_frame()
-    │
-    ├── args.h / ipc_args.h
-    │   CLI argument parsing
-    │
-    ├── Tests 
-    │   ├── ipc_math_test.cpp — core math helpers, serialize round-trip, topology caching
-    │   ├── corotated_energy_test.cpp — FD convergence for elastic energy/gradient/Hessian
-    │   ├── node_triangle_distance_test.cpp — all 7 regions + degenerate
-    │   ├── segment_segment_distance_test.cpp — all 9 regions + parallel + stress
-    │   ├── barrier_energy_test.cpp — FD convergence for NT/SS barrier gradient+Hessian
-    │   ├── ccd_test.cpp — linear + cubic CCD, degeneracy chain, stress, initial guess
-    │   ├── broad_phase_test.cpp — BVH, pairs, CCD candidates, query_single_node_ccd vs brute-force
-    │   ├── make_shape_test.cpp — adjacency maps, greedy coloring
-    │   ├── parallel_helper_test.cpp — predictions, conflict graph, commits, solver
-    │   ├── total_energy_test.cpp — combined elastic+barrier FD convergence
-    │   ├── simulation_snapshot_test.cpp — golden-file regression
-    │   ├── restart_test.cpp — checkpoint resume
-    │   ├── parallel_serial_consistency_test.cpp — serial vs parallel agreement
-    │   └── visualization_test.cpp — debug OBJ export
-    │
-    └── Readme.md
-
-## Notes
-
-- corotated_energy implements element-level (triangle) physics
-- physics provides no-barrier local gradient/Hessian terms and residual helpers
-- barrier_energy provides per-pair barrier energy, gradient, and Hessian for both node–triangle and segment–segment primitives
-- ccd provides both linear (any single-moving-DOF configuration) and general cubic (multi-vertex) continuous collision detection
-- broad_phase maintains barrier candidate pairs incrementally during sweeps, and `query_single_node_ccd` returns both node-triangle roles that a moving vi can play (`nt_node_pairs`: vi is the lone node; `nt_face_pairs`: vi is one of the triangle's corners, so the face deforms)
-- solver performs nonlinear Gauss–Seidel iterations with CCD step filtering and CCD-projected initial guess
-- simulation.h controls time stepping and scene setup
+    ./build/bending_energy_test
+    ./build/parallel_helper_test
