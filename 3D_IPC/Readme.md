@@ -10,6 +10,8 @@ continuous collision detection to keep every intermediate state intersection-fre
 Per time step, the optimizer minimizes an incremental potential made of:
 
 - **Inertial term** — implicit Euler predictor against the current velocity field.
+- **Gravity** — constant body-force potential `−m·g·x` set by `gx`, `gy`, `gz`
+  (default `(0, -9.81, 0)` m/s²).
 - **Elastic term** — corotated membrane energy + Grinspun-style discrete-shell
   hinge bending (`kB` controls bending stiffness; `kB = 0` disables it).
 - **IPC log-barrier contact** — node–triangle and segment–segment barriers built
