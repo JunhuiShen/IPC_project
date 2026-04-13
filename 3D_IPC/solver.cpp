@@ -156,6 +156,13 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
 
     const int nv = static_cast<int>(xnew.size());
 
+    // Skip refreshing a vertex whose displacement since its last refresh is
+    // below this threshold. The broad-phase boxes carry a d_hat-scale safety
+    // pad, so sub-pad jitter does not change which barrier pairs are active.
+    // Mirrors the optimization already used by the parallel solver.
+    const double refresh_skip_thresh2 = (0.05 * dhat) * (0.05 * dhat);
+    std::vector<Vec3> x_at_last_refresh = xnew;
+
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         // Save positions before the sweep for the CCD sanity check.
         std::vector<Vec3> x_before;
@@ -164,8 +171,13 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
         for (const auto& group : color_groups) {
             for (int vi : group) {
                 update_one_vertex(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm);
-                if (use_barrier)
-                    broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
+                if (use_barrier) {
+                    const Vec3 d = xnew[vi] - x_at_last_refresh[vi];
+                    if (d.squaredNorm() >= refresh_skip_thresh2) {
+                        broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
+                        x_at_last_refresh[vi] = xnew[vi];
+                    }
+                }
             }
         }
 
