@@ -792,11 +792,11 @@ EXPECT_TRUE(contains_ss_pair(broad.ss_pairs(), EdgeKey(0, 1), EdgeKey(3, 4)));
 }
 
 // ====================================================================
-//  query_single_node_ccd: verify it returns a superset of brute-force
-//  epsilon-padded CCD candidates for a single moving vertex.
+//  query_pairs_for_vertex: verify it returns a superset of brute-force
+//  epsilon-padded candidate pairs for a single moving vertex.
 // ====================================================================
 
-// Brute-force AABB-overlap reference for query_single_node_ccd. Enumerates all
+// Brute-force AABB-overlap reference for query_pairs_for_vertex. Enumerates all
 // three pair classes that the production query is supposed to return:
 //   - NT node-role:  vi is the lone moving node, swept against any external triangle
 //   - NT face-role:  vi is one corner of an incident triangle, that triangle's
@@ -881,18 +881,18 @@ static PairSets brute_force_single_node_ccd(const std::vector<Vec3>& x, int vi, 
     return out;
 }
 
-static PairSets pairs_from_ccd_result(const BroadPhase::SingleNodeCCDResult& ccd) {
+static PairSets pairs_from_query_result(const BroadPhase::VertexPairs& q) {
     PairSets out;
-    for (const auto& p : ccd.nt_node_pairs)
+    for (const auto& p : q.nt_node_pairs)
         out.nt.insert(make_nt_key(p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2]));
-    for (const auto& p : ccd.nt_face_pairs)
+    for (const auto& p : q.nt_face_pairs)
         out.nt.insert(make_nt_key(p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2]));
-    for (const auto& p : ccd.ss_pairs)
+    for (const auto& p : q.ss_pairs)
         out.ss.insert(make_ss_key(p.v[0], p.v[1], p.v[2], p.v[3]));
     return out;
 }
 
-TEST(QuerySingleNodeCCD, SupersetOfBruteForceForAllVertices) {
+TEST(QueryPairsForVertex, SupersetOfBruteForceForAllVertices) {
     std::vector<Vec3> x = {
         {0,0,0}, {1,0,0}, {2,0,0}, {3,0,0},
         {0,1,0}, {1,1,0}, {2,1,0}, {3,1,0},
@@ -919,8 +919,8 @@ TEST(QuerySingleNodeCCD, SupersetOfBruteForceForAllVertices) {
 
     for (int vi = 0; vi < nv; ++vi) {
         for (const Vec3& dx : displacements) {
-            const auto ccd = bp.query_single_node_ccd(x, vi, dx, mesh);
-            const auto result_pairs = pairs_from_ccd_result(ccd);
+            const auto q = bp.query_pairs_for_vertex(x, vi, dx, mesh);
+            const auto result_pairs = pairs_from_query_result(q);
             const auto brute = brute_force_single_node_ccd(x, vi, dx, mesh);
 
             for (const auto& nt_key : brute.nt) {
@@ -934,13 +934,13 @@ TEST(QuerySingleNodeCCD, SupersetOfBruteForceForAllVertices) {
                     << " e0=(" << ss_key.e0.a << "," << ss_key.e0.b
                     << ") e1=(" << ss_key.e1.a << "," << ss_key.e1.b << ")";
             }
-            for (const auto& p : ccd.nt_node_pairs) {
+            for (const auto& p : q.nt_node_pairs) {
                 EXPECT_EQ(p.node, vi);
                 EXPECT_NE(p.node, p.tri_v[0]);
                 EXPECT_NE(p.node, p.tri_v[1]);
                 EXPECT_NE(p.node, p.tri_v[2]);
             }
-            for (const auto& p : ccd.nt_face_pairs) {
+            for (const auto& p : q.nt_face_pairs) {
                 // The vi_local corner of the triangle must equal vi.
                 ASSERT_GE(p.vi_local, 0);
                 ASSERT_LE(p.vi_local, 2);
@@ -950,7 +950,7 @@ TEST(QuerySingleNodeCCD, SupersetOfBruteForceForAllVertices) {
                 EXPECT_NE(p.node, p.tri_v[1]);
                 EXPECT_NE(p.node, p.tri_v[2]);
             }
-            for (const auto& p : ccd.ss_pairs) {
+            for (const auto& p : q.ss_pairs) {
                 EXPECT_FALSE(share_vertex(
                     EdgeKey(p.v[0], p.v[1]), EdgeKey(p.v[2], p.v[3])));
             }
@@ -959,15 +959,15 @@ TEST(QuerySingleNodeCCD, SupersetOfBruteForceForAllVertices) {
 }
 
 // ====================================================================
-//  query_single_node_ccd: face-role NT pairs
+//  query_pairs_for_vertex: face-role NT pairs
 //
 //  Two non-touching triangles. When a corner of triangle A moves down
-//  toward triangle B's static node, query_single_node_ccd must report
+//  toward triangle B's static node, query_pairs_for_vertex must report
 //  the (B-node, A-triangle) face-role pair from A's vi enumeration —
 //  the symmetric (B-node, A-triangle) node-role pair from B-node's
 //  enumeration is irrelevant because B-node is not the moving vertex.
 // ====================================================================
-TEST(QuerySingleNodeCCD, FaceRoleEnumerationFindsExternalNode) {
+TEST(QueryPairsForVertex, FaceRoleEnumerationFindsExternalNode) {
     // Triangle A: corners 0,1,2 in the z=1 plane. Triangle B: corners 3,4,5
     // in the z=0 plane. Initially the two triangles are far apart in z.
     std::vector<Vec3> x = {
@@ -990,12 +990,12 @@ TEST(QuerySingleNodeCCD, FaceRoleEnumerationFindsExternalNode) {
     // and through the plane of triangle B.
     const int vi = 0;
     const Vec3 dx(0.3, 0.3, -1.2);
-    const auto ccd = bp.query_single_node_ccd(x, vi, dx, mesh);
+    const auto q = bp.query_pairs_for_vertex(x, vi, dx, mesh);
 
     // The lone-node-role list contains (vi=0, triangle B): vi as the moving
     // node piercing triangle B.
     bool node_role_found = false;
-    for (const auto& p : ccd.nt_node_pairs) {
+    for (const auto& p : q.nt_node_pairs) {
         if (p.node == 0) {
             const auto k = make_nt_key(p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2]);
             if (k == make_nt_key(0, 3, 4, 5)) { node_role_found = true; break; }
@@ -1007,7 +1007,7 @@ TEST(QuerySingleNodeCCD, FaceRoleEnumerationFindsExternalNode) {
     // The face-role list contains (external node 3, triangle A): node 3 about
     // to land in the swept face of triangle A as vi=0 (corner of A) moves.
     bool face_role_found = false;
-    for (const auto& p : ccd.nt_face_pairs) {
+    for (const auto& p : q.nt_face_pairs) {
         if (p.node == 3) {
             const auto k = make_nt_key(p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2]);
             if (k == make_nt_key(3, 0, 1, 2)) {
@@ -1023,12 +1023,12 @@ TEST(QuerySingleNodeCCD, FaceRoleEnumerationFindsExternalNode) {
 }
 
 // ====================================================================
-//  query_single_node_ccd: face-role pair must NOT be confused for a
+//  query_pairs_for_vertex: face-role pair must NOT be confused for a
 //  node-role pair. The moving vertex never appears as the lone node of
 //  a face-role entry, and the face-role list never contains pairs where
 //  the external node is one of the moving triangle's own corners.
 // ====================================================================
-TEST(QuerySingleNodeCCD, FaceRolePairWellFormed) {
+TEST(QueryPairsForVertex, FaceRolePairWellFormed) {
     std::vector<Vec3> x = {
         {0.0, 0.0, 1.0}, {1.0, 0.0, 1.0}, {0.0, 1.0, 1.0},
         {0.3, 0.3, 0.0}, {1.3, 0.0, 0.0}, {0.0, 1.3, 0.0},
@@ -1044,9 +1044,9 @@ TEST(QuerySingleNodeCCD, FaceRolePairWellFormed) {
 
     for (int vi = 0; vi < nv; ++vi) {
         const Vec3 dx(0.1, -0.2, 0.3);
-        const auto ccd = bp.query_single_node_ccd(x, vi, dx, mesh);
+        const auto q = bp.query_pairs_for_vertex(x, vi, dx, mesh);
 
-        for (const auto& p : ccd.nt_face_pairs) {
+        for (const auto& p : q.nt_face_pairs) {
             // vi must be the local-vi corner of the triangle.
             ASSERT_GE(p.vi_local, 0);
             ASSERT_LE(p.vi_local, 2);
@@ -1065,7 +1065,7 @@ TEST(QuerySingleNodeCCD, FaceRolePairWellFormed) {
     }
 }
 
-TEST(QuerySingleNodeCCD, ConservativeAfterRefresh) {
+TEST(QueryPairsForVertex, ConservativeAfterRefresh) {
     std::vector<Vec3> x = {
         {0,0,0}, {1,0,0}, {0,1,0},
         {0.3,0.3,0.05}, {1.3,0.3,0.05}, {0.3,1.3,0.05},
@@ -1082,8 +1082,8 @@ TEST(QuerySingleNodeCCD, ConservativeAfterRefresh) {
     bp.refresh(x, v, mesh, 0, 1.0/30.0, 0.1, 0.0, 0.05);
 
     Vec3 dx(0, 0, -0.2);
-    const auto ccd = bp.query_single_node_ccd(x, 0, dx, mesh);
-    const auto result_pairs = pairs_from_ccd_result(ccd);
+    const auto q = bp.query_pairs_for_vertex(x, 0, dx, mesh);
+    const auto result_pairs = pairs_from_query_result(q);
     const auto brute = brute_force_single_node_ccd(x, 0, dx, mesh);
 
     for (const auto& nt_key : brute.nt)
@@ -1092,120 +1092,3 @@ TEST(QuerySingleNodeCCD, ConservativeAfterRefresh) {
         EXPECT_TRUE(result_pairs.ss.count(ss_key)) << "Missing SS pair after refresh";
 }
 
-// ====================================================================
-//  detect_mesh_self_intersection: post-step sanity check.
-// ====================================================================
-
-TEST(MeshSanity, FlatMeshHasNoIntersections) {
-    // 3x3 grid of vertices, 8 triangles in the z=0 plane — no penetration.
-    std::vector<Vec3> x = {
-        {0, 0, 0}, {1, 0, 0}, {2, 0, 0},
-        {0, 1, 0}, {1, 1, 0}, {2, 1, 0},
-        {0, 2, 0}, {1, 2, 0}, {2, 2, 0},
-    };
-    std::vector<std::array<int, 3>> tris = {
-        {0, 1, 4}, {0, 4, 3},
-        {1, 2, 5}, {1, 5, 4},
-        {3, 4, 7}, {3, 7, 6},
-        {4, 5, 8}, {4, 8, 7},
-    };
-    RefMesh mesh = make_mesh(x, tris);
-
-    const auto report = detect_mesh_self_intersection(x, mesh);
-    EXPECT_TRUE(report.ok());
-    EXPECT_EQ(report.count, 0);
-}
-
-TEST(MeshSanity, SharedVertexPairIsNotFlagged) {
-    // Two triangles hinged along vertex 0 with no other geometric overlap:
-    // triangle 0 lies in the +x/+y quadrant of z = 0, triangle 1 lies in
-    // the -x/-y quadrant of a tilted plane through vertex 0. The pair
-    // shares exactly vertex 0 and the rest of each triangle is far from
-    // the other's face. The sanity checker must not flag this.
-    std::vector<Vec3> x = {
-        { 0.0,  0.0, 0.0},   // 0  shared
-        { 1.0,  0.0, 0.0},   // 1  tri 0
-        { 0.0,  1.0, 0.0},   // 2  tri 0
-        {-1.0,  0.0, 1.0},   // 3  tri 1
-        { 0.0, -1.0, 1.0},   // 4  tri 1
-    };
-    std::vector<std::array<int, 3>> tris = {
-        {0, 1, 2},
-        {0, 3, 4},
-    };
-    RefMesh mesh = make_mesh(x, tris);
-
-    const auto report = detect_mesh_self_intersection(x, mesh);
-    EXPECT_TRUE(report.ok()) << "hinged pair sharing one vertex is not a penetration";
-}
-
-TEST(MeshSanity, EdgeThroughFaceIsDetectedWithCorrectInfo) {
-    // Triangle 0: a unit triangle in the z = 0 plane.
-    // Triangle 1: a tall triangle whose edge (vertex 3 -> vertex 4) runs
-    // vertically through the interior of triangle 0 at (0.25, 0.25, z).
-    std::vector<Vec3> x = {
-        {0.0, 0.0, 0.0},   // 0  (tri 0)
-        {1.0, 0.0, 0.0},   // 1  (tri 0)
-        {0.0, 1.0, 0.0},   // 2  (tri 0)
-        {0.25, 0.25, 1.0}, // 3  (tri 1 top, above the face)
-        {0.25, 0.25, -1.0},// 4  (tri 1 bottom, below the face)
-        {0.9, 0.9, 0.5},   // 5  (tri 1 third vertex, off to the side)
-    };
-    std::vector<std::array<int, 3>> tris = {
-        {0, 1, 2},
-        {3, 4, 5},
-    };
-    RefMesh mesh = make_mesh(x, tris);
-
-    const auto report = detect_mesh_self_intersection(x, mesh);
-    ASSERT_FALSE(report.ok());
-    EXPECT_GE(report.count, 1);
-
-    // The first hit must describe the piercing edge as (3, 4) and the pierced
-    // triangle as 0 (both orderings of the edge are acceptable).
-    const auto& h = report.first;
-    EXPECT_EQ(h.tri, 0);
-    const bool edge_ok = (h.edge_v0 == 3 && h.edge_v1 == 4) ||
-                         (h.edge_v0 == 4 && h.edge_v1 == 3);
-    EXPECT_TRUE(edge_ok)
-        << "expected edge (3,4); got (" << h.edge_v0 << "," << h.edge_v1 << ")";
-
-    // The hit point must lie inside triangle 0. Barycentric coords at
-    // (0.25, 0.25, 0) are (1 - 0.25 - 0.25, 0.25, 0.25) = (0.5, 0.25, 0.25).
-    EXPECT_NEAR(h.bary[0], 0.5,  1e-9);
-    EXPECT_NEAR(h.bary[1], 0.25, 1e-9);
-    EXPECT_NEAR(h.bary[2], 0.25, 1e-9);
-
-    // And the edge parameter at z = 0 from z = 1 -> z = -1 is s = 0.5.
-    EXPECT_NEAR(h.s, 0.5, 1e-9);
-}
-
-TEST(MeshSanity, EdgeTouchingFaceBoundaryIsNotFlagged) {
-    // Triangle 1's edge grazes triangle 0's edge (1, 2) — touches the
-    // boundary, not the interior. The tolerance in detect_mesh_self_intersection
-    // permits boundary contacts without flagging them as penetrations only
-    // because bary components are allowed to be slightly negative. A point
-    // exactly on the boundary should be detected or not, but must not be a
-    // false positive deep inside. This test documents the boundary behavior.
-    std::vector<Vec3> x = {
-        {0.0, 0.0, 0.0},
-        {1.0, 0.0, 0.0},
-        {0.0, 1.0, 0.0},
-        {0.5, 0.5, 1.0},
-        {0.5, 0.5, -1.0},
-        {1.5, 1.5, 0.0},
-    };
-    std::vector<std::array<int, 3>> tris = {
-        {0, 1, 2},
-        {3, 4, 5},
-    };
-    RefMesh mesh = make_mesh(x, tris);
-
-    const auto report = detect_mesh_self_intersection(x, mesh);
-    // Edge (3, 4) pierces the interior of triangle 0 at (0.5, 0.5, 0).
-    // Barycentric coords there are exactly (0, 0.5, 0.5) — on the edge (1, 2).
-    // Our tol (-1e-12) permits this, which is correct for a debug sanity check:
-    // a boundary touch is geometrically a penetration of measure zero but in
-    // practice indicates a near-miss we want to see during debugging.
-    EXPECT_GE(report.count, 1);
-}

@@ -3,14 +3,6 @@
 #include <unordered_map>
 #include <unordered_set>
 
-TriangleRest make_rest_triangle(const std::vector<Vec2>& X, const RefMesh& ref_mesh, int tri_idx) {
-    TriangleRest rest;
-    rest.X[0] = X[tri_vertex(ref_mesh, tri_idx, 0)];
-    rest.X[1] = X[tri_vertex(ref_mesh, tri_idx, 1)];
-    rest.X[2] = X[tri_vertex(ref_mesh, tri_idx, 2)];
-    return rest;
-}
-
 TriangleDef make_def_triangle(const std::vector<Vec3>& x, const RefMesh& ref_mesh, int tri_idx) {
     TriangleDef def;
     def.x[0] = x[tri_vertex(ref_mesh, tri_idx, 0)];
@@ -37,25 +29,6 @@ void clear_model(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, 
     state.deformed_positions.clear();
     state.velocities.clear();
     pins.clear();
-}
-
-int build_single_triangle(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X,
-                          const Vec2& X0, const Vec2& X1, const Vec2& X2,
-                          const Vec3& x0, const Vec3& x1, const Vec3& x2) {
-    int base = static_cast<int>(state.deformed_positions.size());
-
-    X.push_back(X0);
-    X.push_back(X1);
-    X.push_back(X2);
-
-    state.deformed_positions.push_back(x0);
-    state.deformed_positions.push_back(x1);
-    state.deformed_positions.push_back(x2);
-
-    ref_mesh.tris.push_back(base + 0);
-    ref_mesh.tris.push_back(base + 1);
-    ref_mesh.tris.push_back(base + 2);
-    return base;
 }
 
 void append_pin(std::vector<Pin>& pins, int vertex_index, const std::vector<Vec3>& x) {

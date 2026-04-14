@@ -202,8 +202,6 @@ inline PinMap build_pin_map(const std::vector<Pin>& pins, int nv) {
     return m;
 }
 
-double triangle_ref_area_2d(const RefMesh& ref_mesh, int tri_idx);
-
 double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins,
                                                 const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
@@ -211,10 +209,6 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
                                                                      const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                                                      const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                                                      const PinMap* pin_map = nullptr);
-
-Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                            const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                            const BroadPhase& broad_phase, const PinMap* pin_map = nullptr);
 
 double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,

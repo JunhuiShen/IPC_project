@@ -31,11 +31,7 @@ struct TriangleDef {
 // Utility functions
 Mat33 matrix3d_inverse(const Mat33& H);
 
-TriangleDef ZeroTriangleDef();
-
 TriangleDef add_scale(const TriangleDef& a, const TriangleDef& b, double s);
-
-Vec9 flatten_def(const TriangleDef& def);
 
 double get_dof(const TriangleDef& def, int node, int comp);
 

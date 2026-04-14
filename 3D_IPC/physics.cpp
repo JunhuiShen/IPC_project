@@ -9,16 +9,6 @@
 #include <sstream>
 #include <iostream>
 
-double triangle_ref_area_2d(const RefMesh& ref_mesh, int tri_idx) {
-    const Vec2& X0 = ref_mesh.ref_positions[tri_vertex(ref_mesh, tri_idx, 0)];
-    const Vec2& X1 = ref_mesh.ref_positions[tri_vertex(ref_mesh, tri_idx, 1)];
-    const Vec2& X2 = ref_mesh.ref_positions[tri_vertex(ref_mesh, tri_idx, 2)];
-    Mat22 Dm_local;
-    Dm_local.col(0) = X1 - X0;
-    Dm_local.col(1) = X2 - X0;
-    return 0.5 * std::abs(Dm_local.determinant());
-}
-
 double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const SimParams& params,
                                                 const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
     double E = 0.0, PE = 0.0;
@@ -114,9 +104,9 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
     return {g, H};
 }
 
-Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                            const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                            const BroadPhase& broad_phase, const PinMap* pin_map) {
+static Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+                                   const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                   const BroadPhase& broad_phase, const PinMap* pin_map) {
     const double dt2 = params.dt2();
     const auto& bp_cache = broad_phase.cache();
     Vec3 g = Vec3::Zero();

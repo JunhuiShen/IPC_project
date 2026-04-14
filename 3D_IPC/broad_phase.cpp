@@ -662,10 +662,10 @@ void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vec
     build(x, v, mesh, dt, /*node_pad=*/epsilon_pad, /*tri_pad=*/epsilon_pad, /*edge_pad=*/epsilon_pad);
 }
 
-BroadPhase::SingleNodeCCDResult BroadPhase::query_single_node_ccd(
+BroadPhase::VertexPairs BroadPhase::query_pairs_for_vertex(
         const std::vector<Vec3>& x, int vi, const Vec3& dx, const RefMesh& mesh) const {
     constexpr double epsilon_pad = 1.0e-10;
-    SingleNodeCCDResult result;
+    VertexPairs result;
 
     AABB vi_box;
     vi_box.expand(x[vi]);
@@ -746,90 +746,3 @@ BroadPhase::SingleNodeCCDResult BroadPhase::query_single_node_ccd(
     return result;
 }
 
-MeshSanityReport detect_mesh_self_intersection(const std::vector<Vec3>& x, const RefMesh& mesh) {
-    MeshSanityReport report;
-    const int nt = num_tris(mesh);
-
-    // One owning triangle per unique edge is enough: the share-vertex test
-    // below rejects the other triangle it would otherwise match against.
-    struct EdgeRef { int v0, v1, tri; };
-    std::vector<EdgeRef> edges;
-    edges.reserve(nt * 3);
-    {
-        std::map<std::pair<int, int>, int> seen;
-        for (int t = 0; t < nt; ++t) {
-            const int abc[3] = {
-                tri_vertex(mesh, t, 0),
-                tri_vertex(mesh, t, 1),
-                tri_vertex(mesh, t, 2),
-            };
-            for (int k = 0; k < 3; ++k) {
-                int a = abc[k];
-                int b = abc[(k + 1) % 3];
-                if (a > b) std::swap(a, b);
-                if (seen.insert({{a, b}, static_cast<int>(edges.size())}).second) {
-                    edges.push_back({a, b, t});
-                }
-            }
-        }
-    }
-
-    for (int t = 0; t < nt; ++t) {
-        const int v0 = tri_vertex(mesh, t, 0);
-        const int v1 = tri_vertex(mesh, t, 1);
-        const int v2 = tri_vertex(mesh, t, 2);
-        const Vec3& A = x[v0];
-        const Vec3& B = x[v1];
-        const Vec3& C = x[v2];
-        const Vec3 N = (B - A).cross(C - A);
-        const double n2 = N.squaredNorm();
-        if (n2 <= 0.0) continue;
-
-        for (const auto& e : edges) {
-            // Skip any edge that shares a vertex with the pierced triangle.
-            if (e.v0 == v0 || e.v0 == v1 || e.v0 == v2) continue;
-            if (e.v1 == v0 || e.v1 == v1 || e.v1 == v2) continue;
-
-            const Vec3& P = x[e.v0];
-            const Vec3& Q = x[e.v1];
-            const double dP = (P - A).dot(N);
-            const double dQ = (Q - A).dot(N);
-            if (dP * dQ > 0.0) continue;        // both endpoints on same side
-            if (dP == 0.0 && dQ == 0.0) continue; // coplanar edge: ignore
-
-            const double s = dP / (dP - dQ);
-            if (s < 0.0 || s > 1.0) continue;
-            const Vec3 H = P + s * (Q - P);
-
-            // Barycentric coordinates of H on triangle (A, B, C).
-            const Vec3 e1v = B - A;
-            const Vec3 e2v = C - A;
-            const Vec3 w   = H - A;
-            const double d11 = e1v.dot(e1v);
-            const double d12 = e1v.dot(e2v);
-            const double d22 = e2v.dot(e2v);
-            const double b1  = e1v.dot(w);
-            const double b2  = e2v.dot(w);
-            const double det = d11 * d22 - d12 * d12;
-            if (det <= 0.0) continue;
-            const double l2 = (d22 * b1 - d12 * b2) / det;
-            const double l3 = (d11 * b2 - d12 * b1) / det;
-            const double l1 = 1.0 - l2 - l3;
-            const double tol = -1e-12;
-            if (l1 > tol && l2 > tol && l3 > tol) {
-                if (report.count == 0) {
-                    report.first.tri       = t;
-                    report.first.other_tri = e.tri;
-                    report.first.edge_v0   = e.v0;
-                    report.first.edge_v1   = e.v1;
-                    report.first.s         = s;
-                    report.first.bary[0]   = l1;
-                    report.first.bary[1]   = l2;
-                    report.first.bary[2]   = l3;
-                }
-                ++report.count;
-            }
-        }
-    }
-    return report;
-}

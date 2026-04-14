@@ -20,9 +20,9 @@ TrustRegionResult make_result(double d0, double M, double eta) {
     r.d0 = d0;
     r.M  = M;
     if (d0 <= 0.0) {
-        r.omega = 0.0;          // already in contact: trust region degenerate
+        r.omega = 0.0; // already in contact: trust region degenerate
     } else if (M <= kMotionEps) {
-        r.omega = 1.0;          // nothing moves
+        r.omega = 1.0;  // nothing moves
     } else {
         r.omega = std::min(1.0, eta * d0 / M);
     }

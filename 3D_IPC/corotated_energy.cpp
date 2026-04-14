@@ -45,7 +45,7 @@ CorotatedCache32 buildCorotatedCache(const Mat32& F) {
     return c;
 }
 
-double PsiCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, double lambda) {
+static double PsiCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, double lambda) {
     return mu * (F - cache.R).squaredNorm()
            + 0.5 * lambda * (cache.J - 1.0) * (cache.J - 1.0);
 }

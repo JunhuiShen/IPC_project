@@ -444,7 +444,7 @@ TEST(CorotatedEnergy, DirectionalDerivativeConvergence){
     const auto tri = MakeTestTriangle();
     const auto def = MakeDeformedTriangle();
 
-    TriangleDef dx = ZeroTriangleDef();
+    TriangleDef dx;
     dx.x[0] = Vec3(0.3, -0.7, 0.2);
     dx.x[1] = Vec3(-0.4, 0.1, 0.5);
     dx.x[2] = Vec3(0.25, 0.6, -0.35);
@@ -454,6 +454,9 @@ TEST(CorotatedEnergy, DirectionalDerivativeConvergence){
     const Mat32 F = compute_F(tri.Dm_inv, def);
     const CorotatedCache32 cache = buildCorotatedCache(F);
 
+    Vec9 dx_flat;
+    for (int i = 0; i < 3; ++i) dx_flat.segment<3>(3 * i) = dx.x[i];
+
     // Flatten all three node gradients into a Vec9 for the dot product
     Vec9 g_flat = Vec9::Zero();
     {
@@ -462,7 +465,7 @@ TEST(CorotatedEnergy, DirectionalDerivativeConvergence){
         for (int i = 0; i < 3; ++i)
             g_flat.segment<3>(3 * i) = corotated_node_gradient(P, tri.ref_area, gradN, i);
     }
-    const double exact = g_flat.dot(flatten_def(dx));
+    const double exact = g_flat.dot(dx_flat);
 
     std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
     std::vector<double> errors;

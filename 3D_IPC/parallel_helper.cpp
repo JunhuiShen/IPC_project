@@ -290,12 +290,12 @@ static double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, cons
     const Vec3 dx = -delta;
     const bool tr = params.use_trust_region;
 
-    const auto ccd = broad_phase.query_single_node_ccd(x, vi, dx, ref_mesh);
+    const auto pairs = broad_phase.query_pairs_for_vertex(x, vi, dx, ref_mesh);
 
     double safe_min = 1.0;
 
     // vi is the lone moving node against static triangles.
-    for (const auto& p : ccd.nt_node_pairs) {
+    for (const auto& p : pairs.nt_node_pairs) {
         if (tr) {
             auto r = trust_region_vertex_triangle_gauss_seidel(
                 x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
@@ -311,7 +311,7 @@ static double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, cons
     }
 
     // vi is one corner of a moving triangle against a static node.
-    for (const auto& p : ccd.nt_face_pairs) {
+    for (const auto& p : pairs.nt_face_pairs) {
         if (tr) {
             auto r = trust_region_vertex_triangle_gauss_seidel(
                 x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
@@ -328,7 +328,7 @@ static double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, cons
         }
     }
 
-    for (const auto& p : ccd.ss_pairs) {
+    for (const auto& p : pairs.ss_pairs) {
         if (tr) {
             auto r = trust_region_edge_edge_gauss_seidel(
                 x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], dx);

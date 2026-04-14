@@ -16,7 +16,6 @@ struct CorotatedCache32 {
 
 CorotatedCache32 buildCorotatedCache(const Mat32& F);
 
-double PsiCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, double lambda);
 Mat32  PCorotated32(const CorotatedCache32& cache, const Mat32& F, double mu, double lambda);
 void   dPdFCorotated32(const CorotatedCache32& cache, double mu, double lambda, Mat66& dPdF);
 

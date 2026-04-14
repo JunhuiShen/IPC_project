@@ -55,24 +55,6 @@ int  build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out);
 void refit_bvh(std::vector<BVHNode>& nodes, const std::vector<AABB>& boxes);
 void query_bvh(const std::vector<BVHNode>& nodes, int root, const AABB& query, std::vector<int>& hits);
 
-// Brute-force edge-triangle self-intersection check, O(NE * NT). Debug-only.
-struct MeshIntersectionHit {
-    int    tri       = -1;
-    int    other_tri = -1;
-    int    edge_v0   = -1;
-    int    edge_v1   = -1;
-    double s         = 0.0;              // param along piercing edge
-    double bary[3]   = {0.0, 0.0, 0.0};  // barycentric on pierced triangle
-};
-
-struct MeshSanityReport {
-    int                 count = 0;
-    MeshIntersectionHit first{};  // valid only when count > 0
-    bool ok() const { return count == 0; }
-};
-
-MeshSanityReport detect_mesh_self_intersection(const std::vector<Vec3>& x, const RefMesh& mesh);
-
 // Swept-AABB broad phase producing candidate node–triangle and segment–segment pairs.
 class BroadPhase {
 public:
@@ -135,11 +117,13 @@ public:
     void set_mesh_topology(const RefMesh& mesh, int nv);
     bool has_topology() const { return topology_valid_; }
 
-    // CCD candidates for moving only vertex vi, grouped by vi's role:
+    // Broad-phase candidate pairs that involve vertex vi, grouped by
+    // vi's topological role. Used by both CCD and trust-region narrow
+    // phases as a per-vertex pair source.
     //   nt_node_pairs : vi is the lone moving node vs an external triangle
     //   nt_face_pairs : vi is a corner of a moving triangle vs an external node
     //   ss_pairs      : vi is an endpoint of one edge vs a non-sharing edge
-    struct SingleNodeCCDResult {
+    struct VertexPairs {
         struct NTPair      { int node; int tri_v[3]; };
         struct NTFacePair  { int node; int tri_v[3]; int vi_local; }; // vi_local in {0,1,2}
         struct SSPair      { int v[4]; int vi_dof; };
@@ -147,8 +131,8 @@ public:
         std::vector<NTFacePair> nt_face_pairs;
         std::vector<SSPair>     ss_pairs;
     };
-    
-    SingleNodeCCDResult query_single_node_ccd(const std::vector<Vec3>& x, int vi, const Vec3& dx, const RefMesh& mesh) const;
+
+    VertexPairs query_pairs_for_vertex(const std::vector<Vec3>& x, int vi, const Vec3& dx, const RefMesh& mesh) const;
 
     static std::uint64_t nt_key(int node, int tri) {
         return (std::uint64_t(std::uint32_t(node)) << 32) |

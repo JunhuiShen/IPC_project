@@ -4,8 +4,11 @@
 #include "make_shape.h"
 #include "parallel_helper.h"
 #include "trust_region.h"
+#include "node_triangle_distance.h"
+#include "segment_segment_distance.h"
 
 #include <cstdio>
+#include <limits>
 
 // Initial guess: scale dx by 0.9 * min TOI from CCD over all candidate pairs.
 std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh) {
@@ -52,9 +55,12 @@ std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vecto
     return xnew;
 }
 
-// Initial guess: scale dx by min trust-region omega = eta * d0 / M over all candidate pairs.
+// Initial guess: per-vertex truncation to a trust-region ball of radius
+// b_v = gamma_P * min over candidate pairs involving v of d0. Follows
+// eq. (21) and eq. (28) of Chen et al. 2025.
 std::vector<Vec3> trust_region_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh) {
     const int nv = static_cast<int>(x.size());
+    constexpr double gamma_P = 0.4;  // 0 < gamma_P < 0.5
 
     std::vector<Vec3> dx(nv);
     for (int i = 0; i < nv; ++i) dx[i] = xhat[i] - x[i];
@@ -63,35 +69,41 @@ std::vector<Vec3> trust_region_initial_guess(const std::vector<Vec3>& x, const s
     ccd_bp.build_ccd_candidates(x, dx, ref_mesh, 1.0);
     const auto& cache = ccd_bp.cache();
 
-    double omega = 1.0;
+    // b[v] = min over every candidate pair that touches vertex v of d0,
+    // eventually multiplied by gamma_P.
+    std::vector<double> b(nv, std::numeric_limits<double>::infinity());
 
-    const int n_nt = static_cast<int>(cache.nt_pairs.size());
-    #pragma omp parallel for reduction(min:omega) schedule(static)
-    for (int i = 0; i < n_nt; ++i) {
-        const auto& p = cache.nt_pairs[i];
-        const double w = trust_region_vertex_triangle(
-                x[p.node],     dx[p.node],
-                x[p.tri_v[0]], dx[p.tri_v[0]],
-                x[p.tri_v[1]], dx[p.tri_v[1]],
-                x[p.tri_v[2]], dx[p.tri_v[2]]).omega;
-        omega = std::min(omega, w);
+    for (const auto& p : cache.nt_pairs) {
+        const double d0 = node_triangle_distance(
+                x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]]).distance;
+        // (p.node, triangle) contributes d_{min,v}  for v = p.node
+        // and d^T_{min,v}                           for v = tri_v[0..2]
+        b[p.node]     = std::min(b[p.node],     d0);
+        b[p.tri_v[0]] = std::min(b[p.tri_v[0]], d0);
+        b[p.tri_v[1]] = std::min(b[p.tri_v[1]], d0);
+        b[p.tri_v[2]] = std::min(b[p.tri_v[2]], d0);
     }
-
-    const int n_ss = static_cast<int>(cache.ss_pairs.size());
-    #pragma omp parallel for reduction(min:omega) schedule(static)
-    for (int i = 0; i < n_ss; ++i) {
-        const auto& p = cache.ss_pairs[i];
-        const double w = trust_region_edge_edge(
-                x[p.v[0]], dx[p.v[0]],
-                x[p.v[1]], dx[p.v[1]],
-                x[p.v[2]], dx[p.v[2]],
-                x[p.v[3]], dx[p.v[3]]).omega;
-        omega = std::min(omega, w);
+    for (const auto& p : cache.ss_pairs) {
+        const double d0 = segment_segment_distance(
+                x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]]).distance;
+        // contributes d^E_{min,v} for v = each of the four endpoints
+        b[p.v[0]] = std::min(b[p.v[0]], d0);
+        b[p.v[1]] = std::min(b[p.v[1]], d0);
+        b[p.v[2]] = std::min(b[p.v[2]], d0);
+        b[p.v[3]] = std::min(b[p.v[3]], d0);
     }
+    for (int i = 0; i < nv; ++i) b[i] *= gamma_P;
 
+    // Per-vertex truncation (eq. 28).
     std::vector<Vec3> xnew(nv);
-    for (int i = 0; i < nv; ++i) xnew[i] = x[i] + omega * dx[i];
-
+    for (int i = 0; i < nv; ++i) {
+        const double len = dx[i].norm();
+        if (len <= b[i]) {
+            xnew[i] = xhat[i];                       // keep the full proposed guess
+        } else {
+            xnew[i] = x[i] + (b[i] / len) * dx[i];   // truncate to the b_v ball
+        }
+    }
     return xnew;
 }
 
@@ -125,12 +137,12 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
         const Vec3 dx = -delta;
         const bool tr = params.use_trust_region;
 
-        const auto ccd = broad_phase.query_single_node_ccd(x, vi, dx, ref_mesh);
+        const auto pairs = broad_phase.query_pairs_for_vertex(x, vi, dx, ref_mesh);
 
         double safe_min = 1.0;
 
         // vi as the lone moving node
-        for (const auto& p : ccd.nt_node_pairs) {
+        for (const auto& p : pairs.nt_node_pairs) {
             if (tr) {
                 auto r = trust_region_vertex_triangle_gauss_seidel(
                     x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
@@ -146,7 +158,7 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
         }
 
         // vi as one moving triangle vertex
-        for (const auto& p : ccd.nt_face_pairs) {
+        for (const auto& p : pairs.nt_face_pairs) {
             if (tr) {
                 auto r = trust_region_vertex_triangle_gauss_seidel(
                     x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
@@ -163,7 +175,7 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
             }
         }
 
-        for (const auto& p : ccd.ss_pairs) {
+        for (const auto& p : pairs.ss_pairs) {
             if (tr) {
                 auto r = trust_region_edge_edge_gauss_seidel(
                     x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], dx);
