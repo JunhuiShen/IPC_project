@@ -30,6 +30,7 @@ struct IPCArgs3D : ArgParser {
     double d_hat         = 0.01;  // barrier activation distance; 0 disables contact
     bool   use_parallel  = false;
     bool   ccd_check     = false;
+    bool   use_trust_region = false;
 
     // --- mesh ---
     int    nx           = 2;      
@@ -74,6 +75,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_parallel", use_parallel, false,    "Use parallel Gauss-Seidel (requires coloring)");
 
         add_bool  ("ccd_check",    ccd_check,    false,  "Run post-sweep CCD penetration check (serial + parallel)");
+        add_bool  ("use_trust_region", use_trust_region, false, "Use trust-region narrow phase instead of CCD for step clamping");
 
         add_int   ("nx",          nx,          10,         "Mesh subdivisions in x");
         add_int   ("ny",          ny,          10,         "Mesh subdivisions in y");
@@ -117,6 +119,7 @@ struct IPCArgs3D : ArgParser {
         p.restart_frame    = restart_frame;
         p.use_parallel     = use_parallel;
         p.ccd_check        = ccd_check;
+        p.use_trust_region = use_trust_region;
         return p;
     }
 };

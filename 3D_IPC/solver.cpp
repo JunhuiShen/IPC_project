@@ -3,9 +3,11 @@
 #include "ccd.h"
 #include "make_shape.h"
 #include "parallel_helper.h"
+#include "trust_region.h"
 
 #include <cstdio>
 
+// Initial guess: scale dx by 0.9 * min TOI from CCD over all candidate pairs.
 std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh) {
     const int nv = static_cast<int>(x.size());
 
@@ -42,7 +44,50 @@ std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vecto
         toi_min = std::min(toi_min, t);
     }
 
-    double omega = (toi_min >= 1.0) ? 1.0 : 0.9 * toi_min;
+    const double omega = (toi_min >= 1.0) ? 1.0 : 0.9 * toi_min;
+
+    std::vector<Vec3> xnew(nv);
+    for (int i = 0; i < nv; ++i) xnew[i] = x[i] + omega * dx[i];
+
+    return xnew;
+}
+
+// Initial guess: scale dx by min trust-region omega = eta * d0 / M over all candidate pairs.
+std::vector<Vec3> trust_region_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh) {
+    const int nv = static_cast<int>(x.size());
+
+    std::vector<Vec3> dx(nv);
+    for (int i = 0; i < nv; ++i) dx[i] = xhat[i] - x[i];
+
+    BroadPhase ccd_bp;
+    ccd_bp.build_ccd_candidates(x, dx, ref_mesh, 1.0);
+    const auto& cache = ccd_bp.cache();
+
+    double omega = 1.0;
+
+    const int n_nt = static_cast<int>(cache.nt_pairs.size());
+    #pragma omp parallel for reduction(min:omega) schedule(static)
+    for (int i = 0; i < n_nt; ++i) {
+        const auto& p = cache.nt_pairs[i];
+        const double w = trust_region_vertex_triangle(
+                x[p.node],     dx[p.node],
+                x[p.tri_v[0]], dx[p.tri_v[0]],
+                x[p.tri_v[1]], dx[p.tri_v[1]],
+                x[p.tri_v[2]], dx[p.tri_v[2]]).omega;
+        omega = std::min(omega, w);
+    }
+
+    const int n_ss = static_cast<int>(cache.ss_pairs.size());
+    #pragma omp parallel for reduction(min:omega) schedule(static)
+    for (int i = 0; i < n_ss; ++i) {
+        const auto& p = cache.ss_pairs[i];
+        const double w = trust_region_edge_edge(
+                x[p.v[0]], dx[p.v[0]],
+                x[p.v[1]], dx[p.v[1]],
+                x[p.v[2]], dx[p.v[2]],
+                x[p.v[3]], dx[p.v[3]]).omega;
+        omega = std::min(omega, w);
+    }
 
     std::vector<Vec3> xnew(nv);
     for (int i = 0; i < nv; ++i) xnew[i] = x[i] + omega * dx[i];
@@ -78,43 +123,62 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
     double step = 1.0;
     if (params.d_hat > 0.0) {
         const Vec3 dx = -delta;
+        const bool tr = params.use_trust_region;
 
         const auto ccd = broad_phase.query_single_node_ccd(x, vi, dx, ref_mesh);
 
-        double toi_min = 1.0;
+        double safe_min = 1.0;
 
         // vi as the lone moving node
         for (const auto& p : ccd.nt_node_pairs) {
-            auto r = node_triangle_only_one_node_moves(
-                x[p.node],     dx,
-                x[p.tri_v[0]], Vec3::Zero(),
-                x[p.tri_v[1]], Vec3::Zero(),
-                x[p.tri_v[2]], Vec3::Zero());
-            if (r.collision) toi_min = std::min(toi_min, r.t);
+            if (tr) {
+                auto r = trust_region_vertex_triangle_gauss_seidel(
+                    x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
+                safe_min = std::min(safe_min, r.omega);
+            } else {
+                auto r = node_triangle_only_one_node_moves(
+                    x[p.node],     dx,
+                    x[p.tri_v[0]], Vec3::Zero(),
+                    x[p.tri_v[1]], Vec3::Zero(),
+                    x[p.tri_v[2]], Vec3::Zero());
+                if (r.collision) safe_min = std::min(safe_min, r.t);
+            }
         }
 
         // vi as one moving triangle vertex
         for (const auto& p : ccd.nt_face_pairs) {
-            Vec3 dxv[3] = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
-            dxv[p.vi_local] = dx;
-            auto r = node_triangle_only_one_node_moves(
-                x[p.node],     Vec3::Zero(),
-                x[p.tri_v[0]], dxv[0],
-                x[p.tri_v[1]], dxv[1],
-                x[p.tri_v[2]], dxv[2]);
-            if (r.collision) toi_min = std::min(toi_min, r.t);
+            if (tr) {
+                auto r = trust_region_vertex_triangle_gauss_seidel(
+                    x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
+                safe_min = std::min(safe_min, r.omega);
+            } else {
+                Vec3 dxv[3] = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
+                dxv[p.vi_local] = dx;
+                auto r = node_triangle_only_one_node_moves(
+                    x[p.node],     Vec3::Zero(),
+                    x[p.tri_v[0]], dxv[0],
+                    x[p.tri_v[1]], dxv[1],
+                    x[p.tri_v[2]], dxv[2]);
+                if (r.collision) safe_min = std::min(safe_min, r.t);
+            }
         }
 
         for (const auto& p : ccd.ss_pairs) {
-            CCDResult r;
-            if (p.vi_dof == 0)
-                r = segment_segment_only_one_node_moves(x[p.v[0]], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]]);
-            else
-                r = segment_segment_only_one_node_moves(x[p.v[1]], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]]);
-            if (r.collision) toi_min = std::min(toi_min, r.t);
+            if (tr) {
+                auto r = trust_region_edge_edge_gauss_seidel(
+                    x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], dx);
+                safe_min = std::min(safe_min, r.omega);
+            } else {
+                CCDResult r;
+                if (p.vi_dof == 0)
+                    r = segment_segment_only_one_node_moves(x[p.v[0]], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]]);
+                else
+                    r = segment_segment_only_one_node_moves(x[p.v[1]], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]]);
+                if (r.collision) safe_min = std::min(safe_min, r.t);
+            }
         }
 
-        step = (toi_min >= 1.0) ? 1.0 : 0.9 * toi_min;
+        step = tr ? safe_min : ((safe_min >= 1.0) ? 1.0 : 0.9 * safe_min);
     }
 
     x[vi] -= step * delta;

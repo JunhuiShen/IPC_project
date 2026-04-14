@@ -34,6 +34,9 @@ struct SimParams {
     // Post-sweep CCD penetration check. Off by default.
     bool   ccd_check{false};
 
+    // Use the trust-region narrow phase instead of CCD for step clamping.
+    bool   use_trust_region{false};
+
     double dt()  const {
         if (cached_dt_ < 0.0) cached_dt_ = 1.0 / (fps * static_cast<double>(substeps));
         return cached_dt_;
@@ -218,4 +221,5 @@ double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap&
                                const BroadPhase& broad_phase, const PinMap* pin_map = nullptr);
 
 void serialize_state(const std::string& dir, int frame, const DeformedState& state);
+
 bool deserialize_state(const std::string& dir, int frame, DeformedState& state);

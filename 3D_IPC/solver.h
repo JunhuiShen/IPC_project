@@ -14,6 +14,7 @@ struct SolverResult {
 };
 
 std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh);
+std::vector<Vec3> trust_region_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh);
 
 void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                        const std::vector<Pin>& pins, const SimParams& params,

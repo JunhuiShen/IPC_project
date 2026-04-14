@@ -36,6 +36,7 @@ add_library(corotated_energy_lib
     segment_segment_distance.cpp
     barrier_energy.cpp
     ccd.cpp
+    trust_region.cpp
 )
 
 target_link_libraries(corotated_energy_lib
@@ -123,6 +124,19 @@ target_link_libraries(ccd_test
 )
 
 gtest_discover_tests(ccd_test)
+
+add_executable(trust_region_test
+    trust_region_test.cpp
+)
+
+target_link_libraries(trust_region_test
+    PRIVATE
+    corotated_energy_lib
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(trust_region_test)
 
 add_executable(broad_phase_test
     broad_phase_test.cpp

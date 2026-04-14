@@ -2,6 +2,7 @@
 #include "IPC_math.h"
 #include "ccd.h"
 #include "make_shape.h"
+#include "trust_region.h"
 
 #include <algorithm>
 #include <cmath>
@@ -287,43 +288,62 @@ static double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, cons
     if (params.d_hat <= 0.0) return 1.0;
 
     const Vec3 dx = -delta;
+    const bool tr = params.use_trust_region;
 
     const auto ccd = broad_phase.query_single_node_ccd(x, vi, dx, ref_mesh);
 
-    double toi_min = 1.0;
+    double safe_min = 1.0;
 
     // vi is the lone moving node against static triangles.
     for (const auto& p : ccd.nt_node_pairs) {
-        CCDResult r = node_triangle_only_one_node_moves(
-            x[p.node],     dx,
-            x[p.tri_v[0]], Vec3::Zero(),
-            x[p.tri_v[1]], Vec3::Zero(),
-            x[p.tri_v[2]], Vec3::Zero());
-        if (r.collision) toi_min = std::min(toi_min, r.t);
+        if (tr) {
+            auto r = trust_region_vertex_triangle_gauss_seidel(
+                x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
+            safe_min = std::min(safe_min, r.omega);
+        } else {
+            CCDResult r = node_triangle_only_one_node_moves(
+                x[p.node],     dx,
+                x[p.tri_v[0]], Vec3::Zero(),
+                x[p.tri_v[1]], Vec3::Zero(),
+                x[p.tri_v[2]], Vec3::Zero());
+            if (r.collision) safe_min = std::min(safe_min, r.t);
+        }
     }
 
     // vi is one corner of a moving triangle against a static node.
     for (const auto& p : ccd.nt_face_pairs) {
-        Vec3 dxv[3] = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
-        dxv[p.vi_local] = dx;
-        CCDResult r = node_triangle_only_one_node_moves(
-            x[p.node],     Vec3::Zero(),
-            x[p.tri_v[0]], dxv[0],
-            x[p.tri_v[1]], dxv[1],
-            x[p.tri_v[2]], dxv[2]);
-        if (r.collision) toi_min = std::min(toi_min, r.t);
+        if (tr) {
+            auto r = trust_region_vertex_triangle_gauss_seidel(
+                x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
+            safe_min = std::min(safe_min, r.omega);
+        } else {
+            Vec3 dxv[3] = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
+            dxv[p.vi_local] = dx;
+            CCDResult r = node_triangle_only_one_node_moves(
+                x[p.node],     Vec3::Zero(),
+                x[p.tri_v[0]], dxv[0],
+                x[p.tri_v[1]], dxv[1],
+                x[p.tri_v[2]], dxv[2]);
+            if (r.collision) safe_min = std::min(safe_min, r.t);
+        }
     }
 
     for (const auto& p : ccd.ss_pairs) {
-        CCDResult r;
-        if (p.vi_dof == 0)
-            r = segment_segment_only_one_node_moves(x[p.v[0]], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]]);
-        else
-            r = segment_segment_only_one_node_moves(x[p.v[1]], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]]);
-        if (r.collision) toi_min = std::min(toi_min, r.t);
+        if (tr) {
+            auto r = trust_region_edge_edge_gauss_seidel(
+                x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], dx);
+            safe_min = std::min(safe_min, r.omega);
+        } else {
+            CCDResult r;
+            if (p.vi_dof == 0)
+                r = segment_segment_only_one_node_moves(x[p.v[0]], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]]);
+            else
+                r = segment_segment_only_one_node_moves(x[p.v[1]], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]]);
+            if (r.collision) safe_min = std::min(safe_min, r.t);
+        }
     }
 
-    return (toi_min >= 1.0) ? 1.0 : 0.9 * toi_min;
+    return tr ? safe_min : ((safe_min >= 1.0) ? 1.0 : 0.9 * safe_min);
 }
 
 ParallelCommit compute_parallel_commit_for_vertex(int vi, bool use_cached_prediction, const JacobiPrediction& prediction,
