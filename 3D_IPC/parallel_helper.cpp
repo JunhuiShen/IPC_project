@@ -59,19 +59,27 @@ static void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, cons
     delta_out = matrix3d_inverse(H) * g;
 }
 
-// Certified region = segment (x[vi] → x[vi] - delta) ∪ incident tris/edges,
-// inflated by d_hat. While vi stays inside this box its incident primitives
-// stay d_hat-separated from any non-overlapping other vertex's region, so the
-// two vertices can be updated in parallel.
+// Certified region: segment (x[vi] → x[vi] - delta) ∪ incident tris/edges,
+// with each contributing sub-AABB padded by d_hat/2 so disjoint regions are
+// d_hat-separated. edge_boxes already carry d_hat/2 from the broad phase
+// (tri_boxes carry 0), so only the endpoints and tri_boxes are grown here.
 static AABB build_certified_region_for_vertex(int vi, const std::vector<Vec3>& x, const Vec3& delta, const BroadPhase::Cache& bp_cache, double d_hat){
     AABB box;
 
-    box.expand(x[vi]);
-    box.expand(x[vi] - delta);
+    const Vec3 half_dhat(0.5 * d_hat, 0.5 * d_hat, 0.5 * d_hat);
+
+    const Vec3 a = x[vi];
+    const Vec3 b = x[vi] - delta;
+    box.expand(a - half_dhat);
+    box.expand(a + half_dhat);
+    box.expand(b - half_dhat);
+    box.expand(b + half_dhat);
 
     if (vi >= 0 && vi < static_cast<int>(bp_cache.node_to_tris.size())) {
         for (int tri_idx : bp_cache.node_to_tris[vi]) {
-            box.expand(bp_cache.tri_boxes[tri_idx]);
+            const AABB& tb = bp_cache.tri_boxes[tri_idx];
+            box.expand(tb.min - half_dhat);
+            box.expand(tb.max + half_dhat);
         }
     }
 
@@ -81,8 +89,6 @@ static AABB build_certified_region_for_vertex(int vi, const std::vector<Vec3>& x
         }
     }
 
-    box.min.array() -= d_hat;
-    box.max.array() += d_hat;
     return box;
 }
 

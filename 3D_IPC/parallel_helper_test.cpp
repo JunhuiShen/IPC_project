@@ -192,8 +192,10 @@ TEST(BuildJacobiPredictions, CertifiedRegionInflatedByDhat) {
     std::vector<JacobiPrediction> predictions;
     build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
-    // The certified region should be strictly larger than just the trajectory AABB
-    // (because it includes incident geometry + dhat inflation)
+    // Each sub-AABB feeding the certified region is padded by d_hat/2, so
+    // disjoint regions are guaranteed d_hat-separated. The trajectory
+    // endpoints contribute d_hat/2 balls on each side.
+    const double half_dhat = 0.5 * params.d_hat;
     for (int i = 0; i < static_cast<int>(predictions.size()); ++i) {
         if (!predictions[i].active) continue;
         const Vec3& xi = state.deformed_positions[i];
@@ -204,12 +206,11 @@ TEST(BuildJacobiPredictions, CertifiedRegionInflatedByDhat) {
         traj_box.expand(xi);
         traj_box.expand(xi_moved);
 
-        // Certified region must be at least dhat larger on each side
         for (int k = 0; k < 3; ++k) {
-            EXPECT_LE(U.min(k), traj_box.min(k) - params.d_hat + 1e-12)
-                << "node " << i << " axis " << k << " should be inflated by dhat";
-            EXPECT_GE(U.max(k), traj_box.max(k) + params.d_hat - 1e-12)
-                << "node " << i << " axis " << k << " should be inflated by dhat";
+            EXPECT_LE(U.min(k), traj_box.min(k) - half_dhat + 1e-12)
+                << "node " << i << " axis " << k << " should be inflated by d_hat/2";
+            EXPECT_GE(U.max(k), traj_box.max(k) + half_dhat - 1e-12)
+                << "node " << i << " axis " << k << " should be inflated by d_hat/2";
         }
     }
 }
