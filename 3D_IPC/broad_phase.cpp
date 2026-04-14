@@ -4,6 +4,10 @@
 #include <set>
 #include <tuple>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 // BVH build / refit / query
 int build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out) {
     out.clear();
@@ -559,12 +563,37 @@ void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, c
     build_bvh_topology(c.tri_bvh_nodes, static_cast<int>(c.tri_boxes.size()), c.tri_bvh_parent, c.tri_leaf_node);
     build_bvh_topology(c.edge_bvh_nodes, static_cast<int>(c.edge_boxes.size()), c.edge_bvh_parent, c.edge_leaf_node);
 
+    // Parallel BVH queries, serial pair-insert (add_*_pair mutates shared state).
+    std::vector<std::vector<int>> node_hits(nv);
+    #pragma omp parallel for schedule(dynamic, 32)
     for (int node = 0; node < nv; ++node) {
-        query_node_against_triangles(c, node, mesh);
+        if (c.tri_root < 0) continue;
+        query_bvh(c.tri_bvh_nodes, c.tri_root, c.node_boxes[node], node_hits[node]);
+    }
+    for (int node = 0; node < nv; ++node) {
+        for (int t : node_hits[node]) {
+            const int a  = tri_vertex(mesh, t, 0);
+            const int b  = tri_vertex(mesh, t, 1);
+            const int cc = tri_vertex(mesh, t, 2);
+            if (node_in_triangle(node, a, b, cc)) continue;
+            add_nt_pair(c, node, t, mesh);
+        }
     }
 
+    std::vector<std::vector<int>> edge_hits(ne);
+    #pragma omp parallel for schedule(dynamic, 32)
     for (int e = 0; e < ne; ++e) {
-        query_edge_against_edges(c, e);
+        if (c.edge_root < 0) continue;
+        query_bvh(c.edge_bvh_nodes, c.edge_root, c.edge_boxes[e], edge_hits[e]);
+    }
+    for (int e = 0; e < ne; ++e) {
+        const Edge e0{c.edges[e][0], c.edges[e][1]};
+        for (int other : edge_hits[e]) {
+            if (other == e) continue;
+            const Edge e1{c.edges[other][0], c.edges[other][1]};
+            if (share_vertex(e0, e1)) continue;
+            add_ss_pair(c, e, other);
+        }
     }
 
     cache_ = std::move(c);

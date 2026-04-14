@@ -7,6 +7,26 @@
 #include <cmath>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+static inline int ph_max_threads() {
+#ifdef _OPENMP
+    return omp_get_max_threads();
+#else
+    return 1;
+#endif
+}
+
+static inline int ph_thread_num() {
+#ifdef _OPENMP
+    return omp_get_thread_num();
+#else
+    return 0;
+#endif
+}
+
 static void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                            const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                            const BroadPhase::Cache& bp_cache, Vec3& g_out, Mat33& H_out, Vec3& delta_out,
@@ -88,99 +108,121 @@ void build_jacobi_predictions(const RefMesh& ref_mesh, const VertexTriangleMap& 
     }
 }
 
-static void add_conflict_edge(int a, int b, std::vector<std::vector<int>>& graph){
-    if (a == b) return;
-    graph[a].push_back(b);
-    graph[b].push_back(a);
-}
-
 std::vector<std::vector<int>> build_conflict_graph(const RefMesh& ref_mesh, const std::vector<Pin>& /*pins*/,
                                                    const BroadPhase::Cache& bp_cache, const std::vector<JacobiPrediction>& predictions,
                                                    const VertexTriangleMap* adj){
     const int nv = static_cast<int>(predictions.size());
     std::vector<std::vector<int>> graph(nv);
 
-    // Elastic coupling: two vertices that share a triangle.
-    if (adj) {
-        for (const auto& [vi, tri_list] : *adj) {
-            if (vi < 0 || vi >= nv || !predictions[vi].active) continue;
-            for (const auto& [ti, local_a] : tri_list) {
-                for (int local_b = 0; local_b < 3; ++local_b) {
-                    int vj = tri_vertex(ref_mesh, ti, local_b);
-                    if (vj == vi || vj < 0 || vj >= nv || !predictions[vj].active) continue;
-                    add_conflict_edge(vi, vj, graph);
+    VertexTriangleMap local_adj;
+    if (!adj) {
+        local_adj = build_incident_triangle_map(ref_mesh.tris);
+        adj = &local_adj;
+    }
+
+    std::vector<AABB> active_boxes;
+    std::vector<int> active_ids;
+    active_boxes.reserve(nv);
+    active_ids.reserve(nv);
+    for (int i = 0; i < nv; ++i) {
+        if (!predictions[i].active) continue;
+        active_ids.push_back(i);
+        active_boxes.push_back(predictions[i].certified_region);
+    }
+    std::vector<BVHNode> sw_bvh_nodes;
+    const int sw_root = build_bvh(active_boxes, sw_bvh_nodes);
+
+    // Each thread accumulates edges into its own per-vertex list; we merge
+    // + dedup at the end. Order-independent, so a pure refactor of the
+    // serial version.
+    const int T = ph_max_threads();
+    std::vector<std::vector<std::vector<int>>> local_nbr(T, std::vector<std::vector<int>>(nv));
+
+    const int n_nt = static_cast<int>(bp_cache.nt_pairs.size());
+    const int n_ss = static_cast<int>(bp_cache.ss_pairs.size());
+    const int n_active = static_cast<int>(active_ids.size());
+
+    #pragma omp parallel
+    {
+        auto& lg = local_nbr[ph_thread_num()];
+
+        // Elastic coupling: vertices that share a triangle.
+        if (adj) {
+            #pragma omp for schedule(static) nowait
+            for (int vi = 0; vi < nv; ++vi) {
+                if (!predictions[vi].active) continue;
+                auto it = adj->find(vi);
+                if (it == adj->end()) continue;
+                for (const auto& [ti, local_a] : it->second) {
+                    for (int local_b = 0; local_b < 3; ++local_b) {
+                        int vj = tri_vertex(ref_mesh, ti, local_b);
+                        if (vj == vi || vj < 0 || vj >= nv || !predictions[vj].active) continue;
+                        lg[vi].push_back(vj);
+                        lg[vj].push_back(vi);
+                    }
                 }
             }
         }
-    } else {
-        const auto elastic_adj = ::build_vertex_adjacency_map(ref_mesh.tris);
-        for (const auto& kv : elastic_adj) {
-            const int vi = kv.first;
-            const auto& nbrs = kv.second;
-            if (vi < 0 || vi >= nv) continue;
-            if (!predictions[vi].active) continue;
-            for (int vj : nbrs) {
-                if (vj < 0 || vj >= nv) continue;
-                if (!predictions[vj].active) continue;
-                add_conflict_edge(vi, vj, graph);
+
+        // Barrier node-triangle pairs.
+        #pragma omp for schedule(static) nowait
+        for (int i = 0; i < n_nt; ++i) {
+            const auto& p = bp_cache.nt_pairs[i];
+            const int verts[4] = { p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2] };
+            for (int a = 0; a < 4; ++a) {
+                if (verts[a] < 0 || verts[a] >= nv || !predictions[verts[a]].active) continue;
+                for (int b = a + 1; b < 4; ++b) {
+                    if (verts[b] < 0 || verts[b] >= nv || !predictions[verts[b]].active) continue;
+                    lg[verts[a]].push_back(verts[b]);
+                    lg[verts[b]].push_back(verts[a]);
+                }
             }
         }
-    }
 
-    // Barrier coupling: any two vertices that appear in the same contact pair.
-    for (const auto& p : bp_cache.nt_pairs) {
-        const int verts[4] = { p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2] };
-        for (int a = 0; a < 4; ++a) {
-            if (verts[a] < 0 || verts[a] >= nv || !predictions[verts[a]].active) continue;
-            for (int b = a + 1; b < 4; ++b) {
-                if (verts[b] < 0 || verts[b] >= nv || !predictions[verts[b]].active) continue;
-                add_conflict_edge(verts[a], verts[b], graph);
+        // Barrier segment-segment pairs.
+        #pragma omp for schedule(static) nowait
+        for (int i = 0; i < n_ss; ++i) {
+            const auto& p = bp_cache.ss_pairs[i];
+            for (int a = 0; a < 4; ++a) {
+                const int va = p.v[a];
+                if (va < 0 || va >= nv || !predictions[va].active) continue;
+                for (int b = a + 1; b < 4; ++b) {
+                    const int vb = p.v[b];
+                    if (vb < 0 || vb >= nv || !predictions[vb].active) continue;
+                    lg[va].push_back(vb);
+                    lg[vb].push_back(va);
+                }
             }
         }
-    }
 
-    for (const auto& p : bp_cache.ss_pairs) {
-        for (int a = 0; a < 4; ++a) {
-            const int va = p.v[a];
-            if (va < 0 || va >= nv || !predictions[va].active) continue;
-            for (int b = a + 1; b < 4; ++b) {
-                const int vb = p.v[b];
-                if (vb < 0 || vb >= nv || !predictions[vb].active) continue;
-                add_conflict_edge(va, vb, graph);
-            }
-        }
-    }
-
-    // Swept-region overlap: BVH query of each certified region against the rest.
-    {
-        std::vector<AABB> active_boxes;
-        std::vector<int> active_ids;
-        active_boxes.reserve(nv);
-        active_ids.reserve(nv);
-        for (int i = 0; i < nv; ++i) {
-            if (!predictions[i].active) continue;
-            active_ids.push_back(i);
-            active_boxes.push_back(predictions[i].certified_region);
-        }
-
-        std::vector<BVHNode> bvh_nodes;
-        int root = build_bvh(active_boxes, bvh_nodes);
-
-        std::vector<int> hits;
-        for (int ai = 0; ai < static_cast<int>(active_ids.size()); ++ai) {
-            hits.clear();
-            query_bvh(bvh_nodes, root, active_boxes[ai], hits);
+        // Swept-region overlap: BVH query per active vertex.
+        #pragma omp for schedule(static)
+        for (int ai = 0; ai < n_active; ++ai) {
+            std::vector<int> hits;
+            query_bvh(sw_bvh_nodes, sw_root, active_boxes[ai], hits);
             const int vi = active_ids[ai];
             for (int leaf : hits) {
                 const int vj = active_ids[leaf];
-                if (vj > vi) add_conflict_edge(vi, vj, graph);
+                if (vj > vi) {
+                    lg[vi].push_back(vj);
+                    lg[vj].push_back(vi);
+                }
             }
         }
     }
 
-    for (auto& nbrs : graph) {
-        std::sort(nbrs.begin(), nbrs.end());
-        nbrs.erase(std::unique(nbrs.begin(), nbrs.end()), nbrs.end());
+    // Merge per-thread locals + dedup, parallel over vertices.
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (int vi = 0; vi < nv; ++vi) {
+        std::size_t total = 0;
+        for (int t = 0; t < T; ++t) total += local_nbr[t][vi].size();
+        graph[vi].reserve(total);
+        for (int t = 0; t < T; ++t) {
+            auto& src = local_nbr[t][vi];
+            graph[vi].insert(graph[vi].end(), src.begin(), src.end());
+        }
+        std::sort(graph[vi].begin(), graph[vi].end());
+        graph[vi].erase(std::unique(graph[vi].begin(), graph[vi].end()), graph[vi].end());
     }
 
     return graph;
