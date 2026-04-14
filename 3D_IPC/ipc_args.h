@@ -91,12 +91,13 @@ struct IPCArgs3D : ArgParser {
         add_int   ("example",      example,       3,              "Scene to run: 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
-        add_string("format",       format,        "geo",          "Output format: obj, geo, or usd");
+        add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
         add_int   ("restart_frame", restart_frame, -1,            "Frame to restart from (-1 = no restart)");
     }
 
     ExportFormat to_export_format() const {
         if (format == "geo") return ExportFormat::GEO;
+        if (format == "ply") return ExportFormat::PLY;
         if (format == "usd") return ExportFormat::USD;
         return ExportFormat::OBJ;
     }

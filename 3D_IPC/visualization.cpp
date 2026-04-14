@@ -1,4 +1,7 @@
 #include "visualization.h"
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -164,6 +167,44 @@ void export_usd(const std::string& filename, const std::vector<Vec3>& x, const s
     out << "}\n";
 }
 
+void export_ply(const std::string& filename, const std::vector<Vec3>& x, const std::vector<int>& tris) {
+    FILE* f = fopen(filename.c_str(), "wb");
+    if (!f) { fprintf(stderr, "Error: cannot write %s\n", filename.c_str()); return; }
+
+    const int npoints = static_cast<int>(x.size());
+    const int nprims  = static_cast<int>(tris.size()) / 3;
+
+    fprintf(f,
+        "ply\nformat binary_little_endian 1.0\n"
+        "element vertex %d\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "element face %d\n"
+        "property list uchar int vertex_indices\n"
+        "end_header\n",
+        npoints, nprims);
+
+    std::vector<float> buf(npoints * 3);
+    for (int i = 0; i < npoints; ++i) {
+        buf[i*3+0] = static_cast<float>(x[i](0));
+        buf[i*3+1] = static_cast<float>(x[i](1));
+        buf[i*3+2] = static_cast<float>(x[i](2));
+    }
+    fwrite(buf.data(), sizeof(float), npoints * 3, f);
+
+    const int stride = 1 + 3 * 4;
+    std::vector<uint8_t> fbuf(nprims * stride);
+    uint8_t* p = fbuf.data();
+    for (int t = 0; t < nprims; ++t) {
+        *p++ = 3;
+        int32_t v0 = tris[t*3+0], v1 = tris[t*3+1], v2 = tris[t*3+2];
+        memcpy(p, &v0, 4); p += 4;
+        memcpy(p, &v1, 4); p += 4;
+        memcpy(p, &v2, 4); p += 4;
+    }
+    fwrite(fbuf.data(), 1, nprims * stride, f);
+    fclose(f);
+}
+
 void export_aabb_list(const std::string& filename, const std::vector<AABB>& boxes) {
     std::ofstream out(filename);
     if (!out) {
@@ -242,10 +283,14 @@ void export_broad_phase_boxes(const std::string& filename, const BroadPhase& bp)
 void export_frame(const std::string& outdir, int frame, const std::vector<Vec3>& x, const std::vector<int>& tris,
                   ExportFormat fmt) {
     std::ostringstream ss;
-    const char* ext = (fmt == ExportFormat::GEO) ? ".geo" : (fmt == ExportFormat::USD) ? ".usda" : ".obj";
+    const char* ext = (fmt == ExportFormat::GEO) ? ".geo"
+                    : (fmt == ExportFormat::PLY) ? ".ply"
+                    : (fmt == ExportFormat::USD) ? ".usda" : ".obj";
     ss << outdir << "/frame_" << std::setw(4) << std::setfill('0') << frame << ext;
     if (fmt == ExportFormat::GEO)
         export_geo(ss.str(), x, tris);
+    else if (fmt == ExportFormat::PLY)
+        export_ply(ss.str(), x, tris);
     else if (fmt == ExportFormat::USD)
         export_usd(ss.str(), x, tris);
     else

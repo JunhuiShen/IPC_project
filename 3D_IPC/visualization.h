@@ -4,10 +4,11 @@
 #include <string>
 #include <vector>
 
-enum class ExportFormat { OBJ, GEO, USD };
+enum class ExportFormat { OBJ, GEO, PLY, USD };
 
 void export_obj(const std::string& filename, const std::vector<Vec3>& x, const std::vector<int>& tris);
 void export_geo(const std::string& filename, const std::vector<Vec3>& x, const std::vector<int>& tris);
+void export_ply(const std::string& filename, const std::vector<Vec3>& x, const std::vector<int>& tris);
 void export_usd(const std::string& filename, const std::vector<Vec3>& x, const std::vector<int>& tris);
 
 void export_frame(const std::string& outdir, int frame, const std::vector<Vec3>& x, const std::vector<int>& tris,
