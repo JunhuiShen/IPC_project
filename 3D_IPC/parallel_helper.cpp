@@ -38,10 +38,13 @@ static void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, cons
     delta_out = matrix3d_inverse(H) * g;
 }
 
+// Certified region = segment (x[vi] → x[vi] - delta) ∪ incident tris/edges,
+// inflated by d_hat. While vi stays inside this box its incident primitives
+// stay d_hat-separated from any non-overlapping other vertex's region, so the
+// two vertices can be updated in parallel.
 static AABB build_certified_region_for_vertex(int vi, const std::vector<Vec3>& x, const Vec3& delta, const BroadPhase::Cache& bp_cache, double d_hat){
     AABB box;
 
-    // x_new = x_old - step * delta.
     box.expand(x[vi]);
     box.expand(x[vi] - delta);
 
@@ -97,9 +100,8 @@ std::vector<std::vector<int>> build_conflict_graph(const RefMesh& ref_mesh, cons
     const int nv = static_cast<int>(predictions.size());
     std::vector<std::vector<int>> graph(nv);
 
-    // Elastic coupling: share a triangle.
+    // Elastic coupling: two vertices that share a triangle.
     if (adj) {
-        // Use pre-built adjacency map (avoids rebuilding every iteration)
         for (const auto& [vi, tri_list] : *adj) {
             if (vi < 0 || vi >= nv || !predictions[vi].active) continue;
             for (const auto& [ti, local_a] : tri_list) {
@@ -125,7 +127,7 @@ std::vector<std::vector<int>> build_conflict_graph(const RefMesh& ref_mesh, cons
         }
     }
 
-    // Barrier coupling: active node-triangle pairs.
+    // Barrier coupling: any two vertices that appear in the same contact pair.
     for (const auto& p : bp_cache.nt_pairs) {
         const int verts[4] = { p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2] };
         for (int a = 0; a < 4; ++a) {
@@ -137,7 +139,6 @@ std::vector<std::vector<int>> build_conflict_graph(const RefMesh& ref_mesh, cons
         }
     }
 
-    // Barrier coupling: active segment-segment pairs.
     for (const auto& p : bp_cache.ss_pairs) {
         for (int a = 0; a < 4; ++a) {
             const int va = p.v[a];
@@ -150,7 +151,7 @@ std::vector<std::vector<int>> build_conflict_graph(const RefMesh& ref_mesh, cons
         }
     }
 
-    // Swept-region overlap via BVH
+    // Swept-region overlap: BVH query of each certified region against the rest.
     {
         std::vector<AABB> active_boxes;
         std::vector<int> active_ids;
@@ -249,7 +250,7 @@ static double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, cons
 
     double toi_min = 1.0;
 
-    // vi as the lone moving node — only dx (vi's displacement) is non-zero.
+    // vi is the lone moving node against static triangles.
     for (const auto& p : ccd.nt_node_pairs) {
         CCDResult r = node_triangle_only_one_node_moves(
             x[p.node],     dx,
@@ -259,8 +260,7 @@ static double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, cons
         if (r.collision) toi_min = std::min(toi_min, r.t);
     }
 
-    // vi as one moving triangle vertex — only the dx slot for the vi corner
-    // is non-zero. This is the same linear CCD; only the moving DOF differs.
+    // vi is one corner of a moving triangle against a static node.
     for (const auto& p : ccd.nt_face_pairs) {
         Vec3 dxv[3] = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
         dxv[p.vi_local] = dx;
@@ -305,8 +305,8 @@ ParallelCommit compute_parallel_commit_for_vertex(int vi, bool use_cached_predic
 
     out.delta = delta;
 
-    // dhat-inflated swept regions guarantee barrier set completeness
-    // Single-node CCD against known barrier pairs always suffices
+    // Correctness: the conflict graph ensures no new barrier pair can arise
+    // within this batch, so single-node CCD against the current B̃ suffices.
     out.ccd_step = compute_safe_step_for_vertex(vi, ref_mesh, params, x_current, delta, broad_phase);
 
     out.x_after = x_current[vi] - out.ccd_step * delta;

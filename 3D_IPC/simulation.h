@@ -4,10 +4,9 @@
 #include "broad_phase.h"
 #include <vector>
 
-// Advance the simulation by one frame (all substeps).
-// Returns the SolverResult from the last substep.
-inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_mesh, const VertexTriangleMap& adj, 
-    const std::vector<Pin>& pins, const SimParams& params, const std::vector<std::vector<int>>& color_groups, 
+// Advance one frame across all substeps; returns the last substep's result.
+inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params, const std::vector<std::vector<int>>& color_groups,
     BroadPhase& broad_phase) {
     SolverResult result;
     for (int sub = 0; sub < params.substeps; ++sub) {

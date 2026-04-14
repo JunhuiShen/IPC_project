@@ -14,7 +14,7 @@
 #include <limits>
 #include <vector>
 
-namespace fs = std::__fs::filesystem;
+namespace fs = std::filesystem;
 
 int main(int argc, char** argv) {
     IPCArgs3D args;
@@ -125,8 +125,12 @@ int main(int argc, char** argv) {
         std::cout << "Frame " << std::setw(4) << frame_index
                   << " | initial_residual = " << std::scientific << result.initial_residual
                   << " | final_residual = "   << std::scientific << result.final_residual
-                  << " | global_iters = "     << std::setw(3)    << result.iterations
-                  << " | solver_time = "      << std::fixed << std::setprecision(3)
+                  << " | global_iters = "     << std::setw(3)    << result.iterations;
+        if (params.use_parallel)
+            std::cout << " | colors = "   << std::setw(3) << result.last_num_colors;
+        if (params.ccd_check)
+            std::cout << " | ccd_viol = " << std::setw(3) << result.ccd_violations;
+        std::cout << " | solver_time = " << std::fixed << std::setprecision(3)
                   << solver_ms << " ms\n";
 
         export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt);

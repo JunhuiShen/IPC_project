@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace fs = std::__fs::filesystem;
+namespace fs = std::filesystem;
 
 // Builds a small mesh, runs broad phase, and writes AABBs to OBJ files
 // for visual inspection in Houdini. This test always passes.

@@ -225,7 +225,7 @@ TEST(SerializeState, RoundTrip) {
     original.velocities = {Vec3(0.1,0.2,0.3), Vec3(0.4,0.5,0.6), Vec3(0.7,0.8,0.9)};
 
     std::string dir = "/tmp/ipc_serialize_test";
-    std::__fs::filesystem::create_directories(dir);
+    std::filesystem::create_directories(dir);
     serialize_state(dir, 42, original);
 
     DeformedState loaded;
@@ -237,7 +237,7 @@ TEST(SerializeState, RoundTrip) {
         EXPECT_NEAR((loaded.deformed_positions[i] - original.deformed_positions[i]).norm(), 0.0, 1e-15);
         EXPECT_NEAR((loaded.velocities[i] - original.velocities[i]).norm(), 0.0, 1e-15);
     }
-    std::__fs::filesystem::remove_all(dir);
+    std::filesystem::remove_all(dir);
 }
 
 // ====================================================================

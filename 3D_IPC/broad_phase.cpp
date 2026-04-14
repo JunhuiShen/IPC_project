@@ -629,8 +629,7 @@ void BroadPhase::refresh(const std::vector<Vec3>& x, const std::vector<Vec3>& v,
 }
 
 void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt) {
-    // Tiny epsilon padding for borderline floating-point cases
-    constexpr double epsilon_pad = 1.0e-10;
+    constexpr double epsilon_pad = 1.0e-10;  // fp tie-breaker, not a safety pad
     build(x, v, mesh, dt, /*node_pad=*/epsilon_pad, /*tri_pad=*/epsilon_pad, /*edge_pad=*/epsilon_pad);
 }
 
@@ -639,15 +638,13 @@ BroadPhase::SingleNodeCCDResult BroadPhase::query_single_node_ccd(
     constexpr double epsilon_pad = 1.0e-10;
     SingleNodeCCDResult result;
 
-    // Build vi's swept AABB
     AABB vi_box;
     vi_box.expand(x[vi]);
     vi_box.expand(x[vi] + dx);
     vi_box.min.array() -= epsilon_pad;
     vi_box.max.array() += epsilon_pad;
 
-    // Node-triangle (node role): vi plays the lone-node role against all
-    // non-incident triangles. Query the triangle BVH with vi's swept box.
+    // vi as lone-moving node vs external triangles.
     if (cache_.tri_root >= 0) {
         std::vector<int> hits;
         query_bvh(cache_.tri_bvh_nodes, cache_.tri_root, vi_box, hits);
@@ -660,10 +657,7 @@ BroadPhase::SingleNodeCCDResult BroadPhase::query_single_node_ccd(
         }
     }
 
-    // Node-triangle (face role): vi is one corner of a triangle whose face
-    // is swept by vi's motion. Query the node BVH with the per-triangle
-    // moving-AABB to find external nodes that could land inside the swept
-    // face.
+    // vi as a moving triangle corner vs external nodes.
     if (cache_.node_root >= 0 && vi < static_cast<int>(cache_.node_to_tris.size())) {
         for (int t : cache_.node_to_tris[vi]) {
             const int a = tri_vertex(mesh, t, 0);
@@ -690,13 +684,12 @@ BroadPhase::SingleNodeCCDResult BroadPhase::query_single_node_ccd(
         }
     }
 
-    // Segment-segment: edges incident to vi against non-sharing edges
+    // Segment-segment: edges incident to vi vs non-sharing edges.
     if (cache_.edge_root >= 0 && vi < static_cast<int>(cache_.node_to_edges.size())) {
         for (int ei : cache_.node_to_edges[vi]) {
             const int ea = cache_.edges[ei][0];
             const int eb = cache_.edges[ei][1];
 
-            // Build swept AABB for this edge (only vi endpoint moves)
             AABB edge_box;
             edge_box.expand(x[ea]);
             edge_box.expand(x[eb]);
@@ -712,7 +705,7 @@ BroadPhase::SingleNodeCCDResult BroadPhase::query_single_node_ccd(
                 const int oa = cache_.edges[ej][0];
                 const int ob = cache_.edges[ej][1];
                 if (ea == oa || ea == ob || eb == oa || eb == ob) continue;
-                // Deduplicate: if ej is also incident to vi, only emit when ei < ej
+                // Dedup when both edges are incident to vi: emit only once (ei < ej).
                 if ((oa == vi || ob == vi) && ei > ej) continue;
 
                 int vi_dof = (vi == ea) ? 0 : 1;
@@ -728,10 +721,8 @@ MeshSanityReport detect_mesh_self_intersection(const std::vector<Vec3>& x, const
     MeshSanityReport report;
     const int nt = num_tris(mesh);
 
-    // Build unique edges with a back-reference to one owning triangle. A single
-    // edge may belong to two triangles; we only record one because the sharing-
-    // vertex test below eliminates the wrong one anyway (an edge never pierces
-    // the triangle it belongs to).
+    // One owning triangle per unique edge is enough: the share-vertex test
+    // below rejects the other triangle it would otherwise match against.
     struct EdgeRef { int v0, v1, tri; };
     std::vector<EdgeRef> edges;
     edges.reserve(nt * 3);

@@ -10,7 +10,6 @@
 #include <unordered_map>
 #include <vector>
 
-// Axis-aligned bounding box
 struct AABB {
     Vec3 min, max;
 
@@ -45,7 +44,6 @@ inline bool aabb_intersects(const AABB& a, const AABB& b) {
     return (a.min.array() <= b.max.array()).all() && (a.max.array() >= b.min.array()).all();
 }
 
-// Flat-array BVH node
 struct BVHNode {
     AABB bbox;
     int left = -1;
@@ -57,31 +55,25 @@ int  build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out);
 void refit_bvh(std::vector<BVHNode>& nodes, const std::vector<AABB>& boxes);
 void query_bvh(const std::vector<BVHNode>& nodes, int root, const AABB& query, std::vector<int>& hits);
 
-// Sanity check: mesh self-intersection detection.
-//
-// Brute-force segment-triangle intersection test over every unique edge of
-// the mesh against every triangle, skipping pairs that share a vertex. Useful
-// as a post-step assertion after a Gauss-Seidel iteration or a committed
-// frame to catch any penetration that slipped past CCD. O(NE * NT); not a
-// production check, but cheap enough to run per-frame in debug builds.
+// Brute-force edge-triangle self-intersection check, O(NE * NT). Debug-only.
 struct MeshIntersectionHit {
-    int    tri       = -1;   // pierced triangle index
-    int    other_tri = -1;   // triangle whose edge did the piercing
-    int    edge_v0   = -1;   // piercing edge endpoint (vertex index)
+    int    tri       = -1;
+    int    other_tri = -1;
+    int    edge_v0   = -1;
     int    edge_v1   = -1;
-    double s         = 0.0;  // parameter along the piercing edge in [0, 1]
-    double bary[3]   = {0.0, 0.0, 0.0};  // barycentric coords on the pierced triangle
+    double s         = 0.0;              // param along piercing edge
+    double bary[3]   = {0.0, 0.0, 0.0};  // barycentric on pierced triangle
 };
 
 struct MeshSanityReport {
-    int                 count = 0;  // total number of edge-triangle intersections found
-    MeshIntersectionHit first{};    // details of the first hit (only valid when count > 0)
+    int                 count = 0;
+    MeshIntersectionHit first{};  // valid only when count > 0
     bool ok() const { return count == 0; }
 };
 
 MeshSanityReport detect_mesh_self_intersection(const std::vector<Vec3>& x, const RefMesh& mesh);
 
-// Broad phase: builds candidate node-triangle and segment-segment pairs from swept AABBs over a motion interval
+// Swept-AABB broad phase producing candidate node–triangle and segment–segment pairs.
 class BroadPhase {
 public:
     struct Cache {
@@ -139,19 +131,14 @@ public:
 
     void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt);
 
-    // Pre-compute and cache static mesh topology (edges, node_to_edges, node_to_tris).
-    // Call once when the mesh connectivity is known. Subsequent build/initialize calls reuse this.
+    // Cache static mesh topology; reused by later build/initialize/refresh.
     void set_mesh_topology(const RefMesh& mesh, int nv);
     bool has_topology() const { return topology_valid_; }
 
-    // Lightweight single-node CCD query
-    //
-    //   nt_node_pairs : vi plays the lone-node role, paired with an external
-    //                   non-incident triangle.   (query: triangle BVH)
-    //   nt_face_pairs : vi is one corner of the triangle, paired with an
-    //                   external static node.    (query: node BVH)
-    //   ss_pairs      : vi is an endpoint of one edge, paired with a
-    //                   non-sharing edge.        (query: edge BVH)
+    // CCD candidates for moving only vertex vi, grouped by vi's role:
+    //   nt_node_pairs : vi is the lone moving node vs an external triangle
+    //   nt_face_pairs : vi is a corner of a moving triangle vs an external node
+    //   ss_pairs      : vi is an endpoint of one edge vs a non-sharing edge
     struct SingleNodeCCDResult {
         struct NTPair      { int node; int tri_v[3]; };
         struct NTFacePair  { int node; int tri_v[3]; int vi_local; }; // vi_local in {0,1,2}
@@ -182,7 +169,7 @@ private:
     Cache cache_;
     bool topology_valid_ = false;
 
-    // Cached topology — shared across all builds for the same mesh.
+    // Static mesh connectivity, reused across every build for the same mesh.
     struct Topology {
         std::vector<std::array<int, 2>> edges;
         std::vector<std::vector<int>> node_to_edges;

@@ -6,9 +6,11 @@
 
 struct SolverResult {
     double initial_residual = 0.0;
-    double final_residual = 0.0;
-    int iterations = 0;
-    bool converged = false;
+    double final_residual   = 0.0;
+    int    iterations       = 0;
+    bool   converged        = false;
+    int    last_num_colors  = 0;   // parallel solver only
+    int    ccd_violations   = 0;   // populated when SimParams::ccd_check is on
 };
 
 std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh);

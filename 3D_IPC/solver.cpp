@@ -156,17 +156,15 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
 
     const int nv = static_cast<int>(xnew.size());
 
-    // Skip refreshing a vertex whose displacement since its last refresh is
-    // below this threshold. The broad-phase boxes carry a d_hat-scale safety
-    // pad, so sub-pad jitter does not change which barrier pairs are active.
-    // Mirrors the optimization already used by the parallel solver.
-    const double refresh_skip_thresh2 = (0.05 * dhat) * (0.05 * dhat);
+    // Skip per-vertex refresh when motion < 80% of edge_pad. edge_pad is the
+    // smallest broad-phase pad; staying under it keeps the pair-set valid.
+    const double refresh_skip_thresh  = 0.8 * edge_pad;
+    const double refresh_skip_thresh2 = refresh_skip_thresh * refresh_skip_thresh;
     std::vector<Vec3> x_at_last_refresh = xnew;
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
-        // Save positions before the sweep for the CCD sanity check.
         std::vector<Vec3> x_before;
-        if (use_barrier) x_before = xnew;
+        if (use_barrier && params.ccd_check) x_before = xnew;
 
         for (const auto& group : color_groups) {
             for (int vi : group) {
@@ -184,11 +182,9 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
         result.final_residual = eval_residual();
         result.iterations     = iter;
 
-        // Post-iteration sanity check: CCD between x_before and xnew to detect
-        // any tunneling introduced during this sweep. A collision at toi < 1
-        // means CCD was violated — the per-vertex line-search should have
-        // prevented this.
-        if (use_barrier) {
+        // Optional post-sweep CCD penetration check. toi < 1 means the
+        // per-vertex line-search missed a pair and the sweep tunneled.
+        if (use_barrier && params.ccd_check) {
             std::vector<Vec3> dx(nv);
             for (int i = 0; i < nv; ++i) dx[i] = xnew[i] - x_before[i];
 
@@ -221,10 +217,8 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
 
             if (toi_min < 1.0) {
                 std::fprintf(stderr,
-                    "[solver sanity] CCD violation after iter %d: "
-                    "earliest toi = %.6e (%s)\n",
-                    iter, toi_min,
-                    hit_type == 1 ? "node-triangle" : "segment-segment");
+                    "[serial sanity] CCD violation after iter %d: toi=%.6e (%s)\n",
+                    iter, toi_min, hit_type == 1 ? "node-triangle" : "segment-segment");
             }
         }
 
@@ -250,6 +244,8 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
     const double edge_pad    = dhat * 0.5;
     const PinMap pm = build_pin_map(pins, static_cast<int>(xnew.size()));
 
+    SolverResult result;
+
     if (use_barrier) {
         broad_phase.initialize(xnew, v, ref_mesh, dt, dhat);
     }
@@ -260,7 +256,6 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         return compute_global_residual(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, &pm);
     };
 
-    SolverResult result;
     result.initial_residual = eval_residual();
     result.final_residual   = result.initial_residual;
     result.iterations       = 0;
@@ -271,30 +266,28 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         return result;
     }
 
-    // Skip refreshing vertices whose displacement since the last refresh is
-    // smaller than this. The broad-phase boxes carry a d_hat-scale safety pad,
-    // so sub-pad jitter does not change which barrier pairs are active and
-    // does not invalidate CCD's iter-start BVH.
-    const double refresh_skip_thresh2 = (0.05 * dhat) * (0.05 * dhat);
+    // Skip per-vertex refresh when motion < 80% of edge_pad. edge_pad is the
+    // smallest broad-phase pad; staying under it keeps the pair-set valid.
+    const double refresh_skip_thresh  = 0.8 * edge_pad;
+    const double refresh_skip_thresh2 = refresh_skip_thresh * refresh_skip_thresh;
 
     // Position snapshot at the last broad-phase refresh per vertex.
     std::vector<Vec3> x_at_last_refresh = xnew;
 
-    // Coloring is cached across iterations and rebuilt periodically. The
-    // dependency structure is stable for many iterations, so rebuilding the
-    // conflict graph every step is wasted work.
+    // Coloring is rebuilt every outer iteration.
     std::vector<std::vector<int>> cached_color_groups;
     bool cached_colors_valid = false;
-    constexpr int color_rebuild_interval = 8;
+    constexpr int color_rebuild_interval = 1;
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
+        std::vector<Vec3> x_before;
+        if (use_barrier && params.ccd_check) x_before = xnew;
+
         // Phase 1: Jacobi prediction
         std::vector<JacobiPrediction> predictions;
         build_jacobi_predictions(ref_mesh, adj, pins, params, xnew, xhat, broad_phase.cache(), predictions, &pm);
 
-        // Conflict graph and coloring. Callers can bypass the cached
-        // dynamic coloring by supplying override_colors -- used by tests to
-        // force a specific sweep order.
+        // Tests can pin a schedule via override_colors.
         const std::vector<std::vector<int>>* color_groups_ptr = override_colors;
         if (!color_groups_ptr) {
             const bool need_rebuild = !cached_colors_valid ||
@@ -322,7 +315,6 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
                 commits[local_idx] = compute_parallel_commit_for_vertex(vi, use_cached_prediction, predictions[vi],
                     ref_mesh, adj, pins, params, xnew, xhat, broad_phase, &pm);
             }
-
             apply_parallel_commits(commits, xnew);
 
             if (use_barrier) {
@@ -332,6 +324,49 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
                     broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
                     x_at_last_refresh[vi] = xnew[vi];
                 }
+            }
+        }
+
+        result.last_num_colors = static_cast<int>(color_groups.size());
+
+        // Optional post-sweep CCD penetration check. toi < 1 means a pair
+        // was missed by single-node CCD and the sweep tunneled.
+        if (use_barrier && params.ccd_check) {
+            const int nv_local = static_cast<int>(xnew.size());
+            std::vector<Vec3> dx(nv_local);
+            for (int i = 0; i < nv_local; ++i) dx[i] = xnew[i] - x_before[i];
+
+            BroadPhase ccd_bp;
+            ccd_bp.build_ccd_candidates(x_before, dx, ref_mesh, 1.0);
+            const auto& ccd_cache = ccd_bp.cache();
+
+            double toi_min = 1.0;
+            int hit_type = 0;
+
+            for (int i = 0; i < static_cast<int>(ccd_cache.nt_pairs.size()); ++i) {
+                const auto& p = ccd_cache.nt_pairs[i];
+                double t = node_triangle_general_ccd(
+                    x_before[p.node],     dx[p.node],
+                    x_before[p.tri_v[0]], dx[p.tri_v[0]],
+                    x_before[p.tri_v[1]], dx[p.tri_v[1]],
+                    x_before[p.tri_v[2]], dx[p.tri_v[2]]);
+                if (t < toi_min) { toi_min = t; hit_type = 1; }
+            }
+            for (int i = 0; i < static_cast<int>(ccd_cache.ss_pairs.size()); ++i) {
+                const auto& p = ccd_cache.ss_pairs[i];
+                double t = segment_segment_general_ccd(
+                    x_before[p.v[0]], dx[p.v[0]],
+                    x_before[p.v[1]], dx[p.v[1]],
+                    x_before[p.v[2]], dx[p.v[2]],
+                    x_before[p.v[3]], dx[p.v[3]]);
+                if (t < toi_min) { toi_min = t; hit_type = 2; }
+            }
+
+            if (toi_min < 1.0) {
+                result.ccd_violations += 1;
+                std::fprintf(stderr,
+                    "[parallel sanity] CCD violation after iter %d: toi=%.6e (%s)\n",
+                    iter, toi_min, hit_type == 1 ? "node-triangle" : "segment-segment");
             }
         }
 

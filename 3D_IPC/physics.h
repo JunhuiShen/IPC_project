@@ -31,6 +31,9 @@ struct SimParams {
     int    restart_frame{-1};  // -1 = no restart
     bool   use_parallel{false};
 
+    // Post-sweep CCD penetration check. Off by default.
+    bool   ccd_check{false};
+
     double dt()  const {
         if (cached_dt_ < 0.0) cached_dt_ = 1.0 / (fps * static_cast<double>(substeps));
         return cached_dt_;
@@ -39,7 +42,7 @@ struct SimParams {
         if (cached_dt2_ < 0.0) { double d = dt(); cached_dt2_ = d * d; }
         return cached_dt2_;
     }
-    // Call after changing fps or substeps at runtime (they are typically set once).
+    // Call after mutating fps or substeps.
     void invalidate_dt_cache() const { cached_dt_ = -1.0; cached_dt2_ = -1.0; }
 
 private:
@@ -53,20 +56,16 @@ struct DeformedState {
     std::vector<Vec3> velocities;
 };
 
-// Discrete-shell hinge: two triangles sharing an edge. v[0] and v[1]
-// are the shared edge endpoints; v[2] and v[3] are the opposite-vertex
-// apices in the two triangles. The orientation convention (which
-// triangle is "A" and which is "B") is fixed by build_hinges() so that
-// the face normals m_A and m_B point the same way when the hinge is
-// flat (bar_theta = 0 at rest).
+// Discrete-shell hinge: two triangles sharing an edge.
+// v[0..1] are the shared edge endpoints, v[2..3] the two apices. A/B
+// orientation is fixed by build_hinges() so m_A, m_B agree when flat.
 struct Hinge {
-    int v[4];
-    double bar_theta;  // rest dihedral-angle complement (0 for flat 2D rest)
-    double c_e;        // geometric coefficient |e|^2 / (A_A + A_B)
+    int    v[4];
+    double bar_theta;  // rest dihedral complement (0 for flat 2D rest)
+    double c_e;        // |e|^2 / (A_A + A_B)
 };
 
-// Map each vertex to {hinge_index, local_role} pairs, where local_role
-// is in {0,1,2,3} following the HingeDef convention.
+// vertex → {hinge_index, local_role ∈ {0..3}}
 using VertexHingeMap = std::unordered_map<int, std::vector<std::pair<int,int>>>;
 
 struct RefMesh {
@@ -107,9 +106,9 @@ struct RefMesh {
     }
 
     inline void build_hinges(const std::vector<Vec2>& X) {
-        // For each undirected edge, collect the triangles that contain it
-        // along with the directed orientation (0 for v_min->v_max, 1 for
-        // v_max->v_min) and the opposite vertex (apex).
+        // dir = 0 means the triangle traverses this edge in v_min→v_max
+        // order; dir = 1 means v_max→v_min. Pairing one of each yields a
+        // consistently oriented hinge below.
         struct EdgeEntry { int tri; int dir; int apex; };
         std::map<std::pair<int,int>, std::vector<EdgeEntry>> edge_map;
 
@@ -132,9 +131,6 @@ struct RefMesh {
         for (const auto& [edge, entries] : edge_map) {
             if (entries.size() != 2) continue;  // boundary or non-manifold
 
-            // Pair the directed orientations so that the hinge's m_A and
-            // m_B are consistently oriented: tri A carries v[0]->v[1],
-            // tri B carries v[1]->v[0].
             const EdgeEntry* triA = nullptr;
             const EdgeEntry* triB = nullptr;
             for (const auto& e : entries) {
@@ -149,8 +145,6 @@ struct RefMesh {
             h.v[2] = triA->apex;
             h.v[3] = triB->apex;
 
-            // c_e = |e|^2 / (A_A + A_B), equivalent to |e| / h_bar with
-            // h_bar = (h_A + h_B) / 2.
             const Vec2& X0 = X[h.v[0]];
             const Vec2& X1 = X[h.v[1]];
             const Vec2& X2 = X[h.v[2]];
@@ -161,7 +155,7 @@ struct RefMesh {
             const double areaB = 0.5 * std::abs(cross_product_in_2d(eVec, X3 - X0));
             const double area_sum = areaA + areaB;
             h.c_e = (area_sum > 0.0) ? (edge_len2 / area_sum) : 0.0;
-            h.bar_theta = 0.0;  // flat 2D rest configuration
+            h.bar_theta = 0.0;  // flat 2D rest
 
             const int hidx = static_cast<int>(hinges.size());
             hinges.push_back(h);
@@ -189,21 +183,13 @@ inline int num_tris(const RefMesh& ref_mesh) {
     return static_cast<int>(ref_mesh.tris.size()) / 3;
 }
 
-// Maps each vertex to {triangle_index, local_node_index} pairs.
-// Storing local_node_index eliminates the linear search in local_node() at call sites.
+// vertex → {triangle_index, local_corner ∈ {0,1,2}}
 using VertexTriangleMap = std::unordered_map<int, std::vector<std::pair<int,int>>>;
 
-//  Barrier contact pair types
-struct NodeTrianglePair {
-    int node;
-    int tri_v[3];
-};
+struct NodeTrianglePair    { int node; int tri_v[3]; };
+struct SegmentSegmentPair  { int v[4]; };
 
-struct SegmentSegmentPair {
-    int v[4];
-};
-
-// Pin lookup: vertex_index -> index into pins vector, -1 if not pinned.
+// vertex_index → pins[] index, or -1 if not pinned.
 using PinMap = std::vector<int>;
 
 inline PinMap build_pin_map(const std::vector<Pin>& pins, int nv) {
@@ -213,7 +199,6 @@ inline PinMap build_pin_map(const std::vector<Pin>& pins, int nv) {
     return m;
 }
 
-//  Physics functions
 double triangle_ref_area_2d(const RefMesh& ref_mesh, int tri_idx);
 
 double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins,

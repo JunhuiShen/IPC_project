@@ -4,10 +4,7 @@
 #include "physics.h"
 #include "visualization.h"
 
-// ======================================================
-// IPCArgs3D -- simulation parameters for 3D IPC
-// ======================================================
-
+// CLI-facing view of SimParams (with scene-placement knobs on top).
 struct IPCArgs3D : ArgParser {
 
     // --- time integration ---
@@ -27,11 +24,12 @@ struct IPCArgs3D : ArgParser {
     double gz           = 0.0;    // m/s^2
 
     // --- solver ---
-    int    max_iters     = 500;  
-    double tol_abs       = 1e-6;  // residualm)
-    double step_weight   = 1.0;   
-    double d_hat         = 0.02;  // barrier activation distance; 0 = off
-    bool   use_parallel  = false; 
+    int    max_iters     = 5000;
+    double tol_abs       = 1e-6;  // residual norm tolerance
+    double step_weight   = 1.0;
+    double d_hat         = 0.01;  // barrier activation distance; 0 disables contact
+    bool   use_parallel  = false;
+    bool   ccd_check     = false;
 
     // --- mesh ---
     int    nx           = 2;      
@@ -75,6 +73,8 @@ struct IPCArgs3D : ArgParser {
         add_double("d_hat",       d_hat,       0.01,       "Barrier activation distance (0 = off)");
         add_bool  ("use_parallel", use_parallel, false,    "Use parallel Gauss-Seidel (requires coloring)");
 
+        add_bool  ("ccd_check",    ccd_check,    false,  "Run post-sweep CCD penetration check (serial + parallel)");
+
         add_int   ("nx",          nx,          10,         "Mesh subdivisions in x");
         add_int   ("ny",          ny,          10,         "Mesh subdivisions in y");
         add_double("width",       width,       1.0,        "Mesh width");
@@ -116,6 +116,7 @@ struct IPCArgs3D : ArgParser {
         p.d_hat            = d_hat;
         p.restart_frame    = restart_frame;
         p.use_parallel     = use_parallel;
+        p.ccd_check        = ccd_check;
         return p;
     }
 };
