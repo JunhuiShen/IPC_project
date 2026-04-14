@@ -993,3 +993,75 @@ TEST(ParallelSolver, OneSweepRepeatableSameThreadCount) {
     }
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// compute_safe_step_for_vertex — trust-region gate on barrier proximity
+// ---------------------------------------------------------------------------
+//
+// The trust-region narrow phase shrinks a vertex's Newton step by
+// omega = eta * d0 / |delta|, where d0 is the current pair distance and
+// delta is the step. That bound is only meaningful when the pair is
+// actually within the barrier-active range (d0 < d_hat); outside that
+// range the barrier contributes zero gradient and Hessian, so there is
+// no linearization to protect and omega must effectively be 1.
+//
+// Regression test: construct a pair whose current separation d0 is
+// 5 * d_hat (well outside the barrier range) but whose swept AABB does
+// overlap — so the broad phase surfaces the pair — and verify the
+// returned safe step is 1.0. Without the d_hat gate, the returned value
+// would be ~0.8 (the raw omega), which is exactly the example=3 bug.
+
+TEST(TrustRegionSafeStep, FarFromBarrierReturnsFullStep) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+
+    SimParams params;
+    params.fps = 30.0;
+    params.substeps = 1;
+    params.mu = 10.0;
+    params.lambda = 10.0;
+    params.density = 1.0;
+    params.thickness = 0.1;
+    params.kpin = 1e7;
+    params.gravity = Vec3::Zero();
+    params.max_global_iters = 1;
+    params.tol_abs = 1e-6;
+    params.d_hat = 0.1;
+    params.use_parallel = false;
+    params.use_trust_region = true;
+
+    // Triangle A (y=0.5) above triangle B (y=0), gap = 0.5 = 5*d_hat.
+    state.deformed_positions = {
+        Vec3(0.0, 0.5, 0.0), Vec3(1.0, 0.5, 0.0), Vec3(0.0, 0.5, 1.0),  // A
+        Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0),  // B
+    };
+
+    // A large downward velocity on node 0 forces the broad phase to surface
+    // the NT pair even though the current distance is 5*d_hat.
+    state.velocities.assign(6, Vec3::Zero());
+    state.velocities[0] = Vec3(0.0, -20.0, 0.0);
+
+    X = { Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.0, 1.0),
+          Vec2(3.0, 0.0), Vec2(4.0, 0.0), Vec2(3.0, 1.0) };
+
+    ref_mesh.ref_positions = X;
+    ref_mesh.tris = {0, 1, 2, 3, 4, 5};
+    ref_mesh.initialize(X);
+    ref_mesh.build_lumped_mass(params.density, params.thickness);
+
+    BroadPhase bp;
+    bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
+
+    ASSERT_FALSE(bp.cache().nt_pairs.empty())
+        << "precondition: broad phase must surface the far-apart NT pair";
+
+    // Newton step of 0.25 downward on node 0. Without the gate, TR's omega on
+    // (node 0, triangle B) is eta * d0 / |delta| = 0.4 * 0.5 / 0.25 = 0.8.
+    const Vec3 delta = Vec3(0.0, 0.25, 0.0);
+    const double step = compute_safe_step_for_vertex(
+        0, ref_mesh, params, state.deformed_positions, delta, bp);
+
+    EXPECT_NEAR(step, 1.0, 1e-12)
+        << "trust-region clamped a non-colliding pair; d_hat gate missing";
+}

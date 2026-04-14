@@ -36,4 +36,10 @@ ParallelCommit compute_parallel_commit_for_vertex(int vi, bool use_cached_predic
                                                   const SimParams& params, const std::vector<Vec3>& x_current, const std::vector<Vec3>& xhat,
                                                   const BroadPhase& broad_phase, const PinMap* pin_map = nullptr);
 
+// Safe-step scalar in [0, 1] for a single vertex's Newton update. Used by
+// compute_parallel_commit_for_vertex; exposed for targeted unit testing.
+double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimParams& params,
+                                    const std::vector<Vec3>& x, const Vec3& delta,
+                                    const BroadPhase& broad_phase);
+
 void apply_parallel_commits(const std::vector<ParallelCommit>& commits, std::vector<Vec3>& xnew);

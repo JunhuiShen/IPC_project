@@ -289,8 +289,8 @@ static double clip_step_to_certified_region(int vi, const std::vector<Vec3>& x, 
     return clamp_scalar(alpha, 0.0, 1.0);
 }
 
-static double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimParams& params, const std::vector<Vec3>& x, const Vec3& delta,
-                                           const BroadPhase& broad_phase){
+double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimParams& params, const std::vector<Vec3>& x, const Vec3& delta,
+                                    const BroadPhase& broad_phase){
     if (params.d_hat <= 0.0) return 1.0;
 
     const Vec3 dx = -delta;
@@ -305,7 +305,7 @@ static double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, cons
         if (tr) {
             auto r = trust_region_vertex_triangle_gauss_seidel(
                 x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
-            safe_min = std::min(safe_min, r.omega);
+            if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
         } else {
             CCDResult r = node_triangle_only_one_node_moves(
                 x[p.node],     dx,
@@ -321,7 +321,7 @@ static double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, cons
         if (tr) {
             auto r = trust_region_vertex_triangle_gauss_seidel(
                 x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
-            safe_min = std::min(safe_min, r.omega);
+            if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
         } else {
             Vec3 dxv[3] = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
             dxv[p.vi_local] = dx;
@@ -338,7 +338,7 @@ static double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, cons
         if (tr) {
             auto r = trust_region_edge_edge_gauss_seidel(
                 x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], dx);
-            safe_min = std::min(safe_min, r.omega);
+            if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
         } else {
             CCDResult r;
             if (p.vi_dof == 0)
@@ -373,8 +373,8 @@ ParallelCommit compute_parallel_commit_for_vertex(int vi, bool use_cached_predic
 
     out.delta = delta;
 
-    // Correctness: the conflict graph ensures no new barrier pair can arise
-    // within this batch, so single-node CCD against the current B̃ suffices.
+    // The conflict graph ensures no new barrier pair can arise
+    // within this batch, so single-node CCD against the current barrier pairs suffices.
     out.ccd_step = compute_safe_step_for_vertex(vi, ref_mesh, params, x_current, delta, broad_phase);
 
     out.x_after = x_current[vi] - out.ccd_step * delta;

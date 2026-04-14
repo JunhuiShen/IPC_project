@@ -14,7 +14,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
 
         std::vector<Vec3> xnew = params.use_trust_region
-            ? trust_region_initial_guess(state.deformed_positions, xhat, ref_mesh)
+            ? trust_region_initial_guess(state.deformed_positions, xhat, ref_mesh, params.d_hat)
             : ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
 
         if (params.use_parallel)

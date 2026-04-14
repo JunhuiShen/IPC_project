@@ -3,6 +3,7 @@
 #include "make_shape.h"
 #include "physics.h"
 #include "barrier_energy.h"
+#include "broad_phase.h"
 
 #include <Eigen/Dense>
 #include <vector>
@@ -415,6 +416,59 @@ TEST_F(TotalEnergyTest, DirectionalDerivativeWithBending) {
     const double err = std::abs(fd - an);
     std::cout << "bending directional: FD=" << fd << " analytic=" << an << " err=" << err << "\n";
     ASSERT_LT(err, 1e-4) << "directional derivative mismatch with bending enabled";
+}
+
+// =====================================================================
+//  compute_global_residual (production path) vs FD
+//
+//  Bridges the production gradient code (compute_local_gradient in
+//  physics.cpp, reached via compute_global_residual) to the test-side
+//  local_gradient / total_energy pair that the existing FD tests have
+//  already slope-2 validated. Also asserts a round-off-level match
+//  between the two independently implemented gradient paths, so any
+//  drift between them would fire here.
+// =====================================================================
+
+TEST_F(TotalEnergyTest, GlobalResidualMatchesFiniteDifference) {
+    const int nv = static_cast<int>(x.size());
+
+    BroadPhase bp;
+    bp.initialize(x, state.velocities, ref_mesh, params.dt(), params.d_hat);
+
+    const auto& bp_nt = bp.cache().nt_pairs;
+    const auto& bp_ss = bp.cache().ss_pairs;
+    ASSERT_FALSE(bp_nt.empty() && bp_ss.empty())
+        << "broad phase produced no barrier pairs; test would degenerate";
+
+    const double r_prod = compute_global_residual(ref_mesh, adj, pins, params, x, xhat, bp, nullptr);
+
+    VecX g_test(3 * nv);
+    for (int vi = 0; vi < nv; ++vi)
+        g_test.segment<3>(3*vi) = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, bp_nt, bp_ss);
+    const double r_test_infty = g_test.cwiseAbs().maxCoeff();
+
+    const double eps = 1e-6;
+    VecX g_fd(3 * nv);
+    for (int vi = 0; vi < nv; ++vi) {
+        Vec3 gfd = local_gradient_fd(vi, ref_mesh, adj, pins, params, x, xhat, bp_nt, bp_ss, eps);
+        g_fd.segment<3>(3*vi) = gfd;
+    }
+    const double r_fd = g_fd.cwiseAbs().maxCoeff();
+
+    const double test_vs_fd = (g_test - g_fd).norm();
+    std::cout << "r_prod=" << r_prod
+              << " r_test_infty=" << r_test_infty
+              << " r_fd=" << r_fd
+              << " ||g_test - g_fd||=" << test_vs_fd << "\n";
+
+    EXPECT_LT(test_vs_fd, 1e-4)
+        << "test-path gradient disagrees with FD of total_energy";
+
+    EXPECT_NEAR(r_prod, r_test_infty, 1e-12 * std::max(r_prod, 1.0))
+        << "production compute_global_residual disagrees with test-path gradient infinity norm";
+
+    EXPECT_NEAR(r_prod, r_fd, 1e-5 * std::max(r_prod, 1.0))
+        << "production compute_global_residual disagrees with FD infinity norm";
 }
 
 // =====================================================================
