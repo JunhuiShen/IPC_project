@@ -28,7 +28,7 @@ struct IPCArgs3D : ArgParser {
     double tol_abs       = 1e-6;  // residual norm tolerance
     double step_weight   = 1.0;
     double d_hat         = 0.01;  // barrier activation distance; 0 disables contact
-    bool   use_parallel  = false;
+    bool   use_parallel  = true;
     bool   ccd_check     = false;
     bool   use_trust_region = false;
 
@@ -72,7 +72,7 @@ struct IPCArgs3D : ArgParser {
         add_double("tol_abs",     tol_abs,     1e-6,       "Absolute convergence tolerance (residual force)");
         add_double("step_weight", step_weight, 1.0,        "Newton step damping factor");
         add_double("d_hat",       d_hat,       0.01,       "Barrier activation distance (0 = off)");
-        add_bool  ("use_parallel", use_parallel, false,    "Use parallel Gauss-Seidel (requires coloring)");
+        add_bool  ("use_parallel", use_parallel, true,     "Use parallel Gauss-Seidel (requires coloring)");
 
         add_bool  ("ccd_check",    ccd_check,    false,  "Run post-sweep CCD penetration check (serial + parallel)");
         add_bool  ("use_trust_region", use_trust_region, false, "Use trust-region narrow phase instead of CCD for step clamping");
