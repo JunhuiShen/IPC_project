@@ -229,11 +229,12 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
 
     const int nv = static_cast<int>(xnew.size());
 
-    // Skip per-vertex refresh when motion < 80% of edge_pad. edge_pad is the
-    // smallest broad-phase pad; staying under it keeps the pair-set valid.
-    const double refresh_skip_thresh  = 0.8 * edge_pad;
-    const double refresh_skip_thresh2 = refresh_skip_thresh * refresh_skip_thresh;
-    std::vector<Vec3> x_at_last_refresh = xnew;
+    // Optional per-vertex broad-phase refresh 
+    const bool   do_incremental_refresh = use_barrier && params.use_incremental_refresh;
+    const double refresh_skip_thresh    = 0.8 * edge_pad;
+    const double refresh_skip_thresh2   = refresh_skip_thresh * refresh_skip_thresh;
+    std::vector<Vec3> x_at_last_refresh;
+    if (do_incremental_refresh) x_at_last_refresh = xnew;
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         std::vector<Vec3> x_before;
@@ -242,7 +243,7 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
         for (const auto& group : color_groups) {
             for (int vi : group) {
                 update_one_vertex(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm);
-                if (use_barrier) {
+                if (do_incremental_refresh) {
                     const Vec3 d = xnew[vi] - x_at_last_refresh[vi];
                     if (d.squaredNorm() >= refresh_skip_thresh2) {
                         broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
@@ -339,13 +340,12 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         return result;
     }
 
-    // Skip per-vertex refresh when motion < 80% of edge_pad. edge_pad is the
-    // smallest broad-phase pad; staying under it keeps the pair-set valid.
-    const double refresh_skip_thresh  = 0.8 * edge_pad;
-    const double refresh_skip_thresh2 = refresh_skip_thresh * refresh_skip_thresh;
-
-    // Position snapshot at the last broad-phase refresh per vertex.
-    std::vector<Vec3> x_at_last_refresh = xnew;
+    // Optional per-vertex broad-phase refresh 
+    const bool   do_incremental_refresh = use_barrier && params.use_incremental_refresh;
+    const double refresh_skip_thresh    = 0.8 * edge_pad;
+    const double refresh_skip_thresh2   = refresh_skip_thresh * refresh_skip_thresh;
+    std::vector<Vec3> x_at_last_refresh;
+    if (do_incremental_refresh) x_at_last_refresh = xnew;
 
     // Coloring is rebuilt every outer iteration.
     std::vector<std::vector<int>> cached_color_groups;
@@ -390,7 +390,7 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
             }
             apply_parallel_commits(commits, xnew);
 
-            if (use_barrier) {
+            if (do_incremental_refresh) {
                 for (int vi : group) {
                     const Vec3 d = xnew[vi] - x_at_last_refresh[vi];
                     if (d.squaredNorm() < refresh_skip_thresh2) continue;

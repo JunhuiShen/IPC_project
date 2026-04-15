@@ -31,6 +31,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_parallel  = true;
     bool   ccd_check     = false;
     bool   use_trust_region = false;
+    bool   use_incremental_refresh = false;
 
     // --- mesh ---
     int    nx           = 2;      
@@ -76,6 +77,7 @@ struct IPCArgs3D : ArgParser {
 
         add_bool  ("ccd_check",    ccd_check,    false,  "Run post-sweep CCD penetration check (serial + parallel)");
         add_bool  ("use_trust_region", use_trust_region, false, "Use trust-region narrow phase instead of CCD for step clamping");
+        add_bool  ("use_incremental_refresh", use_incremental_refresh, false, "Refresh broad-phase BVH per moved vertex during GS sweep (default off; enable for aggressive scenes)");
 
         add_int   ("nx",          nx,          10,         "Mesh subdivisions in x");
         add_int   ("ny",          ny,          10,         "Mesh subdivisions in y");
@@ -121,6 +123,7 @@ struct IPCArgs3D : ArgParser {
         p.use_parallel     = use_parallel;
         p.ccd_check        = ccd_check;
         p.use_trust_region = use_trust_region;
+        p.use_incremental_refresh = use_incremental_refresh;
         return p;
     }
 };
