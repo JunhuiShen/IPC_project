@@ -38,11 +38,6 @@ struct SimParams {
     bool   use_trust_region{false};
 
     // Rebuild the broad-phase BVH per moved vertex during the GS sweep.
-    // Off by default: the initial swept AABBs from broad_phase.initialize()
-    // stay wide enough on examples 1/2/3 (verified with ccd_check=true), and
-    // skipping the per-vertex rebuild saves ~5% on the high-res cloth stack.
-    // Enable for scenes whose actual GS correction can overshoot the initial
-    // v*dt + d_hat pads -- fast collisions or tight d_hat.
     bool   use_incremental_refresh{false};
 
     double dt()  const {
