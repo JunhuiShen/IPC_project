@@ -140,3 +140,77 @@ void build_cloth_stack_example_high_res(RefMesh& ref_mesh,
         state.velocities[i] = Vec3(0.0, -drop_speed, 0.0);
     }
 }
+
+void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
+                                       DeformedState& state,
+                                       std::vector<Vec2>& X,
+                                       std::vector<Pin>& pins) {
+    clear_model(ref_mesh, state, X, pins);
+
+    // Bigger ground cloth than the shared 1.2x1.2 helper so the falling pile
+    // has room to settle without involving the pinned corners.
+    const int    ground_nx = 20;
+    const int    ground_ny = 20;
+    const double ground_w  = 2.4;
+    const double ground_h  = 2.4;
+    const double ground_y  = 0.0;
+
+    const int ground_base = build_square_mesh(
+            ref_mesh, state, X,
+            ground_nx, ground_ny, ground_w, ground_h,
+            Vec3(-0.5 * ground_w, ground_y, -0.5 * ground_h));
+
+    const int ground_c00 = ground_base + 0;
+    const int ground_c10 = ground_base + ground_nx;
+    const int ground_c01 = ground_base + ground_ny * (ground_nx + 1);
+    const int ground_c11 = ground_base + ground_ny * (ground_nx + 1) + ground_nx;
+
+    append_pin(pins, ground_c00, state.deformed_positions);
+    append_pin(pins, ground_c10, state.deformed_positions);
+    append_pin(pins, ground_c01, state.deformed_positions);
+    append_pin(pins, ground_c11, state.deformed_positions);
+
+    // Horizontal cylinder (long axis +z) acting as a static collider via
+    // Dirichlet pins on every vertex.
+    const int    cyl_nu     = 22;    // circumferential subdivisions
+    const int    cyl_nv     = 12;    // axial subdivisions
+    const double cyl_radius = 0.10;
+    const double cyl_length = 0.6;   // longer than the cloth width so cloth ends overhang both faces
+    const Vec3   cyl_center(0.0, 0.55, 0.0);
+
+    const int cyl_base = build_cylinder_mesh(
+            ref_mesh, state, X,
+            cyl_nu, cyl_nv, cyl_radius, cyl_length, cyl_center);
+
+    // Pin every cylinder vertex so the cylinder behaves as a static collider.
+    const int cyl_vertex_count = cyl_nu * (cyl_nv + 1);
+    for (int k = 0; k < cyl_vertex_count; ++k) {
+        append_pin(pins, cyl_base + k, state.deformed_positions);
+    }
+
+    // Vertical cloth stack dropped onto the cylinder -- same pattern as
+    // build_cloth_stack_example_high_res, with the cylinder catching them
+    // mid-fall before they reach the ground.
+    const int    stack_count   = 15;   // number of falling cloths in the stack
+    const int    small_nx      = 16;   // grid subdivisions along each cloth's x-axis (triangles = 2*nx*ny)
+    const int    small_ny      = 16;   // grid subdivisions along each cloth's y-axis
+    const double small_w       = 0.50; // width of each falling cloth (meters, along x)
+    const double small_h       = 0.50; // height of each falling cloth (meters, along z in world space)
+    const double first_drop_y  = 1.00; // y-coordinate of the lowest falling cloth at t=0
+    const double drop_spacing  = 0.05; // vertical gap (meters) between successive stacked cloths at t=0
+
+    const int stack_mid = stack_count / 2;
+    for (int s = 0; s < stack_count; ++s) {
+        // Tiny asymmetric xz offset (centered on the middle cloth) so perfect
+        // symmetry does not bias stacking.
+        const double x_off = 0.005 * (s - stack_mid);
+        const double z_off = 0.004 * (s - stack_mid);
+        const Vec3 origin(
+                -0.5 * small_w + x_off,
+                first_drop_y + s * drop_spacing,
+                -0.5 * small_h + z_off);
+        build_square_mesh(ref_mesh, state, X, small_nx, small_ny, small_w, small_h, origin);
+    }
+
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+}

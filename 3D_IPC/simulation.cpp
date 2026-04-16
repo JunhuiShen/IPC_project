@@ -31,8 +31,9 @@ int main(int argc, char** argv) {
     if      (args.example == 1) build_two_sheets_example(args, ref_mesh, state, X, pins);
     else if (args.example == 2) build_cloth_stack_example_low_res(ref_mesh, state, X, pins);
     else if (args.example == 3) build_cloth_stack_example_high_res(ref_mesh, state, X, pins);
+    else if (args.example == 4) build_cloth_cylinder_drop_example(ref_mesh, state, X, pins);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4.\n";
         return 1;
     }
 

@@ -47,7 +47,7 @@ struct IPCArgs3D : ArgParser {
     double right_z      = 0.02;   // m
 
     // --- scene selection ---
-    int         example      = 3;   // 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res
+    int         example      = 3;   // 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop
 
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
@@ -90,7 +90,7 @@ struct IPCArgs3D : ArgParser {
         add_double("left_z",      left_z,      0.00,       "Left sheet origin z");
         add_double("right_z",     right_z,     0.02,       "Right sheet origin z");
 
-        add_int   ("example",      example,       3,              "Scene to run: 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res");
+        add_int   ("example",      example,       3,              "Scene to run: 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");

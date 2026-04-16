@@ -28,3 +28,14 @@ void build_cloth_stack_example_high_res(RefMesh& ref_mesh,
                                         DeformedState& state,
                                         std::vector<Vec2>& X,
                                         std::vector<Pin>& pins);
+
+// Cloth + pinned-cylinder drape scene: a 2.4x2.4 pinned ground cloth, one
+// short horizontal cylinder above it (axis along z, every vertex Dirichlet-
+// pinned to act as a static collider), and a vertical stack of fifteen
+// 0.50x0.50 cloths (nx=ny=16) dropped from rest onto the cylinder. The cloths
+// drape over it, slide off, and pile on the ground.
+// Needs --d_hat > 0 on the command line for contacts to work.
+void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
+                                       DeformedState& state,
+                                       std::vector<Vec2>& X,
+                                       std::vector<Pin>& pins);
