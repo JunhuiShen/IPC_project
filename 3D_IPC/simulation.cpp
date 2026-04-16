@@ -16,6 +16,33 @@
 
 namespace fs = std::filesystem;
 
+SolverResult advance_one_frame_twisting(DeformedState& state, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+    std::vector<Pin>& pins, const SimParams& params, const std::vector<std::vector<int>>& color_groups,
+    BroadPhase& broad_phase, const TwistSpec& twist_spec, int frame_index) {
+    SolverResult result;
+    const double dt = params.dt();
+    for (int sub = 0; sub < params.substeps; ++sub) {
+        const double t_next = ((frame_index - 1) * params.substeps + (sub + 1)) * dt;
+        update_twist_pins(pins, twist_spec, t_next);
+
+        std::vector<Vec3> xhat;
+        build_xhat(xhat, state.deformed_positions, state.velocities, dt);
+
+        std::vector<Vec3> xnew = params.use_trust_region
+            ? trust_region_initial_guess(state.deformed_positions, xhat, ref_mesh, params.d_hat)
+            : ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
+
+        if (params.use_parallel)
+            result = global_gauss_seidel_solver_parallel(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
+        else
+            result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
+
+        update_velocity(state.velocities, xnew, state.deformed_positions, dt);
+        state.deformed_positions = xnew;
+    }
+    return result;
+}
+
 int main(int argc, char** argv) {
     IPCArgs3D args;
     if (!args.parse(argc, argv)) return 1;
@@ -27,13 +54,15 @@ int main(int argc, char** argv) {
     DeformedState state;
     std::vector<Vec2> X;
     std::vector<Pin> pins;
+    TwistSpec twist_spec;
 
     if      (args.example == 1) build_two_sheets_example(args, ref_mesh, state, X, pins);
     else if (args.example == 2) build_cloth_stack_example_low_res(ref_mesh, state, X, pins);
     else if (args.example == 3) build_cloth_stack_example_high_res(ref_mesh, state, X, pins);
     else if (args.example == 4) build_cloth_cylinder_drop_example(ref_mesh, state, X, pins);
+    else if (args.example == 5) build_twisting_cloth_example(args, ref_mesh, state, X, pins, twist_spec);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5.\n";
         return 1;
     }
 
@@ -110,7 +139,10 @@ int main(int argc, char** argv) {
         auto solver_start = Clock::now();
         SolverResult result;
 
-        result = advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, broad_phase);
+        if (args.example == 5)
+            result = advance_one_frame_twisting(state, ref_mesh, adj, pins, params, color_groups, broad_phase, twist_spec, frame_index);
+        else
+            result = advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, broad_phase);
 
         if (!result.converged) {
             std::cerr << "Error: solver failed to converge at frame " << frame_index

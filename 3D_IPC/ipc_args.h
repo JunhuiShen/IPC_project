@@ -9,8 +9,8 @@ struct IPCArgs3D : ArgParser {
 
     // --- time integration ---
     double fps          = 30.0;   
-    int    substeps     = 3;      
-    int    num_frames   = 120;    
+    int    substeps     = 3;
+    int    num_frames   = 120;
 
     // --- physics ---
     double mu           = 10.0;   // Pa  (first Lame parameter / shear modulus)
@@ -47,7 +47,8 @@ struct IPCArgs3D : ArgParser {
     double right_z      = 0.02;   // m
 
     // --- scene selection ---
-    int         example      = 3;   // 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop
+    int         example      = 3;   // 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop, 5=twisting_cloth
+    double      twist_turns  = 1.5; // total relative twist (full circles) for example 5
 
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
@@ -79,8 +80,8 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_trust_region", use_trust_region, false, "Use trust-region narrow phase instead of CCD for step clamping");
         add_bool  ("use_incremental_refresh", use_incremental_refresh, false, "Refresh broad-phase BVH per moved vertex during GS sweep (default off; enable for aggressive scenes)");
 
-        add_int   ("nx",          nx,          10,         "Mesh subdivisions in x");
-        add_int   ("ny",          ny,          10,         "Mesh subdivisions in y");
+        add_int   ("nx",          nx,          31,         "Mesh subdivisions in x");
+        add_int   ("ny",          ny,          31,         "Mesh subdivisions in y");
         add_double("width",       width,       1.0,        "Mesh width");
         add_double("height",      height,      1.0,        "Mesh height");
 
@@ -90,7 +91,8 @@ struct IPCArgs3D : ArgParser {
         add_double("left_z",      left_z,      0.00,       "Left sheet origin z");
         add_double("right_z",     right_z,     0.02,       "Right sheet origin z");
 
-        add_int   ("example",      example,       3,              "Scene to run: 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop");
+        add_int   ("example",      example,       3,              "Scene to run: 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop, 5=twisting_cloth");
+        add_double("twist_turns",  twist_turns,   1.5,            "Total relative twist (full turns) for example 5");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");

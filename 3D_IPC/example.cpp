@@ -1,6 +1,8 @@
 #include "example.h"
 #include "make_shape.h"
 
+#include <cmath>
+
 void build_two_sheets_example(const IPCArgs3D& args,
                               RefMesh& ref_mesh,
                               DeformedState& state,
@@ -141,6 +143,91 @@ void build_cloth_stack_example_high_res(RefMesh& ref_mesh,
     }
 }
 
+namespace {
+constexpr double kTwoPi = 6.28318530717958647692;
+
+// Rotate `p` by angle `theta` about the line through `axis_point` parallel
+// to +x. Only the y and z components change.
+Vec3 rotate_about_x_axis(const Vec3& p, const Vec3& axis_point, double theta) {
+    const double c = std::cos(theta);
+    const double s = std::sin(theta);
+    const double dy = p.y() - axis_point.y();
+    const double dz = p.z() - axis_point.z();
+    return Vec3(p.x(),
+                axis_point.y() + c * dy - s * dz,
+                axis_point.z() + s * dy + c * dz);
+}
+} // namespace
+
+void build_twisting_cloth_example(const IPCArgs3D& args,
+                                  RefMesh& ref_mesh,
+                                  DeformedState& state,
+                                  std::vector<Vec2>& X,
+                                  std::vector<Pin>& pins,
+                                  TwistSpec& spec) {
+    clear_model(ref_mesh, state, X, pins);
+
+    const int    nx     = args.nx;
+    const int    ny     = args.ny;
+    const double width  = args.width;
+    const double height = args.height;
+    const double y0     = args.sheet_y;
+
+    // Center the cloth so the midline (+x axis at y = y0, z = 0) passes
+    // through the mesh centroid.
+    const Vec3 origin(-0.5 * width, y0, -0.5 * height);
+    const int base = build_square_mesh(ref_mesh, state, X, nx, ny, width, height, origin);
+
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+
+    const double duration = static_cast<double>(args.num_frames) / args.fps;
+    const double omega = (kTwoPi * args.twist_turns) / (2.0 * duration);
+
+    spec = TwistSpec{};
+    spec.axis_point  = Vec3(0.0, y0, 0.0);
+    spec.omega_left  = -omega;
+    spec.omega_right =  omega;
+
+    const int npin = ny + 1;
+    spec.left_pin_indices.reserve(npin);
+    spec.right_pin_indices.reserve(npin);
+    spec.left_initial_targets.reserve(npin);
+    spec.right_initial_targets.reserve(npin);
+
+    // Pin the full short edge on each side. Every vertex has rotation radius
+    // |z|, so the outer vertices drive the twist while the middle of the edge
+    // sits on the axis and barely moves. build_square_mesh stores grid (i, j)
+    // at base + j * (nx + 1) + i.
+    for (int j = 0; j <= ny; ++j) {
+        const int v_left  = base + j * (nx + 1) + 0;
+        const int v_right = base + j * (nx + 1) + nx;
+
+        spec.left_pin_indices.push_back(static_cast<int>(pins.size()));
+        append_pin(pins, v_left, state.deformed_positions);
+        spec.left_initial_targets.push_back(pins.back().target_position);
+
+        spec.right_pin_indices.push_back(static_cast<int>(pins.size()));
+        append_pin(pins, v_right, state.deformed_positions);
+        spec.right_initial_targets.push_back(pins.back().target_position);
+    }
+}
+
+void update_twist_pins(std::vector<Pin>& pins, const TwistSpec& spec, double t) {
+    const double theta_left  = spec.omega_left  * t;
+    const double theta_right = spec.omega_right * t;
+
+    const int n_left = static_cast<int>(spec.left_pin_indices.size());
+    for (int k = 0; k < n_left; ++k) {
+        pins[spec.left_pin_indices[k]].target_position =
+            rotate_about_x_axis(spec.left_initial_targets[k], spec.axis_point, theta_left);
+    }
+    const int n_right = static_cast<int>(spec.right_pin_indices.size());
+    for (int k = 0; k < n_right; ++k) {
+        pins[spec.right_pin_indices[k]].target_position =
+            rotate_about_x_axis(spec.right_initial_targets[k], spec.axis_point, theta_right);
+    }
+}
+
 void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
                                        DeformedState& state,
                                        std::vector<Vec2>& X,
@@ -148,7 +235,9 @@ void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
     clear_model(ref_mesh, state, X, pins);
 
     // Bigger ground cloth than the shared 1.2x1.2 helper so the falling pile
-    // has room to settle without involving the pinned corners.
+    // has room to settle without involving the pinned corners. Only the
+    // corners are pinned -- the interior is left free so its sagging-under-
+    // gravity gradient stays above tol_abs and keeps the global solver iterating.
     const int    ground_nx = 20;
     const int    ground_ny = 20;
     const double ground_w  = 2.4;
