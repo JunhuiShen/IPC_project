@@ -59,21 +59,22 @@ static void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, cons
     delta_out = matrix3d_inverse(H) * g;
 }
 
-// Certified region: segment (x[vi] → x[vi] - delta) ∪ incident tris/edges,
-// with each contributing sub-AABB padded by d_hat/2 so disjoint regions are
-// d_hat-separated. edge_boxes already carry d_hat/2 from the broad phase
-// (tri_boxes carry 0), so only the endpoints and tri_boxes are grown here.
+// Certified region for vertex vi: isotropic cube centered at x[vi] with
+// half-edge |delta|_2, unioned with incident tri/edge boxes. Every contributing
+// sub-AABB is padded by d_hat/2 so disjoint certified regions are guaranteed
+// d_hat-separated. The isotropic cube allows a fresh Newton step move in any direction 
+// up to the cached step length without being clipped by a thin perpendicular extent. 
+// edge_boxes already carry d_hat/2 from the broad phase; tri_boxes carry 0, 
+// so only the cube and tri_boxes are grown here.
 static AABB build_certified_region_for_vertex(int vi, const std::vector<Vec3>& x, const Vec3& delta, const BroadPhase::Cache& bp_cache, double d_hat){
     AABB box;
 
     const Vec3 half_dhat(0.5 * d_hat, 0.5 * d_hat, 0.5 * d_hat);
+    const Vec3 jacobi_step_extent = Vec3::Constant(delta.norm());
+    const Vec3& center = x[vi];
 
-    const Vec3 a = x[vi];
-    const Vec3 b = x[vi] - delta;
-    box.expand(a - half_dhat);
-    box.expand(a + half_dhat);
-    box.expand(b - half_dhat);
-    box.expand(b + half_dhat);
+    box.expand(center - jacobi_step_extent - half_dhat);
+    box.expand(center + jacobi_step_extent + half_dhat);
 
     if (vi >= 0 && vi < static_cast<int>(bp_cache.node_to_tris.size())) {
         for (int tri_idx : bp_cache.node_to_tris[vi]) {

@@ -15,6 +15,11 @@ void append_pin(std::vector<Pin>& pins, int vertex_index, const std::vector<Vec3
 
 int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin);
 
+// Triangulated cylinder whose long axis is +z, centered at `center`. `nu` and `nv` are the
+// circumferential and axial subdivisions. The wrap column on the underside is omitted to avoid
+// coincident seam vertices that would trip the IPC barrier.
+int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nu, int nv, double radius, double length, const Vec3& center);
+
 // Maps each vertex to {triangle_index, local_node_index} pairs.
 // The local_node_index (0,1,2) is stored to avoid searching at call sites.
 VertexTriangleMap build_incident_triangle_map(const std::vector<int>& indices);

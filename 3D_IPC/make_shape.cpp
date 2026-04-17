@@ -1,5 +1,6 @@
 #include "make_shape.h"
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -70,6 +71,64 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
             int v11 = vertex_index(i + 1, j + 1);
 
             // Split square into two triangles
+            ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v10); ref_mesh.tris.push_back(v11);
+            ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v11); ref_mesh.tris.push_back(v01);
+        }
+    }
+
+    ref_mesh.initialize(X);
+
+    return base;
+}
+
+// Total number of vertices is: nu * (nv + 1) and total number of triangles is: 2 * nu * nv.
+// The surface is closed: the wrap column (i == nu-1 -> i == 0) reuses existing vertex
+// indices, so no vertex is duplicated in 3D.
+int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X,
+                        int nu, int nv, double radius, double length, const Vec3& center) {
+    constexpr double kPi = 3.14159265358979323846;
+    int base = static_cast<int>(state.deformed_positions.size());
+    const double two_pi      = 2.0 * kPi;
+    const double theta_start = -0.5 * kPi;
+
+    for (int j = 0; j <= nv; ++j) {
+
+        // Normalize axial coordinate from 0 to 1
+        double v = static_cast<double>(j) / nv;
+
+        // Scale to actual length, both as 2D parameter and 3D world coord
+        double z_ref   = v * length;
+        double z_world = center.z() - 0.5 * length + z_ref;
+
+        for (int i = 0; i < nu; ++i) {
+
+            double u     = static_cast<double>(i) / nu;
+            double theta = theta_start + u * two_pi;
+
+            // Store reference (2D unrolled) and deformed (3D) positions
+            X.push_back(Vec2(u * two_pi * radius, z_ref));
+            state.deformed_positions.push_back(
+                Vec3(center.x() + radius * std::cos(theta),
+                     center.y() + radius * std::sin(theta),
+                     z_world));
+        }
+    }
+
+    // convert (col, row) -> vertex index
+    auto vertex_index = [base, nu](int i, int j) {
+        return base + j * nu + i;
+    };
+
+    // Create triangles, wrapping the last column back to i == 0 so the cylinder is closed.
+    for (int j = 0; j < nv; ++j) {
+        for (int i = 0; i < nu; ++i) {
+            const int i_next = (i + 1) % nu;
+            int v00 = vertex_index(i,      j);
+            int v10 = vertex_index(i_next, j);
+            int v01 = vertex_index(i,      j + 1);
+            int v11 = vertex_index(i_next, j + 1);
+
+            // Split quad into two triangles
             ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v10); ref_mesh.tris.push_back(v11);
             ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v11); ref_mesh.tris.push_back(v01);
         }

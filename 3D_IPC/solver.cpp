@@ -224,15 +224,20 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
     result.final_residual   = result.initial_residual;
     result.iterations       = 0;
 
+    // Effective stopping threshold: max of absolute floor and relative multiple
+    // of the initial residual (tol_rel == 0 keeps legacy absolute-only behavior).
+    const double effective_tol = std::max(params.tol_abs,
+                                          params.tol_rel * result.initial_residual);
+
     if (residual_history) residual_history->push_back(result.initial_residual);
-    if (result.initial_residual < params.tol_abs) {
+    if (result.initial_residual < effective_tol) {
         result.converged = true;
         return result;
     }
 
     const int nv = static_cast<int>(xnew.size());
 
-    // Optional per-vertex broad-phase refresh 
+    // Optional per-vertex broad-phase refresh
     const bool   do_incremental_refresh = use_barrier && params.use_incremental_refresh;
     const double refresh_skip_thresh    = 0.8 * edge_pad;
     const double refresh_skip_thresh2   = refresh_skip_thresh * refresh_skip_thresh;
@@ -300,7 +305,7 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
         }
 
         if (residual_history) residual_history->push_back(result.final_residual);
-        if (result.final_residual < params.tol_abs) {
+        if (result.final_residual < effective_tol) {
             result.converged = true;
             return result;
         }
@@ -337,13 +342,16 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
     result.final_residual   = result.initial_residual;
     result.iterations       = 0;
 
+    const double effective_tol = std::max(params.tol_abs,
+                                          params.tol_rel * result.initial_residual);
+
     if (residual_history) residual_history->push_back(result.initial_residual);
-    if (result.initial_residual < params.tol_abs) {
+    if (result.initial_residual < effective_tol) {
         result.converged = true;
         return result;
     }
 
-    // Optional per-vertex broad-phase refresh 
+    // Optional per-vertex broad-phase refresh
     const bool   do_incremental_refresh = use_barrier && params.use_incremental_refresh;
     const double refresh_skip_thresh    = 0.8 * edge_pad;
     const double refresh_skip_thresh2   = refresh_skip_thresh * refresh_skip_thresh;
@@ -453,7 +461,7 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         result.iterations     = iter;
 
         if (residual_history) residual_history->push_back(result.final_residual);
-        if (result.final_residual < params.tol_abs) {
+        if (result.final_residual < effective_tol) {
             result.converged = true;
             return result;
         }

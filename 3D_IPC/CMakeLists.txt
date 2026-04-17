@@ -35,6 +35,7 @@ add_library(corotated_energy_lib
     node_triangle_distance.cpp
     segment_segment_distance.cpp
     barrier_energy.cpp
+    sdf_penalty_energy.cpp
     ccd.cpp
     trust_region.cpp
 )
@@ -106,6 +107,18 @@ target_link_libraries(bending_energy_test
     GTest::gtest_main
 )
 gtest_discover_tests(bending_energy_test)
+
+add_executable(sdf_penalty_energy_test
+    sdf_penalty_energy_test.cpp
+)
+
+target_link_libraries(sdf_penalty_energy_test
+    PRIVATE
+    corotated_energy_lib
+    GTest::gtest
+    GTest::gtest_main
+)
+gtest_discover_tests(sdf_penalty_energy_test)
 
 add_executable(ccd_test
     ccd_test.cpp

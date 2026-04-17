@@ -22,3 +22,6 @@ broad_phase_*_boxes.obj
 bvh_*_level_*.obj
 mesh_before.obj
 mesh_after.obj
+
+# Claude Code scheduled-tasks runtime lock
+.claude/scheduled_tasks.lock

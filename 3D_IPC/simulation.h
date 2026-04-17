@@ -4,6 +4,8 @@
 #include "broad_phase.h"
 #include <vector>
 
+struct TwistSpec;
+
 // Advance one frame across all substeps; returns the last substep's result.
 inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
     const std::vector<Pin>& pins, const SimParams& params, const std::vector<std::vector<int>>& color_groups,
@@ -26,3 +28,11 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
     }
     return result;
 }
+
+// Same as advance_one_frame, but refreshes rotating pin targets from
+// twist_spec before every substep. frame_index is 1-based and is combined
+// with params.substeps and params.dt() to compute the absolute time at which
+// each substep ends.
+SolverResult advance_one_frame_twisting(DeformedState& state, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+    std::vector<Pin>& pins, const SimParams& params, const std::vector<std::vector<int>>& color_groups,
+    BroadPhase& broad_phase, const TwistSpec& twist_spec, int frame_index);

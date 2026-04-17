@@ -23,6 +23,7 @@ struct SimParams {
     double fps{30.0};
     int    substeps{1};
     double mu{}, lambda{}, density{}, thickness{}, kpin{}, tol_abs{}, step_weight{};
+    double tol_rel{0.0};  // relative tolerance (factor of initial residual); 0 disables
     double kB{0.0};  // bending (flexural) stiffness; 0 disables the bending term
     double d_hat{0.0};
     Vec3 gravity = Vec3::Zero();
@@ -38,12 +39,12 @@ struct SimParams {
     bool   use_trust_region{false};
 
     // Rebuild the broad-phase BVH per moved vertex during the GS sweep.
-    // Off by default: the initial swept AABBs from broad_phase.initialize()
-    // stay wide enough on examples 1/2/3 (verified with ccd_check=true), and
-    // skipping the per-vertex rebuild saves ~5% on the high-res cloth stack.
-    // Enable for scenes whose actual GS correction can overshoot the initial
-    // v*dt + d_hat pads -- fast collisions or tight d_hat.
     bool   use_incremental_refresh{false};
+
+    // Divide the per-vertex gradient by vertex mass when forming the global
+    // residual. Makes the convergence criterion scale-invariant with mass so
+    // the same tol_abs works for heavy ground and light cloth vertices.
+    bool   mass_normalize_residual{false};
 
     double dt()  const {
         if (cached_dt_ < 0.0) cached_dt_ = 1.0 / (fps * static_cast<double>(substeps));
