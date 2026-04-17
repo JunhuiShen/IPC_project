@@ -2,6 +2,7 @@
 #include "physics.h"
 #include "solver.h"
 #include "broad_phase.h"
+#include "GPU_Sim/gpu_solver_bridge.h"
 #include <vector>
 
 struct TwistSpec;
@@ -19,7 +20,9 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
             ? trust_region_initial_guess(state.deformed_positions, xhat, ref_mesh, params.d_hat)
             : ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
 
-        if (params.use_parallel)
+        if (params.use_gpu)
+            result = gpu_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
+        else if (params.use_parallel)
             result = global_gauss_seidel_solver_parallel(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
         else
             result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);

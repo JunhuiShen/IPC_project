@@ -46,6 +46,12 @@ struct SimParams {
     // the same tol_abs works for heavy ground and light cloth vertices.
     bool   mass_normalize_residual{false};
 
+    // Route the per-substep Gauss-Seidel sweep through the GPU implementation
+    // (gpu_gauss_seidel_solver).  On machines without CUDA the CPU stub is
+    // used automatically.  Incompatible with use_parallel and
+    // use_incremental_refresh (those are ignored when use_gpu is set).
+    bool   use_gpu{false};
+
     double dt()  const {
         if (cached_dt_ < 0.0) cached_dt_ = 1.0 / (fps * static_cast<double>(substeps));
         return cached_dt_;

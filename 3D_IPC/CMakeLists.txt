@@ -28,6 +28,24 @@ if(APPLE)
 endif()
 find_package(OpenMP REQUIRED)
 
+# GPU mesh mirror structs.
+# On machines without CUDA the stub provides CPU-heap equivalents of
+# DeviceBuffer / upload / download so the rest of the code compiles unchanged.
+# On a real CUDA machine: replace gpu_mesh_stub.cpp with gpu_mesh.cu and
+# add CUDA to the LANGUAGES line above.
+add_library(gpu_mesh_lib STATIC
+    GPU_Sim/gpu_mesh_stub.cpp
+    GPU_Sim/gpu_ccd_stub.cpp
+    GPU_Sim/gpu_physics_stub.cpp
+    GPU_Sim/gpu_solver_stub.cpp
+    GPU_Sim/gpu_solver_bridge.cpp
+)
+target_link_libraries(gpu_mesh_lib PUBLIC Eigen3::Eigen corotated_energy_lib OpenMP::OpenMP_CXX)
+target_include_directories(gpu_mesh_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/GPU_Sim
+)
+
 add_library(corotated_energy_lib
     corotated_energy.cpp
     bending_energy.cpp
@@ -120,6 +138,66 @@ target_link_libraries(sdf_penalty_energy_test
 )
 gtest_discover_tests(sdf_penalty_energy_test)
 
+add_executable(gpu_physics_test
+    gpu_physics_test.cpp
+    make_shape.cpp
+    physics.cpp
+    solver.cpp
+    parallel_helper.cpp
+    broad_phase.cpp
+)
+
+target_link_libraries(gpu_physics_test
+    PRIVATE
+    gpu_mesh_lib
+    corotated_energy_lib
+    OpenMP::OpenMP_CXX
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(gpu_physics_test)
+
+add_executable(gpu_solver_test
+    gpu_solver_test.cpp
+    make_shape.cpp
+    physics.cpp
+    solver.cpp
+    parallel_helper.cpp
+    broad_phase.cpp
+)
+
+target_link_libraries(gpu_solver_test
+    PRIVATE
+    gpu_mesh_lib
+    corotated_energy_lib
+    OpenMP::OpenMP_CXX
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(gpu_solver_test)
+
+add_executable(gpu_ccd_test
+    gpu_ccd_test.cpp
+    make_shape.cpp
+    physics.cpp
+    solver.cpp
+    parallel_helper.cpp
+    broad_phase.cpp
+)
+
+target_link_libraries(gpu_ccd_test
+    PRIVATE
+    gpu_mesh_lib
+    corotated_energy_lib
+    OpenMP::OpenMP_CXX
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(gpu_ccd_test)
+
 add_executable(ccd_test
     ccd_test.cpp
     make_shape.cpp
@@ -178,6 +256,7 @@ add_executable(3D_sim
 
 target_link_libraries(3D_sim
     PRIVATE
+    gpu_mesh_lib
     corotated_energy_lib
     OpenMP::OpenMP_CXX
 )
@@ -212,6 +291,7 @@ target_compile_definitions(simulation_snapshot_test
 
 target_link_libraries(simulation_snapshot_test
     PRIVATE
+    gpu_mesh_lib
     corotated_energy_lib
     OpenMP::OpenMP_CXX
     GTest::gtest
@@ -235,6 +315,7 @@ target_compile_definitions(generate_golden
 
 target_link_libraries(generate_golden
     PRIVATE
+    gpu_mesh_lib
     corotated_energy_lib
     OpenMP::OpenMP_CXX
 )
@@ -254,6 +335,7 @@ target_compile_definitions(restart_test
 
 target_link_libraries(restart_test
     PRIVATE
+    gpu_mesh_lib
     corotated_energy_lib
     OpenMP::OpenMP_CXX
     GTest::gtest

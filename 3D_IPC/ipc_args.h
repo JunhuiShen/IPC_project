@@ -34,6 +34,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_trust_region = false;
     bool   use_incremental_refresh = false;
     bool   mass_normalize_residual = true;
+    bool   use_gpu                 = false;
 
     // --- mesh ---
     int    nx           = 2;      
@@ -83,6 +84,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_trust_region", use_trust_region, false, "Use trust-region narrow phase instead of CCD for step clamping");
         add_bool  ("use_incremental_refresh", use_incremental_refresh, false, "Refresh broad-phase BVH per moved vertex during GS sweep (default off; enable for aggressive scenes)");
         add_bool  ("mass_normalize_residual", mass_normalize_residual, true,  "Divide per-vertex gradient by mass when forming the global residual (scale-invariant stopping test)");
+        add_bool  ("use_gpu",              use_gpu,              false, "Route the GS sweep through the GPU implementation (CPU stub when CUDA is unavailable)");
 
         add_int   ("nx",          nx,          31,         "Mesh subdivisions in x");
         add_int   ("ny",          ny,          31,         "Mesh subdivisions in y");
@@ -132,6 +134,7 @@ struct IPCArgs3D : ArgParser {
         p.use_trust_region = use_trust_region;
         p.use_incremental_refresh = use_incremental_refresh;
         p.mass_normalize_residual = mass_normalize_residual;
+        p.use_gpu                 = use_gpu;
         return p;
     }
 };
