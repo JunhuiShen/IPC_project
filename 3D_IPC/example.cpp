@@ -277,7 +277,7 @@ void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
     // Vertical cloth stack dropped onto the cylinder -- same pattern as
     // build_cloth_stack_example_high_res, with the cylinder catching them
     // mid-fall before they reach the ground.
-    const int    stack_count   = 15;   // number of falling cloths in the stack
+    const int    stack_count   = 50;   // number of falling cloths in the stack
     const int    small_nx      = 16;   // grid subdivisions along each cloth's x-axis (triangles = 2*nx*ny)
     const int    small_ny      = 16;   // grid subdivisions along each cloth's y-axis
     const double small_w       = 0.70; // width of each falling cloth (meters, along x)
