@@ -10,7 +10,7 @@ struct IPCArgs3D : ArgParser {
     // --- time integration ---
     double fps          = 30.0;   
     int    substeps     = 3;
-    int    num_frames   = 120;
+    int    num_frames   = 60;
 
     // --- physics ---
     double mu           = 10.0;   // Pa  (first Lame parameter / shear modulus)
@@ -18,7 +18,7 @@ struct IPCArgs3D : ArgParser {
     double density      = 1.0;    // kg/m^3
     double thickness    = 0.1;    // m
     double kB           = 0.0;    // J   (bending stiffness; 0 disables bending)
-    double kpin         = 1e7;    // N/m (pin spring stiffness)
+    double kpin         = 1e5;    // N/m (pin spring stiffness)
     double gx           = 0.0;    // m/s^2
     double gy           = -9.81;  // m/s^2
     double gz           = 0.0;    // m/s^2
@@ -26,12 +26,14 @@ struct IPCArgs3D : ArgParser {
     // --- solver ---
     int    max_iters     = 5000;
     double tol_abs       = 1e-6;  // residual norm tolerance
+    double tol_rel       = 1e-1;  // relative tolerance: stop when residual < tol_rel * initial
     double step_weight   = 1.0;
     double d_hat         = 0.01;  // barrier activation distance; 0 disables contact
     bool   use_parallel  = true;
     bool   ccd_check     = false;
     bool   use_trust_region = false;
     bool   use_incremental_refresh = false;
+    bool   mass_normalize_residual = true;
 
     // --- mesh ---
     int    nx           = 2;      
@@ -58,20 +60,21 @@ struct IPCArgs3D : ArgParser {
     IPCArgs3D() {
         add_double("fps",         fps,         30.0,       "Output frames per second");
         add_int   ("substeps",    substeps,    3,          "Solver substeps per frame (solver_dt = 1/(fps*substeps))");
-        add_int   ("num_frames",  num_frames,  120,        "Number of frames to simulate");
+        add_int   ("num_frames",  num_frames,  60,        "Number of frames to simulate");
 
-        add_double("mu",          mu,          10.0,       "First Lame parameter (shear modulus)");
-        add_double("lambda",      lambda,      10.0,       "Second Lame parameter");
-        add_double("density",     density,     1.0,        "Mass density");
-        add_double("thickness",   thickness,   0.1,        "Shell thickness");
-        add_double("kB",          kB,          1e-2,       "Bending stiffness (0 disables bending)");
-        add_double("kpin",        kpin,        1e7,        "Pin spring stiffness");
+        add_double("mu",          mu,          5.0,        "First Lame parameter (shear modulus)");
+        add_double("lambda",      lambda,      5.0,        "Second Lame parameter");
+        add_double("density",     density,     1.0,         "Mass density");
+        add_double("thickness",   thickness,   0.1,      "Shell thickness");
+        add_double("kB",          kB,          1e-3,       "Bending stiffness (0 disables bending)");
+        add_double("kpin",        kpin,        1e5,        "Pin spring stiffness");
         add_double("gx",          gx,          0.0,        "Gravity x-component");
         add_double("gy",          gy,          -9.81,      "Gravity y-component");
         add_double("gz",          gz,          0.0,        "Gravity z-component");
 
         add_int   ("max_iters",   max_iters,   5000,        "Max Gauss-Seidel iterations per frame");
         add_double("tol_abs",     tol_abs,     1e-6,       "Absolute convergence tolerance (residual force)");
+        add_double("tol_rel",     tol_rel,     1e-1,       "Relative tolerance: stop when residual < tol_rel * initial_residual (0 disables)");
         add_double("step_weight", step_weight, 1.0,        "Newton step damping factor");
         add_double("d_hat",       d_hat,       0.01,       "Barrier activation distance (0 = off)");
         add_bool  ("use_parallel", use_parallel, true,     "Use parallel Gauss-Seidel (requires coloring)");
@@ -79,6 +82,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("ccd_check",    ccd_check,    false,  "Run post-sweep CCD penetration check (serial + parallel)");
         add_bool  ("use_trust_region", use_trust_region, false, "Use trust-region narrow phase instead of CCD for step clamping");
         add_bool  ("use_incremental_refresh", use_incremental_refresh, false, "Refresh broad-phase BVH per moved vertex during GS sweep (default off; enable for aggressive scenes)");
+        add_bool  ("mass_normalize_residual", mass_normalize_residual, true,  "Divide per-vertex gradient by mass when forming the global residual (scale-invariant stopping test)");
 
         add_int   ("nx",          nx,          31,         "Mesh subdivisions in x");
         add_int   ("ny",          ny,          31,         "Mesh subdivisions in y");
@@ -119,6 +123,7 @@ struct IPCArgs3D : ArgParser {
         p.gravity          = Vec3(gx, gy, gz);
         p.max_global_iters = max_iters;
         p.tol_abs          = tol_abs;
+        p.tol_rel          = tol_rel;
         p.step_weight      = step_weight;
         p.d_hat            = d_hat;
         p.restart_frame    = restart_frame;
@@ -126,6 +131,7 @@ struct IPCArgs3D : ArgParser {
         p.ccd_check        = ccd_check;
         p.use_trust_region = use_trust_region;
         p.use_incremental_refresh = use_incremental_refresh;
+        p.mass_normalize_residual = mass_normalize_residual;
         return p;
     }
 };

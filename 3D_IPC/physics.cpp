@@ -174,10 +174,15 @@ double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap&
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                const BroadPhase& broad_phase, const PinMap* pin_map) {
     const int nv = static_cast<int>(x.size());
+    const bool normalize = params.mass_normalize_residual;
     double r_inf = 0.0;
     #pragma omp parallel for reduction(max:r_inf) schedule(static)
     for (int i = 0; i < nv; ++i) {
         Vec3 g = compute_local_gradient(i, ref_mesh, adj, pins, params, x, xhat, broad_phase, pin_map);
+        if (normalize) {
+            const double m = ref_mesh.mass[i];
+            if (m > 0.0) g /= m;
+        }
         r_inf = std::max(r_inf, g.cwiseAbs().maxCoeff());
     }
     return r_inf;

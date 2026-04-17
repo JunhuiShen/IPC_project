@@ -238,10 +238,10 @@ void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
     // has room to settle without involving the pinned corners. Only the
     // corners are pinned -- the interior is left free so its sagging-under-
     // gravity gradient stays above tol_abs and keeps the global solver iterating.
-    const int    ground_nx = 20;
-    const int    ground_ny = 20;
-    const double ground_w  = 2.4;
-    const double ground_h  = 2.4;
+    const int    ground_nx = 40;
+    const int    ground_ny = 40;
+    const double ground_w  = 4.0;
+    const double ground_h  = 4.0;
     const double ground_y  = 0.0;
 
     const int ground_base = build_square_mesh(
@@ -249,23 +249,20 @@ void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
             ground_nx, ground_ny, ground_w, ground_h,
             Vec3(-0.5 * ground_w, ground_y, -0.5 * ground_h));
 
-    const int ground_c00 = ground_base + 0;
-    const int ground_c10 = ground_base + ground_nx;
-    const int ground_c01 = ground_base + ground_ny * (ground_nx + 1);
-    const int ground_c11 = ground_base + ground_ny * (ground_nx + 1) + ground_nx;
-
-    append_pin(pins, ground_c00, state.deformed_positions);
-    append_pin(pins, ground_c10, state.deformed_positions);
-    append_pin(pins, ground_c01, state.deformed_positions);
-    append_pin(pins, ground_c11, state.deformed_positions);
+    // Pin every ground vertex so the ground behaves as a static collider
+    // (experimentally checking the fully-pinned regime).
+    const int ground_vertex_count = (ground_nx + 1) * (ground_ny + 1);
+    for (int k = 0; k < ground_vertex_count; ++k) {
+        append_pin(pins, ground_base + k, state.deformed_positions);
+    }
 
     // Horizontal cylinder (long axis +z) acting as a static collider via
     // Dirichlet pins on every vertex.
-    const int    cyl_nu     = 22;    // circumferential subdivisions
+    const int    cyl_nu     = 8;     // circumferential subdivisions (octagon cross-section)
     const int    cyl_nv     = 12;    // axial subdivisions
-    const double cyl_radius = 0.10;
+    const double cyl_radius = 0.03;
     const double cyl_length = 0.6;   // longer than the cloth width so cloth ends overhang both faces
-    const Vec3   cyl_center(0.0, 0.55, 0.0);
+    const Vec3   cyl_center(-0.30, 0.25, 0.0);
 
     const int cyl_base = build_cylinder_mesh(
             ref_mesh, state, X,
@@ -283,8 +280,8 @@ void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
     const int    stack_count   = 15;   // number of falling cloths in the stack
     const int    small_nx      = 16;   // grid subdivisions along each cloth's x-axis (triangles = 2*nx*ny)
     const int    small_ny      = 16;   // grid subdivisions along each cloth's y-axis
-    const double small_w       = 0.50; // width of each falling cloth (meters, along x)
-    const double small_h       = 0.50; // height of each falling cloth (meters, along z in world space)
+    const double small_w       = 0.70; // width of each falling cloth (meters, along x)
+    const double small_h       = 0.70; // height of each falling cloth (meters, along z in world space)
     const double first_drop_y  = 1.00; // y-coordinate of the lowest falling cloth at t=0
     const double drop_spacing  = 0.05; // vertical gap (meters) between successive stacked cloths at t=0
 

@@ -81,9 +81,9 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
     return base;
 }
 
-// Total number of vertices is: nu * (nv + 1) and total number of triangles is: 2 * (nu - 1) * nv.
-// One wrap column is intentionally skipped, leaving a thin gap on the cylinder's underside
-// (theta_start = -pi/2). Welding the seam would duplicate vertices in 3D and trip the IPC barrier.
+// Total number of vertices is: nu * (nv + 1) and total number of triangles is: 2 * nu * nv.
+// The surface is closed: the wrap column (i == nu-1 -> i == 0) reuses existing vertex
+// indices, so no vertex is duplicated in 3D.
 int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X,
                         int nu, int nv, double radius, double length, const Vec3& center) {
     constexpr double kPi = 3.14159265358979323846;
@@ -119,13 +119,14 @@ int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec
         return base + j * nu + i;
     };
 
-    // Create triangles, skipping the wrap column (i == nu-1 -> i == 0)
+    // Create triangles, wrapping the last column back to i == 0 so the cylinder is closed.
     for (int j = 0; j < nv; ++j) {
-        for (int i = 0; i < nu - 1; ++i) {
-            int v00 = vertex_index(i,     j);
-            int v10 = vertex_index(i + 1, j);
-            int v01 = vertex_index(i,     j + 1);
-            int v11 = vertex_index(i + 1, j + 1);
+        for (int i = 0; i < nu; ++i) {
+            const int i_next = (i + 1) % nu;
+            int v00 = vertex_index(i,      j);
+            int v10 = vertex_index(i_next, j);
+            int v01 = vertex_index(i,      j + 1);
+            int v11 = vertex_index(i_next, j + 1);
 
             // Split quad into two triangles
             ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v10); ref_mesh.tris.push_back(v11);
