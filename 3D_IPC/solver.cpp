@@ -10,6 +10,9 @@
 #include <cstdio>
 #include <limits>
 
+
+
+
 // CCD initial guess
 std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh) {
     const int nv = static_cast<int>(x.size());
@@ -369,6 +372,8 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
                 const auto conflict_graph = build_conflict_graph(ref_mesh, pins, broad_phase.cache(), predictions, &adj);
                 cached_color_groups = greedy_color_conflict_graph(conflict_graph, predictions);
                 cached_colors_valid = true;
+                result.last_num_colors = static_cast<int>(cached_color_groups.size());
+                result.color_groups_parallel = cached_color_groups; //for visualization
             }
             color_groups_ptr = &cached_color_groups;
         }
@@ -401,6 +406,7 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         }
 
         result.last_num_colors = static_cast<int>(color_groups.size());
+
 
         // Optional post-sweep CCD penetration check. toi < 1 means a pair
         // was missed by single-node CCD and the sweep tunneled.

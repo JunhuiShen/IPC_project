@@ -71,6 +71,7 @@ int main(int argc, char** argv) {
             build_vertex_adjacency_map(ref_mesh.tris),
             static_cast<int>(state.deformed_positions.size()));
 
+    
     BroadPhase broad_phase;
 
     std::cout << "num_frames = " << num_frames << "\n";
@@ -133,7 +134,12 @@ int main(int argc, char** argv) {
         std::cout << " | solver_time = " << std::fixed << std::setprecision(3)
                   << solver_ms << " ms\n";
 
-        export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt);
+        if (params.use_parallel) {
+            export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, &result.color_groups_parallel);
+        } else {
+            export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, nullptr);
+        }
+        
         serialize_state(outdir, frame_index, state);
     }
 
