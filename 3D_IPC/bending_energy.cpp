@@ -3,29 +3,9 @@
 #include <cassert>
 #include <cmath>
 
-namespace {
-
-// Cache of geometric quantities shared by theta, gradient, and Hessian.
-//   e = x_1 - x_0,  a = x_2 - x_0,  b = x_3 - x_0
-//   m_A = e x a,    m_B = b x e    (flat configuration -> m_A || m_B)
-//   X = m_A . m_B  (proportional to cos theta)
-//   Y = (m_A x m_B) . e_hat  (proportional to sin theta; m_A x m_B is parallel to e)
-//   X^2 + Y^2 = |m_A|^2 |m_B|^2, so theta = atan2(Y, X).
-struct BendingCache {
-    Vec3 e;
-    Vec3 a;
-    Vec3 b;
-    Vec3 mA;
-    Vec3 mB;
-    Vec3 e_hat;
-    double muA2;
-    double muB2;
-    double ell;
-    double X;
-    double Y;
-    double theta;
-    bool degenerate;
-};
+// make_bending_cache and grad_theta_node are intentionally at file scope
+// (declared in the header): batched consumers precompute a BendingCache and
+// the four per-node grad_theta vectors once per hinge, then reuse them.
 
 BendingCache make_bending_cache(const HingeDef& hinge) {
     BendingCache c;
@@ -56,7 +36,7 @@ BendingCache make_bending_cache(const HingeDef& hinge) {
 // Partial derivative of X = m_A . m_B with respect to x_node (as a 3-vector).
 // Derived by differentiating m_A = e x a and m_B = b x e through e, a, b
 // while tracking each node's dependencies.
-Vec3 dX_dnode(const BendingCache& c, const HingeDef& hinge, int node) {
+static Vec3 dX_dnode(const BendingCache& c, const HingeDef& hinge, int node) {
     switch (node) {
         case 0: {
             const Vec3 cA = hinge.x[2] - hinge.x[1];  // x_2 - x_1
@@ -132,15 +112,13 @@ NodeFrame make_node_frame(const HingeDef& hinge, int node) {
     return f;
 }
 
-Mat33 cross_matrix(const Vec3& v) {
+static Mat33 cross_matrix(const Vec3& v) {
     Mat33 M;
     M <<      0.0, -v(2),  v(1),
             v(2),   0.0, -v(0),
            -v(1),  v(0),   0.0;
     return M;
 }
-
-}  // namespace
 
 double bending_theta(const HingeDef& hinge) {
     return make_bending_cache(hinge).theta;

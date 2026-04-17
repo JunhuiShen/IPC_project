@@ -32,9 +32,9 @@ struct IPCArgs3D : ArgParser {
     bool   use_parallel  = true;
     bool   ccd_check     = false;
     bool   use_trust_region = false;
-    bool   use_incremental_refresh = false;
     bool   mass_normalize_residual = true;
     bool   use_gpu                 = false;
+    int    color_rebuild_interval  = 10;
 
     // --- mesh ---
     int    nx           = 2;      
@@ -82,9 +82,9 @@ struct IPCArgs3D : ArgParser {
 
         add_bool  ("ccd_check",    ccd_check,    false,  "Run post-sweep CCD penetration check (serial + parallel)");
         add_bool  ("use_trust_region", use_trust_region, false, "Use trust-region narrow phase instead of CCD for step clamping");
-        add_bool  ("use_incremental_refresh", use_incremental_refresh, false, "Refresh broad-phase BVH per moved vertex during GS sweep (default off; enable for aggressive scenes)");
         add_bool  ("mass_normalize_residual", mass_normalize_residual, true,  "Divide per-vertex gradient by mass when forming the global residual (scale-invariant stopping test)");
         add_bool  ("use_gpu",              use_gpu,              false, "Route the GS sweep through the GPU implementation (CPU stub when CUDA is unavailable)");
+        add_int   ("color_rebuild_interval", color_rebuild_interval, 10, "Parallel solver: recolor every N outer iterations (N<=0 treated as 1)");
 
         add_int   ("nx",          nx,          31,         "Mesh subdivisions in x");
         add_int   ("ny",          ny,          31,         "Mesh subdivisions in y");
@@ -113,7 +113,7 @@ struct IPCArgs3D : ArgParser {
     }
 
     SimParams to_sim_params() const {
-        SimParams p;
+        SimParams p = SimParams::zeros();
         p.fps              = fps;
         p.substeps         = substeps;
         p.mu               = mu;
@@ -132,9 +132,9 @@ struct IPCArgs3D : ArgParser {
         p.use_parallel     = use_parallel;
         p.ccd_check        = ccd_check;
         p.use_trust_region = use_trust_region;
-        p.use_incremental_refresh = use_incremental_refresh;
         p.mass_normalize_residual = mass_normalize_residual;
         p.use_gpu                 = use_gpu;
+        p.color_rebuild_interval  = color_rebuild_interval;
         return p;
     }
 };

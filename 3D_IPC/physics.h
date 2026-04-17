@@ -19,38 +19,62 @@ struct Pin {
     Vec3 target_position = Vec3::Zero();
 };
 
+// Fields are left uninitialised on purpose. Construct via SimParams::zeros()
+// (safe-zero seed) or IPCArgs3D::to_sim_params() (production CLI defaults).
+// A bare `SimParams p;` is undefined for the fundamental-type members.
 struct SimParams {
-    double fps{30.0};
-    int    substeps{1};
-    double mu{}, lambda{}, density{}, thickness{}, kpin{}, tol_abs{}, step_weight{};
-    double tol_rel{0.0};  // relative tolerance (factor of initial residual); 0 disables
-    double kB{0.0};  // bending (flexural) stiffness; 0 disables the bending term
-    double d_hat{0.0};
-    Vec3 gravity = Vec3::Zero();
-    int max_global_iters{};
+    double fps;
+    int    substeps;
+    double mu, lambda, density, thickness, kpin, tol_abs, step_weight;
+    double tol_rel;   // relative tolerance (factor of initial residual); 0 disables
+    double kB;        // bending (flexural) stiffness; 0 disables the bending term
+    double d_hat;     // barrier activation distance; 0 disables contact
+    Vec3   gravity;
+    int    max_global_iters;
 
-    int    restart_frame{-1};  // -1 = no restart
-    bool   use_parallel{false};
-
-    // Post-sweep CCD penetration check. Off by default.
-    bool   ccd_check{false};
-
-    // Use the trust-region narrow phase instead of CCD for step clamping.
-    bool   use_trust_region{false};
-
-    // Rebuild the broad-phase BVH per moved vertex during the GS sweep.
-    bool   use_incremental_refresh{false};
-
-    // Divide the per-vertex gradient by vertex mass when forming the global
-    // residual. Makes the convergence criterion scale-invariant with mass so
-    // the same tol_abs works for heavy ground and light cloth vertices.
-    bool   mass_normalize_residual{false};
+    int    restart_frame;  // -1 = no restart
+    bool   use_parallel;
+    bool   ccd_check;
+    bool   use_trust_region;
+    bool   mass_normalize_residual;
+    int    color_rebuild_interval;
 
     // Route the per-substep Gauss-Seidel sweep through the GPU implementation
-    // (gpu_gauss_seidel_solver).  On machines without CUDA the CPU stub is
-    // used automatically.  Incompatible with use_parallel and
-    // use_incremental_refresh (those are ignored when use_gpu is set).
-    bool   use_gpu{false};
+    // (gpu_gauss_seidel_solver). On machines without CUDA the CPU stub is
+    // used automatically. When set, use_parallel is ignored.
+    bool   use_gpu;
+
+    // Returns a SimParams with every field set to a benign "disabled / zero /
+    // sentinel" value. This is the single source of truth for the init state
+    // tests start from; callers then override the subset of fields they care
+    // about. Matches the in-class defaults that used to live here.
+    static SimParams zeros() {
+        SimParams p;
+        p.fps                       = 30.0;
+        p.substeps                  = 1;
+        p.mu                        = 0.0;
+        p.lambda                    = 0.0;
+        p.density                   = 0.0;
+        p.thickness                 = 0.0;
+        p.kpin                      = 0.0;
+        p.tol_abs                   = 0.0;
+        p.step_weight               = 0.0;
+        p.tol_rel                   = 0.0;
+        p.kB                        = 0.0;
+        p.d_hat                     = 0.0;
+        p.gravity                   = Vec3::Zero();
+        p.max_global_iters          = 0;
+        p.restart_frame             = -1;
+        p.use_parallel              = false;
+        p.ccd_check                 = false;
+        p.use_trust_region          = false;
+        p.mass_normalize_residual   = false;
+        p.color_rebuild_interval    = 10;
+        p.use_gpu                   = false;
+        p.cached_dt_                = -1.0;
+        p.cached_dt2_               = -1.0;
+        return p;
+    }
 
     double dt()  const {
         if (cached_dt_ < 0.0) cached_dt_ = 1.0 / (fps * static_cast<double>(substeps));
@@ -64,8 +88,8 @@ struct SimParams {
     void invalidate_dt_cache() const { cached_dt_ = -1.0; cached_dt2_ = -1.0; }
 
 private:
-    mutable double cached_dt_ = -1.0;
-    mutable double cached_dt2_ = -1.0;
+    mutable double cached_dt_;
+    mutable double cached_dt2_;
 public:
 };
 
@@ -220,10 +244,39 @@ inline PinMap build_pin_map(const std::vector<Pin>& pins, int nv) {
 double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins,
                                                 const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
+// Per-triangle quantities shared across the triangle's three corners.
+struct TriPrecompute {
+    Mat32      P;
+    Mat66      dPdF;
+    ShapeGrads gradN;
+    double     A            = 0.0;
+    bool       has_hessian  = false;
+};
+
+// Per-hinge quantities shared across the 4 nodes of the bending stencil.
+struct HingePrecompute {
+    std::array<Vec3, 4> gtheta;             // d theta / d x_node for each role
+    double              scale_grad = 0.0;   // 2 * k_B * c_e * (theta - bar_theta)
+    double              scale_hess = 0.0;   // 2 * k_B * c_e
+    bool                degenerate = true;  // true => gradient and PSD Hessian are zero
+};
+
+// `want_hessian == false` leaves dPdF uninitialised.
+void build_elastic_precompute(const RefMesh& ref_mesh, const std::vector<Vec3>& x,
+                              const SimParams& params, bool want_hessian,
+                              std::vector<TriPrecompute>& out);
+
+// Leaves `out` empty when kB <= 0 or the mesh has no hinges.
+void build_bending_precompute(const RefMesh& ref_mesh, const std::vector<Vec3>& x,
+                              const SimParams& params,
+                              std::vector<HingePrecompute>& out);
+
 std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh,
                                                                      const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                                                      const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                                                                     const PinMap* pin_map = nullptr);
+                                                                     const PinMap* pin_map = nullptr,
+                                                                     const std::vector<TriPrecompute>* tri_cache = nullptr,
+                                                                     const std::vector<HingePrecompute>* hinge_cache = nullptr);
 
 double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,

@@ -43,92 +43,13 @@ static void build_test_scene(RefMesh& ref_mesh, DeformedState& state,
     adj = build_incident_triangle_map(ref_mesh.tris);
 }
 
-// Two disjoint triangles used to exercise Case 2 in barrier-set completeness:
-// overlapping certified regions force different colors; after the earlier node commits,
-// refresh must insert newly created proximity pairs before the later node commits.
-static void build_case2_refresh_scene(RefMesh& ref_mesh, DeformedState& state,
-                                      std::vector<Pin>& pins, VertexTriangleMap& adj,
-                                      SimParams& params, std::vector<Vec2>& X) {
-    params.fps              = 30.0;
-    params.substeps         = 1;
-    params.mu               = 10.0;
-    params.lambda           = 10.0;
-    params.density          = 1.0;
-    params.thickness        = 0.1;
-    params.kpin             = 1e7;
-    params.gravity          = Vec3(0.0, -9.81, 0.0);
-    params.max_global_iters = 10;
-    params.tol_abs          = 1e-6;
-    params.d_hat            = 0.15;
-    params.use_parallel     = false;
-
-    pins.clear();
-    ref_mesh.tris.clear();
-    ref_mesh.ref_positions.clear();
-    state.deformed_positions.clear();
-    state.velocities.clear();
-    X.clear();
-
-    // Triangle A (contains node 0, initially far from triangle B)
-    state.deformed_positions.push_back(Vec3(0.0, 0.0, 0.0));  // 0 (moved in test)
-    state.deformed_positions.push_back(Vec3(0.0, 1.0, 0.0));  // 1
-    state.deformed_positions.push_back(Vec3(1.0, 0.0, 0.0));  // 2
-
-    // Triangle B (contains node 3, target of newly created proximity)
-    state.deformed_positions.push_back(Vec3(2.0, 0.0, 0.0));  // 3
-    state.deformed_positions.push_back(Vec3(2.0, 1.0, 0.0));  // 4
-    state.deformed_positions.push_back(Vec3(3.0, 0.0, 0.0));  // 5
-
-    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
-
-    X = {
-        Vec2(0.0, 0.0), Vec2(0.0, 1.0), Vec2(1.0, 0.0),
-        Vec2(2.0, 0.0), Vec2(2.0, 1.0), Vec2(3.0, 0.0)
-    };
-
-    ref_mesh.ref_positions = X;
-    ref_mesh.tris = {0, 1, 2, 3, 4, 5};
-    ref_mesh.initialize(X);
-    ref_mesh.build_lumped_mass(params.density, params.thickness);
-    adj = build_incident_triangle_map(ref_mesh.tris);
-}
-
-static std::unordered_set<std::string> collect_nt_tokens(const BroadPhase::Cache& cache) {
-    std::unordered_set<std::string> out;
-    out.reserve(cache.nt_pairs.size() * 2 + 1);
-    for (const auto& p : cache.nt_pairs) {
-        std::array<int, 3> tri = {p.tri_v[0], p.tri_v[1], p.tri_v[2]};
-        std::sort(tri.begin(), tri.end());
-        out.insert(std::to_string(p.node) + "|" +
-                   std::to_string(tri[0]) + "," +
-                   std::to_string(tri[1]) + "," +
-                   std::to_string(tri[2]));
-    }
-    return out;
-}
-
-static std::unordered_set<std::string> collect_ss_tokens(const BroadPhase::Cache& cache) {
-    std::unordered_set<std::string> out;
-    out.reserve(cache.ss_pairs.size() * 2 + 1);
-    for (const auto& p : cache.ss_pairs) {
-        std::array<int, 2> e0 = {p.v[0], p.v[1]};
-        std::array<int, 2> e1 = {p.v[2], p.v[3]};
-        if (e0[0] > e0[1]) std::swap(e0[0], e0[1]);
-        if (e1[0] > e1[1]) std::swap(e1[0], e1[1]);
-        if (e1 < e0) std::swap(e0, e1);
-        out.insert(std::to_string(e0[0]) + "-" + std::to_string(e0[1]) + "|" +
-                   std::to_string(e1[0]) + "-" + std::to_string(e1[1]));
-    }
-    return out;
-}
-
 // ---------------------------------------------------------------------------
 // build_jacobi_predictions
 // ---------------------------------------------------------------------------
 
 TEST(BuildJacobiPredictions, AllNodesActive) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     std::vector<Vec3> xhat;
@@ -150,7 +71,7 @@ TEST(BuildJacobiPredictions, AllNodesActive) {
 
 TEST(BuildJacobiPredictions, CertifiedRegionContainsTrajectory) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     std::vector<Vec3> xhat;
@@ -180,7 +101,7 @@ TEST(BuildJacobiPredictions, CertifiedRegionContainsTrajectory) {
 
 TEST(BuildJacobiPredictions, CertifiedRegionInflatedByDhat) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     std::vector<Vec3> xhat;
@@ -221,7 +142,7 @@ TEST(BuildJacobiPredictions, CertifiedRegionInflatedByDhat) {
 
 TEST(BuildConflictGraph, ElasticCoupling) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     std::vector<Vec3> xhat;
@@ -251,7 +172,7 @@ TEST(BuildConflictGraph, ElasticCoupling) {
 
 TEST(BuildConflictGraph, SymmetricEdges) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     std::vector<Vec3> xhat;
@@ -276,7 +197,7 @@ TEST(BuildConflictGraph, SymmetricEdges) {
 
 TEST(BuildConflictGraph, NoSelfEdges) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     std::vector<Vec3> xhat;
@@ -296,13 +217,50 @@ TEST(BuildConflictGraph, NoSelfEdges) {
     }
 }
 
+TEST(BuildConflictGraph, SweptBvhCacheMatchesRebuild) {
+    RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
+    build_test_scene(ref_mesh, state, pins, adj, params, X);
+
+    std::vector<Vec3> xhat;
+    build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
+
+    BroadPhase bp;
+    bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
+
+    std::vector<JacobiPrediction> predictions;
+    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+
+    // First call primes the cache via full build.
+    SweptBvhCache sw_cache;
+    auto g1_cached = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions, &adj, nullptr, &sw_cache);
+    auto g1_fresh  = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
+    ASSERT_EQ(g1_cached.size(), g1_fresh.size());
+    for (std::size_t i = 0; i < g1_fresh.size(); ++i)
+        EXPECT_EQ(g1_cached[i], g1_fresh[i]) << "vertex " << i << " differs on cached initial build";
+
+    // Mutate every certified region (shift its bounds) to force refit to
+    // actually do work. Cached path now takes the refit branch.
+    for (auto& p : predictions) {
+        const Vec3 shift(0.013, -0.011, 0.009);
+        p.certified_region.min += shift;
+        p.certified_region.max += shift;
+    }
+
+    auto g2_cached = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions, &adj, nullptr, &sw_cache);
+    auto g2_fresh  = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
+    ASSERT_EQ(g2_cached.size(), g2_fresh.size());
+    for (std::size_t i = 0; i < g2_fresh.size(); ++i)
+        EXPECT_EQ(g2_cached[i], g2_fresh[i]) << "vertex " << i << " differs after cached refit";
+}
+
 // ---------------------------------------------------------------------------
 // greedy_color_conflict_graph
 // ---------------------------------------------------------------------------
 
 TEST(GreedyColorConflictGraph, ValidColoring) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     std::vector<Vec3> xhat;
@@ -336,7 +294,7 @@ TEST(GreedyColorConflictGraph, ValidColoring) {
 
 TEST(GreedyColorConflictGraph, AllActiveVerticesCovered) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     std::vector<Vec3> xhat;
@@ -366,7 +324,7 @@ TEST(GreedyColorConflictGraph, AllActiveVerticesCovered) {
 
 TEST(GreedyColorConflictGraph, EachActiveVertexAppearsExactlyOnce) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     std::vector<Vec3> xhat;
@@ -405,7 +363,7 @@ TEST(GreedyColorConflictGraph, EachActiveVertexAppearsExactlyOnce) {
 
 TEST(ComputeParallelCommit, CachedPredictionProducesValidCommit) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     std::vector<Vec3> xhat;
@@ -431,7 +389,7 @@ TEST(ComputeParallelCommit, CachedPredictionProducesValidCommit) {
 
 TEST(ComputeParallelCommit, FreshDirectionGetsClipped) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     std::vector<Vec3> xhat;
@@ -490,7 +448,7 @@ TEST(ApplyParallelCommits, UpdatesCorrectVertices) {
 
 TEST(BuildConflictGraph, SweptRegionOverlapImpliesEdge) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     std::vector<Vec3> xhat;
@@ -578,7 +536,7 @@ TEST(ParallelHelper, EmptySceneIsHandled) {
     DeformedState state;
     std::vector<Pin> pins;
     VertexTriangleMap adj;
-    SimParams params;
+    SimParams params = SimParams::zeros();
     params.fps = 30.0;
     params.substeps = 1;
     params.mu = 10.0;
@@ -613,7 +571,7 @@ TEST(ParallelHelper, EmptySceneIsHandled) {
 
 TEST(ParallelHelper, InactivePinnedVerticesAreExcludedFromGroupsAndCommits) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     std::vector<Vec3> xhat;
@@ -659,87 +617,9 @@ TEST(ParallelHelper, InactivePinnedVerticesAreExcludedFromGroupsAndCommits) {
     }
 }
 
-TEST(ParallelHelper, OverlapCaseRefreshMakesNewPairVisibleBeforeLaterBatch) {
-    RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
-    build_case2_refresh_scene(ref_mesh, state, pins, adj, params, X);
-
-    // Node i=0 will commit earlier, node j=3 later.
-    const int i = 0;
-    const int j = 3;
-
-    std::vector<Vec3> xhat;
-    build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
-
-    BroadPhase bp;
-    bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
-
-    // Initially node i is far from triangle (3,4,5): this pair should be absent.
-    bool initially_has_i_to_tri_b = false;
-    for (const auto& p : bp.cache().nt_pairs) {
-        const bool tri_b = (p.tri_v[0] == 3 && p.tri_v[1] == 4 && p.tri_v[2] == 5);
-        if (p.node == i && tri_b) {
-            initially_has_i_to_tri_b = true;
-            break;
-        }
-    }
-    EXPECT_FALSE(initially_has_i_to_tri_b);
-
-    std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
-
-    // Force Case 2 overlap edge in the conflict graph.
-    predictions[i].certified_region = AABB(Vec3(1.9, -0.1, -0.1), Vec3(2.3, 0.3, 0.1));
-    predictions[j].certified_region = AABB(Vec3(1.9, -0.1, -0.1), Vec3(2.3, 0.3, 0.1));
-
-    auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
-    auto groups = greedy_color_conflict_graph(graph, predictions);
-
-    std::vector<int> color(predictions.size(), -1);
-    for (int c = 0; c < static_cast<int>(groups.size()); ++c) {
-        for (int v : groups[c]) color[v] = c;
-    }
-    ASSERT_NE(color[i], -1);
-    ASSERT_NE(color[j], -1);
-    EXPECT_NE(color[i], color[j]) << "overlap case should force different batches";
-
-    // Simulate earlier-batch commit of node i: move it near interior of triangle B.
-    std::vector<Vec3> x_after_i = state.deformed_positions;
-    x_after_i[i] = Vec3(2.1, 0.2, 0.0);
-
-    const double dt = params.dt();
-    const double node_pad = params.d_hat;
-    const double tri_pad = 0.0;
-    const double edge_pad = params.d_hat * 0.5;
-    bp.refresh(x_after_i, state.velocities, ref_mesh, i, dt, node_pad, tri_pad, edge_pad);
-
-    // After refresh and before node j's batch, the new proximity pair must be visible.
-    bool refreshed_has_i_to_tri_b = false;
-    for (const auto& p : bp.cache().nt_pairs) {
-        const bool tri_b = (p.tri_v[0] == 3 && p.tri_v[1] == 4 && p.tri_v[2] == 5);
-        if (p.node == i && tri_b) {
-            refreshed_has_i_to_tri_b = true;
-            break;
-        }
-    }
-    EXPECT_TRUE(refreshed_has_i_to_tri_b);
-
-    // Also confirm the later node j sees this pair in its incident list before commit.
-    bool j_incident_sees_pair = false;
-    for (const auto& entry : bp.cache().vertex_nt[j]) {
-        const auto& p = bp.cache().nt_pairs[entry.pair_index];
-        const bool tri_b = (p.tri_v[0] == 3 && p.tri_v[1] == 4 && p.tri_v[2] == 5);
-        if (p.node == i && tri_b) {
-            j_incident_sees_pair = true;
-            break;
-        }
-    }
-    EXPECT_TRUE(j_incident_sees_pair);
-}
-
 TEST(ComputeParallelCommit, NoBarrierImpliesFullCCDStep) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
     params.d_hat = 0.0;
 
@@ -762,7 +642,7 @@ TEST(ComputeParallelCommit, NoBarrierImpliesFullCCDStep) {
 
 TEST(ComputeParallelCommit, ExactBoundaryClipProducesBoundaryPoint) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     std::vector<Vec3> xhat;
@@ -795,7 +675,7 @@ TEST(ComputeParallelCommit, ExactBoundaryClipProducesBoundaryPoint) {
 
 TEST(ParallelSolver, OneSweepProducesFiniteResults) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     SimParams sweep_params = params;
@@ -824,7 +704,7 @@ TEST(ParallelSolver, OneSweepProducesFiniteResults) {
 
 TEST(ParallelSolver, OneSweepDoesNotIncreaseNoBarrierEnergy) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     SimParams sweep_params = params;
@@ -846,45 +726,9 @@ TEST(ParallelSolver, OneSweepDoesNotIncreaseNoBarrierEnergy) {
     EXPECT_LE(E_after, E_before + 1e-10);
 }
 
-TEST(BroadPhaseRefresh, IncrementalMatchesFullRebuildRandomized) {
-    RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
-    build_test_scene(ref_mesh, state, pins, adj, params, X, /*nx=*/4, /*ny=*/4);
-    params.d_hat = 0.05;
-
-    std::vector<Vec3> x = state.deformed_positions;
-    std::vector<Vec3> v = state.velocities;
-    const double dt = params.dt();
-
-    BroadPhase inc_bp;
-    inc_bp.initialize(x, v, ref_mesh, dt, params.d_hat);
-
-    std::mt19937 rng(1337);
-    std::uniform_int_distribution<int> node_dist(0, static_cast<int>(x.size()) - 1);
-    std::uniform_real_distribution<double> disp_dist(-0.08, 0.08);
-
-    for (int step = 0; step < 50; ++step) {
-        const int vi = node_dist(rng);
-        x[vi] += Vec3(disp_dist(rng), disp_dist(rng), disp_dist(rng));
-
-        inc_bp.refresh(x, v, ref_mesh, vi, dt, params.d_hat, 0.0, params.d_hat * 0.5);
-
-        BroadPhase full_bp;
-        full_bp.initialize(x, v, ref_mesh, dt, params.d_hat);
-
-        const auto nt_inc = collect_nt_tokens(inc_bp.cache());
-        const auto nt_full = collect_nt_tokens(full_bp.cache());
-        const auto ss_inc = collect_ss_tokens(inc_bp.cache());
-        const auto ss_full = collect_ss_tokens(full_bp.cache());
-
-        EXPECT_EQ(nt_inc, nt_full) << "NT mismatch at step " << step << ", moved node " << vi;
-        EXPECT_EQ(ss_inc, ss_full) << "SS mismatch at step " << step << ", moved node " << vi;
-    }
-}
-
 TEST(ParallelSolver, MultiIterationStability) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X, /*nx=*/4, /*ny=*/4);
 
     SimParams sweep_params = params;
@@ -933,7 +777,7 @@ TEST(ParallelSolver, MultiIterationStability) {
 #ifdef _OPENMP
 TEST(ParallelSolver, OneSweepConsistentAcrossThreadCounts) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     SimParams sweep_params = params;
@@ -964,7 +808,7 @@ TEST(ParallelSolver, OneSweepConsistentAcrossThreadCounts) {
 
 TEST(ParallelSolver, OneSweepRepeatableSameThreadCount) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
 
     SimParams sweep_params = params;
@@ -1016,7 +860,7 @@ TEST(TrustRegionSafeStep, FarFromBarrierReturnsFullStep) {
     DeformedState state;
     std::vector<Vec2> X;
 
-    SimParams params;
+    SimParams params = SimParams::zeros();
     params.fps = 30.0;
     params.substeps = 1;
     params.mu = 10.0;

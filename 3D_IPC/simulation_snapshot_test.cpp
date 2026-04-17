@@ -77,7 +77,7 @@ auto golden = load_golden(golden_path);
 ASSERT_FALSE(golden.empty()) << "Golden file empty or missing";
 
 RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-VertexTriangleMap adj; SimParams params; std::vector<Vec2> X;
+VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
 build_scene(ref_mesh, state, pins, adj, params, X);
 
 // No barrier -- serial path

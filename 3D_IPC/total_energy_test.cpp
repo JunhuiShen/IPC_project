@@ -211,7 +211,7 @@ bool slope2_check(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
 
 class TotalEnergyTest : public ::testing::Test {
 protected:
-    SimParams params;
+    SimParams params = SimParams::zeros();
     RefMesh ref_mesh;
     DeformedState state;
     std::vector<Vec2> X;

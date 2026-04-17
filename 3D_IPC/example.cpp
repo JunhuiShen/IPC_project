@@ -236,14 +236,12 @@ void build_twisting_cloth_example(const IPCArgs3D& args,
                                   TwistSpec& spec) {
     clear_model(ref_mesh, state, X, pins);
 
-    // Square 100x100 grid -> 10,000 vertices; 2.5m x 2.5m sheet (edge ~0.0253m
-    // keeps min_edge_len > 2*d_hat for the default d_hat=0.01); 8 total relative turns.
+    // Square 100x100 grid with 8 total relative turns.
     const int    nx     = 99;
     const int    ny     = 99;
     const double width  = 2.5;
     const double height = 2.5;
     const double y0     = args.sheet_y;
-    const double twist_turns = 8.0;
 
     // Center the cloth so the midline (+x axis at y = y0, z = 0) passes
     // through the mesh centroid.
@@ -253,7 +251,7 @@ void build_twisting_cloth_example(const IPCArgs3D& args,
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
 
     const double duration = static_cast<double>(args.num_frames) / args.fps;
-    const double omega = (kTwoPi * twist_turns) / (2.0 * duration);
+    const double omega = (kTwoPi * args.twist_turns) / (2.0 * duration);
 
     spec = TwistSpec{};
     spec.axis_point  = Vec3(0.0, y0, 0.0);

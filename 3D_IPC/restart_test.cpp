@@ -80,7 +80,7 @@ TEST(RestartTest, RestartFromFrame50MatchesGolden) {
     {
         RefMesh ref_mesh; DeformedState state;
         std::vector<Pin> pins; VertexTriangleMap adj;
-        SimParams params; std::vector<Vec2> X;
+        SimParams params = SimParams::zeros(); std::vector<Vec2> X;
         build_scene(ref_mesh, state, pins, adj, params, X);
 
         const auto color_groups = greedy_color(build_vertex_adjacency_map(ref_mesh.tris),

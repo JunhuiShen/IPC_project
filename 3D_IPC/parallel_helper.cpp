@@ -31,8 +31,10 @@ static inline int ph_thread_num() {
 static void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                            const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                            const BroadPhase::Cache& bp_cache, Vec3& g_out, Mat33& H_out, Vec3& delta_out,
-                                           const PinMap* pin_map = nullptr){
-    auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x, xhat, pin_map);
+                                           const PinMap* pin_map = nullptr,
+                                           const std::vector<TriPrecompute>* tri_cache = nullptr,
+                                           const std::vector<HingePrecompute>* hinge_cache = nullptr){
+    auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x, xhat, pin_map, tri_cache, hinge_cache);
 
     if (params.d_hat > 0.0) {
         const double dt2 = params.dt2();
@@ -101,35 +103,144 @@ void build_jacobi_predictions(const RefMesh& ref_mesh, const VertexTriangleMap& 
     predictions.clear();
     predictions.resize(nv);
 
+    // Per-triangle F/cache/P/dPdF and per-hinge cache are shared across every
+    // corner of their stencil; the per-vertex call reads them instead of
+    // recomputing from x.
+    std::vector<TriPrecompute>   tri_cache;
+    std::vector<HingePrecompute> hinge_cache;
+    build_elastic_precompute(ref_mesh, x, params, /*want_hessian=*/true, tri_cache);
+    build_bending_precompute(ref_mesh, x, params, hinge_cache);
+
     #pragma omp parallel for if(params.use_parallel)
     for (int vi = 0; vi < nv; ++vi) {
         predictions[vi].active = true;
 
         Vec3 g, delta;
         Mat33 H;
-        compute_local_newton_direction(vi, ref_mesh, adj, pins, params, x, xhat, bp_cache, g, H, delta, pin_map);
+        compute_local_newton_direction(vi, ref_mesh, adj, pins, params, x, xhat, bp_cache, g, H, delta, pin_map, &tri_cache, &hinge_cache);
 
         predictions[vi].g = g;
-        predictions[vi].H = H;
         predictions[vi].delta = delta;
         predictions[vi].certified_region = build_certified_region_for_vertex(vi, x, predictions[vi].delta, bp_cache, params.d_hat);
     }
 }
 
+std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int nv){
+    std::vector<std::vector<int>> out(nv);
+    #pragma omp parallel for schedule(static)
+    for (int vi = 0; vi < nv; ++vi) {
+        auto it = adj.find(vi);
+        if (it == adj.end()) continue;
+        std::vector<int>& row = out[vi];
+        for (const auto& [ti, local_a] : it->second) {
+            for (int local_b = 0; local_b < 3; ++local_b) {
+                const int vj = tri_vertex(ref_mesh, ti, local_b);
+                if (vj == vi || vj < 0 || vj >= nv) continue;
+                row.push_back(vj);
+            }
+        }
+        std::sort(row.begin(), row.end());
+        row.erase(std::unique(row.begin(), row.end()), row.end());
+    }
+    return out;
+}
+
+std::vector<std::vector<int>> build_contact_adj(const BroadPhase::Cache& bp_cache, int nv){
+    const int T = ph_max_threads();
+    std::vector<std::vector<std::vector<int>>> local_nbr(T, std::vector<std::vector<int>>(nv));
+    const int n_nt = static_cast<int>(bp_cache.nt_pairs.size());
+    const int n_ss = static_cast<int>(bp_cache.ss_pairs.size());
+
+    #pragma omp parallel
+    {
+        auto& lg = local_nbr[ph_thread_num()];
+        #pragma omp for schedule(static) nowait
+        for (int i = 0; i < n_nt; ++i) {
+            const auto& p = bp_cache.nt_pairs[i];
+            const int verts[4] = { p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2] };
+            for (int a = 0; a < 4; ++a) {
+                if (verts[a] < 0 || verts[a] >= nv) continue;
+                for (int b = a + 1; b < 4; ++b) {
+                    if (verts[b] < 0 || verts[b] >= nv) continue;
+                    lg[verts[a]].push_back(verts[b]);
+                    lg[verts[b]].push_back(verts[a]);
+                }
+            }
+        }
+        #pragma omp for schedule(static)
+        for (int i = 0; i < n_ss; ++i) {
+            const auto& p = bp_cache.ss_pairs[i];
+            for (int a = 0; a < 4; ++a) {
+                const int va = p.v[a];
+                if (va < 0 || va >= nv) continue;
+                for (int b = a + 1; b < 4; ++b) {
+                    const int vb = p.v[b];
+                    if (vb < 0 || vb >= nv) continue;
+                    lg[va].push_back(vb);
+                    lg[vb].push_back(va);
+                }
+            }
+        }
+    }
+
+    std::vector<std::vector<int>> out(nv);
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (int vi = 0; vi < nv; ++vi) {
+        std::size_t total = 0;
+        for (int t = 0; t < T; ++t) total += local_nbr[t][vi].size();
+        out[vi].reserve(total);
+        for (int t = 0; t < T; ++t) {
+            auto& src = local_nbr[t][vi];
+            out[vi].insert(out[vi].end(), src.begin(), src.end());
+        }
+        std::sort(out[vi].begin(), out[vi].end());
+        out[vi].erase(std::unique(out[vi].begin(), out[vi].end()), out[vi].end());
+    }
+    return out;
+}
+
+std::vector<std::vector<int>> union_adjacency(const std::vector<std::vector<int>>& a,
+                                              const std::vector<std::vector<int>>& b){
+    const int nv = static_cast<int>(std::max(a.size(), b.size()));
+    std::vector<std::vector<int>> out(nv);
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (int vi = 0; vi < nv; ++vi) {
+        const auto* pa = (vi < static_cast<int>(a.size())) ? &a[vi] : nullptr;
+        const auto* pb = (vi < static_cast<int>(b.size())) ? &b[vi] : nullptr;
+        if (!pa || pa->empty()) { if (pb) out[vi] = *pb; continue; }
+        if (!pb || pb->empty()) { out[vi] = *pa; continue; }
+        out[vi].reserve(pa->size() + pb->size());
+        std::set_union(pa->begin(), pa->end(), pb->begin(), pb->end(), std::back_inserter(out[vi]));
+    }
+    return out;
+}
+
 std::vector<std::vector<int>> build_conflict_graph(const RefMesh& ref_mesh, const std::vector<Pin>& /*pins*/,
                                                    const BroadPhase::Cache& bp_cache, const std::vector<JacobiPrediction>& predictions,
-                                                   const VertexTriangleMap* adj){
+                                                   const VertexTriangleMap* adj,
+                                                   const std::vector<std::vector<int>>* base_adj,
+                                                   SweptBvhCache* sw_cache){
     const int nv = static_cast<int>(predictions.size());
     std::vector<std::vector<int>> graph(nv);
 
     VertexTriangleMap local_adj;
-    if (!adj) {
+    if (!adj && !base_adj) {
         local_adj = build_incident_triangle_map(ref_mesh.tris);
         adj = &local_adj;
     }
 
-    std::vector<AABB> active_boxes;
-    std::vector<int> active_ids;
+    // Stage active AABBs into cache storage (if provided) so refit_bvh can
+    // reuse the node layout; otherwise use function-local buffers.
+    std::vector<AABB>  local_active_boxes;
+    std::vector<int>   local_active_ids;
+    std::vector<AABB>& active_boxes = sw_cache ? sw_cache->active_boxes : local_active_boxes;
+    std::vector<int>&  active_ids   = sw_cache ? sw_cache->active_ids   : local_active_ids;
+    const int prev_n_active = static_cast<int>(active_ids.size());
+    const int prev_first_id = prev_n_active > 0 ? active_ids.front() : -1;
+    const int prev_last_id  = prev_n_active > 0 ? active_ids.back()  : -1;
+
+    active_boxes.clear();
+    active_ids.clear();
     active_boxes.reserve(nv);
     active_ids.reserve(nv);
     for (int i = 0; i < nv; ++i) {
@@ -137,73 +248,105 @@ std::vector<std::vector<int>> build_conflict_graph(const RefMesh& ref_mesh, cons
         active_ids.push_back(i);
         active_boxes.push_back(predictions[i].certified_region);
     }
-    std::vector<BVHNode> sw_bvh_nodes;
-    const int sw_root = build_bvh(active_boxes, sw_bvh_nodes);
 
-    // Each thread accumulates edges into its own per-vertex list; we merge
-    // + dedup at the end. Order-independent, so a pure refactor of the
-    // serial version.
+    std::vector<BVHNode>  local_sw_bvh_nodes;
+    std::vector<BVHNode>& sw_bvh_nodes = sw_cache ? sw_cache->nodes : local_sw_bvh_nodes;
+    int sw_root = -1;
+
+    // refit_bvh is only safe if leaf->primitive mapping is unchanged. Cheap
+    // guard: same size and same first/last ids (ids are produced by a
+    // deterministic scan over predictions).
+    const int n_active_now = static_cast<int>(active_ids.size());
+    const bool cache_topology_matches =
+        sw_cache && sw_cache->valid && !sw_bvh_nodes.empty() &&
+        prev_n_active == n_active_now &&
+        (n_active_now == 0 ||
+         (active_ids.front() == prev_first_id && active_ids.back() == prev_last_id));
+    if (cache_topology_matches) {
+        refit_bvh(sw_bvh_nodes, active_boxes);
+        sw_root = sw_cache->root;
+    } else {
+        sw_bvh_nodes.clear();
+        sw_root = build_bvh(active_boxes, sw_bvh_nodes);
+        if (sw_cache) {
+            sw_cache->root  = sw_root;
+            sw_cache->valid = true;
+        }
+    }
+
     const int T = ph_max_threads();
     std::vector<std::vector<std::vector<int>>> local_nbr(T, std::vector<std::vector<int>>(nv));
 
-    const int n_nt = static_cast<int>(bp_cache.nt_pairs.size());
-    const int n_ss = static_cast<int>(bp_cache.ss_pairs.size());
+    const int n_nt     = static_cast<int>(bp_cache.nt_pairs.size());
+    const int n_ss     = static_cast<int>(bp_cache.ss_pairs.size());
     const int n_active = static_cast<int>(active_ids.size());
+    const bool have_base = (base_adj != nullptr);
 
-    #pragma omp parallel
-    {
-        auto& lg = local_nbr[ph_thread_num()];
-
-        // Elastic coupling: vertices that share a triangle.
+    // Elastic + barrier-pair edges (skipped when caller supplies base_adj).
+    if (!have_base) {
         if (adj) {
-            #pragma omp for schedule(static) nowait
-            for (int vi = 0; vi < nv; ++vi) {
-                if (!predictions[vi].active) continue;
-                auto it = adj->find(vi);
-                if (it == adj->end()) continue;
-                for (const auto& [ti, local_a] : it->second) {
-                    for (int local_b = 0; local_b < 3; ++local_b) {
-                        int vj = tri_vertex(ref_mesh, ti, local_b);
-                        if (vj == vi || vj < 0 || vj >= nv || !predictions[vj].active) continue;
-                        lg[vi].push_back(vj);
-                        lg[vj].push_back(vi);
+            #pragma omp parallel
+            {
+                auto& lg = local_nbr[ph_thread_num()];
+                #pragma omp for schedule(static)
+                for (int vi = 0; vi < nv; ++vi) {
+                    if (!predictions[vi].active) continue;
+                    auto it = adj->find(vi);
+                    if (it == adj->end()) continue;
+                    for (const auto& [ti, local_a] : it->second) {
+                        for (int local_b = 0; local_b < 3; ++local_b) {
+                            int vj = tri_vertex(ref_mesh, ti, local_b);
+                            if (vj == vi || vj < 0 || vj >= nv || !predictions[vj].active) continue;
+                            lg[vi].push_back(vj);
+                            lg[vj].push_back(vi);
+                        }
                     }
                 }
             }
         }
 
-        // Barrier node-triangle pairs.
-        #pragma omp for schedule(static) nowait
-        for (int i = 0; i < n_nt; ++i) {
-            const auto& p = bp_cache.nt_pairs[i];
-            const int verts[4] = { p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2] };
-            for (int a = 0; a < 4; ++a) {
-                if (verts[a] < 0 || verts[a] >= nv || !predictions[verts[a]].active) continue;
-                for (int b = a + 1; b < 4; ++b) {
-                    if (verts[b] < 0 || verts[b] >= nv || !predictions[verts[b]].active) continue;
-                    lg[verts[a]].push_back(verts[b]);
-                    lg[verts[b]].push_back(verts[a]);
+        #pragma omp parallel
+        {
+            auto& lg = local_nbr[ph_thread_num()];
+            #pragma omp for schedule(static)
+            for (int i = 0; i < n_nt; ++i) {
+                const auto& p = bp_cache.nt_pairs[i];
+                const int verts[4] = { p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2] };
+                for (int a = 0; a < 4; ++a) {
+                    if (verts[a] < 0 || verts[a] >= nv || !predictions[verts[a]].active) continue;
+                    for (int b = a + 1; b < 4; ++b) {
+                        if (verts[b] < 0 || verts[b] >= nv || !predictions[verts[b]].active) continue;
+                        lg[verts[a]].push_back(verts[b]);
+                        lg[verts[b]].push_back(verts[a]);
+                    }
                 }
             }
         }
 
-        // Barrier segment-segment pairs.
-        #pragma omp for schedule(static) nowait
-        for (int i = 0; i < n_ss; ++i) {
-            const auto& p = bp_cache.ss_pairs[i];
-            for (int a = 0; a < 4; ++a) {
-                const int va = p.v[a];
-                if (va < 0 || va >= nv || !predictions[va].active) continue;
-                for (int b = a + 1; b < 4; ++b) {
-                    const int vb = p.v[b];
-                    if (vb < 0 || vb >= nv || !predictions[vb].active) continue;
-                    lg[va].push_back(vb);
-                    lg[vb].push_back(va);
+        #pragma omp parallel
+        {
+            auto& lg = local_nbr[ph_thread_num()];
+            #pragma omp for schedule(static)
+            for (int i = 0; i < n_ss; ++i) {
+                const auto& p = bp_cache.ss_pairs[i];
+                for (int a = 0; a < 4; ++a) {
+                    const int va = p.v[a];
+                    if (va < 0 || va >= nv || !predictions[va].active) continue;
+                    for (int b = a + 1; b < 4; ++b) {
+                        const int vb = p.v[b];
+                        if (vb < 0 || vb >= nv || !predictions[vb].active) continue;
+                        lg[va].push_back(vb);
+                        lg[vb].push_back(va);
+                    }
                 }
             }
         }
+    }
 
-        // Swept-region overlap: BVH query per active vertex.
+    // Swept-region self-query: pairs whose certified-region AABBs overlap.
+    #pragma omp parallel
+    {
+        auto& lg = local_nbr[ph_thread_num()];
         #pragma omp for schedule(static)
         for (int ai = 0; ai < n_active; ++ai) {
             std::vector<int> hits;
@@ -219,12 +362,16 @@ std::vector<std::vector<int>> build_conflict_graph(const RefMesh& ref_mesh, cons
         }
     }
 
-    // Merge per-thread locals + dedup, parallel over vertices.
+    // Merge per-thread locals, seed with base_adj if provided, then dedup.
     #pragma omp parallel for schedule(dynamic, 64)
     for (int vi = 0; vi < nv; ++vi) {
-        std::size_t total = 0;
+        std::size_t base_sz = (have_base && vi < static_cast<int>(base_adj->size())) ? (*base_adj)[vi].size() : 0;
+        std::size_t total = base_sz;
         for (int t = 0; t < T; ++t) total += local_nbr[t][vi].size();
         graph[vi].reserve(total);
+        if (have_base && base_sz) {
+            graph[vi].insert(graph[vi].end(), (*base_adj)[vi].begin(), (*base_adj)[vi].end());
+        }
         for (int t = 0; t < T; ++t) {
             auto& src = local_nbr[t][vi];
             graph[vi].insert(graph[vi].end(), src.begin(), src.end());
@@ -297,56 +444,70 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
     const Vec3 dx = -delta;
     const bool tr = params.use_trust_region;
 
-    const auto pairs = broad_phase.query_pairs_for_vertex(x, vi, dx, ref_mesh);
-
+    // The bp_cache per-vertex pair lists are a conservative superset of
+    // pairs this vertex can hit during the Newton step (built with velocity-
+    // swept AABBs), so iterating them directly replaces a fresh BVH query.
+    const auto& bp_cache = broad_phase.cache();
     double safe_min = 1.0;
 
-    // vi is the lone moving node against static triangles.
-    for (const auto& p : pairs.nt_node_pairs) {
-        if (tr) {
-            auto r = trust_region_vertex_triangle_gauss_seidel(
-                x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
-            if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
-        } else {
-            CCDResult r = node_triangle_only_one_node_moves(
-                x[p.node],     dx,
-                x[p.tri_v[0]], Vec3::Zero(),
-                x[p.tri_v[1]], Vec3::Zero(),
-                x[p.tri_v[2]], Vec3::Zero());
-            if (r.collision) safe_min = std::min(safe_min, r.t);
+    if (vi >= 0 && vi < static_cast<int>(bp_cache.vertex_nt.size())) {
+        for (const auto& entry : bp_cache.vertex_nt[vi]) {
+            const auto& p = bp_cache.nt_pairs[entry.pair_index];
+            // dof: 0=node, 1=tri_v[0], 2=tri_v[1], 3=tri_v[2]
+            if (entry.dof == 0) {
+                // vi is the lone moving node vs a static triangle.
+                if (tr) {
+                    auto r = trust_region_vertex_triangle_gauss_seidel(
+                        x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
+                    if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
+                } else {
+                    CCDResult r = node_triangle_only_one_node_moves(
+                        x[p.node],     dx,
+                        x[p.tri_v[0]], Vec3::Zero(),
+                        x[p.tri_v[1]], Vec3::Zero(),
+                        x[p.tri_v[2]], Vec3::Zero());
+                    if (r.collision) safe_min = std::min(safe_min, r.t);
+                }
+            } else {
+                // vi is a moving tri corner vs a static node.
+                if (tr) {
+                    auto r = trust_region_vertex_triangle_gauss_seidel(
+                        x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
+                    if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
+                } else {
+                    Vec3 dxv[3] = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
+                    dxv[entry.dof - 1] = dx;
+                    CCDResult r = node_triangle_only_one_node_moves(
+                        x[p.node],     Vec3::Zero(),
+                        x[p.tri_v[0]], dxv[0],
+                        x[p.tri_v[1]], dxv[1],
+                        x[p.tri_v[2]], dxv[2]);
+                    if (r.collision) safe_min = std::min(safe_min, r.t);
+                }
+            }
         }
     }
 
-    // vi is one corner of a moving triangle against a static node.
-    for (const auto& p : pairs.nt_face_pairs) {
-        if (tr) {
-            auto r = trust_region_vertex_triangle_gauss_seidel(
-                x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
-            if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
-        } else {
-            Vec3 dxv[3] = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
-            dxv[p.vi_local] = dx;
-            CCDResult r = node_triangle_only_one_node_moves(
-                x[p.node],     Vec3::Zero(),
-                x[p.tri_v[0]], dxv[0],
-                x[p.tri_v[1]], dxv[1],
-                x[p.tri_v[2]], dxv[2]);
-            if (r.collision) safe_min = std::min(safe_min, r.t);
-        }
-    }
-
-    for (const auto& p : pairs.ss_pairs) {
-        if (tr) {
-            auto r = trust_region_edge_edge_gauss_seidel(
-                x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], dx);
-            if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
-        } else {
-            CCDResult r;
-            if (p.vi_dof == 0)
-                r = segment_segment_only_one_node_moves(x[p.v[0]], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]]);
-            else
-                r = segment_segment_only_one_node_moves(x[p.v[1]], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]]);
-            if (r.collision) safe_min = std::min(safe_min, r.t);
+    if (vi >= 0 && vi < static_cast<int>(bp_cache.vertex_ss.size())) {
+        for (const auto& entry : bp_cache.vertex_ss[vi]) {
+            const auto& p = bp_cache.ss_pairs[entry.pair_index];
+            // dof: 0=v[0], 1=v[1], 2=v[2], 3=v[3]. vi is on the first edge iff dof in {0,1}.
+            if (tr) {
+                auto r = trust_region_edge_edge_gauss_seidel(
+                    x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], dx);
+                if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
+            } else {
+                CCDResult r;
+                if (entry.dof == 0)
+                    r = segment_segment_only_one_node_moves(x[p.v[0]], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]]);
+                else if (entry.dof == 1)
+                    r = segment_segment_only_one_node_moves(x[p.v[1]], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]]);
+                else if (entry.dof == 2)
+                    r = segment_segment_only_one_node_moves(x[p.v[2]], dx, x[p.v[3]], x[p.v[0]], x[p.v[1]]);
+                else
+                    r = segment_segment_only_one_node_moves(x[p.v[3]], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]]);
+                if (r.collision) safe_min = std::min(safe_min, r.t);
+            }
         }
     }
 
@@ -367,15 +528,14 @@ ParallelCommit compute_parallel_commit_for_vertex(int vi, bool use_cached_predic
         Vec3 g_fresh, delta_fresh;
         Mat33 H_fresh;
         compute_local_newton_direction(vi, ref_mesh, adj, pins, params, x_current, xhat, bp_cache, g_fresh, H_fresh, delta_fresh, pin_map);
-
         out.alpha_clip = clip_step_to_certified_region(vi, x_current, delta_fresh, prediction.certified_region);
         delta = out.alpha_clip * delta_fresh;
     }
 
     out.delta = delta;
 
-    // The conflict graph ensures no new barrier pair can arise
-    // within this batch, so single-node CCD against the current barrier pairs suffices.
+    // The conflict graph ensures no new barrier pair can arise within this
+    // batch, so single-node CCD against the current barrier pairs suffices.
     out.ccd_step = compute_safe_step_for_vertex(vi, ref_mesh, params, x_current, delta, broad_phase);
 
     out.x_after = x_current[vi] - out.ccd_step * delta;

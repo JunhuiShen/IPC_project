@@ -583,7 +583,7 @@ TEST(CCDInitialGuess, CollisionFreeAndAdvancedTowardXhat) {
     DeformedState state;
     std::vector<Vec2> X;
     std::vector<Pin> pins;
-    SimParams params;
+    SimParams params = SimParams::zeros();
     params.fps = 30.0;
     params.substeps = 1;
     params.mu = 10.0;
@@ -637,7 +637,7 @@ TEST(CCDInitialGuess, NoCollisionTakesFullStep) {
     DeformedState state;
     std::vector<Vec2> X;
     std::vector<Pin> pins;
-    SimParams params;
+    SimParams params = SimParams::zeros();
     params.fps = 30.0;
     params.substeps = 1;
     params.mu = 10.0;
@@ -675,7 +675,7 @@ TEST(CCDInitialGuess, ParallelMatchesSerial) {
     DeformedState state;
     std::vector<Vec2> X;
     std::vector<Pin> pins;
-    SimParams params;
+    SimParams params = SimParams::zeros();
     params.fps = 30.0;
     params.substeps = 1;
     params.mu = 10.0;

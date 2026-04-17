@@ -7,6 +7,7 @@
 #include "node_triangle_distance.h"
 #include "segment_segment_distance.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <limits>
 
@@ -203,9 +204,6 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
     const double dt         = params.dt();
     const double dhat       = params.d_hat;
     const bool   use_barrier = dhat > 0.0;
-    const double node_pad   = dhat;
-    const double tri_pad    = 0.0;
-    const double edge_pad   = dhat * 0.5;
     const PinMap pm = build_pin_map(pins, static_cast<int>(xnew.size()));
 
     if (use_barrier) {
@@ -237,13 +235,6 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
 
     const int nv = static_cast<int>(xnew.size());
 
-    // Optional per-vertex broad-phase refresh
-    const bool   do_incremental_refresh = use_barrier && params.use_incremental_refresh;
-    const double refresh_skip_thresh    = 0.8 * edge_pad;
-    const double refresh_skip_thresh2   = refresh_skip_thresh * refresh_skip_thresh;
-    std::vector<Vec3> x_at_last_refresh;
-    if (do_incremental_refresh) x_at_last_refresh = xnew;
-
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         std::vector<Vec3> x_before;
         if (use_barrier && params.ccd_check) x_before = xnew;
@@ -251,13 +242,6 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
         for (const auto& group : color_groups) {
             for (int vi : group) {
                 update_one_vertex(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm);
-                if (do_incremental_refresh) {
-                    const Vec3 d = xnew[vi] - x_at_last_refresh[vi];
-                    if (d.squaredNorm() >= refresh_skip_thresh2) {
-                        broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
-                        x_at_last_refresh[vi] = xnew[vi];
-                    }
-                }
             }
         }
 
@@ -321,9 +305,6 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
     const double dt          = params.dt();
     const double dhat        = params.d_hat;
     const bool   use_barrier = dhat > 0.0;
-    const double node_pad    = dhat;
-    const double tri_pad     = 0.0;
-    const double edge_pad    = dhat * 0.5;
     const PinMap pm = build_pin_map(pins, static_cast<int>(xnew.size()));
 
     SolverResult result;
@@ -338,56 +319,120 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         return compute_global_residual(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, &pm);
     };
 
-    result.initial_residual = eval_residual();
-    result.final_residual   = result.initial_residual;
-    result.iterations       = 0;
+    // The iter==1 residual check inside the loop reads from predictions[] and
+    // sets initial_residual + effective_tol on the fly. We only fall back to
+    // eval_residual() at exit if the loop terminates on max_iters.
+    result.final_residual = 0.0;
+    result.iterations     = 0;
+    double effective_tol  = params.tol_abs;  // overwritten on iter 1
 
-    const double effective_tol = std::max(params.tol_abs,
-                                          params.tol_rel * result.initial_residual);
-
-    if (residual_history) residual_history->push_back(result.initial_residual);
-    if (result.initial_residual < effective_tol) {
-        result.converged = true;
-        return result;
-    }
-
-    // Optional per-vertex broad-phase refresh
-    const bool   do_incremental_refresh = use_barrier && params.use_incremental_refresh;
-    const double refresh_skip_thresh    = 0.8 * edge_pad;
-    const double refresh_skip_thresh2   = refresh_skip_thresh * refresh_skip_thresh;
-    std::vector<Vec3> x_at_last_refresh;
-    if (do_incremental_refresh) x_at_last_refresh = xnew;
-
-    // Coloring is rebuilt every outer iteration.
+    // Per-solver-call caches. Emptiness / size / version mismatch encodes
+    // "stale" — no separate validity flags.
+    const int color_interval = (params.color_rebuild_interval > 0)
+                               ? params.color_rebuild_interval : 1;
     std::vector<std::vector<int>> cached_color_groups;
-    bool cached_colors_valid = false;
-    constexpr int color_rebuild_interval = 1;
+    std::vector<std::vector<int>> cached_elastic_adj;
+    std::vector<std::vector<int>> cached_base_adj;
+    std::uint64_t                 cached_bp_version = 0;
+    SweptBvhCache                 cached_sw_bvh;
+    std::vector<AABB>             frozen_certified_regions;
+    std::uint64_t                 last_recolor_bp_version = 0;
+
+    // Reuses the g_i already computed by build_jacobi_predictions, so the
+    // convergence check is essentially free vs. a full compute_global_residual.
+    auto residual_from_predictions = [&](const std::vector<JacobiPrediction>& preds) {
+        const bool normalize = params.mass_normalize_residual;
+        const int nv_local = static_cast<int>(preds.size());
+        double r_inf = 0.0;
+        #pragma omp parallel for reduction(max:r_inf) schedule(static)
+        for (int i = 0; i < nv_local; ++i) {
+            Vec3 g = preds[i].g;
+            if (normalize) {
+                const double m = ref_mesh.mass[i];
+                if (m > 0.0) g /= m;
+            }
+            r_inf = std::max(r_inf, g.cwiseAbs().maxCoeff());
+        }
+        return r_inf;
+    };
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         std::vector<Vec3> x_before;
         if (use_barrier && params.ccd_check) x_before = xnew;
 
-        // Phase 1: Jacobi prediction
         std::vector<JacobiPrediction> predictions;
         build_jacobi_predictions(ref_mesh, adj, pins, params, xnew, xhat, broad_phase.cache(), predictions, &pm);
+
+        // Freeze certified-region AABBs inside the recolor window. The sweep
+        // clips every delta into its box; with boxes held constant, the
+        // conflict graph built below is bit-identical to the one the cached
+        // coloring was produced from, so the cached coloring stays valid.
+        // bp-version change forces an early recolor (NT/SS edges changed).
+        const std::uint64_t bp_v_now = use_barrier ? broad_phase.version() : 0;
+        const bool have_frozen       = !frozen_certified_regions.empty();
+        const bool bp_changed        = have_frozen && bp_v_now != last_recolor_bp_version;
+        const bool periodic_tick     = ((iter - 1) % color_interval == 0);
+        const bool recolor_this_iter = !have_frozen || periodic_tick || bp_changed;
+
+        if (recolor_this_iter) {
+            frozen_certified_regions.resize(predictions.size());
+            for (std::size_t i = 0; i < predictions.size(); ++i)
+                frozen_certified_regions[i] = predictions[i].certified_region;
+            last_recolor_bp_version = bp_v_now;
+        } else {
+            for (std::size_t i = 0; i < predictions.size(); ++i)
+                predictions[i].certified_region = frozen_certified_regions[i];
+        }
+
+        const double residual_now = residual_from_predictions(predictions);
+        if (iter == 1) {
+            result.initial_residual = residual_now;
+            effective_tol = std::max(params.tol_abs, params.tol_rel * residual_now);
+        }
+        result.final_residual = residual_now;
+        if (residual_history) residual_history->push_back(residual_now);
+        if (residual_now < effective_tol) {
+            result.iterations = iter - 1;
+            result.converged  = true;
+            return result;
+        }
 
         // Tests can pin a schedule via override_colors.
         const std::vector<std::vector<int>>* color_groups_ptr = override_colors;
         if (!color_groups_ptr) {
-            const bool need_rebuild = !cached_colors_valid ||
-                                      ((iter - 1) % color_rebuild_interval) == 0;
-            if (need_rebuild) {
-                const auto conflict_graph = build_conflict_graph(ref_mesh, pins, broad_phase.cache(), predictions, &adj);
+            const int nv_preds = static_cast<int>(predictions.size());
+
+            // Elastic is topology-only (build once); contact edges only
+            // change on bp refresh; base = elastic ∪ contact is fed into
+            // build_conflict_graph to shortcut its per-iter work.
+            if (static_cast<int>(cached_elastic_adj.size()) != nv_preds) {
+                cached_elastic_adj = build_elastic_adj(ref_mesh, adj, nv_preds);
+                cached_base_adj.clear();  // derived; rebuild below
+            }
+            const std::uint64_t bp_v = use_barrier ? broad_phase.version() : 0;
+            if (static_cast<int>(cached_base_adj.size()) != nv_preds || bp_v != cached_bp_version) {
+                auto contact_adj = use_barrier ? build_contact_adj(broad_phase.cache(), nv_preds)
+                                               : std::vector<std::vector<int>>(nv_preds);
+                cached_base_adj   = union_adjacency(cached_elastic_adj, contact_adj);
+                cached_bp_version = bp_v;
+            }
+
+            const auto conflict_graph = build_conflict_graph(ref_mesh, pins, broad_phase.cache(), predictions, &adj, &cached_base_adj, &cached_sw_bvh);
+
+            const bool need_recolor = cached_color_groups.empty() || recolor_this_iter;
+            if (need_recolor) {
                 cached_color_groups = greedy_color_conflict_graph(conflict_graph, predictions);
-                cached_colors_valid = true;
-                result.last_num_colors = static_cast<int>(cached_color_groups.size());
-                result.color_groups_parallel = cached_color_groups; //for visualization
+                result.color_groups_parallel = cached_color_groups; // for visualization
+                result.recolor_count += 1;
+            } else {
+                result.recolor_skipped += 1;
             }
             color_groups_ptr = &cached_color_groups;
         }
         const auto& color_groups = *color_groups_ptr;
 
-        // Phase 2: colored Gauss-Seidel
+        // Color 0 reuses the cached prediction.delta; later colors see a
+        // partially-updated xnew and recompute from scratch.
         for (std::size_t color_idx = 0; color_idx < color_groups.size(); ++color_idx) {
             const auto& group = color_groups[color_idx];
             if (group.empty()) continue;
@@ -402,22 +447,12 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
                     ref_mesh, adj, pins, params, xnew, xhat, broad_phase, &pm);
             }
             apply_parallel_commits(commits, xnew);
-
-            if (do_incremental_refresh) {
-                for (int vi : group) {
-                    const Vec3 d = xnew[vi] - x_at_last_refresh[vi];
-                    if (d.squaredNorm() < refresh_skip_thresh2) continue;
-                    broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
-                    x_at_last_refresh[vi] = xnew[vi];
-                }
-            }
         }
 
         result.last_num_colors = static_cast<int>(color_groups.size());
 
-
-        // Optional post-sweep CCD penetration check. toi < 1 means a pair
-        // was missed by single-node CCD and the sweep tunneled.
+        // Optional post-sweep CCD penetration check: toi < 1 means a pair was
+        // missed by single-node CCD and the sweep tunneled.
         if (use_barrier && params.ccd_check) {
             const int nv_local = static_cast<int>(xnew.size());
             std::vector<Vec3> dx(nv_local);
@@ -457,15 +492,12 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
             }
         }
 
-        result.final_residual = eval_residual();
-        result.iterations     = iter;
-
-        if (residual_history) residual_history->push_back(result.final_residual);
-        if (result.final_residual < effective_tol) {
-            result.converged = true;
-            return result;
-        }
+        result.iterations = iter;
     }
 
+    // residual_now was measured before the last sweep; recompute once so the
+    // reported final_residual reflects the post-sweep state.
+    result.final_residual = eval_residual();
+    if (residual_history) residual_history->push_back(result.final_residual);
     return result;
 }
