@@ -10,10 +10,10 @@
 #include <sstream>
 #include <iostream>
 
-// Evaluate every SDF obstacle at `xi`, keep the one with the smallest phi.
-// Corresponds to the union of the obstacle regions: a point's penalty is
-// determined by the nearest surface only. Returns false when no obstacles
-// are defined so callers can skip the penalty term entirely.
+// Union of all obstacles: writes the SDFEvaluation with the smallest phi into
+// `out`. Returns false when no obstacle is defined so callers can skip the
+// penalty. A vertex in the ramp region of two obstacles gets one coherent push
+// toward the nearest surface instead of a double-count.
 static inline bool sdf_min_evaluation(const SimParams& params, const Vec3& xi, SDFEvaluation& out) {
     bool any = false;
     out.phi = std::numeric_limits<double>::infinity();

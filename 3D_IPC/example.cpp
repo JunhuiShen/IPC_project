@@ -143,7 +143,8 @@ void build_cloth_stack_example_high_res(RefMesh& ref_mesh,
     }
 }
 
-void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
+void build_cloth_cylinder_drop_example(const IPCArgs3D& args,
+                                       RefMesh& ref_mesh,
                                        DeformedState& state,
                                        std::vector<Vec2>& X,
                                        std::vector<Pin>& pins,
@@ -203,9 +204,9 @@ void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
     // Vertical cloth stack dropped onto the cylinder -- same pattern as
     // build_cloth_stack_example_high_res, with the cylinder catching them
     // mid-fall before they reach the ground.
-    const int    stack_count   = 50;   // number of falling cloths in the stack
-    const int    small_nx      = 16;   // grid subdivisions along each cloth's x-axis (triangles = 2*nx*ny)
-    const int    small_ny      = 16;   // grid subdivisions along each cloth's y-axis
+    const int    stack_count   = args.drop_stack_count;
+    const int    small_nx      = args.drop_cloth_nx;
+    const int    small_ny      = args.drop_cloth_ny;
     const double small_w       = 0.70; // width of each falling cloth (meters, along x)
     const double small_h       = 0.70; // height of each falling cloth (meters, along z in world space)
     const double first_drop_y  = 1.5; // y-coordinate of the lowest falling cloth at t=0
@@ -247,11 +248,10 @@ void build_twisting_cloth_example(const IPCArgs3D& args,
                                   TwistSpec& spec) {
     clear_model(ref_mesh, state, X, pins);
 
-    // Square 100x100 grid with 8 total relative turns.
-    const int    nx     = 99;
-    const int    ny     = 99;
-    const double width  = 2.5;
-    const double height = 2.5;
+    const int    nx     = args.twist_nx;
+    const int    ny     = args.twist_ny;
+    const double width  = args.twist_size;
+    const double height = args.twist_size;
     const double y0     = args.sheet_y;
 
     // Center the cloth so the midline (+x axis at y = y0, z = 0) passes
@@ -261,8 +261,9 @@ void build_twisting_cloth_example(const IPCArgs3D& args,
 
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
 
-    const double duration = static_cast<double>(args.num_frames) / args.fps;
-    const double omega = (kTwoPi * args.twist_turns) / (2.0 * duration);
+    // Each side spins at +/- omega; relative rate is 2*omega, so args.twist_rate
+    // means omega = pi * rate.
+    const double omega = (kTwoPi * args.twist_rate) / 2.0;
 
     spec = TwistSpec{};
     spec.axis_point  = Vec3(0.0, y0, 0.0);

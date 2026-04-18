@@ -53,7 +53,13 @@ struct IPCArgs3D : ArgParser {
 
     // --- scene selection ---
     int         example      = 3;   // 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop, 5=twisting_cloth
-    double      twist_turns  = 8.0; // total relative twist (full circles) for example 5
+    double      twist_rate   = 0.5; // relative twist rate in Hz for example 5 (full turns per second)
+    int         twist_nx     = 99;  // grid subdivisions along x for example 5
+    int         twist_ny     = 99;  // grid subdivisions along y for example 5
+    double      twist_size   = 2.5; // edge length (m) of the square cloth in example 5
+    int         drop_stack_count = 50; // number of falling cloths in example 4 stack
+    int         drop_cloth_nx    = 16; // grid subdivisions along x of each falling cloth (example 4)
+    int         drop_cloth_ny    = 16; // grid subdivisions along y of each falling cloth (example 4)
 
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
@@ -102,7 +108,13 @@ struct IPCArgs3D : ArgParser {
         add_double("right_z",     right_z,     0.02,       "Right sheet origin z");
 
         add_int   ("example",      example,       3,              "Scene to run: 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop, 5=twisting_cloth");
-        add_double("twist_turns",  twist_turns,   8.0,            "Total relative twist (full turns) for example 5");
+        add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 5 (turns/second; total turns = rate * duration)");
+        add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 5 (vertices = (twist_nx+1)*(twist_ny+1))");
+        add_int   ("twist_ny",     twist_ny,      99,             "Grid subdivisions along y for example 5");
+        add_double("twist_size",   twist_size,    2.5,            "Edge length (m) of the square cloth in example 5");
+        add_int   ("drop_stack_count", drop_stack_count, 50,       "Number of falling cloths in example 4 stack");
+        add_int   ("drop_cloth_nx",    drop_cloth_nx,    16,       "Grid subdivisions along x of each falling cloth in example 4");
+        add_int   ("drop_cloth_ny",    drop_cloth_ny,    16,       "Grid subdivisions along y of each falling cloth in example 4");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
