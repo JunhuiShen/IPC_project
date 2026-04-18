@@ -49,3 +49,20 @@ std::vector<ParallelCommit> gpu_parallel_commit(
 
     return commits;
 }
+
+void gpu_solver_begin_sweep(
+    const RefMesh&, const VertexTriangleMap&, const std::vector<Pin>&,
+    const SimParams&, const std::vector<Vec3>&, const BroadPhase::Cache&,
+    const PinMap*) {}
+
+void gpu_solver_end_sweep() {}
+
+double gpu_compute_global_residual(const std::vector<Vec3>&) { return -1.0; }
+
+std::vector<std::vector<int>> gpu_build_conflict_graph(const std::vector<JacobiPrediction>&) {
+    return {};
+}
+
+bool gpu_fused_sweep(
+    const std::vector<JacobiPrediction>&, const std::vector<std::vector<int>>&,
+    std::vector<Vec3>&) { return false; }

@@ -37,6 +37,12 @@ struct DeviceBuffer {
     void upload(const T* host_data, int n);
     // Copy count elements to host (host_data must point to count*sizeof(T) bytes).
     void download(T* host_data) const;
+    // Return a host-side copy — works for both stub (memcpy) and real CUDA (cudaMemcpy).
+    std::vector<T> to_cpu() const {
+        std::vector<T> v(static_cast<size_t>(count));
+        if (count > 0) download(v.data());
+        return v;
+    }
 };
 
 extern template struct DeviceBuffer<int>;

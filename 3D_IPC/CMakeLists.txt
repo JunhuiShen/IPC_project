@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.18)
 
 project(CorotatedEnergy LANGUAGES CXX)
 
@@ -11,9 +11,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 enable_testing()
+set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
 
 find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(GTest REQUIRED)
+# GTest was built without a Release config (only NOCONFIG); patch the
+# Release IMPORTED_LOCATION so target resolution doesn't yield NOTFOUND.
+get_target_property(_gtest_lib     GTest::gtest      IMPORTED_LOCATION_NOCONFIG)
+get_target_property(_gtest_main_lib GTest::gtest_main IMPORTED_LOCATION_NOCONFIG)
+if(_gtest_lib AND NOT _gtest_lib STREQUAL "_gtest_lib-NOTFOUND")
+    set_target_properties(GTest::gtest PROPERTIES
+        IMPORTED_LOCATION_RELEASE "${_gtest_lib}"
+    )
+endif()
+if(_gtest_main_lib AND NOT _gtest_main_lib STREQUAL "_gtest_main_lib-NOTFOUND")
+    set_target_properties(GTest::gtest_main PROPERTIES
+        IMPORTED_LOCATION_RELEASE "${_gtest_main_lib}"
+    )
+endif()
 if(APPLE)
     set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp")
     set(OpenMP_CXX_LIB_NAMES "omp")
@@ -28,19 +43,49 @@ if(APPLE)
 endif()
 find_package(OpenMP REQUIRED)
 
-# GPU mesh mirror structs.
-# On machines without CUDA the stub provides CPU-heap equivalents of
-# DeviceBuffer / upload / download so the rest of the code compiles unchanged.
-# On a real CUDA machine: replace gpu_mesh_stub.cpp with gpu_mesh.cu and
-# add CUDA to the LANGUAGES line above.
-add_library(gpu_mesh_lib STATIC
-    GPU_Sim/gpu_mesh_stub.cpp
-    GPU_Sim/gpu_ccd_stub.cpp
-    GPU_Sim/gpu_physics_stub.cpp
-    GPU_Sim/gpu_solver_stub.cpp
-    GPU_Sim/gpu_solver_bridge.cpp
-)
-target_link_libraries(gpu_mesh_lib PUBLIC Eigen3::Eigen corotated_energy_lib OpenMP::OpenMP_CXX)
+# Optional CUDA support. If nvcc is found, swap stubs for real .cu files.
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    # Default to sm_89 (Ada) — nvcc 12.0 doesn't know Blackwell (sm_120),
+    # and enable_language(CUDA) otherwise defaults to sm_52 which JIT-compiles
+    # to newer GPUs unreliably (crashes in complex kernels). Override via
+    # -DCMAKE_CUDA_ARCHITECTURES=... if needed.
+    set(CMAKE_CUDA_ARCHITECTURES 89 CACHE STRING "CUDA archs" FORCE)
+    set(GPU_MESH_SOURCES
+        GPU_Sim/gpu_mesh.cu
+        GPU_Sim/gpu_ccd_stub.cpp
+        GPU_Sim/gpu_physics_stub.cpp
+        GPU_Sim/gpu_solver.cu
+        GPU_Sim/gpu_solver_bridge.cpp
+    )
+    find_package(CUDAToolkit REQUIRED)
+    set(GPU_CUDA_FOUND TRUE)
+    message(STATUS "CUDA found — building GPU kernels (arch ${CMAKE_CUDA_ARCHITECTURES})")
+else()
+    set(GPU_MESH_SOURCES
+        GPU_Sim/gpu_mesh_stub.cpp
+        GPU_Sim/gpu_ccd_stub.cpp
+        GPU_Sim/gpu_physics_stub.cpp
+        GPU_Sim/gpu_solver_stub.cpp
+        GPU_Sim/gpu_solver_bridge.cpp
+    )
+    set(GPU_CUDA_FOUND FALSE)
+    message(STATUS "CUDA not found — using CPU stubs")
+endif()
+
+add_library(gpu_mesh_lib STATIC ${GPU_MESH_SOURCES})
+if(GPU_CUDA_FOUND)
+    target_compile_options(gpu_mesh_lib PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+    )
+    target_link_libraries(gpu_mesh_lib PUBLIC Eigen3::Eigen corotated_energy_lib OpenMP::OpenMP_CXX CUDA::cudart)
+else()
+    target_link_libraries(gpu_mesh_lib PUBLIC Eigen3::Eigen corotated_energy_lib OpenMP::OpenMP_CXX)
+endif()
 target_include_directories(gpu_mesh_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/GPU_Sim

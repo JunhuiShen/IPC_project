@@ -67,3 +67,59 @@ std::vector<ParallelCommit> gpu_parallel_commit(
     const std::vector<Vec3>&             xhat,
     const BroadPhase&                    broad_phase,
     const PinMap*                        pin_map = nullptr);
+
+// --------------------------------------------------------------------------
+// Sweep-persistent session
+//
+// Avoids the re-upload-per-call overhead that dominates runtime when
+// gpu_parallel_commit is called many times per frame. Between begin_sweep
+// and end_sweep, gpu_build_jacobi_predictions and gpu_parallel_commit skip
+// the static-data upload (mesh, adjacency, broad-phase, BVH, pins, xhat)
+// and reuse resident device buffers. x_current is re-uploaded on each call
+// since it changes per color group.
+//
+// On the CPU stub these are no-ops.
+// --------------------------------------------------------------------------
+void gpu_solver_begin_sweep(
+    const RefMesh&           ref_mesh,
+    const VertexTriangleMap& adj,
+    const std::vector<Pin>&  pins,
+    const SimParams&         params,
+    const std::vector<Vec3>& xhat,
+    const BroadPhase::Cache& bp_cache,
+    const PinMap*            pin_map);
+
+void gpu_solver_end_sweep();
+
+// --------------------------------------------------------------------------
+// gpu_compute_global_residual
+// Session-backed port of compute_global_residual (physics.cpp).
+// Launches a reduction kernel over the resident d_x / mesh / broadphase.
+// Returns -1.0 if no session is active (caller should fall back to CPU).
+// --------------------------------------------------------------------------
+double gpu_compute_global_residual(const std::vector<Vec3>& x_current);
+
+// --------------------------------------------------------------------------
+// gpu_build_conflict_graph
+// Session-backed port of build_conflict_graph (parallel_helper.cpp). Uses
+// CPU BVH construction for the per-iter swept-region tree (small, fast),
+// then launches a GPU kernel that collects all 4 edge sources per vertex
+// and sort/dedups in-thread. Returns {} if no session is active.
+// --------------------------------------------------------------------------
+std::vector<std::vector<int>> gpu_build_conflict_graph(
+    const std::vector<JacobiPrediction>& predictions);
+
+// --------------------------------------------------------------------------
+// gpu_fused_sweep
+// Runs ALL color groups (Phase 2 / commit) in a single cooperative kernel
+// launch, with grid-wide barriers between colors so later colors see in-
+// place writes from earlier colors directly on device. Eliminates per-color
+// launch overhead + CPU round-trip. Caller must have already run predict
+// and coloring. `x` is updated in place on device and downloaded into xnew
+// at the end. Returns true on success, false if no session is active or a
+// cooperative launch is not supported.
+// --------------------------------------------------------------------------
+bool gpu_fused_sweep(
+    const std::vector<JacobiPrediction>&        predictions,
+    const std::vector<std::vector<int>>&        color_groups,
+    std::vector<Vec3>&                          xnew);
