@@ -174,9 +174,9 @@ void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
     // Horizontal cylinder (long axis +z) acting as a static collider via
     // Dirichlet pins on every vertex.
     const int    cyl_nu     = 8;     // circumferential subdivisions (octagon cross-section)
-    const int    cyl_nv     = 12;    // axial subdivisions
+    const int    cyl_nv     = 20;    // axial subdivisions (keeps axial edge length ~0.05 m)
     const double cyl_radius = 0.03;
-    const double cyl_length = 0.6;   // longer than the cloth width so cloth ends overhang both faces
+    const double cyl_length = 0.7;   // longer than the 0.70 m cloth so no cloth edge wraps the caps
     const Vec3   cyl_center(0.0, 0.25, 0.0);
 
     const int cyl_base = build_cylinder_mesh(
@@ -197,7 +197,7 @@ void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
     const int    small_ny      = 16;   // grid subdivisions along each cloth's y-axis
     const double small_w       = 0.70; // width of each falling cloth (meters, along x)
     const double small_h       = 0.70; // height of each falling cloth (meters, along z in world space)
-    const double first_drop_y  = 1.00; // y-coordinate of the lowest falling cloth at t=0
+    const double first_drop_y  = 1.5; // y-coordinate of the lowest falling cloth at t=0
     const double drop_spacing  = 0.05; // vertical gap (meters) between successive stacked cloths at t=0
 
     for (int s = 0; s < stack_count; ++s) {
