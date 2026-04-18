@@ -29,6 +29,8 @@ struct IPCArgs3D : ArgParser {
     double tol_rel       = 1e-1;  // relative tolerance: stop when residual < tol_rel * initial
     double step_weight   = 1.0;
     double d_hat         = 0.01;  // barrier activation distance; 0 disables contact
+    double k_sdf         = 0.0;   // SDF penalty stiffness; 0 disables the SDF term
+    double eps_sdf       = 0.01;  // SDF ramp-Heaviside transition-layer width
     bool   use_parallel  = true;
     bool   ccd_check     = false;
     bool   use_trust_region = false;
@@ -78,6 +80,8 @@ struct IPCArgs3D : ArgParser {
         add_double("tol_rel",     tol_rel,     1e-1,       "Relative tolerance: stop when residual < tol_rel * initial_residual (0 disables)");
         add_double("step_weight", step_weight, 1.0,        "Newton step damping factor");
         add_double("d_hat",       d_hat,       0.01,       "Barrier activation distance (0 = off)");
+        add_double("k_sdf",       k_sdf,       1e2,        "SDF penalty stiffness (0 = off; obstacles live on SimParams)");
+        add_double("eps_sdf",     eps_sdf,     0.002,       "SDF penalty ramp-Heaviside transition-layer width");
         add_bool  ("use_parallel", use_parallel, true,     "Use parallel Gauss-Seidel (requires coloring)");
 
         add_bool  ("ccd_check",    ccd_check,    false,  "Run post-sweep CCD penetration check (serial + parallel)");
@@ -128,6 +132,8 @@ struct IPCArgs3D : ArgParser {
         p.tol_rel          = tol_rel;
         p.step_weight      = step_weight;
         p.d_hat            = d_hat;
+        p.k_sdf            = k_sdf;
+        p.eps_sdf          = eps_sdf;
         p.restart_frame    = restart_frame;
         p.use_parallel     = use_parallel;
         p.ccd_check        = ccd_check;

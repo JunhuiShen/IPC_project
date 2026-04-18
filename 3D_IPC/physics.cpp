@@ -3,11 +3,30 @@
 #include "make_shape.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <set>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <iostream>
+
+// Evaluate every SDF obstacle at `xi`, keep the one with the smallest phi.
+// Corresponds to the union of the obstacle regions: a point's penalty is
+// determined by the nearest surface only. Returns false when no obstacles
+// are defined so callers can skip the penalty term entirely.
+static inline bool sdf_min_evaluation(const SimParams& params, const Vec3& xi, SDFEvaluation& out) {
+    bool any = false;
+    out.phi = std::numeric_limits<double>::infinity();
+    for (const PlaneSDF& p : params.sdf_planes) {
+        const SDFEvaluation s = evaluate_sdf(p, xi);
+        if (!any || s.phi < out.phi) { out = s; any = true; }
+    }
+    for (const CylinderSDF& c : params.sdf_cylinders) {
+        const SDFEvaluation s = evaluate_sdf(c, xi);
+        if (!any || s.phi < out.phi) { out = s; any = true; }
+    }
+    return any;
+}
 
 double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const SimParams& params,
                                                 const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
@@ -33,6 +52,14 @@ double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const s
             HingeDef def;
             for (int k = 0; k < 4; ++k) def.x[k] = x[h.v[k]];
             PE += bending_energy(def, params.kB, h.c_e, h.bar_theta);
+        }
+    }
+
+    if (params.k_sdf > 0.0) {
+        for (int i = 0; i < static_cast<int>(x.size()); ++i) {
+            SDFEvaluation s;
+            if (sdf_min_evaluation(params, x[i], s))
+                PE += sdf_penalty_energy(s, params.k_sdf, params.eps_sdf);
         }
     }
 
@@ -173,6 +200,14 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
         }
     }
 
+    if (params.k_sdf > 0.0) {
+        SDFEvaluation s;
+        if (sdf_min_evaluation(params, x[vi], s)) {
+            g += dt2 * sdf_penalty_gradient(s, params.k_sdf, params.eps_sdf);
+            H += dt2 * sdf_penalty_hessian (s, params.k_sdf, params.eps_sdf, /*include_curvature=*/false);
+        }
+    }
+
     return {g, H};
 }
 
@@ -237,6 +272,12 @@ static Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const Vertex
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
             g += dt2 * segment_segment_barrier_gradient(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
         }
+    }
+
+    if (params.k_sdf > 0.0) {
+        SDFEvaluation s;
+        if (sdf_min_evaluation(params, x[vi], s))
+            g += dt2 * sdf_penalty_gradient(s, params.k_sdf, params.eps_sdf);
     }
 
     return g;

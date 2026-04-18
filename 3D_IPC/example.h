@@ -38,7 +38,8 @@ void build_cloth_stack_example_high_res(RefMesh& ref_mesh,
 void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
                                        DeformedState& state,
                                        std::vector<Vec2>& X,
-                                       std::vector<Pin>& pins);
+                                       std::vector<Pin>& pins,
+                                       SimParams& params);
 
 // Drives the pin-target motion for the twisting-cloth example: two groups of
 // pins counter-rotate about a common +x axis (through axis_point) at their

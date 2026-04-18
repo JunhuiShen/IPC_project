@@ -19,7 +19,7 @@ double sdf_heaviside_gradient(double z, double eps){
     return -1.0 / eps;
 }
 
-//  Plane SDF: phi(x) = (x - point) . normal, Hessian is zero (flat surface).
+//  Plane SDF
 SDFEvaluation evaluate_sdf(const PlaneSDF& s, const Vec3& x){
     SDFEvaluation r;
     r.phi      = (x - s.point).dot(s.normal);
@@ -28,29 +28,7 @@ SDFEvaluation evaluate_sdf(const PlaneSDF& s, const Vec3& x){
     return r;
 }
 
-//  Sphere SDF: phi(x) = ||x - c|| - radius.
-//  grad_phi = d / ||d||  with d = x - c.
-//  hess_phi = (I - n n^T) / ||d||.
-SDFEvaluation evaluate_sdf(const SphereSDF& s, const Vec3& x){
-    SDFEvaluation r;
-    const Vec3 d     = x - s.center;
-    const double nrm = d.norm();
-    r.phi = nrm - s.radius;
-    if (nrm > 0.0) {
-        r.grad_phi = d / nrm;
-        r.hess_phi = (Mat33::Identity() - r.grad_phi * r.grad_phi.transpose()) / nrm;
-    } else {
-        r.grad_phi = Vec3::Zero();
-        r.hess_phi = Mat33::Zero();
-    }
-    return r;
-}
-
-//  Infinite cylinder SDF.  Let w = (I - a a^T)(x - p) be the component
-//  of x - p perpendicular to the axis and r_perp = ||w||.  Then
-//      phi      = r_perp - R,
-//      grad_phi = w / r_perp,
-//      hess_phi = (I - a a^T - n n^T) / r_perp.
+//  Infinite cylinder SDF
 SDFEvaluation evaluate_sdf(const CylinderSDF& s, const Vec3& x){
     SDFEvaluation r;
     const Vec3 v = x - s.point;

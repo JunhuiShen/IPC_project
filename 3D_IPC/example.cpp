@@ -146,8 +146,11 @@ void build_cloth_stack_example_high_res(RefMesh& ref_mesh,
 void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
                                        DeformedState& state,
                                        std::vector<Vec2>& X,
-                                       std::vector<Pin>& pins) {
+                                       std::vector<Pin>& pins,
+                                       SimParams& params) {
     clear_model(ref_mesh, state, X, pins);
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
 
     // Bigger ground cloth than the shared 1.2x1.2 helper so the falling pile
     // has room to settle without involving the pinned corners. Only the
@@ -188,6 +191,14 @@ void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
     for (int k = 0; k < cyl_vertex_count; ++k) {
         append_pin(pins, cyl_base + k, state.deformed_positions);
     }
+
+    // Offset the plane below the pinned ground sheet so its vertices sit
+    // outside the transition shell and contribute zero SDF energy.
+    params.sdf_planes.push_back(PlaneSDF{
+            Vec3(0.0, ground_y - 2.0 * params.eps_sdf, 0.0),
+            Vec3(0.0, 1.0, 0.0)});
+    params.sdf_cylinders.push_back(CylinderSDF{
+            cyl_center, Vec3(0.0, 0.0, 1.0), cyl_radius});
 
     // Vertical cloth stack dropped onto the cylinder -- same pattern as
     // build_cloth_stack_example_high_res, with the cylinder catching them
