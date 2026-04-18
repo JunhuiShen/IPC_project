@@ -60,6 +60,15 @@ ParallelCommit compute_parallel_commit_for_vertex(int vi, bool use_cached_predic
                                                   const SimParams& params, const std::vector<Vec3>& x_current, const std::vector<Vec3>& xhat,
                                                   const BroadPhase& broad_phase, const PinMap* pin_map = nullptr);
 
+void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+                                    const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                    const BroadPhase::Cache& bp_cache, Vec3& g_out, Mat33& H_out, Vec3& delta_out,
+                                    const PinMap* pin_map = nullptr,
+                                    const std::vector<TriPrecompute>* tri_cache = nullptr,
+                                    const std::vector<HingePrecompute>* hinge_cache = nullptr);
+
+double clip_step_to_certified_region(int vi, const std::vector<Vec3>& x, const Vec3& fresh_delta, const AABB& certified_region);
+
 double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimParams& params,
                                     const std::vector<Vec3>& x, const Vec3& delta,
                                     const BroadPhase& broad_phase);

@@ -28,12 +28,12 @@ static inline int ph_thread_num() {
 #endif
 }
 
-static void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                                           const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                                           const BroadPhase::Cache& bp_cache, Vec3& g_out, Mat33& H_out, Vec3& delta_out,
-                                           const PinMap* pin_map = nullptr,
-                                           const std::vector<TriPrecompute>* tri_cache = nullptr,
-                                           const std::vector<HingePrecompute>* hinge_cache = nullptr){
+void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+                                    const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                    const BroadPhase::Cache& bp_cache, Vec3& g_out, Mat33& H_out, Vec3& delta_out,
+                                    const PinMap* pin_map,
+                                    const std::vector<TriPrecompute>* tri_cache,
+                                    const std::vector<HingePrecompute>* hinge_cache){
     auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x, xhat, pin_map, tri_cache, hinge_cache);
 
     if (params.d_hat > 0.0) {
@@ -412,7 +412,7 @@ std::vector<std::vector<int>> greedy_color_conflict_graph(const std::vector<std:
     return groups;
 }
 
-static double clip_step_to_certified_region(int vi, const std::vector<Vec3>& x, const Vec3& fresh_delta, const AABB& certified_region){
+double clip_step_to_certified_region(int vi, const std::vector<Vec3>& x, const Vec3& fresh_delta, const AABB& certified_region){
     double alpha = 1.0;
 
     for (int k = 0; k < 3; ++k) {

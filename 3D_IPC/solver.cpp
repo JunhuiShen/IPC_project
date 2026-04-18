@@ -438,15 +438,30 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
             if (group.empty()) continue;
 
             const bool use_cached_prediction = (color_idx == 0);
-            std::vector<ParallelCommit> commits(group.size());
+            const auto& bp_cache = broad_phase.cache();
 
+            // Within a color, the conflict graph guarantees no two vertices
+            // share an elastic, bending, or barrier pair, so writing xnew[vi]
+            // immediately cannot race with another thread's reads.
             #pragma omp parallel for schedule(static) if(params.use_parallel && group.size() >= 16)
             for (int local_idx = 0; local_idx < static_cast<int>(group.size()); ++local_idx) {
                 const int vi = group[local_idx];
-                commits[local_idx] = compute_parallel_commit_for_vertex(vi, use_cached_prediction, predictions[vi],
-                    ref_mesh, adj, pins, params, xnew, xhat, broad_phase, &pm);
+                const JacobiPrediction& prediction = predictions[vi];
+
+                Vec3 delta = prediction.delta;
+                if (!use_cached_prediction) {
+                    Vec3 g_fresh, delta_fresh;
+                    Mat33 H_fresh;
+                    compute_local_newton_direction(vi, ref_mesh, adj, pins, params, xnew, xhat,
+                                                   bp_cache, g_fresh, H_fresh, delta_fresh, &pm);
+                    const double alpha_clip = clip_step_to_certified_region(
+                            vi, xnew, delta_fresh, prediction.certified_region);
+                    delta = alpha_clip * delta_fresh;
+                }
+                const double ccd_step = compute_safe_step_for_vertex(
+                        vi, ref_mesh, params, xnew, delta, broad_phase);
+                xnew[vi] -= ccd_step * delta;
             }
-            apply_parallel_commits(commits, xnew);
         }
 
         result.last_num_colors = static_cast<int>(color_groups.size());
