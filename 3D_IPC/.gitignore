@@ -3,6 +3,12 @@ build/
 
 # Simulation output
 frames_sim3d/
+frames_baseline/
+frames_after/
+
+# Benchmark / diff logs
+log_baseline*.txt
+log_after*.txt
 
 # macOS
 .DS_Store

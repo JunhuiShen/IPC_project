@@ -334,7 +334,6 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
     std::uint64_t                 cached_bp_version = 0;
     SweptBvhCache                 cached_sw_bvh;
     std::vector<AABB>             frozen_certified_regions;
-    std::uint64_t                 last_recolor_bp_version = 0;
 
     // Reuses the g_i already computed by build_jacobi_predictions, so the
     // convergence check is essentially free vs. a full compute_global_residual.
@@ -365,18 +364,14 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         // clips every delta into its box; with boxes held constant, the
         // conflict graph built below is bit-identical to the one the cached
         // coloring was produced from, so the cached coloring stays valid.
-        // bp-version change forces an early recolor (NT/SS edges changed).
-        const std::uint64_t bp_v_now = use_barrier ? broad_phase.version() : 0;
         const bool have_frozen       = !frozen_certified_regions.empty();
-        const bool bp_changed        = have_frozen && bp_v_now != last_recolor_bp_version;
         const bool periodic_tick     = ((iter - 1) % color_interval == 0);
-        const bool recolor_this_iter = !have_frozen || periodic_tick || bp_changed;
+        const bool recolor_this_iter = !have_frozen || periodic_tick;
 
         if (recolor_this_iter) {
             frozen_certified_regions.resize(predictions.size());
             for (std::size_t i = 0; i < predictions.size(); ++i)
                 frozen_certified_regions[i] = predictions[i].certified_region;
-            last_recolor_bp_version = bp_v_now;
         } else {
             for (std::size_t i = 0; i < predictions.size(); ++i)
                 predictions[i].certified_region = frozen_certified_regions[i];
@@ -400,9 +395,6 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         if (!color_groups_ptr) {
             const int nv_preds = static_cast<int>(predictions.size());
 
-            // Elastic is topology-only (build once); contact edges only
-            // change on bp refresh; base = elastic ∪ contact is fed into
-            // build_conflict_graph to shortcut its per-iter work.
             if (static_cast<int>(cached_elastic_adj.size()) != nv_preds) {
                 cached_elastic_adj = build_elastic_adj(ref_mesh, adj, nv_preds);
                 cached_base_adj.clear();  // derived; rebuild below
@@ -415,10 +407,8 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
                 cached_bp_version = bp_v;
             }
 
-            const auto conflict_graph = build_conflict_graph(ref_mesh, pins, broad_phase.cache(), predictions, &adj, &cached_base_adj, &cached_sw_bvh);
-
-            const bool need_recolor = cached_color_groups.empty() || recolor_this_iter;
-            if (need_recolor) {
+            if (cached_color_groups.empty() || recolor_this_iter) {
+                const auto conflict_graph = build_conflict_graph(ref_mesh, pins, broad_phase.cache(), predictions, &adj, &cached_base_adj, &cached_sw_bvh);
                 cached_color_groups = greedy_color_conflict_graph(conflict_graph, predictions);
                 result.color_groups_parallel = cached_color_groups; // for visualization
                 result.recolor_count += 1;
