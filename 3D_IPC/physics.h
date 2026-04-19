@@ -2,6 +2,7 @@
 #include "corotated_energy.h"
 #include "bending_energy.h"
 #include "barrier_energy.h"
+#include "sdf_penalty_energy.h"
 #include <algorithm>
 #include <map>
 #include <unordered_map>
@@ -29,6 +30,10 @@ struct SimParams {
     double tol_rel;   // relative tolerance (factor of initial residual); 0 disables
     double kB;        // bending (flexural) stiffness; 0 disables the bending term
     double d_hat;     // barrier activation distance; 0 disables contact
+    double k_sdf;     // SDF penalty stiffness; 0 disables the SDF term
+    double eps_sdf;   // SDF ramp-Heaviside transition-layer width
+    std::vector<PlaneSDF>    sdf_planes;
+    std::vector<CylinderSDF> sdf_cylinders;
     Vec3   gravity;
     int    max_global_iters;
 
@@ -62,6 +67,10 @@ struct SimParams {
         p.tol_rel                   = 0.0;
         p.kB                        = 0.0;
         p.d_hat                     = 0.0;
+        p.k_sdf                     = 0.0;
+        p.eps_sdf                   = 0.0;
+        p.sdf_planes.clear();
+        p.sdf_cylinders.clear();
         p.gravity                   = Vec3::Zero();
         p.max_global_iters          = 0;
         p.restart_frame             = -1;

@@ -301,74 +301,6 @@ TEST(PlaneSDF, HessianIsRankOne){
 }
 
 // ============================================================================
-//  Sphere SDF
-// ============================================================================
-
-TEST(SphereSDF, Evaluate){
-    SphereSDF s{Vec3(1.0, 2.0, 3.0), 0.5};
-
-    SDFEvaluation r = evaluate_sdf(s, Vec3(1.0, 2.0, 3.0 + 0.6));
-    EXPECT_NEAR(r.phi, 0.1, kTol);
-    EXPECT_TRUE(r.grad_phi.isApprox(Vec3(0.0, 0.0, 1.0)));
-
-    r = evaluate_sdf(s, Vec3(1.0, 2.0, 3.0));   //  center
-    EXPECT_NEAR(r.phi, -0.5, kTol);
-}
-
-TEST(SphereSDF, GradientConvergence){
-    //  phi_target = 0.08, eps = 0.2 -- slack 0.08 and 0.12, safe for h up to 1e-2.
-    SphereSDF s{Vec3(0.2, -0.1, 0.05), 0.5};
-    const double k = 30.0;
-    const double eps = 0.2;
-
-    Vec3 dir = Vec3(1.0, 2.0, -1.5).normalized();
-    Vec3 x = s.center + (s.radius + 0.08) * dir;
-
-    const SDFClosure sdf = [&](const Vec3& q){ return evaluate_sdf(s, q); };
-    EXPECT_TRUE(run_sdf_gradient_convergence("sphere", x, sdf, k, eps));
-}
-
-TEST(SphereSDF, HessianConvergence){
-    SphereSDF s{Vec3(0.0, 0.0, 0.0), 0.4};
-    const double k = 20.0;
-    const double eps = 0.2;
-
-    Vec3 dir = Vec3(1.0, -2.0, 3.0).normalized();
-    Vec3 x = s.center + (s.radius + 0.08) * dir;
-
-    const SDFClosure sdf = [&](const Vec3& q){ return evaluate_sdf(s, q); };
-    //  Full Hessian including curvature term -- convergence check catches any
-    //  mistake in either the rank-one part or the H*H'*hess_phi part.
-    EXPECT_TRUE(run_sdf_hessian_convergence("sphere", x, sdf, k, eps, /*include_curvature=*/true));
-}
-
-TEST(SphereSDF, HessianWithoutCurvatureIsRankOne){
-    SphereSDF s{Vec3(0.0, 0.0, 0.0), 0.4};
-    const double k = 20.0;
-    const double eps = 0.2;
-
-    Vec3 dir = Vec3(1.0, -2.0, 3.0).normalized();
-    Vec3 x = s.center + (s.radius + 0.08) * dir;
-
-    const Mat33 H = sdf_penalty_hessian(evaluate_sdf(s, x), k, eps, /*include_curvature=*/false);
-
-    //  Expected: k/eps^2 * n n^T.
-    const Vec3 n = dir;  //  outward normal for a point along dir
-    const Mat33 expected = (k / (eps * eps)) * (n * n.transpose());
-    EXPECT_TRUE(H.isApprox(expected, 1e-8));
-
-    //  Positive semidefinite and rank one.
-    Eigen::SelfAdjointEigenSolver<Mat33> es(H);
-    const Vec3 lambda = es.eigenvalues();
-    EXPECT_GE(lambda(0), -kTol);
-    EXPECT_GE(lambda(1), -kTol);
-    EXPECT_GE(lambda(2), -kTol);
-    EXPECT_NEAR(lambda(0), 0.0, 1e-6);
-    EXPECT_NEAR(lambda(1), 0.0, 1e-6);
-    EXPECT_NEAR(lambda(2), k/(eps*eps), 1e-6);
-}
-
-// ============================================================================
 //  Cylinder SDF
 // ============================================================================
 
@@ -428,34 +360,18 @@ TEST(CylinderSDF, HessianConvergence){
                                             /*include_curvature=*/true));
 }
 
-TEST(SphereSDF, CurvatureTermNonZeroDifference){
-    //  The full Hessian should differ from the flat-approx Hessian when
-    //  phi is large enough and the sphere is small (high curvature).
-    SphereSDF s{Vec3(0.0, 0.0, 0.0), 0.05};
-    const double k = 10.0;
-    const double eps = 0.04;
-
-    Vec3 dir = Vec3(0.0, 0.0, 1.0);
-    Vec3 x = s.center + (s.radius + 0.02) * dir;  //  phi = 0.02
-
-    const SDFEvaluation sdf = evaluate_sdf(s, x);
-    const Mat33 H_full = sdf_penalty_hessian(sdf, k, eps, /*include_curvature=*/true);
-    const Mat33 H_flat = sdf_penalty_hessian(sdf, k, eps, /*include_curvature=*/false);
-    EXPECT_FALSE(H_full.isApprox(H_flat, 1e-4));
-}
-
 // ============================================================================
 //  Boundary behavior
 // ============================================================================
 
 TEST(SDFPenalty, ZeroOutsideTransition){
-    SphereSDF s{Vec3(0.0, 0.0, 0.0), 0.5};
+    CylinderSDF c{Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0), 0.5};
     const double k = 100.0;
     const double eps = 0.1;
 
     //  Far outside: everything zero.
     {
-        const SDFEvaluation sdf = evaluate_sdf(s, Vec3(2.0, 0.0, 0.0));
+        const SDFEvaluation sdf = evaluate_sdf(c, Vec3(2.0, 0.0, 0.5));
         EXPECT_EQ(sdf_penalty_energy  (sdf, k, eps), 0.0);
         EXPECT_TRUE(sdf_penalty_gradient(sdf, k, eps).isApprox(Vec3::Zero()));
         EXPECT_TRUE(sdf_penalty_hessian (sdf, k, eps).isApprox(Mat33::Zero()));
@@ -463,7 +379,7 @@ TEST(SDFPenalty, ZeroOutsideTransition){
 
     //  Deep inside: energy k/2, zero derivatives.
     {
-        const SDFEvaluation sdf = evaluate_sdf(s, Vec3(0.0, 0.0, 0.0));
+        const SDFEvaluation sdf = evaluate_sdf(c, Vec3(0.0, 0.0, 0.5));
         EXPECT_NEAR(sdf_penalty_energy(sdf, k, eps), 0.5 * k, kTol);
         EXPECT_TRUE(sdf_penalty_gradient(sdf, k, eps).isApprox(Vec3::Zero()));
         EXPECT_TRUE(sdf_penalty_hessian (sdf, k, eps).isApprox(Mat33::Zero()));
@@ -474,14 +390,16 @@ TEST(SDFPenalty, GradientPushesOutward){
     //  In the transition layer the -gradient should have a positive projection
     //  onto the outward normal (i.e. the force pushes the node away from the
     //  obstacle).
-    SphereSDF s{Vec3(0.0, 0.0, 0.0), 0.5};
+    CylinderSDF c{Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0), 0.5};
     const double k = 10.0;
     const double eps = 0.1;
 
-    Vec3 dir = Vec3(1.0, 1.0, 1.0).normalized();
-    Vec3 x   = s.center + (s.radius + 0.05) * dir;
+    //  Radial direction perpendicular to the axis.
+    const Vec3 radial = Vec3(1.0, 1.0, 0.0).normalized();
+    //  Point just outside the surface with an arbitrary axial offset.
+    const Vec3 x = c.point + (c.radius + 0.05) * radial + 0.3 * c.axis;
 
-    const Vec3 g = sdf_penalty_gradient(evaluate_sdf(s, x), k, eps);
+    const Vec3 g = sdf_penalty_gradient(evaluate_sdf(c, x), k, eps);
     const Vec3 force = -g;
-    EXPECT_GT(force.dot(dir), 0.0);
+    EXPECT_GT(force.dot(radial), 0.0);
 }

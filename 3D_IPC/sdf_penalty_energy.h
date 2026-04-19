@@ -17,7 +17,7 @@ struct SDFEvaluation {
     SDFEvaluation() : phi(0.0), grad_phi(Vec3::Zero()), hess_phi(Mat33::Zero()) {}
 };
 
-//  Infinite half-space: obstacle occupies the -normal side of the plane
+//  Infinite half-space
 struct PlaneSDF {
     Vec3 point;
     Vec3 normal;   //  must be unit length
@@ -25,16 +25,7 @@ struct PlaneSDF {
 
 SDFEvaluation evaluate_sdf(const PlaneSDF& s, const Vec3& x);
 
-//  Solid ball obstacle
-struct SphereSDF {
-    Vec3   center;
-    double radius;
-};
-
-SDFEvaluation evaluate_sdf(const SphereSDF& s, const Vec3& x);
-
-//  Infinite solid cylinder obstacle.  Axis passes through `point` in
-//  direction `axis` (must be unit length).  Obstacle is the interior.
+//  Infinite solid cylinder 
 struct CylinderSDF {
     Vec3   point;
     Vec3   axis;     //  must be unit length

@@ -29,16 +29,16 @@ void build_cloth_stack_example_high_res(RefMesh& ref_mesh,
                                         std::vector<Vec2>& X,
                                         std::vector<Pin>& pins);
 
-// Cloth + pinned-cylinder drape scene: a 2.4x2.4 ground cloth (corners pinned),
-// one short horizontal cylinder above it (axis along z, every vertex Dirichlet-
-// pinned to act as a static collider), and a vertical stack of fifteen
-// 0.50x0.50 cloths (nx=ny=16) dropped from rest onto the cylinder. The cloths
-// drape over it, slide off, and pile on the ground.
-// Needs --d_hat > 0 on the command line for contacts to work.
-void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
+// Cloth + pinned-cylinder drape scene: 4.0x4.0 pinned ground, a static
+// horizontal cylinder, and a vertical stack of falling cloths. Stack count
+// and per-cloth mesh resolution are set from args.drop_*.
+// Needs --d_hat > 0 for contacts to work.
+void build_cloth_cylinder_drop_example(const IPCArgs3D& args,
+                                       RefMesh& ref_mesh,
                                        DeformedState& state,
                                        std::vector<Vec2>& X,
-                                       std::vector<Pin>& pins);
+                                       std::vector<Pin>& pins,
+                                       SimParams& params);
 
 // Drives the pin-target motion for the twisting-cloth example: two groups of
 // pins counter-rotate about a common +x axis (through axis_point) at their
@@ -53,10 +53,9 @@ struct TwistSpec {
     double omega_right = 0.0;                 // rad/s (signed)
 };
 
-// Square cloth clamped on two opposite short edges. The clamps counter-rotate
-// about the cloth's midline axis so the relative twist reaches
-// args.twist_turns full turns over args.num_frames / args.fps seconds.
-// Needs --d_hat > 0 for self-contact.
+// Square cloth clamped on two opposite short edges. Clamps counter-rotate
+// at a fixed relative rate of args.twist_rate Hz, so total turns scales with
+// run duration. Needs --d_hat > 0 for self-contact.
 void build_twisting_cloth_example(const IPCArgs3D& args,
                                   RefMesh& ref_mesh,
                                   DeformedState& state,
