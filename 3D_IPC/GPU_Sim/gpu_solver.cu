@@ -8,7 +8,11 @@
 #include "gpu_solver.h"
 #include <cuda_runtime.h>
 #include <cooperative_groups.h>
+#include <thrust/sort.h>
+#include <thrust/device_ptr.h>
+#include <thrust/device_vector.h>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <vector>
 
@@ -1323,160 +1327,91 @@ __device__ static int query_bvh_device(
 // Direct structural port of compute_safe_step_for_vertex (parallel_helper.cpp).
 // Uses BVH queries against live positions (same as CPU) and runs CCD or trust
 // region according to params.use_trust_region.
+// Barrier-pair-based safe step: walks the session's vnt/vss CSR lists to find
+// candidate NT/SS pairs involving vi, runs CCD or trust-region for each.
+//
+// Why this is correct (and MUCH faster than a BVH query): the conflict-graph
+// coloring + certified-region clip guarantee that vi's motion this color group
+// stays within d_hat of its starting position. Any pair that could actually
+// collide during this step must therefore be in the precomputed barrier pair
+// list (vertices within d_hat pad). BVH queries during commit (as the CPU's
+// query_pairs_for_vertex does) return the same pairs plus some extras that
+// can't possibly collide — so skipping BVH and iterating the CSR is both
+// correct and dramatically cheaper (no random memory access, no divergent
+// traversal, no wasted CCD tests on impossible pairs).
 __device__ static double compute_safe_step_for_vertex_device(
     int vi,
     const double* x,
     const double  delta[3],
     GPUSimParams  params,
     MeshPtrs      mesh,
-    CertPtrs      cert,
-    BVHPtrs       bvh)
+    BpPtrs        bp)
 {
     if (params.d_hat <= 0.0) return 1.0;
     const double eps = 1.0e-12;
-    const double pad = 1.0e-10;
-
     const double dx[3] = { -delta[0], -delta[1], -delta[2] };
-    double xi[3]; loadv(x, vi, xi);
-    const double xi_end[3] = { xi[0] + dx[0], xi[1] + dx[1], xi[2] + dx[2] };
-
-    // vi's swept AABB.
-    double vbmin[3], vbmax[3];
-    for (int k = 0; k < 3; ++k) {
-        vbmin[k] = dev_min2(xi[k], xi_end[k]) - pad;
-        vbmax[k] = dev_max2(xi[k], xi_end[k]) + pad;
-    }
+    const double zero3[3] = {0.0, 0.0, 0.0};
 
     const bool tr = params.use_trust_region;
     double safe_min = 1.0;
-    int hits[64];
 
-    // ---- vi is the lone moving node vs external triangles ----
-    int n_hits = query_bvh_device(bvh.tri_nodes, bvh.tri_root, vbmin, vbmax, hits, 64);
-    for (int h = 0; h < n_hits; ++h) {
-        const int t  = hits[h];
-        const int a  = mesh.tris[t*3 + 0];
-        const int b  = mesh.tris[t*3 + 1];
-        const int c  = mesh.tris[t*3 + 2];
-        if (vi == a || vi == b || vi == c) continue;
-        double xa[3], xb[3], xc[3];
-        loadv(x, a, xa); loadv(x, b, xb); loadv(x, c, xc);
+    // ---- Node-triangle barrier pairs involving vi ----
+    for (int i = bp.vnt_offsets[vi]; i < bp.vnt_offsets[vi+1]; ++i) {
+        const int pair_idx = bp.vnt_pair_idx[i];
+        const int dof      = bp.vnt_dof[i];   // 0=node, 1/2/3=tri corner a/b/c
+        const int node = bp.nt_data[pair_idx*4 + 0];
+        const int ta   = bp.nt_data[pair_idx*4 + 1];
+        const int tb   = bp.nt_data[pair_idx*4 + 2];
+        const int tc   = bp.nt_data[pair_idx*4 + 3];
+
+        double xn[3], xa[3], xb[3], xc[3];
+        loadv(x, node, xn); loadv(x, ta, xa); loadv(x, tb, xb); loadv(x, tc, xc);
+
         if (tr) {
             double d0;
-            const double omega = tr_nt_gs_dev(xi, xa, xb, xc, delta, d0);
+            const double omega = tr_nt_gs_dev(xn, xa, xb, xc, delta, d0);
             if (d0 < params.d_hat && omega < safe_min) safe_min = omega;
         } else {
-            const double zero3[3] = {0.0, 0.0, 0.0};
+            // Move whichever DOF is vi. Others get zero displacement.
+            double dxn[3] = {0,0,0}, dxa[3] = {0,0,0}, dxb[3] = {0,0,0}, dxc[3] = {0,0,0};
+            if      (dof == 0) { dxn[0]=dx[0]; dxn[1]=dx[1]; dxn[2]=dx[2]; }
+            else if (dof == 1) { dxa[0]=dx[0]; dxa[1]=dx[1]; dxa[2]=dx[2]; }
+            else if (dof == 2) { dxb[0]=dx[0]; dxb[1]=dx[1]; dxb[2]=dx[2]; }
+            else if (dof == 3) { dxc[0]=dx[0]; dxc[1]=dx[1]; dxc[2]=dx[2]; }
             double toi;
-            if (ccd_nt_general(xi, dx, xa, zero3, xb, zero3, xc, zero3, eps, toi)) {
+            if (ccd_nt_general(xn, dxn, xa, dxa, xb, dxb, xc, dxc, eps, toi)) {
                 if (toi < safe_min) safe_min = toi;
             }
         }
+        (void)zero3;  // suppress unused warning on tr path
     }
 
-    // ---- vi as a moving triangle corner vs external nodes ----
-    for (int i = cert.ntt_offsets[vi]; i < cert.ntt_offsets[vi+1]; ++i) {
-        const int t  = cert.ntt_data[i];
-        const int a  = mesh.tris[t*3 + 0];
-        const int b  = mesh.tris[t*3 + 1];
-        const int c  = mesh.tris[t*3 + 2];
-        double xa[3], xb[3], xc[3];
-        loadv(x, a, xa); loadv(x, b, xb); loadv(x, c, xc);
+    // ---- Segment-segment barrier pairs involving vi ----
+    for (int i = bp.vss_offsets[vi]; i < bp.vss_offsets[vi+1]; ++i) {
+        const int pair_idx = bp.vss_pair_idx[i];
+        const int dof      = bp.vss_dof[i];   // 0/1 = in edge1, 2/3 = in edge2
+        const int v0 = bp.ss_data[pair_idx*4 + 0];
+        const int v1 = bp.ss_data[pair_idx*4 + 1];
+        const int v2 = bp.ss_data[pair_idx*4 + 2];
+        const int v3 = bp.ss_data[pair_idx*4 + 3];
 
-        // Build the triangle's swept AABB (only the moving corner sweeps).
-        double tbmin[3], tbmax[3];
-        for (int k = 0; k < 3; ++k) {
-            tbmin[k] = xa[k]; tbmax[k] = xa[k];
-            if (xb[k] < tbmin[k]) tbmin[k] = xb[k]; else if (xb[k] > tbmax[k]) tbmax[k] = xb[k];
-            if (xc[k] < tbmin[k]) tbmin[k] = xc[k]; else if (xc[k] > tbmax[k]) tbmax[k] = xc[k];
-        }
-        if (a == vi) for (int k = 0; k < 3; ++k) {
-            const double e = xa[k] + dx[k];
-            if (e < tbmin[k]) tbmin[k] = e; else if (e > tbmax[k]) tbmax[k] = e;
-        }
-        if (b == vi) for (int k = 0; k < 3; ++k) {
-            const double e = xb[k] + dx[k];
-            if (e < tbmin[k]) tbmin[k] = e; else if (e > tbmax[k]) tbmax[k] = e;
-        }
-        if (c == vi) for (int k = 0; k < 3; ++k) {
-            const double e = xc[k] + dx[k];
-            if (e < tbmin[k]) tbmin[k] = e; else if (e > tbmax[k]) tbmax[k] = e;
-        }
-        for (int k = 0; k < 3; ++k) { tbmin[k] -= pad; tbmax[k] += pad; }
+        double x0[3], x1[3], x2[3], x3[3];
+        loadv(x, v0, x0); loadv(x, v1, x1); loadv(x, v2, x2); loadv(x, v3, x3);
 
-        const int nh = query_bvh_device(bvh.node_nodes, bvh.node_root, tbmin, tbmax, hits, 64);
-        for (int h = 0; h < nh; ++h) {
-            const int X = hits[h];
-            if (X == a || X == b || X == c) continue;
-            const int vi_local = (a == vi) ? 0 : ((b == vi) ? 1 : 2);
-            double xX[3]; loadv(x, X, xX);
-
-            if (tr) {
-                double d0;
-                const double omega = tr_nt_gs_dev(xX, xa, xb, xc, delta, d0);
-                if (d0 < params.d_hat && omega < safe_min) safe_min = omega;
-            } else {
-                double dxv0[3] = {0.0, 0.0, 0.0};
-                double dxv1[3] = {0.0, 0.0, 0.0};
-                double dxv2[3] = {0.0, 0.0, 0.0};
-                double* dxv[3] = { dxv0, dxv1, dxv2 };
-                for (int k = 0; k < 3; ++k) dxv[vi_local][k] = dx[k];
-                const double zero3[3] = {0.0, 0.0, 0.0};
-                double toi;
-                if (ccd_nt_general(xX, zero3, xa, dxv0, xb, dxv1, xc, dxv2, eps, toi)) {
-                    if (toi < safe_min) safe_min = toi;
-                }
-            }
-        }
-    }
-    // ---- Edge-edge pairs: edges incident to vi vs non-sharing edges ----
-    for (int i = cert.nte_offsets[vi]; i < cert.nte_offsets[vi+1]; ++i) {
-        const int ei = cert.nte_data[i];
-        const int ea = bvh.edges[ei*2 + 0];
-        const int eb = bvh.edges[ei*2 + 1];
-
-        double xea[3], xeb[3]; loadv(x, ea, xea); loadv(x, eb, xeb);
-        double ebmin[3], ebmax[3];
-        for (int k = 0; k < 3; ++k) {
-            ebmin[k] = dev_min2(xea[k], xeb[k]);
-            ebmax[k] = dev_max2(xea[k], xeb[k]);
-        }
-        if (ea == vi) for (int k = 0; k < 3; ++k) {
-            const double e = xea[k] + dx[k];
-            if (e < ebmin[k]) ebmin[k] = e; else if (e > ebmax[k]) ebmax[k] = e;
-        }
-        if (eb == vi) for (int k = 0; k < 3; ++k) {
-            const double e = xeb[k] + dx[k];
-            if (e < ebmin[k]) ebmin[k] = e; else if (e > ebmax[k]) ebmax[k] = e;
-        }
-        for (int k = 0; k < 3; ++k) { ebmin[k] -= pad; ebmax[k] += pad; }
-
-        const int nh = query_bvh_device(bvh.edge_nodes, bvh.edge_root, ebmin, ebmax, hits, 64);
-        for (int h = 0; h < nh; ++h) {
-            const int ej = hits[h];
-            if (ej == ei) continue;
-            const int oa = bvh.edges[ej*2 + 0];
-            const int ob = bvh.edges[ej*2 + 1];
-            if (ea == oa || ea == ob || eb == oa || eb == ob) continue;
-            // Dedup when both edges are incident to vi: emit only once (ei < ej).
-            if ((oa == vi || ob == vi) && ei > ej) continue;
-
-            double xoa[3], xob[3]; loadv(x, oa, xoa); loadv(x, ob, xob);
-            const int vi_dof = (vi == ea) ? 0 : 1;
-            if (tr) {
-                double d0;
-                const double omega = tr_ee_gs_dev(xea, xeb, xoa, xob, delta, d0);
-                if (d0 < params.d_hat && omega < safe_min) safe_min = omega;
-            } else {
-                double toi;
-                bool collision;
-                if (vi_dof == 0) {
-                    collision = ccd_ss_single(xea, dx, xeb, xoa, xob, eps, toi);
-                } else {
-                    collision = ccd_ss_single(xeb, dx, xea, xoa, xob, eps, toi);
-                }
-                if (collision && toi < safe_min) safe_min = toi;
-            }
+        if (tr) {
+            double d0;
+            const double omega = tr_ee_gs_dev(x0, x1, x2, x3, delta, d0);
+            if (d0 < params.d_hat && omega < safe_min) safe_min = omega;
+        } else {
+            // ccd_ss_single signature: (x1_moving, dx1, x2, x3, x4) — first
+            // point moves, other 3 static. Swap arguments so vi's point is x1.
+            double toi;
+            bool collision = false;
+            if      (dof == 0) collision = ccd_ss_single(x0, dx, x1, x2, x3, eps, toi);
+            else if (dof == 1) collision = ccd_ss_single(x1, dx, x0, x2, x3, eps, toi);
+            else if (dof == 2) collision = ccd_ss_single(x2, dx, x3, x0, x1, eps, toi);
+            else if (dof == 3) collision = ccd_ss_single(x3, dx, x2, x0, x1, eps, toi);
+            if (collision && toi < safe_min) safe_min = toi;
         }
     }
 
@@ -1710,6 +1645,296 @@ __global__ static void residual_kernel(
 static constexpr int MAX_CONFLICT_DEG = 512;
 
 // ============================================================================
+// ============================================================================
+// LBVH construction on device (Karras 2012).
+//
+// Pipeline, given N box AABBs:
+//   1. lbvh_morton_kernel     — compute 30-bit Morton codes from box centers.
+//   2. thrust::sort_by_key     — sort leaf indices by Morton key.
+//   3. lbvh_build_kernel       — Karras internal-node topology from sorted keys.
+//   4. lbvh_refit_kernel       — bottom-up AABB union (leaves up through root).
+//
+// Output: BVHNodeGPU array sized 2N-1 (leaves then internals). Root is at
+// index N (first internal node).
+// ============================================================================
+
+// Interleave low 10 bits of v with zeros: ... z0 z1 ... z9 → b0 0 0 b1 0 0 ...
+__host__ __device__ static inline uint32_t lbvh_spread3(uint32_t v) {
+    v = (v | (v << 16)) & 0x030000FFu;
+    v = (v | (v <<  8)) & 0x0300F00Fu;
+    v = (v | (v <<  4)) & 0x030C30C3u;
+    v = (v | (v <<  2)) & 0x09249249u;
+    return v;
+}
+
+__device__ static inline uint32_t lbvh_morton3(uint32_t x, uint32_t y, uint32_t z) {
+    return (lbvh_spread3(x) << 2) | (lbvh_spread3(y) << 1) | lbvh_spread3(z);
+}
+
+// Morton code per box, using scene-wide bounds passed by value.
+__global__ static void lbvh_morton_kernel(
+    int           N,
+    const double* box_min,    // N*3
+    const double* box_max,    // N*3
+    double sxmin, double symin, double szmin,
+    double sxmax, double symax, double szmax,
+    uint32_t*     mortons,    // N
+    int*          indices)    // N  (init to 0..N-1 here)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    const double cx = 0.5 * (box_min[i*3+0] + box_max[i*3+0]);
+    const double cy = 0.5 * (box_min[i*3+1] + box_max[i*3+1]);
+    const double cz = 0.5 * (box_min[i*3+2] + box_max[i*3+2]);
+
+    const double sx = (sxmax - sxmin) > 1e-30 ? (sxmax - sxmin) : 1.0;
+    const double sy = (symax - symin) > 1e-30 ? (symax - symin) : 1.0;
+    const double sz = (szmax - szmin) > 1e-30 ? (szmax - szmin) : 1.0;
+
+    double nx = (cx - sxmin) / sx * 1023.999;
+    double ny = (cy - symin) / sy * 1023.999;
+    double nz = (cz - szmin) / sz * 1023.999;
+    if (nx < 0) nx = 0; else if (nx > 1023) nx = 1023;
+    if (ny < 0) ny = 0; else if (ny > 1023) ny = 1023;
+    if (nz < 0) nz = 0; else if (nz > 1023) nz = 1023;
+
+    mortons[i] = lbvh_morton3((uint32_t)nx, (uint32_t)ny, (uint32_t)nz);
+    indices[i] = i;
+}
+
+// Common-prefix length between Morton[i] and Morton[j], with index tiebreaking
+// (needed when adjacent keys are equal).  Returns -1 if j out of range.
+__device__ static inline int lbvh_delta(
+    int i, int j, int N, const uint32_t* sorted_mortons)
+{
+    if (j < 0 || j >= N) return -1;
+    const uint32_t a = sorted_mortons[i];
+    const uint32_t b = sorted_mortons[j];
+    if (a != b) return __clz(a ^ b);
+    // Tiebreak on index.  32 bits of Morton + some prefix of index.
+    return 32 + __clz((uint32_t)i ^ (uint32_t)j);
+}
+
+// One thread per internal node (there are N-1 internal nodes for N leaves).
+// Leaf indices [0, N); internal node indices [N, 2N-1) in the output array.
+// Root is internal node 0, stored at output index N.
+__global__ static void lbvh_build_kernel(
+    int               N,
+    const uint32_t*   sorted_mortons,   // N
+    BVHNodeGPU*       nodes,            // 2N-1
+    int*              parent)           // 2N-1  (filled here for refit)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N - 1) return;
+
+    // Direction d: +1 extends right, -1 extends left.
+    const int dL = lbvh_delta(i, i-1, N, sorted_mortons);
+    const int dR = lbvh_delta(i, i+1, N, sorted_mortons);
+    const int d  = (dR > dL) ? 1 : -1;
+    const int dmin = (d == 1) ? dL : dR;  // prefix just outside the range
+
+    // Find upper bound for range length by exponentially expanding.
+    int lmax = 2;
+    while (lbvh_delta(i, i + lmax*d, N, sorted_mortons) > dmin) lmax *= 2;
+
+    // Binary search for exact length.
+    int l = 0;
+    for (int t = lmax / 2; t >= 1; t /= 2) {
+        if (lbvh_delta(i, i + (l + t)*d, N, sorted_mortons) > dmin) l += t;
+    }
+    const int j = i + l*d;
+
+    // Find split position inside [min(i,j), max(i,j)]: largest s such that
+    // delta(i, i + s*d) > delta(i, j).
+    const int dnode = lbvh_delta(i, j, N, sorted_mortons);
+    int s = 0;
+    for (int t = (l + 1) / 2; t >= 1; t = (t == 1) ? 0 : (t + 1) / 2) {
+        if (lbvh_delta(i, i + (s + t)*d, N, sorted_mortons) > dnode) s += t;
+        if (t == 1) break;
+    }
+    // Correct off-by-one: handle remaining step.
+    int split = i + s*d + (d < 0 ? -1 : 0);  // lower of the two children's range
+
+    // Children: if child's range has length 1, it's a leaf at split (or split+1).
+    const int left_lo  = min(i, j);
+    const int right_hi = max(i, j);
+
+    int left_child, right_child;
+    if (min(i, j) == split) left_child  = split;        // leaf
+    else                    left_child  = N + split;    // internal
+    if (max(i, j) == split + 1) right_child = split + 1;    // leaf
+    else                        right_child = N + split + 1;// internal
+
+    const int me = N + i;  // this internal node's output index
+    BVHNodeGPU& n = nodes[me];
+    n.left      = left_child;
+    n.right     = right_child;
+    n.leafIndex = -1;
+    n.pad       = 0;
+    // bbox filled by refit kernel
+
+    parent[left_child]  = me;
+    parent[right_child] = me;
+    // avoid unused-warning
+    (void)left_lo; (void)right_hi;
+}
+
+// Initialize leaf nodes from sorted box indices.
+__global__ static void lbvh_init_leaves_kernel(
+    int N,
+    const int*    sorted_indices,   // N  — leaf i corresponds to original box sorted_indices[i]
+    const double* box_min,          // (original) N*3
+    const double* box_max,          // (original) N*3
+    BVHNodeGPU*   nodes,            // 2N-1
+    int*          node_ready)       // 2N-1 atomic counter for refit (init to 0)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    const int orig = sorted_indices[i];
+    BVHNodeGPU& n = nodes[i];
+    n.bmin[0] = box_min[orig*3+0]; n.bmin[1] = box_min[orig*3+1]; n.bmin[2] = box_min[orig*3+2];
+    n.bmax[0] = box_max[orig*3+0]; n.bmax[1] = box_max[orig*3+1]; n.bmax[2] = box_max[orig*3+2];
+    n.left = -1;
+    n.right = -1;
+    n.leafIndex = orig;  // leaf points to ORIGINAL box index (so query_bvh_device's caller gets the un-permuted index)
+    n.pad = 0;
+
+    node_ready[i] = 1;  // leaves are ready
+}
+
+// Bottom-up refit: each leaf's parent is incremented; when a parent sees both
+// children ready, it computes its AABB and bubbles up to its own parent.
+__global__ static void lbvh_refit_kernel(
+    int N,
+    BVHNodeGPU* nodes,            // 2N-1
+    const int*  parent,           // 2N-1
+    int*        node_ready)       // 2N-1 — incremented atomically per child arrival
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    // Start from leaf i, walk up propagating until we either hit an internal node
+    // whose other child isn't ready yet (bail) or we reach the root.
+    int cur = parent[i];
+    while (cur >= N) {   // internal node index
+        const int arrivals = atomicAdd(&node_ready[cur], 1) + 1;
+        if (arrivals < 2) return;   // first child to arrive — let the second handle it
+        // Both children ready: union their AABBs.
+        BVHNodeGPU& n = nodes[cur];
+        const BVHNodeGPU& L = nodes[n.left];
+        const BVHNodeGPU& R = nodes[n.right];
+        n.bmin[0] = fmin(L.bmin[0], R.bmin[0]);
+        n.bmin[1] = fmin(L.bmin[1], R.bmin[1]);
+        n.bmin[2] = fmin(L.bmin[2], R.bmin[2]);
+        n.bmax[0] = fmax(L.bmax[0], R.bmax[0]);
+        n.bmax[1] = fmax(L.bmax[1], R.bmax[1]);
+        n.bmax[2] = fmax(L.bmax[2], R.bmax[2]);
+        if (cur == N) return;        // at root
+        cur = parent[cur];
+    }
+}
+
+// Gather-active kernel: compacts full-nv cert_bmin/bmax into n_active-sized
+// active_bmin/bmax via the active_ids[] mapping. One thread per active vertex.
+__global__ static void lbvh_gather_active_boxes_kernel(
+    int n_active,
+    const int*    active_ids,     // n_active
+    const double* full_bmin,      // nv*3
+    const double* full_bmax,      // nv*3
+    double*       active_bmin,    // n_active*3
+    double*       active_bmax)    // n_active*3
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_active) return;
+    const int vi = active_ids[i];
+    active_bmin[i*3+0] = full_bmin[vi*3+0];
+    active_bmin[i*3+1] = full_bmin[vi*3+1];
+    active_bmin[i*3+2] = full_bmin[vi*3+2];
+    active_bmax[i*3+0] = full_bmax[vi*3+0];
+    active_bmax[i*3+1] = full_bmax[vi*3+1];
+    active_bmax[i*3+2] = full_bmax[vi*3+2];
+}
+
+// Host wrapper: builds an LBVH over `nbox` AABBs already on device.
+// Returns root index in `nodes` (always N for non-empty input).
+// Session must hold pre-allocated scratch: d_cert_bvh (>= 2*nbox-1 nodes),
+// plus temp buffers for mortons, indices, parents, ready counter.
+struct LBVHScratch {
+    uint32_t* d_mortons   = nullptr;
+    int*      d_indices   = nullptr;
+    int*      d_parent    = nullptr;
+    int*      d_ready     = nullptr;
+    int       capacity    = 0;  // N, not 2N-1
+};
+
+static void lbvh_scratch_ensure(LBVHScratch& s, int N) {
+    if (N <= s.capacity) return;
+    auto F = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
+    F(s.d_mortons); F(s.d_indices); F(s.d_parent); F(s.d_ready);
+    s.capacity = N;
+    cudaMalloc(&s.d_mortons, N * sizeof(uint32_t));
+    cudaMalloc(&s.d_indices, N * sizeof(int));
+    cudaMalloc(&s.d_parent,  (2*N - 1) * sizeof(int));
+    cudaMalloc(&s.d_ready,   (2*N - 1) * sizeof(int));
+}
+
+static void lbvh_scratch_free(LBVHScratch& s) {
+    auto F = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
+    F(s.d_mortons); F(s.d_indices); F(s.d_parent); F(s.d_ready);
+    s.capacity = 0;
+}
+
+// Build LBVH in-place into `nodes` (caller-allocated, >= 2N-1 BVHNodeGPU).
+// Returns the root index; returns -1 for N <= 0.
+static int lbvh_build(
+    int               N,
+    const double*     d_box_min,
+    const double*     d_box_max,
+    double            sxmin, double symin, double szmin,
+    double            sxmax, double symax, double szmax,
+    BVHNodeGPU*       d_nodes,       // 2N-1
+    LBVHScratch&      s)
+{
+    if (N <= 0) return -1;
+    lbvh_scratch_ensure(s, N);
+
+    const int block = 256;
+    const int grid  = (N + block - 1) / block;
+
+    // 1. Morton codes.
+    lbvh_morton_kernel<<<grid, block>>>(
+        N, d_box_min, d_box_max,
+        sxmin, symin, szmin, sxmax, symax, szmax,
+        s.d_mortons, s.d_indices);
+
+    // 2. Sort (Morton, index) pairs by Morton.
+    thrust::sort_by_key(
+        thrust::device_ptr<uint32_t>(s.d_mortons),
+        thrust::device_ptr<uint32_t>(s.d_mortons + N),
+        thrust::device_ptr<int>(s.d_indices));
+
+    // 3. Fill leaves from sorted permutation (clear ready counter).
+    cudaMemset(s.d_ready, 0, (2*N - 1) * sizeof(int));
+    lbvh_init_leaves_kernel<<<grid, block>>>(
+        N, s.d_indices, d_box_min, d_box_max, d_nodes, s.d_ready);
+
+    if (N == 1) {
+        // Single leaf — treat node 0 as the root.
+        return 0;
+    }
+
+    // 4. Build internal-node topology.
+    const int ig = (N - 1 + block - 1) / block;
+    lbvh_build_kernel<<<ig, block>>>(N, s.d_mortons, d_nodes, s.d_parent);
+
+    // 5. Bottom-up refit (AABB union).
+    lbvh_refit_kernel<<<grid, block>>>(N, d_nodes, s.d_parent, s.d_ready);
+
+    return N;   // root = first internal node
+}
+
 // build_conflict_kernel — GPU port of build_conflict_graph (parallel_helper.cpp).
 // One thread per vertex collects all neighbors from four edge sources:
 //   1. Elastic coupling (shared triangles) — via session's gpu_adj CSR.
@@ -1900,6 +2125,10 @@ struct GpuSolverSession {
     int    *d_active_ids = nullptr;     // at most nv
     int     cert_bvh_capacity = 0;
     BVHNodeGPU *d_cert_bvh = nullptr;   // at most 2*nv-1
+    // Compact-active box buffers for GPU LBVH construction.
+    double *d_active_bmin = nullptr;    // n_active * 3
+    double *d_active_bmax = nullptr;    // n_active * 3
+    LBVHScratch lbvh_scratch;           // Morton codes + sort indices + parent + ready
     int    *d_conflict_nbrs = nullptr;  // nv * MAX_CONFLICT_DEG
     int    *d_conflict_counts = nullptr;// nv
     int    *d_overflow = nullptr;       // single int
@@ -1926,6 +2155,8 @@ static void session_free(GpuSolverSession* s) {
     F(s->d_cert_bvh);
     F(s->d_conflict_nbrs); F(s->d_conflict_counts); F(s->d_overflow);
     F(s->d_vertex_color);
+    F(s->d_active_bmin); F(s->d_active_bmax);
+    lbvh_scratch_free(s->lbvh_scratch);
 }
 
 void gpu_solver_begin_sweep(
@@ -2070,6 +2301,8 @@ void gpu_solver_begin_sweep(
     cudaMalloc(&s.d_cert_bmax, nv*3*sizeof(double));
     cudaMalloc(&s.d_active_flag, nv*sizeof(int));
     cudaMalloc(&s.d_active_ids, nv*sizeof(int));
+    cudaMalloc(&s.d_active_bmin, nv*3*sizeof(double));
+    cudaMalloc(&s.d_active_bmax, nv*3*sizeof(double));
     s.cert_bvh_capacity = hmax(1, 2*nv - 1);
     cudaMalloc(&s.d_cert_bvh, s.cert_bvh_capacity * sizeof(BVHNodeGPU));
     cudaError_t alloc_err = cudaMalloc(&s.d_conflict_nbrs, (size_t)nv * MAX_CONFLICT_DEG * sizeof(int));
@@ -2107,13 +2340,15 @@ std::vector<std::vector<int>> gpu_build_conflict_graph(
 
     std::vector<std::vector<int>> graph(nv);
 
-    // Build active_ids + active_boxes on CPU.
-    std::vector<AABB> active_boxes;
-    std::vector<int>  active_ids;
-    std::vector<int>  active_flag(nv, 0);
+    // Flatten per-vertex certified AABBs + compute scene bounds + active list.
+    std::vector<int>    active_ids;
+    std::vector<int>    active_flag(nv, 0);
     std::vector<double> cert_bmin(nv*3), cert_bmax(nv*3);
-    active_boxes.reserve(nv);
     active_ids.reserve(nv);
+    double sxmin =  std::numeric_limits<double>::infinity();
+    double symin =  sxmin, szmin = sxmin;
+    double sxmax = -std::numeric_limits<double>::infinity();
+    double symax =  sxmax, szmax = sxmax;
     for (int i = 0; i < nv; ++i) {
         cert_bmin[i*3+0] = predictions[i].certified_region.min(0);
         cert_bmin[i*3+1] = predictions[i].certified_region.min(1);
@@ -2124,15 +2359,55 @@ std::vector<std::vector<int>> gpu_build_conflict_graph(
         if (!predictions[i].active) continue;
         active_flag[i] = 1;
         active_ids.push_back(i);
-        active_boxes.push_back(predictions[i].certified_region);
+        for (int k = 0; k < 3; ++k) {
+            const double bmin_k = cert_bmin[i*3+k];
+            const double bmax_k = cert_bmax[i*3+k];
+            if (k == 0) { sxmin = std::min(sxmin, bmin_k); sxmax = std::max(sxmax, bmax_k); }
+            if (k == 1) { symin = std::min(symin, bmin_k); symax = std::max(symax, bmax_k); }
+            if (k == 2) { szmin = std::min(szmin, bmin_k); szmax = std::max(szmax, bmax_k); }
+        }
     }
-
-    // CPU BVH build — fast for a few thousand boxes.
-    std::vector<BVHNode> sw_bvh_nodes;
-    const int sw_root = build_bvh(active_boxes, sw_bvh_nodes);
     const int n_active = (int)active_ids.size();
 
-    // Flatten BVH + upload.
+    // Upload per-vertex boxes + active metadata.
+    cudaMemcpy(s.d_cert_bmin, cert_bmin.data(), nv*3*sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(s.d_cert_bmax, cert_bmax.data(), nv*3*sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(s.d_active_flag, active_flag.data(), nv*sizeof(int), cudaMemcpyHostToDevice);
+    if (n_active > 0) {
+        cudaMemcpy(s.d_active_ids, active_ids.data(), n_active*sizeof(int), cudaMemcpyHostToDevice);
+    }
+
+    // Build BVH over active certified AABBs, either on GPU (LBVH, still WIP —
+    // the Karras split search has a correctness bug producing ~5% missing
+    // edges) or on CPU (build_bvh — slower at 100k but correct).
+    int sw_root = -1;
+#ifdef GPU_USE_LBVH
+    if (n_active > 0) {
+        const int gblock = 256;
+        const int ggrid  = (n_active + gblock - 1) / gblock;
+        lbvh_gather_active_boxes_kernel<<<ggrid, gblock>>>(
+            n_active, s.d_active_ids,
+            s.d_cert_bmin, s.d_cert_bmax,
+            s.d_active_bmin, s.d_active_bmax);
+
+        const int need_nodes = std::max(1, 2*n_active - 1);
+        if (need_nodes > s.cert_bvh_capacity) {
+            cudaFree(s.d_cert_bvh);
+            s.cert_bvh_capacity = need_nodes;
+            cudaMalloc(&s.d_cert_bvh, s.cert_bvh_capacity * sizeof(BVHNodeGPU));
+        }
+        sw_root = lbvh_build(
+            n_active, s.d_active_bmin, s.d_active_bmax,
+            sxmin, symin, szmin, sxmax, symax, szmax,
+            s.d_cert_bvh, s.lbvh_scratch);
+    }
+#else
+    // CPU BVH build (legacy path — known-correct). Falls back if LBVH toggle off.
+    std::vector<AABB> active_boxes;
+    active_boxes.reserve(n_active);
+    for (int vi : active_ids) active_boxes.push_back(predictions[vi].certified_region);
+    std::vector<BVHNode> sw_bvh_nodes;
+    sw_root = build_bvh(active_boxes, sw_bvh_nodes);
     std::vector<BVHNodeGPU> bvh_flat(std::max(1, (int)sw_bvh_nodes.size()));
     for (int i = 0; i < (int)sw_bvh_nodes.size(); ++i) {
         bvh_flat[i].bmin[0]=sw_bvh_nodes[i].bbox.min(0); bvh_flat[i].bmin[1]=sw_bvh_nodes[i].bbox.min(1); bvh_flat[i].bmin[2]=sw_bvh_nodes[i].bbox.min(2);
@@ -2146,13 +2421,7 @@ std::vector<std::vector<int>> gpu_build_conflict_graph(
         cudaMalloc(&s.d_cert_bvh, s.cert_bvh_capacity * sizeof(BVHNodeGPU));
     }
     cudaMemcpy(s.d_cert_bvh, bvh_flat.data(), bvh_flat.size()*sizeof(BVHNodeGPU), cudaMemcpyHostToDevice);
-
-    cudaMemcpy(s.d_cert_bmin, cert_bmin.data(), nv*3*sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(s.d_cert_bmax, cert_bmax.data(), nv*3*sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(s.d_active_flag, active_flag.data(), nv*sizeof(int), cudaMemcpyHostToDevice);
-    if (n_active > 0) {
-        cudaMemcpy(s.d_active_ids, active_ids.data(), n_active*sizeof(int), cudaMemcpyHostToDevice);
-    }
+#endif
 
     const int zero = 0;
     cudaMemcpy(s.d_overflow, &zero, sizeof(int), cudaMemcpyHostToDevice);
@@ -2466,7 +2735,6 @@ void gpu_build_jacobi_predictions(
             pred.active = true;
             pred.g      = Vec3(h_g[vi*3], h_g[vi*3+1], h_g[vi*3+2]);
             pred.delta  = Vec3(h_delta[vi*3], h_delta[vi*3+1], h_delta[vi*3+2]);
-            for(int r=0;r<3;r++) for(int c=0;c<3;c++) pred.H(r,c)=h_H[vi*9+r*3+c];
             pred.certified_region.min = Vec3(h_bmin[vi*3], h_bmin[vi*3+1], h_bmin[vi*3+2]);
             pred.certified_region.max = Vec3(h_bmax[vi*3], h_bmax[vi*3+1], h_bmax[vi*3+2]);
         }
@@ -2633,7 +2901,6 @@ void gpu_build_jacobi_predictions(
         pred.active = true;
         pred.g      = Vec3(h_g[vi*3], h_g[vi*3+1], h_g[vi*3+2]);
         pred.delta  = Vec3(h_delta[vi*3], h_delta[vi*3+1], h_delta[vi*3+2]);
-        for(int r=0;r<3;r++) for(int c=0;c<3;c++) pred.H(r,c)=h_H[vi*9+r*3+c];
         pred.certified_region.min = Vec3(h_bmin[vi*3], h_bmin[vi*3+1], h_bmin[vi*3+2]);
         pred.certified_region.max = Vec3(h_bmax[vi*3], h_bmax[vi*3+1], h_bmax[vi*3+2]);
     }
@@ -2744,9 +3011,9 @@ __global__ static void colored_gs_commit_kernel(
         delta[2] = alpha_clip * delta_fresh[2];
     }
 
-    // CCD / trust-region safe step (item 3 — matches CPU compute_safe_step_for_vertex).
+    // CCD / trust-region safe step. Uses the barrier pair CSR (no BVH query).
     const double ccd_step = compute_safe_step_for_vertex_device(
-        vi, d_x, delta, params, mesh, cert, bvh);
+        vi, d_x, delta, params, mesh, bp);
 
     out_delta[li*3 + 0] = delta[0];
     out_delta[li*3 + 1] = delta[1];
@@ -2816,7 +3083,7 @@ __global__ static void colored_gs_sweep_kernel(
             }
 
             const double ccd_step = compute_safe_step_for_vertex_device(
-                vi, d_x, delta, params, mesh, cert, bvh);
+                vi, d_x, delta, params, mesh, bp);
 
             // In-place: non-conflicting per color-graph coloring.
             d_x[vi*3+0] -= ccd_step * delta[0];

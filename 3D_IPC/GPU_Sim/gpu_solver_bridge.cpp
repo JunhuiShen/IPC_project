@@ -80,6 +80,16 @@ SolverResult gpu_gauss_seidel_solver(
     // -------------------------------------------------------------------
     // Main iteration loop
     // -------------------------------------------------------------------
+    // Rebuild coloring every N iters instead of every iter. Staleness risk:
+    // two vertices that weren't in conflict at rebuild time could drift into
+    // conflict within N iters and miss a coloring edge. CCD still protects
+    // against barrier penetration for each vertex independently — the only
+    // weakened guarantee is the "same-color vertices can't collide simultaneously"
+    // one. Safe for converging sims with small per-iter motion.
+    constexpr int color_rebuild_interval = 1;
+    std::vector<std::vector<int>> cached_color_groups;
+    bool cached_colors_valid = false;
+
     double total_predict_ms = 0, total_commit_ms = 0, total_conflict_ms = 0, total_resid_ms = 0;
     auto t_start_loop = std::chrono::high_resolution_clock::now();
     for (int iter = 1; iter <= p.max_global_iters; ++iter) {
@@ -100,12 +110,18 @@ SolverResult gpu_gauss_seidel_solver(
         // region BVH build is still CPU — 1566 boxes, <5ms). Coloring stays
         // on CPU: it's inherently serial (greedy) and already very fast.
         auto t2 = std::chrono::high_resolution_clock::now();
-        auto conflict_graph = gpu_build_conflict_graph(predictions);
-        if (conflict_graph.empty()) {
-            conflict_graph = build_conflict_graph(
-                ref_mesh, pins, broad_phase.cache(), predictions, &adj);
+        const bool need_rebuild = !cached_colors_valid ||
+                                  ((iter - 1) % color_rebuild_interval) == 0;
+        if (need_rebuild) {
+            auto conflict_graph = gpu_build_conflict_graph(predictions);
+            if (conflict_graph.empty()) {
+                conflict_graph = build_conflict_graph(
+                    ref_mesh, pins, broad_phase.cache(), predictions, &adj);
+            }
+            cached_color_groups = greedy_color_conflict_graph(conflict_graph, predictions);
+            cached_colors_valid = true;
         }
-        const auto color_groups = greedy_color_conflict_graph(conflict_graph, predictions);
+        const auto& color_groups = cached_color_groups;
         auto t3 = std::chrono::high_resolution_clock::now();
         total_conflict_ms += std::chrono::duration<double, std::milli>(t3 - t2).count();
 
