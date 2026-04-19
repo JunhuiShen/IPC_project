@@ -38,3 +38,28 @@ Mat33 bending_node_hessian(const HingeDef& hinge, double k_B, double c_e, double
 // This is the block used by the Gauss-Seidel IPC solver, for which a
 // guaranteed-PSD Hessian is required to produce a descent direction.
 Mat33 bending_node_hessian_psd(const HingeDef& hinge, double k_B, double c_e, double bar_theta, int node);
+
+// -- Shared-computation primitives (exposed for batched precompute paths)
+//
+// Consumers that compute gradients/Hessians for all four nodes of the same
+// hinge should build the BendingCache once and call grad_theta_node four
+// times. bending_node_gradient/hessian_psd rebuild the cache per call.
+struct BendingCache {
+    Vec3   e;
+    Vec3   a;
+    Vec3   b;
+    Vec3   mA;
+    Vec3   mB;
+    Vec3   e_hat;
+    double muA2;
+    double muB2;
+    double ell;
+    double X;
+    double Y;
+    double theta;
+    bool   degenerate;
+};
+
+BendingCache make_bending_cache(const HingeDef& hinge);
+
+Vec3 grad_theta_node(const BendingCache& c, const HingeDef& hinge, int node);

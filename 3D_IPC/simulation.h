@@ -7,11 +7,13 @@
 
 struct TwistSpec;
 
-// Advance one frame across all substeps; returns the last substep's result.
+// Advance one frame across all substeps; returns accumulated stats
+// (initial_residual from first substep, final_residual from last, sum of
+// iterations / violation counts across all substeps).
 inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
     const std::vector<Pin>& pins, const SimParams& params, const std::vector<std::vector<int>>& color_groups,
     BroadPhase& broad_phase) {
-    SolverResult result;
+    SolverResult agg;
     for (int sub = 0; sub < params.substeps; ++sub) {
         std::vector<Vec3> xhat;
         build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
@@ -20,16 +22,19 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
             ? trust_region_initial_guess(state.deformed_positions, xhat, ref_mesh, params.d_hat)
             : ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
 
+        SolverResult sub_result;
         if (params.use_gpu)
-            result = gpu_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
+            sub_result = gpu_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
         else if (params.use_parallel)
-            result = global_gauss_seidel_solver_parallel(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
+            sub_result = global_gauss_seidel_solver_parallel(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
         else
-            result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
+            sub_result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
+        accumulate_solver_result(agg, sub_result, sub == 0);
+
         update_velocity(state.velocities, xnew, state.deformed_positions, params.dt());
         state.deformed_positions = xnew;
     }
-    return result;
+    return agg;
 }
 
 // Same as advance_one_frame, but refreshes rotating pin targets from

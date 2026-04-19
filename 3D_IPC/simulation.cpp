@@ -19,7 +19,7 @@ namespace fs = std::filesystem;
 SolverResult advance_one_frame_twisting(DeformedState& state, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
     std::vector<Pin>& pins, const SimParams& params, const std::vector<std::vector<int>>& color_groups,
     BroadPhase& broad_phase, const TwistSpec& twist_spec, int frame_index) {
-    SolverResult result;
+    SolverResult agg;
     const double dt = params.dt();
     for (int sub = 0; sub < params.substeps; ++sub) {
         const double t_next = ((frame_index - 1) * params.substeps + (sub + 1)) * dt;
@@ -32,17 +32,19 @@ SolverResult advance_one_frame_twisting(DeformedState& state, const RefMesh& ref
             ? trust_region_initial_guess(state.deformed_positions, xhat, ref_mesh, params.d_hat)
             : ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
 
+        SolverResult sub_result;
         if (params.use_gpu)
-            result = gpu_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
+            sub_result = gpu_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
         else if (params.use_parallel)
-            result = global_gauss_seidel_solver_parallel(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
+            sub_result = global_gauss_seidel_solver_parallel(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
         else
-            result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
+            sub_result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
+        accumulate_solver_result(agg, sub_result, sub == 0);
 
         update_velocity(state.velocities, xnew, state.deformed_positions, dt);
         state.deformed_positions = xnew;
     }
-    return result;
+    return agg;
 }
 
 int main(int argc, char** argv) {
@@ -162,8 +164,9 @@ int main(int argc, char** argv) {
                   << " | initial_residual = " << std::scientific << result.initial_residual
                   << " | final_residual = "   << std::scientific << result.final_residual
                   << " | global_iters = "     << std::setw(3)    << result.iterations;
-        if (params.use_parallel)
-            std::cout << " | colors = "   << std::setw(3) << result.last_num_colors;
+        if (params.use_parallel) {
+            std::cout << " | colors = "  << std::setw(3) << result.last_num_colors;
+        }
         if (params.ccd_check)
             std::cout << " | ccd_viol = " << std::setw(3) << result.ccd_violations;
         std::cout << " | solver_time = " << std::fixed << std::setprecision(3)

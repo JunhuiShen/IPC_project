@@ -39,10 +39,67 @@ double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const s
     return E + dt2 * PE;
 }
 
+void build_bending_precompute(const RefMesh& ref_mesh, const std::vector<Vec3>& x,
+                              const SimParams& params,
+                              std::vector<HingePrecompute>& out) {
+    const int nh = static_cast<int>(ref_mesh.hinges.size());
+    if (params.kB <= 0.0 || nh == 0) { out.clear(); return; }
+
+    out.resize(nh);
+    #pragma omp parallel for schedule(static)
+    for (int hi = 0; hi < nh; ++hi) {
+        const Hinge& h = ref_mesh.hinges[hi];
+        HingeDef def;
+        for (int k = 0; k < 4; ++k) def.x[k] = x[h.v[k]];
+
+        const BendingCache c = make_bending_cache(def);
+        HingePrecompute& hp = out[hi];
+        hp.degenerate = c.degenerate;
+        if (c.degenerate) {
+            for (auto& g : hp.gtheta) g.setZero();
+            hp.scale_grad = 0.0;
+            hp.scale_hess = 0.0;
+            continue;
+        }
+        const double two_kB_ce = 2.0 * params.kB * h.c_e;
+        hp.scale_grad = two_kB_ce * (c.theta - h.bar_theta);
+        hp.scale_hess = two_kB_ce;
+        for (int node = 0; node < 4; ++node)
+            hp.gtheta[node] = grad_theta_node(c, def, node);
+    }
+}
+
+void build_elastic_precompute(const RefMesh& ref_mesh, const std::vector<Vec3>& x,
+                              const SimParams& params, bool want_hessian,
+                              std::vector<TriPrecompute>& out) {
+    const int nt = num_tris(ref_mesh);
+    out.resize(nt);
+    #pragma omp parallel for schedule(static)
+    for (int ti = 0; ti < nt; ++ti) {
+        const TriangleDef def = make_def_triangle(x, ref_mesh, ti);
+        Mat32 Ds_mat;
+        Ds_mat.col(0) = def.x[1] - def.x[0];
+        Ds_mat.col(1) = def.x[2] - def.x[0];
+        const Mat22& Dm_inv = ref_mesh.Dm_inverse[ti];
+        const Mat32  F      = Ds_mat * Dm_inv;
+
+        const CorotatedCache32 cache = buildCorotatedCache(F);
+
+        TriPrecompute& tp = out[ti];
+        tp.A     = ref_mesh.area[ti];
+        tp.gradN = shape_function_gradients(Dm_inv);
+        tp.P     = PCorotated32(cache, F, params.mu, params.lambda);
+        tp.has_hessian = want_hessian;
+        if (want_hessian) dPdFCorotated32(cache, params.mu, params.lambda, tp.dPdF);
+    }
+}
+
 std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                                                                      const std::vector<Pin>& pins, const SimParams& params,
                                                                      const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                                                                     const PinMap* pin_map) {
+                                                                     const PinMap* pin_map,
+                                                                     const std::vector<TriPrecompute>* tri_cache,
+                                                                     const std::vector<HingePrecompute>* hinge_cache) {
     const double dt2 = params.dt2();
     Vec3  g = Vec3::Zero();
     Mat33 H = Mat33::Zero();
@@ -68,35 +125,50 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
         }
     }
 
+    const bool have_cache_hess = tri_cache != nullptr;
     for (const auto& [ti, a] : adj.at(vi)) {
-        const TriangleDef def = make_def_triangle(x, ref_mesh, ti);
-        Mat32 Ds_mat;
-        Ds_mat.col(0) = def.x[1] - def.x[0];
-        Ds_mat.col(1) = def.x[2] - def.x[0];
-        const Mat22& Dm_inv = ref_mesh.Dm_inverse[ti];
-        const Mat32  F      = Ds_mat * Dm_inv;
-        const double A      = ref_mesh.area[ti];
+        if (have_cache_hess) {
+            const TriPrecompute& tp = (*tri_cache)[ti];
+            g += dt2 * corotated_node_gradient(tp.P, tp.A, tp.gradN, a);
+            H += dt2 * corotated_node_hessian(tp.dPdF, tp.A, tp.gradN, a);
+        } else {
+            const TriangleDef def = make_def_triangle(x, ref_mesh, ti);
+            Mat32 Ds_mat;
+            Ds_mat.col(0) = def.x[1] - def.x[0];
+            Ds_mat.col(1) = def.x[2] - def.x[0];
+            const Mat22& Dm_inv = ref_mesh.Dm_inverse[ti];
+            const Mat32  F      = Ds_mat * Dm_inv;
+            const double A      = ref_mesh.area[ti];
 
-        // Build cache once -- P, dPdF, gradN all share it
-        const CorotatedCache32 cache = buildCorotatedCache(F);
-        const ShapeGrads gradN = shape_function_gradients(Dm_inv);
-        const Mat32 P = PCorotated32(cache, F, params.mu, params.lambda);
-        Mat66 dPdF;
-        dPdFCorotated32(cache, params.mu, params.lambda, dPdF);
+            const CorotatedCache32 cache = buildCorotatedCache(F);
+            const ShapeGrads gradN = shape_function_gradients(Dm_inv);
+            const Mat32 P = PCorotated32(cache, F, params.mu, params.lambda);
+            Mat66 dPdF;
+            dPdFCorotated32(cache, params.mu, params.lambda, dPdF);
 
-        g += dt2 * corotated_node_gradient(P, A, gradN, a);
-        H += dt2 * corotated_node_hessian(dPdF, A, gradN, a);
+            g += dt2 * corotated_node_gradient(P, A, gradN, a);
+            H += dt2 * corotated_node_hessian(dPdF, A, gradN, a);
+        }
     }
 
     if (params.kB > 0.0) {
         auto it = ref_mesh.hinge_adj.find(vi);
         if (it != ref_mesh.hinge_adj.end()) {
+            const bool have_hinge_cache = hinge_cache != nullptr && !hinge_cache->empty();
             for (const auto& [hi, role] : it->second) {
-                const Hinge& h = ref_mesh.hinges[hi];
-                HingeDef def;
-                for (int k = 0; k < 4; ++k) def.x[k] = x[h.v[k]];
-                g += dt2 * bending_node_gradient(def, params.kB, h.c_e, h.bar_theta, role);
-                H += dt2 * bending_node_hessian_psd(def, params.kB, h.c_e, h.bar_theta, role);
+                if (have_hinge_cache) {
+                    const HingePrecompute& hp = (*hinge_cache)[hi];
+                    if (hp.degenerate) continue;
+                    const Vec3& gtheta = hp.gtheta[role];
+                    g += dt2 * (hp.scale_grad * gtheta);
+                    H += dt2 * (hp.scale_hess * (gtheta * gtheta.transpose()));
+                } else {
+                    const Hinge& h = ref_mesh.hinges[hi];
+                    HingeDef def;
+                    for (int k = 0; k < 4; ++k) def.x[k] = x[h.v[k]];
+                    g += dt2 * bending_node_gradient(def, params.kB, h.c_e, h.bar_theta, role);
+                    H += dt2 * bending_node_hessian_psd(def, params.kB, h.c_e, h.bar_theta, role);
+                }
             }
         }
     }

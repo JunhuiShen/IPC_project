@@ -9,7 +9,7 @@
 #include <iostream>
 
 int main() {
-    SimParams params;
+    SimParams params = SimParams::zeros();
     params.fps             = 30.0;
     params.substeps        = 1;
     params.mu              = 10.0;

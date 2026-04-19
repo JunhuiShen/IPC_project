@@ -174,9 +174,9 @@ void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
     // Horizontal cylinder (long axis +z) acting as a static collider via
     // Dirichlet pins on every vertex.
     const int    cyl_nu     = 8;     // circumferential subdivisions (octagon cross-section)
-    const int    cyl_nv     = 12;    // axial subdivisions
+    const int    cyl_nv     = 20;    // axial subdivisions (keeps axial edge length ~0.05 m)
     const double cyl_radius = 0.03;
-    const double cyl_length = 0.6;   // longer than the cloth width so cloth ends overhang both faces
+    const double cyl_length = 0.7;   // longer than the 0.70 m cloth so no cloth edge wraps the caps
     const Vec3   cyl_center(0.0, 0.25, 0.0);
 
     const int cyl_base = build_cylinder_mesh(
@@ -197,7 +197,7 @@ void build_cloth_cylinder_drop_example(RefMesh& ref_mesh,
     const int    small_ny      = 16;   // grid subdivisions along each cloth's y-axis
     const double small_w       = 0.70; // width of each falling cloth (meters, along x)
     const double small_h       = 0.70; // height of each falling cloth (meters, along z in world space)
-    const double first_drop_y  = 1.00; // y-coordinate of the lowest falling cloth at t=0
+    const double first_drop_y  = 1.5; // y-coordinate of the lowest falling cloth at t=0
     const double drop_spacing  = 0.05; // vertical gap (meters) between successive stacked cloths at t=0
 
     for (int s = 0; s < stack_count; ++s) {
@@ -236,14 +236,12 @@ void build_twisting_cloth_example(const IPCArgs3D& args,
                                   TwistSpec& spec) {
     clear_model(ref_mesh, state, X, pins);
 
-    // Square 100x100 grid -> 10,000 vertices; 2.5m x 2.5m sheet (edge ~0.0253m
-    // keeps min_edge_len > 2*d_hat for the default d_hat=0.01); 8 total relative turns.
+    // Square 100x100 grid with 8 total relative turns.
     const int    nx     = 99;
     const int    ny     = 99;
     const double width  = 2.5;
     const double height = 2.5;
     const double y0     = args.sheet_y;
-    const double twist_turns = 8.0;
 
     // Center the cloth so the midline (+x axis at y = y0, z = 0) passes
     // through the mesh centroid.
@@ -253,7 +251,7 @@ void build_twisting_cloth_example(const IPCArgs3D& args,
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
 
     const double duration = static_cast<double>(args.num_frames) / args.fps;
-    const double omega = (kTwoPi * twist_turns) / (2.0 * duration);
+    const double omega = (kTwoPi * args.twist_turns) / (2.0 * duration);
 
     spec = TwistSpec{};
     spec.axis_point  = Vec3(0.0, y0, 0.0);

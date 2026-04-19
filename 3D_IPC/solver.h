@@ -12,7 +12,28 @@ struct SolverResult {
     int    last_num_colors  = 0;   // parallel solver only
     std::vector<std::vector<int>> color_groups_parallel; // also parallel solver only
     int    ccd_violations   = 0;   // populated when SimParams::ccd_check is on
+
+    int    recolor_count    = 0;   // greedy recolors run (parallel solver)
+    int    recolor_skipped  = 0;   // outer iters that reused the cached coloring
 };
+
+// Fold one substep's result into the frame aggregate. `first` preserves the
+// leading substep's initial_residual and seeds `converged` before AND-folding.
+inline void accumulate_solver_result(SolverResult& agg, const SolverResult& sub, bool first){
+    if (first) {
+        agg.initial_residual = sub.initial_residual;
+        agg.converged        = sub.converged;
+    } else {
+        agg.converged = agg.converged && sub.converged;
+    }
+    agg.final_residual       = sub.final_residual;
+    agg.iterations          += sub.iterations;
+    agg.last_num_colors      = sub.last_num_colors;
+    agg.color_groups_parallel = sub.color_groups_parallel;
+    agg.ccd_violations      += sub.ccd_violations;
+    agg.recolor_count       += sub.recolor_count;
+    agg.recolor_skipped     += sub.recolor_skipped;
+}
 
 std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh);
 std::vector<Vec3> trust_region_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh, double d_hat);

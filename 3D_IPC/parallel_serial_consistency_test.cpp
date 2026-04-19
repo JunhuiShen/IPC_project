@@ -54,7 +54,7 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state,
 // sequentially. Both should reduce energy and produce finite, close results.
 TEST(ParallelSerialConsistency, OneSweepSerialVsParallelFromFreshState) {
     RefMesh ref_mesh; VertexTriangleMap adj;
-    std::vector<Pin> pins; SimParams params; std::vector<Vec2> X;
+    std::vector<Pin> pins; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     DeformedState state;
     build_scene(ref_mesh, state, pins, adj, params, X);
 
@@ -108,7 +108,7 @@ TEST(ParallelSerialConsistency, OneSweepSerialVsParallelFromFreshState) {
 // After multiple sweeps, both solvers should converge to similar final states.
 TEST(ParallelSerialConsistency, MultiSweepConvergesToSimilarState) {
     RefMesh ref_mesh; VertexTriangleMap adj;
-    std::vector<Pin> pins; SimParams params; std::vector<Vec2> X;
+    std::vector<Pin> pins; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     DeformedState state;
     build_scene(ref_mesh, state, pins, adj, params, X);
 
@@ -163,7 +163,7 @@ TEST(ParallelSerialConsistency, MultiSweepConvergesToSimilarState) {
 // same commit expression), so the resulting positions agree bit-for-bit.
 TEST(ParallelSerialConsistency, OneSweepForcedOrderSerialEqualsParallel) {
     RefMesh ref_mesh; VertexTriangleMap adj;
-    std::vector<Pin> pins; SimParams params; std::vector<Vec2> X;
+    std::vector<Pin> pins; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     DeformedState state;
     build_scene(ref_mesh, state, pins, adj, params, X);
 

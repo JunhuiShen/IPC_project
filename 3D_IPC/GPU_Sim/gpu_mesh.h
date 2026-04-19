@@ -190,7 +190,6 @@ struct GPUSimParams {
     bool   use_parallel;
     bool   ccd_check;
     bool   use_trust_region;
-    bool   use_incremental_refresh;
     bool   mass_normalize_residual;
 
     double dt()  const { return dt_val;  }

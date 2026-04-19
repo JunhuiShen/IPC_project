@@ -243,7 +243,6 @@ GPUSimParams GPUSimParams::from(const SimParams& p) {
     g.use_parallel           = p.use_parallel;
     g.ccd_check              = p.ccd_check;
     g.use_trust_region       = p.use_trust_region;
-    g.use_incremental_refresh   = p.use_incremental_refresh;
     g.mass_normalize_residual   = p.mass_normalize_residual;
     return g;
 }

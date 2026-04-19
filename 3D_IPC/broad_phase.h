@@ -100,9 +100,6 @@ public:
 
     void initialize(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double dhat);
 
-    void refresh(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, int moved_node, double dt,
-                 double node_pad, double tri_pad, double edge_pad);
-
     const std::vector<NodeTrianglePair>& nt_pairs() const {
         return cache_.nt_pairs;
     }
@@ -149,9 +146,13 @@ public:
         return cache_;
     }
 
+    // Increments on every initialize()/refresh() — a cache-invalidation key.
+    std::uint64_t version() const { return version_; }
+
 private:
     Cache cache_;
     bool topology_valid_ = false;
+    std::uint64_t version_ = 0;
 
     // Static mesh connectivity, reused across every build for the same mesh.
     struct Topology {
