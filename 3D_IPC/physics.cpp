@@ -10,10 +10,7 @@
 #include <sstream>
 #include <iostream>
 
-// Union of all obstacles: writes the SDFEvaluation with the smallest phi into
-// `out`. Returns false when no obstacle is defined so callers can skip the
-// penalty. A vertex in the ramp region of two obstacles gets one coherent push
-// toward the nearest surface instead of a double-count.
+// Union of all obstacles
 static inline bool sdf_min_evaluation(const SimParams& params, const Vec3& xi, SDFEvaluation& out) {
     bool any = false;
     out.phi = std::numeric_limits<double>::infinity();
@@ -23,6 +20,10 @@ static inline bool sdf_min_evaluation(const SimParams& params, const Vec3& xi, S
     }
     for (const CylinderSDF& c : params.sdf_cylinders) {
         const SDFEvaluation s = evaluate_sdf(c, xi);
+        if (!any || s.phi < out.phi) { out = s; any = true; }
+    }
+    for (const SphereSDF& sp : params.sdf_spheres) {
+        const SDFEvaluation s = evaluate_sdf(sp, xi);
         if (!any || s.phi < out.phi) { out = s; any = true; }
     }
     return any;

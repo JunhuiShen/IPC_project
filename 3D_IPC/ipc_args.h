@@ -24,7 +24,7 @@ struct IPCArgs3D : ArgParser {
     double gz           = 0.0;    // m/s^2
 
     // --- solver ---
-    int    max_iters     = 5000;
+    int    max_substep_iters = 500;  // per-substep cap; per-frame total = max_substep_iters * substeps
     double tol_abs       = 1e-6;  // residual norm tolerance
     double tol_rel       = 1e-1;  // relative tolerance: stop when residual < tol_rel * initial
     double step_weight   = 1.0;
@@ -52,14 +52,21 @@ struct IPCArgs3D : ArgParser {
     double right_z      = 0.02;   // m
 
     // --- scene selection ---
-    int         example      = 3;   // 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop, 5=twisting_cloth
+    int         example      = 3;   // 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop, 5=twisting_cloth, 6=cloth_sphere_drop
     double      twist_rate   = 0.5; // relative twist rate in Hz for example 5 (full turns per second)
     int         twist_nx     = 99;  // grid subdivisions along x for example 5
     int         twist_ny     = 99;  // grid subdivisions along y for example 5
     double      twist_size   = 2.5; // edge length (m) of the square cloth in example 5
     int         drop_stack_count = 50; // number of falling cloths in example 4 stack
-    int         drop_cloth_nx    = 16; // grid subdivisions along x of each falling cloth (example 4)
-    int         drop_cloth_ny    = 16; // grid subdivisions along y of each falling cloth (example 4)
+    int         drop_cloth_nx    = 16; // grid subdivisions along x of each falling cloth for example 4
+    int         drop_cloth_ny    = 16; // grid subdivisions along y of each falling cloth for example 4
+    double      sphere_radius = 0.10;  // sphere collider radius (m) in example 6
+    double      sphere_cx     = 0.0;   // sphere center x for example 6
+    double      sphere_cy     = 0.10;  // sphere center y for example 6; default y=r so sphere is tangent to ground
+    double      sphere_cz     = 0.0;   // sphere center z for example 6
+    int         sphere_subdiv = 2;     // icosphere subdivision level for example 6 (V = 10*4^n + 2)
+    double      sphere_cloth_size = 0.70; // edge length (m) of each falling cloth in example 6
+    double      sphere_ground_size = 4.0; // edge length (m) of the square pinned ground in example 6
 
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
@@ -81,7 +88,7 @@ struct IPCArgs3D : ArgParser {
         add_double("gy",          gy,          -9.81,      "Gravity y-component");
         add_double("gz",          gz,          0.0,        "Gravity z-component");
 
-        add_int   ("max_iters",   max_iters,   5000,        "Max Gauss-Seidel iterations per frame");
+        add_int   ("max_substep_iters", max_substep_iters, 500, "Max Gauss-Seidel iterations per substep (per-frame total = max_substep_iters * substeps)");
         add_double("tol_abs",     tol_abs,     1e-6,       "Absolute convergence tolerance (residual force)");
         add_double("tol_rel",     tol_rel,     1e-1,       "Relative tolerance: stop when residual < tol_rel * initial_residual (0 disables)");
         add_double("step_weight", step_weight, 1.0,        "Newton step damping factor");
@@ -107,7 +114,7 @@ struct IPCArgs3D : ArgParser {
         add_double("left_z",      left_z,      0.00,       "Left sheet origin z");
         add_double("right_z",     right_z,     0.02,       "Right sheet origin z");
 
-        add_int   ("example",      example,       3,              "Scene to run: 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop, 5=twisting_cloth");
+        add_int   ("example",      example,       3,              "Scene to run: 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop, 5=twisting_cloth, 6=cloth_sphere_drop");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 5 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 5 (vertices = (twist_nx+1)*(twist_ny+1))");
         add_int   ("twist_ny",     twist_ny,      99,             "Grid subdivisions along y for example 5");
@@ -115,6 +122,13 @@ struct IPCArgs3D : ArgParser {
         add_int   ("drop_stack_count", drop_stack_count, 50,       "Number of falling cloths in example 4 stack");
         add_int   ("drop_cloth_nx",    drop_cloth_nx,    16,       "Grid subdivisions along x of each falling cloth in example 4");
         add_int   ("drop_cloth_ny",    drop_cloth_ny,    16,       "Grid subdivisions along y of each falling cloth in example 4");
+        add_double("sphere_radius",    sphere_radius,    0.10,     "Sphere collider radius in meters in example 6");
+        add_double("sphere_cx",        sphere_cx,        0.0,      "Sphere center x for example 6");
+        add_double("sphere_cy",        sphere_cy,        0.10,     "Sphere center y for example 6; default y=r so sphere is tangent to ground");
+        add_double("sphere_cz",        sphere_cz,        0.0,      "Sphere center z for example 6");
+        add_int   ("sphere_subdiv",    sphere_subdiv,    2,        "Icosphere subdivision level in example 6 (V = 10*4^n + 2)");
+        add_double("sphere_cloth_size", sphere_cloth_size, 0.70,   "Edge length in meters of each falling cloth in example 6");
+        add_double("sphere_ground_size", sphere_ground_size, 4.0,  "Edge length in meters of the square pinned ground in example 6");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
@@ -139,7 +153,7 @@ struct IPCArgs3D : ArgParser {
         p.kB               = kB;
         p.kpin             = kpin;
         p.gravity          = Vec3(gx, gy, gz);
-        p.max_global_iters = max_iters;
+        p.max_global_iters = max_substep_iters;
         p.tol_abs          = tol_abs;
         p.tol_rel          = tol_rel;
         p.step_weight      = step_weight;

@@ -20,6 +20,13 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
 // coincident seam vertices that would trip the IPC barrier.
 int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nu, int nv, double radius, double length, const Vec3& center);
 
+// Icosphere built by `subdiv` loop-subdivisions of a base icosahedron, with every
+// midpoint normalized to `radius`. Vertex
+// count: 10*4^subdiv + 2. Triangle count: 20*4^subdiv. Reference 2D coords use
+// xz-projection; intended for use as a static pinned collider (elastic energy
+// on sphere triangles is never evaluated because their vertices are all pinned).
+int build_sphere_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int subdiv, double radius, const Vec3& center);
+
 // Maps each vertex to {triangle_index, local_node_index} pairs.
 // The local_node_index (0,1,2) is stored to avoid searching at call sites.
 VertexTriangleMap build_incident_triangle_map(const std::vector<int>& indices);

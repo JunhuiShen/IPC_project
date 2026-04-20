@@ -34,6 +34,7 @@ struct SimParams {
     double eps_sdf;   // SDF ramp-Heaviside transition-layer width
     std::vector<PlaneSDF>    sdf_planes;
     std::vector<CylinderSDF> sdf_cylinders;
+    std::vector<SphereSDF>   sdf_spheres;
     Vec3   gravity;
     int    max_global_iters;
 
@@ -71,6 +72,7 @@ struct SimParams {
         p.eps_sdf                   = 0.0;
         p.sdf_planes.clear();
         p.sdf_cylinders.clear();
+        p.sdf_spheres.clear();
         p.gravity                   = Vec3::Zero();
         p.max_global_iters          = 0;
         p.restart_frame             = -1;

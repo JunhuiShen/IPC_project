@@ -310,3 +310,73 @@ void update_twist_pins(std::vector<Pin>& pins, const TwistSpec& spec, double t) 
     }
 }
 
+void build_cloth_sphere_drop_example(const IPCArgs3D& args,
+                                     RefMesh& ref_mesh,
+                                     DeformedState& state,
+                                     std::vector<Vec2>& X,
+                                     std::vector<Pin>& pins,
+                                     SimParams& params) {
+    clear_model(ref_mesh, state, X, pins);
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+
+    // Ground cloth -- size from args.sphere_ground_size.
+    const int    ground_nx = 40;
+    const int    ground_ny = 40;
+    const double ground_w  = args.sphere_ground_size;
+    const double ground_h  = args.sphere_ground_size;
+    const double ground_y  = 0.0;
+
+    const int ground_base = build_square_mesh(
+            ref_mesh, state, X,
+            ground_nx, ground_ny, ground_w, ground_h,
+            Vec3(-0.5 * ground_w, ground_y, -0.5 * ground_h));
+
+    const int ground_vertex_count = (ground_nx + 1) * (ground_ny + 1);
+    for (int k = 0; k < ground_vertex_count; ++k) {
+        append_pin(pins, ground_base + k, state.deformed_positions);
+    }
+
+    // Static sphere collider: mesh for visualization + IPC barrier (via pinned
+    // triangles), SphereSDF for smooth cloth-sphere contact force.
+    const int    sphere_subdiv = args.sphere_subdiv;
+    const double sphere_radius = args.sphere_radius;
+    const Vec3   sphere_center(args.sphere_cx, args.sphere_cy, args.sphere_cz);
+
+    const int sphere_base = build_sphere_mesh(
+            ref_mesh, state, X,
+            sphere_subdiv, sphere_radius, sphere_center);
+
+    // V_icosphere(subdiv) = 10 * 4^subdiv + 2.
+    int pow4 = 1;
+    for (int k = 0; k < sphere_subdiv; ++k) pow4 *= 4;
+    const int sphere_vertex_count = 10 * pow4 + 2;
+    for (int k = 0; k < sphere_vertex_count; ++k) {
+        append_pin(pins, sphere_base + k, state.deformed_positions);
+    }
+
+    params.sdf_planes.push_back(PlaneSDF{
+            Vec3(0.0, ground_y - 2.0 * params.eps_sdf, 0.0),
+            Vec3(0.0, 1.0, 0.0)});
+    params.sdf_spheres.push_back(SphereSDF{sphere_center, sphere_radius});
+
+    // Falling cloth stack 
+    const int    stack_count   = args.drop_stack_count;
+    const int    small_nx      = args.drop_cloth_nx;
+    const int    small_ny      = args.drop_cloth_ny;
+    const double small_w       = args.sphere_cloth_size;
+    const double small_h       = args.sphere_cloth_size;
+    const double first_drop_y  = 1.5;
+    const double drop_spacing  = 0.05;
+
+    for (int s = 0; s < stack_count; ++s) {
+        const Vec3 origin(
+                -0.5 * small_w,
+                first_drop_y + s * drop_spacing,
+                -0.5 * small_h);
+        build_square_mesh(ref_mesh, state, X, small_nx, small_ny, small_w, small_h, origin);
+    }
+
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+}

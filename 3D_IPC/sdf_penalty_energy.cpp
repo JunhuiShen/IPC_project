@@ -47,6 +47,22 @@ SDFEvaluation evaluate_sdf(const CylinderSDF& s, const Vec3& x){
     return r;
 }
 
+//  Solid sphere SDF
+SDFEvaluation evaluate_sdf(const SphereSDF& s, const Vec3& x){
+    SDFEvaluation r;
+    const Vec3 v = x - s.center;
+    const double rnorm = v.norm();
+    r.phi = rnorm - s.radius;
+    if (rnorm > 0.0) {
+        r.grad_phi = v / rnorm;
+        r.hess_phi = (Mat33::Identity() - r.grad_phi * r.grad_phi.transpose()) / rnorm;
+    } else {
+        r.grad_phi = Vec3::Zero();
+        r.hess_phi = Mat33::Zero();
+    }
+    return r;
+}
+
 double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double eps){
     const double H = sdf_heaviside(sdf.phi, eps);
     return 0.5 * k * H * H;

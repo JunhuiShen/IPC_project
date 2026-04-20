@@ -319,7 +319,7 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
 
     // The iter==1 residual check inside the loop reads from predictions[] and
     // sets initial_residual + effective_tol on the fly. We only fall back to
-    // eval_residual() at exit if the loop terminates on max_iters.
+    // eval_residual() at exit if the loop terminates on max_substep_iters.
     result.final_residual = 0.0;
     result.iterations     = 0;
     double effective_tol  = params.tol_abs;  // overwritten on iter 1

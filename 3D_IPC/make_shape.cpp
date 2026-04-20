@@ -1,8 +1,11 @@
 #include "make_shape.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 TriangleDef make_def_triangle(const std::vector<Vec3>& x, const RefMesh& ref_mesh, int tri_idx) {
     TriangleDef def;
@@ -132,6 +135,101 @@ int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec
             ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v10); ref_mesh.tris.push_back(v11);
             ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v11); ref_mesh.tris.push_back(v01);
         }
+    }
+
+    ref_mesh.initialize(X);
+
+    return base;
+}
+
+int build_sphere_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X,
+                      int subdiv, double radius, const Vec3& center) {
+    const int base = static_cast<int>(state.deformed_positions.size());
+
+    // Base icosahedron: 12 vertices (at ||v|| = sqrt(1 + phi^2) with phi = golden
+    // ratio), 20 triangles. See e.g. Catmull-Clark notes or any graphics text.
+    constexpr double kPhi  = 1.6180339887498948482;  // (1 + sqrt(5)) / 2
+    const double     kNorm = std::sqrt(1.0 + kPhi * kPhi);
+    const double     s     = radius / kNorm;  // scale so |v| = radius
+
+    // Unit-icosahedron vertices, pre-scaled to 'radius'. Rotated by a small
+    // irrational angle around +x so that subdivision midpoints (e.g. the edge
+    // between (0, -1, +phi) and (0, -1, -phi)) don't land exactly on the +-y
+    // axis, where the stereographic projection used for the 2D ref coord
+    // would otherwise become singular.
+    constexpr double kTilt = 0.1;  // rad; irrational in practice, breaks ±y axis alignment
+    const double ct = std::cos(kTilt), st = std::sin(kTilt);
+    auto tilt = [ct, st, s](double x, double y, double z) -> Vec3 {
+        const double yp = ct * y - st * z;
+        const double zp = st * y + ct * z;
+        return Vec3(s * x, s * yp, s * zp);
+    };
+    std::vector<Vec3> verts = {
+        tilt(-1.0,  kPhi,  0.0), tilt( 1.0,  kPhi,  0.0),
+        tilt(-1.0, -kPhi,  0.0), tilt( 1.0, -kPhi,  0.0),
+        tilt( 0.0, -1.0,  kPhi), tilt( 0.0,  1.0,  kPhi),
+        tilt( 0.0, -1.0, -kPhi), tilt( 0.0,  1.0, -kPhi),
+        tilt( kPhi,  0.0, -1.0), tilt( kPhi,  0.0,  1.0),
+        tilt(-kPhi,  0.0, -1.0), tilt(-kPhi,  0.0,  1.0),
+    };
+
+    // 20 faces of the base icosahedron (outward-normal winding when vertices
+    // are placed as above).
+    std::vector<std::array<int, 3>> faces = {
+        {0, 11,  5}, {0,  5,  1}, {0,  1,  7}, {0,  7, 10}, {0, 10, 11},
+        {1,  5,  9}, {5, 11,  4}, {11, 10, 2}, {10, 7,  6}, {7,  1,  8},
+        {3,  9,  4}, {3,  4,  2}, {3,  2,  6}, {3,  6,  8}, {3,  8,  9},
+        {4,  9,  5}, {2,  4, 11}, {6,  2, 10}, {8,  6,  7}, {9,  8,  1},
+    };
+
+    // Loop-subdivide: each triangle splits into 4 by inserting edge midpoints,
+    // normalized to the sphere. Dedupe midpoints by canonicalized edge key.
+    for (int level = 0; level < subdiv; ++level) {
+        std::map<std::pair<int, int>, int> midpoint_cache;
+        auto get_midpoint = [&](int a, int b) -> int {
+            const auto key = (a < b) ? std::make_pair(a, b) : std::make_pair(b, a);
+            auto it = midpoint_cache.find(key);
+            if (it != midpoint_cache.end()) return it->second;
+            Vec3 mid = 0.5 * (verts[a] + verts[b]);
+            mid *= radius / mid.norm();
+            const int idx = static_cast<int>(verts.size());
+            verts.push_back(mid);
+            midpoint_cache.emplace(key, idx);
+            return idx;
+        };
+
+        std::vector<std::array<int, 3>> next_faces;
+        next_faces.reserve(faces.size() * 4);
+        for (const auto& f : faces) {
+            const int a = f[0], b = f[1], c = f[2];
+            const int ab = get_midpoint(a, b);
+            const int bc = get_midpoint(b, c);
+            const int ca = get_midpoint(c, a);
+            next_faces.push_back({a,  ab, ca});
+            next_faces.push_back({ab,  b, bc});
+            next_faces.push_back({ca, bc,  c});
+            next_faces.push_back({ab, bc, ca});
+        }
+        faces.swap(next_faces);
+    }
+
+    // Emit vertices translated to `center`. 2D ref coord uses stereographic
+    // projection from (0, -radius, 0): X = 2r * (x, z) / (y + r). This is
+    // conformal so every triangle has non-degenerate 2D area. The projection
+    // pole (0, -radius, 0) is never an icosphere vertex (no subdivided vertex
+    // lands on the +-y axis).
+    for (const Vec3& v : verts) {
+        state.deformed_positions.push_back(v + center);
+        const double denom = v.y() + radius;
+        X.push_back(Vec2(2.0 * radius * v.x() / denom,
+                         2.0 * radius * v.z() / denom));
+    }
+
+    // Emit triangles with per-batch vertex-index offset by `base`.
+    for (const auto& f : faces) {
+        ref_mesh.tris.push_back(base + f[0]);
+        ref_mesh.tris.push_back(base + f[1]);
+        ref_mesh.tris.push_back(base + f[2]);
     }
 
     ref_mesh.initialize(X);

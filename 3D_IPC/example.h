@@ -40,6 +40,17 @@ void build_cloth_cylinder_drop_example(const IPCArgs3D& args,
                                        std::vector<Pin>& pins,
                                        SimParams& params);
 
+// Cloth + pinned-sphere drape scene: 4.0x4.0 pinned ground, a static sphere,
+// and a vertical stack of falling cloths. Sphere geometry set from
+// args.sphere_*; stack count and per-cloth mesh resolution reuse args.drop_*.
+// Needs --d_hat > 0 for contacts to work.
+void build_cloth_sphere_drop_example(const IPCArgs3D& args,
+                                     RefMesh& ref_mesh,
+                                     DeformedState& state,
+                                     std::vector<Vec2>& X,
+                                     std::vector<Pin>& pins,
+                                     SimParams& params);
+
 // Drives the pin-target motion for the twisting-cloth example: two groups of
 // pins counter-rotate about a common +x axis (through axis_point) at their
 // own signed angular speeds.
