@@ -477,8 +477,9 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
                     Mat33 H_fresh;
                     compute_local_newton_direction(vi, ref_mesh, adj, pins, params, xnew, xhat,
                                                    bp_cache, g_fresh, H_fresh, delta_fresh, &pm);
-                    const double alpha_clip = clip_step_to_certified_region(
-                            vi, xnew, delta_fresh, prediction.certified_region);
+                    const double alpha_clip = use_barrier
+                        ? clip_step_to_certified_region(vi, xnew, delta_fresh, prediction.certified_region)
+                        : 1.0;
                     delta = alpha_clip * delta_fresh;
                 }
                 const double ccd_step = compute_safe_step_for_vertex(

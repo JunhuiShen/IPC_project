@@ -79,7 +79,7 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
         }
     }
 
-    ref_mesh.initialize(X);
+    ref_mesh.initialize(X, state.deformed_positions);
 
     return base;
 }
@@ -152,7 +152,34 @@ int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec
         }
     }
 
-    ref_mesh.initialize(X);
+    // End caps: fan triangles around a center vertex on each circular end.
+    // Cap centers sit off the unrolled strip (y=0 and y=length are occupied
+    // by the boundary rings) so the fan triangles stay non-degenerate in
+    // parameter space and buildCorotatedCache's Eigen decomposition succeeds.
+    const double cap_offset = radius;
+    const int bot_center = static_cast<int>(state.deformed_positions.size());
+    X.push_back(Vec2(kPi * radius, -cap_offset));
+    state.deformed_positions.push_back(
+        Vec3(center.x(), center.y(), center.z() - 0.5 * length));
+
+    const int top_center = static_cast<int>(state.deformed_positions.size());
+    X.push_back(Vec2(kPi * radius, length + cap_offset));
+    state.deformed_positions.push_back(
+        Vec3(center.x(), center.y(), center.z() + 0.5 * length));
+
+    for (int i = 0; i < nu; ++i) {
+        const int i_next = (i + 1) % nu;
+        // Bottom cap faces -z: winding (center, ring[i_next], ring[i]).
+        ref_mesh.tris.push_back(bot_center);
+        ref_mesh.tris.push_back(vertex_index(i_next, 0));
+        ref_mesh.tris.push_back(vertex_index(i,      0));
+        // Top cap faces +z: winding (center, ring[i], ring[i_next]).
+        ref_mesh.tris.push_back(top_center);
+        ref_mesh.tris.push_back(vertex_index(i,      n_rows));
+        ref_mesh.tris.push_back(vertex_index(i_next, n_rows));
+    }
+
+    ref_mesh.initialize(X, state.deformed_positions);
 
     return base;
 }
@@ -247,7 +274,7 @@ int build_sphere_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
         ref_mesh.tris.push_back(base + f[2]);
     }
 
-    ref_mesh.initialize(X);
+    ref_mesh.initialize(X, state.deformed_positions);
 
     return base;
 }

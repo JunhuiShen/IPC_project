@@ -891,7 +891,7 @@ TEST(TrustRegionSafeStep, FarFromBarrierReturnsFullStep) {
 
     ref_mesh.ref_positions = X;
     ref_mesh.tris = {0, 1, 2, 3, 4, 5};
-    ref_mesh.initialize(X);
+    ref_mesh.initialize(X, state.deformed_positions);
     ref_mesh.build_lumped_mass(params.density, params.thickness);
 
     BroadPhase bp;

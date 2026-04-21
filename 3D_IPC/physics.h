@@ -120,7 +120,7 @@ struct DeformedState {
 // orientation is fixed by build_hinges() so m_A, m_B agree when flat.
 struct Hinge {
     int    v[4];
-    double bar_theta;  // rest dihedral complement (0 for flat 2D rest)
+    double bar_theta;  // rest dihedral complement, computed from the initial 3D configuration
     double c_e;        // |e|^2 / (A_A + A_B)
 };
 
@@ -137,10 +137,10 @@ struct RefMesh {
     VertexHingeMap hinge_adj;
     size_t num_positions;
 
-    inline void initialize(const std::vector<Vec2>& X){
+    inline void initialize(const std::vector<Vec2>& X, const std::vector<Vec3>& x_rest){
         num_positions = X.size();
         compute_dm_inverse(X);
-        build_hinges(X);
+        build_hinges(X, x_rest);
     }
 
     inline void compute_dm_inverse(const std::vector<Vec2>& X){
@@ -164,7 +164,7 @@ struct RefMesh {
         assert(mass.size() == num_positions);
     }
 
-    inline void build_hinges(const std::vector<Vec2>& X) {
+    inline void build_hinges(const std::vector<Vec2>& X, const std::vector<Vec3>& x_rest) {
         // dir = 0 means the triangle traverses this edge in v_min→v_max
         // order; dir = 1 means v_max→v_min. Pairing one of each yields a
         // consistently oriented hinge below.
@@ -214,7 +214,10 @@ struct RefMesh {
             const double areaB = 0.5 * std::abs(cross_product_in_2d(eVec, X3 - X0));
             const double area_sum = areaA + areaB;
             h.c_e = (area_sum > 0.0) ? (edge_len2 / area_sum) : 0.0;
-            h.bar_theta = 0.0;  // flat 2D rest
+
+            HingeDef def;
+            for (int k = 0; k < 4; ++k) def.x[k] = x_rest[h.v[k]];
+            h.bar_theta = bending_theta(def);
 
             const int hidx = static_cast<int>(hinges.size());
             hinges.push_back(h);

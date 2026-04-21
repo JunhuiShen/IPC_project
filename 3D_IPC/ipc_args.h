@@ -18,7 +18,7 @@ struct IPCArgs3D : ArgParser {
     double density      = 900.0;  // kg/m^3
     double thickness    = 0.001;  // m
     double kB           = 0.0;    // J   (bending stiffness; 0 disables bending)
-    double kpin         = 1e5;    // N/m (pin spring stiffness)
+    double kpin         = 1e7;    // N/m (pin spring stiffness)
     double gx           = 0.0;    // m/s^2
     double gy           = -9.81;  // m/s^2
     double gz           = 0.0;    // m/s^2
