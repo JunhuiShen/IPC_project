@@ -176,6 +176,10 @@ int main(int argc, char** argv) {
             std::cout << " | ccd_viol = " << std::setw(3) << result.ccd_violations;
         std::cout << " | solver_time = " << std::fixed << std::setprecision(3)
                   << solver_ms << " ms\n";
+        if (params.ccd_check && result.ccd_violations > 0) {
+            std::cout << "Self-intersection detected on frame " << frame_index << " — aborting.\n";
+            std::exit(1);
+        }
 
         if (params.use_parallel) {
             export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, &result.color_groups_parallel);
