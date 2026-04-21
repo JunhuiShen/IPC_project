@@ -41,8 +41,11 @@ struct SimParams {
     int    restart_frame;  // -1 = no restart
     bool   use_parallel;
     bool   ccd_check;
-    bool   use_trust_region;
+    bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
+    bool   use_trust_region;     // if true, use trust_region_initial_guess instead of CCD
+    bool   fixed_iters;          // if true, run exactly max_global_iters sweeps with no tolerance / convergence check
     bool   mass_normalize_residual;
+    bool   use_incremental_refresh;   // per-moved-vertex broad-phase refresh during GS sweep
     int    color_rebuild_interval;
 
     // Route the per-substep Gauss-Seidel sweep through the GPU implementation
@@ -78,8 +81,11 @@ struct SimParams {
         p.restart_frame             = -1;
         p.use_parallel              = false;
         p.ccd_check                 = false;
+        p.use_ccd_guess             = true;
         p.use_trust_region          = false;
+        p.fixed_iters               = false;
         p.mass_normalize_residual   = false;
+        p.use_incremental_refresh   = false;
         p.color_rebuild_interval    = 10;
         p.use_gpu                   = false;
         p.cached_dt_                = -1.0;

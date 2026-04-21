@@ -159,8 +159,8 @@ void build_cloth_cylinder_drop_example(const IPCArgs3D& args,
     // gravity gradient stays above tol_abs and keeps the global solver iterating.
     const int    ground_nx = 40;
     const int    ground_ny = 40;
-    const double ground_w  = 4.0;
-    const double ground_h  = 4.0;
+    const double ground_w  = args.cyl_ground_size;
+    const double ground_h  = args.cyl_ground_size;
     const double ground_y  = 0.0;
 
     const int ground_base = build_square_mesh(
@@ -176,19 +176,20 @@ void build_cloth_cylinder_drop_example(const IPCArgs3D& args,
     }
 
     // Horizontal cylinder (long axis +z) acting as a static collider via
-    // Dirichlet pins on every vertex.
-    const int    cyl_nu     = 8;     // circumferential subdivisions (octagon cross-section)
-    const int    cyl_nv     = 20;    // axial subdivisions (keeps axial edge length ~0.05 m)
-    const double cyl_radius = 0.03;
-    const double cyl_length = 0.7;   // longer than the 0.70 m cloth so no cloth edge wraps the caps
-    const Vec3   cyl_center(0.0, 0.25, 0.0);
+    // Dirichlet pins on every vertex. Triangles are near-equilateral; the
+    // axial row count is picked internally from cyl_nu and the cylinder size.
+    const int    cyl_nu     = args.cyl_nu;
+    const double cyl_radius = args.cyl_radius;
+    const double cyl_length = args.cyl_length;
+    const Vec3   cyl_center(args.cyl_cx, args.cyl_cy, args.cyl_cz);
 
     const int cyl_base = build_cylinder_mesh(
             ref_mesh, state, X,
-            cyl_nu, cyl_nv, cyl_radius, cyl_length, cyl_center);
+            cyl_nu, cyl_radius, cyl_length, cyl_center);
 
     // Pin every cylinder vertex so the cylinder behaves as a static collider.
-    const int cyl_vertex_count = cyl_nu * (cyl_nv + 1);
+    const int cyl_vertex_count =
+            static_cast<int>(state.deformed_positions.size()) - cyl_base;
     for (int k = 0; k < cyl_vertex_count; ++k) {
         append_pin(pins, cyl_base + k, state.deformed_positions);
     }
@@ -207,10 +208,10 @@ void build_cloth_cylinder_drop_example(const IPCArgs3D& args,
     const int    stack_count   = args.drop_stack_count;
     const int    small_nx      = args.drop_cloth_nx;
     const int    small_ny      = args.drop_cloth_ny;
-    const double small_w       = 0.70; // width of each falling cloth (meters, along x)
-    const double small_h       = 0.70; // height of each falling cloth (meters, along z in world space)
-    const double first_drop_y  = 1.5; // y-coordinate of the lowest falling cloth at t=0
-    const double drop_spacing  = 0.05; // vertical gap (meters) between successive stacked cloths at t=0
+    const double small_w       = args.drop_cloth_w;
+    const double small_h       = args.drop_cloth_h;
+    const double first_drop_y  = args.drop_first_y;
+    const double drop_spacing  = args.drop_spacing;
 
     for (int s = 0; s < stack_count; ++s) {
         const Vec3 origin(
@@ -367,8 +368,8 @@ void build_cloth_sphere_drop_example(const IPCArgs3D& args,
     const int    small_ny      = args.drop_cloth_ny;
     const double small_w       = args.sphere_cloth_size;
     const double small_h       = args.sphere_cloth_size;
-    const double first_drop_y  = 1.5;
-    const double drop_spacing  = 0.05;
+    const double first_drop_y  = args.drop_first_y;
+    const double drop_spacing  = args.drop_spacing;
 
     for (int s = 0; s < stack_count; ++s) {
         const Vec3 origin(

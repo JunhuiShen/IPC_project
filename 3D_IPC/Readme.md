@@ -89,7 +89,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | Physics | `mu`, `lambda`, `density`, `thickness`, `kB`, `kpin`, `gx`, `gy`, `gz` |
 | Solver | `max_substep_iters`, `tol_abs`, `tol_rel`, `step_weight`, `d_hat`, `k_sdf`, `eps_sdf`, `use_parallel` |
 | Mesh geometry | `nx`, `ny`, `width`, `height`, `left_x`, `right_x`, `sheet_y`, `left_z`, `right_z` |
-| Scene | `example` (`1`..`6`), plus per-example knobs: `drop_stack_count`, `drop_cloth_nx`, `drop_cloth_ny`, `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `sphere_radius`, `sphere_cx`, `sphere_cy`, `sphere_cz`, `sphere_subdiv`, `sphere_cloth_size`, `sphere_ground_size` |
+| Scene | `example` (`1`..`6`), plus per-example knobs: `drop_stack_count`, `drop_cloth_nx`, `drop_cloth_ny`, `drop_first_y`, `drop_spacing`, `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `sphere_radius`, `sphere_cx`, `sphere_cy`, `sphere_cz`, `sphere_subdiv`, `sphere_cloth_size`, `sphere_ground_size` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| usd`), `restart_frame` |
 
 ## Source layout

@@ -31,3 +31,4 @@ mesh_after.obj
 
 # Claude Code scheduled-tasks runtime lock
 .claude/scheduled_tasks.lock
+example5/

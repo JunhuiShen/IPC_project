@@ -216,7 +216,7 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
     };
 
     SolverResult result;
-    result.initial_residual = eval_residual();
+    result.initial_residual = params.fixed_iters ? 0.0 : eval_residual();
     result.final_residual   = result.initial_residual;
     result.iterations       = 0;
 
@@ -226,12 +226,23 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
                                           params.tol_rel * result.initial_residual);
 
     if (residual_history) residual_history->push_back(result.initial_residual);
-    if (result.initial_residual < effective_tol) {
+    if (!params.fixed_iters && result.initial_residual < effective_tol) {
         result.converged = true;
         return result;
     }
 
     const int nv = static_cast<int>(xnew.size());
+
+    const double node_pad = dhat;
+    const double tri_pad  = 0.0;
+    const double edge_pad = dhat * 0.5;
+    const bool   do_refresh = use_barrier && params.use_incremental_refresh;
+    // Refresh once accumulated drift could have moved pairs past half the
+    // swept-box pad; any later and the current BVH leaves may already miss
+    // newly-reachable pairs.
+    const double skip_thresh2 = (0.8 * edge_pad) * (0.8 * edge_pad);
+    std::vector<Vec3> x_at_last_refresh;
+    if (do_refresh) x_at_last_refresh = xnew;
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         std::vector<Vec3> x_before;
@@ -240,10 +251,17 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
         for (const auto& group : color_groups) {
             for (int vi : group) {
                 update_one_vertex(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm);
+                if (do_refresh) {
+                    const Vec3 d = xnew[vi] - x_at_last_refresh[vi];
+                    if (d.squaredNorm() >= skip_thresh2) {
+                        broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
+                        x_at_last_refresh[vi] = xnew[vi];
+                    }
+                }
             }
         }
 
-        result.final_residual = eval_residual();
+        result.final_residual = params.fixed_iters ? 0.0 : eval_residual();
         result.iterations     = iter;
 
         // Optional post-sweep CCD penetration check. toi < 1 means the
@@ -287,12 +305,13 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
         }
 
         if (residual_history) residual_history->push_back(result.final_residual);
-        if (result.final_residual < effective_tol) {
+        if (!params.fixed_iters && result.final_residual < effective_tol) {
             result.converged = true;
             return result;
         }
     }
 
+    if (params.fixed_iters) result.converged = true;
     return result;
 }
 
@@ -334,6 +353,16 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
     std::uint64_t                 cached_bp_version = 0;
     SweptBvhCache                 cached_sw_bvh;
     std::vector<AABB>             frozen_certified_regions;
+    std::uint64_t                 last_recolor_bp_version = 0;
+
+    const double node_pad = dhat;
+    const double tri_pad  = 0.0;
+    const double edge_pad = dhat * 0.5;
+    const bool   do_refresh = use_barrier && params.use_incremental_refresh;
+    // Threshold matches the serial solver; see that comment for the rationale.
+    const double skip_thresh2 = (0.8 * edge_pad) * (0.8 * edge_pad);
+    std::vector<Vec3> x_at_last_refresh;
+    if (do_refresh) x_at_last_refresh = xnew;
 
     // Reuses the g_i already computed by build_jacobi_predictions, so the
     // convergence check is essentially free vs. a full compute_global_residual.
@@ -363,10 +392,15 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         // Freeze certified-region AABBs inside the recolor window. The sweep
         // clips every delta into its box; with boxes held constant, the
         // conflict graph built below is bit-identical to the one the cached
-        // coloring was produced from, so the cached coloring stays valid.
+        // coloring was produced from, so the cached coloring stays valid —
+        // unless an incremental refresh added new barrier pairs to bp_cache,
+        // in which case bp_v_now has advanced and we must recolor to pick up
+        // the new conflict edges before the next sweep races on them.
+        const std::uint64_t bp_v_now = use_barrier ? broad_phase.version() : 0;
         const bool have_frozen       = !frozen_certified_regions.empty();
         const bool periodic_tick     = ((iter - 1) % color_interval == 0);
-        const bool recolor_this_iter = !have_frozen || periodic_tick;
+        const bool bp_changed        = have_frozen && bp_v_now != last_recolor_bp_version;
+        const bool recolor_this_iter = !have_frozen || periodic_tick || bp_changed;
 
         if (recolor_this_iter) {
             frozen_certified_regions.resize(predictions.size());
@@ -377,14 +411,14 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
                 predictions[i].certified_region = frozen_certified_regions[i];
         }
 
-        const double residual_now = residual_from_predictions(predictions);
+        const double residual_now = params.fixed_iters ? 0.0 : residual_from_predictions(predictions);
         if (iter == 1) {
             result.initial_residual = residual_now;
             effective_tol = std::max(params.tol_abs, params.tol_rel * residual_now);
         }
         result.final_residual = residual_now;
         if (residual_history) residual_history->push_back(residual_now);
-        if (residual_now < effective_tol) {
+        if (!params.fixed_iters && residual_now < effective_tol) {
             result.iterations = iter - 1;
             result.converged  = true;
             return result;
@@ -412,6 +446,7 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
                 cached_color_groups = greedy_color_conflict_graph(conflict_graph, predictions);
                 result.color_groups_parallel = cached_color_groups; // for visualization
                 result.recolor_count += 1;
+                last_recolor_bp_version = bp_v_now;
             } else {
                 result.recolor_skipped += 1;
             }
@@ -449,6 +484,17 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
                 const double ccd_step = compute_safe_step_for_vertex(
                         vi, ref_mesh, params, xnew, delta, broad_phase);
                 xnew[vi] -= ccd_step * delta;
+            }
+
+            // refresh() mutates shared bp_cache state — run after the parallel
+            // sweep finishes, serially over the group's moved vertices.
+            if (do_refresh) {
+                for (int vi : group) {
+                    const Vec3 d = xnew[vi] - x_at_last_refresh[vi];
+                    if (d.squaredNorm() < skip_thresh2) continue;
+                    broad_phase.refresh(xnew, v, ref_mesh, vi, dt, node_pad, tri_pad, edge_pad);
+                    x_at_last_refresh[vi] = xnew[vi];
+                }
             }
         }
 
@@ -500,7 +546,12 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
 
     // residual_now was measured before the last sweep; recompute once so the
     // reported final_residual reflects the post-sweep state.
-    result.final_residual = eval_residual();
+    if (params.fixed_iters) {
+        result.final_residual = 0.0;
+        result.converged = true;
+    } else {
+        result.final_residual = eval_residual();
+    }
     if (residual_history) residual_history->push_back(result.final_residual);
     return result;
 }

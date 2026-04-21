@@ -100,6 +100,12 @@ public:
 
     void initialize(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double dhat);
 
+    // Local update around one moved vertex: refits its + incident tri/edge
+    // BVH leaves and rebuilds the pair lists touching them. Not thread-safe.
+    void refresh(const std::vector<Vec3>& x, const std::vector<Vec3>& v,
+                 const RefMesh& mesh, int moved_node, double dt,
+                 double node_pad, double tri_pad, double edge_pad);
+
     const std::vector<NodeTrianglePair>& nt_pairs() const {
         return cache_.nt_pairs;
     }

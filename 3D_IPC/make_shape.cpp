@@ -84,31 +84,32 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
     return base;
 }
 
-// Total number of vertices is: nu * (nv + 1) and total number of triangles is: 2 * nu * nv.
-// The surface is closed: the wrap column (i == nu-1 -> i == 0) reuses existing vertex
-// indices, so no vertex is duplicated in 3D.
+// Near-iso cylinder (brick-pattern triangulation): odd axial rings are rotated
+// by half a circumferential step so every triangle is near-equilateral.
+// Axial row count n_rows is picked internally to match the equilateral row
+// height h = (2*pi*r/nu) * sqrt(3)/2. Vertex count: nu * (n_rows + 1).
+// Triangle count: 2 * nu * n_rows, where n_rows = max(1, round(length / h)).
 int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X,
-                        int nu, int nv, double radius, double length, const Vec3& center) {
+                        int nu, double radius, double length, const Vec3& center) {
     constexpr double kPi = 3.14159265358979323846;
-    int base = static_cast<int>(state.deformed_positions.size());
+    const int    base        = static_cast<int>(state.deformed_positions.size());
     const double two_pi      = 2.0 * kPi;
     const double theta_start = -0.5 * kPi;
 
-    for (int j = 0; j <= nv; ++j) {
+    const double iso_row_h = (two_pi * radius / nu) * 0.5 * std::sqrt(3.0);
+    const int    n_rows    = std::max(1, static_cast<int>(std::round(length / iso_row_h)));
 
-        // Normalize axial coordinate from 0 to 1
-        double v = static_cast<double>(j) / nv;
-
-        // Scale to actual length, both as 2D parameter and 3D world coord
-        double z_ref   = v * length;
-        double z_world = center.z() - 0.5 * length + z_ref;
+    for (int j = 0; j <= n_rows; ++j) {
+        const double v        = static_cast<double>(j) / n_rows;
+        const double z_ref    = v * length;
+        const double z_world  = center.z() - 0.5 * length + z_ref;
+        const bool   shifted  = (j % 2 == 1);
+        const double u_offset = shifted ? 0.5 / nu : 0.0;
 
         for (int i = 0; i < nu; ++i) {
+            const double u     = static_cast<double>(i) / nu + u_offset;
+            const double theta = theta_start + u * two_pi;
 
-            double u     = static_cast<double>(i) / nu;
-            double theta = theta_start + u * two_pi;
-
-            // Store reference (2D unrolled) and deformed (3D) positions
             X.push_back(Vec2(u * two_pi * radius, z_ref));
             state.deformed_positions.push_back(
                 Vec3(center.x() + radius * std::cos(theta),
@@ -117,23 +118,37 @@ int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec
         }
     }
 
-    // convert (col, row) -> vertex index
     auto vertex_index = [base, nu](int i, int j) {
         return base + j * nu + i;
     };
 
-    // Create triangles, wrapping the last column back to i == 0 so the cylinder is closed.
-    for (int j = 0; j < nv; ++j) {
+    // Row j is shifted when j is odd. Each pair (j, j+1) contributes 2*nu
+    // triangles: one up-pointing (two verts on the non-shifted row, apex on
+    // the shifted row) and one down-pointing (apex on the non-shifted row,
+    // two verts on the shifted row). Wrap via i_next = (i+1) % nu.
+    for (int j = 0; j < n_rows; ++j) {
+        const bool j_shifted = (j % 2 == 1);
         for (int i = 0; i < nu; ++i) {
             const int i_next = (i + 1) % nu;
-            int v00 = vertex_index(i,      j);
-            int v10 = vertex_index(i_next, j);
-            int v01 = vertex_index(i,      j + 1);
-            int v11 = vertex_index(i_next, j + 1);
+            if (!j_shifted) {
+                // Non-shifted row j below, shifted row j+1 above.
+                ref_mesh.tris.push_back(vertex_index(i,      j));
+                ref_mesh.tris.push_back(vertex_index(i_next, j));
+                ref_mesh.tris.push_back(vertex_index(i,      j + 1));
 
-            // Split quad into two triangles
-            ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v10); ref_mesh.tris.push_back(v11);
-            ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v11); ref_mesh.tris.push_back(v01);
+                ref_mesh.tris.push_back(vertex_index(i_next, j));
+                ref_mesh.tris.push_back(vertex_index(i_next, j + 1));
+                ref_mesh.tris.push_back(vertex_index(i,      j + 1));
+            } else {
+                // Shifted row j below, non-shifted row j+1 above.
+                ref_mesh.tris.push_back(vertex_index(i,      j));
+                ref_mesh.tris.push_back(vertex_index(i_next, j));
+                ref_mesh.tris.push_back(vertex_index(i_next, j + 1));
+
+                ref_mesh.tris.push_back(vertex_index(i,      j));
+                ref_mesh.tris.push_back(vertex_index(i_next, j + 1));
+                ref_mesh.tris.push_back(vertex_index(i,      j + 1));
+            }
         }
     }
 

@@ -15,10 +15,14 @@ void append_pin(std::vector<Pin>& pins, int vertex_index, const std::vector<Vec3
 
 int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin);
 
-// Triangulated cylinder whose long axis is +z, centered at `center`. `nu` and `nv` are the
-// circumferential and axial subdivisions. The wrap column on the underside is omitted to avoid
-// coincident seam vertices that would trip the IPC barrier.
-int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nu, int nv, double radius, double length, const Vec3& center);
+// Triangulated cylinder whose long axis is +z, centered at `center`. `nu` is the
+// circumferential subdivision count. Uses a brick-pattern triangulation where
+// odd axial rings are rotated by half a circumferential step, so every
+// triangle is near-equilateral. Axial row count is picked internally so the
+// row height matches the equilateral height h = (2*pi*r/nu) * sqrt(3)/2.
+// Callers must read the generated vertex count from the size of
+// `state.deformed_positions` rather than assuming any formula.
+int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nu, double radius, double length, const Vec3& center);
 
 // Icosphere built by `subdiv` loop-subdivisions of a base icosahedron, with every
 // midpoint normalized to `radius`. Vertex

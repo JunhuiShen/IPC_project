@@ -604,6 +604,62 @@ void BroadPhase::initialize(const std::vector<Vec3>& x, const std::vector<Vec3>&
     ++version_;
 }
 
+void BroadPhase::refresh(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, int moved_node,
+                         double dt, double node_pad, double tri_pad, double edge_pad) {
+    const int nv = static_cast<int>(cache_.node_boxes.size());
+    if (moved_node < 0 || moved_node >= nv) return;
+
+    cache_.node_boxes[moved_node] = build_node_box(x, v, moved_node, dt, node_pad);
+
+    const std::vector<int>& incident_tris = cache_.node_to_tris[moved_node];
+    for (int t : incident_tris) {
+        const int a = tri_vertex(mesh, t, 0);
+        const int b = tri_vertex(mesh, t, 1);
+        const int c = tri_vertex(mesh, t, 2);
+        cache_.tri_boxes[t] = build_triangle_box(x, v, a, b, c, dt, tri_pad);
+    }
+
+    const std::vector<int>& incident_edges = cache_.node_to_edges[moved_node];
+    for (int e : incident_edges) {
+        cache_.edge_boxes[e] = build_edge_box(x, v, cache_.edges[e][0], cache_.edges[e][1], dt, edge_pad);
+    }
+
+    if (cache_.tri_root >= 0) {
+        refit_bvh_locally(cache_.tri_bvh_nodes, cache_.tri_boxes, cache_.tri_bvh_parent,
+                          cache_.tri_leaf_node, incident_tris);
+    }
+    if (cache_.edge_root >= 0) {
+        refit_bvh_locally(cache_.edge_bvh_nodes, cache_.edge_boxes, cache_.edge_bvh_parent,
+                          cache_.edge_leaf_node, incident_edges);
+    }
+    if (cache_.node_root >= 0) {
+        const std::vector<int> moved_only{moved_node};
+        refit_bvh_locally(cache_.node_bvh_nodes, cache_.node_boxes, cache_.node_bvh_parent,
+                          cache_.node_leaf_node, moved_only);
+    }
+
+    remove_nt_pairs_touching_node(cache_, moved_node);
+    for (int t : incident_tris) {
+        remove_nt_pairs_touching_triangle(cache_, t, mesh);
+    }
+
+    for (int e : incident_edges) {
+        remove_ss_pairs_touching_edge(cache_, e);
+    }
+
+    query_node_against_triangles(cache_, moved_node, mesh);
+
+    for (int t : incident_tris) {
+        scan_triangle_against_all_nodes(cache_, t, mesh);
+    }
+
+    for (int e : incident_edges) {
+        query_edge_against_edges(cache_, e);
+    }
+
+    ++version_;
+}
+
 void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt) {
     constexpr double epsilon_pad = 1.0e-10;  // fp tie-breaker, not a safety pad
     build(x, v, mesh, dt, /*node_pad=*/epsilon_pad, /*tri_pad=*/epsilon_pad, /*edge_pad=*/epsilon_pad);

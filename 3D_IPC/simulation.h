@@ -18,9 +18,13 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         std::vector<Vec3> xhat;
         build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
 
-        std::vector<Vec3> xnew = params.use_trust_region
-            ? trust_region_initial_guess(state.deformed_positions, xhat, ref_mesh, params.d_hat)
-            : ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
+        std::vector<Vec3> xnew;
+        if (params.use_trust_region)
+            xnew = trust_region_initial_guess(state.deformed_positions, xhat, ref_mesh, params.d_hat);
+        else if (params.use_ccd_guess)
+            xnew = ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
+        else
+            xnew = state.deformed_positions;
 
         SolverResult sub_result;
         if (params.use_gpu)

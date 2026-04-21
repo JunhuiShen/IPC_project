@@ -55,7 +55,7 @@ SolverResult gpu_gauss_seidel_solver(
     };
 
     SolverResult result;
-    result.initial_residual = eval_residual();
+    result.initial_residual = p.fixed_iters ? 0.0 : eval_residual();
     result.final_residual   = result.initial_residual;
     result.iterations       = 0;
 
@@ -63,7 +63,7 @@ SolverResult gpu_gauss_seidel_solver(
                                           p.tol_rel * result.initial_residual);
 
     if (residual_history) residual_history->push_back(result.initial_residual);
-    if (result.initial_residual < effective_tol) {
+    if (!p.fixed_iters && result.initial_residual < effective_tol) {
         result.converged = true;
         return result;
     }
@@ -104,15 +104,16 @@ SolverResult gpu_gauss_seidel_solver(
         }
 
         result.last_num_colors = static_cast<int>(color_groups.size());
-        result.final_residual  = eval_residual();
+        result.final_residual  = p.fixed_iters ? 0.0 : eval_residual();
         result.iterations      = iter;
 
         if (residual_history) residual_history->push_back(result.final_residual);
-        if (result.final_residual < effective_tol) {
+        if (!p.fixed_iters && result.final_residual < effective_tol) {
             result.converged = true;
             break;
         }
     }
 
+    if (p.fixed_iters) result.converged = true;
     return result;
 }
