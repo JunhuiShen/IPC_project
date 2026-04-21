@@ -315,6 +315,25 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
     return result;
 }
 
+SolverResult global_gauss_seidel_solver_parallel_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+                                                 const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
+                                                 BroadPhase& broad_phase, const std::vector<Vec3>& v, std::vector<double>* residual_history,
+                                                 const std::vector<std::vector<int>>* override_colors) {
+
+    //xnew = intial guess
+    for (int iter = 1; iter <= params.max_global_iters; ++iter) {
+    //1. define node certified regions, i.e. "blue boxes" (e.g. using jacobi predictions)
+    //2. define (red) edge and triangle boxes from node (blue) boxes
+    //3. register barrier pairs based on d_hat padded red box intersections with blue boxes
+    //4. define conflict graph from barrier pair and elastic mesh connectivity
+    //5. define colors for parallel GS updates
+    //6. for each color, loop through nodes in color and (i) compute GS delta (ii) clamp delta to (a) stay in certified region and (b) CCD                                                 
+    //7. optionall check for CCD as a sanity check
+    //8. optionally check for residual tolerance (e.g. dont check if params.fixed_iters==true)
+}
+}
+                                                
+
 SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                                  const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
                                                  BroadPhase& broad_phase, const std::vector<Vec3>& v, std::vector<double>* residual_history,
