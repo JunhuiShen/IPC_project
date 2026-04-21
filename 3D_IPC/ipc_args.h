@@ -13,10 +13,10 @@ struct IPCArgs3D : ArgParser {
     int    num_frames   = 60;
 
     // --- physics ---
-    double mu           = 10.0;   // Pa  (first Lame parameter / shear modulus)
-    double lambda       = 10.0;   // Pa  (second Lame parameter)
-    double density      = 1.0;    // kg/m^3
-    double thickness    = 0.1;    // m
+    double E            = 1000.0; // Pa  (Young's modulus)
+    double nu           = 0.3;    // (Poisson ratio)
+    double density      = 900.0;  // kg/m^3
+    double thickness    = 0.001;  // m
     double kB           = 0.0;    // J   (bending stiffness; 0 disables bending)
     double kpin         = 1e5;    // N/m (pin spring stiffness)
     double gx           = 0.0;    // m/s^2
@@ -92,10 +92,10 @@ struct IPCArgs3D : ArgParser {
         add_int   ("substeps",    substeps,    3,          "Solver substeps per frame (solver_dt = 1/(fps*substeps))");
         add_int   ("num_frames",  num_frames,  60,        "Number of frames to simulate");
 
-        add_double("mu",          mu,          5.0,        "First Lame parameter (shear modulus)");
-        add_double("lambda",      lambda,      5.0,        "Second Lame parameter");
-        add_double("density",     density,     1.0,         "Mass density");
-        add_double("thickness",   thickness,   0.1,      "Shell thickness");
+        add_double("E",           E,           1000.0,     "Young's modulus (Pa)");
+        add_double("nu",          nu,          0.3,        "Poisson ratio");
+        add_double("density",     density,     900.0,       "Mass density (kg/m^3)");
+        add_double("thickness",   thickness,   0.001,       "Shell thickness (m)");
         add_double("kB",          kB,          1e-3,       "Bending stiffness (0 disables bending)");
         add_double("kpin",        kpin,        1e5,        "Pin spring stiffness");
         add_double("gx",          gx,          0.0,        "Gravity x-component");
@@ -174,8 +174,8 @@ struct IPCArgs3D : ArgParser {
         SimParams p = SimParams::zeros();
         p.fps              = fps;
         p.substeps         = substeps;
-        p.mu               = mu;
-        p.lambda           = lambda;
+        p.mu               = E / (2.0 * (1.0 + nu));
+        p.lambda           = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
         p.density          = density;
         p.thickness        = thickness;
         p.kB               = kB;
