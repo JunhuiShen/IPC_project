@@ -316,23 +316,191 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
 }
 
 SolverResult global_gauss_seidel_solver_parallel_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                                                 const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
-                                                 BroadPhase& broad_phase, const std::vector<Vec3>& v, std::vector<double>* residual_history,
-                                                 const std::vector<std::vector<int>>* override_colors) {
+                                                       const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
+                                                       BroadPhase& broad_phase, const std::vector<Vec3>& v, std::vector<double>* residual_history,
+                                                       const std::vector<std::vector<int>>* override_colors) {
+    const double dt          = params.dt();
+    const double dhat        = params.d_hat;
+    const bool   use_barrier = dhat > 0.0;
+    const int    nv          = static_cast<int>(xnew.size());
+    const PinMap pm          = build_pin_map(pins, nv);
 
-    //xnew = intial guess
+    // One initialize() call to populate mesh topology (edges, node_to_tris,
+    // node_to_edges) and to seed iter 1's Jacobi prediction with a
+    // conservative velocity-swept pair set. Every subsequent iter rebuilds
+    // the pair cache from blue/green boxes.
+    if (use_barrier) {
+        broad_phase.initialize(xnew, v, ref_mesh, dt, dhat);
+    } else if (!broad_phase.has_topology()) {
+        broad_phase.set_mesh_topology(ref_mesh, nv);
+    }
+
+    // Snapshot the edge list.
+    const std::vector<std::array<int, 2>> edges = broad_phase.cache().edges;
+
+    // Static elastic adjacency.
+    const std::vector<std::vector<int>> elastic_adj = build_elastic_adj(ref_mesh, adj, nv);
+
+    // Per-iter pair cache. Seeded from the initialize() swept-AABB pairs so
+    // iter 1's Jacobi prediction has a non-empty contact pair list; then
+    // overwritten each iter by register_barrier_pairs_from_blue_green.
+    BroadPhase::Cache iter_cache;
+    if (use_barrier) {
+        iter_cache = broad_phase.cache();
+    } else {
+        iter_cache.vertex_nt.assign(nv, {});
+        iter_cache.vertex_ss.assign(nv, {});
+    }
+
+    if (residual_history) residual_history->clear();
+
+    SolverResult result;
+    result.final_residual = 0.0;
+    result.iterations     = 0;
+    double effective_tol  = params.tol_abs;
+
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
-    //1. define node certified regions, i.e. "blue boxes" (e.g. using jacobi predictions)
-    //2. define (red) edge and triangle boxes from node (blue) boxes
-    //3. register barrier pairs based on d_hat padded red box intersections with blue boxes
-    //4. define conflict graph from barrier pair and elastic mesh connectivity
-    //5. define colors for parallel GS updates
-    //6. for each color, loop through nodes in color and (i) compute GS delta (ii) clamp delta to (a) stay in certified region and (b) CCD                                                 
-    //7. optionall check for CCD as a sanity check
-    //8. optionally check for residual tolerance (e.g. dont check if params.fixed_iters==true)
+        std::vector<Vec3> x_before;
+        if (use_barrier && params.ccd_check) x_before = xnew;
+
+        // Step 1: Jacobi predictions against the current pair cache.
+        std::vector<JacobiPrediction> predictions;
+        build_jacobi_predictions(ref_mesh, adj, pins, params, xnew, xhat, iter_cache, predictions, &pm);
+
+        // Residual from predictions.
+        double residual_now = 0.0;
+        if (!params.fixed_iters) {
+            const bool normalize = params.mass_normalize_residual;
+            double r_inf = 0.0;
+            #pragma omp parallel for reduction(max:r_inf) schedule(static)
+            for (int i = 0; i < nv; ++i) {
+                Vec3 g = predictions[i].g;
+                if (normalize) {
+                    const double m = ref_mesh.mass[i];
+                    if (m > 0.0) g /= m;
+                }
+                r_inf = std::max(r_inf, g.cwiseAbs().maxCoeff());
+            }
+            residual_now = r_inf;
+        }
+        if (iter == 1) {
+            result.initial_residual = residual_now;
+            effective_tol = std::max(params.tol_abs, params.tol_rel * residual_now);
+        }
+        result.final_residual = residual_now;
+        if (residual_history) residual_history->push_back(residual_now);
+        if (!params.fixed_iters && residual_now < effective_tol) {
+            result.iterations = iter - 1;
+            result.converged  = true;
+            return result;
+        }
+
+        // Step 2: define node certified regions, i.e. "blue boxes".
+        std::vector<AABB> blue_boxes(nv);
+        for (int vi = 0; vi < nv; ++vi) {
+            const double r = predictions[vi].delta.norm();
+            const Vec3 half = Vec3::Constant(r);
+            AABB box;
+            box.expand(xnew[vi] - half);
+            box.expand(xnew[vi] + half);
+            blue_boxes[vi] = box;
+        }
+
+        // Step 3: define (red) edge and triangle boxes from node (blue) boxes.
+        if (use_barrier) {
+            iter_cache = register_barrier_pairs_from_blue_green(ref_mesh, edges, blue_boxes, dhat);
+        }
+
+        // Step 4: define conflict graph from barrier pair and elastic mesh connectivity.
+        const std::vector<std::vector<int>> contact_adj = use_barrier? build_contact_adj(iter_cache, nv): std::vector<std::vector<int>>(nv);
+        const std::vector<std::vector<int>> conflict = union_adjacency(elastic_adj, contact_adj);
+
+        // Step 5: define colors for parallel GS updates.
+        const std::vector<std::vector<int>> local_colors = override_colors? std::vector<std::vector<int>>() : greedy_color_conflict_graph(conflict, predictions);
+        const std::vector<std::vector<int>>& color_groups = override_colors ? *override_colors : local_colors;
+
+        // Step 6: colored GS.
+        for (std::size_t color_idx = 0; color_idx < color_groups.size(); ++color_idx) {
+            const auto& group = color_groups[color_idx];
+            if (group.empty()) continue;
+
+            #pragma omp parallel for schedule(static) if(params.use_parallel && group.size() >= 16)
+            for (int local_idx = 0; local_idx < static_cast<int>(group.size()); ++local_idx) {
+                const int vi = group[local_idx];
+
+                Vec3 g_fresh, delta_fresh;
+                Mat33 H_fresh;
+                compute_local_newton_direction(vi, ref_mesh, adj, pins, params, xnew, xhat,
+                                               iter_cache, g_fresh, H_fresh, delta_fresh, &pm);
+
+                // (a) clamp the step to stay inside the node's blue box.
+                const double alpha_clip = use_barrier? clip_step_to_certified_region(vi, xnew, delta_fresh, blue_boxes[vi]): 1.0;
+                const Vec3 delta = alpha_clip * delta_fresh;
+
+                // (b) CCD against the current iter_cache pairs.
+                const double ccd_step = compute_safe_step_for_vertex(vi, ref_mesh, params, xnew, delta, iter_cache);
+
+                xnew[vi] -= ccd_step * delta;
+            }
+        }
+
+        result.last_num_colors       = static_cast<int>(color_groups.size());
+        result.color_groups_parallel = color_groups;
+        result.recolor_count        += 1;
+
+        // Step 7: optional CCD sanity check.
+        if (use_barrier && params.ccd_check) {
+            const int nv_local = static_cast<int>(xnew.size());
+            std::vector<Vec3> dx(nv_local);
+            for (int i = 0; i < nv_local; ++i) dx[i] = xnew[i] - x_before[i];
+
+            BroadPhase ccd_bp;
+            ccd_bp.build_ccd_candidates(x_before, dx, ref_mesh, 1.0);
+            const auto& ccd_cache = ccd_bp.cache();
+
+            double toi_min = 1.0;
+            int hit_type = 0;  // 0=none, 1=node-tri, 2=seg-seg
+
+            for (int i = 0; i < static_cast<int>(ccd_cache.nt_pairs.size()); ++i) {
+                const auto& p = ccd_cache.nt_pairs[i];
+                double t = node_triangle_general_ccd(
+                    x_before[p.node],     dx[p.node],
+                    x_before[p.tri_v[0]], dx[p.tri_v[0]],
+                    x_before[p.tri_v[1]], dx[p.tri_v[1]],
+                    x_before[p.tri_v[2]], dx[p.tri_v[2]]);
+                if (t < toi_min) { toi_min = t; hit_type = 1; }
+            }
+            for (int i = 0; i < static_cast<int>(ccd_cache.ss_pairs.size()); ++i) {
+                const auto& p = ccd_cache.ss_pairs[i];
+                double t = segment_segment_general_ccd(
+                    x_before[p.v[0]], dx[p.v[0]],
+                    x_before[p.v[1]], dx[p.v[1]],
+                    x_before[p.v[2]], dx[p.v[2]],
+                    x_before[p.v[3]], dx[p.v[3]]);
+                if (t < toi_min) { toi_min = t; hit_type = 2; }
+            }
+
+            if (toi_min < 1.0) {
+                result.ccd_violations += 1;
+                std::fprintf(stderr,
+                    "[parallel sanity] CCD violation after iter %d: toi=%.6e (%s)\n",
+                    iter, toi_min, hit_type == 1 ? "node-triangle" : "segment-segment");
+            }
+        }
+
+        result.iterations = iter;
+    }
+
+    // Step 8: optional residual tolerance (skipped when params.fixed_iters).
+    if (params.fixed_iters) {
+        result.final_residual = 0.0;
+        result.converged      = true;
+    } else {
+        result.final_residual = compute_global_residual(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, &pm);
+    }
+
+    return result;
 }
-}
-                                                
 
 SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                                  const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
@@ -502,7 +670,7 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
                     delta = alpha_clip * delta_fresh;
                 }
                 const double ccd_step = compute_safe_step_for_vertex(
-                        vi, ref_mesh, params, xnew, delta, broad_phase);
+                        vi, ref_mesh, params, xnew, delta, broad_phase.cache());
                 xnew[vi] -= ccd_step * delta;
             }
 

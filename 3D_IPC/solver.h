@@ -55,3 +55,11 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
                                                  const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, BroadPhase& broad_phase,
                                                  const std::vector<Vec3>& v, std::vector<double>* residual_history = nullptr,
                                                  const std::vector<std::vector<int>>* override_colors = nullptr);
+
+// Stripped-down correct reference: rebuilds barrier pairs each iter from
+// per-node blue boxes (|delta| cubes) and full-d_hat-padded green edge/tri
+// boxes. No color caching, no certified-region freezing.
+SolverResult global_gauss_seidel_solver_parallel_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+                                                       const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, BroadPhase& broad_phase,
+                                                       const std::vector<Vec3>& v, std::vector<double>* residual_history = nullptr,
+                                                       const std::vector<std::vector<int>>* override_colors = nullptr);

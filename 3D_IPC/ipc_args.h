@@ -38,6 +38,7 @@ struct IPCArgs3D : ArgParser {
     bool   fixed_iters = false;
     bool   mass_normalize_residual = true;
     bool   use_incremental_refresh = false;
+    bool   use_basic_parallel      = true;
     bool   use_gpu                 = false;
     int    color_rebuild_interval  = 1;
 
@@ -117,6 +118,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("fixed_iters",      fixed_iters,      false, "Run exactly max_substep_iters sweeps per substep with no tolerance / convergence check");
         add_bool  ("mass_normalize_residual", mass_normalize_residual, true,  "Divide per-vertex gradient by mass when forming the global residual (scale-invariant stopping test)");
         add_bool  ("use_incremental_refresh", use_incremental_refresh, false, "Refresh broad-phase BVH per moved vertex during GS sweep; keeps the pair cache consistent with Newton-sized motion");
+        add_bool  ("use_basic_parallel",   use_basic_parallel,   false,  "Route through the stripped-down correct parallel GS solver (blue/red/green per-iter pair rebuild; default on)");
         add_bool  ("use_gpu",              use_gpu,              false, "Route the GS sweep through the GPU implementation (CPU stub when CUDA is unavailable)");
         add_int   ("color_rebuild_interval", color_rebuild_interval, 10, "Parallel solver: recolor every N outer iterations (N<=0 treated as 1)");
 
@@ -196,6 +198,7 @@ struct IPCArgs3D : ArgParser {
         p.fixed_iters = fixed_iters;
         p.mass_normalize_residual = mass_normalize_residual;
         p.use_incremental_refresh = use_incremental_refresh;
+        p.use_basic_parallel      = use_basic_parallel;
         p.use_gpu                 = use_gpu;
         p.color_rebuild_interval  = color_rebuild_interval;
         return p;

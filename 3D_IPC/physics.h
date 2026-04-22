@@ -46,6 +46,7 @@ struct SimParams {
     bool   fixed_iters;          // if true, run exactly max_global_iters sweeps with no tolerance / convergence check
     bool   mass_normalize_residual;
     bool   use_incremental_refresh;   // per-moved-vertex broad-phase refresh during GS sweep
+    bool   use_basic_parallel;        // route through global_gauss_seidel_solver_parallel_basic
     int    color_rebuild_interval;
 
     // Route the per-substep Gauss-Seidel sweep through the GPU implementation
@@ -86,6 +87,7 @@ struct SimParams {
         p.fixed_iters               = false;
         p.mass_normalize_residual   = false;
         p.use_incremental_refresh   = false;
+        p.use_basic_parallel        = false;
         p.color_rebuild_interval    = 10;
         p.use_gpu                   = false;
         p.cached_dt_                = -1.0;

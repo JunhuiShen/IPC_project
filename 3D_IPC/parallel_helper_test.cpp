@@ -904,7 +904,7 @@ TEST(TrustRegionSafeStep, FarFromBarrierReturnsFullStep) {
     // (node 0, triangle B) is eta * d0 / |delta| = 0.4 * 0.5 / 0.25 = 0.8.
     const Vec3 delta = Vec3(0.0, 0.25, 0.0);
     const double step = compute_safe_step_for_vertex(
-        0, ref_mesh, params, state.deformed_positions, delta, bp);
+        0, ref_mesh, params, state.deformed_positions, delta, bp.cache());
 
     EXPECT_NEAR(step, 1.0, 1e-12)
         << "trust-region clamped a non-colliding pair; d_hat gate missing";

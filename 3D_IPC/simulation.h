@@ -29,6 +29,8 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         SolverResult sub_result;
         if (params.use_gpu)
             sub_result = gpu_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
+        else if (params.use_parallel && params.use_basic_parallel)
+            sub_result = global_gauss_seidel_solver_parallel_basic(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
         else if (params.use_parallel)
             sub_result = global_gauss_seidel_solver_parallel(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
         else

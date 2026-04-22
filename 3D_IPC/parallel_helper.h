@@ -71,6 +71,18 @@ double clip_step_to_certified_region(int vi, const std::vector<Vec3>& x, const V
 
 double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimParams& params,
                                     const std::vector<Vec3>& x, const Vec3& delta,
-                                    const BroadPhase& broad_phase);
+                                    const BroadPhase::Cache& bp_cache);
+
+// Register per-iter barrier pairs from blue/red/green boxes:
+//   B(vi)  = blue_boxes[vi] (node trust region cube)
+//   R(t/e) = union of incident B  (red edge/triangle box)
+//   G(t/e) = R padded by d_hat on each face (green box)
+// Admit NT pair (n,t) when B(n) and G(t) have intersections and n is not a corner of t, and
+// SS pair (e,f) when G(e) and G(f) have intersections and e,f share no vertex.
+BroadPhase::Cache register_barrier_pairs_from_blue_green(
+    const RefMesh& ref_mesh,
+    const std::vector<std::array<int, 2>>& edges,
+    const std::vector<AABB>& blue_boxes,
+    double d_hat);
 
 void apply_parallel_commits(const std::vector<ParallelCommit>& commits, std::vector<Vec3>& xnew);
