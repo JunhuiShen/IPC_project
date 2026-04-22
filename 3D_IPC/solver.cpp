@@ -245,8 +245,6 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
     if (do_refresh) x_at_last_refresh = xnew;
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
-        std::vector<Vec3> x_before;
-        if (use_barrier && params.ccd_check) x_before = xnew;
 
         for (const auto& group : color_groups) {
             for (int vi : group) {
@@ -264,45 +262,6 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
         result.final_residual = params.fixed_iters ? 0.0 : eval_residual();
         result.iterations     = iter;
 
-        // Optional post-sweep CCD penetration check. toi < 1 means the
-        // per-vertex line-search missed a pair and the sweep tunneled.
-        if (use_barrier && params.ccd_check) {
-            std::vector<Vec3> dx(nv);
-            for (int i = 0; i < nv; ++i) dx[i] = xnew[i] - x_before[i];
-
-            BroadPhase ccd_bp;
-            ccd_bp.build_ccd_candidates(x_before, dx, ref_mesh, 1.0);
-            const auto& ccd_cache = ccd_bp.cache();
-
-            double toi_min = 1.0;
-            int hit_type = 0;  // 0=none, 1=node-tri, 2=seg-seg
-
-            for (int i = 0; i < static_cast<int>(ccd_cache.nt_pairs.size()); ++i) {
-                const auto& p = ccd_cache.nt_pairs[i];
-                double t = node_triangle_general_ccd(
-                    x_before[p.node],     dx[p.node],
-                    x_before[p.tri_v[0]], dx[p.tri_v[0]],
-                    x_before[p.tri_v[1]], dx[p.tri_v[1]],
-                    x_before[p.tri_v[2]], dx[p.tri_v[2]]);
-                if (t < toi_min) { toi_min = t; hit_type = 1; }
-            }
-
-            for (int i = 0; i < static_cast<int>(ccd_cache.ss_pairs.size()); ++i) {
-                const auto& p = ccd_cache.ss_pairs[i];
-                double t = segment_segment_general_ccd(
-                    x_before[p.v[0]], dx[p.v[0]],
-                    x_before[p.v[1]], dx[p.v[1]],
-                    x_before[p.v[2]], dx[p.v[2]],
-                    x_before[p.v[3]], dx[p.v[3]]);
-                if (t < toi_min) { toi_min = t; hit_type = 2; }
-            }
-
-            if (toi_min < 1.0) {
-                std::fprintf(stderr,
-                    "[serial sanity] CCD violation after iter %d: toi=%.6e (%s)\n",
-                    iter, toi_min, hit_type == 1 ? "node-triangle" : "segment-segment");
-            }
-        }
 
         if (residual_history) residual_history->push_back(result.final_residual);
         if (!params.fixed_iters && result.final_residual < effective_tol) {
@@ -360,8 +319,6 @@ SolverResult global_gauss_seidel_solver_parallel_basic(const RefMesh& ref_mesh, 
     double effective_tol  = params.tol_abs;
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
-        std::vector<Vec3> x_before;
-        if (use_barrier && params.ccd_check) x_before = xnew;
 
         // Step 1: Jacobi predictions against the current pair cache.
         std::vector<JacobiPrediction> predictions;
@@ -448,45 +405,6 @@ SolverResult global_gauss_seidel_solver_parallel_basic(const RefMesh& ref_mesh, 
         result.color_groups_parallel = color_groups;
         result.recolor_count        += 1;
 
-        // Step 7: optional CCD sanity check.
-        if (use_barrier && params.ccd_check) {
-            const int nv_local = static_cast<int>(xnew.size());
-            std::vector<Vec3> dx(nv_local);
-            for (int i = 0; i < nv_local; ++i) dx[i] = xnew[i] - x_before[i];
-
-            BroadPhase ccd_bp;
-            ccd_bp.build_ccd_candidates(x_before, dx, ref_mesh, 1.0);
-            const auto& ccd_cache = ccd_bp.cache();
-
-            double toi_min = 1.0;
-            int hit_type = 0;  // 0=none, 1=node-tri, 2=seg-seg
-
-            for (int i = 0; i < static_cast<int>(ccd_cache.nt_pairs.size()); ++i) {
-                const auto& p = ccd_cache.nt_pairs[i];
-                double t = node_triangle_general_ccd(
-                    x_before[p.node],     dx[p.node],
-                    x_before[p.tri_v[0]], dx[p.tri_v[0]],
-                    x_before[p.tri_v[1]], dx[p.tri_v[1]],
-                    x_before[p.tri_v[2]], dx[p.tri_v[2]]);
-                if (t < toi_min) { toi_min = t; hit_type = 1; }
-            }
-            for (int i = 0; i < static_cast<int>(ccd_cache.ss_pairs.size()); ++i) {
-                const auto& p = ccd_cache.ss_pairs[i];
-                double t = segment_segment_general_ccd(
-                    x_before[p.v[0]], dx[p.v[0]],
-                    x_before[p.v[1]], dx[p.v[1]],
-                    x_before[p.v[2]], dx[p.v[2]],
-                    x_before[p.v[3]], dx[p.v[3]]);
-                if (t < toi_min) { toi_min = t; hit_type = 2; }
-            }
-
-            if (toi_min < 1.0) {
-                result.ccd_violations += 1;
-                std::fprintf(stderr,
-                    "[parallel sanity] CCD violation after iter %d: toi=%.6e (%s)\n",
-                    iter, toi_min, hit_type == 1 ? "node-triangle" : "segment-segment");
-            }
-        }
 
         result.iterations = iter;
     }
@@ -570,8 +488,6 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
     };
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
-        std::vector<Vec3> x_before;
-        if (use_barrier && params.ccd_check) x_before = xnew;
 
         std::vector<JacobiPrediction> predictions;
         build_jacobi_predictions(ref_mesh, adj, pins, params, xnew, xhat, broad_phase.cache(), predictions, &pm);
@@ -687,47 +603,6 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         }
 
         result.last_num_colors = static_cast<int>(color_groups.size());
-
-        // Optional post-sweep CCD penetration check: toi < 1 means a pair was
-        // missed by single-node CCD and the sweep tunneled.
-        if (use_barrier && params.ccd_check) {
-            const int nv_local = static_cast<int>(xnew.size());
-            std::vector<Vec3> dx(nv_local);
-            for (int i = 0; i < nv_local; ++i) dx[i] = xnew[i] - x_before[i];
-
-            BroadPhase ccd_bp;
-            ccd_bp.build_ccd_candidates(x_before, dx, ref_mesh, 1.0);
-            const auto& ccd_cache = ccd_bp.cache();
-
-            double toi_min = 1.0;
-            int hit_type = 0;
-
-            for (int i = 0; i < static_cast<int>(ccd_cache.nt_pairs.size()); ++i) {
-                const auto& p = ccd_cache.nt_pairs[i];
-                double t = node_triangle_general_ccd(
-                    x_before[p.node],     dx[p.node],
-                    x_before[p.tri_v[0]], dx[p.tri_v[0]],
-                    x_before[p.tri_v[1]], dx[p.tri_v[1]],
-                    x_before[p.tri_v[2]], dx[p.tri_v[2]]);
-                if (t < toi_min) { toi_min = t; hit_type = 1; }
-            }
-            for (int i = 0; i < static_cast<int>(ccd_cache.ss_pairs.size()); ++i) {
-                const auto& p = ccd_cache.ss_pairs[i];
-                double t = segment_segment_general_ccd(
-                    x_before[p.v[0]], dx[p.v[0]],
-                    x_before[p.v[1]], dx[p.v[1]],
-                    x_before[p.v[2]], dx[p.v[2]],
-                    x_before[p.v[3]], dx[p.v[3]]);
-                if (t < toi_min) { toi_min = t; hit_type = 2; }
-            }
-
-            if (toi_min < 1.0) {
-                result.ccd_violations += 1;
-                std::fprintf(stderr,
-                    "[parallel sanity] CCD violation after iter %d: toi=%.6e (%s)\n",
-                    iter, toi_min, hit_type == 1 ? "node-triangle" : "segment-segment");
-            }
-        }
 
         result.iterations = iter;
     }

@@ -32,3 +32,16 @@ mesh_after.obj
 # Claude Code scheduled-tasks runtime lock
 .claude/scheduled_tasks.lock
 example5/
+
+# Vendored Bernstein Sign Classification + Root Parity CCD
+# (kept on disk as reference; not built into the active binary)
+bsc.cpp
+bsc.h
+rootparitycollisiontest.cpp
+rootparitycollisiontest.h
+interval.cpp
+interval.h
+interval_base.h
+expansion.cpp
+expansion.h
+vec.h
