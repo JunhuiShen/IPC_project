@@ -25,11 +25,12 @@ The nonlinear solve is driven by:
 1. **CCD-projected initial guess** -- advance toward the inertial predictor using
    parallel cubic CCD so the starting iterate is already intersection-free.
 2. **Gauss-Seidel iterations** -- local 3x3 Newton solve per vertex, each step
-   filtered by linear CCD and accepted only if the global residual drops.
-3. **Incremental broad phase** -- swept-AABB BVH with local ancestor-only refit
-   after each accepted vertex update.
+   filtered by linear CCD; stop on residual tolerance (or run fixed iterations).
+3. **Per-iteration contact registration** -- rebuild node-triangle / edge-edge
+   candidate pairs from certified-region blue/green boxes.
 4. **Parallel mode** (`--use_parallel`) -- certified-region conflict graph with
-   greedy coloring so independent vertices can be committed concurrently.
+   greedy coloring so independent vertices can be committed concurrently; colors
+   are rebuilt every `color_rebuild_interval` outer iterations.
 
 ## Requirements
 
@@ -71,8 +72,8 @@ Common invocations:
 
 Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
 (`frame_0000.geo`, `frame_0001.geo`, ...). `--format obj` writes `.obj`;
-`--format usd` writes `.usda` text. A binary restart snapshot `state_NNNN.bin`
-is written alongside every frame.
+`--format ply` writes `.ply`; `--format usd` writes `.usda` text. A binary
+restart snapshot `state_NNNN.bin` is written alongside every frame.
 
 Per-frame statistics are printed to stdout:
 
@@ -86,11 +87,11 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | Group | Flags |
 |-------|-------|
 | Time integration | `fps`, `substeps`, `num_frames` |
-| Physics | `mu`, `lambda`, `density`, `thickness`, `kB`, `kpin`, `gx`, `gy`, `gz` |
-| Solver | `max_substep_iters`, `tol_abs`, `tol_rel`, `step_weight`, `d_hat`, `k_sdf`, `eps_sdf`, `use_parallel` |
+| Physics | `E`, `nu`, `density`, `thickness`, `kB`, `kpin`, `gx`, `gy`, `gz` |
+| Solver | `max_substep_iters`, `tol_abs`, `tol_rel`, `step_weight`, `d_hat`, `k_sdf`, `eps_sdf`, `use_parallel`, `ccd_check`, `use_ccd_guess`, `use_trust_region`, `fixed_iters`, `use_gpu`, `color_rebuild_interval` |
 | Mesh geometry | `nx`, `ny`, `width`, `height`, `left_x`, `right_x`, `sheet_y`, `left_z`, `right_z` |
 | Scene | `example` (`1`..`6`), plus per-example knobs: `drop_stack_count`, `drop_cloth_nx`, `drop_cloth_ny`, `drop_first_y`, `drop_spacing`, `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `sphere_radius`, `sphere_cx`, `sphere_cy`, `sphere_cz`, `sphere_subdiv`, `sphere_cloth_size`, `sphere_ground_size` |
-| Output / restart | `outdir`, `format` (`obj \| geo \| usd`), `restart_frame` |
+| Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame` |
 
 ## Source layout
 
@@ -115,8 +116,8 @@ reader can jump to the layer they care about.
 - `physics.h` / `physics.cpp` -- top-level incremental potential. Accumulates
   inertial + elastic + (when `d_hat > 0`) barrier contributions into per-vertex
   gradients and Hessians, exposes `PinMap` for O(1) pin lookup, and runs the
-  OpenMP-parallel global residual. Serialize/deserialize of simulation state
-  lives here.
+  OpenMP-parallel global residual (mass-normalized by vertex mass).
+  Serialize/deserialize of simulation state lives here.
 
 ### Energy terms
 
@@ -150,11 +151,9 @@ reader can jump to the layer they care about.
   Full degeneracy chain: cubic -> quadratic -> linear -> coplanar -> collinear.
   All root solvers use the stack-allocated `SmallRoots` buffer.
 - `broad_phase.h` / `broad_phase.cpp` -- swept-AABB broad phase backed by a BVH.
-  Caches mesh topology via `set_mesh_topology`, supports incremental refresh
-  and local ancestor-only BVH refit, and exposes `query_single_node_ccd` for
-  per-vertex CCD which enumerates both node-triangle roles a moving vertex
-  can play (lone node vs. triangle corner) as well as edge-edge pairs
-  incident to it.
+  Caches mesh topology via `set_mesh_topology`, builds candidate node-triangle
+  and edge-edge pairs, and exposes per-vertex pair queries used by one-node
+  linear CCD / trust-region step limiting.
 
 ### Solver
 
@@ -183,7 +182,7 @@ Every layer of the pipeline has a GoogleTest binary. To build and run them all:
 | Test binary | Cases | What it covers |
 |-------------|-------|----------------|
 | `ccd_test` | 47 | Linear CCD (all single-moving-DOF cases) and cubic CCD, degeneracy chain, stress, CCD-projected initial guess |
-| `broad_phase_test` | 38 | AABB, BVH, pair generation, CCD candidates, conservativeness, incremental refresh, `query_single_node_ccd` vs brute-force |
+| `broad_phase_test` | 38 | AABB, BVH, pair generation, CCD candidates, conservativeness, per-vertex pair query vs brute-force |
 | `ipc_math_test` | 27 | `matrix3d_inverse`, `segment_closest_point`, `filter_root`, `SmallRoots`, barycentric coords, serialize round-trip, topology caching |
 | `parallel_helper_test` | 26 | Jacobi predictions, certified regions, conflict graph, coloring, parallel commits, solver correctness |
 | `bending_energy_test` | 20 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |

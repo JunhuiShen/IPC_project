@@ -66,12 +66,6 @@ public:
         std::vector<BVHNode> tri_bvh_nodes;
         std::vector<BVHNode> edge_bvh_nodes;
         std::vector<BVHNode> node_bvh_nodes;
-        std::vector<int> node_bvh_parent;
-        std::vector<int> node_leaf_node;
-        std::vector<int> tri_bvh_parent;
-        std::vector<int> edge_bvh_parent;
-        std::vector<int> tri_leaf_node;
-        std::vector<int> edge_leaf_node;
 
         int node_root = -1;
         int tri_root = -1;
@@ -100,12 +94,6 @@ public:
 
     void initialize(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double dhat);
 
-    // Local update around one moved vertex: refits its + incident tri/edge
-    // BVH leaves and rebuilds the pair lists touching them. Not thread-safe.
-    void refresh(const std::vector<Vec3>& x, const std::vector<Vec3>& v,
-                 const RefMesh& mesh, int moved_node, double dt,
-                 double node_pad, double tri_pad, double edge_pad);
-
     const std::vector<NodeTrianglePair>& nt_pairs() const {
         return cache_.nt_pairs;
     }
@@ -116,7 +104,7 @@ public:
 
     void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt);
 
-    // Cache static mesh topology; reused by later build/initialize/refresh.
+    // Cache static mesh topology; reused by later build/initialize calls.
     void set_mesh_topology(const RefMesh& mesh, int nv);
     bool has_topology() const { return topology_valid_; }
 
@@ -152,7 +140,7 @@ public:
         return cache_;
     }
 
-    // Increments on every initialize()/refresh() — a cache-invalidation key.
+    // Increments on every initialize() call — a cache-invalidation key.
     std::uint64_t version() const { return version_; }
 
 private:

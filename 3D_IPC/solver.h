@@ -12,9 +12,6 @@ struct SolverResult {
     int    last_num_colors  = 0;   // parallel solver only
     std::vector<std::vector<int>> color_groups_parallel; // also parallel solver only
     int    ccd_violations   = 0;   // populated when SimParams::ccd_check is on
-
-    int    recolor_count    = 0;   // greedy recolors run (parallel solver)
-    int    recolor_skipped  = 0;   // outer iters that reused the cached coloring
 };
 
 // Fold one substep's result into the frame aggregate. `first` preserves the
@@ -31,8 +28,6 @@ inline void accumulate_solver_result(SolverResult& agg, const SolverResult& sub,
     agg.last_num_colors      = sub.last_num_colors;
     agg.color_groups_parallel = sub.color_groups_parallel;
     agg.ccd_violations      += sub.ccd_violations;
-    agg.recolor_count       += sub.recolor_count;
-    agg.recolor_skipped     += sub.recolor_skipped;
 }
 
 std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh);
@@ -55,11 +50,3 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
                                                  const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, BroadPhase& broad_phase,
                                                  const std::vector<Vec3>& v, std::vector<double>* residual_history = nullptr,
                                                  const std::vector<std::vector<int>>* override_colors = nullptr);
-
-// Stripped-down correct reference: rebuilds barrier pairs each iter from
-// per-node blue boxes (|delta| cubes) and full-d_hat-padded green edge/tri
-// boxes. No color caching, no certified-region freezing.
-SolverResult global_gauss_seidel_solver_parallel_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                                                       const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, BroadPhase& broad_phase,
-                                                       const std::vector<Vec3>& v, std::vector<double>* residual_history = nullptr,
-                                                       const std::vector<std::vector<int>>* override_colors = nullptr);

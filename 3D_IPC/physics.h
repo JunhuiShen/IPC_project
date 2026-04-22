@@ -44,9 +44,6 @@ struct SimParams {
     bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
     bool   use_trust_region;     // if true, use trust_region_initial_guess instead of CCD
     bool   fixed_iters;          // if true, run exactly max_global_iters sweeps with no tolerance / convergence check
-    bool   mass_normalize_residual;
-    bool   use_incremental_refresh;   // per-moved-vertex broad-phase refresh during GS sweep
-    bool   use_basic_parallel;        // route through global_gauss_seidel_solver_parallel_basic
     int    color_rebuild_interval;
 
     // Route the per-substep Gauss-Seidel sweep through the GPU implementation
@@ -85,10 +82,7 @@ struct SimParams {
         p.use_ccd_guess             = true;
         p.use_trust_region          = false;
         p.fixed_iters               = false;
-        p.mass_normalize_residual   = false;
-        p.use_incremental_refresh   = false;
-        p.use_basic_parallel        = false;
-        p.color_rebuild_interval    = 10;
+        p.color_rebuild_interval    = 1;
         p.use_gpu                   = false;
         p.cached_dt_                = -1.0;
         p.cached_dt2_               = -1.0;
@@ -283,12 +277,10 @@ struct HingePrecompute {
     bool                degenerate = true;  // true => gradient and PSD Hessian are zero
 };
 
-// `want_hessian == false` leaves dPdF uninitialised.
 void build_elastic_precompute(const RefMesh& ref_mesh, const std::vector<Vec3>& x,
                               const SimParams& params, bool want_hessian,
                               std::vector<TriPrecompute>& out);
 
-// Leaves `out` empty when kB <= 0 or the mesh has no hinges.
 void build_bending_precompute(const RefMesh& ref_mesh, const std::vector<Vec3>& x,
                               const SimParams& params,
                               std::vector<HingePrecompute>& out);

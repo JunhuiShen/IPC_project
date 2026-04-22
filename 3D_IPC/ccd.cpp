@@ -3,9 +3,32 @@
 #include <algorithm>
 #include <array>
 
+namespace {
+bool inside_triangle_3d_at(const Vec3& x, const Vec3& dx, const Vec3& x1, const Vec3& dx1,
+                           const Vec3& x2, const Vec3& dx2, const Vec3& x3, const Vec3& dx3,
+                           double t, double eps2);
+bool inside_segments_3d_at(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2,
+                           const Vec3& x3, const Vec3& dx3, const Vec3& x4, const Vec3& dx4,
+                           double t, double eps2);
+double node_triangle_coplanar_interval(const Vec3& x, const Vec3& dx, const Vec3& x1, const Vec3& dx1,
+                                       const Vec3& x2, const Vec3& dx2, const Vec3& x3, const Vec3& dx3,
+                                       double eps);
+double persistent_segment_segment_time(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2,
+                                       const Vec3& x3, const Vec3& dx3, const Vec3& x4, const Vec3& dx4,
+                                       double eps);
+}
+
 CCDResult node_triangle_only_one_node_moves(const Vec3& x,  const Vec3& dx, const Vec3& x1, const Vec3& dx1, 
     const Vec3& x2, const Vec3& dx2, const Vec3& x3, const Vec3& dx3, double eps) {
     CCDResult result;
+    constexpr double eps_inside = 1.0e-10;
+
+    if (inside_triangle_3d_at(x, dx, x1, dx1, x2, dx2, x3, dx3, 0.0, eps_inside)) {
+        result.has_candidate_time = true;
+        result.collision = true;
+        result.t = 0.0;
+        return result;
+    }
 
     // f(t) = ((x2(t)-x1(t)) x (x3(t)-x1(t))) . (x(t)-x1(t))
     const Vec3 p0 = x2 - x1, dp = dx2 - dx1;
@@ -19,6 +42,12 @@ CCDResult node_triangle_only_one_node_moves(const Vec3& x,  const Vec3& dx, cons
     if (nearly_zero(c, eps)) {
         if (nearly_zero(d, eps)) {
             result.coplanar_entire_step = true;
+            const double t = node_triangle_coplanar_interval(x, dx, x1, dx1, x2, dx2, x3, dx3, eps);
+            if (t < 1.0 && inside_triangle_3d_at(x, dx, x1, dx1, x2, dx2, x3, dx3, t, eps_inside)) {
+                result.has_candidate_time = true;
+                result.collision = true;
+                result.t = clamp_scalar(t, 0.0, 1.0);
+            }
         } else {
             result.parallel_or_no_crossing = true;
         }
@@ -34,18 +63,20 @@ CCDResult node_triangle_only_one_node_moves(const Vec3& x,  const Vec3& dx, cons
     result.has_candidate_time = true;
     result.t = clamp_scalar(t, 0.0, 1.0);
 
-    // Evaluate all four points at the candidate TOI and check that the static
-    // (or moving) node lies inside the (possibly deformed) triangle.
-    const Vec3 x_t  = x  + result.t * dx;
-    const Vec3 x1_t = x1 + result.t * dx1;
-    const Vec3 x2_t = x2 + result.t * dx2;
-    const Vec3 x3_t = x3 + result.t * dx3;
-    result.collision = point_in_triangle_on_plane(x_t, x1_t, x2_t, x3_t, eps);
+    result.collision = inside_triangle_3d_at(x, dx, x1, dx1, x2, dx2, x3, dx3, result.t, eps_inside);
     return result;
 }
 
 CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double eps) {
     CCDResult result;
+    constexpr double eps_inside = 1.0e-10;
+
+    if (inside_segments_3d_at(x1, dx1, x2, Vec3::Zero(), x3, Vec3::Zero(), x4, Vec3::Zero(), 0.0, eps_inside)) {
+        result.has_candidate_time = true;
+        result.collision = true;
+        result.t = 0.0;
+        return result;
+    }
 
     // Coplanarity condition f(t) = dot((x2-x1-t*dx1) x (x4-x3), (x3-x1-t*dx1)) = 0
     const Vec3 a = x2 - x1;
@@ -58,6 +89,14 @@ CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1, c
     if (nearly_zero(c, eps)) {
         if (nearly_zero(d, eps)) {
             result.coplanar_entire_step = true;
+            const double t = persistent_segment_segment_time(
+                x1, dx1, x2, Vec3::Zero(), x3, Vec3::Zero(), x4, Vec3::Zero(), eps);
+            if (t < 1.0 && inside_segments_3d_at(
+                    x1, dx1, x2, Vec3::Zero(), x3, Vec3::Zero(), x4, Vec3::Zero(), t, eps_inside)) {
+                result.has_candidate_time = true;
+                result.collision = true;
+                result.t = clamp_scalar(t, 0.0, 1.0);
+            }
         } else {
             result.parallel_or_no_crossing = true;
         }
@@ -72,15 +111,8 @@ CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1, c
 
     result.has_candidate_time = true;
     result.t = clamp_scalar(t, 0.0, 1.0);
-
-    const Vec3 x1_star = point_at_linear_step(x1, dx1, result.t);
-    double s = 0.0;
-    double u = 0.0;
-    if (!segment_segment_parameters_if_not_parallel(x1_star, x2, x3, x4, s, u, eps)) {
-        return result;
-    }
-
-    result.collision = in_unit_interval(s, eps) && in_unit_interval(u, eps);
+    result.collision = inside_segments_3d_at(
+        x1, dx1, x2, Vec3::Zero(), x3, Vec3::Zero(), x4, Vec3::Zero(), result.t, eps_inside);
     return result;
 }
 

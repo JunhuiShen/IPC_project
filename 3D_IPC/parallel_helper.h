@@ -38,7 +38,7 @@ struct SweptBvhCache {
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int nv);
 
 // Contact edges of the conflict graph from broad-phase NT/SS pair lists.
-// Stable between broad-phase refreshes (key on BroadPhase::version()).
+// Stable between broad-phase initialize() calls (key on BroadPhase::version()).
 std::vector<std::vector<int>> build_contact_adj(const BroadPhase::Cache& bp_cache, int nv);
 
 // Sorted per-vertex union of two sorted neighbor lists.
