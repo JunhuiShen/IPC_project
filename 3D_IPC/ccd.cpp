@@ -298,8 +298,8 @@ double node_triangle_coplanar_interval(const Vec3& x, const Vec3& dx, const Vec3
     Vec3 n1 = (x2 + dx2 - x1 - dx1).cross(x3 + dx3 - x1 - dx1);
     int drop = dominant_drop_axis(n0, n1);
 
-    auto coeff_edge = [&](const Vec2& a0, const Vec2& da,  const Vec2& b0, const Vec2& db,
-                          const Vec2& p0, const Vec2& dp,  double out[3]) {
+    auto coeff_boundary_segment = [&](const Vec2& a0, const Vec2& da,  const Vec2& b0, const Vec2& db,
+                                      const Vec2& p0, const Vec2& dp,  double out[3]) {
         Vec2 u0 = b0 - a0;
         Vec2 du = db - da;
         Vec2 v0 = p0 - a0;
@@ -318,9 +318,9 @@ double node_triangle_coplanar_interval(const Vec3& x, const Vec3& dx, const Vec3
 
     SmallRoots roots;
     double coeffs[3];
-    coeff_edge(a0, da, b0, db, p0, dp, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots, eps);
-    coeff_edge(b0, db, c0, dc, p0, dp, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots, eps);
-    coeff_edge(c0, dc, a0, da, p0, dp, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots, eps);
+    coeff_boundary_segment(a0, da, b0, db, p0, dp, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots, eps);
+    coeff_boundary_segment(b0, db, c0, dc, p0, dp, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots, eps);
+    coeff_boundary_segment(c0, dc, a0, da, p0, dp, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots, eps);
 
     std::sort(roots.begin(), roots.end());
     for (double t : roots) {

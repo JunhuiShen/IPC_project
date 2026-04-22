@@ -235,7 +235,6 @@ protected:
         params.gravity = Vec3(0, -9.81, 0);
         params.max_global_iters = 50;
         params.tol_abs = 1e-8;
-        params.step_weight = 1.0;
         params.d_hat = 1.0;
 
         clear_model(ref_mesh, state, X, pins);
@@ -445,7 +444,6 @@ TEST_F(TotalEnergyTest, GlobalResidualMatchesFiniteDifference) {
     VecX g_test(3 * nv);
     for (int vi = 0; vi < nv; ++vi)
         g_test.segment<3>(3*vi) = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, bp_nt, bp_ss);
-    const double r_test_infty = g_test.cwiseAbs().maxCoeff();
 
     const double eps = 1e-6;
     VecX g_fd(3 * nv);
@@ -453,9 +451,23 @@ TEST_F(TotalEnergyTest, GlobalResidualMatchesFiniteDifference) {
         Vec3 gfd = local_gradient_fd(vi, ref_mesh, adj, pins, params, x, xhat, bp_nt, bp_ss, eps);
         g_fd.segment<3>(3*vi) = gfd;
     }
-    const double r_fd = g_fd.cwiseAbs().maxCoeff();
 
     const double test_vs_fd = (g_test - g_fd).norm();
+
+    // compute_global_residual reports the infinity norm of mass-normalized
+    // local gradients, so normalize the test and FD paths the same way.
+    VecX g_test_mass_norm = g_test;
+    VecX g_fd_mass_norm = g_fd;
+    for (int vi = 0; vi < nv; ++vi) {
+        const double m = ref_mesh.mass[vi];
+        if (m > 0.0) {
+            g_test_mass_norm.segment<3>(3 * vi) /= m;
+            g_fd_mass_norm.segment<3>(3 * vi) /= m;
+        }
+    }
+    const double r_test_infty = g_test_mass_norm.cwiseAbs().maxCoeff();
+    const double r_fd = g_fd_mass_norm.cwiseAbs().maxCoeff();
+
     std::cout << "r_prod=" << r_prod
               << " r_test_infty=" << r_test_infty
               << " r_fd=" << r_fd

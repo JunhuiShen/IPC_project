@@ -179,7 +179,7 @@ struct GPUSimParams {
     double mu, lambda, density, thickness, kpin, kB;
     double d_hat;
     double gx, gy, gz;
-    double tol_abs, tol_rel, step_weight;
+    double tol_abs, tol_rel;
     int    max_global_iters;
     bool   use_parallel;
     bool   ccd_check;

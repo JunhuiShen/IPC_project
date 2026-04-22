@@ -22,8 +22,8 @@
 // Phase 1 of the parallel solver: compute the Newton direction and certified
 // region for every vertex simultaneously.
 //
-// CPU stub (gpu_solver_stub.cpp): wraps build_jacobi_predictions, which
-// uses #pragma omp parallel for internally.
+// CPU stub (gpu_solver_stub.cpp): runs build_jacobi_prediction_deltas and
+// build_blue_boxes_from_deltas.
 //
 // CUDA (gpu_solver.cu TODO 1): launch one thread per vertex; each thread
 // runs the device-side port of compute_local_newton_direction and

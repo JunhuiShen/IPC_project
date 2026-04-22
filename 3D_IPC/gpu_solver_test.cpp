@@ -13,6 +13,15 @@ namespace {
 
 constexpr double kTol = 1e-10;
 
+static void build_predictions_with_blue_boxes(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+                                              const std::vector<Pin>& pins, const SimParams& params,
+                                              const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                              const BroadPhase::Cache& bp_cache, std::vector<JacobiPrediction>& predictions,
+                                              const PinMap* pin_map = nullptr) {
+    build_jacobi_prediction_deltas(ref_mesh, adj, pins, params, x, xhat, bp_cache, predictions, pin_map);
+    build_blue_boxes_from_deltas(x, params.use_parallel, predictions);
+}
+
 // ---------------------------------------------------------------------------
 // Helper: build a scene without barrier (d_hat = 0)
 // ---------------------------------------------------------------------------
@@ -109,13 +118,13 @@ struct BarrierScene {
 };
 
 // ---------------------------------------------------------------------------
-// Phase 1: gpu_build_jacobi_predictions matches build_jacobi_predictions
+// Phase 1: gpu_build_jacobi_predictions matches CPU delta + blue-box build
 // ---------------------------------------------------------------------------
 TEST(GPUSolver, JacobiPredictionsMatchCPU) {
     NoBarrierScene s;
 
     std::vector<JacobiPrediction> cpu_preds, gpu_preds;
-    build_jacobi_predictions(s.ref_mesh, s.adj, s.pins, s.params,
+    build_predictions_with_blue_boxes(s.ref_mesh, s.adj, s.pins, s.params,
                              s.x, s.xhat, s.bp.cache(), cpu_preds, &s.pin_map);
     gpu_build_jacobi_predictions(s.ref_mesh, s.adj, s.pins, s.params,
                                  s.x, s.xhat, s.bp.cache(), gpu_preds, &s.pin_map);
@@ -132,7 +141,7 @@ TEST(GPUSolver, JacobiPredictionsMatchCPUWithBending) {
     NoBarrierScene s(/*kB=*/1e-3);
 
     std::vector<JacobiPrediction> cpu_preds, gpu_preds;
-    build_jacobi_predictions(s.ref_mesh, s.adj, s.pins, s.params,
+    build_predictions_with_blue_boxes(s.ref_mesh, s.adj, s.pins, s.params,
                              s.x, s.xhat, s.bp.cache(), cpu_preds, &s.pin_map);
     gpu_build_jacobi_predictions(s.ref_mesh, s.adj, s.pins, s.params,
                                  s.x, s.xhat, s.bp.cache(), gpu_preds, &s.pin_map);
@@ -153,7 +162,7 @@ TEST(GPUSolver, JacobiPredictionsMatchCPUWithBending) {
 static void run_commit_comparison(BarrierScene& s) {
     // Use the same predictions for both CPU and GPU sides
     std::vector<JacobiPrediction> preds;
-    build_jacobi_predictions(s.ref_mesh, s.adj, s.pins, s.params,
+    build_predictions_with_blue_boxes(s.ref_mesh, s.adj, s.pins, s.params,
                              s.x, s.xhat, s.bp.cache(), preds, &s.pin_map);
 
     // Conflict coloring (same as bridge)

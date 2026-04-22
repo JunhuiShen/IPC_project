@@ -19,10 +19,18 @@ struct ParallelCommit {
     bool valid = false;
 };
 
-void build_jacobi_predictions(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                              const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                              const BroadPhase::Cache& bp_cache, std::vector<JacobiPrediction>& predictions,
-                              const PinMap* pin_map = nullptr);
+// Hot-path Jacobi stage used by the basic parallel solver: compute only g/delta.
+void build_jacobi_prediction_deltas(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+                                    const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                    const BroadPhase::Cache& bp_cache, std::vector<JacobiPrediction>& predictions,
+                                    const PinMap* pin_map = nullptr);
+
+// Build isotropic blue boxes from prediction deltas and mirror them into
+// prediction.certified_region; optionally also writes them into blue_boxes_out.
+void build_blue_boxes_from_deltas(const std::vector<Vec3>& x,
+                                  bool use_parallel,
+                                  std::vector<JacobiPrediction>& predictions,
+                                  std::vector<AABB>* blue_boxes_out = nullptr);
 
 // Persistent swept-region BVH; reused across build_conflict_graph calls to
 // refit in place of a full rebuild when the active set is stable.
@@ -55,11 +63,6 @@ std::vector<std::vector<int>> build_conflict_graph(const RefMesh& ref_mesh, cons
 
 std::vector<std::vector<int>> greedy_color_conflict_graph(const std::vector<std::vector<int>>& graph, const std::vector<JacobiPrediction>& predictions);
 
-ParallelCommit compute_parallel_commit_for_vertex(int vi, bool use_cached_prediction, const JacobiPrediction& prediction,
-                                                  const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                                                  const SimParams& params, const std::vector<Vec3>& x_current, const std::vector<Vec3>& xhat,
-                                                  const BroadPhase& broad_phase, const PinMap* pin_map = nullptr);
-
 void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                     const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                     const BroadPhase::Cache& bp_cache, Vec3& g_out, Mat33& H_out, Vec3& delta_out,
@@ -84,5 +87,10 @@ BroadPhase::Cache register_barrier_pairs_from_blue_green(
     const std::vector<std::array<int, 2>>& edges,
     const std::vector<AABB>& blue_boxes,
     double d_hat);
+
+ParallelCommit compute_parallel_commit_for_vertex(int vi, bool use_cached_prediction, const JacobiPrediction& prediction,
+                                                  const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+                                                  const SimParams& params, const std::vector<Vec3>& x_current, const std::vector<Vec3>& xhat,
+                                                  const BroadPhase& broad_phase, const PinMap* pin_map = nullptr);
 
 void apply_parallel_commits(const std::vector<ParallelCommit>& commits, std::vector<Vec3>& xnew);

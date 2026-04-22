@@ -61,47 +61,12 @@ void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, const Verte
     delta_out = matrix3d_inverse(H) * g;
 }
 
-// Certified region for vertex vi: isotropic cube centered at x[vi] with
-// half-edge |delta|_2, unioned with incident tri/edge boxes. Every contributing
-// sub-AABB is padded by d_hat/2 so disjoint certified regions are guaranteed
-// d_hat-separated. The isotropic cube allows a fresh Newton step move in any direction 
-// up to the cached step length without being clipped by a thin perpendicular extent. 
-// edge_boxes already carry d_hat/2 from the broad phase; tri_boxes carry 0, 
-// so only the cube and tri_boxes are grown here.
-static AABB build_certified_region_for_vertex(int vi, const std::vector<Vec3>& x, const Vec3& delta, const BroadPhase::Cache& bp_cache, double d_hat){
-    AABB box;
-
-    const Vec3 half_dhat(0.5 * d_hat, 0.5 * d_hat, 0.5 * d_hat);
-    const Vec3 jacobi_step_extent = Vec3::Constant(delta.norm());
-    const Vec3& center = x[vi];
-
-    box.expand(center - jacobi_step_extent - half_dhat);
-    box.expand(center + jacobi_step_extent + half_dhat);
-
-    if (vi >= 0 && vi < static_cast<int>(bp_cache.node_to_tris.size())) {
-        for (int tri_idx : bp_cache.node_to_tris[vi]) {
-            const AABB& tb = bp_cache.tri_boxes[tri_idx];
-            box.expand(tb.min - half_dhat);
-            box.expand(tb.max + half_dhat);
-        }
-    }
-
-    if (vi >= 0 && vi < static_cast<int>(bp_cache.node_to_edges.size())) {
-        for (int edge_idx : bp_cache.node_to_edges[vi]) {
-            box.expand(bp_cache.edge_boxes[edge_idx]);
-        }
-    }
-
-    return box;
-}
-
-void build_jacobi_predictions(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                              const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                              const BroadPhase::Cache& bp_cache, std::vector<JacobiPrediction>& predictions,
-                              const PinMap* pin_map){
+void build_jacobi_prediction_deltas(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+                                    const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                    const BroadPhase::Cache& bp_cache, std::vector<JacobiPrediction>& predictions,
+                                    const PinMap* pin_map){
     const int nv = static_cast<int>(x.size());
-    predictions.clear();
-    predictions.resize(nv);
+    predictions.assign(nv, {});
 
     // Per-triangle F/cache/P/dPdF and per-hinge cache are shared across every
     // corner of their stencil; the per-vertex call reads them instead of
@@ -121,7 +86,23 @@ void build_jacobi_predictions(const RefMesh& ref_mesh, const VertexTriangleMap& 
 
         predictions[vi].g = g;
         predictions[vi].delta = delta;
-        predictions[vi].certified_region = build_certified_region_for_vertex(vi, x, predictions[vi].delta, bp_cache, params.d_hat);
+    }
+}
+
+void build_blue_boxes_from_deltas(const std::vector<Vec3>& x,
+                                  bool use_parallel,
+                                  std::vector<JacobiPrediction>& predictions,
+                                  std::vector<AABB>* blue_boxes_out){
+    const int nv = static_cast<int>(predictions.size());
+    if (blue_boxes_out) blue_boxes_out->resize(nv);
+
+    #pragma omp parallel for if(use_parallel)
+    for (int vi = 0; vi < nv; ++vi) {
+        AABB box;
+        box.expand(x[vi] - Vec3::Constant(predictions[vi].delta.norm()));
+        box.expand(x[vi] + Vec3::Constant(predictions[vi].delta.norm()));
+        predictions[vi].certified_region = box;
+        if (blue_boxes_out) (*blue_boxes_out)[vi] = box;
     }
 }
 
@@ -190,8 +171,7 @@ std::vector<std::vector<int>> build_contact_adj(const BroadPhase::Cache& bp_cach
         for (int t = 0; t < T; ++t) total += local_nbr[t][vi].size();
         out[vi].reserve(total);
         for (int t = 0; t < T; ++t) {
-            auto& src = local_nbr[t][vi];
-            out[vi].insert(out[vi].end(), src.begin(), src.end());
+            out[vi].insert(out[vi].end(), local_nbr[t][vi].begin(), local_nbr[t][vi].end());
         }
         std::sort(out[vi].begin(), out[vi].end());
         out[vi].erase(std::unique(out[vi].begin(), out[vi].end()), out[vi].end());
@@ -373,8 +353,7 @@ std::vector<std::vector<int>> build_conflict_graph(const RefMesh& ref_mesh, cons
             graph[vi].insert(graph[vi].end(), (*base_adj)[vi].begin(), (*base_adj)[vi].end());
         }
         for (int t = 0; t < T; ++t) {
-            auto& src = local_nbr[t][vi];
-            graph[vi].insert(graph[vi].end(), src.begin(), src.end());
+            graph[vi].insert(graph[vi].end(), local_nbr[t][vi].begin(), local_nbr[t][vi].end());
         }
         std::sort(graph[vi].begin(), graph[vi].end());
         graph[vi].erase(std::unique(graph[vi].begin(), graph[vi].end()), graph[vi].end());
@@ -529,24 +508,20 @@ BroadPhase::Cache register_barrier_pairs_from_blue_green(const RefMesh& ref_mesh
         const int a = tri_vertex(ref_mesh, t, 0);
         const int b = tri_vertex(ref_mesh, t, 1);
         const int c = tri_vertex(ref_mesh, t, 2);
-        AABB box;
-        box.expand(blue_boxes[a]);
-        box.expand(blue_boxes[b]);
-        box.expand(blue_boxes[c]);
-        box.min.array() -= d_hat;
-        box.max.array() += d_hat;
-        green_tri[t] = box;
+        green_tri[t] = blue_boxes[a];
+        green_tri[t].expand(blue_boxes[b]);
+        green_tri[t].expand(blue_boxes[c]);
+        green_tri[t].min.array() -= d_hat;
+        green_tri[t].max.array() += d_hat;
     }
 
     // Green edge boxes: union of blue endpoints + d_hat pad.
     std::vector<AABB> green_edge(ne);
     for (int e = 0; e < ne; ++e) {
-        AABB box;
-        box.expand(blue_boxes[edges[e][0]]);
-        box.expand(blue_boxes[edges[e][1]]);
-        box.min.array() -= d_hat;
-        box.max.array() += d_hat;
-        green_edge[e] = box;
+        green_edge[e] = blue_boxes[edges[e][0]];
+        green_edge[e].expand(blue_boxes[edges[e][1]]);
+        green_edge[e].min.array() -= d_hat;
+        green_edge[e].max.array() += d_hat;
     }
 
     std::vector<BVHNode> tri_bvh;
@@ -569,12 +544,7 @@ BroadPhase::Cache register_barrier_pairs_from_blue_green(const RefMesh& ref_mesh
             const int c = tri_vertex(ref_mesh, t, 2);
             if (vi == a || vi == b || vi == c) continue;
             const std::size_t idx = cache.nt_pairs.size();
-            NodeTrianglePair p;
-            p.node = vi;
-            p.tri_v[0] = a;
-            p.tri_v[1] = b;
-            p.tri_v[2] = c;
-            cache.nt_pairs.push_back(p);
+            cache.nt_pairs.push_back(NodeTrianglePair{vi, {a, b, c}});
             cache.vertex_nt[vi].push_back({idx, 0});
             cache.vertex_nt[a].push_back({idx, 1});
             cache.vertex_nt[b].push_back({idx, 2});
@@ -598,12 +568,7 @@ BroadPhase::Cache register_barrier_pairs_from_blue_green(const RefMesh& ref_mesh
             const int ob = edges[other][1];
             if (ea == oa || ea == ob || eb == oa || eb == ob) continue;
             const std::size_t idx = cache.ss_pairs.size();
-            SegmentSegmentPair p;
-            p.v[0] = ea;
-            p.v[1] = eb;
-            p.v[2] = oa;
-            p.v[3] = ob;
-            cache.ss_pairs.push_back(p);
+            cache.ss_pairs.push_back(SegmentSegmentPair{{ea, eb, oa, ob}});
             cache.vertex_ss[ea].push_back({idx, 0});
             cache.vertex_ss[eb].push_back({idx, 1});
             cache.vertex_ss[oa].push_back({idx, 2});

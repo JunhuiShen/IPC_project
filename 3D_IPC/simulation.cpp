@@ -16,41 +16,6 @@
 
 namespace fs = std::filesystem;
 
-SolverResult advance_one_frame_twisting(DeformedState& state, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
-    std::vector<Pin>& pins, const SimParams& params, const std::vector<std::vector<int>>& color_groups,
-    BroadPhase& broad_phase, const TwistSpec& twist_spec, int frame_index) {
-    SolverResult agg;
-    const double dt = params.dt();
-    for (int sub = 0; sub < params.substeps; ++sub) {
-        const double t_next = ((frame_index - 1) * params.substeps + (sub + 1)) * dt;
-        update_twist_pins(pins, twist_spec, t_next);
-
-        std::vector<Vec3> xhat;
-        build_xhat(xhat, state.deformed_positions, state.velocities, dt);
-
-        std::vector<Vec3> xnew;
-        if (params.use_trust_region)
-            xnew = trust_region_initial_guess(state.deformed_positions, xhat, ref_mesh, params.d_hat);
-        else if (params.use_ccd_guess)
-            xnew = ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
-        else
-            xnew = state.deformed_positions;
-
-        SolverResult sub_result;
-        if (params.use_gpu)
-            sub_result = gpu_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
-        else if (params.use_parallel)
-            sub_result = global_gauss_seidel_solver_parallel(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
-        else
-            sub_result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
-        accumulate_solver_result(agg, sub_result, sub == 0);
-
-        update_velocity(state.velocities, xnew, state.deformed_positions, dt);
-        state.deformed_positions = xnew;
-    }
-    return agg;
-}
-
 int main(int argc, char** argv) {
     IPCArgs3D args;
     if (!args.parse(argc, argv)) return 1;
@@ -122,8 +87,9 @@ int main(int argc, char** argv) {
 
     const std::string& outdir = args.outdir;
     const ExportFormat fmt = args.to_export_format();
+    const int restart_frame = args.restart_frame;
 
-    if (params.restart_frame < 0) {
+    if (restart_frame < 0) {
         if (fs::exists(outdir)) fs::remove_all(outdir);
         fs::create_directories(outdir);
         export_frame(outdir, 0, state.deformed_positions, ref_mesh.tris, fmt);
@@ -133,8 +99,8 @@ int main(int argc, char** argv) {
             std::cerr << "Error: restart requested but output directory does not exist: " << outdir << "\n";
             return 1;
         }
-        if (!deserialize_state(outdir, params.restart_frame, state)) {
-            std::cerr << "Error: failed to load restart frame " << params.restart_frame << "\n";
+        if (!deserialize_state(outdir, restart_frame, state)) {
+            std::cerr << "Error: failed to load restart frame " << restart_frame << "\n";
             return 1;
         }
     }
@@ -143,16 +109,16 @@ int main(int argc, char** argv) {
     auto sim_start = Clock::now();
     double total_solver_ms = 0.0;
 
-    int start_frame = (params.restart_frame >= 0) ? (params.restart_frame + 1) : 1;
+    int start_frame = (restart_frame >= 0) ? (restart_frame + 1) : 1;
 
     for (int frame_index = start_frame; frame_index <= num_frames; ++frame_index) {
         auto solver_start = Clock::now();
         SolverResult result;
 
-        if (args.example == 5)
-            result = advance_one_frame_twisting(state, ref_mesh, adj, pins, params, color_groups, broad_phase, twist_spec, frame_index);
-        else
-            result = advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, broad_phase);
+        result = advance_one_frame(
+            state, ref_mesh, adj, pins, params, color_groups, broad_phase,
+            (args.example == 5) ? &twist_spec : nullptr, frame_index,
+            (args.example == 5) ? &update_twist_pins : nullptr);
 
         if (!result.converged) {
             std::cerr << "Error: solver failed to converge at frame " << frame_index

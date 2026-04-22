@@ -19,8 +19,8 @@ void gpu_build_jacobi_predictions(
     const PinMap*                  pin_map)
 {
     // CPU equivalent of the Jacobi predict kernel.
-    // build_jacobi_predictions uses #pragma omp parallel for if(use_parallel).
-    build_jacobi_predictions(ref_mesh, adj, pins, params, x, xhat, bp_cache, predictions, pin_map);
+    build_jacobi_prediction_deltas(ref_mesh, adj, pins, params, x, xhat, bp_cache, predictions, pin_map);
+    build_blue_boxes_from_deltas(x, params.use_parallel, predictions);
 }
 
 std::vector<ParallelCommit> gpu_parallel_commit(

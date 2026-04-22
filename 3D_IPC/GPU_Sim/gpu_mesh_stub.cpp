@@ -242,7 +242,6 @@ GPUSimParams GPUSimParams::from(const SimParams& p) {
     g.gz                     = p.gravity(2);
     g.tol_abs                = p.tol_abs;
     g.tol_rel                = p.tol_rel;
-    g.step_weight            = p.step_weight;
     g.max_global_iters       = p.max_global_iters;
     g.use_parallel           = p.use_parallel;
     g.ccd_check              = p.ccd_check;

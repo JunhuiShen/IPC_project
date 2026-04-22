@@ -26,7 +26,7 @@ struct Pin {
 struct SimParams {
     double fps;
     int    substeps;
-    double mu, lambda, density, thickness, kpin, tol_abs, step_weight;
+    double mu, lambda, density, thickness, kpin, tol_abs;
     double tol_rel;   // relative tolerance (factor of initial residual); 0 disables
     double kB;        // bending (flexural) stiffness; 0 disables the bending term
     double d_hat;     // barrier activation distance; 0 disables contact
@@ -38,7 +38,6 @@ struct SimParams {
     Vec3   gravity;
     int    max_global_iters;
 
-    int    restart_frame;  // -1 = no restart
     bool   use_parallel;
     bool   ccd_check;
     bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
@@ -51,10 +50,6 @@ struct SimParams {
     // used automatically. When set, use_parallel is ignored.
     bool   use_gpu;
 
-    // Returns a SimParams with every field set to a benign "disabled / zero /
-    // sentinel" value. This is the single source of truth for the init state
-    // tests start from; callers then override the subset of fields they care
-    // about. Matches the in-class defaults that used to live here.
     static SimParams zeros() {
         SimParams p;
         p.fps                       = 30.0;
@@ -65,7 +60,6 @@ struct SimParams {
         p.thickness                 = 0.0;
         p.kpin                      = 0.0;
         p.tol_abs                   = 0.0;
-        p.step_weight               = 0.0;
         p.tol_rel                   = 0.0;
         p.kB                        = 0.0;
         p.d_hat                     = 0.0;
@@ -76,7 +70,6 @@ struct SimParams {
         p.sdf_spheres.clear();
         p.gravity                   = Vec3::Zero();
         p.max_global_iters          = 0;
-        p.restart_frame             = -1;
         p.use_parallel              = false;
         p.ccd_check                 = false;
         p.use_ccd_guess             = true;
@@ -97,7 +90,6 @@ struct SimParams {
         if (cached_dt2_ < 0.0) { double d = dt(); cached_dt2_ = d * d; }
         return cached_dt2_;
     }
-    // Call after mutating fps or substeps.
     void invalidate_dt_cache() const { cached_dt_ = -1.0; cached_dt2_ = -1.0; }
 
 private:

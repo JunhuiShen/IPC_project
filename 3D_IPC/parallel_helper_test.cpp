@@ -43,8 +43,17 @@ static void build_test_scene(RefMesh& ref_mesh, DeformedState& state,
     adj = build_incident_triangle_map(ref_mesh.tris);
 }
 
+static void build_predictions_with_blue_boxes(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+                                              const std::vector<Pin>& pins, const SimParams& params,
+                                              const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                              const BroadPhase::Cache& bp_cache, std::vector<JacobiPrediction>& predictions,
+                                              const PinMap* pin_map = nullptr) {
+    build_jacobi_prediction_deltas(ref_mesh, adj, pins, params, x, xhat, bp_cache, predictions, pin_map);
+    build_blue_boxes_from_deltas(x, params.use_parallel, predictions);
+}
+
 // ---------------------------------------------------------------------------
-// build_jacobi_predictions
+// build_jacobi_prediction_deltas + blue-box construction
 // ---------------------------------------------------------------------------
 
 TEST(BuildJacobiPredictions, AllNodesActive) {
@@ -59,7 +68,7 @@ TEST(BuildJacobiPredictions, AllNodesActive) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     ASSERT_EQ(predictions.size(), state.deformed_positions.size());
 
@@ -81,7 +90,7 @@ TEST(BuildJacobiPredictions, CertifiedRegionContainsTrajectory) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     // For each node, x_i and x_i - delta_i must lie inside the certified region
     for (int i = 0; i < static_cast<int>(predictions.size()); ++i) {
@@ -99,7 +108,7 @@ TEST(BuildJacobiPredictions, CertifiedRegionContainsTrajectory) {
     }
 }
 
-TEST(BuildJacobiPredictions, CertifiedRegionInflatedByDhat) {
+TEST(BuildJacobiPredictions, CertifiedRegionMatchesIsotropicDeltaNormBox) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
     VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
@@ -111,27 +120,21 @@ TEST(BuildJacobiPredictions, CertifiedRegionInflatedByDhat) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
-    // Each sub-AABB feeding the certified region is padded by d_hat/2, so
-    // disjoint regions are guaranteed d_hat-separated. The trajectory
-    // endpoints contribute d_hat/2 balls on each side.
-    const double half_dhat = 0.5 * params.d_hat;
+    // Certified regions are the isotropic blue boxes built from ||delta_i||
+    // around x_i.
     for (int i = 0; i < static_cast<int>(predictions.size()); ++i) {
         if (!predictions[i].active) continue;
         const Vec3& xi = state.deformed_positions[i];
-        const Vec3 xi_moved = xi - predictions[i].delta;
+        const double r = predictions[i].delta.norm();
         const AABB& U = predictions[i].certified_region;
 
-        AABB traj_box;
-        traj_box.expand(xi);
-        traj_box.expand(xi_moved);
-
         for (int k = 0; k < 3; ++k) {
-            EXPECT_LE(U.min(k), traj_box.min(k) - half_dhat + 1e-12)
-                << "node " << i << " axis " << k << " should be inflated by d_hat/2";
-            EXPECT_GE(U.max(k), traj_box.max(k) + half_dhat - 1e-12)
-                << "node " << i << " axis " << k << " should be inflated by d_hat/2";
+            EXPECT_NEAR(U.min(k), xi(k) - r, 1e-12)
+                << "node " << i << " axis " << k << " min mismatch";
+            EXPECT_NEAR(U.max(k), xi(k) + r, 1e-12)
+                << "node " << i << " axis " << k << " max mismatch";
         }
     }
 }
@@ -152,7 +155,7 @@ TEST(BuildConflictGraph, ElasticCoupling) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
 
@@ -182,7 +185,7 @@ TEST(BuildConflictGraph, SymmetricEdges) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
 
@@ -207,7 +210,7 @@ TEST(BuildConflictGraph, NoSelfEdges) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
 
@@ -229,7 +232,7 @@ TEST(BuildConflictGraph, SweptBvhCacheMatchesRebuild) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     // First call primes the cache via full build.
     SweptBvhCache sw_cache;
@@ -270,7 +273,7 @@ TEST(GreedyColorConflictGraph, ValidColoring) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
     auto groups = greedy_color_conflict_graph(graph, predictions);
@@ -304,7 +307,7 @@ TEST(GreedyColorConflictGraph, AllActiveVerticesCovered) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
     auto groups = greedy_color_conflict_graph(graph, predictions);
@@ -334,7 +337,7 @@ TEST(GreedyColorConflictGraph, EachActiveVertexAppearsExactlyOnce) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
     auto groups = greedy_color_conflict_graph(graph, predictions);
@@ -373,7 +376,7 @@ TEST(ComputeParallelCommit, CachedPredictionProducesValidCommit) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     // Test commit for a non-pinned vertex using cached prediction (batch 1)
     int vi = 5;
@@ -399,7 +402,7 @@ TEST(ComputeParallelCommit, FreshDirectionGetsClipped) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     // Test commit for a vertex using fresh direction (batch k >= 2)
     int vi = 5;
@@ -458,7 +461,7 @@ TEST(BuildConflictGraph, SweptRegionOverlapImpliesEdge) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
 
@@ -559,7 +562,7 @@ TEST(ParallelHelper, EmptySceneIsHandled) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
     EXPECT_TRUE(predictions.empty());
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
@@ -581,7 +584,7 @@ TEST(ParallelHelper, InactivePinnedVerticesAreExcludedFromGroupsAndCommits) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     for (const auto& pin : pins) {
         ASSERT_GE(pin.vertex_index, 0);
@@ -630,7 +633,7 @@ TEST(ComputeParallelCommit, NoBarrierImpliesFullCCDStep) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     int vi = 5;
     ParallelCommit commit = compute_parallel_commit_for_vertex(
@@ -652,7 +655,7 @@ TEST(ComputeParallelCommit, ExactBoundaryClipProducesBoundaryPoint) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     const int vi = 5;
     JacobiPrediction constrained = predictions[vi];

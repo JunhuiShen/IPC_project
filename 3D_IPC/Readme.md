@@ -88,10 +88,14 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 |-------|-------|
 | Time integration | `fps`, `substeps`, `num_frames` |
 | Physics | `E`, `nu`, `density`, `thickness`, `kB`, `kpin`, `gx`, `gy`, `gz` |
-| Solver | `max_substep_iters`, `tol_abs`, `tol_rel`, `step_weight`, `d_hat`, `k_sdf`, `eps_sdf`, `use_parallel`, `ccd_check`, `use_ccd_guess`, `use_trust_region`, `fixed_iters`, `use_gpu`, `color_rebuild_interval` |
+| Solver | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_sdf`, `eps_sdf`, `use_parallel`, `ccd_check`, `use_ccd_guess`, `use_trust_region`, `fixed_iters`, `use_gpu`, `color_rebuild_interval` |
 | Mesh geometry | `nx`, `ny`, `width`, `height`, `left_x`, `right_x`, `sheet_y`, `left_z`, `right_z` |
 | Scene | `example` (`1`..`6`), plus per-example knobs: `drop_stack_count`, `drop_cloth_nx`, `drop_cloth_ny`, `drop_first_y`, `drop_spacing`, `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `sphere_radius`, `sphere_cx`, `sphere_cy`, `sphere_cz`, `sphere_subdiv`, `sphere_cloth_size`, `sphere_ground_size` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame` |
+
+Notes:
+- `restart_frame` is CLI run-control handled in `simulation.cpp` (from `IPCArgs3D`), not a physics/solver runtime parameter.
+- `SimParams` holds only runtime solver/physics fields used during substeps.
 
 ## Source layout
 
@@ -102,7 +106,8 @@ reader can jump to the layer they care about.
 
 - `simulation.cpp` -- `3D_sim` entry point: parses args, builds a scene from
   `example.cpp`, runs the frame loop, handles restart, prints per-frame stats.
-- `simulation.h` -- inline `advance_one_frame()` time-stepping driver.
+- `simulation.h` -- inline `advance_one_frame()` time-stepping driver (normal and
+  twisting paths unified via optional twist-spec/update callback).
 - `example.h` / `example.cpp` -- built-in scene library selected by `--example`.
 - `args.h`, `ipc_args.h` -- generic `--key value` argument parser and the
   `IPCArgs3D` struct that defines every CLI flag and its default.
@@ -160,8 +165,9 @@ reader can jump to the layer they care about.
 - `solver.h` / `solver.cpp` -- CCD-projected initial guess, serial nonlinear
   Gauss-Seidel solver, and the parallel Gauss-Seidel solver with
   certified-region conflict graph and colored commits.
-- `parallel_helper.h` / `parallel_helper.cpp` -- Jacobi prediction, certified
-  region computation, conflict graph construction, and parallel commit apply.
+- `parallel_helper.h` / `parallel_helper.cpp` -- Jacobi delta prediction,
+  blue-box construction from deltas, conflict graph construction, and parallel
+  commit apply.
 
 ### Tooling
 

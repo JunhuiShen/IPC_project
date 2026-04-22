@@ -12,7 +12,8 @@
 
 #include "gpu_solver_bridge.h"
 #include "gpu_solver.h"            // gpu_build_jacobi_predictions, gpu_parallel_commit
-#include "../parallel_helper.h"    // build_conflict_graph, greedy_color_conflict_graph, apply_parallel_commits
+#include "../parallel_helper.h"    // build_conflict_graph, greedy_color_conflict_graph
+#include "../parallel_helper.h" // apply_parallel_commits
 #include "../make_shape.h"         // build_pin_map
 
 #include <algorithm>

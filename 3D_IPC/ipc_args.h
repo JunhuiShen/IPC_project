@@ -17,7 +17,7 @@ struct IPCArgs3D : ArgParser {
     double nu           = 0.3;    // (Poisson ratio)
     double density      = 900.0;  // kg/m^3
     double thickness    = 0.001;  // m
-    double kB           = 0.0;    // J   (bending stiffness; 0 disables bending)
+    double kB           = 1e-3;   // J   (bending stiffness; 0 disables bending)
     double kpin         = 1e7;    // N/m (pin spring stiffness)
     double gx           = 0.0;    // m/s^2
     double gy           = -9.81;  // m/s^2
@@ -27,10 +27,9 @@ struct IPCArgs3D : ArgParser {
     int    max_substep_iters = 500;  // per-substep cap; per-frame total = max_substep_iters * substeps
     double tol_abs       = 1e-6;  // residual norm tolerance
     double tol_rel       = 1e-1;  // relative tolerance: stop when residual < tol_rel * initial
-    double step_weight   = 1.0;
     double d_hat         = 0.01;  // barrier activation distance; 0 disables contact
-    double k_sdf         = 0.0;   // SDF penalty stiffness; 0 disables the SDF term
-    double eps_sdf       = 0.01;  // SDF ramp-Heaviside transition-layer width
+    double k_sdf         = 1e2;   // SDF penalty stiffness; 0 disables the SDF term
+    double eps_sdf       = 0.002; // SDF ramp-Heaviside transition-layer width
     bool   use_parallel  = true;
     bool   ccd_check     = false;
     bool   use_ccd_guess = true;
@@ -40,10 +39,10 @@ struct IPCArgs3D : ArgParser {
     int    color_rebuild_interval  = 10;
 
     // --- mesh ---
-    int    nx           = 2;      
-    int    ny           = 2;      
-    double width        = 0.4;    // m
-    double height       = 0.4;    // m
+    int    nx           = 31;     
+    int    ny           = 31;     
+    double width        = 1.0;    // m
+    double height       = 1.0;    // m
 
     // --- scene placement ---
     double left_x       = -0.75;  // m
@@ -95,7 +94,7 @@ struct IPCArgs3D : ArgParser {
         add_double("density",     density,     900.0,       "Mass density (kg/m^3)");
         add_double("thickness",   thickness,   0.001,       "Shell thickness (m)");
         add_double("kB",          kB,          1e-3,       "Bending stiffness (0 disables bending)");
-        add_double("kpin",        kpin,        1e5,        "Pin spring stiffness");
+        add_double("kpin",        kpin,        1e7,        "Pin spring stiffness");
         add_double("gx",          gx,          0.0,        "Gravity x-component");
         add_double("gy",          gy,          -9.81,      "Gravity y-component");
         add_double("gz",          gz,          0.0,        "Gravity z-component");
@@ -103,7 +102,6 @@ struct IPCArgs3D : ArgParser {
         add_int   ("max_substep_iters", max_substep_iters, 500, "Max Gauss-Seidel iterations per substep (per-frame total = max_substep_iters * substeps)");
         add_double("tol_abs",     tol_abs,     1e-6,       "Absolute convergence tolerance (residual force)");
         add_double("tol_rel",     tol_rel,     1e-1,       "Relative tolerance: stop when residual < tol_rel * initial_residual (0 disables)");
-        add_double("step_weight", step_weight, 1.0,        "Newton step damping factor");
         add_double("d_hat",       d_hat,       0.01,       "Barrier activation distance (0 = off)");
         add_double("k_sdf",       k_sdf,       1e2,        "SDF penalty stiffness (0 = off; obstacles live on SimParams)");
         add_double("eps_sdf",     eps_sdf,     0.002,       "SDF penalty ramp-Heaviside transition-layer width");
@@ -180,11 +178,9 @@ struct IPCArgs3D : ArgParser {
         p.max_global_iters = max_substep_iters;
         p.tol_abs          = tol_abs;
         p.tol_rel          = tol_rel;
-        p.step_weight      = step_weight;
         p.d_hat            = d_hat;
         p.k_sdf            = k_sdf;
         p.eps_sdf          = eps_sdf;
-        p.restart_frame    = restart_frame;
         p.use_parallel     = use_parallel;
         p.ccd_check        = ccd_check;
         p.use_ccd_guess = use_ccd_guess;

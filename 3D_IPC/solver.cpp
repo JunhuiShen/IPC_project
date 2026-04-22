@@ -28,24 +28,22 @@ std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vecto
     #pragma omp parallel for reduction(min:toi_min) schedule(static)
     for (int i = 0; i < n_nt; ++i) {
         const auto& p = cache.nt_pairs[i];
-        double t = node_triangle_general_ccd(
-                x[p.node],     dx[p.node],
-                x[p.tri_v[0]], dx[p.tri_v[0]],
-                x[p.tri_v[1]], dx[p.tri_v[1]],
-                x[p.tri_v[2]], dx[p.tri_v[2]]);
-        toi_min = std::min(toi_min, t);
+        toi_min = std::min(toi_min, node_triangle_general_ccd(
+            x[p.node],     dx[p.node],
+            x[p.tri_v[0]], dx[p.tri_v[0]],
+            x[p.tri_v[1]], dx[p.tri_v[1]],
+            x[p.tri_v[2]], dx[p.tri_v[2]]));
     }
 
     const int n_ss = static_cast<int>(cache.ss_pairs.size());
     #pragma omp parallel for reduction(min:toi_min) schedule(static)
     for (int i = 0; i < n_ss; ++i) {
         const auto& p = cache.ss_pairs[i];
-        double t = segment_segment_general_ccd(
-                x[p.v[0]], dx[p.v[0]],
-                x[p.v[1]], dx[p.v[1]],
-                x[p.v[2]], dx[p.v[2]],
-                x[p.v[3]], dx[p.v[3]]);
-        toi_min = std::min(toi_min, t);
+        toi_min = std::min(toi_min, segment_segment_general_ccd(
+            x[p.v[0]], dx[p.v[0]],
+            x[p.v[1]], dx[p.v[1]],
+            x[p.v[2]], dx[p.v[2]],
+            x[p.v[3]], dx[p.v[3]]));
     }
 
     const double omega = (toi_min >= 1.0) ? 1.0 : 0.9 * toi_min;
@@ -234,8 +232,6 @@ SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTri
         return result;
     }
 
-    const int nv = static_cast<int>(xnew.size());
-
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         for (const auto& group : color_groups) {
             for (int vi : group) {
@@ -284,12 +280,14 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
     // Per-iter pair cache. Seeded from the initialize() swept-AABB pairs so
     // iter 1's Jacobi prediction has a non-empty contact pair list; then
     // overwritten each iter by register_barrier_pairs_from_blue_green.
-    BroadPhase::Cache iter_cache;
+    BroadPhase::Cache iter_cache_storage;
+    const BroadPhase::Cache* iter_cache = nullptr;
     if (use_barrier) {
-        iter_cache = broad_phase.cache();
+        iter_cache = &broad_phase.cache();
     } else {
-        iter_cache.vertex_nt.assign(nv, {});
-        iter_cache.vertex_ss.assign(nv, {});
+        iter_cache_storage.vertex_nt.assign(nv, {});
+        iter_cache_storage.vertex_ss.assign(nv, {});
+        iter_cache = &iter_cache_storage;
     }
 
     if (residual_history) {
@@ -305,6 +303,7 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
     const int color_rebuild_interval = std::max(1, params.color_rebuild_interval);
     SweptBvhCache sw_cache;
     std::vector<std::vector<int>> cached_colors;
+    const std::vector<std::vector<int>>* last_color_groups = override_colors;
     std::vector<JacobiPrediction> predictions;
     predictions.reserve(nv);
     std::vector<AABB> blue_boxes(nv);
@@ -319,7 +318,7 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         if (use_barrier && params.ccd_check) x_before = xnew;
 
         // Step 1: Jacobi predictions against the current pair cache.
-        build_jacobi_predictions(ref_mesh, adj, pins, params, xnew, xhat, iter_cache, predictions, &pm);
+        build_jacobi_prediction_deltas(ref_mesh, adj, pins, params, xnew, xhat, *iter_cache, predictions, &pm);
 
         // Residual from predictions.
         double residual_now = 0.0;
@@ -342,25 +341,22 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         if (residual_history) residual_history->push_back(residual_now);
         if (!params.fixed_iters && residual_now < effective_tol) {
             result.iterations = iter - 1;
+            if (last_color_groups) {
+                result.last_num_colors = static_cast<int>(last_color_groups->size());
+                result.color_groups_parallel = *last_color_groups;
+            }
             result.converged  = true;
             return result;
         }
 
         // Step 2: define node certified regions, i.e. "blue boxes".
-        for (int vi = 0; vi < nv; ++vi) {
-            const double r = predictions[vi].delta.norm();
-            const Vec3 half = Vec3::Constant(r);
-            AABB box;
-            box.expand(xnew[vi] - half);
-            box.expand(xnew[vi] + half);
-            blue_boxes[vi] = box;
-            predictions[vi].certified_region = box;
-        }
+        build_blue_boxes_from_deltas(xnew, params.use_parallel, predictions, &blue_boxes);
 
         // Step 3: define (red) edge and triangle boxes from node (blue) boxes.
         if (use_barrier) {
-            iter_cache = register_barrier_pairs_from_blue_green(
+            iter_cache_storage = register_barrier_pairs_from_blue_green(
                 ref_mesh, broad_phase.cache().edges, blue_boxes, dhat);
+            iter_cache = &iter_cache_storage;
         }
 
         // Step 4: define/reuse conflict graph colors. We rebuild every
@@ -370,21 +366,18 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         if (!color_groups_ptr) {
             const bool rebuild_colors = cached_colors.empty() || ((iter - 1) % color_rebuild_interval == 0);
             if (rebuild_colors) {
-                const std::vector<std::vector<int>> contact_adj =
-                    use_barrier ? build_contact_adj(iter_cache, nv)
-                                : std::vector<std::vector<int>>(nv);
-                const std::vector<std::vector<int>> base_adj =
-                    union_adjacency(elastic_adj, contact_adj);
-
-                const std::vector<std::vector<int>> conflict = build_conflict_graph(
-                    ref_mesh, pins, iter_cache, predictions, &adj, &base_adj, &sw_cache);
-
+                const std::vector<std::vector<int>> base_adj = union_adjacency(
+                    elastic_adj,
+                    use_barrier ? build_contact_adj(*iter_cache, nv) : std::vector<std::vector<int>>(nv));
                 // Step 5: define colors for parallel GS updates.
-                cached_colors = greedy_color_conflict_graph(conflict, predictions);
+                cached_colors = greedy_color_conflict_graph(
+                    build_conflict_graph(ref_mesh, pins, *iter_cache, predictions, &adj, &base_adj, &sw_cache),
+                    predictions);
             }
             color_groups_ptr = &cached_colors;
         }
         const std::vector<std::vector<int>>& color_groups = *color_groups_ptr;
+        last_color_groups = &color_groups;
 
         // Step 6: colored GS.
         for (std::size_t color_idx = 0; color_idx < color_groups.size(); ++color_idx) {
@@ -400,21 +393,19 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
 
                 // Compute GS delta
                 compute_local_newton_direction(vi, ref_mesh, adj, pins, params, xnew, xhat,
-                                               iter_cache, g_fresh, H_fresh, delta_fresh, &pm);
+                                               *iter_cache, g_fresh, H_fresh, delta_fresh, &pm);
 
                 // Clamp the step to stay inside the node's blue box.
-                const double alpha_clip = use_barrier ? clip_step_to_certified_region(vi, xnew, delta_fresh, blue_boxes[vi]) : 1.0;
-                const Vec3 delta = alpha_clip * delta_fresh;
+                const Vec3 delta = (use_barrier ? clip_step_to_certified_region(vi, xnew, delta_fresh, blue_boxes[vi]) : 1.0) * delta_fresh;
 
                 // CCD against the current iter_cache pairs.
-                const double ccd_step = compute_safe_step_for_vertex(vi, ref_mesh, params, xnew, delta, iter_cache);
+                const double ccd_step = compute_safe_step_for_vertex(vi, ref_mesh, params, xnew, delta, *iter_cache);
 
                 xnew[vi] -= ccd_step * delta;
             }
         }
 
         result.last_num_colors       = static_cast<int>(color_groups.size());
-        result.color_groups_parallel = color_groups;
 
         // Step 7: CCD sanity check on the actual executed colored path.
         if (use_barrier && params.ccd_check) {
@@ -428,7 +419,7 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
                         continue;
                     }
                     const double safe_replay = compute_safe_step_for_vertex(
-                        vi, ref_mesh, params, x_replay, -move, iter_cache);
+                        vi, ref_mesh, params, x_replay, -move, *iter_cache);
                     if (safe_replay < 1.0 - 1.0e-12) {
                         violation = true;
                         break;
@@ -449,6 +440,10 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         result.converged      = true;
     } else {
         result.final_residual = compute_global_residual(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, &pm);
+    }
+    if (last_color_groups) {
+        result.last_num_colors = static_cast<int>(last_color_groups->size());
+        result.color_groups_parallel = *last_color_groups;
     }
 
     return result;

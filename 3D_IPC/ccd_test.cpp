@@ -73,9 +73,10 @@ TEST(CCDNodeTriangleSingleMovingNode, CoplanarEntireStep) {
 
     const CCDResult r = node_triangle_only_one_node_moves(
         x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX);
-    EXPECT_FALSE(r.has_candidate_time);
-    EXPECT_FALSE(r.collision);
-    EXPECT_TRUE(r.coplanar_entire_step);
+    EXPECT_TRUE(r.has_candidate_time);
+    EXPECT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 0.0, kTol);
+    EXPECT_FALSE(r.coplanar_entire_step);
     EXPECT_FALSE(r.parallel_or_no_crossing);
 }
 
@@ -241,9 +242,10 @@ TEST(CCDSegmentSegmentSingleMovingNode, CoplanarEntireStep) {
     const Vec3 x4(0.5,  1.0, 0.0);
 
     const CCDResult r = segment_segment_only_one_node_moves(x1, dx1, x2, x3, x4);
-    EXPECT_FALSE(r.has_candidate_time);
-    EXPECT_FALSE(r.collision);
-    EXPECT_TRUE(r.coplanar_entire_step);
+    EXPECT_TRUE(r.has_candidate_time);
+    EXPECT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 0.0, kTol);
+    EXPECT_FALSE(r.coplanar_entire_step);
     EXPECT_FALSE(r.parallel_or_no_crossing);
 }
 
