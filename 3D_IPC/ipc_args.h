@@ -18,6 +18,7 @@ struct IPCArgs3D : ArgParser {
     double density      = 1.0;    // kg/m^3
     double thickness    = 0.1;    // m
     double kB           = 0.0;    // J   (bending stiffness; 0 disables bending)
+    double damping      = 0.0;    // s   (Rayleigh stiffness damping β; 0 disables damping)
     double kpin         = 1e5;    // N/m (pin spring stiffness)
     double gx           = 0.0;    // m/s^2
     double gy           = -9.81;  // m/s^2
@@ -36,6 +37,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_trust_region = false;
     bool   mass_normalize_residual = true;
     bool   use_gpu                 = false;
+    bool   use_gpu_elastic         = false;
     int    color_rebuild_interval  = 10;
 
     // --- mesh ---
@@ -76,6 +78,7 @@ struct IPCArgs3D : ArgParser {
         add_double("density",     density,     1.0,         "Mass density");
         add_double("thickness",   thickness,   0.1,      "Shell thickness");
         add_double("kB",          kB,          1e-3,       "Bending stiffness (0 disables bending)");
+        add_double("damping",     damping,     0.0,        "Rayleigh stiffness damping coefficient \u03b2 in seconds (0 disables)");
         add_double("kpin",        kpin,        1e5,        "Pin spring stiffness");
         add_double("gx",          gx,          0.0,        "Gravity x-component");
         add_double("gy",          gy,          -9.81,      "Gravity y-component");
@@ -94,6 +97,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_trust_region", use_trust_region, false, "Use trust-region narrow phase instead of CCD for step clamping");
         add_bool  ("mass_normalize_residual", mass_normalize_residual, true,  "Divide per-vertex gradient by mass when forming the global residual (scale-invariant stopping test)");
         add_bool  ("use_gpu",              use_gpu,              false, "Route the GS sweep through the GPU implementation (CPU stub when CUDA is unavailable)");
+        add_bool  ("use_gpu_elastic",      use_gpu_elastic,      false, "Route through the minimal no-collision GPU_Elastic solver (requires d_hat=0); takes precedence over use_gpu");
         add_int   ("color_rebuild_interval", color_rebuild_interval, 10, "Parallel solver: recolor every N outer iterations (N<=0 treated as 1)");
 
         add_int   ("nx",          nx,          31,         "Mesh subdivisions in x");
@@ -137,6 +141,7 @@ struct IPCArgs3D : ArgParser {
         p.density          = density;
         p.thickness        = thickness;
         p.kB               = kB;
+        p.damping          = damping;
         p.kpin             = kpin;
         p.gravity          = Vec3(gx, gy, gz);
         p.max_global_iters = max_iters;
@@ -152,6 +157,7 @@ struct IPCArgs3D : ArgParser {
         p.use_trust_region = use_trust_region;
         p.mass_normalize_residual = mass_normalize_residual;
         p.use_gpu                 = use_gpu;
+        p.use_gpu_elastic         = use_gpu_elastic;
         p.color_rebuild_interval  = color_rebuild_interval;
         return p;
     }

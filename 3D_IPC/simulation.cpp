@@ -21,6 +21,30 @@ SolverResult advance_one_frame_twisting(DeformedState& state, const RefMesh& ref
     BroadPhase& broad_phase, const TwistSpec& twist_spec, int frame_index) {
     SolverResult agg;
     const double dt = params.dt();
+
+    // Fast path: elastic-only, all substeps device-resident. Twist pins still
+    // refresh per substep (small H2D); x/v never touch the host mid-frame.
+    if (params.use_gpu_elastic) {
+        gpu_elastic_begin_frame(state.deformed_positions, state.velocities);
+        for (int sub = 0; sub < params.substeps; ++sub) {
+            const double t_next = ((frame_index - 1) * params.substeps + (sub + 1)) * dt;
+            update_twist_pins(pins, twist_spec, t_next);
+            gpu_elastic_set_pin_targets(pins);
+            gpu_elastic_run_substep_device(params.max_global_iters);
+        }
+        gpu_elastic_end_frame(state.deformed_positions, state.velocities);
+        for (int sub = 0; sub < params.substeps; ++sub) {
+            SolverResult sub_result;
+            sub_result.iterations       = params.max_global_iters;
+            sub_result.final_residual   = gpu_elastic_substep_residual(sub);
+            sub_result.initial_residual = sub_result.final_residual;
+            sub_result.converged        = (sub_result.final_residual >= 0.0);
+            sub_result.last_num_colors  = 0;
+            accumulate_solver_result(agg, sub_result, sub == 0);
+        }
+        return agg;
+    }
+
     for (int sub = 0; sub < params.substeps; ++sub) {
         const double t_next = ((frame_index - 1) * params.substeps + (sub + 1)) * dt;
         update_twist_pins(pins, twist_spec, t_next);
@@ -28,9 +52,8 @@ SolverResult advance_one_frame_twisting(DeformedState& state, const RefMesh& ref
         std::vector<Vec3> xhat;
         build_xhat(xhat, state.deformed_positions, state.velocities, dt);
 
-        std::vector<Vec3> xnew = params.use_trust_region
-            ? trust_region_initial_guess(state.deformed_positions, xhat, ref_mesh, params.d_hat)
-            : ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
+        std::vector<Vec3> xnew = choose_initial_guess(
+            state.deformed_positions, xhat, ref_mesh, params);
 
         SolverResult sub_result;
         if (params.use_gpu)
@@ -53,6 +76,11 @@ int main(int argc, char** argv) {
 
     SimParams params = args.to_sim_params();
     const int num_frames = args.num_frames;
+
+    if (params.use_gpu_elastic && params.d_hat > 0.0) {
+        std::cerr << "Error: --use_gpu_elastic requires d_hat=0 (no-collision solver).\n";
+        return 1;
+    }
 
     RefMesh ref_mesh;
     DeformedState state;
@@ -108,6 +136,9 @@ int main(int argc, char** argv) {
     
     BroadPhase broad_phase;
 
+    if (params.use_gpu_elastic)
+        gpu_elastic_init(ref_mesh, adj, pins, params);
+
     std::cout << "num_frames = " << num_frames << "\n";
     std::cout << "d_hat = " << params.d_hat
               << (params.d_hat > 0.0 ? "  (barrier ON)" : "  (barrier OFF)")
@@ -149,7 +180,10 @@ int main(int argc, char** argv) {
         else
             result = advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, broad_phase);
 
-        if (!result.converged) {
+        // Skip the converge check when the user explicitly disabled both tols
+        // (fixed-iteration benchmark mode). Otherwise abort as before.
+        const bool fixed_iter_mode = (params.tol_abs <= 0.0 && params.tol_rel <= 0.0);
+        if (!result.converged && !fixed_iter_mode) {
             std::cerr << "Error: solver failed to converge at frame " << frame_index
                       << " (final_residual = " << result.final_residual
                       << ", max_iters = " << params.max_global_iters << ")\n";
@@ -183,6 +217,9 @@ int main(int argc, char** argv) {
 
     auto sim_end = Clock::now();
     double total_sim_ms = std::chrono::duration<double, std::milli>(sim_end - sim_start).count();
+
+    if (params.use_gpu_elastic)
+        gpu_elastic_shutdown();
 
     std::cout << "\nSimulation finished.\n";
     std::cout << "Total simulation time: " << std::fixed << std::setprecision(3) << total_sim_ms << " ms\n";

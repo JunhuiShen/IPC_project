@@ -61,6 +61,7 @@ if(CMAKE_CUDA_COMPILER)
         GPU_Sim/gpu_physics_stub.cpp
         GPU_Sim/gpu_solver.cu
         GPU_Sim/gpu_solver_bridge.cpp
+        GPU_Elastic/gpu_elastic.cu
     )
     find_package(CUDAToolkit REQUIRED)
     set(GPU_CUDA_FOUND TRUE)
@@ -72,6 +73,7 @@ else()
         GPU_Sim/gpu_physics_stub.cpp
         GPU_Sim/gpu_solver_stub.cpp
         GPU_Sim/gpu_solver_bridge.cpp
+        GPU_Elastic/gpu_elastic_stub.cpp
     )
     set(GPU_CUDA_FOUND FALSE)
     message(STATUS "CUDA not found — using CPU stubs")
@@ -89,6 +91,7 @@ endif()
 target_include_directories(gpu_mesh_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/GPU_Sim
+    ${CMAKE_CURRENT_SOURCE_DIR}/GPU_Elastic
 )
 
 add_library(corotated_energy_lib

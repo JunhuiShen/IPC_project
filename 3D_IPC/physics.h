@@ -29,6 +29,7 @@ struct SimParams {
     double mu, lambda, density, thickness, kpin, tol_abs, step_weight;
     double tol_rel;   // relative tolerance (factor of initial residual); 0 disables
     double kB;        // bending (flexural) stiffness; 0 disables the bending term
+    double damping;   // Rayleigh-style stiffness damping coefficient β (seconds); 0 = no damping
     double d_hat;     // barrier activation distance; 0 disables contact
     double k_sdf;     // SDF penalty stiffness; 0 disables the SDF term
     double eps_sdf;   // SDF ramp-Heaviside transition-layer width
@@ -49,6 +50,10 @@ struct SimParams {
     // used automatically. When set, use_parallel is ignored.
     bool   use_gpu;
 
+    // Route through the no-collision GPU_Elastic solver (gpu_elastic_*).
+    // Only valid when d_hat == 0. Takes precedence over use_gpu.
+    bool   use_gpu_elastic;
+
     // Returns a SimParams with every field set to a benign "disabled / zero /
     // sentinel" value. This is the single source of truth for the init state
     // tests start from; callers then override the subset of fields they care
@@ -66,6 +71,7 @@ struct SimParams {
         p.step_weight               = 0.0;
         p.tol_rel                   = 0.0;
         p.kB                        = 0.0;
+        p.damping                   = 0.0;
         p.d_hat                     = 0.0;
         p.k_sdf                     = 0.0;
         p.eps_sdf                   = 0.0;
@@ -80,6 +86,7 @@ struct SimParams {
         p.mass_normalize_residual   = false;
         p.color_rebuild_interval    = 10;
         p.use_gpu                   = false;
+        p.use_gpu_elastic           = false;
         p.cached_dt_                = -1.0;
         p.cached_dt2_               = -1.0;
         return p;
