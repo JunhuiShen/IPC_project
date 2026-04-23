@@ -10,7 +10,6 @@ struct SolverResult {
     int    iterations       = 0;
     bool   converged        = false;
     int    last_num_colors  = 0;   // parallel solver only
-    std::vector<std::vector<int>> color_groups_parallel; // also parallel solver only
     int    ccd_violations   = 0;   // populated when SimParams::ccd_check is on
 };
 
@@ -26,7 +25,6 @@ inline void accumulate_solver_result(SolverResult& agg, const SolverResult& sub,
     agg.final_residual       = sub.final_residual;
     agg.iterations          += sub.iterations;
     agg.last_num_colors      = sub.last_num_colors;
-    agg.color_groups_parallel = sub.color_groups_parallel;
     agg.ccd_violations      += sub.ccd_violations;
 }
 

@@ -147,11 +147,7 @@ int main(int argc, char** argv) {
             std::exit(1);
         }
 
-        if (params.use_parallel) {
-            export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, &result.color_groups_parallel);
-        } else {
-            export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, nullptr);
-        }
+        export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, nullptr);
         
         serialize_state(outdir, frame_index, state);
     }

@@ -18,7 +18,7 @@ struct IPCArgs3D : ArgParser {
     double density      = 900.0;  // kg/m^3
     double thickness    = 0.001;  // m
     double kB           = 1e-3;   // J   (bending stiffness; 0 disables bending)
-    double kpin         = 1e7;    // N/m (pin spring stiffness)
+    double kpin         = 1e5;    // N/m (pin spring stiffness)
     double gx           = 0.0;    // m/s^2
     double gy           = -9.81;  // m/s^2
     double gz           = 0.0;    // m/s^2
@@ -94,7 +94,7 @@ struct IPCArgs3D : ArgParser {
         add_double("density",     density,     900.0,       "Mass density (kg/m^3)");
         add_double("thickness",   thickness,   0.001,       "Shell thickness (m)");
         add_double("kB",          kB,          1e-3,       "Bending stiffness (0 disables bending)");
-        add_double("kpin",        kpin,        1e7,        "Pin spring stiffness");
+        add_double("kpin",        kpin,        1e5,        "Pin spring stiffness");
         add_double("gx",          gx,          0.0,        "Gravity x-component");
         add_double("gy",          gy,          -9.81,      "Gravity y-component");
         add_double("gz",          gz,          0.0,        "Gravity z-component");

@@ -19,7 +19,41 @@ static void build_predictions_with_blue_boxes(const RefMesh& ref_mesh, const Ver
                                               const BroadPhase::Cache& bp_cache, std::vector<JacobiPrediction>& predictions,
                                               const PinMap* pin_map = nullptr) {
     build_jacobi_prediction_deltas(ref_mesh, adj, pins, params, x, xhat, bp_cache, predictions, pin_map);
-    build_blue_boxes_from_deltas(x, params.use_parallel, predictions);
+    build_blue_boxes(x, params.use_parallel, predictions);
+}
+
+static ParallelCommit compute_cpu_parallel_commit_reference(
+    int vi, bool use_cached_prediction, const JacobiPrediction& prediction,
+    const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+    const SimParams& params, const std::vector<Vec3>& x_current, const std::vector<Vec3>& xhat,
+    const BroadPhase& broad_phase, const PinMap* pin_map = nullptr) {
+    const auto& bp_cache = broad_phase.cache();
+    ParallelCommit out;
+    out.vi = vi;
+
+    Vec3 delta = prediction.delta;
+    if (!use_cached_prediction) {
+        Vec3 fresh_gradient, fresh_delta;
+        Mat33 fresh_hessian;
+        compute_local_newton_direction(
+            vi, ref_mesh, adj, pins, params, x_current, xhat, bp_cache,
+            fresh_gradient, fresh_hessian, fresh_delta, pin_map);
+        out.alpha_clip = clip_step_to_certified_region(vi, x_current, fresh_delta, prediction.certified_region);
+        delta = out.alpha_clip * fresh_delta;
+    }
+
+    out.delta = delta;
+    out.ccd_step = compute_safe_step_for_vertex(vi, ref_mesh, params, x_current, delta, bp_cache);
+    out.x_after = x_current[vi] - out.ccd_step * delta;
+    out.valid = true;
+    return out;
+}
+
+static void apply_parallel_commits_cpu(const std::vector<ParallelCommit>& commits, std::vector<Vec3>& xnew) {
+    for (const auto& commit : commits) {
+        if (!commit.valid) continue;
+        xnew[commit.vi] = commit.x_after;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +189,7 @@ TEST(GPUSolver, JacobiPredictionsMatchCPUWithBending) {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2: gpu_parallel_commit matches compute_parallel_commit_for_vertex
+// Phase 2: gpu_parallel_commit matches CPU reference commit logic
 // Runs one full Jacobi iteration (predict + commit) per color group and
 // checks x_after per commit.
 // ---------------------------------------------------------------------------
@@ -177,10 +211,10 @@ static void run_commit_comparison(BarrierScene& s) {
         if (group.empty()) continue;
         const bool use_cached = (ci == 0);
 
-        // CPU reference: manual loop over compute_parallel_commit_for_vertex
+        // CPU reference: manual loop over commit math
         std::vector<ParallelCommit> cpu_commits(group.size());
         for (int li = 0; li < static_cast<int>(group.size()); ++li)
-            cpu_commits[li] = compute_parallel_commit_for_vertex(
+            cpu_commits[li] = compute_cpu_parallel_commit_reference(
                 group[li], use_cached, preds[group[li]],
                 s.ref_mesh, s.adj, s.pins, s.params,
                 x_cpu, s.xhat, s.bp, &s.pin_map);
@@ -197,7 +231,7 @@ static void run_commit_comparison(BarrierScene& s) {
                 EXPECT_NEAR(cpu_commits[li].x_after(k), gpu_commits[li].x_after(k), kTol)
                     << "color=" << ci << " local=" << li << " vi=" << group[li] << " k=" << k;
 
-        apply_parallel_commits(cpu_commits, x_cpu);
+        apply_parallel_commits_cpu(cpu_commits, x_cpu);
     }
 }
 

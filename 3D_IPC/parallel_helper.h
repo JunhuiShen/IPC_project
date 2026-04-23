@@ -10,27 +10,37 @@ struct JacobiPrediction {
     AABB certified_region;
 };
 
-struct ParallelCommit {
-    int vi = -1;
-    Vec3 delta = Vec3::Zero();
-    double alpha_clip = 1.0;
-    double ccd_step = 1.0;
-    Vec3 x_after = Vec3::Zero();
-    bool valid = false;
+struct RedBoxes {
+    std::vector<AABB> tri;
+    std::vector<AABB> edge;
+};
+
+struct GreenBoxes {
+    std::vector<AABB> tri;
+    std::vector<AABB> edge;
 };
 
 // Hot-path Jacobi stage used by the basic parallel solver: compute only g/delta.
 void build_jacobi_prediction_deltas(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                                    const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                    const SimParams& params, const std::vector<Vec3>& positions, const std::vector<Vec3>& xhat,
                                     const BroadPhase::Cache& bp_cache, std::vector<JacobiPrediction>& predictions,
                                     const PinMap* pin_map = nullptr);
 
 // Build isotropic blue boxes from prediction deltas and mirror them into
 // prediction.certified_region; optionally also writes them into blue_boxes_out.
-void build_blue_boxes_from_deltas(const std::vector<Vec3>& x,
-                                  bool use_parallel,
-                                  std::vector<JacobiPrediction>& predictions,
-                                  std::vector<AABB>* blue_boxes_out = nullptr);
+void build_blue_boxes(const std::vector<Vec3>& positions,
+                      bool use_parallel,
+                      std::vector<JacobiPrediction>& jacobi_predictions,
+                      std::vector<AABB>* blue_boxes_out = nullptr);
+
+// Build red triangle/edge boxes as unions of incident blue boxes.
+void build_red_boxes(const RefMesh& ref_mesh,
+                     const std::vector<std::array<int, 2>>& edges,
+                     const std::vector<AABB>& blue_boxes,
+                     RedBoxes& red_boxes);
+
+// Build green triangle/edge boxes by padding red boxes by d_hat.
+void build_green_boxes(const RedBoxes& red_boxes, double d_hat, GreenBoxes& green_boxes);
 
 // Persistent swept-region BVH; reused across build_conflict_graph calls to
 // refit in place of a full rebuild when the active set is stable.
@@ -43,11 +53,11 @@ struct SweptBvhCache {
 };
 
 // Mesh-adjacency edges of the conflict graph. Invariant for a fixed mesh.
-std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int nv);
+std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int num_vertices);
 
 // Contact edges of the conflict graph from broad-phase NT/SS pair lists.
 // Stable between broad-phase initialize() calls (key on BroadPhase::version()).
-std::vector<std::vector<int>> build_contact_adj(const BroadPhase::Cache& bp_cache, int nv);
+std::vector<std::vector<int>> build_contact_adj(const BroadPhase::Cache& bp_cache, int num_vertices);
 
 // Sorted per-vertex union of two sorted neighbor lists.
 std::vector<std::vector<int>> union_adjacency(const std::vector<std::vector<int>>& a,
@@ -63,6 +73,11 @@ std::vector<std::vector<int>> build_conflict_graph(const RefMesh& ref_mesh, cons
 
 std::vector<std::vector<int>> greedy_color_conflict_graph(const std::vector<std::vector<int>>& graph, const std::vector<JacobiPrediction>& predictions);
 
+// Infinity norm of mass-normalized predicted gradients.
+double compute_prediction_residual_inf_norm(const RefMesh& ref_mesh,
+                                            const std::vector<JacobiPrediction>& predictions,
+                                            bool use_parallel);
+
 void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                     const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                     const BroadPhase::Cache& bp_cache, Vec3& g_out, Mat33& H_out, Vec3& delta_out,
@@ -76,21 +91,9 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
                                     const std::vector<Vec3>& x, const Vec3& delta,
                                     const BroadPhase::Cache& bp_cache);
 
-// Register per-iter barrier pairs from blue/red/green boxes:
-//   B(vi)  = blue_boxes[vi] (node trust region cube)
-//   R(t/e) = union of incident B  (red edge/triangle box)
-//   G(t/e) = R padded by d_hat on each face (green box)
-// Admit NT pair (n,t) when B(n) and G(t) have intersections and n is not a corner of t, and
-// SS pair (e,f) when G(e) and G(f) have intersections and e,f share no vertex.
-BroadPhase::Cache register_barrier_pairs_from_blue_green(
+// Register pairs using already-constructed green boxes.
+BroadPhase::Cache register_barrier_pairs_from_blue_and_green(
     const RefMesh& ref_mesh,
     const std::vector<std::array<int, 2>>& edges,
     const std::vector<AABB>& blue_boxes,
-    double d_hat);
-
-ParallelCommit compute_parallel_commit_for_vertex(int vi, bool use_cached_prediction, const JacobiPrediction& prediction,
-                                                  const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                                                  const SimParams& params, const std::vector<Vec3>& x_current, const std::vector<Vec3>& xhat,
-                                                  const BroadPhase& broad_phase, const PinMap* pin_map = nullptr);
-
-void apply_parallel_commits(const std::vector<ParallelCommit>& commits, std::vector<Vec3>& xnew);
+    const GreenBoxes& green_boxes);

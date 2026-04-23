@@ -89,20 +89,74 @@ void build_jacobi_prediction_deltas(const RefMesh& ref_mesh, const VertexTriangl
     }
 }
 
-void build_blue_boxes_from_deltas(const std::vector<Vec3>& x,
-                                  bool use_parallel,
-                                  std::vector<JacobiPrediction>& predictions,
-                                  std::vector<AABB>* blue_boxes_out){
-    const int nv = static_cast<int>(predictions.size());
-    if (blue_boxes_out) blue_boxes_out->resize(nv);
+void build_blue_boxes(const std::vector<Vec3>& positions,
+                      bool use_parallel,
+                      std::vector<JacobiPrediction>& jacobi_predictions,
+                      std::vector<AABB>* blue_boxes_out){
+    const int num_vertices = static_cast<int>(jacobi_predictions.size());
+    if (blue_boxes_out) blue_boxes_out->resize(num_vertices);
 
     #pragma omp parallel for if(use_parallel)
-    for (int vi = 0; vi < nv; ++vi) {
-        AABB box;
-        box.expand(x[vi] - Vec3::Constant(predictions[vi].delta.norm()));
-        box.expand(x[vi] + Vec3::Constant(predictions[vi].delta.norm()));
-        predictions[vi].certified_region = box;
-        if (blue_boxes_out) (*blue_boxes_out)[vi] = box;
+    for (int vertex = 0; vertex < num_vertices; ++vertex) {
+        const double radius = jacobi_predictions[vertex].delta.norm();
+        AABB blue_box;
+        blue_box.expand(positions[vertex] - Vec3::Constant(radius));
+        blue_box.expand(positions[vertex] + Vec3::Constant(radius));
+        jacobi_predictions[vertex].certified_region = blue_box;
+        if (blue_boxes_out) (*blue_boxes_out)[vertex] = blue_box;
+    }
+}
+
+void build_red_boxes(const RefMesh& ref_mesh,
+                     const std::vector<std::array<int, 2>>& edges,
+                     const std::vector<AABB>& blue_boxes,
+                     RedBoxes& red_boxes) {
+    const int num_triangles = num_tris(ref_mesh);
+    const int num_edges = static_cast<int>(edges.size());
+
+    red_boxes.tri.resize(num_triangles);
+    red_boxes.edge.resize(num_edges);
+
+    #pragma omp parallel for schedule(static)
+    for (int tri_idx = 0; tri_idx < num_triangles; ++tri_idx) {
+        const int v0 = tri_vertex(ref_mesh, tri_idx, 0);
+        const int v1 = tri_vertex(ref_mesh, tri_idx, 1);
+        const int v2 = tri_vertex(ref_mesh, tri_idx, 2);
+        AABB red_tri_box = blue_boxes[v0];
+        red_tri_box.expand(blue_boxes[v1]);
+        red_tri_box.expand(blue_boxes[v2]);
+        red_boxes.tri[tri_idx] = red_tri_box;
+    }
+
+    #pragma omp parallel for schedule(static)
+    for (int edge_idx = 0; edge_idx < num_edges; ++edge_idx) {
+        AABB red_edge_box = blue_boxes[edges[edge_idx][0]];
+        red_edge_box.expand(blue_boxes[edges[edge_idx][1]]);
+        red_boxes.edge[edge_idx] = red_edge_box;
+    }
+}
+
+void build_green_boxes(const RedBoxes& red_boxes, double d_hat, GreenBoxes& green_boxes) {
+    const int num_triangles = static_cast<int>(red_boxes.tri.size());
+    const int num_edges = static_cast<int>(red_boxes.edge.size());
+
+    green_boxes.tri.resize(num_triangles);
+    green_boxes.edge.resize(num_edges);
+
+    #pragma omp parallel for schedule(static)
+    for (int tri_idx = 0; tri_idx < num_triangles; ++tri_idx) {
+        AABB green_tri_box = red_boxes.tri[tri_idx];
+        green_tri_box.min.array() -= d_hat;
+        green_tri_box.max.array() += d_hat;
+        green_boxes.tri[tri_idx] = green_tri_box;
+    }
+
+    #pragma omp parallel for schedule(static)
+    for (int edge_idx = 0; edge_idx < num_edges; ++edge_idx) {
+        AABB green_edge_box = red_boxes.edge[edge_idx];
+        green_edge_box.min.array() -= d_hat;
+        green_edge_box.max.array() += d_hat;
+        green_boxes.edge[edge_idx] = green_edge_box;
     }
 }
 
@@ -391,6 +445,21 @@ std::vector<std::vector<int>> greedy_color_conflict_graph(const std::vector<std:
     return groups;
 }
 
+double compute_prediction_residual_inf_norm(const RefMesh& ref_mesh,
+                                            const std::vector<JacobiPrediction>& predictions,
+                                            bool use_parallel) {
+    double max_mass_normalized_grad = 0.0;
+    const int num_vertices = static_cast<int>(predictions.size());
+    #pragma omp parallel for reduction(max:max_mass_normalized_grad) if(use_parallel) schedule(static)
+    for (int vertex = 0; vertex < num_vertices; ++vertex) {
+        Vec3 grad = predictions[vertex].g;
+        const double mass = ref_mesh.mass[vertex];
+        if (mass > 0.0) grad /= mass;
+        max_mass_normalized_grad = std::max(max_mass_normalized_grad, grad.cwiseAbs().maxCoeff());
+    }
+    return max_mass_normalized_grad;
+}
+
 double clip_step_to_certified_region(int vi, const std::vector<Vec3>& x, const Vec3& fresh_delta, const AABB& certified_region){
     double alpha = 1.0;
 
@@ -489,128 +558,74 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
     return tr ? safe_min : ((safe_min >= 1.0) ? 1.0 : 0.9 * safe_min);
 }
 
-BroadPhase::Cache register_barrier_pairs_from_blue_green(const RefMesh& ref_mesh, const std::vector<std::array<int, 2>>& edges,
-                                                         const std::vector<AABB>& blue_boxes, double d_hat){
-    const int nv = static_cast<int>(blue_boxes.size());
-    const int nt = num_tris(ref_mesh);
-    const int ne = static_cast<int>(edges.size());
+BroadPhase::Cache register_barrier_pairs_from_blue_and_green(const RefMesh& ref_mesh,
+                                                             const std::vector<std::array<int, 2>>& edges,
+                                                             const std::vector<AABB>& blue_boxes,
+                                                             const GreenBoxes& green_boxes) {
+    const int num_vertices = static_cast<int>(blue_boxes.size());
+    const int num_edges = static_cast<int>(edges.size());
 
-    BroadPhase::Cache cache;
-    cache.edges = edges;
-    cache.vertex_nt.assign(nv, {});
-    cache.vertex_ss.assign(nv, {});
+    BroadPhase::Cache pair_cache;
+    pair_cache.edges = edges;
+    pair_cache.vertex_nt.assign(num_vertices, {});
+    pair_cache.vertex_ss.assign(num_vertices, {});
 
-    if (nv == 0) return cache;
+    if (num_vertices == 0) return pair_cache;
 
-    // Green triangle boxes: union of blue corners, then pad by d_hat on each face.
-    std::vector<AABB> green_tri(nt);
-    for (int t = 0; t < nt; ++t) {
-        const int a = tri_vertex(ref_mesh, t, 0);
-        const int b = tri_vertex(ref_mesh, t, 1);
-        const int c = tri_vertex(ref_mesh, t, 2);
-        green_tri[t] = blue_boxes[a];
-        green_tri[t].expand(blue_boxes[b]);
-        green_tri[t].expand(blue_boxes[c]);
-        green_tri[t].min.array() -= d_hat;
-        green_tri[t].max.array() += d_hat;
-    }
+    const std::vector<AABB>& green_tri_boxes = green_boxes.tri;
+    const std::vector<AABB>& green_edge_boxes = green_boxes.edge;
 
-    // Green edge boxes: union of blue endpoints + d_hat pad.
-    std::vector<AABB> green_edge(ne);
-    for (int e = 0; e < ne; ++e) {
-        green_edge[e] = blue_boxes[edges[e][0]];
-        green_edge[e].expand(blue_boxes[edges[e][1]]);
-        green_edge[e].min.array() -= d_hat;
-        green_edge[e].max.array() += d_hat;
-    }
-
-    std::vector<BVHNode> tri_bvh;
-    const int tri_root = build_bvh(green_tri, tri_bvh);
-    std::vector<BVHNode> edge_bvh;
-    const int edge_root = build_bvh(green_edge, edge_bvh);
+    std::vector<BVHNode> tri_bvh_nodes;
+    const int tri_bvh_root = build_bvh(green_tri_boxes, tri_bvh_nodes);
+    std::vector<BVHNode> edge_bvh_nodes;
+    const int edge_bvh_root = build_bvh(green_edge_boxes, edge_bvh_nodes);
 
     // Node-triangle pairs: register (n, t) when B(n) and G(t) have intersections and n is not a corner of t.
-    std::vector<std::vector<int>> nt_hits(nv);
+    std::vector<std::vector<int>> node_triangle_hits(num_vertices);
     #pragma omp parallel for schedule(dynamic, 32)
-    for (int vi = 0; vi < nv; ++vi) {
-        if (tri_root < 0) continue;
-        query_bvh(tri_bvh, tri_root, blue_boxes[vi], nt_hits[vi]);
+    for (int vertex = 0; vertex < num_vertices; ++vertex) {
+        if (tri_bvh_root < 0) continue;
+        query_bvh(tri_bvh_nodes, tri_bvh_root, blue_boxes[vertex], node_triangle_hits[vertex]);
     }
 
-    for (int vi = 0; vi < nv; ++vi) {
-        for (int t : nt_hits[vi]) {
-            const int a = tri_vertex(ref_mesh, t, 0);
-            const int b = tri_vertex(ref_mesh, t, 1);
-            const int c = tri_vertex(ref_mesh, t, 2);
-            if (vi == a || vi == b || vi == c) continue;
-            const std::size_t idx = cache.nt_pairs.size();
-            cache.nt_pairs.push_back(NodeTrianglePair{vi, {a, b, c}});
-            cache.vertex_nt[vi].push_back({idx, 0});
-            cache.vertex_nt[a].push_back({idx, 1});
-            cache.vertex_nt[b].push_back({idx, 2});
-            cache.vertex_nt[c].push_back({idx, 3});
+    for (int vertex = 0; vertex < num_vertices; ++vertex) {
+        for (int tri_idx : node_triangle_hits[vertex]) {
+            const int v0 = tri_vertex(ref_mesh, tri_idx, 0);
+            const int v1 = tri_vertex(ref_mesh, tri_idx, 1);
+            const int v2 = tri_vertex(ref_mesh, tri_idx, 2);
+            if (vertex == v0 || vertex == v1 || vertex == v2) continue;
+            const std::size_t pair_idx = pair_cache.nt_pairs.size();
+            pair_cache.nt_pairs.push_back(NodeTrianglePair{vertex, {v0, v1, v2}});
+            pair_cache.vertex_nt[vertex].push_back({pair_idx, 0});
+            pair_cache.vertex_nt[v0].push_back({pair_idx, 1});
+            pair_cache.vertex_nt[v1].push_back({pair_idx, 2});
+            pair_cache.vertex_nt[v2].push_back({pair_idx, 3});
         }
     }
 
     // Segment-segment pairs: register (e, f) when G(e) and G(f) have intersections and they share no vertex.
-    std::vector<std::vector<int>> ss_hits(ne);
+    std::vector<std::vector<int>> segment_segment_hits(num_edges);
     #pragma omp parallel for schedule(dynamic, 32)
-    for (int e = 0; e < ne; ++e) {
-        if (edge_root < 0) continue;
-        query_bvh(edge_bvh, edge_root, green_edge[e], ss_hits[e]);
+    for (int edge_idx = 0; edge_idx < num_edges; ++edge_idx) {
+        if (edge_bvh_root < 0) continue;
+        query_bvh(edge_bvh_nodes, edge_bvh_root, green_edge_boxes[edge_idx], segment_segment_hits[edge_idx]);
     }
-    for (int e = 0; e < ne; ++e) {
-        const int ea = edges[e][0];
-        const int eb = edges[e][1];
-        for (int other : ss_hits[e]) {
-            if (other <= e) continue;
-            const int oa = edges[other][0];
-            const int ob = edges[other][1];
-            if (ea == oa || ea == ob || eb == oa || eb == ob) continue;
-            const std::size_t idx = cache.ss_pairs.size();
-            cache.ss_pairs.push_back(SegmentSegmentPair{{ea, eb, oa, ob}});
-            cache.vertex_ss[ea].push_back({idx, 0});
-            cache.vertex_ss[eb].push_back({idx, 1});
-            cache.vertex_ss[oa].push_back({idx, 2});
-            cache.vertex_ss[ob].push_back({idx, 3});
+    for (int edge_idx = 0; edge_idx < num_edges; ++edge_idx) {
+        const int edge_a0 = edges[edge_idx][0];
+        const int edge_a1 = edges[edge_idx][1];
+        for (int other_edge_idx : segment_segment_hits[edge_idx]) {
+            if (other_edge_idx <= edge_idx) continue;
+            const int edge_b0 = edges[other_edge_idx][0];
+            const int edge_b1 = edges[other_edge_idx][1];
+            if (edge_a0 == edge_b0 || edge_a0 == edge_b1 || edge_a1 == edge_b0 || edge_a1 == edge_b1) continue;
+            const std::size_t pair_idx = pair_cache.ss_pairs.size();
+            pair_cache.ss_pairs.push_back(SegmentSegmentPair{{edge_a0, edge_a1, edge_b0, edge_b1}});
+            pair_cache.vertex_ss[edge_a0].push_back({pair_idx, 0});
+            pair_cache.vertex_ss[edge_a1].push_back({pair_idx, 1});
+            pair_cache.vertex_ss[edge_b0].push_back({pair_idx, 2});
+            pair_cache.vertex_ss[edge_b1].push_back({pair_idx, 3});
         }
     }
 
-    return cache;
-}
-
-ParallelCommit compute_parallel_commit_for_vertex(int vi, bool use_cached_prediction, const JacobiPrediction& prediction,
-                                                  const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                                                  const SimParams& params, const std::vector<Vec3>& x_current, const std::vector<Vec3>& xhat,
-                                                  const BroadPhase& broad_phase, const PinMap* pin_map){
-    const auto& bp_cache = broad_phase.cache();
-    ParallelCommit out;
-    out.vi = vi;
-
-    Vec3 delta = prediction.delta;
-
-    if (!use_cached_prediction) {
-        Vec3 g_fresh, delta_fresh;
-        Mat33 H_fresh;
-        compute_local_newton_direction(vi, ref_mesh, adj, pins, params, x_current, xhat, bp_cache, g_fresh, H_fresh, delta_fresh, pin_map);
-        out.alpha_clip = clip_step_to_certified_region(vi, x_current, delta_fresh, prediction.certified_region);
-        delta = out.alpha_clip * delta_fresh;
-    }
-
-    out.delta = delta;
-
-    // The conflict graph ensures no new barrier pair can arise within this
-    // batch, so single-node CCD against the current barrier pairs suffices.
-    out.ccd_step = compute_safe_step_for_vertex(vi, ref_mesh, params, x_current, delta, bp_cache);
-
-    out.x_after = x_current[vi] - out.ccd_step * delta;
-    out.valid = true;
-    return out;
-}
-
-void apply_parallel_commits(const std::vector<ParallelCommit>& commits, std::vector<Vec3>& xnew){
-    for (const auto& commit : commits) {
-        if (!commit.valid) continue;
-        xnew[commit.vi] = commit.x_after;
-    }
+    return pair_cache;
 }

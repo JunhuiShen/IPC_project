@@ -13,11 +13,21 @@
 #include "gpu_solver_bridge.h"
 #include "gpu_solver.h"            // gpu_build_jacobi_predictions, gpu_parallel_commit
 #include "../parallel_helper.h"    // build_conflict_graph, greedy_color_conflict_graph
-#include "../parallel_helper.h" // apply_parallel_commits
 #include "../make_shape.h"         // build_pin_map
 
 #include <algorithm>
 #include <vector>
+
+namespace {
+
+void apply_parallel_commits_cpu(const std::vector<ParallelCommit>& commits, std::vector<Vec3>& xnew) {
+    for (const auto& commit : commits) {
+        if (!commit.valid) continue;
+        xnew[commit.vi] = commit.x_after;
+    }
+}
+
+} // namespace
 
 SolverResult gpu_gauss_seidel_solver(
     const RefMesh&                       ref_mesh,
@@ -101,7 +111,7 @@ SolverResult gpu_gauss_seidel_solver(
                 xnew, xhat, broad_phase, &pm);
 
             // Serial write-back (stays on CPU even on CUDA build)
-            apply_parallel_commits(commits, xnew);
+            apply_parallel_commits_cpu(commits, xnew);
         }
 
         result.last_num_colors = static_cast<int>(color_groups.size());
