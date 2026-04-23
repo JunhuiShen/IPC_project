@@ -28,10 +28,12 @@ void build_jacobi_prediction_deltas(const RefMesh& ref_mesh, const VertexTriangl
 
 // Build isotropic blue boxes from prediction deltas and mirror them into
 // prediction.certified_region; optionally also writes them into blue_boxes_out.
+// If provided, per_vertex_radii overrides ||delta|| for each vertex.
 void build_blue_boxes(const std::vector<Vec3>& positions,
                       bool use_parallel,
                       std::vector<JacobiPrediction>& jacobi_predictions,
-                      std::vector<AABB>* blue_boxes_out = nullptr);
+                      std::vector<AABB>* blue_boxes_out = nullptr,
+                      const std::vector<double>* per_vertex_radii = nullptr);
 
 // Build red triangle/edge boxes as unions of incident blue boxes.
 void build_red_boxes(const RefMesh& ref_mesh,

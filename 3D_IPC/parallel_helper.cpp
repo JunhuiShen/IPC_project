@@ -92,15 +92,18 @@ void build_jacobi_prediction_deltas(const RefMesh& ref_mesh, const VertexTriangl
 void build_blue_boxes(const std::vector<Vec3>& positions,
                       bool use_parallel,
                       std::vector<JacobiPrediction>& jacobi_predictions,
-                      std::vector<AABB>* blue_boxes_out){
+                      std::vector<AABB>* blue_boxes_out,
+                      const std::vector<double>* per_vertex_radii){
     const int num_vertices = static_cast<int>(jacobi_predictions.size());
     if (blue_boxes_out) blue_boxes_out->resize(num_vertices);
+    const bool use_radius_override = per_vertex_radii && static_cast<int>(per_vertex_radii->size()) == num_vertices;
 
     #pragma omp parallel for if(use_parallel)
     for (int vertex = 0; vertex < num_vertices; ++vertex) {
+        const double radius = use_radius_override? std::max(0.0, (*per_vertex_radii)[vertex]): jacobi_predictions[vertex].delta.norm();
         AABB blue_box;
-        blue_box.expand(positions[vertex] - Vec3::Constant(jacobi_predictions[vertex].delta.norm()));
-        blue_box.expand(positions[vertex] + Vec3::Constant(jacobi_predictions[vertex].delta.norm()));
+        blue_box.expand(positions[vertex] - Vec3::Constant(radius));
+        blue_box.expand(positions[vertex] + Vec3::Constant(radius));
         jacobi_predictions[vertex].certified_region = blue_box;
         if (blue_boxes_out) (*blue_boxes_out)[vertex] = blue_box;
     }
@@ -502,7 +505,7 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
                 if (tr) {
                     auto r = trust_region_vertex_triangle_gauss_seidel(
                         x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
-                    if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
+                    safe_min = std::min(safe_min, r.omega);
                 } else {
                     CCDResult r = node_triangle_only_one_node_moves(
                         x[p.node],     dx,
@@ -516,7 +519,7 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
                 if (tr) {
                     auto r = trust_region_vertex_triangle_gauss_seidel(
                         x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
-                    if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
+                    safe_min = std::min(safe_min, r.omega);
                 } else {
                     Vec3 dxv[3] = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
                     dxv[entry.dof - 1] = dx;
@@ -538,7 +541,7 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
             if (tr) {
                 auto r = trust_region_edge_edge_gauss_seidel(
                     x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], dx);
-                if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
+                safe_min = std::min(safe_min, r.omega);
             } else {
                 CCDResult r;
                 if (entry.dof == 0)

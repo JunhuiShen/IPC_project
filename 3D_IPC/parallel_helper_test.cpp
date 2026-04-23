@@ -148,6 +148,40 @@ TEST(BuildJacobiPredictions, CertifiedRegionMatchesIsotropicDeltaNormBox) {
     }
 }
 
+TEST(BuildJacobiPredictions, CertifiedRegionCanUseProvidedRadii) {
+    RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
+    build_test_scene(ref_mesh, state, pins, adj, params, X);
+
+    std::vector<Vec3> xhat;
+    build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
+
+    BroadPhase bp;
+    bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
+
+    std::vector<JacobiPrediction> predictions;
+    build_jacobi_prediction_deltas(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+
+    std::vector<double> override_radii(predictions.size(), 0.0);
+    for (int i = 0; i < static_cast<int>(override_radii.size()); ++i) {
+        override_radii[i] = 0.01 + 0.001 * static_cast<double>(i % 7);
+    }
+
+    build_blue_boxes(state.deformed_positions, params.use_parallel, predictions, nullptr, &override_radii);
+
+    for (int i = 0; i < static_cast<int>(predictions.size()); ++i) {
+        const Vec3& xi = state.deformed_positions[i];
+        const double r = override_radii[i];
+        const AABB& U = predictions[i].certified_region;
+        for (int k = 0; k < 3; ++k) {
+            EXPECT_NEAR(U.min(k), xi(k) - r, 1e-12)
+                << "node " << i << " axis " << k << " min mismatch";
+            EXPECT_NEAR(U.max(k), xi(k) + r, 1e-12)
+                << "node " << i << " axis " << k << " max mismatch";
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // build_red_boxes + build_green_boxes
 // ---------------------------------------------------------------------------
@@ -787,23 +821,21 @@ TEST(ParallelSolver, OneSweepRepeatableSameThreadCount) {
 #endif
 
 // ---------------------------------------------------------------------------
-// compute_safe_step_for_vertex — trust-region gate on barrier proximity
+// compute_safe_step_for_vertex — paper's unconditional trust-region bound
 // ---------------------------------------------------------------------------
 //
-// The trust-region narrow phase shrinks a vertex's Newton step by
-// omega = eta * d0 / |delta|, where d0 is the current pair distance and
-// delta is the step. That bound is only meaningful when the pair is
-// actually within the barrier-active range (d0 < d_hat); outside that
-// range the barrier contributes zero gradient and Hessian, so there is
-// no linearization to protect and omega must effectively be 1.
+// Paper Eq. 21 defines b_v = gamma_p * min(d0) across ALL incident pairs,
+// without any d_hat threshold. compute_safe_step_for_vertex mirrors this by
+// applying omega = min(1, eta * d0 / |delta|) to every pair the broad phase
+// surfaces, regardless of whether d0 is inside the barrier-active range.
 //
-// Regression test: construct a pair whose current separation d0 is
-// 5 * d_hat (well outside the barrier range) but whose swept AABB does
-// overlap — so the broad phase surfaces the pair — and verify the
-// returned safe step is 1.0. Without the d_hat gate, the returned value
-// would be ~0.8 (the raw omega), which is exactly the example=3 bug.
+// This test constructs a pair with d0 = 5*d_hat (outside barrier range) and
+// a Newton step large enough that eta * d0 / |delta| < 1. The returned
+// safe step must be 0.8 (the raw omega), NOT 1.0 — the earlier d_hat gate
+// that forced 1.0 for distant pairs weakened the paper invariant and has
+// been removed.
 
-TEST(TrustRegionSafeStep, FarFromBarrierReturnsFullStep) {
+TEST(TrustRegionSafeStep, FarFromBarrierStillBoundedByTrustRegion) {
     RefMesh ref_mesh;
     DeformedState state;
     std::vector<Vec2> X;
@@ -848,12 +880,12 @@ TEST(TrustRegionSafeStep, FarFromBarrierReturnsFullStep) {
     ASSERT_FALSE(bp.cache().nt_pairs.empty())
         << "precondition: broad phase must surface the far-apart NT pair";
 
-    // Newton step of 0.25 downward on node 0. Without the gate, TR's omega on
-    // (node 0, triangle B) is eta * d0 / |delta| = 0.4 * 0.5 / 0.25 = 0.8.
+    // Newton step of 0.25 downward on node 0.
+    // omega = eta * d0 / |delta| = 0.4 * 0.5 / 0.25 = 0.8.
     const Vec3 delta = Vec3(0.0, 0.25, 0.0);
     const double step = compute_safe_step_for_vertex(
         0, ref_mesh, params, state.deformed_positions, delta, bp.cache());
 
-    EXPECT_NEAR(step, 1.0, 1e-12)
-        << "trust-region clamped a non-colliding pair; d_hat gate missing";
+    EXPECT_NEAR(step, 0.8, 1e-12)
+        << "trust-region should clamp motion regardless of d_hat (paper Eq. 21)";
 }

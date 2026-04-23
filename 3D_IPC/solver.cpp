@@ -55,7 +55,7 @@ std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vecto
 }
 
 // Trust-region initial guess
-std::vector<Vec3> trust_region_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh, double d_hat) {
+std::vector<Vec3> trust_region_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh, double /*d_hat*/) {
     const int nv = static_cast<int>(x.size());
     constexpr double gamma_P = 0.4;  // 0 < gamma_P < 0.5
 
@@ -66,14 +66,14 @@ std::vector<Vec3> trust_region_initial_guess(const std::vector<Vec3>& x, const s
     ccd_bp.build_ccd_candidates(x, dx, ref_mesh, 1.0);
     const auto& cache = ccd_bp.cache();
 
-    // b[v] = min over every barrier-active candidate pair that touches v of d0,
-    // eventually multiplied by gamma_P.
+    // Paper Eq. 21: b[v] = gamma_P * min over every candidate pair touching v
+    // of d0. No d_hat threshold -- the invariant ||x_v - x_v^prev|| <= b_v
+    // must hold for all pairs, not only those already inside the barrier.
     std::vector<double> b(nv, std::numeric_limits<double>::infinity());
 
     for (const auto& p : cache.nt_pairs) {
         const double d0 = node_triangle_distance(
                 x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]]).distance;
-        if (d0 >= d_hat) continue;
         b[p.node]     = std::min(b[p.node],     d0);
         b[p.tri_v[0]] = std::min(b[p.tri_v[0]], d0);
         b[p.tri_v[1]] = std::min(b[p.tri_v[1]], d0);
@@ -82,7 +82,6 @@ std::vector<Vec3> trust_region_initial_guess(const std::vector<Vec3>& x, const s
     for (const auto& p : cache.ss_pairs) {
         const double d0 = segment_segment_distance(
                 x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]]).distance;
-        if (d0 >= d_hat) continue;
         b[p.v[0]] = std::min(b[p.v[0]], d0);
         b[p.v[1]] = std::min(b[p.v[1]], d0);
         b[p.v[2]] = std::min(b[p.v[2]], d0);
@@ -142,7 +141,7 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
             if (tr) {
                 auto r = trust_region_vertex_triangle_gauss_seidel(
                     x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
-                if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
+                safe_min = std::min(safe_min, r.omega);
             } else {
                 auto r = node_triangle_only_one_node_moves(
                     x[p.node],     dx,
@@ -158,7 +157,7 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
             if (tr) {
                 auto r = trust_region_vertex_triangle_gauss_seidel(
                     x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
-                if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
+                safe_min = std::min(safe_min, r.omega);
             } else {
                 Vec3 dxv[3] = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
                 dxv[p.vi_local] = dx;
@@ -175,7 +174,7 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
             if (tr) {
                 auto r = trust_region_edge_edge_gauss_seidel(
                     x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], dx);
-                if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
+                safe_min = std::min(safe_min, r.omega);
             } else {
                 CCDResult r;
                 if (p.vi_dof == 0)
@@ -304,6 +303,7 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
     std::vector<JacobiPrediction> jacobi_predictions;
     jacobi_predictions.reserve(num_vertices);
     std::vector<AABB> blue_boxes(num_vertices);
+    std::vector<double> trust_blue_radii;
     RedBoxes red_boxes;
     GreenBoxes green_boxes;
     std::vector<Vec3> positions_before_iter;
@@ -404,11 +404,19 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         }
 
         // Step 2: define node certified regions, i.e. "blue boxes".
-        build_blue_boxes(
-            xnew,
-            params.use_parallel,
-            jacobi_predictions,
-            &blue_boxes);
+        // With trust-region on, the radius is the b_v = gamma_P * d0_min
+        const std::vector<double>* blue_box_radii = nullptr;
+        if (barrier_enabled && params.use_trust_region) {
+            trust_blue_radii.resize(num_vertices);
+            #pragma omp parallel for if(params.use_parallel)
+            for (int vi = 0; vi < num_vertices; ++vi) {
+                const double b = compute_trust_region_bound_for_vertex(vi, xnew, *active_pair_cache, 0.4);
+                trust_blue_radii[vi] = std::isfinite(b) ? b : jacobi_predictions[vi].delta.norm();
+            }
+            blue_box_radii = &trust_blue_radii;
+        }
+        
+        build_blue_boxes(xnew, params.use_parallel, jacobi_predictions, &blue_boxes, blue_box_radii);
 
         // Step 3: define (red) edge and triangle boxes from node (blue) boxes.
         if (barrier_enabled) {
