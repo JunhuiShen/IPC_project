@@ -408,8 +408,7 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
             xnew,
             params.use_parallel,
             jacobi_predictions,
-            &blue_boxes,
-            1.0e-3 * ref_mesh.min_edge_length);
+            &blue_boxes);
 
         // Step 3: define (red) edge and triangle boxes from node (blue) boxes.
         if (barrier_enabled) {

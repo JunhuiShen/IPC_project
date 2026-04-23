@@ -92,17 +92,15 @@ void build_jacobi_prediction_deltas(const RefMesh& ref_mesh, const VertexTriangl
 void build_blue_boxes(const std::vector<Vec3>& positions,
                       bool use_parallel,
                       std::vector<JacobiPrediction>& jacobi_predictions,
-                      std::vector<AABB>* blue_boxes_out,
-                      double radius){
+                      std::vector<AABB>* blue_boxes_out){
     const int num_vertices = static_cast<int>(jacobi_predictions.size());
     if (blue_boxes_out) blue_boxes_out->resize(num_vertices);
 
     #pragma omp parallel for if(use_parallel)
     for (int vertex = 0; vertex < num_vertices; ++vertex) {
-        const double node_radius = std::max(jacobi_predictions[vertex].delta.norm(), radius);
         AABB blue_box;
-        blue_box.expand(positions[vertex] - Vec3::Constant(node_radius));
-        blue_box.expand(positions[vertex] + Vec3::Constant(node_radius));
+        blue_box.expand(positions[vertex] - Vec3::Constant(jacobi_predictions[vertex].delta.norm()));
+        blue_box.expand(positions[vertex] + Vec3::Constant(jacobi_predictions[vertex].delta.norm()));
         jacobi_predictions[vertex].certified_region = blue_box;
         if (blue_boxes_out) (*blue_boxes_out)[vertex] = blue_box;
     }
