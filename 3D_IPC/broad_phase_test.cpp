@@ -1,5 +1,7 @@
 #include "broad_phase.h"
 #include "physics.h"
+#include "make_shape.h"
+#include "visualization.h"
 #include "node_triangle_distance.h"
 #include "segment_segment_distance.h"
 
@@ -910,6 +912,43 @@ TEST(QueryPairsForVertex, FaceRoleEnumerationFindsExternalNode) {
     }
     EXPECT_TRUE(face_role_found)
         << "expected face-role pair (external node 3, tri A={0,1,2}) from vi=0";
+}
+
+TEST(BroadPhaseTest, BlueRedCcdTest) {
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    build_square_mesh(mesh, state, X, 4, 4, 1.0, 1.0, Vec3(0.0, 0.0, 0.0));
+
+    const std::vector<Vec3>& x = state.deformed_positions;
+    const int nv = static_cast<int>(x.size());
+
+    std::vector<AABB> blue_boxes(nv);
+    for (int i = 0; i < nv; ++i) {
+        blue_boxes[i] = AABB(x[i] - Vec3::Constant(0.05), x[i] + Vec3::Constant(0.05));
+    }
+
+    BroadPhase broad;
+    broad.initialize(blue_boxes, mesh);
+
+    std::srand(42);
+    std::vector<Vec3> vel(nv);
+    for (int i = 0; i < nv; ++i)
+        vel[i] = Vec3::NullaryExpr([](){ return ((std::rand() / double(RAND_MAX)) * 2.0 - 1.0) * 0.05; });
+
+    const double dt = 1.0;
+    std::vector<Vec3> clamped(nv);
+    for (int i = 0; i < nv; ++i) {
+        clamped[i] = broad.clamp_to_node_box(i, x[i] + dt * vel[i]);
+        const AABB& box = broad.cache().node_boxes[i];
+        EXPECT_TRUE((clamped[i].array() >= box.min.array()).all() &&
+                    (clamped[i].array() <= box.max.array()).all())
+            << "clamped[" << i << "] is outside its node box";
+    }
+
+    export_geo("vis_debug/blue_red_ccd_mesh.geo", x, mesh.tris);
+    export_geo("vis_debug/blue_red_ccd_mesh_deformed.geo", clamped, mesh.tris);
+    export_broad_phase_hierarchy("vis_debug/blue_red_bvh", broad);
 }
 
 // ====================================================================

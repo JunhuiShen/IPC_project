@@ -94,6 +94,10 @@ public:
 
     void initialize(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double dhat);
 
+    // Initialize from pre-built per-vertex AABBs. Triangle and edge boxes are
+    // derived as the union of their vertex boxes (i.e. red boxes).
+    void initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh);
+
     const std::vector<NodeTrianglePair>& nt_pairs() const {
         return cache_.nt_pairs;
     }
@@ -138,6 +142,12 @@ public:
 
     const Cache& cache() const {
         return cache_;
+    }
+
+    // Clamps p to lie inside the node box for vertex i.
+    Vec3 clamp_to_node_box(int i, const Vec3& p) const {
+        const AABB& box = cache_.node_boxes[i];
+        return p.cwiseMax(box.min).cwiseMin(box.max);
     }
 
     // Increments on every initialize() call — a cache-invalidation key.

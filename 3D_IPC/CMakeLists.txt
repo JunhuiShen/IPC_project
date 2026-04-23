@@ -232,6 +232,8 @@ gtest_discover_tests(trust_region_test)
 add_executable(broad_phase_test
     broad_phase_test.cpp
     broad_phase.cpp
+    make_shape.cpp
+    visualization.cpp
 )
 
 target_link_libraries(broad_phase_test

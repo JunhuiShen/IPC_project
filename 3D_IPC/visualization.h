@@ -26,3 +26,7 @@ void export_aabb_list(const std::string& filename, const std::vector<AABB>& boxe
 // Leaf nodes shallower than depth are included since they cannot split further.
 // Returns the number of boxes written (0 means the depth is beyond the tree).
 int export_bvh_level(const std::string& filename, const std::vector<BVHNode>& nodes, int root, int depth);
+
+// Writes the full BVH hierarchy for all three trees (tri, edge, node) as a
+// series of per-level OBJ files: <prefix>_tri_level_N.obj, etc.
+void export_broad_phase_hierarchy(const std::string& prefix, const BroadPhase& bp);

@@ -446,6 +446,78 @@ void BroadPhase::initialize(const std::vector<Vec3>& x, const std::vector<Vec3>&
     ++version_;
 }
 
+void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh) {
+    const int nv = static_cast<int>(vertex_boxes.size());
+    const int nt = num_tris(mesh);
+
+    Cache c;
+    c.vertex_nt.resize(nv);
+    c.vertex_ss.resize(nv);
+
+    if (!topology_valid_) set_mesh_topology(mesh, nv);
+    c.edges = topo_.edges;
+    c.node_to_edges = topo_.node_to_edges;
+    c.node_to_tris = topo_.node_to_tris;
+    const int ne = static_cast<int>(c.edges.size());
+
+    c.node_boxes = vertex_boxes;
+
+    c.tri_boxes.resize(nt);
+    for (int t = 0; t < nt; ++t) {
+        const int a  = tri_vertex(mesh, t, 0);
+        const int b  = tri_vertex(mesh, t, 1);
+        const int cc = tri_vertex(mesh, t, 2);
+        c.tri_boxes[t] = vertex_boxes[a];
+        c.tri_boxes[t].expand(vertex_boxes[b]);
+        c.tri_boxes[t].expand(vertex_boxes[cc]);
+    }
+
+    c.edge_boxes.resize(ne);
+    for (int e = 0; e < ne; ++e) {
+        c.edge_boxes[e] = vertex_boxes[c.edges[e][0]];
+        c.edge_boxes[e].expand(vertex_boxes[c.edges[e][1]]);
+    }
+
+    c.tri_root  = build_bvh(c.tri_boxes,  c.tri_bvh_nodes);
+    c.edge_root = build_bvh(c.edge_boxes, c.edge_bvh_nodes);
+    c.node_root = build_bvh(c.node_boxes, c.node_bvh_nodes);
+
+    std::vector<std::vector<int>> node_hits(nv);
+    #pragma omp parallel for schedule(dynamic, 32)
+    for (int node = 0; node < nv; ++node) {
+        if (c.tri_root < 0) continue;
+        query_bvh(c.tri_bvh_nodes, c.tri_root, c.node_boxes[node], node_hits[node]);
+    }
+    for (int node = 0; node < nv; ++node) {
+        for (int t : node_hits[node]) {
+            const int a  = tri_vertex(mesh, t, 0);
+            const int b  = tri_vertex(mesh, t, 1);
+            const int cc = tri_vertex(mesh, t, 2);
+            if (node_in_triangle(node, a, b, cc)) continue;
+            add_nt_pair(c, node, t, mesh);
+        }
+    }
+
+    std::vector<std::vector<int>> edge_hits(ne);
+    #pragma omp parallel for schedule(dynamic, 32)
+    for (int e = 0; e < ne; ++e) {
+        if (c.edge_root < 0) continue;
+        query_bvh(c.edge_bvh_nodes, c.edge_root, c.edge_boxes[e], edge_hits[e]);
+    }
+    for (int e = 0; e < ne; ++e) {
+        const Edge e0{c.edges[e][0], c.edges[e][1]};
+        for (int other : edge_hits[e]) {
+            if (other == e) continue;
+            const Edge e1{c.edges[other][0], c.edges[other][1]};
+            if (share_vertex(e0, e1)) continue;
+            add_ss_pair(c, e, other);
+        }
+    }
+
+    cache_ = std::move(c);
+    ++version_;
+}
+
 void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt) {
     constexpr double epsilon_pad = 1.0e-10;  // fp tie-breaker, not a safety pad
     build(x, v, mesh, dt, /*node_pad=*/epsilon_pad, /*tri_pad=*/epsilon_pad, /*edge_pad=*/epsilon_pad);
