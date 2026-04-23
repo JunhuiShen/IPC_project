@@ -345,9 +345,14 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
                 compute_local_newton_direction(vertex, ref_mesh, adj, pins, params, xnew, xhat,
                                                *active_pair_cache, unused_gradient, unused_hessian, fresh_delta, &pin_map);
 
-                // Clamp the step to stay inside the node's blue box.
-                const Vec3 clipped_delta =
-                    (barrier_enabled ? clip_step_to_certified_region(vertex, xnew, fresh_delta, blue_boxes[vertex]) : 1.0) * fresh_delta;
+                // Clamp to the blue box only when barriers are enabled.
+                // With barriers off, skip certified-region clipping entirely.
+                Vec3 clipped_delta = fresh_delta;
+                if (barrier_enabled) {
+                    const double clip_alpha =
+                        clip_step_to_certified_region(vertex, xnew, fresh_delta, blue_boxes[vertex]);
+                    clipped_delta = clip_alpha * fresh_delta;
+                }
 
                 // CCD against the current active barrier-pair cache.
                 const double safe_step = compute_safe_step_for_vertex(vertex, ref_mesh, params, xnew, clipped_delta, *active_pair_cache);
@@ -399,7 +404,12 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         }
 
         // Step 2: define node certified regions, i.e. "blue boxes".
-        build_blue_boxes(xnew, params.use_parallel, jacobi_predictions, &blue_boxes);
+        build_blue_boxes(
+            xnew,
+            params.use_parallel,
+            jacobi_predictions,
+            &blue_boxes,
+            1.0e-3 * ref_mesh.min_edge_length);
 
         // Step 3: define (red) edge and triangle boxes from node (blue) boxes.
         if (barrier_enabled) {
@@ -420,7 +430,7 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         // Step 6: colored GS.
         apply_colored_gauss_seidel(color_groups_to_apply);
 
-        // Step 7: CCD sanity check on the actual executed colored path.
+        // Step 7: replay CCD sanity check in the same coloring order.
         if (has_ccd_replay_violation(color_groups_to_apply)) result.ccd_violations += 1;
 
         result.iterations = outer_iter;

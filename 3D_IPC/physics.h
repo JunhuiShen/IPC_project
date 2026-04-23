@@ -124,11 +124,13 @@ struct RefMesh {
     std::vector<Hinge> hinges;
     VertexHingeMap hinge_adj;
     size_t num_positions;
+    double min_edge_length = 0.0;
 
     inline void initialize(const std::vector<Vec2>& X, const std::vector<Vec3>& x_rest){
         num_positions = X.size();
         compute_dm_inverse(X);
         build_hinges(X, x_rest);
+        compute_min_edge_length(x_rest);
     }
 
     inline void compute_dm_inverse(const std::vector<Vec2>& X){
@@ -222,6 +224,20 @@ struct RefMesh {
             double mv = m / 3.0;
             for (int a = 0; a < 3; ++a) mass[tris[t * 3 + a]] += mv;
         }
+    }
+
+    inline void compute_min_edge_length(const std::vector<Vec3>& x_rest) {
+        double min_len = std::numeric_limits<double>::max();
+        const int nt = static_cast<int>(tris.size()) / 3;
+        for (int t = 0; t < nt; ++t) {
+            const int v0 = tris[3 * t + 0];
+            const int v1 = tris[3 * t + 1];
+            const int v2 = tris[3 * t + 2];
+            min_len = std::min(min_len, (x_rest[v1] - x_rest[v0]).norm());
+            min_len = std::min(min_len, (x_rest[v2] - x_rest[v1]).norm());
+            min_len = std::min(min_len, (x_rest[v0] - x_rest[v2]).norm());
+        }
+        min_edge_length = (min_len == std::numeric_limits<double>::max()) ? 0.0 : min_len;
     }
 };
 

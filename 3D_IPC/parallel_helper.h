@@ -31,7 +31,8 @@ void build_jacobi_prediction_deltas(const RefMesh& ref_mesh, const VertexTriangl
 void build_blue_boxes(const std::vector<Vec3>& positions,
                       bool use_parallel,
                       std::vector<JacobiPrediction>& jacobi_predictions,
-                      std::vector<AABB>* blue_boxes_out = nullptr);
+                      std::vector<AABB>* blue_boxes_out = nullptr,
+                      double radius = 0.0);
 
 // Build red triangle/edge boxes as unions of incident blue boxes.
 void build_red_boxes(const RefMesh& ref_mesh,
