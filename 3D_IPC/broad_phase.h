@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IPC_math.h"
+#include "ccd.h"
 #include "physics.h"
 
 #include <algorithm>
@@ -96,7 +97,7 @@ public:
 
     // Initialize from pre-built per-vertex AABBs. Triangle and edge boxes are
     // derived as the union of their vertex boxes (i.e. red boxes).
-    void initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh);
+    void initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat = 0.0);
 
     const std::vector<NodeTrianglePair>& nt_pairs() const {
         return cache_.nt_pairs;
@@ -105,6 +106,11 @@ public:
     const std::vector<SegmentSegmentPair>& ss_pairs() const {
         return cache_.ss_pairs;
     }
+
+    // Run CCD over all cached NT and SS pairs given current positions x and
+    // proposed new positions x_new. Returns the minimum TOI in [0,1], or 1.0
+    // if no collision is detected.
+    double ccd_min_toi(const std::vector<Vec3>& x, const std::vector<Vec3>& x_new) const;
 
     void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt);
 

@@ -446,7 +446,7 @@ void BroadPhase::initialize(const std::vector<Vec3>& x, const std::vector<Vec3>&
     ++version_;
 }
 
-void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh) {
+void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat) {
     const int nv = static_cast<int>(vertex_boxes.size());
     const int nt = num_tris(mesh);
 
@@ -462,6 +462,7 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
 
     c.node_boxes = vertex_boxes;
 
+    const Vec3 pad = d_hat * Vec3::Ones();
     c.tri_boxes.resize(nt);
     for (int t = 0; t < nt; ++t) {
         const int a  = tri_vertex(mesh, t, 0);
@@ -470,12 +471,16 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
         c.tri_boxes[t] = vertex_boxes[a];
         c.tri_boxes[t].expand(vertex_boxes[b]);
         c.tri_boxes[t].expand(vertex_boxes[cc]);
+        c.tri_boxes[t].min -= pad;
+        c.tri_boxes[t].max += pad;
     }
 
     c.edge_boxes.resize(ne);
     for (int e = 0; e < ne; ++e) {
         c.edge_boxes[e] = vertex_boxes[c.edges[e][0]];
         c.edge_boxes[e].expand(vertex_boxes[c.edges[e][1]]);
+        c.edge_boxes[e].min -= pad;
+        c.edge_boxes[e].max += pad;
     }
 
     c.tri_root  = build_bvh(c.tri_boxes,  c.tri_bvh_nodes);
@@ -516,6 +521,32 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
 
     cache_ = std::move(c);
     ++version_;
+}
+
+double BroadPhase::ccd_min_toi(const std::vector<Vec3>& x, const std::vector<Vec3>& x_new) const {
+    const int nv = static_cast<int>(x.size());
+    std::vector<Vec3> dx(nv);
+    for (int i = 0; i < nv; ++i) dx[i] = x_new[i] - x[i];
+
+    double toi_min = 1.0;
+
+    for (const auto& p : cache_.nt_pairs) {
+        toi_min = std::min(toi_min, node_triangle_general_ccd(
+            x[p.node],     dx[p.node],
+            x[p.tri_v[0]], dx[p.tri_v[0]],
+            x[p.tri_v[1]], dx[p.tri_v[1]],
+            x[p.tri_v[2]], dx[p.tri_v[2]]));
+    }
+
+    for (const auto& p : cache_.ss_pairs) {
+        toi_min = std::min(toi_min, segment_segment_general_ccd(
+            x[p.v[0]], dx[p.v[0]],
+            x[p.v[1]], dx[p.v[1]],
+            x[p.v[2]], dx[p.v[2]],
+            x[p.v[3]], dx[p.v[3]]));
+    }
+
+    return toi_min;
 }
 
 void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt) {

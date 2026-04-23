@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <sys/stat.h>
 #include <set>
 #include <tuple>
 #include <vector>
@@ -915,10 +916,28 @@ TEST(QueryPairsForVertex, FaceRoleEnumerationFindsExternalNode) {
 }
 
 TEST(BroadPhaseTest, BlueRedCcdTest) {
-    //build test geom
-    RefMesh mesh;DeformedState state;std::vector<Vec2> X;
-    build_square_mesh(mesh, state, X, 4, 4, 1.0, 1.0, Vec3(0.0, 0.0, 0.0));
-    const std::vector<Vec3>& x = state.deformed_positions;
+    // two 4x4 sheets, second slightly above the first
+    RefMesh mesh0, mesh1;
+    DeformedState state0, state1;
+    std::vector<Vec2> X0, X1;
+    build_square_mesh(mesh0, state0, X0, 4, 4, 1.0, 1.0, Vec3(0.0, 0.0, 0.0));
+    build_square_mesh(mesh1, state1, X1, 4, 4, 1.0, 1.0, Vec3(0.0, 0.01, 0.0));
+
+    const int nv0 = static_cast<int>(state0.deformed_positions.size());
+    const int nv1 = static_cast<int>(state1.deformed_positions.size());
+
+    // merge into a single mesh and position array
+    std::vector<Vec3> x_all = state0.deformed_positions;
+    x_all.insert(x_all.end(), state1.deformed_positions.begin(), state1.deformed_positions.end());
+
+    RefMesh mesh;
+    mesh.num_positions = nv0 + nv1;
+    mesh.ref_positions.insert(mesh.ref_positions.end(), mesh0.ref_positions.begin(), mesh0.ref_positions.end());
+    mesh.ref_positions.insert(mesh.ref_positions.end(), mesh1.ref_positions.begin(), mesh1.ref_positions.end());
+    mesh.tris = mesh0.tris;
+    for (int idx : mesh1.tris) mesh.tris.push_back(idx + nv0);
+
+    const std::vector<Vec3>& x = x_all;
     const int nv = static_cast<int>(x.size());
 
     //build test node (blue) boxes and create broad phase (red boxes) accordingly
@@ -927,25 +946,62 @@ TEST(BroadPhaseTest, BlueRedCcdTest) {
         blue_boxes[i] = AABB(x[i] - Vec3::Constant(0.05), x[i] + Vec3::Constant(0.05));
     }
     BroadPhase broad;
-    broad.initialize(blue_boxes, mesh);
+    broad.initialize(blue_boxes, mesh, 0.01);
 
     //create random velocities and clamp their motion to node boxes, test that clamping keeps things in the node boxes
     std::srand(42);
     std::vector<Vec3> vel(nv);
     for (int i = 0; i < nv; ++i)
-        vel[i] = Vec3::NullaryExpr([](){ return ((std::rand() / double(RAND_MAX)) * 2.0 - 1.0) * 0.05; });
-    const double dt = 1.0;
+        vel[i] = Vec3::NullaryExpr([](){ return ((std::rand() / double(RAND_MAX)) * 2.0 - 1.0) * 1.5; });
+    const double dt = 1.0/30.0;
+    std::vector<Vec3> x_new(nv);
+    for (int i = 0; i < nv; ++i) x_new[i] = x[i] + dt * vel[i];
     std::vector<Vec3> clamped(nv);
     for (int i = 0; i < nv; ++i) {
-        clamped[i] = broad.clamp_to_node_box(i, x[i] + dt * vel[i]);
+        clamped[i] = broad.clamp_to_node_box(i, x_new[i]);
         const AABB& box = broad.cache().node_boxes[i];
         EXPECT_TRUE((clamped[i].array() >= box.min.array()).all() &&
                     (clamped[i].array() <= box.max.array()).all())
             << "clamped[" << i << "] is outside its node box";
     }
 
+    // build swept broad phase from x to clamped positions
+    std::vector<Vec3> vel_clamped(nv);
+    for (int i = 0; i < nv; ++i) vel_clamped[i] = (clamped[i] - x[i]) / dt;
+    BroadPhase swept_broad;
+    swept_broad.build_ccd_candidates(x, vel_clamped, mesh, dt);
+
+    // swept pairs must be a subset of blue-box pairs
+    const PairSets blue_sets  = pair_sets_from_broad(broad);
+    const PairSets swept_sets = pair_sets_from_broad(swept_broad);
+    printf("blue NT=%zu SS=%zu  swept NT=%zu SS=%zu\n",
+           blue_sets.nt.size(), blue_sets.ss.size(),
+           swept_sets.nt.size(), swept_sets.ss.size());
+    for (const auto& key : swept_sets.nt) {
+        EXPECT_TRUE(blue_sets.nt.count(key))
+            << "NT pair (node=" << key.node << ", tri=["
+            << key.a << "," << key.b << "," << key.c
+            << "]) in swept but not in blue-box broad phase";
+    }
+    for (const auto& key : swept_sets.ss) {
+        EXPECT_TRUE(blue_sets.ss.count(key))
+            << "SS pair (e0=[" << key.e0.a << "," << key.e0.b
+            << "], e1=[" << key.e1.a << "," << key.e1.b
+            << "]) in swept but not in blue-box broad phase";
+    }
+
+    //verify (visualy) that CCD correctly detetcs first collision
+    double alpha = broad.ccd_min_toi(x, clamped);
+
+    std::vector<Vec3> x_ccd(nv);
+    for (int i = 0; i < nv; ++i) x_ccd[i] = x[i] + alpha * (clamped[i] - x[i]);
+
+    printf("ccd alpha=%.6f\n", alpha);
+
+    mkdir("vis_debug", 0755);
     export_geo("vis_debug/blue_red_ccd_mesh.geo", x, mesh.tris);
     export_geo("vis_debug/blue_red_ccd_mesh_deformed.geo", clamped, mesh.tris);
+    export_geo("vis_debug/blue_red_ccd_mesh_ccd.geo", x_ccd, mesh.tris);
     export_broad_phase_hierarchy("vis_debug/blue_red_bvh", broad);
 }
 
