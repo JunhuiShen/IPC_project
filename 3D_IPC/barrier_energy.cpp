@@ -25,7 +25,7 @@ double levi_civita(int i, int j, int k){
 double scalar_barrier(double delta, double d_hat){
     if (d_hat <= 0.0) throw std::runtime_error("scalar_barrier: d_hat must be positive.");
     if (delta >= d_hat) return 0.0;
-    if (delta <= 0.0) throw std::runtime_error("scalar_barrier: delta must be positive.");
+    if (delta == 0.0) throw std::runtime_error("scalar_barrier: delta must be nonzero.");
     const double s = delta - d_hat;
     return -(s * s) * std::log(delta / d_hat);
 }
@@ -33,7 +33,7 @@ double scalar_barrier(double delta, double d_hat){
 double scalar_barrier_gradient(double delta, double d_hat){
     if (d_hat <= 0.0) throw std::runtime_error("scalar_barrier_gradient: d_hat must be positive.");
     if (delta >= d_hat) return 0.0;
-    if (delta <= 0.0) throw std::runtime_error("scalar_barrier_gradient: delta must be positive.");
+    if (delta == 0.0) throw std::runtime_error("scalar_barrier_gradient: delta must be nonzero.");
     const double s = delta - d_hat;
     return -2.0 * s * std::log(delta / d_hat) - (s * s) / delta;
 }
@@ -41,7 +41,7 @@ double scalar_barrier_gradient(double delta, double d_hat){
 double scalar_barrier_hessian(double delta, double d_hat){
     if (d_hat <= 0.0) throw std::runtime_error("scalar_barrier_hessian: d_hat must be positive.");
     if (delta >= d_hat) return 0.0;
-    if (delta <= 0.0) throw std::runtime_error("scalar_barrier_hessian: delta must be positive.");
+    if (delta == 0.0) throw std::runtime_error("scalar_barrier_hessian: delta must be nonzero.");
     const double ratio = d_hat / delta;
     return ratio * ratio + 2.0 * ratio - 3.0 - 2.0 * std::log(delta / d_hat);
 }
@@ -63,7 +63,7 @@ Vec3 node_triangle_barrier_gradient(const Vec3& x, const Vec3& x1, const Vec3& x
 
     Vec3 g = Vec3::Zero();
     if (bp == 0.0) return g;
-    if (delta <= 0.0) throw std::runtime_error("node_triangle_barrier_gradient: distance must be positive.");
+    if (delta == 0.0) throw std::runtime_error("node_triangle_barrier_gradient: distance must be nonzero.");
 
     double u[3];
     for (int k = 0; k < 3; ++k) u[k] = (x(k) - dr.closest_point(k)) / delta;
@@ -173,7 +173,7 @@ Mat33 node_triangle_barrier_hessian(const Vec3& x, const Vec3& x1, const Vec3& x
     const double bpp   = scalar_barrier_hessian(delta, d_hat);
 
     if (bp == 0.0 && bpp == 0.0) return H;
-    if (delta <= 0.0) throw std::runtime_error("node_triangle_barrier_hessian: distance must be positive.");
+    if (delta == 0.0) throw std::runtime_error("node_triangle_barrier_hessian: distance must be nonzero.");
 
     const Vec3* Y[4] = {&x, &x1, &x2, &x3};
     const int p = dof;
@@ -423,7 +423,7 @@ Vec3 segment_segment_barrier_gradient(const Vec3& x1, const Vec3& x2, const Vec3
 
     Vec3 g = Vec3::Zero();
     if (bp == 0.0) return g;
-    if (delta <= 0.0) throw std::runtime_error("segment_segment_barrier_gradient: distance must be positive.");
+    if (delta == 0.0) throw std::runtime_error("segment_segment_barrier_gradient: distance must be nonzero.");
 
     const Vec3 r = dr.closest_point_1 - dr.closest_point_2;
     double u[3];
@@ -500,7 +500,7 @@ Mat33 segment_segment_barrier_hessian(const Vec3& x1, const Vec3& x2,
     const double bpp   = scalar_barrier_hessian(delta, d_hat);
 
     if (bp == 0.0 && bpp == 0.0) return H;
-    if (delta <= 0.0) throw std::runtime_error("segment_segment_barrier_hessian: distance must be positive.");
+    if (delta == 0.0) throw std::runtime_error("segment_segment_barrier_hessian: distance must be nonzero.");
 
     const Vec3* Y[4] = {&x1, &x2, &x3, &x4};
     const int p = dof;

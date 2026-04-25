@@ -5,6 +5,8 @@ build/
 frames_sim3d/
 frames_baseline/
 frames_after/
+acceptance_*/
+tools/
 
 # Benchmark / diff logs
 log_baseline*.txt

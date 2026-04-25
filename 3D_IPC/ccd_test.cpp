@@ -1,8 +1,11 @@
 #include "ccd.h"
 #include "solver.h"
 #include "make_shape.h"
+#include "segment_segment_distance.h"
 
 #include <gtest/gtest.h>
+#include <algorithm>
+#include <array>
 
 namespace {
 
@@ -261,6 +264,140 @@ TEST(CCDSegmentSegmentSingleMovingNode, CandidateOutsideStepInterval) {
     EXPECT_FALSE(r.collision);
     EXPECT_FALSE(r.coplanar_entire_step);
     EXPECT_TRUE(r.parallel_or_no_crossing);
+}
+
+// ---------------------------------------------------------------------------
+// Regression guard for an example-4 segment pair whose distance increases
+// throughout the sampled motion. It should remain a no-collision case.
+TEST(CCDSegmentSegmentSingleMovingNode, RepoExample4Frame9Sub6Iter5) {
+    const Vec3 x1(-5.33363314325580457e-02, 1.57380202214873172e-01, 3.54253855534581164e-01);
+    const Vec3 dx1( 3.14637561392388425e-03,-1.90288924652220982e-03, 5.87251965795404507e-03);
+    const Vec3 x2(-9.03270283891810799e-02, 1.85085196018025616e-01, 3.53048101908432388e-01);
+    const Vec3 x3(-7.56544663979064197e-02, 1.74344892610936164e-01, 3.42000252922963821e-01);
+    const Vec3 x4(-6.78743242217503817e-02, 1.67293411642532724e-01, 3.60000372162717852e-01);
+
+    double d_min = 1e9; double t_at_min = -1.0;
+    double d_prev = -1.0;
+    for (int i = 0; i <= 100; ++i) {
+        double t = i / 100.0;
+        Vec3 x1t = x1 + dx1 * t;
+        auto d = segment_segment_distance(x1t, x2, x3, x4);
+        if (d.distance < d_min) { d_min = d.distance; t_at_min = t; }
+        if (i > 0) {
+            EXPECT_GE(d.distance, d_prev - 1e-12) << "distance should not decrease at sample " << i;
+        }
+        d_prev = d.distance;
+    }
+
+    const CCDResult r = segment_segment_only_one_node_moves(x1, dx1, x2, x3, x4);
+    EXPECT_FALSE(r.collision);
+    EXPECT_FALSE(r.has_candidate_time);
+    EXPECT_TRUE(r.parallel_or_no_crossing);
+    EXPECT_NEAR(d_min, 4.36963887902074195e-04, 1e-15);
+    EXPECT_DOUBLE_EQ(t_at_min, 0.0);
+}
+
+TEST(GeneralCCDSegmentSegment, RepoExample4Frame9Sub6SweepBoundaryEdge) {
+    // Example-4 predictor sweep where the boundary edge primitive must clip
+    // the step even though the neighboring node-triangle primitive is outside.
+    const Vec3 x3588(-0.059539791821382186, 0.1540607437288348, 0.35529553899914945);
+    const Vec3 dx3588(0.004847380237543629, 0.0043465291684171292, -2.5049316649261577e-05);
+    const Vec3 x3589(-0.091034795625455009, 0.18520815040391844, 0.3532480684510913);
+    const Vec3 dx3589(0.00013025060027307966, 0.00040432496563547193, -0.00010336345303363359);
+
+    const Vec3 x3117(-0.075654645452310015, 0.17434507029226337, 0.34200013654345546);
+    const Vec3 dx3117(9.2102319146358802e-08, -8.8077176663148293e-08, 1.2465886145562877e-07);
+    const Vec3 x3148(-0.082705931560382612, 0.18212494614593469, 0.3600000809332693);
+    const Vec3 dx3148(-2.5397006150895685e-08, 3.2212561784650262e-08, 4.4863568915420871e-08);
+    const Vec3 x3149(-0.067874983350554322, 0.16729401010559197, 0.36000022549626293);
+    const Vec3 dx3149(2.1052045717784296e-08, -1.4851148838479489e-08, 2.2516221354074162e-07);
+
+    const std::array<double, 3> toi = {
+        segment_segment_general_ccd(x3117, dx3117, x3148, dx3148, x3588, dx3588, x3589, dx3589),
+        segment_segment_general_ccd(x3117, dx3117, x3149, dx3149, x3588, dx3588, x3589, dx3589),
+        segment_segment_general_ccd(x3148, dx3148, x3149, dx3149, x3588, dx3588, x3589, dx3589),
+    };
+
+    EXPECT_DOUBLE_EQ(toi[0], 1.0);
+    EXPECT_NEAR(toi[1], 0.86764166245631813, 1e-9);
+    EXPECT_DOUBLE_EQ(toi[2], 1.0);
+}
+
+TEST(GeneralCCDNodeTriangle, RepoExample4Frame9Sub6SweepNodeTriangleOutside) {
+    // Same captured sweep. The v3588 plane crossing is outside this cylinder
+    // triangle for the predictor motion, so the boundary SS primitive above is
+    // the decisive contact.
+    const Vec3 x3588(-0.059539791821382186, 0.1540607437288348, 0.35529553899914945);
+    const Vec3 dx3588(0.004847380237543629, 0.0043465291684171292, -2.5049316649261577e-05);
+    const Vec3 x3117(-0.075654645452310015, 0.17434507029226337, 0.34200013654345546);
+    const Vec3 dx3117(9.2102319146358802e-08, -8.8077176663148293e-08, 1.2465886145562877e-07);
+    const Vec3 x3148(-0.082705931560382612, 0.18212494614593469, 0.3600000809332693);
+    const Vec3 dx3148(-2.5397006150895685e-08, 3.2212561784650262e-08, 4.4863568915420871e-08);
+    const Vec3 x3149(-0.067874983350554322, 0.16729401010559197, 0.36000022549626293);
+    const Vec3 dx3149(2.1052045717784296e-08, -1.4851148838479489e-08, 2.2516221354074162e-07);
+
+    const double toi = node_triangle_general_ccd(
+        x3588, dx3588, x3117, dx3117, x3149, dx3149, x3148, dx3148);
+    EXPECT_DOUBLE_EQ(toi, 1.0);
+}
+
+TEST(GeneralCCDClothCloth, RepoExample4Frame9Sub8FirstCrossing) {
+    // Cloth-cloth example-4 sweep whose final edge-triangle crossing must be
+    // represented by at least one legal VF/EE CCD event.
+    const Vec3 x3346(0.08712833976681923, 0.17877421220858070, -0.32661607072106447);
+    const Vec3 dx3346(0.00067734780013454, -0.00080126570631464, -0.00031187147184419);
+    const Vec3 x3328(0.10968703434917194, 0.21990170027158606, -0.36743254758293364);
+    const Vec3 dx3328(-0.00021517113302960, -0.00021279894679258, -0.00040805071333450);
+    const Vec3 x3618(0.09703499570429237, 0.18800609993799147, -0.35201048636447191);
+    const Vec3 dx3618(-0.00030715771853801, 0.00072942951647373, 0.00003814747329084);
+    const Vec3 x3636(0.06721104360563963, 0.15255331981292530, -0.31062147477971258);
+    const Vec3 dx3636(-0.00332165259637236, 0.00319812532310226, -0.00010903449705529);
+    const Vec3 x3635(0.09601130899431572, 0.18606972009767381, -0.30860063125557996);
+    const Vec3 dx3635(-0.00050502730280225, 0.00073262713672059, -0.00000312696759880);
+
+    const std::array<double, 5> toi = {
+        node_triangle_general_ccd(x3346, dx3346, x3618, dx3618, x3636, dx3636, x3635, dx3635),
+        node_triangle_general_ccd(x3328, dx3328, x3618, dx3618, x3636, dx3636, x3635, dx3635),
+        segment_segment_general_ccd(x3346, dx3346, x3328, dx3328, x3618, dx3618, x3636, dx3636),
+        segment_segment_general_ccd(x3346, dx3346, x3328, dx3328, x3636, dx3636, x3635, dx3635),
+        segment_segment_general_ccd(x3346, dx3346, x3328, dx3328, x3635, dx3635, x3618, dx3618),
+    };
+
+    const double toi_min = *std::min_element(toi.begin(), toi.end());
+    EXPECT_LT(toi_min, 1.0);
+}
+
+TEST(GeneralCCDClothCloth, RepoExample4TenStackFrame6To7FirstCrossing) {
+    // Coarser saved-frame sweep from the dense-stack example. At least one
+    // legal VF/EE event must appear over the full-frame motion.
+    const Vec3 x3341(0.0437676, 0.40053, -0.306259);
+    const Vec3 x3358(0.0437671, 0.40053, -0.262509);
+    const Vec3 x3613(0.0437701, 0.40653, -0.350001);
+    const Vec3 x3631(0.0875185, 0.40653, -0.30625);
+    const Vec3 x3630(0.0437685, 0.40653, -0.306251);
+
+    const Vec3 y3341(0.0449519, 0.351985, -0.307173);
+    const Vec3 y3358(0.0447381, 0.352262, -0.263718);
+    const Vec3 y3613(0.0431897, 0.352311, -0.347623);
+    const Vec3 y3631(0.0860174, 0.340867, -0.304771);
+    const Vec3 y3630(0.0431711, 0.352483, -0.304094);
+
+    const Vec3 dx3341 = y3341 - x3341;
+    const Vec3 dx3358 = y3358 - x3358;
+    const Vec3 dx3613 = y3613 - x3613;
+    const Vec3 dx3631 = y3631 - x3631;
+    const Vec3 dx3630 = y3630 - x3630;
+
+    const std::array<double, 5> toi = {
+        node_triangle_general_ccd(x3341, dx3341, x3613, dx3613, x3631, dx3631, x3630, dx3630),
+        node_triangle_general_ccd(x3358, dx3358, x3613, dx3613, x3631, dx3631, x3630, dx3630),
+        segment_segment_general_ccd(x3341, dx3341, x3358, dx3358, x3613, dx3613, x3631, dx3631),
+        segment_segment_general_ccd(x3341, dx3341, x3358, dx3358, x3631, dx3631, x3630, dx3630),
+        segment_segment_general_ccd(x3341, dx3341, x3358, dx3358, x3630, dx3630, x3613, dx3613),
+    };
+
+    const double toi_min = *std::min_element(toi.begin(), toi.end());
+    EXPECT_LT(toi_min, 1.0);
 }
 
 // ===========================================================================

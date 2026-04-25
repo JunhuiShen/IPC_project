@@ -125,7 +125,7 @@ static constexpr double PI = 3.14159265358979323846;
 //  Polynomial solvers
 
 void solve_linear_all(double c, double d, SmallRoots& roots, double eps) {
-    double s = std::max({1.0, std::fabs(c), std::fabs(d)});
+    double s = std::max(1.0, std::fabs(d));
     if (nearly_zero(c, eps * s)) return;
     add_root(roots, -d / c, eps);
 }
@@ -138,7 +138,8 @@ void solve_quadratic_all(double a, double b, double c, SmallRoots& roots, double
     }
 
     double D = b * b - 4.0 * a * c;
-    double tol = eps * s * s * 16.0;
+    const double coeff_scale = std::max({std::fabs(a), std::fabs(b), std::fabs(c)});
+    double tol = eps * coeff_scale * coeff_scale * 16.0;
     if (D < -tol) return;
     if (std::fabs(D) <= tol) {
         add_root(roots, -b / (2.0 * a), eps);
@@ -154,9 +155,13 @@ void solve_quadratic_all(double a, double b, double c, SmallRoots& roots, double
 
 void solve_cubic_all(double a, double b, double c, double d, SmallRoots& roots, double eps) {
     double s = max_abs_value_among_four_numbers(a, b, c, d);
+    const double degree_eps = std::sqrt(eps);
     if (nearly_zero(a, eps * s)) {
         solve_quadratic_all(b, c, d, roots, eps);
         return;
+    }
+    if (nearly_zero(a, degree_eps * s)) {
+        solve_quadratic_all(b, c, d, roots, eps);
     }
 
     double inv_a = 1.0 / a;
@@ -228,16 +233,18 @@ bool inside_triangle_3d_at(const Vec3& x, const Vec3& dx, const Vec3& x1, const 
     Vec3 w = xt - a;
     Vec3 n = e1.cross(e2);
     double n2 = n.squaredNorm();
-    if (n2 <= eps2 * eps2) return false;
-    if (std::fabs(n.dot(w)) > eps2 * std::sqrt(n2)) return false;
-
     double d11 = e1.dot(e1);
     double d12 = e1.dot(e2);
     double d22 = e2.dot(e2);
+    const double tri_scale = std::sqrt(d11) + std::sqrt(d22);
+    const double eps_len = std::max(eps2, 1.0e-8 * tri_scale);
+    if (n2 <= eps_len * eps_len) return false;
+    if (std::fabs(n.dot(w)) > eps_len * std::sqrt(n2)) return false;
+
     double b1 = e1.dot(w);
     double b2 = e2.dot(w);
     double det = d11 * d22 - d12 * d12;
-    if (std::fabs(det) <= eps2 * std::max({1.0, d11, d22})) return false;
+    if (std::fabs(det) <= eps_len * std::max({1.0, d11, d22})) return false;
 
     double lam2 = (d22 * b1 - d12 * b2) / det;
     double lam3 = (d11 * b2 - d12 * b1) / det;
@@ -256,10 +263,13 @@ bool inside_segments_3d_at(const Vec3& x1, const Vec3& dx1, const Vec3& x2, cons
     Vec3 w = b0 - a0;
     Vec3 n = u.cross(v);
     double n2 = n.squaredNorm();
+    const double len_u = u.norm();
+    const double len_v = v.norm();
+    const double eps_len = std::max(eps2, 1.0e-8 * (len_u + len_v));
 
-    if (n2 <= eps2 * eps2) {
+    if (n2 <= eps_len * eps_len) {
         Vec3 crossw = w.cross(u);
-        if (crossw.squaredNorm() > 1e-16) return false;
+        if (crossw.squaredNorm() > eps_len * eps_len * std::max(1.0, u.squaredNorm())) return false;
 
         Vec3 d0 = a1 - a0;
         double ax = std::fabs(d0.x()), ay = std::fabs(d0.y()), az = std::fabs(d0.z());
@@ -273,12 +283,12 @@ bool inside_segments_3d_at(const Vec3& x1, const Vec3& dx1, const Vec3& x2, cons
         return A <= D + 1e-8 && C <= B + 1e-8;
     }
 
-    if (std::fabs(w.dot(n)) > eps2 * std::sqrt(n2)) return false;
+    if (std::fabs(w.dot(n)) > eps_len * std::sqrt(n2)) return false;
     double s = w.cross(v).dot(n) / n2;
     double upar = w.cross(u).dot(n) / n2;
     Vec3 pa = a0 + u * s;
     Vec3 pb = b0 + v * upar;
-    if ((pa - pb).squaredNorm() > eps2 * eps2) return false;
+    if ((pa - pb).squaredNorm() > eps_len * eps_len) return false;
     return s >= -1e-8 && s <= 1.0 + 1e-8 && upar >= -1e-8 && upar <= 1.0 + 1e-8;
 }
 

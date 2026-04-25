@@ -54,6 +54,7 @@
             return;
         }
 
+        out << std::setprecision(17);
         for (const auto& p : x) out << "v " << p.x() << " " << p.y() << " " << p.z() << "\n";
         for (int t = 0; t < static_cast<int>(tris.size()); t += 3)
             out << "f " << (tris[t] + 1) << " " << (tris[t+1] + 1) << " " << (tris[t+2] + 1) << "\n";
