@@ -550,7 +550,7 @@ double BroadPhase::ccd_min_toi(const std::vector<Vec3>& x, const std::vector<Vec
 }
 
 void BroadPhase::per_vertex_safe_step(
-        std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety, bool clip_to_node_box) const {
+        std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety, bool clip_to_node_box, bool clip_ccd) const {
     const int nv = static_cast<int>(x.size());
 
     for (int vi = 0; vi < nv; ++vi) {
@@ -576,7 +576,7 @@ void BroadPhase::per_vertex_safe_step(
 
         double toi_min = 1.0;
 
-        for (const auto& entry : cache_.vertex_nt[vi]) {
+        if (clip_ccd) for (const auto& entry : cache_.vertex_nt[vi]) {
             const auto& p = cache_.nt_pairs[entry.pair_index];
             CCDResult r;
             if (entry.dof == 0) {
@@ -601,7 +601,7 @@ void BroadPhase::per_vertex_safe_step(
             if (r.collision) toi_min = std::min(toi_min, r.t);
         }
 
-        for (const auto& entry : cache_.vertex_ss[vi]) {
+        if (clip_ccd) for (const auto& entry : cache_.vertex_ss[vi]) {
             const auto& p = cache_.ss_pairs[entry.pair_index];
             // always put vi in the x1 (moving) slot; swap edges if vi is on edge 2
             CCDResult r;

@@ -251,7 +251,8 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
 
     //gs loop
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
-        broad_phase.per_vertex_safe_step(xnew, [&](int vi){ return xnew[vi] - gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm); });
+        broad_phase.per_vertex_safe_step(xnew, [&](int vi){ return xnew[vi] - gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm); },
+                                         /*safety=*/0.9, /*clip_to_node_box=*/true, /*clip_ccd=*/params.d_hat > 0.0);
         result.final_residual = 0.0;
         result.iterations     = iter;
         if (residual_history) residual_history->push_back(result.final_residual);
