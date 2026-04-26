@@ -148,54 +148,36 @@ void build_cloth_cylinder_drop_example(const IPCArgs3D& args,
                                        DeformedState& state,
                                        std::vector<Vec2>& X,
                                        std::vector<Pin>& pins,
-                                       SimParams& params) {
+                                       SimParams& params,
+                                       std::vector<Vec3>& static_x,
+                                       std::vector<int>&  static_tris) {
     clear_model(ref_mesh, state, X, pins);
     params.sdf_planes.clear();
     params.sdf_cylinders.clear();
 
-    // Bigger ground cloth than the shared 1.2x1.2 helper so the falling pile
-    // has room to settle without involving the pinned corners. Only the
-    // corners are pinned -- the interior is left free so its sagging-under-
-    // gravity gradient stays above tol_abs and keeps the global solver iterating.
-    const int    ground_nx = 40;
-    const int    ground_ny = 40;
     const double ground_w  = args.cyl_ground_size;
     const double ground_h  = args.cyl_ground_size;
     const double ground_y  = 0.0;
 
-    const int ground_base = build_square_mesh(
-            ref_mesh, state, X,
-            ground_nx, ground_ny, ground_w, ground_h,
-            Vec3(-0.5 * ground_w, ground_y, -0.5 * ground_h));
-
-    // Pin every ground vertex so the ground behaves as a static collider
-    // (experimentally checking the fully-pinned regime).
-    const int ground_vertex_count = (ground_nx + 1) * (ground_ny + 1);
-    for (int k = 0; k < ground_vertex_count; ++k) {
-        append_pin(pins, ground_base + k, state.deformed_positions);
-    }
-
-    // Horizontal cylinder (long axis +z) acting as a static collider via
-    // Dirichlet pins on every vertex. Triangles are near-equilateral; the
-    // axial row count is picked internally from cyl_nu and the cylinder size.
     const int    cyl_nu     = args.cyl_nu;
     const double cyl_radius = args.cyl_radius;
     const double cyl_length = args.cyl_length;
     const Vec3   cyl_center(args.cyl_cx, args.cyl_cy, args.cyl_cz);
 
-    const int cyl_base = build_cylinder_mesh(
-            ref_mesh, state, X,
-            cyl_nu, cyl_radius, cyl_length, cyl_center);
-
-    // Pin every cylinder vertex so the cylinder behaves as a static collider.
-    const int cyl_vertex_count =
-            static_cast<int>(state.deformed_positions.size()) - cyl_base;
-    for (int k = 0; k < cyl_vertex_count; ++k) {
-        append_pin(pins, cyl_base + k, state.deformed_positions);
+    // Build ground and cylinder into a scratch mesh for one-time export only.
+    {
+        RefMesh        s_ref;
+        DeformedState  s_state;
+        std::vector<Vec2> s_X;
+        build_square_mesh(s_ref, s_state, s_X,
+                          40, 40, ground_w, ground_h,
+                          Vec3(-0.5 * ground_w, ground_y, -0.5 * ground_h));
+        build_cylinder_mesh(s_ref, s_state, s_X,
+                            cyl_nu, cyl_radius, cyl_length, cyl_center);
+        static_x    = s_state.deformed_positions;
+        static_tris = s_ref.tris;
     }
 
-    // Offset the plane below the pinned ground sheet so its vertices sit
-    // outside the transition shell and contribute zero SDF energy.
     params.sdf_planes.push_back(PlaneSDF{
             Vec3(0.0, ground_y - 2.0 * params.eps_sdf, 0.0),
             Vec3(0.0, 1.0, 0.0)});

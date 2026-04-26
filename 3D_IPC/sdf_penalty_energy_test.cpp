@@ -216,12 +216,12 @@ TEST(PlaneSDF, Evaluate){
     EXPECT_NEAR(r.phi, -0.3, kTol);
 }
 
-TEST(PlaneSDF, EnergyOutsideTransitionIsZero){
+TEST(PlaneSDF, EnergyBehavior){
     PlaneSDF p{Vec3(0.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)};
     const double k = 100.0;
     const double eps = 0.1;
 
-    //  Far outside (phi > eps): zero energy, zero gradient, zero Hessian.
+    //  Outside (phi > 0): zero energy, zero gradient, zero Hessian.
     {
         const SDFEvaluation sdf = evaluate_sdf(p, Vec3(0.0, 1.0, 0.0));
         EXPECT_EQ(sdf_penalty_energy(sdf, k, eps), 0.0);
@@ -229,49 +229,51 @@ TEST(PlaneSDF, EnergyOutsideTransitionIsZero){
         EXPECT_TRUE(sdf_penalty_hessian(sdf, k, eps).isApprox(Mat33::Zero()));
     }
 
-    //  Deep inside (phi < 0): energy k/2, but gradient and Hessian vanish.
+    //  Inside (phi = -0.5): E = 0.5*k*0.25, grad = k*(-0.5)*n, hess = k*n*n^T.
     {
-        const SDFEvaluation sdf = evaluate_sdf(p, Vec3(0.0, -1.0, 0.0));
-        EXPECT_NEAR(sdf_penalty_energy(sdf, k, eps), 0.5 * k, kTol);
-        EXPECT_TRUE(sdf_penalty_gradient(sdf, k, eps).isApprox(Vec3::Zero()));
-        EXPECT_TRUE(sdf_penalty_hessian(sdf, k, eps).isApprox(Mat33::Zero()));
+        const SDFEvaluation sdf = evaluate_sdf(p, Vec3(0.0, -0.5, 0.0));
+        EXPECT_NEAR(sdf_penalty_energy(sdf, k, eps), 0.5 * k * 0.25, kTol);
+        const Vec3 n(0.0, 1.0, 0.0);
+        EXPECT_TRUE(sdf_penalty_gradient(sdf, k, eps).isApprox(k * (-0.5) * n, kTol));
+        EXPECT_TRUE(sdf_penalty_hessian(sdf, k, eps).isApprox(k * (n * n.transpose()), kTol));
     }
 }
 
-TEST(PlaneSDF, EnergyInTransitionLayer){
+TEST(PlaneSDF, EnergyPenetrationDepth){
     PlaneSDF p{Vec3(0.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)};
     const double k = 50.0;
     const double eps = 0.2;
 
-    //  phi = 0.05, H = (0.2 - 0.05)/0.2 = 0.75, E = 0.5 * 50 * 0.75^2
-    Vec3 x(1.0, 0.05, -2.0);
-    const double expected = 0.5 * k * (0.75 * 0.75);
-    EXPECT_NEAR(sdf_penalty_energy(evaluate_sdf(p, x), k, eps), expected, kTol);
+    //  phi = -0.1: E = 0.5 * k * 0.01
+    Vec3 x(1.0, -0.1, -2.0);
+    EXPECT_NEAR(sdf_penalty_energy(evaluate_sdf(p, x), k, eps), 0.5 * k * 0.01, kTol);
 }
 
 TEST(PlaneSDF, GradientConvergence){
-    //  Tilted plane, phi_target = 0.15 in eps = 0.3 -- 0.15 slack on both sides,
-    //  safe for h up to 1e-2.
+    //  phi = -0.15: inside by 0.15, safe for h up to 1e-2 without crossing phi=0.
     Vec3 n = Vec3(1.0, 2.0, 3.0).normalized();
     PlaneSDF p{Vec3(0.1, -0.2, 0.05), n};
     const double k = 25.0;
     const double eps = 0.3;
 
-    Vec3 x = p.point + 0.15 * n + Vec3(0.4, -0.3, 0.2);
-    x += (0.15 - (x - p.point).dot(n)) * n;
+    Vec3 tangent(0.4, -0.3, 0.2);
+    tangent -= tangent.dot(n) * n;
+    Vec3 x = p.point - 0.15 * n + tangent;
 
     const SDFClosure sdf = [&](const Vec3& q){ return evaluate_sdf(p, q); };
     EXPECT_TRUE(run_sdf_gradient_convergence("plane", x, sdf, k, eps));
 }
 
 TEST(PlaneSDF, HessianConvergence){
+    //  phi = -0.10: inside, hessian = k*n*n^T (constant), FD recovers it exactly.
     Vec3 n = Vec3(-1.0, 1.0, 2.0).normalized();
     PlaneSDF p{Vec3(0.0, 0.0, 0.0), n};
     const double k = 40.0;
     const double eps = 0.25;
 
-    Vec3 x = 0.10 * n + Vec3(0.5, 0.5, -0.1);
-    x += (0.10 - (x - p.point).dot(n)) * n;
+    Vec3 tangent(0.5, 0.5, -0.1);
+    tangent -= tangent.dot(n) * n;
+    Vec3 x = p.point - 0.10 * n + tangent;
 
     const SDFClosure sdf = [&](const Vec3& q){ return evaluate_sdf(p, q); };
     EXPECT_TRUE(run_sdf_hessian_convergence("plane", x, sdf, k, eps, /*include_curvature=*/true));
@@ -283,21 +285,22 @@ TEST(PlaneSDF, HessianIsRankOne){
     const double k = 40.0;
     const double eps = 0.25;
 
-    Vec3 x = 0.10 * n + Vec3(0.5, 0.5, -0.1);
-    x += (0.10 - (x - p.point).dot(n)) * n;
+    Vec3 tangent(0.5, 0.5, -0.1);
+    tangent -= tangent.dot(n) * n;
+    Vec3 x = p.point - 0.10 * n + tangent;
 
     const Mat33 H_ana = sdf_penalty_hessian(evaluate_sdf(p, x), k, eps);
 
-    //  Hessian should be k/eps^2 * n n^T -- rank one and symmetric.
+    //  Hessian inside is k * n*n^T (plane has zero curvature) -- rank one and symmetric.
     EXPECT_TRUE(H_ana.isApprox(H_ana.transpose(), kTol));
-    const Mat33 expected = (k / (eps * eps)) * (n * n.transpose());
+    const Mat33 expected = k * (n * n.transpose());
     EXPECT_TRUE(H_ana.isApprox(expected, kTol));
 
     Eigen::SelfAdjointEigenSolver<Mat33> es(H_ana);
     const Vec3 lambda = es.eigenvalues();
-    EXPECT_NEAR(lambda(0), 0.0,           1e-6);
-    EXPECT_NEAR(lambda(1), 0.0,           1e-6);
-    EXPECT_NEAR(lambda(2), k/(eps*eps),   1e-6);
+    EXPECT_NEAR(lambda(0), 0.0, 1e-6);
+    EXPECT_NEAR(lambda(1), 0.0, 1e-6);
+    EXPECT_NEAR(lambda(2), k,   1e-6);
 }
 
 // ============================================================================
@@ -325,19 +328,16 @@ TEST(CylinderSDF, Evaluate){
 }
 
 TEST(CylinderSDF, GradientConvergence){
-    //  Tilted axis so components mix.
+    //  phi = -0.08: inside by 0.08, safe for h up to 1e-2.
     CylinderSDF c{Vec3(0.1, -0.2, 0.05),
                   Vec3(1.0, 2.0, -1.0).normalized(),
                   0.4};
     const double k = 30.0;
     const double eps = 0.2;
 
-    //  Pick a point with perpendicular distance = R + 0.08, well inside the
-    //  transition layer.  Choose a radial direction orthogonal to the axis.
     const Vec3 raw_dir(3.0, -1.0, 2.0);
     const Vec3 perp_dir = (raw_dir - c.axis * c.axis.dot(raw_dir)).normalized();
-    const Vec3 x = c.point + (c.radius + 0.08) * perp_dir
-                   + 0.5 * c.axis;   //  arbitrary axial offset
+    const Vec3 x = c.point + (c.radius - 0.08) * perp_dir + 0.5 * c.axis;
 
     const SDFClosure sdf = [&](const Vec3& q){ return evaluate_sdf(c, q); };
     EXPECT_TRUE(run_sdf_gradient_convergence("cylinder", x, sdf, k, eps));
@@ -352,8 +352,7 @@ TEST(CylinderSDF, HessianConvergence){
 
     const Vec3 raw_dir(1.0, 2.0, 3.0);
     const Vec3 perp_dir = (raw_dir - c.axis * c.axis.dot(raw_dir)).normalized();
-    const Vec3 x = c.point + (c.radius + 0.08) * perp_dir
-                   + 0.3 * c.axis;
+    const Vec3 x = c.point + (c.radius - 0.08) * perp_dir + 0.3 * c.axis;
 
     const SDFClosure sdf = [&](const Vec3& q){ return evaluate_sdf(c, q); };
     EXPECT_TRUE(run_sdf_hessian_convergence("cylinder", x, sdf, k, eps,
@@ -385,12 +384,12 @@ TEST(SphereSDF, Evaluate){
     EXPECT_TRUE(r.hess_phi.isApprox(Mat33::Zero()));
 }
 
-TEST(SphereSDF, EnergyOutsideTransitionIsZero){
+TEST(SphereSDF, EnergyBehavior){
     SphereSDF s{Vec3(0.0, 0.0, 0.0), 0.5};
     const double k = 100.0;
     const double eps = 0.1;
 
-    //  Far outside (phi > eps): zero energy, zero gradient, zero Hessian.
+    //  Outside (phi > 0): zero energy, zero gradient, zero Hessian.
     {
         const SDFEvaluation sdf = evaluate_sdf(s, Vec3(2.0, 0.0, 0.0));
         EXPECT_EQ(sdf_penalty_energy(sdf, k, eps), 0.0);
@@ -398,69 +397,66 @@ TEST(SphereSDF, EnergyOutsideTransitionIsZero){
         EXPECT_TRUE(sdf_penalty_hessian(sdf, k, eps).isApprox(Mat33::Zero()));
     }
 
-    //  Deep inside (phi < 0): energy k/2, but gradient and Hessian vanish.
+    //  Inside (phi = 0.1 - 0.5 = -0.4): E = 0.5*k*0.16, grad/hess nonzero.
     {
         const SDFEvaluation sdf = evaluate_sdf(s, Vec3(0.1, 0.0, 0.0));
-        EXPECT_NEAR(sdf_penalty_energy(sdf, k, eps), 0.5 * k, kTol);
-        EXPECT_TRUE(sdf_penalty_gradient(sdf, k, eps).isApprox(Vec3::Zero()));
-        EXPECT_TRUE(sdf_penalty_hessian(sdf, k, eps).isApprox(Mat33::Zero()));
+        EXPECT_NEAR(sdf_penalty_energy(sdf, k, eps), 0.5 * k * sdf.phi * sdf.phi, kTol);
+        const Vec3 expected_grad = k * sdf.phi * sdf.grad_phi;
+        EXPECT_TRUE(sdf_penalty_gradient(sdf, k, eps).isApprox(expected_grad, kTol));
+        EXPECT_FALSE(sdf_penalty_hessian(sdf, k, eps).isApprox(Mat33::Zero()));
     }
 }
 
-TEST(SphereSDF, EnergyInTransitionLayer){
+TEST(SphereSDF, EnergyPenetrationDepth){
     SphereSDF s{Vec3(0.0, 0.0, 0.0), 0.5};
     const double k = 50.0;
     const double eps = 0.2;
 
-    //  ||x|| = 0.55, phi = 0.05, H = (0.2 - 0.05)/0.2 = 0.75, E = 0.5 * 50 * 0.75^2.
-    Vec3 x(0.55, 0.0, 0.0);
-    const double expected = 0.5 * k * (0.75 * 0.75);
-    EXPECT_NEAR(sdf_penalty_energy(evaluate_sdf(s, x), k, eps), expected, kTol);
+    //  ||x|| = 0.45, phi = -0.05: E = 0.5 * k * 0.05^2.
+    Vec3 x(0.45, 0.0, 0.0);
+    const double phi = 0.45 - 0.5;
+    EXPECT_NEAR(sdf_penalty_energy(evaluate_sdf(s, x), k, eps), 0.5 * k * phi * phi, kTol);
 }
 
 TEST(SphereSDF, HessianStructure){
-    //  Sphere penalty Hessian = k*(H')^2 * n n^T + k*H*H' * (I - n n^T)/r.
-    //  Normal eigenvalue = k*(H')^2; transverse (2x) = k*H*H'/r (negative in
-    //  the ramp since H' < 0).  Differs from the plane (rank 1, no curvature).
+    //  H = k*(n*n^T) + k*phi*(I - n*n^T)/r.
+    //  Eigenvalue along n: k. Transverse (2x): k*phi/r (negative when phi<0).
     SphereSDF s{Vec3(0.0, 0.0, 0.0), 0.5};
     const double k = 40.0;
     const double eps = 0.25;
 
-    //  r = 0.6, phi = 0.1, H = (eps - phi)/eps = 0.6, H' = -1/eps = -4.
+    //  r = 0.4, phi = 0.4 - 0.5 = -0.1: inside.
     const Vec3 n_dir = Vec3(1.0, 2.0, -1.0).normalized();
-    const double r    = 0.6;
-    const Vec3 x      = r * n_dir;
-    const double phi  = r - 0.5;          // 0.1
-    const double H    = (eps - phi) / eps; // 0.6
-    const double Hp   = -1.0 / eps;        // -4
+    const double r   = 0.4;
+    const Vec3 x     = r * n_dir;
+    const double phi = r - 0.5;  // -0.1
 
     const Mat33 H_ana = sdf_penalty_hessian(evaluate_sdf(s, x), k, eps);
     const Mat33 expected =
-            (k * Hp * Hp) * (n_dir * n_dir.transpose())
-          + (k * H * Hp / r) * (Mat33::Identity() - n_dir * n_dir.transpose());
+            k * (n_dir * n_dir.transpose())
+          + (k * phi / r) * (Mat33::Identity() - n_dir * n_dir.transpose());
 
     EXPECT_TRUE(H_ana.isApprox(H_ana.transpose(), kTol));
     EXPECT_TRUE(H_ana.isApprox(expected, kTol));
 
-    //  Eigenvalues: one along n (= k*Hp^2), two transverse (= k*H*Hp/r).
+    //  Eigenvalues: k along n, k*phi/r transverse (negative).
     Eigen::SelfAdjointEigenSolver<Mat33> es(H_ana);
-    const Vec3 lambda = es.eigenvalues();   // ascending order
-    const double lam_normal = k * Hp * Hp;  // +640
-    const double lam_trans  = k * H * Hp / r; // -160
-    EXPECT_NEAR(lambda(0), lam_trans, 1e-6);
-    EXPECT_NEAR(lambda(1), lam_trans, 1e-6);
+    const Vec3 lambda = es.eigenvalues();       // ascending
+    const double lam_normal = k;                // +40
+    const double lam_trans  = k * phi / r;      // -10
+    EXPECT_NEAR(lambda(0), lam_trans,  1e-6);
+    EXPECT_NEAR(lambda(1), lam_trans,  1e-6);
     EXPECT_NEAR(lambda(2), lam_normal, 1e-6);
 }
 
 TEST(SphereSDF, GradientConvergence){
+    //  phi = -0.08: inside by 0.08, safe for h up to 1e-2 without crossing phi=0.
     SphereSDF s{Vec3(0.1, -0.2, 0.05), 0.4};
     const double k = 30.0;
     const double eps = 0.2;
 
-    //  Point with ||x - center|| = R + 0.08 -- phi = 0.08 sits mid-transition
-    //  layer, safe for h up to 1e-2 without leaving the ramp.
     const Vec3 dir = Vec3(3.0, -1.0, 2.0).normalized();
-    const Vec3 x = s.center + (s.radius + 0.08) * dir;
+    const Vec3 x = s.center + (s.radius - 0.08) * dir;
 
     const SDFClosure sdf = [&](const Vec3& q){ return evaluate_sdf(s, q); };
     EXPECT_TRUE(run_sdf_gradient_convergence("sphere", x, sdf, k, eps));
@@ -472,7 +468,7 @@ TEST(SphereSDF, HessianConvergence){
     const double eps = 0.2;
 
     const Vec3 dir = Vec3(3.0, -1.0, 2.0).normalized();
-    const Vec3 x = s.center + (s.radius + 0.08) * dir;
+    const Vec3 x = s.center + (s.radius - 0.08) * dir;
 
     const SDFClosure sdf = [&](const Vec3& q){ return evaluate_sdf(s, q); };
     EXPECT_TRUE(run_sdf_hessian_convergence("sphere", x, sdf, k, eps,
@@ -534,7 +530,7 @@ TEST(SDFPenalty, ZeroOutsideTransition){
     const double k = 100.0;
     const double eps = 0.1;
 
-    //  Far outside: everything zero.
+    //  Outside (phi > 0): everything zero.
     {
         const SDFEvaluation sdf = evaluate_sdf(c, Vec3(2.0, 0.0, 0.5));
         EXPECT_EQ(sdf_penalty_energy  (sdf, k, eps), 0.0);
@@ -542,27 +538,23 @@ TEST(SDFPenalty, ZeroOutsideTransition){
         EXPECT_TRUE(sdf_penalty_hessian (sdf, k, eps).isApprox(Mat33::Zero()));
     }
 
-    //  Deep inside: energy k/2, zero derivatives.
+    //  Inside (phi = 0.3 - 0.5 = -0.2): energy and derivatives nonzero.
     {
-        const SDFEvaluation sdf = evaluate_sdf(c, Vec3(0.0, 0.0, 0.5));
-        EXPECT_NEAR(sdf_penalty_energy(sdf, k, eps), 0.5 * k, kTol);
-        EXPECT_TRUE(sdf_penalty_gradient(sdf, k, eps).isApprox(Vec3::Zero()));
-        EXPECT_TRUE(sdf_penalty_hessian (sdf, k, eps).isApprox(Mat33::Zero()));
+        const SDFEvaluation sdf = evaluate_sdf(c, Vec3(0.3, 0.0, 0.5));
+        EXPECT_NEAR(sdf_penalty_energy(sdf, k, eps), 0.5 * k * sdf.phi * sdf.phi, kTol);
+        EXPECT_FALSE(sdf_penalty_gradient(sdf, k, eps).isApprox(Vec3::Zero()));
+        EXPECT_FALSE(sdf_penalty_hessian (sdf, k, eps).isApprox(Mat33::Zero()));
     }
 }
 
 TEST(SDFPenalty, GradientPushesOutward){
-    //  In the transition layer the -gradient should have a positive projection
-    //  onto the outward normal (i.e. the force pushes the node away from the
-    //  obstacle).
+    //  Inside the surface (phi < 0): force = -gradient should push outward.
     CylinderSDF c{Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0), 0.5};
     const double k = 10.0;
     const double eps = 0.1;
 
-    //  Radial direction perpendicular to the axis.
     const Vec3 radial = Vec3(1.0, 1.0, 0.0).normalized();
-    //  Point just outside the surface with an arbitrary axial offset.
-    const Vec3 x = c.point + (c.radius + 0.05) * radial + 0.3 * c.axis;
+    const Vec3 x = c.point + (c.radius - 0.05) * radial + 0.3 * c.axis;
 
     const Vec3 g = sdf_penalty_gradient(evaluate_sdf(c, x), k, eps);
     const Vec3 force = -g;

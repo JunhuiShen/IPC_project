@@ -36,6 +36,13 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
                        const std::vector<Vec3>& xhat, std::vector<Vec3>& x,
                        const BroadPhase& broad_phase, const PinMap* pin_map = nullptr);
 
+SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+                                              const std::vector<Pin>& pins, const SimParams& params,
+                                              std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
+                                              const std::vector<Vec3>& v,
+                                              const std::vector<std::vector<int>>& color_groups,
+                                              std::vector<double>* residual_history = nullptr);
+
 SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                                         const std::vector<Pin>& pins, const SimParams& params,
                                         std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,

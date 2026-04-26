@@ -36,6 +36,8 @@ struct IPCArgs3D : ArgParser {
     bool   use_trust_region = false;
     bool   fixed_iters = false;
     bool   use_gpu                 = false;
+    bool   experimental            = false;
+    double node_box_size           = 0.1;
     int    color_rebuild_interval  = 10;
 
     // --- mesh ---
@@ -112,6 +114,8 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_trust_region", use_trust_region, false, "Use trust-region narrow phase instead of CCD for step clamping");
         add_bool  ("fixed_iters",      fixed_iters,      false, "Run exactly max_substep_iters sweeps per substep with no tolerance / convergence check");
         add_bool  ("use_gpu",              use_gpu,              false, "Route the GS sweep through the GPU implementation (CPU stub when CUDA is unavailable)");
+        add_bool  ("experimental",         experimental,         false, "Use global_gauss_seidel_solver_basic (requires fixed_iters)");
+        add_double("node_box_size",        node_box_size,        0.1,   "Half-extent of the symmetric node box used by the experimental solver");
         add_int   ("color_rebuild_interval", color_rebuild_interval, 10, "Parallel solver: recolor every N outer iterations (N<=0 treated as 1)");
 
         add_int   ("nx",          nx,          31,         "Mesh subdivisions in x");
@@ -187,6 +191,8 @@ struct IPCArgs3D : ArgParser {
         p.use_trust_region = use_trust_region;
         p.fixed_iters = fixed_iters;
         p.use_gpu                 = use_gpu;
+        p.experimental            = experimental;
+        p.node_box_size           = node_box_size;
         p.color_rebuild_interval  = color_rebuild_interval;
         return p;
     }

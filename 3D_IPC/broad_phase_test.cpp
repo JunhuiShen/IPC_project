@@ -992,16 +992,19 @@ TEST(BroadPhaseTest, BlueRedCcdTest) {
 
     //verify (visualy) that CCD correctly detetcs first collision
     double alpha = broad.ccd_min_toi(x, clamped);
-
     std::vector<Vec3> x_ccd(nv);
     for (int i = 0; i < nv; ++i) x_ccd[i] = x[i] + alpha * (clamped[i] - x[i]);
-
     printf("ccd alpha=%.6f\n", alpha);
+
+    //test and verify visually that per_vertex_safe_step prevents collision
+    std::vector<Vec3> x_ss = x;
+    broad.per_vertex_safe_step(x_ss, [&](int vi){ return clamped[vi]; });
 
     mkdir("vis_debug", 0755);
     export_geo("vis_debug/blue_red_ccd_mesh.geo", x, mesh.tris);
     export_geo("vis_debug/blue_red_ccd_mesh_deformed.geo", clamped, mesh.tris);
     export_geo("vis_debug/blue_red_ccd_mesh_ccd.geo", x_ccd, mesh.tris);
+    export_geo("vis_debug/blue_red_ccd_mesh_ss.geo", x_ss, mesh.tris);
     export_broad_phase_hierarchy("vis_debug/blue_red_bvh", broad);
 }
 

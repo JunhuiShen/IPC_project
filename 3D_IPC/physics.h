@@ -49,6 +49,8 @@ struct SimParams {
     // (gpu_gauss_seidel_solver). On machines without CUDA the CPU stub is
     // used automatically. When set, use_parallel is ignored.
     bool   use_gpu;
+    bool   experimental;       // if true, use global_gauss_seidel_solver_basic
+    double node_box_size;      // half-extent of the symmetric node box used by experimental solver
 
     static SimParams zeros() {
         SimParams p;
@@ -77,6 +79,8 @@ struct SimParams {
         p.fixed_iters               = false;
         p.color_rebuild_interval    = 1;
         p.use_gpu                   = false;
+        p.experimental              = false;
+        p.node_box_size             = 0.1;
         p.cached_dt_                = -1.0;
         p.cached_dt2_               = -1.0;
         return p;

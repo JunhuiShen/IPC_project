@@ -29,10 +29,13 @@ int main(int argc, char** argv) {
     std::vector<Pin> pins;
     TwistSpec twist_spec;
 
+    std::vector<Vec3> static_x;
+    std::vector<int>  static_tris;
+
     if      (args.example == 1) build_two_sheets_example(args, ref_mesh, state, X, pins);
     else if (args.example == 2) build_cloth_stack_example_low_res(ref_mesh, state, X, pins);
     else if (args.example == 3) build_cloth_stack_example_high_res(ref_mesh, state, X, pins);
-    else if (args.example == 4) build_cloth_cylinder_drop_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 4) build_cloth_cylinder_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else if (args.example == 5) build_twisting_cloth_example(args, ref_mesh, state, X, pins, twist_spec);
     else if (args.example == 6) build_cloth_sphere_drop_example(args, ref_mesh, state, X, pins, params);
     else {
@@ -91,6 +94,16 @@ int main(int argc, char** argv) {
         fs::create_directories(outdir);
         export_frame(outdir, 0, state.deformed_positions, ref_mesh.tris, fmt);
         serialize_state(outdir, 0, state);
+        if (!static_x.empty()) {
+            const char* ext = (fmt == ExportFormat::GEO) ? ".geo"
+                            : (fmt == ExportFormat::PLY) ? ".ply"
+                            : (fmt == ExportFormat::USD) ? ".usda" : ".obj";
+            const std::string path = outdir + "/static_colliders" + ext;
+            if      (fmt == ExportFormat::GEO) export_geo(path, static_x, static_tris);
+            else if (fmt == ExportFormat::PLY) export_ply(path, static_x, static_tris);
+            else if (fmt == ExportFormat::USD) export_usd(path, static_x, static_tris);
+            else                               export_obj(path, static_x, static_tris);
+        }
     } else {
         if (!fs::exists(outdir)) {
             std::cerr << "Error: restart requested but output directory does not exist: " << outdir << "\n";

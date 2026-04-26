@@ -102,6 +102,32 @@ std::vector<Vec3> trust_region_initial_guess(const std::vector<Vec3>& x, const s
     return xnew;
 }
 
+Vec3 gs_vertex_delta(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
+                       const std::vector<Vec3>& xhat, std::vector<Vec3>& x, const BroadPhase& broad_phase, const PinMap* pin_map) {
+    const auto& bp_cache = broad_phase.cache();
+    auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x, xhat, pin_map);
+
+    if (params.d_hat > 0.0) {
+        const double dt2 = params.dt2();
+
+        for (const auto& entry : bp_cache.vertex_nt[vi]) {
+            const auto& p = bp_cache.nt_pairs[entry.pair_index];
+            auto [bg, bH] = node_triangle_barrier_gradient_and_hessian(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
+            g += dt2 * bg;
+            H += dt2 * bH;
+        }
+
+        for (const auto& entry : bp_cache.vertex_ss[vi]) {
+            const auto& p = bp_cache.ss_pairs[entry.pair_index];
+            auto [bg, bH] = segment_segment_barrier_gradient_and_hessian(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
+            g += dt2 * bg;
+            H += dt2 * bH;
+        }
+    }
+
+    return matrix3d_inverse(H) * g;
+}
+
 void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
                        const std::vector<Vec3>& xhat, std::vector<Vec3>& x, const BroadPhase& broad_phase, const PinMap* pin_map) {
     const auto& bp_cache = broad_phase.cache();
@@ -189,6 +215,51 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
     }
 
     x[vi] -= step * delta;
+}
+
+SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
+                                        std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
+                                        const std::vector<Vec3>& v, const std::vector<std::vector<int>>& color_groups,
+                                        std::vector<double>* residual_history) {
+
+    if (!params.fixed_iters) {
+        fprintf(stderr, "global_gauss_seidel_solver_basic: params.fixed_iters must be true\n");
+        exit(1);
+    }
+
+    //create node (blue) boxes and create broad phase (red boxes) accordingly
+    const int nv = static_cast<int>(xnew.size());
+    const PinMap pm = build_pin_map(pins, nv);
+    std::vector<AABB> blue_boxes(nv);
+    for (int i = 0; i < nv; ++i) {
+        blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(params.node_box_size), xnew[i] + Vec3::Constant(params.node_box_size));
+    }
+    BroadPhase broad_phase;
+    broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
+
+    //residual tracking: not going to actually do this and will demand running with fixed iterations
+    if (residual_history) residual_history->clear();
+    SolverResult result;
+    result.initial_residual = 0.0;
+    result.final_residual   = result.initial_residual;
+    result.iterations       = 0;
+    if (residual_history) {
+        const int reserve_n = std::max(0, params.max_global_iters);
+        residual_history->reserve(static_cast<std::size_t>(reserve_n) + 1);
+        residual_history->push_back(result.initial_residual);
+    }
+
+    //gs loop
+    for (int iter = 1; iter <= params.max_global_iters; ++iter) {
+        broad_phase.per_vertex_safe_step(xnew, [&](int vi){ return xnew[vi] - gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm); });
+        result.final_residual = 0.0;
+        result.iterations     = iter;
+        if (residual_history) residual_history->push_back(result.final_residual);
+
+    }
+
+    if (params.fixed_iters) result.converged = true;
+    return result;
 }
 
 SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,

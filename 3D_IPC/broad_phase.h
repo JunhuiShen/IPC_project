@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <unordered_map>
 #include <vector>
@@ -111,6 +112,12 @@ public:
     // proposed new positions x_new. Returns the minimum TOI in [0,1], or 1.0
     // if no collision is detected.
     double ccd_min_toi(const std::vector<Vec3>& x, const std::vector<Vec3>& x_new) const;
+
+    // For each vertex vi in sequence, compute the safe step along
+    // (x[vi] -> x_new_fn(vi)) using the linear one-node-moves CCD check.
+    // All other vertices are treated as stationary at their already-committed
+    // positions. Modifies x in place.
+    void per_vertex_safe_step(std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety = 0.9, bool clip_to_node_box = true) const;
 
     void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt);
 
