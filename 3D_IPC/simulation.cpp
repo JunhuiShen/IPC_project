@@ -125,10 +125,17 @@ int main(int argc, char** argv) {
         auto solver_start = Clock::now();
         SolverResult result;
 
+        SubstepCallback substep_cb = nullptr;
+        if (params.write_substeps) {
+            substep_cb = [&](int global_sub, const std::vector<Vec3>& pos) {
+                export_frame(outdir, global_sub + 1, pos, ref_mesh.tris, fmt, nullptr);
+            };
+        }
+
         result = advance_one_frame(
             state, ref_mesh, adj, pins, params, color_groups, broad_phase,
             (args.example == 5) ? &twist_spec : nullptr, frame_index,
-            (args.example == 5) ? &update_twist_pins : nullptr);
+            (args.example == 5) ? &update_twist_pins : nullptr, substep_cb);
 
         if (!result.converged) {
             std::cerr << "Error: solver failed to converge at frame " << frame_index
@@ -157,7 +164,8 @@ int main(int argc, char** argv) {
             std::exit(1);
         }
 
-        export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, nullptr);
+        if (!params.write_substeps)
+            export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, nullptr);
         
         serialize_state(outdir, frame_index, state);
     }

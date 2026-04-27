@@ -3,6 +3,7 @@
 #include "solver.h"
 #include "broad_phase.h"
 #include "GPU_Sim/gpu_solver_bridge.h"
+#include <functional>
 #include <vector>
 
 struct TwistSpec;
@@ -11,10 +12,13 @@ using PinTargetUpdater = void (*)(std::vector<Pin>& pins, const TwistSpec& spec,
 // Advance one frame across all substeps; returns accumulated stats
 // (initial_residual from first substep, final_residual from last, sum of
 // iterations / violation counts across all substeps).
+// Called after each substep with the global substep index (0-based) and current positions.
+using SubstepCallback = std::function<void(int, const std::vector<Vec3>&)>;
+
 inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
     std::vector<Pin>& pins, const SimParams& params, const std::vector<std::vector<int>>& color_groups,
     BroadPhase& broad_phase, const TwistSpec* twist_spec = nullptr, int frame_index = 1,
-    PinTargetUpdater pin_updater = nullptr) {
+    PinTargetUpdater pin_updater = nullptr, SubstepCallback on_substep = nullptr) {
     SolverResult agg;
     const double dt = params.dt();
     for (int sub = 0; sub < params.substeps; ++sub) {
@@ -47,6 +51,11 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
 
         update_velocity(state.velocities, xnew, state.deformed_positions, dt);
         state.deformed_positions = xnew;
+
+        if (on_substep) {
+            const int global_sub = (frame_index - 1) * params.substeps + sub;
+            on_substep(global_sub, state.deformed_positions);
+        }
     }
     return agg;
 }

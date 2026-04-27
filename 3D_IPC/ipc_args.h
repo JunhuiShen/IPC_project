@@ -31,6 +31,8 @@ struct IPCArgs3D : ArgParser {
     double k_sdf         = 1e2;   // SDF penalty stiffness; 0 disables the SDF term
     double eps_sdf       = 0.002; // SDF ramp-Heaviside transition-layer width
     bool   use_parallel  = true;
+    bool   write_substeps = false;
+    bool   use_ccd       = true;
     bool   ccd_check     = false;
     bool   use_ccd_guess = true;
     bool   use_trust_region = false;
@@ -107,8 +109,10 @@ struct IPCArgs3D : ArgParser {
         add_double("d_hat",       d_hat,       0.01,       "Barrier activation distance (0 = off)");
         add_double("k_sdf",       k_sdf,       1e2,        "SDF penalty stiffness (0 = off; obstacles live on SimParams)");
         add_double("eps_sdf",     eps_sdf,     0.002,       "SDF penalty ramp-Heaviside transition-layer width");
-        add_bool  ("use_parallel", use_parallel, true,     "Use parallel Gauss-Seidel (requires coloring)");
+        add_bool  ("use_parallel",   use_parallel,   true,  "Use parallel Gauss-Seidel (requires coloring)");
+        add_bool  ("write_substeps", write_substeps, false, "Write an output file after every substep (useful for visual debugging)");
 
+        add_bool  ("use_ccd",      use_ccd,      true,   "Run CCD step clamping in per_vertex_safe_step");
         add_bool  ("ccd_check",    ccd_check,    false,  "Run post-sweep CCD penetration check (serial + parallel)");
         add_bool  ("use_ccd_guess",    use_ccd_guess,    true,  "Use ccd_initial_guess as the substep start point (ignored if use_trust_region is on)");
         add_bool  ("use_trust_region", use_trust_region, false, "Use trust-region narrow phase instead of CCD for step clamping");
@@ -186,6 +190,8 @@ struct IPCArgs3D : ArgParser {
         p.k_sdf            = k_sdf;
         p.eps_sdf          = eps_sdf;
         p.use_parallel     = use_parallel;
+        p.write_substeps   = write_substeps;
+        p.use_ccd          = use_ccd;
         p.ccd_check        = ccd_check;
         p.use_ccd_guess = use_ccd_guess;
         p.use_trust_region = use_trust_region;

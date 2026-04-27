@@ -39,6 +39,8 @@ struct SimParams {
     int    max_global_iters;
 
     bool   use_parallel;
+    bool   write_substeps;       // if true, export a frame file after every substep (not just every frame)
+    bool   use_ccd;              // if true, run CCD step clamping in per_vertex_safe_step
     bool   ccd_check;
     bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
     bool   use_trust_region;     // if true, use trust_region_initial_guess instead of CCD
@@ -73,6 +75,8 @@ struct SimParams {
         p.gravity                   = Vec3::Zero();
         p.max_global_iters          = 0;
         p.use_parallel              = false;
+        p.write_substeps            = false;
+        p.use_ccd                   = false;
         p.ccd_check                 = false;
         p.use_ccd_guess             = true;
         p.use_trust_region          = false;
