@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.18)
 
 project(CorotatedEnergy LANGUAGES CXX)
 
@@ -14,6 +14,17 @@ enable_testing()
 
 find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(GTest REQUIRED)
+
+# Tight-Inclusion CCD (https://github.com/Continuous-Collision-Detection/Tight-Inclusion)
+# powers our general CCD (multi-vertex motion). Pulled in via FetchContent so the
+# build is self-contained.
+include(FetchContent)
+FetchContent_Declare(
+    tight_inclusion
+    GIT_REPOSITORY https://github.com/Continuous-Collision-Detection/Tight-Inclusion.git
+    GIT_TAG        v1.0.6
+)
+FetchContent_MakeAvailable(tight_inclusion)
 if(APPLE)
     set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp")
     set(OpenMP_CXX_LIB_NAMES "omp")
@@ -60,6 +71,7 @@ add_library(corotated_energy_lib
 
 target_link_libraries(corotated_energy_lib
     PUBLIC Eigen3::Eigen
+    PRIVATE tight_inclusion::tight_inclusion
 )
 
 target_include_directories(corotated_energy_lib
@@ -177,26 +189,6 @@ target_link_libraries(gpu_solver_test
 )
 
 gtest_discover_tests(gpu_solver_test)
-
-add_executable(gpu_ccd_test
-    gpu_ccd_test.cpp
-    make_shape.cpp
-    physics.cpp
-    solver.cpp
-    parallel_helper.cpp
-    broad_phase.cpp
-)
-
-target_link_libraries(gpu_ccd_test
-    PRIVATE
-    gpu_mesh_lib
-    corotated_energy_lib
-    OpenMP::OpenMP_CXX
-    GTest::gtest
-    GTest::gtest_main
-)
-
-gtest_discover_tests(gpu_ccd_test)
 
 add_executable(ccd_test
     ccd_test.cpp

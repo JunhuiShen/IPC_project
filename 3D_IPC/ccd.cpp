@@ -1,7 +1,11 @@
 #include "ccd.h"
 
+#include <tight_inclusion/ccd.hpp>
+
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <limits>
 
 namespace {
 bool inside_triangle_3d_at(const Vec3& x, const Vec3& dx, const Vec3& x1, const Vec3& dx1,
@@ -117,12 +121,12 @@ CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1, c
 }
 
 
-// General CCD: all vertices may move, returns earliest TOI in [0,1].
+// =============================================================================
+// Linear CCD helpers
+// =============================================================================
 namespace {
 
-static constexpr double PI = 3.14159265358979323846;
-
-//  Polynomial solvers
+// Polynomial solvers (linear CCD coplanar fallback only)
 
 void solve_linear_all(double c, double d, SmallRoots& roots, double eps) {
     double s = std::max(1.0, std::fabs(d));
@@ -153,58 +157,7 @@ void solve_quadratic_all(double a, double b, double c, SmallRoots& roots, double
     if (!nearly_zero(q, eps * s)) add_root(roots, c / q, eps);
 }
 
-void solve_cubic_all(double a, double b, double c, double d, SmallRoots& roots, double eps) {
-    double s = max_abs_value_among_four_numbers(a, b, c, d);
-    const double degree_eps = std::sqrt(eps);
-    if (nearly_zero(a, eps * s)) {
-        solve_quadratic_all(b, c, d, roots, eps);
-        return;
-    }
-    if (nearly_zero(a, degree_eps * s)) {
-        solve_quadratic_all(b, c, d, roots, eps);
-    }
-
-    double inv_a = 1.0 / a;
-    double ba = b * inv_a;
-    double ca = c * inv_a;
-    double da = d * inv_a;
-    double shift = -ba / 3.0;
-    double p = ca - (ba * ba) / 3.0;
-    double q = (2.0 / 27.0) * ba * ba * ba - (ba * ca) / 3.0 + da;
-    double Delta = -4.0 * p * p * p - 27.0 * q * q;
-    double dtol = eps * std::max({1.0, std::fabs(p * p * p), std::fabs(q * q)}) * 64.0;
-
-    if (Delta > dtol) {
-        double m = 2.0 * std::sqrt(std::max(0.0, -p / 3.0));
-        if (nearly_zero(m, eps)) {
-            add_root(roots, shift, eps);
-        } else {
-            double w = clamp_scalar((3.0 * q) / (p * m), -1.0, 1.0);
-            double theta = std::acos(w) / 3.0;
-            for (int k = 0; k < 3; ++k) {
-                double sk = m * std::cos(theta - 2.0 * PI * k / 3.0);
-                add_root(roots, sk + shift, eps);
-            }
-        }
-    } else if (Delta < -dtol) {
-        double Disc = q * q / 4.0 + p * p * p / 27.0;
-        double sqrtD = std::sqrt(std::max(0.0, Disc));
-        double C = std::cbrt(-q / 2.0 + sqrtD);
-        double s0 = nearly_zero(C, eps) ? 0.0 : (C - p / (3.0 * C));
-        add_root(roots, s0 + shift, eps);
-    } else {
-        if (nearly_zero(p, eps * std::max(1.0, std::fabs(p))) && nearly_zero(q, eps * std::max(1.0, std::fabs(q)))) {
-            add_root(roots, shift, eps);
-        } else if (!nearly_zero(p, eps * std::max(1.0, std::fabs(p)))) {
-            add_root(roots,  3.0 * q / p + shift, eps);
-            add_root(roots, -1.5 * q / p + shift, eps);
-        } else {
-            add_root(roots, shift, eps);
-        }
-    }
-}
-
-// Projection helpers
+// Projection helpers (linear CCD coplanar fallback only)
 
 Vec2 project_drop_axis(const Vec3& v, int drop_axis) {
     if (drop_axis == 0) return Vec2(v.y(), v.z());
@@ -219,7 +172,7 @@ int dominant_drop_axis(const Vec3& n0, const Vec3& n1) {
     return 2;
 }
 
-// Geometric containment tests
+// Geometric containment tests (linear CCD only)
 
 bool inside_triangle_3d_at(const Vec3& x, const Vec3& dx, const Vec3& x1, const Vec3& dx1,
                            const Vec3& x2, const Vec3& dx2, const Vec3& x3, const Vec3& dx3,
@@ -292,7 +245,7 @@ bool inside_segments_3d_at(const Vec3& x1, const Vec3& dx1, const Vec3& x2, cons
     return s >= -1e-8 && s <= 1.0 + 1e-8 && upar >= -1e-8 && upar <= 1.0 + 1e-8;
 }
 
-// Degenerate-case handlers
+// Degenerate-case handlers (linear CCD coplanar fallback only)
 
 bool point_in_triangle_projected(const Vec2& p, const Vec2& a, const Vec2& b, const Vec2& c) {
     double e0 = cross_product_in_2d(b - a, p - a);
@@ -308,13 +261,15 @@ double node_triangle_coplanar_interval(const Vec3& x, const Vec3& dx, const Vec3
     Vec3 n1 = (x2 + dx2 - x1 - dx1).cross(x3 + dx3 - x1 - dx1);
     int drop = dominant_drop_axis(n0, n1);
 
+    // Under one-moving-node, the t^2 term cross_2d(du, dv) is always 0
+    // (one of du/dv is zero, or du == dv up to sign), so the boundary
+    // equation reduces to linear in t.
     auto coeff_boundary_segment = [&](const Vec2& a0, const Vec2& da,  const Vec2& b0, const Vec2& db,
-                                      const Vec2& p0, const Vec2& dp,  double out[3]) {
+                                      const Vec2& p0, const Vec2& dp,  double out[2]) {
         Vec2 u0 = b0 - a0;
         Vec2 du = db - da;
         Vec2 v0 = p0 - a0;
         Vec2 dv = dp - da;
-        out[2] = cross_product_in_2d(du, dv);
         out[1] = cross_product_in_2d(du, v0) + cross_product_in_2d(u0, dv);
         out[0] = cross_product_in_2d(u0, v0);
     };
@@ -327,10 +282,10 @@ double node_triangle_coplanar_interval(const Vec3& x, const Vec3& dx, const Vec3
     if (point_in_triangle_projected(p0, a0, b0, c0)) return 0.0;
 
     SmallRoots roots;
-    double coeffs[3];
-    coeff_boundary_segment(a0, da, b0, db, p0, dp, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots, eps);
-    coeff_boundary_segment(b0, db, c0, dc, p0, dp, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots, eps);
-    coeff_boundary_segment(c0, dc, a0, da, p0, dp, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots, eps);
+    double coeffs[2];
+    coeff_boundary_segment(a0, da, b0, db, p0, dp, coeffs); solve_linear_all(coeffs[1], coeffs[0], roots, eps);
+    coeff_boundary_segment(b0, db, c0, dc, p0, dp, coeffs); solve_linear_all(coeffs[1], coeffs[0], roots, eps);
+    coeff_boundary_segment(c0, dc, a0, da, p0, dp, coeffs); solve_linear_all(coeffs[1], coeffs[0], roots, eps);
 
     std::sort(roots.begin(), roots.end());
     for (double t : roots) {
@@ -432,25 +387,27 @@ double persistent_segment_segment_time(const Vec3& x1, const Vec3& dx1, const Ve
 
     if (segments_intersect_projected(a0, b0, c0, d0)) return 0.0;
 
+    // Same one-moving-node argument as in node_triangle_coplanar_interval:
+    // the t^2 coefficient cross_2d(du, dv) always vanishes here, so the
+    // 2D orientation equation is linear in t.
     auto orient_coeff = [](const Vec2& p0, const Vec2& dp,
                            const Vec2& q0, const Vec2& dq,
                            const Vec2& r0, const Vec2& dr,
-                           double out[3]) {
+                           double out[2]) {
         Vec2 u0 = q0 - p0;
         Vec2 du = dq - dp;
         Vec2 v0 = r0 - p0;
         Vec2 dv = dr - dp;
-        out[2] = cross_product_in_2d(du, dv);
         out[1] = cross_product_in_2d(du, v0) + cross_product_in_2d(u0, dv);
         out[0] = cross_product_in_2d(u0, v0);
     };
 
     SmallRoots roots;
-    double coeffs[3];
-    orient_coeff(a0, da, b0, db, c0, dc, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots, eps);
-    orient_coeff(a0, da, b0, db, d0, dd, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots, eps);
-    orient_coeff(c0, dc, d0, dd, a0, da, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots, eps);
-    orient_coeff(c0, dc, d0, dd, b0, db, coeffs); solve_quadratic_all(coeffs[2], coeffs[1], coeffs[0], roots, eps);
+    double coeffs[2];
+    orient_coeff(a0, da, b0, db, c0, dc, coeffs); solve_linear_all(coeffs[1], coeffs[0], roots, eps);
+    orient_coeff(a0, da, b0, db, d0, dd, coeffs); solve_linear_all(coeffs[1], coeffs[0], roots, eps);
+    orient_coeff(c0, dc, d0, dd, a0, da, coeffs); solve_linear_all(coeffs[1], coeffs[0], roots, eps);
+    orient_coeff(c0, dc, d0, dd, b0, db, coeffs); solve_linear_all(coeffs[1], coeffs[0], roots, eps);
 
     std::sort(roots.begin(), roots.end());
     for (double t : roots) {
@@ -463,73 +420,78 @@ double persistent_segment_segment_time(const Vec3& x1, const Vec3& dx1, const Ve
 
 } 
 
-// General CCD functions
-double node_triangle_general_ccd(const Vec3& x, const Vec3& dx, const Vec3& x1, const Vec3& dx1,
-                                 const Vec3& x2, const Vec3& dx2,  const Vec3& x3, const Vec3& dx3,
-                                 double eps1, double eps2) {
-    if (inside_triangle_3d_at(x, dx, x1, dx1, x2, dx2, x3, dx3, 0.0, eps2)) return 0.0;
+// General CCD: backed by Tight-Inclusion CCD [Wang et al. 2021].
+// https://github.com/Continuous-Collision-Detection/Tight-Inclusion
+//
+// TICCD is a conservative inclusion-based root finder. Returning false is a
+// guarantee of no collision in the step. Returning true may be a false
+// positive, but only when the closest distance between the two primitives is
+// at most (tolerance + ms + err).
+//
+// Parameters used here (matching TICCD's reference example, app/main.cpp):
+//   ms          - minimum separation distance (>= 0). A collision is
+//                 guaranteed to be reported if the pair gets closer than ms.
+//   tolerance   - target solver precision (max edge length of the inclusion
+//                 box). 1e-6 is the upstream-recommended value.
+//   max_itr     - early-termination cap on inclusion-tree iterations. 1e6 is
+//                 the upstream-recommended cap; -1 disables it.
+//   err         - per-axis numerical filter compensating for floating-point
+//                 error in the inclusion function. (-1,-1,-1) tells TICCD to
+//                 compute it from the query alone; for tighter filters, call
+//                 ticcd::get_numerical_error() once with the simulation's
+//                 scene AABB and reuse the result.
+//   t_max       - upper bound of the time interval to check (in [0, 1]).
+//   ccd_method  - inclusion-tree traversal; default/recommended
+//                 BREADTH_FIRST_SEARCH.
+//   no_zero_toi - when ms > 0, set true to keep refining instead of letting
+//                 toi snap to 0; default false.
+namespace {
 
-    Vec3 p0 = x2 - x1, dp = dx2 - dx1;
-    Vec3 q0 = x3 - x1, dq = dx3 - dx1;
-    Vec3 r0 = x - x1, dr = dx - dx1;
+constexpr double kTiccdMinSeparation = 1.0e-10;
+constexpr double kTiccdTolerance     = 1.0e-6;
+constexpr long   kTiccdMaxIter       = 1000000;
+constexpr bool   kTiccdNoZeroToi     = ticcd::DEFAULT_NO_ZERO_TOI;
+constexpr ticcd::CCDRootFindingMethod kTiccdMethod = ticcd::CCDRootFindingMethod::BREADTH_FIRST_SEARCH;
 
-    Vec3 p0xq0 = p0.cross(q0);
-    Vec3 dpxq0 = dp.cross(q0);
-    Vec3 p0xdq = p0.cross(dq);
-    Vec3 dpxdq = dp.cross(dq);
-
-    double d = p0xq0.dot(r0);
-    double c = dpxq0.dot(r0) + p0xdq.dot(r0) + p0xq0.dot(dr);
-    double b = dpxdq.dot(r0) + dpxq0.dot(dr) + p0xdq.dot(dr);
-    double a = dpxdq.dot(dr);
-
-    SmallRoots roots;
-    solve_cubic_all(a, b, c, d, roots, eps1);
-    std::sort(roots.begin(), roots.end());
-    for (double t : roots) {
-        if (inside_triangle_3d_at(x, dx, x1, dx1, x2, dx2, x3, dx3, t, eps2)) return t;
-    }
-
-    double s = max_abs_value_among_four_numbers(a, b, c, d);
-    if (nearly_zero(a, eps1 * s) && nearly_zero(b, eps1 * s) && nearly_zero(c, eps1 * s) && nearly_zero(d, eps1 * s)) {
-        double t = node_triangle_coplanar_interval(x, dx, x1, dx1, x2, dx2, x3, dx3, eps1);
-        if (t < 1.0 && inside_triangle_3d_at(x, dx, x1, dx1, x2, dx2, x3, dx3, t, eps2)) return t;
-    }
-
-    return 1.0;
+double clamp_toi(double toi) {
+    if (!std::isfinite(toi)) return 1.0;
+    if (toi < 0.0) return 0.0;
+    if (toi > 1.0) return 1.0;
+    return toi;
 }
 
-double segment_segment_general_ccd(const Vec3& x1, const Vec3& dx1,  const Vec3& x2, const Vec3& dx2,
-                                   const Vec3& x3, const Vec3& dx3, const Vec3& x4, const Vec3& dx4,
-                                   double eps1, double eps2) {
-    if (inside_segments_3d_at(x1, dx1, x2, dx2, x3, dx3, x4, dx4, 0.0, eps2)) return 0.0;
+}  // namespace
 
-    Vec3 p0 = x2 - x1, dp = dx2 - dx1;
-    Vec3 q0 = x4 - x3, dq = dx4 - dx3;
-    Vec3 r0 = x3 - x1, dr = dx3 - dx1;
+double node_triangle_general_ccd(const Vec3& x,  const Vec3& dx,
+                                 const Vec3& x1, const Vec3& dx1,
+                                 const Vec3& x2, const Vec3& dx2,
+                                 const Vec3& x3, const Vec3& dx3) {
+    const ticcd::Array3 err  = ticcd::Array3::Constant(-1.0);
+    double  toi  = std::numeric_limits<double>::infinity();
+    double  output_tolerance = kTiccdTolerance;
 
-    Vec3 p0xq0 = p0.cross(q0);
-    Vec3 dpxq0 = dp.cross(q0);
-    Vec3 p0xdq = p0.cross(dq);
-    Vec3 dpxdq = dp.cross(dq);
+    const bool collision = ticcd::vertexFaceCCD(
+        x,      x1,       x2,       x3,
+        x + dx, x1 + dx1, x2 + dx2, x3 + dx3,
+        err, kTiccdMinSeparation, toi, kTiccdTolerance, /*t_max=*/1.0,
+        kTiccdMaxIter, output_tolerance, kTiccdNoZeroToi, kTiccdMethod);
 
-    double d = p0xq0.dot(r0);
-    double c = dpxq0.dot(r0) + p0xdq.dot(r0) + p0xq0.dot(dr);
-    double b = dpxdq.dot(r0) + dpxq0.dot(dr) + p0xdq.dot(dr);
-    double a = dpxdq.dot(dr);
+    return collision ? clamp_toi(toi) : 1.0;
+}
 
-    SmallRoots roots;
-    solve_cubic_all(a, b, c, d, roots, eps1);
-    std::sort(roots.begin(), roots.end());
-    for (double t : roots) {
-        if (inside_segments_3d_at(x1, dx1, x2, dx2, x3, dx3, x4, dx4, t, eps2)) return t;
-    }
+double segment_segment_general_ccd(const Vec3& x1, const Vec3& dx1,
+                                   const Vec3& x2, const Vec3& dx2,
+                                   const Vec3& x3, const Vec3& dx3,
+                                   const Vec3& x4, const Vec3& dx4) {
+    const ticcd::Array3 err  = ticcd::Array3::Constant(-1.0);
+    double  toi  = std::numeric_limits<double>::infinity();
+    double  output_tolerance = kTiccdTolerance;
 
-    double s = max_abs_value_among_four_numbers(a, b, c, d);
-    if (nearly_zero(a, eps1 * s) && nearly_zero(b, eps1 * s) && nearly_zero(c, eps1 * s) && nearly_zero(d, eps1 * s)) {
-        double t = persistent_segment_segment_time(x1, dx1, x2, dx2, x3, dx3, x4, dx4, eps1);
-        if (t < 1.0 && inside_segments_3d_at(x1, dx1, x2, dx2, x3, dx3, x4, dx4, t, eps2)) return t;
-    }
+    const bool collision = ticcd::edgeEdgeCCD(
+        x1,       x2,       x3,       x4,
+        x1 + dx1, x2 + dx2, x3 + dx3, x4 + dx4,
+        err, kTiccdMinSeparation, toi, kTiccdTolerance, /*t_max=*/1.0,
+        kTiccdMaxIter, output_tolerance, kTiccdNoZeroToi, kTiccdMethod);
 
-    return 1.0;
+    return collision ? clamp_toi(toi) : 1.0;
 }

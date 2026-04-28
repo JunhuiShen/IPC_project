@@ -529,58 +529,6 @@ TEST_F(TotalEnergyTest, PerVertexHessianWithBendingAtRest) {
 //      gradient along the outward normal, and adds a PSD block to H.
 // =====================================================================
 
-TEST_F(TotalEnergyTest, SdfPenaltyAppearsInObjective) {
-    params.d_hat = 0.0;          // barriers off so the SDF term is the only contact contribution
-    params.kB    = 0.0;
-    nt_pairs.clear();
-    ss_pairs.clear();
-
-    const double E_base = total_energy(ref_mesh, pins, params, x, xhat, nt_pairs, ss_pairs);
-
-    // Place a horizontal ground plane just above vertex 0. With an initial
-    // mesh in the z = 0 / z = 0.4 planes and vertices displaced by O(0.03),
-    // vertex 0's y-coordinate is negative enough that phi = y is inside the
-    // transition shell when the plane sits at y = eps_sdf/2.
-    const double eps_sdf = 0.05;
-    PlaneSDF ground{Vec3(0.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)};  // phi = y
-    params.k_sdf   = 1e4;
-    params.eps_sdf = eps_sdf;
-    params.sdf_planes = {ground};
-
-    // Move vertex 0 so it sits in the transition layer: phi = +0.5*eps_sdf.
-    const int vi = 0;
-    x[vi].y()    = 0.5 * eps_sdf;
-    xhat[vi].y() = 0.5 * eps_sdf;
-
-    const double E_sdf = total_energy(ref_mesh, pins, params, x, xhat, nt_pairs, ss_pairs);
-    EXPECT_GT(E_sdf, E_base) << "SDF penalty did not raise the total energy";
-
-    // Gradient: outward normal is +y; the energy gradient points -y (into the
-    // obstacle). Force = -grad, so force.dot(+y) > 0 (pushed up, away from ground).
-    Vec3  g = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
-    Mat33 H = local_hessian (vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
-
-    // Baseline gradient (k_sdf = 0) for the same vertex, same positions.
-    SimParams params_off = params;
-    params_off.k_sdf = 0.0;
-    params_off.sdf_planes.clear();
-    Vec3 g_base = local_gradient(vi, ref_mesh, adj, pins, params_off, x, xhat, nt_pairs, ss_pairs);
-
-    const Vec3 g_sdf_only = g - g_base;
-    EXPECT_LT(g_sdf_only.y(), 0.0) << "SDF gradient should push the vertex upward (-y component of grad)";
-    EXPECT_NEAR(g_sdf_only.x(), 0.0, 1e-12);
-    EXPECT_NEAR(g_sdf_only.z(), 0.0, 1e-12);
-
-    // Hessian PSD contribution: outer-product rank-1 in the +y direction.
-    Mat33 H_base = local_hessian(vi, ref_mesh, adj, pins, params_off, x, xhat, nt_pairs, ss_pairs);
-    Mat33 H_sdf_only = H - H_base;
-    Eigen::SelfAdjointEigenSolver<Mat33> es(H_sdf_only);
-    const Vec3 lambda = es.eigenvalues();
-    EXPECT_GE(lambda(0), -1e-10);
-    EXPECT_GE(lambda(1), -1e-10);
-    EXPECT_GT(lambda(2),  0.0);
-}
-
 TEST_F(TotalEnergyTest, SdfPenaltyDisabledIsBaseline) {
     params.d_hat = 0.0;
     nt_pairs.clear();

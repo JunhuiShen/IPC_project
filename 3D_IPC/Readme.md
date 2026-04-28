@@ -23,7 +23,8 @@ Per time step, the optimizer minimizes an incremental potential made of:
 The nonlinear solve is driven by:
 
 1. **CCD-projected initial guess** -- advance toward the inertial predictor using
-   parallel cubic CCD so the starting iterate is already intersection-free.
+   general CCD (Tight-Inclusion) so the starting iterate is already
+   intersection-free.
 2. **Gauss-Seidel iterations** -- local 3x3 Newton solve per vertex, each step
    filtered by linear CCD; stop on residual tolerance (or run fixed iterations).
 3. **Per-iteration contact registration** -- rebuild node-triangle / edge-edge
@@ -35,10 +36,12 @@ The nonlinear solve is driven by:
 ## Requirements
 
 - C++17 compiler (GCC 9+, Clang 10+, MSVC 2019+)
-- CMake 3.10+
+- CMake 3.18+
 - Eigen3
 - OpenMP (on macOS: `brew install libomp`)
 - GoogleTest
+- Tight-Inclusion CCD -- fetched automatically by CMake (requires network on
+  first configure)
 
 ## Build
 
@@ -152,9 +155,11 @@ reader can jump to the layer they care about.
 
 - `ccd.h` / `ccd.cpp` -- linear node-triangle CCD for every single-moving-DOF
   configuration, linear segment-segment CCD for single-moving-endpoint sweeps,
-  and general cubic CCD for multi-vertex motion (used by the initial guess).
-  Full degeneracy chain: cubic -> quadratic -> linear -> coplanar -> collinear.
-  All root solvers use the stack-allocated `SmallRoots` buffer.
+  and general CCD for multi-vertex motion. The general CCD entry points
+  (`node_triangle_general_ccd`, `segment_segment_general_ccd`) are thin wrappers
+  over [Tight-Inclusion CCD](https://github.com/Continuous-Collision-Detection/Tight-Inclusion).
+  The linear-only path's coplanar fallback uses a stack-allocated `SmallRoots`
+  root buffer.
 - `broad_phase.h` / `broad_phase.cpp` -- swept-AABB broad phase backed by a BVH.
   Caches mesh topology via `set_mesh_topology`, builds candidate node-triangle
   and edge-edge pairs, and exposes per-vertex pair queries used by one-node
@@ -187,7 +192,7 @@ Every layer of the pipeline has a GoogleTest binary. To build and run them all:
 
 | Test binary | Cases | What it covers |
 |-------------|-------|----------------|
-| `ccd_test` | 47 | Linear CCD (all single-moving-DOF cases) and cubic CCD, degeneracy chain, stress, CCD-projected initial guess |
+| `ccd_test` | 20 | Linear CCD single-moving-DOF cases plus Tight-Inclusion-backed general NT/SS wrapper smoke tests |
 | `broad_phase_test` | 38 | AABB, BVH, pair generation, CCD candidates, conservativeness, per-vertex pair query vs brute-force |
 | `ipc_math_test` | 27 | `matrix3d_inverse`, `segment_closest_point`, `filter_root`, `SmallRoots`, barycentric coords, serialize round-trip, topology caching |
 | `parallel_helper_test` | 26 | Jacobi predictions, certified regions, conflict graph, coloring, parallel commits, solver correctness |
@@ -212,3 +217,15 @@ Run any suite directly:
     ./build/ccd_test
     ./build/bending_energy_test
     ./build/parallel_helper_test
+
+## Acknowledgments
+
+Our general (multi-vertex motion) continuous collision detection is provided by
+[**Tight-Inclusion CCD**](https://github.com/Continuous-Collision-Detection/Tight-Inclusion):
+
+> Bolun Wang, Zachary Ferguson, Teseo Schneider, Xin Jiang, Marco Attene, and
+> Daniele Panozzo. *A Large-Scale Benchmark and an Inclusion-Based Algorithm
+> for Continuous Collision Detection.* ACM Transactions on Graphics, 2021.
+
+The library is fetched automatically at configure time via CMake's
+`FetchContent`. See its repository for license and citation details.
