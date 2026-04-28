@@ -36,7 +36,7 @@ The nonlinear solve is driven by:
 ## Requirements
 
 - C++17 compiler (GCC 9+, Clang 10+, MSVC 2019+)
-- CMake 3.18+
+- CMake 3.21+
 - Eigen3
 - OpenMP (on macOS: `brew install libomp`)
 - GoogleTest
