@@ -7,6 +7,12 @@
 #include <cmath>
 #include <limits>
 
+// =============================================================================
+// Self-written linear CCD (kept for reference; replaced by TICCD wrappers
+// further down). Disabled with `#if 0` because it produced false negatives
+// on coplanar/collinear inputs that allowed pairs to tunnel.
+// =============================================================================
+#if 0
 namespace {
 bool inside_triangle_3d_at(const Vec3& x, const Vec3& dx, const Vec3& x1, const Vec3& dx1,
                            const Vec3& x2, const Vec3& dx2, const Vec3& x3, const Vec3& dx3,
@@ -418,7 +424,8 @@ double persistent_segment_segment_time(const Vec3& x1, const Vec3& dx1, const Ve
     return collinear_segment_overlap_time(x1, dx1, x2, dx2, x3, dx3, x4, dx4, eps);
 }
 
-} 
+}
+#endif  // self-written linear CCD (disabled, replaced by TICCD wrappers)
 
 // General CCD: backed by Tight-Inclusion CCD [Wang et al. 2021].
 // https://github.com/Continuous-Collision-Detection/Tight-Inclusion
@@ -494,4 +501,45 @@ double segment_segment_general_ccd(const Vec3& x1, const Vec3& dx1,
         kTiccdMaxIter, output_tolerance, kTiccdNoZeroToi, kTiccdMethod);
 
     return collision ? clamp_toi(toi) : 1.0;
+}
+
+// =============================================================================
+// Linear (one-moving-node) CCD entry points are thin wrappers over the
+// general TICCD-backed path. The historical hand-rolled linear CCD lives at
+// the top of this file inside `#if 0`. Only `.collision` and `.t` carry
+// meaningful values now; the legacy `has_candidate_time`,
+// `coplanar_entire_step`, `parallel_or_no_crossing` flags are derived from
+// TICCD's bool + toi answer.
+// =============================================================================
+namespace {
+
+CCDResult ccd_result_from_toi(double toi) {
+    CCDResult r;
+    if (toi < 1.0) {
+        r.has_candidate_time = true;
+        r.collision          = true;
+        r.t                  = toi;
+    } else {
+        r.parallel_or_no_crossing = true;
+    }
+    return r;
+}
+
+}  // namespace
+
+CCDResult node_triangle_only_one_node_moves(const Vec3& x,  const Vec3& dx,
+                                            const Vec3& x1, const Vec3& dx1,
+                                            const Vec3& x2, const Vec3& dx2,
+                                            const Vec3& x3, const Vec3& dx3,
+                                            double /*eps*/) {
+    return ccd_result_from_toi(node_triangle_general_ccd(
+        x, dx, x1, dx1, x2, dx2, x3, dx3));
+}
+
+CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1,
+                                              const Vec3& x2, const Vec3& x3, const Vec3& x4,
+                                              double /*eps*/) {
+    const Vec3 zero = Vec3::Zero();
+    return ccd_result_from_toi(segment_segment_general_ccd(
+        x1, dx1, x2, zero, x3, zero, x4, zero));
 }
