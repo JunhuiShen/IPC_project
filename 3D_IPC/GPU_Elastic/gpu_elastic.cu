@@ -1024,7 +1024,7 @@ void gpu_elastic_init(const RefMesh& ref_mesh,
     s.gp.gx     = static_cast<Real>(params.gravity(0));
     s.gp.gy     = static_cast<Real>(params.gravity(1));
     s.gp.gz     = static_cast<Real>(params.gravity(2));
-    s.gp.mass_normalize_residual = params.mass_normalize_residual ? 1 : 0;
+    s.gp.mass_normalize_residual = 1;
 
     // Mesh + adjacency + pins via existing GPU mirrors (double).
     s.mesh.upload(ref_mesh);
