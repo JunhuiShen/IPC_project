@@ -1,8 +1,11 @@
 #include "make_shape.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 TriangleDef make_def_triangle(const std::vector<Vec3>& x, const RefMesh& ref_mesh, int tri_idx) {
     TriangleDef def;
@@ -76,36 +79,37 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
         }
     }
 
-    ref_mesh.initialize(X);
+    ref_mesh.initialize(X, state.deformed_positions);
 
     return base;
 }
 
-// Total number of vertices is: nu * (nv + 1) and total number of triangles is: 2 * nu * nv.
-// The surface is closed: the wrap column (i == nu-1 -> i == 0) reuses existing vertex
-// indices, so no vertex is duplicated in 3D.
+// Near-iso cylinder (brick-pattern triangulation): odd axial rings are rotated
+// by half a circumferential step so every triangle is near-equilateral.
+// Axial row count n_rows is picked internally to match the equilateral row
+// height h = (2*pi*r/nu) * sqrt(3)/2. Vertex count: nu * (n_rows + 1).
+// Triangle count: 2 * nu * n_rows, where n_rows = max(1, round(length / h)).
 int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X,
-                        int nu, int nv, double radius, double length, const Vec3& center) {
+                        int nu, double radius, double length, const Vec3& center) {
     constexpr double kPi = 3.14159265358979323846;
-    int base = static_cast<int>(state.deformed_positions.size());
+    const int    base        = static_cast<int>(state.deformed_positions.size());
     const double two_pi      = 2.0 * kPi;
     const double theta_start = -0.5 * kPi;
 
-    for (int j = 0; j <= nv; ++j) {
+    const double iso_row_h = (two_pi * radius / nu) * 0.5 * std::sqrt(3.0);
+    const int    n_rows    = std::max(1, static_cast<int>(std::round(length / iso_row_h)));
 
-        // Normalize axial coordinate from 0 to 1
-        double v = static_cast<double>(j) / nv;
-
-        // Scale to actual length, both as 2D parameter and 3D world coord
-        double z_ref   = v * length;
-        double z_world = center.z() - 0.5 * length + z_ref;
+    for (int j = 0; j <= n_rows; ++j) {
+        const double v        = static_cast<double>(j) / n_rows;
+        const double z_ref    = v * length;
+        const double z_world  = center.z() - 0.5 * length + z_ref;
+        const bool   shifted  = (j % 2 == 1);
+        const double u_offset = shifted ? 0.5 / nu : 0.0;
 
         for (int i = 0; i < nu; ++i) {
+            const double u     = static_cast<double>(i) / nu + u_offset;
+            const double theta = theta_start + u * two_pi;
 
-            double u     = static_cast<double>(i) / nu;
-            double theta = theta_start + u * two_pi;
-
-            // Store reference (2D unrolled) and deformed (3D) positions
             X.push_back(Vec2(u * two_pi * radius, z_ref));
             state.deformed_positions.push_back(
                 Vec3(center.x() + radius * std::cos(theta),
@@ -114,27 +118,163 @@ int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec
         }
     }
 
-    // convert (col, row) -> vertex index
     auto vertex_index = [base, nu](int i, int j) {
         return base + j * nu + i;
     };
 
-    // Create triangles, wrapping the last column back to i == 0 so the cylinder is closed.
-    for (int j = 0; j < nv; ++j) {
+    // Row j is shifted when j is odd. Each pair (j, j+1) contributes 2*nu
+    // triangles: one up-pointing (two verts on the non-shifted row, apex on
+    // the shifted row) and one down-pointing (apex on the non-shifted row,
+    // two verts on the shifted row). Wrap via i_next = (i+1) % nu.
+    for (int j = 0; j < n_rows; ++j) {
+        const bool j_shifted = (j % 2 == 1);
         for (int i = 0; i < nu; ++i) {
             const int i_next = (i + 1) % nu;
-            int v00 = vertex_index(i,      j);
-            int v10 = vertex_index(i_next, j);
-            int v01 = vertex_index(i,      j + 1);
-            int v11 = vertex_index(i_next, j + 1);
+            if (!j_shifted) {
+                // Non-shifted row j below, shifted row j+1 above.
+                ref_mesh.tris.push_back(vertex_index(i,      j));
+                ref_mesh.tris.push_back(vertex_index(i_next, j));
+                ref_mesh.tris.push_back(vertex_index(i,      j + 1));
 
-            // Split quad into two triangles
-            ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v10); ref_mesh.tris.push_back(v11);
-            ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v11); ref_mesh.tris.push_back(v01);
+                ref_mesh.tris.push_back(vertex_index(i_next, j));
+                ref_mesh.tris.push_back(vertex_index(i_next, j + 1));
+                ref_mesh.tris.push_back(vertex_index(i,      j + 1));
+            } else {
+                // Shifted row j below, non-shifted row j+1 above.
+                ref_mesh.tris.push_back(vertex_index(i,      j));
+                ref_mesh.tris.push_back(vertex_index(i_next, j));
+                ref_mesh.tris.push_back(vertex_index(i_next, j + 1));
+
+                ref_mesh.tris.push_back(vertex_index(i,      j));
+                ref_mesh.tris.push_back(vertex_index(i_next, j + 1));
+                ref_mesh.tris.push_back(vertex_index(i,      j + 1));
+            }
         }
     }
 
-    ref_mesh.initialize(X);
+    // End caps: fan triangles around a center vertex on each circular end.
+    // Cap centers sit off the unrolled strip (y=0 and y=length are occupied
+    // by the boundary rings) so the fan triangles stay non-degenerate in
+    // parameter space and buildCorotatedCache's Eigen decomposition succeeds.
+    const double cap_offset = radius;
+    const int bot_center = static_cast<int>(state.deformed_positions.size());
+    X.push_back(Vec2(kPi * radius, -cap_offset));
+    state.deformed_positions.push_back(
+        Vec3(center.x(), center.y(), center.z() - 0.5 * length));
+
+    const int top_center = static_cast<int>(state.deformed_positions.size());
+    X.push_back(Vec2(kPi * radius, length + cap_offset));
+    state.deformed_positions.push_back(
+        Vec3(center.x(), center.y(), center.z() + 0.5 * length));
+
+    for (int i = 0; i < nu; ++i) {
+        const int i_next = (i + 1) % nu;
+        // Bottom cap faces -z: winding (center, ring[i_next], ring[i]).
+        ref_mesh.tris.push_back(bot_center);
+        ref_mesh.tris.push_back(vertex_index(i_next, 0));
+        ref_mesh.tris.push_back(vertex_index(i,      0));
+        // Top cap faces +z: winding (center, ring[i], ring[i_next]).
+        ref_mesh.tris.push_back(top_center);
+        ref_mesh.tris.push_back(vertex_index(i,      n_rows));
+        ref_mesh.tris.push_back(vertex_index(i_next, n_rows));
+    }
+
+    ref_mesh.initialize(X, state.deformed_positions);
+
+    return base;
+}
+
+int build_sphere_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X,
+                      int subdiv, double radius, const Vec3& center) {
+    const int base = static_cast<int>(state.deformed_positions.size());
+
+    // Base icosahedron: 12 vertices (at ||v|| = sqrt(1 + phi^2) with phi = golden
+    // ratio), 20 triangles. See e.g. Catmull-Clark notes or any graphics text.
+    constexpr double kPhi  = 1.6180339887498948482;  // (1 + sqrt(5)) / 2
+    const double     kNorm = std::sqrt(1.0 + kPhi * kPhi);
+    const double     s     = radius / kNorm;  // scale so |v| = radius
+
+    // Unit-icosahedron vertices, pre-scaled to 'radius'. Rotated by a small
+    // irrational angle around +x so that subdivision midpoints (e.g. the edge
+    // between (0, -1, +phi) and (0, -1, -phi)) don't land exactly on the +-y
+    // axis, where the stereographic projection used for the 2D ref coord
+    // would otherwise become singular.
+    constexpr double kTilt = 0.1;  // rad; irrational in practice, breaks ±y axis alignment
+    const double ct = std::cos(kTilt), st = std::sin(kTilt);
+    auto tilt = [ct, st, s](double x, double y, double z) -> Vec3 {
+        const double yp = ct * y - st * z;
+        const double zp = st * y + ct * z;
+        return Vec3(s * x, s * yp, s * zp);
+    };
+    std::vector<Vec3> verts = {
+        tilt(-1.0,  kPhi,  0.0), tilt( 1.0,  kPhi,  0.0),
+        tilt(-1.0, -kPhi,  0.0), tilt( 1.0, -kPhi,  0.0),
+        tilt( 0.0, -1.0,  kPhi), tilt( 0.0,  1.0,  kPhi),
+        tilt( 0.0, -1.0, -kPhi), tilt( 0.0,  1.0, -kPhi),
+        tilt( kPhi,  0.0, -1.0), tilt( kPhi,  0.0,  1.0),
+        tilt(-kPhi,  0.0, -1.0), tilt(-kPhi,  0.0,  1.0),
+    };
+
+    // 20 faces of the base icosahedron (outward-normal winding when vertices
+    // are placed as above).
+    std::vector<std::array<int, 3>> faces = {
+        {0, 11,  5}, {0,  5,  1}, {0,  1,  7}, {0,  7, 10}, {0, 10, 11},
+        {1,  5,  9}, {5, 11,  4}, {11, 10, 2}, {10, 7,  6}, {7,  1,  8},
+        {3,  9,  4}, {3,  4,  2}, {3,  2,  6}, {3,  6,  8}, {3,  8,  9},
+        {4,  9,  5}, {2,  4, 11}, {6,  2, 10}, {8,  6,  7}, {9,  8,  1},
+    };
+
+    // Loop-subdivide: each triangle splits into 4 by inserting edge midpoints,
+    // normalized to the sphere. Dedupe midpoints by canonicalized edge key.
+    for (int level = 0; level < subdiv; ++level) {
+        std::map<std::pair<int, int>, int> midpoint_cache;
+        auto get_midpoint = [&](int a, int b) -> int {
+            const auto key = (a < b) ? std::make_pair(a, b) : std::make_pair(b, a);
+            auto it = midpoint_cache.find(key);
+            if (it != midpoint_cache.end()) return it->second;
+            Vec3 mid = 0.5 * (verts[a] + verts[b]);
+            mid *= radius / mid.norm();
+            const int idx = static_cast<int>(verts.size());
+            verts.push_back(mid);
+            midpoint_cache.emplace(key, idx);
+            return idx;
+        };
+
+        std::vector<std::array<int, 3>> next_faces;
+        next_faces.reserve(faces.size() * 4);
+        for (const auto& f : faces) {
+            const int a = f[0], b = f[1], c = f[2];
+            const int ab = get_midpoint(a, b);
+            const int bc = get_midpoint(b, c);
+            const int ca = get_midpoint(c, a);
+            next_faces.push_back({a,  ab, ca});
+            next_faces.push_back({ab,  b, bc});
+            next_faces.push_back({ca, bc,  c});
+            next_faces.push_back({ab, bc, ca});
+        }
+        faces.swap(next_faces);
+    }
+
+    // Emit vertices translated to `center`. 2D ref coord uses stereographic
+    // projection from (0, -radius, 0): X = 2r * (x, z) / (y + r). This is
+    // conformal so every triangle has non-degenerate 2D area. The projection
+    // pole (0, -radius, 0) is never an icosphere vertex (no subdivided vertex
+    // lands on the +-y axis).
+    for (const Vec3& v : verts) {
+        state.deformed_positions.push_back(v + center);
+        const double denom = v.y() + radius;
+        X.push_back(Vec2(2.0 * radius * v.x() / denom,
+                         2.0 * radius * v.z() / denom));
+    }
+
+    // Emit triangles with per-batch vertex-index offset by `base`.
+    for (const auto& f : faces) {
+        ref_mesh.tris.push_back(base + f[0]);
+        ref_mesh.tris.push_back(base + f[1]);
+        ref_mesh.tris.push_back(base + f[2]);
+    }
+
+    ref_mesh.initialize(X, state.deformed_positions);
 
     return base;
 }

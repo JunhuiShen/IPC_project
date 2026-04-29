@@ -54,6 +54,7 @@
             return;
         }
 
+        out << std::setprecision(17);
         for (const auto& p : x) out << "v " << p.x() << " " << p.y() << " " << p.z() << "\n";
         for (int t = 0; t < static_cast<int>(tris.size()); t += 3)
             out << "f " << (tris[t] + 1) << " " << (tris[t+1] + 1) << " " << (tris[t+2] + 1) << "\n";
@@ -335,6 +336,16 @@
         out << "g edge_boxes\n";
         for (const AABB& box : c.edge_boxes)
             write_aabb_wireframe(out, box, v_offset);
+    }
+
+    void export_broad_phase_hierarchy(const std::string& prefix, const BroadPhase& bp) {
+        const auto& cache = bp.cache();
+        for (int depth = 0; ; ++depth) {
+            const int nt = export_bvh_level(prefix + "_tri_level_"  + std::to_string(depth) + ".obj", cache.tri_bvh_nodes,  cache.tri_root,  depth);
+            const int ne = export_bvh_level(prefix + "_edge_level_" + std::to_string(depth) + ".obj", cache.edge_bvh_nodes, cache.edge_root, depth);
+            const int nn = export_bvh_level(prefix + "_node_level_" + std::to_string(depth) + ".obj", cache.node_bvh_nodes, cache.node_root, depth);
+            if (nt == 0 && ne == 0 && nn == 0) break;
+        }
     }
 
     void export_frame(const std::string& outdir, int frame, const std::vector<Vec3>& x, const std::vector<int>& tris,

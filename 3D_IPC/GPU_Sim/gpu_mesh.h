@@ -185,12 +185,11 @@ struct GPUSimParams {
     double mu, lambda, density, thickness, kpin, kB;
     double d_hat;
     double gx, gy, gz;
-    double tol_abs, tol_rel, step_weight;
+    double tol_abs, tol_rel;
     int    max_global_iters;
     bool   use_parallel;
     bool   ccd_check;
     bool   use_trust_region;
-    bool   mass_normalize_residual;
 
     double dt()  const { return dt_val;  }
     double dt2() const { return dt2_val; }

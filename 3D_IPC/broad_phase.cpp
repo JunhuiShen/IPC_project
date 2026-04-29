@@ -360,161 +360,6 @@ namespace {
         cache.ss_pair_index.erase(BroadPhase::ss_key(victim_edges[0], victim_edges[1]));
     }
 
-    static inline void remove_nt_pairs_touching_node(BroadPhase::Cache& cache, int node) {
-        if (cache.vertex_nt.empty()) return;
-        std::vector<std::size_t> to_delete;
-        for (const auto& e : cache.vertex_nt[node]) {
-            if (e.dof == 0) to_delete.push_back(e.pair_index);
-        }
-        std::sort(to_delete.rbegin(), to_delete.rend());
-        for (std::size_t idx : to_delete) erase_nt_pair_at(cache, idx);
-    }
-
-    static inline void remove_nt_pairs_touching_triangle(BroadPhase::Cache& cache, int tri_idx, const RefMesh& mesh) {
-        if (cache.vertex_nt.empty()) return;
-        const int verts[3] = {tri_vertex(mesh, tri_idx, 0), tri_vertex(mesh, tri_idx, 1), tri_vertex(mesh, tri_idx, 2)};
-        std::vector<std::size_t> to_delete;
-        for (int v : verts) {
-            for (const auto& e : cache.vertex_nt[v]) {
-                if (cache.nt_pair_tri[e.pair_index] == tri_idx)
-                    to_delete.push_back(e.pair_index);
-            }
-        }
-        std::sort(to_delete.begin(), to_delete.end());
-        to_delete.erase(std::unique(to_delete.begin(), to_delete.end()), to_delete.end());
-        for (auto it = to_delete.rbegin(); it != to_delete.rend(); ++it)
-            erase_nt_pair_at(cache, *it);
-    }
-
-    static inline void remove_ss_pairs_touching_edge(BroadPhase::Cache& cache, int edge_idx) {
-        if (cache.vertex_ss.empty()) return;
-        const int v0 = cache.edges[edge_idx][0];
-        const int v1 = cache.edges[edge_idx][1];
-        std::vector<std::size_t> to_delete;
-        for (int v : {v0, v1}) {
-            for (const auto& e : cache.vertex_ss[v]) {
-                const auto& edges = cache.ss_pair_edges[e.pair_index];
-                if (edges[0] == edge_idx || edges[1] == edge_idx)
-                    to_delete.push_back(e.pair_index);
-            }
-        }
-        std::sort(to_delete.begin(), to_delete.end());
-        to_delete.erase(std::unique(to_delete.begin(), to_delete.end()), to_delete.end());
-        for (auto it = to_delete.rbegin(); it != to_delete.rend(); ++it)
-            erase_ss_pair_at(cache, *it);
-    }
-
-    static inline void query_node_against_triangles(BroadPhase::Cache& cache, int node, const RefMesh& mesh) {
-        if (cache.tri_root < 0) return;
-
-        std::vector<int> hits;
-        query_bvh(cache.tri_bvh_nodes, cache.tri_root, cache.node_boxes[node], hits);
-
-        for (int t : hits) {
-            const int a = tri_vertex(mesh, t, 0);
-            const int b = tri_vertex(mesh, t, 1);
-            const int c = tri_vertex(mesh, t, 2);
-            if (node_in_triangle(node, a, b, c)) continue;
-            add_nt_pair(cache, node, t, mesh);
-        }
-    }
-
-    static inline void scan_triangle_against_all_nodes(BroadPhase::Cache& cache, int tri_idx, const RefMesh& mesh) {
-        if (tri_idx < 0 || tri_idx >= static_cast<int>(cache.tri_boxes.size())) return;
-        if (cache.node_root < 0) return;
-
-        const int a = tri_vertex(mesh, tri_idx, 0);
-        const int b = tri_vertex(mesh, tri_idx, 1);
-        const int c = tri_vertex(mesh, tri_idx, 2);
-        const AABB& tri_box = cache.tri_boxes[tri_idx];
-
-        std::vector<int> hits;
-        query_bvh(cache.node_bvh_nodes, cache.node_root, tri_box, hits);
-
-        for (int node : hits) {
-            if (node_in_triangle(node, a, b, c)) continue;
-            add_nt_pair(cache, node, tri_idx, mesh);
-        }
-    }
-
-    static inline void query_edge_against_edges(BroadPhase::Cache& cache, int edge_idx) {
-        if (cache.edge_root < 0) return;
-        if (edge_idx < 0 || edge_idx >= static_cast<int>(cache.edge_boxes.size())) return;
-
-        const Edge e0{cache.edges[edge_idx][0], cache.edges[edge_idx][1]};
-
-        std::vector<int> hits;
-        query_bvh(cache.edge_bvh_nodes, cache.edge_root, cache.edge_boxes[edge_idx], hits);
-
-        for (int other : hits) {
-            if (other == edge_idx) continue;
-
-            const Edge e1{cache.edges[other][0], cache.edges[other][1]};
-            if (share_vertex(e0, e1)) continue;
-
-            add_ss_pair(cache, edge_idx, other);
-        }
-    }
-
-    static void build_bvh_topology(const std::vector<BVHNode>& nodes, int num_primitives,
-                                   std::vector<int>& out_parent, std::vector<int>& out_leaf_node) {
-        out_parent.assign(nodes.size(), -1);
-        out_leaf_node.assign(num_primitives, -1);
-
-        for (int i = 0; i < static_cast<int>(nodes.size()); ++i) {
-            const BVHNode& n = nodes[i];
-            if (n.leafIndex >= 0) {
-                if (n.leafIndex >= 0 && n.leafIndex < static_cast<int>(out_leaf_node.size())) {
-                    out_leaf_node[n.leafIndex] = i;
-                }
-            } else {
-                if (n.left >= 0) out_parent[n.left] = i;
-                if (n.right >= 0) out_parent[n.right] = i;
-            }
-        }
-    }
-
-    static void refit_bvh_locally(std::vector<BVHNode>& nodes, const std::vector<AABB>& boxes,
-                                  const std::vector<int>& parent, const std::vector<int>& leaf_node,
-                                  const std::vector<int>& dirty_primitives) {
-        if (nodes.empty()) return;
-
-        std::vector<int> stack;
-        std::vector<unsigned char> enqueued(nodes.size(), 0);
-
-        auto enqueue_once = [&](int node_idx) {
-            if (node_idx < 0 || node_idx >= static_cast<int>(nodes.size())) return;
-            if (!enqueued[node_idx]) {
-                enqueued[node_idx] = 1;
-                stack.push_back(node_idx);
-            }
-        };
-
-        for (int prim_idx : dirty_primitives) {
-            if (prim_idx < 0 || prim_idx >= static_cast<int>(leaf_node.size())) continue;
-            const int leaf = leaf_node[prim_idx];
-            if (leaf < 0) continue;
-            nodes[leaf].bbox = boxes[prim_idx];
-            enqueue_once(parent[leaf]);
-        }
-
-        while (!stack.empty()) {
-            const int idx = stack.back();
-            stack.pop_back();
-
-            BVHNode& n = nodes[idx];
-            if (n.leafIndex >= 0) {
-                n.bbox = boxes[n.leafIndex];
-            } else {
-                n.bbox = AABB();
-                n.bbox.expand(nodes[n.left].bbox);
-                n.bbox.expand(nodes[n.right].bbox);
-            }
-
-            enqueue_once(parent[idx]);
-        }
-    }
-
 }
 
 // Broad phase
@@ -559,9 +404,6 @@ void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, c
     c.tri_root = build_bvh(c.tri_boxes, c.tri_bvh_nodes);
     c.edge_root = build_bvh(c.edge_boxes, c.edge_bvh_nodes);
     c.node_root = build_bvh(c.node_boxes, c.node_bvh_nodes);
-    build_bvh_topology(c.node_bvh_nodes, static_cast<int>(c.node_boxes.size()), c.node_bvh_parent, c.node_leaf_node);
-    build_bvh_topology(c.tri_bvh_nodes, static_cast<int>(c.tri_boxes.size()), c.tri_bvh_parent, c.tri_leaf_node);
-    build_bvh_topology(c.edge_bvh_nodes, static_cast<int>(c.edge_boxes.size()), c.edge_bvh_parent, c.edge_leaf_node);
 
     // Parallel BVH queries, serial pair-insert (add_*_pair mutates shared state).
     std::vector<std::vector<int>> node_hits(nv);
@@ -602,6 +444,180 @@ void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, c
 void BroadPhase::initialize(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double dhat) {
     build(x, v, mesh, dt, /*node_pad=*/dhat, /*tri_pad=*/0.0, /*edge_pad=*/dhat * 0.5);
     ++version_;
+}
+
+void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat) {
+    const int nv = static_cast<int>(vertex_boxes.size());
+    const int nt = num_tris(mesh);
+
+    Cache c;
+    c.vertex_nt.resize(nv);
+    c.vertex_ss.resize(nv);
+
+    if (!topology_valid_) set_mesh_topology(mesh, nv);
+    c.edges = topo_.edges;
+    c.node_to_edges = topo_.node_to_edges;
+    c.node_to_tris = topo_.node_to_tris;
+    const int ne = static_cast<int>(c.edges.size());
+
+    c.node_boxes = vertex_boxes;
+
+    const Vec3 pad = d_hat * Vec3::Ones();
+    c.tri_boxes.resize(nt);
+    for (int t = 0; t < nt; ++t) {
+        const int a  = tri_vertex(mesh, t, 0);
+        const int b  = tri_vertex(mesh, t, 1);
+        const int cc = tri_vertex(mesh, t, 2);
+        c.tri_boxes[t] = vertex_boxes[a];
+        c.tri_boxes[t].expand(vertex_boxes[b]);
+        c.tri_boxes[t].expand(vertex_boxes[cc]);
+        c.tri_boxes[t].min -= pad;
+        c.tri_boxes[t].max += pad;
+    }
+
+    c.edge_boxes.resize(ne);
+    for (int e = 0; e < ne; ++e) {
+        c.edge_boxes[e] = vertex_boxes[c.edges[e][0]];
+        c.edge_boxes[e].expand(vertex_boxes[c.edges[e][1]]);
+        c.edge_boxes[e].min -= pad;
+        c.edge_boxes[e].max += pad;
+    }
+
+    c.tri_root  = build_bvh(c.tri_boxes,  c.tri_bvh_nodes);
+    c.edge_root = build_bvh(c.edge_boxes, c.edge_bvh_nodes);
+    c.node_root = build_bvh(c.node_boxes, c.node_bvh_nodes);
+
+    std::vector<std::vector<int>> node_hits(nv);
+    #pragma omp parallel for schedule(dynamic, 32)
+    for (int node = 0; node < nv; ++node) {
+        if (c.tri_root < 0) continue;
+        query_bvh(c.tri_bvh_nodes, c.tri_root, c.node_boxes[node], node_hits[node]);
+    }
+    for (int node = 0; node < nv; ++node) {
+        for (int t : node_hits[node]) {
+            const int a  = tri_vertex(mesh, t, 0);
+            const int b  = tri_vertex(mesh, t, 1);
+            const int cc = tri_vertex(mesh, t, 2);
+            if (node_in_triangle(node, a, b, cc)) continue;
+            add_nt_pair(c, node, t, mesh);
+        }
+    }
+
+    std::vector<std::vector<int>> edge_hits(ne);
+    #pragma omp parallel for schedule(dynamic, 32)
+    for (int e = 0; e < ne; ++e) {
+        if (c.edge_root < 0) continue;
+        query_bvh(c.edge_bvh_nodes, c.edge_root, c.edge_boxes[e], edge_hits[e]);
+    }
+    for (int e = 0; e < ne; ++e) {
+        const Edge e0{c.edges[e][0], c.edges[e][1]};
+        for (int other : edge_hits[e]) {
+            if (other == e) continue;
+            const Edge e1{c.edges[other][0], c.edges[other][1]};
+            if (share_vertex(e0, e1)) continue;
+            add_ss_pair(c, e, other);
+        }
+    }
+
+    cache_ = std::move(c);
+    ++version_;
+}
+
+double BroadPhase::ccd_min_toi(const std::vector<Vec3>& x, const std::vector<Vec3>& x_new) const {
+    const int nv = static_cast<int>(x.size());
+    std::vector<Vec3> dx(nv);
+    for (int i = 0; i < nv; ++i) dx[i] = x_new[i] - x[i];
+
+    double toi_min = 1.0;
+
+    for (const auto& p : cache_.nt_pairs) {
+        toi_min = std::min(toi_min, node_triangle_general_ccd(
+            x[p.node],     dx[p.node],
+            x[p.tri_v[0]], dx[p.tri_v[0]],
+            x[p.tri_v[1]], dx[p.tri_v[1]],
+            x[p.tri_v[2]], dx[p.tri_v[2]]));
+    }
+
+    for (const auto& p : cache_.ss_pairs) {
+        toi_min = std::min(toi_min, segment_segment_general_ccd(
+            x[p.v[0]], dx[p.v[0]],
+            x[p.v[1]], dx[p.v[1]],
+            x[p.v[2]], dx[p.v[2]],
+            x[p.v[3]], dx[p.v[3]]));
+    }
+
+    return toi_min;
+}
+
+void BroadPhase::per_vertex_safe_step(
+        std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety, bool clip_to_node_box, bool clip_ccd, bool use_ticcd) const {
+    const int nv = static_cast<int>(x.size());
+
+    for (int vi = 0; vi < nv; ++vi) {
+        if (clip_to_node_box) {
+            const AABB& box = cache_.node_boxes[vi];
+            if ((x[vi].array() < box.min.array()).any() || (x[vi].array() > box.max.array()).any()) {
+                fprintf(stderr, "per_vertex_safe_step: x[%d] = (%.6f, %.6f, %.6f) is outside box [(%.6f,%.6f,%.6f),(%.6f,%.6f,%.6f)]\n",
+                    vi,
+                    x[vi].x(), x[vi].y(), x[vi].z(),
+                    box.min.x(), box.min.y(), box.min.z(),
+                    box.max.x(), box.max.y(), box.max.z());
+                exit(1);
+            }
+        }
+        const Vec3 x_new = clip_to_node_box
+            ? [&]{ constexpr double inset = 1e-10;
+                   const AABB& box = cache_.node_boxes[vi];
+                   return x_new_fn(vi).cwiseMax(box.min + Vec3::Constant(inset))
+                                      .cwiseMin(box.max - Vec3::Constant(inset)); }()
+            : x_new_fn(vi);
+        const Vec3 dx = x_new - x[vi];
+        if (dx.squaredNorm() < 1e-28) continue;
+
+        double toi_min = 1.0;
+
+        if (clip_ccd) for (const auto& entry : cache_.vertex_nt[vi]) {
+            const auto& p = cache_.nt_pairs[entry.pair_index];
+            CCDResult r;
+            if (entry.dof == 0) {
+                r = node_triangle_only_one_node_moves(
+                    x[vi],         dx,
+                    x[p.tri_v[0]], Vec3::Zero(),
+                    x[p.tri_v[1]], Vec3::Zero(),
+                    x[p.tri_v[2]], Vec3::Zero(),
+                    1e-12, use_ticcd);
+            } else {
+                Vec3 d0 = Vec3::Zero(), d1 = Vec3::Zero(), d2 = Vec3::Zero();
+                if      (entry.dof == 1) d0 = dx;
+                else if (entry.dof == 2) d1 = dx;
+                else                     d2 = dx;
+                r = node_triangle_only_one_node_moves(
+                    x[p.node],     Vec3::Zero(),
+                    x[p.tri_v[0]], d0,
+                    x[p.tri_v[1]], d1,
+                    x[p.tri_v[2]], d2,
+                    1e-12, use_ticcd);
+            }
+            if (r.collision) toi_min = std::min(toi_min, r.t);
+        }
+
+        if (clip_ccd) for (const auto& entry : cache_.vertex_ss[vi]) {
+            const auto& p = cache_.ss_pairs[entry.pair_index];
+            CCDResult r;
+            if (entry.dof == 0)
+                r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]], 1e-12, use_ticcd);
+            else if (entry.dof == 1)
+                r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]], 1e-12, use_ticcd);
+            else if (entry.dof == 2)
+                r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[3]], x[p.v[0]], x[p.v[1]], 1e-12, use_ticcd);
+            else
+                r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]], 1e-12, use_ticcd);
+            if (r.collision) toi_min = std::min(toi_min, r.t);
+        }
+
+        const double step = (toi_min < 1.0) ? safety * toi_min : 1.0;
+        x[vi] = x[vi] + step * dx;
+    }
 }
 
 void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt) {
@@ -692,4 +708,3 @@ BroadPhase::VertexPairs BroadPhase::query_pairs_for_vertex(
 
     return result;
 }
-

@@ -1,11 +1,13 @@
 #pragma once
 
 #include "IPC_math.h"
+#include "ccd.h"
 #include "physics.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <unordered_map>
 #include <vector>
@@ -66,12 +68,6 @@ public:
         std::vector<BVHNode> tri_bvh_nodes;
         std::vector<BVHNode> edge_bvh_nodes;
         std::vector<BVHNode> node_bvh_nodes;
-        std::vector<int> node_bvh_parent;
-        std::vector<int> node_leaf_node;
-        std::vector<int> tri_bvh_parent;
-        std::vector<int> edge_bvh_parent;
-        std::vector<int> tri_leaf_node;
-        std::vector<int> edge_leaf_node;
 
         int node_root = -1;
         int tri_root = -1;
@@ -100,6 +96,10 @@ public:
 
     void initialize(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double dhat);
 
+    // Initialize from pre-built per-vertex AABBs. Triangle and edge boxes are
+    // derived as the union of their vertex boxes (i.e. red boxes).
+    void initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat = 0.0);
+
     const std::vector<NodeTrianglePair>& nt_pairs() const {
         return cache_.nt_pairs;
     }
@@ -108,9 +108,20 @@ public:
         return cache_.ss_pairs;
     }
 
+    // Run CCD over all cached NT and SS pairs given current positions x and
+    // proposed new positions x_new. Returns the minimum TOI in [0,1], or 1.0
+    // if no collision is detected.
+    double ccd_min_toi(const std::vector<Vec3>& x, const std::vector<Vec3>& x_new) const;
+
+    // For each vertex vi in sequence, compute the safe step along
+    // (x[vi] -> x_new_fn(vi)) using the linear one-node-moves CCD check.
+    // All other vertices are treated as stationary at their already-committed
+    // positions. Modifies x in place.
+    void per_vertex_safe_step(std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety = 0.9, bool clip_to_node_box = true, bool clip_ccd = true, bool use_ticcd = true) const;
+
     void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt);
 
-    // Cache static mesh topology; reused by later build/initialize/refresh.
+    // Cache static mesh topology; reused by later build/initialize calls.
     void set_mesh_topology(const RefMesh& mesh, int nv);
     bool has_topology() const { return topology_valid_; }
 
@@ -146,7 +157,13 @@ public:
         return cache_;
     }
 
-    // Increments on every initialize()/refresh() — a cache-invalidation key.
+    // Clamps p to lie inside the node box for vertex i.
+    Vec3 clamp_to_node_box(int i, const Vec3& p) const {
+        const AABB& box = cache_.node_boxes[i];
+        return p.cwiseMax(box.min).cwiseMin(box.max);
+    }
+
+    // Increments on every initialize() call — a cache-invalidation key.
     std::uint64_t version() const { return version_; }
 
 private:

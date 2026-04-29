@@ -1,6 +1,9 @@
 #pragma once
 
 #include "IPC_math.h"
+#include "broad_phase.h"
+
+#include <vector>
 
 // Trust-region narrow phase
 
@@ -10,21 +13,12 @@ struct TrustRegionResult {
     double M     = 0.0;   // total displacement magnitude
 };
 
-// Vertex-triangle pair where every vertex may move.
-TrustRegionResult trust_region_vertex_triangle(
-        const Vec3& x,  const Vec3& dx,
-        const Vec3& x1, const Vec3& dx1,
-        const Vec3& x2, const Vec3& dx2,
-        const Vec3& x3, const Vec3& dx3,
-        double eta = 0.4);
-
-// Edge-edge pair where every endpoint may move.
-TrustRegionResult trust_region_edge_edge(
-        const Vec3& a1, const Vec3& da1,
-        const Vec3& a2, const Vec3& da2,
-        const Vec3& b1, const Vec3& db1,
-        const Vec3& b2, const Vec3& db2,
-        double eta = 0.4);
+// Per-vertex conservative bound 
+//  b_v = gamma_p * min d0 across all NT/SS pairs incident to vi
+double compute_trust_region_bound_for_vertex(int vi,
+                                             const std::vector<Vec3>& x,
+                                             const BroadPhase::Cache& bp_cache,
+                                             double gamma_p);
 
 // Gauss-Seidel substep: only one vertex of the pair moves, with
 // displacement delta. Caller is responsible for tracking which vertex the delta belongs to.

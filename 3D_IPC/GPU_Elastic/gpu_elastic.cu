@@ -1015,7 +1015,7 @@ void gpu_elastic_init(const RefMesh& ref_mesh,
     s.gp.mu     = static_cast<Real>(params.mu);
     s.gp.lambda = static_cast<Real>(params.lambda);
     s.gp.kB     = static_cast<Real>(params.kB);
-    s.gp.damping= static_cast<Real>(params.damping);
+    s.gp.damping= Real(0);
     {
         const char* e = std::getenv("GPU_ELASTIC_STVK");
         s.gp.use_stvk = (e && e[0] == '1') ? 1 : 0;

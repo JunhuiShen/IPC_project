@@ -47,31 +47,40 @@ SDFEvaluation evaluate_sdf(const CylinderSDF& s, const Vec3& x){
     return r;
 }
 
-double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double eps){
-    const double H = sdf_heaviside(sdf.phi, eps);
-    return 0.5 * k * H * H;
-}
-
-Vec3 sdf_penalty_gradient(const SDFEvaluation& sdf, double k, double eps){
-    if (eps <= 0.0) throw std::runtime_error("sdf_penalty_gradient: eps must be positive.");
-    //  Nonzero only strictly inside the transition layer.
-    if (sdf.phi <= 0.0 || sdf.phi >= eps) return Vec3::Zero();
-    const double H  = (eps - sdf.phi) / eps;
-    const double Hp = -1.0 / eps;
-    //  dE/dx = k * H * H' * grad_phi
-    return (k * H * Hp) * sdf.grad_phi;
-}
-
-Mat33 sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double eps, bool include_curvature){
-    if (eps <= 0.0) throw std::runtime_error("sdf_penalty_hessian: eps must be positive.");
-    if (sdf.phi <= 0.0 || sdf.phi >= eps) return Mat33::Zero();
-    //  d^2E/dx dx^T = k * (H')^2 * n n^T + k * H * H' * d^2 phi/dx dx^T.
-    const double Hp2 = 1.0 / (eps * eps);
-    Mat33 Hess = (k * Hp2) * (sdf.grad_phi * sdf.grad_phi.transpose());
-    if (include_curvature) {
-        const double H  = (eps - sdf.phi) / eps;
-        const double Hp = -1.0 / eps;
-        Hess += (k * H * Hp) * sdf.hess_phi;
+//  Solid sphere SDF
+SDFEvaluation evaluate_sdf(const SphereSDF& s, const Vec3& x){
+    SDFEvaluation r;
+    const Vec3 v = x - s.center;
+    const double rnorm = v.norm();
+    r.phi = rnorm - s.radius;
+    if (rnorm > 0.0) {
+        r.grad_phi = v / rnorm;
+        r.hess_phi = (Mat33::Identity() - r.grad_phi * r.grad_phi.transpose()) / rnorm;
+    } else {
+        r.grad_phi = Vec3::Zero();
+        r.hess_phi = Mat33::Zero();
     }
+    return r;
+}
+
+// One-sided quadratic: E = 0.5 * k * max(0, -phi)^2.
+// Force = -dE/dx = k * max(0, -phi) * grad_phi, pointing away from the obstacle.
+// eps is accepted for API compatibility but ignored.
+
+double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double /*eps*/){
+    if (sdf.phi >= 0.0) return 0.0;
+    return 0.5 * k * sdf.phi * sdf.phi;
+}
+
+Vec3 sdf_penalty_gradient(const SDFEvaluation& sdf, double k, double /*eps*/){
+    if (sdf.phi >= 0.0) return Vec3::Zero();
+    return k * sdf.phi * sdf.grad_phi;
+}
+
+Mat33 sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double /*eps*/, bool include_curvature){
+    if (sdf.phi >= 0.0) return Mat33::Zero();
+    Mat33 Hess = k * (sdf.grad_phi * sdf.grad_phi.transpose());
+    if (include_curvature)
+        Hess += k * sdf.phi * sdf.hess_phi;
     return Hess;
 }

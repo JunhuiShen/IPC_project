@@ -131,18 +131,36 @@ double filter_root(double t, double eps) {
     return clamp_scalar(t, 0.0, 1.0);
 }
 
-void add_root(std::vector<double>& roots, double t, double eps) {
+namespace {
+template <typename ContainsFn, typename PushFn>
+void add_root_impl(double t, double eps, ContainsFn contains, PushFn push) {
     t = filter_root(t, eps);
     if (t < 0.0) return;
-    for (double r : roots)
-        if (std::fabs(r - t) <= 1e-9) return;
-    roots.push_back(t);
+    if (contains(t)) return;
+    push(t);
+}
+} // namespace
+
+void add_root(std::vector<double>& roots, double t, double eps) {
+    add_root_impl(
+        t, eps,
+        [&](double v) {
+            for (double r : roots) {
+                if (std::fabs(r - v) <= 1e-9) return true;
+            }
+            return false;
+        },
+        [&](double v) { roots.push_back(v); });
 }
 
 void add_root(SmallRoots& roots, double t, double eps) {
-    t = filter_root(t, eps);
-    if (t < 0.0) return;
-    for (int i = 0; i < roots.count; ++i)
-        if (std::fabs(roots.data[i] - t) <= 1e-9) return;
-    roots.push_back(t);
+    add_root_impl(
+        t, eps,
+        [&](double v) {
+            for (int i = 0; i < roots.count; ++i) {
+                if (std::fabs(roots.data[i] - v) <= 1e-9) return true;
+            }
+            return false;
+        },
+        [&](double v) { roots.push_back(v); });
 }

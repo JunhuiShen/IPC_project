@@ -16,60 +16,6 @@
 
 namespace fs = std::filesystem;
 
-SolverResult advance_one_frame_twisting(DeformedState& state, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
-    std::vector<Pin>& pins, const SimParams& params, const std::vector<std::vector<int>>& color_groups,
-    BroadPhase& broad_phase, const TwistSpec& twist_spec, int frame_index) {
-    SolverResult agg;
-    const double dt = params.dt();
-
-    // Fast path: elastic-only, all substeps device-resident. Twist pins still
-    // refresh per substep (small H2D); x/v never touch the host mid-frame.
-    if (params.use_gpu_elastic) {
-        gpu_elastic_begin_frame(state.deformed_positions, state.velocities);
-        for (int sub = 0; sub < params.substeps; ++sub) {
-            const double t_next = ((frame_index - 1) * params.substeps + (sub + 1)) * dt;
-            update_twist_pins(pins, twist_spec, t_next);
-            gpu_elastic_set_pin_targets(pins);
-            gpu_elastic_run_substep_device(params.max_global_iters);
-        }
-        gpu_elastic_end_frame(state.deformed_positions, state.velocities);
-        for (int sub = 0; sub < params.substeps; ++sub) {
-            SolverResult sub_result;
-            sub_result.iterations       = params.max_global_iters;
-            sub_result.final_residual   = gpu_elastic_substep_residual(sub);
-            sub_result.initial_residual = sub_result.final_residual;
-            sub_result.converged        = (sub_result.final_residual >= 0.0);
-            sub_result.last_num_colors  = 0;
-            accumulate_solver_result(agg, sub_result, sub == 0);
-        }
-        return agg;
-    }
-
-    for (int sub = 0; sub < params.substeps; ++sub) {
-        const double t_next = ((frame_index - 1) * params.substeps + (sub + 1)) * dt;
-        update_twist_pins(pins, twist_spec, t_next);
-
-        std::vector<Vec3> xhat;
-        build_xhat(xhat, state.deformed_positions, state.velocities, dt);
-
-        std::vector<Vec3> xnew = choose_initial_guess(
-            state.deformed_positions, xhat, ref_mesh, params);
-
-        SolverResult sub_result;
-        if (params.use_gpu)
-            sub_result = gpu_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
-        else if (params.use_parallel)
-            sub_result = global_gauss_seidel_solver_parallel(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
-        else
-            sub_result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
-        accumulate_solver_result(agg, sub_result, sub == 0);
-
-        update_velocity(state.velocities, xnew, state.deformed_positions, dt);
-        state.deformed_positions = xnew;
-    }
-    return agg;
-}
-
 int main(int argc, char** argv) {
     IPCArgs3D args;
     if (!args.parse(argc, argv)) return 1;
@@ -88,13 +34,17 @@ int main(int argc, char** argv) {
     std::vector<Pin> pins;
     TwistSpec twist_spec;
 
+    std::vector<Vec3> static_x;
+    std::vector<int>  static_tris;
+
     if      (args.example == 1) build_two_sheets_example(args, ref_mesh, state, X, pins);
     else if (args.example == 2) build_cloth_stack_example_low_res(ref_mesh, state, X, pins);
     else if (args.example == 3) build_cloth_stack_example_high_res(ref_mesh, state, X, pins);
-    else if (args.example == 4) build_cloth_cylinder_drop_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 4) build_cloth_cylinder_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else if (args.example == 5) build_twisting_cloth_example(args, ref_mesh, state, X, pins, twist_spec);
+    else if (args.example == 6) build_cloth_sphere_drop_example(args, ref_mesh, state, X, pins, params);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6.\n";
         return 1;
     }
 
@@ -109,12 +59,9 @@ int main(int argc, char** argv) {
             const int v0 = ref_mesh.tris[3 * t + 0];
             const int v1 = ref_mesh.tris[3 * t + 1];
             const int v2 = ref_mesh.tris[3 * t + 2];
-            const auto& p0 = state.deformed_positions[v0];
-            const auto& p1 = state.deformed_positions[v1];
-            const auto& p2 = state.deformed_positions[v2];
-            min_edge_len = std::min(min_edge_len, (p1 - p0).norm());
-            min_edge_len = std::min(min_edge_len, (p2 - p1).norm());
-            min_edge_len = std::min(min_edge_len, (p0 - p2).norm());
+            min_edge_len = std::min(min_edge_len, (state.deformed_positions[v1] - state.deformed_positions[v0]).norm());
+            min_edge_len = std::min(min_edge_len, (state.deformed_positions[v2] - state.deformed_positions[v1]).norm());
+            min_edge_len = std::min(min_edge_len, (state.deformed_positions[v0] - state.deformed_positions[v2]).norm());
         }
         const double d_hat_limit = 0.5 * min_edge_len;
         if (params.d_hat > d_hat_limit) {
@@ -133,7 +80,7 @@ int main(int argc, char** argv) {
             build_vertex_adjacency_map(ref_mesh.tris),
             static_cast<int>(state.deformed_positions.size()));
 
-    
+
     BroadPhase broad_phase;
 
     if (params.use_gpu_elastic)
@@ -148,19 +95,30 @@ int main(int argc, char** argv) {
 
     const std::string& outdir = args.outdir;
     const ExportFormat fmt = args.to_export_format();
+    const int restart_frame = args.restart_frame;
 
-    if (params.restart_frame < 0) {
+    if (restart_frame < 0) {
         if (fs::exists(outdir)) fs::remove_all(outdir);
         fs::create_directories(outdir);
         export_frame(outdir, 0, state.deformed_positions, ref_mesh.tris, fmt);
         serialize_state(outdir, 0, state);
+        if (!static_x.empty()) {
+            const char* ext = (fmt == ExportFormat::GEO) ? ".geo"
+                            : (fmt == ExportFormat::PLY) ? ".ply"
+                            : (fmt == ExportFormat::USD) ? ".usda" : ".obj";
+            const std::string path = outdir + "/static_colliders" + ext;
+            if      (fmt == ExportFormat::GEO) export_geo(path, static_x, static_tris);
+            else if (fmt == ExportFormat::PLY) export_ply(path, static_x, static_tris);
+            else if (fmt == ExportFormat::USD) export_usd(path, static_x, static_tris);
+            else                               export_obj(path, static_x, static_tris);
+        }
     } else {
         if (!fs::exists(outdir)) {
             std::cerr << "Error: restart requested but output directory does not exist: " << outdir << "\n";
             return 1;
         }
-        if (!deserialize_state(outdir, params.restart_frame, state)) {
-            std::cerr << "Error: failed to load restart frame " << params.restart_frame << "\n";
+        if (!deserialize_state(outdir, restart_frame, state)) {
+            std::cerr << "Error: failed to load restart frame " << restart_frame << "\n";
             return 1;
         }
     }
@@ -169,24 +127,28 @@ int main(int argc, char** argv) {
     auto sim_start = Clock::now();
     double total_solver_ms = 0.0;
 
-    int start_frame = (params.restart_frame >= 0) ? (params.restart_frame + 1) : 1;
+    int start_frame = (restart_frame >= 0) ? (restart_frame + 1) : 1;
 
     for (int frame_index = start_frame; frame_index <= num_frames; ++frame_index) {
         auto solver_start = Clock::now();
         SolverResult result;
 
-        if (args.example == 5)
-            result = advance_one_frame_twisting(state, ref_mesh, adj, pins, params, color_groups, broad_phase, twist_spec, frame_index);
-        else
-            result = advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, broad_phase);
+        SubstepCallback substep_cb = nullptr;
+        if (params.write_substeps) {
+            substep_cb = [&](int global_sub, const std::vector<Vec3>& pos) {
+                export_frame(outdir, global_sub + 1, pos, ref_mesh.tris, fmt, nullptr);
+            };
+        }
 
-        // Skip the converge check when the user explicitly disabled both tols
-        // (fixed-iteration benchmark mode). Otherwise abort as before.
-        const bool fixed_iter_mode = (params.tol_abs <= 0.0 && params.tol_rel <= 0.0);
-        if (!result.converged && !fixed_iter_mode) {
+        result = advance_one_frame(
+            state, ref_mesh, adj, pins, params, color_groups, broad_phase,
+            (args.example == 5) ? &twist_spec : nullptr, frame_index,
+            (args.example == 5) ? &update_twist_pins : nullptr, substep_cb, outdir);
+
+        if (!result.converged) {
             std::cerr << "Error: solver failed to converge at frame " << frame_index
                       << " (final_residual = " << result.final_residual
-                      << ", max_iters = " << params.max_global_iters << ")\n";
+                      << ", max_substep_iters = " << params.max_global_iters << ")\n";
             return 1;
         }
 
@@ -205,12 +167,13 @@ int main(int argc, char** argv) {
             std::cout << " | ccd_viol = " << std::setw(3) << result.ccd_violations;
         std::cout << " | solver_time = " << std::fixed << std::setprecision(3)
                   << solver_ms << " ms\n";
-
-        if (params.use_parallel) {
-            export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, &result.color_groups_parallel);
-        } else {
-            export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, nullptr);
+        if (params.ccd_check && result.ccd_violations > 0) {
+            std::cout << "Self-intersection detected on frame " << frame_index << " — aborting.\n";
+            std::exit(1);
         }
+
+        if (!params.write_substeps)
+            export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, nullptr);
         
         serialize_state(outdir, frame_index, state);
     }

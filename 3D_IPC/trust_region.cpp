@@ -4,6 +4,7 @@
 #include "segment_segment_distance.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace {
 
@@ -31,28 +32,39 @@ TrustRegionResult make_result(double d0, double M, double eta) {
 
 }  // namespace
 
-TrustRegionResult trust_region_vertex_triangle(const Vec3& x,  const Vec3& dx, const Vec3& x1, const Vec3& dx1,
-        const Vec3& x2, const Vec3& dx2, const Vec3& x3, const Vec3& dx3, double eta) {
-    const double d0 = node_triangle_distance(x, x1, x2, x3).distance;
-    const double M  = dx.norm() + dx1.norm() + dx2.norm() + dx3.norm();
-    return make_result(d0, M, clamp_eta(eta));
-}
-
-TrustRegionResult trust_region_edge_edge(const Vec3& a1, const Vec3& da1, const Vec3& a2, const Vec3& da2,
-        const Vec3& b1, const Vec3& db1, const Vec3& b2, const Vec3& db2, double eta) {
-    const double d0 = segment_segment_distance(a1, a2, b1, b2).distance;
-    const double M  = da1.norm() + da2.norm() + db1.norm() + db2.norm();
-    return make_result(d0, M, clamp_eta(eta));
-}
-
-TrustRegionResult trust_region_vertex_triangle_gauss_seidel(const Vec3& x,  const Vec3& x1, 
+TrustRegionResult trust_region_vertex_triangle_gauss_seidel(const Vec3& x,  const Vec3& x1,
     const Vec3& x2, const Vec3& x3, const Vec3& delta, double eta) {
     const double d0 = node_triangle_distance(x, x1, x2, x3).distance;
     return make_result(d0, delta.norm(), clamp_eta(eta));
 }
 
-TrustRegionResult trust_region_edge_edge_gauss_seidel(const Vec3& a1, const Vec3& a2, const Vec3& b1, const Vec3& b2, 
+TrustRegionResult trust_region_edge_edge_gauss_seidel(const Vec3& a1, const Vec3& a2, const Vec3& b1, const Vec3& b2,
     const Vec3& delta, double eta) {
     const double d0 = segment_segment_distance(a1, a2, b1, b2).distance;
     return make_result(d0, delta.norm(), clamp_eta(eta));
+}
+
+double compute_trust_region_bound_for_vertex(int vi,
+                                             const std::vector<Vec3>& x,
+                                             const BroadPhase::Cache& bp_cache,
+                                             double gamma_p) {
+    double d0_min = std::numeric_limits<double>::infinity();
+
+    if (vi >= 0 && vi < static_cast<int>(bp_cache.vertex_nt.size())) {
+        for (const auto& entry : bp_cache.vertex_nt[vi]) {
+            const auto& p = bp_cache.nt_pairs[entry.pair_index];
+            const double d0 = node_triangle_distance(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]]).distance;
+            if (d0 < d0_min) d0_min = d0;
+        }
+    }
+
+    if (vi >= 0 && vi < static_cast<int>(bp_cache.vertex_ss.size())) {
+        for (const auto& entry : bp_cache.vertex_ss[vi]) {
+            const auto& p = bp_cache.ss_pairs[entry.pair_index];
+            const double d0 = segment_segment_distance(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]]).distance;
+            if (d0 < d0_min) d0_min = d0;
+        }
+    }
+
+    return gamma_p * d0_min;  // +inf when vi has no incident pairs
 }

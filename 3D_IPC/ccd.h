@@ -12,21 +12,30 @@ struct CCDResult {
     double t = std::numeric_limits<double>::quiet_NaN();
 };
 
-// Linear node-triangle CCD
+// One-moving-node NT CCD. Dispatches based on `use_ticcd`:
+//   true  (default) -> Tight-Inclusion CCD library (conservative, robust)
+//   false           -> self-written closed-form linear CCD (faster, exact
+//                       when only one of the four vertices moves).
 CCDResult node_triangle_only_one_node_moves(
         const Vec3& x,  const Vec3& dx,
         const Vec3& x1, const Vec3& dx1,
         const Vec3& x2, const Vec3& dx2,
         const Vec3& x3, const Vec3& dx3,
-        double eps = 1.0e-12);
+        double eps = 1.0e-12,
+        bool use_ticcd = true);
 
-CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double eps = 1.0e-12);
+// One-moving-node SS CCD. Same dispatch semantics as above.
+CCDResult segment_segment_only_one_node_moves(
+        const Vec3& x1, const Vec3& dx1,
+        const Vec3& x2, const Vec3& x3, const Vec3& x4,
+        double eps = 1.0e-12,
+        bool use_ticcd = true);
 
-// General CCD: all vertices may move, finds exact earliest TOI and returns 1.0 when no collision occurs in [0,1].
+// General NT/SS CCD: all vertices may move. Backed by Tight-Inclusion CCD.
+// Returns the earliest time of impact in [0, 1], or 1.0 when no collision
+// occurs over the step.
 double node_triangle_general_ccd(const Vec3& x, const Vec3& dx, const Vec3& x1, const Vec3& dx1,
-                                 const Vec3& x2, const Vec3& dx2, const Vec3& x3, const Vec3& dx3,
-                                 double eps1 = 1e-12, double eps2 = 1e-10);
+                                 const Vec3& x2, const Vec3& dx2, const Vec3& x3, const Vec3& dx3);
 
 double segment_segment_general_ccd(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2,
-                                   const Vec3& x3, const Vec3& dx3, const Vec3& x4, const Vec3& dx4,
-                                   double eps1 = 1e-12, double eps2 = 1e-10);
+                                   const Vec3& x3, const Vec3& dx3, const Vec3& x4, const Vec3& dx4);

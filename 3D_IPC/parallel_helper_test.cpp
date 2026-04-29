@@ -43,8 +43,26 @@ static void build_test_scene(RefMesh& ref_mesh, DeformedState& state,
     adj = build_incident_triangle_map(ref_mesh.tris);
 }
 
+static void build_predictions_with_blue_boxes(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+                                              const std::vector<Pin>& pins, const SimParams& params,
+                                              const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                              const BroadPhase::Cache& bp_cache, std::vector<JacobiPrediction>& predictions,
+                                              const PinMap* pin_map = nullptr) {
+    build_jacobi_prediction_deltas(ref_mesh, adj, pins, params, x, xhat, bp_cache, predictions, pin_map);
+    build_blue_boxes(x, params.use_parallel, predictions);
+}
+
+static void expect_aabb_near(const AABB& actual, const AABB& expected, double tol, const char* label, int idx) {
+    for (int axis = 0; axis < 3; ++axis) {
+        EXPECT_NEAR(actual.min(axis), expected.min(axis), tol)
+            << label << " " << idx << " min axis " << axis;
+        EXPECT_NEAR(actual.max(axis), expected.max(axis), tol)
+            << label << " " << idx << " max axis " << axis;
+    }
+}
+
 // ---------------------------------------------------------------------------
-// build_jacobi_predictions
+// build_jacobi_prediction_deltas + blue-box construction
 // ---------------------------------------------------------------------------
 
 TEST(BuildJacobiPredictions, AllNodesActive) {
@@ -59,7 +77,7 @@ TEST(BuildJacobiPredictions, AllNodesActive) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     ASSERT_EQ(predictions.size(), state.deformed_positions.size());
 
@@ -81,7 +99,7 @@ TEST(BuildJacobiPredictions, CertifiedRegionContainsTrajectory) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     // For each node, x_i and x_i - delta_i must lie inside the certified region
     for (int i = 0; i < static_cast<int>(predictions.size()); ++i) {
@@ -99,7 +117,7 @@ TEST(BuildJacobiPredictions, CertifiedRegionContainsTrajectory) {
     }
 }
 
-TEST(BuildJacobiPredictions, CertifiedRegionInflatedByDhat) {
+TEST(BuildJacobiPredictions, CertifiedRegionMatchesIsotropicDeltaNormBox) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
     VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
@@ -111,29 +129,150 @@ TEST(BuildJacobiPredictions, CertifiedRegionInflatedByDhat) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
-    // Each sub-AABB feeding the certified region is padded by d_hat/2, so
-    // disjoint regions are guaranteed d_hat-separated. The trajectory
-    // endpoints contribute d_hat/2 balls on each side.
-    const double half_dhat = 0.5 * params.d_hat;
+    // Certified regions are the isotropic blue boxes built from ||delta_i||
+    // around x_i.
     for (int i = 0; i < static_cast<int>(predictions.size()); ++i) {
         if (!predictions[i].active) continue;
         const Vec3& xi = state.deformed_positions[i];
-        const Vec3 xi_moved = xi - predictions[i].delta;
+        const double r = predictions[i].delta.norm();
         const AABB& U = predictions[i].certified_region;
 
-        AABB traj_box;
-        traj_box.expand(xi);
-        traj_box.expand(xi_moved);
-
         for (int k = 0; k < 3; ++k) {
-            EXPECT_LE(U.min(k), traj_box.min(k) - half_dhat + 1e-12)
-                << "node " << i << " axis " << k << " should be inflated by d_hat/2";
-            EXPECT_GE(U.max(k), traj_box.max(k) + half_dhat - 1e-12)
-                << "node " << i << " axis " << k << " should be inflated by d_hat/2";
+            EXPECT_NEAR(U.min(k), xi(k) - r, 1e-12)
+                << "node " << i << " axis " << k << " min mismatch";
+            EXPECT_NEAR(U.max(k), xi(k) + r, 1e-12)
+                << "node " << i << " axis " << k << " max mismatch";
         }
     }
+}
+
+TEST(BuildJacobiPredictions, CertifiedRegionCanUseProvidedRadii) {
+    RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
+    build_test_scene(ref_mesh, state, pins, adj, params, X);
+
+    std::vector<Vec3> xhat;
+    build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
+
+    BroadPhase bp;
+    bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
+
+    std::vector<JacobiPrediction> predictions;
+    build_jacobi_prediction_deltas(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+
+    std::vector<double> override_radii(predictions.size(), 0.0);
+    for (int i = 0; i < static_cast<int>(override_radii.size()); ++i) {
+        override_radii[i] = 0.01 + 0.001 * static_cast<double>(i % 7);
+    }
+
+    build_blue_boxes(state.deformed_positions, params.use_parallel, predictions, nullptr, &override_radii);
+
+    for (int i = 0; i < static_cast<int>(predictions.size()); ++i) {
+        const Vec3& xi = state.deformed_positions[i];
+        const double r = override_radii[i];
+        const AABB& U = predictions[i].certified_region;
+        for (int k = 0; k < 3; ++k) {
+            EXPECT_NEAR(U.min(k), xi(k) - r, 1e-12)
+                << "node " << i << " axis " << k << " min mismatch";
+            EXPECT_NEAR(U.max(k), xi(k) + r, 1e-12)
+                << "node " << i << " axis " << k << " max mismatch";
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// build_red_boxes + build_green_boxes
+// ---------------------------------------------------------------------------
+
+TEST(BuildRedGreenBoxes, RedBoxesMatchBlueUnionsForAllTrianglesAndEdges) {
+    RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
+    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
+    build_test_scene(ref_mesh, state, pins, adj, params, X);
+
+    BroadPhase bp;
+    bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
+
+    const int nv = static_cast<int>(state.deformed_positions.size());
+    std::vector<AABB> blue_boxes(nv);
+    for (int vi = 0; vi < nv; ++vi) {
+        const double s = static_cast<double>(vi) + 1.0;
+        const Vec3 lo(0.10 * s, -0.25 * s, 0.33 * s);
+        const Vec3 hi = lo + Vec3(0.07, 0.11, 0.13);
+        blue_boxes[vi] = AABB(lo, hi);
+    }
+
+    RedBoxes red_boxes;
+    build_red_boxes(ref_mesh, bp.cache().edges, blue_boxes, red_boxes);
+
+    ASSERT_EQ(static_cast<int>(red_boxes.tri.size()), num_tris(ref_mesh));
+    ASSERT_EQ(red_boxes.edge.size(), bp.cache().edges.size());
+
+    for (int tri_idx = 0; tri_idx < num_tris(ref_mesh); ++tri_idx) {
+        AABB expected = blue_boxes[tri_vertex(ref_mesh, tri_idx, 0)];
+        expected.expand(blue_boxes[tri_vertex(ref_mesh, tri_idx, 1)]);
+        expected.expand(blue_boxes[tri_vertex(ref_mesh, tri_idx, 2)]);
+        expect_aabb_near(red_boxes.tri[tri_idx], expected, 1e-12, "red tri", tri_idx);
+    }
+
+    for (int edge_idx = 0; edge_idx < static_cast<int>(bp.cache().edges.size()); ++edge_idx) {
+        const int a = bp.cache().edges[edge_idx][0];
+        const int b = bp.cache().edges[edge_idx][1];
+        AABB expected = blue_boxes[a];
+        expected.expand(blue_boxes[b]);
+        expect_aabb_near(red_boxes.edge[edge_idx], expected, 1e-12, "red edge", edge_idx);
+    }
+}
+
+TEST(BuildRedGreenBoxes, GreenBoxesAreExactlyRedBoxesPaddedByDhat) {
+    RedBoxes red_boxes;
+    red_boxes.tri = {
+        AABB(Vec3(-1.0, 2.0, -3.0), Vec3(0.5, 2.5, -2.0)),
+        AABB(Vec3(4.0, -5.0, 6.0), Vec3(7.0, -1.0, 9.0))
+    };
+    red_boxes.edge = {
+        AABB(Vec3(-0.2, -0.3, -0.4), Vec3(0.9, 1.3, 1.7)),
+        AABB(Vec3(10.0, 11.0, 12.0), Vec3(13.0, 14.0, 15.0)),
+        AABB(Vec3(-8.0, -7.0, -6.0), Vec3(-2.0, -1.0, 0.0))
+    };
+
+    const double d_hat = 0.37;
+    GreenBoxes green_boxes;
+    build_green_boxes(red_boxes, d_hat, green_boxes);
+
+    ASSERT_EQ(green_boxes.tri.size(), red_boxes.tri.size());
+    ASSERT_EQ(green_boxes.edge.size(), red_boxes.edge.size());
+
+    for (int tri_idx = 0; tri_idx < static_cast<int>(red_boxes.tri.size()); ++tri_idx) {
+        AABB expected = red_boxes.tri[tri_idx];
+        expected.min.array() -= d_hat;
+        expected.max.array() += d_hat;
+        expect_aabb_near(green_boxes.tri[tri_idx], expected, 1e-12, "green tri", tri_idx);
+    }
+
+    for (int edge_idx = 0; edge_idx < static_cast<int>(red_boxes.edge.size()); ++edge_idx) {
+        AABB expected = red_boxes.edge[edge_idx];
+        expected.min.array() -= d_hat;
+        expected.max.array() += d_hat;
+        expect_aabb_near(green_boxes.edge[edge_idx], expected, 1e-12, "green edge", edge_idx);
+    }
+}
+
+TEST(BuildRedGreenBoxes, EmptyInputProducesEmptyOutputs) {
+    RefMesh ref_mesh;
+    std::vector<std::array<int, 2>> edges;
+    std::vector<AABB> blue_boxes;
+
+    RedBoxes red_boxes;
+    build_red_boxes(ref_mesh, edges, blue_boxes, red_boxes);
+    EXPECT_TRUE(red_boxes.tri.empty());
+    EXPECT_TRUE(red_boxes.edge.empty());
+
+    GreenBoxes green_boxes;
+    build_green_boxes(red_boxes, 0.25, green_boxes);
+    EXPECT_TRUE(green_boxes.tri.empty());
+    EXPECT_TRUE(green_boxes.edge.empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +291,7 @@ TEST(BuildConflictGraph, ElasticCoupling) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
 
@@ -182,7 +321,7 @@ TEST(BuildConflictGraph, SymmetricEdges) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
 
@@ -207,7 +346,7 @@ TEST(BuildConflictGraph, NoSelfEdges) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
 
@@ -229,7 +368,7 @@ TEST(BuildConflictGraph, SweptBvhCacheMatchesRebuild) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     // First call primes the cache via full build.
     SweptBvhCache sw_cache;
@@ -270,7 +409,7 @@ TEST(GreedyColorConflictGraph, ValidColoring) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
     auto groups = greedy_color_conflict_graph(graph, predictions);
@@ -304,7 +443,7 @@ TEST(GreedyColorConflictGraph, AllActiveVerticesCovered) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
     auto groups = greedy_color_conflict_graph(graph, predictions);
@@ -334,7 +473,7 @@ TEST(GreedyColorConflictGraph, EachActiveVertexAppearsExactlyOnce) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
     auto groups = greedy_color_conflict_graph(graph, predictions);
@@ -357,95 +496,6 @@ TEST(GreedyColorConflictGraph, EachActiveVertexAppearsExactlyOnce) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// compute_parallel_commit_for_vertex
-// ---------------------------------------------------------------------------
-
-TEST(ComputeParallelCommit, CachedPredictionProducesValidCommit) {
-    RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
-    build_test_scene(ref_mesh, state, pins, adj, params, X);
-
-    std::vector<Vec3> xhat;
-    build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
-
-    BroadPhase bp;
-    bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
-
-    std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
-
-    // Test commit for a non-pinned vertex using cached prediction (batch 1)
-    int vi = 5;
-    ParallelCommit commit = compute_parallel_commit_for_vertex(
-        vi, true, predictions[vi],
-        ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp);
-
-    EXPECT_TRUE(commit.valid);
-    EXPECT_EQ(commit.vi, vi);
-    EXPECT_GT(commit.ccd_step, 0.0);
-    EXPECT_LE(commit.ccd_step, 1.0);
-}
-
-TEST(ComputeParallelCommit, FreshDirectionGetsClipped) {
-    RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
-    build_test_scene(ref_mesh, state, pins, adj, params, X);
-
-    std::vector<Vec3> xhat;
-    build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
-
-    BroadPhase bp;
-    bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
-
-    std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
-
-    // Test commit for a vertex using fresh direction (batch k >= 2)
-    int vi = 5;
-    ParallelCommit commit = compute_parallel_commit_for_vertex(
-        vi, false, predictions[vi],
-        ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp);
-
-    EXPECT_TRUE(commit.valid);
-    EXPECT_GT(commit.alpha_clip, 0.0);
-    EXPECT_LE(commit.alpha_clip, 1.0);
-
-    // The committed position must lie inside the certified region
-    const AABB& U = predictions[vi].certified_region;
-    for (int k = 0; k < 3; ++k) {
-        EXPECT_GE(commit.x_after(k), U.min(k) - 1e-10)
-            << "committed position outside certified region, axis " << k;
-        EXPECT_LE(commit.x_after(k), U.max(k) + 1e-10)
-            << "committed position outside certified region, axis " << k;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// apply_parallel_commits
-// ---------------------------------------------------------------------------
-
-TEST(ApplyParallelCommits, UpdatesCorrectVertices) {
-    int nv = 10;
-    std::vector<Vec3> xnew(nv, Vec3::Zero());
-
-    std::vector<ParallelCommit> commits(3);
-    commits[0].valid = true;  commits[0].vi = 2; commits[0].x_after = Vec3(1.0, 2.0, 3.0);
-    commits[1].valid = true;  commits[1].vi = 7; commits[1].x_after = Vec3(4.0, 5.0, 6.0);
-    commits[2].valid = false; commits[2].vi = 5; commits[2].x_after = Vec3(9.0, 9.0, 9.0);
-
-    apply_parallel_commits(commits, xnew);
-
-    EXPECT_EQ(xnew[2], Vec3(1.0, 2.0, 3.0));
-    EXPECT_EQ(xnew[7], Vec3(4.0, 5.0, 6.0));
-    EXPECT_EQ(xnew[5], Vec3::Zero());  // invalid commit should not be applied
-
-    // Other vertices should remain zero
-    for (int i : {0, 1, 3, 4, 6, 8, 9}) {
-        EXPECT_EQ(xnew[i], Vec3::Zero()) << "vertex " << i << " should be unchanged";
-    }
-}
-
 TEST(BuildConflictGraph, SweptRegionOverlapImpliesEdge) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
     VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
@@ -458,7 +508,7 @@ TEST(BuildConflictGraph, SweptRegionOverlapImpliesEdge) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
 
@@ -559,7 +609,7 @@ TEST(ParallelHelper, EmptySceneIsHandled) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
     EXPECT_TRUE(predictions.empty());
 
     auto graph = build_conflict_graph(ref_mesh, pins, bp.cache(), predictions);
@@ -569,7 +619,7 @@ TEST(ParallelHelper, EmptySceneIsHandled) {
     EXPECT_TRUE(groups.empty());
 }
 
-TEST(ParallelHelper, InactivePinnedVerticesAreExcludedFromGroupsAndCommits) {
+TEST(ParallelHelper, InactivePinnedVerticesAreExcludedFromGroups) {
     RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
     VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
     build_test_scene(ref_mesh, state, pins, adj, params, X);
@@ -581,7 +631,7 @@ TEST(ParallelHelper, InactivePinnedVerticesAreExcludedFromGroupsAndCommits) {
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
 
     std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
+    build_predictions_with_blue_boxes(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
 
     for (const auto& pin : pins) {
         ASSERT_GE(pin.vertex_index, 0);
@@ -599,74 +649,6 @@ TEST(ParallelHelper, InactivePinnedVerticesAreExcludedFromGroupsAndCommits) {
         EXPECT_FALSE(grouped.count(pin.vertex_index)) << "inactive pinned vertex should not be grouped";
     }
 
-    std::vector<Vec3> xnew = state.deformed_positions;
-    std::vector<ParallelCommit> commits(state.deformed_positions.size());
-    for (const auto& g : groups) {
-        for (int vi : g) {
-            commits[vi] = compute_parallel_commit_for_vertex(
-                vi, true, predictions[vi], ref_mesh, adj, pins, params, xnew, xhat, bp);
-        }
-        apply_parallel_commits(commits, xnew);
-    }
-
-    for (const auto& pin : pins) {
-        const int vi = pin.vertex_index;
-        EXPECT_NEAR(xnew[vi].x(), state.deformed_positions[vi].x(), 1e-12);
-        EXPECT_NEAR(xnew[vi].y(), state.deformed_positions[vi].y(), 1e-12);
-        EXPECT_NEAR(xnew[vi].z(), state.deformed_positions[vi].z(), 1e-12);
-    }
-}
-
-TEST(ComputeParallelCommit, NoBarrierImpliesFullCCDStep) {
-    RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
-    build_test_scene(ref_mesh, state, pins, adj, params, X);
-    params.d_hat = 0.0;
-
-    std::vector<Vec3> xhat;
-    build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
-
-    BroadPhase bp;
-    bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
-
-    std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
-
-    int vi = 5;
-    ParallelCommit commit = compute_parallel_commit_for_vertex(
-        vi, true, predictions[vi], ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp);
-
-    EXPECT_TRUE(commit.valid);
-    EXPECT_DOUBLE_EQ(commit.ccd_step, 1.0);
-}
-
-TEST(ComputeParallelCommit, ExactBoundaryClipProducesBoundaryPoint) {
-    RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-    VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
-    build_test_scene(ref_mesh, state, pins, adj, params, X);
-
-    std::vector<Vec3> xhat;
-    build_xhat(xhat, state.deformed_positions, state.velocities, params.dt());
-
-    BroadPhase bp;
-    bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
-
-    std::vector<JacobiPrediction> predictions;
-    build_jacobi_predictions(ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp.cache(), predictions);
-
-    const int vi = 5;
-    JacobiPrediction constrained = predictions[vi];
-    const Vec3 xi = state.deformed_positions[vi];
-    constrained.certified_region = AABB(xi, xi);  // zero-volume region at current point
-
-    ParallelCommit commit = compute_parallel_commit_for_vertex(
-        vi, false, constrained, ref_mesh, adj, pins, params, state.deformed_positions, xhat, bp);
-
-    EXPECT_TRUE(commit.valid);
-    EXPECT_NEAR(commit.alpha_clip, 0.0, 1e-12);
-    EXPECT_NEAR(commit.x_after.x(), xi.x(), 1e-12);
-    EXPECT_NEAR(commit.x_after.y(), xi.y(), 1e-12);
-    EXPECT_NEAR(commit.x_after.z(), xi.z(), 1e-12);
 }
 
 // ---------------------------------------------------------------------------
@@ -839,23 +821,21 @@ TEST(ParallelSolver, OneSweepRepeatableSameThreadCount) {
 #endif
 
 // ---------------------------------------------------------------------------
-// compute_safe_step_for_vertex — trust-region gate on barrier proximity
+// compute_safe_step_for_vertex — paper's unconditional trust-region bound
 // ---------------------------------------------------------------------------
 //
-// The trust-region narrow phase shrinks a vertex's Newton step by
-// omega = eta * d0 / |delta|, where d0 is the current pair distance and
-// delta is the step. That bound is only meaningful when the pair is
-// actually within the barrier-active range (d0 < d_hat); outside that
-// range the barrier contributes zero gradient and Hessian, so there is
-// no linearization to protect and omega must effectively be 1.
+// Paper Eq. 21 defines b_v = gamma_p * min(d0) across ALL incident pairs,
+// without any d_hat threshold. compute_safe_step_for_vertex mirrors this by
+// applying omega = min(1, eta * d0 / |delta|) to every pair the broad phase
+// surfaces, regardless of whether d0 is inside the barrier-active range.
 //
-// Regression test: construct a pair whose current separation d0 is
-// 5 * d_hat (well outside the barrier range) but whose swept AABB does
-// overlap — so the broad phase surfaces the pair — and verify the
-// returned safe step is 1.0. Without the d_hat gate, the returned value
-// would be ~0.8 (the raw omega), which is exactly the example=3 bug.
+// This test constructs a pair with d0 = 5*d_hat (outside barrier range) and
+// a Newton step large enough that eta * d0 / |delta| < 1. The returned
+// safe step must be 0.8 (the raw omega), NOT 1.0 — the earlier d_hat gate
+// that forced 1.0 for distant pairs weakened the paper invariant and has
+// been removed.
 
-TEST(TrustRegionSafeStep, FarFromBarrierReturnsFullStep) {
+TEST(TrustRegionSafeStep, FarFromBarrierStillBoundedByTrustRegion) {
     RefMesh ref_mesh;
     DeformedState state;
     std::vector<Vec2> X;
@@ -891,7 +871,7 @@ TEST(TrustRegionSafeStep, FarFromBarrierReturnsFullStep) {
 
     ref_mesh.ref_positions = X;
     ref_mesh.tris = {0, 1, 2, 3, 4, 5};
-    ref_mesh.initialize(X);
+    ref_mesh.initialize(X, state.deformed_positions);
     ref_mesh.build_lumped_mass(params.density, params.thickness);
 
     BroadPhase bp;
@@ -900,12 +880,12 @@ TEST(TrustRegionSafeStep, FarFromBarrierReturnsFullStep) {
     ASSERT_FALSE(bp.cache().nt_pairs.empty())
         << "precondition: broad phase must surface the far-apart NT pair";
 
-    // Newton step of 0.25 downward on node 0. Without the gate, TR's omega on
-    // (node 0, triangle B) is eta * d0 / |delta| = 0.4 * 0.5 / 0.25 = 0.8.
+    // Newton step of 0.25 downward on node 0.
+    // omega = eta * d0 / |delta| = 0.4 * 0.5 / 0.25 = 0.8.
     const Vec3 delta = Vec3(0.0, 0.25, 0.0);
     const double step = compute_safe_step_for_vertex(
-        0, ref_mesh, params, state.deformed_positions, delta, bp);
+        0, ref_mesh, params, state.deformed_positions, delta, bp.cache());
 
-    EXPECT_NEAR(step, 1.0, 1e-12)
-        << "trust-region clamped a non-colliding pair; d_hat gate missing";
+    EXPECT_NEAR(step, 0.8, 1e-12)
+        << "trust-region should clamp motion regardless of d_hat (paper Eq. 21)";
 }

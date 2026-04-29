@@ -26,38 +26,39 @@ struct Pin {
 struct SimParams {
     double fps;
     int    substeps;
-    double mu, lambda, density, thickness, kpin, tol_abs, step_weight;
+    double mu, lambda, density, thickness, kpin, tol_abs;
     double tol_rel;   // relative tolerance (factor of initial residual); 0 disables
     double kB;        // bending (flexural) stiffness; 0 disables the bending term
-    double damping;   // Rayleigh-style stiffness damping coefficient β (seconds); 0 = no damping
     double d_hat;     // barrier activation distance; 0 disables contact
     double k_sdf;     // SDF penalty stiffness; 0 disables the SDF term
     double eps_sdf;   // SDF ramp-Heaviside transition-layer width
     std::vector<PlaneSDF>    sdf_planes;
     std::vector<CylinderSDF> sdf_cylinders;
+    std::vector<SphereSDF>   sdf_spheres;
     Vec3   gravity;
     int    max_global_iters;
 
-    int    restart_frame;  // -1 = no restart
     bool   use_parallel;
+    bool   write_substeps;       // if true, export a frame file after every substep (not just every frame)
+    bool   use_ccd;              // if true, run CCD step clamping in per_vertex_safe_step
     bool   ccd_check;
-    bool   use_trust_region;
-    bool   mass_normalize_residual;
+    bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
+    bool   use_trust_region;     // if true, use trust_region_initial_guess instead of CCD
+    bool   fixed_iters;          // if true, run exactly max_global_iters sweeps with no tolerance / convergence check
     int    color_rebuild_interval;
 
     // Route the per-substep Gauss-Seidel sweep through the GPU implementation
     // (gpu_gauss_seidel_solver). On machines without CUDA the CPU stub is
     // used automatically. When set, use_parallel is ignored.
     bool   use_gpu;
-
     // Route through the no-collision GPU_Elastic solver (gpu_elastic_*).
     // Only valid when d_hat == 0. Takes precedence over use_gpu.
     bool   use_gpu_elastic;
+    bool   experimental;       // if true, use global_gauss_seidel_solver_basic
+    double node_box_size;      // half-extent of the symmetric node box used by experimental solver
+    double k_barrier;              // barrier stiffness multiplier
+    bool   use_ticcd;              // true (default) -> Tight-Inclusion CCD library; false -> self-written linear CCD
 
-    // Returns a SimParams with every field set to a benign "disabled / zero /
-    // sentinel" value. This is the single source of truth for the init state
-    // tests start from; callers then override the subset of fields they care
-    // about. Matches the in-class defaults that used to live here.
     static SimParams zeros() {
         SimParams p;
         p.fps                       = 30.0;
@@ -68,25 +69,30 @@ struct SimParams {
         p.thickness                 = 0.0;
         p.kpin                      = 0.0;
         p.tol_abs                   = 0.0;
-        p.step_weight               = 0.0;
         p.tol_rel                   = 0.0;
         p.kB                        = 0.0;
-        p.damping                   = 0.0;
         p.d_hat                     = 0.0;
         p.k_sdf                     = 0.0;
         p.eps_sdf                   = 0.0;
         p.sdf_planes.clear();
         p.sdf_cylinders.clear();
+        p.sdf_spheres.clear();
         p.gravity                   = Vec3::Zero();
         p.max_global_iters          = 0;
-        p.restart_frame             = -1;
         p.use_parallel              = false;
+        p.write_substeps            = false;
+        p.use_ccd                   = false;
         p.ccd_check                 = false;
+        p.use_ccd_guess             = true;
         p.use_trust_region          = false;
-        p.mass_normalize_residual   = false;
-        p.color_rebuild_interval    = 10;
+        p.fixed_iters               = false;
+        p.color_rebuild_interval    = 1;
         p.use_gpu                   = false;
         p.use_gpu_elastic           = false;
+        p.experimental              = false;
+        p.node_box_size             = 0.1;
+        p.k_barrier                     = 1.0;
+        p.use_ticcd                     = true;
         p.cached_dt_                = -1.0;
         p.cached_dt2_               = -1.0;
         return p;
@@ -100,7 +106,6 @@ struct SimParams {
         if (cached_dt2_ < 0.0) { double d = dt(); cached_dt2_ = d * d; }
         return cached_dt2_;
     }
-    // Call after mutating fps or substeps.
     void invalidate_dt_cache() const { cached_dt_ = -1.0; cached_dt2_ = -1.0; }
 
 private:
@@ -119,7 +124,7 @@ struct DeformedState {
 // orientation is fixed by build_hinges() so m_A, m_B agree when flat.
 struct Hinge {
     int    v[4];
-    double bar_theta;  // rest dihedral complement (0 for flat 2D rest)
+    double bar_theta;  // rest dihedral complement, computed from the initial 3D configuration
     double c_e;        // |e|^2 / (A_A + A_B)
 };
 
@@ -136,10 +141,10 @@ struct RefMesh {
     VertexHingeMap hinge_adj;
     size_t num_positions;
 
-    inline void initialize(const std::vector<Vec2>& X){
+    inline void initialize(const std::vector<Vec2>& X, const std::vector<Vec3>& x_rest){
         num_positions = X.size();
         compute_dm_inverse(X);
-        build_hinges(X);
+        build_hinges(X, x_rest);
     }
 
     inline void compute_dm_inverse(const std::vector<Vec2>& X){
@@ -163,7 +168,7 @@ struct RefMesh {
         assert(mass.size() == num_positions);
     }
 
-    inline void build_hinges(const std::vector<Vec2>& X) {
+    inline void build_hinges(const std::vector<Vec2>& X, const std::vector<Vec3>& x_rest) {
         // dir = 0 means the triangle traverses this edge in v_min→v_max
         // order; dir = 1 means v_max→v_min. Pairing one of each yields a
         // consistently oriented hinge below.
@@ -213,7 +218,10 @@ struct RefMesh {
             const double areaB = 0.5 * std::abs(cross_product_in_2d(eVec, X3 - X0));
             const double area_sum = areaA + areaB;
             h.c_e = (area_sum > 0.0) ? (edge_len2 / area_sum) : 0.0;
-            h.bar_theta = 0.0;  // flat 2D rest
+
+            HingeDef def;
+            for (int k = 0; k < 4; ++k) def.x[k] = x_rest[h.v[k]];
+            h.bar_theta = bending_theta(def);
 
             const int hidx = static_cast<int>(hinges.size());
             hinges.push_back(h);
@@ -231,6 +239,7 @@ struct RefMesh {
             for (int a = 0; a < 3; ++a) mass[tris[t * 3 + a]] += mv;
         }
     }
+
 };
 
 inline int tri_vertex(const RefMesh& ref_mesh, int tri_idx, int local) {
@@ -277,12 +286,10 @@ struct HingePrecompute {
     bool                degenerate = true;  // true => gradient and PSD Hessian are zero
 };
 
-// `want_hessian == false` leaves dPdF uninitialised.
 void build_elastic_precompute(const RefMesh& ref_mesh, const std::vector<Vec3>& x,
                               const SimParams& params, bool want_hessian,
                               std::vector<TriPrecompute>& out);
 
-// Leaves `out` empty when kB <= 0 or the mesh has no hinges.
 void build_bending_precompute(const RefMesh& ref_mesh, const std::vector<Vec3>& x,
                               const SimParams& params,
                               std::vector<HingePrecompute>& out);

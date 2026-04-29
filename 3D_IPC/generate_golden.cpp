@@ -20,7 +20,6 @@ int main() {
     params.gravity         = Vec3(0.0, -9.81, 0.0);
     params.max_global_iters = 100;
     params.tol_abs         = 1e-6;
-    params.step_weight     = 1.0;
     params.use_parallel    = false;
 
     RefMesh ref_mesh; DeformedState state;

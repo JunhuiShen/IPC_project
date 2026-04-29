@@ -3,6 +3,14 @@ build/
 
 # Simulation output
 frames_sim3d/
+frames_baseline/
+frames_after/
+acceptance_*/
+tools/
+
+# Benchmark / diff logs
+log_baseline*.txt
+log_after*.txt
 
 # macOS
 .DS_Store
@@ -25,3 +33,21 @@ mesh_after.obj
 
 # Claude Code scheduled-tasks runtime lock
 .claude/scheduled_tasks.lock
+example5/
+
+# Long-running randomized linear-vs-TICCD parity sweep — local-only.
+# Kept off the public build so `ctest` stays fast for everyone else.
+ccd_stress_test.cpp
+
+# Vendored Bernstein Sign Classification + Root Parity CCD
+# (kept on disk as reference; not built into the active binary)
+bsc.cpp
+bsc.h
+rootparitycollisiontest.cpp
+rootparitycollisiontest.h
+interval.cpp
+interval.h
+interval_base.h
+expansion.cpp
+expansion.h
+vec.h

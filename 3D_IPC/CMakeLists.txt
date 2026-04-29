@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.21)
 
 project(CorotatedEnergy LANGUAGES CXX)
 
@@ -11,24 +11,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 enable_testing()
-set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
 
 find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(GTest REQUIRED)
-# GTest was built without a Release config (only NOCONFIG); patch the
-# Release IMPORTED_LOCATION so target resolution doesn't yield NOTFOUND.
-get_target_property(_gtest_lib     GTest::gtest      IMPORTED_LOCATION_NOCONFIG)
-get_target_property(_gtest_main_lib GTest::gtest_main IMPORTED_LOCATION_NOCONFIG)
-if(_gtest_lib AND NOT _gtest_lib STREQUAL "_gtest_lib-NOTFOUND")
-    set_target_properties(GTest::gtest PROPERTIES
-        IMPORTED_LOCATION_RELEASE "${_gtest_lib}"
-    )
-endif()
-if(_gtest_main_lib AND NOT _gtest_main_lib STREQUAL "_gtest_main_lib-NOTFOUND")
-    set_target_properties(GTest::gtest_main PROPERTIES
-        IMPORTED_LOCATION_RELEASE "${_gtest_main_lib}"
-    )
-endif()
+
+# Tight-Inclusion CCD (https://github.com/Continuous-Collision-Detection/Tight-Inclusion)
+# powers our general CCD (multi-vertex motion). Pulled in via FetchContent so the
+# build is self-contained.
+include(FetchContent)
+FetchContent_Declare(
+    tight_inclusion
+    GIT_REPOSITORY https://github.com/Continuous-Collision-Detection/Tight-Inclusion.git
+    GIT_TAG        v1.0.6
+)
+FetchContent_MakeAvailable(tight_inclusion)
 if(APPLE)
     set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp")
     set(OpenMP_CXX_LIB_NAMES "omp")
@@ -50,16 +46,12 @@ if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-    # Default to sm_89 (Ada) — nvcc 12.0 doesn't know Blackwell (sm_120),
-    # and enable_language(CUDA) otherwise defaults to sm_52 which JIT-compiles
-    # to newer GPUs unreliably (crashes in complex kernels). Override via
-    # -DCMAKE_CUDA_ARCHITECTURES=... if needed.
     set(CMAKE_CUDA_ARCHITECTURES 89 CACHE STRING "CUDA archs" FORCE)
     set(GPU_MESH_SOURCES
         GPU_Sim/gpu_mesh.cu
         GPU_Sim/gpu_ccd_stub.cpp
         GPU_Sim/gpu_physics_stub.cpp
-        GPU_Sim/gpu_solver.cu
+        GPU_Sim/gpu_solver_stub.cpp
         GPU_Sim/gpu_solver_bridge.cpp
         GPU_Elastic/gpu_elastic.cu
     )
@@ -108,6 +100,7 @@ add_library(corotated_energy_lib
 
 target_link_libraries(corotated_energy_lib
     PUBLIC Eigen3::Eigen
+    PRIVATE tight_inclusion::tight_inclusion
 )
 
 target_include_directories(corotated_energy_lib
@@ -226,26 +219,6 @@ target_link_libraries(gpu_solver_test
 
 gtest_discover_tests(gpu_solver_test)
 
-add_executable(gpu_ccd_test
-    gpu_ccd_test.cpp
-    make_shape.cpp
-    physics.cpp
-    solver.cpp
-    parallel_helper.cpp
-    broad_phase.cpp
-)
-
-target_link_libraries(gpu_ccd_test
-    PRIVATE
-    gpu_mesh_lib
-    corotated_energy_lib
-    OpenMP::OpenMP_CXX
-    GTest::gtest
-    GTest::gtest_main
-)
-
-gtest_discover_tests(gpu_ccd_test)
-
 add_executable(ccd_test
     ccd_test.cpp
     make_shape.cpp
@@ -264,6 +237,28 @@ target_link_libraries(ccd_test
 
 gtest_discover_tests(ccd_test)
 
+# Long-running randomized linear-vs-TICCD parity sweep. Local-only:
+# `ccd_stress_test.cpp` is gitignored, so this target is built only when the
+# source happens to be present on disk. Not registered with
+# `gtest_discover_tests` — keeps `ctest` fast even when the source IS present.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ccd_stress_test.cpp")
+    add_executable(ccd_stress_test
+        ccd_stress_test.cpp
+        make_shape.cpp
+        physics.cpp
+        solver.cpp
+        parallel_helper.cpp
+        broad_phase.cpp
+    )
+
+    target_link_libraries(ccd_stress_test
+        PRIVATE
+        corotated_energy_lib
+        GTest::gtest
+        GTest::gtest_main
+    )
+endif()
+
 add_executable(trust_region_test
     trust_region_test.cpp
 )
@@ -280,6 +275,8 @@ gtest_discover_tests(trust_region_test)
 add_executable(broad_phase_test
     broad_phase_test.cpp
     broad_phase.cpp
+    make_shape.cpp
+    visualization.cpp
 )
 
 target_link_libraries(broad_phase_test

@@ -10,10 +10,7 @@
 #include <sstream>
 #include <iostream>
 
-// Union of all obstacles: writes the SDFEvaluation with the smallest phi into
-// `out`. Returns false when no obstacle is defined so callers can skip the
-// penalty. A vertex in the ramp region of two obstacles gets one coherent push
-// toward the nearest surface instead of a double-count.
+// Union of all obstacles
 static inline bool sdf_min_evaluation(const SimParams& params, const Vec3& xi, SDFEvaluation& out) {
     bool any = false;
     out.phi = std::numeric_limits<double>::infinity();
@@ -23,6 +20,10 @@ static inline bool sdf_min_evaluation(const SimParams& params, const Vec3& xi, S
     }
     for (const CylinderSDF& c : params.sdf_cylinders) {
         const SDFEvaluation s = evaluate_sdf(c, xi);
+        if (!any || s.phi < out.phi) { out = s; any = true; }
+    }
+    for (const SphereSDF& sp : params.sdf_spheres) {
+        const SDFEvaluation s = evaluate_sdf(sp, xi);
         if (!any || s.phi < out.phi) { out = s; any = true; }
     }
     return any;
@@ -263,14 +264,15 @@ static Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const Vertex
     }
 
     if (params.d_hat > 0.0) {
+        const double dt2k = dt2 * params.k_barrier;
         for (const auto& entry : bp_cache.vertex_nt[vi]) {
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
-            g += dt2 * node_triangle_barrier_gradient(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
+            g += dt2k * node_triangle_barrier_gradient(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
         }
 
         for (const auto& entry : bp_cache.vertex_ss[vi]) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
-            g += dt2 * segment_segment_barrier_gradient(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
+            g += dt2k * segment_segment_barrier_gradient(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
         }
     }
 
@@ -287,15 +289,12 @@ double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap&
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                const BroadPhase& broad_phase, const PinMap* pin_map) {
     const int nv = static_cast<int>(x.size());
-    const bool normalize = params.mass_normalize_residual;
     double r_inf = 0.0;
     #pragma omp parallel for reduction(max:r_inf) schedule(static)
     for (int i = 0; i < nv; ++i) {
         Vec3 g = compute_local_gradient(i, ref_mesh, adj, pins, params, x, xhat, broad_phase, pin_map);
-        if (normalize) {
-            const double m = ref_mesh.mass[i];
-            if (m > 0.0) g /= m;
-        }
+        const double m = ref_mesh.mass[i];
+        if (m > 0.0) g /= m;
         r_inf = std::max(r_inf, g.cwiseAbs().maxCoeff());
     }
     return r_inf;

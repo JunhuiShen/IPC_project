@@ -37,21 +37,21 @@ void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, const Verte
     auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x, xhat, pin_map, tri_cache, hinge_cache);
 
     if (params.d_hat > 0.0) {
-        const double dt2 = params.dt2();
+        const double dt2k = params.dt2() * params.k_barrier;
 
         for (const auto& entry : bp_cache.vertex_nt[vi]) {
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
             auto [bg, bH] = node_triangle_barrier_gradient_and_hessian( x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
-            g += dt2 * bg;
-            H += dt2 * bH;
+            g += dt2k * bg;
+            H += dt2k * bH;
         }
 
         for (const auto& entry : bp_cache.vertex_ss[vi]) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
             auto [bg, bH] = segment_segment_barrier_gradient_and_hessian(
                     x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
-            g += dt2 * bg;
-            H += dt2 * bH;
+            g += dt2k * bg;
+            H += dt2k * bH;
         }
     }
 
@@ -61,47 +61,12 @@ void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, const Verte
     delta_out = matrix3d_inverse(H) * g;
 }
 
-// Certified region for vertex vi: isotropic cube centered at x[vi] with
-// half-edge |delta|_2, unioned with incident tri/edge boxes. Every contributing
-// sub-AABB is padded by d_hat/2 so disjoint certified regions are guaranteed
-// d_hat-separated. The isotropic cube allows a fresh Newton step move in any direction 
-// up to the cached step length without being clipped by a thin perpendicular extent. 
-// edge_boxes already carry d_hat/2 from the broad phase; tri_boxes carry 0, 
-// so only the cube and tri_boxes are grown here.
-static AABB build_certified_region_for_vertex(int vi, const std::vector<Vec3>& x, const Vec3& delta, const BroadPhase::Cache& bp_cache, double d_hat){
-    AABB box;
-
-    const Vec3 half_dhat(0.5 * d_hat, 0.5 * d_hat, 0.5 * d_hat);
-    const Vec3 jacobi_step_extent = Vec3::Constant(delta.norm());
-    const Vec3& center = x[vi];
-
-    box.expand(center - jacobi_step_extent - half_dhat);
-    box.expand(center + jacobi_step_extent + half_dhat);
-
-    if (vi >= 0 && vi < static_cast<int>(bp_cache.node_to_tris.size())) {
-        for (int tri_idx : bp_cache.node_to_tris[vi]) {
-            const AABB& tb = bp_cache.tri_boxes[tri_idx];
-            box.expand(tb.min - half_dhat);
-            box.expand(tb.max + half_dhat);
-        }
-    }
-
-    if (vi >= 0 && vi < static_cast<int>(bp_cache.node_to_edges.size())) {
-        for (int edge_idx : bp_cache.node_to_edges[vi]) {
-            box.expand(bp_cache.edge_boxes[edge_idx]);
-        }
-    }
-
-    return box;
-}
-
-void build_jacobi_predictions(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                              const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                              const BroadPhase::Cache& bp_cache, std::vector<JacobiPrediction>& predictions,
-                              const PinMap* pin_map){
+void build_jacobi_prediction_deltas(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+                                    const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                    const BroadPhase::Cache& bp_cache, std::vector<JacobiPrediction>& predictions,
+                                    const PinMap* pin_map){
     const int nv = static_cast<int>(x.size());
-    predictions.clear();
-    predictions.resize(nv);
+    predictions.assign(nv, {});
 
     // Per-triangle F/cache/P/dPdF and per-hinge cache are shared across every
     // corner of their stencil; the per-vertex call reads them instead of
@@ -121,7 +86,79 @@ void build_jacobi_predictions(const RefMesh& ref_mesh, const VertexTriangleMap& 
 
         predictions[vi].g = g;
         predictions[vi].delta = delta;
-        predictions[vi].certified_region = build_certified_region_for_vertex(vi, x, predictions[vi].delta, bp_cache, params.d_hat);
+    }
+}
+
+void build_blue_boxes(const std::vector<Vec3>& positions,
+                      bool use_parallel,
+                      std::vector<JacobiPrediction>& jacobi_predictions,
+                      std::vector<AABB>* blue_boxes_out,
+                      const std::vector<double>* per_vertex_radii){
+    const int num_vertices = static_cast<int>(jacobi_predictions.size());
+    if (blue_boxes_out) blue_boxes_out->resize(num_vertices);
+    const bool use_radius_override = per_vertex_radii && static_cast<int>(per_vertex_radii->size()) == num_vertices;
+
+    #pragma omp parallel for if(use_parallel)
+    for (int vertex = 0; vertex < num_vertices; ++vertex) {
+        const double radius = use_radius_override? std::max(0.0, (*per_vertex_radii)[vertex]): jacobi_predictions[vertex].delta.norm();
+        AABB blue_box;
+        blue_box.expand(positions[vertex] - Vec3::Constant(radius));
+        blue_box.expand(positions[vertex] + Vec3::Constant(radius));
+        jacobi_predictions[vertex].certified_region = blue_box;
+        if (blue_boxes_out) (*blue_boxes_out)[vertex] = blue_box;
+    }
+}
+
+void build_red_boxes(const RefMesh& ref_mesh,
+                     const std::vector<std::array<int, 2>>& edges,
+                     const std::vector<AABB>& blue_boxes,
+                     RedBoxes& red_boxes) {
+    const int num_triangles = num_tris(ref_mesh);
+    const int num_edges = static_cast<int>(edges.size());
+
+    red_boxes.tri.resize(num_triangles);
+    red_boxes.edge.resize(num_edges);
+
+    #pragma omp parallel for schedule(static)
+    for (int tri_idx = 0; tri_idx < num_triangles; ++tri_idx) {
+        const int v0 = tri_vertex(ref_mesh, tri_idx, 0);
+        const int v1 = tri_vertex(ref_mesh, tri_idx, 1);
+        const int v2 = tri_vertex(ref_mesh, tri_idx, 2);
+        AABB red_tri_box = blue_boxes[v0];
+        red_tri_box.expand(blue_boxes[v1]);
+        red_tri_box.expand(blue_boxes[v2]);
+        red_boxes.tri[tri_idx] = red_tri_box;
+    }
+
+    #pragma omp parallel for schedule(static)
+    for (int edge_idx = 0; edge_idx < num_edges; ++edge_idx) {
+        AABB red_edge_box = blue_boxes[edges[edge_idx][0]];
+        red_edge_box.expand(blue_boxes[edges[edge_idx][1]]);
+        red_boxes.edge[edge_idx] = red_edge_box;
+    }
+}
+
+void build_green_boxes(const RedBoxes& red_boxes, double d_hat, GreenBoxes& green_boxes) {
+    const int num_triangles = static_cast<int>(red_boxes.tri.size());
+    const int num_edges = static_cast<int>(red_boxes.edge.size());
+
+    green_boxes.tri.resize(num_triangles);
+    green_boxes.edge.resize(num_edges);
+
+    #pragma omp parallel for schedule(static)
+    for (int tri_idx = 0; tri_idx < num_triangles; ++tri_idx) {
+        AABB green_tri_box = red_boxes.tri[tri_idx];
+        green_tri_box.min.array() -= d_hat;
+        green_tri_box.max.array() += d_hat;
+        green_boxes.tri[tri_idx] = green_tri_box;
+    }
+
+    #pragma omp parallel for schedule(static)
+    for (int edge_idx = 0; edge_idx < num_edges; ++edge_idx) {
+        AABB green_edge_box = red_boxes.edge[edge_idx];
+        green_edge_box.min.array() -= d_hat;
+        green_edge_box.max.array() += d_hat;
+        green_boxes.edge[edge_idx] = green_edge_box;
     }
 }
 
@@ -190,8 +227,7 @@ std::vector<std::vector<int>> build_contact_adj(const BroadPhase::Cache& bp_cach
         for (int t = 0; t < T; ++t) total += local_nbr[t][vi].size();
         out[vi].reserve(total);
         for (int t = 0; t < T; ++t) {
-            auto& src = local_nbr[t][vi];
-            out[vi].insert(out[vi].end(), src.begin(), src.end());
+            out[vi].insert(out[vi].end(), local_nbr[t][vi].begin(), local_nbr[t][vi].end());
         }
         std::sort(out[vi].begin(), out[vi].end());
         out[vi].erase(std::unique(out[vi].begin(), out[vi].end()), out[vi].end());
@@ -373,8 +409,7 @@ std::vector<std::vector<int>> build_conflict_graph(const RefMesh& ref_mesh, cons
             graph[vi].insert(graph[vi].end(), (*base_adj)[vi].begin(), (*base_adj)[vi].end());
         }
         for (int t = 0; t < T; ++t) {
-            auto& src = local_nbr[t][vi];
-            graph[vi].insert(graph[vi].end(), src.begin(), src.end());
+            graph[vi].insert(graph[vi].end(), local_nbr[t][vi].begin(), local_nbr[t][vi].end());
         }
         std::sort(graph[vi].begin(), graph[vi].end());
         graph[vi].erase(std::unique(graph[vi].begin(), graph[vi].end()), graph[vi].end());
@@ -412,6 +447,21 @@ std::vector<std::vector<int>> greedy_color_conflict_graph(const std::vector<std:
     return groups;
 }
 
+double compute_prediction_residual_inf_norm(const RefMesh& ref_mesh,
+                                            const std::vector<JacobiPrediction>& predictions,
+                                            bool use_parallel) {
+    double max_mass_normalized_grad = 0.0;
+    const int num_vertices = static_cast<int>(predictions.size());
+    #pragma omp parallel for reduction(max:max_mass_normalized_grad) if(use_parallel) schedule(static)
+    for (int vertex = 0; vertex < num_vertices; ++vertex) {
+        Vec3 grad = predictions[vertex].g;
+        const double mass = ref_mesh.mass[vertex];
+        if (mass > 0.0) grad /= mass;
+        max_mass_normalized_grad = std::max(max_mass_normalized_grad, grad.cwiseAbs().maxCoeff());
+    }
+    return max_mass_normalized_grad;
+}
+
 double clip_step_to_certified_region(int vi, const std::vector<Vec3>& x, const Vec3& fresh_delta, const AABB& certified_region){
     double alpha = 1.0;
 
@@ -438,16 +488,12 @@ double clip_step_to_certified_region(int vi, const std::vector<Vec3>& x, const V
 }
 
 double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimParams& params, const std::vector<Vec3>& x, const Vec3& delta,
-                                    const BroadPhase& broad_phase){
+                                    const BroadPhase::Cache& bp_cache){
     if (params.d_hat <= 0.0) return 1.0;
 
     const Vec3 dx = -delta;
     const bool tr = params.use_trust_region;
 
-    // The bp_cache per-vertex pair lists are a conservative superset of
-    // pairs this vertex can hit during the Newton step (built with velocity-
-    // swept AABBs), so iterating them directly replaces a fresh BVH query.
-    const auto& bp_cache = broad_phase.cache();
     double safe_min = 1.0;
 
     if (vi >= 0 && vi < static_cast<int>(bp_cache.vertex_nt.size())) {
@@ -459,13 +505,14 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
                 if (tr) {
                     auto r = trust_region_vertex_triangle_gauss_seidel(
                         x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
-                    if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
+                    safe_min = std::min(safe_min, r.omega);
                 } else {
                     CCDResult r = node_triangle_only_one_node_moves(
                         x[p.node],     dx,
                         x[p.tri_v[0]], Vec3::Zero(),
                         x[p.tri_v[1]], Vec3::Zero(),
-                        x[p.tri_v[2]], Vec3::Zero());
+                        x[p.tri_v[2]], Vec3::Zero(),
+                        /*eps=*/1.0e-12, params.use_ticcd);
                     if (r.collision) safe_min = std::min(safe_min, r.t);
                 }
             } else {
@@ -473,7 +520,7 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
                 if (tr) {
                     auto r = trust_region_vertex_triangle_gauss_seidel(
                         x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], dx);
-                    if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
+                    safe_min = std::min(safe_min, r.omega);
                 } else {
                     Vec3 dxv[3] = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
                     dxv[entry.dof - 1] = dx;
@@ -481,7 +528,8 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
                         x[p.node],     Vec3::Zero(),
                         x[p.tri_v[0]], dxv[0],
                         x[p.tri_v[1]], dxv[1],
-                        x[p.tri_v[2]], dxv[2]);
+                        x[p.tri_v[2]], dxv[2],
+                        /*eps=*/1.0e-12, params.use_ticcd);
                     if (r.collision) safe_min = std::min(safe_min, r.t);
                 }
             }
@@ -495,17 +543,18 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
             if (tr) {
                 auto r = trust_region_edge_edge_gauss_seidel(
                     x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], dx);
-                if (r.d0 < params.d_hat) safe_min = std::min(safe_min, r.omega);
+                safe_min = std::min(safe_min, r.omega);
             } else {
                 CCDResult r;
+                const double eps_ccd = 1.0e-12;
                 if (entry.dof == 0)
-                    r = segment_segment_only_one_node_moves(x[p.v[0]], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]]);
+                    r = segment_segment_only_one_node_moves(x[p.v[0]], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]], eps_ccd, params.use_ticcd);
                 else if (entry.dof == 1)
-                    r = segment_segment_only_one_node_moves(x[p.v[1]], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]]);
+                    r = segment_segment_only_one_node_moves(x[p.v[1]], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]], eps_ccd, params.use_ticcd);
                 else if (entry.dof == 2)
-                    r = segment_segment_only_one_node_moves(x[p.v[2]], dx, x[p.v[3]], x[p.v[0]], x[p.v[1]]);
+                    r = segment_segment_only_one_node_moves(x[p.v[2]], dx, x[p.v[3]], x[p.v[0]], x[p.v[1]], eps_ccd, params.use_ticcd);
                 else
-                    r = segment_segment_only_one_node_moves(x[p.v[3]], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]]);
+                    r = segment_segment_only_one_node_moves(x[p.v[3]], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]], eps_ccd, params.use_ticcd);
                 if (r.collision) safe_min = std::min(safe_min, r.t);
             }
         }
@@ -514,38 +563,74 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
     return tr ? safe_min : ((safe_min >= 1.0) ? 1.0 : 0.9 * safe_min);
 }
 
-ParallelCommit compute_parallel_commit_for_vertex(int vi, bool use_cached_prediction, const JacobiPrediction& prediction,
-                                                  const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                                                  const SimParams& params, const std::vector<Vec3>& x_current, const std::vector<Vec3>& xhat,
-                                                  const BroadPhase& broad_phase, const PinMap* pin_map){
-    const auto& bp_cache = broad_phase.cache();
-    ParallelCommit out;
-    out.vi = vi;
+BroadPhase::Cache register_barrier_pairs_from_blue_and_green(const RefMesh& ref_mesh,
+                                                             const std::vector<std::array<int, 2>>& edges,
+                                                             const std::vector<AABB>& blue_boxes,
+                                                             const GreenBoxes& green_boxes) {
+    const int num_vertices = static_cast<int>(blue_boxes.size());
+    const int num_edges = static_cast<int>(edges.size());
 
-    Vec3 delta = prediction.delta;
+    BroadPhase::Cache pair_cache;
+    pair_cache.edges = edges;
+    pair_cache.vertex_nt.assign(num_vertices, {});
+    pair_cache.vertex_ss.assign(num_vertices, {});
 
-    if (!use_cached_prediction) {
-        Vec3 g_fresh, delta_fresh;
-        Mat33 H_fresh;
-        compute_local_newton_direction(vi, ref_mesh, adj, pins, params, x_current, xhat, bp_cache, g_fresh, H_fresh, delta_fresh, pin_map);
-        out.alpha_clip = clip_step_to_certified_region(vi, x_current, delta_fresh, prediction.certified_region);
-        delta = out.alpha_clip * delta_fresh;
+    if (num_vertices == 0) return pair_cache;
+
+    const std::vector<AABB>& green_tri_boxes = green_boxes.tri;
+    const std::vector<AABB>& green_edge_boxes = green_boxes.edge;
+
+    std::vector<BVHNode> tri_bvh_nodes;
+    const int tri_bvh_root = build_bvh(green_tri_boxes, tri_bvh_nodes);
+    std::vector<BVHNode> edge_bvh_nodes;
+    const int edge_bvh_root = build_bvh(green_edge_boxes, edge_bvh_nodes);
+
+    // Node-triangle pairs: register (n, t) when B(n) and G(t) have intersections and n is not a corner of t.
+    std::vector<std::vector<int>> node_triangle_hits(num_vertices);
+    #pragma omp parallel for schedule(dynamic, 32)
+    for (int vertex = 0; vertex < num_vertices; ++vertex) {
+        if (tri_bvh_root < 0) continue;
+        query_bvh(tri_bvh_nodes, tri_bvh_root, blue_boxes[vertex], node_triangle_hits[vertex]);
     }
 
-    out.delta = delta;
-
-    // The conflict graph ensures no new barrier pair can arise within this
-    // batch, so single-node CCD against the current barrier pairs suffices.
-    out.ccd_step = compute_safe_step_for_vertex(vi, ref_mesh, params, x_current, delta, broad_phase);
-
-    out.x_after = x_current[vi] - out.ccd_step * delta;
-    out.valid = true;
-    return out;
-}
-
-void apply_parallel_commits(const std::vector<ParallelCommit>& commits, std::vector<Vec3>& xnew){
-    for (const auto& commit : commits) {
-        if (!commit.valid) continue;
-        xnew[commit.vi] = commit.x_after;
+    for (int vertex = 0; vertex < num_vertices; ++vertex) {
+        for (int tri_idx : node_triangle_hits[vertex]) {
+            const int v0 = tri_vertex(ref_mesh, tri_idx, 0);
+            const int v1 = tri_vertex(ref_mesh, tri_idx, 1);
+            const int v2 = tri_vertex(ref_mesh, tri_idx, 2);
+            if (vertex == v0 || vertex == v1 || vertex == v2) continue;
+            const std::size_t pair_idx = pair_cache.nt_pairs.size();
+            pair_cache.nt_pairs.push_back(NodeTrianglePair{vertex, {v0, v1, v2}});
+            pair_cache.vertex_nt[vertex].push_back({pair_idx, 0});
+            pair_cache.vertex_nt[v0].push_back({pair_idx, 1});
+            pair_cache.vertex_nt[v1].push_back({pair_idx, 2});
+            pair_cache.vertex_nt[v2].push_back({pair_idx, 3});
+        }
     }
+
+    // Segment-segment pairs: register (e, f) when G(e) and G(f) have intersections and they share no vertex.
+    std::vector<std::vector<int>> segment_segment_hits(num_edges);
+    #pragma omp parallel for schedule(dynamic, 32)
+    for (int edge_idx = 0; edge_idx < num_edges; ++edge_idx) {
+        if (edge_bvh_root < 0) continue;
+        query_bvh(edge_bvh_nodes, edge_bvh_root, green_edge_boxes[edge_idx], segment_segment_hits[edge_idx]);
+    }
+    for (int edge_idx = 0; edge_idx < num_edges; ++edge_idx) {
+        const int edge_a0 = edges[edge_idx][0];
+        const int edge_a1 = edges[edge_idx][1];
+        for (int other_edge_idx : segment_segment_hits[edge_idx]) {
+            if (other_edge_idx <= edge_idx) continue;
+            const int edge_b0 = edges[other_edge_idx][0];
+            const int edge_b1 = edges[other_edge_idx][1];
+            if (edge_a0 == edge_b0 || edge_a0 == edge_b1 || edge_a1 == edge_b0 || edge_a1 == edge_b1) continue;
+            const std::size_t pair_idx = pair_cache.ss_pairs.size();
+            pair_cache.ss_pairs.push_back(SegmentSegmentPair{{edge_a0, edge_a1, edge_b0, edge_b1}});
+            pair_cache.vertex_ss[edge_a0].push_back({pair_idx, 0});
+            pair_cache.vertex_ss[edge_a1].push_back({pair_idx, 1});
+            pair_cache.vertex_ss[edge_b0].push_back({pair_idx, 2});
+            pair_cache.vertex_ss[edge_b1].push_back({pair_idx, 3});
+        }
+    }
+
+    return pair_cache;
 }

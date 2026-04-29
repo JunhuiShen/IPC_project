@@ -7,14 +7,23 @@
 // With CUDA, gpu_solver.cu provides the kernel implementations.
 //
 // Everything else in the iteration loop — build_conflict_graph,
-// greedy_color_conflict_graph, apply_parallel_commits — stays on the CPU and
+// greedy_color_conflict_graph, commit write-back — stays on the CPU and
 // is called directly from the bridge; no GPU version is needed.
 
 #include "gpu_mesh.h"
-#include "../parallel_helper.h"   // JacobiPrediction, ParallelCommit
+#include "../parallel_helper.h"   // JacobiPrediction
 #include "../physics.h"
 #include "../broad_phase.h"
 #include <vector>
+
+struct ParallelCommit {
+    int vi = -1;
+    Vec3 delta = Vec3::Zero();
+    double alpha_clip = 1.0;
+    double ccd_step = 1.0;
+    Vec3 x_after = Vec3::Zero();
+    bool valid = false;
+};
 
 // --------------------------------------------------------------------------
 // gpu_build_jacobi_predictions
@@ -22,8 +31,8 @@
 // Phase 1 of the parallel solver: compute the Newton direction and certified
 // region for every vertex simultaneously.
 //
-// CPU stub (gpu_solver_stub.cpp): wraps build_jacobi_predictions, which
-// uses #pragma omp parallel for internally.
+// CPU stub (gpu_solver_stub.cpp): runs build_jacobi_prediction_deltas and
+// build_blue_boxes.
 //
 // CUDA (gpu_solver.cu TODO 1): launch one thread per vertex; each thread
 // runs the device-side port of compute_local_newton_direction and
@@ -48,12 +57,12 @@ void gpu_build_jacobi_predictions(
 // the certified step (clipping to region if not color-0) then run single-node
 // CCD. Returns one ParallelCommit per group member.
 //
-// CPU stub (gpu_solver_stub.cpp): wraps compute_parallel_commit_for_vertex
-// with #pragma omp parallel for.
+// CPU stub (gpu_solver_stub.cpp): runs the same commit math with
+// #pragma omp parallel for.
 //
 // CUDA (gpu_solver.cu TODO 2): upload group indices + predictions to device,
 // launch one thread per group member calling the device-side port of
-// compute_parallel_commit_for_vertex (raw double arrays), download commits.
+// the commit math (raw double arrays), download commits.
 // --------------------------------------------------------------------------
 std::vector<ParallelCommit> gpu_parallel_commit(
     const std::vector<int>&              group,
