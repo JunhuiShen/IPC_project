@@ -40,6 +40,8 @@ struct IPCArgs3D : ArgParser {
     bool   use_gpu                 = false;
     bool   experimental            = false;
     double node_box_size           = 0.1;
+    double k_barrier                   = 1.0;
+    bool   write_barrier_distances     = false;
     int    color_rebuild_interval  = 10;
 
     // --- mesh ---
@@ -120,6 +122,8 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_gpu",              use_gpu,              false, "Route the GS sweep through the GPU implementation (CPU stub when CUDA is unavailable)");
         add_bool  ("experimental",         experimental,         false, "Use global_gauss_seidel_solver_basic (requires fixed_iters)");
         add_double("node_box_size",        node_box_size,        0.1,   "Half-extent of the symmetric node box used by the experimental solver");
+        add_double("k_barrier",                k_barrier,                1.0,   "Barrier stiffness multiplier");
+        add_bool  ("write_barrier_distances",  write_barrier_distances,  false, "Write per-substep barrier pair distances to text files in outdir");
         add_int   ("color_rebuild_interval", color_rebuild_interval, 10, "Parallel solver: recolor every N outer iterations (N<=0 treated as 1)");
 
         add_int   ("nx",          nx,          31,         "Mesh subdivisions in x");
@@ -199,6 +203,8 @@ struct IPCArgs3D : ArgParser {
         p.use_gpu                 = use_gpu;
         p.experimental            = experimental;
         p.node_box_size           = node_box_size;
+        p.k_barrier                   = k_barrier;
+        p.write_barrier_distances     = write_barrier_distances;
         p.color_rebuild_interval  = color_rebuild_interval;
         return p;
     }

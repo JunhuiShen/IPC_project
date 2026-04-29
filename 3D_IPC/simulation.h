@@ -4,6 +4,7 @@
 #include "broad_phase.h"
 #include "GPU_Sim/gpu_solver_bridge.h"
 #include <functional>
+#include <string>
 #include <vector>
 
 struct TwistSpec;
@@ -18,7 +19,7 @@ using SubstepCallback = std::function<void(int, const std::vector<Vec3>&)>;
 inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
     std::vector<Pin>& pins, const SimParams& params, const std::vector<std::vector<int>>& color_groups,
     BroadPhase& broad_phase, const TwistSpec* twist_spec = nullptr, int frame_index = 1,
-    PinTargetUpdater pin_updater = nullptr, SubstepCallback on_substep = nullptr) {
+    PinTargetUpdater pin_updater = nullptr, SubstepCallback on_substep = nullptr, const std::string& outdir = "") {
     SolverResult agg;
     const double dt = params.dt();
     for (int sub = 0; sub < params.substeps; ++sub) {
@@ -40,7 +41,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
 
         SolverResult sub_result;
         if (params.experimental)
-            sub_result = global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, color_groups);
+            sub_result = global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, color_groups, nullptr, outdir);
         else if (params.use_gpu)
             sub_result = gpu_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
         else if (params.use_parallel)

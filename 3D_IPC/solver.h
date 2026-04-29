@@ -2,6 +2,7 @@
 #pragma once
 #include "physics.h"
 #include "broad_phase.h"
+#include <string>
 #include <vector>
 
 struct SolverResult {
@@ -41,7 +42,8 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                                               std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
                                               const std::vector<Vec3>& v,
                                               const std::vector<std::vector<int>>& color_groups,
-                                              std::vector<double>* residual_history = nullptr);
+                                              std::vector<double>* residual_history = nullptr,
+                                              const std::string& outdir = "");
 
 SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                                         const std::vector<Pin>& pins, const SimParams& params,
