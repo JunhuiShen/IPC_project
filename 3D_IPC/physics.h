@@ -54,7 +54,6 @@ struct SimParams {
     bool   experimental;       // if true, use global_gauss_seidel_solver_basic
     double node_box_size;      // half-extent of the symmetric node box used by experimental solver
     double k_barrier;              // barrier stiffness multiplier
-    bool   write_barrier_distances; // if true, write per-substep barrier pair distances to text files
     bool   use_ticcd;              // true (default) -> Tight-Inclusion CCD library; false -> self-written linear CCD
 
     static SimParams zeros() {
@@ -89,7 +88,6 @@ struct SimParams {
         p.experimental              = false;
         p.node_box_size             = 0.1;
         p.k_barrier                     = 1.0;
-        p.write_barrier_distances       = false;
         p.use_ticcd                     = true;
         p.cached_dt_                = -1.0;
         p.cached_dt2_               = -1.0;

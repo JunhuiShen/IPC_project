@@ -220,6 +220,31 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
     x[vi] -= step * delta;
 }
 
+static void write_substep_data(const SimParams& params, const BroadPhase& broad_phase,
+                        const std::vector<Vec3>& xnew, const std::string& outdir) {
+    static int substep_counter = 0;
+    const std::string dist_path = (outdir.empty() ? "" : outdir + "/") + "barrier_distances_" + std::to_string(substep_counter++) + ".txt";
+    if (FILE* dist_file = fopen(dist_path.c_str(), "w")) {
+        fprintf(dist_file, "# substep %d  d_hat=%.6e\n# type node/v0 v1 v2 v3 distance force_norm_sum\n", substep_counter - 1, params.d_hat);
+        const auto& bpc = broad_phase.cache();
+        for (const auto& p : bpc.nt_pairs) {
+            const auto dr = node_triangle_distance(xnew[p.node], xnew[p.tri_v[0]], xnew[p.tri_v[1]], xnew[p.tri_v[2]]);
+            double fsum = 0.0;
+            for (int dof = 0; dof < 4; ++dof)
+                fsum += node_triangle_barrier_gradient(xnew[p.node], xnew[p.tri_v[0]], xnew[p.tri_v[1]], xnew[p.tri_v[2]], params.d_hat, dof, 1e-12, &dr).norm();
+            fprintf(dist_file, "NT %d %d %d %d %.10e %.10e\n", p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2], dr.distance, fsum);
+        }
+        for (const auto& p : bpc.ss_pairs) {
+            const auto dr = segment_segment_distance(xnew[p.v[0]], xnew[p.v[1]], xnew[p.v[2]], xnew[p.v[3]]);
+            double fsum = 0.0;
+            for (int dof = 0; dof < 4; ++dof)
+                fsum += segment_segment_barrier_gradient(xnew[p.v[0]], xnew[p.v[1]], xnew[p.v[2]], xnew[p.v[3]], params.d_hat, dof, 1e-12, &dr).norm();
+            fprintf(dist_file, "SS %d %d %d %d %.10e %.10e\n", p.v[0], p.v[1], p.v[2], p.v[3], dr.distance, fsum);
+        }
+        fclose(dist_file);
+    }
+}
+
 SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
                                         std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
                                         const std::vector<Vec3>& v, const std::vector<std::vector<int>>& color_groups,
@@ -252,34 +277,15 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
         residual_history->push_back(result.initial_residual);
     }
 
-    if (params.d_hat > 0.0 && params.write_barrier_distances) {
-        static int substep_counter = 0;
-        const std::string dist_path = (outdir.empty() ? "" : outdir + "/") + "barrier_distances_" + std::to_string(substep_counter++) + ".txt";
-        if (FILE* dist_file = fopen(dist_path.c_str(), "w")) {
-            fprintf(dist_file, "# substep %d  d_hat=%.6e\n# type node/v0 v1 v2 v3 distance force_norm_sum\n", substep_counter - 1, params.d_hat);
-            const auto& bpc = broad_phase.cache();
-            for (const auto& p : bpc.nt_pairs) {
-                const auto dr = node_triangle_distance(xnew[p.node], xnew[p.tri_v[0]], xnew[p.tri_v[1]], xnew[p.tri_v[2]]);
-                double fsum = 0.0;
-                for (int dof = 0; dof < 4; ++dof)
-                    fsum += node_triangle_barrier_gradient(xnew[p.node], xnew[p.tri_v[0]], xnew[p.tri_v[1]], xnew[p.tri_v[2]], params.d_hat, dof, 1e-12, &dr).norm();
-                fprintf(dist_file, "NT %d %d %d %d %.10e %.10e\n", p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2], dr.distance, fsum);
-            }
-            for (const auto& p : bpc.ss_pairs) {
-                const auto dr = segment_segment_distance(xnew[p.v[0]], xnew[p.v[1]], xnew[p.v[2]], xnew[p.v[3]]);
-                double fsum = 0.0;
-                for (int dof = 0; dof < 4; ++dof)
-                    fsum += segment_segment_barrier_gradient(xnew[p.v[0]], xnew[p.v[1]], xnew[p.v[2]], xnew[p.v[3]], params.d_hat, dof, 1e-12, &dr).norm();
-                fprintf(dist_file, "SS %d %d %d %d %.10e %.10e\n", p.v[0], p.v[1], p.v[2], p.v[3], dr.distance, fsum);
-            }
-            fclose(dist_file);
-        }
+    //write substep data
+    if (params.write_substeps) {
+        write_substep_data(params, broad_phase, xnew, outdir);
     }
 
     //gs loop
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         broad_phase.per_vertex_safe_step(xnew, [&](int vi){ return xnew[vi] - gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm); },
-                                         /*safety=*/0.9, /*clip_to_node_box=*/true, /*clip_ccd=*/params.use_ccd);
+                                         /*safety=*/0.9, /*clip_to_node_box=*/true, /*clip_ccd=*/params.use_ccd, /*use_ticcd=*/params.use_ticcd);
         result.final_residual = 0.0;
         result.iterations     = iter;
         if (residual_history) residual_history->push_back(result.final_residual);

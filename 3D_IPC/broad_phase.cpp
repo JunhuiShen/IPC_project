@@ -550,7 +550,7 @@ double BroadPhase::ccd_min_toi(const std::vector<Vec3>& x, const std::vector<Vec
 }
 
 void BroadPhase::per_vertex_safe_step(
-        std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety, bool clip_to_node_box, bool clip_ccd) const {
+        std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety, bool clip_to_node_box, bool clip_ccd, bool use_ticcd) const {
     const int nv = static_cast<int>(x.size());
 
     for (int vi = 0; vi < nv; ++vi) {
@@ -578,32 +578,41 @@ void BroadPhase::per_vertex_safe_step(
 
         if (clip_ccd) for (const auto& entry : cache_.vertex_nt[vi]) {
             const auto& p = cache_.nt_pairs[entry.pair_index];
-            Vec3 dn = Vec3::Zero(), d0 = Vec3::Zero(), d1 = Vec3::Zero(), d2 = Vec3::Zero();
-            if      (entry.dof == 0) dn = dx;
-            else if (entry.dof == 1) d0 = dx;
-            else if (entry.dof == 2) d1 = dx;
-            else                     d2 = dx;
-            const double t = node_triangle_general_ccd(
-                x[p.node],     dn,
-                x[p.tri_v[0]], d0,
-                x[p.tri_v[1]], d1,
-                x[p.tri_v[2]], d2);
-            if (t < 1.0) toi_min = std::min(toi_min, t);
+            CCDResult r;
+            if (entry.dof == 0) {
+                r = node_triangle_only_one_node_moves(
+                    x[vi],         dx,
+                    x[p.tri_v[0]], Vec3::Zero(),
+                    x[p.tri_v[1]], Vec3::Zero(),
+                    x[p.tri_v[2]], Vec3::Zero(),
+                    1e-12, use_ticcd);
+            } else {
+                Vec3 d0 = Vec3::Zero(), d1 = Vec3::Zero(), d2 = Vec3::Zero();
+                if      (entry.dof == 1) d0 = dx;
+                else if (entry.dof == 2) d1 = dx;
+                else                     d2 = dx;
+                r = node_triangle_only_one_node_moves(
+                    x[p.node],     Vec3::Zero(),
+                    x[p.tri_v[0]], d0,
+                    x[p.tri_v[1]], d1,
+                    x[p.tri_v[2]], d2,
+                    1e-12, use_ticcd);
+            }
+            if (r.collision) toi_min = std::min(toi_min, r.t);
         }
 
         if (clip_ccd) for (const auto& entry : cache_.vertex_ss[vi]) {
             const auto& p = cache_.ss_pairs[entry.pair_index];
-            Vec3 d0 = Vec3::Zero(), d1 = Vec3::Zero(), d2 = Vec3::Zero(), d3 = Vec3::Zero();
-            if      (entry.dof == 0) d0 = dx;
-            else if (entry.dof == 1) d1 = dx;
-            else if (entry.dof == 2) d2 = dx;
-            else                     d3 = dx;
-            const double t = segment_segment_general_ccd(
-                x[p.v[0]], d0,
-                x[p.v[1]], d1,
-                x[p.v[2]], d2,
-                x[p.v[3]], d3);
-            if (t < 1.0) toi_min = std::min(toi_min, t);
+            CCDResult r;
+            if (entry.dof == 0)
+                r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]], 1e-12, use_ticcd);
+            else if (entry.dof == 1)
+                r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]], 1e-12, use_ticcd);
+            else if (entry.dof == 2)
+                r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[3]], x[p.v[0]], x[p.v[1]], 1e-12, use_ticcd);
+            else
+                r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]], 1e-12, use_ticcd);
+            if (r.collision) toi_min = std::min(toi_min, r.t);
         }
 
         const double step = (toi_min < 1.0) ? safety * toi_min : 1.0;

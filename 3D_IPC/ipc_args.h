@@ -41,7 +41,6 @@ struct IPCArgs3D : ArgParser {
     bool   experimental            = false;
     double node_box_size           = 0.1;
     double k_barrier                   = 1.0;
-    bool   write_barrier_distances     = false;
     bool   use_ticcd                   = true;     // true: Tight-Inclusion library | false: self-written linear CCD
     int    color_rebuild_interval  = 10;
 
@@ -124,7 +123,6 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("experimental",         experimental,         false, "Use global_gauss_seidel_solver_basic (requires fixed_iters)");
         add_double("node_box_size",        node_box_size,        0.1,   "Half-extent of the symmetric node box used by the experimental solver");
         add_double("k_barrier",                k_barrier,                1.0,   "Barrier stiffness multiplier");
-        add_bool  ("write_barrier_distances",  write_barrier_distances,  false, "Write per-substep barrier pair distances to text files in outdir");
         add_bool  ("use_ticcd",                use_ticcd,                true,  "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library (default), false=self-written linear");
         add_int   ("color_rebuild_interval", color_rebuild_interval, 10, "Parallel solver: recolor every N outer iterations (N<=0 treated as 1)");
 
@@ -206,7 +204,6 @@ struct IPCArgs3D : ArgParser {
         p.experimental            = experimental;
         p.node_box_size           = node_box_size;
         p.k_barrier                   = k_barrier;
-        p.write_barrier_distances     = write_barrier_distances;
         p.use_ticcd                   = use_ticcd;
         p.color_rebuild_interval  = color_rebuild_interval;
         return p;
