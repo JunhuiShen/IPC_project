@@ -84,6 +84,7 @@ struct IPCArgs3D : ArgParser {
     int         sphere_subdiv = 2;     // icosphere subdivision level for example 6 (V = 10*4^n + 2)
     double      sphere_cloth_size = 0.70; // edge length (m) of each falling cloth in example 6
     double      sphere_ground_size = 4.0; // edge length (m) of the square pinned ground in example 6
+    int         sphere_ground_nx   = 38;  // grid subdivisions along each axis of the square pinned ground in example 6
 
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
@@ -163,6 +164,7 @@ struct IPCArgs3D : ArgParser {
         add_int   ("sphere_subdiv",    sphere_subdiv,    2,        "Icosphere subdivision level in example 6 (V = 10*4^n + 2)");
         add_double("sphere_cloth_size", sphere_cloth_size, 0.70,   "Edge length in meters of each falling cloth in example 6");
         add_double("sphere_ground_size", sphere_ground_size, 4.0,  "Edge length in meters of the square pinned ground in example 6");
+        add_int   ("sphere_ground_nx",   sphere_ground_nx,   38,   "Grid subdivisions along each axis of the square pinned ground in example 6");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
