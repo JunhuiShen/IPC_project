@@ -91,7 +91,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 |-------|-------|
 | Time integration | `fps`, `substeps`, `num_frames` |
 | Physics | `E`, `nu`, `density`, `thickness`, `kB`, `kpin`, `gx`, `gy`, `gz` |
-| Solver | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_sdf`, `eps_sdf`, `use_parallel`, `ccd_check`, `use_ccd_guess`, `use_trust_region`, `fixed_iters`, `use_gpu`, `color_rebuild_interval` |
+| Solver | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `use_parallel`, `use_ccd`, `use_ticcd`, `ccd_check`, `use_ccd_guess`, `use_trust_region`, `fixed_iters`, `use_gpu`, `experimental`, `node_box_size`, `color_rebuild_interval`, `write_barrier_distances` |
 | Mesh geometry | `nx`, `ny`, `width`, `height`, `left_x`, `right_x`, `sheet_y`, `left_z`, `right_z` |
 | Scene | `example` (`1`..`6`), plus per-example knobs: `drop_stack_count`, `drop_cloth_nx`, `drop_cloth_ny`, `drop_first_y`, `drop_spacing`, `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `sphere_radius`, `sphere_cx`, `sphere_cy`, `sphere_cz`, `sphere_subdiv`, `sphere_cloth_size`, `sphere_ground_size` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame` |
@@ -153,13 +153,25 @@ reader can jump to the layer they care about.
 
 ### Collision detection
 
-- `ccd.h` / `ccd.cpp` -- linear node-triangle CCD for every single-moving-DOF
-  configuration, linear segment-segment CCD for single-moving-endpoint sweeps,
-  and general CCD for multi-vertex motion. The general CCD entry points
-  (`node_triangle_general_ccd`, `segment_segment_general_ccd`) are thin wrappers
-  over [Tight-Inclusion CCD](https://github.com/Continuous-Collision-Detection/Tight-Inclusion).
-  The linear-only path's coplanar fallback uses a stack-allocated `SmallRoots`
-  root buffer.
+- `ccd.h` / `ccd.cpp` -- four public CCD entry points:
+  - `node_triangle_only_one_node_moves` and `segment_segment_only_one_node_moves`
+    take a `bool use_ticcd` flag (default `true`). When `true` they forward to
+    Tight-Inclusion CCD; when `false` they use a closed-form linear backend
+    that is exact when one of the four vertices moves over the step (the case
+    Gauss-Seidel queries always satisfy). The parallel solver passes
+    `params.use_ticcd` (CLI flag `--use_ticcd`); the basic and sequential
+    solvers always use the default (TICCD).
+  - `node_triangle_general_ccd` and `segment_segment_general_ccd` are
+    TICCD-only entry points used wherever multiple vertices move
+    simultaneously (e.g. CCD-projected initial guess).
+
+  TICCD wraps [Tight-Inclusion CCD](https://github.com/Continuous-Collision-Detection/Tight-Inclusion);
+  parameters (min-separation, tolerance, max-iter, search method) are
+  documented inline in `ccd.cpp`. The closed-form backend's coplanar fallback
+  uses a stack-allocated `SmallRoots` buffer. The linear backend was validated
+  against TICCD over 5,500 random one-moving-node configurations during
+  development — TICCD is treated as ground truth, and any TICCD-detected
+  collision the linear path misses is treated as a regression.
 - `broad_phase.h` / `broad_phase.cpp` -- swept-AABB broad phase backed by a BVH.
   Caches mesh topology via `set_mesh_topology`, builds candidate node-triangle
   and edge-edge pairs, and exposes per-vertex pair queries used by one-node
@@ -192,7 +204,7 @@ Every layer of the pipeline has a GoogleTest binary. To build and run them all:
 
 | Test binary | Cases | What it covers |
 |-------------|-------|----------------|
-| `ccd_test` | 20 | Linear CCD single-moving-DOF cases plus Tight-Inclusion-backed general NT/SS wrapper smoke tests |
+| `ccd_test` | 17 | Linear CCD single-moving-DOF cases plus Tight-Inclusion-backed general NT/SS wrapper smoke tests |
 | `broad_phase_test` | 38 | AABB, BVH, pair generation, CCD candidates, conservativeness, per-vertex pair query vs brute-force |
 | `ipc_math_test` | 27 | `matrix3d_inverse`, `segment_closest_point`, `filter_root`, `SmallRoots`, barycentric coords, serialize round-trip, topology caching |
 | `parallel_helper_test` | 26 | Jacobi predictions, certified regions, conflict graph, coloring, parallel commits, solver correctness |

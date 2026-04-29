@@ -264,14 +264,15 @@ static Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const Vertex
     }
 
     if (params.d_hat > 0.0) {
+        const double dt2k = dt2 * params.k_barrier;
         for (const auto& entry : bp_cache.vertex_nt[vi]) {
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
-            g += dt2 * node_triangle_barrier_gradient(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
+            g += dt2k * node_triangle_barrier_gradient(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
         }
 
         for (const auto& entry : bp_cache.vertex_ss[vi]) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
-            g += dt2 * segment_segment_barrier_gradient(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
+            g += dt2k * segment_segment_barrier_gradient(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
         }
     }
 

@@ -208,6 +208,28 @@ target_link_libraries(ccd_test
 
 gtest_discover_tests(ccd_test)
 
+# Long-running randomized linear-vs-TICCD parity sweep. Local-only:
+# `ccd_stress_test.cpp` is gitignored, so this target is built only when the
+# source happens to be present on disk. Not registered with
+# `gtest_discover_tests` — keeps `ctest` fast even when the source IS present.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ccd_stress_test.cpp")
+    add_executable(ccd_stress_test
+        ccd_stress_test.cpp
+        make_shape.cpp
+        physics.cpp
+        solver.cpp
+        parallel_helper.cpp
+        broad_phase.cpp
+    )
+
+    target_link_libraries(ccd_stress_test
+        PRIVATE
+        corotated_energy_lib
+        GTest::gtest
+        GTest::gtest_main
+    )
+endif()
+
 add_executable(trust_region_test
     trust_region_test.cpp
 )

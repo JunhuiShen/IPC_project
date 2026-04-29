@@ -37,21 +37,21 @@ void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, const Verte
     auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x, xhat, pin_map, tri_cache, hinge_cache);
 
     if (params.d_hat > 0.0) {
-        const double dt2 = params.dt2();
+        const double dt2k = params.dt2() * params.k_barrier;
 
         for (const auto& entry : bp_cache.vertex_nt[vi]) {
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
             auto [bg, bH] = node_triangle_barrier_gradient_and_hessian( x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
-            g += dt2 * bg;
-            H += dt2 * bH;
+            g += dt2k * bg;
+            H += dt2k * bH;
         }
 
         for (const auto& entry : bp_cache.vertex_ss[vi]) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
             auto [bg, bH] = segment_segment_barrier_gradient_and_hessian(
                     x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
-            g += dt2 * bg;
-            H += dt2 * bH;
+            g += dt2k * bg;
+            H += dt2k * bH;
         }
     }
 
@@ -511,7 +511,8 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
                         x[p.node],     dx,
                         x[p.tri_v[0]], Vec3::Zero(),
                         x[p.tri_v[1]], Vec3::Zero(),
-                        x[p.tri_v[2]], Vec3::Zero());
+                        x[p.tri_v[2]], Vec3::Zero(),
+                        /*eps=*/1.0e-12, params.use_ticcd);
                     if (r.collision) safe_min = std::min(safe_min, r.t);
                 }
             } else {
@@ -527,7 +528,8 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
                         x[p.node],     Vec3::Zero(),
                         x[p.tri_v[0]], dxv[0],
                         x[p.tri_v[1]], dxv[1],
-                        x[p.tri_v[2]], dxv[2]);
+                        x[p.tri_v[2]], dxv[2],
+                        /*eps=*/1.0e-12, params.use_ticcd);
                     if (r.collision) safe_min = std::min(safe_min, r.t);
                 }
             }
@@ -544,14 +546,15 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
                 safe_min = std::min(safe_min, r.omega);
             } else {
                 CCDResult r;
+                const double eps_ccd = 1.0e-12;
                 if (entry.dof == 0)
-                    r = segment_segment_only_one_node_moves(x[p.v[0]], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]]);
+                    r = segment_segment_only_one_node_moves(x[p.v[0]], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]], eps_ccd, params.use_ticcd);
                 else if (entry.dof == 1)
-                    r = segment_segment_only_one_node_moves(x[p.v[1]], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]]);
+                    r = segment_segment_only_one_node_moves(x[p.v[1]], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]], eps_ccd, params.use_ticcd);
                 else if (entry.dof == 2)
-                    r = segment_segment_only_one_node_moves(x[p.v[2]], dx, x[p.v[3]], x[p.v[0]], x[p.v[1]]);
+                    r = segment_segment_only_one_node_moves(x[p.v[2]], dx, x[p.v[3]], x[p.v[0]], x[p.v[1]], eps_ccd, params.use_ticcd);
                 else
-                    r = segment_segment_only_one_node_moves(x[p.v[3]], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]]);
+                    r = segment_segment_only_one_node_moves(x[p.v[3]], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]], eps_ccd, params.use_ticcd);
                 if (r.collision) safe_min = std::min(safe_min, r.t);
             }
         }

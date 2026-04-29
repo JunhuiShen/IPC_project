@@ -287,3 +287,4 @@ TEST(GeneralCCDSegmentSegment, TightInclusionNoCollision) {
 
     EXPECT_DOUBLE_EQ(t, 1.0);
 }
+

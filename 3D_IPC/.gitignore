@@ -35,6 +35,10 @@ mesh_after.obj
 .claude/scheduled_tasks.lock
 example5/
 
+# Long-running randomized linear-vs-TICCD parity sweep — local-only.
+# Kept off the public build so `ctest` stays fast for everyone else.
+ccd_stress_test.cpp
+
 # Vendored Bernstein Sign Classification + Root Parity CCD
 # (kept on disk as reference; not built into the active binary)
 bsc.cpp
