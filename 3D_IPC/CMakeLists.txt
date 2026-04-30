@@ -92,7 +92,8 @@ add_library(corotated_energy_lib
     barrier_energy.cpp
     sdf_penalty_energy.cpp
     ccd.cpp
-    trust_region.cpp
+    ogc_trust_region.cpp
+    visualization.cpp
 )
 
 target_link_libraries(corotated_energy_lib
@@ -273,7 +274,6 @@ add_executable(broad_phase_test
     broad_phase_test.cpp
     broad_phase.cpp
     make_shape.cpp
-    visualization.cpp
 )
 
 target_link_libraries(broad_phase_test
@@ -290,7 +290,6 @@ add_executable(3D_sim
     physics.cpp
     solver.cpp
     parallel_helper.cpp
-    visualization.cpp
     broad_phase.cpp
     simulation.cpp
     example.cpp
@@ -411,7 +410,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/visualization_test.cpp")
         make_shape.cpp
         physics.cpp
         broad_phase.cpp
-        visualization.cpp
     )
 
     target_compile_definitions(visualization_test
@@ -453,7 +451,6 @@ add_executable(total_energy_test
     physics.cpp
     solver.cpp
     parallel_helper.cpp
-    visualization.cpp
     broad_phase.cpp
 )
 
