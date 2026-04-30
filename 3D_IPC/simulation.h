@@ -45,14 +45,14 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
                 if (params.use_broadphase) {
                     auto pairs = gpu_hash_grid_build_pairs(
                         bp_x_scratch, ref_mesh,
-                        params.node_box_size, params.d_hat);
+                        params.node_box_max, params.d_hat);
                     (void)pairs;
                 } else {
                     std::vector<AABB> blue_boxes(bp_x_scratch.size());
                     for (std::size_t i = 0; i < bp_x_scratch.size(); ++i) {
                         blue_boxes[i] = AABB(
-                            bp_x_scratch[i] - Vec3::Constant(params.node_box_size),
-                            bp_x_scratch[i] + Vec3::Constant(params.node_box_size));
+                            bp_x_scratch[i] - Vec3::Constant(params.node_box_max),
+                            bp_x_scratch[i] + Vec3::Constant(params.node_box_max));
                     }
                     BroadPhase bp;
                     bp.initialize(blue_boxes, ref_mesh, params.d_hat);
