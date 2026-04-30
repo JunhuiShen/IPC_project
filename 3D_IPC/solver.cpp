@@ -12,6 +12,9 @@
 #include <limits>
 #include <cstdio>
 #include <string>
+#include <fstream>
+#include <filesystem>
+#include "visualization.h"
 
 
 // CCD initial guess
@@ -220,13 +223,111 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
     x[vi] -= step * delta;
 }
 
+static void export_ss_pairs_geo(const std::string& filename, const std::vector<Vec3>& x,
+                                const std::vector<SegmentSegmentPair>& ss_pairs) {
+    std::ofstream out(filename);
+    if (!out) return;
+
+    const int nv   = static_cast<int>(x.size());
+    const int nss  = static_cast<int>(ss_pairs.size());
+    const int nprims = nss * 2;      // 2 edges per pair
+    const int nverts = nprims * 2;   // 2 vertices per edge
+
+    // per-point SS pair count
+    std::vector<int> ss_count(nv, 0);
+    for (const auto& p : ss_pairs) {
+        ss_count[p.v[0]]++; ss_count[p.v[1]]++;
+        ss_count[p.v[2]]++; ss_count[p.v[3]]++;
+    }
+
+    out << std::setprecision(10);
+    out << "[\n";
+    out << "    \"fileversion\", \"18.5.408\",\n";
+    out << "    \"hasindex\", false,\n";
+    out << "    \"pointcount\", " << nv << ",\n";
+    out << "    \"vertexcount\", " << nverts << ",\n";
+    out << "    \"primitivecount\", " << nprims << ",\n";
+    out << "    \"info\", {},\n";
+
+    // topology: for each edge primitive, list its 2 point indices
+    out << "    \"topology\",\n    [\n";
+    out << "        \"pointref\",\n        [\n";
+    out << "            \"indices\", [";
+    for (int i = 0; i < nss; ++i) {
+        const auto& p = ss_pairs[i];
+        if (i > 0) out << ",";
+        out << p.v[0] << "," << p.v[1] << "," << p.v[2] << "," << p.v[3];
+    }
+    out << "]\n        ]\n    ],\n";
+
+    // attributes
+    out << "    \"attributes\",\n    [\n";
+
+    // point attributes: P and ss_pair_count
+    out << "        \"pointattributes\",\n        [\n";
+    out << "            [\n";
+    out << "                [\"scope\",\"public\",\"type\",\"numeric\",\"name\",\"P\",\"options\",{}],\n";
+    out << "                [\"size\",3,\"storage\",\"fpreal32\",\"values\",\n";
+    out << "                    [\"size\",3,\"storage\",\"fpreal32\",\"tuples\",[";
+    for (int i = 0; i < nv; ++i) {
+        if (i > 0) out << ",";
+        out << "[" << x[i].x() << "," << x[i].y() << "," << x[i].z() << "]";
+    }
+    out << "]]]\n            ],\n";
+    out << "            [\n";
+    out << "                [\"scope\",\"public\",\"type\",\"numeric\",\"name\",\"ss_pair_count\",\"options\",{}],\n";
+    out << "                [\"size\",1,\"storage\",\"int32\",\"values\",\n";
+    out << "                    [\"size\",1,\"storage\",\"int32\",\"tuples\",[";
+    for (int i = 0; i < nv; ++i) {
+        if (i > 0) out << ",";
+        out << "[" << ss_count[i] << "]";
+    }
+    out << "]]]\n            ]\n";
+    out << "        ],\n";
+
+    // primitive attributes: pair_idx
+    out << "        \"primitiveattributes\",\n        [\n";
+    out << "            [\n";
+    out << "                [\"scope\",\"public\",\"type\",\"numeric\",\"name\",\"pair_idx\",\"options\",{}],\n";
+    out << "                [\"size\",1,\"storage\",\"int32\",\"values\",\n";
+    out << "                    [\"size\",1,\"storage\",\"int32\",\"tuples\",[";
+    for (int i = 0; i < nss; ++i) {
+        if (i > 0) out << ",";
+        out << "[" << i << "],[" << i << "]";  // two edges per pair share the same pair_idx
+    }
+    out << "]]]\n            ]\n";
+    out << "        ]\n";
+    out << "    ],\n";
+
+    // primitives: Polygon_run of 2-vertex open polygons (line segments)
+    out << "    \"primitives\",\n    [\n";
+    out << "        [\n";
+    out << "            [\"type\",\"Polygon_run\"],\n";
+    out << "            [\n";
+    out << "                \"startvertex\", 0,\n";
+    out << "                \"nprimitives\", " << nprims << ",\n";
+    out << "                \"nvertices_rle\", [2," << nprims << "]\n";
+    out << "            ]\n";
+    out << "        ]\n";
+    out << "    ]\n";
+    out << "]\n";
+}
+
 static void write_substep_data(const SimParams& params, const BroadPhase& broad_phase,
-                        const std::vector<Vec3>& xnew, const std::string& outdir) {
+                        const std::vector<Vec3>& xnew, const std::string& outdir,
+                        const RefMesh* ref_mesh = nullptr,
+                        const std::vector<std::vector<int>>* color_groups = nullptr) {
     static int substep_counter = 0;
-    const std::string dist_path = (outdir.empty() ? "" : outdir + "/") + "barrier_distances_" + std::to_string(substep_counter++) + ".txt";
+    const int step = substep_counter++;
+    const std::string prefix = (outdir.empty() ? "" : outdir + "/");
+    const std::string subdir = prefix + "substep_" + std::to_string(step);
+    std::filesystem::create_directories(subdir);
+    const auto& bpc = broad_phase.cache();
+
+    // --- barrier distances file ---
+    const std::string dist_path = subdir + "/barrier_distances.txt";
     if (FILE* dist_file = fopen(dist_path.c_str(), "w")) {
-        fprintf(dist_file, "# substep %d  d_hat=%.6e\n# type node/v0 v1 v2 v3 distance force_norm_sum\n", substep_counter - 1, params.d_hat);
-        const auto& bpc = broad_phase.cache();
+        fprintf(dist_file, "# substep %d  d_hat=%.6e\n# type node/v0 v1 v2 v3 distance force_norm_sum\n", step, params.d_hat);
         for (const auto& p : bpc.nt_pairs) {
             const auto dr = node_triangle_distance(xnew[p.node], xnew[p.tri_v[0]], xnew[p.tri_v[1]], xnew[p.tri_v[2]]);
             double fsum = 0.0;
@@ -242,6 +343,95 @@ static void write_substep_data(const SimParams& params, const BroadPhase& broad_
             fprintf(dist_file, "SS %d %d %d %d %.10e %.10e\n", p.v[0], p.v[1], p.v[2], p.v[3], dr.distance, fsum);
         }
         fclose(dist_file);
+    }
+
+    // --- barrier stats file ---
+    const int nv = static_cast<int>(xnew.size());
+    std::vector<int> vertex_pair_count(nv, 0);
+    for (const auto& p : bpc.nt_pairs) {
+        vertex_pair_count[p.node]++;
+        vertex_pair_count[p.tri_v[0]]++;
+        vertex_pair_count[p.tri_v[1]]++;
+        vertex_pair_count[p.tri_v[2]]++;
+    }
+    for (const auto& p : bpc.ss_pairs) {
+        vertex_pair_count[p.v[0]]++;
+        vertex_pair_count[p.v[1]]++;
+        vertex_pair_count[p.v[2]]++;
+        vertex_pair_count[p.v[3]]++;
+    }
+    const int total_pairs = static_cast<int>(bpc.nt_pairs.size() + bpc.ss_pairs.size());
+
+    std::vector<int> sorted_counts = vertex_pair_count;
+    std::sort(sorted_counts.begin(), sorted_counts.end());
+    const int vmin = sorted_counts.front();
+    const int vmax = sorted_counts.back();
+    double vmedian;
+    if (nv % 2 == 0)
+        vmedian = 0.5 * (sorted_counts[nv / 2 - 1] + sorted_counts[nv / 2]);
+    else
+        vmedian = sorted_counts[nv / 2];
+
+    const std::string stats_path = subdir + "/barrier_stats.txt";
+    if (FILE* stats_file = fopen(stats_path.c_str(), "w")) {
+        fprintf(stats_file, "substep %d\n", step);
+        fprintf(stats_file, "total_pairs %d\n", total_pairs);
+        fprintf(stats_file, "nt_pairs %d\n", static_cast<int>(bpc.nt_pairs.size()));
+        fprintf(stats_file, "ss_pairs %d\n", static_cast<int>(bpc.ss_pairs.size()));
+        fprintf(stats_file, "vertex_pair_count_min %d\n", vmin);
+        fprintf(stats_file, "vertex_pair_count_max %d\n", vmax);
+        fprintf(stats_file, "vertex_pair_count_median %.1f\n", vmedian);
+        fclose(stats_file);
+    }
+
+    // --- colored mesh ---
+    if (ref_mesh) {
+        export_geo(subdir + "/mesh.geo", xnew, ref_mesh->tris, color_groups);
+    }
+
+    // --- SS pairs (combined) ---
+    export_ss_pairs_geo(subdir + "/ss_pairs.geo", xnew, bpc.ss_pairs);
+
+    // --- SS pairs (one file each) ---
+    const std::string ss_dir = subdir + "/ss_pairs";
+    std::filesystem::create_directories(ss_dir);
+    for (int i = 0; i < static_cast<int>(bpc.ss_pairs.size()); ++i) {
+        const auto& p = bpc.ss_pairs[i];
+        const std::string path = ss_dir + "/ss_pair_" + std::to_string(i) + ".geo";
+        std::ofstream out(path);
+        if (!out) continue;
+        out << std::setprecision(10);
+        out << "[\n";
+        out << "    \"fileversion\", \"18.5.408\",\n";
+        out << "    \"hasindex\", false,\n";
+        out << "    \"pointcount\", 4,\n";
+        out << "    \"vertexcount\", 4,\n";
+        out << "    \"primitivecount\", 2,\n";
+        out << "    \"info\", {},\n";
+        out << "    \"topology\",\n    [\n";
+        out << "        \"pointref\",\n        [\n";
+        out << "            \"indices\", [0,1,2,3]\n";
+        out << "        ]\n    ],\n";
+        out << "    \"attributes\",\n    [\n";
+        out << "        \"pointattributes\",\n        [\n";
+        out << "            [\n";
+        out << "                [\"scope\",\"public\",\"type\",\"numeric\",\"name\",\"P\",\"options\",{}],\n";
+        out << "                [\"size\",3,\"storage\",\"fpreal32\",\"values\",\n";
+        out << "                    [\"size\",3,\"storage\",\"fpreal32\",\"tuples\",[";
+        for (int k = 0; k < 4; ++k) {
+            if (k > 0) out << ",";
+            const Vec3& pt = xnew[p.v[k]];
+            out << "[" << pt.x() << "," << pt.y() << "," << pt.z() << "]";
+        }
+        out << "]]]\n            ]\n        ]\n    ],\n";
+        out << "    \"primitives\",\n    [\n";
+        out << "        [\n";
+        out << "            [\"type\",\"Polygon_run\"],\n";
+        out << "            [\n";
+        out << "                \"startvertex\", 0,\n";
+        out << "                \"nprimitives\", 2,\n";
+        out << "                \"nvertices_rle\", [2,2]\n";
+        out << "            ]\n        ]\n    ]\n]\n";
     }
 }
 
@@ -290,7 +480,7 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
 
     //write substep data
     if (params.write_substeps) {
-        write_substep_data(params, broad_phase, xnew, outdir);
+        write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, &color_groups);
     }
 
     const std::vector<Vec3> xnew_substep_start = xnew;
