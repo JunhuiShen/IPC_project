@@ -194,6 +194,13 @@ __global__ void k_build_cell_ranges(
 // Counts may include duplicates (same (vi, t) found via multiple cells);
 // dedupe is on host after emit.
 // ---------------------------------------------------------------------------
+// Warp-per-vertex variant: 32 threads cooperate on one vertex's query work.
+// All threads in the warp visit the same cells in lockstep. Within each cell,
+// candidates are striped across the 32 lanes. At the end the local counts are
+// warp-reduced via __shfl_xor and lane 0 writes the total. Intent: trade
+// thread-level parallelism (1 thread/vertex) for warp-cooperative work
+// distribution that better tolerates per-cell candidate variance and amortizes
+// the cell_start/cell_end loads.
 __global__ void k_query_count(
     int n_vert, const double* __restrict__ X, const double* __restrict__ R, double d_hat,
     GridParams g, const int* __restrict__ cell_start,
@@ -201,7 +208,8 @@ __global__ void k_query_count(
     const int* __restrict__ tris,
     int* __restrict__ out_counts)
 {
-    const int vi = blockIdx.x * blockDim.x + threadIdx.x;
+    const int vi   = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;  // /32
+    const int lane = threadIdx.x & 31;
     if (vi >= n_vert) return;
 
     const double vx = X[3*vi+0], vy = X[3*vi+1], vz = X[3*vi+2];
@@ -224,7 +232,8 @@ __global__ void k_query_count(
         const int s = cell_start[cell];
         if (s < 0) continue;
         const int e = cell_end[cell];
-        for (int k = s; k < e; ++k) {
+        // Stripe candidates across the 32 lanes.
+        for (int k = s + lane; k < e; k += 32) {
             const int t = sorted_tri_ids[k];
             const int tv0 = tris[3*t+0];
             const int tv1 = tris[3*t+1];
@@ -239,13 +248,19 @@ __global__ void k_query_count(
             ++n;
         }
     }
-    out_counts[vi] = n;
+    // Warp-reduce
+    for (int o = 16; o > 0; o >>= 1) n += __shfl_xor_sync(0xffffffff, n, o);
+    if (lane == 0) out_counts[vi] = n;
 }
 
 // ---------------------------------------------------------------------------
 // Kernel 4b: per-vertex query (emit) — same walk, write into pre-allocated
 // per-vertex slot at offsets[vi] .. offsets[vi+1]-1.
 // ---------------------------------------------------------------------------
+// Warp-per-vertex emit. 32 lanes cooperate. Per-iteration warp ballot + popc
+// gives each emitting lane its slot offset within the warp's allocation. The
+// warp's running write pointer is held in lane 0 (broadcast each iter) so we
+// don't need shared memory.
 __global__ void k_query_emit(
     int n_vert, const double* __restrict__ X, const double* __restrict__ R, double d_hat,
     GridParams g, const int* __restrict__ cell_start,
@@ -253,7 +268,8 @@ __global__ void k_query_emit(
     const int* __restrict__ tris, const int* __restrict__ offsets,
     int* __restrict__ out_node, int* __restrict__ out_tri)
 {
-    const int vi = blockIdx.x * blockDim.x + threadIdx.x;
+    const int vi   = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    const int lane = threadIdx.x & 31;
     if (vi >= n_vert) return;
 
     const double vx = X[3*vi+0], vy = X[3*vi+1], vz = X[3*vi+2];
@@ -268,7 +284,9 @@ __global__ void k_query_emit(
     const int hi_y = clampi(floor_div(bmx_y - g.oy, g.cell_size), 0, g.ny - 1);
     const int hi_z = clampi(floor_div(bmx_z - g.oz, g.cell_size), 0, g.nz - 1);
 
-    int p = offsets[vi];
+    // Warp's running write pointer — held in lane 0, broadcast to all lanes.
+    int warp_p = offsets[vi];
+
     for (int cz = lo_z; cz <= hi_z; ++cz)
     for (int cy = lo_y; cy <= hi_y; ++cy)
     for (int cx = lo_x; cx <= hi_x; ++cx) {
@@ -276,21 +294,32 @@ __global__ void k_query_emit(
         const int s = cell_start[cell];
         if (s < 0) continue;
         const int e = cell_end[cell];
-        for (int k = s; k < e; ++k) {
-            const int t = sorted_tri_ids[k];
-            const int tv0 = tris[3*t+0];
-            const int tv1 = tris[3*t+1];
-            const int tv2 = tris[3*t+2];
-            if (vi == tv0 || vi == tv1 || vi == tv2) continue;
-            double tmn_x, tmn_y, tmn_z, tmx_x, tmx_y, tmx_z;
-            red_tri_box(X, R, tv0, tv1, tv2, d_hat,
-                        tmn_x, tmn_y, tmn_z, tmx_x, tmx_y, tmx_z);
-            if (!aabb_overlap(bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z,
-                              tmn_x, tmn_y, tmn_z, tmx_x, tmx_y, tmx_z))
-                continue;
-            out_node[p] = vi;
-            out_tri[p]  = t;
-            ++p;
+        // Stripe candidates across lanes; each iteration handles up to 32.
+        for (int base = s; base < e; base += 32) {
+            const int k = base + lane;
+            int t = -1;
+            bool emit = false;
+            if (k < e) {
+                t = sorted_tri_ids[k];
+                const int tv0 = tris[3*t+0];
+                const int tv1 = tris[3*t+1];
+                const int tv2 = tris[3*t+2];
+                if (vi != tv0 && vi != tv1 && vi != tv2) {
+                    double tmn_x, tmn_y, tmn_z, tmx_x, tmx_y, tmx_z;
+                    red_tri_box(X, R, tv0, tv1, tv2, d_hat,
+                                tmn_x, tmn_y, tmn_z, tmx_x, tmx_y, tmx_z);
+                    emit = aabb_overlap(bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z,
+                                        tmn_x, tmn_y, tmn_z, tmx_x, tmx_y, tmx_z);
+                }
+            }
+            const unsigned ballot = __ballot_sync(0xffffffff, emit);
+            if (emit) {
+                const int prefix = __popc(ballot & ((1u << lane) - 1u));
+                const int slot = warp_p + prefix;
+                out_node[slot] = vi;
+                out_tri[slot]  = t;
+            }
+            warp_p += __popc(ballot);
         }
     }
 }
@@ -363,7 +392,8 @@ __global__ void k_query_count_ss(
     const int* __restrict__ sorted_edge_ids,
     int* __restrict__ out_counts)
 {
-    const int ea = blockIdx.x * blockDim.x + threadIdx.x;
+    const int ea   = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    const int lane = threadIdx.x & 31;
     if (ea >= n_edges) return;
     const int a0 = edges[2*ea+0], a1 = edges[2*ea+1];
     double amn_x, amn_y, amn_z, amx_x, amx_y, amx_z;
@@ -383,9 +413,9 @@ __global__ void k_query_count_ss(
         const int s = cell_start[cell];
         if (s < 0) continue;
         const int e = cell_end[cell];
-        for (int k = s; k < e; ++k) {
+        for (int k = s + lane; k < e; k += 32) {
             const int eb = sorted_edge_ids[k];
-            if (eb <= ea) continue;  // each pair {ea, eb} registered once
+            if (eb <= ea) continue;
             const int b0 = edges[2*eb+0], b1 = edges[2*eb+1];
             if (a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1) continue;
             double bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z;
@@ -396,10 +426,12 @@ __global__ void k_query_count_ss(
             ++n;
         }
     }
-    out_counts[ea] = n;
+    for (int o = 16; o > 0; o >>= 1) n += __shfl_xor_sync(0xffffffff, n, o);
+    if (lane == 0) out_counts[ea] = n;
 }
 
-// Kernel: per-edge query (emit) — same walk, write into pre-allocated slot.
+// Warp-per-edge emit. Mirrors NT emit: ballot + popc gives each emitting
+// lane its slot offset within the warp's pre-allocated range.
 __global__ void k_query_emit_ss(
     int n_edges, const int* __restrict__ edges,
     const double* __restrict__ X, const double* __restrict__ R, double d_hat, GridParams g,
@@ -408,7 +440,8 @@ __global__ void k_query_emit_ss(
     const int* __restrict__ offsets,
     int* __restrict__ out_a, int* __restrict__ out_b)
 {
-    const int ea = blockIdx.x * blockDim.x + threadIdx.x;
+    const int ea   = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    const int lane = threadIdx.x & 31;
     if (ea >= n_edges) return;
     const int a0 = edges[2*ea+0], a1 = edges[2*ea+1];
     double amn_x, amn_y, amn_z, amx_x, amx_y, amx_z;
@@ -420,7 +453,7 @@ __global__ void k_query_emit_ss(
     const int hi_y = clampi(floor_div(amx_y - g.oy, g.cell_size), 0, g.ny - 1);
     const int hi_z = clampi(floor_div(amx_z - g.oz, g.cell_size), 0, g.nz - 1);
 
-    int p = offsets[ea];
+    int warp_p = offsets[ea];
     for (int cz = lo_z; cz <= hi_z; ++cz)
     for (int cy = lo_y; cy <= hi_y; ++cy)
     for (int cx = lo_x; cx <= hi_x; ++cx) {
@@ -428,19 +461,30 @@ __global__ void k_query_emit_ss(
         const int s = cell_start[cell];
         if (s < 0) continue;
         const int e = cell_end[cell];
-        for (int k = s; k < e; ++k) {
-            const int eb = sorted_edge_ids[k];
-            if (eb <= ea) continue;
-            const int b0 = edges[2*eb+0], b1 = edges[2*eb+1];
-            if (a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1) continue;
-            double bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z;
-            red_edge_box(X, R, b0, b1, d_hat, bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z);
-            if (!aabb_overlap(amn_x, amn_y, amn_z, amx_x, amx_y, amx_z,
-                              bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z))
-                continue;
-            out_a[p] = ea;
-            out_b[p] = eb;
-            ++p;
+        for (int base = s; base < e; base += 32) {
+            const int k = base + lane;
+            int eb = -1;
+            bool emit = false;
+            if (k < e) {
+                eb = sorted_edge_ids[k];
+                if (eb > ea) {
+                    const int b0 = edges[2*eb+0], b1 = edges[2*eb+1];
+                    if (a0 != b0 && a0 != b1 && a1 != b0 && a1 != b1) {
+                        double bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z;
+                        red_edge_box(X, R, b0, b1, d_hat, bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z);
+                        emit = aabb_overlap(amn_x, amn_y, amn_z, amx_x, amx_y, amx_z,
+                                            bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z);
+                    }
+                }
+            }
+            const unsigned ballot = __ballot_sync(0xffffffff, emit);
+            if (emit) {
+                const int prefix = __popc(ballot & ((1u << lane) - 1u));
+                const int slot = warp_p + prefix;
+                out_a[slot] = ea;
+                out_b[slot] = eb;
+            }
+            warp_p += __popc(ballot);
         }
     }
 }
@@ -663,8 +707,10 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     cudaCheck(d_alloc(&d_v_counts,  sizeof(int) * (nv + 1)), "malloc v_counts");
     cudaCheck(d_alloc(&d_v_offsets, sizeof(int) * (nv + 1)), "malloc v_offsets");
     {
+        // Warp-per-vertex: 32 threads per vertex; 8 vertices per block of 256.
         const int block = 256;
-        const int grid_b = (nv + block - 1) / block;
+        const int verts_per_block = block / 32;
+        const int grid_b = (nv + verts_per_block - 1) / verts_per_block;
         k_query_count<<<grid_b, block>>>(nv, d_X, d_R, d_hat, g,
                                           d_cell_start, d_cell_end,
                                           d_tri_ids_sorted, d_tris,
@@ -692,7 +738,8 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
         cudaCheck(d_alloc(&d_out_node, sizeof(int) * n_emitted), "malloc out_node");
         cudaCheck(d_alloc(&d_out_tri,  sizeof(int) * n_emitted), "malloc out_tri");
         const int block = 256;
-        const int grid_b = (nv + block - 1) / block;
+        const int verts_per_block = block / 32;
+        const int grid_b = (nv + verts_per_block - 1) / verts_per_block;
         k_query_emit<<<grid_b, block>>>(nv, d_X, d_R, d_hat, g,
                                         d_cell_start, d_cell_end,
                                         d_tri_ids_sorted, d_tris,
@@ -888,7 +935,8 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
         cudaCheck(d_alloc(&d_q_offsets, sizeof(int) * (ne + 1)), "malloc q_offsets");
         {
             const int block = 256;
-            const int grid_b = (ne + block - 1) / block;
+            const int edges_per_block = block / 32;
+            const int grid_b = (ne + edges_per_block - 1) / edges_per_block;
             k_query_count_ss<<<grid_b, block>>>(ne, d_edges, d_X, d_R, d_hat, g,
                                                  d_e_cell_start, d_e_cell_end,
                                                  d_e_edge_ids_sorted,
@@ -916,7 +964,8 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
             cudaCheck(d_alloc(&d_out_a, sizeof(int) * n_ss_emitted), "malloc out_a");
             cudaCheck(d_alloc(&d_out_b, sizeof(int) * n_ss_emitted), "malloc out_b");
             const int block = 256;
-            const int grid_b = (ne + block - 1) / block;
+            const int edges_per_block = block / 32;
+            const int grid_b = (ne + edges_per_block - 1) / edges_per_block;
             k_query_emit_ss<<<grid_b, block>>>(ne, d_edges, d_X, d_R, d_hat, g,
                                                 d_e_cell_start, d_e_cell_end,
                                                 d_e_edge_ids_sorted,
