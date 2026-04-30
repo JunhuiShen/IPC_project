@@ -62,7 +62,8 @@ struct SimParams {
     // a head-to-head speed comparison on identical inputs.
     bool   use_cpu_broadphase;
     bool   experimental;       // if true, use global_gauss_seidel_solver_basic
-    double node_box_size;      // half-extent of the symmetric node box used by experimental solver
+    double node_box_max;       // upper bound on node box half-extent used by experimental solver
+    double node_box_min;       // lower bound on node box half-extent (floor when prev disp is near zero)
     double k_barrier;              // barrier stiffness multiplier
     bool   use_ticcd;              // true (default) -> Tight-Inclusion CCD library; false -> self-written linear CCD
 
@@ -99,7 +100,8 @@ struct SimParams {
         p.use_broadphase            = false;
         p.use_cpu_broadphase        = false;
         p.experimental              = false;
-        p.node_box_size             = 0.1;
+        p.node_box_max              = 0.01;
+        p.node_box_min              = 0.001;
         p.k_barrier                     = 1.0;
         p.use_ticcd                     = true;
         p.cached_dt_                = -1.0;
