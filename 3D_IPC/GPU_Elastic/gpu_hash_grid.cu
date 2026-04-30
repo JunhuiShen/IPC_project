@@ -70,41 +70,43 @@ __device__ inline bool aabb_overlap(
         && amx_z >= bmn_z && amn_z <= bmx_z;
 }
 
-// Red triangle box = union of 3 blue boxes, then padded by d_hat.
-// Done in CPU's order to be bit-identical: blue box first (subtract nbs),
-// then pad (subtract d_hat). Combining (nbs + d_hat) into one constant
-// rounds differently and causes 1-ULP boundary disagreements with CPU.
+// Red triangle box = union of 3 per-vertex blue boxes, then padded by d_hat.
+// Each vertex's blue box uses its own radius from R[]. Done in CPU's order
+// (blue box first, then d_hat pad) for FP bit-identity with the CPU side.
 __device__ inline void red_tri_box(
-    const double* __restrict__ X, int v0, int v1, int v2, double nbs, double d_hat,
+    const double* __restrict__ X, const double* __restrict__ R,
+    int v0, int v1, int v2, double d_hat,
     double& mn_x, double& mn_y, double& mn_z,
     double& mx_x, double& mx_y, double& mx_z)
 {
     const double p0x = X[3*v0+0], p0y = X[3*v0+1], p0z = X[3*v0+2];
     const double p1x = X[3*v1+0], p1y = X[3*v1+1], p1z = X[3*v1+2];
     const double p2x = X[3*v2+0], p2y = X[3*v2+1], p2z = X[3*v2+2];
-    mn_x = (fmin(fmin(p0x, p1x), p2x) - nbs) - d_hat;
-    mn_y = (fmin(fmin(p0y, p1y), p2y) - nbs) - d_hat;
-    mn_z = (fmin(fmin(p0z, p1z), p2z) - nbs) - d_hat;
-    mx_x = (fmax(fmax(p0x, p1x), p2x) + nbs) + d_hat;
-    mx_y = (fmax(fmax(p0y, p1y), p2y) + nbs) + d_hat;
-    mx_z = (fmax(fmax(p0z, p1z), p2z) + nbs) + d_hat;
+    const double r0 = R[v0], r1 = R[v1], r2 = R[v2];
+    mn_x = fmin(fmin(p0x - r0, p1x - r1), p2x - r2) - d_hat;
+    mn_y = fmin(fmin(p0y - r0, p1y - r1), p2y - r2) - d_hat;
+    mn_z = fmin(fmin(p0z - r0, p1z - r1), p2z - r2) - d_hat;
+    mx_x = fmax(fmax(p0x + r0, p1x + r1), p2x + r2) + d_hat;
+    mx_y = fmax(fmax(p0y + r0, p1y + r1), p2y + r2) + d_hat;
+    mx_z = fmax(fmax(p0z + r0, p1z + r1), p2z + r2) + d_hat;
 }
 
-// Red edge box = union of 2 blue boxes, then padded by d_hat. Same FP order
-// as CPU.
+// Red edge box = union of 2 per-vertex blue boxes, then padded by d_hat.
 __device__ inline void red_edge_box(
-    const double* __restrict__ X, int v0, int v1, double nbs, double d_hat,
+    const double* __restrict__ X, const double* __restrict__ R,
+    int v0, int v1, double d_hat,
     double& mn_x, double& mn_y, double& mn_z,
     double& mx_x, double& mx_y, double& mx_z)
 {
     const double p0x = X[3*v0+0], p0y = X[3*v0+1], p0z = X[3*v0+2];
     const double p1x = X[3*v1+0], p1y = X[3*v1+1], p1z = X[3*v1+2];
-    mn_x = (fmin(p0x, p1x) - nbs) - d_hat;
-    mn_y = (fmin(p0y, p1y) - nbs) - d_hat;
-    mn_z = (fmin(p0z, p1z) - nbs) - d_hat;
-    mx_x = (fmax(p0x, p1x) + nbs) + d_hat;
-    mx_y = (fmax(p0y, p1y) + nbs) + d_hat;
-    mx_z = (fmax(p0z, p1z) + nbs) + d_hat;
+    const double r0 = R[v0], r1 = R[v1];
+    mn_x = fmin(p0x - r0, p1x - r1) - d_hat;
+    mn_y = fmin(p0y - r0, p1y - r1) - d_hat;
+    mn_z = fmin(p0z - r0, p1z - r1) - d_hat;
+    mx_x = fmax(p0x + r0, p1x + r1) + d_hat;
+    mx_y = fmax(p0y + r0, p1y + r1) + d_hat;
+    mx_z = fmax(p0z + r0, p1z + r1) + d_hat;
 }
 
 // ---------------------------------------------------------------------------
@@ -112,7 +114,7 @@ __device__ inline void red_edge_box(
 // ---------------------------------------------------------------------------
 __global__ void k_count_tri_cells(
     int n_tri, const int* __restrict__ tris,
-    const double* __restrict__ X, double nbs, double d_hat, GridParams g,
+    const double* __restrict__ X, const double* __restrict__ R, double d_hat, GridParams g,
     int* __restrict__ counts)
 {
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -123,7 +125,7 @@ __global__ void k_count_tri_cells(
     const int v2 = tris[3*t+2];
 
     double mn_x, mn_y, mn_z, mx_x, mx_y, mx_z;
-    red_tri_box(X, v0, v1, v2, nbs, d_hat, mn_x, mn_y, mn_z, mx_x, mx_y, mx_z);
+    red_tri_box(X, R, v0, v1, v2, d_hat, mn_x, mn_y, mn_z, mx_x, mx_y, mx_z);
 
     const int lo_x = clampi(floor_div(mn_x - g.ox, g.cell_size), 0, g.nx - 1);
     const int lo_y = clampi(floor_div(mn_y - g.oy, g.cell_size), 0, g.ny - 1);
@@ -140,7 +142,7 @@ __global__ void k_count_tri_cells(
 // ---------------------------------------------------------------------------
 __global__ void k_scatter_tri_cells(
     int n_tri, const int* __restrict__ tris,
-    const double* __restrict__ X, double nbs, double d_hat, GridParams g,
+    const double* __restrict__ X, const double* __restrict__ R, double d_hat, GridParams g,
     const int* __restrict__ offsets,
     int* __restrict__ out_cell_ids, int* __restrict__ out_tri_ids)
 {
@@ -152,7 +154,7 @@ __global__ void k_scatter_tri_cells(
     const int v2 = tris[3*t+2];
 
     double mn_x, mn_y, mn_z, mx_x, mx_y, mx_z;
-    red_tri_box(X, v0, v1, v2, nbs, d_hat, mn_x, mn_y, mn_z, mx_x, mx_y, mx_z);
+    red_tri_box(X, R, v0, v1, v2, d_hat, mn_x, mn_y, mn_z, mx_x, mx_y, mx_z);
 
     const int lo_x = clampi(floor_div(mn_x - g.ox, g.cell_size), 0, g.nx - 1);
     const int lo_y = clampi(floor_div(mn_y - g.oy, g.cell_size), 0, g.ny - 1);
@@ -193,7 +195,7 @@ __global__ void k_build_cell_ranges(
 // dedupe is on host after emit.
 // ---------------------------------------------------------------------------
 __global__ void k_query_count(
-    int n_vert, const double* __restrict__ X, double nbs, double d_hat,
+    int n_vert, const double* __restrict__ X, const double* __restrict__ R, double d_hat,
     GridParams g, const int* __restrict__ cell_start,
     const int* __restrict__ cell_end, const int* __restrict__ sorted_tri_ids,
     const int* __restrict__ tris,
@@ -203,8 +205,9 @@ __global__ void k_query_count(
     if (vi >= n_vert) return;
 
     const double vx = X[3*vi+0], vy = X[3*vi+1], vz = X[3*vi+2];
-    const double bmn_x = vx - nbs, bmn_y = vy - nbs, bmn_z = vz - nbs;
-    const double bmx_x = vx + nbs, bmx_y = vy + nbs, bmx_z = vz + nbs;
+    const double r = R[vi];
+    const double bmn_x = vx - r, bmn_y = vy - r, bmn_z = vz - r;
+    const double bmx_x = vx + r, bmx_y = vy + r, bmx_z = vz + r;
 
     const int lo_x = clampi(floor_div(bmn_x - g.ox, g.cell_size), 0, g.nx - 1);
     const int lo_y = clampi(floor_div(bmn_y - g.oy, g.cell_size), 0, g.ny - 1);
@@ -228,7 +231,7 @@ __global__ void k_query_count(
             const int tv2 = tris[3*t+2];
             if (vi == tv0 || vi == tv1 || vi == tv2) continue;
             double tmn_x, tmn_y, tmn_z, tmx_x, tmx_y, tmx_z;
-            red_tri_box(X, tv0, tv1, tv2, nbs, d_hat,
+            red_tri_box(X, R, tv0, tv1, tv2, d_hat,
                         tmn_x, tmn_y, tmn_z, tmx_x, tmx_y, tmx_z);
             if (!aabb_overlap(bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z,
                               tmn_x, tmn_y, tmn_z, tmx_x, tmx_y, tmx_z))
@@ -244,7 +247,7 @@ __global__ void k_query_count(
 // per-vertex slot at offsets[vi] .. offsets[vi+1]-1.
 // ---------------------------------------------------------------------------
 __global__ void k_query_emit(
-    int n_vert, const double* __restrict__ X, double nbs, double d_hat,
+    int n_vert, const double* __restrict__ X, const double* __restrict__ R, double d_hat,
     GridParams g, const int* __restrict__ cell_start,
     const int* __restrict__ cell_end, const int* __restrict__ sorted_tri_ids,
     const int* __restrict__ tris, const int* __restrict__ offsets,
@@ -254,8 +257,9 @@ __global__ void k_query_emit(
     if (vi >= n_vert) return;
 
     const double vx = X[3*vi+0], vy = X[3*vi+1], vz = X[3*vi+2];
-    const double bmn_x = vx - nbs, bmn_y = vy - nbs, bmn_z = vz - nbs;
-    const double bmx_x = vx + nbs, bmx_y = vy + nbs, bmx_z = vz + nbs;
+    const double r = R[vi];
+    const double bmn_x = vx - r, bmn_y = vy - r, bmn_z = vz - r;
+    const double bmx_x = vx + r, bmx_y = vy + r, bmx_z = vz + r;
 
     const int lo_x = clampi(floor_div(bmn_x - g.ox, g.cell_size), 0, g.nx - 1);
     const int lo_y = clampi(floor_div(bmn_y - g.oy, g.cell_size), 0, g.ny - 1);
@@ -279,7 +283,7 @@ __global__ void k_query_emit(
             const int tv2 = tris[3*t+2];
             if (vi == tv0 || vi == tv1 || vi == tv2) continue;
             double tmn_x, tmn_y, tmn_z, tmx_x, tmx_y, tmx_z;
-            red_tri_box(X, tv0, tv1, tv2, nbs, d_hat,
+            red_tri_box(X, R, tv0, tv1, tv2, d_hat,
                         tmn_x, tmn_y, tmn_z, tmx_x, tmx_y, tmx_z);
             if (!aabb_overlap(bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z,
                               tmn_x, tmn_y, tmn_z, tmx_x, tmx_y, tmx_z))
@@ -301,7 +305,7 @@ __global__ void k_query_emit(
 // Kernel: count cells per edge red box.
 __global__ void k_count_edge_cells(
     int n_edges, const int* __restrict__ edges,
-    const double* __restrict__ X, double nbs, double d_hat, GridParams g,
+    const double* __restrict__ X, const double* __restrict__ R, double d_hat, GridParams g,
     int* __restrict__ counts)
 {
     const int e = blockIdx.x * blockDim.x + threadIdx.x;
@@ -309,7 +313,7 @@ __global__ void k_count_edge_cells(
     const int v0 = edges[2*e+0];
     const int v1 = edges[2*e+1];
     double mn_x, mn_y, mn_z, mx_x, mx_y, mx_z;
-    red_edge_box(X, v0, v1, nbs, d_hat, mn_x, mn_y, mn_z, mx_x, mx_y, mx_z);
+    red_edge_box(X, R, v0, v1, d_hat, mn_x, mn_y, mn_z, mx_x, mx_y, mx_z);
     const int lo_x = clampi(floor_div(mn_x - g.ox, g.cell_size), 0, g.nx - 1);
     const int lo_y = clampi(floor_div(mn_y - g.oy, g.cell_size), 0, g.ny - 1);
     const int lo_z = clampi(floor_div(mn_z - g.oz, g.cell_size), 0, g.nz - 1);
@@ -322,7 +326,7 @@ __global__ void k_count_edge_cells(
 // Kernel: scatter (cell_id, edge_id) pairs.
 __global__ void k_scatter_edge_cells(
     int n_edges, const int* __restrict__ edges,
-    const double* __restrict__ X, double nbs, double d_hat, GridParams g,
+    const double* __restrict__ X, const double* __restrict__ R, double d_hat, GridParams g,
     const int* __restrict__ offsets,
     int* __restrict__ out_cell_ids, int* __restrict__ out_edge_ids)
 {
@@ -331,7 +335,7 @@ __global__ void k_scatter_edge_cells(
     const int v0 = edges[2*e+0];
     const int v1 = edges[2*e+1];
     double mn_x, mn_y, mn_z, mx_x, mx_y, mx_z;
-    red_edge_box(X, v0, v1, nbs, d_hat, mn_x, mn_y, mn_z, mx_x, mx_y, mx_z);
+    red_edge_box(X, R, v0, v1, d_hat, mn_x, mn_y, mn_z, mx_x, mx_y, mx_z);
     const int lo_x = clampi(floor_div(mn_x - g.ox, g.cell_size), 0, g.nx - 1);
     const int lo_y = clampi(floor_div(mn_y - g.oy, g.cell_size), 0, g.ny - 1);
     const int lo_z = clampi(floor_div(mn_z - g.oz, g.cell_size), 0, g.nz - 1);
@@ -354,7 +358,7 @@ __global__ void k_scatter_edge_cells(
 // orientations would otherwise visit the same pair.
 __global__ void k_query_count_ss(
     int n_edges, const int* __restrict__ edges,
-    const double* __restrict__ X, double nbs, double d_hat, GridParams g,
+    const double* __restrict__ X, const double* __restrict__ R, double d_hat, GridParams g,
     const int* __restrict__ cell_start, const int* __restrict__ cell_end,
     const int* __restrict__ sorted_edge_ids,
     int* __restrict__ out_counts)
@@ -363,7 +367,7 @@ __global__ void k_query_count_ss(
     if (ea >= n_edges) return;
     const int a0 = edges[2*ea+0], a1 = edges[2*ea+1];
     double amn_x, amn_y, amn_z, amx_x, amx_y, amx_z;
-    red_edge_box(X, a0, a1, nbs, d_hat, amn_x, amn_y, amn_z, amx_x, amx_y, amx_z);
+    red_edge_box(X, R, a0, a1, d_hat, amn_x, amn_y, amn_z, amx_x, amx_y, amx_z);
     const int lo_x = clampi(floor_div(amn_x - g.ox, g.cell_size), 0, g.nx - 1);
     const int lo_y = clampi(floor_div(amn_y - g.oy, g.cell_size), 0, g.ny - 1);
     const int lo_z = clampi(floor_div(amn_z - g.oz, g.cell_size), 0, g.nz - 1);
@@ -385,7 +389,7 @@ __global__ void k_query_count_ss(
             const int b0 = edges[2*eb+0], b1 = edges[2*eb+1];
             if (a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1) continue;
             double bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z;
-            red_edge_box(X, b0, b1, nbs, d_hat, bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z);
+            red_edge_box(X, R, b0, b1, d_hat, bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z);
             if (!aabb_overlap(amn_x, amn_y, amn_z, amx_x, amx_y, amx_z,
                               bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z))
                 continue;
@@ -398,7 +402,7 @@ __global__ void k_query_count_ss(
 // Kernel: per-edge query (emit) — same walk, write into pre-allocated slot.
 __global__ void k_query_emit_ss(
     int n_edges, const int* __restrict__ edges,
-    const double* __restrict__ X, double nbs, double d_hat, GridParams g,
+    const double* __restrict__ X, const double* __restrict__ R, double d_hat, GridParams g,
     const int* __restrict__ cell_start, const int* __restrict__ cell_end,
     const int* __restrict__ sorted_edge_ids,
     const int* __restrict__ offsets,
@@ -408,7 +412,7 @@ __global__ void k_query_emit_ss(
     if (ea >= n_edges) return;
     const int a0 = edges[2*ea+0], a1 = edges[2*ea+1];
     double amn_x, amn_y, amn_z, amx_x, amx_y, amx_z;
-    red_edge_box(X, a0, a1, nbs, d_hat, amn_x, amn_y, amn_z, amx_x, amx_y, amx_z);
+    red_edge_box(X, R, a0, a1, d_hat, amn_x, amn_y, amn_z, amx_x, amx_y, amx_z);
     const int lo_x = clampi(floor_div(amn_x - g.ox, g.cell_size), 0, g.nx - 1);
     const int lo_y = clampi(floor_div(amn_y - g.oy, g.cell_size), 0, g.ny - 1);
     const int lo_z = clampi(floor_div(amn_z - g.oz, g.cell_size), 0, g.nz - 1);
@@ -430,7 +434,7 @@ __global__ void k_query_emit_ss(
             const int b0 = edges[2*eb+0], b1 = edges[2*eb+1];
             if (a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1) continue;
             double bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z;
-            red_edge_box(X, b0, b1, nbs, d_hat, bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z);
+            red_edge_box(X, R, b0, b1, d_hat, bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z);
             if (!aabb_overlap(amn_x, amn_y, amn_z, amx_x, amx_y, amx_z,
                               bmn_x, bmn_y, bmn_z, bmx_x, bmx_y, bmx_z))
                 continue;
@@ -457,15 +461,21 @@ inline void cudaCheck(cudaError_t e, const char* what) {
 // Host-side orchestrator
 // ===========================================================================
 GpuBroadPhaseResult gpu_hash_grid_build_pairs(
-    const std::vector<Vec3>& positions,
-    const RefMesh&           ref_mesh,
-    double                   node_box_size,
-    double                   d_hat)
+    const std::vector<Vec3>&    positions,
+    const RefMesh&              ref_mesh,
+    const std::vector<double>&  per_vertex_radii,
+    double                      d_hat)
 {
     GpuBroadPhaseResult result;
     const int nv = static_cast<int>(positions.size());
     const int nt = static_cast<int>(ref_mesh.tris.size()) / 3;
     if (nv == 0 || nt == 0) return result;
+    if (static_cast<int>(per_vertex_radii.size()) != nv) {
+        std::fprintf(stderr,
+            "[gpu_hash_grid] per_vertex_radii size %zu != positions size %d\n",
+            per_vertex_radii.size(), nv);
+        std::abort();
+    }
 
     // Instrumentation: GPU_HG_PROFILE=1 prints per-call phase timings.
     const bool prof = (std::getenv("GPU_HG_PROFILE") != nullptr);
@@ -483,25 +493,30 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     auto t_phase = Clock::now();
 
     // -----------------------------------------------------------------------
-    // Compute mesh AABB → grid origin + dims. Use the *blue-box-padded*
-    // AABB so every blue box and red box is strictly inside the grid.
+    // Compute mesh AABB → grid origin + dims. Per-vertex pad uses each
+    // vertex's own radius; for grid sizing we conservatively use max radius.
     // -----------------------------------------------------------------------
+    double max_r = 0.0;
+    for (double r : per_vertex_radii) max_r = std::max(max_r, r);
+
     Vec3 mn = positions[0];
     Vec3 mx = positions[0];
     for (int i = 1; i < nv; ++i) {
         mn = mn.cwiseMin(positions[i]);
         mx = mx.cwiseMax(positions[i]);
     }
-    // Red tri box pad = node_box_size + d_hat (CPU computes the same way:
-    // union of 3 blue boxes — each ± node_box_size — then inflated by d_hat).
-    const double pad = node_box_size + d_hat;
+    // Pad mesh AABB by worst-case red box extent so every primitive's red
+    // box lies inside the grid. Red box = blue box (±radius) + d_hat.
+    const double pad = max_r + d_hat;
     mn.array() -= pad;
     mx.array() += pad;
 
     GridParams g{};
-    g.cell_size = 2.0 * node_box_size + d_hat;
+    // Cell size scales with worst-case overlap diameter to keep cell counts
+    // bounded for the hot loops that walk per-primitive cell ranges.
+    g.cell_size = 2.0 * max_r + d_hat;
+    if (g.cell_size <= 0.0) g.cell_size = 1.0;  // degenerate: all radii zero
     g.ox = mn(0); g.oy = mn(1); g.oz = mn(2);
-    // +1 to round up; +1 again to give a one-cell margin.
     g.nx = std::max(1, static_cast<int>(std::ceil((mx(0) - mn(0)) / g.cell_size)) + 1);
     g.ny = std::max(1, static_cast<int>(std::ceil((mx(1) - mn(1)) / g.cell_size)) + 1);
     g.nz = std::max(1, static_cast<int>(std::ceil((mx(2) - mn(2)) / g.cell_size)) + 1);
@@ -518,11 +533,15 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     }
 
     double* d_X = nullptr;
+    double* d_R = nullptr;
     int*    d_tris = nullptr;
     cudaCheck(cudaMalloc(&d_X, sizeof(double) * 3 * nv), "malloc d_X");
+    cudaCheck(cudaMalloc(&d_R, sizeof(double) * nv),     "malloc d_R");
     cudaCheck(cudaMalloc(&d_tris, sizeof(int) * 3 * nt), "malloc d_tris");
     cudaCheck(cudaMemcpy(d_X, h_X.data(), sizeof(double) * 3 * nv,
                          cudaMemcpyHostToDevice), "memcpy d_X");
+    cudaCheck(cudaMemcpy(d_R, per_vertex_radii.data(), sizeof(double) * nv,
+                         cudaMemcpyHostToDevice), "memcpy d_R");
     cudaCheck(cudaMemcpy(d_tris, ref_mesh.tris.data(), sizeof(int) * 3 * nt,
                          cudaMemcpyHostToDevice), "memcpy d_tris");
 
@@ -534,7 +553,7 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     {
         const int block = 256;
         const int grid_b = (nt + block - 1) / block;
-        k_count_tri_cells<<<grid_b, block>>>(nt, d_tris, d_X, node_box_size, d_hat, g, d_counts);
+        k_count_tri_cells<<<grid_b, block>>>(nt, d_tris, d_X, d_R, d_hat, g, d_counts);
         cudaCheck(cudaGetLastError(), "k_count_tri_cells");
     }
 
@@ -569,7 +588,7 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     {
         const int block = 256;
         const int grid_b = (nt + block - 1) / block;
-        k_scatter_tri_cells<<<grid_b, block>>>(nt, d_tris, d_X, node_box_size, d_hat, g,
+        k_scatter_tri_cells<<<grid_b, block>>>(nt, d_tris, d_X, d_R, d_hat, g,
                                                d_offsets, d_cell_ids, d_tri_ids);
         cudaCheck(cudaGetLastError(), "k_scatter_tri_cells");
     }
@@ -620,7 +639,7 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     {
         const int block = 256;
         const int grid_b = (nv + block - 1) / block;
-        k_query_count<<<grid_b, block>>>(nv, d_X, node_box_size, d_hat, g,
+        k_query_count<<<grid_b, block>>>(nv, d_X, d_R, d_hat, g,
                                           d_cell_start, d_cell_end,
                                           d_tri_ids_sorted, d_tris,
                                           d_v_counts);
@@ -648,7 +667,7 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
         cudaCheck(cudaMalloc(&d_out_tri,  sizeof(int) * n_emitted), "malloc out_tri");
         const int block = 256;
         const int grid_b = (nv + block - 1) / block;
-        k_query_emit<<<grid_b, block>>>(nv, d_X, node_box_size, d_hat, g,
+        k_query_emit<<<grid_b, block>>>(nv, d_X, d_R, d_hat, g,
                                         d_cell_start, d_cell_end,
                                         d_tri_ids_sorted, d_tris,
                                         d_v_offsets, d_out_node, d_out_tri);
@@ -741,7 +760,7 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
         {
             const int block = 256;
             const int grid_b = (ne + block - 1) / block;
-            k_count_edge_cells<<<grid_b, block>>>(ne, d_edges, d_X, node_box_size, d_hat, g, d_e_counts);
+            k_count_edge_cells<<<grid_b, block>>>(ne, d_edges, d_X, d_R, d_hat, g, d_e_counts);
             cudaCheck(cudaGetLastError(), "k_count_edge_cells");
         }
         {
@@ -769,7 +788,7 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
         if (e_total > 0) {
             const int block = 256;
             const int grid_b = (ne + block - 1) / block;
-            k_scatter_edge_cells<<<grid_b, block>>>(ne, d_edges, d_X, node_box_size, d_hat, g,
+            k_scatter_edge_cells<<<grid_b, block>>>(ne, d_edges, d_X, d_R, d_hat, g,
                                                      d_e_offsets,
                                                      d_e_cell_ids, d_e_edge_ids);
             cudaCheck(cudaGetLastError(), "k_scatter_edge_cells");
@@ -813,7 +832,7 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
         {
             const int block = 256;
             const int grid_b = (ne + block - 1) / block;
-            k_query_count_ss<<<grid_b, block>>>(ne, d_edges, d_X, node_box_size, d_hat, g,
+            k_query_count_ss<<<grid_b, block>>>(ne, d_edges, d_X, d_R, d_hat, g,
                                                  d_e_cell_start, d_e_cell_end,
                                                  d_e_edge_ids_sorted,
                                                  d_q_counts);
@@ -841,7 +860,7 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
             cudaCheck(cudaMalloc(&d_out_b, sizeof(int) * n_ss_emitted), "malloc out_b");
             const int block = 256;
             const int grid_b = (ne + block - 1) / block;
-            k_query_emit_ss<<<grid_b, block>>>(ne, d_edges, d_X, node_box_size, d_hat, g,
+            k_query_emit_ss<<<grid_b, block>>>(ne, d_edges, d_X, d_R, d_hat, g,
                                                 d_e_cell_start, d_e_cell_end,
                                                 d_e_edge_ids_sorted,
                                                 d_q_offsets,
@@ -898,6 +917,7 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     // Cleanup
     // -----------------------------------------------------------------------
     cudaFree(d_X);
+    cudaFree(d_R);
     cudaFree(d_tris);
     cudaFree(d_counts);
     cudaFree(d_offsets);

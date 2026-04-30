@@ -22,11 +22,12 @@ struct GpuBroadPhaseResult {
     std::vector<SegmentSegmentPair>   ss_pairs;
 };
 
-// Inputs mirror BroadPhase::initialize(blue_boxes, mesh, d_hat) modulo the
-// fact that blue boxes here are reconstructed internally from positions +
-// node_box_size (uniform half-extent, basic-solver style).
+// Inputs mirror BroadPhase::initialize(blue_boxes, mesh, d_hat) but with
+// per-vertex blue box half-extents passed in `per_vertex_radii` (length nv).
+// Mirrors gauss_seidel_basic's per-vertex `node_box_size_fn(vi)` clamping
+// of prev_disp * padding to [node_box_min, node_box_max].
 GpuBroadPhaseResult gpu_hash_grid_build_pairs(
-    const std::vector<Vec3>& positions,
-    const RefMesh&           ref_mesh,
-    double                   node_box_size,
-    double                   d_hat);
+    const std::vector<Vec3>&    positions,
+    const RefMesh&              ref_mesh,
+    const std::vector<double>&  per_vertex_radii,
+    double                      d_hat);

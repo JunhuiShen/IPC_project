@@ -124,12 +124,13 @@ void print_diff_ss(const std::set<SSKey>& cpu, const std::set<SSKey>& gpu) {
 
 GpuBroadPhaseResult cpu_reference(
     const std::vector<Vec3>& positions, const RefMesh& mesh,
-    double node_box_size, double d_hat)
+    const std::vector<double>& per_vertex_radii, double d_hat)
 {
     std::vector<AABB> blue_boxes(positions.size());
     for (std::size_t i = 0; i < positions.size(); ++i) {
-        blue_boxes[i] = AABB(positions[i] - Vec3::Constant(node_box_size),
-                             positions[i] + Vec3::Constant(node_box_size));
+        const double r = per_vertex_radii[i];
+        blue_boxes[i] = AABB(positions[i] - Vec3::Constant(r),
+                             positions[i] + Vec3::Constant(r));
     }
     BroadPhase bp;
     bp.initialize(blue_boxes, mesh, d_hat);
@@ -141,8 +142,10 @@ GpuBroadPhaseResult cpu_reference(
 
 void check_match(const std::vector<Vec3>& positions, const RefMesh& mesh,
                  double node_box_size, double d_hat) {
-    const auto cpu_full = cpu_reference(positions, mesh, node_box_size, d_hat);
-    const auto gpu_full = gpu_hash_grid_build_pairs(positions, mesh, node_box_size, d_hat);
+    // Tests use uniform radii; per-vertex sizing is exercised via real sim.
+    std::vector<double> radii(positions.size(), node_box_size);
+    const auto cpu_full = cpu_reference(positions, mesh, radii, d_hat);
+    const auto gpu_full = gpu_hash_grid_build_pairs(positions, mesh, radii, d_hat);
 
     const auto cpu_nt = to_set(cpu_full.nt_pairs);
     const auto gpu_nt = to_set(gpu_full.nt_pairs);

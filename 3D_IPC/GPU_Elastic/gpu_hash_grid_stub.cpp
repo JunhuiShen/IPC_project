@@ -4,15 +4,16 @@
 #include "../broad_phase.h"
 
 GpuBroadPhaseResult gpu_hash_grid_build_pairs(
-    const std::vector<Vec3>& positions,
-    const RefMesh&           ref_mesh,
-    double                   node_box_size,
-    double                   d_hat)
+    const std::vector<Vec3>&    positions,
+    const RefMesh&              ref_mesh,
+    const std::vector<double>&  per_vertex_radii,
+    double                      d_hat)
 {
     std::vector<AABB> blue_boxes(positions.size());
     for (std::size_t i = 0; i < positions.size(); ++i) {
-        blue_boxes[i] = AABB(positions[i] - Vec3::Constant(node_box_size),
-                             positions[i] + Vec3::Constant(node_box_size));
+        const double r = per_vertex_radii[i];
+        blue_boxes[i] = AABB(positions[i] - Vec3::Constant(r),
+                             positions[i] + Vec3::Constant(r));
     }
     BroadPhase bp;
     bp.initialize(blue_boxes, ref_mesh, d_hat);

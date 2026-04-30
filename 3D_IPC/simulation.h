@@ -5,6 +5,7 @@
 #include "GPU_Sim/gpu_solver_bridge.h"
 #include "GPU_Elastic/gpu_elastic.h"
 #include "GPU_Elastic/gpu_hash_grid.h"
+#include <algorithm>
 #include <functional>
 #include <string>
 #include <vector>
@@ -29,35 +30,55 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
     // the host mid-frame; pin targets refresh per substep when twisting.
     if (params.use_gpu_elastic) {
         gpu_elastic_begin_frame(state.deformed_positions, state.velocities);
-        std::vector<Vec3> bp_x_scratch;  // reused across substeps when use_broadphase is on
+        // Per-vertex prev_disp tracking mirrors gauss_seidel_basic at
+        // solver.cpp:261-269. Initialized to node_box_max on first call so
+        // substep 0 uses the upper-bound radius; subsequent substeps clamp
+        // (prev_disp * padding) to [node_box_min, node_box_max].
+        const int nv = static_cast<int>(state.deformed_positions.size());
+        static std::vector<double> prev_disp;
+        if (static_cast<int>(prev_disp.size()) != nv)
+            prev_disp.assign(nv, params.node_box_max);
+        constexpr double node_box_padding = 1.2;
+        std::vector<Vec3> bp_x_scratch;
+        std::vector<Vec3> bp_x_prev;
+        std::vector<double> bp_radii(nv);
         for (int sub = 0; sub < params.substeps; ++sub) {
             if (twist_spec && pin_updater) {
                 const double t_next = ((frame_index - 1) * params.substeps + (sub + 1)) * dt;
                 pin_updater(pins, *twist_spec, t_next);
                 gpu_elastic_set_pin_targets(pins);
             }
+            // Capture pre-substep positions to compute displacement after.
+            if (params.use_broadphase || params.use_cpu_broadphase) {
+                gpu_elastic_peek_positions(bp_x_prev);
+                for (int i = 0; i < nv; ++i) {
+                    bp_radii[i] = std::clamp(prev_disp[i] * node_box_padding,
+                                             params.node_box_min,
+                                             params.node_box_max);
+                }
+            }
             gpu_elastic_run_substep_device(params.max_global_iters);
             if (params.use_broadphase || params.use_cpu_broadphase) {
-                // Snapshot current device positions, then run either GPU or
-                // CPU broad phase. Pair list discarded — measures overhead
-                // before the GS sweep consumes the lists.
                 gpu_elastic_peek_positions(bp_x_scratch);
                 if (params.use_broadphase) {
                     auto pairs = gpu_hash_grid_build_pairs(
-                        bp_x_scratch, ref_mesh,
-                        params.node_box_max, params.d_hat);
+                        bp_x_prev, ref_mesh, bp_radii, params.d_hat);
                     (void)pairs;
                 } else {
-                    std::vector<AABB> blue_boxes(bp_x_scratch.size());
-                    for (std::size_t i = 0; i < bp_x_scratch.size(); ++i) {
+                    std::vector<AABB> blue_boxes(nv);
+                    for (int i = 0; i < nv; ++i) {
                         blue_boxes[i] = AABB(
-                            bp_x_scratch[i] - Vec3::Constant(params.node_box_max),
-                            bp_x_scratch[i] + Vec3::Constant(params.node_box_max));
+                            bp_x_prev[i] - Vec3::Constant(bp_radii[i]),
+                            bp_x_prev[i] + Vec3::Constant(bp_radii[i]));
                     }
                     BroadPhase bp;
                     bp.initialize(blue_boxes, ref_mesh, params.d_hat);
                     (void)bp;
                 }
+                // Update prev_disp for next substep from this substep's
+                // actual displacement.
+                for (int i = 0; i < nv; ++i)
+                    prev_disp[i] = (bp_x_scratch[i] - bp_x_prev[i]).norm();
             }
         }
         gpu_elastic_end_frame(state.deformed_positions, state.velocities);
