@@ -37,9 +37,10 @@ The nonlinear solve is driven by:
 
 - C++17 compiler (GCC 9+, Clang 10+, MSVC 2019+)
 - CMake 3.21+
-- Eigen3
 - OpenMP (on macOS: `brew install libomp`)
 - GoogleTest
+- Eigen 3.4.0 -- fetched automatically by CMake (requires network on
+  first configure)
 - Tight-Inclusion CCD -- fetched automatically by CMake (requires network on
   first configure)
 
@@ -168,10 +169,7 @@ reader can jump to the layer they care about.
   TICCD wraps [Tight-Inclusion CCD](https://github.com/Continuous-Collision-Detection/Tight-Inclusion);
   parameters (min-separation, tolerance, max-iter, search method) are
   documented inline in `ccd.cpp`. The closed-form backend's coplanar fallback
-  uses a stack-allocated `SmallRoots` buffer. The linear backend was validated
-  against TICCD over 5,500 random one-moving-node configurations during
-  development — TICCD is treated as ground truth, and any TICCD-detected
-  collision the linear path misses is treated as a regression.
+  uses a stack-allocated `SmallRoots` buffer. 
 - `broad_phase.h` / `broad_phase.cpp` -- swept-AABB broad phase backed by a BVH.
   Caches mesh topology via `set_mesh_topology`, builds candidate node-triangle
   and edge-edge pairs, and exposes per-vertex pair queries used by one-node

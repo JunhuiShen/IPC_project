@@ -78,12 +78,12 @@ struct IPCArgs3D : ArgParser {
     double      cyl_cx        = 0.0;   // cylinder center x for example 4
     double      cyl_cy        = 0.25;  // cylinder center y for example 4
     double      cyl_cz        = 0.0;   // cylinder center z for example 4
-    double      sphere_radius = 0.10;  // sphere collider radius (m) in example 6
+    double      sphere_radius = 0.35;  // sphere collider radius (m) in example 6
     double      sphere_cx     = 0.0;   // sphere center x for example 6
-    double      sphere_cy     = 0.10;  // sphere center y for example 6; default y=r so sphere is tangent to ground
+    double      sphere_cy     = 0.35;  // sphere center y for example 6; default y=r so sphere is tangent to ground
     double      sphere_cz     = 0.0;   // sphere center z for example 6
     int         sphere_subdiv = 2;     // icosphere subdivision level for example 6 (V = 10*4^n + 2)
-    double      sphere_cloth_size = 0.70; // edge length (m) of each falling cloth in example 6
+    double      sphere_cloth_size = 2.00; // edge length (m) of each falling cloth in example 6
     double      sphere_ground_size = 4.0; // edge length (m) of the square pinned ground in example 6
     int         sphere_ground_nx   = 38;  // grid subdivisions along each axis of the square pinned ground in example 6
 
@@ -159,12 +159,12 @@ struct IPCArgs3D : ArgParser {
         add_double("cyl_cx",           cyl_cx,           0.0,      "Cylinder center x for example 4");
         add_double("cyl_cy",           cyl_cy,           0.25,     "Cylinder center y for example 4");
         add_double("cyl_cz",           cyl_cz,           0.0,      "Cylinder center z for example 4");
-        add_double("sphere_radius",    sphere_radius,    0.10,     "Sphere collider radius in meters in example 6");
+        add_double("sphere_radius",    sphere_radius,    0.35,     "Sphere collider radius in meters in example 6");
         add_double("sphere_cx",        sphere_cx,        0.0,      "Sphere center x for example 6");
-        add_double("sphere_cy",        sphere_cy,        0.10,     "Sphere center y for example 6; default y=r so sphere is tangent to ground");
+        add_double("sphere_cy",        sphere_cy,        0.35,     "Sphere center y for example 6; default y=r so sphere is tangent to ground");
         add_double("sphere_cz",        sphere_cz,        0.0,      "Sphere center z for example 6");
         add_int   ("sphere_subdiv",    sphere_subdiv,    2,        "Icosphere subdivision level in example 6 (V = 10*4^n + 2)");
-        add_double("sphere_cloth_size", sphere_cloth_size, 0.70,   "Edge length in meters of each falling cloth in example 6");
+        add_double("sphere_cloth_size", sphere_cloth_size, 2.00,   "Edge length in meters of each falling cloth in example 6");
         add_double("sphere_ground_size", sphere_ground_size, 4.0,  "Edge length in meters of the square pinned ground in example 6");
         add_int   ("sphere_ground_nx",   sphere_ground_nx,   38,   "Grid subdivisions along each axis of the square pinned ground in example 6");
 

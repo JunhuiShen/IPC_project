@@ -387,14 +387,7 @@ CCDResult linear_node_triangle_impl(const Vec3& x,  const Vec3& dx,
 CCDResult linear_segment_segment_impl(const Vec3& x1, const Vec3& dx1,
                                       const Vec3& x2, const Vec3& x3, const Vec3& x4, double eps) {
     CCDResult result;
-    // Match TICCD's effective collision band on near-parallel / near-coincident
-    // SS configs. With one moving node, the off-coplanar residual `n² ≈
-    // |dx1 × edge|²` can run up to ~1e-10 even when the edges are coincident
-    // in 3D, so we widen the inside-segment gate to keep such cases inside the
-    // coplanar branch. Empirically, 1.0e-4 is the tightest stable value: a
-    // sweep of {5e-6, 1e-5, 2e-5, 5e-5} absolute and {1e-6, 1e-5}*(|u|+|v|)
-    // relative all regressed FN under fresh-seed re-validation (ccd_stress_test).
-    constexpr double eps_inside = 1.0e-4;
+    constexpr double eps_inside = 1.0e-10;
     const Vec3 zero = Vec3::Zero();
 
     if (inside_segments_3d_at(x1, dx1, x2, zero, x3, zero, x4, zero, 0.0, eps_inside)) {
@@ -434,9 +427,6 @@ CCDResult linear_segment_segment_impl(const Vec3& x1, const Vec3& dx1,
             return result;
         }
     }
-    // Near-parallel edges: t = -d/c is unstable (d, c both cancellation-
-    // dominated). Fall back to sampled coincidence checks across the step;
-    // TICCD detects those as collisions and we must agree.
     const double ab2   = (a.cross(b)).squaredNorm();
     const double scale = std::max(1.0, a.squaredNorm() * b.squaredNorm());
     const bool near_parallel = ab2 <= 1.0e-12 * scale;

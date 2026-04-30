@@ -16,8 +16,8 @@ include(FetchContent)
 
 # Pin Eigen to 3.4.0. Homebrew shipped Eigen 5.0.x in early 2026 and that
 # version triggered NaN corruption through std::function<Vec3(int)> boundaries
-# in the experimental solver. Until the codebase is audited for Eigen 5
-# compatibility, fetch 3.4.0 directly so every build uses the validated version.
+# in the experimental solver on AppleClang + libc++ + ARM64. Pin until the
+# codebase is audited for Eigen 5 compatibility.
 set(EIGEN_BUILD_DOC OFF CACHE INTERNAL "")
 set(EIGEN_BUILD_TESTING OFF CACHE INTERNAL "")
 set(EIGEN_BUILD_PKGCONFIG OFF CACHE INTERNAL "")
@@ -26,9 +26,13 @@ FetchContent_Declare(
     eigen3
     URL      https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
     URL_HASH SHA256=8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
-# Use GetProperties + Populate so we don't pull Eigen's CMakeLists into the
-# project (it adds heaps of test/check targets). We just need the headers.
+# Don't run Eigen's own CMakeLists -- we only need the headers, and its build
+# adds dozens of test / check targets that clutter `make help`.
+if(POLICY CMP0169)
+    cmake_policy(SET CMP0169 OLD)
+endif()
 FetchContent_GetProperties(eigen3)
 if(NOT eigen3_POPULATED)
     FetchContent_Populate(eigen3)
