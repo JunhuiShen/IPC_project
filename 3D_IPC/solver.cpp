@@ -247,7 +247,7 @@ static void write_substep_data(const SimParams& params, const BroadPhase& broad_
 
 SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
                                         std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
-                                        const std::vector<Vec3>& v, const std::vector<std::vector<int>>& color_groups,
+                                        const std::vector<Vec3>& v,
                                         std::vector<double>* residual_history, const std::string& outdir) {
 
     if (!params.fixed_iters) {
@@ -264,6 +264,11 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     }
     BroadPhase broad_phase;
     broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
+
+    //create colors
+    const std::vector<std::vector<int>> color_groups = greedy_color_conflict_graph(
+        union_adjacency(build_elastic_adj(ref_mesh, adj, static_cast<int>(xnew.size())),
+                        build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()))));
 
     //residual tracking: not going to actually do this and will demand running with fixed iterations
     if (residual_history) residual_history->clear();
@@ -285,7 +290,8 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     //gs loop
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         broad_phase.per_vertex_safe_step(xnew, [&](int vi){ return xnew[vi] - gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm); },
-                                         /*safety=*/0.9, /*clip_to_node_box=*/true, /*clip_ccd=*/params.use_ccd, /*use_ticcd=*/params.use_ticcd);
+                                         /*safety=*/0.9, /*clip_to_node_box=*/true, /*clip_ccd=*/params.use_ccd, /*use_ticcd=*/params.use_ticcd,
+                                         params.use_parallel ? &color_groups : nullptr);
         result.final_residual = 0.0;
         result.iterations     = iter;
         if (residual_history) residual_history->push_back(result.final_residual);

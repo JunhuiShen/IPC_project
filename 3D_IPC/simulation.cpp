@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
     else if (args.example == 3) build_cloth_stack_example_high_res(ref_mesh, state, X, pins);
     else if (args.example == 4) build_cloth_cylinder_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else if (args.example == 5) build_twisting_cloth_example(args, ref_mesh, state, X, pins, twist_spec);
-    else if (args.example == 6) build_cloth_sphere_drop_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 6) build_cloth_sphere_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else {
         std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6.\n";
         return 1;

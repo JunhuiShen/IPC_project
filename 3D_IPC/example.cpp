@@ -298,45 +298,37 @@ void build_cloth_sphere_drop_example(const IPCArgs3D& args,
                                      DeformedState& state,
                                      std::vector<Vec2>& X,
                                      std::vector<Pin>& pins,
-                                     SimParams& params) {
+                                     SimParams& params,
+                                     std::vector<Vec3>& static_x,
+                                     std::vector<int>&  static_tris) {
     clear_model(ref_mesh, state, X, pins);
     params.sdf_planes.clear();
     params.sdf_cylinders.clear();
     params.sdf_spheres.clear();
 
-    // Ground cloth -- size from args.sphere_ground_size.
-    const int    ground_nx = 40;
-    const int    ground_ny = 40;
     const double ground_w  = args.sphere_ground_size;
     const double ground_h  = args.sphere_ground_size;
     const double ground_y  = 0.0;
+    const int    ground_nx = args.sphere_ground_nx;
+    const int    ground_ny = args.sphere_ground_nx;
 
-    const int ground_base = build_square_mesh(
-            ref_mesh, state, X,
-            ground_nx, ground_ny, ground_w, ground_h,
-            Vec3(-0.5 * ground_w, ground_y, -0.5 * ground_h));
-
-    const int ground_vertex_count = (ground_nx + 1) * (ground_ny + 1);
-    for (int k = 0; k < ground_vertex_count; ++k) {
-        append_pin(pins, ground_base + k, state.deformed_positions);
-    }
-
-    // Static sphere collider: mesh for visualization + IPC barrier (via pinned
-    // triangles), SphereSDF for smooth cloth-sphere contact force.
     const int    sphere_subdiv = args.sphere_subdiv;
     const double sphere_radius = args.sphere_radius;
     const Vec3   sphere_center(args.sphere_cx, args.sphere_cy, args.sphere_cz);
 
-    const int sphere_base = build_sphere_mesh(
-            ref_mesh, state, X,
-            sphere_subdiv, sphere_radius, sphere_center);
-
-    // V_icosphere(subdiv) = 10 * 4^subdiv + 2.
-    int pow4 = 1;
-    for (int k = 0; k < sphere_subdiv; ++k) pow4 *= 4;
-    const int sphere_vertex_count = 10 * pow4 + 2;
-    for (int k = 0; k < sphere_vertex_count; ++k) {
-        append_pin(pins, sphere_base + k, state.deformed_positions);
+    // Build ground and sphere into a scratch mesh for one-time export only.
+    // Collisions go through SDFs below; nothing here joins ref_mesh.
+    {
+        RefMesh        s_ref;
+        DeformedState  s_state;
+        std::vector<Vec2> s_X;
+        build_square_mesh(s_ref, s_state, s_X,
+                          ground_nx, ground_ny, ground_w, ground_h,
+                          Vec3(-0.5 * ground_w, ground_y, -0.5 * ground_h));
+        build_sphere_mesh(s_ref, s_state, s_X,
+                          sphere_subdiv, sphere_radius, sphere_center);
+        static_x    = s_state.deformed_positions;
+        static_tris = s_ref.tris;
     }
 
     params.sdf_planes.push_back(PlaneSDF{

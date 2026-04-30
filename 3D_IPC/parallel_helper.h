@@ -73,6 +73,7 @@ std::vector<std::vector<int>> build_conflict_graph(const RefMesh& ref_mesh, cons
                                                    const std::vector<std::vector<int>>* base_adj = nullptr,
                                                    SweptBvhCache* sw_cache = nullptr);
 
+std::vector<std::vector<int>> greedy_color_conflict_graph(const std::vector<std::vector<int>>& graph);
 std::vector<std::vector<int>> greedy_color_conflict_graph(const std::vector<std::vector<int>>& graph, const std::vector<JacobiPrediction>& predictions);
 
 // Infinity norm of mass-normalized predicted gradients.

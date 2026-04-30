@@ -550,10 +550,11 @@ double BroadPhase::ccd_min_toi(const std::vector<Vec3>& x, const std::vector<Vec
 }
 
 void BroadPhase::per_vertex_safe_step(
-        std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety, bool clip_to_node_box, bool clip_ccd, bool use_ticcd) const {
+        std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety, bool clip_to_node_box, bool clip_ccd, bool use_ticcd,
+        const std::vector<std::vector<int>>* color_groups) const {
     const int nv = static_cast<int>(x.size());
 
-    for (int vi = 0; vi < nv; ++vi) {
+    auto process_vertex = [&](int vi) {
         if (clip_to_node_box) {
             const AABB& box = cache_.node_boxes[vi];
             if ((x[vi].array() < box.min.array()).any() || (x[vi].array() > box.max.array()).any()) {
@@ -572,7 +573,7 @@ void BroadPhase::per_vertex_safe_step(
                                       .cwiseMin(box.max - Vec3::Constant(inset)); }()
             : x_new_fn(vi);
         const Vec3 dx = x_new - x[vi];
-        if (dx.squaredNorm() < 1e-28) continue;
+        if (dx.squaredNorm() < 1e-28) return;
 
         double toi_min = 1.0;
 
@@ -617,6 +618,17 @@ void BroadPhase::per_vertex_safe_step(
 
         const double step = (toi_min < 1.0) ? safety * toi_min : 1.0;
         x[vi] = x[vi] + step * dx;
+    };
+
+    if (color_groups) {
+        for (const auto& group : *color_groups) {
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < static_cast<int>(group.size()); ++i)
+                process_vertex(group[i]);
+        }
+    } else {
+        for (int vi = 0; vi < nv; ++vi)
+            process_vertex(vi);
     }
 }
 
