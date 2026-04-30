@@ -179,9 +179,8 @@ std::set<SSKey> gpu_ss_set(const GpuBroadPhaseResult& g) {
     return s;
 }
 
-void check_match(const std::vector<Vec3>& positions, const RefMesh& mesh,
-                 double node_box_size, double d_hat) {
-    std::vector<double> radii(positions.size(), node_box_size);
+void check_match_with_radii(const std::vector<Vec3>& positions, const RefMesh& mesh,
+                            const std::vector<double>& radii, double d_hat) {
     const auto cpu_full = cpu_reference(positions, mesh, radii, d_hat);
     auto gpu_full = gpu_hash_grid_build_pairs(positions, mesh, radii, d_hat);
 
@@ -194,6 +193,12 @@ void check_match(const std::vector<Vec3>& positions, const RefMesh& mesh,
     const auto gpu_ss = gpu_ss_set(gpu_full);
     if (cpu_ss != gpu_ss) print_diff_ss(cpu_ss, gpu_ss);
     EXPECT_EQ(cpu_ss, gpu_ss) << "SS pair sets differ";
+}
+
+void check_match(const std::vector<Vec3>& positions, const RefMesh& mesh,
+                 double node_box_size, double d_hat) {
+    std::vector<double> radii(positions.size(), node_box_size);
+    check_match_with_radii(positions, mesh, radii, d_hat);
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +324,82 @@ TEST(GpuHashGrid, ClothFullTwist) {
 
     check_match(state.deformed_positions, mesh,
                 /*node_box_size=*/0.1, /*d_hat=*/0.02);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-call: same mesh across 5 frames, positions twisted incrementally.
+// Catches stale data in:
+//   - the static EdgeCache (h_edges + d_edges keyed on mesh.tris pointer)
+//   - the cudaMallocAsync memory pool (buffers reused across calls)
+// If either returns dirty data on call N, the comparison fails.
+// ---------------------------------------------------------------------------
+TEST(GpuHashGrid, MultiCall_SameMesh_FiveFrames) {
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    build_square_mesh(mesh, state, X,
+                      /*nx=*/15, /*ny=*/15, /*width=*/1.0, /*height=*/1.0,
+                      /*origin=*/Vec3(0.0, 0.0, 0.0));
+
+    for (int frame = 0; frame < 5; ++frame) {
+        // Verify CURRENT positions before mutation (call N matches CPU).
+        check_match(state.deformed_positions, mesh,
+                    /*node_box_size=*/0.1, /*d_hat=*/0.02);
+        // Apply small twist increment for next frame.
+        apply_twist(state.deformed_positions, /*total_angle=*/0.2 * M_PI,
+                    /*x_min=*/0.0, /*x_max=*/1.0, /*axis_y=*/0.5);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-call: same mesh, varying per-vertex radii across calls. Mimics the
+// adaptive node-box sizing the simulation hook uses (clamp(prev_disp * k,
+// min, max)). Catches bugs where the GPU reads stale radii from a pooled
+// buffer or relies on a uniform-radii fast path.
+// ---------------------------------------------------------------------------
+TEST(GpuHashGrid, MultiCall_VaryingRadii_FiveFrames) {
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    build_square_mesh(mesh, state, X, 15, 15, 1.0, 1.0, Vec3(0.0, 0.0, 0.0));
+
+    const int nv = static_cast<int>(state.deformed_positions.size());
+    std::vector<double> radii(nv);
+
+    for (int frame = 0; frame < 5; ++frame) {
+        // Vary radii per-vertex and per-frame. Range [0.02, 0.15] — wide
+        // enough that grid cell_size (which uses max radius) grows
+        // call-over-call, exercising different grid dims.
+        for (int i = 0; i < nv; ++i) {
+            radii[i] = 0.05 + 0.04 * std::sin(0.7 * i + 1.3 * frame);
+            if (radii[i] < 0.02) radii[i] = 0.02;
+        }
+        check_match_with_radii(state.deformed_positions, mesh,
+                               radii, /*d_hat=*/0.01);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-call: alternate between two different meshes. Forces the EdgeCache
+// to invalidate and re-upload on every call. Verifies cache invalidation
+// logic (keyed on tris.data() + tris.size()) handles mesh switches.
+// ---------------------------------------------------------------------------
+TEST(GpuHashGrid, MultiCall_SwitchMesh) {
+    RefMesh mesh_a, mesh_b;
+    DeformedState state_a, state_b;
+    std::vector<Vec2> X_a, X_b;
+
+    build_square_mesh(mesh_a, state_a, X_a, 15, 15, 1.0, 1.0, Vec3(0.0, 0.0, 0.0));
+    build_square_mesh(mesh_b, state_b, X_b, 7, 7, 0.5, 0.5, Vec3(0.0, 0.0, 0.0));
+
+    // Apply different deformations so each scene exercises real proximity.
+    apply_twist(state_a.deformed_positions, M_PI / 2, 0.0, 1.0, 0.5);
+    apply_twist(state_b.deformed_positions, M_PI / 3, 0.0, 0.5, 0.25);
+
+    for (int frame = 0; frame < 5; ++frame) {
+        check_match(state_a.deformed_positions, mesh_a, 0.08, 0.02);
+        check_match(state_b.deformed_positions, mesh_b, 0.08, 0.02);
+    }
 }
 
 }  // namespace
