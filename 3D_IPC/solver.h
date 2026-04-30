@@ -41,7 +41,6 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                                               const std::vector<Pin>& pins, const SimParams& params,
                                               std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
                                               const std::vector<Vec3>& v,
-                                              const std::vector<std::vector<int>>& color_groups,
                                               std::vector<double>* residual_history = nullptr,
                                               const std::string& outdir = "");
 

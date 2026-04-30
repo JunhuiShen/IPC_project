@@ -418,6 +418,30 @@ std::vector<std::vector<int>> build_conflict_graph(const RefMesh& ref_mesh, cons
     return graph;
 }
 
+std::vector<std::vector<int>> greedy_color_conflict_graph(const std::vector<std::vector<int>>& graph) {
+    const int nv = static_cast<int>(graph.size());
+    std::vector<int> color(nv, -1);
+    int max_color = -1;
+
+    for (int vi = 0; vi < nv; ++vi) {
+        std::vector<char> used(max_color + 2, 0);
+        for (int nb : graph[vi]) {
+            if (nb >= 0 && nb < nv && color[nb] >= 0)
+                used[color[nb]] = 1;
+        }
+        int c = 0;
+        while (c < static_cast<int>(used.size()) && used[c]) ++c;
+        color[vi] = c;
+        max_color = std::max(max_color, c);
+    }
+
+    std::vector<std::vector<int>> groups(max_color + 1);
+    for (int vi = 0; vi < nv; ++vi) {
+        if (color[vi] >= 0) groups[color[vi]].push_back(vi);
+    }
+    return groups;
+}
+
 std::vector<std::vector<int>> greedy_color_conflict_graph(const std::vector<std::vector<int>>& graph, const std::vector<JacobiPrediction>& predictions){
     const int nv = static_cast<int>(graph.size());
     std::vector<int> color(nv, -1);
