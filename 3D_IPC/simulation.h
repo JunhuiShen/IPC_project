@@ -4,6 +4,7 @@
 #include "broad_phase.h"
 #include "GPU_Sim/gpu_solver_bridge.h"
 #include "GPU_Elastic/gpu_elastic.h"
+#include "GPU_Elastic/gpu_hash_grid.h"
 #include <functional>
 #include <string>
 #include <vector>
@@ -28,6 +29,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
     // the host mid-frame; pin targets refresh per substep when twisting.
     if (params.use_gpu_elastic) {
         gpu_elastic_begin_frame(state.deformed_positions, state.velocities);
+        std::vector<Vec3> bp_x_scratch;  // reused across substeps when use_broadphase is on
         for (int sub = 0; sub < params.substeps; ++sub) {
             if (twist_spec && pin_updater) {
                 const double t_next = ((frame_index - 1) * params.substeps + (sub + 1)) * dt;
@@ -35,6 +37,28 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
                 gpu_elastic_set_pin_targets(pins);
             }
             gpu_elastic_run_substep_device(params.max_global_iters);
+            if (params.use_broadphase || params.use_cpu_broadphase) {
+                // Snapshot current device positions, then run either GPU or
+                // CPU broad phase. Pair list discarded — measures overhead
+                // before the GS sweep consumes the lists.
+                gpu_elastic_peek_positions(bp_x_scratch);
+                if (params.use_broadphase) {
+                    auto pairs = gpu_hash_grid_build_pairs(
+                        bp_x_scratch, ref_mesh,
+                        params.node_box_size, params.d_hat);
+                    (void)pairs;
+                } else {
+                    std::vector<AABB> blue_boxes(bp_x_scratch.size());
+                    for (std::size_t i = 0; i < bp_x_scratch.size(); ++i) {
+                        blue_boxes[i] = AABB(
+                            bp_x_scratch[i] - Vec3::Constant(params.node_box_size),
+                            bp_x_scratch[i] + Vec3::Constant(params.node_box_size));
+                    }
+                    BroadPhase bp;
+                    bp.initialize(blue_boxes, ref_mesh, params.d_hat);
+                    (void)bp;
+                }
+            }
         }
         gpu_elastic_end_frame(state.deformed_positions, state.velocities);
         for (int sub = 0; sub < params.substeps; ++sub) {

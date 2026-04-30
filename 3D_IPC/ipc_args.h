@@ -39,6 +39,8 @@ struct IPCArgs3D : ArgParser {
     bool   fixed_iters = false;
     bool   use_gpu                 = false;
     bool   use_gpu_elastic         = false;
+    bool   use_broadphase          = false;
+    bool   use_cpu_broadphase      = false;
     bool   experimental            = false;
     double node_box_size           = 0.1;
     double k_barrier                   = 1.0;
@@ -123,6 +125,8 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("fixed_iters",      fixed_iters,      false, "Run exactly max_substep_iters sweeps per substep with no tolerance / convergence check");
         add_bool  ("use_gpu",              use_gpu,              false, "Route the GS sweep through the GPU implementation (CPU stub when CUDA is unavailable)");
         add_bool  ("use_gpu_elastic",      use_gpu_elastic,      false, "Route through the minimal no-collision GPU_Elastic solver (requires d_hat=0); takes precedence over use_gpu");
+        add_bool  ("use_broadphase",       use_broadphase,       false, "When use_gpu_elastic is on, run the GPU hash-grid broad phase per substep (discarded; for benchmarking overhead)");
+        add_bool  ("use_cpu_broadphase",   use_cpu_broadphase,   false, "When use_gpu_elastic is on, run the CPU BroadPhase per substep (discarded; for head-to-head with --use_broadphase)");
         add_bool  ("experimental",         experimental,         false, "Use global_gauss_seidel_solver_basic (requires fixed_iters)");
         add_double("node_box_size",        node_box_size,        0.1,   "Half-extent of the symmetric node box used by the experimental solver");
         add_double("k_barrier",                k_barrier,                1.0,   "Barrier stiffness multiplier");
@@ -206,6 +210,8 @@ struct IPCArgs3D : ArgParser {
         p.fixed_iters = fixed_iters;
         p.use_gpu                 = use_gpu;
         p.use_gpu_elastic         = use_gpu_elastic;
+        p.use_broadphase          = use_broadphase;
+        p.use_cpu_broadphase      = use_cpu_broadphase;
         p.experimental            = experimental;
         p.node_box_size           = node_box_size;
         p.k_barrier                   = k_barrier;

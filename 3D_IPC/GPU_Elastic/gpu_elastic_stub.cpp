@@ -12,6 +12,7 @@ bool gpu_elastic_run_substep(const std::vector<Vec3>&, const std::vector<Vec3>&,
                              int, std::vector<Vec3>&) { return false; }
 void gpu_elastic_begin_frame(const std::vector<Vec3>&, const std::vector<Vec3>&) {}
 bool gpu_elastic_run_substep_device(int) { return false; }
+void gpu_elastic_peek_positions(std::vector<Vec3>&) {}
 void gpu_elastic_end_frame(std::vector<Vec3>&, std::vector<Vec3>&) {}
 double gpu_elastic_substep_residual(int) { return -1.0; }
 double gpu_elastic_last_residual() { return -1.0; }

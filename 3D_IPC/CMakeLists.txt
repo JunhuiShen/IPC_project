@@ -54,6 +54,7 @@ if(CMAKE_CUDA_COMPILER)
         GPU_Sim/gpu_solver_stub.cpp
         GPU_Sim/gpu_solver_bridge.cpp
         GPU_Elastic/gpu_elastic.cu
+        GPU_Elastic/gpu_hash_grid.cu
     )
     find_package(CUDAToolkit REQUIRED)
     set(GPU_CUDA_FOUND TRUE)
@@ -66,6 +67,7 @@ else()
         GPU_Sim/gpu_solver_stub.cpp
         GPU_Sim/gpu_solver_bridge.cpp
         GPU_Elastic/gpu_elastic_stub.cpp
+        GPU_Elastic/gpu_hash_grid_stub.cpp
     )
     set(GPU_CUDA_FOUND FALSE)
     message(STATUS "CUDA not found — using CPU stubs")
@@ -218,6 +220,27 @@ target_link_libraries(gpu_solver_test
 )
 
 gtest_discover_tests(gpu_solver_test)
+
+add_executable(gpu_hash_grid_test
+    gpu_hash_grid_test.cpp
+    make_shape.cpp
+    physics.cpp
+    solver.cpp
+    parallel_helper.cpp
+    broad_phase.cpp
+    example.cpp
+)
+
+target_link_libraries(gpu_hash_grid_test
+    PRIVATE
+    gpu_mesh_lib
+    corotated_energy_lib
+    OpenMP::OpenMP_CXX
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(gpu_hash_grid_test)
 
 add_executable(ccd_test
     ccd_test.cpp

@@ -54,6 +54,13 @@ struct SimParams {
     // Route through the no-collision GPU_Elastic solver (gpu_elastic_*).
     // Only valid when d_hat == 0. Takes precedence over use_gpu.
     bool   use_gpu_elastic;
+    // When use_gpu_elastic is on, run the GPU hash-grid broad phase per
+    // substep (and discard the result). Used to benchmark broad-phase
+    // overhead before the GS sweep is wired to consume the pair lists.
+    bool   use_broadphase;
+    // Same as use_broadphase but runs the CPU BroadPhase::initialize for
+    // a head-to-head speed comparison on identical inputs.
+    bool   use_cpu_broadphase;
     bool   experimental;       // if true, use global_gauss_seidel_solver_basic
     double node_box_size;      // half-extent of the symmetric node box used by experimental solver
     double k_barrier;              // barrier stiffness multiplier
@@ -89,6 +96,8 @@ struct SimParams {
         p.color_rebuild_interval    = 1;
         p.use_gpu                   = false;
         p.use_gpu_elastic           = false;
+        p.use_broadphase            = false;
+        p.use_cpu_broadphase        = false;
         p.experimental              = false;
         p.node_box_size             = 0.1;
         p.k_barrier                     = 1.0;

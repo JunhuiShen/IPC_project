@@ -70,6 +70,12 @@ void gpu_elastic_end_frame(std::vector<Vec3>& x, std::vector<Vec3>& v);
 // gpu_elastic_end_frame has drained the stream. sub is in [0, substeps).
 double gpu_elastic_substep_residual(int sub);
 
+// Snapshot device positions to host without ending the frame. Forces a
+// stream sync, copies d_x to `x`, returns. Velocities, d_x_prev, etc. are
+// left untouched, so the substep loop can continue. Used by external
+// per-substep consumers (e.g. broad phase) that need positions mid-frame.
+void gpu_elastic_peek_positions(std::vector<Vec3>& x);
+
 // Residual from the most recent run_substep (reduction over d_x using the
 // final state). Mass-normalized when params.mass_normalize_residual is set.
 double gpu_elastic_last_residual();

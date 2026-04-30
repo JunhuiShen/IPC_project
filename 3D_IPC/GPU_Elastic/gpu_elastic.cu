@@ -1222,6 +1222,19 @@ bool gpu_elastic_run_substep_device(int max_iters) {
 // End-of-frame download: single cudaStreamSynchronize (covers all pipelined
 // substeps + async residual D2Hs), then pull x and v back. After this call,
 // h_residuals_pinned[0..count-1] holds this frame's per-substep residuals.
+void gpu_elastic_peek_positions(std::vector<Vec3>& x) {
+    if (!g_sess) return;
+    Session& s = *g_sess;
+    const int nv = s.nv;
+    cudaStreamSynchronize(s.stream);
+    std::vector<Real> h_x(nv*3);
+    cudaMemcpy(h_x.data(), s.d_x, nv*3*sizeof(Real), cudaMemcpyDeviceToHost);
+    if ((int)x.size() != nv) x.resize(nv);
+    for (int i = 0; i < nv; ++i) {
+        x[i] = Vec3(h_x[i*3+0], h_x[i*3+1], h_x[i*3+2]);
+    }
+}
+
 void gpu_elastic_end_frame(std::vector<Vec3>& x, std::vector<Vec3>& v) {
     if (!g_sess) return;
     Session& s = *g_sess;
