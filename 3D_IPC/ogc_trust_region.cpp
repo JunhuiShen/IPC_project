@@ -1,4 +1,4 @@
-#include "trust_region.h"
+#include "ogc_trust_region.h"
 
 #include "node_triangle_distance.h"
 #include "segment_segment_distance.h"

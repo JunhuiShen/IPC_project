@@ -3,7 +3,7 @@
 #include "ccd.h"
 #include "make_shape.h"
 #include "parallel_helper.h"
-#include "trust_region.h"
+#include "ogc_trust_region.h"
 #include "node_triangle_distance.h"
 #include "segment_segment_distance.h"
 #include "barrier_energy.h"
@@ -57,54 +57,6 @@ std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vecto
     std::vector<Vec3> xnew(nv);
     for (int i = 0; i < nv; ++i) xnew[i] = x[i] + omega * dx[i];
 
-    return xnew;
-}
-
-// Trust-region initial guess
-std::vector<Vec3> trust_region_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh, double /*d_hat*/) {
-    const int nv = static_cast<int>(x.size());
-    constexpr double gamma_P = 0.4;  // 0 < gamma_P < 0.5
-
-    std::vector<Vec3> dx(nv);
-    for (int i = 0; i < nv; ++i) dx[i] = xhat[i] - x[i];
-
-    BroadPhase ccd_bp;
-    ccd_bp.build_ccd_candidates(x, dx, ref_mesh, 1.0);
-    const auto& cache = ccd_bp.cache();
-
-    // Paper Eq. 21: b[v] = gamma_P * min over every candidate pair touching v
-    // of d0. No d_hat threshold -- the invariant ||x_v - x_v^prev|| <= b_v
-    // must hold for all pairs, not only those already inside the barrier.
-    std::vector<double> b(nv, std::numeric_limits<double>::infinity());
-
-    for (const auto& p : cache.nt_pairs) {
-        const double d0 = node_triangle_distance(
-                x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]]).distance;
-        b[p.node]     = std::min(b[p.node],     d0);
-        b[p.tri_v[0]] = std::min(b[p.tri_v[0]], d0);
-        b[p.tri_v[1]] = std::min(b[p.tri_v[1]], d0);
-        b[p.tri_v[2]] = std::min(b[p.tri_v[2]], d0);
-    }
-    for (const auto& p : cache.ss_pairs) {
-        const double d0 = segment_segment_distance(
-                x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]]).distance;
-        b[p.v[0]] = std::min(b[p.v[0]], d0);
-        b[p.v[1]] = std::min(b[p.v[1]], d0);
-        b[p.v[2]] = std::min(b[p.v[2]], d0);
-        b[p.v[3]] = std::min(b[p.v[3]], d0);
-    }
-    for (int i = 0; i < nv; ++i) b[i] *= gamma_P;
-
-    // Per-vertex truncation (eq. 28).
-    std::vector<Vec3> xnew(nv);
-    for (int i = 0; i < nv; ++i) {
-        const double len = dx[i].norm();
-        if (len <= b[i]) {
-            xnew[i] = xhat[i];                       // keep the full proposed guess
-        } else {
-            xnew[i] = x[i] + (b[i] / len) * dx[i];   // truncate to the b_v ball
-        }
-    }
     return xnew;
 }
 
@@ -162,7 +114,7 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
     double step = 1.0;
     if (params.d_hat > 0.0) {
         const Vec3 dx = -delta;
-        const bool tr = params.use_trust_region;
+        const bool tr = params.use_ogc;
 
         const auto pairs = broad_phase.query_pairs_for_vertex(x, vi, dx, ref_mesh);
 
@@ -454,12 +406,27 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     constexpr double node_box_padding = 1.2;
     auto node_box_size_fn = [&](int vi) { return std::clamp(prev_disp[vi] * node_box_padding, params.node_box_min, params.node_box_max); };
     std::vector<AABB> blue_boxes(nv);
-    for (int i = 0; i < nv; ++i) {
-        const double r = node_box_size_fn(i);
-        blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
-    }
     BroadPhase broad_phase;
-    broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
+
+    if (params.use_ogc) {
+        // First pass: conservative max-size boxes so the broad phase finds every pair the vertex could possibly reach this substep
+        for (int i = 0; i < nv; ++i)
+            blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(params.node_box_max), xnew[i] + Vec3::Constant(params.node_box_max));
+        broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
+
+        // Second pass: tighten to rho_i = 0.4 * min d0 over incident NT/SS pairs
+        for (int i = 0; i < nv; ++i) {
+            const double r = compute_trust_region_bound_for_vertex(i, xnew, broad_phase.cache(), 0.4);
+            blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
+        }
+        broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
+    } else {
+        for (int i = 0; i < nv; ++i) {
+            const double r = node_box_size_fn(i);
+            blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
+        }
+        broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
+    }
 
     //create colors
     const std::vector<std::vector<int>> color_groups = greedy_color_conflict_graph(
@@ -488,7 +455,10 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     //gs loop
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         broad_phase.per_vertex_safe_step(xnew, [&](int vi){ return xnew[vi] - gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm); },
-                                         /*safety=*/0.9, /*clip_to_node_box=*/true, /*clip_ccd=*/params.use_ccd, /*use_ticcd=*/params.use_ticcd,
+                                         /*safety=*/0.9, /*clip_to_node_box=*/true,
+                                         /*clip_ccd=*/params.use_ogc ? false : params.use_ccd,
+                                         /*use_ticcd=*/params.use_ticcd,
+                                         /*use_ogc=*/params.use_ogc,
                                          params.use_parallel ? &color_groups : nullptr);
         result.final_residual = 0.0;
         result.iterations     = iter;
@@ -717,7 +687,7 @@ SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const 
         // Step 2: define node certified regions, i.e. "blue boxes".
         // With trust-region on, the radius is the b_v = gamma_P * d0_min
         const std::vector<double>* blue_box_radii = nullptr;
-        if (barrier_enabled && params.use_trust_region) {
+        if (barrier_enabled && params.use_ogc) {
             trust_blue_radii.resize(num_vertices);
             #pragma omp parallel for if(params.use_parallel)
             for (int vi = 0; vi < num_vertices; ++vi) {

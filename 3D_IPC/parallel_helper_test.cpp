@@ -853,7 +853,7 @@ TEST(TrustRegionSafeStep, FarFromBarrierStillBoundedByTrustRegion) {
     params.tol_abs = 1e-6;
     params.d_hat = 0.1;
     params.use_parallel = false;
-    params.use_trust_region = true;
+    params.use_ogc = true;
 
     // Triangle A (y=0.5) above triangle B (y=0), gap = 0.5 = 5*d_hat.
     state.deformed_positions = {

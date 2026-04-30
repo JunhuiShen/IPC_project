@@ -43,7 +43,7 @@ struct SimParams {
     bool   use_ccd;              // if true, run CCD step clamping in per_vertex_safe_step
     bool   ccd_check;
     bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
-    bool   use_trust_region;     // if true, use trust_region_initial_guess instead of CCD
+    bool   use_ogc;     // if true, use trust_region_initial_guess instead of CCD
     bool   fixed_iters;          // if true, run exactly max_global_iters sweeps with no tolerance / convergence check
     int    color_rebuild_interval;
 
@@ -82,7 +82,7 @@ struct SimParams {
         p.use_ccd                   = false;
         p.ccd_check                 = false;
         p.use_ccd_guess             = true;
-        p.use_trust_region          = false;
+        p.use_ogc          = false;
         p.fixed_iters               = false;
         p.color_rebuild_interval    = 1;
         p.use_gpu                   = false;
