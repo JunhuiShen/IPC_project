@@ -446,6 +446,20 @@ __global__ void k_query_emit_ss(
 }
 
 // ---------------------------------------------------------------------------
+// Pack two int32 IDs into a uint64 key for radix sort + unique dedup.
+// High 32 bits = first id, low 32 = second.
+// ---------------------------------------------------------------------------
+__global__ void k_pack_keys(int n, const int* __restrict__ a,
+                            const int* __restrict__ b,
+                            unsigned long long* __restrict__ keys)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    keys[i] = (static_cast<unsigned long long>(static_cast<unsigned int>(a[i])) << 32)
+            |  static_cast<unsigned long long>(static_cast<unsigned int>(b[i]));
+}
+
+// ---------------------------------------------------------------------------
 // Cuda error helper
 // ---------------------------------------------------------------------------
 inline void cudaCheck(cudaError_t e, const char* what) {
@@ -453,6 +467,18 @@ inline void cudaCheck(cudaError_t e, const char* what) {
         std::fprintf(stderr, "[gpu_hash_grid] %s: %s\n", what, cudaGetErrorString(e));
         std::abort();
     }
+}
+
+// Stream-ordered allocation. CUDA 11.2+ has a memory pool: subsequent
+// d_alloc calls reuse memory freed by d_free at near-zero cost. Avoids
+// the per-call cudaMalloc/cudaFree storm. Stream 0 = legacy default; the
+// pool still works since allocations are pool-tracked, not stream-bound.
+template<typename T>
+inline cudaError_t d_alloc(T** p, std::size_t bytes) {
+    return cudaMallocAsync(reinterpret_cast<void**>(p), bytes, 0);
+}
+inline cudaError_t d_free(void* p) {
+    return cudaFreeAsync(p, 0);
 }
 
 }  // namespace
@@ -535,9 +561,9 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     double* d_X = nullptr;
     double* d_R = nullptr;
     int*    d_tris = nullptr;
-    cudaCheck(cudaMalloc(&d_X, sizeof(double) * 3 * nv), "malloc d_X");
-    cudaCheck(cudaMalloc(&d_R, sizeof(double) * nv),     "malloc d_R");
-    cudaCheck(cudaMalloc(&d_tris, sizeof(int) * 3 * nt), "malloc d_tris");
+    cudaCheck(d_alloc(&d_X, sizeof(double) * 3 * nv), "malloc d_X");
+    cudaCheck(d_alloc(&d_R, sizeof(double) * nv),     "malloc d_R");
+    cudaCheck(d_alloc(&d_tris, sizeof(int) * 3 * nt), "malloc d_tris");
     cudaCheck(cudaMemcpy(d_X, h_X.data(), sizeof(double) * 3 * nv,
                          cudaMemcpyHostToDevice), "memcpy d_X");
     cudaCheck(cudaMemcpy(d_R, per_vertex_radii.data(), sizeof(double) * nv,
@@ -549,7 +575,7 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     // Pass 1: per-triangle, count cells overlapped.
     // -----------------------------------------------------------------------
     int* d_counts = nullptr;
-    cudaCheck(cudaMalloc(&d_counts, sizeof(int) * (nt + 1)), "malloc d_counts");
+    cudaCheck(d_alloc(&d_counts, sizeof(int) * (nt + 1)), "malloc d_counts");
     {
         const int block = 256;
         const int grid_b = (nt + block - 1) / block;
@@ -562,13 +588,13 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     // cub::DeviceScan needs a temporary buffer; query size, then run.
     // -----------------------------------------------------------------------
     int* d_offsets = nullptr;
-    cudaCheck(cudaMalloc(&d_offsets, sizeof(int) * (nt + 1)), "malloc d_offsets");
+    cudaCheck(d_alloc(&d_offsets, sizeof(int) * (nt + 1)), "malloc d_offsets");
     void* d_tmp = nullptr;
     std::size_t tmp_bytes = 0;
     cub::DeviceScan::ExclusiveSum(nullptr, tmp_bytes, d_counts, d_offsets, nt + 1);
-    cudaCheck(cudaMalloc(&d_tmp, tmp_bytes), "malloc cub tmp1");
+    cudaCheck(d_alloc(&d_tmp, tmp_bytes), "malloc cub tmp1");
     cub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes, d_counts, d_offsets, nt + 1);
-    cudaCheck(cudaFree(d_tmp), "free cub tmp1");
+    cudaCheck(d_free(d_tmp), "free cub tmp1");
 
     int total_entries = 0;
     cudaCheck(cudaMemcpy(&total_entries, d_offsets + nt, sizeof(int),
@@ -581,10 +607,10 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     int* d_tri_ids  = nullptr;
     int* d_cell_ids_sorted = nullptr;
     int* d_tri_ids_sorted  = nullptr;
-    cudaCheck(cudaMalloc(&d_cell_ids, sizeof(int) * total_entries), "malloc cell_ids");
-    cudaCheck(cudaMalloc(&d_tri_ids,  sizeof(int) * total_entries), "malloc tri_ids");
-    cudaCheck(cudaMalloc(&d_cell_ids_sorted, sizeof(int) * total_entries), "malloc cell_ids_s");
-    cudaCheck(cudaMalloc(&d_tri_ids_sorted,  sizeof(int) * total_entries), "malloc tri_ids_s");
+    cudaCheck(d_alloc(&d_cell_ids, sizeof(int) * total_entries), "malloc cell_ids");
+    cudaCheck(d_alloc(&d_tri_ids,  sizeof(int) * total_entries), "malloc tri_ids");
+    cudaCheck(d_alloc(&d_cell_ids_sorted, sizeof(int) * total_entries), "malloc cell_ids_s");
+    cudaCheck(d_alloc(&d_tri_ids_sorted,  sizeof(int) * total_entries), "malloc tri_ids_s");
     {
         const int block = 256;
         const int grid_b = (nt + block - 1) / block;
@@ -602,12 +628,12 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
             d_cell_ids, d_cell_ids_sorted,
             d_tri_ids,  d_tri_ids_sorted,
             total_entries);
-        cudaCheck(cudaMalloc(&d_tmp, tmp_bytes), "malloc cub tmp2");
+        cudaCheck(d_alloc(&d_tmp, tmp_bytes), "malloc cub tmp2");
         cub::DeviceRadixSort::SortPairs(d_tmp, tmp_bytes,
             d_cell_ids, d_cell_ids_sorted,
             d_tri_ids,  d_tri_ids_sorted,
             total_entries);
-        cudaCheck(cudaFree(d_tmp), "free cub tmp2");
+        cudaCheck(d_free(d_tmp), "free cub tmp2");
     }
 
     // -----------------------------------------------------------------------
@@ -615,8 +641,8 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     // -----------------------------------------------------------------------
     int* d_cell_start = nullptr;
     int* d_cell_end   = nullptr;
-    cudaCheck(cudaMalloc(&d_cell_start, sizeof(int) * g.n_cells), "malloc cell_start");
-    cudaCheck(cudaMalloc(&d_cell_end,   sizeof(int) * g.n_cells), "malloc cell_end");
+    cudaCheck(d_alloc(&d_cell_start, sizeof(int) * g.n_cells), "malloc cell_start");
+    cudaCheck(d_alloc(&d_cell_end,   sizeof(int) * g.n_cells), "malloc cell_end");
     cudaCheck(cudaMemset(d_cell_start, 0xFF, sizeof(int) * g.n_cells), "memset start"); // -1
     cudaCheck(cudaMemset(d_cell_end,   0,    sizeof(int) * g.n_cells), "memset end");
     if (total_entries > 0) {
@@ -634,8 +660,8 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     // -----------------------------------------------------------------------
     int* d_v_counts  = nullptr;
     int* d_v_offsets = nullptr;
-    cudaCheck(cudaMalloc(&d_v_counts,  sizeof(int) * (nv + 1)), "malloc v_counts");
-    cudaCheck(cudaMalloc(&d_v_offsets, sizeof(int) * (nv + 1)), "malloc v_offsets");
+    cudaCheck(d_alloc(&d_v_counts,  sizeof(int) * (nv + 1)), "malloc v_counts");
+    cudaCheck(d_alloc(&d_v_offsets, sizeof(int) * (nv + 1)), "malloc v_offsets");
     {
         const int block = 256;
         const int grid_b = (nv + block - 1) / block;
@@ -649,10 +675,10 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
         d_tmp = nullptr; tmp_bytes = 0;
         cub::DeviceScan::ExclusiveSum(nullptr, tmp_bytes,
                                       d_v_counts, d_v_offsets, nv + 1);
-        cudaCheck(cudaMalloc(&d_tmp, tmp_bytes), "malloc cub tmp3");
+        cudaCheck(d_alloc(&d_tmp, tmp_bytes), "malloc cub tmp3");
         cub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes,
                                       d_v_counts, d_v_offsets, nv + 1);
-        cudaCheck(cudaFree(d_tmp), "free cub tmp3");
+        cudaCheck(d_free(d_tmp), "free cub tmp3");
     }
     int n_emitted = 0;
     cudaCheck(cudaMemcpy(&n_emitted, d_v_offsets + nv, sizeof(int),
@@ -663,8 +689,8 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     int* d_out_node = nullptr;
     int* d_out_tri  = nullptr;
     if (n_emitted > 0) {
-        cudaCheck(cudaMalloc(&d_out_node, sizeof(int) * n_emitted), "malloc out_node");
-        cudaCheck(cudaMalloc(&d_out_tri,  sizeof(int) * n_emitted), "malloc out_tri");
+        cudaCheck(d_alloc(&d_out_node, sizeof(int) * n_emitted), "malloc out_node");
+        cudaCheck(d_alloc(&d_out_tri,  sizeof(int) * n_emitted), "malloc out_tri");
         const int block = 256;
         const int grid_b = (nv + block - 1) / block;
         k_query_emit<<<grid_b, block>>>(nv, d_X, d_R, d_hat, g,
@@ -678,29 +704,61 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     // Sort + unique on (node, tri) keys to dedupe entries from triangles
     // visited via multiple cells. We pack into 64-bit keys for radix sort.
     // -----------------------------------------------------------------------
-    std::vector<int> h_node(n_emitted);
-    std::vector<int> h_tri(n_emitted);
+    // GPU dedup: pack (node, tri) into uint64 keys, radix-sort, select unique.
+    // Only the (much smaller) unique key list comes back to the host.
+    std::vector<std::uint64_t> h_unique_keys;
     if (n_emitted > 0) {
-        cudaCheck(cudaMemcpy(h_node.data(), d_out_node, sizeof(int) * n_emitted,
-                             cudaMemcpyDeviceToHost), "copy node");
-        cudaCheck(cudaMemcpy(h_tri.data(),  d_out_tri,  sizeof(int) * n_emitted,
-                             cudaMemcpyDeviceToHost), "copy tri");
+        unsigned long long* d_keys = nullptr;
+        unsigned long long* d_keys_sorted = nullptr;
+        unsigned long long* d_keys_unique = nullptr;
+        int* d_n_unique = nullptr;
+        cudaCheck(d_alloc(&d_keys,        sizeof(unsigned long long) * n_emitted), "malloc keys");
+        cudaCheck(d_alloc(&d_keys_sorted, sizeof(unsigned long long) * n_emitted), "malloc keys_sorted");
+        cudaCheck(d_alloc(&d_keys_unique, sizeof(unsigned long long) * n_emitted), "malloc keys_unique");
+        cudaCheck(d_alloc(&d_n_unique,    sizeof(int)),                              "malloc n_unique");
+        {
+            const int block = 256;
+            const int grid_b = (n_emitted + block - 1) / block;
+            k_pack_keys<<<grid_b, block>>>(n_emitted, d_out_node, d_out_tri, d_keys);
+            cudaCheck(cudaGetLastError(), "k_pack_keys nt");
+        }
+        // Radix sort
+        {
+            d_tmp = nullptr; tmp_bytes = 0;
+            cub::DeviceRadixSort::SortKeys(nullptr, tmp_bytes,
+                d_keys, d_keys_sorted, n_emitted);
+            cudaCheck(d_alloc(&d_tmp, tmp_bytes), "malloc cub tmp_sortkeys");
+            cub::DeviceRadixSort::SortKeys(d_tmp, tmp_bytes,
+                d_keys, d_keys_sorted, n_emitted);
+            cudaCheck(d_free(d_tmp), "free cub tmp_sortkeys");
+        }
+        // Unique
+        {
+            d_tmp = nullptr; tmp_bytes = 0;
+            cub::DeviceSelect::Unique(nullptr, tmp_bytes,
+                d_keys_sorted, d_keys_unique, d_n_unique, n_emitted);
+            cudaCheck(d_alloc(&d_tmp, tmp_bytes), "malloc cub tmp_unique");
+            cub::DeviceSelect::Unique(d_tmp, tmp_bytes,
+                d_keys_sorted, d_keys_unique, d_n_unique, n_emitted);
+            cudaCheck(d_free(d_tmp), "free cub tmp_unique");
+        }
+        int n_unique = 0;
+        cudaCheck(cudaMemcpy(&n_unique, d_n_unique, sizeof(int),
+                             cudaMemcpyDeviceToHost), "read n_unique");
+        h_unique_keys.resize(n_unique);
+        if (n_unique > 0) {
+            cudaCheck(cudaMemcpy(h_unique_keys.data(), d_keys_unique,
+                                 sizeof(unsigned long long) * n_unique,
+                                 cudaMemcpyDeviceToHost), "copy unique");
+        }
+        d_free(d_keys);
+        d_free(d_keys_sorted);
+        d_free(d_keys_unique);
+        d_free(d_n_unique);
     }
 
-    // Build NodeTrianglePair list, dedupe on (node, tri_idx) on host.
-    std::vector<std::uint64_t> keys;
-    keys.reserve(n_emitted);
-    for (int i = 0; i < n_emitted; ++i) {
-        const std::uint64_t k =
-            (static_cast<std::uint64_t>(h_node[i]) << 32) |
-            static_cast<std::uint64_t>(h_tri[i]);
-        keys.push_back(k);
-    }
-    std::sort(keys.begin(), keys.end());
-    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-
-    result.nt_pairs.reserve(keys.size());
-    for (std::uint64_t k : keys) {
+    result.nt_pairs.reserve(h_unique_keys.size());
+    for (std::uint64_t k : h_unique_keys) {
         const int node = static_cast<int>(k >> 32);
         const int t    = static_cast<int>(k & 0xFFFFFFFFu);
         NodeTrianglePair p;
@@ -715,10 +773,19 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     // SS pipeline
     // =======================================================================
 
-    // Build unique edges on host from triangle adjacency.
-    // Each triangle contributes 3 edges; dedupe via sorted-pair hash set.
-    std::vector<std::array<int, 2>> h_edges;
-    {
+    // Edge enumeration AND device upload are static across the simulation
+    // — cached by triangle array identity. Saves ~1.5ms per call (host
+    // enumeration ~1ms + d_edges H2D ~0.35ms).
+    struct EdgeCache {
+        const int* tris_ptr = nullptr;
+        std::size_t tris_size = 0;
+        std::vector<std::array<int, 2>> h_edges;
+        int* d_edges = nullptr;
+    };
+    static EdgeCache edge_cache;
+    if (edge_cache.tris_ptr != ref_mesh.tris.data() ||
+        edge_cache.tris_size != ref_mesh.tris.size()) {
+        edge_cache.h_edges.clear();
         struct PairHash {
             std::size_t operator()(const std::pair<int,int>& p) const noexcept {
                 return std::hash<long long>{}(
@@ -727,7 +794,7 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
         };
         std::unordered_set<std::pair<int,int>, PairHash> seen;
         seen.reserve(static_cast<std::size_t>(nt) * 2);
-        h_edges.reserve(static_cast<std::size_t>(nt) * 3);
+        edge_cache.h_edges.reserve(static_cast<std::size_t>(nt) * 3);
         for (int t = 0; t < nt; ++t) {
             int corners[3] = {
                 ref_mesh.tris[3*t + 0],
@@ -739,24 +806,32 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
                 int b = corners[(i + 1) % 3];
                 if (a > b) std::swap(a, b);
                 if (seen.insert({a, b}).second)
-                    h_edges.push_back({a, b});
+                    edge_cache.h_edges.push_back({a, b});
             }
         }
+        // Upload to device once, free any prior allocation first.
+        if (edge_cache.d_edges) d_free(edge_cache.d_edges);
+        const int ne_new = static_cast<int>(edge_cache.h_edges.size());
+        cudaCheck(d_alloc(&edge_cache.d_edges, sizeof(int) * 2 * ne_new),
+                  "malloc d_edges (cache)");
+        cudaCheck(cudaMemcpy(edge_cache.d_edges, edge_cache.h_edges.data(),
+                             sizeof(int) * 2 * ne_new, cudaMemcpyHostToDevice),
+                  "memcpy d_edges (cache)");
+        edge_cache.tris_ptr = ref_mesh.tris.data();
+        edge_cache.tris_size = ref_mesh.tris.size();
     }
+    const std::vector<std::array<int, 2>>& h_edges = edge_cache.h_edges;
     const int ne = static_cast<int>(h_edges.size());
     mark("edges", t_phase, t_edges);
 
     if (ne > 0) {
-        int* d_edges = nullptr;
-        cudaCheck(cudaMalloc(&d_edges, sizeof(int) * 2 * ne), "malloc d_edges");
-        cudaCheck(cudaMemcpy(d_edges, h_edges.data(), sizeof(int) * 2 * ne,
-                             cudaMemcpyHostToDevice), "memcpy d_edges");
+        int* d_edges = edge_cache.d_edges;  // cached, persistent across calls
 
         // Pass 1: count cells per edge.
         int* d_e_counts = nullptr;
         int* d_e_offsets = nullptr;
-        cudaCheck(cudaMalloc(&d_e_counts,  sizeof(int) * (ne + 1)), "malloc e_counts");
-        cudaCheck(cudaMalloc(&d_e_offsets, sizeof(int) * (ne + 1)), "malloc e_offsets");
+        cudaCheck(d_alloc(&d_e_counts,  sizeof(int) * (ne + 1)), "malloc e_counts");
+        cudaCheck(d_alloc(&d_e_offsets, sizeof(int) * (ne + 1)), "malloc e_offsets");
         {
             const int block = 256;
             const int grid_b = (ne + block - 1) / block;
@@ -767,10 +842,10 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
             d_tmp = nullptr; tmp_bytes = 0;
             cub::DeviceScan::ExclusiveSum(nullptr, tmp_bytes,
                                           d_e_counts, d_e_offsets, ne + 1);
-            cudaCheck(cudaMalloc(&d_tmp, tmp_bytes), "malloc cub tmp4");
+            cudaCheck(d_alloc(&d_tmp, tmp_bytes), "malloc cub tmp4");
             cub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes,
                                           d_e_counts, d_e_offsets, ne + 1);
-            cudaCheck(cudaFree(d_tmp), "free cub tmp4");
+            cudaCheck(d_free(d_tmp), "free cub tmp4");
         }
         int e_total = 0;
         cudaCheck(cudaMemcpy(&e_total, d_e_offsets + ne, sizeof(int),
@@ -781,10 +856,10 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
         int* d_e_edge_ids = nullptr;
         int* d_e_cell_ids_sorted = nullptr;
         int* d_e_edge_ids_sorted = nullptr;
-        cudaCheck(cudaMalloc(&d_e_cell_ids,        sizeof(int) * e_total), "malloc e_cell_ids");
-        cudaCheck(cudaMalloc(&d_e_edge_ids,        sizeof(int) * e_total), "malloc e_edge_ids");
-        cudaCheck(cudaMalloc(&d_e_cell_ids_sorted, sizeof(int) * e_total), "malloc e_cell_ids_s");
-        cudaCheck(cudaMalloc(&d_e_edge_ids_sorted, sizeof(int) * e_total), "malloc e_edge_ids_s");
+        cudaCheck(d_alloc(&d_e_cell_ids,        sizeof(int) * e_total), "malloc e_cell_ids");
+        cudaCheck(d_alloc(&d_e_edge_ids,        sizeof(int) * e_total), "malloc e_edge_ids");
+        cudaCheck(d_alloc(&d_e_cell_ids_sorted, sizeof(int) * e_total), "malloc e_cell_ids_s");
+        cudaCheck(d_alloc(&d_e_edge_ids_sorted, sizeof(int) * e_total), "malloc e_edge_ids_s");
         if (e_total > 0) {
             const int block = 256;
             const int grid_b = (ne + block - 1) / block;
@@ -801,19 +876,19 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
                 d_e_cell_ids, d_e_cell_ids_sorted,
                 d_e_edge_ids, d_e_edge_ids_sorted,
                 e_total);
-            cudaCheck(cudaMalloc(&d_tmp, tmp_bytes), "malloc cub tmp5");
+            cudaCheck(d_alloc(&d_tmp, tmp_bytes), "malloc cub tmp5");
             cub::DeviceRadixSort::SortPairs(d_tmp, tmp_bytes,
                 d_e_cell_ids, d_e_cell_ids_sorted,
                 d_e_edge_ids, d_e_edge_ids_sorted,
                 e_total);
-            cudaCheck(cudaFree(d_tmp), "free cub tmp5");
+            cudaCheck(d_free(d_tmp), "free cub tmp5");
         }
 
         // Build cell→range map (separate from NT's; SS hashes edges, not tris).
         int* d_e_cell_start = nullptr;
         int* d_e_cell_end   = nullptr;
-        cudaCheck(cudaMalloc(&d_e_cell_start, sizeof(int) * g.n_cells), "malloc e_cell_start");
-        cudaCheck(cudaMalloc(&d_e_cell_end,   sizeof(int) * g.n_cells), "malloc e_cell_end");
+        cudaCheck(d_alloc(&d_e_cell_start, sizeof(int) * g.n_cells), "malloc e_cell_start");
+        cudaCheck(d_alloc(&d_e_cell_end,   sizeof(int) * g.n_cells), "malloc e_cell_end");
         cudaCheck(cudaMemset(d_e_cell_start, 0xFF, sizeof(int) * g.n_cells), "memset e_start");
         cudaCheck(cudaMemset(d_e_cell_end,   0,    sizeof(int) * g.n_cells), "memset e_end");
         if (e_total > 0) {
@@ -827,8 +902,8 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
         // Per-edge query: count then emit.
         int* d_q_counts  = nullptr;
         int* d_q_offsets = nullptr;
-        cudaCheck(cudaMalloc(&d_q_counts,  sizeof(int) * (ne + 1)), "malloc q_counts");
-        cudaCheck(cudaMalloc(&d_q_offsets, sizeof(int) * (ne + 1)), "malloc q_offsets");
+        cudaCheck(d_alloc(&d_q_counts,  sizeof(int) * (ne + 1)), "malloc q_counts");
+        cudaCheck(d_alloc(&d_q_offsets, sizeof(int) * (ne + 1)), "malloc q_offsets");
         {
             const int block = 256;
             const int grid_b = (ne + block - 1) / block;
@@ -842,10 +917,10 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
             d_tmp = nullptr; tmp_bytes = 0;
             cub::DeviceScan::ExclusiveSum(nullptr, tmp_bytes,
                                           d_q_counts, d_q_offsets, ne + 1);
-            cudaCheck(cudaMalloc(&d_tmp, tmp_bytes), "malloc cub tmp6");
+            cudaCheck(d_alloc(&d_tmp, tmp_bytes), "malloc cub tmp6");
             cub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes,
                                           d_q_counts, d_q_offsets, ne + 1);
-            cudaCheck(cudaFree(d_tmp), "free cub tmp6");
+            cudaCheck(d_free(d_tmp), "free cub tmp6");
         }
         int n_ss_emitted = 0;
         cudaCheck(cudaMemcpy(&n_ss_emitted, d_q_offsets + ne, sizeof(int),
@@ -856,8 +931,8 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
         int* d_out_a = nullptr;
         int* d_out_b = nullptr;
         if (n_ss_emitted > 0) {
-            cudaCheck(cudaMalloc(&d_out_a, sizeof(int) * n_ss_emitted), "malloc out_a");
-            cudaCheck(cudaMalloc(&d_out_b, sizeof(int) * n_ss_emitted), "malloc out_b");
+            cudaCheck(d_alloc(&d_out_a, sizeof(int) * n_ss_emitted), "malloc out_a");
+            cudaCheck(d_alloc(&d_out_b, sizeof(int) * n_ss_emitted), "malloc out_b");
             const int block = 256;
             const int grid_b = (ne + block - 1) / block;
             k_query_emit_ss<<<grid_b, block>>>(ne, d_edges, d_X, d_R, d_hat, g,
@@ -868,23 +943,56 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
             cudaCheck(cudaGetLastError(), "k_query_emit_ss");
         }
 
-        // Copy back, dedupe on (ea, eb) keys.
-        std::vector<int> h_a(n_ss_emitted), h_b(n_ss_emitted);
-        if (n_ss_emitted > 0) {
-            cudaCheck(cudaMemcpy(h_a.data(), d_out_a, sizeof(int) * n_ss_emitted,
-                                 cudaMemcpyDeviceToHost), "copy a");
-            cudaCheck(cudaMemcpy(h_b.data(), d_out_b, sizeof(int) * n_ss_emitted,
-                                 cudaMemcpyDeviceToHost), "copy b");
-        }
+        // GPU dedup: pack → radix sort → unique on device, only the small
+        // unique key list crosses to host.
         std::vector<std::uint64_t> ss_keys;
-        ss_keys.reserve(n_ss_emitted);
-        for (int i = 0; i < n_ss_emitted; ++i) {
-            ss_keys.push_back(
-                (static_cast<std::uint64_t>(h_a[i]) << 32) |
-                static_cast<std::uint64_t>(h_b[i]));
+        if (n_ss_emitted > 0) {
+            unsigned long long* d_keys = nullptr;
+            unsigned long long* d_keys_sorted = nullptr;
+            unsigned long long* d_keys_unique = nullptr;
+            int* d_n_unique = nullptr;
+            cudaCheck(d_alloc(&d_keys,        sizeof(unsigned long long) * n_ss_emitted), "malloc ss_keys");
+            cudaCheck(d_alloc(&d_keys_sorted, sizeof(unsigned long long) * n_ss_emitted), "malloc ss_keys_sorted");
+            cudaCheck(d_alloc(&d_keys_unique, sizeof(unsigned long long) * n_ss_emitted), "malloc ss_keys_unique");
+            cudaCheck(d_alloc(&d_n_unique,    sizeof(int)),                                  "malloc ss_n_unique");
+            {
+                const int block = 256;
+                const int grid_b = (n_ss_emitted + block - 1) / block;
+                k_pack_keys<<<grid_b, block>>>(n_ss_emitted, d_out_a, d_out_b, d_keys);
+                cudaCheck(cudaGetLastError(), "k_pack_keys ss");
+            }
+            {
+                d_tmp = nullptr; tmp_bytes = 0;
+                cub::DeviceRadixSort::SortKeys(nullptr, tmp_bytes,
+                    d_keys, d_keys_sorted, n_ss_emitted);
+                cudaCheck(d_alloc(&d_tmp, tmp_bytes), "malloc cub tmp_ss_sortkeys");
+                cub::DeviceRadixSort::SortKeys(d_tmp, tmp_bytes,
+                    d_keys, d_keys_sorted, n_ss_emitted);
+                cudaCheck(d_free(d_tmp), "free cub tmp_ss_sortkeys");
+            }
+            {
+                d_tmp = nullptr; tmp_bytes = 0;
+                cub::DeviceSelect::Unique(nullptr, tmp_bytes,
+                    d_keys_sorted, d_keys_unique, d_n_unique, n_ss_emitted);
+                cudaCheck(d_alloc(&d_tmp, tmp_bytes), "malloc cub tmp_ss_unique");
+                cub::DeviceSelect::Unique(d_tmp, tmp_bytes,
+                    d_keys_sorted, d_keys_unique, d_n_unique, n_ss_emitted);
+                cudaCheck(d_free(d_tmp), "free cub tmp_ss_unique");
+            }
+            int n_unique = 0;
+            cudaCheck(cudaMemcpy(&n_unique, d_n_unique, sizeof(int),
+                                 cudaMemcpyDeviceToHost), "read ss n_unique");
+            ss_keys.resize(n_unique);
+            if (n_unique > 0) {
+                cudaCheck(cudaMemcpy(ss_keys.data(), d_keys_unique,
+                                     sizeof(unsigned long long) * n_unique,
+                                     cudaMemcpyDeviceToHost), "copy ss unique");
+            }
+            d_free(d_keys);
+            d_free(d_keys_sorted);
+            d_free(d_keys_unique);
+            d_free(d_n_unique);
         }
-        std::sort(ss_keys.begin(), ss_keys.end());
-        ss_keys.erase(std::unique(ss_keys.begin(), ss_keys.end()), ss_keys.end());
 
         result.ss_pairs.reserve(ss_keys.size());
         for (std::uint64_t k : ss_keys) {
@@ -898,39 +1006,39 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
             result.ss_pairs.push_back(p);
         }
 
-        cudaFree(d_edges);
-        cudaFree(d_e_counts);
-        cudaFree(d_e_offsets);
-        cudaFree(d_e_cell_ids);
-        cudaFree(d_e_edge_ids);
-        cudaFree(d_e_cell_ids_sorted);
-        cudaFree(d_e_edge_ids_sorted);
-        cudaFree(d_e_cell_start);
-        cudaFree(d_e_cell_end);
-        cudaFree(d_q_counts);
-        cudaFree(d_q_offsets);
-        if (d_out_a) cudaFree(d_out_a);
-        if (d_out_b) cudaFree(d_out_b);
+        // d_edges is owned by edge_cache — do not free.
+        d_free(d_e_counts);
+        d_free(d_e_offsets);
+        d_free(d_e_cell_ids);
+        d_free(d_e_edge_ids);
+        d_free(d_e_cell_ids_sorted);
+        d_free(d_e_edge_ids_sorted);
+        d_free(d_e_cell_start);
+        d_free(d_e_cell_end);
+        d_free(d_q_counts);
+        d_free(d_q_offsets);
+        if (d_out_a) d_free(d_out_a);
+        if (d_out_b) d_free(d_out_b);
     }
 
     // -----------------------------------------------------------------------
     // Cleanup
     // -----------------------------------------------------------------------
-    cudaFree(d_X);
-    cudaFree(d_R);
-    cudaFree(d_tris);
-    cudaFree(d_counts);
-    cudaFree(d_offsets);
-    cudaFree(d_cell_ids);
-    cudaFree(d_tri_ids);
-    cudaFree(d_cell_ids_sorted);
-    cudaFree(d_tri_ids_sorted);
-    cudaFree(d_cell_start);
-    cudaFree(d_cell_end);
-    cudaFree(d_v_counts);
-    cudaFree(d_v_offsets);
-    if (d_out_node) cudaFree(d_out_node);
-    if (d_out_tri)  cudaFree(d_out_tri);
+    d_free(d_X);
+    d_free(d_R);
+    d_free(d_tris);
+    d_free(d_counts);
+    d_free(d_offsets);
+    d_free(d_cell_ids);
+    d_free(d_tri_ids);
+    d_free(d_cell_ids_sorted);
+    d_free(d_tri_ids_sorted);
+    d_free(d_cell_start);
+    d_free(d_cell_end);
+    d_free(d_v_counts);
+    d_free(d_v_offsets);
+    if (d_out_node) d_free(d_out_node);
+    if (d_out_tri)  d_free(d_out_tri);
 
     if (prof) {
         mark("dedup", t_phase, t_dedup);
