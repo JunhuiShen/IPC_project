@@ -258,9 +258,15 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     //create node (blue) boxes and create broad phase (red boxes) accordingly
     const int nv = static_cast<int>(xnew.size());
     const PinMap pm = build_pin_map(pins, nv);
+    static std::vector<double> prev_disp;
+    if (static_cast<int>(prev_disp.size()) != nv)
+        prev_disp.assign(nv, params.node_box_max);
+    constexpr double node_box_padding = 1.2;
+    auto node_box_size_fn = [&](int vi) { return std::clamp(prev_disp[vi] * node_box_padding, params.node_box_min, params.node_box_max); };
     std::vector<AABB> blue_boxes(nv);
     for (int i = 0; i < nv; ++i) {
-        blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(params.node_box_size), xnew[i] + Vec3::Constant(params.node_box_size));
+        const double r = node_box_size_fn(i);
+        blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
     }
     BroadPhase broad_phase;
     broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
@@ -287,6 +293,8 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
         write_substep_data(params, broad_phase, xnew, outdir);
     }
 
+    const std::vector<Vec3> xnew_substep_start = xnew;
+
     //gs loop
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         broad_phase.per_vertex_safe_step(xnew, [&](int vi){ return xnew[vi] - gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm); },
@@ -296,6 +304,9 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
         result.iterations     = iter;
         if (residual_history) residual_history->push_back(result.final_residual);
     }
+
+    for (int i = 0; i < nv; ++i)
+        prev_disp[i] = (xnew[i] - xnew_substep_start[i]).norm();
 
     if (params.fixed_iters) result.converged = true;
     return result;
