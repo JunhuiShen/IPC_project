@@ -12,13 +12,35 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 enable_testing()
 
-find_package(Eigen3 REQUIRED NO_MODULE)
+include(FetchContent)
+
+# Pin Eigen to 3.4.0. Homebrew shipped Eigen 5.0.x in early 2026 and that
+# version triggered NaN corruption through std::function<Vec3(int)> boundaries
+# in the experimental solver. Until the codebase is audited for Eigen 5
+# compatibility, fetch 3.4.0 directly so every build uses the validated version.
+set(EIGEN_BUILD_DOC OFF CACHE INTERNAL "")
+set(EIGEN_BUILD_TESTING OFF CACHE INTERNAL "")
+set(EIGEN_BUILD_PKGCONFIG OFF CACHE INTERNAL "")
+set(BUILD_TESTING OFF CACHE INTERNAL "")
+FetchContent_Declare(
+    eigen3
+    URL      https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
+    URL_HASH SHA256=8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72
+)
+# Use GetProperties + Populate so we don't pull Eigen's CMakeLists into the
+# project (it adds heaps of test/check targets). We just need the headers.
+FetchContent_GetProperties(eigen3)
+if(NOT eigen3_POPULATED)
+    FetchContent_Populate(eigen3)
+endif()
+add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
+target_include_directories(Eigen3::Eigen SYSTEM INTERFACE ${eigen3_SOURCE_DIR})
+
 find_package(GTest REQUIRED)
 
 # Tight-Inclusion CCD (https://github.com/Continuous-Collision-Detection/Tight-Inclusion)
 # powers our general CCD (multi-vertex motion). Pulled in via FetchContent so the
 # build is self-contained.
-include(FetchContent)
 FetchContent_Declare(
     tight_inclusion
     GIT_REPOSITORY https://github.com/Continuous-Collision-Detection/Tight-Inclusion.git
