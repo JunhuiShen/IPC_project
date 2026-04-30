@@ -122,7 +122,12 @@ void print_diff_ss(const std::set<SSKey>& cpu, const std::set<SSKey>& gpu) {
         std::printf("          ... (+%zu more)\n", gpu_only.size() - kPrint);
 }
 
-GpuBroadPhaseResult cpu_reference(
+struct CpuRefPairs {
+    std::vector<NodeTrianglePair>   nt_pairs;
+    std::vector<SegmentSegmentPair> ss_pairs;
+};
+
+CpuRefPairs cpu_reference(
     const std::vector<Vec3>& positions, const RefMesh& mesh,
     const std::vector<double>& per_vertex_radii, double d_hat)
 {
@@ -134,26 +139,59 @@ GpuBroadPhaseResult cpu_reference(
     }
     BroadPhase bp;
     bp.initialize(blue_boxes, mesh, d_hat);
-    GpuBroadPhaseResult r;
-    r.nt_pairs = bp.cache().nt_pairs;
-    r.ss_pairs = bp.cache().ss_pairs;
-    return r;
+    return CpuRefPairs{bp.cache().nt_pairs, bp.cache().ss_pairs};
+}
+
+// Convert GPU's device-resident packed key arrays into NT/SS sets for
+// comparison with CPU. NT keys are (node << 32) | tri_idx — we look up the
+// triangle's three vertices via mesh.tris. SS keys are (edge_a << 32) | edge_b
+// — we look up endpoint vertices via the GPU's cached edge table.
+std::set<NTKey> gpu_nt_set(const GpuBroadPhaseResult& g, const RefMesh& mesh) {
+    std::set<NTKey> s;
+    auto keys = gpu_broad_phase_nt_keys_to_host(g);
+    for (auto k : keys) {
+        const int node = static_cast<int>(k >> 32);
+        const int t    = static_cast<int>(k & 0xFFFFFFFFu);
+        NodeTrianglePair p;
+        p.node     = node;
+        p.tri_v[0] = mesh.tris[3*t + 0];
+        p.tri_v[1] = mesh.tris[3*t + 1];
+        p.tri_v[2] = mesh.tris[3*t + 2];
+        s.insert(canonicalize(p));
+    }
+    return s;
+}
+
+std::set<SSKey> gpu_ss_set(const GpuBroadPhaseResult& g) {
+    std::set<SSKey> s;
+    auto keys = gpu_broad_phase_ss_keys_to_host(g);
+    auto edges = gpu_broad_phase_edges_to_host(g);
+    for (auto k : keys) {
+        const int ea = static_cast<int>(k >> 32);
+        const int eb = static_cast<int>(k & 0xFFFFFFFFu);
+        SegmentSegmentPair p;
+        p.v[0] = edges[2*ea + 0];
+        p.v[1] = edges[2*ea + 1];
+        p.v[2] = edges[2*eb + 0];
+        p.v[3] = edges[2*eb + 1];
+        s.insert(canonicalize(p));
+    }
+    return s;
 }
 
 void check_match(const std::vector<Vec3>& positions, const RefMesh& mesh,
                  double node_box_size, double d_hat) {
-    // Tests use uniform radii; per-vertex sizing is exercised via real sim.
     std::vector<double> radii(positions.size(), node_box_size);
     const auto cpu_full = cpu_reference(positions, mesh, radii, d_hat);
-    const auto gpu_full = gpu_hash_grid_build_pairs(positions, mesh, radii, d_hat);
+    auto gpu_full = gpu_hash_grid_build_pairs(positions, mesh, radii, d_hat);
 
     const auto cpu_nt = to_set(cpu_full.nt_pairs);
-    const auto gpu_nt = to_set(gpu_full.nt_pairs);
+    const auto gpu_nt = gpu_nt_set(gpu_full, mesh);
     if (cpu_nt != gpu_nt) print_diff_nt(cpu_nt, gpu_nt);
     EXPECT_EQ(cpu_nt, gpu_nt) << "NT pair sets differ";
 
     const auto cpu_ss = to_set(cpu_full.ss_pairs);
-    const auto gpu_ss = to_set(gpu_full.ss_pairs);
+    const auto gpu_ss = gpu_ss_set(gpu_full);
     if (cpu_ss != gpu_ss) print_diff_ss(cpu_ss, gpu_ss);
     EXPECT_EQ(cpu_ss, gpu_ss) << "SS pair sets differ";
 }

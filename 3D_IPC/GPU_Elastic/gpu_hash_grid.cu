@@ -701,12 +701,9 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     }
 
     // -----------------------------------------------------------------------
-    // Sort + unique on (node, tri) keys to dedupe entries from triangles
-    // visited via multiple cells. We pack into 64-bit keys for radix sort.
-    // -----------------------------------------------------------------------
     // GPU dedup: pack (node, tri) into uint64 keys, radix-sort, select unique.
-    // Only the (much smaller) unique key list comes back to the host.
-    std::vector<std::uint64_t> h_unique_keys;
+    // The result keeps the unique key array on device (transferred to result).
+    // -----------------------------------------------------------------------
     if (n_emitted > 0) {
         unsigned long long* d_keys = nullptr;
         unsigned long long* d_keys_sorted = nullptr;
@@ -722,7 +719,6 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
             k_pack_keys<<<grid_b, block>>>(n_emitted, d_out_node, d_out_tri, d_keys);
             cudaCheck(cudaGetLastError(), "k_pack_keys nt");
         }
-        // Radix sort
         {
             d_tmp = nullptr; tmp_bytes = 0;
             cub::DeviceRadixSort::SortKeys(nullptr, tmp_bytes,
@@ -732,7 +728,6 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
                 d_keys, d_keys_sorted, n_emitted);
             cudaCheck(d_free(d_tmp), "free cub tmp_sortkeys");
         }
-        // Unique
         {
             d_tmp = nullptr; tmp_bytes = 0;
             cub::DeviceSelect::Unique(nullptr, tmp_bytes,
@@ -745,28 +740,12 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
         int n_unique = 0;
         cudaCheck(cudaMemcpy(&n_unique, d_n_unique, sizeof(int),
                              cudaMemcpyDeviceToHost), "read n_unique");
-        h_unique_keys.resize(n_unique);
-        if (n_unique > 0) {
-            cudaCheck(cudaMemcpy(h_unique_keys.data(), d_keys_unique,
-                                 sizeof(unsigned long long) * n_unique,
-                                 cudaMemcpyDeviceToHost), "copy unique");
-        }
+        // Transfer ownership of d_keys_unique to the result.
+        result.d_nt_keys  = d_keys_unique;
+        result.n_nt_pairs = n_unique;
         d_free(d_keys);
         d_free(d_keys_sorted);
-        d_free(d_keys_unique);
         d_free(d_n_unique);
-    }
-
-    result.nt_pairs.reserve(h_unique_keys.size());
-    for (std::uint64_t k : h_unique_keys) {
-        const int node = static_cast<int>(k >> 32);
-        const int t    = static_cast<int>(k & 0xFFFFFFFFu);
-        NodeTrianglePair p;
-        p.node     = node;
-        p.tri_v[0] = ref_mesh.tris[3*t + 0];
-        p.tri_v[1] = ref_mesh.tris[3*t + 1];
-        p.tri_v[2] = ref_mesh.tris[3*t + 2];
-        result.nt_pairs.push_back(p);
     }
 
     // =======================================================================
@@ -822,6 +801,9 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
     }
     const std::vector<std::array<int, 2>>& h_edges = edge_cache.h_edges;
     const int ne = static_cast<int>(h_edges.size());
+    // Expose the cached edge table on the result (non-owning pointer).
+    result.d_edges = edge_cache.d_edges;
+    result.n_edges = ne;
     mark("edges", t_phase, t_edges);
 
     if (ne > 0) {
@@ -943,9 +925,8 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
             cudaCheck(cudaGetLastError(), "k_query_emit_ss");
         }
 
-        // GPU dedup: pack → radix sort → unique on device, only the small
-        // unique key list crosses to host.
-        std::vector<std::uint64_t> ss_keys;
+        // GPU dedup: pack → radix sort → unique on device. The unique key
+        // array stays on device and ownership transfers to the result.
         if (n_ss_emitted > 0) {
             unsigned long long* d_keys = nullptr;
             unsigned long long* d_keys_sorted = nullptr;
@@ -982,28 +963,12 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
             int n_unique = 0;
             cudaCheck(cudaMemcpy(&n_unique, d_n_unique, sizeof(int),
                                  cudaMemcpyDeviceToHost), "read ss n_unique");
-            ss_keys.resize(n_unique);
-            if (n_unique > 0) {
-                cudaCheck(cudaMemcpy(ss_keys.data(), d_keys_unique,
-                                     sizeof(unsigned long long) * n_unique,
-                                     cudaMemcpyDeviceToHost), "copy ss unique");
-            }
+            // Transfer ownership of d_keys_unique to the result.
+            result.d_ss_keys  = d_keys_unique;
+            result.n_ss_pairs = n_unique;
             d_free(d_keys);
             d_free(d_keys_sorted);
-            d_free(d_keys_unique);
             d_free(d_n_unique);
-        }
-
-        result.ss_pairs.reserve(ss_keys.size());
-        for (std::uint64_t k : ss_keys) {
-            const int ea = static_cast<int>(k >> 32);
-            const int eb = static_cast<int>(k & 0xFFFFFFFFu);
-            SegmentSegmentPair p;
-            p.v[0] = h_edges[ea][0];
-            p.v[1] = h_edges[ea][1];
-            p.v[2] = h_edges[eb][0];
-            p.v[3] = h_edges[eb][1];
-            result.ss_pairs.push_back(p);
         }
 
         // d_edges is owned by edge_cache — do not free.
@@ -1047,10 +1012,49 @@ GpuBroadPhaseResult gpu_hash_grid_build_pairs(
         std::fprintf(stderr,
             "[gpu_hg] total=%.2fms  nt=%.2fms  edges=%.2fms  ss=%.2fms  "
             "dedup=%.2fms  nv=%d nt=%d ne=%d  nt_emit=%d ss_emit=%d  "
-            "nt_pairs=%zu ss_pairs=%zu\n",
+            "nt_pairs=%d ss_pairs=%d\n",
             t_total, t_nt, t_edges, t_ss, t_dedup,
             nv, nt, ne, n_nt_emitted_total, n_ss_emitted_total,
-            result.nt_pairs.size(), result.ss_pairs.size());
+            result.n_nt_pairs, result.n_ss_pairs);
     }
     return result;
+}
+
+// ============================================================================
+// Result lifetime + host-copy helpers
+// ============================================================================
+GpuBroadPhaseResult::~GpuBroadPhaseResult() {
+    if (d_nt_keys) cudaFreeAsync(d_nt_keys, 0);
+    if (d_ss_keys) cudaFreeAsync(d_ss_keys, 0);
+    // d_edges is non-owning (cached).
+}
+
+std::vector<unsigned long long> gpu_broad_phase_nt_keys_to_host(const GpuBroadPhaseResult& r) {
+    std::vector<unsigned long long> out;
+    if (r.n_nt_pairs == 0 || r.d_nt_keys == nullptr) return out;
+    out.resize(r.n_nt_pairs);
+    cudaMemcpy(out.data(), r.d_nt_keys,
+               sizeof(unsigned long long) * r.n_nt_pairs,
+               cudaMemcpyDeviceToHost);
+    return out;
+}
+
+std::vector<unsigned long long> gpu_broad_phase_ss_keys_to_host(const GpuBroadPhaseResult& r) {
+    std::vector<unsigned long long> out;
+    if (r.n_ss_pairs == 0 || r.d_ss_keys == nullptr) return out;
+    out.resize(r.n_ss_pairs);
+    cudaMemcpy(out.data(), r.d_ss_keys,
+               sizeof(unsigned long long) * r.n_ss_pairs,
+               cudaMemcpyDeviceToHost);
+    return out;
+}
+
+std::vector<int> gpu_broad_phase_edges_to_host(const GpuBroadPhaseResult& r) {
+    std::vector<int> out;
+    if (r.n_edges == 0 || r.d_edges == nullptr) return out;
+    out.resize(2 * r.n_edges);
+    cudaMemcpy(out.data(), r.d_edges,
+               sizeof(int) * 2 * r.n_edges,
+               cudaMemcpyDeviceToHost);
+    return out;
 }
