@@ -120,7 +120,7 @@ struct BarrierScene {
     std::vector<std::vector<int>> color_groups;
     int nv = 0;
 
-    explicit BarrierScene(bool use_ogc = false) {
+    explicit BarrierScene(bool use_trust_region = false) {
         params           = SimParams::zeros();   // safe defaults for every field
         params.fps       = 30.0;
         params.substeps  = 1;
@@ -131,7 +131,7 @@ struct BarrierScene {
         params.kpin      = 0.0;
         params.kB        = 0.0;
         params.d_hat     = 0.5;
-        params.use_ogc = use_ogc;
+        params.use_trust_region = use_trust_region;
         params.gravity   = Vec3(0.0, -9.81, 0.0);
 
         clear_model(ref_mesh, state, X, pins);
@@ -238,12 +238,12 @@ static void run_commit_comparison(BarrierScene& s) {
 }
 
 TEST(GPUSolver, ParallelCommitMatchesCPU_LinearCCD) {
-    BarrierScene s(/*use_ogc=*/false);
+    BarrierScene s(/*use_trust_region=*/false);
     run_commit_comparison(s);
 }
 
 TEST(GPUSolver, ParallelCommitMatchesCPU_TrustRegion) {
-    BarrierScene s(/*use_ogc=*/true);
+    BarrierScene s(/*use_trust_region=*/true);
     run_commit_comparison(s);
 }
 

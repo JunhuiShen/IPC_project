@@ -1,4 +1,4 @@
-#include "ogc_trust_region.h"
+#include "trust_region.h"
 
 #include "node_triangle_distance.h"
 #include "segment_segment_distance.h"
@@ -11,7 +11,7 @@
 namespace {
 
 constexpr double kTol = 1.0e-12;
-constexpr double kEta = 0.4;  // matches the default in ogc_trust_region.h
+constexpr double kEta = 0.4;  // matches the default in trust_region.h
 
 double vt_distance(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3) {
     return node_triangle_distance(x, x1, x2, x3).distance;

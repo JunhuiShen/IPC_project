@@ -183,7 +183,7 @@ struct GPUSimParams {
     int    max_global_iters;
     bool   use_parallel;
     bool   ccd_check;
-    bool   use_ogc;
+    bool   use_trust_region;
 
     double dt()  const { return dt_val;  }
     double dt2() const { return dt2_val; }

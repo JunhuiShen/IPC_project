@@ -35,7 +35,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_ccd       = true;
     bool   ccd_check     = false;
     bool   use_ccd_guess = true;
-    bool   use_ogc = false;
+    bool   use_trust_region = false;
     bool   fixed_iters = false;
     bool   use_gpu                 = false;
     bool   experimental            = false;
@@ -118,8 +118,8 @@ struct IPCArgs3D : ArgParser {
 
         add_bool  ("use_ccd",      use_ccd,      true,   "Run CCD step clamping in per_vertex_safe_step");
         add_bool  ("ccd_check",    ccd_check,    false,  "Run post-sweep CCD penetration check (serial + parallel)");
-        add_bool  ("use_ccd_guess",    use_ccd_guess,    true,  "Use ccd_initial_guess as the substep start point (ignored if use_ogc is on)");
-        add_bool  ("use_ogc", use_ogc, false, "Use trust-region narrow phase instead of CCD for step clamping");
+        add_bool  ("use_ccd_guess",    use_ccd_guess,    true,  "Use ccd_initial_guess as the substep start point (ignored if use_trust_region is on)");
+        add_bool  ("use_trust_region", use_trust_region, false, "Use trust-region narrow phase instead of CCD for step clamping");
         add_bool  ("fixed_iters",      fixed_iters,      false, "Run exactly max_substep_iters sweeps per substep with no tolerance / convergence check");
         add_bool  ("use_gpu",              use_gpu,              false, "Route the GS sweep through the GPU implementation (CPU stub when CUDA is unavailable)");
         add_bool  ("experimental",         experimental,         false, "Use global_gauss_seidel_solver_basic (requires fixed_iters)");
@@ -202,7 +202,7 @@ struct IPCArgs3D : ArgParser {
         p.use_ccd          = use_ccd;
         p.ccd_check        = ccd_check;
         p.use_ccd_guess = use_ccd_guess;
-        p.use_ogc = use_ogc;
+        p.use_trust_region = use_trust_region;
         p.fixed_iters = fixed_iters;
         p.use_gpu                 = use_gpu;
         p.experimental            = experimental;

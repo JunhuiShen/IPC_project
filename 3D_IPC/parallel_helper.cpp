@@ -2,7 +2,7 @@
 #include "IPC_math.h"
 #include "ccd.h"
 #include "make_shape.h"
-#include "ogc_trust_region.h"
+#include "trust_region.h"
 
 #include <algorithm>
 #include <cmath>
@@ -516,7 +516,7 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
     if (params.d_hat <= 0.0) return 1.0;
 
     const Vec3 dx = -delta;
-    const bool tr = params.use_ogc;
+    const bool tr = params.use_trust_region;
 
     double safe_min = 1.0;
 
