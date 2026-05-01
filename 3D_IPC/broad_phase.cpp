@@ -477,15 +477,17 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
     }
 
     c.edge_boxes.resize(ne);
+    std::vector<AABB> red_edge_boxes(ne);
     for (int e = 0; e < ne; ++e) {
-        c.edge_boxes[e] = vertex_boxes[c.edges[e][0]];
-        c.edge_boxes[e].expand(vertex_boxes[c.edges[e][1]]);
+        red_edge_boxes[e] = vertex_boxes[c.edges[e][0]];
+        red_edge_boxes[e].expand(vertex_boxes[c.edges[e][1]]);
+        c.edge_boxes[e] = red_edge_boxes[e];
         c.edge_boxes[e].min -= pad;
         c.edge_boxes[e].max += pad;
     }
 
-    c.tri_root  = build_bvh(c.tri_boxes,  c.tri_bvh_nodes);
-    c.edge_root = build_bvh(c.edge_boxes, c.edge_bvh_nodes);
+    c.tri_root  = build_bvh(c.tri_boxes,    c.tri_bvh_nodes);
+    c.edge_root = build_bvh(red_edge_boxes, c.edge_bvh_nodes);  // BVH from red (uninflated) boxes
     c.node_root = build_bvh(c.node_boxes, c.node_bvh_nodes);
 
     std::vector<std::vector<int>> node_hits(nv);

@@ -175,6 +175,85 @@ void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
     x[vi] -= step * delta;
 }
 
+static void export_nt_pairs_geo(const std::string& filename, const std::vector<Vec3>& x,
+                                const std::vector<NodeTrianglePair>& nt_pairs) {
+    std::ofstream out(filename);
+    if (!out) return;
+
+    const int nv    = static_cast<int>(x.size());
+    const int nnt   = static_cast<int>(nt_pairs.size());
+    const int nverts = nnt * 3;
+
+    std::vector<int> nt_count(nv, 0);
+    for (const auto& p : nt_pairs) {
+        nt_count[p.node]++;
+        nt_count[p.tri_v[0]]++; nt_count[p.tri_v[1]]++; nt_count[p.tri_v[2]]++;
+    }
+
+    out << std::setprecision(10);
+    out << "[\n";
+    out << "    \"fileversion\", \"18.5.408\",\n";
+    out << "    \"hasindex\", false,\n";
+    out << "    \"pointcount\", " << nv << ",\n";
+    out << "    \"vertexcount\", " << nverts << ",\n";
+    out << "    \"primitivecount\", " << nnt << ",\n";
+    out << "    \"info\", {},\n";
+
+    out << "    \"topology\",\n    [\n";
+    out << "        \"pointref\",\n        [\n";
+    out << "            \"indices\", [";
+    for (int i = 0; i < nnt; ++i) {
+        const auto& p = nt_pairs[i];
+        if (i > 0) out << ",";
+        out << p.tri_v[0] << "," << p.tri_v[1] << "," << p.tri_v[2];
+    }
+    out << "]\n        ]\n    ],\n";
+
+    out << "    \"attributes\",\n    [\n";
+    out << "        \"pointattributes\",\n        [\n";
+    out << "            [\n";
+    out << "                [\"scope\",\"public\",\"type\",\"numeric\",\"name\",\"P\",\"options\",{}],\n";
+    out << "                [\"size\",3,\"storage\",\"fpreal32\",\"values\",\n";
+    out << "                    [\"size\",3,\"storage\",\"fpreal32\",\"tuples\",[";
+    for (int i = 0; i < nv; ++i) {
+        if (i > 0) out << ",";
+        out << "[" << x[i].x() << "," << x[i].y() << "," << x[i].z() << "]";
+    }
+    out << "]]]\n            ],\n";
+    out << "            [\n";
+    out << "                [\"scope\",\"public\",\"type\",\"numeric\",\"name\",\"nt_pair_count\",\"options\",{}],\n";
+    out << "                [\"size\",1,\"storage\",\"int32\",\"values\",\n";
+    out << "                    [\"size\",1,\"storage\",\"int32\",\"tuples\",[";
+    for (int i = 0; i < nv; ++i) {
+        if (i > 0) out << ",";
+        out << "[" << nt_count[i] << "]";
+    }
+    out << "]]]\n            ]\n";
+    out << "        ],\n";
+
+    out << "        \"primitiveattributes\",\n        [\n";
+    out << "            [\n";
+    out << "                [\"scope\",\"public\",\"type\",\"numeric\",\"name\",\"pair_idx\",\"options\",{}],\n";
+    out << "                [\"size\",1,\"storage\",\"int32\",\"values\",\n";
+    out << "                    [\"size\",1,\"storage\",\"int32\",\"tuples\",[";
+    for (int i = 0; i < nnt; ++i) {
+        if (i > 0) out << ",";
+        out << "[" << i << "]";
+    }
+    out << "]]]\n            ]\n";
+    out << "        ]\n";
+    out << "    ],\n";
+
+    out << "    \"primitives\",\n    [\n";
+    out << "        [\n";
+    out << "            [\"type\",\"Polygon_run\"],\n";
+    out << "            [\n";
+    out << "                \"startvertex\", 0,\n";
+    out << "                \"nprimitives\", " << nnt << ",\n";
+    out << "                \"nvertices_rle\", [3," << nnt << "]\n";
+    out << "            ]\n        ]\n    ]\n]\n";
+}
+
 static void export_ss_pairs_geo(const std::string& filename, const std::vector<Vec3>& x,
                                 const std::vector<SegmentSegmentPair>& ss_pairs) {
     std::ofstream out(filename);
@@ -339,6 +418,53 @@ static void write_substep_data(const SimParams& params, const BroadPhase& broad_
     // --- colored mesh ---
     if (ref_mesh) {
         export_geo(subdir + "/mesh.geo", xnew, ref_mesh->tris, color_groups);
+    }
+
+    // --- NT pairs (combined) ---
+    export_nt_pairs_geo(subdir + "/nt_pairs.geo", xnew, bpc.nt_pairs);
+
+    // --- NT pairs (one file each) ---
+    const std::string nt_dir = subdir + "/nt_pairs";
+    std::filesystem::create_directories(nt_dir);
+    for (int i = 0; i < static_cast<int>(bpc.nt_pairs.size()); ++i) {
+        const auto& p = bpc.nt_pairs[i];
+        const std::string path = nt_dir + "/nt_pair_" + std::to_string(i) + ".geo";
+        std::ofstream out(path);
+        if (!out) continue;
+        out << std::setprecision(10);
+        out << "[\n";
+        out << "    \"fileversion\", \"18.5.408\",\n";
+        out << "    \"hasindex\", false,\n";
+        out << "    \"pointcount\", 4,\n";
+        out << "    \"vertexcount\", 3,\n";
+        out << "    \"primitivecount\", 1,\n";
+        out << "    \"info\", {},\n";
+        out << "    \"topology\",\n    [\n";
+        out << "        \"pointref\",\n        [\n";
+        out << "            \"indices\", [1,2,3]\n";
+        out << "        ]\n    ],\n";
+        out << "    \"attributes\",\n    [\n";
+        out << "        \"pointattributes\",\n        [\n";
+        out << "            [\n";
+        out << "                [\"scope\",\"public\",\"type\",\"numeric\",\"name\",\"P\",\"options\",{}],\n";
+        out << "                [\"size\",3,\"storage\",\"fpreal32\",\"values\",\n";
+        out << "                    [\"size\",3,\"storage\",\"fpreal32\",\"tuples\",[";
+        // point 0 = node, points 1-3 = tri verts
+        const int pts[4] = {p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2]};
+        for (int k = 0; k < 4; ++k) {
+            if (k > 0) out << ",";
+            const Vec3& pt = xnew[pts[k]];
+            out << "[" << pt.x() << "," << pt.y() << "," << pt.z() << "]";
+        }
+        out << "]]]\n            ]\n        ]\n    ],\n";
+        out << "    \"primitives\",\n    [\n";
+        out << "        [\n";
+        out << "            [\"type\",\"Polygon_run\"],\n";
+        out << "            [\n";
+        out << "                \"startvertex\", 0,\n";
+        out << "                \"nprimitives\", 1,\n";
+        out << "                \"nvertices_rle\", [3,1]\n";
+        out << "            ]\n        ]\n    ]\n]\n";
     }
 
     // --- SS pairs (combined) ---
