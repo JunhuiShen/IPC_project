@@ -32,8 +32,10 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         build_xhat(xhat, state.deformed_positions, state.velocities, dt);
 
         std::vector<Vec3> xnew;
-        
-        if (params.use_ccd_guess)
+
+        if (params.use_ogc)
+            xnew = state.deformed_positions;
+        else if (params.use_ccd_guess)
             xnew = ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
         else
             xnew = state.deformed_positions;

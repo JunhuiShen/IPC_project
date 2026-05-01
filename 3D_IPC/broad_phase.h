@@ -117,7 +117,11 @@ public:
     // (x[vi] -> x_new_fn(vi)) using the linear one-node-moves CCD check.
     // All other vertices are treated as stationary at their already-committed
     // positions. Modifies x in place.
-    // use_ogc: replace the per-pair CCD safety with the per-pair trust-region narrow phase
+    // use_ogc: project the per-iteration displacement onto the L2 trust-region
+    // sphere of radius 0.4 * d0_min(vi) centered at the current x[vi]. The
+    // radius is recomputed from the broad-phase cache each iteration so it
+    // adapts as vertices approach contacts. clip_to_node_box / clip_ccd are
+    // ignored under use_ogc.
     void per_vertex_safe_step(std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety = 0.9, bool clip_to_node_box = true, bool clip_ccd = true, bool use_ticcd = true, bool use_ogc = false, const std::vector<std::vector<int>>* color_groups = nullptr) const;
 
     void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt);

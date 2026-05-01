@@ -406,27 +406,12 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     constexpr double node_box_padding = 1.2;
     auto node_box_size_fn = [&](int vi) { return std::clamp(prev_disp[vi] * node_box_padding, params.node_box_min, params.node_box_max); };
     std::vector<AABB> blue_boxes(nv);
-    BroadPhase broad_phase;
-
-    if (params.use_ogc) {
-        // First pass: conservative max-size boxes so the broad phase finds every pair the vertex could possibly reach this substep
-        for (int i = 0; i < nv; ++i)
-            blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(params.node_box_max), xnew[i] + Vec3::Constant(params.node_box_max));
-        broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
-
-        // Second pass: tighten to rho_i = 0.4 * min d0 over incident NT/SS pairs
-        for (int i = 0; i < nv; ++i) {
-            const double r = compute_trust_region_bound_for_vertex(i, xnew, broad_phase.cache(), 0.4);
-            blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
-        }
-        broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
-    } else {
-        for (int i = 0; i < nv; ++i) {
-            const double r = node_box_size_fn(i);
-            blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
-        }
-        broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
+    for (int i = 0; i < nv; ++i) {
+        const double r = node_box_size_fn(i);
+        blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
     }
+    BroadPhase broad_phase;
+    broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
 
     //create colors
     const std::vector<std::vector<int>> color_groups = greedy_color_conflict_graph(
