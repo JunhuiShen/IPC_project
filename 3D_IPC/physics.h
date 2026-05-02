@@ -41,11 +41,9 @@ struct SimParams {
     bool   use_parallel;
     bool   write_substeps;       // if true, export a frame file after every substep (not just every frame)
     bool   use_ccd;              // if true, run CCD step clamping in per_vertex_safe_step
-    bool   ccd_check;
     bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
     bool   use_ogc;     // if true, use trust_region_initial_guess instead of CCD
     bool   fixed_iters;          // if true, run exactly max_global_iters sweeps with no tolerance / convergence check
-    int    color_rebuild_interval;
 
     // Route the per-substep Gauss-Seidel sweep through the GPU implementation
     // (gpu_gauss_seidel_solver). On machines without CUDA the CPU stub is
@@ -80,11 +78,9 @@ struct SimParams {
         p.use_parallel              = false;
         p.write_substeps            = false;
         p.use_ccd                   = false;
-        p.ccd_check                 = false;
         p.use_ccd_guess             = true;
         p.use_ogc          = false;
         p.fixed_iters               = false;
-        p.color_rebuild_interval    = 1;
         p.use_gpu                   = false;
         p.experimental              = false;
         p.node_box_max              = 0.01;

@@ -10,8 +10,6 @@ struct SolverResult {
     double final_residual   = 0.0;
     int    iterations       = 0;
     bool   converged        = false;
-    int    last_num_colors  = 0;   // parallel solver only
-    int    ccd_violations   = 0;   // populated when SimParams::ccd_check is on
 };
 
 // Fold one substep's result into the frame aggregate. `first` preserves the
@@ -25,8 +23,6 @@ inline void accumulate_solver_result(SolverResult& agg, const SolverResult& sub,
     }
     agg.final_residual       = sub.final_residual;
     agg.iterations          += sub.iterations;
-    agg.last_num_colors      = sub.last_num_colors;
-    agg.ccd_violations      += sub.ccd_violations;
 }
 
 std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh);
@@ -43,16 +39,3 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                                               const std::vector<Vec3>& v,
                                               std::vector<double>* residual_history = nullptr,
                                               const std::string& outdir = "");
-
-SolverResult global_gauss_seidel_solver(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
-                                        const std::vector<Pin>& pins, const SimParams& params,
-                                        std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
-                                        BroadPhase& broad_phase,
-                                        const std::vector<Vec3>& v,
-                                        const std::vector<std::vector<int>>& color_groups,
-                                        std::vector<double>* residual_history = nullptr);
-
-SolverResult global_gauss_seidel_solver_parallel(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-                                                 const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, BroadPhase& broad_phase,
-                                                 const std::vector<Vec3>& v, std::vector<double>* residual_history = nullptr,
-                                                 const std::vector<std::vector<int>>* override_colors = nullptr);

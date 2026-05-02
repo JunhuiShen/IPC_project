@@ -33,17 +33,15 @@ struct IPCArgs3D : ArgParser {
     bool   use_parallel  = true;
     bool   write_substeps = false;
     bool   use_ccd       = true;
-    bool   ccd_check     = false;
     bool   use_ccd_guess = true;
     bool   use_ogc = false;
     bool   fixed_iters = false;
     bool   use_gpu                 = false;
-    bool   experimental            = false;
+    bool   experimental            = true;
     double node_box_max            = 0.01;
     double node_box_min            = 0.001;
     double k_barrier                   = 1.0;
     bool   use_ticcd                   = true;     // true: Tight-Inclusion library | false: self-written linear CCD
-    int    color_rebuild_interval  = 10;
 
     // --- mesh ---
     int    nx           = 31;     
@@ -117,17 +115,15 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("write_substeps", write_substeps, false, "Write an output file after every substep (useful for visual debugging)");
 
         add_bool  ("use_ccd",      use_ccd,      true,   "Run CCD step clamping in per_vertex_safe_step");
-        add_bool  ("ccd_check",    ccd_check,    false,  "Run post-sweep CCD penetration check (serial + parallel)");
         add_bool  ("use_ccd_guess",    use_ccd_guess,    true,  "Use ccd_initial_guess as the substep start point (ignored if use_ogc is on)");
         add_bool  ("use_ogc", use_ogc, false, "Use trust-region narrow phase instead of CCD for step clamping");
         add_bool  ("fixed_iters",      fixed_iters,      false, "Run exactly max_substep_iters sweeps per substep with no tolerance / convergence check");
         add_bool  ("use_gpu",              use_gpu,              false, "Route the GS sweep through the GPU implementation (CPU stub when CUDA is unavailable)");
-        add_bool  ("experimental",         experimental,         false, "Use global_gauss_seidel_solver_basic (requires fixed_iters)");
+        add_bool  ("experimental",         experimental,         true,  "Use global_gauss_seidel_solver_basic (requires fixed_iters)");
         add_double("node_box_max",         node_box_max,         0.01,  "Upper bound on node box half-extent used by the experimental solver");
         add_double("node_box_min",         node_box_min,         0.001, "Lower bound on node box half-extent (floor when prev disp is near zero)");
         add_double("k_barrier",                k_barrier,                1.0,   "Barrier stiffness multiplier");
         add_bool  ("use_ticcd",                use_ticcd,                true,  "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library (default), false=self-written linear");
-        add_int   ("color_rebuild_interval", color_rebuild_interval, 10, "Parallel solver: recolor every N outer iterations (N<=0 treated as 1)");
 
         add_int   ("nx",          nx,          31,         "Mesh subdivisions in x");
         add_int   ("ny",          ny,          31,         "Mesh subdivisions in y");
@@ -200,7 +196,6 @@ struct IPCArgs3D : ArgParser {
         p.use_parallel     = use_parallel;
         p.write_substeps   = write_substeps;
         p.use_ccd          = use_ccd;
-        p.ccd_check        = ccd_check;
         p.use_ccd_guess = use_ccd_guess;
         p.use_ogc = use_ogc;
         p.fixed_iters = fixed_iters;
@@ -210,7 +205,6 @@ struct IPCArgs3D : ArgParser {
         p.node_box_min            = node_box_min;
         p.k_barrier                   = k_barrier;
         p.use_ticcd                   = use_ticcd;
-        p.color_rebuild_interval  = color_rebuild_interval;
         return p;
     }
 };

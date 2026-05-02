@@ -54,6 +54,7 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state,
     params.max_global_iters = 100;
     params.tol_abs         = 1e-6;
     params.use_parallel    = false;
+    params.fixed_iters     = true;
 
     clear_model(ref_mesh, state, X, pins);
     int nx = 10, ny = 10;
@@ -82,16 +83,13 @@ TEST(RestartTest, RestartFromFrame50MatchesGolden) {
         SimParams params = SimParams::zeros(); std::vector<Vec2> X;
         build_scene(ref_mesh, state, pins, adj, params, X);
 
-        const auto color_groups = greedy_color(build_vertex_adjacency_map(ref_mesh.tris),
-                                               static_cast<int>(state.deformed_positions.size()));
-
         ASSERT_TRUE(deserialize_state(checkpoint_dir, kRestartFrame, state))
             << "Failed to deserialize state at frame " << kRestartFrame;
 
         BroadPhase broad_phase;
 
         for (int f = kRestartFrame + 1; f <= kTotalFrames; ++f) {
-            advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, broad_phase);
+            advance_one_frame(state, ref_mesh, adj, pins, params, broad_phase);
 
             ASSERT_TRUE(golden.count(f)) << "No golden data for frame " << f;
             const auto& expected = golden[f];

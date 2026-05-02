@@ -30,8 +30,7 @@ The nonlinear solve is driven by:
 3. **Per-iteration contact registration** -- rebuild node-triangle / edge-edge
    candidate pairs from certified-region blue/green boxes.
 4. **Parallel mode** (`--use_parallel`) -- certified-region conflict graph with
-   greedy coloring so independent vertices can be committed concurrently; colors
-   are rebuilt every `color_rebuild_interval` outer iterations.
+   greedy coloring so independent vertices can be committed concurrently.
 
 ## Requirements
 
@@ -92,7 +91,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 |-------|-------|
 | Time integration | `fps`, `substeps`, `num_frames` |
 | Physics | `E`, `nu`, `density`, `thickness`, `kB`, `kpin`, `gx`, `gy`, `gz` |
-| Solver | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `use_parallel`, `use_ccd`, `use_ticcd`, `ccd_check`, `use_ccd_guess`, `use_trust_region`, `fixed_iters`, `use_gpu`, `experimental`, `node_box_size`, `color_rebuild_interval`, `write_barrier_distances` |
+| Solver | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `use_parallel`, `use_ccd`, `use_ticcd`, `ccd_check`, `use_ccd_guess`, `use_trust_region`, `fixed_iters`, `use_gpu`, `experimental`, `node_box_size`, `write_barrier_distances` |
 | Mesh geometry | `nx`, `ny`, `width`, `height`, `left_x`, `right_x`, `sheet_y`, `left_z`, `right_z` |
 | Scene | `example` (`1`..`6`), plus per-example knobs: `drop_stack_count`, `drop_cloth_nx`, `drop_cloth_ny`, `drop_first_y`, `drop_spacing`, `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `sphere_radius`, `sphere_cx`, `sphere_cy`, `sphere_cz`, `sphere_subdiv`, `sphere_cloth_size`, `sphere_ground_size` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame` |

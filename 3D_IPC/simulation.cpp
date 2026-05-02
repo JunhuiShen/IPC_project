@@ -71,11 +71,6 @@ int main(int argc, char** argv) {
                   << " (d_hat limit = " << d_hat_limit << ")\n";
     }
 
-    const auto color_groups = greedy_color(
-            build_vertex_adjacency_map(ref_mesh.tris),
-            static_cast<int>(state.deformed_positions.size()));
-
-    
     BroadPhase broad_phase;
 
     std::cout << "num_frames = " << num_frames << "\n";
@@ -133,7 +128,7 @@ int main(int argc, char** argv) {
         }
 
         result = advance_one_frame(
-            state, ref_mesh, adj, pins, params, color_groups, broad_phase,
+            state, ref_mesh, adj, pins, params, broad_phase,
             (args.example == 5) ? &twist_spec : nullptr, frame_index,
             (args.example == 5) ? &update_twist_pins : nullptr, substep_cb, outdir);
 
@@ -151,18 +146,9 @@ int main(int argc, char** argv) {
         std::cout << "Frame " << std::setw(4) << frame_index
                   << " | initial_residual = " << std::scientific << result.initial_residual
                   << " | final_residual = "   << std::scientific << result.final_residual
-                  << " | global_iters = "     << std::setw(3)    << result.iterations;
-        if (params.use_parallel) {
-            std::cout << " | colors = "  << std::setw(3) << result.last_num_colors;
-        }
-        if (params.ccd_check)
-            std::cout << " | ccd_viol = " << std::setw(3) << result.ccd_violations;
-        std::cout << " | solver_time = " << std::fixed << std::setprecision(3)
+                  << " | global_iters = "     << std::setw(3)    << result.iterations
+                  << " | solver_time = "      << std::fixed << std::setprecision(3)
                   << solver_ms << " ms\n";
-        if (params.ccd_check && result.ccd_violations > 0) {
-            std::cout << "Self-intersection detected on frame " << frame_index << " — aborting.\n";
-            std::exit(1);
-        }
 
         if (!params.write_substeps)
             export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, nullptr);

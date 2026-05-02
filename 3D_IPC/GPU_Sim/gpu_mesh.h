@@ -182,7 +182,6 @@ struct GPUSimParams {
     double tol_abs, tol_rel;
     int    max_global_iters;
     bool   use_parallel;
-    bool   ccd_check;
     bool   use_ogc;
 
     double dt()  const { return dt_val;  }

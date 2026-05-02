@@ -257,19 +257,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ccd_stress_test.cpp")
     )
 endif()
 
-add_executable(trust_region_test
-    trust_region_test.cpp
-)
-
-target_link_libraries(trust_region_test
-    PRIVATE
-    corotated_energy_lib
-    GTest::gtest
-    GTest::gtest_main
-)
-
-gtest_discover_tests(trust_region_test)
-
 add_executable(broad_phase_test
     broad_phase_test.cpp
     broad_phase.cpp
@@ -384,25 +371,6 @@ target_link_libraries(restart_test
 )
 
 gtest_discover_tests(restart_test)
-
-add_executable(parallel_serial_consistency_test
-    parallel_serial_consistency_test.cpp
-    make_shape.cpp
-    physics.cpp
-    solver.cpp
-    parallel_helper.cpp
-    broad_phase.cpp
-)
-
-target_link_libraries(parallel_serial_consistency_test
-    PRIVATE
-    corotated_energy_lib
-    OpenMP::OpenMP_CXX
-    GTest::gtest
-    GTest::gtest_main
-)
-
-gtest_discover_tests(parallel_serial_consistency_test)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/visualization_test.cpp")
     add_executable(visualization_test

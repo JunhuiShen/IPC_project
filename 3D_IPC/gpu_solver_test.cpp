@@ -247,14 +247,5 @@ TEST(GPUSolver, ParallelCommitMatchesCPU_TrustRegion) {
     run_commit_comparison(s);
 }
 
-// NOTE: A previous end-to-end test `GPUSolver.GPUMatchesParallelSolver` was
-// removed. It compared `gpu_gauss_seidel_solver` against
-// `global_gauss_seidel_solver_parallel` for bit-identity, but the two solvers
-// are not actually bit-identical: the parallel solver was upgraded to the
-// blue/red/green certified-region pipeline (per-iter
-// `register_barrier_pairs_from_blue_and_green`) while the GPU bridge still
-// uses the swept-AABB pair cache built once at `broad_phase.initialize()`.
-// Closing that gap is a real porting task, not a test fix. Re-add this test
-// once the GPU bridge mirrors the parallel solver's per-iter pair pipeline.
 
 }  // namespace

@@ -12,12 +12,12 @@ using PinTargetUpdater = void (*)(std::vector<Pin>& pins, const TwistSpec& spec,
 
 // Advance one frame across all substeps; returns accumulated stats
 // (initial_residual from first substep, final_residual from last, sum of
-// iterations / violation counts across all substeps).
+// iterations across all substeps).
 // Called after each substep with the global substep index (0-based) and current positions.
 using SubstepCallback = std::function<void(int, const std::vector<Vec3>&)>;
 
 inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
-    std::vector<Pin>& pins, const SimParams& params, const std::vector<std::vector<int>>& color_groups,
+    std::vector<Pin>& pins, const SimParams& params,
     BroadPhase& broad_phase, const TwistSpec* twist_spec = nullptr, int frame_index = 1,
     PinTargetUpdater pin_updater = nullptr, SubstepCallback on_substep = nullptr, const std::string& outdir = "") {
     SolverResult agg;
@@ -41,14 +41,10 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
             xnew = state.deformed_positions;
 
         SolverResult sub_result;
-        if (params.experimental)
-            sub_result = global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, nullptr, outdir);
-        else if (params.use_gpu)
-            sub_result = gpu_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
-        else if (params.use_parallel)
-            sub_result = global_gauss_seidel_solver_parallel(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
+        if (params.use_gpu)
+            sub_result = gpu_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
         else
-            sub_result = global_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities, color_groups);
+            sub_result = global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, nullptr, outdir);
         accumulate_solver_result(agg, sub_result, sub == 0);
 
         update_velocity(state.velocities, xnew, state.deformed_positions, dt);

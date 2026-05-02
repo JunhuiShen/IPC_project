@@ -244,7 +244,6 @@ GPUSimParams GPUSimParams::from(const SimParams& p) {
     g.tol_rel                = p.tol_rel;
     g.max_global_iters       = p.max_global_iters;
     g.use_parallel           = p.use_parallel;
-    g.ccd_check              = p.ccd_check;
     g.use_ogc       = p.use_ogc;
     return g;
 }

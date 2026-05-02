@@ -52,6 +52,7 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin
     params.max_global_iters = 100;
     params.tol_abs      = 1e-6;
     params.use_parallel = false;
+    params.fixed_iters  = true;
 
     clear_model(ref_mesh, state, X, pins);
     int nx = 10, ny = 10;
@@ -61,10 +62,6 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin
     append_pin(pins, base + ny * (nx + 1) + nx, state.deformed_positions);
     ref_mesh.build_lumped_mass(params.density, params.thickness);
     adj         = build_incident_triangle_map(ref_mesh.tris);
-}
-
-static std::vector<std::vector<int>> build_color_groups(const RefMesh& ref_mesh, int num_vertices) {
-    return greedy_color(build_vertex_adjacency_map(ref_mesh.tris), num_vertices);
 }
 
 // ---------------------------------------------------------------------------
@@ -79,12 +76,10 @@ RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
 VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
 build_scene(ref_mesh, state, pins, adj, params, X);
 
-// No barrier -- serial path
 BroadPhase broad_phase;
-const auto color_groups = build_color_groups(ref_mesh, static_cast<int>(state.deformed_positions.size()));
 
 for (int frame = 1; frame <= 100; ++frame) {
-advance_one_frame(state, ref_mesh, adj, pins, params, color_groups, broad_phase);
+advance_one_frame(state, ref_mesh, adj, pins, params, broad_phase);
 
 ASSERT_TRUE(golden.count(frame)) << "No golden data for frame " << frame;
 const auto& expected = golden[frame];

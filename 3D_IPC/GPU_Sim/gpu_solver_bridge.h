@@ -14,7 +14,6 @@
 #include "../broad_phase.h"
 #include <vector>
 
-// Same calling convention as global_gauss_seidel_solver.
 SolverResult gpu_gauss_seidel_solver(
     const RefMesh&                            ref_mesh,
     const VertexTriangleMap&                  adj,
@@ -24,5 +23,4 @@ SolverResult gpu_gauss_seidel_solver(
     const std::vector<Vec3>&                  xhat,
     BroadPhase&                               broad_phase,
     const std::vector<Vec3>&                  v,
-    const std::vector<std::vector<int>>&      color_groups,
     std::vector<double>*                      residual_history = nullptr);

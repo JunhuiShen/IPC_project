@@ -1,6 +1,6 @@
 // gpu_solver_bridge.cpp
-// Implements gpu_gauss_seidel_solver using the Jacobi-prediction algorithm,
-// identical to global_gauss_seidel_solver_parallel.
+// Implements gpu_gauss_seidel_solver using the Jacobi-prediction algorithm
+// (predict + colored-commit certified-region pipeline).
 //
 // The two GPU-accelerated phases are dispatched through gpu_solver.h:
 //   gpu_build_jacobi_predictions  — Phase 1 (one thread per vertex)
@@ -38,7 +38,6 @@ SolverResult gpu_gauss_seidel_solver(
     const std::vector<Vec3>&             xhat,
     BroadPhase&                          broad_phase,
     const std::vector<Vec3>&             v,
-    const std::vector<std::vector<int>>& /*color_groups*/,  // ignored — rebuilt dynamically
     std::vector<double>*                 residual_history)
 {
     const double dt          = params.dt();
@@ -114,7 +113,6 @@ SolverResult gpu_gauss_seidel_solver(
             apply_parallel_commits_cpu(commits, xnew);
         }
 
-        result.last_num_colors = static_cast<int>(color_groups.size());
         result.final_residual  = p.fixed_iters ? 0.0 : eval_residual();
         result.iterations      = iter;
 
