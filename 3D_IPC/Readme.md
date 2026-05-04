@@ -82,7 +82,7 @@ restart snapshot `state_NNNN.bin` is written alongside every frame.
 
 Per-frame statistics are printed to stdout:
 
-    Frame    1 | initial_residual=... | final_residual=... | global_iters=... | solver_time=... ms
+    Frame    1 | global_iters=... | solver_time=... ms
 
 ## CLI reference
 
