@@ -1,53 +1,18 @@
-# Build files
+# Build artifacts (CMake out-of-tree)
 build/
 
 # Simulation output
 frames_sim3d/
-frames_baseline/
-frames_after/
-acceptance_*/
+tmp_full/
+
+# Local Python audit / debug scripts
 tools/
 
-# Benchmark / diff logs
-log_baseline*.txt
-log_after*.txt
+# Debug OBJ dumps written by visualization_test
+vis_debug/
 
 # macOS
 .DS_Store
 
-# CMake
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-Makefile
-
-# Executables
-3D_sim
-simulation
-
-# Broad-phase / BVH debug OBJ dumps
-broad_phase_*_boxes.obj
-bvh_*_level_*.obj
-mesh_before.obj
-mesh_after.obj
-
 # Claude Code scheduled-tasks runtime lock
 .claude/scheduled_tasks.lock
-example5/
-
-# Long-running randomized linear-vs-TICCD parity sweep — local-only.
-# Kept off the public build so `ctest` stays fast for everyone else.
-ccd_stress_test.cpp
-
-# Vendored Bernstein Sign Classification + Root Parity CCD
-# (kept on disk as reference; not built into the active binary)
-bsc.cpp
-bsc.h
-rootparitycollisiontest.cpp
-rootparitycollisiontest.h
-interval.cpp
-interval.h
-interval_base.h
-expansion.cpp
-expansion.h
-vec.h

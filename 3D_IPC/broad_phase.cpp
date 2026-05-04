@@ -10,8 +10,10 @@
 #endif
 
 // BVH build / refit / query
-int build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out) {
+namespace {
+inline int build_bvh_impl(const std::vector<AABB>& boxes, std::vector<BVHNode>& out, std::vector<int>* leaf_to_node) {
     out.clear();
+    if (leaf_to_node) leaf_to_node->assign(boxes.size(), -1);
     if (boxes.empty()) return -1;
 
     std::vector<int> idx(boxes.size());
@@ -39,7 +41,9 @@ int build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out) {
 
         const int count = task.end - task.start;
         if (count == 1) {
-            out[task.node_idx].leafIndex = idx[task.start];
+            const int leaf = idx[task.start];
+            out[task.node_idx].leafIndex = leaf;
+            if (leaf_to_node) (*leaf_to_node)[leaf] = task.node_idx;
             continue;
         }
 
@@ -62,12 +66,23 @@ int build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out) {
 
         out[task.node_idx].left = left;
         out[task.node_idx].right = right;
+        out[left].parent = task.node_idx;
+        out[right].parent = task.node_idx;
 
         stack.push_back({right, mid, task.end});
         stack.push_back({left, task.start, mid});
     }
 
     return 0;
+}
+}  // namespace
+
+int build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out) {
+    return build_bvh_impl(boxes, out, nullptr);
+}
+
+int build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out, std::vector<int>& leaf_to_node) {
+    return build_bvh_impl(boxes, out, &leaf_to_node);
 }
 
 void refit_bvh(std::vector<BVHNode>& nodes, const std::vector<AABB>& boxes) {
@@ -80,6 +95,21 @@ void refit_bvh(std::vector<BVHNode>& nodes, const std::vector<AABB>& boxes) {
             n.bbox.expand(nodes[n.left].bbox);
             n.bbox.expand(nodes[n.right].bbox);
         }
+    }
+}
+
+void refit_bvh_leaf(std::vector<BVHNode>& nodes, const std::vector<int>& leaf_to_node, int leafIndex, const AABB& new_box) {
+    if (leafIndex < 0 || leafIndex >= static_cast<int>(leaf_to_node.size())) return;
+    int idx = leaf_to_node[leafIndex];
+    if (idx < 0) return;
+
+    nodes[idx].bbox = new_box;
+    for (int parent = nodes[idx].parent; parent >= 0; parent = nodes[parent].parent) {
+        AABB combined = nodes[nodes[parent].left].bbox;
+        combined.expand(nodes[nodes[parent].right].bbox);
+        const AABB& prev = nodes[parent].bbox;
+        if (combined.min == prev.min && combined.max == prev.max) break;
+        nodes[parent].bbox = combined;
     }
 }
 
@@ -486,9 +516,9 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
         c.edge_boxes[e].max += pad;
     }
 
-    c.tri_root  = build_bvh(c.tri_boxes,    c.tri_bvh_nodes);
-    c.edge_root = build_bvh(red_edge_boxes, c.edge_bvh_nodes);  // BVH from red (uninflated) boxes
-    c.node_root = build_bvh(c.node_boxes, c.node_bvh_nodes);
+    c.tri_root  = build_bvh(c.tri_boxes,    c.tri_bvh_nodes,  c.tri_leaf_to_node);
+    c.edge_root = build_bvh(red_edge_boxes, c.edge_bvh_nodes, c.edge_leaf_to_node);  // BVH from red (uninflated) boxes
+    c.node_root = build_bvh(c.node_boxes,   c.node_bvh_nodes, c.node_leaf_to_node);
 
     std::vector<std::vector<int>> node_hits(nv);
     #pragma omp parallel for schedule(dynamic, 32)
@@ -524,6 +554,31 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
 
     cache_ = std::move(c);
     ++version_;
+}
+
+void incremental_refresh_vertex(BroadPhase::Cache& c, int vi, const std::vector<Vec3>& x, const RefMesh& mesh, double box_pad, double node_box_radius_padded) {
+    if (vi < 0 || vi >= static_cast<int>(c.node_boxes.size())) return;
+
+    const Vec3 r = Vec3::Constant(node_box_radius_padded);
+    c.node_boxes[vi] = AABB(x[vi] - r, x[vi] + r);
+    refit_bvh_leaf(c.node_bvh_nodes, c.node_leaf_to_node, vi, c.node_boxes[vi]);
+
+    const Vec3 pad = Vec3::Constant(box_pad);
+    for (int t : c.node_to_tris[vi]) {
+        AABB tb = c.node_boxes[tri_vertex(mesh, t, 0)];
+        tb.expand(c.node_boxes[tri_vertex(mesh, t, 1)]);
+        tb.expand(c.node_boxes[tri_vertex(mesh, t, 2)]);
+        tb.min -= pad; tb.max += pad;
+        c.tri_boxes[t] = tb;
+        refit_bvh_leaf(c.tri_bvh_nodes, c.tri_leaf_to_node, t, tb);
+    }
+    
+    for (int e : c.node_to_edges[vi]) {
+        AABB red = c.node_boxes[c.edges[e][0]];
+        red.expand(c.node_boxes[c.edges[e][1]]);
+        c.edge_boxes[e] = AABB(red.min - pad, red.max + pad);
+        refit_bvh_leaf(c.edge_bvh_nodes, c.edge_leaf_to_node, e, red);
+    }
 }
 
 double BroadPhase::ccd_min_toi(const std::vector<Vec3>& x, const std::vector<Vec3>& x_new) const {
@@ -581,9 +636,14 @@ void BroadPhase::per_vertex_safe_step(
         double toi_min = 1.0;
 
         if (use_ogc) {
-            const double bound = compute_trust_region_bound_for_vertex(vi, x, cache_, 0.4);
+            double bound = compute_trust_region_bound_for_vertex(vi, x, cache_, 0.4);
+            if (!std::isfinite(bound)) {
+                // No-pair fallback: half min-extent of the cubic node box.
+                const Vec3 e = cache_.node_boxes[vi].extent();
+                bound = 0.5 * std::min({e.x(), e.y(), e.z()});
+            }
             const double dx_norm = dx.norm();
-            if (std::isfinite(bound) && dx_norm > 0.0)
+            if (dx_norm > 0.0)
                 toi_min = std::min(1.0, bound / dx_norm);
         }
 

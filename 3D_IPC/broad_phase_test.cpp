@@ -1051,3 +1051,182 @@ TEST(QueryPairsForVertex, FaceRolePairWellFormed) {
     }
 }
 
+// ====================================================================
+//  incremental_refresh_vertex: after moving x[vi], the partial refit
+//  must leave node/tri/edge leaf boxes equal to a fresh recomputation
+//  from the new positions, and every internal BVH node must equal the
+//  union of its children (the refit invariant). Pair lists are NOT
+//  mutated by the helper -- they are frozen for the iteration.
+// ====================================================================
+namespace {
+
+bool aabb_equal(const AABB& a, const AABB& b, double tol = 1e-12) {
+    return (a.min - b.min).cwiseAbs().maxCoeff() <= tol &&
+           (a.max - b.max).cwiseAbs().maxCoeff() <= tol;
+}
+
+void check_bvh_internal_invariant(const std::vector<BVHNode>& nodes) {
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        if (nodes[i].leafIndex >= 0) continue;
+        ASSERT_GE(nodes[i].left,  0);
+        ASSERT_GE(nodes[i].right, 0);
+        AABB combined = nodes[nodes[i].left].bbox;
+        combined.expand(nodes[nodes[i].right].bbox);
+        EXPECT_TRUE(aabb_equal(nodes[i].bbox, combined))
+            << "internal node " << i << " bbox is not the union of its children";
+    }
+}
+
+}  // namespace
+
+TEST(BroadPhaseTest, IncrementalRefreshMatchesFreshBoxes) {
+    // Two triangles sharing edge (1,2) plus a free vertex at index 4.
+    // Vertex 1 is incident to both triangles and to edges (0,1),(1,2),(1,3),
+    // so refreshing it touches all three BVHs nontrivially.
+    const std::vector<Vec3> x_init = {
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0),
+        Vec3(1.0, 1.0, 0.0),
+        Vec3(0.5, 0.5, 1.0),  // free vertex (no incident triangle)
+    };
+    const RefMesh mesh = make_mesh(x_init, {{0, 1, 2}, {1, 3, 2}});
+    const int nv = static_cast<int>(x_init.size());
+
+    constexpr double radius = 0.1;
+    constexpr double pad    = 0.02;
+
+    auto make_node_boxes = [&](const std::vector<Vec3>& x) {
+        std::vector<AABB> b(nv);
+        for (int i = 0; i < nv; ++i)
+            b[i] = AABB(x[i] - Vec3::Constant(radius), x[i] + Vec3::Constant(radius));
+        return b;
+    };
+
+    BroadPhase bp;
+    bp.initialize(make_node_boxes(x_init), mesh, pad);
+
+    // --- Before the move: snapshot leaf bboxes for unmoved primitives. ---
+    const auto cache_before = bp.cache();
+    const std::size_t pair_count_nt_before = cache_before.nt_pairs.size();
+    const std::size_t pair_count_ss_before = cache_before.ss_pairs.size();
+
+    // --- Move vertex 1 by a non-trivial offset. ---
+    constexpr int    vi   = 1;
+    const Vec3 displacement(0.05, -0.03, 0.07);
+    std::vector<Vec3> x_new = x_init;
+    x_new[vi] += displacement;
+
+    bp.mutable_cache().node_boxes[vi] = AABB(x_new[vi] - Vec3::Constant(radius),
+                                              x_new[vi] + Vec3::Constant(radius));
+    incremental_refresh_vertex(bp.mutable_cache(), vi, x_new, mesh, pad, radius);
+
+    const auto& c = bp.cache();
+
+    // --- vi's node leaf must be the new padded cube around x_new[vi]. ---
+    const AABB expected_node_box(x_new[vi] - Vec3::Constant(radius),
+                                  x_new[vi] + Vec3::Constant(radius));
+    EXPECT_TRUE(aabb_equal(c.node_boxes[vi], expected_node_box));
+
+    // --- Untouched node leaves are unchanged. ---
+    for (int j = 0; j < nv; ++j) {
+        if (j == vi) continue;
+        EXPECT_TRUE(aabb_equal(c.node_boxes[j], cache_before.node_boxes[j]))
+            << "untouched node " << j << " was modified";
+    }
+
+    // --- Incident tri boxes match union(node_boxes) + pad. ---
+    const Vec3 padv = Vec3::Constant(pad);
+    for (int t : c.node_to_tris[vi]) {
+        AABB expect = c.node_boxes[mesh.tris[3 * t + 0]];
+        expect.expand(c.node_boxes[mesh.tris[3 * t + 1]]);
+        expect.expand(c.node_boxes[mesh.tris[3 * t + 2]]);
+        expect.min -= padv;
+        expect.max += padv;
+        EXPECT_TRUE(aabb_equal(c.tri_boxes[t], expect))
+            << "tri " << t << " box does not match fresh union+pad";
+    }
+
+    // --- Incident edge boxes match union + pad (the green box). ---
+    for (int e : c.node_to_edges[vi]) {
+        AABB expect = c.node_boxes[c.edges[e][0]];
+        expect.expand(c.node_boxes[c.edges[e][1]]);
+        expect.min -= padv;
+        expect.max += padv;
+        EXPECT_TRUE(aabb_equal(c.edge_boxes[e], expect))
+            << "edge " << e << " box does not match fresh union+pad";
+    }
+
+    // --- Refit invariant: every internal BVH node = union of its children. ---
+    check_bvh_internal_invariant(c.node_bvh_nodes);
+    check_bvh_internal_invariant(c.tri_bvh_nodes);
+    check_bvh_internal_invariant(c.edge_bvh_nodes);
+
+    // --- Leaf bbox in each BVH matches the box stored in the cache vector. ---
+    for (int i = 0; i < nv; ++i) {
+        const int n = c.node_leaf_to_node[i];
+        ASSERT_GE(n, 0);
+        EXPECT_EQ(c.node_bvh_nodes[n].leafIndex, i);
+        EXPECT_TRUE(aabb_equal(c.node_bvh_nodes[n].bbox, c.node_boxes[i]));
+    }
+    for (int t = 0; t < static_cast<int>(c.tri_boxes.size()); ++t) {
+        const int n = c.tri_leaf_to_node[t];
+        ASSERT_GE(n, 0);
+        EXPECT_TRUE(aabb_equal(c.tri_bvh_nodes[n].bbox, c.tri_boxes[t]));
+    }
+    // Edge BVH is built from RED (unpadded) boxes per the asymmetric SS
+    // convention -- recompute the unpadded union for comparison.
+    for (int e = 0; e < static_cast<int>(c.edges.size()); ++e) {
+        const int n = c.edge_leaf_to_node[e];
+        ASSERT_GE(n, 0);
+        AABB red = c.node_boxes[c.edges[e][0]];
+        red.expand(c.node_boxes[c.edges[e][1]]);
+        EXPECT_TRUE(aabb_equal(c.edge_bvh_nodes[n].bbox, red))
+            << "edge BVH leaf " << e << " is not the unpadded union";
+    }
+
+    // --- Pair lists are NOT mutated (frozen for the iteration). ---
+    EXPECT_EQ(c.nt_pairs.size(), pair_count_nt_before);
+    EXPECT_EQ(c.ss_pairs.size(), pair_count_ss_before);
+}
+
+// ====================================================================
+//  Sanity check: a no-op call (move vi to itself) leaves every leaf
+//  bbox bit-identical, and a sequence of partial refits stays
+//  consistent with a single full rebuild against the same final state.
+// ====================================================================
+TEST(BroadPhaseTest, IncrementalRefreshIsIdempotentForZeroMove) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0),
+        Vec3(1.0, 1.0, 0.0),
+    };
+    const RefMesh mesh = make_mesh(x, {{0, 1, 2}, {1, 3, 2}});
+    const int nv = static_cast<int>(x.size());
+
+    constexpr double radius = 0.1;
+    constexpr double pad    = 0.02;
+
+    std::vector<AABB> boxes(nv);
+    for (int i = 0; i < nv; ++i)
+        boxes[i] = AABB(x[i] - Vec3::Constant(radius), x[i] + Vec3::Constant(radius));
+
+    BroadPhase bp;
+    bp.initialize(boxes, mesh, pad);
+    const auto cache_before = bp.cache();
+
+    for (int vi = 0; vi < nv; ++vi)
+        incremental_refresh_vertex(bp.mutable_cache(), vi, x, mesh, pad, radius);
+
+    const auto& c = bp.cache();
+    for (int i = 0; i < nv; ++i)
+        EXPECT_TRUE(aabb_equal(c.node_boxes[i], cache_before.node_boxes[i]));
+    for (std::size_t t = 0; t < c.tri_boxes.size(); ++t)
+        EXPECT_TRUE(aabb_equal(c.tri_boxes[t], cache_before.tri_boxes[t]));
+    for (std::size_t e = 0; e < c.edge_boxes.size(); ++e)
+        EXPECT_TRUE(aabb_equal(c.edge_boxes[e], cache_before.edge_boxes[e]));
+    check_bvh_internal_invariant(c.node_bvh_nodes);
+    check_bvh_internal_invariant(c.tri_bvh_nodes);
+    check_bvh_internal_invariant(c.edge_bvh_nodes);
+}

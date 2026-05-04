@@ -50,11 +50,20 @@ struct BVHNode {
     AABB bbox;
     int left = -1;
     int right = -1;
+    int parent = -1;
     int leafIndex = -1;
 };
 
 int  build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out);
+
+// Same, plus fills leaf_to_node[leafIndex] = node_idx (required by refit_bvh_leaf).
+int  build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out, std::vector<int>& leaf_to_node);
+
 void refit_bvh(std::vector<BVHNode>& nodes, const std::vector<AABB>& boxes);
+
+// Refits one leaf and walks its parent chain until a parent's bbox is unchanged.
+void refit_bvh_leaf(std::vector<BVHNode>& nodes, const std::vector<int>& leaf_to_node, int leafIndex, const AABB& new_box);
+
 void query_bvh(const std::vector<BVHNode>& nodes, int root, const AABB& query, std::vector<int>& hits);
 
 // Swept-AABB broad phase producing candidate node–triangle and segment–segment pairs.
@@ -68,6 +77,11 @@ public:
         std::vector<BVHNode> tri_bvh_nodes;
         std::vector<BVHNode> edge_bvh_nodes;
         std::vector<BVHNode> node_bvh_nodes;
+
+        // leafIndex -> BVH node index
+        std::vector<int> tri_leaf_to_node;
+        std::vector<int> edge_leaf_to_node;
+        std::vector<int> node_leaf_to_node;
 
         int node_root = -1;
         int tri_root = -1;
@@ -162,6 +176,9 @@ public:
         return cache_;
     }
 
+    // Used by global_gauss_seidel_solver_ogc for partial leaf refit; other callers should use cache().
+    Cache& mutable_cache() { return cache_; }
+
     // Clamps p to lie inside the node box for vertex i.
     Vec3 clamp_to_node_box(int i, const Vec3& p) const {
         const AABB& box = cache_.node_boxes[i];
@@ -186,3 +203,6 @@ private:
 
     void build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double node_pad, double tri_pad, double edge_pad);
 };
+
+void incremental_refresh_vertex(BroadPhase::Cache& c, int vi, const std::vector<Vec3>& x,  
+    const RefMesh& mesh,  double box_pad, double node_box_radius_padded);

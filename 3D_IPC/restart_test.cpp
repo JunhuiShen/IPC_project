@@ -55,6 +55,8 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state,
     params.tol_abs         = 1e-6;
     params.use_parallel    = false;
     params.fixed_iters     = true;
+    params.node_box_min    = 0.001;
+    params.node_box_max    = 0.01;
 
     clear_model(ref_mesh, state, X, pins);
     int nx = 10, ny = 10;

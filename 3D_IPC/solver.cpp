@@ -582,3 +582,86 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     if (params.fixed_iters) result.converged = true;
     return result;
 }
+
+SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
+                                            std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
+                                            const std::vector<Vec3>& /*v*/,
+                                            std::vector<double>* residual_history, const std::string& outdir) {
+    if (!params.fixed_iters) {
+        fprintf(stderr, "global_gauss_seidel_solver_ogc: params.fixed_iters must be true\n");
+        exit(1);
+    }
+
+    const int nv = static_cast<int>(xnew.size());
+    const PinMap pm = build_pin_map(pins, nv);
+
+    static std::vector<double> prev_disp;
+    if (static_cast<int>(prev_disp.size()) != nv)
+        prev_disp.assign(nv, params.node_box_max);
+    constexpr double node_box_padding = 1.2;
+    auto node_box_size_fn = [&](int vi) { return std::clamp(prev_disp[vi] * node_box_padding, params.node_box_min, params.node_box_max); };
+
+    if (residual_history) residual_history->clear();
+    SolverResult result;
+    result.initial_residual = 0.0;
+    result.final_residual   = 0.0;
+    result.iterations       = 0;
+    if (residual_history) {
+        residual_history->reserve(static_cast<std::size_t>(std::max(0, params.max_global_iters)) + 1);
+        residual_history->push_back(0.0);
+    }
+
+    BroadPhase broad_phase;
+    const std::vector<Vec3> xnew_substep_start = xnew; // position snapshot at the start of the whole substep
+    const double pad = std::max(params.ogc_box_pad, params.d_hat);
+
+    std::vector<AABB> bvh_node_boxes(nv);
+    std::vector<Vec3> xnew_iter_start(nv);
+
+    for (int iter = 1; iter <= params.max_global_iters; ++iter) {
+        for (int i = 0; i < nv; ++i) {
+            const double r = node_box_size_fn(i) + pad;
+            bvh_node_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
+        }
+        broad_phase.initialize(bvh_node_boxes, ref_mesh, pad);
+
+        if (params.write_substeps && iter == 1)
+            write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, nullptr);
+
+        xnew_iter_start = xnew;
+        auto& bp_cache = broad_phase.mutable_cache();
+
+        for (int vi = 0; vi < nv; ++vi) {
+            const Vec3 dx_full = -gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm);
+            if (dx_full.squaredNorm() < 1e-28) continue;
+
+            // Clipping
+            const double R_vi = node_box_size_fn(vi);
+            constexpr double inset = 1e-10;
+            const Vec3 clip_min = xnew_iter_start[vi] - Vec3::Constant(R_vi);
+            const Vec3 clip_max = xnew_iter_start[vi] + Vec3::Constant(R_vi);
+            const Vec3 x_target = (xnew[vi] + dx_full).cwiseMax(clip_min + Vec3::Constant(inset)).cwiseMin(clip_max - Vec3::Constant(inset));
+            const Vec3 dx = x_target - xnew[vi];
+            if (dx.squaredNorm() < 1e-28) continue;
+
+            // No-pair fallback = half min-extent of the cubic clip box = R_vi.
+            double bound = compute_trust_region_bound_for_vertex(vi, xnew, broad_phase.cache(), 0.4);
+            if (!std::isfinite(bound)) bound = R_vi;
+
+            const double dx_norm = dx.norm();
+            const double toi = (dx_norm > 0.0) ? std::min(1.0, bound / dx_norm) : 1.0;
+            xnew[vi] += toi * dx;
+
+            incremental_refresh_vertex(bp_cache, vi, xnew, ref_mesh, pad, R_vi + pad);
+        }
+
+        result.iterations = iter;
+        if (residual_history) residual_history->push_back(0.0);
+    }
+
+    for (int i = 0; i < nv; ++i)
+        prev_disp[i] = (xnew[i] - xnew_substep_start[i]).norm();
+
+    result.converged = true;
+    return result;
+}

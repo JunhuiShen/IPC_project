@@ -43,6 +43,8 @@ struct SimParams {
     bool   use_ccd;              // if true, run CCD step clamping in per_vertex_safe_step
     bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
     bool   use_ogc;     // if true, use trust_region_initial_guess instead of CCD
+    bool   use_ogc_solver;       // if true, route the substep through global_gauss_seidel_solver_ogc
+    double ogc_box_pad;          // OGC node-box / tri-edge union pad used by the per-iter BVH rebuild
     bool   fixed_iters;          // if true, run exactly max_global_iters sweeps with no tolerance / convergence check
 
     // Route the per-substep Gauss-Seidel sweep through the GPU implementation
@@ -80,11 +82,13 @@ struct SimParams {
         p.use_ccd                   = false;
         p.use_ccd_guess             = true;
         p.use_ogc          = false;
+        p.use_ogc_solver            = false;
+        p.ogc_box_pad               = 0.0;
         p.fixed_iters               = false;
         p.use_gpu                   = false;
         p.experimental              = false;
-        p.node_box_max              = 0.01;
-        p.node_box_min              = 0.001;
+        p.node_box_max              = 0.0;
+        p.node_box_min              = 0.0;
         p.k_barrier                     = 1.0;
         p.use_ticcd                     = true;
         p.cached_dt_                = -1.0;

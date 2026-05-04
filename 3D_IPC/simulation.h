@@ -33,7 +33,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
 
         std::vector<Vec3> xnew;
 
-        if (params.use_ogc)
+        if (params.use_ogc || params.use_ogc_solver)
             xnew = state.deformed_positions;
         else if (params.use_ccd_guess)
             xnew = ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
@@ -43,6 +43,8 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         SolverResult sub_result;
         if (params.use_gpu)
             sub_result = gpu_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
+        else if (params.use_ogc_solver)
+            sub_result = global_gauss_seidel_solver_ogc(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, nullptr, outdir);
         else
             sub_result = global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, nullptr, outdir);
         accumulate_solver_result(agg, sub_result, sub == 0);

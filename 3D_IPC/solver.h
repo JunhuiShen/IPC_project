@@ -39,3 +39,14 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                                               const std::vector<Vec3>& v,
                                               std::vector<double>* residual_history = nullptr,
                                               const std::string& outdir = "");
+
+// Serial OGC Gauss-Seidel solver. Per outer iter: rebuild broad-phase with
+// params.ogc_box_pad-padded node boxes; sweep vertices serially with tight
+// node-box clip + OGC trust-region clip (R_vi fallback for no-pair vertices);
+// partial BVH refit after each move. Pair lists frozen per iter.
+SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+                                            const std::vector<Pin>& pins, const SimParams& params,
+                                            std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
+                                            const std::vector<Vec3>& v,
+                                            std::vector<double>* residual_history = nullptr,
+                                            const std::string& outdir = "");
