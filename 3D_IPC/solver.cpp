@@ -612,19 +612,12 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         if (iter > 1) broad_phase.refresh_pairs(ref_mesh);
         for (int vi = 0; vi < nv; ++vi) {
-            const Vec3 dx_full = -gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm);
-            if (dx_full.squaredNorm() < 1e-28) continue;
-
-            // Clipping
-            const double R_vi = node_box_size_fn(vi);
-            constexpr double inset = 1e-10;
-            const Vec3 clip_min = xnew_substep_start[vi] - Vec3::Constant(R_vi);
-            const Vec3 clip_max = xnew_substep_start[vi] + Vec3::Constant(R_vi);
-            const Vec3 x_target = (xnew[vi] + dx_full).cwiseMax(clip_min + Vec3::Constant(inset)).cwiseMin(clip_max - Vec3::Constant(inset));
-            const Vec3 dx = x_target - xnew[vi];
+            const Vec3 dx = -gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm);
             if (dx.squaredNorm() < 1e-28) continue;
 
-            // No-pair fallback = half min-extent of the cubic clip box = R_vi.
+            const double R_vi = node_box_size_fn(vi);
+
+            // No-pair fallback bound = R_vi (matches the BVH leaf half-extent).
             double bound = compute_trust_region_bound_for_vertex(vi, xnew, broad_phase.cache(), 0.4);
             if (!std::isfinite(bound)) bound = R_vi;
 
