@@ -612,25 +612,22 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
     }
 
     BroadPhase broad_phase;
-    const std::vector<Vec3> xnew_substep_start = xnew; // position snapshot at the start of the whole substep
+    const std::vector<Vec3> xnew_substep_start = xnew;  // anchor for clip boxes and prev_disp
     const double pad = std::max(params.ogc_box_pad, params.d_hat);
 
     std::vector<AABB> bvh_node_boxes(nv);
-    std::vector<Vec3> xnew_iter_start(nv);
+    for (int i = 0; i < nv; ++i) {
+        const double r = node_box_size_fn(i) + pad;
+        bvh_node_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
+    }
+    broad_phase.initialize(bvh_node_boxes, ref_mesh, pad);
+
+    if (params.write_substeps)
+        write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, nullptr);
+
+    auto& bp_cache = broad_phase.mutable_cache();
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
-        for (int i = 0; i < nv; ++i) {
-            const double r = node_box_size_fn(i) + pad;
-            bvh_node_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
-        }
-        broad_phase.initialize(bvh_node_boxes, ref_mesh, pad);
-
-        if (params.write_substeps && iter == 1)
-            write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, nullptr);
-
-        xnew_iter_start = xnew;
-        auto& bp_cache = broad_phase.mutable_cache();
-
         for (int vi = 0; vi < nv; ++vi) {
             const Vec3 dx_full = -gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm);
             if (dx_full.squaredNorm() < 1e-28) continue;
@@ -638,8 +635,8 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
             // Clipping
             const double R_vi = node_box_size_fn(vi);
             constexpr double inset = 1e-10;
-            const Vec3 clip_min = xnew_iter_start[vi] - Vec3::Constant(R_vi);
-            const Vec3 clip_max = xnew_iter_start[vi] + Vec3::Constant(R_vi);
+            const Vec3 clip_min = xnew_substep_start[vi] - Vec3::Constant(R_vi);
+            const Vec3 clip_max = xnew_substep_start[vi] + Vec3::Constant(R_vi);
             const Vec3 x_target = (xnew[vi] + dx_full).cwiseMax(clip_min + Vec3::Constant(inset)).cwiseMin(clip_max - Vec3::Constant(inset));
             const Vec3 dx = x_target - xnew[vi];
             if (dx.squaredNorm() < 1e-28) continue;
