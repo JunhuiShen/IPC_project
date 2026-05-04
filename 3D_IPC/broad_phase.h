@@ -114,6 +114,13 @@ public:
     // derived as the union of their vertex boxes (i.e. red boxes).
     void initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat = 0.0);
 
+    // Re-query NT and SS pair lists from the current BVH state without
+    // rebuilding the BVHs. Used by global_gauss_seidel_solver_ogc after
+    // incremental_refresh_vertex has updated BVH leaves to reflect per-vertex
+    // moves: this rebuilds vertex_nt/vertex_ss/nt_pairs/ss_pairs so that the
+    // next outer iteration sees pair lists reflecting the current mesh state.
+    void refresh_pairs(const RefMesh& mesh);
+
     const std::vector<NodeTrianglePair>& nt_pairs() const {
         return cache_.nt_pairs;
     }

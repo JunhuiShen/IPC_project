@@ -628,6 +628,7 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
     auto& bp_cache = broad_phase.mutable_cache();
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
+        if (iter > 1) broad_phase.refresh_pairs(ref_mesh);
         for (int vi = 0; vi < nv; ++vi) {
             const Vec3 dx_full = -gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm);
             if (dx_full.squaredNorm() < 1e-28) continue;

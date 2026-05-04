@@ -556,6 +556,54 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
     ++version_;
 }
 
+void BroadPhase::refresh_pairs(const RefMesh& mesh) {
+    Cache& c = cache_;
+    const int nv = static_cast<int>(c.node_boxes.size());
+    const int ne = static_cast<int>(c.edges.size());
+
+    c.nt_pairs.clear();
+    c.nt_pair_tri.clear();
+    c.nt_pair_index.clear();
+    for (auto& v : c.vertex_nt) v.clear();
+
+    c.ss_pairs.clear();
+    c.ss_pair_edges.clear();
+    c.ss_pair_index.clear();
+    for (auto& v : c.vertex_ss) v.clear();
+
+    std::vector<std::vector<int>> node_hits(nv);
+    #pragma omp parallel for schedule(dynamic, 32)
+    for (int node = 0; node < nv; ++node) {
+        if (c.tri_root < 0) continue;
+        query_bvh(c.tri_bvh_nodes, c.tri_root, c.node_boxes[node], node_hits[node]);
+    }
+    for (int node = 0; node < nv; ++node) {
+        for (int t : node_hits[node]) {
+            const int a  = tri_vertex(mesh, t, 0);
+            const int b  = tri_vertex(mesh, t, 1);
+            const int cc = tri_vertex(mesh, t, 2);
+            if (node_in_triangle(node, a, b, cc)) continue;
+            add_nt_pair(c, node, t, mesh);
+        }
+    }
+
+    std::vector<std::vector<int>> edge_hits(ne);
+    #pragma omp parallel for schedule(dynamic, 32)
+    for (int e = 0; e < ne; ++e) {
+        if (c.edge_root < 0) continue;
+        query_bvh(c.edge_bvh_nodes, c.edge_root, c.edge_boxes[e], edge_hits[e]);
+    }
+    for (int e = 0; e < ne; ++e) {
+        const Edge e0{c.edges[e][0], c.edges[e][1]};
+        for (int other : edge_hits[e]) {
+            if (other == e) continue;
+            const Edge e1{c.edges[other][0], c.edges[other][1]};
+            if (share_vertex(e0, e1)) continue;
+            add_ss_pair(c, e, other);
+        }
+    }
+}
+
 void incremental_refresh_vertex(BroadPhase::Cache& c, int vi, const std::vector<Vec3>& x, const RefMesh& mesh, double box_pad, double node_box_radius_padded) {
     if (vi < 0 || vi >= static_cast<int>(c.node_boxes.size())) return;
 
