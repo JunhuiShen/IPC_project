@@ -134,8 +134,7 @@ int main(int argc, char** argv) {
 
         if (!result.converged) {
             std::cerr << "Error: solver failed to converge at frame " << frame_index
-                      << " (final_residual = " << result.final_residual
-                      << ", max_substep_iters = " << params.max_global_iters << ")\n";
+                      << " (max_substep_iters = " << params.max_global_iters << ")\n";
             return 1;
         }
 
@@ -144,10 +143,8 @@ int main(int argc, char** argv) {
         total_solver_ms += solver_ms;
 
         std::cout << "Frame " << std::setw(4) << frame_index
-                  << " | initial_residual = " << std::scientific << result.initial_residual
-                  << " | final_residual = "   << std::scientific << result.final_residual
-                  << " | global_iters = "     << std::setw(3)    << result.iterations
-                  << " | solver_time = "      << std::fixed << std::setprecision(3)
+                  << " | global_iters = " << std::setw(3) << result.iterations
+                  << " | solver_time = "  << std::fixed << std::setprecision(3)
                   << solver_ms << " ms\n";
 
         if (!params.write_substeps)

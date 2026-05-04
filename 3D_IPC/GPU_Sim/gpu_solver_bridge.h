@@ -22,5 +22,4 @@ SolverResult gpu_gauss_seidel_solver(
     std::vector<Vec3>&                        xnew,
     const std::vector<Vec3>&                  xhat,
     BroadPhase&                               broad_phase,
-    const std::vector<Vec3>&                  v,
-    std::vector<double>*                      residual_history = nullptr);
+    const std::vector<Vec3>&                  v);

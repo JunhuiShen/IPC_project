@@ -37,8 +37,7 @@ SolverResult gpu_gauss_seidel_solver(
     std::vector<Vec3>&                   xnew,
     const std::vector<Vec3>&             xhat,
     BroadPhase&                          broad_phase,
-    const std::vector<Vec3>&             v,
-    std::vector<double>*                 residual_history)
+    const std::vector<Vec3>&             v)
 {
     const double dt          = params.dt();
     const double dhat        = params.d_hat;
@@ -57,23 +56,18 @@ SolverResult gpu_gauss_seidel_solver(
     if (use_barrier)
         broad_phase.initialize(xnew, v, ref_mesh, dt, dhat);
 
-    if (residual_history) residual_history->clear();
-
     auto eval_residual = [&]() {
         return compute_global_residual(ref_mesh, adj, pins, p,
                                        xnew, xhat, broad_phase, &pm);
     };
 
     SolverResult result;
-    result.initial_residual = p.fixed_iters ? 0.0 : eval_residual();
-    result.final_residual   = result.initial_residual;
-    result.iterations       = 0;
+    result.iterations = 0;
 
-    const double effective_tol = std::max(p.tol_abs,
-                                          p.tol_rel * result.initial_residual);
+    const double initial_residual = p.fixed_iters ? 0.0 : eval_residual();
+    const double effective_tol    = std::max(p.tol_abs, p.tol_rel * initial_residual);
 
-    if (residual_history) residual_history->push_back(result.initial_residual);
-    if (!p.fixed_iters && result.initial_residual < effective_tol) {
+    if (!p.fixed_iters && initial_residual < effective_tol) {
         result.converged = true;
         return result;
     }
@@ -113,11 +107,10 @@ SolverResult gpu_gauss_seidel_solver(
             apply_parallel_commits_cpu(commits, xnew);
         }
 
-        result.final_residual  = p.fixed_iters ? 0.0 : eval_residual();
-        result.iterations      = iter;
+        result.iterations = iter;
 
-        if (residual_history) residual_history->push_back(result.final_residual);
-        if (!p.fixed_iters && result.final_residual < effective_tol) {
+        const double cur_residual = p.fixed_iters ? 0.0 : eval_residual();
+        if (!p.fixed_iters && cur_residual < effective_tol) {
             result.converged = true;
             break;
         }

@@ -516,7 +516,7 @@ static void write_substep_data(const SimParams& params, const BroadPhase& broad_
 SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
                                         std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
                                         const std::vector<Vec3>& v,
-                                        std::vector<double>* residual_history, const std::string& outdir) {
+                                        const std::string& outdir) {
 
     if (!params.fixed_iters) {
         fprintf(stderr, "global_gauss_seidel_solver_basic: params.fixed_iters must be true\n");
@@ -544,17 +544,8 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
         union_adjacency(build_elastic_adj(ref_mesh, adj, static_cast<int>(xnew.size())),
                         build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()))));
 
-    //residual tracking: not going to actually do this and will demand running with fixed iterations
-    if (residual_history) residual_history->clear();
     SolverResult result;
-    result.initial_residual = 0.0;
-    result.final_residual   = result.initial_residual;
-    result.iterations       = 0;
-    if (residual_history) {
-        const int reserve_n = std::max(0, params.max_global_iters);
-        residual_history->reserve(static_cast<std::size_t>(reserve_n) + 1);
-        residual_history->push_back(result.initial_residual);
-    }
+    result.iterations = 0;
 
     //write substep data
     if (params.write_substeps) {
@@ -571,9 +562,7 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                                          /*use_ticcd=*/params.use_ticcd,
                                          /*use_ogc=*/params.use_ogc,
                                          params.use_parallel ? &color_groups : nullptr);
-        result.final_residual = 0.0;
-        result.iterations     = iter;
-        if (residual_history) residual_history->push_back(result.final_residual);
+        result.iterations = iter;
     }
 
     for (int i = 0; i < nv; ++i)
@@ -586,7 +575,7 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
 SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
                                             std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
                                             const std::vector<Vec3>& /*v*/,
-                                            std::vector<double>* residual_history, const std::string& outdir) {
+                                            const std::string& outdir) {
     if (!params.fixed_iters) {
         fprintf(stderr, "global_gauss_seidel_solver_ogc: params.fixed_iters must be true\n");
         exit(1);
@@ -601,15 +590,8 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
     constexpr double node_box_padding = 1.2;
     auto node_box_size_fn = [&](int vi) { return std::clamp(prev_disp[vi] * node_box_padding, params.node_box_min, params.node_box_max); };
 
-    if (residual_history) residual_history->clear();
     SolverResult result;
-    result.initial_residual = 0.0;
-    result.final_residual   = 0.0;
-    result.iterations       = 0;
-    if (residual_history) {
-        residual_history->reserve(static_cast<std::size_t>(std::max(0, params.max_global_iters)) + 1);
-        residual_history->push_back(0.0);
-    }
+    result.iterations = 0;
 
     BroadPhase broad_phase;
     const std::vector<Vec3> xnew_substep_start = xnew;  // anchor for clip boxes and prev_disp
@@ -654,7 +636,6 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
         }
 
         result.iterations = iter;
-        if (residual_history) residual_history->push_back(0.0);
     }
 
     for (int i = 0; i < nv; ++i)
