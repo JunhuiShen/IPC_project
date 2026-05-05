@@ -97,6 +97,7 @@ struct IPCArgs3D : ArgParser {
     double      tcyl_radius      = 0.06;   // both cylinders' radius (m); axis runs along x
     double      tcyl_length      = 1.50;   // both cylinders' length along x (m); should exceed tcyl_strip_span_z
     int         tcyl_nu          = 64;     // circumferential subdivisions for visual cylinder mesh
+    double      tcyl_visual_shrink = 0.040;// render cylinders this much thinner than r (m), so cloth-cyl lag never visually penetrates
     double      tcyl_twist_rate  = 0.15;   // turns/second per cylinder (sign-flipped between top/bot)
     double      tcyl_settle_time = 0.2;    // seconds with omega=0 so cloth settles under gravity
     double      tcyl_ramp_time   = 0.5;    // seconds to linearly ramp omega from 0 to full
@@ -192,6 +193,7 @@ struct IPCArgs3D : ArgParser {
         add_double("tcyl_radius",      tcyl_radius,      0.06, "Cylinder radius (m) for example 7 (axis along x)");
         add_double("tcyl_length",      tcyl_length,      1.50, "Cylinder length along x (m) for example 7; should exceed tcyl_strip_span_z");
         add_int   ("tcyl_nu",          tcyl_nu,          64,   "Circumferential subdivisions for visual cylinder mesh in example 7");
+        add_double("tcyl_visual_shrink", tcyl_visual_shrink, 0.040, "Render cylinders thinner than tcyl_radius by this many m (visual only; physics still uses tcyl_radius). Hides cloth-cyl lag during rotation in example 7.");
         add_double("tcyl_twist_rate",  tcyl_twist_rate,  0.15, "Turns/second per cylinder in example 7 (top and bot rotate in opposite directions)");
         add_double("tcyl_settle_time", tcyl_settle_time, 0.2,  "Seconds with omega=0 so cloth settles under gravity in example 7");
         add_double("tcyl_ramp_time",   tcyl_ramp_time,   0.5,  "Seconds to linearly ramp omega from 0 to full in example 7");

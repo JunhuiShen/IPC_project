@@ -485,11 +485,15 @@ void build_two_cylinder_twist_example(const IPCArgs3D& args,
 
     // Visual cylinder meshes along +x (build_cylinder_mesh creates them
     // along +z natively; the (x,y,z) → (z,y,x) swap rotates onto +x).
+    // Render the cyl mesh thinner than the physical radius r by
+    // `tcyl_visual_shrink` so dynamic drop-row lag during rotation never
+    // visually pokes through the cylinder. Physics is unaffected.
+    const double r_visual = std::max(0.001, r - args.tcyl_visual_shrink);
     auto append_x_axis_cylinder = [&](const Vec3& center) {
         RefMesh        s_ref;
         DeformedState  s_state;
         std::vector<Vec2> s_X;
-        build_cylinder_mesh(s_ref, s_state, s_X, args.tcyl_nu, r, args.tcyl_length, Vec3::Zero());
+        build_cylinder_mesh(s_ref, s_state, s_X, args.tcyl_nu, r_visual, args.tcyl_length, Vec3::Zero());
         const int base_v = static_cast<int>(static_x.size());
         for (const Vec3& p : s_state.deformed_positions) {
             static_x.push_back(Vec3(p.z() + center.x(),
@@ -524,8 +528,8 @@ void build_two_cylinder_twist_example(const IPCArgs3D& args,
     // point (zero distance ⇒ barrier gradient blows up), we pin j=ny to
     // the top cylinder but nudge it outward in -z by `seam_offset` and
     // snap its initial position to match so there's no startup yank.
-    const double seam_offset = std::max(1.5 * params.d_hat,
-                                        std::max(1.5 * params.eps_sdf, 0.005));
+    // 5 mm is comfortably above any reasonable d_hat (cloth-cloth barrier).
+    const double seam_offset = std::max(1.5 * params.d_hat, 0.005);
     const double span = args.tcyl_strip_span_z;
 
     for (int strip = 0; strip < n_strips; ++strip) {
