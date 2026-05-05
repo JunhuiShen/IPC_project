@@ -3,47 +3,62 @@
 
 #include <cmath>
 
-void build_two_sheets_example(const IPCArgs3D& args,
-                              RefMesh& ref_mesh,
-                              DeformedState& state,
-                              std::vector<Vec2>& X,
-                              std::vector<Pin>& pins) {
-    clear_model(ref_mesh, state, X, pins);
+namespace {
+// ---------------------------------------------------------------------------
+// Shared helpers used across examples.
+// ---------------------------------------------------------------------------
 
-    // Two sheets, side-by-side in x, embedded in the xz plane by build_square_mesh().
-    const int base_left = build_square_mesh(
-            ref_mesh, state, X,
-            args.nx, args.ny, args.width, args.height,
-            Vec3(args.left_x, args.sheet_y, args.left_z)
-    );
+constexpr double kPi    = 3.14159265358979323846;
+constexpr double kTwoPi = 6.28318530717958647692;
 
-    const int base_right = build_square_mesh(
-            ref_mesh, state, X,
-            args.nx, args.ny, args.width, args.height,
-            Vec3(args.right_x, args.sheet_y, args.right_z)
-    );
-
-    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
-
-    // Tiny asymmetry on the right sheet so the evolution is not perfectly symmetric.
-    state.deformed_positions[base_right + 0] += Vec3(-0.02, 0.00, -0.01);
-    state.deformed_positions[base_right + 2] += Vec3(-0.02, 0.00, -0.01);
-
-    // Pin inner-side top and bottom corners.
-    const int left_bottom_right = base_left + args.nx;
-    const int left_top_right    = base_left + args.ny * (args.nx + 1) + args.nx;
-    const int right_bottom_left = base_right + 0;
-    const int right_top_left    = base_right + args.ny * (args.nx + 1);
-
-    append_pin(pins, left_top_right,    state.deformed_positions);
-    append_pin(pins, left_bottom_right, state.deformed_positions);
-    append_pin(pins, right_top_left,    state.deformed_positions);
-    append_pin(pins, right_bottom_left, state.deformed_positions);
+// Rotate `p` by angle `theta` about the line through `axis_point` parallel
+// to +x. Only the y and z components change.
+Vec3 rotate_about_x_axis(const Vec3& p, const Vec3& axis_point, double theta) {
+    const double c = std::cos(theta);
+    const double s = std::sin(theta);
+    const double dy = p.y() - axis_point.y();
+    const double dz = p.z() - axis_point.z();
+    return Vec3(p.x(),
+                axis_point.y() + c * dy - s * dz,
+                axis_point.z() + s * dy + c * dz);
 }
 
-namespace {
-// Shared ground-cloth builder: 1.2x1.2 square in the xz plane at y=0, four
-// corners pinned. Returns nothing; appends to ref_mesh/state/X/pins in place.
+// Rotate `p` by angle `theta` about the line through `axis_point` parallel
+// to +y. Only the x and z components change.
+Vec3 rotate_about_y_axis(const Vec3& p, const Vec3& axis_point, double theta) {
+    const double c = std::cos(theta);
+    const double s = std::sin(theta);
+    const double dx = p.x() - axis_point.x();
+    const double dz = p.z() - axis_point.z();
+    return Vec3(axis_point.x() + c * dx + s * dz,
+                p.y(),
+                axis_point.z() - s * dx + c * dz);
+}
+
+// Effective rotation angle: zero during the settle phase, then quadratic
+// (linear-ramp on omega) over the ramp phase, then linear afterward so the
+// pin target velocity is continuous and matches a steady omega. If
+// `max_abs_theta` is positive, the magnitude is clamped to that cap so the
+// cylinder coasts and then stops at the target angle.
+double effective_theta(double omega, double t, double t_settle, double t_ramp,
+                       double max_abs_theta = 0.0) {
+    double theta = 0.0;
+    if (t > t_settle) {
+        const double s = t - t_settle;
+        if (t_ramp <= 0.0)            theta = omega * s;
+        else if (s >= t_ramp)         theta = omega * (s - 0.5 * t_ramp);
+        else                          theta = 0.5 * omega * s * s / t_ramp;
+    }
+    if (max_abs_theta > 0.0) {
+        if (theta >  max_abs_theta) theta =  max_abs_theta;
+        if (theta < -max_abs_theta) theta = -max_abs_theta;
+    }
+    return theta;
+}
+
+// Shared ground-cloth builder used by examples 2 and 3: 1.2x1.2 square in the
+// xz plane at y=0 with the four corners pinned. Appends to ref_mesh / state /
+// X / pins in place.
 void build_ground_cloth(RefMesh& ref_mesh,
                         DeformedState& state,
                         std::vector<Vec2>& X,
@@ -71,6 +86,50 @@ void build_ground_cloth(RefMesh& ref_mesh,
 }
 } // namespace
 
+
+// ---------------------------------------------------------------------------
+// Example 1: two side-by-side sheets with their inner corners pinned.
+// ---------------------------------------------------------------------------
+void build_two_sheets_example(const IPCArgs3D& args,
+                              RefMesh& ref_mesh,
+                              DeformedState& state,
+                              std::vector<Vec2>& X,
+                              std::vector<Pin>& pins) {
+    clear_model(ref_mesh, state, X, pins);
+
+    // Two sheets, side-by-side in x, embedded in the xz plane by build_square_mesh().
+    const int base_left = build_square_mesh(
+            ref_mesh, state, X,
+            args.nx, args.ny, args.width, args.height,
+            Vec3(args.left_x, args.sheet_y, args.left_z));
+
+    const int base_right = build_square_mesh(
+            ref_mesh, state, X,
+            args.nx, args.ny, args.width, args.height,
+            Vec3(args.right_x, args.sheet_y, args.right_z));
+
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+
+    // Tiny asymmetry on the right sheet so the evolution is not perfectly symmetric.
+    state.deformed_positions[base_right + 0] += Vec3(-0.02, 0.00, -0.01);
+    state.deformed_positions[base_right + 2] += Vec3(-0.02, 0.00, -0.01);
+
+    // Pin inner-side top and bottom corners.
+    const int left_bottom_right = base_left + args.nx;
+    const int left_top_right    = base_left + args.ny * (args.nx + 1) + args.nx;
+    const int right_bottom_left = base_right + 0;
+    const int right_top_left    = base_right + args.ny * (args.nx + 1);
+
+    append_pin(pins, left_top_right,    state.deformed_positions);
+    append_pin(pins, left_bottom_right, state.deformed_positions);
+    append_pin(pins, right_top_left,    state.deformed_positions);
+    append_pin(pins, right_bottom_left, state.deformed_positions);
+}
+
+
+// ---------------------------------------------------------------------------
+// Example 2: ground cloth + 3 small cloths dropped from rest. Low-res, cheap.
+// ---------------------------------------------------------------------------
 void build_cloth_stack_example_low_res(RefMesh& ref_mesh,
                                        DeformedState& state,
                                        std::vector<Vec2>& X,
@@ -104,6 +163,10 @@ void build_cloth_stack_example_low_res(RefMesh& ref_mesh,
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
 }
 
+
+// ---------------------------------------------------------------------------
+// Example 3: ground cloth + 5 dense, fast-falling cloths. High-res stress test.
+// ---------------------------------------------------------------------------
 void build_cloth_stack_example_high_res(RefMesh& ref_mesh,
                                         DeformedState& state,
                                         std::vector<Vec2>& X,
@@ -114,19 +177,18 @@ void build_cloth_stack_example_high_res(RefMesh& ref_mesh,
 
     // Five densely-spaced cloths with initial downward velocity so layers
     // engage contact near-simultaneously -- the actual stress window.
-    const int    stack_count   = 5;    // number of falling cloths in the stack
-    const int    small_nx      = 16;    // grid subdivisions along each cloth's x-axis (triangles = 2*nx*ny)
-    const int    small_ny      = 16;    // grid subdivisions along each cloth's y-axis
-    const double small_w       = 0.35; // width of each falling cloth (meters, along x)
-    const double small_h       = 0.35; // height of each falling cloth (meters, along z in world space)
-    const double first_drop_y  = 0.25; // y-coordinate of the lowest falling cloth at t=0
-    const double drop_spacing  = 0.09; // vertical gap (meters) between successive stacked cloths at t=0
-    const double drop_speed    = 2.0;  // initial downward velocity applied to every falling-cloth vertex (m/s)
+    const int    stack_count   = 5;
+    const int    small_nx      = 16;
+    const int    small_ny      = 16;
+    const double small_w       = 0.35;
+    const double small_h       = 0.35;
+    const double first_drop_y  = 0.25;
+    const double drop_spacing  = 0.09;
+    const double drop_speed    = 2.0;  // initial -y velocity (m/s)
 
     const int falling_begin = static_cast<int>(state.deformed_positions.size());
 
     for (int s = 0; s < stack_count; ++s) {
-        // Tiny asymmetric xz offset so perfect symmetry does not bias stacking.
         const double x_off = 0.005 * (s - 1);
         const double z_off = 0.004 * (s - 1);
         const Vec3 origin(
@@ -143,6 +205,12 @@ void build_cloth_stack_example_high_res(RefMesh& ref_mesh,
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Example 4: cloth stack drops onto a static cylinder + pinned ground.
+// Cylinder/ground are exported once as static_x/static_tris; collisions go
+// through SDFs (sdf_planes + sdf_cylinders).
+// ---------------------------------------------------------------------------
 void build_cloth_cylinder_drop_example(const IPCArgs3D& args,
                                        RefMesh& ref_mesh,
                                        DeformedState& state,
@@ -207,22 +275,10 @@ void build_cloth_cylinder_drop_example(const IPCArgs3D& args,
 }
 
 
-namespace {
-constexpr double kTwoPi = 6.28318530717958647692;
-
-// Rotate `p` by angle `theta` about the line through `axis_point` parallel
-// to +x. Only the y and z components change.
-Vec3 rotate_about_x_axis(const Vec3& p, const Vec3& axis_point, double theta) {
-    const double c = std::cos(theta);
-    const double s = std::sin(theta);
-    const double dy = p.y() - axis_point.y();
-    const double dz = p.z() - axis_point.z();
-    return Vec3(p.x(),
-                axis_point.y() + c * dy - s * dz,
-                axis_point.z() + s * dy + c * dz);
-}
-} // namespace
-
+// ---------------------------------------------------------------------------
+// Example 5: square cloth with both short edges clamped, edges counter-rotate
+// about the +x axis at twist_rate Hz.
+// ---------------------------------------------------------------------------
 void build_twisting_cloth_example(const IPCArgs3D& args,
                                   RefMesh& ref_mesh,
                                   DeformedState& state,
@@ -293,6 +349,10 @@ void update_twist_pins(std::vector<Pin>& pins, const TwistSpec& spec, double t) 
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Example 6: cloth stack drops onto a static sphere + pinned ground.
+// ---------------------------------------------------------------------------
 void build_cloth_sphere_drop_example(const IPCArgs3D& args,
                                      RefMesh& ref_mesh,
                                      DeformedState& state,
@@ -336,7 +396,6 @@ void build_cloth_sphere_drop_example(const IPCArgs3D& args,
             Vec3(0.0, 1.0, 0.0)});
     params.sdf_spheres.push_back(SphereSDF{sphere_center, sphere_radius});
 
-    // Falling cloth stack 
     const int    stack_count   = args.drop_stack_count;
     const int    small_nx      = args.drop_cloth_nx;
     const int    small_ny      = args.drop_cloth_ny;
@@ -354,4 +413,194 @@ void build_cloth_sphere_drop_example(const IPCArgs3D& args,
     }
 
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+}
+
+
+// ---------------------------------------------------------------------------
+// Example 7: N closed-loop cloth strips wrapping two horizontal cylinders.
+// Both cylinders rotate about +y in opposite directions, twisting the strips
+// together in the gap between them.
+// ---------------------------------------------------------------------------
+void build_two_cylinder_twist_example(const IPCArgs3D& args,
+                                      RefMesh& ref_mesh,
+                                      DeformedState& state,
+                                      std::vector<Vec2>& X,
+                                      std::vector<Pin>& pins,
+                                      SimParams& params,
+                                      std::vector<Vec3>& static_x,
+                                      std::vector<int>&  static_tris,
+                                      CylinderTwistSpec& spec) {
+    clear_model(ref_mesh, state, X, pins);
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+
+    const int    n_strips = std::max(1, args.tcyl_n_strips);
+    const int    nx       = args.tcyl_nx;
+    const int    ny       = args.tcyl_ny;
+    const double strip_w  = args.tcyl_strip_w;
+    const double H        = 0.5 * args.tcyl_cloth_h;       // half y-distance between cyl axes
+    const double r        = args.tcyl_radius;
+    const double omega    = kTwoPi * args.tcyl_twist_rate;
+
+    const Vec3 top_center(0.0,  H, 0.0);
+    const Vec3 bot_center(0.0, -H, 0.0);
+
+    // Each strip is a CLOSED LOOP wrapping both horizontal cylinders, like
+    // a flat belt on two pulleys. Going around the loop:
+    //   1. Top wrap   (length π·pin_r): from back of top cyl OVER the top
+    //                                   to the front of top cyl.  Pinned.
+    //   2. Front drop (length 2H):     straight down at z=+pin_r.  Free.
+    //   3. Bot wrap   (length π·pin_r): from front of bot cyl UNDER the
+    //                                   bottom to the back of bot cyl.  Pinned.
+    //   4. Back drop  (length 2H):     straight up at z=-pin_r.  Free.
+    // Wrap-to-drop transitions are tangent-continuous (no curvature kink),
+    // so uniform parametric sampling stays uniform after the 3D remap.
+    //
+    // pin_r is slightly larger than r so the flat cloth chords between wrap
+    // rows sit outside the cylinder mesh chords (no polygon-vs-polygon
+    // interpenetration at frame 0). 2 mm is visually flush.
+    const double pin_r        = r + 0.002;
+    const double wrap_len     = kPi * pin_r;
+    const double drop_len     = 2.0 * H;
+    const double loop_L       = 2.0 * wrap_len + 2.0 * drop_len;
+    const double s_top_end    = wrap_len;
+    const double s_front_end  = wrap_len + drop_len;
+    const double s_bot_end    = 2.0 * wrap_len + drop_len;
+
+    auto loop_position = [&](double s) -> Vec3 {
+        if (s <= s_top_end) {
+            const double phi = kPi - s / pin_r;
+            return Vec3(0.0, H + pin_r * std::sin(phi), pin_r * std::cos(phi));
+        }
+        if (s <= s_front_end) {
+            return Vec3(0.0, H - (s - s_top_end), pin_r);
+        }
+        if (s <= s_bot_end) {
+            const double phi = -(s - s_front_end) / pin_r;
+            return Vec3(0.0, -H + pin_r * std::sin(phi), pin_r * std::cos(phi));
+        }
+        return Vec3(0.0, -H + (s - s_bot_end), -pin_r);
+    };
+
+    // Visual cylinder meshes along +x (build_cylinder_mesh creates them
+    // along +z natively; the (x,y,z) → (z,y,x) swap rotates onto +x).
+    auto append_x_axis_cylinder = [&](const Vec3& center) {
+        RefMesh        s_ref;
+        DeformedState  s_state;
+        std::vector<Vec2> s_X;
+        build_cylinder_mesh(s_ref, s_state, s_X, args.tcyl_nu, r, args.tcyl_length, Vec3::Zero());
+        const int base_v = static_cast<int>(static_x.size());
+        for (const Vec3& p : s_state.deformed_positions) {
+            static_x.push_back(Vec3(p.z() + center.x(),
+                                    p.y() + center.y(),
+                                    p.x() + center.z()));
+        }
+        for (int t : s_ref.tris) static_tris.push_back(base_v + t);
+    };
+    const int top_v_begin = 0;
+    append_x_axis_cylinder(top_center);
+    const int top_v_end = static_cast<int>(static_x.size());
+    append_x_axis_cylinder(bot_center);
+    const int bot_v_end = static_cast<int>(static_x.size());
+
+    spec = CylinderTwistSpec{};
+    spec.top_axis_point = top_center;
+    spec.bot_axis_point = bot_center;
+    spec.omega_top      =  omega;
+    spec.omega_bot      = -omega;
+    spec.t_settle       = std::max(0.0, args.tcyl_settle_time);
+    spec.t_ramp         = std::max(0.0, args.tcyl_ramp_time);
+    spec.max_abs_theta  = std::max(0.0, kTwoPi * args.tcyl_max_turn);
+    spec.static_x_rest  = static_x;
+    spec.top_v_begin    = top_v_begin;
+    spec.top_v_end      = top_v_end;
+    spec.bot_v_begin    = top_v_end;
+    spec.bot_v_end      = bot_v_end;
+
+    // The last panel row (j == ny) lands at s = loop_L, which geometrically
+    // coincides with s = 0 (the back drop closes onto the top-wrap start).
+    // To anchor the closed loop without two pinned vertices at the same
+    // point (zero distance ⇒ barrier gradient blows up), we pin j=ny to
+    // the top cylinder but nudge it outward in -z by `seam_offset` and
+    // snap its initial position to match so there's no startup yank.
+    const double seam_offset = std::max(1.5 * params.d_hat,
+                                        std::max(1.5 * params.eps_sdf, 0.005));
+    const double span = args.tcyl_strip_span_z;
+
+    for (int strip = 0; strip < n_strips; ++strip) {
+        const double x_center = (n_strips == 1)
+            ? 0.0
+            : (-0.5 * span + (strip + 0.5) * (span / n_strips));
+
+        const Vec3 build_origin(-0.5 * strip_w, 0.0, 0.0);
+        const int  base = build_square_mesh(ref_mesh, state, X,
+                                            nx, ny, strip_w, loop_L, build_origin);
+
+        // Remap each panel row to its 3D position along the loop.
+        for (int j = 0; j <= ny; ++j) {
+            const Vec3 p = loop_position((static_cast<double>(j) / ny) * loop_L);
+            for (int i = 0; i <= nx; ++i) {
+                const double dx = (static_cast<double>(i) / nx - 0.5) * strip_w;
+                state.deformed_positions[base + j * (nx + 1) + i] =
+                    Vec3(x_center + dx, p.y(), p.z());
+            }
+        }
+
+        // Pin the wrap rows. Treat j=ny as part of the top wrap (s = 0)
+        // with the seam offset applied.
+        for (int j = 0; j <= ny; ++j) {
+            const double s = (j == ny) ? 0.0 : (static_cast<double>(j) / ny) * loop_L;
+            const bool on_top_wrap = (s <= s_top_end);
+            const bool on_bot_wrap = (s >= s_front_end && s <= s_bot_end);
+            if (!on_top_wrap && !on_bot_wrap) continue;
+
+            for (int i = 0; i <= nx; ++i) {
+                const int v = base + j * (nx + 1) + i;
+                if (j == ny) state.deformed_positions[v].z() -= seam_offset;
+
+                auto& pin_indices = on_top_wrap ? spec.top_pin_indices     : spec.bot_pin_indices;
+                auto& targets     = on_top_wrap ? spec.top_initial_targets : spec.bot_initial_targets;
+                pin_indices.push_back(static_cast<int>(pins.size()));
+                append_pin(pins, v, state.deformed_positions);
+                targets.push_back(pins.back().target_position);
+            }
+        }
+    }
+
+    // Re-initialize hinges with the curved 3D rest pose so bending energy
+    // is zero in the wrapped configuration (otherwise the strips would try
+    // to flatten themselves).
+    ref_mesh.initialize(X, state.deformed_positions);
+
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+}
+
+void update_cylinder_twist_pins(std::vector<Pin>& pins,
+                                const CylinderTwistSpec& spec, double t) {
+    const double theta_top = effective_theta(spec.omega_top, t, spec.t_settle, spec.t_ramp, spec.max_abs_theta);
+    const double theta_bot = effective_theta(spec.omega_bot, t, spec.t_settle, spec.t_ramp, spec.max_abs_theta);
+    const int n_top = static_cast<int>(spec.top_pin_indices.size());
+    for (int k = 0; k < n_top; ++k) {
+        pins[spec.top_pin_indices[k]].target_position =
+            rotate_about_y_axis(spec.top_initial_targets[k], spec.top_axis_point, theta_top);
+    }
+    const int n_bot = static_cast<int>(spec.bot_pin_indices.size());
+    for (int k = 0; k < n_bot; ++k) {
+        pins[spec.bot_pin_indices[k]].target_position =
+            rotate_about_y_axis(spec.bot_initial_targets[k], spec.bot_axis_point, theta_bot);
+    }
+}
+
+void update_cylinder_visuals(std::vector<Vec3>& static_x,
+                             const CylinderTwistSpec& spec,
+                             double t) {
+    const double theta_top = effective_theta(spec.omega_top, t, spec.t_settle, spec.t_ramp, spec.max_abs_theta);
+    const double theta_bot = effective_theta(spec.omega_bot, t, spec.t_settle, spec.t_ramp, spec.max_abs_theta);
+    for (int i = spec.top_v_begin; i < spec.top_v_end; ++i) {
+        static_x[i] = rotate_about_y_axis(spec.static_x_rest[i], spec.top_axis_point, theta_top);
+    }
+    for (int i = spec.bot_v_begin; i < spec.bot_v_end; ++i) {
+        static_x[i] = rotate_about_y_axis(spec.static_x_rest[i], spec.bot_axis_point, theta_bot);
+    }
 }

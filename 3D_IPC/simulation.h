@@ -7,8 +7,9 @@
 #include <string>
 #include <vector>
 
-struct TwistSpec;
-using PinTargetUpdater = void (*)(std::vector<Pin>& pins, const TwistSpec& spec, double t);
+// Per-substep pin-target updater. The closure captures whichever spec the
+// caller wants (TwistSpec, CylinderTwistSpec, etc.).
+using PinTargetUpdater = std::function<void(std::vector<Pin>& pins, double t)>;
 
 // Advance one frame across all substeps; returns accumulated stats
 // Called after each substep with the global substep index (0-based) and current positions.
@@ -16,14 +17,14 @@ using SubstepCallback = std::function<void(int, const std::vector<Vec3>&)>;
 
 inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
     std::vector<Pin>& pins, const SimParams& params,
-    BroadPhase& broad_phase, const TwistSpec* twist_spec = nullptr, int frame_index = 1,
+    BroadPhase& broad_phase, int frame_index = 1,
     PinTargetUpdater pin_updater = nullptr, SubstepCallback on_substep = nullptr, const std::string& outdir = "") {
     SolverResult agg;
     const double dt = params.dt();
     for (int sub = 0; sub < params.substeps; ++sub) {
-        if (twist_spec && pin_updater) {
+        if (pin_updater) {
             const double t_next = ((frame_index - 1) * params.substeps + (sub + 1)) * dt;
-            pin_updater(pins, *twist_spec, t_next);
+            pin_updater(pins, t_next);
         }
 
         std::vector<Vec3> xhat;

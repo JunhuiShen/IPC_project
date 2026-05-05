@@ -617,7 +617,7 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
 
             const double R_vi = node_box_size_fn(vi);
 
-            // No-pair fallback bound = R_vi (matches the BVH leaf half-extent).
+            // No-pair fallback bound = R_vi
             double bound = compute_trust_region_bound_for_vertex(vi, xnew, broad_phase.cache(), 0.4);
             if (!std::isfinite(bound)) bound = R_vi;
 

@@ -82,3 +82,67 @@ void build_twisting_cloth_example(const IPCArgs3D& args,
 // radians, using omega_left for the left group and omega_right for the right.
 // Call once per substep.
 void update_twist_pins(std::vector<Pin>& pins, const TwistSpec& spec, double t);
+
+// Drives example7: N closed-loop cloth strips wrapping two horizontal
+// cylinders (long axis along +x). Each cylinder rotates about the vertical
+// (+y) axis through its own center, in opposite directions. This swings
+// the cylinder ends in the x-z plane, dragging the pinned wrap segments
+// with them and twisting the strips together in the gap between cylinders.
+// Rotation is held at zero for t_settle seconds (cloth hangs/settles),
+// then linearly ramped from zero to full omega over t_ramp seconds.
+struct CylinderTwistSpec {
+    std::vector<int>  top_pin_indices;
+    std::vector<int>  bot_pin_indices;
+    std::vector<Vec3> top_initial_targets;
+    std::vector<Vec3> bot_initial_targets;
+    Vec3   top_axis_point{Vec3::Zero()};
+    Vec3   bot_axis_point{Vec3::Zero()};
+    double omega_top = 0.0;   // rad/s, signed
+    double omega_bot = 0.0;   // rad/s, signed
+    double t_settle  = 0.0;   // seconds with omega clamped to zero
+    double t_ramp    = 0.0;   // seconds to linearly ramp from 0 to omega
+    // Total rotation cap (radians, magnitude). Once |effective_theta|
+    // hits this value the cylinder stops; 0 means no cap.
+    double max_abs_theta = 0.0;
+
+    // Rest positions of the visual cylinder vertices and the index ranges
+    // (in static_x) belonging to the top and bottom cylinders. Used by
+    // update_cylinder_visuals to rotate the cylinders per frame so the
+    // exported collider geometry matches the live pin rotation.
+    std::vector<Vec3> static_x_rest;
+    int top_v_begin = 0;
+    int top_v_end   = 0;
+    int bot_v_begin = 0;
+    int bot_v_end   = 0;
+};
+
+// Vertical cloth strip in the xy plane between two horizontal z-axis
+// cylinders. Top and bottom edges pinned; pins counter-rotate about each
+// cylinder's axis at args.tcyl_twist_rate Hz to twist the cloth between them.
+// Cylinder visual mesh goes into static_x / static_tris (one-time export);
+// SDF cylinders are pushed into params.sdf_cylinders for contact.
+// Needs --d_hat > 0 and --k_sdf > 0 for cloth/cylinder contact to work.
+void build_two_cylinder_twist_example(const IPCArgs3D& args,
+                                      RefMesh& ref_mesh,
+                                      DeformedState& state,
+                                      std::vector<Vec2>& X,
+                                      std::vector<Pin>& pins,
+                                      SimParams& params,
+                                      std::vector<Vec3>& static_x,
+                                      std::vector<int>&  static_tris,
+                                      CylinderTwistSpec& spec);
+
+// Rotates each pin's target about +z (through the corresponding cylinder
+// axis_point) by omega_{top,bot} * t. Call once per substep.
+void update_cylinder_twist_pins(std::vector<Pin>& pins,
+                                const CylinderTwistSpec& spec,
+                                double t);
+
+// Rotates the visual cylinder vertices in `static_x` so the exported
+// collider geometry matches the live pin rotation. Top cylinder verts
+// (range [top_v_begin, top_v_end)) rotate about spec.top_axis_point at
+// omega_top, bottom verts about bot_axis_point at omega_bot, both about
+// the +y axis with the same settle/ramp curve as update_cylinder_twist_pins.
+void update_cylinder_visuals(std::vector<Vec3>& static_x,
+                             const CylinderTwistSpec& spec,
+                             double t);

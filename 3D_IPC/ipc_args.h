@@ -8,7 +8,7 @@
 struct IPCArgs3D : ArgParser {
 
     // --- time integration ---
-    double fps          = 30.0;   
+    double fps          = 30.0;
     int    substeps     = 3;
     int    num_frames   = 60;
 
@@ -87,6 +87,21 @@ struct IPCArgs3D : ArgParser {
     double      sphere_ground_size = 4.0; // edge length (m) of the square pinned ground in example 6
     int         sphere_ground_nx   = 38;  // grid subdivisions along each axis of the square pinned ground in example 6
 
+    // example 7: N closed-loop cloth strips twisted between two horizontal cylinders
+    int         tcyl_n_strips    = 4;      // number of cloth strips along x (along the cylinder axis)
+    double      tcyl_strip_w     = 0.18;   // each strip's x-width (m, along beam axis)
+    double      tcyl_strip_span_z= 1.20;   // total x-span over which strips are distributed (along cyl axis, m)
+    double      tcyl_cloth_h     = 1.0;    // pin-to-pin y distance between cylinders (m)
+    int         tcyl_nx          = 16;     // strip subdivisions along x (cols = tcyl_nx+1)
+    int         tcyl_ny          = 180;    // strip subdivisions along y (rows = tcyl_ny+1)
+    double      tcyl_radius      = 0.06;   // both cylinders' radius (m); axis runs along x
+    double      tcyl_length      = 1.50;   // both cylinders' length along x (m); should exceed tcyl_strip_span_z
+    int         tcyl_nu          = 64;     // circumferential subdivisions for visual cylinder mesh
+    double      tcyl_twist_rate  = 0.15;   // turns/second per cylinder (sign-flipped between top/bot)
+    double      tcyl_settle_time = 0.2;    // seconds with omega=0 so cloth settles under gravity
+    double      tcyl_ramp_time   = 0.5;    // seconds to linearly ramp omega from 0 to full
+    double      tcyl_max_turn    = 0.5;    // |total turns| cap per cylinder; rotation stops here (0 = no cap)
+
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
     std::string format       = "geo";
@@ -140,7 +155,7 @@ struct IPCArgs3D : ArgParser {
         add_double("left_z",      left_z,      0.00,       "Left sheet origin z");
         add_double("right_z",     right_z,     0.02,       "Right sheet origin z");
 
-        add_int   ("example",      example,       3,              "Scene to run: 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop, 5=twisting_cloth, 6=cloth_sphere_drop, 7=skirt_around_body");
+        add_int   ("example",      example,       3,              "Scene to run: 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop, 5=twisting_cloth, 6=cloth_sphere_drop, 7=two_cylinder_twist");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 5 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 5 (vertices = (twist_nx+1)*(twist_ny+1))");
         add_int   ("twist_ny",     twist_ny,      99,             "Grid subdivisions along y for example 5");
@@ -167,6 +182,20 @@ struct IPCArgs3D : ArgParser {
         add_double("sphere_cloth_size", sphere_cloth_size, 2.00,   "Edge length in meters of each falling cloth in example 6");
         add_double("sphere_ground_size", sphere_ground_size, 4.0,  "Edge length in meters of the square pinned ground in example 6");
         add_int   ("sphere_ground_nx",   sphere_ground_nx,   38,   "Grid subdivisions along each axis of the square pinned ground in example 6");
+
+        add_int   ("tcyl_n_strips",    tcyl_n_strips,    4,    "Number of cloth strips along x (along cylinder axis) for example 7");
+        add_double("tcyl_strip_w",     tcyl_strip_w,     0.18, "Each strip's x-width (m, along beam axis) for example 7");
+        add_double("tcyl_strip_span_z",tcyl_strip_span_z,1.20, "Total x-span over which strips are distributed (m, along cyl axis) for example 7");
+        add_double("tcyl_cloth_h",     tcyl_cloth_h,     1.00, "Pin-to-pin y distance between cylinders (m) for example 7");
+        add_int   ("tcyl_nx",          tcyl_nx,          16,   "Strip subdivisions along x for example 7 (cols = tcyl_nx+1)");
+        add_int   ("tcyl_ny",          tcyl_ny,          180,  "Strip subdivisions along y for example 7 (rows = tcyl_ny+1)");
+        add_double("tcyl_radius",      tcyl_radius,      0.06, "Cylinder radius (m) for example 7 (axis along x)");
+        add_double("tcyl_length",      tcyl_length,      1.50, "Cylinder length along x (m) for example 7; should exceed tcyl_strip_span_z");
+        add_int   ("tcyl_nu",          tcyl_nu,          64,   "Circumferential subdivisions for visual cylinder mesh in example 7");
+        add_double("tcyl_twist_rate",  tcyl_twist_rate,  0.15, "Turns/second per cylinder in example 7 (top and bot rotate in opposite directions)");
+        add_double("tcyl_settle_time", tcyl_settle_time, 0.2,  "Seconds with omega=0 so cloth settles under gravity in example 7");
+        add_double("tcyl_ramp_time",   tcyl_ramp_time,   0.5,  "Seconds to linearly ramp omega from 0 to full in example 7");
+        add_double("tcyl_max_turn",    tcyl_max_turn,    0.5,  "Per-cylinder rotation cap (turns); rotation stops at this magnitude in example 7. 0 = no cap.");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");

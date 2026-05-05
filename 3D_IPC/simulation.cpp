@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -27,7 +28,8 @@ int main(int argc, char** argv) {
     DeformedState state;
     std::vector<Vec2> X;
     std::vector<Pin> pins;
-    TwistSpec twist_spec;
+    TwistSpec         twist_spec;
+    CylinderTwistSpec cyl_twist_spec;
 
     std::vector<Vec3> static_x;
     std::vector<int>  static_tris;
@@ -38,9 +40,21 @@ int main(int argc, char** argv) {
     else if (args.example == 4) build_cloth_cylinder_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else if (args.example == 5) build_twisting_cloth_example(args, ref_mesh, state, X, pins, twist_spec);
     else if (args.example == 6) build_cloth_sphere_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
+    else if (args.example == 7) build_two_cylinder_twist_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, cyl_twist_spec);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7.\n";
         return 1;
+    }
+
+    PinTargetUpdater pin_updater = nullptr;
+    if (args.example == 5) {
+        pin_updater = [&twist_spec](std::vector<Pin>& p, double t) {
+            update_twist_pins(p, twist_spec, t);
+        };
+    } else if (args.example == 7) {
+        pin_updater = [&cyl_twist_spec](std::vector<Pin>& p, double t) {
+            update_cylinder_twist_pins(p, cyl_twist_spec, t);
+        };
     }
 
     ref_mesh.build_lumped_mass(params.density, params.thickness);
@@ -84,20 +98,39 @@ int main(int argc, char** argv) {
     const ExportFormat fmt = args.to_export_format();
     const int restart_frame = args.restart_frame;
 
+    const char* collider_ext = (fmt == ExportFormat::GEO) ? ".geo"
+                             : (fmt == ExportFormat::PLY) ? ".ply"
+                             : (fmt == ExportFormat::USD) ? ".usda" : ".obj";
+
+    auto write_collider_mesh = [&](const std::string& path) {
+        if      (fmt == ExportFormat::GEO) export_geo(path, static_x, static_tris);
+        else if (fmt == ExportFormat::PLY) export_ply(path, static_x, static_tris);
+        else if (fmt == ExportFormat::USD) export_usd(path, static_x, static_tris);
+        else                               export_obj(path, static_x, static_tris);
+    };
+
+    auto frame_collider_path = [&](int f) {
+        std::ostringstream oss;
+        oss << outdir << "/collider_"
+            << std::setw(4) << std::setfill('0') << f << collider_ext;
+        return oss.str();
+    };
+
+    // Example 7's cylinders rotate over time, so the collider mesh has to be
+    // re-exported per frame. Other examples keep the one-time "static_colliders".
+    const bool collider_is_dynamic = (args.example == 7);
+
     if (restart_frame < 0) {
         if (fs::exists(outdir)) fs::remove_all(outdir);
         fs::create_directories(outdir);
         export_frame(outdir, 0, state.deformed_positions, ref_mesh.tris, fmt);
         serialize_state(outdir, 0, state);
         if (!static_x.empty()) {
-            const char* ext = (fmt == ExportFormat::GEO) ? ".geo"
-                            : (fmt == ExportFormat::PLY) ? ".ply"
-                            : (fmt == ExportFormat::USD) ? ".usda" : ".obj";
-            const std::string path = outdir + "/static_colliders" + ext;
-            if      (fmt == ExportFormat::GEO) export_geo(path, static_x, static_tris);
-            else if (fmt == ExportFormat::PLY) export_ply(path, static_x, static_tris);
-            else if (fmt == ExportFormat::USD) export_usd(path, static_x, static_tris);
-            else                               export_obj(path, static_x, static_tris);
+            if (collider_is_dynamic) {
+                write_collider_mesh(frame_collider_path(0));
+            } else {
+                write_collider_mesh(outdir + "/static_colliders" + collider_ext);
+            }
         }
     } else {
         if (!fs::exists(outdir)) {
@@ -129,8 +162,7 @@ int main(int argc, char** argv) {
 
         result = advance_one_frame(
             state, ref_mesh, adj, pins, params, broad_phase,
-            (args.example == 5) ? &twist_spec : nullptr, frame_index,
-            (args.example == 5) ? &update_twist_pins : nullptr, substep_cb, outdir);
+            frame_index, pin_updater, substep_cb, outdir);
 
         if (!result.converged) {
             std::cerr << "Error: solver failed to converge at frame " << frame_index
@@ -149,7 +181,14 @@ int main(int argc, char** argv) {
 
         if (!params.write_substeps)
             export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, nullptr);
-        
+
+        if (collider_is_dynamic && !static_x.empty()) {
+            // t = end of this frame, matching pin-target time used by the solver.
+            const double t_frame = frame_index / params.fps;
+            update_cylinder_visuals(static_x, cyl_twist_spec, t_frame);
+            write_collider_mesh(frame_collider_path(frame_index));
+        }
+
         serialize_state(outdir, frame_index, state);
     }
 
