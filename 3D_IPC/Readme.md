@@ -20,16 +20,22 @@ Per time step, the optimizer minimizes an incremental potential made of:
   sphere) with stiffness `k_sdf` and transition layer `eps_sdf`.
 - **Pin springs** -- soft positional constraints for fixed vertices.
 
-The nonlinear solve is driven by one of two Gauss-Seidel solvers, selected by
+The nonlinear solve is driven by one of three Gauss-Seidel solvers, selected by
 CLI flag:
 
 - **`global_gauss_seidel_solver_basic`** (default) -- builds the broad phase
   once per substep and sweeps every vertex with a local 3x3 Newton step.
   Each step is clamped by either CCD (`--use_ccd`) or an OGC narrow phase
   (`--use_ogc`). Supports parallel-by-color via `--use_parallel`.
+  Requires `--fixed_iters`.
 - **`global_gauss_seidel_solver_ogc`** (`--use_ogc_solver`) -- serial-only
   sibling that rebuilds the broad phase per outer iteration and partial-refits
   the BVH after each per-vertex commit. Padding controlled by `--ogc_box_pad`.
+  Requires `--fixed_iters`.
+- **`gpu_gauss_seidel_solver`** (`--use_gpu`) -- Jacobi-prediction algorithm
+  with conflict-graph coloring; backed by CUDA kernels on a real GPU build,
+  OpenMP on the CPU stub build (default). Supports both fixed-iteration and
+  tolerance-driven termination.
 
 Our OGC narrow phase and solver implement the algorithm from Chen et al.
 2025; see Acknowledgments.
@@ -53,8 +59,11 @@ Our OGC narrow phase and solver implement the algorithm from Chen et al.
 
 ## Run
 
-    ./build/3D_sim                      # default scene (cloth stack, high-res)
+    ./build/3D_sim --fixed_iters        # default scene (cloth stack, high-res)
     ./build/3D_sim --help               # full argument list
+
+(`--fixed_iters` is required by both CPU solvers; `--use_gpu` is the only path
+that runs without it.)
 
 Built-in example scenes (`--example N`):
 
@@ -76,43 +85,22 @@ Common invocations:
     ./build/3D_sim --format usd --outdir frames_usd        # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
 
-### Example 7: twist + untwist between two cylinders
+Reference command for example 5 (square cloth twisted in place, 180 frames at
+0.5 turns/s):
 
-Four closed-loop cloth strips wrap two horizontal cylinders (long axes along
-+x). Each cylinder counter-rotates about +y, dragging the pinned wrap segments
-and twisting the strips together in the gap between them. With
-`tcyl_untwist=true` (default) the rotation reverses smoothly back to zero
-once the per-cylinder turn cap is reached, so the cloth ends in its
-starting configuration.
-
-The pin-target angle profile is built from `effective_theta` in `example.cpp`
-and runs through four phases:
-
-1. **Settle** (`tcyl_settle_time`, default 0.2 s) -- omega clamped to zero so
-   the cloth hangs under gravity before rotation begins.
-2. **Forward trapezoid** -- omega ramps up over `tcyl_ramp_time` (0.5 s),
-   runs at `2*pi*tcyl_twist_rate` rad/s, then ramps back to zero, sized so
-   total accumulated angle is exactly `2*pi*tcyl_max_turn` rad.
-3. **Hold** (`tcyl_hold_time`, default 0.0 s) -- dwell at peak twist.
-4. **Reverse trapezoid** -- mirror image of phase 2, returning the angle
-   to zero (only when `tcyl_untwist=true`).
-
-At the default `tcyl_max_turn=0.75` (270°) and `tcyl_twist_rate=0.15`
-turns/s, phases 1+2 run 5.7 s and phase 4 runs 5.5 s, so the full
-twist-then-untwist completes in ~336 frames at 30 fps. Run with
-`--num_frames 360` to capture the full motion plus a short tail:
-
-    ./build/3D_sim --example 7 --num_frames 360 \
-        --E 115 --nu 0.25 --kB 0.009 --kpin 5e6 \
+    ./build/3D_sim --example 5 --num_frames 180 \
+        --E 115 --nu 0.25 --kB 0.009 --kpin 5e6 --twist_rate 0.5 \
         --d_hat 0.005 --k_barrier 100 \
         --fixed_iters --max_substep_iters 10 --use_ticcd false --experimental true
 
-The visual cylinder mesh is rendered thinner than the physical pin radius by
-`tcyl_visual_shrink` (default 0.040 m) so the cloth–cylinder dynamic lag
-during fast rotation never visually pokes through. Physics is unaffected.
-Set `--tcyl_visual_shrink 0` to render the cylinders at their true
-collision radius, or `--tcyl_untwist false` to leave the cylinders parked
-at the peak twist instead of reversing.
+Reference command for example 7 (1.5 turns per cylinder, twist + untwist, 690
+frames):
+
+    ./build/3D_sim --example 7 --num_frames 690 \
+        --E 115 --nu 0.25 --kB 0.009 --kpin 5e6 \
+        --d_hat 0.005 --k_barrier 100 \
+        --fixed_iters --max_substep_iters 10 --use_ticcd false --experimental true \
+        --tcyl_max_turn 1.5 --tcyl_visual_shrink 0.026
 
 Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
 (`frame_0000.geo`, `frame_0001.geo`, ...). `--format obj` writes `.obj`;
@@ -121,7 +109,10 @@ restart snapshot `state_NNNN.bin` is written alongside every frame.
 
 Per-frame statistics are printed to stdout:
 
-    Frame    1 | global_iters=... | solver_time=... ms
+    Frame    1 | global_iters =   X | solver_time = X.XXX ms
+
+After the run finishes, total / average solver time and total simulation time
+are also printed.
 
 ## CLI reference
 
@@ -232,12 +223,13 @@ reader can jump to the layer they care about.
 
 ### Solver
 
-- `solver.h` / `solver.cpp` -- two solvers selected by CLI flag:
-  - `global_gauss_seidel_solver_basic` (`--experimental`, default): substep-
-    frozen broad phase, Gauss-Seidel sweeps via `BroadPhase::per_vertex_safe_step`,
-    step-clamped by linear/TICCD CCD or the OGC narrow phase (`--use_ogc`).
-    With `--use_parallel`, the conflict-graph coloring built in
-    `parallel_helper` drives parallel-by-color commits.
+- `solver.h` / `solver.cpp` -- two CPU solvers selected by CLI flag (both
+  require `--fixed_iters` and exit with an error otherwise):
+  - `global_gauss_seidel_solver_basic` (default): substep-frozen broad phase,
+    Gauss-Seidel sweeps via `BroadPhase::per_vertex_safe_step`, step-clamped
+    by linear/TICCD CCD or the OGC narrow phase (`--use_ogc`). With
+    `--use_parallel`, the conflict-graph coloring built in `parallel_helper`
+    drives parallel-by-color commits.
   - `global_gauss_seidel_solver_ogc` (`--use_ogc_solver`): per-iteration broad-
     phase rebuild with `--ogc_box_pad`-padded node boxes, serial sweep with
     OGC clip unconditionally on, partial BVH refit per move via
@@ -249,6 +241,12 @@ reader can jump to the layer they care about.
 - `parallel_helper.h` / `parallel_helper.cpp` -- Jacobi delta prediction,
   conflict-graph construction, greedy coloring, and parallel commit apply for
   the basic solver under `--use_parallel`.
+- `GPU_Sim/gpu_solver_bridge.cpp` (+ stubs `gpu_solver_stub.cpp`,
+  `gpu_mesh_stub.cpp`, `gpu_ccd_stub.cpp`) -- `gpu_gauss_seidel_solver`,
+  selected by `--use_gpu`. Implements the Jacobi-prediction sweep with
+  conflict-graph coloring; on a CPU-only build the kernels are OpenMP loops,
+  and on a CUDA build the corresponding `.cu` files take their place. Honors
+  `fixed_iters` either way.
 
 ### Tooling
 

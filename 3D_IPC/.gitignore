@@ -2,7 +2,7 @@
 build/
 
 # Simulation output
-frames_sim3d/
+frames_*/
 tmp_full/
 
 # Local Python audit / debug scripts
