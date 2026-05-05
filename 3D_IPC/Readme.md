@@ -66,6 +66,7 @@ Built-in example scenes (`--example N`):
 | `4` | Cloth stack dropped over a horizontal cylinder |
 | `5` | Square cloth clamped on two edges and twisted |
 | `6` | Cloth stack dropped over a sphere (icosphere collider) |
+| `7` | Four closed-loop cloth strips wrapping two horizontal cylinders, twisted then untwisted |
 
 Common invocations:
 
@@ -74,6 +75,44 @@ Common invocations:
     ./build/3D_sim --format obj --outdir frames_obj        # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd        # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
+
+### Example 7: twist + untwist between two cylinders
+
+Four closed-loop cloth strips wrap two horizontal cylinders (long axes along
++x). Each cylinder counter-rotates about +y, dragging the pinned wrap segments
+and twisting the strips together in the gap between them. With
+`tcyl_untwist=true` (default) the rotation reverses smoothly back to zero
+once the per-cylinder turn cap is reached, so the cloth ends in its
+starting configuration.
+
+The pin-target angle profile is built from `effective_theta` in `example.cpp`
+and runs through four phases:
+
+1. **Settle** (`tcyl_settle_time`, default 0.2 s) -- omega clamped to zero so
+   the cloth hangs under gravity before rotation begins.
+2. **Forward trapezoid** -- omega ramps up over `tcyl_ramp_time` (0.5 s),
+   runs at `2*pi*tcyl_twist_rate` rad/s, then ramps back to zero, sized so
+   total accumulated angle is exactly `2*pi*tcyl_max_turn` rad.
+3. **Hold** (`tcyl_hold_time`, default 0.0 s) -- dwell at peak twist.
+4. **Reverse trapezoid** -- mirror image of phase 2, returning the angle
+   to zero (only when `tcyl_untwist=true`).
+
+At the default `tcyl_max_turn=0.75` (270°) and `tcyl_twist_rate=0.15`
+turns/s, phases 1+2 run 5.7 s and phase 4 runs 5.5 s, so the full
+twist-then-untwist completes in ~336 frames at 30 fps. Run with
+`--num_frames 360` to capture the full motion plus a short tail:
+
+    ./build/3D_sim --example 7 --num_frames 360 \
+        --E 115 --nu 0.25 --kB 0.009 --kpin 5e6 \
+        --d_hat 0.005 --k_barrier 100 \
+        --fixed_iters --max_substep_iters 10 --use_ticcd false --experimental true
+
+The visual cylinder mesh is rendered thinner than the physical pin radius by
+`tcyl_visual_shrink` (default 0.040 m) so the cloth–cylinder dynamic lag
+during fast rotation never visually pokes through. Physics is unaffected.
+Set `--tcyl_visual_shrink 0` to render the cylinders at their true
+collision radius, or `--tcyl_untwist false` to leave the cylinders parked
+at the peak twist instead of reversing.
 
 Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
 (`frame_0000.geo`, `frame_0001.geo`, ...). `--format obj` writes `.obj`;
@@ -98,7 +137,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (new per-iter rebuild solver), `ogc_box_pad` (BVH padding for the per-iter rebuild; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (clamp range for `R_vi = clamp(prev_disp * 1.2, min, max)`) |
 | Mesh geometry | `nx`, `ny`, `width`, `height`, `left_x`, `right_x`, `sheet_y`, `left_z`, `right_z` |
-| Scene | `example` (`1`..`6`) + per-example knobs: `drop_stack_count`, `drop_cloth_nx`, `drop_cloth_ny`, `drop_first_y`, `drop_spacing`, `drop_cloth_w`, `drop_cloth_h`, `cyl_nu`, `cyl_radius`, `cyl_length`, `cyl_cx/cy/cz`, `cyl_ground_size`, `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `sphere_radius`, `sphere_cx/cy/cz`, `sphere_subdiv`, `sphere_cloth_size`, `sphere_ground_size`, `sphere_ground_nx` |
+| Scene | `example` (`1`..`7`) + per-example knobs: `drop_stack_count`, `drop_cloth_nx`, `drop_cloth_ny`, `drop_first_y`, `drop_spacing`, `drop_cloth_w`, `drop_cloth_h`, `cyl_nu`, `cyl_radius`, `cyl_length`, `cyl_cx/cy/cz`, `cyl_ground_size`, `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `sphere_radius`, `sphere_cx/cy/cz`, `sphere_subdiv`, `sphere_cloth_size`, `sphere_ground_size`, `sphere_ground_nx`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame` |
 
 Notes:
