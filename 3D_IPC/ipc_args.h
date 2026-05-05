@@ -101,7 +101,9 @@ struct IPCArgs3D : ArgParser {
     double      tcyl_twist_rate  = 0.15;   // turns/second per cylinder (sign-flipped between top/bot)
     double      tcyl_settle_time = 0.2;    // seconds with omega=0 so cloth settles under gravity
     double      tcyl_ramp_time   = 0.5;    // seconds to linearly ramp omega from 0 to full
-    double      tcyl_max_turn    = 0.5;    // |total turns| cap per cylinder; rotation stops here (0 = no cap)
+    double      tcyl_max_turn    = 0.75;   // |total turns| cap per cylinder (0 = no cap). 0.5=180°, 0.75=270°
+    bool        tcyl_untwist     = true;   // after reaching max_turn, smoothly reverse rotation back to 0
+    double      tcyl_hold_time   = 0.0;    // seconds to dwell at peak twist before reversing (untwist only)
 
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
@@ -196,8 +198,10 @@ struct IPCArgs3D : ArgParser {
         add_double("tcyl_visual_shrink", tcyl_visual_shrink, 0.040, "Render cylinders thinner than tcyl_radius by this many m (visual only; physics still uses tcyl_radius). Hides cloth-cyl lag during rotation in example 7.");
         add_double("tcyl_twist_rate",  tcyl_twist_rate,  0.15, "Turns/second per cylinder in example 7 (top and bot rotate in opposite directions)");
         add_double("tcyl_settle_time", tcyl_settle_time, 0.2,  "Seconds with omega=0 so cloth settles under gravity in example 7");
-        add_double("tcyl_ramp_time",   tcyl_ramp_time,   0.5,  "Seconds to linearly ramp omega from 0 to full in example 7");
-        add_double("tcyl_max_turn",    tcyl_max_turn,    0.5,  "Per-cylinder rotation cap (turns); rotation stops at this magnitude in example 7. 0 = no cap.");
+        add_double("tcyl_ramp_time",   tcyl_ramp_time,   0.5,  "Seconds to linearly ramp omega between 0 and full in example 7");
+        add_double("tcyl_max_turn",    tcyl_max_turn,    0.75, "Per-cylinder rotation cap (turns) in example 7. 0 = no cap; 0.5=180°, 0.75=270°.");
+        add_bool  ("tcyl_untwist",     tcyl_untwist,     true, "If true, after reaching tcyl_max_turn the cylinder smoothly reverses back to 0 (twist + untwist).");
+        add_double("tcyl_hold_time",   tcyl_hold_time,   0.0,  "Seconds to dwell at peak twist before reversing (only with tcyl_untwist=true).");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");

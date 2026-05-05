@@ -35,25 +35,65 @@ Vec3 rotate_about_y_axis(const Vec3& p, const Vec3& axis_point, double theta) {
                 axis_point.z() - s * dx + c * dz);
 }
 
-// Effective rotation angle: zero during the settle phase, then quadratic
-// (linear-ramp on omega) over the ramp phase, then linear afterward so the
-// pin target velocity is continuous and matches a steady omega. If
-// `max_abs_theta` is positive, the magnitude is clamped to that cap so the
-// cylinder coasts and then stops at the target angle.
+// Angle accumulated during a single trapezoidal phase: ramp omega up over
+// t_ramp, hold at omega for t_steady, ramp omega back down over t_ramp.
+// Phase duration = 2*t_ramp + t_steady; total angle = omega*(t_ramp + t_steady).
+double trapezoid_theta(double s, double omega, double t_ramp, double t_steady) {
+    if (s <= 0.0)        return 0.0;
+    if (s <= t_ramp)     return 0.5 * omega * s * s / t_ramp;        // accel
+    const double s1 = s - t_ramp;
+    if (s1 <= t_steady)  return 0.5 * omega * t_ramp + omega * s1;   // steady
+    const double s2 = s1 - t_steady;
+    if (s2 < t_ramp)
+        return 0.5 * omega * t_ramp + omega * t_steady
+             + omega * s2 - 0.5 * omega * s2 * s2 / t_ramp;           // decel
+    return omega * (t_ramp + t_steady);                               // done
+}
+
+// Pin-target angle as a function of wall time.
+//
+//   max_abs_theta = 0: open-ended motion (quadratic ramp then steady omega).
+//   max_abs_theta > 0, untwist = false: forward trapezoid that lands exactly
+//       on max_abs_theta, then holds there.
+//   max_abs_theta > 0, untwist = true:  forward trapezoid → dwell t_hold →
+//       reverse trapezoid back to 0 (twist + untwist).
 double effective_theta(double omega, double t, double t_settle, double t_ramp,
-                       double max_abs_theta = 0.0) {
-    double theta = 0.0;
-    if (t > t_settle) {
-        const double s = t - t_settle;
-        if (t_ramp <= 0.0)            theta = omega * s;
-        else if (s >= t_ramp)         theta = omega * (s - 0.5 * t_ramp);
-        else                          theta = 0.5 * omega * s * s / t_ramp;
+                       double max_abs_theta = 0.0,
+                       bool untwist = false,
+                       double t_hold = 0.0) {
+    if (t <= t_settle) return 0.0;
+
+    const double abs_omega = std::abs(omega);
+    const double sgn       = (omega >= 0.0) ? 1.0 : -1.0;
+    const double s         = t - t_settle;
+
+    // Open-ended path: simple ramp + steady, no decel.
+    if (max_abs_theta <= 0.0 || abs_omega <= 0.0) {
+        if (t_ramp <= 0.0)       return omega * s;
+        if (s >= t_ramp)         return omega * (s - 0.5 * t_ramp);
+        return 0.5 * omega * s * s / t_ramp;
     }
-    if (max_abs_theta > 0.0) {
-        if (theta >  max_abs_theta) theta =  max_abs_theta;
-        if (theta < -max_abs_theta) theta = -max_abs_theta;
-    }
-    return theta;
+
+    // Capped path. Steady duration is sized so accel + steady + decel
+    // integrate to exactly max_abs_theta (pure triangle if omega is so
+    // high that the two ramps alone would overshoot).
+    const double t_steady = std::max(0.0, max_abs_theta / abs_omega - t_ramp);
+    const double t_fwd    = 2.0 * t_ramp + t_steady;
+
+    if (s <= t_fwd)              // forward trapezoid (ramp up → steady → ramp down)
+        return sgn * trapezoid_theta(s, abs_omega, t_ramp, t_steady);
+    if (!untwist)                // no untwist → hold at peak forever
+        return sgn * max_abs_theta;
+
+    const double s2 = s - t_fwd;
+    if (s2 <= t_hold)            // dwell at peak
+        return sgn * max_abs_theta;
+
+    const double s3 = s2 - t_hold;
+    if (s3 <= t_fwd)             // reverse trapezoid: mirror of forward
+        return sgn * (max_abs_theta - trapezoid_theta(s3, abs_omega, t_ramp, t_steady));
+
+    return 0.0;                  // back to start, untwist complete
 }
 
 // Shared ground-cloth builder used by examples 2 and 3: 1.2x1.2 square in the
@@ -516,6 +556,8 @@ void build_two_cylinder_twist_example(const IPCArgs3D& args,
     spec.t_settle       = std::max(0.0, args.tcyl_settle_time);
     spec.t_ramp         = std::max(0.0, args.tcyl_ramp_time);
     spec.max_abs_theta  = std::max(0.0, kTwoPi * args.tcyl_max_turn);
+    spec.untwist        = args.tcyl_untwist;
+    spec.t_hold         = std::max(0.0, args.tcyl_hold_time);
     spec.static_x_rest  = static_x;
     spec.top_v_begin    = top_v_begin;
     spec.top_v_end      = top_v_end;
@@ -582,8 +624,10 @@ void build_two_cylinder_twist_example(const IPCArgs3D& args,
 
 void update_cylinder_twist_pins(std::vector<Pin>& pins,
                                 const CylinderTwistSpec& spec, double t) {
-    const double theta_top = effective_theta(spec.omega_top, t, spec.t_settle, spec.t_ramp, spec.max_abs_theta);
-    const double theta_bot = effective_theta(spec.omega_bot, t, spec.t_settle, spec.t_ramp, spec.max_abs_theta);
+    const double theta_top = effective_theta(spec.omega_top, t, spec.t_settle, spec.t_ramp,
+                                              spec.max_abs_theta, spec.untwist, spec.t_hold);
+    const double theta_bot = effective_theta(spec.omega_bot, t, spec.t_settle, spec.t_ramp,
+                                              spec.max_abs_theta, spec.untwist, spec.t_hold);
     const int n_top = static_cast<int>(spec.top_pin_indices.size());
     for (int k = 0; k < n_top; ++k) {
         pins[spec.top_pin_indices[k]].target_position =
@@ -599,8 +643,10 @@ void update_cylinder_twist_pins(std::vector<Pin>& pins,
 void update_cylinder_visuals(std::vector<Vec3>& static_x,
                              const CylinderTwistSpec& spec,
                              double t) {
-    const double theta_top = effective_theta(spec.omega_top, t, spec.t_settle, spec.t_ramp, spec.max_abs_theta);
-    const double theta_bot = effective_theta(spec.omega_bot, t, spec.t_settle, spec.t_ramp, spec.max_abs_theta);
+    const double theta_top = effective_theta(spec.omega_top, t, spec.t_settle, spec.t_ramp,
+                                              spec.max_abs_theta, spec.untwist, spec.t_hold);
+    const double theta_bot = effective_theta(spec.omega_bot, t, spec.t_settle, spec.t_ramp,
+                                              spec.max_abs_theta, spec.untwist, spec.t_hold);
     for (int i = spec.top_v_begin; i < spec.top_v_end; ++i) {
         static_x[i] = rotate_about_y_axis(spec.static_x_rest[i], spec.top_axis_point, theta_top);
     }

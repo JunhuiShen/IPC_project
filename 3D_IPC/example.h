@@ -84,13 +84,16 @@ void build_twisting_cloth_example(const IPCArgs3D& args,
 void update_twist_pins(std::vector<Pin>& pins, const TwistSpec& spec, double t);
 
 // Drives example 7: N closed-loop cloth strips wrapping two horizontal
-// cylinders (long axis along +x). Each cylinder rotates about the vertical
-// (+y) axis through its own center, in opposite directions. This swings
-// the cylinder ends in the x-z plane, dragging the pinned wrap segments
-// with them and twisting the strips together in the gap between cylinders.
-// Rotation is held at zero for t_settle seconds (cloth hangs/settles),
-// then ramped quadratically to full omega over t_ramp seconds, then runs at
-// constant omega until |theta| reaches max_abs_theta and the cylinder stops.
+// cylinders (long axis along +x). Each cylinder rotates about +y through its
+// own center, in opposite directions, swinging the cylinder ends in the x-z
+// plane and dragging the pinned wrap segments with them.
+//
+// Pin-target angle profile (see effective_theta):
+//   1. settle  : t in [0, t_settle], theta = 0
+//   2. forward : trapezoidal (ramp-up, steady at omega, ramp-down) to ±max_abs_theta
+//   3. hold    : dwell t_hold at peak (only if untwist == true)
+//   4. reverse : mirror of forward, back to 0   (only if untwist == true)
+// max_abs_theta == 0 disables the cap and runs the simple ramp-then-steady profile.
 struct CylinderTwistSpec {
     std::vector<int>  top_pin_indices;
     std::vector<int>  bot_pin_indices;
@@ -98,11 +101,13 @@ struct CylinderTwistSpec {
     std::vector<Vec3> bot_initial_targets;
     Vec3   top_axis_point{Vec3::Zero()};
     Vec3   bot_axis_point{Vec3::Zero()};
-    double omega_top     = 0.0;  // rad/s, signed
-    double omega_bot     = 0.0;  // rad/s, signed
-    double t_settle      = 0.0;  // seconds with omega clamped to zero
-    double t_ramp        = 0.0;  // seconds to linearly ramp from 0 to omega
-    double max_abs_theta = 0.0;  // |theta| cap (radians); 0 means no cap
+    double omega_top     = 0.0;   // rad/s, signed
+    double omega_bot     = 0.0;   // rad/s, signed
+    double t_settle      = 0.0;   // seconds with omega clamped to zero
+    double t_ramp        = 0.0;   // seconds to ramp omega between 0 and full
+    double max_abs_theta = 0.0;   // |theta| cap (radians); 0 means no cap
+    bool   untwist       = false; // after hitting peak, reverse back to 0
+    double t_hold        = 0.0;   // seconds to dwell at peak before reversing
 
     // Rest positions of the visual cylinder vertices and the index ranges
     // (in static_x) belonging to the top and bottom cylinders. Used by
@@ -118,11 +123,13 @@ struct CylinderTwistSpec {
 // Closed-loop cloth strips between two horizontal +x-axis cylinders. Each
 // strip's top-half wrap is pinned to the top cylinder; bot-half wrap to the
 // bottom cylinder. Pins counter-rotate about +y at args.tcyl_twist_rate Hz
-// to twist the strips together in the gap between cylinders. The visual
-// cylinder mesh is appended to static_x / static_tris and gets re-rotated
-// per frame by update_cylinder_visuals; no SDF colliders are pushed (cloth-
-// cylinder contact is only enforced by the pin spring + the visual radius
-// being smaller than the physical pin radius via tcyl_visual_shrink).
+// up to args.tcyl_max_turn turns; with args.tcyl_untwist == true the motion
+// then reverses back to the starting orientation (twist + untwist). The
+// visual cylinder mesh is appended to static_x / static_tris (and rotated
+// per frame by update_cylinder_visuals); no SDF colliders are pushed —
+// cloth–cylinder contact is enforced only by the pin spring, plus the
+// visual radius being shrunk by args.tcyl_visual_shrink so any solver-side
+// drop-row lag never visually pokes through the cylinder.
 void build_two_cylinder_twist_example(const IPCArgs3D& args,
                                       RefMesh& ref_mesh,
                                       DeformedState& state,
