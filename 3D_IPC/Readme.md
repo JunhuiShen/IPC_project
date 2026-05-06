@@ -88,22 +88,6 @@ Reference command for example 1 (square cloth twisted in place, 180 frames at
         --d_hat 0.005 --k_barrier 100 \
         --fixed_iters --max_substep_iters 10
 
-Same scene, OGC narrow-phase clip in the basic solver (8 substeps):
-
-    ./build/3D_sim --example 1 --num_frames 180 \
-        --E 115 --nu 0.25 --kB 0.009 --kpin 5e6 --twist_rate 0.5 \
-        --d_hat 0.005 --k_barrier 100 \
-        --fixed_iters --max_substep_iters 10 --substeps 8 \
-        --use_ogc true
-
-Same scene, dedicated OGC Gauss-Seidel solver (per-iter BVH rebuild):
-
-    ./build/3D_sim --example 1 --num_frames 180 \
-        --E 115 --nu 0.25 --kB 0.009 --kpin 5e6 --twist_rate 0.5 \
-        --d_hat 0.005 --k_barrier 100 \
-        --fixed_iters --max_substep_iters 10 --substeps 8 \
-        --use_ogc_solver true
-
 Reference command for example 2 (1.5 turns per cylinder, twist + untwist, 690
 frames):
 
