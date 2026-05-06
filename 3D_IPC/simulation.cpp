@@ -47,8 +47,12 @@ int main(int argc, char** argv) {
             update_twist_pins(p, twist_spec, t);
         };
     } else if (args.example == 2) {
-        pin_updater = [&cyl_twist_spec](std::vector<Pin>& p, double t) {
+        // SDF axes must co-rotate with the pin targets every substep; per-frame
+        // sync left the SDF lagging the pin by half a frame, which manifested
+        // as one-sided penetration on the strips that yaw into the lag.
+        pin_updater = [&cyl_twist_spec, &params](std::vector<Pin>& p, double t) {
             update_cylinder_twist_pins(p, cyl_twist_spec, t);
+            update_cylinder_sdfs(params, cyl_twist_spec, t);
         };
     }
 
@@ -178,7 +182,8 @@ int main(int argc, char** argv) {
             export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, nullptr);
 
         if (collider_is_dynamic && !static_x.empty()) {
-            // t = end of this frame, matching pin-target time used by the solver.
+            // SDF was already advanced per substep by pin_updater; the visual
+            // mesh only needs a per-frame refresh for the export.
             const double t_frame = frame_index / params.fps;
             update_cylinder_visuals(static_x, cyl_twist_spec, t_frame);
             write_collider_mesh(frame_collider_path(frame_index));

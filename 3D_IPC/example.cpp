@@ -148,8 +148,10 @@ void update_twist_pins(std::vector<Pin>& pins, const TwistSpec& spec, double t) 
 
 
 // Example 2: N closed-loop cloth strips wrap two horizontal cylinders. Both
-// cylinders rotate about +y in opposite directions, twisting the strips
-// together in the gap between them.
+// cylinders counter-rotate about +y, dragging the wrap rows via pin springs
+// and twisting the strips together in the gap. Pin targets, visual mesh, and
+// SDF axes all yaw about the same +y line so the wrap pin (orbiting at radius
+// pin_r > r) never crosses the rotating SDF surface.
 void build_two_cylinder_twist_example(const IPCArgs3D& args,
                                       RefMesh& ref_mesh,
                                       DeformedState& state,
@@ -174,16 +176,21 @@ void build_two_cylinder_twist_example(const IPCArgs3D& args,
     const Vec3 top_center(0.0,  H, 0.0);
     const Vec3 bot_center(0.0, -H, 0.0);
 
-    // Each strip is a closed loop wrapping both cylinders like a flat belt:
-    //   1. Top wrap   (length π·pin_r): back of top → front of top (pinned)
-    //   2. Front drop (length 2H):     straight down at z=+pin_r   (free)
-    //   3. Bot wrap   (length π·pin_r): front of bot → back of bot (pinned)
-    //   4. Back drop  (length 2H):     straight up at z=-pin_r     (free)
-    // Wrap-to-drop transitions are tangent-continuous, so uniform sampling
-    // stays uniform after the 3D remap.
-    //
-    // pin_r > r so flat cloth chords sit just outside the cylinder mesh
-    // chords (no polygon-vs-polygon interpenetration at frame 0).
+    // Two infinite-cylinder SDFs, axes initially along +x. update_cylinder_sdfs
+    // yaws them per substep alongside the pin update; substep co-rotation is
+    // what stops the pin from sitting inside a lagging SDF mid-frame.
+    params.sdf_cylinders.push_back(CylinderSDF{ top_center, Vec3::UnitX(), r });
+    params.sdf_cylinders.push_back(CylinderSDF{ bot_center, Vec3::UnitX(), r });
+
+    // Each strip is a flat belt wrapping both cylinders, parameterised by arc
+    // length s ∈ [0, loop_L):
+    //   [0,        s_top_end)   top  wrap, back→front, length π·pin_r
+    //   [s_top_end, s_front_end) front drop, y from +H to -H at z=+pin_r
+    //   [s_front_end, s_bot_end) bot  wrap, front→back, length π·pin_r
+    //   [s_bot_end, loop_L)     back drop, y from -H to +H at z=-pin_r
+    // pin_r is set just outside r so the initial polyline doesn't touch the
+    // cylinder mesh. With default eps_sdf = 0.002 this also coincides with the
+    // SDF's force-free rest distance, so the wrap pin and the SDF agree.
     const double pin_r        = r + 0.002;
     const double wrap_len     = kPi * pin_r;
     const double drop_len     = 2.0 * H;
@@ -207,9 +214,8 @@ void build_two_cylinder_twist_example(const IPCArgs3D& args,
         return Vec3(0.0, -H + (s - s_bot_end), -pin_r);
     };
 
-    // build_cylinder_mesh produces +z cylinders; the (x,y,z) → (z,y,x) swap
-    // rotates onto +x. r_visual < r so dynamic drop-row lag during rotation
-    // never visually pokes through the cylinder.
+    // Visual cylinder mesh (export only). build_cylinder_mesh emits +z aligned;
+    // the (x,y,z) → (z,y,x) swap below rotates onto +x to match the SDF.
     const double r_visual = std::max(0.001, r - args.tcyl_visual_shrink);
     auto append_x_axis_cylinder = [&](const Vec3& center) {
         RefMesh        s_ref;
@@ -246,10 +252,9 @@ void build_two_cylinder_twist_example(const IPCArgs3D& args,
     spec.bot_v_begin    = top_v_end;
     spec.bot_v_end      = bot_v_end;
 
-    // j == ny lands at s = loop_L, geometrically coincident with s = 0 (the
-    // back drop closes onto the top-wrap start). Anchor it to the top
-    // cylinder but nudge -z by seam_offset so the two pinned vertices are
-    // not coincident (zero distance ⇒ barrier gradient blows up).
+    // j=ny and j=0 sample the same loop position (s=loop_L wraps to s=0). The
+    // mesh has them as separate vertices, so we nudge j=ny by -z by seam_offset
+    // to keep them apart — coincident barrier pairs blow up the gradient.
     const double seam_offset = std::max(1.5 * params.d_hat, 0.005);
     const double span = args.tcyl_strip_span_z;
 
@@ -272,8 +277,9 @@ void build_two_cylinder_twist_example(const IPCArgs3D& args,
             }
         }
 
-        // Pin the wrap rows. Treat j=ny as the top-wrap start (s = 0) with
-        // the seam offset applied.
+        // Pin every wrap-row vertex; j=ny is folded back to s=0 with the seam
+        // offset already applied. Pin targets are the rotated initial positions
+        // (see update_cylinder_twist_pins), which yaw about +y at radius pin_r.
         for (int j = 0; j <= ny; ++j) {
             const double s = (j == ny) ? 0.0 : (static_cast<double>(j) / ny) * loop_L;
             const bool on_top_wrap = (s <= s_top_end);
@@ -293,11 +299,26 @@ void build_two_cylinder_twist_example(const IPCArgs3D& args,
         }
     }
 
-    // Re-initialize hinges with the curved 3D rest pose so bending energy
-    // is zero in the wrapped configuration.
+    // Re-initialise hinges with the wrapped 3D positions so bar_theta captures
+    // the curved rest pose; otherwise bending would push the cloth flat.
     ref_mesh.initialize(X, state.deformed_positions);
 
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+}
+
+void update_cylinder_sdfs(SimParams& params,
+                          const CylinderTwistSpec& spec, double t) {
+    if (params.sdf_cylinders.size() < 2) return;
+    const double theta_top = effective_theta(spec.omega_top, t, spec.t_settle, spec.t_ramp,
+                                              spec.max_abs_theta, spec.untwist, spec.t_hold);
+    const double theta_bot = effective_theta(spec.omega_bot, t, spec.t_settle, spec.t_ramp,
+                                              spec.max_abs_theta, spec.untwist, spec.t_hold);
+    // Yaw the SDF axis about +y (axis_point at origin → pure direction rotate)
+    // by the same theta that drives the pins, so pin and SDF surface co-rotate.
+    params.sdf_cylinders[0].point = spec.top_axis_point;
+    params.sdf_cylinders[0].axis  = rotate_about_y_axis(Vec3::UnitX(), Vec3::Zero(), theta_top);
+    params.sdf_cylinders[1].point = spec.bot_axis_point;
+    params.sdf_cylinders[1].axis  = rotate_about_y_axis(Vec3::UnitX(), Vec3::Zero(), theta_bot);
 }
 
 void update_cylinder_twist_pins(std::vector<Pin>& pins,

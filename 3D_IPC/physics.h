@@ -31,7 +31,7 @@ struct SimParams {
     double kB;        // bending (flexural) stiffness; 0 disables the bending term
     double d_hat;     // barrier activation distance; 0 disables contact
     double k_sdf;     // SDF penalty stiffness; 0 disables the SDF term
-    double eps_sdf;   // SDF ramp-Heaviside transition-layer width
+    double eps_sdf;   // SDF soft-barrier range; cloth rest at phi=eps_sdf. 0 = hard quadratic.
     std::vector<PlaneSDF>    sdf_planes;
     std::vector<CylinderSDF> sdf_cylinders;
     Vec3   gravity;

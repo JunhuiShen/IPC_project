@@ -25,9 +25,9 @@ void build_twisting_cloth_example(const IPCArgs3D& args,
 
 void update_twist_pins(std::vector<Pin>& pins, const TwistSpec& spec, double t);
 
-// Example 2: two horizontal cylinders rotating about +y, dragging the wrap
-// segments of N closed-loop cloth strips. Pin-target angle profile (settle →
-// trapezoidal forward → optional hold → optional reverse) lives in effective_theta.
+// Example 2: closed-loop cloth strips wrap two cylinders that counter-rotate
+// about +y; pins, visual mesh, and SDF axes all yaw together so the wrap pin
+// (orbiting at pin_r > r) never crosses the SDF surface.
 struct CylinderTwistSpec {
     std::vector<int>  top_pin_indices;
     std::vector<int>  bot_pin_indices;
@@ -50,11 +50,9 @@ struct CylinderTwistSpec {
     int bot_v_end   = 0;
 };
 
-// Closed-loop cloth strips between two +x-axis cylinders. Pins counter-rotate
-// about +y at args.tcyl_twist_rate Hz up to args.tcyl_max_turn turns;
-// args.tcyl_untwist == true reverses back to start. Visual cylinder mesh is
-// appended to static_x / static_tris and rotated per frame; cloth-cylinder
-// contact is enforced by the pin springs only.
+// Build the scene described above. Pins counter-rotate at tcyl_twist_rate Hz
+// up to tcyl_max_turn turns; tcyl_untwist=true mirrors the trapezoid back to
+// 0. Visual cylinder mesh is appended to static_x/static_tris.
 void build_two_cylinder_twist_example(const IPCArgs3D& args,
                                       RefMesh& ref_mesh,
                                       DeformedState& state,
@@ -69,8 +67,13 @@ void update_cylinder_twist_pins(std::vector<Pin>& pins,
                                 const CylinderTwistSpec& spec,
                                 double t);
 
-// Rotates the visual cylinder vertices in `static_x` to track the live pin
-// rotation. Same settle/ramp curve as update_cylinder_twist_pins.
+// Yaws the visual cylinder vertices in `static_x` about +y by effective_theta(t).
 void update_cylinder_visuals(std::vector<Vec3>& static_x,
                              const CylinderTwistSpec& spec,
                              double t);
+
+// Yaws the SDF cylinder axes about +y by the same effective_theta(t) the pins
+// use, so the collision surface co-rotates with the wrap pin's orbit.
+void update_cylinder_sdfs(SimParams& params,
+                          const CylinderTwistSpec& spec,
+                          double t);

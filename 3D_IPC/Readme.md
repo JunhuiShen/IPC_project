@@ -17,7 +17,8 @@ Per time step, the optimizer minimizes an incremental potential made of:
 - **IPC log-barrier contact** -- node-triangle and segment-segment barriers built
   from a swept-AABB BVH broad phase.
 - **SDF penalty contact** -- analytic signed-distance penalties (plane, cylinder)
-  with stiffness `k_sdf` and transition layer `eps_sdf`.
+  with stiffness `k_sdf` and active range `eps_sdf` (cloth's force-free rest
+  is at `phi = eps_sdf`; set 0 for a hard quadratic at the surface).
 - **Pin springs** -- soft positional constraints for fixed vertices.
 
 The nonlinear solve is driven by one of three Gauss-Seidel solvers, selected by
@@ -95,7 +96,7 @@ frames):
         --E 115 --nu 0.25 --kB 0.009 --kpin 5e6 \
         --d_hat 0.005 --k_barrier 100 \
         --fixed_iters --max_substep_iters 10 \
-        --tcyl_max_turn 1.5 --tcyl_visual_shrink 0.026
+        --tcyl_max_turn 1.5 --tcyl_visual_shrink 0.005
 
 Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
 (`frame_0000.geo`, `frame_0001.geo`, ...). `--format obj` writes `.obj`;
@@ -168,8 +169,10 @@ reader can jump to the layer they care about.
   `b(delta; d_hat)` and its derivatives, plus per-pair energy, gradient, and
   Hessian for node-triangle and segment-segment primitives.
 - `sdf_penalty_energy.h` / `sdf_penalty_energy.cpp` -- analytic SDF primitives
-  (plane, cylinder, sphere) and the shared Heaviside-ramp penalty with
-  derivatives. Used for static colliders outside the IPC barrier pipeline.
+  (plane, cylinder) and a soft one-sided quadratic penalty with derivatives:
+  `0.5·k·(eps - phi)^2` for `phi < eps`, with `eps = 0` recovering a hard
+  quadratic at the surface. Used for static or driven colliders outside the
+  IPC barrier pipeline.
 
 ### Geometric primitives
 
@@ -263,7 +266,7 @@ Every layer of the pipeline has a GoogleTest binary. To build and run them all:
 | `ccd_test` | 17 | Linear CCD single-moving-DOF cases plus TICCD-backed general NT/SS wrapper smoke tests |
 | `broad_phase_test` | 30 | AABB, BVH, pair generation, CCD candidates, conservativeness, per-vertex pair query vs brute-force, asymmetric red/green SS convention, `incremental_refresh_vertex` partial refit |
 | `ipc_math_test` | 27 | `matrix3d_inverse`, `segment_closest_point`, `filter_root`, `SmallRoots`, barycentric coords, serialize round-trip, topology caching |
-| `sdf_penalty_energy_test` | 14 | Plane / cylinder SDF energy + gradient + Hessian FD convergence, ramp boundary |
+| `sdf_penalty_energy_test` | 15 | Plane / cylinder SDF energy + gradient + Hessian FD convergence, hard-quadratic limit, soft-barrier rest at `phi=eps` |
 | `bending_energy_test` | 20 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
 | `parallel_helper_test` | 20 | Jacobi predictions, conflict graph, coloring, parallel commits, solver correctness |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |

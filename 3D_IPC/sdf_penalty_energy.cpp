@@ -47,24 +47,33 @@ SDFEvaluation evaluate_sdf(const CylinderSDF& s, const Vec3& x){
     return r;
 }
 
-// One-sided quadratic: E = 0.5 * k * max(0, -phi)^2.
-// Force = -dE/dx = k * max(0, -phi) * grad_phi, pointing away from the obstacle.
-// eps is accepted for API compatibility but ignored.
+// Soft one-sided quadratic with active range eps. The IPC d_hat analogue for
+// SDFs: cloth rest is at phi = eps (clearance eps outside the obstacle), and
+// repulsion ramps in for phi < eps. eps = 0 collapses to a hard quadratic at
+// the surface.
+//
+//   E(phi)     = 0.5 * k * (eps - phi)^2  for phi < eps,   else 0
+//   dE/dphi    = -k * (eps - phi)         for phi < eps,   else 0
+//   d^2E/dphi^2 = k                       for phi < eps,   else 0  (jump at eps)
+//
+// The Hessian's discontinuity at phi=eps is harmless when the solver requests
+// include_curvature=false (its default), since the outer-product term is PSD.
 
-double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double /*eps*/){
-    if (sdf.phi >= 0.0) return 0.0;
-    return 0.5 * k * sdf.phi * sdf.phi;
+double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double eps){
+    if (sdf.phi >= eps) return 0.0;
+    const double d = eps - sdf.phi;
+    return 0.5 * k * d * d;
 }
 
-Vec3 sdf_penalty_gradient(const SDFEvaluation& sdf, double k, double /*eps*/){
-    if (sdf.phi >= 0.0) return Vec3::Zero();
-    return k * sdf.phi * sdf.grad_phi;
+Vec3 sdf_penalty_gradient(const SDFEvaluation& sdf, double k, double eps){
+    if (sdf.phi >= eps) return Vec3::Zero();
+    return -k * (eps - sdf.phi) * sdf.grad_phi;
 }
 
-Mat33 sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double /*eps*/, bool include_curvature){
-    if (sdf.phi >= 0.0) return Mat33::Zero();
+Mat33 sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double eps, bool include_curvature){
+    if (sdf.phi >= eps) return Mat33::Zero();
     Mat33 Hess = k * (sdf.grad_phi * sdf.grad_phi.transpose());
     if (include_curvature)
-        Hess += k * sdf.phi * sdf.hess_phi;
+        Hess -= k * (eps - sdf.phi) * sdf.hess_phi;
     return Hess;
 }

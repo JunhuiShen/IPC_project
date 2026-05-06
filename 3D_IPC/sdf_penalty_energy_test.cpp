@@ -219,7 +219,8 @@ TEST(PlaneSDF, Evaluate){
 TEST(PlaneSDF, EnergyBehavior){
     PlaneSDF p{Vec3(0.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)};
     const double k = 100.0;
-    const double eps = 0.1;
+    //  eps=0 collapses to the hard one-sided quadratic: E = 0.5*k*phi^2 for phi<0.
+    const double eps = 0.0;
 
     //  Outside (phi > 0): zero energy, zero gradient, zero Hessian.
     {
@@ -242,11 +243,46 @@ TEST(PlaneSDF, EnergyBehavior){
 TEST(PlaneSDF, EnergyPenetrationDepth){
     PlaneSDF p{Vec3(0.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)};
     const double k = 50.0;
-    const double eps = 0.2;
+    const double eps = 0.0;  //  hard quadratic regime
 
     //  phi = -0.1: E = 0.5 * k * 0.01
     Vec3 x(1.0, -0.1, -2.0);
     EXPECT_NEAR(sdf_penalty_energy(evaluate_sdf(p, x), k, eps), 0.5 * k * 0.01, kTol);
+}
+
+//  Soft-barrier semantics: with eps>0, E = 0.5*k*(eps - phi)^2 for phi<eps.
+//  Cloth's force-free rest is at phi = eps; surface contact (phi=0) costs
+//  0.5*k*eps^2 of energy and gets pushed outward.
+TEST(PlaneSDF, SoftBarrierWithEps){
+    PlaneSDF p{Vec3(0.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)};
+    const double k   = 100.0;
+    const double eps = 0.1;
+    const Vec3   n(0.0, 1.0, 0.0);
+
+    //  Past the active range (phi > eps): zero everything.
+    {
+        const SDFEvaluation sdf = evaluate_sdf(p, Vec3(0.0, 1.0, 0.0));  //  phi=1.0
+        EXPECT_EQ(sdf_penalty_energy(sdf, k, eps), 0.0);
+        EXPECT_TRUE(sdf_penalty_gradient(sdf, k, eps).isApprox(Vec3::Zero()));
+    }
+    //  At the rest distance (phi = eps): zero energy, zero force.
+    {
+        const SDFEvaluation sdf = evaluate_sdf(p, Vec3(0.0, eps, 0.0));
+        EXPECT_NEAR(sdf_penalty_energy(sdf, k, eps), 0.0, kTol);
+        EXPECT_TRUE(sdf_penalty_gradient(sdf, k, eps).isApprox(Vec3::Zero(), kTol));
+    }
+    //  At the surface (phi = 0): E = 0.5*k*eps^2, grad = -k*eps*n.
+    {
+        const SDFEvaluation sdf = evaluate_sdf(p, Vec3(0.0, 0.0, 0.0));
+        EXPECT_NEAR(sdf_penalty_energy(sdf, k, eps), 0.5 * k * eps * eps, kTol);
+        EXPECT_TRUE(sdf_penalty_gradient(sdf, k, eps).isApprox(-k * eps * n, kTol));
+    }
+    //  Inside (phi = -0.2): E = 0.5*k*(eps+0.2)^2 = 0.5*k*0.09.
+    {
+        const SDFEvaluation sdf = evaluate_sdf(p, Vec3(0.0, -0.2, 0.0));
+        EXPECT_NEAR(sdf_penalty_energy(sdf, k, eps), 0.5 * k * 0.09, kTol);
+        EXPECT_TRUE(sdf_penalty_gradient(sdf, k, eps).isApprox(-k * 0.3 * n, kTol));
+    }
 }
 
 TEST(PlaneSDF, GradientConvergence){
@@ -366,7 +402,7 @@ TEST(CylinderSDF, HessianConvergence){
 TEST(SDFPenalty, ZeroOutsideTransition){
     CylinderSDF c{Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0), 0.5};
     const double k = 100.0;
-    const double eps = 0.1;
+    const double eps = 0.0;  //  hard quadratic so the closed form below holds
 
     //  Outside (phi > 0): everything zero.
     {

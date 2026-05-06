@@ -28,8 +28,8 @@ struct IPCArgs3D : ArgParser {
     double tol_abs       = 1e-6;  // residual norm tolerance
     double tol_rel       = 1e-1;  // relative tolerance: stop when residual < tol_rel * initial
     double d_hat         = 0.01;  // barrier activation distance; 0 disables contact
-    double k_sdf         = 1e2;   // SDF penalty stiffness; 0 disables the SDF term
-    double eps_sdf       = 0.002; // SDF ramp-Heaviside transition-layer width
+    double k_sdf         = 1e5;   // SDF penalty stiffness; 0 disables the SDF term
+    double eps_sdf       = 0.002; // SDF soft-barrier range (m); cloth rest at phi=eps_sdf. 0 = hard quadratic at the surface.
     bool   use_parallel  = true;
     bool   write_substeps = false;
     bool   use_ccd       = true;
@@ -64,7 +64,7 @@ struct IPCArgs3D : ArgParser {
     double      tcyl_radius      = 0.06;   // both cylinders' radius (m); axis runs along x
     double      tcyl_length      = 1.50;   // both cylinders' length along x (m); should exceed tcyl_strip_span_z
     int         tcyl_nu          = 64;     // circumferential subdivisions for visual cylinder mesh
-    double      tcyl_visual_shrink = 0.040;// render cylinders this much thinner than r (m), so cloth-cyl lag never visually penetrates
+    double      tcyl_visual_shrink = 0.005;// render cylinders this much thinner than r (m). With SDF active a small shrink (≈ d_hat) is enough.
     double      tcyl_twist_rate  = 0.15;   // turns/second per cylinder (sign-flipped between top/bot)
     double      tcyl_settle_time = 0.2;    // seconds with omega=0 so cloth settles under gravity
     double      tcyl_ramp_time   = 0.5;    // seconds to linearly ramp omega from 0 to full
@@ -96,8 +96,8 @@ struct IPCArgs3D : ArgParser {
         add_double("tol_abs",     tol_abs,     1e-6,       "Absolute convergence tolerance (residual force)");
         add_double("tol_rel",     tol_rel,     1e-1,       "Relative tolerance: stop when residual < tol_rel * initial_residual (0 disables)");
         add_double("d_hat",       d_hat,       0.01,       "Barrier activation distance (0 = off)");
-        add_double("k_sdf",       k_sdf,       1e2,        "SDF penalty stiffness (0 = off; obstacles live on SimParams)");
-        add_double("eps_sdf",     eps_sdf,     0.002,       "SDF penalty ramp-Heaviside transition-layer width");
+        add_double("k_sdf",       k_sdf,       1e5,        "SDF penalty stiffness (0 = off). Penalty 0.5·k·(eps_sdf-phi)^2 for phi<eps_sdf; transient penetration depth ~ v·sqrt(m/k).");
+        add_double("eps_sdf",     eps_sdf,     0.002,      "SDF soft-barrier range (m). Cloth's force-free rest is at phi=eps_sdf. 0 = hard quadratic at the surface.");
         add_bool  ("use_parallel",   use_parallel,   true,  "Use parallel Gauss-Seidel (requires coloring)");
         add_bool  ("write_substeps", write_substeps, false, "Write an output file after every substep (useful for visual debugging)");
 
@@ -129,7 +129,7 @@ struct IPCArgs3D : ArgParser {
         add_double("tcyl_radius",      tcyl_radius,      0.06, "Cylinder radius (m) for example 2 (axis along x)");
         add_double("tcyl_length",      tcyl_length,      1.50, "Cylinder length along x (m) for example 2; should exceed tcyl_strip_span_z");
         add_int   ("tcyl_nu",          tcyl_nu,          64,   "Circumferential subdivisions for visual cylinder mesh in example 2");
-        add_double("tcyl_visual_shrink", tcyl_visual_shrink, 0.040, "Render cylinders thinner than tcyl_radius by this many m (visual only; physics still uses tcyl_radius). Hides cloth-cyl lag during rotation in example 2.");
+        add_double("tcyl_visual_shrink", tcyl_visual_shrink, 0.005, "Render cylinders thinner than tcyl_radius by this many m (visual only; physics still uses tcyl_radius). With SDF active the cloth can't penetrate r, so a small shrink (≈ d_hat) hides only transient lag. Pass a larger value (e.g. 0.04) to recover the old skinny-cylinder look.");
         add_double("tcyl_twist_rate",  tcyl_twist_rate,  0.15, "Turns/second per cylinder in example 2 (top and bot rotate in opposite directions)");
         add_double("tcyl_settle_time", tcyl_settle_time, 0.2,  "Seconds with omega=0 so cloth settles under gravity in example 2");
         add_double("tcyl_ramp_time",   tcyl_ramp_time,   0.5,  "Seconds to linearly ramp omega between 0 and full in example 2");
