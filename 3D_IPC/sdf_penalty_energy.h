@@ -34,14 +34,6 @@ struct CylinderSDF {
 
 SDFEvaluation evaluate_sdf(const CylinderSDF& s, const Vec3& x);
 
-//  Solid sphere
-struct SphereSDF {
-    Vec3   center;
-    double radius;
-};
-
-SDFEvaluation evaluate_sdf(const SphereSDF& s, const Vec3& x);
-
 double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double eps);
 
 Vec3   sdf_penalty_gradient(const SDFEvaluation& sdf, double k, double eps);

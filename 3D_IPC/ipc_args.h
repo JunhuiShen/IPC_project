@@ -39,55 +39,22 @@ struct IPCArgs3D : ArgParser {
     double ogc_box_pad = 0.005;
     bool   fixed_iters = false;
     bool   use_gpu                 = false;
-    bool   experimental            = true;
     double node_box_max            = 0.01;
     double node_box_min            = 0.001;
     double k_barrier                   = 1.0;
-    bool   use_ticcd                   = true;     // true: Tight-Inclusion library | false: self-written linear CCD
-
-    // --- mesh ---
-    int    nx           = 31;     
-    int    ny           = 31;     
-    double width        = 1.0;    // m
-    double height       = 1.0;    // m
-
-    // --- scene placement ---
-    double left_x       = -0.75;  // m
-    double right_x      = 0.75;   // m
-    double sheet_y      = 0.20;   // m
-    double left_z       = 0.00;   // m
-    double right_z      = 0.02;   // m
+    bool   use_ticcd                   = false;    // true: Tight-Inclusion library | false: self-written linear CCD
 
     // --- scene selection ---
-    int         example      = 3;   // 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop, 5=twisting_cloth, 6=cloth_sphere_drop
-    double      twist_rate   = 0.5; // relative twist rate in Hz for example 5 (full turns per second)
-    int         twist_nx     = 99;  // grid subdivisions along x for example 5
-    int         twist_ny     = 99;  // grid subdivisions along y for example 5
-    double      twist_size   = 2.5; // edge length (m) of the square cloth in example 5
-    int         drop_stack_count = 50; // number of falling cloths in example 4 stack
-    int         drop_cloth_nx    = 16; // grid subdivisions along x of each falling cloth for example 4
-    int         drop_cloth_ny    = 16; // grid subdivisions along y of each falling cloth for example 4
-    double      drop_first_y     = 0.40; // y-coordinate of the lowest falling cloth at t=0 for examples 4 and 6
-    double      drop_spacing     = 0.02; // vertical gap (m) between successive stacked cloths at t=0 for examples 4 and 6
-    double      drop_cloth_w     = 0.70; // width (m, along x) of each falling cloth for example 4
-    double      drop_cloth_h     = 0.70; // length (m, along z) of each falling cloth for example 4
-    double      cyl_ground_size  = 4.0;  // edge length (m) of the square pinned ground in example 4
-    int         cyl_nu        = 32;    // circumferential subdivisions for example 4 cylinder (axial row count auto-picked for iso triangles)
-    double      cyl_radius    = 0.105; // cylinder collider radius (m) for example 4
-    double      cyl_length    = 0.9;   // cylinder collider length (m) for example 4
-    double      cyl_cx        = 0.0;   // cylinder center x for example 4
-    double      cyl_cy        = 0.25;  // cylinder center y for example 4
-    double      cyl_cz        = 0.0;   // cylinder center z for example 4
-    double      sphere_radius = 0.35;  // sphere collider radius (m) in example 6
-    double      sphere_cx     = 0.0;   // sphere center x for example 6
-    double      sphere_cy     = 0.35;  // sphere center y for example 6; default y=r so sphere is tangent to ground
-    double      sphere_cz     = 0.0;   // sphere center z for example 6
-    int         sphere_subdiv = 2;     // icosphere subdivision level for example 6 (V = 10*4^n + 2)
-    double      sphere_cloth_size = 2.00; // edge length (m) of each falling cloth in example 6
-    double      sphere_ground_size = 4.0; // edge length (m) of the square pinned ground in example 6
-    int         sphere_ground_nx   = 38;  // grid subdivisions along each axis of the square pinned ground in example 6
+    int         example      = 1;   // 1=twisting_cloth, 2=two_cylinder_twist
+    double      sheet_y      = 0.20; // m -- midline y for example 1
 
-    // example 7: N closed-loop cloth strips twisted between two horizontal cylinders
+    // example 1: square cloth twisted in place
+    double      twist_rate   = 0.5; // relative twist rate in Hz (full turns per second)
+    int         twist_nx     = 99;  // grid subdivisions along x
+    int         twist_ny     = 99;  // grid subdivisions along y
+    double      twist_size   = 2.5; // edge length (m)
+
+    // example 2: N closed-loop cloth strips twisted between two horizontal cylinders
     int         tcyl_n_strips    = 4;      // number of cloth strips along x (along the cylinder axis)
     double      tcyl_strip_w     = 0.18;   // each strip's x-width (m, along beam axis)
     double      tcyl_strip_span_z= 1.20;   // total x-span over which strips are distributed (along cyl axis, m)
@@ -141,65 +108,32 @@ struct IPCArgs3D : ArgParser {
         add_double("ogc_box_pad", ogc_box_pad, 0.005, "Padding on OGC node boxes / tri-edge unions for the per-iter BVH rebuild (floored to d_hat at use)");
         add_bool  ("fixed_iters",      fixed_iters,      false, "Run exactly max_substep_iters sweeps per substep with no tolerance / convergence check");
         add_bool  ("use_gpu",              use_gpu,              false, "Route the GS sweep through the GPU implementation (CPU stub when CUDA is unavailable)");
-        add_bool  ("experimental",         experimental,         true,  "Use global_gauss_seidel_solver_basic (requires fixed_iters)");
-        add_double("node_box_max",         node_box_max,         0.01,  "Upper bound on node box half-extent used by the experimental solver");
+        add_double("node_box_max",         node_box_max,         0.01,  "Upper bound on node box half-extent used by the basic solver");
         add_double("node_box_min",         node_box_min,         0.001, "Lower bound on node box half-extent (floor when prev disp is near zero)");
         add_double("k_barrier",                k_barrier,                1.0,   "Barrier stiffness multiplier");
-        add_bool  ("use_ticcd",                use_ticcd,                true,  "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library (default), false=self-written linear");
+        add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
-        add_int   ("nx",          nx,          31,         "Mesh subdivisions in x");
-        add_int   ("ny",          ny,          31,         "Mesh subdivisions in y");
-        add_double("width",       width,       1.0,        "Mesh width");
-        add_double("height",      height,      1.0,        "Mesh height");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist");
+        add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
+        add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
+        add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
+        add_int   ("twist_ny",     twist_ny,      99,             "Grid subdivisions along y for example 1");
+        add_double("twist_size",   twist_size,    2.5,            "Edge length (m) of the square cloth in example 1");
 
-        add_double("left_x",      left_x,      -0.75,      "Left sheet origin x");
-        add_double("right_x",     right_x,     0.75,       "Right sheet origin x");
-        add_double("sheet_y",     sheet_y,     0.20,       "Shared sheet origin y");
-        add_double("left_z",      left_z,      0.00,       "Left sheet origin z");
-        add_double("right_z",     right_z,     0.02,       "Right sheet origin z");
-
-        add_int   ("example",      example,       3,              "Scene to run: 1=two_sheets, 2=cloth_stack_low_res, 3=cloth_stack_high_res, 4=cloth_cylinder_drop, 5=twisting_cloth, 6=cloth_sphere_drop, 7=two_cylinder_twist");
-        add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 5 (turns/second; total turns = rate * duration)");
-        add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 5 (vertices = (twist_nx+1)*(twist_ny+1))");
-        add_int   ("twist_ny",     twist_ny,      99,             "Grid subdivisions along y for example 5");
-        add_double("twist_size",   twist_size,    2.5,            "Edge length (m) of the square cloth in example 5");
-        add_int   ("drop_stack_count", drop_stack_count, 50,       "Number of falling cloths in example 4 stack");
-        add_int   ("drop_cloth_nx",    drop_cloth_nx,    16,       "Grid subdivisions along x of each falling cloth in example 4");
-        add_int   ("drop_cloth_ny",    drop_cloth_ny,    16,       "Grid subdivisions along y of each falling cloth in example 4");
-        add_double("drop_first_y",     drop_first_y,     0.40,     "Y-coordinate of the lowest falling cloth at t=0 in examples 4 and 6");
-        add_double("drop_spacing",     drop_spacing,     0.02,     "Vertical gap (m) between successive stacked cloths at t=0 in examples 4 and 6");
-        add_double("drop_cloth_w",     drop_cloth_w,     0.70,     "Width (m, along x) of each falling cloth in example 4");
-        add_double("drop_cloth_h",     drop_cloth_h,     0.70,     "Length (m, along z) of each falling cloth in example 4");
-        add_double("cyl_ground_size", cyl_ground_size,   4.0,      "Edge length (m) of the square pinned ground in example 4");
-        add_int   ("cyl_nu",           cyl_nu,           32,       "Circumferential subdivisions for example 4 cylinder");
-        add_double("cyl_radius",       cyl_radius,       0.105,    "Cylinder collider radius in meters for example 4");
-        add_double("cyl_length",       cyl_length,       0.9,      "Cylinder collider length in meters for example 4");
-        add_double("cyl_cx",           cyl_cx,           0.0,      "Cylinder center x for example 4");
-        add_double("cyl_cy",           cyl_cy,           0.25,     "Cylinder center y for example 4");
-        add_double("cyl_cz",           cyl_cz,           0.0,      "Cylinder center z for example 4");
-        add_double("sphere_radius",    sphere_radius,    0.35,     "Sphere collider radius in meters in example 6");
-        add_double("sphere_cx",        sphere_cx,        0.0,      "Sphere center x for example 6");
-        add_double("sphere_cy",        sphere_cy,        0.35,     "Sphere center y for example 6; default y=r so sphere is tangent to ground");
-        add_double("sphere_cz",        sphere_cz,        0.0,      "Sphere center z for example 6");
-        add_int   ("sphere_subdiv",    sphere_subdiv,    2,        "Icosphere subdivision level in example 6 (V = 10*4^n + 2)");
-        add_double("sphere_cloth_size", sphere_cloth_size, 2.00,   "Edge length in meters of each falling cloth in example 6");
-        add_double("sphere_ground_size", sphere_ground_size, 4.0,  "Edge length in meters of the square pinned ground in example 6");
-        add_int   ("sphere_ground_nx",   sphere_ground_nx,   38,   "Grid subdivisions along each axis of the square pinned ground in example 6");
-
-        add_int   ("tcyl_n_strips",    tcyl_n_strips,    4,    "Number of cloth strips along x (along cylinder axis) for example 7");
-        add_double("tcyl_strip_w",     tcyl_strip_w,     0.18, "Each strip's x-width (m, along beam axis) for example 7");
-        add_double("tcyl_strip_span_z",tcyl_strip_span_z,1.20, "Total x-span over which strips are distributed (m, along cyl axis) for example 7");
-        add_double("tcyl_cloth_h",     tcyl_cloth_h,     1.00, "Pin-to-pin y distance between cylinders (m) for example 7");
-        add_int   ("tcyl_nx",          tcyl_nx,          16,   "Strip subdivisions along x for example 7 (cols = tcyl_nx+1)");
-        add_int   ("tcyl_ny",          tcyl_ny,          180,  "Strip subdivisions along y for example 7 (rows = tcyl_ny+1)");
-        add_double("tcyl_radius",      tcyl_radius,      0.06, "Cylinder radius (m) for example 7 (axis along x)");
-        add_double("tcyl_length",      tcyl_length,      1.50, "Cylinder length along x (m) for example 7; should exceed tcyl_strip_span_z");
-        add_int   ("tcyl_nu",          tcyl_nu,          64,   "Circumferential subdivisions for visual cylinder mesh in example 7");
-        add_double("tcyl_visual_shrink", tcyl_visual_shrink, 0.040, "Render cylinders thinner than tcyl_radius by this many m (visual only; physics still uses tcyl_radius). Hides cloth-cyl lag during rotation in example 7.");
-        add_double("tcyl_twist_rate",  tcyl_twist_rate,  0.15, "Turns/second per cylinder in example 7 (top and bot rotate in opposite directions)");
-        add_double("tcyl_settle_time", tcyl_settle_time, 0.2,  "Seconds with omega=0 so cloth settles under gravity in example 7");
-        add_double("tcyl_ramp_time",   tcyl_ramp_time,   0.5,  "Seconds to linearly ramp omega between 0 and full in example 7");
-        add_double("tcyl_max_turn",    tcyl_max_turn,    0.75, "Per-cylinder rotation cap (turns) in example 7. 0 = no cap; 0.5=180°, 0.75=270°.");
+        add_int   ("tcyl_n_strips",    tcyl_n_strips,    4,    "Number of cloth strips along x (along cylinder axis) for example 2");
+        add_double("tcyl_strip_w",     tcyl_strip_w,     0.18, "Each strip's x-width (m, along beam axis) for example 2");
+        add_double("tcyl_strip_span_z",tcyl_strip_span_z,1.20, "Total x-span over which strips are distributed (m, along cyl axis) for example 2");
+        add_double("tcyl_cloth_h",     tcyl_cloth_h,     1.00, "Pin-to-pin y distance between cylinders (m) for example 2");
+        add_int   ("tcyl_nx",          tcyl_nx,          16,   "Strip subdivisions along x for example 2 (cols = tcyl_nx+1)");
+        add_int   ("tcyl_ny",          tcyl_ny,          180,  "Strip subdivisions along y for example 2 (rows = tcyl_ny+1)");
+        add_double("tcyl_radius",      tcyl_radius,      0.06, "Cylinder radius (m) for example 2 (axis along x)");
+        add_double("tcyl_length",      tcyl_length,      1.50, "Cylinder length along x (m) for example 2; should exceed tcyl_strip_span_z");
+        add_int   ("tcyl_nu",          tcyl_nu,          64,   "Circumferential subdivisions for visual cylinder mesh in example 2");
+        add_double("tcyl_visual_shrink", tcyl_visual_shrink, 0.040, "Render cylinders thinner than tcyl_radius by this many m (visual only; physics still uses tcyl_radius). Hides cloth-cyl lag during rotation in example 2.");
+        add_double("tcyl_twist_rate",  tcyl_twist_rate,  0.15, "Turns/second per cylinder in example 2 (top and bot rotate in opposite directions)");
+        add_double("tcyl_settle_time", tcyl_settle_time, 0.2,  "Seconds with omega=0 so cloth settles under gravity in example 2");
+        add_double("tcyl_ramp_time",   tcyl_ramp_time,   0.5,  "Seconds to linearly ramp omega between 0 and full in example 2");
+        add_double("tcyl_max_turn",    tcyl_max_turn,    0.75, "Per-cylinder rotation cap (turns) in example 2. 0 = no cap; 0.5=180°, 0.75=270°.");
         add_bool  ("tcyl_untwist",     tcyl_untwist,     true, "If true, after reaching tcyl_max_turn the cylinder smoothly reverses back to 0 (twist + untwist).");
         add_double("tcyl_hold_time",   tcyl_hold_time,   0.0,  "Seconds to dwell at peak twist before reversing (only with tcyl_untwist=true).");
 
@@ -241,7 +175,6 @@ struct IPCArgs3D : ArgParser {
         p.ogc_box_pad = ogc_box_pad;
         p.fixed_iters = fixed_iters;
         p.use_gpu                 = use_gpu;
-        p.experimental            = experimental;
         p.node_box_max            = node_box_max;
         p.node_box_min            = node_box_min;
         p.k_barrier                   = k_barrier;

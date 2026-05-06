@@ -47,22 +47,6 @@ SDFEvaluation evaluate_sdf(const CylinderSDF& s, const Vec3& x){
     return r;
 }
 
-//  Solid sphere SDF
-SDFEvaluation evaluate_sdf(const SphereSDF& s, const Vec3& x){
-    SDFEvaluation r;
-    const Vec3 v = x - s.center;
-    const double rnorm = v.norm();
-    r.phi = rnorm - s.radius;
-    if (rnorm > 0.0) {
-        r.grad_phi = v / rnorm;
-        r.hess_phi = (Mat33::Identity() - r.grad_phi * r.grad_phi.transpose()) / rnorm;
-    } else {
-        r.grad_phi = Vec3::Zero();
-        r.hess_phi = Mat33::Zero();
-    }
-    return r;
-}
-
 // One-sided quadratic: E = 0.5 * k * max(0, -phi)^2.
 // Force = -dE/dx = k * max(0, -phi) * grad_phi, pointing away from the obstacle.
 // eps is accepted for API compatibility but ignored.

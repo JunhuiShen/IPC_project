@@ -34,24 +34,19 @@ int main(int argc, char** argv) {
     std::vector<Vec3> static_x;
     std::vector<int>  static_tris;
 
-    if      (args.example == 1) build_two_sheets_example(args, ref_mesh, state, X, pins);
-    else if (args.example == 2) build_cloth_stack_example_low_res(ref_mesh, state, X, pins);
-    else if (args.example == 3) build_cloth_stack_example_high_res(ref_mesh, state, X, pins);
-    else if (args.example == 4) build_cloth_cylinder_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
-    else if (args.example == 5) build_twisting_cloth_example(args, ref_mesh, state, X, pins, twist_spec);
-    else if (args.example == 6) build_cloth_sphere_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
-    else if (args.example == 7) build_two_cylinder_twist_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, cyl_twist_spec);
+    if      (args.example == 1) build_twisting_cloth_example(args, ref_mesh, state, X, pins, twist_spec);
+    else if (args.example == 2) build_two_cylinder_twist_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, cyl_twist_spec);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2.\n";
         return 1;
     }
 
     PinTargetUpdater pin_updater = nullptr;
-    if (args.example == 5) {
+    if (args.example == 1) {
         pin_updater = [&twist_spec](std::vector<Pin>& p, double t) {
             update_twist_pins(p, twist_spec, t);
         };
-    } else if (args.example == 7) {
+    } else if (args.example == 2) {
         pin_updater = [&cyl_twist_spec](std::vector<Pin>& p, double t) {
             update_cylinder_twist_pins(p, cyl_twist_spec, t);
         };
@@ -116,9 +111,9 @@ int main(int argc, char** argv) {
         return oss.str();
     };
 
-    // Example 7's cylinders rotate over time, so the collider mesh has to be
+    // Example 2's cylinders rotate over time, so the collider mesh has to be
     // re-exported per frame. Other examples keep the one-time "static_colliders".
-    const bool collider_is_dynamic = (args.example == 7);
+    const bool collider_is_dynamic = (args.example == 2);
 
     if (restart_frame < 0) {
         if (fs::exists(outdir)) fs::remove_all(outdir);

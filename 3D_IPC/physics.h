@@ -34,7 +34,6 @@ struct SimParams {
     double eps_sdf;   // SDF ramp-Heaviside transition-layer width
     std::vector<PlaneSDF>    sdf_planes;
     std::vector<CylinderSDF> sdf_cylinders;
-    std::vector<SphereSDF>   sdf_spheres;
     Vec3   gravity;
     int    max_global_iters;
 
@@ -51,8 +50,7 @@ struct SimParams {
     // (gpu_gauss_seidel_solver). On machines without CUDA the CPU stub is
     // used automatically. When set, use_parallel is ignored.
     bool   use_gpu;
-    bool   experimental;       // if true, use global_gauss_seidel_solver_basic
-    double node_box_max;       // upper bound on node box half-extent used by experimental solver
+    double node_box_max;       // upper bound on node box half-extent used by the basic solver
     double node_box_min;       // lower bound on node box half-extent (floor when prev disp is near zero)
     double k_barrier;              // barrier stiffness multiplier
     bool   use_ticcd;              // true (default) -> Tight-Inclusion CCD library; false -> self-written linear CCD
@@ -74,7 +72,6 @@ struct SimParams {
         p.eps_sdf                   = 0.0;
         p.sdf_planes.clear();
         p.sdf_cylinders.clear();
-        p.sdf_spheres.clear();
         p.gravity                   = Vec3::Zero();
         p.max_global_iters          = 0;
         p.use_parallel              = false;
@@ -86,7 +83,6 @@ struct SimParams {
         p.ogc_box_pad               = 0.0;
         p.fixed_iters               = false;
         p.use_gpu                   = false;
-        p.experimental              = false;
         p.node_box_max              = 0.0;
         p.node_box_min              = 0.0;
         p.k_barrier                     = 1.0;
