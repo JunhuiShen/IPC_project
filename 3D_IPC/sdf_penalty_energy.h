@@ -25,7 +25,7 @@ struct PlaneSDF {
 
 SDFEvaluation evaluate_sdf(const PlaneSDF& s, const Vec3& x);
 
-//  Infinite solid cylinder 
+//  Infinite solid cylinder
 struct CylinderSDF {
     Vec3   point;
     Vec3   axis;     //  must be unit length
@@ -33,6 +33,14 @@ struct CylinderSDF {
 };
 
 SDFEvaluation evaluate_sdf(const CylinderSDF& s, const Vec3& x);
+
+//  Solid sphere
+struct SphereSDF {
+    Vec3   center;
+    double radius;
+};
+
+SDFEvaluation evaluate_sdf(const SphereSDF& s, const Vec3& x);
 
 double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double eps);
 

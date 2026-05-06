@@ -22,6 +22,10 @@ static inline bool sdf_min_evaluation(const SimParams& params, const Vec3& xi, S
         const SDFEvaluation s = evaluate_sdf(c, xi);
         if (!any || s.phi < out.phi) { out = s; any = true; }
     }
+    for (const SphereSDF& sp : params.sdf_spheres) {
+        const SDFEvaluation s = evaluate_sdf(sp, xi);
+        if (!any || s.phi < out.phi) { out = s; any = true; }
+    }
     return any;
 }
 

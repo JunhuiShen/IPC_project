@@ -396,6 +396,74 @@ TEST(CylinderSDF, HessianConvergence){
 }
 
 // ============================================================================
+//  Sphere SDF
+// ============================================================================
+
+TEST(SphereSDF, Evaluate){
+    //  Sphere at origin, radius 0.5.
+    SphereSDF s{Vec3(0.0, 0.0, 0.0), 0.5};
+
+    //  Point at (0.6, 0, 0) -- distance 0.6, phi = 0.1, grad along +x.
+    SDFEvaluation r = evaluate_sdf(s, Vec3(0.6, 0.0, 0.0));
+    EXPECT_NEAR(r.phi, 0.1, kTol);
+    EXPECT_TRUE(r.grad_phi.isApprox(Vec3(1.0, 0.0, 0.0)));
+    //  hess_phi = (I - n n^T)/r_dist; with n = e_x and r_dist = 0.6, the
+    //  remaining tangent plane stiffness is diag(0, 1/0.6, 1/0.6).
+    Mat33 expected = Mat33::Zero();
+    expected(1, 1) = 1.0 / 0.6;
+    expected(2, 2) = 1.0 / 0.6;
+    EXPECT_TRUE(r.hess_phi.isApprox(expected, kTol));
+
+    //  Point on a translated sphere's center: phi = -R, derivatives degenerate
+    //  -> zero sentinels (same convention as the cylinder's on-axis case).
+    SphereSDF s2{Vec3(1.0, 2.0, 3.0), 0.4};
+    r = evaluate_sdf(s2, s2.center);
+    EXPECT_NEAR(r.phi, -0.4, kTol);
+    EXPECT_TRUE(r.grad_phi.isApprox(Vec3::Zero()));
+    EXPECT_TRUE(r.hess_phi.isApprox(Mat33::Zero()));
+}
+
+TEST(SphereSDF, GradientConvergence){
+    //  Inside by 0.08: phi = -0.08, safe for h up to 1e-2 without crossing 0.
+    SphereSDF s{Vec3(0.1, -0.2, 0.05), 0.4};
+    const double k = 30.0;
+    const double eps = 0.2;
+
+    const Vec3 dir = Vec3(3.0, -1.0, 2.0).normalized();
+    const Vec3 x = s.center + (s.radius - 0.08) * dir;
+
+    const SDFClosure sdf = [&](const Vec3& q){ return evaluate_sdf(s, q); };
+    EXPECT_TRUE(run_sdf_gradient_convergence("sphere", x, sdf, k, eps));
+}
+
+TEST(SphereSDF, HessianConvergence){
+    SphereSDF s{Vec3(0.0, 0.0, 0.0), 0.4};
+    const double k = 20.0;
+    const double eps = 0.2;
+
+    const Vec3 dir = Vec3(1.0, 2.0, 3.0).normalized();
+    const Vec3 x = s.center + (s.radius - 0.08) * dir;
+
+    const SDFClosure sdf = [&](const Vec3& q){ return evaluate_sdf(s, q); };
+    EXPECT_TRUE(run_sdf_hessian_convergence("sphere", x, sdf, k, eps,
+                                            /*include_curvature=*/true));
+}
+
+TEST(SphereSDF, GradientPushesOutward){
+    //  Inside the surface: force = -gradient should push radially outward.
+    SphereSDF s{Vec3(0.0, 0.0, 0.0), 0.5};
+    const double k = 10.0;
+    const double eps = 0.1;
+
+    const Vec3 radial = Vec3(1.0, 1.0, 1.0).normalized();
+    const Vec3 x = s.center + (s.radius - 0.05) * radial;
+
+    const Vec3 g = sdf_penalty_gradient(evaluate_sdf(s, x), k, eps);
+    const Vec3 force = -g;
+    EXPECT_GT(force.dot(radial), 0.0);
+}
+
+// ============================================================================
 //  Boundary behavior
 // ============================================================================
 
