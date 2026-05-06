@@ -80,8 +80,11 @@ double effective_theta(double omega, double t, double t_settle, double t_ramp,
 } // namespace
 
 
-// Example 1: square cloth with both short edges clamped, edges counter-rotate
-// about the +x axis at twist_rate Hz.
+// ---------------------------------------------------------------------------
+// Example 1: twisting cloth
+// ---------------------------------------------------------------------------
+// Square cloth with both short edges clamped, edges counter-rotate about the
+// +x axis at twist_rate Hz.
 void build_twisting_cloth_example(const IPCArgs3D& args,
                                   RefMesh& ref_mesh,
                                   DeformedState& state,
@@ -147,11 +150,14 @@ void update_twist_pins(std::vector<Pin>& pins, const TwistSpec& spec, double t) 
 }
 
 
-// Example 2: N closed-loop cloth strips wrap two horizontal cylinders. Both
-// cylinders counter-rotate about +y, dragging the wrap rows via pin springs
-// and twisting the strips together in the gap. Pin targets, visual mesh, and
-// SDF axes all yaw about the same +y line so the wrap pin (orbiting at radius
-// pin_r > r) never crosses the rotating SDF surface.
+// ---------------------------------------------------------------------------
+// Example 2: two-cylinder twist
+// ---------------------------------------------------------------------------
+// N closed-loop cloth strips wrap two horizontal cylinders. Both cylinders
+// counter-rotate about +y, dragging the wrap rows via pin springs and twisting
+// the strips together in the gap. Pin targets, visual mesh, and SDF axes all
+// yaw about the same +y line so the wrap pin (orbiting at radius pin_r > r)
+// never crosses the rotating SDF surface.
 void build_two_cylinder_twist_example(const IPCArgs3D& args,
                                       RefMesh& ref_mesh,
                                       DeformedState& state,
@@ -351,5 +357,68 @@ void update_cylinder_visuals(std::vector<Vec3>& static_x,
     }
     for (int i = spec.bot_v_begin; i < spec.bot_v_end; ++i) {
         static_x[i] = rotate_about_y_axis(spec.static_x_rest[i], spec.bot_axis_point, theta_bot);
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Example 3: cloth pile
+// ---------------------------------------------------------------------------
+// Square ground sheet pinned at its four corners catches a stack of smaller
+// cloths dropped from above. Contact is pure IPC log-barrier (no SDF), and
+// nothing is scripted -- the only inputs after construction are gravity and
+// the initial drop velocity.
+void build_cloth_pile_example(const IPCArgs3D& args,
+                              RefMesh& ref_mesh,
+                              DeformedState& state,
+                              std::vector<Vec2>& X,
+                              std::vector<Pin>& pins) {
+    clear_model(ref_mesh, state, X, pins);
+
+    // Ground sheet in the xz plane at y=0; corners pinned to form a hammock.
+    const int    g_nx = args.pile_ground_nx;
+    const int    g_ny = args.pile_ground_ny;
+    const double g_w  = args.pile_ground_size;
+    const double g_h  = args.pile_ground_size;
+
+    const int g_base = build_square_mesh(
+            ref_mesh, state, X,
+            g_nx, g_ny, g_w, g_h,
+            Vec3(-0.5 * g_w, 0.0, -0.5 * g_h));
+
+    // build_square_mesh stores grid (i, j) at base + j * (g_nx + 1) + i, so
+    // the four corners are (0,0), (g_nx,0), (0,g_ny), (g_nx,g_ny).
+    const int row_stride = g_nx + 1;
+    append_pin(pins, g_base + 0,                            state.deformed_positions);
+    append_pin(pins, g_base + g_nx,                         state.deformed_positions);
+    append_pin(pins, g_base + g_ny * row_stride,            state.deformed_positions);
+    append_pin(pins, g_base + g_ny * row_stride + g_nx,     state.deformed_positions);
+
+    // Falling cloths, evenly spaced in y above the hammock. A small per-cloth
+    // xz offset breaks perfect symmetry so the pile doesn't lock into a
+    // straight column. All falling vertices share an initial -y velocity.
+    const int    n      = args.pile_count;
+    const int    nx     = args.pile_nx;
+    const int    ny     = args.pile_ny;
+    const double w      = args.pile_cloth_size;
+    const double h      = args.pile_cloth_size;
+    const double first  = args.pile_first_y;
+    const double dy     = args.pile_spacing;
+    const double v_drop = args.pile_drop_speed;
+
+    const int falling_begin = static_cast<int>(state.deformed_positions.size());
+
+    for (int s = 0; s < n; ++s) {
+        const double x_off = 0.005 * (s - 1);
+        const double z_off = 0.004 * (s - 1);
+        const Vec3 origin(-0.5 * w + x_off,
+                          first + s * dy,
+                          -0.5 * h + z_off);
+        build_square_mesh(ref_mesh, state, X, nx, ny, w, h, origin);
+    }
+
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+    for (int i = falling_begin; i < static_cast<int>(state.velocities.size()); ++i) {
+        state.velocities[i] = Vec3(0.0, -v_drop, 0.0);
     }
 }

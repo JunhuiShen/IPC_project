@@ -72,11 +72,13 @@ Built-in example scenes (`--example N`):
 |-------------|-------|
 | `1` | Square cloth clamped on two edges and twisted (default) |
 | `2` | Four closed-loop cloth strips wrapping two horizontal cylinders, twisted then untwisted |
+| `3` | Small cloths dropped onto a corner-pinned ground sheet (pure barrier-contact pile-up) |
 
 Common invocations:
 
     ./build/3D_sim --example 1                              # twisting cloth
     ./build/3D_sim --example 2                              # two-cylinder twist
+    ./build/3D_sim --example 3                              # cloth pile on pinned hammock
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
@@ -94,6 +96,14 @@ frames):
 
     ./build/3D_sim --example 2 --num_frames 690 \
         --E 115 --nu 0.25 --kB 0.009 --kpin 5e6 \
+        --d_hat 0.005 --k_barrier 100 \
+        --fixed_iters --max_substep_iters 10
+
+Reference command for example 3 (5 cloths piling on a 1.2 m corner-pinned
+ground sheet, 120 frames):
+
+    ./build/3D_sim --example 3 --num_frames 120 \
+        --E 115 --nu 0.25 --kB 1e-4 --kpin 5e6 \
         --d_hat 0.005 --k_barrier 100 \
         --fixed_iters --max_substep_iters 10
 
@@ -122,7 +132,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (new per-iter rebuild solver), `ogc_box_pad` (BVH padding for the per-iter rebuild; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (clamp range for `R_vi = clamp(prev_disp * 1.2, min, max)`) |
-| Scene | `example` (`1`..`2`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time` |
+| Scene | `example` (`1`..`3`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `pile_count`, `pile_nx`, `pile_ny`, `pile_cloth_size`, `pile_first_y`, `pile_spacing`, `pile_drop_speed`, `pile_ground_nx`, `pile_ground_ny`, `pile_ground_size` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame` |
 
 Notes:

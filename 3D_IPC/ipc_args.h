@@ -45,7 +45,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_ticcd                   = false;    // true: Tight-Inclusion library | false: self-written linear CCD
 
     // --- scene selection ---
-    int         example      = 1;   // 1=twisting_cloth, 2=two_cylinder_twist
+    int         example      = 1;   // 1=twisting_cloth, 2=two_cylinder_twist, 3=cloth_pile
     double      sheet_y      = 0.20; // m -- midline y for example 1
 
     // example 1: square cloth twisted in place
@@ -71,6 +71,18 @@ struct IPCArgs3D : ArgParser {
     double      tcyl_max_turn    = 1.5;    // |total turns| cap per cylinder (0 = no cap). 0.5=180°, 1.5=540°
     bool        tcyl_untwist     = true;   // after reaching max_turn, smoothly reverse rotation back to 0
     double      tcyl_hold_time   = 0.0;    // seconds to dwell at peak twist before reversing (untwist only)
+
+    // example 3: small cloths piling onto a corner-pinned ground sheet
+    int         pile_count       = 5;      // number of falling cloths
+    int         pile_nx          = 16;     // each falling cloth's grid subdivisions along x
+    int         pile_ny          = 16;     // each falling cloth's grid subdivisions along y
+    double      pile_cloth_size  = 0.35;   // each falling cloth's edge length (m)
+    double      pile_first_y     = 0.25;   // y of the lowest falling cloth at t=0 (m)
+    double      pile_spacing     = 0.09;   // y-gap between successive falling cloths (m)
+    double      pile_drop_speed  = 2.0;    // initial -y velocity for every falling vertex (m/s)
+    int         pile_ground_nx   = 10;     // ground sheet grid subdivisions along x
+    int         pile_ground_ny   = 10;     // ground sheet grid subdivisions along y
+    double      pile_ground_size = 1.2;    // ground sheet edge length (m); pinned at all four corners
 
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
@@ -113,7 +125,7 @@ struct IPCArgs3D : ArgParser {
         add_double("k_barrier",                k_barrier,                1.0,   "Barrier stiffness multiplier");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cloth_pile");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -136,6 +148,17 @@ struct IPCArgs3D : ArgParser {
         add_double("tcyl_max_turn",    tcyl_max_turn,    1.5,  "Per-cylinder rotation cap (turns) in example 2. 0 = no cap; 0.5=180°, 1.5=540°.");
         add_bool  ("tcyl_untwist",     tcyl_untwist,     true, "If true, after reaching tcyl_max_turn the cylinder smoothly reverses back to 0 (twist + untwist).");
         add_double("tcyl_hold_time",   tcyl_hold_time,   0.0,  "Seconds to dwell at peak twist before reversing (only with tcyl_untwist=true).");
+
+        add_int   ("pile_count",       pile_count,       5,    "Number of falling cloths in example 3");
+        add_int   ("pile_nx",          pile_nx,          16,   "Grid subdivisions along x for each falling cloth in example 3");
+        add_int   ("pile_ny",          pile_ny,          16,   "Grid subdivisions along y for each falling cloth in example 3");
+        add_double("pile_cloth_size",  pile_cloth_size,  0.35, "Edge length (m) of each falling cloth in example 3");
+        add_double("pile_first_y",     pile_first_y,     0.25, "y-position (m) of the lowest falling cloth at t=0 in example 3");
+        add_double("pile_spacing",     pile_spacing,     0.09, "y-gap (m) between successive falling cloths in example 3");
+        add_double("pile_drop_speed",  pile_drop_speed,  2.0,  "Initial downward speed (m/s) of every falling-cloth vertex in example 3");
+        add_int   ("pile_ground_nx",   pile_ground_nx,   10,   "Ground-sheet subdivisions along x in example 3");
+        add_int   ("pile_ground_ny",   pile_ground_ny,   10,   "Ground-sheet subdivisions along y in example 3");
+        add_double("pile_ground_size", pile_ground_size, 1.2,  "Ground-sheet edge length (m) in example 3 (corners pinned)");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");

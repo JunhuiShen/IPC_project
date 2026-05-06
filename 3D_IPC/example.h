@@ -77,3 +77,12 @@ void update_cylinder_visuals(std::vector<Vec3>& static_x,
 void update_cylinder_sdfs(SimParams& params,
                           const CylinderTwistSpec& spec,
                           double t);
+
+// Example 3: corner-pinned ground sheet (hammock) catches a stack of smaller
+// cloths dropped from above. Pure IPC log-barrier contact, no SDF, no
+// scripted motion -- only gravity and an initial drop velocity.
+void build_cloth_pile_example(const IPCArgs3D& args,
+                              RefMesh& ref_mesh,
+                              DeformedState& state,
+                              std::vector<Vec2>& X,
+                              std::vector<Pin>& pins);
