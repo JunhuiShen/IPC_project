@@ -81,11 +81,11 @@ Common invocations:
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
 
-Reference command for example 1 (square cloth twisted in place, 180 frames at
+Reference command for example 1 (square cloth twisted in place, 240 frames at
 0.5 turns/s):
 
-    ./build/3D_sim --example 1 --num_frames 180 \
-        --E 115 --nu 0.25 --kB 0.009 --kpin 5e6 --twist_rate 0.5 \
+    ./build/3D_sim --example 1 --num_frames 240 \
+        --E 115 --nu 0.25 --kB 0.009 --kpin 1e7 --twist_rate 0.5 \
         --d_hat 0.005 --k_barrier 100 \
         --fixed_iters --max_substep_iters 10
 
@@ -95,8 +95,7 @@ frames):
     ./build/3D_sim --example 2 --num_frames 690 \
         --E 115 --nu 0.25 --kB 0.009 --kpin 5e6 \
         --d_hat 0.005 --k_barrier 100 \
-        --fixed_iters --max_substep_iters 10 \
-        --tcyl_max_turn 1.5 --tcyl_visual_shrink 0.005
+        --fixed_iters --max_substep_iters 10
 
 Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
 (`frame_0000.geo`, `frame_0001.geo`, ...). `--format obj` writes `.obj`;

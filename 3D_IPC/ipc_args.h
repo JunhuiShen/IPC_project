@@ -68,7 +68,7 @@ struct IPCArgs3D : ArgParser {
     double      tcyl_twist_rate  = 0.15;   // turns/second per cylinder (sign-flipped between top/bot)
     double      tcyl_settle_time = 0.2;    // seconds with omega=0 so cloth settles under gravity
     double      tcyl_ramp_time   = 0.5;    // seconds to linearly ramp omega from 0 to full
-    double      tcyl_max_turn    = 0.75;   // |total turns| cap per cylinder (0 = no cap). 0.5=180°, 0.75=270°
+    double      tcyl_max_turn    = 1.5;    // |total turns| cap per cylinder (0 = no cap). 0.5=180°, 1.5=540°
     bool        tcyl_untwist     = true;   // after reaching max_turn, smoothly reverse rotation back to 0
     double      tcyl_hold_time   = 0.0;    // seconds to dwell at peak twist before reversing (untwist only)
 
@@ -133,7 +133,7 @@ struct IPCArgs3D : ArgParser {
         add_double("tcyl_twist_rate",  tcyl_twist_rate,  0.15, "Turns/second per cylinder in example 2 (top and bot rotate in opposite directions)");
         add_double("tcyl_settle_time", tcyl_settle_time, 0.2,  "Seconds with omega=0 so cloth settles under gravity in example 2");
         add_double("tcyl_ramp_time",   tcyl_ramp_time,   0.5,  "Seconds to linearly ramp omega between 0 and full in example 2");
-        add_double("tcyl_max_turn",    tcyl_max_turn,    0.75, "Per-cylinder rotation cap (turns) in example 2. 0 = no cap; 0.5=180°, 0.75=270°.");
+        add_double("tcyl_max_turn",    tcyl_max_turn,    1.5,  "Per-cylinder rotation cap (turns) in example 2. 0 = no cap; 0.5=180°, 1.5=540°.");
         add_bool  ("tcyl_untwist",     tcyl_untwist,     true, "If true, after reaching tcyl_max_turn the cylinder smoothly reverses back to 0 (twist + untwist).");
         add_double("tcyl_hold_time",   tcyl_hold_time,   0.0,  "Seconds to dwell at peak twist before reversing (only with tcyl_untwist=true).");
 
