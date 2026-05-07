@@ -47,10 +47,7 @@ SDFEvaluation evaluate_sdf(const CylinderSDF& s, const Vec3& x){
     return r;
 }
 
-//  Sphere SDF.  Hess = (I - n n^T) / r_dist matches d^2 phi / dx_i dx_j
-//  for phi(x) = ||x - c|| - R.  At the center r_dist = 0 the derivatives
-//  are undefined, so we return zero sentinels (same convention as the
-//  cylinder's on-axis case).
+//  Sphere SDF
 SDFEvaluation evaluate_sdf(const SphereSDF& s, const Vec3& x){
     SDFEvaluation r;
     const Vec3   d      = x - s.center;
@@ -66,17 +63,6 @@ SDFEvaluation evaluate_sdf(const SphereSDF& s, const Vec3& x){
     return r;
 }
 
-// Soft one-sided quadratic with active range eps. The IPC d_hat analogue for
-// SDFs: cloth rest is at phi = eps (clearance eps outside the obstacle), and
-// repulsion ramps in for phi < eps. eps = 0 collapses to a hard quadratic at
-// the surface.
-//
-//   E(phi)     = 0.5 * k * (eps - phi)^2  for phi < eps,   else 0
-//   dE/dphi    = -k * (eps - phi)         for phi < eps,   else 0
-//   d^2E/dphi^2 = k                       for phi < eps,   else 0  (jump at eps)
-//
-// The Hessian's discontinuity at phi=eps is harmless when the solver requests
-// include_curvature=false (its default), since the outer-product term is PSD.
 
 double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double eps){
     if (sdf.phi >= eps) return 0.0;

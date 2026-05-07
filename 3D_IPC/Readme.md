@@ -16,7 +16,7 @@ Per time step, the optimizer minimizes an incremental potential made of:
   hinge bending (`kB` controls bending stiffness; `kB = 0` disables it).
 - **IPC log-barrier contact** -- node-triangle and segment-segment barriers built
   from a swept-AABB BVH broad phase.
-- **SDF penalty contact** -- analytic signed-distance penalties (plane, cylinder)
+- **SDF penalty contact** -- analytic signed-distance penalties (plane, cylinder, sphere)
   with stiffness `k_sdf` and active range `eps_sdf` (cloth's force-free rest
   is at `phi = eps_sdf`; set 0 for a hard quadratic at the surface).
 - **Pin springs** -- soft positional constraints for fixed vertices.
@@ -72,13 +72,13 @@ Built-in example scenes (`--example N`):
 |-------------|-------|
 | `1` | Square cloth clamped on two edges and twisted (default) |
 | `2` | Four closed-loop cloth strips wrapping two horizontal cylinders, twisted then untwisted |
-| `3` | Small cloths dropped onto a corner-pinned ground sheet (pure barrier-contact pile-up) |
+| `3` | Cloths dropped onto a sphere; they drape over it and pile around its base |
 
 Common invocations:
 
     ./build/3D_sim --example 1                              # twisting cloth
     ./build/3D_sim --example 2                              # two-cylinder twist
-    ./build/3D_sim --example 3                              # cloth pile on pinned hammock
+    ./build/3D_sim --example 3                              # cloth pile on sphere
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
@@ -99,12 +99,12 @@ frames):
         --d_hat 0.005 --k_barrier 100 \
         --fixed_iters --max_substep_iters 10
 
-Reference command for example 3 (5 cloths piling on a 1.2 m corner-pinned
-ground sheet, 120 frames):
+Reference command for example 3 (16 cloths pile on a centered sphere, 60
+frames):
 
-    ./build/3D_sim --example 3 --num_frames 120 \
+    ./build/3D_sim --example 3 --num_frames 60 \
         --E 115 --nu 0.25 --kB 1e-4 --kpin 5e6 \
-        --d_hat 0.005 --k_barrier 100 \
+        --d_hat 0.005 --k_barrier 100 --k_sdf 1e4 --eps_sdf 0.01 \
         --fixed_iters --max_substep_iters 10
 
 Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
@@ -132,7 +132,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (new per-iter rebuild solver), `ogc_box_pad` (BVH padding for the per-iter rebuild; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (clamp range for `R_vi = clamp(prev_disp * 1.2, min, max)`) |
-| Scene | `example` (`1`..`3`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `pile_count`, `pile_nx`, `pile_ny`, `pile_cloth_size`, `pile_first_y`, `pile_spacing`, `pile_drop_speed`, `pile_ground_nx`, `pile_ground_ny`, `pile_ground_size` |
+| Scene | `example` (`1`..`3`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `pile_count`, `pile_nx`, `pile_ny`, `pile_cloth_size`, `pile_first_y`, `pile_spacing`, `pile_drop_speed`, `pile_radius`, `pile_sphere_y`, `pile_sphere_subdiv`, `pile_visual_shrink`, `pile_ground_size`, `pile_ground_subdiv` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame` |
 
 Notes:
@@ -178,7 +178,7 @@ reader can jump to the layer they care about.
   `b(delta; d_hat)` and its derivatives, plus per-pair energy, gradient, and
   Hessian for node-triangle and segment-segment primitives.
 - `sdf_penalty_energy.h` / `sdf_penalty_energy.cpp` -- analytic SDF primitives
-  (plane, cylinder) and a soft one-sided quadratic penalty with derivatives:
+  (plane, cylinder, sphere) and a soft one-sided quadratic penalty with derivatives:
   `0.5·k·(eps - phi)^2` for `phi < eps`, with `eps = 0` recovering a hard
   quadratic at the surface. Used for static or driven colliders outside the
   IPC barrier pipeline.

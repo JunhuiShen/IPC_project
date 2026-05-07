@@ -72,17 +72,20 @@ struct IPCArgs3D : ArgParser {
     bool        tcyl_untwist     = true;   // after reaching max_turn, smoothly reverse rotation back to 0
     double      tcyl_hold_time   = 0.0;    // seconds to dwell at peak twist before reversing (untwist only)
 
-    // example 3: small cloths piling onto a corner-pinned ground sheet
-    int         pile_count       = 5;      // number of falling cloths
-    int         pile_nx          = 16;     // each falling cloth's grid subdivisions along x
-    int         pile_ny          = 16;     // each falling cloth's grid subdivisions along y
-    double      pile_cloth_size  = 0.35;   // each falling cloth's edge length (m)
-    double      pile_first_y     = 0.25;   // y of the lowest falling cloth at t=0 (m)
-    double      pile_spacing     = 0.09;   // y-gap between successive falling cloths (m)
-    double      pile_drop_speed  = 2.0;    // initial -y velocity for every falling vertex (m/s)
-    int         pile_ground_nx   = 10;     // ground sheet grid subdivisions along x
-    int         pile_ground_ny   = 10;     // ground sheet grid subdivisions along y
-    double      pile_ground_size = 1.2;    // ground sheet edge length (m); pinned at all four corners
+    // example 3: large floppy cloths piling onto a static sphere on a ground plane
+    int         pile_count          = 16;    // number of falling cloths
+    int         pile_nx             = 31;    // each falling cloth's grid subdivisions along x ((nx+1)^2 verts per cloth)
+    int         pile_ny             = 31;    // each falling cloth's grid subdivisions along y
+    double      pile_cloth_size     = 0.7;   // each falling cloth's edge length (m); larger than sphere diameter so cloth corners drape past the equator and reach the ground
+    double      pile_first_y        = 0.5;   // y of the lowest falling cloth at t=0 (m); just above sphere top
+    double      pile_spacing        = 0.02;  // y-gap between successive falling cloths (m); tight stack
+    double      pile_drop_speed     = 0.0;   // initial -y velocity for every falling vertex (m/s)
+    double      pile_radius         = 0.22;  // static sphere radius (m)
+    double      pile_sphere_y       = 0.22;  // static sphere center y (m); default = radius so it sits tangent to the ground at y=0
+    int         pile_sphere_subdiv  = 2;     // visual icosphere subdivisions (0=20 tris, 1=80, 2=320, 3=1280)
+    double      pile_visual_shrink  = 0.005; // shrink rendered sphere radius by this (m); cloth rests at phi=eps_sdf
+    double      pile_ground_size    = 2.0;   // visual ground square edge length (m); SDF half-space is infinite
+    int         pile_ground_subdiv  = 20;    // visual ground grid subdivisions per side (1 = single quad)
 
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
@@ -149,16 +152,19 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("tcyl_untwist",     tcyl_untwist,     true, "If true, after reaching tcyl_max_turn the cylinder smoothly reverses back to 0 (twist + untwist).");
         add_double("tcyl_hold_time",   tcyl_hold_time,   0.0,  "Seconds to dwell at peak twist before reversing (only with tcyl_untwist=true).");
 
-        add_int   ("pile_count",       pile_count,       5,    "Number of falling cloths in example 3");
-        add_int   ("pile_nx",          pile_nx,          16,   "Grid subdivisions along x for each falling cloth in example 3");
-        add_int   ("pile_ny",          pile_ny,          16,   "Grid subdivisions along y for each falling cloth in example 3");
-        add_double("pile_cloth_size",  pile_cloth_size,  0.35, "Edge length (m) of each falling cloth in example 3");
-        add_double("pile_first_y",     pile_first_y,     0.25, "y-position (m) of the lowest falling cloth at t=0 in example 3");
-        add_double("pile_spacing",     pile_spacing,     0.09, "y-gap (m) between successive falling cloths in example 3");
-        add_double("pile_drop_speed",  pile_drop_speed,  2.0,  "Initial downward speed (m/s) of every falling-cloth vertex in example 3");
-        add_int   ("pile_ground_nx",   pile_ground_nx,   10,   "Ground-sheet subdivisions along x in example 3");
-        add_int   ("pile_ground_ny",   pile_ground_ny,   10,   "Ground-sheet subdivisions along y in example 3");
-        add_double("pile_ground_size", pile_ground_size, 1.2,  "Ground-sheet edge length (m) in example 3 (corners pinned)");
+        add_int   ("pile_count",         pile_count,         16,    "Number of falling cloths in example 3");
+        add_int   ("pile_nx",            pile_nx,            31,    "Grid subdivisions along x for each falling cloth in example 3 ((nx+1)^2 verts per cloth)");
+        add_int   ("pile_ny",            pile_ny,            31,    "Grid subdivisions along y for each falling cloth in example 3");
+        add_double("pile_cloth_size",    pile_cloth_size,    0.7,   "Edge length (m) of each falling cloth in example 3 (larger than sphere diameter so cloth corners drape past the equator and reach the ground)");
+        add_double("pile_first_y",       pile_first_y,       0.5,   "y-position (m) of the lowest falling cloth at t=0 in example 3");
+        add_double("pile_spacing",       pile_spacing,       0.02,  "y-gap (m) between successive falling cloths in example 3");
+        add_double("pile_drop_speed",    pile_drop_speed,    0.0,   "Initial downward speed (m/s) of every falling-cloth vertex in example 3");
+        add_double("pile_radius",        pile_radius,        0.22,  "Static sphere radius (m) in example 3");
+        add_double("pile_sphere_y",      pile_sphere_y,      0.22,  "Static sphere center y (m) in example 3 (ground plane is at y=0; default = radius so the sphere sits tangent to the ground)");
+        add_int   ("pile_sphere_subdiv", pile_sphere_subdiv, 2,     "Visual icosphere subdivisions in example 3 (0=20 tris, 1=80, 2=320, 3=1280)");
+        add_double("pile_visual_shrink", pile_visual_shrink, 0.005, "Shrink rendered sphere radius by this (m) in example 3 (cloth rests at phi=eps_sdf outside the SDF surface)");
+        add_double("pile_ground_size",   pile_ground_size,   2.0,   "Visual ground square edge length (m) in example 3; SDF half-space is infinite");
+        add_int   ("pile_ground_subdiv", pile_ground_subdiv, 20,    "Visual ground grid subdivisions per side in example 3 (1 = single quad)");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
