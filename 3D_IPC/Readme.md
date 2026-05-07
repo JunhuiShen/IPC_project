@@ -91,12 +91,13 @@ Reference command for example 1 (square cloth twisted in place, 240 frames at
         --d_hat 0.005 --k_barrier 100 \
         --fixed_iters --max_substep_iters 10
 
-Reference command for example 2 (1.5 turns per cylinder, twist + untwist, 690
+Reference command for example 2 (2.0 turns per cylinder, twist + untwist, 900
 frames):
 
-    ./build/3D_sim --example 2 --num_frames 690 \
+    ./build/3D_sim --example 2 --num_frames 900 \
         --E 115 --nu 0.25 --kB 0.009 --kpin 5e6 \
         --d_hat 0.005 --k_barrier 100 \
+        --tcyl_max_turn 2.0 \
         --fixed_iters --max_substep_iters 10
 
 Reference command for example 3 (16 cloths pile on a centered sphere, 60

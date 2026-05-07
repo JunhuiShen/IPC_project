@@ -84,8 +84,8 @@ struct IPCArgs3D : ArgParser {
     double      pile_sphere_x       = 0.0;   // static sphere center x (m); negative = shift left, positive = shift right
     int         pile_sphere_subdiv  = 2;     // visual icosphere subdivisions (0=20 tris, 1=80, 2=320, 3=1280)
     double      pile_visual_shrink  = 0.005; // shrink rendered sphere radius by this (m); cloth rests at phi=eps_sdf
-    double      pile_ground_size    = 2.0;   // visual ground square edge length (m); SDF half-space is infinite
-    int         pile_ground_subdiv  = 20;    // visual ground grid subdivisions per side (1 = single quad)
+    double      pile_ground_size    = 1.0;   // visual ground square edge length (m); SDF half-space is infinite
+    int         pile_ground_subdiv  = 10;    // visual ground grid subdivisions per side (1 = single quad)
 
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";

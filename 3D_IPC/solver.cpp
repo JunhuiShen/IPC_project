@@ -539,10 +539,12 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     BroadPhase broad_phase;
     broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
 
-    //create colors
+    // Conflict graph for parallel-by-color GS: elastic and hinge and contact
     const std::vector<std::vector<int>> color_groups = greedy_color_conflict_graph(
-        union_adjacency(build_elastic_adj(ref_mesh, adj, static_cast<int>(xnew.size())),
-                        build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()))));
+        union_adjacency(
+            union_adjacency(build_elastic_adj(ref_mesh, adj, static_cast<int>(xnew.size())),
+                            build_hinge_adj(ref_mesh, static_cast<int>(xnew.size()))),
+            build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()))));
 
     SolverResult result;
     result.iterations = 0;

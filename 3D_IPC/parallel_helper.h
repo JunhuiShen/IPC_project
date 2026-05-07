@@ -57,6 +57,9 @@ struct SweptBvhCache {
 // Mesh-adjacency edges of the conflict graph. Invariant for a fixed mesh.
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int num_vertices);
 
+// Bending-hinge edges of the conflict graph
+std::vector<std::vector<int>> build_hinge_adj(const RefMesh& ref_mesh, int num_vertices);
+
 // Contact edges of the conflict graph from broad-phase NT/SS pair lists.
 // Stable between broad-phase initialize() calls (key on BroadPhase::version()).
 std::vector<std::vector<int>> build_contact_adj(const BroadPhase::Cache& bp_cache, int num_vertices);

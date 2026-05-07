@@ -182,6 +182,32 @@ std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const V
     return out;
 }
 
+std::vector<std::vector<int>> build_hinge_adj(const RefMesh& ref_mesh, int nv) {
+    std::vector<std::vector<int>> out(nv);
+    const int nh = static_cast<int>(ref_mesh.hinges.size());
+    if (nh == 0) return out;
+    for (int hi = 0; hi < nh; ++hi) {
+        const auto& h = ref_mesh.hinges[hi];
+        for (int a = 0; a < 4; ++a) {
+            const int va = h.v[a];
+            if (va < 0 || va >= nv) continue;
+            for (int b = a + 1; b < 4; ++b) {
+                const int vb = h.v[b];
+                if (vb < 0 || vb >= nv) continue;
+                out[va].push_back(vb);
+                out[vb].push_back(va);
+            }
+        }
+    }
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (int vi = 0; vi < nv; ++vi) {
+        auto& row = out[vi];
+        std::sort(row.begin(), row.end());
+        row.erase(std::unique(row.begin(), row.end()), row.end());
+    }
+    return out;
+}
+
 std::vector<std::vector<int>> build_contact_adj(const BroadPhase::Cache& bp_cache, int nv){
     const int T = ph_max_threads();
     std::vector<std::vector<std::vector<int>>> local_nbr(T, std::vector<std::vector<int>>(nv));
