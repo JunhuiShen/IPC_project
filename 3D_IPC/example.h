@@ -78,10 +78,11 @@ void update_cylinder_sdfs(SimParams& params,
                           const CylinderTwistSpec& spec,
                           double t);
 
-// Example 3: a stack of small cloths is dropped onto a static sphere; each
-// cloth briefly drapes on the sphere, slides off, and falls onto a static
-// ground plane below. Both obstacles are SDFs (sphere + plane), each with a
-// visual mesh appended to static_x / static_tris for export -- the
+// Example 3: a stack of small cloths is launched downward (initial speed
+// pile_drop_speed) onto a corner-pinned catcher cloth tilted pile_pinned_tilt
+// degrees about +z; cloths bounce off the catcher's tilted face onto a static
+// sphere and ground plane. Sphere and ground are analytic SDFs, each with a
+// visual mesh appended to static_x / static_tris for export only -- the
 // simulation only sees them through their analytic SDF.
 void build_cloth_pile_example(const IPCArgs3D& args,
                               RefMesh& ref_mesh,

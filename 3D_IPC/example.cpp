@@ -30,6 +30,19 @@ Vec3 rotate_about_y_axis(const Vec3& p, const Vec3& axis_point, double theta) {
                 axis_point.z() - s * dx + c * dz);
 }
 
+// Rotate `p` about the +z line through `axis_point` by `theta`.
+// Positive theta lifts +x toward +y; in example 3 we pass a negative theta so
+// the +x edge of the catcher drops toward the sphere.
+Vec3 rotate_about_z_axis(const Vec3& p, const Vec3& axis_point, double theta) {
+    const double c = std::cos(theta);
+    const double s = std::sin(theta);
+    const double dx = p.x() - axis_point.x();
+    const double dy = p.y() - axis_point.y();
+    return Vec3(axis_point.x() + c * dx - s * dy,
+                axis_point.y() + s * dx + c * dy,
+                p.z());
+}
+
 // Trapezoidal phase: ramp-up over t_ramp, hold at omega for t_steady, ramp-down.
 double trapezoid_theta(double s, double omega, double t_ramp, double t_steady) {
     if (s <= 0.0)        return 0.0;
@@ -362,13 +375,14 @@ void update_cylinder_visuals(std::vector<Vec3>& static_x,
 
 
 // ---------------------------------------------------------------------------
-// Example 3: cloth pile on a corner-pinned hammock + sphere + ground
+// Example 3: cloth stack -> tilted catcher -> sphere + ground
 // ---------------------------------------------------------------------------
-// A stack of cloths falls onto a square hammock cloth pinned at its four
-// corners. The hammock sags under gravity + stack load, drapes over the
-// static sphere below, and the unloaded edges fall down to the ground.
-// Sphere and ground are analytic SDFs; their visual meshes are appended
-// to static_x / static_tris for export only.
+// A stack of falling cloths is dropped (with optional initial speed
+// pile_drop_speed) onto a square catcher cloth pinned at its four corners
+// and tilted pile_pinned_tilt degrees about +z so its surface normal points
+// toward the sphere. Cloths bounce off the catcher and onto the static
+// sphere / ground plane. Sphere and ground are analytic SDFs; their visual
+// meshes are appended to static_x / static_tris for export only.
 void build_cloth_pile_example(const IPCArgs3D& args,
                               RefMesh& ref_mesh,
                               DeformedState& state,
@@ -413,7 +427,9 @@ void build_cloth_pile_example(const IPCArgs3D& args,
         for (int t : s_ref.tris) static_tris.push_back(base_v + t);
     }
 
-    // Catcher hammock: flat square cloth pinned at its four corners.
+    // Catcher cloth: square cloth pinned at its four corners. When
+    // pile_pinned_tilt != 0 the whole catcher (mesh + pin targets) is rotated
+    // about +z through its center, so the cloth is held as an inclined plane.
     if (args.pile_pinned_enable) {
         const int    pnx = std::max(1, args.pile_pinned_nx);
         const int    pny = std::max(1, args.pile_pinned_ny);
@@ -422,6 +438,18 @@ void build_cloth_pile_example(const IPCArgs3D& args,
         const int    p_base = build_square_mesh(ref_mesh, state, X, pnx, pny,
                                                 pw, pw,
                                                 Vec3(-0.5 * pw, py, -0.5 * pw));
+
+        // Negative sign: positive arg tilts the +x edge downward (toward the
+        // sphere at +pile_sphere_x), so cloths land and slide toward it.
+        const double tilt = -args.pile_pinned_tilt * kPi / 180.0;
+        if (tilt != 0.0) {
+            const Vec3 axis(0.0, py, 0.0);
+            const int n_total = static_cast<int>(state.deformed_positions.size());
+            for (int v = p_base; v < n_total; ++v) {
+                state.deformed_positions[v] =
+                    rotate_about_z_axis(state.deformed_positions[v], axis, tilt);
+            }
+        }
 
         auto pin_corner = [&](int i, int j) {
             append_pin(pins, p_base + j * (pnx + 1) + i, state.deformed_positions);

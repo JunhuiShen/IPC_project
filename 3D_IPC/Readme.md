@@ -83,11 +83,11 @@ Common invocations:
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
 
-Reference command for example 1 (square cloth twisted in place, 180 frames at
+Reference command for example 1 (square cloth twisted in place, 240 frames at
 0.5 turns/s):
 
-    ./build/3D_sim --example 1 --num_frames 180 \
-        --E 115 --nu 0.25 --kB 0.009 --kpin 1e7 --twist_rate 0.5 \
+    ./build/3D_sim --example 1 --num_frames 240 \
+        --E 115 --nu 0.25 --kB 0.009 --kpin 1e8 --twist_rate 0.5 \
         --d_hat 0.005 --k_barrier 100 \
         --fixed_iters --max_substep_iters 10
 
@@ -100,13 +100,16 @@ frames):
         --tcyl_max_turn 2.0 \
         --fixed_iters --max_substep_iters 10
 
-Reference command for example 3 (16 cloths pile on a centered sphere, 60
-frames):
+Reference command for example 3 (a stack of 4 cloths is launched downward
+onto a 45°-tilted corner-pinned catcher cloth and bounces toward a static
+sphere; 60 frames):
 
     ./build/3D_sim --example 3 --num_frames 60 \
-     --E 125 --nu 0.3 --kB 1e-4 --kpin 5e6 \
-    --d_hat 0.005 --k_barrier 100 --k_sdf 1e4 --eps_sdf 0.01 \
-    --fixed_iters --max_substep_iters 10  --pile_radius 0.18
+        --substeps 5 --max_substep_iters 40 \
+        --E 500 --nu 0.3 --kB 5e-4 --kpin 5e6 \
+        --d_hat 0.005 --k_barrier 100 --k_sdf 1e4 --eps_sdf 0.01 \
+        --pile_drop_speed 10 \
+        --fixed_iters --outdir sim_geo/ex3
 
 Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
 (`frame_0000.geo`, `frame_0001.geo`, ...). `--format obj` writes `.obj`;
@@ -133,7 +136,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (new per-iter rebuild solver), `ogc_box_pad` (BVH padding for the per-iter rebuild; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (clamp range for `R_vi = clamp(prev_disp * 1.2, min, max)`) |
-| Scene | `example` (`1`..`3`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `pile_count`, `pile_nx`, `pile_ny`, `pile_cloth_size`, `pile_first_y`, `pile_spacing`, `pile_drop_speed`, `pile_radius`, `pile_sphere_x`, `pile_sphere_subdiv`, `pile_visual_shrink`, `pile_ground_size`, `pile_ground_subdiv` |
+| Scene | `example` (`1`..`3`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `pile_count`, `pile_nx`, `pile_ny`, `pile_cloth_size`, `pile_first_y`, `pile_spacing`, `pile_drop_speed`, `pile_radius`, `pile_sphere_x`, `pile_sphere_subdiv`, `pile_visual_shrink`, `pile_ground_size`, `pile_ground_subdiv`, `pile_pinned_enable`, `pile_pinned_y`, `pile_pinned_size`, `pile_pinned_nx`, `pile_pinned_ny`, `pile_stack_x`, `pile_pinned_tilt` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame` |
 
 Notes:

@@ -72,15 +72,15 @@ struct IPCArgs3D : ArgParser {
     bool        tcyl_untwist     = true;   // after reaching max_turn, smoothly reverse rotation back to 0
     double      tcyl_hold_time   = 0.0;    // seconds to dwell at peak twist before reversing (untwist only)
 
-    // example 3: a stack of falling cloths lands on a corner-pinned square
-    // "hammock" cloth held above a static sphere + ground plane. Under gravity
-    // and the stack load the hammock sags, drapes over the sphere, and the
-    // edges fall down to the ground.
-    int         pile_count          = 6;     // number of falling cloths
+    // example 3: a stack of falling cloths is launched downward (initial speed
+    // pile_drop_speed) onto a corner-pinned catcher cloth tilted
+    // pile_pinned_tilt degrees about +z; cloths bounce off the catcher's
+    // tilted face toward a static sphere + ground plane.
+    int         pile_count          = 4;     // number of falling cloths
     int         pile_nx             = 48;    // each falling cloth's grid subdivisions along x ((nx+1)^2 verts per cloth)
     int         pile_ny             = 48;    // each falling cloth's grid subdivisions along y
-    double      pile_cloth_size     = 1.2;   // each falling cloth's edge length (m); ~60% of the catcher
-    double      pile_first_y        = 2.5;   // y of the lowest falling cloth at t=0 (m)
+    double      pile_cloth_size     = 0.7;   // each falling cloth's edge length (m); ~50% of the catcher
+    double      pile_first_y        = 2.6;   // y of the lowest falling cloth at t=0 (m)
     double      pile_spacing        = 0.18;  // y-gap between successive falling cloths (m)
     double      pile_drop_speed     = 0.0;   // initial -y velocity applied to every falling vertex (m/s)
     double      pile_radius         = 0.5;   // static sphere radius (m)
@@ -91,10 +91,11 @@ struct IPCArgs3D : ArgParser {
     int         pile_ground_subdiv  = 240;   // visual ground grid subdivisions per side (visual only)
     bool        pile_pinned_enable  = true;  // build the corner-pinned hammock catcher cloth above the sphere
     double      pile_pinned_y       = 1.6;   // y (m) of the catcher cloth's four pinned corners
-    double      pile_pinned_size    = 2.0;   // catcher cloth edge length (m)
+    double      pile_pinned_size    = 1.4;   // catcher cloth edge length (m)
     int         pile_pinned_nx      = 80;    // catcher cloth grid subdivisions along x
     int         pile_pinned_ny      = 80;    // catcher cloth grid subdivisions along y
     double      pile_stack_x        = 0.0;   // x-shift of the falling stack (m); 0 = centred over the hammock
+    double      pile_pinned_tilt    = 45.0;  // catcher cloth tilt about +z through its center (deg); +ve drops the +x edge so cloth slides toward the sphere
 
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
@@ -161,11 +162,11 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("tcyl_untwist",     tcyl_untwist,     true, "If true, after reaching tcyl_max_turn the cylinder smoothly reverses back to 0 (twist + untwist).");
         add_double("tcyl_hold_time",   tcyl_hold_time,   0.0,  "Seconds to dwell at peak twist before reversing (only with tcyl_untwist=true).");
 
-        add_int   ("pile_count",         pile_count,         6,     "Number of falling cloths in example 3");
+        add_int   ("pile_count",         pile_count,         4,     "Number of falling cloths in example 3");
         add_int   ("pile_nx",            pile_nx,            48,    "Grid subdivisions along x for each falling cloth in example 3");
         add_int   ("pile_ny",            pile_ny,            48,    "Grid subdivisions along y for each falling cloth in example 3");
-        add_double("pile_cloth_size",    pile_cloth_size,    1.2,   "Edge length (m) of each falling cloth in example 3");
-        add_double("pile_first_y",       pile_first_y,       2.5,   "y-position (m) of the lowest falling cloth at t=0 in example 3");
+        add_double("pile_cloth_size",    pile_cloth_size,    0.7,   "Edge length (m) of each falling cloth in example 3");
+        add_double("pile_first_y",       pile_first_y,       2.6,   "y-position (m) of the lowest falling cloth at t=0 in example 3");
         add_double("pile_spacing",       pile_spacing,       0.18,  "y-gap (m) between successive falling cloths in example 3");
         add_double("pile_drop_speed",    pile_drop_speed,    0.0,   "Initial downward speed (m/s) of every falling-cloth vertex in example 3");
         add_double("pile_radius",        pile_radius,        0.5,   "Static sphere radius (m) in example 3");
@@ -176,10 +177,11 @@ struct IPCArgs3D : ArgParser {
         add_int   ("pile_ground_subdiv", pile_ground_subdiv, 240,   "Visual ground grid subdivisions per side in example 3");
         add_bool  ("pile_pinned_enable", pile_pinned_enable, true,  "Build the corner-pinned hammock catcher cloth in example 3");
         add_double("pile_pinned_y",      pile_pinned_y,      1.6,   "y (m) of the catcher cloth's four pinned corners in example 3");
-        add_double("pile_pinned_size",   pile_pinned_size,   2.0,   "Edge length (m) of the catcher cloth in example 3");
+        add_double("pile_pinned_size",   pile_pinned_size,   1.4,   "Edge length (m) of the catcher cloth in example 3");
         add_int   ("pile_pinned_nx",     pile_pinned_nx,     80,    "Catcher cloth grid subdivisions along x in example 3");
         add_int   ("pile_pinned_ny",     pile_pinned_ny,     80,    "Catcher cloth grid subdivisions along y in example 3");
         add_double("pile_stack_x",       pile_stack_x,       0.0,   "x-shift (m) of the falling stack in example 3 (0 = centred over the hammock)");
+        add_double("pile_pinned_tilt",   pile_pinned_tilt,   45.0,  "Catcher cloth tilt (deg) about +z through its center in example 3; +ve drops the +x edge so cloth slides toward the sphere");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
