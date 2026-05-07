@@ -103,9 +103,9 @@ Reference command for example 3 (16 cloths pile on a centered sphere, 60
 frames):
 
     ./build/3D_sim --example 3 --num_frames 60 \
-        --E 115 --nu 0.25 --kB 1e-4 --kpin 5e6 \
-        --d_hat 0.005 --k_barrier 100 --k_sdf 1e4 --eps_sdf 0.01 \
-        --fixed_iters --max_substep_iters 10
+     --E 125 --nu 0.3 --kB 1e-4 --kpin 5e6 \
+    --d_hat 0.005 --k_barrier 100 --k_sdf 1e4 --eps_sdf 0.01 \
+    --fixed_iters --max_substep_iters 10  --pile_radius 0.18
 
 Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
 (`frame_0000.geo`, `frame_0001.geo`, ...). `--format obj` writes `.obj`;
