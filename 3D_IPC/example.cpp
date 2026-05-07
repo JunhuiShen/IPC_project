@@ -382,8 +382,9 @@ void build_cloth_pile_example(const IPCArgs3D& args,
     params.sdf_cylinders.clear();
     params.sdf_spheres.clear();
 
-    const Vec3   sphere_c(0.0, args.pile_sphere_y, 0.0);
     const double sphere_r = args.pile_radius;
+    // Sphere sits tangent to the ground (y = radius); only its x can shift.
+    const Vec3   sphere_c(args.pile_sphere_x, sphere_r, 0.0);
     const double ground_y = 0.0;
 
     // Visual ground + sphere into static_x / static_tris (export-only;

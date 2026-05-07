@@ -81,7 +81,7 @@ struct IPCArgs3D : ArgParser {
     double      pile_spacing        = 0.02;  // y-gap between successive falling cloths (m); tight stack
     double      pile_drop_speed     = 0.0;   // initial -y velocity for every falling vertex (m/s)
     double      pile_radius         = 0.22;  // static sphere radius (m)
-    double      pile_sphere_y       = 0.22;  // static sphere center y (m); default = radius so it sits tangent to the ground at y=0
+    double      pile_sphere_x       = 0.0;   // static sphere center x (m); negative = shift left, positive = shift right
     int         pile_sphere_subdiv  = 2;     // visual icosphere subdivisions (0=20 tris, 1=80, 2=320, 3=1280)
     double      pile_visual_shrink  = 0.005; // shrink rendered sphere radius by this (m); cloth rests at phi=eps_sdf
     double      pile_ground_size    = 2.0;   // visual ground square edge length (m); SDF half-space is infinite
@@ -160,7 +160,7 @@ struct IPCArgs3D : ArgParser {
         add_double("pile_spacing",       pile_spacing,       0.02,  "y-gap (m) between successive falling cloths in example 3");
         add_double("pile_drop_speed",    pile_drop_speed,    0.0,   "Initial downward speed (m/s) of every falling-cloth vertex in example 3");
         add_double("pile_radius",        pile_radius,        0.22,  "Static sphere radius (m) in example 3");
-        add_double("pile_sphere_y",      pile_sphere_y,      0.22,  "Static sphere center y (m) in example 3 (ground plane is at y=0; default = radius so the sphere sits tangent to the ground)");
+        add_double("pile_sphere_x",      pile_sphere_x,      0.0,   "Static sphere center x (m) in example 3 (negative = shift left, positive = shift right)");
         add_int   ("pile_sphere_subdiv", pile_sphere_subdiv, 2,     "Visual icosphere subdivisions in example 3 (0=20 tris, 1=80, 2=320, 3=1280)");
         add_double("pile_visual_shrink", pile_visual_shrink, 0.005, "Shrink rendered sphere radius by this (m) in example 3 (cloth rests at phi=eps_sdf outside the SDF surface)");
         add_double("pile_ground_size",   pile_ground_size,   2.0,   "Visual ground square edge length (m) in example 3; SDF half-space is infinite");
