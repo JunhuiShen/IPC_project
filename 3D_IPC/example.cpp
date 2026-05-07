@@ -362,13 +362,13 @@ void update_cylinder_visuals(std::vector<Vec3>& static_x,
 
 
 // ---------------------------------------------------------------------------
-// Example 3: cloth pile on a static sphere
+// Example 3: cloth pile on a corner-pinned hammock + sphere + ground
 // ---------------------------------------------------------------------------
-// A stack of large floppy cloths (each wider than the sphere) is dropped onto
-// a static sphere tangent to a static ground plane. Cloths drape past the
-// equator on all sides and their edges settle on the ground around the
-// sphere. Contact is through analytic SDFs (sphere + plane); the visual
-// sphere and ground meshes are appended to static_x / static_tris for export.
+// A stack of cloths falls onto a square hammock cloth pinned at its four
+// corners. The hammock sags under gravity + stack load, drapes over the
+// static sphere below, and the unloaded edges fall down to the ground.
+// Sphere and ground are analytic SDFs; their visual meshes are appended
+// to static_x / static_tris for export only.
 void build_cloth_pile_example(const IPCArgs3D& args,
                               RefMesh& ref_mesh,
                               DeformedState& state,
@@ -383,12 +383,18 @@ void build_cloth_pile_example(const IPCArgs3D& args,
     params.sdf_spheres.clear();
 
     const double sphere_r = args.pile_radius;
-    // Sphere sits tangent to the ground (y = radius); only its x can shift.
-    const Vec3   sphere_c(args.pile_sphere_x, sphere_r, 0.0);
     const double ground_y = 0.0;
+    // Sphere sits tangent to the ground (y_center = radius); only x can shift.
+    const Vec3   sphere_c(args.pile_sphere_x, sphere_r, 0.0);
 
-    // Visual ground + sphere into static_x / static_tris (export-only;
-    // simulation collisions go through the SDFs registered below).
+    // Collision SDFs. The plane is offset by eps_sdf below the visual ground
+    // so the cloth's force-free rest (phi = eps_sdf) lands exactly at y = 0.
+    params.sdf_planes.push_back(PlaneSDF{
+            Vec3(0.0, ground_y - params.eps_sdf, 0.0),
+            Vec3(0.0, 1.0, 0.0)});
+    params.sdf_spheres.push_back(SphereSDF{sphere_c, sphere_r});
+
+    // Visual ground + sphere meshes (export only; collisions use the SDFs).
     {
         RefMesh           s_ref;
         DeformedState     s_state;
@@ -397,9 +403,8 @@ void build_cloth_pile_example(const IPCArgs3D& args,
         const int    gn = std::max(1, args.pile_ground_subdiv);
         build_square_mesh(s_ref, s_state, s_X, gn, gn, gw, gw,
                           Vec3(-0.5 * gw, ground_y, -0.5 * gw));
-        // Render the sphere just inside the SDF's rest distance (cloth at
-        // phi = eps_sdf) so the visual mesh and the cloth resting position
-        // line up.
+        // Render the sphere just inside the SDF's rest distance so the visual
+        // surface coincides with where the cloth comes to rest (phi = eps_sdf).
         const double r_visual = std::max(0.001, sphere_r - args.pile_visual_shrink);
         build_sphere_mesh(s_ref, s_state, s_X, args.pile_sphere_subdiv,
                           r_visual, sphere_c);
@@ -408,26 +413,45 @@ void build_cloth_pile_example(const IPCArgs3D& args,
         for (int t : s_ref.tris) static_tris.push_back(base_v + t);
     }
 
-    // The plane SDF is offset eps_sdf below the visual ground so the cloth's
-    // force-free rest position (phi = eps_sdf) aligns with y = ground_y.
-    params.sdf_planes.push_back(PlaneSDF{
-            Vec3(0.0, ground_y - params.eps_sdf, 0.0),
-            Vec3(0.0, 1.0, 0.0)});
-    params.sdf_spheres.push_back(SphereSDF{sphere_c, sphere_r});
+    // Catcher hammock: flat square cloth pinned at its four corners.
+    if (args.pile_pinned_enable) {
+        const int    pnx = std::max(1, args.pile_pinned_nx);
+        const int    pny = std::max(1, args.pile_pinned_ny);
+        const double pw  = args.pile_pinned_size;
+        const double py  = args.pile_pinned_y;
+        const int    p_base = build_square_mesh(ref_mesh, state, X, pnx, pny,
+                                                pw, pw,
+                                                Vec3(-0.5 * pw, py, -0.5 * pw));
 
-    // Falling cloths, square in the xz plane, evenly spaced in y.
+        auto pin_corner = [&](int i, int j) {
+            append_pin(pins, p_base + j * (pnx + 1) + i, state.deformed_positions);
+        };
+        pin_corner(0,   0);
+        pin_corner(pnx, 0);
+        pin_corner(0,   pny);
+        pin_corner(pnx, pny);
+    }
+
+    // Falling cloths: identical squares in the xz plane, stacked along +y.
     const int    n     = args.pile_count;
     const int    nx    = args.pile_nx;
     const int    ny    = args.pile_ny;
     const double w     = args.pile_cloth_size;
     const double first = args.pile_first_y;
     const double dy    = args.pile_spacing;
+    const double sx    = args.pile_stack_x;
 
+    const int falling_v_begin = static_cast<int>(state.deformed_positions.size());
     for (int s = 0; s < n; ++s) {
-        const Vec3 origin(-0.5 * w, first + s * dy, -0.5 * w);
+        const Vec3 origin(sx - 0.5 * w, first + s * dy, -0.5 * w);
         build_square_mesh(ref_mesh, state, X, nx, ny, w, w, origin);
     }
 
-    state.velocities.assign(state.deformed_positions.size(),
-                            Vec3(0.0, -args.pile_drop_speed, 0.0));
+    // Catcher starts at rest; only the falling stack gets pile_drop_speed.
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+    const Vec3 v_drop(0.0, -args.pile_drop_speed, 0.0);
+    for (int v = falling_v_begin;
+         v < static_cast<int>(state.deformed_positions.size()); ++v) {
+        state.velocities[v] = v_drop;
+    }
 }
