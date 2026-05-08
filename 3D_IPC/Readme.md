@@ -73,14 +73,14 @@ Built-in example scenes (`--example N`):
 | `1` | Square cloth clamped on two edges and twisted (default) |
 | `2` | Four closed-loop cloth strips wrapping two horizontal cylinders, twisted then untwisted |
 | `3` | Cloths dropped onto a 45°-tilted corner-pinned catcher cloth; they drape over its low edge and fall onto a static sphere and ground |
-| `4` | Deformable xyzrgb dragon falls under gravity onto a static ground plane SDF |
+| `4` | Deformable xyzrgb dragon squeezed between two opposing plane SDFs (floor rising + ceiling descending) |
 
 Common invocations:
 
     ./build/3D_sim --example 1                              # twisting cloth
     ./build/3D_sim --example 2                              # two-cylinder twist
     ./build/3D_sim --example 3                              # cloth pile on sphere
-    ./build/3D_sim --example 4                              # dragon falls onto ground SDF
+    ./build/3D_sim --example 4                              # two-plate squeeze on the dragon
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
@@ -112,33 +112,18 @@ corner-pinned catcher cloth and slides off onto a static sphere and ground;
         --d_hat 0.002 --k_barrier 200 --eps_sdf 0.01 \
         --fixed_iters
 
-Reference command for example 4 (the xyzrgb dragon falls under gravity onto
-a static ground plane SDF; 240 frames). The dragon is loaded from
-`--dragon_path`, which defaults to `xyzrgb_dragon_12k.obj` -- a 12k-vertex
-decimation of the original 125k-vertex `xyzrgb_dragon_full.obj`, produced
-by `tools/decimate_obj.py`. The dragon is simulated as a fully deformable
-body with all energies enabled (corotated, bending, IPC barrier; the
-ground SDF drives the SDF penalty).
+Reference command for example 4 (the xyzrgb dragon squeezed between a
+floor that rises and a ceiling that descends, both at 0.2 m/s along y;
+120 frames). Dragon defaults to `xyzrgb_dragon_12k.obj`, the 12k-vert
+decimation produced by `tools/decimate_obj.py`:
 
-`--E` is dropped to 10 (vs example 1's 115) so the dragon is soft enough
-that per-vertex Gauss-Seidel converges fast enough to pass gravity through
-the body each substep. `--d_hat` is 0.002 (vs example 1's 0.005) because
-it must stay below 0.5 × the smallest dragon edge after scaling -- with
-the default `--dragon_scale 0.02` the 12k mesh's smallest edge is ~4.4 mm.
+    ./build/3D_sim --example 4 --num_frames 120 \
+        --dragon_squeeze_speed 0.2 \
+        --E 10 --nu 0.25 --kB 0.001 --kpin 1e8 \
+        --d_hat 0.002 --k_barrier 100 --k_sdf 1e7 --eps_sdf 0.08 \
+        --fixed_iters --max_substep_iters 10
 
-       ./build/3D_sim --example 4 --num_frames 60 \
-           --E 10 --nu 0.25 --kB 0.001 --kpin 1e8 \
-           --d_hat 0.002 --k_barrier 100 --k_sdf 1e7 --eps_sdf 0.08 \
-           --fixed_iters --max_substep_iters 10
-
-`--eps_sdf 0.08` widens the SDF soft-barrier zone, and the visual ground is
-built at `y = ground_y - eps_sdf` (so the dragon's force-free rest sits 8 cm
-above the visual surface). That hides the ~5 cm extension that the dragon's
-lowest claws / spikes naturally settle to under self-weight when E=10 makes
-the body soft -- the dragon's deepest vertex stays at `y ≈ -0.05`, well
-above the visual ground at `y = -0.08`.
-
-To regenerate the decimated dragon (or produce a different target count):
+To regenerate the decimated dragon (or pick a different target count):
 
     python3 tools/decimate_obj.py xyzrgb_dragon_full.obj xyzrgb_dragon_12k.obj --target-faces 24000
 
@@ -167,7 +152,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (new per-iter rebuild solver), `ogc_box_pad` (BVH padding for the per-iter rebuild; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (clamp range for `R_vi = clamp(prev_disp * 1.2, min, max)`) |
-| Scene | `example` (`1`..`4`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `pile_count`, `pile_nx`, `pile_ny`, `pile_cloth_size`, `pile_first_y`, `pile_spacing`, `pile_drop_speed`, `pile_radius`, `pile_sphere_x`, `pile_sphere_subdiv`, `pile_visual_shrink`, `pile_ground_size`, `pile_ground_subdiv`, `pile_pinned_y`, `pile_pinned_size`, `pile_pinned_nx`, `pile_pinned_ny`, `pile_stack_x`, `pile_pinned_tilt`, `dragon_path`, `dragon_scale`, `dragon_drop_y`, `dragon_ground_size`, `dragon_ground_subdiv` |
+| Scene | `example` (`1`..`4`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `pile_count`, `pile_nx`, `pile_ny`, `pile_cloth_size`, `pile_first_y`, `pile_spacing`, `pile_drop_speed`, `pile_radius`, `pile_sphere_x`, `pile_sphere_subdiv`, `pile_visual_shrink`, `pile_ground_size`, `pile_ground_subdiv`, `pile_pinned_y`, `pile_pinned_size`, `pile_pinned_nx`, `pile_pinned_ny`, `pile_stack_x`, `pile_pinned_tilt`, `dragon_path`, `dragon_scale`, `dragon_drop_y`, `dragon_ground_size`, `dragon_ground_subdiv`, `dragon_top_pin_count`, `dragon_floor_gap`, `dragon_floor_speed`, `dragon_floor_rise_max`, `dragon_floor_settle` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame` |
 
 Notes:

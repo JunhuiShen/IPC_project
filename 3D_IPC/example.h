@@ -93,17 +93,54 @@ void build_cloth_pile_example(const IPCArgs3D& args,
                               std::vector<Vec3>& static_x,
                               std::vector<int>&  static_tris);
 
-// Example 4: a deformable dragon loaded from --dragon_path is dropped under
-// gravity onto a ground plane SDF. The dragon participates in every energy
-// term (corotated, bending, IPC barrier). Per-triangle Dm_inverse and
-// per-hinge c_e are rebuilt from the 3D rest pose because the dragon is a
-// closed surface with no global 2D parameterization. Visual ground mesh
-// (rendered eps_sdf below the rest level) is appended to static_x/tris.
-void build_dragon_drop_example(const IPCArgs3D& args,
-                               RefMesh& ref_mesh,
-                               DeformedState& state,
-                               std::vector<Vec2>& X,
-                               std::vector<Pin>& pins,
-                               SimParams& params,
-                               std::vector<Vec3>& static_x,
-                               std::vector<int>&  static_tris);
+// Example 4: deformable dragon (loaded from --dragon_path) squeezed between
+// one or two translating plane SDFs. Gravity is disabled inside the build
+// so the scene is driven only by the moving plates. Per-triangle Dm_inverse
+// and per-hinge c_e are rebuilt from the 3D rest pose because the dragon
+// is a closed surface with no global 2D parameterization.
+//
+// build_dragon_squeeze_example contains three variants behind an #if chain:
+//   1. floor rises into a top-pinned dragon
+//   2. ceiling descends onto a bottom-pinned dragon
+//   3. floor + ceiling press toward each other, no pins (active)
+// Each plate has its own rise_velocity (sign sets direction); rise_max and
+// t_settle are shared so plates stay in lock-step.
+struct DragonSqueezePlate {
+    int    plane_index = -1;            // params.sdf_planes index
+    Vec3   plane_point_rest{Vec3::Zero()};
+    Vec3   rise_velocity{Vec3::Zero()}; // m/s; sign sets translation direction
+
+    // Visual mesh slice in static_x. visual_v_rest stores the pre-motion
+    // positions so update_dragon_squeeze_visual can re-translate from rest
+    // each frame (avoids drift from accumulating per-frame deltas).
+    int    visual_v_begin = 0;
+    int    visual_v_end   = 0;
+    std::vector<Vec3> visual_v_rest;
+};
+
+struct DragonSqueezeSpec {
+    std::vector<DragonSqueezePlate> plates;
+    double rise_max = 0.0;  // cap on |displacement| applied to every plate (m); 0 = no cap
+    double t_settle = 0.0;  // seconds at the start with no motion (shared across plates)
+};
+
+void build_dragon_squeeze_example(const IPCArgs3D& args,
+                                  RefMesh& ref_mesh,
+                                  DeformedState& state,
+                                  std::vector<Vec2>& X,
+                                  std::vector<Pin>& pins,
+                                  SimParams& params,
+                                  std::vector<Vec3>& static_x,
+                                  std::vector<int>&  static_tris,
+                                  DragonSqueezeSpec& spec);
+
+// Per-substep: snaps each plate's SDF point to plane_point_rest plus the
+// clamped translation. Per-substep (not per-frame) so the dragon never sees
+// a stale plane mid-substep -- same lesson as example 2's cylinders.
+void update_dragon_squeeze_sdf(SimParams& params,
+                               const DragonSqueezeSpec& spec, double t);
+
+// Per-frame: re-translates each plate's visual vertices from visual_v_rest
+// for the export.
+void update_dragon_squeeze_visual(std::vector<Vec3>& static_x,
+                                  const DragonSqueezeSpec& spec, double t);

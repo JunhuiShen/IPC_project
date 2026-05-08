@@ -28,8 +28,9 @@ int main(int argc, char** argv) {
     DeformedState state;
     std::vector<Vec2> X;
     std::vector<Pin> pins;
-    TwistSpec         twist_spec;
-    CylinderTwistSpec cyl_twist_spec;
+    TwistSpec          twist_spec;
+    CylinderTwistSpec  cyl_twist_spec;
+    DragonSqueezeSpec  squeeze_spec;
 
     std::vector<Vec3> static_x;
     std::vector<int>  static_tris;
@@ -37,7 +38,7 @@ int main(int argc, char** argv) {
     if      (args.example == 1) build_twisting_cloth_example(args, ref_mesh, state, X, pins, twist_spec);
     else if (args.example == 2) build_two_cylinder_twist_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, cyl_twist_spec);
     else if (args.example == 3) build_cloth_pile_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
-    else if (args.example == 4) build_dragon_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
+    else if (args.example == 4) build_dragon_squeeze_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, squeeze_spec);
     else {
         std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4.\n";
         return 1;
@@ -55,6 +56,13 @@ int main(int argc, char** argv) {
         pin_updater = [&cyl_twist_spec, &params](std::vector<Pin>& p, double t) {
             update_cylinder_twist_pins(p, cyl_twist_spec, t);
             update_cylinder_sdfs(params, cyl_twist_spec, t);
+        };
+    } else if (args.example == 4) {
+        // Dragon pins are static; the closure exists only to advance the
+        // rising-floor SDF every substep (per-frame sync would let the dragon
+        // collide with a stale plane position mid-substep).
+        pin_updater = [&squeeze_spec, &params](std::vector<Pin>&, double t) {
+            update_dragon_squeeze_sdf(params, squeeze_spec, t);
         };
     }
 
@@ -117,9 +125,10 @@ int main(int argc, char** argv) {
         return oss.str();
     };
 
-    // Example 2's cylinders rotate over time, so the collider mesh has to be
-    // re-exported per frame. Other examples keep the one-time "static_colliders".
-    const bool collider_is_dynamic = (args.example == 2);
+    // Examples whose visible collider moves over time get a per-frame export
+    // (example 2's rotating cylinders, example 4's rising floor). Others keep
+    // the one-time "static_colliders".
+    const bool collider_is_dynamic = (args.example == 2 || args.example == 4);
 
     if (restart_frame < 0) {
         if (fs::exists(outdir)) fs::remove_all(outdir);
@@ -187,7 +196,8 @@ int main(int argc, char** argv) {
             // SDF was already advanced per substep by pin_updater; the visual
             // mesh only needs a per-frame refresh for the export.
             const double t_frame = frame_index / params.fps;
-            update_cylinder_visuals(static_x, cyl_twist_spec, t_frame);
+            if      (args.example == 2) update_cylinder_visuals      (static_x, cyl_twist_spec, t_frame);
+            else if (args.example == 4) update_dragon_squeeze_visual (static_x, squeeze_spec,   t_frame);
             write_collider_mesh(frame_collider_path(frame_index));
         }
 

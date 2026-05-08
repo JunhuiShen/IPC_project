@@ -98,16 +98,21 @@ struct IPCArgs3D : ArgParser {
     double      pile_stack_x        = 0.0;   // x-shift of the falling stack (m); 0 = centred over the catcher
     double      pile_pinned_tilt    = 45.0;  // catcher cloth tilt about +z through its center (deg); +ve drops the +x edge so cloth slides toward the sphere
 
-    // example 4: a deformable dragon mesh is dropped onto a ground plane SDF
-    // (with a visual ground mesh exported for rendering). Dragon participates
-    // in every energy term (corotated, bending, IPC barrier) -- per-tri
-    // Dm_inverse and per-hinge c_e are rebuilt from the 3D rest pose since
-    // the dragon is a closed surface with no global 2D parameterization.
-    std::string dragon_path         = "xyzrgb_dragon_12k.obj"; // OBJ path (relative or absolute); the 12k-vert decimated mesh produced by tools/decimate_obj.py
-    double      dragon_scale        = 0.02;  // uniform scale applied to OBJ vertices (m / OBJ unit)
-    double      dragon_drop_y       = 1.5;   // y (m) of the dragon's lowest vertex at t=0
-    double      dragon_ground_size  = 9.0;   // visual ground square edge length (m); SDF half-space is infinite
-    int         dragon_ground_subdiv = 240;  // visual ground grid subdivisions per side
+    // example 4: deformable dragon held in place (top vertices pinned, gravity
+    // off) while a ground plane SDF rises into it from below, squeezing the
+    // body up against the pinned crown. Per-tri Dm_inverse and per-hinge c_e
+    // are rebuilt from the 3D rest pose since the dragon is a closed surface
+    // with no global 2D parameterization.
+    std::string dragon_path           = "xyzrgb_dragon_12k.obj"; // OBJ path; the 12k-vert decimated mesh produced by tools/decimate_obj.py
+    double      dragon_scale          = 0.02;   // uniform scale applied to OBJ vertices (m / OBJ unit)
+    double      dragon_drop_y         = 1.5;    // y (m) of the dragon's lowest vertex at t=0 (its resting altitude)
+    double      dragon_ground_size    = 5.0;    // visual ground square edge length (m); SDF half-space is infinite. Sized to just cover the dragon's xz footprint under heavy squeeze (~4.4 m wide at the maximum-compression frame of the both-ends variant)
+    int         dragon_ground_subdiv  = 240;    // visual ground grid subdivisions per side
+    int         dragon_anchor_pin_count = 120;  // number of dragon vertices to pin (selected from the end opposite the squeeze direction)
+    double      dragon_squeeze_gap      = 0.05; // initial gap (m) between dragon's nearest extreme vertex and the moving SDF's force-free rest
+    double      dragon_squeeze_speed    = 0.15; // |velocity| of the moving SDF (m/s); slow enough that 60-90 frame runs stay below the dragon's elastic-yield ceiling and never see the cap
+    double      dragon_squeeze_max      = 1.8;  // safety cap on |total displacement| (m); ~dragon height, so unreachable for normal demo lengths but prevents the SDF from sailing off through the body if --num_frames is cranked to many hundreds. 0 = no motion
+    double      dragon_squeeze_settle   = 0.0;  // seconds to wait before the SDF starts moving (0 = start at t=0)
 
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
@@ -194,11 +199,16 @@ struct IPCArgs3D : ArgParser {
         add_double("pile_stack_x",       pile_stack_x,       0.0,   "x-shift (m) of the falling stack in example 3 (0 = centred over the catcher)");
         add_double("pile_pinned_tilt",   pile_pinned_tilt,   45.0,  "Catcher cloth tilt (deg) about +z through its center in example 3; +ve drops the +x edge so cloth slides toward the sphere");
 
-        add_string("dragon_path",         dragon_path,         "xyzrgb_dragon_12k.obj", "Path to the dragon OBJ file for example 4 (relative paths are resolved against the working directory). Default points to the 12k-vert decimated mesh from tools/decimate_obj.py; pass xyzrgb_dragon_full.obj to use the original 125k-vert mesh");
-        add_double("dragon_scale",        dragon_scale,        0.02,  "Uniform scale applied to dragon OBJ vertices in example 4 (m per OBJ unit). Smaller values give a smaller dragon (and smaller min-edge -- d_hat must stay below 0.5 * min edge)");
-        add_double("dragon_drop_y",       dragon_drop_y,       1.5,   "y-position (m) of the dragon's lowest vertex at t=0 in example 4");
-        add_double("dragon_ground_size",  dragon_ground_size,  9.0,   "Visual ground square edge length (m) in example 4; SDF half-space is infinite");
-        add_int   ("dragon_ground_subdiv",dragon_ground_subdiv,240,   "Visual ground grid subdivisions per side in example 4");
+        add_string("dragon_path",            dragon_path,           "xyzrgb_dragon_12k.obj", "Path to the dragon OBJ file for example 4 (relative paths are resolved against the working directory). Default points to the 12k-vert decimated mesh from tools/decimate_obj.py; pass xyzrgb_dragon_full.obj to use the original 125k-vert mesh");
+        add_double("dragon_scale",           dragon_scale,           0.02, "Uniform scale applied to dragon OBJ vertices in example 4 (m per OBJ unit). Smaller values give a smaller dragon (and smaller min-edge -- d_hat must stay below 0.5 * min edge)");
+        add_double("dragon_drop_y",            dragon_drop_y,            1.5,  "y-position (m) of the dragon's lowest vertex at t=0 in example 4 (its resting altitude)");
+        add_double("dragon_ground_size",       dragon_ground_size,       5.0,  "Visual ground square edge length (m) in example 4; SDF half-space is infinite. Sized to just cover the dragon's xz footprint under heavy squeeze");
+        add_int   ("dragon_ground_subdiv",     dragon_ground_subdiv,     240,  "Visual ground grid subdivisions per side in example 4");
+        add_int   ("dragon_anchor_pin_count",  dragon_anchor_pin_count,  120,  "Number of dragon vertices to pin in place in example 4 (anchors the squeeze; selected from the end opposite the squeeze direction)");
+        add_double("dragon_squeeze_gap",       dragon_squeeze_gap,       0.05, "Initial gap (m) between dragon's nearest extreme vertex and the moving SDF's force-free rest in example 4");
+        add_double("dragon_squeeze_speed",     dragon_squeeze_speed,     0.15, "|velocity| of the moving SDF in example 4 (m/s); slow enough that 60-90 frame runs stay below the dragon's elastic-yield ceiling and never see the cap");
+        add_double("dragon_squeeze_max",       dragon_squeeze_max,       1.8,  "Safety cap on |total displacement| of the moving SDF in example 4 (m); ~dragon height, so unreachable for normal demo lengths but prevents the SDF from sailing off through the body if --num_frames is cranked to many hundreds. 0 disables the motion");
+        add_double("dragon_squeeze_settle",    dragon_squeeze_settle,    0.0,  "Seconds to wait at the start of example 4 before the SDF begins moving (0 = start at t=0)");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");

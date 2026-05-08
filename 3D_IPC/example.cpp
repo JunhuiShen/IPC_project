@@ -1,6 +1,7 @@
 #include "example.h"
 #include "make_shape.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -487,57 +488,31 @@ void build_cloth_pile_example(const IPCArgs3D& args,
 
 
 // ---------------------------------------------------------------------------
-// Example 4: deformable dragon -> ground plane SDF
+// Example 4: dragon press -- one or two translating plates squeeze the dragon
 // ---------------------------------------------------------------------------
-// The xyzrgb dragon (loaded from --dragon_path, defaults to the 12k-vert
-// decimation produced by tools/decimate_obj.py) is dropped under gravity
-// onto a ground plane SDF. Per-triangle Dm_inverse and per-hinge c_e are
-// rebuilt from the 3D rest pose: the dragon is a closed surface with no
-// global 2D parameterization, so the OBJ loader's xz-projection X collapses
-// triangles on near-vertical surfaces in 2D. bar_theta is already correct
-// because build_hinges samples it from the 3D rest positions, not from X.
-//
-// The visual ground is rendered eps_sdf below the dragon's force-free rest
-// level (rather than coincident with it). That hides the few-cm sag that
-// the dragon's lowest spikes / claws settle to under self-weight when the
-// soft SDF penalty + node-box-clamped per-vertex Gauss-Seidel can't fully
-// push them back to the SDF surface -- the visible result is a clean dragon
-// resting on visible ground with no through-ground penetration.
-void build_dragon_drop_example(const IPCArgs3D& args,
-                               RefMesh& ref_mesh,
-                               DeformedState& state,
-                               std::vector<Vec2>& X,
-                               std::vector<Pin>& pins,
-                               SimParams& params,
-                               std::vector<Vec3>& static_x,
-                               std::vector<int>&  static_tris) {
+// Defaults to xyzrgb_dragon_12k.obj (12k-vert decimation by
+// tools/decimate_obj.py). Gravity is forced to zero so motion comes only
+// from the moving plates. Per-triangle Dm_inverse and per-hinge c_e are
+// rebuilt from the 3D rest pose because the dragon is a closed surface
+// (the OBJ loader's xz-projection X collapses near-vertical triangles).
+// Each plate's visual mesh sits at the SDF surface, eps_sdf from the
+// dragon's force-free rest level. Three variants live behind the #if
+// chain below; pick by flipping which block is enabled.
+void build_dragon_squeeze_example(const IPCArgs3D& args,
+                                  RefMesh& ref_mesh,
+                                  DeformedState& state,
+                                  std::vector<Vec2>& X,
+                                  std::vector<Pin>& pins,
+                                  SimParams& params,
+                                  std::vector<Vec3>& static_x,
+                                  std::vector<int>&  static_tris,
+                                  DragonSqueezeSpec& spec) {
     clear_model(ref_mesh, state, X, pins);
     params.sdf_planes.clear();
     params.sdf_cylinders.clear();
     params.sdf_spheres.clear();
 
-    const double ground_y       = 0.0;
-    const double visual_ground_y = ground_y - params.eps_sdf;
-
-    // SDF surface at visual_ground_y; force-free rest (phi = eps_sdf) lands
-    // at ground_y, eps_sdf above the visible ground (see header comment).
-    params.sdf_planes.push_back(PlaneSDF{
-        Vec3(0.0, visual_ground_y, 0.0),
-        Vec3(0.0, 1.0, 0.0)
-    });
-
-    {
-        RefMesh           s_ref;
-        DeformedState     s_state;
-        std::vector<Vec2> s_X;
-        const double gw = args.dragon_ground_size;
-        const int    gn = std::max(1, args.dragon_ground_subdiv);
-        build_square_mesh(s_ref, s_state, s_X, gn, gn, gw, gw,
-                          Vec3(-0.5 * gw, visual_ground_y, -0.5 * gw));
-        const int base_v = static_cast<int>(static_x.size());
-        for (const Vec3& p : s_state.deformed_positions) static_x.push_back(p);
-        for (int t : s_ref.tris) static_tris.push_back(base_v + t);
-    }
+    params.gravity = Vec3::Zero();
 
     const int dragon_v_begin = static_cast<int>(state.deformed_positions.size());
     const int dragon_t_begin = num_tris(ref_mesh);
@@ -548,8 +523,8 @@ void build_dragon_drop_example(const IPCArgs3D& args,
     const int dragon_v_end = static_cast<int>(state.deformed_positions.size());
     const int dragon_t_end = num_tris(ref_mesh);
 
-    // Re-center the loaded dragon so its AABB sits at x=z=0 and its lowest
-    // vertex starts at dragon_drop_y.
+    // Translate the loaded dragon so its AABB is centered at x=z=0 and its
+    // lowest vertex sits at dragon_drop_y.
     Vec3 lo( std::numeric_limits<double>::max(),
              std::numeric_limits<double>::max(),
              std::numeric_limits<double>::max());
@@ -568,11 +543,133 @@ void build_dragon_drop_example(const IPCArgs3D& args,
     for (int v = dragon_v_begin; v < dragon_v_end; ++v) {
         state.deformed_positions[v] += shift;
     }
+    const double dragon_y_lo = lo.y() + shift.y();
+    const double dragon_y_hi = hi.y() + shift.y();
 
     rebuild_triangle_rest_isometric(ref_mesh, state.deformed_positions,
                                     dragon_t_begin, dragon_t_end);
     rebuild_hinge_c_e_3d(ref_mesh, state.deformed_positions,
                          dragon_v_begin, dragon_v_end);
 
+    std::vector<std::pair<double, int>> by_y;
+    by_y.reserve(dragon_v_end - dragon_v_begin);
+    for (int v = dragon_v_begin; v < dragon_v_end; ++v) {
+        by_y.emplace_back(state.deformed_positions[v].y(), v);
+    }
+    const int n_pin = std::clamp(args.dragon_anchor_pin_count, 1,
+                                 static_cast<int>(by_y.size()));
+
+    const double gw    = args.dragon_ground_size;
+    const int    gn    = std::max(1, args.dragon_ground_subdiv);
+    const double speed = std::abs(args.dragon_squeeze_speed);
+
+    spec = DragonSqueezeSpec{};
+    spec.rise_max = std::max(0.0, args.dragon_squeeze_max);
+    spec.t_settle = std::max(0.0, args.dragon_squeeze_settle);
+
+    // Append one moving plate (SDF + visual mesh) and record the indexing
+    // the spec needs to translate it later.
+    auto add_plate = [&](double sdf_y, const Vec3& normal, const Vec3& vel) {
+        DragonSqueezePlate p;
+        p.plane_index = static_cast<int>(params.sdf_planes.size());
+        params.sdf_planes.push_back(PlaneSDF{Vec3(0.0, sdf_y, 0.0), normal});
+        p.plane_point_rest = params.sdf_planes.back().point;
+        p.rise_velocity    = vel;
+
+        p.visual_v_begin = static_cast<int>(static_x.size());
+        {
+            RefMesh           s_ref;
+            DeformedState     s_state;
+            std::vector<Vec2> s_X;
+            build_square_mesh(s_ref, s_state, s_X, gn, gn, gw, gw,
+                              Vec3(-0.5 * gw, sdf_y, -0.5 * gw));
+            const int base_v = static_cast<int>(static_x.size());
+            for (const Vec3& q : s_state.deformed_positions) static_x.push_back(q);
+            for (int t : s_ref.tris) static_tris.push_back(base_v + t);
+        }
+        p.visual_v_end = static_cast<int>(static_x.size());
+        p.visual_v_rest.assign(static_x.begin() + p.visual_v_begin,
+                               static_x.begin() + p.visual_v_end);
+        spec.plates.push_back(std::move(p));
+    };
+
+#if 0
+    // === BOTTOM-RISE: floor rises into a top-pinned dragon ====================
+    // Plane normal +y; force-free rest at phi=eps_sdf is eps_sdf ABOVE the
+    // SDF surface, so the visual floor sits the same eps_sdf below the
+    // dragon's resting bottom.
+    std::sort(by_y.begin(), by_y.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+    for (int i = 0; i < n_pin; ++i) {
+        append_pin(pins, by_y[i].second, state.deformed_positions);
+    }
+    add_plate(dragon_y_lo - args.dragon_squeeze_gap - params.eps_sdf,
+              Vec3(0.0,  1.0, 0.0),
+              Vec3(0.0,  speed, 0.0));
+
+#elif 0
+    // === TOP-DESCENT: ceiling descends onto a bottom-pinned dragon ============
+    // Plane normal -y so phi(x) = point.y - x.y; force-free rest at
+    // phi=eps_sdf is eps_sdf BELOW the SDF surface (mirror of the floor
+    // case), which puts the visual ceiling at the right wall position.
+    std::sort(by_y.begin(), by_y.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (int i = 0; i < n_pin; ++i) {
+        append_pin(pins, by_y[i].second, state.deformed_positions);
+    }
+    add_plate(dragon_y_hi + args.dragon_squeeze_gap + params.eps_sdf,
+              Vec3(0.0, -1.0, 0.0),
+              Vec3(0.0, -speed, 0.0));
+
+#else
+    // === BOTH-ENDS (active): floor + ceiling press toward the middle ==========
+    // No anchor pins -- the two opposing plates' equal-and-opposite forces
+    // cancel at the COM by symmetry, so the dragon stays centered.
+    // dragon_anchor_pin_count is unused here.
+    (void)n_pin;
+    add_plate(dragon_y_lo - args.dragon_squeeze_gap - params.eps_sdf,
+              Vec3(0.0,  1.0, 0.0),
+              Vec3(0.0,  speed, 0.0));
+    add_plate(dragon_y_hi + args.dragon_squeeze_gap + params.eps_sdf,
+              Vec3(0.0, -1.0, 0.0),
+              Vec3(0.0, -speed, 0.0));
+#endif
+
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+}
+
+namespace {
+// |rise_velocity * s| capped at rise_max (rise_max==0 disables the cap).
+// Direction stays along rise_velocity even when capped.
+Vec3 dragon_squeeze_displacement(const DragonSqueezePlate& p,
+                                 double s, double rise_max) {
+    Vec3 d = p.rise_velocity * s;
+    if (rise_max > 0.0) {
+        const double mag = d.norm();
+        if (mag > rise_max) d *= (rise_max / mag);
+    }
+    return d;
+}
+}
+
+void update_dragon_squeeze_sdf(SimParams& params,
+                               const DragonSqueezeSpec& spec, double t) {
+    const double s = std::max(0.0, t - spec.t_settle);
+    for (const DragonSqueezePlate& p : spec.plates) {
+        if (p.plane_index < 0 ||
+            p.plane_index >= static_cast<int>(params.sdf_planes.size())) continue;
+        params.sdf_planes[p.plane_index].point =
+            p.plane_point_rest + dragon_squeeze_displacement(p, s, spec.rise_max);
+    }
+}
+
+void update_dragon_squeeze_visual(std::vector<Vec3>& static_x,
+                                  const DragonSqueezeSpec& spec, double t) {
+    const double s = std::max(0.0, t - spec.t_settle);
+    for (const DragonSqueezePlate& p : spec.plates) {
+        const Vec3 d = dragon_squeeze_displacement(p, s, spec.rise_max);
+        for (int i = p.visual_v_begin; i < p.visual_v_end; ++i) {
+            static_x[i] = p.visual_v_rest[i - p.visual_v_begin] + d;
+        }
+    }
 }
