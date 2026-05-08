@@ -430,7 +430,7 @@ void build_cloth_pile_example(const IPCArgs3D& args,
     // Catcher cloth: square cloth pinned at its four corners. When
     // pile_pinned_tilt != 0 the whole catcher (mesh + pin targets) is rotated
     // about +z through its center, so the cloth is held as an inclined plane.
-    if (args.pile_pinned_enable) {
+    {
         const int    pnx = std::max(1, args.pile_pinned_nx);
         const int    pny = std::max(1, args.pile_pinned_ny);
         const double pw  = args.pile_pinned_size;

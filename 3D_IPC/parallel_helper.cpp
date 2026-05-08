@@ -162,7 +162,7 @@ void build_green_boxes(const RedBoxes& red_boxes, double d_hat, GreenBoxes& gree
     }
 }
 
-std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int nv){
+std::vector<std::vector<int>> build_corotated_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int nv){
     std::vector<std::vector<int>> out(nv);
     #pragma omp parallel for schedule(static)
     for (int vi = 0; vi < nv; ++vi) {
@@ -182,7 +182,7 @@ std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const V
     return out;
 }
 
-std::vector<std::vector<int>> build_hinge_adj(const RefMesh& ref_mesh, int nv) {
+std::vector<std::vector<int>> build_bending_adj(const RefMesh& ref_mesh, int nv) {
     std::vector<std::vector<int>> out(nv);
     const int nh = static_cast<int>(ref_mesh.hinges.size());
     if (nh == 0) return out;
