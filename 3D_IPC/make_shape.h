@@ -31,6 +31,31 @@ int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec
 // on sphere triangles is never evaluated because their vertices are all pinned).
 int build_sphere_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int subdiv, double radius, const Vec3& center);
 
+// Loads vertices and triangle faces from a Wavefront OBJ. n-gon faces are
+// fan-triangulated; orphan vertices (unused by any face) are dropped to keep
+// adjacency-by-vertex queries total. Each vertex is uniformly scaled by
+// `scale`, then translated by `origin`. `X` receives an xz-projection
+// placeholder -- for closed meshes the caller must override per-triangle
+// `Dm_inverse` / `area` and per-hinge `c_e` via the rebuild_* helpers below
+// (the xz projection collapses near-vertical triangles in 2D).
+int load_obj_mesh(const std::string& path, RefMesh& ref_mesh, DeformedState& state,
+                  std::vector<Vec2>& X, double scale, const Vec3& origin);
+
+// Replaces `ref_mesh.Dm_inverse[t]` and `ref_mesh.area[t]` in [t_begin, t_end)
+// with an isometric 2D flattening of each triangle's 3D rest shape, so the
+// corotated F is identity at rest regardless of the global 2D parameterization
+// used for X.
+void rebuild_triangle_rest_isometric(RefMesh& ref_mesh,
+                                     const std::vector<Vec3>& x_rest,
+                                     int t_begin, int t_end);
+
+// Replaces `c_e` for hinges whose 4 vertices all lie in [v_begin, v_end) with
+// |edge|^2 / (A_A + A_B) measured on the 3D rest shape. Same use case as
+// rebuild_triangle_rest_isometric.
+void rebuild_hinge_c_e_3d(RefMesh& ref_mesh,
+                          const std::vector<Vec3>& x_rest,
+                          int v_begin, int v_end);
+
 // Maps each vertex to {triangle_index, local_node_index} pairs.
 // The local_node_index (0,1,2) is stored to avoid searching at call sites.
 VertexTriangleMap build_incident_triangle_map(const std::vector<int>& indices);

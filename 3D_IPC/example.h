@@ -92,3 +92,18 @@ void build_cloth_pile_example(const IPCArgs3D& args,
                               SimParams& params,
                               std::vector<Vec3>& static_x,
                               std::vector<int>&  static_tris);
+
+// Example 4: a deformable dragon loaded from --dragon_path is dropped under
+// gravity onto a ground plane SDF. The dragon participates in every energy
+// term (corotated, bending, IPC barrier). Per-triangle Dm_inverse and
+// per-hinge c_e are rebuilt from the 3D rest pose because the dragon is a
+// closed surface with no global 2D parameterization. Visual ground mesh
+// (rendered eps_sdf below the rest level) is appended to static_x/tris.
+void build_dragon_drop_example(const IPCArgs3D& args,
+                               RefMesh& ref_mesh,
+                               DeformedState& state,
+                               std::vector<Vec2>& X,
+                               std::vector<Pin>& pins,
+                               SimParams& params,
+                               std::vector<Vec3>& static_x,
+                               std::vector<int>&  static_tris);

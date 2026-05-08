@@ -2,7 +2,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <fstream>
 #include <map>
+#include <sstream>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -277,6 +281,154 @@ int build_sphere_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
     ref_mesh.initialize(X, state.deformed_positions);
 
     return base;
+}
+
+int load_obj_mesh(const std::string& path, RefMesh& ref_mesh, DeformedState& state,
+                  std::vector<Vec2>& X, double scale, const Vec3& origin) {
+    std::ifstream in(path);
+    if (!in) {
+        throw std::runtime_error("load_obj_mesh: cannot open '" + path + "'");
+    }
+
+    const int base = static_cast<int>(state.deformed_positions.size());
+
+    std::vector<Vec3> raw_verts;
+    raw_verts.reserve(1 << 16);
+    std::vector<std::array<int, 3>> raw_tris;
+    raw_tris.reserve(1 << 16);
+
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.size() < 2) continue;
+        if (line[0] == '#') continue;
+        std::istringstream iss(line);
+        std::string tag;
+        iss >> tag;
+        if (tag == "v") {
+            double x, y, z;
+            if (iss >> x >> y >> z) raw_verts.emplace_back(x, y, z);
+        } else if (tag == "f") {
+            std::vector<int> idx;
+            idx.reserve(4);
+            std::string tok;
+            while (iss >> tok) {
+                // OBJ corners may be v / v/vt / v/vt/vn / v//vn -- take the
+                // leading vertex index.
+                const std::size_t slash = tok.find('/');
+                const std::string vstr = (slash == std::string::npos) ? tok : tok.substr(0, slash);
+                if (vstr.empty()) continue;
+                int v = std::stoi(vstr);
+                // Negative indices are relative to the current vertex count.
+                if (v < 0) v = static_cast<int>(raw_verts.size()) + 1 + v;
+                idx.push_back(v - 1);
+            }
+            for (int i = 1; i + 1 < static_cast<int>(idx.size()); ++i) {
+                raw_tris.push_back({idx[0], idx[i], idx[i + 1]});
+            }
+        }
+    }
+
+    // Drop orphan vertices: simulation.cpp's residual loop calls adj.at(vi)
+    // for every vertex in deformed_positions, which throws for any vertex
+    // unreferenced by ref_mesh.tris.
+    std::vector<char> is_used(raw_verts.size(), 0);
+    for (const auto& t : raw_tris) {
+        if (t[0] >= 0 && t[0] < (int)raw_verts.size()) is_used[t[0]] = 1;
+        if (t[1] >= 0 && t[1] < (int)raw_verts.size()) is_used[t[1]] = 1;
+        if (t[2] >= 0 && t[2] < (int)raw_verts.size()) is_used[t[2]] = 1;
+    }
+    std::vector<int> remap(raw_verts.size(), -1);
+    int kept = 0;
+    for (std::size_t i = 0; i < raw_verts.size(); ++i) {
+        if (is_used[i]) remap[i] = kept++;
+    }
+
+    state.deformed_positions.reserve(state.deformed_positions.size() + kept);
+    X.reserve(X.size() + kept);
+    for (std::size_t i = 0; i < raw_verts.size(); ++i) {
+        if (!is_used[i]) continue;
+        const Vec3 p = scale * raw_verts[i] + origin;
+        state.deformed_positions.push_back(p);
+        X.push_back(Vec2(p.x(), p.z()));
+    }
+
+    ref_mesh.tris.reserve(ref_mesh.tris.size() + raw_tris.size() * 3);
+    for (const auto& t : raw_tris) {
+        ref_mesh.tris.push_back(base + remap[t[0]]);
+        ref_mesh.tris.push_back(base + remap[t[1]]);
+        ref_mesh.tris.push_back(base + remap[t[2]]);
+    }
+
+    ref_mesh.initialize(X, state.deformed_positions);
+
+    return base;
+}
+
+void rebuild_triangle_rest_isometric(RefMesh& ref_mesh,
+                                     const std::vector<Vec3>& x_rest,
+                                     int t_begin, int t_end) {
+    const int nt = num_tris(ref_mesh);
+    if (t_begin < 0 || t_end > nt || t_begin >= t_end) return;
+
+    // Lay each rest triangle flat in 2D with X0=(0,0), X1 along +x at the
+    // true 3D edge length, X2 placed so |X2-X0| / |X2-X1| match their 3D
+    // counterparts. All three rest edge lengths are preserved -> corotated F
+    // is identity at the rest pose. Degenerate triangles fall back to area=0
+    // and Dm_inverse=I so they contribute nothing to the elastic gradient
+    // (corotated_node_gradient/Hessian both scale linearly in ref_area).
+    for (int t = t_begin; t < t_end; ++t) {
+        const Vec3& p0 = x_rest[ref_mesh.tris[3 * t + 0]];
+        const Vec3& p1 = x_rest[ref_mesh.tris[3 * t + 1]];
+        const Vec3& p2 = x_rest[ref_mesh.tris[3 * t + 2]];
+
+        const Vec3   e1     = p1 - p0;
+        const double e1_len = e1.norm();
+        if (e1_len <= 0.0) {
+            ref_mesh.area[t]       = 0.0;
+            ref_mesh.Dm_inverse[t] = Mat22::Identity();
+            continue;
+        }
+        const Vec3   e2          = p2 - p0;
+        const Vec3   e1_unit     = e1 / e1_len;
+        const double dot         = e2.dot(e1_unit);
+        const double e2_perp_len = (e2 - dot * e1_unit).norm();
+
+        Mat22 Dm;
+        Dm.col(0) = Vec2(e1_len, 0.0);
+        Dm.col(1) = Vec2(dot,    e2_perp_len);
+
+        const double det = Dm.determinant();
+        if (det == 0.0) {
+            ref_mesh.area[t]       = 0.0;
+            ref_mesh.Dm_inverse[t] = Mat22::Identity();
+            continue;
+        }
+        ref_mesh.area[t]       = 0.5 * std::abs(det);
+        ref_mesh.Dm_inverse[t] = Dm.inverse();
+    }
+}
+
+void rebuild_hinge_c_e_3d(RefMesh& ref_mesh,
+                          const std::vector<Vec3>& x_rest,
+                          int v_begin, int v_end) {
+    for (Hinge& h : ref_mesh.hinges) {
+        bool all_in_range = true;
+        for (int k = 0; k < 4; ++k) {
+            if (h.v[k] < v_begin || h.v[k] >= v_end) { all_in_range = false; break; }
+        }
+        if (!all_in_range) continue;
+
+        const Vec3& p0 = x_rest[h.v[0]];
+        const Vec3& p1 = x_rest[h.v[1]];
+        const Vec3& p2 = x_rest[h.v[2]];
+        const Vec3& p3 = x_rest[h.v[3]];
+        const Vec3   e        = p1 - p0;
+        const double edge_len2 = e.squaredNorm();
+        const double areaA = 0.5 * (e.cross(p2 - p0)).norm();
+        const double areaB = 0.5 * (e.cross(p3 - p0)).norm();
+        const double area_sum = areaA + areaB;
+        h.c_e = (area_sum > 0.0) ? (edge_len2 / area_sum) : 0.0;
+    }
 }
 
 std::unordered_map<int, std::vector<int>> build_vertex_adjacency_map(const std::vector<int>& tris) {

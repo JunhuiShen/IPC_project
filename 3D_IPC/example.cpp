@@ -2,6 +2,7 @@
 #include "make_shape.h"
 
 #include <cmath>
+#include <limits>
 
 namespace {
 
@@ -482,4 +483,96 @@ void build_cloth_pile_example(const IPCArgs3D& args,
          v < static_cast<int>(state.deformed_positions.size()); ++v) {
         state.velocities[v] = v_drop;
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Example 4: deformable dragon -> ground plane SDF
+// ---------------------------------------------------------------------------
+// The xyzrgb dragon (loaded from --dragon_path, defaults to the 12k-vert
+// decimation produced by tools/decimate_obj.py) is dropped under gravity
+// onto a ground plane SDF. Per-triangle Dm_inverse and per-hinge c_e are
+// rebuilt from the 3D rest pose: the dragon is a closed surface with no
+// global 2D parameterization, so the OBJ loader's xz-projection X collapses
+// triangles on near-vertical surfaces in 2D. bar_theta is already correct
+// because build_hinges samples it from the 3D rest positions, not from X.
+//
+// The visual ground is rendered eps_sdf below the dragon's force-free rest
+// level (rather than coincident with it). That hides the few-cm sag that
+// the dragon's lowest spikes / claws settle to under self-weight when the
+// soft SDF penalty + node-box-clamped per-vertex Gauss-Seidel can't fully
+// push them back to the SDF surface -- the visible result is a clean dragon
+// resting on visible ground with no through-ground penetration.
+void build_dragon_drop_example(const IPCArgs3D& args,
+                               RefMesh& ref_mesh,
+                               DeformedState& state,
+                               std::vector<Vec2>& X,
+                               std::vector<Pin>& pins,
+                               SimParams& params,
+                               std::vector<Vec3>& static_x,
+                               std::vector<int>&  static_tris) {
+    clear_model(ref_mesh, state, X, pins);
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+
+    const double ground_y       = 0.0;
+    const double visual_ground_y = ground_y - params.eps_sdf;
+
+    // SDF surface at visual_ground_y; force-free rest (phi = eps_sdf) lands
+    // at ground_y, eps_sdf above the visible ground (see header comment).
+    params.sdf_planes.push_back(PlaneSDF{
+        Vec3(0.0, visual_ground_y, 0.0),
+        Vec3(0.0, 1.0, 0.0)
+    });
+
+    {
+        RefMesh           s_ref;
+        DeformedState     s_state;
+        std::vector<Vec2> s_X;
+        const double gw = args.dragon_ground_size;
+        const int    gn = std::max(1, args.dragon_ground_subdiv);
+        build_square_mesh(s_ref, s_state, s_X, gn, gn, gw, gw,
+                          Vec3(-0.5 * gw, visual_ground_y, -0.5 * gw));
+        const int base_v = static_cast<int>(static_x.size());
+        for (const Vec3& p : s_state.deformed_positions) static_x.push_back(p);
+        for (int t : s_ref.tris) static_tris.push_back(base_v + t);
+    }
+
+    const int dragon_v_begin = static_cast<int>(state.deformed_positions.size());
+    const int dragon_t_begin = num_tris(ref_mesh);
+
+    load_obj_mesh(args.dragon_path, ref_mesh, state, X,
+                  args.dragon_scale, Vec3::Zero());
+
+    const int dragon_v_end = static_cast<int>(state.deformed_positions.size());
+    const int dragon_t_end = num_tris(ref_mesh);
+
+    // Re-center the loaded dragon so its AABB sits at x=z=0 and its lowest
+    // vertex starts at dragon_drop_y.
+    Vec3 lo( std::numeric_limits<double>::max(),
+             std::numeric_limits<double>::max(),
+             std::numeric_limits<double>::max());
+    Vec3 hi(-std::numeric_limits<double>::max(),
+            -std::numeric_limits<double>::max(),
+            -std::numeric_limits<double>::max());
+    for (int v = dragon_v_begin; v < dragon_v_end; ++v) {
+        const Vec3& p = state.deformed_positions[v];
+        lo = lo.cwiseMin(p);
+        hi = hi.cwiseMax(p);
+    }
+    const Vec3 center = 0.5 * (lo + hi);
+    const Vec3 shift(-center.x(),
+                      args.dragon_drop_y - lo.y(),
+                     -center.z());
+    for (int v = dragon_v_begin; v < dragon_v_end; ++v) {
+        state.deformed_positions[v] += shift;
+    }
+
+    rebuild_triangle_rest_isometric(ref_mesh, state.deformed_positions,
+                                    dragon_t_begin, dragon_t_end);
+    rebuild_hinge_c_e_3d(ref_mesh, state.deformed_positions,
+                         dragon_v_begin, dragon_v_end);
+
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
 }

@@ -4,6 +4,8 @@
 #include "physics.h"
 #include "visualization.h"
 
+#include <string>
+
 // CLI-facing view of SimParams (with scene-placement knobs on top).
 struct IPCArgs3D : ArgParser {
 
@@ -45,7 +47,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_ticcd                   = false;    // true: Tight-Inclusion library | false: self-written linear CCD
 
     // --- scene selection ---
-    int         example      = 1;   // 1=twisting_cloth, 2=two_cylinder_twist, 3=cloth_pile
+    int         example      = 1;   // 1=twisting_cloth, 2=two_cylinder_twist, 3=cloth_pile, 4=dragon_on_cloth
     double      sheet_y      = 0.20; // m -- midline y for example 1
 
     // example 1: square cloth twisted in place
@@ -96,6 +98,17 @@ struct IPCArgs3D : ArgParser {
     double      pile_stack_x        = 0.0;   // x-shift of the falling stack (m); 0 = centred over the catcher
     double      pile_pinned_tilt    = 45.0;  // catcher cloth tilt about +z through its center (deg); +ve drops the +x edge so cloth slides toward the sphere
 
+    // example 4: a deformable dragon mesh is dropped onto a ground plane SDF
+    // (with a visual ground mesh exported for rendering). Dragon participates
+    // in every energy term (corotated, bending, IPC barrier) -- per-tri
+    // Dm_inverse and per-hinge c_e are rebuilt from the 3D rest pose since
+    // the dragon is a closed surface with no global 2D parameterization.
+    std::string dragon_path         = "xyzrgb_dragon_12k.obj"; // OBJ path (relative or absolute); the 12k-vert decimated mesh produced by tools/decimate_obj.py
+    double      dragon_scale        = 0.02;  // uniform scale applied to OBJ vertices (m / OBJ unit)
+    double      dragon_drop_y       = 1.5;   // y (m) of the dragon's lowest vertex at t=0
+    double      dragon_ground_size  = 9.0;   // visual ground square edge length (m); SDF half-space is infinite
+    int         dragon_ground_subdiv = 240;  // visual ground grid subdivisions per side
+
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
     std::string format       = "geo";
@@ -137,7 +150,7 @@ struct IPCArgs3D : ArgParser {
         add_double("k_barrier",                k_barrier,                1.0,   "Barrier stiffness multiplier");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cloth_pile");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cloth_pile, 4=dragon_on_cloth");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -180,6 +193,12 @@ struct IPCArgs3D : ArgParser {
         add_int   ("pile_pinned_ny",     pile_pinned_ny,     80,    "Catcher cloth grid subdivisions along y in example 3");
         add_double("pile_stack_x",       pile_stack_x,       0.0,   "x-shift (m) of the falling stack in example 3 (0 = centred over the catcher)");
         add_double("pile_pinned_tilt",   pile_pinned_tilt,   45.0,  "Catcher cloth tilt (deg) about +z through its center in example 3; +ve drops the +x edge so cloth slides toward the sphere");
+
+        add_string("dragon_path",         dragon_path,         "xyzrgb_dragon_12k.obj", "Path to the dragon OBJ file for example 4 (relative paths are resolved against the working directory). Default points to the 12k-vert decimated mesh from tools/decimate_obj.py; pass xyzrgb_dragon_full.obj to use the original 125k-vert mesh");
+        add_double("dragon_scale",        dragon_scale,        0.02,  "Uniform scale applied to dragon OBJ vertices in example 4 (m per OBJ unit). Smaller values give a smaller dragon (and smaller min-edge -- d_hat must stay below 0.5 * min edge)");
+        add_double("dragon_drop_y",       dragon_drop_y,       1.5,   "y-position (m) of the dragon's lowest vertex at t=0 in example 4");
+        add_double("dragon_ground_size",  dragon_ground_size,  9.0,   "Visual ground square edge length (m) in example 4; SDF half-space is infinite");
+        add_int   ("dragon_ground_subdiv",dragon_ground_subdiv,240,   "Visual ground grid subdivisions per side in example 4");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
