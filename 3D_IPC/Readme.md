@@ -114,8 +114,9 @@ corner-pinned catcher cloth and slides off onto a static sphere and ground;
 
 Reference command for example 4 (the xyzrgb dragon squeezed between a
 floor that rises and a ceiling that descends, both at 0.2 m/s along y;
-120 frames). Dragon defaults to `xyzrgb_dragon_12k.obj`, the 12k-vert
-decimation produced by `tools/decimate_obj.py`:
+120 frames; gravity disabled inside the builder). Dragon defaults to
+`xyzrgb_dragon_12k.obj`, the 12k-vert decimation produced by
+`tools/decimate_obj.py`:
 
     ./build/3D_sim --example 4 --num_frames 120 \
         --dragon_squeeze_speed 0.2 \
