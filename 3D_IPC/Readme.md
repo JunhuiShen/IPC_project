@@ -338,6 +338,6 @@ Our OGC narrow phase and `global_gauss_seidel_solver_ogc` implement:
 
 The dragon mesh used by example 4 (`xyzrgb_dragon_full.obj`) is the
 **XYZ RGB Asian Dragon** scan from the Stanford 3D Scanning Repository,
-redistributed via [hughsk/stanford-dragon](https://github.com/hughsk/stanford-dragon).
+sourced via [alecjacobson/common-3d-test-models](https://github.com/alecjacobson/common-3d-test-models).
 The 12k-vertex `xyzrgb_dragon_12k.obj` is a quadric edge-collapse decimation
 of that mesh produced by `tools/decimate_obj.py`.
