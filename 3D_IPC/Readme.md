@@ -120,7 +120,7 @@ decimation produced by `tools/decimate_obj.py`:
     ./build/3D_sim --example 4 --num_frames 120 \
         --dragon_squeeze_speed 0.2 \
         --E 10 --nu 0.25 --kB 0.001 --kpin 1e8 \
-        --d_hat 0.002 --k_barrier 100 --k_sdf 1e7 --eps_sdf 0.08 \
+        --d_hat 0.002 --k_barrier 100 --k_sdf 2e8 --eps_sdf 0.01 \
         --fixed_iters --max_substep_iters 10
 
 To regenerate the decimated dragon (or pick a different target count):
