@@ -31,6 +31,7 @@ int main(int argc, char** argv) {
     TwistSpec          twist_spec;
     CylinderTwistSpec  cyl_twist_spec;
     DragonSqueezeSpec  squeeze_spec;
+    TwistUntwistSpec   tu_spec;
 
     std::vector<Vec3> static_x;
     std::vector<int>  static_tris;
@@ -38,8 +39,9 @@ int main(int argc, char** argv) {
     if      (args.example == 1) build_twisting_cloth_example(args, ref_mesh, state, X, pins, twist_spec);
     else if (args.example == 2) build_two_cylinder_twist_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, cyl_twist_spec);
     else if (args.example == 3) build_dragon_squeeze_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, squeeze_spec);
+    else if (args.example == 4) build_twist_untwist_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, tu_spec);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4.\n";
         return 1;
     }
 
@@ -62,6 +64,13 @@ int main(int argc, char** argv) {
         // collide with a stale plane position mid-substep).
         pin_updater = [&squeeze_spec, &params](std::vector<Pin>&, double t) {
             update_dragon_squeeze_sdf(params, squeeze_spec, t);
+        };
+    } else if (args.example == 4) {
+        // Pin and SDF axis yaw in lock-step per substep, so the wrap pin
+        // never sits inside a lagging SDF mid-step.
+        pin_updater = [&tu_spec, &params](std::vector<Pin>& p, double t) {
+            update_twist_untwist_pins(p, tu_spec, t);
+            update_twist_untwist_sdf(params, tu_spec, t);
         };
     }
 
@@ -127,7 +136,7 @@ int main(int argc, char** argv) {
     // Examples whose visible collider moves over time get a per-frame export
     // (example 2's rotating cylinders, example 3's moving plates). Others keep
     // the one-time "static_colliders".
-    const bool collider_is_dynamic = (args.example == 2 || args.example == 3);
+    const bool collider_is_dynamic = (args.example == 2 || args.example == 3 || args.example == 4);
 
     if (restart_frame < 0) {
         if (fs::exists(outdir)) fs::remove_all(outdir);
@@ -197,6 +206,7 @@ int main(int argc, char** argv) {
             const double t_frame = frame_index / params.fps;
             if      (args.example == 2) update_cylinder_visuals      (static_x, cyl_twist_spec, t_frame);
             else if (args.example == 3) update_dragon_squeeze_visual (static_x, squeeze_spec,   t_frame);
+            else if (args.example == 4) update_twist_untwist_visual  (static_x, tu_spec,        t_frame);
             write_collider_mesh(frame_collider_path(frame_index));
         }
 

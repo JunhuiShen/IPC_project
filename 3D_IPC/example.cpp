@@ -575,3 +575,178 @@ void update_dragon_squeeze_visual(std::vector<Vec3>& static_x,
         }
     }
 }
+
+
+// Example 4: rectangular cloth (tu_width x tu_size) draped under one cylinder
+// (axis +x, at (0, sheet_y, 0)). Pre-pose: back drop -> bottom-wrap semicircle
+// -> front drop, so j=0 and j=ny rows end at y=corner_y on either side of the
+// cylinder. Static pins: the 4 outer corners (i in {0,nx}, j in {0,ny}). Wrap
+// pins: every vertex on the bottom-semicircle rows; their targets and the SDF
+// axis both yaw about +y in lock-step (same convention as example 2), so the
+// cloth twists between the rotating wrap and the fixed corners.
+void build_twist_untwist_example(const IPCArgs3D& args,
+                                 RefMesh& ref_mesh,
+                                 DeformedState& state,
+                                 std::vector<Vec2>& X,
+                                 std::vector<Pin>& pins,
+                                 SimParams& params,
+                                 std::vector<Vec3>& static_x,
+                                 std::vector<int>&  static_tris,
+                                 TwistUntwistSpec& spec) {
+    clear_model(ref_mesh, state, X, pins);
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+
+    const int    nx       = args.tu_nx;
+    const int    ny       = args.tu_ny;
+    const double strip_w  = args.tu_width;         // cloth x-width (along cyl axis)
+    const double cloth_L  = args.tu_size;          // cloth arc length (drops + bottom wrap)
+    const double cyl_y    = args.sheet_y;          // cylinder axis sits at sheet_y
+    const double r        = args.tu_cyl_radius;
+    const double pin_r    = r + std::max(params.eps_sdf, 1e-3);
+    const Vec3   cyl_pt(0.0, cyl_y, 0.0);
+
+    // Arc partition: bottom wrap (pi*pin_r) plus two equal drops use the rest
+    // of the cloth length. Floor at 0.05 m guards against a cloth too short
+    // for even the wrap.
+    const double wrap_len = kPi * pin_r;
+    const double drop_len = std::max((cloth_L - wrap_len) * 0.5, 0.05);
+    const double total_arc = 2.0 * drop_len + wrap_len;
+    const double corner_y  = cyl_y + drop_len;
+
+    auto arc_position = [&](double s) -> Vec3 {
+        if (s <= drop_len) {
+            return Vec3(0.0, corner_y - s, -pin_r);
+        }
+        if (s <= drop_len + wrap_len) {
+            // phi sweeps -pi/2 (back tangent) -> 0 (bottom) -> +pi/2 (front).
+            const double phi = -kPi / 2.0 + (s - drop_len) / pin_r;
+            return Vec3(0.0,
+                        cyl_y - pin_r * std::cos(phi),
+                        pin_r * std::sin(phi));
+        }
+        const double s_in = s - drop_len - wrap_len;
+        return Vec3(0.0, cyl_y + s_in, +pin_r);
+    };
+
+    // build_square_mesh lays out (i,j) at base + j*(nx+1) + i; we overwrite
+    // the deformed positions below to bend the flat grid onto the arc.
+    const Vec3 build_origin(-0.5 * strip_w, 0.0, 0.0);
+    const int  base = build_square_mesh(ref_mesh, state, X,
+                                        nx, ny, strip_w, total_arc, build_origin);
+
+    for (int j = 0; j <= ny; ++j) {
+        const Vec3 p = arc_position((static_cast<double>(j) / ny) * total_arc);
+        for (int i = 0; i <= nx; ++i) {
+            const double dx = (static_cast<double>(i) / nx - 0.5) * strip_w;
+            state.deformed_positions[base + j * (nx + 1) + i] =
+                Vec3(dx, p.y(), p.z());
+        }
+    }
+    // Re-init hinges from the curved pose so bending doesn't try to flatten
+    // the wrap back out (same fix as example 2).
+    ref_mesh.initialize(X, state.deformed_positions);
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+
+    spec = TwistUntwistSpec{};
+    spec.cyl_axis_point = cyl_pt;
+    spec.omega          = kTwoPi * args.tu_twist_rate;
+    spec.t_settle       = std::max(0.0, args.tu_settle_time);
+    spec.t_ramp         = std::max(0.0, args.tu_ramp_time);
+    spec.max_abs_theta  = std::max(0.0, kTwoPi * args.tu_max_turn);
+    spec.untwist        = args.tu_untwist;
+    spec.t_hold         = std::max(0.0, args.tu_hold_time);
+
+    // Pinning: wrap rows co-rotate with the cylinder; only the 4 outer corners
+    // of the top edges are held static (interior of the top edges is free, so
+    // the cloth sags between the corners like a hammock).
+    for (int j = 0; j <= ny; ++j) {
+        const double s = (static_cast<double>(j) / ny) * total_arc;
+        const bool on_wrap = (s > drop_len) && (s < drop_len + wrap_len);
+
+        if (on_wrap) {
+            for (int i = 0; i <= nx; ++i) {
+                const int v = base + j * (nx + 1) + i;
+                spec.wrap_pin_indices.push_back(static_cast<int>(pins.size()));
+                append_pin(pins, v, state.deformed_positions);
+                spec.wrap_initial_targets.push_back(pins.back().target_position);
+            }
+        } else if (j == 0 || j == ny) {
+            for (int i : {0, nx}) {
+                const int v = base + j * (nx + 1) + i;
+                spec.end_pin_indices.push_back(static_cast<int>(pins.size()));
+                append_pin(pins, v, state.deformed_positions);
+                spec.end_initial_targets.push_back(pins.back().target_position);
+            }
+        }
+    }
+
+    // SDF axis starts +x; update_twist_untwist_sdf yaws it about +y per substep.
+    spec.cyl_sdf_index = static_cast<int>(params.sdf_cylinders.size());
+    params.sdf_cylinders.push_back(CylinderSDF{cyl_pt, Vec3::UnitX(), r});
+
+    // Visual cylinder: build_cylinder_mesh emits +z-aligned at origin; swap
+    // (x,y,z) -> (z,y,x) to align with +x, then translate to cyl_pt. Radius
+    // tracks the cloth's rest radius (pin_r), not the SDF radius (r), so the
+    // wrap sits flush against the visible surface with no gap.
+    const double r_visual = std::max(0.001, pin_r - args.tu_visual_shrink);
+    {
+        RefMesh           s_ref;
+        DeformedState     s_state;
+        std::vector<Vec2> s_X;
+        build_cylinder_mesh(s_ref, s_state, s_X, args.tu_cyl_nu,
+                            r_visual, args.tu_cyl_length, Vec3::Zero());
+        spec.visual_v_begin = static_cast<int>(static_x.size());
+        const int base_v = spec.visual_v_begin;
+        for (const Vec3& p : s_state.deformed_positions) {
+            static_x.push_back(Vec3(p.z() + cyl_pt.x(),
+                                    p.y() + cyl_pt.y(),
+                                    p.x() + cyl_pt.z()));
+        }
+        for (int t : s_ref.tris) static_tris.push_back(base_v + t);
+        spec.visual_v_end = static_cast<int>(static_x.size());
+        spec.visual_v_rest.assign(static_x.begin() + spec.visual_v_begin,
+                                  static_x.begin() + spec.visual_v_end);
+    }
+}
+
+void update_twist_untwist_pins(std::vector<Pin>& pins,
+                               const TwistUntwistSpec& spec, double t) {
+    // Re-snap the 4 corner pins each step so a restart from any frame
+    // recovers their static targets.
+    const int n_end = static_cast<int>(spec.end_pin_indices.size());
+    for (int k = 0; k < n_end; ++k) {
+        pins[spec.end_pin_indices[k]].target_position = spec.end_initial_targets[k];
+    }
+    const double theta = effective_theta(spec.omega, t, spec.t_settle, spec.t_ramp,
+                                         spec.max_abs_theta, spec.untwist, spec.t_hold);
+    const int n_wrap = static_cast<int>(spec.wrap_pin_indices.size());
+    for (int k = 0; k < n_wrap; ++k) {
+        pins[spec.wrap_pin_indices[k]].target_position =
+            rotate_about_y_axis(spec.wrap_initial_targets[k], spec.cyl_axis_point, theta);
+    }
+}
+
+void update_twist_untwist_sdf(SimParams& params,
+                              const TwistUntwistSpec& spec, double t) {
+    if (spec.cyl_sdf_index < 0 ||
+        spec.cyl_sdf_index >= static_cast<int>(params.sdf_cylinders.size())) return;
+    // Same theta as the wrap pins: per-substep so the pin never sits inside
+    // a lagging SDF mid-step.
+    const double theta = effective_theta(spec.omega, t, spec.t_settle, spec.t_ramp,
+                                         spec.max_abs_theta, spec.untwist, spec.t_hold);
+    params.sdf_cylinders[spec.cyl_sdf_index].point = spec.cyl_axis_point;
+    params.sdf_cylinders[spec.cyl_sdf_index].axis  =
+        rotate_about_y_axis(Vec3::UnitX(), Vec3::Zero(), theta);
+}
+
+void update_twist_untwist_visual(std::vector<Vec3>& static_x,
+                                 const TwistUntwistSpec& spec, double t) {
+    const double theta = effective_theta(spec.omega, t, spec.t_settle, spec.t_ramp,
+                                         spec.max_abs_theta, spec.untwist, spec.t_hold);
+    for (int i = spec.visual_v_begin; i < spec.visual_v_end; ++i) {
+        static_x[i] = rotate_about_y_axis(spec.visual_v_rest[i - spec.visual_v_begin],
+                                          spec.cyl_axis_point, theta);
+    }
+}

@@ -73,12 +73,14 @@ Built-in example scenes (`--example N`):
 | `1` | Square cloth clamped on two edges and twisted (default) |
 | `2` | Four closed-loop cloth strips wrapping two horizontal cylinders, twisted then untwisted |
 | `3` | Deformable xyzrgb dragon squeezed between two opposing plane SDFs (floor rising + ceiling descending), then plates retract and the dragon springs back |
+| `4` | Square cloth draped over a single horizontal cylinder; cylinder spins about its own axis and twists the cloth between two stationary end clamps, then reverses to untwist |
 
 Common invocations:
 
     ./build/3D_sim --example 1                              # twisting cloth
     ./build/3D_sim --example 2                              # two-cylinder twist
     ./build/3D_sim --example 3                              # two-plate squeeze on the dragon
+    ./build/3D_sim --example 4                              # spinning cylinder twists cloth between fixed end clamps
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
@@ -108,6 +110,15 @@ peak ~90% compression):
         --E 50 --nu 0.25 --kB 0.05 --kpin 1e8 \
         --d_hat 0.002 --k_barrier 100 --k_sdf 1e10 --eps_sdf 0.01 \
         --fixed_iters --max_substep_iters 10 --substeps 8
+
+Reference command for example 4 (cylinder spins forward, holds, then reverses;
+writes to `frames_ex4/`):
+
+    ./build/3D_sim --example 4 --num_frames 180 --outdir frames_ex4 \
+        --E 115 --nu 0.25 --kB 0.009 --kpin 1e8 \
+        --d_hat 0.005 --k_barrier 100 \
+        --tu_max_turn 1.0 --tu_untwist true --tu_hold_time 0.2 \
+        --fixed_iters --max_substep_iters 10
 
 To regenerate the decimated dragon (or pick a different target count):
 

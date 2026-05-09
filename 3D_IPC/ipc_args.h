@@ -74,6 +74,24 @@ struct IPCArgs3D : ArgParser {
     bool        tcyl_untwist     = true;   // after reaching max_turn, smoothly reverse rotation back to 0
     double      tcyl_hold_time   = 0.0;    // seconds to dwell at peak twist before reversing (untwist only)
 
+    // example 4 (open-loop variant of example 2): single cylinder, rectangular
+    // cloth wrapping its underside; 4 outer corners pinned, wrap rows yaw with
+    // the cylinder. Defaults mirror example 2's per-strip values.
+    double      tu_size           = 2.2;   // cloth arc length (m): drop + bottom wrap + drop
+    double      tu_width          = 0.18;  // cloth width along the cylinder axis (m)
+    int         tu_nx             = 16;    // grid subdivisions along x (cyl axis)
+    int         tu_ny             = 90;    // grid subdivisions along the arc
+    double      tu_twist_rate     = 0.15;  // turns/second
+    double      tu_settle_time    = 0.0;
+    double      tu_ramp_time      = 0.0;
+    double      tu_max_turn       = 4.0;   // |total turns| cap (0 = uncapped)
+    bool        tu_untwist        = true;  // mirror the trapezoid back to 0
+    double      tu_hold_time      = 0.0;   // dwell at peak twist before reversing
+    double      tu_cyl_radius     = 0.06;
+    double      tu_cyl_length     = 1.50;  // along x (m)
+    int         tu_cyl_nu         = 64;    // circumferential subdivisions for the visual mesh
+    double      tu_visual_shrink  = 0.002; // visual cyl this much thinner than pin_r (m); avoids SDF/barrier fighting at contact
+
     // example 3: deformable dragon squeezed by one or two translating plane
     // SDFs, gravity off. Per-tri Dm_inverse and per-hinge c_e are rebuilt
     // from the 3D rest pose since the dragon is a closed surface with no
@@ -131,7 +149,7 @@ struct IPCArgs3D : ArgParser {
         add_double("k_barrier",                k_barrier,                1.0,   "Barrier stiffness multiplier");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=dragon_squeeze");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=dragon_squeeze, 4=cylinder_twist_untwist");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -154,6 +172,21 @@ struct IPCArgs3D : ArgParser {
         add_double("tcyl_max_turn",    tcyl_max_turn,    1.5,  "Per-cylinder rotation cap (turns) in example 2. 0 = no cap; 0.5=180°, 1.5=540°.");
         add_bool  ("tcyl_untwist",     tcyl_untwist,     true, "If true, after reaching tcyl_max_turn the cylinder smoothly reverses back to 0 (twist + untwist).");
         add_double("tcyl_hold_time",   tcyl_hold_time,   0.0,  "Seconds to dwell at peak twist before reversing (only with tcyl_untwist=true).");
+
+        add_double("tu_size",          tu_size,          2.2,  "Cloth ARC length (m) for example 4: drop + bottom wrap + drop. Defaults to ~one strip from example 2 (2*tcyl_cloth_h + pi*pin_r)");
+        add_double("tu_width",         tu_width,         0.18, "Cloth width (m) along the cylinder axis for example 4. Defaults to tcyl_strip_w from example 2");
+        add_int   ("tu_nx",            tu_nx,            16,   "Cloth grid subdivisions along x for example 4 (along the cylinder axis); same as tcyl_nx");
+        add_int   ("tu_ny",            tu_ny,            90,   "Cloth grid subdivisions along the arc (back drop -> bottom wrap -> front drop) for example 4; half of tcyl_ny since we keep half of the example 2 loop");
+        add_double("tu_twist_rate",    tu_twist_rate,    0.15, "Cylinder yaw rate (turns/second) for example 4; same as example 2 default");
+        add_double("tu_settle_time",   tu_settle_time,   0.0,  "Seconds with omega=0 so the cloth settles before the cylinder starts yawing in example 4 (default 0: motion from t=0)");
+        add_double("tu_ramp_time",     tu_ramp_time,     0.0,  "Seconds to linearly ramp omega between 0 and full in example 4 (default 0: instant)");
+        add_double("tu_max_turn",      tu_max_turn,      4.0,  "Cylinder yaw cap (turns) in example 4 (0 = no cap). Default 4 turns winds the drops around +y enough to start tangling");
+        add_bool  ("tu_untwist",       tu_untwist,       true, "If true, after reaching tu_max_turn the cylinder reverses back to 0 (twist + untwist) in example 4");
+        add_double("tu_hold_time",     tu_hold_time,     0.0,  "Seconds to dwell at peak twist before reversing in example 4");
+        add_double("tu_cyl_radius",    tu_cyl_radius,    0.06, "Collider cylinder radius (m) for example 4; same as example 2's tcyl_radius");
+        add_double("tu_cyl_length",    tu_cyl_length,    1.50, "Collider cylinder length along x (m) for example 4; same as example 2's tcyl_length");
+        add_int   ("tu_cyl_nu",        tu_cyl_nu,        64,   "Circumferential subdivisions for the visual cylinder in example 4");
+        add_double("tu_visual_shrink", tu_visual_shrink, 0.002,"Render cylinder this much thinner than the cloth's rest radius (m, visual only). Small offset (~2mm) keeps a visible sliver between cloth + cylinder and avoids SDF/barrier energy fighting at the contact");
 
         add_string("dragon_path",            dragon_path,           "xyzrgb_dragon_12k.obj", "Path to the dragon OBJ file for example 3 (relative paths are resolved against the working directory). Default points to the 12k-vert decimated mesh from tools/decimate_obj.py; pass xyzrgb_dragon_full.obj to use the original 125k-vert mesh");
         add_double("dragon_scale",           dragon_scale,           0.02, "Uniform scale applied to dragon OBJ vertices in example 3 (m per OBJ unit). Smaller values give a smaller dragon (and smaller min-edge -- d_hat must stay below 0.5 * min edge)");

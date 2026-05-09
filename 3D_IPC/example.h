@@ -130,3 +130,53 @@ void update_dragon_squeeze_sdf(SimParams& params,
 // for the export.
 void update_dragon_squeeze_visual(std::vector<Vec3>& static_x,
                                   const DragonSqueezeSpec& spec, double t);
+
+
+// Example 4: open-loop variant of example 2 with a single cylinder. A
+// rectangular cloth (tu_width x tu_size) wraps the cylinder's underside;
+// the cloth's 4 outer corners are statically pinned, and the wrap rows
+// co-rotate with the cylinder. SDF axis yaws about +y in lock-step with
+// the wrap pins, twisting the cloth between rotating wrap and fixed corners.
+struct TwistUntwistSpec {
+    std::vector<int>  end_pin_indices;
+    std::vector<Vec3> end_initial_targets;
+    std::vector<int>  wrap_pin_indices;
+    std::vector<Vec3> wrap_initial_targets;
+
+    Vec3   cyl_axis_point{Vec3::Zero()};
+    double omega         = 0.0;            // rad/s
+    double t_settle      = 0.0;
+    double t_ramp        = 0.0;
+    double max_abs_theta = 0.0;
+    bool   untwist       = false;
+    double t_hold        = 0.0;
+
+    // Visual cylinder slice in static_x; visual_v_rest holds pre-rotation
+    // positions so each frame rotates from rest (no drift).
+    int               cyl_sdf_index  = -1;
+    int               visual_v_begin = 0;
+    int               visual_v_end   = 0;
+    std::vector<Vec3> visual_v_rest;
+};
+
+void build_twist_untwist_example(const IPCArgs3D& args,
+                                 RefMesh& ref_mesh,
+                                 DeformedState& state,
+                                 std::vector<Vec2>& X,
+                                 std::vector<Pin>& pins,
+                                 SimParams& params,
+                                 std::vector<Vec3>& static_x,
+                                 std::vector<int>&  static_tris,
+                                 TwistUntwistSpec& spec);
+
+void update_twist_untwist_pins(std::vector<Pin>& pins,
+                               const TwistUntwistSpec& spec, double t);
+
+// Per-substep: yaws the SDF axis about +y by effective_theta(t) so the
+// collider stays co-rotated with the wrap pins.
+void update_twist_untwist_sdf(SimParams& params,
+                              const TwistUntwistSpec& spec, double t);
+
+// Per-frame: yaws the visual cylinder vertices about +y to match the SDF.
+void update_twist_untwist_visual(std::vector<Vec3>& static_x,
+                                 const TwistUntwistSpec& spec, double t);
