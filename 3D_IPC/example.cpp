@@ -580,10 +580,10 @@ void update_dragon_squeeze_visual(std::vector<Vec3>& static_x,
 // Example 4: rectangular cloth (tu_width x tu_size) draped under one cylinder
 // (axis +x, at (0, sheet_y, 0)). Pre-pose: back drop -> bottom-wrap semicircle
 // -> front drop, so j=0 and j=ny rows end at y=corner_y on either side of the
-// cylinder. Static pins: the 4 outer corners (i in {0,nx}, j in {0,ny}). Wrap
-// pins: every vertex on the bottom-semicircle rows; their targets and the SDF
-// axis both yaw about +y in lock-step (same convention as example 2), so the
-// cloth twists between the rotating wrap and the fixed corners.
+// cylinder. Both top edges (j=0 and j=ny rows in full) are statically pinned
+// as stretchy clamping bars; the bottom-wrap rows are also pinned, and their
+// targets co-rotate with the SDF axis about +y, twisting the cloth between
+// rotating wrap and fixed bars.
 void build_twist_untwist_example(const IPCArgs3D& args,
                                  RefMesh& ref_mesh,
                                  DeformedState& state,
@@ -604,7 +604,7 @@ void build_twist_untwist_example(const IPCArgs3D& args,
     const double cloth_L  = args.tu_size;          // cloth arc length (drops + bottom wrap)
     const double cyl_y    = args.sheet_y;          // cylinder axis sits at sheet_y
     const double r        = args.tu_cyl_radius;
-    const double pin_r    = r + std::max(params.eps_sdf, 1e-3);
+    const double pin_r    = r + 0.002;             // 2mm SDF rest offset, same as example 2
     const Vec3   cyl_pt(0.0, cyl_y, 0.0);
 
     // Arc partition: bottom wrap (pi*pin_r) plus two equal drops use the rest
@@ -658,9 +658,9 @@ void build_twist_untwist_example(const IPCArgs3D& args,
     spec.untwist        = args.tu_untwist;
     spec.t_hold         = std::max(0.0, args.tu_hold_time);
 
-    // Pinning: wrap rows co-rotate with the cylinder; only the 4 outer corners
-    // of the top edges are held static (interior of the top edges is free, so
-    // the cloth sags between the corners like a hammock).
+    // Pinning matches the SIGGRAPH knot demo's "stretchy clamping bars":
+    // both top edges (j=0 and j=ny) are pinned along their full length, and
+    // the bottom-wrap rows co-rotate with the cylinder.
     for (int j = 0; j <= ny; ++j) {
         const double s = (static_cast<double>(j) / ny) * total_arc;
         const bool on_wrap = (s > drop_len) && (s < drop_len + wrap_len);
@@ -673,7 +673,7 @@ void build_twist_untwist_example(const IPCArgs3D& args,
                 spec.wrap_initial_targets.push_back(pins.back().target_position);
             }
         } else if (j == 0 || j == ny) {
-            for (int i : {0, nx}) {
+            for (int i = 0; i <= nx; ++i) {
                 const int v = base + j * (nx + 1) + i;
                 spec.end_pin_indices.push_back(static_cast<int>(pins.size()));
                 append_pin(pins, v, state.deformed_positions);
@@ -713,8 +713,8 @@ void build_twist_untwist_example(const IPCArgs3D& args,
 
 void update_twist_untwist_pins(std::vector<Pin>& pins,
                                const TwistUntwistSpec& spec, double t) {
-    // Re-snap the 4 corner pins each step so a restart from any frame
-    // recovers their static targets.
+    // Re-snap the static top-bar pins each step so a restart from any frame
+    // recovers their targets.
     const int n_end = static_cast<int>(spec.end_pin_indices.size());
     for (int k = 0; k < n_end; ++k) {
         pins[spec.end_pin_indices[k]].target_position = spec.end_initial_targets[k];

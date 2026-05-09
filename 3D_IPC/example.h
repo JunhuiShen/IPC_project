@@ -132,11 +132,11 @@ void update_dragon_squeeze_visual(std::vector<Vec3>& static_x,
                                   const DragonSqueezeSpec& spec, double t);
 
 
-// Example 4: open-loop variant of example 2 with a single cylinder. A
-// rectangular cloth (tu_width x tu_size) wraps the cylinder's underside;
-// the cloth's 4 outer corners are statically pinned, and the wrap rows
-// co-rotate with the cylinder. SDF axis yaws about +y in lock-step with
-// the wrap pins, twisting the cloth between rotating wrap and fixed corners.
+// Example 4: rectangular cloth (tu_width x tu_size) wrapping a single
+// horizontal cylinder's underside. Both top edges are statically pinned
+// (stretchy clamping bars), and the bottom-wrap rows co-rotate with the
+// cylinder. SDF axis yaws about +y in lock-step with the wrap pins,
+// twisting the cloth between rotating wrap and fixed bars.
 struct TwistUntwistSpec {
     std::vector<int>  end_pin_indices;
     std::vector<Vec3> end_initial_targets;
