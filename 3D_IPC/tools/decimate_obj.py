@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Decimate a Wavefront OBJ via quadric edge-collapse and write the result.
 
-Used to coarsen the xyzrgb dragon (125k verts) down to a tractable size for
-example 4 so the original example-1 parameter set converges (the convergence
-criterion dt^2 * E < rho * h * l^2 scales with the squared min edge length;
-coarsening lets us raise E or drop substeps).
+Iteratively collapses the lowest-quadric-error edge (trimesh's
+simplify_quadric_decimation) until the face count drops to --target-faces.
+Preserves the closed surface, genus, and silhouette; aggressively simplifies
+flat regions while keeping high-curvature features. The resulting mesh has
+non-uniform triangle sizes -- small where curvature is high, large where it
+is low -- which raises the min edge length and makes IPC convergence
+tractable (the criterion dt^2 * E < rho * h * l^2 scales with squared min
+edge, so coarsening lets you raise E or drop substeps).
 
 Usage:
-    python tools/decimate_obj.py <input.obj> <output.obj> --target-faces 24000
+    python tools/decimate_obj.py <input.obj> <output.obj> --target-faces N
 """
 
 import argparse
