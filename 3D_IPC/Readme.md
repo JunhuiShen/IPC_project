@@ -72,7 +72,7 @@ Built-in example scenes (`--example N`):
 |-------------|-------|
 | `1` | Square cloth clamped on two edges and twisted (default) |
 | `2` | Four closed-loop cloth strips wrapping two horizontal cylinders, twisted then untwisted |
-| `3` | Deformable xyzrgb dragon squeezed between two opposing plane SDFs (floor rising + ceiling descending) |
+| `3` | Deformable xyzrgb dragon squeezed between two opposing plane SDFs (floor rising + ceiling descending), then plates retract and the dragon springs back |
 
 Common invocations:
 
@@ -100,17 +100,14 @@ frames):
         --tcyl_max_turn 2.0 \
         --fixed_iters --max_substep_iters 10
 
-Reference command for example 3 (the xyzrgb dragon squeezed between a
-floor that rises and a ceiling that descends, both at 0.2 m/s along y;
-120 frames; gravity disabled inside the builder). Dragon defaults to
-`xyzrgb_dragon_12k.obj`, the 12k-vert decimation produced by
-`tools/decimate_obj.py`:
+Reference command for example 3 (240 frames: press, retract, spring back;
+peak ~90% compression):
 
-    ./build/3D_sim --example 3 --num_frames 120 \
-        --dragon_squeeze_speed 0.2 \
-        --E 10 --nu 0.25 --kB 0.001 --kpin 1e8 \
-        --d_hat 0.002 --k_barrier 100 --k_sdf 2e8 --eps_sdf 0.01 \
-        --fixed_iters --max_substep_iters 10
+    ./build/3D_sim --example 3 --num_frames 240 \
+        --dragon_squeeze_speed 0.2 --dragon_squeeze_max 0.87 --dragon_squeeze_hold 0.0 \
+        --E 50 --nu 0.25 --kB 0.05 --kpin 1e8 \
+        --d_hat 0.002 --k_barrier 100 --k_sdf 1e10 --eps_sdf 0.01 \
+        --fixed_iters --max_substep_iters 10 --substeps 8
 
 To regenerate the decimated dragon (or pick a different target count):
 
@@ -141,7 +138,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (new per-iter rebuild solver), `ogc_box_pad` (BVH padding for the per-iter rebuild; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (clamp range for `R_vi = clamp(prev_disp * 1.2, min, max)`) |
-| Scene | `example` (`1`..`3`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `dragon_path`, `dragon_scale`, `dragon_drop_y`, `dragon_ground_size`, `dragon_ground_subdiv`, `dragon_anchor_pin_count`, `dragon_squeeze_gap`, `dragon_squeeze_speed`, `dragon_squeeze_max`, `dragon_squeeze_settle` |
+| Scene | `example` (`1`..`3`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `dragon_path`, `dragon_scale`, `dragon_drop_y`, `dragon_ground_size`, `dragon_ground_subdiv`, `dragon_anchor_pin_count`, `dragon_squeeze_gap`, `dragon_squeeze_speed`, `dragon_squeeze_max`, `dragon_squeeze_settle`, `dragon_squeeze_hold` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame` |
 
 Notes:

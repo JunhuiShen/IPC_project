@@ -107,6 +107,7 @@ struct DragonSqueezeSpec {
     std::vector<DragonSqueezePlate> plates;
     double rise_max = 0.0;  // cap on |displacement| applied to every plate (m); 0 = no cap
     double t_settle = 0.0;  // seconds at the start with no motion (shared across plates)
+    double t_hold   = -1.0; // if >= 0, plates trapezoid: press to rise_max, hold for this many seconds, retract to rest. <0 = press-and-stay.
 };
 
 void build_dragon_squeeze_example(const IPCArgs3D& args,

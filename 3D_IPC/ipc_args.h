@@ -88,6 +88,7 @@ struct IPCArgs3D : ArgParser {
     double      dragon_squeeze_speed    = 0.15; // |velocity| of the moving SDF (m/s); slow enough that 60-90 frame runs stay below the dragon's elastic-yield ceiling and never see the cap
     double      dragon_squeeze_max      = 1.8;  // safety cap on |total displacement| (m); ~dragon height, so unreachable for normal demo lengths but prevents the SDF from sailing off through the body if --num_frames is cranked to many hundreds. 0 = no motion
     double      dragon_squeeze_settle   = 0.0;  // seconds to wait before the SDF starts moving (0 = start at t=0)
+    double      dragon_squeeze_hold     = -1.0; // if >= 0, plates trapezoid: press to dragon_squeeze_max, hold this long, then retract back to rest. <0 = press-and-stay.
 
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
@@ -164,6 +165,7 @@ struct IPCArgs3D : ArgParser {
         add_double("dragon_squeeze_speed",     dragon_squeeze_speed,     0.15, "|velocity| of the moving SDF in example 3 (m/s); slow enough that 60-90 frame runs stay below the dragon's elastic-yield ceiling and never see the cap");
         add_double("dragon_squeeze_max",       dragon_squeeze_max,       1.8,  "Safety cap on |total displacement| of the moving SDF in example 3 (m); ~dragon height, so unreachable for normal demo lengths but prevents the SDF from sailing off through the body if --num_frames is cranked to many hundreds. 0 disables the motion");
         add_double("dragon_squeeze_settle",    dragon_squeeze_settle,    0.0,  "Seconds to wait at the start of example 3 before the SDF begins moving (0 = start at t=0)");
+        add_double("dragon_squeeze_hold",      dragon_squeeze_hold,      -1.0, "If >= 0, plates trapezoid: press to dragon_squeeze_max, hold for this many seconds, retract to rest (spring-back). <0 = press-and-stay.");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");

@@ -455,6 +455,7 @@ void build_dragon_squeeze_example(const IPCArgs3D& args,
     spec = DragonSqueezeSpec{};
     spec.rise_max = std::max(0.0, args.dragon_squeeze_max);
     spec.t_settle = std::max(0.0, args.dragon_squeeze_settle);
+    spec.t_hold   = args.dragon_squeeze_hold;
 
     // Append one moving plate (SDF + visual mesh) and record the indexing
     // the spec needs to translate it later.
@@ -528,16 +529,28 @@ void build_dragon_squeeze_example(const IPCArgs3D& args,
 }
 
 namespace {
-// |rise_velocity * s| capped at rise_max (rise_max==0 disables the cap).
-// Direction stays along rise_velocity even when capped.
+// Plate displacement at virtual time s = max(0, t - t_settle).
+// t_hold < 0 : press at rise_velocity, capped at rise_max (legacy press-and-stay).
+// t_hold >= 0: trapezoid -- press to rise_max, hold t_hold s, retract to 0.
 Vec3 dragon_squeeze_displacement(const DragonSqueezePlate& p,
-                                 double s, double rise_max) {
-    Vec3 d = p.rise_velocity * s;
-    if (rise_max > 0.0) {
-        const double mag = d.norm();
-        if (mag > rise_max) d *= (rise_max / mag);
+                                 double s, double rise_max, double t_hold) {
+    if (t_hold < 0.0) {
+        Vec3 d = p.rise_velocity * s;
+        if (rise_max > 0.0) {
+            const double mag = d.norm();
+            if (mag > rise_max) d *= (rise_max / mag);
+        }
+        return d;
     }
-    return d;
+    const double v = p.rise_velocity.norm();
+    if (v == 0.0 || rise_max <= 0.0) return Vec3::Zero();
+    const double t_press = rise_max / v;
+    double phase_s;
+    if (s <= t_press)                       phase_s = s;
+    else if (s <= t_press + t_hold)         phase_s = t_press;
+    else if (s <= 2.0 * t_press + t_hold)   phase_s = t_press - (s - t_press - t_hold);
+    else                                    phase_s = 0.0;
+    return p.rise_velocity * phase_s;
 }
 }
 
@@ -548,7 +561,7 @@ void update_dragon_squeeze_sdf(SimParams& params,
         if (p.plane_index < 0 ||
             p.plane_index >= static_cast<int>(params.sdf_planes.size())) continue;
         params.sdf_planes[p.plane_index].point =
-            p.plane_point_rest + dragon_squeeze_displacement(p, s, spec.rise_max);
+            p.plane_point_rest + dragon_squeeze_displacement(p, s, spec.rise_max, spec.t_hold);
     }
 }
 
@@ -556,7 +569,7 @@ void update_dragon_squeeze_visual(std::vector<Vec3>& static_x,
                                   const DragonSqueezeSpec& spec, double t) {
     const double s = std::max(0.0, t - spec.t_settle);
     for (const DragonSqueezePlate& p : spec.plates) {
-        const Vec3 d = dragon_squeeze_displacement(p, s, spec.rise_max);
+        const Vec3 d = dragon_squeeze_displacement(p, s, spec.rise_max, spec.t_hold);
         for (int i = p.visual_v_begin; i < p.visual_v_end; ++i) {
             static_x[i] = p.visual_v_rest[i - p.visual_v_begin] + d;
         }

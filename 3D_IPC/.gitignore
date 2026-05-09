@@ -18,6 +18,9 @@ xyzrgb_dragon_full.obj
 # Top-level run logs from background sim invocations
 *_log.txt
 
+# Zip archives
+*.zip
+
 # Debug OBJ dumps written by visualization_test
 vis_debug/
 
