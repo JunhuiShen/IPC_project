@@ -47,7 +47,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_ticcd                   = false;    // true: Tight-Inclusion library | false: self-written linear CCD
 
     // --- scene selection ---
-    int         example      = 1;   // 1=twisting_cloth, 2=two_cylinder_twist, 3=cloth_pile, 4=dragon_on_cloth
+    int         example      = 1;   // 1=twisting_cloth, 2=two_cylinder_twist, 3=dragon_squeeze
     double      sheet_y      = 0.20; // m -- midline y for example 1
 
     // example 1: square cloth twisted in place
@@ -74,35 +74,10 @@ struct IPCArgs3D : ArgParser {
     bool        tcyl_untwist     = true;   // after reaching max_turn, smoothly reverse rotation back to 0
     double      tcyl_hold_time   = 0.0;    // seconds to dwell at peak twist before reversing (untwist only)
 
-    // example 3: a stack of falling cloths is launched downward (initial speed
-    // pile_drop_speed) onto a corner-pinned catcher cloth tilted
-    // pile_pinned_tilt degrees about +z; cloths bounce off the catcher's
-    // tilted face toward a static sphere + ground plane.
-    int         pile_count          = 4;     // number of falling cloths
-    int         pile_nx             = 48;    // each falling cloth's grid subdivisions along x ((nx+1)^2 verts per cloth)
-    int         pile_ny             = 48;    // each falling cloth's grid subdivisions along y
-    double      pile_cloth_size     = 0.7;   // each falling cloth's edge length (m); ~50% of the catcher
-    double      pile_first_y        = 3.0;   // y of the lowest falling cloth at t=0 (m)
-    double      pile_spacing        = 0.18;  // y-gap between successive falling cloths (m)
-    double      pile_drop_speed     = 0.0;   // initial -y velocity applied to every falling vertex (m/s)
-    double      pile_radius         = 0.7;   // static sphere radius (m)
-    double      pile_sphere_x       = 0.7;   // static sphere center x (m); offset so cloths sliding off the catcher land on it
-    int         pile_sphere_subdiv  = 4;     // visual icosphere subdivisions (0=20 tris, 1=80, 2=320, 3=1280, 4=5120)
-    double      pile_visual_shrink  = 0.005; // shrink rendered sphere radius by this (m); cloth rests at phi=eps_sdf
-    double      pile_ground_size    = 3.0;   // visual ground square edge length (m); SDF half-space is infinite
-    int         pile_ground_subdiv  = 240;   // visual ground grid subdivisions per side (visual only)
-    double      pile_pinned_y       = 2.5;   // y (m) of the catcher cloth's four pinned corners
-    double      pile_pinned_size    = 1.4;   // catcher cloth edge length (m)
-    int         pile_pinned_nx      = 80;    // catcher cloth grid subdivisions along x
-    int         pile_pinned_ny      = 80;    // catcher cloth grid subdivisions along y
-    double      pile_stack_x        = 0.0;   // x-shift of the falling stack (m); 0 = centred over the catcher
-    double      pile_pinned_tilt    = 45.0;  // catcher cloth tilt about +z through its center (deg); +ve drops the +x edge so cloth slides toward the sphere
-
-    // example 4: deformable dragon held in place (top vertices pinned, gravity
-    // off) while a ground plane SDF rises into it from below, squeezing the
-    // body up against the pinned crown. Per-tri Dm_inverse and per-hinge c_e
-    // are rebuilt from the 3D rest pose since the dragon is a closed surface
-    // with no global 2D parameterization.
+    // example 3: deformable dragon squeezed by one or two translating plane
+    // SDFs, gravity off. Per-tri Dm_inverse and per-hinge c_e are rebuilt
+    // from the 3D rest pose since the dragon is a closed surface with no
+    // global 2D parameterization.
     std::string dragon_path           = "xyzrgb_dragon_12k.obj"; // OBJ path; the 12k-vert decimated mesh produced by tools/decimate_obj.py
     double      dragon_scale          = 0.02;   // uniform scale applied to OBJ vertices (m / OBJ unit)
     double      dragon_drop_y         = 1.5;    // y (m) of the dragon's lowest vertex at t=0 (its resting altitude)
@@ -155,7 +130,7 @@ struct IPCArgs3D : ArgParser {
         add_double("k_barrier",                k_barrier,                1.0,   "Barrier stiffness multiplier");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cloth_pile, 4=dragon_on_cloth");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=dragon_squeeze");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -179,36 +154,16 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("tcyl_untwist",     tcyl_untwist,     true, "If true, after reaching tcyl_max_turn the cylinder smoothly reverses back to 0 (twist + untwist).");
         add_double("tcyl_hold_time",   tcyl_hold_time,   0.0,  "Seconds to dwell at peak twist before reversing (only with tcyl_untwist=true).");
 
-        add_int   ("pile_count",         pile_count,         4,     "Number of falling cloths in example 3");
-        add_int   ("pile_nx",            pile_nx,            48,    "Grid subdivisions along x for each falling cloth in example 3");
-        add_int   ("pile_ny",            pile_ny,            48,    "Grid subdivisions along y for each falling cloth in example 3");
-        add_double("pile_cloth_size",    pile_cloth_size,    0.7,   "Edge length (m) of each falling cloth in example 3");
-        add_double("pile_first_y",       pile_first_y,       3.0,   "y-position (m) of the lowest falling cloth at t=0 in example 3");
-        add_double("pile_spacing",       pile_spacing,       0.18,  "y-gap (m) between successive falling cloths in example 3");
-        add_double("pile_drop_speed",    pile_drop_speed,    0.0,   "Initial downward speed (m/s) of every falling-cloth vertex in example 3");
-        add_double("pile_radius",        pile_radius,        0.7,   "Static sphere radius (m) in example 3");
-        add_double("pile_sphere_x",      pile_sphere_x,      0.7,   "Static sphere center x (m) in example 3");
-        add_int   ("pile_sphere_subdiv", pile_sphere_subdiv, 4,     "Visual icosphere subdivisions in example 3 (0=20 tris, 1=80, 2=320, 3=1280, 4=5120)");
-        add_double("pile_visual_shrink", pile_visual_shrink, 0.005, "Shrink rendered sphere radius by this (m) in example 3 (cloth rests at phi=eps_sdf outside the SDF surface)");
-        add_double("pile_ground_size",   pile_ground_size,   3.0,   "Visual ground square edge length (m) in example 3; SDF half-space is infinite");
-        add_int   ("pile_ground_subdiv", pile_ground_subdiv, 240,   "Visual ground grid subdivisions per side in example 3");
-        add_double("pile_pinned_y",      pile_pinned_y,      2.5,   "y (m) of the catcher cloth's four pinned corners in example 3");
-        add_double("pile_pinned_size",   pile_pinned_size,   1.4,   "Edge length (m) of the catcher cloth in example 3");
-        add_int   ("pile_pinned_nx",     pile_pinned_nx,     80,    "Catcher cloth grid subdivisions along x in example 3");
-        add_int   ("pile_pinned_ny",     pile_pinned_ny,     80,    "Catcher cloth grid subdivisions along y in example 3");
-        add_double("pile_stack_x",       pile_stack_x,       0.0,   "x-shift (m) of the falling stack in example 3 (0 = centred over the catcher)");
-        add_double("pile_pinned_tilt",   pile_pinned_tilt,   45.0,  "Catcher cloth tilt (deg) about +z through its center in example 3; +ve drops the +x edge so cloth slides toward the sphere");
-
-        add_string("dragon_path",            dragon_path,           "xyzrgb_dragon_12k.obj", "Path to the dragon OBJ file for example 4 (relative paths are resolved against the working directory). Default points to the 12k-vert decimated mesh from tools/decimate_obj.py; pass xyzrgb_dragon_full.obj to use the original 125k-vert mesh");
-        add_double("dragon_scale",           dragon_scale,           0.02, "Uniform scale applied to dragon OBJ vertices in example 4 (m per OBJ unit). Smaller values give a smaller dragon (and smaller min-edge -- d_hat must stay below 0.5 * min edge)");
-        add_double("dragon_drop_y",            dragon_drop_y,            1.5,  "y-position (m) of the dragon's lowest vertex at t=0 in example 4 (its resting altitude)");
-        add_double("dragon_ground_size",       dragon_ground_size,       5.0,  "Visual ground square edge length (m) in example 4; SDF half-space is infinite. Sized to just cover the dragon's xz footprint under heavy squeeze");
-        add_int   ("dragon_ground_subdiv",     dragon_ground_subdiv,     240,  "Visual ground grid subdivisions per side in example 4");
-        add_int   ("dragon_anchor_pin_count",  dragon_anchor_pin_count,  120,  "Number of dragon vertices to pin in place in example 4 (anchors the squeeze; selected from the end opposite the squeeze direction)");
-        add_double("dragon_squeeze_gap",       dragon_squeeze_gap,       0.05, "Initial gap (m) between dragon's nearest extreme vertex and the moving SDF's force-free rest in example 4");
-        add_double("dragon_squeeze_speed",     dragon_squeeze_speed,     0.15, "|velocity| of the moving SDF in example 4 (m/s); slow enough that 60-90 frame runs stay below the dragon's elastic-yield ceiling and never see the cap");
-        add_double("dragon_squeeze_max",       dragon_squeeze_max,       1.8,  "Safety cap on |total displacement| of the moving SDF in example 4 (m); ~dragon height, so unreachable for normal demo lengths but prevents the SDF from sailing off through the body if --num_frames is cranked to many hundreds. 0 disables the motion");
-        add_double("dragon_squeeze_settle",    dragon_squeeze_settle,    0.0,  "Seconds to wait at the start of example 4 before the SDF begins moving (0 = start at t=0)");
+        add_string("dragon_path",            dragon_path,           "xyzrgb_dragon_12k.obj", "Path to the dragon OBJ file for example 3 (relative paths are resolved against the working directory). Default points to the 12k-vert decimated mesh from tools/decimate_obj.py; pass xyzrgb_dragon_full.obj to use the original 125k-vert mesh");
+        add_double("dragon_scale",           dragon_scale,           0.02, "Uniform scale applied to dragon OBJ vertices in example 3 (m per OBJ unit). Smaller values give a smaller dragon (and smaller min-edge -- d_hat must stay below 0.5 * min edge)");
+        add_double("dragon_drop_y",            dragon_drop_y,            1.5,  "y-position (m) of the dragon's lowest vertex at t=0 in example 3 (its resting altitude)");
+        add_double("dragon_ground_size",       dragon_ground_size,       5.0,  "Visual ground square edge length (m) in example 3; SDF half-space is infinite. Sized to just cover the dragon's xz footprint under heavy squeeze");
+        add_int   ("dragon_ground_subdiv",     dragon_ground_subdiv,     240,  "Visual ground grid subdivisions per side in example 3");
+        add_int   ("dragon_anchor_pin_count",  dragon_anchor_pin_count,  120,  "Number of dragon vertices to pin in place in example 3 (anchors the squeeze; selected from the end opposite the squeeze direction)");
+        add_double("dragon_squeeze_gap",       dragon_squeeze_gap,       0.05, "Initial gap (m) between dragon's nearest extreme vertex and the moving SDF's force-free rest in example 3");
+        add_double("dragon_squeeze_speed",     dragon_squeeze_speed,     0.15, "|velocity| of the moving SDF in example 3 (m/s); slow enough that 60-90 frame runs stay below the dragon's elastic-yield ceiling and never see the cap");
+        add_double("dragon_squeeze_max",       dragon_squeeze_max,       1.8,  "Safety cap on |total displacement| of the moving SDF in example 3 (m); ~dragon height, so unreachable for normal demo lengths but prevents the SDF from sailing off through the body if --num_frames is cranked to many hundreds. 0 disables the motion");
+        add_double("dragon_squeeze_settle",    dragon_squeeze_settle,    0.0,  "Seconds to wait at the start of example 3 before the SDF begins moving (0 = start at t=0)");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");

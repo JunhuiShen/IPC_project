@@ -162,7 +162,7 @@ void build_green_boxes(const RedBoxes& red_boxes, double d_hat, GreenBoxes& gree
     }
 }
 
-std::vector<std::vector<int>> build_corotated_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int nv){
+std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int nv){
     std::vector<std::vector<int>> out(nv);
     #pragma omp parallel for schedule(static)
     for (int vi = 0; vi < nv; ++vi) {
@@ -176,32 +176,6 @@ std::vector<std::vector<int>> build_corotated_adj(const RefMesh& ref_mesh, const
                 row.push_back(vj);
             }
         }
-        std::sort(row.begin(), row.end());
-        row.erase(std::unique(row.begin(), row.end()), row.end());
-    }
-    return out;
-}
-
-std::vector<std::vector<int>> build_bending_adj(const RefMesh& ref_mesh, int nv) {
-    std::vector<std::vector<int>> out(nv);
-    const int nh = static_cast<int>(ref_mesh.hinges.size());
-    if (nh == 0) return out;
-    for (int hi = 0; hi < nh; ++hi) {
-        const auto& h = ref_mesh.hinges[hi];
-        for (int a = 0; a < 4; ++a) {
-            const int va = h.v[a];
-            if (va < 0 || va >= nv) continue;
-            for (int b = a + 1; b < 4; ++b) {
-                const int vb = h.v[b];
-                if (vb < 0 || vb >= nv) continue;
-                out[va].push_back(vb);
-                out[vb].push_back(va);
-            }
-        }
-    }
-    #pragma omp parallel for schedule(dynamic, 64)
-    for (int vi = 0; vi < nv; ++vi) {
-        auto& row = out[vi];
         std::sort(row.begin(), row.end());
         row.erase(std::unique(row.begin(), row.end()), row.end());
     }

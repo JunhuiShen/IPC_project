@@ -54,13 +54,8 @@ struct SweptBvhCache {
     bool                 valid = false;
 };
 
-// Corotated elastic edges of the conflict graph: vertices that
-// share a triangle. Invariant for a fixed mesh.
-std::vector<std::vector<int>> build_corotated_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int num_vertices);
-
-// Bending-hinge elastic edges of the conflict graph: vertices that share a
-// hinge (4-vertex stencil). Invariant for a fixed mesh.
-std::vector<std::vector<int>> build_bending_adj(const RefMesh& ref_mesh, int num_vertices);
+// Mesh-adjacency edges of the conflict graph. Invariant for a fixed mesh.
+std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int num_vertices);
 
 // Contact edges of the conflict graph from broad-phase NT/SS pair lists.
 // Stable between broad-phase initialize() calls (key on BroadPhase::version()).

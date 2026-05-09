@@ -37,10 +37,9 @@ int main(int argc, char** argv) {
 
     if      (args.example == 1) build_twisting_cloth_example(args, ref_mesh, state, X, pins, twist_spec);
     else if (args.example == 2) build_two_cylinder_twist_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, cyl_twist_spec);
-    else if (args.example == 3) build_cloth_pile_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
-    else if (args.example == 4) build_dragon_squeeze_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, squeeze_spec);
+    else if (args.example == 3) build_dragon_squeeze_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, squeeze_spec);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3.\n";
         return 1;
     }
 
@@ -57,9 +56,9 @@ int main(int argc, char** argv) {
             update_cylinder_twist_pins(p, cyl_twist_spec, t);
             update_cylinder_sdfs(params, cyl_twist_spec, t);
         };
-    } else if (args.example == 4) {
+    } else if (args.example == 3) {
         // Dragon pins are static; the closure exists only to advance the
-        // rising-floor SDF every substep (per-frame sync would let the dragon
+        // moving-plate SDF every substep (per-frame sync would let the dragon
         // collide with a stale plane position mid-substep).
         pin_updater = [&squeeze_spec, &params](std::vector<Pin>&, double t) {
             update_dragon_squeeze_sdf(params, squeeze_spec, t);
@@ -126,9 +125,9 @@ int main(int argc, char** argv) {
     };
 
     // Examples whose visible collider moves over time get a per-frame export
-    // (example 2's rotating cylinders, example 4's rising floor). Others keep
+    // (example 2's rotating cylinders, example 3's moving plates). Others keep
     // the one-time "static_colliders".
-    const bool collider_is_dynamic = (args.example == 2 || args.example == 4);
+    const bool collider_is_dynamic = (args.example == 2 || args.example == 3);
 
     if (restart_frame < 0) {
         if (fs::exists(outdir)) fs::remove_all(outdir);
@@ -197,7 +196,7 @@ int main(int argc, char** argv) {
             // mesh only needs a per-frame refresh for the export.
             const double t_frame = frame_index / params.fps;
             if      (args.example == 2) update_cylinder_visuals      (static_x, cyl_twist_spec, t_frame);
-            else if (args.example == 4) update_dragon_squeeze_visual (static_x, squeeze_spec,   t_frame);
+            else if (args.example == 3) update_dragon_squeeze_visual (static_x, squeeze_spec,   t_frame);
             write_collider_mesh(frame_collider_path(frame_index));
         }
 

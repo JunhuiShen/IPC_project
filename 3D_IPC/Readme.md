@@ -72,23 +72,21 @@ Built-in example scenes (`--example N`):
 |-------------|-------|
 | `1` | Square cloth clamped on two edges and twisted (default) |
 | `2` | Four closed-loop cloth strips wrapping two horizontal cylinders, twisted then untwisted |
-| `3` | Cloths dropped onto a 45°-tilted corner-pinned catcher cloth; they drape over its low edge and fall onto a static sphere and ground |
-| `4` | Deformable xyzrgb dragon squeezed between two opposing plane SDFs (floor rising + ceiling descending) |
+| `3` | Deformable xyzrgb dragon squeezed between two opposing plane SDFs (floor rising + ceiling descending) |
 
 Common invocations:
 
     ./build/3D_sim --example 1                              # twisting cloth
     ./build/3D_sim --example 2                              # two-cylinder twist
-    ./build/3D_sim --example 3                              # cloth pile on sphere
-    ./build/3D_sim --example 4                              # two-plate squeeze on the dragon
+    ./build/3D_sim --example 3                              # two-plate squeeze on the dragon
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
 
-Reference command for example 1 (square cloth twisted in place, 240 frames at
+Reference command for example 1 (square cloth twisted in place, 180 frames at
 0.5 turns/s):
 
-    ./build/3D_sim --example 1 --num_frames 240 \
+    ./build/3D_sim --example 1 --num_frames 180 \
         --E 115 --nu 0.25 --kB 0.009 --kpin 1e8 --twist_rate 0.5 \
         --d_hat 0.005 --k_barrier 100 \
         --fixed_iters --max_substep_iters 10
@@ -102,23 +100,13 @@ frames):
         --tcyl_max_turn 2.0 \
         --fixed_iters --max_substep_iters 10
 
-Reference command for example 3 (a stack of 4 cloths falls onto a 45°-tilted
-corner-pinned catcher cloth and slides off onto a static sphere and ground;
-60 frames):
-
-    ./build/3D_sim --example 3 --num_frames 60 \
-        --substeps 15 --max_substep_iters 20 \
-        --E 115 --nu 0.25 --kB 0.001 --kpin 5e6 \
-        --d_hat 0.002 --k_barrier 200 --eps_sdf 0.01 \
-        --fixed_iters
-
-Reference command for example 4 (the xyzrgb dragon squeezed between a
+Reference command for example 3 (the xyzrgb dragon squeezed between a
 floor that rises and a ceiling that descends, both at 0.2 m/s along y;
 120 frames; gravity disabled inside the builder). Dragon defaults to
 `xyzrgb_dragon_12k.obj`, the 12k-vert decimation produced by
 `tools/decimate_obj.py`:
 
-    ./build/3D_sim --example 4 --num_frames 120 \
+    ./build/3D_sim --example 3 --num_frames 120 \
         --dragon_squeeze_speed 0.2 \
         --E 10 --nu 0.25 --kB 0.001 --kpin 1e8 \
         --d_hat 0.002 --k_barrier 100 --k_sdf 2e8 --eps_sdf 0.01 \
@@ -153,7 +141,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (new per-iter rebuild solver), `ogc_box_pad` (BVH padding for the per-iter rebuild; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (clamp range for `R_vi = clamp(prev_disp * 1.2, min, max)`) |
-| Scene | `example` (`1`..`4`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `pile_count`, `pile_nx`, `pile_ny`, `pile_cloth_size`, `pile_first_y`, `pile_spacing`, `pile_drop_speed`, `pile_radius`, `pile_sphere_x`, `pile_sphere_subdiv`, `pile_visual_shrink`, `pile_ground_size`, `pile_ground_subdiv`, `pile_pinned_y`, `pile_pinned_size`, `pile_pinned_nx`, `pile_pinned_ny`, `pile_stack_x`, `pile_pinned_tilt`, `dragon_path`, `dragon_scale`, `dragon_drop_y`, `dragon_ground_size`, `dragon_ground_subdiv`, `dragon_top_pin_count`, `dragon_floor_gap`, `dragon_floor_speed`, `dragon_floor_rise_max`, `dragon_floor_settle` |
+| Scene | `example` (`1`..`3`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `dragon_path`, `dragon_scale`, `dragon_drop_y`, `dragon_ground_size`, `dragon_ground_subdiv`, `dragon_anchor_pin_count`, `dragon_squeeze_gap`, `dragon_squeeze_speed`, `dragon_squeeze_max`, `dragon_squeeze_settle` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame` |
 
 Notes:
@@ -337,7 +325,7 @@ Our OGC narrow phase and `global_gauss_seidel_solver_ogc` implement:
 > *Offset Geometric Contact.* ACM Transactions on Graphics 44(4):160, 2025.
 > [doi:10.1145/3731205](https://doi.org/10.1145/3731205)
 
-The dragon mesh used by example 4 (`xyzrgb_dragon_full.obj`) is the
+The dragon mesh used by example 3 (`xyzrgb_dragon_full.obj`) is the
 **XYZ RGB Asian Dragon** scan from the Stanford 3D Scanning Repository,
 sourced via [alecjacobson/common-3d-test-models](https://github.com/alecjacobson/common-3d-test-models).
 The 12k-vertex `xyzrgb_dragon_12k.obj` is a quadric edge-collapse decimation
