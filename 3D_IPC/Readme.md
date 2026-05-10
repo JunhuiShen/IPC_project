@@ -100,11 +100,12 @@ frames):
         --tcyl_max_turn 2.0 \
         --fixed_iters --max_substep_iters 10
 
-Reference command for example 3 (2.0 turns, twist + untwist, 850 frames):
+Reference command for example 3 (4.0 turns at 0.30 turns/s, twist + untwist, 850 frames):
 
     ./build/3D_sim --example 3 --num_frames 850 \
         --E 115 --nu 0.25 --kB 0.009 --kpin 1e8 \
-        --d_hat 0.005 --k_barrier 100 --k_sdf 1e7 \
+        --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 \
+        --tu_max_turn 4.0 --tu_twist_rate 0.30 \
         --fixed_iters --max_substep_iters 10 --substeps 5
 
 Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
