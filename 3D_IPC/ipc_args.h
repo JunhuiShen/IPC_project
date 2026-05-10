@@ -47,7 +47,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_ticcd                   = false;    // true: Tight-Inclusion library | false: self-written linear CCD
 
     // --- scene selection ---
-    int         example      = 1;   // 1=twisting_cloth, 2=two_cylinder_twist, 3=dragon_squeeze
+    int         example      = 1;   // 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist
     double      sheet_y      = 0.20; // m -- midline y for example 1
 
     // example 1: square cloth twisted in place
@@ -74,7 +74,7 @@ struct IPCArgs3D : ArgParser {
     bool        tcyl_untwist     = true;   // after reaching max_turn, smoothly reverse rotation back to 0
     double      tcyl_hold_time   = 0.0;    // seconds to dwell at peak twist before reversing (untwist only)
 
-    // example 4: rectangular cloth wrapping one horizontal cylinder, twisted between two clamped top edges
+    // example 3: rectangular cloth wrapping one horizontal cylinder, twisted between two clamped top edges
     double      tu_size           = 4.0;   // cloth arc length (m): drop + bottom wrap + drop
     double      tu_width          = 0.60;  // cloth width along the cylinder axis (m)
     int         tu_nx             = 55;    // grid subdivisions along x (cyl axis)
@@ -89,22 +89,6 @@ struct IPCArgs3D : ArgParser {
     double      tu_cyl_length     = 3.9;   // along x (m)
     int         tu_cyl_nu         = 64;    // circumferential subdivisions for the visual mesh
     double      tu_visual_shrink  = 0.002; // visual cyl this much thinner than pin_r (m); avoids SDF/barrier fighting at contact
-
-    // example 3: deformable dragon squeezed by one or two translating plane
-    // SDFs, gravity off. Per-tri Dm_inverse and per-hinge c_e are rebuilt
-    // from the 3D rest pose since the dragon is a closed surface with no
-    // global 2D parameterization.
-    std::string dragon_path           = "xyzrgb_dragon_12k.obj"; // OBJ path; the 12k-vert decimated mesh produced by tools/decimate_obj.py
-    double      dragon_scale          = 0.02;   // uniform scale applied to OBJ vertices (m / OBJ unit)
-    double      dragon_drop_y         = 1.5;    // y (m) of the dragon's lowest vertex at t=0 (its resting altitude)
-    double      dragon_ground_size    = 5.0;    // visual ground square edge length (m); SDF half-space is infinite. Sized to just cover the dragon's xz footprint under heavy squeeze (~4.4 m wide at the maximum-compression frame of the both-ends variant)
-    int         dragon_ground_subdiv  = 240;    // visual ground grid subdivisions per side
-    int         dragon_anchor_pin_count = 120;  // number of dragon vertices to pin (selected from the end opposite the squeeze direction)
-    double      dragon_squeeze_gap      = 0.05; // initial gap (m) between dragon's nearest extreme vertex and the moving SDF's force-free rest
-    double      dragon_squeeze_speed    = 0.15; // |velocity| of the moving SDF (m/s); slow enough that 60-90 frame runs stay below the dragon's elastic-yield ceiling and never see the cap
-    double      dragon_squeeze_max      = 1.8;  // safety cap on |total displacement| (m); ~dragon height, so unreachable for normal demo lengths but prevents the SDF from sailing off through the body if --num_frames is cranked to many hundreds. 0 = no motion
-    double      dragon_squeeze_settle   = 0.0;  // seconds to wait before the SDF starts moving (0 = start at t=0)
-    double      dragon_squeeze_hold     = -1.0; // if >= 0, plates trapezoid: press to dragon_squeeze_max, hold this long, then retract back to rest. <0 = press-and-stay.
 
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
@@ -147,7 +131,7 @@ struct IPCArgs3D : ArgParser {
         add_double("k_barrier",                k_barrier,                1.0,   "Barrier stiffness multiplier");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=dragon_squeeze, 4=cylinder_twist_untwist");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -171,32 +155,20 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("tcyl_untwist",     tcyl_untwist,     true, "If true, after reaching tcyl_max_turn the cylinder smoothly reverses back to 0 (twist + untwist).");
         add_double("tcyl_hold_time",   tcyl_hold_time,   0.0,  "Seconds to dwell at peak twist before reversing (only with tcyl_untwist=true).");
 
-        add_double("tu_size",          tu_size,          4.0,  "Cloth arc length (m) for example 4: drop + bottom wrap + drop");
-        add_double("tu_width",         tu_width,         0.60, "Cloth width (m) along the cylinder axis for example 4");
-        add_int   ("tu_nx",            tu_nx,            55,   "Cloth grid subdivisions along x for example 4 (along the cylinder axis)");
-        add_int   ("tu_ny",            tu_ny,            180,  "Cloth grid subdivisions along the arc (back drop -> bottom wrap -> front drop) for example 4");
-        add_double("tu_twist_rate",    tu_twist_rate,    0.15, "Cylinder yaw rate (turns/second) for example 4");
-        add_double("tu_settle_time",   tu_settle_time,   0.2,  "Seconds with omega=0 so the cloth settles before the cylinder starts yawing in example 4");
-        add_double("tu_ramp_time",     tu_ramp_time,     0.5,  "Seconds to linearly ramp omega between 0 and full in example 4");
-        add_double("tu_max_turn",      tu_max_turn,      2.0,  "Cylinder yaw cap (turns) in example 4 (0 = no cap)");
-        add_bool  ("tu_untwist",       tu_untwist,       true, "If true, after reaching tu_max_turn the cylinder reverses back to 0 (twist + untwist) in example 4");
-        add_double("tu_hold_time",     tu_hold_time,     0.0,  "Seconds to dwell at peak twist before reversing in example 4");
-        add_double("tu_cyl_radius",    tu_cyl_radius,    0.156,"Collider cylinder radius (m) for example 4");
-        add_double("tu_cyl_length",    tu_cyl_length,    3.9,  "Collider cylinder length along x (m) for example 4");
-        add_int   ("tu_cyl_nu",        tu_cyl_nu,        64,   "Circumferential subdivisions for the visual cylinder in example 4");
+        add_double("tu_size",          tu_size,          4.0,  "Cloth arc length (m) for example 3: drop + bottom wrap + drop");
+        add_double("tu_width",         tu_width,         0.60, "Cloth width (m) along the cylinder axis for example 3");
+        add_int   ("tu_nx",            tu_nx,            55,   "Cloth grid subdivisions along x for example 3 (along the cylinder axis)");
+        add_int   ("tu_ny",            tu_ny,            180,  "Cloth grid subdivisions along the arc (back drop -> bottom wrap -> front drop) for example 3");
+        add_double("tu_twist_rate",    tu_twist_rate,    0.15, "Cylinder yaw rate (turns/second) for example 3");
+        add_double("tu_settle_time",   tu_settle_time,   0.2,  "Seconds with omega=0 so the cloth settles before the cylinder starts yawing in example 3");
+        add_double("tu_ramp_time",     tu_ramp_time,     0.5,  "Seconds to linearly ramp omega between 0 and full in example 3");
+        add_double("tu_max_turn",      tu_max_turn,      2.0,  "Cylinder yaw cap (turns) in example 3 (0 = no cap)");
+        add_bool  ("tu_untwist",       tu_untwist,       true, "If true, after reaching tu_max_turn the cylinder reverses back to 0 (twist + untwist) in example 3");
+        add_double("tu_hold_time",     tu_hold_time,     0.0,  "Seconds to dwell at peak twist before reversing in example 3");
+        add_double("tu_cyl_radius",    tu_cyl_radius,    0.156,"Collider cylinder radius (m) for example 3");
+        add_double("tu_cyl_length",    tu_cyl_length,    3.9,  "Collider cylinder length along x (m) for example 3");
+        add_int   ("tu_cyl_nu",        tu_cyl_nu,        64,   "Circumferential subdivisions for the visual cylinder in example 3");
         add_double("tu_visual_shrink", tu_visual_shrink, 0.002,"Render cylinder this much thinner than the cloth's rest radius (m, visual only). Small offset (~2mm) keeps a visible sliver between cloth + cylinder and avoids SDF/barrier energy fighting at the contact");
-
-        add_string("dragon_path",            dragon_path,           "xyzrgb_dragon_12k.obj", "Path to the dragon OBJ file for example 3 (relative paths are resolved against the working directory). Default points to the 12k-vert decimated mesh from tools/decimate_obj.py; pass xyzrgb_dragon_full.obj to use the original 125k-vert mesh");
-        add_double("dragon_scale",           dragon_scale,           0.02, "Uniform scale applied to dragon OBJ vertices in example 3 (m per OBJ unit). Smaller values give a smaller dragon (and smaller min-edge -- d_hat must stay below 0.5 * min edge)");
-        add_double("dragon_drop_y",            dragon_drop_y,            1.5,  "y-position (m) of the dragon's lowest vertex at t=0 in example 3 (its resting altitude)");
-        add_double("dragon_ground_size",       dragon_ground_size,       5.0,  "Visual ground square edge length (m) in example 3; SDF half-space is infinite. Sized to just cover the dragon's xz footprint under heavy squeeze");
-        add_int   ("dragon_ground_subdiv",     dragon_ground_subdiv,     240,  "Visual ground grid subdivisions per side in example 3");
-        add_int   ("dragon_anchor_pin_count",  dragon_anchor_pin_count,  120,  "Number of dragon vertices to pin in place in example 3 (anchors the squeeze; selected from the end opposite the squeeze direction)");
-        add_double("dragon_squeeze_gap",       dragon_squeeze_gap,       0.05, "Initial gap (m) between dragon's nearest extreme vertex and the moving SDF's force-free rest in example 3");
-        add_double("dragon_squeeze_speed",     dragon_squeeze_speed,     0.15, "|velocity| of the moving SDF in example 3 (m/s); slow enough that 60-90 frame runs stay below the dragon's elastic-yield ceiling and never see the cap");
-        add_double("dragon_squeeze_max",       dragon_squeeze_max,       1.8,  "Safety cap on |total displacement| of the moving SDF in example 3 (m); ~dragon height, so unreachable for normal demo lengths but prevents the SDF from sailing off through the body if --num_frames is cranked to many hundreds. 0 disables the motion");
-        add_double("dragon_squeeze_settle",    dragon_squeeze_settle,    0.0,  "Seconds to wait at the start of example 3 before the SDF begins moving (0 = start at t=0)");
-        add_double("dragon_squeeze_hold",      dragon_squeeze_hold,      -1.0, "If >= 0, plates trapezoid: press to dragon_squeeze_max, hold for this many seconds, retract to rest (spring-back). <0 = press-and-stay.");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");

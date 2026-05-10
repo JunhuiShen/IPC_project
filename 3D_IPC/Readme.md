@@ -72,15 +72,13 @@ Built-in example scenes (`--example N`):
 |-------------|-------|
 | `1` | Square cloth clamped on two edges and twisted (default) |
 | `2` | Four closed-loop cloth strips wrapping two horizontal cylinders, twisted then untwisted |
-| `3` | Deformable xyzrgb dragon squeezed between two opposing plane SDFs (floor rising + ceiling descending), then plates retract and the dragon springs back |
-| `4` | Rectangular cloth wrapping one horizontal cylinder; cylinder yaws about +y, twisting the cloth between two clamped top edges, then reverses to untwist |
+| `3` | Rectangular cloth wrapping one horizontal cylinder; cylinder yaws about +y, twisting the cloth between two clamped top edges, then reverses to untwist |
 
 Common invocations:
 
     ./build/3D_sim --example 1                              # twisting cloth
     ./build/3D_sim --example 2                              # two-cylinder twist
-    ./build/3D_sim --example 3                              # two-plate squeeze on the dragon
-    ./build/3D_sim --example 4                              # cylinder yaws and twists cloth between two clamped top edges
+    ./build/3D_sim --example 3                              # cylinder yaws and twists cloth between two clamped top edges
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
@@ -102,25 +100,12 @@ frames):
         --tcyl_max_turn 2.0 \
         --fixed_iters --max_substep_iters 10
 
-Reference command for example 3 (240 frames: press, retract, spring back;
-peak ~90% compression):
+Reference command for example 3 (2.0 turns, twist + untwist, 850 frames):
 
-    ./build/3D_sim --example 3 --num_frames 240 \
-        --dragon_squeeze_speed 0.2 --dragon_squeeze_max 0.87 --dragon_squeeze_hold 0.0 \
-        --E 50 --nu 0.25 --kB 0.05 --kpin 1e8 \
-        --d_hat 0.002 --k_barrier 100 --k_sdf 1e10 --eps_sdf 0.01 \
-        --fixed_iters --max_substep_iters 10 --substeps 8
-
-Reference command for example 4 (2.0 turns, twist + untwist, 850 frames):
-
-    ./build/3D_sim --example 4 --num_frames 850 --outdir frames_ex4 \
+    ./build/3D_sim --example 3 --num_frames 850 \
         --E 115 --nu 0.25 --kB 0.009 --kpin 1e8 \
         --d_hat 0.005 --k_barrier 100 --k_sdf 1e7 \
         --fixed_iters --max_substep_iters 10 --substeps 5
-
-To regenerate the decimated dragon (or pick a different target count):
-
-    python3 tools/decimate_obj.py xyzrgb_dragon_full.obj xyzrgb_dragon_12k.obj --target-faces 24000
 
 Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
 (`frame_0000.geo`, `frame_0001.geo`, ...). `--format obj` writes `.obj`;
@@ -147,7 +132,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (new per-iter rebuild solver), `ogc_box_pad` (BVH padding for the per-iter rebuild; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (clamp range for `R_vi = clamp(prev_disp * 1.2, min, max)`) |
-| Scene | `example` (`1`..`3`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `dragon_path`, `dragon_scale`, `dragon_drop_y`, `dragon_ground_size`, `dragon_ground_subdiv`, `dragon_anchor_pin_count`, `dragon_squeeze_gap`, `dragon_squeeze_speed`, `dragon_squeeze_max`, `dragon_squeeze_settle`, `dragon_squeeze_hold` |
+| Scene | `example` (`1`..`3`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame` |
 
 Notes:
@@ -331,8 +316,3 @@ Our OGC narrow phase and `global_gauss_seidel_solver_ogc` implement:
 > *Offset Geometric Contact.* ACM Transactions on Graphics 44(4):160, 2025.
 > [doi:10.1145/3731205](https://doi.org/10.1145/3731205)
 
-The dragon mesh used by example 3 (`xyzrgb_dragon_full.obj`) is the
-**XYZ RGB Asian Dragon** scan from the Stanford 3D Scanning Repository,
-sourced via [alecjacobson/common-3d-test-models](https://github.com/alecjacobson/common-3d-test-models).
-The 12k-vertex `xyzrgb_dragon_12k.obj` is a quadric edge-collapse decimation
-of that mesh produced by `tools/decimate_obj.py`.
