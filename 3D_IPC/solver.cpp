@@ -609,23 +609,37 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
 
     auto& bp_cache = broad_phase.mutable_cache();
 
+    std::vector<Vec3>   xnew_copy(nv);
+    std::vector<double> bounds(nv);
+
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
-        if (iter > 1) broad_phase.refresh_pairs(ref_mesh);
+        if (iter > 1) {
+            for (int vi = 0; vi < nv; ++vi) {
+                const double R_vi = node_box_size_fn(vi);
+                incremental_refresh_vertex(bp_cache, vi, xnew, ref_mesh, pad, R_vi + pad);
+            }
+            broad_phase.refresh_pairs(ref_mesh);
+        }
+
+        xnew_copy = xnew;
+
+        #pragma omp parallel for schedule(static)
         for (int vi = 0; vi < nv; ++vi) {
-            const Vec3 dx = -gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm);
-            if (dx.squaredNorm() < 1e-28) continue;
+            double b = compute_trust_region_bound_for_vertex(vi, xnew_copy, bp_cache, 0.4);
+            if (!std::isfinite(b)) b = node_box_size_fn(vi);
+            bounds[vi] = b;
+        }
 
-            const double R_vi = node_box_size_fn(vi);
-
-            // No-pair fallback bound = R_vi
-            double bound = compute_trust_region_bound_for_vertex(vi, xnew, broad_phase.cache(), 0.4);
-            if (!std::isfinite(bound)) bound = R_vi;
-
+        #pragma omp parallel for schedule(static)
+        for (int vi = 0; vi < nv; ++vi) {
+            const Vec3 dx = -gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew_copy, broad_phase, &pm);
+            if (dx.squaredNorm() < 1e-28) {
+                xnew[vi] = xnew_copy[vi];
+                continue;
+            }
             const double dx_norm = dx.norm();
-            const double toi = (dx_norm > 0.0) ? std::min(1.0, bound / dx_norm) : 1.0;
-            xnew[vi] += toi * dx;
-
-            incremental_refresh_vertex(bp_cache, vi, xnew, ref_mesh, pad, R_vi + pad);
+            const double toi = (dx_norm > 0.0) ? std::min(1.0, bounds[vi] / dx_norm) : 1.0;
+            xnew[vi] = xnew_copy[vi] + toi * dx;
         }
 
         result.iterations = iter;
