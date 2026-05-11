@@ -31,6 +31,7 @@ int main(int argc, char** argv) {
     TwistSpec          twist_spec;
     CylinderTwistSpec  cyl_twist_spec;
     DragonSqueezeSpec  squeeze_spec;
+    ClothingSpec       clothing_spec;
 
     std::vector<Vec3> static_x;
     std::vector<int>  static_tris;
@@ -38,8 +39,9 @@ int main(int argc, char** argv) {
     if      (args.example == 1) build_twisting_cloth_example(args, ref_mesh, state, X, pins, twist_spec);
     else if (args.example == 2) build_two_cylinder_twist_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, cyl_twist_spec);
     else if (args.example == 3) build_dragon_squeeze_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, squeeze_spec);
+    else if (args.example == 4) build_clothing_example(args, ref_mesh, state, X, pins, params, clothing_spec);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4.\n";
         return 1;
     }
 
@@ -63,12 +65,25 @@ int main(int argc, char** argv) {
         pin_updater = [&squeeze_spec, &params](std::vector<Pin>&, double t) {
             update_dragon_squeeze_sdf(params, squeeze_spec, t);
         };
+    } else if (args.example == 4) {
+        // Body is fully pinned; pin targets are interpolated from the source
+        // OBJ sequence each substep. Per-substep (not per-frame) so the
+        // dress never sees a stale body position mid-substep -- same
+        // lesson as examples 2 and 3.
+        pin_updater = [&clothing_spec](std::vector<Pin>& p, double t) {
+            update_clothing_pins(p, clothing_spec, t);
+        };
     }
 
     ref_mesh.build_lumped_mass(params.density, params.thickness);
     VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);
 
-    // Validate d_hat against the minimum edge length in the mesh.
+    // Validate d_hat against the minimum edge length in the mesh. For example 4
+    // we downgrade this from an error to a warning: the body is fully pinned,
+    // and the broad phase already excludes incident-triangle / shared-vertex
+    // pairs, so sub-d_hat edges inside the body (e.g. SMPL face features) won't
+    // trigger spurious self-contact at runtime.
+    const bool d_hat_warn_only = (args.example == 4);
     if (params.d_hat > 0.0) {
         double min_edge_len = std::numeric_limits<double>::max();
         const int nt = static_cast<int>(ref_mesh.tris.size()) / 3;
@@ -82,12 +97,14 @@ int main(int argc, char** argv) {
         }
         const double d_hat_limit = 0.5 * min_edge_len;
         if (params.d_hat > d_hat_limit) {
-            std::cerr << "Error: d_hat (" << params.d_hat
-                      << ") > 0.5 * minimum edge length (" << d_hat_limit
+            std::ostream& out = d_hat_warn_only ? std::cout : std::cerr;
+            out << (d_hat_warn_only ? "Warning" : "Error")
+                << ": d_hat (" << params.d_hat
+                << ") > 0.5 * minimum edge length (" << d_hat_limit
                       << ", min_edge_len = " << min_edge_len
                       << "). Barrier activation distance must not exceed half "
                          "the shortest edge in the mesh.\n";
-            return 1;
+            if (!d_hat_warn_only) return 1;
         }
         std::cout << "min_edge_length = " << min_edge_len
                   << " (d_hat limit = " << d_hat_limit << ")\n";

@@ -143,7 +143,11 @@ public:
     // radius is recomputed from the broad-phase cache each iteration so it
     // adapts as vertices approach contacts. clip_to_node_box / clip_ccd are
     // ignored under use_ogc.
-    void per_vertex_safe_step(std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety = 0.9, bool clip_to_node_box = true, bool clip_ccd = true, bool use_ticcd = true, bool use_ogc = false, const std::vector<std::vector<int>>* color_groups = nullptr) const;
+    // is_kinematic (optional): skip CCD on pairs where every primitive is
+    // marked kinematic (e.g. example 4's pinned body). Body-internal pairs
+    // would otherwise spuriously block the externally-prescribed motion in
+    // sub-d_hat regions (SMPL ear / finger / mouth verts).
+    void per_vertex_safe_step(std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety = 0.9, bool clip_to_node_box = true, bool clip_ccd = true, bool use_ticcd = true, bool use_ogc = false, const std::vector<std::vector<int>>* color_groups = nullptr, const std::vector<char>* is_kinematic = nullptr) const;
 
     void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt);
 

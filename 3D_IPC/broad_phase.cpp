@@ -1,6 +1,8 @@
 #include "broad_phase.h"
 #include "ogc_trust_region.h"
 
+#include <atomic>
+
 #include <map>
 #include <set>
 #include <tuple>
@@ -657,8 +659,13 @@ double BroadPhase::ccd_min_toi(const std::vector<Vec3>& x, const std::vector<Vec
 
 void BroadPhase::per_vertex_safe_step(
         std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety, bool clip_to_node_box, bool clip_ccd, bool use_ticcd,
-        bool use_ogc, const std::vector<std::vector<int>>* color_groups) const {
+        bool use_ogc, const std::vector<std::vector<int>>* color_groups, const std::vector<char>* is_kinematic) const {
     const int nv = static_cast<int>(x.size());
+
+    // Diagnostic counters: how often does CCD limit a step? High clip rate
+    // means cloth is fighting body / itself and convergence will suffer.
+    std::atomic<int> n_moved{0};        // verts whose proposed dx was non-zero
+    std::atomic<int> n_clipped{0};      // of those, how many got toi < 1.0
 
     auto process_vertex = [&](int vi) {
         if (clip_to_node_box) {
@@ -680,6 +687,7 @@ void BroadPhase::per_vertex_safe_step(
             : x_new_fn(vi);
         const Vec3 dx = x_new - x[vi];
         if (dx.squaredNorm() < 1e-28) return;
+        n_moved.fetch_add(1, std::memory_order_relaxed);
 
         double toi_min = 1.0;
 
@@ -697,6 +705,14 @@ void BroadPhase::per_vertex_safe_step(
 
         if (clip_ccd) for (const auto& entry : cache_.vertex_nt[vi]) {
             const auto& p = cache_.nt_pairs[entry.pair_index];
+            // Skip body-internal pairs: when every primitive in the pair is
+            // kinematic, the pair describes externally-prescribed body-vs-
+            // body motion which IPC's CCD should not block.
+            if (is_kinematic
+                && (*is_kinematic)[p.node]
+                && (*is_kinematic)[p.tri_v[0]]
+                && (*is_kinematic)[p.tri_v[1]]
+                && (*is_kinematic)[p.tri_v[2]]) continue;
             CCDResult r;
             if (entry.dof == 0) {
                 r = node_triangle_only_one_node_moves(x[vi], dx, x[p.tri_v[0]], Vec3::Zero(), x[p.tri_v[1]], Vec3::Zero(), x[p.tri_v[2]], Vec3::Zero(),
@@ -718,6 +734,11 @@ void BroadPhase::per_vertex_safe_step(
 
         if (clip_ccd) for (const auto& entry : cache_.vertex_ss[vi]) {
             const auto& p = cache_.ss_pairs[entry.pair_index];
+            if (is_kinematic
+                && (*is_kinematic)[p.v[0]]
+                && (*is_kinematic)[p.v[1]]
+                && (*is_kinematic)[p.v[2]]
+                && (*is_kinematic)[p.v[3]]) continue;
             CCDResult r;
             if (entry.dof == 0)
                 r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]], 1e-12, use_ticcd);
@@ -731,6 +752,7 @@ void BroadPhase::per_vertex_safe_step(
         }
 
         const double step = use_ogc? toi_min: ((toi_min < 1.0) ? safety * toi_min : 1.0);
+        if (toi_min < 1.0) n_clipped.fetch_add(1, std::memory_order_relaxed);
         x[vi] = x[vi] + step * dx;
     };
 
@@ -743,6 +765,12 @@ void BroadPhase::per_vertex_safe_step(
     } else {
         for (int vi = 0; vi < nv; ++vi)
             process_vertex(vi);
+    }
+    if (clip_ccd && n_moved.load() > 0) {
+        const int m = n_moved.load();
+        const int c = n_clipped.load();
+        fprintf(stderr, "[CCD] moved=%d clipped=%d (%.1f%%)\n",
+                m, c, 100.0 * c / m);
     }
 }
 

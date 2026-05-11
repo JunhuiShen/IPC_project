@@ -526,6 +526,11 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     //create node (blue) boxes and create broad phase (red boxes) accordingly
     const int nv = static_cast<int>(xnew.size());
     const PinMap pm = build_pin_map(pins, nv);
+    // is_kinematic[vi] = 1 iff vi has a kinematic pin (externally prescribed
+    // motion). Used to filter body-internal CCD pairs in per_vertex_safe_step
+    // so SMPL face/finger micro-features don't block kinematic motion.
+    std::vector<char> is_kinematic(nv, 0);
+    for (const Pin& pin : pins) if (pin.kinematic) is_kinematic[pin.vertex_index] = 1;
     static std::vector<double> prev_disp;
     if (static_cast<int>(prev_disp.size()) != nv)
         prev_disp.assign(nv, params.node_box_max);
@@ -556,12 +561,23 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
 
     //gs loop
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
-        broad_phase.per_vertex_safe_step(xnew, [&](int vi){ return xnew[vi] - gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm); },
+        broad_phase.per_vertex_safe_step(xnew, [&](int vi) -> Vec3 {
+                // Kinematic pins (e.g. example 4's animated body) skip the
+                // Newton step and propose the pin target directly. CCD still
+                // runs to keep them from teleporting through the dress, but
+                // body-internal pairs are filtered out via is_kinematic so
+                // sub-d_hat features (SMPL ears, fingers, mouth) don't
+                // spuriously block fine motion.
+                const int pi = pm[vi];
+                if (pi >= 0 && pins[pi].kinematic) return pins[pi].target_position;
+                return xnew[vi] - gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm);
+            },
                                          /*safety=*/0.9, /*clip_to_node_box=*/true,
                                          /*clip_ccd=*/params.use_ogc ? false : params.use_ccd,
                                          /*use_ticcd=*/params.use_ticcd,
                                          /*use_ogc=*/params.use_ogc,
-                                         params.use_parallel ? &color_groups : nullptr);
+                                         params.use_parallel ? &color_groups : nullptr,
+                                         &is_kinematic);
         result.iterations = iter;
     }
 

@@ -16,8 +16,15 @@ class BroadPhase;
 struct Tri { int v[3]; };
 
 struct Pin {
-    int vertex_index = -1;
+    int  vertex_index    = -1;
     Vec3 target_position = Vec3::Zero();
+    // Kinematic pins represent vertices whose motion is fully prescribed
+    // externally (e.g. example 4's animated body). The Gauss-Seidel solver
+    // bypasses the per-vertex Newton step for kinematic pins and instead
+    // moves them straight toward target_position (still CCD-clamped to
+    // preserve the intersection-free invariant), which avoids body-internal
+    // barrier/elastic forces fighting the pin spring.
+    bool kinematic       = false;
 };
 
 // Fields are left uninitialised on purpose. Construct via SimParams::zeros()

@@ -283,6 +283,30 @@ int build_sphere_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
     return base;
 }
 
+std::vector<Vec3> load_obj_verts_only(const std::string& path, int expected_count) {
+    std::ifstream in(path);
+    if (!in) {
+        throw std::runtime_error("load_obj_verts_only: cannot open '" + path + "'");
+    }
+    std::vector<Vec3> verts;
+    if (expected_count > 0) verts.reserve(expected_count);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.size() < 2 || line[0] != 'v' || line[1] != ' ') continue;
+        std::istringstream iss(line);
+        std::string tag;
+        double x, y, z;
+        if (iss >> tag >> x >> y >> z) verts.emplace_back(x, y, z);
+    }
+    if (expected_count >= 0 && static_cast<int>(verts.size()) != expected_count) {
+        throw std::runtime_error("load_obj_verts_only: '" + path + "' has "
+                                 + std::to_string(verts.size())
+                                 + " v-lines, expected "
+                                 + std::to_string(expected_count));
+    }
+    return verts;
+}
+
 int load_obj_mesh(const std::string& path, RefMesh& ref_mesh, DeformedState& state,
                   std::vector<Vec2>& X, double scale, const Vec3& origin) {
     std::ifstream in(path);

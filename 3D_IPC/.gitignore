@@ -9,6 +9,7 @@ tmp_full/
 # tools/<x> rather than tools/ so the !exception below can reach in.
 tools/*
 !tools/decimate_obj.py
+!tools/bake_cloth3d_body.py
 
 # Stanford XYZ RGB dragon source mesh -- 11 MB, fetch from
 # https://github.com/alecjacobson/common-3d-test-models if you want to

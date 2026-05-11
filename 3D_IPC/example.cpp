@@ -3,7 +3,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <iomanip>
 #include <limits>
+#include <sstream>
+#include <stdexcept>
 
 namespace {
 
@@ -560,5 +564,119 @@ void update_dragon_squeeze_visual(std::vector<Vec3>& static_x,
         for (int i = p.visual_v_begin; i < p.visual_v_end; ++i) {
             static_x[i] = p.visual_v_rest[i - p.visual_v_begin] + d;
         }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Example 4: clothing on an animated person
+// ---------------------------------------------------------------------------
+namespace {
+std::string body_obj_path(const std::string& dir, int frame) {
+    std::ostringstream oss;
+    oss << dir << "/body_" << std::setw(4) << std::setfill('0') << frame << ".obj";
+    return oss.str();
+}
+}
+
+void build_clothing_example(const IPCArgs3D& args,
+                            RefMesh& ref_mesh,
+                            DeformedState& state,
+                            std::vector<Vec2>& X,
+                            std::vector<Pin>& pins,
+                            SimParams& params,
+                            ClothingSpec& spec) {
+    if (args.cloth_body_dir.empty()) {
+        throw std::runtime_error("--cloth_body_dir is required for example 4");
+    }
+    if (args.cloth_dress_obj.empty()) {
+        throw std::runtime_error("--cloth_dress_obj is required for example 4");
+    }
+
+    clear_model(ref_mesh, state, X, pins);
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+
+    // ---- Body: load topology + frame `first_frame` positions ------------
+    const int body_v_begin = static_cast<int>(state.deformed_positions.size()); // 0
+    const int body_t_begin = num_tris(ref_mesh);                                 // 0
+    load_obj_mesh(body_obj_path(args.cloth_body_dir, args.cloth_first_frame),
+                  ref_mesh, state, X, /*scale=*/1.0, /*origin=*/Vec3::Zero());
+    const int body_v_end = static_cast<int>(state.deformed_positions.size());
+    const int body_t_end = num_tris(ref_mesh);
+    const int body_count = body_v_end - body_v_begin;
+
+    // ---- Body: load remaining frames into spec.body_frames --------------
+    spec.body_frames.clear();
+    spec.body_frames.emplace_back(state.deformed_positions.begin() + body_v_begin,
+                                  state.deformed_positions.begin() + body_v_end);
+    for (int f = args.cloth_first_frame + 1;; ++f) {
+        const std::string p = body_obj_path(args.cloth_body_dir, f);
+        if (!std::filesystem::exists(p)) break;
+        spec.body_frames.push_back(load_obj_verts_only(p, body_count));
+    }
+
+    // ---- Dress: append into the same RefMesh ----------------------------
+    const int dress_v_begin = static_cast<int>(state.deformed_positions.size());
+    const int dress_t_begin = num_tris(ref_mesh);
+    load_obj_mesh(args.cloth_dress_obj, ref_mesh, state, X,
+                  /*scale=*/1.0, /*origin=*/Vec3::Zero());
+    const int dress_v_end = static_cast<int>(state.deformed_positions.size());
+    const int dress_t_end = num_tris(ref_mesh);
+
+    // ---- Closed-mesh fixups: the xz-projected X used by load_obj_mesh
+    // gives wrong Dm_inverse and hinge c_e for non-flat surfaces. Rebuild
+    // both from the 3D rest pose for body and dress triangle ranges, then
+    // for the union of body+dress vertex ranges (covers all hinges since
+    // hinges live inside one connected component).
+    rebuild_triangle_rest_isometric(ref_mesh, state.deformed_positions,
+                                    body_t_begin, body_t_end);
+    rebuild_triangle_rest_isometric(ref_mesh, state.deformed_positions,
+                                    dress_t_begin, dress_t_end);
+    rebuild_hinge_c_e_3d(ref_mesh, state.deformed_positions,
+                         body_v_begin, body_v_end);
+    rebuild_hinge_c_e_3d(ref_mesh, state.deformed_positions,
+                         dress_v_begin, dress_v_end);
+
+    // ---- Velocities start at zero ---------------------------------------
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+
+    // ---- Pins: every body vertex pinned + flagged kinematic so the GS
+    //      solver snaps them to their pin target instead of running a
+    //      Newton step (which would let body-internal barrier/elastic
+    //      forces fight the pin spring). ----------------------------------
+    spec.body_pin_indices.assign(body_count, -1);
+    for (int i = 0; i < body_count; ++i) {
+        const int v = body_v_begin + i;
+        spec.body_pin_indices[i] = static_cast<int>(pins.size());
+        append_pin(pins, v, state.deformed_positions);
+        pins.back().kinematic = true;
+    }
+
+    spec.body_v_begin = body_v_begin;
+    spec.body_v_end   = body_v_end;
+    spec.source_fps   = args.cloth_source_fps;
+    spec.first_frame  = args.cloth_first_frame;
+}
+
+void update_clothing_pins(std::vector<Pin>& pins,
+                          const ClothingSpec& spec,
+                          double t) {
+    const int N = static_cast<int>(spec.body_frames.size());
+    if (N == 0) return;
+
+    const double f = t * spec.source_fps;
+    int a = static_cast<int>(std::floor(f));
+    a = std::clamp(a, 0, N - 1);
+    int b = std::clamp(a + 1, 0, N - 1);
+    double alpha = (a == b) ? 0.0 : std::clamp(f - static_cast<double>(a), 0.0, 1.0);
+
+    const int n_body = static_cast<int>(spec.body_pin_indices.size());
+    const auto& A = spec.body_frames[a];
+    const auto& B = spec.body_frames[b];
+    for (int i = 0; i < n_body; ++i) {
+        pins[spec.body_pin_indices[i]].target_position =
+            (1.0 - alpha) * A[i] + alpha * B[i];
     }
 }

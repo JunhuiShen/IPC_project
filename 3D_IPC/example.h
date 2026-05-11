@@ -129,3 +129,49 @@ void update_dragon_squeeze_sdf(SimParams& params,
 // for the export.
 void update_dragon_squeeze_visual(std::vector<Vec3>& static_x,
                                   const DragonSqueezeSpec& spec, double t);
+
+
+// Example 4: clothing on an animated person. The body is delivered as a
+// per-frame OBJ sequence (e.g. CLOTH3D baked via tools/bake_cloth3d_body.py)
+// and treated as fully-pinned cloth — every body vertex has a pin spring whose
+// target is interpolated from the source sequence each substep. The dress is
+// loaded from a single OBJ as the IPC initial state and simulated forward.
+//
+// Topology must be stable across all body frames (vertex count and order
+// identical). The builder concatenates body + dress into one RefMesh.
+struct ClothingSpec {
+    // Per-frame body vertex positions, indexed [frame][i_in_body].
+    // body_frames.size() == number of source frames loaded.
+    std::vector<std::vector<Vec3>> body_frames;
+
+    // Map from local body-vertex index (0..body_count-1) to the index in pins[]
+    // for that vertex. Used by update_clothing_pins to write each substep's
+    // interpolated target.
+    std::vector<int> body_pin_indices;
+
+    // Body vertex range in the combined mesh: [body_v_begin, body_v_end).
+    int body_v_begin = 0;
+    int body_v_end   = 0;
+
+    double source_fps  = 30.0; // framerate of body_frames
+    int    first_frame = 0;    // source-frame index at sim t=0
+};
+
+// Concatenates body (frame 0 OBJ in args.cloth_body_dir) and dress
+// (args.cloth_dress_obj) into one RefMesh; loads the rest of the body sequence
+// into spec.body_frames; pins every body vertex to its frame-0 position.
+// Disables gravity-driven body motion (pins enforce kinematic body).
+void build_clothing_example(const IPCArgs3D& args,
+                            RefMesh& ref_mesh,
+                            DeformedState& state,
+                            std::vector<Vec2>& X,
+                            std::vector<Pin>& pins,
+                            SimParams& params,
+                            ClothingSpec& spec);
+
+// Per-substep: linearly interpolates between adjacent source frames at sim
+// time t and writes the result into each body pin's target_position. After
+// the source sequence ends, pins clamp to the last available frame.
+void update_clothing_pins(std::vector<Pin>& pins,
+                          const ClothingSpec& spec,
+                          double t);

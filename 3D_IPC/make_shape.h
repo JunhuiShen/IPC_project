@@ -41,6 +41,12 @@ int build_sphere_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
 int load_obj_mesh(const std::string& path, RefMesh& ref_mesh, DeformedState& state,
                   std::vector<Vec2>& X, double scale, const Vec3& origin);
 
+// Reads only the `v ` lines from an OBJ and returns the resulting vertices.
+// Throws if the count doesn't match `expected_count` (set to -1 to skip the
+// check). Used for per-frame body OBJ loading where topology is established
+// once via load_obj_mesh and only positions vary across frames.
+std::vector<Vec3> load_obj_verts_only(const std::string& path, int expected_count = -1);
+
 // Replaces `ref_mesh.Dm_inverse[t]` and `ref_mesh.area[t]` in [t_begin, t_end)
 // with an isometric 2D flattening of each triangle's 3D rest shape, so the
 // corotated F is identity at rest regardless of the global 2D parameterization

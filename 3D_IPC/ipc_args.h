@@ -47,7 +47,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_ticcd                   = false;    // true: Tight-Inclusion library | false: self-written linear CCD
 
     // --- scene selection ---
-    int         example      = 1;   // 1=twisting_cloth, 2=two_cylinder_twist, 3=dragon_squeeze
+    int         example      = 1;   // 1=twisting_cloth, 2=two_cylinder_twist, 3=dragon_squeeze, 4=clothing
     double      sheet_y      = 0.20; // m -- midline y for example 1
 
     // example 1: square cloth twisted in place
@@ -78,6 +78,15 @@ struct IPCArgs3D : ArgParser {
     // SDFs, gravity off. Per-tri Dm_inverse and per-hinge c_e are rebuilt
     // from the 3D rest pose since the dragon is a closed surface with no
     // global 2D parameterization.
+    // example 4: clothing on an animated person. Body is a fully-pinned cloth
+    // whose pin targets are read from a per-frame OBJ sequence (e.g. CLOTH3D
+    // baked via tools/bake_cloth3d_body.py); dress is a single OBJ used as the
+    // IPC initial state, then simulated forward.
+    std::string cloth_body_dir        = "";   // dir containing body_NNNN.obj sequence (frame 0 establishes topology)
+    std::string cloth_dress_obj       = "";   // single OBJ used as the dress's IPC initial state
+    int         cloth_first_frame     = 0;    // body OBJ frame index that maps to sim t=0
+    double      cloth_source_fps      = 30.0; // framerate of the source body OBJ sequence (CLOTH3D = 30)
+
     std::string dragon_path           = "xyzrgb_dragon_12k.obj"; // OBJ path; the 12k-vert decimated mesh produced by tools/decimate_obj.py
     double      dragon_scale          = 0.02;   // uniform scale applied to OBJ vertices (m / OBJ unit)
     double      dragon_drop_y         = 1.5;    // y (m) of the dragon's lowest vertex at t=0 (its resting altitude)
@@ -130,7 +139,7 @@ struct IPCArgs3D : ArgParser {
         add_double("k_barrier",                k_barrier,                1.0,   "Barrier stiffness multiplier");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=dragon_squeeze");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=dragon_squeeze, 4=clothing");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -153,6 +162,11 @@ struct IPCArgs3D : ArgParser {
         add_double("tcyl_max_turn",    tcyl_max_turn,    1.5,  "Per-cylinder rotation cap (turns) in example 2. 0 = no cap; 0.5=180°, 1.5=540°.");
         add_bool  ("tcyl_untwist",     tcyl_untwist,     true, "If true, after reaching tcyl_max_turn the cylinder smoothly reverses back to 0 (twist + untwist).");
         add_double("tcyl_hold_time",   tcyl_hold_time,   0.0,  "Seconds to dwell at peak twist before reversing (only with tcyl_untwist=true).");
+
+        add_string("cloth_body_dir",         cloth_body_dir,        "",   "Directory containing the body_NNNN.obj sequence for example 4 (frame 0 establishes topology, the rest drive pin targets). Bake from a CLOTH3D sequence with tools/bake_cloth3d_body.py.");
+        add_string("cloth_dress_obj",        cloth_dress_obj,       "",   "Path to the dress OBJ used as the IPC initial state in example 4 (e.g. dress_0000.obj produced by tools/bake_cloth3d_body.py)");
+        add_int   ("cloth_first_frame",      cloth_first_frame,     0,    "Body sequence frame index that maps to sim t=0 in example 4");
+        add_double("cloth_source_fps",       cloth_source_fps,      30.0, "Framerate of the body OBJ sequence in example 4 (CLOTH3D = 30). Used to map sim time to source-frame index for pin-target interpolation.");
 
         add_string("dragon_path",            dragon_path,           "xyzrgb_dragon_12k.obj", "Path to the dragon OBJ file for example 3 (relative paths are resolved against the working directory). Default points to the 12k-vert decimated mesh from tools/decimate_obj.py; pass xyzrgb_dragon_full.obj to use the original 125k-vert mesh");
         add_double("dragon_scale",           dragon_scale,           0.02, "Uniform scale applied to dragon OBJ vertices in example 3 (m per OBJ unit). Smaller values give a smaller dragon (and smaller min-edge -- d_hat must stay below 0.5 * min edge)");
