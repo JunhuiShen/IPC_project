@@ -44,6 +44,7 @@ struct IPCArgs3D : ArgParser {
     double node_box_max            = 0.01;
     double node_box_min            = 0.001;
     double k_barrier                   = 1.0;
+    double damping                     = 0.8;     // Jacobi step damping in global_gauss_seidel_solver_ogc (multiplies the per-vertex Newton delta)
     bool   use_ticcd                   = false;    // true: Tight-Inclusion library | false: self-written linear CCD
 
     // --- scene selection ---
@@ -129,6 +130,7 @@ struct IPCArgs3D : ArgParser {
         add_double("node_box_max",         node_box_max,         0.01,  "Upper bound on node box half-extent used by the basic solver");
         add_double("node_box_min",         node_box_min,         0.001, "Lower bound on node box half-extent (floor when prev disp is near zero)");
         add_double("k_barrier",                k_barrier,                1.0,   "Barrier stiffness multiplier");
+        add_double("damping",                  damping,                  0.8,   "Jacobi step damping in global_gauss_seidel_solver_ogc (multiplies per-vertex Newton delta; <1 stabilizes the parallel sweep)");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
         add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist");
@@ -211,6 +213,7 @@ struct IPCArgs3D : ArgParser {
         p.node_box_max            = node_box_max;
         p.node_box_min            = node_box_min;
         p.k_barrier                   = k_barrier;
+        p.damping                     = damping;
         p.use_ticcd                   = use_ticcd;
         return p;
     }

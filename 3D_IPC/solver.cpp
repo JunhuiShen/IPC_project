@@ -632,7 +632,7 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
 
         #pragma omp parallel for schedule(static)
         for (int vi = 0; vi < nv; ++vi) {
-            const Vec3 dx = -gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew_copy, broad_phase, &pm);
+            const Vec3 dx = - params.damping * gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew_copy, broad_phase, &pm);
             if (dx.squaredNorm() < 1e-28) {
                 xnew[vi] = xnew_copy[vi];
                 continue;
