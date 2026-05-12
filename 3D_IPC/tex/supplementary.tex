@@ -1,0 +1,299 @@
+\documentclass[acmtog,anonymous,review]{acmart}
+\acmSubmissionID{1107}
+
+\usepackage{bm}
+\usepackage{mathtools}
+\usepackage{enumitem}
+
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\abs}[1]{\left\lvert #1 \right\rvert}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\T}{\mathsf{T}}
+
+\DeclareMathOperator{\diag}{diag}
+
+\title{Supplementary Material:\\
+Continuous Collision Detection Trust Regions for Clothing Simulation}
+
+\begin{document}
+\maketitle
+
+\subsection{Incremental Potential and Energy Decomposition}
+\label{sec:incremtal_energy}
+
+We adopt the standard incremental potential
+formulation~\cite{li2020ipc}. A backward Euler step reduces to the
+minimization
+\begin{equation}
+\label{eq:inc_pot}
+\Phi(\mathbf{x})
+=
+\tfrac{1}{2}\,
+\|\mathbf{x}-\hat{\mathbf{x}}\|_{\mathbf{M}}^{2}
++
+(\Delta t)^2\,PE(\mathbf{x}),
+\end{equation}
+where
+$\|\mathbf{v}\|_{\mathbf{M}}^{2}
+=\mathbf{v}^{\mathsf T}\mathbf{M}\mathbf{v}$,
+$\hat{\mathbf{x}}=\mathbf{x}^n+\Delta t\,\mathbf{v}^n$ is the
+inertial extrapolation, and
+$\mathbf{M}=\diag(m_1\mathbf{I}_3,\dots,m_N\mathbf{I}_3)$
+is the lumped mass matrix. We decompose the total potential as
+\begin{multline}
+\label{eq:pe_decomp}
+PE(\mathbf{x})
+=
+PE^{\mathrm{e}}(\mathbf{x})
++
+PE^{\mathrm{b}}(\mathbf{x})
++
+PE^{\mathrm{g}}(\mathbf{x})
+\\
++\;
+PE^{\mathrm{bar}}(\mathbf{x})
++
+PE^{\mathrm{pin}}(\mathbf{x}),
+\end{multline}
+corresponding respectively to corotated elastic stretching,
+discrete shell bending, gravity, IPC barrier contact, and pinning
+constraints. We now briefly state each term.
+
+\paragraph{Corotated elasticity.}
+On each triangle with rest-shape matrix
+$\mathbf{D}_m\in\mathbb{R}^{2\times 2}$, deformed segment matrix
+$\mathbf{D}_s\in\mathbb{R}^{3\times 2}$, and deformation gradient
+$\mathbf{F}=\mathbf{D}_s\mathbf{D}_m^{-1}$, we use the corotated
+energy density~\cite{stomakhin2012elasticity}
+\begin{equation}
+\label{eq:psi_corotated}
+\psi(\mathbf{F})
+=
+\mu\|\mathbf{F}-\mathbf{R}\|_F^2
++
+\tfrac{\lambda}{2}(J-1)^2,
+\end{equation}
+where $\mathbf{F}=\mathbf{R}\mathbf{S}$ is the polar decomposition,
+$J=\sqrt{\det(\mathbf{F}^{\mathsf T}\mathbf{F})}$, and $\mu,\lambda$
+are Lam\'{e} parameters. The element elastic energy is
+$E_t=A_t\,\psi(\mathbf{F})$ with rest area
+$A_t=\tfrac{1}{2}|\det\mathbf{D}_m|$, and the total stretching
+energy is $PE^{\mathrm{e}}=\sum_t E_t$.
+
+\paragraph{Bending.}
+Following Grinspun et al.~\cite{grinspun2003discrete}, the discrete
+shell bending energy for a hinge segment $e$ with dihedral-angle
+complement $\theta$ and rest value $\bar{\theta}$ is
+\begin{equation}
+\label{eq:bending_energy}
+w_e = k_B\,c_e\,(\theta - \bar{\theta})^2,
+\qquad
+c_e = \frac{|\bar{e}|}{\bar{h}_e},
+\end{equation}
+where $k_B$ is the bending stiffness and $c_e$ is a geometric
+coefficient depending on the rest segment length and opposite heights.
+The total bending energy is $PE^{\mathrm{b}}=\sum_e w_e$.
+
+\paragraph{Gravity and pinning.}
+Gravity contributes a linear potential
+$PE_i^{\mathrm{g}}(\mathbf{x}_i)
+=-m_i\,\mathbf{g}_{\mathrm{grav}}^{\mathsf T}\mathbf{x}_i$
+at each node. Pinned nodes are enforced through a quadratic penalty
+$PE_i^{\mathrm{pin}}(\mathbf{x}_i)
+=\tfrac{k_{\mathrm{pin}}}{2}
+\|\mathbf{x}_i-\mathbf{x}_i^{\mathrm{pin}}\|^2$
+with $k_{\mathrm{pin}}\gg 1$.
+
+\paragraph{IPC barrier.}
+Non-penetration between deformable primitives is enforced by the IPC
+log-barrier~\cite{li2020ipc}. For a primitive pair with gap
+$\delta>0$, the barrier function is
+\begin{equation}
+\label{eq:barrier}
+b(\delta;\hat{d})
+=
+\begin{cases}
+-(\delta-\hat{d})^2\ln(\delta/\hat{d}), & 0<\delta<\hat{d},\\
+0, & \delta\ge\hat{d},
+\end{cases}
+\end{equation}
+and the total barrier energy is
+\begin{equation}
+\label{eq:barrier_energy}
+PE^{\mathrm{bar}}(\mathbf{x}) = \kappa_{\mathrm{bar}} \sum_{(p,q)} b(\delta_{pq};\hat{d}),
+\end{equation}
+where $\kappa_{\mathrm{bar}}$ is the barrier stiffness and the sum
+ranges over all active vertex--triangle and edge--edge pairs.
+
+\subsection{Signed-Distance Penalty Energy}
+
+We additionally enforce non-penetration with respect to rigid
+obstacles through a penalty energy composed from the signed distance
+function and a piecewise-linear Heaviside. Let
+$\Omega \subset \mathbb{R}^3$ denote the obstacle region with signed
+distance function $\phi(\mathbf{x})$, negative inside and positive
+outside. Define the piecewise-linear Heaviside
+\[
+H(z) =
+\begin{cases}
+1, & z < 0, \\
+(\epsilon - z) / \epsilon, & 0 \le z \le \epsilon, \\
+0, & z > \epsilon,
+\end{cases}
+\]
+so that $H$ transitions linearly from full penetration to zero over
+a band of width $\epsilon$. The per-node penalty energy is
+\begin{equation}
+\label{eq:pe_sdf}
+PE_i^{\mathrm{sdf}}(\mathbf{x}_i)
+= \tfrac{k_{\mathrm{sdf}}}{2}
+\bigl[H\bigl(\phi(\mathbf{x}_i)\bigr)\bigr]^2,
+\end{equation}
+where $k_{\mathrm{sdf}}$ is a stiffness parameter. Nodes with
+$\phi(\mathbf{x}_i) > \epsilon$ contribute zero energy and are
+skipped. 
+\subsection{Local Newton Subproblem}
+\label{sec:local_newton}
+
+The Gauss--Seidel strategy updates nodes sequentially through local
+implicit subproblems. Each local step incorporates the inertia,
+elastic, gravitational, pinning, and active barrier contributions
+associated with the current node.
+
+For node $i$, the local first-order optimality condition is
+\begin{multline}
+\label{eq:local_opt}
+\nabla_{\mathbf{x}_i}\Phi(\mathbf{x})
+=
+m_i(\mathbf{x}_i-\hat{\mathbf{x}}_i)
++
+(\Delta t)^2
+\bigl(
+\nabla_{\mathbf{x}_i}PE^{\mathrm{e}}
+\\
++\nabla_{\mathbf{x}_i}PE^{\mathrm{b}}
++\nabla_{\mathbf{x}_i}PE^{\mathrm{bar}}
++\nabla_{\mathbf{x}_i}PE^{\mathrm{pin}}
+-m_i\mathbf{g}_{\mathrm{grav}}
+\bigr)
+=\mathbf{0},
+\end{multline}
+where the pinning term is present only if node $i$ is pinned.
+Linearizing about the current $\mathbf{x}_i$ and solving for the
+correction $\boldsymbol{\delta}_i\in\mathbb{R}^3$ gives
+\begin{equation}
+\label{eq:local_newton}
+\mathbf{H}_{ii}\,\boldsymbol{\delta}_i = \mathbf{g}_i,
+\end{equation}
+where $\mathbf{g}_i=\nabla_{\mathbf{x}_i}\Phi(\mathbf{x})$ and
+\begin{multline}
+\label{eq:local_hessian}
+\mathbf{H}_{ii}
+=
+m_i\mathbf{I}_3
++
+(\Delta t)^2
+\bigl(
+\mathbf{H}^{\mathrm{e}}_{ii}
++\mathbf{H}^{\mathrm{b}}_{ii}
+\\
++\mathbf{H}^{\mathrm{bar}}_{ii}
++\mathbf{H}^{\mathrm{pin}}_{ii}
+\bigr)
+\in\mathbb{R}^{3\times 3}.
+\end{multline}
+Here $\mathbf{H}^{\mathrm{e}}_{ii}$ is the diagonal block of the
+elastic Hessian summed over all triangles incident to node $i$,
+$\mathbf{H}^{\mathrm{b}}_{ii}$ is the diagonal block of the bending
+Hessian summed over all hinge segments incident to node $i$,
+$\mathbf{H}^{\mathrm{bar}}_{ii}$ is the diagonal block of the barrier
+Hessian summed over all active barrier pairs involving node $i$, and
+$\mathbf{H}^{\mathrm{pin}}_{ii}=k_{\mathrm{pin}}\mathbf{I}_3$ if $i$
+is pinned and zero otherwise. The node position is then updated as
+\begin{equation}
+\label{eq:node_update}
+\mathbf{x}_i
+\leftarrow
+\mathbf{x}_i - \omega_i\,\boldsymbol{\delta}_i,
+\end{equation}
+where $\omega_i\in(0,1]$ is a step size determined by
+linear CCD in
+Section~\ref{sec:linear_ccd}.
+
+\subsection{Initial Guess}
+\label{sec:initial_guess}
+
+The initial iterate $\mathbf{x}^{(0)}$ must be collision-free and
+connected to $\mathbf{x}^n$ by a linear trajectory so that CCD
+queries are well defined.
+
+The inertial term
+$\tfrac{1}{2}\|\mathbf{x}-\hat{\mathbf{x}}\|_{\mathbf{M}}^2$ in
+the incremental potential~\eqref{eq:inc_pot} is minimized at the inertial
+extrapolation
+$\hat{\mathbf{x}}=\mathbf{x}^n+\Delta t\,\mathbf{v}^n$, which is
+typically the dominant contribution to $\Phi$. A natural initial
+guess is therefore to advance toward $\hat{\mathbf{x}}$ as far as
+collision constraints allow. Since all nodes move simultaneously
+along this trajectory, the coplanarity polynomial for each candidate
+primitive pair is a full cubic in
+$t$~\cite{bridson2002cloth}. For every candidate pair we compute the
+earliest collision time $t^*\in[0,1]$ and set
+\begin{equation}
+\label{eq:omega0}
+\omega_0
+=
+\min \,\!\bigl(1,\;
+\min_{\text{all pairs}}\,0.9\,t^*\bigr),
+\end{equation}
+\begin{equation}
+\label{eq:ccd_guess}
+\mathbf{x}^{(0)}
+=
+\mathbf{x}^n+\omega_0\,\Delta t\,\mathbf{v}^n.
+\end{equation}
+This places the initial guess at the collision-free configuration
+that minimizes the inertial energy along the line from
+$\mathbf{x}^n$ to $\hat{\mathbf{x}}$, so the solver only needs to
+resolve the potential energies.
+
+\subsection{Linear CCD}
+\label{sec:linear_ccd}
+
+Each local Newton update must be filtered to ensure collision freedom.
+We use CCD based on coplanarity
+tests~\cite{bridson2002cloth} to determine the maximal admissible
+step size.  Candidate primitive pairs are identified via swept
+axis-aligned bounding boxes organized in bounding volume
+hierarchies~\cite[Section~4.2]{ericson2004collision}.
+
+Since only a single node moves per local step, the coplanarity
+polynomial simplifies significantly.  Given four points interpolating
+as $\mathbf{x}_i(t)=\mathbf{x}_i^0+t\,\mathbf{d}_i$ with
+$t\in[0,1]$, define the edge vectors
+$\mathbf{p}=\mathbf{x}_1-\mathbf{x}_0$,
+$\mathbf{q}=\mathbf{x}_2-\mathbf{x}_0$,
+$\mathbf{r}=\mathbf{x}_3-\mathbf{x}_0$.  The scalar triple product
+$f(t)=(\mathbf{p}(t)\times\mathbf{q}(t))\cdot\mathbf{r}(t)$ is
+cubic in general, but when only one vertex carries nonzero
+displacement, at most one of $\mathbf{p},\mathbf{q},\mathbf{r}$
+depends on~$t$, so
+\begin{equation}\label{eq:linear_ccd}
+  f(t) = ct + d, \qquad t^* = -d/c.
+\end{equation}
+For example, when the query vertex~$\mathbf{x}_0$ moves with
+displacement~$\mathbf{d}_0$, the coefficients are
+$d=(\mathbf{p}_0\!\times\!\mathbf{q}_0)\cdot\mathbf{r}_0$ and
+$c=-(\mathbf{p}_0\!\times\!\mathbf{q}_0)\cdot\mathbf{d}_0
+   +(\mathbf{p}_0\!\times\!\mathbf{d}_0)\cdot\mathbf{r}_0
+   +(\mathbf{d}_0\!\times\!\mathbf{q}_0)\cdot\mathbf{r}_0$,
+where $\mathbf{p}_0,\mathbf{q}_0,\mathbf{r}_0$ are the edge vectors
+at~$t\!=\!0$.  A candidate~$t^*$ is accepted only if $|c|>\epsilon$,
+$t^*\!\in\!(0,1]$, and the contact point lies inside the primitive
+(positive barycentric coordinates for vertex--triangle; both edge
+parameters in~$[0,1]$ for edge--edge).  The step is clamped to
+$\hat{t}=0.9\,\min t^*$ to maintain a safety margin.
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{refs}
+\end{document}
