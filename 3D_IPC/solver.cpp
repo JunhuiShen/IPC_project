@@ -86,6 +86,38 @@ Vec3 gs_vertex_delta(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& a
     return matrix3d_inverse(H) * g;
 }
 
+// Elastic terms read x_elastic (live, GS-style across colors); barrier terms read
+// x_barrier (iteration-start snapshot, Jacobi-style). Safe to call in parallel
+// within a single elastic-coloring color class.
+Vec3 gs_vertex_delta_split(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
+                            const std::vector<Vec3>& xhat,
+                            const std::vector<Vec3>& x_elastic,
+                            const std::vector<Vec3>& x_barrier,
+                            const BroadPhase& broad_phase, const PinMap* pin_map) {
+    const auto& bp_cache = broad_phase.cache();
+    auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x_elastic, xhat, pin_map);
+
+    if (params.d_hat > 0.0) {
+        const double dt2k = params.dt2() * params.k_barrier;
+
+        for (const auto& entry : bp_cache.vertex_nt[vi]) {
+            const auto& p = bp_cache.nt_pairs[entry.pair_index];
+            auto [bg, bH] = node_triangle_barrier_gradient_and_hessian(x_barrier[p.node], x_barrier[p.tri_v[0]], x_barrier[p.tri_v[1]], x_barrier[p.tri_v[2]], params.d_hat, entry.dof);
+            g += dt2k * bg;
+            H += dt2k * bH;
+        }
+
+        for (const auto& entry : bp_cache.vertex_ss[vi]) {
+            const auto& p = bp_cache.ss_pairs[entry.pair_index];
+            auto [bg, bH] = segment_segment_barrier_gradient_and_hessian(x_barrier[p.v[0]], x_barrier[p.v[1]], x_barrier[p.v[2]], x_barrier[p.v[3]], params.d_hat, entry.dof);
+            g += dt2k * bg;
+            H += dt2k * bH;
+        }
+    }
+
+    return matrix3d_inverse(H) * g;
+}
+
 void update_one_vertex(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
                        const std::vector<Vec3>& xhat, std::vector<Vec3>& x, const BroadPhase& broad_phase, const PinMap* pin_map) {
     const auto& bp_cache = broad_phase.cache();
@@ -604,6 +636,12 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
     }
     broad_phase.initialize(bvh_node_boxes, ref_mesh, pad);
 
+    // Color from elastic adjacency only — barrier pairs are handled by reading
+    // a frozen snapshot (xnew_copy) inside each color, so they don't need to
+    // constrain the coloring.
+    const std::vector<std::vector<int>> color_groups = greedy_color_conflict_graph(
+        build_elastic_adj(ref_mesh, adj, nv));
+
     if (params.write_substeps)
         write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, nullptr);
 
@@ -630,16 +668,22 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
             bounds[vi] = b;
         }
 
-        #pragma omp parallel for schedule(static)
-        for (int vi = 0; vi < nv; ++vi) {
-            const Vec3 dx = - params.damping * gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew_copy, broad_phase, &pm);
-            if (dx.squaredNorm() < 1e-28) {
-                xnew[vi] = xnew_copy[vi];
-                continue;
+        for (const auto& color : color_groups) {
+            const int csz = static_cast<int>(color.size());
+            #pragma omp parallel for schedule(static)
+            for (int idx = 0; idx < csz; ++idx) {
+                const int vi = color[idx];
+                // Elastic stencil reads live xnew (GS across colors); barrier
+                // stencil reads frozen xnew_copy (Jacobi).
+                const Vec3 dx = - params.damping * gs_vertex_delta_split(vi, ref_mesh, adj, pins, params, xhat, xnew, xnew_copy, broad_phase, &pm);
+                if (dx.squaredNorm() < 1e-28) {
+                    xnew[vi] = xnew_copy[vi];
+                    continue;
+                }
+                const double dx_norm = dx.norm();
+                const double toi = (dx_norm > 0.0) ? std::min(1.0, bounds[vi] / dx_norm) : 1.0;
+                xnew[vi] = xnew_copy[vi] + toi * dx;
             }
-            const double dx_norm = dx.norm();
-            const double toi = (dx_norm > 0.0) ? std::min(1.0, bounds[vi] / dx_norm) : 1.0;
-            xnew[vi] = xnew_copy[vi] + toi * dx;
         }
 
         result.iterations = iter;
