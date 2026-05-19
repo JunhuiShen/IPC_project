@@ -126,3 +126,13 @@ void update_twist_untwist_sdf(SimParams& params,
 // Per-frame: yaws the visual cylinder vertices about +y to match the SDF.
 void update_twist_untwist_visual(std::vector<Vec3>& static_x,
                                  const TwistUntwistSpec& spec, double t);
+
+// Example 4: avatar wearing simulated clothing.
+void build_avatar_clothing_example(const IPCArgs3D& args,
+                                   RefMesh& ref_mesh,
+                                   DeformedState& state,
+                                   std::vector<Vec2>& X,
+                                   std::vector<Pin>& pins,
+                                   SimParams& params,
+                                   std::vector<Vec3>& static_x,
+                                   std::vector<int>&  static_tris);

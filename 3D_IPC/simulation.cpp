@@ -38,8 +38,9 @@ int main(int argc, char** argv) {
     if      (args.example == 1) build_twisting_cloth_example(args, ref_mesh, state, X, pins, twist_spec);
     else if (args.example == 2) build_two_cylinder_twist_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, cyl_twist_spec);
     else if (args.example == 3) build_twist_untwist_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, tu_spec);
+    else if (args.example == 4) build_avatar_clothing_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4.\n";
         return 1;
     }
 
@@ -63,6 +64,8 @@ int main(int argc, char** argv) {
             update_twist_untwist_pins(p, tu_spec, t);
             update_twist_untwist_sdf(params, tu_spec, t);
         };
+    } else if (args.example == 4) {
+        // TODO: avatar clothing pin updater
     }
 
     ref_mesh.build_lumped_mass(params.density, params.thickness);
@@ -127,7 +130,7 @@ int main(int argc, char** argv) {
     // Examples whose visible collider moves over time get a per-frame export
     // (example 2's rotating cylinders, example 3's moving plates). Others keep
     // the one-time "static_colliders".
-    const bool collider_is_dynamic = (args.example == 2 || args.example == 3);
+    const bool collider_is_dynamic = (args.example == 2 || args.example == 3 || args.example == 4);
 
     if (restart_frame < 0) {
         if (fs::exists(outdir)) fs::remove_all(outdir);
@@ -197,6 +200,7 @@ int main(int argc, char** argv) {
             const double t_frame = frame_index / params.fps;
             if      (args.example == 2) update_cylinder_visuals     (static_x, cyl_twist_spec, t_frame);
             else if (args.example == 3) update_twist_untwist_visual (static_x, tu_spec,        t_frame);
+            // example 4: TODO avatar visual update
             write_collider_mesh(frame_collider_path(frame_index));
         }
 
