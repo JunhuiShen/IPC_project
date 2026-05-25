@@ -364,6 +364,42 @@ int load_obj_mesh(const std::string& path, RefMesh& ref_mesh, DeformedState& sta
     return base;
 }
 
+void load_obj_mesh(const std::string& path, std::vector<Vec3>& verts,
+                   std::vector<int>& tris, double scale, const Vec3& origin) {
+    std::ifstream in(path);
+    if (!in)
+        throw std::runtime_error("load_obj_mesh: cannot open '" + path + "'");
+
+    const int base = static_cast<int>(verts.size());
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.size() < 2 || line[0] == '#') continue;
+        std::istringstream iss(line);
+        std::string tag;
+        iss >> tag;
+        if (tag == "v") {
+            double x, y, z;
+            if (iss >> x >> y >> z) verts.push_back(scale * Vec3(x, y, z) + origin);
+        } else if (tag == "f") {
+            std::vector<int> idx;
+            std::string tok;
+            while (iss >> tok) {
+                const std::size_t slash = tok.find('/');
+                const std::string vstr = (slash == std::string::npos) ? tok : tok.substr(0, slash);
+                if (vstr.empty()) continue;
+                int v = std::stoi(vstr);
+                if (v < 0) v = static_cast<int>(verts.size()) - base + 1 + v;
+                idx.push_back(base + v - 1);
+            }
+            for (int i = 1; i + 1 < static_cast<int>(idx.size()); ++i) {
+                tris.push_back(idx[0]);
+                tris.push_back(idx[i]);
+                tris.push_back(idx[i + 1]);
+            }
+        }
+    }
+}
+
 void rebuild_triangle_rest_isometric(RefMesh& ref_mesh,
                                      const std::vector<Vec3>& x_rest,
                                      int t_begin, int t_end) {

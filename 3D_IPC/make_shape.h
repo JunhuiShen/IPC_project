@@ -41,6 +41,12 @@ int build_sphere_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
 int load_obj_mesh(const std::string& path, RefMesh& ref_mesh, DeformedState& state,
                   std::vector<Vec2>& X, double scale, const Vec3& origin);
 
+// Lighter overload: reads positions and triangles directly into flat arrays.
+// Suitable for static/collider meshes that don't need RefMesh or DeformedState.
+void load_obj_mesh(const std::string& path, std::vector<Vec3>& verts,
+                   std::vector<int>& tris, double scale = 1.0,
+                   const Vec3& origin = Vec3::Zero());
+
 // Replaces `ref_mesh.Dm_inverse[t]` and `ref_mesh.area[t]` in [t_begin, t_end)
 // with an isometric 2D flattening of each triangle's 3D rest shape, so the
 // corotated F is identity at rest regardless of the global 2D parameterization

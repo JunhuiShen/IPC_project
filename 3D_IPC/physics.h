@@ -130,7 +130,6 @@ struct Hinge {
 using VertexHingeMap = std::unordered_map<int, std::vector<std::pair<int,int>>>;
 
 struct RefMesh {
-    std::vector<Vec2> ref_positions;
     std::vector<int>  tris; // flat: every 3 ints = one triangle
     std::vector<Mat22> Dm_inverse;
     std::vector<double> area;

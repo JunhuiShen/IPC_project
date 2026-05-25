@@ -77,7 +77,6 @@ namespace {
     static RefMesh make_mesh(const std::vector<Vec3>& x, const std::vector<std::array<int, 3>>& tris_in) {
         RefMesh mesh;
         mesh.num_positions = x.size();
-        mesh.ref_positions.resize(x.size(), Vec2::Zero());
 
         for (const auto& t : tris_in) {
             mesh.tris.push_back(t[0]);
@@ -932,8 +931,6 @@ TEST(BroadPhaseTest, BlueRedCcdTest) {
 
     RefMesh mesh;
     mesh.num_positions = nv0 + nv1;
-    mesh.ref_positions.insert(mesh.ref_positions.end(), mesh0.ref_positions.begin(), mesh0.ref_positions.end());
-    mesh.ref_positions.insert(mesh.ref_positions.end(), mesh1.ref_positions.begin(), mesh1.ref_positions.end());
     mesh.tris = mesh0.tris;
     for (int idx : mesh1.tris) mesh.tris.push_back(idx + nv0);
 

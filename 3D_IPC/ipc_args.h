@@ -96,6 +96,9 @@ struct IPCArgs3D : ArgParser {
     std::string format       = "geo";
     int         restart_frame = -1;
 
+    // --- data ---
+    std::string datadir      = "";
+
     IPCArgs3D() {
         add_double("fps",         fps,         30.0,       "Output frames per second");
         add_int   ("substeps",    substeps,    3,          "Solver substeps per frame (solver_dt = 1/(fps*substeps))");
@@ -175,6 +178,7 @@ struct IPCArgs3D : ArgParser {
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
         add_int   ("restart_frame", restart_frame, -1,            "Frame to restart from (-1 = no restart)");
+        add_string("datadir",      datadir,       "",             "Path to input data directory (e.g. meshes for example 4)");
     }
 
     ExportFormat to_export_format() const {

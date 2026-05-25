@@ -700,7 +700,6 @@ TEST(TrustRegionSafeStep, FarFromBarrierStillBoundedByTrustRegion) {
     X = { Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.0, 1.0),
           Vec2(3.0, 0.0), Vec2(4.0, 0.0), Vec2(3.0, 1.0) };
 
-    ref_mesh.ref_positions = X;
     ref_mesh.tris = {0, 1, 2, 3, 4, 5};
     ref_mesh.initialize(X, state.deformed_positions);
     ref_mesh.build_lumped_mass(params.density, params.thickness);
