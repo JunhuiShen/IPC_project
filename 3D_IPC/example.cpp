@@ -546,13 +546,12 @@ void update_twist_untwist_sdf(SimParams& params,
 void build_avatar_clothing_example(const IPCArgs3D& args,
                                    RefMesh& ref_mesh,
                                    DeformedState& state,
-                                   std::vector<Vec2>& X,
                                    std::vector<Pin>& /*pins*/,
                                    SimParams& params,
                                    std::vector<Vec3>& static_x,
                                    std::vector<int>&  static_tris) {
     load_obj_mesh(args.datadir + "/body_0000.obj", static_x, static_tris);
-    load_obj_mesh(args.datadir + "/dress_0000.obj", ref_mesh, state, X,
+    load_obj_mesh(args.datadir + "/dress_0000.obj", ref_mesh, state,
                   /*scale=*/1.0, /*origin=*/Vec3::Zero());
 
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());

@@ -284,7 +284,7 @@ int build_sphere_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
 }
 
 int load_obj_mesh(const std::string& path, RefMesh& ref_mesh, DeformedState& state,
-                  std::vector<Vec2>& X, double scale, const Vec3& origin) {
+                  double scale, const Vec3& origin) {
     std::ifstream in(path);
     if (!in) {
         throw std::runtime_error("load_obj_mesh: cannot open '" + path + "'");
@@ -344,12 +344,9 @@ int load_obj_mesh(const std::string& path, RefMesh& ref_mesh, DeformedState& sta
     }
 
     state.deformed_positions.reserve(state.deformed_positions.size() + kept);
-    X.reserve(X.size() + kept);
     for (std::size_t i = 0; i < raw_verts.size(); ++i) {
         if (!is_used[i]) continue;
-        const Vec3 p = scale * raw_verts[i] + origin;
-        state.deformed_positions.push_back(p);
-        X.push_back(Vec2(p.x(), p.z()));
+        state.deformed_positions.push_back(scale * raw_verts[i] + origin);
     }
 
     ref_mesh.tris.reserve(ref_mesh.tris.size() + raw_tris.size() * 3);
@@ -359,7 +356,7 @@ int load_obj_mesh(const std::string& path, RefMesh& ref_mesh, DeformedState& sta
         ref_mesh.tris.push_back(base + remap[t[2]]);
     }
 
-    ref_mesh.initialize(X, state.deformed_positions);
+    ref_mesh.initialize(state.deformed_positions);
 
     return base;
 }

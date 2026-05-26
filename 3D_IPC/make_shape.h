@@ -39,7 +39,7 @@ int build_sphere_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
 // `Dm_inverse` / `area` and per-hinge `c_e` via the rebuild_* helpers below
 // (the xz projection collapses near-vertical triangles in 2D).
 int load_obj_mesh(const std::string& path, RefMesh& ref_mesh, DeformedState& state,
-                  std::vector<Vec2>& X, double scale, const Vec3& origin);
+                  double scale, const Vec3& origin);
 
 // Lighter overload: reads positions and triangles directly into flat arrays.
 // Suitable for static/collider meshes that don't need RefMesh or DeformedState.

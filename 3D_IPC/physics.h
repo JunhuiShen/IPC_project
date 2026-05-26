@@ -144,6 +144,33 @@ struct RefMesh {
         build_hinges(X, x_rest);
     }
 
+    inline void initialize(const std::vector<Vec3>& x_rest){
+        num_positions = x_rest.size();
+        compute_dm_inverse(x_rest);
+        build_hinges(x_rest);
+    }
+
+    inline void compute_dm_inverse(const std::vector<Vec3>& X){
+        int nt = static_cast<int>(tris.size()) / 3;
+        Dm_inverse.resize(nt);
+        area.resize(nt);
+        for(int t = 0; t < nt; t++){
+            const Vec3& X0 = X[tris[t*3+0]];
+            const Vec3& X1 = X[tris[t*3+1]];
+            const Vec3& X2 = X[tris[t*3+2]];
+            Mat32 Dm;
+            Dm.col(0) = X1 - X0;
+            Dm.col(1) = X2 - X0;
+            // QR: Dm = Q * R, Q is 3x2 orthonormal, R is 2x2 upper triangular
+            // area = 0.5 * |det(R)|  (since det(Dm^T Dm) = det(R)^2)
+            // Dm_inverse = R^{-1}  (same role as the 2D case)
+            Mat22 R = Dm.householderQr().matrixQR().topLeftCorner<2,2>()
+                        .template triangularView<Eigen::Upper>();
+            area[t] = 0.5 * std::abs(R.determinant());
+            Dm_inverse[t] = R.inverse();
+        }
+    }
+
     inline void compute_dm_inverse(const std::vector<Vec2>& X){
         int nt = static_cast<int>(tris.size()) / 3;
         Dm_inverse.resize(nt);
@@ -213,6 +240,68 @@ struct RefMesh {
             const double edge_len2 = eVec.squaredNorm();
             const double areaA = 0.5 * std::abs(cross_product_in_2d(eVec, X2 - X0));
             const double areaB = 0.5 * std::abs(cross_product_in_2d(eVec, X3 - X0));
+            const double area_sum = areaA + areaB;
+            h.c_e = (area_sum > 0.0) ? (edge_len2 / area_sum) : 0.0;
+
+            HingeDef def;
+            for (int k = 0; k < 4; ++k) def.x[k] = x_rest[h.v[k]];
+            h.bar_theta = bending_theta(def);
+
+            const int hidx = static_cast<int>(hinges.size());
+            hinges.push_back(h);
+            for (int k = 0; k < 4; ++k)
+                hinge_adj[h.v[k]].emplace_back(hidx, k);
+        }
+    }
+
+    inline void build_hinges(const std::vector<Vec3>& x_rest) {
+        // dir = 0 means the triangle traverses this edge in v_min→v_max
+        // order; dir = 1 means v_max→v_min. Pairing one of each yields a
+        // consistently oriented hinge below.
+        struct EdgeEntry { int tri; int dir; int apex; };
+        std::map<std::pair<int,int>, std::vector<EdgeEntry>> edge_map;
+
+        const int nt = static_cast<int>(tris.size()) / 3;
+        for (int t = 0; t < nt; ++t) {
+            const int v[3] = { tris[3*t+0], tris[3*t+1], tris[3*t+2] };
+            for (int k = 0; k < 3; ++k) {
+                const int va = v[k];
+                const int vb = v[(k+1)%3];
+                const int vc = v[(k+2)%3];
+                const int vmin = std::min(va, vb);
+                const int vmax = std::max(va, vb);
+                const int dir  = (va == vmin) ? 0 : 1;
+                edge_map[{vmin, vmax}].push_back({t, dir, vc});
+            }
+        }
+
+        hinges.clear();
+        hinge_adj.clear();
+        for (const auto& [edge, entries] : edge_map) {
+            if (entries.size() != 2) continue;  // boundary or non-manifold
+
+            const EdgeEntry* triA = nullptr;
+            const EdgeEntry* triB = nullptr;
+            for (const auto& e : entries) {
+                if (e.dir == 0) triA = &e;
+                else            triB = &e;
+            }
+            if (triA == nullptr || triB == nullptr) continue;
+
+            Hinge h;
+            h.v[0] = edge.first;
+            h.v[1] = edge.second;
+            h.v[2] = triA->apex;
+            h.v[3] = triB->apex;
+
+            const Vec3& X0 = x_rest[h.v[0]];
+            const Vec3& X1 = x_rest[h.v[1]];
+            const Vec3& X2 = x_rest[h.v[2]];
+            const Vec3& X3 = x_rest[h.v[3]];
+            const Vec3 eVec = X1 - X0;
+            const double edge_len2 = eVec.squaredNorm();
+            const double areaA = 0.5 * eVec.cross(X2 - X0).norm();
+            const double areaB = 0.5 * eVec.cross(X3 - X0).norm();
             const double area_sum = areaA + areaB;
             h.c_e = (area_sum > 0.0) ? (edge_len2 / area_sum) : 0.0;
 
