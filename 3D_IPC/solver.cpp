@@ -460,12 +460,7 @@ static void write_substep_data(const SimParams& params, const BroadPhase& broad_
 SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
                                         std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
                                         const std::vector<Vec3>& v,
-                                        const std::string& outdir) {
-
-    if (!params.fixed_iters) {
-        fprintf(stderr, "global_gauss_seidel_solver_basic: params.fixed_iters must be true\n");
-        exit(1);
-    }
+                                        const std::string& outdir, bool verbose) {
 
     //create node (blue) boxes and create broad phase (red boxes) accordingly
     const int nv = static_cast<int>(xnew.size());
@@ -490,6 +485,11 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
 
     SolverResult result;
     result.iterations = 0;
+    double r0=0,residual=0;
+    if (!params.fixed_iters){
+        r0 = compute_global_residual(ref_mesh,adj,pins,params,xnew,xhat,broad_phase,&pm);
+        result.converged = false;
+    }
 
     //write substep data
     if (params.write_substeps) {
@@ -507,6 +507,15 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                                          /*use_ogc=*/params.use_ogc,
                                          params.use_parallel ? &color_groups : nullptr);
         result.iterations = iter;
+        if (!params.fixed_iters){
+            residual = compute_global_residual(ref_mesh,adj,pins,params,xnew,xhat,broad_phase,&pm);
+            if (verbose)
+                fprintf(stderr, "  [GS] iter %d  residual = %.6e\n", iter, residual);
+            if(residual < params.tol_rel * r0 || residual < params.tol_abs){
+                result.converged = true;
+                break;
+            }
+        }
     }
 
     for (int i = 0; i < nv; ++i)

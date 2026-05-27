@@ -40,6 +40,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_ogc_solver = false;
     double ogc_box_pad = 0.005;
     bool   fixed_iters = false;
+    bool   verbose     = false;
     bool   use_gpu                 = false;
     double node_box_max            = 0.01;
     double node_box_min            = 0.001;
@@ -129,6 +130,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_ogc_solver", use_ogc_solver, false, "Use the serial OGC Gauss-Seidel solver (rebuilds BVH per iter; partial leaf refit per move)");
         add_double("ogc_box_pad", ogc_box_pad, 0.005, "Padding on OGC node boxes / tri-edge unions for the per-iter BVH rebuild (floored to d_hat at use)");
         add_bool  ("fixed_iters",      fixed_iters,      false, "Run exactly max_substep_iters sweeps per substep with no tolerance / convergence check");
+        add_bool  ("verbose",          verbose,          false, "Print residual after each GS iteration (only when fixed_iters is false)");
         add_bool  ("use_gpu",              use_gpu,              false, "Route the GS sweep through the GPU implementation (CPU stub when CUDA is unavailable)");
         add_double("node_box_max",         node_box_max,         0.01,  "Upper bound on node box half-extent used by the basic solver");
         add_double("node_box_min",         node_box_min,         0.001, "Lower bound on node box half-extent (floor when prev disp is near zero)");
@@ -213,6 +215,7 @@ struct IPCArgs3D : ArgParser {
         p.use_ogc_solver = use_ogc_solver;
         p.ogc_box_pad = ogc_box_pad;
         p.fixed_iters = fixed_iters;
+        p.verbose     = verbose;
         p.use_gpu                 = use_gpu;
         p.node_box_max            = node_box_max;
         p.node_box_min            = node_box_min;

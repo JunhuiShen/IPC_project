@@ -22,7 +22,8 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                                               const std::vector<Pin>& pins, const SimParams& params,
                                               std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
                                               const std::vector<Vec3>& v,
-                                              const std::string& outdir = "");
+                                              const std::string& outdir = "",
+                                              bool verbose = false);
 
 SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                                             const std::vector<Pin>& pins, const SimParams& params,

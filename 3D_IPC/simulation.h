@@ -45,7 +45,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         else if (params.use_ogc_solver)
             sub_result = global_gauss_seidel_solver_ogc(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir);
         else
-            sub_result = global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir);
+            sub_result = global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir, params.verbose);
         
         accumulate_solver_result(agg, sub_result, sub == 0);
 
