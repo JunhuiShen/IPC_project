@@ -52,11 +52,24 @@ Our OGC narrow phase and solver implement the algorithm from Chen et al.
 - Tight-Inclusion CCD -- fetched automatically by CMake (requires network on
   first configure)
 
+## Notes for coding agents
+
+When working on this project, Claude, Codex, and other coding agents should
+first check the libraries and local wrappers that are already part of the
+codebase before writing new implementations. Start from `CMakeLists.txt` and
+the relevant headers to see what Eigen, Tight-Inclusion CCD, GoogleTest, OpenMP,
+and any fetched or vendored sources already provide; after configuration, also
+inspect `build/_deps/` and `CPM_modules/` when they are relevant. Prefer using
+or adapting a maintained library API or an existing project helper over
+duplicating math, geometry, collision detection, testing, or build logic, and
+only add custom code when the available library path is not suitable.
+
 ## Build
 
-    cd 3D_IPC
+    cd IPC_project/3D_IPC
     cmake -B build
-    cmake --build build --clean-first
+    cmake --build build --clean-first   # clean rebuild
+    cmake --build build -j              # faster incremental parallel build
 
 ## Run
 
@@ -316,4 +329,3 @@ Our OGC narrow phase and `global_gauss_seidel_solver_ogc` implement:
 > Anka He Chen, Jerry Hsu, Ziheng Liu, Miles Macklin, Yin Yang, and Cem Yuksel.
 > *Offset Geometric Contact.* ACM Transactions on Graphics 44(4):160, 2025.
 > [doi:10.1145/3731205](https://doi.org/10.1145/3731205)
-
