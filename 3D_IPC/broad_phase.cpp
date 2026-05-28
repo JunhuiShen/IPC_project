@@ -673,10 +673,12 @@ void BroadPhase::per_vertex_safe_step(
             }
         }
         const Vec3 x_new = clip_to_node_box
-            ? [&]{ constexpr double inset = 1e-10;
+            ? [&]() -> Vec3 { constexpr double inset = 1e-10;
                    const AABB& box = cache_.node_boxes[vi];
-                   return x_new_fn(vi).cwiseMax(box.min + Vec3::Constant(inset))
-                                      .cwiseMin(box.max - Vec3::Constant(inset)); }()
+                   const Vec3 raw = x_new_fn(vi);
+                   const Vec3 lo = (box.min + Vec3::Constant(inset)).eval();
+                   const Vec3 hi = (box.max - Vec3::Constant(inset)).eval();
+                   return raw.cwiseMax(lo).cwiseMin(hi); }()
             : x_new_fn(vi);
         const Vec3 dx = x_new - x[vi];
         if (dx.squaredNorm() < 1e-28) return;

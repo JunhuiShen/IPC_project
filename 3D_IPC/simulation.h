@@ -49,6 +49,9 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         
         accumulate_solver_result(agg, sub_result, sub == 0);
 
+        if (!sub_result.converged)
+            return agg;
+
         update_velocity(state.velocities, xnew, state.deformed_positions, dt);
         state.deformed_positions = xnew;
 

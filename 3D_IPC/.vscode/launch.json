@@ -5,11 +5,28 @@
             "name": "Debug 3D_sim",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/3D_sim",
-            "args": [],
+            "program": "${workspaceFolder}/build_debug/3D_sim",
+            "args": [
+                "--example", "4",
+                "--num_frames", "500",
+                "--E", "800",
+                "--nu", "0.3",
+                "--kB", "0",
+                "--d_hat", "0",
+                "--k_barrier", "100",
+                "--max_substep_iters", "10",
+                "--substeps", "10",
+                "--datadir", "${env:HOME}/Downloads/body_obj_fuse6mm",
+                "--fixed_iters", "false",
+                "--verbose", "true",
+                "--use_ccd", "false",
+                "--use_parallel", "false"
+            ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
-            "environment": [],
+            "environment": [
+                { "name": "OMP_NUM_THREADS", "value": "1" }
+            ],
             "externalConsole": false,
             "MIMode": "lldb",
             "preLaunchTask": "cmake build"
