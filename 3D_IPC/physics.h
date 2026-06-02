@@ -42,6 +42,7 @@ struct SimParams {
     bool   write_substeps;       // if true, export a frame file after every substep (not just every frame)
     bool   use_ccd;              // if true, run CCD step clamping in per_vertex_safe_step
     bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
+    bool   use_verlet_guess;     // if true, start GS from xhat + dt²*gravity (Verlet predictor)
     bool   use_ogc;     // if true, use trust_region_initial_guess instead of CCD
     bool   use_ogc_solver;       // if true, route the substep through global_gauss_seidel_solver_ogc
     double ogc_box_pad;          // OGC node-box / tri-edge union pad used by the per-iter BVH rebuild
@@ -82,6 +83,7 @@ struct SimParams {
         p.write_substeps            = false;
         p.use_ccd                   = false;
         p.use_ccd_guess             = true;
+        p.use_verlet_guess          = false;
         p.use_ogc          = false;
         p.use_ogc_solver            = false;
         p.ogc_box_pad               = 0.0;

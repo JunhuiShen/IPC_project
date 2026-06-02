@@ -36,6 +36,7 @@ struct IPCArgs3D : ArgParser {
     bool   write_substeps = false;
     bool   use_ccd       = true;
     bool   use_ccd_guess = true;
+    bool   use_verlet_guess = false;
     bool   use_ogc = false;
     bool   use_ogc_solver = false;
     double ogc_box_pad = 0.005;
@@ -126,6 +127,7 @@ struct IPCArgs3D : ArgParser {
 
         add_bool  ("use_ccd",      use_ccd,      true,   "Run CCD step clamping in per_vertex_safe_step");
         add_bool  ("use_ccd_guess",    use_ccd_guess,    true,  "Use ccd_initial_guess as the substep start point (ignored if use_ogc is on)");
+        add_bool  ("use_verlet_guess", use_verlet_guess, false, "Start GS from xhat + dt^2*gravity (Verlet predictor)");
         add_bool  ("use_ogc", use_ogc, false, "Use trust-region narrow phase instead of CCD for step clamping");
         add_bool  ("use_ogc_solver", use_ogc_solver, false, "Use the serial OGC Gauss-Seidel solver (rebuilds BVH per iter; partial leaf refit per move)");
         add_double("ogc_box_pad", ogc_box_pad, 0.005, "Padding on OGC node boxes / tri-edge unions for the per-iter BVH rebuild (floored to d_hat at use)");
@@ -194,8 +196,8 @@ struct IPCArgs3D : ArgParser {
         SimParams p = SimParams::zeros();
         p.fps              = fps;
         p.substeps         = substeps;
-        p.mu               = E / (2.0 * (1.0 + nu));
-        p.lambda           = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
+        p.mu               = E * thickness / (2.0 * (1.0 + nu));
+        p.lambda           = E * thickness * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
         p.density          = density;
         p.thickness        = thickness;
         p.kB               = kB;
@@ -210,7 +212,8 @@ struct IPCArgs3D : ArgParser {
         p.use_parallel     = use_parallel;
         p.write_substeps   = write_substeps;
         p.use_ccd          = use_ccd;
-        p.use_ccd_guess = use_ccd_guess;
+        p.use_ccd_guess    = use_ccd_guess;
+        p.use_verlet_guess = use_verlet_guess;
         p.use_ogc = use_ogc;
         p.use_ogc_solver = use_ogc_solver;
         p.ogc_box_pad = ogc_box_pad;

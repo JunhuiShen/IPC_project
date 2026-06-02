@@ -34,7 +34,12 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
 
         if (params.use_ogc || params.use_ogc_solver)
             xnew = state.deformed_positions;
-        else if (params.use_ccd_guess)
+        else if (params.use_verlet_guess) {
+            const Vec3 dt2g = params.dt2() * params.gravity;
+            std::vector<Vec3> xverlet(xhat.size());
+            for (int i = 0; i < (int)xhat.size(); ++i) xverlet[i] = xhat[i] + dt2g;
+            xnew = ccd_initial_guess(state.deformed_positions, xverlet, ref_mesh);
+        } else if (params.use_ccd_guess)
             xnew = ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
         else
             xnew = state.deformed_positions;
