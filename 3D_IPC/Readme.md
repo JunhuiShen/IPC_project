@@ -267,9 +267,7 @@ reader can jump to the layer they care about.
     `incremental_refresh_vertex`.
 
   Both share the per-vertex Newton solve (`gs_vertex_delta`) and node-box clip
-  mechanics. `ccd_initial_guess`, `transition_initial_guess` (global translation
-  with pin and one-step SDF correction), and `update_one_vertex` (single-vertex
-  Newton + CCD helper) live here.
+  mechanics. `ccd_initial_guess`, `transition_initial_guess`, and `update_one_vertex` live here.
 - `parallel_helper.h` / `parallel_helper.cpp` -- Jacobi delta prediction,
   conflict-graph construction, greedy coloring, and parallel commit apply for
   the basic solver under `--use_parallel`.
