@@ -469,7 +469,13 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     if (static_cast<int>(prev_disp.size()) != nv)
         prev_disp.assign(nv, params.node_box_max);
     constexpr double node_box_padding = 1.2;
-    auto node_box_size_fn = [&](int vi) { return std::clamp(prev_disp[vi] * node_box_padding, params.node_box_min, params.node_box_max); };
+    const double dt = params.dt();
+    // Use max(prev_disp, velocity-based step) so free-fall doesn't collapse the box
+    // to node_box_min right before a high-velocity floor contact
+    auto node_box_size_fn = [&](int vi) {
+        const double inertial = v[vi].norm() * dt;
+        return std::clamp(std::max(prev_disp[vi], inertial) * node_box_padding, params.node_box_min, params.node_box_max);
+    };
     std::vector<AABB> blue_boxes(nv);
     for (int i = 0; i < nv; ++i) {
         const double r = node_box_size_fn(i);
