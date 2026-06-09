@@ -2,6 +2,7 @@
 #include "physics.h"
 #include "solver.h"
 #include "broad_phase.h"
+#include "make_shape.h"
 #include "GPU_Sim/gpu_solver_bridge.h"
 #include <functional>
 #include <string>
@@ -43,20 +44,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         else if (params.use_ccd_guess)
             xnew = ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
         else if (params.use_transition_guess){
-            xnew.resize(xhat.size());
-            const Vec3 dt2g = params.dt2() * params.gravity;
-            double total_mass = 0.0;
-            for (double m: ref_mesh.mass) total_mass += m;
-            Vec3 C = Vec3::Zero();
-            for (int alpha = 0; alpha < (int)C.size(); ++alpha){
-                for(int i = 0; i < (int)xhat.size(); ++i){
-                    C[alpha] -= ((ref_mesh.mass[i]/total_mass) * (state.deformed_positions[i][alpha] - xhat[i][alpha]));
-                }
-            }
-            C += dt2g;
-            for(int i = 0; i < (int)xhat.size(); ++i){
-                xnew[i] = state.deformed_positions[i] + C;
-            }
+            xnew = transition_initial_guess(state.deformed_positions, xhat, ref_mesh, pins, params);
         }
         else
             xnew = state.deformed_positions;

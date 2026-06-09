@@ -306,6 +306,26 @@ target_link_libraries(simulation_snapshot_test
 
 gtest_discover_tests(simulation_snapshot_test)
 
+add_executable(initial_guess_test
+    initial_guess_test.cpp
+    make_shape.cpp
+    physics.cpp
+    solver.cpp
+    parallel_helper.cpp
+    broad_phase.cpp
+)
+
+target_link_libraries(initial_guess_test
+    PRIVATE
+    gpu_mesh_lib
+    corotated_energy_lib
+    OpenMP::OpenMP_CXX
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(initial_guess_test)
+
 add_executable(generate_golden
     generate_golden.cpp
     make_shape.cpp

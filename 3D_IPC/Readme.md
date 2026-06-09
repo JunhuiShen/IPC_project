@@ -86,15 +86,26 @@ Built-in example scenes (`--example N`):
 | `1` | Square cloth clamped on two edges and twisted (default) |
 | `2` | Four closed-loop cloth strips wrapping two horizontal cylinders, twisted then untwisted |
 | `3` | Rectangular cloth wrapping one horizontal cylinder; cylinder yaws about +y, twisting the cloth between two clamped top edges, then reverses to untwist |
+| `4` | Avatar clothing scene loaded from `datadir` (`body_0000.obj` collider + `dress_0000.obj` simulated cloth) |
 
 Common invocations:
 
     ./build/3D_sim --example 1                              # twisting cloth
     ./build/3D_sim --example 2                              # two-cylinder twist
     ./build/3D_sim --example 3                              # cylinder yaws and twists cloth between two clamped top edges
+    ./build/3D_sim --use_ccd_guess false --use_transition_guess true --fixed_iters
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
+
+Initial guesses are selected before the nonlinear solver starts each substep.
+The default is `ccd_initial_guess`; `--use_transition_guess true` instead starts
+from a single global translation `x_i^n + C`, so pass
+`--use_ccd_guess false` when using it. This transition guess minimizes the
+translation-restricted inertia + gravity + pin-spring objective in closed form,
+then applies one cheap 3D Newton correction for SDF penalty contact. Elastic,
+bending, and cloth-cloth IPC barrier terms are unchanged by a uniform
+translation and therefore do not affect `C`.
 
 Reference command for example 1 (square cloth twisted in place, 240 frames at
 0.5 turns/s):
@@ -143,11 +154,11 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | Time integration | `fps`, `substeps`, `num_frames` |
 | Physics | `E`, `nu`, `density`, `thickness`, `kB`, `kpin`, `gx`, `gy`, `gz` |
 | Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `fixed_iters`, `use_parallel`, `use_gpu`, `write_substeps` |
-| CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_ticcd` |
+| CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_transition_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (new per-iter rebuild solver), `ogc_box_pad` (BVH padding for the per-iter rebuild; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (clamp range for `R_vi = clamp(prev_disp * 1.2, min, max)`) |
-| Scene | `example` (`1`..`3`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink` |
-| Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame` |
+| Scene | `example` (`1`..`4`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink` |
+| Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame`, `datadir` |
 
 Notes:
 - `restart_frame` is CLI run-control handled in `simulation.cpp` (from `IPCArgs3D`), not a physics/solver runtime parameter.
@@ -162,8 +173,8 @@ reader can jump to the layer they care about.
 
 - `simulation.cpp` -- `3D_sim` entry point: parses args, builds a scene from
   `example.cpp`, runs the frame loop, handles restart, prints per-frame stats.
-- `simulation.h` -- inline `advance_one_frame()` time-stepping driver (normal and
-  twisting paths unified via optional twist-spec/update callback).
+- `simulation.h` -- inline `advance_one_frame()` time-stepping driver; selects
+  the substep initial guess before dispatching to the chosen solver.
 - `example.h` / `example.cpp` -- built-in scene library selected by `--example`.
 - `args.h`, `ipc_args.h` -- generic `--key value` argument parser and the
   `IPCArgs3D` struct that defines every CLI flag and its default.
@@ -210,12 +221,12 @@ reader can jump to the layer they care about.
 
 - `ccd.h` / `ccd.cpp` -- four public CCD entry points behind two backends:
   - `node_triangle_only_one_node_moves` and `segment_segment_only_one_node_moves`
-    take a `bool use_ticcd` flag (default `true`). When `true` they forward to
+    take a `bool use_ticcd` flag. When `true` they forward to
     Tight-Inclusion CCD; when `false` they use a **self-written closed-form
     "linear" backend** that is exact in principle when one of the four
     vertices moves over the step (the case Gauss-Seidel queries always
     satisfy). The Gauss-Seidel solvers pass `params.use_ticcd` (CLI flag
-    `--use_ticcd`).
+    `--use_ticcd`; default `false` in the production CLI).
   - `node_triangle_general_ccd` and `segment_segment_general_ccd` are
     TICCD-only entry points used wherever multiple vertices move
     simultaneously (e.g. the CCD-projected initial guess in
@@ -256,8 +267,9 @@ reader can jump to the layer they care about.
     `incremental_refresh_vertex`.
 
   Both share the per-vertex Newton solve (`gs_vertex_delta`) and node-box clip
-  mechanics. `ccd_initial_guess` and `update_one_vertex` (single-vertex Newton +
-  CCD helper) live here.
+  mechanics. `ccd_initial_guess`, `transition_initial_guess` (global translation
+  with pin and one-step SDF correction), and `update_one_vertex` (single-vertex
+  Newton + CCD helper) live here.
 - `parallel_helper.h` / `parallel_helper.cpp` -- Jacobi delta prediction,
   conflict-graph construction, greedy coloring, and parallel commit apply for
   the basic solver under `--use_parallel`.
@@ -297,6 +309,7 @@ Every layer of the pipeline has a GoogleTest binary. To build and run them all:
 | `barrier_energy_test` | 14 | Scalar barrier, NT/SS gradient/Hessian FD convergence, activation boundary, near-parallel stress |
 | `corotated_energy_test` | 13 | Energy, rest state, rotation/translation invariance, gradient/Hessian FD convergence, stress |
 | `total_energy_test` | 12 | Combined elastic + barrier FD convergence, barrier activation, per-vertex gradient/Hessian, slope-2 checks |
+| `initial_guess_test` | 4 | CCD no-candidate guess and transition guess closed forms for inertia/gravity, pins, and one-step plane-SDF correction |
 | `node_triangle_distance_test` | 9 | All 7 proximity regions + signed distance + degenerate |
 | `visualization_test` | 2 | Debug OBJ export (no assertions -- manual inspection) |
 | `simulation_snapshot_test` | 1 | Golden-file regression (5-frame determinism) |
