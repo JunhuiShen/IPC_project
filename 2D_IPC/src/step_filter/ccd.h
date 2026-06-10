@@ -2,6 +2,7 @@
 
 #include "step_filter.h"
 #include <cstddef>
+#include <Eigen/Dense>
 
 // ======================================================
 // CCD step filter
@@ -32,6 +33,22 @@ namespace step_filter::ccd {
                      const Vec2& x2, const Vec2& dx2,
                      const Vec2& x3, const Vec2& dx3,
                      double eta = 0.9);
+
+    bool point_segment_2d_rb_rotation(const Eigen::Vector2d& x,
+                                      const Eigen::Vector2d& x_com,
+                                      const double& theta_n,
+                                      const double& theta_new,
+                                      const Eigen::Vector2d& x0,
+                                      const Eigen::Vector2d& x1,
+                                      double& step);
+
+    double safe_step_rb_rotation(const Eigen::Vector2d& x,
+                                 const Eigen::Vector2d& x_com,
+                                 const double& theta_n,
+                                 const double& theta_new,
+                                 const Eigen::Vector2d& x0,
+                                 const Eigen::Vector2d& x1,
+                                 double eta = 0.9);
 
 } // namespace step_filter::ccd
 

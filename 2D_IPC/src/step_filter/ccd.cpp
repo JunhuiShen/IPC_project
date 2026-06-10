@@ -1,6 +1,8 @@
 #include "ccd.h"
 #include <cmath>
 #include <algorithm>
+#include <Eigen/Dense>
+#include <iostream>
 
 namespace step_filter::ccd {
 
@@ -58,6 +60,78 @@ namespace step_filter::ccd {
         t_out = t_star;
         return true;
     }
+
+    bool point_segment_2d_rb_rotation(const Eigen::Vector2d& x, const Eigen::Vector2d& x_com, const double& theta_n, const double& theta_new, const Eigen::Vector2d& x0, const Eigen::Vector2d& x1, double& step) {
+        step = 0.0;
+
+        Eigen::Vector2d dx = x - x_com;
+        double cos_n = std::cos(theta_n);
+        double sin_n = std::sin(theta_n);
+
+        Eigen::Vector2d r{cos_n * dx.x() + sin_n * dx.y(), -sin_n * dx.x() + cos_n * dx.y()};
+
+        Eigen::Vector2d d = x1 - x0;
+        double seg_len = d.norm();
+        if (seg_len < 1e-14) {
+            std::cerr << "Warning: degenerate segment in point_segment_2d_rotation(): seg_len = " << seg_len
+                      << ", threshold = 1e-14\n";
+            return false;
+        }
+
+        Eigen::Vector2d d_hat = d / seg_len;
+
+        double A = r.x() * d_hat.y() - r.y() * d_hat.x();
+        double B = -r.x() * d_hat.x() - r.y() * d_hat.y();
+        double C = (x_com.x() - x0.x()) * d_hat.y()
+                 - (x_com.y() - x0.y()) * d_hat.x();
+
+        double amplitude = std::sqrt(A*A + B*B);
+        if (std::abs(C) > amplitude + 1e-14) return false;
+
+        double phi = std::atan2(B, A);
+        double arccos_val = std::acos(std::clamp(-C / amplitude, -1.0, 1.0)); // clamp to prevent numerical errors.
+
+        double theta_candidates[2] = { phi + arccos_val, phi - arccos_val };
+        
+        double best_s = std::numeric_limits<double>::infinity();
+        double dtheta = theta_new - theta_n;
+        if (std::abs(dtheta) < 1e-14){ 
+            std::cerr << "Warning: theta_new - theta_n < threshold\n";
+            return false;
+        }
+
+        for (double theta_star : theta_candidates) {
+            double s = (theta_star - theta_n) / dtheta;
+            if (s < 0.0 || s > 1.0) continue;
+
+            double theta_s = theta_n + s * dtheta;
+            Eigen::Vector2d x_s{
+                std::cos(theta_s) * r.x() - std::sin(theta_s) * r.y(),
+                std::sin(theta_s) * r.x() + std::cos(theta_s) * r.y()
+            };
+            x_s += x_com;
+
+            double t_star = (x_s - x0).dot(d) / (seg_len * seg_len);
+            if (t_star < 0.0 || t_star > 1.0) continue;
+
+            if (s < best_s) best_s = s;
+        }
+
+        if (best_s == std::numeric_limits<double>::infinity()) return false;
+        step = best_s;
+        return true;
+    }
+
+    double safe_step_rb_rotation(const Eigen::Vector2d& x, const Eigen::Vector2d& x_com, const double& theta_n, const double& theta_new, const Eigen::Vector2d& x0, const Eigen::Vector2d& x1, const double eta) {
+        ++total_tests;
+        double step;
+        if (!point_segment_2d_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, step)) {
+            return 1.0;
+        }
+        ++total_collisions;
+        return (step <= 1e-12) ? 0.0 : eta * step;
+    }
+
 
     double safe_step(const Vec2& x1, const Vec2& dx1,
                      const Vec2& x2, const Vec2& dx2,

@@ -26,6 +26,31 @@ add_library(ipc_core
 
 target_include_directories(ipc_core PUBLIC src)
 
+# Eigen Library
+include(FetchContent)
+
+set(EIGEN_BUILD_DOC OFF CACHE INTERNAL "")
+set(EIGEN_BUILD_TESTING OFF CACHE INTERNAL "")
+set(EIGEN_BUILD_PKGCONFIG OFF CACHE INTERNAL "")
+set(BUILD_TESTING OFF CACHE INTERNAL "")
+FetchContent_Declare(
+    eigen3
+    URL      https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
+    URL_HASH SHA256=8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+if(POLICY CMP0169)
+    cmake_policy(SET CMP0169 OLD)
+endif()
+FetchContent_GetProperties(eigen3)
+if(NOT eigen3_POPULATED)
+    FetchContent_Populate(eigen3)
+endif()
+add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
+target_include_directories(Eigen3::Eigen SYSTEM INTERFACE ${eigen3_SOURCE_DIR})
+
+target_link_libraries(ipc_core PUBLIC Eigen3::Eigen)
+
 # ── Simulation executable ─────────────────────────────────────────────────────
 add_executable(simulation src/simulation.cpp)
 target_link_libraries(simulation PRIVATE ipc_core)
