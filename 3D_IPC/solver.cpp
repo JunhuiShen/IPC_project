@@ -9,6 +9,7 @@
 #include "barrier_energy.h"
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <cstdio>
 #include <string>
@@ -534,64 +535,71 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
         prev_disp.assign(nv, params.node_box_max);
     constexpr double node_box_padding = 1.2;
     const double dt = params.dt();
-    // Use max(prev_disp, velocity-based step) so free-fall doesn't collapse the box
-    // to node_box_min right before a high-velocity floor contact
     auto node_box_size_fn = [&](int vi) {
         const double inertial = v[vi].norm() * dt;
         return std::clamp(std::max(prev_disp[vi], inertial) * node_box_padding, params.node_box_min, params.node_box_max);
     };
     std::vector<AABB> blue_boxes(nv);
-    for (int i = 0; i < nv; ++i) {
-        const double r = node_box_size_fn(i);
-        blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
-    }
     BroadPhase broad_phase;
-    broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
 
     //create colors
-    const std::vector<std::vector<int>> color_groups = greedy_color_conflict_graph(
-        union_adjacency(build_elastic_adj(ref_mesh, adj, static_cast<int>(xnew.size())),
-                        build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()))));
+    std::vector<std::vector<int>> ea=build_elastic_adj(ref_mesh, adj, static_cast<int>(xnew.size()));
+    std::vector<std::vector<int>> bca;
+    std::vector<std::vector<int>> color_groups;
 
     SolverResult result;
-    result.iterations = 0;
-    double r0=0,residual=0;
-    if (!params.fixed_iters){
-        r0 = compute_global_residual(ref_mesh,adj,pins,params,xnew,xhat,broad_phase,&pm);
-        result.converged = false;
-    }
-
-    //write substep data
-    if (params.write_substeps) {
-        write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, &color_groups);
-    }
-
     const std::vector<Vec3> xnew_substep_start = xnew;
 
+    double r1=0.;
     //gs loop
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
-        broad_phase.per_vertex_safe_step(xnew, [&](int vi) -> Vec3 { return xnew[vi] - gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm); },
+        if((iter-1)%params.node_box_update_count==0){//rebuild node boxes and color accordingly
+            if (verbose) fprintf(stderr, "  [GS] iter %d  rebuilding node boxes\n", iter);
+            //create new node boxes
+            for (int i = 0; i < nv; ++i) {
+                const double r = node_box_size_fn(i);
+                blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
+            }
+            //rebuild bvh and pairs
+            broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
+            bca=build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()));
+            //color
+            color_groups=greedy_color_conflict_graph(union_adjacency(ea,bca));
+        }
+
+        std::atomic<int> clip_count{0};
+        broad_phase.per_vertex_safe_step(xnew, [&](int vi) -> Vec3 { return xnew[vi] - params.damping * gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm); },
                                          /*safety=*/0.9, /*clip_to_node_box=*/true,
                                          /*clip_ccd=*/params.use_ogc ? false : params.use_ccd,
                                          /*use_ticcd=*/params.use_ticcd,
                                          /*use_ogc=*/params.use_ogc,
-                                         params.use_parallel ? &color_groups : nullptr);
+                                         params.use_parallel ? &color_groups : nullptr,
+                                         verbose ? &clip_count : nullptr);
+
         result.iterations = iter;
         if (!params.fixed_iters){
-            residual = compute_global_residual(ref_mesh,adj,pins,params,xnew,xhat,broad_phase,&pm);
+            double residual = compute_global_residual(ref_mesh,adj,pins,params,xnew,xhat,broad_phase,&pm);
+            if(iter==1) r1=residual;
             if (verbose)
-                fprintf(stderr, "  [GS] iter %d  residual = %.6e\n", iter, residual);
-            if(residual < params.tol_rel * r0 || residual < params.tol_abs){
+                fprintf(stderr, "  [GS] iter %d  residual = %.6e  node clips = %d\n", iter, residual, clip_count.load());
+            if(residual < params.tol_rel * r1 || residual < params.tol_abs){
                 result.converged = true;
                 break;
             }
         }
     }
 
+    //record displacement over sub step
     for (int i = 0; i < nv; ++i)
         prev_disp[i] = (xnew[i] - xnew_substep_start[i]).norm();
 
     if (params.fixed_iters) result.converged = true;
+
+    //write substep data
+    if (params.write_substeps) {
+        write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, &color_groups);
+    }
+
     return result;
 }
 

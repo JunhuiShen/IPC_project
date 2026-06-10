@@ -176,6 +176,21 @@ std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const V
                 row.push_back(vj);
             }
         }
+
+        // A hinge's two apex vertices (h.v[2], h.v[3]) are coupled through the
+        // bending term but share no triangle, so the 1-ring adjacency above
+        // misses that pair. The shared-edge endpoints (h.v[0], h.v[1]) are
+        // already adjacent to both apexes via the two triangles.
+        auto hinge_it = ref_mesh.hinge_adj.find(vi);
+        if (hinge_it != ref_mesh.hinge_adj.end()) {
+            for (const auto& [hi, role] : hinge_it->second) {
+                if (role < 2) continue;
+                const Hinge& h = ref_mesh.hinges[hi];
+                const int other_apex = h.v[role == 2 ? 3 : 2];
+                if (other_apex != vi && other_apex >= 0 && other_apex < nv) row.push_back(other_apex);
+            }
+        }
+
         std::sort(row.begin(), row.end());
         row.erase(std::unique(row.begin(), row.end()), row.end());
     }

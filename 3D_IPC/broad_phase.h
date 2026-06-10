@@ -143,7 +143,7 @@ public:
     // radius is recomputed from the broad-phase cache each iteration so it
     // adapts as vertices approach contacts. clip_to_node_box / clip_ccd are
     // ignored under use_ogc.
-    void per_vertex_safe_step(std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety = 0.9, bool clip_to_node_box = true, bool clip_ccd = true, bool use_ticcd = true, bool use_ogc = false, const std::vector<std::vector<int>>* color_groups = nullptr) const;
+    void per_vertex_safe_step(std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety = 0.9, bool clip_to_node_box = true, bool clip_ccd = true, bool use_ticcd = true, bool use_ogc = false, const std::vector<std::vector<int>>* color_groups = nullptr, std::atomic<int>* clip_count = nullptr) const;
 
     void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt);
 

@@ -56,6 +56,7 @@ struct SimParams {
     bool   use_gpu;
     double node_box_max;       // upper bound on node box half-extent used by the basic solver
     double node_box_min;       // lower bound on node box half-extent (floor when prev disp is near zero)
+    int    node_box_update_count;
     double k_barrier;              // barrier stiffness multiplier
     double damping;                // Jacobi step damping in global_gauss_seidel_solver_ogc (multiplies the per-vertex Newton delta)
     bool   use_ticcd;              // true (default) -> Tight-Inclusion CCD library; false -> self-written linear CCD
@@ -94,6 +95,7 @@ struct SimParams {
         p.use_gpu                   = false;
         p.node_box_max              = 0.0;
         p.node_box_min              = 0.0;
+        p.node_box_update_count     = 250;
         p.k_barrier                     = 1.0;
         p.damping                       = 0.8;
         p.use_ticcd                     = true;
