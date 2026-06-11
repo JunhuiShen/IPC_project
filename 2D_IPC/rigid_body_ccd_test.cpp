@@ -1,16 +1,18 @@
 #include <gtest/gtest.h>
 #include <Eigen/Dense>
 #include <cmath>
+#include <algorithm>
 #include "ccd.h"
+#include <random>
 
 using namespace step_filter::ccd;
 
 
 // # Run a single test
-// ./build/rigid_body_ccd_test --gtest_filter="CCD.PointSegmentRotation_HitsAt45Degrees"
+// ./build/tests/rigid_body_ccd_test --gtest_filter="CCD.PointSegmentRotation_HitsAt45Degrees"
 
 // # Run all tests matching a pattern (wildcard)
-// ./build/rigid_body_ccd_test --gtest_filter="CCD.*"
+// ./build/tests/rigid_body_ccd_test --gtest_filter="CCD.*"
 
 
 TEST(CCD, PointSegmentRotation_HitsAt45Degrees) {
@@ -229,9 +231,6 @@ TEST(CCD, RbRotation_TwoCrossings_Miss) {
 
     double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 1.0, 1e-10);
-    std::cout<<"step is "<<step<<std::endl;
-    std::cout<<"hit is "<<hit<<std::endl;
-    std::cout<<"omega is "<<omega<<std::endl;
 }
 
 TEST(CCD, RbRotation_TwoCrossings_HitAtEndOfStep) {
@@ -252,10 +251,6 @@ TEST(CCD, RbRotation_TwoCrossings_HitAtEndOfStep) {
 
     double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 0.9 * 1.0, 1e-10);
-    
-        std::cout<<"step is "<<step<<std::endl;
-    std::cout<<"hit is "<<hit<<std::endl;
-    std::cout<<"omega is "<<omega<<std::endl;
 }
 
 TEST(CCD, RbRotation_TwoCrossings_HitAtMidpoint) {
@@ -276,9 +271,6 @@ TEST(CCD, RbRotation_TwoCrossings_HitAtMidpoint) {
 
     double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 0.9 * 0.5, 1e-10);
-    std::cout<<"step is "<<step<<std::endl;
-    std::cout<<"hit is "<<hit<<std::endl;
-    std::cout<<"omega is "<<omega<<std::endl;
 }
 
 TEST(CCD, RbRotation_TwoCrossings_HitAtOneThird) {
@@ -301,9 +293,6 @@ TEST(CCD, RbRotation_TwoCrossings_HitAtOneThird) {
     double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 0.9 * (1.0 / 3.0), 1e-10);
 
-    std::cout<<"step is "<<step<<std::endl;
-    std::cout<<"hit is "<<hit<<std::endl;
-    std::cout<<"omega is "<<omega<<std::endl;
 }
 
 TEST(CCD, RbRotation_TwoCrossings_HitAtQuarter) {
@@ -326,8 +315,103 @@ TEST(CCD, RbRotation_TwoCrossings_HitAtQuarter) {
     double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 0.9 * 0.25, 1e-10);
 
+}
 
-    std::cout<<"step is "<<step<<std::endl;
-    std::cout<<"hit is "<<hit<<std::endl;
-    std::cout<<"omega is "<<omega<<std::endl;
+// Randomized test: x_com and radius are random, defining a circle
+// centered at x_com. The particle x = x_com + radius*(1,0) starts at
+// "3 o'clock" (theta_s=0). Let
+//   Q(angle) = x_com + radius * (cos(angle), sin(angle))
+// be the point reached by rotating x around x_com CCW by `angle`
+// (Q(0) = x). The chord endpoints are x0 = Q(pi/3) and x1 = Q(pi - pi/3)
+// = Q(2pi/3); since cos(pi-a) = -cos(a) and sin(pi-a) = sin(a), these
+// share the same y-coordinate, so the chord between them is HORIZONTAL.
+//
+// Since x0, x1, and the particle's path Q(theta_s) all lie on the same
+// circle, x0 and x1 are exactly the two points where that circle crosses
+// the chord's line. With theta_n = 0 and theta_min = min(pi/3, 2pi/3) =
+// pi/3, hit = (theta_new >= theta_min) and step = theta_min/theta_new --
+// independent of x_com and radius:
+//   theta_new = pi/6  <  theta_min -> miss
+//   theta_new = pi/2  >= theta_min -> step = (pi/3)/(pi/2)  = 2/3
+//   theta_new = 3pi/2 >= theta_min -> step = (pi/3)/(3pi/2) = 2/9
+//   theta_new = 2pi   >= theta_min -> step = (pi/3)/(2pi)   = 1/6
+//
+// The chord is extended by `margin` past x0/x1 (along the same line) so
+// the relevant crossing point is strictly interior to the segment
+// (t_star in (0,1)) rather than landing exactly on a segment endpoint,
+// which would be numerically fragile.
+TEST(CCD, RbRotation_RandomHorizontalChord) {
+    std::mt19937 rng(12345); // fixed seed -> deterministic test
+    std::uniform_real_distribution<double> pos_dist(-5.0, 5.0);
+    std::uniform_real_distribution<double> radius_dist(0.5, 3.0);
+
+    const double theta     = M_PI / 3.0;
+    const double theta_b   = M_PI - theta; // 2pi/3
+    const double theta_min = std::min(theta, theta_b); // pi/3
+    const double theta_n   = 0.0;
+
+    Eigen::Vector2d x_com(pos_dist(rng), pos_dist(rng));
+    double radius = radius_dist(rng);
+
+    Eigen::Vector2d x  = x_com + radius * Eigen::Vector2d(1.0, 0.0);
+    Eigen::Vector2d x0 = x_com + radius * Eigen::Vector2d(std::cos(theta),   std::sin(theta));
+    Eigen::Vector2d x1 = x_com + radius * Eigen::Vector2d(std::cos(theta_b), std::sin(theta_b));
+
+    Eigen::Vector2d d_hat = (x1 - x0).normalized();
+    double margin = radius;
+    Eigen::Vector2d x0e = x0 - margin * d_hat;
+    Eigen::Vector2d x1e = x1 + margin * d_hat;
+
+    // theta_new = pi/6 < theta_min -> miss
+    {
+        double theta_new = M_PI / 6.0;
+        double step = -1.0;
+        bool hit = point_segment_2d_rb_rotation(x, x_com, theta_n, theta_new, x0e, x1e, step);
+        EXPECT_FALSE(hit);
+
+        double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0e, x1e, 0.9);
+        EXPECT_NEAR(omega, 1.0, 1e-9);
+    }
+
+    // theta_new = pi/2 >= theta_min -> hit at s = (pi/3)/(pi/2)
+    {
+        double theta_new = M_PI / 2.0;
+        double step = -1.0;
+        bool hit = point_segment_2d_rb_rotation(x, x_com, theta_n, theta_new, x0e, x1e, step);
+        EXPECT_TRUE(hit);
+
+        double expect_step = theta_min / theta_new;
+        EXPECT_NEAR(step, expect_step, 1e-9);
+
+        double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0e, x1e, 0.9);
+        EXPECT_NEAR(omega, 0.9 * expect_step, 1e-9);
+    }
+
+    // theta_new = 3pi/2 >= theta_min -> hit at s = (pi/3)/(3pi/2)
+    {
+        double theta_new = 3.0 * M_PI / 2.0;
+        double step = -1.0;
+        bool hit = point_segment_2d_rb_rotation(x, x_com, theta_n, theta_new, x0e, x1e, step);
+        EXPECT_TRUE(hit);
+
+        double expect_step = theta_min / theta_new;
+        EXPECT_NEAR(step, expect_step, 1e-9);
+
+        double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0e, x1e, 0.9);
+        EXPECT_NEAR(omega, 0.9 * expect_step, 1e-9);
+    }
+
+    // theta_new = 2pi >= theta_min -> hit at s = (pi/3)/(2pi)
+    {
+        double theta_new = 2.0 * M_PI;
+        double step = -1.0;
+        bool hit = point_segment_2d_rb_rotation(x, x_com, theta_n, theta_new, x0e, x1e, step);
+        EXPECT_TRUE(hit);
+
+        double expect_step = theta_min / theta_new;
+        EXPECT_NEAR(step, expect_step, 1e-9);
+
+        double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0e, x1e, 0.9);
+        EXPECT_NEAR(omega, 0.9 * expect_step, 1e-9);
+    }
 }

@@ -62,6 +62,8 @@ namespace step_filter::ccd {
     }
 
     bool point_segment_2d_rb_rotation(const Eigen::Vector2d& x, const Eigen::Vector2d& x_com, const double& theta_n, const double& theta_new, const Eigen::Vector2d& x0, const Eigen::Vector2d& x1, double& step) {
+        // We assume counterclockwise rotation from theta_n to theta_new.
+        
         step = 0.0;
 
         Eigen::Vector2d dx = x - x_com;
