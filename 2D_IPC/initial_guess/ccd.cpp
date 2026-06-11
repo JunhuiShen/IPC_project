@@ -1,6 +1,6 @@
 #include "ccd.h"
 #include "../broad_phase/bvh.h"
-#include "../step_filter/ccd.h"
+#include "../ccd.h"
 #include <algorithm>
 #include <vector>
 

@@ -1,16 +1,16 @@
 #include <gtest/gtest.h>
 #include <Eigen/Dense>
 #include <cmath>
-#include "step_filter/ccd.h"
+#include "ccd.h"
 
 using namespace step_filter::ccd;
 
 
 // # Run a single test
-// ./build/tests/rigid_body_ccd_test --gtest_filter="CCD.PointSegmentRotation_HitsAt45Degrees"
+// ./build/rigid_body_ccd_test --gtest_filter="CCD.PointSegmentRotation_HitsAt45Degrees"
 
 // # Run all tests matching a pattern (wildcard)
-// ./build/tests/rigid_body_ccd_test --gtest_filter="CCD.*"
+// ./build/rigid_body_ccd_test --gtest_filter="CCD.*"
 
 
 TEST(CCD, PointSegmentRotation_HitsAt45Degrees) {

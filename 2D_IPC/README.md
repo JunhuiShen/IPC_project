@@ -26,46 +26,80 @@ These components can be swapped to compare different algorithmic variants.
 
     ./build/simulation
 
-Output frames are written to `frames_spring_IPC_bvh/` as
+Example 1, with the default CCD step policy and CCD initial guess:
 
-    frame_0001.obj
-    frame_0002.obj
+    ./build/simulation --example 1
+
+A fully explicit version of the same run:
+
+    ./build/simulation --example 1 --substeps 3 --step_policy ccd --initial_guess ccd --format geo --outdir frames_2d
+
+Output frames are written to `frames_2d/` by default as
+
+    frame_0000.geo
+    frame_0001.geo
+    frame_0002.geo
     ...
+
+Binary restart checkpoints are written beside the frames:
+
+    state_0000.bin
+    state_0001.bin
+    ...
+
+Resume from a checkpoint with:
+
+    ./build/simulation --example 1 --restart_frame 30 --outdir frames_2d
+
+Export every substep with:
+
+    ./build/simulation --example 1 --write_substeps
+
+From the repository root, the default output folder is:
+
+    2D_IPC/frames_2d/
 
 
 ## Console Output
 
 Per-frame statistics are printed to stdout:
 
-    Frame    2 | initial_residual=... | final_residual=... | global_iters=...
-    Frame    3 | initial_residual=... | final_residual=... | global_iters=...
+    Vertices: ... | Segments: ...
+    Frame    1 | initial_residual=... | final_residual=... | global_iters=... | solver_time=... s
+    Frame    2 | initial_residual=... | final_residual=... | global_iters=... | solver_time=... s
     ...
     ===== Simulation Summary =====
     max_global_residual = ...
     avg_global_iters = ...
-    total runtime = ... seconds
+    total_sim_time = ... seconds
+    total_solver_time = ... seconds
+    avg_solver_time = ... seconds/frame
 
-## Example Selection
+## Solver
 
-Simulation scenes are selected in `src/simulation.cpp`.
+`simulation.cpp` handles CLI parsing, scene setup, restart, and frame export.
+The per-frame driver is `advance_one_frame(...)` in `simulation.h`.
 
-Example:
+The 2D solver is in `solver.cpp`.
 
-    // ExampleType example_type = ExampleType::Example1;
-    ExampleType example_type = ExampleType::Example2;
+Each frame is split into `substeps` substeps (default `3`). Each substep runs a
+nonlinear Gauss-Seidel sweep over chain nodes:
 
-Available example scenes are defined in `src/example.cpp`.
+- builds a persistent `BVHBroadPhase` active set once per timestep
+- computes a local 2x2 Newton update for each node
+- clamps each update with either CCD or trust-region step policy
+- incrementally refreshes the broad phase after each committed node move
+- reports a mass-normalized residual
 
-## Strategy Selection
+## Example And Strategy Selection
 
-Algorithmic strategies are configured in `src/simulation.cpp`.
+Simulation scenes and algorithmic choices are selected with CLI flags defined in
+`ipc_args.h`.
 
-Example configuration:
+    ./build/simulation --example 2 --step_policy ccd --initial_guess affine
 
-    StepPolicy filtering_step_policy = StepPolicy::CCD;
-    initial_guess::Type initial_guess_type = initial_guess::Type::CCD;
-
-The broad-phase collision candidate detector used in the simulation is `BVHBroadPhase`.
+Available scenes are defined in `example.cpp`. The broad-phase collision
+candidate detector used in the simulation is `BVHBroadPhase`.
 
 ## Step Filter Options
 
@@ -79,33 +113,20 @@ The broad-phase collision candidate detector used in the simulation is `BVHBroad
 | Initial Guess | Description |
 |---|---|
 | `CCD` | CCD-filtered initial guess |
-| `TrustRegion` | Trust-region-filtered initial guess |
 | `Affine` | Affine-motion-based initial guess |
 | `Trivial` | No-motion initial guess |
+| `TrustRegion` | Accepted as a legacy alias for `Trivial` |
 
-## Swapping Strategies
-
-Strategies can be changed in `src/simulation.cpp`.
-
-Example:
-
-    auto broad_phase = std::make_unique<BVHBroadPhase>();
-
-    StepPolicy filtering_step_policy = StepPolicy::CCD;
-    // StepPolicy filtering_step_policy = StepPolicy::TrustRegion;
-
-    initial_guess::Type initial_guess_type = initial_guess::Type::CCD;
-    // initial_guess::Type initial_guess_type = initial_guess::Type::TrustRegion;
-    // initial_guess::Type initial_guess_type = initial_guess::Type::Trivial;
-    // initial_guess::Type initial_guess_type = initial_guess::Type::Affine;
-
-Available options:
+Available CLI options:
 
 | Role | Options |
 |---|---|
 | `BroadPhase` | `BVHBroadPhase` |
-| `StepFilter` | `CCD`, `TrustRegion` |
-| `InitialGuess` | `CCD`, `TrustRegion`, `Affine`, `Trivial` |
+| `substeps` | positive integer, default `3` |
+| `step_policy` | `ccd`, `trust_region` |
+| `initial_guess` | `ccd`, `affine`, `trivial`, `trust_region` (= `trivial`) |
+| `write_substeps` | boolean, writes `substep_XXXX.geo` / `.obj` |
+| `restart_frame` | frame index for `state_XXXX.bin`; `-1` disables restart |
 
 After changing a strategy, rebuild the project:
 
@@ -115,58 +136,29 @@ After changing a strategy, rebuild the project:
 
     2D_IPC/
     ├── CMakeLists.txt
-    └── src/
-        ├── ipc_math.h
-        │   Vec2, Vec, Mat2, basic math operations
-        │
-        ├── physics.h / physics.cpp
-        │   spring forces
-        │   barrier IPC potential
-        │   analytic gradients and Hessians
-        │
-        ├── chain.h / chain.cpp
-        │   Chain structure
-        │   make_chain()
-        │   build_xhat()
-        │   update_velocity()
-        │
-        ├── visualization.h / visualization.cpp
-        │   export_obj()
-        │   export_frame()
-        │
-        ├── solver.h / solver.cpp
-        │   nonlinear Gauss–Seidel solver
-        │
-        ├── example.h / example.cpp
-        │   example scene construction
-        │
-        ├── simulation.cpp
-        │   main simulation driver
-        │
-        ├── broad_phase/
-        │   ├── broad_phase.h
-        │   └── bvh.h / bvh.cpp
-        │       swept AABB + BVH candidate detection
-        │
-        ├── step_filter/
-        │   ├── step_filter.h
-        │   ├── ccd.h / ccd.cpp
-        │   └── trust_region.h / trust_region.cpp
-        │       collision-safe Newton step filters
-        │
-        └── initial_guess/
-            ├── initial_guess.h
-            ├── initial_guess.cpp
-            │   dispatcher for initial guess strategies
-            │
-            ├── trivial.h / trivial.cpp
-            ├── affine.h / affine.cpp
-            ├── ccd.h / ccd.cpp
-            └── trust_region.h / trust_region.cpp
+    ├── simulation.cpp
+    ├── simulation.h
+    ├── solver.h / solver.cpp
+    ├── physics.h / physics.cpp
+    ├── spring_energy.h / spring_energy.cpp
+    ├── barrier_energy.h / barrier_energy.cpp
+    │   scalar IPC barrier plus node-segment gradient/Hessian
+    ├── node_segment_distance.h / node_segment_distance.cpp
+    ├── ogc_trust_region.h / ogc_trust_region.cpp
+    ├── ccd.h / ccd.cpp
+    ├── chain.h / chain.cpp
+    ├── example.h / example.cpp
+    ├── restart.h / restart.cpp
+    ├── visualization.h / visualization.cpp
+    ├── broad_phase/
+    │   └── broad_phase.h, bvh.h / bvh.cpp
+    └── initial_guess/
+        └── initial_guess.h / .cpp, trivial, affine, ccd
 
 ## Notes
 
 - `BVHBroadPhase` performs broad-phase AABB candidate detection.
 - `CCD` and `TrustRegion` step policies limit the Newton step to maintain collision safety.
 - Initial guess strategies provide different warm-starts for the nonlinear solver.
-- Output frames are exported as `.obj` files for visualization and debugging.
+- Rest lengths and edge topology live in one mesh-wide `RefMesh`; there are no separate reference positions.
+- Output frames are exported as `.geo` by default; pass `--format obj` for `.obj`.

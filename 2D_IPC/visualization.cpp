@@ -72,3 +72,18 @@ void export_frame(const std::string& outdir,
         export_obj(ss.str(), x_combined, edges_combined);
     }
 }
+
+void export_substep_frame(const std::string& outdir,
+                          int substep,
+                          const Vec& x_combined,
+                          const std::vector<std::pair<int,int>>& edges_combined,
+                          OutputFormat format) {
+    std::ostringstream ss;
+    if (format == OutputFormat::GEO) {
+        ss << outdir << "/substep_" << std::setw(4) << std::setfill('0') << substep << ".geo";
+        export_geo(ss.str(), x_combined, edges_combined);
+    } else {
+        ss << outdir << "/substep_" << std::setw(4) << std::setfill('0') << substep << ".obj";
+        export_obj(ss.str(), x_combined, edges_combined);
+    }
+}

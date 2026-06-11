@@ -29,3 +29,9 @@ void export_frame(const std::string& outdir,
                   const Vec& x_combined,
                   const std::vector<std::pair<int,int>>& edges_combined,
                   OutputFormat format = OutputFormat::OBJ);
+
+void export_substep_frame(const std::string& outdir,
+                          int substep,
+                          const Vec& x_combined,
+                          const std::vector<std::pair<int,int>>& edges_combined,
+                          OutputFormat format = OutputFormat::OBJ);

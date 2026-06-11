@@ -1,8 +1,9 @@
 // Visualizes a BVH as an SVG file.
-// Compile: clang++ -std=c++17 -O2 bvh_visualize.cpp bvh_box_leaf.cpp -o bvh_viz && ./bvh_viz
+// Compile from project root:
+// clang++ -std=c++17 -O2 tools/bvh_visualize.cpp broad_phase/bvh.cpp -I. -o bvh_viz && ./bvh_viz
 // Then open bvh_out.svg in a browser.
 
-#include "bvh_box_leaf.h"
+#include "../broad_phase/bvh.h"
 #include <fstream>
 #include <iostream>
 #include <queue>

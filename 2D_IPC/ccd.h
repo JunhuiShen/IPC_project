@@ -1,6 +1,6 @@
 #pragma once
 
-#include "step_filter.h"
+#include "ipc_math.h"
 #include <cstddef>
 #include <Eigen/Dense>
 
@@ -51,11 +51,3 @@ namespace step_filter::ccd {
                                  double eta = 0.9);
 
 } // namespace step_filter::ccd
-
-class CCDFilter : public StepFilter {
-public:
-    double compute_safe_step(int who_global, const Vec2& dx,
-                             const Vec& x_global,
-                             const std::vector<physics::NodeSegmentPair>& candidates,
-                             double eta) override;
-};

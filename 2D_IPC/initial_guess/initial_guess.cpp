@@ -2,7 +2,6 @@
 #include "trivial.h"
 #include "affine.h"
 #include "ccd.h"
-#include "trust_region.h"
 
 #include <stdexcept>
 
@@ -42,11 +41,6 @@ namespace initial_guess {
 
         if (initial_guess_type == Type::CCD) {
             ccd::apply(blocks, x_combined, v_combined, segment_valid, dt, eta);
-            return;
-        }
-
-        if (initial_guess_type == Type::TrustRegion) {
-            trust_region::apply(blocks, x_combined, v_combined, segment_valid, dt, eta);
             return;
         }
 

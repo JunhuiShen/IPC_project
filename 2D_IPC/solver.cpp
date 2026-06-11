@@ -1,29 +1,18 @@
 #include "solver.h"
-#include "step_filter/ccd.h"
+#include "barrier_energy.h"
+#include "ccd.h"
+#include "ogc_trust_region.h"
 #include <algorithm>
-#include <stdexcept>
 
 using namespace math;
 using namespace physics;
-
-// ======================================================
-// Internal helpers
-// ======================================================
-
-static Mat2 mat2_inverse(const Mat2& H) {
-    double det = H.a11 * H.a22 - H.a12 * H.a21;
-    if (std::abs(det) < 1e-12)
-        throw std::runtime_error("Singular matrix in mat2_inverse()");
-    double inv = 1.0 / det;
-    return {H.a22 * inv, -H.a12 * inv, -H.a21 * inv, H.a11 * inv};
-}
 
 static Vec2 compute_local_gradient(int i, const BlockView& b,
                                    double dt, double k, const Vec2& g_accel,
                                    const std::vector<NodeSegmentPair>& barrier_pairs,
                                    double dhat, const Vec& x_global) {
     Vec2 gi = local_grad_no_barrier(i, *b.x, *b.xhat, *b.xpin,
-                                    *b.mass, *b.L, *b.is_pinned,
+                                    *b.mass, b.ref_mesh->rest_lengths, b.rest_length_offset, *b.is_pinned,
                                     dt, k, g_accel);
 
     const int who = b.offset + i;
@@ -43,7 +32,9 @@ static Mat2 compute_local_hessian(int i, const BlockView& b,
                                   double dt, double k,
                                   const std::vector<NodeSegmentPair>& barrier_pairs,
                                   double dhat, const Vec& x_global) {
-    Mat2 Hi = local_hess_no_barrier(i, *b.x, *b.mass, *b.L, *b.is_pinned, dt, k);
+    Mat2 Hi = local_hess_no_barrier(i, *b.x, *b.mass,
+                                    b.ref_mesh->rest_lengths, b.rest_length_offset,
+                                    *b.is_pinned, dt, k);
 
     const int who = b.offset + i;
 
@@ -68,10 +59,66 @@ static double compute_global_residual(const BlockView& b,
 
     for (int i = 0; i < b.size(); ++i) {
         Vec2 g = compute_local_gradient(i, b, dt, k, g_accel, barrier_pairs, dhat, x_global);
-        r = std::max(r, std::max(std::abs(g.x), std::abs(g.y)));
+        const double mi = std::max((*b.mass)[i], 1e-12);
+        r = std::max(r, std::max(std::abs(g.x), std::abs(g.y)) / mi);
     }
 
     return r;
+}
+
+static double compute_ccd_safe_step(int who_global, const Vec2& dx,
+                                    const Vec& x_global,
+                                    const std::vector<NodeSegmentPair>& candidates,
+                                    double eta) {
+    double omega = 1.0;
+    Vec2 full{-dx.x, -dx.y};
+
+    for (const auto& c : candidates) {
+        if (who_global != c.node && who_global != c.seg0 && who_global != c.seg1)
+            continue;
+
+        Vec2 xi = get_xi(x_global, c.node);
+        Vec2 xj = get_xi(x_global, c.seg0);
+        Vec2 xk = get_xi(x_global, c.seg1);
+
+        Vec2 dxi{}, dxj{}, dxk{};
+        if      (who_global == c.node) dxi = full;
+        else if (who_global == c.seg0) dxj = full;
+        else if (who_global == c.seg1) dxk = full;
+
+        omega = std::min(omega, step_filter::ccd::safe_step(xi, dxi, xj, dxj, xk, dxk, eta));
+        if (omega <= 0.0) return 0.0;
+    }
+
+    return omega;
+}
+
+static double compute_trust_region_safe_step(int who_global, const Vec2& dx,
+                                             const Vec& x_global,
+                                             const std::vector<NodeSegmentPair>& candidates,
+                                             double eta) {
+    double omega = 1.0;
+    Vec2 full{-dx.x, -dx.y};
+
+    for (const auto& c : candidates) {
+        if (who_global != c.node && who_global != c.seg0 && who_global != c.seg1)
+            continue;
+
+        Vec2 xi = get_xi(x_global, c.node);
+        Vec2 xj = get_xi(x_global, c.seg0);
+        Vec2 xk = get_xi(x_global, c.seg1);
+
+        Vec2 dxi{}, dxj{}, dxk{};
+        if      (who_global == c.node) dxi = full;
+        else if (who_global == c.seg0) dxj = full;
+        else if (who_global == c.seg1) dxk = full;
+
+        omega = std::min(omega, trust_region_node_segment_gauss_seidel(
+                xi, dxi, xj, dxj, xk, dxk, eta).omega);
+        if (omega <= 0.0) return 0.0;
+    }
+
+    return omega;
 }
 
 static void update_one_node(int local_i, const BlockView& b,
@@ -80,7 +127,7 @@ static void update_one_node(int local_i, const BlockView& b,
                             const std::vector<char>& segment_valid,
                             double dt, double k, const Vec2& g_accel,
                             double dhat, double eta,
-                            StepFilter& step_filter) {
+                            bool use_ccd_step_policy) {
     Vec2 gi = compute_local_gradient(local_i, b,
                                      dt, k, g_accel,
                                      broad_phase.pairs(), dhat, x_global);
@@ -99,7 +146,7 @@ static void update_one_node(int local_i, const BlockView& b,
 
     std::vector<NodeSegmentPair> filtering_candidate_set;
 
-    if (dynamic_cast<CCDFilter*>(&step_filter) != nullptr) {
+    if (use_ccd_step_policy) {
         filtering_candidate_set = broad_phase.build_ccd_candidates_for_node(
                 who, x_global, v_newton, segment_valid, dt
         );
@@ -110,9 +157,9 @@ static void update_one_node(int local_i, const BlockView& b,
         );
     }
 
-    double omega = step_filter.compute_safe_step(
-            who, dx, x_global, filtering_candidate_set, eta
-    );
+    double omega = use_ccd_step_policy
+            ? compute_ccd_safe_step(who, dx, x_global, filtering_candidate_set, eta)
+            : compute_trust_region_safe_step(who, dx, x_global, filtering_candidate_set, eta);
 
     Vec2 xi = get_xi(*b.x, local_i);
     xi.x -= omega * dx.x;
@@ -130,12 +177,12 @@ static void update_one_node(int local_i, const BlockView& b,
 // Public API
 // ======================================================
 
-SolveResult solve(std::vector<BlockView>& blocks,
-                  Vec& x_global, const Vec& v_vel_global,
-                  double dt, double k, const Vec2& g_accel,
-                  double dhat, int max_iters, double tol_abs, double eta,
-                  BroadPhase& broad_phase, StepFilter& step_filter,
-                  std::vector<double>* residual_history) {
+SolveResult global_gauss_seidel_solver_basic(std::vector<BlockView>& blocks,
+                                              Vec& x_global, const Vec& v_vel_global,
+                                              double dt, double k, const Vec2& g_accel,
+                                              double dhat, int max_iters, double tol_abs, double eta,
+                                              BroadPhase& broad_phase, bool use_ccd_step_policy,
+                                              std::vector<double>* residual_history) {
 
     const int total_nodes = static_cast<int>(x_global.size() / 2);
 
@@ -173,7 +220,7 @@ SolveResult solve(std::vector<BlockView>& blocks,
             for (int i = 0; i < b.size(); ++i) {
                 update_one_node(i, b, x_global, broad_phase, v_vel_global,
                                 segment_valid,
-                                dt, k, g_accel, dhat, eta, step_filter);
+                                dt, k, g_accel, dhat, eta, use_ccd_step_policy);
             }
         }
 

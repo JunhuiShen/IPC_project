@@ -148,31 +148,3 @@ namespace step_filter::ccd {
     }
 
 } // namespace step_filter::ccd
-
-double CCDFilter::compute_safe_step(int who_global, const Vec2& dx,
-                                    const Vec& x_global,
-                                    const std::vector<physics::NodeSegmentPair>& candidates,
-                                    double eta) {
-    using namespace math;
-    double omega = 1.0;
-    Vec2 full{-dx.x, -dx.y};
-
-    for (const auto& c : candidates) {
-        if (who_global != c.node && who_global != c.seg0 && who_global != c.seg1)
-            continue;
-
-        Vec2 xi = get_xi(x_global, c.node);
-        Vec2 xj = get_xi(x_global, c.seg0);
-        Vec2 xk = get_xi(x_global, c.seg1);
-
-        Vec2 dxi{}, dxj{}, dxk{};
-        if      (who_global == c.node) dxi = full;
-        else if (who_global == c.seg0) dxj = full;
-        else if (who_global == c.seg1) dxk = full;
-
-        omega = std::min(omega, step_filter::ccd::safe_step(xi, dxi, xj, dxj, xk, dxk, eta));
-        if (omega <= 0.0) return 0.0;
-    }
-
-    return omega;
-}

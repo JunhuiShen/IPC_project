@@ -1,5 +1,26 @@
 #include "chain.h"
-#include <iostream>
+
+void RefMesh::initialize_from_chains(const std::vector<Chain>& chains,
+                                     const std::vector<int>& node_offsets) {
+    num_positions = 0;
+    edges.clear();
+    rest_lengths.clear();
+    chain_node_offsets = node_offsets;
+    chain_rest_offsets.assign(chains.size(), 0);
+
+    for (std::size_t b = 0; b < chains.size(); ++b) {
+        const Chain& c = chains[b];
+        const int offset = node_offsets[b];
+        chain_rest_offsets[b] = static_cast<int>(rest_lengths.size());
+        num_positions += c.N;
+
+        for (int i = 0; i < c.N - 1; ++i) {
+            edges.emplace_back(offset + i, offset + i + 1);
+            rest_lengths.push_back(math::node_distance(c.x, i, i + 1));
+        }
+    }
+}
+
 Chain make_chain(Vec2 start, Vec2 end, int N, double mass_density, double thickness) {
     Chain c;
     c.N = N;
@@ -18,22 +39,30 @@ Chain make_chain(Vec2 start, Vec2 end, int N, double mass_density, double thickn
         set_xi(c.xpin, i, xi);
     }
 
-    //create chain rest lengths
-    for (int i = 0; i < N - 1; ++i) {
-        c.edges.emplace_back(i, i + 1);
-        c.rest_lengths.push_back(math::node_distance(c.x, i, i + 1));
-    }
-
     //set nodal masses
     for(int s=0;s<N-1;s++){
         Vec2 edge=get_xi(c.x, s+1)-get_xi(c.x, s);
         double segment_length=math::norm(edge);
         double segment_mass=thickness*thickness*segment_length*mass_density;
         c.mass[s] += .5*segment_mass; c.mass[s+1] += .5*segment_mass;
-        std::cout<<"segment "<<s<<" length="<<segment_length<<" mass="<<segment_mass<<"\n";
     }
 
     return c;
+}
+
+std::vector<int> compute_node_offsets(const std::vector<Chain>& chains) {
+    std::vector<int> offsets(chains.size(), 0);
+    for (std::size_t b = 1; b < chains.size(); ++b) {
+        offsets[b] = offsets[b - 1] + chains[b - 1].N;
+    }
+    return offsets;
+}
+
+RefMesh build_ref_mesh(const std::vector<Chain>& chains,
+                       const std::vector<int>& node_offsets) {
+    RefMesh ref_mesh;
+    ref_mesh.initialize_from_chains(chains, node_offsets);
+    return ref_mesh;
 }
 
 void build_xhat(Chain& c, double dt) {

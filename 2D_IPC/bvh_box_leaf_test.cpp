@@ -1,7 +1,4 @@
-// Compile: clang++ -std=c++17 -O2 bvh_box_leaf_test.cpp bvh_box_leaf.cpp -o bvh_test \
-//   -I/opt/homebrew/include -L/opt/homebrew/lib -lgtest -lgtest_main && ./bvh_test
-
-#include "bvh_box_leaf.h"
+#include "broad_phase/bvh.h"
 #include <algorithm>
 #include <gtest/gtest.h>
 

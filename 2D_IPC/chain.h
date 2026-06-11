@@ -1,11 +1,23 @@
 #pragma once
 
 #include "ipc_math.h"
+#include <utility>
 #include <vector>
 
 // ======================================================
 // Chain: core data structure + construction + state update
 // ======================================================
+
+struct RefMesh {
+    int num_positions{};
+    std::vector<std::pair<int, int>> edges;
+    std::vector<double> rest_lengths;
+    std::vector<int> chain_node_offsets;
+    std::vector<int> chain_rest_offsets;
+
+    void initialize_from_chains(const std::vector<struct Chain>& chains,
+                                const std::vector<int>& node_offsets);
+};
 
 struct Chain {
     int N{};
@@ -15,12 +27,14 @@ struct Chain {
     Vec xpin;         // fixed pin targets
     std::vector<double> mass;
     std::vector<char> is_pinned;
-    std::vector<double> rest_lengths;
-    std::vector<std::pair<int, int>> edges;
 };
 
 // Build a uniformly-spaced chain from start to end with N nodes
 Chain make_chain(Vec2 start, Vec2 end, int N, double mass_value, double thickness=0.01);
+
+std::vector<int> compute_node_offsets(const std::vector<Chain>& chains);
+RefMesh build_ref_mesh(const std::vector<Chain>& chains,
+                       const std::vector<int>& node_offsets);
 
 // xhat = x + dt * v
 void build_xhat(Chain& c, double dt);

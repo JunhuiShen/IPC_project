@@ -1,6 +1,9 @@
 #pragma once
 
+#include "barrier_energy.h"
 #include "ipc_math.h"
+#include "node_segment_distance.h"
+#include "spring_energy.h"
 #include <vector>
 
 // ======================================================
@@ -17,38 +20,19 @@ namespace physics {
         int seg1;
     };
 
-    // --- Spring energy ---
-
-    Vec2 local_spring_grad(int i, const Vec &x, double k, const std::vector<double> &L);
-    Mat2 local_spring_hess(int i, const Vec &x, double k, const std::vector<double> &L);
-
-    // --- Barrier (scalar) ---
-
-    double barrier_energy(double d, double dhat);
-    double barrier_grad  (double d, double dhat);
-    double barrier_hess  (double d, double dhat);
-
-    // --- Point-segment geometry ---
-
-    double node_segment_distance(const Vec2 &xi, const Vec2 &xj, const Vec2 &xjp1,
-                                 double &t, Vec2 &p, Vec2 &r);
-
-    // --- Barrier gradient / Hessian for a node-segment pair ---
-
-    Vec2 local_barrier_grad(int who, const Vec &x, int node, int seg0, int seg1, double dhat);
-    Mat2 local_barrier_hess(int who, const Vec &x, int node, int seg0, int seg1, double dhat);
-
     // --- Incremental potential (no barrier) ---
 
     Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat, const Vec &xpin,
                                const std::vector<double> &mass,
                                const std::vector<double> &L,
+                               int rest_offset,
                                const std::vector<char> &is_pinned,
                                double dt, double k, const Vec2 &g_accel);
 
     Mat2 local_hess_no_barrier(int i, const Vec &x,
                                const std::vector<double> &mass,
                                const std::vector<double> &L,
+                               int rest_offset,
                                const std::vector<char> &is_pinned,
                                double dt, double k);
 

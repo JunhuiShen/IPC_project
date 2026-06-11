@@ -4,27 +4,33 @@ project(2D_IPC CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# set(CMAKE_BUILD_TYPE Release)
-set(CMAKE_BUILD_TYPE Debug)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+enable_testing()
 
 # ── Core library ──────────────────────────────────────────────────────────────
 add_library(ipc_core
-    src/physics.cpp
-    src/chain.cpp
-    src/visualization.cpp
-    src/broad_phase/bvh.cpp
-    src/step_filter/ccd.cpp
-    src/step_filter/trust_region.cpp
-    src/initial_guess/trivial.cpp
-    src/initial_guess/affine.cpp
-    src/initial_guess/ccd.cpp
-    src/initial_guess/trust_region.cpp
-    src/solver.cpp
-    src/example.cpp
-    src/initial_guess/initial_guess.cpp
+    physics.cpp
+    spring_energy.cpp
+    barrier_energy.cpp
+    node_segment_distance.cpp
+    ogc_trust_region.cpp
+    chain.cpp
+    restart.cpp
+    visualization.cpp
+    broad_phase/bvh.cpp
+    ccd.cpp
+    initial_guess/trivial.cpp
+    initial_guess/affine.cpp
+    initial_guess/ccd.cpp
+    solver.cpp
+    example.cpp
+    initial_guess/initial_guess.cpp
 )
 
-target_include_directories(ipc_core PUBLIC src)
+target_include_directories(ipc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Eigen Library
 include(FetchContent)
@@ -52,10 +58,17 @@ target_include_directories(Eigen3::Eigen SYSTEM INTERFACE ${eigen3_SOURCE_DIR})
 target_link_libraries(ipc_core PUBLIC Eigen3::Eigen)
 
 # ── Simulation executable ─────────────────────────────────────────────────────
-add_executable(simulation src/simulation.cpp)
+add_executable(simulation simulation.cpp)
 target_link_libraries(simulation PRIVATE ipc_core)
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
-if(EXISTS "${CMAKE_SOURCE_DIR}/tests/CMakeLists.txt")
-    add_subdirectory(tests)
-endif()
+find_package(GTest REQUIRED)
+include(GoogleTest)
+
+add_executable(rigid_body_ccd_test rigid_body_ccd_test.cpp)
+target_link_libraries(rigid_body_ccd_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
+gtest_discover_tests(rigid_body_ccd_test)
+
+add_executable(bvh_box_leaf_test bvh_box_leaf_test.cpp)
+target_link_libraries(bvh_box_leaf_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
+gtest_discover_tests(bvh_box_leaf_test)

@@ -1,0 +1,8 @@
+# Build artifacts
+build/
+
+# Simulation output
+frames_*/
+
+# macOS
+.DS_Store

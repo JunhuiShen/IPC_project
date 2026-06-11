@@ -11,7 +11,7 @@
 // This matches the original monolithic code:
 // - arbitrary number of contiguous blocks
 // - arbitrary offsets
-// - supports Trivial / Affine / CCD / TrustRegion
+// - supports Trivial / Affine / CCD
 // ======================================================
 
 namespace initial_guess {
@@ -19,8 +19,7 @@ namespace initial_guess {
     enum class Type {
         Trivial,
         Affine,
-        CCD,
-        TrustRegion
+        CCD
     };
 
     // Description of one contiguous block in the global indexing

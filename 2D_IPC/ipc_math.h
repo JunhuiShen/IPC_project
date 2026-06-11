@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <stdexcept>
 #include <vector>
 
 // ======================================================
@@ -107,6 +108,14 @@ namespace math {
 
     static inline Vec2 matvec(const Mat2 &A, const Vec2 &v) {
         return {A.a11 * v.x + A.a12 * v.y, A.a21 * v.x + A.a22 * v.y};
+    }
+
+    static inline Mat2 mat2_inverse(const Mat2& H) {
+        double det = H.a11 * H.a22 - H.a12 * H.a21;
+        if (std::abs(det) < 1e-12)
+            throw std::runtime_error("Singular matrix in mat2_inverse()");
+        double inv = 1.0 / det;
+        return {H.a22 * inv, -H.a12 * inv, -H.a21 * inv, H.a11 * inv};
     }
 
 } // namespace math
