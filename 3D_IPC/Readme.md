@@ -93,15 +93,15 @@ Common invocations:
     ./build/3D_sim --example 1                              # twisting cloth
     ./build/3D_sim --example 2                              # two-cylinder twist
     ./build/3D_sim --example 3                              # cylinder yaws and twists cloth between two clamped top edges
-    ./build/3D_sim --use_ccd_guess false --use_transition_guess true --fixed_iters
+    ./build/3D_sim --use_ccd_guess false --use_translation_guess true --fixed_iters
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
 
 Initial guesses are selected before the nonlinear solver starts each substep.
-The default is `ccd_initial_guess`; `--use_transition_guess true` instead starts
+The default is `ccd_initial_guess`; `--use_translation_guess true` instead starts
 from a single global translation `x_i^n + C`, so pass
-`--use_ccd_guess false` when using it. This transition guess minimizes the
+`--use_ccd_guess false` when using it. This translation guess minimizes the
 translation-restricted inertia + gravity + pin-spring objective in closed form,
 then applies one cheap 3D Newton correction for SDF penalty contact. Elastic,
 bending, and cloth-cloth IPC barrier terms are unchanged by a uniform
@@ -154,7 +154,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | Time integration | `fps`, `substeps`, `num_frames` |
 | Physics | `E`, `nu`, `density`, `thickness`, `kB`, `kpin`, `gx`, `gy`, `gz` |
 | Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `fixed_iters`, `use_parallel`, `use_gpu`, `write_substeps` |
-| CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_transition_guess`, `use_ticcd` |
+| CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (new per-iter rebuild solver), `ogc_box_pad` (BVH padding for the per-iter rebuild; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (clamp range for `R_vi = clamp(prev_disp * 1.2, min, max)`) |
 | Scene | `example` (`1`..`4`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink` |
@@ -267,7 +267,7 @@ reader can jump to the layer they care about.
     `incremental_refresh_vertex`.
 
   Both share the per-vertex Newton solve (`gs_vertex_delta`) and node-box clip
-  mechanics. `ccd_initial_guess`, `transition_initial_guess`, and `update_one_vertex` live here.
+  mechanics. `ccd_initial_guess`, `translation_initial_guess`, and `update_one_vertex` live here.
 - `parallel_helper.h` / `parallel_helper.cpp` -- Jacobi delta prediction,
   conflict-graph construction, greedy coloring, and parallel commit apply for
   the basic solver under `--use_parallel`.
@@ -307,7 +307,7 @@ Every layer of the pipeline has a GoogleTest binary. To build and run them all:
 | `barrier_energy_test` | 14 | Scalar barrier, NT/SS gradient/Hessian FD convergence, activation boundary, near-parallel stress |
 | `corotated_energy_test` | 13 | Energy, rest state, rotation/translation invariance, gradient/Hessian FD convergence, stress |
 | `total_energy_test` | 12 | Combined elastic + barrier FD convergence, barrier activation, per-vertex gradient/Hessian, slope-2 checks |
-| `initial_guess_test` | 4 | CCD no-candidate guess and transition guess closed forms for inertia/gravity, pins, and one-step plane-SDF correction |
+| `initial_guess_test` | 4 | CCD no-candidate guess and translation guess closed forms for inertia/gravity, pins, and one-step plane-SDF correction |
 | `node_triangle_distance_test` | 9 | All 7 proximity regions + signed distance + degenerate |
 | `visualization_test` | 2 | Debug OBJ export (no assertions -- manual inspection) |
 | `simulation_snapshot_test` | 1 | Golden-file regression (5-frame determinism) |

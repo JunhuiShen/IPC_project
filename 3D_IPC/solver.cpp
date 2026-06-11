@@ -61,7 +61,7 @@ std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vecto
     return xnew;
 }
 
-static inline bool transition_guess_sdf_min_evaluation(const SimParams& params, const Vec3& xi, SDFEvaluation& out) {
+static inline bool translation_guess_sdf_min_evaluation(const SimParams& params, const Vec3& xi, SDFEvaluation& out) {
     bool any = false;
     out.phi = std::numeric_limits<double>::infinity();
     for (const PlaneSDF& p : params.sdf_planes) {
@@ -79,7 +79,7 @@ static inline bool transition_guess_sdf_min_evaluation(const SimParams& params, 
     return any;
 }
 
-std::vector<Vec3> transition_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+std::vector<Vec3> translation_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                            const RefMesh& ref_mesh, const std::vector<Pin>& pins,
                                            const SimParams& params) {
     std::vector<Vec3> xnew(xhat.size());
@@ -110,7 +110,7 @@ std::vector<Vec3> transition_initial_guess(const std::vector<Vec3>& x, const std
 
         for(int i = 0; i < (int)xhat.size(); ++i){
             SDFEvaluation s;
-            if (transition_guess_sdf_min_evaluation(params, x[i] + C, s)) {
+            if (translation_guess_sdf_min_evaluation(params, x[i] + C, s)) {
                 G += dt2 * sdf_penalty_gradient(s, params.k_sdf, params.eps_sdf);
                 H += dt2 * sdf_penalty_hessian(s, params.k_sdf, params.eps_sdf, false);
             }

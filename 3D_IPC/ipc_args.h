@@ -37,7 +37,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_ccd       = true;
     bool   use_ccd_guess = true;
     bool   use_verlet_guess = false;
-    bool   use_transition_guess = false;
+    bool   use_translation_guess = false;
     bool   use_ogc = false;
     bool   use_ogc_solver = false;
     double ogc_box_pad = 0.005;
@@ -130,7 +130,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_ccd",      use_ccd,      true,   "Run CCD step clamping in per_vertex_safe_step");
         add_bool  ("use_ccd_guess",    use_ccd_guess,    true,  "Use ccd_initial_guess as the substep start point (ignored if use_ogc is on)");
         add_bool  ("use_verlet_guess", use_verlet_guess, false, "Start GS from xhat + dt^2*gravity (Verlet predictor)");
-        add_bool  ("use_transition_guess", use_transition_guess, false, "Start GS from x^n + C");
+        add_bool  ("use_translation_guess", use_translation_guess, false, "Start GS from x^n + C");
         add_bool  ("use_ogc", use_ogc, false, "Use trust-region narrow phase instead of CCD for step clamping");
         add_bool  ("use_ogc_solver", use_ogc_solver, false, "Use the serial OGC Gauss-Seidel solver (rebuilds BVH per iter; partial leaf refit per move)");
         add_double("ogc_box_pad", ogc_box_pad, 0.005, "Padding on OGC node boxes / tri-edge unions for the per-iter BVH rebuild (floored to d_hat at use)");
@@ -221,7 +221,7 @@ struct IPCArgs3D : ArgParser {
         p.use_ogc = use_ogc;
         p.use_ogc_solver = use_ogc_solver;
         p.ogc_box_pad = ogc_box_pad;
-        p.use_transition_guess = use_transition_guess;
+        p.use_translation_guess = use_translation_guess;
         p.fixed_iters = fixed_iters;
         p.verbose     = verbose;
         p.use_gpu                 = use_gpu;

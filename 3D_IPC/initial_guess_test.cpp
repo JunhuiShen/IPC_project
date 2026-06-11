@@ -49,7 +49,7 @@ TEST(CCDInitialGuess, ReturnsTargetWhenNoCollisionCandidates) {
     }
 }
 
-TEST(TransitionInitialGuess, MatchesMassWeightedInertiaAndGravityClosedForm) {
+TEST(TranslationInitialGuess, MatchesMassWeightedInertiaAndGravityClosedForm) {
     SimParams params = base_params();
     params.gravity = Vec3(0.0, -4.0, 2.0);
 
@@ -65,7 +65,7 @@ TEST(TransitionInitialGuess, MatchesMassWeightedInertiaAndGravityClosedForm) {
         x[2] + Vec3(0.0, 0.0, -1.0),
     };
 
-    const std::vector<Vec3> guess = transition_initial_guess(x, xhat, ref_mesh, {}, params);
+    const std::vector<Vec3> guess = translation_initial_guess(x, xhat, ref_mesh, {}, params);
 
     // Inertia gives (2, 2, -3) / 6 = (1/3, 1/3, -1/2).
     // With dt = 1/2, gravity contributes dt^2 * g = (0, -1, 1/2).
@@ -77,7 +77,7 @@ TEST(TransitionInitialGuess, MatchesMassWeightedInertiaAndGravityClosedForm) {
     }
 }
 
-TEST(TransitionInitialGuess, IncludesPinSpringsInClosedFormTranslation) {
+TEST(TranslationInitialGuess, IncludesPinSpringsInClosedFormTranslation) {
     SimParams params = base_params();
     params.kpin = 20.0;
 
@@ -94,7 +94,7 @@ TEST(TransitionInitialGuess, IncludesPinSpringsInClosedFormTranslation) {
         Pin{1, x[1] + Vec3(0.0, 4.0, 0.0)},
     };
 
-    const std::vector<Vec3> guess = transition_initial_guess(x, xhat, ref_mesh, pins, params);
+    const std::vector<Vec3> guess = translation_initial_guess(x, xhat, ref_mesh, pins, params);
 
     const Vec3 expected_C(1.0, 2.0, 0.0);
     ASSERT_EQ(guess.size(), x.size());
@@ -103,7 +103,7 @@ TEST(TransitionInitialGuess, IncludesPinSpringsInClosedFormTranslation) {
     }
 }
 
-TEST(TransitionInitialGuess, AppliesOneNewtonCorrectionForPlaneSDF) {
+TEST(TranslationInitialGuess, AppliesOneNewtonCorrectionForPlaneSDF) {
     SimParams params = SimParams::zeros();
     params.fps = 1.0;
     params.substeps = 1;
@@ -120,7 +120,7 @@ TEST(TransitionInitialGuess, AppliesOneNewtonCorrectionForPlaneSDF) {
     };
     std::vector<Vec3> xhat = x;
 
-    const std::vector<Vec3> guess = transition_initial_guess(x, xhat, ref_mesh, {}, params);
+    const std::vector<Vec3> guess = translation_initial_guess(x, xhat, ref_mesh, {}, params);
 
     // Two active vertices have total penetration 0.4. With dt = 1 and k = 10:
     // C_y = 10 * 0.4 / (3 + 10 * 2) = 4/23.

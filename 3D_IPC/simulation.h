@@ -43,8 +43,8 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         } 
         else if (params.use_ccd_guess)
             xnew = ccd_initial_guess(state.deformed_positions, xhat, ref_mesh);
-        else if (params.use_transition_guess){
-            xnew = transition_initial_guess(state.deformed_positions, xhat, ref_mesh, pins, params);
+        else if (params.use_translation_guess){
+            xnew = translation_initial_guess(state.deformed_positions, xhat, ref_mesh, pins, params);
         }
         else
             xnew = state.deformed_positions;
