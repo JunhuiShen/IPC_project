@@ -51,6 +51,7 @@ int main(int argc, char** argv) {
     params.frame_dt = args.dt;
     params.substeps = args.substeps;
     params.k_spring = args.k_spring;
+    params.k_barrier = args.k_barrier;
     params.gravity = {args.gx, args.gy};
     params.dhat = args.dhat;
     params.tol_abs = args.tol_abs;

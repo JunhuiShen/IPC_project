@@ -32,6 +32,7 @@ struct IPCArgs : ArgParser {
     double tol_abs          = 1e-6;
     int    max_global_iters = 10000;
     double eta              = 0.9;
+    double k_barrier        = 100.0;
 
     // --- geometry ---
     int number_of_nodes = 100;
@@ -57,10 +58,11 @@ struct IPCArgs : ArgParser {
         add_double("k_spring",        k_spring,        1000.0,    "Spring stiffness");
         add_double("mass_density",    mass_density,    1000.0,    "Mass density (kg/m^2)");
 
-        add_double("dhat",            dhat,            0.1,       "IPC contact distance threshold");
+        add_double("dhat",            dhat,            0.005,       "IPC contact distance threshold");
         add_double("tol_abs",         tol_abs,         1e-6,      "Absolute convergence tolerance");
         add_int   ("max_iters",       max_global_iters,1000,     "Max global Newton iterations");
         add_double("eta",             eta,             0.9,       "Step-size safety factor");
+        add_double("k_barrier",       k_barrier,       100.0,     "IPC barrier stiffness multiplier");
 
         add_int   ("nodes",           number_of_nodes, 100,       "Nodes per chain");
 

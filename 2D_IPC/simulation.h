@@ -13,6 +13,7 @@ struct SimParams2D {
     double frame_dt = 1.0 / 30.0;
     int    substeps = 3;
     double k_spring = 1000.0;
+    double k_barrier = 100.0;
     Vec2   gravity{0.0, -9.81};
     double dhat = 0.1;
     double tol_abs = 1e-6;
@@ -106,7 +107,7 @@ inline AdvanceResult2D advance_one_frame(std::vector<Chain>& chains,
         std::vector<double> res_hist;
         SolveResult sub_result = global_gauss_seidel_solver_basic(
                 blocks, x_combined, v_combined, dt, params.k_spring, params.gravity,
-                params.dhat, params.max_global_iters, params.tol_abs, params.eta,
+                params.dhat, params.k_barrier, params.max_global_iters, params.tol_abs, params.eta,
                 broad_phase, params.use_ccd_step_policy, &res_hist);
 
         if (aggregate.substeps_completed == 0 && !res_hist.empty()) {

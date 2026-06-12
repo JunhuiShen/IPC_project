@@ -124,6 +124,7 @@ Available CLI options:
 | `BroadPhase` | `BVHBroadPhase` |
 | `substeps` | positive integer, default `3` |
 | `step_policy` | `ccd`, `trust_region` |
+| `k_barrier` | IPC barrier stiffness multiplier, default `100` |
 | `initial_guess` | `ccd`, `affine`, `trivial`, `trust_region` (= `trivial`) |
 | `write_substeps` | boolean, writes `substep_XXXX.geo` / `.obj` |
 | `restart_frame` | frame index for `state_XXXX.bin`; `-1` disables restart |
