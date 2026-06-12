@@ -28,6 +28,7 @@ add_library(ipc_core
     solver.cpp
     example.cpp
     initial_guess/initial_guess.cpp
+    rigid_body.cpp
 )
 
 target_include_directories(ipc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -65,10 +66,10 @@ target_link_libraries(simulation PRIVATE ipc_core)
 find_package(GTest REQUIRED)
 include(GoogleTest)
 
-add_executable(rigid_body_ccd_test rigid_body_ccd_test.cpp)
+add_executable(rigid_body_ccd_test tests/rigid_body_ccd_test.cpp)
 target_link_libraries(rigid_body_ccd_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
 gtest_discover_tests(rigid_body_ccd_test)
 
-add_executable(bvh_box_leaf_test bvh_box_leaf_test.cpp)
+add_executable(bvh_box_leaf_test tests/bvh_box_leaf_test.cpp)
 target_link_libraries(bvh_box_leaf_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
 gtest_discover_tests(bvh_box_leaf_test)
