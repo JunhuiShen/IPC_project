@@ -94,7 +94,6 @@ add_library(corotated_energy_lib
     ccd.cpp
     ogc_trust_region.cpp
     visualization.cpp
-    rigid_body.cpp
 )
 
 target_link_libraries(corotated_energy_lib
