@@ -1,7 +1,7 @@
 # IPC Project
 
 Research codebase for **Incremental Potential Contact (IPC)** simulation,
-covering both 2D spring chains and 3D deformable triangle meshes
+covering both 2D spring-edge networks and 3D deformable triangle meshes
 (cloth / thin shells). Each time step optimizes an incremental potential
 with a **nonlinear Gauss–Seidel solver**, using continuous collision
 detection (or a distance-based trust region) to keep every intermediate
@@ -11,7 +11,7 @@ state intersection-free.
 
 | Directory | What it is |
 |-----------|------------|
-| [`2D_IPC/`](2D_IPC/) | 2D spring-chain testbed for swapping broad-phase, step-filter, and initial-guess strategies. Lightweight, dependency-free. |
+| [`2D_IPC/`](2D_IPC/) | 2D explicit-edge testbed supporting branches, loops, and disconnected components while swapping broad-phase, step-filter, and initial-guess strategies. |
 | [`3D_IPC/`](3D_IPC/) | Full 3D simulator for deformable triangle meshes (cloth / thin shells). CCD- and OGC-based step clamping, parallel-by-color GS, optional GPU pipeline, USD/OBJ/PLY/GEO export. |
 
 Each subproject has its own README with build instructions, CLI flags,
