@@ -17,6 +17,7 @@ add_library(ipc_core
     barrier_energy.cpp
     node_segment_distance.cpp
     ogc_trust_region.cpp
+    parallel_helper.cpp
     chain.cpp
     restart.cpp
     visualization.cpp
@@ -58,6 +59,22 @@ target_include_directories(Eigen3::Eigen SYSTEM INTERFACE ${eigen3_SOURCE_DIR})
 
 target_link_libraries(ipc_core PUBLIC Eigen3::Eigen)
 
+if(APPLE)
+    set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp")
+    set(OpenMP_CXX_LIB_NAMES "omp")
+    if(EXISTS /opt/homebrew/opt/libomp)
+        set(_LIBOMP_PREFIX /opt/homebrew/opt/libomp)
+    else()
+        set(_LIBOMP_PREFIX /usr/local/opt/libomp)
+    endif()
+    set(OpenMP_omp_LIBRARY ${_LIBOMP_PREFIX}/lib/libomp.dylib)
+    include_directories(${_LIBOMP_PREFIX}/include)
+endif()
+find_package(OpenMP QUIET)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(ipc_core PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
 # ── Simulation executable ─────────────────────────────────────────────────────
 add_executable(simulation simulation.cpp)
 target_link_libraries(simulation PRIVATE ipc_core)
@@ -73,3 +90,7 @@ gtest_discover_tests(rigid_body_ccd_test)
 add_executable(bvh_box_leaf_test tests/bvh_box_leaf_test.cpp)
 target_link_libraries(bvh_box_leaf_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
 gtest_discover_tests(bvh_box_leaf_test)
+
+add_executable(parallel_helper_test parallel_helper_test.cpp)
+target_link_libraries(parallel_helper_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
+gtest_discover_tests(parallel_helper_test)

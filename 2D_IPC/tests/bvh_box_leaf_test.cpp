@@ -68,3 +68,16 @@ TEST(BVH, BuildQueryRefit) {
         EXPECT_NE(std::find(hits.begin(), hits.end(), 0), hits.end());
     }
 }
+
+TEST(BVH, NodeBoxSafeStepClipsToBox) {
+    BVHBroadPhase bp;
+    Vec x = {0.0, 0.0, 1.0, 0.0};
+    std::vector<char> segment_valid = {1};
+    std::vector<double> radii = {0.5, 0.5};
+
+    bp.initialize_node_radii(x, segment_valid, radii, 0.0);
+
+    EXPECT_DOUBLE_EQ(bp.node_box_safe_step(0, Vec2(0.0, 0.0), Vec2(2.0, 0.0)), 0.25);
+    EXPECT_DOUBLE_EQ(bp.node_box_safe_step(0, Vec2(0.0, 0.0), Vec2(0.0, -1.0)), 0.5);
+    EXPECT_DOUBLE_EQ(bp.node_box_safe_step(0, Vec2(0.0, 0.0), Vec2(0.1, 0.1)), 1.0);
+}

@@ -29,5 +29,7 @@ SolveResult global_gauss_seidel_solver_basic(std::vector<BlockView>& blocks,
                                               double dt, double k, const Vec2& g_accel,
                                               double d_hat, double k_barrier,
                                               int max_iters, double tol_abs, double eta,
+                                              double node_box_min, double node_box_max, int node_box_update_count,
                                               BroadPhase& broad_phase, bool use_ccd_step_policy,
+                                              bool use_parallel,
                                               std::vector<double>* residual_history = nullptr);

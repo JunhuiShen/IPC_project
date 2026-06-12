@@ -41,24 +41,31 @@ namespace step_filter::ccd {
 
         if (num_roots == 0) return false;
 
-        double t_star = t_candidates[0];
-        if (num_roots == 2 && t_candidates[1] < t_star) t_star = t_candidates[1];
+        std::sort(t_candidates, t_candidates + num_roots);
 
-        Vec2 x1t = add(x1, scale(dx1, t_star));
-        Vec2 x2t = add(x2, scale(dx2, t_star));
-        Vec2 x3t = add(x3, scale(dx3, t_star));
+        constexpr double segment_tol = 1e-9;
+        for (int r = 0; r < num_roots; ++r) {
+            double t_star = t_candidates[r];
 
-        Vec2 seg = sub(x3t, x2t);
-        Vec2 rel = sub(x1t, x2t);
+            Vec2 x1t = add(x1, scale(dx1, t_star));
+            Vec2 x2t = add(x2, scale(dx2, t_star));
+            Vec2 x3t = add(x3, scale(dx3, t_star));
 
-        double seg_len2 = norm2(seg);
-        if (seg_len2 < eps) return false;
+            Vec2 seg = sub(x3t, x2t);
+            Vec2 rel = sub(x1t, x2t);
 
-        double s_param = dot(rel, seg) / seg_len2;
-        if (s_param < 0.0 || s_param > 1.0) return false;
+            double seg_len2 = norm2(seg);
+            if (seg_len2 < eps) continue;
 
-        t_out = t_star;
-        return true;
+            double s_param = dot(rel, seg) / seg_len2;
+            if (s_param < -segment_tol || s_param > 1.0 + segment_tol)
+                continue;
+
+            t_out = t_star;
+            return true;
+        }
+
+        return false;
     }
 
     bool point_segment_2d_rb_rotation(const Eigen::Vector2d& x, const Eigen::Vector2d& x_com, const double& theta_n, const double& theta_new, const Eigen::Vector2d& x0, const Eigen::Vector2d& x1, double& step) {

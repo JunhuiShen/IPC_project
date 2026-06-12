@@ -33,6 +33,10 @@ struct IPCArgs : ArgParser {
     int    max_substep_iters = 500;
     double eta              = 0.9;
     double k_barrier        = 100.0;
+    bool   use_parallel     = true;
+    double node_box_min     = 0.001;
+    double node_box_max     = 0.01;
+    int    node_box_update_count = 1;
 
     // --- geometry ---
     int number_of_nodes = 100;
@@ -63,6 +67,10 @@ struct IPCArgs : ArgParser {
         add_int   ("max_substep_iters", max_substep_iters, 500,   "Max Gauss-Seidel iterations per substep");
         add_double("eta",             eta,             0.9,       "Step-size safety factor");
         add_double("k_barrier",       k_barrier,       100.0,     "IPC barrier stiffness multiplier");
+        add_bool  ("use_parallel",    use_parallel,    true,      "Use color-parallel Gauss-Seidel updates");
+        add_double("node_box_min",    node_box_min,    0.001,     "Lower bound on node box half-width");
+        add_double("node_box_max",    node_box_max,    0.01,      "Upper bound on node box half-width");
+        add_int   ("node_box_update_count", node_box_update_count, 1, "Gauss-Seidel iterations between node-box/contact recoloring rebuilds");
 
         add_int   ("nodes",           number_of_nodes, 100,       "Nodes per chain");
 
@@ -106,6 +114,9 @@ struct IPCArgs : ArgParser {
         assert(eta > 0.0 && eta < 1.0 && "eta must be in (0, 1)");
         assert(substeps > 0 && "substeps must be positive");
         assert(max_substep_iters > 0 && "max_substep_iters must be positive");
+        assert(node_box_min > 0.0 && "node_box_min must be positive");
+        assert(node_box_max >= node_box_min && "node_box_max must be >= node_box_min");
+        assert(node_box_update_count > 0 && "node_box_update_count must be positive");
 
         // Trust region requires a conservative eta (originally 0.4).
         // If the trust-region step policy is active, eta should be well below 1.

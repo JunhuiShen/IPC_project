@@ -19,6 +19,10 @@ struct SimParams2D {
     double tol_abs = 1e-6;
     int    max_substep_iters = 500;
     double eta = 0.9;
+    bool   use_parallel = false;
+    double node_box_min = 0.001;
+    double node_box_max = 0.01;
+    int    node_box_update_count = 1;
     bool   use_ccd_step_policy = true;
     bool   write_substeps = false;
     initial_guess::Type initial_guess_type = initial_guess::Type::CCD;
@@ -108,7 +112,8 @@ inline AdvanceResult2D advance_one_frame(std::vector<Chain>& chains,
         SolveResult sub_result = global_gauss_seidel_solver_basic(
                 blocks, x_combined, v_combined, dt, params.k_spring, params.gravity,
                 params.d_hat, params.k_barrier, params.max_substep_iters, params.tol_abs, params.eta,
-                broad_phase, params.use_ccd_step_policy, &res_hist);
+                params.node_box_min, params.node_box_max, params.node_box_update_count,
+                broad_phase, params.use_ccd_step_policy, params.use_parallel, &res_hist);
 
         if (aggregate.substeps_completed == 0 && !res_hist.empty()) {
             aggregate.first_initial_residual = res_hist.front();

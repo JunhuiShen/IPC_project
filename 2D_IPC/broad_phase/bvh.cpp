@@ -115,6 +115,11 @@ static inline AABB build_node_box(const Vec& x, const Vec& v, int i, double dt, 
     );
 }
 
+static inline AABB build_node_box_from_radius(const Vec& x, int i, double r) {
+    Vec2 xi = get_xi(x, i);
+    return AABB(Vec2(xi.x - r, xi.y - r), Vec2(xi.x + r, xi.y + r));
+}
+
 static inline AABB build_segment_box(const Vec& x, const Vec& v, int seg0, double dt, double pad) {
     Vec2 x0 = get_xi(x, seg0);
     Vec2 x1 = get_xi(x, seg0 + 1);
@@ -127,6 +132,17 @@ static inline AABB build_segment_box(const Vec& x, const Vec& v, int seg0, doubl
             Vec2(std::max({x0.x, x1.x, x0.x + dt * v0.x, x1.x + dt * v1.x}) + pad,
                  std::max({x0.y, x1.y, x0.y + dt * v0.y, x1.y + dt * v1.y}) + pad)
     );
+}
+
+static inline AABB build_segment_box_from_node_boxes(const std::vector<AABB>& node_boxes,
+                                                     int seg0, double pad) {
+    AABB box = node_boxes[seg0];
+    box.expand(node_boxes[seg0 + 1]);
+    box.min.x -= pad;
+    box.min.y -= pad;
+    box.max.x += pad;
+    box.max.y += pad;
+    return box;
 }
 
 static inline void add_pair(Cache& c, int node, int seg0) {
@@ -230,10 +246,54 @@ void BVHBroadPhase::build(const Vec& x, const Vec& v,
     cache_ = std::move(c);
 }
 
+void BVHBroadPhase::build_from_node_radii(const Vec& x,
+                                          const std::vector<char>& segment_valid,
+                                          const std::vector<double>& node_radii,
+                                          double d_hat) {
+    Cache c;
+    const int total = static_cast<int>(x.size() / 2);
+    const int nseg = std::max(0, total - 1);
+
+    c.node_boxes.resize(total);
+    c.segment_boxes.resize(nseg);
+    c.segment_valid = segment_valid;
+    c.seg0_to_leaf.assign(nseg, -1);
+
+    for (int i = 0; i < total; ++i) {
+        const double r = (i < static_cast<int>(node_radii.size())) ? node_radii[i] : 0.0;
+        c.node_boxes[i] = build_node_box_from_radius(x, i, r);
+    }
+
+    for (int j = 0; j < nseg; ++j) {
+        if (!is_valid_segment_start(j, c.segment_valid)) continue;
+
+        c.segment_boxes[j] = build_segment_box_from_node_boxes(c.node_boxes, j, d_hat);
+
+        int leaf_k = static_cast<int>(c.seg_leaf_to_seg0.size());
+        c.seg0_to_leaf[j] = leaf_k;
+        c.seg_leaf_to_seg0.push_back(j);
+        c.seg_bvh_boxes.push_back(c.segment_boxes[j]);
+    }
+
+    c.seg_bvh_root = build_bvh(c.seg_bvh_boxes, c.seg_bvh_nodes);
+
+    for (int i = 0; i < total; ++i)
+        query_node(c, i);
+
+    cache_ = std::move(c);
+}
+
 void BVHBroadPhase::initialize(const Vec& x, const Vec& v,
                                const std::vector<char>& segment_valid,
                                double dt, double d_hat) {
     build(x, v, segment_valid, dt, /*node_pad=*/d_hat, /*seg_pad=*/0.0);
+}
+
+void BVHBroadPhase::initialize_node_radii(const Vec& x,
+                                          const std::vector<char>& segment_valid,
+                                          const std::vector<double>& node_radii,
+                                          double d_hat) {
+    build_from_node_radii(x, segment_valid, node_radii, d_hat);
 }
 
 void BVHBroadPhase::refresh(const Vec& x, const Vec& v,
@@ -274,6 +334,32 @@ void BVHBroadPhase::refresh(const Vec& x, const Vec& v,
 
 const std::vector<NSP>& BVHBroadPhase::pairs() const {
     return cache_.pairs;
+}
+
+double BVHBroadPhase::node_box_safe_step(int node, const Vec2& x0, const Vec2& displacement) const {
+    if (node < 0 || node >= static_cast<int>(cache_.node_boxes.size()))
+        return 1.0;
+
+    const AABB& box = cache_.node_boxes[node];
+    constexpr double eps = 1.0e-12;
+    double alpha = 1.0;
+
+    auto clip_axis = [&](double x, double d, double lo, double hi) {
+        if (x < lo - eps || x > hi + eps) {
+            alpha = 0.0;
+            return;
+        }
+        if (d > 0.0) {
+            alpha = std::min(alpha, (hi - x) / d);
+        } else if (d < 0.0) {
+            alpha = std::min(alpha, (lo - x) / d);
+        }
+    };
+
+    clip_axis(x0.x, displacement.x, box.min.x, box.max.x);
+    clip_axis(x0.y, displacement.y, box.min.y, box.max.y);
+
+    return std::clamp(alpha, 0.0, 1.0);
 }
 
 std::vector<NSP> BVHBroadPhase::build_ccd_candidates(const Vec& x, const Vec& v,

@@ -129,6 +129,9 @@ Available CLI options:
 | `density` | mass density, default `900` |
 | `d_hat` | IPC contact activation distance |
 | `num_frames` | number of output frames |
+| `use_parallel` | boolean, enables color-parallel basic solver updates |
+| `node_box_min` / `node_box_max` | lower/upper half-width clamp for parallel node boxes |
+| `node_box_update_count` | Gauss-Seidel iterations between parallel broad-phase/contact recoloring rebuilds |
 | `initial_guess` | `ccd`, `affine`, `trivial`, `trust_region` (= `trivial`) |
 | `write_substeps` | boolean, writes `substep_XXXX.geo` / `.obj` |
 | `restart_frame` | frame index for `state_XXXX.bin`; `-1` disables restart |

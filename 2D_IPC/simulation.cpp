@@ -57,6 +57,10 @@ int main(int argc, char** argv) {
     params.tol_abs = args.tol_abs;
     params.max_substep_iters = args.max_substep_iters;
     params.eta = args.eta;
+    params.use_parallel = args.use_parallel;
+    params.node_box_min = args.node_box_min;
+    params.node_box_max = args.node_box_max;
+    params.node_box_update_count = args.node_box_update_count;
     params.use_ccd_step_policy = args.use_ccd_step_policy();
     params.write_substeps = args.write_substeps;
     params.initial_guess_type = args.get_initial_guess_type();

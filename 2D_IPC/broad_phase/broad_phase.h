@@ -19,6 +19,11 @@ public:
                             const std::vector<char>& segment_valid,
                             double dt, double d_hat) = 0;
 
+    virtual void initialize_node_radii(const Vec& x,
+                                       const std::vector<char>& segment_valid,
+                                       const std::vector<double>& node_radii,
+                                       double d_hat) = 0;
+
     // Incremental update after one node moved (called per Newton step)
     virtual void refresh(const Vec& x, const Vec& v,
                          int moved_node,
@@ -26,6 +31,8 @@ public:
 
     // Current barrier active-set pairs
     virtual const std::vector<physics::NodeSegmentPair>& pairs() const = 0;
+
+    virtual double node_box_safe_step(int node, const Vec2& x0, const Vec2& displacement) const = 0;
 
     // One-shot candidate builds for step filtering
     virtual std::vector<physics::NodeSegmentPair>

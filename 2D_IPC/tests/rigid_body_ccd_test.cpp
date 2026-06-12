@@ -7,6 +7,20 @@
 
 using namespace step_filter::ccd;
 
+TEST(CCD, PointSegmentTranslation_Frame69EndpointHit) {
+    Vec2 x1{0.02664057288132943, -3.0406644634341644};
+    Vec2 dx1{-0.15774506361863982, 0.006790619555892387};
+    Vec2 x2{-0.05169457285238759, -2.9854434893910375};
+    Vec2 dx2{0.1431603686532615, 0.0022727067031325845};
+    Vec2 x3{-0.02664057288132943, -3.0406644634341644};
+    Vec2 dx3{0.15774506361863982, 0.006790619555892387};
+
+    double t = -1.0;
+    EXPECT_TRUE(point_segment_2d(x1, dx1, x2, dx2, x3, dx3, t));
+    EXPECT_NEAR(t, 0.16888371826160567, 1e-10);
+    EXPECT_NEAR(safe_step(x1, dx1, x2, dx2, x3, dx3, 0.9),
+                0.9 * 0.16888371826160567, 1e-10);
+}
 
 // # Run a single test
 // ./build/tests/rigid_body_ccd_test --gtest_filter="CCD.PointSegmentRotation_HitsAt45Degrees"

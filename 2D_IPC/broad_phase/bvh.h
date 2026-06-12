@@ -67,11 +67,18 @@ public:
                     const std::vector<char>& segment_valid,
                     double dt, double d_hat) override;
 
+    void initialize_node_radii(const Vec& x,
+                               const std::vector<char>& segment_valid,
+                               const std::vector<double>& node_radii,
+                               double d_hat) override;
+
     void refresh(const Vec& x, const Vec& v,
                  int moved_node,
                  double dt, double node_pad, double seg_pad) override;
 
     const std::vector<physics::NodeSegmentPair>& pairs() const override;
+
+    double node_box_safe_step(int node, const Vec2& x0, const Vec2& displacement) const override;
 
     std::vector<physics::NodeSegmentPair>
     build_ccd_candidates(const Vec& x, const Vec& v,
@@ -109,4 +116,9 @@ public:
     void build(const Vec& x, const Vec& v,
                const std::vector<char>& segment_valid,
                double dt, double node_pad, double seg_pad);
+
+    void build_from_node_radii(const Vec& x,
+                               const std::vector<char>& segment_valid,
+                               const std::vector<double>& node_radii,
+                               double d_hat);
 };
