@@ -1,33 +1,30 @@
 #pragma once
 
+#include "../broad_phase/broad_phase.h"
 #include "initial_guess.h"
-#include "../physics.h"
+
 #include <vector>
 
 // ======================================================
 // CCD initial guess
 //
-// Globally safe explicit step using CCD over an arbitrary
-// list of blocks/chains:
+// Globally safe explicit step using CCD over explicit edges:
 //
 //   omega = min over all candidate pairs of eta * t_hit
 //   xnew  = x + omega * dt * v
 //
-// This matches the original monolithic code.
 // ======================================================
 
 namespace initial_guess::ccd {
 
     double global_safe_step(const Vec& x,
                             const Vec& v,
-                            const std::vector<physics::NodeSegmentPair>& pairs,
+                            const std::vector<contact::NodeSegmentPair>& pairs,
                             double dt,
                             double eta = 0.9);
 
-    void apply(const std::vector<BlockRef>& blocks,
-               Vec& x_combined,
-               Vec& v_combined,
-               const std::vector<char>& segment_valid,
+    void apply(const State2D& state, const RefMesh& ref_mesh,
+               Vec& xnew, Vec& solver_velocity,
                double dt,
                double eta);
 

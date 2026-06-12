@@ -1,8 +1,6 @@
 #pragma once
 
 #include "broad_phase.h"
-#include <unordered_map>
-#include <cstdint>
 #include <vector>
 #include <limits>
 #include <algorithm>
@@ -25,10 +23,6 @@ struct AABB {
         min.x = std::min(min.x, o.min.x); min.y = std::min(min.y, o.min.y);
         max.x = std::max(max.x, o.max.x); max.y = std::max(max.y, o.max.y);
     }
-    void expand(const Vec2& p) {
-        min.x = std::min(min.x, p.x); min.y = std::min(min.y, p.y);
-        max.x = std::max(max.x, p.x); max.y = std::max(max.y, p.y);
-    }
     Vec2 centroid() const { return (min + max) * 0.5; }
     Vec2 extent()   const { return max - min; }
 };
@@ -49,76 +43,61 @@ struct BVHNode {
 };
 
 int  build_bvh  (const std::vector<AABB>& boxes, std::vector<BVHNode>& out);
-void refit_bvh  (std::vector<BVHNode>& nodes, const std::vector<AABB>& boxes);
 void query_bvh  (const std::vector<BVHNode>& nodes, int nodeIdx,
                  const AABB& query, std::vector<int>& hits);
 
 // ======================================================
 // BVHBroadPhase — BVH-based implementation of BroadPhase
 //
-// Builds a BVH over swept segment AABBs at initialization.
-// Supports O(log n) node queries and incremental refit
-// after a single node move.
+// Builds BVHs over segment AABBs and supports O(log n)
+// node queries.
 // ======================================================
 
 class BVHBroadPhase : public BroadPhase {
 public:
-    void initialize(const Vec& x, const Vec& v,
-                    const std::vector<char>& segment_valid,
-                    double dt, double d_hat) override;
-
     void initialize_node_radii(const Vec& x,
-                               const std::vector<char>& segment_valid,
+                               const std::vector<std::pair<int, int>>& edges,
                                const std::vector<double>& node_radii,
                                double d_hat) override;
 
-    void refresh(const Vec& x, const Vec& v,
-                 int moved_node,
-                 double dt, double node_pad, double seg_pad) override;
-
-    const std::vector<physics::NodeSegmentPair>& pairs() const override;
+    const std::vector<contact::NodeSegmentPair>& pairs() const override;
 
     double node_box_safe_step(int node, const Vec2& x0, const Vec2& displacement) const override;
 
-    std::vector<physics::NodeSegmentPair>
+    std::vector<contact::NodeSegmentPair>
     build_ccd_candidates(const Vec& x, const Vec& v,
-                         const std::vector<char>& segment_valid,
+                         const std::vector<std::pair<int, int>>& edges,
                          double dt) override;
 
-    std::vector<physics::NodeSegmentPair>
+    std::vector<contact::NodeSegmentPair>
     build_ccd_candidates_for_node(int who, const Vec& x, const Vec& v_newton,
-                                  const std::vector<char>& segment_valid,
+                                  const std::vector<std::pair<int, int>>& edges,
                                   double dt) override;
 
-    std::vector<physics::NodeSegmentPair>
+    std::vector<contact::NodeSegmentPair>
     build_trust_region_candidates(const Vec& x, const Vec& v,
-                                  const std::vector<char>& segment_valid,
+                                  const std::vector<std::pair<int, int>>& edges,
                                   double dt, double motion_pad) override;
 
-public:
     struct Cache {
         std::vector<AABB> node_boxes;
-        std::vector<AABB> segment_boxes;
-        std::vector<char> segment_valid;
 
-        std::vector<int>     seg_leaf_to_seg0;
-        std::vector<int>     seg0_to_leaf;
-        std::vector<AABB>    seg_bvh_boxes;
+        std::vector<std::pair<int, int>> seg_leaf_edges;
         std::vector<BVHNode> seg_bvh_nodes;
         int                  seg_bvh_root = -1;
 
-        std::vector<physics::NodeSegmentPair>          pairs;
-        std::unordered_map<std::uint64_t, std::size_t> pair_index;
+        std::vector<contact::NodeSegmentPair> pairs;
     };
 
+private:
     Cache cache_;
 
     void build(const Vec& x, const Vec& v,
-               const std::vector<char>& segment_valid,
+               const std::vector<std::pair<int, int>>& edges,
                double dt, double node_pad, double seg_pad);
 
     void build_from_node_radii(const Vec& x,
-                               const std::vector<char>& segment_valid,
+                               const std::vector<std::pair<int, int>>& edges,
                                const std::vector<double>& node_radii,
                                double d_hat);
 };

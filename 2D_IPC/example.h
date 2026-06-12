@@ -1,7 +1,7 @@
 #pragma once
 
-#include "chain.h"
-#include <vector>
+#include "mesh.h"
+#include "state.h"
 
 enum class ExampleType {
     Example1,
@@ -9,7 +9,8 @@ enum class ExampleType {
 };
 
 struct ExampleScene {
-    std::vector<Chain> chains;
+    State2D state;
+    RefMesh ref_mesh;
 };
 
 ExampleScene build_example(ExampleType example_type, int number_of_nodes, double density);

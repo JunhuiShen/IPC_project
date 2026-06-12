@@ -4,9 +4,6 @@
 
 namespace initial_guess::trivial {
 
-    // xnew = current positions, v_combined = current velocities
-    void apply(const std::vector<BlockRef>& blocks,
-               Vec& x_combined,
-               Vec& v_combined);
+    void apply(const State2D& state, Vec& xnew, Vec& solver_velocity);
 
 } // namespace initial_guess::trivial

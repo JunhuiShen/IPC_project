@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <gtest/gtest.h>
 
-TEST(BVH, BuildQueryRefit) {
+TEST(BVH, BuildAndQuery) {
     std::vector<AABB> boxes = {
         AABB(Vec2(0,0), Vec2(1,1)),  // box 0
         AABB(Vec2(2,1), Vec2(5,2)),  // box 1
@@ -51,33 +51,36 @@ TEST(BVH, BuildQueryRefit) {
         EXPECT_TRUE(hits.empty());
     }
 
-    // Move box 0 into the right region and refit, then re-query left region
-    boxes[0] = AABB(Vec2(3,1), Vec2(4,2));
-    refit_bvh(nodes, boxes);
-
-    {
-        AABB q(Vec2(0,0), Vec2(1,1));
-        std::vector<int> hits;
-        query_bvh(nodes, root, q, hits);
-        EXPECT_TRUE(hits.empty());
-    }
-    {
-        AABB q(Vec2(3,1), Vec2(4,2));
-        std::vector<int> hits;
-        query_bvh(nodes, root, q, hits);
-        EXPECT_NE(std::find(hits.begin(), hits.end(), 0), hits.end());
-    }
 }
 
 TEST(BVH, NodeBoxSafeStepClipsToBox) {
     BVHBroadPhase bp;
     Vec x = {0.0, 0.0, 1.0, 0.0};
-    std::vector<char> segment_valid = {1};
+    std::vector<std::pair<int, int>> edges = {{0, 1}};
     std::vector<double> radii = {0.5, 0.5};
 
-    bp.initialize_node_radii(x, segment_valid, radii, 0.0);
+    bp.initialize_node_radii(x, edges, radii, 0.0);
 
     EXPECT_DOUBLE_EQ(bp.node_box_safe_step(0, Vec2(0.0, 0.0), Vec2(2.0, 0.0)), 0.25);
     EXPECT_DOUBLE_EQ(bp.node_box_safe_step(0, Vec2(0.0, 0.0), Vec2(0.0, -1.0)), 0.5);
     EXPECT_DOUBLE_EQ(bp.node_box_safe_step(0, Vec2(0.0, 0.0), Vec2(0.1, 0.1)), 1.0);
+}
+
+TEST(BVH, SupportsNonconsecutiveEdgeEndpoints) {
+    BVHBroadPhase bp;
+    Vec x = {
+        -1.0, 0.0,
+         0.0, 0.1,
+         2.0, 2.0,
+         1.0, 0.0,
+    };
+    std::vector<std::pair<int, int>> edges = {{0, 3}};
+    std::vector<double> radii(4, 0.2);
+
+    bp.initialize_node_radii(x, edges, radii, 0.0);
+
+    ASSERT_EQ(bp.pairs().size(), 1u);
+    EXPECT_EQ(bp.pairs()[0].node, 1);
+    EXPECT_EQ(bp.pairs()[0].seg0, 0);
+    EXPECT_EQ(bp.pairs()[0].seg1, 3);
 }

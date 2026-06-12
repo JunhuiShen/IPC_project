@@ -4,7 +4,6 @@
 
 namespace physics {
 
-double barrier_energy(double d, double dhat);
 double barrier_grad(double d, double dhat);
 double barrier_hess(double d, double dhat);
 

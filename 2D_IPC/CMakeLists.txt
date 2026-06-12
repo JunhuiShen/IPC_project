@@ -18,6 +18,9 @@ add_library(ipc_core
     node_segment_distance.cpp
     ogc_trust_region.cpp
     parallel_helper.cpp
+    simulation.cpp
+    state.cpp
+    mesh.cpp
     chain.cpp
     restart.cpp
     visualization.cpp
@@ -75,7 +78,7 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 # ── Simulation executable ─────────────────────────────────────────────────────
-add_executable(simulation simulation.cpp)
+add_executable(simulation main.cpp)
 target_link_libraries(simulation PRIVATE ipc_core)
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -93,3 +96,7 @@ gtest_discover_tests(bvh_box_leaf_test)
 add_executable(parallel_helper_test parallel_helper_test.cpp)
 target_link_libraries(parallel_helper_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
 gtest_discover_tests(parallel_helper_test)
+
+add_executable(state_test state_test.cpp)
+target_link_libraries(state_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
+gtest_discover_tests(state_test)

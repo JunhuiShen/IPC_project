@@ -1,6 +1,6 @@
 # 2D IPC — Incremental Potential Contact Simulation
 
-A 2D physics simulation of spring chains with contact handled using
+A 2D physics simulation of arbitrary spring-edge networks with contact handled using
 **Incremental Potential Contact (IPC)** and solved with a **nonlinear Gauss–Seidel solver**.
 
 The simulator is designed for experimenting with different strategies for:
@@ -20,7 +20,18 @@ These components can be swapped to compare different algorithmic variants.
 
     cd 2D_IPC
     cmake -B build
-    cmake --build build
+    cmake --build build --clean-first   # clean rebuild
+    cmake --build build -j              # faster incremental parallel build
+
+## Test
+
+Run all tests and print details for any failures:
+
+    ctest --test-dir build --output-on-failure
+
+Rerun only the tests that failed in the previous test run:
+
+    ctest --test-dir build --rerun-failed --output-on-failure
 
 ## Run
 
@@ -77,19 +88,35 @@ Per-frame statistics are printed to stdout:
 
 ## Solver
 
-`simulation.cpp` handles CLI parsing, scene setup, restart, and frame export.
-The per-frame driver is `advance_one_frame(...)` in `simulation.h`.
+`main.cpp` handles CLI parsing, scene setup, restart, and frame export.
+The per-frame driver is declared in `simulation.h` and implemented in
+`simulation.cpp`.
 
 The 2D solver is in `solver.cpp`.
 
 Each frame is split into `substeps` substeps (default `3`). Each substep runs a
-nonlinear Gauss-Seidel sweep over chain nodes:
+nonlinear Gauss-Seidel sweep over global nodes:
 
-- builds a persistent `BVHBroadPhase` active set once per timestep
+- builds a node-box `BVHBroadPhase` active set
 - computes a local 2x2 Newton update for each node
 - clamps each update with either CCD or trust-region step policy
-- incrementally refreshes the broad phase after each committed node move
+- periodically rebuilds and recolors the active set according to
+  `node_box_update_count`
 - reports a mass-normalized residual
+
+## Data Model
+
+The runtime is topology-agnostic:
+
+- `State2D` stores one global position, velocity, mass, and pin array.
+- `RefMesh` stores explicit edge endpoint pairs, rest lengths, and incident-edge
+  adjacency for each node.
+- Elasticity, contact, coloring, CCD, and Newton updates all use global node IDs.
+
+Edges do not need consecutive endpoints. Branches, loops, disconnected
+components, and edges such as `(0, 7)` are valid. `Chain` is only a convenience
+used by the bundled examples to generate initial geometry; the solver never
+receives chain or block information.
 
 ## Example And Strategy Selection
 
@@ -144,17 +171,27 @@ After changing a strategy, rebuild the project:
 
     2D_IPC/
     ├── CMakeLists.txt
-    ├── simulation.cpp
-    ├── simulation.h
+    ├── main.cpp
+    │   CLI application setup, restart, and output
+    ├── simulation.h / simulation.cpp
+    │   substep loop and frame advancement
     ├── solver.h / solver.cpp
     ├── physics.h / physics.cpp
+    │   local incremental-potential gradient and Hessian
     ├── spring_energy.h / spring_energy.cpp
     ├── barrier_energy.h / barrier_energy.cpp
     │   scalar IPC barrier plus node-segment gradient/Hessian
     ├── node_segment_distance.h / node_segment_distance.cpp
     ├── ogc_trust_region.h / ogc_trust_region.cpp
     ├── ccd.h / ccd.cpp
+    ├── parallel_helper.h / parallel_helper.cpp
+    │   conflict graph construction and greedy coloring
+    ├── state.h / state.cpp
+    │   global dynamic state plus predictor and velocity updates
+    ├── mesh.h / mesh.cpp
+    │   explicit edge topology, rest lengths, and node-edge incidence
     ├── chain.h / chain.cpp
+    │   optional chain geometry and assembly helpers for example scenes
     ├── example.h / example.cpp
     ├── restart.h / restart.cpp
     ├── visualization.h / visualization.cpp
@@ -168,5 +205,5 @@ After changing a strategy, rebuild the project:
 - `BVHBroadPhase` performs broad-phase AABB candidate detection.
 - `CCD` and `TrustRegion` step policies limit the Newton step to maintain collision safety.
 - Initial guess strategies provide different warm-starts for the nonlinear solver.
-- Rest lengths and edge topology live in one mesh-wide `RefMesh`; there are no separate reference positions.
+- Rest lengths, explicit edge topology, and per-node edge incidence live in one mesh-wide `RefMesh`.
 - Output frames are exported as `.geo` by default; pass `--format obj` for `.obj`.

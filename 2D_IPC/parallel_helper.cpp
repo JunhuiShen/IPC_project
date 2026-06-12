@@ -1,4 +1,5 @@
 #include "parallel_helper.h"
+
 #include <algorithm>
 
 namespace {
@@ -12,29 +13,27 @@ void add_graph_edge(std::vector<std::vector<int>>& graph, int a, int b) {
     graph[b].push_back(a);
 }
 
-}
+} // namespace
 
 std::vector<std::vector<int>>
-build_conflict_graph(const std::vector<BlockView>& blocks,
-                     const std::vector<physics::NodeSegmentPair>& barrier_pairs,
+build_conflict_graph(const std::vector<std::pair<int, int>>& edges,
+                     const std::vector<contact::NodeSegmentPair>& contact_pairs,
                      int total_nodes) {
     std::vector<std::vector<int>> graph(total_nodes);
 
-    for (const auto& b : blocks) {
-        for (int i = 0; i + 1 < b.size(); ++i) {
-            add_graph_edge(graph, b.offset + i, b.offset + i + 1);
-        }
+    for (const auto& [a, b] : edges) {
+        add_graph_edge(graph, a, b);
     }
 
-    for (const auto& p : barrier_pairs) {
-        add_graph_edge(graph, p.node, p.seg0);
-        add_graph_edge(graph, p.node, p.seg1);
-        add_graph_edge(graph, p.seg0, p.seg1);
+    for (const auto& pair : contact_pairs) {
+        add_graph_edge(graph, pair.node, pair.seg0);
+        add_graph_edge(graph, pair.node, pair.seg1);
+        add_graph_edge(graph, pair.seg0, pair.seg1);
     }
 
-    for (auto& nbrs : graph) {
-        std::sort(nbrs.begin(), nbrs.end());
-        nbrs.erase(std::unique(nbrs.begin(), nbrs.end()), nbrs.end());
+    for (auto& neighbors : graph) {
+        std::sort(neighbors.begin(), neighbors.end());
+        neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
     }
 
     return graph;
@@ -46,34 +45,24 @@ greedy_color_conflict_graph(const std::vector<std::vector<int>>& graph) {
     std::vector<int> color(n, -1);
     std::vector<std::vector<int>> groups;
 
-    for (int v = 0; v < n; ++v) {
+    for (int vertex = 0; vertex < n; ++vertex) {
         std::vector<char> used(groups.size(), 0);
-        for (int u : graph[v]) {
-            if (u >= 0 && u < n && color[u] >= 0)
-                used[color[u]] = 1;
+        for (int neighbor : graph[vertex]) {
+            if (neighbor >= 0 && neighbor < n && color[neighbor] >= 0) {
+                used[color[neighbor]] = 1;
+            }
         }
 
-        int c = 0;
-        while (c < static_cast<int>(used.size()) && used[c]) ++c;
-        if (c == static_cast<int>(groups.size()))
+        int group = 0;
+        while (group < static_cast<int>(used.size()) && used[group]) {
+            ++group;
+        }
+        if (group == static_cast<int>(groups.size())) {
             groups.emplace_back();
-        color[v] = c;
-        groups[c].push_back(v);
+        }
+        color[vertex] = group;
+        groups[group].push_back(vertex);
     }
 
     return groups;
 }
-
-std::vector<std::pair<int, int>>
-build_global_to_block_local(const std::vector<BlockView>& blocks, int total_nodes) {
-    std::vector<std::pair<int, int>> map(total_nodes, {-1, -1});
-    for (int b = 0; b < static_cast<int>(blocks.size()); ++b) {
-        for (int i = 0; i < blocks[b].size(); ++i) {
-            const int who = blocks[b].offset + i;
-            if (who >= 0 && who < total_nodes)
-                map[who] = {b, i};
-        }
-    }
-    return map;
-}
-

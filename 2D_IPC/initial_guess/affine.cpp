@@ -3,20 +3,17 @@
 
 namespace initial_guess::affine {
 
-    Params compute_affine_params_global(const std::vector<BlockRef>& blocks) {
+    Params compute_affine_params(const State2D& state) {
         Vec2 xcom{0.0, 0.0};
         double M = 0.0;
 
-        for (const auto& b : blocks) {
-            const Chain& c = *b.chain;
-            for (int i = 0; i < c.N; ++i) {
-                if (c.is_pinned[i]) continue;
+        for (int i = 0; i < state.size(); ++i) {
+            if (state.is_pinned[i]) continue;
 
-                Vec2 xi = get_xi(c.x, i);
-                xcom.x += c.mass[i] * xi.x;
-                xcom.y += c.mass[i] * xi.y;
-                M += c.mass[i];
-            }
+            Vec2 xi = get_xi(state.x, i);
+            xcom.x += state.mass[i] * xi.x;
+            xcom.y += state.mass[i] * xi.y;
+            M += state.mass[i];
         }
 
         if (M <= 1e-12) {
@@ -29,27 +26,24 @@ namespace initial_guess::affine {
         double G[3][3] = {{0.0}};
         double bvec[3] = {0.0, 0.0, 0.0};
 
-        for (const auto& br : blocks) {
-            const Chain& c = *br.chain;
-            for (int i = 0; i < c.N; ++i) {
-                if (c.is_pinned[i]) continue;
+        for (int i = 0; i < state.size(); ++i) {
+            if (state.is_pinned[i]) continue;
 
-                Vec2 Xi = get_xi(c.x, i);
-                Vec2 Vi = get_xi(c.v, i);
-                Vec2 d{Xi.x - xcom.x, Xi.y - xcom.y};
+            Vec2 Xi = get_xi(state.x, i);
+            Vec2 Vi = get_xi(state.v, i);
+            Vec2 d{Xi.x - xcom.x, Xi.y - xcom.y};
 
-                Vec2 U1{-d.y, d.x};
-                Vec2 U2{1.0, 0.0};
-                Vec2 U3{0.0, 1.0};
-                Vec2 U[3] = {U1, U2, U3};
+            Vec2 U1{-d.y, d.x};
+            Vec2 U2{1.0, 0.0};
+            Vec2 U3{0.0, 1.0};
+            Vec2 U[3] = {U1, U2, U3};
 
-                double w = c.mass[i];
+            double w = state.mass[i];
 
-                for (int k = 0; k < 3; ++k) {
-                    bvec[k] += w * (U[k].x * Vi.x + U[k].y * Vi.y);
-                    for (int j = 0; j < 3; ++j) {
-                        G[k][j] += w * (U[k].x * U[j].x + U[k].y * U[j].y);
-                    }
+            for (int k = 0; k < 3; ++k) {
+                bvec[k] += w * (U[k].x * Vi.x + U[k].y * Vi.y);
+                for (int j = 0; j < 3; ++j) {
+                    G[k][j] += w * (U[k].x * U[j].x + U[k].y * U[j].y);
                 }
             }
         }
@@ -66,33 +60,21 @@ namespace initial_guess::affine {
         return {ap.vhat.x - ap.omega * d.y, ap.vhat.y + ap.omega * d.x};
     }
 
-    void build_v_combined_from_affine(Vec& v_combined,
-                                      const std::vector<BlockRef>& blocks,
-                                      const Params& ap) {
-        for (const auto& b : blocks) {
-            const Chain& c = *b.chain;
-            for (int i = 0; i < c.N; ++i) {
-                Vec2 xi = get_xi(c.x, i);
-                Vec2 vi = c.is_pinned[i] ? Vec2{0.0, 0.0} : velocity_at(ap, xi);
-                set_xi(v_combined, b.offset + i, vi);
-            }
-        }
-    }
+    void apply(const Params& ap, const State2D& state,
+               Vec& xnew, Vec& solver_velocity, double dt) {
+        xnew = state.x;
+        solver_velocity.assign(state.v.size(), 0.0);
 
-    void apply_to_block(const Params& ap, const BlockRef& b, double dt) {
-        Chain& c = *b.chain;
-        Vec& xnew = *b.xnew;
-        xnew = c.x;
+        for (int i = 0; i < state.size(); ++i) {
+            Vec2 xi = get_xi(state.x, i);
 
-        for (int i = 0; i < c.N; ++i) {
-            Vec2 xi = get_xi(c.x, i);
-
-            if (c.is_pinned[i]) {
+            if (state.is_pinned[i]) {
                 set_xi(xnew, i, xi);
                 continue;
             }
 
             Vec2 v_aff = velocity_at(ap, xi);
+            set_xi(solver_velocity, i, v_aff);
             set_xi(xnew, i, {xi.x + dt * v_aff.x, xi.y + dt * v_aff.y});
         }
     }

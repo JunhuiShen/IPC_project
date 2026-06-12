@@ -1,57 +1,55 @@
 #pragma once
 
 #include "../ipc_math.h"
-#include "../physics.h"
+
+#include <utility>
 #include <vector>
+
+namespace contact {
+
+struct NodeSegmentPair {
+    int node;
+    int seg0;
+    int seg1;
+};
+
+} // namespace contact
 
 // ======================================================
 // BroadPhase — base class for broad-phase collision detection
 //
-// Manages a persistent barrier pair cache and provides
-// one-shot candidate builds for step filtering.
+// Manages the barrier active set and provides one-shot
+// candidate builds for step filtering.
 // Swap implementations by swapping the subclass.
 // ======================================================
 
 class BroadPhase {
 public:
-    // Set up the persistent barrier pair cache (called once per timestep)
-    virtual void initialize(const Vec& x, const Vec& v,
-                            const std::vector<char>& segment_valid,
-                            double dt, double d_hat) = 0;
-
     virtual void initialize_node_radii(const Vec& x,
-                                       const std::vector<char>& segment_valid,
+                                       const std::vector<std::pair<int, int>>& edges,
                                        const std::vector<double>& node_radii,
                                        double d_hat) = 0;
 
-    // Incremental update after one node moved (called per Newton step)
-    virtual void refresh(const Vec& x, const Vec& v,
-                         int moved_node,
-                         double dt, double node_pad, double seg_pad) = 0;
-
     // Current barrier active-set pairs
-    virtual const std::vector<physics::NodeSegmentPair>& pairs() const = 0;
+    virtual const std::vector<contact::NodeSegmentPair>& pairs() const = 0;
 
     virtual double node_box_safe_step(int node, const Vec2& x0, const Vec2& displacement) const = 0;
 
     // One-shot candidate builds for step filtering
-    virtual std::vector<physics::NodeSegmentPair>
+    virtual std::vector<contact::NodeSegmentPair>
     build_ccd_candidates(const Vec& x, const Vec& v,
-                         const std::vector<char>& segment_valid,
+                         const std::vector<std::pair<int, int>>& edges,
                          double dt) = 0;
 
     // Efficient single-node CCD candidates using the existing BVH (no rebuild)
-    // Default falls back to full rebuild — override for performance.
-    virtual std::vector<physics::NodeSegmentPair>
+    virtual std::vector<contact::NodeSegmentPair>
     build_ccd_candidates_for_node(int who, const Vec& x, const Vec& v_newton,
-                                  const std::vector<char>& segment_valid,
-                                  double dt) {
-        return build_ccd_candidates(x, v_newton, segment_valid, dt);
-    }
+                                  const std::vector<std::pair<int, int>>& edges,
+                                  double dt) = 0;
 
-    virtual std::vector<physics::NodeSegmentPair>
+    virtual std::vector<contact::NodeSegmentPair>
     build_trust_region_candidates(const Vec& x, const Vec& v,
-                                  const std::vector<char>& segment_valid,
+                                  const std::vector<std::pair<int, int>>& edges,
                                   double dt, double motion_pad) = 0;
 
     virtual ~BroadPhase() = default;

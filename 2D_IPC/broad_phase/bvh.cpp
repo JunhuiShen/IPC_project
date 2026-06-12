@@ -2,10 +2,10 @@
 #include <algorithm>
 
 using Cache = BVHBroadPhase::Cache;
-using NSP   = physics::NodeSegmentPair;
+using NSP   = contact::NodeSegmentPair;
 
 // ======================================================
-// BVH tree — build, refit, query
+// BVH tree — build and query
 // ======================================================
 
 static int build_recursive(std::vector<BVHNode>& nodes,
@@ -52,19 +52,6 @@ int build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out) {
     return build_recursive(out, boxes, idx, 0, static_cast<int>(idx.size()));
 }
 
-void refit_bvh(std::vector<BVHNode>& nodes, const std::vector<AABB>& boxes) {
-    for (int i = static_cast<int>(nodes.size()) - 1; i >= 0; --i) {
-        BVHNode& n = nodes[i];
-        if (n.leafIndex >= 0) {
-            n.bbox = boxes[n.leafIndex];
-        } else {
-            n.bbox = AABB{};
-            n.bbox.expand(nodes[n.left].bbox);
-            n.bbox.expand(nodes[n.right].bbox);
-        }
-    }
-}
-
 void query_bvh(const std::vector<BVHNode>& nodes, int nodeIdx,
                const AABB& query, std::vector<int>& hits) {
     if (nodeIdx < 0) return;
@@ -92,16 +79,8 @@ void query_bvh(const std::vector<BVHNode>& nodes, int nodeIdx,
 // Internal helpers (file-local, operate on Cache)
 // ======================================================
 
-static inline bool is_valid_segment_start(int j, const std::vector<char>& segment_valid) {
-    return (j >= 0 && j < static_cast<int>(segment_valid.size()) && segment_valid[j]);
-}
-
 static inline bool is_invalid_pair(int node, int seg0, int seg1) {
     return (node == seg0) || (node == seg1);
-}
-
-static inline std::uint64_t pair_key(int node, int seg0) {
-    return (std::uint64_t(std::uint32_t(node)) << 32) | std::uint32_t(seg0);
 }
 
 static inline AABB build_node_box(const Vec& x, const Vec& v, int i, double dt, double pad) {
@@ -120,11 +99,12 @@ static inline AABB build_node_box_from_radius(const Vec& x, int i, double r) {
     return AABB(Vec2(xi.x - r, xi.y - r), Vec2(xi.x + r, xi.y + r));
 }
 
-static inline AABB build_segment_box(const Vec& x, const Vec& v, int seg0, double dt, double pad) {
+static inline AABB build_segment_box(const Vec& x, const Vec& v,
+                                     int seg0, int seg1, double dt, double pad) {
     Vec2 x0 = get_xi(x, seg0);
-    Vec2 x1 = get_xi(x, seg0 + 1);
+    Vec2 x1 = get_xi(x, seg1);
     Vec2 v0 = get_xi(v, seg0);
-    Vec2 v1 = get_xi(v, seg0 + 1);
+    Vec2 v1 = get_xi(v, seg1);
 
     return AABB(
             Vec2(std::min({x0.x, x1.x, x0.x + dt * v0.x, x1.x + dt * v1.x}) - pad,
@@ -135,9 +115,9 @@ static inline AABB build_segment_box(const Vec& x, const Vec& v, int seg0, doubl
 }
 
 static inline AABB build_segment_box_from_node_boxes(const std::vector<AABB>& node_boxes,
-                                                     int seg0, double pad) {
+                                                     int seg0, int seg1, double pad) {
     AABB box = node_boxes[seg0];
-    box.expand(node_boxes[seg0 + 1]);
+    box.expand(node_boxes[seg1]);
     box.min.x -= pad;
     box.min.y -= pad;
     box.max.x += pad;
@@ -145,66 +125,16 @@ static inline AABB build_segment_box_from_node_boxes(const std::vector<AABB>& no
     return box;
 }
 
-static inline void add_pair(Cache& c, int node, int seg0) {
-    std::uint64_t key = pair_key(node, seg0);
-    if (c.pair_index.count(key)) return;
-
-    c.pair_index[key] = c.pairs.size();
-    c.pairs.push_back({node, seg0, seg0 + 1});
-}
-
-static inline void erase_pair_at(Cache& c, std::size_t idx) {
-    const std::size_t last = c.pairs.size() - 1;
-    NSP victim = c.pairs[idx];
-
-    if (idx != last) {
-        c.pairs[idx] = c.pairs[last];
-        c.pair_index[pair_key(c.pairs[idx].node, c.pairs[idx].seg0)] = idx;
-    }
-
-    c.pairs.pop_back();
-    c.pair_index.erase(pair_key(victim.node, victim.seg0));
-}
-
-static inline void remove_pairs_touching_node(Cache& c, int node) {
-    for (std::size_t i = c.pairs.size(); i > 0; --i)
-        if (c.pairs[i - 1].node == node)
-            erase_pair_at(c, i - 1);
-}
-
-static inline void remove_pairs_touching_segment(Cache& c, int seg0) {
-    for (std::size_t i = c.pairs.size(); i > 0; --i)
-        if (c.pairs[i - 1].seg0 == seg0)
-            erase_pair_at(c, i - 1);
-}
-
 static inline void query_node(Cache& c, int node) {
     if (c.seg_bvh_root < 0) return;
 
-    const int total = static_cast<int>(c.node_boxes.size());
     std::vector<int> hits;
     query_bvh(c.seg_bvh_nodes, c.seg_bvh_root, c.node_boxes[node], hits);
 
     for (int leaf_k : hits) {
-        int seg0 = c.seg_leaf_to_seg0[leaf_k];
-        int seg1 = seg0 + 1;
-        if (seg1 >= total) continue;
+        const auto [seg0, seg1] = c.seg_leaf_edges[leaf_k];
         if (is_invalid_pair(node, seg0, seg1)) continue;
-        add_pair(c, node, seg0);
-    }
-}
-
-static inline void scan_segment(Cache& c, int seg0) {
-    if (!is_valid_segment_start(seg0, c.segment_valid)) return;
-
-    const int total = static_cast<int>(c.node_boxes.size());
-    const int seg1 = seg0 + 1;
-    const AABB& sb = c.segment_boxes[seg0];
-
-    for (int node = 0; node < total; ++node) {
-        if (is_invalid_pair(node, seg0, seg1)) continue;
-        if (aabb_intersects(c.node_boxes[node], sb))
-            add_pair(c, node, seg0);
+        c.pairs.push_back({node, seg0, seg1});
     }
 }
 
@@ -213,32 +143,24 @@ static inline void scan_segment(Cache& c, int seg0) {
 // ======================================================
 
 void BVHBroadPhase::build(const Vec& x, const Vec& v,
-                          const std::vector<char>& segment_valid,
+                          const std::vector<std::pair<int, int>>& edges,
                           double dt, double node_pad, double seg_pad) {
     Cache c;
     const int total = static_cast<int>(x.size() / 2);
-    const int nseg = std::max(0, total - 1);
 
     c.node_boxes.resize(total);
-    c.segment_boxes.resize(nseg);
-    c.segment_valid = segment_valid;
-    c.seg0_to_leaf.assign(nseg, -1);
+    std::vector<AABB> segment_boxes;
 
     for (int i = 0; i < total; ++i)
         c.node_boxes[i] = build_node_box(x, v, i, dt, node_pad);
 
-    for (int j = 0; j < nseg; ++j) {
-        if (!is_valid_segment_start(j, c.segment_valid)) continue;
-
-        c.segment_boxes[j] = build_segment_box(x, v, j, dt, seg_pad);
-
-        int leaf_k = static_cast<int>(c.seg_leaf_to_seg0.size());
-        c.seg0_to_leaf[j] = leaf_k;
-        c.seg_leaf_to_seg0.push_back(j);
-        c.seg_bvh_boxes.push_back(c.segment_boxes[j]);
+    for (int e = 0; e < static_cast<int>(edges.size()); ++e) {
+        const auto [seg0, seg1] = edges[e];
+        c.seg_leaf_edges.push_back(edges[e]);
+        segment_boxes.push_back(build_segment_box(x, v, seg0, seg1, dt, seg_pad));
     }
 
-    c.seg_bvh_root = build_bvh(c.seg_bvh_boxes, c.seg_bvh_nodes);
+    c.seg_bvh_root = build_bvh(segment_boxes, c.seg_bvh_nodes);
 
     for (int i = 0; i < total; ++i)
         query_node(c, i);
@@ -247,35 +169,28 @@ void BVHBroadPhase::build(const Vec& x, const Vec& v,
 }
 
 void BVHBroadPhase::build_from_node_radii(const Vec& x,
-                                          const std::vector<char>& segment_valid,
+                                          const std::vector<std::pair<int, int>>& edges,
                                           const std::vector<double>& node_radii,
                                           double d_hat) {
     Cache c;
     const int total = static_cast<int>(x.size() / 2);
-    const int nseg = std::max(0, total - 1);
 
     c.node_boxes.resize(total);
-    c.segment_boxes.resize(nseg);
-    c.segment_valid = segment_valid;
-    c.seg0_to_leaf.assign(nseg, -1);
+    std::vector<AABB> segment_boxes;
 
     for (int i = 0; i < total; ++i) {
         const double r = (i < static_cast<int>(node_radii.size())) ? node_radii[i] : 0.0;
         c.node_boxes[i] = build_node_box_from_radius(x, i, r);
     }
 
-    for (int j = 0; j < nseg; ++j) {
-        if (!is_valid_segment_start(j, c.segment_valid)) continue;
-
-        c.segment_boxes[j] = build_segment_box_from_node_boxes(c.node_boxes, j, d_hat);
-
-        int leaf_k = static_cast<int>(c.seg_leaf_to_seg0.size());
-        c.seg0_to_leaf[j] = leaf_k;
-        c.seg_leaf_to_seg0.push_back(j);
-        c.seg_bvh_boxes.push_back(c.segment_boxes[j]);
+    for (int e = 0; e < static_cast<int>(edges.size()); ++e) {
+        const auto [seg0, seg1] = edges[e];
+        c.seg_leaf_edges.push_back(edges[e]);
+        segment_boxes.push_back(
+                build_segment_box_from_node_boxes(c.node_boxes, seg0, seg1, d_hat));
     }
 
-    c.seg_bvh_root = build_bvh(c.seg_bvh_boxes, c.seg_bvh_nodes);
+    c.seg_bvh_root = build_bvh(segment_boxes, c.seg_bvh_nodes);
 
     for (int i = 0; i < total; ++i)
         query_node(c, i);
@@ -283,53 +198,11 @@ void BVHBroadPhase::build_from_node_radii(const Vec& x,
     cache_ = std::move(c);
 }
 
-void BVHBroadPhase::initialize(const Vec& x, const Vec& v,
-                               const std::vector<char>& segment_valid,
-                               double dt, double d_hat) {
-    build(x, v, segment_valid, dt, /*node_pad=*/d_hat, /*seg_pad=*/0.0);
-}
-
 void BVHBroadPhase::initialize_node_radii(const Vec& x,
-                                          const std::vector<char>& segment_valid,
+                                          const std::vector<std::pair<int, int>>& edges,
                                           const std::vector<double>& node_radii,
                                           double d_hat) {
-    build_from_node_radii(x, segment_valid, node_radii, d_hat);
-}
-
-void BVHBroadPhase::refresh(const Vec& x, const Vec& v,
-                            int moved_node,
-                            double dt, double node_pad, double seg_pad) {
-    const int total = static_cast<int>(cache_.node_boxes.size());
-    if (moved_node < 0 || moved_node >= total) return;
-
-    cache_.node_boxes[moved_node] = build_node_box(x, v, moved_node, dt, node_pad);
-
-    const int left_seg = moved_node - 1;
-    const int right_seg = moved_node;
-
-    auto update_seg = [&](int seg0) {
-        if (!is_valid_segment_start(seg0, cache_.segment_valid)) return;
-        cache_.segment_boxes[seg0] = build_segment_box(x, v, seg0, dt, seg_pad);
-        int leaf_k = cache_.seg0_to_leaf[seg0];
-        if (leaf_k >= 0)
-            cache_.seg_bvh_boxes[leaf_k] = cache_.segment_boxes[seg0];
-    };
-
-    update_seg(left_seg);
-    update_seg(right_seg);
-
-    if (cache_.seg_bvh_root >= 0)
-        refit_bvh(cache_.seg_bvh_nodes, cache_.seg_bvh_boxes);
-
-    remove_pairs_touching_node(cache_, moved_node);
-    if (is_valid_segment_start(left_seg, cache_.segment_valid))
-        remove_pairs_touching_segment(cache_, left_seg);
-    if (is_valid_segment_start(right_seg, cache_.segment_valid))
-        remove_pairs_touching_segment(cache_, right_seg);
-
-    query_node(cache_, moved_node);
-    scan_segment(cache_, left_seg);
-    scan_segment(cache_, right_seg);
+    build_from_node_radii(x, edges, node_radii, d_hat);
 }
 
 const std::vector<NSP>& BVHBroadPhase::pairs() const {
@@ -363,16 +236,16 @@ double BVHBroadPhase::node_box_safe_step(int node, const Vec2& x0, const Vec2& d
 }
 
 std::vector<NSP> BVHBroadPhase::build_ccd_candidates(const Vec& x, const Vec& v,
-                                                     const std::vector<char>& segment_valid,
+                                                     const std::vector<std::pair<int, int>>& edges,
                                                      double dt) {
     BVHBroadPhase tmp;
-    tmp.build(x, v, segment_valid, dt, /*node_pad=*/0.0, /*seg_pad=*/0.0);
+    tmp.build(x, v, edges, dt, /*node_pad=*/0.0, /*seg_pad=*/0.0);
     return tmp.cache_.pairs;
 }
 
 std::vector<NSP> BVHBroadPhase::build_ccd_candidates_for_node(
         int who, const Vec& x, const Vec& v_newton,
-        const std::vector<char>& segment_valid, double dt) {
+        const std::vector<std::pair<int, int>>& edges, double dt) {
 
     std::vector<NSP> result;
     if (cache_.seg_bvh_root < 0) return result;
@@ -385,18 +258,14 @@ std::vector<NSP> BVHBroadPhase::build_ccd_candidates_for_node(
     query_bvh(cache_.seg_bvh_nodes, cache_.seg_bvh_root, node_box, hits);
 
     for (int leaf_k : hits) {
-        int seg0 = cache_.seg_leaf_to_seg0[leaf_k];
-        int seg1 = seg0 + 1;
-        if (seg1 >= total) continue;
+        const auto [seg0, seg1] = cache_.seg_leaf_edges[leaf_k];
         if (is_invalid_pair(who, seg0, seg1)) continue;
         result.push_back({who, seg0, seg1});
     }
 
-    // 2. Adjacent segments containing 'who' also sweep — scan all nodes against them
-    auto check_segment = [&](int seg0) {
-        if (!is_valid_segment_start(seg0, segment_valid)) return;
-        int seg1 = seg0 + 1;
-        AABB seg_box = build_segment_box(x, v_newton, seg0, dt, 0.0);
+    // 2. Edges containing 'who' also sweep — scan all nodes against them.
+    auto check_segment = [&](int seg0, int seg1) {
+        AABB seg_box = build_segment_box(x, v_newton, seg0, seg1, dt, 0.0);
         for (int node = 0; node < total; ++node) {
             if (is_invalid_pair(node, seg0, seg1)) continue;
             if (aabb_intersects(build_node_box(x, v_newton, node, dt, 0.0), seg_box))
@@ -404,24 +273,25 @@ std::vector<NSP> BVHBroadPhase::build_ccd_candidates_for_node(
         }
     };
 
-    check_segment(who - 1);
-    check_segment(who);
+    for (const auto& [seg0, seg1] : edges) {
+        if (seg0 == who || seg1 == who) check_segment(seg0, seg1);
+    }
 
     // Deduplicate
     std::sort(result.begin(), result.end(), [](const NSP& a, const NSP& b) {
-        return std::tie(a.node, a.seg0) < std::tie(b.node, b.seg0);
+        return std::tie(a.node, a.seg0, a.seg1) < std::tie(b.node, b.seg0, b.seg1);
     });
     result.erase(std::unique(result.begin(), result.end(), [](const NSP& a, const NSP& b) {
-        return a.node == b.node && a.seg0 == b.seg0;
+        return a.node == b.node && a.seg0 == b.seg0 && a.seg1 == b.seg1;
     }), result.end());
 
     return result;
 }
 
 std::vector<NSP> BVHBroadPhase::build_trust_region_candidates(const Vec& x, const Vec& v,
-                                                              const std::vector<char>& segment_valid,
+                                                              const std::vector<std::pair<int, int>>& edges,
                                                               double dt, double motion_pad) {
     BVHBroadPhase tmp;
-    tmp.build(x, v, segment_valid, dt, /*node_pad=*/motion_pad, /*seg_pad=*/0.0);
+    tmp.build(x, v, edges, dt, /*node_pad=*/motion_pad, /*seg_pad=*/0.0);
     return tmp.cache_.pairs;
 }

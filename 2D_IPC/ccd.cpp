@@ -132,12 +132,10 @@ namespace step_filter::ccd {
     }
 
     double safe_step_rb_rotation(const Eigen::Vector2d& x, const Eigen::Vector2d& x_com, const double& theta_n, const double& theta_new, const Eigen::Vector2d& x0, const Eigen::Vector2d& x1, const double eta) {
-        ++total_tests;
         double step;
         if (!point_segment_2d_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, step)) {
             return 1.0;
         }
-        ++total_collisions;
         return (step <= 1e-12) ? 0.0 : eta * step;
     }
 
@@ -146,13 +144,10 @@ namespace step_filter::ccd {
                      const Vec2& x2, const Vec2& dx2,
                      const Vec2& x3, const Vec2& dx3,
                      double eta) {
-        ++total_tests;
-
         double t_hit;
         if (!point_segment_2d(x1, dx1, x2, dx2, x3, dx3, t_hit))
             return 1.0;
 
-        ++total_collisions;
         return (t_hit <= 1e-12) ? 0.0 : eta * t_hit;
     }
 

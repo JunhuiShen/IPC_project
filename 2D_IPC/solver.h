@@ -1,32 +1,20 @@
 #pragma once
 
 #include "ipc_math.h"
-#include "physics.h"
-#include "chain.h"
+#include "mesh.h"
+#include "state.h"
 #include "broad_phase/broad_phase.h"
 #include <vector>
-
-struct BlockView {
-    Vec*                        x;
-    const Vec*                  xhat;
-    const Vec*                  xpin;
-    const std::vector<double>*  mass;
-    const RefMesh*              ref_mesh;
-    int                         rest_length_offset;
-    const std::vector<char>*    is_pinned;
-    int                         offset;
-
-    int size() const { return static_cast<int>(mass->size()); }
-};
 
 struct SolveResult {
     double final_residual;
     int    iterations_used;
 };
 
-SolveResult global_gauss_seidel_solver_basic(std::vector<BlockView>& blocks,
-                                              Vec& x_global, const Vec& v_vel_global,
-                                              double dt, double k, const Vec2& g_accel,
+SolveResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh,
+                                              const State2D& state,
+                                              Vec& x, const Vec& solver_velocity,
+                                              double dt, double k_spring, const Vec2& g_accel,
                                               double d_hat, double k_barrier,
                                               int max_iters, double tol_abs, double eta,
                                               double node_box_min, double node_box_max, int node_box_update_count,

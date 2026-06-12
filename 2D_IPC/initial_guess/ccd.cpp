@@ -8,7 +8,7 @@ namespace initial_guess::ccd {
 
     double global_safe_step(const Vec& x,
                             const Vec& v,
-                            const std::vector<physics::NodeSegmentPair>& pairs,
+                            const std::vector<contact::NodeSegmentPair>& pairs,
                             double dt,
                             double eta) {
         double omega = 1.0;
@@ -38,49 +38,34 @@ namespace initial_guess::ccd {
         return omega;
     }
 
-    void apply(const std::vector<BlockRef>& blocks,
-               Vec& x_combined,
-               Vec& v_combined,
-               const std::vector<char>& segment_valid,
+    void apply(const State2D& state, const RefMesh& ref_mesh,
+               Vec& xnew, Vec& solver_velocity,
                double dt,
                double eta) {
-
-        const int total = total_nodes(blocks);
-        x_combined.assign(2 * total, 0.0);
-        v_combined.assign(2 * total, 0.0);
-
-        build_x_combined_from_current_positions(x_combined, blocks);
-        build_v_combined_from_chain_velocities(v_combined, blocks);
+        xnew = state.x;
+        solver_velocity = state.v;
 
         // Broad-phase the candidate node-segment pairs with the BVH (O(n log n)).
         // Pairs whose swept AABBs don't overlap over [0, dt] cannot collide, so
         // their safe step is 1.0 and omitting them leaves omega unchanged.
         BVHBroadPhase broad_phase;
-        auto pairs = broad_phase.build_ccd_candidates(x_combined, v_combined, segment_valid, dt);
-        double omega = global_safe_step(x_combined, v_combined, pairs, dt, eta);
+        auto pairs = broad_phase.build_ccd_candidates(
+                state.x, state.v, ref_mesh.edges, dt);
+        double omega = global_safe_step(state.x, state.v, pairs, dt, eta);
 
-        for (const auto& b : blocks) {
-            Chain& c = *b.chain;
-            Vec& xnew = *b.xnew;
-            xnew = c.x;
-
-            for (int i = 0; i < c.N; ++i) {
-                Vec2 xi = get_xi(c.x, i);
-
-                if (c.is_pinned[i]) {
-                    set_xi(xnew, i, xi);
-                    continue;
-                }
-
-                Vec2 vi = get_xi(c.v, i);
-                set_xi(xnew, i, {
-                        xi.x + omega * dt * vi.x,
-                        xi.y + omega * dt * vi.y
-                });
+        for (int i = 0; i < state.size(); ++i) {
+            Vec2 xi = get_xi(state.x, i);
+            if (state.is_pinned[i]) {
+                set_xi(xnew, i, xi);
+                continue;
             }
-        }
 
-        build_x_combined_from_xnew(x_combined, blocks);
+            Vec2 vi = get_xi(state.v, i);
+            set_xi(xnew, i, {
+                    xi.x + omega * dt * vi.x,
+                    xi.y + omega * dt * vi.y
+            });
+        }
     }
 
 } // namespace initial_guess::ccd

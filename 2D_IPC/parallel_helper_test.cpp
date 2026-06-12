@@ -1,5 +1,7 @@
 #include "parallel_helper.h"
+
 #include <gtest/gtest.h>
+
 #include <algorithm>
 
 namespace {
@@ -11,20 +13,13 @@ bool has_edge(const std::vector<std::vector<int>>& graph, int a, int b) {
 }
 
 TEST(ParallelHelper, ConflictGraphContainsSpringsAndContacts) {
-    std::vector<double> mass0(3, 1.0);
-    std::vector<double> mass1(2, 1.0);
+    std::vector<std::pair<int, int>> edges{{0, 2}, {2, 4}, {1, 3}};
+    std::vector<contact::NodeSegmentPair> pairs{{0, 3, 4}};
+    auto graph = build_conflict_graph(edges, pairs, 5);
 
-    std::vector<BlockView> blocks{
-        BlockView{nullptr, nullptr, nullptr, &mass0, nullptr, 0, nullptr, 0},
-        BlockView{nullptr, nullptr, nullptr, &mass1, nullptr, 0, nullptr, 3},
-    };
-
-    std::vector<physics::NodeSegmentPair> pairs{{0, 3, 4}};
-    auto graph = build_conflict_graph(blocks, pairs, 5);
-
-    EXPECT_TRUE(has_edge(graph, 0, 1));
-    EXPECT_TRUE(has_edge(graph, 1, 2));
-    EXPECT_TRUE(has_edge(graph, 3, 4));
+    EXPECT_TRUE(has_edge(graph, 0, 2));
+    EXPECT_TRUE(has_edge(graph, 2, 4));
+    EXPECT_TRUE(has_edge(graph, 1, 3));
     EXPECT_TRUE(has_edge(graph, 0, 3));
     EXPECT_TRUE(has_edge(graph, 0, 4));
 }
@@ -50,21 +45,3 @@ TEST(ParallelHelper, GreedyColoringSeparatesNeighbors) {
             EXPECT_NE(color[v], color[u]);
     }
 }
-
-TEST(ParallelHelper, GlobalToBlockLocalMap) {
-    std::vector<double> mass0(2, 1.0);
-    std::vector<double> mass1(3, 1.0);
-
-    std::vector<BlockView> blocks{
-        BlockView{nullptr, nullptr, nullptr, &mass0, nullptr, 0, nullptr, 0},
-        BlockView{nullptr, nullptr, nullptr, &mass1, nullptr, 0, nullptr, 2},
-    };
-
-    auto map = build_global_to_block_local(blocks, 5);
-
-    EXPECT_EQ(map[0], std::make_pair(0, 0));
-    EXPECT_EQ(map[1], std::make_pair(0, 1));
-    EXPECT_EQ(map[2], std::make_pair(1, 0));
-    EXPECT_EQ(map[4], std::make_pair(1, 2));
-}
-

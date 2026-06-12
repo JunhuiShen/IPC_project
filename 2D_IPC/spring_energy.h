@@ -1,14 +1,14 @@
 #pragma once
 
 #include "ipc_math.h"
-#include <vector>
+#include "mesh.h"
 
 namespace physics {
 
-Vec2 local_spring_grad(int i, const Vec& x, double k,
-                       const std::vector<double>& rest_lengths, int rest_offset);
+Vec2 local_spring_grad(int i, const Vec& x, double k_spring,
+                       const RefMesh& ref_mesh);
 
-Mat2 local_spring_hess(int i, const Vec& x, double k,
-                       const std::vector<double>& rest_lengths, int rest_offset);
+Mat2 local_spring_hess(int i, const Vec& x, double k_spring,
+                       const RefMesh& ref_mesh);
 
 }

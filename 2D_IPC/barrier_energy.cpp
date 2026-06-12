@@ -6,11 +6,6 @@
 namespace physics {
 using namespace math;
 
-double barrier_energy(double d, double dhat) {
-    if (d >= dhat) return 0.0;
-    return -(d - dhat) * (d - dhat) * std::log(d / dhat);
-}
-
 double barrier_grad(double d, double dhat) {
     if (d >= dhat) return 0.0;
     return -2 * (d - dhat) * std::log(d / dhat) - (d - dhat) * (d - dhat) / d;

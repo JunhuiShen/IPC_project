@@ -1,7 +1,6 @@
 #pragma once
 
 #include "ipc_math.h"
-#include <cstddef>
 #include <Eigen/Dense>
 
 // ======================================================
@@ -13,15 +12,6 @@
 // ======================================================
 
 namespace step_filter::ccd {
-
-    // Global CCD statistics
-    inline std::size_t total_tests = 0;
-    inline std::size_t total_collisions = 0;
-
-    inline void reset_stats() {
-        total_tests = 0;
-        total_collisions = 0;
-    }
 
     // Low-level free functions
     bool point_segment_2d(const Vec2& x1, const Vec2& dx1,

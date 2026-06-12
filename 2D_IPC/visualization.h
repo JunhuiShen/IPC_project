@@ -26,12 +26,12 @@ void export_geo(const std::string& filename,
 
 void export_frame(const std::string& outdir,
                   int frame,
-                  const Vec& x_combined,
-                  const std::vector<std::pair<int,int>>& edges_combined,
+                  const Vec& x,
+                  const std::vector<std::pair<int,int>>& edges,
                   OutputFormat format = OutputFormat::OBJ);
 
 void export_substep_frame(const std::string& outdir,
                           int substep,
-                          const Vec& x_combined,
-                          const std::vector<std::pair<int,int>>& edges_combined,
+                          const Vec& x,
+                          const std::vector<std::pair<int,int>>& edges,
                           OutputFormat format = OutputFormat::OBJ);

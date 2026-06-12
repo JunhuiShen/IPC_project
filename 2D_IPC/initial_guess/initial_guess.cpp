@@ -8,39 +8,25 @@
 namespace initial_guess {
 
     void apply(Type initial_guess_type,
-               const std::vector<BlockRef>& blocks,
-               Vec& x_combined,
-               Vec& v_combined,
-               const std::vector<char>& segment_valid,
+               const State2D& state,
+               const RefMesh& ref_mesh,
+               Vec& xnew,
+               Vec& solver_velocity,
                double dt,
-               double d_hat,
                double eta) {
-        (void)d_hat; // currently unused by the modular initial-guess implementations
-
         if (initial_guess_type == Type::Trivial) {
-            trivial::apply(blocks, x_combined, v_combined);
+            trivial::apply(state, xnew, solver_velocity);
             return;
         }
 
         if (initial_guess_type == Type::Affine) {
-            affine::Params ap = affine::compute_affine_params_global(blocks);
-            const int total = total_nodes(blocks);
-
-            x_combined.assign(2 * total, 0.0);
-            v_combined.assign(2 * total, 0.0);
-
-            affine::build_v_combined_from_affine(v_combined, blocks, ap);
-
-            for (const auto& b : blocks) {
-                affine::apply_to_block(ap, b, dt);
-            }
-
-            build_x_combined_from_xnew(x_combined, blocks);
+            affine::Params ap = affine::compute_affine_params(state);
+            affine::apply(ap, state, xnew, solver_velocity, dt);
             return;
         }
 
         if (initial_guess_type == Type::CCD) {
-            ccd::apply(blocks, x_combined, v_combined, segment_valid, dt, eta);
+            ccd::apply(state, ref_mesh, xnew, solver_velocity, dt, eta);
             return;
         }
 

@@ -60,30 +60,30 @@ void export_geo(const std::string& filename,
 
 void export_frame(const std::string& outdir,
                   int frame,
-                  const Vec& x_combined,
-                  const std::vector<std::pair<int,int>>& edges_combined,
+                  const Vec& x,
+                  const std::vector<std::pair<int,int>>& edges,
                   OutputFormat format) {
     std::ostringstream ss;
     if (format == OutputFormat::GEO) {
         ss << outdir << "/frame_" << std::setw(4) << std::setfill('0') << frame << ".geo";
-        export_geo(ss.str(), x_combined, edges_combined);
+        export_geo(ss.str(), x, edges);
     } else {
         ss << outdir << "/frame_" << std::setw(4) << std::setfill('0') << frame << ".obj";
-        export_obj(ss.str(), x_combined, edges_combined);
+        export_obj(ss.str(), x, edges);
     }
 }
 
 void export_substep_frame(const std::string& outdir,
                           int substep,
-                          const Vec& x_combined,
-                          const std::vector<std::pair<int,int>>& edges_combined,
+                          const Vec& x,
+                          const std::vector<std::pair<int,int>>& edges,
                           OutputFormat format) {
     std::ostringstream ss;
     if (format == OutputFormat::GEO) {
         ss << outdir << "/substep_" << std::setw(4) << std::setfill('0') << substep << ".geo";
-        export_geo(ss.str(), x_combined, edges_combined);
+        export_geo(ss.str(), x, edges);
     } else {
         ss << outdir << "/substep_" << std::setw(4) << std::setfill('0') << substep << ".obj";
-        export_obj(ss.str(), x_combined, edges_combined);
+        export_obj(ss.str(), x, edges);
     }
 }

@@ -1,17 +1,12 @@
 #include "physics.h"
+#include "spring_energy.h"
 
 namespace physics {
-    using namespace math;
-
-    // ======================================================
-    // Incremental potential (no barrier)
-    // ======================================================
 
     Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat, const Vec &xpin,
-                               const std::vector<double> &mass, const std::vector<double> &L,
-                               int rest_offset,
+                               const std::vector<double> &mass, const RefMesh& ref_mesh,
                                const std::vector<char> &is_pinned,
-                               double dt, double k, const Vec2 &g_accel) {
+                               double dt, double k_spring, const Vec2 &g_accel) {
 
         Vec2 xi = get_xi(x, i), xhi = get_xi(xhat, i);
         Vec2 gi{0.0, 0.0};
@@ -19,7 +14,7 @@ namespace physics {
         gi.x += mass[i] * (xi.x - xhi.x);
         gi.y += mass[i] * (xi.y - xhi.y);
 
-        Vec2 gs = local_spring_grad(i, x, k, L, rest_offset);
+        Vec2 gs = local_spring_grad(i, x, k_spring, ref_mesh);
         gi.x += dt * dt * gs.x;
         gi.y += dt * dt * gs.y;
 
@@ -39,14 +34,13 @@ namespace physics {
 
     Mat2 local_hess_no_barrier(int i, const Vec &x,
                                const std::vector<double> &mass,
-                               const std::vector<double> &L,
-                               int rest_offset,
+                               const RefMesh& ref_mesh,
                                const std::vector<char> &is_pinned,
-                               double dt, double k) {
+                               double dt, double k_spring) {
 
         Mat2 H{mass[i], 0, 0, mass[i]};
 
-        Mat2 Hs = local_spring_hess(i, x, k, L, rest_offset);
+        Mat2 Hs = local_spring_hess(i, x, k_spring, ref_mesh);
         H.a11 += dt * dt * Hs.a11;
         H.a12 += dt * dt * Hs.a12;
         H.a21 += dt * dt * Hs.a21;
