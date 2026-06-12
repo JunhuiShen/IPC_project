@@ -1,26 +1,10 @@
 #include "ccd.h"
 #include "../ccd.h"
+#include "../broad_phase/bvh.h"
 #include <algorithm>
 #include <vector>
 
 namespace initial_guess::ccd {
-
-    static std::vector<physics::NodeSegmentPair>
-    build_all_node_segment_pairs(int total,
-                                 const std::vector<char>& segment_valid) {
-        std::vector<physics::NodeSegmentPair> pairs;
-        for (int seg0 = 0; seg0 + 1 < total; ++seg0) {
-            if (seg0 >= static_cast<int>(segment_valid.size()) || !segment_valid[seg0])
-                continue;
-
-            const int seg1 = seg0 + 1;
-            for (int node = 0; node < total; ++node) {
-                if (node == seg0 || node == seg1) continue;
-                pairs.push_back({node, seg0, seg1});
-            }
-        }
-        return pairs;
-    }
 
     double global_safe_step(const Vec& x,
                             const Vec& v,
@@ -68,7 +52,11 @@ namespace initial_guess::ccd {
         build_x_combined_from_current_positions(x_combined, blocks);
         build_v_combined_from_chain_velocities(v_combined, blocks);
 
-        auto pairs = build_all_node_segment_pairs(total, segment_valid);
+        // Broad-phase the candidate node-segment pairs with the BVH (O(n log n)).
+        // Pairs whose swept AABBs don't overlap over [0, dt] cannot collide, so
+        // their safe step is 1.0 and omitting them leaves omega unchanged.
+        BVHBroadPhase broad_phase;
+        auto pairs = broad_phase.build_ccd_candidates(x_combined, v_combined, segment_valid, dt);
         double omega = global_safe_step(x_combined, v_combined, pairs, dt, eta);
 
         for (const auto& b : blocks) {
