@@ -17,7 +17,7 @@ public:
     // Set up the persistent barrier pair cache (called once per timestep)
     virtual void initialize(const Vec& x, const Vec& v,
                             const std::vector<char>& segment_valid,
-                            double dt, double dhat) = 0;
+                            double dt, double d_hat) = 0;
 
     // Incremental update after one node moved (called per Newton step)
     virtual void refresh(const Vec& x, const Vec& v,

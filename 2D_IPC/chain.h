@@ -30,7 +30,7 @@ struct Chain {
 };
 
 // Build a uniformly-spaced chain from start to end with N nodes
-Chain make_chain(Vec2 start, Vec2 end, int N, double mass_value, double thickness=0.01);
+Chain make_chain(Vec2 start, Vec2 end, int N, double density, double thickness=0.01);
 
 std::vector<int> compute_node_offsets(const std::vector<Chain>& chains);
 RefMesh build_ref_mesh(const std::vector<Chain>& chains,

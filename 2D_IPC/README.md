@@ -123,8 +123,12 @@ Available CLI options:
 |---|---|
 | `BroadPhase` | `BVHBroadPhase` |
 | `substeps` | positive integer, default `3` |
+| `max_substep_iters` | max Gauss-Seidel iterations per substep, default `500` |
 | `step_policy` | `ccd`, `trust_region` |
 | `k_barrier` | IPC barrier stiffness multiplier, default `100` |
+| `density` | mass density, default `900` |
+| `d_hat` | IPC contact activation distance |
+| `num_frames` | number of output frames |
 | `initial_guess` | `ccd`, `affine`, `trivial`, `trust_region` (= `trivial`) |
 | `write_substeps` | boolean, writes `substep_XXXX.geo` / `.obj` |
 | `restart_frame` | frame index for `state_XXXX.bin`; `-1` disables restart |

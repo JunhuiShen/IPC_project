@@ -232,8 +232,8 @@ void BVHBroadPhase::build(const Vec& x, const Vec& v,
 
 void BVHBroadPhase::initialize(const Vec& x, const Vec& v,
                                const std::vector<char>& segment_valid,
-                               double dt, double dhat) {
-    build(x, v, segment_valid, dt, /*node_pad=*/dhat, /*seg_pad=*/0.0);
+                               double dt, double d_hat) {
+    build(x, v, segment_valid, dt, /*node_pad=*/d_hat, /*seg_pad=*/0.0);
 }
 
 void BVHBroadPhase::refresh(const Vec& x, const Vec& v,

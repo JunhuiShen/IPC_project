@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
     }
     fs::create_directories(args.outdir);
 
-    ExampleScene scene = build_example(args.get_example_type(), args.number_of_nodes, args.mass_density);
+    ExampleScene scene = build_example(args.get_example_type(), args.number_of_nodes, args.density);
     std::vector<Chain> chains = std::move(scene.chains);
     std::vector<int> offsets = compute_node_offsets(chains);
     RefMesh ref_mesh = build_ref_mesh(chains, offsets);
@@ -53,9 +53,9 @@ int main(int argc, char** argv) {
     params.k_spring = args.k_spring;
     params.k_barrier = args.k_barrier;
     params.gravity = {args.gx, args.gy};
-    params.dhat = args.dhat;
+    params.d_hat = args.d_hat;
     params.tol_abs = args.tol_abs;
-    params.max_global_iters = args.max_global_iters;
+    params.max_substep_iters = args.max_substep_iters;
     params.eta = args.eta;
     params.use_ccd_step_policy = args.use_ccd_step_policy();
     params.write_substeps = args.write_substeps;
@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
     int frames_advanced = 0;
 
     const int start_frame = restarting ? args.restart_frame + 1 : 1;
-    for (int frame = start_frame; frame <= args.total_frames; ++frame) {
+    for (int frame = start_frame; frame <= args.num_frames; ++frame) {
         auto substep_export = [&](int global_substep, const Vec& x_substep) {
             if (params.write_substeps) {
                 export_substep_frame(args.outdir, global_substep + 1, x_substep, ref_mesh.edges, output_format);

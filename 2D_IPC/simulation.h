@@ -15,9 +15,9 @@ struct SimParams2D {
     double k_spring = 1000.0;
     double k_barrier = 100.0;
     Vec2   gravity{0.0, -9.81};
-    double dhat = 0.1;
+    double d_hat = 0.005;
     double tol_abs = 1e-6;
-    int    max_global_iters = 10000;
+    int    max_substep_iters = 500;
     double eta = 0.9;
     bool   use_ccd_step_policy = true;
     bool   write_substeps = false;
@@ -101,13 +101,13 @@ inline AdvanceResult2D advance_one_frame(std::vector<Chain>& chains,
 
         std::vector<initial_guess::BlockRef> guess_blocks = make_guess_blocks();
         initial_guess::apply(params.initial_guess_type, guess_blocks, x_combined, v_combined,
-                             segment_valid, dt, params.dhat, params.eta);
+                             segment_valid, dt, params.d_hat, params.eta);
 
         std::vector<BlockView> blocks = make_solver_blocks();
         std::vector<double> res_hist;
         SolveResult sub_result = global_gauss_seidel_solver_basic(
                 blocks, x_combined, v_combined, dt, params.k_spring, params.gravity,
-                params.dhat, params.k_barrier, params.max_global_iters, params.tol_abs, params.eta,
+                params.d_hat, params.k_barrier, params.max_substep_iters, params.tol_abs, params.eta,
                 broad_phase, params.use_ccd_step_policy, &res_hist);
 
         if (aggregate.substeps_completed == 0 && !res_hist.empty()) {

@@ -13,9 +13,9 @@ namespace initial_guess {
                Vec& v_combined,
                const std::vector<char>& segment_valid,
                double dt,
-               double dhat,
+               double d_hat,
                double eta) {
-        (void)dhat; // currently unused by the modular initial-guess implementations
+        (void)d_hat; // currently unused by the modular initial-guess implementations
 
         if (initial_guess_type == Type::Trivial) {
             trivial::apply(blocks, x_combined, v_combined);

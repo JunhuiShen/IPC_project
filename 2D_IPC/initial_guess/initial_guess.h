@@ -70,6 +70,6 @@ namespace initial_guess {
                const std::vector<BlockRef>& blocks,
                Vec& x_combined, Vec& v_combined,
                const std::vector<char>& segment_valid,
-               double dt, double dhat, double eta);
+               double dt, double d_hat, double eta);
 
 } // namespace initial_guess

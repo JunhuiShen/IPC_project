@@ -65,7 +65,7 @@ class BVHBroadPhase : public BroadPhase {
 public:
     void initialize(const Vec& x, const Vec& v,
                     const std::vector<char>& segment_valid,
-                    double dt, double dhat) override;
+                    double dt, double d_hat) override;
 
     void refresh(const Vec& x, const Vec& v,
                  int moved_node,

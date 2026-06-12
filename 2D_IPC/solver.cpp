@@ -10,7 +10,7 @@ using namespace physics;
 static Vec2 compute_local_gradient(int i, const BlockView& b,
                                    double dt, double k, const Vec2& g_accel,
                                    const std::vector<NodeSegmentPair>& barrier_pairs,
-                                   double dhat, double k_barrier, const Vec& x_global) {
+                                   double d_hat, double k_barrier, const Vec& x_global) {
     Vec2 gi = local_grad_no_barrier(i, *b.x, *b.xhat, *b.xpin,
                                     *b.mass, b.ref_mesh->rest_lengths, b.rest_length_offset, *b.is_pinned,
                                     dt, k, g_accel);
@@ -20,7 +20,7 @@ static Vec2 compute_local_gradient(int i, const BlockView& b,
     for (const auto& c : barrier_pairs) {
         if (c.node != who && c.seg0 != who && c.seg1 != who) continue;
 
-        Vec2 gb = local_barrier_grad(who, x_global, c.node, c.seg0, c.seg1, dhat);
+        Vec2 gb = local_barrier_grad(who, x_global, c.node, c.seg0, c.seg1, d_hat);
         gi.x += dt * dt * k_barrier * gb.x;
         gi.y += dt * dt * k_barrier * gb.y;
     }
@@ -31,7 +31,7 @@ static Vec2 compute_local_gradient(int i, const BlockView& b,
 static Mat2 compute_local_hessian(int i, const BlockView& b,
                                   double dt, double k,
                                   const std::vector<NodeSegmentPair>& barrier_pairs,
-                                  double dhat, double k_barrier, const Vec& x_global) {
+                                  double d_hat, double k_barrier, const Vec& x_global) {
     Mat2 Hi = local_hess_no_barrier(i, *b.x, *b.mass,
                                     b.ref_mesh->rest_lengths, b.rest_length_offset,
                                     *b.is_pinned, dt, k);
@@ -41,7 +41,7 @@ static Mat2 compute_local_hessian(int i, const BlockView& b,
     for (const auto& c : barrier_pairs) {
         if (c.node != who && c.seg0 != who && c.seg1 != who) continue;
 
-        Mat2 Hb = local_barrier_hess(who, x_global, c.node, c.seg0, c.seg1, dhat);
+        Mat2 Hb = local_barrier_hess(who, x_global, c.node, c.seg0, c.seg1, d_hat);
         Hi.a11 += dt * dt * k_barrier * Hb.a11;
         Hi.a12 += dt * dt * k_barrier * Hb.a12;
         Hi.a21 += dt * dt * k_barrier * Hb.a21;
@@ -54,11 +54,11 @@ static Mat2 compute_local_hessian(int i, const BlockView& b,
 static double compute_global_residual(const BlockView& b,
                                       double dt, double k, const Vec2& g_accel,
                                       const std::vector<NodeSegmentPair>& barrier_pairs,
-                                      double dhat, double k_barrier, const Vec& x_global) {
+                                      double d_hat, double k_barrier, const Vec& x_global) {
     double r = 0.0;
 
     for (int i = 0; i < b.size(); ++i) {
-        Vec2 g = compute_local_gradient(i, b, dt, k, g_accel, barrier_pairs, dhat, k_barrier, x_global);
+        Vec2 g = compute_local_gradient(i, b, dt, k, g_accel, barrier_pairs, d_hat, k_barrier, x_global);
         const double mi = std::max((*b.mass)[i], 1e-12);
         r = std::max(r, std::max(std::abs(g.x), std::abs(g.y)) / mi);
     }
@@ -126,15 +126,15 @@ static void update_one_node(int local_i, const BlockView& b,
                             const Vec& v_vel_global,
                             const std::vector<char>& segment_valid,
                             double dt, double k, const Vec2& g_accel,
-                            double dhat, double k_barrier, double eta,
+                            double d_hat, double k_barrier, double eta,
                             bool use_ccd_step_policy) {
     Vec2 gi = compute_local_gradient(local_i, b,
                                      dt, k, g_accel,
-                                     broad_phase.pairs(), dhat, k_barrier, x_global);
+                                     broad_phase.pairs(), d_hat, k_barrier, x_global);
 
     Mat2 Hi = compute_local_hessian(local_i, b,
                                     dt, k,
-                                    broad_phase.pairs(), dhat, k_barrier, x_global);
+                                    broad_phase.pairs(), d_hat, k_barrier, x_global);
 
     Vec2 dx = matvec(mat2_inverse(Hi), gi);
 
@@ -170,7 +170,7 @@ static void update_one_node(int local_i, const BlockView& b,
 
     // Incrementally refresh the persistent barrier broad phase
     broad_phase.refresh(x_global, v_vel_global, who,
-                        dt, /*node_pad=*/dhat, /*seg_pad=*/0.0);
+                        dt, /*node_pad=*/d_hat, /*seg_pad=*/0.0);
 }
 
 // ======================================================
@@ -180,7 +180,7 @@ static void update_one_node(int local_i, const BlockView& b,
 SolveResult global_gauss_seidel_solver_basic(std::vector<BlockView>& blocks,
                                               Vec& x_global, const Vec& v_vel_global,
                                               double dt, double k, const Vec2& g_accel,
-                                              double dhat, double k_barrier,
+                                              double d_hat, double k_barrier,
                                               int max_iters, double tol_abs, double eta,
                                               BroadPhase& broad_phase, bool use_ccd_step_policy,
                                               std::vector<double>* residual_history) {
@@ -195,7 +195,7 @@ SolveResult global_gauss_seidel_solver_basic(std::vector<BlockView>& blocks,
     }
 
     // Persistent barrier cache
-    broad_phase.initialize(x_global, v_vel_global, segment_valid, dt, dhat);
+    broad_phase.initialize(x_global, v_vel_global, segment_valid, dt, d_hat);
 
     if (residual_history) residual_history->clear();
 
@@ -204,7 +204,7 @@ SolveResult global_gauss_seidel_solver_basic(std::vector<BlockView>& blocks,
         for (const auto& b : blocks) {
             r = std::max(r, compute_global_residual(
                     b, dt, k, g_accel,
-                    broad_phase.pairs(), dhat, k_barrier, x_global
+                    broad_phase.pairs(), d_hat, k_barrier, x_global
             ));
         }
         return r;
@@ -221,7 +221,7 @@ SolveResult global_gauss_seidel_solver_basic(std::vector<BlockView>& blocks,
             for (int i = 0; i < b.size(); ++i) {
                 update_one_node(i, b, x_global, broad_phase, v_vel_global,
                                 segment_valid,
-                                dt, k, g_accel, dhat, k_barrier, eta, use_ccd_step_policy);
+                                dt, k, g_accel, d_hat, k_barrier, eta, use_ccd_step_policy);
             }
         }
 

@@ -12,4 +12,4 @@ struct ExampleScene {
     std::vector<Chain> chains;
 };
 
-ExampleScene build_example(ExampleType example_type, int number_of_nodes, double mass_density);
+ExampleScene build_example(ExampleType example_type, int number_of_nodes, double density);
