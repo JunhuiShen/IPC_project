@@ -26,6 +26,7 @@ build_conflict_graph(const std::vector<std::pair<int, int>>& edges,
     }
 
     for (const auto& pair : contact_pairs) {
+        // A node-segment barrier couples all three participating nodes.
         add_graph_edge(graph, pair.node, pair.seg0);
         add_graph_edge(graph, pair.node, pair.seg1);
         add_graph_edge(graph, pair.seg0, pair.seg1);

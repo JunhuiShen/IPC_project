@@ -84,3 +84,87 @@ TEST(BVH, SupportsNonconsecutiveEdgeEndpoints) {
     EXPECT_EQ(bp.pairs()[0].seg0, 0);
     EXPECT_EQ(bp.pairs()[0].seg1, 3);
 }
+
+TEST(BVH, RegistersBlueGreenIntersection) {
+    BVHBroadPhase bp;
+    Vec x = {
+        0.0, 0.0,
+        2.0, 0.0,
+        1.0, 0.35,
+    };
+    std::vector<std::pair<int, int>> edges = {{0, 1}};
+    std::vector<double> radii = {0.0, 0.0, 0.1};
+
+    // The segment red box lies at y=0. Its green box reaches y=0.3 after
+    // augmentation, while node 2's blue box reaches down to y=0.25.
+    bp.initialize_node_radii(x, edges, radii, 0.3);
+
+    ASSERT_EQ(bp.pairs().size(), 1u);
+    EXPECT_EQ(bp.pairs()[0].node, 2);
+    EXPECT_EQ(bp.pairs()[0].seg0, 0);
+    EXPECT_EQ(bp.pairs()[0].seg1, 1);
+}
+
+TEST(BVH, StoresExplicitBlueRedGreenBoxes) {
+    BVHBroadPhase bp;
+    Vec x = {
+        0.0, 0.0,
+        2.0, 1.0,
+        1.0, 3.0,
+    };
+    std::vector<std::pair<int, int>> edges = {{0, 1}};
+    std::vector<double> radii = {0.25, 0.5, 0.1};
+
+    bp.initialize_node_radii(x, edges, radii, 0.2);
+    const auto& cache = bp.cache();
+
+    ASSERT_EQ(cache.blue_boxes.size(), 3u);
+    ASSERT_EQ(cache.red_segment_boxes.size(), 1u);
+    ASSERT_EQ(cache.green_segment_boxes.size(), 1u);
+
+    EXPECT_DOUBLE_EQ(cache.blue_boxes[0].min.x, -0.25);
+    EXPECT_DOUBLE_EQ(cache.blue_boxes[0].max.y, 0.25);
+
+    EXPECT_DOUBLE_EQ(cache.red_segment_boxes[0].min.x, -0.25);
+    EXPECT_DOUBLE_EQ(cache.red_segment_boxes[0].min.y, -0.25);
+    EXPECT_DOUBLE_EQ(cache.red_segment_boxes[0].max.x, 2.5);
+    EXPECT_DOUBLE_EQ(cache.red_segment_boxes[0].max.y, 1.5);
+
+    EXPECT_DOUBLE_EQ(cache.green_segment_boxes[0].min.x, -0.45);
+    EXPECT_DOUBLE_EQ(cache.green_segment_boxes[0].min.y, -0.45);
+    EXPECT_DOUBLE_EQ(cache.green_segment_boxes[0].max.x, 2.7);
+    EXPECT_DOUBLE_EQ(cache.green_segment_boxes[0].max.y, 1.7);
+}
+
+TEST(BVH, RejectsSeparatedBlueGreenBoxes) {
+    BVHBroadPhase bp;
+    Vec x = {
+        0.0, 0.0,
+        2.0, 0.0,
+        1.0, 0.41,
+    };
+    std::vector<std::pair<int, int>> edges = {{0, 1}};
+    std::vector<double> radii = {0.0, 0.0, 0.1};
+
+    // Green ends at y=0.3 and node 2's blue box starts at y=0.31.
+    bp.initialize_node_radii(x, edges, radii, 0.3);
+
+    EXPECT_TRUE(bp.pairs().empty());
+}
+
+TEST(BVH, RegistersBoxesTouchingAtBoundary) {
+    BVHBroadPhase bp;
+    Vec x = {
+        0.0, 0.0,
+        2.0, 0.0,
+        1.0, 0.5,
+    };
+    std::vector<std::pair<int, int>> edges = {{0, 1}};
+    std::vector<double> radii = {0.0, 0.0, 0.25};
+
+    // Both boxes include y=0.25, so the inclusive AABB test registers the pair.
+    bp.initialize_node_radii(x, edges, radii, 0.25);
+
+    ASSERT_EQ(bp.pairs().size(), 1u);
+    EXPECT_EQ(bp.pairs()[0].node, 2);
+}

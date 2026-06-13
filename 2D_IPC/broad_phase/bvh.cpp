@@ -114,25 +114,27 @@ static inline AABB build_segment_box(const Vec& x, const Vec& v,
     );
 }
 
-static inline AABB build_segment_box_from_node_boxes(const std::vector<AABB>& node_boxes,
-                                                     int seg0, int seg1, double pad) {
-    AABB box = node_boxes[seg0];
-    box.expand(node_boxes[seg1]);
-    box.min.x -= pad;
-    box.min.y -= pad;
-    box.max.x += pad;
-    box.max.y += pad;
-    return box;
+static inline AABB build_segment_red_box(const std::vector<AABB>& blue_boxes,
+                                         int seg0, int seg1) {
+    AABB red_box = blue_boxes[seg0];
+    red_box.expand(blue_boxes[seg1]);
+    return red_box;
+}
+
+static inline AABB augment_box(const AABB& box, double pad) {
+    return AABB(
+            Vec2(box.min.x - pad, box.min.y - pad),
+            Vec2(box.max.x + pad, box.max.y + pad));
 }
 
 static inline void query_node(Cache& c, int node) {
-    if (c.seg_bvh_root < 0) return;
+    if (c.green_bvh_root < 0) return;
 
     std::vector<int> hits;
-    query_bvh(c.seg_bvh_nodes, c.seg_bvh_root, c.node_boxes[node], hits);
+    query_bvh(c.green_bvh_nodes, c.green_bvh_root, c.blue_boxes[node], hits);
 
     for (int leaf_k : hits) {
-        const auto [seg0, seg1] = c.seg_leaf_edges[leaf_k];
+        const auto [seg0, seg1] = c.segment_leaf_edges[leaf_k];
         if (is_invalid_pair(node, seg0, seg1)) continue;
         c.pairs.push_back({node, seg0, seg1});
     }
@@ -148,19 +150,23 @@ void BVHBroadPhase::build(const Vec& x, const Vec& v,
     Cache c;
     const int total = static_cast<int>(x.size() / 2);
 
-    c.node_boxes.resize(total);
-    std::vector<AABB> segment_boxes;
+    c.blue_boxes.resize(total);
+    c.red_segment_boxes.reserve(edges.size());
+    c.green_segment_boxes.reserve(edges.size());
 
     for (int i = 0; i < total; ++i)
-        c.node_boxes[i] = build_node_box(x, v, i, dt, node_pad);
+        c.blue_boxes[i] = build_node_box(x, v, i, dt, node_pad);
 
     for (int e = 0; e < static_cast<int>(edges.size()); ++e) {
         const auto [seg0, seg1] = edges[e];
-        c.seg_leaf_edges.push_back(edges[e]);
-        segment_boxes.push_back(build_segment_box(x, v, seg0, seg1, dt, seg_pad));
+        c.segment_leaf_edges.push_back(edges[e]);
+
+        const AABB red_box = build_segment_box(x, v, seg0, seg1, dt, 0.0);
+        c.red_segment_boxes.push_back(red_box);
+        c.green_segment_boxes.push_back(augment_box(red_box, seg_pad));
     }
 
-    c.seg_bvh_root = build_bvh(segment_boxes, c.seg_bvh_nodes);
+    c.green_bvh_root = build_bvh(c.green_segment_boxes, c.green_bvh_nodes);
 
     for (int i = 0; i < total; ++i)
         query_node(c, i);
@@ -175,22 +181,25 @@ void BVHBroadPhase::build_from_node_radii(const Vec& x,
     Cache c;
     const int total = static_cast<int>(x.size() / 2);
 
-    c.node_boxes.resize(total);
-    std::vector<AABB> segment_boxes;
+    c.blue_boxes.resize(total);
+    c.red_segment_boxes.reserve(edges.size());
+    c.green_segment_boxes.reserve(edges.size());
 
     for (int i = 0; i < total; ++i) {
         const double r = (i < static_cast<int>(node_radii.size())) ? node_radii[i] : 0.0;
-        c.node_boxes[i] = build_node_box_from_radius(x, i, r);
+        c.blue_boxes[i] = build_node_box_from_radius(x, i, r);
     }
 
     for (int e = 0; e < static_cast<int>(edges.size()); ++e) {
         const auto [seg0, seg1] = edges[e];
-        c.seg_leaf_edges.push_back(edges[e]);
-        segment_boxes.push_back(
-                build_segment_box_from_node_boxes(c.node_boxes, seg0, seg1, d_hat));
+        c.segment_leaf_edges.push_back(edges[e]);
+
+        const AABB red_box = build_segment_red_box(c.blue_boxes, seg0, seg1);
+        c.red_segment_boxes.push_back(red_box);
+        c.green_segment_boxes.push_back(augment_box(red_box, d_hat));
     }
 
-    c.seg_bvh_root = build_bvh(segment_boxes, c.seg_bvh_nodes);
+    c.green_bvh_root = build_bvh(c.green_segment_boxes, c.green_bvh_nodes);
 
     for (int i = 0; i < total; ++i)
         query_node(c, i);
@@ -210,10 +219,10 @@ const std::vector<NSP>& BVHBroadPhase::pairs() const {
 }
 
 double BVHBroadPhase::node_box_safe_step(int node, const Vec2& x0, const Vec2& displacement) const {
-    if (node < 0 || node >= static_cast<int>(cache_.node_boxes.size()))
+    if (node < 0 || node >= static_cast<int>(cache_.blue_boxes.size()))
         return 1.0;
 
-    const AABB& box = cache_.node_boxes[node];
+    const AABB& box = cache_.blue_boxes[node];
     constexpr double eps = 1.0e-12;
     double alpha = 1.0;
 
@@ -248,17 +257,17 @@ std::vector<NSP> BVHBroadPhase::build_ccd_candidates_for_node(
         const std::vector<std::pair<int, int>>& edges, double dt) {
 
     std::vector<NSP> result;
-    if (cache_.seg_bvh_root < 0) return result;
+    if (cache_.green_bvh_root < 0) return result;
 
     const int total = static_cast<int>(x.size() / 2);
 
     // 1. Node 'who' sweeps — query segment BVH for intersecting segments
     AABB node_box = build_node_box(x, v_newton, who, dt, 0.0);
     std::vector<int> hits;
-    query_bvh(cache_.seg_bvh_nodes, cache_.seg_bvh_root, node_box, hits);
+    query_bvh(cache_.green_bvh_nodes, cache_.green_bvh_root, node_box, hits);
 
     for (int leaf_k : hits) {
-        const auto [seg0, seg1] = cache_.seg_leaf_edges[leaf_k];
+        const auto [seg0, seg1] = cache_.segment_leaf_edges[leaf_k];
         if (is_invalid_pair(who, seg0, seg1)) continue;
         result.push_back({who, seg0, seg1});
     }

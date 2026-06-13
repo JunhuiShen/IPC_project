@@ -49,8 +49,7 @@ void query_bvh  (const std::vector<BVHNode>& nodes, int nodeIdx,
 // ======================================================
 // BVHBroadPhase — BVH-based implementation of BroadPhase
 //
-// Builds BVHs over segment AABBs and supports O(log n)
-// node queries.
+// Builds a BVH over green segment AABBs and queries it with blue node AABBs.
 // ======================================================
 
 class BVHBroadPhase : public BroadPhase {
@@ -80,14 +79,18 @@ public:
                                   double dt, double motion_pad) override;
 
     struct Cache {
-        std::vector<AABB> node_boxes;
+        std::vector<AABB> blue_boxes;
+        std::vector<AABB> red_segment_boxes;
+        std::vector<AABB> green_segment_boxes;
 
-        std::vector<std::pair<int, int>> seg_leaf_edges;
-        std::vector<BVHNode> seg_bvh_nodes;
-        int                  seg_bvh_root = -1;
+        std::vector<std::pair<int, int>> segment_leaf_edges;
+        std::vector<BVHNode> green_bvh_nodes;
+        int                  green_bvh_root = -1;
 
         std::vector<contact::NodeSegmentPair> pairs;
     };
+
+    const Cache& cache() const { return cache_; }
 
 private:
     Cache cache_;

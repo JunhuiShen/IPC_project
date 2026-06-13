@@ -5,8 +5,6 @@
 #include "parallel_helper.h"
 #include "physics.h"
 #include <algorithm>
-#include <set>
-#include <tuple>
 
 using namespace math;
 using namespace physics;
@@ -193,8 +191,6 @@ SolveResult global_gauss_seidel_solver_basic(
         prev_disp.assign(total_nodes, node_box_max);
 
     std::vector<std::vector<int>> color_groups;
-    std::vector<NodeSegmentPair> conflict_pairs;
-    std::set<std::tuple<int, int, int>> conflict_pair_keys;
 
     auto update_prev_disp = [&]() {
         for (int i = 0; i < total_nodes; ++i) {
@@ -206,20 +202,15 @@ SolveResult global_gauss_seidel_solver_basic(
         std::vector<double> node_radii(total_nodes, node_box_min);
         constexpr double node_box_padding = 1.2;
         for (int i = 0; i < total_nodes; ++i) {
-            const double inertial = norm(get_xi(solver_velocity, i)) * dt;
-            const double raw = std::max(prev_disp[i], inertial) * node_box_padding;
+            const double raw = prev_disp[i] * node_box_padding;
             node_radii[i] = std::clamp(raw, node_box_min, node_box_max);
         }
 
         broad_phase.initialize_node_radii(x, ref_mesh.edges, node_radii, d_hat);
 
-        for (const NodeSegmentPair& p : broad_phase.pairs()) {
-            if (conflict_pair_keys.emplace(p.node, p.seg0, p.seg1).second)
-                conflict_pairs.push_back(p);
-        }
-
+        // Rebuild colors from current elastic and contact coupling.
         const auto graph = build_conflict_graph(
-                ref_mesh.edges, conflict_pairs, total_nodes);
+                ref_mesh.edges, broad_phase.pairs(), total_nodes);
         color_groups = greedy_color_conflict_graph(graph);
     };
 
