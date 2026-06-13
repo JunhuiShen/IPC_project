@@ -130,7 +130,7 @@ static double compute_trust_region_safe_step(
 
 static NodeUpdate compute_node_update(
         int who, const RefMesh& ref_mesh, const State2D& state,
-        const Vec& x, BroadPhase& broad_phase, const Vec& solver_velocity,
+        const Vec& x, BroadPhase& broad_phase,
         double dt, double k_spring, const Vec2& g_accel,
         double d_hat, double k_barrier, double eta,
         bool use_ccd_step_policy) {
@@ -146,7 +146,7 @@ static NodeUpdate compute_node_update(
     Vec2 displacement{-dx.x, -dx.y};
     double omega = broad_phase.node_box_safe_step(who, xi, displacement);
 
-    Vec v_newton(solver_velocity.size(), 0.0);
+    Vec v_newton(x.size(), 0.0);
     set_xi(v_newton, who, {-dx.x / dt, -dx.y / dt});
 
     std::vector<NodeSegmentPair> filtering_candidates;
@@ -176,7 +176,7 @@ static void commit_node_update(const NodeUpdate& update, Vec& x) {
 
 SolveResult global_gauss_seidel_solver_basic(
         const RefMesh& ref_mesh, const State2D& state,
-        Vec& x, const Vec& solver_velocity,
+        Vec& x,
         double dt, double k_spring, const Vec2& g_accel,
         double d_hat, double k_barrier,
         int max_iters, double tol_abs, double eta,
@@ -242,7 +242,7 @@ SolveResult global_gauss_seidel_solver_basic(
             #pragma omp parallel for if(use_parallel && group.size() > 1)
             for (int idx = 0; idx < static_cast<int>(group.size()); ++idx) {
                 updates[idx] = compute_node_update(
-                        group[idx], ref_mesh, state, x, broad_phase, solver_velocity,
+                        group[idx], ref_mesh, state, x, broad_phase,
                         dt, k_spring, g_accel, d_hat, k_barrier, eta,
                         use_ccd_step_policy);
             }

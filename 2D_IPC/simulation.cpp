@@ -16,14 +16,13 @@ AdvanceResult2D advance_one_frame(
         build_xhat(state.xhat, state.x, state.v, dt);
 
         Vec xnew;
-        Vec solver_velocity;
         initial_guess::apply(
                 params.initial_guess_type, state, ref_mesh,
-                xnew, solver_velocity, dt, params.eta);
+                xnew, dt, params.eta);
 
         std::vector<double> residual_history;
         const SolveResult substep_result = global_gauss_seidel_solver_basic(
-                ref_mesh, state, xnew, solver_velocity,
+                ref_mesh, state, xnew,
                 dt, params.k_spring, params.gravity,
                 params.d_hat, params.k_barrier,
                 params.max_substep_iters, params.tol_abs, params.eta,

@@ -11,22 +11,21 @@ namespace initial_guess {
                const State2D& state,
                const RefMesh& ref_mesh,
                Vec& xnew,
-               Vec& solver_velocity,
                double dt,
                double eta) {
         if (initial_guess_type == Type::Trivial) {
-            trivial::apply(state, xnew, solver_velocity);
+            trivial::apply(state, xnew);
             return;
         }
 
         if (initial_guess_type == Type::Affine) {
             affine::Params ap = affine::compute_affine_params(state);
-            affine::apply(ap, state, xnew, solver_velocity, dt);
+            affine::apply(ap, state, xnew, dt);
             return;
         }
 
         if (initial_guess_type == Type::CCD) {
-            ccd::apply(state, ref_mesh, xnew, solver_velocity, dt, eta);
+            ccd::apply(state, ref_mesh, xnew, dt, eta);
             return;
         }
 

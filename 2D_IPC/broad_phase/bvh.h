@@ -99,8 +99,4 @@ private:
                const std::vector<std::pair<int, int>>& edges,
                double dt, double node_pad, double seg_pad);
 
-    void build_from_node_radii(const Vec& x,
-                               const std::vector<std::pair<int, int>>& edges,
-                               const std::vector<double>& node_radii,
-                               double d_hat);
 };

@@ -39,11 +39,10 @@ namespace initial_guess::ccd {
     }
 
     void apply(const State2D& state, const RefMesh& ref_mesh,
-               Vec& xnew, Vec& solver_velocity,
+               Vec& xnew,
                double dt,
                double eta) {
         xnew = state.x;
-        solver_velocity = state.v;
 
         // Broad-phase the candidate node-segment pairs with the BVH (O(n log n)).
         // Pairs whose swept AABBs don't overlap over [0, dt] cannot collide, so

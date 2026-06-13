@@ -61,9 +61,8 @@ namespace initial_guess::affine {
     }
 
     void apply(const Params& ap, const State2D& state,
-               Vec& xnew, Vec& solver_velocity, double dt) {
+               Vec& xnew, double dt) {
         xnew = state.x;
-        solver_velocity.assign(state.v.size(), 0.0);
 
         for (int i = 0; i < state.size(); ++i) {
             Vec2 xi = get_xi(state.x, i);
@@ -74,7 +73,6 @@ namespace initial_guess::affine {
             }
 
             Vec2 v_aff = velocity_at(ap, xi);
-            set_xi(solver_velocity, i, v_aff);
             set_xi(xnew, i, {xi.x + dt * v_aff.x, xi.y + dt * v_aff.y});
         }
     }

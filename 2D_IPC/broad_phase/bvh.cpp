@@ -8,61 +8,79 @@ using NSP   = contact::NodeSegmentPair;
 // BVH tree — build and query
 // ======================================================
 
-static int build_recursive(std::vector<BVHNode>& nodes,
-                           const std::vector<AABB>& boxes,
-                           std::vector<int>& indices, int start, int end) {
-    int nodeIdx = static_cast<int>(nodes.size());
-    nodes.emplace_back();
-
-    AABB nodeBox;
-    for (int i = start; i < end; ++i) nodeBox.expand(boxes[indices[i]]);
-    nodes[nodeIdx].bbox = nodeBox;
-
-    int count = end - start;
-    if (count == 1) {
-        nodes[nodeIdx].leafIndex = indices[start];
-        return nodeIdx;
-    }
-
-    Vec2 e = nodeBox.extent();
-    int axis = (e.y > e.x) ? 1 : 0;
-
-    int mid = start + count / 2;
-    auto cmp = [&](int a, int b) {
-        Vec2 ca = boxes[a].centroid(), cb = boxes[b].centroid();
-        return axis == 0 ? ca.x < cb.x : ca.y < cb.y;
-    };
-    std::nth_element(indices.begin() + start, indices.begin() + mid, indices.begin() + end, cmp);
-
-    int left  = build_recursive(nodes, boxes, indices, start, mid);
-    int right = build_recursive(nodes, boxes, indices, mid, end);
-    nodes[nodeIdx].left  = left;
-    nodes[nodeIdx].right = right;
-    return nodeIdx;
-}
-
 int build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out) {
     out.clear();
     if (boxes.empty()) return -1;
 
-    std::vector<int> idx(boxes.size());
+    std::vector<int> indices(boxes.size());
     for (size_t i = 0; i < boxes.size(); ++i)
-        idx[i] = static_cast<int>(i);
+        indices[i] = static_cast<int>(i);
 
-    return build_recursive(out, boxes, idx, 0, static_cast<int>(idx.size()));
+    struct BuildTask {
+        int node;
+        int start;
+        int end;
+    };
+
+    out.reserve(2 * boxes.size() - 1);
+    out.emplace_back();
+
+    std::vector<BuildTask> stack;
+    stack.push_back({0, 0, static_cast<int>(indices.size())});
+
+    while (!stack.empty()) {
+        const BuildTask task = stack.back();
+        stack.pop_back();
+
+        AABB node_box;
+        for (int i = task.start; i < task.end; ++i)
+            node_box.expand(boxes[indices[i]]);
+        out[task.node].bbox = node_box;
+
+        const int count = task.end - task.start;
+        if (count == 1) {
+            out[task.node].leafIndex = indices[task.start];
+            continue;
+        }
+
+        const Vec2 extent = node_box.extent();
+        const int axis = (extent.y > extent.x) ? 1 : 0;
+        const int mid = task.start + count / 2;
+        auto compare_centroid = [&](int a, int b) {
+            const Vec2 ca = boxes[a].centroid();
+            const Vec2 cb = boxes[b].centroid();
+            return axis == 0 ? ca.x < cb.x : ca.y < cb.y;
+        };
+        std::nth_element(
+                indices.begin() + task.start,
+                indices.begin() + mid,
+                indices.begin() + task.end,
+                compare_centroid);
+
+        const int left = static_cast<int>(out.size());
+        out.emplace_back();
+        const int right = static_cast<int>(out.size());
+        out.emplace_back();
+        out[task.node].left = left;
+        out[task.node].right = right;
+
+        stack.push_back({right, mid, task.end});
+        stack.push_back({left, task.start, mid});
+    }
+
+    return 0;
 }
 
 void query_bvh(const std::vector<BVHNode>& nodes, int nodeIdx,
                const AABB& query, std::vector<int>& hits) {
     if (nodeIdx < 0) return;
 
-    // iterative stack-based traversal
-    int stack[64];
-    int top = 0;
-    stack[top++] = nodeIdx;
+    std::vector<int> stack;
+    stack.push_back(nodeIdx);
 
-    while (top > 0) {
-        const BVHNode& n = nodes[stack[--top]];
+    while (!stack.empty()) {
+        const BVHNode& n = nodes[stack.back()];
+        stack.pop_back();
         if (!aabb_intersects(n.bbox, query)) continue;
 
         if (n.leafIndex >= 0) {
@@ -70,8 +88,8 @@ void query_bvh(const std::vector<BVHNode>& nodes, int nodeIdx,
             continue;
         }
 
-        stack[top++] = n.left;
-        stack[top++] = n.right;
+        stack.push_back(n.left);
+        stack.push_back(n.right);
     }
 }
 
@@ -174,10 +192,11 @@ void BVHBroadPhase::build(const Vec& x, const Vec& v,
     cache_ = std::move(c);
 }
 
-void BVHBroadPhase::build_from_node_radii(const Vec& x,
-                                          const std::vector<std::pair<int, int>>& edges,
-                                          const std::vector<double>& node_radii,
-                                          double d_hat) {
+void BVHBroadPhase::initialize_node_radii(
+        const Vec& x,
+        const std::vector<std::pair<int, int>>& edges,
+        const std::vector<double>& node_radii,
+        double d_hat) {
     Cache c;
     const int total = static_cast<int>(x.size() / 2);
 
@@ -205,13 +224,6 @@ void BVHBroadPhase::build_from_node_radii(const Vec& x,
         query_node(c, i);
 
     cache_ = std::move(c);
-}
-
-void BVHBroadPhase::initialize_node_radii(const Vec& x,
-                                          const std::vector<std::pair<int, int>>& edges,
-                                          const std::vector<double>& node_radii,
-                                          double d_hat) {
-    build_from_node_radii(x, edges, node_radii, d_hat);
 }
 
 const std::vector<NSP>& BVHBroadPhase::pairs() const {

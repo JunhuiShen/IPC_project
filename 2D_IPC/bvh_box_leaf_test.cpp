@@ -53,6 +53,33 @@ TEST(BVH, BuildAndQuery) {
 
 }
 
+TEST(BVH, IterativeBuildHandlesManyBoxes) {
+    constexpr int box_count = 4096;
+    std::vector<AABB> boxes;
+    boxes.reserve(box_count);
+    for (int i = 0; i < box_count; ++i) {
+        const double x = static_cast<double>(i);
+        boxes.emplace_back(Vec2(x, -1.0), Vec2(x + 0.5, 1.0));
+    }
+
+    std::vector<BVHNode> nodes;
+    const int root = build_bvh(boxes, nodes);
+
+    ASSERT_EQ(root, 0);
+    ASSERT_EQ(nodes.size(), 2u * boxes.size() - 1u);
+
+    std::vector<int> hits;
+    query_bvh(
+            nodes, root,
+            AABB(Vec2(-1.0, -2.0), Vec2(box_count + 1.0, 2.0)),
+            hits);
+    std::sort(hits.begin(), hits.end());
+
+    ASSERT_EQ(hits.size(), boxes.size());
+    for (int i = 0; i < box_count; ++i)
+        EXPECT_EQ(hits[i], i);
+}
+
 TEST(BVH, NodeBoxSafeStepClipsToBox) {
     BVHBroadPhase bp;
     Vec x = {0.0, 0.0, 1.0, 0.0};

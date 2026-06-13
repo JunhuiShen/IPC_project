@@ -24,6 +24,6 @@ namespace initial_guess::affine {
     Params compute_affine_params(const State2D& state);
     Vec2   velocity_at(const Params& ap, const Vec2& x);
     void   apply(const Params& ap, const State2D& state,
-                 Vec& xnew, Vec& solver_velocity, double dt);
+                 Vec& xnew, double dt);
 
 } // namespace initial_guess::affine

@@ -24,7 +24,7 @@ namespace initial_guess::ccd {
                             double eta = 0.9);
 
     void apply(const State2D& state, const RefMesh& ref_mesh,
-               Vec& xnew, Vec& solver_velocity,
+               Vec& xnew,
                double dt,
                double eta);
 

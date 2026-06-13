@@ -18,7 +18,7 @@ namespace initial_guess {
 
     void apply(Type initial_guess_type,
                const State2D& state, const RefMesh& ref_mesh,
-               Vec& xnew, Vec& solver_velocity,
+               Vec& xnew,
                double dt, double eta);
 
 } // namespace initial_guess

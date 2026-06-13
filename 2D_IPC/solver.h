@@ -13,7 +13,7 @@ struct SolveResult {
 
 SolveResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh,
                                               const State2D& state,
-                                              Vec& x, const Vec& solver_velocity,
+                                              Vec& x,
                                               double dt, double k_spring, const Vec2& g_accel,
                                               double d_hat, double k_barrier,
                                               int max_iters, double tol_abs, double eta,
