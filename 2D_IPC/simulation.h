@@ -24,7 +24,7 @@ struct SimParams2D {
     double node_box_max = 0.01;
     int    node_box_update_count = 1;
     bool   use_ccd_step_policy = true;
-    initial_guess::Type initial_guess_type = initial_guess::Type::CCD;
+    InitialGuessType initial_guess_type = InitialGuessType::CCD;
 
     double substep_dt() const {
         return frame_dt / static_cast<double>(std::max(1, substeps));

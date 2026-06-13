@@ -1,9 +1,6 @@
 #include "spring_energy.h"
 #include <cmath>
 
-namespace physics {
-using namespace math;
-
 Vec2 local_spring_grad(int i, const Vec& x, double k_spring,
                        const RefMesh& ref_mesh) {
     Vec2 g_i{0.0, 0.0};
@@ -52,6 +49,4 @@ Mat2 local_spring_hess(int i, const Vec& x, double k_spring,
     }
 
     return H_ii;
-}
-
 }

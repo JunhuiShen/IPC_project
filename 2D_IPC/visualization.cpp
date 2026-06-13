@@ -4,8 +4,6 @@
 #include <iomanip>
 #include <iostream>
 
-using namespace math;
-
 void export_obj(const std::string& filename,
                 const Vec& x,
                 const std::vector<std::pair<int,int>>& edges) {

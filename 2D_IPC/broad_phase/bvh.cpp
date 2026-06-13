@@ -2,7 +2,7 @@
 #include <algorithm>
 
 using Cache = BVHBroadPhase::Cache;
-using NSP   = contact::NodeSegmentPair;
+using NSP   = NodeSegmentPair;
 
 // ======================================================
 // BVH tree — build and query

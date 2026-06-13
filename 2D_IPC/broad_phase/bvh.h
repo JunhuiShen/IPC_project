@@ -59,21 +59,21 @@ public:
                                const std::vector<double>& node_radii,
                                double d_hat) override;
 
-    const std::vector<contact::NodeSegmentPair>& pairs() const override;
+    const std::vector<NodeSegmentPair>& pairs() const override;
 
     double node_box_safe_step(int node, const Vec2& x0, const Vec2& displacement) const override;
 
-    std::vector<contact::NodeSegmentPair>
+    std::vector<NodeSegmentPair>
     build_ccd_candidates(const Vec& x, const Vec& v,
                          const std::vector<std::pair<int, int>>& edges,
                          double dt) override;
 
-    std::vector<contact::NodeSegmentPair>
+    std::vector<NodeSegmentPair>
     build_ccd_candidates_for_node(int who, const Vec& x, const Vec& v_newton,
                                   const std::vector<std::pair<int, int>>& edges,
                                   double dt) override;
 
-    std::vector<contact::NodeSegmentPair>
+    std::vector<NodeSegmentPair>
     build_trust_region_candidates(const Vec& x, const Vec& v,
                                   const std::vector<std::pair<int, int>>& edges,
                                   double dt, double motion_pad) override;
@@ -87,7 +87,7 @@ public:
         std::vector<BVHNode> green_bvh_nodes;
         int                  green_bvh_root = -1;
 
-        std::vector<contact::NodeSegmentPair> pairs;
+        std::vector<NodeSegmentPair> pairs;
     };
 
     const Cache& cache() const { return cache_; }

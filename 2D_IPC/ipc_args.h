@@ -96,11 +96,11 @@ struct IPCArgs : ArgParser {
         return OutputFormat::GEO;
     }
 
-    initial_guess::Type get_initial_guess_type() const {
-        if (initial_guess_type == "trust_region") return initial_guess::Type::Trivial;
-        if (initial_guess_type == "trivial")      return initial_guess::Type::Trivial;
-        if (initial_guess_type == "affine")       return initial_guess::Type::Affine;
-        return initial_guess::Type::CCD;
+    InitialGuessType get_initial_guess_type() const {
+        if (initial_guess_type == "trust_region") return InitialGuessType::Trivial;
+        if (initial_guess_type == "trivial")      return InitialGuessType::Trivial;
+        if (initial_guess_type == "affine")       return InitialGuessType::Affine;
+        return InitialGuessType::CCD;
     }
 
     // Returns true if step policy is CCD (false = TrustRegion)

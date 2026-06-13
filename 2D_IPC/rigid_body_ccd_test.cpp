@@ -5,8 +5,6 @@
 #include "ccd.h"
 #include <random>
 
-using namespace step_filter::ccd;
-
 TEST(CCD, PointSegmentTranslation_Frame69EndpointHit) {
     Vec2 x1{0.02664057288132943, -3.0406644634341644};
     Vec2 dx1{-0.15774506361863982, 0.006790619555892387};
@@ -18,7 +16,7 @@ TEST(CCD, PointSegmentTranslation_Frame69EndpointHit) {
     double t = -1.0;
     EXPECT_TRUE(point_segment_2d(x1, dx1, x2, dx2, x3, dx3, t));
     EXPECT_NEAR(t, 0.16888371826160567, 1e-10);
-    EXPECT_NEAR(safe_step(x1, dx1, x2, dx2, x3, dx3, 0.9),
+    EXPECT_NEAR(point_segment_ccd_safe_step(x1, dx1, x2, dx2, x3, dx3, 0.9),
                 0.9 * 0.16888371826160567, 1e-10);
 }
 
@@ -106,8 +104,8 @@ TEST(CCD, RbRotation_TangentMiss) {
     bool hit = point_segment_2d_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, step);
     EXPECT_FALSE(hit);
 
-    // No collision -> safe_step_rb_rotation reports the full step is safe.
-    double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
+    // No collision -> point_segment_rb_rotation_safe_step reports the full step is safe.
+    double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 1.0, 1e-10);
 }
 
@@ -127,7 +125,7 @@ TEST(CCD, RbRotation_TangentHitAtEndOfStep) {
     EXPECT_TRUE(hit);
     EXPECT_NEAR(step, 1.0, 1e-10);
 
-    double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
+    double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 0.9 * 1.0, 1e-10);
 }
 
@@ -147,7 +145,7 @@ TEST(CCD, RbRotation_TangentHitAtMidpoint) {
     EXPECT_TRUE(hit);
     EXPECT_NEAR(step, 0.5, 1e-10);
 
-    double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
+    double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 0.9 * 0.5, 1e-10);
 }
 
@@ -172,7 +170,7 @@ TEST(CCD, RbRotation_NonzeroThetaN) {
     EXPECT_TRUE(hit);
     EXPECT_NEAR(step, 1.0, 1e-10);
 
-    double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
+    double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 0.9 * 1.0, 1e-10);
 }
 
@@ -192,7 +190,7 @@ TEST(CCD, RbRotation_NonzeroThetaN_Miss) {
     bool hit = point_segment_2d_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, step);
     EXPECT_FALSE(hit);
 
-    double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
+    double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 1.0, 1e-10);
 }
 
@@ -214,7 +212,7 @@ TEST(CCD, RbRotation_NonzeroThetaN_HitAtMidpoint) {
     EXPECT_TRUE(hit);
     EXPECT_NEAR(step, 0.5, 1e-10);
 
-    double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
+    double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 0.9 * 0.5, 1e-10);
 }
 
@@ -243,7 +241,7 @@ TEST(CCD, RbRotation_TwoCrossings_Miss) {
     bool hit = point_segment_2d_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, step);
     EXPECT_FALSE(hit);
 
-    double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
+    double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 1.0, 1e-10);
 }
 
@@ -263,7 +261,7 @@ TEST(CCD, RbRotation_TwoCrossings_HitAtEndOfStep) {
     EXPECT_TRUE(hit);
     EXPECT_NEAR(step, 1.0, 1e-10);
 
-    double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
+    double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 0.9 * 1.0, 1e-10);
 }
 
@@ -283,7 +281,7 @@ TEST(CCD, RbRotation_TwoCrossings_HitAtMidpoint) {
     EXPECT_TRUE(hit);
     EXPECT_NEAR(step, 0.5, 1e-10);
 
-    double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
+    double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 0.9 * 0.5, 1e-10);
 }
 
@@ -304,7 +302,7 @@ TEST(CCD, RbRotation_TwoCrossings_HitAtOneThird) {
     EXPECT_TRUE(hit);
     EXPECT_NEAR(step, 1.0 / 3.0, 1e-10);
 
-    double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
+    double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 0.9 * (1.0 / 3.0), 1e-10);
 
 }
@@ -326,7 +324,7 @@ TEST(CCD, RbRotation_TwoCrossings_HitAtQuarter) {
     EXPECT_TRUE(hit);
     EXPECT_NEAR(step, 0.25, 1e-10);
 
-    double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, 0.9);
+    double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0, x1, 0.9);
     EXPECT_NEAR(omega, 0.9 * 0.25, 1e-10);
 
 }
@@ -383,7 +381,7 @@ TEST(CCD, RbRotation_RandomHorizontalChord) {
         bool hit = point_segment_2d_rb_rotation(x, x_com, theta_n, theta_new, x0e, x1e, step);
         EXPECT_FALSE(hit);
 
-        double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0e, x1e, 0.9);
+        double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0e, x1e, 0.9);
         EXPECT_NEAR(omega, 1.0, 1e-9);
     }
 
@@ -397,7 +395,7 @@ TEST(CCD, RbRotation_RandomHorizontalChord) {
         double expect_step = theta_min / theta_new;
         EXPECT_NEAR(step, expect_step, 1e-9);
 
-        double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0e, x1e, 0.9);
+        double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0e, x1e, 0.9);
         EXPECT_NEAR(omega, 0.9 * expect_step, 1e-9);
     }
 
@@ -411,7 +409,7 @@ TEST(CCD, RbRotation_RandomHorizontalChord) {
         double expect_step = theta_min / theta_new;
         EXPECT_NEAR(step, expect_step, 1e-9);
 
-        double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0e, x1e, 0.9);
+        double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0e, x1e, 0.9);
         EXPECT_NEAR(omega, 0.9 * expect_step, 1e-9);
     }
 
@@ -425,7 +423,7 @@ TEST(CCD, RbRotation_RandomHorizontalChord) {
         double expect_step = theta_min / theta_new;
         EXPECT_NEAR(step, expect_step, 1e-9);
 
-        double omega = safe_step_rb_rotation(x, x_com, theta_n, theta_new, x0e, x1e, 0.9);
+        double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0e, x1e, 0.9);
         EXPECT_NEAR(omega, 0.9 * expect_step, 1e-9);
     }
 }

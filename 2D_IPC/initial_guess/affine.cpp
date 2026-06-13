@@ -1,9 +1,7 @@
 #include "affine.h"
 #include <cmath>
 
-namespace initial_guess::affine {
-
-    Params compute_affine_params(const State2D& state) {
+AffineInitialGuessParams compute_affine_initial_guess_params(const State2D& state) {
         Vec2 xcom{0.0, 0.0};
         double M = 0.0;
 
@@ -55,13 +53,18 @@ namespace initial_guess::affine {
         return {omega, {vhat_x, vhat_y}, xcom};
     }
 
-    Vec2 velocity_at(const Params& ap, const Vec2& x) {
-        Vec2 d{x.x - ap.xcom.x, x.y - ap.xcom.y};
-        return {ap.vhat.x - ap.omega * d.y, ap.vhat.y + ap.omega * d.x};
+Vec2 affine_initial_guess_velocity(
+        const AffineInitialGuessParams& params, const Vec2& x) {
+        Vec2 d{x.x - params.xcom.x, x.y - params.xcom.y};
+        return {
+            params.vhat.x - params.omega * d.y,
+            params.vhat.y + params.omega * d.x
+        };
     }
 
-    void apply(const Params& ap, const State2D& state,
-               Vec& xnew, double dt) {
+void apply_affine_initial_guess(
+        const AffineInitialGuessParams& params,
+        const State2D& state, Vec& xnew, double dt) {
         xnew = state.x;
 
         for (int i = 0; i < state.size(); ++i) {
@@ -72,9 +75,7 @@ namespace initial_guess::affine {
                 continue;
             }
 
-            Vec2 v_aff = velocity_at(ap, xi);
+            Vec2 v_aff = affine_initial_guess_velocity(params, xi);
             set_xi(xnew, i, {xi.x + dt * v_aff.x, xi.y + dt * v_aff.y});
         }
     }
-
-} // namespace initial_guess::affine

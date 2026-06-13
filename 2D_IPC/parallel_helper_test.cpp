@@ -30,7 +30,7 @@ std::vector<int> colors_from_groups(const std::vector<std::vector<int>>& groups,
 
 TEST(ParallelHelper, ConflictGraphContainsSpringsAndContacts) {
     std::vector<std::pair<int, int>> edges{{0, 2}, {2, 4}, {1, 3}};
-    std::vector<contact::NodeSegmentPair> pairs{{0, 3, 4}};
+    std::vector<NodeSegmentPair> pairs{{0, 3, 4}};
     auto graph = build_conflict_graph(edges, pairs, 5);
 
     EXPECT_TRUE(has_edge(graph, 0, 2));
@@ -69,7 +69,7 @@ TEST(ParallelHelper, GreedyColoringSeparatesNeighbors) {
 
 TEST(ParallelHelper, MeshAndContactConflictsSeparateParallelGroups) {
     std::vector<std::pair<int, int>> edges{{0, 1}, {1, 2}};
-    std::vector<contact::NodeSegmentPair> pairs{{3, 1, 2}};
+    std::vector<NodeSegmentPair> pairs{{3, 1, 2}};
 
     const auto graph = build_conflict_graph(edges, pairs, 5);
     const auto groups = greedy_color_conflict_graph(graph);

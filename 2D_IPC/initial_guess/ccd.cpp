@@ -4,11 +4,9 @@
 #include <algorithm>
 #include <vector>
 
-namespace initial_guess::ccd {
-
-    double global_safe_step(const Vec& x,
+double ccd_initial_guess_safe_step(const Vec& x,
                             const Vec& v,
-                            const std::vector<contact::NodeSegmentPair>& pairs,
+                            const std::vector<NodeSegmentPair>& pairs,
                             double dt,
                             double eta) {
         double omega = 1.0;
@@ -28,7 +26,8 @@ namespace initial_guess::ccd {
 
             omega = std::min(
                     omega,
-                    step_filter::ccd::safe_step(xi, dxi, xj, dxj, xk, dxk, eta)
+                    point_segment_ccd_safe_step(
+                            xi, dxi, xj, dxj, xk, dxk, eta)
             );
 
             if (omega <= 0.0)
@@ -38,7 +37,7 @@ namespace initial_guess::ccd {
         return omega;
     }
 
-    void apply(const State2D& state, const RefMesh& ref_mesh,
+void apply_ccd_initial_guess(const State2D& state, const RefMesh& ref_mesh,
                Vec& xnew,
                double dt,
                double eta) {
@@ -50,7 +49,8 @@ namespace initial_guess::ccd {
         BVHBroadPhase broad_phase;
         auto pairs = broad_phase.build_ccd_candidates(
                 state.x, state.v, ref_mesh.edges, dt);
-        double omega = global_safe_step(state.x, state.v, pairs, dt, eta);
+        double omega = ccd_initial_guess_safe_step(
+                state.x, state.v, pairs, dt, eta);
 
         for (int i = 0; i < state.size(); ++i) {
             Vec2 xi = get_xi(state.x, i);
@@ -66,5 +66,3 @@ namespace initial_guess::ccd {
             });
         }
     }
-
-} // namespace initial_guess::ccd

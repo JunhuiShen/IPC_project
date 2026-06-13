@@ -11,33 +11,30 @@
 // the safe fraction of the Newton step.
 // ======================================================
 
-namespace step_filter::ccd {
+bool point_segment_2d(const Vec2& x1, const Vec2& dx1,
+                      const Vec2& x2, const Vec2& dx2,
+                      const Vec2& x3, const Vec2& dx3,
+                      double& t_out, double eps = 1e-12);
 
-    // Low-level free functions
-    bool point_segment_2d(const Vec2& x1, const Vec2& dx1,
-                          const Vec2& x2, const Vec2& dx2,
-                          const Vec2& x3, const Vec2& dx3,
-                          double& t_out, double eps = 1e-12);
+double point_segment_ccd_safe_step(
+        const Vec2& x1, const Vec2& dx1,
+        const Vec2& x2, const Vec2& dx2,
+        const Vec2& x3, const Vec2& dx3,
+        double eta = 0.9);
 
-    double safe_step(const Vec2& x1, const Vec2& dx1,
-                     const Vec2& x2, const Vec2& dx2,
-                     const Vec2& x3, const Vec2& dx3,
-                     double eta = 0.9);
+bool point_segment_2d_rb_rotation(const Eigen::Vector2d& x,
+                                  const Eigen::Vector2d& x_com,
+                                  const double& theta_n,
+                                  const double& theta_new,
+                                  const Eigen::Vector2d& x0,
+                                  const Eigen::Vector2d& x1,
+                                  double& step);
 
-    bool point_segment_2d_rb_rotation(const Eigen::Vector2d& x,
-                                      const Eigen::Vector2d& x_com,
-                                      const double& theta_n,
-                                      const double& theta_new,
-                                      const Eigen::Vector2d& x0,
-                                      const Eigen::Vector2d& x1,
-                                      double& step);
-
-    double safe_step_rb_rotation(const Eigen::Vector2d& x,
-                                 const Eigen::Vector2d& x_com,
-                                 const double& theta_n,
-                                 const double& theta_new,
-                                 const Eigen::Vector2d& x0,
-                                 const Eigen::Vector2d& x1,
-                                 double eta = 0.9);
-
-} // namespace step_filter::ccd
+double point_segment_rb_rotation_safe_step(
+        const Eigen::Vector2d& x,
+        const Eigen::Vector2d& x_com,
+        const double& theta_n,
+        const double& theta_new,
+        const Eigen::Vector2d& x0,
+        const Eigen::Vector2d& x1,
+        double eta = 0.9);

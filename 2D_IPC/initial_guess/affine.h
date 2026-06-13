@@ -13,17 +13,15 @@
 // while keeping pinned nodes fixed.
 // ======================================================
 
-namespace initial_guess::affine {
+struct AffineInitialGuessParams {
+    double omega;
+    Vec2   vhat;
+    Vec2   xcom;
+};
 
-    struct Params {
-        double omega;
-        Vec2   vhat;
-        Vec2   xcom;
-    };
-
-    Params compute_affine_params(const State2D& state);
-    Vec2   velocity_at(const Params& ap, const Vec2& x);
-    void   apply(const Params& ap, const State2D& state,
-                 Vec& xnew, double dt);
-
-} // namespace initial_guess::affine
+AffineInitialGuessParams compute_affine_initial_guess_params(const State2D& state);
+Vec2 affine_initial_guess_velocity(
+        const AffineInitialGuessParams& params, const Vec2& x);
+void apply_affine_initial_guess(
+        const AffineInitialGuessParams& params,
+        const State2D& state, Vec& xnew, double dt);

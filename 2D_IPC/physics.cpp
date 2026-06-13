@@ -1,12 +1,10 @@
 #include "physics.h"
 #include "spring_energy.h"
 
-namespace physics {
-
-    Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat, const Vec &xpin,
-                               const std::vector<double> &mass, const RefMesh& ref_mesh,
-                               const std::vector<char> &is_pinned,
-                               double dt, double k_spring, const Vec2 &g_accel) {
+Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat, const Vec &xpin,
+                           const std::vector<double> &mass, const RefMesh& ref_mesh,
+                           const std::vector<char> &is_pinned,
+                           double dt, double k_spring, const Vec2 &g_accel) {
 
         Vec2 xi = get_xi(x, i), xhi = get_xi(xhat, i);
         Vec2 gi{0.0, 0.0};
@@ -32,11 +30,11 @@ namespace physics {
         return gi;
     }
 
-    Mat2 local_hess_no_barrier(int i, const Vec &x,
-                               const std::vector<double> &mass,
-                               const RefMesh& ref_mesh,
-                               const std::vector<char> &is_pinned,
-                               double dt, double k_spring) {
+Mat2 local_hess_no_barrier(int i, const Vec &x,
+                           const std::vector<double> &mass,
+                           const RefMesh& ref_mesh,
+                           const std::vector<char> &is_pinned,
+                           double dt, double k_spring) {
 
         Mat2 H{mass[i], 0, 0, mass[i]};
 
@@ -55,5 +53,3 @@ namespace physics {
 
         return H;
     }
-
-} // namespace physics

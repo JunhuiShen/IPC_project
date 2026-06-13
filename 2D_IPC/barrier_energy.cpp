@@ -3,9 +3,6 @@
 #include <algorithm>
 #include <cmath>
 
-namespace physics {
-using namespace math;
-
 double barrier_grad(double d, double dhat) {
     if (d >= dhat) return 0.0;
     return -2 * (d - dhat) * std::log(d / dhat) - (d - dhat) * (d - dhat) / d;
@@ -226,6 +223,4 @@ Mat2 local_barrier_hess(int who, const Vec& x, int node, int seg0, int seg1, dou
     else if (who == seg0) return add(H1, K1);
     else if (who == seg1) return add(H2, K2);
     return {0, 0, 0, 0};
-}
-
 }

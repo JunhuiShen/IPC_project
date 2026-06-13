@@ -20,7 +20,7 @@ Chain make_chain(Vec2 start, Vec2 end, int N, double density, double thickness) 
     //set nodal masses
     for(int s=0;s<N-1;s++){
         Vec2 edge=get_xi(c.x, s+1)-get_xi(c.x, s);
-        double segment_length=math::norm(edge);
+        double segment_length=norm(edge);
         double segment_mass=thickness*thickness*segment_length*density;
         c.mass[s] += .5*segment_mass; c.mass[s+1] += .5*segment_mass;
     }

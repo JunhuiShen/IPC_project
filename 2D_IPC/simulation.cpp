@@ -16,7 +16,7 @@ AdvanceResult2D advance_one_frame(
         build_xhat(state.xhat, state.x, state.v, dt);
 
         Vec xnew;
-        initial_guess::apply(
+        apply_initial_guess(
                 params.initial_guess_type, state, ref_mesh,
                 xnew, dt, params.eta);
 

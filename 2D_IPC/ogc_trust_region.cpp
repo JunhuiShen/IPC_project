@@ -37,9 +37,9 @@ TrustRegionResult2D trust_region_node_segment_gauss_seidel(
         double eta) {
     double s = 0.0;
     Vec2 p{}, r{};
-    double d0 = physics::node_segment_distance(xi, xj, xk, s, p, r);
+    double d0 = node_segment_distance(xi, xj, xk, s, p, r);
     d0 = std::max(d0, 1.0e-12);
 
-    const double M = math::norm(dxi) + math::norm(dxj) + math::norm(dxk);
+    const double M = norm(dxi) + norm(dxj) + norm(dxk);
     return make_result(d0, M, clamp_eta(eta));
 }

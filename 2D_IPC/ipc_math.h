@@ -43,9 +43,7 @@ inline void set_xi(Vec &x, int i, const Vec2 &v) {
 // Math operations
 // ======================================================
 
-namespace math {
-
-    inline double node_distance(const Vec &a, int i, int j) {
+inline double node_distance(const Vec &a, int i, int j) {
         double dx = a[2 * i]     - a[2 * j];
         double dy = a[2 * i + 1] - a[2 * j + 1];
         return std::sqrt(dx * dx + dy * dy);
@@ -117,5 +115,3 @@ namespace math {
         double inv = 1.0 / det;
         return {H.a22 * inv, -H.a12 * inv, -H.a21 * inv, H.a11 * inv};
     }
-
-} // namespace math

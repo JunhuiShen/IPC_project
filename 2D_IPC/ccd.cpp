@@ -4,11 +4,7 @@
 #include <Eigen/Dense>
 #include <iostream>
 
-namespace step_filter::ccd {
-
-    using namespace math;
-
-    bool point_segment_2d(const Vec2& x1, const Vec2& dx1,
+bool point_segment_2d(const Vec2& x1, const Vec2& dx1,
                           const Vec2& x2, const Vec2& dx2,
                           const Vec2& x3, const Vec2& dx3,
                           double& t_out, double eps) {
@@ -131,7 +127,7 @@ namespace step_filter::ccd {
         return true;
     }
 
-    double safe_step_rb_rotation(const Eigen::Vector2d& x, const Eigen::Vector2d& x_com, const double& theta_n, const double& theta_new, const Eigen::Vector2d& x0, const Eigen::Vector2d& x1, const double eta) {
+double point_segment_rb_rotation_safe_step(const Eigen::Vector2d& x, const Eigen::Vector2d& x_com, const double& theta_n, const double& theta_new, const Eigen::Vector2d& x0, const Eigen::Vector2d& x1, const double eta) {
         double step;
         if (!point_segment_2d_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, step)) {
             return 1.0;
@@ -140,7 +136,7 @@ namespace step_filter::ccd {
     }
 
 
-    double safe_step(const Vec2& x1, const Vec2& dx1,
+double point_segment_ccd_safe_step(const Vec2& x1, const Vec2& dx1,
                      const Vec2& x2, const Vec2& dx2,
                      const Vec2& x3, const Vec2& dx3,
                      double eta) {
@@ -150,5 +146,3 @@ namespace step_filter::ccd {
 
         return (t_hit <= 1e-12) ? 0.0 : eta * t_hit;
     }
-
-} // namespace step_filter::ccd

@@ -5,15 +5,11 @@
 #include <utility>
 #include <vector>
 
-namespace contact {
-
 struct NodeSegmentPair {
     int node;
     int seg0;
     int seg1;
 };
-
-} // namespace contact
 
 // ======================================================
 // BroadPhase — base class for broad-phase collision detection
@@ -31,23 +27,23 @@ public:
                                        double d_hat) = 0;
 
     // Current barrier active-set pairs
-    virtual const std::vector<contact::NodeSegmentPair>& pairs() const = 0;
+    virtual const std::vector<NodeSegmentPair>& pairs() const = 0;
 
     virtual double node_box_safe_step(int node, const Vec2& x0, const Vec2& displacement) const = 0;
 
     // One-shot candidate builds for step filtering
-    virtual std::vector<contact::NodeSegmentPair>
+    virtual std::vector<NodeSegmentPair>
     build_ccd_candidates(const Vec& x, const Vec& v,
                          const std::vector<std::pair<int, int>>& edges,
                          double dt) = 0;
 
     // Efficient single-node CCD candidates using the existing BVH (no rebuild)
-    virtual std::vector<contact::NodeSegmentPair>
+    virtual std::vector<NodeSegmentPair>
     build_ccd_candidates_for_node(int who, const Vec& x, const Vec& v_newton,
                                   const std::vector<std::pair<int, int>>& edges,
                                   double dt) = 0;
 
-    virtual std::vector<contact::NodeSegmentPair>
+    virtual std::vector<NodeSegmentPair>
     build_trust_region_candidates(const Vec& x, const Vec& v,
                                   const std::vector<std::pair<int, int>>& edges,
                                   double dt, double motion_pad) = 0;

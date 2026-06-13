@@ -6,10 +6,6 @@
 #include "physics.h"
 #include <algorithm>
 
-using namespace math;
-using namespace physics;
-using contact::NodeSegmentPair;
-
 struct NodeUpdate {
     int who = -1;
     Vec2 dx{0.0, 0.0};
@@ -95,7 +91,8 @@ static double compute_ccd_safe_step(int who, const Vec2& dx,
         else if (who == c.seg1) dxk = full;
 
         omega = std::min(
-                omega, step_filter::ccd::safe_step(xi, dxi, xj, dxj, xk, dxk, eta));
+                omega, point_segment_ccd_safe_step(
+                        xi, dxi, xj, dxj, xk, dxk, eta));
         if (omega <= 0.0) return 0.0;
     }
 

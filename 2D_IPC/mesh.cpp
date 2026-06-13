@@ -21,7 +21,7 @@ void initialize_ref_mesh(RefMesh& ref_mesh, int num_positions,
         if (a < 0 || b < 0 || a >= num_positions || b >= num_positions || a == b) {
             throw std::invalid_argument("RefMesh contains an invalid edge");
         }
-        const double rest_length = math::node_distance(rest_positions, a, b);
+        const double rest_length = node_distance(rest_positions, a, b);
         if (!std::isfinite(rest_length) || rest_length <= 1e-12) {
             throw std::invalid_argument("RefMesh contains a degenerate edge");
         }
