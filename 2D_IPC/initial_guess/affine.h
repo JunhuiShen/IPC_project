@@ -20,8 +20,6 @@ struct AffineInitialGuessParams {
 };
 
 AffineInitialGuessParams compute_affine_initial_guess_params(const State2D& state);
-Vec2 affine_initial_guess_velocity(
-        const AffineInitialGuessParams& params, const Vec2& x);
-void apply_affine_initial_guess(
-        const AffineInitialGuessParams& params,
-        const State2D& state, Vec& xnew, double dt);
+Vec2 affine_initial_guess_velocity(const AffineInitialGuessParams& params, const Vec2& x);
+void apply_affine_initial_guess(const AffineInitialGuessParams& params,
+                                const State2D& state, Vec& xnew, double dt);

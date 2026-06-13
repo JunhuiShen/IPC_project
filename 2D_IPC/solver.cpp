@@ -90,9 +90,7 @@ static double compute_ccd_safe_step(int who, const Vec2& dx,
         else if (who == c.seg0) dxj = full;
         else if (who == c.seg1) dxk = full;
 
-        omega = std::min(
-                omega, point_segment_ccd_safe_step(
-                        xi, dxi, xj, dxj, xk, dxk, eta));
+        omega = std::min(omega, point_segment_ccd_safe_step(xi, dxi, xj, dxj, xk, dxk, eta));
         if (omega <= 0.0) return 0.0;
     }
 
@@ -206,8 +204,7 @@ SolveResult global_gauss_seidel_solver_basic(
         broad_phase.initialize_node_radii(x, ref_mesh.edges, node_radii, d_hat);
 
         // Rebuild colors from current elastic and contact coupling.
-        const auto graph = build_conflict_graph(
-                ref_mesh.edges, broad_phase.pairs(), total_nodes);
+        const auto graph = build_conflict_graph(ref_mesh.edges, broad_phase.pairs(), total_nodes);
         color_groups = greedy_color_conflict_graph(graph);
     };
 
@@ -216,8 +213,8 @@ SolveResult global_gauss_seidel_solver_basic(
 
     auto eval_residual = [&]() {
         return compute_global_residual(
-                ref_mesh, state, x, dt, k_spring, g_accel,
-                broad_phase.pairs(), d_hat, k_barrier);
+            ref_mesh, state, x, dt, k_spring, g_accel,
+            broad_phase.pairs(), d_hat, k_barrier);
     };
 
     double r = eval_residual();

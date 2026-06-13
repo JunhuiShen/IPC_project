@@ -53,10 +53,8 @@ ExampleScene build_example(ExampleType example_type, int number_of_nodes, double
         case ExampleType::Example2:
         {
 
-            Chain upper = make_chain(
-                    {-2.4, 2.8}, {1.2, 1.35}, number_of_nodes, density);
-            Chain lower = make_chain(
-                    {-1.85, 2.05}, {1.1, -2.9}, number_of_nodes, density);
+            Chain upper = make_chain({-2.4, 2.8}, {1.2, 1.35}, number_of_nodes, density);
+            Chain lower = make_chain({-1.85, 2.05}, {1.1, -2.9}, number_of_nodes, density);
 
             pin_node(upper, 0);
             pin_node(lower, 0);

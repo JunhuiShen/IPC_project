@@ -16,9 +16,7 @@ AdvanceResult2D advance_one_frame(
         build_xhat(state.xhat, state.x, state.v, dt);
 
         Vec xnew;
-        apply_initial_guess(
-                params.initial_guess_type, state, ref_mesh,
-                xnew, dt, params.eta);
+        apply_initial_guess(params.initial_guess_type, state, ref_mesh, xnew, dt, params.eta);
 
         std::vector<double> residual_history;
         const SolveResult substep_result = global_gauss_seidel_solver_basic(
@@ -34,8 +32,7 @@ AdvanceResult2D advance_one_frame(
         if (aggregate.substeps_completed == 0 && !residual_history.empty()) {
             aggregate.first_initial_residual = residual_history.front();
         }
-        aggregate.max_final_residual = std::max(
-                aggregate.max_final_residual, substep_result.final_residual);
+        aggregate.max_final_residual = std::max(aggregate.max_final_residual, substep_result.final_residual);
         aggregate.total_iterations += substep_result.iterations_used;
         aggregate.substeps_completed += 1;
 

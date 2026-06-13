@@ -57,8 +57,7 @@ TEST(ParallelHelper, GreedyColoringSeparatesNeighbors) {
     };
 
     auto groups = greedy_color_conflict_graph(graph);
-    const std::vector<int> color =
-            colors_from_groups(groups, static_cast<int>(graph.size()));
+    const std::vector<int> color = colors_from_groups(groups, static_cast<int>(graph.size()));
 
     for (int v = 0; v < static_cast<int>(graph.size()); ++v) {
         ASSERT_GE(color[v], 0);

@@ -14,8 +14,5 @@ enum class InitialGuessType {
     CCD
 };
 
-void apply_initial_guess(
-        InitialGuessType initial_guess_type,
-        const State2D& state, const RefMesh& ref_mesh,
-        Vec& xnew,
-        double dt, double eta);
+void apply_initial_guess(InitialGuessType initial_guess_type, const State2D& state,
+                         const RefMesh& ref_mesh, Vec& xnew, double dt, double eta);

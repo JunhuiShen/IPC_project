@@ -2,80 +2,78 @@
 #include <cmath>
 
 AffineInitialGuessParams compute_affine_initial_guess_params(const State2D& state) {
-        Vec2 xcom{0.0, 0.0};
-        double M = 0.0;
+    Vec2 xcom{0.0, 0.0};
+    double M = 0.0;
 
-        for (int i = 0; i < state.size(); ++i) {
-            if (state.is_pinned[i]) continue;
+    for (int i = 0; i < state.size(); ++i) {
+        if (state.is_pinned[i]) continue;
 
-            Vec2 xi = get_xi(state.x, i);
-            xcom.x += state.mass[i] * xi.x;
-            xcom.y += state.mass[i] * xi.y;
-            M += state.mass[i];
-        }
+        Vec2 xi = get_xi(state.x, i);
+        xcom.x += state.mass[i] * xi.x;
+        xcom.y += state.mass[i] * xi.y;
+        M += state.mass[i];
+    }
 
-        if (M <= 1e-12) {
-            return {0.0, {0.0, 0.0}, {0.0, 0.0}};
-        }
+    if (M <= 1e-12) {
+        return {0.0, {0.0, 0.0}, {0.0, 0.0}};
+    }
 
-        xcom.x /= M;
-        xcom.y /= M;
+    xcom.x /= M;
+    xcom.y /= M;
 
-        double G[3][3] = {{0.0}};
-        double bvec[3] = {0.0, 0.0, 0.0};
+    double G[3][3] = {{0.0}};
+    double bvec[3] = {0.0, 0.0, 0.0};
 
-        for (int i = 0; i < state.size(); ++i) {
-            if (state.is_pinned[i]) continue;
+    for (int i = 0; i < state.size(); ++i) {
+        if (state.is_pinned[i]) continue;
 
-            Vec2 Xi = get_xi(state.x, i);
-            Vec2 Vi = get_xi(state.v, i);
-            Vec2 d{Xi.x - xcom.x, Xi.y - xcom.y};
+        Vec2 Xi = get_xi(state.x, i);
+        Vec2 Vi = get_xi(state.v, i);
+        Vec2 d{Xi.x - xcom.x, Xi.y - xcom.y};
 
-            Vec2 U1{-d.y, d.x};
-            Vec2 U2{1.0, 0.0};
-            Vec2 U3{0.0, 1.0};
-            Vec2 U[3] = {U1, U2, U3};
+        Vec2 U1{-d.y, d.x};
+        Vec2 U2{1.0, 0.0};
+        Vec2 U3{0.0, 1.0};
+        Vec2 U[3] = {U1, U2, U3};
 
-            double w = state.mass[i];
+        double w = state.mass[i];
 
-            for (int k = 0; k < 3; ++k) {
-                bvec[k] += w * (U[k].x * Vi.x + U[k].y * Vi.y);
-                for (int j = 0; j < 3; ++j) {
-                    G[k][j] += w * (U[k].x * U[j].x + U[k].y * U[j].y);
-                }
+        for (int k = 0; k < 3; ++k) {
+            bvec[k] += w * (U[k].x * Vi.x + U[k].y * Vi.y);
+            for (int j = 0; j < 3; ++j) {
+                G[k][j] += w * (U[k].x * U[j].x + U[k].y * U[j].y);
             }
         }
-
-        double omega  = (std::abs(G[0][0]) > 1e-12) ? bvec[0] / G[0][0] : 0.0;
-        double vhat_x = (std::abs(G[1][1]) > 1e-12) ? bvec[1] / G[1][1] : 0.0;
-        double vhat_y = (std::abs(G[2][2]) > 1e-12) ? bvec[2] / G[2][2] : 0.0;
-
-        return {omega, {vhat_x, vhat_y}, xcom};
     }
 
-Vec2 affine_initial_guess_velocity(
-        const AffineInitialGuessParams& params, const Vec2& x) {
-        Vec2 d{x.x - params.xcom.x, x.y - params.xcom.y};
-        return {
-            params.vhat.x - params.omega * d.y,
-            params.vhat.y + params.omega * d.x
-        };
-    }
+    double omega  = (std::abs(G[0][0]) > 1e-12) ? bvec[0] / G[0][0] : 0.0;
+    double vhat_x = (std::abs(G[1][1]) > 1e-12) ? bvec[1] / G[1][1] : 0.0;
+    double vhat_y = (std::abs(G[2][2]) > 1e-12) ? bvec[2] / G[2][2] : 0.0;
 
-void apply_affine_initial_guess(
-        const AffineInitialGuessParams& params,
-        const State2D& state, Vec& xnew, double dt) {
-        xnew = state.x;
+    return {omega, {vhat_x, vhat_y}, xcom};
+}
 
-        for (int i = 0; i < state.size(); ++i) {
-            Vec2 xi = get_xi(state.x, i);
+Vec2 affine_initial_guess_velocity(const AffineInitialGuessParams& params, const Vec2& x) {
+    Vec2 d{x.x - params.xcom.x, x.y - params.xcom.y};
+    return {
+        params.vhat.x - params.omega * d.y,
+        params.vhat.y + params.omega * d.x
+    };
+}
 
-            if (state.is_pinned[i]) {
-                set_xi(xnew, i, xi);
-                continue;
-            }
+void apply_affine_initial_guess(const AffineInitialGuessParams& params,
+                                const State2D& state, Vec& xnew, double dt) {
+    xnew = state.x;
 
-            Vec2 v_aff = affine_initial_guess_velocity(params, xi);
-            set_xi(xnew, i, {xi.x + dt * v_aff.x, xi.y + dt * v_aff.y});
+    for (int i = 0; i < state.size(); ++i) {
+        Vec2 xi = get_xi(state.x, i);
+
+        if (state.is_pinned[i]) {
+            set_xi(xnew, i, xi);
+            continue;
         }
+
+        Vec2 v_aff = affine_initial_guess_velocity(params, xi);
+        set_xi(xnew, i, {xi.x + dt * v_aff.x, xi.y + dt * v_aff.y});
     }
+}

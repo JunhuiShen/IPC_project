@@ -41,8 +41,7 @@ int main(int argc, char** argv) {
     }
     fs::create_directories(args.outdir);
 
-    ExampleScene scene =
-            build_example(args.get_example_type(), args.number_of_nodes, args.density);
+    ExampleScene scene = build_example(args.get_example_type(), args.number_of_nodes, args.density);
     State2D state = std::move(scene.state);
     RefMesh ref_mesh = std::move(scene.ref_mesh);
 
@@ -95,16 +94,14 @@ int main(int argc, char** argv) {
         };
 
         const auto solver_start = clock::now();
-        const AdvanceResult2D result = advance_one_frame(
-                state, ref_mesh, params, broad_phase, frame, substep_export);
+        const AdvanceResult2D result = advance_one_frame(state, ref_mesh, params, broad_phase, frame, substep_export);
         const auto solver_end = clock::now();
         const std::chrono::duration<double> solver_elapsed = solver_end - solver_start;
 
         export_frame(args.outdir, frame, state.x, ref_mesh.edges, output_format);
         write_checkpoint(checkpoint_path(args.outdir, frame), state);
 
-        max_global_residual =
-                std::max(max_global_residual, result.max_final_residual);
+        max_global_residual = std::max(max_global_residual, result.max_final_residual);
         total_solver_time += solver_elapsed.count();
         sum_global_iters_used += result.total_iterations;
         frames_advanced += 1;
