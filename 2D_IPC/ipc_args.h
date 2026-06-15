@@ -4,8 +4,7 @@
 #include "example.h"
 #include "visualization.h"
 #include "initial_guess/initial_guess.h"
-#include <cassert>
-#include <iostream>
+#include <stdexcept>
 
 // ======================================================
 // IPCArgs — simulation parameters for 2D IPC
@@ -50,7 +49,7 @@ struct IPCArgs : ArgParser {
     // --- strategy (stored as strings, converted via getters) ---
     std::string example_type        = "1";    // "1" | "2"
     std::string step_policy         = "ccd";  // "ccd" | "trust_region"
-    std::string initial_guess_type  = "ccd";  // "ccd" | "trivial" | "affine" | "trust_region" (= trivial)
+    std::string initial_guess_type  = "ccd";  // "ccd" | "trivial" | "affine"
 
     IPCArgs() {
         add_double("dt",              dt,              1.0/30.0,  "Timestep size (seconds)");
@@ -81,52 +80,47 @@ struct IPCArgs : ArgParser {
 
         add_string("example",         example_type,    "1",       "Example scene: 1 | 2");
         add_string("step_policy",     step_policy,     "ccd",     "Step filter: ccd | trust_region");
-        add_string("initial_guess",   initial_guess_type, "ccd",  "Initial guess: ccd | trivial | affine | trust_region (= trivial)");
+        add_string("initial_guess",   initial_guess_type, "ccd",  "Initial guess: ccd | trivial | affine");
     }
 
     // --- typed getters ---
 
     ExampleType get_example_type() const {
+        if (example_type == "1") return ExampleType::Example1;
         if (example_type == "2") return ExampleType::Example2;
-        return ExampleType::Example1;
+        throw std::invalid_argument("Unknown example: " + example_type);
     }
 
     OutputFormat get_output_format() const {
         if (output_format == "obj") return OutputFormat::OBJ;
-        return OutputFormat::GEO;
+        if (output_format == "geo") return OutputFormat::GEO;
+        throw std::invalid_argument("Unknown output format: " + output_format);
     }
 
     InitialGuessType get_initial_guess_type() const {
-        if (initial_guess_type == "trust_region") return InitialGuessType::Trivial;
-        if (initial_guess_type == "trivial")      return InitialGuessType::Trivial;
-        if (initial_guess_type == "affine")       return InitialGuessType::Affine;
-        return InitialGuessType::CCD;
+        if (initial_guess_type == "ccd")     return InitialGuessType::CCD;
+        if (initial_guess_type == "trivial") return InitialGuessType::Trivial;
+        if (initial_guess_type == "affine")  return InitialGuessType::Affine;
+        throw std::invalid_argument("Unknown initial guess: " + initial_guess_type);
     }
 
     // Returns true if step policy is CCD (false = TrustRegion)
     bool use_ccd_step_policy() const {
-        return step_policy != "trust_region";
+        if (step_policy == "ccd") return true;
+        if (step_policy == "trust_region") return false;
+        throw std::invalid_argument("Unknown step policy: " + step_policy);
     }
 
-    // Call after parse(). Asserts parameter combinations are sensible.
+    // Call after parse(). Throws if parameter combinations are invalid.
     void validate() const {
-        // eta must always be in (0, 1)
-        assert(eta > 0.0 && eta < 1.0 && "eta must be in (0, 1)");
-        assert(substeps > 0 && "substeps must be positive");
-        assert(max_substep_iters > 0 && "max_substep_iters must be positive");
-        assert(node_box_min > 0.0 && "node_box_min must be positive");
-        assert(node_box_max >= node_box_min && "node_box_max must be >= node_box_min");
-        assert(node_box_update_count > 0 && "node_box_update_count must be positive");
-
-        // Trust region requires a conservative eta (originally 0.4).
-        // If the trust-region step policy is active, eta should be well below 1.
-        const bool using_trust_region = (step_policy == "trust_region");
-        if (using_trust_region) {
-            if (eta > 0.5) {
-                std::cerr << "Warning: trust_region is active but eta=" << eta
-                          << " is high (recommended <= 0.5, original default was 0.4).\n";
-            }
-            assert(eta <= 0.5 && "eta must be <= 0.5 when using trust_region");
+        if (!(eta > 0.0 && eta < 1.0)) throw std::invalid_argument("eta must be in (0, 1)");
+        if (substeps <= 0) throw std::invalid_argument("substeps must be positive");
+        if (max_substep_iters <= 0) throw std::invalid_argument("max_substep_iters must be positive");
+        if (node_box_min <= 0.0) throw std::invalid_argument("node_box_min must be positive");
+        if (node_box_max < node_box_min) throw std::invalid_argument("node_box_max must be >= node_box_min");
+        if (node_box_update_count <= 0) throw std::invalid_argument("node_box_update_count must be positive");
+        if (step_policy == "trust_region" && eta > 0.5) {
+            throw std::invalid_argument("eta must be <= 0.5 when using trust_region");
         }
     }
 };

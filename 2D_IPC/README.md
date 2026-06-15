@@ -169,7 +169,6 @@ candidate detector used in the simulation is `BVHBroadPhase`.
 | `ccd` | CCD-filtered explicit prediction |
 | `affine` | Affine-motion prediction |
 | `trivial` | No-motion prediction |
-| `trust_region` | Legacy alias for `trivial` |
 
 Important CLI options:
 
@@ -185,7 +184,7 @@ Important CLI options:
 | `tol_abs` / `max_substep_iters` | defaults `1e-6` and `500` |
 | `eta` | step safety factor; default `0.9`; use at most `0.5` with `trust_region` |
 | `step_policy` | `ccd` or `trust_region` |
-| `initial_guess` | `ccd`, `affine`, `trivial`, or `trust_region` |
+| `initial_guess` | `ccd`, `affine`, or `trivial` |
 | `use_parallel` | color-parallel updates; default `true` |
 | `node_box_min` / `node_box_max` | defaults `0.001` and `0.01` |
 | `node_box_update_count` | active-set rebuild interval; default `1` |

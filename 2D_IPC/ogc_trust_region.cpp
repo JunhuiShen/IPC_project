@@ -10,10 +10,6 @@ constexpr double kMotionEps = 1.0e-12;
 constexpr double kEtaLo = 1.0e-12;
 constexpr double kEtaHi = 0.5 - 1.0e-12;
 
-double clamp_eta(double eta) {
-    return std::min(std::max(eta, kEtaLo), kEtaHi);
-}
-
 TrustRegionResult2D make_result(double d0, double M, double eta) {
     TrustRegionResult2D r;
     r.d0 = d0;
@@ -41,5 +37,5 @@ TrustRegionResult2D trust_region_node_segment_gauss_seidel(
     d0 = std::max(d0, 1.0e-12);
 
     const double M = norm(dxi) + norm(dxj) + norm(dxk);
-    return make_result(d0, M, clamp_eta(eta));
+    return make_result(d0, M, std::clamp(eta, kEtaLo, kEtaHi));
 }

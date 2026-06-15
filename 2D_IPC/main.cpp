@@ -30,7 +30,21 @@ int main(int argc, char** argv) {
     if (!args.parse(argc, argv)) {
         return 1;
     }
-    args.validate();
+
+    ExampleType example_type = ExampleType::Example1;
+    OutputFormat output_format = OutputFormat::GEO;
+    InitialGuessType initial_guess_type = InitialGuessType::CCD;
+    bool use_ccd_step_policy = true;
+    try {
+        args.validate();
+        example_type = args.get_example_type();
+        output_format = args.get_output_format();
+        initial_guess_type = args.get_initial_guess_type();
+        use_ccd_step_policy = args.use_ccd_step_policy();
+    } catch (const std::invalid_argument& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
 
     using clock = std::chrono::high_resolution_clock;
     const auto start_time = clock::now();
@@ -41,7 +55,7 @@ int main(int argc, char** argv) {
     }
     fs::create_directories(args.outdir);
 
-    ExampleScene scene = build_example(args.get_example_type(), args.number_of_nodes, args.density);
+    ExampleScene scene = build_example(example_type, args.number_of_nodes, args.density);
     State2D state = std::move(scene.state);
     RefMesh ref_mesh = std::move(scene.ref_mesh);
 
@@ -64,10 +78,9 @@ int main(int argc, char** argv) {
     params.node_box_min = args.node_box_min;
     params.node_box_max = args.node_box_max;
     params.node_box_update_count = args.node_box_update_count;
-    params.use_ccd_step_policy = args.use_ccd_step_policy();
-    params.initial_guess_type = args.get_initial_guess_type();
+    params.use_ccd_step_policy = use_ccd_step_policy;
+    params.initial_guess_type = initial_guess_type;
 
-    const OutputFormat output_format = args.get_output_format();
     BVHBroadPhase broad_phase;
 
     std::cout << "Vertices: " << ref_mesh.num_positions
