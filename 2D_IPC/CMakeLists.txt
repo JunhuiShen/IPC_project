@@ -24,7 +24,7 @@ add_library(ipc_core
     chain.cpp
     restart.cpp
     visualization.cpp
-    broad_phase/bvh.cpp
+    broad_phase.cpp
     ccd.cpp
     initial_guess/trivial.cpp
     initial_guess/affine.cpp
@@ -90,9 +90,9 @@ add_executable(rigid_body_ccd_test rigid_body_ccd_test.cpp)
 target_link_libraries(rigid_body_ccd_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
 gtest_discover_tests(rigid_body_ccd_test)
 
-add_executable(bvh_box_leaf_test bvh_box_leaf_test.cpp)
-target_link_libraries(bvh_box_leaf_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
-gtest_discover_tests(bvh_box_leaf_test)
+add_executable(broad_phase_test broad_phase_test.cpp)
+target_link_libraries(broad_phase_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
+gtest_discover_tests(broad_phase_test)
 
 add_executable(parallel_helper_test parallel_helper_test.cpp)
 target_link_libraries(parallel_helper_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)

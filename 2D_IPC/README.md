@@ -153,7 +153,7 @@ Simulation scenes and algorithmic choices are selected with CLI flags defined in
     ./build/simulation --example 2 --step_policy ccd --initial_guess affine
 
 Available scenes are defined in `example.cpp`. The broad-phase collision
-candidate detector used in the simulation is `BVHBroadPhase`.
+candidate detector used in the simulation is `BroadPhase`.
 
 ## Step Filter Options
 
@@ -212,8 +212,10 @@ strategy changes do not require rebuilding.
     ├── node_segment_distance.h / node_segment_distance.cpp
     ├── ogc_trust_region.h / ogc_trust_region.cpp
     ├── ccd.h / ccd.cpp
+    ├── broad_phase.h / broad_phase.cpp
+    │   AABB/BVH infrastructure, active-set cache, and swept candidate queries
     ├── parallel_helper.h / parallel_helper.cpp
-    │   conflict graph construction and greedy coloring
+    │   blue/red/green box construction, pair registration, adjacency, and coloring
     ├── state.h / state.cpp
     │   global dynamic state plus predictor and velocity updates
     ├── mesh.h / mesh.cpp
@@ -223,7 +225,5 @@ strategy changes do not require rebuilding.
     ├── example.h / example.cpp
     ├── restart.h / restart.cpp
     ├── visualization.h / visualization.cpp
-    ├── broad_phase/
-    │   └── broad_phase.h, bvh.h / bvh.cpp
     └── initial_guess/
         └── initial_guess.h / .cpp, trivial, affine, ccd

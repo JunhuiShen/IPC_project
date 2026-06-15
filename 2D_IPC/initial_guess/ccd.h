@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../broad_phase/broad_phase.h"
+#include "../broad_phase.h"
 #include "initial_guess.h"
 
 #include <vector>

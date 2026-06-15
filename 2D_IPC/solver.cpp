@@ -185,6 +185,7 @@ SolveResult global_gauss_seidel_solver_basic(
     if (static_cast<int>(prev_disp.size()) != total_nodes)
         prev_disp.assign(total_nodes, node_box_max);
 
+    const auto elastic_adj = build_elastic_adj(ref_mesh.edges, total_nodes);
     std::vector<std::vector<int>> color_groups;
 
     auto update_prev_disp = [&]() {
@@ -201,11 +202,17 @@ SolveResult global_gauss_seidel_solver_basic(
             node_radii[i] = std::clamp(raw, node_box_min, node_box_max);
         }
 
-        broad_phase.initialize_node_radii(x, ref_mesh.edges, node_radii, d_hat);
+        std::vector<AABB> blue_boxes;
+        RedBoxes red_boxes;
+        GreenBoxes green_boxes;
+        build_blue_boxes(x, node_radii, blue_boxes);
+        build_red_boxes(ref_mesh.edges, blue_boxes, red_boxes);
+        build_green_boxes(red_boxes, d_hat, green_boxes);
+        broad_phase.mutable_cache() = register_barrier_pairs_from_blue_and_green(
+            ref_mesh.edges, blue_boxes, green_boxes);
 
-        // Rebuild colors from current elastic and contact coupling.
-        const auto graph = build_conflict_graph(ref_mesh.edges, broad_phase.pairs(), total_nodes);
-        color_groups = greedy_color_conflict_graph(graph);
+        const auto contact_adj = build_contact_adj(broad_phase.pairs(), total_nodes);
+        color_groups = greedy_color_conflict_graph(union_adjacency(elastic_adj, contact_adj));
     };
 
     build_parallel_active_set();

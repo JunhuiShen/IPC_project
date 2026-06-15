@@ -1,6 +1,6 @@
 #include "ccd.h"
 #include "../ccd.h"
-#include "../broad_phase/bvh.h"
+#include "../broad_phase.h"
 #include <algorithm>
 #include <vector>
 
@@ -37,7 +37,7 @@ void apply_ccd_initial_guess(const State2D& state, const RefMesh& ref_mesh,
     // Broad-phase the candidate node-segment pairs with the BVH (O(n log n)).
     // Pairs whose swept AABBs don't overlap over [0, dt] cannot collide, so
     // their safe step is 1.0 and omitting them leaves omega unchanged.
-    BVHBroadPhase broad_phase;
+    BroadPhase broad_phase;
     auto pairs = broad_phase.build_ccd_candidates(state.x, state.v, ref_mesh.edges, dt);
     double omega = ccd_initial_guess_safe_step(state.x, state.v, pairs, dt, eta);
 

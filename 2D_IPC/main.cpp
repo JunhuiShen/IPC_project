@@ -1,4 +1,4 @@
-#include "broad_phase/bvh.h"
+#include "broad_phase.h"
 #include "example.h"
 #include "ipc_args.h"
 #include "restart.h"
@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
     params.use_ccd_step_policy = use_ccd_step_policy;
     params.initial_guess_type = initial_guess_type;
 
-    BVHBroadPhase broad_phase;
+    BroadPhase broad_phase;
 
     std::cout << "Vertices: " << ref_mesh.num_positions
               << " | Segments: " << ref_mesh.edges.size() << "\n";

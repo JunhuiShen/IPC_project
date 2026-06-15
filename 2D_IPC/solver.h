@@ -3,7 +3,7 @@
 #include "ipc_math.h"
 #include "mesh.h"
 #include "state.h"
-#include "broad_phase/broad_phase.h"
+#include "broad_phase.h"
 #include <vector>
 
 struct SolveResult {
