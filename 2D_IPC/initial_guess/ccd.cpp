@@ -33,7 +33,8 @@ double ccd_initial_guess_safe_step(const Vec& x, const Vec& v,
 void apply_ccd_initial_guess(const DeformedState& state, const RefMesh& ref_mesh,
                              const std::vector<Pin>& pins, Vec& xnew, double dt, double eta) {
     xnew = state.deformed_positions;
-    const PinMap pin_map = build_pin_map(pins, state.size());
+    const int total_nodes = static_cast<int>(state.deformed_positions.size());
+    const PinMap pin_map = build_pin_map(pins, total_nodes);
 
     // Broad-phase the candidate node-segment pairs with the BVH (O(n log n)).
     // Pairs whose swept AABBs don't overlap over [0, dt] cannot collide, so
@@ -42,7 +43,7 @@ void apply_ccd_initial_guess(const DeformedState& state, const RefMesh& ref_mesh
     auto pairs = broad_phase.build_ccd_candidates(state.deformed_positions, state.velocities, ref_mesh.edges, dt);
     double omega = ccd_initial_guess_safe_step(state.deformed_positions, state.velocities, pairs, dt, eta);
 
-    for (int i = 0; i < state.size(); ++i) {
+    for (int i = 0; i < total_nodes; ++i) {
         Vec2 xi = get_xi(state.deformed_positions, i);
         if (pin_map[i] >= 0) {
             set_xi(xnew, i, pins[pin_map[i]].target_position);

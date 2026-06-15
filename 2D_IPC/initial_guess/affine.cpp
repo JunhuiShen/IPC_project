@@ -5,9 +5,10 @@ AffineInitialGuessParams compute_affine_initial_guess_params(
         const DeformedState& state, const RefMesh& ref_mesh, const std::vector<Pin>& pins) {
     Vec2 xcom{0.0, 0.0};
     double M = 0.0;
-    const PinMap pin_map = build_pin_map(pins, state.size());
+    const int total_nodes = static_cast<int>(state.deformed_positions.size());
+    const PinMap pin_map = build_pin_map(pins, total_nodes);
 
-    for (int i = 0; i < state.size(); ++i) {
+    for (int i = 0; i < total_nodes; ++i) {
         if (pin_map[i] >= 0) continue;
 
         Vec2 xi = get_xi(state.deformed_positions, i);
@@ -27,7 +28,7 @@ AffineInitialGuessParams compute_affine_initial_guess_params(
     double G[3][3] = {{0.0}};
     double bvec[3] = {0.0, 0.0, 0.0};
 
-    for (int i = 0; i < state.size(); ++i) {
+    for (int i = 0; i < total_nodes; ++i) {
         if (pin_map[i] >= 0) continue;
 
         Vec2 Xi = get_xi(state.deformed_positions, i);
@@ -68,9 +69,10 @@ void apply_affine_initial_guess(const AffineInitialGuessParams& params,
                                 const DeformedState& state, const std::vector<Pin>& pins,
                                 Vec& xnew, double dt) {
     xnew = state.deformed_positions;
-    const PinMap pin_map = build_pin_map(pins, state.size());
+    const int total_nodes = static_cast<int>(state.deformed_positions.size());
+    const PinMap pin_map = build_pin_map(pins, total_nodes);
 
-    for (int i = 0; i < state.size(); ++i) {
+    for (int i = 0; i < total_nodes; ++i) {
         Vec2 xi = get_xi(state.deformed_positions, i);
 
         if (pin_map[i] >= 0) {

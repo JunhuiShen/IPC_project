@@ -45,8 +45,6 @@ struct Pin {
 struct DeformedState {
     Vec deformed_positions;
     Vec velocities;
-
-    int size() const { return static_cast<int>(deformed_positions.size()); }
 };
 
 struct RefMesh {

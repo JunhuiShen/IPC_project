@@ -116,7 +116,7 @@ void serialize_state(const std::string& dir, int frame, const DeformedState& sta
         return;
     }
 
-    const int num_positions = state.size();
+    const int num_positions = static_cast<int>(state.deformed_positions.size());
     if (!write_value(out, kMagic) || !write_value(out, kVersion) ||
         !write_value(out, num_positions)) {
         std::cerr << "Error: failed to write checkpoint header " << filename << "\n";
@@ -141,7 +141,7 @@ bool deserialize_state(const std::string& dir, int frame, DeformedState& state) 
     int num_positions = 0;
     if (!read_value(in, magic) || !read_value(in, version) ||
         !read_value(in, num_positions) || magic != kMagic ||
-        version != kVersion || num_positions != state.size()) {
+        version != kVersion || num_positions != static_cast<int>(state.deformed_positions.size())) {
         std::cerr << "Error: checkpoint " << filename << " does not match this 2D IPC scene\n";
         return false;
     }
@@ -149,8 +149,8 @@ bool deserialize_state(const std::string& dir, int frame, DeformedState& state) 
     Vec positions;
     Vec velocities;
     if (!read_vec(in, positions) || !read_vec(in, velocities) ||
-        static_cast<int>(positions.size()) != state.size() ||
-        static_cast<int>(velocities.size()) != state.size()) {
+        static_cast<int>(positions.size()) != static_cast<int>(state.deformed_positions.size()) ||
+        static_cast<int>(velocities.size()) != static_cast<int>(state.deformed_positions.size())) {
         std::cerr << "Error: checkpoint " << filename << " has incompatible state\n";
         return false;
     }

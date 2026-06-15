@@ -62,7 +62,7 @@ static double compute_global_residual(const RefMesh& ref_mesh,
                                       double d_hat, double k_barrier) {
     double r = 0.0;
 
-    for (int i = 0; i < state.size(); ++i) {
+    for (int i = 0; i < static_cast<int>(state.deformed_positions.size()); ++i) {
         Vec2 g = compute_local_gradient(
                 i, ref_mesh, pins, pin_map, state, x, xhat, dt, k_spring, g_accel,
                 barrier_pairs, d_hat, k_barrier);
@@ -182,7 +182,7 @@ SolveResult global_gauss_seidel_solver_basic(
         double node_box_min, double node_box_max, int node_box_update_count,
         BroadPhase& broad_phase, bool use_ccd_step_policy,
         bool use_parallel, std::vector<double>* residual_history) {
-    const int total_nodes = state.size();
+    const int total_nodes = static_cast<int>(state.deformed_positions.size());
     const Vec x_substep_start = x;
     const PinMap pin_map = build_pin_map(pins, total_nodes);
 
