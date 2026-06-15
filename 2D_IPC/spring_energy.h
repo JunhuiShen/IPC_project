@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ipc_math.h"
-#include "mesh.h"
+#include "physics.h"
 
 Vec2 local_spring_grad(int i, const Vec& x, double k_spring,
                        const RefMesh& ref_mesh);

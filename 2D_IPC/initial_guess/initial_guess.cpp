@@ -5,21 +5,22 @@
 
 #include <stdexcept>
 
-void apply_initial_guess(InitialGuessType initial_guess_type, const State2D& state,
-                         const RefMesh& ref_mesh, Vec& xnew, double dt, double eta) {
+void apply_initial_guess(InitialGuessType initial_guess_type, const DeformedState& state,
+                         const RefMesh& ref_mesh, const std::vector<Pin>& pins,
+                         Vec& xnew, double dt, double eta) {
     if (initial_guess_type == InitialGuessType::Trivial) {
         apply_trivial_initial_guess(state, xnew);
         return;
     }
 
     if (initial_guess_type == InitialGuessType::Affine) {
-        const AffineInitialGuessParams params = compute_affine_initial_guess_params(state);
-        apply_affine_initial_guess(params, state, xnew, dt);
+        const AffineInitialGuessParams params = compute_affine_initial_guess_params(state, ref_mesh, pins);
+        apply_affine_initial_guess(params, state, pins, xnew, dt);
         return;
     }
 
     if (initial_guess_type == InitialGuessType::CCD) {
-        apply_ccd_initial_guess(state, ref_mesh, xnew, dt, eta);
+        apply_ccd_initial_guess(state, ref_mesh, pins, xnew, dt, eta);
         return;
     }
 

@@ -1,15 +1,15 @@
 #pragma once
 
-#include "mesh.h"
-#include "state.h"
+#include "physics.h"
 
 enum class ExampleType {
     Example1
 };
 
 struct ExampleScene {
-    State2D state;
+    DeformedState state;
     RefMesh ref_mesh;
+    std::vector<Pin> pins;
 };
 
 ExampleScene build_example(

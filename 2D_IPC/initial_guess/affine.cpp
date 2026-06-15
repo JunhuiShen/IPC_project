@@ -1,17 +1,20 @@
 #include "affine.h"
 #include <cmath>
 
-AffineInitialGuessParams compute_affine_initial_guess_params(const State2D& state) {
+AffineInitialGuessParams compute_affine_initial_guess_params(
+        const DeformedState& state, const RefMesh& ref_mesh, const std::vector<Pin>& pins) {
     Vec2 xcom{0.0, 0.0};
     double M = 0.0;
+    const PinMap pin_map = build_pin_map(pins, state.size());
 
     for (int i = 0; i < state.size(); ++i) {
-        if (state.is_pinned[i]) continue;
+        if (pin_map[i] >= 0) continue;
 
-        Vec2 xi = get_xi(state.x, i);
-        xcom.x += state.mass[i] * xi.x;
-        xcom.y += state.mass[i] * xi.y;
-        M += state.mass[i];
+        Vec2 xi = get_xi(state.deformed_positions, i);
+        const double mass = ref_mesh.mass[i];
+        xcom.x += mass * xi.x;
+        xcom.y += mass * xi.y;
+        M += mass;
     }
 
     if (M <= 1e-12) {
@@ -25,10 +28,10 @@ AffineInitialGuessParams compute_affine_initial_guess_params(const State2D& stat
     double bvec[3] = {0.0, 0.0, 0.0};
 
     for (int i = 0; i < state.size(); ++i) {
-        if (state.is_pinned[i]) continue;
+        if (pin_map[i] >= 0) continue;
 
-        Vec2 Xi = get_xi(state.x, i);
-        Vec2 Vi = get_xi(state.v, i);
+        Vec2 Xi = get_xi(state.deformed_positions, i);
+        Vec2 Vi = get_xi(state.velocities, i);
         Vec2 d{Xi.x - xcom.x, Xi.y - xcom.y};
 
         Vec2 U1{-d.y, d.x};
@@ -36,7 +39,7 @@ AffineInitialGuessParams compute_affine_initial_guess_params(const State2D& stat
         Vec2 U3{0.0, 1.0};
         Vec2 U[3] = {U1, U2, U3};
 
-        double w = state.mass[i];
+        double w = ref_mesh.mass[i];
 
         for (int k = 0; k < 3; ++k) {
             bvec[k] += w * (U[k].x * Vi.x + U[k].y * Vi.y);
@@ -62,14 +65,16 @@ Vec2 affine_initial_guess_velocity(const AffineInitialGuessParams& params, const
 }
 
 void apply_affine_initial_guess(const AffineInitialGuessParams& params,
-                                const State2D& state, Vec& xnew, double dt) {
-    xnew = state.x;
+                                const DeformedState& state, const std::vector<Pin>& pins,
+                                Vec& xnew, double dt) {
+    xnew = state.deformed_positions;
+    const PinMap pin_map = build_pin_map(pins, state.size());
 
     for (int i = 0; i < state.size(); ++i) {
-        Vec2 xi = get_xi(state.x, i);
+        Vec2 xi = get_xi(state.deformed_positions, i);
 
-        if (state.is_pinned[i]) {
-            set_xi(xnew, i, xi);
+        if (pin_map[i] >= 0) {
+            set_xi(xnew, i, pins[pin_map[i]].target_position);
             continue;
         }
 

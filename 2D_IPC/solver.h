@@ -1,9 +1,7 @@
 #pragma once
 
-#include "ipc_math.h"
-#include "mesh.h"
-#include "state.h"
 #include "broad_phase.h"
+#include "physics.h"
 #include <vector>
 
 struct SolveResult {
@@ -12,7 +10,9 @@ struct SolveResult {
 };
 
 SolveResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh,
-                                              const State2D& state,
+                                              const std::vector<Pin>& pins,
+                                              const DeformedState& state,
+                                              const Vec& xhat,
                                               Vec& x,
                                               double dt, double k_spring, const Vec2& g_accel,
                                               double d_hat, double k_barrier,

@@ -19,7 +19,7 @@ void add_graph_edge(std::vector<std::vector<int>>& graph, int a, int b) {
 void build_blue_boxes(
     const Vec& positions, const std::vector<double>& node_radii,
     std::vector<AABB>& blue_boxes) {
-    const int total_nodes = static_cast<int>(positions.size() / 2);
+    const int total_nodes = static_cast<int>(positions.size());
     blue_boxes.resize(total_nodes);
 
     for (int node = 0; node < total_nodes; ++node) {

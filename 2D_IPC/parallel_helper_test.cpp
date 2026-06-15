@@ -43,9 +43,9 @@ std::vector<int> colors_from_groups(const std::vector<std::vector<int>>& groups,
 
 TEST(ParallelHelper, BuildsExplicitBlueRedGreenBoxes) {
     Vec x = {
-        0.0, 0.0,
-        2.0, 1.0,
-        1.0, 3.0,
+        {0.0, 0.0},
+        {2.0, 1.0},
+        {1.0, 3.0},
     };
     std::vector<std::pair<int, int>> edges = {{0, 1}};
     std::vector<double> radii = {0.25, 0.5, 0.1};
@@ -73,9 +73,9 @@ TEST(ParallelHelper, BuildsExplicitBlueRedGreenBoxes) {
 
 TEST(ParallelHelper, RegistersBlueGreenIntersection) {
     Vec x = {
-        0.0, 0.0,
-        2.0, 0.0,
-        1.0, 0.35,
+        {0.0, 0.0},
+        {2.0, 0.0},
+        {1.0, 0.35},
     };
     const auto cache = build_active_set(x, {{0, 1}}, {0.0, 0.0, 0.1}, 0.3);
     ASSERT_EQ(cache.pairs.size(), 1u);
@@ -86,10 +86,10 @@ TEST(ParallelHelper, RegistersBlueGreenIntersection) {
 
 TEST(ParallelHelper, SupportsNonconsecutiveEdgeEndpoints) {
     Vec x = {
-        -1.0, 0.0,
-         0.0, 0.1,
-         2.0, 2.0,
-         1.0, 0.0,
+        {-1.0, 0.0},
+        { 0.0, 0.1},
+        { 2.0, 2.0},
+        { 1.0, 0.0},
     };
     const auto cache = build_active_set(x, {{0, 3}}, std::vector<double>(4, 0.2), 0.0);
     ASSERT_EQ(cache.pairs.size(), 1u);
@@ -100,9 +100,9 @@ TEST(ParallelHelper, SupportsNonconsecutiveEdgeEndpoints) {
 
 TEST(ParallelHelper, RejectsSeparatedBlueGreenBoxes) {
     Vec x = {
-        0.0, 0.0,
-        2.0, 0.0,
-        1.0, 0.41,
+        {0.0, 0.0},
+        {2.0, 0.0},
+        {1.0, 0.41},
     };
     const auto cache = build_active_set(x, {{0, 1}}, {0.0, 0.0, 0.1}, 0.3);
     EXPECT_TRUE(cache.pairs.empty());
@@ -110,9 +110,9 @@ TEST(ParallelHelper, RejectsSeparatedBlueGreenBoxes) {
 
 TEST(ParallelHelper, RegistersBoxesTouchingAtBoundary) {
     Vec x = {
-        0.0, 0.0,
-        2.0, 0.0,
-        1.0, 0.5,
+        {0.0, 0.0},
+        {2.0, 0.0},
+        {1.0, 0.5},
     };
     const auto cache = build_active_set(x, {{0, 1}}, {0.0, 0.0, 0.25}, 0.25);
     ASSERT_EQ(cache.pairs.size(), 1u);

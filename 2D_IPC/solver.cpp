@@ -13,13 +13,13 @@ struct NodeUpdate {
 };
 
 static Vec2 compute_local_gradient(int who, const RefMesh& ref_mesh,
-                                   const State2D& state, const Vec& x,
+                                   const std::vector<Pin>& pins, const PinMap& pin_map,
+                                   const DeformedState& state, const Vec& x, const Vec& xhat,
                                    double dt, double k_spring, const Vec2& g_accel,
                                    const std::vector<NodeSegmentPair>& barrier_pairs,
                                    double d_hat, double k_barrier) {
     Vec2 gi = local_grad_no_barrier(
-            who, x, state.xhat, state.xpin, state.mass, ref_mesh,
-            state.is_pinned, dt, k_spring, g_accel);
+            who, x, xhat, ref_mesh, pins, &pin_map, dt, k_spring, g_accel);
 
     for (const auto& c : barrier_pairs) {
         if (c.node != who && c.seg0 != who && c.seg1 != who) continue;
@@ -33,12 +33,13 @@ static Vec2 compute_local_gradient(int who, const RefMesh& ref_mesh,
 }
 
 static Mat2 compute_local_hessian(int who, const RefMesh& ref_mesh,
-                                  const State2D& state, const Vec& x,
+                                  const std::vector<Pin>& pins, const PinMap& pin_map,
+                                  const DeformedState& state, const Vec& x,
                                   double dt, double k_spring,
                                   const std::vector<NodeSegmentPair>& barrier_pairs,
                                   double d_hat, double k_barrier) {
     Mat2 Hi = local_hess_no_barrier(
-            who, x, state.mass, ref_mesh, state.is_pinned, dt, k_spring);
+            who, x, ref_mesh, pins, &pin_map, dt, k_spring);
 
     for (const auto& c : barrier_pairs) {
         if (c.node != who && c.seg0 != who && c.seg1 != who) continue;
@@ -54,7 +55,8 @@ static Mat2 compute_local_hessian(int who, const RefMesh& ref_mesh,
 }
 
 static double compute_global_residual(const RefMesh& ref_mesh,
-                                      const State2D& state, const Vec& x,
+                                      const std::vector<Pin>& pins, const PinMap& pin_map,
+                                      const DeformedState& state, const Vec& x, const Vec& xhat,
                                       double dt, double k_spring, const Vec2& g_accel,
                                       const std::vector<NodeSegmentPair>& barrier_pairs,
                                       double d_hat, double k_barrier) {
@@ -62,9 +64,9 @@ static double compute_global_residual(const RefMesh& ref_mesh,
 
     for (int i = 0; i < state.size(); ++i) {
         Vec2 g = compute_local_gradient(
-                i, ref_mesh, state, x, dt, k_spring, g_accel,
+                i, ref_mesh, pins, pin_map, state, x, xhat, dt, k_spring, g_accel,
                 barrier_pairs, d_hat, k_barrier);
-        const double mi = std::max(state.mass[i], 1e-12);
+        const double mi = std::max(ref_mesh.mass[i], 1e-12);
         r = std::max(r, std::max(std::abs(g.x), std::abs(g.y)) / mi);
     }
 
@@ -124,16 +126,17 @@ static double compute_trust_region_safe_step(
 }
 
 static NodeUpdate compute_node_update(
-        int who, const RefMesh& ref_mesh, const State2D& state,
-        const Vec& x, BroadPhase& broad_phase,
+        int who, const RefMesh& ref_mesh, const DeformedState& state,
+        const std::vector<Pin>& pins, const PinMap& pin_map,
+        const Vec& x, const Vec& xhat, BroadPhase& broad_phase,
         double dt, double k_spring, const Vec2& g_accel,
         double d_hat, double k_barrier, double eta,
         bool use_ccd_step_policy) {
     Vec2 gi = compute_local_gradient(
-            who, ref_mesh, state, x, dt, k_spring, g_accel,
+            who, ref_mesh, pins, pin_map, state, x, xhat, dt, k_spring, g_accel,
             broad_phase.pairs(), d_hat, k_barrier);
     Mat2 Hi = compute_local_hessian(
-            who, ref_mesh, state, x, dt, k_spring,
+            who, ref_mesh, pins, pin_map, state, x, dt, k_spring,
             broad_phase.pairs(), d_hat, k_barrier);
 
     Vec2 dx = matvec(mat2_inverse(Hi), gi);
@@ -141,7 +144,7 @@ static NodeUpdate compute_node_update(
     Vec2 displacement{-dx.x, -dx.y};
     double omega = broad_phase.node_box_safe_step(who, xi, displacement);
 
-    Vec v_newton(x.size(), 0.0);
+    Vec v_newton(x.size(), Vec2{0.0, 0.0});
     set_xi(v_newton, who, {-dx.x / dt, -dx.y / dt});
 
     std::vector<NodeSegmentPair> filtering_candidates;
@@ -170,7 +173,8 @@ static void commit_node_update(const NodeUpdate& update, Vec& x) {
 }
 
 SolveResult global_gauss_seidel_solver_basic(
-        const RefMesh& ref_mesh, const State2D& state,
+        const RefMesh& ref_mesh, const std::vector<Pin>& pins,
+        const DeformedState& state, const Vec& xhat,
         Vec& x,
         double dt, double k_spring, const Vec2& g_accel,
         double d_hat, double k_barrier,
@@ -180,6 +184,7 @@ SolveResult global_gauss_seidel_solver_basic(
         bool use_parallel, std::vector<double>* residual_history) {
     const int total_nodes = state.size();
     const Vec x_substep_start = x;
+    const PinMap pin_map = build_pin_map(pins, total_nodes);
 
     static std::vector<double> prev_disp;
     if (static_cast<int>(prev_disp.size()) != total_nodes)
@@ -220,7 +225,7 @@ SolveResult global_gauss_seidel_solver_basic(
 
     auto eval_residual = [&]() {
         return compute_global_residual(
-            ref_mesh, state, x, dt, k_spring, g_accel,
+            ref_mesh, pins, pin_map, state, x, xhat, dt, k_spring, g_accel,
             broad_phase.pairs(), d_hat, k_barrier);
     };
 
@@ -243,7 +248,7 @@ SolveResult global_gauss_seidel_solver_basic(
             #pragma omp parallel for if(use_parallel && group.size() > 1)
             for (int idx = 0; idx < static_cast<int>(group.size()); ++idx) {
                 updates[idx] = compute_node_update(
-                        group[idx], ref_mesh, state, x, broad_phase,
+                        group[idx], ref_mesh, state, pins, pin_map, x, xhat, broad_phase,
                         dt, k_spring, g_accel, d_hat, k_barrier, eta,
                         use_ccd_step_policy);
             }

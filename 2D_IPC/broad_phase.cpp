@@ -43,7 +43,7 @@ std::vector<NodeSegmentPair> build_swept_candidates(
     std::vector<BVHNode> bvh_nodes;
     const int root = build_bvh(segment_boxes, bvh_nodes);
     std::vector<NodeSegmentPair> pairs;
-    const int total_nodes = static_cast<int>(x.size() / 2);
+    const int total_nodes = static_cast<int>(x.size());
 
     for (int node = 0; node < total_nodes; ++node) {
         std::vector<int> hits;
@@ -182,7 +182,7 @@ std::vector<NodeSegmentPair> BroadPhase::build_ccd_candidates_for_node(
         if (!is_invalid_pair(who, seg0, seg1)) result.push_back({who, seg0, seg1});
     }
 
-    const int total_nodes = static_cast<int>(x.size() / 2);
+    const int total_nodes = static_cast<int>(x.size());
     for (const auto& [seg0, seg1] : edges) {
         if (seg0 != who && seg1 != who) continue;
         const AABB segment_box = build_swept_segment_box(x, v_newton, seg0, seg1, dt, 0.0);

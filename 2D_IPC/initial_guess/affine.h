@@ -19,7 +19,9 @@ struct AffineInitialGuessParams {
     Vec2   xcom;
 };
 
-AffineInitialGuessParams compute_affine_initial_guess_params(const State2D& state);
+AffineInitialGuessParams compute_affine_initial_guess_params(
+    const DeformedState& state, const RefMesh& ref_mesh, const std::vector<Pin>& pins);
 Vec2 affine_initial_guess_velocity(const AffineInitialGuessParams& params, const Vec2& x);
 void apply_affine_initial_guess(const AffineInitialGuessParams& params,
-                                const State2D& state, Vec& xnew, double dt);
+                                const DeformedState& state, const std::vector<Pin>& pins,
+                                Vec& xnew, double dt);

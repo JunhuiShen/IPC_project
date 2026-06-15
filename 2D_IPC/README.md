@@ -99,9 +99,8 @@ Per-frame statistics are printed to stdout:
 
 ## Solver
 
-`main.cpp` handles CLI parsing, scene setup, restart, and frame export.
-The per-frame driver is declared in `simulation.h` and implemented in
-`simulation.cpp`.
+`simulation.cpp` handles CLI parsing, scene setup, restart, and frame export.
+The per-frame driver is declared inline in `simulation.h`.
 
 The 2D solver is in `solver.cpp`.
 
@@ -127,10 +126,11 @@ nonlinear Gauss-Seidel iterations over global nodes:
 
 The runtime is topology-agnostic:
 
-- `State2D` stores the evolving configuration: current positions, velocities,
-  predicted positions, masses, and pin data.
+- `DeformedState` stores the evolving configuration as `std::vector<Vec2>`
+  current positions and velocities.
 - `RefMesh` stores the fixed reference information: explicit edge endpoint
-  pairs, rest lengths, and incident-edge adjacency for each node.
+  pairs, rest lengths, incident-edge adjacency for each node, and lumped mass.
+- `Pin` stores soft positional constraints separately from the deformed state.
 - Elasticity, contact, coloring, CCD, and Newton updates all use global node IDs.
 
 Edges do not need consecutive endpoints. Branches, loops, disconnected
@@ -139,7 +139,8 @@ used by the bundled examples to generate initial geometry; the solver never
 receives chain or block information.
 
 `RefMesh` stores reference invariants rather than a separate array of reference
-positions. Its rest lengths are computed from the initial `State2D::x`.
+positions. Its rest lengths are computed from the initial
+`DeformedState::deformed_positions`.
 
 ## Examples And Strategies
 
@@ -201,13 +202,11 @@ strategy changes do not require rebuilding.
 
     2D_IPC/
     ├── CMakeLists.txt
-    ├── main.cpp
-    │   CLI application setup, restart, and output
     ├── simulation.h / simulation.cpp
-    │   substep loop and frame advancement
+    │   inline substep loop plus CLI application setup, restart, and output
     ├── solver.h / solver.cpp
     ├── physics.h / physics.cpp
-    │   local incremental-potential gradient and Hessian
+    │   SimParams2D, DeformedState, RefMesh, Pin, serialization, and local physics terms
     ├── spring_energy.h / spring_energy.cpp
     ├── barrier_energy.h / barrier_energy.cpp
     │   scalar IPC barrier plus node-segment gradient/Hessian
@@ -218,14 +217,9 @@ strategy changes do not require rebuilding.
     │   AABB/BVH infrastructure, active-set cache, and swept candidate queries
     ├── parallel_helper.h / parallel_helper.cpp
     │   blue/red/green box construction, pair registration, adjacency, and coloring
-    ├── state.h / state.cpp
-    │   global dynamic state plus predictor and velocity updates
-    ├── mesh.h / mesh.cpp
-    │   explicit edge topology, rest lengths, and node-edge incidence
     ├── chain.h / chain.cpp
     │   optional chain geometry and assembly helpers for example scenes
     ├── example.h / example.cpp
-    ├── restart.h / restart.cpp
     ├── visualization.h / visualization.cpp
     └── initial_guess/
         └── initial_guess.h / .cpp, trivial, affine, ccd

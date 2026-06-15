@@ -13,7 +13,7 @@ void export_obj(const std::string& filename,
         return;
     }
 
-    int N = static_cast<int>(x.size() / 2);
+    int N = static_cast<int>(x.size());
     for (int i = 0; i < N; ++i) {
         Vec2 xi = get_xi(x, i);
         out << "v " << xi.x << " " << xi.y << " 0.0\n";
@@ -32,7 +32,7 @@ void export_geo(const std::string& filename,
         return;
     }
 
-    const int N = static_cast<int>(x.size() / 2);
+    const int N = static_cast<int>(x.size());
     const int E = static_cast<int>(edges.size());
 
     out << std::setprecision(17);

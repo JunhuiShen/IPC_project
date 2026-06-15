@@ -17,7 +17,7 @@ struct Vec2 {
     Vec2 operator*(double s)      const { return Vec2(x * s,   y * s);   }
 };
 
-using Vec = std::vector<double>;
+using Vec = std::vector<Vec2>;
 
 struct Mat2 {
     double a11, a12, a21, a22;
@@ -28,15 +28,14 @@ struct Mat2x2x2 {
     Mat2 m0, m1;
 };
 
-// Get position of node i from flat position vector
+// Get position of node i from a per-node position vector.
 inline Vec2 get_xi(const Vec &x, int i) {
-    return {x[2 * i], x[2 * i + 1]};
+    return x[i];
 }
 
-// Set position of node i in flat position vector
+// Set position of node i in a per-node position vector.
 inline void set_xi(Vec &x, int i, const Vec2 &v) {
-    x[2 * i]     = v.x;
-    x[2 * i + 1] = v.y;
+    x[i] = v;
 }
 
 // ======================================================
@@ -44,8 +43,8 @@ inline void set_xi(Vec &x, int i, const Vec2 &v) {
 // ======================================================
 
 inline double node_distance(const Vec &a, int i, int j) {
-    double dx = a[2 * i]     - a[2 * j];
-    double dy = a[2 * i + 1] - a[2 * j + 1];
+    double dx = a[i].x - a[j].x;
+    double dy = a[i].y - a[j].y;
     return std::sqrt(dx * dx + dy * dy);
 }
 

@@ -4,8 +4,7 @@
 #include <stdexcept>
 
 static void pin_node(Chain& chain, int i) {
-    chain.is_pinned[i] = 1;
-    set_xi(chain.xpin, i, get_xi(chain.x, i));
+    chain.pins.push_back({i, get_xi(chain.deformed_positions, i)});
 }
 
 ExampleScene build_example(
@@ -19,7 +18,7 @@ ExampleScene build_example(
                 make_chain({-1.85, 2.05}, {1.1, -2.9}, number_of_nodes, density, thickness);
             pin_node(upper, 0);
             pin_node(lower, 0);
-            assemble_chains({upper, lower}, scene.state, scene.ref_mesh);
+            assemble_chains({upper, lower}, scene.state, scene.ref_mesh, scene.pins);
             break;
         }
         default:
