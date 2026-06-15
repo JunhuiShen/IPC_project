@@ -15,6 +15,20 @@ These components can be swapped to compare different algorithmic variants.
 
 - C++17 compiler (GCC 9+, Clang 10+, or MSVC 2019+)
 - CMake 3.16+
+- Eigen 3.4.0 -- fetched automatically by CMake (requires network on the first configure)
+- GoogleTest
+- OpenMP (optional; on macOS: `brew install libomp`)
+
+## Notes for coding agents
+
+When working on this project, Claude, Codex, and other coding agents should
+first inspect the libraries and local helpers already used by the codebase
+before writing new implementations. Start with `CMakeLists.txt` and the
+relevant headers to see what Eigen, GoogleTest, OpenMP, and existing project
+utilities provide. After configuration, inspect `build/_deps/` when fetched
+dependencies are relevant. Prefer maintained library APIs and existing project
+helpers over duplicating math, geometry, collision detection, testing, or
+build logic.
 
 ## Build
 
@@ -43,9 +57,11 @@ Example 1, with the default CCD step policy and CCD initial guess:
 
 A fully explicit version of the same run:
 
-    ./build/simulation --example 1 --substeps 3 --step_policy ccd --initial_guess ccd --format geo --outdir frames_2d
+    ./build/simulation --example 1 --substeps 3 \
+        --step_policy ccd --initial_guess ccd \
+        --format geo --outdir frames_2d
 
-Output frames are written to `frames_2d/` by default as
+Output frames are written to `frames_2d/` by default:
 
     frame_0000.geo
     frame_0001.geo
@@ -66,10 +82,9 @@ Export every substep with:
 
     ./build/simulation --example 1 --write_substeps
 
-From the repository root, the default output folder is:
-
-    2D_IPC/frames_2d/
-
+The output directory is relative to the current working directory. When the
+simulator is launched from `2D_IPC/`, the default location is
+`2D_IPC/frames_2d/`.
 
 ## Console Output
 
@@ -94,23 +109,32 @@ The per-frame driver is declared in `simulation.h` and implemented in
 
 The 2D solver is in `solver.cpp`.
 
-Each frame is split into `substeps` substeps (default `3`). Each substep runs a
-nonlinear Gauss-Seidel sweep over global nodes:
+Each frame is split into `substeps` substeps (default `3`). Each substep runs
+nonlinear Gauss-Seidel iterations over global nodes:
 
-- builds a node-box `BVHBroadPhase` active set
+- sizes each node trust region as
+  `clamp(1.2 * previous_displacement, node_box_min, node_box_max)`
+- builds blue node trust boxes
+- builds each red segment box as the union of its endpoint blue boxes
+- builds each green segment box by augmenting its red box by `d_hat`
+- registers node-segment contact pairs where a blue box intersects a green box
+- builds a mesh/contact conflict graph and colors it greedily
 - computes a local 2x2 Newton update for each node
-- clamps each update with either CCD or trust-region step policy
-- periodically rebuilds and recolors the active set according to
-  `node_box_update_count`
+- clamps each update to its blue box and then applies either the CCD or
+  distance-based trust-region contact filter
+- keeps contact pairs and coloring fixed within one Gauss-Seidel iteration
+- rebuilds boxes, contact pairs, and coloring every
+  `node_box_update_count` iterations
 - reports a mass-normalized residual
 
 ## Data Model
 
 The runtime is topology-agnostic:
 
-- `State2D` stores one global position, velocity, mass, and pin array.
-- `RefMesh` stores explicit edge endpoint pairs, rest lengths, and incident-edge
-  adjacency for each node.
+- `State2D` stores the evolving configuration: current positions, velocities,
+  predicted positions, masses, and pin data.
+- `RefMesh` stores the fixed reference information: explicit edge endpoint
+  pairs, rest lengths, and incident-edge adjacency for each node.
 - Elasticity, contact, coloring, CCD, and Newton updates all use global node IDs.
 
 Edges do not need consecutive endpoints. Branches, loops, disconnected
@@ -118,7 +142,10 @@ components, and edges such as `(0, 7)` are valid. `Chain` is only a convenience
 used by the bundled examples to generate initial geometry; the solver never
 receives chain or block information.
 
-## Example And Strategy Selection
+`RefMesh` stores reference invariants rather than a separate array of reference
+positions. Its rest lengths are computed from the initial `State2D::x`.
+
+## Examples And Strategies
 
 Simulation scenes and algorithmic choices are selected with CLI flags defined in
 `ipc_args.h`.
@@ -130,42 +157,44 @@ candidate detector used in the simulation is `BVHBroadPhase`.
 
 ## Step Filter Options
 
-| Filter | Description |
+| CLI value | Description |
 |---|---|
-| `CCD` | CCD-based collision-safe Newton step filter |
-| `TrustRegion` | Distance-based trust-region Newton step filter |
+| `ccd` | Linear point-segment CCD step filter |
+| `trust_region` | Distance-based trust-region step filter; requires `eta <= 0.5` |
 
 ## Initial Guess Options
 
-| Initial Guess | Description |
+| CLI value | Description |
 |---|---|
-| `CCD` | CCD-filtered initial guess |
-| `Affine` | Affine-motion-based initial guess |
-| `Trivial` | No-motion initial guess |
-| `TrustRegion` | Accepted as a legacy alias for `Trivial` |
+| `ccd` | CCD-filtered explicit prediction |
+| `affine` | Affine-motion prediction |
+| `trivial` | No-motion prediction |
+| `trust_region` | Legacy alias for `trivial` |
 
-Available CLI options:
+Important CLI options:
 
-| Role | Options |
+| Option | Values/default |
 |---|---|
-| `BroadPhase` | `BVHBroadPhase` |
-| `substeps` | positive integer, default `3` |
-| `max_substep_iters` | max Gauss-Seidel iterations per substep, default `500` |
-| `step_policy` | `ccd`, `trust_region` |
-| `k_barrier` | IPC barrier stiffness multiplier, default `100` |
-| `density` | mass density, default `900` |
-| `d_hat` | IPC contact activation distance |
-| `num_frames` | number of output frames |
-| `use_parallel` | boolean, enables color-parallel basic solver updates |
-| `node_box_min` / `node_box_max` | lower/upper half-width clamp for parallel node boxes |
-| `node_box_update_count` | Gauss-Seidel iterations between parallel broad-phase/contact recoloring rebuilds |
-| `initial_guess` | `ccd`, `affine`, `trivial`, `trust_region` (= `trivial`) |
-| `write_substeps` | boolean, writes `substep_XXXX.geo` / `.obj` |
-| `restart_frame` | frame index for `state_XXXX.bin`; `-1` disables restart |
+| `example` | `1` or `2`; default `1` |
+| `nodes` | nodes per chain; default `100` |
+| `dt` / `substeps` | frame timestep `1/30`; `3` substeps |
+| `num_frames` | default `120` |
+| `gx` / `gy` | gravity; defaults `0` and `-9.81` |
+| `k_spring` / `k_barrier` | defaults `1000` and `100` |
+| `density` / `d_hat` | defaults `900` and `0.005` |
+| `tol_abs` / `max_substep_iters` | defaults `1e-6` and `500` |
+| `eta` | step safety factor; default `0.9`; use at most `0.5` with `trust_region` |
+| `step_policy` | `ccd` or `trust_region` |
+| `initial_guess` | `ccd`, `affine`, `trivial`, or `trust_region` |
+| `use_parallel` | color-parallel updates; default `true` |
+| `node_box_min` / `node_box_max` | defaults `0.001` and `0.01` |
+| `node_box_update_count` | active-set rebuild interval; default `1` |
+| `format` / `outdir` | `geo` or `obj`; default directory `frames_2d` |
+| `write_substeps` | exports every substep; default `false` |
+| `restart_frame` | checkpoint frame; `-1` disables restart |
 
-After changing a strategy, rebuild the project:
-
-    cmake --build build
+Run `./build/simulation --help` for the complete generated option list. CLI
+strategy changes do not require rebuilding.
 
 ## Project Structure
 
@@ -199,11 +228,3 @@ After changing a strategy, rebuild the project:
     │   └── broad_phase.h, bvh.h / bvh.cpp
     └── initial_guess/
         └── initial_guess.h / .cpp, trivial, affine, ccd
-
-## Notes
-
-- `BVHBroadPhase` performs broad-phase AABB candidate detection.
-- `CCD` and `TrustRegion` step policies limit the Newton step to maintain collision safety.
-- Initial guess strategies provide different warm-starts for the nonlinear solver.
-- Rest lengths, explicit edge topology, and per-node edge incidence live in one mesh-wide `RefMesh`.
-- Output frames are exported as `.geo` by default; pass `--format obj` for `.obj`.
