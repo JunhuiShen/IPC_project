@@ -4,8 +4,7 @@
 #include "state.h"
 
 enum class ExampleType {
-    Example1,
-    Example2
+    Example1
 };
 
 struct ExampleScene {
@@ -13,4 +12,5 @@ struct ExampleScene {
     RefMesh ref_mesh;
 };
 
-ExampleScene build_example(ExampleType example_type, int number_of_nodes, double density);
+ExampleScene build_example(
+    ExampleType example_type, int number_of_nodes, double density);

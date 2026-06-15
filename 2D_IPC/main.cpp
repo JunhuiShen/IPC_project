@@ -49,15 +49,26 @@ int main(int argc, char** argv) {
     using clock = std::chrono::high_resolution_clock;
     const auto start_time = clock::now();
 
+    ExampleScene scene =
+        build_example(example_type, args.number_of_nodes, args.density);
+    State2D state = std::move(scene.state);
+    RefMesh ref_mesh = std::move(scene.ref_mesh);
+
+    const double min_edge_length =
+        *std::min_element(ref_mesh.rest_lengths.begin(), ref_mesh.rest_lengths.end());
+    const double d_hat_limit = 0.5 * min_edge_length;
+    if (!(args.d_hat < d_hat_limit)) {
+        std::cerr << "Error: d_hat (" << args.d_hat
+                  << ") must be < 0.5 * minimum edge length (" << d_hat_limit
+                  << ", minimum edge length = " << min_edge_length << ").\n";
+        return 1;
+    }
+
     const bool restarting = args.restart_frame >= 0;
     if (!restarting && fs::exists(args.outdir)) {
         fs::remove_all(args.outdir);
     }
     fs::create_directories(args.outdir);
-
-    ExampleScene scene = build_example(example_type, args.number_of_nodes, args.density);
-    State2D state = std::move(scene.state);
-    RefMesh ref_mesh = std::move(scene.ref_mesh);
 
     if (restarting &&
         !read_checkpoint(checkpoint_path(args.outdir, args.restart_frame), state)) {
@@ -84,7 +95,9 @@ int main(int argc, char** argv) {
     BroadPhase broad_phase;
 
     std::cout << "Vertices: " << ref_mesh.num_positions
-              << " | Segments: " << ref_mesh.edges.size() << "\n";
+              << " | Segments: " << ref_mesh.edges.size()
+              << " | Min edge length: " << min_edge_length
+              << " | d_hat limit: " << d_hat_limit << "\n";
 
     if (!restarting) {
         export_frame(args.outdir, 0, state.x, ref_mesh.edges, output_format);

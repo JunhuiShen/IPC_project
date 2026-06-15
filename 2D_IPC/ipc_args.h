@@ -2,8 +2,9 @@
 
 #include "args.h"
 #include "example.h"
-#include "visualization.h"
 #include "initial_guess/initial_guess.h"
+#include "visualization.h"
+
 #include <stdexcept>
 
 // ======================================================
@@ -47,7 +48,7 @@ struct IPCArgs : ArgParser {
     int         restart_frame = -1;
 
     // --- strategy (stored as strings, converted via getters) ---
-    std::string example_type        = "1";    // "1" | "2"
+    std::string example_type        = "1";
     std::string step_policy         = "ccd";  // "ccd" | "trust_region"
     std::string initial_guess_type  = "ccd";  // "ccd" | "trivial" | "affine"
 
@@ -78,7 +79,7 @@ struct IPCArgs : ArgParser {
         add_bool  ("write_substeps",  write_substeps,  false,     "Export every substep as substep_XXXX");
         add_int   ("restart_frame",   restart_frame,   -1,        "Resume from outdir/state_XXXX.bin; -1 disables restart");
 
-        add_string("example",         example_type,    "1",       "Example scene: 1 | 2");
+        add_string("example",         example_type,    "1",       "Example scene: 1");
         add_string("step_policy",     step_policy,     "ccd",     "Step filter: ccd | trust_region");
         add_string("initial_guess",   initial_guess_type, "ccd",  "Initial guess: ccd | trivial | affine");
     }
@@ -87,7 +88,6 @@ struct IPCArgs : ArgParser {
 
     ExampleType get_example_type() const {
         if (example_type == "1") return ExampleType::Example1;
-        if (example_type == "2") return ExampleType::Example2;
         throw std::invalid_argument("Unknown example: " + example_type);
     }
 
@@ -114,8 +114,10 @@ struct IPCArgs : ArgParser {
     // Call after parse(). Throws if parameter combinations are invalid.
     void validate() const {
         if (!(eta > 0.0 && eta < 1.0)) throw std::invalid_argument("eta must be in (0, 1)");
+        if (!(d_hat >= 0.0)) throw std::invalid_argument("d_hat must be nonnegative");
         if (substeps <= 0) throw std::invalid_argument("substeps must be positive");
         if (max_substep_iters <= 0) throw std::invalid_argument("max_substep_iters must be positive");
+        if (number_of_nodes < 2) throw std::invalid_argument("nodes must be at least 2");
         if (node_box_min <= 0.0) throw std::invalid_argument("node_box_min must be positive");
         if (node_box_max < node_box_min) throw std::invalid_argument("node_box_max must be >= node_box_min");
         if (node_box_update_count <= 0) throw std::invalid_argument("node_box_update_count must be positive");

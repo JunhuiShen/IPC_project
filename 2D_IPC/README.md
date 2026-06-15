@@ -49,13 +49,9 @@ Rerun only the tests that failed in the previous test run:
 
 ## Run
 
-    ./build/simulation
-
-Example 1, with the default CCD step policy and CCD initial guess:
-
     ./build/simulation --example 1
 
-A fully explicit version of the same run:
+A fully explicit run of Example 1:
 
     ./build/simulation --example 1 --substeps 3 \
         --step_policy ccd --initial_guess ccd \
@@ -147,13 +143,14 @@ positions. Its rest lengths are computed from the initial `State2D::x`.
 
 ## Examples And Strategies
 
-Simulation scenes and algorithmic choices are selected with CLI flags defined in
+Example 1 contains two pinned chains swinging into each other. Its geometry is
+defined in `example.cpp`. Algorithmic choices use CLI flags defined in
 `ipc_args.h`.
 
-    ./build/simulation --example 2 --step_policy ccd --initial_guess affine
+    ./build/simulation --example 1 --step_policy ccd --initial_guess affine
 
-Available scenes are defined in `example.cpp`. The broad-phase collision
-candidate detector used in the simulation is `BroadPhase`.
+The broad-phase collision candidate detector used in the simulation is
+`BroadPhase`.
 
 ## Step Filter Options
 
@@ -174,7 +171,7 @@ Important CLI options:
 
 | Option | Values/default |
 |---|---|
-| `example` | `1` or `2`; default `1` |
+| `example` | currently `1`; default `1` |
 | `nodes` | nodes per chain; default `100` |
 | `dt` / `substeps` | frame timestep `1/30`; `3` substeps |
 | `num_frames` | default `120` |
@@ -191,6 +188,10 @@ Important CLI options:
 | `format` / `outdir` | `geo` or `obj`; default directory `frames_2d` |
 | `write_substeps` | exports every substep; default `false` |
 | `restart_frame` | checkpoint frame; `-1` disables restart |
+
+`d_hat` must be nonnegative and strictly smaller than half the minimum
+reference edge length. The executable validates this after constructing the
+selected scene and reports the allowed limit.
 
 Run `./build/simulation --help` for the complete generated option list. CLI
 strategy changes do not require rebuilding.
