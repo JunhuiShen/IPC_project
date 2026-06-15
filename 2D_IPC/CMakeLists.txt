@@ -32,6 +32,7 @@ add_library(ipc_core
     solver.cpp
     example.cpp
     initial_guess/initial_guess.cpp
+    rigid_body.cpp
 )
 
 target_include_directories(ipc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
