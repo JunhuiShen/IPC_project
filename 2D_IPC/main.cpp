@@ -50,7 +50,8 @@ int main(int argc, char** argv) {
     const auto start_time = clock::now();
 
     ExampleScene scene =
-        build_example(example_type, args.number_of_nodes, args.density);
+        build_example(
+            example_type, args.number_of_nodes, args.density, args.thickness);
     State2D state = std::move(scene.state);
     RefMesh ref_mesh = std::move(scene.ref_mesh);
 

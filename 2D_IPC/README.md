@@ -177,7 +177,8 @@ Important CLI options:
 | `num_frames` | default `120` |
 | `gx` / `gy` | gravity; defaults `0` and `-9.81` |
 | `k_spring` / `k_barrier` | defaults `1000` and `100` |
-| `density` / `d_hat` | defaults `900` and `0.005` |
+| `density` / `thickness` | defaults `900 kg/m^3` and `0.001 m` |
+| `d_hat` | default `0.005` |
 | `tol_abs` / `max_substep_iters` | defaults `1e-6` and `500` |
 | `eta` | step safety factor; default `0.9`; use at most `0.5` with `trust_region` |
 | `step_policy` | `ccd` or `trust_region` |

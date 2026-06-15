@@ -26,6 +26,7 @@ struct IPCArgs : ArgParser {
     double gy           = -9.81;
     double k_spring     = 1000.0;
     double density = 900.0;
+    double thickness = 0.001;
 
     // --- IPC ---
     double d_hat            = 0.005;
@@ -60,7 +61,8 @@ struct IPCArgs : ArgParser {
         add_double("gx",              gx,              0.0,       "Gravity x-component (m/s^2)");
         add_double("gy",              gy,              -9.81,     "Gravity y-component (m/s^2)");
         add_double("k_spring",        k_spring,        1000.0,    "Spring stiffness");
-        add_double("density",         density,         900.0,     "Mass density (kg/m^2)");
+        add_double("density",         density,         900.0,     "Mass density (kg/m^3)");
+        add_double("thickness",       thickness,       0.001,     "Chain cross-section thickness (m)");
 
         add_double("d_hat",           d_hat,           0.005,     "IPC contact distance threshold");
         add_double("tol_abs",         tol_abs,         1e-6,      "Absolute convergence tolerance");
@@ -115,6 +117,7 @@ struct IPCArgs : ArgParser {
     void validate() const {
         if (!(eta > 0.0 && eta < 1.0)) throw std::invalid_argument("eta must be in (0, 1)");
         if (!(d_hat >= 0.0)) throw std::invalid_argument("d_hat must be nonnegative");
+        if (!(thickness > 0.0)) throw std::invalid_argument("thickness must be positive");
         if (substeps <= 0) throw std::invalid_argument("substeps must be positive");
         if (max_substep_iters <= 0) throw std::invalid_argument("max_substep_iters must be positive");
         if (number_of_nodes < 2) throw std::invalid_argument("nodes must be at least 2");

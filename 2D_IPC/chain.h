@@ -16,6 +16,6 @@ struct Chain {
 };
 
 // Build a uniformly-spaced chain from start to end with N nodes
-Chain make_chain(Vec2 start, Vec2 end, int N, double density, double thickness=0.01);
+Chain make_chain(Vec2 start, Vec2 end, int N, double density, double thickness=0.001);
 
 void assemble_chains(const std::vector<Chain>& chains, State2D& state, RefMesh& ref_mesh);
