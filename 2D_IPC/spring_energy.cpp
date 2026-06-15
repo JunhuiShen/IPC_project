@@ -1,6 +1,18 @@
 #include "spring_energy.h"
 #include <cmath>
 
+double spring_energy(int edge_index, const Vec& x, double k_spring,
+                     const RefMesh& ref_mesh) {
+    const auto [a, b] = ref_mesh.edges[edge_index];
+    const double Lref = ref_mesh.rest_lengths[edge_index];
+    Vec2 xa = get_xi(x, a), xb = get_xi(x, b);
+    const double dx = xb.x - xa.x;
+    const double dy = xb.y - xa.y;
+    const double ell = std::sqrt(dx * dx + dy * dy);
+    const double stretch = ell - Lref;
+    return 0.5 * k_spring / Lref * stretch * stretch;
+}
+
 Vec2 local_spring_grad(int i, const Vec& x, double k_spring,
                        const RefMesh& ref_mesh) {
     Vec2 g_i{0.0, 0.0};

@@ -93,3 +93,11 @@ gtest_discover_tests(broad_phase_test)
 add_executable(parallel_helper_test parallel_helper_test.cpp)
 target_link_libraries(parallel_helper_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
 gtest_discover_tests(parallel_helper_test)
+
+add_executable(spring_energy_test spring_energy_test.cpp)
+target_link_libraries(spring_energy_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
+gtest_discover_tests(spring_energy_test)
+
+add_executable(barrier_energy_test barrier_energy_test.cpp)
+target_link_libraries(barrier_energy_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
+gtest_discover_tests(barrier_energy_test)

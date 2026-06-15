@@ -3,6 +3,11 @@
 #include <algorithm>
 #include <cmath>
 
+double barrier_energy(double d, double dhat) {
+    if (d >= dhat) return 0.0;
+    return -(d - dhat) * (d - dhat) * std::log(d / dhat);
+}
+
 double barrier_grad(double d, double dhat) {
     if (d >= dhat) return 0.0;
     return -2 * (d - dhat) * std::log(d / dhat) - (d - dhat) * (d - dhat) / d;
@@ -88,6 +93,13 @@ Mat2x2x2 get_grad_j_common_analytic_x2(double L, const Vec2& u, const Vec2& v,
 
     return {dJ_dx, dJ_dy};
 }
+}
+
+double node_segment_barrier_energy(const Vec& x, int node, int seg0, int seg1, double dhat) {
+    double t = 0.0;
+    Vec2 p{}, r{};
+    const double d = node_segment_distance(get_xi(x, node), get_xi(x, seg0), get_xi(x, seg1), t, p, r);
+    return barrier_energy(d, dhat);
 }
 
 Vec2 local_barrier_grad(int who, const Vec& x, int node, int seg0, int seg1, double dhat) {

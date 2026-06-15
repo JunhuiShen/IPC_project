@@ -37,15 +37,37 @@ build logic.
     cmake --build build --clean-first   # clean rebuild
     cmake --build build -j              # faster incremental parallel build
 
-## Test
+## Testing
 
-Run all tests and print details for any failures:
+After configuring and building, run the full 2D test suite from the repository
+root or from `2D_IPC/`:
 
     ctest --test-dir build --output-on-failure
 
 Rerun only the tests that failed in the previous test run:
 
     ctest --test-dir build --rerun-failed --output-on-failure
+
+Run a focused subset by matching the GoogleTest suite name:
+
+    ctest --test-dir build -R SpringEnergy --output-on-failure
+    ctest --test-dir build -R BarrierEnergy --output-on-failure
+    ctest --test-dir build -R CCD --output-on-failure
+    ctest --test-dir build -R ParallelHelper --output-on-failure
+
+The main test groups are:
+
+| Test group | Coverage |
+|---|---|
+| `SpringEnergy` | spring energy, local gradient, and local Hessian finite-difference convergence |
+| `BarrierEnergy` | scalar/node-segment barrier energy, local gradient, and local Hessian finite-difference convergence |
+| `CCD` | point-segment and rigid-body continuous collision detection cases |
+| `BVH` | AABB/BVH construction, query, and safe-step behavior |
+| `ParallelHelper` | blue/red/green boxes, contact registration, conflict graph construction, and coloring |
+
+The energy tests use centered finite differences. Energy-vs-gradient and
+gradient-vs-Hessian errors should converge with slope in `[1.95, 2.05]` as the
+step size is halved.
 
 ## Run
 
@@ -208,8 +230,9 @@ strategy changes do not require rebuilding.
     ├── physics.h / physics.cpp
     │   SimParams2D, DeformedState, RefMesh, Pin, serialization, and local physics terms
     ├── spring_energy.h / spring_energy.cpp
+    │   one-edge spring energy and per-node local gradient/Hessian blocks
     ├── barrier_energy.h / barrier_energy.cpp
-    │   scalar IPC barrier plus node-segment gradient/Hessian
+    │   scalar IPC barrier and node-segment energy, gradient, and Hessian blocks
     ├── node_segment_distance.h / node_segment_distance.cpp
     ├── ogc_trust_region.h / ogc_trust_region.cpp
     ├── ccd.h / ccd.cpp
