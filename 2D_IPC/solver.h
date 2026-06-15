@@ -9,15 +9,23 @@ struct SolveResult {
     int    iterations_used;
 };
 
+Vec trivial_initial_guess(const DeformedState& state);
+
+double ccd_initial_guess_safe_step(const Vec& x, const Vec& v,
+                                   const std::vector<NodeSegmentPair>& pairs,
+                                   double dt, double eta = 0.9);
+
+Vec ccd_initial_guess(const DeformedState& state, const RefMesh& ref_mesh,
+                      const std::vector<Pin>& pins, double dt, double eta);
+
+Vec affine_initial_guess(const DeformedState& state, const RefMesh& ref_mesh,
+                         const std::vector<Pin>& pins, double dt);
+
 SolveResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh,
                                               const std::vector<Pin>& pins,
                                               const DeformedState& state,
                                               const Vec& xhat,
-                                              Vec& x,
-                                              double dt, double k_spring, const Vec2& g_accel,
-                                              double d_hat, double k_barrier,
-                                              int max_iters, double tol_abs, double eta,
-                                              double node_box_min, double node_box_max, int node_box_update_count,
-                                              BroadPhase& broad_phase, bool use_ccd_step_policy,
-                                              bool use_parallel,
+                                              Vec& xnew,
+                                              const SimParams2D& params,
+                                              BroadPhase& broad_phase,
                                               std::vector<double>* residual_history = nullptr);

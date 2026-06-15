@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ipc_math.h"
+#include "sdf_penalty_energy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -20,6 +21,10 @@ struct SimParams2D {
     int    substeps = 3;
     double k_spring = 1000.0;
     double k_barrier = 100.0;
+    double k_sdf = 1e5;
+    double eps_sdf = 0.002;
+    std::vector<GroundSDF> sdf_grounds;
+    std::vector<CircleSDF> sdf_circles;
     Vec2   gravity{0.0, -9.81};
     double d_hat = 0.005;
     double tol_abs = 1e-6;

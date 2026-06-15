@@ -15,6 +15,7 @@ add_library(ipc_core
     physics.cpp
     spring_energy.cpp
     barrier_energy.cpp
+    sdf_penalty_energy.cpp
     node_segment_distance.cpp
     ogc_trust_region.cpp
     parallel_helper.cpp
@@ -22,12 +23,8 @@ add_library(ipc_core
     visualization.cpp
     broad_phase.cpp
     ccd.cpp
-    initial_guess/trivial.cpp
-    initial_guess/affine.cpp
-    initial_guess/ccd.cpp
     solver.cpp
     example.cpp
-    initial_guess/initial_guess.cpp
     rigid_body.cpp
 )
 
@@ -101,3 +98,7 @@ gtest_discover_tests(spring_energy_test)
 add_executable(barrier_energy_test barrier_energy_test.cpp)
 target_link_libraries(barrier_energy_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
 gtest_discover_tests(barrier_energy_test)
+
+add_executable(sdf_penalty_energy_test sdf_penalty_energy_test.cpp)
+target_link_libraries(sdf_penalty_energy_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
+gtest_discover_tests(sdf_penalty_energy_test)

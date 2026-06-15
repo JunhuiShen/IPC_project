@@ -2,7 +2,6 @@
 
 #include "args.h"
 #include "example.h"
-#include "initial_guess/initial_guess.h"
 #include "visualization.h"
 
 #include <stdexcept>
@@ -25,6 +24,8 @@ struct IPCArgs : ArgParser {
     double gx           = 0.0;
     double gy           = -9.81;
     double k_spring     = 1000.0;
+    double k_sdf        = 1e5;
+    double eps_sdf      = 0.002;
     double density = 900.0;
     double thickness = 0.001;
 
@@ -61,6 +62,8 @@ struct IPCArgs : ArgParser {
         add_double("gx",              gx,              0.0,       "Gravity x-component (m/s^2)");
         add_double("gy",              gy,              -9.81,     "Gravity y-component (m/s^2)");
         add_double("k_spring",        k_spring,        1000.0,    "Spring stiffness");
+        add_double("k_sdf",           k_sdf,           1e5,       "SDF penalty stiffness");
+        add_double("eps_sdf",         eps_sdf,         0.002,     "SDF transition band width");
         add_double("density",         density,         900.0,     "Mass density (kg/m^3)");
         add_double("thickness",       thickness,       0.001,     "Chain cross-section thickness (m)");
 
@@ -117,6 +120,8 @@ struct IPCArgs : ArgParser {
     void validate() const {
         if (!(eta > 0.0 && eta < 1.0)) throw std::invalid_argument("eta must be in (0, 1)");
         if (!(d_hat >= 0.0)) throw std::invalid_argument("d_hat must be nonnegative");
+        if (!(k_sdf >= 0.0)) throw std::invalid_argument("k_sdf must be nonnegative");
+        if (!(eps_sdf > 0.0)) throw std::invalid_argument("eps_sdf must be positive");
         if (!(thickness > 0.0)) throw std::invalid_argument("thickness must be positive");
         if (substeps <= 0) throw std::invalid_argument("substeps must be positive");
         if (max_substep_iters <= 0) throw std::invalid_argument("max_substep_iters must be positive");

@@ -10,7 +10,6 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
-#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -70,6 +69,8 @@ int main(int argc, char** argv) {
     params.substeps = args.substeps;
     params.k_spring = args.k_spring;
     params.k_barrier = args.k_barrier;
+    params.k_sdf = args.k_sdf;
+    params.eps_sdf = args.eps_sdf;
     params.gravity = {args.gx, args.gy};
     params.d_hat = args.d_hat;
     params.tol_abs = args.tol_abs;
@@ -104,8 +105,8 @@ int main(int argc, char** argv) {
         auto substep_export = [&](int global_substep, const Vec& x_substep) {
             if (args.write_substeps) {
                 export_substep_frame(
-                        args.outdir, global_substep + 1, x_substep,
-                        ref_mesh.edges, output_format);
+                        args.outdir, global_substep + 1, x_substep, ref_mesh.edges,
+                        output_format);
             }
         };
 

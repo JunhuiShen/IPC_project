@@ -61,6 +61,7 @@ The main test groups are:
 |---|---|
 | `SpringEnergy` | spring energy, local gradient, and local Hessian finite-difference convergence |
 | `BarrierEnergy` | scalar/node-segment barrier energy, local gradient, and local Hessian finite-difference convergence |
+| `SDFPenalty2D`, `SDFHeaviside2D`, `GroundSDF`, `CircleSDF` | Heaviside-squared SDF penalty with ground and circle signed-distance fields |
 | `CCD` | point-segment and rigid-body continuous collision detection cases |
 | `BVH` | AABB/BVH construction, query, and safe-step behavior |
 | `ParallelHelper` | blue/red/green boxes, contact registration, conflict graph construction, and coloring |
@@ -166,11 +167,14 @@ positions. Its rest lengths are computed from the initial
 
 ## Examples And Strategies
 
-Example 1 contains two pinned chains swinging into each other. Its geometry is
-defined in `example.cpp`. Algorithmic choices use CLI flags defined in
-`ipc_args.h`.
+Example geometry is defined in `example.cpp`. Algorithmic choices use CLI flags
+defined in `ipc_args.h`.
 
     ./build/simulation --example 1 --step_policy ccd --initial_guess affine
+
+| Example | Description |
+|---|---|
+| `1` | two pinned chains swinging into each other with node-segment IPC contact |
 
 The broad-phase collision candidate detector used in the simulation is
 `BroadPhase`.
@@ -194,12 +198,13 @@ Important CLI options:
 
 | Option | Values/default |
 |---|---|
-| `example` | currently `1`; default `1` |
+| `example` | `1`; default `1` |
 | `nodes` | nodes per chain; default `100` |
 | `dt` / `substeps` | frame timestep `1/30`; `3` substeps |
 | `num_frames` | default `120` |
 | `gx` / `gy` | gravity; defaults `0` and `-9.81` |
 | `k_spring` / `k_barrier` | defaults `1000` and `100` |
+| `k_sdf` / `eps_sdf` | defaults `1e5` and `0.002`; SDF penalty parameters |
 | `density` / `thickness` | defaults `900 kg/m^3` and `0.001 m` |
 | `d_hat` | default `0.005` |
 | `tol_abs` / `max_substep_iters` | defaults `1e-6` and `500` |
@@ -227,12 +232,15 @@ strategy changes do not require rebuilding.
     ├── simulation.h / simulation.cpp
     │   inline substep loop plus CLI application setup, restart, and output
     ├── solver.h / solver.cpp
+    │   initial guesses, local Newton updates, and nonlinear Gauss-Seidel solver
     ├── physics.h / physics.cpp
     │   SimParams2D, DeformedState, RefMesh, Pin, serialization, and local physics terms
     ├── spring_energy.h / spring_energy.cpp
     │   one-edge spring energy and per-node local gradient/Hessian blocks
     ├── barrier_energy.h / barrier_energy.cpp
     │   scalar IPC barrier and node-segment energy, gradient, and Hessian blocks
+    ├── sdf_penalty_energy.h / sdf_penalty_energy.cpp
+    │   generic Heaviside-squared 2D SDF penalty plus ground and circle SDF evaluators
     ├── node_segment_distance.h / node_segment_distance.cpp
     ├── ogc_trust_region.h / ogc_trust_region.cpp
     ├── ccd.h / ccd.cpp
@@ -243,6 +251,4 @@ strategy changes do not require rebuilding.
     ├── chain.h / chain.cpp
     │   optional chain geometry and assembly helpers for example scenes
     ├── example.h / example.cpp
-    ├── visualization.h / visualization.cpp
-    └── initial_guess/
-        └── initial_guess.h / .cpp, trivial, affine, ccd
+    └── visualization.h / visualization.cpp
