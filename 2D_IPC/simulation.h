@@ -35,8 +35,11 @@ inline AdvanceResult2D advance_one_frame(
             xnew = trivial_initial_guess(state);
         } else if (params.initial_guess_type == InitialGuessType::CCD) {
             xnew = ccd_initial_guess(state, ref_mesh, pins, dt, params.eta);
+        } else if (params.initial_guess_type == InitialGuessType::Verlet) {
+            xnew = verlet_initial_guess(
+                    state, ref_mesh, pins, dt, params.eta, params.gravity);
         } else {
-            xnew = affine_initial_guess(state, ref_mesh, pins, dt);
+            xnew = trivial_initial_guess(state);
         }
         std::vector<double> residual_history;
         const SolveResult substep_result = global_gauss_seidel_solver_basic(

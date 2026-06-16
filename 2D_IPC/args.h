@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 #include <iostream>
@@ -29,6 +30,7 @@ struct ArgParser {
     };
 
     std::vector<Spec> specs;
+    std::set<std::string> provided_keys;
 
     // --- registration helpers ---
 
@@ -100,6 +102,7 @@ struct ArgParser {
                 print_usage(argv[0]);
                 return false;
             }
+            provided_keys.insert(key);
 
             // bool flag with no following value
             if (spec->default_str == "true" || spec->default_str == "false") {
@@ -122,6 +125,10 @@ struct ArgParser {
             }
         }
         return true;
+    }
+
+    bool was_provided(const std::string& key) const {
+        return provided_keys.find(key) != provided_keys.end();
     }
 
     void print_usage(const std::string& program_name) const {

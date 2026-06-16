@@ -12,8 +12,8 @@ double sdf_heaviside(double z, double eps) {
 
 double sdf_heaviside_gradient(double z, double eps) {
     if (eps <= 0.0) throw std::runtime_error("sdf_heaviside_gradient: eps must be positive.");
-    if (z < 0.0) return 0.0;
-    if (z > eps) return 0.0;
+    if (z <= 0.0) return 0.0;
+    if (z >= eps) return 0.0;
     return -1.0 / eps;
 }
 
@@ -44,24 +44,23 @@ SDFEvaluation evaluate_sdf(const CircleSDF& sdf, const Vec2& x) {
 }
 
 double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double eps) {
-    const double H = sdf_heaviside(sdf.phi, eps);
-    return 0.5 * k * H * H;
+    if (sdf.phi >= eps) return 0.0;
+    const double d = eps - sdf.phi;
+    return 0.5 * k * d * d;
 }
 
 Vec2 sdf_penalty_gradient(const SDFEvaluation& sdf, double k, double eps) {
-    const double H = sdf_heaviside(sdf.phi, eps);
-    const double Hp = sdf_heaviside_gradient(sdf.phi, eps);
-    return scale(sdf.grad_phi, k * H * Hp);
+    if (sdf.phi >= eps) return {0.0, 0.0};
+    return scale(sdf.grad_phi, -k * (eps - sdf.phi));
 }
 
 Mat2 sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double eps,
                          bool include_curvature) {
-    const double H = sdf_heaviside(sdf.phi, eps);
-    const double Hp = sdf_heaviside_gradient(sdf.phi, eps);
+    if (sdf.phi >= eps) return {0.0, 0.0, 0.0, 0.0};
 
-    Mat2 Hess = scale(outer(sdf.grad_phi, sdf.grad_phi), k * Hp * Hp);
+    Mat2 Hess = scale(outer(sdf.grad_phi, sdf.grad_phi), k);
     if (include_curvature) {
-        Hess = add(Hess, scale(sdf.hess_phi, k * H * Hp));
+        Hess = add(Hess, scale(sdf.hess_phi, -k * (eps - sdf.phi)));
     }
     return Hess;
 }

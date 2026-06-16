@@ -18,8 +18,9 @@ double ccd_initial_guess_safe_step(const Vec& x, const Vec& v,
 Vec ccd_initial_guess(const DeformedState& state, const RefMesh& ref_mesh,
                       const std::vector<Pin>& pins, double dt, double eta);
 
-Vec affine_initial_guess(const DeformedState& state, const RefMesh& ref_mesh,
-                         const std::vector<Pin>& pins, double dt);
+Vec verlet_initial_guess(const DeformedState& state, const RefMesh& ref_mesh,
+                         const std::vector<Pin>& pins, double dt, double eta,
+                         const Vec2& gravity);
 
 SolveResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh,
                                               const std::vector<Pin>& pins,

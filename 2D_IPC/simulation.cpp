@@ -10,8 +10,53 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <utility>
 
 namespace fs = std::filesystem;
+
+static void export_scene_frame(const std::string& outdir,
+                               int frame,
+                               const Vec& dynamic_x,
+                               const std::vector<std::pair<int, int>>& dynamic_edges,
+                               const Vec& static_x,
+                               const std::vector<std::pair<int, int>>& static_edges,
+                               OutputFormat format) {
+    if (static_x.empty()) {
+        export_frame(outdir, frame, dynamic_x, dynamic_edges, format);
+        return;
+    }
+
+    Vec x = dynamic_x;
+    std::vector<std::pair<int, int>> edges = dynamic_edges;
+    const int offset = static_cast<int>(x.size());
+    x.insert(x.end(), static_x.begin(), static_x.end());
+    for (const auto& edge : static_edges) {
+        edges.emplace_back(offset + edge.first, offset + edge.second);
+    }
+    export_frame(outdir, frame, x, edges, format);
+}
+
+static void export_scene_substep(const std::string& outdir,
+                                 int substep,
+                                 const Vec& dynamic_x,
+                                 const std::vector<std::pair<int, int>>& dynamic_edges,
+                                 const Vec& static_x,
+                                 const std::vector<std::pair<int, int>>& static_edges,
+                                 OutputFormat format) {
+    if (static_x.empty()) {
+        export_substep_frame(outdir, substep, dynamic_x, dynamic_edges, format);
+        return;
+    }
+
+    Vec x = dynamic_x;
+    std::vector<std::pair<int, int>> edges = dynamic_edges;
+    const int offset = static_cast<int>(x.size());
+    x.insert(x.end(), static_x.begin(), static_x.end());
+    for (const auto& edge : static_edges) {
+        edges.emplace_back(offset + edge.first, offset + edge.second);
+    }
+    export_substep_frame(outdir, substep, x, edges, format);
+}
 
 int main(int argc, char** argv) {
     IPCArgs args;
@@ -29,6 +74,9 @@ int main(int argc, char** argv) {
         output_format = args.get_output_format();
         initial_guess_type = args.get_initial_guess_type();
         use_ccd_step_policy = args.use_ccd_step_policy();
+        if (example_type == ExampleType::Example2 && !args.was_provided("initial_guess")) {
+            initial_guess_type = InitialGuessType::Verlet;
+        }
     } catch (const std::invalid_argument& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
@@ -43,6 +91,8 @@ int main(int argc, char** argv) {
     DeformedState state = std::move(scene.state);
     RefMesh ref_mesh = std::move(scene.ref_mesh);
     std::vector<Pin> pins = std::move(scene.pins);
+    Vec static_positions = std::move(scene.static_positions);
+    std::vector<std::pair<int, int>> static_edges = std::move(scene.static_edges);
 
     const double min_edge_length =
         *std::min_element(ref_mesh.rest_lengths.begin(), ref_mesh.rest_lengths.end());
@@ -71,6 +121,8 @@ int main(int argc, char** argv) {
     params.k_barrier = args.k_barrier;
     params.k_sdf = args.k_sdf;
     params.eps_sdf = args.eps_sdf;
+    params.sdf_grounds = std::move(scene.sdf_grounds);
+    params.sdf_circles = std::move(scene.sdf_circles);
     params.gravity = {args.gx, args.gy};
     params.d_hat = args.d_hat;
     params.tol_abs = args.tol_abs;
@@ -91,7 +143,9 @@ int main(int argc, char** argv) {
               << " | d_hat limit: " << d_hat_limit << "\n";
 
     if (!restarting) {
-        export_frame(args.outdir, 0, state.deformed_positions, ref_mesh.edges, output_format);
+        export_scene_frame(
+                args.outdir, 0, state.deformed_positions, ref_mesh.edges,
+                static_positions, static_edges, output_format);
         serialize_state(args.outdir, 0, state);
     }
 
@@ -104,9 +158,9 @@ int main(int argc, char** argv) {
     for (int frame = start_frame; frame <= args.num_frames; ++frame) {
         auto substep_export = [&](int global_substep, const Vec& x_substep) {
             if (args.write_substeps) {
-                export_substep_frame(
+                export_scene_substep(
                         args.outdir, global_substep + 1, x_substep, ref_mesh.edges,
-                        output_format);
+                        static_positions, static_edges, output_format);
             }
         };
 
@@ -116,7 +170,9 @@ int main(int argc, char** argv) {
         const auto solver_end = clock::now();
         const std::chrono::duration<double> solver_elapsed = solver_end - solver_start;
 
-        export_frame(args.outdir, frame, state.deformed_positions, ref_mesh.edges, output_format);
+        export_scene_frame(
+                args.outdir, frame, state.deformed_positions, ref_mesh.edges,
+                static_positions, static_edges, output_format);
         serialize_state(args.outdir, frame, state);
 
         max_global_residual = std::max(max_global_residual, result.max_final_residual);

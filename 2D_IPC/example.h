@@ -3,13 +3,18 @@
 #include "physics.h"
 
 enum class ExampleType {
-    Example1
+    Example1,
+    Example2
 };
 
 struct ExampleScene {
     DeformedState state;
     RefMesh ref_mesh;
     std::vector<Pin> pins;
+    std::vector<GroundSDF> sdf_grounds;
+    std::vector<CircleSDF> sdf_circles;
+    Vec static_positions;
+    std::vector<std::pair<int, int>> static_edges;
 };
 
 ExampleScene build_example(

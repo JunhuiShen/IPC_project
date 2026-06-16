@@ -24,7 +24,7 @@ struct IPCArgs : ArgParser {
     double gx           = 0.0;
     double gy           = -9.81;
     double k_spring     = 1000.0;
-    double k_sdf        = 1e5;
+    double k_sdf        = 500.0;
     double eps_sdf      = 0.002;
     double density = 900.0;
     double thickness = 0.001;
@@ -52,7 +52,7 @@ struct IPCArgs : ArgParser {
     // --- strategy (stored as strings, converted via getters) ---
     std::string example_type        = "1";
     std::string step_policy         = "ccd";  // "ccd" | "trust_region"
-    std::string initial_guess_type  = "ccd";  // "ccd" | "trivial" | "affine"
+    std::string initial_guess_type  = "ccd";  // "ccd" | "trivial" | "verlet"
 
     IPCArgs() {
         add_double("dt",              dt,              1.0/30.0,  "Timestep size (seconds)");
@@ -62,8 +62,8 @@ struct IPCArgs : ArgParser {
         add_double("gx",              gx,              0.0,       "Gravity x-component (m/s^2)");
         add_double("gy",              gy,              -9.81,     "Gravity y-component (m/s^2)");
         add_double("k_spring",        k_spring,        1000.0,    "Spring stiffness");
-        add_double("k_sdf",           k_sdf,           1e5,       "SDF penalty stiffness");
-        add_double("eps_sdf",         eps_sdf,         0.002,     "SDF transition band width");
+        add_double("k_sdf",           k_sdf,           500.0,     "SDF penalty stiffness");
+        add_double("eps_sdf",         eps_sdf,         0.002,     "SDF active range; 0 gives a hard quadratic at the surface");
         add_double("density",         density,         900.0,     "Mass density (kg/m^3)");
         add_double("thickness",       thickness,       0.001,     "Chain cross-section thickness (m)");
 
@@ -84,15 +84,16 @@ struct IPCArgs : ArgParser {
         add_bool  ("write_substeps",  write_substeps,  false,     "Export every substep as substep_XXXX");
         add_int   ("restart_frame",   restart_frame,   -1,        "Resume from outdir/state_XXXX.bin; -1 disables restart");
 
-        add_string("example",         example_type,    "1",       "Example scene: 1");
+        add_string("example",         example_type,    "1",       "Example scene: 1 | 2");
         add_string("step_policy",     step_policy,     "ccd",     "Step filter: ccd | trust_region");
-        add_string("initial_guess",   initial_guess_type, "ccd",  "Initial guess: ccd | trivial | affine");
+        add_string("initial_guess",   initial_guess_type, "ccd",  "Initial guess: ccd | trivial | verlet");
     }
 
     // --- typed getters ---
 
     ExampleType get_example_type() const {
         if (example_type == "1") return ExampleType::Example1;
+        if (example_type == "2") return ExampleType::Example2;
         throw std::invalid_argument("Unknown example: " + example_type);
     }
 
@@ -105,7 +106,7 @@ struct IPCArgs : ArgParser {
     InitialGuessType get_initial_guess_type() const {
         if (initial_guess_type == "ccd")     return InitialGuessType::CCD;
         if (initial_guess_type == "trivial") return InitialGuessType::Trivial;
-        if (initial_guess_type == "affine")  return InitialGuessType::Affine;
+        if (initial_guess_type == "verlet")  return InitialGuessType::Verlet;
         throw std::invalid_argument("Unknown initial guess: " + initial_guess_type);
     }
 
@@ -121,7 +122,7 @@ struct IPCArgs : ArgParser {
         if (!(eta > 0.0 && eta < 1.0)) throw std::invalid_argument("eta must be in (0, 1)");
         if (!(d_hat >= 0.0)) throw std::invalid_argument("d_hat must be nonnegative");
         if (!(k_sdf >= 0.0)) throw std::invalid_argument("k_sdf must be nonnegative");
-        if (!(eps_sdf > 0.0)) throw std::invalid_argument("eps_sdf must be positive");
+        if (!(eps_sdf >= 0.0)) throw std::invalid_argument("eps_sdf must be nonnegative");
         if (!(thickness > 0.0)) throw std::invalid_argument("thickness must be positive");
         if (substeps <= 0) throw std::invalid_argument("substeps must be positive");
         if (max_substep_iters <= 0) throw std::invalid_argument("max_substep_iters must be positive");

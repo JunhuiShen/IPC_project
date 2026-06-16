@@ -170,11 +170,12 @@ positions. Its rest lengths are computed from the initial
 Example geometry is defined in `example.cpp`. Algorithmic choices use CLI flags
 defined in `ipc_args.h`.
 
-    ./build/simulation --example 1 --step_policy ccd --initial_guess affine
+    ./build/simulation --example 2 --initial_guess verlet
 
 | Example | Description |
 |---|---|
 | `1` | two pinned chains swinging into each other with node-segment IPC contact |
+| `2` | one falling chain above a static ground SDF collider |
 
 The broad-phase collision candidate detector used in the simulation is
 `BroadPhase`.
@@ -191,26 +192,26 @@ The broad-phase collision candidate detector used in the simulation is
 | CLI value | Description |
 |---|---|
 | `ccd` | CCD-filtered explicit prediction |
-| `affine` | Affine-motion prediction |
+| `verlet` | CCD-filtered prediction using `x + dt v + dt^2 g` |
 | `trivial` | No-motion prediction |
 
 Important CLI options:
 
 | Option | Values/default |
 |---|---|
-| `example` | `1`; default `1` |
+| `example` | `1` or `2`; default `1` |
 | `nodes` | nodes per chain; default `100` |
 | `dt` / `substeps` | frame timestep `1/30`; `3` substeps |
 | `num_frames` | default `120` |
 | `gx` / `gy` | gravity; defaults `0` and `-9.81` |
 | `k_spring` / `k_barrier` | defaults `1000` and `100` |
-| `k_sdf` / `eps_sdf` | defaults `1e5` and `0.002`; SDF penalty parameters |
+| `k_sdf` / `eps_sdf` | defaults `500` and `0.002`; SDF penalty parameters |
 | `density` / `thickness` | defaults `900 kg/m^3` and `0.001 m` |
 | `d_hat` | default `0.005` |
 | `tol_abs` / `max_substep_iters` | defaults `1e-6` and `500` |
 | `eta` | step safety factor; default `0.9`; use at most `0.5` with `trust_region` |
 | `step_policy` | `ccd` or `trust_region` |
-| `initial_guess` | `ccd`, `affine`, or `trivial` |
+| `initial_guess` | `ccd`, `verlet`, or `trivial`; example `2` uses `verlet` unless explicitly set |
 | `use_parallel` | color-parallel updates; default `true` |
 | `node_box_min` / `node_box_max` | defaults `0.001` and `0.01` |
 | `node_box_update_count` | active-set rebuild interval; default `1` |

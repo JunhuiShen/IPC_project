@@ -198,9 +198,9 @@ TEST(SDFHeaviside2D, PiecewiseValues) {
 TEST(SDFHeaviside2D, GradientPiecewise) {
     const double eps = 0.1;
     EXPECT_EQ(sdf_heaviside_gradient(-1.0, eps), 0.0);
-    EXPECT_NEAR(sdf_heaviside_gradient(0.0, eps), -10.0, kTol);
+    EXPECT_EQ(sdf_heaviside_gradient(0.0, eps), 0.0);
     EXPECT_NEAR(sdf_heaviside_gradient(0.04, eps), -10.0, kTol);
-    EXPECT_NEAR(sdf_heaviside_gradient(eps, eps), -10.0, kTol);
+    EXPECT_EQ(sdf_heaviside_gradient(eps, eps), 0.0);
     EXPECT_EQ(sdf_heaviside_gradient(2.0 * eps, eps), 0.0);
 
     EXPECT_THROW(sdf_heaviside_gradient(0.0, -1.0), std::runtime_error);
@@ -213,28 +213,42 @@ TEST(SDFPenalty2D, EnergyBehavior) {
 
     EXPECT_EQ(sdf_penalty_energy(evaluate_sdf(ground, {0.0, 0.5}), k, eps), 0.0);
     EXPECT_NEAR(sdf_penalty_energy(evaluate_sdf(ground, {0.0, -0.2}), k, eps),
-                0.5 * k, kTol);
+                0.5 * k * 0.3 * 0.3, kTol);
     EXPECT_NEAR(sdf_penalty_energy(evaluate_sdf(ground, {0.0, 0.04}), k, eps),
-                0.5 * k * 0.6 * 0.6, kTol);
+                0.5 * k * 0.06 * 0.06, kTol);
 
     const Vec2 g = sdf_penalty_gradient(evaluate_sdf(ground, {0.0, 0.04}), k, eps);
     EXPECT_NEAR(g.x, 0.0, kTol);
-    EXPECT_NEAR(g.y, -600.0, kTol);
+    EXPECT_NEAR(g.y, -6.0, kTol);
 
     const Mat2 H = sdf_penalty_hessian(evaluate_sdf(ground, {0.0, 0.04}), k, eps);
     EXPECT_NEAR(H.a11, 0.0, kTol);
     EXPECT_NEAR(H.a12, 0.0, kTol);
     EXPECT_NEAR(H.a21, 0.0, kTol);
-    EXPECT_NEAR(H.a22, k / (eps * eps), kTol);
+    EXPECT_NEAR(H.a22, k, kTol);
 
     const Vec2 inside_g = sdf_penalty_gradient(evaluate_sdf(ground, {0.0, -0.2}), k, eps);
     const Mat2 inside_H = sdf_penalty_hessian(evaluate_sdf(ground, {0.0, -0.2}), k, eps);
     EXPECT_NEAR(inside_g.x, 0.0, kTol);
-    EXPECT_NEAR(inside_g.y, 0.0, kTol);
+    EXPECT_NEAR(inside_g.y, -30.0, kTol);
     EXPECT_NEAR(inside_H.a11, 0.0, kTol);
     EXPECT_NEAR(inside_H.a12, 0.0, kTol);
     EXPECT_NEAR(inside_H.a21, 0.0, kTol);
-    EXPECT_NEAR(inside_H.a22, 0.0, kTol);
+    EXPECT_NEAR(inside_H.a22, k, kTol);
+}
+
+TEST(SDFPenalty2D, HardQuadraticWithZeroEps) {
+    const GroundSDF ground{0.0};
+    const double k = 50.0;
+    const double eps = 0.0;
+
+    EXPECT_EQ(sdf_penalty_energy(evaluate_sdf(ground, {0.0, 0.5}), k, eps), 0.0);
+    EXPECT_NEAR(sdf_penalty_energy(evaluate_sdf(ground, {0.0, -0.2}), k, eps),
+                0.5 * k * 0.2 * 0.2, kTol);
+
+    const Vec2 g = sdf_penalty_gradient(evaluate_sdf(ground, {0.0, -0.2}), k, eps);
+    EXPECT_NEAR(g.x, 0.0, kTol);
+    EXPECT_NEAR(g.y, -10.0, kTol);
 }
 
 TEST(SDFPenalty2D, GroundFiniteDifferenceConvergence) {
