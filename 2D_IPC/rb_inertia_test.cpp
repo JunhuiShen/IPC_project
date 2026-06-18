@@ -163,12 +163,13 @@ TEST(RigidBodyInertia, RotationGradientHessianHasSlopeTwo) {
     const double theta_n = -0.28;
     const double omega_n = 1.35;
     const double dt = 0.041;
+    const Mat2 inertia_tensor = inertia_body_tensor(U, masses);
 
     auto gradient = [&](double theta_eval) {
-        return inertia_rotation_gradient(theta_eval, theta_n, omega_n, U, masses, dt);
+        return inertia_rotation_gradient(theta_eval, theta_n, omega_n, inertia_tensor, dt);
     };
 
-    const double H = inertia_rotation_hessian(theta, theta_n, omega_n, U, masses, dt);
+    const double H = inertia_rotation_hessian(theta, theta_n, omega_n, inertia_tensor, dt);
 
     bool passed = true;
     passed &= check_rotation_gradient_hessian("rb inertia rotation dgrad/dtheta", theta, H, gradient);

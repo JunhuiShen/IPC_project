@@ -70,6 +70,14 @@ static inline double vec_entry(const Vec2& v, int index) {
     return index == 0 ? v.x : v.y;
 }
 
+static inline void set_vec_entry(Vec2& v, int index, double value) {
+    if (index == 0) {
+        v.x = value;
+    } else {
+        v.y = value;
+    }
+}
+
 static inline double cross(const Vec2 &a, const Vec2 &b) {
     return a.x * b.y - a.y * b.x;
 }
