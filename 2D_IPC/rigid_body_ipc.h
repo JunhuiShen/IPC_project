@@ -14,6 +14,16 @@ Mat2 inertia_translation_hessian(double m_total);
 // inertia_tensor_{gamma beta} = sum_i m_i U_{i gamma} U_{i beta}.
 Mat2 inertia_body_tensor(const Vec& U, const std::vector<double>& masses);
 
+
+// U = X - Y. Assume Y is at the origin.
+// Takes in a material space particle X and transform into world space position x
+Vec2 world_space_position(const Vec2& X, const Vec2& x_com, const double theta);
+
+// U = X - Y. Assume Y is at the origin.
+// Takes in a world space particle x and transform into material space position X
+Vec2 material_space_position(const Vec2& x, const Vec2& x_com, const double theta);
+
+
 // Rotation gradient from the reduced rigid-body inertia:
 // grad_theta_Ib =
 //     -R_{alpha gamma}(theta_n) C_{alpha lambda}

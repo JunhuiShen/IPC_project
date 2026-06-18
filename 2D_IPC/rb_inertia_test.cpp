@@ -1,4 +1,4 @@
-#include "rb_inertia.h"
+#include "rigid_body_ipc.h"
 
 #include <gtest/gtest.h>
 

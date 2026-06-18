@@ -26,7 +26,7 @@ add_library(ipc_core
     solver.cpp
     example.cpp
     rigid_body.cpp
-    rb_inertia.cpp
+    rigid_body_ipc.cpp
 )
 
 target_include_directories(ipc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
