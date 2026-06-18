@@ -29,6 +29,32 @@ Mat2 inertia_body_tensor(const Vec& U, const std::vector<double>& masses) {
     return inertia_tensor;
 }
 
+Vec2 world_space_position(const Vec2& X, const Vec2& x_com, const double theta){
+    // Takes in a material space particle X and transform into world space position x
+    Vec2 x = x_com;
+
+    Vec2 U{double(0),double(0)}, r{double(0),double(0)};
+    for(size_t alpha = 0; alpha < 2; alpha++){
+        set_vec_entry(U,alpha,vec_entry(X,alpha));
+    }
+    r = matvec(R(theta),U);
+    for(size_t alpha = 0; alpha < 2; alpha++){
+        set_vec_entry(x,alpha, vec_entry(x,alpha) + vec_entry(r,alpha));
+    }
+
+    return x;
+}
+
+Vec2 material_space_position(const Vec2& x, const Vec2& x_com, const double theta){
+    // Takes in a world space particle x and transform into material space position X
+    Vec2 r{double(0),double(0)};
+    for(size_t alpha = 0; alpha < 2; alpha++){
+        set_vec_entry(r,alpha,vec_entry(x,alpha)-vec_entry(x_com,alpha));
+    }
+
+    Vec2 X = matvec(R(-theta),r);
+    return X;
+}
 
 
 double incremental_potential_energy(const Vec2& y, const double theta, const Vec2& y_n, const double theta_n, const Vec2& vhat_n, const double omega_n, const double dt, const double m_total, const Mat2& I){
