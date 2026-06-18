@@ -34,7 +34,3 @@ double incremental_potential_energy(const Vec2& y, double theta,
                                     double omega_n, double dt, double m_total,
                                     const Mat2& I);
 
-double incremental_potential_energy_new(const Vec2& y, double theta,
-                                    const Vec2& y_n, double theta_n, const Vec2& vhat_n,
-                                    double omega_n, double dt, double m_total,
-                                    const Mat2& I);

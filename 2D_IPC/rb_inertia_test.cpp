@@ -231,7 +231,7 @@ TEST(RigidBodyInertia, EnergyGradientTestRotation) {
     const double analytic_grad = inertia_rotation_gradient(theta, theta_n, omega_n, I, dt);
 
     auto energy_of_theta = [&](double theta_eval) {
-        return incremental_potential_energy_new(y, theta_eval, y_n, theta_n, vhat_n, omega_n, dt, m_total, I);
+        return incremental_potential_energy(y, theta_eval, y_n, theta_n, vhat_n, omega_n, dt, m_total, I);
     };
 
     const bool passed = check_rotation_gradient_hessian(
