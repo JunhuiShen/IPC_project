@@ -176,3 +176,65 @@ TEST(RigidBodyInertia, RotationGradientHessianHasSlopeTwo) {
 
     EXPECT_TRUE(passed);
 }
+
+TEST(RigidBodyInertia, EnergyGradientTestTranslation) {
+    const Vec U = {
+        {-0.8, 0.35},
+        {0.45, -0.55},
+        {0.9, 0.7},
+    };
+    const Vec2 y{0.31, -0.42};
+    const Vec2 y_n{-0.13, 0.27};
+    const Vec2 vhat_n{1.7, -0.6};
+    const std::vector<double> masses = {1.2, 0.7, 1.9};
+    const double m_total = 3.8;
+    const double theta = 0.61;
+    const double theta_n = -0.28;
+    const double omega_n = 1.35;
+    const double dt = 0.041;
+    const Mat2 I = inertia_body_tensor(U, masses);
+
+    const Vec2 analytic_grad = inertia_translation_gradient(y, y_n, vhat_n, dt, m_total);
+
+    bool passed = true;
+    for (int comp = 0; comp < 2; ++comp) {
+        const double y_comp = comp == 0 ? y.x : y.y;
+        auto energy_of_comp = [&, comp](double val) {
+            Vec2 y_eval = y;
+            if (comp == 0) y_eval.x = val; else y_eval.y = val;
+            return incremental_potential_energy(y_eval, theta, y_n, theta_n, vhat_n, omega_n, dt, m_total, I);
+        };
+        passed &= check_rotation_gradient_hessian(
+            "dE/dy[" + std::to_string(comp) + "]",
+            y_comp, component(analytic_grad, comp), energy_of_comp);
+    }
+    EXPECT_TRUE(passed);
+}
+
+TEST(RigidBodyInertia, EnergyGradientTestRotation) {
+    const Vec U = {
+        {-0.8, 0.35},
+        {0.45, -0.55},
+        {0.9, 0.7},
+    };
+    const Vec2 y{0.31, -0.42};
+    const Vec2 y_n{-0.13, 0.27};
+    const Vec2 vhat_n{1.7, -0.6};
+    const std::vector<double> masses = {1.2, 0.7, 1.9};
+    const double m_total = 3.8;
+    const double theta = 0.61;
+    const double theta_n = -0.28;
+    const double omega_n = 1.35;
+    const double dt = 0.041;
+    const Mat2 I = inertia_body_tensor(U, masses);
+
+    const double analytic_grad = inertia_rotation_gradient(theta, theta_n, omega_n, I, dt);
+
+    auto energy_of_theta = [&](double theta_eval) {
+        return incremental_potential_energy_new(y, theta_eval, y_n, theta_n, vhat_n, omega_n, dt, m_total, I);
+    };
+
+    const bool passed = check_rotation_gradient_hessian(
+        "dE/dtheta", theta, analytic_grad, energy_of_theta);
+    EXPECT_TRUE(passed);
+}

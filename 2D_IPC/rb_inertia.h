@@ -28,3 +28,13 @@ double inertia_rotation_gradient(double theta, double theta_n, double omega_n, c
 //     +dt * omega_n * C_{alpha kappa} R_{kappa gamma}(theta_n)
 //        R_{alpha beta}(theta) inertia_tensor_{gamma beta}.
 double inertia_rotation_hessian(double theta, double theta_n, double omega_n, const Mat2& inertia_tensor, double dt);
+
+double incremental_potential_energy(const Vec2& y, double theta,
+                                    const Vec2& y_n, double theta_n, const Vec2& vhat_n,
+                                    double omega_n, double dt, double m_total,
+                                    const Mat2& I);
+
+double incremental_potential_energy_new(const Vec2& y, double theta,
+                                    const Vec2& y_n, double theta_n, const Vec2& vhat_n,
+                                    double omega_n, double dt, double m_total,
+                                    const Mat2& I);

@@ -517,53 +517,53 @@ inline void SymmetricEigenDecomposition(const Eigen::MatrixXd& A, Eigen::MatrixX
 }
 
   inline std::array<int,2> MaxAbsEntry(const Eigen::MatrixXd& A, const std::array<int,2>& i_range,const std::array<int,2>& j_range){
-    std::array<int,2>result={i_range[0],j_range[0]};
-    double max_abs=double(0);
-    for(size_t i=size_t(i_range[0]);i<size_t(i_range[1]);i++){
-      for(size_t j=size_t(j_range[0]);j<size_t(j_range[1]);j++){
-        if(abs(A(i,j))>max_abs){
-          result={int(i),int(j)};
-          max_abs=abs(A(i,j));
+      std::array<int,2>result={i_range[0],j_range[0]};
+      double max_abs=double(0);
+      for(size_t i=size_t(i_range[0]);i<size_t(i_range[1]);i++){
+        for(size_t j=size_t(j_range[0]);j<size_t(j_range[1]);j++){
+          if(abs(A(i,j))>max_abs){
+            result={int(i),int(j)};
+            max_abs=abs(A(i,j));
+          }
         }
       }
-    }
-    return result;
+      return result;
   }
 
   inline void SwapRows(const std::array<int,2>& row_swap, Eigen::MatrixXd& A){
-    Assert(size_t(row_swap[0])<size_t(A.rows()) && size_t(row_swap[0])<size_t(A.rows()) && size_t(row_swap[0])>=0 && size_t(row_swap[1])>=0,"ALGEBRA::SwapRows: rows not in dims of matrix.");
+      Assert(size_t(row_swap[0])<size_t(A.rows()) && size_t(row_swap[0])<size_t(A.rows()) && size_t(row_swap[0])>=0 && size_t(row_swap[1])>=0,"ALGEBRA::SwapRows: rows not in dims of matrix.");
 
-    if(row_swap[0]==row_swap[1]) 
-      return;
+      if(row_swap[0]==row_swap[1]) 
+        return;
 
-    for(size_t j=0;j<size_t(A.cols());j++){
-      double temp=A(row_swap[0], j);
-      A(row_swap[0], j)=A(row_swap[1] + j);
-      A(row_swap[1] + j)=temp;
-    }
+      for(size_t j=0;j<size_t(A.cols());j++){
+        double temp=A(row_swap[0], j);
+        A(row_swap[0], j)=A(row_swap[1] + j);
+        A(row_swap[1] + j)=temp;
+      }
   }
 
 inline void PLU(const Eigen::MatrixXd& A, std::vector<std::array<int,2>>& row_swaps, Eigen::MatrixXd& LU){
-	std::array<int,2> dims = {int(A.rows()), int(A.cols())};
-	Assert(dims[0]==dims[1],"PLU only supports square matrices.");
-	LU=A;
-	size_t n=dims[0];
-	
-	row_swaps.resize(n-1);
-	
-	for(size_t k=0;k<n-1;k++){
-		std::array<int,2> pivot_entry= MaxAbsEntry(LU,{int(k),int(n)},{int(k),int(k+1)});
-		row_swaps[k]={int(k),pivot_entry[0]};
-		Assert(abs(LU(pivot_entry[0],k)),"PLU: rank deficient matrix.");
-		SwapRows(row_swaps[k], LU);
-		for(size_t i=k+1;i<n;i++){
-			LU(i,k)=LU(i,k)/LU(k,k);
-			#pragma omp parallel for
-			for(int j=int(k+1);j<int(n);++j){
-		      LU(i,j)-=LU(i,k)*LU(k,j);
-		    }
-		}
-	}
+    std::array<int,2> dims = {int(A.rows()), int(A.cols())};
+    Assert(dims[0]==dims[1],"PLU only supports square matrices.");
+    LU=A;
+    size_t n=dims[0];
+    
+    row_swaps.resize(n-1);
+    
+    for(size_t k=0;k<n-1;k++){
+      std::array<int,2> pivot_entry= MaxAbsEntry(LU,{int(k),int(n)},{int(k),int(k+1)});
+      row_swaps[k]={int(k),pivot_entry[0]};
+      Assert(abs(LU(pivot_entry[0],k)),"PLU: rank deficient matrix.");
+      SwapRows(row_swaps[k], LU);
+      for(size_t i=k+1;i<n;i++){
+        LU(i,k)=LU(i,k)/LU(k,k);
+        #pragma omp parallel for
+        for(int j=int(k+1);j<int(n);++j){
+            LU(i,j)-=LU(i,k)*LU(k,j);
+          }
+      }
+    }
 }
 
 inline void PLUSolve(const Eigen::MatrixXd& LU, const std::vector<std::array<int,2>>& row_swaps, const std::vector<double>& b, std::vector<double>& x){

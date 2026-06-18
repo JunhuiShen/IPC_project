@@ -9,6 +9,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <Eigen/Dense>
 
 enum class InitialGuessType {
     Trivial,
@@ -50,6 +51,13 @@ struct Pin {
 struct DeformedState {
     Vec deformed_positions;
     Vec velocities;
+
+    // Rigid Bodies
+    std::vector<Vec> x_coms; // center of mass position for each rb
+    std::vector<Vec> v_coms; // center of amss velocity for each rb
+    std::vector<double> theta; // orientation for each rb
+    std::vector<double> omega; // angular velocity for each rb = [0,0,omega]
+
 };
 
 struct RefMesh {
@@ -58,6 +66,9 @@ struct RefMesh {
     std::vector<double> rest_lengths;
     std::vector<std::vector<int>> incident_edges;
     std::vector<double> mass;
+
+    std::vector<std::vector<Vec2>> ref_positions; // array of particles in material space for each rb
+    std::vector<Mat2> inertia_tensor; // inertia tensor for each rb
 
     inline void initialize(int n_positions,
                            const std::vector<std::pair<int, int>>& input_edges,
@@ -122,6 +133,7 @@ inline void update_velocity(Vec& v, const Vec& xnew, const Vec& xold, double dt)
         });
     }
 }
+
 
 Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat,
                            const RefMesh& ref_mesh,

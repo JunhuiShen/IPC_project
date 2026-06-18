@@ -29,6 +29,73 @@ Mat2 inertia_body_tensor(const Vec& U, const std::vector<double>& masses) {
     return inertia_tensor;
 }
 
+
+double incremental_potential_energy(const Vec2& y, const double theta, const Vec2& y_n, const double theta_n, const Vec2& vhat_n, const double omega_n, const double dt, const double m_total, const Mat2& I){
+    double result = double(0);
+
+    // Translation
+    for(size_t alpha = 0; alpha < 2; alpha++){
+        result += (m_total/double(2)) * (vec_entry(y,alpha) - (vec_entry(y_n,alpha) + dt * vec_entry(vhat_n,alpha))) * (vec_entry(y,alpha) - (vec_entry(y_n,alpha) + dt * vec_entry(vhat_n,alpha)));
+    }
+
+    // Orientation
+    const Mat2 R_theta = R(theta);
+    const Mat2 R_n = R(theta_n);
+    const Mat2 C_mat = C();
+    for(size_t beta = 0; beta < 2; beta++){
+        for(size_t alpha = 0; alpha < 2; alpha++){
+            for(size_t gamma = 0; gamma < 2; gamma++){
+                for(size_t eta = 0; eta < 2; eta++){
+                    result += ((double(1) + double(.5) * (dt * omega_n) * (dt * omega_n)) * mat_entry(I,beta,beta) 
+                                - mat_entry(R_theta,alpha,beta) * mat_entry(R_n,alpha,gamma) * mat_entry(I,beta,gamma)
+                                - dt * omega_n * mat_entry(R_theta, alpha, beta) * mat_entry(C_mat,alpha,gamma) * mat_entry(R_n,gamma,eta)*mat_entry(I,beta,eta)
+                                );
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+double incremental_potential_energy_new(const Vec2& y, const double theta, const Vec2& y_n, const double theta_n, const Vec2& vhat_n, const double omega_n, const double dt, const double m_total, const Mat2& I){
+    double result = double(0);
+
+    // Translation
+    for(size_t alpha = 0; alpha < 2; alpha++){
+        result += mat_entry(I,alpha,alpha) + (m_total/double(2)) * vec_entry(y,alpha) * vec_entry(y,alpha)
+                - m_total * vec_entry(y_n,alpha) * vec_entry(y,alpha) - m_total * dt * vec_entry(vhat_n,alpha) * vec_entry(y, alpha)
+                + (m_total/double(2)) * vec_entry(y_n,alpha) * vec_entry(y_n,alpha) + (dt * dt * double(.5)) * vec_entry(y_n,alpha) * vec_entry(vhat_n,alpha)
+                + (dt * dt * double(.5)) * omega_n * omega_n * mat_entry(I,alpha,alpha) + dt * dt * double(.5) * m_total * vec_entry(vhat_n,alpha) * vec_entry(vhat_n,alpha);
+    }
+
+    // Orientation
+    const Mat2 R_theta = R(theta);
+    const Mat2 R_n = R(theta_n);
+    const Mat2 C_mat = C();
+    for(size_t alpha = 0; alpha < 2; alpha++){
+        for(size_t beta = 0; beta < 2; beta++){
+            for(size_t delta = 0; delta < 2; delta++){
+                result -= mat_entry(R_theta,alpha,beta) * mat_entry(I,beta,delta) * mat_entry(R_n,alpha,delta);
+            }
+        }
+    }
+
+    for(size_t alpha = 0; alpha < 2; alpha++){
+        for(size_t beta = 0; beta < 2; beta++){
+            for(size_t delta = 0; delta < 2; delta++){
+                for(size_t gamma = 0; gamma < 2; gamma++){
+                    result -= dt * mat_entry(I,beta,gamma) * mat_entry(R_theta, alpha, beta) * mat_entry(C_mat,alpha,delta) * mat_entry(R_n, delta,gamma);
+                }
+            }
+        }
+    }
+
+
+    return result;
+}
+
+
 Vec2 inertia_translation_gradient(const Vec2& y, const Vec2& y_n, const Vec2& vhat_n, double dt, double m_total) {
     Vec2 grad{0.0, 0.0};
     for (int alpha = 0; alpha < 2; ++alpha) {
