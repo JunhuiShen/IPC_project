@@ -66,6 +66,10 @@ static inline double dot(const Vec2 &a, const Vec2 &b) {
     return a.x * b.x + a.y * b.y;
 }
 
+static inline double vec_entry(const Vec2& v, int index) {
+    return index == 0 ? v.x : v.y;
+}
+
 static inline double cross(const Vec2 &a, const Vec2 &b) {
     return a.x * b.y - a.y * b.x;
 }
@@ -82,6 +86,29 @@ static inline double norm(const Vec2 &a) {
 
 static inline Mat2 outer(const Vec2 &a, const Vec2 &b) {
     return {a.x * b.x, a.x * b.y, a.y * b.x, a.y * b.y};
+}
+
+static inline double mat_entry(const Mat2& A, int row, int col) {
+    if (row == 0 && col == 0) return A.a11;
+    if (row == 0 && col == 1) return A.a12;
+    if (row == 1 && col == 0) return A.a21;
+    return A.a22;
+}
+
+static inline void set_mat_entry(Mat2& A, int row, int col, double value) {
+    if (row == 0 && col == 0) {
+        A.a11 = value;
+    } else if (row == 0 && col == 1) {
+        A.a12 = value;
+    } else if (row == 1 && col == 0) {
+        A.a21 = value;
+    } else {
+        A.a22 = value;
+    }
+}
+
+static inline double kronecker_delta(int i, int j) {
+    return i == j ? 1.0 : 0.0;
 }
 
 static inline Mat2 matmul(const Mat2 &A, const Mat2 &B) {

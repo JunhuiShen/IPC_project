@@ -26,6 +26,7 @@ add_library(ipc_core
     solver.cpp
     example.cpp
     rigid_body.cpp
+    rb_inertia.cpp
 )
 
 target_include_directories(ipc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -102,3 +103,7 @@ gtest_discover_tests(barrier_energy_test)
 add_executable(sdf_penalty_energy_test sdf_penalty_energy_test.cpp)
 target_link_libraries(sdf_penalty_energy_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
 gtest_discover_tests(sdf_penalty_energy_test)
+
+add_executable(rb_inertia_test rb_inertia_test.cpp)
+target_link_libraries(rb_inertia_test PRIVATE ipc_core GTest::gtest GTest::gtest_main)
+gtest_discover_tests(rb_inertia_test)
