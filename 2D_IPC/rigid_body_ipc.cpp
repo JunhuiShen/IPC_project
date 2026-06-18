@@ -56,6 +56,34 @@ Vec2 material_space_position(const Vec2& x, const Vec2& x_com, const double thet
     return X;
 }
 
+void create_rigid_body(const Vec& x, const Vec2& v_com_input, const double theta_input, const double omega_input, const double total_mass, Vec2& x_com, Vec2& v_com, double& theta, double& omega, Mat2& I, Vec& ref_positions){
+    v_com = v_com_input;
+    theta = theta_input;
+    omega = omega_input;
+    double nodal_mass = total_mass/double(x.size());
+    
+    // compute center of mass
+    x_com = {double(0),double(0)};
+    for(size_t i = 0; i < x.size(); i++){
+        for(size_t c = 0; c < 2; c++){
+            set_vec_entry(x_com,c,vec_entry(x_com,c)+nodal_mass*vec_entry(x[i],c));
+        }
+    }
+
+    x_com.x = x_com.x/total_mass;
+    x_com.y = x_com.y/total_mass;
+
+    // transform all particles into material space
+    ref_positions.resize(x.size());
+    for(size_t i = 0; i < x.size(); i++){
+        ref_positions[i] = material_space_position(x[i],x_com,theta);
+    }
+
+    // compute inertia tensor
+    std::vector<double> nodal_mass_array(x.size(),nodal_mass);
+    I = inertia_body_tensor(ref_positions,nodal_mass_array);
+}
+
 
 double incremental_potential_energy(const Vec2& y, const double theta, const Vec2& y_n, const double theta_n, const Vec2& vhat_n, const double omega_n, const double dt, const double m_total, const Mat2& I){
     double result = double(0);

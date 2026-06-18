@@ -23,6 +23,11 @@ Vec2 world_space_position(const Vec2& X, const Vec2& x_com, const double theta);
 // Takes in a world space particle x and transform into material space position X
 Vec2 material_space_position(const Vec2& x, const Vec2& x_com, const double theta);
 
+// Take in rigid body stuff 
+// (world space particles, v_com_input, theta_input, omega_input, total_mass)
+// compute center of mass, inertia tensor, material space particles
+// and store them into ref_mesh and deformed state
+void create_rigid_body(const Vec& x, const Vec2& v_com_input, const double theta_input, const double omega_input, const double total_mass, Vec2& x_com, Vec2& v_com, double& theta, double& omega, Mat2& I, Vec& ref_positions);
 
 // Rotation gradient from the reduced rigid-body inertia:
 // grad_theta_Ib =
