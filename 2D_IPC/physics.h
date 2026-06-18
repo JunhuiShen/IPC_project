@@ -54,7 +54,7 @@ struct DeformedState {
 
     // Rigid Bodies
     Vec x_coms; // center of mass position for each rb
-    Vec v_coms; // center of amss velocity for each rb
+    Vec v_coms; // center of mass velocity for each rb
     std::vector<double> theta; // orientation for each rb
     std::vector<double> omega; // angular velocity for each rb = [0,0,omega]
 

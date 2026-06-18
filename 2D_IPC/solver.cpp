@@ -4,6 +4,7 @@
 #include "ogc_trust_region.h"
 #include "parallel_helper.h"
 #include "physics.h"
+#include "rigid_body_ipc.h"
 #include <algorithm>
 #include <limits>
 
@@ -83,6 +84,10 @@ struct NodeUpdate {
     Vec2 dx{0.0, 0.0};
     double omega = 0.0;
 };
+
+static bool node_in_rigid_body(const std::vector<int>& rb_nodes, int node) {
+    return std::find(rb_nodes.begin(), rb_nodes.end(), node) != rb_nodes.end();
+}
 
 static bool sdf_min_evaluation(const std::vector<GroundSDF>& grounds,
                                const std::vector<CircleSDF>& circles,
@@ -247,6 +252,54 @@ static double compute_trust_region_safe_step(
     }
 
     return omega;
+}
+
+struct ComUpdate {
+    int rb = -1;
+    Vec2 dy{0.0, 0.0};   // H^{-1} g
+    double omega = 1.0;  // CCD-safe step fraction
+};
+
+static bool contains_node(const std::vector<int>& nodes, int node) {
+    return std::find(nodes.begin(), nodes.end(), node) != nodes.end();
+}
+
+static ComUpdate compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const std::vector<int>& rb_nodes,
+    const Vec& x, const Vec2& y_current, const std::vector<NodeSegmentPair>& ccd_pairs, double dt, double eta, double m_total) {
+
+    const Vec2& y_n = state.x_coms[rb];
+    const Vec2& vhat_n = state.v_coms[rb];
+
+    Vec2 g = inertia_translation_gradient(y_current, y_n, vhat_n, dt, m_total);
+    Mat2 H = inertia_translation_hessian(m_total);
+
+    Vec2 dy = matvec(mat2_inverse(H), g);
+    Vec2 full_step{-dy.x, -dy.y};
+
+    double omega = 1.0;
+
+    for (const NodeSegmentPair& c : ccd_pairs) {
+        const bool node_moves = contains_node(rb_nodes, c.node);
+        const bool seg0_moves = contains_node(rb_nodes, c.seg0);
+        const bool seg1_moves = contains_node(rb_nodes, c.seg1);
+
+        if (!node_moves && !seg0_moves && !seg1_moves) continue;
+        if (node_moves && seg0_moves && seg1_moves) continue;
+
+        Vec2 dxi{0.0, 0.0};
+        Vec2 dxj{0.0, 0.0};
+        Vec2 dxk{0.0, 0.0};
+
+        if (node_moves) dxi = full_step;
+        if (seg0_moves) dxj = full_step;
+        if (seg1_moves) dxk = full_step;
+
+        omega = std::min(omega, point_segment_ccd_safe_step(get_xi(x, c.node), dxi, get_xi(x, c.seg0), dxj, get_xi(x, c.seg1), dxk, eta));
+
+        if (omega <= 0.0) return {rb, dy, 0.0};
+    }
+
+    return {rb, dy, omega};
 }
 
 static NodeUpdate compute_node_update(
