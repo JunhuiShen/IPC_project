@@ -30,6 +30,7 @@ Mat2 inertia_body_tensor(const Vec& U, const std::vector<double>& masses) {
 }
 
 Vec2 world_space_position(const Vec2& X, const Vec2& x_com, const double theta){
+    // U = X - Y. Assume Y is at the origin.
     // Takes in a material space particle X and transform into world space position x
     Vec2 x = x_com;
 
@@ -46,6 +47,7 @@ Vec2 world_space_position(const Vec2& X, const Vec2& x_com, const double theta){
 }
 
 Vec2 material_space_position(const Vec2& x, const Vec2& x_com, const double theta){
+    // U = X - Y. Assume Y is at the origin.
     // Takes in a world space particle x and transform into material space position X
     Vec2 r{double(0),double(0)};
     for(size_t alpha = 0; alpha < 2; alpha++){
