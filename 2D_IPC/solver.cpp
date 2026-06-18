@@ -12,9 +12,7 @@ Vec trivial_initial_guess(const DeformedState& state) {
     return state.deformed_positions;
 }
 
-double ccd_initial_guess_safe_step(const Vec& x, const Vec& v,
-                                   const std::vector<NodeSegmentPair>& pairs,
-                                   double dt, double eta) {
+double ccd_initial_guess_safe_step(const Vec& x, const Vec& v, const std::vector<NodeSegmentPair>& pairs,  double dt, double eta) {
     double omega = 1.0;
 
     for (const auto& c : pairs) {
@@ -37,8 +35,7 @@ double ccd_initial_guess_safe_step(const Vec& x, const Vec& v,
     return omega;
 }
 
-Vec ccd_initial_guess(const DeformedState& state, const RefMesh& ref_mesh,
-                      const std::vector<Pin>& pins, double dt, double eta) {
+Vec ccd_initial_guess(const DeformedState& state, const RefMesh& ref_mesh, const std::vector<Pin>& pins, double dt, double eta) {
     Vec xnew = state.deformed_positions;
     const int total_nodes = static_cast<int>(state.deformed_positions.size());
     const PinMap pin_map = build_pin_map(pins, total_nodes);
@@ -89,10 +86,7 @@ static bool node_in_rigid_body(const std::vector<int>& rb_nodes, int node) {
     return std::find(rb_nodes.begin(), rb_nodes.end(), node) != rb_nodes.end();
 }
 
-static bool sdf_min_evaluation(const std::vector<GroundSDF>& grounds,
-                               const std::vector<CircleSDF>& circles,
-                               const Vec2& xi,
-                               SDFEvaluation& out) {
+static bool sdf_min_evaluation(const std::vector<GroundSDF>& grounds,  const std::vector<CircleSDF>& circles,  const Vec2& xi, SDFEvaluation& out) {
     bool any = false;
     out.phi = std::numeric_limits<double>::infinity();
 
@@ -115,8 +109,7 @@ static bool sdf_min_evaluation(const std::vector<GroundSDF>& grounds,
     return any;
 }
 
-static bool sdf_min_evaluation(const SimParams2D& params, const Vec2& xi,
-                               SDFEvaluation& out) {
+static bool sdf_min_evaluation(const SimParams2D& params, const Vec2& xi, SDFEvaluation& out) {
     return sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, xi, out);
 }
 
@@ -202,10 +195,7 @@ static double compute_global_residual(const RefMesh& ref_mesh,
     return r;
 }
 
-static double compute_ccd_safe_step(int who, const Vec2& dx,
-                                    const Vec& x,
-                                    const std::vector<NodeSegmentPair>& candidates,
-                                    double eta) {
+static double compute_ccd_safe_step(int who, const Vec2& dx, const Vec& x, const std::vector<NodeSegmentPair>& candidates, double eta) {
     double omega = 1.0;
     Vec2 full{-dx.x, -dx.y};
 
@@ -228,9 +218,7 @@ static double compute_ccd_safe_step(int who, const Vec2& dx,
     return omega;
 }
 
-static double compute_trust_region_safe_step(
-        int who, const Vec2& dx, const Vec& x,
-        const std::vector<NodeSegmentPair>& candidates, double eta) {
+static double compute_trust_region_safe_step(int who, const Vec2& dx, const Vec& x, const std::vector<NodeSegmentPair>& candidates, double eta) {
     double omega = 1.0;
     Vec2 full{-dx.x, -dx.y};
 
@@ -259,6 +247,16 @@ struct ComUpdate {
     Vec2 dy{0.0, 0.0};   // H^{-1} g
     double omega = 1.0;  // CCD-safe step fraction
 };
+
+struct ThetaUpdate {
+    int rb = -1;
+    double dtheta = 0.0; // H^{-1} g
+    double omega = 1.0;  // CCD-safe step fraction
+};
+
+static Eigen::Vector2d to_eigen(const Vec2& v) {
+    return {v.x, v.y};
+}
 
 static bool contains_node(const std::vector<int>& nodes, int node) {
     return std::find(nodes.begin(), nodes.end(), node) != nodes.end();
@@ -302,18 +300,59 @@ static ComUpdate compute_com_update(int rb, const DeformedState& state, const Re
     return {rb, dy, omega};
 }
 
-static NodeUpdate compute_node_update(
-        int who, const RefMesh& ref_mesh, const DeformedState& state,
-        const std::vector<Pin>& pins, const PinMap& pin_map,
-        const Vec& x, const Vec& xhat, BroadPhase& broad_phase,
-        const SimParams2D& params,
-        double dt) {
-    Vec2 gi = compute_local_gradient(
-            who, ref_mesh, pins, pin_map, state, x, xhat, params,
-            broad_phase.pairs(), dt);
-    Mat2 Hi = compute_local_hessian(
-            who, ref_mesh, pins, pin_map, state, x, params,
-            broad_phase.pairs(), dt);
+static ThetaUpdate compute_theta_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const std::vector<int>& rb_nodes, 
+    const Vec& x, double theta_current, const std::vector<NodeSegmentPair>& ccd_pairs, double dt, double eta) {
+
+    const double theta_n = state.theta[rb];
+    const double omega_n = state.omega[rb];
+    const Mat2& I = ref_mesh.inertia_tensor[rb];
+
+    const double g = inertia_rotation_gradient(theta_current, theta_n, omega_n, I, dt);
+    const double H = inertia_rotation_hessian(theta_current, theta_n, omega_n, I, dt);
+
+    const double dtheta = g / H;
+    const double theta_new = theta_current - dtheta;
+    const Vec2 x_com_vec = state.x_coms[rb];
+    const Eigen::Vector2d x_com = to_eigen(x_com_vec);
+
+    double step = 1.0;
+    for (const NodeSegmentPair& c : ccd_pairs) {
+        const bool node_moves = contains_node(rb_nodes, c.node);
+        const bool seg0_moves = contains_node(rb_nodes, c.seg0);
+        const bool seg1_moves = contains_node(rb_nodes, c.seg1);
+
+        if (!node_moves && !seg0_moves && !seg1_moves) continue;
+        if (node_moves && seg0_moves && seg1_moves) continue;
+
+        if (node_moves && !seg0_moves && !seg1_moves) {
+            step = std::min(step, point_segment_rb_rotation_safe_step(to_eigen(get_xi(x, c.node)), x_com, theta_current, theta_new, to_eigen(get_xi(x, c.seg0)), to_eigen(get_xi(x, c.seg1)), eta));
+            if (step <= 0.0) return {rb, dtheta, 0.0};
+            continue;
+        }
+
+        // A moving rigid segment vs a fixed world node can be treated in the rigid body’s material frame as a fixed material segment vs the external node rotating by -dtheta
+        if (!node_moves && seg0_moves && seg1_moves) {
+            const Vec2 material_point = material_space_position(get_xi(x, c.node), x_com_vec, theta_current);
+            const Vec2 material_seg0 = material_space_position(get_xi(x, c.seg0), x_com_vec, theta_current);
+            const Vec2 material_seg1 = material_space_position(get_xi(x, c.seg1), x_com_vec, theta_current);
+
+            step = std::min(step, point_segment_rb_rotation_safe_step(to_eigen(material_point), Eigen::Vector2d::Zero(), 0.0, -(theta_new - theta_current), to_eigen(material_seg0), to_eigen(material_seg1), eta));
+            if (step <= 0.0) return {rb, dtheta, 0.0};
+            continue;
+        }
+
+        return {rb, dtheta, 0.0};
+    }
+
+    return {rb, dtheta, step};
+}
+
+static NodeUpdate compute_node_update(int who, const RefMesh& ref_mesh, const DeformedState& state, 
+    const std::vector<Pin>& pins, const PinMap& pin_map, const Vec& x, const Vec& xhat, BroadPhase& broad_phase, 
+    const SimParams2D& params, double dt) {
+
+    Vec2 gi = compute_local_gradient(who, ref_mesh, pins, pin_map, state, x, xhat, params, broad_phase.pairs(), dt);
+    Mat2 Hi = compute_local_hessian(who, ref_mesh, pins, pin_map, state, x, params, broad_phase.pairs(), dt);
 
     Vec2 dx = matvec(mat2_inverse(Hi), gi);
     Vec2 xi = get_xi(x, who);
@@ -325,17 +364,13 @@ static NodeUpdate compute_node_update(
 
     std::vector<NodeSegmentPair> filtering_candidates;
     if (params.use_ccd_step_policy) {
-        filtering_candidates = broad_phase.build_ccd_candidates_for_node(
-                who, x, v_newton, ref_mesh.edges, dt);
+        filtering_candidates = broad_phase.build_ccd_candidates_for_node(who, x, v_newton, ref_mesh.edges, dt);
     } else {
         const double motion_pad = norm(dx) / params.eta;
-        filtering_candidates = broad_phase.build_trust_region_candidates(
-                x, v_newton, ref_mesh.edges, dt, motion_pad);
+        filtering_candidates = broad_phase.build_trust_region_candidates(x, v_newton, ref_mesh.edges, dt, motion_pad);
     }
 
-    const double contact_omega = params.use_ccd_step_policy
-            ? compute_ccd_safe_step(who, dx, x, filtering_candidates, params.eta)
-            : compute_trust_region_safe_step(who, dx, x, filtering_candidates, params.eta);
+    const double contact_omega = params.use_ccd_step_policy? compute_ccd_safe_step(who, dx, x, filtering_candidates, params.eta): compute_trust_region_safe_step(who, dx, x, filtering_candidates, params.eta);
 
     return {who, dx, std::min(omega, contact_omega)};
 }
@@ -348,13 +383,8 @@ static void commit_node_update(const NodeUpdate& update, Vec& x) {
     set_xi(x, update.who, xi);
 }
 
-SolveResult global_gauss_seidel_solver_basic(
-        const RefMesh& ref_mesh, const std::vector<Pin>& pins,
-        const DeformedState& state, const Vec& xhat,
-        Vec& xnew,
-        const SimParams2D& params,
-        BroadPhase& broad_phase,
-        std::vector<double>* residual_history) {
+SolveResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const DeformedState& state, const Vec& xhat,  Vec& xnew,
+        const SimParams2D& params, BroadPhase& broad_phase, std::vector<double>* residual_history) {
     const int total_nodes = static_cast<int>(state.deformed_positions.size());
     const Vec xnew_substep_start = xnew;
     const PinMap pin_map = build_pin_map(pins, total_nodes);
@@ -386,8 +416,7 @@ SolveResult global_gauss_seidel_solver_basic(
         build_blue_boxes(xnew, node_radii, blue_boxes);
         build_red_boxes(ref_mesh.edges, blue_boxes, red_boxes);
         build_green_boxes(red_boxes, params.d_hat, green_boxes);
-        broad_phase.mutable_cache() = register_barrier_pairs_from_blue_and_green(
-            ref_mesh.edges, blue_boxes, green_boxes);
+        broad_phase.mutable_cache() = register_barrier_pairs_from_blue_and_green(ref_mesh.edges, blue_boxes, green_boxes);
 
         const auto contact_adj = build_contact_adj(broad_phase.pairs(), total_nodes);
         color_groups = greedy_color_conflict_graph(union_adjacency(elastic_adj, contact_adj));
@@ -397,9 +426,7 @@ SolveResult global_gauss_seidel_solver_basic(
     if (residual_history) residual_history->clear();
 
     auto eval_residual = [&]() {
-        return compute_global_residual(
-            ref_mesh, pins, pin_map, state, xnew, xhat, params,
-            broad_phase.pairs(), params.substep_dt());
+        return compute_global_residual(ref_mesh, pins, pin_map, state, xnew, xhat, params, broad_phase.pairs(), params.substep_dt());
     };
 
     double r = eval_residual();
@@ -420,9 +447,7 @@ SolveResult global_gauss_seidel_solver_basic(
 
             #pragma omp parallel for if(params.use_parallel && group.size() > 1)
             for (int idx = 0; idx < static_cast<int>(group.size()); ++idx) {
-                updates[idx] = compute_node_update(
-                        group[idx], ref_mesh, state, pins, pin_map, xnew, xhat, broad_phase,
-                        params, params.substep_dt());
+                updates[idx] = compute_node_update(group[idx], ref_mesh, state, pins, pin_map, xnew, xhat, broad_phase, params, params.substep_dt());
             }
 
             for (const NodeUpdate& update : updates)
