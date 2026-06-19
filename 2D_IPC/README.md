@@ -157,9 +157,9 @@ The runtime is topology-agnostic:
 - Elasticity, contact, coloring, CCD, and Newton updates all use global node IDs.
 
 Edges do not need consecutive endpoints. Branches, loops, disconnected
-components, and edges such as `(0, 7)` are valid. `Chain` is only a convenience
-used by the bundled examples to generate initial geometry; the solver never
-receives chain or block information.
+components, and edges such as `(0, 7)` are valid. `make_shape` helpers are only
+conveniences used by the bundled examples to generate initial geometry; the
+solver never receives chain or block information.
 
 `RefMesh` stores reference invariants rather than a separate array of reference
 positions. Its rest lengths are computed from the initial
@@ -249,7 +249,7 @@ strategy changes do not require rebuilding.
     │   AABB/BVH infrastructure, active-set cache, and swept candidate queries
     ├── parallel_helper.h / parallel_helper.cpp
     │   blue/red/green box construction, pair registration, adjacency, and coloring
-    ├── chain.h / chain.cpp
-    │   optional chain geometry and assembly helpers for example scenes
+    ├── make_shape.h / make_shape.cpp
+    │   optional deformable and rigid shape builders for example scenes
     ├── example.h / example.cpp
     └── visualization.h / visualization.cpp

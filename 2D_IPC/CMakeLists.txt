@@ -19,7 +19,7 @@ add_library(ipc_core
     node_segment_distance.cpp
     ogc_trust_region.cpp
     parallel_helper.cpp
-    chain.cpp
+    make_shape.cpp
     visualization.cpp
     broad_phase.cpp
     ccd.cpp

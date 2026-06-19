@@ -74,9 +74,6 @@ int main(int argc, char** argv) {
         output_format = args.get_output_format();
         initial_guess_type = args.get_initial_guess_type();
         use_ccd_step_policy = args.use_ccd_step_policy();
-        if (example_type == ExampleType::Example2 && !args.was_provided("initial_guess")) {
-            initial_guess_type = InitialGuessType::Verlet;
-        }
     } catch (const std::invalid_argument& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;

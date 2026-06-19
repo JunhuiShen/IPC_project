@@ -1,5 +1,5 @@
 #include "example.h"
-#include "chain.h"
+#include "make_shape.h"
 
 #include <stdexcept>
 
@@ -19,15 +19,6 @@ ExampleScene build_example(
             pin_node(upper, 0);
             pin_node(lower, 0);
             assemble_chains({upper, lower}, scene.state, scene.ref_mesh, scene.pins);
-            break;
-        }
-        case ExampleType::Example2: {
-            Chain falling =
-                make_chain({-1.2, 1.4}, {1.2, 1.4}, number_of_nodes, density, thickness);
-            assemble_chains({falling}, scene.state, scene.ref_mesh, scene.pins);
-            scene.sdf_grounds.push_back(GroundSDF{0.0});
-            scene.static_positions = {{-2.0, 0.0}, {2.0, 0.0}};
-            scene.static_edges = {{0, 1}};
             break;
         }
         default:

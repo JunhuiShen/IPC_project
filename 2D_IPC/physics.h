@@ -71,10 +71,9 @@ struct RefMesh {
     std::vector<Vec> ref_positions; // array of particles in material space for each rb
     std::vector<Mat2> inertia_tensor; // inertia tensor for each rb
     std::vector<double> total_mass; // total_mass for each rb
+    std::vector<std::vector<int>> rb_nodes; // global node indices for each rb
 
-    inline void initialize(int n_positions,
-                           const std::vector<std::pair<int, int>>& input_edges,
-                           const Vec& rest_positions) {
+    inline void initialize(int n_positions, const std::vector<std::pair<int, int>>& input_edges, const Vec& rest_positions) {
         if (n_positions < 0 ||
             static_cast<int>(rest_positions.size()) != n_positions) {
             throw std::invalid_argument("RefMesh rest positions have an invalid size");

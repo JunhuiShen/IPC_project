@@ -3,8 +3,7 @@
 #include "physics.h"
 
 enum class ExampleType {
-    Example1,
-    Example2
+    Example1
 };
 
 struct ExampleScene {
@@ -17,5 +16,4 @@ struct ExampleScene {
     std::vector<std::pair<int, int>> static_edges;
 };
 
-ExampleScene build_example(
-    ExampleType example_type, int number_of_nodes, double density, double thickness);
+ExampleScene build_example(ExampleType example_type, int number_of_nodes, double density, double thickness);
