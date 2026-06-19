@@ -74,33 +74,41 @@ void assemble_chains(const std::vector<Chain>& chains, DeformedState& state, Ref
     ref_mesh.mass = std::move(mass);
 }
 
-int append_rigid_pentagon(DeformedState& state, RefMesh& ref_mesh, Vec2 center, double radius, double density, double thickness, Vec2 v_com, double theta, double omega) {
+int append_rigid_polygon(int number_of_nodes, DeformedState& state, RefMesh& ref_mesh, Vec2 center, double radius, double density,
+                         double thickness, Vec2 v_com, double theta, double omega) {
+    if (number_of_nodes < 3) {
+        throw std::invalid_argument("Rigid polygon must have at least 3 nodes");
+    }
+    if (!(radius > 0.0)) {
+        throw std::invalid_argument("Rigid polygon radius must be positive");
+    }
 
     const int rb = static_cast<int>(state.x_coms.size());
     const int base = static_cast<int>(state.deformed_positions.size());
 
-    Vec x_local(5);
-    for (int i = 0; i < 5; ++i) {
-        const double angle = theta + 2.0 * kPi * double(i) / 5.0;
+    Vec x_local(number_of_nodes);
+    for (int i = 0; i < number_of_nodes; ++i) {
+        const double angle = theta + 2.0 * kPi * double(i) / double(number_of_nodes);
         x_local[i] = {center.x + radius * std::cos(angle), center.y + radius * std::sin(angle)
         };
     }
 
-    // A regular pentagon has area A = (5 / 2) R^2 sin(2 pi / 5)
-    const double area = 0.5 * 5.0 * radius * radius * std::sin(2.0 * kPi / 5.0);
+    // Regular n-gon area: A = (n / 2) R^2 sin(2 pi / n)
+    const double n = double(number_of_nodes);
+    const double area = 0.5 * n * radius * radius * std::sin(2.0 * kPi / n);
     const double total_mass = area * thickness * density;
-    const double nodal_mass = total_mass / 5.0;
+    const double nodal_mass = total_mass / n;
 
     state.deformed_positions.insert(state.deformed_positions.end(), x_local.begin(), x_local.end());
-    state.velocities.insert(state.velocities.end(), 5, v_com);
+    state.velocities.insert(state.velocities.end(), number_of_nodes, v_com);
 
     if (ref_mesh.mass.size() < static_cast<std::size_t>(base)) {
         ref_mesh.mass.resize(base, 0.0);
     }
-    ref_mesh.mass.insert(ref_mesh.mass.end(), 5, nodal_mass);
+    ref_mesh.mass.insert(ref_mesh.mass.end(), number_of_nodes, nodal_mass);
 
-    for (int i = 0; i < 5; ++i) {
-        ref_mesh.edges.emplace_back(base + i, base + ((i + 1) % 5));
+    for (int i = 0; i < number_of_nodes; ++i) {
+        ref_mesh.edges.emplace_back(base + i, base + ((i + 1) % number_of_nodes));
     }
 
     Vec2 x_com;
@@ -119,7 +127,12 @@ int append_rigid_pentagon(DeformedState& state, RefMesh& ref_mesh, Vec2 center, 
     ref_mesh.ref_positions.push_back(ref_positions);
     ref_mesh.inertia_tensor.push_back(inertia);
     ref_mesh.total_mass.push_back(total_mass);
-    ref_mesh.rb_nodes.push_back({base, base + 1, base + 2, base + 3, base + 4});
+
+    std::vector<int> rb_nodes(number_of_nodes);
+    for (int i = 0; i < number_of_nodes; ++i) {
+        rb_nodes[i] = base + i;
+    }
+    ref_mesh.rb_nodes.push_back(std::move(rb_nodes));
 
     rebuild_ref_mesh(ref_mesh, state.deformed_positions);
     return rb;
