@@ -263,12 +263,18 @@ static bool contains_node(const std::vector<int>& nodes, int node) {
 }
 
 static ComUpdate compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const std::vector<int>& rb_nodes,
-    const Vec& x, const Vec2& y_current, const std::vector<NodeSegmentPair>& ccd_pairs, double dt, double eta, double m_total) {
+    const Vec& x, const Vec2& y_current, const std::vector<NodeSegmentPair>& ccd_pairs, double dt, double eta, double m_total, const double gravity) {
 
     const Vec2& y_n = state.x_coms[rb];
     const Vec2& vhat_n = state.v_coms[rb];
 
     Vec2 g = inertia_translation_gradient(y_current, y_n, vhat_n, dt, m_total);
+
+    // add gravitational potential gradient
+    const Vec2 g_grav = gravitational_gradient(m_total, gravity, dt);
+    g.x -= g_grav.x;
+    g.y -= g_grav.y;
+
     Mat2 H = inertia_translation_hessian(m_total);
 
     Vec2 dy = matvec(mat2_inverse(H), g);
@@ -550,7 +556,7 @@ SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::ve
             const auto& rb_nodes = ref_mesh.rb_nodes[rb];
             const double m_total = ref_mesh.total_mass[rb];
 
-            const ComUpdate cu = compute_com_update(rb, state, ref_mesh, rb_nodes, xnew, y_current[rb], broad_phase.pairs(), dt, params.eta, m_total);
+            const ComUpdate cu = compute_com_update(rb, state, ref_mesh, rb_nodes, xnew, y_current[rb], broad_phase.pairs(), dt, params.eta, m_total, params.gravity.y);
             y_current[rb].x -= cu.omega * cu.dy.x;
             y_current[rb].y -= cu.omega * cu.dy.y;
             sync_rb_positions(rb);

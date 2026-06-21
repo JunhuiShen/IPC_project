@@ -23,7 +23,7 @@ ExampleScene build_example(
         }
         // Command line: ./build/simulation --example 2 --num_frames 500 --outdir frames_hexagon
         case ExampleType::Example2: {
-            int rb = append_rigid_polygon(int(6), scene.state, scene.ref_mesh, {double(0),double(1)}, double(.5),double(1), double(0.001), {double(0),double(0)}, double(0),double(.2));
+            int rb = append_rigid_polygon(int(6), scene.state, scene.ref_mesh, {double(0),double(10)}, double(.5),double(1), double(0.001), {double(0),double(0)}, double(0),double(1));
             break;
         }
         default:

@@ -189,3 +189,11 @@ double inertia_rotation_hessian(double theta, double theta_n, double omega_n, co
 
     return first_sum + dt * omega_n * second_sum;
 }
+
+double gravitational_potential(const Vec2& y, const double m_total, const double gravity, const double dt) {
+    return dt*dt*m_total * gravity * vec_entry(y,1);
+}
+
+Vec2 gravitational_gradient(const double m_total, const double gravity, const double dt) {
+    return {double(0), dt*dt*m_total*gravity};
+}

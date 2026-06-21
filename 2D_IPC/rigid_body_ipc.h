@@ -49,3 +49,8 @@ double incremental_potential_energy(const Vec2& y, double theta,
                                     double omega_n, double dt, double m_total,
                                     const Mat2& I);
 
+
+double gravitational_potential(const Vec2& y, double m_total, const double gravity, const double dt);
+
+Vec2 gravitational_gradient(const double m_total, const double gravity, const double dt);
+
