@@ -93,6 +93,7 @@ struct IPCArgs : ArgParser {
 
     ExampleType get_example_type() const {
         if (example_type == "1") return ExampleType::Example1;
+        if (example_type == "2") return ExampleType::Example2;
         throw std::invalid_argument("Unknown example: " + example_type);
     }
 

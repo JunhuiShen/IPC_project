@@ -3,7 +3,8 @@
 #include "physics.h"
 
 enum class ExampleType {
-    Example1
+    Example1,
+    Example2
 };
 
 struct ExampleScene {
