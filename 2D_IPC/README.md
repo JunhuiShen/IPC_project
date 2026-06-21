@@ -115,15 +115,22 @@ simulator is launched from `2D_IPC/`, the default location is
 Per-frame statistics are printed to stdout:
 
     Vertices: ... | Segments: ...
-    Frame    1 | initial_residual=... | final_residual=... | global_iters=... | solver_time=... s
-    Frame    2 | initial_residual=... | final_residual=... | global_iters=... | solver_time=... s
+    Frame    1 | initial_residual=... | final_residual=... | final_rb_residual=... | global_iters=... | solver_time=... s
+    Frame    2 | initial_residual=... | final_residual=... | final_rb_residual=... | global_iters=... | solver_time=... s
     ...
     ===== Simulation Summary =====
     max_global_residual = ...
+    max_rb_residual = ...
     avg_global_iters = ...
     total_sim_time = ... seconds
     total_solver_time = ... seconds
     avg_solver_time = ... seconds/frame
+
+`final_residual` is the mass-normalized nodal residual used by the convergence
+check. Rigid-body scenes also report `final_rb_residual`, an unnormalized
+reduced residual formed from net COM force and scalar torque (`J^T g`) for
+rigid nodes; visualization-only static colliders are not part of either
+residual.
 
 ## Solver
 

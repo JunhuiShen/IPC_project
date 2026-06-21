@@ -7,6 +7,8 @@
 struct SolveResult {
     double final_residual;
     int    iterations_used;
+    bool   has_rigid_residual = false;
+    double final_rigid_residual = 0.0;
 };
 
 Vec trivial_initial_guess(const DeformedState& state);

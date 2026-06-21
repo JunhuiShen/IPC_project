@@ -195,6 +195,45 @@ static double compute_global_residual(const RefMesh& ref_mesh,
     return r;
 }
 
+static double compute_rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const PinMap& pin_map, const DeformedState& state, const Vec& x, const Vec& xhat, const Vec& y_current, const SimParams2D& params, const std::vector<NodeSegmentPair>& barrier_pairs, double dt) {
+    const int total_nodes = static_cast<int>(state.deformed_positions.size());
+    const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
+
+    std::vector<int> node_to_rb(total_nodes, -1);
+    for (int rb = 0; rb < num_rbs; ++rb) {
+        for (int node : ref_mesh.rb_nodes[rb]) {
+            if (node >= 0 && node < total_nodes) node_to_rb[node] = rb;
+        }
+    }
+
+    Vec rb_force(num_rbs, Vec2{0.0, 0.0});
+    std::vector<double> rb_torque(num_rbs, 0.0);
+    double residual = 0.0;
+
+    for (int i = 0; i < total_nodes; ++i) {
+        const Vec2 gi = compute_local_gradient(i, ref_mesh, pins, pin_map, state, x, xhat, params, barrier_pairs, dt);
+
+        const int rb = node_to_rb[i];
+
+        // COM residual: dE/dy = sum_i dE/dx_i where dx_i / dy = I and dE / dy = sum_i (dx_i/dy)^T g_i = sum_i g_i
+        rb_force[rb].x += gi.x;
+        rb_force[rb].y += gi.y;
+
+        // Rotation residual: dE/dtheta = sum_i dot(dx_i/dtheta, dE/dx_i) where dx_i / dtheta = C R X_i = C (x_i - y) = C r_i with r_i = (r_x, r_y)
+        const Vec2 r = get_xi(x, i) - y_current[rb];
+        const Vec2 dxdtheta{-r.y, r.x};
+        rb_torque[rb] += dot(dxdtheta, gi);
+    }
+
+    for (int rb = 0; rb < num_rbs; ++rb) {
+        residual = std::max(residual, std::abs(rb_force[rb].x));
+        residual = std::max(residual, std::abs(rb_force[rb].y));
+        residual = std::max(residual, std::abs(rb_torque[rb]));
+    }
+
+    return residual;
+}
+
 static double compute_ccd_safe_step(int who, const Vec2& dx, const Vec& x, const std::vector<NodeSegmentPair>& candidates, double eta) {
     double omega = 1.0;
     Vec2 full{-dx.x, -dx.y};
@@ -578,12 +617,19 @@ SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::ve
         return compute_global_residual(ref_mesh, pins, pin_map, state, xnew, xhat, params, broad_phase.pairs(), dt);
     };
 
+    auto make_result = [&](double residual, int iterations) {
+        SolveResult result{residual, iterations};
+        result.has_rigid_residual = true;
+        result.final_rigid_residual = compute_rigid_body_unnormalized_residual(ref_mesh, pins, pin_map, state, xnew, xhat, y_current, params, broad_phase.pairs(), dt);
+        return result;
+    };
+
     double r = eval_residual();
     if (residual_history) residual_history->push_back(r);
 
     if (r < params.tol_abs) {
         update_prev_disp();
-        return {r, 0};
+        return make_result(r, 0);
     }
 
     const int rebuild_every = std::max(1, params.node_box_update_count);
@@ -627,10 +673,10 @@ SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::ve
 
         if (r < params.tol_abs) {
             update_prev_disp();
-            return {r, it};
+            return make_result(r, it);
         }
     }
 
     update_prev_disp();
-    return {r, params.max_substep_iters};
+    return make_result(r, params.max_substep_iters);
 }

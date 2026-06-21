@@ -133,6 +133,8 @@ int main(int argc, char** argv) {
     }
 
     double max_global_residual = 0.0;
+    double max_rigid_residual = 0.0;
+    bool saw_rigid_residual = false;
     double total_solver_time = 0.0;
     int sum_global_iters_used = 0;
     int frames_advanced = 0;
@@ -156,6 +158,10 @@ int main(int argc, char** argv) {
         serialize_state(args.outdir, frame, state);
 
         max_global_residual = std::max(max_global_residual, result.max_final_residual);
+        if (result.has_rigid_residual) {
+            saw_rigid_residual = true;
+            max_rigid_residual = std::max(max_rigid_residual, result.max_final_rigid_residual);
+        }
         total_solver_time += solver_elapsed.count();
         sum_global_iters_used += result.total_iterations;
         frames_advanced += 1;
@@ -164,8 +170,12 @@ int main(int argc, char** argv) {
                   << " | initial_residual=" << std::scientific
                   << result.first_initial_residual
                   << " | final_residual=" << std::scientific
-                  << result.max_final_residual
-                  << " | global_iters=" << std::setw(3) << result.total_iterations
+                  << result.max_final_residual;
+        if (result.has_rigid_residual) {
+            std::cout << " | final_rb_residual=" << std::scientific
+                      << result.max_final_rigid_residual;
+        }
+        std::cout << " | global_iters=" << std::setw(3) << result.total_iterations
                   << " | solver_time=" << solver_elapsed.count() << " s"
                   << '\n';
     }
@@ -183,6 +193,10 @@ int main(int argc, char** argv) {
     std::cout << "\n===== Simulation Summary =====\n";
     std::cout << "max_global_residual = " << std::scientific
               << max_global_residual << "\n";
+    if (saw_rigid_residual) {
+        std::cout << "max_rb_residual = " << std::scientific
+                  << max_rigid_residual << "\n";
+    }
     std::cout << "avg_global_iters = " << std::fixed << avg_global_iters_used << "\n";
     std::cout << "total_sim_time = " << elapsed.count() << " seconds\n";
     std::cout << "total_solver_time = " << total_solver_time << " seconds\n";

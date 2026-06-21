@@ -12,6 +12,8 @@
 struct AdvanceResult2D {
     double first_initial_residual = 0.0;
     double max_final_residual = 0.0;
+    bool   has_rigid_residual = false;
+    double max_final_rigid_residual = 0.0;
     int    total_iterations = 0;
     int    substeps_completed = 0;
 };
@@ -50,6 +52,10 @@ inline AdvanceResult2D advance_one_frame(
             aggregate.first_initial_residual = residual_history.front();
         }
         aggregate.max_final_residual = std::max(aggregate.max_final_residual, substep_result.final_residual);
+        if (substep_result.has_rigid_residual) {
+            aggregate.has_rigid_residual = true;
+            aggregate.max_final_rigid_residual = std::max(aggregate.max_final_rigid_residual, substep_result.final_rigid_residual);
+        }
         aggregate.total_iterations += substep_result.iterations_used;
         aggregate.substeps_completed += 1;
 
@@ -93,6 +99,10 @@ inline AdvanceResult2D advance_one_frame_rb(
         if (aggregate.substeps_completed == 0 && !residual_history.empty())
             aggregate.first_initial_residual = residual_history.front();
         aggregate.max_final_residual = std::max(aggregate.max_final_residual, substep_result.final_residual);
+        if (substep_result.has_rigid_residual) {
+            aggregate.has_rigid_residual = true;
+            aggregate.max_final_rigid_residual = std::max(aggregate.max_final_rigid_residual, substep_result.final_rigid_residual);
+        }
         aggregate.total_iterations += substep_result.iterations_used;
         aggregate.substeps_completed += 1;
 
