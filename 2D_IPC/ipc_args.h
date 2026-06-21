@@ -84,7 +84,7 @@ struct IPCArgs : ArgParser {
         add_bool  ("write_substeps",  write_substeps,  false,     "Export every substep as substep_XXXX");
         add_int   ("restart_frame",   restart_frame,   -1,        "Resume from outdir/state_XXXX.bin; -1 disables restart");
 
-        add_string("example",         example_type,    "1",       "Example scene: 1");
+        add_string("example",         example_type,    "1",       "Example scene: 1 | 2");
         add_string("step_policy",     step_policy,     "ccd",     "Step filter: ccd | trust_region");
         add_string("initial_guess",   initial_guess_type, "ccd",  "Initial guess: ccd | trivial | verlet");
     }

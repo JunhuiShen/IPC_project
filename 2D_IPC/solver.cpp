@@ -262,8 +262,46 @@ static bool contains_node(const std::vector<int>& nodes, int node) {
     return std::find(nodes.begin(), nodes.end(), node) != nodes.end();
 }
 
+static void add_rigid_sdf_translation_terms(const std::vector<int>& rb_nodes, const Vec& x, const SimParams2D& params, double dt, Vec2& g, Mat2& H) {
+    if (params.k_sdf <= 0.0) return;
+
+    for (int node : rb_nodes) {
+        SDFEvaluation sdf;
+        if (!sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, get_xi(x, node), sdf)) continue;
+
+        const Vec2 gs = sdf_penalty_gradient(sdf, params.k_sdf, params.eps_sdf);
+        const Mat2 Hs = sdf_penalty_hessian(sdf, params.k_sdf, params.eps_sdf, /*include_curvature=*/false);
+
+        g.x += dt * dt * gs.x;
+        g.y += dt * dt * gs.y;
+        H.a11 += dt * dt * Hs.a11;
+        H.a12 += dt * dt * Hs.a12;
+        H.a21 += dt * dt * Hs.a21;
+        H.a22 += dt * dt * Hs.a22;
+    }
+}
+
+static void add_rigid_sdf_rotation_terms(const std::vector<int>& rb_nodes, const Vec& x, const Vec2& y_current, const SimParams2D& params, double dt, double& g, double& H) {
+    if (params.k_sdf <= 0.0) return;
+
+    for (int node : rb_nodes) {
+        const Vec2 xi = get_xi(x, node);
+        SDFEvaluation sdf;
+        if (!sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, xi, sdf)) continue;
+
+        const Vec2 gs = sdf_penalty_gradient(sdf, params.k_sdf, params.eps_sdf);
+        const Mat2 Hs = sdf_penalty_hessian(sdf, params.k_sdf, params.eps_sdf, /*include_curvature=*/false);
+
+        const Vec2 r = xi - y_current;
+        const Vec2 dxdtheta{-r.y, r.x};
+
+        g += dt * dt * dot(dxdtheta, gs);
+        H += dt * dt * dot(dxdtheta, matvec(Hs, dxdtheta));
+    }
+}
+
 static ComUpdate compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const std::vector<int>& rb_nodes,
-    const Vec& x, const Vec2& y_current, const std::vector<NodeSegmentPair>& ccd_pairs, double dt, double eta, double m_total, const double gravity) {
+    const Vec& x, const Vec2& y_current, const std::vector<NodeSegmentPair>& ccd_pairs, const SimParams2D& params, double dt, double eta, double m_total) {
 
     const Vec2& y_n = state.x_coms[rb];
     const Vec2& vhat_n = state.v_coms[rb];
@@ -271,11 +309,12 @@ static ComUpdate compute_com_update(int rb, const DeformedState& state, const Re
     Vec2 g = inertia_translation_gradient(y_current, y_n, vhat_n, dt, m_total);
 
     // add gravitational potential gradient
-    const Vec2 g_grav = gravitational_gradient(m_total, gravity, dt);
+    const Vec2 g_grav = gravitational_gradient(m_total, params.gravity.y, dt);
     g.x -= g_grav.x;
     g.y -= g_grav.y;
 
     Mat2 H = inertia_translation_hessian(m_total);
+    add_rigid_sdf_translation_terms(rb_nodes, x, params, dt, g, H);
 
     Vec2 dy = matvec(mat2_inverse(H), g);
     Vec2 full_step{-dy.x, -dy.y};
@@ -307,18 +346,19 @@ static ComUpdate compute_com_update(int rb, const DeformedState& state, const Re
 }
 
 static ThetaUpdate compute_theta_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const std::vector<int>& rb_nodes, 
-    const Vec& x, double theta_current, const std::vector<NodeSegmentPair>& ccd_pairs, double dt, double eta) {
+    const Vec& x, const Vec2& y_current, double theta_current, const std::vector<NodeSegmentPair>& ccd_pairs, const SimParams2D& params, double dt, double eta) {
 
     const double theta_n = state.theta[rb];
     const double omega_n = state.omega[rb];
     const Mat2& I = ref_mesh.inertia_tensor[rb];
 
-    const double g = inertia_rotation_gradient(theta_current, theta_n, omega_n, I, dt);
-    const double H = inertia_rotation_hessian(theta_current, theta_n, omega_n, I, dt);
+    double g = inertia_rotation_gradient(theta_current, theta_n, omega_n, I, dt);
+    double H = inertia_rotation_hessian(theta_current, theta_n, omega_n, I, dt);
+    add_rigid_sdf_rotation_terms(rb_nodes, x, y_current, params, dt, g, H);
 
     const double dtheta = g / H;
     const double theta_new = theta_current - dtheta;
-    const Vec2 x_com_vec = state.x_coms[rb];
+    const Vec2 x_com_vec = y_current;
     const Eigen::Vector2d x_com = to_eigen(x_com_vec);
 
     double step = 1.0;
@@ -556,12 +596,12 @@ SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::ve
             const auto& rb_nodes = ref_mesh.rb_nodes[rb];
             const double m_total = ref_mesh.total_mass[rb];
 
-            const ComUpdate cu = compute_com_update(rb, state, ref_mesh, rb_nodes, xnew, y_current[rb], broad_phase.pairs(), dt, params.eta, m_total, params.gravity.y);
+            const ComUpdate cu = compute_com_update(rb, state, ref_mesh, rb_nodes, xnew, y_current[rb], broad_phase.pairs(), params, dt, params.eta, m_total);
             y_current[rb].x -= cu.omega * cu.dy.x;
             y_current[rb].y -= cu.omega * cu.dy.y;
             sync_rb_positions(rb);
 
-            const ThetaUpdate tu = compute_theta_update(rb, state, ref_mesh, rb_nodes, xnew, theta_current[rb], broad_phase.pairs(), dt, params.eta);
+            const ThetaUpdate tu = compute_theta_update(rb, state, ref_mesh, rb_nodes, xnew, y_current[rb], theta_current[rb], broad_phase.pairs(), params, dt, params.eta);
             theta_current[rb] -= tu.omega * tu.dtheta;
             sync_rb_positions(rb);
         }

@@ -18,44 +18,30 @@ static void export_scene_frame(const std::string& outdir,
                                int frame,
                                const Vec& dynamic_x,
                                const std::vector<std::pair<int, int>>& dynamic_edges,
-                               const Vec& static_x,
-                               const std::vector<std::pair<int, int>>& static_edges,
                                OutputFormat format) {
-    if (static_x.empty()) {
-        export_frame(outdir, frame, dynamic_x, dynamic_edges, format);
-        return;
-    }
-
-    Vec x = dynamic_x;
-    std::vector<std::pair<int, int>> edges = dynamic_edges;
-    const int offset = static_cast<int>(x.size());
-    x.insert(x.end(), static_x.begin(), static_x.end());
-    for (const auto& edge : static_edges) {
-        edges.emplace_back(offset + edge.first, offset + edge.second);
-    }
-    export_frame(outdir, frame, x, edges, format);
+    export_frame(outdir, frame, dynamic_x, dynamic_edges, format);
 }
 
 static void export_scene_substep(const std::string& outdir,
                                  int substep,
                                  const Vec& dynamic_x,
                                  const std::vector<std::pair<int, int>>& dynamic_edges,
-                                 const Vec& static_x,
-                                 const std::vector<std::pair<int, int>>& static_edges,
                                  OutputFormat format) {
-    if (static_x.empty()) {
-        export_substep_frame(outdir, substep, dynamic_x, dynamic_edges, format);
-        return;
-    }
+    export_substep_frame(outdir, substep, dynamic_x, dynamic_edges, format);
+}
 
-    Vec x = dynamic_x;
-    std::vector<std::pair<int, int>> edges = dynamic_edges;
-    const int offset = static_cast<int>(x.size());
-    x.insert(x.end(), static_x.begin(), static_x.end());
-    for (const auto& edge : static_edges) {
-        edges.emplace_back(offset + edge.first, offset + edge.second);
+static void export_static_colliders(const std::string& outdir,
+                                    const Vec& static_x,
+                                    const std::vector<std::pair<int, int>>& static_edges,
+                                    OutputFormat format) {
+    if (static_x.empty()) return;
+
+    const fs::path filename = fs::path(outdir) / (format == OutputFormat::GEO ? "static_colliders.geo" : "static_colliders.obj");
+    if (format == OutputFormat::GEO) {
+        export_geo(filename.string(), static_x, static_edges);
+    } else {
+        export_obj(filename.string(), static_x, static_edges);
     }
-    export_substep_frame(outdir, substep, x, edges, format);
 }
 
 int main(int argc, char** argv) {
@@ -139,10 +125,10 @@ int main(int argc, char** argv) {
               << " | Min edge length: " << min_edge_length
               << " | d_hat limit: " << d_hat_limit << "\n";
 
+    export_static_colliders(args.outdir, static_positions, static_edges, output_format);
+
     if (!restarting) {
-        export_scene_frame(
-                args.outdir, 0, state.deformed_positions, ref_mesh.edges,
-                static_positions, static_edges, output_format);
+        export_scene_frame(args.outdir, 0, state.deformed_positions, ref_mesh.edges, output_format);
         serialize_state(args.outdir, 0, state);
     }
 
@@ -155,9 +141,7 @@ int main(int argc, char** argv) {
     for (int frame = start_frame; frame <= args.num_frames; ++frame) {
         auto substep_export = [&](int global_substep, const Vec& x_substep) {
             if (args.write_substeps) {
-                export_scene_substep(
-                        args.outdir, global_substep + 1, x_substep, ref_mesh.edges,
-                        static_positions, static_edges, output_format);
+                export_scene_substep(args.outdir, global_substep + 1, x_substep, ref_mesh.edges, output_format);
             }
         };
 
@@ -168,9 +152,7 @@ int main(int argc, char** argv) {
         const auto solver_end = clock::now();
         const std::chrono::duration<double> solver_elapsed = solver_end - solver_start;
 
-        export_scene_frame(
-                args.outdir, frame, state.deformed_positions, ref_mesh.edges,
-                static_positions, static_edges, output_format);
+        export_scene_frame(args.outdir, frame, state.deformed_positions, ref_mesh.edges, output_format);
         serialize_state(args.outdir, frame, state);
 
         max_global_residual = std::max(max_global_residual, result.max_final_residual);

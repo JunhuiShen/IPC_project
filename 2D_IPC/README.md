@@ -87,6 +87,11 @@ Output frames are written to `frames_2d/` by default:
     frame_0002.geo
     ...
 
+Scenes with visualization-only static collider geometry also write one holder
+file beside the frames:
+
+    static_colliders.geo
+
 Binary restart checkpoints are written beside the frames:
 
     state_0000.bin
@@ -170,12 +175,19 @@ positions. Its rest lengths are computed from the initial
 Example geometry is defined in `example.cpp`. Algorithmic choices use CLI flags
 defined in `ipc_args.h`.
 
-    ./build/simulation --example 2 --initial_guess verlet
+    ./build/simulation --example 2 --initial_guess verlet \
+        --format geo --outdir frames_hexagon
 
 | Example | Description |
 |---|---|
 | `1` | two pinned chains swinging into each other with node-segment IPC contact |
-| `2` | one falling chain above a static ground SDF collider |
+| `2` | spinning/falling rigid hexagon above an SDF-only ground at `y = 0`; exports a separate visible static collider line from `(-4, 0)` to `(4, 0)` for Houdini |
+
+In Example 2, ground collision comes from the SDF penalty, not from an IPC
+ground segment. The exported line is visualization-only and is written once as
+`static_colliders.geo` or `static_colliders.obj`, matching the 3D IPC static
+collider export convention. Per-frame geometry contains only simulated nodes
+and edges.
 
 The broad-phase collision candidate detector used in the simulation is
 `BroadPhase`.
@@ -205,13 +217,13 @@ Important CLI options:
 | `num_frames` | default `120` |
 | `gx` / `gy` | gravity; defaults `0` and `-9.81` |
 | `k_spring` / `k_barrier` | defaults `1000` and `100` |
-| `k_sdf` / `eps_sdf` | defaults `500` and `0.002`; SDF penalty parameters |
+| `k_sdf` / `eps_sdf` | defaults `500` and `0.002`; SDF penalty parameters used by ground/circle SDFs, including Example 2's ground |
 | `density` / `thickness` | defaults `900 kg/m^3` and `0.001 m` |
 | `d_hat` | default `0.005` |
 | `tol_abs` / `max_substep_iters` | defaults `1e-6` and `500` |
 | `eta` | step safety factor; default `0.9`; use at most `0.5` with `trust_region` |
 | `step_policy` | `ccd` or `trust_region` |
-| `initial_guess` | `ccd`, `verlet`, or `trivial`; example `2` uses `verlet` unless explicitly set |
+| `initial_guess` | `ccd`, `verlet`, or `trivial`; default `ccd` |
 | `use_parallel` | color-parallel updates; default `true` |
 | `node_box_min` / `node_box_max` | defaults `0.001` and `0.01` |
 | `node_box_update_count` | active-set rebuild interval; default `1` |
