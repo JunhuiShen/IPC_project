@@ -589,18 +589,12 @@ SolveResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const std:
 }
 
 SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const DeformedState& state, const Vec& xhat, Vec& xnew,
-        Vec& y_current, std::vector<double>& theta_current,
-        const SimParams2D& params, BroadPhase& broad_phase, std::vector<double>* residual_history) {
+        Vec& y_current, std::vector<double>& theta_current, const SimParams2D& params, std::vector<double>* residual_history) {
     const int total_nodes = static_cast<int>(state.deformed_positions.size());
-    const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
-    const Vec xnew_substep_start = xnew;
     const PinMap pin_map = build_pin_map(pins, total_nodes);
+    const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
     const double dt = params.substep_dt();
-
-    std::vector<bool> is_rb_node(total_nodes, false);
-    for (int rb = 0; rb < num_rbs; ++rb)
-        for (int node : ref_mesh.rb_nodes[rb])
-            is_rb_node[node] = true;
+    (void)xhat;
 
     auto sync_rb_positions = [&](int rb) {
         const Vec2& y = y_current[rb];
@@ -614,52 +608,17 @@ SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::ve
     for (int rb = 0; rb < num_rbs; ++rb)
         sync_rb_positions(rb);
 
-    static std::vector<double> prev_disp_rb;
-    if (static_cast<int>(prev_disp_rb.size()) != total_nodes)
-        prev_disp_rb.assign(total_nodes, params.node_box_max);
-
-    const auto elastic_adj = build_elastic_adj(ref_mesh.edges, total_nodes);
-    std::vector<std::vector<int>> color_groups;
-
-    auto update_prev_disp = [&]() {
-        for (int i = 0; i < total_nodes; ++i)
-            prev_disp_rb[i] = norm(get_xi(xnew, i) - get_xi(xnew_substep_start, i));
-    };
-
-    auto build_parallel_active_set = [&]() {
-        std::vector<double> node_radii(total_nodes, params.node_box_min);
-        constexpr double node_box_padding = 1.2;
-        for (int i = 0; i < total_nodes; ++i) {
-            const double raw = prev_disp_rb[i] * node_box_padding;
-            node_radii[i] = std::clamp(raw, params.node_box_min, params.node_box_max);
-        }
-
-        std::vector<AABB> blue_boxes;
-        RedBoxes red_boxes;
-        GreenBoxes green_boxes;
-        build_blue_boxes(xnew, node_radii, blue_boxes);
-        build_red_boxes(ref_mesh.edges, blue_boxes, red_boxes);
-        build_green_boxes(red_boxes, params.d_hat, green_boxes);
-        broad_phase.mutable_cache() = register_barrier_pairs_from_blue_and_green(ref_mesh.edges, blue_boxes, green_boxes);
-
-        const auto contact_adj = build_contact_adj(broad_phase.pairs(), total_nodes);
-        color_groups = greedy_color_conflict_graph(union_adjacency(elastic_adj, contact_adj));
-    };
-
-    build_parallel_active_set();
+    const std::vector<NodeSegmentPair> barrier_pairs;
     if (residual_history) residual_history->clear();
 
     auto eval_residual = [&]() {
-        double r_cloth = compute_global_residual(ref_mesh, pins, pin_map, state, xnew, xhat, params, broad_phase.pairs(), dt);
-        double r_rb = compute_rigid_body_unnormalized_residual(ref_mesh, state, xnew, y_current, theta_current, params, broad_phase.pairs(), dt);
-        double r = r_cloth+r_rb;
-        return r;
+        return compute_rigid_body_unnormalized_residual(ref_mesh, state, xnew, y_current, theta_current, params, barrier_pairs, dt);
     };
 
     auto make_result = [&](double residual, int iterations) {
         SolveResult result{residual, iterations};
         result.has_rigid_residual = true;
-        result.final_rigid_residual = compute_rigid_body_unnormalized_residual(ref_mesh, state, xnew, y_current, theta_current, params, broad_phase.pairs(), dt);
+        result.final_rigid_residual = compute_rigid_body_unnormalized_residual(ref_mesh, state, xnew, y_current, theta_current, params, barrier_pairs, dt);
         return result;
     };
 
@@ -667,55 +626,31 @@ SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::ve
     if (residual_history) residual_history->push_back(r);
 
     if (r < params.tol_abs) {
-        update_prev_disp();
         return make_result(r, 0);
     }
 
-    const int rebuild_every = std::max(1, params.node_box_update_count);
     for (int it = 1; it < params.max_substep_iters; ++it) {
-        if (it > 1 && (it - 1) % rebuild_every == 0)
-            build_parallel_active_set();
-
-        // Rigid body updates: COM then orientation
         for (int rb = 0; rb < num_rbs; ++rb) {
             const auto& rb_nodes = ref_mesh.rb_nodes[rb];
             const double m_total = ref_mesh.total_mass[rb];
 
-            const ComUpdate cu = compute_com_update(rb, state, ref_mesh, rb_nodes, xnew, y_current[rb], broad_phase.pairs(), params, dt, params.eta, m_total);
+            const ComUpdate cu = compute_com_update(rb, state, ref_mesh, rb_nodes, xnew, y_current[rb], barrier_pairs, params, dt, params.eta, m_total);
             y_current[rb].x -= cu.omega * cu.dy.x;
             y_current[rb].y -= cu.omega * cu.dy.y;
             sync_rb_positions(rb);
 
-            const ThetaUpdate tu = compute_theta_update(rb, state, ref_mesh, rb_nodes, xnew, y_current[rb], theta_current[rb], broad_phase.pairs(), params, dt, params.eta);
+            const ThetaUpdate tu = compute_theta_update(rb, state, ref_mesh, rb_nodes, xnew, y_current[rb], theta_current[rb], barrier_pairs, params, dt, params.eta);
             theta_current[rb] -= tu.omega * tu.dtheta;
             sync_rb_positions(rb);
-        }
-
-        // Free node updates
-        for (const auto& group : color_groups) {
-            std::vector<int> free_nodes;
-            for (int node : group)
-                if (!is_rb_node[node]) free_nodes.push_back(node);
-
-            std::vector<NodeUpdate> updates(free_nodes.size());
-
-            #pragma omp parallel for if(params.use_parallel && free_nodes.size() > 1)
-            for (int idx = 0; idx < static_cast<int>(free_nodes.size()); ++idx)
-                updates[idx] = compute_node_update(free_nodes[idx], ref_mesh, state, pins, pin_map, xnew, xhat, broad_phase, params, dt);
-
-            for (const NodeUpdate& update : updates)
-                commit_node_update(update, xnew);
         }
 
         r = eval_residual();
         if (residual_history) residual_history->push_back(r);
 
         if (r < params.tol_abs) {
-            update_prev_disp();
             return make_result(r, it);
         }
     }
 
-    update_prev_disp();
     return make_result(r, params.max_substep_iters);
 }

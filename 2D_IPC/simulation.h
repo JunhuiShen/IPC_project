@@ -73,8 +73,8 @@ inline AdvanceResult2D advance_one_frame(
 
 inline AdvanceResult2D advance_one_frame_rb(
         DeformedState& state, const RefMesh& ref_mesh, const std::vector<Pin>& pins,
-        const SimParams2D& params, BroadPhase& broad_phase,
-        int frame_index, SubstepCallback2D on_substep = nullptr) {
+        const SimParams2D& params, int frame_index,
+        SubstepCallback2D on_substep = nullptr) {
     const double dt = params.substep_dt();
     const int substeps = std::max(1, params.substeps);
     const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
@@ -94,7 +94,7 @@ inline AdvanceResult2D advance_one_frame_rb(
         const SolveResult substep_result = global_gauss_seidel_solver_rb(
                 ref_mesh, pins, state, xhat, xnew,
                 y_current, theta_current,
-                params, broad_phase, &residual_history);
+                params, &residual_history);
 
         if (aggregate.substeps_completed == 0 && !residual_history.empty())
             aggregate.first_initial_residual = residual_history.front();

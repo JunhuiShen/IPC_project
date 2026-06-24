@@ -43,5 +43,4 @@ SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh,
                                            Vec& y_current,
                                            std::vector<double>& theta_current,
                                            const SimParams2D& params,
-                                           BroadPhase& broad_phase,
                                            std::vector<double>* residual_history = nullptr);

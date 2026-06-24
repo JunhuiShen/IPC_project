@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
         const auto solver_start = clock::now();
         const AdvanceResult2D result = ref_mesh.rb_nodes.empty()
             ? advance_one_frame(state, ref_mesh, pins, params, broad_phase, frame, substep_export)
-            : advance_one_frame_rb(state, ref_mesh, pins, params, broad_phase, frame, substep_export);
+            : advance_one_frame_rb(state, ref_mesh, pins, params, frame, substep_export);
         const auto solver_end = clock::now();
         const std::chrono::duration<double> solver_elapsed = solver_end - solver_start;
 
