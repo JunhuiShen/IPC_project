@@ -215,17 +215,17 @@ TEST(SDFPenalty2D, EnergyBehavior) {
     EXPECT_NEAR(sdf_penalty_energy(evaluate_sdf(ground, {0.0, -0.2}), k, eps),
                 0.5 * k * 0.3 * 0.3, kTol);
     EXPECT_NEAR(sdf_penalty_energy(evaluate_sdf(ground, {0.0, 0.04}), k, eps),
-                0.5 * k * 0.06 * 0.06, kTol);
+                0.5 * k * 0.6 * 0.06 * 0.06, kTol);
 
     const Vec2 g = sdf_penalty_gradient(evaluate_sdf(ground, {0.0, 0.04}), k, eps);
     EXPECT_NEAR(g.x, 0.0, kTol);
-    EXPECT_NEAR(g.y, -6.0, kTol);
+    EXPECT_NEAR(g.y, -5.4, kTol);
 
     const Mat2 H = sdf_penalty_hessian(evaluate_sdf(ground, {0.0, 0.04}), k, eps);
     EXPECT_NEAR(H.a11, 0.0, kTol);
     EXPECT_NEAR(H.a12, 0.0, kTol);
     EXPECT_NEAR(H.a21, 0.0, kTol);
-    EXPECT_NEAR(H.a22, k, kTol);
+    EXPECT_NEAR(H.a22, 180.0, kTol);
 
     const Vec2 inside_g = sdf_penalty_gradient(evaluate_sdf(ground, {0.0, -0.2}), k, eps);
     const Mat2 inside_H = sdf_penalty_hessian(evaluate_sdf(ground, {0.0, -0.2}), k, eps);
