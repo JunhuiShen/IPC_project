@@ -236,3 +236,46 @@ Mat2 local_barrier_hess(int who, const Vec& x, int node, int seg0, int seg1, dou
     else if (who == seg1) return add(H2, K2);
     return {0, 0, 0, 0};
 }
+
+RigidBarrierGradient local_barrier_grad_rb(const std::vector<int>& rb_nodes, const Vec& x, const Vec2& x_com, int node, int seg0, int seg1, double dhat) {
+    RigidBarrierGradient result;
+
+    for (int who : rb_nodes) {
+        if (who != node && who != seg0 && who != seg1) continue;
+
+        const Vec2 gx = local_barrier_grad(who, x, node, seg0, seg1, dhat);
+        const Vec2 r = get_xi(x, who) - x_com;
+        const Vec2 dx_dtheta{-r.y, r.x};
+        
+        // g_y += g_x
+        result.translation = result.translation + gx;
+        // g_theta += (dx/dtheta)^T g_x
+        result.rotation += dot(dx_dtheta, gx);
+    }
+
+    return result;
+}
+
+RigidBarrierHessian local_barrier_hess_rb(const std::vector<int>& rb_nodes, const Vec& x, const Vec2& x_com, int node, int seg0, int seg1, double dhat) {
+    RigidBarrierHessian result;
+
+    for (int who : rb_nodes) {
+        if (who != node && who != seg0 && who != seg1) continue;
+
+        const Vec2 gx = local_barrier_grad(who, x, node, seg0, seg1, dhat);
+        const Mat2 Hx = local_barrier_hess(who, x, node, seg0, seg1, dhat);
+        const Vec2 r = get_xi(x, who) - x_com;
+        const Vec2 dx_dtheta{-r.y, r.x};
+        const Vec2 d2x_dtheta2{-r.x, -r.y};
+        const Vec2 Hx_dx_dtheta = matvec(Hx, dx_dtheta);
+
+        // H_yy += H_x
+        result.translation_translation = add(result.translation_translation, Hx);
+        // H_ytheta  += H_x * dx/dtheta
+        result.translation_rotation = result.translation_rotation + Hx_dx_dtheta;
+        // H_thetatheta += (dx/dtheta)^T H_x (dx/dtheta)  + g_x^T d2x/dtheta2
+        result.rotation_rotation += dot(dx_dtheta, Hx_dx_dtheta) + dot(gx, d2x_dtheta2);
+    }
+
+    return result;
+}

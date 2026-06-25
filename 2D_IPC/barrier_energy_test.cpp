@@ -21,6 +21,42 @@ double component(const Mat2& A, int r, int c) {
     return A.a22;
 }
 
+double component(const RigidBarrierGradient& g, int c) {
+    if (c == 0) return g.translation.x;
+    if (c == 1) return g.translation.y;
+    return g.rotation;
+}
+
+double component(const RigidBarrierHessian& H, int r, int c) {
+    if (r < 2 && c < 2) return component(H.translation_translation, r, c);
+    if (r < 2 && c == 2) return component(H.translation_rotation, r);
+    if (r == 2 && c < 2) return component(H.translation_rotation, c);
+    return H.rotation_rotation;
+}
+
+Vec2 rotate(const Vec2& x, double theta) {
+    const double c = std::cos(theta);
+    const double s = std::sin(theta);
+    return {c * x.x - s * x.y, s * x.x + c * x.y};
+}
+
+void perturb_rigid_dof(Vec2& y, double& theta, int dof, double h) {
+    if (dof == 0) {
+        y.x += h;
+    } else if (dof == 1) {
+        y.y += h;
+    } else {
+        theta += h;
+    }
+}
+
+Vec rigid_eval_positions(const Vec& base, int rb_node, const Vec2& material,
+                         const Vec2& y, double theta) {
+    Vec result = base;
+    set_xi(result, rb_node, y + rotate(material, theta));
+    return result;
+}
+
 void perturb(Vec& x, int node, int comp, double h) {
     if (comp == 0) {
         x[node].x += h;
@@ -126,6 +162,58 @@ bool check_gradient_hessian_component(const std::string& label,
     return check_slope_near_two(label, hs, errors, analytic);
 }
 
+template <typename EnergyFn>
+bool check_rigid_energy_gradient_component(const std::string& label,
+                                           const Vec2& y,
+                                           double theta,
+                                           int dof,
+                                           double analytic,
+                                           EnergyFn energy) {
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
+    std::vector<double> errors;
+    errors.reserve(hs.size());
+
+    for (double h : hs) {
+        Vec2 yp = y;
+        Vec2 ym = y;
+        double thetap = theta;
+        double thetam = theta;
+        perturb_rigid_dof(yp, thetap, dof, h);
+        perturb_rigid_dof(ym, thetam, dof, -h);
+        const double fd = (energy(yp, thetap) - energy(ym, thetam)) / (2.0 * h);
+        errors.push_back(std::abs(fd - analytic));
+    }
+
+    return check_slope_near_two(label, hs, errors, analytic);
+}
+
+template <typename GradFn>
+bool check_rigid_gradient_hessian_component(const std::string& label,
+                                            const Vec2& y,
+                                            double theta,
+                                            int perturb_dof,
+                                            int grad_dof,
+                                            double analytic,
+                                            GradFn gradient) {
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
+    std::vector<double> errors;
+    errors.reserve(hs.size());
+
+    for (double h : hs) {
+        Vec2 yp = y;
+        Vec2 ym = y;
+        double thetap = theta;
+        double thetam = theta;
+        perturb_rigid_dof(yp, thetap, perturb_dof, h);
+        perturb_rigid_dof(ym, thetam, perturb_dof, -h);
+        const double fd = (component(gradient(yp, thetap), grad_dof) -
+                           component(gradient(ym, thetam), grad_dof)) / (2.0 * h);
+        errors.push_back(std::abs(fd - analytic));
+    }
+
+    return check_slope_near_two(label, hs, errors, analytic);
+}
+
 } // namespace
 
 TEST(BarrierEnergy, EnergyGradientAndGradientHessianHaveSlopeTwo) {
@@ -167,6 +255,60 @@ TEST(BarrierEnergy, EnergyGradientAndGradientHessianHaveSlopeTwo) {
                     x, who, perturb_comp, grad_comp,
                     component(H, grad_comp, perturb_comp), gradient);
             }
+        }
+    }
+
+    EXPECT_TRUE(passed);
+}
+
+TEST(BarrierEnergy, RigidBodyGradientAndHessianChainRuleHaveSlopeTwo) {
+    const int seg0 = 0;
+    const int seg1 = 1;
+    const int rb_node = 2;
+    const Vec base = {
+        {0.0, 0.0},
+        {1.0, 0.0},
+        {0.0, 0.0},
+    };
+    const std::vector<int> rb_nodes = {rb_node};
+    const Vec2 material{0.18, 0.24};
+    const Vec2 y{0.22, 0.03};
+    const double theta = 0.41;
+    const double dhat = 1.0;
+    const Vec x = rigid_eval_positions(base, rb_node, material, y, theta);
+
+    auto positions = [&](const Vec2& y_eval, double theta_eval) {
+        return rigid_eval_positions(base, rb_node, material, y_eval, theta_eval);
+    };
+    auto energy = [&](const Vec2& y_eval, double theta_eval) {
+        const Vec x_eval = positions(y_eval, theta_eval);
+        return node_segment_barrier_energy(x_eval, rb_node, seg0, seg1, dhat);
+    };
+    auto gradient = [&](const Vec2& y_eval, double theta_eval) {
+        const Vec x_eval = positions(y_eval, theta_eval);
+        return local_barrier_grad_rb(
+                rb_nodes, x_eval, y_eval, rb_node, seg0, seg1, dhat);
+    };
+
+    const RigidBarrierGradient g = local_barrier_grad_rb(
+            rb_nodes, x, y, rb_node, seg0, seg1, dhat);
+    const RigidBarrierHessian H = local_barrier_hess_rb(
+            rb_nodes, x, y, rb_node, seg0, seg1, dhat);
+
+    bool passed = true;
+    for (int dof = 0; dof < 3; ++dof) {
+        passed &= check_rigid_energy_gradient_component(
+                "rigid barrier dE/dq dof " + std::to_string(dof),
+                y, theta, dof, component(g, dof), energy);
+    }
+
+    for (int perturb_dof = 0; perturb_dof < 3; ++perturb_dof) {
+        for (int grad_dof = 0; grad_dof < 3; ++grad_dof) {
+            passed &= check_rigid_gradient_hessian_component(
+                    "rigid barrier dgrad/dq row " + std::to_string(grad_dof) +
+                            " col " + std::to_string(perturb_dof),
+                    y, theta, perturb_dof, grad_dof,
+                    component(H, grad_dof, perturb_dof), gradient);
         }
     }
 

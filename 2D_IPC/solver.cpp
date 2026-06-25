@@ -71,9 +71,7 @@ Vec ccd_initial_guess(const DeformedState& state, const RefMesh& ref_mesh, const
     return xnew;
 }
 
-Vec verlet_initial_guess(const DeformedState& state, const RefMesh& ref_mesh,
-                         const std::vector<Pin>& pins, double dt, double eta,
-                         const Vec2& gravity) {
+Vec verlet_initial_guess(const DeformedState& state, const RefMesh& ref_mesh,const std::vector<Pin>& pins, double dt, double eta, const Vec2& gravity) {
     DeformedState predictor = state;
     const int total_nodes = static_cast<int>(state.deformed_positions.size());
 
@@ -95,6 +93,46 @@ struct NodeUpdate {
 
 static bool node_in_rigid_body(const std::vector<int>& rb_nodes, int node) {
     return std::find(rb_nodes.begin(), rb_nodes.end(), node) != rb_nodes.end();
+}
+
+static std::vector<std::vector<std::pair<int, int>>> build_rigid_body_edges(const RefMesh& ref_mesh) {
+    const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
+    std::vector<std::vector<std::pair<int, int>>> rb_edges(num_rbs);
+
+    for (int rb = 0; rb < num_rbs; ++rb) {
+        const auto& rb_nodes = ref_mesh.rb_nodes[rb];
+        for (const auto& edge : ref_mesh.edges) {
+            if (contains_node(rb_nodes, edge.first) && contains_node(rb_nodes, edge.second)) {
+                rb_edges[rb].push_back(edge);
+            }
+        }
+    }
+
+    return rb_edges;
+}
+
+static std::vector<NodeSegmentPair> build_rigid_body_barrier_pairs(const RefMesh& ref_mesh) {
+    const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
+    const auto rb_edges = build_rigid_body_edges(ref_mesh);
+    std::vector<NodeSegmentPair> pairs;
+
+    for (int rb_a = 0; rb_a < num_rbs; ++rb_a) {
+        for (int rb_b = rb_a + 1; rb_b < num_rbs; ++rb_b) {
+            for (int node : ref_mesh.rb_nodes[rb_a]) {
+                for (const auto& [seg0, seg1] : rb_edges[rb_b]) {
+                    pairs.push_back({node, seg0, seg1});
+                }
+            }
+
+            for (int node : ref_mesh.rb_nodes[rb_b]) {
+                for (const auto& [seg0, seg1] : rb_edges[rb_a]) {
+                    pairs.push_back({node, seg0, seg1});
+                }
+            }
+        }
+    }
+
+    return pairs;
 }
 
 static bool sdf_min_evaluation(const std::vector<GroundSDF>& grounds,  const std::vector<CircleSDF>& circles,  const Vec2& xi, SDFEvaluation& out) {
@@ -125,12 +163,8 @@ static bool sdf_min_evaluation(const SimParams2D& params, const Vec2& xi, SDFEva
 }
 
 // Returns the generalized gradient [dE/dy_x, dE/dy_y, dE/dtheta] for rigid body rb.
-static Eigen::Vector3d compute_local_gradient_rb(int rb, const RefMesh& ref_mesh,
-                                                  const DeformedState& state, const Vec& x,
-                                                  const Vec2& y_current, double theta_current, double m_total,
-                                                  const SimParams2D& params,
-                                                  const std::vector<NodeSegmentPair>& barrier_pairs,
-                                                  double dt) {
+static Eigen::Vector3d compute_local_gradient_rb(int rb, const RefMesh& ref_mesh, const DeformedState& state, const Vec& x, const Vec2& y_current, double theta_current, double m_total,
+                                                  const SimParams2D& params, const std::vector<NodeSegmentPair>& barrier_pairs, double dt) {
     // Translation: inertia + gravity
     Vec2 gt = inertia_translation_gradient(y_current, state.x_coms[rb], state.v_coms[rb], dt, m_total);
     const Vec2 g_grav = gravitational_gradient(m_total, params.gravity.y, dt);
@@ -148,11 +182,10 @@ static Eigen::Vector3d compute_local_gradient_rb(int rb, const RefMesh& ref_mesh
         if (!node_in_rb && !seg0_in_rb && !seg1_in_rb) continue;
         if (node_in_rb && seg0_in_rb && seg1_in_rb) continue;
 
-        for (int node : rb_nodes) {
-            Vec2 gb = local_barrier_grad(node, x, c.node, c.seg0, c.seg1, params.d_hat);
-            gt.x += dt * dt * params.k_barrier * gb.x;
-            gt.y += dt * dt * params.k_barrier * gb.y;
-        }
+        const RigidBarrierGradient gb = local_barrier_grad_rb(rb_nodes, x, y_current, c.node, c.seg0, c.seg1, params.d_hat);
+        gt.x += dt * dt * params.k_barrier * gb.translation.x;
+        gt.y += dt * dt * params.k_barrier * gb.translation.y;
+        gr += dt * dt * params.k_barrier * gb.rotation;
     }
 
     if (params.k_sdf > 0.0) {
@@ -174,12 +207,8 @@ static Eigen::Vector3d compute_local_gradient_rb(int rb, const RefMesh& ref_mesh
 }
 
 
-static Vec2 compute_local_gradient(int who, const RefMesh& ref_mesh,
-                                   const std::vector<Pin>& pins, const PinMap& pin_map,
-                                   const DeformedState& state, const Vec& x, const Vec& xhat,
-                                   const SimParams2D& params,
-                                   const std::vector<NodeSegmentPair>& barrier_pairs,
-                                   double dt) {
+static Vec2 compute_local_gradient(int who, const RefMesh& ref_mesh, const std::vector<Pin>& pins, const PinMap& pin_map, const DeformedState& state, const Vec& x, const Vec& xhat,  const SimParams2D& params, 
+    const std::vector<NodeSegmentPair>& barrier_pairs, double dt) {
     Vec2 gi = local_grad_no_barrier(
             who, x, xhat, ref_mesh, pins, &pin_map, dt, params.k_spring, params.gravity);
 
@@ -203,12 +232,8 @@ static Vec2 compute_local_gradient(int who, const RefMesh& ref_mesh,
     return gi;
 }
 
-static Mat2 compute_local_hessian(int who, const RefMesh& ref_mesh,
-                                  const std::vector<Pin>& pins, const PinMap& pin_map,
-                                  const DeformedState& state, const Vec& x,
-                                  const SimParams2D& params,
-                                  const std::vector<NodeSegmentPair>& barrier_pairs,
-                                  double dt) {
+static Mat2 compute_local_hessian(int who, const RefMesh& ref_mesh, const std::vector<Pin>& pins, const PinMap& pin_map,
+                                  const DeformedState& state, const Vec& x, const SimParams2D& params, const std::vector<NodeSegmentPair>& barrier_pairs, double dt) {
     Mat2 Hi = local_hess_no_barrier(
             who, x, ref_mesh, pins, &pin_map, dt, params.k_spring);
 
@@ -225,8 +250,7 @@ static Mat2 compute_local_hessian(int who, const RefMesh& ref_mesh,
     if (params.k_sdf > 0.0) {
         SDFEvaluation sdf;
         if (sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, get_xi(x, who), sdf)) {
-            Mat2 Hs = sdf_penalty_hessian(
-                    sdf, params.k_sdf, params.eps_sdf, /*include_curvature=*/false);
+            Mat2 Hs = sdf_penalty_hessian(sdf, params.k_sdf, params.eps_sdf, /*include_curvature=*/false);
             Hi.a11 += dt * dt * Hs.a11;
             Hi.a12 += dt * dt * Hs.a12;
             Hi.a21 += dt * dt * Hs.a21;
@@ -237,18 +261,12 @@ static Mat2 compute_local_hessian(int who, const RefMesh& ref_mesh,
     return Hi;
 }
 
-static double compute_global_residual(const RefMesh& ref_mesh,
-                                      const std::vector<Pin>& pins, const PinMap& pin_map,
-                                      const DeformedState& state, const Vec& x, const Vec& xhat,
-                                      const SimParams2D& params,
-                                      const std::vector<NodeSegmentPair>& barrier_pairs,
-                                      double dt) {
+static double compute_global_residual(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const PinMap& pin_map,  const DeformedState& state, const Vec& x, const Vec& xhat,
+                                      const SimParams2D& params, const std::vector<NodeSegmentPair>& barrier_pairs,  double dt) {
     double r = 0.0;
 
     for (int i = 0; i < static_cast<int>(state.deformed_positions.size()); ++i) {
-        Vec2 g = compute_local_gradient(
-                i, ref_mesh, pins, pin_map, state, x, xhat, params,
-                barrier_pairs, dt);
+        Vec2 g = compute_local_gradient(i, ref_mesh, pins, pin_map, state, x, xhat, params, barrier_pairs, dt);
         const double mi = std::max(ref_mesh.mass[i], 1e-12);
         r = std::max(r, std::max(std::abs(g.x), std::abs(g.y)) / mi);
     }
@@ -256,21 +274,14 @@ static double compute_global_residual(const RefMesh& ref_mesh,
     return r;
 }
 
-static double compute_rigid_body_unnormalized_residual(const RefMesh& ref_mesh,
-                                                       const DeformedState& state, const Vec& x,
-                                                       const Vec& y_current, const std::vector<double>& theta_current,
-                                                       const SimParams2D& params,
-                                                        const std::vector<NodeSegmentPair>& barrier_pairs,
-                                                       double dt) {
+static double compute_rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedState& state, const Vec& x, const Vec& y_current, const std::vector<double>& theta_current,
+                                                       const SimParams2D& params, const std::vector<NodeSegmentPair>& barrier_pairs, double dt) {
     const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
     double residual = 0.0;
 
     for (int rb = 0; rb < num_rbs; ++rb) {
         const double m_total = ref_mesh.total_mass[rb];
-        const Eigen::Vector3d g = compute_local_gradient_rb(
-                rb, ref_mesh, state, x,
-                y_current[rb], theta_current[rb], m_total,
-                params, barrier_pairs, dt);
+        const Eigen::Vector3d g = compute_local_gradient_rb(rb, ref_mesh, state, x, y_current[rb], theta_current[rb], m_total, params, barrier_pairs, dt);
 
         residual += g.norm();
     }
@@ -317,8 +328,7 @@ static double compute_trust_region_safe_step(int who, const Vec2& dx, const Vec&
         else if (who == c.seg0) dxj = full;
         else if (who == c.seg1) dxk = full;
 
-        omega = std::min(omega, trust_region_node_segment_gauss_seidel(
-                xi, dxi, xj, dxj, xk, dxk, eta).omega);
+        omega = std::min(omega, trust_region_node_segment_gauss_seidel(xi, dxi, xj, dxj, xk, dxk, eta).omega);
         if (omega <= 0.0) return 0.0;
     }
 
@@ -375,6 +385,42 @@ static void add_rigid_sdf_rotation_terms(const std::vector<int>& rb_nodes, const
     }
 }
 
+static void add_rigid_barrier_translation_terms(const std::vector<int>& rb_nodes, const Vec& x, const Vec2& y_current, const std::vector<NodeSegmentPair>& barrier_pairs, const SimParams2D& params, double dt, Vec2& g, Mat2& H) {
+    for (const NodeSegmentPair& c : barrier_pairs) {
+        const bool node_in_rb = contains_node(rb_nodes, c.node);
+        const bool seg0_in_rb = contains_node(rb_nodes, c.seg0);
+        const bool seg1_in_rb = contains_node(rb_nodes, c.seg1);
+        if (!node_in_rb && !seg0_in_rb && !seg1_in_rb) continue;
+        if (node_in_rb && seg0_in_rb && seg1_in_rb) continue;
+
+        const RigidBarrierGradient gb = local_barrier_grad_rb(rb_nodes, x, y_current, c.node, c.seg0, c.seg1, params.d_hat);
+        const RigidBarrierHessian Hb = local_barrier_hess_rb(rb_nodes, x, y_current, c.node, c.seg0, c.seg1, params.d_hat);
+
+        g.x += dt * dt * params.k_barrier * gb.translation.x;
+        g.y += dt * dt * params.k_barrier * gb.translation.y;
+        H.a11 += dt * dt * params.k_barrier * Hb.translation_translation.a11;
+        H.a12 += dt * dt * params.k_barrier * Hb.translation_translation.a12;
+        H.a21 += dt * dt * params.k_barrier * Hb.translation_translation.a21;
+        H.a22 += dt * dt * params.k_barrier * Hb.translation_translation.a22;
+    }
+}
+
+static void add_rigid_barrier_rotation_terms(const std::vector<int>& rb_nodes, const Vec& x, const Vec2& y_current, const std::vector<NodeSegmentPair>& barrier_pairs, const SimParams2D& params, double dt, double& g, double& H) {
+    for (const NodeSegmentPair& c : barrier_pairs) {
+        const bool node_in_rb = contains_node(rb_nodes, c.node);
+        const bool seg0_in_rb = contains_node(rb_nodes, c.seg0);
+        const bool seg1_in_rb = contains_node(rb_nodes, c.seg1);
+        if (!node_in_rb && !seg0_in_rb && !seg1_in_rb) continue;
+        if (node_in_rb && seg0_in_rb && seg1_in_rb) continue;
+
+        const RigidBarrierGradient gb = local_barrier_grad_rb(rb_nodes, x, y_current, c.node, c.seg0, c.seg1, params.d_hat);
+        const RigidBarrierHessian Hb = local_barrier_hess_rb(rb_nodes, x, y_current, c.node, c.seg0, c.seg1, params.d_hat);
+
+        g += dt * dt * params.k_barrier * gb.rotation;
+        H += dt * dt * params.k_barrier * Hb.rotation_rotation;
+    }
+}
+
 static ComUpdate compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const std::vector<int>& rb_nodes,
     const Vec& x, const Vec2& y_current, const std::vector<NodeSegmentPair>& ccd_pairs, const SimParams2D& params, double dt, double eta, double m_total) {
 
@@ -389,6 +435,7 @@ static ComUpdate compute_com_update(int rb, const DeformedState& state, const Re
     g.y -= g_grav.y;
 
     Mat2 H = inertia_translation_hessian(m_total);
+    add_rigid_barrier_translation_terms(rb_nodes, x, y_current, ccd_pairs, params, dt, g, H);
     add_rigid_sdf_translation_terms(rb_nodes, x, params, dt, g, H);
 
     Vec2 dy = matvec(mat2_inverse(H), g);
@@ -429,6 +476,7 @@ static ThetaUpdate compute_theta_update(int rb, const DeformedState& state, cons
 
     double g = inertia_rotation_gradient(theta_current, theta_n, omega_n, I, dt);
     double H = inertia_rotation_hessian(theta_current, theta_n, omega_n, I, dt);
+    add_rigid_barrier_rotation_terms(rb_nodes, x, y_current, ccd_pairs, params, dt, g, H);
     add_rigid_sdf_rotation_terms(rb_nodes, x, y_current, params, dt, g, H);
 
     const double dtheta = g / H;
@@ -608,7 +656,7 @@ SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::ve
     for (int rb = 0; rb < num_rbs; ++rb)
         sync_rb_positions(rb);
 
-    const std::vector<NodeSegmentPair> barrier_pairs;
+    const std::vector<NodeSegmentPair> barrier_pairs = build_rigid_body_barrier_pairs(ref_mesh);
     if (residual_history) residual_history->clear();
 
     auto eval_residual = [&]() {

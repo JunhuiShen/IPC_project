@@ -188,13 +188,7 @@ defined in `ipc_args.h`.
 | Example | Description |
 |---|---|
 | `1` | two pinned chains swinging into each other with node-segment IPC contact |
-| `2` | spinning/falling rigid hexagon above an SDF-only ground at `y = 0`; exports a separate visible static collider line from `(-4, 0)` to `(4, 0)` for Houdini |
-
-In Example 2, ground collision comes from the SDF penalty, not from an IPC
-ground segment. The exported line is visualization-only and is written once as
-`static_colliders.geo` or `static_colliders.obj`, matching the 3D IPC static
-collider export convention. Per-frame geometry contains only simulated nodes
-and edges.
+| `2` | spinning/falling rigid hexagon above ground |
 
 The broad-phase collision candidate detector used in the simulation is
 `BroadPhase`.
