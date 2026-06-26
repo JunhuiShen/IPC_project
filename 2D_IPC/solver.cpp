@@ -162,9 +162,32 @@ static bool sdf_min_evaluation(const SimParams2D& params, const Vec2& xi, SDFEva
     return sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, xi, out);
 }
 
+static int pin_index_for_node(const PinMap& pin_map, int node) {
+    if (node < 0 || node >= static_cast<int>(pin_map.size())) return -1;
+    return pin_map[node];
+}
+
+static void add_rigid_pin_gradient_terms(const std::vector<int>& rb_nodes, const Vec& x, const Vec2& y_current, const std::vector<Pin>& pins, const PinMap& pin_map,
+    double dt, Vec2& translation, double& rotation) {
+    for (int node : rb_nodes) {
+        const int pin_index = pin_index_for_node(pin_map, node);
+        if (pin_index < 0) continue;
+
+        const Vec2 xi = get_xi(x, node);
+        const Vec2 xpin = pins[pin_index].target_position;
+        const Vec2 gx{k_pin_stiffness * (xi.x - xpin.x), k_pin_stiffness * (xi.y - xpin.y)};
+        const Vec2 r = xi - y_current;
+        const Vec2 dx_dtheta{-r.y, r.x};
+
+        translation.x += dt * dt * gx.x;
+        translation.y += dt * dt * gx.y;
+        rotation += dt * dt * dot(dx_dtheta, gx);
+    }
+}
+
 // Returns the generalized gradient [dE/dy_x, dE/dy_y, dE/dtheta] for rigid body rb.
 static Eigen::Vector3d compute_local_gradient_rb(int rb, const RefMesh& ref_mesh, const DeformedState& state, const Vec& x, const Vec2& y_current, double theta_current, double m_total,
-                                                  const SimParams2D& params, const std::vector<NodeSegmentPair>& barrier_pairs, double dt) {
+                                                  const std::vector<Pin>& pins, const PinMap& pin_map, const SimParams2D& params, const std::vector<NodeSegmentPair>& barrier_pairs, double dt) {
     // Translation: inertia + gravity
     Vec2 gt = inertia_translation_gradient(y_current, state.x_coms[rb], state.v_coms[rb], dt, m_total);
     const Vec2 g_grav = gravitational_gradient(m_total, params.gravity.y, dt);
@@ -175,6 +198,8 @@ static Eigen::Vector3d compute_local_gradient_rb(int rb, const RefMesh& ref_mesh
     double gr = inertia_rotation_gradient(theta_current, state.theta[rb], state.omega[rb], ref_mesh.inertia_tensor[rb], dt);
 
     const auto& rb_nodes = ref_mesh.rb_nodes[rb];
+    add_rigid_pin_gradient_terms(rb_nodes, x, y_current, pins, pin_map, dt, gt, gr);
+
     for (const auto& c : barrier_pairs) {
         const bool node_in_rb = contains_node(rb_nodes, c.node);
         const bool seg0_in_rb = contains_node(rb_nodes, c.seg0);
@@ -232,10 +257,9 @@ static Vec2 compute_local_gradient(int who, const RefMesh& ref_mesh, const std::
     return gi;
 }
 
-static Mat2 compute_local_hessian(int who, const RefMesh& ref_mesh, const std::vector<Pin>& pins, const PinMap& pin_map,
-                                  const DeformedState& state, const Vec& x, const SimParams2D& params, const std::vector<NodeSegmentPair>& barrier_pairs, double dt) {
-    Mat2 Hi = local_hess_no_barrier(
-            who, x, ref_mesh, pins, &pin_map, dt, params.k_spring);
+static Mat2 compute_local_hessian(int who, const RefMesh& ref_mesh, const PinMap& pin_map,
+    const DeformedState& state, const Vec& x, const SimParams2D& params, const std::vector<NodeSegmentPair>& barrier_pairs, double dt) {
+    Mat2 Hi = local_hess_no_barrier(who, x, ref_mesh, &pin_map, dt, params.k_spring);
 
     for (const auto& c : barrier_pairs) {
         if (c.node != who && c.seg0 != who && c.seg1 != who) continue;
@@ -274,14 +298,15 @@ static double compute_global_residual(const RefMesh& ref_mesh, const std::vector
     return r;
 }
 
-static double compute_rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedState& state, const Vec& x, const Vec& y_current, const std::vector<double>& theta_current,
+static double compute_rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const PinMap& pin_map,
+                                                       const DeformedState& state, const Vec& x, const Vec& y_current, const std::vector<double>& theta_current,
                                                        const SimParams2D& params, const std::vector<NodeSegmentPair>& barrier_pairs, double dt) {
     const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
     double residual = 0.0;
 
     for (int rb = 0; rb < num_rbs; ++rb) {
         const double m_total = ref_mesh.total_mass[rb];
-        const Eigen::Vector3d g = compute_local_gradient_rb(rb, ref_mesh, state, x, y_current[rb], theta_current[rb], m_total, params, barrier_pairs, dt);
+        const Eigen::Vector3d g = compute_local_gradient_rb(rb, ref_mesh, state, x, y_current[rb], theta_current[rb], m_total, pins, pin_map, params, barrier_pairs, dt);
 
         residual += g.norm();
     }
@@ -367,6 +392,38 @@ static void add_rigid_sdf_translation_terms(const std::vector<int>& rb_nodes, co
     }
 }
 
+static void add_rigid_pin_translation_terms(const std::vector<int>& rb_nodes, const Vec& x, const std::vector<Pin>& pins, const PinMap& pin_map, double dt, Vec2& g, Mat2& H) {
+    for (int node : rb_nodes) {
+        const int pin_index = pin_index_for_node(pin_map, node);
+        if (pin_index < 0) continue;
+
+        const Vec2 xi = get_xi(x, node);
+        const Vec2 xpin = pins[pin_index].target_position;
+
+        g.x += dt * dt * k_pin_stiffness * (xi.x - xpin.x);
+        g.y += dt * dt * k_pin_stiffness * (xi.y - xpin.y);
+        H.a11 += dt * dt * k_pin_stiffness;
+        H.a22 += dt * dt * k_pin_stiffness;
+    }
+}
+
+static void add_rigid_pin_rotation_terms(const std::vector<int>& rb_nodes, const Vec& x, const Vec2& y_current, const std::vector<Pin>& pins, const PinMap& pin_map, double dt, double& g, double& H) {
+    for (int node : rb_nodes) {
+        const int pin_index = pin_index_for_node(pin_map, node);
+        if (pin_index < 0) continue;
+
+        const Vec2 xi = get_xi(x, node);
+        const Vec2 xpin = pins[pin_index].target_position;
+        const Vec2 gx{k_pin_stiffness * (xi.x - xpin.x), k_pin_stiffness * (xi.y - xpin.y)};
+        const Vec2 r = xi - y_current;
+        const Vec2 dx_dtheta{-r.y, r.x};
+        const Vec2 d2x_dtheta2{-r.x, -r.y};
+
+        g += dt * dt * dot(dx_dtheta, gx);
+        H += dt * dt * (k_pin_stiffness * dot(dx_dtheta, dx_dtheta) + dot(gx, d2x_dtheta2));
+    }
+}
+
 static void add_rigid_sdf_rotation_terms(const std::vector<int>& rb_nodes, const Vec& x, const Vec2& y_current, const SimParams2D& params, double dt, double& g, double& H) {
     if (params.k_sdf <= 0.0) return;
 
@@ -419,8 +476,9 @@ static void add_rigid_barrier_rotation_terms(const std::vector<int>& rb_nodes, c
     }
 }
 
-static ComUpdate compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const std::vector<int>& rb_nodes,
-    const Vec& x, const Vec2& y_current, const std::vector<NodeSegmentPair>& ccd_pairs, const SimParams2D& params, double dt, double eta, double m_total) {
+static ComUpdate compute_com_update(int rb, const DeformedState& state, const std::vector<int>& rb_nodes,
+    const Vec& x, const Vec2& y_current, const std::vector<Pin>& pins, const PinMap& pin_map,
+    const std::vector<NodeSegmentPair>& ccd_pairs, const SimParams2D& params, double dt, double eta, double m_total) {
 
     const Vec2& y_n = state.x_coms[rb];
     const Vec2& vhat_n = state.v_coms[rb];
@@ -433,6 +491,7 @@ static ComUpdate compute_com_update(int rb, const DeformedState& state, const Re
     g.y -= g_grav.y;
 
     Mat2 H = inertia_translation_hessian(m_total);
+    add_rigid_pin_translation_terms(rb_nodes, x, pins, pin_map, dt, g, H);
     add_rigid_barrier_translation_terms(rb_nodes, x, y_current, ccd_pairs, params, dt, g, H);
     add_rigid_sdf_translation_terms(rb_nodes, x, y_current, params, dt, g, H);
 
@@ -466,7 +525,8 @@ static ComUpdate compute_com_update(int rb, const DeformedState& state, const Re
 }
 
 static ThetaUpdate compute_theta_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const std::vector<int>& rb_nodes, 
-    const Vec& x, const Vec2& y_current, double theta_current, const std::vector<NodeSegmentPair>& ccd_pairs, const SimParams2D& params, double dt, double eta) {
+    const Vec& x, const Vec2& y_current, double theta_current, const std::vector<Pin>& pins, const PinMap& pin_map,
+    const std::vector<NodeSegmentPair>& ccd_pairs, const SimParams2D& params, double dt, double eta) {
 
     const double theta_n = state.theta[rb];
     const double omega_n = state.omega[rb];
@@ -474,6 +534,7 @@ static ThetaUpdate compute_theta_update(int rb, const DeformedState& state, cons
 
     double g = inertia_rotation_gradient(theta_current, theta_n, omega_n, I, dt);
     double H = inertia_rotation_hessian(theta_current, theta_n, omega_n, I, dt);
+    add_rigid_pin_rotation_terms(rb_nodes, x, y_current, pins, pin_map, dt, g, H);
     add_rigid_barrier_rotation_terms(rb_nodes, x, y_current, ccd_pairs, params, dt, g, H);
     add_rigid_sdf_rotation_terms(rb_nodes, x, y_current, params, dt, g, H);
 
@@ -519,7 +580,7 @@ static NodeUpdate compute_node_update(int who, const RefMesh& ref_mesh, const De
     const SimParams2D& params, double dt) {
 
     Vec2 gi = compute_local_gradient(who, ref_mesh, pins, pin_map, state, x, xhat, params, broad_phase.pairs(), dt);
-    Mat2 Hi = compute_local_hessian(who, ref_mesh, pins, pin_map, state, x, params, broad_phase.pairs(), dt);
+    Mat2 Hi = compute_local_hessian(who, ref_mesh, pin_map, state, x, params, broad_phase.pairs(), dt);
 
     Vec2 dx = matvec(mat2_inverse(Hi), gi);
     Vec2 xi = get_xi(x, who);
@@ -634,14 +695,12 @@ SolveResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const std:
     return {r, params.max_substep_iters};
 }
 
-SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const DeformedState& state, const Vec& xhat, Vec& xnew,
+SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const DeformedState& state, Vec& xnew,
         Vec& y_current, std::vector<double>& theta_current, const SimParams2D& params, std::vector<double>* residual_history) {
     const int total_nodes = static_cast<int>(state.deformed_positions.size());
     const PinMap pin_map = build_pin_map(pins, total_nodes);
     const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
     const double dt = params.substep_dt();
-    (void)xhat;
-
     auto sync_rb_positions = [&](int rb) {
         const Vec2& y = y_current[rb];
         const double theta = theta_current[rb];
@@ -658,13 +717,13 @@ SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::ve
     if (residual_history) residual_history->clear();
 
     auto eval_residual = [&]() {
-        return compute_rigid_body_unnormalized_residual(ref_mesh, state, xnew, y_current, theta_current, params, barrier_pairs, dt);
+        return compute_rigid_body_unnormalized_residual(ref_mesh, pins, pin_map, state, xnew, y_current, theta_current, params, barrier_pairs, dt);
     };
 
     auto make_result = [&](double residual, int iterations) {
         SolveResult result{residual, iterations};
         result.has_rigid_residual = true;
-        result.final_rigid_residual = compute_rigid_body_unnormalized_residual(ref_mesh, state, xnew, y_current, theta_current, params, barrier_pairs, dt);
+        result.final_rigid_residual = compute_rigid_body_unnormalized_residual(ref_mesh, pins, pin_map, state, xnew, y_current, theta_current, params, barrier_pairs, dt);
         return result;
     };
 
@@ -680,12 +739,12 @@ SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::ve
             const auto& rb_nodes = ref_mesh.rb_nodes[rb];
             const double m_total = ref_mesh.total_mass[rb];
 
-            const ComUpdate cu = compute_com_update(rb, state, ref_mesh, rb_nodes, xnew, y_current[rb], barrier_pairs, params, dt, params.eta, m_total);
+            const ComUpdate cu = compute_com_update(rb, state, rb_nodes, xnew, y_current[rb], pins, pin_map, barrier_pairs, params, dt, params.eta, m_total);
             y_current[rb].x -= cu.omega * cu.dy.x;
             y_current[rb].y -= cu.omega * cu.dy.y;
             sync_rb_positions(rb);
 
-            const ThetaUpdate tu = compute_theta_update(rb, state, ref_mesh, rb_nodes, xnew, y_current[rb], theta_current[rb], barrier_pairs, params, dt, params.eta);
+            const ThetaUpdate tu = compute_theta_update(rb, state, ref_mesh, rb_nodes, xnew, y_current[rb], theta_current[rb], pins, pin_map, barrier_pairs, params, dt, params.eta);
             theta_current[rb] -= tu.omega * tu.dtheta;
             sync_rb_positions(rb);
         }

@@ -81,9 +81,6 @@ inline AdvanceResult2D advance_one_frame_rb(
     AdvanceResult2D aggregate;
 
     for (int substep = 0; substep < substeps; ++substep) {
-        Vec xhat;
-        build_xhat(xhat, state.deformed_positions, state.velocities, dt);
-
         Vec xnew = trivial_initial_guess(state);
 
         // Working rb DOFs — initialised from current state, updated by solver
@@ -91,10 +88,7 @@ inline AdvanceResult2D advance_one_frame_rb(
         std::vector<double> theta_current = state.theta;
 
         std::vector<double> residual_history;
-        const SolveResult substep_result = global_gauss_seidel_solver_rb(
-                ref_mesh, pins, state, xhat, xnew,
-                y_current, theta_current,
-                params, &residual_history);
+        const SolveResult substep_result = global_gauss_seidel_solver_rb(ref_mesh, pins, state, xnew, y_current, theta_current, params, &residual_history);
 
         if (aggregate.substeps_completed == 0 && !residual_history.empty())
             aggregate.first_initial_residual = residual_history.front();

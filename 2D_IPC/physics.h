@@ -17,6 +17,8 @@ enum class InitialGuessType {
     Verlet
 };
 
+inline constexpr double k_pin_stiffness = 5e6;
+
 struct SimParams2D {
     double frame_dt = 1.0 / 30.0;
     int    substeps = 3;
@@ -128,25 +130,16 @@ inline void update_velocity(Vec& v, const Vec& xnew, const Vec& xold, double dt)
     for (int i = 0; i < num_positions; ++i) {
         Vec2 xi_new = get_xi(xnew, i);
         Vec2 xi_old = get_xi(xold, i);
-        set_xi(v, i, {
-                (xi_new.x - xi_old.x) / dt,
-                (xi_new.y - xi_old.y) / dt
+        set_xi(v, i, {(xi_new.x - xi_old.x) / dt, (xi_new.y - xi_old.y) / dt
         });
     }
 }
 
 
-Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat,
-                           const RefMesh& ref_mesh,
-                           const std::vector<Pin>& pins,
-                           const PinMap* pin_map,
+Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat, const RefMesh& ref_mesh, const std::vector<Pin>& pins, const PinMap* pin_map,
                            double dt, double k_spring, const Vec2 &g_accel);
 
-Mat2 local_hess_no_barrier(int i, const Vec &x,
-                           const RefMesh& ref_mesh,
-                           const std::vector<Pin>& pins,
-                           const PinMap* pin_map,
-                           double dt, double k_spring);
+Mat2 local_hess_no_barrier(int i, const Vec &x,  const RefMesh& ref_mesh, const PinMap* pin_map, double dt, double k_spring);
 
 void serialize_state(const std::string& dir, int frame, const DeformedState& state);
 bool deserialize_state(const std::string& dir, int frame, DeformedState& state);

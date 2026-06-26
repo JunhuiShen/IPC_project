@@ -49,11 +49,8 @@ bool read_vec(std::ifstream& in, Vec& values) {
 }
 }
 
-Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat,
-                       const RefMesh& ref_mesh,
-                       const std::vector<Pin>& pins,
-                       const PinMap* pin_map,
-                       double dt, double k_spring, const Vec2 &g_accel) {
+Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat, const RefMesh& ref_mesh, const std::vector<Pin>& pins,
+                       const PinMap* pin_map, double dt, double k_spring, const Vec2 &g_accel) {
 
     Vec2 xi = get_xi(x, i), xhi = get_xi(xhat, i);
     Vec2 gi{0.0, 0.0};
@@ -69,25 +66,17 @@ Vec2 local_grad_no_barrier(int i, const Vec &x, const Vec &xhat,
     gi.x -= dt * dt * mass * g_accel.x;
     gi.y -= dt * dt * mass * g_accel.y;
 
-    constexpr double k_pin = 5e6;
-
     const int pin_index = pin_map ? (*pin_map)[i] : -1;
     if (pin_index >= 0) {
         const Vec2 xpi = pins[pin_index].target_position;
-        gi.x += dt * dt * k_pin * (xi.x - xpi.x);
-        gi.y += dt * dt * k_pin * (xi.y - xpi.y);
+        gi.x += dt * dt * k_pin_stiffness * (xi.x - xpi.x);
+        gi.y += dt * dt * k_pin_stiffness * (xi.y - xpi.y);
     }
 
     return gi;
 }
 
-Mat2 local_hess_no_barrier(int i, const Vec &x,
-                       const RefMesh& ref_mesh,
-                       const std::vector<Pin>& pins,
-                       const PinMap* pin_map,
-                       double dt, double k_spring) {
-    (void)pins;
-
+Mat2 local_hess_no_barrier(int i, const Vec &x, const RefMesh& ref_mesh, const PinMap* pin_map, double dt, double k_spring) {
     const double mass = ref_mesh.mass[i];
     Mat2 H{mass, 0, 0, mass};
 
@@ -97,12 +86,10 @@ Mat2 local_hess_no_barrier(int i, const Vec &x,
     H.a21 += dt * dt * Hs.a21;
     H.a22 += dt * dt * Hs.a22;
 
-    constexpr double k_pin = 5e6;
-
     const int pin_index = pin_map ? (*pin_map)[i] : -1;
     if (pin_index >= 0) {
-        H.a11 += dt * dt * k_pin;
-        H.a22 += dt * dt * k_pin;
+        H.a11 += dt * dt * k_pin_stiffness;
+        H.a22 += dt * dt * k_pin_stiffness;
     }
 
     return H;
