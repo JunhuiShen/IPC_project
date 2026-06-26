@@ -347,22 +347,23 @@ struct ThetaUpdate {
     double omega = 1.0;  // CCD-safe step fraction
 };
 
-static void add_rigid_sdf_translation_terms(const std::vector<int>& rb_nodes, const Vec& x, const SimParams2D& params, double dt, Vec2& g, Mat2& H) {
+static void add_rigid_sdf_translation_terms(const std::vector<int>& rb_nodes, const Vec& x, const Vec2& y_current, const SimParams2D& params, double dt, Vec2& g, Mat2& H) {
     if (params.k_sdf <= 0.0) return;
 
     for (int node : rb_nodes) {
         SDFEvaluation sdf;
         if (!sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, get_xi(x, node), sdf)) continue;
 
-        const Vec2 gs = sdf_penalty_gradient(sdf, params.k_sdf, params.eps_sdf);
-        const Mat2 Hs = sdf_penalty_hessian(sdf, params.k_sdf, params.eps_sdf, /*include_curvature=*/false);
+        const Vec2 xi = get_xi(x, node);
+        const RigidSDFGradient gs = sdf_penalty_gradient_rb(sdf, xi, y_current, params.k_sdf, params.eps_sdf);
+        const RigidSDFHessian Hs = sdf_penalty_hessian_rb(sdf, xi, y_current, params.k_sdf, params.eps_sdf, /*include_sdf_curvature=*/false, /*include_rigid_curvature=*/false);
 
-        g.x += dt * dt * gs.x;
-        g.y += dt * dt * gs.y;
-        H.a11 += dt * dt * Hs.a11;
-        H.a12 += dt * dt * Hs.a12;
-        H.a21 += dt * dt * Hs.a21;
-        H.a22 += dt * dt * Hs.a22;
+        g.x += dt * dt * gs.translation.x;
+        g.y += dt * dt * gs.translation.y;
+        H.a11 += dt * dt * Hs.translation_translation.a11;
+        H.a12 += dt * dt * Hs.translation_translation.a12;
+        H.a21 += dt * dt * Hs.translation_translation.a21;
+        H.a22 += dt * dt * Hs.translation_translation.a22;
     }
 }
 
@@ -374,14 +375,11 @@ static void add_rigid_sdf_rotation_terms(const std::vector<int>& rb_nodes, const
         SDFEvaluation sdf;
         if (!sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, xi, sdf)) continue;
 
-        const Vec2 gs = sdf_penalty_gradient(sdf, params.k_sdf, params.eps_sdf);
-        const Mat2 Hs = sdf_penalty_hessian(sdf, params.k_sdf, params.eps_sdf, /*include_curvature=*/false);
+        const RigidSDFGradient gs = sdf_penalty_gradient_rb(sdf, xi, y_current, params.k_sdf, params.eps_sdf);
+        const RigidSDFHessian Hs = sdf_penalty_hessian_rb(sdf, xi, y_current, params.k_sdf, params.eps_sdf, /*include_sdf_curvature=*/false, /*include_rigid_curvature=*/false);
 
-        const Vec2 r = xi - y_current;
-        const Vec2 dxdtheta{-r.y, r.x};
-
-        g += dt * dt * dot(dxdtheta, gs);
-        H += dt * dt * dot(dxdtheta, matvec(Hs, dxdtheta));
+        g += dt * dt * gs.rotation;
+        H += dt * dt * Hs.rotation_rotation;
     }
 }
 
@@ -436,7 +434,7 @@ static ComUpdate compute_com_update(int rb, const DeformedState& state, const Re
 
     Mat2 H = inertia_translation_hessian(m_total);
     add_rigid_barrier_translation_terms(rb_nodes, x, y_current, ccd_pairs, params, dt, g, H);
-    add_rigid_sdf_translation_terms(rb_nodes, x, params, dt, g, H);
+    add_rigid_sdf_translation_terms(rb_nodes, x, y_current, params, dt, g, H);
 
     Vec2 dy = matvec(mat2_inverse(H), g);
     Vec2 full_step{-dy.x, -dy.y};

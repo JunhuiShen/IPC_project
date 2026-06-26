@@ -95,3 +95,32 @@ Mat2 sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double eps, bool in
     }
     return Hess;
 }
+
+RigidSDFGradient sdf_penalty_gradient_rb(const SDFEvaluation& sdf, const Vec2& x, const Vec2& x_com, double k, double eps) {
+    const Vec2 gx = sdf_penalty_gradient(sdf, k, eps);
+    const Vec2 r = x - x_com;
+    const Vec2 dx_dtheta{-r.y, r.x};
+
+    RigidSDFGradient result;
+    result.translation = gx;
+    result.rotation = dot(dx_dtheta, gx);
+    return result;
+}
+
+RigidSDFHessian sdf_penalty_hessian_rb(const SDFEvaluation& sdf, const Vec2& x, const Vec2& x_com, double k, double eps, bool include_sdf_curvature, bool include_rigid_curvature) {
+    const Vec2 gx = sdf_penalty_gradient(sdf, k, eps);
+    const Mat2 Hx = sdf_penalty_hessian(sdf, k, eps, include_sdf_curvature);
+    const Vec2 r = x - x_com;
+    const Vec2 dx_dtheta{-r.y, r.x};
+    const Vec2 d2x_dtheta2{-r.x, -r.y};
+    const Vec2 Hx_dx_dtheta = matvec(Hx, dx_dtheta);
+
+    RigidSDFHessian result;
+    result.translation_translation = Hx;
+    result.translation_rotation = Hx_dx_dtheta;
+    result.rotation_rotation = dot(dx_dtheta, Hx_dx_dtheta);
+    if (include_rigid_curvature) {
+        result.rotation_rotation += dot(gx, d2x_dtheta2);
+    }
+    return result;
+}

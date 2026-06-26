@@ -157,6 +157,39 @@ nonlinear Gauss-Seidel iterations over global nodes:
   `node_box_update_count` iterations
 - reports a mass-normalized residual
 
+### Rigid-Body Variant
+
+The 2D code also includes a reduced-coordinate rigid-body Gauss-Seidel path for
+polygonal rigid bodies. A rigid body stores a center of mass `y`, orientation
+`theta`, material-space vertex positions, total mass, and inertia tensor. During
+the solve, its world vertices are reconstructed from
+
+    x_i = R(theta) X_i + y 
+
+The central implementation for this layer is `rigid_body_ipc.h/.cpp`: it owns
+the 2D rigid transform helpers, material/world-space conversion, rigid-body
+creation, inertia tensor construction, and reduced inertial energy derivatives.
+
+Local nodal contact derivatives are pulled back to rigid-body coordinates by
+the chain rule. Translation uses `dx_i/dy = I`; rotation uses
+`dx_i/dtheta = {-r_i.y, r_i.x}` with `r_i = x_i - y`.
+
+The rigid-body solver currently uses a deliberately simple serial path:
+
+- sweeps rigid bodies one at a time
+- updates COM and orientation as separate scalar/vector blocks
+- builds rigid-rigid node-segment pairs naively from topology
+- checks every rigid body against all other rigid bodies, without AABB/BVH filtering
+- recomputes barrier and SDF gradients/Hessians from the current positions each time they are needed
+
+Rigid barrier derivatives live in `barrier_energy.h/.cpp` as
+`local_barrier_grad_rb` and `local_barrier_hess_rb`. Rigid SDF penalty
+derivatives live in `sdf_penalty_energy.h/.cpp` as
+`sdf_penalty_gradient_rb` and `sdf_penalty_hessian_rb`. These helpers keep the
+reduced-coordinate chain rule close to the corresponding energy term, while
+`solver.cpp` is responsible for choosing the Gauss-Seidel update order and step
+safety.
+
 ## Data Model
 
 The runtime is topology-agnostic:
@@ -249,12 +282,14 @@ strategy changes do not require rebuilding.
     │   initial guesses, local Newton updates, and nonlinear Gauss-Seidel solver
     ├── physics.h / physics.cpp
     │   SimParams2D, DeformedState, RefMesh, Pin, serialization, and local physics terms
+    ├── rigid_body_ipc.h / rigid_body_ipc.cpp
+    │   2D rigid transforms, material/world-space conversion, rigid-body creation, inertia, and reduced inertial derivatives
     ├── spring_energy.h / spring_energy.cpp
     │   one-edge spring energy and per-node local gradient/Hessian blocks
     ├── barrier_energy.h / barrier_energy.cpp
-    │   scalar IPC barrier and node-segment energy, gradient, and Hessian blocks
+    │   scalar IPC barrier and node-segment energy, gradient, Hessian, and rigid-body chain-rule blocks
     ├── sdf_penalty_energy.h / sdf_penalty_energy.cpp
-    │   generic Heaviside-squared 2D SDF penalty plus ground and circle SDF evaluators
+    │   generic Heaviside-squared 2D SDF penalty plus ground/circle SDF evaluators and rigid-body chain-rule blocks
     ├── node_segment_distance.h / node_segment_distance.cpp
     ├── ogc_trust_region.h / ogc_trust_region.cpp
     ├── ccd.h / ccd.cpp

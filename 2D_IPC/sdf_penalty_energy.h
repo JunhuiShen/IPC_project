@@ -8,6 +8,17 @@ struct SDFEvaluation {
     Mat2 hess_phi{0.0, 0.0, 0.0, 0.0};
 };
 
+struct RigidSDFGradient {
+    Vec2 translation{0.0, 0.0};
+    double rotation = 0.0;
+};
+
+struct RigidSDFHessian {
+    Mat2 translation_translation{0.0, 0.0, 0.0, 0.0};
+    Vec2 translation_rotation{0.0, 0.0};
+    double rotation_rotation = 0.0;
+};
+
 double sdf_heaviside(double z, double eps);
 
 double sdf_heaviside_gradient(double z, double eps);
@@ -29,5 +40,8 @@ double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double eps);
 
 Vec2 sdf_penalty_gradient(const SDFEvaluation& sdf, double k, double eps);
 
-Mat2 sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double eps,
-                         bool include_curvature = true);
+Mat2 sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double eps, bool include_curvature = true);
+
+RigidSDFGradient sdf_penalty_gradient_rb(const SDFEvaluation& sdf, const Vec2& x, const Vec2& x_com, double k, double eps);
+
+RigidSDFHessian sdf_penalty_hessian_rb(const SDFEvaluation& sdf, const Vec2& x, const Vec2& x_com, double k, double eps, bool include_sdf_curvature = true, bool include_rigid_curvature = true);

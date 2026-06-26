@@ -24,11 +24,40 @@ double component(const Mat2& A, int r, int c) {
     return A.a22;
 }
 
+double component(const RigidSDFGradient& g, int c) {
+    if (c == 0) return g.translation.x;
+    if (c == 1) return g.translation.y;
+    return g.rotation;
+}
+
+double component(const RigidSDFHessian& H, int r, int c) {
+    if (r < 2 && c < 2) return component(H.translation_translation, r, c);
+    if (r < 2 && c == 2) return component(H.translation_rotation, r);
+    if (r == 2 && c < 2) return component(H.translation_rotation, c);
+    return H.rotation_rotation;
+}
+
+Vec2 rotate(const Vec2& x, double theta) {
+    const double c = std::cos(theta);
+    const double s = std::sin(theta);
+    return {c * x.x - s * x.y, s * x.x + c * x.y};
+}
+
 void perturb(Vec2& x, int comp, double h) {
     if (comp == 0) {
         x.x += h;
     } else {
         x.y += h;
+    }
+}
+
+void perturb_rigid_dof(Vec2& y, double& theta, int dof, double h) {
+    if (dof == 0) {
+        y.x += h;
+    } else if (dof == 1) {
+        y.y += h;
+    } else {
+        theta += h;
     }
 }
 
@@ -160,6 +189,58 @@ bool check_sdf_convergence(const std::string& name, const SDF& sdf, const Vec2& 
     return passed;
 }
 
+template <typename EnergyFn>
+bool check_rigid_energy_gradient_component(const std::string& label,
+                                           const Vec2& y,
+                                           double theta,
+                                           int dof,
+                                           double analytic,
+                                           EnergyFn energy) {
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
+    std::vector<double> errors;
+    errors.reserve(hs.size());
+
+    for (double h : hs) {
+        Vec2 yp = y;
+        Vec2 ym = y;
+        double thetap = theta;
+        double thetam = theta;
+        perturb_rigid_dof(yp, thetap, dof, h);
+        perturb_rigid_dof(ym, thetam, dof, -h);
+        const double fd = (energy(yp, thetap) - energy(ym, thetam)) / (2.0 * h);
+        errors.push_back(std::abs(fd - analytic));
+    }
+
+    return check_slope_near_two(label, hs, errors, analytic);
+}
+
+template <typename GradFn>
+bool check_rigid_gradient_hessian_component(const std::string& label,
+                                            const Vec2& y,
+                                            double theta,
+                                            int perturb_dof,
+                                            int grad_dof,
+                                            double analytic,
+                                            GradFn gradient) {
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
+    std::vector<double> errors;
+    errors.reserve(hs.size());
+
+    for (double h : hs) {
+        Vec2 yp = y;
+        Vec2 ym = y;
+        double thetap = theta;
+        double thetam = theta;
+        perturb_rigid_dof(yp, thetap, perturb_dof, h);
+        perturb_rigid_dof(ym, thetam, perturb_dof, -h);
+        const double fd = (component(gradient(yp, thetap), grad_dof) -
+                           component(gradient(ym, thetam), grad_dof)) / (2.0 * h);
+        errors.push_back(std::abs(fd - analytic));
+    }
+
+    return check_slope_near_two(label, hs, errors, analytic);
+}
+
 } // namespace
 
 TEST(GroundSDF, Evaluate) {
@@ -259,4 +340,48 @@ TEST(SDFPenalty2D, GroundFiniteDifferenceConvergence) {
 TEST(SDFPenalty2D, CircleFiniteDifferenceConvergence) {
     const CircleSDF circle{{0.0, 0.0}, 1.0};
     EXPECT_TRUE(check_sdf_convergence("circle", circle, Vec2{1.04, 0.2}, 23.0, 0.15));
+}
+
+TEST(SDFPenalty2D, RigidBodyGradientAndHessianChainRuleHaveSlopeTwo) {
+    const CircleSDF circle{{0.0, 0.0}, 1.0};
+    const Vec2 material{0.2, 0.15};
+    const Vec2 y{0.9, 0.0};
+    const double theta = 0.3;
+    const double k = 23.0;
+    const double eps = 0.2;
+
+    auto position = [&](const Vec2& y_eval, double theta_eval) {
+        return y_eval + rotate(material, theta_eval);
+    };
+    auto energy = [&](const Vec2& y_eval, double theta_eval) {
+        const Vec2 x_eval = position(y_eval, theta_eval);
+        return sdf_penalty_energy(evaluate_sdf(circle, x_eval), k, eps);
+    };
+    auto gradient = [&](const Vec2& y_eval, double theta_eval) {
+        const Vec2 x_eval = position(y_eval, theta_eval);
+        return sdf_penalty_gradient_rb(evaluate_sdf(circle, x_eval), x_eval, y_eval, k, eps);
+    };
+
+    const Vec2 x = position(y, theta);
+    const RigidSDFGradient g = sdf_penalty_gradient_rb(evaluate_sdf(circle, x), x, y, k, eps);
+    const RigidSDFHessian H = sdf_penalty_hessian_rb(evaluate_sdf(circle, x), x, y, k, eps);
+
+    bool passed = true;
+    for (int dof = 0; dof < 3; ++dof) {
+        passed &= check_rigid_energy_gradient_component(
+                "sdf rigid dE/dq dof " + std::to_string(dof),
+                y, theta, dof, component(g, dof), energy);
+    }
+
+    for (int perturb_dof = 0; perturb_dof < 3; ++perturb_dof) {
+        for (int grad_dof = 0; grad_dof < 3; ++grad_dof) {
+            passed &= check_rigid_gradient_hessian_component(
+                    "sdf rigid dgrad/dq row " + std::to_string(grad_dof) +
+                            " col " + std::to_string(perturb_dof),
+                    y, theta, perturb_dof, grad_dof,
+                    component(H, grad_dof, perturb_dof), gradient);
+        }
+    }
+
+    EXPECT_TRUE(passed);
 }
