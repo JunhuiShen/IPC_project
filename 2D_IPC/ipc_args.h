@@ -31,7 +31,7 @@ struct IPCArgs : ArgParser {
 
     // --- IPC ---
     double d_hat            = 0.005;
-    double tol_abs          = 1e-6;
+    double tol_abs          = 1e-10;
     int    max_substep_iters = 500;
     double eta              = 0.9;
     double k_barrier        = 100.0;
@@ -84,7 +84,7 @@ struct IPCArgs : ArgParser {
         add_bool  ("write_substeps",  write_substeps,  false,     "Export every substep as substep_XXXX");
         add_int   ("restart_frame",   restart_frame,   -1,        "Resume from outdir/state_XXXX.bin; -1 disables restart");
 
-        add_string("example",         example_type,    "1",       "Example scene: 1 | 2");
+        add_string("example",         example_type,    "1",       "Example scene: 1 | 2 | 3");
         add_string("step_policy",     step_policy,     "ccd",     "Step filter: ccd | trust_region");
         add_string("initial_guess",   initial_guess_type, "ccd",  "Initial guess: ccd | trivial | verlet");
     }
@@ -94,6 +94,7 @@ struct IPCArgs : ArgParser {
     ExampleType get_example_type() const {
         if (example_type == "1") return ExampleType::Example1;
         if (example_type == "2") return ExampleType::Example2;
+        if (example_type == "3") return ExampleType::Example3;
         throw std::invalid_argument("Unknown example: " + example_type);
     }
 
