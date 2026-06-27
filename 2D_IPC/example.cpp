@@ -27,7 +27,7 @@ ExampleScene build_example(
             scene.static_edges = {{0, 1}};
             break;
         }
-        // Command line: ./build/simulation --example 3 --num_frames 500 --outdir frames_two_hex
+        // Command line: ./build/simulation --example 3 --num_frames 500 --outdir frames_two_hex --gy 0
         case ExampleType::Example3: {
             append_rigid_polygon(6, scene.state, scene.ref_mesh, {-5.0, 0.0}, 0.5, 1.0, 0.001, {3.0, 0.0}, 0.0, 0.0);
             append_rigid_polygon(6, scene.state, scene.ref_mesh, {5.0, 0.0}, 0.5, 1.0, 0.001, {-3.0, 0.0}, 0.0, 0.0);
