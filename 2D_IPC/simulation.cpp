@@ -101,6 +101,7 @@ int main(int argc, char** argv) {
     params.frame_dt = args.dt;
     params.substeps = args.substeps;
     params.k_spring = args.k_spring;
+    params.kpin = args.kpin;
     params.k_barrier = args.k_barrier;
     params.k_sdf = args.k_sdf;
     params.eps_sdf = args.eps_sdf;
@@ -112,6 +113,7 @@ int main(int argc, char** argv) {
     params.max_substep_iters = args.max_substep_iters;
     params.eta = args.eta;
     params.use_parallel = args.use_parallel;
+    params.fixed_iters = args.fixed_iters;
     params.node_box_min = args.node_box_min;
     params.node_box_max = args.node_box_max;
     params.node_box_update_count = args.node_box_update_count;

@@ -250,11 +250,12 @@ Important CLI options:
 | `dt` / `substeps` | frame timestep `1/30`; `3` substeps |
 | `num_frames` | default `120` |
 | `gx` / `gy` | gravity; defaults `0` and `-9.81` |
-| `k_spring` / `k_barrier` | defaults `1000` and `100` |
+| `k_spring` / `kpin` / `k_barrier` | defaults `1000`, `5e6`, and `100` |
 | `k_sdf` / `eps_sdf` | defaults `500` and `0.002`; SDF penalty parameters used by ground/circle SDFs, including Example 2's ground |
 | `density` / `thickness` | defaults `900 kg/m^3` and `0.001 m` |
 | `d_hat` | default `0.005` |
 | `tol_abs` / `max_substep_iters` | defaults `1e-6` and `500` |
+| `fixed_iters` | run exactly `max_substep_iters` solver sweeps with no convergence check; default `false` |
 | `eta` | step safety factor; default `0.9`; use at most `0.5` with `trust_region` |
 | `step_policy` | `ccd` or `trust_region` |
 | `initial_guess` | `ccd`, `verlet`, or `trivial`; default `ccd` |

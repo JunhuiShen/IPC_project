@@ -24,6 +24,7 @@ struct IPCArgs : ArgParser {
     double gx           = 0.0;
     double gy           = -9.81;
     double k_spring     = 1000.0;
+    double kpin         = 5e6;
     double k_sdf        = 500.0;
     double eps_sdf      = 0.002;
     double density = 900.0;
@@ -36,6 +37,7 @@ struct IPCArgs : ArgParser {
     double eta              = 0.9;
     double k_barrier        = 100.0;
     bool   use_parallel     = true;
+    bool   fixed_iters      = false;
     double node_box_min     = 0.001;
     double node_box_max     = 0.01;
     int    node_box_update_count = 1;
@@ -62,6 +64,7 @@ struct IPCArgs : ArgParser {
         add_double("gx",              gx,              0.0,       "Gravity x-component (m/s^2)");
         add_double("gy",              gy,              -9.81,     "Gravity y-component (m/s^2)");
         add_double("k_spring",        k_spring,        1000.0,    "Spring stiffness");
+        add_double("kpin",            kpin,            5e6,       "Pin stiffness");
         add_double("k_sdf",           k_sdf,           500.0,     "SDF penalty stiffness");
         add_double("eps_sdf",         eps_sdf,         0.002,     "SDF active range; 0 gives a hard quadratic at the surface");
         add_double("density",         density,         900.0,     "Mass density (kg/m^3)");
@@ -73,6 +76,7 @@ struct IPCArgs : ArgParser {
         add_double("eta",             eta,             0.9,       "Step-size safety factor");
         add_double("k_barrier",       k_barrier,       100.0,     "IPC barrier stiffness multiplier");
         add_bool  ("use_parallel",    use_parallel,    true,      "Use color-parallel Gauss-Seidel updates");
+        add_bool  ("fixed_iters",     fixed_iters,     false,     "Run exactly max_substep_iters sweeps with no convergence check");
         add_double("node_box_min",    node_box_min,    0.001,     "Lower bound on node box half-width");
         add_double("node_box_max",    node_box_max,    0.01,      "Upper bound on node box half-width");
         add_int   ("node_box_update_count", node_box_update_count, 1, "Gauss-Seidel iterations between node-box/contact recoloring rebuilds");
@@ -122,6 +126,7 @@ struct IPCArgs : ArgParser {
     void validate() const {
         if (!(eta > 0.0 && eta < 1.0)) throw std::invalid_argument("eta must be in (0, 1)");
         if (!(d_hat >= 0.0)) throw std::invalid_argument("d_hat must be nonnegative");
+        if (!(kpin >= 0.0)) throw std::invalid_argument("kpin must be nonnegative");
         if (!(k_sdf >= 0.0)) throw std::invalid_argument("k_sdf must be nonnegative");
         if (!(eps_sdf >= 0.0)) throw std::invalid_argument("eps_sdf must be nonnegative");
         if (!(thickness > 0.0)) throw std::invalid_argument("thickness must be positive");
