@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <Eigen/Dense>
 #include <iostream>
+#include <limits>
 
 bool point_segment_2d(const Vec2& x1, const Vec2& dx1,
                       const Vec2& x2, const Vec2& dx2,
@@ -67,8 +68,6 @@ bool point_segment_2d_rb_rotation(
     const Eigen::Vector2d& x, const Eigen::Vector2d& x_com, const double& theta_n,
     const double& theta_new, const Eigen::Vector2d& x0, const Eigen::Vector2d& x1,
     double& step) {
-    // We assume counterclockwise rotation from theta_n to theta_new.
-
     step = 0.0;
 
     Eigen::Vector2d dx = x - x_com;
@@ -89,11 +88,16 @@ bool point_segment_2d_rb_rotation(
 
     double A = r.x() * d_hat.y() - r.y() * d_hat.x();
     double B = -r.x() * d_hat.x() - r.y() * d_hat.y();
-    double C = (x_com.x() - x0.x()) * d_hat.y()
-             - (x_com.y() - x0.y()) * d_hat.x();
+    double C = (x_com.x() - x0.x()) * d_hat.y() - (x_com.y() - x0.y()) * d_hat.x();
 
     double amplitude = std::sqrt(A * A + B * B);
     if (std::abs(C) > amplitude + 1e-14) return false;
+    if (amplitude < 1e-14) {
+        if (std::abs(C) > 1e-14) return false;
+        const double t_star = (x - x0).dot(d) / (seg_len * seg_len);
+        if (t_star < -1e-12 || t_star > 1.0 + 1e-12) return false;
+        return true;
+    }
 
     double phi = std::atan2(B, A);
     double arccos_val = std::acos(std::clamp(-C / amplitude, -1.0, 1.0)); // clamp to prevent numerical errors.
@@ -107,11 +111,14 @@ bool point_segment_2d_rb_rotation(
         return false;
     }
 
-    for (double theta_star : theta_candidates) {
-        double s = (theta_star - theta_n) / dtheta;
-        if (s < 0.0 || s > 1.0) continue;
+    constexpr double two_pi = 2.0 * M_PI;
 
-        double theta_s = theta_n + s * dtheta;
+    auto consider_theta = [&](double theta_star) {
+        double s = (theta_star - theta_n) / dtheta;
+        if (s < -1e-12 || s > 1.0 + 1e-12) return;
+        s = std::clamp(s, 0.0, 1.0);
+
+        double theta_s = theta_star;
         Eigen::Vector2d x_s{
             std::cos(theta_s) * r.x() - std::sin(theta_s) * r.y(),
             std::sin(theta_s) * r.x() + std::cos(theta_s) * r.y()
@@ -119,9 +126,21 @@ bool point_segment_2d_rb_rotation(
         x_s += x_com;
 
         double t_star = (x_s - x0).dot(d) / (seg_len * seg_len);
-        if (t_star < 0.0 || t_star > 1.0) continue;
+        if (t_star < -1e-12 || t_star > 1.0 + 1e-12) return;
 
         if (s < best_s) best_s = s;
+    };
+
+    for (double theta_base : theta_candidates) {
+        double k = 0.0;
+        if (dtheta > 0.0) {
+            // Forward rotation: choose the first wrapped root at or after theta_n
+            k = std::ceil((theta_n - theta_base - 1e-12) / two_pi);
+        } else {
+            // Backward rotation: choose the first wrapped root at or before theta_n
+            k = std::floor((theta_n - theta_base + 1e-12) / two_pi);
+        }
+        consider_theta(theta_base + two_pi * k);
     }
 
     if (best_s == std::numeric_limits<double>::infinity()) return false;

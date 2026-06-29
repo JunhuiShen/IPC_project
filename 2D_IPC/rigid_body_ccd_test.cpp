@@ -329,6 +329,46 @@ TEST(CCD, RbRotation_TwoCrossings_HitAtQuarter) {
 
 }
 
+TEST(CCD, RbRotation_WrappedRootAfterNonzeroThetaN) {
+    // Same two-crossing geometry, but theta_n already includes one full turn.
+    // The first forward hit is theta = 5pi/2 = pi/2 + 2pi, halfway through.
+    Eigen::Vector2d x_com(0.0, 0.0);
+    Eigen::Vector2d x(0.0, -1.0);
+    double theta_n   = 2.0 * M_PI;
+    double theta_new = 3.0 * M_PI;
+
+    Eigen::Vector2d x0(-2.0, 0.0);
+    Eigen::Vector2d x1( 2.0, 0.0);
+
+    double step = -1.0;
+    bool hit = point_segment_2d_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, step);
+    EXPECT_TRUE(hit);
+    EXPECT_NEAR(step, 0.5, 1e-10);
+
+    double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0, x1, 0.9);
+    EXPECT_NEAR(omega, 0.9 * 0.5, 1e-10);
+}
+
+TEST(CCD, RbRotation_WrappedClockwiseRootAfterNonzeroThetaN) {
+    // Clockwise interval from 2pi to pi reaches the wrapped -pi/2 root at
+    // theta = 3pi/2, halfway through.
+    Eigen::Vector2d x_com(0.0, 0.0);
+    Eigen::Vector2d x(0.0, -1.0);
+    double theta_n   = 2.0 * M_PI;
+    double theta_new = M_PI;
+
+    Eigen::Vector2d x0(-2.0, 0.0);
+    Eigen::Vector2d x1( 2.0, 0.0);
+
+    double step = -1.0;
+    bool hit = point_segment_2d_rb_rotation(x, x_com, theta_n, theta_new, x0, x1, step);
+    EXPECT_TRUE(hit);
+    EXPECT_NEAR(step, 0.5, 1e-10);
+
+    double omega = point_segment_rb_rotation_safe_step(x, x_com, theta_n, theta_new, x0, x1, 0.9);
+    EXPECT_NEAR(omega, 0.9 * 0.5, 1e-10);
+}
+
 // Randomized test: x_com and radius are random, defining a circle
 // centered at x_com. The particle x = x_com + radius*(1,0) starts at
 // "3 o'clock" (theta_s=0). Let
