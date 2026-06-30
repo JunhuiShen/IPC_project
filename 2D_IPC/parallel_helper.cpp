@@ -70,21 +70,40 @@ void build_blue_boxes(
     }
 }
 
-void build_blue_boxes_rb_rotation(const Vec& x_coms,
+void build_blue_boxes_rb(const Vec& positions,
+                          const Vec& x_coms,
                           const std::vector<double>& thetas,
-                          const std::vector<double>& omega,
+                          double eps,
+                          const std::vector<double>& com_radii,
                           const std::vector<std::vector<int>>& rb_nodes,
                           const std::vector<Vec>& ref_positions,
-                          double dt,
                           std::vector<AABB>& blue_boxes) {
+    blue_boxes.resize(positions.size());
+
     for (int rb = 0; rb < static_cast<int>(rb_nodes.size()); ++rb) {
-        const Vec2   x_com = x_coms[rb];
-        const double theta = thetas[rb];
-        const double eps   = 0.5 * std::abs(omega[rb] * dt);
+        const Vec2   x_com  = x_coms[rb];
+        const double theta  = thetas[rb];
+        const double r_com  = com_radii[rb];
+
         for (int i = 0; i < static_cast<int>(rb_nodes[rb].size()); ++i) {
-            const int  node = rb_nodes[rb][i];
-            const Vec2 X    = get_xi(ref_positions[rb], i);
-            blue_boxes[node] = arc_node_aabb(x_com, theta, X, eps);
+            const int  node     = rb_nodes[rb][i];
+            const Vec2 X        = get_xi(ref_positions[rb], i);
+            const Vec2 node_pos = get_xi(positions, node);
+
+            // All nodes of this rb share one translation box based on COM displacement
+            blue_boxes[node] = AABB(
+                Vec2(node_pos.x - r_com, node_pos.y - r_com),
+                Vec2(node_pos.x + r_com, node_pos.y + r_com));
+
+            // Place arc at each COM corner of the translation box and union all 4
+            const Vec2 corners[4] = {
+                {x_com.x - r_com, x_com.y - r_com},
+                {x_com.x + r_com, x_com.y - r_com},
+                {x_com.x - r_com, x_com.y + r_com},
+                {x_com.x + r_com, x_com.y + r_com},
+            };
+            for (const Vec2& c : corners)
+                blue_boxes[node].expand(arc_node_aabb(c, theta, X, eps));
         }
     }
 }
