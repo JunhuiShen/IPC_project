@@ -37,11 +37,11 @@ AABB arc_node_aabb(const Vec2& x_com, const double theta, const Vec2& X, const d
     double y_min = std::min(p_a.y, p_b.y);
     double y_max = std::max(p_a.y, p_b.y);
 
-    static const double cardinals[4] = {0.0, M_PI/2.0, M_PI, 3.0*M_PI/2.0};
+    static const double extreme_points[4] = {0.0, M_PI/2.0, M_PI, 3.0*M_PI/2.0};
     static const Vec2   offsets[4]   = {{1.0,0.0},{0.0,1.0},{-1.0,0.0},{0.0,-1.0}};
 
     for (int k = 0; k < 4; ++k) {
-        double t = std::fmod(cardinals[k] - theta_a, 2.0 * M_PI);
+        double t = std::fmod(extreme_points[k] - theta_a, 2.0 * M_PI);
         if (t < 0.0) t += 2.0 * M_PI;
         t += theta_a;
         if (t <= theta_b) {
