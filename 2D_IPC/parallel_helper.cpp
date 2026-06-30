@@ -20,6 +20,10 @@ void add_graph_edge(std::vector<std::vector<int>>& graph, int a, int b) {
 
 AABB arc_node_aabb(const Vec2& x_com, const double theta, const Vec2& X, const double eps) {
     const double R         = norm(X);
+    // X is the node's fixed material-space offset from the rigid body's COM.
+    // phi_local is its angle inside the body; adding theta rotates that offset
+    // into world space. The blue box below encloses the node's arc over
+    // [phi_world - eps, phi_world + eps].
     const double phi_local = std::atan2(X.y, X.x);
     const double phi_world = phi_local + theta;
     const double theta_a   = phi_world - eps;
@@ -95,7 +99,9 @@ void build_blue_boxes_rb(const Vec& positions,
                 Vec2(node_pos.x - r_com, node_pos.y - r_com),
                 Vec2(node_pos.x + r_com, node_pos.y + r_com));
 
-            // Place arc at each COM corner of the translation box and union all 4
+            // The COM can move anywhere inside this translation square. Since
+            // translating an arc by a box reaches its axis extrema at the box
+            // corners, union the same rotation arc at all four COM corners.
             const Vec2 corners[4] = {
                 {x_com.x - r_com, x_com.y - r_com},
                 {x_com.x + r_com, x_com.y - r_com},
