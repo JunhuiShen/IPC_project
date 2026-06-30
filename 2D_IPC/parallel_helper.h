@@ -16,6 +16,14 @@ struct GreenBoxes {
 void build_blue_boxes(const Vec& positions, const std::vector<double>& node_radii,
                       std::vector<AABB>& blue_boxes);
 
+void build_blue_boxes_rb_rotation(const Vec& x_coms,
+                          const std::vector<double>& thetas,
+                          const std::vector<double>& omega,
+                          const std::vector<std::vector<int>>& rb_nodes,
+                          const std::vector<Vec>& ref_positions,
+                          double dt,
+                          std::vector<AABB>& blue_boxes);
+
 void build_red_boxes(const std::vector<std::pair<int, int>>& edges,
                      const std::vector<AABB>& blue_boxes, RedBoxes& red_boxes);
 

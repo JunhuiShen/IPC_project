@@ -18,6 +18,8 @@ AABB build_swept_node_box(const Vec& x, const Vec& v, int node, double dt, doubl
         Vec2(std::max(x0.x, x1.x) + pad, std::max(x0.y, x1.y) + pad));
 }
 
+
+
 AABB build_swept_segment_box(
     const Vec& x, const Vec& v, int seg0, int seg1, double dt, double pad) {
     const Vec2 x0 = get_xi(x, seg0);

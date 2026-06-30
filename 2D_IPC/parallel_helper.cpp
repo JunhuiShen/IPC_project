@@ -1,6 +1,7 @@
 #include "parallel_helper.h"
 
 #include <algorithm>
+#include <cmath>
 #include <iterator>
 
 namespace {
@@ -16,6 +17,43 @@ void add_graph_edge(std::vector<std::vector<int>>& graph, int a, int b) {
 
 } // namespace
 
+
+AABB arc_node_aabb(const Vec2& x_com, const double theta, const Vec2& X, const double eps) {
+    const double R         = norm(X);
+    const double phi_local = std::atan2(X.y, X.x);
+    const double phi_world = phi_local + theta;
+    const double theta_a   = phi_world - eps;
+    const double theta_b   = phi_world + eps;
+
+    auto point_at = [&](double t) -> Vec2 {
+        return Vec2(std::cos(t), std::sin(t)) * R + x_com;
+    };
+
+    const Vec2 p_a = point_at(theta_a);
+    const Vec2 p_b = point_at(theta_b);
+
+    double x_min = std::min(p_a.x, p_b.x);
+    double x_max = std::max(p_a.x, p_b.x);
+    double y_min = std::min(p_a.y, p_b.y);
+    double y_max = std::max(p_a.y, p_b.y);
+
+    static const double cardinals[4] = {0.0, M_PI/2.0, M_PI, 3.0*M_PI/2.0};
+    static const Vec2   offsets[4]   = {{1.0,0.0},{0.0,1.0},{-1.0,0.0},{0.0,-1.0}};
+
+    for (int k = 0; k < 4; ++k) {
+        double t = std::fmod(cardinals[k] - theta_a, 2.0 * M_PI);
+        if (t < 0.0) t += 2.0 * M_PI;
+        t += theta_a;
+        if (t <= theta_b) {
+            const Vec2 p = x_com + offsets[k] * R;
+            x_min = std::min(x_min, p.x); x_max = std::max(x_max, p.x);
+            y_min = std::min(y_min, p.y); y_max = std::max(y_max, p.y);
+        }
+    }
+
+    return AABB({x_min, y_min}, {x_max, y_max});
+}
+
 void build_blue_boxes(
     const Vec& positions, const std::vector<double>& node_radii,
     std::vector<AABB>& blue_boxes) {
@@ -29,6 +67,25 @@ void build_blue_boxes(
         blue_boxes[node] = AABB(
             Vec2(x.x - radius, x.y - radius),
             Vec2(x.x + radius, x.y + radius));
+    }
+}
+
+void build_blue_boxes_rb_rotation(const Vec& x_coms,
+                          const std::vector<double>& thetas,
+                          const std::vector<double>& omega,
+                          const std::vector<std::vector<int>>& rb_nodes,
+                          const std::vector<Vec>& ref_positions,
+                          double dt,
+                          std::vector<AABB>& blue_boxes) {
+    for (int rb = 0; rb < static_cast<int>(rb_nodes.size()); ++rb) {
+        const Vec2   x_com = x_coms[rb];
+        const double theta = thetas[rb];
+        const double eps   = 0.5 * std::abs(omega[rb] * dt);
+        for (int i = 0; i < static_cast<int>(rb_nodes[rb].size()); ++i) {
+            const int  node = rb_nodes[rb][i];
+            const Vec2 X    = get_xi(ref_positions[rb], i);
+            blue_boxes[node] = arc_node_aabb(x_com, theta, X, eps);
+        }
     }
 }
 

@@ -108,6 +108,9 @@ inline AdvanceResult2D advance_one_frame_rb(
             state.v_coms[rb].x = (y_current[rb].x - state.x_coms[rb].x) / dt;
             state.v_coms[rb].y = (y_current[rb].y - state.x_coms[rb].y) / dt;
             state.omega[rb] = (theta_current[rb] - state.theta[rb]) / dt;
+            // Normalize theta to [0, 2pi) after omega is computed
+            theta_current[rb] = std::fmod(theta_current[rb], 2.0 * M_PI);
+            if (theta_current[rb] < 0.0) theta_current[rb] += 2.0 * M_PI;
         }
 
         // Commit rb DOFs
