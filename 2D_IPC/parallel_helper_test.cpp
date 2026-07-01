@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 
 namespace {
 
@@ -181,3 +183,49 @@ TEST(ParallelHelper, MeshAndContactConflictsSeparateParallelGroups) {
         EXPECT_GE(color[node], 0);
     }
 }
+
+// ── arc_node_aabb tests ───────────────────────────────────────────────────────
+
+namespace {
+
+static AABB brute_force(const Vec2& x_com, double theta, const Vec2& X,
+                        double eps, int samples = 4000000) {
+    const double R         = norm(X);
+    const double phi_world = std::atan2(X.y, X.x) + theta;
+    double x_min =  1e300, x_max = -1e300;
+    double y_min =  1e300, y_max = -1e300;
+    for (int i = 0; i <= samples; ++i) {
+        const double t = (phi_world - eps) + 2.0 * eps * (double(i) / samples);
+        x_min = std::min(x_min, x_com.x + R * std::cos(t));
+        x_max = std::max(x_max, x_com.x + R * std::cos(t));
+        y_min = std::min(y_min, x_com.y + R * std::sin(t));
+        y_max = std::max(y_max, x_com.y + R * std::sin(t));
+    }
+    return AABB({x_min, y_min}, {x_max, y_max});
+}
+
+static void check(const Vec2& x_com, double theta, const Vec2& X, double eps) {
+    const AABB result = arc_node_aabb(x_com, theta, X, eps);
+    const AABB ref    = brute_force(x_com, theta, X, eps);
+    std::cout << "result: " << result.min.x << ", " << result.min.y << ", "
+              << result.max.x << ", " << result.max.y << std::endl;
+    std::cout << "ref:    " << ref.min.x << ", " << ref.min.y << ", "
+              << ref.max.x << ", " << ref.max.y << std::endl;
+    std::cout<<"\n"<<std::endl;
+    EXPECT_NEAR(result.min.x, ref.min.x, 1e-14);
+    EXPECT_NEAR(result.min.y, ref.min.y, 1e-14);
+    EXPECT_NEAR(result.max.x, ref.max.x, 1e-14);
+    EXPECT_NEAR(result.max.y, ref.max.y, 1e-14);
+}
+
+} // namespace
+
+TEST(ArcNodeAABB, ShortArcNoCardinal)    { check({0,0},  M_PI/4,          {1,0},   0.1);     }
+TEST(ArcNodeAABB, CrossesRightCardinal)  { check({1,2},  0.0,             {2,0},   0.5);     }
+TEST(ArcNodeAABB, CrossesTopCardinal)    { check({0,0},  0.0,             {0,1.5}, 0.4);     }
+TEST(ArcNodeAABB, CrossesLeftCardinal)   { check({0,0},  M_PI,            {1,0},   0.3);     }
+TEST(ArcNodeAABB, CrossesBottomCardinal) { check({0,0}, -M_PI/2,          {1,0},   0.3);     }
+TEST(ArcNodeAABB, HalfCircle)            { check({0,0},  0.0,             {1,0},   M_PI/2);  }
+TEST(ArcNodeAABB, CrossesAllCardinals)   { check({3,2},  M_PI/4,          {1,0},   M_PI);    }
+TEST(ArcNodeAABB, LargeThetaBeyondTwoPi) { check({0,0},  7*M_PI/4+4*M_PI, {1,0},   0.3);     }
+TEST(ArcNodeAABB, NonZeroMaterialAngle)  { check({2,3},  M_PI/6,          {1,1},   0.4);     }

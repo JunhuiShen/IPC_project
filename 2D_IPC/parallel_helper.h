@@ -13,6 +13,10 @@ struct GreenBoxes {
     std::vector<AABB> segment;
 };
 
+// AABB of the arc swept by material point X rotating about x_com,
+// with body orientation theta and half-arc-width eps.
+AABB arc_node_aabb(const Vec2& x_com, double theta, const Vec2& X, double eps);
+
 void build_blue_boxes(const Vec& positions, const std::vector<double>& node_radii,
                       std::vector<AABB>& blue_boxes);
 

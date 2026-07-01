@@ -102,10 +102,8 @@ void build_blue_boxes_rb(const Vec& positions,
             // The COM can move anywhere inside this translation square. Since
             // translating an arc by a box reaches its axis extrema at the box
             // corners, union the same rotation arc at all four COM corners.
-            const Vec2 corners[4] = {
+            const Vec2 corners[2] = {
                 {x_com.x - r_com, x_com.y - r_com},
-                {x_com.x + r_com, x_com.y - r_com},
-                {x_com.x - r_com, x_com.y + r_com},
                 {x_com.x + r_com, x_com.y + r_com},
             };
             for (const Vec2& c : corners)
