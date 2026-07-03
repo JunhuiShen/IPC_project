@@ -72,14 +72,3 @@ TEST(BVH, IterativeBuildHandlesManyBoxes) {
     ASSERT_EQ(hits.size(), boxes.size());
     for (int i = 0; i < box_count; ++i) EXPECT_EQ(hits[i], i);
 }
-
-TEST(BVH, NodeBoxSafeStepClipsToBox) {
-    BroadPhase bp;
-    bp.mutable_cache().blue_boxes = {
-        AABB(Vec2(-0.5, -0.5), Vec2(0.5, 0.5)),
-    };
-
-    EXPECT_DOUBLE_EQ(bp.node_box_safe_step(0, Vec2(0.0, 0.0), Vec2(2.0, 0.0)), 0.25);
-    EXPECT_DOUBLE_EQ(bp.node_box_safe_step(0, Vec2(0.0, 0.0), Vec2(0.0, -1.0)), 0.5);
-    EXPECT_DOUBLE_EQ(bp.node_box_safe_step(0, Vec2(0.0, 0.0), Vec2(0.1, 0.1)), 1.0);
-}

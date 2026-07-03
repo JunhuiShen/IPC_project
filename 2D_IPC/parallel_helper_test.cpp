@@ -73,6 +73,14 @@ TEST(ParallelHelper, BuildsExplicitBlueRedGreenBoxes) {
     EXPECT_DOUBLE_EQ(green_boxes.segment[0].max.y, 1.7);
 }
 
+TEST(ParallelHelper, BoxSafeStepClipsToBox) {
+    const AABB box(Vec2(-0.5, -0.5), Vec2(0.5, 0.5));
+
+    EXPECT_DOUBLE_EQ(box_safe_step(box, Vec2(0.0, 0.0), Vec2(2.0, 0.0)), 0.25);
+    EXPECT_DOUBLE_EQ(box_safe_step(box, Vec2(0.0, 0.0), Vec2(0.0, -1.0)), 0.5);
+    EXPECT_DOUBLE_EQ(box_safe_step(box, Vec2(0.0, 0.0), Vec2(0.1, 0.1)), 1.0);
+}
+
 TEST(ParallelHelper, RegistersBlueGreenIntersection) {
     Vec x = {
         {0.0, 0.0},

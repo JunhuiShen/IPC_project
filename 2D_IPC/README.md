@@ -174,13 +174,16 @@ Local nodal contact derivatives are pulled back to rigid-body coordinates by
 the chain rule. Translation uses `dx_i/dy = I`; rotation uses
 `dx_i/dtheta = {-r_i.y, r_i.x}` with `r_i = x_i - y`.
 
-The rigid-body solver currently uses a deliberately simple serial path:
+The rigid-body solver mirrors the node-wise parallel path at the contact-set level:
 
-- sweeps rigid bodies one at a time
+- builds arc-aware blue boxes for each rigid-body node from COM and rotation trust regions
+- builds red segment boxes from endpoint blue boxes
+- builds green segment boxes by augmenting red boxes by `d_hat`
+- registers rigid-rigid node-segment contact pairs through the same BVH query used by the node solver
+- colors a rigid-body conflict graph from those contact pairs
+- updates same-color rigid bodies in parallel when `use_parallel` is enabled
 - updates COM and orientation as separate scalar/vector blocks
-- builds rigid-rigid node-segment pairs naively from topology
-- checks every rigid body against all other rigid bodies, without AABB/BVH filtering
-- recomputes barrier and SDF gradients/Hessians from the current positions each time they are needed
+- clamps COM and orientation updates to the trust regions that generated the active contact set
 
 Rigid barrier derivatives live in `barrier_energy.h/.cpp` as
 `local_barrier_grad_rb` and `local_barrier_hess_rb`. Rigid SDF penalty
@@ -261,6 +264,7 @@ Important CLI options:
 | `initial_guess` | `ccd`, `verlet`, or `trivial`; default `ccd` |
 | `use_parallel` | color-parallel updates; default `true` |
 | `node_box_min` / `node_box_max` | defaults `0.001` and `0.01` |
+| `theta_box_min` / `theta_box_max` | rigid-body angular trust-region half-widths; defaults `0.001` and `0.05` |
 | `node_box_update_count` | active-set rebuild interval; default `1` |
 | `format` / `outdir` | `geo` or `obj`; default directory `frames_2d` |
 | `write_substeps` | exports every substep; default `false` |

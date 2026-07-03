@@ -14,26 +14,15 @@
 
 namespace fs = std::filesystem;
 
-static void export_scene_frame(const std::string& outdir,
-                               int frame,
-                               const Vec& dynamic_x,
-                               const std::vector<std::pair<int, int>>& dynamic_edges,
-                               OutputFormat format) {
+static void export_scene_frame(const std::string& outdir, int frame, const Vec& dynamic_x, const std::vector<std::pair<int, int>>& dynamic_edges, OutputFormat format) {
     export_frame(outdir, frame, dynamic_x, dynamic_edges, format);
 }
 
-static void export_scene_substep(const std::string& outdir,
-                                 int substep,
-                                 const Vec& dynamic_x,
-                                 const std::vector<std::pair<int, int>>& dynamic_edges,
-                                 OutputFormat format) {
+static void export_scene_substep(const std::string& outdir, int substep, const Vec& dynamic_x, const std::vector<std::pair<int, int>>& dynamic_edges, OutputFormat format) {
     export_substep_frame(outdir, substep, dynamic_x, dynamic_edges, format);
 }
 
-static void export_static_colliders(const std::string& outdir,
-                                    const Vec& static_x,
-                                    const std::vector<std::pair<int, int>>& static_edges,
-                                    OutputFormat format) {
+static void export_static_colliders(const std::string& outdir, const Vec& static_x, const std::vector<std::pair<int, int>>& static_edges, OutputFormat format) {
     if (static_x.empty()) return;
 
     const fs::path filename = fs::path(outdir) / (format == OutputFormat::GEO ? "static_colliders.geo" : "static_colliders.obj");
@@ -116,6 +105,8 @@ int main(int argc, char** argv) {
     params.fixed_iters = args.fixed_iters;
     params.node_box_min = args.node_box_min;
     params.node_box_max = args.node_box_max;
+    params.theta_box_min = args.theta_box_min;
+    params.theta_box_max = args.theta_box_max;
     params.node_box_update_count = args.node_box_update_count;
     params.use_ccd_step_policy = use_ccd_step_policy;
     params.initial_guess_type = initial_guess_type;
@@ -150,9 +141,12 @@ int main(int argc, char** argv) {
         };
 
         const auto solver_start = clock::now();
-        const AdvanceResult2D result = ref_mesh.rb_nodes.empty()
-            ? advance_one_frame(state, ref_mesh, pins, params, broad_phase, frame, substep_export)
-            : advance_one_frame_rb(state, ref_mesh, pins, params, frame, substep_export);
+        AdvanceResult2D result;
+        if (ref_mesh.rb_nodes.empty()) {
+            result = advance_one_frame(state, ref_mesh, pins, params, broad_phase, frame, substep_export);
+        } else {
+            result = advance_one_frame_rb(state, ref_mesh, pins, params, broad_phase, frame, substep_export);
+        }
         const auto solver_end = clock::now();
         const std::chrono::duration<double> solver_elapsed = solver_end - solver_start;
 

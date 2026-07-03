@@ -65,22 +65,10 @@ public:
     };
 
     Cache& mutable_cache() { return cache_; }
+    const Cache& cache() const { return cache_; }
     const std::vector<NodeSegmentPair>& pairs() const { return cache_.pairs; }
 
-    double node_box_safe_step(int node, const Vec2& x0, const Vec2& displacement) const;
-
-    std::vector<NodeSegmentPair> build_ccd_candidates(
-        const Vec& x, const Vec& v,
-        const std::vector<std::pair<int, int>>& edges, double dt) const;
-
-    std::vector<NodeSegmentPair> build_ccd_candidates_for_node(
-        int who, const Vec& x, const Vec& v_newton,
-        const std::vector<std::pair<int, int>>& edges, double dt) const;
-
-    std::vector<NodeSegmentPair> build_trust_region_candidates(
-        const Vec& x, const Vec& v,
-        const std::vector<std::pair<int, int>>& edges,
-        double dt, double motion_pad) const;
+    std::vector<NodeSegmentPair> build_ccd_candidates(const Vec& x, const Vec& v, const std::vector<std::pair<int, int>>& edges, double dt) const;
 
 private:
     Cache cache_;

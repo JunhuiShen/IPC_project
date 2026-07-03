@@ -36,6 +36,8 @@ struct SimParams2D {
     bool   fixed_iters = false;
     double node_box_min = 0.001;
     double node_box_max = 0.01;
+    double theta_box_min = 0.001;
+    double theta_box_max = 0.05;
     int    node_box_update_count = 1;
     bool   use_ccd_step_policy = true;
     InitialGuessType initial_guess_type = InitialGuessType::CCD;

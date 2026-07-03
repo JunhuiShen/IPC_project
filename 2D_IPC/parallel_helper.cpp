@@ -20,10 +20,8 @@ void add_graph_edge(std::vector<std::vector<int>>& graph, int a, int b) {
 
 AABB arc_node_aabb(const Vec2& x_com, const double theta, const Vec2& X, const double eps) {
     const double R         = norm(X);
-    // X is the node's fixed material-space offset from the rigid body's COM.
-    // phi_local is its angle inside the body; adding theta rotates that offset
-    // into world space. The blue box below encloses the node's arc over
-    // [phi_world - eps, phi_world + eps].
+    // X is the node's fixed material-space offset from the COM
+    // Convert its local polar angle to world space, then bound the arc endpoints and any axis-aligned extrema crossed by the angular interval
     const double phi_local = std::atan2(X.y, X.x);
     const double phi_world = phi_local + theta;
     const double theta_a   = phi_world - eps;
@@ -58,9 +56,26 @@ AABB arc_node_aabb(const Vec2& x_com, const double theta, const Vec2& X, const d
     return AABB({x_min, y_min}, {x_max, y_max});
 }
 
-void build_blue_boxes(
-    const Vec& positions, const std::vector<double>& node_radii,
-    std::vector<AABB>& blue_boxes) {
+double box_safe_step(const AABB& box, const Vec2& x0, const Vec2& displacement) {
+    constexpr double eps = 1.0e-12;
+    double alpha = 1.0;
+
+    auto clip_axis = [&](double x, double d, double lo, double hi) {
+        if (x < lo - eps || x > hi + eps) {
+            alpha = 0.0;
+        } else if (d > 0.0) {
+            alpha = std::min(alpha, (hi - x) / d);
+        } else if (d < 0.0) {
+            alpha = std::min(alpha, (lo - x) / d);
+        }
+    };
+
+    clip_axis(x0.x, displacement.x, box.min.x, box.max.x);
+    clip_axis(x0.y, displacement.y, box.min.y, box.max.y);
+    return std::clamp(alpha, 0.0, 1.0);
+}
+
+void build_blue_boxes(const Vec& positions, const std::vector<double>& node_radii, std::vector<AABB>& blue_boxes) {
     const int total_nodes = static_cast<int>(positions.size());
     blue_boxes.resize(total_nodes);
 
@@ -74,47 +89,36 @@ void build_blue_boxes(
     }
 }
 
-void build_blue_boxes_rb(const Vec& positions,
-                          const Vec& x_coms,
-                          const std::vector<double>& thetas,
-                          double eps,
-                          const std::vector<double>& com_radii,
-                          const std::vector<std::vector<int>>& rb_nodes,
-                          const std::vector<Vec>& ref_positions,
-                          std::vector<AABB>& blue_boxes) {
+void build_blue_boxes_rb(const Vec& positions, const Vec& x_coms, const std::vector<double>& thetas, const std::vector<double>& theta_radii, const std::vector<double>& com_radii, const std::vector<std::vector<int>>& rb_nodes, const std::vector<Vec>& ref_positions, std::vector<AABB>& blue_boxes) {
     blue_boxes.resize(positions.size());
 
+    // For each rigid node, combine a square COM trust region with the angular arc swept by the material point around that moving COM
     for (int rb = 0; rb < static_cast<int>(rb_nodes.size()); ++rb) {
         const Vec2   x_com  = x_coms[rb];
         const double theta  = thetas[rb];
         const double r_com  = com_radii[rb];
+        const double r_theta = theta_radii[rb];
 
         for (int i = 0; i < static_cast<int>(rb_nodes[rb].size()); ++i) {
             const int  node     = rb_nodes[rb][i];
             const Vec2 X        = get_xi(ref_positions[rb], i);
             const Vec2 node_pos = get_xi(positions, node);
 
-            // All nodes of this rb share one translation box based on COM displacement
+            // Start with the COM translation trust box for this node, then expand it below by the node's possible rotational arc
             blue_boxes[node] = AABB(
                 Vec2(node_pos.x - r_com, node_pos.y - r_com),
                 Vec2(node_pos.x + r_com, node_pos.y + r_com));
-
-            // The COM can move anywhere inside this translation square. Since
-            // translating an arc by a box reaches its axis extrema at the box
-            // corners, union the same rotation arc at all four COM corners.
             const Vec2 corners[2] = {
                 {x_com.x - r_com, x_com.y - r_com},
                 {x_com.x + r_com, x_com.y + r_com},
             };
             for (const Vec2& c : corners)
-                blue_boxes[node].expand(arc_node_aabb(c, theta, X, eps));
+                blue_boxes[node].expand(arc_node_aabb(c, theta, X, r_theta));
         }
     }
 }
 
-void build_red_boxes(
-    const std::vector<std::pair<int, int>>& edges,
-    const std::vector<AABB>& blue_boxes, RedBoxes& red_boxes) {
+void build_red_boxes(const std::vector<std::pair<int, int>>& edges, const std::vector<AABB>& blue_boxes, RedBoxes& red_boxes) {
     red_boxes.segment.resize(edges.size());
     for (int edge = 0; edge < static_cast<int>(edges.size()); ++edge) {
         const auto [seg0, seg1] = edges[edge];
@@ -124,8 +128,7 @@ void build_red_boxes(
     }
 }
 
-void build_green_boxes(
-    const RedBoxes& red_boxes, double d_hat, GreenBoxes& green_boxes) {
+void build_green_boxes(const RedBoxes& red_boxes, double d_hat, GreenBoxes& green_boxes) {
     green_boxes.segment.resize(red_boxes.segment.size());
     for (int edge = 0; edge < static_cast<int>(red_boxes.segment.size()); ++edge) {
         const AABB& red_box = red_boxes.segment[edge];
@@ -135,10 +138,7 @@ void build_green_boxes(
     }
 }
 
-BroadPhase::Cache register_barrier_pairs_from_blue_and_green(
-    const std::vector<std::pair<int, int>>& edges,
-    const std::vector<AABB>& blue_boxes,
-    const GreenBoxes& green_boxes) {
+BroadPhase::Cache register_barrier_pairs_from_blue_and_green(const std::vector<std::pair<int, int>>& edges, const std::vector<AABB>& blue_boxes, const GreenBoxes& green_boxes) {
     BroadPhase::Cache cache;
     cache.blue_boxes = blue_boxes;
     cache.segment_leaf_edges = edges;
@@ -157,8 +157,7 @@ BroadPhase::Cache register_barrier_pairs_from_blue_and_green(
     return cache;
 }
 
-std::vector<std::vector<int>>
-build_elastic_adj(const std::vector<std::pair<int, int>>& edges, int total_nodes) {
+std::vector<std::vector<int>> build_elastic_adj(const std::vector<std::pair<int, int>>& edges, int total_nodes) {
     std::vector<std::vector<int>> graph(total_nodes);
     for (const auto& [a, b] : edges) add_graph_edge(graph, a, b);
     for (auto& neighbors : graph) {
@@ -168,8 +167,7 @@ build_elastic_adj(const std::vector<std::pair<int, int>>& edges, int total_nodes
     return graph;
 }
 
-std::vector<std::vector<int>>
-build_contact_adj(const std::vector<NodeSegmentPair>& contact_pairs, int total_nodes) {
+std::vector<std::vector<int>> build_contact_adj(const std::vector<NodeSegmentPair>& contact_pairs, int total_nodes) {
     std::vector<std::vector<int>> graph(total_nodes);
     for (const auto& pair : contact_pairs) {
         add_graph_edge(graph, pair.node, pair.seg0);
@@ -185,9 +183,7 @@ build_contact_adj(const std::vector<NodeSegmentPair>& contact_pairs, int total_n
     return graph;
 }
 
-std::vector<std::vector<int>>
-union_adjacency(const std::vector<std::vector<int>>& a,
-                const std::vector<std::vector<int>>& b) {
+std::vector<std::vector<int>> union_adjacency(const std::vector<std::vector<int>>& a, const std::vector<std::vector<int>>& b) {
     const int total_nodes = static_cast<int>(std::max(a.size(), b.size()));
     std::vector<std::vector<int>> graph(total_nodes);
     for (int node = 0; node < total_nodes; ++node) {
@@ -202,8 +198,7 @@ union_adjacency(const std::vector<std::vector<int>>& a,
     return graph;
 }
 
-std::vector<std::vector<int>>
-greedy_color_conflict_graph(const std::vector<std::vector<int>>& graph) {
+std::vector<std::vector<int>> greedy_color_conflict_graph(const std::vector<std::vector<int>>& graph) {
     const int n = static_cast<int>(graph.size());
     std::vector<int> color(n, -1);
     std::vector<std::vector<int>> groups;

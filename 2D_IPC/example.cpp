@@ -29,8 +29,8 @@ ExampleScene build_example(
         }
         // Command line: ./build/simulation --example 3 --num_frames 100 --outdir frames_hexagons_collide --k_sdf 1e10 --eps_sdf .001 --max_substep_iters 5000 --substeps 25 --tol_abs 1e-12 --gy 0
         case ExampleType::Example3: {
-            append_rigid_polygon(6, scene.state, scene.ref_mesh, {-5.0, 0.0}, 0.5, 1.0, 0.001, {3.0, 0.0}, 0.0, 0.0);
-            append_rigid_polygon(6, scene.state, scene.ref_mesh, {5.0, 0.0}, 0.5, 1.0, 0.001, {-3.0, 0.0}, 0.0, 0.0);
+            append_rigid_polygon(6, scene.state, scene.ref_mesh, {-5.0, 0.0}, 0.5, 1.0, 0.001, {3.0, 0.0}, 0.0, 4.0);
+            append_rigid_polygon(6, scene.state, scene.ref_mesh, {5.0, 0.0}, 0.5, 1.0, 0.001, {-3.0, 0.0}, 0.0, 4.0);
             break;
         }
         default:

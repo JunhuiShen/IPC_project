@@ -1,17 +1,17 @@
-# IPC Project
+# Incremental Potential Contact Simulators
 
 Research codebase for **Incremental Potential Contact (IPC)** simulation,
-covering both 2D spring-edge networks and 3D deformable triangle meshes
-(cloth / thin shells). Each time step optimizes an incremental potential
-with a **nonlinear Gauss–Seidel solver**, using continuous collision
-detection (or a distance-based trust region) to keep every intermediate
-state intersection-free.
+covering 2D spring-edge and rigid-body systems alongside 3D deformable
+triangle meshes (cloth / thin shells). Each time step optimizes an
+incremental potential with a **nonlinear Gauss–Seidel solver**, using
+continuous collision detection (or a distance-based trust region) to keep
+every intermediate state intersection-free.
 
 ## Subprojects
 
 | Directory | What it is |
 |-----------|------------|
-| [`2D_IPC/`](2D_IPC/) | 2D explicit-edge testbed supporting branches, loops, and disconnected components while swapping broad-phase, step-filter, and initial-guess strategies. |
+| [`2D_IPC/`](2D_IPC/) | 2D explicit-edge and rigid-body testbed with vertex-wise and rigid-body Gauss--Seidel solvers, box-structured broad phase, and example scenes. |
 | [`3D_IPC/`](3D_IPC/) | Full 3D simulator for deformable triangle meshes (cloth / thin shells). CCD- and OGC-based step clamping, parallel-by-color GS, optional GPU pipeline, USD/OBJ/PLY/GEO export. |
 
 Each subproject has its own README with build instructions, CLI flags,
@@ -27,8 +27,8 @@ to port ideas between them:
 
 - **Incremental potential.** Inertial + elastic + IPC log-barrier
   contact, minimized per substep.
-- **Nonlinear Gauss–Seidel.** Per-vertex local Newton step, swept across
-  the mesh once per outer iteration.
+- **Nonlinear Gauss–Seidel.** Per-vertex or rigid-body local Newton steps,
+  swept across the system once per outer iteration.
 - **Step safety.** Either continuous collision detection (CCD) or a
   distance-based trust region clamps each per-vertex move to keep the
   iterate intersection-free.

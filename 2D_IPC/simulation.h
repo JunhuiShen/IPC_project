@@ -34,14 +34,14 @@ inline AdvanceResult2D advance_one_frame(
 
         Vec xnew;
         if (params.initial_guess_type == InitialGuessType::Trivial) {
-            xnew = trivial_initial_guess(state);
+            xnew = initial_guess::trivial_initial_guess(state);
         } else if (params.initial_guess_type == InitialGuessType::CCD) {
-            xnew = ccd_initial_guess(state, ref_mesh, pins, dt, params.eta);
+            xnew = initial_guess::ccd_initial_guess(state, ref_mesh, pins, dt, params.eta);
         } else if (params.initial_guess_type == InitialGuessType::Verlet) {
-            xnew = verlet_initial_guess(
+            xnew = initial_guess::verlet_initial_guess(
                     state, ref_mesh, pins, dt, params.eta, params.gravity);
         } else {
-            xnew = trivial_initial_guess(state);
+            xnew = initial_guess::trivial_initial_guess(state);
         }
         std::vector<double> residual_history;
         const SolveResult substep_result = global_gauss_seidel_solver_basic(
@@ -71,24 +71,21 @@ inline AdvanceResult2D advance_one_frame(
     return aggregate;
 }
 
-inline AdvanceResult2D advance_one_frame_rb(
-        DeformedState& state, const RefMesh& ref_mesh, const std::vector<Pin>& pins,
-        const SimParams2D& params, int frame_index,
-        SubstepCallback2D on_substep = nullptr) {
+inline AdvanceResult2D advance_one_frame_rb(DeformedState& state, const RefMesh& ref_mesh, const std::vector<Pin>& pins, const SimParams2D& params, 
+    BroadPhase& broad_phase, int frame_index, SubstepCallback2D on_substep = nullptr) {
     const double dt = params.substep_dt();
     const int substeps = std::max(1, params.substeps);
     const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
     AdvanceResult2D aggregate;
 
     for (int substep = 0; substep < substeps; ++substep) {
-        Vec xnew = trivial_initial_guess(state);
+        Vec xnew = initial_guess::trivial_initial_guess(state);
 
-        // Working rb DOFs — initialised from current state, updated by solver
         Vec y_current = state.x_coms;
         std::vector<double> theta_current = state.theta;
 
         std::vector<double> residual_history;
-        const SolveResult substep_result = global_gauss_seidel_solver_rb(ref_mesh, pins, state, xnew, y_current, theta_current, params, &residual_history);
+        const SolveResult substep_result = global_gauss_seidel_solver_rb(ref_mesh, pins, state, xnew, y_current, theta_current, params, broad_phase, &residual_history);
 
         if (aggregate.substeps_completed == 0 && !residual_history.empty())
             aggregate.first_initial_residual = residual_history.front();

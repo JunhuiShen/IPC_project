@@ -40,6 +40,8 @@ struct IPCArgs : ArgParser {
     bool   fixed_iters      = false;
     double node_box_min     = 0.001;
     double node_box_max     = 0.01;
+    double theta_box_min    = 0.001;
+    double theta_box_max    = 0.05;
     int    node_box_update_count = 1;
 
     // --- geometry ---
@@ -79,6 +81,8 @@ struct IPCArgs : ArgParser {
         add_bool  ("fixed_iters",     fixed_iters,     false,     "Run exactly max_substep_iters sweeps with no convergence check");
         add_double("node_box_min",    node_box_min,    0.001,     "Lower bound on node box half-width");
         add_double("node_box_max",    node_box_max,    0.01,      "Upper bound on node box half-width");
+        add_double("theta_box_min",   theta_box_min,   0.001,     "Lower bound on rigid-body theta trust-region half-width");
+        add_double("theta_box_max",   theta_box_max,   0.05,      "Upper bound on rigid-body theta trust-region half-width");
         add_int   ("node_box_update_count", node_box_update_count, 1, "Gauss-Seidel iterations between node-box/contact recoloring rebuilds");
 
         add_int   ("nodes",           number_of_nodes, 100,       "Nodes per chain");
@@ -135,6 +139,8 @@ struct IPCArgs : ArgParser {
         if (number_of_nodes < 2) throw std::invalid_argument("nodes must be at least 2");
         if (node_box_min <= 0.0) throw std::invalid_argument("node_box_min must be positive");
         if (node_box_max < node_box_min) throw std::invalid_argument("node_box_max must be >= node_box_min");
+        if (theta_box_min <= 0.0) throw std::invalid_argument("theta_box_min must be positive");
+        if (theta_box_max < theta_box_min) throw std::invalid_argument("theta_box_max must be >= theta_box_min");
         if (node_box_update_count <= 0) throw std::invalid_argument("node_box_update_count must be positive");
         if (step_policy == "trust_region" && eta > 0.5) {
             throw std::invalid_argument("eta must be <= 0.5 when using trust_region");
