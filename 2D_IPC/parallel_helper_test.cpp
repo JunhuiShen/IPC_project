@@ -215,11 +215,6 @@ static AABB brute_force(const Vec2& x_com, double theta, const Vec2& X,
 static void check(const Vec2& x_com, double theta, const Vec2& X, double eps) {
     const AABB result = arc_node_aabb(x_com, theta, X, eps);
     const AABB ref    = brute_force(x_com, theta, X, eps);
-    std::cout << "result: " << result.min.x << ", " << result.min.y << ", "
-              << result.max.x << ", " << result.max.y << std::endl;
-    std::cout << "ref:    " << ref.min.x << ", " << ref.min.y << ", "
-              << ref.max.x << ", " << ref.max.y << std::endl;
-    std::cout<<"\n"<<std::endl;
     EXPECT_NEAR(result.min.x, ref.min.x, 1e-14);
     EXPECT_NEAR(result.min.y, ref.min.y, 1e-14);
     EXPECT_NEAR(result.max.x, ref.max.x, 1e-14);
