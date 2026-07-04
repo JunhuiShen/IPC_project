@@ -97,7 +97,7 @@ inline AdvanceResult2D advance_one_frame_rb(DeformedState& state, const RefMesh&
         aggregate.total_iterations += substep_result.iterations_used;
         aggregate.substeps_completed += 1;
 
-        // Update free-node velocities
+        // Update velocities of nodes
         update_velocity(state.velocities, xnew, state.deformed_positions, dt);
 
         // Update rb velocities from the change in COM and theta
