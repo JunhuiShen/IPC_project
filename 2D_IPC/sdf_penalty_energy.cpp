@@ -52,23 +52,54 @@ SDFEvaluation evaluate_sdf(const PlaneSDF& sdf, const Vec2& x) {
 }
 
 double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double eps) {
-    if (sdf.phi >= eps) return 0.0;
+    if (eps <= 0.0) {
+        if (sdf.phi >= 0.0) return 0.0;
+        return 0.5 * k * sdf.phi * sdf.phi;
+    }
+
+    const double H = sdf_heaviside(sdf.phi, eps);
+    if (H <= 0.0) return 0.0;
+
     const double d = eps - sdf.phi;
-    return 0.5 * k * d * d;
+    return 0.5 * k * H * d * d;
 }
 
 Vec2 sdf_penalty_gradient(const SDFEvaluation& sdf, double k, double eps) {
-    if (sdf.phi >= eps) return {0.0, 0.0};
-    return scale(sdf.grad_phi, -k * (eps - sdf.phi));
+    if (eps <= 0.0) {
+        if (sdf.phi >= 0.0) return {0.0, 0.0};
+        return scale(sdf.grad_phi, k * sdf.phi);
+    }
+
+    const double H = sdf_heaviside(sdf.phi, eps);
+    if (H <= 0.0) return {0.0, 0.0};
+
+    const double Hp = sdf_heaviside_gradient(sdf.phi, eps);
+    const double d = eps - sdf.phi;
+    const double dE_dphi = 0.5 * k * (Hp * d * d - 2.0 * H * d);
+    return scale(sdf.grad_phi, dE_dphi);
 }
 
 Mat2 sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double eps, bool include_curvature) {
-    if (sdf.phi >= eps) return {0.0, 0.0, 0.0, 0.0};
+    double dE_dphi = 0.0;
+    double d2E_dphi2 = 0.0;
 
-    const double d = eps - sdf.phi;
-    Mat2 Hess = scale(outer(sdf.grad_phi, sdf.grad_phi), k);
+    if (eps <= 0.0) {
+        if (sdf.phi >= 0.0) return {0.0, 0.0, 0.0, 0.0};
+        dE_dphi = k * sdf.phi;
+        d2E_dphi2 = k;
+    } else {
+        const double H = sdf_heaviside(sdf.phi, eps);
+        if (H <= 0.0) return {0.0, 0.0, 0.0, 0.0};
+
+        const double Hp = sdf_heaviside_gradient(sdf.phi, eps);
+        const double d = eps - sdf.phi;
+        dE_dphi = 0.5 * k * (Hp * d * d - 2.0 * H * d);
+        d2E_dphi2 = 0.5 * k * (-4.0 * Hp * d + 2.0 * H);
+    }
+
+    Mat2 Hess = scale(outer(sdf.grad_phi, sdf.grad_phi), d2E_dphi2);
     if (include_curvature) {
-        Hess = add(Hess, scale(sdf.hess_phi, -k * d));
+        Hess = add(Hess, scale(sdf.hess_phi, dE_dphi));
     }
     return Hess;
 }
