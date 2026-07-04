@@ -27,6 +27,7 @@ struct SimParams2D {
     double eps_sdf = 0.002;
     std::vector<GroundSDF> sdf_grounds;
     std::vector<CircleSDF> sdf_circles;
+    std::vector<PlaneSDF>  sdf_planes;
     Vec2   gravity{0.0, -9.81};
     double d_hat = 0.005;
     double tol_abs = 1e-6;
@@ -75,7 +76,8 @@ struct RefMesh {
     std::vector<Vec> ref_positions; // array of particles in material space for each rb
     std::vector<Mat2> inertia_tensor; // inertia tensor for each rb
     std::vector<double> total_mass; // total_mass for each rb
-    std::vector<std::vector<int>> rb_nodes; // global node indices for each rb
+    std::vector<std::vector<int>> rb_nodes;  // global node indices for each rb
+    std::vector<int>              node_to_rb; // global node index -> rb index (-1 for non-rb nodes)
 
     inline void initialize(int n_positions, const std::vector<std::pair<int, int>>& input_edges, const Vec& rest_positions) {
         if (n_positions < 0 ||

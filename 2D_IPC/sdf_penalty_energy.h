@@ -36,6 +36,13 @@ struct CircleSDF {
 
 SDFEvaluation evaluate_sdf(const CircleSDF& sdf, const Vec2& x);
 
+struct PlaneSDF {
+    Vec2   normal{0.0, 1.0}; // default normal pointing up like a ground plane.
+    double offset = 0.0;
+};
+
+SDFEvaluation evaluate_sdf(const PlaneSDF& sdf, const Vec2& x);
+
 double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double eps);
 
 Vec2 sdf_penalty_gradient(const SDFEvaluation& sdf, double k, double eps);

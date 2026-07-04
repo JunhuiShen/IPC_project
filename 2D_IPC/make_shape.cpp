@@ -132,7 +132,13 @@ int append_rigid_polygon(int number_of_nodes, DeformedState& state, RefMesh& ref
     for (int i = 0; i < number_of_nodes; ++i) {
         rb_nodes[i] = base + i;
     }
-    ref_mesh.rb_nodes.push_back(std::move(rb_nodes));
+    ref_mesh.rb_nodes.push_back(rb_nodes);
+
+    // Keep node_to_rb in sync — grow to cover new nodes, fill with -1 for non-rb slots
+    if (static_cast<int>(ref_mesh.node_to_rb.size()) < base + number_of_nodes)
+        ref_mesh.node_to_rb.resize(base + number_of_nodes, -1);
+    for (int i = 0; i < number_of_nodes; ++i)
+        ref_mesh.node_to_rb[base + i] = rb;
 
     rebuild_ref_mesh(ref_mesh, state.deformed_positions);
     return rb;

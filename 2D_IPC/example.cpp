@@ -33,6 +33,36 @@ ExampleScene build_example(
             append_rigid_polygon(6, scene.state, scene.ref_mesh, {5.0, 0.0}, 0.5, 1.0, 0.001, {-3.0, 0.0}, 0.0, 4.0);
             break;
         }
+        // Command line: ./build/simulation --example 4 --num_frames 300 --outdir frames_box --max_substep_iters 5000 --substeps 50 --tol_abs 1e-12
+        case ExampleType::Example4: {
+            // Open-top box: ground at y=0, left wall at x=-4, right wall at x=4
+            scene.sdf_grounds.push_back({0.0});
+            scene.sdf_planes.push_back({{ 1.0, 0.0}, -4.0}); // left wall:  phi = x.x - (-4) = x.x + 4, > 0 when x.x > -4
+            scene.sdf_planes.push_back({{-1.0, 0.0}, -4.0}); // right wall: phi = -x.x - (-4) = 4 - x.x, > 0 when x.x < 4
+
+            // Visualize the box outline
+            scene.static_positions = {
+                {-4.0, 0.0}, {4.0, 0.0},   // bottom ground
+                {-4.0, 0.0}, {-4.0, 8.0},  // left wall
+                { 4.0, 0.0}, { 4.0, 8.0},  // right wall
+            };
+            scene.static_edges = {{0,1}, {2,3}, {4,5}};
+
+            // 200 polygons in a 10x20 grid, cycling through shapes 3-8 sides
+            constexpr int cols = 10, rows = 15;
+            for (int row = 0; row < rows; ++row) {
+                for (int col = 0; col < cols; ++col) {
+                    const int    idx   = row * cols + col;
+                    const int    sides = 3 + (idx % 6);              // cycles 3,4,5,6,7,8
+                    const double x     = -3.6 + col * 0.8;           // evenly across [-3.6, 3.6]
+                    const double y     = 6.0  + row * 1.0;           // stack upward from y=6
+                    const double theta = (idx % 7) * (M_PI / 7.0);   // varied initial orientation
+                    append_rigid_polygon(sides, scene.state, scene.ref_mesh,
+                        {x, y}, 0.3, 1.0, 0.001, {0.0, 0.0}, theta, 0.0);
+                }
+            }
+            break;
+        }
         default:
             throw std::invalid_argument("Unknown example type");
     }

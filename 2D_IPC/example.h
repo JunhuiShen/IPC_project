@@ -5,7 +5,8 @@
 enum class ExampleType {
     Example1,
     Example2,
-    Example3
+    Example3,
+    Example4
 };
 
 struct ExampleScene {
@@ -14,6 +15,7 @@ struct ExampleScene {
     std::vector<Pin> pins;
     std::vector<GroundSDF> sdf_grounds;
     std::vector<CircleSDF> sdf_circles;
+    std::vector<PlaneSDF>  sdf_planes;
     Vec static_positions;
     std::vector<std::pair<int, int>> static_edges;
 };

@@ -107,7 +107,7 @@ bool point_segment_2d_rb_rotation(
     double best_s = std::numeric_limits<double>::infinity();
     double dtheta = theta_new - theta_n;
     if (std::abs(dtheta) < 1e-14) {
-        std::cerr << "Warning: theta_new - theta_n < threshold\n";
+        // std::cerr << "Warning: theta_new - theta_n < threshold\n";
         return false;
     }
 

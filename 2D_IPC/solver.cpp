@@ -85,24 +85,22 @@ Vec verlet_initial_guess(const DeformedState& state, const RefMesh& ref_mesh,con
 
 } // namespace initial_guess
 
-bool sdf_min_evaluation(const std::vector<GroundSDF>& grounds,  const std::vector<CircleSDF>& circles,  const Vec2& xi, SDFEvaluation& out) {
+bool sdf_min_evaluation(const std::vector<GroundSDF>& grounds, const std::vector<CircleSDF>& circles,
+                        const std::vector<PlaneSDF>& planes, const Vec2& xi, SDFEvaluation& out) {
     bool any = false;
     out.phi = std::numeric_limits<double>::infinity();
 
     for (const GroundSDF& ground : grounds) {
         const SDFEvaluation sdf = evaluate_sdf(ground, xi);
-        if (!any || sdf.phi < out.phi) {
-            out = sdf;
-            any = true;
-        }
+        if (!any || sdf.phi < out.phi) { out = sdf; any = true; }
     }
-
     for (const CircleSDF& circle : circles) {
         const SDFEvaluation sdf = evaluate_sdf(circle, xi);
-        if (!any || sdf.phi < out.phi) {
-            out = sdf;
-            any = true;
-        }
+        if (!any || sdf.phi < out.phi) { out = sdf; any = true; }
+    }
+    for (const PlaneSDF& plane : planes) {
+        const SDFEvaluation sdf = evaluate_sdf(plane, xi);
+        if (!any || sdf.phi < out.phi) { out = sdf; any = true; }
     }
 
     return any;
@@ -136,7 +134,7 @@ Vec2 compute_local_gradient(int who, const RefMesh& ref_mesh, const std::vector<
 
     if (params.k_sdf > 0.0) {
         SDFEvaluation sdf;
-        if (sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, get_xi(x, who), sdf)) {
+        if (sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, params.sdf_planes, get_xi(x, who), sdf)) {
             Vec2 gs = sdf_penalty_gradient(sdf, params.k_sdf, params.eps_sdf);
             gi.x += dt * dt * gs.x;
             gi.y += dt * dt * gs.y;
@@ -162,7 +160,7 @@ Mat2 compute_local_hessian(int who, const RefMesh& ref_mesh, const PinMap& pin_m
 
     if (params.k_sdf > 0.0) {
         SDFEvaluation sdf;
-        if (sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, get_xi(x, who), sdf)) {
+        if (sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, params.sdf_planes, get_xi(x, who), sdf)) {
             Mat2 Hs = sdf_penalty_hessian(sdf, params.k_sdf, params.eps_sdf, /*include_curvature=*/false);
             Hi.a11 += dt * dt * Hs.a11;
             Hi.a12 += dt * dt * Hs.a12;
@@ -396,7 +394,7 @@ Eigen::Vector3d compute_local_gradient_rb(int rb, const RefMesh& ref_mesh, const
     if (params.k_sdf > 0.0) {
         for (int node : rb_nodes) {
             SDFEvaluation sdf;
-            if (sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, get_xi(x, node), sdf)) {
+            if (sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, params.sdf_planes, get_xi(x, node), sdf)) {
                 const Vec2 xi = get_xi(x, node);
                 const Vec2 gs = sdf_penalty_gradient(sdf, params.k_sdf, params.eps_sdf);
                 gt.x += dt * dt * gs.x;
@@ -454,7 +452,7 @@ void add_rigid_sdf_translation_terms(const std::vector<int>& rb_nodes, const Vec
 
     for (int node : rb_nodes) {
         SDFEvaluation sdf;
-        if (!sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, get_xi(x, node), sdf)) continue;
+        if (!sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, params.sdf_planes, get_xi(x, node), sdf)) continue;
 
         const Vec2 xi = get_xi(x, node);
         const RigidSDFGradient gs = sdf_penalty_gradient_rb(sdf, xi, y_current, params.k_sdf, params.eps_sdf);
@@ -507,7 +505,7 @@ void add_rigid_sdf_rotation_terms(const std::vector<int>& rb_nodes, const Vec& x
     for (int node : rb_nodes) {
         const Vec2 xi = get_xi(x, node);
         SDFEvaluation sdf;
-        if (!sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, xi, sdf)) continue;
+        if (!sdf_min_evaluation(params.sdf_grounds, params.sdf_circles, params.sdf_planes, xi, sdf)) continue;
 
         const RigidSDFGradient gs = sdf_penalty_gradient_rb(sdf, xi, y_current, params.k_sdf, params.eps_sdf);
         const RigidSDFHessian Hs = sdf_penalty_hessian_rb(sdf, xi, y_current, params.k_sdf, params.eps_sdf, /*include_sdf_curvature=*/false, /*include_rigid_curvature=*/false);
@@ -772,7 +770,7 @@ SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::ve
         prev_theta_disp.assign(num_rbs, params.theta_box_max);
     }
 
-    const std::vector<int> node_to_rb = rb_solver::build_node_to_rb(ref_mesh, total_nodes);
+    const std::vector<int>& node_to_rb = ref_mesh.node_to_rb;
     std::vector<std::vector<int>> color_groups;
     std::vector<AABB> com_boxes;
     std::vector<double> theta_box_centers;

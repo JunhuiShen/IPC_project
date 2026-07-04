@@ -43,6 +43,14 @@ SDFEvaluation evaluate_sdf(const CircleSDF& sdf, const Vec2& x) {
     return r;
 }
 
+SDFEvaluation evaluate_sdf(const PlaneSDF& sdf, const Vec2& x) {
+    SDFEvaluation r;
+    r.phi      = dot(sdf.normal, x) - sdf.offset;
+    r.grad_phi = sdf.normal;
+    r.hess_phi = {0.0, 0.0, 0.0, 0.0};
+    return r;
+}
+
 double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double eps) {
     if (sdf.phi >= eps) return 0.0;
     const double d = eps - sdf.phi;

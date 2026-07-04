@@ -96,6 +96,7 @@ int main(int argc, char** argv) {
     params.eps_sdf = args.eps_sdf;
     params.sdf_grounds = std::move(scene.sdf_grounds);
     params.sdf_circles = std::move(scene.sdf_circles);
+    params.sdf_planes  = std::move(scene.sdf_planes);
     params.gravity = {args.gx, args.gy};
     params.d_hat = args.d_hat;
     params.tol_abs = args.tol_abs;
