@@ -218,13 +218,31 @@ positions. Its rest lengths are computed from the initial
 Example geometry is defined in `example.cpp`. Algorithmic choices use CLI flags
 defined in `ipc_args.h`.
 
-    ./build/simulation --example 2 --initial_guess verlet \
-        --format geo --outdir frames_hexagon
+Reference commands:
+
+    ./build/simulation --example 1 --substeps 3 \
+        --step_policy ccd --initial_guess ccd \
+        --outdir frames_2d
+
+    ./build/simulation --example 2 --eps_sdf 0.001 --k_sdf 1e3 \
+        --num_frames 500 --max_substep_iters 50000 \
+        --tol_abs 1e-10 --substeps 10
+
+    ./build/simulation --example 3 --num_frames 100 \
+        --outdir frames_hexagons_collide --k_sdf 1e10 \
+        --eps_sdf .001 --max_substep_iters 5000 \
+        --substeps 25 --tol_abs 1e-12 --gy 0
+
+    ./build/simulation --example 4 --num_frames 300 \
+        --outdir frames_box --max_substep_iters 5000 \
+        --substeps 50 --tol_abs 1e-12
 
 | Example | Description |
 |---|---|
 | `1` | two pinned chains swinging into each other with node-segment IPC contact |
 | `2` | spinning/falling rigid hexagon above ground |
+| `3` | two rigid hexagons colliding horizontally without gravity |
+| `4` | many rigid polygons falling into an open-top SDF box |
 
 The broad-phase collision candidate detector used in the simulation is
 `BroadPhase`.
@@ -248,7 +266,7 @@ Important CLI options:
 
 | Option | Values/default |
 |---|---|
-| `example` | `1` or `2`; default `1` |
+| `example` | `1`, `2`, `3`, or `4`; default `1` |
 | `nodes` | nodes per chain; default `100` |
 | `dt` / `substeps` | frame timestep `1/30`; `3` substeps |
 | `num_frames` | default `120` |
