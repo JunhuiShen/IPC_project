@@ -21,16 +21,16 @@ ExampleScene build_example(
         }
         // Command line: ./build/simulation --example 2 --num_frames 500 --outdir frames_hexagon
         case ExampleType::Example2: {
-            append_rigid_polygon(int(6), scene.state, scene.ref_mesh, {double(0),double(10)}, double(.5),double(1), double(0.001), {double(0),double(0)}, double(0),double(1));
+            append_rigid_polygon(int(6), scene.state, scene.ref_mesh, {double(0),double(10)}, double(.5), density, thickness, {double(0),double(0)}, double(0),double(1));
             scene.sdf_grounds.push_back({double(0)});
             scene.static_positions = {{double(-4), double(0)}, {double(4), double(0)}};
             scene.static_edges = {{0, 1}};
             break;
         }
-        // Command line: ./build/simulation --example 3 --num_frames 100 --outdir frames_hexagons_collide --k_sdf 1e10 --eps_sdf .001 --max_substep_iters 5000 --substeps 25 --tol_abs 1e-12 --gy 0
+        // Command line: ./build/simulation --example 3 --num_frames 100 --outdir frames_hexagons_collide --eps_sdf .001 --max_substep_iters 5000 --substeps 25 --tol_abs 1e-12 --gy 0
         case ExampleType::Example3: {
-            append_rigid_polygon(6, scene.state, scene.ref_mesh, {-5.0, 0.0}, 0.5, 1.0, 0.001, {3.0, 0.0}, 0.0, 4.0);
-            append_rigid_polygon(6, scene.state, scene.ref_mesh, {5.0, 0.0}, 0.5, 1.0, 0.001, {-3.0, 0.0}, 0.0, 4.0);
+            append_rigid_polygon(6, scene.state, scene.ref_mesh, {-5.0, 0.0}, 0.5, density, thickness, {3.0, 0.0}, 0.0, 4.0);
+            append_rigid_polygon(6, scene.state, scene.ref_mesh, {5.0, 0.0}, 0.5, density, thickness, {-3.0, 0.0}, 0.0, 4.0);
             break;
         }
         // Command line: ./build/simulation --example 4 --num_frames 300 --outdir frames_box --max_substep_iters 5000 --substeps 50 --tol_abs 1e-12
@@ -57,8 +57,7 @@ ExampleScene build_example(
                     const double x     = -3.6 + col * 0.8;           // evenly across [-3.6, 3.6]
                     const double y     = 6.0  + row * 1.0;           // stack upward from y=6
                     const double theta = (idx % 7) * (M_PI / 7.0);   // varied initial orientation
-                    append_rigid_polygon(sides, scene.state, scene.ref_mesh,
-                        {x, y}, 0.3, 1.0, 0.001, {0.0, 0.0}, theta, 0.0);
+                    append_rigid_polygon(sides, scene.state, scene.ref_mesh, {x, y}, 0.3, density, thickness, {0.0, 0.0}, theta, 0.0);
                 }
             }
             break;

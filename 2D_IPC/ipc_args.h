@@ -25,7 +25,7 @@ struct IPCArgs : ArgParser {
     double gy           = -9.81;
     double k_spring     = 1000.0;
     double kpin         = 5e6;
-    double k_sdf        = 500.0;
+    double k_sdf        = 1e6;
     double eps_sdf      = 0.002;
     double density = 900.0;
     double thickness = 0.001;
@@ -67,7 +67,7 @@ struct IPCArgs : ArgParser {
         add_double("gy",              gy,              -9.81,     "Gravity y-component (m/s^2)");
         add_double("k_spring",        k_spring,        1000.0,    "Spring stiffness");
         add_double("kpin",            kpin,            5e6,       "Pin stiffness");
-        add_double("k_sdf",           k_sdf,           500.0,     "SDF penalty stiffness");
+        add_double("k_sdf",           k_sdf,           1e6,       "SDF penalty stiffness");
         add_double("eps_sdf",         eps_sdf,         0.002,     "SDF active range; 0 gives a hard quadratic at the surface");
         add_double("density",         density,         900.0,     "Mass density (kg/m^3)");
         add_double("thickness",       thickness,       0.001,     "Chain cross-section thickness (m)");

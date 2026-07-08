@@ -23,7 +23,7 @@ struct SimParams2D {
     double k_spring = 1000.0;
     double kpin = 5e6;
     double k_barrier = 100.0;
-    double k_sdf = 500.0;
+    double k_sdf = 1e6;
     double eps_sdf = 0.002;
     std::vector<GroundSDF> sdf_grounds;
     std::vector<CircleSDF> sdf_circles;

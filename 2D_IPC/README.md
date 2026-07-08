@@ -220,17 +220,14 @@ defined in `ipc_args.h`.
 
 Reference commands:
 
-    ./build/simulation --example 1 --substeps 3 \
-        --step_policy ccd --initial_guess ccd \
-        --outdir frames_2d
+    ./build/simulation --example 1 --substeps 3 
 
-    ./build/simulation --example 2 --eps_sdf 0.001 --k_sdf 1e3 \
+    ./build/simulation --example 2 --eps_sdf 0.001 \
         --num_frames 500 --max_substep_iters 50000 \
         --tol_abs 1e-10 --substeps 10
 
     ./build/simulation --example 3 --num_frames 100 \
-        --outdir frames_hexagons_collide --k_sdf 1e10 \
-        --eps_sdf .001 --max_substep_iters 5000 \
+        --outdir frames_hexagons_collide --eps_sdf .001 --max_substep_iters 5000 \
         --substeps 25 --tol_abs 1e-12 --gy 0
 
     ./build/simulation --example 4 --num_frames 300 \
@@ -272,7 +269,7 @@ Important CLI options:
 | `num_frames` | default `120` |
 | `gx` / `gy` | gravity; defaults `0` and `-9.81` |
 | `k_spring` / `kpin` / `k_barrier` | defaults `1000`, `5e6`, and `100` |
-| `k_sdf` / `eps_sdf` | defaults `500` and `0.002`; SDF penalty parameters used by ground/circle SDFs, including Example 2's ground |
+| `k_sdf` / `eps_sdf` | defaults `1e6` and `0.002`|
 | `density` / `thickness` | defaults `900 kg/m^3` and `0.001 m` |
 | `d_hat` | default `0.005` |
 | `tol_abs` / `max_substep_iters` | defaults `1e-6` and `500` |
