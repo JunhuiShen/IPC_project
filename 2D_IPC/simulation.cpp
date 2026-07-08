@@ -100,6 +100,7 @@ int main(int argc, char** argv) {
     params.gravity = {args.gx, args.gy};
     params.d_hat = args.d_hat;
     params.tol_abs = args.tol_abs;
+    params.tol_rel = args.tol_rel;
     params.max_substep_iters = args.max_substep_iters;
     params.eta = args.eta;
     params.use_parallel = args.use_parallel;

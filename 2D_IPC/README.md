@@ -127,7 +127,8 @@ Per-frame statistics are printed to stdout:
     avg_solver_time = ... seconds/frame
 
 `final_residual` is the mass-normalized nodal residual used by the convergence
-check. Rigid-body scenes also report `final_rb_residual`, an unnormalized
+check. By default, each substep stops once the residual has dropped by 1000x
+from its initial value. Rigid-body scenes also report `final_rb_residual`, an unnormalized
 reduced residual formed from net COM force and scalar torque (`J^T g`) for
 rigid nodes; visualization-only static colliders are not part of either
 residual.
@@ -224,15 +225,15 @@ Reference commands:
 
     ./build/simulation --example 2 --eps_sdf 0.001 \
         --num_frames 500 --max_substep_iters 50000 \
-        --tol_abs 1e-10 --substeps 10
+        --substeps 10
 
     ./build/simulation --example 3 --num_frames 100 \
         --outdir frames_hexagons_collide --eps_sdf .001 --max_substep_iters 5000 \
-        --substeps 25 --tol_abs 1e-12 --gy 0
+        --substeps 25 --gy 0
 
     ./build/simulation --example 4 --num_frames 300 \
         --outdir frames_box --max_substep_iters 5000 \
-        --substeps 50 --tol_abs 1e-12
+        --substeps 50
 
 | Example | Description |
 |---|---|
@@ -265,21 +266,21 @@ Important CLI options:
 |---|---|
 | `example` | `1`, `2`, `3`, or `4`; default `1` |
 | `nodes` | nodes per chain; default `100` |
-| `dt` / `substeps` | frame timestep `1/30`; `3` substeps |
+| `dt` / `substeps` | frame timestep `1/30 s`; `3` substeps |
 | `num_frames` | default `120` |
-| `gx` / `gy` | gravity; defaults `0` and `-9.81` |
-| `k_spring` / `kpin` / `k_barrier` | defaults `1000`, `5e6`, and `100` |
-| `k_sdf` / `eps_sdf` | defaults `1e6` and `0.002`|
+| `gx` / `gy` | gravity in `m/s^2`; defaults `0` and `-9.81` |
+| `k_spring` / `kpin` / `k_barrier` | defaults `1000 N`, `5e6 N/m`, and `100 N/m` |
+| `k_sdf` / `eps_sdf` | defaults `1e6 N/m` and `0.002 m` |
 | `density` / `thickness` | defaults `900 kg/m^3` and `0.001 m` |
-| `d_hat` | default `0.005` |
-| `tol_abs` / `max_substep_iters` | defaults `1e-6` and `500` |
+| `d_hat` | default `0.005 m` |
+| `tol_rel` / `tol_abs` / `max_substep_iters` | defaults `1e-3`, `1e-6`, and `500`; `tol_rel` stops after a 1000x residual drop, while `tol_abs` also enables absolute stopping |
 | `fixed_iters` | run exactly `max_substep_iters` solver sweeps with no convergence check; default `false` |
-| `eta` | step safety factor; default `0.9`; use at most `0.5` with `trust_region` |
+| `eta` | dimensionless step safety factor; default `0.9`; use at most `0.5` with `trust_region` |
 | `step_policy` | `ccd` or `trust_region` |
 | `initial_guess` | `ccd`, `verlet`, or `trivial`; default `ccd` |
 | `use_parallel` | color-parallel updates; default `true` |
-| `node_box_min` / `node_box_max` | defaults `0.001` and `0.01` |
-| `theta_box_min` / `theta_box_max` | rigid-body angular trust-region half-widths; defaults `0.001` and `0.05` |
+| `node_box_min` / `node_box_max` | defaults `0.001 m` and `0.01 m` |
+| `theta_box_min` / `theta_box_max` | rigid-body angular trust-region half-widths; defaults `0.001 rad` and `0.05 rad` |
 | `node_box_update_count` | active-set rebuild interval; default `1` |
 | `format` / `outdir` | `geo` or `obj`; default directory `frames_2d` |
 | `write_substeps` | exports every substep; default `false` |

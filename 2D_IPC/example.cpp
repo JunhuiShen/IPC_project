@@ -27,13 +27,13 @@ ExampleScene build_example(
             scene.static_edges = {{0, 1}};
             break;
         }
-        // Command line: ./build/simulation --example 3 --num_frames 100 --outdir frames_hexagons_collide --eps_sdf .001 --max_substep_iters 5000 --substeps 25 --tol_abs 1e-12 --gy 0
+        // Command line: ./build/simulation --example 3 --num_frames 100 --outdir frames_hexagons_collide --eps_sdf .001 --max_substep_iters 5000 --substeps 25 --gy 0
         case ExampleType::Example3: {
             append_rigid_polygon(6, scene.state, scene.ref_mesh, {-5.0, 0.0}, 0.5, density, thickness, {3.0, 0.0}, 0.0, 4.0);
             append_rigid_polygon(6, scene.state, scene.ref_mesh, {5.0, 0.0}, 0.5, density, thickness, {-3.0, 0.0}, 0.0, 4.0);
             break;
         }
-        // Command line: ./build/simulation --example 4 --num_frames 300 --outdir frames_box --max_substep_iters 5000 --substeps 50 --tol_abs 1e-12
+        // Command line: ./build/simulation --example 4 --num_frames 300 --outdir frames_box --max_substep_iters 5000 --substeps 50
         case ExampleType::Example4: {
             // Open-top box: ground at y=0, left wall at x=-4, right wall at x=4
             scene.sdf_grounds.push_back({0.0});

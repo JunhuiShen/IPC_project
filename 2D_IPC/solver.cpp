@@ -6,6 +6,7 @@
 #include "physics.h"
 #include "rigid_body_ipc.h"
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <limits>
 
@@ -14,6 +15,17 @@ Eigen::Vector2d to_eigen(const Vec2& v) {
 }
 
 namespace {
+
+bool residual_converged(double residual, double initial_residual, const SimParams2D& params) {
+    double effective_tol = 0.0;
+    if (params.tol_abs > 0.0) {
+        effective_tol = std::max(effective_tol, params.tol_abs);
+    }
+    if (params.tol_rel > 0.0 && std::isfinite(initial_residual)) {
+        effective_tol = std::max(effective_tol, params.tol_rel * initial_residual);
+    }
+    return residual <= effective_tol;
+}
 
 double ccd_initial_guess_safe_step(const Vec& x, const Vec& v, const std::vector<NodeSegmentPair>& pairs,  double dt, double eta) {
     double omega = 1.0;
@@ -718,9 +730,10 @@ SolveResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const std:
     };
 
     double r = eval_residual();
+    const double initial_residual = r;
     if (residual_history) residual_history->push_back(r);
 
-    if (!params.fixed_iters && r < params.tol_abs) {
+    if (!params.fixed_iters && residual_converged(r, initial_residual, params)) {
         update_prev_disp();
         return {r, 0};
     }
@@ -745,7 +758,7 @@ SolveResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const std:
         r = eval_residual();
         if (residual_history) residual_history->push_back(r);
 
-        if (!params.fixed_iters && r < params.tol_abs) {
+        if (!params.fixed_iters && residual_converged(r, initial_residual, params)) {
             update_prev_disp();
             return {r, it};
         }
@@ -835,9 +848,10 @@ SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::ve
     };
 
     double r = eval_residual();
+    const double initial_residual = r;
     if (residual_history) residual_history->push_back(r);
 
-    if (!params.fixed_iters && r < params.tol_abs) {
+    if (!params.fixed_iters && residual_converged(r, initial_residual, params)) {
         update_prev_disp();
         return make_result(r, 0);
     }
@@ -881,7 +895,7 @@ SolveResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const std::ve
         r = eval_residual();
         if (residual_history) residual_history->push_back(r);
 
-        if (!params.fixed_iters && r < params.tol_abs) {
+        if (!params.fixed_iters && residual_converged(r, initial_residual, params)) {
             update_prev_disp();
             return make_result(r, it);
         }

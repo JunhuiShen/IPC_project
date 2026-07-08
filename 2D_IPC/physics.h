@@ -31,6 +31,7 @@ struct SimParams2D {
     Vec2   gravity{0.0, -9.81};
     double d_hat = 0.005;
     double tol_abs = 1e-6;
+    double tol_rel = 1e-3;
     int    max_substep_iters = 500;
     double eta = 0.9;
     bool   use_parallel = false;

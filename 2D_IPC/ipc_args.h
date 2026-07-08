@@ -32,7 +32,8 @@ struct IPCArgs : ArgParser {
 
     // --- IPC ---
     double d_hat            = 0.005;
-    double tol_abs          = 1e-10;
+    double tol_abs          = 1e-6;
+    double tol_rel          = 1e-3;
     int    max_substep_iters = 500;
     double eta              = 0.9;
     double k_barrier        = 100.0;
@@ -59,30 +60,31 @@ struct IPCArgs : ArgParser {
     std::string initial_guess_type  = "ccd";  // "ccd" | "trivial" | "verlet"
 
     IPCArgs() {
-        add_double("dt",              dt,              1.0/30.0,  "Timestep size (seconds)");
+        add_double("dt",              dt,              1.0/30.0,  "Timestep size (s)");
         add_int   ("substeps",        substeps,        3,         "Substeps per frame");
         add_int   ("num_frames",      num_frames,      120,       "Number of frames to simulate");
 
         add_double("gx",              gx,              0.0,       "Gravity x-component (m/s^2)");
         add_double("gy",              gy,              -9.81,     "Gravity y-component (m/s^2)");
-        add_double("k_spring",        k_spring,        1000.0,    "Spring stiffness");
-        add_double("kpin",            kpin,            5e6,       "Pin stiffness");
-        add_double("k_sdf",           k_sdf,           1e6,       "SDF penalty stiffness");
-        add_double("eps_sdf",         eps_sdf,         0.002,     "SDF active range; 0 gives a hard quadratic at the surface");
+        add_double("k_spring",        k_spring,        1000.0,    "Spring stiffness (N)");
+        add_double("kpin",            kpin,            5e6,       "Pin stiffness (N/m)");
+        add_double("k_sdf",           k_sdf,           1e6,       "SDF penalty stiffness (N/m)");
+        add_double("eps_sdf",         eps_sdf,         0.002,     "SDF active range (m); 0 gives a hard quadratic at the surface");
         add_double("density",         density,         900.0,     "Mass density (kg/m^3)");
         add_double("thickness",       thickness,       0.001,     "Chain cross-section thickness (m)");
 
-        add_double("d_hat",           d_hat,           0.005,     "IPC contact distance threshold");
-        add_double("tol_abs",         tol_abs,         1e-6,      "Absolute convergence tolerance");
+        add_double("d_hat",           d_hat,           0.005,     "IPC contact distance threshold (m)");
+        add_double("tol_abs",         tol_abs,         1e-6,      "Absolute convergence tolerance (residual units; 0 disables)");
+        add_double("tol_rel",         tol_rel,         1e-3,      "Relative tolerance (dimensionless): stop when residual drops below tol_rel * initial_residual (0 disables)");
         add_int   ("max_substep_iters", max_substep_iters, 500,   "Max Gauss-Seidel iterations per substep");
-        add_double("eta",             eta,             0.9,       "Step-size safety factor");
-        add_double("k_barrier",       k_barrier,       100.0,     "IPC barrier stiffness multiplier");
+        add_double("eta",             eta,             0.9,       "Step-size safety factor (dimensionless)");
+        add_double("k_barrier",       k_barrier,       100.0,     "IPC barrier stiffness multiplier (N/m)");
         add_bool  ("use_parallel",    use_parallel,    true,      "Use color-parallel Gauss-Seidel updates");
         add_bool  ("fixed_iters",     fixed_iters,     false,     "Run exactly max_substep_iters sweeps with no convergence check");
-        add_double("node_box_min",    node_box_min,    0.001,     "Lower bound on node box half-width");
-        add_double("node_box_max",    node_box_max,    0.01,      "Upper bound on node box half-width");
-        add_double("theta_box_min",   theta_box_min,   0.001,     "Lower bound on rigid-body theta trust-region half-width");
-        add_double("theta_box_max",   theta_box_max,   0.05,      "Upper bound on rigid-body theta trust-region half-width");
+        add_double("node_box_min",    node_box_min,    0.001,     "Lower bound on node box half-width (m)");
+        add_double("node_box_max",    node_box_max,    0.01,      "Upper bound on node box half-width (m)");
+        add_double("theta_box_min",   theta_box_min,   0.001,     "Lower bound on rigid-body theta trust-region half-width (rad)");
+        add_double("theta_box_max",   theta_box_max,   0.05,      "Upper bound on rigid-body theta trust-region half-width (rad)");
         add_int   ("node_box_update_count", node_box_update_count, 1, "Gauss-Seidel iterations between node-box/contact recoloring rebuilds");
 
         add_int   ("nodes",           number_of_nodes, 100,       "Nodes per chain");
@@ -134,6 +136,8 @@ struct IPCArgs : ArgParser {
         if (!(kpin >= 0.0)) throw std::invalid_argument("kpin must be nonnegative");
         if (!(k_sdf >= 0.0)) throw std::invalid_argument("k_sdf must be nonnegative");
         if (!(eps_sdf >= 0.0)) throw std::invalid_argument("eps_sdf must be nonnegative");
+        if (!(tol_abs >= 0.0)) throw std::invalid_argument("tol_abs must be nonnegative");
+        if (!(tol_rel >= 0.0)) throw std::invalid_argument("tol_rel must be nonnegative");
         if (!(thickness > 0.0)) throw std::invalid_argument("thickness must be positive");
         if (substeps <= 0) throw std::invalid_argument("substeps must be positive");
         if (max_substep_iters <= 0) throw std::invalid_argument("max_substep_iters must be positive");
