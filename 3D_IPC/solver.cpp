@@ -669,8 +669,7 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
     // Color from elastic adjacency only — barrier pairs are handled by reading
     // a frozen snapshot (xnew_copy) inside each color, so they don't need to
     // constrain the coloring.
-    const std::vector<std::vector<int>> color_groups = greedy_color_conflict_graph(
-        build_elastic_adj(ref_mesh, adj, nv));
+    const std::vector<std::vector<int>> color_groups = greedy_color_conflict_graph(build_elastic_adj(ref_mesh, adj, nv));
 
     if (params.write_substeps)
         write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, nullptr);

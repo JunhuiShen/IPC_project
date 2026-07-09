@@ -10,16 +10,6 @@ struct JacobiPrediction {
     AABB certified_region;
 };
 
-struct RedBoxes {
-    std::vector<AABB> tri;
-    std::vector<AABB> edge;
-};
-
-struct GreenBoxes {
-    std::vector<AABB> tri;
-    std::vector<AABB> edge;
-};
-
 // Hot-path Jacobi stage used by the basic parallel solver: compute only g/delta.
 void build_jacobi_prediction_deltas(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                     const SimParams& params, const std::vector<Vec3>& positions, const std::vector<Vec3>& xhat,
@@ -34,15 +24,6 @@ void build_blue_boxes(const std::vector<Vec3>& positions,
                       std::vector<JacobiPrediction>& jacobi_predictions,
                       std::vector<AABB>* blue_boxes_out = nullptr,
                       const std::vector<double>* per_vertex_radii = nullptr);
-
-// Build red triangle/edge boxes as unions of incident blue boxes.
-void build_red_boxes(const RefMesh& ref_mesh,
-                     const std::vector<std::array<int, 2>>& edges,
-                     const std::vector<AABB>& blue_boxes,
-                     RedBoxes& red_boxes);
-
-// Build green triangle/edge boxes by padding red boxes by d_hat.
-void build_green_boxes(const RedBoxes& red_boxes, double d_hat, GreenBoxes& green_boxes);
 
 // Persistent swept-region BVH; reused across build_conflict_graph calls to
 // refit in place of a full rebuild when the active set is stable.
@@ -93,10 +74,3 @@ double clip_step_to_certified_region(int vi, const std::vector<Vec3>& x, const V
 double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimParams& params,
                                     const std::vector<Vec3>& x, const Vec3& delta,
                                     const BroadPhase::Cache& bp_cache);
-
-// Register pairs using already-constructed green boxes.
-BroadPhase::Cache register_barrier_pairs_from_blue_and_green(
-    const RefMesh& ref_mesh,
-    const std::vector<std::array<int, 2>>& edges,
-    const std::vector<AABB>& blue_boxes,
-    const GreenBoxes& green_boxes);

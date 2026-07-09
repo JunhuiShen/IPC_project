@@ -129,11 +129,6 @@ public:
         return cache_.ss_pairs;
     }
 
-    // Run CCD over all cached NT and SS pairs given current positions x and
-    // proposed new positions x_new. Returns the minimum TOI in [0,1], or 1.0
-    // if no collision is detected.
-    double ccd_min_toi(const std::vector<Vec3>& x, const std::vector<Vec3>& x_new) const;
-
     // For each vertex vi in sequence, compute the safe step along
     // (x[vi] -> x_new_fn(vi)) using the linear one-node-moves CCD check.
     // All other vertices are treated as stationary at their already-committed
@@ -150,23 +145,6 @@ public:
     // Cache static mesh topology; reused by later build/initialize calls.
     void set_mesh_topology(const RefMesh& mesh, int nv);
     bool has_topology() const { return topology_valid_; }
-
-    // Broad-phase candidate pairs that involve vertex vi, grouped by
-    // vi's topological role. Used by both CCD and trust-region narrow
-    // phases as a per-vertex pair source.
-    //   nt_node_pairs : vi is the lone moving node vs an external triangle
-    //   nt_face_pairs : vi is a corner of a moving triangle vs an external node
-    //   ss_pairs      : vi is an endpoint of one edge vs a non-sharing edge
-    struct VertexPairs {
-        struct NTPair      { int node; int tri_v[3]; };
-        struct NTFacePair  { int node; int tri_v[3]; int vi_local; }; // vi_local in {0,1,2}
-        struct SSPair      { int v[4]; int vi_dof; };
-        std::vector<NTPair>     nt_node_pairs;
-        std::vector<NTFacePair> nt_face_pairs;
-        std::vector<SSPair>     ss_pairs;
-    };
-
-    VertexPairs query_pairs_for_vertex(const std::vector<Vec3>& x, int vi, const Vec3& dx, const RefMesh& mesh) const;
 
     static std::uint64_t nt_key(int node, int tri) {
         return (std::uint64_t(std::uint32_t(node)) << 32) |

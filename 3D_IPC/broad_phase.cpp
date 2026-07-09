@@ -529,6 +529,7 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
     if (c.node_to_tris.empty()) c.node_to_tris = topo_.node_to_tris;
     const int ne = static_cast<int>(c.edges.size());
 
+    // Blue boxes: one certified motion box per vertex.
     c.node_boxes = vertex_boxes;
 
     const Vec3 pad = d_hat * Vec3::Ones();
@@ -537,6 +538,7 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
         const int a  = tri_vertex(mesh, t, 0);
         const int b  = tri_vertex(mesh, t, 1);
         const int cc = tri_vertex(mesh, t, 2);
+        // Green triangle boxes: union of incident blue boxes, padded by d_hat.
         c.tri_boxes[t] = vertex_boxes[a];
         c.tri_boxes[t].expand(vertex_boxes[b]);
         c.tri_boxes[t].expand(vertex_boxes[cc]);
@@ -547,6 +549,7 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
     c.edge_boxes.resize(ne);
     std::vector<AABB> red_edge_boxes(ne);
     for (int e = 0; e < ne; ++e) {
+        // Red edge boxes are unpadded edge unions; edge_boxes stores the padded green boxes.
         red_edge_boxes[e] = vertex_boxes[c.edges[e][0]];
         red_edge_boxes[e].expand(vertex_boxes[c.edges[e][1]]);
         c.edge_boxes[e] = red_edge_boxes[e];
@@ -555,9 +558,10 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
     }
 
     c.tri_root  = build_bvh(c.tri_boxes,    c.tri_bvh_nodes,  c.tri_leaf_to_node);
-    c.edge_root = build_bvh(red_edge_boxes, c.edge_bvh_nodes, c.edge_leaf_to_node);  // BVH from red (uninflated) boxes
+    c.edge_root = build_bvh(red_edge_boxes, c.edge_bvh_nodes, c.edge_leaf_to_node);
     c.node_root = build_bvh(c.node_boxes,   c.node_bvh_nodes, c.node_leaf_to_node);
 
+    // NT candidates: blue node boxes queried against green triangle boxes.
     std::vector<std::vector<int>> node_hits(nv);
     #pragma omp parallel for schedule(dynamic, 32)
     for (int node = 0; node < nv; ++node) {
@@ -574,6 +578,7 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
         }
     }
 
+    // SS candidates: green edge boxes queried against red edge boxes.
     std::vector<std::vector<int>> edge_hits(ne);
     #pragma omp parallel for schedule(dynamic, 32)
     for (int e = 0; e < ne; ++e) {
@@ -665,32 +670,6 @@ void incremental_refresh_vertex(BroadPhase::Cache& c, int vi, const std::vector<
         c.edge_boxes[e] = AABB(red.min - pad, red.max + pad);
         refit_bvh_leaf(c.edge_bvh_nodes, c.edge_leaf_to_node, e, red);
     }
-}
-
-double BroadPhase::ccd_min_toi(const std::vector<Vec3>& x, const std::vector<Vec3>& x_new) const {
-    const int nv = static_cast<int>(x.size());
-    std::vector<Vec3> dx(nv);
-    for (int i = 0; i < nv; ++i) dx[i] = x_new[i] - x[i];
-
-    double toi_min = 1.0;
-
-    for (const auto& p : cache_.nt_pairs) {
-        toi_min = std::min(toi_min, node_triangle_general_ccd(
-            x[p.node],     dx[p.node],
-            x[p.tri_v[0]], dx[p.tri_v[0]],
-            x[p.tri_v[1]], dx[p.tri_v[1]],
-            x[p.tri_v[2]], dx[p.tri_v[2]]));
-    }
-
-    for (const auto& p : cache_.ss_pairs) {
-        toi_min = std::min(toi_min, segment_segment_general_ccd(
-            x[p.v[0]], dx[p.v[0]],
-            x[p.v[1]], dx[p.v[1]],
-            x[p.v[2]], dx[p.v[2]],
-            x[p.v[3]], dx[p.v[3]]));
-    }
-
-    return toi_min;
 }
 
 void BroadPhase::per_vertex_safe_step(
@@ -791,88 +770,4 @@ void BroadPhase::per_vertex_safe_step(
 void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt) {
     constexpr double epsilon_pad = 1.0e-10;  // fp tie-breaker, not a safety pad
     build(x, v, mesh, dt, /*node_pad=*/epsilon_pad, /*tri_pad=*/epsilon_pad, /*edge_pad=*/epsilon_pad);
-}
-
-BroadPhase::VertexPairs BroadPhase::query_pairs_for_vertex(
-        const std::vector<Vec3>& x, int vi, const Vec3& dx, const RefMesh& mesh) const {
-    constexpr double epsilon_pad = 1.0e-10;
-    VertexPairs result;
-
-    AABB vi_box;
-    vi_box.expand(x[vi]);
-    vi_box.expand(x[vi] + dx);
-    vi_box.min.array() -= epsilon_pad;
-    vi_box.max.array() += epsilon_pad;
-
-    // vi as lone-moving node vs external triangles.
-    if (cache_.tri_root >= 0) {
-        std::vector<int> hits;
-        query_bvh(cache_.tri_bvh_nodes, cache_.tri_root, vi_box, hits);
-        for (int t : hits) {
-            const int a = tri_vertex(mesh, t, 0);
-            const int b = tri_vertex(mesh, t, 1);
-            const int c = tri_vertex(mesh, t, 2);
-            if (vi == a || vi == b || vi == c) continue;
-            result.nt_node_pairs.push_back({vi, {a, b, c}});
-        }
-    }
-
-    // vi as a moving triangle corner vs external nodes.
-    if (cache_.node_root >= 0 && vi < static_cast<int>(cache_.node_to_tris.size())) {
-        for (int t : cache_.node_to_tris[vi]) {
-            const int a = tri_vertex(mesh, t, 0);
-            const int b = tri_vertex(mesh, t, 1);
-            const int c = tri_vertex(mesh, t, 2);
-
-            AABB tri_box;
-            tri_box.expand(x[a]);
-            tri_box.expand(x[b]);
-            tri_box.expand(x[c]);
-            if (a == vi) tri_box.expand(x[a] + dx);
-            if (b == vi) tri_box.expand(x[b] + dx);
-            if (c == vi) tri_box.expand(x[c] + dx);
-            tri_box.min.array() -= epsilon_pad;
-            tri_box.max.array() += epsilon_pad;
-
-            std::vector<int> hits;
-            query_bvh(cache_.node_bvh_nodes, cache_.node_root, tri_box, hits);
-            for (int X : hits) {
-                if (X == a || X == b || X == c) continue;
-                const int vi_local = (a == vi) ? 0 : ((b == vi) ? 1 : 2);
-                result.nt_face_pairs.push_back({X, {a, b, c}, vi_local});
-            }
-        }
-    }
-
-    // Segment-segment: edges incident to vi vs non-sharing edges.
-    if (cache_.edge_root >= 0 && vi < static_cast<int>(cache_.node_to_edges.size())) {
-        for (int ei : cache_.node_to_edges[vi]) {
-            const int ea = cache_.edges[ei][0];
-            const int eb = cache_.edges[ei][1];
-
-            AABB edge_box;
-            edge_box.expand(x[ea]);
-            edge_box.expand(x[eb]);
-            if (ea == vi) edge_box.expand(x[ea] + dx);
-            if (eb == vi) edge_box.expand(x[eb] + dx);
-            edge_box.min.array() -= epsilon_pad;
-            edge_box.max.array() += epsilon_pad;
-
-            std::vector<int> hits;
-            query_bvh(cache_.edge_bvh_nodes, cache_.edge_root, edge_box, hits);
-            for (int ej : hits) {
-                if (ej == ei) continue;
-                const int oa = cache_.edges[ej][0];
-                const int ob = cache_.edges[ej][1];
-                if (ea == oa || ea == ob || eb == oa || eb == ob) continue;
-                // Dedup when both edges are incident to vi: emit only once (ei < ej).
-                if ((oa == vi || ob == vi) && ei > ej) continue;
-
-                int vi_dof = (vi == ea) ? 0 : 1;
-                result.ss_pairs.push_back({{ea, eb, oa, ob}, vi_dof});
-            }
-        }
-    }
-
-    return result;
 }

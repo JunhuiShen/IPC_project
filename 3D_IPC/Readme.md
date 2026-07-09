@@ -113,7 +113,7 @@ Reference command for example 1 (square cloth twisted in place, 240 frames at
     ./build/3D_sim --example 1 --num_frames 240 \
       --E 115000 --nu 0.25 --kB 0.009 --kpin 1e8 --twist_rate 0.5 \
       --d_hat 0.005 --k_barrier 100 \
-      --fixed_iters --max_substep_iters 10 --substeps 5
+      --fixed_iters --max_substep_iters 10 --substeps 5 --node_box_update_count 10
 
 Reference command for example 2 (2.0 turns per cylinder, twist + untwist, 900
 frames):
@@ -122,7 +122,7 @@ frames):
         --E 115000 --nu 0.25 --kB 0.009 --kpin 5e6 \
         --d_hat 0.005 --k_barrier 100 \
         --tcyl_max_turn 2.0 \
-        --fixed_iters --max_substep_iters 10
+        --fixed_iters --max_substep_iters 10 --node_box_update_count 10
 
 Reference command for example 3 (4.0 turns at 0.30 turns/s, twist + untwist, 850 frames):
 
@@ -130,7 +130,7 @@ Reference command for example 3 (4.0 turns at 0.30 turns/s, twist + untwist, 850
         --E 115000 --nu 0.25 --kB 0.009 --kpin 1e8 \
         --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 \
         --tu_max_turn 4.0 --tu_twist_rate 0.30 \
-        --fixed_iters --max_substep_iters 10 --substeps 5
+        --fixed_iters --max_substep_iters 10 --substeps 5 --node_box_update_count 10
 
 Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
 (`frame_0000.geo`, `frame_0001.geo`, ...). `--format obj` writes `.obj`;
@@ -156,7 +156,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `fixed_iters`, `use_parallel`, `use_gpu`, `write_substeps` |
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (new per-iter rebuild solver), `ogc_box_pad` (BVH padding for the per-iter rebuild; floored to `d_hat`) |
-| Node-box sizing | `node_box_min`, `node_box_max` (clamp range for `R_vi = clamp(prev_disp * 1.2, min, max)`) |
+| Node-box sizing | `node_box_min`, `node_box_max` (basic solver clamp range for `R_vi = clamp(max(prev_disp, \|v_i\| dt) * 1.2, min, max)`), `node_box_update_count` (GS iterations between broad-phase/contact-color rebuilds) |
 | Scene | `example` (`1`..`4`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame`, `datadir` |
 
