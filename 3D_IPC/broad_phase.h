@@ -169,19 +169,9 @@ public:
     // Used by global_gauss_seidel_solver_ogc for partial leaf refit; other callers should use cache().
     Cache& mutable_cache() { return cache_; }
 
-    // Clamps p to lie inside the node box for vertex i.
-    Vec3 clamp_to_node_box(int i, const Vec3& p) const {
-        const AABB& box = cache_.node_boxes[i];
-        return p.cwiseMax(box.min).cwiseMin(box.max);
-    }
-
-    // Increments on every initialize() call — a cache-invalidation key.
-    std::uint64_t version() const { return version_; }
-
 private:
     Cache cache_;
     bool topology_valid_ = false;
-    std::uint64_t version_ = 0;
 
     // Static mesh connectivity, reused across every build for the same mesh.
     struct Topology {

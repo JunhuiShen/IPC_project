@@ -107,7 +107,6 @@ struct SimParams {
         if (cached_dt2_ < 0.0) { double d = dt(); cached_dt2_ = d * d; }
         return cached_dt2_;
     }
-    void invalidate_dt_cache() const { cached_dt_ = -1.0; cached_dt2_ = -1.0; }
 
 private:
     mutable double cached_dt_;

@@ -523,7 +523,6 @@ void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, c
 
 void BroadPhase::initialize(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double dhat) {
     build(x, v, mesh, dt, /*node_pad=*/dhat, /*tri_pad=*/0.0, /*edge_pad=*/dhat * 0.5);
-    ++version_;
 }
 
 void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat) {
@@ -606,7 +605,6 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
     }
 
     cache_ = std::move(c);
-    ++version_;
 }
 
 void BroadPhase::refresh_pairs(const RefMesh& mesh) {

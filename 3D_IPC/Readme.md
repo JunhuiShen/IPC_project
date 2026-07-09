@@ -2,7 +2,7 @@
 
 A 3D simulator for deformable triangle meshes (cloth / thin shells) built around
 **Incremental Potential Contact (IPC)**. Each time step optimizes an incremental
-potential with a **nonlinear Gauss-Seidel solver** (serial or parallel), using
+potential with a **parallel-by-color nonlinear Gauss-Seidel solver**, using
 continuous collision detection to keep every intermediate state intersection-free.
 
 ## What the simulator does
@@ -27,11 +27,12 @@ CLI flag:
 - **`global_gauss_seidel_solver_basic`** (default) -- builds the broad phase
   once per substep and sweeps every vertex with a local 3x3 Newton step.
   Each step is clamped by either CCD (`--use_ccd`) or an OGC narrow phase
-  (`--use_ogc`). Supports parallel-by-color via `--use_parallel`.
-  Requires `--fixed_iters`.
-- **`global_gauss_seidel_solver_ogc`** (`--use_ogc_solver`) -- serial-only
-  sibling that rebuilds the broad phase per outer iteration and partial-refits
-  the BVH after each per-vertex commit. Padding controlled by `--ogc_box_pad`.
+  (`--use_ogc`). It uses conflict-graph coloring for parallel-by-color
+  commits when `--use_parallel` is enabled. Requires `--fixed_iters`.
+- **`global_gauss_seidel_solver_ogc`** (`--use_ogc_solver`) -- alternative
+  OGC solver that rebuilds the broad phase per outer iteration and
+  partial-refits the BVH after each per-vertex commit. Padding controlled by
+  `--ogc_box_pad`.
   Requires `--fixed_iters`.
 
 Our OGC narrow phase and solver implement the algorithm from Chen et al.
@@ -106,7 +107,7 @@ Reference command for example 1 (square cloth twisted in place, 240 frames at
 0.5 turns/s):
 
     ./build/3D_sim --example 1 --num_frames 240 \
-      --E 115000 --nu 0.25 --kB 0.009 --kpin 1e8 --twist_rate 0.5 \
+      --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
       --d_hat 0.005 --k_barrier 100 \
       --fixed_iters --max_substep_iters 10 --substeps 5 --node_box_update_count 10
 
@@ -236,27 +237,29 @@ reader can jump to the layer they care about.
   `SmallRoots` buffer to avoid heap traffic.
 - `broad_phase.h` / `broad_phase.cpp` -- swept-AABB broad phase backed by a
   per-tree BVH. Caches mesh topology via `set_mesh_topology`; builds candidate
-  node-triangle and edge-edge pairs from per-vertex AABBs; exposes per-vertex
-  pair queries used by one-node linear CCD and the OGC narrow phase. SS pairs
-  use the asymmetric red/green convention. Adds `parent` pointers and per-tree
-  `leaf_to_node` maps so `refit_bvh_leaf` and `incremental_refresh_vertex` can
-  do `O(log N)` partial refits, used by `global_gauss_seidel_solver_ogc`.
+  node-triangle and edge-edge pairs from per-vertex AABBs; stores per-vertex
+  incident pair lists used by one-node linear CCD and the OGC narrow phase.
+  Adds `parent` pointers and per-tree `leaf_to_node` maps so
+  `refit_bvh_leaf` and `incremental_refresh_vertex` can do `O(log N)` partial
+  refits, used by `global_gauss_seidel_solver_ogc`.
 - `ogc_trust_region.h` / `ogc_trust_region.cpp` -- OGC narrow-phase helpers
   (per-pair scaling and the per-vertex `compute_trust_region_bound_for_vertex`).
   See Acknowledgments.
 
 ### Solver
 
-- `solver.h` / `solver.cpp` -- two CPU solvers selected by CLI flag (both
-  require `--fixed_iters` and exit with an error otherwise):
-  - `global_gauss_seidel_solver_basic` (default): substep-frozen broad phase,
-    Gauss-Seidel sweeps via `BroadPhase::per_vertex_safe_step`, step-clamped
-    by linear/TICCD CCD or the OGC narrow phase (`--use_ogc`). With
-    `--use_parallel`, the conflict-graph coloring built in `parallel_helper`
-    drives parallel-by-color commits.
+- `solver.h` / `solver.cpp` -- solver implementations selected by CLI flag
+  (both require `--fixed_iters` and exit with an error otherwise):
+  - `global_gauss_seidel_solver_basic` (default): broad-phase/contact-color
+    data is rebuilt every `node_box_update_count` GS iterations and reused
+    between rebuilds. Gauss-Seidel sweeps run via
+    `BroadPhase::per_vertex_safe_step`, step-clamped by linear/TICCD CCD or
+    the OGC narrow phase (`--use_ogc`). With `--use_parallel`, the
+    conflict-graph coloring built in `parallel_helper` drives parallel-by-color
+    commits.
   - `global_gauss_seidel_solver_ogc` (`--use_ogc_solver`): per-iteration broad-
-    phase rebuild with `--ogc_box_pad`-padded node boxes, serial sweep with
-    OGC clip unconditionally on, partial BVH refit per move via
+    phase rebuild with `--ogc_box_pad`-padded node boxes, OGC clip
+    unconditionally on, partial BVH refit per move via
     `incremental_refresh_vertex`.
 
   Both share the per-vertex Newton solve (`gs_vertex_delta`) and node-box clip
@@ -284,11 +287,11 @@ Every layer of the pipeline has a GoogleTest binary. To build and run them all:
 | Test binary | Cases | What it covers |
 |-------------|-------|----------------|
 | `ccd_test` | 17 | Linear CCD single-moving-DOF cases plus TICCD-backed general NT/SS wrapper smoke tests |
-| `broad_phase_test` | 30 | AABB, BVH, pair generation, CCD candidates, conservativeness, per-vertex pair query vs brute-force, asymmetric red/green SS convention, `incremental_refresh_vertex` partial refit |
+| `broad_phase_test` | 26 | AABB, BVH, pair generation, CCD candidates, conservativeness, uniqueness, and `incremental_refresh_vertex` partial refit |
 | `ipc_math_test` | 27 | `matrix3d_inverse`, `segment_closest_point`, `filter_root`, `SmallRoots`, barycentric coords, serialize round-trip, topology caching |
 | `sdf_penalty_energy_test` | 15 | Plane / cylinder SDF energy + gradient + Hessian FD convergence, hard-quadratic limit, soft-barrier rest at `phi=eps` |
 | `bending_energy_test` | 20 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
-| `parallel_helper_test` | 3 | Coloring and CPU safe-step behavior |
+| `parallel_helper_test` | 3 | Coloring and safe-step behavior |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
 | `make_shape_test` | 15 | Adjacency maps, greedy coloring |
 | `barrier_energy_test` | 14 | Scalar barrier, NT/SS gradient/Hessian FD convergence, activation boundary, near-parallel stress |

@@ -7,7 +7,7 @@
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int num_vertices);
 
 // Contact edges of the conflict graph from broad-phase NT/SS pair lists.
-// Stable between broad-phase initialize() calls (key on BroadPhase::version()).
+// Stable between broad-phase initialize() calls.
 struct ContactAdjacencyScratch {
     std::vector<std::vector<std::vector<int>>> local_nbr;
     int threads = 0;

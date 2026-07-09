@@ -9,6 +9,14 @@ Mat33 matrix3d_inverse(const Mat33& H) {
                  - H(0,1)*(H(1,0)*H(2,2) - H(1,2)*H(2,0))
                  + H(0,2)*(H(1,0)*H(2,1) - H(1,1)*H(2,0));
 
+    const double scale = H.cwiseAbs().maxCoeff();
+    const double det_scale = scale * scale * scale;
+    const double det_tol = 64.0 * std::numeric_limits<double>::epsilon() * det_scale;
+    if (!H.allFinite()) return Mat33::Zero();
+    if (!std::isfinite(det) || std::abs(det) <= det_tol) {
+        return H.completeOrthogonalDecomposition().pseudoInverse();
+    }
+
     double inv_det = 1.0 / det;
     Mat33 inv;
 

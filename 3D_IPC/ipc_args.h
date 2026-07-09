@@ -28,7 +28,7 @@ struct IPCArgs3D : ArgParser {
     // --- solver ---
     int    max_substep_iters = 500;  // per-substep cap; per-frame total = max_substep_iters * substeps
     double tol_abs       = 1e-6;  // residual norm tolerance
-    double tol_rel       = 1e-1;  // relative tolerance: stop when residual < tol_rel * initial
+    double tol_rel       = 1e-3;  // relative tolerance: stop when residual < tol_rel * initial
     double d_hat         = 0.01;  // barrier activation distance; 0 disables contact
     double k_sdf         = 1e5;   // SDF penalty stiffness; 0 disables the SDF term
     double eps_sdf       = 0.002; // SDF soft-barrier range (m); cloth rest at phi=eps_sdf. 0 = hard quadratic at the surface.
@@ -119,7 +119,7 @@ struct IPCArgs3D : ArgParser {
 
         add_int   ("max_substep_iters", max_substep_iters, 500, "Max Gauss-Seidel iterations per substep (per-frame total = max_substep_iters * substeps)");
         add_double("tol_abs",     tol_abs,     1e-6,       "Absolute convergence tolerance (residual force)");
-        add_double("tol_rel",     tol_rel,     1e-1,       "Relative tolerance: stop when residual < tol_rel * initial_residual (0 disables)");
+        add_double("tol_rel",     tol_rel,     1e-3,       "Relative tolerance: stop when residual < tol_rel * initial_residual (0 disables)");
         add_double("d_hat",       d_hat,       0.01,       "Barrier activation distance (0 = off)");
         add_double("k_sdf",       k_sdf,       1e5,        "SDF penalty stiffness (0 = off)");
         add_double("eps_sdf",     eps_sdf,     0.002,      "SDF soft-barrier range (m). Cloth's force-free rest is at phi=eps_sdf. 0 = hard quadratic at the surface.");

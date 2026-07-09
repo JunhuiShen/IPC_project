@@ -28,6 +28,20 @@ TEST(Matrix3dInverse, KnownInverse) {
     EXPECT_NEAR((prod - Mat33::Identity()).lpNorm<Eigen::Infinity>(), 0.0, 1e-12);
 }
 
+TEST(Matrix3dInverse, SingularMatrixReturnsFinitePseudoInverse) {
+    Mat33 A = Mat33::Zero();
+    A(0, 0) = 2.0;
+    A(1, 1) = 3.0;
+
+    Mat33 inv = matrix3d_inverse(A);
+
+    EXPECT_TRUE(inv.allFinite());
+    EXPECT_NEAR(inv(0, 0), 0.5, 1e-14);
+    EXPECT_NEAR(inv(1, 1), 1.0 / 3.0, 1e-14);
+    EXPECT_NEAR(inv(2, 2), 0.0, 1e-14);
+    EXPECT_NEAR((A * inv * A - A).lpNorm<Eigen::Infinity>(), 0.0, 1e-12);
+}
+
 // ====================================================================
 //  clamp_scalar
 // ====================================================================
