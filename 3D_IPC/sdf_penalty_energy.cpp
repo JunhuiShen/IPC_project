@@ -65,20 +65,54 @@ SDFEvaluation evaluate_sdf(const SphereSDF& s, const Vec3& x){
 
 
 double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double eps){
-    if (sdf.phi >= eps) return 0.0;
+    if (eps <= 0.0) {
+        if (sdf.phi >= 0.0) return 0.0;
+        return 0.5 * k * sdf.phi * sdf.phi;
+    }
+
+    const double H = sdf_heaviside(sdf.phi, eps);
+    if (H <= 0.0) return 0.0;
+
     const double d = eps - sdf.phi;
-    return 0.5 * k * d * d;
+    return 0.5 * k * H * d * d;
 }
 
 Vec3 sdf_penalty_gradient(const SDFEvaluation& sdf, double k, double eps){
-    if (sdf.phi >= eps) return Vec3::Zero();
-    return -k * (eps - sdf.phi) * sdf.grad_phi;
+    if (eps <= 0.0) {
+        if (sdf.phi >= 0.0) return Vec3::Zero();
+        return k * sdf.phi * sdf.grad_phi;
+    }
+
+    const double H = sdf_heaviside(sdf.phi, eps);
+    if (H <= 0.0) return Vec3::Zero();
+
+    const double Hp = sdf_heaviside_gradient(sdf.phi, eps);
+    const double d = eps - sdf.phi;
+    const double dE_dphi = 0.5 * k * (Hp * d * d - 2.0 * H * d);
+    return dE_dphi * sdf.grad_phi;
 }
 
 Mat33 sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double eps, bool include_curvature){
-    if (sdf.phi >= eps) return Mat33::Zero();
-    Mat33 Hess = k * (sdf.grad_phi * sdf.grad_phi.transpose());
-    if (include_curvature)
-        Hess -= k * (eps - sdf.phi) * sdf.hess_phi;
+    double dE_dphi = 0.0;
+    double d2E_dphi2 = 0.0;
+
+    if (eps <= 0.0) {
+        if (sdf.phi >= 0.0) return Mat33::Zero();
+        dE_dphi = k * sdf.phi;
+        d2E_dphi2 = k;
+    } else {
+        const double H = sdf_heaviside(sdf.phi, eps);
+        if (H <= 0.0) return Mat33::Zero();
+
+        const double Hp = sdf_heaviside_gradient(sdf.phi, eps);
+        const double d = eps - sdf.phi;
+        dE_dphi = 0.5 * k * (Hp * d * d - 2.0 * H * d);
+        d2E_dphi2 = 0.5 * k * (-4.0 * Hp * d + 2.0 * H);
+    }
+
+    Mat33 Hess = d2E_dphi2 * (sdf.grad_phi * sdf.grad_phi.transpose());
+    if (include_curvature) {
+        Hess += dE_dphi * sdf.hess_phi;
+    }
     return Hess;
 }

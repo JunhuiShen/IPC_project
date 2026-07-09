@@ -203,10 +203,8 @@ reader can jump to the layer they care about.
   `b(delta; d_hat)` and its derivatives, plus per-pair energy, gradient, and
   Hessian for node-triangle and segment-segment primitives.
 - `sdf_penalty_energy.h` / `sdf_penalty_energy.cpp` -- analytic SDF primitives
-  (plane, cylinder, sphere) and a soft one-sided quadratic penalty with derivatives:
-  `0.5·k·(eps - phi)^2` for `phi < eps`, with `eps = 0` recovering a hard
-  quadratic at the surface. Used for static or driven colliders outside the
-  IPC barrier pipeline.
+  (plane, cylinder, sphere) and a smoothed one-sided SDF penalty with derivatives. 
+  Used for static or driven colliders outside the IPC barrier pipeline.
 
 ### Geometric primitives
 

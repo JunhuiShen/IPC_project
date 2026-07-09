@@ -122,7 +122,7 @@ struct IPCArgs3D : ArgParser {
         add_double("tol_abs",     tol_abs,     1e-6,       "Absolute convergence tolerance (residual force)");
         add_double("tol_rel",     tol_rel,     1e-1,       "Relative tolerance: stop when residual < tol_rel * initial_residual (0 disables)");
         add_double("d_hat",       d_hat,       0.01,       "Barrier activation distance (0 = off)");
-        add_double("k_sdf",       k_sdf,       1e5,        "SDF penalty stiffness (0 = off). Penalty 0.5·k·(eps_sdf-phi)^2 for phi<eps_sdf; transient penetration depth ~ v·sqrt(m/k).");
+        add_double("k_sdf",       k_sdf,       1e5,        "SDF penalty stiffness (0 = off)");
         add_double("eps_sdf",     eps_sdf,     0.002,      "SDF soft-barrier range (m). Cloth's force-free rest is at phi=eps_sdf. 0 = hard quadratic at the surface.");
         add_bool  ("use_parallel",   use_parallel,   true,  "Use parallel Gauss-Seidel (requires coloring)");
         add_bool  ("write_substeps", write_substeps, false, "Write an output file after every substep (useful for visual debugging)");

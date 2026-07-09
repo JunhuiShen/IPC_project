@@ -250,7 +250,7 @@ TEST(PlaneSDF, EnergyPenetrationDepth){
     EXPECT_NEAR(sdf_penalty_energy(evaluate_sdf(p, x), k, eps), 0.5 * k * 0.01, kTol);
 }
 
-//  Soft-barrier semantics: with eps>0, E = 0.5*k*(eps - phi)^2 for phi<eps.
+//  Soft-barrier semantics: with eps>0, E = 0.5*k*H(phi)*(eps - phi)^2.
 //  Cloth's force-free rest is at phi = eps; surface contact (phi=0) costs
 //  0.5*k*eps^2 of energy and gets pushed outward.
 TEST(PlaneSDF, SoftBarrierWithEps){
@@ -276,6 +276,13 @@ TEST(PlaneSDF, SoftBarrierWithEps){
         const SDFEvaluation sdf = evaluate_sdf(p, Vec3(0.0, 0.0, 0.0));
         EXPECT_NEAR(sdf_penalty_energy(sdf, k, eps), 0.5 * k * eps * eps, kTol);
         EXPECT_TRUE(sdf_penalty_gradient(sdf, k, eps).isApprox(-k * eps * n, kTol));
+    }
+    //  In the transition band (phi = 0.04): H = 0.6, d = 0.06.
+    {
+        const SDFEvaluation sdf = evaluate_sdf(p, Vec3(0.0, 0.04, 0.0));
+        EXPECT_NEAR(sdf_penalty_energy(sdf, k, eps), 0.5 * k * 0.6 * 0.06 * 0.06, kTol);
+        EXPECT_TRUE(sdf_penalty_gradient(sdf, k, eps).isApprox(-5.4 * n, kTol));
+        EXPECT_TRUE(sdf_penalty_hessian(sdf, k, eps).isApprox(180.0 * (n * n.transpose()), kTol));
     }
     //  Inside (phi = -0.2): E = 0.5*k*(eps+0.2)^2 = 0.5*k*0.09.
     {
