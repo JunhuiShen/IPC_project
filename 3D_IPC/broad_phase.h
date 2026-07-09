@@ -106,6 +106,11 @@ public:
         };
         std::vector<std::vector<VertexPairEntry>> vertex_nt;
         std::vector<std::vector<VertexPairEntry>> vertex_ss;
+
+        // Scratch buffers reused across broad-phase rebuilds.
+        std::vector<std::vector<int>> node_hits;
+        std::vector<std::vector<int>> edge_hits;
+        std::vector<AABB> red_edge_boxes;
     };
 
     void initialize(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double dhat);

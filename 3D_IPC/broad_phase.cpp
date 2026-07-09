@@ -431,6 +431,15 @@ namespace {
         return c;
     }
 
+    static std::vector<std::vector<int>>& prepare_hit_rows(std::vector<std::vector<int>>& rows, int n) {
+        if (static_cast<int>(rows.size()) == n) {
+            for (auto& row : rows) row.clear();
+        } else {
+            rows.assign(n, {});
+        }
+        return rows;
+    }
+
 }
 
 // Broad phase
@@ -477,7 +486,7 @@ void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, c
     c.node_root = build_bvh(c.node_boxes, c.node_bvh_nodes);
 
     // Parallel BVH queries, serial pair-insert (add_*_pair mutates shared state).
-    std::vector<std::vector<int>> node_hits(nv);
+    std::vector<std::vector<int>>& node_hits = prepare_hit_rows(c.node_hits, nv);
     #pragma omp parallel for schedule(dynamic, 32)
     for (int node = 0; node < nv; ++node) {
         if (c.tri_root < 0) continue;
@@ -493,7 +502,7 @@ void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, c
         }
     }
 
-    std::vector<std::vector<int>> edge_hits(ne);
+    std::vector<std::vector<int>>& edge_hits = prepare_hit_rows(c.edge_hits, ne);
     #pragma omp parallel for schedule(dynamic, 32)
     for (int e = 0; e < ne; ++e) {
         if (c.edge_root < 0) continue;
@@ -547,7 +556,8 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
     }
 
     c.edge_boxes.resize(ne);
-    std::vector<AABB> red_edge_boxes(ne);
+    std::vector<AABB>& red_edge_boxes = c.red_edge_boxes;
+    red_edge_boxes.resize(ne);
     for (int e = 0; e < ne; ++e) {
         // Red edge boxes are unpadded edge unions; edge_boxes stores the padded green boxes.
         red_edge_boxes[e] = vertex_boxes[c.edges[e][0]];
@@ -562,7 +572,7 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
     c.node_root = build_bvh(c.node_boxes,   c.node_bvh_nodes, c.node_leaf_to_node);
 
     // NT candidates: blue node boxes queried against green triangle boxes.
-    std::vector<std::vector<int>> node_hits(nv);
+    std::vector<std::vector<int>>& node_hits = prepare_hit_rows(c.node_hits, nv);
     #pragma omp parallel for schedule(dynamic, 32)
     for (int node = 0; node < nv; ++node) {
         if (c.tri_root < 0) continue;
@@ -579,7 +589,7 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
     }
 
     // SS candidates: green edge boxes queried against red edge boxes.
-    std::vector<std::vector<int>> edge_hits(ne);
+    std::vector<std::vector<int>>& edge_hits = prepare_hit_rows(c.edge_hits, ne);
     #pragma omp parallel for schedule(dynamic, 32)
     for (int e = 0; e < ne; ++e) {
         if (c.edge_root < 0) continue;
@@ -614,7 +624,7 @@ void BroadPhase::refresh_pairs(const RefMesh& mesh) {
     c.ss_pair_index.clear();
     for (auto& v : c.vertex_ss) v.clear();
 
-    std::vector<std::vector<int>> node_hits(nv);
+    std::vector<std::vector<int>>& node_hits = prepare_hit_rows(c.node_hits, nv);
     #pragma omp parallel for schedule(dynamic, 32)
     for (int node = 0; node < nv; ++node) {
         if (c.tri_root < 0) continue;
@@ -630,7 +640,7 @@ void BroadPhase::refresh_pairs(const RefMesh& mesh) {
         }
     }
 
-    std::vector<std::vector<int>> edge_hits(ne);
+    std::vector<std::vector<int>>& edge_hits = prepare_hit_rows(c.edge_hits, ne);
     #pragma omp parallel for schedule(dynamic, 32)
     for (int e = 0; e < ne; ++e) {
         if (c.edge_root < 0) continue;

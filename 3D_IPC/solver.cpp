@@ -575,8 +575,10 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     // Elastic adjacency depends only on mesh topology, so reuse it across GS calls.
     static ElasticAdjacencyCache elastic_adj_cache;
     const std::vector<std::vector<int>>& ea = elastic_adj_cache.get(ref_mesh, adj, nv);
-    std::vector<std::vector<int>> bca;
-    std::vector<std::vector<int>> color_groups;
+    static ContactAdjacencyScratch contact_adj_scratch;
+    static std::vector<std::vector<int>> bca;
+    static std::vector<std::vector<int>> combined_adj;
+    static std::vector<std::vector<int>> color_groups;
 
     SolverResult result;
     const std::vector<Vec3> xnew_substep_start = xnew;
@@ -593,9 +595,10 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
             }
             //rebuild bvh and pairs
             broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
-            bca=build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()));
+            build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()), bca, &contact_adj_scratch);
             //color
-            color_groups=greedy_color_conflict_graph(union_adjacency(ea,bca));
+            union_adjacency(ea, bca, combined_adj);
+            greedy_color_conflict_graph(combined_adj, color_groups);
         }
 
         std::atomic<int> clip_count{0};
@@ -669,7 +672,9 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
     // Color from elastic adjacency only — barrier pairs are handled by reading
     // a frozen snapshot (xnew_copy) inside each color, so they don't need to
     // constrain the coloring.
-    const std::vector<std::vector<int>> color_groups = greedy_color_conflict_graph(build_elastic_adj(ref_mesh, adj, nv));
+    const std::vector<std::vector<int>> elastic_adj = build_elastic_adj(ref_mesh, adj, nv);
+    std::vector<std::vector<int>> color_groups;
+    greedy_color_conflict_graph(elastic_adj, color_groups);
 
     if (params.write_substeps)
         write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, nullptr);

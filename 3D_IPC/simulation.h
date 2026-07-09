@@ -3,7 +3,6 @@
 #include "solver.h"
 #include "broad_phase.h"
 #include "make_shape.h"
-#include "GPU_Sim/gpu_solver_bridge.h"
 #include <functional>
 #include <string>
 #include <vector>
@@ -50,9 +49,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
             xnew = state.deformed_positions;
 
         SolverResult sub_result;
-        if (params.use_gpu)
-            sub_result = gpu_gauss_seidel_solver(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, state.velocities);
-        else if (params.use_ogc_solver)
+        if (params.use_ogc_solver)
             sub_result = global_gauss_seidel_solver_ogc(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir);
         else
             sub_result = global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, params.verbose);

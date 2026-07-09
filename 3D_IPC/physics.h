@@ -50,10 +50,6 @@ struct SimParams {
     bool   fixed_iters;          // if true, run exactly max_global_iters sweeps with no tolerance / convergence check
     bool   verbose;              // if true, print residual after each GS iteration (only when fixed_iters is false)
 
-    // Route the per-substep Gauss-Seidel sweep through the GPU implementation
-    // (gpu_gauss_seidel_solver). On machines without CUDA the CPU stub is
-    // used automatically. When set, use_parallel is ignored.
-    bool   use_gpu;
     double node_box_max;       // upper bound on node box half-extent used by the basic solver
     double node_box_min;       // lower bound on node box half-extent (floor when prev disp is near zero)
     int    node_box_update_count;
@@ -92,7 +88,6 @@ struct SimParams {
         p.ogc_box_pad               = 0.0;
         p.fixed_iters               = false;
         p.verbose                   = false;
-        p.use_gpu                   = false;
         p.node_box_max              = 0.0;
         p.node_box_min              = 0.0;
         p.node_box_update_count     = 250;

@@ -21,7 +21,7 @@ Per time step, the optimizer minimizes an incremental potential made of:
   is at `phi = eps_sdf`; set 0 for a hard quadratic at the surface).
 - **Pin springs** -- soft positional constraints for fixed vertices.
 
-The nonlinear solve is driven by one of three Gauss-Seidel solvers, selected by
+The nonlinear solve is driven by one of two Gauss-Seidel solvers, selected by
 CLI flag:
 
 - **`global_gauss_seidel_solver_basic`** (default) -- builds the broad phase
@@ -33,10 +33,6 @@ CLI flag:
   sibling that rebuilds the broad phase per outer iteration and partial-refits
   the BVH after each per-vertex commit. Padding controlled by `--ogc_box_pad`.
   Requires `--fixed_iters`.
-- **`gpu_gauss_seidel_solver`** (`--use_gpu`) -- Jacobi-prediction algorithm
-  with conflict-graph coloring; backed by CUDA kernels on a real GPU build,
-  OpenMP on the CPU stub build (default). Supports both fixed-iteration and
-  tolerance-driven termination.
 
 Our OGC narrow phase and solver implement the algorithm from Chen et al.
 2025; see Acknowledgments.
@@ -76,8 +72,7 @@ only add custom code when the available library path is not suitable.
     ./build/3D_sim --fixed_iters        # default scene (twisting cloth)
     ./build/3D_sim --help               # full argument list
 
-(`--fixed_iters` is required by both CPU solvers; `--use_gpu` is the only path
-that runs without it.)
+(`--fixed_iters` is required by both solvers.)
 
 Built-in example scenes (`--example N`):
 
@@ -153,7 +148,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 |-------|-------|
 | Time integration | `fps`, `substeps`, `num_frames` |
 | Physics | `E`, `nu`, `density`, `thickness`, `kB`, `kpin`, `gx`, `gy`, `gz` |
-| Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `fixed_iters`, `use_parallel`, `use_gpu`, `write_substeps` |
+| Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `fixed_iters`, `use_parallel`, `write_substeps` |
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (new per-iter rebuild solver), `ogc_box_pad` (BVH padding for the per-iter rebuild; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (basic solver clamp range for `R_vi = clamp(max(prev_disp, \|v_i\| dt) * 1.2, min, max)`), `node_box_update_count` (GS iterations between broad-phase/contact-color rebuilds) |
@@ -266,15 +261,9 @@ reader can jump to the layer they care about.
 
   Both share the per-vertex Newton solve (`gs_vertex_delta`) and node-box clip
   mechanics. `ccd_initial_guess`, `translation_initial_guess`, and `update_one_vertex` live here.
-- `parallel_helper.h` / `parallel_helper.cpp` -- Jacobi delta prediction,
-  conflict-graph construction, greedy coloring, and parallel commit apply for
-  the basic solver under `--use_parallel`.
-- `GPU_Sim/gpu_solver_bridge.cpp` (+ stubs `gpu_solver_stub.cpp`,
-  `gpu_mesh_stub.cpp`, `gpu_ccd_stub.cpp`) -- `gpu_gauss_seidel_solver`,
-  selected by `--use_gpu`. Implements the Jacobi-prediction sweep with
-  conflict-graph coloring; on a CPU-only build the kernels are OpenMP loops,
-  and on a CUDA build the corresponding `.cu` files take their place. Honors
-  `fixed_iters` either way.
+- `parallel_helper.h` / `parallel_helper.cpp` -- helpers for elastic
+  adjacency, contact adjacency, adjacency union, greedy coloring, local Newton
+  direction, and safe-step computation.
 
 ### Tooling
 
@@ -299,7 +288,7 @@ Every layer of the pipeline has a GoogleTest binary. To build and run them all:
 | `ipc_math_test` | 27 | `matrix3d_inverse`, `segment_closest_point`, `filter_root`, `SmallRoots`, barycentric coords, serialize round-trip, topology caching |
 | `sdf_penalty_energy_test` | 15 | Plane / cylinder SDF energy + gradient + Hessian FD convergence, hard-quadratic limit, soft-barrier rest at `phi=eps` |
 | `bending_energy_test` | 20 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
-| `parallel_helper_test` | 20 | Jacobi predictions, conflict graph, coloring, parallel commits, solver correctness |
+| `parallel_helper_test` | 3 | Coloring and CPU safe-step behavior |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
 | `make_shape_test` | 15 | Adjacency maps, greedy coloring |
 | `barrier_energy_test` | 14 | Scalar barrier, NT/SS gradient/Hessian FD convergence, activation boundary, near-parallel stress |
