@@ -15,7 +15,7 @@ struct IPCArgs3D : ArgParser {
     int    num_frames   = 60;
 
     // --- physics ---
-    double E            = 1000.0; // Pa  (Young's modulus)
+    double E            = 1e6;    // Pa  (Young's modulus)
     double nu           = 0.3;    // (Poisson ratio)
     double density      = 900.0;  // kg/m^3
     double thickness    = 0.001;  // m
@@ -108,7 +108,7 @@ struct IPCArgs3D : ArgParser {
         add_int   ("substeps",    substeps,    3,          "Solver substeps per frame (solver_dt = 1/(fps*substeps))");
         add_int   ("num_frames",  num_frames,  60,        "Number of frames to simulate");
 
-        add_double("E",           E,           1000.0,     "Young's modulus (Pa)");
+        add_double("E",           E,           1e6,        "Young's modulus (Pa); membrane Lamé parameters use E * thickness");
         add_double("nu",          nu,          0.3,        "Poisson ratio");
         add_double("density",     density,     900.0,       "Mass density (kg/m^3)");
         add_double("thickness",   thickness,   0.001,       "Shell thickness (m)");
@@ -200,8 +200,8 @@ struct IPCArgs3D : ArgParser {
         SimParams p = SimParams::zeros();
         p.fps              = fps;
         p.substeps         = substeps;
-        p.mu               = E / (2.0 * (1.0 + nu));
-        p.lambda           = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
+        p.mu               = E * thickness / (2.0 * (1.0 + nu));
+        p.lambda           = E * thickness * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
         p.density          = density;
         p.thickness        = thickness;
         p.kB               = kB;
