@@ -26,7 +26,7 @@ bool check_convergence(const std::string& label, double analytic,
                        const std::vector<double>& errors,
                        double noise_scale = 1e-10, bool verbose = true) {
     const double noise_floor = noise_scale * (1.0 + std::abs(analytic));
-    bool saw_good_slope = false;
+    bool saw_reliable_slope = false;
     bool all_below_noise = true;
     bool passed = true;
 
@@ -47,12 +47,12 @@ bool check_convergence(const std::string& label, double analytic,
         double slope = std::log(errors[i-1] / errors[i]) / std::log(hs[i-1] / hs[i]);
         if (verbose)
             std::cout << "    h=" << hs[i] << "  err=" << errors[i]
-                      << "  slope=" << std::fixed << std::setprecision(2) << slope << "\n";
-        if (slope < 1.8) {
-            std::cerr << "  FAIL: slope " << slope << " < 1.8 for " << label << "\n";
+                      << "  slope=" << std::fixed << std::setprecision(6) << slope << "\n";
+        saw_reliable_slope = true;
+        if (slope < 1.99 || slope > 2.01) {
+            std::cerr << "  FAIL: slope " << slope
+                      << " outside [1.99, 2.01] for " << label << "\n";
             passed = false;
-        } else {
-            saw_good_slope = true;
         }
     }
 
@@ -62,7 +62,7 @@ bool check_convergence(const std::string& label, double analytic,
         return true;
     }
 
-    if (!saw_good_slope) {
+    if (!saw_reliable_slope) {
         std::cerr << "  FAIL: no reliable slope data for " << label << "\n";
         passed = false;
     }
@@ -181,7 +181,7 @@ TEST(BendingEnergy, GradientConvergence) {
     const auto h = MakeTestHinge();
     const double bar_theta = 0.0;
 
-    const std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     bool all_passed = true;
 
     for (int node : {0, 1, 2, 3}) {
@@ -214,7 +214,7 @@ TEST(BendingEnergy, HessianConvergence) {
     const auto h = MakeTestHinge();
     const double bar_theta = 0.0;
 
-    const std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     bool all_passed = true;
     int tested = 0, skipped = 0;
 
@@ -277,7 +277,7 @@ TEST(BendingEnergy, DirectionalDerivativeConvergence) {
     Vec3 dx(0.4, -0.6, 0.3);
     dx.normalize();
 
-    const std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
 
     for (int node : {0, 1, 2, 3}) {
         const Vec3 g = bending_node_gradient(h, kB, kCe, bar_theta, node);
@@ -554,7 +554,7 @@ TEST(BendingEnergy, PsdHessianConvergenceAtRest) {
     const auto h = MakeTestHinge();
     const double bar_theta = bending_theta(h);
 
-    const std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     bool all_passed = true;
 
     for (int node : {0, 1, 2, 3}) {

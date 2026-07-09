@@ -22,7 +22,7 @@ namespace {
 
 bool check_convergence(const std::string& label, double analytic, const std::vector<double>& hs, const std::vector<double>& errors, double noise_scale = 1e-10, bool verbose = true){
     const double noise_floor = noise_scale * (1.0 + std::abs(analytic));
-    bool saw_good_slope = false;
+    bool saw_reliable_slope = false;
     bool all_below_noise = true;
     bool passed = true;
 
@@ -43,12 +43,12 @@ bool check_convergence(const std::string& label, double analytic, const std::vec
         double slope = std::log(errors[i-1] / errors[i]) / std::log(hs[i-1] / hs[i]);
         if (verbose)
             std::cout << "    h=" << hs[i] << "  err=" << errors[i]
-                      << "  slope=" << std::fixed << std::setprecision(2) << slope << "\n";
-        if (slope < 1.8) {
-            std::cerr << "  FAIL: slope " << slope << " < 1.8 for " << label << "\n";
+                      << "  slope=" << std::fixed << std::setprecision(6) << slope << "\n";
+        saw_reliable_slope = true;
+        if (slope < 1.99 || slope > 2.01) {
+            std::cerr << "  FAIL: slope " << slope
+                      << " outside [1.99, 2.01] for " << label << "\n";
             passed = false;
-        } else {
-            saw_good_slope = true;
         }
     }
 
@@ -58,7 +58,7 @@ bool check_convergence(const std::string& label, double analytic, const std::vec
         return true;
     }
 
-    if (!saw_good_slope) {
+    if (!saw_reliable_slope) {
         std::cerr << "  FAIL: no reliable slope data for " << label << "\n";
         passed = false;
     }
@@ -326,7 +326,7 @@ TEST(CorotatedEnergy, GradientConvergence){
     const Mat32 F = compute_F(tri.Dm_inv, def);
     const CorotatedCache32 cache = buildCorotatedCache(F);
 
-    std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     bool all_passed = true;
 
     const Mat32 P_base = PCorotated32(cache, F, kMu, kLambda);
@@ -369,7 +369,7 @@ TEST(CorotatedEnergy, HessianConvergence){
     const CorotatedCache32 cache = buildCorotatedCache(F);
     const Mat99 H = assemble_hessian(cache, F, tri.ref_area, tri.Dm_inv, kMu, kLambda);
 
-    std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     bool all_passed = true;
     int tested = 0, skipped = 0;
 
@@ -467,7 +467,7 @@ TEST(CorotatedEnergy, DirectionalDerivativeConvergence){
     }
     const double exact = g_flat.dot(dx_flat);
 
-    std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     std::vector<double> errors;
 
     for (auto h : hs) {

@@ -97,7 +97,7 @@ struct SimParams {
         p.node_box_min              = 0.0;
         p.node_box_update_count     = 250;
         p.k_barrier                     = 1.0;
-        p.damping                       = 0.8;
+        p.damping                       = 1.0;
         p.use_ticcd                     = true;
         p.cached_dt_                = -1.0;
         p.cached_dt2_               = -1.0;

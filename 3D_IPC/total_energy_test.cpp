@@ -175,7 +175,7 @@ bool slope2_check(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
 
     Vec3 dir(0.3, -0.5, 0.8); dir.normalize();
 
-    std::vector<double> hs = {1e-2, 5e-3, 2.5e-3, 1.25e-3};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     std::vector<double> errs;
 
     for (double h : hs) {
@@ -188,19 +188,32 @@ bool slope2_check(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
     }
 
     double noise_floor = 1e-10;
-    bool saw_good_slope = false;
+    bool all_below_noise = true;
+    bool saw_reliable_slope = false;
+    bool passed = true;
     for (int i = 1; i < (int)errs.size(); ++i) {
-        if (errs[i] < noise_floor && errs[i-1] < noise_floor) continue;
+        if (errs[i] < noise_floor || errs[i-1] < noise_floor) continue;
+        all_below_noise = false;
         if (errs[i] == 0.0) continue;
         double slope = std::log(errs[i-1]/errs[i]) / std::log(hs[i-1]/hs[i]);
         std::cout << "    h=" << hs[i] << "  err=" << errs[i]
-                  << "  slope=" << std::fixed << std::setprecision(2) << slope << "\n";
-        if (slope >= 1.8) saw_good_slope = true;
+                  << "  slope=" << std::fixed << std::setprecision(6) << slope << "\n";
+        saw_reliable_slope = true;
+        if (slope < 1.99 || slope > 2.01) {
+            std::cerr << "  FAIL: slope " << slope
+                      << " outside [1.99, 2.01] for slope-2 vertex " << vi << "\n";
+            passed = false;
+        }
     }
-    if (!saw_good_slope) {
-        std::cerr << "  FAIL: no slope >= 1.8 for slope-2 vertex " << vi << "\n";
+    if (all_below_noise) {
+        std::cout << "    (all errors below noise floor -- exact match)\n";
+        return true;
     }
-    return saw_good_slope;
+    if (!saw_reliable_slope) {
+        std::cerr << "  FAIL: no reliable slope data for slope-2 vertex " << vi << "\n";
+        passed = false;
+    }
+    return passed;
 }
 
 } // anonymous namespace

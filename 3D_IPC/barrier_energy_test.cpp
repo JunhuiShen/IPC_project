@@ -135,7 +135,7 @@ struct SSTestPoint {
 bool check_convergence(const std::string& label, double analytic, const std::vector<double>& hs,
                        const std::vector<double>& errors, double noise_scale = 1e-10, bool verbose = true){
     const double noise_floor = noise_scale * (1.0 + std::abs(analytic));
-    bool saw_good_slope = false;
+    bool saw_reliable_slope = false;
     bool all_below_noise = true;
     bool passed = true;
 
@@ -156,12 +156,12 @@ bool check_convergence(const std::string& label, double analytic, const std::vec
         double slope = std::log(errors[i-1]/errors[i]) / std::log(hs[i-1]/hs[i]);
         if (verbose)
             std::cout << "    h=" << hs[i] << "  err=" << errors[i]
-                      << "  slope=" << std::fixed << std::setprecision(2) << slope << "\n";
-        if (slope < 1.8) {
-            std::cerr << "  FAIL: slope " << slope << " < 1.8 for " << label << "\n";
+                      << "  slope=" << std::fixed << std::setprecision(6) << slope << "\n";
+        saw_reliable_slope = true;
+        if (slope < 1.99 || slope > 2.01) {
+            std::cerr << "  FAIL: slope " << slope
+                      << " outside [1.99, 2.01] for " << label << "\n";
             passed = false;
-        } else {
-            saw_good_slope = true;
         }
     }
 
@@ -169,7 +169,7 @@ bool check_convergence(const std::string& label, double analytic, const std::vec
         if (verbose) std::cout << "    (all errors below noise floor -- exact match)\n";
         return true;
     }
-    if (!saw_good_slope) {
+    if (!saw_reliable_slope) {
         std::cerr << "  FAIL: no reliable slope data for " << label << "\n";
         passed = false;
     }
@@ -195,7 +195,7 @@ bool run_gradient_convergence_test(const TestPoint& tp){
     std::cout << "=== Gradient convergence: " << tp.name << " ===\n";
 
     const char* dof_names[4] = {"x", "x1", "x2", "x3"};
-    std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     bool all_passed = true;
 
     for (int v = 0; v < 4; ++v) {
@@ -237,7 +237,7 @@ bool run_hessian_convergence_test(const TestPoint& tp){
     std::cout << "=== Hessian convergence: " << tp.name << " ===\n";
 
     const char* dof_names[4] = {"x", "x1", "x2", "x3"};
-    std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     bool all_passed = true;
     int tested = 0, skipped_zero = 0;
 
@@ -290,7 +290,7 @@ bool run_ss_gradient_convergence_test(const SSTestPoint& tp){
     std::cout << "=== SS Gradient convergence: " << tp.name << " ===\n";
 
     const char* dof_names[4] = {"x1", "x2", "x3", "x4"};
-    std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     bool all_passed = true;
 
     for (int v = 0; v < 4; ++v) {
@@ -332,7 +332,7 @@ bool run_ss_hessian_convergence_test(const SSTestPoint& tp){
     std::cout << "=== SS Hessian convergence: " << tp.name << " ===\n";
 
     const char* dof_names[4] = {"x1", "x2", "x3", "x4"};
-    std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     bool all_passed = true;
     int tested = 0, skipped_zero = 0;
 
@@ -448,7 +448,7 @@ std::vector<SSTestPoint> make_ss_test_points() {
 TEST(BarrierEnergy, ScalarBarrierGradientConvergence){
     const double d_hat = 1.0, delta = 0.4;
     const double analytic = scalar_barrier_gradient(delta, d_hat);
-    std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     std::vector<double> errors;
     for (auto h : hs) errors.push_back(std::abs(scalar_barrier_fd(delta, d_hat, h) - analytic));
     EXPECT_TRUE(check_convergence("b'", analytic, hs, errors)) << "scalar barrier gradient convergence";
@@ -457,7 +457,7 @@ TEST(BarrierEnergy, ScalarBarrierGradientConvergence){
 TEST(BarrierEnergy, ScalarBarrierHessianConvergence){
     const double d_hat = 1.0, delta = 0.4;
     const double analytic = scalar_barrier_hessian(delta, d_hat);
-    std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     std::vector<double> errors;
     for (auto h : hs) errors.push_back(std::abs(scalar_barrier_gradient_fd(delta, d_hat, h) - analytic));
     EXPECT_TRUE(check_convergence("b''", analytic, hs, errors)) << "scalar barrier hessian convergence";

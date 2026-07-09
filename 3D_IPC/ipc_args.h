@@ -48,7 +48,7 @@ struct IPCArgs3D : ArgParser {
     double node_box_min            = 0.001;
     int    node_box_update_count   = 250;
     double k_barrier                   = 1.0;
-    double damping                     = 0.8;     // Jacobi step damping in global_gauss_seidel_solver_ogc (multiplies the per-vertex Newton delta)
+    double damping                     = 1.0;    
     bool   use_ticcd                   = false;    // true: Tight-Inclusion library | false: self-written linear CCD
 
     // --- scene selection ---
@@ -141,7 +141,7 @@ struct IPCArgs3D : ArgParser {
         add_double("node_box_min",         node_box_min,         0.001, "Lower bound on node box half-extent (floor when prev disp is near zero)");
         add_int   ("node_box_update_count", node_box_update_count, 1,   "Number of times to rebuild node boxes per substep");
         add_double("k_barrier",                k_barrier,                1.0,   "Barrier stiffness multiplier");
-        add_double("damping",                  damping,                  0.8,   "Jacobi step damping in global_gauss_seidel_solver_ogc (multiplies per-vertex Newton delta; <1 stabilizes the parallel sweep)");
+        add_double("damping",                  damping,                  1.0,   "Jacobi step damping in global_gauss_seidel_solver_ogc (multiplies per-vertex Newton delta; <1 stabilizes the parallel sweep)");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
         add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing");
@@ -200,8 +200,8 @@ struct IPCArgs3D : ArgParser {
         SimParams p = SimParams::zeros();
         p.fps              = fps;
         p.substeps         = substeps;
-        p.mu               = E * thickness / (2.0 * (1.0 + nu));
-        p.lambda           = E * thickness * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
+        p.mu               = E / (2.0 * (1.0 + nu));
+        p.lambda           = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
         p.density          = density;
         p.thickness        = thickness;
         p.kB               = kB;

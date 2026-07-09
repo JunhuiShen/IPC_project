@@ -46,7 +46,7 @@ bool check_convergence(const std::string& label, double analytic,
                        const std::vector<double>& errors,
                        double noise_scale = 1e-10, bool verbose = true){
     const double noise_floor = noise_scale * (1.0 + std::abs(analytic));
-    bool saw_good_slope = false;
+    bool saw_reliable_slope = false;
     bool all_below_noise = true;
     bool passed = true;
 
@@ -67,12 +67,12 @@ bool check_convergence(const std::string& label, double analytic,
         double slope = std::log(errors[i-1]/errors[i]) / std::log(hs[i-1]/hs[i]);
         if (verbose)
             std::cout << "    h=" << hs[i] << "  err=" << errors[i]
-                      << "  slope=" << std::fixed << std::setprecision(2) << slope << "\n";
-        if (slope < 1.8) {
-            std::cerr << "  FAIL: slope " << slope << " < 1.8 for " << label << "\n";
+                      << "  slope=" << std::fixed << std::setprecision(6) << slope << "\n";
+        saw_reliable_slope = true;
+        if (slope < 1.99 || slope > 2.01) {
+            std::cerr << "  FAIL: slope " << slope
+                      << " outside [1.99, 2.01] for " << label << "\n";
             passed = false;
-        } else {
-            saw_good_slope = true;
         }
     }
 
@@ -80,7 +80,7 @@ bool check_convergence(const std::string& label, double analytic,
         if (verbose) std::cout << "    (all errors below noise floor -- exact match)\n";
         return true;
     }
-    if (!saw_good_slope) {
+    if (!saw_reliable_slope) {
         std::cerr << "  FAIL: no reliable slope data for " << label << "\n";
         passed = false;
     }
@@ -93,7 +93,7 @@ using SDFClosure = std::function<SDFEvaluation(const Vec3&)>;
 bool run_sdf_gradient_convergence(const std::string& name, const Vec3& x,
                                   const SDFClosure& sdf, double k, double eps){
     std::cout << "=== Gradient convergence: " << name << " ===\n";
-    const std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     const auto energy = [&](const Vec3& q){ return sdf_penalty_energy(sdf(q), k, eps); };
 
     const Vec3 g_ana = sdf_penalty_gradient(sdf(x), k, eps);
@@ -130,7 +130,7 @@ bool run_sdf_hessian_convergence(const std::string& name, const Vec3& x,
                                  bool include_curvature){
     std::cout << "=== Hessian convergence: " << name
               << " (curvature=" << (include_curvature ? "true" : "false") << ") ===\n";
-    const std::vector<double> hs = {1e-2, 1e-3, 1e-4, 1e-5, 1e-6};
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     const auto gradient = [&](const Vec3& q){ return sdf_penalty_gradient(sdf(q), k, eps); };
 
     const Mat33 H_ana = sdf_penalty_hessian(sdf(x), k, eps, include_curvature);
