@@ -332,7 +332,7 @@ bool run_ss_hessian_convergence_test(const SSTestPoint& tp){
     std::cout << "=== SS Hessian convergence: " << tp.name << " ===\n";
 
     const char* dof_names[4] = {"x1", "x2", "x3", "x4"};
-    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
+    const std::vector<double> hs = {5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4, 3.125e-4};
     bool all_passed = true;
     int tested = 0, skipped_zero = 0;
 

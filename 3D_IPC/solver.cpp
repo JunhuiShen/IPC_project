@@ -17,15 +17,45 @@
 #include <filesystem>
 #include "visualization.h"
 
+namespace {
+
+struct ElasticAdjacencyCache {
+    const RefMesh* mesh = nullptr;
+    const int* tris_data = nullptr;
+    std::size_t tris_size = 0;
+    std::size_t hinges_size = 0;
+    int num_vertices = -1;
+    std::vector<std::vector<int>> adjacency;
+
+    bool matches(const RefMesh& ref_mesh, int nv) const {
+        return mesh == &ref_mesh && tris_data == ref_mesh.tris.data() && tris_size == ref_mesh.tris.size() && hinges_size == ref_mesh.hinges.size() && num_vertices == nv;
+    }
+
+    const std::vector<std::vector<int>>& get(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int nv) {
+        if (!matches(ref_mesh, nv)) {
+            adjacency = build_elastic_adj(ref_mesh, adj, nv);
+            mesh = &ref_mesh;
+            tris_data = ref_mesh.tris.data();
+            tris_size = ref_mesh.tris.size();
+            hinges_size = ref_mesh.hinges.size();
+            num_vertices = nv;
+        }
+        return adjacency;
+    }
+};
+
+}  // namespace
 
 // CCD initial guess
-std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh) {
+std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                    const RefMesh& ref_mesh, BroadPhase* scratch_broad_phase) {
     const int nv = static_cast<int>(x.size());
 
     std::vector<Vec3> dx(nv);
     for (int i = 0; i < nv; ++i) dx[i] = xhat[i] - x[i];
 
-    BroadPhase ccd_bp;
+    BroadPhase local_bp;
+    BroadPhase& ccd_bp = scratch_broad_phase ? *scratch_broad_phase : local_bp;
     ccd_bp.build_ccd_candidates(x, dx, ref_mesh, 1.0);
     const auto& cache = ccd_bp.cache();
 
@@ -525,6 +555,7 @@ static void write_substep_data(const SimParams& params, const BroadPhase& broad_
 SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
                                         std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
                                         const std::vector<Vec3>& v,
+                                        BroadPhase& broad_phase,
                                         const std::string& outdir, bool verbose) {
 
     //create node (blue) boxes and create broad phase (red boxes) accordingly
@@ -540,10 +571,10 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
         return std::clamp(std::max(prev_disp[vi], inertial) * node_box_padding, params.node_box_min, params.node_box_max);
     };
     std::vector<AABB> blue_boxes(nv);
-    BroadPhase broad_phase;
 
-    //create colors
-    std::vector<std::vector<int>> ea=build_elastic_adj(ref_mesh, adj, static_cast<int>(xnew.size()));
+    // Elastic adjacency depends only on mesh topology, so reuse it across GS calls.
+    static ElasticAdjacencyCache elastic_adj_cache;
+    const std::vector<std::vector<int>>& ea = elastic_adj_cache.get(ref_mesh, adj, nv);
     std::vector<std::vector<int>> bca;
     std::vector<std::vector<int>> color_groups;
 

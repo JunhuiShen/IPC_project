@@ -16,7 +16,8 @@ inline void accumulate_solver_result(SolverResult& agg, const SolverResult& sub,
     agg.iterations += sub.iterations;
 }
 
-std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh);
+std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                    const RefMesh& ref_mesh, BroadPhase* scratch_broad_phase = nullptr);
 
 std::vector<Vec3> translation_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                            const RefMesh& ref_mesh, const std::vector<Pin>& pins,
@@ -26,6 +27,7 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                                               const std::vector<Pin>& pins, const SimParams& params,
                                               std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
                                               const std::vector<Vec3>& v,
+                                              BroadPhase& broad_phase,
                                               const std::string& outdir = "",
                                               bool verbose = false);
 

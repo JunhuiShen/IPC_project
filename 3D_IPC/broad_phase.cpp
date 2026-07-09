@@ -391,27 +391,67 @@ namespace {
         cache.ss_pair_index.erase(BroadPhase::ss_key(victim_edges[0], victim_edges[1]));
     }
 
+    // Recycle broad-phase storage/topology to avoid allocation churn; per-build boxes, BVHs, and pairs are cleared.
+    static BroadPhase::Cache take_reusable_cache(BroadPhase::Cache& old_cache, int nv) {
+        BroadPhase::Cache c = std::move(old_cache);
+
+        c.node_boxes.clear();
+        c.tri_boxes.clear();
+        c.edge_boxes.clear();
+
+        c.tri_bvh_nodes.clear();
+        c.edge_bvh_nodes.clear();
+        c.node_bvh_nodes.clear();
+        c.tri_leaf_to_node.clear();
+        c.edge_leaf_to_node.clear();
+        c.node_leaf_to_node.clear();
+
+        c.node_root = -1;
+        c.tri_root = -1;
+        c.edge_root = -1;
+
+        c.nt_pairs.clear();
+        c.ss_pairs.clear();
+        c.nt_pair_tri.clear();
+        c.ss_pair_edges.clear();
+        c.nt_pair_index.clear();
+        c.ss_pair_index.clear();
+
+        if (static_cast<int>(c.vertex_nt.size()) == nv) {
+            for (auto& row : c.vertex_nt) row.clear();
+        } else {
+            c.vertex_nt.assign(nv, {});
+        }
+        if (static_cast<int>(c.vertex_ss.size()) == nv) {
+            for (auto& row : c.vertex_ss) row.clear();
+        } else {
+            c.vertex_ss.assign(nv, {});
+        }
+
+        return c;
+    }
+
 }
 
 // Broad phase
 void BroadPhase::set_mesh_topology(const RefMesh& mesh, int nv) {
     build_unique_edges_and_adjacency(mesh, nv, topo_.edges, topo_.node_to_edges, topo_.node_to_tris);
+    cache_.edges.clear();
+    cache_.node_to_edges.clear();
+    cache_.node_to_tris.clear();
     topology_valid_ = true;
 }
 
 void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double node_pad, double tri_pad, double edge_pad) {
-    Cache c;
-
     const int nv = static_cast<int>(x.size());
     const int nt = num_tris(mesh);
 
-    c.vertex_nt.resize(nv);
-    c.vertex_ss.resize(nv);
+    Cache c = take_reusable_cache(cache_, nv);
 
     if (!topology_valid_) set_mesh_topology(mesh, nv);
-    c.edges = topo_.edges;
-    c.node_to_edges = topo_.node_to_edges;
-    c.node_to_tris = topo_.node_to_tris;
+    if (c.edges.empty()) c.edges = topo_.edges;
+    if (c.node_to_edges.empty()) c.node_to_edges = topo_.node_to_edges;
+    if (c.node_to_tris.empty()) c.node_to_tris = topo_.node_to_tris;
     const int ne = static_cast<int>(c.edges.size());
 
     c.node_boxes.resize(nv);
@@ -481,14 +521,12 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
     const int nv = static_cast<int>(vertex_boxes.size());
     const int nt = num_tris(mesh);
 
-    Cache c;
-    c.vertex_nt.resize(nv);
-    c.vertex_ss.resize(nv);
+    Cache c = take_reusable_cache(cache_, nv);
 
     if (!topology_valid_) set_mesh_topology(mesh, nv);
-    c.edges = topo_.edges;
-    c.node_to_edges = topo_.node_to_edges;
-    c.node_to_tris = topo_.node_to_tris;
+    if (c.edges.empty()) c.edges = topo_.edges;
+    if (c.node_to_edges.empty()) c.node_to_edges = topo_.node_to_edges;
+    if (c.node_to_tris.empty()) c.node_to_tris = topo_.node_to_tris;
     const int ne = static_cast<int>(c.edges.size());
 
     c.node_boxes = vertex_boxes;
