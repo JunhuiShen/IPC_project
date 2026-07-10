@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iostream>
 #include <limits>
 
 // -----------------------------------------------------------------------------
@@ -508,4 +509,290 @@ CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1,
             segment_segment_general_ccd(x1, dx1, x2, zero, x3, zero, x4, zero));
     }
     return linear_segment_segment_impl(x1, dx1, x2, x3, x4, eps);
+}
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////  Rigid Body CCD  /////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+static bool point_segment_2d_rb_rotation(
+    const Eigen::Vector2d& x, const Eigen::Vector2d& x_com, const double& theta_n,
+    const double& theta_new, const Eigen::Vector2d& x0, const Eigen::Vector2d& x1,
+    double& step) {
+    step = 0.0;
+
+    Eigen::Vector2d dx = x - x_com;
+    double cos_n = std::cos(theta_n);
+    double sin_n = std::sin(theta_n);
+
+    Eigen::Vector2d r{cos_n * dx.x() + sin_n * dx.y(), -sin_n * dx.x() + cos_n * dx.y()};
+
+    Eigen::Vector2d d = x1 - x0;
+    double seg_len = d.norm();
+    if (seg_len < 1e-14) {
+        std::cerr << "Warning: degenerate segment in point_segment_2d_rotation(): seg_len = " << seg_len
+                  << ", threshold = 1e-14\n";
+        return false;
+    }
+
+    Eigen::Vector2d d_hat = d / seg_len;
+
+    double A = r.x() * d_hat.y() - r.y() * d_hat.x();
+    double B = -r.x() * d_hat.x() - r.y() * d_hat.y();
+    double C = (x_com.x() - x0.x()) * d_hat.y() - (x_com.y() - x0.y()) * d_hat.x();
+
+    double amplitude = std::sqrt(A * A + B * B);
+    if (std::abs(C) > amplitude + 1e-14) return false;
+    if (amplitude < 1e-14) {
+        if (std::abs(C) > 1e-14) return false;
+        const double t_star = (x - x0).dot(d) / (seg_len * seg_len);
+        if (t_star < -1e-12 || t_star > 1.0 + 1e-12) return false;
+        return true;
+    }
+
+    double phi = std::atan2(B, A);
+    double arccos_val = std::acos(std::clamp(-C / amplitude, -1.0, 1.0)); // clamp to prevent numerical errors.
+
+    double theta_candidates[2] = {phi + arccos_val, phi - arccos_val};
+
+    double best_s = std::numeric_limits<double>::infinity();
+    double dtheta = theta_new - theta_n;
+    if (std::abs(dtheta) < 1e-14) {
+        // std::cerr << "Warning: theta_new - theta_n < threshold\n";
+        return false;
+    }
+
+    constexpr double two_pi = 2.0 * M_PI;
+
+    auto consider_theta = [&](double theta_star) {
+        double s = (theta_star - theta_n) / dtheta;
+        if (s < -1e-12 || s > 1.0 + 1e-12) return;
+        s = std::clamp(s, 0.0, 1.0);
+
+        double theta_s = theta_star;
+        Eigen::Vector2d x_s{
+            std::cos(theta_s) * r.x() - std::sin(theta_s) * r.y(),
+            std::sin(theta_s) * r.x() + std::cos(theta_s) * r.y()
+        };
+        x_s += x_com;
+
+        double t_star = (x_s - x0).dot(d) / (seg_len * seg_len);
+        if (t_star < -1e-12 || t_star > 1.0 + 1e-12) return;
+
+        if (s < best_s) best_s = s;
+    };
+
+    for (double theta_base : theta_candidates) {
+        double k = 0.0;
+        if (dtheta > 0.0) {
+            // Forward rotation: choose the first wrapped root at or after theta_n
+            k = std::ceil((theta_n - theta_base - 1e-12) / two_pi);
+        } else {
+            // Backward rotation: choose the first wrapped root at or before theta_n
+            k = std::floor((theta_n - theta_base + 1e-12) / two_pi);
+        }
+        consider_theta(theta_base + two_pi * k);
+    }
+
+    if (best_s == std::numeric_limits<double>::infinity()) return false;
+    step = best_s;
+    return true;
+}
+
+// Helper: build orthonormal basis perpendicular to n_hat (rotation normal)
+static void buildBasis(const Vec3& n_hat, Vec3& e1, Vec3& e2) {
+    Vec3 ref = (std::abs(n_hat.x()) < 0.9) ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
+    e1 = n_hat.cross(ref).normalized();
+    e2 = n_hat.cross(e1);
+}
+
+// Helper: project 3D point to 2D in plane spanned by e1, e2
+static Vec2 project2D(const Vec3& p, const Vec3& x_com, const Vec3& e1, const Vec3& e2) {
+    Vec3 dp = p - x_com;
+    return Vec2(dp.dot(e1), dp.dot(e2));
+}
+
+bool segment_segment_rb_rotation_ccd(
+    const Vec3& x0, const Vec3& x1,       // moving segment world positions at s=0
+    const Vec3& x_com,                     // rotation center
+    const Vec4& q_new, const Vec4& q_n,    // quaternions (w,x,y,z)
+    const Vec3& x2, const Vec3& x3,        // stationary segment
+    double& s)
+{
+    s = 0.0; // matches point_segment_2d_rb_rotation's convention: only meaningful when the return value is true
+    constexpr double eps = 1e-10;
+
+    // -------------------------
+    // Step 1: Extract rotation axis and angle from q_rel = q_new * q_n^(-1)
+    // -------------------------
+    Vec4 q_n_conj = Rigid_Body::ALGEBRA::ConjugateQuaternion(q_n);
+    Vec4 q_rel    = Rigid_Body::ALGEBRA::QuaternionMultiply(q_new, q_n_conj);
+
+    Vec3 v_rel(q_rel[1], q_rel[2], q_rel[3]);
+    double v_rel_norm = v_rel.norm();
+    if (v_rel_norm < eps) return false; // no rotation
+
+    Vec3 n_hat = v_rel / v_rel_norm;
+
+    // -------------------------
+    // Step 2: Heights and radii of moving endpoints
+    // -------------------------
+    double h0 = (x0 - x_com).dot(n_hat);
+    double h1 = (x1 - x_com).dot(n_hat);
+
+    Vec3 x0_perp = (x0 - x_com) - h0 * n_hat;
+    Vec3 x1_perp = (x1 - x_com) - h1 * n_hat;
+    double r0    = x0_perp.norm();
+    double r1    = x1_perp.norm();
+    double r_min = std::min(r0, r1);
+    double r_max = std::max(r0, r1);
+    
+    if (r_max < eps) return false; // segment lies on the rotation axis; it never moves
+
+    // Signed rotation angle (shortest arc), measured from whichever endpoint
+    // has the larger perpendicular radius to the axis -- avoids the
+    // ill-conditioned atan2 that a near-zero-radius endpoint would give.
+    // acos(q_rel.w()) alone can't distinguish a short rotation from its
+    // long-way-around complement, which silently broke Cases A/B below
+    // whenever a step's rotation exceeded 180 degrees.
+    const Vec3& ref_perp  = (r0 >= r1) ? x0_perp : x1_perp;
+    Vec3 ref_perp_rotated = Rigid_Body::ALGEBRA::QuaternionRotate(q_rel, ref_perp);
+    double dtheta = std::atan2(ref_perp.cross(ref_perp_rotated).dot(n_hat), ref_perp.dot(ref_perp_rotated));
+
+    // -------------------------
+    // Step 3: Stationary segment decomposition
+    // -------------------------
+    Vec3 q2   = x2 - x_com;
+    Vec3 q3   = x3 - x_com;
+    Vec3 e    = q3 - q2;
+    double h2 = q2.dot(n_hat);
+    double en = e.dot(n_hat);
+
+    // build 2D basis (needed for multiple cases)
+    Vec3 e1, e2;
+    buildBasis(n_hat, e1, e2);
+
+    // -------------------------
+    // Case A: Frustum (h0 != h1)
+    // -------------------------
+    if (std::abs(h1 - h0) > eps) {
+
+        double alpha = (r1 - r0) / (h1 - h0);
+        double R2    = r0 + alpha * (h2 - h0);
+
+        Vec3 q2_perp = q2 - h2 * n_hat;
+        Vec3 e_perp  = e - en * n_hat;
+
+        double A = e_perp.squaredNorm() - alpha * alpha * en * en;
+        double B = 2.0 * (q2_perp.dot(e_perp) - alpha * en * R2);
+        double C = q2_perp.squaredNorm() - R2 * R2;
+
+        double disc = B * B - 4.0 * A * C;
+        if (disc < 0.0) return false;
+
+        double sqrt_disc = std::sqrt(disc);
+
+        // reference angle of x0_perp in the plane
+        double theta_ref = std::atan2(x0_perp.dot(e2), x0_perp.dot(e1));
+
+        double best_s = std::numeric_limits<double>::infinity();
+        for (int sign : {-1, 1}) {
+            double u = (-B + sign * sqrt_disc) / (2.0 * A);
+            if (u < -eps || u > 1.0 + eps) continue;
+            u = std::clamp(u, 0.0, 1.0);
+
+            Vec3 p_star      = (1.0 - u) * x2 + u * x3;
+            Vec3 p_star_perp = (p_star - x_com) - ((p_star - x_com).dot(n_hat)) * n_hat;
+
+            // recover angle
+            double theta_star = std::atan2(p_star_perp.dot(e2), p_star_perp.dot(e1));
+            double dangle     = theta_star - theta_ref;
+
+            // wrap dangle to be consistent with dtheta sign
+            while (dtheta > 0 && dangle < -eps)  dangle += 2.0 * M_PI;
+            while (dtheta < 0 && dangle >  eps)  dangle -= 2.0 * M_PI;
+
+            double s_cand = dangle / dtheta;
+            if (s_cand < -eps || s_cand > 1.0 + eps) continue;
+            s_cand = std::clamp(s_cand, 0.0, 1.0);
+
+            if (s_cand < best_s) best_s = s_cand;
+        }
+
+        if (best_s == std::numeric_limits<double>::infinity()) return false;
+        s = best_s;
+        return true;
+    }
+
+    // -------------------------
+    // Case B: Flat annulus (h0 == h1)
+    // -------------------------
+
+    // Sub-case B1: stationary segment pierces plane
+    if (std::abs(en) > eps) {
+
+        double u_star = (h0 - h2) / en;
+        if (u_star < -eps || u_star > 1.0 + eps) return false;
+        u_star = std::clamp(u_star, 0.0, 1.0);
+
+        Vec3 p_star      = (1.0 - u_star) * x2 + u_star * x3;
+        Vec3 p_star_perp = (p_star - x_com) - ((p_star - x_com).dot(n_hat)) * n_hat;
+        double rho_star  = p_star_perp.norm();
+
+        if (rho_star < r_min - eps || rho_star > r_max + eps) return false;
+
+        // project to 2D and run reversed CCD
+        Vec2 p_star_2d = project2D(p_star, x_com, e1, e2);
+        Vec2 x0_2d     = project2D(x0, x_com, e1, e2);
+        Vec2 x1_2d     = project2D(x1, x_com, e1, e2);
+        Vec2 x_com_2d  = Vec2::Zero();
+
+        double s_cand = 0.0;
+        bool hit = point_segment_2d_rb_rotation(
+            p_star_2d, x_com_2d, 0.0, -dtheta, x0_2d, x1_2d, s_cand);
+
+        if (!hit) return false;
+        s = s_cand;
+        return true;
+    }
+
+    // Sub-case B2: both segments flat
+    if (std::abs(h0 - h2) > eps) return false; // parallel planes
+
+    // same plane: 4 point-segment CCD checks
+    Vec2 x0_2d    = project2D(x0, x_com, e1, e2);
+    Vec2 x1_2d    = project2D(x1, x_com, e1, e2);
+    Vec2 x2_2d    = project2D(x2, x_com, e1, e2);
+    Vec2 x3_2d    = project2D(x3, x_com, e1, e2);
+    Vec2 x_com_2d = Vec2::Zero();
+
+    // need theta_n in the constructed 2D frame
+    // angle of x0 in the plane at s=0
+    double theta_n_2d   = std::atan2(x0_2d.y(), x0_2d.x());
+    double theta_new_2d = theta_n_2d + dtheta;
+
+    struct Check { Vec2 x; double tn, tnew; Vec2 seg0, seg1; };
+    std::vector<Check> checks = {
+        {x0_2d, theta_n_2d,   theta_new_2d,  x2_2d, x3_2d},
+        {x1_2d, theta_n_2d,   theta_new_2d,  x2_2d, x3_2d},
+        {x2_2d, 0.0,          -dtheta,        x0_2d, x1_2d},
+        {x3_2d, 0.0,          -dtheta,        x0_2d, x1_2d},
+    };
+
+    for (auto& c : checks) {
+        double s_cand = 0.0;
+        bool hit = point_segment_2d_rb_rotation(
+            c.x, x_com_2d, c.tn, c.tnew, c.seg0, c.seg1, s_cand);
+        if (hit && s_cand < s) s = s_cand;
+    }
+
+    if (s == std::numeric_limits<double>::infinity()) return false;
+    return true;
 }

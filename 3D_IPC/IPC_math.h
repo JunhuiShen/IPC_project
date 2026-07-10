@@ -8,6 +8,7 @@
 // Type aliases
 using Vec2   = Eigen::Vector2d;
 using Vec3   = Eigen::Vector3d;
+using Vec4   = Eigen::Vector4d;
 using Vec6   = Eigen::Matrix<double, 6, 1>;
 using Vec9   = Eigen::Matrix<double, 9, 1>;
 using Vec12  = Eigen::Matrix<double, 12, 1>;

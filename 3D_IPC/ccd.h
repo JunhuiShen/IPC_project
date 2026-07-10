@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IPC_math.h"
+#include "algebra/algebra.h"
 
 #include <limits>
 
@@ -39,3 +40,15 @@ double node_triangle_general_ccd(const Vec3& x, const Vec3& dx, const Vec3& x1, 
 
 double segment_segment_general_ccd(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2,
                                    const Vec3& x3, const Vec3& dx3, const Vec3& x4, const Vec3& dx4);
+
+///////////////////// Rigid Body CCD ////////////////////////////
+
+// Segment [x0, x1] rotating rigidly about x_com from orientation q_n to q_new
+// against the fixed segment [x2, x3]. Returns the earliest time of impact `s`
+// in [0, 1], or false if none.
+bool segment_segment_rb_rotation_ccd(
+        const Vec3& x0, const Vec3& x1,
+        const Vec3& x_com,
+        const Vec4& q_new, const Vec4& q_n,
+        const Vec3& x2, const Vec3& x3,
+        double& s);
