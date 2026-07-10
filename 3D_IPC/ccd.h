@@ -6,10 +6,7 @@
 #include <limits>
 
 struct CCDResult {
-    bool has_candidate_time = false;
     bool collision = false;
-    bool coplanar_entire_step = false;
-    bool parallel_or_no_crossing = false;
     double t = std::numeric_limits<double>::quiet_NaN();
 };
 

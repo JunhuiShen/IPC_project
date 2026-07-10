@@ -327,8 +327,7 @@ double clamp_toi(double toi) {
 
 CCDResult ccd_result_from_toi(double toi) {
     CCDResult r;
-    if (toi < 1.0) { r.has_candidate_time = true; r.collision = true; r.t = toi; }
-    else           { r.parallel_or_no_crossing = true; }
+    if (toi < 1.0) { r.collision = true; r.t = toi; }
     return r;
 }
 
@@ -345,7 +344,6 @@ CCDResult linear_node_triangle_impl(const Vec3& x,  const Vec3& dx,
     constexpr double eps_inside = 1.0e-10;
 
     if (inside_triangle_3d_at(x, dx, x1, dx1, x2, dx2, x3, dx3, 0.0, eps_inside)) {
-        result.has_candidate_time = true;
         result.collision = true;
         result.t = 0.0;
         return result;
@@ -361,27 +359,24 @@ CCDResult linear_node_triangle_impl(const Vec3& x,  const Vec3& dx,
 
     if (nearly_zero(c, eps)) {
         if (nearly_zero(d, eps)) {
-            result.coplanar_entire_step = true;
             const double t = node_triangle_coplanar_interval(x, dx, x1, dx1, x2, dx2, x3, dx3, eps);
             if (t < 1.0 && inside_triangle_3d_at(x, dx, x1, dx1, x2, dx2, x3, dx3, t, eps_inside)) {
-                result.has_candidate_time = true;
                 result.collision = true;
                 result.t = clamp_scalar(t, 0.0, 1.0);
             }
-        } else {
-            result.parallel_or_no_crossing = true;
         }
         return result;
     }
 
     const double t = -d / c;
     if (!in_unit_interval(t, eps)) {
-        result.parallel_or_no_crossing = true;
         return result;
     }
-    result.has_candidate_time = true;
-    result.t = clamp_scalar(t, 0.0, 1.0);
-    result.collision = inside_triangle_3d_at(x, dx, x1, dx1, x2, dx2, x3, dx3, result.t, eps_inside);
+    const double candidate_t = clamp_scalar(t, 0.0, 1.0);
+    if (inside_triangle_3d_at(x, dx, x1, dx1, x2, dx2, x3, dx3, candidate_t, eps_inside)) {
+        result.collision = true;
+        result.t = candidate_t;
+    }
     return result;
 }
 
@@ -392,7 +387,6 @@ CCDResult linear_segment_segment_impl(const Vec3& x1, const Vec3& dx1,
     const Vec3 zero = Vec3::Zero();
 
     if (inside_segments_3d_at(x1, dx1, x2, zero, x3, zero, x4, zero, 0.0, eps_inside)) {
-        result.has_candidate_time = true;
         result.collision = true;
         result.t = 0.0;
         return result;
@@ -405,15 +399,11 @@ CCDResult linear_segment_segment_impl(const Vec3& x1, const Vec3& dx1,
 
     if (nearly_zero(c, eps)) {
         if (nearly_zero(d, eps)) {
-            result.coplanar_entire_step = true;
             const double t = persistent_segment_segment_time(x1, dx1, x2, zero, x3, zero, x4, zero, eps);
             if (t < 1.0 && inside_segments_3d_at(x1, dx1, x2, zero, x3, zero, x4, zero, t, eps_inside)) {
-                result.has_candidate_time = true;
                 result.collision = true;
                 result.t = clamp_scalar(t, 0.0, 1.0);
             }
-        } else {
-            result.parallel_or_no_crossing = true;
         }
         return result;
     }
@@ -421,10 +411,10 @@ CCDResult linear_segment_segment_impl(const Vec3& x1, const Vec3& dx1,
     const double t = -d / c;
     const bool t_in_range = in_unit_interval(t, eps);
     if (t_in_range) {
-        result.t = clamp_scalar(t, 0.0, 1.0);
-        if (inside_segments_3d_at(x1, dx1, x2, zero, x3, zero, x4, zero, result.t, eps_inside)) {
-            result.has_candidate_time = true;
+        const double candidate_t = clamp_scalar(t, 0.0, 1.0);
+        if (inside_segments_3d_at(x1, dx1, x2, zero, x3, zero, x4, zero, candidate_t, eps_inside)) {
             result.collision = true;
+            result.t = candidate_t;
             return result;
         }
     }
@@ -434,15 +424,12 @@ CCDResult linear_segment_segment_impl(const Vec3& x1, const Vec3& dx1,
     if (!t_in_range || near_parallel) {
         for (double ts : {0.0, 1.0, 0.25, 0.5, 0.75, 0.125, 0.375, 0.625, 0.875}) {
             if (inside_segments_3d_at(x1, dx1, x2, zero, x3, zero, x4, zero, ts, eps_inside)) {
-                result.has_candidate_time = true;
                 result.collision = true;
                 result.t = ts;
                 return result;
             }
         }
     }
-    if (!t_in_range) result.parallel_or_no_crossing = true;
-    else             result.has_candidate_time = true;
     return result;
 }
 
