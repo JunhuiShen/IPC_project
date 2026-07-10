@@ -193,16 +193,18 @@ void union_adjacency(const std::vector<std::vector<int>>& a,const std::vector<st
 void greedy_color_conflict_graph(const std::vector<std::vector<int>>& graph, std::vector<std::vector<int>>& groups) {
     const int nv = static_cast<int>(graph.size());
     std::vector<int> color(nv, -1);
+    // A timestamped marker array avoids allocating and clearing `used` once per vertex
+    // At most `nv` colors can occur in a graph of `nv` vertices.
+    std::vector<int> seen_color(nv, -1);
     int max_color = -1;
 
     for (int vi = 0; vi < nv; ++vi) {
-        std::vector<char> used(max_color + 2, 0);
         for (int nb : graph[vi]) {
             if (nb >= 0 && nb < nv && color[nb] >= 0)
-                used[color[nb]] = 1;
+                seen_color[color[nb]] = vi;
         }
         int c = 0;
-        while (c < static_cast<int>(used.size()) && used[c]) ++c;
+        while (c < nv && seen_color[c] == vi) ++c;
         color[vi] = c;
         max_color = std::max(max_color, c);
     }

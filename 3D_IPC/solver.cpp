@@ -44,6 +44,40 @@ struct ElasticAdjacencyCache {
     }
 };
 
+struct OGCSolverScratch {
+    ElasticAdjacencyCache elastic_adjacency;
+    BroadPhase broad_phase;
+    const RefMesh* mesh = nullptr;
+    const int* tris_data = nullptr;
+    std::size_t tris_size = 0;
+    std::size_t hinges_size = 0;
+    int num_vertices = -1;
+
+    std::vector<double> prev_disp;
+    std::vector<AABB> bvh_node_boxes;
+    std::vector<std::vector<int>> color_groups;
+    std::vector<Vec3> xnew_substep_start;
+    std::vector<Vec3> xnew_copy;
+    std::vector<double> bounds;
+
+    bool matches(const RefMesh& ref_mesh, int nv) const {
+        return mesh == &ref_mesh && tris_data == ref_mesh.tris.data() && tris_size == ref_mesh.tris.size() && hinges_size == ref_mesh.hinges.size() && num_vertices == nv;
+    }
+
+    void prepare(const RefMesh& ref_mesh, int nv) {
+        if (matches(ref_mesh, nv)) return;
+
+        // BroadPhase retains topology internally, so replace it when the mesh topology changes rather than reusing stale connectivity
+        broad_phase = BroadPhase{};
+        elastic_adjacency = ElasticAdjacencyCache{};
+        mesh = &ref_mesh;
+        tris_data = ref_mesh.tris.data();
+        tris_size = ref_mesh.tris.size();
+        hinges_size = ref_mesh.hinges.size();
+        num_vertices = nv;
+    }
+};
+
 }  // namespace
 
 // CCD initial guess
@@ -581,8 +615,9 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     static std::vector<std::vector<int>> color_groups;
 
     SolverResult result;
-    const std::vector<Vec3> xnew_substep_start = xnew;
-
+    // anchor for clip boxes and prev_disp
+    const std::vector<Vec3> xnew_substep_start = xnew;  
+ 
     double r1=0.;
     //gs loop
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
@@ -649,7 +684,10 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
     const int nv = static_cast<int>(xnew.size());
     const PinMap pm = build_pin_map(pins, nv);
 
-    static std::vector<double> prev_disp;
+    static OGCSolverScratch scratch;
+    scratch.prepare(ref_mesh, nv);
+
+    std::vector<double>& prev_disp = scratch.prev_disp;
     if (static_cast<int>(prev_disp.size()) != nv)
         prev_disp.assign(nv, params.node_box_max);
     constexpr double node_box_padding = 1.2;
@@ -658,22 +696,23 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
     SolverResult result;
     result.iterations = 0;
 
-    BroadPhase broad_phase;
-    const std::vector<Vec3> xnew_substep_start = xnew;  // anchor for clip boxes and prev_disp
+    BroadPhase& broad_phase = scratch.broad_phase;
+    std::vector<Vec3>& xnew_substep_start = scratch.xnew_substep_start;
+    // anchor for clip boxes and prev_disp
+    xnew_substep_start = xnew; 
     const double pad = std::max(params.ogc_box_pad, params.d_hat);
 
-    std::vector<AABB> bvh_node_boxes(nv);
+    std::vector<AABB>& bvh_node_boxes = scratch.bvh_node_boxes;
+    bvh_node_boxes.resize(nv);
     for (int i = 0; i < nv; ++i) {
         const double r = node_box_size_fn(i) + pad;
         bvh_node_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
     }
     broad_phase.initialize(bvh_node_boxes, ref_mesh, pad);
 
-    // Color from elastic adjacency only — barrier pairs are handled by reading
-    // a frozen snapshot (xnew_copy) inside each color, so they don't need to
-    // constrain the coloring.
-    const std::vector<std::vector<int>> elastic_adj = build_elastic_adj(ref_mesh, adj, nv);
-    std::vector<std::vector<int>> color_groups;
+    // Color from elastic adjacency only since barrier pairs are handled by reading  a frozen snapshot (xnew_copy) inside each color, so they don't need to constrain the coloring
+    const std::vector<std::vector<int>>& elastic_adj = scratch.elastic_adjacency.get(ref_mesh, adj, nv);
+    std::vector<std::vector<int>>& color_groups = scratch.color_groups;
     greedy_color_conflict_graph(elastic_adj, color_groups);
 
     if (params.write_substeps)
@@ -681,8 +720,10 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
 
     auto& bp_cache = broad_phase.mutable_cache();
 
-    std::vector<Vec3>   xnew_copy(nv);
-    std::vector<double> bounds(nv);
+    std::vector<Vec3>& xnew_copy = scratch.xnew_copy;
+    std::vector<double>& bounds = scratch.bounds;
+    xnew_copy.resize(nv);
+    bounds.resize(nv);
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         if (iter > 1) {
