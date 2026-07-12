@@ -593,43 +593,41 @@ static bool point_segment_2d_rb_rotation(
     return true;
 }
 
-// Helper: build orthonormal basis perpendicular to n_hat (rotation normal)
 static void buildBasis(const Vec3& n_hat, Vec3& e1, Vec3& e2) {
     Vec3 ref = (std::abs(n_hat.x()) < 0.9) ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
     e1 = n_hat.cross(ref).normalized();
     e2 = n_hat.cross(e1);
 }
 
-// Helper: project 3D point to 2D in plane spanned by e1, e2
 static Vec2 project2D(const Vec3& p, const Vec3& x_com, const Vec3& e1, const Vec3& e2) {
     Vec3 dp = p - x_com;
     return Vec2(dp.dot(e1), dp.dot(e2));
 }
 
 bool segment_segment_rb_rotation_ccd(
-    const Vec3& x0, const Vec3& x1,       // moving segment world positions at s=0
-    const Vec3& x_com,                     // rotation center
-    const Vec4& q_new, const Vec4& q_n,    // quaternions (w,x,y,z)
-    const Vec3& x2, const Vec3& x3,        // stationary segment
+    const Vec3& x0, const Vec3& x1, // moving segment world space posiitons
+    const Vec3& x_com, // moving segment rigid body center of mass
+    const Vec4& q_new, const Vec4& q_n, // moving segment rigid body orientations (quaternions)
+    const Vec3& x2, const Vec3& x3, // stationary segment world space positions
     double& s)
 {
-    s = 0.0; // matches point_segment_2d_rb_rotation's convention: only meaningful when the return value is true
+    s = 0.0;
     constexpr double eps = 1e-10;
 
     // -------------------------
-    // Step 1: Extract rotation axis and angle from q_rel = q_new * q_n^(-1)
+    // Step 1: Extract rotation axis from q_rel = q_new * q_n^(-1)
     // -------------------------
     Vec4 q_n_conj = Rigid_Body::ALGEBRA::ConjugateQuaternion(q_n);
     Vec4 q_rel    = Rigid_Body::ALGEBRA::QuaternionMultiply(q_new, q_n_conj);
 
     Vec3 v_rel(q_rel[1], q_rel[2], q_rel[3]);
     double v_rel_norm = v_rel.norm();
-    if (v_rel_norm < eps) return false; // no rotation
+    if (v_rel_norm < eps) return false;
 
     Vec3 n_hat = v_rel / v_rel_norm;
 
     // -------------------------
-    // Step 2: Heights and radii of moving endpoints
+    // Step 2: Decompose moving endpoints
     // -------------------------
     double h0 = (x0 - x_com).dot(n_hat);
     double h1 = (x1 - x_com).dot(n_hat);
@@ -638,148 +636,204 @@ bool segment_segment_rb_rotation_ccd(
     Vec3 x1_perp = (x1 - x_com) - h1 * n_hat;
     double r0    = x0_perp.norm();
     double r1    = x1_perp.norm();
-    double r_min = std::min(r0, r1);
     double r_max = std::max(r0, r1);
-    
-    if (r_max < eps) return false; // segment lies on the rotation axis; it never moves
 
-    // Signed rotation angle (shortest arc), measured from whichever endpoint
-    // has the larger perpendicular radius to the axis -- avoids the
-    // ill-conditioned atan2 that a near-zero-radius endpoint would give.
-    // acos(q_rel.w()) alone can't distinguish a short rotation from its
-    // long-way-around complement, which silently broke Cases A/B below
-    // whenever a step's rotation exceeded 180 degrees.
-    const Vec3& ref_perp  = (r0 >= r1) ? x0_perp : x1_perp;
-    Vec3 ref_perp_rotated = Rigid_Body::ALGEBRA::QuaternionRotate(q_rel, ref_perp);
-    double dtheta = std::atan2(ref_perp.cross(ref_perp_rotated).dot(n_hat), ref_perp.dot(ref_perp_rotated));
+    if (r_max < eps) return false;
+
+    // Signed dtheta from larger-radius endpoint
+    const Vec3& ref_perp       = (r0 >= r1) ? x0_perp : x1_perp;
+    Vec3        ref_perp_rotated = Rigid_Body::ALGEBRA::QuaternionRotate(q_rel, ref_perp);
+    double dtheta = std::atan2(
+        ref_perp.cross(ref_perp_rotated).dot(n_hat),
+        ref_perp.dot(ref_perp_rotated));
+
+    if (std::abs(dtheta) < eps) return false;
+
+    Vec3 dx_perp = x1_perp - x0_perp;
 
     // -------------------------
-    // Step 3: Stationary segment decomposition
+    // Step 3: Decompose stationary segment
     // -------------------------
-    Vec3 q2   = x2 - x_com;
-    Vec3 q3   = x3 - x_com;
-    Vec3 e    = q3 - q2;
-    double h2 = q2.dot(n_hat);
-    double en = e.dot(n_hat);
+    Vec3   q2  = x2 - x_com;
+    Vec3   q3  = x3 - x_com;
+    Vec3   e   = q3 - q2;
+    double h2  = q2.dot(n_hat);
+    double en  = e.dot(n_hat);
 
-    // build 2D basis (needed for multiple cases)
+    Vec3 q2_perp = q2 - h2 * n_hat;
+    Vec3 e_perp  = e  - en * n_hat;
+
+    // Build 2D basis
     Vec3 e1, e2;
     buildBasis(n_hat, e1, e2);
 
+    // theta_n and theta_new in 2D frame
+    Vec2   ref_2d       = Vec2(ref_perp.dot(e1), ref_perp.dot(e2));
+    double theta_n_2d   = std::atan2(ref_2d.y(), ref_2d.x());
+    double theta_new_2d = theta_n_2d + dtheta;
+
+    bool   found  = false;
+    double best_s = std::numeric_limits<double>::infinity();
+
     // -------------------------
-    // Case A: Frustum (h0 != h1)
+    // Case A: General swept surface (h0 != h1)
     // -------------------------
     if (std::abs(h1 - h0) > eps) {
 
-        double alpha = (r1 - r0) / (h1 - h0);
-        double R2    = r0 + alpha * (h2 - h0);
+        double dh = h1 - h0;
 
-        Vec3 q2_perp = q2 - h2 * n_hat;
-        Vec3 e_perp  = e - en * n_hat;
+        // For a stationary point at parameter u, the height is h2 + u*en
+        // The corresponding t on the moving segment is t(u) = (h2 + u*en - h0) / (h1 - h0)
+        // x_perp at t(u): x0_perp + t(u)*dx_perp = x0_perp' + u*beta*dx_perp
+        // where x0_perp' = x0_perp + (h2-h0)/dh * dx_perp
+        //       beta     = en / dh
 
-        double A = e_perp.squaredNorm() - alpha * alpha * en * en;
-        double B = 2.0 * (q2_perp.dot(e_perp) - alpha * en * R2);
-        double C = q2_perp.squaredNorm() - R2 * R2;
+        double beta      = en / dh;
+        Vec3   x0_perp_p = x0_perp + ((h2 - h0) / dh) * dx_perp; // x_perp at t(0)
+
+        // Quadratic: rho_stationary^2(u) - rho_moving^2(u) = 0
+        // rho_stationary^2(u) = ||q2_perp + u*e_perp||^2
+        // rho_moving^2(u)     = ||x0_perp' + u*beta*dx_perp||^2
+
+        double A = e_perp.squaredNorm()   - beta * beta * dx_perp.squaredNorm();
+        double B = 2.0 * (q2_perp.dot(e_perp) - beta * x0_perp_p.dot(dx_perp));
+        double C = q2_perp.squaredNorm()  - x0_perp_p.squaredNorm();
 
         double disc = B * B - 4.0 * A * C;
-        if (disc < 0.0) return false;
+        if (disc >= 0.0) {
+            double sqrt_disc = std::sqrt(std::max(0.0, disc));
 
-        double sqrt_disc = std::sqrt(disc);
+            for (int sign : {-1, 1}) {
+                double u;
 
-        // reference angle of x0_perp in the plane
-        double theta_ref = std::atan2(x0_perp.dot(e2), x0_perp.dot(e1));
+                if (std::abs(A) < eps) {
+                    if (std::abs(B) < eps) {
+                        if (std::abs(C) < eps) {
+                            // infinite intersections: segment lies on swept surface
+                            // only process once (skip second iteration)
+                            if (sign == -1) continue;
+                            u = 0.0; // take earliest contact
+                        } 
+                        else {
+                            continue; // no intersection
+                        }
+                    } 
+                    else {
+                        u = -C / B;
+                    }
+                } 
+                else {
+                    u = (-B + sign * sqrt_disc) / (2.0 * A);
+                }
 
-        double best_s = std::numeric_limits<double>::infinity();
-        for (int sign : {-1, 1}) {
-            double u = (-B + sign * sqrt_disc) / (2.0 * A);
-            if (u < -eps || u > 1.0 + eps) continue;
-            u = std::clamp(u, 0.0, 1.0);
+                if (u < -eps || u > 1.0 + eps) continue;
+                u = std::clamp(u, 0.0, 1.0);
 
-            Vec3 p_star      = (1.0 - u) * x2 + u * x3;
-            Vec3 p_star_perp = (p_star - x_com) - ((p_star - x_com).dot(n_hat)) * n_hat;
+                // corresponding t on moving segment
+                double t = (h2 + u * en - h0) / dh;
+                if (t < -eps || t > 1.0 + eps) continue;
+                t = std::clamp(t, 0.0, 1.0);
 
-            // recover angle
-            double theta_star = std::atan2(p_star_perp.dot(e2), p_star_perp.dot(e1));
-            double dangle     = theta_star - theta_ref;
+                // contact point on moving segment (perpendicular part)
+                Vec3 moving_perp = x0_perp + t * dx_perp;
+                if (moving_perp.norm() < eps) continue; // on axis, degenerate
 
-            // wrap dangle to be consistent with dtheta sign
-            while (dtheta > 0 && dangle < -eps)  dangle += 2.0 * M_PI;
-            while (dtheta < 0 && dangle >  eps)  dangle -= 2.0 * M_PI;
+                // contact point on stationary segment (perpendicular part)
+                Vec3 p_star      = (1.0 - u) * x2 + u * x3;
+                Vec3 p_star_perp = (p_star - x_com) - ((p_star - x_com).dot(n_hat)) * n_hat;
 
-            double s_cand = dangle / dtheta;
-            if (s_cand < -eps || s_cand > 1.0 + eps) continue;
-            s_cand = std::clamp(s_cand, 0.0, 1.0);
+                // recover signed angle: from moving_perp to p_star_perp
+                double theta_ref  = std::atan2(moving_perp.dot(e2), moving_perp.dot(e1));
+                double theta_star = std::atan2(p_star_perp.dot(e2), p_star_perp.dot(e1));
+                double dangle     = theta_star - theta_ref;
 
-            if (s_cand < best_s) best_s = s_cand;
+                // wrap dangle consistent with sign of dtheta
+                while (dtheta > 0 && dangle < -eps) dangle += 2.0 * M_PI;
+                while (dtheta < 0 && dangle >  eps) dangle -= 2.0 * M_PI;
+
+                double s_cand = dangle / dtheta;
+                if (s_cand < -eps || s_cand > 1.0 + eps) continue;
+                s_cand = std::clamp(s_cand, 0.0, 1.0);
+
+                if (s_cand < best_s) { best_s = s_cand; found = true; }
+            }
         }
 
-        if (best_s == std::numeric_limits<double>::infinity()) return false;
-        s = best_s;
-        return true;
+    } 
+    else {
+        // -------------------------
+        // Case B: Flat annulus (h0 == h1)
+        // -------------------------
+
+        // Find true inner radius
+        double r_inner, r_outer;
+        r_outer = std::max(r0, r1);
+
+        double dx_perp_sq = dx_perp.squaredNorm();
+        if (dx_perp_sq < eps) {
+            // both endpoints at same perpendicular position
+            r_inner = r0;
+        } else {
+            double t_star = -x0_perp.dot(dx_perp) / dx_perp_sq;
+            if (t_star > 0.0 && t_star < 1.0) {
+                r_inner = (x0_perp + t_star * dx_perp).norm();
+            } else {
+                r_inner = std::min(r0, r1);
+            }
+        }
+
+        if (std::abs(en) > eps) {
+            // Sub-case B1: stationary segment pierces annulus plane
+            double u_star = (h0 - h2) / en;
+            if (u_star >= -eps && u_star <= 1.0 + eps) {
+                u_star = std::clamp(u_star, 0.0, 1.0);
+
+                Vec3   p_star      = (1.0 - u_star) * x2 + u_star * x3;
+                Vec3   p_star_perp = (p_star - x_com) - ((p_star - x_com).dot(n_hat)) * n_hat;
+                double rho_star    = p_star_perp.norm();
+
+                if (rho_star >= r_inner - eps && rho_star <= r_outer + eps) {
+                    Vec2 p_star_2d = project2D(p_star, x_com, e1, e2);
+                    Vec2 x0_2d     = project2D(x0,     x_com, e1, e2);
+                    Vec2 x1_2d     = project2D(x1,     x_com, e1, e2);
+                    Vec2 x_com_2d  = Vec2::Zero();
+
+                    double s_cand = 0.0;
+                    bool hit = point_segment_2d_rb_rotation(
+                        p_star_2d, x_com_2d, 0.0, -dtheta, x0_2d, x1_2d, s_cand);
+
+                    if (hit) { best_s = s_cand; found = true; }
+                }
+            }
+
+        } 
+        else if (std::abs(h0 - h2) < eps) {
+            // Sub-case B2: both segments in same plane
+            Vec2 x0_2d    = project2D(x0, x_com, e1, e2);
+            Vec2 x1_2d    = project2D(x1, x_com, e1, e2);
+            Vec2 x2_2d    = project2D(x2, x_com, e1, e2);
+            Vec2 x3_2d    = project2D(x3, x_com, e1, e2);
+            Vec2 x_com_2d = Vec2::Zero();
+
+            struct Check { Vec2 x; double tn, tnew; Vec2 seg0, seg1; };
+            std::vector<Check> checks = {
+                {x0_2d, theta_n_2d, theta_new_2d, x2_2d, x3_2d},
+                {x1_2d, theta_n_2d, theta_new_2d, x2_2d, x3_2d},
+                {x2_2d, 0.0,       -dtheta,       x0_2d, x1_2d},
+                {x3_2d, 0.0,       -dtheta,       x0_2d, x1_2d},
+            };
+
+            for (auto& c : checks) {
+                double s_cand = 0.0;
+                bool hit = point_segment_2d_rb_rotation(
+                    c.x, x_com_2d, c.tn, c.tnew, c.seg0, c.seg1, s_cand);
+                if (hit && s_cand < best_s) { best_s = s_cand; found = true; }
+            }
+        }
+        // else: parallel planes -> no collision
     }
 
-    // -------------------------
-    // Case B: Flat annulus (h0 == h1)
-    // -------------------------
-
-    // Sub-case B1: stationary segment pierces plane
-    if (std::abs(en) > eps) {
-
-        double u_star = (h0 - h2) / en;
-        if (u_star < -eps || u_star > 1.0 + eps) return false;
-        u_star = std::clamp(u_star, 0.0, 1.0);
-
-        Vec3 p_star      = (1.0 - u_star) * x2 + u_star * x3;
-        Vec3 p_star_perp = (p_star - x_com) - ((p_star - x_com).dot(n_hat)) * n_hat;
-        double rho_star  = p_star_perp.norm();
-
-        if (rho_star < r_min - eps || rho_star > r_max + eps) return false;
-
-        // project to 2D and run reversed CCD
-        Vec2 p_star_2d = project2D(p_star, x_com, e1, e2);
-        Vec2 x0_2d     = project2D(x0, x_com, e1, e2);
-        Vec2 x1_2d     = project2D(x1, x_com, e1, e2);
-        Vec2 x_com_2d  = Vec2::Zero();
-
-        double s_cand = 0.0;
-        bool hit = point_segment_2d_rb_rotation(
-            p_star_2d, x_com_2d, 0.0, -dtheta, x0_2d, x1_2d, s_cand);
-
-        if (!hit) return false;
-        s = s_cand;
-        return true;
-    }
-
-    // Sub-case B2: both segments flat
-    if (std::abs(h0 - h2) > eps) return false; // parallel planes
-
-    // same plane: 4 point-segment CCD checks
-    Vec2 x0_2d    = project2D(x0, x_com, e1, e2);
-    Vec2 x1_2d    = project2D(x1, x_com, e1, e2);
-    Vec2 x2_2d    = project2D(x2, x_com, e1, e2);
-    Vec2 x3_2d    = project2D(x3, x_com, e1, e2);
-    Vec2 x_com_2d = Vec2::Zero();
-
-    // need theta_n in the constructed 2D frame
-    // angle of x0 in the plane at s=0
-    double theta_n_2d   = std::atan2(x0_2d.y(), x0_2d.x());
-    double theta_new_2d = theta_n_2d + dtheta;
-
-    struct Check { Vec2 x; double tn, tnew; Vec2 seg0, seg1; };
-    std::vector<Check> checks = {
-        {x0_2d, theta_n_2d,   theta_new_2d,  x2_2d, x3_2d},
-        {x1_2d, theta_n_2d,   theta_new_2d,  x2_2d, x3_2d},
-        {x2_2d, 0.0,          -dtheta,        x0_2d, x1_2d},
-        {x3_2d, 0.0,          -dtheta,        x0_2d, x1_2d},
-    };
-
-    for (auto& c : checks) {
-        double s_cand = 0.0;
-        bool hit = point_segment_2d_rb_rotation(
-            c.x, x_com_2d, c.tn, c.tnew, c.seg0, c.seg1, s_cand);
-        if (hit && s_cand < s) s = s_cand;
-    }
-
-    if (s == std::numeric_limits<double>::infinity()) return false;
+    if (!found) return false;
+    s = best_s;
     return true;
 }
