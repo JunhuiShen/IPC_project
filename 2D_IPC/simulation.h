@@ -81,11 +81,11 @@ inline AdvanceResult2D advance_one_frame_rb(DeformedState& state, const RefMesh&
     for (int substep = 0; substep < substeps; ++substep) {
         Vec xnew = initial_guess::trivial_initial_guess(state);
 
-        Vec y_current = state.x_coms;
-        std::vector<double> theta_current = state.theta;
+        Vec ynew = state.x_coms;
+        std::vector<double> theta_new = state.theta;
 
         std::vector<double> residual_history;
-        const SolveResult substep_result = global_gauss_seidel_solver_rb(ref_mesh, pins, state, xnew, y_current, theta_current, params, broad_phase, &residual_history);
+        const SolveResult substep_result = global_gauss_seidel_solver_rb(ref_mesh, pins, state, xnew, ynew, theta_new, params, broad_phase, &residual_history);
 
         if (aggregate.substeps_completed == 0 && !residual_history.empty())
             aggregate.first_initial_residual = residual_history.front();
@@ -102,17 +102,17 @@ inline AdvanceResult2D advance_one_frame_rb(DeformedState& state, const RefMesh&
 
         // Update rb velocities from the change in COM and theta
         for (int rb = 0; rb < num_rbs; ++rb) {
-            state.v_coms[rb].x = (y_current[rb].x - state.x_coms[rb].x) / dt;
-            state.v_coms[rb].y = (y_current[rb].y - state.x_coms[rb].y) / dt;
-            state.omega[rb] = (theta_current[rb] - state.theta[rb]) / dt;
+            state.v_coms[rb].x = (ynew[rb].x - state.x_coms[rb].x) / dt;
+            state.v_coms[rb].y = (ynew[rb].y - state.x_coms[rb].y) / dt;
+            state.omega[rb] = (theta_new[rb] - state.theta[rb]) / dt;
             // Normalize theta to [0, 2pi) after omega is computed
-            theta_current[rb] = std::fmod(theta_current[rb], 2.0 * M_PI);
-            if (theta_current[rb] < 0.0) theta_current[rb] += 2.0 * M_PI;
+            theta_new[rb] = std::fmod(theta_new[rb], 2.0 * M_PI);
+            if (theta_new[rb] < 0.0) theta_new[rb] += 2.0 * M_PI;
         }
 
         // Commit rb DOFs
-        state.x_coms = std::move(y_current);
-        state.theta  = std::move(theta_current);
+        state.x_coms = std::move(ynew);
+        state.theta  = std::move(theta_new);
         state.deformed_positions = std::move(xnew);
 
         if (on_substep) {

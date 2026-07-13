@@ -25,7 +25,6 @@ add_library(ipc_core
     ccd.cpp
     solver.cpp
     example.cpp
-    rigid_body.cpp
     rigid_body_ipc.cpp
 )
 
