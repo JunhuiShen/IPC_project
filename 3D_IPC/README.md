@@ -25,10 +25,12 @@ The nonlinear solve is driven by one of two Gauss-Seidel solvers, selected by
 CLI flag:
 
 - **`global_gauss_seidel_solver_basic`** (default) -- builds the broad phase
-  once per substep and sweeps every vertex with a local 3x3 Newton step.
+  every `node_box_update_count` iterations and sweeps every vertex with a local
+  3x3 Newton step.
   Each step is clamped by either CCD (`--use_ccd`) or an OGC narrow phase
   (`--use_ogc`). It uses conflict-graph coloring for parallel-by-color
-  commits when `--use_parallel` is enabled. Requires `--fixed_iters`.
+  commits when `--use_parallel` is enabled. It supports either convergence-
+  based stopping or a fixed iteration count with `--fixed_iters`.
 - **`global_gauss_seidel_solver_ogc`** (`--use_ogc_solver`) -- alternative
   OGC solver that rebuilds the broad phase per outer iteration and
   partial-refits the BVH after each per-vertex commit. Padding controlled by
@@ -37,6 +39,32 @@ CLI flag:
 
 Our OGC narrow phase and solver implement the algorithm from Chen et al.
 2025; see Acknowledgments.
+
+## Solver Algorithm
+
+Each substep runs nonlinear Gauss-Seidel iterations over the mesh vertices:
+
+- builds a blue trust-region box for each vertex with a heuristic size
+- builds red primitive boxes from the blue boxes of the vertices belonging to
+  each triangle and edge
+- builds green primitive boxes by augmenting the red boxes by `d_hat`
+- registers vertex-triangle and edge-edge contact pairs from intersections of
+  the corresponding boxes
+- builds a combined elastic/contact conflict graph and colors it greedily
+- processes the color groups sequentially; vertices within one color group can
+  be updated in parallel
+- computes a local Newton update for each vertex
+- clips each update to its blue trust-region box and then applies CCD to keep
+  the complete motion path intersection-free
+- keeps the contact pairs and coloring fixed between rebuilds, potentially
+  across multiple Gauss-Seidel iterations
+- rebuilds the boxes, contact pairs, conflict graph, and coloring every
+  `node_box_update_count` iterations
+- evaluates the global residual after each sweep and stops when the requested
+  convergence tolerance is reached
+
+In short, the solver repeatedly builds a conservative contact set and
+performs collision-safe per-vertex Newton updates one color group at a time.
 
 ## Requirements
 
@@ -73,7 +101,8 @@ only add custom code when the available library path is not suitable.
     ./build/3D_sim --fixed_iters        # default scene (twisting cloth)
     ./build/3D_sim --help               # full argument list
 
-(`--fixed_iters` is required by both solvers.)
+(`--fixed_iters` is required only by `global_gauss_seidel_solver_ogc`; the
+default basic solver can instead use residual-based convergence.)
 
 Built-in example scenes (`--example N`):
 
@@ -248,8 +277,7 @@ reader can jump to the layer they care about.
 
 ### Solver
 
-- `solver.h` / `solver.cpp` -- solver implementations selected by CLI flag
-  (both require `--fixed_iters` and exit with an error otherwise):
+- `solver.h` / `solver.cpp` -- solver implementations selected by CLI flag:
   - `global_gauss_seidel_solver_basic` (default): broad-phase/contact-color
     data is rebuilt every `node_box_update_count` GS iterations and reused
     between rebuilds. Gauss-Seidel sweeps run via

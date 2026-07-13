@@ -12,13 +12,13 @@ every intermediate state intersection-free.
 | Directory | What it is |
 |-----------|------------|
 | [`2D_IPC/`](2D_IPC/) | 2D explicit-edge and rigid-body testbed with vertex-wise and rigid-body Gauss--Seidel solvers, box-structured broad phase, and example scenes. |
-| [`3D_IPC/`](3D_IPC/) | Full 3D simulator for deformable triangle meshes (cloth / thin shells). CCD- and OGC-based step clamping, parallel-by-color GS, optional GPU pipeline, USD/OBJ/PLY/GEO export. |
+| [`3D_IPC/`](3D_IPC/) | Full 3D simulator for deformable triangle meshes (cloth / thin shells). CCD- and OGC-based step clamping, parallel-by-color GS, and USD/OBJ/PLY/GEO export. |
 
 Each subproject has its own README with build instructions, CLI flags,
 example scenes, and a source-layout map. Start there:
 
 - [`2D_IPC/README.md`](2D_IPC/README.md)
-- [`3D_IPC/Readme.md`](3D_IPC/Readme.md)
+- [`3D_IPC/README.md`](3D_IPC/README.md)
 
 ## Shared themes
 
@@ -42,8 +42,9 @@ Each subproject builds independently with CMake:
     cd 2D_IPC && cmake -B build && cmake --build build
     cd 3D_IPC && cmake -B build && cmake --build build
 
-The 3D project additionally requires OpenMP, GoogleTest, Eigen, and
-Tight-Inclusion CCD (the latter two fetched automatically).
+Both projects use OpenMP, GoogleTest, and Eigen. The 3D project additionally
+uses Tight-Inclusion CCD; Eigen and Tight-Inclusion are fetched automatically
+by their respective CMake configurations.
 
 ## Acknowledgments
 

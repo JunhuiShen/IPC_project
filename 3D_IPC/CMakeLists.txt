@@ -178,6 +178,21 @@ target_link_libraries(ccd_test
 
 gtest_discover_tests(ccd_test)
 
+add_executable(rigid_body_ipc_test
+    rigid_body_ipc_test.cpp
+    rigid_body_ipc.cpp
+    quaternion_math.cpp
+)
+
+target_link_libraries(rigid_body_ipc_test
+    PRIVATE
+    corotated_energy_lib
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(rigid_body_ipc_test)
+
 add_executable(broad_phase_test
     broad_phase_test.cpp
     broad_phase.cpp
