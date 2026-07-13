@@ -1,6 +1,7 @@
 #include "ccd.h"
 #include "segment_segment_distance.h"
 
+#include <cmath>
 #include <gtest/gtest.h>
 
 // TICCD's solving precision; the linear-CCD wrapper's TOI is accurate to
@@ -247,3 +248,254 @@ TEST(GeneralCCDSegmentSegment, TightInclusionNoCollision) {
 
     EXPECT_DOUBLE_EQ(t, 1.0);
 }
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////  Rigid Body CCD Test /////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+namespace {
+const Vec4 kIdentityQ(1.0, 0.0, 0.0, 0.0);
+
+Vec4 AxisAngleQuat(const Vec3& axis, double angle) {
+    return Rigid_Body::ALGEBRA::QuaternionFromVector(axis.normalized() * angle);
+}
+}  // namespace
+
+TEST(SegmentSegmentRBRotationCCD, NoRotationReturnsFalse) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(0.0, -1.0, 0.0);
+    const Vec3 x1(0.0, -2.0, 2.0);
+    const Vec3 x2(1.0, -0.5, 1.0);
+    const Vec3 x3(2.0, 0.5, 1.0);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, kIdentityQ, kIdentityQ, x2, x3, s);
+    EXPECT_FALSE(hit);
+}
+
+TEST(SegmentSegmentRBRotationCCD, SegmentOnAxisReturnsFalse) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(0.0, 0.0, 1.0);
+    const Vec3 x1(0.0, 0.0, 3.0);
+    const Vec3 x2(1.0, 0.0, 2.0);
+    const Vec3 x3(-1.0, 0.0, 2.0);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI / 2.0);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
+    EXPECT_FALSE(hit);
+}
+
+TEST(SegmentSegmentRBRotationCCD, CaseA_FrustumHit) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(0.0, -1.0, 0.0);
+    const Vec3 x1(0.0, -2.0, 2.0);
+    const Vec3 x2(1.0, -0.5, 1.0);
+    const Vec3 x3(2.0, 0.5, 1.0);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
+    ASSERT_TRUE(hit);
+    EXPECT_NEAR(s, 0.5, 1e-10);
+}
+
+TEST(SegmentSegmentRBRotationCCD, CaseB1_PiercingAnnulusHit) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(0.0, -1.0, 0.0);
+    const Vec3 x1(0.0, -2.0, 0.0);
+    const Vec3 x2(1.5, 0.0, -1.0);
+    const Vec3 x3(1.5, 0.0, 1.0);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
+    ASSERT_TRUE(hit);
+    EXPECT_NEAR(s, 0.5, 1e-10);
+}
+
+TEST(SegmentSegmentRBRotationCCD, CaseB2_SamePlaneHit) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(0.0, -1.0, 0.0);
+    const Vec3 x1(0.0, -2.0, 0.0);
+    const Vec3 x2(1.5, 0.0, 0.0);
+    const Vec3 x3(3.0, 0.0, 0.0);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
+    ASSERT_TRUE(hit);
+    EXPECT_NEAR(s, 0.5, 1e-10);
+}
+
+TEST(SegmentSegmentRBRotationCCD, CaseA_SkewSegmentGeneralHit) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(1.0, 0.0, 0.0);
+    const Vec3 x1(0.0, 2.0, 3.0);
+    const Vec3 x2(-0.10131289848292738, 0.60967344361641129, 1.5);
+    const Vec3 x3(-0.26524061172707147, 1.596145797425957, 1.5);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI / 2.0);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
+    ASSERT_TRUE(hit);
+    EXPECT_NEAR(s, 0.4, 1e-10);
+}
+
+TEST(SegmentSegmentRBRotationCCD, CaseA_SkewSegmentOppositeSidesHit) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(1.0, 0.0, -1.0);
+    const Vec3 x1(0.0, 2.0, 2.0);
+    const Vec3 x2(-0.10131289848292738, 0.60967344361641129, 0.5);
+    const Vec3 x3(-0.26524061172707147, 1.596145797425957, 0.5);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI / 2.0);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
+    ASSERT_TRUE(hit);
+    EXPECT_NEAR(s, 0.4, 1e-10);
+}
+
+TEST(SegmentSegmentRBRotationCCD, CaseA_SkewSegmentOppositeXSidesHit) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(-1.0, 0.5, -1.0);
+    const Vec3 x1(1.0, -0.3, 2.0);
+    const Vec3 x2(0.23511410091698948, -0.32360679774997875, 0.5);
+    const Vec3 x3(-0.35267115137548433, 0.48541019662496826, 0.5);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI / 2.0);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
+    ASSERT_TRUE(hit);
+    EXPECT_NEAR(s, 0.4, 1e-10);
+}
+
+TEST(SegmentSegmentRBRotationCCD, CaseA_ArbitraryAxisHit) {
+    const Vec3 x_com(0.5, -0.3, 0.2);
+    const Vec3 x0(1.5, -0.3, -0.8);
+    const Vec3 x1(0.5, 1.7, 2.2);
+    const Vec3 x2(1.2351048854627524, 0.30605919321519798, 0.85883592132205056);
+    const Vec3 x3(0.48919814277551343, 0.9666188030347671, 0.94418305418971882);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(1, 1, 1), M_PI / 2.0);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
+    ASSERT_TRUE(hit);
+    EXPECT_NEAR(s, 0.4, 1e-10);
+}
+
+TEST(SegmentSegmentRBRotationCCD, CaseA_HourglassEndpointTouchHit) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(2.0, 0.0, -2.0);
+    const Vec3 x1(-2.0, 0.0, 2.0);
+    const Vec3 x2(0.0, 1.0, 1.0);
+    const Vec3 x3(0.0, 1.0, -1.0);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
+    ASSERT_TRUE(hit);
+    EXPECT_NEAR(s, 0.5, 1e-10);
+}
+
+TEST(SegmentSegmentRBRotationCCD, CaseB1_TrueInnerRadiusHit) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(-1.0, 0.2, 0.0);
+    const Vec3 x1(1.0, 0.2, 0.0);
+    const Vec3 x2(0.5, 0.0, -1.0);
+    const Vec3 x3(0.5, 0.0, 1.0);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), -M_PI / 4.0);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
+    ASSERT_TRUE(hit);
+    EXPECT_NEAR(s, 0.52395952173781901, 1e-9);
+}
+
+TEST(SegmentSegmentRBRotationCCD, CaseB1_InsideTrueInnerRadiusNoCollision) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(-1.0, 0.2, 0.0);
+    const Vec3 x1(1.0, 0.2, 0.0);
+    const Vec3 x2(0.1, 0.0, -1.0);
+    const Vec3 x3(0.1, 0.0, 1.0);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI / 2.0);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
+    EXPECT_FALSE(hit);
+}
+
+TEST(SegmentSegmentRBRotationCCD, CaseB1_SkewTrueInnerRadiusHit) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(-1.0, 0.2, 0.0);
+    const Vec3 x1(1.0, 0.5, 0.0);
+    const Vec3 x2(0.6, 0.0, -1.0);
+    const Vec3 x3(0.6, 0.0, 1.0);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), -M_PI / 2.0);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
+    ASSERT_TRUE(hit);
+    EXPECT_NEAR(s, 0.48624588465853014, 1e-9);
+}
+
+TEST(SegmentSegmentRBRotationCCD, CaseB1_SkewInsideTrueInnerRadiusNoCollision) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(-1.0, 0.2, 0.0);
+    const Vec3 x1(1.0, 0.5, 0.0);
+    const Vec3 x2(0.2, 0.0, -1.0);
+    const Vec3 x3(0.2, 0.0, 1.0);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
+    EXPECT_FALSE(hit);
+}
+
+TEST(SegmentSegmentRBRotationCCD, CaseB2_ParallelPlanesNoCollision) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(0.0, -1.0, 0.0);
+    const Vec3 x1(0.0, -2.0, 0.0);
+    const Vec3 x2(1.5, 0.0, 5.0);
+    const Vec3 x3(3.0, 0.0, 5.0);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI);
+
+    double s = -1.0;
+    const bool hit = segment_segment_rb_rotation_ccd(
+        x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
+    EXPECT_FALSE(hit);
+}
+

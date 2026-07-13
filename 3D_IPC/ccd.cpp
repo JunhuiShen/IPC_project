@@ -773,11 +773,13 @@ bool segment_segment_rb_rotation_ccd(
         if (dx_perp_sq < eps) {
             // both endpoints at same perpendicular position
             r_inner = r0;
-        } else {
+        } 
+        else {
             double t_star = -x0_perp.dot(dx_perp) / dx_perp_sq;
             if (t_star > 0.0 && t_star < 1.0) {
                 r_inner = (x0_perp + t_star * dx_perp).norm();
-            } else {
+            } 
+            else {
                 r_inner = std::min(r0, r1);
             }
         }
