@@ -705,7 +705,6 @@ bool segment_segment_rb_rotation_ccd(
 
             for (int sign : {-1, 1}) {
                 double u;
-
                 if (std::abs(A) < eps) {
                     if (std::abs(B) < eps) {
                         if (std::abs(C) < eps) {
@@ -836,6 +835,192 @@ bool segment_segment_rb_rotation_ccd(
     }
 
     if (!found) return false;
+    s = best_s;
+    return true;
+}
+
+bool point_triangle_rb_rotation_ccd(
+    const Vec3& x,          // world position of particle at s=0
+    const Vec3& x_com,      // center of mass
+    const Vec4& q_new,      // quaternion at s=1
+    const Vec4& q_n,        // quaternion at s=0
+    const Vec3& x2,         // triangle vertex 0
+    const Vec3& x3,         // triangle vertex 1
+    const Vec3& x4,         // triangle vertex 2
+    double& s)
+{
+    s = 0.0;
+    constexpr double eps = 1e-10;
+
+    // -------------------------
+    // Step 0: Extract rotation axis from q_rel = q_new * q_n^(-1)
+    // -------------------------
+    Vec4 q_n_conj = Rigid_Body::ALGEBRA::ConjugateQuaternion(q_n);
+    Vec4 q_rel    = Rigid_Body::ALGEBRA::QuaternionMultiply(q_new, q_n_conj);
+
+    Vec3 v_rel(q_rel[1], q_rel[2], q_rel[3]);
+    double v_rel_norm = v_rel.norm();
+    if (v_rel_norm < eps) return false; // no rotation
+
+    Vec3 n_hat = v_rel / v_rel_norm;
+
+    // -------------------------
+    // Step 1: Decompose particle offset (world space at s=0)
+    // -------------------------
+    Vec3   dx = x - x_com;
+    double h  = dx.dot(n_hat);
+
+    Vec3 r_parallel = h * n_hat;
+    Vec3 r_perp     = dx - r_parallel;
+
+    if (r_perp.norm() < eps) return false; // particle on rotation axis
+
+    // Signed rotation angle
+    Vec3 r_perp_rotated = Rigid_Body::ALGEBRA::QuaternionRotate(q_rel, r_perp);
+    double dtheta = std::atan2(
+        r_perp.cross(r_perp_rotated).dot(n_hat),
+        r_perp.dot(r_perp_rotated));
+
+    if (std::abs(dtheta) < eps) return false; // no rotation
+
+    Vec3 n_cross_r_perp = n_hat.cross(r_perp);
+
+    // -------------------------
+    // Step 3: Triangle plane condition
+    // -------------------------
+    Vec3 e1 = x3 - x2;
+    Vec3 e2 = x4 - x2;
+
+    Vec3   n_tri      = e1.cross(e2);
+    double n_tri_norm = n_tri.norm();
+    if (n_tri_norm < eps) {
+        std::cerr << "Warning: degenerate triangle detected in point_triangle_rb_rotation_ccd() when computing surface normal\n";
+        return false; // degenerate triangle
+    }
+
+    Vec3 n_tri_hat = n_tri / n_tri_norm;
+
+    double A = r_perp.dot(n_tri_hat);
+    double B = n_cross_r_perp.dot(n_tri_hat);
+    double C = (x_com + r_parallel - x2).dot(n_tri_hat);
+
+    // Precompute barycentric system (triangle is stationary)
+    double a11 = e1.dot(e1);
+    double a12 = e1.dot(e2);
+    double a22 = e2.dot(e2);
+    double det = a11 * a22 - a12 * a12;
+    if (std::abs(det) < eps){
+        std::cerr << "Warning: degenerate triangle detected in point_triangle_rb_rotation_ccd() because of 0 determinant\n";
+        return false; // degenerate triangle
+    }
+
+    // barycentric inside-check for an arbitrary point 
+    auto inside_triangle = [&](const Vec3& p) -> bool {
+        Vec3   r_tri = p - x2;
+        double b1    = r_tri.dot(e1);
+        double b2    = r_tri.dot(e2);
+
+        double alpha   = ( b1 * a22 - b2 * a12) / det;
+        double beta    = (-b1 * a12 + b2 * a11) / det;
+        double lambda1 = 1.0 - alpha - beta;
+
+        return (alpha >= -eps && beta >= -eps && lambda1 >= -eps);
+    };
+
+    double amplitude = std::sqrt(A * A + B * B);
+
+    // -------------------------
+    // Degenerate case: circle parallel to triangle plane
+    // -------------------------
+    if (amplitude < eps) {
+        if (std::abs(C) > eps) return false; // constant nonzero distance, never touches
+
+        // In-plane case: particle rotates within the triangle plane.
+
+        // If the particle starts inside the triangle, contact at s = 0
+        if (inside_triangle(x)) {
+            s = 0.0;
+            return true;
+        }
+
+        // Otherwise: 2D CCD against the three triangle edges
+        Vec3 be1, be2;
+        buildBasis(n_hat, be1, be2);
+
+        Vec2 x_2d     = project2D(x,  x_com, be1, be2);
+        Vec2 x2_2d    = project2D(x2, x_com, be1, be2);
+        Vec2 x3_2d    = project2D(x3, x_com, be1, be2);
+        Vec2 x4_2d    = project2D(x4, x_com, be1, be2);
+        Vec2 x_com_2d = Vec2::Zero();
+
+        // theta_n is a free gauge choice; only dtheta matters
+        double theta_n_2d   = std::atan2(x_2d.y(), x_2d.x());
+        double theta_new_2d = theta_n_2d + dtheta;
+
+        double best_s_planar = std::numeric_limits<double>::infinity();
+
+        const std::array<std::pair<Vec2, Vec2>, 3> edges = {{
+            {x2_2d, x3_2d},
+            {x3_2d, x4_2d},
+            {x4_2d, x2_2d},
+        }};
+
+        for (const auto& edge : edges) {
+            double s_cand = 0.0;
+            bool hit = point_segment_2d_rb_rotation(
+                x_2d, x_com_2d, theta_n_2d, theta_new_2d,
+                edge.first, edge.second, s_cand);
+            if (hit && s_cand < best_s_planar) best_s_planar = s_cand;
+        }
+
+        if (best_s_planar == std::numeric_limits<double>::infinity()) return false;
+        s = best_s_planar;
+        return true;
+    }
+
+    if (std::abs(C) > amplitude + eps) return false; // circle never reaches plane so no collision
+
+    // -------------------------
+    // Step 4: Solve A*cos(theta) + B*sin(theta) + C = 0, theta(s) = s*dtheta
+    // -------------------------
+    double phi        = std::atan2(B, A);
+    double arccos_val = std::acos(std::clamp(-C / amplitude, -1.0, 1.0));
+
+    double theta_candidates[2] = {phi + arccos_val, phi - arccos_val};
+
+    constexpr double two_pi = 2.0 * M_PI;
+    double best_s = std::numeric_limits<double>::infinity();
+
+    auto consider_theta = [&](double theta_star) {
+        // theta^n = 0 by construction (r_perp is world-space at s=0)
+        double s_cand = theta_star / dtheta;
+        if (s_cand < -eps || s_cand > 1.0 + eps) return;
+        s_cand = std::clamp(s_cand, 0.0, 1.0);
+
+        // Step 5: contact position via Rodrigues
+        double theta_s = s_cand * dtheta;
+        Vec3 x_s = x_com + r_parallel
+                         + r_perp         * std::cos(theta_s)
+                         + n_cross_r_perp * std::sin(theta_s);
+
+        // Step 6: barycentric inside-triangle check
+        if (!inside_triangle(x_s)) return;
+
+        if (s_cand < best_s) best_s = s_cand;
+    };
+
+    for (double theta_base : theta_candidates) {
+        // wrap to find first root at/after 0 (dtheta > 0) or at/before 0 (dtheta < 0)
+        double k;
+        if (dtheta > 0.0) {
+            k = std::ceil((0.0 - theta_base - eps) / two_pi);
+        } else {
+            k = std::floor((0.0 - theta_base + eps) / two_pi);
+        }
+        consider_theta(theta_base + two_pi * k);
+    }
+
+    if (best_s == std::numeric_limits<double>::infinity()) return false;
     s = best_s;
     return true;
 }

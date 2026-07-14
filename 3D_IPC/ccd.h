@@ -49,3 +49,13 @@ bool segment_segment_rb_rotation_ccd(
         const Vec4& q_new, const Vec4& q_n,
         const Vec3& x2, const Vec3& x3,
         double& s);
+
+// Particle x rotating rigidly about x_com from orientation q_n to q_new
+// against the fixed triangle (x2, x3, x4). Returns the earliest time of
+// impact `s` in [0, 1], or false if none.
+bool point_triangle_rb_rotation_ccd(
+        const Vec3& x,
+        const Vec3& x_com,
+        const Vec4& q_new, const Vec4& q_n,
+        const Vec3& x2, const Vec3& x3, const Vec3& x4,
+        double& s);

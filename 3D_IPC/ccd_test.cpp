@@ -499,3 +499,51 @@ TEST(SegmentSegmentRBRotationCCD, CaseB2_ParallelPlanesNoCollision) {
     EXPECT_FALSE(hit);
 }
 
+TEST(PointTriangleRBRotationCCD, CoplanarTriangleHit) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x(0.0, -2.0, 0.0);
+    const Vec3 x2(1.0, 0.0, 0.0);
+    const Vec3 x3(3.0, 0.0, 0.0);
+    const Vec3 x4(2.0, 1.0, 0.0);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI);
+
+    double s = -1.0;
+    const bool hit = point_triangle_rb_rotation_ccd(
+        x, x_com, q_new, kIdentityQ, x2, x3, x4, s);
+    ASSERT_TRUE(hit);
+    EXPECT_NEAR(s, 0.5, 1e-14);
+}
+
+TEST(PointTriangleRBRotationCCD, TiltedAxisAlignedTriangleHit) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x(0.0, -2.0, 0.0);
+    const Vec3 x2(1.0, 0.0, -1.0);
+    const Vec3 x3(3.0, 0.0, -1.0);
+    const Vec3 x4(2.0, 0.0, 1.0);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI);
+
+    double s = -1.0;
+    const bool hit = point_triangle_rb_rotation_ccd(
+        x, x_com, q_new, kIdentityQ, x2, x3, x4, s);
+    ASSERT_TRUE(hit);
+    EXPECT_NEAR(s, 0.5, 1e-14);
+}
+
+TEST(PointTriangleRBRotationCCD, SkewTiltedTriangleHit) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x(0.0, -2.0, 0.0);
+    const Vec3 x2(1.5, -0.5, -0.5);
+    const Vec3 x3(2.7, 0.6, 0.4);
+    const Vec3 x4(1.6, 0.7, 0.8);
+
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI);
+
+    double s = -1.0;
+    const bool hit = point_triangle_rb_rotation_ccd(
+        x, x_com, q_new, kIdentityQ, x2, x3, x4, s);
+    ASSERT_TRUE(hit);
+    EXPECT_NEAR(s, 0.51132265526877663, 1e-14);
+}
+
