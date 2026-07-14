@@ -233,8 +233,8 @@ reader can jump to the layer they care about.
 
 ### Geometric primitives
 
-- `IPC_math.h` / `IPC_math.cpp` -- type aliases, 3x3 matrix utilities,
-  `SmallRoots` stack-allocated polynomial root container, miscellaneous helpers.
+- `IPC_math.h` / `IPC_math.cpp` -- type aliases, 3x3 matrix utilities, and
+  shared geometric helpers.
 - `node_triangle_distance.h` / `node_triangle_distance.cpp` -- closest-point
   distance covering all 7 Voronoi regions plus degenerate triangles.
 - `segment_segment_distance.h` / `segment_segment_distance.cpp` -- closest-point
@@ -316,13 +316,13 @@ Every layer of the pipeline has a GoogleTest binary. To build and run them all:
 |-------------|-------|----------------|
 | `ccd_test` | 17 | Linear CCD single-moving-DOF cases plus TICCD-backed general NT/SS wrapper smoke tests |
 | `broad_phase_test` | 26 | AABB, BVH, pair generation, CCD candidates, conservativeness, uniqueness, and `incremental_refresh_vertex` partial refit |
-| `ipc_math_test` | 27 | `matrix3d_inverse`, `segment_closest_point`, `filter_root`, `SmallRoots`, barycentric coords, serialize round-trip, topology caching |
+| `ipc_math_test` | 15 | `matrix3d_inverse`, `segment_closest_point`, barycentric coordinates, serialize round-trip, and topology caching |
 | `sdf_penalty_energy_test` | 15 | Plane / cylinder SDF energy + gradient + Hessian FD convergence, hard-quadratic limit, soft-barrier rest at `phi=eps` |
 | `bending_energy_test` | 20 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
 | `parallel_helper_test` | 3 | Coloring and safe-step behavior |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
 | `make_shape_test` | 15 | Adjacency maps, greedy coloring |
-| `barrier_energy_test` | 14 | Scalar barrier, NT/SS gradient/Hessian FD convergence, activation boundary, near-parallel stress |
+| `barrier_energy_test` | 18 | Scalar barrier, NT/SS gradient/Hessian FD convergence, NT/SS cross-Hessian blocks |
 | `corotated_energy_test` | 13 | Energy, rest state, rotation/translation invariance, gradient/Hessian FD convergence, stress |
 | `total_energy_test` | 12 | Combined elastic + barrier FD convergence, barrier activation, per-vertex gradient/Hessian, slope-2 checks |
 | `initial_guess_test` | 4 | CCD no-candidate guess and translation guess closed forms for inertia/gravity, pins, and one-step plane-SDF correction |

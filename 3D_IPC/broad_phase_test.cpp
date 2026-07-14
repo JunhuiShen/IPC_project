@@ -860,3 +860,36 @@ TEST(BroadPhaseTest, IncrementalRefreshIsIdempotentForZeroMove) {
     check_bvh_internal_invariant(c.tri_bvh_nodes);
     check_bvh_internal_invariant(c.edge_bvh_nodes);
 }
+
+TEST(BroadPhaseTest, PerVertexSafeStepBacksOffEndpointCollision) {
+    std::vector<Vec3> x = {
+        Vec3(1.5, 0.25, 0.0),
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0),
+    };
+    const std::vector<Vec3> target = {
+        Vec3(0.75, 0.25, 0.0),  // first touches the triangle at t = 1
+        x[1], x[2], x[3],
+    };
+
+    BroadPhase bp;
+    auto& cache = bp.mutable_cache();
+    cache.vertex_nt.resize(x.size());
+    cache.vertex_ss.resize(x.size());
+    NodeTrianglePair pair{};
+    pair.node = 0;
+    pair.tri_v[0] = 1;
+    pair.tri_v[1] = 2;
+    pair.tri_v[2] = 3;
+    cache.nt_pairs.push_back(pair);
+    cache.vertex_nt[0].push_back({/*pair_index=*/0, /*dof=*/0});
+
+    bp.per_vertex_safe_step(
+        x, [&](int vi) { return target[vi]; },
+        /*safety=*/0.9, /*clip_to_node_box=*/false, /*clip_ccd=*/true,
+        /*use_ticcd=*/false, /*use_ogc=*/false);
+
+    const Vec3 expected(0.825, 0.25, 0.0);
+    EXPECT_TRUE(x[0].isApprox(expected, 1.0e-12));
+}

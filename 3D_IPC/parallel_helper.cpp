@@ -41,15 +41,14 @@ void compute_local_newton_direction(int vi, const RefMesh& ref_mesh, const Verte
 
         for (const auto& entry : bp_cache.vertex_nt[vi]) {
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
-            auto [bg, bH] = node_triangle_barrier_gradient_and_hessian( x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
+            auto [bg, bH] = node_triangle_barrier_self_gradient_and_hessian( x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
             g += dt2k * bg;
             H += dt2k * bH;
         }
 
         for (const auto& entry : bp_cache.vertex_ss[vi]) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
-            auto [bg, bH] = segment_segment_barrier_gradient_and_hessian(
-                    x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
+            auto [bg, bH] = segment_segment_barrier_self_gradient_and_hessian(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
             g += dt2k * bg;
             H += dt2k * bH;
         }
@@ -172,21 +171,14 @@ void build_contact_adj(const BroadPhase::Cache& bp_cache, int nv, std::vector<st
 
 void union_adjacency(const std::vector<std::vector<int>>& a,const std::vector<std::vector<int>>& b, std::vector<std::vector<int>>& out) {
     const int nv = static_cast<int>(std::max(a.size(), b.size()));
+    static const std::vector<int> empty_row;
     prepare_int_rows(out, nv);
     #pragma omp parallel for schedule(dynamic, 64)
     for (int vi = 0; vi < nv; ++vi) {
-        const auto* pa = (vi < static_cast<int>(a.size())) ? &a[vi] : nullptr;
-        const auto* pb = (vi < static_cast<int>(b.size())) ? &b[vi] : nullptr;
-        if (!pa || pa->empty()) {
-            if (pb) out[vi].insert(out[vi].end(), pb->begin(), pb->end());
-            continue;
-        }
-        if (!pb || pb->empty()) {
-            out[vi].insert(out[vi].end(), pa->begin(), pa->end());
-            continue;
-        }
-        out[vi].reserve(pa->size() + pb->size());
-        std::set_union(pa->begin(), pa->end(), pb->begin(), pb->end(), std::back_inserter(out[vi]));
+        const auto& row_a = vi < static_cast<int>(a.size()) ? a[vi] : empty_row;
+        const auto& row_b = vi < static_cast<int>(b.size()) ? b[vi] : empty_row;
+        out[vi].reserve(row_a.size() + row_b.size());
+        std::set_union(row_a.begin(), row_a.end(), row_b.begin(), row_b.end(), std::back_inserter(out[vi]));
     }
 }
 
@@ -220,14 +212,14 @@ void greedy_color_conflict_graph(const std::vector<std::vector<int>>& graph, std
     }
 }
 
-double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimParams& params, const std::vector<Vec3>& x, const Vec3& delta,
-                                    const BroadPhase::Cache& bp_cache){
+double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimParams& params, const std::vector<Vec3>& x, const Vec3& delta,  const BroadPhase::Cache& bp_cache){
     if (params.d_hat <= 0.0) return 1.0;
 
     const Vec3 dx = -delta;
     const bool tr = params.use_ogc;
 
     double safe_min = 1.0;
+    bool has_collision = false;
 
     if (vi >= 0 && vi < static_cast<int>(bp_cache.vertex_nt.size())) {
         for (const auto& entry : bp_cache.vertex_nt[vi]) {
@@ -246,7 +238,10 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
                         x[p.tri_v[1]], Vec3::Zero(),
                         x[p.tri_v[2]], Vec3::Zero(),
                         /*eps=*/1.0e-12, params.use_ticcd);
-                    if (r.collision) safe_min = std::min(safe_min, r.t);
+                    if (r.collision) {
+                        has_collision = true;
+                        safe_min = std::min(safe_min, r.t);
+                    }
                 }
             } else {
                 // vi is a moving tri corner vs a static node.
@@ -263,7 +258,10 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
                         x[p.tri_v[1]], dxv[1],
                         x[p.tri_v[2]], dxv[2],
                         /*eps=*/1.0e-12, params.use_ticcd);
-                    if (r.collision) safe_min = std::min(safe_min, r.t);
+                    if (r.collision) {
+                        has_collision = true;
+                        safe_min = std::min(safe_min, r.t);
+                    }
                 }
             }
         }
@@ -288,10 +286,13 @@ double compute_safe_step_for_vertex(int vi, const RefMesh& ref_mesh, const SimPa
                     r = segment_segment_only_one_node_moves(x[p.v[2]], dx, x[p.v[3]], x[p.v[0]], x[p.v[1]], eps_ccd, params.use_ticcd);
                 else
                     r = segment_segment_only_one_node_moves(x[p.v[3]], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]], eps_ccd, params.use_ticcd);
-                if (r.collision) safe_min = std::min(safe_min, r.t);
+                if (r.collision) {
+                    has_collision = true;
+                    safe_min = std::min(safe_min, r.t);
+                }
             }
         }
     }
 
-    return tr ? safe_min : ((safe_min >= 1.0) ? 1.0 : 0.9 * safe_min);
+    return tr ? safe_min : (has_collision ? 0.9 * safe_min : 1.0);
 }

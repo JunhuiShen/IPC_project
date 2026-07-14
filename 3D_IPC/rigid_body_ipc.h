@@ -13,8 +13,8 @@ Vec4 quaternion_from_angular_velocity(const Vec4& q0, const Vec3& omega, double 
 Mat43 dq_domega(const Vec4& q0, const Vec3& omega, double dt);
 std::array<Mat33, 4> d2q_domega2(const Vec4& q0, const Vec3& omega, double dt);
 
-// For unit q0, let q = E(omega, dt) * q0, where E(omega, dt) is the quaternion exponential defined above
-// The two coordinate transforms are x = x_com + R(q) X  (material to world), and X = R(q)^T (x - x_com) (world to material)
+// x = x_com + R(q) X with q(omega) = E(omega, dt) * q0.
+// X = R(q)^T (x - x_com) with q(omega) = E(omega, dt) * q0.
 Vec3 world_space_position(const Vec3& X, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt);
 Vec3 material_space_position(const Vec3& x, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt);
 

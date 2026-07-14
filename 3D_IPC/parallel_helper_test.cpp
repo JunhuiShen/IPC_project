@@ -86,3 +86,38 @@ TEST(TrustRegionSafeStep, FarFromBarrierStillBoundedByTrustRegion) {
     EXPECT_NEAR(step, 0.8, 1e-12)
         << "trust-region should clamp motion regardless of d_hat (paper Eq. 21)";
 }
+
+TEST(LinearCCDSafeStep, EndpointCollisionUsesSafetyFactor) {
+    SimParams params = SimParams::zeros();
+    params.d_hat = 0.1;
+    params.use_ogc = false;
+    params.use_ticcd = false;
+
+    // The first segment [x[0], x[1]] becomes [2, 0] at the end of the
+    // proposed move and touches the static segment [2, 3] at t = 1.
+    const std::vector<Vec3> x = {
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(2.0, 0.0, 0.0),
+        Vec3(3.0, 0.0, 0.0),
+    };
+
+    BroadPhase::Cache cache;
+    cache.vertex_nt.resize(x.size());
+    cache.vertex_ss.resize(x.size());
+    SegmentSegmentPair pair{};
+    pair.v[0] = 0;
+    pair.v[1] = 1;
+    pair.v[2] = 2;
+    pair.v[3] = 3;
+    cache.ss_pairs.push_back(pair);
+    cache.vertex_ss[0].push_back({/*pair_index=*/0, /*dof=*/0});
+
+    // compute_safe_step_for_vertex uses dx = -delta.
+    const Vec3 delta(-1.0, 0.0, 0.0);
+    const RefMesh ref_mesh{};
+    const double step = compute_safe_step_for_vertex(
+        0, ref_mesh, params, x, delta, cache);
+
+    EXPECT_NEAR(step, 0.9, 1.0e-12);
+}

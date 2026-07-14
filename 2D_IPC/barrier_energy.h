@@ -21,7 +21,11 @@ double barrier_hess(double d, double dhat);
 
 double node_segment_barrier_energy(const Vec& x, int node, int seg0, int seg1, double dhat);
 Vec2 local_barrier_grad(int who, const Vec& x, int node, int seg0, int seg1, double dhat);
-Mat2 local_barrier_hess(int who, const Vec& x, int node, int seg0, int seg1, double dhat);
+// Hessian block d(local_barrier_grad(row_who))/d(x_col_who).
+Mat2 local_barrier_cross_hessian(int row_who, int col_who, const Vec& x,
+                                 int node, int seg0, int seg1, double dhat);
+// Self/diagonal Hessian block H(who, who).
+Mat2 local_barrier_self_hessian(int who, const Vec& x, int node, int seg0, int seg1, double dhat);
 
 RigidBarrierGradient local_barrier_grad_rb(const std::vector<int>& rb_nodes, const Vec& x, const Vec2& x_com, int node, int seg0, int seg1, double dhat);
 RigidBarrierHessian local_barrier_hess_rb(const std::vector<int>& rb_nodes, const Vec& x, const Vec2& x_com, int node, int seg0, int seg1, double dhat);

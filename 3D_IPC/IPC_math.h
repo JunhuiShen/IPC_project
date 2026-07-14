@@ -2,8 +2,6 @@
 
 #include <Eigen/Dense>
 #include <array>
-#include <vector>
-#include <limits>
 
 // Type aliases
 using Vec2   = Eigen::Vector2d;
@@ -33,6 +31,10 @@ struct TriangleDef {
 };
 
 // Utility functions
+double kronecker_delta(int i, int j);
+
+int levi_civita(int i, int j, int k);
+
 Mat33 matrix3d_inverse(const Mat33& H);
 
 TriangleDef add_scale(const TriangleDef& a, const TriangleDef& b, double s);
@@ -41,43 +43,8 @@ double get_dof(const TriangleDef& def, int node, int comp);
 
 void set_dof(TriangleDef& def, int node, int comp, double value);
 
-double clamp_scalar(double v, double lo, double hi);
-
 Vec3 segment_closest_point(const Vec3& x, const Vec3& a, const Vec3& b, double& t);
 
 std::array<double, 3> triangle_plane_barycentric_coordinates(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double eps = 1e-12);
 
-bool nearly_zero(double value, double eps = 1e-12);
-
-bool in_unit_interval(double t, double eps = 1e-12);
-
-Vec3 point_at_linear_step(const Vec3& x, const Vec3& dx, double t);
-
-bool point_in_triangle_on_plane(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double eps = 1e-12);
-
-bool segment_segment_parameters_if_not_parallel(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double& s, double& u, double eps = 1e-12);
-
 double cross_product_in_2d(const Vec2& a, const Vec2& b);
-
-double max_abs_value_among_four_numbers(double a, double b, double c, double d);
-
-double filter_root(double t, double eps = 1e-12);
-
-void add_root(std::vector<double>& roots, double t, double eps = 1e-12);
-
-// Fixed-capacity root buffer: avoids heap allocation in CCD hot path.
-struct SmallRoots {
-    static constexpr int MAX_ROOTS = 12;
-    std::array<double, MAX_ROOTS> data;
-    int count = 0;
-
-    void push_back(double v) { if (count < MAX_ROOTS) data[count++] = v; }
-    int size() const { return count; }
-    double operator[](int i) const { return data[i]; }
-    double* begin() { return data.data(); }
-    double* end() { return data.data() + count; }
-    const double* begin() const { return data.data(); }
-    const double* end() const { return data.data() + count; }
-};
-
-void add_root(SmallRoots& roots, double t, double eps = 1e-12);

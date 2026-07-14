@@ -711,6 +711,7 @@ void BroadPhase::per_vertex_safe_step(
         if (dx.squaredNorm() < 1e-28) return;
 
         double toi_min = 1.0;
+        bool has_collision = false;
 
         if (use_ogc) {
             double bound = compute_trust_region_bound_for_vertex(vi, x, cache_, 0.4);
@@ -742,7 +743,10 @@ void BroadPhase::per_vertex_safe_step(
                     x[p.tri_v[2]], d2,
                     1e-12, use_ticcd);
             }
-            if (r.collision) toi_min = std::min(toi_min, r.t);
+            if (r.collision) {
+                has_collision = true;
+                toi_min = std::min(toi_min, r.t);
+            }
         }
 
         if (clip_ccd) for (const auto& entry : cache_.vertex_ss[vi]) {
@@ -756,10 +760,13 @@ void BroadPhase::per_vertex_safe_step(
                 r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[3]], x[p.v[0]], x[p.v[1]], 1e-12, use_ticcd);
             else
                 r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]], 1e-12, use_ticcd);
-            if (r.collision) toi_min = std::min(toi_min, r.t);
+            if (r.collision) {
+                has_collision = true;
+                toi_min = std::min(toi_min, r.t);
+            }
         }
 
-        const double step = use_ogc? toi_min: ((toi_min < 1.0) ? safety * toi_min : 1.0);
+        const double step = use_ogc ? toi_min : (has_collision ? safety * toi_min : 1.0);
         x[vi] = x[vi] + step * dx;
     };
 

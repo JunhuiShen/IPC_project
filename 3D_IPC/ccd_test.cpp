@@ -1,6 +1,7 @@
 #include "ccd.h"
 #include "segment_segment_distance.h"
 
+#include <array>
 #include <cmath>
 #include <gtest/gtest.h>
 
@@ -10,6 +11,8 @@ constexpr double kTol = 1.0e-6;
 
 namespace {
 const Vec3 ZERO_DX(0.0, 0.0, 0.0);
+constexpr std::array<double, 6> LINEAR_CCD_SCALES = {
+    1.0e-5, 0x1p-20, 0x1p-10, 1.0, 0x1p10, 0x1p20};
 }  // namespace
 
 TEST(CCDNodeTriangleSingleMovingNode, InteriorHit) {
@@ -20,7 +23,8 @@ TEST(CCDNodeTriangleSingleMovingNode, InteriorHit) {
     const Vec3 x3(0.0, 1.0, 0.0);
 
     const CCDResult r = node_triangle_only_one_node_moves(
-        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX);
+        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX,
+        /*eps=*/1.0e-12, /*use_ticcd=*/false);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
 }
@@ -33,7 +37,8 @@ TEST(CCDNodeTriangleSingleMovingNode, ParallelNoCrossing) {
     const Vec3 x3(0.0, 1.0, 0.0);
 
     const CCDResult r = node_triangle_only_one_node_moves(
-        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX);
+        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX,
+        /*eps=*/1.0e-12, /*use_ticcd=*/false);
     EXPECT_FALSE(r.collision);
 }
 
@@ -45,9 +50,26 @@ TEST(CCDNodeTriangleSingleMovingNode, CoplanarEntireStep) {
     const Vec3 x3(0.0, 1.0, 0.0);
 
     const CCDResult r = node_triangle_only_one_node_moves(
-        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX);
+        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX,
+        /*eps=*/1.0e-12, /*use_ticcd=*/false);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.0, kTol);
+}
+
+TEST(CCDNodeTriangleSingleMovingNode, CoplanarForEntireStepEndpointHit) {
+    // The node remains in the triangle's plane and first reaches the
+    // hypotenuse exactly at the end of the step.
+    const Vec3 x(1.5, 0.25, 0.0);
+    const Vec3 dx(-0.75, 0.0, 0.0);
+    const Vec3 x1(0.0, 0.0, 0.0);
+    const Vec3 x2(1.0, 0.0, 0.0);
+    const Vec3 x3(0.0, 1.0, 0.0);
+
+    const CCDResult r = node_triangle_only_one_node_moves(
+        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX,
+        /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    EXPECT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 1.0, 1.0e-12);
 }
 
 TEST(CCDNodeTriangleSingleMovingNode, CandidateOutsideStepInterval) {
@@ -58,7 +80,8 @@ TEST(CCDNodeTriangleSingleMovingNode, CandidateOutsideStepInterval) {
     const Vec3 x3(0.0, 1.0, 0.0);
 
     const CCDResult r = node_triangle_only_one_node_moves(
-        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX);
+        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX,
+        /*eps=*/1.0e-12, /*use_ticcd=*/false);
     EXPECT_FALSE(r.collision);
 }
 
@@ -78,7 +101,8 @@ TEST(CCDNodeTriangleSingleMovingTriVertex, V0HitsStaticNode) {
     const Vec3 x3(0.0, 2.0, 0.0);
 
     const CCDResult r = node_triangle_only_one_node_moves(
-        x, ZERO_DX, x1, dx1, x2, ZERO_DX, x3, ZERO_DX);
+        x, ZERO_DX, x1, dx1, x2, ZERO_DX, x3, ZERO_DX,
+        /*eps=*/1.0e-12, /*use_ticcd=*/false);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
 }
@@ -90,7 +114,8 @@ TEST(CCDNodeTriangleSingleMovingTriVertex, V1HitsStaticNode) {
     const Vec3 x3(0.0, 2.0, 0.0);
 
     const CCDResult r = node_triangle_only_one_node_moves(
-        x, ZERO_DX, x1, ZERO_DX, x2, dx2, x3, ZERO_DX);
+        x, ZERO_DX, x1, ZERO_DX, x2, dx2, x3, ZERO_DX,
+        /*eps=*/1.0e-12, /*use_ticcd=*/false);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
 }
@@ -102,7 +127,8 @@ TEST(CCDNodeTriangleSingleMovingTriVertex, V2HitsStaticNode) {
     const Vec3 x3(0.0, 2.0, 0.0), dx3(0.0, 0.0, 2.0);
 
     const CCDResult r = node_triangle_only_one_node_moves(
-        x, ZERO_DX, x1, ZERO_DX, x2, ZERO_DX, x3, dx3);
+        x, ZERO_DX, x1, ZERO_DX, x2, ZERO_DX, x3, dx3,
+        /*eps=*/1.0e-12, /*use_ticcd=*/false);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
 }
@@ -115,7 +141,8 @@ TEST(CCDNodeTriangleSingleMovingTriVertex, MovingVertexCoincidesWithStaticNode) 
     const Vec3 x3(0.0, 1.0, 0.0);
 
     const CCDResult r = node_triangle_only_one_node_moves(
-        x, ZERO_DX, x1, dx1, x2, ZERO_DX, x3, ZERO_DX);
+        x, ZERO_DX, x1, dx1, x2, ZERO_DX, x3, ZERO_DX,
+        /*eps=*/1.0e-12, /*use_ticcd=*/false);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
 }
@@ -127,7 +154,8 @@ TEST(CCDSegmentSegmentSingleMovingNode, InteriorHit) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_only_one_node_moves(x1, dx1, x2, x3, x4);
+    const CCDResult r = segment_segment_only_one_node_moves(
+        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
 }
@@ -139,7 +167,8 @@ TEST(CCDSegmentSegmentSingleMovingNode, ParallelNoCrossing) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_only_one_node_moves(x1, dx1, x2, x3, x4);
+    const CCDResult r = segment_segment_only_one_node_moves(
+        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
     EXPECT_FALSE(r.collision);
 }
 
@@ -150,9 +179,40 @@ TEST(CCDSegmentSegmentSingleMovingNode, CoplanarEntireStep) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_only_one_node_moves(x1, dx1, x2, x3, x4);
+    const CCDResult r = segment_segment_only_one_node_moves(
+        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.0, kTol);
+}
+
+TEST(CCDSegmentSegmentSingleMovingNode, CollinearForEntireStepEndpointHit) {
+    // The moving endpoint extends the first segment until it first touches
+    // the second segment exactly at the end of the step.
+    const Vec3 x1(1.0, 0.0, 0.0);
+    const Vec3 dx1(1.0, 0.0, 0.0);
+    const Vec3 x2(0.0, 0.0, 0.0);
+    const Vec3 x3(2.0, 0.0, 0.0);
+    const Vec3 x4(3.0, 0.0, 0.0);
+
+    const CCDResult r = segment_segment_only_one_node_moves(
+        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    EXPECT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 1.0, 1.0e-12);
+}
+
+TEST(CCDSegmentSegmentSingleMovingNode, CoplanarForEntireStepEndpointHit) {
+    // The segments stay coplanar and non-collinear. The moving endpoint first
+    // reaches the static segment exactly at the end of the step.
+    const Vec3 x1(0.0, -1.0, 0.0);
+    const Vec3 dx1(0.0, 1.0, 0.0);
+    const Vec3 x2(1.0, -1.0, 0.0);
+    const Vec3 x3(0.0, 0.0, 0.0);
+    const Vec3 x4(0.0, 1.0, 0.0);
+
+    const CCDResult r = segment_segment_only_one_node_moves(
+        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    EXPECT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 1.0, 1.0e-12);
 }
 
 TEST(CCDSegmentSegmentSingleMovingNode, CandidateOutsideStepInterval) {
@@ -162,7 +222,38 @@ TEST(CCDSegmentSegmentSingleMovingNode, CandidateOutsideStepInterval) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_only_one_node_moves(x1, dx1, x2, x3, x4);
+    const CCDResult r = segment_segment_only_one_node_moves(
+        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    EXPECT_FALSE(r.collision);
+}
+
+TEST(CCDSegmentSegmentSingleMovingNode, NearParallelHitAtNonSampledTime) {
+    // At t=0.3 the moving segment is almost parallel to the static segment,
+    // but crosses it at its midpoint. The TOI is not one of the historical
+    // fixed probe times, so it must come from the affine coplanarity root.
+    const Vec3 x1(0.0, -2.0e-7, -3.0e-7);
+    const Vec3 dx1(0.0, 0.0, 1.0e-6);
+    const Vec3 x2(1.0, 2.0e-7, 0.0);
+    const Vec3 x3(0.0, 0.0, 0.0);
+    const Vec3 x4(1.0, 0.0, 0.0);
+
+    const CCDResult r = segment_segment_only_one_node_moves(
+        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    EXPECT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 0.3, 1.0e-12);
+}
+
+TEST(CCDSegmentSegmentSingleMovingNode, NearParallelCoplanarityWithoutOverlap) {
+    // The supporting lines become coplanar at t=0.3, but the finite segments
+    // are disjoint. Coplanarity alone must not produce a collision.
+    const Vec3 x1(0.0, -2.0e-7, -3.0e-7);
+    const Vec3 dx1(0.0, 0.0, 1.0e-6);
+    const Vec3 x2(1.0, 2.0e-7, 0.0);
+    const Vec3 x3(2.0, 0.0, 0.0);
+    const Vec3 x4(3.0, 0.0, 0.0);
+
+    const CCDResult r = segment_segment_only_one_node_moves(
+        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
     EXPECT_FALSE(r.collision);
 }
 
@@ -189,10 +280,136 @@ TEST(CCDSegmentSegmentSingleMovingNode, RepoExample4Frame9Sub6Iter5) {
         d_prev = d.distance;
     }
 
-    const CCDResult r = segment_segment_only_one_node_moves(x1, dx1, x2, x3, x4);
+    const CCDResult r = segment_segment_only_one_node_moves(
+        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
     EXPECT_FALSE(r.collision);
     EXPECT_NEAR(d_min, 4.36963887902074195e-04, 1e-15);
     EXPECT_DOUBLE_EQ(t_at_min, 0.0);
+}
+
+TEST(CCDNodeTriangleSingleMovingNode, ScaleInvariantInteriorHit) {
+    for (double s : LINEAR_CCD_SCALES) {
+        SCOPED_TRACE(::testing::Message() << "scale = " << s);
+        const CCDResult r = node_triangle_only_one_node_moves(
+            s * Vec3(0.25, 0.25, 1.0), s * Vec3(0.0, 0.0, -2.0),
+            s * Vec3(0.0, 0.0, 0.0), ZERO_DX,
+            s * Vec3(1.0, 0.0, 0.0), ZERO_DX,
+            s * Vec3(0.0, 1.0, 0.0), ZERO_DX,
+            /*eps=*/1.0e-12, /*use_ticcd=*/false);
+        EXPECT_TRUE(r.collision);
+        EXPECT_NEAR(r.t, 0.5, 1.0e-12);
+    }
+}
+
+TEST(CCDNodeTriangleSingleMovingNode, ScaleInvariantCoplanarForEntireStepHit) {
+    for (double s : LINEAR_CCD_SCALES) {
+        SCOPED_TRACE(::testing::Message() << "scale = " << s);
+        const CCDResult r = node_triangle_only_one_node_moves(
+            s * Vec3(1.25, 0.25, 0.0), s * Vec3(-1.0, 0.0, 0.0),
+            s * Vec3(0.0, 0.0, 0.0), ZERO_DX,
+            s * Vec3(1.0, 0.0, 0.0), ZERO_DX,
+            s * Vec3(0.0, 1.0, 0.0), ZERO_DX,
+            /*eps=*/1.0e-12, /*use_ticcd=*/false);
+        EXPECT_TRUE(r.collision);
+        EXPECT_NEAR(r.t, 0.5, 1.0e-12);
+    }
+}
+
+TEST(CCDNodeTriangleSingleMovingNode, ScaleInvariantParallelNoCrossing) {
+    for (double s : LINEAR_CCD_SCALES) {
+        SCOPED_TRACE(::testing::Message() << "scale = " << s);
+        const CCDResult r = node_triangle_only_one_node_moves(
+            s * Vec3(0.25, 0.25, 1.0), s * Vec3(1.0, 0.0, 0.0),
+            s * Vec3(0.0, 0.0, 0.0), ZERO_DX,
+            s * Vec3(1.0, 0.0, 0.0), ZERO_DX,
+            s * Vec3(0.0, 1.0, 0.0), ZERO_DX,
+            /*eps=*/1.0e-12, /*use_ticcd=*/false);
+        EXPECT_FALSE(r.collision);
+    }
+}
+
+TEST(CCDNodeTriangleSingleMovingTriVertex, ScaleInvariantHits) {
+    for (double s : LINEAR_CCD_SCALES) {
+        SCOPED_TRACE(::testing::Message() << "scale = " << s);
+
+        const CCDResult v0 = node_triangle_only_one_node_moves(
+            s * Vec3(0.5, 0.5, 0.5), ZERO_DX,
+            s * Vec3(0.0, 0.0, 0.0), s * Vec3(0.0, 0.0, 2.0),
+            s * Vec3(2.0, 0.0, 0.0), ZERO_DX,
+            s * Vec3(0.0, 2.0, 0.0), ZERO_DX,
+            /*eps=*/1.0e-12, /*use_ticcd=*/false);
+        EXPECT_TRUE(v0.collision);
+        EXPECT_NEAR(v0.t, 0.5, 1.0e-12);
+
+        const CCDResult v1 = node_triangle_only_one_node_moves(
+            s * Vec3(1.0, 0.5, 0.5), ZERO_DX,
+            s * Vec3(0.0, 0.0, 0.0), ZERO_DX,
+            s * Vec3(2.0, 0.0, 0.0), s * Vec3(0.0, 0.0, 2.0),
+            s * Vec3(0.0, 2.0, 0.0), ZERO_DX,
+            /*eps=*/1.0e-12, /*use_ticcd=*/false);
+        EXPECT_TRUE(v1.collision);
+        EXPECT_NEAR(v1.t, 0.5, 1.0e-12);
+
+        const CCDResult v2 = node_triangle_only_one_node_moves(
+            s * Vec3(0.5, 1.0, 0.5), ZERO_DX,
+            s * Vec3(0.0, 0.0, 0.0), ZERO_DX,
+            s * Vec3(2.0, 0.0, 0.0), ZERO_DX,
+            s * Vec3(0.0, 2.0, 0.0), s * Vec3(0.0, 0.0, 2.0),
+            /*eps=*/1.0e-12, /*use_ticcd=*/false);
+        EXPECT_TRUE(v2.collision);
+        EXPECT_NEAR(v2.t, 0.5, 1.0e-12);
+    }
+}
+
+TEST(CCDSegmentSegmentSingleMovingNode, ScaleInvariantInteriorHit) {
+    for (double s : LINEAR_CCD_SCALES) {
+        SCOPED_TRACE(::testing::Message() << "scale = " << s);
+        const CCDResult r = segment_segment_only_one_node_moves(
+            s * Vec3(0.0, 0.0, 1.0), s * Vec3(0.0, 0.0, -2.0),
+            s * Vec3(1.0, 0.0, 0.0),
+            s * Vec3(0.5, -1.0, 0.0), s * Vec3(0.5, 1.0, 0.0),
+            /*eps=*/1.0e-12, /*use_ticcd=*/false);
+        EXPECT_TRUE(r.collision);
+        EXPECT_NEAR(r.t, 0.5, 1.0e-12);
+    }
+}
+
+TEST(CCDSegmentSegmentSingleMovingNode, ScaleInvariantCollinearForEntireStepHit) {
+    for (double s : LINEAR_CCD_SCALES) {
+        SCOPED_TRACE(::testing::Message() << "scale = " << s);
+        const CCDResult r = segment_segment_only_one_node_moves(
+            s * Vec3(1.0, 0.0, 0.0), s * Vec3(2.0, 0.0, 0.0),
+            s * Vec3(0.0, 0.0, 0.0),
+            s * Vec3(2.0, 0.0, 0.0), s * Vec3(3.0, 0.0, 0.0),
+            /*eps=*/1.0e-12, /*use_ticcd=*/false);
+        EXPECT_TRUE(r.collision);
+        EXPECT_NEAR(r.t, 0.5, 1.0e-12);
+    }
+}
+
+TEST(CCDSegmentSegmentSingleMovingNode, ScaleInvariantCoplanarForEntireStepHit) {
+    for (double s : LINEAR_CCD_SCALES) {
+        SCOPED_TRACE(::testing::Message() << "scale = " << s);
+        const CCDResult r = segment_segment_only_one_node_moves(
+            s * Vec3(0.0, -1.0, 0.0), s * Vec3(0.0, 2.0, 0.0),
+            s * Vec3(1.0, -1.0, 0.0),
+            s * Vec3(0.0, 0.0, 0.0), s * Vec3(0.0, 1.0, 0.0),
+            /*eps=*/1.0e-12, /*use_ticcd=*/false);
+        EXPECT_TRUE(r.collision);
+        EXPECT_NEAR(r.t, 0.5, 1.0e-12);
+    }
+}
+
+TEST(CCDSegmentSegmentSingleMovingNode, ScaleInvariantParallelNoCrossing) {
+    for (double s : LINEAR_CCD_SCALES) {
+        SCOPED_TRACE(::testing::Message() << "scale = " << s);
+        const CCDResult r = segment_segment_only_one_node_moves(
+            s * Vec3(0.0, 0.0, 1.0), s * Vec3(0.0, 1.0, 0.0),
+            s * Vec3(1.0, 0.0, 1.0),
+            s * Vec3(0.5, -1.0, 0.0), s * Vec3(0.5, 1.0, 0.0),
+            /*eps=*/1.0e-12, /*use_ticcd=*/false);
+        EXPECT_FALSE(r.collision);
+    }
 }
 
 TEST(GeneralCCDNodeTriangle, TightInclusionInteriorHit) {
@@ -498,7 +715,6 @@ TEST(SegmentSegmentRBRotationCCD, CaseB2_ParallelPlanesNoCollision) {
         x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
     EXPECT_FALSE(hit);
 }
-
 TEST(PointTriangleRBRotationCCD, CoplanarTriangleHit) {
     const Vec3 x_com(0.0, 0.0, 0.0);
     const Vec3 x(0.0, -2.0, 0.0);
@@ -546,4 +762,3 @@ TEST(PointTriangleRBRotationCCD, SkewTiltedTriangleHit) {
     ASSERT_TRUE(hit);
     EXPECT_NEAR(s, 0.51132265526877663, 1e-14);
 }
-

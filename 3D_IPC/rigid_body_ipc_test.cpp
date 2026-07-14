@@ -41,7 +41,7 @@ OmegaNodeEnergy evaluate_omega_node_energy( const Vec3& X, const Vec3& target, c
 }
 
 QuaternionNodeEnergy evaluate_quaternion_node_energy( const Vec3& X, const Vec3& target, const Vec3& x_com, const Vec4& quat) {
-    const Vec3 gx = x_com + Rigid_Body::ALGEBRA::QuaternionRotate(quat, X) - target;
+    const Vec3 gx = x_com + quaternion_rotate(quat, X) - target;
     const Mat34 J_xq = dx_dq(X, quat);
     const std::array<Mat44, 3> H_xq = d2x_dq2(X);
 
@@ -124,12 +124,11 @@ TEST(RigidBodyIPCQuaternionWrappers, ForwardAndInverseRotationRoundTrip) {
     EXPECT_TRUE(quaternion_inverse_rotate(quat, rotated).isApprox(vector, 1.0e-14));
 }
 
-TEST(RigidBodyIPCQuaternionWrappers, MaterialAndWorldSpacePositionRoundTrip) {
+TEST(RigidBodyIPCOmegaNodeKinematics, MaterialAndWorldSpacePositionRoundTrip) {
     const Vec3 X(0.7, -0.4, 1.2);
     const Vec3 x_com(-0.3, 0.8, 1.5);
     const Vec4 q0 = quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
     const Vec3 omega(0.7, -0.4, 0.2);
-
     const Vec3 x = world_space_position(X, x_com, q0, omega, kDt);
     const Vec3 recovered = material_space_position(x, x_com, q0, omega, kDt);
 

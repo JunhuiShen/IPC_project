@@ -3,6 +3,15 @@
 #include <cmath>
 #include <limits>
 
+double kronecker_delta(int i, int j) {
+    return i == j ? 1.0 : 0.0;
+}
+
+int levi_civita(int i, int j, int k) {
+    if (i == j || j == k || i == k) return 0;
+    return ((i == 0 && j == 1 && k == 2) || (i == 1 && j == 2 && k == 0) || (i == 2 && j == 0 && k == 1)) ? 1 : -1;
+}
+
 Mat33 matrix3d_inverse(const Mat33& H) {
 
     double det = H(0,0)*(H(1,1)*H(2,2) - H(1,2)*H(2,1))
@@ -47,10 +56,6 @@ void set_dof(TriangleDef& def, int node, int comp, double value) {
     def.x[node](comp) = value;
 }
 
-double clamp_scalar(double v, double lo, double hi) {
-    return std::max(lo, std::min(v, hi));
-}
-
 Vec3 segment_closest_point(const Vec3& x, const Vec3& a, const Vec3& b, double& t) {
     const Vec3 ab = b - a;
     const double ab2 = ab.dot(ab);
@@ -61,7 +66,7 @@ Vec3 segment_closest_point(const Vec3& x, const Vec3& a, const Vec3& b, double& 
     }
 
     t = (x - a).dot(ab) / ab2;
-    t = clamp_scalar(t, 0.0, 1.0);
+    t = std::clamp(t, 0.0, 1.0);
     return a + t * ab;
 }
 
@@ -93,82 +98,6 @@ std::array<double, 3> triangle_plane_barycentric_coordinates(const Vec3& x, cons
     return {{lambda1, lambda2, lambda3}};
 }
 
-bool nearly_zero(double value, double eps) {
-    return std::abs(value) <= eps;
-}
-
-bool in_unit_interval(double t, double eps) {
-    return t >= -eps && t <= 1.0 + eps;
-}
-
-Vec3 point_at_linear_step(const Vec3& x, const Vec3& dx, double t) {
-    return x + t * dx;
-}
-
-bool point_in_triangle_on_plane(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double eps){
-    auto b = triangle_plane_barycentric_coordinates(x,x1,x2,x3,eps);
-    return b[0] >= -eps && b[1] >= -eps && b[2] >= -eps;
-}
-
-bool segment_segment_parameters_if_not_parallel(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double& s, double& u, double eps){
-    Vec3 a = x2 - x1;
-    Vec3 b = x4 - x3;
-    Vec3 c = x3 - x1;
-
-    Vec3 n = a.cross(b);
-    double denom = n.squaredNorm();
-
-    if (std::abs(denom) <= eps)
-        return false;
-
-    s = c.cross(b).dot(n) / denom;
-    u = c.cross(a).dot(n) / denom;
-    return true;
-}
-
 double cross_product_in_2d(const Vec2& a, const Vec2& b) {
     return a.x() * b.y() - a.y() * b.x();
-}
-
-double max_abs_value_among_four_numbers(double a, double b, double c, double d) {
-    return std::max({1.0, std::fabs(a), std::fabs(b), std::fabs(c), std::fabs(d)});
-}
-
-double filter_root(double t, double eps) {
-    if (!in_unit_interval(t, eps)) return -1.0;
-    return clamp_scalar(t, 0.0, 1.0);
-}
-
-namespace {
-template <typename ContainsFn, typename PushFn>
-void add_root_impl(double t, double eps, ContainsFn contains, PushFn push) {
-    t = filter_root(t, eps);
-    if (t < 0.0) return;
-    if (contains(t)) return;
-    push(t);
-}
-} // namespace
-
-void add_root(std::vector<double>& roots, double t, double eps) {
-    add_root_impl(
-        t, eps,
-        [&](double v) {
-            for (double r : roots) {
-                if (std::fabs(r - v) <= 1e-9) return true;
-            }
-            return false;
-        },
-        [&](double v) { roots.push_back(v); });
-}
-
-void add_root(SmallRoots& roots, double t, double eps) {
-    add_root_impl(
-        t, eps,
-        [&](double v) {
-            for (int i = 0; i < roots.count; ++i) {
-                if (std::fabs(roots.data[i] - v) <= 1e-9) return true;
-            }
-            return false;
-        },
-        [&](double v) { roots.push_back(v); });
 }

@@ -93,6 +93,13 @@ Mat2x2x2 get_grad_j_common_analytic_x2(double L, const Vec2& u, const Vec2& v,
 
     return {dJ_dx, dJ_dy};
 }
+
+int barrier_local_dof(int who, int node, int seg0, int seg1) {
+    if (who == node) return 0;
+    if (who == seg0) return 1;
+    if (who == seg1) return 2;
+    return -1;
+}
 }
 
 double node_segment_barrier_energy(const Vec& x, int node, int seg0, int seg1, double dhat) {
@@ -156,7 +163,7 @@ Vec2 local_barrier_grad(int who, const Vec& x, int node, int seg0, int seg1, dou
     return {0, 0};
 }
 
-Mat2 local_barrier_hess(int who, const Vec& x, int node, int seg0, int seg1, double dhat) {
+Mat2 local_barrier_self_hessian(int who, const Vec& x, int node, int seg0, int seg1, double dhat) {
     Vec2 xi = get_xi(x, node);
     Vec2 x1 = get_xi(x, seg0);
     Vec2 x2 = get_xi(x, seg1);
@@ -237,6 +244,88 @@ Mat2 local_barrier_hess(int who, const Vec& x, int node, int seg0, int seg1, dou
     return {0, 0, 0, 0};
 }
 
+Mat2 local_barrier_cross_hessian(int row_who, int col_who, const Vec& x, int node, int seg0, int seg1, double dhat) {
+    // Keep the existing diagonal implementation as the canonical self block.
+    if (row_who == col_who) {
+        return local_barrier_self_hessian(row_who, x, node, seg0, seg1, dhat);
+    }
+
+    const int row = barrier_local_dof(row_who, node, seg0, seg1);
+    const int col = barrier_local_dof(col_who, node, seg0, seg1);
+    if (row < 0 || col < 0) return {0, 0, 0, 0};
+
+    const Vec2 xi = get_xi(x, node);
+    const Vec2 x1 = get_xi(x, seg0);
+    const Vec2 x2 = get_xi(x, seg1);
+
+    double t = 0.0;
+    Vec2 closest{}, residual{};
+    double d = node_segment_distance(xi, x1, x2, t, closest, residual);
+    if (d >= dhat) return {0, 0, 0, 0};
+    d = std::max(d, 1.0e-12);
+
+    const Vec2 n{residual.x / d, residual.y / d};
+    const double bp = barrier_grad(d, dhat);
+    const double bpp = barrier_hess(d, dhat);
+    const Mat2 I{1, 0, 0, 1};
+    const Mat2 Hrr{
+            bpp * n.x * n.x + (bp / d) * (1.0 - n.x * n.x),
+            (bpp - bp / d) * n.x * n.y,
+            (bpp - bp / d) * n.x * n.y,
+            bpp * n.y * n.y + (bp / d) * (1.0 - n.y * n.y)};
+
+    // Endpoint branches have constant residual Jacobians. The signs are the
+    // products of the row and column coefficients in r = x - x_endpoint.
+    if (t <= 1.0e-6) {
+        const double coeff[3] = {1.0, -1.0, 0.0};
+        return scale(Hrr, coeff[row] * coeff[col]);
+    }
+    if (t >= 1.0 - 1.0e-6) {
+        const double coeff[3] = {1.0, 0.0, -1.0};
+        return scale(Hrr, coeff[row] * coeff[col]);
+    }
+
+    const Vec2 s{x2.x - x1.x, x2.y - x1.y};
+    const double L = norm(s);
+    if (L < 1.0e-12) return {0, 0, 0, 0};
+
+    const Vec2 u{s.x / L, s.y / L};
+    const Vec2 v{xi.x - x1.x, xi.y - x1.y};
+    const Mat2 K{0, 1, -1, 0};
+    const Mat2 KT = transpose(K);
+
+    // c = cross(s,v), d = |c|/L.  The constants encode
+    // ds/dy_p = alpha_p I and dv/dy_p = beta_p I for
+    // y = (x, x1, x2).
+    const double alpha[3] = {0.0, -1.0, 1.0};
+    const double beta[3] = {1.0, -1.0, 0.0};
+    const double c = cross(s, v);
+    const double side = c > 0.0 ? 1.0 : (c < 0.0 ? -1.0 : 0.0);
+
+    const Vec2 Kv = matvec(K, v);
+    const Vec2 KTs = matvec(KT, s);
+    Vec2 grad_c[3];
+    Vec2 grad_inv_L[3];
+    for (int p = 0; p < 3; ++p) {
+        grad_c[p] = add(scale(Kv, alpha[p]), scale(KTs, beta[p]));
+        grad_inv_L[p] = scale(u, -alpha[p] / (L * L));
+    }
+
+    const Vec2 grad_d_row = scale(add(scale(grad_c[row], 1.0 / L), scale(grad_inv_L[row], c)), side);
+    const Vec2 grad_d_col = scale(add(scale(grad_c[col], 1.0 / L), scale(grad_inv_L[col], c)), side);
+
+    const Mat2 hess_c = add(scale(K, alpha[row] * beta[col]), scale(KT, beta[row] * alpha[col]));
+    const Mat2 hess_inv_L = scale(add(scale(outer(u, u), 3.0), scale(I, -1.0)), alpha[row] * alpha[col] / (L * L * L));
+
+    Mat2 hess_d = scale(hess_c, 1.0 / L);
+    hess_d = add(hess_d, outer(grad_c[row], grad_inv_L[col]));
+    hess_d = add(hess_d, outer(grad_inv_L[row], grad_c[col]));
+    hess_d = add(hess_d, scale(hess_inv_L, c));
+    hess_d = scale(hess_d, side);
+
+    return add(scale(outer(grad_d_row, grad_d_col), bpp), scale(hess_d, bp));
+}
+
 RigidBarrierGradient local_barrier_grad_rb(const std::vector<int>& rb_nodes, const Vec& x, const Vec2& x_com, int node, int seg0, int seg1, double dhat) {
     RigidBarrierGradient result;
 
@@ -259,22 +348,31 @@ RigidBarrierGradient local_barrier_grad_rb(const std::vector<int>& rb_nodes, con
 RigidBarrierHessian local_barrier_hess_rb(const std::vector<int>& rb_nodes, const Vec& x, const Vec2& x_com, int node, int seg0, int seg1, double dhat) {
     RigidBarrierHessian result;
 
+    std::vector<int> active_nodes;
     for (int who : rb_nodes) {
-        if (who != node && who != seg0 && who != seg1) continue;
+        if (who == node || who == seg0 || who == seg1) active_nodes.push_back(who);
+    }
 
-        const Vec2 gx = local_barrier_grad(who, x, node, seg0, seg1, dhat);
-        const Mat2 Hx = local_barrier_hess(who, x, node, seg0, seg1, dhat);
-        const Vec2 r = get_xi(x, who) - x_com;
-        const Vec2 dx_dtheta{-r.y, r.x};
-        const Vec2 d2x_dtheta2{-r.x, -r.y};
-        const Vec2 Hx_dx_dtheta = matvec(Hx, dx_dtheta);
+    for (int row_who : active_nodes) {
+        const Vec2 gx = local_barrier_grad(row_who, x, node, seg0, seg1, dhat);
+        const Vec2 row_r = get_xi(x, row_who) - x_com;
+        const Vec2 dx_row_dtheta{-row_r.y, row_r.x};
+        const Vec2 d2x_row_dtheta2{-row_r.x, -row_r.y};
 
-        // H_yy += H_x
-        result.translation_translation = add(result.translation_translation, Hx);
-        // H_ytheta  += H_x * dx/dtheta
-        result.translation_rotation = result.translation_rotation + Hx_dx_dtheta;
-        // H_thetatheta += (dx/dtheta)^T H_x (dx/dtheta)  + g_x^T d2x/dtheta2
-        result.rotation_rotation += dot(dx_dtheta, Hx_dx_dtheta) + dot(gx, d2x_dtheta2);
+        // Coordinate-map curvature occurs once per contact node.
+        result.rotation_rotation += dot(gx, d2x_row_dtheta2);
+
+        for (int col_who : active_nodes) {
+            const Mat2 Hcross = local_barrier_cross_hessian(row_who, col_who, x, node, seg0, seg1, dhat);
+            const Vec2 col_r = get_xi(x, col_who) - x_com;
+            const Vec2 dx_col_dtheta{-col_r.y, col_r.x};
+            const Vec2 Hcross_dx_col = matvec(Hcross, dx_col_dtheta);
+
+            // Sum J_row^T H_row,col J_col over every pair of rigid nodes.
+            result.translation_translation = add(result.translation_translation, Hcross);
+            result.translation_rotation = result.translation_rotation + Hcross_dx_col;
+            result.rotation_rotation += dot(dx_row_dtheta, Hcross_dx_col);
+        }
     }
 
     return result;

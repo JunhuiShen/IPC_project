@@ -105,7 +105,7 @@ Mat33 local_hessian(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& ad
         else if (vi == p.tri_v[1])  dof = 2;
         else if (vi == p.tri_v[2])  dof = 3;
         if (dof < 0) continue;
-        H += dt2 * node_triangle_barrier_hessian(
+        H += dt2 * node_triangle_barrier_self_hessian(
                 x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, dof);
     }
 
@@ -116,7 +116,7 @@ Mat33 local_hessian(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& ad
         else if (vi == p.v[2]) dof = 2;
         else if (vi == p.v[3]) dof = 3;
         if (dof < 0) continue;
-        H += dt2 * segment_segment_barrier_hessian(
+        H += dt2 * segment_segment_barrier_self_hessian(
                 x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, dof);
     }
 

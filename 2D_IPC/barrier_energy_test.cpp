@@ -57,6 +57,16 @@ Vec rigid_eval_positions(const Vec& base, int rb_node, const Vec2& material,
     return result;
 }
 
+Vec rigid_eval_positions(const Vec& base, const std::vector<int>& rb_nodes,
+                         const std::vector<Vec2>& material,
+                         const Vec2& y, double theta) {
+    Vec result = base;
+    for (std::size_t i = 0; i < rb_nodes.size(); ++i) {
+        set_xi(result, rb_nodes[i], y + rotate(material[i], theta));
+    }
+    return result;
+}
+
 void perturb(Vec& x, int node, int comp, double h) {
     if (comp == 0) {
         x[node].x += h;
@@ -234,7 +244,7 @@ TEST(BarrierEnergy, EnergyGradientAndGradientHessianHaveSlopeTwo) {
     bool passed = true;
     for (int who : {node, seg0, seg1}) {
         const Vec2 g = local_barrier_grad(who, x, node, seg0, seg1, dhat);
-        const Mat2 H = local_barrier_hess(who, x, node, seg0, seg1, dhat);
+        const Mat2 H = local_barrier_self_hessian(who, x, node, seg0, seg1, dhat);
         auto gradient = [&](const Vec& x_eval) {
             return local_barrier_grad(who, x_eval, node, seg0, seg1, dhat);
         };
@@ -259,6 +269,97 @@ TEST(BarrierEnergy, EnergyGradientAndGradientHessianHaveSlopeTwo) {
     }
 
     EXPECT_TRUE(passed);
+}
+
+TEST(BarrierEnergy, CrossHessianMatchesGradientFiniteDifference) {
+    struct TestCase {
+        const char* name;
+        Vec x;
+    };
+
+    const std::vector<TestCase> cases = {
+        {"interior", {{0.0, 0.0}, {1.1, 0.2}, {0.35, 0.42}}},
+        {"interior_negative", {{0.0, 0.0}, {1.1, 0.2}, {0.35, -0.30}}},
+        {"endpoint0", {{0.0, 0.0}, {1.0, 0.0}, {-0.25, 0.22}}},
+        {"endpoint1", {{0.0, 0.0}, {1.0, 0.0}, {1.25, 0.22}}},
+    };
+    const int seg0 = 0;
+    const int seg1 = 1;
+    const int node = 2;
+    const int dofs[3] = {node, seg0, seg1};
+    const double dhat = 1.0;
+    const double h = 1.0e-5;
+
+    for (const TestCase& test : cases) {
+        for (int row = 0; row < 3; ++row) {
+            const Mat2 Hself = local_barrier_self_hessian(
+                    dofs[row], test.x, node, seg0, seg1, dhat);
+            const Mat2 Hdiag = local_barrier_cross_hessian(
+                    dofs[row], dofs[row], test.x, node, seg0, seg1, dhat);
+            for (int k = 0; k < 2; ++k) {
+                for (int l = 0; l < 2; ++l) {
+                    EXPECT_DOUBLE_EQ(component(Hself, k, l), component(Hdiag, k, l))
+                            << test.name << " diagonal block row=" << row;
+                }
+            }
+
+            Mat2 translation_sum{0, 0, 0, 0};
+            for (int col = 0; col < 3; ++col) {
+                const Mat2 H = local_barrier_cross_hessian(
+                        dofs[row], dofs[col], test.x, node, seg0, seg1, dhat);
+                const Mat2 HT = local_barrier_cross_hessian(
+                        dofs[col], dofs[row], test.x, node, seg0, seg1, dhat);
+                translation_sum = add(translation_sum, H);
+
+                for (int k = 0; k < 2; ++k) {
+                    for (int l = 0; l < 2; ++l) {
+                        EXPECT_NEAR(component(H, k, l), component(HT, l, k), 1.0e-10)
+                                << test.name << " symmetry row=" << row << " col=" << col;
+
+                        Vec xp = test.x;
+                        Vec xm = test.x;
+                        perturb(xp, dofs[col], l, h);
+                        perturb(xm, dofs[col], l, -h);
+                        const Vec2 gp = local_barrier_grad(
+                                dofs[row], xp, node, seg0, seg1, dhat);
+                        const Vec2 gm = local_barrier_grad(
+                                dofs[row], xm, node, seg0, seg1, dhat);
+                        const double fd = (component(gp, k) - component(gm, k)) / (2.0 * h);
+                        const double tolerance = 5.0e-5 * (1.0 + std::abs(component(H, k, l)));
+                        EXPECT_NEAR(component(H, k, l), fd, tolerance)
+                                << test.name << " H(" << row << "," << col << ")"
+                                << " component (" << k << "," << l << ")";
+                    }
+                }
+            }
+
+            for (int k = 0; k < 2; ++k) {
+                for (int l = 0; l < 2; ++l) {
+                    EXPECT_NEAR(component(translation_sum, k, l), 0.0, 1.0e-9)
+                            << test.name << " translation row=" << row;
+                }
+            }
+        }
+    }
+}
+
+TEST(BarrierEnergy, InactiveCrossHessianIsZero) {
+    const Vec x = {{0.0, 0.0}, {1.0, 0.0}, {0.4, 2.0}};
+    const int seg0 = 0;
+    const int seg1 = 1;
+    const int node = 2;
+    const int dofs[3] = {node, seg0, seg1};
+
+    for (int row : dofs) {
+        for (int col : dofs) {
+            const Mat2 H = local_barrier_cross_hessian(
+                    row, col, x, node, seg0, seg1, 1.0);
+            EXPECT_DOUBLE_EQ(H.a11, 0.0);
+            EXPECT_DOUBLE_EQ(H.a12, 0.0);
+            EXPECT_DOUBLE_EQ(H.a21, 0.0);
+            EXPECT_DOUBLE_EQ(H.a22, 0.0);
+        }
+    }
 }
 
 TEST(BarrierEnergy, RigidBodyGradientAndHessianChainRuleHaveSlopeTwo) {
@@ -306,6 +407,59 @@ TEST(BarrierEnergy, RigidBodyGradientAndHessianChainRuleHaveSlopeTwo) {
         for (int grad_dof = 0; grad_dof < 3; ++grad_dof) {
             passed &= check_rigid_gradient_hessian_component(
                     "rigid barrier dgrad/dq row " + std::to_string(grad_dof) +
+                            " col " + std::to_string(perturb_dof),
+                    y, theta, perturb_dof, grad_dof,
+                    component(H, grad_dof, perturb_dof), gradient);
+        }
+    }
+
+    EXPECT_TRUE(passed);
+}
+
+TEST(BarrierEnergy, MultiNodeRigidBodyHessianIncludesCrossBlocks) {
+    const int seg0 = 0;
+    const int seg1 = 1;
+    const int node = 2;
+    const Vec base = {
+        {0.0, 0.0},
+        {1.0, 0.0}, // static second segment endpoint
+        {0.0, 0.0},
+    };
+    const std::vector<int> rb_nodes = {seg0, node};
+    const std::vector<Vec2> material = {{-0.15, -0.05}, {0.25, 0.22}};
+    const Vec2 y{0.15, 0.03};
+    const double theta = 0.25;
+    const double dhat = 1.0;
+    const Vec x = rigid_eval_positions(base, rb_nodes, material, y, theta);
+
+    auto positions = [&](const Vec2& y_eval, double theta_eval) {
+        return rigid_eval_positions(base, rb_nodes, material, y_eval, theta_eval);
+    };
+    auto energy = [&](const Vec2& y_eval, double theta_eval) {
+        const Vec x_eval = positions(y_eval, theta_eval);
+        return node_segment_barrier_energy(x_eval, node, seg0, seg1, dhat);
+    };
+    auto gradient = [&](const Vec2& y_eval, double theta_eval) {
+        const Vec x_eval = positions(y_eval, theta_eval);
+        return local_barrier_grad_rb(
+                rb_nodes, x_eval, y_eval, node, seg0, seg1, dhat);
+    };
+
+    const RigidBarrierGradient g = local_barrier_grad_rb(
+            rb_nodes, x, y, node, seg0, seg1, dhat);
+    const RigidBarrierHessian H = local_barrier_hess_rb(
+            rb_nodes, x, y, node, seg0, seg1, dhat);
+
+    bool passed = true;
+    for (int dof = 0; dof < 3; ++dof) {
+        passed &= check_rigid_energy_gradient_component(
+                "multi-node rigid barrier dE/dq dof " + std::to_string(dof),
+                y, theta, dof, component(g, dof), energy);
+    }
+    for (int perturb_dof = 0; perturb_dof < 3; ++perturb_dof) {
+        for (int grad_dof = 0; grad_dof < 3; ++grad_dof) {
+            passed &= check_rigid_gradient_hessian_component(
+                    "multi-node rigid barrier dgrad/dq row " + std::to_string(grad_dof) +
                             " col " + std::to_string(perturb_dof),
                     y, theta, perturb_dof, grad_dof,
                     component(H, grad_dof, perturb_dof), gradient);

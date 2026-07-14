@@ -163,7 +163,7 @@ Mat2 compute_local_hessian(int who, const RefMesh& ref_mesh, const PinMap& pin_m
     for (const auto& c : barrier_pairs) {
         if (c.node != who && c.seg0 != who && c.seg1 != who) continue;
 
-        Mat2 Hb = local_barrier_hess(who, x, c.node, c.seg0, c.seg1, params.d_hat);
+        Mat2 Hb = local_barrier_self_hessian(who, x, c.node, c.seg0, c.seg1, params.d_hat);
         Hi.a11 += dt * dt * params.k_barrier * Hb.a11;
         Hi.a12 += dt * dt * params.k_barrier * Hb.a12;
         Hi.a21 += dt * dt * params.k_barrier * Hb.a21;

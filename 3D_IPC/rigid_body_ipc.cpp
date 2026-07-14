@@ -5,16 +5,6 @@ namespace {
 
 constexpr double kSmallAngleThreshold = 1.0e-4;
 
-double kronecker_delta(int i, int j) {
-    return i == j ? 1.0 : 0.0;
-}
-
-int levi_civita_3d(int i, int j, int k) {
-    if (i == j || j == k || i == k)
-        return 0;
-    return ((i == 0 && j == 1 && k == 2) || (i == 1 && j == 2 && k == 0) || (i == 2 && j == 0 && k == 1)) ? 1 : -1;
-}
-
 }  // namespace
 
 // Let a = dt / 2, r = ||omega||, and E(omega) = [cos(a r); (sin(a r) / r) * omega]
@@ -137,13 +127,13 @@ Vec4 quaternion_from_angular_velocity(const Vec4& q0, const Vec3& omega, double 
 }
 
 Vec3 world_space_position(const Vec3& X, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt) {
-    const Vec4 q = quaternion_from_angular_velocity(q0, omega, dt);
-    return x_com + quaternion_rotate(q, X);
+    const Vec4 quat = quaternion_from_angular_velocity(q0, omega, dt);
+    return x_com + quaternion_rotate(quat, X);
 }
 
-Vec3 material_space_position(const Vec3& x, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt) {
-    const Vec4 q = quaternion_from_angular_velocity(q0, omega, dt);
-    return quaternion_inverse_rotate(q, x - x_com);
+Vec3 material_space_position( const Vec3& x, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt) {
+    const Vec4 quat = quaternion_from_angular_velocity(q0, omega, dt);
+    return quaternion_inverse_rotate(quat, x - x_com);
 }
 
 // J(c,beta) = d x_c / d q_beta for x = x_com + R(q) X.
@@ -158,13 +148,13 @@ Mat34 dx_dq(const Vec3& X, const Vec4& quat) {
         J(c, 0) = 2.0 * w * X[c];
         for (int i = 0; i < 3; ++i) {
             for (int j = 0; j < 3; ++j)
-                J(c, 0) += 2.0 * levi_civita_3d(c, i, j) * v[i] * X[j];
+                J(c, 0) += 2.0 * levi_civita(c, i, j) * v[i] * X[j];
         }
 
         for (int a = 0; a < 3; ++a) {
             J(c, a + 1) = 2.0 * (-v[a] * X[c] + v[c] * X[a]);
             for (int j = 0; j < 3; ++j) {
-                J(c, a + 1) += 2.0 * (kronecker_delta(c, a) * v[j] * X[j] + w * levi_civita_3d(c, a, j) * X[j]);
+                J(c, a + 1) += 2.0 * (kronecker_delta(c, a) * v[j] * X[j] + w * levi_civita(c, a, j) * X[j]);
             }
         }
     }
@@ -183,7 +173,7 @@ std::array<Mat44, 3> d2x_dq2(const Vec3& X) {
 
         for (int a = 0; a < 3; ++a) {
             for (int j = 0; j < 3; ++j) {
-                const double value = 2.0 * levi_civita_3d(c, a, j) * X[j];
+                const double value = 2.0 * levi_civita(c, a, j) * X[j];
                 H[c](0, a + 1) += value;
                 H[c](a + 1, 0) += value;
             }
@@ -270,7 +260,8 @@ Mat33 rigid_node_translation_hessian(const Mat33& Hx) {
     return 0.5 * (Hx + Hx.transpose());
 }
 
-// The angular-velocity Hessian contribution is H_omegaomega = J_xomega^T sym(Hx) J_xomega + sum_c gx[c] d2x_c / d omega2.
+// Add the mixed terms sum_{i != j} J_i^T H_ij J_j separately when assembling a coupled multi-node rigid-body Hessian.
+// The per-node angular-velocity Hessian contribution is H_omegaomega = J_xomega^T sym(Hx) J_xomega + sum_c gx[c] d2x_c / d omega2.
 Mat33 rigid_node_omega_hessian(const Vec3& gx, const Mat33& Hx, const Mat33& dx_domega, const std::array<Mat33, 3>& d2x_domega2) {
     const Mat33 Hx_symmetric = rigid_node_translation_hessian(Hx);
     Mat33 omega_hessian = dx_domega.transpose() * Hx_symmetric * dx_domega;

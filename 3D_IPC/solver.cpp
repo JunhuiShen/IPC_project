@@ -199,14 +199,14 @@ Vec3 gs_vertex_delta(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& a
 
         for (const auto& entry : bp_cache.vertex_nt[vi]) {
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
-            auto [bg, bH] = node_triangle_barrier_gradient_and_hessian(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
+            auto [bg, bH] = node_triangle_barrier_self_gradient_and_hessian(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
             g += dt2k * bg;
             H += dt2k * bH;
         }
 
         for (const auto& entry : bp_cache.vertex_ss[vi]) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
-            auto [bg, bH] = segment_segment_barrier_gradient_and_hessian(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
+            auto [bg, bH] = segment_segment_barrier_self_gradient_and_hessian(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
             g += dt2k * bg;
             H += dt2k * bH;
         }
@@ -231,14 +231,14 @@ Vec3 gs_vertex_delta_split(int vi, const RefMesh& ref_mesh, const VertexTriangle
 
         for (const auto& entry : bp_cache.vertex_nt[vi]) {
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
-            auto [bg, bH] = node_triangle_barrier_gradient_and_hessian(x_barrier[p.node], x_barrier[p.tri_v[0]], x_barrier[p.tri_v[1]], x_barrier[p.tri_v[2]], params.d_hat, entry.dof);
+            auto [bg, bH] = node_triangle_barrier_self_gradient_and_hessian(x_barrier[p.node], x_barrier[p.tri_v[0]], x_barrier[p.tri_v[1]], x_barrier[p.tri_v[2]], params.d_hat, entry.dof);
             g += dt2k * bg;
             H += dt2k * bH;
         }
 
         for (const auto& entry : bp_cache.vertex_ss[vi]) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
-            auto [bg, bH] = segment_segment_barrier_gradient_and_hessian(x_barrier[p.v[0]], x_barrier[p.v[1]], x_barrier[p.v[2]], x_barrier[p.v[3]], params.d_hat, entry.dof);
+            auto [bg, bH] = segment_segment_barrier_self_gradient_and_hessian(x_barrier[p.v[0]], x_barrier[p.v[1]], x_barrier[p.v[2]], x_barrier[p.v[3]], params.d_hat, entry.dof);
             g += dt2k * bg;
             H += dt2k * bH;
         }

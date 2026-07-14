@@ -4,6 +4,7 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -242,7 +243,7 @@ bool run_hessian_convergence_test(const TestPoint& tp){
     int tested = 0, skipped_zero = 0;
 
     for (int v = 0; v < 4; ++v) {
-        const Mat33 H = node_triangle_barrier_hessian(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, v);
+        const Mat33 H = node_triangle_barrier_self_hessian(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, v);
         for (int k = 0; k < 3; ++k) {
             for (int l = 0; l < 3; ++l) {
                 const double analytic_val = H(k, l);
@@ -337,7 +338,7 @@ bool run_ss_hessian_convergence_test(const SSTestPoint& tp){
     int tested = 0, skipped_zero = 0;
 
     for (int v = 0; v < 4; ++v) {
-        const Mat33 H = segment_segment_barrier_hessian(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, v);
+        const Mat33 H = segment_segment_barrier_self_hessian(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, v);
         for (int k = 0; k < 3; ++k) {
             for (int l = 0; l < 3; ++l) {
                 const double analytic_val = H(k, l);
@@ -463,14 +464,53 @@ TEST(BarrierEnergy, ScalarBarrierHessianConvergence){
     EXPECT_TRUE(check_convergence("b''", analytic, hs, errors)) << "scalar barrier hessian convergence";
 }
 
+TEST(BarrierEnergy, RejectsInvalidDofIndices){
+    const Vec3 x(0.25, 0.25, 0.3);
+    const Vec3 x1(0.0, 0.0, 0.0);
+    const Vec3 x2(1.0, 0.0, 0.0);
+    const Vec3 x3(0.0, 1.0, 0.0);
+    const Vec3 x4(1.0, 1.0, 0.3);
+    constexpr double d_hat = 1.0;
+
+    EXPECT_THROW(
+            node_triangle_barrier_gradient(x, x1, x2, x3, d_hat, -1),
+            std::invalid_argument);
+    EXPECT_THROW(
+            node_triangle_barrier_gradient(x, x1, x2, x3, d_hat, 4),
+            std::invalid_argument);
+    EXPECT_THROW(
+            node_triangle_barrier_self_gradient_and_hessian(x, x1, x2, x3, d_hat, 4),
+            std::invalid_argument);
+
+    EXPECT_THROW(
+            segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, -1),
+            std::invalid_argument);
+    EXPECT_THROW(
+            segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, 4),
+            std::invalid_argument);
+    EXPECT_THROW(
+            segment_segment_barrier_self_gradient_and_hessian(x1, x2, x3, x4, d_hat, 4),
+            std::invalid_argument);
+}
+
 TEST(BarrierEnergy, ZeroOutsideActivation){
     const Vec3 x1(0,0,0), x2(1,0,0), x3(0,1,0), x(0.25,0.25,2.0);
     const double d_hat = 1.0;
     EXPECT_TRUE(approx(node_triangle_barrier(x, x1, x2, x3, d_hat), 0.0)) << "inactive energy";
-    for (int dof = 0; dof < 4; ++dof) {
-        Vec3 g = node_triangle_barrier_gradient(x, x1, x2, x3, d_hat, dof);
+    for (int row = 0; row < 4; ++row) {
+        Vec3 g = node_triangle_barrier_gradient(x, x1, x2, x3, d_hat, row);
         for (int k = 0; k < 3; ++k)
-            EXPECT_TRUE(approx(g(k), 0.0)) << "inactive grad dof=" << dof;
+            EXPECT_TRUE(approx(g(k), 0.0)) << "inactive grad dof=" << row;
+
+        const Mat33 H = node_triangle_barrier_self_hessian(x, x1, x2, x3, d_hat, row);
+        EXPECT_EQ(H.norm(), 0.0) << "inactive self Hessian row=" << row;
+
+        for (int col = 0; col < 4; ++col) {
+            const Mat33 Hcross = node_triangle_barrier_cross_hessian(
+                    x, x1, x2, x3, d_hat, row, col);
+            EXPECT_EQ(Hcross.norm(), 0.0)
+                    << "inactive cross Hessian row=" << row << " col=" << col;
+        }
     }
 }
 
@@ -503,14 +543,149 @@ TEST(BarrierEnergy, NTHessianConvergence){
     }
 }
 
+TEST(BarrierEnergy, NTCrossHessianFiniteDifference){
+    const double h = 1.0e-5;
+    const char* dof_names[4] = {"x", "x1", "x2", "x3"};
+    auto test_points = make_nt_test_points();
+    test_points.push_back({
+            "face_interior_negative",
+            Vec3(0.25, 0.25, -0.3),
+            Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0),
+            1.0, NodeTriangleRegion::FaceInterior});
+
+    for (const auto& tp : test_points) {
+        for (int row = 0; row < 4; ++row) {
+            const Mat33 Hself = node_triangle_barrier_self_hessian(
+                    tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, row);
+            const Mat33 Hdiag = node_triangle_barrier_cross_hessian(
+                    tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, row, row);
+            EXPECT_LT((Hself - Hdiag).norm(), 1.0e-12) << tp.name << " row=" << row;
+
+            Mat33 translation_sum = Mat33::Zero();
+            for (int col = 0; col < 4; ++col) {
+                translation_sum += node_triangle_barrier_cross_hessian(
+                        tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, row, col);
+            }
+            EXPECT_LT(translation_sum.norm(), 1.0e-10)
+                    << tp.name << " translated Hessian row=" << row;
+
+            for (int col = 0; col < 4; ++col) {
+                if (row == col) continue;
+
+                const Mat33 H = node_triangle_barrier_cross_hessian(
+                        tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, row, col);
+                const Mat33 Htranspose = node_triangle_barrier_cross_hessian(
+                        tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, col, row);
+                EXPECT_LT((H - Htranspose.transpose()).norm(), 1.0e-10)
+                        << tp.name << " H(" << dof_names[row] << "," << dof_names[col] << ")";
+
+                for (int k = 0; k < 3; ++k) {
+                    for (int l = 0; l < 3; ++l) {
+                        // H(k,l) = d gradient(row)(k) / d y_col(l).
+                        const double fd = node_triangle_gradient_fd(
+                                tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat,
+                                col, l, row, k, h);
+                        const double tol = 2.0e-5 * (1.0 + std::abs(H(k, l)));
+                        EXPECT_NEAR(H(k, l), fd, tol)
+                                << tp.name << " H(" << dof_names[row] << k << ","
+                                << dof_names[col] << l << ")";
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(BarrierEnergy, DegenerateTriangleActiveFeatureHessian){
+    const double d_hat = 1.0;
+    const double eps = 1.0e-4;
+    const double h = 1.0e-7;
+    const Vec3 y[4] = {
+        Vec3(0.5, -0.2, 0.3), // query point
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.2, 5.0e-5, 0.0)
+    };
+
+    const auto dr = node_triangle_distance(y[0], y[1], y[2], y[3], eps);
+    ASSERT_EQ(dr.region, NodeTriangleRegion::DegenerateTriangle);
+
+    double total_hessian_norm = 0.0;
+    for (int dof = 0; dof < 4; ++dof) {
+        const Mat33 H = node_triangle_barrier_self_hessian(
+                y[0], y[1], y[2], y[3], d_hat, dof, eps);
+        total_hessian_norm += H.norm();
+
+        for (int l = 0; l < 3; ++l) {
+            Vec3 yp[4] = {y[0], y[1], y[2], y[3]};
+            Vec3 ym[4] = {y[0], y[1], y[2], y[3]};
+            yp[dof](l) += h;
+            ym[dof](l) -= h;
+
+            const Vec3 gp = node_triangle_barrier_gradient(
+                    yp[0], yp[1], yp[2], yp[3], d_hat, dof, eps);
+            const Vec3 gm = node_triangle_barrier_gradient(
+                    ym[0], ym[1], ym[2], ym[3], d_hat, dof, eps);
+            const Vec3 fd = (gp - gm) / (2.0 * h);
+
+            for (int k = 0; k < 3; ++k) {
+                const double tol = 5.0e-5 * (1.0 + std::abs(H(k, l)));
+                EXPECT_NEAR(H(k, l), fd(k), tol)
+                        << "dof=" << dof << " k=" << k << " l=" << l;
+            }
+        }
+    }
+
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            if (row == col) continue;
+            const Mat33 H = node_triangle_barrier_cross_hessian(
+                    y[0], y[1], y[2], y[3], d_hat, row, col, eps);
+            total_hessian_norm += H.norm();
+
+            for (int l = 0; l < 3; ++l) {
+                Vec3 yp[4] = {y[0], y[1], y[2], y[3]};
+                Vec3 ym[4] = {y[0], y[1], y[2], y[3]};
+                yp[col](l) += h;
+                ym[col](l) -= h;
+
+                const Vec3 gp = node_triangle_barrier_gradient(
+                        yp[0], yp[1], yp[2], yp[3], d_hat, row, eps);
+                const Vec3 gm = node_triangle_barrier_gradient(
+                        ym[0], ym[1], ym[2], ym[3], d_hat, row, eps);
+                const Vec3 fd = (gp - gm) / (2.0 * h);
+
+                for (int k = 0; k < 3; ++k) {
+                    const double tol = 5.0e-5 * (1.0 + std::abs(H(k, l)));
+                    EXPECT_NEAR(H(k, l), fd(k), tol)
+                            << "row=" << row << " col=" << col
+                            << " k=" << k << " l=" << l;
+                }
+            }
+        }
+    }
+    EXPECT_GT(total_hessian_norm, 1.0e-8);
+}
+
 TEST(BarrierEnergy, SSZeroOutsideActivation){
     const Vec3 x1(0,0,0), x2(1,0,0), x3(0.5,-3,2), x4(0.5,3,2);
     const double d_hat = 1.0;
     EXPECT_TRUE(approx(segment_segment_barrier(x1, x2, x3, x4, d_hat), 0.0)) << "ss inactive energy";
-    for (int dof = 0; dof < 4; ++dof) {
-        Vec3 g = segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, dof);
+    for (int row = 0; row < 4; ++row) {
+        Vec3 g = segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, row);
         for (int k = 0; k < 3; ++k)
-            EXPECT_TRUE(approx(g(k), 0.0)) << "ss inactive grad dof=" << dof;
+            EXPECT_TRUE(approx(g(k), 0.0)) << "ss inactive grad dof=" << row;
+
+        const Mat33 H = segment_segment_barrier_self_hessian(
+                x1, x2, x3, x4, d_hat, row);
+        EXPECT_EQ(H.norm(), 0.0) << "ss inactive self Hessian row=" << row;
+
+        for (int col = 0; col < 4; ++col) {
+            const Mat33 Hcross = segment_segment_barrier_cross_hessian(
+                    x1, x2, x3, x4, d_hat, row, col);
+            EXPECT_EQ(Hcross.norm(), 0.0)
+                    << "ss inactive cross Hessian row=" << row << " col=" << col;
+        }
     }
 }
 
@@ -541,6 +716,137 @@ TEST(BarrierEnergy, SSHessianConvergence){
     for (const auto& tp : test_points) {
         EXPECT_TRUE(run_ss_hessian_convergence_test(tp)) << tp.name << ": SS Hessian convergence failed";
     }
+}
+
+TEST(BarrierEnergy, SSCrossHessianFiniteDifference){
+    const double h = 1.0e-5;
+    const char* dof_names[4] = {"x1", "x2", "x3", "x4"};
+    auto test_points = make_ss_test_points();
+
+    // Generic skew interior pair with nonzero A, B, C, D, and E derivatives.
+    const Vec3 a(1.0, 0.2, 0.1);
+    const Vec3 b(0.3, 1.0, 0.4);
+    const Vec3 r = 0.35 * a.cross(b).normalized();
+    const Vec3 gx1(0.0, 0.0, 0.0);
+    const Vec3 gx2 = gx1 + a;
+    const Vec3 gx3 = gx1 + 0.3 * a - r - 0.6 * b;
+    const Vec3 gx4 = gx3 + b;
+    test_points.push_back({
+            "ss_generic_skew_interior", gx1, gx2, gx3, gx4, 2.0,
+            SegmentSegmentRegion::Interior});
+
+    for (const auto& tp : test_points) {
+        for (int row = 0; row < 4; ++row) {
+            const Mat33 Hself = segment_segment_barrier_self_hessian(
+                    tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, row);
+            const Mat33 Hdiag = segment_segment_barrier_cross_hessian(
+                    tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, row, row);
+            EXPECT_LT((Hself - Hdiag).norm(), 1.0e-12) << tp.name << " row=" << row;
+
+            Mat33 translation_sum = Mat33::Zero();
+            for (int col = 0; col < 4; ++col) {
+                translation_sum += segment_segment_barrier_cross_hessian(
+                        tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, row, col);
+            }
+            EXPECT_LT(translation_sum.norm(), 1.0e-9)
+                    << tp.name << " translated Hessian row=" << row;
+
+            for (int col = 0; col < 4; ++col) {
+                if (row == col) continue;
+
+                const Mat33 H = segment_segment_barrier_cross_hessian(
+                        tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, row, col);
+                const Mat33 Htranspose = segment_segment_barrier_cross_hessian(
+                        tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, col, row);
+                EXPECT_LT((H - Htranspose.transpose()).norm(), 1.0e-9)
+                        << tp.name << " H(" << dof_names[row] << "," << dof_names[col] << ")";
+
+                for (int k = 0; k < 3; ++k) {
+                    for (int l = 0; l < 3; ++l) {
+                        // H(k,l) = d gradient(row)(k) / d y_col(l).
+                        const double fd = segment_segment_gradient_fd(
+                                tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat,
+                                col, l, row, k, h);
+                        const double tol = 5.0e-5 * (1.0 + std::abs(H(k, l)));
+                        EXPECT_NEAR(H(k, l), fd, tol)
+                                << tp.name << " H(" << dof_names[row] << k << ","
+                                << dof_names[col] << l << ")";
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(BarrierEnergy, ParallelSegmentsActiveFeatureHessian){
+    const double d_hat = 1.0;
+    const double eps = 2.0e-2;
+    const double h = 1.0e-7;
+    const Vec3 y[4] = {
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(-1.0, 0.3, 0.2),
+        Vec3(0.5, 0.31, 0.2)
+    };
+
+    const auto dr = segment_segment_distance(y[0], y[1], y[2], y[3], eps);
+    ASSERT_EQ(dr.region, SegmentSegmentRegion::ParallelSegments);
+
+    double total_hessian_norm = 0.0;
+    for (int dof = 0; dof < 4; ++dof) {
+        const Mat33 H = segment_segment_barrier_self_hessian(
+                y[0], y[1], y[2], y[3], d_hat, dof, eps);
+        total_hessian_norm += H.norm();
+
+        for (int l = 0; l < 3; ++l) {
+            Vec3 yp[4] = {y[0], y[1], y[2], y[3]};
+            Vec3 ym[4] = {y[0], y[1], y[2], y[3]};
+            yp[dof](l) += h;
+            ym[dof](l) -= h;
+
+            const Vec3 gp = segment_segment_barrier_gradient(
+                    yp[0], yp[1], yp[2], yp[3], d_hat, dof, eps);
+            const Vec3 gm = segment_segment_barrier_gradient(
+                    ym[0], ym[1], ym[2], ym[3], d_hat, dof, eps);
+            const Vec3 fd = (gp - gm) / (2.0 * h);
+
+            for (int k = 0; k < 3; ++k) {
+                const double tol = 5.0e-5 * (1.0 + std::abs(H(k, l)));
+                EXPECT_NEAR(H(k, l), fd(k), tol)
+                        << "dof=" << dof << " k=" << k << " l=" << l;
+            }
+        }
+    }
+
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            if (row == col) continue;
+            const Mat33 H = segment_segment_barrier_cross_hessian(
+                    y[0], y[1], y[2], y[3], d_hat, row, col, eps);
+            total_hessian_norm += H.norm();
+
+            for (int l = 0; l < 3; ++l) {
+                Vec3 yp[4] = {y[0], y[1], y[2], y[3]};
+                Vec3 ym[4] = {y[0], y[1], y[2], y[3]};
+                yp[col](l) += h;
+                ym[col](l) -= h;
+
+                const Vec3 gp = segment_segment_barrier_gradient(
+                        yp[0], yp[1], yp[2], yp[3], d_hat, row, eps);
+                const Vec3 gm = segment_segment_barrier_gradient(
+                        ym[0], ym[1], ym[2], ym[3], d_hat, row, eps);
+                const Vec3 fd = (gp - gm) / (2.0 * h);
+
+                for (int k = 0; k < 3; ++k) {
+                    const double tol = 5.0e-5 * (1.0 + std::abs(H(k, l)));
+                    EXPECT_NEAR(H(k, l), fd(k), tol)
+                            << "row=" << row << " col=" << col
+                            << " k=" << k << " l=" << l;
+                }
+            }
+        }
+    }
+    EXPECT_GT(total_hessian_norm, 1.0e-8);
 }
 
 TEST(BarrierEnergy, StressNTNearActivation){
@@ -602,7 +908,7 @@ TEST(BarrierEnergy, StressSSNearParallel){
 
     // Hessian should be finite
     for (int dof = 0; dof < 4; ++dof) {
-        Mat33 H = segment_segment_barrier_hessian(x1, x2, x3, x4, d_hat, dof);
+        Mat33 H = segment_segment_barrier_self_hessian(x1, x2, x3, x4, d_hat, dof);
         EXPECT_TRUE(std::isfinite(H.norm())) << "near-parallel SS Hessian should be finite for dof=" << dof;
     }
 

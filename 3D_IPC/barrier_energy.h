@@ -16,13 +16,21 @@ Vec3 node_triangle_barrier_gradient(const Vec3& x, const Vec3& x1, const Vec3& x
                                     double d_hat, int dof, double eps = 1.0e-12,
                                     const NodeTriangleDistanceResult* precomputed_dr = nullptr);
 
-Mat33 node_triangle_barrier_hessian(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
-                                    double d_hat, int dof, double eps = 1.0e-12,
-                                    const NodeTriangleDistanceResult* precomputed_dr = nullptr);
+// Hessian block H(row_dof, col_dof), where H(k,l) is the derivative of
+// gradient(row_dof)(k) with respect to coordinate l of col_dof.
+Mat33 node_triangle_barrier_cross_hessian(
+        const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
+        double d_hat, int row_dof, int col_dof, double eps = 1.0e-12,
+        const NodeTriangleDistanceResult* precomputed_dr = nullptr);
 
-// Returns both gradient and node-self hessian for dof (computes distance once).
-std::pair<Vec3, Mat33> node_triangle_barrier_gradient_and_hessian(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
-                                                                  double d_hat, int dof, double eps = 1.0e-12);
+// Self/diagonal Hessian block H(dof, dof).
+Mat33 node_triangle_barrier_self_hessian(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
+                                         double d_hat, int dof, double eps = 1.0e-12,
+                                         const NodeTriangleDistanceResult* precomputed_dr = nullptr);
+
+// Returns both the gradient and self/diagonal Hessian block for dof.
+std::pair<Vec3, Mat33> node_triangle_barrier_self_gradient_and_hessian(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
+                                                                       double d_hat, int dof, double eps = 1.0e-12);
 
 // Segment--segment barrier with DOF ordering: 0=x1, 1=x2, 2=x3, 3=x4
 double segment_segment_barrier(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, double eps = 1.0e-12);
@@ -31,10 +39,19 @@ Vec3 segment_segment_barrier_gradient(const Vec3& x1, const Vec3& x2, const Vec3
                                       double d_hat, int dof, double eps = 1.0e-12,
                                       const SegmentSegmentDistanceResult* precomputed_dr = nullptr);
 
-Mat33 segment_segment_barrier_hessian(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
-                                      double d_hat, int dof, double eps = 1.0e-12,
-                                      const SegmentSegmentDistanceResult* precomputed_dr = nullptr);
+// Hessian block H(row_dof, col_dof), where H(k,l) is the derivative of
+// gradient(row_dof)(k) with respect to coordinate l of col_dof.
+Mat33 segment_segment_barrier_cross_hessian(
+        const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+        double d_hat, int row_dof, int col_dof, double eps = 1.0e-12,
+        const SegmentSegmentDistanceResult* precomputed_dr = nullptr);
 
-// Returns both gradient and node-self hessian for dof (computes distance once).
-std::pair<Vec3, Mat33> segment_segment_barrier_gradient_and_hessian(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
-                                                                    double d_hat, int dof, double eps = 1.0e-12);
+// Self/diagonal Hessian block H(dof, dof).
+Mat33 segment_segment_barrier_self_hessian(
+        const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+        double d_hat, int dof, double eps = 1.0e-12,
+        const SegmentSegmentDistanceResult* precomputed_dr = nullptr);
+
+// Returns both the gradient and self/diagonal Hessian block for dof.
+std::pair<Vec3, Mat33> segment_segment_barrier_self_gradient_and_hessian(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+                                                                         double d_hat, int dof, double eps = 1.0e-12);

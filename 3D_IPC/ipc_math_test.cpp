@@ -43,13 +43,26 @@ TEST(Matrix3dInverse, SingularMatrixReturnsFinitePseudoInverse) {
 }
 
 // ====================================================================
-//  clamp_scalar
+//  index symbols
 // ====================================================================
 
-TEST(ClampScalar, ClampsBelowAndAbove) {
-    EXPECT_DOUBLE_EQ(clamp_scalar(-1.0, 0.0, 1.0), 0.0);
-    EXPECT_DOUBLE_EQ(clamp_scalar(2.0, 0.0, 1.0), 1.0);
-    EXPECT_DOUBLE_EQ(clamp_scalar(0.5, 0.0, 1.0), 0.5);
+TEST(IndexSymbols, KroneckerDelta) {
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            EXPECT_DOUBLE_EQ(kronecker_delta(i, j), i == j ? 1.0 : 0.0);
+        }
+    }
+}
+
+TEST(IndexSymbols, LeviCivita) {
+    EXPECT_EQ(levi_civita(0, 1, 2), 1);
+    EXPECT_EQ(levi_civita(1, 2, 0), 1);
+    EXPECT_EQ(levi_civita(2, 0, 1), 1);
+    EXPECT_EQ(levi_civita(0, 2, 1), -1);
+    EXPECT_EQ(levi_civita(2, 1, 0), -1);
+    EXPECT_EQ(levi_civita(1, 0, 2), -1);
+    EXPECT_EQ(levi_civita(0, 0, 1), 0);
+    EXPECT_EQ(levi_civita(2, 1, 2), 0);
 }
 
 // ====================================================================
@@ -79,71 +92,6 @@ TEST(SegmentClosestPoint, DegenerateZeroLength) {
     Vec3 cp = segment_closest_point(Vec3(5,5,5), a, b, t);
     EXPECT_DOUBLE_EQ(t, 0.0);
     EXPECT_NEAR((cp - a).norm(), 0.0, 1e-14);
-}
-
-// ====================================================================
-//  nearly_zero, in_unit_interval, filter_root
-// ====================================================================
-
-TEST(NearlyZero, Basics) {
-    EXPECT_TRUE(nearly_zero(0.0));
-    EXPECT_TRUE(nearly_zero(1e-13));
-    EXPECT_FALSE(nearly_zero(1e-10));
-}
-
-TEST(InUnitInterval, BoundaryValues) {
-    EXPECT_TRUE(in_unit_interval(0.0));
-    EXPECT_TRUE(in_unit_interval(1.0));
-    EXPECT_TRUE(in_unit_interval(-1e-13));   // within eps
-    EXPECT_TRUE(in_unit_interval(1.0 + 1e-13));
-    EXPECT_FALSE(in_unit_interval(-0.1));
-    EXPECT_FALSE(in_unit_interval(1.1));
-}
-
-TEST(FilterRoot, AcceptsValidRoots) {
-    EXPECT_NEAR(filter_root(0.5), 0.5, 1e-14);
-    EXPECT_NEAR(filter_root(0.0), 0.0, 1e-14);
-    EXPECT_NEAR(filter_root(1.0), 1.0, 1e-14);
-}
-
-TEST(FilterRoot, RejectsBeyondInterval) {
-    EXPECT_LT(filter_root(-0.1), 0.0);
-    EXPECT_LT(filter_root(1.1), 0.0);
-}
-
-TEST(FilterRoot, ClampsNearBoundary) {
-    double r = filter_root(-1e-13);
-    EXPECT_GE(r, 0.0);
-    EXPECT_LE(r, 1e-12);
-}
-
-// ====================================================================
-//  add_root / SmallRoots
-// ====================================================================
-
-TEST(AddRoot, SmallRootsBasics) {
-    SmallRoots roots;
-    add_root(roots, 0.5);
-    add_root(roots, 0.3);
-    add_root(roots, 0.5);  // duplicate — should be skipped
-    EXPECT_EQ(roots.size(), 2);
-}
-
-TEST(AddRoot, SmallRootsRejectsOutOfRange) {
-    SmallRoots roots;
-    add_root(roots, -0.5);
-    add_root(roots, 1.5);
-    EXPECT_EQ(roots.size(), 0);
-}
-
-TEST(AddRoot, SmallRootsSortable) {
-    SmallRoots roots;
-    add_root(roots, 0.8);
-    add_root(roots, 0.2);
-    add_root(roots, 0.5);
-    std::sort(roots.begin(), roots.end());
-    EXPECT_LT(roots[0], roots[1]);
-    EXPECT_LT(roots[1], roots[2]);
 }
 
 // ====================================================================
@@ -194,39 +142,6 @@ TEST(Barycentric, DegenerateTriangleReturnsZero) {
     EXPECT_DOUBLE_EQ(b[0], 0.0);
     EXPECT_DOUBLE_EQ(b[1], 0.0);
     EXPECT_DOUBLE_EQ(b[2], 0.0);
-}
-
-// ====================================================================
-//  point_in_triangle_on_plane
-// ====================================================================
-
-TEST(PointInTriangle, InteriorPoint) {
-    Vec3 x1(0,0,0), x2(1,0,0), x3(0,1,0);
-    EXPECT_TRUE(point_in_triangle_on_plane(Vec3(0.2, 0.2, 0.0), x1, x2, x3));
-}
-
-TEST(PointInTriangle, ExteriorPoint) {
-    Vec3 x1(0,0,0), x2(1,0,0), x3(0,1,0);
-    EXPECT_FALSE(point_in_triangle_on_plane(Vec3(1.0, 1.0, 0.0), x1, x2, x3));
-}
-
-// ====================================================================
-//  segment_segment_parameters_if_not_parallel
-// ====================================================================
-
-TEST(SegmentSegmentParams, CrossingSegments) {
-    Vec3 x1(0,0,0), x2(1,0,0), x3(0.5,-1,0), x4(0.5,1,0);
-    double s, u;
-    bool ok = segment_segment_parameters_if_not_parallel(x1, x2, x3, x4, s, u);
-    EXPECT_TRUE(ok);
-    EXPECT_NEAR(s, 0.5, 1e-12);
-    EXPECT_NEAR(u, 0.5, 1e-12);
-}
-
-TEST(SegmentSegmentParams, ParallelReturnsFalse) {
-    Vec3 x1(0,0,0), x2(1,0,0), x3(0,1,0), x4(1,1,0);
-    double s, u;
-    EXPECT_FALSE(segment_segment_parameters_if_not_parallel(x1, x2, x3, x4, s, u));
 }
 
 // ====================================================================
@@ -292,17 +207,4 @@ TEST(SetMeshTopology, CachedTopologyMatchesFreshBuild) {
         EXPECT_EQ(fc.edges[i][0], cc.edges[i][0]);
         EXPECT_EQ(fc.edges[i][1], cc.edges[i][1]);
     }
-}
-
-// ====================================================================
-//  max_abs_value_among_four_numbers
-// ====================================================================
-
-TEST(MaxAbsValue, AlwaysAtLeastOne) {
-    EXPECT_GE(max_abs_value_among_four_numbers(0, 0, 0, 0), 1.0);
-}
-
-TEST(MaxAbsValue, PicksLargestAbsolute) {
-    EXPECT_DOUBLE_EQ(max_abs_value_among_four_numbers(-5, 3, 2, 1), 5.0);
-    EXPECT_DOUBLE_EQ(max_abs_value_among_four_numbers(0.1, 0.2, 0.3, 0.4), 1.0);
 }

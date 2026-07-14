@@ -1,5 +1,6 @@
 #include "segment_segment_distance.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -25,7 +26,7 @@ static double optimal_t_for_fixed_s(const Vec3& x1, const Vec3& a, const Vec3& x
     if (C <= 0.0) {
         t_out = 0.0;
     } else {
-        t_out = clamp_scalar((p - x3).dot(b) / C, 0.0, 1.0);
+        t_out = std::clamp((p - x3).dot(b) / C, 0.0, 1.0);
     }
     const Vec3 q = x3 + t_out * b;
     return (p - q).norm();
@@ -37,7 +38,7 @@ static double optimal_s_for_fixed_t(const Vec3& x1, const Vec3& a, const Vec3& x
     if (A <= 0.0) {
         s_out = 0.0;
     } else {
-        s_out = clamp_scalar((q - x1).dot(a) / A, 0.0, 1.0);
+        s_out = std::clamp((q - x1).dot(a) / A, 0.0, 1.0);
     }
     const Vec3 p = x1 + s_out * a;
     return (p - q).norm();
