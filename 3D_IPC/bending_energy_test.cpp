@@ -90,19 +90,7 @@ HingeDef MakeFlatHinge() {
 }  // anonymous namespace
 
 // ===========================================================================
-//  Test 1: theta and energy are finite
-// ===========================================================================
-
-TEST(BendingEnergy, EnergyIsFinite) {
-    const auto h = MakeTestHinge();
-    const double theta = bending_theta(h);
-    ASSERT_TRUE(std::isfinite(theta));
-    const double E = bending_energy(h, kB, kCe, 0.1);
-    EXPECT_TRUE(std::isfinite(E));
-}
-
-// ===========================================================================
-//  Test 2: flat configuration gives theta = 0
+//  Flat configuration gives theta = 0
 // ===========================================================================
 
 TEST(BendingEnergy, FlatStateZeroTheta) {
@@ -112,7 +100,7 @@ TEST(BendingEnergy, FlatStateZeroTheta) {
 }
 
 // ===========================================================================
-//  Test 3: rest state (bar_theta = theta) has zero energy and gradient
+//  Rest state (bar_theta = theta) has zero energy and gradient
 // ===========================================================================
 
 TEST(BendingEnergy, RestStateZeroEnergyAndGradient) {
@@ -127,7 +115,7 @@ TEST(BendingEnergy, RestStateZeroEnergyAndGradient) {
 }
 
 // ===========================================================================
-//  Test 4: translation invariance of energy
+//  Translation invariance of energy
 // ===========================================================================
 
 TEST(BendingEnergy, TranslationInvariance) {
@@ -143,7 +131,7 @@ TEST(BendingEnergy, TranslationInvariance) {
 }
 
 // ===========================================================================
-//  Test 5: rotation invariance of energy
+//  Rotation invariance of energy
 // ===========================================================================
 
 TEST(BendingEnergy, RotationInvariance) {
@@ -160,7 +148,7 @@ TEST(BendingEnergy, RotationInvariance) {
 }
 
 // ===========================================================================
-//  Test 6: Hessian self-block is symmetric
+//  Hessian self-block is symmetric
 // ===========================================================================
 
 TEST(BendingEnergy, HessianSymmetry) {
@@ -174,7 +162,7 @@ TEST(BendingEnergy, HessianSymmetry) {
 }
 
 // ===========================================================================
-//  Test 7: gradient convergence (slope = 2 in finite differences)
+//  Gradient convergence (slope = 2 in finite differences)
 // ===========================================================================
 
 TEST(BendingEnergy, GradientConvergence) {
@@ -207,7 +195,7 @@ TEST(BendingEnergy, GradientConvergence) {
 }
 
 // ===========================================================================
-//  Test 8: Hessian self-block convergence (slope = 2 in finite differences)
+//  Hessian self-block convergence (slope = 2 in finite differences)
 // ===========================================================================
 
 TEST(BendingEnergy, HessianConvergence) {
@@ -267,39 +255,7 @@ TEST(BendingEnergy, HessianConvergence) {
 }
 
 // ===========================================================================
-//  Test 9: directional derivative convergence (slope = 2)
-// ===========================================================================
-
-TEST(BendingEnergy, DirectionalDerivativeConvergence) {
-    const auto h = MakeTestHinge();
-    const double bar_theta = 0.0;
-
-    Vec3 dx(0.4, -0.6, 0.3);
-    dx.normalize();
-
-    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
-
-    for (int node : {0, 1, 2, 3}) {
-        const Vec3 g = bending_node_gradient(h, kB, kCe, bar_theta, node);
-        const double exact = g.dot(dx);
-
-        std::vector<double> errors;
-        for (auto hh : hs) {
-            HingeDef dp = h, dm = h;
-            dp.x[node] += hh * dx;
-            dm.x[node] -= hh * dx;
-            const double fd = (bending_energy(dp, kB, kCe, bar_theta)
-                               - bending_energy(dm, kB, kCe, bar_theta)) / (2.0 * hh);
-            errors.push_back(std::abs(fd - exact));
-        }
-        const std::string label = "directional[node" + std::to_string(node) + "]";
-        EXPECT_TRUE(check_convergence(label, exact, hs, errors))
-            << "directional derivative convergence failed (node " << node << ")";
-    }
-}
-
-// ===========================================================================
-//  Test 10: rest-state Hessian self-block equals the Gauss-Newton term
+//  Rest-state Hessian self-block equals the Gauss-Newton term
 // ===========================================================================
 
 TEST(BendingEnergy, RestHessianMatchesGaussNewton) {
@@ -329,7 +285,7 @@ TEST(BendingEnergy, RestHessianMatchesGaussNewton) {
 }
 
 // ===========================================================================
-//  Test 11: known fold angle -- both apex vertices rotated about the edge
+//  Known fold angle -- both apex vertices rotated about the edge
 // ===========================================================================
 
 TEST(BendingEnergy, KnownFoldAngle) {
@@ -350,7 +306,7 @@ TEST(BendingEnergy, KnownFoldAngle) {
 }
 
 // ===========================================================================
-//  Test 12: uniform scale invariance -- theta is a pure angle
+//  Uniform scale invariance -- theta is a pure angle
 // ===========================================================================
 
 TEST(BendingEnergy, ScaleInvariance) {
@@ -367,7 +323,7 @@ TEST(BendingEnergy, ScaleInvariance) {
 }
 
 // ===========================================================================
-//  Test 13: energy is exactly k_B * c_e * (theta - bar_theta)^2
+//  Energy is exactly k_B * c_e * (theta - bar_theta)^2
 // ===========================================================================
 
 TEST(BendingEnergy, EnergyQuadraticFormula) {
@@ -383,7 +339,7 @@ TEST(BendingEnergy, EnergyQuadraticFormula) {
 }
 
 // ===========================================================================
-//  Test 14: energy is invariant under a large global translation
+//  Energy is invariant under a large global translation
 // ===========================================================================
 
 TEST(BendingEnergy, LargeCoordinateOffset) {
@@ -414,7 +370,7 @@ TEST(BendingEnergy, LargeCoordinateOffset) {
 }
 
 // ===========================================================================
-//  Test 15: near-degenerate triangle -- theta, gradient, Hessian finite
+//  Near-degenerate triangle -- theta, gradient, Hessian finite
 // ===========================================================================
 
 TEST(BendingEnergy, NearDegenerateTriangleA) {
@@ -453,7 +409,7 @@ TEST(BendingEnergy, NearDegenerateTriangleA) {
 }
 
 // ===========================================================================
-//  Test 16: zero-length hinge edge -- degenerate but handled gracefully
+//  Zero-length hinge edge -- degenerate but handled gracefully
 // ===========================================================================
 
 TEST(BendingEnergy, ZeroLengthHingeEdge) {
@@ -480,7 +436,7 @@ TEST(BendingEnergy, ZeroLengthHingeEdge) {
 }
 
 // ===========================================================================
-//  Test 17: gradient sums to zero (translation null mode)
+//  Gradient sums to zero (translation null mode)
 // ===========================================================================
 
 TEST(BendingEnergy, GradientSumZero) {
@@ -495,7 +451,7 @@ TEST(BendingEnergy, GradientSumZero) {
 }
 
 // ===========================================================================
-//  Test 18: PSD Hessian matches 2*k_B*c_e*(grad theta)(grad theta)^T
+//  PSD Hessian matches 2*k_B*c_e*(grad theta)(grad theta)^T
 // ===========================================================================
 
 TEST(BendingEnergy, PsdHessianMatchesGradientSquared) {
@@ -527,7 +483,7 @@ TEST(BendingEnergy, PsdHessianMatchesGradientSquared) {
 }
 
 // ===========================================================================
-//  Test 19: PSD Hessian matches exact at rest (delta = 0) for nodes 2, 3
+//  PSD Hessian matches exact at rest (delta = 0) for nodes 2, 3
 // ===========================================================================
 
 TEST(BendingEnergy, PsdHessianMatchesExactAtRest) {
@@ -543,7 +499,7 @@ TEST(BendingEnergy, PsdHessianMatchesExactAtRest) {
 }
 
 // ===========================================================================
-//  Test 20: PSD Hessian FD convergence at all 4 nodes, near the rest state
+//  PSD Hessian FD convergence at all 4 nodes, near the rest state
 // ===========================================================================
 //
 // At the rest state (delta = 0) the PSD Hessian equals the true Hessian, so

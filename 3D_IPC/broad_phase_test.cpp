@@ -10,6 +10,7 @@
 #include <array>
 #include <set>
 #include <tuple>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -122,10 +123,6 @@ namespace {
             if (ss_pair_matches(p, e0, e1)) return true;
         }
         return false;
-    }
-
-    static bool pair_shares_vertex(const SegmentSegmentPair& p) {
-        return share_vertex(EdgeKey(p.v[0], p.v[1]), EdgeKey(p.v[2], p.v[3]));
     }
 
     static std::vector<EdgeKey> build_unique_edges_ref(const RefMesh& mesh) {
@@ -323,6 +320,46 @@ namespace {
         });
     }
 
+    // Pair order feeds the deterministic solver schedule. Reconstruct the
+    // expected first-seen order from BroadPhase's cached query results.
+    static void expect_pair_order_matches_query_hits(const BroadPhase::Cache& cache,
+                                                     const RefMesh& mesh) {
+        std::unordered_set<std::uint64_t> seen_nt;
+        std::vector<std::pair<int, int>> expected_nt;
+        for (int node = 0; node < static_cast<int>(cache.node_hits.size()); ++node) {
+            for (int t : cache.node_hits[node]) {
+                const int a = tri_vertex(mesh, t, 0);
+                const int b = tri_vertex(mesh, t, 1);
+                const int c = tri_vertex(mesh, t, 2);
+                if (node == a || node == b || node == c) continue;
+                if (seen_nt.insert(BroadPhase::nt_key(node, t)).second)
+                    expected_nt.emplace_back(node, t);
+            }
+        }
+
+        ASSERT_EQ(cache.nt_pairs.size(), expected_nt.size());
+        ASSERT_EQ(cache.nt_pair_tri.size(), expected_nt.size());
+        for (std::size_t i = 0; i < expected_nt.size(); ++i) {
+            EXPECT_EQ(cache.nt_pairs[i].node, expected_nt[i].first) << "NT pair " << i;
+            EXPECT_EQ(cache.nt_pair_tri[i], expected_nt[i].second) << "NT pair " << i;
+        }
+
+        std::unordered_set<std::uint64_t> seen_ss;
+        std::vector<std::array<int, 2>> expected_ss;
+        for (int e = 0; e < static_cast<int>(cache.edge_hits.size()); ++e) {
+            const EdgeKey e0(cache.edges[e][0], cache.edges[e][1]);
+            for (int other : cache.edge_hits[e]) {
+                if (other == e) continue;
+                const EdgeKey e1(cache.edges[other][0], cache.edges[other][1]);
+                if (share_vertex(e0, e1)) continue;
+                const std::uint64_t key = BroadPhase::ss_key(e, other);
+                if (seen_ss.insert(key).second)
+                    expected_ss.push_back({std::min(e, other), std::max(e, other)});
+            }
+        }
+        EXPECT_EQ(cache.ss_pair_edges, expected_ss);
+    }
+
 } // namespace
 
 TEST(AABBTest, DefaultConstructorStartsEmpty) {
@@ -422,7 +459,7 @@ EXPECT_EQ(hits[0], 0);
 }
 }
 
-TEST(BroadPhaseTest, SingleTriangleProducesNoSelfNodeTrianglePairs) {
+TEST(BroadPhaseTest, SingleTriangleProducesNoIncidentPairs) {
 const std::vector<Vec3> x = {Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)};
 const std::vector<Vec3> v(x.size(), Vec3::Zero());
 const RefMesh mesh = make_mesh(x, {{0, 1, 2}});
@@ -448,21 +485,6 @@ const auto& nt = broad.nt_pairs();
 EXPECT_TRUE(contains_nt_pair(nt, 3, 0, 1, 2) || contains_nt_pair(nt, 4, 0, 1, 2) || contains_nt_pair(nt, 5, 0, 1, 2));
 }
 
-TEST(BroadPhaseTest, FiltersOutNodeTrianglePairsThatShareVertices) {
-const std::vector<Vec3> x = {Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)};
-const std::vector<Vec3> v(x.size(), Vec3::Zero());
-const RefMesh mesh = make_mesh(x, {{0, 1, 2}});
-
-BroadPhase broad;
-broad.initialize(x, v, mesh, 1.0, 10.0);
-
-for (const auto& p : broad.nt_pairs()) {
-EXPECT_NE(p.node, p.tri_v[0]);
-EXPECT_NE(p.node, p.tri_v[1]);
-EXPECT_NE(p.node, p.tri_v[2]);
-}
-}
-
 TEST(BroadPhaseTest, DetectsSegmentSegmentPairFromOverlappingBoxes) {
 const std::vector<Vec3> x = {
         Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 0.0), Vec3(0.0, 1.0, 0.0),
@@ -474,18 +496,6 @@ const RefMesh mesh = make_mesh(x, {{0, 1, 2}, {3, 4, 5}});
 BroadPhase broad;
 broad.initialize(x, v, mesh, 1.0, 0.0);
 EXPECT_TRUE(contains_ss_pair(broad.ss_pairs(), EdgeKey(0, 1), EdgeKey(3, 4)));
-}
-
-TEST(BroadPhaseTest, FiltersOutSegmentPairsThatShareVertices) {
-const std::vector<Vec3> x = {Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)};
-const std::vector<Vec3> v(x.size(), Vec3::Zero());
-const RefMesh mesh = make_mesh(x, {{0, 1, 2}});
-
-BroadPhase broad;
-broad.initialize(x, v, mesh, 1.0, 10.0);
-for (const auto& p : broad.ss_pairs()) {
-EXPECT_FALSE(pair_shares_vertex(p));
-}
 }
 
 TEST(BroadPhaseTest, CCDCandidatesDetectFutureNodeTriangleOverlap) {
@@ -642,17 +652,35 @@ EXPECT_TRUE(std::includes(large.nt.begin(), large.nt.end(), small.nt.begin(), sm
 EXPECT_TRUE(std::includes(large.ss.begin(), large.ss.end(), small.ss.begin(), small.ss.end()));
 }
 
-TEST(BroadPhaseTest, OutputPairsAreUnique) {
-std::vector<Vec3> x, v;
-RefMesh mesh;
-build_two_sheet_scene(x, v, mesh);
+TEST(BroadPhaseTest, PairOrderMatchesFirstQueryHitOrder) {
+    std::vector<Vec3> x, v;
+    RefMesh mesh;
+    build_three_sheet_scene(x, v, mesh);
 
-BroadPhase broad;
-broad.initialize(x, v, mesh, 1.0, 0.15);
+    const int nv = static_cast<int>(x.size());
+    std::vector<AABB> boxes(nv);
+    for (int i = 0; i < nv; ++i)
+        boxes[i] = AABB(x[i] - Vec3::Constant(0.04), x[i] + Vec3::Constant(0.04));
 
-const PairSets uniq = pair_sets_from_broad(broad);
-EXPECT_EQ(uniq.nt.size(), broad.nt_pairs().size());
-EXPECT_EQ(uniq.ss.size(), broad.ss_pairs().size());
+    BroadPhase broad;
+    broad.initialize(boxes, mesh, 0.07);
+    expect_pair_order_matches_query_hits(broad.cache(), mesh);
+
+    // Exercise the OGC refresh path, whose edge BVH leaves are incrementally
+    // refitted red boxes while edge_boxes remain the padded green queries.
+    x[0] += Vec3(0.01, -0.005, 0.002);
+    incremental_refresh_vertex(broad.mutable_cache(), 0, x, mesh,
+                               /*box_pad=*/0.07, /*node_box_radius_padded=*/0.04);
+    broad.refresh_pairs(mesh);
+    expect_pair_order_matches_query_hits(broad.cache(), mesh);
+
+    broad.build_ccd_candidates(x, v, mesh, 1.0);
+    expect_pair_order_matches_query_hits(broad.cache(), mesh);
+
+    // The velocity-based build does not create edge leaf maps. Refresh must
+    // still recognize the earlier directional hit and avoid duplicate pairs.
+    broad.refresh_pairs(mesh);
+    expect_pair_order_matches_query_hits(broad.cache(), mesh);
 }
 
 TEST(BroadPhaseTest, EmptyMeshProducesNoPairs) {
@@ -861,7 +889,7 @@ TEST(BroadPhaseTest, IncrementalRefreshIsIdempotentForZeroMove) {
     check_bvh_internal_invariant(c.edge_bvh_nodes);
 }
 
-TEST(BroadPhaseTest, PerVertexSafeStepBacksOffEndpointCollision) {
+TEST(BroadPhaseTest, PerVertexSafeStepClampsCCDAndOGC) {
     std::vector<Vec3> x = {
         Vec3(1.5, 0.25, 0.0),
         Vec3(0.0, 0.0, 0.0),
@@ -875,6 +903,7 @@ TEST(BroadPhaseTest, PerVertexSafeStepBacksOffEndpointCollision) {
 
     BroadPhase bp;
     auto& cache = bp.mutable_cache();
+    cache.node_boxes.assign(x.size(), AABB(Vec3::Constant(-2.0), Vec3::Constant(2.0)));
     cache.vertex_nt.resize(x.size());
     cache.vertex_ss.resize(x.size());
     NodeTrianglePair pair{};
@@ -887,9 +916,38 @@ TEST(BroadPhaseTest, PerVertexSafeStepBacksOffEndpointCollision) {
 
     bp.per_vertex_safe_step(
         x, [&](int vi) { return target[vi]; },
-        /*safety=*/0.9, /*clip_to_node_box=*/false, /*clip_ccd=*/true,
+        /*safety=*/0.9, /*clip_ccd=*/true,
         /*use_ticcd=*/false, /*use_ogc=*/false);
 
     const Vec3 expected(0.825, 0.25, 0.0);
     EXPECT_TRUE(x[0].isApprox(expected, 1.0e-12));
+
+    // Exercise the production OGC path with an incident pair initially 0.5
+    // apart. Its trust radius is 0.4 * 0.5 = 0.2, so a 0.25 displacement is
+    // scaled to 0.8 even though CCD clipping is disabled.
+    std::vector<Vec3> x_ogc = {
+        Vec3(0.0, 0.5, 0.0),
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 0.0, 1.0),
+    };
+    const std::vector<Vec3> target_ogc = {
+        Vec3(0.0, 0.25, 0.0),
+        x_ogc[1], x_ogc[2], x_ogc[3],
+    };
+
+    BroadPhase ogc_bp;
+    auto& ogc_cache = ogc_bp.mutable_cache();
+    ogc_cache.node_boxes.assign(x_ogc.size(), AABB(Vec3::Constant(-2.0), Vec3::Constant(2.0)));
+    ogc_cache.vertex_nt.resize(x_ogc.size());
+    ogc_cache.vertex_ss.resize(x_ogc.size());
+    ogc_cache.nt_pairs.push_back(pair);
+    ogc_cache.vertex_nt[0].push_back({/*pair_index=*/0, /*dof=*/0});
+
+    ogc_bp.per_vertex_safe_step(
+        x_ogc, [&](int vi) { return target_ogc[vi]; },
+        /*safety=*/0.9, /*clip_ccd=*/false,
+        /*use_ticcd=*/false, /*use_ogc=*/true);
+
+    EXPECT_TRUE(x_ogc[0].isApprox(Vec3(0.0, 0.3, 0.0), 1.0e-12));
 }

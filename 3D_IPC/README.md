@@ -209,7 +209,7 @@ reader can jump to the layer they care about.
 ### Mesh & physics state
 
 - `make_shape.h` / `make_shape.cpp` -- mesh construction, `build_xhat()`,
-  `update_velocity()`, vertex adjacency, greedy graph coloring.
+  `update_velocity()`, and incident-triangle maps.
 - `physics.h` / `physics.cpp` -- top-level incremental potential. Accumulates
   inertial + elastic + (when `d_hat > 0`) barrier contributions into per-vertex
   gradients and Hessians, exposes `PinMap` for O(1) pin lookup, and runs the
@@ -293,8 +293,8 @@ reader can jump to the layer they care about.
   Both share the per-vertex Newton solve (`gs_vertex_delta`) and node-box clip
   mechanics. `ccd_initial_guess`, `translation_initial_guess`, and `update_one_vertex` live here.
 - `parallel_helper.h` / `parallel_helper.cpp` -- helpers for elastic
-  adjacency, contact adjacency, adjacency union, greedy coloring, local Newton
-  direction, and safe-step computation.
+  adjacency, contact adjacency, adjacency union, and deterministic greedy
+  coloring.
 
 ### Tooling
 
@@ -314,17 +314,18 @@ Every layer of the pipeline has a GoogleTest binary. To build and run them all:
 
 | Test binary | Cases | What it covers |
 |-------------|-------|----------------|
-| `ccd_test` | 17 | Linear CCD single-moving-DOF cases plus TICCD-backed general NT/SS wrapper smoke tests |
-| `broad_phase_test` | 26 | AABB, BVH, pair generation, CCD candidates, conservativeness, uniqueness, and `incremental_refresh_vertex` partial refit |
+| `ccd_test` | 48 | Linear CCD single-moving-DOF, scale/coplanar stress cases, and TICCD-backed general NT/SS wrappers |
+| `rigid_body_ipc_test` | 20 | Quaternion kinematics/derivatives and rigid-body rotational CCD |
+| `broad_phase_test` | 25 | AABB, BVH, pair generation/order, CCD candidates, conservativeness, and `incremental_refresh_vertex` partial refit |
 | `ipc_math_test` | 15 | `matrix3d_inverse`, `segment_closest_point`, barycentric coordinates, serialize round-trip, and topology caching |
 | `sdf_penalty_energy_test` | 15 | Plane / cylinder SDF energy + gradient + Hessian FD convergence, hard-quadratic limit, soft-barrier rest at `phi=eps` |
-| `bending_energy_test` | 20 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
-| `parallel_helper_test` | 3 | Coloring and safe-step behavior |
+| `bending_energy_test` | 18 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
+| `parallel_helper_test` | 2 | Exact contact adjacency and deterministic coloring/scratch reuse |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
-| `make_shape_test` | 15 | Adjacency maps, greedy coloring |
-| `barrier_energy_test` | 18 | Scalar barrier, NT/SS gradient/Hessian FD convergence, NT/SS cross-Hessian blocks |
-| `corotated_energy_test` | 13 | Energy, rest state, rotation/translation invariance, gradient/Hessian FD convergence, stress |
-| `total_energy_test` | 12 | Combined elastic + barrier FD convergence, barrier activation, per-vertex gradient/Hessian, slope-2 checks |
+| `make_shape_test` | 6 | Incident-triangle maps and icosphere construction |
+| `barrier_energy_test` | 16 | Scalar barrier, all NT/SS feature regions, force partition, derivative blocks, and stress cases |
+| `corotated_energy_test` | 11 | Rest state, invariance, gradient/Hessian FD convergence, and stress cases |
+| `total_energy_test` | 5 | Aggregate Hessian/gradient checks, production residual FD, bending wiring, and disabled-SDF no-op behavior |
 | `initial_guess_test` | 4 | CCD no-candidate guess and translation guess closed forms for inertia/gravity, pins, and one-step plane-SDF correction |
 | `node_triangle_distance_test` | 9 | All 7 proximity regions + signed distance + degenerate |
 | `visualization_test` | 2 | Debug OBJ export (no assertions -- manual inspection) |

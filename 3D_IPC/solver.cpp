@@ -609,7 +609,6 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     // Elastic adjacency depends only on mesh topology, so reuse it across GS calls.
     static ElasticAdjacencyCache elastic_adj_cache;
     const std::vector<std::vector<int>>& ea = elastic_adj_cache.get(ref_mesh, adj, nv);
-    static ContactAdjacencyScratch contact_adj_scratch;
     static std::vector<std::vector<int>> bca;
     static std::vector<std::vector<int>> combined_adj;
     static std::vector<std::vector<int>> color_groups;
@@ -630,7 +629,7 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
             }
             //rebuild bvh and pairs
             broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
-            build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()), bca, &contact_adj_scratch);
+            build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()), bca);
             //color
             union_adjacency(ea, bca, combined_adj);
             greedy_color_conflict_graph(combined_adj, color_groups);
@@ -638,8 +637,7 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
 
         std::atomic<int> clip_count{0};
         broad_phase.per_vertex_safe_step(xnew, [&](int vi) -> Vec3 { return xnew[vi] - params.damping * gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm); },
-                                         /*safety=*/0.9, /*clip_to_node_box=*/true,
-                                         /*clip_ccd=*/params.use_ogc ? false : params.use_ccd,
+                                         /*safety=*/0.9, /*clip_ccd=*/params.use_ogc ? false : params.use_ccd,
                                          /*use_ticcd=*/params.use_ticcd,
                                          /*use_ogc=*/params.use_ogc,
                                          params.use_parallel ? &color_groups : nullptr,

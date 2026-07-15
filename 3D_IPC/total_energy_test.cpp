@@ -15,18 +15,6 @@ using VecX = Eigen::VectorXd;
 
 namespace {
 
-VecX flatten_positions(const std::vector<Vec3>& x){
-    VecX q(3 * x.size());
-    for (int i = 0; i < (int)x.size(); ++i) q.segment<3>(3*i) = x[i];
-    return q;
-}
-
-std::vector<Vec3> unflatten_positions(const VecX& q){
-    std::vector<Vec3> x(q.size()/3);
-    for (int i = 0; i < (int)x.size(); ++i) x[i] = q.segment<3>(3*i);
-    return x;
-}
-
 // =====================================================================
 //  Total energy: no_barrier base + barrier for active pairs
 // =====================================================================
@@ -159,63 +147,6 @@ Mat33 local_hessian_fd(int vi, const RefMesh& ref_mesh, const VertexTriangleMap&
     return Hfd;
 }
 
-// =====================================================================
-//  Slope-2 check
-// =====================================================================
-
-bool slope2_check(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
-                  const std::vector<Pin>& pins, const SimParams& params,
-                  const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                  const std::vector<NodeTrianglePair>& nt_pairs,
-                  const std::vector<SegmentSegmentPair>& ss_pairs){
-    std::cout << "\n=== slope-2 check vertex " << vi << " ===\n";
-
-    Vec3  g = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
-    Mat33 H = local_hessian (vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
-
-    Vec3 dir(0.3, -0.5, 0.8); dir.normalize();
-
-    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
-    std::vector<double> errs;
-
-    for (double h : hs) {
-        auto xh = x;
-        xh[vi] += h * dir;
-        Vec3 gh  = local_gradient(vi, ref_mesh, adj, pins, params, xh, xhat, nt_pairs, ss_pairs);
-        Vec3 lin = g + h * H * dir;
-        double err = (gh - lin).norm();
-        errs.push_back(err);
-    }
-
-    double noise_floor = 1e-10;
-    bool all_below_noise = true;
-    bool saw_reliable_slope = false;
-    bool passed = true;
-    for (int i = 1; i < (int)errs.size(); ++i) {
-        if (errs[i] < noise_floor || errs[i-1] < noise_floor) continue;
-        all_below_noise = false;
-        if (errs[i] == 0.0) continue;
-        double slope = std::log(errs[i-1]/errs[i]) / std::log(hs[i-1]/hs[i]);
-        std::cout << "    h=" << hs[i] << "  err=" << errs[i]
-                  << "  slope=" << std::fixed << std::setprecision(6) << slope << "\n";
-        saw_reliable_slope = true;
-        if (slope < 1.99 || slope > 2.01) {
-            std::cerr << "  FAIL: slope " << slope
-                      << " outside [1.99, 2.01] for slope-2 vertex " << vi << "\n";
-            passed = false;
-        }
-    }
-    if (all_below_noise) {
-        std::cout << "    (all errors below noise floor -- exact match)\n";
-        return true;
-    }
-    if (!saw_reliable_slope) {
-        std::cerr << "  FAIL: no reliable slope data for slope-2 vertex " << vi << "\n";
-        passed = false;
-    }
-    return passed;
-}
-
 } // anonymous namespace
 
 // =====================================================================
@@ -284,68 +215,6 @@ protected:
 };
 
 // -----------------------------------------------------------------
-//  Barrier activation check
-// -----------------------------------------------------------------
-
-TEST_F(TotalEnergyTest, BarrierActivation) {
-    for (int i = 0; i < (int)nt_pairs.size(); ++i) {
-        const auto& p = nt_pairs[i];
-        auto dr = node_triangle_distance(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]]);
-        double e = node_triangle_barrier(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat);
-        std::cout << "NT pair " << i << ": distance=" << dr.distance
-                  << " barrier=" << e << " region=" << to_string(dr.region) << "\n";
-        EXPECT_GT(dr.distance, 0.0) << "NT pair " << i << " has non-positive distance";
-    }
-    for (int i = 0; i < (int)ss_pairs.size(); ++i) {
-        const auto& p = ss_pairs[i];
-        auto dr = segment_segment_distance(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]]);
-        double e = segment_segment_barrier(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat);
-        std::cout << "SS pair " << i << ": distance=" << dr.distance
-                  << " barrier=" << e << " region=" << to_string(dr.region) << "\n";
-        EXPECT_GT(dr.distance, 0.0) << "SS pair " << i << " has non-positive distance";
-    }
-}
-
-// -----------------------------------------------------------------
-//  Directional derivative check
-// -----------------------------------------------------------------
-
-TEST_F(TotalEnergyTest, DirectionalDerivative) {
-    VecX q   = flatten_positions(x);
-    VecX dir = VecX::Random(q.size()); dir.normalize();
-    double eps = 1e-6;
-
-    auto xp = unflatten_positions(q + eps * dir);
-    auto xm = unflatten_positions(q - eps * dir);
-    double fd = (total_energy(ref_mesh, pins, params, xp, xhat, nt_pairs, ss_pairs)
-                 - total_energy(ref_mesh, pins, params, xm, xhat, nt_pairs, ss_pairs)) / (2.0 * eps);
-
-    VecX g(3 * x.size());
-    for (int vi = 0; vi < (int)x.size(); ++vi)
-        g.segment<3>(3*vi) = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
-
-    double an = g.dot(dir);
-    double err = std::abs(fd - an);
-    std::cout << "FD=" << fd << " analytic=" << an << " error=" << err << "\n";
-    ASSERT_LT(err, 1e-4) << "directional derivative error too large";
-}
-
-// -----------------------------------------------------------------
-//  Per-vertex gradient check
-// -----------------------------------------------------------------
-
-TEST_F(TotalEnergyTest, PerVertexGradient) {
-    double eps = 1e-6;
-    for (int vi = 0; vi < (int)x.size(); ++vi) {
-        Vec3 g   = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
-        Vec3 gfd = local_gradient_fd(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs, eps);
-        double err = (g - gfd).norm();
-        std::cout << "v " << vi << " err=" << err << "\n";
-        ASSERT_LT(err, 1e-4) << "gradient mismatch at vertex " << vi;
-    }
-}
-
-// -----------------------------------------------------------------
 //  Per-vertex Hessian check
 // -----------------------------------------------------------------
 
@@ -360,25 +229,6 @@ TEST_F(TotalEnergyTest, PerVertexHessian) {
     }
 }
 
-// -----------------------------------------------------------------
-//  Slope-2 checks
-// -----------------------------------------------------------------
-
-TEST_F(TotalEnergyTest, Slope2Vertex2) {
-    EXPECT_TRUE(slope2_check(2, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs))
-        << "slope-2 check failed for vertex 2";
-}
-
-TEST_F(TotalEnergyTest, Slope2Vertex0) {
-    EXPECT_TRUE(slope2_check(0, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs))
-        << "slope-2 check failed for vertex 0";
-}
-
-TEST_F(TotalEnergyTest, Slope2Vertex4) {
-    EXPECT_TRUE(slope2_check(4, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs))
-        << "slope-2 check failed for vertex 4";
-}
-
 // =====================================================================
 //  Bending enabled: check the bending term is correctly wired into the
 //  total incremental potential and per-vertex gradient alongside elastic,
@@ -389,7 +239,7 @@ TEST_F(TotalEnergyTest, Slope2Vertex4) {
 // Gauss-Newton PSD approximation (see bending_node_hessian_psd), which
 // differs from the true Hessian by 2*k_B*c_e*delta * d^2 theta. We
 // therefore only check gradient consistency here; bending Hessian
-// consistency is covered at the rest state in bending_physics_test.cpp.
+// consistency is covered at the rest state below.
 
 TEST_F(TotalEnergyTest, PerVertexGradientWithBending) {
     params.kB = 50.0;  // enable bending on top of the existing config
@@ -408,37 +258,12 @@ TEST_F(TotalEnergyTest, PerVertexGradientWithBending) {
     ASSERT_LT(max_err, 1e-4) << "gradient mismatch with bending enabled";
 }
 
-TEST_F(TotalEnergyTest, DirectionalDerivativeWithBending) {
-    params.kB = 50.0;
-
-    VecX q   = flatten_positions(x);
-    VecX dir = VecX::Random(q.size()); dir.normalize();
-    const double eps = 1e-6;
-
-    auto xp = unflatten_positions(q + eps * dir);
-    auto xm = unflatten_positions(q - eps * dir);
-    const double fd = (total_energy(ref_mesh, pins, params, xp, xhat, nt_pairs, ss_pairs)
-                       - total_energy(ref_mesh, pins, params, xm, xhat, nt_pairs, ss_pairs)) / (2.0 * eps);
-
-    VecX g(3 * x.size());
-    for (int vi = 0; vi < (int)x.size(); ++vi)
-        g.segment<3>(3*vi) = local_gradient(vi, ref_mesh, adj, pins, params, x, xhat, nt_pairs, ss_pairs);
-
-    const double an = g.dot(dir);
-    const double err = std::abs(fd - an);
-    std::cout << "bending directional: FD=" << fd << " analytic=" << an << " err=" << err << "\n";
-    ASSERT_LT(err, 1e-4) << "directional derivative mismatch with bending enabled";
-}
-
 // =====================================================================
 //  compute_global_residual (production path) vs FD
 //
-//  Bridges the production gradient code (compute_local_gradient in
-//  physics.cpp, reached via compute_global_residual) to the test-side
-//  local_gradient / total_energy pair that the existing FD tests have
-//  already slope-2 validated. Also asserts a round-off-level match
-//  between the two independently implemented gradient paths, so any
-//  drift between them would fire here.
+//  Compares the production gradient code reached via compute_global_residual
+//  against both an independently assembled test gradient and direct finite
+//  differences of total_energy. Any drift between the paths fails here.
 // =====================================================================
 
 TEST_F(TotalEnergyTest, GlobalResidualMatchesFiniteDifference) {

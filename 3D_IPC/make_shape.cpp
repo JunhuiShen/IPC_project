@@ -7,8 +7,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 
 TriangleDef make_def_triangle(const std::vector<Vec3>& x, const RefMesh& ref_mesh, int tri_idx) {
@@ -462,51 +460,6 @@ void rebuild_hinge_c_e_3d(RefMesh& ref_mesh,
         const double area_sum = areaA + areaB;
         h.c_e = (area_sum > 0.0) ? (edge_len2 / area_sum) : 0.0;
     }
-}
-
-std::unordered_map<int, std::vector<int>> build_vertex_adjacency_map(const std::vector<int>& tris) {
-    std::unordered_map<int, std::unordered_set<int>> adj_set;
-    int nt = static_cast<int>(tris.size()) / 3;
-    for (int t = 0; t < nt; ++t) {
-        int a = tris[t * 3 + 0];
-        int b = tris[t * 3 + 1];
-        int c = tris[t * 3 + 2];
-        adj_set[a].insert(b); adj_set[a].insert(c);
-        adj_set[b].insert(a); adj_set[b].insert(c);
-        adj_set[c].insert(a); adj_set[c].insert(b);
-    }
-    std::unordered_map<int, std::vector<int>> result;
-    result.reserve(adj_set.size());
-    for (auto& [v, neighbors] : adj_set)
-        result[v] = std::vector<int>(neighbors.begin(), neighbors.end());
-    return result;
-}
-
-std::vector<std::vector<int>> greedy_color(
-    const std::unordered_map<int, std::vector<int>>& adj,
-    int num_vertices)
-{
-    std::vector<int> color(num_vertices, -1);
-
-    for (int v = 0; v < num_vertices; ++v) {
-        // Collect colors already used by neighbors
-        std::unordered_set<int> used;
-        if (adj.count(v))
-            for (int n : adj.at(v))
-                if (color[n] != -1) used.insert(color[n]);
-
-        // Pick the smallest color not in use
-        int c = 0;
-        while (used.count(c)) ++c;
-        color[v] = c;
-    }
-
-    // Invert: color -> list of vertices
-    int num_colors = *std::max_element(color.begin(), color.end()) + 1;
-    std::vector<std::vector<int>> groups(num_colors);
-    for (int v = 0; v < num_vertices; ++v)
-        groups[color[v]].push_back(v);
-    return groups;
 }
 
 // Builds VertexTriangleMap: each vertex maps to {triangle_index, local_node_index} pairs.

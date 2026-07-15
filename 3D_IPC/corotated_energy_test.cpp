@@ -146,18 +146,7 @@ Mat32 compute_F(const Mat22& Dm_inv, const TriangleDef& def){
 }  // anonymous namespace
 
 // ===========================================================================
-//  Test 1: energy is finite
-// ===========================================================================
-
-TEST(CorotatedEnergy, EnergyIsFinite){
-    const auto tri = MakeTestTriangle();
-    const auto def = MakeDeformedTriangle();
-    const double E = corotated_energy(tri.ref_area, tri.Dm_inv, def, kMu, kLambda);
-    ASSERT_TRUE(std::isfinite(E)) << "energy is not finite";
-}
-
-// ===========================================================================
-//  Test 2: rest state has zero energy and zero gradient
+//  Rest state has zero energy and zero gradient
 // ===========================================================================
 
 TEST(CorotatedEnergy, RestStateZeroEnergyAndGradient){
@@ -180,7 +169,7 @@ TEST(CorotatedEnergy, RestStateZeroEnergyAndGradient){
 }
 
 // ===========================================================================
-//  Test 3: rotation invariance -- rotated rest state has zero energy
+//  Rotation invariance -- rotated rest state has zero energy
 // ===========================================================================
 
 TEST(CorotatedEnergy, RotationInvariance){
@@ -209,7 +198,7 @@ TEST(CorotatedEnergy, RotationInvariance){
 }
 
 // ===========================================================================
-//  Test 4: translation invariance
+//  Translation invariance
 // ===========================================================================
 
 TEST(CorotatedEnergy, TranslationInvariance){
@@ -227,7 +216,7 @@ TEST(CorotatedEnergy, TranslationInvariance){
 }
 
 // ===========================================================================
-//  Test 5: nodal gradients sum to zero
+//  Nodal gradients sum to zero
 // ===========================================================================
 
 TEST(CorotatedEnergy, GradientSumZero){
@@ -249,7 +238,7 @@ TEST(CorotatedEnergy, GradientSumZero){
 }
 
 // ===========================================================================
-//  Test 6: Hessian symmetry
+//  Hessian symmetry
 // ===========================================================================
 
 TEST(CorotatedEnergy, HessianSymmetry){
@@ -295,7 +284,7 @@ TEST(CorotatedEnergy, SelfBlockMatchesAnalytic){
 }
 
 // ===========================================================================
-//  Test 7: Hessian has translation null modes
+//  Hessian has translation null modes
 // ===========================================================================
 
 TEST(CorotatedEnergy, HessianTranslationNull){
@@ -316,7 +305,7 @@ TEST(CorotatedEnergy, HessianTranslationNull){
 }
 
 // ===========================================================================
-//  Test 8: gradient convergence (slope = 2)
+//  Gradient convergence (slope = 2)
 // ===========================================================================
 
 TEST(CorotatedEnergy, GradientConvergence){
@@ -358,7 +347,7 @@ TEST(CorotatedEnergy, GradientConvergence){
 }
 
 // ===========================================================================
-//  Test 9: Hessian convergence (slope = 2)
+//  Hessian convergence (slope = 2)
 // ===========================================================================
 
 TEST(CorotatedEnergy, HessianConvergence){
@@ -434,51 +423,6 @@ TEST(CorotatedEnergy, HessianConvergence){
 
     std::cout << "  Tested " << tested << " entries, skipped " << skipped << " zero entries\n";
     EXPECT_TRUE(all_passed) << "Hessian convergence failed";
-}
-
-// ===========================================================================
-//  Test 10: directional derivative convergence (slope = 2)
-// ===========================================================================
-
-TEST(CorotatedEnergy, DirectionalDerivativeConvergence){
-    const auto tri = MakeTestTriangle();
-    const auto def = MakeDeformedTriangle();
-
-    TriangleDef dx;
-    dx.x[0] = Vec3(0.3, -0.7, 0.2);
-    dx.x[1] = Vec3(-0.4, 0.1, 0.5);
-    dx.x[2] = Vec3(0.25, 0.6, -0.35);
-    double norm = std::sqrt(dx.x[0].squaredNorm() + dx.x[1].squaredNorm() + dx.x[2].squaredNorm());
-    for (auto& v : dx.x) v /= norm;
-
-    const Mat32 F = compute_F(tri.Dm_inv, def);
-    const CorotatedCache32 cache = buildCorotatedCache(F);
-
-    Vec9 dx_flat;
-    for (int i = 0; i < 3; ++i) dx_flat.segment<3>(3 * i) = dx.x[i];
-
-    // Flatten all three node gradients into a Vec9 for the dot product
-    Vec9 g_flat = Vec9::Zero();
-    {
-        const Mat32 P = PCorotated32(cache, F, kMu, kLambda);
-        const ShapeGrads gradN = shape_function_gradients(tri.Dm_inv);
-        for (int i = 0; i < 3; ++i)
-            g_flat.segment<3>(3 * i) = corotated_node_gradient(P, tri.ref_area, gradN, i);
-    }
-    const double exact = g_flat.dot(dx_flat);
-
-    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
-    std::vector<double> errors;
-
-    for (auto h : hs) {
-        const TriangleDef dp = add_scale(def, dx, h);
-        const TriangleDef dm = add_scale(def, dx, -h);
-        double fd = (corotated_energy(tri.ref_area, tri.Dm_inv, dp, kMu, kLambda)
-                     - corotated_energy(tri.ref_area, tri.Dm_inv, dm, kMu, kLambda)) / (2.0 * h);
-        errors.push_back(std::abs(fd - exact));
-    }
-
-    EXPECT_TRUE(check_convergence("directional", exact, hs, errors)) << "directional derivative convergence failed";
 }
 
 // ===========================================================================

@@ -199,8 +199,19 @@ bool run_gradient_convergence_test(const TestPoint& tp){
     const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     bool all_passed = true;
 
+    const auto region = node_triangle_distance(tp.x, tp.x1, tp.x2, tp.x3).region;
+    if (region != tp.expected_region) {
+        std::cerr << "  FAIL: " << tp.name << " reached region " << to_string(region)
+                  << " instead of " << to_string(tp.expected_region) << "\n";
+        all_passed = false;
+    }
+
+    // Translation invariance requires the four per-DOF gradients to sum to zero.
+    Vec3 gradient_sum = Vec3::Zero();
+
     for (int v = 0; v < 4; ++v) {
         Vec3 g = node_triangle_barrier_gradient(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, v);
+        gradient_sum += g;
         for (int k = 0; k < 3; ++k) {
             double analytic = g(k);
 
@@ -223,6 +234,15 @@ bool run_gradient_convergence_test(const TestPoint& tp){
 
             std::string label = std::string("d/d(") + dof_names[v] + ")_" + std::to_string(k);
             if (!check_convergence(label, analytic, hs, errors, 1e-10)) all_passed = false;
+        }
+    }
+
+    for (int k = 0; k < 3; ++k) {
+        if (!(std::abs(gradient_sum(k)) < 1.0e-12)) {
+            std::cerr << "  FAIL: " << tp.name << " gradient sum is "
+                      << gradient_sum.transpose() << "\n";
+            all_passed = false;
+            break;
         }
     }
 
@@ -294,8 +314,19 @@ bool run_ss_gradient_convergence_test(const SSTestPoint& tp){
     const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
     bool all_passed = true;
 
+    const auto region = segment_segment_distance(tp.x1, tp.x2, tp.x3, tp.x4).region;
+    if (region != tp.expected_region) {
+        std::cerr << "  FAIL: " << tp.name << " reached region " << to_string(region)
+                  << " instead of " << to_string(tp.expected_region) << "\n";
+        all_passed = false;
+    }
+
+    // Translation invariance requires the four per-DOF gradients to sum to zero.
+    Vec3 gradient_sum = Vec3::Zero();
+
     for (int v = 0; v < 4; ++v) {
         Vec3 g = segment_segment_barrier_gradient(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, v);
+        gradient_sum += g;
         for (int k = 0; k < 3; ++k) {
             double analytic = g(k);
 
@@ -318,6 +349,15 @@ bool run_ss_gradient_convergence_test(const SSTestPoint& tp){
 
             std::string label = std::string("d/d(") + dof_names[v] + ")_" + std::to_string(k);
             if (!check_convergence(label, analytic, hs, errors, 1e-9)) all_passed = false;
+        }
+    }
+
+    for (int k = 0; k < 3; ++k) {
+        if (!(std::abs(gradient_sum(k)) < 1.0e-12)) {
+            std::cerr << "  FAIL: " << tp.name << " gradient sum is "
+                      << gradient_sum.transpose() << "\n";
+            all_passed = false;
+            break;
         }
     }
 
@@ -505,6 +545,11 @@ TEST(BarrierEnergy, ZeroOutsideActivation){
         const Mat33 H = node_triangle_barrier_self_hessian(x, x1, x2, x3, d_hat, row);
         EXPECT_EQ(H.norm(), 0.0) << "inactive self Hessian row=" << row;
 
+        const auto [combined_g, combined_H] = node_triangle_barrier_self_gradient_and_hessian(
+                x, x1, x2, x3, d_hat, row);
+        EXPECT_EQ(combined_g.norm(), 0.0) << "inactive combined gradient row=" << row;
+        EXPECT_EQ(combined_H.norm(), 0.0) << "inactive combined Hessian row=" << row;
+
         for (int col = 0; col < 4; ++col) {
             const Mat33 Hcross = node_triangle_barrier_cross_hessian(
                     x, x1, x2, x3, d_hat, row, col);
@@ -512,21 +557,6 @@ TEST(BarrierEnergy, ZeroOutsideActivation){
                     << "inactive cross Hessian row=" << row << " col=" << col;
         }
     }
-}
-
-TEST(BarrierEnergy, PartitionOfForce){
-    auto check = [](const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
-                    const std::string& label){
-        Vec3 total = Vec3::Zero();
-        for (int dof = 0; dof < 4; ++dof)
-            total += node_triangle_barrier_gradient(x, x1, x2, x3, 1.0, dof);
-        for (int k = 0; k < 3; ++k)
-            EXPECT_LT(std::abs(total(k)), 1e-12) << label << ": total gradient should sum to zero";
-    };
-
-    check(Vec3(0.25,0.25,0.3), Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), "face");
-    check(Vec3(0.5,-0.2,0.1),  Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), "edge");
-    check(Vec3(-0.2,-0.3,0.1), Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), "vertex");
 }
 
 TEST(BarrierEnergy, NTGradientConvergence){
@@ -680,6 +710,11 @@ TEST(BarrierEnergy, SSZeroOutsideActivation){
                 x1, x2, x3, x4, d_hat, row);
         EXPECT_EQ(H.norm(), 0.0) << "ss inactive self Hessian row=" << row;
 
+        const auto [combined_g, combined_H] = segment_segment_barrier_self_gradient_and_hessian(
+                x1, x2, x3, x4, d_hat, row);
+        EXPECT_EQ(combined_g.norm(), 0.0) << "ss inactive combined gradient row=" << row;
+        EXPECT_EQ(combined_H.norm(), 0.0) << "ss inactive combined Hessian row=" << row;
+
         for (int col = 0; col < 4; ++col) {
             const Mat33 Hcross = segment_segment_barrier_cross_hessian(
                     x1, x2, x3, x4, d_hat, row, col);
@@ -689,23 +724,12 @@ TEST(BarrierEnergy, SSZeroOutsideActivation){
     }
 }
 
-TEST(BarrierEnergy, SSPartitionOfForce){
-    auto check = [](const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
-                    const std::string& label){
-        Vec3 total = Vec3::Zero();
-        for (int dof = 0; dof < 4; ++dof)
-            total += segment_segment_barrier_gradient(x1, x2, x3, x4, 2.0, dof);
-        for (int k = 0; k < 3; ++k)
-            EXPECT_LT(std::abs(total(k)), 1e-12) << label << ": total gradient should sum to zero";
-    };
-
-    check(Vec3(0,0,0), Vec3(1,0,0), Vec3(0.5,-1,0.5), Vec3(0.5,1,0.5), "interior");
-    check(Vec3(0,0,0), Vec3(1,0,0), Vec3(-1,-1,0.3),  Vec3(-1,1,0.3),  "edge_s0");
-    check(Vec3(0,0,0), Vec3(1,0,0), Vec3(-1,-1,0.3),  Vec3(-1,-2,0.3), "corner");
-}
-
 TEST(BarrierEnergy, SSGradientConvergence){
     auto test_points = make_ss_test_points();
+    test_points.push_back({
+            "ss_near_parallel_edge_t0",
+            Vec3(0,0,0), Vec3(1,0,0), Vec3(0.1,0.3,0.3), Vec3(0.9,0.4,0.3), 1.0,
+            SegmentSegmentRegion::Edge_t0});
     for (const auto& tp : test_points) {
         EXPECT_TRUE(run_ss_gradient_convergence_test(tp)) << tp.name << ": SS gradient convergence failed";
     }
@@ -913,16 +937,4 @@ TEST(BarrierEnergy, StressSSNearParallel){
     }
 
     std::cout << "  E=" << std::scientific << E << "\n";
-}
-
-TEST(BarrierEnergy, StressSSNearParallelGradient){
-    SSTestPoint tp;
-    tp.name = "ss_near_parallel_stress";
-    tp.x1 = Vec3(0,0,0);
-    tp.x2 = Vec3(1,0,0);
-    tp.x3 = Vec3(0.1, 0.3, 0.3);
-    tp.x4 = Vec3(0.9, 0.4, 0.3);
-    tp.d_hat = 1.0;
-    tp.expected_region = SegmentSegmentRegion::Interior;
-    EXPECT_TRUE(run_ss_gradient_convergence_test(tp)) << "near-parallel SS gradient convergence";
 }

@@ -9,7 +9,6 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
-#include <unordered_map>
 #include <vector>
 
 struct AABB {
@@ -97,13 +96,14 @@ public:
         std::vector<int> nt_pair_tri;
         std::vector<std::array<int, 2>> ss_pair_edges;
 
-        std::unordered_map<std::uint64_t, std::size_t> nt_pair_index;
-        std::unordered_map<std::uint64_t, std::size_t> ss_pair_index;
-
         struct VertexPairEntry {
+            // Index of the actual contact in nt_pairs (for vertex_nt) or ss_pairs (for vertex_ss)
             std::size_t pair_index;
-            int dof;  // 0=node/v[0], 1=tri_v[0]/v[1], 2=tri_v[1]/v[2], 3=tri_v[2]/v[3]
+            // Role of this vertex within that four-vertex contact:
+            // 0=node/v[0], 1=tri_v[0]/v[1], 2=tri_v[1]/v[2], 3=tri_v[2]/v[3].
+            int dof;
         };
+        // Per-vertex references to the actual contact-pair arrays above.
         std::vector<std::vector<VertexPairEntry>> vertex_nt;
         std::vector<std::vector<VertexPairEntry>> vertex_ss;
 
@@ -137,13 +137,14 @@ public:
     // For each vertex vi in sequence, compute the safe step along
     // (x[vi] -> x_new_fn(vi)) using the linear one-node-moves CCD check.
     // All other vertices are treated as stationary at their already-committed
-    // positions. Modifies x in place.
+    // positions. Each target is clamped slightly inside that vertex's cached
+    // node box because the cached contact pairs cover only motion within those
+    // boxes. Modifies x in place.
     // use_ogc: project the per-iteration displacement onto the L2 trust-region
     // sphere of radius 0.4 * d0_min(vi) centered at the current x[vi]. The
     // radius is recomputed from the broad-phase cache each iteration so it
-    // adapts as vertices approach contacts. clip_to_node_box / clip_ccd are
-    // ignored under use_ogc.
-    void per_vertex_safe_step(std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety = 0.9, bool clip_to_node_box = true, bool clip_ccd = true, bool use_ticcd = true, bool use_ogc = false, const std::vector<std::vector<int>>* color_groups = nullptr, std::atomic<int>* clip_count = nullptr) const;
+    // adapts as vertices approach contacts.
+    void per_vertex_safe_step(std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety = 0.9, bool clip_ccd = true, bool use_ticcd = true, bool use_ogc = false, const std::vector<std::vector<int>>* color_groups = nullptr, std::atomic<int>* clip_count = nullptr) const;
 
     void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt);
 

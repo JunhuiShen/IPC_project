@@ -1,6 +1,7 @@
 #include "broad_phase.h"
 #include "ogc_trust_region.h"
 
+#include <cassert>
 #include <map>
 #include <set>
 #include <tuple>
@@ -252,30 +253,8 @@ namespace {
         return box;
     }
 
-    using VPE = BroadPhase::Cache::VertexPairEntry;
-
-    static inline void remove_vertex_entry(std::vector<VPE>& vec, std::size_t pair_idx) {
-        for (std::size_t i = 0; i < vec.size(); ++i) {
-            if (vec[i].pair_index == pair_idx) {
-                vec[i] = vec.back();
-                vec.pop_back();
-                return;
-            }
-        }
-    }
-
-    static inline void update_vertex_entry(std::vector<VPE>& vec, std::size_t old_idx, std::size_t new_idx) {
-        for (auto& e : vec) {
-            if (e.pair_index == old_idx) {
-                e.pair_index = new_idx;
-                return;
-            }
-        }
-    }
-
-    static inline void add_nt_pair(BroadPhase::Cache& cache, int node, int tri_idx, const RefMesh& mesh) {
-        const std::uint64_t key = BroadPhase::nt_key(node, tri_idx);
-        if (cache.nt_pair_index.count(key)) return;
+    static inline void append_nt_pair(BroadPhase::Cache& cache, int node, int tri_idx, const RefMesh& mesh) {
+        const std::size_t idx = cache.nt_pairs.size();
 
         NodeTrianglePair p;
         p.node = node;
@@ -283,8 +262,6 @@ namespace {
         p.tri_v[1] = tri_vertex(mesh, tri_idx, 1);
         p.tri_v[2] = tri_vertex(mesh, tri_idx, 2);
 
-        const std::size_t idx = cache.nt_pairs.size();
-        cache.nt_pair_index[key] = idx;
         cache.nt_pairs.push_back(p);
         cache.nt_pair_tri.push_back(tri_idx);
 
@@ -296,13 +273,12 @@ namespace {
         }
     }
 
-    static inline void add_ss_pair(BroadPhase::Cache& cache, int e0, int e1) {
+    static inline void append_ss_pair(BroadPhase::Cache& cache, int e0, int e1) {
         int a = e0;
         int b = e1;
         if (a > b) std::swap(a, b);
 
-        const std::uint64_t key = BroadPhase::ss_key(a, b);
-        if (cache.ss_pair_index.count(key)) return;
+        const std::size_t idx = cache.ss_pairs.size();
 
         SegmentSegmentPair p;
         p.v[0] = cache.edges[a][0];
@@ -310,8 +286,6 @@ namespace {
         p.v[2] = cache.edges[b][0];
         p.v[3] = cache.edges[b][1];
 
-        const std::size_t idx = cache.ss_pairs.size();
-        cache.ss_pair_index[key] = idx;
         cache.ss_pairs.push_back(p);
         cache.ss_pair_edges.push_back({a, b});
 
@@ -323,72 +297,20 @@ namespace {
         }
     }
 
-    static inline void erase_nt_pair_at(BroadPhase::Cache& cache, std::size_t idx) {
-        const std::size_t last = cache.nt_pairs.size() - 1;
-        const auto& victim = cache.nt_pairs[idx];
-        const int victim_node = victim.node;
-        const int victim_tri = cache.nt_pair_tri[idx];
+    static inline bool earlier_edge_query_already_reported_pair(const BroadPhase::Cache& cache, int current_edge, int hit_edge) {
+        if (hit_edge >= current_edge) return false;
 
-        if (!cache.vertex_nt.empty()) {
-            remove_vertex_entry(cache.vertex_nt[victim.node], idx);
-            remove_vertex_entry(cache.vertex_nt[victim.tri_v[0]], idx);
-            remove_vertex_entry(cache.vertex_nt[victim.tri_v[1]], idx);
-            remove_vertex_entry(cache.vertex_nt[victim.tri_v[2]], idx);
+        // Edge-query results are consumed in increasing edge order. Check
+        // whether the already-consumed query for hit_edge also found
+        // current_edge; if so, this unordered pair was already appended.
+        const int current_leaf = current_edge < static_cast<int>(cache.edge_leaf_to_node.size())? cache.edge_leaf_to_node[current_edge] : -1;
+        if (current_leaf >= 0 && current_leaf < static_cast<int>(cache.edge_bvh_nodes.size()))
+            return aabb_intersects(cache.edge_boxes[hit_edge], cache.edge_bvh_nodes[current_leaf].bbox);
 
-            if (idx != last) {
-                const auto& moved = cache.nt_pairs[last];
-                update_vertex_entry(cache.vertex_nt[moved.node], last, idx);
-                update_vertex_entry(cache.vertex_nt[moved.tri_v[0]], last, idx);
-                update_vertex_entry(cache.vertex_nt[moved.tri_v[1]], last, idx);
-                update_vertex_entry(cache.vertex_nt[moved.tri_v[2]], last, idx);
-            }
-        }
-
-        if (idx != last) {
-            cache.nt_pairs[idx] = cache.nt_pairs[last];
-            cache.nt_pair_tri[idx] = cache.nt_pair_tri[last];
-
-            const int moved_node = cache.nt_pairs[idx].node;
-            const int moved_tri = cache.nt_pair_tri[idx];
-            cache.nt_pair_index[BroadPhase::nt_key(moved_node, moved_tri)] = idx;
-        }
-
-        cache.nt_pairs.pop_back();
-        cache.nt_pair_tri.pop_back();
-        cache.nt_pair_index.erase(BroadPhase::nt_key(victim_node, victim_tri));
-    }
-
-    static inline void erase_ss_pair_at(BroadPhase::Cache& cache, std::size_t idx) {
-        const std::size_t last = cache.ss_pairs.size() - 1;
-        const auto& victim = cache.ss_pairs[idx];
-        const std::array<int, 2> victim_edges = cache.ss_pair_edges[idx];
-
-        if (!cache.vertex_ss.empty()) {
-            remove_vertex_entry(cache.vertex_ss[victim.v[0]], idx);
-            remove_vertex_entry(cache.vertex_ss[victim.v[1]], idx);
-            remove_vertex_entry(cache.vertex_ss[victim.v[2]], idx);
-            remove_vertex_entry(cache.vertex_ss[victim.v[3]], idx);
-
-            if (idx != last) {
-                const auto& moved = cache.ss_pairs[last];
-                update_vertex_entry(cache.vertex_ss[moved.v[0]], last, idx);
-                update_vertex_entry(cache.vertex_ss[moved.v[1]], last, idx);
-                update_vertex_entry(cache.vertex_ss[moved.v[2]], last, idx);
-                update_vertex_entry(cache.vertex_ss[moved.v[3]], last, idx);
-            }
-        }
-
-        if (idx != last) {
-            cache.ss_pairs[idx] = cache.ss_pairs[last];
-            cache.ss_pair_edges[idx] = cache.ss_pair_edges[last];
-
-            const std::array<int, 2> moved_edges = cache.ss_pair_edges[idx];
-            cache.ss_pair_index[BroadPhase::ss_key(moved_edges[0], moved_edges[1])] = idx;
-        }
-
-        cache.ss_pairs.pop_back();
-        cache.ss_pair_edges.pop_back();
-        cache.ss_pair_index.erase(BroadPhase::ss_key(victim_edges[0], victim_edges[1]));
+        // Velocity-based BVHs do not keep leaf indices, so consult the saved
+        // query results directly when refresh_pairs() is called on one.
+        const auto& earlier_hits = cache.edge_hits[hit_edge];
+        return std::find(earlier_hits.begin(), earlier_hits.end(), current_edge)!= earlier_hits.end();
     }
 
     // Recycle broad-phase storage/topology to avoid allocation churn; per-build boxes, BVHs, and pairs are cleared.
@@ -414,9 +336,6 @@ namespace {
         c.ss_pairs.clear();
         c.nt_pair_tri.clear();
         c.ss_pair_edges.clear();
-        c.nt_pair_index.clear();
-        c.ss_pair_index.clear();
-
         if (static_cast<int>(c.vertex_nt.size()) == nv) {
             for (auto& row : c.vertex_nt) row.clear();
         } else {
@@ -427,7 +346,6 @@ namespace {
         } else {
             c.vertex_ss.assign(nv, {});
         }
-
         return c;
     }
 
@@ -481,11 +399,17 @@ void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, c
         c.edge_boxes[e] = build_edge_box(x, v, c.edges[e][0], c.edges[e][1], dt, edge_pad);
     }
 
-    c.tri_root = build_bvh(c.tri_boxes, c.tri_bvh_nodes);
-    c.edge_root = build_bvh(c.edge_boxes, c.edge_bvh_nodes);
-    c.node_root = build_bvh(c.node_boxes, c.node_bvh_nodes);
+    #pragma omp parallel sections
+    {
+        #pragma omp section
+        { c.tri_root = build_bvh(c.tri_boxes, c.tri_bvh_nodes); }
+        #pragma omp section
+        { c.edge_root = build_bvh(c.edge_boxes, c.edge_bvh_nodes); }
+        #pragma omp section
+        { c.node_root = build_bvh(c.node_boxes, c.node_bvh_nodes); }
+    }
 
-    // Parallel BVH queries, serial pair-insert (add_*_pair mutates shared state).
+    // Parallel BVH queries, followed by serial ordered pair insertion.
     std::vector<std::vector<int>>& node_hits = prepare_hit_rows(c.node_hits, nv);
     #pragma omp parallel for schedule(dynamic, 32)
     for (int node = 0; node < nv; ++node) {
@@ -498,7 +422,7 @@ void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, c
             const int b  = tri_vertex(mesh, t, 1);
             const int cc = tri_vertex(mesh, t, 2);
             if (node_in_triangle(node, a, b, cc)) continue;
-            add_nt_pair(c, node, t, mesh);
+            append_nt_pair(c, node, t, mesh);
         }
     }
 
@@ -511,10 +435,10 @@ void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, c
     for (int e = 0; e < ne; ++e) {
         const Edge e0{c.edges[e][0], c.edges[e][1]};
         for (int other : edge_hits[e]) {
-            if (other == e) continue;
+            if (other <= e) continue;
             const Edge e1{c.edges[other][0], c.edges[other][1]};
             if (share_vertex(e0, e1)) continue;
-            add_ss_pair(c, e, other);
+            append_ss_pair(c, e, other);
         }
     }
 
@@ -566,9 +490,15 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
         c.edge_boxes[e].max += pad;
     }
 
-    c.tri_root  = build_bvh(c.tri_boxes,    c.tri_bvh_nodes,  c.tri_leaf_to_node);
-    c.edge_root = build_bvh(red_edge_boxes, c.edge_bvh_nodes, c.edge_leaf_to_node);
-    c.node_root = build_bvh(c.node_boxes,   c.node_bvh_nodes, c.node_leaf_to_node);
+    #pragma omp parallel sections
+    {
+        #pragma omp section
+        { c.tri_root = build_bvh(c.tri_boxes, c.tri_bvh_nodes, c.tri_leaf_to_node); }
+        #pragma omp section
+        { c.edge_root = build_bvh(red_edge_boxes, c.edge_bvh_nodes, c.edge_leaf_to_node); }
+        #pragma omp section
+        { c.node_root = build_bvh(c.node_boxes, c.node_bvh_nodes, c.node_leaf_to_node); }
+    }
 
     // NT candidates: blue node boxes queried against green triangle boxes.
     std::vector<std::vector<int>>& node_hits = prepare_hit_rows(c.node_hits, nv);
@@ -583,7 +513,7 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
             const int b  = tri_vertex(mesh, t, 1);
             const int cc = tri_vertex(mesh, t, 2);
             if (node_in_triangle(node, a, b, cc)) continue;
-            add_nt_pair(c, node, t, mesh);
+            append_nt_pair(c, node, t, mesh);
         }
     }
 
@@ -600,7 +530,8 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
             if (other == e) continue;
             const Edge e1{c.edges[other][0], c.edges[other][1]};
             if (share_vertex(e0, e1)) continue;
-            add_ss_pair(c, e, other);
+            if (earlier_edge_query_already_reported_pair(c, e, other)) continue;
+            append_ss_pair(c, e, other);
         }
     }
 
@@ -614,12 +545,10 @@ void BroadPhase::refresh_pairs(const RefMesh& mesh) {
 
     c.nt_pairs.clear();
     c.nt_pair_tri.clear();
-    c.nt_pair_index.clear();
     for (auto& v : c.vertex_nt) v.clear();
 
     c.ss_pairs.clear();
     c.ss_pair_edges.clear();
-    c.ss_pair_index.clear();
     for (auto& v : c.vertex_ss) v.clear();
 
     std::vector<std::vector<int>>& node_hits = prepare_hit_rows(c.node_hits, nv);
@@ -634,7 +563,7 @@ void BroadPhase::refresh_pairs(const RefMesh& mesh) {
             const int b  = tri_vertex(mesh, t, 1);
             const int cc = tri_vertex(mesh, t, 2);
             if (node_in_triangle(node, a, b, cc)) continue;
-            add_nt_pair(c, node, t, mesh);
+            append_nt_pair(c, node, t, mesh);
         }
     }
 
@@ -650,7 +579,8 @@ void BroadPhase::refresh_pairs(const RefMesh& mesh) {
             if (other == e) continue;
             const Edge e1{c.edges[other][0], c.edges[other][1]};
             if (share_vertex(e0, e1)) continue;
-            add_ss_pair(c, e, other);
+            if (earlier_edge_query_already_reported_pair(c, e, other)) continue;
+            append_ss_pair(c, e, other);
         }
     }
 }
@@ -681,32 +611,22 @@ void incremental_refresh_vertex(BroadPhase::Cache& c, int vi, const std::vector<
 }
 
 void BroadPhase::per_vertex_safe_step(
-        std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety, bool clip_to_node_box, bool clip_ccd, bool use_ticcd,
+        std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety, bool clip_ccd, bool use_ticcd,
         bool use_ogc, const std::vector<std::vector<int>>* color_groups, std::atomic<int>* clip_count) const {
     const int nv = static_cast<int>(x.size());
 
     auto process_vertex = [&](int vi) {
-        if (clip_to_node_box) {
-            const AABB& box = cache_.node_boxes[vi];
-            if ((x[vi].array() < box.min.array()).any() || (x[vi].array() > box.max.array()).any()) {
-                fprintf(stderr, "per_vertex_safe_step: x[%d] = (%.6f, %.6f, %.6f) is outside box [(%.6f,%.6f,%.6f),(%.6f,%.6f,%.6f)]\n",
-                    vi,
-                    x[vi].x(), x[vi].y(), x[vi].z(),
-                    box.min.x(), box.min.y(), box.min.z(),
-                    box.max.x(), box.max.y(), box.max.z());
-                exit(1);
-            }
-        }
-        const Vec3 x_new = clip_to_node_box
-            ? [&]() -> Vec3 { constexpr double inset = 1e-10;
-                   const AABB& box = cache_.node_boxes[vi];
-                   const Vec3 raw = x_new_fn(vi);
-                   const Vec3 lo = (box.min + Vec3::Constant(inset)).eval();
-                   const Vec3 hi = (box.max - Vec3::Constant(inset)).eval();
-                   const Vec3 clipped = raw.cwiseMax(lo).cwiseMin(hi);
-                   if (clip_count && (clipped - raw).squaredNorm() > 0.0) ++(*clip_count);
-                   return clipped; }()
-            : x_new_fn(vi);
+        const AABB& box = cache_.node_boxes[vi];
+        assert((x[vi].array() >= box.min.array()).all() && (x[vi].array() <= box.max.array()).all() && "per_vertex_safe_step: current position is outside its cached node box");
+
+        // Clip to the node box
+        constexpr double inset = 1e-10;
+        const Vec3 raw = x_new_fn(vi);
+        const Vec3 lo = (box.min + Vec3::Constant(inset)).eval();
+        const Vec3 hi = (box.max - Vec3::Constant(inset)).eval();
+        const Vec3 x_new = raw.cwiseMax(lo).cwiseMin(hi);
+        if (clip_count && (x_new - raw).squaredNorm() > 0.0) ++(*clip_count);
+
         const Vec3 dx = x_new - x[vi];
         if (dx.squaredNorm() < 1e-28) return;
 
@@ -729,19 +649,13 @@ void BroadPhase::per_vertex_safe_step(
             const auto& p = cache_.nt_pairs[entry.pair_index];
             CCDResult r;
             if (entry.dof == 0) {
-                r = node_triangle_only_one_node_moves(x[vi], dx, x[p.tri_v[0]], Vec3::Zero(), x[p.tri_v[1]], Vec3::Zero(), x[p.tri_v[2]], Vec3::Zero(),
-                    1e-12, use_ticcd);
+                r = node_triangle_only_one_node_moves(x[vi], dx, x[p.tri_v[0]], Vec3::Zero(), x[p.tri_v[1]], Vec3::Zero(), x[p.tri_v[2]], Vec3::Zero(), 1e-12, use_ticcd);
             } else {
                 Vec3 d0 = Vec3::Zero(), d1 = Vec3::Zero(), d2 = Vec3::Zero();
                 if      (entry.dof == 1) d0 = dx;
                 else if (entry.dof == 2) d1 = dx;
                 else                     d2 = dx;
-                r = node_triangle_only_one_node_moves(
-                    x[p.node],     Vec3::Zero(),
-                    x[p.tri_v[0]], d0,
-                    x[p.tri_v[1]], d1,
-                    x[p.tri_v[2]], d2,
-                    1e-12, use_ticcd);
+                r = node_triangle_only_one_node_moves(x[p.node], Vec3::Zero(), x[p.tri_v[0]], d0, x[p.tri_v[1]], d1, x[p.tri_v[2]], d2, 1e-12, use_ticcd);
             }
             if (r.collision) {
                 has_collision = true;

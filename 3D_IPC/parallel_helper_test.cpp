@@ -1,123 +1,102 @@
 #include "parallel_helper.h"
 #include "physics.h"
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <vector>
 
-TEST(GreedyColorConflictGraph, ValidColoring) {
+namespace {
+
+void build_contact_adj_pair_scan_reference(const BroadPhase::Cache& cache, int nv,
+                                           std::vector<std::vector<int>>& out) {
+    out.assign(nv, {});
+    auto add_clique = [&](const int verts[4]) {
+        for (int a = 0; a < 4; ++a) {
+            if (verts[a] < 0 || verts[a] >= nv) continue;
+            for (int b = a + 1; b < 4; ++b) {
+                if (verts[b] < 0 || verts[b] >= nv) continue;
+                out[verts[a]].push_back(verts[b]);
+                out[verts[b]].push_back(verts[a]);
+            }
+        }
+    };
+    for (const auto& p : cache.nt_pairs) {
+        const int verts[4] = {p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2]};
+        add_clique(verts);
+    }
+    for (const auto& p : cache.ss_pairs) add_clique(p.v);
+    for (auto& row : out) {
+        std::sort(row.begin(), row.end());
+        row.erase(std::unique(row.begin(), row.end()), row.end());
+    }
+}
+
+void populate_contact_incidence(BroadPhase::Cache& cache, int nv) {
+    cache.vertex_nt.assign(nv, {});
+    cache.vertex_ss.assign(nv, {});
+    for (std::size_t i = 0; i < cache.nt_pairs.size(); ++i) {
+        const auto& p = cache.nt_pairs[i];
+        const int verts[4] = {p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2]};
+        for (int role = 0; role < 4; ++role)
+            if (verts[role] >= 0 && verts[role] < nv)
+                cache.vertex_nt[verts[role]].push_back({i, role});
+    }
+    for (std::size_t i = 0; i < cache.ss_pairs.size(); ++i) {
+        const auto& p = cache.ss_pairs[i];
+        for (int role = 0; role < 4; ++role)
+            if (p.v[role] >= 0 && p.v[role] < nv)
+                cache.vertex_ss[p.v[role]].push_back({i, role});
+    }
+}
+
+} // namespace
+
+TEST(ParallelHelper, ContactAdjacencyMatchesPairScanExactly) {
+    constexpr int nv = 6;
+    BroadPhase::Cache cache;
+
+    NodeTrianglePair nt{};
+    nt.node = 0;
+    nt.tri_v[0] = 1;
+    nt.tri_v[1] = 2;
+    nt.tri_v[2] = 3;
+    cache.nt_pairs.push_back(nt);
+
+    SegmentSegmentPair ss{};
+    ss.v[0] = 1;
+    ss.v[1] = 2;
+    ss.v[2] = 4;
+    ss.v[3] = 5;
+    cache.ss_pairs.push_back(ss);
+
+    populate_contact_incidence(cache, nv);
+
+    std::vector<std::vector<int>> expected;
+    build_contact_adj_pair_scan_reference(cache, nv, expected);
+
+    std::vector<std::vector<int>> actual{{99}};
+    build_contact_adj(cache, nv, actual);
+    EXPECT_EQ(actual, expected);
+
+    BroadPhase::Cache empty;
+    empty.vertex_nt.resize(nv);
+    empty.vertex_ss.resize(nv);
+    build_contact_adj(empty, nv, actual);
+    EXPECT_EQ(actual, std::vector<std::vector<int>>(nv));
+}
+
+TEST(GreedyColorConflictGraph, DeterministicColoringAndScratchReuse) {
     const std::vector<std::vector<int>> graph = {
         {1, 2},
         {0, 2},
         {0, 1, 3},
         {2},
+        {},
     };
 
-    std::vector<std::vector<int>> groups;
+    std::vector<std::vector<int>> groups{{99}, {98}, {97}};
     greedy_color_conflict_graph(graph, groups);
+    EXPECT_EQ(groups, (std::vector<std::vector<int>>{{0, 3, 4}, {1}, {2}}));
 
-    std::vector<int> color(graph.size(), -1);
-    for (int c = 0; c < static_cast<int>(groups.size()); ++c) {
-        for (int v : groups[c]) color[v] = c;
-    }
-
-    for (int vi = 0; vi < static_cast<int>(graph.size()); ++vi) {
-        ASSERT_GE(color[vi], 0);
-        for (int vj : graph[vi]) {
-            EXPECT_NE(color[vi], color[vj]);
-        }
-    }
-}
-
-TEST(ParallelHelper, EmptyGraphColorsEmpty) {
-    std::vector<std::vector<int>> groups{{1, 2, 3}};
     greedy_color_conflict_graph({}, groups);
     EXPECT_TRUE(groups.empty());
-}
-
-TEST(TrustRegionSafeStep, FarFromBarrierStillBoundedByTrustRegion) {
-    RefMesh ref_mesh;
-    DeformedState state;
-    std::vector<Vec2> X;
-
-    SimParams params = SimParams::zeros();
-    params.fps = 30.0;
-    params.substeps = 1;
-    params.mu = 10.0;
-    params.lambda = 10.0;
-    params.density = 1.0;
-    params.thickness = 0.1;
-    params.kpin = 1e7;
-    params.gravity = Vec3::Zero();
-    params.max_global_iters = 1;
-    params.tol_abs = 1e-6;
-    params.d_hat = 0.1;
-    params.use_parallel = false;
-    params.use_ogc = true;
-
-    // Triangle A (y=0.5) above triangle B (y=0), gap = 0.5 = 5*d_hat.
-    state.deformed_positions = {
-        Vec3(0.0, 0.5, 0.0), Vec3(1.0, 0.5, 0.0), Vec3(0.0, 0.5, 1.0),  // A
-        Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0),  // B
-    };
-
-    // A large downward velocity on node 0 forces the broad phase to surface
-    // the NT pair even though the current distance is 5*d_hat.
-    state.velocities.assign(6, Vec3::Zero());
-    state.velocities[0] = Vec3(0.0, -20.0, 0.0);
-
-    X = { Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.0, 1.0),
-          Vec2(3.0, 0.0), Vec2(4.0, 0.0), Vec2(3.0, 1.0) };
-
-    ref_mesh.tris = {0, 1, 2, 3, 4, 5};
-    ref_mesh.initialize(X, state.deformed_positions);
-    ref_mesh.build_lumped_mass(params.density, params.thickness);
-
-    BroadPhase bp;
-    bp.initialize(state.deformed_positions, state.velocities, ref_mesh, params.dt(), params.d_hat);
-
-    ASSERT_FALSE(bp.cache().nt_pairs.empty())
-        << "precondition: broad phase must surface the far-apart NT pair";
-
-    // Newton step of 0.25 downward on node 0.
-    // omega = eta * d0 / |delta| = 0.4 * 0.5 / 0.25 = 0.8.
-    const Vec3 delta = Vec3(0.0, 0.25, 0.0);
-    const double step = compute_safe_step_for_vertex(
-        0, ref_mesh, params, state.deformed_positions, delta, bp.cache());
-
-    EXPECT_NEAR(step, 0.8, 1e-12)
-        << "trust-region should clamp motion regardless of d_hat (paper Eq. 21)";
-}
-
-TEST(LinearCCDSafeStep, EndpointCollisionUsesSafetyFactor) {
-    SimParams params = SimParams::zeros();
-    params.d_hat = 0.1;
-    params.use_ogc = false;
-    params.use_ticcd = false;
-
-    // The first segment [x[0], x[1]] becomes [2, 0] at the end of the
-    // proposed move and touches the static segment [2, 3] at t = 1.
-    const std::vector<Vec3> x = {
-        Vec3(1.0, 0.0, 0.0),
-        Vec3(0.0, 0.0, 0.0),
-        Vec3(2.0, 0.0, 0.0),
-        Vec3(3.0, 0.0, 0.0),
-    };
-
-    BroadPhase::Cache cache;
-    cache.vertex_nt.resize(x.size());
-    cache.vertex_ss.resize(x.size());
-    SegmentSegmentPair pair{};
-    pair.v[0] = 0;
-    pair.v[1] = 1;
-    pair.v[2] = 2;
-    pair.v[3] = 3;
-    cache.ss_pairs.push_back(pair);
-    cache.vertex_ss[0].push_back({/*pair_index=*/0, /*dof=*/0});
-
-    // compute_safe_step_for_vertex uses dx = -delta.
-    const Vec3 delta(-1.0, 0.0, 0.0);
-    const RefMesh ref_mesh{};
-    const double step = compute_safe_step_for_vertex(
-        0, ref_mesh, params, x, delta, cache);
-
-    EXPECT_NEAR(step, 0.9, 1.0e-12);
 }

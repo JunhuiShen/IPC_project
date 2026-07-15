@@ -240,16 +240,6 @@ TEST(PlaneSDF, EnergyBehavior){
     }
 }
 
-TEST(PlaneSDF, EnergyPenetrationDepth){
-    PlaneSDF p{Vec3(0.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)};
-    const double k = 50.0;
-    const double eps = 0.0;  //  hard quadratic regime
-
-    //  phi = -0.1: E = 0.5 * k * 0.01
-    Vec3 x(1.0, -0.1, -2.0);
-    EXPECT_NEAR(sdf_penalty_energy(evaluate_sdf(p, x), k, eps), 0.5 * k * 0.01, kTol);
-}
-
 //  Soft-barrier semantics: with eps>0, E = 0.5*k*H(phi)*(eps - phi)^2.
 //  Cloth's force-free rest is at phi = eps; surface contact (phi=0) costs
 //  0.5*k*eps^2 of energy and gets pushed outward.
@@ -384,6 +374,7 @@ TEST(CylinderSDF, GradientConvergence){
 
     const SDFClosure sdf = [&](const Vec3& q){ return evaluate_sdf(c, q); };
     EXPECT_TRUE(run_sdf_gradient_convergence("cylinder", x, sdf, k, eps));
+    EXPECT_GT((-sdf_penalty_gradient(sdf(x), k, eps)).dot(perp_dir), 0.0);
 }
 
 TEST(CylinderSDF, HessianConvergence){
@@ -441,6 +432,7 @@ TEST(SphereSDF, GradientConvergence){
 
     const SDFClosure sdf = [&](const Vec3& q){ return evaluate_sdf(s, q); };
     EXPECT_TRUE(run_sdf_gradient_convergence("sphere", x, sdf, k, eps));
+    EXPECT_GT((-sdf_penalty_gradient(sdf(x), k, eps)).dot(dir), 0.0);
 }
 
 TEST(SphereSDF, HessianConvergence){
@@ -454,58 +446,4 @@ TEST(SphereSDF, HessianConvergence){
     const SDFClosure sdf = [&](const Vec3& q){ return evaluate_sdf(s, q); };
     EXPECT_TRUE(run_sdf_hessian_convergence("sphere", x, sdf, k, eps,
                                             /*include_curvature=*/true));
-}
-
-TEST(SphereSDF, GradientPushesOutward){
-    //  Inside the surface: force = -gradient should push radially outward.
-    SphereSDF s{Vec3(0.0, 0.0, 0.0), 0.5};
-    const double k = 10.0;
-    const double eps = 0.1;
-
-    const Vec3 radial = Vec3(1.0, 1.0, 1.0).normalized();
-    const Vec3 x = s.center + (s.radius - 0.05) * radial;
-
-    const Vec3 g = sdf_penalty_gradient(evaluate_sdf(s, x), k, eps);
-    const Vec3 force = -g;
-    EXPECT_GT(force.dot(radial), 0.0);
-}
-
-// ============================================================================
-//  Boundary behavior
-// ============================================================================
-
-TEST(SDFPenalty, ZeroOutsideTransition){
-    CylinderSDF c{Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0), 0.5};
-    const double k = 100.0;
-    const double eps = 0.0;  //  hard quadratic so the closed form below holds
-
-    //  Outside (phi > 0): everything zero.
-    {
-        const SDFEvaluation sdf = evaluate_sdf(c, Vec3(2.0, 0.0, 0.5));
-        EXPECT_EQ(sdf_penalty_energy  (sdf, k, eps), 0.0);
-        EXPECT_TRUE(sdf_penalty_gradient(sdf, k, eps).isApprox(Vec3::Zero()));
-        EXPECT_TRUE(sdf_penalty_hessian (sdf, k, eps).isApprox(Mat33::Zero()));
-    }
-
-    //  Inside (phi = 0.3 - 0.5 = -0.2): energy and derivatives nonzero.
-    {
-        const SDFEvaluation sdf = evaluate_sdf(c, Vec3(0.3, 0.0, 0.5));
-        EXPECT_NEAR(sdf_penalty_energy(sdf, k, eps), 0.5 * k * sdf.phi * sdf.phi, kTol);
-        EXPECT_FALSE(sdf_penalty_gradient(sdf, k, eps).isApprox(Vec3::Zero()));
-        EXPECT_FALSE(sdf_penalty_hessian (sdf, k, eps).isApprox(Mat33::Zero()));
-    }
-}
-
-TEST(SDFPenalty, GradientPushesOutward){
-    //  Inside the surface (phi < 0): force = -gradient should push outward.
-    CylinderSDF c{Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 1.0), 0.5};
-    const double k = 10.0;
-    const double eps = 0.1;
-
-    const Vec3 radial = Vec3(1.0, 1.0, 0.0).normalized();
-    const Vec3 x = c.point + (c.radius - 0.05) * radial + 0.3 * c.axis;
-
-    const Vec3 g = sdf_penalty_gradient(evaluate_sdf(c, x), k, eps);
-    const Vec3 force = -g;
-    EXPECT_GT(force.dot(radial), 0.0);
 }

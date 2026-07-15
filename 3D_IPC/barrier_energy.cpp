@@ -224,6 +224,10 @@ Mat33 node_triangle_barrier_cross_hessian(const Vec3& x, const Vec3& x1, const V
     const Vec3* Y[4] = {&x, &x1, &x2, &x3};
     const int p = row_dof;
     const int q = col_dof;
+    // Derivative tables are only consumed at p and q. A self-Hessian has
+    // p == q, so it needs one derivative row rather than all four.
+    const int requested_dofs[2] = {p, q};
+    const int requested_dof_count = 1 + (p != q);
 
     const NodeTriangleRegion region = dr.region == NodeTriangleRegion::DegenerateTriangle? resolve_degenerate_triangle_region(x, x1, x2, x3) : dr.region;
 
@@ -288,7 +292,8 @@ Mat33 node_triangle_barrier_cross_hessian(const Vec3& x, const Vec3& x1, const V
 
             double t_d[4][3];
             double r_d[4][3][3];
-            for (int pp = 0; pp < 4; ++pp) {
+            for (int di = 0; di < requested_dof_count; ++di) {
+                const int pp = requested_dofs[di];
                 for (int k = 0; k < 3; ++k) {
                     const double alpha_pk = omega[pp] * e[k] + epsilon[pp] * w[k];
                     const double beta_pk  = 2.0 * epsilon[pp] * e[k];
@@ -386,7 +391,8 @@ Mat33 node_triangle_barrier_cross_hessian(const Vec3& x, const Vec3& x1, const V
             const double s_sign = (phi > 0.0) ? 1.0 : (phi < 0.0) ? -1.0 : 0.0;
 
             double Nd[4][3][3];
-            for (int pp = 0; pp < 4; ++pp) {
+            for (int di = 0; di < requested_dof_count; ++di) {
+                const int pp = requested_dofs[di];
                 for (int k = 0; k < 3; ++k) {
                     for (int i = 0; i < 3; ++i) {
                         double val = 0.0;
@@ -398,7 +404,8 @@ Mat33 node_triangle_barrier_cross_hessian(const Vec3& x, const Vec3& x1, const V
             }
 
             double eta_d[4][3], psi_d[4][3], phi_d[4][3];
-            for (int pp = 0; pp < 4; ++pp) {
+            for (int di = 0; di < requested_dof_count; ++di) {
+                const int pp = requested_dofs[di];
                 for (int k = 0; k < 3; ++k) {
                     double eta_pk = 0.0;
                     for (int i = 0; i < 3; ++i) eta_pk += n[i] * Nd[pp][k][i];
@@ -570,6 +577,10 @@ Mat33 segment_segment_barrier_cross_hessian(
     const Vec3* Y[4] = {&x1, &x2, &x3, &x4};
     const int p = row_dof;
     const int q = col_dof;
+    // Derivative tables are only consumed at p and q. A self-Hessian has
+    // p == q, so it needs one derivative row rather than all four.
+    const int requested_dofs[2] = {p, q};
+    const int requested_dof_count = 1 + (p != q);
 
     const SegmentSegmentRegion region = dr.region == SegmentSegmentRegion::ParallelSegments? resolve_parallel_segment_region(dr.s, dr.t): dr.region;
 
@@ -640,7 +651,8 @@ Mat33 segment_segment_barrier_cross_hessian(
 
             double t_d[4][3];
             double r_d[4][3][3];
-            for (int pp = 0; pp < 4; ++pp) {
+            for (int di = 0; di < requested_dof_count; ++di) {
+                const int pp = requested_dofs[di];
                 for (int k = 0; k < 3; ++k) {
                     const double alpha_pk = omega[pp] * e[k] + epsilon[pp] * w[k];
                     const double beta_pk  = 2.0 * epsilon[pp] * e[k];
@@ -730,7 +742,8 @@ Mat33 segment_segment_barrier_cross_hessian(
             const double t_val = zeta / Delta;
 
             double Ad[4][3], Bd[4][3], Cd[4][3], Dd[4][3], Ed[4][3];
-            for (int pp = 0; pp < 4; ++pp) {
+            for (int di = 0; di < requested_dof_count; ++di) {
+                const int pp = requested_dofs[di];
                 for (int k = 0; k < 3; ++k) {
                     Ad[pp][k] = 2.0 * sig_a[pp] * a[k];
                     Bd[pp][k] = sig_a[pp] * b[k] + sig_b[pp] * a[k];
@@ -741,7 +754,8 @@ Mat33 segment_segment_barrier_cross_hessian(
             }
 
             double nu_d[4][3], zeta_d[4][3], Delta_d[4][3];
-            for (int pp = 0; pp < 4; ++pp) {
+            for (int di = 0; di < requested_dof_count; ++di) {
+                const int pp = requested_dofs[di];
                 for (int k = 0; k < 3; ++k) {
                     nu_d[pp][k]    = Bd[pp][k] * E + B * Ed[pp][k] - Cd[pp][k] * D - C * Dd[pp][k];
                     zeta_d[pp][k]  = Ad[pp][k] * E + A * Ed[pp][k] - Bd[pp][k] * D - B * Dd[pp][k];
@@ -750,7 +764,8 @@ Mat33 segment_segment_barrier_cross_hessian(
             }
 
             double s_d[4][3], t_d[4][3];
-            for (int pp = 0; pp < 4; ++pp) {
+            for (int di = 0; di < requested_dof_count; ++di) {
+                const int pp = requested_dofs[di];
                 for (int k = 0; k < 3; ++k) {
                     s_d[pp][k] = nu_d[pp][k] / Delta   - nu   * Delta_d[pp][k] / (Delta * Delta);
                     t_d[pp][k] = zeta_d[pp][k] / Delta - zeta * Delta_d[pp][k] / (Delta * Delta);
@@ -764,7 +779,8 @@ Mat33 segment_segment_barrier_cross_hessian(
             }
 
             double p_d[4][3][3], q_d_arr[4][3][3], r_d[4][3][3];
-            for (int pp = 0; pp < 4; ++pp) {
+            for (int di = 0; di < requested_dof_count; ++di) {
+                const int pp = requested_dofs[di];
                 for (int k = 0; k < 3; ++k) {
                     for (int i = 0; i < 3; ++i) {
                         const double dik = (i == k) ? 1.0 : 0.0;
@@ -855,6 +871,9 @@ std::pair<Vec3, Mat33> node_triangle_barrier_self_gradient_and_hessian(
         const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
         double d_hat, int dof, double eps) {
     const auto dr = node_triangle_distance(x, x1, x2, x3, eps);
+    if (dof >= 0 && dof < 4 && d_hat > 0.0 && dr.distance >= d_hat) {
+        return {Vec3::Zero(), Mat33::Zero()};
+    }
     return {node_triangle_barrier_gradient(x, x1, x2, x3, d_hat, dof, eps, &dr),
             node_triangle_barrier_self_hessian(x, x1, x2, x3, d_hat, dof, eps, &dr)};
 }
@@ -863,6 +882,9 @@ std::pair<Vec3, Mat33> segment_segment_barrier_self_gradient_and_hessian(
         const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
         double d_hat, int dof, double eps) {
     const auto dr = segment_segment_distance(x1, x2, x3, x4, eps);
+    if (dof >= 0 && dof < 4 && d_hat > 0.0 && dr.distance >= d_hat) {
+        return {Vec3::Zero(), Mat33::Zero()};
+    }
     return {segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, dof, eps, &dr),
             segment_segment_barrier_self_hessian(x1, x2, x3, x4, d_hat, dof, eps, &dr)};
 }

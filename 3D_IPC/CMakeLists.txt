@@ -347,11 +347,7 @@ endif()
 
 add_executable(parallel_helper_test
     parallel_helper_test.cpp
-    make_shape.cpp
-    physics.cpp
-    solver.cpp
     parallel_helper.cpp
-    broad_phase.cpp
 )
 
 target_link_libraries(parallel_helper_test

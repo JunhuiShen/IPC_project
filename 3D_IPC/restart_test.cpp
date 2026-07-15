@@ -107,6 +107,4 @@ TEST(RestartTest, RestartFromFrame50MatchesGolden) {
             }
         }
     }
-
-    // Note: frame_50_checkpoint is kept on disk for use by parallel_serial_consistency_test
 }
