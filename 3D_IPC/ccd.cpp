@@ -708,14 +708,12 @@ bool segment_segment_rb_rotation_ccd(
 
     if (r_max < eps) return false;
 
-    // Signed dtheta from larger-radius endpoint
-    const Vec3& ref_perp       = (r0 >= r1) ? x0_perp : x1_perp;
-    Vec3        ref_perp_rotated = Rigid_Body::ALGEBRA::QuaternionRotate(q_rel, ref_perp);
-    double dtheta = std::atan2(
-        ref_perp.cross(ref_perp_rotated).dot(n_hat),
-        ref_perp.dot(ref_perp_rotated));
+    double dtheta = 2.0 * std::atan2(v_rel_norm, q_rel[0]);
 
     if (std::abs(dtheta) < eps) return false;
+
+    // Larger-radius endpoint: well-conditioned reference for the 2D angle gauge
+    const Vec3& ref_perp = (r0 >= r1) ? x0_perp : x1_perp;
 
     Vec3 dx_perp = x1_perp - x0_perp;
 
@@ -778,7 +776,7 @@ bool segment_segment_rb_rotation_ccd(
                         if (std::abs(C) < eps) {
                             // infinite intersections: segment lies on swept surface
                             // only process once (skip second iteration)
-                            if (sign == -1) continue;
+                            if (sign == 1) continue;
                             u = 0.0; // take earliest contact
                         } 
                         else {
@@ -942,11 +940,7 @@ bool point_triangle_rb_rotation_ccd(
 
     if (r_perp.norm() < eps) return false; // particle on rotation axis
 
-    // Signed rotation angle
-    Vec3 r_perp_rotated = Rigid_Body::ALGEBRA::QuaternionRotate(q_rel, r_perp);
-    double dtheta = std::atan2(
-        r_perp.cross(r_perp_rotated).dot(n_hat),
-        r_perp.dot(r_perp_rotated));
+    double dtheta = 2.0 * std::atan2(v_rel_norm, q_rel[0]);
 
     if (std::abs(dtheta) < eps) return false; // no rotation
 
@@ -958,9 +952,13 @@ bool point_triangle_rb_rotation_ccd(
     Vec3 e1 = x3 - x2;
     Vec3 e2 = x4 - x2;
 
+    double a11 = e1.dot(e1);
+    double a12 = e1.dot(e2);
+    double a22 = e2.dot(e2);
+
     Vec3   n_tri      = e1.cross(e2);
     double n_tri_norm = n_tri.norm();
-    if (n_tri_norm < eps) {
+    if (n_tri_norm * n_tri_norm <= eps * a11 * a22) {
         std::cerr << "Warning: degenerate triangle detected in point_triangle_rb_rotation_ccd() when computing surface normal\n";
         return false; // degenerate triangle
     }
@@ -972,11 +970,8 @@ bool point_triangle_rb_rotation_ccd(
     double C = (x_com + r_parallel - x2).dot(n_tri_hat);
 
     // Precompute barycentric system (triangle is stationary)
-    double a11 = e1.dot(e1);
-    double a12 = e1.dot(e2);
-    double a22 = e2.dot(e2);
     double det = a11 * a22 - a12 * a12;
-    if (std::abs(det) < eps){
+    if (std::abs(det) <= eps * a11 * a22){
         std::cerr << "Warning: degenerate triangle detected in point_triangle_rb_rotation_ccd() because of 0 determinant\n";
         return false; // degenerate triangle
     }
