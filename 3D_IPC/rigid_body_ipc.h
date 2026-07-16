@@ -13,18 +13,19 @@ Vec4 quaternion_from_angular_velocity(const Vec4& q0, const Vec3& omega, double 
 Mat43 dq_domega(const Vec4& q0, const Vec3& omega, double dt);
 std::array<Mat33, 4> d2q_domega2(const Vec4& q0, const Vec3& omega, double dt);
 
-// x = x_com + R(q) X with q(omega) = E(omega, dt) * q0.
-// X = R(q)^T (x - x_com) with q(omega) = E(omega, dt) * q0.
-Vec3 world_space_position(const Vec3& X, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt);
+// X_centered is a fixed body-space position measured from the center of mass.
+// x = x_com + R(q) X_centered with q(omega) = E(omega, dt) * q0.
+// X_centered = R(q)^T (x - x_com) with q(omega) = E(omega, dt) * q0.
+Vec3 world_space_position(const Vec3& X_centered, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt);
 Vec3 material_space_position(const Vec3& x, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt);
 
 // Node Jacobian and coordinate Hessians with respect to quaternion coordinates
-Mat34 dx_dq(const Vec3& X, const Vec4& quat);
-std::array<Mat44, 3> d2x_dq2(const Vec3& X);
+Mat34 dx_dq(const Vec3& X_centered, const Vec4& quat);
+std::array<Mat44, 3> d2x_dq2(const Vec3& X_centered);
 
-// Exact omega-coordinate derivatives of x(t, omega) = t + R(q(omega)) X
-Mat33 dx_domega(const Vec3& X, const Vec4& q0, const Vec3& omega, double dt);
-std::array<Mat33, 3> d2x_domega2( const Vec3& X, const Vec4& q0, const Vec3& omega, double dt);
+// Exact omega-coordinate derivatives of x(t, omega) = t + R(q(omega)) X_centered
+Mat33 dx_domega(const Vec3& X_centered, const Vec4& q0, const Vec3& omega, double dt);
+std::array<Mat33, 3> d2x_domega2(const Vec3& X_centered, const Vec4& q0, const Vec3& omega, double dt);
 
 // Per-node translation and angular-velocity gradient contributions.
 Vec3 rigid_node_translation_gradient(const Vec3& gx);

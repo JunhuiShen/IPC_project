@@ -22,9 +22,7 @@
 namespace {
 
 bool is_effectively_zero(double value, double magnitude_bound, double relative_eps) {
-    return magnitude_bound == 0.0
-        ? value == 0.0
-        : std::abs(value) <= relative_eps * magnitude_bound;
+    return magnitude_bound == 0.0? value == 0.0 : std::abs(value) <= relative_eps * magnitude_bound;
 }
 
 bool in_unit_interval(double t, double eps) {
@@ -38,9 +36,7 @@ Vec2 project_drop_axis(const Vec3& v, int drop_axis) {
 }
 
 int dominant_drop_axis(const Vec3& n0, const Vec3& n1) {
-    Vec3 n(std::fabs(n0.x()) + std::fabs(n1.x()),
-           std::fabs(n0.y()) + std::fabs(n1.y()),
-           std::fabs(n0.z()) + std::fabs(n1.z()));
+    Vec3 n(std::fabs(n0.x()) + std::fabs(n1.x()), std::fabs(n0.y()) + std::fabs(n1.y()),  std::fabs(n0.z()) + std::fabs(n1.z()));
     if (n.x() >= n.y() && n.x() >= n.z()) return 0;
     if (n.y() >= n.x() && n.y() >= n.z()) return 1;
     return 2;
@@ -50,11 +46,8 @@ int dominant_drop_axis(const Vec3& n0, const Vec3& n1) {
 // One-moving-vertex linear CCD
 // -----------------------------------------------------------------------------
 
-CCDResult node_triangle_linear_ccd(const Vec3& x,  const Vec3& dx,
-                                   const Vec3& x1, const Vec3& dx1,
-                                   const Vec3& x2, const Vec3& dx2,
-                                   const Vec3& x3, const Vec3& dx3,
-                                   double eps) {
+CCDResult node_triangle_linear_ccd(const Vec3& x,  const Vec3& dx, const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2,
+                                   const Vec3& x3, const Vec3& dx3, double eps) {
     CCDResult result;
     const double geometry_relative_eps = std::max(eps, 1.0e-8);
 
@@ -72,14 +65,12 @@ CCDResult node_triangle_linear_ccd(const Vec3& x,  const Vec3& dx,
 
         // Degenerate triangles are outside the supported input domain.
         const double area_scale2 = e11 * e22;
-        if (area_scale2 == 0.0
-            || normal2 <= geometry_relative_eps * geometry_relative_eps * area_scale2) {
+        if (area_scale2 == 0.0 || normal2 <= geometry_relative_eps * geometry_relative_eps * area_scale2) {
             return false;
         }
 
         const double local_length = std::max({std::sqrt(e11), std::sqrt(e22), offset.norm()});
-        if (std::fabs(normal.dot(offset))
-            > geometry_relative_eps * std::sqrt(normal2) * local_length) {
+        if (std::fabs(normal.dot(offset)) > geometry_relative_eps * std::sqrt(normal2) * local_length) {
             return false;
         }
 
@@ -105,12 +96,8 @@ CCDResult node_triangle_linear_ccd(const Vec3& x,  const Vec3& dx,
     const double d = pxq.dot(r);
     const double c = dp.cross(q).dot(r) + p.cross(dq).dot(r) + pxq.dot(dr);
     const double d_scale = p.norm() * q.norm() * r.norm();
-    const double c_scale =
-        dp.norm() * q.norm() * r.norm()
-        + p.norm() * dq.norm() * r.norm()
-        + p.norm() * q.norm() * dr.norm();
-    const bool coplanar_for_entire_step =
-        is_effectively_zero(c, c_scale, eps) && is_effectively_zero(d, d_scale, eps);
+    const double c_scale = dp.norm() * q.norm() * r.norm() + p.norm() * dq.norm() * r.norm() + p.norm() * q.norm() * dr.norm();
+    const bool coplanar_for_entire_step = is_effectively_zero(c, c_scale, eps) && is_effectively_zero(d, d_scale, eps);
 
     if (c != 0.0) {
         const double t = -d / c;
@@ -125,9 +112,8 @@ CCDResult node_triangle_linear_ccd(const Vec3& x,  const Vec3& dx,
 
     if (!coplanar_for_entire_step) return result;
 
-    // Special case: the node and triangle remain coplanar. Project to 2D;
-    // contact can begin only when the node crosses a triangle edge.
-    const double projected_relative_eps = std::max(eps, 1.0e-10);
+    // Fully coplanar step: project along the most stable coordinate plane.
+    // Point-triangle membership can change only when the point crosses one of the three projected triangle-edge lines.
     const Vec3 normal0 = (x2 - x1).cross(x3 - x1);
     const Vec3 normal1 = (x2 + dx2 - x1 - dx1).cross(x3 + dx3 - x1 - dx1);
     const int drop_axis = dominant_drop_axis(normal0, normal1);
@@ -141,44 +127,23 @@ CCDResult node_triangle_linear_ccd(const Vec3& x,  const Vec3& dx,
     const Vec2 c0 = project_drop_axis(x3, drop_axis);
     const Vec2 dc = project_drop_axis(dx3, drop_axis);
 
-    const auto point_in_triangle_2d = [&](const Vec2& point, const Vec2& a,
-                                          const Vec2& b, const Vec2& c) {
-        const auto orientation_sign = [&](const Vec2& u, const Vec2& v,
-                                           const Vec2& query) {
-            const Vec2 edge = v - u;
-            const Vec2 offset = query - u;
-            const double orientation = cross_product_in_2d(edge, offset);
-            const double tolerance = projected_relative_eps * edge.norm() * offset.norm();
-            return (orientation > tolerance) - (orientation < -tolerance);
-        };
-        const int s0 = orientation_sign(a, b, point);
-        const int s1 = orientation_sign(b, c, point);
-        const int s2 = orientation_sign(c, a, point);
-        return (s0 >= 0 && s1 >= 0 && s2 >= 0)
-            || (s0 <= 0 && s1 <= 0 && s2 <= 0);
-    };
-
+    // Keep every in-range boundary event, including duplicate or arbitrarily close roots.
+    // Distinct physical events need not be well separated in time.
     std::array<double, 3> roots{};
     std::size_t root_count = 0;
-    const auto add_orientation_root = [&](const Vec2& u0, const Vec2& du,
-                                           const Vec2& v0, const Vec2& dv,
-                                           const Vec2& query0, const Vec2& dquery) {
+    const auto add_orientation_root = [&](const Vec2& u0, const Vec2& du,  const Vec2& v0, const Vec2& dv,  const Vec2& query0, const Vec2& dquery) {
         const Vec2 edge = v0 - u0;
         const Vec2 dedge = dv - du;
         const Vec2 offset = query0 - u0;
         const Vec2 doffset = dquery - du;
         const double intercept = cross_product_in_2d(edge, offset);
-        const double slope = cross_product_in_2d(dedge, offset)
-            + cross_product_in_2d(edge, doffset);
+        const double slope = cross_product_in_2d(dedge, offset) + cross_product_in_2d(edge, doffset);
         const double scale = std::max(std::fabs(slope), std::fabs(intercept));
         if (std::fabs(slope) <= eps * scale) return;
 
         double t = -intercept / slope;
         if (!in_unit_interval(t, eps)) return;
         t = std::clamp(t, 0.0, 1.0);
-        for (std::size_t i = 0; i < root_count; ++i) {
-            if (std::fabs(roots[i] - t) <= 1.0e-9) return;
-        }
         roots[root_count++] = t;
     };
 
@@ -187,26 +152,37 @@ CCDResult node_triangle_linear_ccd(const Vec3& x,  const Vec3& dx,
     add_orientation_root(c0, dc, a0, da, point0, dpoint);
     std::sort(roots.begin(), roots.begin() + root_count);
 
-    double coplanar_t = 1.0;
+    // Test every event with the full 3D predicate. Between consecutive events, exact membership is constant, so one midpoint represents that interval.
     for (std::size_t i = 0; i < root_count; ++i) {
         const double t = roots[i];
-        if (point_in_triangle_2d(
-                point0 + dpoint * t, a0 + da * t, b0 + db * t, c0 + dc * t)) {
-            coplanar_t = t;
-            break;
+        if (point_in_triangle_at(t)) {
+            result.collision = true;
+            result.t = t;
+            return result;
+        }
+
+        const double next_t = (i + 1 < root_count) ? roots[i + 1] : 1.0;
+        if (next_t > t) {
+            const double midpoint = t + 0.5 * (next_t - t);
+            if (point_in_triangle_at(midpoint)) {
+                // No boundary event occurs inside this interval, so contact starts at its left endpoint.
+                // Returning t is conservative if the fixed-time predicate is tolerance-padded.
+                result.collision = true;
+                result.t = t;
+                return result;
+            }
         }
     }
 
-    if (point_in_triangle_at(coplanar_t)) {
-        if (!result.collision || coplanar_t < result.t) result.t = coplanar_t;
+    // t=0 was tested before the coplanar branch; close the sweep at t=1.
+    if (point_in_triangle_at(1.0)) {
         result.collision = true;
+        result.t = 1.0;
     }
     return result;
 }
 
-CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1,
-                                     const Vec3& x2, const Vec3& x3,
-                                     const Vec3& x4, double eps) {
+CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double eps) {
     CCDResult result;
     const double geometry_relative_eps = std::max(eps, 1.0e-8);
 
@@ -252,8 +228,7 @@ CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1,
         const Vec3 point_a = a0 + u * alpha;
         const Vec3 point_b = b0 + v * beta;
         if ((point_a - point_b).squaredNorm() > distance_tolerance * distance_tolerance) return false;
-        return alpha >= -1.0e-8 && alpha <= 1.0 + 1.0e-8
-            && beta >= -1.0e-8 && beta <= 1.0 + 1.0e-8;
+        return alpha >= -1.0e-8 && alpha <= 1.0 + 1.0e-8 && beta >= -1.0e-8 && beta <= 1.0 + 1.0e-8;
     };
 
     if (segments_intersect_at(0.0)) {
@@ -271,8 +246,7 @@ CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1,
     const double c = -normal.dot(dx1);
     const double d_scale = normal.norm() * y.norm();
     const double c_scale = normal.norm() * dx1.norm();
-    const bool coplanar_for_entire_step =
-        is_effectively_zero(c, c_scale, eps) && is_effectively_zero(d, d_scale, eps);
+    const bool coplanar_for_entire_step = is_effectively_zero(c, c_scale, eps) && is_effectively_zero(d, d_scale, eps);
 
     if (c != 0.0) {
         const double t = -d / c;
@@ -287,11 +261,8 @@ CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1,
 
     if (!coplanar_for_entire_step) return result;
 
-    // Special cases: the segments remain coplanar. Handle continuously
-    // parallel/collinear motion in 1D; otherwise use projected 2D edge events.
-    const auto earliest_point_in_interval_time = [&](double point0, double dpoint,
-                                                      double a0, double da,
-                                                      double b0, double db) {
+    // Fully coplanar step: handle permanently parallel/collinear motion in 1D; otherwise sweep the projected 2D boundary events below.
+    const auto earliest_point_in_interval_time = [&](double point0, double dpoint,  double a0, double da, double b0, double db) {
         const auto is_between = [&](double t) {
             const double ra = (point0 - a0) + t * (dpoint - da);
             const double rb = (point0 - b0) + t * (dpoint - db);
@@ -300,6 +271,8 @@ CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1,
         };
         if (is_between(0.0)) return 0.0;
 
+        // In 1D, interval membership can change only when the point meets an endpoint.
+        // Keep both roots even when they coincide or are very close.
         std::array<double, 2> roots{};
         std::size_t root_count = 0;
         const auto add_root = [&](double slope, double intercept) {
@@ -307,19 +280,21 @@ CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1,
             if (std::fabs(slope) <= eps * scale) return;
             double t = -intercept / slope;
             if (!in_unit_interval(t, eps)) return;
-            t = std::clamp(t, 0.0, 1.0);
-            for (std::size_t i = 0; i < root_count; ++i) {
-                if (std::fabs(roots[i] - t) <= 1.0e-9) return;
-            }
-            roots[root_count++] = t;
+            roots[root_count++] = std::clamp(t, 0.0, 1.0);
         };
         add_root(dpoint - da, point0 - a0);
         add_root(dpoint - db, point0 - b0);
         std::sort(roots.begin(), roots.begin() + root_count);
+
+        // Test every endpoint event and one representative midpoint from each following interval; membership is constant between endpoint events.
         for (std::size_t i = 0; i < root_count; ++i) {
             const double t = roots[i];
-            if (is_between(t) || is_between(std::min(1.0, t + 1.0e-9))) return t;
+            if (is_between(t)) return t;
+
+            const double next_t = (i + 1 < root_count) ? roots[i + 1] : 1.0;
+            if (next_t > t && is_between(t + 0.5 * (next_t - t))) return t;
         }
+        if (is_between(1.0)) return 1.0;
         return 1.0;
     };
 
@@ -356,89 +331,78 @@ CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1,
         return scale2 == 0.0 || n.squaredNorm() <= eps * eps * scale2;
     };
 
-    double coplanar_t = 1.0;
+    // Permanently parallel motion reduces to 1D interval overlap.
+    // Validate the earliest 1D event with the full 3D segment predicate before returning it.
     if (relatively_parallel(direction0, normal0)
         && relatively_parallel(direction1, normal1)) {
-        coplanar_t = earliest_collinear_time();
-    } else {
-        const double projected_relative_eps = std::max(eps, 1.0e-10);
-        const int drop_axis = dominant_drop_axis(normal0, normal1);
-        const Vec2 a0 = project_drop_axis(x1, drop_axis);
-        const Vec2 da = project_drop_axis(dx1, drop_axis);
-        const Vec2 b0 = project_drop_axis(x2, drop_axis);
-        const Vec2 c0 = project_drop_axis(x3, drop_axis);
-        const Vec2 d0 = project_drop_axis(x4, drop_axis);
-
-        const auto orientation_sign = [&](const Vec2& u, const Vec2& v,
-                                           const Vec2& query) {
-            const Vec2 edge = v - u;
-            const Vec2 offset = query - u;
-            const double orientation = cross_product_in_2d(edge, offset);
-            const double tolerance = projected_relative_eps * edge.norm() * offset.norm();
-            return (orientation > tolerance) - (orientation < -tolerance);
-        };
-        const auto on_segment = [&](const Vec2& u, const Vec2& query, const Vec2& v) {
-            const Vec2 qu = query - u, qv = query - v, vu = v - u;
-            const double scale2 = std::max({qu.squaredNorm(), qv.squaredNorm(), vu.squaredNorm()});
-            return qu.dot(qv) <= projected_relative_eps * scale2;
-        };
-        const auto segments_intersect_2d = [&](const Vec2& a, const Vec2& b,
-                                                const Vec2& c, const Vec2& d) {
-            const int s1 = orientation_sign(a, b, c);
-            const int s2 = orientation_sign(a, b, d);
-            const int s3 = orientation_sign(c, d, a);
-            const int s4 = orientation_sign(c, d, b);
-            if (s1 * s2 < 0 && s3 * s4 < 0) return true;
-            if (s1 == 0 && on_segment(a, c, b)) return true;
-            if (s2 == 0 && on_segment(a, d, b)) return true;
-            if (s3 == 0 && on_segment(c, a, d)) return true;
-            return s4 == 0 && on_segment(c, b, d);
-        };
-
-        std::array<double, 4> roots{};
-        std::size_t root_count = 0;
-        const auto add_orientation_root = [&](const Vec2& u0, const Vec2& du,
-                                               const Vec2& v0, const Vec2& dv,
-                                               const Vec2& query0, const Vec2& dquery) {
-            const Vec2 edge = v0 - u0;
-            const Vec2 dedge = dv - du;
-            const Vec2 offset = query0 - u0;
-            const Vec2 doffset = dquery - du;
-            const double intercept = cross_product_in_2d(edge, offset);
-            const double slope = cross_product_in_2d(dedge, offset)
-                + cross_product_in_2d(edge, doffset);
-            const double scale = std::max(std::fabs(slope), std::fabs(intercept));
-            if (std::fabs(slope) <= eps * scale) return;
-            double t = -intercept / slope;
-            if (!in_unit_interval(t, eps)) return;
-            t = std::clamp(t, 0.0, 1.0);
-            for (std::size_t i = 0; i < root_count; ++i) {
-                if (std::fabs(roots[i] - t) <= 1.0e-9) return;
-            }
-            roots[root_count++] = t;
-        };
-
-        const Vec2 zero = Vec2::Zero();
-        add_orientation_root(a0, da, b0, zero, c0, zero);
-        add_orientation_root(a0, da, b0, zero, d0, zero);
-        add_orientation_root(c0, zero, d0, zero, a0, da);
-        add_orientation_root(c0, zero, d0, zero, b0, zero);
-        std::sort(roots.begin(), roots.begin() + root_count);
-        bool found_projected_collision = false;
-        for (std::size_t i = 0; i < root_count; ++i) {
-            const double t = roots[i];
-            if (segments_intersect_2d(a0 + da * t, b0, c0, d0)) {
-                coplanar_t = t;
-                found_projected_collision = true;
-                break;
-            }
+        const double collinear_t = earliest_collinear_time();
+        if (segments_intersect_at(collinear_t)) {
+            result.collision = true;
+            result.t = collinear_t;
         }
-        if (!found_projected_collision) coplanar_t = earliest_collinear_time();
+        return result;
     }
 
-    if (segments_intersect_at(coplanar_t)) {
-        if (!result.collision || coplanar_t < result.t) result.t = coplanar_t;
+    // Remaining coplanar case: project along the most stable coordinate plane.
+    // Segment intersection can change only at the four endpoint/supporting-line orientation events generated below.
+    const int drop_axis = dominant_drop_axis(normal0, normal1);
+    const Vec2 a0 = project_drop_axis(x1, drop_axis);
+    const Vec2 da = project_drop_axis(dx1, drop_axis);
+    const Vec2 b0 = project_drop_axis(x2, drop_axis);
+    const Vec2 c0 = project_drop_axis(x3, drop_axis);
+    const Vec2 d0 = project_drop_axis(x4, drop_axis);
+
+    // Keep all events, including duplicate or arbitrarily close roots.
+    std::array<double, 4> roots{};
+    std::size_t root_count = 0;
+    const auto add_orientation_root = [&](const Vec2& u0, const Vec2& du, const Vec2& v0, const Vec2& dv, const Vec2& query0, const Vec2& dquery) {
+        const Vec2 edge = v0 - u0;
+        const Vec2 dedge = dv - du;
+        const Vec2 offset = query0 - u0;
+        const Vec2 doffset = dquery - du;
+        const double intercept = cross_product_in_2d(edge, offset);
+        const double slope = cross_product_in_2d(dedge, offset) + cross_product_in_2d(edge, doffset);
+        const double scale = std::max(std::fabs(slope), std::fabs(intercept));
+        if (std::fabs(slope) <= eps * scale) return;
+        double t = -intercept / slope;
+        if (!in_unit_interval(t, eps)) return;
+        roots[root_count++] = std::clamp(t, 0.0, 1.0);
+    };
+
+    const Vec2 zero = Vec2::Zero();
+    add_orientation_root(a0, da, b0, zero, c0, zero);
+    add_orientation_root(a0, da, b0, zero, d0, zero);
+    add_orientation_root(c0, zero, d0, zero, a0, da);
+    add_orientation_root(c0, zero, d0, zero, b0, zero);
+    std::sort(roots.begin(), roots.begin() + root_count);
+
+    // Test every event with the full 3D predicate.
+    // Exact intersection is constant between events, so one midpoint represents each open interval.
+    for (std::size_t i = 0; i < root_count; ++i) {
+        const double t = roots[i];
+        if (segments_intersect_at(t)) {
+            result.collision = true;
+            result.t = t;
+            return result;
+        }
+
+        const double next_t = (i + 1 < root_count) ? roots[i + 1] : 1.0;
+        if (next_t > t) {
+            const double midpoint = t + 0.5 * (next_t - t);
+            if (segments_intersect_at(midpoint)) {
+                // The intersection state is constant between orientation events.
+                // Return the left endpoint as a conservative TOI.
+                result.collision = true;
+                result.t = t;
+                return result;
+            }
+        }
+    }
+
+    // t=0 was tested before the coplanar branch; close the sweep at t=1.
+    if (segments_intersect_at(1.0)) {
         result.collision = true;
+        result.t = 1.0;
     }
     return result;
 }

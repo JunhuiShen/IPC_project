@@ -126,9 +126,9 @@ Vec4 quaternion_from_angular_velocity(const Vec4& q0, const Vec3& omega, double 
     return quaternion_multiply(exp(omega, dt), q0);
 }
 
-Vec3 world_space_position(const Vec3& X, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt) {
+Vec3 world_space_position(const Vec3& X_centered, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt) {
     const Vec4 quat = quaternion_from_angular_velocity(q0, omega, dt);
-    return x_com + quaternion_rotate(quat, X);
+    return x_com + quaternion_rotate(quat, X_centered);
 }
 
 Vec3 material_space_position( const Vec3& x, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt) {
@@ -136,25 +136,25 @@ Vec3 material_space_position( const Vec3& x, const Vec3& x_com, const Vec4& q0, 
     return quaternion_inverse_rotate(quat, x - x_com);
 }
 
-// J(c,beta) = d x_c / d q_beta for x = x_com + R(q) X.
+// J(c,beta) = d x_c / d q_beta for x = x_com + R(q) X_centered.
 // Here c is a spatial index, beta is a quaternion index, and q = (w,v)
 // The translation Jacobian is the identity and is omitted here
-Mat34 dx_dq(const Vec3& X, const Vec4& quat) {
+Mat34 dx_dq(const Vec3& X_centered, const Vec4& quat) {
     const double w = quat[0];
     const Vec3 v(quat[1], quat[2], quat[3]);
     Mat34 J = Mat34::Zero();
 
     for (int c = 0; c < 3; ++c) {
-        J(c, 0) = 2.0 * w * X[c];
+        J(c, 0) = 2.0 * w * X_centered[c];
         for (int i = 0; i < 3; ++i) {
             for (int j = 0; j < 3; ++j)
-                J(c, 0) += 2.0 * levi_civita(c, i, j) * v[i] * X[j];
+                J(c, 0) += 2.0 * levi_civita(c, i, j) * v[i] * X_centered[j];
         }
 
         for (int a = 0; a < 3; ++a) {
-            J(c, a + 1) = 2.0 * (-v[a] * X[c] + v[c] * X[a]);
+            J(c, a + 1) = 2.0 * (-v[a] * X_centered[c] + v[c] * X_centered[a]);
             for (int j = 0; j < 3; ++j) {
-                J(c, a + 1) += 2.0 * (kronecker_delta(c, a) * v[j] * X[j] + w * levi_civita(c, a, j) * X[j]);
+                J(c, a + 1) += 2.0 * (kronecker_delta(c, a) * v[j] * X_centered[j] + w * levi_civita(c, a, j) * X_centered[j]);
             }
         }
     }
@@ -163,17 +163,17 @@ Mat34 dx_dq(const Vec3& X, const Vec4& quat) {
 
 // H[c](beta,gamma) = d2 x_c / (d q_beta d q_gamma).
 // Translation is affine, so every second derivative involving it is zero.
-std::array<Mat44, 3> d2x_dq2(const Vec3& X) {
+std::array<Mat44, 3> d2x_dq2(const Vec3& X_centered) {
     std::array<Mat44, 3> H = {
         Mat44::Zero(), Mat44::Zero(), Mat44::Zero()
     };
 
     for (int c = 0; c < 3; ++c) {
-        H[c](0, 0) = 2.0 * X[c];
+        H[c](0, 0) = 2.0 * X_centered[c];
 
         for (int a = 0; a < 3; ++a) {
             for (int j = 0; j < 3; ++j) {
-                const double value = 2.0 * levi_civita(c, a, j) * X[j];
+                const double value = 2.0 * levi_civita(c, a, j) * X_centered[j];
                 H[c](0, a + 1) += value;
                 H[c](a + 1, 0) += value;
             }
@@ -181,7 +181,7 @@ std::array<Mat44, 3> d2x_dq2(const Vec3& X) {
 
         for (int a = 0; a < 3; ++a) {
             for (int b = 0; b < 3; ++b) {
-                H[c](a + 1, b + 1) = 2.0 * (-kronecker_delta(a, b) * X[c] + kronecker_delta(a, c) * X[b] + kronecker_delta(b, c) * X[a]);
+                H[c](a + 1, b + 1) = 2.0 * (-kronecker_delta(a, b) * X_centered[c] + kronecker_delta(a, c) * X_centered[b] + kronecker_delta(b, c) * X_centered[a]);
             }
         }
     }
@@ -222,17 +222,17 @@ std::array<Mat33, 4> d2q_domega2(const Vec4& q0, const Vec3& omega, double dt) {
 }
 
 // For each x_c, dx / d omega = (dx / dq) (dq / d omega)
-Mat33 dx_domega(const Vec3& X, const Vec4& q0, const Vec3& omega, double dt) {
+Mat33 dx_domega(const Vec3& X_centered, const Vec4& q0, const Vec3& omega, double dt) {
     const Vec4 q = quaternion_from_angular_velocity(q0, omega, dt);
-    return dx_dq(X, q) * dq_domega(q0, omega, dt);
+    return dx_dq(X_centered, q) * dq_domega(q0, omega, dt);
 }
 
 // For each x_c, the omega Hessian is d2x_c / d omega2 = (dq/domega)^T (d2x_c/dq2) (dq/domega) + sum_alpha (dx_c/dq_alpha) (d2q_alpha/domega2)
-std::array<Mat33, 3> d2x_domega2(const Vec3& X, const Vec4& q0, const Vec3& omega, double dt) {
+std::array<Mat33, 3> d2x_domega2(const Vec3& X_centered, const Vec4& q0, const Vec3& omega, double dt) {
     std::array<Mat33, 3> result;
     const Vec4 q = quaternion_from_angular_velocity(q0, omega, dt);
-    const Mat34 J_xq = dx_dq(X, q);
-    const std::array<Mat44, 3> H_xq = d2x_dq2(X);
+    const Mat34 J_xq = dx_dq(X_centered, q);
+    const std::array<Mat44, 3> H_xq = d2x_dq2(X_centered);
     const Mat43 J_qomega = dq_domega(q0, omega, dt);
     const std::array<Mat33, 4> H_qomega = d2q_domega2(q0, omega, dt);
 

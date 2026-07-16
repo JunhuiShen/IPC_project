@@ -25,10 +25,10 @@ struct QuaternionNodeEnergy {
     Mat44 hessian = Mat44::Zero();
 };
 
-OmegaNodeEnergy evaluate_omega_node_energy( const Vec3& X, const Vec3& target, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt) {
-    const Vec3 x = world_space_position(X, x_com, q0, omega, dt);
-    const Mat33 J_xomega = dx_domega(X, q0, omega, dt);
-    const std::array<Mat33, 3> H_xomega = d2x_domega2(X, q0, omega, dt);
+OmegaNodeEnergy evaluate_omega_node_energy(const Vec3& X_centered, const Vec3& target, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt) {
+    const Vec3 x = world_space_position(X_centered, x_com, q0, omega, dt);
+    const Mat33 J_xomega = dx_domega(X_centered, q0, omega, dt);
+    const std::array<Mat33, 3> H_xomega = d2x_domega2(X_centered, q0, omega, dt);
     const Vec3 gx = x - target;
     const Vec3 omega_gradient = rigid_node_omega_gradient(gx, J_xomega);
     const Mat33 omega_hessian = rigid_node_omega_hessian(gx, Mat33::Identity(), J_xomega, H_xomega);
@@ -40,10 +40,10 @@ OmegaNodeEnergy evaluate_omega_node_energy( const Vec3& X, const Vec3& target, c
     return result;
 }
 
-QuaternionNodeEnergy evaluate_quaternion_node_energy( const Vec3& X, const Vec3& target, const Vec3& x_com, const Vec4& quat) {
-    const Vec3 gx = x_com + quaternion_rotate(quat, X) - target;
-    const Mat34 J_xq = dx_dq(X, quat);
-    const std::array<Mat44, 3> H_xq = d2x_dq2(X);
+QuaternionNodeEnergy evaluate_quaternion_node_energy(const Vec3& X_centered, const Vec3& target, const Vec3& x_com, const Vec4& quat) {
+    const Vec3 gx = x_com + quaternion_rotate(quat, X_centered) - target;
+    const Mat34 J_xq = dx_dq(X_centered, quat);
+    const std::array<Mat44, 3> H_xq = d2x_dq2(X_centered);
 
     QuaternionNodeEnergy result;
     result.energy = 0.5 * gx.squaredNorm();
@@ -125,14 +125,14 @@ TEST(RigidBodyIPCQuaternionWrappers, ForwardAndInverseRotationRoundTrip) {
 }
 
 TEST(RigidBodyIPCOmegaNodeKinematics, MaterialAndWorldSpacePositionRoundTrip) {
-    const Vec3 X(0.7, -0.4, 1.2);
+    const Vec3 X_centered(0.7, -0.4, 1.2);
     const Vec3 x_com(-0.3, 0.8, 1.5);
     const Vec4 q0 = quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
     const Vec3 omega(0.7, -0.4, 0.2);
-    const Vec3 x = world_space_position(X, x_com, q0, omega, kDt);
+    const Vec3 x = world_space_position(X_centered, x_com, q0, omega, kDt);
     const Vec3 recovered = material_space_position(x, x_com, q0, omega, kDt);
 
-    EXPECT_TRUE(recovered.isApprox(X, 1.0e-14));
+    EXPECT_TRUE(recovered.isApprox(X_centered, 1.0e-14));
 }
 
 TEST(RigidBodyIPCQuaternionOmega, ProductTensorMatchesHamiltonProduct) {
@@ -332,16 +332,16 @@ TEST(RigidBodyIPCQuaternionOmega, SecondDerivativeConvergesQuadratically) {
 }
 
 TEST(RigidBodyIPCQuaternionDerivatives, DxDqTaylorRemainderConvergesQuadratically) {
-    const Vec3 X(0.4, -0.7, 1.1);
+    const Vec3 X_centered(0.4, -0.7, 1.1);
     const Vec4 q(0.8, -0.3, 0.4, 0.2);
     const Vec4 direction = Vec4(0.2, -0.3, 0.4, -0.5).normalized();
-    const Mat34 J = dx_dq(X, q);
+    const Mat34 J = dx_dq(X_centered, q);
     std::vector<double> errors(kConvergenceHs.size());
 
     for (std::size_t hi = 0; hi < kConvergenceHs.size(); ++hi) {
         const double h = kConvergenceHs[hi];
-        const Vec3 remainder = Rigid_Body::ALGEBRA::QuaternionRotate(q + h * direction, X)
-            - Rigid_Body::ALGEBRA::QuaternionRotate(q, X) - h * J * direction;
+        const Vec3 remainder = Rigid_Body::ALGEBRA::QuaternionRotate(q + h * direction, X_centered)
+            - Rigid_Body::ALGEBRA::QuaternionRotate(q, X_centered) - h * J * direction;
         errors[hi] = remainder.norm();
     }
 
@@ -349,16 +349,16 @@ TEST(RigidBodyIPCQuaternionDerivatives, DxDqTaylorRemainderConvergesQuadraticall
 }
 
 TEST(RigidBodyIPCQuaternionDerivatives, D2xDq2MatchesFiniteDifferenceOfDxDq) {
-    const Vec3 X(0.4, -0.7, 1.1);
+    const Vec3 X_centered(0.4, -0.7, 1.1);
     const Vec4 q(0.8, -0.3, 0.4, 0.2);
-    const std::array<Mat44, 3> exact = d2x_dq2(X);
+    const std::array<Mat44, 3> exact = d2x_dq2(X_centered);
 
     for (double h : kConvergenceHs) {
         for (int gamma = 0; gamma < 4; ++gamma) {
             Vec4 step = Vec4::Zero();
             step[gamma] = h;
             const Mat34 finite_difference =
-                (dx_dq(X, q + step) - dx_dq(X, q - step)) / (2.0 * h);
+                (dx_dq(X_centered, q + step) - dx_dq(X_centered, q - step)) / (2.0 * h);
 
             for (int c = 0; c < 3; ++c) {
                 const Vec4 error = finite_difference.row(c).transpose()
@@ -372,7 +372,7 @@ TEST(RigidBodyIPCQuaternionDerivatives, D2xDq2MatchesFiniteDifferenceOfDxDq) {
 }
 
 TEST(RigidBodyIPCQuaternionDerivatives, NodeEnergyDerivativesConvergeQuadratically) {
-    const Vec3 X(0.4, -0.7, 1.1);
+    const Vec3 X_centered(0.4, -0.7, 1.1);
     const Vec3 target(-0.2, 0.6, 0.3);
     const Vec3 x_com(0.1, -0.2, 0.3);
     const Vec4 quat(0.8, -0.3, 0.4, 0.2);
@@ -382,16 +382,16 @@ TEST(RigidBodyIPCQuaternionDerivatives, NodeEnergyDerivativesConvergeQuadratical
     for (std::size_t hi = 0; hi < kConvergenceHs.size(); ++hi) {
         const double h = kConvergenceHs[hi];
         const QuaternionNodeEnergy exact =
-            evaluate_quaternion_node_energy(X, target, x_com, quat);
+            evaluate_quaternion_node_energy(X_centered, target, x_com, quat);
         Vec4 gradient_fd = Vec4::Zero();
         Mat44 hessian_fd = Mat44::Zero();
         for (int beta = 0; beta < 4; ++beta) {
             Vec4 step = Vec4::Zero();
             step[beta] = h;
             const QuaternionNodeEnergy plus =
-                evaluate_quaternion_node_energy(X, target, x_com, quat + step);
+                evaluate_quaternion_node_energy(X_centered, target, x_com, quat + step);
             const QuaternionNodeEnergy minus =
-                evaluate_quaternion_node_energy(X, target, x_com, quat - step);
+                evaluate_quaternion_node_energy(X_centered, target, x_com, quat - step);
             gradient_fd[beta] = (plus.energy - minus.energy) / (2.0 * h);
             hessian_fd.col(beta) = (plus.gradient - minus.gradient) / (2.0 * h);
         }
@@ -404,12 +404,12 @@ TEST(RigidBodyIPCQuaternionDerivatives, NodeEnergyDerivativesConvergeQuadratical
 }
 
 TEST(RigidBodyIPCOmegaNodeKinematics, JacobianConvergesQuadratically) {
-    const Vec3 X(0.4, -0.7, 1.1);
+    const Vec3 X_centered(0.4, -0.7, 1.1);
     const Vec3 x_com(0.1, -0.2, 0.3);
     const Vec4 q0 = Rigid_Body::ALGEBRA::QuaternionFromVector(Vec3(0.2, -0.1, 0.3));
     const Vec3 omega(0.7, -0.4, 0.2);
     constexpr double dt = 1.3;
-    const Mat33 exact = dx_domega(X, q0, omega, dt);
+    const Mat33 exact = dx_domega(X_centered, q0, omega, dt);
     std::vector<double> errors(kConvergenceHs.size());
 
     for (std::size_t hi = 0; hi < kConvergenceHs.size(); ++hi) {
@@ -419,8 +419,8 @@ TEST(RigidBodyIPCOmegaNodeKinematics, JacobianConvergesQuadratically) {
             Vec3 step = Vec3::Zero();
             step[beta] = h;
             finite_difference.col(beta) =
-                (world_space_position(X, x_com, q0, omega + step, dt)
-                 - world_space_position(X, x_com, q0, omega - step, dt)) / (2.0 * h);
+                (world_space_position(X_centered, x_com, q0, omega + step, dt)
+                 - world_space_position(X_centered, x_com, q0, omega - step, dt)) / (2.0 * h);
         }
         errors[hi] = (finite_difference - exact).norm();
     }
@@ -429,11 +429,11 @@ TEST(RigidBodyIPCOmegaNodeKinematics, JacobianConvergesQuadratically) {
 }
 
 TEST(RigidBodyIPCOmegaNodeKinematics, SecondDerivativeConvergesQuadratically) {
-    const Vec3 X(0.4, -0.7, 1.1);
+    const Vec3 X_centered(0.4, -0.7, 1.1);
     const Vec4 q0 = Rigid_Body::ALGEBRA::QuaternionFromVector(Vec3(0.2, -0.1, 0.3));
     const Vec3 omega(0.7, -0.4, 0.2);
     constexpr double dt = 1.3;
-    const std::array<Mat33, 3> exact = d2x_domega2(X, q0, omega, dt);
+    const std::array<Mat33, 3> exact = d2x_domega2(X_centered, q0, omega, dt);
     std::vector<double> errors(kConvergenceHs.size());
 
     for (std::size_t hi = 0; hi < kConvergenceHs.size(); ++hi) {
@@ -443,8 +443,8 @@ TEST(RigidBodyIPCOmegaNodeKinematics, SecondDerivativeConvergesQuadratically) {
             Vec3 step = Vec3::Zero();
             step[gamma] = h;
             const Mat33 finite_difference =
-                (dx_domega(X, q0, omega + step, dt)
-                 - dx_domega(X, q0, omega - step, dt)) / (2.0 * h);
+                (dx_domega(X_centered, q0, omega + step, dt)
+                 - dx_domega(X_centered, q0, omega - step, dt)) / (2.0 * h);
             for (int c = 0; c < 3; ++c) {
                 const Vec3 error = finite_difference.row(c).transpose()
                     - exact[c].col(gamma);
@@ -458,7 +458,7 @@ TEST(RigidBodyIPCOmegaNodeKinematics, SecondDerivativeConvergesQuadratically) {
 }
 
 TEST(RigidBodyIPCOmegaNodeDerivatives, CenteredDifferenceConvergesQuadratically) {
-    const Vec3 X(0.4, -0.7, 1.1);
+    const Vec3 X_centered(0.4, -0.7, 1.1);
     const Vec3 target(-0.2, 0.6, 0.3);
     const Vec3 x_com(0.1, -0.2, 0.3);
     const Vec4 q0 = Rigid_Body::ALGEBRA::QuaternionFromVector(Vec3(0.2, -0.1, 0.3));
@@ -469,7 +469,7 @@ TEST(RigidBodyIPCOmegaNodeDerivatives, CenteredDifferenceConvergesQuadratically)
     for (std::size_t hi = 0; hi < kConvergenceHs.size(); ++hi) {
         const double h = kConvergenceHs[hi];
         const OmegaNodeEnergy exact =
-            evaluate_omega_node_energy(X, target, x_com, q0, omega, dt);
+            evaluate_omega_node_energy(X_centered, target, x_com, q0, omega, dt);
         Vec3 gradient_fd = Vec3::Zero();
         Mat33 hessian_fd = Mat33::Zero();
 
@@ -477,9 +477,9 @@ TEST(RigidBodyIPCOmegaNodeDerivatives, CenteredDifferenceConvergesQuadratically)
             Vec3 step = Vec3::Zero();
             step[beta] = h;
             const OmegaNodeEnergy plus =
-                evaluate_omega_node_energy(X, target, x_com, q0, omega + step, dt);
+                evaluate_omega_node_energy(X_centered, target, x_com, q0, omega + step, dt);
             const OmegaNodeEnergy minus =
-                evaluate_omega_node_energy(X, target, x_com, q0, omega - step, dt);
+                evaluate_omega_node_energy(X_centered, target, x_com, q0, omega - step, dt);
             gradient_fd[beta] = (plus.energy - minus.energy) / (2.0 * h);
             hessian_fd.col(beta) = (plus.gradient - minus.gradient) / (2.0 * h);
         }
