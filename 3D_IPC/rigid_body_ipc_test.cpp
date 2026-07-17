@@ -114,6 +114,17 @@ TEST(RigidBodyIPCQuaternionWrappers, SignAlignmentUsesReferenceHemisphere) {
     EXPECT_TRUE(quaternion_align_sign(reference, reference).isApprox(reference, 1.0e-14));
 }
 
+TEST(RigidBodyIPCQuaternionWrappers, TimeDerivativeUsesWorldSpaceAngularVelocity) {
+    const Vec4 q = quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
+    const Vec3 omega(0.7, -0.4, 0.2);
+    const Vec4 omega_quaternion(0.0, omega[0], omega[1], omega[2]);
+    const Vec4 expected = 0.5 * quaternion_multiply(omega_quaternion, q);
+    const Vec4 q_dot = quaternion_time_derivative(q, omega);
+
+    EXPECT_TRUE(q_dot.isApprox(expected, 1.0e-14));
+    EXPECT_NEAR(q.dot(q_dot), 0.0, 1.0e-14);
+}
+
 TEST(RigidBodyIPCQuaternionWrappers, ForwardAndInverseRotationRoundTrip) {
     const double half_angle = 0.25 * std::acos(-1.0);
     const Vec4 quat(std::cos(half_angle), 0.0, 0.0, std::sin(half_angle));
@@ -490,6 +501,126 @@ TEST(RigidBodyIPCOmegaNodeDerivatives, CenteredDifferenceConvergesQuadratically)
 
     expect_quadratic_convergence(kConvergenceHs, gradient_errors);
     expect_quadratic_convergence(kConvergenceHs, hessian_errors);
+}
+
+TEST(RigidBodyIPCInertialEnergy, TranslationDerivativesMatchEnergy) {
+    const std::vector<double> masses = {1.2, 0.7, 1.9};
+    const std::vector<Vec3> R_p = {
+        Vec3(-0.8, 0.35, 0.2),
+        Vec3(0.45, -0.55, 0.9),
+        Vec3(0.3394736842105263, -0.0184210526315789, -0.4578947368421053),
+    };
+    const double total_mass = 3.8;
+    const Vec3 x_com(0.31, -0.42, 0.18);
+    const Vec3 x_com_n(-0.13, 0.27, -0.22);
+    const Vec3 v_com_n(1.7, -0.6, 0.4);
+    const Vec4 q_n = quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
+    const Vec3 omega(0.6, -0.3, 0.7);
+    const Vec3 omega_n(-0.2, 0.5, 0.4);
+    constexpr double dt = 0.31;
+
+    ASSERT_TRUE((masses[0] * R_p[0] + masses[1] * R_p[1] + masses[2] * R_p[2]).isZero(1.0e-14));
+
+    const Vec3 exact_gradient = inertia_translation_gradient(x_com, x_com_n, v_com_n, dt, total_mass);
+    const Mat33 exact_hessian = inertia_translation_hessian(total_mass);
+    Vec3 gradient_fd = Vec3::Zero();
+    Mat33 hessian_fd = Mat33::Zero();
+    constexpr double h = 1.0e-5;
+
+    for (int alpha = 0; alpha < 3; ++alpha) {
+        Vec3 step = Vec3::Zero();
+        step[alpha] = h;
+        const double plus_energy = incremental_potential_energy(x_com + step, omega, x_com_n, v_com_n, q_n, omega_n, dt, total_mass, masses, R_p);
+        const double minus_energy = incremental_potential_energy(x_com - step, omega, x_com_n, v_com_n, q_n, omega_n, dt, total_mass, masses, R_p);
+        gradient_fd[alpha] = (plus_energy - minus_energy) / (2.0 * h);
+
+        const Vec3 plus_gradient = inertia_translation_gradient(x_com + step, x_com_n, v_com_n, dt, total_mass);
+        const Vec3 minus_gradient = inertia_translation_gradient(x_com - step, x_com_n, v_com_n, dt, total_mass);
+        hessian_fd.col(alpha) = (plus_gradient - minus_gradient) / (2.0 * h);
+    }
+
+    EXPECT_TRUE(gradient_fd.isApprox(exact_gradient, 1.0e-9));
+    EXPECT_TRUE(hessian_fd.isApprox(exact_hessian, 1.0e-9));
+}
+
+TEST(RigidBodyIPCInertialEnergy, OmegaDerivativesConvergeQuadratically) {
+    const std::vector<double> masses = {1.2, 0.7, 1.9};
+    const std::vector<Vec3> R_p = {
+        Vec3(-0.8, 0.35, 0.2),
+        Vec3(0.45, -0.55, 0.9),
+        Vec3(0.3394736842105263, -0.0184210526315789, -0.4578947368421053),
+    };
+    const double total_mass = 3.8;
+    const Vec3 x_com_n(-0.13, 0.27, -0.22);
+    const Vec3 v_com_n(1.7, -0.6, 0.4);
+    constexpr double dt = 0.31;
+    const Vec3 x_com = x_com_n + dt * v_com_n;
+    const Vec4 q_n = quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
+    const Vec3 omega(0.6, -0.3, 0.7);
+    const Vec3 omega_n(-0.2, 0.5, 0.4);
+    const auto [exact_gradient, exact_hessian] = inertia_rotation_gradient_hessian(omega, q_n, omega_n, dt, masses, R_p);
+    std::vector<double> gradient_errors(kConvergenceHs.size());
+    std::vector<double> hessian_errors(kConvergenceHs.size());
+
+    for (std::size_t hi = 0; hi < kConvergenceHs.size(); ++hi) {
+        const double h = kConvergenceHs[hi];
+        Vec3 gradient_fd = Vec3::Zero();
+        Mat33 hessian_fd = Mat33::Zero();
+
+        for (int beta = 0; beta < 3; ++beta) {
+            Vec3 step = Vec3::Zero();
+            step[beta] = h;
+            const double plus_energy = incremental_potential_energy(x_com, omega + step, x_com_n, v_com_n, q_n, omega_n, dt, total_mass, masses, R_p);
+            const double minus_energy = incremental_potential_energy(x_com, omega - step, x_com_n, v_com_n, q_n, omega_n, dt, total_mass, masses, R_p);
+            gradient_fd[beta] = (plus_energy - minus_energy) / (2.0 * h);
+
+            const Vec3 plus_gradient = inertia_rotation_gradient_hessian(omega + step, q_n, omega_n, dt, masses, R_p).first;
+            const Vec3 minus_gradient = inertia_rotation_gradient_hessian(omega - step, q_n, omega_n, dt, masses, R_p).first;
+            hessian_fd.col(beta) = (plus_gradient - minus_gradient) / (2.0 * h);
+        }
+
+        gradient_errors[hi] = (gradient_fd - exact_gradient).norm();
+        hessian_errors[hi] = (hessian_fd - exact_hessian).norm();
+    }
+
+    expect_quadratic_convergence(kConvergenceHs, gradient_errors);
+    expect_quadratic_convergence(kConvergenceHs, hessian_errors);
+}
+
+TEST(RigidBodyIPCInertialEnergy, ReducedEnergyMatchesFullNodalMassQuadratic) {
+    const std::vector<double> masses = {1.2, 0.7, 1.9};
+    const std::vector<Vec3> R_p = {
+        Vec3(-0.8, 0.35, 0.2),
+        Vec3(0.45, -0.55, 0.9),
+        Vec3(0.3394736842105263, -0.0184210526315789, -0.4578947368421053),
+    };
+    const double total_mass = 3.8;
+    const Vec3 x_com(0.31, -0.42, 0.18);
+    const Vec3 x_com_n(-0.13, 0.27, -0.22);
+    const Vec3 v_com_n(1.7, -0.6, 0.4);
+    const Vec4 q_n = quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
+    const Vec3 omega(0.6, -0.3, 0.7);
+    const Vec3 omega_n(-0.2, 0.5, 0.4);
+    constexpr double dt = 0.31;
+
+    ASSERT_TRUE((masses[0] * R_p[0] + masses[1] * R_p[1] + masses[2] * R_p[2]).isZero(1.0e-14));
+
+    const Vec4 q = quaternion_from_angular_velocity(q_n, omega, dt);
+    double full_nodal_energy = 0.0;
+
+    for (std::size_t p = 0; p < R_p.size(); ++p) {
+        const Vec3 r_p = quaternion_rotate(q, R_p[p]);
+        const Vec3 r_p_n = quaternion_rotate(q_n, R_p[p]);
+        const Vec3 x_p = x_com + r_p;
+        const Vec3 v_p_n = v_com_n + omega_n.cross(r_p_n);
+        const Vec3 x_hat_p = x_com_n + r_p_n + dt * v_p_n;
+        const Vec3 residual = x_p - x_hat_p;
+        full_nodal_energy += 0.5 * masses[p] * residual.squaredNorm();
+    }
+
+    const double reduced_energy = incremental_potential_energy(x_com, omega, x_com_n, v_com_n, q_n, omega_n, dt, total_mass, masses, R_p);
+
+    EXPECT_NEAR(reduced_energy, full_nodal_energy, 1.0e-14);
 }
 
 }  // namespace

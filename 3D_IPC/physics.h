@@ -117,6 +117,11 @@ public:
 struct DeformedState {
     std::vector<Vec3> deformed_positions;
     std::vector<Vec3> velocities;
+
+    Vec3 x_com = Vec3::Zero(); // center of mass
+    Vec3 v_com = Vec3::Zero(); // center-of-mass velocity
+    Vec4 q = Vec4(1.0, 0.0, 0.0, 0.0); // quaternion
+    Vec3 omega = Vec3::Zero(); // angular velocity
 };
 
 // Discrete-shell hinge: two triangles sharing an edge.

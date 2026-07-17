@@ -9,6 +9,9 @@ Vec4 quaternion_inverse(const Vec4& quat);
 Vec4 quaternion_normalize(const Vec4& quat);
 Vec4 quaternion_align_sign(const Vec4& quat, const Vec4& reference);
 
+// q_dot = 1/2 (0, omega) * q for world-space angular velocity omega.
+Vec4 quaternion_time_derivative(const Vec4& q, const Vec3& omega);
+
 // These rotation helpers expect a unit quaternion
 Vec3 quaternion_rotate(const Vec4& quat, const Vec3& vector);
 Vec3 quaternion_inverse_rotate(const Vec4& quat, const Vec3& vector);

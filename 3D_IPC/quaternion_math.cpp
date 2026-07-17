@@ -50,6 +50,12 @@ Vec4 quaternion_align_sign(const Vec4& quat, const Vec4& reference) {
     return quat.dot(reference) < 0.0 ? -quat : quat;
 }
 
+// q_dot = 1/2 (0, omega) * q.
+Vec4 quaternion_time_derivative(const Vec4& q, const Vec3& omega) {
+    const Vec4 omega_quaternion(0.0, omega[0], omega[1], omega[2]);
+    return 0.5 * quaternion_multiply(omega_quaternion, q);
+}
+
 Vec3 quaternion_rotate(const Vec4& quat, const Vec3& vector) {
     return Rigid_Body::ALGEBRA::QuaternionRotate(quat, vector);
 }
