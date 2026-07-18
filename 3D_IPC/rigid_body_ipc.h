@@ -25,19 +25,21 @@ Vec3 material_space_position(const Vec3& x, const Vec3& x_com, const Vec4& q0, c
 Mat34 dx_dq(const Vec3& X_centered, const Vec4& quat);
 std::array<Mat44, 3> d2x_dq2(const Vec3& X_centered);
 
-// Rigid-body inertial incremental potential from the pointwise COM/quaternion formulation.
-// The candidate quaternion is q(omega) = exp((dt / 2) * omega) * q_n.
-// The fixed predictor uses q_dot_n = 1/2 (0, omega_n) * q_n.
-// masses[p] is m_p, and total_mass is m = sum_p m_p.
+// Precompute I_hat = sum_p m_p R_p R_p^T once for each rigid body.
 // R_p[p] = X_p - X_com is the fixed body-reference COM offset of point p.
-double incremental_potential_energy(const Vec3& x_com, const Vec3& omega, const Vec3& x_com_n, const Vec3& v_com_n, const Vec4& q_n, const Vec3& omega_n, double dt, double total_mass, const std::vector<double>& masses, const std::vector<Vec3>& R_p);
+Mat33 body_second_moment(const std::vector<double>& masses, const std::vector<Vec3>& R_p);
+
+// Rigid-body inertial incremental potential aggregated with I_hat.
+// The candidate quaternion is q(omega) = exp((dt / 2) * omega) * q_n.
+// The fixed predictor uses the lagged q_dot_n = 1/2 (0, omega_n) * q_nm1.
+double incremental_potential_energy(const Vec3& x_com, const Vec3& omega, const Vec3& x_com_n, const Vec3& v_com_n, const Vec4& q_n, const Vec4& q_nm1, const Vec3& omega_n, double dt, double total_mass, const Mat33& I_hat);
 
 Vec3 inertia_translation_gradient(const Vec3& x_com, const Vec3& x_com_n, const Vec3& v_com_n, double dt, double total_mass);
 
 Mat33 inertia_translation_hessian(double total_mass);
 
 // Exact gradient and Hessian of the rotational inertial term with respect to omega.
-std::pair<Vec3, Mat33> inertia_rotation_gradient_hessian(const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, double dt, const std::vector<double>& masses, const std::vector<Vec3>& R_p);
+std::pair<Vec3, Mat33> inertia_rotation_gradient_hessian(const Vec3& omega, const Vec4& q_n, const Vec4& q_nm1, const Vec3& omega_n, double dt, const Mat33& I_hat);
 
 // Exact omega-coordinate derivatives of x(t, omega) = t + R(q(omega)) X_centered
 Mat33 dx_domega(const Vec3& X_centered, const Vec4& q0, const Vec3& omega, double dt);

@@ -515,9 +515,11 @@ TEST(RigidBodyIPCInertialEnergy, TranslationDerivativesMatchEnergy) {
     const Vec3 x_com_n(-0.13, 0.27, -0.22);
     const Vec3 v_com_n(1.7, -0.6, 0.4);
     const Vec4 q_n = quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
+    const Vec4 q_nm1 = quaternion_normalize(Vec4(0.7, -0.1, 0.5, 0.2));
     const Vec3 omega(0.6, -0.3, 0.7);
     const Vec3 omega_n(-0.2, 0.5, 0.4);
     constexpr double dt = 0.31;
+    const Mat33 I_hat = body_second_moment(masses, R_p);
 
     ASSERT_TRUE((masses[0] * R_p[0] + masses[1] * R_p[1] + masses[2] * R_p[2]).isZero(1.0e-14));
 
@@ -530,8 +532,8 @@ TEST(RigidBodyIPCInertialEnergy, TranslationDerivativesMatchEnergy) {
     for (int alpha = 0; alpha < 3; ++alpha) {
         Vec3 step = Vec3::Zero();
         step[alpha] = h;
-        const double plus_energy = incremental_potential_energy(x_com + step, omega, x_com_n, v_com_n, q_n, omega_n, dt, total_mass, masses, R_p);
-        const double minus_energy = incremental_potential_energy(x_com - step, omega, x_com_n, v_com_n, q_n, omega_n, dt, total_mass, masses, R_p);
+        const double plus_energy = incremental_potential_energy(x_com + step, omega, x_com_n, v_com_n, q_n, q_nm1, omega_n, dt, total_mass, I_hat);
+        const double minus_energy = incremental_potential_energy(x_com - step, omega, x_com_n, v_com_n, q_n, q_nm1, omega_n, dt, total_mass, I_hat);
         gradient_fd[alpha] = (plus_energy - minus_energy) / (2.0 * h);
 
         const Vec3 plus_gradient = inertia_translation_gradient(x_com + step, x_com_n, v_com_n, dt, total_mass);
@@ -556,9 +558,11 @@ TEST(RigidBodyIPCInertialEnergy, OmegaDerivativesConvergeQuadratically) {
     constexpr double dt = 0.31;
     const Vec3 x_com = x_com_n + dt * v_com_n;
     const Vec4 q_n = quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
+    const Vec4 q_nm1 = quaternion_normalize(Vec4(0.7, -0.1, 0.5, 0.2));
     const Vec3 omega(0.6, -0.3, 0.7);
     const Vec3 omega_n(-0.2, 0.5, 0.4);
-    const auto [exact_gradient, exact_hessian] = inertia_rotation_gradient_hessian(omega, q_n, omega_n, dt, masses, R_p);
+    const Mat33 I_hat = body_second_moment(masses, R_p);
+    const auto [exact_gradient, exact_hessian] = inertia_rotation_gradient_hessian(omega, q_n, q_nm1, omega_n, dt, I_hat);
     std::vector<double> gradient_errors(kConvergenceHs.size());
     std::vector<double> hessian_errors(kConvergenceHs.size());
 
@@ -570,12 +574,12 @@ TEST(RigidBodyIPCInertialEnergy, OmegaDerivativesConvergeQuadratically) {
         for (int beta = 0; beta < 3; ++beta) {
             Vec3 step = Vec3::Zero();
             step[beta] = h;
-            const double plus_energy = incremental_potential_energy(x_com, omega + step, x_com_n, v_com_n, q_n, omega_n, dt, total_mass, masses, R_p);
-            const double minus_energy = incremental_potential_energy(x_com, omega - step, x_com_n, v_com_n, q_n, omega_n, dt, total_mass, masses, R_p);
+            const double plus_energy = incremental_potential_energy(x_com, omega + step, x_com_n, v_com_n, q_n, q_nm1, omega_n, dt, total_mass, I_hat);
+            const double minus_energy = incremental_potential_energy(x_com, omega - step, x_com_n, v_com_n, q_n, q_nm1, omega_n, dt, total_mass, I_hat);
             gradient_fd[beta] = (plus_energy - minus_energy) / (2.0 * h);
 
-            const Vec3 plus_gradient = inertia_rotation_gradient_hessian(omega + step, q_n, omega_n, dt, masses, R_p).first;
-            const Vec3 minus_gradient = inertia_rotation_gradient_hessian(omega - step, q_n, omega_n, dt, masses, R_p).first;
+            const Vec3 plus_gradient = inertia_rotation_gradient_hessian(omega + step, q_n, q_nm1, omega_n, dt, I_hat).first;
+            const Vec3 minus_gradient = inertia_rotation_gradient_hessian(omega - step, q_n, q_nm1, omega_n, dt, I_hat).first;
             hessian_fd.col(beta) = (plus_gradient - minus_gradient) / (2.0 * h);
         }
 
@@ -599,26 +603,33 @@ TEST(RigidBodyIPCInertialEnergy, ReducedEnergyMatchesFullNodalMassQuadratic) {
     const Vec3 x_com_n(-0.13, 0.27, -0.22);
     const Vec3 v_com_n(1.7, -0.6, 0.4);
     const Vec4 q_n = quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
+    const Vec4 q_nm1 = quaternion_normalize(Vec4(0.7, -0.1, 0.5, 0.2));
     const Vec3 omega(0.6, -0.3, 0.7);
     const Vec3 omega_n(-0.2, 0.5, 0.4);
     constexpr double dt = 0.31;
+    const Mat33 I_hat = body_second_moment(masses, R_p);
 
     ASSERT_TRUE((masses[0] * R_p[0] + masses[1] * R_p[1] + masses[2] * R_p[2]).isZero(1.0e-14));
 
     const Vec4 q = quaternion_from_angular_velocity(q_n, omega, dt);
+    const Vec4 q_dot_n = quaternion_time_derivative(q_nm1, omega_n);
     double full_nodal_energy = 0.0;
 
     for (std::size_t p = 0; p < R_p.size(); ++p) {
         const Vec3 r_p = quaternion_rotate(q, R_p[p]);
         const Vec3 r_p_n = quaternion_rotate(q_n, R_p[p]);
+        const Vec4 R_p_quaternion(0.0, R_p[p][0], R_p[p][1], R_p[p][2]);
+        const Vec4 first_term = quaternion_multiply(quaternion_multiply(q_dot_n, R_p_quaternion), quaternion_conjugate(q_n));
+        const Vec4 second_term = quaternion_multiply(quaternion_multiply(q_n, R_p_quaternion), quaternion_conjugate(q_dot_n));
+        const Vec3 r_dot_p_n = (first_term + second_term).tail<3>();
         const Vec3 x_p = x_com + r_p;
-        const Vec3 v_p_n = v_com_n + omega_n.cross(r_p_n);
+        const Vec3 v_p_n = v_com_n + r_dot_p_n;
         const Vec3 x_hat_p = x_com_n + r_p_n + dt * v_p_n;
         const Vec3 residual = x_p - x_hat_p;
         full_nodal_energy += 0.5 * masses[p] * residual.squaredNorm();
     }
 
-    const double reduced_energy = incremental_potential_energy(x_com, omega, x_com_n, v_com_n, q_n, omega_n, dt, total_mass, masses, R_p);
+    const double reduced_energy = incremental_potential_energy(x_com, omega, x_com_n, v_com_n, q_n, q_nm1, omega_n, dt, total_mass, I_hat);
 
     EXPECT_NEAR(reduced_energy, full_nodal_energy, 1.0e-14);
 }

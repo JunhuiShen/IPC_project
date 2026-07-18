@@ -6,103 +6,65 @@ namespace {
 
 constexpr double kSmallAngleThreshold = 1.0e-4;
 
-// r_hat_p = r_p(q_n) + dt r_dot_p^n, where r_p(q_n) = vec(q_n * (0, R_p) * (q_n)^*) and
-// r_dot_p^n = vec(q_dot_n * (0, R_p) * (q_n)^* + q_n * (0, R_p) * (q_dot_n)^*).
-Vec3 build_rhat(const Vec3& R_p, const Vec4& q_n, const Vec4& q_dot_n, double dt) {
-    const Vec4 R_p_quaternion(0.0, R_p[0], R_p[1], R_p[2]);
-    const Vec4 first_term = quaternion_multiply(quaternion_multiply(q_dot_n, R_p_quaternion), quaternion_conjugate(q_n));
-    const Vec4 second_term = quaternion_multiply(quaternion_multiply(q_n, R_p_quaternion), quaternion_conjugate(q_dot_n));
-    const Vec3 r_dot_p_n = (first_term + second_term).tail<3>();
-    return quaternion_rotate(q_n, R_p) + dt * r_dot_p_n;
-}
-
-// (J_p)_{i,0} = 2 q_s R_{p,i} + 2 epsilon_{ijk} q_j R_{p,k} and (J_p)_{i,l} = 2 (-q_l R_{p,i} + delta_{il} q_j R_{p,j} + q_i R_{p,l} + q_s epsilon_{ilk} R_{p,k}).
-Mat34 build_Jp(const Vec3& R_p, const Vec4& q) {
+// G_alpha(q) = partial R(q) / partial q_alpha, where G_0 = 2 q_s I_3 + 2 [q_v]_x and
+// G_l = -2 q_l I_3 + 2 e_l q_v^T + 2 q_v e_l^T + 2 q_s [e_l]_x for l = 1, 2, 3.
+std::array<Mat33, 4> rotation_matrix_gradient(const Vec4& q) {
     const double q_s = q[0];
-    const Vec3 q_v(q[1], q[2], q[3]);
-    Mat34 J_p = Mat34::Zero();
-
-    for (int i = 0; i < 3; ++i) {
-        J_p(i, 0) = 2.0 * q_s * R_p[i];
-        for (int j = 0; j < 3; ++j) {
-            for (int k = 0; k < 3; ++k) {
-                J_p(i, 0) += 2.0 * levi_civita(i, j, k) * q_v[j] * R_p[k];
-            }
-        }
-
-        for (int l = 0; l < 3; ++l) {
-            J_p(i, l + 1) = 2.0 * (-q_v[l] * R_p[i] + q_v[i] * R_p[l]);
-            for (int j = 0; j < 3; ++j) {
-                J_p(i, l + 1) += 2.0 * kronecker_delta(i, l) * q_v[j] * R_p[j];
-            }
-            for (int k = 0; k < 3; ++k) {
-                J_p(i, l + 1) += 2.0 * q_s * levi_civita(i, l, k) * R_p[k];
-            }
-        }
+    const Vec3 q_v = q.tail<3>();
+    std::array<Mat33, 4> G;
+    G[0] = 2.0 * q_s * Mat33::Identity() + 2.0 * skew_matrix(q_v);
+    for (int l = 0; l < 3; ++l) {
+        const Vec3 e_l = Vec3::Unit(l);
+        G[l + 1] = -2.0 * q_v[l] * Mat33::Identity() + 2.0 * e_l * q_v.transpose() + 2.0 * q_v * e_l.transpose() + 2.0 * q_s * skew_matrix(e_l);
     }
-    return J_p;
+    return G;
 }
 
-// B_p[i] is the 4x4 matrix with entries (B_p)_{i,alpha,beta} = partial^2 b_{p,i} / (partial q_alpha partial q_beta).
-std::array<Mat44, 3> build_Bp(const Vec3& R_p) {
-    std::array<Mat44, 3> B_p = {Mat44::Zero(), Mat44::Zero(), Mat44::Zero()};
-
-    for (int i = 0; i < 3; ++i) {
-        B_p[i](0, 0) = 2.0 * R_p[i];
-
-        for (int l = 0; l < 3; ++l) {
-            for (int k = 0; k < 3; ++k) {
-                const double value = 2.0 * levi_civita(i, l, k) * R_p[k];
-                B_p[i](0, l + 1) += value;
-                B_p[i](l + 1, 0) += value;
-            }
-        }
-
-        for (int l = 0; l < 3; ++l) {
-            for (int m = 0; m < 3; ++m) {
-                B_p[i](l + 1, m + 1) = 2.0 * (-kronecker_delta(l, m) * R_p[i] + kronecker_delta(i, l) * R_p[m] + kronecker_delta(i, m) * R_p[l]);
-            }
-        }
-    }
-    return B_p;
+// R(q) = (q_s^2 - q_v^T q_v) I_3 + 2 q_v q_v^T + 2 q_s [q_v]_x.
+// D = R(q(omega)) - R_hat, where R_hat = R(q_n) + dt R_dot_n,
+// R_dot_n = G_alpha(q_n) q_dot_n_alpha, and q_dot_n = 1/2 (0, omega_n) * q_nm1.
+Mat33 rotation_residual(const Vec3& omega, const Vec4& q_n, const Vec4& q_nm1, const Vec3& omega_n, double dt) {
+    const auto rotation_matrix = [](const Vec4& q) -> Mat33 {
+        const double q_s = q[0];
+        const Vec3 q_v = q.tail<3>();
+        return (q_s * q_s - q_v.squaredNorm()) * Mat33::Identity() + 2.0 * q_v * q_v.transpose() + 2.0 * q_s * skew_matrix(q_v);
+    };
+    const Vec4 q = quaternion_from_angular_velocity(q_n, omega, dt);
+    const Vec4 q_dot_n = quaternion_time_derivative(q_nm1, omega_n);
+    const std::array<Mat33, 4> G_n = rotation_matrix_gradient(q_n);
+    Mat33 R_dot_n = Mat33::Zero();
+    for (int alpha = 0; alpha < 4; ++alpha)
+        R_dot_n += q_dot_n[alpha] * G_n[alpha];
+    return rotation_matrix(q) - rotation_matrix(q_n) - dt * R_dot_n;
 }
 
-// Assemble g_q and H_qq from b_p = r_p(q(omega)) - r_hat_p, where r_p(q) = vec(q * (0, R_p) * q^*) and r_hat_p = r_p(q_n) + dt r_dot_p^n.
-std::pair<Vec4, Mat44> quaternion_inertia_derivatives(const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, double dt, const std::vector<double>& masses, const std::vector<Vec3>& R_p) {
+// For E_q = 1/2 tr(D I_hat D^T), (g_q)_alpha = tr(D^T G_alpha I_hat) and
+// (H_qq)_{alpha,beta} = tr(G_alpha^T G_beta I_hat) + tr(D^T K_{alpha,beta} I_hat).
+std::pair<Vec4, Mat44> quaternion_inertia_derivatives(const Vec3& omega, const Vec4& q_n, const Vec4& q_nm1, const Vec3& omega_n, double dt, const Mat33& I_hat) {
     Vec4 g_q = Vec4::Zero(); // g_q = partial E_q / partial q.
     Mat44 H_qq = Mat44::Zero(); // H_qq = partial^2 E_q / partial q^2.
-    // q = q(omega) is the candidate unit quaternion at time n+1.
     const Vec4 q = quaternion_from_angular_velocity(q_n, omega, dt);
-    // q_dot_n = 1/2 (0, omega_n) * q_n is the quaternion velocity in the note.
-    const Vec4 q_dot_n = quaternion_time_derivative(q_n, omega_n);
+    const Mat33 D = rotation_residual(omega, q_n, q_nm1, omega_n, dt); // D(q) R_p = b_p.
+    const std::array<Mat33, 4> G = rotation_matrix_gradient(q); // G_alpha = partial D / partial q_alpha.
 
-    for (std::size_t p = 0; p < R_p.size(); ++p) {
-        // r_p = vec(q * (0, R_p) * q^*)
-        const Vec3 r_p = quaternion_rotate(q, R_p[p]);
-        // r_hat_p = r_p(q_n) + dt r_dot_p^n is fixed
-        const Vec3 r_hat_p = build_rhat(R_p[p], q_n, q_dot_n, dt);
-        // b_p = r_p - r_hat_p
-        const Vec3 b_p = r_p - r_hat_p;
-        // J_p = partial b_p / partial q is assembled directly from the indexed formula above.
-        const Mat34 J_p = build_Jp(R_p[p], q);
-
-        // (g_q)_alpha = sum_p m_p b_{p,i} (J_p)_{i,alpha}.
-        for (int alpha = 0; alpha < 4; ++alpha) {
-            for (int i = 0; i < 3; ++i) {
-                g_q[alpha] += masses[p] * b_p[i] * J_p(i, alpha);
+    for (int alpha = 0; alpha < 4; ++alpha) {
+        g_q[alpha] = (D.transpose() * G[alpha] * I_hat).trace();
+        for (int beta = 0; beta < 4; ++beta) {
+            // K_00 = 2 I_3, K_0l = K_l0 = 2 [e_l]_x, and
+            // K_lm = -2 delta_lm I_3 + 2 e_l e_m^T + 2 e_m e_l^T.
+            Mat33 K_alpha_beta;
+            if (alpha == 0 && beta == 0) {
+                K_alpha_beta = 2.0 * Mat33::Identity();
+            } else if (alpha == 0 || beta == 0) {
+                K_alpha_beta = 2.0 * skew_matrix(Vec3::Unit((alpha == 0 ? beta : alpha) - 1));
+            } else {
+                const int l = alpha - 1;
+                const int m = beta - 1;
+                const Vec3 e_l = Vec3::Unit(l);
+                const Vec3 e_m = Vec3::Unit(m);
+                K_alpha_beta = -2.0 * kronecker_delta(l, m) * Mat33::Identity() + 2.0 * e_l * e_m.transpose() + 2.0 * e_m * e_l.transpose();
             }
-        }
-
-        // B_p[i] = partial^2 b_{p,i} / partial q^2 is assembled directly from the indexed piecewise formula above.
-        const std::array<Mat44, 3> B_p = build_Bp(R_p[p]);
-
-        // (H_qq)_{alpha,beta} = sum_p m_p [(J_p)_{i,alpha} (J_p)_{i,beta}  + b_{p,i} (B_p)_{i,alpha,beta} ].
-        for (int alpha = 0; alpha < 4; ++alpha) {
-            for (int beta = 0; beta < 4; ++beta) {
-                for (int i = 0; i < 3; ++i) {
-                    H_qq(alpha, beta) += masses[p] * (J_p(i, alpha) * J_p(i, beta) + b_p[i] * B_p[i](alpha, beta));
-                }
-            }
+            H_qq(alpha, beta) = (G[alpha].transpose() * G[beta] * I_hat).trace() + (D.transpose() * K_alpha_beta * I_hat).trace();
         }
     }
 
@@ -293,9 +255,19 @@ std::array<Mat44, 3> d2x_dq2(const Vec3& X_centered) {
     return H;
 }
 
-// E_in = 1/2 m ||x_com - x_com_n - dt v_com_n||^2 + 1/2 sum_p m_p ||r_p(q(omega)) - r_hat_p||^2.
-double incremental_potential_energy(const Vec3& x_com, const Vec3& omega, const Vec3& x_com_n, const Vec3& v_com_n, const Vec4& q_n, const Vec3& omega_n, double dt, double total_mass, const std::vector<double>& masses, const std::vector<Vec3>& R_p) {
+// I_hat = sum_p m_p R_p R_p^T is constant in the body frame and is precomputed once.
+Mat33 body_second_moment(const std::vector<double>& masses, const std::vector<Vec3>& R_p) {
+    assert(masses.size() == R_p.size());
+    Mat33 I_hat = Mat33::Zero();
+    for (std::size_t p = 0; p < R_p.size(); ++p)
+        I_hat += masses[p] * R_p[p] * R_p[p].transpose();
+    return I_hat;
+}
+
+// E_in = 1/2 m ||x_com - x_com_n - dt v_com_n||^2 + 1/2 tr(D I_hat D^T).
+double incremental_potential_energy(const Vec3& x_com, const Vec3& omega, const Vec3& x_com_n, const Vec3& v_com_n, const Vec4& q_n, const Vec4& q_nm1, const Vec3& omega_n, double dt, double total_mass, const Mat33& I_hat) {
     assert(std::abs(q_n.squaredNorm() - 1.0) < 1.0e-10 && "q_n must be a unit quaternion");
+    assert(std::abs(q_nm1.squaredNorm() - 1.0) < 1.0e-10 && "q_nm1 must be a unit quaternion");
     // a = x_com - x_hat_com = x_com - x_com_n - dt v_com_n is the translational inertial residual.
     const Vec3 a = x_com - x_com_n - dt * v_com_n;
     double energy = 0.0;
@@ -304,18 +276,8 @@ double incremental_potential_energy(const Vec3& x_com, const Vec3& omega, const 
     for (int i = 0; i < 3; ++i)
         energy += 0.5 * total_mass * a[i] * a[i];
 
-    const Vec4 q = quaternion_from_angular_velocity(q_n, omega, dt); // Candidate q^{n+1} = q(omega).
-    const Vec4 q_dot_n = quaternion_time_derivative(q_n, omega_n); // q_dot_n = 1/2 (0, omega_n) * q_n.
-
-    // E_q = (1/2) sum_p m_p b_{p,i} b_{p,i}.
-    for (std::size_t p = 0; p < R_p.size(); ++p) {
-        // r_p, r_hat_p, and b_p are the candidate offset, predicted offset, and their residual.
-        const Vec3 r_p = quaternion_rotate(q, R_p[p]);
-        const Vec3 r_hat_p = build_rhat(R_p[p], q_n, q_dot_n, dt);
-        const Vec3 b_p = r_p - r_hat_p;
-        for (int i = 0; i < 3; ++i)
-            energy += 0.5 * masses[p] * b_p[i] * b_p[i];
-    }
+    const Mat33 D = rotation_residual(omega, q_n, q_nm1, omega_n, dt); // D = R(q) - R_hat.
+    energy += 0.5 * (D * I_hat * D.transpose()).trace(); // E_q = 1/2 tr(D I_hat D^T).
 
     return energy;
 }
@@ -345,13 +307,11 @@ Mat33 inertia_translation_hessian(double total_mass) {
 }
 
 // g_omega = J_qomega^T g_q and H_omegaomega = J_qomega^T H_qq J_qomega + sum_alpha (g_q)_alpha H_omegaomega^{q_alpha}.
-std::pair<Vec3, Mat33> inertia_rotation_gradient_hessian(const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, double dt, const std::vector<double>& masses, const std::vector<Vec3>& R_p) {
+std::pair<Vec3, Mat33> inertia_rotation_gradient_hessian(const Vec3& omega, const Vec4& q_n, const Vec4& q_nm1, const Vec3& omega_n, double dt, const Mat33& I_hat) {
     assert(std::abs(q_n.squaredNorm() - 1.0) < 1.0e-10 && "q_n must be a unit quaternion");
-    // H_qq is exact and includes the residual-curvature B_p term.
-    const auto [g_q, H_qq] = quaternion_inertia_derivatives(omega, q_n, omega_n, dt, masses, R_p);
-    // J_qomega = partial q / partial omega maps the ambient quaternion derivatives to omega coordinates.
+    assert(std::abs(q_nm1.squaredNorm() - 1.0) < 1.0e-10 && "q_nm1 must be a unit quaternion");
+    const auto [g_q, H_qq] = quaternion_inertia_derivatives(omega, q_n, q_nm1, omega_n, dt, I_hat);
     const Mat43 J_qomega = dq_domega(q_n, omega, dt);
-    // H_qomega[alpha] = partial^2 q_alpha / partial omega^2 supplies the second-order chain-rule term.
     const std::array<Mat33, 4> H_qomega = d2q_domega2(q_n, omega, dt);
     Vec3 gradient = Vec3::Zero();
     Mat33 hessian = Mat33::Zero();

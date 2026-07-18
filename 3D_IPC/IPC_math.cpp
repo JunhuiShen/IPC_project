@@ -12,6 +12,18 @@ int levi_civita(int i, int j, int k) {
     return ((i == 0 && j == 1 && k == 2) || (i == 1 && j == 2 && k == 0) || (i == 2 && j == 0 && k == 1)) ? 1 : -1;
 }
 
+Mat33 skew_matrix(const Vec3& v) {
+    Mat33 result = Mat33::Zero();
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            for (int k = 0; k < 3; ++k) {
+                result(i, j) -= levi_civita(i, j, k) * v[k];
+            }
+        }
+    }
+    return result;
+}
+
 Mat33 matrix3d_inverse(const Mat33& H) {
 
     double det = H(0,0)*(H(1,1)*H(2,2) - H(1,2)*H(2,1))

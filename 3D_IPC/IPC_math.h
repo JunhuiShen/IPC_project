@@ -35,6 +35,8 @@ double kronecker_delta(int i, int j);
 
 int levi_civita(int i, int j, int k);
 
+Mat33 skew_matrix(const Vec3& v);
+
 Mat33 matrix3d_inverse(const Mat33& H);
 
 TriangleDef add_scale(const TriangleDef& a, const TriangleDef& b, double s);
