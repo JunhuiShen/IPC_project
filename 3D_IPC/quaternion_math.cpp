@@ -1,13 +1,12 @@
 #include "quaternion_math.h"
 #include "algebra/algebra.h"
-#include <cassert>
 #include <cmath>
 #include <stdexcept>
 
 int quaternion_product_tensor(int alpha, int beta, int gamma) {
-    assert(0 <= alpha && alpha < 4);
-    assert(0 <= beta  && beta  < 4);
-    assert(0 <= gamma && gamma < 4);
+    Rigid_Body::Assert((0 <= alpha) && (alpha <= 3), "MathTools: Invalid first argument for Quaternion Product Tensor.");
+    Rigid_Body::Assert((0 <= beta) && (beta <= 3), "MathTools: Invalid second argument for Quaternion Product Tensor.");
+    Rigid_Body::Assert((0 <= gamma) && (gamma <= 3), "MathTools: Invalid third argument for Quaternion Product Tensor.");
 
     if (alpha == 0 && beta == 0 && gamma == 0) return 1;
     if (alpha == 0 && beta == gamma && beta != 0) return -1;
@@ -20,6 +19,19 @@ int quaternion_product_tensor(int alpha, int beta, int gamma) {
     if (alpha == 2 && beta == 1 && gamma == 3) return -1;
     if (alpha == 3 && beta == 2 && gamma == 1) return -1;
     return 0;
+}
+
+
+int QPT_QPT(int alpha, int beta, int delta, int epsilon) {
+    Rigid_Body::Assert((0 <= alpha) && (alpha <= 3), "MathTools: Invalid first argument for Quaternion Product Tensor.");
+    Rigid_Body::Assert((0 <= beta) && (beta <= 3), "MathTools: Invalid second argument for Quaternion Product Tensor.");
+    Rigid_Body::Assert((0 <= delta) && (delta <= 3), "MathTools: Invalid third argument for Quaternion Product Tensor.");
+    Rigid_Body::Assert((0 <= epsilon) && (epsilon <= 3), "MathTools: Invalid fourth argument for Quaternion Product Tensor.");
+    int result = 0;
+    for (int gamma = 0; gamma < 4; gamma++) {
+        result += quaternion_product_tensor(alpha, beta, gamma) * quaternion_product_tensor(gamma, delta, epsilon);
+    }
+    return result;
 }
 
 Vec4 quaternion_multiply(const Vec4& a, const Vec4& b) {

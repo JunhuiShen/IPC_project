@@ -118,10 +118,11 @@ struct DeformedState {
     std::vector<Vec3> deformed_positions;
     std::vector<Vec3> velocities;
 
-    Vec3 x_com = Vec3::Zero(); // center of mass
-    Vec3 v_com = Vec3::Zero(); // center-of-mass velocity
-    Vec4 q = Vec4(1.0, 0.0, 0.0, 0.0); // quaternion
-    Vec3 omega = Vec3::Zero(); // angular velocity
+    // Rigid Bodies
+    std::vector<Vec3> x_coms; // center of mass position for each rb
+    std::vector<Vec3> v_coms; // center of mass velocity for each rb
+    std::vector<Vec4> orientations; // orientation stored as quaternion
+    std::vector<Vec3> omega; // angular velocity
 };
 
 // Discrete-shell hinge: two triangles sharing an edge.
@@ -144,6 +145,11 @@ struct RefMesh {
     std::vector<Hinge> hinges;
     VertexHingeMap hinge_adj;
     size_t num_positions;
+
+    // Rigid Bodies
+    std::vector<Vec3> ref_positions; // array of particles in material space for each rb
+    std::vector<double> total_mass; // total_mass for each rb
+    std::vector<Mat16> inertia_tensor_C4; // IPC inertia tensor for each rb
 
     inline void initialize(const std::vector<Vec2>& X, const std::vector<Vec3>& x_rest){
         num_positions = X.size();

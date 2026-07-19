@@ -634,4 +634,117 @@ TEST(RigidBodyIPCInertialEnergy, ReducedEnergyMatchesFullNodalMassQuadratic) {
     EXPECT_NEAR(reduced_energy, full_nodal_energy, 1.0e-14);
 }
 
+TEST(RigidBodyIPCTraditionalInertialEnergy, OmegaDerivativesConvergeWithCenteredDifferences) {
+    const std::vector<double> masses = {1.2, 0.7, 1.9};
+    const double total_mass = 3.8;
+    const std::vector<Vec3> R_p = {
+        Vec3(-0.8, 0.35, 0.2),
+        Vec3(0.45, -0.55, 0.9),
+        Vec3(0.3394736842105263, -0.0184210526315789, -0.4578947368421053),
+    };
+    const Vec3 x_com_n(-0.13, 0.27, -0.22);
+    const Vec3 v_com_n(1.7, -0.6, 0.4);
+    constexpr double dt = 0.31;
+    const Vec3 x_com = x_com_n + dt * v_com_n;
+    const Vec4 q_n = quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
+    const Vec3 omega(0.6, -0.3, 0.7);
+    const Vec3 omega_n(-0.2, 0.5, 0.4);
+    const Mat16 IC4 = InertiaC4(R_p, masses);
+
+    auto orientation = [&](const Vec3& w) {
+        return Rigid_Body::ALGEBRA::QuaternionMultiply(
+            Rigid_Body::ALGEBRA::QuaternionFromVector(dt * w), q_n);
+    };
+    auto energy = [&](const Vec3& w) {
+        return incremental_potential_energy(
+            x_com, orientation(w), x_com_n, v_com_n,
+            omega_n, q_n, dt, total_mass, IC4);
+    };
+    auto gradient = [&](const Vec3& w) {
+        return incremental_potential_orientation_gradient(
+            orientation(w), w, q_n, omega_n, IC4, dt);
+    };
+
+    Vec3 exact_gradient = Vec3::Zero();
+    Mat33 exact_hessian = Mat33::Zero();
+    incremental_potential_orientation_gradient_hessian(
+        orientation(omega), omega, q_n, omega_n, IC4, dt,
+        exact_hessian, exact_gradient);
+
+    EXPECT_TRUE(exact_gradient.isApprox(gradient(omega), 1.0e-12));
+    EXPECT_TRUE(exact_hessian.isApprox(exact_hessian.transpose(), 1.0e-12));
+
+    std::vector<double> gradient_errors(kConvergenceHs.size());
+    std::vector<double> hessian_errors(kConvergenceHs.size());
+    for (std::size_t hi = 0; hi < kConvergenceHs.size(); ++hi) {
+        const double h = kConvergenceHs[hi];
+        Vec3 gradient_fd = Vec3::Zero();
+        Mat33 hessian_fd = Mat33::Zero();
+
+        for (int beta = 0; beta < 3; ++beta) {
+            Vec3 step = Vec3::Zero();
+            step[beta] = h;
+            gradient_fd[beta] =
+                (energy(omega + step) - energy(omega - step)) / (2.0 * h);
+            hessian_fd.col(beta) =
+                (gradient(omega + step) - gradient(omega - step)) / (2.0 * h);
+        }
+
+        gradient_errors[hi] = (gradient_fd - exact_gradient).norm();
+        hessian_errors[hi] = (hessian_fd - exact_hessian).norm();
+    }
+
+    expect_quadratic_convergence(kConvergenceHs, gradient_errors);
+    expect_quadratic_convergence(kConvergenceHs, hessian_errors);
+}
+
+TEST(RigidBodyIPCTraditionalInertialEnergy, TranslationDerivativesMatchCenteredDifferences) {
+    const std::vector<double> masses = {1.2, 0.7, 1.9};
+    const std::vector<Vec3> R_p = {
+        Vec3(-0.8, 0.35, 0.2),
+        Vec3(0.45, -0.55, 0.9),
+        Vec3(0.3394736842105263, -0.0184210526315789, -0.4578947368421053),
+    };
+    const double total_mass = 3.8;
+    const Vec3 x_com(0.31, -0.42, 0.18);
+    const Vec3 x_com_n(-0.13, 0.27, -0.22);
+    const Vec3 v_com_n(1.7, -0.6, 0.4);
+    const Vec4 q_n = quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
+    const Vec3 omega(0.6, -0.3, 0.7);
+    const Vec3 omega_n(-0.2, 0.5, 0.4);
+    constexpr double dt = 0.31;
+    constexpr double h = 1.0e-5;
+    const Mat16 IC4 = InertiaC4(R_p, masses);
+    const Vec4 q = Rigid_Body::ALGEBRA::QuaternionMultiply(
+        Rigid_Body::ALGEBRA::QuaternionFromVector(dt * omega), q_n);
+
+    auto energy = [&](const Vec3& center) {
+        return incremental_potential_energy(
+            center, q, x_com_n, v_com_n,
+            omega_n, q_n, dt, total_mass, IC4);
+    };
+    auto gradient = [&](const Vec3& center) {
+        return incremental_potential_translation_gradient(
+            center, x_com_n, v_com_n, total_mass, dt);
+    };
+
+    const Vec3 exact_gradient = gradient(x_com);
+    const Mat33 exact_hessian =
+        incremental_potential_translation_hessian(total_mass);
+    Vec3 gradient_fd = Vec3::Zero();
+    Mat33 hessian_fd = Mat33::Zero();
+
+    for (int alpha = 0; alpha < 3; ++alpha) {
+        Vec3 step = Vec3::Zero();
+        step[alpha] = h;
+        gradient_fd[alpha] =
+            (energy(x_com + step) - energy(x_com - step)) / (2.0 * h);
+        hessian_fd.col(alpha) =
+            (gradient(x_com + step) - gradient(x_com - step)) / (2.0 * h);
+    }
+
+    EXPECT_TRUE(gradient_fd.isApprox(exact_gradient, 1.0e-9));
+    EXPECT_TRUE(hessian_fd.isApprox(exact_hessian, 1.0e-9));
+}
+
 }  // namespace

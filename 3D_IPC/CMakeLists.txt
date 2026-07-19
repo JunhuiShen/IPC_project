@@ -77,6 +77,7 @@ add_library(corotated_energy_lib
     ogc_trust_region.cpp
     visualization.cpp
     rigid_body.cpp
+    rigid_body_ipc.cpp
 )
 
 target_link_libraries(corotated_energy_lib

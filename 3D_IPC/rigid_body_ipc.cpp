@@ -1,6 +1,7 @@
 #include "rigid_body_ipc.h"
 #include <cassert>
 #include <cmath>
+#include <algebra/algebra.h>
 
 namespace {
 
@@ -418,4 +419,208 @@ Mat33 rigid_node_omega_hessian(const Vec3& gx, const Mat33& Hx, const Mat33& dx_
         omega_hessian += gx[c] * d2x_domega2[c];
     }
     return 0.5 * (omega_hessian + omega_hessian.transpose());
+}
+
+
+Mat16 InertiaC4(const std::vector<Vec3>& R, const std::vector<double>& nodal_mass){
+    // R material space position
+    Mat16 IC4 = Mat16::Zero();
+    Mat44 I_hat = Mat44::Zero();
+    for(size_t i = 0; i < R.size(); i++){
+        for(size_t alpha = 1; alpha < 4; alpha++){
+            for(size_t beta = 1; beta < 4; beta++){
+                I_hat(alpha,beta) += nodal_mass[i] * R[i][alpha-1] * R[i][beta-1];
+            }
+        }
+    }
+
+    for(size_t beta = 0; beta < 4; beta++){
+        for(size_t sigma = 0; sigma < 4; sigma++){
+            for(size_t epsilon = 0; epsilon < 4; epsilon++){
+                for(size_t theta = 0; theta < 4; theta++){
+                    for(size_t alpha = 1; alpha < 4; alpha++){
+                        for(size_t delta = 1; delta < 4; delta++){
+                            for(size_t rho = 1; rho < 4; rho++){
+                                IC4(beta * 4 + sigma, epsilon * 4 + theta) +=
+                                    I_hat(delta, rho)
+                                    * QPT_QPT(alpha, beta, delta, epsilon)
+                                    * QPT_QPT(alpha, sigma, rho, theta);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return IC4;
+}
+
+double incremental_potential_energy(const Vec3& x_com, const Vec4& q, const Vec3& x_com_n,
+                                    const Vec3& v_com_n, const Vec3& omega_n, const Vec4& q_n,
+                                    const double dt, const double total_mass, const Mat16& IC4
+                                    ){
+                                        double IPE = double(0);
+                                        Vec3 x_hat_com_n = x_com_n + dt * v_com_n;
+                                        // linear part
+                                        IPE += double(.5) * total_mass * (x_com - x_hat_com_n).squaredNorm();
+
+                                        // angular part
+                                        Vec4 q_inv = Rigid_Body::ALGEBRA::ConjugateQuaternion(q);
+                                        Vec4 q_n_inv = Rigid_Body::ALGEBRA::ConjugateQuaternion(q_n);
+                                        Vec3 angle = (double(-1)*dt) * omega_n;
+                                        Vec4 omega_n_4d = Vec4(double(0), omega_n[0], omega_n[1], omega_n[2]);
+                                        Vec4 q_nm1 = Rigid_Body::ALGEBRA::QuaternionMultiply(
+                                            Rigid_Body::ALGEBRA::QuaternionFromVector(angle), q_n);
+                                        Vec4 q_n_dot = double(.5) * Rigid_Body::ALGEBRA::QuaternionMultiply(omega_n_4d,q_nm1);
+                                        Vec4 q_n_inv_dot = double(-1) * Rigid_Body::ALGEBRA::QuaternionMultiply(q_n_inv, Rigid_Body::ALGEBRA::QuaternionMultiply(q_n_dot,q_n_inv));
+
+                                        for (size_t beta = 0; beta < 4; beta++){
+                                            for(size_t sigma = 0; sigma < 4; sigma++){
+                                                for(size_t epsilon = 0; epsilon < 4; epsilon++){
+                                                    for(size_t theta = 0; theta < 4; theta++){
+                                                        IPE += IC4(beta*4 + sigma, epsilon * 4 + theta) * q[beta] * q_inv[epsilon] *
+                                                        (double(.5) * q[sigma] * q_inv[theta]
+                                                        - q_n[sigma] * q_n_inv[theta]
+                                                        - dt * q_n_dot[sigma] * q_n_inv[theta]
+                                                        - dt * q_n[sigma] * q_n_inv_dot[theta]);
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // angular part constant terms
+                                        for (size_t beta = 0; beta < 4; beta++){
+                                            for(size_t sigma = 0; sigma < 4; sigma++){
+                                                for(size_t epsilon = 0; epsilon < 4; epsilon++){
+                                                    for(size_t theta = 0; theta < 4; theta++){
+                                                        IPE += IC4(beta*4 + sigma, epsilon * 4 + theta)*
+                                                        (dt * q_n[beta] * q_n_inv[epsilon] * q_n_dot[sigma] * q_n_inv[theta]
+                                                        + dt * q_n[beta] * q_n_inv_dot[epsilon] * q_n[sigma] * q_n_inv_dot[theta]
+                                                        + dt * dt * q_n_dot[beta] * q_n_inv[epsilon] * q_n[sigma] * q_n_inv_dot[theta]
+                                                        + double(.5) * q_n[beta] * q_n_inv[epsilon] * q_n[sigma] * q_n_inv[theta]
+                                                        + double(.5) * dt * dt * q_n_dot[beta] * q_n_inv[epsilon] * q_n_dot[sigma] * q_n_inv[theta]
+                                                        + double(.5) * dt * dt * q_n[beta] * q_n_inv_dot[epsilon] * q_n[sigma] * q_n_inv_dot[theta]);
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        return IPE;
+                                    }
+
+Vec3 incremental_potential_translation_gradient(const Vec3& x_com, const Vec3& x_com_n, const Vec3& v_com_n, const double total_mass,const double dt){
+    Vec3 g = Vec3::Zero();
+    Vec3 x_hat_com_n = x_com_n + dt * v_com_n;
+    g = total_mass * (x_com - x_hat_com_n);
+    return g;
+}
+
+Mat33 incremental_potential_translation_hessian(const double total_mass){
+    Mat33 H = total_mass * Mat33::Identity();
+    return H;
+}
+
+Vec3 incremental_potential_orientation_gradient(const Vec4& q, const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, const Mat16& IC4, const double dt){
+    Vec4 g_q = Vec4::Zero();
+
+    Eigen::Matrix<double,4,3> dqdw = Rigid_Body::ALGEBRA::DqDw(dt, omega, q_n);
+    Vec4 q_inv = Rigid_Body::ALGEBRA::ConjugateQuaternion(q);
+    Vec4 q_n_inv = Rigid_Body::ALGEBRA::ConjugateQuaternion(q_n);
+    Vec3 angle = (double(-1)*dt) * omega_n;
+    Vec4 omega_n_4d = Vec4(double(0), omega_n[0], omega_n[1], omega_n[2]);
+    Vec4 q_nm1 = Rigid_Body::ALGEBRA::QuaternionMultiply(
+        Rigid_Body::ALGEBRA::QuaternionFromVector(angle), q_n);
+    Vec4 q_n_dot = double(.5) * Rigid_Body::ALGEBRA::QuaternionMultiply(omega_n_4d,q_nm1);
+    Vec4 q_n_inv_dot = double(-1) * Rigid_Body::ALGEBRA::QuaternionMultiply(q_n_inv, Rigid_Body::ALGEBRA::QuaternionMultiply(q_n_dot,q_n_inv));
+
+    Mat44 Dq = Mat44::Identity(), Dq_inv;
+    Dq_inv = -Dq;
+    Dq_inv(0,0) = double(1); // Diag(Dq_inv) = [1,-1,-1,-1]
+
+    for(size_t alpha = 0; alpha < 4; alpha++){
+        for(size_t beta = 0; beta < 4; beta++){
+            for(size_t sigma = 0; sigma < 4; sigma++){
+                for(size_t epsilon = 0; epsilon < 4; epsilon++){
+                    for(size_t theta = 0; theta < 4; theta++){
+                        g_q[alpha] += IC4(beta*4 + sigma, epsilon*4 + theta) * (Dq(alpha,beta) * q_inv[epsilon] + q[beta] * Dq_inv(alpha,epsilon))
+                        * (q[sigma] * q_inv[theta] - q_n[sigma] * q_n_inv[theta] - dt * q_n_dot[sigma] * q_n_inv[theta] - dt * q_n[sigma] * q_n_inv_dot[theta]);
+                    }
+                }
+            }
+        }
+    }
+
+
+    Vec3 g_w = dqdw.transpose() * g_q;
+
+    return g_w;
+}
+
+void incremental_potential_orientation_gradient_hessian(const Vec4& q, const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, const Mat16& IC4, const double dt, Mat33& H_w, Vec3& g_w){
+    g_w.setZero();
+    H_w.setZero();
+
+    Eigen::Matrix<double,4,3> dqdw = Rigid_Body::ALGEBRA::DqDw(dt, omega, q_n);
+    std::array<Eigen::Matrix<double,4,3>,3> d2qdw2 = Rigid_Body::ALGEBRA::D2qDw2(dt,omega,q_n);
+    Vec4 q_inv = Rigid_Body::ALGEBRA::ConjugateQuaternion(q);
+    Vec4 q_n_inv = Rigid_Body::ALGEBRA::ConjugateQuaternion(q_n);
+    Vec3 angle = (double(-1)*dt) * omega_n;
+    Vec4 omega_n_4d = Vec4(double(0), omega_n[0], omega_n[1], omega_n[2]);
+    Vec4 q_nm1 = Rigid_Body::ALGEBRA::QuaternionMultiply(
+        Rigid_Body::ALGEBRA::QuaternionFromVector(angle), q_n);
+    Vec4 q_n_dot = double(.5) * Rigid_Body::ALGEBRA::QuaternionMultiply(omega_n_4d,q_nm1);
+    Vec4 q_n_inv_dot = double(-1) * Rigid_Body::ALGEBRA::QuaternionMultiply(q_n_inv, Rigid_Body::ALGEBRA::QuaternionMultiply(q_n_dot,q_n_inv));
+
+    Mat44 Dq = Mat44::Identity(), Dq_inv;
+    Dq_inv = -Dq;
+    Dq_inv(0,0) = double(1); // Diag(Dq_inv) = [1,-1,-1,-1]
+
+    // Gradient
+    Vec4 g_q = Vec4::Zero();
+    for(size_t alpha = 0; alpha < 4; alpha++){
+        for(size_t beta = 0; beta < 4; beta++){
+            for(size_t sigma = 0; sigma < 4; sigma++){
+                for(size_t epsilon = 0; epsilon < 4; epsilon++){
+                    for(size_t theta = 0; theta < 4; theta++){
+                        g_q[alpha] += IC4(beta*4 + sigma, epsilon*4 + theta) * (Dq(alpha,beta) * q_inv[epsilon] + q[beta] * Dq_inv(alpha,epsilon))
+                        * (q[sigma] * q_inv[theta] - q_n[sigma] * q_n_inv[theta] - dt * q_n_dot[sigma] * q_n_inv[theta] - dt * q_n[sigma] * q_n_inv_dot[theta]);
+                    }
+                }
+            }
+        }
+    }
+    g_w = dqdw.transpose() * g_q;
+
+    // Hessian
+    Mat44 H_q = Mat44::Zero();
+    for(size_t alpha = 0; alpha < 4; alpha++){
+        for(size_t gamma = 0; gamma < 4; gamma++){
+            for(size_t beta = 0; beta < 4; beta++){
+                for(size_t sigma = 0; sigma < 4; sigma++){
+                    for(size_t epsilon = 0; epsilon < 4; epsilon++){
+                        for(size_t theta = 0; theta < 4; theta++){
+                            H_q(alpha, gamma) += IC4(beta*4 + sigma, epsilon*4 + theta)
+                            * (
+                                (Dq(alpha,beta) * Dq_inv(gamma,epsilon) + Dq(gamma,beta) * Dq_inv(alpha,epsilon))
+                                * (q[sigma] * q_inv[theta] - q_n[sigma] * q_n_inv[theta] - dt * q_n_dot[sigma] * q_n_inv(theta) - dt * q_n[sigma] * q_n_inv_dot[theta])
+                                + (Dq(alpha,beta) * q_inv[epsilon] + q[beta] * Dq_inv(alpha,epsilon))
+                                * (Dq(gamma,sigma) * q_inv[theta] + q[sigma] * Dq_inv(gamma,theta))
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    H_w = dqdw.transpose() * H_q * dqdw;
+
+    for(size_t alpha = 0; alpha < 3; alpha++){
+        for(size_t gamma = 0; gamma < 3; gamma++){
+            for(size_t beta = 0; beta < 4; beta++){
+                H_w(alpha,gamma) += d2qdw2[gamma](beta,alpha) * g_q[beta];
+            }
+        }
+    }
 }

@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "quaternion_math.h"
 
 namespace Rigid_Body {
 
@@ -62,6 +63,125 @@ inline Eigen::Vector4d QuaternionMultiply(const Eigen::Vector4d& a, const Eigen:
         a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
         a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0]);
 }
+
+inline Eigen::Matrix<double,4,3> DexpDw(const double dt, const Vec3& w){
+    Eigen::Matrix<double,4,3> dexpdw = Eigen::Matrix<double,4,3>::Zero();
+    Mat33 I_3 = Mat33::Identity();
+    double w_norm = w.norm();
+    double angle  = w_norm * dt / double(2);          // (1/2) dt |w|
+ 
+    if(angle < 1e-4){
+        // series branch:  sin(x)/x ~ 1 - x^2/6,   coefficients written in dt, |w|
+        double c1 = double(.5)*dt      * (double(1) - angle*angle/double(6));   // sin(angle)/|w|
+        double h  = -dt*dt*dt/double(24) * (double(1) - angle*angle/double(10)); // bracket coeff
+        double g  = -dt*dt/double(4)   * (double(1) - angle*angle/double(6));   // scalar-row coeff
+        for(size_t beta = 0; beta < 3; beta++){
+            dexpdw(0,beta) = g * w[beta];
+        }
+        for(size_t alpha = 1; alpha < 4; alpha++){
+            for(size_t beta = 0; beta < 3; beta++){
+                dexpdw(alpha,beta) = c1 * I_3(alpha-1,beta) + h * w[alpha-1]*w[beta];
+            }
+        }
+    }
+    else{
+        for(size_t beta = 0; beta < 3; beta++){
+            dexpdw(0,beta) = -sin(angle) * dt / double(2) * w[beta] / w_norm;
+        }
+        for(size_t alpha = 1; alpha < 4; alpha++){
+            for(size_t beta = 0; beta < 3; beta++){
+                dexpdw(alpha,beta) = cos(angle)*dt/double(2)*w[alpha-1]*w[beta]/(w_norm*w_norm)
+                                   + sin(angle)*(I_3(alpha-1,beta)*w_norm - w[alpha-1]*w[beta]/w_norm)/(w_norm*w_norm);
+            }
+        }
+    }
+    return dexpdw;
+}
+ 
+
+inline std::array<Eigen::Matrix<double,4,3>,3> D2expDw2(const double dt, const Vec3& w){
+    std::array<Eigen::Matrix<double,4,3>,3> d2;
+    for(size_t gamma = 0; gamma < 3; gamma++) d2[gamma].setZero();
+ 
+    Mat33 I_3 = Mat33::Identity();
+    double w_norm = w.norm();
+    double angle  = w_norm * dt / double(2);
+ 
+    double g, g_t, h, h_t;
+    if(angle < 1e-2){
+        g   = -dt*dt/double(4)              * (double(1) - angle*angle/double(6));
+        g_t =  dt*dt*dt*dt/double(48)       * (double(1) - angle*angle/double(10));
+        h   = -dt*dt*dt/double(24)          * (double(1) - angle*angle/double(10));
+        h_t =  dt*dt*dt*dt*dt/double(480)   * (double(1) - angle*angle/double(14));
+    }
+    else{
+        double s  = sin(angle);
+        double c  = cos(angle);
+        double n2 = w_norm*w_norm;
+        double n3 = n2*w_norm;
+        double n4 = n2*n2;
+        double n5 = n4*w_norm;
+        g   = -dt/double(2) * s / w_norm;
+        g_t = -dt*dt/double(4) * c / n2 + dt/double(2) * s / n3;
+        h   =  dt/double(2) * c / n2 - s / n3;
+        h_t = -dt*dt/double(4) * s / n3 - double(3)*dt/double(2) * c / n4 + double(3) * s / n5;
+    }
+ 
+    for(size_t gamma = 0; gamma < 3; gamma++){
+        // scalar row (alpha = 0)
+        for(size_t beta = 0; beta < 3; beta++){
+            d2[gamma](0,beta) = g * I_3(beta,gamma) + g_t * w[beta]*w[gamma];
+        }
+        // vector rows (alpha = 1..3, component a = alpha-1)
+        for(size_t alpha = 1; alpha < 4; alpha++){
+            size_t a = alpha - 1;
+            for(size_t beta = 0; beta < 3; beta++){
+                d2[gamma](alpha,beta) = h * ( I_3(beta,gamma) * w[a]
+                                            + I_3(gamma,a)    * w[beta]
+                                            + I_3(a,beta)     * w[gamma] )
+                                      + h_t * w[a]*w[beta]*w[gamma];
+            }
+        }
+    }
+    return d2;
+}
+
+
+inline Eigen::Matrix<double,4,3> DqDw(const double dt, const Vec3& w, const Vec4& q_n){
+    Eigen::Matrix<double,4,3> dexpdw = DexpDw(dt,w);
+    Eigen::Matrix<double,4,3> DqDw = Eigen::Matrix<double,4,3>::Zero();
+    for(size_t alpha = 0; alpha < 4; alpha++){
+      for(size_t beta = 0; beta < 3; beta++){
+        for(size_t gamma = 0; gamma < 4; gamma++){
+          for(size_t delta = 0; delta < 4; delta++){
+            DqDw(alpha,beta) += quaternion_product_tensor(alpha,gamma,delta) * dexpdw(gamma,beta) * q_n[delta];
+          }
+        }
+      }
+    }
+    return DqDw;
+}
+
+inline std::array<Eigen::Matrix<double,4,3>,3> D2qDw2(const double dt, const Vec3& w, const Vec4& q_n){
+    std::array<Eigen::Matrix<double,4,3>,3> d2expdw2 = D2expDw2(dt, w);
+    std::array<Eigen::Matrix<double,4,3>,3> d2qdw2;
+    for(size_t gamma = 0; gamma < 3; gamma++) d2qdw2[gamma].setZero();
+
+    for(size_t theta = 0; theta < 3; theta++){
+      for(size_t alpha = 0; alpha < 4; alpha++){
+        for(size_t beta = 0; beta < 3; beta++){
+          for(size_t gamma = 0; gamma < 4; gamma++){
+            for(size_t delta = 0; delta < 4; delta++){
+                d2qdw2[theta](alpha,beta) += quaternion_product_tensor(alpha,gamma,delta) * d2expdw2[theta](gamma,beta) * q_n[delta];
+            }
+          }
+        }
+      }
+    }
+    return d2qdw2;
+}
+
+
 
 inline Eigen::Vector3d QuaternionRotate(const Eigen::Vector4d& q, const Eigen::Vector3d& v) {
     Eigen::Vector4d a = q;

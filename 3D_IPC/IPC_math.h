@@ -20,6 +20,7 @@ using Mat39  = Eigen::Matrix<double, 3, 9>;
 using Mat66  = Eigen::Matrix<double, 6, 6>;
 using Mat312 = Eigen::Matrix<double, 3, 12>;
 using Mat12  = Eigen::Matrix<double, 12, 12>;
+using Mat16 = Eigen::Matrix<double,16,16>;
 
 // Triangle definitions
 struct TriangleRest {

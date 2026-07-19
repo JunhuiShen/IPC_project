@@ -18,3 +18,7 @@ Vec3 quaternion_inverse_rotate(const Vec4& quat, const Vec3& vector);
 
 // Quaternion product tensor: (a * b)_alpha = sum_{beta,gamma} Q(alpha,beta,gamma) a_beta b_gamma
 int quaternion_product_tensor(int alpha, int beta, int gamma);
+
+// Contraction of two product tensors over their shared index:
+// QPT_QPT(alpha, beta, delta, epsilon) = sum_gamma Q(alpha,beta,gamma) Q(gamma,delta,epsilon)
+int QPT_QPT(int alpha, int beta, int delta, int epsilon);

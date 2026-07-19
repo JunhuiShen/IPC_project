@@ -52,3 +52,31 @@ Vec3 rigid_node_omega_gradient(const Vec3& gx, const Mat33& dx_domega);
 // Per-node translation and angular-velocity Hessian contributions.
 Mat33 rigid_node_translation_hessian(const Mat33& Hx);
 Mat33 rigid_node_omega_hessian(const Vec3& gx, const Mat33& Hx, const Mat33& dx_domega, const std::array<Mat33, 3>& d2x_domega2);
+
+// Traditional rigid-body inertial potential using the fourth-order
+// quaternion inertia tensor. For omega derivatives, q must satisfy
+// q = QuaternionFromVector(dt * omega) * q_n.
+Mat16 InertiaC4(const std::vector<Vec3>& R, const std::vector<double>& nodal_mass);
+
+double incremental_potential_energy(
+    const Vec3& x_com, const Vec4& q,
+    const Vec3& x_com_n, const Vec3& v_com_n,
+    const Vec3& omega_n, const Vec4& q_n,
+    double dt, double total_mass, const Mat16& IC4);
+
+Vec3 incremental_potential_translation_gradient(
+    const Vec3& x_com, const Vec3& x_com_n, const Vec3& v_com_n,
+    double total_mass, double dt);
+
+Mat33 incremental_potential_translation_hessian(double total_mass);
+
+Vec3 incremental_potential_orientation_gradient(
+    const Vec4& q, const Vec3& omega,
+    const Vec4& q_n, const Vec3& omega_n,
+    const Mat16& IC4, double dt);
+
+void incremental_potential_orientation_gradient_hessian(
+    const Vec4& q, const Vec3& omega,
+    const Vec4& q_n, const Vec3& omega_n,
+    const Mat16& IC4, double dt,
+    Mat33& H_w, Vec3& g_w);
