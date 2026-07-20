@@ -80,3 +80,10 @@ void incremental_potential_orientation_gradient_hessian(
     const Vec4& q_n, const Vec3& omega_n,
     const Mat16& IC4, double dt,
     Mat33& H_w, Vec3& g_w);
+
+
+double gravitational_potential(
+    const Vec3& x_com, const double total_mass, const double gravity, const double dt);
+
+Vec3 gravitational_potential_gradient(
+    const double total_mass, const double gravity, const double dt);
