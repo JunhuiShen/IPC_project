@@ -698,7 +698,7 @@ TEST(RigidBodyIPCTraditionalInertialEnergy, OmegaDerivativesConvergeWithCentered
     expect_quadratic_convergence(kConvergenceHs, hessian_errors);
 }
 
-TEST(RigidBodyIPCTraditionalInertialEnergy, TranslationDerivativesMatchCenteredDifferences) {
+TEST(RigidBodyIPCTraditionalInertialEnergy, TranslationDerivativesMatchCenteredDifferencesAcrossStepSizes) {
     const std::vector<double> masses = {1.2, 0.7, 1.9};
     const std::vector<Vec3> R_p = {
         Vec3(-0.8, 0.35, 0.2),
@@ -713,7 +713,6 @@ TEST(RigidBodyIPCTraditionalInertialEnergy, TranslationDerivativesMatchCenteredD
     const Vec3 omega(0.6, -0.3, 0.7);
     const Vec3 omega_n(-0.2, 0.5, 0.4);
     constexpr double dt = 0.31;
-    constexpr double h = 1.0e-5;
     const Mat16 IC4 = InertiaC4(R_p, masses);
     const Vec4 q = Rigid_Body::ALGEBRA::QuaternionMultiply(
         Rigid_Body::ALGEBRA::QuaternionFromVector(dt * omega), q_n);
@@ -731,20 +730,27 @@ TEST(RigidBodyIPCTraditionalInertialEnergy, TranslationDerivativesMatchCenteredD
     const Vec3 exact_gradient = gradient(x_com);
     const Mat33 exact_hessian =
         incremental_potential_translation_hessian(total_mass);
-    Vec3 gradient_fd = Vec3::Zero();
-    Mat33 hessian_fd = Mat33::Zero();
 
-    for (int alpha = 0; alpha < 3; ++alpha) {
-        Vec3 step = Vec3::Zero();
-        step[alpha] = h;
-        gradient_fd[alpha] =
-            (energy(x_com + step) - energy(x_com - step)) / (2.0 * h);
-        hessian_fd.col(alpha) =
-            (gradient(x_com + step) - gradient(x_com - step)) / (2.0 * h);
+    for (const double h : kConvergenceHs) {
+        Vec3 gradient_fd = Vec3::Zero();
+        Mat33 hessian_fd = Mat33::Zero();
+
+        for (int alpha = 0; alpha < 3; ++alpha) {
+            Vec3 step = Vec3::Zero();
+            step[alpha] = h;
+            gradient_fd[alpha] =
+                (energy(x_com + step) - energy(x_com - step)) / (2.0 * h);
+            hessian_fd.col(alpha) =
+                (gradient(x_com + step) - gradient(x_com - step)) / (2.0 * h);
+        }
+
+        const double gradient_error = (gradient_fd - exact_gradient).norm();
+        const double hessian_error = (hessian_fd - exact_hessian).norm();
+        EXPECT_LT(gradient_error, 1.0e-10)
+            << "translation gradient centered-difference error at h = " << h;
+        EXPECT_LT(hessian_error, 1.0e-10)
+            << "translation Hessian centered-difference error at h = " << h;
     }
-
-    EXPECT_TRUE(gradient_fd.isApprox(exact_gradient, 1.0e-9));
-    EXPECT_TRUE(hessian_fd.isApprox(exact_hessian, 1.0e-9));
 }
 
 }  // namespace
