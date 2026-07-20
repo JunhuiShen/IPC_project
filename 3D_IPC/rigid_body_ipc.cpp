@@ -501,7 +501,7 @@ double incremental_potential_energy(const Vec3& x_com, const Vec4& q, const Vec3
                                                     for(size_t theta = 0; theta < 4; theta++){
                                                         IPE += IC4(beta*4 + sigma, epsilon * 4 + theta)*
                                                         (dt * q_n[beta] * q_n_inv[epsilon] * q_n_dot[sigma] * q_n_inv[theta]
-                                                        + dt * q_n[beta] * q_n_inv_dot[epsilon] * q_n[sigma] * q_n_inv_dot[theta]
+                                                        + dt * q_n[beta] * q_n_inv_dot[epsilon] * q_n[sigma] * q_n_inv[theta]
                                                         + dt * dt * q_n_dot[beta] * q_n_inv[epsilon] * q_n[sigma] * q_n_inv_dot[theta]
                                                         + double(.5) * q_n[beta] * q_n_inv[epsilon] * q_n[sigma] * q_n_inv[theta]
                                                         + double(.5) * dt * dt * q_n_dot[beta] * q_n_inv[epsilon] * q_n_dot[sigma] * q_n_inv[theta]
