@@ -482,6 +482,25 @@ TEST(BendingEnergy, PsdHessianMatchesGradientSquared) {
     }
 }
 
+TEST(BendingEnergy, CombinedGradientAndPsdHessianMatchesStandalone) {
+    const auto h = MakeTestHinge();
+    for (double bar_theta : {-0.2, 0.0, 0.3}) {
+        for (int node = 0; node < 4; ++node) {
+            const auto [g, H] = bending_node_gradient_hessian_psd(
+                    h, kB, kCe, bar_theta, node);
+            const Vec3 g_expected = bending_node_gradient(
+                    h, kB, kCe, bar_theta, node);
+            const Mat33 H_expected = bending_node_hessian_psd(
+                    h, kB, kCe, bar_theta, node);
+
+            EXPECT_EQ((g - g_expected).cwiseAbs().maxCoeff(), 0.0)
+                    << "gradient mismatch at node " << node;
+            EXPECT_EQ((H - H_expected).cwiseAbs().maxCoeff(), 0.0)
+                    << "PSD Hessian mismatch at node " << node;
+        }
+    }
+}
+
 // ===========================================================================
 //  PSD Hessian matches exact at rest (delta = 0) for nodes 2, 3
 // ===========================================================================

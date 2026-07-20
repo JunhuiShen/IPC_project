@@ -44,15 +44,75 @@ struct ElasticAdjacencyCache {
     }
 };
 
+struct BasicSolverScratch {
+    ElasticAdjacencyCache elastic_adjacency;
+    const RefMesh* mesh = nullptr;
+    const int* tris_data = nullptr;
+    const Mat22* dm_data = nullptr;
+    std::size_t tris_size = 0;
+    std::size_t dm_size = 0;
+    std::size_t hinges_size = 0;
+    int num_vertices = -1;
+
+    PinMap pin_map;
+    std::vector<IncidentTriangles> incident_triangles;
+    std::vector<ShapeGrads> rest_shape_grads;
+    std::vector<double> prev_disp;
+    std::vector<AABB> blue_boxes;
+    std::vector<Vec3> xnew_substep_start;
+    std::vector<std::vector<int>> contact_adjacency;
+    std::vector<std::vector<int>> combined_adjacency;
+    std::vector<std::vector<int>> color_groups;
+
+    bool matches(const RefMesh& ref_mesh, int nv) const {
+        return mesh == &ref_mesh && tris_data == ref_mesh.tris.data() && dm_data == ref_mesh.Dm_inverse.data()
+            && tris_size == ref_mesh.tris.size() && dm_size == ref_mesh.Dm_inverse.size() && hinges_size == ref_mesh.hinges.size() && num_vertices == nv;
+    }
+
+    void prepare(const RefMesh& ref_mesh, const VertexTriangleMap& adj,int nv, double initial_prev_disp) {
+        if (!matches(ref_mesh, nv)) {
+            elastic_adjacency = ElasticAdjacencyCache{};
+            incident_triangles.assign(nv, {});
+            for (const auto& [vi, row] : adj) {
+                if (vi >= 0 && vi < nv) incident_triangles[vi] = row;
+            }
+
+            rest_shape_grads.resize(ref_mesh.Dm_inverse.size());
+            for (int ti = 0; ti < static_cast<int>(ref_mesh.Dm_inverse.size()); ++ti)
+                rest_shape_grads[ti] = shape_function_gradients(ref_mesh.Dm_inverse[ti]);
+
+            prev_disp.assign(nv, initial_prev_disp);
+            contact_adjacency.clear();
+            combined_adjacency.clear();
+            color_groups.clear();
+            mesh = &ref_mesh;
+            tris_data = ref_mesh.tris.data();
+            dm_data = ref_mesh.Dm_inverse.data();
+            tris_size = ref_mesh.tris.size();
+            dm_size = ref_mesh.Dm_inverse.size();
+            hinges_size = ref_mesh.hinges.size();
+            num_vertices = nv;
+        }
+
+        pin_map.assign(nv, -1);
+        blue_boxes.resize(nv);
+        xnew_substep_start.resize(nv);
+    }
+};
+
 struct OGCSolverScratch {
     ElasticAdjacencyCache elastic_adjacency;
     BroadPhase broad_phase;
     const RefMesh* mesh = nullptr;
     const int* tris_data = nullptr;
+    const Mat22* dm_data = nullptr;
     std::size_t tris_size = 0;
+    std::size_t dm_size = 0;
     std::size_t hinges_size = 0;
     int num_vertices = -1;
 
+    std::vector<IncidentTriangles> incident_triangles;
+    std::vector<ShapeGrads> rest_shape_grads;
     std::vector<double> prev_disp;
     std::vector<AABB> bvh_node_boxes;
     std::vector<std::vector<int>> color_groups;
@@ -61,22 +121,83 @@ struct OGCSolverScratch {
     std::vector<double> bounds;
 
     bool matches(const RefMesh& ref_mesh, int nv) const {
-        return mesh == &ref_mesh && tris_data == ref_mesh.tris.data() && tris_size == ref_mesh.tris.size() && hinges_size == ref_mesh.hinges.size() && num_vertices == nv;
+        return mesh == &ref_mesh && tris_data == ref_mesh.tris.data()
+            && dm_data == ref_mesh.Dm_inverse.data()
+            && tris_size == ref_mesh.tris.size()
+            && dm_size == ref_mesh.Dm_inverse.size()
+            && hinges_size == ref_mesh.hinges.size() && num_vertices == nv;
     }
 
-    void prepare(const RefMesh& ref_mesh, int nv) {
+    void prepare(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int nv) {
         if (matches(ref_mesh, nv)) return;
 
         // BroadPhase retains topology internally, so replace it when the mesh topology changes rather than reusing stale connectivity
         broad_phase = BroadPhase{};
         elastic_adjacency = ElasticAdjacencyCache{};
+
+        incident_triangles.assign(nv, {});
+        for (const auto& [vi, row] : adj) {
+            if (vi >= 0 && vi < nv) incident_triangles[vi] = row;
+        }
+
+        rest_shape_grads.resize(ref_mesh.Dm_inverse.size());
+        for (int ti = 0; ti < static_cast<int>(ref_mesh.Dm_inverse.size()); ++ti)
+            rest_shape_grads[ti] = shape_function_gradients(ref_mesh.Dm_inverse[ti]);
+
         mesh = &ref_mesh;
         tris_data = ref_mesh.tris.data();
+        dm_data = ref_mesh.Dm_inverse.data();
         tris_size = ref_mesh.tris.size();
+        dm_size = ref_mesh.Dm_inverse.size();
         hinges_size = ref_mesh.hinges.size();
         num_vertices = nv;
     }
 };
+
+// Cheap conservative rejection for inactive barrier candidates.
+// Broad-phase pairs cover each vertex's complete trust box, so many cached pairs are farther than d_hat at the current GS iterate.
+
+// Return the squared Euclidean distance from p to the closed AABB [lo, hi].
+// An axis contributes zero when p lies inside its interval; otherwise it contributes the squared gap to the nearest box face.
+// Keeping the result squared avoids a square root when callers compare it with d_hat^2.
+static inline double point_aabb_squared_distance(
+        const Vec3& p, const Vec3& lo, const Vec3& hi) {
+    double d2 = 0.0;
+    for (int axis = 0; axis < 3; ++axis) {
+        double d = 0.0;
+        if (p[axis] < lo[axis]) {
+            d = lo[axis] - p[axis];
+        } else if (p[axis] > hi[axis]) {
+            d = p[axis] - hi[axis];
+        }
+        d2 += d * d;
+    }
+    return d2;
+}
+
+static inline bool node_triangle_aabbs_within_distance(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, double distance_squared) {
+    const Vec3 lo = a.cwiseMin(b).cwiseMin(c);
+    const Vec3 hi = a.cwiseMax(b).cwiseMax(c);
+    return point_aabb_squared_distance(p, lo, hi) <= distance_squared;
+}
+
+static inline bool segment_aabbs_within_distance(const Vec3& a0, const Vec3& a1, const Vec3& b0, const Vec3& b1, double distance_squared) {
+    const Vec3 alo = a0.cwiseMin(a1);
+    const Vec3 ahi = a0.cwiseMax(a1);
+    const Vec3 blo = b0.cwiseMin(b1);
+    const Vec3 bhi = b0.cwiseMax(b1);
+    double d2 = 0.0;
+    for (int axis = 0; axis < 3; ++axis) {
+        double d = 0.0;
+        if (ahi[axis] < blo[axis]) {
+            d = blo[axis] - ahi[axis];
+        } else if (bhi[axis] < alo[axis]) {
+            d = alo[axis] - bhi[axis];
+        }
+        d2 += d * d;
+    }
+    return d2 <= distance_squared;
+}
 
 }  // namespace
 
@@ -189,16 +310,22 @@ std::vector<Vec3> translation_initial_guess(const std::vector<Vec3>& x, const st
     return xnew;
 }
 
-Vec3 gs_vertex_delta(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
-                       const std::vector<Vec3>& xhat, std::vector<Vec3>& x, const BroadPhase& broad_phase, const PinMap* pin_map) {
+// Elastic and barrier terms both read the current live GS iterate.
+Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
+                                  const std::vector<Vec3>& xhat, std::vector<Vec3>& x, const BroadPhase& broad_phase, const PinMap* pin_map,
+                                  const IncidentTriangles* incident_triangles = nullptr,
+                                  const std::vector<ShapeGrads>* rest_shape_grads = nullptr) {
     const auto& bp_cache = broad_phase.cache();
-    auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x, xhat, pin_map);
+    auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x, xhat, pin_map, incident_triangles, rest_shape_grads);
 
     if (params.d_hat > 0.0) {
         const double dt2k = params.dt2() * params.k_barrier;
+        const double d_hat2 = params.d_hat * params.d_hat;
 
         for (const auto& entry : bp_cache.vertex_nt[vi]) {
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
+            if (!node_triangle_aabbs_within_distance(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], d_hat2))
+                continue;
             auto [bg, bH] = node_triangle_barrier_self_gradient_and_hessian(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
             g += dt2k * bg;
             H += dt2k * bH;
@@ -206,6 +333,8 @@ Vec3 gs_vertex_delta(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& a
 
         for (const auto& entry : bp_cache.vertex_ss[vi]) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
+            if (!segment_aabbs_within_distance(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], d_hat2))
+                continue;
             auto [bg, bH] = segment_segment_barrier_self_gradient_and_hessian(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
             g += dt2k * bg;
             H += dt2k * bH;
@@ -218,19 +347,20 @@ Vec3 gs_vertex_delta(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& a
 // Elastic terms read x_elastic (live, GS-style across colors); barrier terms read
 // x_barrier (iteration-start snapshot, Jacobi-style). Safe to call in parallel
 // within a single elastic-coloring color class.
-Vec3 gs_vertex_delta_split(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
-                            const std::vector<Vec3>& xhat,
-                            const std::vector<Vec3>& x_elastic,
-                            const std::vector<Vec3>& x_barrier,
-                            const BroadPhase& broad_phase, const PinMap* pin_map) {
+Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
+                                    const std::vector<Vec3>& xhat, const std::vector<Vec3>& x_elastic, const std::vector<Vec3>& x_barrier, const BroadPhase& broad_phase, const PinMap* pin_map,
+                                    const IncidentTriangles* incident_triangles,  const std::vector<ShapeGrads>* rest_shape_grads) {
     const auto& bp_cache = broad_phase.cache();
-    auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x_elastic, xhat, pin_map);
+    auto [g, H] = compute_local_gradient_and_hessian_no_barrier(vi, ref_mesh, adj, pins, params, x_elastic, xhat, pin_map, incident_triangles, rest_shape_grads);
 
     if (params.d_hat > 0.0) {
         const double dt2k = params.dt2() * params.k_barrier;
+        const double d_hat2 = params.d_hat * params.d_hat;
 
         for (const auto& entry : bp_cache.vertex_nt[vi]) {
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
+            if (!node_triangle_aabbs_within_distance(x_barrier[p.node], x_barrier[p.tri_v[0]], x_barrier[p.tri_v[1]], x_barrier[p.tri_v[2]], d_hat2))
+                continue;
             auto [bg, bH] = node_triangle_barrier_self_gradient_and_hessian(x_barrier[p.node], x_barrier[p.tri_v[0]], x_barrier[p.tri_v[1]], x_barrier[p.tri_v[2]], params.d_hat, entry.dof);
             g += dt2k * bg;
             H += dt2k * bH;
@@ -238,6 +368,8 @@ Vec3 gs_vertex_delta_split(int vi, const RefMesh& ref_mesh, const VertexTriangle
 
         for (const auto& entry : bp_cache.vertex_ss[vi]) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
+            if (!segment_aabbs_within_distance(x_barrier[p.v[0]], x_barrier[p.v[1]], x_barrier[p.v[2]], x_barrier[p.v[3]], d_hat2))
+                continue;
             auto [bg, bH] = segment_segment_barrier_self_gradient_and_hessian(x_barrier[p.v[0]], x_barrier[p.v[1]], x_barrier[p.v[2]], x_barrier[p.v[3]], params.d_hat, entry.dof);
             g += dt2k * bg;
             H += dt2k * bH;
@@ -594,28 +726,31 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
 
     //create node (blue) boxes and create broad phase (red boxes) accordingly
     const int nv = static_cast<int>(xnew.size());
-    const PinMap pm = build_pin_map(pins, nv);
-    static std::vector<double> prev_disp;
-    if (static_cast<int>(prev_disp.size()) != nv)
-        prev_disp.assign(nv, params.node_box_max);
+    static BasicSolverScratch scratch;
+    scratch.prepare(ref_mesh, adj, nv, params.node_box_max);
+
+    PinMap& pm = scratch.pin_map;
+    for (int pi = 0; pi < static_cast<int>(pins.size()); ++pi)
+        pm[pins[pi].vertex_index] = pi;
+    std::vector<double>& prev_disp = scratch.prev_disp;
     constexpr double node_box_padding = 1.2;
     const double dt = params.dt();
     auto node_box_size_fn = [&](int vi) {
         const double inertial = v[vi].norm() * dt;
         return std::clamp(std::max(prev_disp[vi], inertial) * node_box_padding, params.node_box_min, params.node_box_max);
     };
-    std::vector<AABB> blue_boxes(nv);
+    std::vector<AABB>& blue_boxes = scratch.blue_boxes;
 
     // Elastic adjacency depends only on mesh topology, so reuse it across GS calls.
-    static ElasticAdjacencyCache elastic_adj_cache;
-    const std::vector<std::vector<int>>& ea = elastic_adj_cache.get(ref_mesh, adj, nv);
-    static std::vector<std::vector<int>> bca;
-    static std::vector<std::vector<int>> combined_adj;
-    static std::vector<std::vector<int>> color_groups;
+    const std::vector<std::vector<int>>& ea = scratch.elastic_adjacency.get(ref_mesh, adj, nv);
+    std::vector<std::vector<int>>& bca = scratch.contact_adjacency;
+    std::vector<std::vector<int>>& combined_adj = scratch.combined_adjacency;
+    std::vector<std::vector<int>>& color_groups = scratch.color_groups;
 
     SolverResult result;
     // anchor for clip boxes and prev_disp
-    const std::vector<Vec3> xnew_substep_start = xnew;  
+    std::vector<Vec3>& xnew_substep_start = scratch.xnew_substep_start;
+    xnew_substep_start = xnew;
  
     double r1=0.;
     //gs loop
@@ -636,7 +771,13 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
         }
 
         std::atomic<int> clip_count{0};
-        broad_phase.per_vertex_safe_step(xnew, [&](int vi) -> Vec3 { return xnew[vi] - params.damping * gs_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm); },
+        broad_phase.per_vertex_safe_step(xnew, [&](int vi) -> Vec3 {
+                                             return xnew[vi] - params.damping * gs_vertex_delta_live_barrier(
+                                                     vi, ref_mesh, adj, pins, params, xhat, xnew,
+                                                     broad_phase, &pm,
+                                                     &scratch.incident_triangles[vi],
+                                                     &scratch.rest_shape_grads);
+                                         },
                                          /*safety=*/0.9, /*clip_ccd=*/params.use_ogc ? false : params.use_ccd,
                                          /*use_ticcd=*/params.use_ticcd,
                                          /*use_ogc=*/params.use_ogc,
@@ -683,7 +824,7 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
     const PinMap pm = build_pin_map(pins, nv);
 
     static OGCSolverScratch scratch;
-    scratch.prepare(ref_mesh, nv);
+    scratch.prepare(ref_mesh, adj, nv);
 
     std::vector<double>& prev_disp = scratch.prev_disp;
     if (static_cast<int>(prev_disp.size()) != nv)
@@ -748,7 +889,8 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
                 const int vi = color[idx];
                 // Elastic stencil reads live xnew (GS across colors); barrier
                 // stencil reads frozen xnew_copy (Jacobi).
-                const Vec3 dx = - params.damping * gs_vertex_delta_split(vi, ref_mesh, adj, pins, params, xhat, xnew, xnew_copy, broad_phase, &pm);
+                const Vec3 dx = - params.damping * gs_vertex_delta_frozen_barrier(vi, ref_mesh, adj, pins, params, xhat, xnew, xnew_copy, 
+                    broad_phase, &pm, &scratch.incident_triangles[vi], &scratch.rest_shape_grads);
                 if (dx.squaredNorm() < 1e-28) {
                     xnew[vi] = xnew_copy[vi];
                     continue;

@@ -126,6 +126,8 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
                                                                      const std::vector<Pin>& pins, const SimParams& params,
                                                                      const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                                                      const PinMap* pin_map,
+                                                                     const IncidentTriangles* incident_triangles,
+                                                                     const std::vector<ShapeGrads>* rest_shape_grads,
                                                                      const std::vector<TriPrecompute>* tri_cache,
                                                                      const std::vector<HingePrecompute>* hinge_cache) {
     const double dt2 = params.dt2();
@@ -154,7 +156,8 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
     }
 
     const bool have_cache_hess = tri_cache != nullptr;
-    for (const auto& [ti, a] : adj.at(vi)) {
+    const IncidentTriangles& incident = incident_triangles ? *incident_triangles : adj.at(vi);
+    for (const auto& [ti, a] : incident) {
         if (have_cache_hess) {
             const TriPrecompute& tp = (*tri_cache)[ti];
             g += dt2 * corotated_node_gradient(tp.P, tp.A, tp.gradN, a);
@@ -169,13 +172,20 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
             const double A      = ref_mesh.area[ti];
 
             const CorotatedCache32 cache = buildCorotatedCache(F);
-            const ShapeGrads gradN = shape_function_gradients(Dm_inv);
+            ShapeGrads local_gradN;
+            const ShapeGrads* gradN = nullptr;
+            if (rest_shape_grads) {
+                gradN = &(*rest_shape_grads)[ti];
+            } else {
+                local_gradN = shape_function_gradients(Dm_inv);
+                gradN = &local_gradN;
+            }
             const Mat32 P = PCorotated32(cache, F, params.mu, params.lambda);
             Mat66 dPdF;
             dPdFCorotated32(cache, params.mu, params.lambda, dPdF);
 
-            g += dt2 * corotated_node_gradient(P, A, gradN, a);
-            H += dt2 * corotated_node_hessian(dPdF, A, gradN, a);
+            g += dt2 * corotated_node_gradient(P, A, *gradN, a);
+            H += dt2 * corotated_node_hessian(dPdF, A, *gradN, a);
         }
     }
 
@@ -194,8 +204,9 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
                     const Hinge& h = ref_mesh.hinges[hi];
                     HingeDef def;
                     for (int k = 0; k < 4; ++k) def.x[k] = x[h.v[k]];
-                    g += dt2 * bending_node_gradient(def, params.kB, h.c_e, h.bar_theta, role);
-                    H += dt2 * bending_node_hessian_psd(def, params.kB, h.c_e, h.bar_theta, role);
+                    auto [bg, bH] = bending_node_gradient_hessian_psd( def, params.kB, h.c_e, h.bar_theta, role);
+                    g += dt2 * bg;
+                    H += dt2 * bH;
                 }
             }
         }

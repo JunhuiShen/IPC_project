@@ -12,6 +12,32 @@
 
 // BVH build / refit / query
 namespace {
+inline bool node_triangle_single_vertex_swept_aabbs_intersect(const NodeTrianglePair& p, int moving_dof, const std::vector<Vec3>& x, const Vec3& dx) {
+    AABB node_box;
+    node_box.expand(x[p.node]);
+    if (moving_dof == 0) node_box.expand(x[p.node] + dx);
+
+    AABB tri_box;
+    for (int role = 0; role < 3; ++role) {
+        const Vec3& xi = x[p.tri_v[role]];
+        tri_box.expand(xi);
+        if (moving_dof == role + 1) tri_box.expand(xi + dx);
+    }
+    return aabb_intersects(node_box, tri_box);
+}
+
+inline bool segment_segment_single_vertex_swept_aabbs_intersect(const SegmentSegmentPair& p, int moving_dof, const std::vector<Vec3>& x, const Vec3& dx) {
+    AABB first_box;
+    AABB second_box;
+    for (int role = 0; role < 4; ++role) {
+        AABB& box = role < 2 ? first_box : second_box;
+        const Vec3& xi = x[p.v[role]];
+        box.expand(xi);
+        if (moving_dof == role) box.expand(xi + dx);
+    }
+    return aabb_intersects(first_box, second_box);
+}
+
 inline int build_bvh_impl(const std::vector<AABB>& boxes, std::vector<BVHNode>& out, std::vector<int>* leaf_to_node) {
     out.clear();
     if (leaf_to_node) leaf_to_node->assign(boxes.size(), -1);
@@ -54,11 +80,9 @@ inline int build_bvh_impl(const std::vector<AABB>& boxes, std::vector<BVHNode>& 
         else if (e.z() > e.x() && e.z() >= e.y()) axis = 2;
 
         const int mid = task.start + count / 2;
-        std::nth_element(
-                idx.begin() + task.start,
-                idx.begin() + mid,
-                idx.begin() + task.end,
-                [&](int a, int b) { return boxes[a].centroid()[axis] < boxes[b].centroid()[axis]; });
+        std::nth_element( idx.begin() + task.start, idx.begin() + mid, idx.begin() + task.end, [&](int a, int b) {
+                    return boxes[a].min[axis] + boxes[a].max[axis] < boxes[b].min[axis] + boxes[b].max[axis];
+                });
 
         const int left = static_cast<int>(out.size());
         out.emplace_back();
@@ -647,14 +671,17 @@ void BroadPhase::per_vertex_safe_step(
 
         if (clip_ccd) for (const auto& entry : cache_.vertex_nt[vi]) {
             const auto& p = cache_.nt_pairs[entry.pair_index];
+            // Conservatively precheck the swept primitive AABBs to reject impossible collisions before running the more expensive exact CCD test.
+            if (!node_triangle_single_vertex_swept_aabbs_intersect(p, entry.dof, x, dx))
+                continue;
             CCDResult r;
             if (entry.dof == 0) {
                 r = node_triangle_only_one_node_moves(x[vi], dx, x[p.tri_v[0]], Vec3::Zero(), x[p.tri_v[1]], Vec3::Zero(), x[p.tri_v[2]], Vec3::Zero(), 1e-12, use_ticcd);
             } else {
                 Vec3 d0 = Vec3::Zero(), d1 = Vec3::Zero(), d2 = Vec3::Zero();
-                if      (entry.dof == 1) d0 = dx;
+                if (entry.dof == 1) d0 = dx;
                 else if (entry.dof == 2) d1 = dx;
-                else                     d2 = dx;
+                else d2 = dx;
                 r = node_triangle_only_one_node_moves(x[p.node], Vec3::Zero(), x[p.tri_v[0]], d0, x[p.tri_v[1]], d1, x[p.tri_v[2]], d2, 1e-12, use_ticcd);
             }
             if (r.collision) {
@@ -665,6 +692,8 @@ void BroadPhase::per_vertex_safe_step(
 
         if (clip_ccd) for (const auto& entry : cache_.vertex_ss[vi]) {
             const auto& p = cache_.ss_pairs[entry.pair_index];
+            if (!segment_segment_single_vertex_swept_aabbs_intersect(p, entry.dof, x, dx))
+                continue;
             CCDResult r;
             if (entry.dof == 0)
                 r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]], 1e-12, use_ticcd);
@@ -685,10 +714,15 @@ void BroadPhase::per_vertex_safe_step(
     };
 
     if (color_groups) {
-        for (const auto& group : *color_groups) {
-            #pragma omp parallel for schedule(static)
-            for (int i = 0; i < static_cast<int>(group.size()); ++i)
-                process_vertex(group[i]);
+        // Reuse one OpenMP team across all colors.
+        // The implicit barrier at the end of each omp for preserves the required color-by-color ordering.
+        #pragma omp parallel
+        {
+            for (const auto& group : *color_groups) {
+                #pragma omp for schedule(static)
+                for (int i = 0; i < static_cast<int>(group.size()); ++i)
+                    process_vertex(group[i]);
+            }
         }
     } else {
         for (int vi = 0; vi < nv; ++vi)

@@ -7,9 +7,9 @@ namespace {
 
 constexpr double kSmallAngleThreshold = 1.0e-4;
 
-// G_alpha(q) = partial R(q) / partial q_alpha, where G_0 = 2 q_s I_3 + 2 [q_v]_x and
+// G_alpha(q) = partial R_h(q) / partial q_alpha, where G_0 = 2 q_s I_3 + 2 [q_v]_x and
 // G_l = -2 q_l I_3 + 2 e_l q_v^T + 2 q_v e_l^T + 2 q_s [e_l]_x for l = 1, 2, 3.
-std::array<Mat33, 4> rotation_matrix_gradient(const Vec4& q) {
+std::array<Mat33, 4> dRh_dq(const Vec4& q) {
     const double q_s = q[0];
     const Vec3 q_v = q.tail<3>();
     std::array<Mat33, 4> G;
@@ -21,22 +21,27 @@ std::array<Mat33, 4> rotation_matrix_gradient(const Vec4& q) {
     return G;
 }
 
-// R(q) = (q_s^2 - q_v^T q_v) I_3 + 2 q_v q_v^T + 2 q_s [q_v]_x.
-// D = R(q(omega)) - R_hat, where R_hat = R(q_n) + dt R_dot_n,
-// R_dot_n = G_alpha(q_n) q_dot_n_alpha, and q_dot_n = 1/2 (0, omega_n) * q_nm1.
+// R_h(q) = (q_s^2 - q_v^T q_v) I_3 + 2 q_v q_v^T + 2 q_s [q_v]_x represents q (0, r) q^*.
+// The physical rotation q (0, r) q^{-1} is R(q) = R_h(q) / ||q||^2.
+// Since q_n is unit, its directional derivative is R_dot_n = G_alpha(q_n) q_dot_n_alpha - 2 (q_n^T q_dot_n) R_h(q_n).
+// D = R(q(omega)) - R_hat, where R_hat = R(q_n) + dt R_dot_n, and q_dot_n = 1/2 (0, omega_n) * q_nm1.
 Mat33 rotation_residual(const Vec3& omega, const Vec4& q_n, const Vec4& q_nm1, const Vec3& omega_n, double dt) {
-    const auto rotation_matrix = [](const Vec4& q) -> Mat33 {
+    const auto homogeneous_quaternion_rotation_matrix = [](const Vec4& q) -> Mat33 {
         const double q_s = q[0];
         const Vec3 q_v = q.tail<3>();
         return (q_s * q_s - q_v.squaredNorm()) * Mat33::Identity() + 2.0 * q_v * q_v.transpose() + 2.0 * q_s * skew_matrix(q_v);
     };
     const Vec4 q = quaternion_from_angular_velocity(q_n, omega, dt);
+    const Mat33 R_candidate = homogeneous_quaternion_rotation_matrix(q);
     const Vec4 q_dot_n = quaternion_time_derivative(q_nm1, omega_n);
-    const std::array<Mat33, 4> G_n = rotation_matrix_gradient(q_n);
+    const std::array<Mat33, 4> G_n = dRh_dq(q_n);
+    const Mat33 R_n = homogeneous_quaternion_rotation_matrix(q_n);
     Mat33 R_dot_n = Mat33::Zero();
     for (int alpha = 0; alpha < 4; ++alpha)
         R_dot_n += q_dot_n[alpha] * G_n[alpha];
-    return rotation_matrix(q) - rotation_matrix(q_n) - dt * R_dot_n;
+    R_dot_n -= 2.0 * q_n.dot(q_dot_n) * R_n;
+    const Mat33 R_hat_np1 = R_n + dt * R_dot_n;
+    return R_candidate - R_hat_np1;
 }
 
 // For E_q = 1/2 tr(D I_hat D^T), (g_q)_alpha = tr(D^T G_alpha I_hat) and
@@ -46,7 +51,7 @@ std::pair<Vec4, Mat44> quaternion_inertia_derivatives(const Vec3& omega, const V
     Mat44 H_qq = Mat44::Zero(); // H_qq = partial^2 E_q / partial q^2.
     const Vec4 q = quaternion_from_angular_velocity(q_n, omega, dt);
     const Mat33 D = rotation_residual(omega, q_n, q_nm1, omega_n, dt); // D(q) R_p = b_p.
-    const std::array<Mat33, 4> G = rotation_matrix_gradient(q); // G_alpha = partial D / partial q_alpha.
+    const std::array<Mat33, 4> G = dRh_dq(q); // G_alpha = partial D / partial q_alpha.
 
     for (int alpha = 0; alpha < 4; ++alpha) {
         g_q[alpha] = (D.transpose() * G[alpha] * I_hat).trace();

@@ -10,6 +10,21 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# The solver's hottest path crosses translation-unit boundaries repeatedly
+# (solver -> physics -> elastic/contact kernels).  Release IPO lets the
+# compiler inline and optimize those calls together without changing the
+# numerical algorithm.  Keep a portable fallback for toolchains without LTO.
+option(IPC_ENABLE_IPO "Enable interprocedural optimization in Release builds" ON)
+if(IPC_ENABLE_IPO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT IPC_IPO_SUPPORTED OUTPUT IPC_IPO_ERROR)
+    if(IPC_IPO_SUPPORTED)
+        set(IPC_IPO_ENABLED ON)
+    else()
+        message(STATUS "IPO unavailable: ${IPC_IPO_ERROR}")
+    endif()
+endif()
+
 enable_testing()
 
 include(FetchContent)
@@ -51,6 +66,13 @@ FetchContent_Declare(
     GIT_TAG        v1.0.6
 )
 FetchContent_MakeAvailable(tight_inclusion)
+
+# Set this only after third-party targets have been created.  Their build time
+# and ABI do not benefit from whole-program optimization of our solver.
+if(IPC_IPO_ENABLED)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+endif()
+
 if(APPLE)
     set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp")
     set(OpenMP_CXX_LIB_NAMES "omp")

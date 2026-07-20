@@ -139,6 +139,18 @@ Vec3 bending_node_gradient(const HingeDef& hinge, double k_B, double c_e, double
     return (2.0 * k_B * c_e * delta) * gtheta;
 }
 
+std::pair<Vec3, Mat33> bending_node_gradient_hessian_psd(const HingeDef& hinge, double k_B, double c_e, double bar_theta, int node) {
+    assert(node >= 0 && node < 4);
+    const BendingCache c = make_bending_cache(hinge);
+    if (c.degenerate) return {Vec3::Zero(), Mat33::Zero()};
+
+    const Vec3 gtheta = grad_theta_node(c, hinge, node);
+    const double scale = 2.0 * k_B * c_e;
+    const Vec3 g = (scale * (c.theta - bar_theta)) * gtheta;
+    const Mat33 H = scale * (gtheta * gtheta.transpose());
+    return {g, H};
+}
+
 Mat33 bending_node_hessian(const HingeDef& hinge, double k_B, double c_e, double bar_theta, int node) {
     // Exact self-block Hessian per the note's derivation. Only nodes 2
     // and 3 are covered; for nodes 0 and 1 use bending_node_hessian_psd().
@@ -149,7 +161,7 @@ Mat33 bending_node_hessian(const HingeDef& hinge, double k_B, double c_e, double
     const double theta = bending_theta(hinge);
     const double delta = theta - bar_theta;
 
-    // theta_{,p}     = -ell m_p / Q                              -> gtheta
+    // theta_{,p}     = -ell m_p / Q  
     // theta_{,pq}    = -ell [ [e]x_{pq}/Q - 2 m_p (m x e)_q / Q^2 ]
     // d^2 w / dx_p dx_q = 2 k_B c_e [ theta_{,p} theta_{,q} + delta * theta_{,pq} ]
     const Vec3 gtheta = (-f.ell / f.Q) * f.m;

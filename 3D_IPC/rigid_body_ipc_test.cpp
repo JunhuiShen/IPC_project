@@ -613,14 +613,21 @@ TEST(RigidBodyIPCInertialEnergy, ReducedEnergyMatchesFullNodalMassQuadratic) {
 
     const Vec4 q = quaternion_from_angular_velocity(q_n, omega, dt);
     const Vec4 q_dot_n = quaternion_time_derivative(q_nm1, omega_n);
+    const Vec4 q_n_inverse = quaternion_inverse(q_n);
+    const Vec4 q_n_inverse_dot = -quaternion_multiply(
+        q_n_inverse, quaternion_multiply(q_dot_n, q_n_inverse));
     double full_nodal_energy = 0.0;
+
+    ASSERT_GT(std::abs(q_n.dot(q_dot_n)), 1.0e-3);
 
     for (std::size_t p = 0; p < R_p.size(); ++p) {
         const Vec3 r_p = quaternion_rotate(q, R_p[p]);
         const Vec3 r_p_n = quaternion_rotate(q_n, R_p[p]);
         const Vec4 R_p_quaternion(0.0, R_p[p][0], R_p[p][1], R_p[p][2]);
-        const Vec4 first_term = quaternion_multiply(quaternion_multiply(q_dot_n, R_p_quaternion), quaternion_conjugate(q_n));
-        const Vec4 second_term = quaternion_multiply(quaternion_multiply(q_n, R_p_quaternion), quaternion_conjugate(q_dot_n));
+        const Vec4 first_term = quaternion_multiply(
+            quaternion_multiply(q_dot_n, R_p_quaternion), q_n_inverse);
+        const Vec4 second_term = quaternion_multiply(
+            quaternion_multiply(q_n, R_p_quaternion), q_n_inverse_dot);
         const Vec3 r_dot_p_n = (first_term + second_term).tail<3>();
         const Vec3 x_p = x_com + r_p;
         const Vec3 v_p_n = v_com_n + r_dot_p_n;

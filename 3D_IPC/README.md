@@ -96,6 +96,10 @@ only add custom code when the available library path is not suitable.
     cmake --build build --clean-first   # clean rebuild
     cmake --build build -j              # faster incremental parallel build
 
+Release builds enable interprocedural optimization when the compiler supports
+it, allowing the solver and its energy kernels to be optimized together. Pass
+`-DIPC_ENABLE_IPO=OFF` at configure time to disable it.
+
 ## Run
 
     ./build/3D_sim --fixed_iters        # default scene (twisting cloth)

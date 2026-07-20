@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IPC_math.h"
+#include <utility>
 
 // Discrete-shell hinge bending energy (Grinspun et al. 2003).
 //
@@ -25,6 +26,10 @@ double bending_energy(const HingeDef& hinge, double k_B, double c_e, double bar_
 // Computed via the chain rule through the (m_A, m_B, e_hat) parameterization,
 // so the formula is unified across all four nodes.
 Vec3 bending_node_gradient(const HingeDef& hinge, double k_B, double c_e, double bar_theta, int node);
+
+// Joint gradient and Gauss-Newton self-Hessian evaluation for solver paths that need both.
+// Builds the dihedral cache and grad(theta) only once.
+std::pair<Vec3, Mat33> bending_node_gradient_hessian_psd(const HingeDef& hinge, double k_B, double c_e, double bar_theta, int node);
 
 // Exact self-block Hessian following the note's derivation. Only
 // defined for the apex nodes (2 and 3); asserts otherwise. Can be

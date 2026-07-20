@@ -349,8 +349,9 @@ inline int num_tris(const RefMesh& ref_mesh) {
     return static_cast<int>(ref_mesh.tris.size()) / 3;
 }
 
-// vertex → {triangle_index, local_corner ∈ {0,1,2}}
+// vertex -> {triangle_index, local_corner in {0,1,2}}
 using VertexTriangleMap = std::unordered_map<int, std::vector<std::pair<int,int>>>;
+using IncidentTriangles = std::vector<std::pair<int,int>>;
 
 struct NodeTrianglePair    { int node; int tri_v[3]; };
 struct SegmentSegmentPair  { int v[4]; };
@@ -397,6 +398,8 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
                                                                      const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                                                      const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                                                      const PinMap* pin_map = nullptr,
+                                                                     const IncidentTriangles* incident_triangles = nullptr,
+                                                                     const std::vector<ShapeGrads>* rest_shape_grads = nullptr,
                                                                      const std::vector<TriPrecompute>* tri_cache = nullptr,
                                                                      const std::vector<HingePrecompute>* hinge_cache = nullptr);
 

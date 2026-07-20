@@ -218,6 +218,31 @@ protected:
 //  Per-vertex Hessian check
 // -----------------------------------------------------------------
 
+TEST_F(TotalEnergyTest, CachedIncidentRowsAndRestGradientsMatchFallbackExactly) {
+    std::vector<IncidentTriangles> dense_incident(x.size());
+    for (const auto& [vi, row] : adj)
+        dense_incident[vi] = row;
+
+    std::vector<ShapeGrads> rest_shape_grads(ref_mesh.Dm_inverse.size());
+    for (int ti = 0; ti < static_cast<int>(ref_mesh.Dm_inverse.size()); ++ti)
+        rest_shape_grads[ti] = shape_function_gradients(ref_mesh.Dm_inverse[ti]);
+
+    for (int vi = 0; vi < static_cast<int>(x.size()); ++vi) {
+        const auto [g_fallback, H_fallback] =
+                compute_local_gradient_and_hessian_no_barrier(
+                        vi, ref_mesh, adj, pins, params, x, xhat);
+        const auto [g_cached, H_cached] =
+                compute_local_gradient_and_hessian_no_barrier(
+                        vi, ref_mesh, adj, pins, params, x, xhat, nullptr,
+                        &dense_incident[vi], &rest_shape_grads);
+
+        EXPECT_EQ((g_cached - g_fallback).cwiseAbs().maxCoeff(), 0.0)
+                << "gradient mismatch at vertex " << vi;
+        EXPECT_EQ((H_cached - H_fallback).cwiseAbs().maxCoeff(), 0.0)
+                << "Hessian mismatch at vertex " << vi;
+    }
+}
+
 TEST_F(TotalEnergyTest, PerVertexHessian) {
     double eps = 1e-6;
     for (int vi = 0; vi < (int)x.size(); ++vi) {
