@@ -40,40 +40,6 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
                                             const std::vector<Vec3>& v,
                                             const std::string& outdir = "");
 
-
-namespace rb_solver {
-
-struct ComUpdate {
-    int rb = -1;
-    Vec3 dx_com = Vec3::Zero(); // Newton direction H^{-1}g; subtract when committing.
-    double step = 1.0;          // Reserved for rigid-body CCD/trust-region clipping.
-};
-
-struct OrientationUpdate {
-    int rb = -1;
-    Vec3 domega = Vec3::Zero(); // Newton direction H^{-1}g in omega coordinates.
-    double step = 1.0;          // Reserved for rotational CCD/trust-region clipping.
-};
-
-ComUpdate compute_com_update(
-    int rb, const DeformedState& state, const Vec3& x_com,
-    const SimParams& params, double dt, double total_mass);
-
-OrientationUpdate compute_orientation_update(
-    int rb, const DeformedState& state, const RefMesh& ref_mesh,
-    const Vec3& omega, double dt);
-
-void commit_com_update(
-    const ComUpdate& update, std::vector<Vec3>& x_coms);
-
-void commit_orientation_update(
-    const OrientationUpdate& update, const DeformedState& state,
-    std::vector<Vec4>& orientations, std::vector<Vec3>& omega,
-    double dt);
-
-} // namespace rb_solver
-
-
 SolverResult global_gauss_seidel_solver_basic_rb(
     const RefMesh& ref_mesh, const DeformedState& state,
     const SimParams& params, std::vector<Vec3>& x_coms,

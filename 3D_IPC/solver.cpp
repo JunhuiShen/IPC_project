@@ -320,6 +320,17 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
             greedy_color_conflict_graph(combined_adj, color_groups);
         }
 
+        if (iter == 1 && !params.fixed_iters) {
+            r1 = compute_global_residual(ref_mesh,adj,pins,params,xnew,xhat,broad_phase,&pm);
+            result.has_residual = true;
+            result.initial_residual = r1;
+            result.final_residual = r1;
+            if(r1 < params.tol_rel * r1 || r1 < params.tol_abs){
+                result.converged = true;
+                break;
+            }
+        }
+
         std::atomic<int> clip_count{0};
         per_vertex_safe_step(broad_phase, xnew, [&](int vi) -> Vec3 {
                                              return xnew[vi] - params.damping * gs_vertex_delta_live_barrier(
@@ -337,7 +348,7 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
         result.iterations = iter;
         if (!params.fixed_iters){
             double residual = compute_global_residual(ref_mesh,adj,pins,params,xnew,xhat,broad_phase,&pm);
-            if(iter==1) r1=residual;
+            result.final_residual = residual;
             if (verbose)
                 fprintf(stderr, "  [GS] iter %d  residual = %.6e  node clips = %d\n", iter, residual, clip_count.load());
             if(residual < params.tol_rel * r1 || residual < params.tol_abs){
@@ -462,9 +473,10 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
 }
 
 
+namespace {
 namespace rb_solver {
 
-static Vec3 angular_velocity_from_orientation(
+Vec3 angular_velocity_from_orientation(
     const Vec4& q, const Vec4& q_n, double dt) {
     Vec4 relative = quaternion_multiply(q, quaternion_conjugate(q_n));
     relative = quaternion_normalize(relative);
@@ -483,7 +495,7 @@ static Vec3 angular_velocity_from_orientation(
     return (2.0 * half_angle / (dt * sin_half_angle)) * vector_part;
 }
 
-static void validate_rigid_solver_state(
+void validate_rigid_solver_state(
     const RefMesh& ref_mesh, const DeformedState& state,
     const std::vector<Vec3>& x_coms,
     const std::vector<Vec4>& orientations,
@@ -498,97 +510,59 @@ static void validate_rigid_solver_state(
         && orientations.size() == num_rbs
         && omega.size() == num_rbs;
     if (!valid) {
-        throw std::invalid_argument(
-            "global_gauss_seidel_solver_basic_rb: inconsistent rigid-body array sizes");
+        throw std::invalid_argument("global_gauss_seidel_solver_basic_rb: inconsistent rigid-body array sizes");
     }
 }
 
-static double rigid_body_unnormalized_residual(
+double rigid_body_unnormalized_residual(
     const RefMesh& ref_mesh, const DeformedState& state,
     const SimParams& params, const std::vector<Vec3>& x_coms,
     const std::vector<Vec3>& omega, double dt) {
     double residual = 0.0;
     const int num_rbs = static_cast<int>(ref_mesh.total_mass.size());
     for (int rb = 0; rb < num_rbs; ++rb) {
-        Vec3 com_gradient = inertia_translation_gradient(
-            x_coms[rb], state.x_coms[rb], state.v_coms[rb], dt,
-            ref_mesh.total_mass[rb]);
-        com_gradient -= gravitational_potential_gradient(
-            ref_mesh.total_mass[rb], params.gravity.y(), dt);
+        Vec3 com_gradient = inertia_translation_gradient(x_coms[rb], state.x_coms[rb], state.v_coms[rb], dt, ref_mesh.total_mass[rb]);
+        com_gradient -= gravitational_potential_gradient(ref_mesh.total_mass[rb], params.gravity.y(), dt);
 
-        const Vec3 orientation_gradient =
-            inertia_rotation_gradient_hessian(
-                omega[rb], state.orientations[rb], state.omega[rb], dt,
-                ref_mesh.I_hat[rb]).first;
+        const Vec3 orientation_gradient = inertia_rotation_gradient_hessian(omega[rb], state.orientations[rb], state.omega[rb], dt, ref_mesh.I_hat[rb]).first;
         residual += com_gradient.norm() + orientation_gradient.norm();
     }
     return residual;
 }
 
-ComUpdate compute_com_update(
+Vec3 compute_com_update(
     int rb, const DeformedState& state, const Vec3& x_com,
     const SimParams& params, double dt, double total_mass) {
     const Vec3& x_com_n = state.x_coms[rb];
     const Vec3& v_com_n = state.v_coms[rb];
 
-    Vec3 gradient = inertia_translation_gradient(
-        x_com, x_com_n, v_com_n, dt, total_mass);
-    gradient -= gravitational_potential_gradient(
-        total_mass, params.gravity.y(), dt);
+    Vec3 gradient = inertia_translation_gradient(x_com, x_com_n, v_com_n, dt, total_mass);
+    gradient -= gravitational_potential_gradient(total_mass, params.gravity.y(), dt);
 
     const Mat33 hessian = inertia_translation_hessian(total_mass);
-    const Vec3 dx_com = hessian.ldlt().solve(gradient);
-    return {rb, dx_com, 1.0};
+    return hessian.ldlt().solve(gradient);
 }
 
-OrientationUpdate compute_orientation_update(
+Vec3 compute_omega_update(
     int rb, const DeformedState& state, const RefMesh& ref_mesh,
     const Vec3& omega, double dt) {
     const Vec4& q_n = state.orientations[rb];
     const Vec3& omega_n = state.omega[rb];
     const Mat33& I_hat = ref_mesh.I_hat[rb];
 
-    const auto [gradient, hessian] = inertia_rotation_gradient_hessian(
-        omega, q_n, omega_n, dt, I_hat);
-    const Vec3 domega = hessian.ldlt().solve(gradient);
-    return {rb, domega, 1.0};
-}
-
-void commit_com_update(
-    const ComUpdate& update, std::vector<Vec3>& x_coms) {
-    if (update.rb < 0)
-        return;
-    x_coms[update.rb] -= update.step * update.dx_com;
-}
-
-void commit_orientation_update(
-    const OrientationUpdate& update, const DeformedState& state,
-    std::vector<Vec4>& orientations, std::vector<Vec3>& omega,
-    double dt) {
-    if (update.rb < 0)
-        return;
-
-    const int rb = update.rb;
-    omega[rb] -= update.step * update.domega;
-
-    Vec4 q = quaternion_from_angular_velocity(
-        state.orientations[rb], omega[rb], dt);
-    q = quaternion_align_sign(quaternion_normalize(q), state.orientations[rb]);
-
-    orientations[rb] = q;
-    omega[rb] = angular_velocity_from_orientation(
-        orientations[rb], state.orientations[rb], dt);
+    const auto [gradient, hessian] = inertia_rotation_gradient_hessian(omega, q_n, omega_n, dt, I_hat);
+    return hessian.ldlt().solve(gradient);
 }
 
 } // namespace rb_solver
+} // namespace
 
 SolverResult global_gauss_seidel_solver_basic_rb(
     const RefMesh& ref_mesh, const DeformedState& state,
     const SimParams& params, std::vector<Vec3>& x_coms,
     std::vector<Vec4>& orientations, std::vector<Vec3>& omega,
     bool verbose) {
-    rb_solver::validate_rigid_solver_state(
-        ref_mesh, state, x_coms, orientations, omega);
+    rb_solver::validate_rigid_solver_state(ref_mesh, state, x_coms, orientations, omega);
 
     SolverResult result;
     const int num_rbs = static_cast<int>(ref_mesh.total_mass.size());
@@ -598,68 +572,54 @@ SolverResult global_gauss_seidel_solver_basic_rb(
     // its candidate value even if the initial residual already satisfies the
     // tolerance and no Newton update is needed.
     for (int rb = 0; rb < num_rbs; ++rb) {
-        const rb_solver::OrientationUpdate prediction{
-            rb, Vec3::Zero(), 1.0
-        };
-        rb_solver::commit_orientation_update(
-            prediction, state, orientations, omega, dt);
+        orientations[rb] = quaternion_align_sign(quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega[rb], dt)), state.orientations[rb]);
+        omega[rb] = rb_solver::angular_velocity_from_orientation(orientations[rb], state.orientations[rb], dt);
     }
 
-    const double initial_residual =
-        rb_solver::rigid_body_unnormalized_residual(
-            ref_mesh, state, params, x_coms, omega, dt);
-    double residual = initial_residual;
-
-    result.has_residual = true;
-    result.initial_residual = initial_residual;
-    result.final_residual = initial_residual;
+    double initial_residual = 0.0;
 
     auto residual_converged = [&](double value) {
         double tolerance = 0.0;
         if (params.tol_abs > 0.0)
             tolerance = std::max(tolerance, params.tol_abs);
         if (params.tol_rel > 0.0 && std::isfinite(initial_residual)) {
-            tolerance = std::max(
-                tolerance, params.tol_rel * initial_residual);
+            tolerance = std::max(tolerance, params.tol_rel * initial_residual);
         }
         return value <= tolerance;
     };
 
-    if (!params.fixed_iters && residual_converged(initial_residual)) {
-        result.converged = true;
-        return result;
+    if (!params.fixed_iters) {
+        initial_residual = rb_solver::rigid_body_unnormalized_residual(ref_mesh, state, params, x_coms, omega, dt);
+        result.has_residual = true;
+        result.initial_residual = initial_residual;
+        result.final_residual = initial_residual;
+
+        if (residual_converged(initial_residual)) {
+            result.converged = true;
+            return result;
+        }
     }
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         for (int rb = 0; rb < num_rbs; ++rb) {
-            rb_solver::ComUpdate update = rb_solver::compute_com_update(
-                rb, state, x_coms[rb], params, dt,
-                ref_mesh.total_mass[rb]);
-            update.step *= params.damping;
-            rb_solver::commit_com_update(update, x_coms);
-        }
+            x_coms[rb] -= params.damping * rb_solver::compute_com_update(rb, state, x_coms[rb], params, dt, ref_mesh.total_mass[rb]);
 
-        for (int rb = 0; rb < num_rbs; ++rb) {
-            rb_solver::OrientationUpdate update =
-                rb_solver::compute_orientation_update(
-                    rb, state, ref_mesh, omega[rb], dt);
-            update.step *= params.damping;
-            rb_solver::commit_orientation_update(
-                update, state, orientations, omega, dt);
+            omega[rb] -= params.damping * rb_solver::compute_omega_update(rb, state, ref_mesh, omega[rb], dt);
+            orientations[rb] = quaternion_align_sign(quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega[rb], dt)), state.orientations[rb]);
+            omega[rb] = rb_solver::angular_velocity_from_orientation(orientations[rb], state.orientations[rb], dt);
         }
 
         result.iterations = iter;
-        residual = rb_solver::rigid_body_unnormalized_residual(
-            ref_mesh, state, params, x_coms, omega, dt);
-        result.final_residual = residual;
-        if (verbose && !params.fixed_iters) {
-            std::fprintf(
-                stderr, "  [RB GS] iter %d  residual = %.6e\n",
-                iter, residual);
-        }
-        if (!params.fixed_iters && residual_converged(residual)) {
-            result.converged = true;
-            break;
+        if (!params.fixed_iters) {
+            const double residual = rb_solver::rigid_body_unnormalized_residual(ref_mesh, state, params, x_coms, omega, dt);
+            result.final_residual = residual;
+            if (verbose) {
+                std::fprintf(stderr, "  [RB GS] iter %d  residual = %.6e\n", iter, residual);
+            }
+            if (residual_converged(residual)) {
+                result.converged = true;
+                break;
+            }
         }
     }
 
