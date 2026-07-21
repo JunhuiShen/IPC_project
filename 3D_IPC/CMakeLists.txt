@@ -1,438 +1,245 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(CorotatedEnergy LANGUAGES CXX)
+project(IPC3D VERSION 0.1.0 LANGUAGES CXX)
 
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+# -----------------------------------------------------------------------------
+# Project options
+# -----------------------------------------------------------------------------
+
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type")
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+        Debug Release RelWithDebInfo MinSizeRel
+    )
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
-# The solver's hottest path crosses translation-unit boundaries repeatedly
-# (solver -> physics -> elastic/contact kernels).  Release IPO lets the
-# compiler inline and optimize those calls together without changing the
-# numerical algorithm.  Keep a portable fallback for toolchains without LTO.
+option(IPC_BUILD_SIMULATOR "Build the 3D simulator" ON)
+option(IPC_BUILD_TOOLS "Build developer tools" ON)
 option(IPC_ENABLE_IPO "Enable interprocedural optimization in Release builds" ON)
+
+include(CTest)
+include(FetchContent)
+
+# -----------------------------------------------------------------------------
+# Dependencies
+# -----------------------------------------------------------------------------
+
+# Keep Eigen at 3.4.0. Eigen 5 has produced numerical corruption in this
+# project with AppleClang/libc++ on ARM64 and has not yet been qualified.
+FetchContent_Declare(
+    eigen3
+    URL https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
+    URL_HASH SHA256=8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    SOURCE_SUBDIR _ipc_header_only
+)
+
+# Tight-Inclusion provides continuous collision detection for general motion.
+FetchContent_Declare(
+    tight_inclusion
+    GIT_REPOSITORY https://github.com/Continuous-Collision-Detection/Tight-Inclusion.git
+    GIT_TAG v1.0.6
+    GIT_SHALLOW TRUE
+)
+
+# SOURCE_SUBDIR above deliberately names a directory without a CMake project,
+# so Eigen is populated without adding its documentation and test targets.
+FetchContent_MakeAvailable(eigen3)
+add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
+target_include_directories(Eigen3::Eigen SYSTEM INTERFACE
+    "${eigen3_SOURCE_DIR}"
+)
+
+FetchContent_MakeAvailable(tight_inclusion)
+
+# AppleClang needs Homebrew's libomp and a compiler-specific OpenMP flag. Feed
+# those paths to FindOpenMP instead of adding a global include directory.
+if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    find_path(IPC_LIBOMP_INCLUDE_DIR omp.h
+        HINTS
+            /opt/homebrew/opt/libomp/include
+            /usr/local/opt/libomp/include
+    )
+    find_library(IPC_LIBOMP_LIBRARY omp
+        HINTS
+            /opt/homebrew/opt/libomp/lib
+            /usr/local/opt/libomp/lib
+    )
+    if(IPC_LIBOMP_INCLUDE_DIR AND IPC_LIBOMP_LIBRARY)
+        set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp" CACHE STRING
+            "C++ compiler flags for OpenMP" FORCE
+        )
+        set(OpenMP_CXX_LIB_NAMES omp CACHE STRING
+            "C++ OpenMP library names" FORCE
+        )
+        set(OpenMP_omp_LIBRARY "${IPC_LIBOMP_LIBRARY}" CACHE FILEPATH
+            "Path to the OpenMP runtime" FORCE
+        )
+        set(OpenMP_CXX_INCLUDE_DIR "${IPC_LIBOMP_INCLUDE_DIR}" CACHE PATH
+            "Path to OpenMP headers" FORCE
+        )
+    endif()
+endif()
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+
+# -----------------------------------------------------------------------------
+# Project helpers
+# -----------------------------------------------------------------------------
+
+set(IPC_IPO_SUPPORTED FALSE)
 if(IPC_ENABLE_IPO)
     include(CheckIPOSupported)
     check_ipo_supported(RESULT IPC_IPO_SUPPORTED OUTPUT IPC_IPO_ERROR)
-    if(IPC_IPO_SUPPORTED)
-        set(IPC_IPO_ENABLED ON)
-    else()
+    if(NOT IPC_IPO_SUPPORTED)
         message(STATUS "IPO unavailable: ${IPC_IPO_ERROR}")
     endif()
 endif()
 
-enable_testing()
-
-include(FetchContent)
-
-# Pin Eigen to 3.4.0. Homebrew shipped Eigen 5.0.x in early 2026 and that
-# version triggered NaN corruption through std::function<Vec3(int)> boundaries
-# in the experimental solver on AppleClang + libc++ + ARM64. Pin until the
-# codebase is audited for Eigen 5 compatibility.
-set(EIGEN_BUILD_DOC OFF CACHE INTERNAL "")
-set(EIGEN_BUILD_TESTING OFF CACHE INTERNAL "")
-set(EIGEN_BUILD_PKGCONFIG OFF CACHE INTERNAL "")
-set(BUILD_TESTING OFF CACHE INTERNAL "")
-FetchContent_Declare(
-    eigen3
-    URL      https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
-    URL_HASH SHA256=8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-# Don't run Eigen's own CMakeLists -- we only need the headers, and its build
-# adds dozens of test / check targets that clutter `make help`.
-if(POLICY CMP0169)
-    cmake_policy(SET CMP0169 OLD)
-endif()
-FetchContent_GetProperties(eigen3)
-if(NOT eigen3_POPULATED)
-    FetchContent_Populate(eigen3)
-endif()
-add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
-target_include_directories(Eigen3::Eigen SYSTEM INTERFACE ${eigen3_SOURCE_DIR})
-
-find_package(GTest REQUIRED)
-
-# Tight-Inclusion CCD (https://github.com/Continuous-Collision-Detection/Tight-Inclusion)
-# powers our general CCD (multi-vertex motion). Pulled in via FetchContent so the
-# build is self-contained.
-FetchContent_Declare(
-    tight_inclusion
-    GIT_REPOSITORY https://github.com/Continuous-Collision-Detection/Tight-Inclusion.git
-    GIT_TAG        v1.0.6
-)
-FetchContent_MakeAvailable(tight_inclusion)
-
-# Set this only after third-party targets have been created.  Their build time
-# and ABI do not benefit from whole-program optimization of our solver.
-if(IPC_IPO_ENABLED)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
-endif()
-
-if(APPLE)
-    set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp")
-    set(OpenMP_CXX_LIB_NAMES "omp")
-    # Support both Apple Silicon (/opt/homebrew) and Intel (/usr/local) Homebrew paths
-    if(EXISTS /opt/homebrew/opt/libomp)
-        set(_LIBOMP_PREFIX /opt/homebrew/opt/libomp)
-    else()
-        set(_LIBOMP_PREFIX /usr/local/opt/libomp)
+function(ipc_enable_ipo target)
+    if(IPC_IPO_SUPPORTED)
+        set_property(TARGET "${target}" PROPERTY
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE
+        )
     endif()
-    set(OpenMP_omp_LIBRARY ${_LIBOMP_PREFIX}/lib/libomp.dylib)
-    include_directories(${_LIBOMP_PREFIX}/include)
-endif()
-find_package(OpenMP REQUIRED)
+endfunction()
 
-add_library(corotated_energy_lib
-    corotated_energy.cpp
-    bending_energy.cpp
+function(ipc_configure_library target)
+    target_compile_features("${target}" PUBLIC cxx_std_17)
+    set_target_properties("${target}" PROPERTIES
+        CXX_EXTENSIONS OFF
+        POSITION_INDEPENDENT_CODE ON
+    )
+    target_include_directories("${target}" PUBLIC
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
+    )
+    ipc_enable_ipo("${target}")
+endfunction()
+
+# -----------------------------------------------------------------------------
+# Libraries
+# -----------------------------------------------------------------------------
+
+# Geometry, constitutive models, contact kernels, and output utilities.
+set(IPC_CORE_SOURCES
     IPC_math.cpp
-    node_triangle_distance.cpp
-    segment_segment_distance.cpp
     barrier_energy.cpp
-    sdf_penalty_energy.cpp
+    bending_energy.cpp
     ccd.cpp
+    corotated_energy.cpp
+    node_triangle_distance.cpp
     ogc_trust_region.cpp
-    visualization.cpp
+    quaternion_math.cpp
     rigid_body.cpp
     rigid_body_ipc.cpp
-    quaternion_math.cpp
+    sdf_penalty_energy.cpp
+    segment_segment_distance.cpp
+    visualization.cpp
 )
 
+add_library(corotated_energy_lib STATIC ${IPC_CORE_SOURCES})
+add_library(IPC::core ALIAS corotated_energy_lib)
+ipc_configure_library(corotated_energy_lib)
 target_link_libraries(corotated_energy_lib
-    PUBLIC Eigen3::Eigen
-    PRIVATE tight_inclusion::tight_inclusion
-)
-
-target_include_directories(corotated_energy_lib
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-add_executable(corotated_energy_test
-    corotated_energy_test.cpp
-)
-
-target_link_libraries(corotated_energy_test
+    PUBLIC
+        Eigen3::Eigen
+        OpenMP::OpenMP_CXX
     PRIVATE
-    corotated_energy_lib
-    GTest::gtest
-    GTest::gtest_main
-)
-gtest_discover_tests(corotated_energy_test)
-
-add_executable(node_triangle_distance_test
-    node_triangle_distance_test.cpp
+        tight_inclusion::tight_inclusion
 )
 
-target_link_libraries(node_triangle_distance_test
-    PRIVATE
-    corotated_energy_lib
-    GTest::gtest
-    GTest::gtest_main
-)
-gtest_discover_tests(node_triangle_distance_test)
-
-add_executable(segment_segment_distance_test
-    segment_segment_distance_test.cpp
-)
-
-target_link_libraries(segment_segment_distance_test
-    PRIVATE
-    corotated_energy_lib
-    GTest::gtest
-    GTest::gtest_main
-)
-gtest_discover_tests(segment_segment_distance_test)
-
-add_executable(barrier_energy_test
-    barrier_energy_test.cpp
-)
-
-target_link_libraries(barrier_energy_test
-    PRIVATE
-    corotated_energy_lib
-    GTest::gtest
-    GTest::gtest_main
-)
-gtest_discover_tests(barrier_energy_test)
-
-add_executable(bending_energy_test
-    bending_energy_test.cpp
-)
-
-target_link_libraries(bending_energy_test
-    PRIVATE
-    corotated_energy_lib
-    GTest::gtest
-    GTest::gtest_main
-)
-gtest_discover_tests(bending_energy_test)
-
-add_executable(sdf_penalty_energy_test
-    sdf_penalty_energy_test.cpp
-)
-
-target_link_libraries(sdf_penalty_energy_test
-    PRIVATE
-    corotated_energy_lib
-    GTest::gtest
-    GTest::gtest_main
-)
-gtest_discover_tests(sdf_penalty_energy_test)
-
-add_executable(ccd_test
-    ccd_test.cpp
-    make_shape.cpp
-    physics.cpp
-    solver.cpp
-    parallel_helper.cpp
+# Mesh setup, broad phase, physics assembly, and nonlinear solvers. Keeping
+# these sources in a library prevents every test from recompiling them.
+set(IPC_SIMULATION_SOURCES
     broad_phase.cpp
-)
-
-target_link_libraries(ccd_test
-    PRIVATE
-    corotated_energy_lib
-    GTest::gtest
-    GTest::gtest_main
-)
-
-gtest_discover_tests(ccd_test)
-
-add_executable(rigid_body_ipc_test
-    rigid_body_ipc_test.cpp
-    rigid_body_ipc.cpp
-    quaternion_math.cpp
-)
-
-target_link_libraries(rigid_body_ipc_test
-    PRIVATE
-    corotated_energy_lib
-    GTest::gtest
-    GTest::gtest_main
-)
-
-gtest_discover_tests(rigid_body_ipc_test)
-
-add_executable(broad_phase_test
-    broad_phase_test.cpp
-    broad_phase.cpp
-    make_shape.cpp
-)
-
-target_link_libraries(broad_phase_test
-    PRIVATE
-    corotated_energy_lib
-    GTest::gtest
-    GTest::gtest_main
-)
-
-gtest_discover_tests(broad_phase_test)
-
-add_executable(3D_sim
-    make_shape.cpp
-    physics.cpp
-    solver.cpp
-    parallel_helper.cpp
-    broad_phase.cpp
-    simulation.cpp
-    example.cpp
-)
-
-target_link_libraries(3D_sim
-    PRIVATE
-    corotated_energy_lib
-    OpenMP::OpenMP_CXX
-)
-
-add_executable(make_shape_test
-    make_shape_test.cpp
-    make_shape.cpp
-    physics.cpp
-)
-
-target_link_libraries(make_shape_test
-    PRIVATE
-    corotated_energy_lib
-    GTest::gtest
-    GTest::gtest_main
-)
-
-gtest_discover_tests(make_shape_test)
-
-add_executable(example_test
-    example_test.cpp
     example.cpp
     make_shape.cpp
-    physics.cpp
-)
-
-target_link_libraries(example_test
-    PRIVATE
-    corotated_energy_lib
-    GTest::gtest
-    GTest::gtest_main
-)
-
-gtest_discover_tests(example_test)
-
-add_executable(simulation_snapshot_test
-    simulation_snapshot_test.cpp
-    make_shape.cpp
+    parallel_helper.cpp
     physics.cpp
     solver.cpp
-    parallel_helper.cpp
-    broad_phase.cpp
 )
 
-target_compile_definitions(simulation_snapshot_test
-    PRIVATE GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+add_library(ipc STATIC ${IPC_SIMULATION_SOURCES})
+add_library(IPC::ipc ALIAS ipc)
+ipc_configure_library(ipc)
+target_link_libraries(ipc
+    PUBLIC
+        IPC::core
+        OpenMP::OpenMP_CXX
 )
 
-target_link_libraries(simulation_snapshot_test
-    PRIVATE
-    corotated_energy_lib
-    OpenMP::OpenMP_CXX
-    GTest::gtest
-    GTest::gtest_main
-)
+# -----------------------------------------------------------------------------
+# Applications and tools
+# -----------------------------------------------------------------------------
 
-gtest_discover_tests(simulation_snapshot_test)
-
-add_executable(initial_guess_test
-    initial_guess_test.cpp
-    make_shape.cpp
-    physics.cpp
-    solver.cpp
-    parallel_helper.cpp
-    broad_phase.cpp
-)
-
-target_link_libraries(initial_guess_test
-    PRIVATE
-    corotated_energy_lib
-    OpenMP::OpenMP_CXX
-    GTest::gtest
-    GTest::gtest_main
-)
-
-gtest_discover_tests(initial_guess_test)
-
-add_executable(generate_golden
-    generate_golden.cpp
-    make_shape.cpp
-    physics.cpp
-    solver.cpp
-    parallel_helper.cpp
-    broad_phase.cpp
-)
-
-target_compile_definitions(generate_golden
-    PRIVATE GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-)
-
-target_link_libraries(generate_golden
-    PRIVATE
-    corotated_energy_lib
-    OpenMP::OpenMP_CXX
-)
-
-add_executable(restart_test
-    restart_test.cpp
-    make_shape.cpp
-    physics.cpp
-    solver.cpp
-    parallel_helper.cpp
-    broad_phase.cpp
-)
-
-target_compile_definitions(restart_test
-    PRIVATE GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-)
-
-target_link_libraries(restart_test
-    PRIVATE
-    corotated_energy_lib
-    OpenMP::OpenMP_CXX
-    GTest::gtest
-    GTest::gtest_main
-)
-
-gtest_discover_tests(restart_test)
-
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/visualization_test.cpp")
-    add_executable(visualization_test
-        visualization_test.cpp
-        make_shape.cpp
-        physics.cpp
-        broad_phase.cpp
-    )
-
-    target_compile_definitions(visualization_test
-        PRIVATE VIS_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-    )
-
-    target_link_libraries(visualization_test
-        PRIVATE
-        corotated_energy_lib
-        GTest::gtest
-        GTest::gtest_main
-    )
-
-    gtest_discover_tests(visualization_test)
+if(IPC_BUILD_SIMULATOR)
+    add_executable(3D_sim simulation.cpp)
+    target_link_libraries(3D_sim PRIVATE IPC::ipc)
+    ipc_enable_ipo(3D_sim)
 endif()
 
-add_executable(parallel_helper_test
-    parallel_helper_test.cpp
-    parallel_helper.cpp
-)
+if(IPC_BUILD_TOOLS)
+    add_executable(generate_golden generate_golden.cpp)
+    target_compile_definitions(generate_golden PRIVATE
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(generate_golden PRIVATE IPC::ipc)
+    ipc_enable_ipo(generate_golden)
+endif()
 
-target_link_libraries(parallel_helper_test
-    PRIVATE
-    corotated_energy_lib
-    OpenMP::OpenMP_CXX
-    GTest::gtest
-    GTest::gtest_main
-)
+# -----------------------------------------------------------------------------
+# Tests
+# -----------------------------------------------------------------------------
 
-gtest_discover_tests(parallel_helper_test)
+if(BUILD_TESTING)
+    find_package(GTest REQUIRED)
+    include(GoogleTest)
 
-add_executable(total_energy_test
-    total_energy_test.cpp
-    make_shape.cpp
-    physics.cpp
-    solver.cpp
-    parallel_helper.cpp
-    broad_phase.cpp
-)
+    function(ipc_add_test target)
+        cmake_parse_arguments(PARSE_ARGV 1 IPC_TEST "" "" "DEFINITIONS")
 
-target_link_libraries(total_energy_test
-    PRIVATE
-    corotated_energy_lib
-    OpenMP::OpenMP_CXX
-    GTest::gtest
-    GTest::gtest_main
-)
-gtest_discover_tests(total_energy_test)
+        add_executable("${target}" "${target}.cpp")
+        target_link_libraries("${target}" PRIVATE IPC::ipc GTest::gtest_main)
+        if(IPC_TEST_DEFINITIONS)
+            target_compile_definitions("${target}" PRIVATE ${IPC_TEST_DEFINITIONS})
+        endif()
+        ipc_enable_ipo("${target}")
+        gtest_discover_tests("${target}"
+            DISCOVERY_MODE PRE_TEST
+            DISCOVERY_TIMEOUT 60
+        )
+    endfunction()
 
-add_executable(ipc_math_test
-    ipc_math_test.cpp
-    make_shape.cpp
-    physics.cpp
-    solver.cpp
-    parallel_helper.cpp
-    broad_phase.cpp
-)
+    set(IPC_TEST_TARGETS
+        barrier_energy_test
+        bending_energy_test
+        broad_phase_test
+        ccd_test
+        corotated_energy_test
+        initial_guess_test
+        ipc_math_test
+        make_shape_test
+        node_triangle_distance_test
+        parallel_helper_test
+        rigid_body_ipc_test
+        sdf_penalty_energy_test
+        segment_segment_distance_test
+        total_energy_test
+    )
+    foreach(test_target IN LISTS IPC_TEST_TARGETS)
+        ipc_add_test("${test_target}")
+    endforeach()
 
-target_link_libraries(ipc_math_test
-    PRIVATE
-    corotated_energy_lib
-    OpenMP::OpenMP_CXX
-    GTest::gtest
-    GTest::gtest_main
-)
+    ipc_add_test(simulation_snapshot_test DEFINITIONS
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    ipc_add_test(restart_test DEFINITIONS
+        GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    ipc_add_test(visualization_test DEFINITIONS
+        VIS_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}"
+    )
 
-gtest_discover_tests(ipc_math_test)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/state_io_test.cpp")
+        ipc_add_test(state_io_test)
+    endif()
+endif()
