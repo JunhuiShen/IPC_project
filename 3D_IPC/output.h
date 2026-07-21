@@ -11,8 +11,9 @@ void export_geo(const std::string& filename, const std::vector<Vec3>& x, const s
 void export_ply(const std::string& filename, const std::vector<Vec3>& x, const std::vector<int>& tris);
 void export_usd(const std::string& filename, const std::vector<Vec3>& x, const std::vector<int>& tris);
 
-void export_frame(const std::string& outdir, int frame, const std::vector<Vec3>& x, const std::vector<int>& tris,
-                  ExportFormat fmt, const std::vector<std::vector<int>>* color_groups = nullptr);
+void write_substep_data(const SimParams& params, const BroadPhase& broad_phase, const std::vector<Vec3>& xnew, const std::string& outdir, const RefMesh* ref_mesh = nullptr, const std::vector<std::vector<int>>* color_groups = nullptr);
+
+void export_frame(const std::string& outdir, int frame, const std::vector<Vec3>& x, const std::vector<int>& tris, ExportFormat fmt, const std::vector<std::vector<int>>* color_groups = nullptr);
 
 // Writes all broad phase AABBs (node, triangle, edge) as a wireframe OBJ.
 // Three named groups are written: node_boxes, tri_boxes, edge_boxes.

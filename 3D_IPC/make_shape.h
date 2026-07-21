@@ -1,66 +1,25 @@
 #pragma once
 #include "physics.h"
+#include <string>
 #include <vector>
 
-TriangleDef make_def_triangle(const std::vector<Vec3>& x, const RefMesh& ref_mesh, int tri_idx);
-
-void build_xhat(std::vector<Vec3>& xhat, const std::vector<Vec3>& x, const std::vector<Vec3>& v, double dt);
-
-void update_velocity(std::vector<Vec3>& v, const std::vector<Vec3>& xnew, const std::vector<Vec3>& xold, double dt);
-
-void clear_model(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, std::vector<Pin>& pins);
-
-void append_pin(std::vector<Pin>& pins, int vertex_index, const std::vector<Vec3>& x);
-
+// Grid counts: V = (nx + 1)(ny + 1), T = 2 nx ny.
 int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin);
 
-// Triangulated cylinder whose long axis is +z, centered at `center`. `nu` is the
-// circumferential subdivision count. Uses a brick-pattern triangulation where
-// odd axial rings are rotated by half a circumferential step, so every
-// triangle is near-equilateral. Axial row count is picked internally so the
-// row height matches the equilateral height h = (2*pi*r/nu) * sqrt(3)/2.
-// Callers must read the generated vertex count from the size of
-// `state.deformed_positions` rather than assuming any formula.
+// Cylinder: h = (2 pi radius/nu)sqrt(3)/2, n = max(1, round(length/h)); V = nu(n+1)+2, T = 2nu(n+1).
 int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nu, double radius, double length, const Vec3& center);
 
-// Icosphere built by `subdiv` loop-subdivisions of a base icosahedron, with every
-// midpoint normalized to `radius`. Vertex
-// count: 10*4^subdiv + 2. Triangle count: 20*4^subdiv. Reference 2D coords use
-// xz-projection; intended for use as a static pinned collider (elastic energy
-// on sphere triangles is never evaluated because their vertices are all pinned).
+// Icosphere counts: V = 10(4^subdiv) + 2, T = 20(4^subdiv); X uses xz projection.
 int build_sphere_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int subdiv, double radius, const Vec3& center);
 
-// Loads vertices and triangle faces from a Wavefront OBJ. n-gon faces are
-// fan-triangulated; orphan vertices (unused by any face) are dropped to keep
-// adjacency-by-vertex queries total. Each vertex is uniformly scaled by
-// `scale`, then translated by `origin`. `X` receives an xz-projection
-// placeholder -- for closed meshes the caller must override per-triangle
-// `Dm_inverse` / `area` and per-hinge `c_e` via the rebuild_* helpers below
-// (the xz projection collapses near-vertical triangles in 2D).
-int load_obj_mesh(const std::string& path, RefMesh& ref_mesh, DeformedState& state,
-                  double scale, const Vec3& origin);
+// OBJ transform: x' = origin + scale*x; each n-gon becomes n - 2 triangles.
+int load_obj_mesh(const std::string& path, RefMesh& ref_mesh, DeformedState& state, double scale, const Vec3& origin);
 
-// Lighter overload: reads positions and triangles directly into flat arrays.
-// Suitable for static/collider meshes that don't need RefMesh or DeformedState.
-void load_obj_mesh(const std::string& path, std::vector<Vec3>& verts,
-                   std::vector<int>& tris, double scale = 1.0,
-                   const Vec3& origin = Vec3::Zero());
+// Flat-array overload of the same OBJ transform and triangulation.
+void load_obj_mesh(const std::string& path, std::vector<Vec3>& verts, std::vector<int>& tris, double scale = 1.0, const Vec3& origin = Vec3::Zero());
 
-// Replaces `ref_mesh.Dm_inverse[t]` and `ref_mesh.area[t]` in [t_begin, t_end)
-// with an isometric 2D flattening of each triangle's 3D rest shape, so the
-// corotated F is identity at rest regardless of the global 2D parameterization
-// used for X.
-void rebuild_triangle_rest_isometric(RefMesh& ref_mesh,
-                                     const std::vector<Vec3>& x_rest,
-                                     int t_begin, int t_end);
+// Sets Dm from an edge-length-preserving 2D flattening and A = |det(Dm)|/2.
+void rebuild_triangle_rest_isometric(RefMesh& ref_mesh, const std::vector<Vec3>& x_rest, int t_begin, int t_end);
 
-// Replaces `c_e` for hinges whose 4 vertices all lie in [v_begin, v_end) with
-// |edge|^2 / (A_A + A_B) measured on the 3D rest shape. Same use case as
-// rebuild_triangle_rest_isometric.
-void rebuild_hinge_c_e_3d(RefMesh& ref_mesh,
-                          const std::vector<Vec3>& x_rest,
-                          int v_begin, int v_end);
-
-// Maps each vertex to {triangle_index, local_node_index} pairs.
-// The local_node_index (0,1,2) is stored to avoid searching at call sites.
-VertexTriangleMap build_incident_triangle_map(const std::vector<int>& indices);
+// Sets c_e = |edge|^2 / (A_left + A_right) within the vertex range.
+void rebuild_hinge_c_e_3d(RefMesh& ref_mesh, const std::vector<Vec3>& x_rest, int v_begin, int v_end);

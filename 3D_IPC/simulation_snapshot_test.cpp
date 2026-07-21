@@ -1,4 +1,5 @@
 #include "make_shape.h"
+#include "mesh_utils.h"
 #include "physics.h"
 #include "simulation.h"
 #include "solver.h"

@@ -1,13 +1,13 @@
 # 3D IPC -- Incremental Potential Contact Simulation
 
 A 3D simulator for deformable triangle meshes (cloth / thin shells) built around
-**Incremental Potential Contact (IPC)**. Each time step optimizes an incremental
-potential with a **parallel-by-color nonlinear Gauss-Seidel solver**, using
-continuous collision detection to keep every intermediate state intersection-free.
+**Incremental Potential Contact (IPC)**, with a reduced-coordinate rigid-body
+example. The deformable solver uses parallel-by-color nonlinear Gauss-Seidel and
+continuous collision detection to keep intermediate states intersection-free.
 
 ## What the simulator does
 
-Per time step, the optimizer minimizes an incremental potential made of:
+For deformable scenes, each time step minimizes an incremental potential made of:
 
 - **Inertial term** -- implicit Euler predictor against the current velocity field.
 - **Gravity** -- constant body-force potential `-m*g*x` set by `gx`, `gy`, `gz`
@@ -21,8 +21,7 @@ Per time step, the optimizer minimizes an incremental potential made of:
   is at `phi = eps_sdf`; set 0 for a hard quadratic at the surface).
 - **Pin springs** -- soft positional constraints for fixed vertices.
 
-The nonlinear solve is driven by one of two Gauss-Seidel solvers, selected by
-CLI flag:
+Deformable scenes use one of two Gauss-Seidel solvers, selected by CLI flag:
 
 - **`global_gauss_seidel_solver_basic`** (default) -- builds the broad phase
   every `node_box_update_count` iterations and sweeps every vertex with a local
@@ -37,12 +36,18 @@ CLI flag:
   `--ogc_box_pad`.
   Requires `--fixed_iters`.
 
+Rigid-body scenes use **`global_gauss_seidel_solver_basic_rb`**, which solves
+one three-component COM vector and one three-component rotation vector per
+body. Orientation quaternions are derived from the rotation vector. Rigid-body
+collision handling is not implemented yet.
+
 Our OGC narrow phase and solver implement the algorithm from Chen et al.
 2025; see Acknowledgments.
 
 ## Solver Algorithm
 
-Each substep runs nonlinear Gauss-Seidel iterations over the mesh vertices:
+For deformable scenes, each substep runs nonlinear Gauss-Seidel iterations over
+the mesh vertices:
 
 - builds a blue trust-region box for each vertex with a heuristic size
 - builds red primitive boxes from the blue boxes of the vertices belonging to
@@ -116,7 +121,12 @@ Built-in example scenes (`--example N`):
 | `2` | Four closed-loop cloth strips wrapping two horizontal cylinders, twisted then untwisted |
 | `3` | Rectangular cloth wrapping one horizontal cylinder; cylinder yaws about +y, twisting the cloth between two clamped top edges, then reverses to untwist |
 | `4` | Avatar clothing scene loaded from `datadir` (`body_0000.obj` collider + `dress_0000.obj` simulated cloth) |
-| `5` | Freely rotating rigid tennis racket with configurable initial angular velocity and no gravity |
+| `5` | Freely rotating rigid tennis racket with a prescribed initial angular velocity and no gravity |
+
+For rigid-body examples, the reported vertices and triangles describe the
+surface geometry. The reduced solver advances one three-component COM vector
+and one three-component rotation (theta/omega) vector per rigid body, rather
+than solving every surface vertex independently.
 
 Common invocations:
 
@@ -130,8 +140,9 @@ Common invocations:
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
 
 Initial guesses are selected before the nonlinear solver starts each substep.
-The default is `ccd_initial_guess`; `--use_translation_guess true` instead starts
-from a single global translation `x_i^n + C`, so pass
+The default is `ccd_initial_guess`. `--use_verlet_guess true` uses the
+CCD-clipped Verlet predictor `xhat + dt^2 gravity`; `--use_translation_guess
+true` instead starts from a single global translation `x_i^n + C`, so pass
 `--use_ccd_guess false` when using it. This translation guess minimizes the
 translation-restricted inertia + gravity + pin-spring objective in closed form,
 then applies one cheap 3D Newton correction for SDF penalty contact. Elastic,
@@ -167,6 +178,8 @@ Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
 (`frame_0000.geo`, `frame_0001.geo`, ...). `--format obj` writes `.obj`;
 `--format ply` writes `.ply`; `--format usd` writes `.usda` text. A binary
 restart snapshot `state_NNNN.bin` is written alongside every frame.
+Checkpoints currently store particle positions and velocities only, so restart
+is supported for deformable scenes but not for the reduced rigid-body state.
 
 Per-frame statistics are printed to stdout:
 
@@ -184,11 +197,11 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 |-------|-------|
 | Time integration | `fps`, `substeps`, `num_frames` |
 | Physics | `E`, `nu`, `density`, `thickness`, `kB`, `kpin`, `gx`, `gy`, `gz` |
-| Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `fixed_iters`, `use_parallel`, `write_substeps` |
+| Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `damping`, `fixed_iters`, `use_parallel`, `verbose`, `write_substeps` |
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
-| OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (new per-iter rebuild solver), `ogc_box_pad` (BVH padding for the per-iter rebuild; floored to `d_hat`) |
+| OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (per-iteration rebuild solver), `ogc_box_pad` (BVH padding for the per-iteration rebuild; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (basic solver clamp range for `R_vi = clamp(max(prev_disp, \|v_i\| dt) * 1.2, min, max)`), `node_box_update_count` (GS iterations between broad-phase/contact-color rebuilds) |
-| Scene | `example` (`1`..`4`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink` |
+| Scene | `example` (`1`..`5`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame`, `datadir` |
 
 Notes:
@@ -209,18 +222,24 @@ reader can jump to the layer they care about.
 - `example.h` / `example.cpp` -- built-in scene library selected by `--example`.
 - `args.h`, `ipc_args.h` -- generic `--key value` argument parser and the
   `IPCArgs3D` struct that defines every CLI flag and its default.
-- `visualization.h` / `visualization.cpp` -- `export_obj`, `export_geo`,
-  `export_usd`, `export_frame`.
+- `output.h` / `output.cpp` -- frame and diagnostic output, including
+  `export_obj`, `export_geo`, `export_usd`, `export_frame`, broad-phase debug
+  geometry, and `write_substep_data`.
 
 ### Mesh & physics state
 
-- `make_shape.h` / `make_shape.cpp` -- mesh construction, `build_xhat()`,
-  `update_velocity()`, and incident-triangle maps.
+- `make_shape.h` / `make_shape.cpp` -- square, cylinder, sphere, and OBJ mesh
+  construction plus rest-shape rebuilding.
+- `mesh_utils.h` / `mesh_utils.cpp` -- generic model reset, pin insertion,
+  deformed-triangle assembly, and incident-triangle maps.
+- `time_integration.h` / `time_integration.cpp` -- inertial target construction
+  (`build_xhat`) and post-step velocity updates.
+- `state_io.h` / `state_io.cpp` -- binary simulation checkpoint serialization
+  and deserialization for particle positions and velocities.
 - `physics.h` / `physics.cpp` -- top-level incremental potential. Accumulates
   inertial + elastic + (when `d_hat > 0`) barrier contributions into per-vertex
   gradients and Hessians, exposes `PinMap` for O(1) pin lookup, and runs the
   OpenMP-parallel global residual (mass-normalized by vertex mass).
-  Serialize/deserialize of simulation state lives here.
 
 ### Energy terms
 
@@ -273,21 +292,22 @@ reader can jump to the layer they care about.
 - `broad_phase.h` / `broad_phase.cpp` -- swept-AABB broad phase backed by a
   per-tree BVH. Caches mesh topology via `set_mesh_topology`; builds candidate
   node-triangle and edge-edge pairs from per-vertex AABBs; stores per-vertex
-  incident pair lists used by one-node linear CCD and the OGC narrow phase.
+  incident pair lists used by collision-safe stepping.
   Adds `parent` pointers and per-tree `leaf_to_node` maps so
   `refit_bvh_leaf` and `incremental_refresh_vertex` can do `O(log N)` partial
   refits, used by `global_gauss_seidel_solver_ogc`.
-- `ogc_trust_region.h` / `ogc_trust_region.cpp` -- OGC narrow-phase helpers
-  (per-pair scaling and the per-vertex `compute_trust_region_bound_for_vertex`).
-  See Acknowledgments.
+- `safe_step.h` / `safe_step.cpp` -- per-vertex node-box clipping, CCD safe
+  stepping, and OGC trust-region bounds over broad-phase contact candidates.
 
 ### Solver
 
+- `initial_guess.h` / `initial_guess.cpp` -- CCD-projected, Verlet, and
+  translation-restricted initial guesses selected by `advance_one_frame()`.
 - `solver.h` / `solver.cpp` -- solver implementations selected by CLI flag:
   - `global_gauss_seidel_solver_basic` (default): broad-phase/contact-color
     data is rebuilt every `node_box_update_count` GS iterations and reused
     between rebuilds. Gauss-Seidel sweeps run via
-    `BroadPhase::per_vertex_safe_step`, step-clamped by linear/TICCD CCD or
+    `per_vertex_safe_step`, step-clamped by linear/TICCD CCD or
     the OGC narrow phase (`--use_ogc`). With `--use_parallel`, the
     conflict-graph coloring built in `parallel_helper` drives parallel-by-color
     commits.
@@ -297,10 +317,21 @@ reader can jump to the layer they care about.
     `incremental_refresh_vertex`.
 
   Both share the per-vertex Newton solve (`gs_vertex_delta`) and node-box clip
-  mechanics. `ccd_initial_guess`, `translation_initial_guess`, and `update_one_vertex` live here.
+  mechanics.
 - `parallel_helper.h` / `parallel_helper.cpp` -- helpers for elastic
   adjacency, contact adjacency, adjacency union, and deterministic greedy
   coloring.
+
+### Rigid bodies
+
+- `quaternion_math.h` / `quaternion_math.cpp` -- quaternion normalization,
+  products, rotations, and derivative helpers.
+- `rigid_body_ipc.h` / `rigid_body_ipc.cpp` -- reduced rigid-body creation,
+  COM/orientation kinematics, inertial energy, and analytic derivatives.
+- The rigid-body Gauss-Seidel solve currently lives in `solver.h` / `solver.cpp`;
+  `advance_one_frame_rb` and particle synchronization live in `simulation.h`.
+- `rigid_body.h` / `rigid_body.cpp` is a legacy standalone dynamics helper;
+  example 5 uses `rigid_body_ipc` instead.
 
 ### Tooling
 
@@ -312,7 +343,7 @@ reader can jump to the layer they care about.
 
 ## Tests
 
-Every layer of the pipeline has a GoogleTest binary. To build and run them all:
+The GoogleTest suite is split into focused binaries. To build and run them all:
 
     cmake -B build
     cmake --build build --clean-first
@@ -320,21 +351,22 @@ Every layer of the pipeline has a GoogleTest binary. To build and run them all:
 
 | Test binary | Cases | What it covers |
 |-------------|-------|----------------|
-| `ccd_test` | 48 | Linear CCD single-moving-DOF, scale/coplanar stress cases, and TICCD-backed general NT/SS wrappers |
-| `rigid_body_ipc_test` | 20 | Quaternion kinematics/derivatives and rigid-body rotational CCD |
-| `broad_phase_test` | 25 | AABB, BVH, pair generation/order, CCD candidates, conservativeness, and `incremental_refresh_vertex` partial refit |
-| `ipc_math_test` | 15 | `matrix3d_inverse`, `segment_closest_point`, barycentric coordinates, serialize round-trip, and topology caching |
+| `ccd_test` | 40 | Linear CCD single-moving-DOF, scale/coplanar stress cases, and TICCD-backed general NT/SS wrappers |
+| `rigid_body_ipc_test` | 26 | Quaternion kinematics/derivatives, reduced inertial energy, and rigid-body rotational CCD |
+| `broad_phase_test` | 25 | AABB, BVH, pair generation/order, CCD candidates, safe stepping, conservativeness, and `incremental_refresh_vertex` partial refit |
+| `ipc_math_test` | 14 | `matrix3d_inverse`, `segment_closest_point`, barycentric coordinates, and topology caching |
 | `sdf_penalty_energy_test` | 15 | Plane / cylinder SDF energy + gradient + Hessian FD convergence, hard-quadratic limit, soft-barrier rest at `phi=eps` |
-| `bending_energy_test` | 18 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
+| `bending_energy_test` | 19 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
 | `parallel_helper_test` | 2 | Exact contact adjacency and deterministic coloring/scratch reuse |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
 | `make_shape_test` | 6 | Incident-triangle maps and icosphere construction |
 | `barrier_energy_test` | 16 | Scalar barrier, all NT/SS feature regions, force partition, derivative blocks, and stress cases |
 | `corotated_energy_test` | 11 | Rest state, invariance, gradient/Hessian FD convergence, and stress cases |
-| `total_energy_test` | 5 | Aggregate Hessian/gradient checks, production residual FD, bending wiring, and disabled-SDF no-op behavior |
-| `initial_guess_test` | 4 | CCD no-candidate guess and translation guess closed forms for inertia/gravity, pins, and one-step plane-SDF correction |
+| `initial_guess_test` | 5 | CCD no-candidate, Verlet gravity, and translation closed forms for inertia/gravity, pins, and one-step plane-SDF correction |
+| `time_integration_test` | 1 | Position-difference velocity updates |
+| `state_io_test` | 1 | Binary checkpoint serialize/deserialize round trip |
 | `node_triangle_distance_test` | 9 | All 7 proximity regions + signed distance + degenerate |
-| `visualization_test` | 2 | Debug OBJ export (no assertions -- manual inspection) |
+| `output_test` | 2 | Debug OBJ/BVH export for manual inspection |
 | `simulation_snapshot_test` | 1 | Golden-file regression (5-frame determinism) |
 | `restart_test` | 1 | Checkpoint resume matches golden |
 

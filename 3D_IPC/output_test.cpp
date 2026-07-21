@@ -1,7 +1,8 @@
 #include "broad_phase.h"
 #include "make_shape.h"
+#include "mesh_utils.h"
 #include "physics.h"
-#include "visualization.h"
+#include "output.h"
 
 #include <gtest/gtest.h>
 #include <filesystem>
@@ -13,8 +14,8 @@ namespace fs = std::filesystem;
 
 // Builds a small mesh, runs broad phase, and writes AABBs to OBJ files
 // for visual inspection in Houdini. This test always passes.
-// Output: VIS_OUTPUT_DIR/broad_phase_{node,tri,edge}_boxes.obj
-TEST(VisualizationTest, ExportBroadPhaseBoxes) {
+// Output: OUTPUT_TEST_DIR/broad_phase_{node,tri,edge}_boxes.obj
+TEST(OutputTest, ExportBroadPhaseBoxes) {
     RefMesh ref_mesh;
     DeformedState state;
     std::vector<Vec2> X;
@@ -31,7 +32,7 @@ TEST(VisualizationTest, ExportBroadPhaseBoxes) {
     BroadPhase bp;
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, dt, dhat);
 
-    const std::string dir = std::string(VIS_OUTPUT_DIR) + "/vis_debug";
+    const std::string dir = std::string(OUTPUT_TEST_DIR) + "/output_debug";
     fs::create_directories(dir);
     const BroadPhase::Cache& c = bp.cache();
     export_aabb_list(dir + "/broad_phase_node_boxes.obj", c.node_boxes);
@@ -49,9 +50,9 @@ TEST(VisualizationTest, ExportBroadPhaseBoxes) {
 }
 
 // Writes one OBJ per BVH depth level for each of the three BVHs (tri, edge, node).
-// Output: VIS_OUTPUT_DIR/bvh_{tri,edge,node}_level_N.obj
+// Output: OUTPUT_TEST_DIR/bvh_{tri,edge,node}_level_N.obj
 // Load them in Houdini and step through N to walk the tree top-down.
-TEST(VisualizationTest, ExportBVHLevels) {
+TEST(OutputTest, ExportBVHLevels) {
     RefMesh ref_mesh;
     DeformedState state;
     std::vector<Vec2> X;
@@ -65,7 +66,7 @@ TEST(VisualizationTest, ExportBVHLevels) {
     BroadPhase bp;
     bp.initialize(state.deformed_positions, state.velocities, ref_mesh, 1.0 / 30.0, 0.05);
 
-    const std::string dir = std::string(VIS_OUTPUT_DIR) + "/vis_debug";
+    const std::string dir = std::string(OUTPUT_TEST_DIR) + "/output_debug";
     fs::create_directories(dir);
     const BroadPhase::Cache& c = bp.cache();
 

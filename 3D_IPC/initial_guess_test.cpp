@@ -1,4 +1,4 @@
-#include "solver.h"
+#include "initial_guess.h"
 
 #include <gtest/gtest.h>
 #include <vector>
@@ -46,6 +46,31 @@ TEST(CCDInitialGuess, ReturnsTargetWhenNoCollisionCandidates) {
     ASSERT_EQ(guess.size(), xhat.size());
     for (int i = 0; i < static_cast<int>(xhat.size()); ++i) {
         expect_vec_near(guess[i], xhat[i], 1e-12);
+    }
+}
+
+TEST(VerletInitialGuess, AddsGravityAndReturnsCollisionFreeTarget) {
+    SimParams params = base_params();
+    params.gravity = Vec3(0.0, -4.0, 2.0);
+
+    RefMesh ref_mesh = ref_mesh_with_masses({1.0, 1.0});
+    ref_mesh.tris.clear();
+
+    const std::vector<Vec3> x = {
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 2.0, 3.0),
+    };
+    const std::vector<Vec3> xhat = {
+        Vec3(0.5, 1.0, -0.5),
+        Vec3(1.5, 3.0, 2.5),
+    };
+
+    const std::vector<Vec3> guess = verlet_initial_guess(x, xhat, ref_mesh, params);
+    const Vec3 dt2g = params.dt2() * params.gravity;
+
+    ASSERT_EQ(guess.size(), xhat.size());
+    for (int i = 0; i < static_cast<int>(xhat.size()); ++i) {
+        expect_vec_near(guess[i], xhat[i] + dt2g, 1e-12);
     }
 }
 

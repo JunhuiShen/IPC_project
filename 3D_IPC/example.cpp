@@ -1,5 +1,6 @@
 #include "example.h"
 #include "make_shape.h"
+#include "mesh_utils.h"
 #include "rigid_body_ipc.h"
 
 #include <algorithm>

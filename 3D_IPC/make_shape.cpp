@@ -9,47 +9,6 @@
 #include <string>
 #include <utility>
 
-TriangleDef make_def_triangle(const std::vector<Vec3>& x, const RefMesh& ref_mesh, int tri_idx) {
-    TriangleDef def;
-    def.x[0] = x[tri_vertex(ref_mesh, tri_idx, 0)];
-    def.x[1] = x[tri_vertex(ref_mesh, tri_idx, 1)];
-    def.x[2] = x[tri_vertex(ref_mesh, tri_idx, 2)];
-    return def;
-}
-
-void build_xhat(std::vector<Vec3>& xhat, const std::vector<Vec3>& x, const std::vector<Vec3>& v, double dt) {
-    int n = static_cast<int>(x.size());
-    xhat.resize(n);
-    for (int i = 0; i < n; ++i) xhat[i] = x[i] + dt * v[i];
-}
-
-void update_velocity(std::vector<Vec3>& v, const std::vector<Vec3>& xnew, const std::vector<Vec3>& xold, double dt) {
-    int n = static_cast<int>(xnew.size());
-    v.resize(n);
-    for (int i = 0; i < n; ++i) v[i] = (xnew[i] - xold[i]) / dt;
-}
-
-void clear_model(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, std::vector<Pin>& pins) {
-    X.clear();
-    ref_mesh.tris.clear();
-    state.deformed_positions.clear();
-    state.velocities.clear();
-    state.x_coms.clear();
-    state.v_coms.clear();
-    state.orientations.clear();
-    state.omega.clear();
-    ref_mesh.ref_positions.clear();
-    ref_mesh.total_mass.clear();
-    ref_mesh.I_hat.clear();
-    ref_mesh.rb_nodes.clear();
-    ref_mesh.node_to_rb.clear();
-    pins.clear();
-}
-
-void append_pin(std::vector<Pin>& pins, int vertex_index, const std::vector<Vec3>& x) {
-    pins.push_back(Pin{vertex_index, x[vertex_index]});
-}
-
 // Total number of vertices is: (nx + 1) * (ny + 1) and total number of triangles is: 2 * nx * ny
 int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin) {
     int base = static_cast<int>(state.deformed_positions.size());
@@ -95,11 +54,7 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
     return base;
 }
 
-// Near-iso cylinder (brick-pattern triangulation): odd axial rings are rotated
-// by half a circumferential step so every triangle is near-equilateral.
-// Axial row count n_rows is picked internally to match the equilateral row
-// height h = (2*pi*r/nu) * sqrt(3)/2. Vertex count: nu * (n_rows + 1).
-// Triangle count: 2 * nu * n_rows, where n_rows = max(1, round(length / h)).
+// V = nu(n_rows + 1) + 2 and T = 2nu(n_rows + 1), including both end caps.
 int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X,
                         int nu, double radius, double length, const Vec3& center) {
     constexpr double kPi = 3.14159265358979323846;
@@ -469,17 +424,4 @@ void rebuild_hinge_c_e_3d(RefMesh& ref_mesh,
         const double area_sum = areaA + areaB;
         h.c_e = (area_sum > 0.0) ? (edge_len2 / area_sum) : 0.0;
     }
-}
-
-// Builds VertexTriangleMap: each vertex maps to {triangle_index, local_node_index} pairs.
-// Storing the local index (0,1,2) eliminates the linear search previously done by local_node().
-VertexTriangleMap build_incident_triangle_map(const std::vector<int>& indices) {
-    VertexTriangleMap result;
-    for (int i = 0; i < static_cast<int>(indices.size()); ++i) {
-        const int vertex     = indices[i];
-        const int tri_idx    = i / 3;
-        const int local_node = i % 3;
-        result[vertex].emplace_back(tri_idx, local_node);
-    }
-    return result;
 }

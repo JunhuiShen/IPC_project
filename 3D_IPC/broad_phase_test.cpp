@@ -2,6 +2,7 @@
 #include "physics.h"
 #include "make_shape.h"
 #include "node_triangle_distance.h"
+#include "safe_step.h"
 #include "segment_segment_distance.h"
 
 #include <gtest/gtest.h>
@@ -914,8 +915,8 @@ TEST(BroadPhaseTest, PerVertexSafeStepClampsCCDAndOGC) {
     cache.nt_pairs.push_back(pair);
     cache.vertex_nt[0].push_back({/*pair_index=*/0, /*dof=*/0});
 
-    bp.per_vertex_safe_step(
-        x, [&](int vi) { return target[vi]; },
+    per_vertex_safe_step(
+        bp, x, [&](int vi) { return target[vi]; },
         /*safety=*/0.9, /*clip_ccd=*/true,
         /*use_ticcd=*/false, /*use_ogc=*/false);
 
@@ -944,8 +945,8 @@ TEST(BroadPhaseTest, PerVertexSafeStepClampsCCDAndOGC) {
     ogc_cache.nt_pairs.push_back(pair);
     ogc_cache.vertex_nt[0].push_back({/*pair_index=*/0, /*dof=*/0});
 
-    ogc_bp.per_vertex_safe_step(
-        x_ogc, [&](int vi) { return target_ogc[vi]; },
+    per_vertex_safe_step(
+        ogc_bp, x_ogc, [&](int vi) { return target_ogc[vi]; },
         /*safety=*/0.9, /*clip_ccd=*/false,
         /*use_ticcd=*/false, /*use_ogc=*/true);
 

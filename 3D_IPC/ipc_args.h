@@ -2,7 +2,7 @@
 
 #include "args.h"
 #include "physics.h"
-#include "visualization.h"
+#include "output.h"
 
 #include <string>
 

@@ -3,6 +3,8 @@ build/
 
 # Simulation output
 frames_*/
+racket_output/
+vis_debug/
 tmp_full/
 
 # Local Python audit / debug scripts
@@ -20,9 +22,6 @@ xyzrgb_dragon_full.obj
 
 # Zip archives
 *.zip
-
-# Debug OBJ dumps written by visualization_test
-vis_debug/
 
 # macOS
 .DS_Store

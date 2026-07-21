@@ -1,9 +1,10 @@
 #include "example.h"
-#include "make_shape.h"
+#include "mesh_utils.h"
 #include "physics.h"
 #include "simulation.h"
 #include "solver.h"
-#include "visualization.h"
+#include "state_io.h"
+#include "output.h"
 #include "ipc_args.h"
 #include "broad_phase.h"
 
@@ -104,9 +105,21 @@ int main(int argc, char** argv) {
     std::cout << "d_hat = " << params.d_hat
               << (params.d_hat > 0.0 ? "  (barrier ON)" : "  (barrier OFF)")
               << "\n";
-    std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
-    std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
-    std::cout << "Rigid bodies: " << ref_mesh.total_mass.size() << "\n";
+    const std::size_t num_rigid_bodies = ref_mesh.total_mass.size();
+    const bool is_rigid_body_simulation = num_rigid_bodies > 0;
+    std::cout << "Vertices:  " << state.deformed_positions.size()
+              << (is_rigid_body_simulation ? " (rigid surface nodes)" : "") << "\n";
+    std::cout << "Triangles: " << ref_mesh.tris.size() / 3
+              << (is_rigid_body_simulation ? " (rigid surface geometry)" : "") << "\n";
+    std::cout << "Rigid bodies: " << num_rigid_bodies << "\n";
+    if (is_rigid_body_simulation) {
+        const std::size_t num_com_vectors = state.x_coms.size();
+        const std::size_t num_theta_vectors = state.omega.size();
+        std::cout << "Rigid-body reduced solve:\n";
+        std::cout << "  COM vectors:   " << num_com_vectors << " (" << 3 * num_com_vectors << " scalar unknowns)\n";
+        std::cout << "  Theta vectors: " << num_theta_vectors << " (" << 3 * num_theta_vectors << " scalar unknowns, represented by omega)\n";
+        std::cout << "  Total reduced scalar unknowns: " << 3 * (num_com_vectors + num_theta_vectors) << "\n";
+    }
 
     const std::string& outdir = args.outdir;
     const ExportFormat fmt = args.to_export_format();

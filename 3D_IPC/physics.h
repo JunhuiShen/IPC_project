@@ -11,7 +11,6 @@
 #include <cassert>
 
 class BroadPhase;
-#include <string>
 
 struct Tri { int v[3]; };
 
@@ -408,7 +407,3 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
 double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                const BroadPhase& broad_phase, const PinMap* pin_map = nullptr);
-
-void serialize_state(const std::string& dir, int frame, const DeformedState& state);
-
-bool deserialize_state(const std::string& dir, int frame, DeformedState& state);

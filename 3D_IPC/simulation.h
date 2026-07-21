@@ -2,8 +2,9 @@
 #include "physics.h"
 #include "solver.h"
 #include "broad_phase.h"
-#include "make_shape.h"
+#include "initial_guess.h"
 #include "rigid_body_ipc.h"
+#include "time_integration.h"
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -114,12 +115,8 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
 
         if (params.use_ogc || params.use_ogc_solver)
             xnew = state.deformed_positions;
-        else if (params.use_verlet_guess) {
-            const Vec3 dt2g = params.dt2() * params.gravity;
-            std::vector<Vec3> xverlet(xhat.size());
-            for (int i = 0; i < (int)xhat.size(); ++i) xverlet[i] = xhat[i] + dt2g;
-            xnew = ccd_initial_guess(state.deformed_positions, xverlet, ref_mesh, &broad_phase);
-        } 
+        else if (params.use_verlet_guess)
+            xnew = verlet_initial_guess(state.deformed_positions, xhat, ref_mesh, params, &broad_phase);
         else if (params.use_ccd_guess)
             xnew = ccd_initial_guess(state.deformed_positions, xhat, ref_mesh, &broad_phase);
         else if (params.use_translation_guess){

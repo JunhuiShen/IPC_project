@@ -1,13 +1,11 @@
 #pragma once
 
 #include "IPC_math.h"
-#include "ccd.h"
 #include "physics.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <functional>
 #include <limits>
 #include <vector>
 
@@ -134,18 +132,6 @@ public:
         return cache_.ss_pairs;
     }
 
-    // For each vertex vi in sequence, compute the safe step along
-    // (x[vi] -> x_new_fn(vi)) using the linear one-node-moves CCD check.
-    // All other vertices are treated as stationary at their already-committed
-    // positions. Each target is clamped slightly inside that vertex's cached
-    // node box because the cached contact pairs cover only motion within those
-    // boxes. Modifies x in place.
-    // use_ogc: project the per-iteration displacement onto the L2 trust-region
-    // sphere of radius 0.4 * d0_min(vi) centered at the current x[vi]. The
-    // radius is recomputed from the broad-phase cache each iteration so it
-    // adapts as vertices approach contacts.
-    void per_vertex_safe_step(std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety = 0.9, bool clip_ccd = true, bool use_ticcd = true, bool use_ogc = false, const std::vector<std::vector<int>>* color_groups = nullptr, std::atomic<int>* clip_count = nullptr) const;
-
     void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt);
 
     // Cache static mesh topology; reused by later build/initialize calls.
@@ -185,5 +171,4 @@ private:
     void build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double node_pad, double tri_pad, double edge_pad);
 };
 
-void incremental_refresh_vertex(BroadPhase::Cache& c, int vi, const std::vector<Vec3>& x,  
-    const RefMesh& mesh,  double box_pad, double node_box_radius_padded);
+void incremental_refresh_vertex(BroadPhase::Cache& c, int vi, const std::vector<Vec3>& x, const RefMesh& mesh, double box_pad, double node_box_radius_padded);

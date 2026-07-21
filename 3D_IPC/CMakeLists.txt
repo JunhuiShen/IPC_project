@@ -119,7 +119,7 @@ endfunction()
 # Libraries
 # -----------------------------------------------------------------------------
 
-# Geometry, constitutive models, contact kernels, and output utilities.
+# Geometry, constitutive models, and contact kernels.
 set(IPC_CORE_SOURCES
     IPC_math.cpp
     barrier_energy.cpp
@@ -127,13 +127,11 @@ set(IPC_CORE_SOURCES
     ccd.cpp
     corotated_energy.cpp
     node_triangle_distance.cpp
-    ogc_trust_region.cpp
     quaternion_math.cpp
     rigid_body.cpp
     rigid_body_ipc.cpp
     sdf_penalty_energy.cpp
     segment_segment_distance.cpp
-    visualization.cpp
 )
 
 add_library(corotated_energy_lib STATIC ${IPC_CORE_SOURCES})
@@ -147,15 +145,21 @@ target_link_libraries(corotated_energy_lib
         tight_inclusion::tight_inclusion
 )
 
-# Mesh setup, broad phase, physics assembly, and nonlinear solvers. Keeping
-# these sources in a library prevents every test from recompiling them.
+# Mesh setup, broad phase, safe stepping, physics assembly, output, and nonlinear solvers.
+# Keeping these sources in a library prevents every test from recompiling them.
 set(IPC_SIMULATION_SOURCES
     broad_phase.cpp
     example.cpp
+    initial_guess.cpp
     make_shape.cpp
+    mesh_utils.cpp
+    output.cpp
     parallel_helper.cpp
     physics.cpp
+    safe_step.cpp
     solver.cpp
+    state_io.cpp
+    time_integration.cpp
 )
 
 add_library(ipc STATIC ${IPC_SIMULATION_SOURCES})
@@ -223,7 +227,8 @@ if(BUILD_TESTING)
         rigid_body_ipc_test
         sdf_penalty_energy_test
         segment_segment_distance_test
-        total_energy_test
+        state_io_test
+        time_integration_test
     )
     foreach(test_target IN LISTS IPC_TEST_TARGETS)
         ipc_add_test("${test_target}")
@@ -235,11 +240,8 @@ if(BUILD_TESTING)
     ipc_add_test(restart_test DEFINITIONS
         GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
-    ipc_add_test(visualization_test DEFINITIONS
-        VIS_OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}"
+    ipc_add_test(output_test DEFINITIONS
+        OUTPUT_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}"
     )
 
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/state_io_test.cpp")
-        ipc_add_test(state_io_test)
-    endif()
 endif()
