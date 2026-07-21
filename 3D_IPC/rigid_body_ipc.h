@@ -5,6 +5,9 @@
 #include <utility>
 #include <vector>
 
+struct DeformedState;
+struct RefMesh;
+
 // Quaternion exponential E(omega) = exp((dt / 2) * omega) and derivatives
 Vec4 exp(const Vec3& omega, double dt);
 Mat43 dexp_domega(const Vec3& omega, double dt);
@@ -16,6 +19,12 @@ Mat43 dq_domega(const Vec4& q0, const Vec3& omega, double dt);
 std::array<Mat33, 4> d2q_domega2(const Vec4& q0, const Vec3& omega, double dt);
 
 // X_centered is a fixed body-space position measured from the center of mass.
+// Direct transforms using an already-evaluated orientation quaternion.
+Vec3 world_space_position(
+    const Vec3& X, const Vec3& x_com, const Vec4& orientation);
+Vec3 material_space_position(
+    const Vec3& x, const Vec3& x_com, const Vec4& orientation);
+
 // x = x_com + vec(q * (0, X_centered) * q^*) with q(omega) = E(omega, dt) * q0.
 // X_centered = vec(q^* * (0, x - x_com) * q) with q(omega) = E(omega, dt) * q0.
 Vec3 world_space_position(const Vec3& X_centered, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt);
@@ -28,6 +37,18 @@ std::array<Mat44, 3> d2x_dq2(const Vec3& X_centered);
 // Precompute I_hat = sum_p m_p R_p R_p^T once for each rigid body.
 // R_p[p] = X_p - X_com is the fixed body-reference COM offset of point p.
 Mat33 body_second_moment(const std::vector<double>& masses, const std::vector<Vec3>& R_p);
+
+// Register one rigid body from its particles' world-space positions. The
+// particles are appended to state.deformed_positions and receive equal mass
+// totaling total_mass.
+// The input orientation and omega use the scalar-first quaternion and
+// world-space angular-velocity conventions used by this file. Returns the
+// newly assigned rigid-body index.
+int create_rigid_body(
+    const std::vector<Vec3>& x,
+    const Vec3& v_com_input, const Vec4& orientation_input,
+    const Vec3& omega_input, double total_mass,
+    RefMesh& ref_mesh, DeformedState& state);
 
 // Rigid-body inertial incremental potential aggregated with I_hat.
 // The candidate quaternion is q(omega) = exp((dt / 2) * omega) * q_n.

@@ -1,5 +1,6 @@
 #include "example.h"
 #include "make_shape.h"
+#include "rigid_body_ipc.h"
 
 #include <algorithm>
 #include <cmath>
@@ -9,6 +10,31 @@ namespace {
 
 constexpr double kPi    = 3.14159265358979323846;
 constexpr double kTwoPi = 6.28318530717958647692;
+
+void append_box_mesh(
+    const Vec3& lo, const Vec3& hi,
+    std::vector<Vec3>& x, std::vector<int>& tris) {
+    const int base = static_cast<int>(x.size());
+    x.push_back(Vec3(lo.x(), lo.y(), lo.z()));
+    x.push_back(Vec3(hi.x(), lo.y(), lo.z()));
+    x.push_back(Vec3(hi.x(), hi.y(), lo.z()));
+    x.push_back(Vec3(lo.x(), hi.y(), lo.z()));
+    x.push_back(Vec3(lo.x(), lo.y(), hi.z()));
+    x.push_back(Vec3(hi.x(), lo.y(), hi.z()));
+    x.push_back(Vec3(hi.x(), hi.y(), hi.z()));
+    x.push_back(Vec3(lo.x(), hi.y(), hi.z()));
+
+    static constexpr int box_tris[36] = {
+        0, 2, 1, 0, 3, 2,
+        4, 5, 6, 4, 6, 7,
+        0, 1, 5, 0, 5, 4,
+        1, 2, 6, 1, 6, 5,
+        2, 3, 7, 2, 7, 6,
+        3, 0, 4, 3, 4, 7
+    };
+    for (int index : box_tris)
+        tris.push_back(base + index);
+}
 
 // Rotate `p` about the +x line through `axis_point` by `theta`.
 Vec3 rotate_about_x_axis(const Vec3& p, const Vec3& axis_point, double theta) {
@@ -569,4 +595,122 @@ void update_twist_untwist_visual(std::vector<Vec3>& static_x,
         static_x[i] = rotate_about_y_axis(spec.visual_v_rest[i - spec.visual_v_begin],
                                           spec.cyl_axis_point, theta);
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Example 5: freely rotating rigid tennis racket
+// ---------------------------------------------------------------------------
+// Commend line: ./build/3D_sim --example 5 --num_frames 500 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output 
+void build_rotating_tennis_racket_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params) {
+    clear_model(ref_mesh, state, X, pins);
+
+    params.gravity = Vec3::Zero();
+    params.d_hat = 0.0;
+    params.k_sdf = 0.0;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd = false;
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+
+    std::vector<Vec3> x;
+    std::vector<int> tris;
+
+    // Elliptical annular head, lying initially in the x-y plane.
+    constexpr int head_segments = 64;
+    constexpr double head_center_y = 0.25;
+    constexpr double outer_rx = 0.36;
+    constexpr double outer_ry = 0.48;
+    constexpr double inner_rx = 0.29;
+    constexpr double inner_ry = 0.39;
+    constexpr double half_thickness = 0.018;
+
+    for (int i = 0; i < head_segments; ++i) {
+        const double theta = kTwoPi * static_cast<double>(i)
+            / static_cast<double>(head_segments);
+        const double c = std::cos(theta);
+        const double s = std::sin(theta);
+        x.push_back(Vec3(outer_rx * c, head_center_y + outer_ry * s,
+                         half_thickness));
+        x.push_back(Vec3(outer_rx * c, head_center_y + outer_ry * s,
+                         -half_thickness));
+        x.push_back(Vec3(inner_rx * c, head_center_y + inner_ry * s,
+                         half_thickness));
+        x.push_back(Vec3(inner_rx * c, head_center_y + inner_ry * s,
+                         -half_thickness));
+    }
+
+    for (int i = 0; i < head_segments; ++i) {
+        const int j = (i + 1) % head_segments;
+        const int oi_f = 4 * i + 0;
+        const int oi_b = 4 * i + 1;
+        const int ii_f = 4 * i + 2;
+        const int ii_b = 4 * i + 3;
+        const int oj_f = 4 * j + 0;
+        const int oj_b = 4 * j + 1;
+        const int ij_f = 4 * j + 2;
+        const int ij_b = 4 * j + 3;
+
+        const int patch[24] = {
+            oi_f, oj_f, ii_f, oj_f, ij_f, ii_f,
+            oi_b, ii_b, oj_b, oj_b, ii_b, ij_b,
+            oi_f, oi_b, oj_f, oj_f, oi_b, oj_b,
+            ii_f, ij_f, ii_b, ij_f, ij_b, ii_b
+        };
+        tris.insert(tris.end(), std::begin(patch), std::end(patch));
+    }
+
+    // Handle and throat. The handle overlaps the bottom of the frame so the
+    // exported surface reads as one racket even though rigid kinematics do not
+    // require a topologically connected mesh.
+    append_box_mesh(
+        Vec3(-0.055, -0.98, -0.025),
+        Vec3( 0.055, -0.16,  0.025), x, tris);
+    append_box_mesh(
+        Vec3(-0.13, -0.25, -0.022),
+        Vec3( 0.13, -0.12,  0.022), x, tris);
+
+    // Thin box-shaped strings clipped to the inner ellipse.
+    constexpr double string_half_width = 0.003;
+    constexpr double string_half_thickness = 0.003;
+    for (int k = -3; k <= 3; ++k) {
+        const double string_x = 0.065 * static_cast<double>(k);
+        const double ratio = string_x / inner_rx;
+        const double half_y = inner_ry * std::sqrt(std::max(0.0, 1.0 - ratio * ratio));
+        append_box_mesh(
+            Vec3(string_x - string_half_width,
+                 head_center_y - half_y,
+                 -string_half_thickness),
+            Vec3(string_x + string_half_width,
+                 head_center_y + half_y,
+                  string_half_thickness), x, tris);
+    }
+    for (int k = -4; k <= 4; ++k) {
+        const double string_y = 0.075 * static_cast<double>(k);
+        const double ratio = string_y / inner_ry;
+        const double half_x = inner_rx * std::sqrt(std::max(0.0, 1.0 - ratio * ratio));
+        append_box_mesh(
+            Vec3(-half_x,
+                 head_center_y + string_y - string_half_width,
+                 -string_half_thickness),
+            Vec3( half_x,
+                 head_center_y + string_y + string_half_width,
+                  string_half_thickness), x, tris);
+    }
+
+    ref_mesh.tris = tris;
+    X.reserve(x.size());
+    for (const Vec3& position : x)
+        X.push_back(position.head<2>());
+
+    create_rigid_body(
+        x, Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
+        Vec3(double(-5), double(0.02), double(0.01)),
+        0.30, ref_mesh, state);
 }

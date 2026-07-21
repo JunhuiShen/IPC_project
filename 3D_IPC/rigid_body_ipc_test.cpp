@@ -1,6 +1,7 @@
 #include "rigid_body_ipc.h"
 
 #include "algebra/algebra.h"
+#include "physics.h"
 
 #include <gtest/gtest.h>
 
@@ -85,6 +86,80 @@ void expect_quadratic_convergence(
 
     EXPECT_TRUE(all_below_noise || saw_reliable_slope)
         << "no reliable finite-difference slope data";
+}
+
+TEST(RigidBodyIPCCreation, ComputesAndStoresRigidBodyState) {
+    const Vec3 center(0.7, -0.4, 1.2);
+    const Vec3 v_com(-0.3, 0.5, 0.2);
+    const Vec3 omega(0.4, -0.2, 0.3);
+    const Vec4 orientation =
+        quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
+    const std::vector<Vec3> body_offsets = {
+        Vec3(1.0, 0.0, 0.0), Vec3(-1.0, 0.0, 0.0),
+        Vec3(0.0, 2.0, 0.0), Vec3(0.0, -2.0, 0.0),
+        Vec3(0.0, 0.0, 0.5), Vec3(0.0, 0.0, -0.5)
+    };
+
+    DeformedState state;
+    state.deformed_positions.push_back(Vec3(9.0, 8.0, 7.0));
+    std::vector<Vec3> x;
+    for (const Vec3& offset : body_offsets) {
+        x.push_back(
+            center + quaternion_rotate(orientation, offset));
+    }
+
+    RefMesh ref_mesh;
+    constexpr double total_mass = 12.0;
+    const int rb = create_rigid_body(
+        x, v_com, 2.0 * orientation, omega, total_mass,
+        ref_mesh, state);
+    const std::vector<int>& nodes = ref_mesh.rb_nodes[rb];
+
+    ASSERT_EQ(rb, 0);
+    ASSERT_EQ(state.x_coms.size(), 1u);
+    ASSERT_EQ(ref_mesh.ref_positions.size(), 1u);
+    ASSERT_EQ(ref_mesh.rb_nodes.size(), 1u);
+    ASSERT_EQ(ref_mesh.num_positions, state.deformed_positions.size());
+    ASSERT_EQ(ref_mesh.node_to_rb.size(), state.deformed_positions.size());
+
+    EXPECT_TRUE(state.x_coms[rb].isApprox(center, 1.0e-14));
+    EXPECT_TRUE(state.v_coms[rb].isApprox(v_com, 1.0e-14));
+    EXPECT_TRUE(state.orientations[rb].isApprox(orientation, 1.0e-14));
+    EXPECT_TRUE(state.omega[rb].isApprox(omega, 1.0e-14));
+    EXPECT_DOUBLE_EQ(ref_mesh.total_mass[rb], total_mass);
+    EXPECT_EQ(ref_mesh.rb_nodes[rb], nodes);
+    EXPECT_EQ(ref_mesh.node_to_rb[0], -1);
+
+    const double nodal_mass = total_mass / body_offsets.size();
+    const std::vector<double> masses(body_offsets.size(), nodal_mass);
+    const Mat33 expected_I_hat = body_second_moment(masses, body_offsets);
+    EXPECT_TRUE(ref_mesh.I_hat[rb].isApprox(expected_I_hat, 1.0e-14));
+
+    for (std::size_t local = 0; local < nodes.size(); ++local) {
+        const int node = nodes[local];
+        const Vec3 world_offset = quaternion_rotate(
+            orientation, body_offsets[local]);
+        EXPECT_TRUE(ref_mesh.ref_positions[rb][local].isApprox(
+            body_offsets[local], 1.0e-14));
+        EXPECT_DOUBLE_EQ(ref_mesh.mass[node], nodal_mass);
+        EXPECT_EQ(ref_mesh.node_to_rb[node], rb);
+        EXPECT_TRUE(state.velocities[node].isApprox(
+            v_com + omega.cross(world_offset), 1.0e-14));
+    }
+}
+
+TEST(RigidBodyIPCPositionHelpers, OrientationOverloadsRoundTrip) {
+    const Vec3 x_com(0.7, -0.4, 1.2);
+    const Vec4 orientation =
+        quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
+    const Vec3 X(0.3, -0.6, 0.2);
+
+    const Vec3 x = world_space_position(
+        X, x_com, orientation);
+    const Vec3 recovered_X = material_space_position(
+        x, x_com, orientation);
+
+    EXPECT_TRUE(recovered_X.isApprox(X, 1.0e-14));
 }
 
 TEST(RigidBodyIPCQuaternionWrappers, MultiplyAndConjugateUseScalarFirstHamiltonConvention) {

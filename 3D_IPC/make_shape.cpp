@@ -34,6 +34,15 @@ void clear_model(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, 
     ref_mesh.tris.clear();
     state.deformed_positions.clear();
     state.velocities.clear();
+    state.x_coms.clear();
+    state.v_coms.clear();
+    state.orientations.clear();
+    state.omega.clear();
+    ref_mesh.ref_positions.clear();
+    ref_mesh.total_mass.clear();
+    ref_mesh.I_hat.clear();
+    ref_mesh.rb_nodes.clear();
+    ref_mesh.node_to_rb.clear();
     pins.clear();
 }
 

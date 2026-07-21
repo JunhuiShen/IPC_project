@@ -100,6 +100,7 @@ add_library(corotated_energy_lib
     visualization.cpp
     rigid_body.cpp
     rigid_body_ipc.cpp
+    quaternion_math.cpp
 )
 
 target_link_libraries(corotated_energy_lib
@@ -261,6 +262,22 @@ target_link_libraries(make_shape_test
 )
 
 gtest_discover_tests(make_shape_test)
+
+add_executable(example_test
+    example_test.cpp
+    example.cpp
+    make_shape.cpp
+    physics.cpp
+)
+
+target_link_libraries(example_test
+    PRIVATE
+    corotated_energy_lib
+    GTest::gtest
+    GTest::gtest_main
+)
+
+gtest_discover_tests(example_test)
 
 add_executable(simulation_snapshot_test
     simulation_snapshot_test.cpp

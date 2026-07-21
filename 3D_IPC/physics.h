@@ -147,9 +147,11 @@ struct RefMesh {
     size_t num_positions;
 
     // Rigid Bodies
-    std::vector<Vec3> ref_positions; // array of particles in material space for each rb
+    std::vector<std::vector<Vec3>> ref_positions; // body-space particle positions for each rb
     std::vector<double> total_mass; // total_mass for each rb
-    std::vector<Mat16> inertia_tensor_C4; // IPC inertia tensor for each rb
+    std::vector<Mat33> I_hat; // IPC inertia tensor for each rb
+    std::vector<std::vector<int>> rb_nodes; // global particle indices for each rb
+    std::vector<int> node_to_rb; // global particle index -> rb index (-1 if deformable)
 
     inline void initialize(const std::vector<Vec2>& X, const std::vector<Vec3>& x_rest){
         num_positions = X.size();

@@ -39,8 +39,9 @@ int main(int argc, char** argv) {
     else if (args.example == 2) build_two_cylinder_twist_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, cyl_twist_spec);
     else if (args.example == 3) build_twist_untwist_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, tu_spec);
     else if (args.example == 4) build_avatar_clothing_example(args, ref_mesh, state, pins, params, static_x, static_tris);
+    else if (args.example == 5) build_rotating_tennis_racket_example(args, ref_mesh, state, X, pins, params);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5.\n";
         return 1;
     }
 
@@ -68,7 +69,8 @@ int main(int argc, char** argv) {
         // TODO: avatar clothing pin updater
     }
 
-    ref_mesh.build_lumped_mass(params.density, params.thickness);
+    if (ref_mesh.total_mass.empty())
+        ref_mesh.build_lumped_mass(params.density, params.thickness);
     VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);
 
     // Validate d_hat against the minimum edge length in the mesh.
@@ -104,6 +106,7 @@ int main(int argc, char** argv) {
               << "\n";
     std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
+    std::cout << "Rigid bodies: " << ref_mesh.total_mass.size() << "\n";
 
     const std::string& outdir = args.outdir;
     const ExportFormat fmt = args.to_export_format();
@@ -172,9 +175,14 @@ int main(int argc, char** argv) {
             };
         }
 
-        result = advance_one_frame(
-            state, ref_mesh, adj, pins, params, broad_phase,
-            frame_index, pin_updater, substep_cb, outdir);
+        if (!ref_mesh.total_mass.empty()) {
+            result = advance_one_frame_rb(
+                state, ref_mesh, params, frame_index, substep_cb);
+        } else {
+            result = advance_one_frame(
+                state, ref_mesh, adj, pins, params, broad_phase,
+                frame_index, pin_updater, substep_cb, outdir);
+        }
 
         if (!result.converged) {
             std::cerr << "Error: solver failed to converge at frame " << frame_index
@@ -186,9 +194,16 @@ int main(int argc, char** argv) {
         double solver_ms = std::chrono::duration<double, std::milli>(solver_end - solver_start).count();
         total_solver_ms += solver_ms;
 
-        std::cout << "Frame " << std::setw(4) << frame_index
-                  << " | global_iters = " << std::setw(3) << result.iterations
-                  << " | solver_time = "  << std::fixed << std::setprecision(3)
+        std::cout << "Frame " << std::setw(4) << frame_index;
+        if (result.has_residual) {
+            std::cout << " | initial_residual = " << std::scientific
+                      << std::setprecision(6)
+                      << result.initial_residual
+                      << " | final_residual = "
+                      << result.final_residual;
+        }
+        std::cout << " | global_iters = " << std::setw(3) << result.iterations
+                  << " | solver_time = " << std::fixed << std::setprecision(3)
                   << solver_ms << " ms\n";
 
         if (!params.write_substeps)

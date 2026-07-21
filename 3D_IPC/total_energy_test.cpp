@@ -4,6 +4,9 @@
 #include "physics.h"
 #include "barrier_energy.h"
 #include "broad_phase.h"
+#include "rigid_body_ipc.h"
+#include "simulation.h"
+#include "solver.h"
 
 #include <Eigen/Dense>
 #include <vector>
@@ -415,4 +418,263 @@ TEST_F(TotalEnergyTest, SdfPenaltyDisabledIsBaseline) {
         g_ref = local_gradient(0, ref_mesh, adj, pins, p2, x, xhat, nt_pairs, ss_pairs);
     }
     EXPECT_TRUE((g - g_ref).isZero(0.0));
+}
+
+TEST(RigidBodySolverUpdate, ComUpdateUsesInertiaAndGravity) {
+    DeformedState state;
+    state.x_coms = {Vec3(-0.2, 0.4, 0.1)};
+    state.v_coms = {Vec3(0.7, -0.3, 0.2)};
+
+    SimParams params = SimParams::zeros();
+    params.gravity = Vec3(0.0, -9.81, 0.0);
+
+    constexpr double dt = 0.08;
+    constexpr double total_mass = 3.7;
+    const Vec3 x_com(0.5, -0.1, 0.3);
+    const rb_solver::ComUpdate update = rb_solver::compute_com_update(
+        0, state, x_com, params, dt, total_mass);
+
+    std::vector<Vec3> x_coms = {x_com};
+    rb_solver::commit_com_update(update, x_coms);
+    Vec3 expected_x_com = state.x_coms[0] + dt * state.v_coms[0];
+    expected_x_com.y() += dt * dt * params.gravity.y();
+
+    EXPECT_EQ(update.rb, 0);
+    EXPECT_DOUBLE_EQ(update.step, 1.0);
+    EXPECT_TRUE(x_coms[0].isApprox(expected_x_com, 1.0e-14));
+}
+
+TEST(RigidBodySolverUpdate, OrientationUpdateSolvesNewtonSystem) {
+    DeformedState state;
+    state.orientations = {
+        quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4))
+    };
+    state.omega = {Vec3(-0.2, 0.5, 0.4)};
+
+    constexpr double dt = 0.31;
+    const Vec3 omega(0.6, -0.3, 0.7);
+    const Mat33 I_hat = (Mat33() <<
+        1.4, 0.2, -0.1,
+        0.2, 0.9, 0.15,
+        -0.1, 0.15, 1.1).finished();
+    RefMesh ref_mesh;
+    ref_mesh.I_hat = {I_hat};
+
+    const auto [gradient, hessian] = inertia_rotation_gradient_hessian(
+        omega, state.orientations[0], state.omega[0], dt, I_hat);
+    const rb_solver::OrientationUpdate update =
+        rb_solver::compute_orientation_update(0, state, ref_mesh, omega, dt);
+
+    EXPECT_EQ(update.rb, 0);
+    EXPECT_DOUBLE_EQ(update.step, 1.0);
+    EXPECT_TRUE((hessian * update.domega).isApprox(gradient, 1.0e-12));
+}
+
+TEST(RigidBodySolverUpdate, OrientationCommitRoundTripsThroughQuaternion) {
+    DeformedState state;
+    state.orientations = {
+        quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4))
+    };
+
+    constexpr double dt = 0.31;
+    std::vector<Vec3> omega = {Vec3(0.6, -0.3, 0.7)};
+    std::vector<Vec4> orientations = {state.orientations[0]};
+    const rb_solver::OrientationUpdate update{
+        0, Vec3(0.15, -0.05, 0.2), 0.4
+    };
+    const Vec3 expected_omega = omega[0] - update.step * update.domega;
+
+    rb_solver::commit_orientation_update(
+        update, state, orientations, omega, dt);
+
+    const Vec4 expected_orientation = quaternion_align_sign(
+        quaternion_normalize(quaternion_from_angular_velocity(
+            state.orientations[0], expected_omega, dt)),
+        state.orientations[0]);
+    const Vec4 reconstructed_orientation = quaternion_align_sign(
+        quaternion_normalize(quaternion_from_angular_velocity(
+            state.orientations[0], omega[0], dt)),
+        orientations[0]);
+
+    EXPECT_TRUE(orientations[0].isApprox(expected_orientation, 1.0e-14));
+    EXPECT_TRUE(omega[0].isApprox(expected_omega, 1.0e-14));
+    EXPECT_TRUE(reconstructed_orientation.isApprox(orientations[0], 1.0e-14));
+}
+
+TEST(RigidBodySolver, BasicCollisionFreeSweepConverges) {
+    DeformedState state;
+    state.x_coms = {Vec3(-0.2, 0.4, 0.1), Vec3(0.8, -0.5, 0.3)};
+    state.v_coms = {Vec3(0.7, -0.3, 0.2), Vec3(-0.2, 0.6, -0.1)};
+    state.orientations = {
+        quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4)),
+        quaternion_normalize(Vec4(0.7, 0.1, -0.5, 0.2))
+    };
+    state.omega = {Vec3::Zero(), Vec3::Zero()};
+
+    RefMesh ref_mesh;
+    ref_mesh.total_mass = {3.7, 1.9};
+    ref_mesh.I_hat = {
+        (Mat33() <<
+            1.4, 0.2, -0.1,
+            0.2, 0.9, 0.15,
+            -0.1, 0.15, 1.1).finished(),
+        (Mat33() <<
+            0.8, -0.1, 0.05,
+            -0.1, 1.2, 0.2,
+            0.05, 0.2, 1.0).finished()
+    };
+
+    SimParams params = SimParams::zeros();
+    params.fps = 20.0;
+    params.substeps = 1;
+    params.gravity = Vec3(0.0, -9.81, 0.0);
+    params.max_global_iters = 20;
+    params.tol_abs = 1.0e-11;
+    params.damping = 1.0;
+
+    std::vector<Vec3> x_coms = {
+        Vec3(0.5, -0.1, 0.3), Vec3(-0.4, 0.2, -0.8)
+    };
+    std::vector<Vec4> orientations = state.orientations;
+    std::vector<Vec3> omega = {
+        Vec3(0.2, -0.1, 0.15), Vec3(-0.1, 0.25, 0.05)
+    };
+
+    const SolverResult result = global_gauss_seidel_solver_basic_rb(
+        ref_mesh, state, params, x_coms, orientations, omega);
+
+    ASSERT_TRUE(result.converged);
+    EXPECT_TRUE(result.has_residual);
+    EXPECT_GT(result.initial_residual, result.final_residual);
+    EXPECT_LE(result.final_residual, params.tol_abs);
+    EXPECT_GE(result.iterations, 1);
+    EXPECT_LE(result.iterations, params.max_global_iters);
+    for (int rb = 0; rb < 2; ++rb) {
+        Vec3 expected_com =
+            state.x_coms[rb] + params.dt() * state.v_coms[rb];
+        expected_com.y() += params.dt2() * params.gravity.y();
+        EXPECT_TRUE(x_coms[rb].isApprox(expected_com, 1.0e-12));
+        EXPECT_TRUE(omega[rb].isZero(1.0e-10));
+        EXPECT_TRUE(orientations[rb].isApprox(
+            state.orientations[rb], 1.0e-10));
+    }
+}
+
+TEST(RigidBodySolver, ConvergedInitialGuessStillAdvancesOrientation) {
+    DeformedState state;
+    state.x_coms = {Vec3::Zero()};
+    state.v_coms = {Vec3::Zero()};
+    state.orientations = {Vec4(1.0, 0.0, 0.0, 0.0)};
+    state.omega = {Vec3(5.0, 0.0, 0.0)};
+
+    RefMesh ref_mesh;
+    ref_mesh.total_mass = {1.0};
+    ref_mesh.I_hat = {Mat33::Identity()};
+
+    SimParams params = SimParams::zeros();
+    params.fps = 30.0;
+    params.substeps = 1;
+    params.max_global_iters = 20;
+    params.tol_abs = 1.0e6;
+
+    std::vector<Vec3> x_coms = state.x_coms;
+    std::vector<Vec4> orientations = state.orientations;
+    std::vector<Vec3> omega = state.omega;
+    const Vec4 expected_orientation = quaternion_align_sign(
+        quaternion_normalize(quaternion_from_angular_velocity(
+            state.orientations[0], state.omega[0], params.dt())),
+        state.orientations[0]);
+
+    const SolverResult result = global_gauss_seidel_solver_basic_rb(
+        ref_mesh, state, params, x_coms, orientations, omega);
+
+    ASSERT_TRUE(result.converged);
+    EXPECT_EQ(result.iterations, 0);
+    EXPECT_TRUE(orientations[0].isApprox(expected_orientation, 1.0e-14));
+    EXPECT_FALSE(orientations[0].isApprox(state.orientations[0], 1.0e-14));
+    EXPECT_TRUE(omega[0].isApprox(state.omega[0], 1.0e-14));
+}
+
+TEST(RigidBodySolver, BasicCollisionFreeSweepHonorsFixedIterations) {
+    DeformedState state;
+    state.x_coms = {Vec3::Zero()};
+    state.v_coms = {Vec3::Zero()};
+    state.orientations = {Vec4(1.0, 0.0, 0.0, 0.0)};
+    state.omega = {Vec3::Zero()};
+
+    RefMesh ref_mesh;
+    ref_mesh.total_mass = {1.0};
+    ref_mesh.I_hat = {Mat33::Identity()};
+
+    SimParams params = SimParams::zeros();
+    params.max_global_iters = 3;
+    params.fixed_iters = true;
+
+    std::vector<Vec3> x_coms = {Vec3(1.0, -2.0, 3.0)};
+    std::vector<Vec4> orientations = state.orientations;
+    std::vector<Vec3> omega = {Vec3(0.1, -0.2, 0.3)};
+
+    const SolverResult result = global_gauss_seidel_solver_basic_rb(
+        ref_mesh, state, params, x_coms, orientations, omega);
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_TRUE(result.has_residual);
+    EXPECT_EQ(result.iterations, params.max_global_iters);
+}
+
+TEST(RigidBodySimulation, AdvanceOneFrameCommitsEachSubstep) {
+    const Vec3 x_com_0(-0.2, 0.4, 0.1);
+    const Vec3 v_com_0(0.7, -0.3, 0.2);
+    const Vec4 orientation_0 =
+        quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
+    const std::vector<Vec3> body_offsets = {
+        Vec3(1.0, 0.0, 0.0), Vec3(-1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0), Vec3(0.0, -1.0, 0.0),
+        Vec3(0.0, 0.0, 1.0), Vec3(0.0, 0.0, -1.0)
+    };
+
+    DeformedState state;
+    std::vector<Vec3> x;
+    for (const Vec3& offset : body_offsets) {
+        x.push_back(
+            x_com_0 + quaternion_rotate(orientation_0, offset));
+    }
+
+    RefMesh ref_mesh;
+    create_rigid_body(
+        x, v_com_0, orientation_0, Vec3::Zero(), 3.7,
+        ref_mesh, state);
+    const std::vector<int>& nodes = ref_mesh.rb_nodes[0];
+
+    SimParams params = SimParams::zeros();
+    params.fps = 20.0;
+    params.substeps = 2;
+    params.gravity = Vec3(0.0, -9.81, 0.0);
+    params.max_global_iters = 1;
+    params.fixed_iters = true;
+
+    const SolverResult result = advance_one_frame_rb(
+        state, ref_mesh, params);
+
+    const double dt = params.dt();
+    const Vec3 expected_v = v_com_0 + 2.0 * dt * params.gravity;
+    const Vec3 expected_x =
+        x_com_0 + 2.0 * dt * v_com_0
+        + 3.0 * dt * dt * params.gravity;
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_TRUE(result.has_residual);
+    EXPECT_GT(result.initial_residual, result.final_residual);
+    EXPECT_EQ(result.iterations, params.substeps);
+    EXPECT_TRUE(state.x_coms[0].isApprox(expected_x, 1.0e-12));
+    EXPECT_TRUE(state.v_coms[0].isApprox(expected_v, 1.0e-12));
+    EXPECT_TRUE(state.orientations[0].isApprox(orientation_0, 1.0e-12));
+    EXPECT_TRUE(state.omega[0].isZero(1.0e-12));
+    for (std::size_t local = 0; local < nodes.size(); ++local) {
+        EXPECT_TRUE(state.deformed_positions[nodes[local]].isApprox(
+            expected_x + quaternion_rotate(orientation_0, body_offsets[local]),
+            1.0e-12));
+        EXPECT_TRUE(state.velocities[nodes[local]].isApprox(
+            expected_v, 1.0e-12));
+    }
 }

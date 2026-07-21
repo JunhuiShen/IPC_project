@@ -135,3 +135,9 @@ void build_avatar_clothing_example(const IPCArgs3D& args,
                                    SimParams& params,
                                    std::vector<Vec3>& static_x,
                                    std::vector<int>&  static_tris);
+
+// Example 5: a freely rotating rigid tennis racket with no gravity.
+void build_rotating_tennis_racket_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params);

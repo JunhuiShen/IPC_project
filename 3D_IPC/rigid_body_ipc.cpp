@@ -1,6 +1,8 @@
 #include "rigid_body_ipc.h"
+#include "physics.h"
 #include <cassert>
 #include <cmath>
+#include <stdexcept>
 #include <algebra/algebra.h>
 
 namespace {
@@ -199,14 +201,24 @@ Vec4 quaternion_from_angular_velocity(const Vec4& q0, const Vec3& omega, double 
     return quaternion_multiply(exp(omega, dt), q0);
 }
 
+Vec3 world_space_position(
+    const Vec3& X, const Vec3& x_com, const Vec4& orientation) {
+    return x_com + quaternion_rotate(orientation, X);
+}
+
+Vec3 material_space_position(
+    const Vec3& x, const Vec3& x_com, const Vec4& orientation) {
+    return quaternion_inverse_rotate(orientation, x - x_com);
+}
+
 Vec3 world_space_position(const Vec3& X_centered, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt) {
     const Vec4 quat = quaternion_from_angular_velocity(q0, omega, dt);
-    return x_com + quaternion_rotate(quat, X_centered);
+    return world_space_position(X_centered, x_com, quat);
 }
 
 Vec3 material_space_position( const Vec3& x, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt) {
     const Vec4 quat = quaternion_from_angular_velocity(q0, omega, dt);
-    return quaternion_inverse_rotate(quat, x - x_com);
+    return material_space_position(x, x_com, quat);
 }
 
 // J(c,beta) = d x_c / d q_beta for x = x_com + vec(q * (0, X_centered) * q^*).
@@ -269,6 +281,102 @@ Mat33 body_second_moment(const std::vector<double>& masses, const std::vector<Ve
     for (std::size_t p = 0; p < R_p.size(); ++p)
         I_hat += masses[p] * R_p[p] * R_p[p].transpose();
     return I_hat;
+}
+
+int create_rigid_body(
+    const std::vector<Vec3>& x,
+    const Vec3& v_com_input, const Vec4& orientation_input,
+    const Vec3& omega_input, double total_mass,
+    RefMesh& ref_mesh, DeformedState& state) {
+    if (x.empty())
+        throw std::invalid_argument("create_rigid_body: x cannot be empty");
+    if (!std::isfinite(total_mass) || total_mass <= 0.0)
+        throw std::invalid_argument("create_rigid_body: total_mass must be positive and finite");
+    if (!orientation_input.allFinite()
+        || orientation_input.squaredNorm() <= 1.0e-24) {
+        throw std::invalid_argument("create_rigid_body: orientation must be a nonzero finite quaternion");
+    }
+    if (!v_com_input.allFinite() || !omega_input.allFinite())
+        throw std::invalid_argument("create_rigid_body: velocities must be finite");
+    for (const Vec3& position : x) {
+        if (!position.allFinite()) {
+            throw std::invalid_argument(
+                "create_rigid_body: world-space positions must be finite");
+        }
+    }
+
+    const std::size_t num_rbs = ref_mesh.total_mass.size();
+    const bool storage_is_consistent =
+        ref_mesh.I_hat.size() == num_rbs
+        && ref_mesh.ref_positions.size() == num_rbs
+        && ref_mesh.rb_nodes.size() == num_rbs
+        && state.x_coms.size() == num_rbs
+        && state.v_coms.size() == num_rbs
+        && state.orientations.size() == num_rbs
+        && state.omega.size() == num_rbs;
+    if (!storage_is_consistent) {
+        throw std::invalid_argument(
+            "create_rigid_body: existing rigid-body arrays have inconsistent sizes");
+    }
+
+    const std::size_t old_num_nodes = state.deformed_positions.size();
+    if (state.velocities.size() < old_num_nodes)
+        state.velocities.resize(old_num_nodes, Vec3::Zero());
+    if (ref_mesh.mass.size() < old_num_nodes)
+        ref_mesh.mass.resize(old_num_nodes, 0.0);
+    if (ref_mesh.node_to_rb.size() < old_num_nodes)
+        ref_mesh.node_to_rb.resize(old_num_nodes, -1);
+
+    state.deformed_positions.insert(
+        state.deformed_positions.end(),
+        x.begin(), x.end());
+    state.velocities.resize(state.deformed_positions.size(), Vec3::Zero());
+    ref_mesh.mass.resize(state.deformed_positions.size(), 0.0);
+    ref_mesh.node_to_rb.resize(state.deformed_positions.size(), -1);
+    ref_mesh.num_positions = state.deformed_positions.size();
+
+    std::vector<int> node_indices(x.size());
+    for (std::size_t local = 0; local < x.size(); ++local)
+        node_indices[local] = static_cast<int>(old_num_nodes + local);
+
+    const Vec4 orientation = quaternion_normalize(orientation_input);
+    const double nodal_mass =
+        total_mass / static_cast<double>(x.size());
+
+    Vec3 x_com = Vec3::Zero();
+    for (const Vec3& position : x)
+        x_com += nodal_mass * position;
+    x_com /= total_mass;
+
+    std::vector<Vec3> ref_positions;
+    ref_positions.reserve(x.size());
+    std::vector<double> nodal_masses(x.size(), nodal_mass);
+    for (const Vec3& position : x) {
+        ref_positions.push_back(material_space_position(
+            position, x_com, orientation));
+    }
+    const Mat33 I_hat = body_second_moment(nodal_masses, ref_positions);
+
+    const int rb = static_cast<int>(num_rbs);
+    state.x_coms.push_back(x_com);
+    state.v_coms.push_back(v_com_input);
+    state.orientations.push_back(orientation);
+    state.omega.push_back(omega_input);
+
+    ref_mesh.ref_positions.push_back(ref_positions);
+    ref_mesh.total_mass.push_back(total_mass);
+    ref_mesh.I_hat.push_back(I_hat);
+    ref_mesh.rb_nodes.push_back(node_indices);
+
+    for (int node : node_indices) {
+        const Vec3 world_offset = state.deformed_positions[node] - x_com;
+        ref_mesh.mass[node] = nodal_mass;
+        ref_mesh.node_to_rb[node] = rb;
+        state.velocities[node] =
+            v_com_input + omega_input.cross(world_offset);
+    }
+
+    return rb;
 }
 
 // E_in = 1/2 m ||x_com - x_com_n - dt v_com_n||^2 + 1/2 tr(D I_hat D^T).
