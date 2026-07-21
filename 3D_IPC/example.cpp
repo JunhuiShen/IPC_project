@@ -3,9 +3,12 @@
 #include "mesh_utils.h"
 #include "rigid_body_ipc.h"
 
+#include <Eigen/Eigenvalues>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 namespace {
 
@@ -712,6 +715,86 @@ void build_rotating_tennis_racket_example(
 
     create_rigid_body(
         x, Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
-        Vec3(double(-5), double(0.02), double(0.01)),
+        Vec3(double(5), double(0.02), double(0.01)),
         0.30, ref_mesh, state);
+}
+
+
+// ---------------------------------------------------------------------------
+// Example 6: freely rotating space tool
+// ---------------------------------------------------------------------------
+// command line: ./build/3D_sim --example 6 --num_frames 2000 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir space_tool_output 
+void build_rotating_space_tool_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params) {
+    clear_model(ref_mesh, state, X, pins);
+
+    params.gravity = Vec3::Zero();
+    params.d_hat = 0.0;
+    params.k_sdf = 0.0;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd = false;
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+
+    // The rotational residual is small in physical units. These tolerances
+    // ensure the torque-free angular-velocity update is not skipped.
+    params.tol_abs = 1.0e-12;
+    params.tol_rel = 1.0e-8;
+
+    std::vector<Vec3> x;
+    std::vector<int> tris;
+
+    // A vertical tool body lying initially in the x-y plane. A short handle
+    // protrudes from the right side near its middle, matching a "|-" profile.
+    append_box_mesh(
+        Vec3(-0.080, -0.50, -0.060),
+        Vec3( 0.080,  0.50,  0.060), x, tris); // thick vertical body
+    append_box_mesh(
+        Vec3(0.070, -0.040, -0.040),
+        Vec3(0.38,  0.040,  0.040), x, tris);  // thinner side handle
+
+    ref_mesh.tris = tris;
+    X.reserve(x.size());
+    for (const Vec3& position : x)
+        X.push_back(position.head<2>());
+
+    // The asymmetric "|-" geometry rotates the in-plane principal axes away
+    // from the coordinate axes. Compute them from the same equal nodal masses
+    // used by create_rigid_body, then spin mostly around the intermediate one.
+    constexpr double total_mass = 0.60;
+    const double nodal_mass = total_mass / static_cast<double>(x.size());
+    Vec3 x_com = Vec3::Zero();
+    for (const Vec3& position : x)
+        x_com += nodal_mass * position;
+    x_com /= total_mass;
+
+    std::vector<Vec3> centered_positions;
+    centered_positions.reserve(x.size());
+    for (const Vec3& position : x)
+        centered_positions.push_back(position - x_com);
+    const std::vector<double> masses(x.size(), nodal_mass);
+    const Mat33 second_moment =
+        body_second_moment(masses, centered_positions);
+    const Mat33 physical_inertia =
+        second_moment.trace() * Mat33::Identity() - second_moment;
+    const Eigen::SelfAdjointEigenSolver<Mat33> eigensolver(physical_inertia);
+    if (eigensolver.info() != Eigen::Success) {
+        throw std::runtime_error(
+            "build_rotating_space_tool_example: inertia eigensolve failed");
+    }
+
+    const Mat33 principal_axes = eigensolver.eigenvectors();
+    const Vec3 initial_omega =
+        5.0 * principal_axes.col(1)
+        + 0.04 * principal_axes.col(0)
+        + 0.02 * principal_axes.col(2);
+
+    create_rigid_body(
+        x, Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
+        initial_omega, total_mass, ref_mesh, state);
 }

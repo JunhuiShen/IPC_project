@@ -141,3 +141,10 @@ void build_rotating_tennis_racket_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
+
+// Example 6: a freely rotating "|-" space tool initialized near its
+// intermediate principal axis to demonstrate the Dzhanibekov effect.
+void build_rotating_space_tool_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params);

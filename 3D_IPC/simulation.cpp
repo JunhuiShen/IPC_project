@@ -41,8 +41,9 @@ int main(int argc, char** argv) {
     else if (args.example == 3) build_twist_untwist_example(args, ref_mesh, state, X, pins, params, static_x, static_tris, tu_spec);
     else if (args.example == 4) build_avatar_clothing_example(args, ref_mesh, state, pins, params, static_x, static_tris);
     else if (args.example == 5) build_rotating_tennis_racket_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 6) build_rotating_space_tool_example(args, ref_mesh, state, X, pins, params);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6.\n";
         return 1;
     }
 

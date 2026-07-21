@@ -51,7 +51,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_ticcd                   = false;    // true: Tight-Inclusion library | false: self-written linear CCD
 
     // --- scene selection ---
-    int         example      = 1;   // 1-4 deformable scenes, 5=rotating rigid tennis racket
+    int         example      = 1;   // 1-4 deformable, 5=racket, 6=space tool
     double      sheet_y      = 0.20; // m -- midline y for example 1
 
     // example 1: square cloth twisted in place
