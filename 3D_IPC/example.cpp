@@ -798,3 +798,63 @@ void build_rotating_space_tool_example(
         x, Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
         initial_omega, total_mass, ref_mesh, state);
 }
+
+
+// ---------------------------------------------------------------------------
+// Example 7: rigid box falling onto a ground plane
+// ---------------------------------------------------------------------------
+// command line: ./build/3D_sim --example 7 --num_frames 200 --substeps 10 --tol_abs 1e-12 --tol_rel 1e-10 --outdir drop_box_output --format obj
+void build_rigid_box_drop_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params,
+    std::vector<Vec3>& static_x, std::vector<int>& static_tris) {
+    clear_model(ref_mesh, state, X, pins);
+    static_x.clear();
+    static_tris.clear();
+
+    // Keep these values controllable from the command line. Their defaults
+    // provide Earth gravity and a stiff, slightly softened ground contact.
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.k_sdf = args.k_sdf;
+    params.eps_sdf = args.eps_sdf;
+    params.d_hat = 0.0;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.sdf_planes.push_back(
+        {Vec3::Zero(), Vec3::UnitY()});
+    params.use_ccd = false;
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+
+    std::vector<Vec3> x;
+    std::vector<int> tris;
+    const Vec3 box_center(0.0, 5.0, 0.0);
+    const Vec3 box_half_extent(0.30, 0.20, 0.25);
+    append_box_mesh(
+        box_center - box_half_extent,
+        box_center + box_half_extent, x, tris);
+
+    ref_mesh.tris = tris;
+    X.reserve(x.size());
+    for (const Vec3& position : x)
+        X.push_back(position.head<2>());
+
+    create_rigid_body(
+        x, Vec3::Zero(), Vec4(1, .00, 0.0, 0.0),
+        Vec3{1.0, 0.0, 0.0}, 1, ref_mesh, state);
+
+    // Flat visual ground at the same y=0 surface used by the plane SDF.
+    static_x = {
+        Vec3(-2.0, 0.0, -2.0),
+        Vec3( 2.0, 0.0, -2.0),
+        Vec3( 2.0, 0.0,  2.0),
+        Vec3(-2.0, 0.0,  2.0),
+    };
+    static_tris = {
+        0, 2, 1,
+        0, 3, 2,
+    };
+}

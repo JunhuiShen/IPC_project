@@ -2,6 +2,7 @@
 
 #include "algebra/algebra.h"
 #include "physics.h"
+#include "solver.h"
 
 #include <gtest/gtest.h>
 
@@ -711,6 +712,101 @@ TEST(RigidBodyIPCInertialEnergy, ReducedEnergyMatchesFullNodalMassQuadratic) {
     const double reduced_energy = incremental_potential_energy(x_com, omega, x_com_n, v_com_n, q_n, omega_n, dt, total_mass, I_hat);
 
     EXPECT_NEAR(reduced_energy, full_nodal_energy, 1.0e-14);
+}
+
+TEST(RigidBodyIPCSolver, AddsRigidSDFTranslationAndRotationTerms) {
+    const Vec3 center(0.2, -0.25, 0.1);
+    const std::vector<Vec3> offsets = {
+        Vec3(0.8, -0.4, 0.3),
+        Vec3(-0.4, -0.2, -0.5),
+        Vec3(-0.3, 0.5, 0.1),
+        Vec3(-0.1, 0.1, 0.1),
+    };
+    std::vector<Vec3> x;
+    for (const Vec3& offset : offsets)
+        x.push_back(center + offset);
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    constexpr double total_mass = 4.0;
+    const int rb = create_rigid_body(
+        x, Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0), Vec3::Zero(),
+        total_mass, ref_mesh, state);
+
+    SimParams params = SimParams::zeros();
+    params.fps = 10.0;
+    params.substeps = 1;
+    params.k_sdf = 20.0;
+    params.eps_sdf = 0.0;
+    params.sdf_planes.push_back(
+        {Vec3::Zero(), Vec3::UnitY()});
+    params.max_global_iters = 1;
+    params.fixed_iters = true;
+    params.damping = 1.0;
+    const double dt = params.dt();
+    const double dt2 = dt * dt;
+
+    Vec3 expected_com_gradient = Vec3::Zero();
+    Mat33 expected_com_hessian = inertia_translation_hessian(total_mass);
+    for (const Vec3& X_centered : ref_mesh.ref_positions[rb]) {
+        const SDFEvaluation sdf = evaluate_sdf(
+            params.sdf_planes.front(),
+            world_space_position(
+                X_centered, center, state.orientations[rb], Vec3::Zero(), dt));
+        const RigidSDFGradient gradient = sdf_penalty_gradient_rb(
+            sdf, X_centered, state.orientations[rb], Vec3::Zero(), dt,
+            params.k_sdf, params.eps_sdf);
+        const RigidSDFHessian hessian = sdf_penalty_hessian_rb(
+            sdf, X_centered, state.orientations[rb], Vec3::Zero(), dt,
+            params.k_sdf, params.eps_sdf,
+            /*include_sdf_curvature=*/false,
+            /*include_rigid_curvature=*/false);
+        expected_com_gradient += dt2 * gradient.translation;
+        expected_com_hessian += dt2 * hessian.translation_translation;
+    }
+    const Vec3 expected_com = center
+        - expected_com_hessian.ldlt().solve(expected_com_gradient);
+
+    auto [expected_omega_gradient, expected_omega_hessian] =
+        inertia_rotation_gradient_hessian(
+            Vec3::Zero(), state.orientations[rb], state.omega[rb], dt,
+            ref_mesh.I_hat[rb]);
+    for (const Vec3& X_centered : ref_mesh.ref_positions[rb]) {
+        const SDFEvaluation sdf = evaluate_sdf(
+            params.sdf_planes.front(),
+            world_space_position(
+                X_centered, expected_com, state.orientations[rb],
+                Vec3::Zero(), dt));
+        const RigidSDFGradient gradient = sdf_penalty_gradient_rb(
+            sdf, X_centered, state.orientations[rb], Vec3::Zero(), dt,
+            params.k_sdf, params.eps_sdf);
+        const RigidSDFHessian hessian = sdf_penalty_hessian_rb(
+            sdf, X_centered, state.orientations[rb], Vec3::Zero(), dt,
+            params.k_sdf, params.eps_sdf,
+            /*include_sdf_curvature=*/false,
+            /*include_rigid_curvature=*/false);
+        expected_omega_gradient += dt2 * gradient.rotation;
+        expected_omega_hessian += dt2 * hessian.rotation_rotation;
+    }
+    const Vec3 expected_omega = -expected_omega_hessian.ldlt().solve(
+        expected_omega_gradient);
+
+    std::vector<Vec3> x_coms = state.x_coms;
+    std::vector<Vec4> orientations = state.orientations;
+    std::vector<Vec3> omega = state.omega;
+    const SolverResult result = global_gauss_seidel_solver_basic_rb(
+        ref_mesh, state, params, x_coms, orientations, omega);
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_EQ(result.iterations, 1);
+    EXPECT_GT(expected_com.y(), center.y());
+    EXPECT_GT(expected_omega.norm(), 1.0e-6);
+    EXPECT_TRUE(x_coms[rb].isApprox(expected_com, 1.0e-12));
+    EXPECT_TRUE(omega[rb].isApprox(expected_omega, 1.0e-12));
+    EXPECT_TRUE(orientations[rb].isApprox(
+        quaternion_from_angular_velocity(
+            state.orientations[rb], expected_omega, dt),
+        1.0e-12));
 }
 
 }  // namespace

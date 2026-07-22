@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -476,6 +477,87 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
 namespace {
 namespace rb_solver {
 
+bool rigid_sdf_min_evaluation(
+    const SimParams& params, const Vec3& x, SDFEvaluation& result) {
+    bool found = false;
+    result.phi = std::numeric_limits<double>::infinity();
+
+    const auto consider = [&](const SDFEvaluation& candidate) {
+        if (!found || candidate.phi < result.phi) {
+            result = candidate;
+            found = true;
+        }
+    };
+
+    for (const PlaneSDF& plane : params.sdf_planes)
+        consider(evaluate_sdf(plane, x));
+    for (const CylinderSDF& cylinder : params.sdf_cylinders)
+        consider(evaluate_sdf(cylinder, x));
+    for (const SphereSDF& sphere : params.sdf_spheres)
+        consider(evaluate_sdf(sphere, x));
+
+    return found;
+}
+
+void accumulate_rigid_sdf_terms(
+    const std::vector<Vec3>& ref_positions,
+    const Vec3& x_com, const Vec4& q_n, const Vec3& omega,
+    const SimParams& params, double dt,
+    Vec3* translation_gradient, Mat33* translation_hessian,
+    Vec3* rotation_gradient, Mat33* rotation_hessian) {
+    if (params.k_sdf <= 0.0)
+        return;
+
+    const double dt2 = dt * dt;
+    for (const Vec3& X_centered : ref_positions) {
+        const Vec3 x = world_space_position(
+            X_centered, x_com, q_n, omega, dt);
+        SDFEvaluation sdf;
+        if (!rigid_sdf_min_evaluation(params, x, sdf))
+            continue;
+
+        if (translation_gradient != nullptr || rotation_gradient != nullptr) {
+            const RigidSDFGradient sdf_gradient = sdf_penalty_gradient_rb(
+                sdf, X_centered, q_n, omega, dt,
+                params.k_sdf, params.eps_sdf);
+            if (translation_gradient != nullptr)
+                *translation_gradient += dt2 * sdf_gradient.translation;
+            if (rotation_gradient != nullptr)
+                *rotation_gradient += dt2 * sdf_gradient.rotation;
+        }
+
+        if (translation_hessian != nullptr || rotation_hessian != nullptr) {
+            const RigidSDFHessian sdf_hessian = sdf_penalty_hessian_rb(
+                sdf, X_centered, q_n, omega, dt,
+                params.k_sdf, params.eps_sdf,
+                /*include_sdf_curvature=*/false,
+                /*include_rigid_curvature=*/false);
+            if (translation_hessian != nullptr)
+                *translation_hessian += dt2 * sdf_hessian.translation_translation;
+            if (rotation_hessian != nullptr)
+                *rotation_hessian += dt2 * sdf_hessian.rotation_rotation;
+        }
+    }
+}
+
+void add_rigid_sdf_translation_terms(
+    const std::vector<Vec3>& ref_positions,
+    const Vec3& x_com, const Vec4& q_n, const Vec3& omega,
+    const SimParams& params, double dt, Vec3& gradient, Mat33& hessian) {
+    accumulate_rigid_sdf_terms(
+        ref_positions, x_com, q_n, omega, params, dt,
+        &gradient, &hessian, nullptr, nullptr);
+}
+
+void add_rigid_sdf_rotation_terms(
+    const std::vector<Vec3>& ref_positions,
+    const Vec3& x_com, const Vec4& q_n, const Vec3& omega,
+    const SimParams& params, double dt, Vec3& gradient, Mat33& hessian) {
+    accumulate_rigid_sdf_terms(
+        ref_positions, x_com, q_n, omega, params, dt,
+        nullptr, nullptr, &gradient, &hessian);
+}
+
 Vec3 angular_velocity_from_orientation(
     const Vec4& q, const Vec4& q_n, double dt) {
     Vec4 relative = quaternion_multiply(q, quaternion_conjugate(q_n));
@@ -502,6 +584,8 @@ void validate_rigid_solver_state(
     const std::vector<Vec3>& omega) {
     const std::size_t num_rbs = ref_mesh.total_mass.size();
     const bool valid = ref_mesh.I_hat.size() == num_rbs
+        && ref_mesh.rb_nodes.size() == num_rbs
+        && ref_mesh.ref_positions.size() == num_rbs
         && state.x_coms.size() == num_rbs
         && state.v_coms.size() == num_rbs
         && state.orientations.size() == num_rbs
@@ -524,33 +608,48 @@ double rigid_body_unnormalized_residual(
         Vec3 com_gradient = inertia_translation_gradient(x_coms[rb], state.x_coms[rb], state.v_coms[rb], dt, ref_mesh.total_mass[rb]);
         com_gradient -= gravitational_potential_gradient(ref_mesh.total_mass[rb], params.gravity.y(), dt);
 
-        const Vec3 orientation_gradient = inertia_rotation_gradient_hessian(omega[rb], state.orientations[rb], state.omega[rb], dt, ref_mesh.I_hat[rb]).first;
+        Vec3 orientation_gradient = inertia_rotation_gradient_hessian(omega[rb], state.orientations[rb], state.omega[rb], dt, ref_mesh.I_hat[rb]).first;
+        accumulate_rigid_sdf_terms(
+            ref_mesh.ref_positions[rb], x_coms[rb], state.orientations[rb],
+            omega[rb], params, dt,
+            &com_gradient, nullptr, &orientation_gradient, nullptr);
         residual += com_gradient.norm() + orientation_gradient.norm();
     }
     return residual;
 }
 
 Vec3 compute_com_update(
-    int rb, const DeformedState& state, const Vec3& x_com,
-    const SimParams& params, double dt, double total_mass) {
+    int rb, const DeformedState& state, const RefMesh& ref_mesh,
+    const Vec3& x_com, const Vec3& omega,
+    const SimParams& params, double dt) {
     const Vec3& x_com_n = state.x_coms[rb];
     const Vec3& v_com_n = state.v_coms[rb];
 
-    Vec3 gradient = inertia_translation_gradient(x_com, x_com_n, v_com_n, dt, total_mass);
-    gradient -= gravitational_potential_gradient(total_mass, params.gravity.y(), dt);
+    Vec3 gradient = inertia_translation_gradient(
+        x_com, x_com_n, v_com_n, dt, ref_mesh.total_mass[rb]);
+    gradient -= gravitational_potential_gradient(
+        ref_mesh.total_mass[rb], params.gravity.y(), dt);
 
-    const Mat33 hessian = inertia_translation_hessian(total_mass);
+    Mat33 hessian = inertia_translation_hessian(ref_mesh.total_mass[rb]);
+    add_rigid_sdf_translation_terms(
+        ref_mesh.ref_positions[rb], x_com, state.orientations[rb], omega,
+        params, dt, gradient, hessian);
     return hessian.ldlt().solve(gradient);
 }
 
 Vec3 compute_omega_update(
     int rb, const DeformedState& state, const RefMesh& ref_mesh,
-    const Vec3& omega, double dt) {
+    const Vec3& x_com, const Vec3& omega,
+    const SimParams& params, double dt) {
     const Vec4& q_n = state.orientations[rb];
     const Vec3& omega_n = state.omega[rb];
     const Mat33& I_hat = ref_mesh.I_hat[rb];
 
-    const auto [gradient, hessian] = inertia_rotation_gradient_hessian(omega, q_n, omega_n, dt, I_hat);
+    auto [gradient, hessian] = inertia_rotation_gradient_hessian(
+        omega, q_n, omega_n, dt, I_hat);
+    add_rigid_sdf_rotation_terms(
+        ref_mesh.ref_positions[rb], x_com, q_n, omega,
+        params, dt, gradient, hessian);
     return hessian.ldlt().solve(gradient);
 }
 
@@ -602,9 +701,11 @@ SolverResult global_gauss_seidel_solver_basic_rb(
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         for (int rb = 0; rb < num_rbs; ++rb) {
-            x_coms[rb] -= params.damping * rb_solver::compute_com_update(rb, state, x_coms[rb], params, dt, ref_mesh.total_mass[rb]);
+            x_coms[rb] -= params.damping * rb_solver::compute_com_update(
+                rb, state, ref_mesh, x_coms[rb], omega[rb], params, dt);
 
-            omega[rb] -= params.damping * rb_solver::compute_omega_update(rb, state, ref_mesh, omega[rb], dt);
+            omega[rb] -= params.damping * rb_solver::compute_omega_update(
+                rb, state, ref_mesh, x_coms[rb], omega[rb], params, dt);
             orientations[rb] = quaternion_align_sign(quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega[rb], dt)), state.orientations[rb]);
             omega[rb] = rb_solver::angular_velocity_from_orientation(orientations[rb], state.orientations[rb], dt);
         }

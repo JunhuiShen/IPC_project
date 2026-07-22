@@ -1,5 +1,7 @@
 #include "sdf_penalty_energy.h"
 
+#include "rigid_body_ipc.h"
+
 #include <gtest/gtest.h>
 #include <cmath>
 #include <functional>
@@ -446,4 +448,125 @@ TEST(SphereSDF, HessianConvergence){
     const SDFClosure sdf = [&](const Vec3& q){ return evaluate_sdf(s, q); };
     EXPECT_TRUE(run_sdf_hessian_convergence("sphere", x, sdf, k, eps,
                                             /*include_curvature=*/true));
+}
+
+// ============================================================================
+//  Rigid-body chained derivatives
+// ============================================================================
+
+namespace {
+
+
+struct RigidSDFSetup {
+    SphereSDF sphere{Vec3(0.0, 0.0, 0.0), 1.0};
+    double k = 50.0;
+    double eps = 0.2;
+    double dt = 0.31;
+    Vec3 X_centered{0.4, -0.25, 0.3};
+    Vec4 q_n = quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
+    Vec3 omega{0.6, -0.3, 0.7};
+    Vec3 x_com;
+
+    RigidSDFSetup() {
+        const Vec3 dir = Vec3(0.7, -0.4, 0.6).normalized();
+        const Vec3 rotated =
+            world_space_position(X_centered, Vec3::Zero(), q_n, omega, dt);
+        x_com = (sphere.radius + 0.08) * dir - rotated;
+    }
+
+    Vec3 world_x(const Vec3& t, const Vec3& w) const {
+        return world_space_position(X_centered, t, q_n, w, dt);
+    }
+    SDFEvaluation sdf_at(const Vec3& t, const Vec3& w) const {
+        return evaluate_sdf(sphere, world_x(t, w));
+    }
+    double energy_at(const Vec3& t, const Vec3& w) const {
+        return sdf_penalty_energy(sdf_at(t, w), k, eps);
+    }
+    RigidSDFGradient gradient_at(const Vec3& t, const Vec3& w) const {
+        return sdf_penalty_gradient_rb(sdf_at(t, w), X_centered, q_n, w, dt, k, eps);
+    }
+};
+
+bool run_component_convergence(const std::string& label, double analytic,
+                               const std::vector<double>& hs,
+                               const std::function<double(double)>& fd_at_h,
+                               double noise_scale){
+    if (std::abs(analytic) < 1e-14) {
+        const double fd_fine = fd_at_h(hs.back());
+        if (std::abs(fd_fine) > 1e-6) {
+            std::cerr << "  FAIL: " << label << " analytic=0 but fd=" << fd_fine << "\n";
+            return false;
+        }
+        return true;
+    }
+    std::vector<double> errors;
+    for (double h : hs) errors.push_back(std::abs(fd_at_h(h) - analytic));
+    return check_convergence(label, analytic, hs, errors, noise_scale, false)
+        || check_convergence(label, analytic, hs, errors, noise_scale, true);
+}
+
+}  // namespace
+
+TEST(RigidBodySDFPenalty, GradientConvergesWithCenteredDifferences){
+    const RigidSDFSetup s;
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
+
+    //  The smooth-branch assumption behind the slope test: every FD sample
+    //  must stay strictly inside the (0, eps) band.
+    const SDFEvaluation sdf0 = s.sdf_at(s.x_com, s.omega);
+    ASSERT_GT(sdf0.phi, 0.05);
+    ASSERT_LT(sdf0.phi, s.eps - 0.05);
+
+    const RigidSDFGradient g_ana = s.gradient_at(s.x_com, s.omega);
+
+    const auto energy_of_t = [&](const Vec3& t){ return s.energy_at(t, s.omega); };
+    const auto energy_of_w = [&](const Vec3& w){ return s.energy_at(s.x_com, w); };
+
+    bool all_passed = true;
+    for (int comp = 0; comp < 3; ++comp) {
+        all_passed &= run_component_convergence(
+            "dE/dt_" + std::to_string(comp), g_ana.translation(comp), hs,
+            [&](double h){ return fd_gradient(energy_of_t, s.x_com, h)(comp); }, 1e-10);
+        all_passed &= run_component_convergence(
+            "dE/dw_" + std::to_string(comp), g_ana.rotation(comp), hs,
+            [&](double h){ return fd_gradient(energy_of_w, s.omega, h)(comp); }, 1e-10);
+    }
+    EXPECT_TRUE(all_passed);
+}
+
+TEST(RigidBodySDFPenalty, HessianConvergesWithCenteredDifferences){
+    const RigidSDFSetup s;
+    const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
+
+    const RigidSDFHessian H_ana = sdf_penalty_hessian_rb(
+        s.sdf_at(s.x_com, s.omega), s.X_centered, s.q_n, s.omega, s.dt, s.k, s.eps);
+
+    EXPECT_TRUE(H_ana.translation_translation.isApprox(
+        H_ana.translation_translation.transpose(), 1e-12));
+    EXPECT_TRUE(H_ana.rotation_rotation.isApprox(
+        H_ana.rotation_rotation.transpose(), 1e-12));
+
+    const auto grad_t_of_t = [&](const Vec3& t){ return s.gradient_at(t, s.omega).translation; };
+    const auto grad_t_of_w = [&](const Vec3& w){ return s.gradient_at(s.x_com, w).translation; };
+    const auto grad_w_of_w = [&](const Vec3& w){ return s.gradient_at(s.x_com, w).rotation; };
+
+    bool all_passed = true;
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            all_passed &= run_component_convergence(
+                "H_tt(" + std::to_string(row) + "," + std::to_string(col) + ")",
+                H_ana.translation_translation(row, col), hs,
+                [&](double h){ return fd_hessian(grad_t_of_t, s.x_com, h)(row, col); }, 1e-9);
+            all_passed &= run_component_convergence(
+                "H_tw(" + std::to_string(row) + "," + std::to_string(col) + ")",
+                H_ana.translation_rotation(row, col), hs,
+                [&](double h){ return fd_hessian(grad_t_of_w, s.omega, h)(row, col); }, 1e-9);
+            all_passed &= run_component_convergence(
+                "H_ww(" + std::to_string(row) + "," + std::to_string(col) + ")",
+                H_ana.rotation_rotation(row, col), hs,
+                [&](double h){ return fd_hessian(grad_w_of_w, s.omega, h)(row, col); }, 1e-9);
+        }
+    }
+    EXPECT_TRUE(all_passed);
 }

@@ -1,5 +1,7 @@
 #include "sdf_penalty_energy.h"
 
+#include "rigid_body_ipc.h"
+
 #include <cmath>
 #include <stdexcept>
 
@@ -115,4 +117,40 @@ Mat33 sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double eps, bool i
         Hess += dE_dphi * sdf.hess_phi;
     }
     return Hess;
+}
+
+RigidSDFGradient sdf_penalty_gradient_rb(
+    const SDFEvaluation& sdf, const Vec3& X_centered,
+    const Vec4& q_n, const Vec3& omega, const double dt,
+    const double k, const double eps){
+    const Vec3  gx       = sdf_penalty_gradient(sdf, k, eps);
+    const Mat33 J_xomega = dx_domega(X_centered, q_n, omega, dt);
+
+    RigidSDFGradient result;
+    result.translation = rigid_node_translation_gradient(gx);
+    result.rotation    = rigid_node_omega_gradient(gx, J_xomega);
+    return result;
+}
+
+RigidSDFHessian sdf_penalty_hessian_rb(
+    const SDFEvaluation& sdf, const Vec3& X_centered,
+    const Vec4& q_n, const Vec3& omega, const double dt,
+    const double k, const double eps,
+    const bool include_sdf_curvature, const bool include_rigid_curvature){
+    const Vec3  gx           = sdf_penalty_gradient(sdf, k, eps);
+    const Mat33 Hx           = sdf_penalty_hessian(sdf, k, eps, include_sdf_curvature);
+    const Mat33 Hx_symmetric = rigid_node_translation_hessian(Hx);
+    const Mat33 J_xomega     = dx_domega(X_centered, q_n, omega, dt);
+
+    RigidSDFHessian result;
+    result.translation_translation = Hx_symmetric;
+    result.translation_rotation    = Hx_symmetric * J_xomega;
+    if (include_rigid_curvature) {
+        result.rotation_rotation = rigid_node_omega_hessian(
+            gx, Hx, J_xomega, d2x_domega2(X_centered, q_n, omega, dt));
+    } else {
+        const Mat33 rr = J_xomega.transpose() * Hx_symmetric * J_xomega;
+        result.rotation_rotation = 0.5 * (rr + rr.transpose());
+    }
+    return result;
 }
