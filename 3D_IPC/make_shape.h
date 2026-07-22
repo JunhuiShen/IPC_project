@@ -3,6 +3,17 @@
 #include <string>
 #include <vector>
 
+// Extruded regular n-gon rigid body. The polygon is built in the material
+// x-y plane and extruded along material z by `thickness`; `orientation`
+// rotates that prism into world space. Returns the rigid-body index.
+int append_rigid_polygon(
+    int number_of_nodes, DeformedState& state, RefMesh& ref_mesh,
+    const Vec3& center, double radius, double density,
+    double thickness = 0.001,
+    const Vec3& v_com = Vec3::Zero(),
+    const Vec4& orientation = Vec4(1.0, 0.0, 0.0, 0.0),
+    const Vec3& omega = Vec3::Zero());
+
 // Grid counts: V = (nx + 1)(ny + 1), T = 2 nx ny.
 int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin);
 

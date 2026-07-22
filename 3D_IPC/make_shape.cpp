@@ -1,4 +1,5 @@
 #include "make_shape.h"
+#include "rigid_body_ipc.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -8,6 +9,85 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+
+int append_rigid_polygon(
+    int number_of_nodes, DeformedState& state, RefMesh& ref_mesh,
+    const Vec3& center, double radius, double density,
+    double thickness, const Vec3& v_com,
+    const Vec4& orientation, const Vec3& omega) {
+    if (number_of_nodes < 3)
+        throw std::invalid_argument(
+            "append_rigid_polygon: number_of_nodes must be at least 3");
+    if (!std::isfinite(radius) || radius <= 0.0)
+        throw std::invalid_argument(
+            "append_rigid_polygon: radius must be positive and finite");
+    if (!std::isfinite(density) || density <= 0.0)
+        throw std::invalid_argument(
+            "append_rigid_polygon: density must be positive and finite");
+    if (!std::isfinite(thickness) || thickness <= 0.0)
+        throw std::invalid_argument(
+            "append_rigid_polygon: thickness must be positive and finite");
+
+    constexpr double kPi = 3.14159265358979323846;
+    const double two_pi = 2.0 * kPi;
+    const double half_thickness = 0.5 * thickness;
+    const Vec4 q = quaternion_normalize(orientation);
+    const int base = static_cast<int>(state.deformed_positions.size());
+
+    std::vector<Vec3> world_positions;
+    world_positions.reserve(2 * number_of_nodes);
+    for (int layer = 0; layer < 2; ++layer) {
+        const double z = (layer == 0) ? -half_thickness : half_thickness;
+        for (int i = 0; i < number_of_nodes; ++i) {
+            const double angle = two_pi * static_cast<double>(i)
+                / static_cast<double>(number_of_nodes);
+            const Vec3 X(
+                radius * std::cos(angle),
+                radius * std::sin(angle), z);
+            world_positions.push_back(
+                center + quaternion_rotate(q, X));
+        }
+    }
+
+    ref_mesh.tris.reserve(
+        ref_mesh.tris.size() + 3 * (4 * number_of_nodes - 4));
+    const auto bottom = [base](int i) { return base + i; };
+    const auto top = [base, number_of_nodes](int i) {
+        return base + number_of_nodes + i;
+    };
+
+    // Cap fans. The bottom faces -z and the top faces +z in material space.
+    for (int i = 1; i + 1 < number_of_nodes; ++i) {
+        ref_mesh.tris.push_back(bottom(0));
+        ref_mesh.tris.push_back(bottom(i + 1));
+        ref_mesh.tris.push_back(bottom(i));
+
+        ref_mesh.tris.push_back(top(0));
+        ref_mesh.tris.push_back(top(i));
+        ref_mesh.tris.push_back(top(i + 1));
+    }
+
+    // Two outward-facing triangles for every rectangular side panel.
+    for (int i = 0; i < number_of_nodes; ++i) {
+        const int next = (i + 1) % number_of_nodes;
+        ref_mesh.tris.push_back(bottom(i));
+        ref_mesh.tris.push_back(bottom(next));
+        ref_mesh.tris.push_back(top(next));
+
+        ref_mesh.tris.push_back(bottom(i));
+        ref_mesh.tris.push_back(top(next));
+        ref_mesh.tris.push_back(top(i));
+    }
+
+    // Volume = regular-polygon area times extrusion thickness.
+    const double n = static_cast<double>(number_of_nodes);
+    const double area = 0.5 * n * radius * radius
+        * std::sin(two_pi / n);
+    const double total_mass = area * thickness * density;
+    return create_rigid_body(
+        world_positions, v_com, q, omega, total_mass,
+        ref_mesh, state);
+}
 
 // Total number of vertices is: (nx + 1) * (ny + 1) and total number of triangles is: 2 * nx * ny
 int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin) {

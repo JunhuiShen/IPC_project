@@ -801,7 +801,7 @@ void build_rotating_space_tool_example(
 
 
 // ---------------------------------------------------------------------------
-// Example 7: rigid box falling onto a ground plane
+// Example 7: rigid box and hexagonal prism falling onto a ground plane
 // ---------------------------------------------------------------------------
 // command line: ./build/3D_sim --example 7 --num_frames 200 --substeps 10 --tol_abs 1e-12 --tol_rel 1e-10 --outdir drop_box_output --format obj
 void build_rigid_box_drop_example(
@@ -831,8 +831,8 @@ void build_rigid_box_drop_example(
 
     std::vector<Vec3> x;
     std::vector<int> tris;
-    const Vec3 box_center(0.0, 5.0, 0.0);
-    const Vec3 box_half_extent(0.30, 0.20, 0.25);
+    const Vec3 box_center(-0.55, 5.0, 0.0);
+    const Vec3 box_half_extent(0.18, 0.14, 0.16);
     append_box_mesh(
         box_center - box_half_extent,
         box_center + box_half_extent, x, tris);
@@ -843,8 +843,17 @@ void build_rigid_box_drop_example(
         X.push_back(position.head<2>());
 
     create_rigid_body(
-        x, Vec3::Zero(), Vec4(1, .00, 0.0, 0.0),
+        x, Vec3::Zero(), Vec4(1, 0.0, 0.0, 0.0),
         Vec3{1.0, 0.0, 0.0}, 1, ref_mesh, state);
+
+    append_rigid_polygon(
+        6, state, ref_mesh,
+        Vec3(0.55, 5.0, 0.0),
+        /*radius=*/0.22,
+        /*density=*/30.0,
+        /*thickness=*/0.28,
+        Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0));
 
     // Flat visual ground at the same y=0 surface used by the plane SDF.
     static_x = {

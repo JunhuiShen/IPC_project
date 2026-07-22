@@ -149,7 +149,8 @@ void build_rotating_space_tool_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
-// Example 7: a rigid box falling under gravity onto a horizontal ground SDF.
+// Example 7: a rigid box and an extruded hexagon falling under gravity onto a
+// horizontal ground SDF.
 void build_rigid_box_drop_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
