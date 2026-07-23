@@ -2,7 +2,10 @@
 
 #include "IPC_math.h"
 #include "node_triangle_distance.h"
+#include "rigid_body_ipc.h"
 #include "segment_segment_distance.h"
+
+#include <array>
 
 //  Scalar barrier
 double scalar_barrier(double delta, double d_hat);
@@ -55,3 +58,16 @@ Mat33 segment_segment_barrier_self_hessian(
 // Returns both the gradient and self/diagonal Hessian block for dof.
 std::pair<Vec3, Mat33> segment_segment_barrier_self_gradient_and_hessian(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
                                                                          double d_hat, int dof, double eps = 1.0e-12);
+
+enum class RigidBarrierSide {
+    FirstPrimitive,
+    SecondPrimitive
+};
+
+// FirstPrimitive selects the node; SecondPrimitive selects the triangle.
+// X_centered entries on the unselected side are ignored and may be zero.
+RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, double eps = 1.0e-12);
+
+// FirstPrimitive selects (x1,x2); SecondPrimitive selects (x3,x4).
+// X_centered entries on the unselected side are ignored and may be zero.
+RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, double eps = 1.0e-12);

@@ -1,7 +1,9 @@
 #include "barrier_energy.h"
+#include "rigid_body_ipc.h"
 
 #include <gtest/gtest.h>
 #include <cmath>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
@@ -480,6 +482,66 @@ std::vector<SSTestPoint> make_ss_test_points() {
     };
 }
 
+bool run_rigid_barrier_convergence_test(const std::string& name, const Vec3& x_com, const Vec3& omega, const std::function<RigidEnergyDerivatives(const Vec3&, const Vec3&)>& evaluate, const std::function<double(const Vec3&, const Vec3&)>& energy) {
+    const std::vector<double> hs = {5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4, 3.125e-4};
+    const RigidEnergyDerivatives analytic = evaluate(x_com, omega);
+    bool all_passed = true;
+
+    const auto require_convergence = [&](const std::string& label, double value, const std::vector<double>& errors, double noise_scale) {
+        if (!check_convergence(label, value, hs, errors, noise_scale, false)) {
+            check_convergence(label, value, hs, errors, noise_scale, true);
+            all_passed = false;
+        }
+    };
+
+    for (int column = 0; column < 3; ++column) {
+        std::vector<double> translation_gradient_errors;
+        std::vector<double> orientation_gradient_errors;
+        std::array<std::vector<double>, 3> translation_translation_hessian_errors;
+        std::array<std::vector<double>, 3> translation_orientation_hessian_errors;
+        std::array<std::vector<double>, 3> orientation_orientation_hessian_errors;
+
+        for (double h : hs) {
+            Vec3 com_plus = x_com;
+            Vec3 com_minus = x_com;
+            com_plus[column] += h;
+            com_minus[column] -= h;
+            const RigidEnergyDerivatives com_plus_derivatives = evaluate(com_plus, omega);
+            const RigidEnergyDerivatives com_minus_derivatives = evaluate(com_minus, omega);
+            const double translation_gradient_fd = (energy(com_plus, omega) - energy(com_minus, omega)) / (2.0 * h);
+            const Vec3 translation_translation_hessian_fd = (com_plus_derivatives.translation_gradient - com_minus_derivatives.translation_gradient) / (2.0 * h);
+
+            Vec3 omega_plus = omega;
+            Vec3 omega_minus = omega;
+            omega_plus[column] += h;
+            omega_minus[column] -= h;
+            const RigidEnergyDerivatives omega_plus_derivatives = evaluate(x_com, omega_plus);
+            const RigidEnergyDerivatives omega_minus_derivatives = evaluate(x_com, omega_minus);
+            const double orientation_gradient_fd = (energy(x_com, omega_plus) - energy(x_com, omega_minus)) / (2.0 * h);
+            const Vec3 translation_orientation_hessian_fd = (omega_plus_derivatives.translation_gradient - omega_minus_derivatives.translation_gradient) / (2.0 * h);
+            const Vec3 orientation_orientation_hessian_fd = (omega_plus_derivatives.orientation_gradient - omega_minus_derivatives.orientation_gradient) / (2.0 * h);
+
+            translation_gradient_errors.push_back(std::abs(translation_gradient_fd - analytic.translation_gradient[column]));
+            orientation_gradient_errors.push_back(std::abs(orientation_gradient_fd - analytic.orientation_gradient[column]));
+            for (int row = 0; row < 3; ++row) {
+                translation_translation_hessian_errors[row].push_back(std::abs(translation_translation_hessian_fd[row] - analytic.translation_translation_hessian(row, column)));
+                translation_orientation_hessian_errors[row].push_back(std::abs(translation_orientation_hessian_fd[row] - analytic.translation_orientation_hessian(row, column)));
+                orientation_orientation_hessian_errors[row].push_back(std::abs(orientation_orientation_hessian_fd[row] - analytic.orientation_orientation_hessian(row, column)));
+            }
+        }
+
+        require_convergence(name + " translation gradient " + std::to_string(column), analytic.translation_gradient[column], translation_gradient_errors, 1.0e-10);
+        require_convergence(name + " orientation gradient " + std::to_string(column), analytic.orientation_gradient[column], orientation_gradient_errors, 1.0e-10);
+        for (int row = 0; row < 3; ++row) {
+            require_convergence(name + " H_tt(" + std::to_string(row) + "," + std::to_string(column) + ")", analytic.translation_translation_hessian(row, column), translation_translation_hessian_errors[row], 1.0e-9);
+            require_convergence(name + " H_to(" + std::to_string(row) + "," + std::to_string(column) + ")", analytic.translation_orientation_hessian(row, column), translation_orientation_hessian_errors[row], 1.0e-9);
+            require_convergence(name + " H_oo(" + std::to_string(row) + "," + std::to_string(column) + ")", analytic.orientation_orientation_hessian(row, column), orientation_orientation_hessian_errors[row], 1.0e-9);
+        }
+    }
+
+    return all_passed;
+}
+
 } // namespace
 
 // ===========================================================================
@@ -937,4 +999,49 @@ TEST(BarrierEnergy, StressSSNearParallel){
     }
 
     std::cout << "  E=" << std::scientific << E << "\n";
+}
+
+TEST(BarrierEnergy, RigidNodeTriangleChainRuleConvergesQuadratically) {
+    const Vec3 fixed_point(0.08, 0.04, 0.22);
+    const std::array<Vec3, 4> references = {Vec3::Zero(), Vec3(-0.6, -0.5, 0.0), Vec3(0.6, -0.5, 0.0), Vec3(0.0, 0.7, 0.0)};
+    const Vec4 q_n(1.0, 0.0, 0.0, 0.0);
+    const Vec3 x_com(0.02, -0.03, 0.01);
+    const Vec3 omega(0.18, -0.12, 0.09);
+    constexpr double dt = 0.2;
+    constexpr double d_hat = 0.5;
+
+    const auto evaluate = [&](const Vec3& com, const Vec3& w) {
+        std::array<Vec3, 4> y;
+        y[0] = fixed_point;
+        for (int i = 1; i < 4; ++i)
+            y[i] = world_space_position(references[i], com, q_n, w, dt);
+        return node_triangle_barrier_rb(y[0], y[1], y[2], y[3], references, RigidBarrierSide::SecondPrimitive, q_n, w, dt, d_hat);
+    };
+    const auto energy = [&](const Vec3& com, const Vec3& w) {
+        return node_triangle_barrier(fixed_point, world_space_position(references[1], com, q_n, w, dt), world_space_position(references[2], com, q_n, w, dt), world_space_position(references[3], com, q_n, w, dt), d_hat);
+    };
+
+    EXPECT_TRUE(run_rigid_barrier_convergence_test("rigid NT", x_com, omega, evaluate, energy));
+}
+
+TEST(BarrierEnergy, RigidSegmentSegmentChainRuleConvergesQuadratically) {
+    const std::array<Vec3, 4> references = {Vec3(-0.6, 0.0, 0.0), Vec3(0.6, 0.0, 0.0), Vec3::Zero(), Vec3::Zero()};
+    const Vec3 fixed0(0.0, -0.7, 0.23);
+    const Vec3 fixed1(0.0,  0.7, 0.23);
+    const Vec4 q_n(1.0, 0.0, 0.0, 0.0);
+    const Vec3 x_com(0.01, -0.02, 0.0);
+    const Vec3 omega(0.08, -0.1, 0.12);
+    constexpr double dt = 0.15;
+    constexpr double d_hat = 0.5;
+
+    const auto evaluate = [&](const Vec3& com, const Vec3& w) {
+        const Vec3 y0 = world_space_position(references[0], com, q_n, w, dt);
+        const Vec3 y1 = world_space_position(references[1], com, q_n, w, dt);
+        return segment_segment_barrier_rb(y0, y1, fixed0, fixed1, references, RigidBarrierSide::FirstPrimitive, q_n, w, dt, d_hat);
+    };
+    const auto energy = [&](const Vec3& com, const Vec3& w) {
+        return segment_segment_barrier(world_space_position(references[0], com, q_n, w, dt), world_space_position(references[1], com, q_n, w, dt), fixed0, fixed1, d_hat);
+    };
+
+    EXPECT_TRUE(run_rigid_barrier_convergence_test("rigid SS", x_com, omega, evaluate, energy));
 }

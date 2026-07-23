@@ -753,16 +753,9 @@ TEST(RigidBodyIPCSolver, AddsRigidSDFTranslationAndRotationTerms) {
             params.sdf_planes.front(),
             world_space_position(
                 X_centered, center, state.orientations[rb], Vec3::Zero(), dt));
-        const RigidSDFGradient gradient = sdf_penalty_gradient_rb(
-            sdf, X_centered, state.orientations[rb], Vec3::Zero(), dt,
-            params.k_sdf, params.eps_sdf);
-        const RigidSDFHessian hessian = sdf_penalty_hessian_rb(
-            sdf, X_centered, state.orientations[rb], Vec3::Zero(), dt,
-            params.k_sdf, params.eps_sdf,
-            /*include_sdf_curvature=*/false,
-            /*include_rigid_curvature=*/false);
-        expected_com_gradient += dt2 * gradient.translation;
-        expected_com_hessian += dt2 * hessian.translation_translation;
+        const RigidEnergyDerivatives derivatives = sdf_penalty_derivatives_rb(sdf, X_centered, state.orientations[rb], Vec3::Zero(), dt, params.k_sdf, params.eps_sdf, false, false);
+        expected_com_gradient += dt2 * derivatives.translation_gradient;
+        expected_com_hessian += dt2 * derivatives.translation_translation_hessian;
     }
     const Vec3 expected_com = center
         - expected_com_hessian.ldlt().solve(expected_com_gradient);
@@ -777,16 +770,9 @@ TEST(RigidBodyIPCSolver, AddsRigidSDFTranslationAndRotationTerms) {
             world_space_position(
                 X_centered, expected_com, state.orientations[rb],
                 Vec3::Zero(), dt));
-        const RigidSDFGradient gradient = sdf_penalty_gradient_rb(
-            sdf, X_centered, state.orientations[rb], Vec3::Zero(), dt,
-            params.k_sdf, params.eps_sdf);
-        const RigidSDFHessian hessian = sdf_penalty_hessian_rb(
-            sdf, X_centered, state.orientations[rb], Vec3::Zero(), dt,
-            params.k_sdf, params.eps_sdf,
-            /*include_sdf_curvature=*/false,
-            /*include_rigid_curvature=*/false);
-        expected_omega_gradient += dt2 * gradient.rotation;
-        expected_omega_hessian += dt2 * hessian.rotation_rotation;
+        const RigidEnergyDerivatives derivatives = sdf_penalty_derivatives_rb(sdf, X_centered, state.orientations[rb], Vec3::Zero(), dt, params.k_sdf, params.eps_sdf, false, false);
+        expected_omega_gradient += dt2 * derivatives.orientation_gradient;
+        expected_omega_hessian += dt2 * derivatives.orientation_orientation_hessian;
     }
     const Vec3 expected_omega = -expected_omega_hessian.ldlt().solve(
         expected_omega_gradient);

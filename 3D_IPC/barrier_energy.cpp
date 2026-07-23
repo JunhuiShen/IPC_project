@@ -1,4 +1,5 @@
 #include "barrier_energy.h"
+#include "rigid_body_ipc.h"
 
 #include <algorithm>
 #include <cmath>
@@ -887,4 +888,81 @@ std::pair<Vec3, Mat33> segment_segment_barrier_self_gradient_and_hessian(
     }
     return {segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, dof, eps, &dr),
             segment_segment_barrier_self_hessian(x1, x2, x3, x4, d_hat, dof, eps, &dr)};
+}
+
+RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, double eps) {
+    const NodeTriangleDistanceResult dr = node_triangle_distance(x, x1, x2, x3, eps);
+    if (d_hat > 0.0 && dr.distance >= d_hat)
+        return RigidEnergyDerivatives{};
+
+    RigidEnergyDerivatives result;
+    std::array<Vec3, 4> gradients = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
+    std::array<Mat33, 4> jacobians = {Mat33::Zero(), Mat33::Zero(), Mat33::Zero(), Mat33::Zero()};
+
+    const int first_dof = side == RigidBarrierSide::FirstPrimitive ? 0 : 1;
+    const int last_dof = side == RigidBarrierSide::FirstPrimitive ? 0 : 3;
+
+    for (int i = first_dof; i <= last_dof; ++i) {
+        gradients[i] = node_triangle_barrier_gradient(x, x1, x2, x3, d_hat, i, eps, &dr);
+        jacobians[i] = dx_domega(X_centered[i], q_n, omega, dt);
+        result.translation_gradient += gradients[i];
+        result.orientation_gradient += jacobians[i].transpose() * gradients[i];
+    }
+
+    for (int i = first_dof; i <= last_dof; ++i) {
+        for (int j = first_dof; j <= last_dof; ++j) {
+            const Mat33 Hij = node_triangle_barrier_cross_hessian(x, x1, x2, x3, d_hat, i, j, eps, &dr);
+            result.translation_translation_hessian += Hij;
+            result.translation_orientation_hessian += Hij * jacobians[j];
+            result.orientation_orientation_hessian += jacobians[i].transpose() * Hij * jacobians[j];
+        }
+
+        const std::array<Mat33, 3> coordinate_hessians = d2x_domega2(X_centered[i], q_n, omega, dt);
+        for (int coordinate = 0; coordinate < 3; ++coordinate) {
+            result.orientation_orientation_hessian += gradients[i][coordinate] * coordinate_hessians[coordinate];
+        }
+    }
+
+    result.translation_translation_hessian = 0.5 * (result.translation_translation_hessian + result.translation_translation_hessian.transpose());
+    result.orientation_orientation_hessian = 0.5 * (result.orientation_orientation_hessian + result.orientation_orientation_hessian.transpose());
+    return result;
+}
+
+RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, double eps) {
+    const SegmentSegmentDistanceResult dr = segment_segment_distance(x1, x2, x3, x4, eps);
+    if (d_hat > 0.0 && dr.distance >= d_hat)
+        return RigidEnergyDerivatives{};
+
+    RigidEnergyDerivatives result;
+    std::array<Vec3, 4> gradients = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
+    std::array<Mat33, 4> jacobians = {Mat33::Zero(), Mat33::Zero(), Mat33::Zero(), Mat33::Zero()};
+
+    const int first_dof = side == RigidBarrierSide::FirstPrimitive ? 0 : 2;
+    const int last_dof = side == RigidBarrierSide::FirstPrimitive ? 1 : 3;
+
+    for (int i = first_dof; i <= last_dof; ++i) {
+        gradients[i] = segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, i, eps, &dr);
+        jacobians[i] = dx_domega(X_centered[i], q_n, omega, dt);
+        result.translation_gradient += gradients[i];
+        result.orientation_gradient += jacobians[i].transpose() * gradients[i];
+    }
+
+    // Include every cross-node block on the selected rigid primitive.
+    for (int i = first_dof; i <= last_dof; ++i) {
+        for (int j = first_dof; j <= last_dof; ++j) {
+            const Mat33 Hij = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, i, j, eps, &dr);
+            result.translation_translation_hessian += Hij;
+            result.translation_orientation_hessian += Hij * jacobians[j];
+            result.orientation_orientation_hessian += jacobians[i].transpose() * Hij * jacobians[j];
+        }
+
+        const std::array<Mat33, 3> coordinate_hessians = d2x_domega2(X_centered[i], q_n, omega, dt);
+        for (int coordinate = 0; coordinate < 3; ++coordinate) {
+            result.orientation_orientation_hessian += gradients[i][coordinate] * coordinate_hessians[coordinate];
+        }
+    }
+
+    result.translation_translation_hessian = 0.5 * (result.translation_translation_hessian + result.translation_translation_hessian.transpose());
+    result.orientation_orientation_hessian = 0.5 * (result.orientation_orientation_hessian + result.orientation_orientation_hessian.transpose());
+    return result;
 }

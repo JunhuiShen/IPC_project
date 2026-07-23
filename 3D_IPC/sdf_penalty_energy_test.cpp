@@ -483,8 +483,8 @@ struct RigidSDFSetup {
     double energy_at(const Vec3& t, const Vec3& w) const {
         return sdf_penalty_energy(sdf_at(t, w), k, eps);
     }
-    RigidSDFGradient gradient_at(const Vec3& t, const Vec3& w) const {
-        return sdf_penalty_gradient_rb(sdf_at(t, w), X_centered, q_n, w, dt, k, eps);
+    RigidEnergyDerivatives derivatives_at(const Vec3& t, const Vec3& w) const {
+        return sdf_penalty_derivatives_rb(sdf_at(t, w), X_centered, q_n, w, dt, k, eps);
     }
 };
 
@@ -518,7 +518,7 @@ TEST(RigidBodySDFPenalty, GradientConvergesWithCenteredDifferences){
     ASSERT_GT(sdf0.phi, 0.05);
     ASSERT_LT(sdf0.phi, s.eps - 0.05);
 
-    const RigidSDFGradient g_ana = s.gradient_at(s.x_com, s.omega);
+    const RigidEnergyDerivatives analytic = s.derivatives_at(s.x_com, s.omega);
 
     const auto energy_of_t = [&](const Vec3& t){ return s.energy_at(t, s.omega); };
     const auto energy_of_w = [&](const Vec3& w){ return s.energy_at(s.x_com, w); };
@@ -526,10 +526,10 @@ TEST(RigidBodySDFPenalty, GradientConvergesWithCenteredDifferences){
     bool all_passed = true;
     for (int comp = 0; comp < 3; ++comp) {
         all_passed &= run_component_convergence(
-            "dE/dt_" + std::to_string(comp), g_ana.translation(comp), hs,
+            "dE/dt_" + std::to_string(comp), analytic.translation_gradient(comp), hs,
             [&](double h){ return fd_gradient(energy_of_t, s.x_com, h)(comp); }, 1e-10);
         all_passed &= run_component_convergence(
-            "dE/dw_" + std::to_string(comp), g_ana.rotation(comp), hs,
+            "dE/dw_" + std::to_string(comp), analytic.orientation_gradient(comp), hs,
             [&](double h){ return fd_gradient(energy_of_w, s.omega, h)(comp); }, 1e-10);
     }
     EXPECT_TRUE(all_passed);
@@ -539,32 +539,29 @@ TEST(RigidBodySDFPenalty, HessianConvergesWithCenteredDifferences){
     const RigidSDFSetup s;
     const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
 
-    const RigidSDFHessian H_ana = sdf_penalty_hessian_rb(
-        s.sdf_at(s.x_com, s.omega), s.X_centered, s.q_n, s.omega, s.dt, s.k, s.eps);
+    const RigidEnergyDerivatives analytic = sdf_penalty_derivatives_rb(s.sdf_at(s.x_com, s.omega), s.X_centered, s.q_n, s.omega, s.dt, s.k, s.eps);
 
-    EXPECT_TRUE(H_ana.translation_translation.isApprox(
-        H_ana.translation_translation.transpose(), 1e-12));
-    EXPECT_TRUE(H_ana.rotation_rotation.isApprox(
-        H_ana.rotation_rotation.transpose(), 1e-12));
+    EXPECT_TRUE(analytic.translation_translation_hessian.isApprox(analytic.translation_translation_hessian.transpose(), 1e-12));
+    EXPECT_TRUE(analytic.orientation_orientation_hessian.isApprox(analytic.orientation_orientation_hessian.transpose(), 1e-12));
 
-    const auto grad_t_of_t = [&](const Vec3& t){ return s.gradient_at(t, s.omega).translation; };
-    const auto grad_t_of_w = [&](const Vec3& w){ return s.gradient_at(s.x_com, w).translation; };
-    const auto grad_w_of_w = [&](const Vec3& w){ return s.gradient_at(s.x_com, w).rotation; };
+    const auto grad_t_of_t = [&](const Vec3& t){ return s.derivatives_at(t, s.omega).translation_gradient; };
+    const auto grad_t_of_w = [&](const Vec3& w){ return s.derivatives_at(s.x_com, w).translation_gradient; };
+    const auto grad_w_of_w = [&](const Vec3& w){ return s.derivatives_at(s.x_com, w).orientation_gradient; };
 
     bool all_passed = true;
     for (int row = 0; row < 3; ++row) {
         for (int col = 0; col < 3; ++col) {
             all_passed &= run_component_convergence(
                 "H_tt(" + std::to_string(row) + "," + std::to_string(col) + ")",
-                H_ana.translation_translation(row, col), hs,
+                analytic.translation_translation_hessian(row, col), hs,
                 [&](double h){ return fd_hessian(grad_t_of_t, s.x_com, h)(row, col); }, 1e-9);
             all_passed &= run_component_convergence(
                 "H_tw(" + std::to_string(row) + "," + std::to_string(col) + ")",
-                H_ana.translation_rotation(row, col), hs,
+                analytic.translation_orientation_hessian(row, col), hs,
                 [&](double h){ return fd_hessian(grad_t_of_w, s.omega, h)(row, col); }, 1e-9);
             all_passed &= run_component_convergence(
                 "H_ww(" + std::to_string(row) + "," + std::to_string(col) + ")",
-                H_ana.rotation_rotation(row, col), hs,
+                analytic.orientation_orientation_hessian(row, col), hs,
                 [&](double h){ return fd_hessian(grad_w_of_w, s.omega, h)(row, col); }, 1e-9);
         }
     }

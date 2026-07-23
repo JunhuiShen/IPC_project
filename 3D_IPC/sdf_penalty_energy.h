@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IPC_math.h"
+#include "rigid_body_ipc.h"
 
 //  SDF-based penalty energy
 
@@ -49,34 +50,4 @@ Vec3   sdf_penalty_gradient(const SDFEvaluation& sdf, double k, double eps);
 Mat33  sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double eps,
                            bool include_curvature = true);
 
-
-
-struct RigidSDFGradient {
-    Vec3 translation;  //  dE/dx_com
-    Vec3 rotation;     //  dE/domega
-
-    RigidSDFGradient() : translation(Vec3::Zero()), rotation(Vec3::Zero()) {}
-};
-
-struct RigidSDFHessian {
-    Mat33 translation_translation;  //  d2E/dx_com2
-    Mat33 translation_rotation;     //  d2E/dx_com domega (rows x_com, cols omega)
-    Mat33 rotation_rotation;        //  d2E/domega2
-
-    RigidSDFHessian()
-        : translation_translation(Mat33::Zero()),
-          translation_rotation(Mat33::Zero()),
-          rotation_rotation(Mat33::Zero()) {}
-};
-
-RigidSDFGradient sdf_penalty_gradient_rb(
-    const SDFEvaluation& sdf, const Vec3& X_centered,
-    const Vec4& q_n, const Vec3& omega, double dt,
-    double k, double eps);
-
-RigidSDFHessian sdf_penalty_hessian_rb(
-    const SDFEvaluation& sdf, const Vec3& X_centered,
-    const Vec4& q_n, const Vec3& omega, double dt,
-    double k, double eps,
-    bool include_sdf_curvature = true,
-    bool include_rigid_curvature = true);
+RigidEnergyDerivatives sdf_penalty_derivatives_rb(const SDFEvaluation& sdf, const Vec3& X_centered, const Vec4& q_n, const Vec3& omega, double dt, double k, double eps, bool include_sdf_curvature = true, bool include_rigid_curvature = true);
