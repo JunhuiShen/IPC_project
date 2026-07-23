@@ -795,4 +795,140 @@ TEST(RigidBodyIPCSolver, AddsRigidSDFTranslationAndRotationTerms) {
         1.0e-12));
 }
 
+TEST(RigidBodyIPCSolver, AddsNaiveRigidBarrierTranslationAndOrientationTerms) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    state.deformed_positions = {Vec3(-1.0, -1.0, 0.0), Vec3(3.0, -1.0, 0.0), Vec3(-1.0, 3.0, 0.0)};
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+    ref_mesh.tris = {0, 1, 2};
+
+    const std::vector<Vec3> rigid_nodes = {Vec3(0.0, 0.0, 0.2), Vec3(3.0, 0.0, 1.0), Vec3(0.0, 3.0, 1.0), Vec3(3.0, 3.0, 1.0)};
+    constexpr double total_mass = 4.0;
+    const int rb = create_rigid_body(rigid_nodes, Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0), Vec3::Zero(), total_mass, ref_mesh, state);
+
+    SimParams params = SimParams::zeros();
+    params.fps = 10.0;
+    params.substeps = 1;
+    params.d_hat = 0.5;
+    params.k_barrier = 100.0;
+    params.max_global_iters = 1;
+    params.fixed_iters = true;
+    params.damping = 1.0;
+    const double dt = params.dt();
+    const double barrier_scale = dt * dt * params.k_barrier;
+
+    {
+        SimParams residual_params = params;
+        residual_params.fixed_iters = false;
+        residual_params.max_global_iters = 0;
+        std::vector<Vec3> residual_x_coms = state.x_coms;
+        std::vector<Vec4> residual_orientations = state.orientations;
+        std::vector<Vec3> residual_omega = state.omega;
+        const SolverResult residual_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, residual_params, residual_x_coms, residual_orientations, residual_omega);
+        EXPECT_TRUE(residual_result.has_residual);
+        EXPECT_GT(residual_result.initial_residual, 1.0e-8);
+    }
+
+    const auto barrier_at = [&](const Vec3& x_com, const Vec3& omega) {
+        RigidEnergyDerivatives total;
+        for (int local = 0; local < static_cast<int>(ref_mesh.ref_positions[rb].size()); ++local) {
+            const Vec3 x = world_space_position(ref_mesh.ref_positions[rb][local], x_com, state.orientations[rb], omega, dt);
+            const std::array<Vec3, 4> references = {ref_mesh.ref_positions[rb][local], Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
+            const RigidEnergyDerivatives contribution = node_triangle_barrier_rb(x, state.deformed_positions[0], state.deformed_positions[1], state.deformed_positions[2], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega, dt, params.d_hat);
+            total.translation_gradient += contribution.translation_gradient;
+            total.orientation_gradient += contribution.orientation_gradient;
+            total.translation_translation_hessian += contribution.translation_translation_hessian;
+            total.translation_orientation_hessian += contribution.translation_orientation_hessian;
+            total.orientation_orientation_hessian += contribution.orientation_orientation_hessian;
+        }
+        return total;
+    };
+
+    const Vec3 initial_com = state.x_coms[rb];
+    const Vec3 initial_omega = state.omega[rb];
+    const RigidEnergyDerivatives initial_barrier = barrier_at(initial_com, initial_omega);
+    Vec3 expected_com_gradient = inertia_translation_gradient(initial_com, state.x_coms[rb], state.v_coms[rb], dt, total_mass);
+    Mat33 expected_com_hessian = inertia_translation_hessian(total_mass);
+    expected_com_gradient += barrier_scale * initial_barrier.translation_gradient;
+    expected_com_hessian += barrier_scale * initial_barrier.translation_translation_hessian;
+    const Vec3 expected_com = initial_com - expected_com_hessian.ldlt().solve(expected_com_gradient);
+
+    auto [expected_omega_gradient, expected_omega_hessian] = inertia_rotation_gradient_hessian(initial_omega, state.orientations[rb], state.omega[rb], dt, ref_mesh.I_hat[rb]);
+    const RigidEnergyDerivatives updated_barrier = barrier_at(expected_com, initial_omega);
+    expected_omega_gradient += barrier_scale * updated_barrier.orientation_gradient;
+    expected_omega_hessian += barrier_scale * updated_barrier.orientation_orientation_hessian;
+    const Vec3 expected_omega = initial_omega - expected_omega_hessian.ldlt().solve(expected_omega_gradient);
+
+    std::vector<Vec3> x_coms = state.x_coms;
+    std::vector<Vec4> orientations = state.orientations;
+    std::vector<Vec3> omega = state.omega;
+    const SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_coms, orientations, omega);
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_EQ(result.iterations, 1);
+    EXPECT_GT(x_coms[rb].z(), initial_com.z());
+    EXPECT_GT(omega[rb].norm(), 1.0e-8);
+    EXPECT_TRUE(x_coms[rb].isApprox(expected_com, 1.0e-11));
+    EXPECT_TRUE(omega[rb].isApprox(expected_omega, 1.0e-11));
+}
+
+TEST(RigidBodyIPCSolver, AddsNaiveRigidSegmentBarrierTerms) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    state.deformed_positions = {Vec3(-1.0, 0.0, 0.2), Vec3(1.0, 0.0, 0.2)};
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+
+    const std::vector<Vec3> rigid_nodes = {Vec3(0.0, -1.0, 0.0), Vec3(0.0, 1.0, 0.0), Vec3(3.0, 3.0, 2.0), Vec3(-3.0, 3.0, 2.0)};
+    constexpr double total_mass = 4.0;
+    const int rb = create_rigid_body(rigid_nodes, Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0), Vec3::Zero(), total_mass, ref_mesh, state);
+    const int r0 = ref_mesh.rb_nodes[rb][0];
+    const int r1 = ref_mesh.rb_nodes[rb][1];
+    ref_mesh.tris = {0, 1, 1, r0, r1, r1};
+
+    SimParams params = SimParams::zeros();
+    params.fps = 10.0;
+    params.substeps = 1;
+    params.d_hat = 0.5;
+    params.k_barrier = 100.0;
+    params.max_global_iters = 1;
+    params.fixed_iters = true;
+    params.damping = 1.0;
+    const double dt = params.dt();
+    const double barrier_scale = dt * dt * params.k_barrier;
+
+    const auto barrier_at = [&](const Vec3& x_com, const Vec3& omega) {
+        const Vec3 x0 = world_space_position(ref_mesh.ref_positions[rb][0], x_com, state.orientations[rb], omega, dt);
+        const Vec3 x1 = world_space_position(ref_mesh.ref_positions[rb][1], x_com, state.orientations[rb], omega, dt);
+        const std::array<Vec3, 4> references = {Vec3::Zero(), Vec3::Zero(), ref_mesh.ref_positions[rb][0], ref_mesh.ref_positions[rb][1]};
+        return segment_segment_barrier_rb(state.deformed_positions[0], state.deformed_positions[1], x0, x1, references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega, dt, params.d_hat);
+    };
+
+    const Vec3 initial_com = state.x_coms[rb];
+    const Vec3 initial_omega = state.omega[rb];
+    const RigidEnergyDerivatives initial_barrier = barrier_at(initial_com, initial_omega);
+    Vec3 expected_com_gradient = inertia_translation_gradient(initial_com, state.x_coms[rb], state.v_coms[rb], dt, total_mass);
+    Mat33 expected_com_hessian = inertia_translation_hessian(total_mass);
+    expected_com_gradient += barrier_scale * initial_barrier.translation_gradient;
+    expected_com_hessian += barrier_scale * initial_barrier.translation_translation_hessian;
+    const Vec3 expected_com = initial_com - expected_com_hessian.ldlt().solve(expected_com_gradient);
+
+    auto [expected_omega_gradient, expected_omega_hessian] = inertia_rotation_gradient_hessian(initial_omega, state.orientations[rb], state.omega[rb], dt, ref_mesh.I_hat[rb]);
+    const RigidEnergyDerivatives updated_barrier = barrier_at(expected_com, initial_omega);
+    expected_omega_gradient += barrier_scale * updated_barrier.orientation_gradient;
+    expected_omega_hessian += barrier_scale * updated_barrier.orientation_orientation_hessian;
+    const Vec3 expected_omega = initial_omega - expected_omega_hessian.ldlt().solve(expected_omega_gradient);
+
+    std::vector<Vec3> x_coms = state.x_coms;
+    std::vector<Vec4> orientations = state.orientations;
+    std::vector<Vec3> omega = state.omega;
+    const SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_coms, orientations, omega);
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_EQ(result.iterations, 1);
+    EXPECT_LT(x_coms[rb].z(), initial_com.z());
+    EXPECT_GT(omega[rb].norm(), 1.0e-8);
+    EXPECT_TRUE(x_coms[rb].isApprox(expected_com, 1.0e-11));
+    EXPECT_TRUE(omega[rb].isApprox(expected_omega, 1.0e-11));
+}
+
 }  // namespace

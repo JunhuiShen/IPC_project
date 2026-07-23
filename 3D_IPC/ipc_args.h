@@ -46,7 +46,7 @@ struct IPCArgs3D : ArgParser {
     double node_box_max            = 0.01;
     double node_box_min            = 0.001;
     int    node_box_update_count   = 250;
-    double k_barrier                   = 1.0;
+    double k_barrier                   = 100.0;
     double damping                     = 1.0;    
     bool   use_ticcd                   = false;    // true: Tight-Inclusion library | false: self-written linear CCD
 
@@ -138,7 +138,7 @@ struct IPCArgs3D : ArgParser {
         add_double("node_box_max",         node_box_max,         0.01,  "Upper bound on node box half-extent used by the basic solver");
         add_double("node_box_min",         node_box_min,         0.001, "Lower bound on node box half-extent (floor when prev disp is near zero)");
         add_int   ("node_box_update_count", node_box_update_count, 1,   "GS iterations between node-box/contact-color rebuilds; set to max_substep_iters to rebuild once per substep");
-        add_double("k_barrier",                k_barrier,                1.0,   "Barrier stiffness multiplier");
+        add_double("k_barrier",                k_barrier,                100.0, "Barrier stiffness multiplier");
         add_double("damping",                  damping,                  1.0,   "Jacobi step damping in global_gauss_seidel_solver_ogc (multiplies per-vertex Newton delta; <1 stabilizes the parallel sweep)");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 

@@ -7,6 +7,7 @@
 #include "safe_step.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -476,6 +477,115 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
 
 namespace rb_solver {
 
+// Convert the triangle mesh into a unique edge list.
+std::vector<std::array<int, 2>> build_unique_edges(const RefMesh& ref_mesh) {
+    std::vector<std::array<int, 2>> edges;
+    edges.reserve(ref_mesh.tris.size());
+    for (int tri = 0; tri < num_tris(ref_mesh); ++tri) {
+        const int v[3] = {tri_vertex(ref_mesh, tri, 0), tri_vertex(ref_mesh, tri, 1), tri_vertex(ref_mesh, tri, 2)};
+        for (int local = 0; local < 3; ++local) {
+            const int a = v[local];
+            const int b = v[(local + 1) % 3];
+            if (a == b)
+                continue;
+            edges.push_back({std::min(a, b), std::max(a, b)});
+        }
+    }
+    std::sort(edges.begin(), edges.end());
+    edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+    return edges;
+}
+
+int owning_rb_for_node(const std::vector<int>& node_to_rb, int node) {
+    if (node < 0 || node >= static_cast<int>(node_to_rb.size()))
+        return -1;
+    return node_to_rb[node];
+}
+
+// Map a global rigid-node index to its fixed body-space coordinate
+const Vec3& rigid_node_body_space_position(int node, const RefMesh& ref_mesh) {
+    const int rb = owning_rb_for_node(ref_mesh.node_to_rb, node);
+    const std::vector<int>& rb_nodes = ref_mesh.rb_nodes[rb];
+    const int local = static_cast<int>(std::find(rb_nodes.begin(), rb_nodes.end(), node) - rb_nodes.begin());
+    return ref_mesh.ref_positions[rb][local];
+}
+
+std::vector<Vec3> construct_current_rigid_node_position(const RefMesh& ref_mesh, const DeformedState& state, const std::vector<Vec3>& x_coms, const std::vector<Vec3>& omega, double dt) {
+    std::vector<Vec3> positions = state.deformed_positions;
+    for (int rb = 0; rb < static_cast<int>(ref_mesh.rb_nodes.size()); ++rb) {
+        for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local) {
+            const int node = ref_mesh.rb_nodes[rb][local];
+            positions[node] = world_space_position(ref_mesh.ref_positions[rb][local], x_coms[rb], state.orientations[rb], omega[rb], dt);
+        }
+    }
+    return positions;
+}
+
+void add_rigid_derivatives(RigidEnergyDerivatives& total, const RigidEnergyDerivatives& contribution) {
+    total.translation_gradient += contribution.translation_gradient;
+    total.orientation_gradient += contribution.orientation_gradient;
+    total.translation_translation_hessian += contribution.translation_translation_hessian;
+    total.translation_orientation_hessian += contribution.translation_orientation_hessian;
+    total.orientation_orientation_hessian += contribution.orientation_orientation_hessian;
+}
+
+RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh, const DeformedState& state, const std::vector<std::array<int, 2>>& edges, const std::vector<Vec3>& x_coms, const std::vector<Vec3>& omega, const SimParams& params, double dt) {
+    RigidEnergyDerivatives total;
+    if (params.d_hat <= 0.0 || params.k_barrier <= 0.0)
+        return total;
+
+    const std::vector<Vec3> positions = construct_current_rigid_node_position(ref_mesh, state, x_coms, omega, dt);
+    const int num_nodes = static_cast<int>(positions.size());
+
+    // Node-triangle barrier derivatives involving the current rigid body
+    for (int node = 0; node < num_nodes; ++node) {
+        const bool node_is_current = owning_rb_for_node(ref_mesh.node_to_rb, node) == rb;
+        for (int tri = 0; tri < num_tris(ref_mesh); ++tri) {
+            const int v0 = tri_vertex(ref_mesh, tri, 0);
+            const int v1 = tri_vertex(ref_mesh, tri, 1);
+            const int v2 = tri_vertex(ref_mesh, tri, 2);
+            if (node == v0 || node == v1 || node == v2)
+                continue;
+
+            const bool triangle_touches_current = owning_rb_for_node(ref_mesh.node_to_rb, v0) == rb || owning_rb_for_node(ref_mesh.node_to_rb, v1) == rb || owning_rb_for_node(ref_mesh.node_to_rb, v2) == rb;
+            const bool triangle_is_current = owning_rb_for_node(ref_mesh.node_to_rb, v0) == rb && owning_rb_for_node(ref_mesh.node_to_rb, v1) == rb && owning_rb_for_node(ref_mesh.node_to_rb, v2) == rb;
+            if (node_is_current && !triangle_touches_current) {
+                const std::array<Vec3, 4> references = {rigid_node_body_space_position(node, ref_mesh), Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
+                add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega[rb], dt, params.d_hat));
+            } else if (!node_is_current && triangle_is_current) {
+                const std::array<Vec3, 4> references = {Vec3::Zero(), rigid_node_body_space_position(v0, ref_mesh), rigid_node_body_space_position(v1, ref_mesh), rigid_node_body_space_position(v2, ref_mesh)};
+                add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega[rb], dt, params.d_hat));
+            }
+        }
+    }
+
+    // Segment-segment barrier derivatives involving the current rigid body
+    for (int first = 0; first < static_cast<int>(edges.size()); ++first) {
+        const int a0 = edges[first][0];
+        const int a1 = edges[first][1];
+        const bool first_touches_current = owning_rb_for_node(ref_mesh.node_to_rb, a0) == rb || owning_rb_for_node(ref_mesh.node_to_rb, a1) == rb;
+        const bool first_is_current = owning_rb_for_node(ref_mesh.node_to_rb, a0) == rb && owning_rb_for_node(ref_mesh.node_to_rb, a1) == rb;
+        for (int second = first + 1; second < static_cast<int>(edges.size()); ++second) {
+            const int b0 = edges[second][0];
+            const int b1 = edges[second][1];
+            if (a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1)
+                continue;
+
+            const bool second_touches_current = owning_rb_for_node(ref_mesh.node_to_rb, b0) == rb || owning_rb_for_node(ref_mesh.node_to_rb, b1) == rb;
+            const bool second_is_current = owning_rb_for_node(ref_mesh.node_to_rb, b0) == rb && owning_rb_for_node(ref_mesh.node_to_rb, b1) == rb;
+            if (first_is_current && !second_touches_current) {
+                const std::array<Vec3, 4> references = {rigid_node_body_space_position(a0, ref_mesh), rigid_node_body_space_position(a1, ref_mesh), Vec3::Zero(), Vec3::Zero()};
+                add_rigid_derivatives(total, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega[rb], dt, params.d_hat));
+            } else if (!first_touches_current && second_is_current) {
+                const std::array<Vec3, 4> references = {Vec3::Zero(), Vec3::Zero(), rigid_node_body_space_position(b0, ref_mesh), rigid_node_body_space_position(b1, ref_mesh)};
+                add_rigid_derivatives(total, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega[rb], dt, params.d_hat));
+            }
+        }
+    }
+
+    return total;
+}
+
 bool rigid_sdf_min_evaluation(const SimParams& params, const Vec3& x, SDFEvaluation& result) {
     bool found = false;
     result.phi = std::numeric_limits<double>::infinity();
@@ -583,39 +693,51 @@ void validate_rigid_solver_state(const RefMesh& ref_mesh, const DeformedState& s
     }
 }
 
-double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedState& state, const SimParams& params, const std::vector<Vec3>& x_coms, const std::vector<Vec3>& omega, double dt) {
+double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedState& state, const std::vector<std::array<int, 2>>& edges, const SimParams& params, const std::vector<Vec3>& x_coms, const std::vector<Vec3>& omega, double dt) {
     double residual = 0.0;
     const int num_rbs = static_cast<int>(ref_mesh.total_mass.size());
+    const double barrier_scale = dt * dt * params.k_barrier;
     for (int rb = 0; rb < num_rbs; ++rb) {
         Vec3 com_gradient = inertia_translation_gradient(x_coms[rb], state.x_coms[rb], state.v_coms[rb], dt, ref_mesh.total_mass[rb]);
         com_gradient -= gravitational_potential_gradient(ref_mesh.total_mass[rb], params.gravity.y(), dt);
 
         Vec3 orientation_gradient = inertia_rotation_gradient_hessian(omega[rb], state.orientations[rb], state.omega[rb], dt, ref_mesh.I_hat[rb]).first;
         add_rigid_sdf_gradients(ref_mesh.ref_positions[rb], x_coms[rb], state.orientations[rb], omega[rb], params, dt, com_gradient, orientation_gradient);
+        const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, edges, x_coms, omega, params, dt);
+        com_gradient += barrier_scale * barrier.translation_gradient;
+        orientation_gradient += barrier_scale * barrier.orientation_gradient;
         residual += com_gradient.norm() + orientation_gradient.norm();
     }
     return residual;
 }
 
-Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const Vec3& x_com, const Vec3& omega, const SimParams& params, double dt) {
+Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const std::vector<std::array<int, 2>>& edges, const std::vector<Vec3>& x_coms, const std::vector<Vec3>& omega, const SimParams& params, double dt) {
     const Vec3& x_com_n = state.x_coms[rb];
     const Vec3& v_com_n = state.v_coms[rb];
 
-    Vec3 gradient = inertia_translation_gradient(x_com, x_com_n, v_com_n, dt, ref_mesh.total_mass[rb]);
+    Vec3 gradient = inertia_translation_gradient(x_coms[rb], x_com_n, v_com_n, dt, ref_mesh.total_mass[rb]);
     gradient -= gravitational_potential_gradient(ref_mesh.total_mass[rb], params.gravity.y(), dt);
 
     Mat33 hessian = inertia_translation_hessian(ref_mesh.total_mass[rb]);
-    add_rigid_sdf_translation_terms(ref_mesh.ref_positions[rb], x_com, state.orientations[rb], omega, params, dt, gradient, hessian);
+    add_rigid_sdf_translation_terms(ref_mesh.ref_positions[rb], x_coms[rb], state.orientations[rb], omega[rb], params, dt, gradient, hessian);
+    const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, edges, x_coms, omega, params, dt);
+    const double barrier_scale = dt * dt * params.k_barrier;
+    gradient += barrier_scale * barrier.translation_gradient;
+    hessian += barrier_scale * barrier.translation_translation_hessian;
     return hessian.ldlt().solve(gradient);
 }
 
-Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const Vec3& x_com, const Vec3& omega, const SimParams& params, double dt) {
+Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const std::vector<std::array<int, 2>>& edges, const std::vector<Vec3>& x_coms, const std::vector<Vec3>& omega, const SimParams& params, double dt) {
     const Vec4& q_n = state.orientations[rb];
     const Vec3& omega_n = state.omega[rb];
     const Mat33& I_hat = ref_mesh.I_hat[rb];
 
-    auto [gradient, hessian] = inertia_rotation_gradient_hessian(omega, q_n, omega_n, dt, I_hat);
-    add_rigid_sdf_orientation_terms(ref_mesh.ref_positions[rb], x_com, q_n, omega, params, dt, gradient, hessian);
+    auto [gradient, hessian] = inertia_rotation_gradient_hessian(omega[rb], q_n, omega_n, dt, I_hat);
+    add_rigid_sdf_orientation_terms(ref_mesh.ref_positions[rb], x_coms[rb], q_n, omega[rb], params, dt, gradient, hessian);
+    const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, edges, x_coms, omega, params, dt);
+    const double barrier_scale = dt * dt * params.k_barrier;
+    gradient += barrier_scale * barrier.orientation_gradient;
+    hessian += barrier_scale * barrier.orientation_orientation_hessian;
     return hessian.ldlt().solve(gradient);
 }
 
@@ -631,6 +753,7 @@ SolverResult global_gauss_seidel_solver_basic_rb(
     SolverResult result;
     const int num_rbs = static_cast<int>(ref_mesh.total_mass.size());
     const double dt = params.dt();
+    const std::vector<std::array<int, 2>> edges = rb_solver::build_unique_edges(ref_mesh);
 
     // Orientation is derived from the angular-velocity solve variable. Build
     // its candidate value even if the initial residual already satisfies the
@@ -653,7 +776,7 @@ SolverResult global_gauss_seidel_solver_basic_rb(
     };
 
     if (!params.fixed_iters) {
-        initial_residual = rb_solver::rigid_body_unnormalized_residual(ref_mesh, state, params, x_coms, omega, dt);
+        initial_residual = rb_solver::rigid_body_unnormalized_residual(ref_mesh, state, edges, params, x_coms, omega, dt);
         result.has_residual = true;
         result.initial_residual = initial_residual;
         result.final_residual = initial_residual;
@@ -666,16 +789,16 @@ SolverResult global_gauss_seidel_solver_basic_rb(
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         for (int rb = 0; rb < num_rbs; ++rb) {
-            x_coms[rb] -= params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, x_coms[rb], omega[rb], params, dt);
+            x_coms[rb] -= params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, edges, x_coms, omega, params, dt);
 
-            omega[rb] -= params.damping * rb_solver::compute_omega_update(rb, state, ref_mesh, x_coms[rb], omega[rb], params, dt);
+            omega[rb] -= params.damping * rb_solver::compute_omega_update(rb, state, ref_mesh, edges, x_coms, omega, params, dt);
             orientations[rb] = quaternion_align_sign(quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega[rb], dt)), state.orientations[rb]);
             omega[rb] = rb_solver::angular_velocity_from_orientation(orientations[rb], state.orientations[rb], dt);
         }
 
         result.iterations = iter;
         if (!params.fixed_iters) {
-            const double residual = rb_solver::rigid_body_unnormalized_residual(ref_mesh, state, params, x_coms, omega, dt);
+            const double residual = rb_solver::rigid_body_unnormalized_residual(ref_mesh, state, edges, params, x_coms, omega, dt);
             result.final_residual = residual;
             if (verbose) {
                 std::fprintf(stderr, "  [RB GS] iter %d  residual = %.6e\n", iter, residual);
