@@ -1022,4 +1022,132 @@ TEST(RigidBodyTranslationSafeStep, SkipsInternalAndUnrelatedPairs) {
         1.0);
 }
 
+TEST(RigidBodyOmegaSafeStep, MovingNodeUsesRotationCCD) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, -2.0, 0.0),
+        Vec3(1.0, 0.0, -1.0),
+        Vec3(3.0, 0.0, -1.0),
+        Vec3(2.0, 0.0, 1.0)
+    };
+    RefMesh ref_mesh;
+    ref_mesh.tris = {1, 2, 3};
+    ref_mesh.node_to_rb = {0, -1, -1, -1};
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+
+    const double alpha = per_rigid_body_omega_safe_step(
+        ref_mesh, {}, x, 0, Vec3::Zero(),
+        identity, Vec3::Zero(), Vec3(0.0, 0.0, -M_PI),
+        1.0, 0.9);
+
+    EXPECT_NEAR(alpha, 0.45, 1.0e-12);
+}
+
+TEST(RigidBodyOmegaSafeStep, MovingTriangleUsesReverseRotation) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, -2.0, 0.0),
+        Vec3(1.0, 0.0, -1.0),
+        Vec3(3.0, 0.0, -1.0),
+        Vec3(2.0, 0.0, 1.0)
+    };
+    RefMesh ref_mesh;
+    ref_mesh.tris = {1, 2, 3};
+    ref_mesh.node_to_rb = {-1, 0, 0, 0};
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+
+    const double alpha = per_rigid_body_omega_safe_step(
+        ref_mesh, {}, x, 0, Vec3::Zero(),
+        identity, Vec3::Zero(), Vec3(0.0, 0.0, M_PI),
+        1.0, 0.9);
+
+    EXPECT_NEAR(alpha, 0.45, 1.0e-12);
+}
+
+TEST(RigidBodyOmegaSafeStep, MovingFirstEdgeUsesRotationCCD) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, -1.0, 0.0),
+        Vec3(0.0, -2.0, 0.0),
+        Vec3(1.5, 0.0, 0.0),
+        Vec3(3.0, 0.0, 0.0)
+    };
+    RefMesh ref_mesh;
+    ref_mesh.node_to_rb = {0, 0, -1, -1};
+    const std::vector<std::array<int, 2>> edges = {{0, 1}, {2, 3}};
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+
+    const double alpha = per_rigid_body_omega_safe_step(
+        ref_mesh, edges, x, 0, Vec3::Zero(),
+        identity, Vec3::Zero(), Vec3(0.0, 0.0, -M_PI),
+        1.0, 0.9);
+
+    EXPECT_NEAR(alpha, 0.45, 1.0e-12);
+}
+
+TEST(RigidBodyOmegaSafeStep, MovingSecondEdgeUsesReverseRotation) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, -1.0, 0.0),
+        Vec3(0.0, -2.0, 0.0),
+        Vec3(1.5, 0.0, 0.0),
+        Vec3(3.0, 0.0, 0.0)
+    };
+    RefMesh ref_mesh;
+    ref_mesh.node_to_rb = {0, 0, -1, -1};
+    const std::vector<std::array<int, 2>> edges = {{2, 3}, {0, 1}};
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+
+    const double alpha = per_rigid_body_omega_safe_step(
+        ref_mesh, edges, x, 0, Vec3::Zero(),
+        identity, Vec3::Zero(), Vec3(0.0, 0.0, -M_PI),
+        1.0, 0.9);
+
+    EXPECT_NEAR(alpha, 0.45, 1.0e-12);
+}
+
+TEST(RigidBodyOmegaSafeStep, SkipsInternalAndUnrelatedPairs) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, -1.0, 0.0),
+        Vec3(0.0, -2.0, 0.0),
+        Vec3(1.5, 0.0, 0.0),
+        Vec3(3.0, 0.0, 0.0)
+    };
+    const std::vector<std::array<int, 2>> edges = {{0, 1}, {2, 3}};
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    RefMesh ref_mesh;
+
+    ref_mesh.node_to_rb = {0, 0, 0, 0};
+    EXPECT_DOUBLE_EQ(
+        per_rigid_body_omega_safe_step(
+            ref_mesh, edges, x, 0, Vec3::Zero(),
+            identity, Vec3::Zero(), Vec3(0.0, 0.0, -M_PI),
+            1.0),
+        1.0);
+
+    ref_mesh.node_to_rb = {-1, -1, -1, -1};
+    EXPECT_DOUBLE_EQ(
+        per_rigid_body_omega_safe_step(
+            ref_mesh, edges, x, 0, Vec3::Zero(),
+            identity, Vec3::Zero(), Vec3(0.0, 0.0, -M_PI),
+            1.0),
+        1.0);
+}
+
+TEST(RigidBodyOmegaSafeStep, RejectsPartiallyOwnedPrimitive) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, -2.0, 0.0),
+        Vec3(1.0, 0.0, -1.0),
+        Vec3(3.0, 0.0, -1.0),
+        Vec3(2.0, 0.0, 1.0)
+    };
+    RefMesh ref_mesh;
+    ref_mesh.tris = {1, 2, 3};
+    ref_mesh.node_to_rb = {-1, 0, -1, -1};
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+
+    EXPECT_DOUBLE_EQ(
+        per_rigid_body_omega_safe_step(
+            ref_mesh, {}, x, 0, Vec3::Zero(),
+            identity, Vec3::Zero(), Vec3(0.0, 0.0, -M_PI),
+            1.0),
+        0.0);
+}
+
 }  // namespace

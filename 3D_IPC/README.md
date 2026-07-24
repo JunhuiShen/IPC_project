@@ -122,6 +122,11 @@ Built-in example scenes (`--example N`):
 | `3` | Rectangular cloth wrapping one horizontal cylinder; cylinder yaws about +y, twisting the cloth between two clamped top edges, then reverses to untwist |
 | `4` | Avatar clothing scene loaded from `datadir` (`body_0000.obj` collider + `dress_0000.obj` simulated cloth) |
 | `5` | Freely rotating rigid tennis racket with a prescribed initial angular velocity and no gravity |
+| `6` | Freely rotating space tool initialized near its intermediate principal axis |
+| `7` | Rigid box and hexagonal prism falling onto a ground plane |
+| `8` | Two same-height rigid hexagonal prisms moving toward one another with zero gravity |
+| `9` | Five vertically aligned rigid hexagonal prisms falling and stacking on a ground plane |
+| `10` | Five differently oriented rigid hexagonal prisms tumbling apart onto a ground plane |
 
 For rigid-body examples, the reported vertices and triangles describe the
 surface geometry. The reduced solver advances one three-component COM vector
@@ -134,6 +139,9 @@ Common invocations:
     ./build/3D_sim --example 2                              # two-cylinder twist
     ./build/3D_sim --example 3                              # cylinder yaws and twists cloth between two clamped top edges
     ./build/3D_sim --example 5                              # freely rotating rigid tennis racket
+    ./build/3D_sim --example 8 --substeps 10 --format obj   # head-on rigid polygon collision
+    ./build/3D_sim --example 9 --substeps 10 --format obj   # five rigid polygons dropping into a stack
+    ./build/3D_sim --example 10 --substeps 10 --format obj  # five rigid polygons tumbling and scattering
     ./build/3D_sim --use_ccd_guess false --use_translation_guess true --fixed_iters
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames

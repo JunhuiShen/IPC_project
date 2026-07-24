@@ -1,4 +1,5 @@
 #include "ccd.h"
+#include "safe_step.h"
 #include "segment_segment_distance.h"
 
 #include <cmath>
@@ -832,4 +833,80 @@ TEST(SegmentSegmentRBRotationCCD, RotationBeyond180Hit) {
         x0, x1, x_com, q_new, kIdentityQ, x2, x3, s);
     ASSERT_TRUE(hit);
     EXPECT_NEAR(s, 1.0 / 3.0, 1e-10);
+}
+
+TEST(RigidBodyRotationSafeStep, SegmentSegmentScalesTimeOfImpact) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(0.0, -1.0, 0.0);
+    const Vec3 x1(0.0, -2.0, 0.0);
+    const Vec3 x2(1.5, 0.0, 0.0);
+    const Vec3 x3(3.0, 0.0, 0.0);
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI);
+
+    EXPECT_NEAR(
+        segment_segment_rb_rotation_safe_step(
+            x0, x1, x_com, q_new, kIdentityQ, x2, x3, 0.9),
+        0.45, 1e-10);
+}
+
+TEST(RigidBodyRotationSafeStep, PointTriangleScalesTimeOfImpact) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x(0.0, -2.0, 0.0);
+    const Vec3 x2(1.0, 0.0, -1.0);
+    const Vec3 x3(3.0, 0.0, -1.0);
+    const Vec3 x4(2.0, 0.0, 1.0);
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI);
+
+    EXPECT_NEAR(
+        point_triangle_rb_rotation_safe_step(
+            x, x_com, q_new, kIdentityQ, x2, x3, x4, 0.9),
+        0.45, 1e-10);
+}
+
+TEST(RigidBodyRotationSafeStep, NoCollisionReturnsFullStep) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI / 2.0);
+
+    EXPECT_DOUBLE_EQ(
+        segment_segment_rb_rotation_safe_step(
+            Vec3(0.0, -1.0, 0.0), Vec3(0.0, -2.0, 0.0),
+            x_com, q_new, kIdentityQ,
+            Vec3(1.5, 0.0, 5.0), Vec3(3.0, 0.0, 5.0)),
+        1.0);
+
+    EXPECT_DOUBLE_EQ(
+        point_triangle_rb_rotation_safe_step(
+            Vec3(0.0, -2.0, 0.0), x_com, q_new, kIdentityQ,
+            Vec3(1.0, 0.0, 5.0),
+            Vec3(3.0, 0.0, 5.0),
+            Vec3(2.0, 1.0, 5.0)),
+        1.0);
+}
+
+TEST(RigidBodyRotationSafeStep, InitialPointTriangleContactReturnsZero) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x(2.0, 0.0, 0.0);
+    const Vec3 x2(1.0, -1.0, 0.0);
+    const Vec3 x3(3.0, -1.0, 0.0);
+    const Vec3 x4(2.0, 1.0, 0.0);
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI / 2.0);
+
+    EXPECT_DOUBLE_EQ(
+        point_triangle_rb_rotation_safe_step(
+            x, x_com, q_new, kIdentityQ, x2, x3, x4),
+        0.0);
+}
+
+TEST(RigidBodyRotationSafeStep, InitialSegmentSegmentContactReturnsZero) {
+    const Vec3 x_com(0.0, 0.0, 0.0);
+    const Vec3 x0(1.0, 0.0, 0.0);
+    const Vec3 x1(2.0, 0.0, 0.0);
+    const Vec3 x2(1.0, -1.0, 0.0);
+    const Vec3 x3(1.0, 1.0, 0.0);
+    const Vec4 q_new = AxisAngleQuat(Vec3(0, 0, 1), M_PI / 2.0);
+
+    EXPECT_DOUBLE_EQ(
+        segment_segment_rb_rotation_safe_step(
+            x0, x1, x_com, q_new, kIdentityQ, x2, x3),
+        0.0);
 }
