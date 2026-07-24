@@ -2,6 +2,7 @@
 
 #include "algebra/algebra.h"
 #include "physics.h"
+#include "safe_step.h"
 #include "solver.h"
 
 #include <gtest/gtest.h>
@@ -929,6 +930,96 @@ TEST(RigidBodyIPCSolver, AddsNaiveRigidSegmentBarrierTerms) {
     EXPECT_GT(omega[rb].norm(), 1.0e-8);
     EXPECT_TRUE(x_coms[rb].isApprox(expected_com, 1.0e-11));
     EXPECT_TRUE(omega[rb].isApprox(expected_omega, 1.0e-11));
+}
+
+TEST(RigidBodyTranslationSafeStep, MovingNodeUsesLinearCCD) {
+    const std::vector<Vec3> x = {
+        Vec3(0.25, 0.25, 1.0),
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0)
+    };
+    RefMesh ref_mesh;
+    ref_mesh.tris = {1, 2, 3};
+    ref_mesh.node_to_rb = {0, -1, -1, -1};
+
+    const double alpha = per_rigid_body_translation_safe_step(
+        ref_mesh, {}, x, 0, Vec3(0.0, 0.0, -2.0), 0.9);
+
+    EXPECT_NEAR(alpha, 0.45, 1.0e-12);
+}
+
+TEST(RigidBodyTranslationSafeStep, MovingTriangleUsesRelativeNodeMotion) {
+    const std::vector<Vec3> x = {
+        Vec3(0.25, 0.25, 1.0),
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0)
+    };
+    RefMesh ref_mesh;
+    ref_mesh.tris = {1, 2, 3};
+    ref_mesh.node_to_rb = {-1, 0, 0, 0};
+
+    const double alpha = per_rigid_body_translation_safe_step(
+        ref_mesh, {}, x, 0, Vec3(0.0, 0.0, 2.0), 0.9);
+
+    EXPECT_NEAR(alpha, 0.45, 1.0e-12);
+}
+
+TEST(RigidBodyTranslationSafeStep, MovingFirstEdgeUsesTranslatingEdgeCCD) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, 0.0, 1.0),
+        Vec3(1.0, 0.0, 1.0),
+        Vec3(0.5, -1.0, 0.0),
+        Vec3(0.5, 1.0, 0.0)
+    };
+    RefMesh ref_mesh;
+    ref_mesh.node_to_rb = {0, 0, -1, -1};
+    const std::vector<std::array<int, 2>> edges = {{0, 1}, {2, 3}};
+
+    const double alpha = per_rigid_body_translation_safe_step(
+        ref_mesh, edges, x, 0, Vec3(0.0, 0.0, -2.0), 0.9);
+
+    EXPECT_NEAR(alpha, 0.45, 1.0e-12);
+}
+
+TEST(RigidBodyTranslationSafeStep, MovingSecondEdgeIsReorderedForCCD) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, 0.0, 1.0),
+        Vec3(1.0, 0.0, 1.0),
+        Vec3(0.5, -1.0, 0.0),
+        Vec3(0.5, 1.0, 0.0)
+    };
+    RefMesh ref_mesh;
+    ref_mesh.node_to_rb = {0, 0, -1, -1};
+    const std::vector<std::array<int, 2>> edges = {{2, 3}, {0, 1}};
+
+    const double alpha = per_rigid_body_translation_safe_step(
+        ref_mesh, edges, x, 0, Vec3(0.0, 0.0, -2.0), 0.9);
+
+    EXPECT_NEAR(alpha, 0.45, 1.0e-12);
+}
+
+TEST(RigidBodyTranslationSafeStep, SkipsInternalAndUnrelatedPairs) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, 0.0, 1.0),
+        Vec3(1.0, 0.0, 1.0),
+        Vec3(0.5, -1.0, 0.0),
+        Vec3(0.5, 1.0, 0.0)
+    };
+    const std::vector<std::array<int, 2>> edges = {{0, 1}, {2, 3}};
+    RefMesh ref_mesh;
+    ref_mesh.node_to_rb = {0, 0, 0, 0};
+    EXPECT_DOUBLE_EQ(
+        per_rigid_body_translation_safe_step(
+            ref_mesh, edges, x, 0, Vec3(0.0, 0.0, -2.0)),
+        1.0);
+
+    ref_mesh.node_to_rb = {-1, -1, -1, -1};
+    EXPECT_DOUBLE_EQ(
+        per_rigid_body_translation_safe_step(
+            ref_mesh, edges, x, 0, Vec3(0.0, 0.0, -2.0)),
+        1.0);
 }
 
 }  // namespace

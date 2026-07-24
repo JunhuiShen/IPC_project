@@ -477,7 +477,7 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
 
 namespace rb_solver {
 
-// Convert the triangle mesh into a unique edge list.
+// Convert the triangle mesh into a unique edge list for segment-segment comparison
 std::vector<std::array<int, 2>> build_unique_edges(const RefMesh& ref_mesh) {
     std::vector<std::array<int, 2>> edges;
     edges.reserve(ref_mesh.tris.size());
@@ -549,10 +549,10 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
 
             const bool triangle_touches_current = owning_rb_for_node(ref_mesh.node_to_rb, v0) == rb || owning_rb_for_node(ref_mesh.node_to_rb, v1) == rb || owning_rb_for_node(ref_mesh.node_to_rb, v2) == rb;
             const bool triangle_is_current = owning_rb_for_node(ref_mesh.node_to_rb, v0) == rb && owning_rb_for_node(ref_mesh.node_to_rb, v1) == rb && owning_rb_for_node(ref_mesh.node_to_rb, v2) == rb;
-            if (node_is_current && !triangle_touches_current) {
+            if (node_is_current && !triangle_touches_current) { // the node moves and the entire triangle is fixed
                 const std::array<Vec3, 4> references = {rigid_node_body_space_position(node, ref_mesh), Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
                 add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega[rb], dt, params.d_hat));
-            } else if (!node_is_current && triangle_is_current) {
+            } else if (!node_is_current && triangle_is_current) { // the triangle moves and the node is fixed
                 const std::array<Vec3, 4> references = {Vec3::Zero(), rigid_node_body_space_position(v0, ref_mesh), rigid_node_body_space_position(v1, ref_mesh), rigid_node_body_space_position(v2, ref_mesh)};
                 add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega[rb], dt, params.d_hat));
             }
