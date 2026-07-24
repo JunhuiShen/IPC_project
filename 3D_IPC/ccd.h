@@ -23,11 +23,16 @@ CCDResult node_triangle_only_one_node_moves(
         bool use_ticcd = true);
 
 // One-moving-node SS CCD. Same dispatch semantics as above.
-CCDResult segment_segment_only_one_node_moves(
-        const Vec3& x1, const Vec3& dx1,
+CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1,
         const Vec3& x2, const Vec3& x3, const Vec3& x4,
-        double eps = 1.0e-12,
-        bool use_ticcd = true);
+        double eps = 1.0e-12, bool use_ticcd = true);
+
+// Translating-edge SS CCD. Both endpoints of [x1, x2] must have the same
+// displacement (`dx1 == dx2`), while [x3, x4] remains fixed.
+CCDResult segment_segment_same_displacement_linear_ccd(const Vec3& x1, const Vec3& dx1,
+        const Vec3& x2, const Vec3& dx2,
+        const Vec3& x3, const Vec3& x4,
+        double eps = 1.0e-12);
 
 // General NT/SS CCD: all vertices may move. Backed by Tight-Inclusion CCD.
 // Returns the earliest time of impact in [0, 1], or 1.0 when no collision

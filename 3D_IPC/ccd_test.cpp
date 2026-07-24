@@ -320,6 +320,191 @@ TEST(CCDSegmentSegmentSingleMovingNode, RepoExample4Frame9Sub6Iter5) {
     EXPECT_DOUBLE_EQ(t_at_min, 0.0);
 }
 
+TEST(CCDSegmentSegmentSameDisplacement, InteriorHit) {
+    const Vec3 x1(0.0, 0.0, 1.0);
+    const Vec3 dx(0.0, 0.0, -2.0);
+    const Vec3 x2(1.0, 0.0, 1.0);
+    const Vec3 x3(0.5, -1.0, 0.0);
+    const Vec3 x4(0.5,  1.0, 0.0);
+
+    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+        x1, dx, x2, dx, x3, x4);
+    ASSERT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 0.5, kTol);
+}
+
+TEST(CCDSegmentSegmentSameDisplacement, CoplanarityWithoutFiniteOverlap) {
+    const Vec3 x1(0.0, 0.0, 1.0);
+    const Vec3 dx(0.0, 0.0, -2.0);
+    const Vec3 x2(1.0, 0.0, 1.0);
+    const Vec3 x3(2.0, -1.0, 0.0);
+    const Vec3 x4(2.0,  1.0, 0.0);
+
+    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+        x1, dx, x2, dx, x3, x4);
+    EXPECT_FALSE(r.collision);
+}
+
+TEST(CCDSegmentSegmentSameDisplacement, SpatialEndpointHit) {
+    const Vec3 x1(0.0, 0.0, 1.0);
+    const Vec3 dx(0.0, 0.0, -2.0);
+    const Vec3 x2(1.0, 0.0, 1.0);
+    const Vec3 x3(1.0, 0.0, 0.0);
+    const Vec3 x4(1.0, 1.0, 0.0);
+
+    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+        x1, dx, x2, dx, x3, x4);
+    ASSERT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 0.5, kTol);
+}
+
+TEST(CCDSegmentSegmentSameDisplacement, StepEndpointHit) {
+    const Vec3 x1(0.0, 0.0, 1.0);
+    const Vec3 dx(0.0, 0.0, -1.0);
+    const Vec3 x2(1.0, 0.0, 1.0);
+    const Vec3 x3(0.5, -1.0, 0.0);
+    const Vec3 x4(0.5,  1.0, 0.0);
+
+    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+        x1, dx, x2, dx, x3, x4);
+    ASSERT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 1.0, kTol);
+}
+
+TEST(CCDSegmentSegmentSameDisplacement, CZeroDNonzero) {
+    const Vec3 x1(0.0, 0.0, 1.0);
+    const Vec3 dx(1.0, 0.0, 0.0);
+    const Vec3 x2(1.0, 0.0, 1.0);
+    const Vec3 x3(0.5, -1.0, 0.0);
+    const Vec3 x4(0.5,  1.0, 0.0);
+
+    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+        x1, dx, x2, dx, x3, x4);
+    EXPECT_FALSE(r.collision);
+}
+
+TEST(CCDSegmentSegmentSameDisplacement, CandidateOutsideStepInterval) {
+    const Vec3 x1(0.0, 0.0, 1.0);
+    const Vec3 dx(0.0, 0.0, 1.0);
+    const Vec3 x2(1.0, 0.0, 1.0);
+    const Vec3 x3(0.5, -1.0, 0.0);
+    const Vec3 x4(0.5,  1.0, 0.0);
+
+    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+        x1, dx, x2, dx, x3, x4);
+    EXPECT_FALSE(r.collision);
+}
+
+TEST(CCDSegmentSegmentSameDisplacement, CoplanarSweep) {
+    const Vec3 x1(0.0, -1.0, 0.0);
+    const Vec3 dx(0.0, 2.0, 0.0);
+    const Vec3 x2(1.0, -1.0, 0.0);
+    const Vec3 x3(0.5, -0.25, 0.0);
+    const Vec3 x4(0.5,  0.25, 0.0);
+
+    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+        x1, dx, x2, dx, x3, x4);
+    ASSERT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 0.375, kTol);
+}
+
+TEST(CCDSegmentSegmentSameDisplacement, CoplanarSweepWithoutFiniteOverlap) {
+    const Vec3 x1(-2.0, 2.0, 0.0);
+    const Vec3 dx(3.0, 0.0, 0.0);
+    const Vec3 x2(-1.0, 2.0, 0.0);
+    const Vec3 x3(0.0, 0.0, 0.0);
+    const Vec3 x4(0.0, 1.0, 0.0);
+
+    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+        x1, dx, x2, dx, x3, x4);
+    EXPECT_FALSE(r.collision);
+}
+
+TEST(CCDSegmentSegmentSameDisplacement, ParallelCollinearSweep) {
+    const Vec3 x1(0.0, 0.0, 0.0);
+    const Vec3 dx(2.0, 0.0, 0.0);
+    const Vec3 x2(1.0, 0.0, 0.0);
+    const Vec3 x3(2.0, 0.0, 0.0);
+    const Vec3 x4(3.0, 0.0, 0.0);
+
+    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+        x1, dx, x2, dx, x3, x4);
+    ASSERT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 0.5, kTol);
+}
+
+TEST(CCDSegmentSegmentSameDisplacement, ParallelTransverseSweep) {
+    const Vec3 x1(0.0, 1.0, 0.0);
+    const Vec3 dx(0.0, -2.0, 0.0);
+    const Vec3 x2(1.0, 1.0, 0.0);
+    const Vec3 x3(0.5, 0.0, 0.0);
+    const Vec3 x4(1.5, 0.0, 0.0);
+
+    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+        x1, dx, x2, dx, x3, x4);
+    ASSERT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 0.5, kTol);
+}
+
+TEST(CCDSegmentSegmentSameDisplacement, ParallelTransverseSweepWithoutFiniteOverlap) {
+    const Vec3 x1(0.0, 1.0, 0.0);
+    const Vec3 dx(0.0, -2.0, 0.0);
+    const Vec3 x2(1.0, 1.0, 0.0);
+    const Vec3 x3(2.0, 0.0, 0.0);
+    const Vec3 x4(3.0, 0.0, 0.0);
+
+    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+        x1, dx, x2, dx, x3, x4);
+    EXPECT_FALSE(r.collision);
+}
+
+TEST(CCDSegmentSegmentSameDisplacement, SmallTransverseVelocityStillFindsContact) {
+    // A transverse component small relative to the total displacement must
+    // not be rounded to zero: the moving segment reaches x4 at t=0.6.
+    const Vec3 x1(0.0, 5.4e-8, 0.0);
+    const Vec3 dx(10.0, -9.0e-8, 0.0);
+    const Vec3 x2(1.0, 5.4e-8, 0.0);
+    const Vec3 x3(5.0, 0.0, 0.0);
+    const Vec3 x4(6.0, 0.0, 0.0);
+
+    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+        x1, dx, x2, dx, x3, x4);
+    ASSERT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 0.6, 1.0e-12);
+}
+
+TEST(CCDSegmentSegmentSameDisplacement, NearParallelCoplanarSweepUsesTrueEntry) {
+    // The directions differ by only 1e-8 radians at this scale. Treating them
+    // as exactly parallel delays the reported contact from x2/x4 at t=0.5 to
+    // x1/x3 at t=1.
+    const Vec3 x1(0.0, 2.0, 0.0);
+    const Vec3 dx(0.0, -2.0, 0.0);
+    const Vec3 x2(1.0e8, 2.0, 0.0);
+    const Vec3 x3(0.0, 0.0, 0.0);
+    const Vec3 x4(1.0e8, 1.0, 0.0);
+
+    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+        x1, dx, x2, dx, x3, x4);
+    ASSERT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, 0.5, kTol);
+}
+
+TEST(CCDSegmentSegmentSameDisplacement, TinyAngleStillUsesNonparallelRoot) {
+    // Even an angle below eps has a well-defined nonparallel endpoint root.
+    // Collapsing it to the parallel branch would delay contact until t=1.
+    const Vec3 x1(0.0, 2.0, 0.0);
+    const Vec3 dx(0.0, -2.0, 0.0);
+    const Vec3 x2(1.0e8, 2.0, 0.0);
+    const Vec3 x3(0.0, 0.0, 0.0);
+    const Vec3 x4(1.0e8, 9.0e-5, 0.0);
+    const double expected_t = (2.0 - 9.0e-5) / 2.0;
+
+    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+        x1, dx, x2, dx, x3, x4);
+    ASSERT_TRUE(r.collision);
+    EXPECT_NEAR(r.t, expected_t, 1.0e-12);
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -40,6 +41,64 @@ int dominant_drop_axis(const Vec3& n0, const Vec3& n1) {
     if (n.x() >= n.y() && n.x() >= n.z()) return 0;
     if (n.y() >= n.x() && n.y() >= n.z()) return 1;
     return 2;
+}
+
+// Test whether segments [a0, a1] and [b0, b1] intersect by checking (b0 - a0) * ((a1 - a0) x (b1 - b0)) = 0
+bool segments_intersect(const Vec3& a0, const Vec3& a1, const Vec3& b0, const Vec3& b1, double geometry_relative_eps) {
+    const Vec3 u = a1 - a0;
+    const Vec3 v = b1 - b0;
+    const Vec3 w = b0 - a0;
+    const Vec3 normal = u.cross(v);
+    const double normal2 = normal.squaredNorm();
+    const double u2 = u.squaredNorm();
+    const double v2 = v.squaredNorm();
+    if (u2 == 0.0 || v2 == 0.0) return false;
+
+    const double local_length = std::max({std::sqrt(u2), std::sqrt(v2), w.norm()});
+    const double distance_tolerance = geometry_relative_eps * local_length;
+
+    // Parallel or near-parallel case
+    if (normal2 <= geometry_relative_eps * geometry_relative_eps * u2 * v2) {
+        if (w.cross(u).squaredNorm() > distance_tolerance * distance_tolerance * u2) {
+            return false;
+        }
+
+        const double ax = std::fabs(u.x());
+        const double ay = std::fabs(u.y());
+        const double az = std::fabs(u.z());
+        const int axis = (ax >= ay && ax >= az) ? 0 : (ay >= ax && ay >= az ? 1 : 2);
+        const auto component = [&](const Vec3& point) {
+            return axis == 0 ? point.x() : (axis == 1 ? point.y() : point.z());
+        };
+
+        double A = component(a0), B = component(a1);
+        double C = component(b0), D = component(b1);
+        if (A > B) std::swap(A, B);
+        if (C > D) std::swap(C, D);
+        return A <= D + distance_tolerance && C <= B + distance_tolerance;
+    }
+
+    if (std::fabs(w.dot(normal)) > distance_tolerance * std::sqrt(normal2)) return false;
+    const double alpha = w.cross(v).dot(normal) / normal2;
+    const double beta = w.cross(u).dot(normal) / normal2;
+    const Vec3 point_a = a0 + u * alpha;
+    const Vec3 point_b = b0 + v * beta;
+    if ((point_a - point_b).squaredNorm() > distance_tolerance * distance_tolerance) return false;
+    return alpha >= -1.0e-8 && alpha <= 1.0 + 1.0e-8 && beta >= -1.0e-8 && beta <= 1.0 + 1.0e-8;
+}
+
+bool clip_affine_to_interval(
+        double value0, double slope,
+        double lower, double upper,
+        double& t_min, double& t_max) {
+    if (slope == 0.0) return value0 >= lower && value0 <= upper;
+
+    double lower_time = (lower - value0) / slope;
+    double upper_time = (upper - value0) / slope;
+    if (lower_time > upper_time) std::swap(lower_time, upper_time);
+    t_min = std::max(t_min, lower_time);
+    t_max = std::min(t_max, upper_time);
+    return t_min <= t_max;
 }
 
 // -----------------------------------------------------------------------------
@@ -191,44 +250,7 @@ CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1, const Vec3
         const Vec3 a1 = x2;
         const Vec3 b0 = x3;
         const Vec3 b1 = x4;
-        const Vec3 u = a1 - a0;
-        const Vec3 v = b1 - b0;
-        const Vec3 w = b0 - a0;
-        const Vec3 normal = u.cross(v);
-        const double normal2 = normal.squaredNorm();
-        const double u2 = u.squaredNorm();
-        const double v2 = v.squaredNorm();
-        if (u2 == 0.0 || v2 == 0.0) return false;
-
-        const double local_length = std::max({std::sqrt(u2), std::sqrt(v2), w.norm()});
-        const double distance_tolerance = geometry_relative_eps * local_length;
-        if (normal2 <= geometry_relative_eps * geometry_relative_eps * u2 * v2) {
-            if (w.cross(u).squaredNorm() > distance_tolerance * distance_tolerance * u2) {
-                return false;
-            }
-
-            const double ax = std::fabs(u.x());
-            const double ay = std::fabs(u.y());
-            const double az = std::fabs(u.z());
-            const int axis = (ax >= ay && ax >= az) ? 0 : (ay >= ax && ay >= az ? 1 : 2);
-            const auto component = [&](const Vec3& point) {
-                return axis == 0 ? point.x() : (axis == 1 ? point.y() : point.z());
-            };
-
-            double A = component(a0), B = component(a1);
-            double C = component(b0), D = component(b1);
-            if (A > B) std::swap(A, B);
-            if (C > D) std::swap(C, D);
-            return A <= D + distance_tolerance && C <= B + distance_tolerance;
-        }
-
-        if (std::fabs(w.dot(normal)) > distance_tolerance * std::sqrt(normal2)) return false;
-        const double alpha = w.cross(v).dot(normal) / normal2;
-        const double beta = w.cross(u).dot(normal) / normal2;
-        const Vec3 point_a = a0 + u * alpha;
-        const Vec3 point_b = b0 + v * beta;
-        if ((point_a - point_b).squaredNorm() > distance_tolerance * distance_tolerance) return false;
-        return alpha >= -1.0e-8 && alpha <= 1.0 + 1.0e-8 && beta >= -1.0e-8 && beta <= 1.0 + 1.0e-8;
+        return segments_intersect(a0, a1, b0, b1, geometry_relative_eps);
     };
 
     if (segments_intersect_at(0.0)) {
@@ -407,6 +429,148 @@ CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1, const Vec3
     return result;
 }
 
+}  // namespace
+
+CCDResult segment_segment_same_displacement_linear_ccd(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2, const Vec3& x3, const Vec3& x4, double eps) {
+    assert((dx1 - dx2).squaredNorm() == 0.0 && "endpoint displacements must match");
+    (void)dx2;
+    const Vec3& dx = dx1;
+    CCDResult result;
+    const double geometry_relative_eps = std::max(eps, 1.0e-8);
+
+    const auto segments_intersect_at = [&](double t) {
+        return segments_intersect( x1 + dx * t, x2 + dx * t, x3, x4, geometry_relative_eps);
+    };
+
+    if (segments_intersect_at(0.0)) {
+        result.collision = true;
+        result.t = 0.0;
+        return result;
+    }
+
+    const Vec3 a = x2 - x1;
+    const Vec3 b = x4 - x3;
+    const Vec3 r = x3 - x1;
+    const double a2 = a.squaredNorm();
+    const double b2 = b.squaredNorm();
+
+    if (a2 == 0.0 || b2 == 0.0) return result;
+
+    const Vec3 normal = a.cross(b);
+    const double normal2 = normal.squaredNorm();
+    const bool parallel = normal2 == 0.0;
+
+    if (!parallel) {
+        // Ordinary case: f(t) = (a x b) . (r - t dx) = d + c t = 0
+        const double d = normal.dot(r);
+        const double c = -normal.dot(dx);
+        const double d_scale = std::sqrt(normal2) * r.norm();
+        const double c_scale = std::sqrt(normal2) * dx.norm();
+        const bool coplanar_for_entire_step = is_effectively_zero(c, c_scale, eps) && is_effectively_zero(d, d_scale, eps);
+
+        // When c != 0, this gives the single candidate time t = -d / c
+        if (c != 0.0) {
+            const double t = -d / c;
+            if (in_unit_interval(t, eps)) {
+                const double candidate_t = std::clamp(t, 0.0, 1.0);
+                if (segments_intersect_at(candidate_t)) {
+                    result.collision = true;
+                    result.t = candidate_t;
+                    return result;
+                }
+            }
+        }
+
+        // Unless f(t) is effectively zero throughout the step, the isolated root above is the only possible coplanarity event
+        if (!coplanar_for_entire_step) return result;
+
+        // Nonparallel and coplanar for the entire step: alpha(t) and beta(t) are affine.
+        // Clip [0, 1] against 0 <= alpha,beta <= 1 to obtain the first finite-segment overlap.
+        const double alpha0 = r.cross(b).dot(normal) / normal2;
+        const double alpha_slope = -dx.cross(b).dot(normal) / normal2;
+        const double beta0 = r.cross(a).dot(normal) / normal2;
+        const double beta_slope = -dx.cross(a).dot(normal) / normal2;
+        double t_min = 0.0;
+        double t_max = 1.0;
+        if (!clip_affine_to_interval(alpha0, alpha_slope, 0.0, 1.0, t_min, t_max) || !clip_affine_to_interval(beta0, beta_slope, 0.0, 1.0, t_min, t_max)) {
+            return result;
+        }
+
+        if (in_unit_interval(t_min, eps)) {
+            const double candidate_t = std::clamp(t_min, 0.0, 1.0);
+            if (segments_intersect_at(candidate_t)) {
+                result.collision = true;
+                result.t = candidate_t;
+            }
+        }
+        return result;
+    }
+
+    // Parallel case: a x b = 0, so f(t) is identically zero regardless of  the separation between the supporting lines.
+    // Test collinearity first, then test overlap of the finite segments.
+    const Vec3 direction = a2 >= b2 ? a : b;
+    const double direction2 = direction.squaredNorm();
+    const Vec3 transverse_offset = r.cross(direction);
+    const Vec3 transverse_velocity = dx.cross(direction);
+    const double transverse_velocity2 = transverse_velocity.squaredNorm();
+    const bool no_transverse_motion = transverse_velocity2 == 0.0;
+
+    if (!no_transverse_motion) {
+        // Solve transverse_offset - t * transverse_velocity = 0.
+        // The scalar projection gives the only candidate; the fixed-time predicate rejects it when the two vector quantities are not parallel.
+        const double t = transverse_offset.dot(transverse_velocity) / transverse_velocity2;
+        if (in_unit_interval(t, eps)) {
+            const double candidate_t = std::clamp(t, 0.0, 1.0);
+            if (segments_intersect_at(candidate_t)) {
+                result.collision = true;
+                result.t = candidate_t;
+            }
+        }
+        return result;
+    }
+
+    const double transverse_offset_scale2 = r.squaredNorm() * direction2;
+    const bool collinear_for_entire_step =
+        transverse_offset_scale2 == 0.0 ? transverse_offset.squaredNorm() == 0.0 : transverse_offset.squaredNorm() <= geometry_relative_eps * geometry_relative_eps * transverse_offset_scale2;
+    if (!collinear_for_entire_step) return result;
+
+    // The supporting lines remain collinear.
+    //  Project onto the dominant axis and clip the translated interval against the fixed interval.
+    const double ax = std::fabs(direction.x());
+    const double ay = std::fabs(direction.y());
+    const double az = std::fabs(direction.z());
+    const int axis = (ax >= ay && ax >= az) ? 0 : (ay >= ax && ay >= az ? 1 : 2);
+    const auto component = [&](const Vec3& point) {
+        return axis == 0 ? point.x() : (axis == 1 ? point.y() : point.z());
+    };
+
+    double moving_min = component(x1);
+    double moving_max = component(x2);
+    double fixed_min = component(x3);
+    double fixed_max = component(x4);
+    if (moving_min > moving_max) std::swap(moving_min, moving_max);
+    if (fixed_min > fixed_max) std::swap(fixed_min, fixed_max);
+
+    const double speed = component(dx);
+    double t_min = 0.0;
+    double t_max = 1.0;
+    if (!clip_affine_to_interval(moving_min - fixed_max, speed, -std::numeric_limits<double>::infinity(), 0.0, t_min, t_max)
+    || !clip_affine_to_interval( fixed_min - moving_max, -speed, -std::numeric_limits<double>::infinity(), 0.0, t_min, t_max)) {
+        return result;
+    }
+
+    if (in_unit_interval(t_min, eps)) {
+        const double candidate_t = std::clamp(t_min, 0.0, 1.0);
+        if (segments_intersect_at(candidate_t)) {
+            result.collision = true;
+            result.t = candidate_t;
+        }
+    }
+    return result;
+}
+
+namespace {
+
 // TICCD configuration (see Wang et al. 2021, "A Large-Scale Benchmark and an
 // Inclusion-Based Algorithm for Continuous Collision Detection", and the
 // upstream library at github.com/Continuous-Collision-Detection/Tight-Inclusion).
@@ -529,9 +693,6 @@ CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1,
     }
     return segment_segment_linear_ccd(x1, dx1, x2, x3, x4, eps);
 }
-
-
-
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
