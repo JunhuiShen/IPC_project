@@ -164,16 +164,16 @@ void build_two_rigid_polygon_collision_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
-// Example 9: five vertically aligned rigid polygonal prisms falling under
-// gravity and stacking on a horizontal ground plane.
-void build_five_rigid_polygon_drop_stack_example(
+// Example 9: twenty vertically aligned rigid polygonal prisms initialized as a
+// stationary stack immediately above a horizontal ground plane.
+void build_twenty_rigid_polygon_static_stack_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris);
 
-// Example 10: five differently oriented rigid polygonal prisms falling under
-// gravity, tumbling apart, and scattering across a horizontal ground plane.
+// Example 10: five differently oriented rigid polygonal prisms aligned in one
+// vertical column and falling onto one another above a horizontal ground plane.
 void build_five_rigid_polygon_drop_scatter_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,

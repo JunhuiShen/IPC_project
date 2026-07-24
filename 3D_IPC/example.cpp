@@ -916,178 +916,172 @@ void build_two_rigid_polygon_collision_example(
         collision_orientation, Vec3(-1.2, 1.2, -2.0));
 }
 
+// ---------------------------------------------------------------------------
+// Example 9: twenty rigid polygonal prisms initialized in a static vertical stack
+// ---------------------------------------------------------------------------
+// command line: ./build/3D_sim --example 9 --num_frames 100 --substeps 10 --outdir twenty_polygon_static_stack_output --format obj
+void build_twenty_rigid_polygon_static_stack_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params,
+    std::vector<Vec3>& static_x, std::vector<int>& static_tris) {
+    clear_model(ref_mesh, state, X, pins);
+    static_x.clear();
+    static_tris.clear();
 
-// // ---------------------------------------------------------------------------
-// // Example 9: five rigid polygonal prisms falling into a vertical stack
-// // ---------------------------------------------------------------------------
-// // command line: ./build/3D_sim --example 9 --num_frames 30 --substeps 10 --outdir five_polygon_drop_output --format obj
-// void build_five_rigid_polygon_drop_stack_example(
-//     const IPCArgs3D& args, RefMesh& ref_mesh,
-//     DeformedState& state, std::vector<Vec2>& X,
-//     std::vector<Pin>& pins, SimParams& params,
-//     std::vector<Vec3>& static_x, std::vector<int>& static_tris) {
-//     clear_model(ref_mesh, state, X, pins);
-//     static_x.clear();
-//     static_tris.clear();
+    params.gravity = Vec3::Zero();
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = args.k_sdf;
+    params.eps_sdf = args.eps_sdf;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.sdf_planes.push_back(
+        {Vec3::Zero(), Vec3::UnitY()});
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
 
-//     params.gravity = Vec3(args.gx, args.gy, args.gz);
-//     params.d_hat = args.d_hat;
-//     params.k_barrier = args.k_barrier;
-//     params.k_sdf = args.k_sdf;
-//     params.eps_sdf = args.eps_sdf;
-//     params.sdf_planes.clear();
-//     params.sdf_cylinders.clear();
-//     params.sdf_spheres.clear();
-//     params.sdf_planes.push_back(
-//         {Vec3::Zero(), Vec3::UnitY()});
-//     params.use_ccd_guess = false;
-//     params.use_verlet_guess = false;
-//     params.use_translation_guess = false;
+    constexpr int polygon_count = 20;
+    constexpr double radius = 0.28;
+    constexpr double density = 25.0;
+    constexpr double thickness = 0.12;
+    // Each prism is laid flat: material z (the extrusion direction) maps to
+    // world y, so its large polygonal caps form the horizontal contact faces.
+    // Place the surfaces just outside the active SDF/barrier ranges. With zero
+    // gravity and zero initial velocities, the assembled tower stays at rest.
+    constexpr double clearance_margin = 1.0e-4;
+    const double ground_clearance =
+        std::max(params.eps_sdf, 0.0) + clearance_margin;
+    const double interbody_clearance =
+        std::max(params.d_hat, 0.0) + clearance_margin;
+    const double lowest_center_y =
+        0.5 * thickness + ground_clearance;
+    const double center_spacing =
+        thickness + interbody_clearance;
+    const double flat_half_angle = 0.25 * kPi;
+    const Vec4 flat_orientation(
+        std::cos(flat_half_angle), std::sin(flat_half_angle),
+        0.0, 0.0);
 
-//     constexpr int polygon_count = 5;
-//     constexpr double radius = 0.28;
-//     constexpr double density = 25.0;
-//     constexpr double thickness = 0.12;
-//     // Each prism is laid flat: material z (the extrusion direction) maps to
-//     // world y, so its large polygonal caps form the horizontal contact faces.
-//     // Small gaps produce a visible, low-speed contact cascade.
-//     constexpr double lowest_center_y = 0.18;
-//     constexpr double center_spacing = 0.16;
-//     const double flat_half_angle = 0.25 * kPi;
-//     const Vec4 flat_orientation(
-//         std::cos(flat_half_angle), std::sin(flat_half_angle),
-//         0.0, 0.0);
+    for (int polygon = 0; polygon < polygon_count; ++polygon) {
+        const double center_y =
+            lowest_center_y + center_spacing * polygon;
+        append_rigid_polygon(
+            6, state, ref_mesh,
+            Vec3(0.0, center_y, 0.0),
+            radius, density, thickness,
+            Vec3::Zero(), flat_orientation, Vec3::Zero());
+    }
 
-//     for (int polygon = 0; polygon < polygon_count; ++polygon) {
-//         const double center_y =
-//             lowest_center_y + center_spacing * polygon;
-//         append_rigid_polygon(
-//             6, state, ref_mesh,
-//             Vec3(0.0, center_y, 0.0),
-//             radius, density, thickness,
-//             Vec3::Zero(), flat_orientation, Vec3::Zero());
-//     }
-
-//     // Flat ground
-//     static_x = {
-//         Vec3(-1.5, 0.0, -1.5),
-//         Vec3( 1.5, 0.0, -1.5),
-//         Vec3( 1.5, 0.0,  1.5),
-//         Vec3(-1.5, 0.0,  1.5),
-//     };
-//     static_tris = {
-//         0, 2, 1,
-//         0, 3, 2,
-//     };
-// }
+    // Flat ground
+    static_x = {
+        Vec3(-1.5, 0.0, -1.5),
+        Vec3( 1.5, 0.0, -1.5),
+        Vec3( 1.5, 0.0,  1.5),
+        Vec3(-1.5, 0.0,  1.5),
+    };
+    static_tris = {
+        0, 2, 1,
+        0, 3, 2,
+    };
+}
 
 
-// // ---------------------------------------------------------------------------
-// // Example 10: five differently oriented rigid polygons tumbling apart
-// // ---------------------------------------------------------------------------
-// // command line: ./build/3D_sim --example 10 --num_frames 30 --substeps 10 --outdir five_polygon_scatter_output --format obj
-// void build_five_rigid_polygon_drop_scatter_example(
-//     const IPCArgs3D& args, RefMesh& ref_mesh,
-//     DeformedState& state, std::vector<Vec2>& X,
-//     std::vector<Pin>& pins, SimParams& params,
-//     std::vector<Vec3>& static_x, std::vector<int>& static_tris) {
-//     clear_model(ref_mesh, state, X, pins);
-//     static_x.clear();
-//     static_tris.clear();
+// ---------------------------------------------------------------------------
+// Example 10: five differently oriented rigid polygons dropping onto one another
+// ---------------------------------------------------------------------------
+// command line: ./build/3D_sim --example 10 --num_frames 100 --substeps 10 --outdir five_polygon_oriented_stack_output --format obj
+void build_five_rigid_polygon_drop_scatter_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params,
+    std::vector<Vec3>& static_x, std::vector<int>& static_tris) {
+    clear_model(ref_mesh, state, X, pins);
+    static_x.clear();
+    static_tris.clear();
 
-//     params.gravity = Vec3(args.gx, args.gy, args.gz);
-//     params.d_hat = args.d_hat;
-//     params.k_barrier = args.k_barrier;
-//     params.k_sdf = args.k_sdf;
-//     params.eps_sdf = args.eps_sdf;
-//     params.sdf_planes.clear();
-//     params.sdf_cylinders.clear();
-//     params.sdf_spheres.clear();
-//     params.sdf_planes.push_back(
-//         {Vec3::Zero(), Vec3::UnitY()});
-//     params.use_ccd_guess = false;
-//     params.use_verlet_guess = false;
-//     params.use_translation_guess = false;
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = args.k_sdf;
+    params.eps_sdf = args.eps_sdf;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.sdf_planes.push_back(
+        {Vec3::Zero(), Vec3::UnitY()});
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
 
-//     constexpr int polygon_count = 5;
-//     constexpr double radius = 0.22;
-//     constexpr double density = 25.0;
-//     constexpr double thickness = 0.14;
-//     constexpr double lowest_center_y = 0.45;
-//     constexpr double center_spacing = 0.56;
+    constexpr int polygon_count = 5;
+    constexpr double radius = 0.22;
+    constexpr double density = 25.0;
+    constexpr double thickness = 0.14;
+    constexpr double lowest_center_y = 0.45;
+    constexpr double center_spacing = 0.56;
 
-//     const Vec3 center_offsets[polygon_count] = {
-//         Vec3(-0.07, 0.0,  0.02),
-//         Vec3( 0.06, 0.0, -0.05),
-//         Vec3(-0.03, 0.0,  0.07),
-//         Vec3( 0.08, 0.0,  0.02),
-//         Vec3(-0.05, 0.0, -0.06),
-//     };
-//     const Vec3 xyz_angles[polygon_count] = {
-//         Vec3( 0.35,  0.15, -0.20),
-//         Vec3(-0.45,  0.30,  0.25),
-//         Vec3( 0.25, -0.40,  0.50),
-//         Vec3(-0.30, -0.20, -0.45),
-//         Vec3( 0.55,  0.35,  0.10),
-//     };
-//     const Vec3 initial_velocity[polygon_count] = {
-//         Vec3(-0.35, 0.0, -0.22),
-//         Vec3( 0.30, 0.0, -0.18),
-//         Vec3(-0.20, 0.0,  0.32),
-//         Vec3( 0.35, 0.0,  0.20),
-//         Vec3( 0.05, 0.0, -0.35),
-//     };
-//     const Vec3 initial_omega[polygon_count] = {
-//         Vec3( 0.8,  0.3, -0.5),
-//         Vec3(-0.6,  0.9,  0.4),
-//         Vec3( 0.5, -0.7,  0.8),
-//         Vec3(-0.9, -0.4,  0.3),
-//         Vec3( 0.4,  0.6, -0.8),
-//     };
+    const Vec3 xyz_angles[polygon_count] = {
+        Vec3( 0.35,  0.15, -0.20),
+        Vec3(-0.45,  0.30,  0.25),
+        Vec3( 0.25, -0.40,  0.50),
+        Vec3(-0.30, -0.20, -0.45),
+        Vec3( 0.55,  0.35,  0.10),
+    };
+    const Vec3 initial_omega[polygon_count] = {
+        Vec3( 0.8,  0.3, -0.5),
+        Vec3(-0.6,  0.9,  0.4),
+        Vec3( 0.5, -0.7,  0.8),
+        Vec3(-0.9, -0.4,  0.3),
+        Vec3( 0.4,  0.6, -0.8),
+    };
 
-//     const auto axis_angle_quaternion =
-//         [](const Vec3& axis, double angle) {
-//             const double half_angle = 0.5 * angle;
-//             const double sin_half_angle = std::sin(half_angle);
-//             return Vec4(
-//                 std::cos(half_angle),
-//                 sin_half_angle * axis.x(),
-//                 sin_half_angle * axis.y(),
-//                 sin_half_angle * axis.z());
-//         };
+    const auto axis_angle_quaternion =
+        [](const Vec3& axis, double angle) {
+            const double half_angle = 0.5 * angle;
+            const double sin_half_angle = std::sin(half_angle);
+            return Vec4(
+                std::cos(half_angle),
+                sin_half_angle * axis.x(),
+                sin_half_angle * axis.y(),
+                sin_half_angle * axis.z());
+        };
 
-//     for (int polygon = 0; polygon < polygon_count; ++polygon) {
-//         const Vec4 qx = axis_angle_quaternion(
-//             Vec3::UnitX(), xyz_angles[polygon].x());
-//         const Vec4 qy = axis_angle_quaternion(
-//             Vec3::UnitY(), xyz_angles[polygon].y());
-//         const Vec4 qz = axis_angle_quaternion(
-//             Vec3::UnitZ(), xyz_angles[polygon].z());
-//         const Vec4 orientation = quaternion_normalize(
-//             quaternion_multiply(
-//                 qz, quaternion_multiply(qy, qx)));
+    for (int polygon = 0; polygon < polygon_count; ++polygon) {
+        const Vec4 qx = axis_angle_quaternion(
+            Vec3::UnitX(), xyz_angles[polygon].x());
+        const Vec4 qy = axis_angle_quaternion(
+            Vec3::UnitY(), xyz_angles[polygon].y());
+        const Vec4 qz = axis_angle_quaternion(
+            Vec3::UnitZ(), xyz_angles[polygon].z());
+        const Vec4 orientation = quaternion_normalize(
+            quaternion_multiply(
+                qz, quaternion_multiply(qy, qx)));
 
-//         const Vec3 center =
-//             Vec3(0.0,
-//                  lowest_center_y + center_spacing * polygon,
-//                  0.0)
-//             + center_offsets[polygon];
-//         append_rigid_polygon(
-//             6, state, ref_mesh, center,
-//             radius, density, thickness,
-//             initial_velocity[polygon],
-//             orientation, initial_omega[polygon]);
-//     }
+        // All centers share the same x-z position, so the bodies fall onto
+        // one another instead of being given an artificial lateral scatter.
+        const Vec3 center(
+            0.0,
+            lowest_center_y + center_spacing * polygon,
+            0.0);
+        append_rigid_polygon(
+            6, state, ref_mesh, center,
+            radius, density, thickness,
+            Vec3::Zero(),
+            orientation, initial_omega[polygon]);
+    }
 
-//     // Flat visual ground at the y=0 plane SDF.
-//     static_x = {
-//         Vec3(-2.0, 0.0, -2.0),
-//         Vec3( 2.0, 0.0, -2.0),
-//         Vec3( 2.0, 0.0,  2.0),
-//         Vec3(-2.0, 0.0,  2.0),
-//     };
-//     static_tris = {
-//         0, 2, 1,
-//         0, 3, 2,
-//     };
-// }
+    // Flat visual ground at the y=0 plane SDF.
+    static_x = {
+        Vec3(-2.0, 0.0, -2.0),
+        Vec3( 2.0, 0.0, -2.0),
+        Vec3( 2.0, 0.0,  2.0),
+        Vec3(-2.0, 0.0,  2.0),
+    };
+    static_tris = {
+        0, 2, 1,
+        0, 3, 2,
+    };
+}
