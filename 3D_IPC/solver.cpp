@@ -657,24 +657,6 @@ void add_rigid_sdf_orientation_terms(const std::vector<Vec3>& ref_positions, con
     }
 }
 
-Vec3 angular_velocity_from_orientation(const Vec4& q, const Vec4& q_n, double dt) {
-    Vec4 relative = quaternion_multiply(q, quaternion_conjugate(q_n));
-    relative = quaternion_normalize(relative);
-
-    // q and -q encode the same rotation. Use the principal relative rotation
-    // so the logarithm returns an angle in [0, pi].
-    if (relative[0] < 0.0)
-        relative = -relative;
-
-    const Vec3 vector_part = relative.tail<3>();
-    const double sin_half_angle = vector_part.norm();
-    if (sin_half_angle < 1.0e-12)
-        return (2.0 / dt) * vector_part;
-
-    const double half_angle = std::atan2(sin_half_angle, relative[0]);
-    return (2.0 * half_angle / (dt * sin_half_angle)) * vector_part;
-}
-
 void validate_rigid_solver_state(const RefMesh& ref_mesh, const DeformedState& state, const std::vector<Vec3>& x_coms, const std::vector<Vec4>& orientations, const std::vector<Vec3>& omega) {
     const std::size_t num_rbs = ref_mesh.total_mass.size();
     const bool valid = ref_mesh.I_hat.size() == num_rbs
@@ -745,11 +727,7 @@ Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref
 
 } // namespace rb_solver
 
-SolverResult global_gauss_seidel_solver_basic_rb(
-    const RefMesh& ref_mesh, const DeformedState& state,
-    const SimParams& params, std::vector<Vec3>& x_coms,
-    std::vector<Vec4>& orientations, std::vector<Vec3>& omega,
-    bool verbose) {
+SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const DeformedState& state, const SimParams& params, std::vector<Vec3>& x_coms, std::vector<Vec4>& orientations, std::vector<Vec3>& omega, bool verbose) {
     rb_solver::validate_rigid_solver_state(ref_mesh, state, x_coms, orientations, omega);
 
     SolverResult result;
@@ -757,12 +735,22 @@ SolverResult global_gauss_seidel_solver_basic_rb(
     const double dt = params.dt();
     const std::vector<std::array<int, 2>> edges = rb_solver::build_unique_edges(ref_mesh);
 
-    // Orientation is derived from the angular-velocity solve variable. Build
-    // its candidate value even if the initial residual already satisfies the
-    // tolerance and no Newton update is needed.
+    // The incoming omega values define orientation targets for this step, and we start every body at its current orientation
+    const std::vector<Vec3> input_omega = omega;
+    for (Vec3& omega_rb : omega)
+        omega_rb = Vec3::Zero();
+    orientations = state.orientations;
+
     for (int rb = 0; rb < num_rbs; ++rb) {
-        orientations[rb] = quaternion_align_sign(quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega[rb], dt)), state.orientations[rb]);
-        omega[rb] = rb_solver::angular_velocity_from_orientation(orientations[rb], state.orientations[rb], dt);
+        const std::vector<Vec3> node_positions = rb_solver::construct_current_rigid_node_position(ref_mesh, state, x_coms, omega, dt);
+        const Vec4 current = quaternion_normalize(state.orientations[rb]);
+        const Vec4 target = quaternion_align_sign(quaternion_normalize(quaternion_from_angular_velocity(current, input_omega[rb], dt)), current);
+        // Clip each target along the same shortest-arc quaternion path used to update the orientation
+        const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, edges, node_positions, rb, x_coms[rb], current, target);
+        const Vec4 accepted = interpolate_orientation_shortest_arc(current, target, rotation_safe_step);
+        orientations[rb] = quaternion_align_sign(accepted, current);
+        // Rebuild the node positions for each body so processed bodies use their accepted orientations while other bodies remain at their start-of-step orientations
+        omega[rb] = angular_velocity_from_orientation(accepted, current, dt);
     }
 
     double initial_residual = 0.0;
@@ -801,12 +789,15 @@ SolverResult global_gauss_seidel_solver_basic_rb(
                 node_positions[node] += com_displacement;
 
             const Vec3 delta_omega = rb_solver::compute_omega_update(rb, state, ref_mesh, edges, node_positions,x_coms, omega, params, dt);
-            const double omega_safe_step = per_rigid_body_omega_safe_step(
-                    ref_mesh, edges, node_positions, rb, x_coms[rb],
-                    state.orientations[rb], omega[rb], delta_omega, dt);
-            omega[rb] -= params.damping * omega_safe_step * delta_omega;
-            orientations[rb] = quaternion_align_sign(quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega[rb], dt)), state.orientations[rb]);
-            omega[rb] = rb_solver::angular_velocity_from_orientation(orientations[rb], state.orientations[rb], dt);
+            const Vec4 current = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega[rb], dt));
+            // Construct q_target =  E(dt * (omega_current - damping * delta_omega)) * q_n before CCD
+            const Vec3 target_omega = omega[rb] - params.damping * delta_omega;
+            const Vec4 target = quaternion_align_sign(quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], target_omega, dt)), current);
+            // CCD checks the shortest fixed-axis path from q_current to q_target and get a safe step weight
+            const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, edges, node_positions, rb, x_coms[rb], current, target);
+            const Vec4 accepted = interpolate_orientation_shortest_arc(current, target, rotation_safe_step);
+            orientations[rb] = quaternion_align_sign(accepted, state.orientations[rb]);
+            omega[rb] = angular_velocity_from_orientation(accepted, state.orientations[rb], dt);
         }
 
         result.iterations = iter;

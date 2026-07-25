@@ -44,10 +44,8 @@ int main(int argc, char** argv) {
     else if (args.example == 6) build_rotating_space_tool_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 7) build_rigid_box_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else if (args.example == 8) build_two_rigid_polygon_collision_example(args, ref_mesh, state, X, pins, params);
-    else if (args.example == 9) build_five_rigid_polygon_drop_stack_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
-    else if (args.example == 10) build_five_rigid_polygon_drop_scatter_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8.\n";
         return 1;
     }
 

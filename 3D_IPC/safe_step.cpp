@@ -46,34 +46,6 @@ inline bool segment_segment_single_vertex_swept_aabbs_intersect(const SegmentSeg
 
 }  // namespace
 
-double segment_segment_rb_rotation_safe_step(
-        const Vec3& x0, const Vec3& x1,
-        const Vec3& x_com,
-        const Vec4& q_new, const Vec4& q_n,
-        const Vec3& x2, const Vec3& x3,
-        double eta) {
-    double step = 0.0;
-    if (!segment_segment_rb_rotation_ccd(
-            x0, x1, x_com, q_new, q_n, x2, x3, step)) {
-        return 1.0;
-    }
-    return step <= 1.0e-12 ? 0.0 : eta * step;
-}
-
-double point_triangle_rb_rotation_safe_step(
-        const Vec3& x,
-        const Vec3& x_com,
-        const Vec4& q_new, const Vec4& q_n,
-        const Vec3& x2, const Vec3& x3, const Vec3& x4,
-        double eta) {
-    double step = 0.0;
-    if (!point_triangle_rb_rotation_ccd(
-            x, x_com, q_new, q_n, x2, x3, x4, step)) {
-        return 1.0;
-    }
-    return step <= 1.0e-12 ? 0.0 : eta * step;
-}
-
 double compute_trust_region_bound_for_vertex(int vi, const std::vector<Vec3>& x, const BroadPhase& broad_phase, double gamma_p) {
     const BroadPhase::Cache& bp_cache = broad_phase.cache();
     double d0_min = std::numeric_limits<double>::infinity();
@@ -269,33 +241,18 @@ double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const std::
     return has_collision ? safety * toi_min : 1.0;
 }
 
-double per_rigid_body_omega_safe_step(
-    const RefMesh& ref_mesh,
-    const std::vector<std::array<int, 2>>& edges,
-    const std::vector<Vec3>& x,
-    int rb,
-    const Vec3& x_com,
-    const Vec4& q_n,
-    const Vec3& omega_current,
-    const Vec3& delta_omega,
-    double dt,
-    double safety) {
+double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const std::vector<std::array<int, 2>>& edges, const std::vector<Vec3>& x, int rb, const Vec3& x_com, const Vec4& q_current, const Vec4& q_target, double safety) {
     assert(rb >= 0);
     assert(safety >= 0.0 && safety <= 1.0);
 
     const auto owned_by_current_body = [&](int node) {
         assert(node >= 0 && node < static_cast<int>(x.size()));
-        return node < static_cast<int>(ref_mesh.node_to_rb.size())
-            && ref_mesh.node_to_rb[node] == rb;
+        return node < static_cast<int>(ref_mesh.node_to_rb.size()) && ref_mesh.node_to_rb[node] == rb;
     };
 
-    const Vec4 current = quaternion_normalize(
-        quaternion_from_angular_velocity(q_n, omega_current, dt));
-    const Vec4 proposed = quaternion_normalize(
-        quaternion_from_angular_velocity(
-            q_n, omega_current - delta_omega, dt));
-    const Vec4 q_reverse = quaternion_normalize(
-        quaternion_multiply(current, quaternion_conjugate(proposed)));
+    const Vec4 current = quaternion_normalize(q_current);
+    const Vec4 proposed = quaternion_align_sign(quaternion_normalize(q_target), current);
+    const Vec4 q_reverse = quaternion_normalize(quaternion_multiply(current, quaternion_conjugate(proposed)));
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
 
     double toi_min = 1.0;
@@ -332,14 +289,10 @@ double per_rigid_body_omega_safe_step(
 
             double toi = 0.0;
             if (node_is_current && !triangle_touches_current) {
-                const bool collision = point_triangle_rb_rotation_ccd(
-                    x[node], x_com, proposed, current,
-                    x[v0], x[v1], x[v2], toi);
+                const bool collision = point_triangle_rb_rotation_ccd(x[node], x_com, proposed, current, x[v0], x[v1], x[v2], toi);
                 consider(collision, toi);
             } else if (!node_is_current && triangle_is_current) {
-                const bool collision = point_triangle_rb_rotation_ccd(
-                    x[node], x_com, q_reverse, identity,
-                    x[v0], x[v1], x[v2], toi);
+                const bool collision = point_triangle_rb_rotation_ccd(x[node], x_com, q_reverse, identity, x[v0], x[v1], x[v2], toi);
                 consider(collision, toi);
             } else if (node_is_current || triangle_touches_current) {
                 // A partially owned triangle is not a rigid primitive.
@@ -378,14 +331,10 @@ double per_rigid_body_omega_safe_step(
 
             double toi = 0.0;
             if (first_is_current && !second_touches_current) {
-                const bool collision = segment_segment_rb_rotation_ccd(
-                    x[a0], x[a1], x_com, proposed, current,
-                    x[b0], x[b1], toi);
+                const bool collision = segment_segment_rb_rotation_ccd(x[a0], x[a1], x_com, proposed, current, x[b0], x[b1], toi);
                 consider(collision, toi);
             } else if (!first_touches_current && second_is_current) {
-                const bool collision = segment_segment_rb_rotation_ccd(
-                    x[a0], x[a1], x_com, q_reverse, identity,
-                    x[b0], x[b1], toi);
+                const bool collision = segment_segment_rb_rotation_ccd(x[a0], x[a1], x_com, q_reverse, identity, x[b0], x[b1], toi);
                 consider(collision, toi);
             } else if (first_touches_current || second_touches_current) {
                 // A partially owned segment is not a rigid primitive.

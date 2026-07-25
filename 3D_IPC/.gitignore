@@ -4,6 +4,7 @@ build/
 # Simulation output
 frames_*/
 racket_output/
+polygon_collision_output/
 vis_debug/
 tmp_full/
 

@@ -29,6 +29,14 @@ Vec4 quaternion_from_angular_velocity(const Vec4& q0, const Vec3& omega, double 
 Mat43 dq_domega(const Vec4& q0, const Vec3& omega, double dt);
 std::array<Mat33, 4> d2q_domega2(const Vec4& q0, const Vec3& omega, double dt);
 
+// Align q_target's sign with q_current so the relative rotation is the shortest
+// Let q_relative = q_target * q_current^-1, so q_target = q_relative * q_current
+// Scale its rotation angle by alpha and get q(alpha) = exp(alpha * log(q_relative)) * q_current
+Vec4 interpolate_orientation_shortest_arc(const Vec4& q_current, const Vec4& q_target, double alpha);
+
+// Invert q = exp((dt / 2) * omega) * q_n and get omega = (2 / dt) * log(q * q_n^-1)
+Vec3 angular_velocity_from_orientation(const Vec4& q, const Vec4& q_n, double dt);
+
 // X_centered is a fixed body-space position measured from the center of mass.
 // Direct transforms using an already-evaluated orientation quaternion.
 Vec3 world_space_position(const Vec3& X, const Vec3& x_com, const Vec4& orientation);

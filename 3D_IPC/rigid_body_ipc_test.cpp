@@ -191,6 +191,46 @@ TEST(RigidBodyIPCQuaternionWrappers, SignAlignmentUsesReferenceHemisphere) {
     EXPECT_TRUE(quaternion_align_sign(reference, reference).isApprox(reference, 1.0e-14));
 }
 
+TEST(RigidBodyIPCQuaternionWrappers, ShortestArcInterpolationMatchesRecoveredOmega) {
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec3 omega_current(0.5 * M_PI, 0.0, 0.0);
+    const Vec3 omega_target(0.0, 0.5 * M_PI, 0.0);
+    const Vec4 q_current = quaternion_from_angular_velocity(
+        identity, omega_current, 1.0);
+    const Vec4 q_target = quaternion_from_angular_velocity(
+        identity, omega_target, 1.0);
+    constexpr double alpha = 0.4;
+
+    const Vec4 accepted = interpolate_orientation_shortest_arc(
+        q_current, q_target, alpha);
+    const Vec4 accepted_from_opposite_sign =
+        interpolate_orientation_shortest_arc(
+            q_current, -q_target, alpha);
+    const Vec3 recovered_omega =
+        angular_velocity_from_orientation(accepted, identity, 1.0);
+    const Vec4 reconstructed = quaternion_from_angular_velocity(
+        identity, recovered_omega, 1.0);
+
+    EXPECT_NEAR(accepted.norm(), 1.0, 1.0e-14);
+    EXPECT_NEAR(
+        std::abs(accepted.dot(accepted_from_opposite_sign)),
+        1.0, 1.0e-14);
+    EXPECT_NEAR(
+        std::abs(accepted.dot(quaternion_normalize(reconstructed))),
+        1.0, 1.0e-14);
+
+    // A straight line in omega space is a different rotation path when the
+    // current and target angular velocities are not parallel.
+    const Vec3 affine_omega =
+        (1.0 - alpha) * omega_current + alpha * omega_target;
+    const Vec4 affine_orientation = quaternion_normalize(
+        quaternion_from_angular_velocity(identity, affine_omega, 1.0));
+    EXPECT_GT(
+        (quaternion_rotate(accepted, Vec3::UnitZ())
+         - quaternion_rotate(affine_orientation, Vec3::UnitZ())).norm(),
+        1.0e-2);
+}
+
 TEST(RigidBodyIPCQuaternionWrappers, TimeDerivativeUsesWorldSpaceAngularVelocity) {
     const Vec4 q = quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
     const Vec3 omega(0.7, -0.4, 0.2);
@@ -932,6 +972,41 @@ TEST(RigidBodyIPCSolver, AddsNaiveRigidSegmentBarrierTerms) {
     EXPECT_TRUE(omega[rb].isApprox(expected_omega, 1.0e-11));
 }
 
+TEST(RigidBodyIPCSolver, ClipsIncomingAngularVelocityBeforeResidualCheck) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    state.deformed_positions = {
+        Vec3(1.0, 0.0, -1.0),
+        Vec3(3.0, 0.0, -1.0),
+        Vec3(2.0, 0.0, 1.0)
+    };
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+    ref_mesh.tris = {0, 1, 2};
+
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const int rb = create_rigid_body({Vec3(0.0, -2.0, 0.0), Vec3(0.0, 2.0, 0.0)}, Vec3::Zero(), identity, Vec3::Zero(), 2.0, ref_mesh, state);
+
+    SimParams params = SimParams::zeros();
+    params.fps = 1.0;
+    params.substeps = 1;
+    params.tol_abs = 1.0e100;
+    params.max_global_iters = 1;
+
+    std::vector<Vec3> x_coms = state.x_coms;
+    std::vector<Vec4> orientations = state.orientations;
+    std::vector<Vec3> omega = state.omega;
+    omega[rb] = Vec3(0.0, 0.0, M_PI);
+
+    const SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_coms, orientations, omega);
+    const Vec4 target = quaternion_from_angular_velocity(identity, Vec3(0.0, 0.0, M_PI), 1.0);
+    const Vec4 expected = interpolate_orientation_shortest_arc(identity, target, 0.45);
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_EQ(result.iterations, 0);
+    EXPECT_NEAR(omega[rb].z(), 0.45 * M_PI, 1.0e-12);
+    EXPECT_TRUE(orientations[rb].isApprox(expected, 1.0e-12));
+}
+
 TEST(RigidBodyTranslationSafeStep, MovingNodeUsesLinearCCD) {
     const std::vector<Vec3> x = {
         Vec3(0.25, 0.25, 1.0),
@@ -1022,7 +1097,7 @@ TEST(RigidBodyTranslationSafeStep, SkipsInternalAndUnrelatedPairs) {
         1.0);
 }
 
-TEST(RigidBodyOmegaSafeStep, MovingNodeUsesRotationCCD) {
+TEST(RigidBodyRotationSafeStep, MovingNodeUsesRotationCCD) {
     const std::vector<Vec3> x = {
         Vec3(0.0, -2.0, 0.0),
         Vec3(1.0, 0.0, -1.0),
@@ -1033,16 +1108,52 @@ TEST(RigidBodyOmegaSafeStep, MovingNodeUsesRotationCCD) {
     ref_mesh.tris = {1, 2, 3};
     ref_mesh.node_to_rb = {0, -1, -1, -1};
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 target = quaternion_from_angular_velocity(
+        identity, Vec3(0.0, 0.0, M_PI), 1.0);
 
-    const double alpha = per_rigid_body_omega_safe_step(
+    const double alpha = per_rigid_body_rotation_safe_step(
         ref_mesh, {}, x, 0, Vec3::Zero(),
-        identity, Vec3::Zero(), Vec3(0.0, 0.0, -M_PI),
-        1.0, 0.9);
+        identity, target, 0.9);
 
     EXPECT_NEAR(alpha, 0.45, 1.0e-12);
 }
 
-TEST(RigidBodyOmegaSafeStep, MovingTriangleUsesReverseRotation) {
+TEST(RigidBodyRotationSafeStep, NoncollinearOmegaEndpointsUseQuaternionPath) {
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 current = quaternion_from_angular_velocity(
+        identity, Vec3(0.5 * M_PI, 0.0, 0.0), 1.0);
+    const Vec4 target = quaternion_from_angular_velocity(
+        identity, Vec3(0.0, 0.5 * M_PI, 0.0), 1.0);
+    const Vec4 halfway = interpolate_orientation_shortest_arc(
+        current, target, 0.5);
+    const Vec3 moving_start =
+        quaternion_rotate(current, Vec3::UnitZ());
+    const Vec3 contact =
+        quaternion_rotate(halfway, Vec3::UnitZ());
+
+    const Vec4 relative = quaternion_normalize(
+        quaternion_multiply(target, quaternion_conjugate(current)));
+    const Vec3 axis = relative.tail<3>().normalized();
+    const Vec3 plane_normal = axis.cross(contact).normalized();
+    const Vec3 plane_axis = plane_normal.cross(axis).normalized();
+    const std::vector<Vec3> x = {
+        moving_start,
+        contact + 0.4 * axis,
+        contact - 0.2 * axis + 0.35 * plane_axis,
+        contact - 0.2 * axis - 0.35 * plane_axis
+    };
+
+    RefMesh ref_mesh;
+    ref_mesh.tris = {1, 2, 3};
+    ref_mesh.node_to_rb = {0, -1, -1, -1};
+    const double alpha = per_rigid_body_rotation_safe_step(
+        ref_mesh, {}, x, 0, Vec3::Zero(),
+        current, target, 0.9);
+
+    EXPECT_NEAR(alpha, 0.45, 1.0e-10);
+}
+
+TEST(RigidBodyRotationSafeStep, MovingTriangleUsesReverseRotation) {
     const std::vector<Vec3> x = {
         Vec3(0.0, -2.0, 0.0),
         Vec3(1.0, 0.0, -1.0),
@@ -1053,16 +1164,17 @@ TEST(RigidBodyOmegaSafeStep, MovingTriangleUsesReverseRotation) {
     ref_mesh.tris = {1, 2, 3};
     ref_mesh.node_to_rb = {-1, 0, 0, 0};
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 target = quaternion_from_angular_velocity(
+        identity, Vec3(0.0, 0.0, -M_PI), 1.0);
 
-    const double alpha = per_rigid_body_omega_safe_step(
+    const double alpha = per_rigid_body_rotation_safe_step(
         ref_mesh, {}, x, 0, Vec3::Zero(),
-        identity, Vec3::Zero(), Vec3(0.0, 0.0, M_PI),
-        1.0, 0.9);
+        identity, target, 0.9);
 
     EXPECT_NEAR(alpha, 0.45, 1.0e-12);
 }
 
-TEST(RigidBodyOmegaSafeStep, MovingFirstEdgeUsesRotationCCD) {
+TEST(RigidBodyRotationSafeStep, MovingFirstEdgeUsesRotationCCD) {
     const std::vector<Vec3> x = {
         Vec3(0.0, -1.0, 0.0),
         Vec3(0.0, -2.0, 0.0),
@@ -1073,16 +1185,17 @@ TEST(RigidBodyOmegaSafeStep, MovingFirstEdgeUsesRotationCCD) {
     ref_mesh.node_to_rb = {0, 0, -1, -1};
     const std::vector<std::array<int, 2>> edges = {{0, 1}, {2, 3}};
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 target = quaternion_from_angular_velocity(
+        identity, Vec3(0.0, 0.0, M_PI), 1.0);
 
-    const double alpha = per_rigid_body_omega_safe_step(
+    const double alpha = per_rigid_body_rotation_safe_step(
         ref_mesh, edges, x, 0, Vec3::Zero(),
-        identity, Vec3::Zero(), Vec3(0.0, 0.0, -M_PI),
-        1.0, 0.9);
+        identity, target, 0.9);
 
     EXPECT_NEAR(alpha, 0.45, 1.0e-12);
 }
 
-TEST(RigidBodyOmegaSafeStep, MovingSecondEdgeUsesReverseRotation) {
+TEST(RigidBodyRotationSafeStep, MovingSecondEdgeUsesReverseRotation) {
     const std::vector<Vec3> x = {
         Vec3(0.0, -1.0, 0.0),
         Vec3(0.0, -2.0, 0.0),
@@ -1093,16 +1206,17 @@ TEST(RigidBodyOmegaSafeStep, MovingSecondEdgeUsesReverseRotation) {
     ref_mesh.node_to_rb = {0, 0, -1, -1};
     const std::vector<std::array<int, 2>> edges = {{2, 3}, {0, 1}};
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 target = quaternion_from_angular_velocity(
+        identity, Vec3(0.0, 0.0, M_PI), 1.0);
 
-    const double alpha = per_rigid_body_omega_safe_step(
+    const double alpha = per_rigid_body_rotation_safe_step(
         ref_mesh, edges, x, 0, Vec3::Zero(),
-        identity, Vec3::Zero(), Vec3(0.0, 0.0, -M_PI),
-        1.0, 0.9);
+        identity, target, 0.9);
 
     EXPECT_NEAR(alpha, 0.45, 1.0e-12);
 }
 
-TEST(RigidBodyOmegaSafeStep, SkipsInternalAndUnrelatedPairs) {
+TEST(RigidBodyRotationSafeStep, SkipsInternalAndUnrelatedPairs) {
     const std::vector<Vec3> x = {
         Vec3(0.0, -1.0, 0.0),
         Vec3(0.0, -2.0, 0.0),
@@ -1111,26 +1225,26 @@ TEST(RigidBodyOmegaSafeStep, SkipsInternalAndUnrelatedPairs) {
     };
     const std::vector<std::array<int, 2>> edges = {{0, 1}, {2, 3}};
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 target = quaternion_from_angular_velocity(
+        identity, Vec3(0.0, 0.0, M_PI), 1.0);
     RefMesh ref_mesh;
 
     ref_mesh.node_to_rb = {0, 0, 0, 0};
     EXPECT_DOUBLE_EQ(
-        per_rigid_body_omega_safe_step(
+        per_rigid_body_rotation_safe_step(
             ref_mesh, edges, x, 0, Vec3::Zero(),
-            identity, Vec3::Zero(), Vec3(0.0, 0.0, -M_PI),
-            1.0),
+            identity, target),
         1.0);
 
     ref_mesh.node_to_rb = {-1, -1, -1, -1};
     EXPECT_DOUBLE_EQ(
-        per_rigid_body_omega_safe_step(
+        per_rigid_body_rotation_safe_step(
             ref_mesh, edges, x, 0, Vec3::Zero(),
-            identity, Vec3::Zero(), Vec3(0.0, 0.0, -M_PI),
-            1.0),
+            identity, target),
         1.0);
 }
 
-TEST(RigidBodyOmegaSafeStep, RejectsPartiallyOwnedPrimitive) {
+TEST(RigidBodyRotationSafeStep, RejectsPartiallyOwnedPrimitive) {
     const std::vector<Vec3> x = {
         Vec3(0.0, -2.0, 0.0),
         Vec3(1.0, 0.0, -1.0),
@@ -1141,12 +1255,13 @@ TEST(RigidBodyOmegaSafeStep, RejectsPartiallyOwnedPrimitive) {
     ref_mesh.tris = {1, 2, 3};
     ref_mesh.node_to_rb = {-1, 0, -1, -1};
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 target = quaternion_from_angular_velocity(
+        identity, Vec3(0.0, 0.0, M_PI), 1.0);
 
     EXPECT_DOUBLE_EQ(
-        per_rigid_body_omega_safe_step(
+        per_rigid_body_rotation_safe_step(
             ref_mesh, {}, x, 0, Vec3::Zero(),
-            identity, Vec3::Zero(), Vec3(0.0, 0.0, -M_PI),
-            1.0),
+            identity, target),
         0.0);
 }
 

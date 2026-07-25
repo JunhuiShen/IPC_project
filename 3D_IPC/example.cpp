@@ -905,15 +905,15 @@ void build_two_rigid_polygon_collision_example(
         6, state, ref_mesh,
         Vec3(-0.65, 0.0, 0.0),
         radius, density, thickness,
-        Vec3(1.0, 0.0, 0.0),
-        collision_orientation, Vec3::Zero());
+        Vec3(1.0, 0.0005, 0.0),
+        collision_orientation, Vec3(1.2, -1.2, 2.0));
 
     append_rigid_polygon(
         6, state, ref_mesh,
         Vec3(0.65, 0.0, 0.0),
         radius, density, thickness,
-        Vec3(-1.0, 0.0, 0.0),
-        collision_orientation, Vec3::Zero());
+        Vec3(-1.0, -0.0005, 0.0),
+        collision_orientation, Vec3(-1.2, 1.2, -2.0));
 }
 
 
