@@ -1087,102 +1087,12 @@ TEST(RigidBodyIPCSolver, AddsNaiveRigidSegmentBarrierTerms) {
     EXPECT_TRUE(omega_new[rb].isApprox(expected_omega, 1.0e-11));
 }
 
-TEST(RigidBodyIPCSolver, ClipsIncomingAngularVelocityBeforeResidualCheck) {
+TEST(RigidBodyIPCSolver, StartsFromPreviousStateBeforeResidualCheck) {
     RefMesh ref_mesh;
     DeformedState state;
-    state.deformed_positions = {
-        Vec3(1.0, 0.0, -1.0),
-        Vec3(3.0, 0.0, -1.0),
-        Vec3(2.0, 0.0, 1.0)
-    };
-    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
-    ref_mesh.tris = {0, 1, 2};
-
-    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
-    const int rb = create_rigid_body({Vec3(0.0, -2.0, 0.0), Vec3(0.0, 2.0, 0.0)}, Vec3::Zero(), identity, Vec3::Zero(), 2.0, ref_mesh, state);
-
-    SimParams params = SimParams::zeros();
-    params.fps = 1.0;
-    params.substeps = 1;
-    params.tol_abs = 1.0e100;
-    params.max_global_iters = 1;
-
-    std::vector<Vec3> x_com_new = state.x_coms;
-    std::vector<Vec4> q_new = state.orientations;
-    std::vector<Vec3> omega_new = state.omega;
-    omega_new[rb] = Vec3(0.0, 0.0, M_PI);
-
-    const SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new);
-    const Vec4 target = quaternion_from_angular_velocity(identity, Vec3(0.0, 0.0, M_PI), 1.0);
-    const Vec4 expected = interpolate_orientation_shortest_arc(identity, target, 0.45);
-
-    EXPECT_TRUE(result.converged);
-    EXPECT_EQ(result.iterations, 0);
-    EXPECT_NEAR(omega_new[rb].z(), 0.45 * M_PI, 1.0e-12);
-    EXPECT_TRUE(q_new[rb].isApprox(expected, 1.0e-12));
-}
-
-TEST(RigidBodyIPCSolver, PreservesFullIncoming270DegreeArc) {
-    RefMesh ref_mesh;
-    DeformedState state;
-    state.deformed_positions = {
-        Vec3(-1.0, 2.0, -1.0),
-        Vec3(1.0, 2.0, -1.0),
-        Vec3(0.0, 2.0, 1.0),
-    };
-    state.velocities.assign(
-        state.deformed_positions.size(), Vec3::Zero());
-    ref_mesh.tris = {0, 1, 2};
-
-    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
-    const int rb = create_rigid_body(
-        {
-            Vec3(0.0, -2.0, 0.0),
-            Vec3(5.0, 1.0, 0.0),
-            Vec3(-5.0, 1.0, 0.0),
-        },
-        Vec3::Zero(),
-        identity,
-        Vec3::Zero(),
-        3.0,
-        ref_mesh,
-        state);
-
-    SimParams params = SimParams::zeros();
-    params.fps = 1.0;
-    params.substeps = 1;
-    params.tol_abs = 1.0e100;
-    params.max_global_iters = 1;
-
-    std::vector<Vec3> x_coms = state.x_coms;
-    std::vector<Vec4> orientations = state.orientations;
-    std::vector<Vec3> omega = state.omega;
-    const Vec3 incoming_omega(0.0, 0.0, 1.5 * M_PI);
-    omega[rb] = incoming_omega;
-
-    const SolverResult result = global_gauss_seidel_solver_basic_rb(
-        ref_mesh, state, params, x_coms, orientations, omega);
-
-    constexpr double expected_safe_step = 0.6;
-    const Vec4 target = quaternion_from_angular_velocity(
-        identity, incoming_omega, 1.0);
-    const Vec4 expected_orientation = interpolate_orientation_full_arc(
-        identity, target, expected_safe_step);
-
-    EXPECT_TRUE(result.converged);
-    EXPECT_EQ(result.iterations, 0);
-    EXPECT_NEAR(
-        omega[rb].z(),
-        expected_safe_step * incoming_omega.z(),
-        1.0e-12);
-    EXPECT_TRUE(orientations[rb].isApprox(
-        expected_orientation, 1.0e-12));
-}
-
-TEST(RigidBodyIPCSolver, StoresFullArcEndpointSignConsistentlyWithOmega) {
-    RefMesh ref_mesh;
-    DeformedState state;
-    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 orientation =
+        quaternion_normalize(Vec4(0.9, 0.1, -0.2, 0.3));
+    const Vec3 previous_omega(0.4, -0.2, 0.3);
     const int rb = create_rigid_body(
         {
             Vec3(1.0, 1.0, 1.0),
@@ -1191,8 +1101,8 @@ TEST(RigidBodyIPCSolver, StoresFullArcEndpointSignConsistentlyWithOmega) {
             Vec3(-1.0, -1.0, 1.0),
         },
         Vec3::Zero(),
-        identity,
-        Vec3::Zero(),
+        orientation,
+        previous_omega,
         4.0,
         ref_mesh,
         state);
@@ -1206,24 +1116,21 @@ TEST(RigidBodyIPCSolver, StoresFullArcEndpointSignConsistentlyWithOmega) {
     std::vector<Vec3> x_coms = state.x_coms;
     std::vector<Vec4> orientations = state.orientations;
     std::vector<Vec3> omega = state.omega;
-    const Vec3 incoming_omega(0.0, 0.0, 1.5 * M_PI);
-    omega[rb] = incoming_omega;
+    x_coms[rb] = Vec3(9.0, -8.0, 7.0);
+    orientations[rb] =
+        quaternion_normalize(Vec4(0.2, -0.3, 0.4, -0.5));
+    omega[rb] = Vec3(-6.0, 5.0, -4.0);
 
     const SolverResult result = global_gauss_seidel_solver_basic_rb(
         ref_mesh, state, params, x_coms, orientations, omega);
-    const Vec4 raw_target = quaternion_normalize(
-        quaternion_from_angular_velocity(
-            state.orientations[rb], incoming_omega, 1.0));
 
     EXPECT_TRUE(result.converged);
     EXPECT_EQ(result.iterations, 0);
-    EXPECT_LT(raw_target[0], 0.0);
-    EXPECT_TRUE(orientations[rb].isApprox(raw_target, 1.0e-12));
-    EXPECT_TRUE(omega[rb].isApprox(incoming_omega, 1.0e-12));
-    EXPECT_TRUE(quaternion_normalize(
-        quaternion_from_angular_velocity(
-            state.orientations[rb], omega[rb], 1.0))
-        .isApprox(orientations[rb], 1.0e-12));
+    EXPECT_TRUE(x_coms[rb].isApprox(state.x_coms[rb], 1.0e-12));
+    EXPECT_TRUE(
+        orientations[rb].isApprox(state.orientations[rb], 1.0e-12));
+    EXPECT_TRUE(omega[rb].isZero(1.0e-12));
+    EXPECT_TRUE(state.omega[rb].isApprox(previous_omega, 1.0e-12));
 }
 
 TEST(RigidBodyTranslationSafeStep, MovingNodeUsesLinearCCD) {
