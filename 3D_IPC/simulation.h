@@ -69,21 +69,21 @@ inline SolverResult advance_one_frame_rb(
     const double dt = params.dt();
 
     for (int sub = 0; sub < params.substeps; ++sub) {
-        std::vector<Vec3> x_coms_new = state.x_coms;
-        std::vector<Vec4> orientations_new = state.orientations;
+        std::vector<Vec3> x_com_new = state.x_coms;
+        std::vector<Vec4> q_new = state.orientations;
         std::vector<Vec3> omega_new = state.omega;
 
         const SolverResult sub_result = global_gauss_seidel_solver_basic_rb(
-            ref_mesh, state, params, x_coms_new,
-            orientations_new, omega_new, params.verbose);
+            ref_mesh, state, params, x_com_new,
+            q_new, omega_new, params.verbose);
         accumulate_solver_result(agg, sub_result, sub == 0);
 
         if (!sub_result.converged)
             return agg;
 
-        update_velocity(state.v_coms, x_coms_new, state.x_coms, dt);
-        state.x_coms = x_coms_new;
-        state.orientations = orientations_new;
+        update_velocity(state.v_coms, x_com_new, state.x_coms, dt);
+        state.x_coms = x_com_new;
+        state.orientations = q_new;
         state.omega = omega_new;
         sync_rigid_body_particles(ref_mesh, state);
 

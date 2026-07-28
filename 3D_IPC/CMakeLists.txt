@@ -128,7 +128,6 @@ set(IPC_CORE_SOURCES
     corotated_energy.cpp
     node_triangle_distance.cpp
     quaternion_math.cpp
-    rigid_body.cpp
     rigid_body_ipc.cpp
     sdf_penalty_energy.cpp
     segment_segment_distance.cpp

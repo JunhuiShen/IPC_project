@@ -42,6 +42,6 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
 
 SolverResult global_gauss_seidel_solver_basic_rb(
     const RefMesh& ref_mesh, const DeformedState& state,
-    const SimParams& params, std::vector<Vec3>& x_coms,
-    std::vector<Vec4>& orientations, std::vector<Vec3>& omega,
+    const SimParams& params, std::vector<Vec3>& x_com_new,
+    std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new,
     bool verbose = false);

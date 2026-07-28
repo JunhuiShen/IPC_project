@@ -818,19 +818,19 @@ TEST(RigidBodyIPCSolver, AddsRigidSDFTranslationAndRotationTerms) {
     const Vec3 expected_omega = -expected_omega_hessian.ldlt().solve(
         expected_omega_gradient);
 
-    std::vector<Vec3> x_coms = state.x_coms;
-    std::vector<Vec4> orientations = state.orientations;
-    std::vector<Vec3> omega = state.omega;
+    std::vector<Vec3> x_com_new = state.x_coms;
+    std::vector<Vec4> q_new = state.orientations;
+    std::vector<Vec3> omega_new = state.omega;
     const SolverResult result = global_gauss_seidel_solver_basic_rb(
-        ref_mesh, state, params, x_coms, orientations, omega);
+        ref_mesh, state, params, x_com_new, q_new, omega_new);
 
     EXPECT_TRUE(result.converged);
     EXPECT_EQ(result.iterations, 1);
     EXPECT_GT(expected_com.y(), center.y());
     EXPECT_GT(expected_omega.norm(), 1.0e-6);
-    EXPECT_TRUE(x_coms[rb].isApprox(expected_com, 1.0e-12));
-    EXPECT_TRUE(omega[rb].isApprox(expected_omega, 1.0e-12));
-    EXPECT_TRUE(orientations[rb].isApprox(
+    EXPECT_TRUE(x_com_new[rb].isApprox(expected_com, 1.0e-12));
+    EXPECT_TRUE(omega_new[rb].isApprox(expected_omega, 1.0e-12));
+    EXPECT_TRUE(q_new[rb].isApprox(
         quaternion_from_angular_velocity(
             state.orientations[rb], expected_omega, dt),
         1.0e-12));
@@ -862,10 +862,10 @@ TEST(RigidBodyIPCSolver, AddsNaiveRigidBarrierTranslationAndOrientationTerms) {
         SimParams residual_params = params;
         residual_params.fixed_iters = false;
         residual_params.max_global_iters = 0;
-        std::vector<Vec3> residual_x_coms = state.x_coms;
-        std::vector<Vec4> residual_orientations = state.orientations;
-        std::vector<Vec3> residual_omega = state.omega;
-        const SolverResult residual_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, residual_params, residual_x_coms, residual_orientations, residual_omega);
+        std::vector<Vec3> residual_x_com_new = state.x_coms;
+        std::vector<Vec4> residual_q_new = state.orientations;
+        std::vector<Vec3> residual_omega_new = state.omega;
+        const SolverResult residual_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, residual_params, residual_x_com_new, residual_q_new, residual_omega_new);
         EXPECT_TRUE(residual_result.has_residual);
         EXPECT_GT(residual_result.initial_residual, 1.0e-8);
     }
@@ -900,17 +900,17 @@ TEST(RigidBodyIPCSolver, AddsNaiveRigidBarrierTranslationAndOrientationTerms) {
     expected_omega_hessian += barrier_scale * updated_barrier.orientation_orientation_hessian;
     const Vec3 expected_omega = initial_omega - expected_omega_hessian.ldlt().solve(expected_omega_gradient);
 
-    std::vector<Vec3> x_coms = state.x_coms;
-    std::vector<Vec4> orientations = state.orientations;
-    std::vector<Vec3> omega = state.omega;
-    const SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_coms, orientations, omega);
+    std::vector<Vec3> x_com_new = state.x_coms;
+    std::vector<Vec4> q_new = state.orientations;
+    std::vector<Vec3> omega_new = state.omega;
+    const SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new);
 
     EXPECT_TRUE(result.converged);
     EXPECT_EQ(result.iterations, 1);
-    EXPECT_GT(x_coms[rb].z(), initial_com.z());
-    EXPECT_GT(omega[rb].norm(), 1.0e-8);
-    EXPECT_TRUE(x_coms[rb].isApprox(expected_com, 1.0e-11));
-    EXPECT_TRUE(omega[rb].isApprox(expected_omega, 1.0e-11));
+    EXPECT_GT(x_com_new[rb].z(), initial_com.z());
+    EXPECT_GT(omega_new[rb].norm(), 1.0e-8);
+    EXPECT_TRUE(x_com_new[rb].isApprox(expected_com, 1.0e-11));
+    EXPECT_TRUE(omega_new[rb].isApprox(expected_omega, 1.0e-11));
 }
 
 TEST(RigidBodyIPCSolver, AddsNaiveRigidSegmentBarrierTerms) {
@@ -959,17 +959,17 @@ TEST(RigidBodyIPCSolver, AddsNaiveRigidSegmentBarrierTerms) {
     expected_omega_hessian += barrier_scale * updated_barrier.orientation_orientation_hessian;
     const Vec3 expected_omega = initial_omega - expected_omega_hessian.ldlt().solve(expected_omega_gradient);
 
-    std::vector<Vec3> x_coms = state.x_coms;
-    std::vector<Vec4> orientations = state.orientations;
-    std::vector<Vec3> omega = state.omega;
-    const SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_coms, orientations, omega);
+    std::vector<Vec3> x_com_new = state.x_coms;
+    std::vector<Vec4> q_new = state.orientations;
+    std::vector<Vec3> omega_new = state.omega;
+    const SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new);
 
     EXPECT_TRUE(result.converged);
     EXPECT_EQ(result.iterations, 1);
-    EXPECT_LT(x_coms[rb].z(), initial_com.z());
-    EXPECT_GT(omega[rb].norm(), 1.0e-8);
-    EXPECT_TRUE(x_coms[rb].isApprox(expected_com, 1.0e-11));
-    EXPECT_TRUE(omega[rb].isApprox(expected_omega, 1.0e-11));
+    EXPECT_LT(x_com_new[rb].z(), initial_com.z());
+    EXPECT_GT(omega_new[rb].norm(), 1.0e-8);
+    EXPECT_TRUE(x_com_new[rb].isApprox(expected_com, 1.0e-11));
+    EXPECT_TRUE(omega_new[rb].isApprox(expected_omega, 1.0e-11));
 }
 
 TEST(RigidBodyIPCSolver, ClipsIncomingAngularVelocityBeforeResidualCheck) {
@@ -992,19 +992,19 @@ TEST(RigidBodyIPCSolver, ClipsIncomingAngularVelocityBeforeResidualCheck) {
     params.tol_abs = 1.0e100;
     params.max_global_iters = 1;
 
-    std::vector<Vec3> x_coms = state.x_coms;
-    std::vector<Vec4> orientations = state.orientations;
-    std::vector<Vec3> omega = state.omega;
-    omega[rb] = Vec3(0.0, 0.0, M_PI);
+    std::vector<Vec3> x_com_new = state.x_coms;
+    std::vector<Vec4> q_new = state.orientations;
+    std::vector<Vec3> omega_new = state.omega;
+    omega_new[rb] = Vec3(0.0, 0.0, M_PI);
 
-    const SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_coms, orientations, omega);
+    const SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new);
     const Vec4 target = quaternion_from_angular_velocity(identity, Vec3(0.0, 0.0, M_PI), 1.0);
     const Vec4 expected = interpolate_orientation_shortest_arc(identity, target, 0.45);
 
     EXPECT_TRUE(result.converged);
     EXPECT_EQ(result.iterations, 0);
-    EXPECT_NEAR(omega[rb].z(), 0.45 * M_PI, 1.0e-12);
-    EXPECT_TRUE(orientations[rb].isApprox(expected, 1.0e-12));
+    EXPECT_NEAR(omega_new[rb].z(), 0.45 * M_PI, 1.0e-12);
+    EXPECT_TRUE(q_new[rb].isApprox(expected, 1.0e-12));
 }
 
 TEST(RigidBodyTranslationSafeStep, MovingNodeUsesLinearCCD) {

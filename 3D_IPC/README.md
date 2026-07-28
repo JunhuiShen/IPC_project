@@ -338,8 +338,6 @@ reader can jump to the layer they care about.
   COM/orientation kinematics, inertial energy, and analytic derivatives.
 - The rigid-body Gauss-Seidel solve currently lives in `solver.h` / `solver.cpp`;
   `advance_one_frame_rb` and particle synchronization live in `simulation.h`.
-- `rigid_body.h` / `rigid_body.cpp` is a legacy standalone dynamics helper;
-  example 5 uses `rigid_body_ipc` instead.
 
 ### Tooling
 
