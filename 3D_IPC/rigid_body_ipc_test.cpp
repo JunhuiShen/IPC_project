@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -229,6 +230,120 @@ TEST(RigidBodyIPCQuaternionWrappers, ShortestArcInterpolationMatchesRecoveredOme
         (quaternion_rotate(accepted, Vec3::UnitZ())
          - quaternion_rotate(affine_orientation, Vec3::UnitZ())).norm(),
         1.0e-2);
+}
+
+TEST(RigidBodyIPCQuaternionWrappers, FullArcInterpolationPreserves270DegreeBranch) {
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec3 full_rotation(0.0, 0.0, 1.5 * M_PI);
+    const Vec4 target = quaternion_from_angular_velocity(
+        identity, full_rotation, 1.0);
+
+    const Vec4 halfway = interpolate_orientation_full_arc(
+        identity, target, 0.5);
+    const Vec4 expected_halfway = quaternion_from_angular_velocity(
+        identity, Vec3(0.0, 0.0, 0.75 * M_PI), 1.0);
+
+    EXPECT_TRUE(halfway.isApprox(expected_halfway, 1.0e-14));
+    EXPECT_TRUE(interpolate_orientation_full_arc(
+        identity, target, 1.0).isApprox(
+            quaternion_normalize(target), 1.0e-14));
+}
+
+TEST(RigidBodyIPCQuaternionWrappers, FullArcTreatsOppositeTargetSignsAsComplementaryPaths) {
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 target_270 = quaternion_from_angular_velocity(
+        identity, Vec3(0.0, 0.0, 1.5 * M_PI), 1.0);
+
+    const Vec4 halfway_270 = interpolate_orientation_full_arc(
+        identity, target_270, 0.5);
+    const Vec4 halfway_minus_90 = interpolate_orientation_full_arc(
+        identity, -target_270, 0.5);
+    const Vec4 expected_135 = quaternion_from_angular_velocity(
+        identity, Vec3(0.0, 0.0, 0.75 * M_PI), 1.0);
+    const Vec4 expected_minus_45 = quaternion_from_angular_velocity(
+        identity, Vec3(0.0, 0.0, -0.25 * M_PI), 1.0);
+
+    EXPECT_TRUE(halfway_270.isApprox(expected_135, 1.0e-14));
+    EXPECT_TRUE(halfway_minus_90.isApprox(expected_minus_45, 1.0e-14));
+    EXPECT_LT(std::abs(halfway_270.dot(halfway_minus_90)), 1.0e-14);
+}
+
+TEST(RigidBodyIPCQuaternionWrappers, FullArcAngularVelocityRecoveryPreserves270DegreeBranch) {
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    constexpr double dt = 0.25;
+    const Vec3 omega(0.0, 0.0, 1.5 * M_PI / dt);
+    const Vec4 target = quaternion_from_angular_velocity(
+        identity, omega, dt);
+
+    EXPECT_TRUE(angular_velocity_from_orientation_full_arc(
+        target, identity, dt).isApprox(omega, 1.0e-13));
+    EXPECT_TRUE(angular_velocity_from_orientation_full_arc(
+        -target, identity, dt).isApprox(
+            Vec3(0.0, 0.0, -0.5 * M_PI / dt), 1.0e-13));
+}
+
+TEST(RigidBodyIPCQuaternionWrappers, NearFullTurnRetainsItsAxisAndAngle) {
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const double rotation_angle = 2.0 * M_PI - 1.0e-13;
+    const Vec3 omega(0.0, 0.0, rotation_angle);
+    const Vec4 target = quaternion_from_angular_velocity(
+        identity, omega, 1.0);
+
+    const Vec4 halfway = interpolate_orientation_full_arc(
+        identity, target, 0.5);
+    const Vec4 expected_halfway = quaternion_from_angular_velocity(
+        identity, 0.5 * omega, 1.0);
+    const Vec3 recovered =
+        angular_velocity_from_orientation_full_arc(
+            target, identity, 1.0);
+
+    EXPECT_TRUE(halfway.isApprox(expected_halfway, 1.0e-13));
+    EXPECT_TRUE(recovered.isApprox(omega, 1.0e-12));
+}
+
+TEST(RigidBodyIPCQuaternionWrappers, FullArcHelpersValidateInputsAndAmbiguousFullTurn) {
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+
+    EXPECT_THROW(
+        interpolate_orientation_full_arc(identity, identity, -0.1),
+        std::invalid_argument);
+    EXPECT_THROW(
+        interpolate_orientation_full_arc(
+            identity, identity,
+            std::numeric_limits<double>::infinity()),
+        std::invalid_argument);
+    EXPECT_THROW(
+        angular_velocity_from_orientation_full_arc(
+            identity, identity, 0.0),
+        std::invalid_argument);
+    EXPECT_THROW(
+        angular_velocity_from_orientation_full_arc(
+            identity, identity,
+            std::numeric_limits<double>::quiet_NaN()),
+        std::invalid_argument);
+
+    // The antipodal endpoint specifies a 360-degree angle but not its axis.
+    EXPECT_THROW(
+        interpolate_orientation_full_arc(identity, -identity, 0.5),
+        std::invalid_argument);
+    EXPECT_THROW(
+        angular_velocity_from_orientation_full_arc(
+            -identity, identity, 1.0),
+        std::invalid_argument);
+
+    // A full turn built with trigonometric functions is only numerically
+    // antipodal; its roundoff-sized vector part is not a reliable axis.
+    const Vec4 numerical_full_turn =
+        quaternion_from_angular_velocity(
+            identity, Vec3(0.0, 0.0, 2.0 * M_PI), 1.0);
+    EXPECT_THROW(
+        interpolate_orientation_full_arc(
+            identity, numerical_full_turn, 0.5),
+        std::invalid_argument);
+    EXPECT_THROW(
+        angular_velocity_from_orientation_full_arc(
+            numerical_full_turn, identity, 1.0),
+        std::invalid_argument);
 }
 
 TEST(RigidBodyIPCQuaternionWrappers, TimeDerivativeUsesWorldSpaceAngularVelocity) {
@@ -1007,6 +1122,110 @@ TEST(RigidBodyIPCSolver, ClipsIncomingAngularVelocityBeforeResidualCheck) {
     EXPECT_TRUE(q_new[rb].isApprox(expected, 1.0e-12));
 }
 
+TEST(RigidBodyIPCSolver, PreservesFullIncoming270DegreeArc) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    state.deformed_positions = {
+        Vec3(-1.0, 2.0, -1.0),
+        Vec3(1.0, 2.0, -1.0),
+        Vec3(0.0, 2.0, 1.0),
+    };
+    state.velocities.assign(
+        state.deformed_positions.size(), Vec3::Zero());
+    ref_mesh.tris = {0, 1, 2};
+
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const int rb = create_rigid_body(
+        {
+            Vec3(0.0, -2.0, 0.0),
+            Vec3(5.0, 1.0, 0.0),
+            Vec3(-5.0, 1.0, 0.0),
+        },
+        Vec3::Zero(),
+        identity,
+        Vec3::Zero(),
+        3.0,
+        ref_mesh,
+        state);
+
+    SimParams params = SimParams::zeros();
+    params.fps = 1.0;
+    params.substeps = 1;
+    params.tol_abs = 1.0e100;
+    params.max_global_iters = 1;
+
+    std::vector<Vec3> x_coms = state.x_coms;
+    std::vector<Vec4> orientations = state.orientations;
+    std::vector<Vec3> omega = state.omega;
+    const Vec3 incoming_omega(0.0, 0.0, 1.5 * M_PI);
+    omega[rb] = incoming_omega;
+
+    const SolverResult result = global_gauss_seidel_solver_basic_rb(
+        ref_mesh, state, params, x_coms, orientations, omega);
+
+    constexpr double expected_safe_step = 0.6;
+    const Vec4 target = quaternion_from_angular_velocity(
+        identity, incoming_omega, 1.0);
+    const Vec4 expected_orientation = interpolate_orientation_full_arc(
+        identity, target, expected_safe_step);
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_EQ(result.iterations, 0);
+    EXPECT_NEAR(
+        omega[rb].z(),
+        expected_safe_step * incoming_omega.z(),
+        1.0e-12);
+    EXPECT_TRUE(orientations[rb].isApprox(
+        expected_orientation, 1.0e-12));
+}
+
+TEST(RigidBodyIPCSolver, StoresFullArcEndpointSignConsistentlyWithOmega) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const int rb = create_rigid_body(
+        {
+            Vec3(1.0, 1.0, 1.0),
+            Vec3(1.0, -1.0, -1.0),
+            Vec3(-1.0, 1.0, -1.0),
+            Vec3(-1.0, -1.0, 1.0),
+        },
+        Vec3::Zero(),
+        identity,
+        Vec3::Zero(),
+        4.0,
+        ref_mesh,
+        state);
+
+    SimParams params = SimParams::zeros();
+    params.fps = 1.0;
+    params.substeps = 1;
+    params.tol_abs = 1.0e100;
+    params.max_global_iters = 1;
+
+    std::vector<Vec3> x_coms = state.x_coms;
+    std::vector<Vec4> orientations = state.orientations;
+    std::vector<Vec3> omega = state.omega;
+    const Vec3 incoming_omega(0.0, 0.0, 1.5 * M_PI);
+    omega[rb] = incoming_omega;
+
+    const SolverResult result = global_gauss_seidel_solver_basic_rb(
+        ref_mesh, state, params, x_coms, orientations, omega);
+    const Vec4 raw_target = quaternion_normalize(
+        quaternion_from_angular_velocity(
+            state.orientations[rb], incoming_omega, 1.0));
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_EQ(result.iterations, 0);
+    EXPECT_LT(raw_target[0], 0.0);
+    EXPECT_TRUE(orientations[rb].isApprox(raw_target, 1.0e-12));
+    EXPECT_TRUE(omega[rb].isApprox(incoming_omega, 1.0e-12));
+    EXPECT_TRUE(quaternion_normalize(
+        quaternion_from_angular_velocity(
+            state.orientations[rb], omega[rb], 1.0))
+        .isApprox(orientations[rb], 1.0e-12));
+}
+
 TEST(RigidBodyTranslationSafeStep, MovingNodeUsesLinearCCD) {
     const std::vector<Vec3> x = {
         Vec3(0.25, 0.25, 1.0),
@@ -1118,6 +1337,33 @@ TEST(RigidBodyRotationSafeStep, MovingNodeUsesRotationCCD) {
     EXPECT_NEAR(alpha, 0.45, 1.0e-12);
 }
 
+TEST(RigidBodyRotationSafeStep, PreservesFull270DegreeTargetArc) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, -2.0, 0.0),
+        Vec3(-1.0, 2.0, -1.0),
+        Vec3(1.0, 2.0, -1.0),
+        Vec3(0.0, 2.0, 1.0),
+    };
+    RefMesh ref_mesh;
+    ref_mesh.tris = {1, 2, 3};
+    ref_mesh.node_to_rb = {0, -1, -1, -1};
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 full_target = quaternion_from_angular_velocity(
+        identity, Vec3(0.0, 0.0, 1.5 * M_PI), 1.0);
+
+    const double full_alpha = per_rigid_body_rotation_safe_step(
+        ref_mesh, {}, x, 0, Vec3::Zero(),
+        identity, full_target, 0.9);
+    const double complementary_alpha =
+        per_rigid_body_rotation_safe_step(
+            ref_mesh, {}, x, 0, Vec3::Zero(),
+            identity, -full_target, 0.9);
+
+    // Contact occurs after 180 / 270 = 2/3 of the full arc.
+    EXPECT_NEAR(full_alpha, 0.9 * (2.0 / 3.0), 1.0e-12);
+    EXPECT_DOUBLE_EQ(complementary_alpha, 1.0);
+}
+
 TEST(RigidBodyRotationSafeStep, NoncollinearOmegaEndpointsUseQuaternionPath) {
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
     const Vec4 current = quaternion_from_angular_velocity(
@@ -1174,6 +1420,32 @@ TEST(RigidBodyRotationSafeStep, MovingTriangleUsesReverseRotation) {
     EXPECT_NEAR(alpha, 0.45, 1.0e-12);
 }
 
+TEST(RigidBodyRotationSafeStep, MovingTriangleReverseCasePreservesFullArc) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, -2.0, 0.0),
+        Vec3(-1.0, 2.0, -1.0),
+        Vec3(1.0, 2.0, -1.0),
+        Vec3(0.0, 2.0, 1.0),
+    };
+    RefMesh ref_mesh;
+    ref_mesh.tris = {1, 2, 3};
+    ref_mesh.node_to_rb = {-1, 0, 0, 0};
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 full_target = quaternion_from_angular_velocity(
+        identity, Vec3(0.0, 0.0, 1.5 * M_PI), 1.0);
+
+    const double full_alpha = per_rigid_body_rotation_safe_step(
+        ref_mesh, {}, x, 0, Vec3::Zero(),
+        identity, full_target, 0.9);
+    const double complementary_alpha =
+        per_rigid_body_rotation_safe_step(
+            ref_mesh, {}, x, 0, Vec3::Zero(),
+            identity, -full_target, 0.9);
+
+    EXPECT_NEAR(full_alpha, 0.9 * (2.0 / 3.0), 1.0e-12);
+    EXPECT_DOUBLE_EQ(complementary_alpha, 1.0);
+}
+
 TEST(RigidBodyRotationSafeStep, MovingFirstEdgeUsesRotationCCD) {
     const std::vector<Vec3> x = {
         Vec3(0.0, -1.0, 0.0),
@@ -1214,6 +1486,33 @@ TEST(RigidBodyRotationSafeStep, MovingSecondEdgeUsesReverseRotation) {
         identity, target, 0.9);
 
     EXPECT_NEAR(alpha, 0.45, 1.0e-12);
+}
+
+TEST(RigidBodyRotationSafeStep, MovingSecondEdgeReverseCasePreservesFullArc) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, -1.0, 0.0),
+        Vec3(0.0, -2.0, 0.0),
+        Vec3(0.0, 1.5, -1.0),
+        Vec3(0.0, 1.5, 1.0),
+    };
+    RefMesh ref_mesh;
+    ref_mesh.node_to_rb = {-1, -1, 0, 0};
+    const std::vector<std::array<int, 2>> edges = {
+        {0, 1}, {2, 3}};
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 full_target = quaternion_from_angular_velocity(
+        identity, Vec3(0.0, 0.0, 1.5 * M_PI), 1.0);
+
+    const double full_alpha = per_rigid_body_rotation_safe_step(
+        ref_mesh, edges, x, 0, Vec3::Zero(),
+        identity, full_target, 0.9);
+    const double complementary_alpha =
+        per_rigid_body_rotation_safe_step(
+            ref_mesh, edges, x, 0, Vec3::Zero(),
+            identity, -full_target, 0.9);
+
+    EXPECT_NEAR(full_alpha, 0.9 * (2.0 / 3.0), 1.0e-12);
+    EXPECT_DOUBLE_EQ(complementary_alpha, 1.0);
 }
 
 TEST(RigidBodyRotationSafeStep, SkipsInternalAndUnrelatedPairs) {

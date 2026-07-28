@@ -2,12 +2,15 @@
 #include "physics.h"
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <algebra/algebra.h>
 
 namespace {
 
 constexpr double kSmallAngleThreshold = 1.0e-4;
+constexpr double kFullTurnAxisTolerance =
+    64.0 * std::numeric_limits<double>::epsilon();
 
 // G_alpha(q) = partial R_h(q) / partial q_alpha, where G_0 = 2 q_s I_3 + 2 [q_v]_x and
 // G_l = -2 q_l I_3 + 2 e_l q_v^T + 2 q_v e_l^T + 2 q_s [e_l]_x for l = 1, 2, 3.
@@ -243,6 +246,60 @@ Vec3 angular_velocity_from_orientation(const Vec4& q, const Vec4& q_n, double dt
     const double sin_half_angle = vector_part.norm();
     if (sin_half_angle < 1.0e-12)
         return (2.0 / dt) * vector_part;
+
+    const double half_angle = std::atan2(sin_half_angle, relative[0]);
+    return (2.0 * half_angle / (dt * sin_half_angle)) * vector_part;
+}
+
+Vec4 interpolate_orientation_full_arc(
+    const Vec4& q_current, const Vec4& q_target, double alpha) {
+    if (!std::isfinite(alpha) || alpha < 0.0 || alpha > 1.0) {
+        throw std::invalid_argument(
+            "interpolate_orientation_full_arc requires alpha in [0, 1]");
+    }
+
+    const Vec4 current = quaternion_normalize(q_current);
+    const Vec4 target = quaternion_normalize(q_target);
+    if (alpha == 0.0)
+        return current;
+    if (alpha == 1.0)
+        return target;
+
+    const Vec4 relative = quaternion_normalize(quaternion_multiply(target, quaternion_conjugate(current)));
+    const Vec3 vector_part = relative.tail<3>();
+    const double sin_half_angle = vector_part.norm();
+    if (relative[0] < 0.0 && sin_half_angle <= kFullTurnAxisTolerance) {
+        throw std::invalid_argument(
+            "interpolate_orientation_full_arc cannot determine the axis of a numerically exact full turn");
+    }
+    if (sin_half_angle < 1.0e-12) {
+        return quaternion_normalize((1.0 - alpha) * current + alpha * target);
+    }
+
+    // atan2 returns a half angle in [0, pi], so the relative quaternion sign
+    // selects a full rotation angle in [0, 2*pi].
+    const double half_angle = std::atan2(sin_half_angle, relative[0]);
+    const Vec3 rotation_vector =(2.0 * alpha * half_angle / sin_half_angle) * vector_part;
+    return quaternion_normalize(quaternion_multiply(exp(rotation_vector, 1.0), current));
+}
+
+Vec3 angular_velocity_from_orientation_full_arc(
+    const Vec4& q, const Vec4& q_n, double dt) {
+    if (!std::isfinite(dt) || dt <= 0.0) {
+        throw std::invalid_argument(
+            "angular_velocity_from_orientation_full_arc requires a positive finite dt");
+    }
+
+    const Vec4 relative = quaternion_normalize(quaternion_multiply(quaternion_normalize(q),quaternion_conjugate(quaternion_normalize(q_n))));
+    const Vec3 vector_part = relative.tail<3>();
+    const double sin_half_angle = vector_part.norm();
+    if (relative[0] < 0.0 && sin_half_angle <= kFullTurnAxisTolerance) {
+        throw std::invalid_argument(
+            "angular_velocity_from_orientation_full_arc cannot determine the axis of a numerically exact full turn");
+    }
+    if (sin_half_angle < 1.0e-12) {
+        return (2.0 / dt) * vector_part;
+    }
 
     const double half_angle = std::atan2(sin_half_angle, relative[0]);
     return (2.0 * half_angle / (dt * sin_half_angle)) * vector_part;

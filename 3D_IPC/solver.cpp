@@ -744,13 +744,13 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
     for (int rb = 0; rb < num_rbs; ++rb) {
         const std::vector<Vec3> node_positions = rb_solver::construct_current_rigid_node_position(ref_mesh, state, x_com_new, omega_new, dt);
         const Vec4 q_current = quaternion_normalize(state.orientations[rb]);
-        const Vec4 q_target = quaternion_align_sign(quaternion_normalize(quaternion_from_angular_velocity(q_current, input_omega[rb], dt)), q_current);
-        // Clip each target along the same shortest-arc quaternion path used to update the orientation
+        const Vec4 q_target = quaternion_normalize(quaternion_from_angular_velocity(q_current, input_omega[rb], dt));
+        // Preserve the full arc encoded by the raw target quaternion sign.
         const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, edges, node_positions, rb, x_com_new[rb], q_current, q_target);
-        const Vec4 q_accepted = interpolate_orientation_shortest_arc(q_current, q_target, rotation_safe_step);
-        q_new[rb] = quaternion_align_sign(q_accepted, q_current);
+        const Vec4 q_accepted = interpolate_orientation_full_arc(q_current, q_target, rotation_safe_step);
+        q_new[rb] = q_accepted;
         // Rebuild the node positions for each body so processed bodies use their accepted orientations while other bodies remain at their start-of-step orientations
-        omega_new[rb] = angular_velocity_from_orientation(q_accepted, q_current, dt);
+        omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, q_current, dt);
     }
 
     double initial_residual = 0.0;
@@ -792,12 +792,16 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
             const Vec4 q_current = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_new[rb], dt));
             // Construct q_target =  E(dt * (omega_current - damping * delta_omega)) * q_n before CCD
             const Vec3 omega_target = omega_new[rb] - params.damping * delta_omega;
-            const Vec4 q_target = quaternion_align_sign(quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_target, dt)), q_current);
-            // CCD checks the shortest fixed-axis path from q_current to q_target and get a safe step weight
+            const Vec4 q_target = quaternion_normalize(
+                quaternion_from_angular_velocity(
+                    state.orientations[rb], omega_target, dt));
+            // CCD and the accepted update use the same full arc encoded by
+            // q_current and the raw-sign q_target.
             const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, edges, node_positions, rb, x_com_new[rb], q_current, q_target);
-            const Vec4 q_accepted = interpolate_orientation_shortest_arc(q_current, q_target, rotation_safe_step);
-            q_new[rb] = quaternion_align_sign(q_accepted, state.orientations[rb]);
-            omega_new[rb] = angular_velocity_from_orientation(q_accepted, state.orientations[rb], dt);
+            const Vec4 q_accepted = interpolate_orientation_full_arc(q_current, q_target, rotation_safe_step);
+            q_new[rb] = q_accepted;
+            omega_new[rb] = angular_velocity_from_orientation_full_arc(
+                q_accepted, state.orientations[rb], dt);
         }
 
         result.iterations = iter;

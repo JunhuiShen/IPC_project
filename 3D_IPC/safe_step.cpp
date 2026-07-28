@@ -251,7 +251,7 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const std::vec
     };
 
     const Vec4 current = quaternion_normalize(q_current);
-    const Vec4 proposed = quaternion_align_sign(quaternion_normalize(q_target), current);
+    const Vec4 proposed = quaternion_normalize(q_target);
     const Vec4 q_reverse = quaternion_normalize(quaternion_multiply(current, quaternion_conjugate(proposed)));
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
 

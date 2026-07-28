@@ -37,6 +37,16 @@ Vec4 interpolate_orientation_shortest_arc(const Vec4& q_current, const Vec4& q_t
 // Invert q = exp((dt / 2) * omega) * q_n and get omega = (2 / dt) * log(q * q_n^-1)
 Vec3 angular_velocity_from_orientation(const Vec4& q, const Vec4& q_n, double dt);
 
+// Follow the relative arc encoded by the signs of q_current and q_target,
+// without replacing it by the equivalent shortest arc. This can distinguish,
+// for example, +270 degrees from -90 degrees, but an exact (or numerically
+// indistinguishable) 360-degree arc is underdetermined by its endpoints.
+Vec4 interpolate_orientation_full_arc(const Vec4& q_current, const Vec4& q_target, double alpha);
+
+// Recover the angular velocity from the relative arc encoded by q and q_n
+// without changing quaternion signs or selecting the shortest branch.
+Vec3 angular_velocity_from_orientation_full_arc(const Vec4& q, const Vec4& q_n, double dt);
+
 // X_centered is a fixed body-space position measured from the center of mass.
 // Direct transforms using an already-evaluated orientation quaternion.
 Vec3 world_space_position(const Vec3& X, const Vec3& x_com, const Vec4& orientation);

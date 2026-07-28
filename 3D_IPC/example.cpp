@@ -919,7 +919,7 @@ void build_two_rigid_polygon_collision_example(
 // ---------------------------------------------------------------------------
 // Example 9: twenty rigid polygonal prisms initialized in a static vertical stack
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 9 --num_frames 100 --substeps 10 --outdir twenty_polygon_static_stack_output --format obj
+// command line: ./build/3D_sim --example 9 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --outdir twenty_polygon_static_stack_output --format obj
 void build_twenty_rigid_polygon_static_stack_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
