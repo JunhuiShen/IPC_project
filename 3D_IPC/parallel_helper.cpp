@@ -1,7 +1,104 @@
 #include "parallel_helper.h"
+#include "quaternion_math.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
 #include <vector>
+
+namespace {
+
+bool periodic_angle_in_interval(
+    double angle, double interval_min, double interval_max) {
+    constexpr double two_pi = 2.0 * M_PI;
+    const double shifted =
+        angle + two_pi * std::ceil((interval_min - angle) / two_pi);
+    const double scale = std::max(
+        {1.0, std::abs(interval_min), std::abs(interval_max),
+         std::abs(shifted)});
+    const double tolerance =
+        32.0 * std::numeric_limits<double>::epsilon() * scale;
+    return shifted <= interval_max + tolerance;
+}
+
+} // namespace
+
+AABB arc_node_aabb(
+    const Vec3& x_com, const Vec4& orientation,
+    const Vec3& X, const Vec4& q_rel) {
+    if (!x_com.allFinite() || !X.allFinite()) {
+        throw std::invalid_argument(
+            "arc_node_box requires finite positions");
+    }
+
+    const Vec4 q_current = quaternion_normalize(orientation);
+    const Vec4 relative = quaternion_normalize(q_rel);
+
+    const Vec3 current_offset = quaternion_rotate(q_current, X);
+    const Vec3 current_position = x_com + current_offset;
+    const Vec3 vector_part = relative.tail<3>();
+    const double sin_half_angle = vector_part.norm();
+    if (sin_half_angle == 0.0) {
+        if (relative[0] >= 0.0)
+            return AABB(current_position, current_position);
+
+        // An exact 2*pi endpoint quaternion has lost its rotation axis. The
+        // sphere box is conservative for every possible full-turn axis.
+        const Vec3 radius = Vec3::Constant(X.norm());
+        return AABB(x_com - radius, x_com + radius);
+    }
+
+    const Vec3 axis = vector_part / sin_half_angle;
+    const double angular_extent =
+        2.0 * std::atan2(sin_half_angle, relative[0]);
+
+    // Rodrigues' formula gives
+    // p(t) = circle_center + cosine_coefficient cos(t)
+    //                       + sine_coefficient sin(t).
+    const Vec3 axial_offset = axis * axis.dot(current_offset);
+    const Vec3 circle_center = x_com + axial_offset;
+    const Vec3 cosine_coefficient = current_offset - axial_offset;
+    const Vec3 sine_coefficient = axis.cross(current_offset);
+
+    const auto point_at = [&](double angle) {
+        return circle_center
+            + std::cos(angle) * cosine_coefficient
+            + std::sin(angle) * sine_coefficient;
+    };
+
+    AABB box;
+    box.expand(current_position);
+    box.expand(point_at(angular_extent));
+
+    // Each coordinate is c + a cos(t) + b sin(t). Its extrema occur at
+    // atan2(b, a) and that angle plus pi, modulo 2*pi.
+    for (int coordinate = 0; coordinate < 3; ++coordinate) {
+        const double a = cosine_coefficient[coordinate];
+        const double b = sine_coefficient[coordinate];
+        const double amplitude = std::hypot(a, b);
+        if (amplitude == 0.0)
+            continue;
+
+        const double maximum_angle = std::atan2(b, a);
+        if (periodic_angle_in_interval(
+                maximum_angle, 0.0, angular_extent)) {
+            box.max[coordinate] = std::max(
+                box.max[coordinate],
+                circle_center[coordinate] + amplitude);
+        }
+
+        if (periodic_angle_in_interval(
+                maximum_angle + M_PI,
+                0.0, angular_extent)) {
+            box.min[coordinate] = std::min(
+                box.min[coordinate],
+                circle_center[coordinate] - amplitude);
+        }
+    }
+
+    return box;
+}
 
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int nv){
     std::vector<std::vector<int>> out(nv);
