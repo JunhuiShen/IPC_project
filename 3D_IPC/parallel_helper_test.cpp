@@ -1,10 +1,24 @@
 #include "parallel_helper.h"
 #include "physics.h"
+#include "quaternion_math.h"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <vector>
 
 namespace {
+
+Vec4 axis_angle_quaternion(const Vec3& axis_input, double angle) {
+    const Vec3 axis = axis_input.normalized();
+    const double half_angle = 0.5 * angle;
+    const double sin_half_angle = std::sin(half_angle);
+    return Vec4(
+        std::cos(half_angle),
+        sin_half_angle * axis.x(),
+        sin_half_angle * axis.y(),
+        sin_half_angle * axis.z());
+}
 
 void build_contact_adj_pair_scan_reference(const BroadPhase::Cache& cache, int nv,
                                            std::vector<std::vector<int>>& out) {
@@ -99,4 +113,149 @@ TEST(GreedyColorConflictGraph, DeterministicColoringAndScratchReuse) {
 
     greedy_color_conflict_graph({}, groups);
     EXPECT_TRUE(groups.empty());
+}
+
+// ── arc_node_aabb tests ──────────────────────────────────────────────────────
+
+namespace {
+
+AABB brute_force(
+    const Vec3& x_com, const Vec4& q, const Vec3& X,
+    const Vec4& q_rel, int samples = 400000) {
+    const Vec4 q_current = quaternion_normalize(q);
+    const Vec4 q_relative = quaternion_normalize(q_rel);
+    const Vec3 x = x_com + quaternion_rotate(q_current, X);
+    const Vec3 vector_part = q_relative.tail<3>();
+    const double sin_half_angle = vector_part.norm();
+
+    if (sin_half_angle < 1.0e-12) {
+        if (q_relative[0] >= 0.0)
+            return AABB(x, x);
+
+        const Vec3 radius = Vec3::Constant(X.norm());
+        return AABB(x_com - radius, x_com + radius);
+    }
+
+    const Vec3 axis = vector_part / sin_half_angle;
+    const double angular_extent =
+        2.0 * std::atan2(sin_half_angle, q_relative[0]);
+
+    AABB box;
+    for (int sample = 0; sample <= samples; ++sample) {
+        const double alpha =
+            -1.0 + 2.0 * static_cast<double>(sample) / samples;
+        const Vec4 delta =
+            axis_angle_quaternion(axis, alpha * angular_extent);
+        const Vec4 sampled_q = quaternion_multiply(delta, q_current);
+        box.expand(x_com + quaternion_rotate(sampled_q, X));
+    }
+    return box;
+}
+
+void check(
+    const Vec3& x_com, const Vec4& q, const Vec3& X,
+    const Vec4& q_rel, double tolerance = 1.0e-9) {
+    const AABB result = arc_node_aabb(x_com, q, X, q_rel);
+    const AABB reference = brute_force(x_com, q, X, q_rel);
+
+    for (int coordinate = 0; coordinate < 3; ++coordinate) {
+        // The analytic box must contain every densely sampled point.
+        EXPECT_LE(result.min[coordinate], reference.min[coordinate] + 1.0e-12);
+        EXPECT_GE(result.max[coordinate], reference.max[coordinate] - 1.0e-12);
+        EXPECT_NEAR(result.min[coordinate], reference.min[coordinate], tolerance);
+        EXPECT_NEAR(result.max[coordinate], reference.max[coordinate], tolerance);
+    }
+}
+
+} // namespace
+
+TEST(ArcNodeAABB, BoundsSymmetricQuarterTurnExactly) {
+    const Vec3 x_com(1.0, -2.0, 3.0);
+    const Vec4 q(1.0, 0.0, 0.0, 0.0);
+    const Vec3 X(2.0, 0.0, 1.0);
+    const Vec4 q_rel =
+        axis_angle_quaternion(Vec3::UnitZ(), 0.5 * M_PI);
+
+    check(x_com, q, X, q_rel);
+    const AABB box = arc_node_aabb(x_com, q, X, q_rel);
+    EXPECT_TRUE(box.min.isApprox(Vec3(1.0, -4.0, 4.0), 1.0e-14));
+    EXPECT_TRUE(box.max.isApprox(Vec3(3.0, 0.0, 4.0), 1.0e-14));
+}
+
+TEST(ArcNodeAABB, PreservesFullArcSignAndNormalizesQuaternionInputs) {
+    const Vec3 x_com = Vec3::Zero();
+    const Vec4 q(1.0, 0.0, 0.0, 0.0);
+    const Vec3 X = Vec3::UnitX();
+    const Vec4 q_rel =
+        axis_angle_quaternion(Vec3::UnitZ(), 1.5 * M_PI);
+
+    check(x_com, q, X, q_rel);
+    check(x_com, q, X, -q_rel);
+    check(x_com, 3.0 * q, X, 5.0 * q_rel);
+
+    const AABB full_270 = arc_node_aabb(x_com, q, X, q_rel);
+    const AABB complementary_minus_90 =
+        arc_node_aabb(x_com, q, X, -q_rel);
+    const AABB scaled =
+        arc_node_aabb(x_com, 3.0 * q, X, 5.0 * q_rel);
+
+    EXPECT_TRUE(full_270.min.isApprox(Vec3(-1.0, -1.0, 0.0), 1.0e-14));
+    EXPECT_TRUE(full_270.max.isApprox(Vec3(1.0, 1.0, 0.0), 1.0e-14));
+    EXPECT_TRUE(complementary_minus_90.min.isApprox(
+        Vec3(0.0, -1.0, 0.0), 1.0e-14));
+    EXPECT_TRUE(complementary_minus_90.max.isApprox(
+        Vec3(1.0, 1.0, 0.0), 1.0e-14));
+    EXPECT_TRUE(scaled.min.isApprox(full_270.min, 1.0e-14));
+    EXPECT_TRUE(scaled.max.isApprox(full_270.max, 1.0e-14));
+}
+
+TEST(ArcNodeAABB, HalfTurnExtentBoundsFullCircle) {
+    const Vec3 x_com(1.0, -2.0, 3.0);
+    const Vec4 q(1.0, 0.0, 0.0, 0.0);
+    const Vec3 X(2.0, 0.0, 1.0);
+    const Vec4 q_rel =
+        axis_angle_quaternion(Vec3::UnitZ(), M_PI);
+
+    check(x_com, q, X, q_rel);
+    const AABB box = arc_node_aabb(x_com, q, X, q_rel);
+    EXPECT_TRUE(box.min.isApprox(Vec3(-1.0, -4.0, 4.0), 1.0e-14));
+    EXPECT_TRUE(box.max.isApprox(Vec3(3.0, 0.0, 4.0), 1.0e-14));
+}
+
+TEST(ArcNodeAABB, MatchesBruteForceForArbitraryAxis) {
+    const Vec3 x_com(0.4, -0.7, 1.1);
+    const Vec4 q =
+        axis_angle_quaternion(Vec3(1.0, 2.0, -1.0), 0.8);
+    const Vec3 X(1.2, -0.4, 0.7);
+    const Vec4 q_rel =
+        axis_angle_quaternion(Vec3(-0.3, 0.9, 0.2), 1.1);
+
+    check(x_com, q, X, q_rel);
+}
+
+TEST(ArcNodeAABB, DegenerateArcFullTurnFallbackAndInvalidQuaternions) {
+    const Vec3 x_com(0.2, -0.4, 0.7);
+    const Vec4 q =
+        axis_angle_quaternion(Vec3::UnitY(), 0.6);
+    const Vec3 X(0.8, -0.3, 1.1);
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec3 x = x_com + quaternion_rotate(q, X);
+
+    check(x_com, q, X, identity);
+    const AABB stationary = arc_node_aabb(x_com, q, X, identity);
+    const AABB antipodal = arc_node_aabb(x_com, q, X, -identity);
+    const Vec3 full_turn_radius = Vec3::Constant(X.norm());
+    EXPECT_TRUE(stationary.min.isApprox(x, 1.0e-14));
+    EXPECT_TRUE(stationary.max.isApprox(x, 1.0e-14));
+    EXPECT_TRUE(antipodal.min.isApprox(
+        x_com - full_turn_radius, 1.0e-14));
+    EXPECT_TRUE(antipodal.max.isApprox(
+        x_com + full_turn_radius, 1.0e-14));
+
+    EXPECT_THROW(
+        arc_node_aabb(x_com, Vec4::Zero(), X, identity),
+        std::invalid_argument);
+    EXPECT_THROW(
+        arc_node_aabb(x_com, q, X, Vec4::Zero()),
+        std::invalid_argument);
 }
