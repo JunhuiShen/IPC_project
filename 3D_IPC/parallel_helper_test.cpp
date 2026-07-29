@@ -259,3 +259,70 @@ TEST(ArcNodeAABB, DegenerateArcFullTurnFallbackAndInvalidQuaternions) {
         arc_node_aabb(x_com, q, X, Vec4::Zero()),
         std::invalid_argument);
 }
+
+TEST(RigidBodyBlueBoxes, CombinesRotationArcAndCOMTranslation) {
+    const Vec3 x_com(1.0, -2.0, 3.0);
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const std::vector<Vec3> material_positions = {
+        Vec3(2.0, 0.0, 1.0),
+        Vec3(0.0, 1.0, 0.0),
+    };
+    const std::vector<Vec3> positions = {
+        x_com + material_positions[0],
+        x_com + material_positions[1],
+    };
+
+    RefMesh ref_mesh;
+    ref_mesh.rb_nodes = {{0, 1}};
+    ref_mesh.ref_positions = {material_positions};
+    SimParams params = SimParams::zeros();
+    params.node_box_min = 0.1;
+    params.node_box_max = 1.0;
+
+    const std::vector<AABB> boxes = build_blue_boxes_rb(positions, {x_com}, {identity}, {axis_angle_quaternion(Vec3::UnitZ(), 0.5 * M_PI)}, {0.2}, params, ref_mesh);
+
+    ASSERT_EQ(boxes.size(), positions.size());
+    EXPECT_TRUE(boxes[0].min.isApprox(Vec3(0.76, -4.24, 3.76), 1.0e-14));
+    EXPECT_TRUE(boxes[0].max.isApprox(Vec3(3.24, 0.24, 4.24), 1.0e-14));
+    EXPECT_TRUE(boxes[1].min.isApprox(Vec3(-0.24, -2.24, 2.76), 1.0e-14));
+    EXPECT_TRUE(boxes[1].max.isApprox(Vec3(2.24, -0.76, 3.24), 1.0e-14));
+}
+
+TEST(RigidBodyBlueBoxes, StationaryRotationReducesToCOMBox) {
+    const Vec3 x_com(-0.4, 0.7, 1.2);
+    const Vec4 q = axis_angle_quaternion(Vec3(1.0, -2.0, 0.5), 0.8);
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec3 X(0.3, -0.6, 1.1);
+    const Vec3 x = x_com + quaternion_rotate(q, X);
+
+    RefMesh ref_mesh;
+    ref_mesh.rb_nodes = {{0}};
+    ref_mesh.ref_positions = {{X}};
+    SimParams params = SimParams::zeros();
+    params.node_box_min = 0.4;
+    params.node_box_max = 0.8;
+
+    const std::vector<AABB> boxes = build_blue_boxes_rb({x}, {x_com}, {q}, {identity}, {0.0}, params, ref_mesh);
+
+    ASSERT_EQ(boxes.size(), 1);
+    EXPECT_TRUE(boxes[0].min.isApprox(x - Vec3::Constant(0.4), 1.0e-14));
+    EXPECT_TRUE(boxes[0].max.isApprox(x + Vec3::Constant(0.4), 1.0e-14));
+}
+
+TEST(RigidBodyBlueBoxes, COMBoundClampsToMaximum) {
+    const Vec3 x_com = Vec3::Zero();
+    const Vec3 X = Vec3::UnitX();
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    RefMesh ref_mesh;
+    ref_mesh.rb_nodes = {{0}};
+    ref_mesh.ref_positions = {{X}};
+    SimParams params = SimParams::zeros();
+    params.node_box_min = 0.1;
+    params.node_box_max = 0.3;
+
+    const std::vector<AABB> boxes = build_blue_boxes_rb({X}, {x_com}, {identity}, {identity}, {2.0}, params, ref_mesh);
+
+    ASSERT_EQ(boxes.size(), 1);
+    EXPECT_TRUE(boxes[0].min.isApprox(X - Vec3::Constant(0.3), 1.0e-14));
+    EXPECT_TRUE(boxes[0].max.isApprox(X + Vec3::Constant(0.3), 1.0e-14));
+}

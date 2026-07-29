@@ -98,6 +98,25 @@ AABB arc_node_aabb(
     return box;
 }
 
+std::vector<AABB> build_blue_boxes_rb(const std::vector<Vec3>& positions, const std::vector<Vec3>& x_coms, const std::vector<Vec4>& orientations, const std::vector<Vec4>& quaternion_bounds, const std::vector<double>& prev_com_disp, const SimParams& params, const RefMesh& ref_mesh) {
+    const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
+    std::vector<AABB> blue_boxes(positions.size());
+    constexpr double node_box_padding = 1.2;
+
+    for (int rb = 0; rb < num_rbs; ++rb) {
+        const std::vector<int>& nodes = ref_mesh.rb_nodes[rb];
+        const std::vector<Vec3>& material_positions = ref_mesh.ref_positions[rb];
+        const double r = std::clamp(node_box_padding * prev_com_disp[rb], params.node_box_min, params.node_box_max);
+        const Vec3 radius = Vec3::Constant(r);
+        for (int local = 0; local < static_cast<int>(nodes.size()); ++local) {
+            const int node = nodes[local];
+            const AABB rotation_box = arc_node_aabb(x_coms[rb], orientations[rb], material_positions[local], quaternion_bounds[rb]);
+            blue_boxes[node] = AABB(rotation_box.min - radius, rotation_box.max + radius);
+        }
+    }
+    return blue_boxes;
+}
+
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int nv){
     std::vector<std::vector<int>> out(nv);
     #pragma omp parallel for schedule(static)

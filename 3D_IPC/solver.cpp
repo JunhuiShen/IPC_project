@@ -768,9 +768,9 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
         for (int rb = 0; rb < num_rbs; ++rb) {
             std::vector<Vec3> node_positions = rb_solver::construct_current_rigid_node_position(ref_mesh, state, x_com_new, omega_new, dt);
 
-            const Vec3 com_step = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, edges, node_positions,x_com_new, omega_new, params, dt);
-            const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, edges, node_positions, rb, -com_step);
-            const Vec3 com_displacement = -com_safe_step * com_step;
+            const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, edges, node_positions,x_com_new, omega_new, params, dt);
+            const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, edges, node_positions, rb, -delta_com);
+            const Vec3 com_displacement = -com_safe_step * delta_com;
             x_com_new[rb] += com_displacement;
             for (const int node : ref_mesh.rb_nodes[rb])
                 node_positions[node] += com_displacement;
@@ -779,9 +779,7 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
             const Vec4 q_current = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_new[rb], dt));
             // Construct q_target =  E(dt * (omega_current - damping * delta_omega)) * q_n before CCD
             const Vec3 omega_target = omega_new[rb] - params.damping * delta_omega;
-            const Vec4 q_target = quaternion_normalize(
-                quaternion_from_angular_velocity(
-                    state.orientations[rb], omega_target, dt));
+            const Vec4 q_target = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_target, dt));
             // CCD and the accepted update use the same full arc encoded by
             // q_current and the raw-sign q_target.
             const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, edges, node_positions, rb, x_com_new[rb], q_current, q_target);

@@ -12,6 +12,9 @@ AABB arc_node_aabb(
     const Vec3& x_com, const Vec4& q,
     const Vec3& X, const Vec4& q_rel);
 
+// Rigid-node blue boxes from quaternion bounds and padded previous COM motion.
+std::vector<AABB> build_blue_boxes_rb(const std::vector<Vec3>& positions, const std::vector<Vec3>& x_coms, const std::vector<Vec4>& orientations, const std::vector<Vec4>& quaternion_bounds, const std::vector<double>& prev_com_disp, const SimParams& params, const RefMesh& ref_mesh);
+
 // Mesh-adjacency edges of the conflict graph. Invariant for a fixed mesh.
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int num_vertices);
 
