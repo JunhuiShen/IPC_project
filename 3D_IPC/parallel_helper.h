@@ -3,12 +3,13 @@
 #include "broad_phase.h"
 #include <vector>
 
-// Bound the actual directed rotation of material point X from orientation to
-// q_new. q_rel uses the world-relative convention
-// q_rel = q_new * orientation^-1, and its raw sign selects the full arc. The
-// swept positions are x_com + R(q_rel(t) * orientation) X for t in [0, 1].
+// Bound material point X over the symmetric full-arc envelope about the
+// current orientation q. q_rel uses the world-relative convention
+// q_rel = q_new * q^-1, and its raw sign selects the angular extent.
+// The swept positions are x_com + R(q_rel(t) * q) X for
+// t in [-1, 1], analogous to the 2D theta +/- eta interval.
 AABB arc_node_aabb(
-    const Vec3& x_com, const Vec4& orientation,
+    const Vec3& x_com, const Vec4& q,
     const Vec3& X, const Vec4& q_rel);
 
 // Mesh-adjacency edges of the conflict graph. Invariant for a fixed mesh.

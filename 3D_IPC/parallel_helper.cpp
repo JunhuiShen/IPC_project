@@ -25,24 +25,23 @@ bool periodic_angle_in_interval(
 } // namespace
 
 AABB arc_node_aabb(
-    const Vec3& x_com, const Vec4& orientation,
+    const Vec3& x_com, const Vec4& q,
     const Vec3& X, const Vec4& q_rel) {
     if (!x_com.allFinite() || !X.allFinite()) {
         throw std::invalid_argument(
-            "arc_node_box requires finite positions");
+            "arc_node_aabb requires finite positions");
     }
 
-    const Vec4 q_current = quaternion_normalize(orientation);
-    const Vec4 relative = quaternion_normalize(q_rel);
+    const Vec4 q_current = quaternion_normalize(q);
+    const Vec4 q_relative = quaternion_normalize(q_rel);
 
-    const Vec3 current_offset = quaternion_rotate(q_current, X);
-    const Vec3 current_position = x_com + current_offset;
-    const Vec3 vector_part = relative.tail<3>();
+    const Vec3 world_space_offset = quaternion_rotate(q_current, X);
+    const Vec3 x = x_com + world_space_offset;
+    const Vec3 vector_part = q_relative.tail<3>();
     const double sin_half_angle = vector_part.norm();
-    if (sin_half_angle == 0.0) {
-        if (relative[0] >= 0.0)
-            return AABB(current_position, current_position);
-
+    if (sin_half_angle < 1.0e-12) {
+        if (q_relative[0] >= 0.0)
+            return AABB(x, x);
         // An exact 2*pi endpoint quaternion has lost its rotation axis. The
         // sphere box is conservative for every possible full-turn axis.
         const Vec3 radius = Vec3::Constant(X.norm());
@@ -50,16 +49,15 @@ AABB arc_node_aabb(
     }
 
     const Vec3 axis = vector_part / sin_half_angle;
-    const double angular_extent =
-        2.0 * std::atan2(sin_half_angle, relative[0]);
+    const double angular_extent = 2.0 * std::atan2(sin_half_angle, q_relative[0]);
 
     // Rodrigues' formula gives
     // p(t) = circle_center + cosine_coefficient cos(t)
     //                       + sine_coefficient sin(t).
-    const Vec3 axial_offset = axis * axis.dot(current_offset);
+    const Vec3 axial_offset = axis * axis.dot(world_space_offset);
     const Vec3 circle_center = x_com + axial_offset;
-    const Vec3 cosine_coefficient = current_offset - axial_offset;
-    const Vec3 sine_coefficient = axis.cross(current_offset);
+    const Vec3 cosine_coefficient = world_space_offset - axial_offset;
+    const Vec3 sine_coefficient = axis.cross(world_space_offset);
 
     const auto point_at = [&](double angle) {
         return circle_center
@@ -68,7 +66,7 @@ AABB arc_node_aabb(
     };
 
     AABB box;
-    box.expand(current_position);
+    box.expand(point_at(-angular_extent));
     box.expand(point_at(angular_extent));
 
     // Each coordinate is c + a cos(t) + b sin(t). Its extrema occur at
@@ -77,12 +75,12 @@ AABB arc_node_aabb(
         const double a = cosine_coefficient[coordinate];
         const double b = sine_coefficient[coordinate];
         const double amplitude = std::hypot(a, b);
-        if (amplitude == 0.0)
+        if (amplitude < 1.0e-12)
             continue;
 
         const double maximum_angle = std::atan2(b, a);
         if (periodic_angle_in_interval(
-                maximum_angle, 0.0, angular_extent)) {
+                maximum_angle, -angular_extent, angular_extent)) {
             box.max[coordinate] = std::max(
                 box.max[coordinate],
                 circle_center[coordinate] + amplitude);
@@ -90,7 +88,7 @@ AABB arc_node_aabb(
 
         if (periodic_angle_in_interval(
                 maximum_angle + M_PI,
-                0.0, angular_extent)) {
+                -angular_extent, angular_extent)) {
             box.min[coordinate] = std::min(
                 box.min[coordinate],
                 circle_center[coordinate] - amplitude);
