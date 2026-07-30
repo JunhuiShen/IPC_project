@@ -98,6 +98,49 @@ TEST(ParallelHelper, ContactAdjacencyMatchesPairScanExactly) {
     EXPECT_EQ(actual, std::vector<std::vector<int>>(nv));
 }
 
+TEST(ParallelHelper, RigidContactAdjacencyFiltersInternalPairsAndColorsBodies) {
+    BroadPhase::Cache cache;
+    const auto add_nt = [&](int node, int a, int b, int c) {
+        NodeTrianglePair pair;
+        pair.node = node;
+        pair.tri_v[0] = a;
+        pair.tri_v[1] = b;
+        pair.tri_v[2] = c;
+        cache.nt_pairs.push_back(pair);
+    };
+    const auto add_ss = [&](int a0, int a1, int b0, int b1) {
+        SegmentSegmentPair pair;
+        pair.v[0] = a0;
+        pair.v[1] = a1;
+        pair.v[2] = b0;
+        pair.v[3] = b1;
+        cache.ss_pairs.push_back(pair);
+    };
+
+    add_nt(0, 1, 2, 3);
+    add_nt(0, 4, 5, 6);
+    add_nt(4, 8, 9, 10);
+    add_nt(16, 12, 13, 14);
+    add_nt(16, 17, 18, 19);
+    add_ss(8, 9, 10, 11);
+    add_ss(0, 1, 4, 5);
+    add_ss(16, 17, 12, 13);
+
+    std::vector<int> node_to_rb(20, -1);
+    for (int node = 0; node < 16; ++node)
+        node_to_rb[node] = node / 4;
+    std::vector<std::vector<int>> adjacency;
+    build_rb_contact_adj(cache, node_to_rb, 4, adjacency);
+
+    EXPECT_EQ(adjacency, (std::vector<std::vector<int>>{{1}, {0, 2}, {1}, {}}));
+    EXPECT_EQ(cache.nt_pairs.size(), 5);
+    EXPECT_EQ(cache.ss_pairs.size(), 3);
+
+    std::vector<std::vector<int>> groups;
+    greedy_color_conflict_graph(adjacency, groups);
+    EXPECT_EQ(groups, (std::vector<std::vector<int>>{{0, 2, 3}, {1}}));
+}
+
 TEST(GreedyColorConflictGraph, DeterministicColoringAndScratchReuse) {
     const std::vector<std::vector<int>> graph = {
         {1, 2},
@@ -186,25 +229,20 @@ TEST(ArcNodeAABB, PreservesFullArcSignAndNormalizesQuaternionInputs) {
     const Vec3 x_com = Vec3::Zero();
     const Vec4 q(1.0, 0.0, 0.0, 0.0);
     const Vec3 X = Vec3::UnitX();
-    const Vec4 q_rel =
-        axis_angle_quaternion(Vec3::UnitZ(), 1.5 * M_PI);
+    const Vec4 q_rel = axis_angle_quaternion(Vec3::UnitZ(), 1.5 * M_PI);
 
     check(x_com, q, X, q_rel);
     check(x_com, q, X, -q_rel);
     check(x_com, 3.0 * q, X, 5.0 * q_rel);
 
     const AABB full_270 = arc_node_aabb(x_com, q, X, q_rel);
-    const AABB complementary_minus_90 =
-        arc_node_aabb(x_com, q, X, -q_rel);
-    const AABB scaled =
-        arc_node_aabb(x_com, 3.0 * q, X, 5.0 * q_rel);
+    const AABB complementary_minus_90 = arc_node_aabb(x_com, q, X, -q_rel);
+    const AABB scaled = arc_node_aabb(x_com, 3.0 * q, X, 5.0 * q_rel);
 
     EXPECT_TRUE(full_270.min.isApprox(Vec3(-1.0, -1.0, 0.0), 1.0e-14));
     EXPECT_TRUE(full_270.max.isApprox(Vec3(1.0, 1.0, 0.0), 1.0e-14));
-    EXPECT_TRUE(complementary_minus_90.min.isApprox(
-        Vec3(0.0, -1.0, 0.0), 1.0e-14));
-    EXPECT_TRUE(complementary_minus_90.max.isApprox(
-        Vec3(1.0, 1.0, 0.0), 1.0e-14));
+    EXPECT_TRUE(complementary_minus_90.min.isApprox(Vec3(0.0, -1.0, 0.0), 1.0e-14));
+    EXPECT_TRUE(complementary_minus_90.max.isApprox(Vec3(1.0, 1.0, 0.0), 1.0e-14));
     EXPECT_TRUE(scaled.min.isApprox(full_270.min, 1.0e-14));
     EXPECT_TRUE(scaled.max.isApprox(full_270.max, 1.0e-14));
 }
@@ -213,8 +251,7 @@ TEST(ArcNodeAABB, HalfTurnExtentBoundsFullCircle) {
     const Vec3 x_com(1.0, -2.0, 3.0);
     const Vec4 q(1.0, 0.0, 0.0, 0.0);
     const Vec3 X(2.0, 0.0, 1.0);
-    const Vec4 q_rel =
-        axis_angle_quaternion(Vec3::UnitZ(), M_PI);
+    const Vec4 q_rel = axis_angle_quaternion(Vec3::UnitZ(), M_PI);
 
     check(x_com, q, X, q_rel);
     const AABB box = arc_node_aabb(x_com, q, X, q_rel);
@@ -224,19 +261,16 @@ TEST(ArcNodeAABB, HalfTurnExtentBoundsFullCircle) {
 
 TEST(ArcNodeAABB, MatchesBruteForceForArbitraryAxis) {
     const Vec3 x_com(0.4, -0.7, 1.1);
-    const Vec4 q =
-        axis_angle_quaternion(Vec3(1.0, 2.0, -1.0), 0.8);
+    const Vec4 q = axis_angle_quaternion(Vec3(1.0, 2.0, -1.0), 0.8);
     const Vec3 X(1.2, -0.4, 0.7);
-    const Vec4 q_rel =
-        axis_angle_quaternion(Vec3(-0.3, 0.9, 0.2), 1.1);
+    const Vec4 q_rel = axis_angle_quaternion(Vec3(-0.3, 0.9, 0.2), 1.1);
 
     check(x_com, q, X, q_rel);
 }
 
 TEST(ArcNodeAABB, DegenerateArcFullTurnFallbackAndInvalidQuaternions) {
     const Vec3 x_com(0.2, -0.4, 0.7);
-    const Vec4 q =
-        axis_angle_quaternion(Vec3::UnitY(), 0.6);
+    const Vec4 q = axis_angle_quaternion(Vec3::UnitY(), 0.6);
     const Vec3 X(0.8, -0.3, 1.1);
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
     const Vec3 x = x_com + quaternion_rotate(q, X);
@@ -247,30 +281,18 @@ TEST(ArcNodeAABB, DegenerateArcFullTurnFallbackAndInvalidQuaternions) {
     const Vec3 full_turn_radius = Vec3::Constant(X.norm());
     EXPECT_TRUE(stationary.min.isApprox(x, 1.0e-14));
     EXPECT_TRUE(stationary.max.isApprox(x, 1.0e-14));
-    EXPECT_TRUE(antipodal.min.isApprox(
-        x_com - full_turn_radius, 1.0e-14));
-    EXPECT_TRUE(antipodal.max.isApprox(
-        x_com + full_turn_radius, 1.0e-14));
+    EXPECT_TRUE(antipodal.min.isApprox(x_com - full_turn_radius, 1.0e-14));
+    EXPECT_TRUE(antipodal.max.isApprox(x_com + full_turn_radius, 1.0e-14));
 
-    EXPECT_THROW(
-        arc_node_aabb(x_com, Vec4::Zero(), X, identity),
-        std::invalid_argument);
-    EXPECT_THROW(
-        arc_node_aabb(x_com, q, X, Vec4::Zero()),
-        std::invalid_argument);
+    EXPECT_THROW(arc_node_aabb(x_com, Vec4::Zero(), X, identity), std::invalid_argument);
+    EXPECT_THROW(arc_node_aabb(x_com, q, X, Vec4::Zero()), std::invalid_argument);
 }
 
 TEST(RigidBodyBlueBoxes, CombinesRotationArcAndCOMTranslation) {
     const Vec3 x_com(1.0, -2.0, 3.0);
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
-    const std::vector<Vec3> material_positions = {
-        Vec3(2.0, 0.0, 1.0),
-        Vec3(0.0, 1.0, 0.0),
-    };
-    const std::vector<Vec3> positions = {
-        x_com + material_positions[0],
-        x_com + material_positions[1],
-    };
+    const std::vector<Vec3> material_positions = {Vec3(2.0, 0.0, 1.0), Vec3(0.0, 1.0, 0.0)};
+    const std::vector<Vec3> positions = {x_com + material_positions[0], x_com + material_positions[1]};
 
     RefMesh ref_mesh;
     ref_mesh.rb_nodes = {{0, 1}};

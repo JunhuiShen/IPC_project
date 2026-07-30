@@ -9,28 +9,23 @@
 
 namespace {
 
-bool periodic_angle_in_interval(
-    double angle, double interval_min, double interval_max) {
+bool periodic_angle_in_interval(double angle, double interval_min, double interval_max) {
     constexpr double two_pi = 2.0 * M_PI;
-    const double shifted =
-        angle + two_pi * std::ceil((interval_min - angle) / two_pi);
-    const double scale = std::max(
-        {1.0, std::abs(interval_min), std::abs(interval_max),
-         std::abs(shifted)});
-    const double tolerance =
-        32.0 * std::numeric_limits<double>::epsilon() * scale;
+    const double shifted = angle + two_pi * std::ceil((interval_min - angle) / two_pi);
+    const double scale = std::max({1.0, std::abs(interval_min), std::abs(interval_max), std::abs(shifted)});
+    const double tolerance = 32.0 * std::numeric_limits<double>::epsilon() * scale;
     return shifted <= interval_max + tolerance;
 }
 
 } // namespace
 
-AABB arc_node_aabb(
-    const Vec3& x_com, const Vec4& q,
-    const Vec3& X, const Vec4& q_rel) {
-    if (!x_com.allFinite() || !X.allFinite()) {
-        throw std::invalid_argument(
-            "arc_node_aabb requires finite positions");
-    }
+int owning_rb_for_node(const std::vector<int>& node_to_rb, int node) {
+    return node >= 0 && node < static_cast<int>(node_to_rb.size()) ? node_to_rb[node] : -1;
+}
+
+AABB arc_node_aabb(const Vec3& x_com, const Vec4& q, const Vec3& X, const Vec4& q_rel) {
+    if (!x_com.allFinite() || !X.allFinite())
+        throw std::invalid_argument("arc_node_aabb requires finite positions");
 
     const Vec4 q_current = quaternion_normalize(q);
     const Vec4 q_relative = quaternion_normalize(q_rel);
@@ -79,19 +74,12 @@ AABB arc_node_aabb(
             continue;
 
         const double maximum_angle = std::atan2(b, a);
-        if (periodic_angle_in_interval(
-                maximum_angle, -angular_extent, angular_extent)) {
-            box.max[coordinate] = std::max(
-                box.max[coordinate],
-                circle_center[coordinate] + amplitude);
+        if (periodic_angle_in_interval(maximum_angle, -angular_extent, angular_extent)) {
+            box.max[coordinate] = std::max(box.max[coordinate], circle_center[coordinate] + amplitude);
         }
 
-        if (periodic_angle_in_interval(
-                maximum_angle + M_PI,
-                -angular_extent, angular_extent)) {
-            box.min[coordinate] = std::min(
-                box.min[coordinate],
-                circle_center[coordinate] - amplitude);
+        if (periodic_angle_in_interval(maximum_angle + M_PI, -angular_extent, angular_extent)) {
+            box.min[coordinate] = std::min(box.min[coordinate], circle_center[coordinate] - amplitude);
         }
     }
 
@@ -106,15 +94,51 @@ std::vector<AABB> build_blue_boxes_rb(const std::vector<Vec3>& positions, const 
     for (int rb = 0; rb < num_rbs; ++rb) {
         const std::vector<int>& nodes = ref_mesh.rb_nodes[rb];
         const std::vector<Vec3>& material_positions = ref_mesh.ref_positions[rb];
-        const double r = std::clamp(node_box_padding * prev_com_disp[rb], params.node_box_min, params.node_box_max);
-        const Vec3 radius = Vec3::Constant(r);
+        const Vec3 com_radius = Vec3::Constant(std::clamp(node_box_padding * prev_com_disp[rb], params.node_box_min, params.node_box_max));
         for (int local = 0; local < static_cast<int>(nodes.size()); ++local) {
             const int node = nodes[local];
             const AABB rotation_box = arc_node_aabb(x_coms[rb], orientations[rb], material_positions[local], quaternion_bounds[rb]);
-            blue_boxes[node] = AABB(rotation_box.min - radius, rotation_box.max + radius);
+            blue_boxes[node] = AABB(rotation_box.min - com_radius, rotation_box.max + com_radius);
         }
     }
     return blue_boxes;
+}
+
+void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_rb, int num_rbs, std::vector<std::vector<int>>& out) {
+    if (static_cast<int>(out.size()) == num_rbs) {
+        for (std::vector<int>& neighbors : out)
+            neighbors.clear();
+    } else {
+        out.assign(num_rbs, {});
+    }
+
+    const auto add_edge = [&](int first, int second) {
+        if (first < 0 || second < 0)
+            return;
+        out[first].push_back(second);
+        out[second].push_back(first);
+    };
+
+    for (const NodeTrianglePair& pair : bp_cache.nt_pairs) {
+        const int node_rb = owning_rb_for_node(node_to_rb, pair.node);
+        const int triangle_rb = owning_rb_for_node(node_to_rb, pair.tri_v[0]);
+        if (node_rb == triangle_rb || (node_rb < 0 && triangle_rb < 0))
+            continue;
+        add_edge(node_rb, triangle_rb);
+    }
+
+    for (const SegmentSegmentPair& pair : bp_cache.ss_pairs) {
+        const int first_edge_rb = owning_rb_for_node(node_to_rb, pair.v[0]);
+        const int second_edge_rb = owning_rb_for_node(node_to_rb, pair.v[2]);
+        if (first_edge_rb == second_edge_rb || (first_edge_rb < 0 && second_edge_rb < 0))
+            continue;
+        add_edge(first_edge_rb, second_edge_rb);
+    }
+
+    for (std::vector<int>& neighbors : out) {
+        std::sort(neighbors.begin(), neighbors.end());
+        neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
+    }
 }
 
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int nv){

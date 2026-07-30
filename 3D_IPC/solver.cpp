@@ -152,14 +152,8 @@ struct OGCSolverScratch {
     }
 };
 
-// Cheap conservative rejection for inactive barrier candidates.
-// Broad-phase pairs cover each vertex's complete trust box, so many cached pairs are farther than d_hat at the current GS iterate.
-
-// Return the squared Euclidean distance from p to the closed AABB [lo, hi].
-// An axis contributes zero when p lies inside its interval; otherwise it contributes the squared gap to the nearest box face.
-// Keeping the result squared avoids a square root when callers compare it with d_hat^2.
-static inline double point_aabb_squared_distance(
-        const Vec3& p, const Vec3& lo, const Vec3& hi) {
+// Cheap AABB rejection before exact rigid barrier distances.
+static inline double point_aabb_squared_distance(const Vec3& p, const Vec3& lo, const Vec3& hi) {
     double d2 = 0.0;
     for (int axis = 0; axis < 3; ++axis) {
         double d = 0.0;
@@ -477,29 +471,20 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
 
 namespace rb_solver {
 
-// Convert the triangle mesh into a unique edge list.
 std::vector<std::array<int, 2>> build_unique_edges(const RefMesh& ref_mesh) {
     std::vector<std::array<int, 2>> edges;
     edges.reserve(ref_mesh.tris.size());
     for (int tri = 0; tri < num_tris(ref_mesh); ++tri) {
-        const int v[3] = {tri_vertex(ref_mesh, tri, 0), tri_vertex(ref_mesh, tri, 1), tri_vertex(ref_mesh, tri, 2)};
+        const int vertices[3] = {tri_vertex(ref_mesh, tri, 0), tri_vertex(ref_mesh, tri, 1), tri_vertex(ref_mesh, tri, 2)};
         for (int local = 0; local < 3; ++local) {
-            const int a = v[local];
-            const int b = v[(local + 1) % 3];
-            if (a == b)
-                continue;
-            edges.push_back({std::min(a, b), std::max(a, b)});
+            const int first = vertices[local];
+            const int second = vertices[(local + 1) % 3];
+            edges.push_back({std::min(first, second), std::max(first, second)});
         }
     }
     std::sort(edges.begin(), edges.end());
     edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
     return edges;
-}
-
-int owning_rb_for_node(const std::vector<int>& node_to_rb, int node) {
-    if (node < 0 || node >= static_cast<int>(node_to_rb.size()))
-        return -1;
-    return node_to_rb[node];
 }
 
 // Map a global rigid-node index to its fixed body-space coordinate
@@ -533,49 +518,49 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
     RigidEnergyDerivatives total;
     if (params.d_hat <= 0.0 || params.k_barrier <= 0.0)
         return total;
+    const double d_hat2 = params.d_hat * params.d_hat;
 
-    const int num_nodes = static_cast<int>(positions.size());
-
-    // Node-triangle barrier derivatives involving the current rigid body
-    for (int node = 0; node < num_nodes; ++node) {
-        const bool node_is_current = owning_rb_for_node(ref_mesh.node_to_rb, node) == rb;
+    for (int node = 0; node < static_cast<int>(positions.size()); ++node) {
+        const int node_rb = owning_rb_for_node(ref_mesh.node_to_rb, node);
         for (int tri = 0; tri < num_tris(ref_mesh); ++tri) {
             const int v0 = tri_vertex(ref_mesh, tri, 0);
             const int v1 = tri_vertex(ref_mesh, tri, 1);
             const int v2 = tri_vertex(ref_mesh, tri, 2);
             if (node == v0 || node == v1 || node == v2)
                 continue;
-
-            const bool triangle_touches_current = owning_rb_for_node(ref_mesh.node_to_rb, v0) == rb || owning_rb_for_node(ref_mesh.node_to_rb, v1) == rb || owning_rb_for_node(ref_mesh.node_to_rb, v2) == rb;
-            const bool triangle_is_current = owning_rb_for_node(ref_mesh.node_to_rb, v0) == rb && owning_rb_for_node(ref_mesh.node_to_rb, v1) == rb && owning_rb_for_node(ref_mesh.node_to_rb, v2) == rb;
-            if (node_is_current && !triangle_touches_current) { // the node moves and the entire triangle is fixed
+            const int triangle_rb = owning_rb_for_node(ref_mesh.node_to_rb, v0);
+            if (node_rb == triangle_rb || (node_rb != rb && triangle_rb != rb))
+                continue;
+            if (!node_triangle_aabbs_within_distance(positions[node], positions[v0], positions[v1], positions[v2], d_hat2))
+                continue;
+            if (node_rb == rb) {
                 const std::array<Vec3, 4> references = {rigid_node_body_space_position(node, ref_mesh), Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
                 add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat));
-            } else if (!node_is_current && triangle_is_current) { // the triangle moves and the node is fixed
+            } else {
                 const std::array<Vec3, 4> references = {Vec3::Zero(), rigid_node_body_space_position(v0, ref_mesh), rigid_node_body_space_position(v1, ref_mesh), rigid_node_body_space_position(v2, ref_mesh)};
                 add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat));
             }
         }
     }
 
-    // Segment-segment barrier derivatives involving the current rigid body
     for (int first = 0; first < static_cast<int>(edges.size()); ++first) {
         const int a0 = edges[first][0];
         const int a1 = edges[first][1];
-        const bool first_touches_current = owning_rb_for_node(ref_mesh.node_to_rb, a0) == rb || owning_rb_for_node(ref_mesh.node_to_rb, a1) == rb;
-        const bool first_is_current = owning_rb_for_node(ref_mesh.node_to_rb, a0) == rb && owning_rb_for_node(ref_mesh.node_to_rb, a1) == rb;
+        const int first_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, a0);
         for (int second = first + 1; second < static_cast<int>(edges.size()); ++second) {
             const int b0 = edges[second][0];
             const int b1 = edges[second][1];
             if (a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1)
                 continue;
-
-            const bool second_touches_current = owning_rb_for_node(ref_mesh.node_to_rb, b0) == rb || owning_rb_for_node(ref_mesh.node_to_rb, b1) == rb;
-            const bool second_is_current = owning_rb_for_node(ref_mesh.node_to_rb, b0) == rb && owning_rb_for_node(ref_mesh.node_to_rb, b1) == rb;
-            if (first_is_current && !second_touches_current) {
+            const int second_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, b0);
+            if (first_edge_rb == second_edge_rb || (first_edge_rb != rb && second_edge_rb != rb))
+                continue;
+            if (!segment_aabbs_within_distance(positions[a0], positions[a1], positions[b0], positions[b1], d_hat2))
+                continue;
+            if (first_edge_rb == rb) {
                 const std::array<Vec3, 4> references = {rigid_node_body_space_position(a0, ref_mesh), rigid_node_body_space_position(a1, ref_mesh), Vec3::Zero(), Vec3::Zero()};
                 add_rigid_derivatives(total, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat));
-            } else if (!first_touches_current && second_is_current) {
+            } else {
                 const std::array<Vec3, 4> references = {Vec3::Zero(), Vec3::Zero(), rigid_node_body_space_position(b0, ref_mesh), rigid_node_body_space_position(b1, ref_mesh)};
                 add_rigid_derivatives(total, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat));
             }
@@ -678,9 +663,7 @@ double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedS
     double residual = 0.0;
     const int num_rbs = static_cast<int>(ref_mesh.total_mass.size());
     const double barrier_scale = dt * dt * params.k_barrier;
-    const std::vector<Vec3> positions =
-        construct_current_rigid_node_position(
-            ref_mesh, state, x_com_new, omega_new, dt);
+    const std::vector<Vec3> positions = construct_current_rigid_node_position(ref_mesh, state, x_com_new, omega_new, dt);
     for (int rb = 0; rb < num_rbs; ++rb) {
         Vec3 com_gradient = inertia_translation_gradient(x_com_new[rb], state.x_coms[rb], state.v_coms[rb], dt, ref_mesh.total_mass[rb]);
         com_gradient -= gravitational_potential_gradient(ref_mesh.total_mass[rb], params.gravity.y(), dt);

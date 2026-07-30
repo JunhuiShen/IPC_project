@@ -1,9 +1,9 @@
 # 3D IPC -- Incremental Potential Contact Simulation
 
-A 3D simulator for deformable triangle meshes (cloth / thin shells) built around
-**Incremental Potential Contact (IPC)**, with a reduced-coordinate rigid-body
-example. The deformable solver uses parallel-by-color nonlinear Gauss-Seidel and
-continuous collision detection to keep intermediate states intersection-free.
+A 3D simulator for deformable triangle meshes (cloth / thin shells) and
+reduced-coordinate rigid bodies built around **Incremental Potential Contact
+(IPC)**. The deformable solvers use conflict coloring for parallel updates and
+broad-phase contact sets for IPC.
 
 ## What the simulator does
 
@@ -37,14 +37,18 @@ Deformable scenes use one of two Gauss-Seidel solvers, selected by CLI flag:
   Requires `--fixed_iters`.
 
 Rigid-body scenes use **`global_gauss_seidel_solver_basic_rb`**, which solves
-one three-component COM vector and one three-component rotation vector per
-body. Orientation quaternions are derived from the rotation vector. Rigid-body
-collision handling is not implemented yet.
+one three-component COM position and one three-component angular-velocity
+vector per body. Orientation quaternions are derived from the angular update.
+Rigid IPC barriers and translation/rotation CCD use brute-force primitive
+scans. The available rigid blue-box and conflict-coloring helpers are not
+called by this solver.
 
 Our OGC narrow phase and solver implement the algorithm from Chen et al.
 2025; see Acknowledgments.
 
 ## Solver Algorithm
+
+### Deformable solver
 
 For deformable scenes, each substep runs nonlinear Gauss-Seidel iterations over
 the mesh vertices:
@@ -70,6 +74,28 @@ the mesh vertices:
 
 In short, the solver repeatedly builds a conservative contact set and
 performs collision-safe per-vertex Newton updates one color group at a time.
+
+### Rigid-body solver
+
+For rigid-body scenes, each substep:
+
+- processes the bodies sequentially with nonlinear Gauss-Seidel
+- reconstructs the current rigid surface before each body update
+- applies a COM Newton update followed by brute-force translation CCD
+- applies an angular-velocity Newton update followed by brute-force rotation CCD
+- evaluates all rigid-rigid and rigid-fixed node-triangle and edge-edge
+  combinations, using a cheap current-position AABB rejection before exact
+  barrier distances
+- stops by residual tolerance or `--fixed_iters`
+
+The basic RB solver does not use blue boxes, broad-phase contact candidates,
+conflict graphs, or coloring. Separate helpers build a rigid node blue box as
+the Minkowski sum of its quaternion rotation-arc box and padded COM translation
+box, then generate candidates and body coloring for future integration.
+
+Rigid meshes are assumed valid: every triangle has three distinct vertices,
+every edge has two distinct endpoints, and every primitive has one uniform
+owner.
 
 ## Requirements
 
@@ -208,8 +234,8 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `damping`, `fixed_iters`, `use_parallel`, `verbose`, `write_substeps` |
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (per-iteration rebuild solver), `ogc_box_pad` (BVH padding for the per-iteration rebuild; floored to `d_hat`) |
-| Node-box sizing | `node_box_min`, `node_box_max` (basic solver clamp range for `R_vi = clamp(max(prev_disp, \|v_i\| dt) * 1.2, min, max)`), `node_box_update_count` (GS iterations between broad-phase/contact-color rebuilds) |
-| Scene | `example` (`1`..`5`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink` |
+| Node-box sizing | `node_box_min`, `node_box_max` (deformable basic-solver clamp range for `R_vi = clamp(max(prev_disp, \|v_i\| dt) * 1.2, min, max)`; `build_blue_boxes_rb` applies the same clamp to its supplied COM displacement bound), `node_box_update_count` (deformable GS iterations between broad-phase/contact-color rebuilds) |
+| Scene | `example` (`1`..`10`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame`, `datadir` |
 
 Notes:
@@ -275,18 +301,25 @@ reader can jump to the layer they care about.
 
 ### Collision detection
 
-- `ccd.h` / `ccd.cpp` -- four public CCD entry points behind two backends:
+- `ccd.h` / `ccd.cpp` -- deformable and rigid CCD entry points:
   - `node_triangle_only_one_node_moves` and `segment_segment_only_one_node_moves`
     take a `bool use_ticcd` flag. When `true` they forward to
     Tight-Inclusion CCD; when `false` they use a **self-written closed-form
     "linear" backend** that is exact in principle when one of the four
-    vertices moves over the step (the case Gauss-Seidel queries always
-    satisfy). The Gauss-Seidel solvers pass `params.use_ticcd` (CLI flag
-    `--use_ticcd`; default `false` in the production CLI).
+    vertices moves over the step. The deformable per-vertex Gauss-Seidel path
+    passes `params.use_ticcd` (CLI flag `--use_ticcd`; default `false` in the
+    production CLI).
+  - `segment_segment_same_displacement_linear_ccd` handles a translating edge
+    against a fixed edge and is used by rigid-body COM stepping.
   - `node_triangle_general_ccd` and `segment_segment_general_ccd` are
     TICCD-only entry points used wherever multiple vertices move
     simultaneously (e.g. the CCD-projected initial guess in
     `ccd_initial_guess`).
+  - `point_triangle_rb_rotation_ccd` and
+    `segment_segment_rb_rotation_ccd` follow a rigid quaternion rotation
+    against a fixed primitive. Rigid translation stepping uses the linear
+    one-node and translating-edge routes directly; it does not dispatch
+    through `params.use_ticcd`.
 
   **Numerical caveat.** The linear backend reduces each query to a small
   polynomial and falls back to a 2D coplanar test. Coefficient sign tests use
@@ -299,19 +332,22 @@ reader can jump to the layer they care about.
   `SmallRoots` buffer to avoid heap traffic.
 - `broad_phase.h` / `broad_phase.cpp` -- swept-AABB broad phase backed by a
   per-tree BVH. Caches mesh topology via `set_mesh_topology`; builds candidate
-  node-triangle and edge-edge pairs from per-vertex AABBs; stores per-vertex
-  incident pair lists used by collision-safe stepping.
+  node-triangle and edge-edge pairs from per-vertex AABBs, including auxiliary
+  rigid blue-node/green-triangle and green-edge/red-edge queries; stores
+  per-vertex incident pair lists used by collision-safe stepping.
   Adds `parent` pointers and per-tree `leaf_to_node` maps so
   `refit_bvh_leaf` and `incremental_refresh_vertex` can do `O(log N)` partial
   refits, used by `global_gauss_seidel_solver_ogc`.
 - `safe_step.h` / `safe_step.cpp` -- per-vertex node-box clipping, CCD safe
-  stepping, and OGC trust-region bounds over broad-phase contact candidates.
+  stepping, OGC trust-region bounds, and brute-force per-rigid-body
+  translation/rotation CCD.
 
 ### Solver
 
 - `initial_guess.h` / `initial_guess.cpp` -- CCD-projected, Verlet, and
   translation-restricted initial guesses selected by `advance_one_frame()`.
-- `solver.h` / `solver.cpp` -- solver implementations selected by CLI flag:
+- `solver.h` / `solver.cpp` -- solver implementations selected by scene state
+  and CLI flags:
   - `global_gauss_seidel_solver_basic` (default): broad-phase/contact-color
     data is rebuilt every `node_box_update_count` GS iterations and reused
     between rebuilds. Gauss-Seidel sweeps run via
@@ -323,12 +359,16 @@ reader can jump to the layer they care about.
     phase rebuild with `--ogc_box_pad`-padded node boxes, OGC clip
     unconditionally on, partial BVH refit per move via
     `incremental_refresh_vertex`.
+  - `global_gauss_seidel_solver_basic_rb`: sequential reduced-coordinate
+    rigid-body COM and rotation updates with brute-force rigid IPC barriers and
+    translation/rotation CCD.
 
-  Both share the per-vertex Newton solve (`gs_vertex_delta`) and node-box clip
-  mechanics.
+  The two deformable solvers share non-barrier per-vertex gradient/Hessian
+  assembly and node-box mechanics, but use live versus frozen barrier
+  stencils.
 - `parallel_helper.h` / `parallel_helper.cpp` -- helpers for elastic
-  adjacency, contact adjacency, adjacency union, and deterministic greedy
-  coloring.
+  adjacency, contact adjacency, rigid-node blue boxes, rigid contact ownership
+  filtering, adjacency union, and deterministic greedy coloring.
 
 ### Rigid bodies
 
@@ -336,8 +376,10 @@ reader can jump to the layer they care about.
   products, rotations, and derivative helpers.
 - `rigid_body_ipc.h` / `rigid_body_ipc.cpp` -- reduced rigid-body creation,
   COM/orientation kinematics, inertial energy, and analytic derivatives.
-- The rigid-body Gauss-Seidel solve currently lives in `solver.h` / `solver.cpp`;
-  `advance_one_frame_rb` and particle synchronization live in `simulation.h`.
+- The rigid-body Gauss-Seidel solve and IPC barrier assembly live in `solver.h`
+  / `solver.cpp`; auxiliary broad-phase/conflict-color construction lives in
+  `broad_phase` and `parallel_helper`; `advance_one_frame_rb` and particle
+  synchronization live in `simulation.h`.
 
 ### Tooling
 
@@ -349,7 +391,8 @@ reader can jump to the layer they care about.
 
 ## Tests
 
-The GoogleTest suite is split into focused binaries. To build and run them all:
+The 259 GoogleTest cases are split into focused binaries. To build and run them
+all:
 
     cmake -B build
     cmake --build build --clean-first
@@ -357,16 +400,16 @@ The GoogleTest suite is split into focused binaries. To build and run them all:
 
 | Test binary | Cases | What it covers |
 |-------------|-------|----------------|
-| `ccd_test` | 40 | Linear CCD single-moving-DOF, scale/coplanar stress cases, and TICCD-backed general NT/SS wrappers |
-| `rigid_body_ipc_test` | 26 | Quaternion kinematics/derivatives, reduced inertial energy, and rigid-body rotational CCD |
+| `ccd_test` | 54 | Linear CCD single-moving-DOF, scale/coplanar stress cases, TICCD-backed general NT/SS wrappers, and rigid rotational CCD |
+| `rigid_body_ipc_test` | 47 | Quaternion kinematics/derivatives, reduced inertial energy, rigid solver contact terms, and rigid translation/rotation safe steps |
 | `broad_phase_test` | 25 | AABB, BVH, pair generation/order, CCD candidates, safe stepping, conservativeness, and `incremental_refresh_vertex` partial refit |
 | `ipc_math_test` | 14 | `matrix3d_inverse`, `segment_closest_point`, barycentric coordinates, and topology caching |
-| `sdf_penalty_energy_test` | 15 | Plane / cylinder SDF energy + gradient + Hessian FD convergence, hard-quadratic limit, soft-barrier rest at `phi=eps` |
+| `sdf_penalty_energy_test` | 17 | Plane / cylinder / sphere and rigid-body SDF energy derivatives, hard-quadratic limit, and soft-barrier rest at `phi=eps` |
 | `bending_energy_test` | 19 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
-| `parallel_helper_test` | 2 | Exact contact adjacency and deterministic coloring/scratch reuse |
+| `parallel_helper_test` | 11 | Contact adjacency, rigid ownership filtering/coloring, quaternion AABBs, and rigid blue boxes |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
 | `make_shape_test` | 6 | Incident-triangle maps and icosphere construction |
-| `barrier_energy_test` | 16 | Scalar barrier, all NT/SS feature regions, force partition, derivative blocks, and stress cases |
+| `barrier_energy_test` | 18 | Scalar barrier, all NT/SS feature regions, force partition, deformable/rigid derivative blocks, and stress cases |
 | `corotated_energy_test` | 11 | Rest state, invariance, gradient/Hessian FD convergence, and stress cases |
 | `initial_guess_test` | 5 | CCD no-candidate, Verlet gravity, and translation closed forms for inertia/gravity, pins, and one-step plane-SDF correction |
 | `time_integration_test` | 1 | Position-difference velocity updates |

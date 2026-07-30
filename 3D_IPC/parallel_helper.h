@@ -3,17 +3,16 @@
 #include "broad_phase.h"
 #include <vector>
 
-// Bound material point X over the symmetric full-arc envelope about the
-// current orientation q. q_rel uses the world-relative convention
-// q_rel = q_new * q^-1, and its raw sign selects the angular extent.
-// The swept positions are x_com + R(q_rel(t) * q) X for
-// t in [-1, 1], analogous to the 2D theta +/- eta interval.
-AABB arc_node_aabb(
-    const Vec3& x_com, const Vec4& q,
-    const Vec3& X, const Vec4& q_rel);
+// Bounds one rigid node over the symmetric quaternion arc q_rel about q.
+AABB arc_node_aabb(const Vec3& x_com, const Vec4& q, const Vec3& X, const Vec4& q_rel);
 
-// Rigid-node blue boxes from quaternion bounds and padded previous COM motion.
+// Rigid-node blue boxes: rotation arc plus padded COM translation.
 std::vector<AABB> build_blue_boxes_rb(const std::vector<Vec3>& positions, const std::vector<Vec3>& x_coms, const std::vector<Vec4>& orientations, const std::vector<Vec4>& quaternion_bounds, const std::vector<double>& prev_com_disp, const SimParams& params, const RefMesh& ref_mesh);
+
+int owning_rb_for_node(const std::vector<int>& node_to_rb, int node);
+
+// Rigid-body conflict graph from broad-phase contacts.
+void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_rb, int num_rbs, std::vector<std::vector<int>>& out);
 
 // Mesh-adjacency edges of the conflict graph. Invariant for a fixed mesh.
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int num_vertices);

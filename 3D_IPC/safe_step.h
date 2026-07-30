@@ -19,5 +19,5 @@ void per_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x, c
 // Returns a safe alpha for translating rigid body rb by alpha * dx using linear CCD.
 double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const std::vector<std::array<int, 2>>& edges, const std::vector<Vec3>& x, int rb, const Vec3& dx, double safety = 0.9);
 
-// Clips each target along the applied quaternion path and rebuild positions so processed bodies use accepted orientations
+// Returns a safe alpha for rotating rigid body rb from q_current to q_target.
 double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const std::vector<std::array<int, 2>>& edges, const std::vector<Vec3>& x, int rb, const Vec3& x_com, const Vec4& q_current, const Vec4& q_target, double safety = 0.9);
