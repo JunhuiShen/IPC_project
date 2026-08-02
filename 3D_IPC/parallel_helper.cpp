@@ -3,87 +3,63 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <stdexcept>
 #include <vector>
-
-namespace {
-
-bool periodic_angle_in_interval(double angle, double interval_min, double interval_max) {
-    constexpr double two_pi = 2.0 * M_PI;
-    const double shifted = angle + two_pi * std::ceil((interval_min - angle) / two_pi);
-    const double scale = std::max({1.0, std::abs(interval_min), std::abs(interval_max), std::abs(shifted)});
-    const double tolerance = 32.0 * std::numeric_limits<double>::epsilon() * scale;
-    return shifted <= interval_max + tolerance;
-}
-
-} // namespace
 
 int owning_rb_for_node(const std::vector<int>& node_to_rb, int node) {
     return node >= 0 && node < static_cast<int>(node_to_rb.size()) ? node_to_rb[node] : -1;
 }
 
-AABB arc_node_aabb(const Vec3& x_com, const Vec4& q, const Vec3& X, const Vec4& q_rel) {
+AABB spherical_cap_node_aabb(const Vec3& x_com, const Vec4& q, const Vec3& X, const Vec4& q_rel) {
     if (!x_com.allFinite() || !X.allFinite())
-        throw std::invalid_argument("arc_node_aabb requires finite positions");
+        throw std::invalid_argument("spherical_cap_node_aabb requires finite positions");
 
     const Vec4 q_current = quaternion_normalize(q);
     const Vec4 q_relative = quaternion_normalize(q_rel);
 
     const Vec3 world_space_offset = quaternion_rotate(q_current, X);
-    const Vec3 x = x_com + world_space_offset;
-    const Vec3 vector_part = q_relative.tail<3>();
-    const double sin_half_angle = vector_part.norm();
-    if (sin_half_angle < 1.0e-12) {
-        if (q_relative[0] >= 0.0)
-            return AABB(x, x);
-        // An exact 2*pi endpoint quaternion has lost its rotation axis. The
-        // sphere box is conservative for every possible full-turn axis.
-        const Vec3 radius = Vec3::Constant(X.norm());
-        return AABB(x_com - radius, x_com + radius);
-    }
+    const double radius = world_space_offset.norm();
+    if (radius == 0.0)
+        return AABB(x_com, x_com);
 
-    const Vec3 axis = vector_part / sin_half_angle;
+    // Preserve the raw quaternion sign so the angular extent remains in
+    // [0, 2*pi] instead of being forced onto the shortest quaternion arc.
+    const double sin_half_angle = q_relative.tail<3>().norm();
     const double angular_extent = 2.0 * std::atan2(sin_half_angle, q_relative[0]);
 
-    // Rodrigues' formula gives
-    // p(t) = circle_center + cosine_coefficient cos(t)
-    //                       + sine_coefficient sin(t).
-    const Vec3 axial_offset = axis * axis.dot(world_space_offset);
-    const Vec3 circle_center = x_com + axial_offset;
-    const Vec3 cosine_coefficient = world_space_offset - axial_offset;
-    const Vec3 sine_coefficient = axis.cross(world_space_offset);
-
-    const auto point_at = [&](double angle) {
-        return circle_center
-            + std::cos(angle) * cosine_coefficient
-            + std::sin(angle) * sine_coefficient;
-    };
-
-    AABB box;
-    box.expand(point_at(-angular_extent));
-    box.expand(point_at(angular_extent));
-
-    // Each coordinate is c + a cos(t) + b sin(t). Its extrema occur at
-    // atan2(b, a) and that angle plus pi, modulo 2*pi.
-    for (int coordinate = 0; coordinate < 3; ++coordinate) {
-        const double a = cosine_coefficient[coordinate];
-        const double b = sine_coefficient[coordinate];
-        const double amplitude = std::hypot(a, b);
-        if (amplitude < 1.0e-12)
-            continue;
-
-        const double maximum_angle = std::atan2(b, a);
-        if (periodic_angle_in_interval(maximum_angle, -angular_extent, angular_extent)) {
-            box.max[coordinate] = std::max(box.max[coordinate], circle_center[coordinate] + amplitude);
-        }
-
-        if (periodic_angle_in_interval(maximum_angle + M_PI, -angular_extent, angular_extent)) {
-            box.min[coordinate] = std::min(box.min[coordinate], circle_center[coordinate] - amplitude);
-        }
+    // With every world-space rotation axis admissible, an extent of pi can
+    // reach every direction on the sphere. Larger full-arc extents do too.
+    if (angular_extent >= M_PI) {
+        const Vec3 sphere_radius = Vec3::Constant(radius);
+        return AABB(x_com - sphere_radius, x_com + sphere_radius);
     }
 
-    return box;
+    // For angular_extent < pi, the reachable directions form the spherical
+    // cap { y : ||y|| = 1, direction.dot(y) >= cos(angular_extent) }.
+    const Vec3 direction = world_space_offset / radius;
+    const double cos_extent = std::cos(angular_extent);
+    const double sin_extent = std::sin(angular_extent);
+    Vec3 cap_min;
+    Vec3 cap_max;
+
+    // Optimize each normalized coordinate y_i over the cap. If +/-e_i lies
+    // in the cap, it is the corresponding extremum. Otherwise the extremum
+    // lies on the cap's boundary circle.
+    for (int coordinate = 0; coordinate < 3; ++coordinate) {
+        const double d = std::clamp(direction[coordinate], -1.0, 1.0);
+        const double tangent_length = std::sqrt(std::max(0.0, 1.0 - d * d));
+
+        cap_max[coordinate] = d >= cos_extent
+            ? 1.0
+            : d * cos_extent + tangent_length * sin_extent;
+        cap_min[coordinate] = -d >= cos_extent
+            ? -1.0
+            : d * cos_extent - tangent_length * sin_extent;
+    }
+
+    return AABB(
+        x_com + radius * cap_min,
+        x_com + radius * cap_max);
 }
 
 std::vector<AABB> build_blue_boxes_rb(const std::vector<Vec3>& positions, const std::vector<Vec3>& x_coms, const std::vector<Vec4>& orientations, const std::vector<Vec4>& quaternion_bounds, const std::vector<double>& prev_com_disp, const SimParams& params, const RefMesh& ref_mesh) {
@@ -97,8 +73,8 @@ std::vector<AABB> build_blue_boxes_rb(const std::vector<Vec3>& positions, const 
         const Vec3 com_radius = Vec3::Constant(std::clamp(node_box_padding * prev_com_disp[rb], params.node_box_min, params.node_box_max));
         for (int local = 0; local < static_cast<int>(nodes.size()); ++local) {
             const int node = nodes[local];
-            const AABB rotation_box = arc_node_aabb(x_coms[rb], orientations[rb], material_positions[local], quaternion_bounds[rb]);
-            blue_boxes[node] = AABB(rotation_box.min - com_radius, rotation_box.max + com_radius);
+            const AABB spherical_cap_box = spherical_cap_node_aabb(x_coms[rb], orientations[rb], material_positions[local], quaternion_bounds[rb]);
+            blue_boxes[node] = AABB(spherical_cap_box.min - com_radius, spherical_cap_box.max + com_radius);
         }
     }
     return blue_boxes;
