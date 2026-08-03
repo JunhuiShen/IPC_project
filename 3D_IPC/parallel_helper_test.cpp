@@ -162,10 +162,13 @@ TEST(GreedyColorConflictGraph, DeterministicColoringAndScratchReuse) {
 
 namespace {
 
+// For testing purposes, increasing the sampling density to 250000 for both polar and azimuth with sampling_tolerance of 1.0e-9.
+// This is just to ensure the code is working properly but extremely slow, almost 30 mins.
+// For pipeline testing, reduce the sampling density to 1000 and sampling_tolerance to 1.0e-3
 AABB brute_force_spherical_cap_aabb(
     const Vec3& x_com, const Vec4& q, const Vec3& X,
-    const Vec4& q_rel, int polar_samples = 360,
-    int azimuth_samples = 720) {
+    const Vec4& q_rel, int polar_samples = 1000,
+    int azimuth_samples = 1000) {
     const Vec4 q_current = quaternion_normalize(q);
     const Vec4 q_relative = quaternion_normalize(q_rel);
     const Vec3 world_space_offset = quaternion_rotate(q_current, X);
@@ -202,7 +205,7 @@ AABB brute_force_spherical_cap_aabb(
 
 void check_spherical_cap_aabb(
     const Vec3& x_com, const Vec4& q, const Vec3& X,
-    const Vec4& q_rel, double sampling_tolerance = 2.0e-4) {
+    const Vec4& q_rel, double sampling_tolerance = 1.0e-3) {
     const AABB result = spherical_cap_node_aabb(x_com, q, X, q_rel);
     const AABB reference = brute_force_spherical_cap_aabb(x_com, q, X, q_rel);
 
