@@ -605,7 +605,7 @@ void update_twist_untwist_visual(std::vector<Vec3>& static_x,
 // ---------------------------------------------------------------------------
 // Example 5: freely rotating rigid tennis racket
 // ---------------------------------------------------------------------------
-// Commend line: ./build/3D_sim --example 5 --num_frames 500 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output 
+// Commend line: ./build/3D_sim --example 5 --num_frames 500 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output 
 void build_rotating_tennis_racket_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
