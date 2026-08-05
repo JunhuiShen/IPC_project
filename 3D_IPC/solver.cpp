@@ -808,7 +808,15 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
             const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], node_positions, rb, x_com_new[rb], q_current, q_bounded);
             const Vec4 q_accepted = interpolate_orientation_full_arc(q_current, q_bounded, rotation_safe_step);
             q_new[rb] = q_accepted;
-            omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, state.orientations[rb], dt);
+            
+            const Vec4 q_n = quaternion_normalize(state.orientations[rb]);
+            const Vec4 q_dot = (q_accepted - q_n) / dt;
+            const Vec4 omega_quaternion = 2.0 * quaternion_multiply(q_dot, quaternion_inverse(q_accepted));
+            omega_new[rb] = omega_quaternion.tail<3>();
+            // omega_new[rb] = angular_velocity_from_orientation_full_arc(
+            //     q_accepted, state.orientations[rb], dt);
+
+
             for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local)
                 node_positions[ref_mesh.rb_nodes[rb][local]] = world_space_position(ref_mesh.ref_positions[rb][local], x_com_new[rb], q_accepted);
         };
