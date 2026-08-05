@@ -4,7 +4,6 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
-#include <algebra/algebra.h>
 
 namespace {
 
@@ -204,58 +203,9 @@ Vec4 quaternion_from_angular_velocity(const Vec4& q0, const Vec3& omega, double 
     return quaternion_multiply(exp(omega, dt), q0);
 }
 
-Vec4 interpolate_orientation_shortest_arc(const Vec4& q_current, const Vec4& q_target, double alpha) {
+Vec4 interpolate_orientation_full_arc(const Vec4& q_current, const Vec4& q_target, double alpha) {
     if (!std::isfinite(alpha) || alpha < 0.0 || alpha > 1.0) {
-        throw std::invalid_argument("interpolate_orientation_shortest_arc requires alpha in [0, 1]");
-    }
-
-    const Vec4 current = quaternion_normalize(q_current);
-    const Vec4 target = quaternion_align_sign(quaternion_normalize(q_target), current);
-    if (alpha == 0.0)
-        return current;
-    if (alpha == 1.0)
-        return target;
-
-    Vec4 relative = quaternion_normalize(quaternion_multiply(target, quaternion_conjugate(current)));
-    if (relative[0] < 0.0)
-        relative = -relative;
-
-    const Vec3 vector_part = relative.tail<3>();
-    const double sin_half_angle = vector_part.norm();
-    if (sin_half_angle < 1.0e-12) {
-        return quaternion_normalize((1.0 - alpha) * current + alpha * target);
-    }
-
-    const double half_angle = std::atan2(sin_half_angle, relative[0]);
-    const Vec3 rotation_vector = (2.0 * alpha * half_angle / sin_half_angle) * vector_part;
-    return quaternion_normalize(quaternion_multiply(exp(rotation_vector, 1.0), current));
-}
-
-Vec3 angular_velocity_from_orientation(const Vec4& q, const Vec4& q_n, double dt) {
-    if (!std::isfinite(dt) || dt <= 0.0) {
-        throw std::invalid_argument("angular_velocity_from_orientation requires a positive finite dt");
-    }
-
-    Vec4 relative = quaternion_multiply(quaternion_normalize(q), quaternion_conjugate(quaternion_normalize(q_n)));
-    relative = quaternion_normalize(relative);
-
-    if (relative[0] < 0.0)
-        relative = -relative;
-
-    const Vec3 vector_part = relative.tail<3>();
-    const double sin_half_angle = vector_part.norm();
-    if (sin_half_angle < 1.0e-12)
-        return (2.0 / dt) * vector_part;
-
-    const double half_angle = std::atan2(sin_half_angle, relative[0]);
-    return (2.0 * half_angle / (dt * sin_half_angle)) * vector_part;
-}
-
-Vec4 interpolate_orientation_full_arc(
-    const Vec4& q_current, const Vec4& q_target, double alpha) {
-    if (!std::isfinite(alpha) || alpha < 0.0 || alpha > 1.0) {
-        throw std::invalid_argument(
-            "interpolate_orientation_full_arc requires alpha in [0, 1]");
+        throw std::invalid_argument("interpolate_orientation_full_arc requires alpha in [0, 1]");
     }
 
     const Vec4 current = quaternion_normalize(q_current);
@@ -269,10 +219,9 @@ Vec4 interpolate_orientation_full_arc(
     const Vec3 vector_part = relative.tail<3>();
     const double sin_half_angle = vector_part.norm();
     if (relative[0] < 0.0 && sin_half_angle <= kFullTurnAxisTolerance) {
-        throw std::invalid_argument(
-            "interpolate_orientation_full_arc cannot determine the axis of a numerically exact full turn");
+        throw std::invalid_argument("interpolate_orientation_full_arc cannot determine the axis of a numerically exact full turn");
     }
-    if (sin_half_angle < 1.0e-12) {
+    if (relative[0] >= 0.0 && sin_half_angle < 1.0e-12) {
         return quaternion_normalize((1.0 - alpha) * current + alpha * target);
     }
 
@@ -283,21 +232,18 @@ Vec4 interpolate_orientation_full_arc(
     return quaternion_normalize(quaternion_multiply(exp(rotation_vector, 1.0), current));
 }
 
-Vec3 angular_velocity_from_orientation_full_arc(
-    const Vec4& q, const Vec4& q_n, double dt) {
+Vec3 angular_velocity_from_orientation_full_arc(const Vec4& q, const Vec4& q_n, double dt) {
     if (!std::isfinite(dt) || dt <= 0.0) {
-        throw std::invalid_argument(
-            "angular_velocity_from_orientation_full_arc requires a positive finite dt");
+        throw std::invalid_argument("angular_velocity_from_orientation_full_arc requires a positive finite dt");
     }
 
     const Vec4 relative = quaternion_normalize(quaternion_multiply(quaternion_normalize(q),quaternion_conjugate(quaternion_normalize(q_n))));
     const Vec3 vector_part = relative.tail<3>();
     const double sin_half_angle = vector_part.norm();
     if (relative[0] < 0.0 && sin_half_angle <= kFullTurnAxisTolerance) {
-        throw std::invalid_argument(
-            "angular_velocity_from_orientation_full_arc cannot determine the axis of a numerically exact full turn");
+        throw std::invalid_argument("angular_velocity_from_orientation_full_arc cannot determine the axis of a numerically exact full turn");
     }
-    if (sin_half_angle < 1.0e-12) {
+    if (relative[0] >= 0.0 && sin_half_angle < 1.0e-12) {
         return (2.0 / dt) * vector_part;
     }
 
@@ -305,13 +251,11 @@ Vec3 angular_velocity_from_orientation_full_arc(
     return (2.0 * half_angle / (dt * sin_half_angle)) * vector_part;
 }
 
-Vec3 world_space_position(
-    const Vec3& X, const Vec3& x_com, const Vec4& orientation) {
+Vec3 world_space_position(const Vec3& X, const Vec3& x_com, const Vec4& orientation) {
     return x_com + quaternion_rotate(orientation, X);
 }
 
-Vec3 material_space_position(
-    const Vec3& x, const Vec3& x_com, const Vec4& orientation) {
+Vec3 material_space_position(const Vec3& x, const Vec3& x_com, const Vec4& orientation) {
     return quaternion_inverse_rotate(orientation, x - x_com);
 }
 
@@ -387,11 +331,7 @@ Mat33 body_second_moment(const std::vector<double>& masses, const std::vector<Ve
     return I_hat;
 }
 
-int create_rigid_body(
-    const std::vector<Vec3>& x,
-    const Vec3& v_com_input, const Vec4& orientation_input,
-    const Vec3& omega_input, double total_mass,
-    RefMesh& ref_mesh, DeformedState& state) {
+int create_rigid_body(const std::vector<Vec3>& x, const Vec3& v_com_input, const Vec4& orientation_input, const Vec3& omega_input, double total_mass, RefMesh& ref_mesh, DeformedState& state) {
     if (x.empty())
         throw std::invalid_argument("create_rigid_body: x cannot be empty");
     if (!std::isfinite(total_mass) || total_mass <= 0.0)
@@ -404,8 +344,7 @@ int create_rigid_body(
         throw std::invalid_argument("create_rigid_body: velocities must be finite");
     for (const Vec3& position : x) {
         if (!position.allFinite()) {
-            throw std::invalid_argument(
-                "create_rigid_body: world-space positions must be finite");
+            throw std::invalid_argument("create_rigid_body: world-space positions must be finite");
         }
     }
 
@@ -419,8 +358,7 @@ int create_rigid_body(
         && state.orientations.size() == num_rbs
         && state.omega.size() == num_rbs;
     if (!storage_is_consistent) {
-        throw std::invalid_argument(
-            "create_rigid_body: existing rigid-body arrays have inconsistent sizes");
+        throw std::invalid_argument("create_rigid_body: existing rigid-body arrays have inconsistent sizes");
     }
 
     const std::size_t old_num_nodes = state.deformed_positions.size();

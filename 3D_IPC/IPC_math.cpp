@@ -54,12 +54,6 @@ Mat33 matrix3d_inverse(const Mat33& H) {
     return inv * inv_det;
 }
 
-TriangleDef add_scale(const TriangleDef& a, const TriangleDef& b, double s) {
-    TriangleDef out;
-    for (int i = 0; i < 3; ++i) out.x[i] = a.x[i] + s * b.x[i];
-    return out;
-}
-
 double get_dof(const TriangleDef& def, int node, int comp) {
     return def.x[node](comp);
 }

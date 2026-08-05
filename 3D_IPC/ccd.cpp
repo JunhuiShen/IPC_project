@@ -7,6 +7,7 @@
 // `*_only_one_node_moves` route to one of the two via the `use_ticcd` arg.
 
 #include "ccd.h"
+#include "quaternion_math.h"
 
 #include <tight_inclusion/ccd.hpp>
 
@@ -16,6 +17,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <vector>
 
 // -----------------------------------------------------------------------------
 // Internal helpers (linear backend + TICCD config + result translation)
@@ -810,8 +812,8 @@ bool segment_segment_rb_rotation_ccd(
     // -------------------------
     // Step 1: Extract rotation axis from q_rel = q_new * q_n^(-1)
     // -------------------------
-    Vec4 q_n_conj = Rigid_Body::ALGEBRA::ConjugateQuaternion(q_n);
-    Vec4 q_rel    = Rigid_Body::ALGEBRA::QuaternionMultiply(q_new, q_n_conj);
+    Vec4 q_n_conj = quaternion_conjugate(q_n);
+    Vec4 q_rel = quaternion_multiply(q_new, q_n_conj);
 
     Vec3 v_rel(q_rel[1], q_rel[2], q_rel[3]);
     double v_rel_norm = v_rel.norm();
@@ -1045,8 +1047,8 @@ bool point_triangle_rb_rotation_ccd(
     // -------------------------
     // Step 0: Extract rotation axis from q_rel = q_new * q_n^(-1)
     // -------------------------
-    Vec4 q_n_conj = Rigid_Body::ALGEBRA::ConjugateQuaternion(q_n);
-    Vec4 q_rel    = Rigid_Body::ALGEBRA::QuaternionMultiply(q_new, q_n_conj);
+    Vec4 q_n_conj = quaternion_conjugate(q_n);
+    Vec4 q_rel = quaternion_multiply(q_new, q_n_conj);
 
     Vec3 v_rel(q_rel[1], q_rel[2], q_rel[3]);
     double v_rel_norm = v_rel.norm();

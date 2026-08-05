@@ -40,8 +40,6 @@ Mat33 skew_matrix(const Vec3& v);
 
 Mat33 matrix3d_inverse(const Mat33& H);
 
-TriangleDef add_scale(const TriangleDef& a, const TriangleDef& b, double s);
-
 double get_dof(const TriangleDef& def, int node, int comp);
 
 void set_dof(TriangleDef& def, int node, int comp, double value);

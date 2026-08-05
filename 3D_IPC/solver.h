@@ -26,22 +26,10 @@ inline void accumulate_solver_result(SolverResult& agg, const SolverResult& sub,
     }
 }
 
-SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
-                                              const std::vector<Pin>& pins, const SimParams& params,
-                                              std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
-                                              const std::vector<Vec3>& v,
-                                              BroadPhase& broad_phase,
-                                              const std::string& outdir = "",
-                                              bool verbose = false);
+// Deformable solvers implemented in solver.cpp.
+SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", bool verbose = false);
 
-SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
-                                            const std::vector<Pin>& pins, const SimParams& params,
-                                            std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
-                                            const std::vector<Vec3>& v,
-                                            const std::string& outdir = "");
+SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, const std::string& outdir = "");
 
-SolverResult global_gauss_seidel_solver_basic_rb(
-    const RefMesh& ref_mesh, const DeformedState& state,
-    const SimParams& params, std::vector<Vec3>& x_com_new,
-    std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new,
-    bool verbose = false);
+// Rigid-body solver implemented in solver.cpp.
+SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const DeformedState& state, const SimParams& params, std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new, bool verbose = false);

@@ -1045,3 +1045,47 @@ TEST(BarrierEnergy, RigidSegmentSegmentChainRuleConvergesQuadratically) {
 
     EXPECT_TRUE(run_rigid_barrier_convergence_test("rigid SS", x_com, omega, evaluate, energy));
 }
+
+TEST(BarrierEnergy, RigidSolverDerivativeModesMatchFullDerivatives) {
+    const auto expect_modes_match = [](const std::function<RigidEnergyDerivatives(RigidDerivativeMode)>& evaluate) {
+        const RigidEnergyDerivatives full = evaluate(RigidDerivativeMode::Full);
+        const RigidEnergyDerivatives gradient = evaluate(RigidDerivativeMode::Gradient);
+        const RigidEnergyDerivatives translation = evaluate(RigidDerivativeMode::TranslationHessian);
+        const RigidEnergyDerivatives orientation = evaluate(RigidDerivativeMode::OrientationHessian);
+
+        EXPECT_TRUE(gradient.translation_gradient.isApprox(full.translation_gradient, 1.0e-14));
+        EXPECT_TRUE(gradient.orientation_gradient.isApprox(full.orientation_gradient, 1.0e-14));
+        EXPECT_TRUE(gradient.translation_translation_hessian.isZero(0.0));
+        EXPECT_TRUE(gradient.translation_orientation_hessian.isZero(0.0));
+        EXPECT_TRUE(gradient.orientation_orientation_hessian.isZero(0.0));
+
+        EXPECT_TRUE(translation.translation_gradient.isApprox(full.translation_gradient, 1.0e-14));
+        EXPECT_TRUE(translation.translation_translation_hessian.isApprox(full.translation_translation_hessian, 1.0e-14));
+        EXPECT_TRUE(translation.orientation_gradient.isZero(0.0));
+        EXPECT_TRUE(translation.translation_orientation_hessian.isZero(0.0));
+        EXPECT_TRUE(translation.orientation_orientation_hessian.isZero(0.0));
+
+        EXPECT_TRUE(orientation.orientation_gradient.isApprox(full.orientation_gradient, 1.0e-14));
+        EXPECT_TRUE(orientation.orientation_orientation_hessian.isApprox(full.orientation_orientation_hessian, 1.0e-14));
+        EXPECT_TRUE(orientation.translation_gradient.isZero(0.0));
+        EXPECT_TRUE(orientation.translation_translation_hessian.isZero(0.0));
+        EXPECT_TRUE(orientation.translation_orientation_hessian.isZero(0.0));
+    };
+
+    const Vec4 q_n(1.0, 0.0, 0.0, 0.0);
+    const Vec3 omega(0.18, -0.12, 0.09);
+    constexpr double dt = 0.2;
+    constexpr double d_hat = 0.5;
+
+    const std::array<Vec3, 4> nt_references = {Vec3::Zero(), Vec3(-0.6, -0.5, 0.0), Vec3(0.6, -0.5, 0.0), Vec3(0.0, 0.7, 0.0)};
+    const Vec3 fixed_point(0.08, 0.04, 0.22);
+    const Vec3 nt_com(0.02, -0.03, 0.01);
+    const std::array<Vec3, 4> nt_positions = {fixed_point, world_space_position(nt_references[1], nt_com, q_n, omega, dt), world_space_position(nt_references[2], nt_com, q_n, omega, dt), world_space_position(nt_references[3], nt_com, q_n, omega, dt)};
+    expect_modes_match([&](RigidDerivativeMode mode) { return node_triangle_barrier_rb(nt_positions[0], nt_positions[1], nt_positions[2], nt_positions[3], nt_references, RigidBarrierSide::SecondPrimitive, q_n, omega, dt, d_hat, mode); });
+
+    const std::array<Vec3, 4> ss_references = {Vec3(-0.6, 0.0, 0.0), Vec3(0.6, 0.0, 0.0), Vec3::Zero(), Vec3::Zero()};
+    const Vec3 ss_com(0.01, -0.02, 0.0);
+    const Vec3 moving0 = world_space_position(ss_references[0], ss_com, q_n, omega, dt);
+    const Vec3 moving1 = world_space_position(ss_references[1], ss_com, q_n, omega, dt);
+    expect_modes_match([&](RigidDerivativeMode mode) { return segment_segment_barrier_rb(moving0, moving1, Vec3(0.0, -0.7, 0.23), Vec3(0.0, 0.7, 0.23), ss_references, RigidBarrierSide::FirstPrimitive, q_n, omega, dt, d_hat, mode); });
+}

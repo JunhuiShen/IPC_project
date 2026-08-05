@@ -51,9 +51,11 @@ struct SimParams {
 
     double node_box_max;       // upper bound on node box half-extent used by the basic solver
     double node_box_min;       // lower bound on node box half-extent (floor when prev disp is near zero)
+    double theta_box_min;      // lower bound on the rigid orientation-box angular radius
+    double theta_box_max;      // upper bound on the rigid orientation-box angular radius
     int    node_box_update_count;
     double k_barrier;              // barrier stiffness multiplier
-    double damping;                // Jacobi step damping in global_gauss_seidel_solver_ogc (multiplies the per-vertex Newton delta)
+    double damping;                // Newton-step damping used by deformable and rigid solvers
     bool   use_ticcd;              // true (default) -> Tight-Inclusion CCD library; false -> self-written linear CCD
 
     static SimParams zeros() {
@@ -89,6 +91,8 @@ struct SimParams {
         p.verbose                   = false;
         p.node_box_max              = 0.0;
         p.node_box_min              = 0.0;
+        p.theta_box_min             = 0.0;
+        p.theta_box_max             = 0.0;
         p.node_box_update_count     = 250;
         p.k_barrier                     = 1.0;
         p.damping                       = 1.0;
@@ -370,39 +374,12 @@ inline PinMap build_pin_map(const std::vector<Pin>& pins, int nv) {
 double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins,
                                                 const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
 
-// Per-triangle quantities shared across the triangle's three corners.
-struct TriPrecompute {
-    Mat32      P;
-    Mat66      dPdF;
-    ShapeGrads gradN;
-    double     A            = 0.0;
-    bool       has_hessian  = false;
-};
-
-// Per-hinge quantities shared across the 4 nodes of the bending stencil.
-struct HingePrecompute {
-    std::array<Vec3, 4> gtheta;             // d theta / d x_node for each role
-    double              scale_grad = 0.0;   // 2 * k_B * c_e * (theta - bar_theta)
-    double              scale_hess = 0.0;   // 2 * k_B * c_e
-    bool                degenerate = true;  // true => gradient and PSD Hessian are zero
-};
-
-void build_elastic_precompute(const RefMesh& ref_mesh, const std::vector<Vec3>& x,
-                              const SimParams& params, bool want_hessian,
-                              std::vector<TriPrecompute>& out);
-
-void build_bending_precompute(const RefMesh& ref_mesh, const std::vector<Vec3>& x,
-                              const SimParams& params,
-                              std::vector<HingePrecompute>& out);
-
 std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh,
                                                                      const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                                                      const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                                                      const PinMap* pin_map = nullptr,
                                                                      const IncidentTriangles* incident_triangles = nullptr,
-                                                                     const std::vector<ShapeGrads>* rest_shape_grads = nullptr,
-                                                                     const std::vector<TriPrecompute>* tri_cache = nullptr,
-                                                                     const std::vector<HingePrecompute>* hinge_cache = nullptr);
+                                                                     const std::vector<ShapeGrads>* rest_shape_grads = nullptr);
 
 double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,

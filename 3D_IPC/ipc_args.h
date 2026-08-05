@@ -45,7 +45,9 @@ struct IPCArgs3D : ArgParser {
     bool   verbose     = false;
     double node_box_max            = 0.01;
     double node_box_min            = 0.001;
-    int    node_box_update_count   = 250;
+    double theta_box_min           = 0.01;
+    double theta_box_max           = 0.1;
+    int    node_box_update_count   = 10;
     double k_barrier                   = 100.0;
     double damping                     = 1.0;    
     bool   use_ticcd                   = false;    // true: Tight-Inclusion library | false: self-written linear CCD
@@ -137,9 +139,11 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("verbose",          verbose,          false, "Print residual after each GS iteration (only when fixed_iters is false)");
         add_double("node_box_max",         node_box_max,         0.01,  "Upper bound on node box half-extent used by the basic solver");
         add_double("node_box_min",         node_box_min,         0.001, "Lower bound on node box half-extent (floor when prev disp is near zero)");
-        add_int   ("node_box_update_count", node_box_update_count, 1,   "GS iterations between node-box/contact-color rebuilds; set to max_substep_iters to rebuild once per substep");
+        add_double("theta_box_min",        theta_box_min,        0.01,  "Lower bound on the rigid orientation-box angular radius (rad)");
+        add_double("theta_box_max",        theta_box_max,        0.1,   "Upper bound on the rigid orientation-box angular radius (rad)");
+        add_int   ("node_box_update_count", node_box_update_count, 10,  "GS iterations between node-box/contact-color rebuilds; set to max_substep_iters to rebuild once per substep");
         add_double("k_barrier",                k_barrier,                100.0, "Barrier stiffness multiplier");
-        add_double("damping",                  damping,                  1.0,   "Jacobi step damping in global_gauss_seidel_solver_ogc (multiplies per-vertex Newton delta; <1 stabilizes the parallel sweep)");
+        add_double("damping",                  damping,                  1.0,   "Newton-step damping used by deformable and rigid solvers; <1 can stabilize an update");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
         add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=rigid_box_drop, 8=two_polygon_collision, 9=five_polygon_stack, 10=five_polygon_scatter");
@@ -224,6 +228,8 @@ struct IPCArgs3D : ArgParser {
         p.verbose     = verbose;
         p.node_box_max            = node_box_max;
         p.node_box_min            = node_box_min;
+        p.theta_box_min           = theta_box_min;
+        p.theta_box_max           = theta_box_max;
         p.node_box_update_count   = node_box_update_count;
         p.k_barrier                   = k_barrier;
         p.damping                     = damping;

@@ -43,6 +43,10 @@ inline bool aabb_intersects(const AABB& a, const AABB& b) {
     return (a.min.array() <= b.max.array()).all() && (a.max.array() >= b.min.array()).all();
 }
 
+// Cheap current-position rejection before exact primitive-distance evaluation.
+bool node_triangle_aabbs_within_distance(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, double distance_squared);
+bool segment_aabbs_within_distance(const Vec3& a0, const Vec3& a1, const Vec3& b0, const Vec3& b1, double distance_squared);
+
 struct BVHNode {
     AABB bbox;
     int left = -1;

@@ -64,10 +64,17 @@ enum class RigidBarrierSide {
     SecondPrimitive
 };
 
+enum class RigidDerivativeMode {
+    Full,
+    Gradient,
+    TranslationHessian,
+    OrientationHessian
+};
+
 // FirstPrimitive selects the node; SecondPrimitive selects the triangle.
 // X_centered entries on the unselected side are ignored and may be zero.
-RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, double eps = 1.0e-12);
+RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode = RigidDerivativeMode::Full, double eps = 1.0e-12);
 
 // FirstPrimitive selects (x1,x2); SecondPrimitive selects (x3,x4).
 // X_centered entries on the unselected side are ignored and may be zero.
-RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, double eps = 1.0e-12);
+RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode = RigidDerivativeMode::Full, double eps = 1.0e-12);

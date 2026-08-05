@@ -8,6 +8,19 @@
 
 // BVH build / refit / query
 namespace {
+double point_aabb_squared_distance(const Vec3& p, const Vec3& lo, const Vec3& hi) {
+    double distance_squared = 0.0;
+    for (int axis = 0; axis < 3; ++axis) {
+        double distance = 0.0;
+        if (p[axis] < lo[axis])
+            distance = lo[axis] - p[axis];
+        else if (p[axis] > hi[axis])
+            distance = p[axis] - hi[axis];
+        distance_squared += distance * distance;
+    }
+    return distance_squared;
+}
+
 inline int build_bvh_impl(const std::vector<AABB>& boxes, std::vector<BVHNode>& out, std::vector<int>* leaf_to_node) {
     out.clear();
     if (leaf_to_node) leaf_to_node->assign(boxes.size(), -1);
@@ -71,6 +84,29 @@ inline int build_bvh_impl(const std::vector<AABB>& boxes, std::vector<BVHNode>& 
     return 0;
 }
 }  // namespace
+
+bool node_triangle_aabbs_within_distance(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, double distance_squared) {
+    const Vec3 lo = a.cwiseMin(b).cwiseMin(c);
+    const Vec3 hi = a.cwiseMax(b).cwiseMax(c);
+    return point_aabb_squared_distance(p, lo, hi) <= distance_squared;
+}
+
+bool segment_aabbs_within_distance(const Vec3& a0, const Vec3& a1, const Vec3& b0, const Vec3& b1, double distance_squared) {
+    const Vec3 alo = a0.cwiseMin(a1);
+    const Vec3 ahi = a0.cwiseMax(a1);
+    const Vec3 blo = b0.cwiseMin(b1);
+    const Vec3 bhi = b0.cwiseMax(b1);
+    double aabb_distance_squared = 0.0;
+    for (int axis = 0; axis < 3; ++axis) {
+        double distance = 0.0;
+        if (ahi[axis] < blo[axis])
+            distance = blo[axis] - ahi[axis];
+        else if (bhi[axis] < alo[axis])
+            distance = alo[axis] - bhi[axis];
+        aabb_distance_squared += distance * distance;
+    }
+    return aabb_distance_squared <= distance_squared;
+}
 
 int build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out) {
     return build_bvh_impl(boxes, out, nullptr);

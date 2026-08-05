@@ -129,10 +129,14 @@ TEST(ParallelHelper, RigidContactAdjacencyFiltersInternalPairsAndColorsBodies) {
     std::vector<int> node_to_rb(20, -1);
     for (int node = 0; node < 16; ++node)
         node_to_rb[node] = node / 4;
+    std::vector<std::vector<int>> body_nt_pair_indices;
+    std::vector<std::vector<int>> body_ss_pair_indices;
     std::vector<std::vector<int>> adjacency;
-    build_rb_contact_adj(cache, node_to_rb, 4, adjacency);
+    build_rb_contact_adj(cache, node_to_rb, 4, body_nt_pair_indices, body_ss_pair_indices, adjacency);
 
     EXPECT_EQ(adjacency, (std::vector<std::vector<int>>{{1}, {0, 2}, {1}, {}}));
+    EXPECT_EQ(body_nt_pair_indices, (std::vector<std::vector<int>>{{1}, {1, 2}, {2}, {3}}));
+    EXPECT_EQ(body_ss_pair_indices, (std::vector<std::vector<int>>{{1}, {1}, {}, {2}}));
     EXPECT_EQ(cache.nt_pairs.size(), 5);
     EXPECT_EQ(cache.ss_pairs.size(), 3);
 
@@ -165,19 +169,14 @@ namespace {
 // For testing purposes, increasing the sampling density to 250000 for both polar and azimuth with sampling_tolerance of 1.0e-9.
 // This is just to ensure the code is working properly but extremely slow, almost 30 mins.
 // For pipeline testing, reduce the sampling density to 1000 and sampling_tolerance to 1.0e-3
-AABB brute_force_spherical_cap_aabb(
-    const Vec3& x_com, const Vec4& q, const Vec3& X,
-    const Vec4& q_rel, int polar_samples = 1000,
-    int azimuth_samples = 1000) {
+AABB brute_force_spherical_cap_aabb(const Vec3& x_com, const Vec4& q, const Vec3& X, double theta_bound, int polar_samples = 1000, int azimuth_samples = 1000) {
     const Vec4 q_current = quaternion_normalize(q);
-    const Vec4 q_relative = quaternion_normalize(q_rel);
     const Vec3 world_space_offset = quaternion_rotate(q_current, X);
     const double radius = world_space_offset.norm();
     if (radius == 0.0)
         return AABB(x_com, x_com);
 
-    const double angular_extent = 2.0 * std::atan2(q_relative.tail<3>().norm(), q_relative[0]);
-    const double cap_extent = std::min(angular_extent, M_PI);
+    const double cap_extent = std::min(theta_bound, M_PI);
     const Vec3 direction = world_space_offset / radius;
     if (cap_extent == 0.0) {
         const Vec3 x = x_com + world_space_offset;
@@ -203,11 +202,9 @@ AABB brute_force_spherical_cap_aabb(
     return box;
 }
 
-void check_spherical_cap_aabb(
-    const Vec3& x_com, const Vec4& q, const Vec3& X,
-    const Vec4& q_rel, double sampling_tolerance = 1.0e-3) {
-    const AABB result = spherical_cap_node_aabb(x_com, q, X, q_rel);
-    const AABB reference = brute_force_spherical_cap_aabb(x_com, q, X, q_rel);
+void check_spherical_cap_aabb(const Vec3& x_com, const Vec4& q, const Vec3& X, double theta_bound, double sampling_tolerance = 1.0e-3) {
+    const AABB result = spherical_cap_node_aabb(x_com, q, X, theta_bound);
+    const AABB reference = brute_force_spherical_cap_aabb(x_com, q, X, theta_bound);
 
     for (int coordinate = 0; coordinate < 3; ++coordinate) {
         // The analytic box must contain every densely sampled point.
@@ -224,49 +221,36 @@ TEST(SphericalCapNodeAABB, BoundsQuarterTurnSphericalCapExactly) {
     const Vec3 x_com(1.0, -2.0, 3.0);
     const Vec4 q(1.0, 0.0, 0.0, 0.0);
     const Vec3 X(2.0, 0.0, 0.0);
-    const Vec4 q_rel = axis_angle_quaternion(Vec3::UnitZ(), 0.5 * M_PI);
-
-    check_spherical_cap_aabb(x_com, q, X, q_rel);
-    const AABB box = spherical_cap_node_aabb(x_com, q, X, q_rel);
+    check_spherical_cap_aabb(x_com, q, X, 0.5 * M_PI);
+    const AABB box = spherical_cap_node_aabb(x_com, q, X, 0.5 * M_PI);
     EXPECT_TRUE(box.min.isApprox(Vec3(1.0, -4.0, 1.0), 1.0e-14));
     EXPECT_TRUE(box.max.isApprox(Vec3(3.0, 0.0, 5.0), 1.0e-14));
 }
 
-TEST(SphericalCapNodeAABB, RelativeQuaternionAxisDoesNotChangeTheCap) {
+TEST(SphericalCapNodeAABB, ContainsMotionAboutDifferentAxes) {
     const Vec3 x_com(0.3, -0.2, 0.8);
     const Vec4 q = axis_angle_quaternion(Vec3(1.0, -2.0, 0.5), 0.7);
     const Vec3 X(1.2, -0.6, 0.4);
-    const Vec4 about_x = axis_angle_quaternion(Vec3::UnitX(), 0.9);
-    const Vec4 about_y = axis_angle_quaternion(Vec3::UnitY(), 0.9);
-    const Vec4 about_arbitrary = axis_angle_quaternion(Vec3(-0.3, 0.9, 0.2), 0.9);
-
-    const AABB x_axis_box = spherical_cap_node_aabb(x_com, q, X, about_x);
-    const AABB y_axis_box = spherical_cap_node_aabb(x_com, q, X, about_y);
-    const AABB arbitrary_axis_box = spherical_cap_node_aabb(x_com, q, X, about_arbitrary);
-    EXPECT_TRUE(x_axis_box.min.isApprox(y_axis_box.min, 1.0e-14));
-    EXPECT_TRUE(x_axis_box.max.isApprox(y_axis_box.max, 1.0e-14));
-    EXPECT_TRUE(x_axis_box.min.isApprox(arbitrary_axis_box.min, 1.0e-14));
-    EXPECT_TRUE(x_axis_box.max.isApprox(arbitrary_axis_box.max, 1.0e-14));
+    const double theta_bound = 0.9;
+    const AABB box = spherical_cap_node_aabb(x_com, q, X, theta_bound);
+    const Vec3 offset = quaternion_rotate(q, X);
+    for (const Vec3& axis : {Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), Vec3(-0.3, 0.9, 0.2).normalized()}) {
+        const Vec3 rotated = x_com + quaternion_rotate(axis_angle_quaternion(axis, theta_bound), offset);
+        EXPECT_TRUE((rotated.array() >= box.min.array() - 1.0e-14).all());
+        EXPECT_TRUE((rotated.array() <= box.max.array() + 1.0e-14).all());
+    }
 }
 
-TEST(SphericalCapNodeAABB, PreservesFullArcSignAndNormalizesQuaternionInputs) {
+TEST(SphericalCapNodeAABB, WideExtentAndNormalizedOrientation) {
     const Vec3 x_com = Vec3::Zero();
     const Vec4 q(1.0, 0.0, 0.0, 0.0);
     const Vec3 X = Vec3::UnitX();
-    const Vec4 q_rel = axis_angle_quaternion(Vec3::UnitZ(), 1.5 * M_PI);
-
-    check_spherical_cap_aabb(x_com, q, X, q_rel);
-    check_spherical_cap_aabb(x_com, q, X, -q_rel);
-    check_spherical_cap_aabb(x_com, 3.0 * q, X, 5.0 * q_rel);
-
-    const AABB full_270 = spherical_cap_node_aabb(x_com, q, X, q_rel);
-    const AABB complementary_minus_90 = spherical_cap_node_aabb(x_com, q, X, -q_rel);
-    const AABB scaled = spherical_cap_node_aabb(x_com, 3.0 * q, X, 5.0 * q_rel);
-
+    check_spherical_cap_aabb(x_com, q, X, 1.5 * M_PI);
+    check_spherical_cap_aabb(x_com, 3.0 * q, X, 1.5 * M_PI);
+    const AABB full_270 = spherical_cap_node_aabb(x_com, q, X, 1.5 * M_PI);
+    const AABB scaled = spherical_cap_node_aabb(x_com, 3.0 * q, X, 1.5 * M_PI);
     EXPECT_TRUE(full_270.min.isApprox(Vec3(-1.0, -1.0, -1.0), 1.0e-14));
     EXPECT_TRUE(full_270.max.isApprox(Vec3(1.0, 1.0, 1.0), 1.0e-14));
-    EXPECT_TRUE(complementary_minus_90.min.isApprox(Vec3(0.0, -1.0, -1.0), 1.0e-14));
-    EXPECT_TRUE(complementary_minus_90.max.isApprox(Vec3(1.0, 1.0, 1.0), 1.0e-14));
     EXPECT_TRUE(scaled.min.isApprox(full_270.min, 1.0e-14));
     EXPECT_TRUE(scaled.max.isApprox(full_270.max, 1.0e-14));
 }
@@ -275,10 +259,8 @@ TEST(SphericalCapNodeAABB, HalfTurnExtentBoundsFullSphere) {
     const Vec3 x_com(1.0, -2.0, 3.0);
     const Vec4 q(1.0, 0.0, 0.0, 0.0);
     const Vec3 X(2.0, 0.0, 1.0);
-    const Vec4 q_rel = axis_angle_quaternion(Vec3::UnitZ(), M_PI);
-
-    check_spherical_cap_aabb(x_com, q, X, q_rel);
-    const AABB box = spherical_cap_node_aabb(x_com, q, X, q_rel);
+    check_spherical_cap_aabb(x_com, q, X, M_PI);
+    const AABB box = spherical_cap_node_aabb(x_com, q, X, M_PI);
     const Vec3 radius = Vec3::Constant(X.norm());
     EXPECT_TRUE(box.min.isApprox(x_com - radius, 1.0e-14));
     EXPECT_TRUE(box.max.isApprox(x_com + radius, 1.0e-14));
@@ -288,46 +270,40 @@ TEST(SphericalCapNodeAABB, MatchesBruteForceForArbitraryAxis) {
     const Vec3 x_com(0.4, -0.7, 1.1);
     const Vec4 q = axis_angle_quaternion(Vec3(1.0, 2.0, -1.0), 0.8);
     const Vec3 X(1.2, -0.4, 0.7);
-    const Vec4 q_rel = axis_angle_quaternion(Vec3(-0.3, 0.9, 0.2), 1.1);
-
-    check_spherical_cap_aabb(x_com, q, X, q_rel);
+    check_spherical_cap_aabb(x_com, q, X, 1.1);
 }
 
 TEST(SphericalCapNodeAABB, MatchesBruteForceForWideCap) {
     const Vec3 x_com(-0.2, 0.5, -0.8);
     const Vec4 q = axis_angle_quaternion(Vec3(-1.0, 0.5, 2.0), 0.4);
     const Vec3 X(0.7, 1.3, -0.2);
-    const Vec4 q_rel = axis_angle_quaternion(Vec3(0.2, -0.7, 1.0), 2.2);
-
-    check_spherical_cap_aabb(x_com, q, X, q_rel);
+    check_spherical_cap_aabb(x_com, q, X, 2.2);
 }
 
 TEST(SphericalCapNodeAABB, DegeneratePointFullTurnAndInvalidQuaternions) {
     const Vec3 x_com(0.2, -0.4, 0.7);
     const Vec4 q = axis_angle_quaternion(Vec3::UnitY(), 0.6);
     const Vec3 X(0.8, -0.3, 1.1);
-    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
     const Vec3 x = x_com + quaternion_rotate(q, X);
 
-    check_spherical_cap_aabb(x_com, q, X, identity);
-    const AABB stationary = spherical_cap_node_aabb(x_com, q, X, identity);
-    const AABB antipodal = spherical_cap_node_aabb(x_com, q, X, -identity);
+    check_spherical_cap_aabb(x_com, q, X, 0.0);
+    const AABB stationary = spherical_cap_node_aabb(x_com, q, X, 0.0);
+    const AABB full_turn = spherical_cap_node_aabb(x_com, q, X, 2.0 * M_PI);
     const Vec3 full_turn_radius = Vec3::Constant(X.norm());
     EXPECT_TRUE(stationary.min.isApprox(x, 1.0e-14));
     EXPECT_TRUE(stationary.max.isApprox(x, 1.0e-14));
-    EXPECT_TRUE(antipodal.min.isApprox(x_com - full_turn_radius, 1.0e-14));
-    EXPECT_TRUE(antipodal.max.isApprox(x_com + full_turn_radius, 1.0e-14));
+    EXPECT_TRUE(full_turn.min.isApprox(x_com - full_turn_radius, 1.0e-14));
+    EXPECT_TRUE(full_turn.max.isApprox(x_com + full_turn_radius, 1.0e-14));
 
     const Vec3 zero_X = Vec3::Zero();
-    const AABB zero_radius = spherical_cap_node_aabb(x_com, q, zero_X, -identity);
+    const AABB zero_radius = spherical_cap_node_aabb(x_com, q, zero_X, 2.0 * M_PI);
     EXPECT_TRUE(zero_radius.min.isApprox(x_com, 1.0e-14));
     EXPECT_TRUE(zero_radius.max.isApprox(x_com, 1.0e-14));
 
-    EXPECT_THROW(spherical_cap_node_aabb(x_com, Vec4::Zero(), X, identity), std::invalid_argument);
-    EXPECT_THROW(spherical_cap_node_aabb(x_com, q, X, Vec4::Zero()), std::invalid_argument);
+    EXPECT_THROW(spherical_cap_node_aabb(x_com, Vec4::Zero(), X, 0.0), std::invalid_argument);
 }
 
-TEST(RigidBodyBlueBoxes, CombinesRotationArcAndCOMTranslation) {
+TEST(RigidBodyBlueBoxes, CombinesSphericalCapAndCOMTranslation) {
     const Vec3 x_com(1.0, -2.0, 3.0);
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
     const std::vector<Vec3> material_positions = {Vec3(2.0, 0.0, 1.0), Vec3(0.0, 1.0, 0.0)};
@@ -336,11 +312,8 @@ TEST(RigidBodyBlueBoxes, CombinesRotationArcAndCOMTranslation) {
     RefMesh ref_mesh;
     ref_mesh.rb_nodes = {{0, 1}};
     ref_mesh.ref_positions = {material_positions};
-    SimParams params = SimParams::zeros();
-    params.node_box_min = 0.1;
-    params.node_box_max = 1.0;
-
-    const std::vector<AABB> boxes = build_blue_boxes_rb(positions, {x_com}, {identity}, {axis_angle_quaternion(Vec3::UnitZ(), 0.5 * M_PI)}, {0.2}, params, ref_mesh);
+    std::vector<AABB> boxes(positions.size());
+    build_blue_boxes_rb({x_com}, {identity}, {0.5 * M_PI}, {0.24}, ref_mesh, boxes);
 
     ASSERT_EQ(boxes.size(), positions.size());
     constexpr double com_padding = 0.24;
@@ -365,29 +338,23 @@ TEST(RigidBodyBlueBoxes, StationaryRotationReducesToCOMBox) {
     RefMesh ref_mesh;
     ref_mesh.rb_nodes = {{0}};
     ref_mesh.ref_positions = {{X}};
-    SimParams params = SimParams::zeros();
-    params.node_box_min = 0.4;
-    params.node_box_max = 0.8;
-
-    const std::vector<AABB> boxes = build_blue_boxes_rb({x}, {x_com}, {q}, {identity}, {0.0}, params, ref_mesh);
+    std::vector<AABB> boxes(1);
+    build_blue_boxes_rb({x_com}, {q}, {0.0}, {0.4}, ref_mesh, boxes);
 
     ASSERT_EQ(boxes.size(), 1);
     EXPECT_TRUE(boxes[0].min.isApprox(x - Vec3::Constant(0.4), 1.0e-14));
     EXPECT_TRUE(boxes[0].max.isApprox(x + Vec3::Constant(0.4), 1.0e-14));
 }
 
-TEST(RigidBodyBlueBoxes, COMBoundClampsToMaximum) {
+TEST(RigidBodyBlueBoxes, UsesCOMBound) {
     const Vec3 x_com = Vec3::Zero();
     const Vec3 X = Vec3::UnitX();
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
     RefMesh ref_mesh;
     ref_mesh.rb_nodes = {{0}};
     ref_mesh.ref_positions = {{X}};
-    SimParams params = SimParams::zeros();
-    params.node_box_min = 0.1;
-    params.node_box_max = 0.3;
-
-    const std::vector<AABB> boxes = build_blue_boxes_rb({X}, {x_com}, {identity}, {identity}, {2.0}, params, ref_mesh);
+    std::vector<AABB> boxes(1);
+    build_blue_boxes_rb({x_com}, {identity}, {0.0}, {0.3}, ref_mesh, boxes);
 
     ASSERT_EQ(boxes.size(), 1);
     EXPECT_TRUE(boxes[0].min.isApprox(X - Vec3::Constant(0.3), 1.0e-14));

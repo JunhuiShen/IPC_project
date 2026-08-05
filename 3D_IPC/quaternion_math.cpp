@@ -1,12 +1,10 @@
 #include "quaternion_math.h"
-#include "algebra/algebra.h"
 #include <cmath>
 #include <stdexcept>
 
 int quaternion_product_tensor(int alpha, int beta, int gamma) {
-    Rigid_Body::Assert((0 <= alpha) && (alpha <= 3), "MathTools: Invalid first argument for Quaternion Product Tensor.");
-    Rigid_Body::Assert((0 <= beta) && (beta <= 3), "MathTools: Invalid second argument for Quaternion Product Tensor.");
-    Rigid_Body::Assert((0 <= gamma) && (gamma <= 3), "MathTools: Invalid third argument for Quaternion Product Tensor.");
+    if (alpha < 0 || alpha > 3 || beta < 0 || beta > 3 || gamma < 0 || gamma > 3)
+        throw std::invalid_argument("quaternion_product_tensor: indices must be in [0, 3]");
 
     if (alpha == 0 && beta == 0 && gamma == 0) return 1;
     if (alpha == 0 && beta == gamma && beta != 0) return -1;
@@ -21,26 +19,13 @@ int quaternion_product_tensor(int alpha, int beta, int gamma) {
     return 0;
 }
 
-
-int QPT_QPT(int alpha, int beta, int delta, int epsilon) {
-    Rigid_Body::Assert((0 <= alpha) && (alpha <= 3), "MathTools: Invalid first argument for Quaternion Product Tensor.");
-    Rigid_Body::Assert((0 <= beta) && (beta <= 3), "MathTools: Invalid second argument for Quaternion Product Tensor.");
-    Rigid_Body::Assert((0 <= delta) && (delta <= 3), "MathTools: Invalid third argument for Quaternion Product Tensor.");
-    Rigid_Body::Assert((0 <= epsilon) && (epsilon <= 3), "MathTools: Invalid fourth argument for Quaternion Product Tensor.");
-    int result = 0;
-    for (int gamma = 0; gamma < 4; gamma++) {
-        result += quaternion_product_tensor(alpha, beta, gamma) * quaternion_product_tensor(gamma, delta, epsilon);
-    }
-    return result;
-}
-
 Vec4 quaternion_multiply(const Vec4& a, const Vec4& b) {
-    return Rigid_Body::ALGEBRA::QuaternionMultiply(a, b);
+    return Vec4(a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3], a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2], a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1], a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0]);
 }
 
 // q^-1 = q* for a unit quaternion.
 Vec4 quaternion_conjugate(const Vec4& quat) {
-    return Rigid_Body::ALGEBRA::ConjugateQuaternion(quat);
+    return Vec4(quat[0], -quat[1], -quat[2], -quat[3]);
 }
 
 Vec4 quaternion_inverse(const Vec4& quat) {
@@ -57,11 +42,6 @@ Vec4 quaternion_normalize(const Vec4& quat) {
     return quat / norm;
 }
 
-// q and -q represent the same rotation.
-Vec4 quaternion_align_sign(const Vec4& quat, const Vec4& reference) {
-    return quat.dot(reference) < 0.0 ? -quat : quat;
-}
-
 // q_dot = 1/2 (0, omega) * q.
 Vec4 quaternion_time_derivative(const Vec4& q, const Vec3& omega) {
     const Vec4 omega_quaternion(0.0, omega[0], omega[1], omega[2]);
@@ -69,7 +49,8 @@ Vec4 quaternion_time_derivative(const Vec4& q, const Vec3& omega) {
 }
 
 Vec3 quaternion_rotate(const Vec4& quat, const Vec3& vector) {
-    return Rigid_Body::ALGEBRA::QuaternionRotate(quat, vector);
+    const Vec4 vector_quaternion(0.0, vector[0], vector[1], vector[2]);
+    return quaternion_multiply(quat, quaternion_multiply(vector_quaternion, quaternion_conjugate(quat))).tail<3>();
 }
 
 Vec3 quaternion_inverse_rotate(const Vec4& quat, const Vec3& vector) {

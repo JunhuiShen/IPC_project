@@ -518,7 +518,9 @@ namespace {
 const Vec4 kIdentityQ(1.0, 0.0, 0.0, 0.0);
 
 Vec4 AxisAngleQuat(const Vec3& axis, double angle) {
-    return Rigid_Body::ALGEBRA::QuaternionFromVector(axis.normalized() * angle);
+    const Vec3 normalized_axis = axis.normalized();
+    const double sin_half_angle = std::sin(0.5 * angle);
+    return Vec4(std::cos(0.5 * angle), sin_half_angle * normalized_axis[0], sin_half_angle * normalized_axis[1], sin_half_angle * normalized_axis[2]);
 }
 }  // namespace
 

@@ -29,14 +29,6 @@ Vec4 quaternion_from_angular_velocity(const Vec4& q0, const Vec3& omega, double 
 Mat43 dq_domega(const Vec4& q0, const Vec3& omega, double dt);
 std::array<Mat33, 4> d2q_domega2(const Vec4& q0, const Vec3& omega, double dt);
 
-// Align q_target's sign with q_current so the relative rotation is the shortest
-// Let q_relative = q_target * q_current^-1, so q_target = q_relative * q_current
-// Scale its rotation angle by alpha and get q(alpha) = exp(alpha * log(q_relative)) * q_current
-Vec4 interpolate_orientation_shortest_arc(const Vec4& q_current, const Vec4& q_target, double alpha);
-
-// Invert q = exp((dt / 2) * omega) * q_n and get omega = (2 / dt) * log(q * q_n^-1)
-Vec3 angular_velocity_from_orientation(const Vec4& q, const Vec4& q_n, double dt);
-
 // Follow the relative arc encoded by the signs of q_current and q_target,
 // without replacing it by the equivalent shortest arc. This can distinguish,
 // for example, +270 degrees from -90 degrees, but an exact (or numerically
@@ -71,11 +63,7 @@ Mat33 body_second_moment(const std::vector<double>& masses, const std::vector<Ve
 // The input orientation and omega use the scalar-first quaternion and
 // world-space angular-velocity conventions used by this file. Returns the
 // newly assigned rigid-body index.
-int create_rigid_body(
-    const std::vector<Vec3>& x,
-    const Vec3& v_com_input, const Vec4& orientation_input,
-    const Vec3& omega_input, double total_mass,
-    RefMesh& ref_mesh, DeformedState& state);
+int create_rigid_body(const std::vector<Vec3>& x, const Vec3& v_com_input, const Vec4& orientation_input, const Vec3& omega_input, double total_mass, RefMesh& ref_mesh, DeformedState& state);
 
 // Rigid-body inertial incremental potential aggregated with I_hat.
 // The candidate quaternion is q(omega) = exp((dt / 2) * omega) * q_n.

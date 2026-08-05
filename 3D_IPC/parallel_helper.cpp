@@ -10,32 +10,22 @@ int owning_rb_for_node(const std::vector<int>& node_to_rb, int node) {
     return node >= 0 && node < static_cast<int>(node_to_rb.size()) ? node_to_rb[node] : -1;
 }
 
-AABB spherical_cap_node_aabb(const Vec3& x_com, const Vec4& q, const Vec3& X, const Vec4& q_rel) {
+AABB spherical_cap_node_aabb(const Vec3& x_com, const Vec4& q, const Vec3& X, double theta_bound) {
     if (!x_com.allFinite() || !X.allFinite())
         throw std::invalid_argument("spherical_cap_node_aabb requires finite positions");
 
     const Vec4 q_current = quaternion_normalize(q);
-    const Vec4 q_relative = quaternion_normalize(q_rel);
-
     const Vec3 world_space_offset = quaternion_rotate(q_current, X);
     const double radius = world_space_offset.norm();
     if (radius == 0.0)
         return AABB(x_com, x_com);
 
-    // Preserve the raw quaternion sign so the angular extent remains in
-    // [0, 2*pi] instead of being forced onto the shortest quaternion arc.
-    const double sin_half_angle = q_relative.tail<3>().norm();
-    const double angular_extent = 2.0 * std::atan2(sin_half_angle, q_relative[0]);
-
-    // With every world-space rotation axis admissible, an extent of pi can
-    // reach every direction on the sphere. Larger full-arc extents do too.
+    const double angular_extent = std::max(0.0, theta_bound);
     if (angular_extent >= M_PI) {
         const Vec3 sphere_radius = Vec3::Constant(radius);
         return AABB(x_com - sphere_radius, x_com + sphere_radius);
     }
 
-    // For angular_extent < pi, the reachable directions form the spherical
-    // cap { y : ||y|| = 1, direction.dot(y) >= cos(angular_extent) }.
     const Vec3 direction = world_space_offset / radius;
     const double cos_extent = std::cos(angular_extent);
     const double sin_extent = std::sin(angular_extent);
@@ -57,35 +47,42 @@ AABB spherical_cap_node_aabb(const Vec3& x_com, const Vec4& q, const Vec3& X, co
             : d * cos_extent - tangent_length * sin_extent;
     }
 
-    return AABB(
-        x_com + radius * cap_min,
-        x_com + radius * cap_max);
+    return AABB(x_com + radius * cap_min, x_com + radius * cap_max);
 }
 
-std::vector<AABB> build_blue_boxes_rb(const std::vector<Vec3>& positions, const std::vector<Vec3>& x_coms, const std::vector<Vec4>& orientations, const std::vector<Vec4>& quaternion_bounds, const std::vector<double>& prev_com_disp, const SimParams& params, const RefMesh& ref_mesh) {
+void build_blue_boxes_rb(const std::vector<Vec3>& com_box_anchors, const std::vector<Vec4>& orientation_box_anchors, const std::vector<double>& theta_box_radii, const std::vector<double>& com_box_radii, const RefMesh& ref_mesh, std::vector<AABB>& blue_boxes) {
     const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
-    std::vector<AABB> blue_boxes(positions.size());
-    constexpr double node_box_padding = 1.2;
 
     for (int rb = 0; rb < num_rbs; ++rb) {
         const std::vector<int>& nodes = ref_mesh.rb_nodes[rb];
         const std::vector<Vec3>& material_positions = ref_mesh.ref_positions[rb];
-        const Vec3 com_radius = Vec3::Constant(std::clamp(node_box_padding * prev_com_disp[rb], params.node_box_min, params.node_box_max));
+        const Vec3 com_radius = Vec3::Constant(com_box_radii[rb]);
         for (int local = 0; local < static_cast<int>(nodes.size()); ++local) {
             const int node = nodes[local];
-            const AABB spherical_cap_box = spherical_cap_node_aabb(x_coms[rb], orientations[rb], material_positions[local], quaternion_bounds[rb]);
+            const AABB spherical_cap_box = spherical_cap_node_aabb(com_box_anchors[rb], orientation_box_anchors[rb], material_positions[local], theta_box_radii[rb]);
             blue_boxes[node] = AABB(spherical_cap_box.min - com_radius, spherical_cap_box.max + com_radius);
         }
     }
-    return blue_boxes;
 }
 
-void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_rb, int num_rbs, std::vector<std::vector<int>>& out) {
+void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_rb, int num_rbs, std::vector<std::vector<int>>& body_nt_pair_indices, std::vector<std::vector<int>>& body_ss_pair_indices, std::vector<std::vector<int>>& out) {
     if (static_cast<int>(out.size()) == num_rbs) {
         for (std::vector<int>& neighbors : out)
             neighbors.clear();
     } else {
         out.assign(num_rbs, {});
+    }
+    if (static_cast<int>(body_nt_pair_indices.size()) == num_rbs) {
+        for (std::vector<int>& pair_indices : body_nt_pair_indices)
+            pair_indices.clear();
+    } else {
+        body_nt_pair_indices.assign(num_rbs, {});
+    }
+    if (static_cast<int>(body_ss_pair_indices.size()) == num_rbs) {
+        for (std::vector<int>& pair_indices : body_ss_pair_indices)
+            pair_indices.clear();
+    } else {
+        body_ss_pair_indices.assign(num_rbs, {});
     }
 
     const auto add_edge = [&](int first, int second) {
@@ -95,19 +92,29 @@ void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<i
         out[second].push_back(first);
     };
 
-    for (const NodeTrianglePair& pair : bp_cache.nt_pairs) {
+    for (int pair_index = 0; pair_index < static_cast<int>(bp_cache.nt_pairs.size()); ++pair_index) {
+        const NodeTrianglePair& pair = bp_cache.nt_pairs[pair_index];
         const int node_rb = owning_rb_for_node(node_to_rb, pair.node);
         const int triangle_rb = owning_rb_for_node(node_to_rb, pair.tri_v[0]);
         if (node_rb == triangle_rb || (node_rb < 0 && triangle_rb < 0))
             continue;
+        if (node_rb >= 0)
+            body_nt_pair_indices[node_rb].push_back(pair_index);
+        if (triangle_rb >= 0)
+            body_nt_pair_indices[triangle_rb].push_back(pair_index);
         add_edge(node_rb, triangle_rb);
     }
 
-    for (const SegmentSegmentPair& pair : bp_cache.ss_pairs) {
+    for (int pair_index = 0; pair_index < static_cast<int>(bp_cache.ss_pairs.size()); ++pair_index) {
+        const SegmentSegmentPair& pair = bp_cache.ss_pairs[pair_index];
         const int first_edge_rb = owning_rb_for_node(node_to_rb, pair.v[0]);
         const int second_edge_rb = owning_rb_for_node(node_to_rb, pair.v[2]);
         if (first_edge_rb == second_edge_rb || (first_edge_rb < 0 && second_edge_rb < 0))
             continue;
+        if (first_edge_rb >= 0)
+            body_ss_pair_indices[first_edge_rb].push_back(pair_index);
+        if (second_edge_rb >= 0)
+            body_ss_pair_indices[second_edge_rb].push_back(pair_index);
         add_edge(first_edge_rb, second_edge_rb);
     }
 

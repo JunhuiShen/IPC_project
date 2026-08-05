@@ -12,6 +12,7 @@
 #include <cassert>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -43,6 +44,40 @@ inline bool segment_segment_single_vertex_swept_aabbs_intersect(const SegmentSeg
         if (moving_dof == role) box.expand(xi + dx);
     }
     return aabb_intersects(first_box, second_box);
+}
+
+inline bool node_triangle_swept_aabbs_intersect(const std::array<AABB, 4>& node_boxes) {
+    AABB triangle_box;
+    triangle_box.expand(node_boxes[1]);
+    triangle_box.expand(node_boxes[2]);
+    triangle_box.expand(node_boxes[3]);
+    return aabb_intersects(node_boxes[0], triangle_box);
+}
+
+inline bool segment_segment_swept_aabbs_intersect(const std::array<AABB, 4>& node_boxes) {
+    AABB first_box;
+    first_box.expand(node_boxes[0]);
+    first_box.expand(node_boxes[1]);
+    AABB second_box;
+    second_box.expand(node_boxes[2]);
+    second_box.expand(node_boxes[3]);
+    return aabb_intersects(first_box, second_box);
+}
+
+inline AABB translated_node_swept_aabb(int node, const std::vector<Vec3>& x, const std::vector<int>& node_to_rb, int rb, const Vec3& dx) {
+    AABB box(x[node], x[node]);
+    if (owning_rb_for_node(node_to_rb, node) == rb)
+        box.expand(x[node] + dx);
+    return box;
+}
+
+inline AABB rotated_node_swept_aabb(int node, const std::vector<Vec3>& x, const std::vector<int>& node_to_rb, int rb, const Vec3& x_com, const Vec4& q_current, double theta) {
+    AABB box(x[node], x[node]);
+    if (owning_rb_for_node(node_to_rb, node) == rb) {
+        const Vec3 material_position = quaternion_inverse_rotate(q_current, x[node] - x_com);
+        box.expand(spherical_cap_node_aabb(x_com, q_current, material_position, theta));
+    }
+    return box;
 }
 
 }  // namespace
@@ -163,7 +198,7 @@ void per_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x, c
     }
 }
 
-double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const std::vector<std::array<int, 2>>& edges, const std::vector<Vec3>& x, int rb, const Vec3& dx, double safety) {
+double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& dx, double safety) {
     assert(rb >= 0);
     assert(safety >= 0.0 && safety <= 1.0);
     if (dx.squaredNorm() < 1.0e-28)
@@ -179,47 +214,71 @@ double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const std::
         toi_min = std::min(toi_min, result.t);
     };
 
-    for (int node = 0; node < static_cast<int>(x.size()); ++node) {
+    for (const int pair_index : nt_pair_indices) {
+        const NodeTrianglePair& pair = bp_cache.nt_pairs[pair_index];
+        const int node = pair.node;
         const int node_rb = owning_rb_for_node(ref_mesh.node_to_rb, node);
-        for (int tri = 0; tri < num_tris(ref_mesh); ++tri) {
-            const int v0 = tri_vertex(ref_mesh, tri, 0);
-            const int v1 = tri_vertex(ref_mesh, tri, 1);
-            const int v2 = tri_vertex(ref_mesh, tri, 2);
-            if (node == v0 || node == v1 || node == v2)
-                continue;
-            const int triangle_rb = owning_rb_for_node(ref_mesh.node_to_rb, v0);
-            if (node_rb == triangle_rb || (node_rb != rb && triangle_rb != rb))
-                continue;
-            if (node_rb == rb)
-                consider(node_triangle_only_one_node_moves(x[node], dx, x[v0], zero, x[v1], zero, x[v2], zero, 1.0e-12, false));
-            else
-                consider(node_triangle_only_one_node_moves(x[node], -dx, x[v0], zero, x[v1], zero, x[v2], zero, 1.0e-12, false));
-        }
+        const int triangle_rb = owning_rb_for_node(ref_mesh.node_to_rb, pair.tri_v[0]);
+        if (node_rb == triangle_rb || (node_rb != rb && triangle_rb != rb))
+            continue;
+        const std::array<AABB, 4> node_boxes = {translated_node_swept_aabb(node, x, ref_mesh.node_to_rb, rb, dx), translated_node_swept_aabb(pair.tri_v[0], x, ref_mesh.node_to_rb, rb, dx), translated_node_swept_aabb(pair.tri_v[1], x, ref_mesh.node_to_rb, rb, dx), translated_node_swept_aabb(pair.tri_v[2], x, ref_mesh.node_to_rb, rb, dx)};
+        if (!node_triangle_swept_aabbs_intersect(node_boxes))
+            continue;
+        if (node_rb == rb)
+            consider(node_triangle_only_one_node_moves(x[node], dx, x[pair.tri_v[0]], zero, x[pair.tri_v[1]], zero, x[pair.tri_v[2]], zero, 1.0e-12, false));
+        else
+            consider(node_triangle_only_one_node_moves(x[node], -dx, x[pair.tri_v[0]], zero, x[pair.tri_v[1]], zero, x[pair.tri_v[2]], zero, 1.0e-12, false));
     }
 
-    for (int first = 0; first < static_cast<int>(edges.size()); ++first) {
-        const int a0 = edges[first][0];
-        const int a1 = edges[first][1];
-        const int first_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, a0);
-        for (int second = first + 1; second < static_cast<int>(edges.size()); ++second) {
-            const int b0 = edges[second][0];
-            const int b1 = edges[second][1];
-            if (a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1)
-                continue;
-            const int second_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, b0);
-            if (first_edge_rb == second_edge_rb || (first_edge_rb != rb && second_edge_rb != rb))
-                continue;
-            if (first_edge_rb == rb)
-                consider(segment_segment_same_displacement_linear_ccd(x[a0], dx, x[a1], dx, x[b0], x[b1], 1.0e-12));
-            else
-                consider(segment_segment_same_displacement_linear_ccd(x[b0], dx, x[b1], dx, x[a0], x[a1], 1.0e-12));
-        }
+    for (const int pair_index : ss_pair_indices) {
+        const SegmentSegmentPair& pair = bp_cache.ss_pairs[pair_index];
+        const int first_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, pair.v[0]);
+        const int second_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, pair.v[2]);
+        if (first_edge_rb == second_edge_rb || (first_edge_rb != rb && second_edge_rb != rb))
+            continue;
+        const std::array<AABB, 4> node_boxes = {translated_node_swept_aabb(pair.v[0], x, ref_mesh.node_to_rb, rb, dx), translated_node_swept_aabb(pair.v[1], x, ref_mesh.node_to_rb, rb, dx), translated_node_swept_aabb(pair.v[2], x, ref_mesh.node_to_rb, rb, dx), translated_node_swept_aabb(pair.v[3], x, ref_mesh.node_to_rb, rb, dx)};
+        if (!segment_segment_swept_aabbs_intersect(node_boxes))
+            continue;
+        if (first_edge_rb == rb)
+            consider(segment_segment_same_displacement_linear_ccd(x[pair.v[0]], dx, x[pair.v[1]], dx, x[pair.v[2]], x[pair.v[3]], 1.0e-12));
+        else
+            consider(segment_segment_same_displacement_linear_ccd(x[pair.v[2]], dx, x[pair.v[3]], dx, x[pair.v[0]], x[pair.v[1]], 1.0e-12));
     }
 
     return has_collision ? safety * toi_min : 1.0;
 }
 
-double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const std::vector<std::array<int, 2>>& edges, const std::vector<Vec3>& x, int rb, const Vec3& x_com, const Vec4& q_current, const Vec4& q_target, double safety) {
+Vec4 bound_quaternion(const Vec4& q_box_anchor, const Vec4& q_current, const Vec4& q_target, double theta_bound) {
+    const Vec4 current = quaternion_normalize(q_current);
+    const Vec4 target = quaternion_normalize(q_target);
+    const Vec4 relative = quaternion_normalize(quaternion_multiply(target, quaternion_conjugate(current)));
+    const Vec3 vector_part = relative.tail<3>();
+    const double sin_half_arc = vector_part.norm();
+    constexpr double full_turn_axis_tolerance = 64.0 * std::numeric_limits<double>::epsilon();
+    if (relative[0] < 0.0 && sin_half_arc <= full_turn_axis_tolerance)
+        throw std::invalid_argument("bound_quaternion cannot determine the axis of an exact full turn");
+    if (theta_bound >= M_PI || (relative[0] >= 0.0 && sin_half_arc == 0.0))
+        return target;
+
+    const Vec4 box_anchor = quaternion_normalize(q_box_anchor);
+    const double half_arc = std::atan2(sin_half_arc, relative[0]);
+    const Vec4 tangent = quaternion_multiply(Vec4(0.0, vector_part.x() / sin_half_arc, vector_part.y() / sin_half_arc, vector_part.z() / sin_half_arc), current);
+    const double box_dot_current = box_anchor.dot(current);
+    const double sign = box_dot_current < 0.0 ? -1.0 : 1.0;
+    const double a = std::abs(box_dot_current);
+    const double b = sign * box_anchor.dot(tangent);
+    const double cap_cosine = std::cos(0.5 * std::max(0.0, theta_bound));
+    assert(a + 1.0e-12 >= cap_cosine && "bound_quaternion: current orientation is outside its cached cap");
+    const double amplitude = std::hypot(a, b);
+    const double phase = std::atan2(b, a);
+    const double boundary_sine = std::sqrt(std::max(0.0, amplitude * amplitude - cap_cosine * cap_cosine));
+    const double boundary_offset = std::atan2(boundary_sine, cap_cosine);
+    const double first_exit = std::max(0.0, phase + boundary_offset);
+    const double alpha = first_exit >= half_arc ? 1.0 : std::clamp(first_exit / half_arc, 0.0, 1.0);
+    return interpolate_orientation_full_arc(current, target, alpha);
+}
+
+double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& x_com, const Vec4& q_current, const Vec4& q_target, double safety) {
     assert(rb >= 0);
     assert(safety >= 0.0 && safety <= 1.0);
 
@@ -227,6 +286,8 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const std::vec
     const Vec4 proposed = quaternion_normalize(q_target);
     const Vec4 q_reverse = quaternion_normalize(quaternion_multiply(current, quaternion_conjugate(proposed)));
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 relative = quaternion_normalize(quaternion_multiply(proposed, quaternion_conjugate(current)));
+    const double theta = 2.0 * std::atan2(relative.tail<3>().norm(), relative[0]);
 
     double toi_min = 1.0;
     bool has_collision = false;
@@ -237,43 +298,37 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const std::vec
         toi_min = std::min(toi_min, toi);
     };
 
-    for (int node = 0; node < static_cast<int>(x.size()); ++node) {
+    for (const int pair_index : nt_pair_indices) {
+        const NodeTrianglePair& pair = bp_cache.nt_pairs[pair_index];
+        const int node = pair.node;
         const int node_rb = owning_rb_for_node(ref_mesh.node_to_rb, node);
-        for (int tri = 0; tri < num_tris(ref_mesh); ++tri) {
-            const int v0 = tri_vertex(ref_mesh, tri, 0);
-            const int v1 = tri_vertex(ref_mesh, tri, 1);
-            const int v2 = tri_vertex(ref_mesh, tri, 2);
-            if (node == v0 || node == v1 || node == v2)
-                continue;
-            const int triangle_rb = owning_rb_for_node(ref_mesh.node_to_rb, v0);
-            if (node_rb == triangle_rb || (node_rb != rb && triangle_rb != rb))
-                continue;
-            double toi = 0.0;
-            if (node_rb == rb)
-                consider(point_triangle_rb_rotation_ccd(x[node], x_com, proposed, current, x[v0], x[v1], x[v2], toi), toi);
-            else
-                consider(point_triangle_rb_rotation_ccd(x[node], x_com, q_reverse, identity, x[v0], x[v1], x[v2], toi), toi);
-        }
+        const int triangle_rb = owning_rb_for_node(ref_mesh.node_to_rb, pair.tri_v[0]);
+        if (node_rb == triangle_rb || (node_rb != rb && triangle_rb != rb))
+            continue;
+        const std::array<AABB, 4> node_boxes = {rotated_node_swept_aabb(node, x, ref_mesh.node_to_rb, rb, x_com, current, theta), rotated_node_swept_aabb(pair.tri_v[0], x, ref_mesh.node_to_rb, rb, x_com, current, theta), rotated_node_swept_aabb(pair.tri_v[1], x, ref_mesh.node_to_rb, rb, x_com, current, theta), rotated_node_swept_aabb(pair.tri_v[2], x, ref_mesh.node_to_rb, rb, x_com, current, theta)};
+        if (!node_triangle_swept_aabbs_intersect(node_boxes))
+            continue;
+        double toi = 0.0;
+        if (node_rb == rb)
+            consider(point_triangle_rb_rotation_ccd(x[node], x_com, proposed, current, x[pair.tri_v[0]], x[pair.tri_v[1]], x[pair.tri_v[2]], toi), toi);
+        else
+            consider(point_triangle_rb_rotation_ccd(x[node], x_com, q_reverse, identity, x[pair.tri_v[0]], x[pair.tri_v[1]], x[pair.tri_v[2]], toi), toi);
     }
 
-    for (int first = 0; first < static_cast<int>(edges.size()); ++first) {
-        const int a0 = edges[first][0];
-        const int a1 = edges[first][1];
-        const int first_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, a0);
-        for (int second = first + 1; second < static_cast<int>(edges.size()); ++second) {
-            const int b0 = edges[second][0];
-            const int b1 = edges[second][1];
-            if (a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1)
-                continue;
-            const int second_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, b0);
-            if (first_edge_rb == second_edge_rb || (first_edge_rb != rb && second_edge_rb != rb))
-                continue;
-            double toi = 0.0;
-            if (first_edge_rb == rb)
-                consider(segment_segment_rb_rotation_ccd(x[a0], x[a1], x_com, proposed, current, x[b0], x[b1], toi), toi);
-            else
-                consider(segment_segment_rb_rotation_ccd(x[a0], x[a1], x_com, q_reverse, identity, x[b0], x[b1], toi), toi);
-        }
+    for (const int pair_index : ss_pair_indices) {
+        const SegmentSegmentPair& pair = bp_cache.ss_pairs[pair_index];
+        const int first_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, pair.v[0]);
+        const int second_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, pair.v[2]);
+        if (first_edge_rb == second_edge_rb || (first_edge_rb != rb && second_edge_rb != rb))
+            continue;
+        const std::array<AABB, 4> node_boxes = {rotated_node_swept_aabb(pair.v[0], x, ref_mesh.node_to_rb, rb, x_com, current, theta), rotated_node_swept_aabb(pair.v[1], x, ref_mesh.node_to_rb, rb, x_com, current, theta), rotated_node_swept_aabb(pair.v[2], x, ref_mesh.node_to_rb, rb, x_com, current, theta), rotated_node_swept_aabb(pair.v[3], x, ref_mesh.node_to_rb, rb, x_com, current, theta)};
+        if (!segment_segment_swept_aabbs_intersect(node_boxes))
+            continue;
+        double toi = 0.0;
+        if (first_edge_rb == rb)
+            consider(segment_segment_rb_rotation_ccd(x[pair.v[0]], x[pair.v[1]], x_com, proposed, current, x[pair.v[2]], x[pair.v[3]], toi), toi);
+        else
+            consider(segment_segment_rb_rotation_ccd(x[pair.v[0]], x[pair.v[1]], x_com, q_reverse, identity, x[pair.v[2]], x[pair.v[3]], toi), toi);
     }
 
     return has_collision ? safety * toi_min : 1.0;

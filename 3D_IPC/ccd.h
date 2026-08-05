@@ -1,7 +1,6 @@
 #pragma once
 
 #include "IPC_math.h"
-#include "algebra/algebra.h"
 
 #include <limits>
 

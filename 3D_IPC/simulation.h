@@ -18,8 +18,7 @@ using PinTargetUpdater = std::function<void(std::vector<Pin>& pins, double t)>;
 // Called after each substep with the global substep index (0-based) and current positions.
 using SubstepCallback = std::function<void(int, const std::vector<Vec3>&)>;
 
-inline void sync_rigid_body_particles(
-    const RefMesh& ref_mesh, DeformedState& state) {
+inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& state) {
     if (ref_mesh.rb_nodes.empty())
         return;
 
@@ -29,8 +28,7 @@ inline void sync_rigid_body_particles(
         || state.v_coms.size() != num_rbs
         || state.orientations.size() != num_rbs
         || state.omega.size() != num_rbs) {
-        throw std::invalid_argument(
-            "sync_rigid_body_particles: inconsistent rigid-body array sizes");
+        throw std::invalid_argument("sync_rigid_body_particles: inconsistent rigid-body array sizes");
     }
 
     if (state.velocities.size() < state.deformed_positions.size())
@@ -40,31 +38,24 @@ inline void sync_rigid_body_particles(
         const auto& nodes = ref_mesh.rb_nodes[rb];
         const auto& ref_positions = ref_mesh.ref_positions[rb];
         if (nodes.size() != ref_positions.size()) {
-            throw std::invalid_argument(
-                "sync_rigid_body_particles: node and reference-position counts differ");
+            throw std::invalid_argument("sync_rigid_body_particles: node and reference-position counts differ");
         }
 
         for (std::size_t local = 0; local < nodes.size(); ++local) {
             const int node = nodes[local];
             if (node < 0
                 || node >= static_cast<int>(state.deformed_positions.size())) {
-                throw std::out_of_range(
-                    "sync_rigid_body_particles: node index is out of range");
+                throw std::out_of_range("sync_rigid_body_particles: node index is out of range");
             }
-            const Vec3 world_offset = quaternion_rotate(
-                state.orientations[rb], ref_positions[local]);
+            const Vec3 world_offset = quaternion_rotate(state.orientations[rb], ref_positions[local]);
             state.deformed_positions[node] = state.x_coms[rb] + world_offset;
-            state.velocities[node] =
-                state.v_coms[rb] + state.omega[rb].cross(world_offset);
+            state.velocities[node] = state.v_coms[rb] + state.omega[rb].cross(world_offset);
         }
     }
 }
 
-// Advance a rigid-body-only frame. Collision handling is intentionally absent.
-inline SolverResult advance_one_frame_rb(
-    DeformedState& state, const RefMesh& ref_mesh,
-    const SimParams& params, int frame_index = 1,
-    SubstepCallback on_substep = nullptr) {
+// Advance a rigid-body-only frame.
+inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& ref_mesh, const SimParams& params, int frame_index = 1, SubstepCallback on_substep = nullptr) {
     SolverResult agg;
     const double dt = params.dt();
 
@@ -73,9 +64,7 @@ inline SolverResult advance_one_frame_rb(
         std::vector<Vec4> q_new = state.orientations;
         std::vector<Vec3> omega_new = state.omega;
 
-        const SolverResult sub_result = global_gauss_seidel_solver_basic_rb(
-            ref_mesh, state, params, x_com_new,
-            q_new, omega_new, params.verbose);
+        const SolverResult sub_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new, params.verbose);
         accumulate_solver_result(agg, sub_result, sub == 0);
 
         if (!sub_result.converged)
