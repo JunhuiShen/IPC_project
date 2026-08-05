@@ -62,7 +62,7 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
     for (int sub = 0; sub < params.substeps; ++sub) {
         std::vector<Vec3> x_com_new = state.x_coms;
         std::vector<Vec4> q_new = state.orientations;
-        std::vector<Vec3> omega_new = state.omega;
+        std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
 
         const SolverResult sub_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new, params.verbose);
         accumulate_solver_result(agg, sub_result, sub == 0);

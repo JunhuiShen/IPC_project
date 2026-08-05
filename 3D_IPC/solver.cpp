@@ -736,10 +736,9 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
     static RigidSolverWorkspace workspace;
     workspace.prepare(ref_mesh, static_cast<int>(state.deformed_positions.size()), params.node_box_max, params.theta_box_max);
 
-    // Start the nonlinear solve from the previous collision-free configuration.
-    // The previous angular velocity remains in state.omega and enters the inertial energy; omega_new is the rotation increment from q_n.
-    omega_new.assign(num_rbs, Vec3::Zero());
-    q_new = state.orientations;
+    // The caller supplies the initial collision-free configuration, with
+    // omega_new storing the rotation increment from q_n. The previous physical
+    // angular velocity remains in state.omega and enters the inertial energy.
     workspace.substep_start_coms = x_com_new;
     rb_solver::construct_current_rigid_node_positions(ref_mesh, state, x_com_new, omega_new, dt, workspace.positions);
 

@@ -955,7 +955,8 @@ TEST(RigidBodyIPCSolver, AddsNaiveRigidBarrierTranslationAndOrientationTerms) {
         residual_params.max_global_iters = 0;
         std::vector<Vec3> residual_x_com_new = state.x_coms;
         std::vector<Vec4> residual_q_new = state.orientations;
-        std::vector<Vec3> residual_omega_new = state.omega;
+        std::vector<Vec3> residual_omega_new(
+            state.omega.size(), Vec3::Zero());
         const SolverResult residual_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, residual_params, residual_x_com_new, residual_q_new, residual_omega_new);
         EXPECT_TRUE(residual_result.has_residual);
         EXPECT_GT(residual_result.initial_residual, 1.0e-8);
@@ -1001,7 +1002,7 @@ TEST(RigidBodyIPCSolver, AddsNaiveRigidBarrierTranslationAndOrientationTerms) {
 
     std::vector<Vec3> x_com_new = state.x_coms;
     std::vector<Vec4> q_new = state.orientations;
-    std::vector<Vec3> omega_new = state.omega;
+    std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
     const SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new);
 
     EXPECT_TRUE(result.converged);
@@ -1067,7 +1068,7 @@ TEST(RigidBodyIPCSolver, ParallelBodiesStayInsideCachedBlueBoxes) {
 
     std::vector<Vec3> parallel_coms = state.x_coms;
     std::vector<Vec4> parallel_orientations = state.orientations;
-    std::vector<Vec3> parallel_omega = state.omega;
+    std::vector<Vec3> parallel_omega(state.omega.size(), Vec3::Zero());
     const SolverResult parallel_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, parallel_coms, parallel_orientations, parallel_omega);
     EXPECT_TRUE(parallel_result.converged);
 
@@ -1083,7 +1084,7 @@ TEST(RigidBodyIPCSolver, ParallelBodiesStayInsideCachedBlueBoxes) {
     params.use_parallel = false;
     std::vector<Vec3> serial_coms = state.x_coms;
     std::vector<Vec4> serial_orientations = state.orientations;
-    std::vector<Vec3> serial_omega = state.omega;
+    std::vector<Vec3> serial_omega(state.omega.size(), Vec3::Zero());
     const SolverResult serial_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, serial_coms, serial_orientations, serial_omega);
     EXPECT_TRUE(serial_result.converged);
     for (int rb = 0; rb < 2; ++rb) {
@@ -1096,7 +1097,7 @@ TEST(RigidBodyIPCSolver, ParallelBodiesStayInsideCachedBlueBoxes) {
     params.node_box_update_count = 1;
     std::vector<Vec3> rebuilt_coms = state.x_coms;
     std::vector<Vec4> rebuilt_orientations = state.orientations;
-    std::vector<Vec3> rebuilt_omega = state.omega;
+    std::vector<Vec3> rebuilt_omega(state.omega.size(), Vec3::Zero());
     global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, rebuilt_coms, rebuilt_orientations, rebuilt_omega);
     for (int rb = 0; rb < 2; ++rb) {
         EXPECT_GT((rebuilt_coms[rb] - state.x_coms[rb]).cwiseAbs().maxCoeff(), params.node_box_max);
