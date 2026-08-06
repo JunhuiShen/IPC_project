@@ -820,12 +820,11 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
             const Vec4 q_accepted = interpolate_orientation_full_arc(q_current, q_bounded, rotation_safe_step);
             q_new[rb] = q_accepted;
             
-            const Vec4 q_n = quaternion_normalize(state.orientations[rb]);
-            const Vec4 q_dot = (q_accepted - q_n) / dt;
-            const Vec4 omega_quaternion = 2.0 * quaternion_multiply(q_dot, quaternion_inverse(q_accepted));
-            omega_new[rb] = omega_quaternion.tail<3>();
-            // omega_new[rb] = angular_velocity_from_orientation_full_arc(
-            //     q_accepted, state.orientations[rb], dt);
+            // const Vec4 q_n = quaternion_normalize(state.orientations[rb]);
+            // const Vec4 q_dot = (q_accepted - q_n) / dt;
+            // const Vec4 omega_quaternion = 2.0 * quaternion_multiply(q_dot, quaternion_inverse(q_accepted));
+            // omega_new[rb] = omega_quaternion.tail<3>();
+            omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, state.orientations[rb], dt);
 
 
             for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local)
