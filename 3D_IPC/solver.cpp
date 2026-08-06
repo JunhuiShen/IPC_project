@@ -455,9 +455,10 @@ const Vec3& rigid_node_body_space_position(int node, const RefMesh& ref_mesh, co
 void construct_current_rigid_node_positions(const RefMesh& ref_mesh, const DeformedState& state, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, double dt, std::vector<Vec3>& positions) {
     positions = state.deformed_positions;
     for (int rb = 0; rb < static_cast<int>(ref_mesh.rb_nodes.size()); ++rb) {
+        const Vec4 orientation = quaternion_from_angular_velocity(state.orientations[rb], omega_new[rb], dt);
         for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local) {
             const int node = ref_mesh.rb_nodes[rb][local];
-            positions[node] = world_space_position(ref_mesh.ref_positions[rb][local], x_com_new[rb], state.orientations[rb], omega_new[rb], dt);
+            positions[node] = world_space_position(ref_mesh.ref_positions[rb][local], x_com_new[rb], orientation);
         }
     }
 }
@@ -475,6 +476,14 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
     if (params.d_hat <= 0.0 || params.k_barrier <= 0.0)
         return total;
     const double d_hat2 = params.d_hat * params.d_hat;
+    QuaternionOmegaKinematics kinematics;
+    const bool needs_orientation_derivatives = mode == RigidDerivativeMode::Full || mode == RigidDerivativeMode::Gradient || mode == RigidDerivativeMode::OrientationHessian;
+    const QuaternionOmegaKinematics* cached_kinematics = nullptr;
+    if (needs_orientation_derivatives && (!nt_pair_indices.empty() || !ss_pair_indices.empty())) {
+        const bool needs_second_derivatives = mode == RigidDerivativeMode::Full || mode == RigidDerivativeMode::OrientationHessian;
+        kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, needs_second_derivatives);
+        cached_kinematics = &kinematics;
+    }
 
     for (const int pair_index : nt_pair_indices) {
         const NodeTrianglePair& pair = bp_cache.nt_pairs[pair_index];
@@ -488,10 +497,10 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
             continue;
         if (node_rb == rb) {
             const std::array<Vec3, 4> references = {rigid_node_body_space_position(node, ref_mesh, node_to_rb_local), Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
-            add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode));
+            add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics));
         } else {
             const std::array<Vec3, 4> references = {Vec3::Zero(), rigid_node_body_space_position(v0, ref_mesh, node_to_rb_local), rigid_node_body_space_position(v1, ref_mesh, node_to_rb_local), rigid_node_body_space_position(v2, ref_mesh, node_to_rb_local)};
-            add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode));
+            add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics));
         }
     }
 
@@ -507,10 +516,10 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
             continue;
         if (first_edge_rb == rb) {
             const std::array<Vec3, 4> references = {rigid_node_body_space_position(a0, ref_mesh, node_to_rb_local), rigid_node_body_space_position(a1, ref_mesh, node_to_rb_local), Vec3::Zero(), Vec3::Zero()};
-            add_rigid_derivatives(total, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode));
+            add_rigid_derivatives(total, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics));
         } else {
             const std::array<Vec3, 4> references = {Vec3::Zero(), Vec3::Zero(), rigid_node_body_space_position(b0, ref_mesh, node_to_rb_local), rigid_node_body_space_position(b1, ref_mesh, node_to_rb_local)};
-            add_rigid_derivatives(total, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode));
+            add_rigid_derivatives(total, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics));
         }
     }
 
@@ -543,14 +552,15 @@ void add_rigid_sdf_gradients(const std::vector<Vec3>& ref_positions, const Vec3&
         return;
 
     const double dt2 = dt * dt;
+    const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(q_n, omega_new, dt);
     for (const Vec3& X_centered : ref_positions) {
-        const Vec3 x = world_space_position(X_centered, x_com_new, q_n, omega_new, dt);
+        const Vec3 x = world_space_position(X_centered, x_com_new, kinematics.orientation);
         SDFEvaluation sdf;
         if (!rigid_sdf_min_evaluation(params, x, sdf))
             continue;
 
         const Vec3 gx = sdf_penalty_gradient(sdf, params.k_sdf, params.eps_sdf);
-        const Mat33 J_xomega = dx_domega(X_centered, q_n, omega_new, dt);
+        const Mat33 J_xomega = dx_domega(X_centered, kinematics);
         translation_gradient += dt2 * gx;
         orientation_gradient += dt2 * J_xomega.transpose() * gx;
     }
@@ -561,8 +571,9 @@ void add_rigid_sdf_translation_terms(const std::vector<Vec3>& ref_positions, con
         return;
 
     const double dt2 = dt * dt;
+    const Vec4 orientation = quaternion_from_angular_velocity(q_n, omega_new, dt);
     for (const Vec3& X_centered : ref_positions) {
-        const Vec3 x = world_space_position(X_centered, x_com_new, q_n, omega_new, dt);
+        const Vec3 x = world_space_position(X_centered, x_com_new, orientation);
         SDFEvaluation sdf;
         if (!rigid_sdf_min_evaluation(params, x, sdf))
             continue;
@@ -577,13 +588,14 @@ void add_rigid_sdf_orientation_terms(const std::vector<Vec3>& ref_positions, con
         return;
 
     const double dt2 = dt * dt;
+    const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(q_n, omega_new, dt);
     for (const Vec3& X_centered : ref_positions) {
-        const Vec3 x = world_space_position(X_centered, x_com_new, q_n, omega_new, dt);
+        const Vec3 x = world_space_position(X_centered, x_com_new, kinematics.orientation);
         SDFEvaluation sdf;
         if (!rigid_sdf_min_evaluation(params, x, sdf))
             continue;
 
-        const RigidEnergyDerivatives derivatives = sdf_penalty_derivatives_rb(sdf, X_centered, q_n, omega_new, dt, params.k_sdf, params.eps_sdf, false, false);
+        const RigidEnergyDerivatives derivatives = sdf_penalty_derivatives_rb(sdf, X_centered, kinematics, params.k_sdf, params.eps_sdf, false, false);
         gradient += dt2 * derivatives.orientation_gradient;
         hessian += dt2 * derivatives.orientation_orientation_hessian;
     }
@@ -613,7 +625,7 @@ double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedS
         Vec3 com_gradient = inertia_translation_gradient(x_com_new[rb], state.x_coms[rb], state.v_coms[rb], dt, ref_mesh.total_mass[rb]);
         com_gradient -= gravitational_potential_gradient(ref_mesh.total_mass[rb], params.gravity.y(), dt);
 
-        Vec3 orientation_gradient = inertia_rotation_gradient_hessian(omega_new[rb], state.orientations[rb], state.omega[rb], dt, ref_mesh.I_hat[rb]).first;
+        Vec3 orientation_gradient = inertia_rotation_gradient(omega_new[rb], state.orientations[rb], state.omega[rb], dt, ref_mesh.I_hat[rb]);
         add_rigid_sdf_gradients(ref_mesh.ref_positions[rb], x_com_new[rb], state.orientations[rb], omega_new[rb], params, dt, com_gradient, orientation_gradient);
         const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, body_nt_pair_indices[rb], body_ss_pair_indices[rb], node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::Gradient);
         com_gradient += barrier_scale * barrier.translation_gradient;

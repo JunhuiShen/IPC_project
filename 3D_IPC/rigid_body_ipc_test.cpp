@@ -86,8 +86,9 @@ double rotation_safe_step_for_test(const RefMesh& ref_mesh, const std::vector<st
 
 OmegaNodeEnergy evaluate_omega_node_energy(const Vec3& X_centered, const Vec3& target, const Vec3& x_com, const Vec4& q0, const Vec3& omega, double dt) {
     const Vec3 x = world_space_position(X_centered, x_com, q0, omega, dt);
-    const Mat33 J_xomega = dx_domega(X_centered, q0, omega, dt);
-    const std::array<Mat33, 3> H_xomega = d2x_domega2(X_centered, q0, omega, dt);
+    const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(q0, omega, dt, true);
+    const Mat33 J_xomega = dx_domega(X_centered, kinematics);
+    const std::array<Mat33, 3> H_xomega = d2x_domega2(X_centered, kinematics);
     const Vec3 gx = x - target;
     const Vec3 omega_gradient = rigid_node_omega_gradient(gx, J_xomega);
     const Mat33 omega_hessian = rigid_node_omega_hessian(gx, Mat33::Identity(), J_xomega, H_xomega);
@@ -646,7 +647,7 @@ TEST(RigidBodyIPCOmegaNodeKinematics, JacobianConvergesQuadratically) {
     const Vec4 q0 = reference_quaternion_from_rotation_vector(Vec3(0.2, -0.1, 0.3));
     const Vec3 omega(0.7, -0.4, 0.2);
     constexpr double dt = 1.3;
-    const Mat33 exact = dx_domega(X_centered, q0, omega, dt);
+    const Mat33 exact = dx_domega(X_centered, quaternion_omega_kinematics(q0, omega, dt));
     std::vector<double> errors(kConvergenceHs.size());
 
     for (std::size_t hi = 0; hi < kConvergenceHs.size(); ++hi) {
@@ -670,7 +671,7 @@ TEST(RigidBodyIPCOmegaNodeKinematics, SecondDerivativeConvergesQuadratically) {
     const Vec4 q0 = reference_quaternion_from_rotation_vector(Vec3(0.2, -0.1, 0.3));
     const Vec3 omega(0.7, -0.4, 0.2);
     constexpr double dt = 1.3;
-    const std::array<Mat33, 3> exact = d2x_domega2(X_centered, q0, omega, dt);
+    const std::array<Mat33, 3> exact = d2x_domega2(X_centered, quaternion_omega_kinematics(q0, omega, dt, true));
     std::vector<double> errors(kConvergenceHs.size());
 
     for (std::size_t hi = 0; hi < kConvergenceHs.size(); ++hi) {
@@ -679,9 +680,11 @@ TEST(RigidBodyIPCOmegaNodeKinematics, SecondDerivativeConvergesQuadratically) {
         for (int gamma = 0; gamma < 3; ++gamma) {
             Vec3 step = Vec3::Zero();
             step[gamma] = h;
+            const QuaternionOmegaKinematics plus_kinematics = quaternion_omega_kinematics(q0, omega + step, dt);
+            const QuaternionOmegaKinematics minus_kinematics = quaternion_omega_kinematics(q0, omega - step, dt);
             const Mat33 finite_difference =
-                (dx_domega(X_centered, q0, omega + step, dt)
-                 - dx_domega(X_centered, q0, omega - step, dt)) / (2.0 * h);
+                (dx_domega(X_centered, plus_kinematics)
+                 - dx_domega(X_centered, minus_kinematics)) / (2.0 * h);
             for (int c = 0; c < 3; ++c) {
                 const Vec3 error = finite_difference.row(c).transpose()
                     - exact[c].col(gamma);
@@ -692,6 +695,37 @@ TEST(RigidBodyIPCOmegaNodeKinematics, SecondDerivativeConvergesQuadratically) {
     }
 
     expect_quadratic_convergence(kConvergenceHs, errors);
+}
+
+TEST(RigidBodyIPCOmegaNodeKinematics, QuaternionDerivativeCacheMatchesPrimitiveEvaluationsExactly) {
+    const Vec3 X_centered(0.4, -0.7, 1.1);
+    const Vec4 q0 = reference_quaternion_from_rotation_vector(Vec3(0.2, -0.1, 0.3));
+    const Vec3 omega(0.7, -0.4, 0.2);
+    constexpr double dt = 1.3;
+
+    const QuaternionOmegaKinematics first_order = quaternion_omega_kinematics(q0, omega, dt);
+    EXPECT_FALSE(first_order.has_second_derivatives);
+    const Vec4 direct_orientation = quaternion_from_angular_velocity(q0, omega, dt);
+    const Mat43 direct_orientation_jacobian = dq_domega(q0, omega, dt);
+    for (int row = 0; row < 4; ++row) {
+        EXPECT_EQ(first_order.orientation[row], direct_orientation[row]);
+        for (int column = 0; column < 3; ++column)
+            EXPECT_EQ(first_order.orientation_jacobian(row, column), direct_orientation_jacobian(row, column));
+    }
+
+    const QuaternionOmegaKinematics second_order = quaternion_omega_kinematics(q0, omega, dt, true);
+    EXPECT_TRUE(second_order.has_second_derivatives);
+    const std::array<Mat33, 4> direct_orientation_hessians = d2q_domega2(q0, omega, dt);
+    for (int coordinate = 0; coordinate < 4; ++coordinate) {
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column)
+                EXPECT_EQ(second_order.orientation_hessians[coordinate](row, column), direct_orientation_hessians[coordinate](row, column));
+        }
+    }
+
+    EXPECT_TRUE(dx_domega(X_centered, first_order).allFinite());
+    for (const Mat33& hessian : d2x_domega2(X_centered, second_order))
+        EXPECT_TRUE(hessian.allFinite());
 }
 
 TEST(RigidBodyIPCOmegaNodeDerivatives, CenteredDifferenceConvergesQuadratically) {
@@ -787,6 +821,9 @@ TEST(RigidBodyIPCInertialEnergy, OmegaDerivativesConvergeQuadratically) {
     const Vec3 omega_n(-0.2, 0.5, 0.4);
     const Mat33 I_hat = body_second_moment(masses, R_p);
     const auto [exact_gradient, exact_hessian] = inertia_rotation_gradient_hessian(omega, q_n, omega_n, dt, I_hat);
+    const Vec3 gradient_only = inertia_rotation_gradient(omega, q_n, omega_n, dt, I_hat);
+    for (int coordinate = 0; coordinate < 3; ++coordinate)
+        EXPECT_EQ(gradient_only[coordinate], exact_gradient[coordinate]);
     std::vector<double> gradient_errors(kConvergenceHs.size());
     std::vector<double> hessian_errors(kConvergenceHs.size());
 

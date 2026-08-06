@@ -484,7 +484,7 @@ struct RigidSDFSetup {
         return sdf_penalty_energy(sdf_at(t, w), k, eps);
     }
     RigidEnergyDerivatives derivatives_at(const Vec3& t, const Vec3& w) const {
-        return sdf_penalty_derivatives_rb(sdf_at(t, w), X_centered, q_n, w, dt, k, eps);
+        return sdf_penalty_derivatives_rb(sdf_at(t, w), X_centered, quaternion_omega_kinematics(q_n, w, dt, true), k, eps);
     }
 };
 
@@ -539,7 +539,7 @@ TEST(RigidBodySDFPenalty, HessianConvergesWithCenteredDifferences){
     const RigidSDFSetup s;
     const std::vector<double> hs = {1.0e-2, 5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4};
 
-    const RigidEnergyDerivatives analytic = sdf_penalty_derivatives_rb(s.sdf_at(s.x_com, s.omega), s.X_centered, s.q_n, s.omega, s.dt, s.k, s.eps);
+    const RigidEnergyDerivatives analytic = sdf_penalty_derivatives_rb(s.sdf_at(s.x_com, s.omega), s.X_centered, quaternion_omega_kinematics(s.q_n, s.omega, s.dt, true), s.k, s.eps);
 
     EXPECT_TRUE(analytic.translation_translation_hessian.isApprox(analytic.translation_translation_hessian.transpose(), 1e-12));
     EXPECT_TRUE(analytic.orientation_orientation_hessian.isApprox(analytic.orientation_orientation_hessian.transpose(), 1e-12));

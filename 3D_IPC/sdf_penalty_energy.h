@@ -50,4 +50,4 @@ Vec3   sdf_penalty_gradient(const SDFEvaluation& sdf, double k, double eps);
 Mat33  sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double eps,
                            bool include_curvature = true);
 
-RigidEnergyDerivatives sdf_penalty_derivatives_rb(const SDFEvaluation& sdf, const Vec3& X_centered, const Vec4& q_n, const Vec3& omega, double dt, double k, double eps, bool include_sdf_curvature = true, bool include_rigid_curvature = true);
+RigidEnergyDerivatives sdf_penalty_derivatives_rb(const SDFEvaluation& sdf, const Vec3& X_centered, const QuaternionOmegaKinematics& kinematics, double k, double eps, bool include_sdf_curvature = true, bool include_rigid_curvature = true);

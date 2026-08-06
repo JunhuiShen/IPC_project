@@ -51,6 +51,16 @@ Mat33 rotation_residual(const Vec3& omega, const Vec4& q_n, const Vec3& omega_n,
 
 // For E_q = 1/2 tr(D I_hat D^T), (g_q)_alpha = tr(D^T G_alpha I_hat) and
 // (H_qq)_{alpha,beta} = tr(G_alpha^T G_beta I_hat) + tr(D^T K_{alpha,beta} I_hat).
+Vec4 quaternion_inertia_gradient(const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, double dt, const Mat33& I_hat) {
+    Vec4 g_q = Vec4::Zero();
+    const Vec4 q = quaternion_from_angular_velocity(q_n, omega, dt);
+    const Mat33 D = rotation_residual(omega, q_n, omega_n, dt);
+    const std::array<Mat33, 4> G = dRh_dq(q);
+    for (int alpha = 0; alpha < 4; ++alpha)
+        g_q[alpha] = (D.transpose() * G[alpha] * I_hat).trace();
+    return g_q;
+}
+
 std::pair<Vec4, Mat44> quaternion_inertia_derivatives(const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, double dt, const Mat33& I_hat) {
     Vec4 g_q = Vec4::Zero(); // g_q = partial E_q / partial q.
     Mat44 H_qq = Mat44::Zero(); // H_qq = partial^2 E_q / partial q^2.
@@ -462,6 +472,18 @@ Mat33 inertia_translation_hessian(double total_mass) {
     return hessian;
 }
 
+Vec3 inertia_rotation_gradient(const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, double dt, const Mat33& I_hat) {
+    assert(std::abs(q_n.squaredNorm() - 1.0) < 1.0e-10 && "q_n must be a unit quaternion");
+    const Vec4 g_q = quaternion_inertia_gradient(omega, q_n, omega_n, dt, I_hat);
+    const Mat43 J_qomega = dq_domega(q_n, omega, dt);
+    Vec3 gradient = Vec3::Zero();
+    for (int beta = 0; beta < 3; ++beta) {
+        for (int alpha = 0; alpha < 4; ++alpha)
+            gradient[beta] += g_q[alpha] * J_qomega(alpha, beta);
+    }
+    return gradient;
+}
+
 // g_omega = J_qomega^T g_q and H_omegaomega = J_qomega^T H_qq J_qomega + sum_alpha (g_q)_alpha H_omegaomega^{q_alpha}.
 std::pair<Vec3, Mat33> inertia_rotation_gradient_hessian(const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, double dt, const Mat33& I_hat) {
     assert(std::abs(q_n.squaredNorm() - 1.0) < 1.0e-10 && "q_n must be a unit quaternion");
@@ -524,25 +546,33 @@ std::array<Mat33, 4> d2q_domega2(const Vec4& q0, const Vec3& omega, double dt) {
     return result;
 }
 
+QuaternionOmegaKinematics quaternion_omega_kinematics(const Vec4& q0, const Vec3& omega, double dt, bool with_second_derivatives) {
+    QuaternionOmegaKinematics result;
+    result.orientation = quaternion_from_angular_velocity(q0, omega, dt);
+    result.orientation_jacobian = dq_domega(q0, omega, dt);
+    if (with_second_derivatives) {
+        result.orientation_hessians = d2q_domega2(q0, omega, dt);
+        result.has_second_derivatives = true;
+    }
+    return result;
+}
+
 // For each x_c, dx / d omega = (dx / dq) (dq / d omega)
-Mat33 dx_domega(const Vec3& X_centered, const Vec4& q0, const Vec3& omega, double dt) {
-    const Vec4 q = quaternion_from_angular_velocity(q0, omega, dt);
-    return dx_dq(X_centered, q) * dq_domega(q0, omega, dt);
+Mat33 dx_domega(const Vec3& X_centered, const QuaternionOmegaKinematics& kinematics) {
+    return dx_dq(X_centered, kinematics.orientation) * kinematics.orientation_jacobian;
 }
 
 // For each x_c, the omega Hessian is d2x_c / d omega2 = (dq/domega)^T (d2x_c/dq2) (dq/domega) + sum_alpha (dx_c/dq_alpha) (d2q_alpha/domega2)
-std::array<Mat33, 3> d2x_domega2(const Vec3& X_centered, const Vec4& q0, const Vec3& omega, double dt) {
+std::array<Mat33, 3> d2x_domega2(const Vec3& X_centered, const QuaternionOmegaKinematics& kinematics) {
+    assert(kinematics.has_second_derivatives && "d2x_domega2 requires cached quaternion second derivatives");
     std::array<Mat33, 3> result;
-    const Vec4 q = quaternion_from_angular_velocity(q0, omega, dt);
-    const Mat34 J_xq = dx_dq(X_centered, q);
+    const Mat34 J_xq = dx_dq(X_centered, kinematics.orientation);
     const std::array<Mat44, 3> H_xq = d2x_dq2(X_centered);
-    const Mat43 J_qomega = dq_domega(q0, omega, dt);
-    const std::array<Mat33, 4> H_qomega = d2q_domega2(q0, omega, dt);
 
     for (int c = 0; c < 3; ++c) {
-        result[c] = J_qomega.transpose() * H_xq[c] * J_qomega;
+        result[c] = kinematics.orientation_jacobian.transpose() * H_xq[c] * kinematics.orientation_jacobian;
         for (int alpha = 0; alpha < 4; ++alpha)
-            result[c] += J_xq(c, alpha) * H_qomega[alpha];
+            result[c] += J_xq(c, alpha) * kinematics.orientation_hessians[alpha];
         result[c] = 0.5 * (result[c] + result[c].transpose());
     }
     return result;

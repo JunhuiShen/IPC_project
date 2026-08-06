@@ -29,6 +29,17 @@ Vec4 quaternion_from_angular_velocity(const Vec4& q0, const Vec3& omega, double 
 Mat43 dq_domega(const Vec4& q0, const Vec3& omega, double dt);
 std::array<Mat33, 4> d2q_domega2(const Vec4& q0, const Vec3& omega, double dt);
 
+// Per-body quaternion data shared by every rigid node at a fixed omega iterate.
+// Set with_second_derivatives only for orientation-Hessian assembly.
+struct QuaternionOmegaKinematics {
+    Vec4 orientation;
+    Mat43 orientation_jacobian;
+    std::array<Mat33, 4> orientation_hessians;
+    bool has_second_derivatives = false;
+};
+
+QuaternionOmegaKinematics quaternion_omega_kinematics(const Vec4& q0, const Vec3& omega, double dt, bool with_second_derivatives = false);
+
 // Follow the relative arc encoded by the signs of q_current and q_target,
 // without replacing it by the equivalent shortest arc. This can distinguish,
 // for example, +270 degrees from -90 degrees, but an exact (or numerically
@@ -74,12 +85,15 @@ Vec3 inertia_translation_gradient(const Vec3& x_com, const Vec3& x_com_n, const 
 
 Mat33 inertia_translation_hessian(double total_mass);
 
+// Exact gradient-only path for residual evaluation
+Vec3 inertia_rotation_gradient(const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, double dt, const Mat33& I_hat);
+
 // Exact gradient and Hessian of the rotational inertial term with respect to omega.
 std::pair<Vec3, Mat33> inertia_rotation_gradient_hessian(const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, double dt, const Mat33& I_hat);
 
 // Exact omega-coordinate derivatives of x(t, omega) = t + R(q(omega)) X_centered
-Mat33 dx_domega(const Vec3& X_centered, const Vec4& q0, const Vec3& omega, double dt);
-std::array<Mat33, 3> d2x_domega2(const Vec3& X_centered, const Vec4& q0, const Vec3& omega, double dt);
+Mat33 dx_domega(const Vec3& X_centered, const QuaternionOmegaKinematics& kinematics);
+std::array<Mat33, 3> d2x_domega2(const Vec3& X_centered, const QuaternionOmegaKinematics& kinematics);
 
 // Per-node translation and angular-velocity gradient contributions.
 Vec3 rigid_node_translation_gradient(const Vec3& gx);

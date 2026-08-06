@@ -119,11 +119,11 @@ Mat33 sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double eps, bool i
     return Hess;
 }
 
-RigidEnergyDerivatives sdf_penalty_derivatives_rb(const SDFEvaluation& sdf, const Vec3& X_centered, const Vec4& q_n, const Vec3& omega, double dt, double k, double eps, bool include_sdf_curvature, bool include_rigid_curvature) {
+RigidEnergyDerivatives sdf_penalty_derivatives_rb(const SDFEvaluation& sdf, const Vec3& X_centered, const QuaternionOmegaKinematics& kinematics, double k, double eps, bool include_sdf_curvature, bool include_rigid_curvature) {
     const Vec3 gx = sdf_penalty_gradient(sdf, k, eps);
     const Mat33 Hx = sdf_penalty_hessian(sdf, k, eps, include_sdf_curvature);
     const Mat33 Hx_symmetric = rigid_node_translation_hessian(Hx);
-    const Mat33 J_xomega = dx_domega(X_centered, q_n, omega, dt);
+    const Mat33 J_xomega = dx_domega(X_centered, kinematics);
 
     RigidEnergyDerivatives result;
     result.translation_gradient = rigid_node_translation_gradient(gx);
@@ -131,7 +131,7 @@ RigidEnergyDerivatives sdf_penalty_derivatives_rb(const SDFEvaluation& sdf, cons
     result.translation_translation_hessian = Hx_symmetric;
     result.translation_orientation_hessian = Hx_symmetric * J_xomega;
     if (include_rigid_curvature) {
-        result.orientation_orientation_hessian = rigid_node_omega_hessian(gx, Hx, J_xomega, d2x_domega2(X_centered, q_n, omega, dt));
+        result.orientation_orientation_hessian = rigid_node_omega_hessian(gx, Hx, J_xomega, d2x_domega2(X_centered, kinematics));
     } else {
         const Mat33 rr = J_xomega.transpose() * Hx_symmetric * J_xomega;
         result.orientation_orientation_hessian = 0.5 * (rr + rr.transpose());

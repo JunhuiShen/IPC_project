@@ -890,7 +890,7 @@ std::pair<Vec3, Mat33> segment_segment_barrier_self_gradient_and_hessian(
             segment_segment_barrier_self_hessian(x1, x2, x3, x4, d_hat, dof, eps, &dr)};
 }
 
-RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode, double eps) {
+RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode, double eps, const QuaternionOmegaKinematics* cached_kinematics) {
     const NodeTriangleDistanceResult dr = node_triangle_distance(x, x1, x2, x3, eps);
     if (d_hat > 0.0 && dr.distance >= d_hat)
         return RigidEnergyDerivatives{};
@@ -906,11 +906,17 @@ RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, c
     const bool compute_translation_hessian = mode == RigidDerivativeMode::Full || mode == RigidDerivativeMode::TranslationHessian;
     const bool compute_orientation_hessian = mode == RigidDerivativeMode::Full || mode == RigidDerivativeMode::OrientationHessian;
     const bool compute_mixed_hessian = mode == RigidDerivativeMode::Full;
+    QuaternionOmegaKinematics local_kinematics;
+    if (compute_orientation_gradient && cached_kinematics == nullptr) {
+        local_kinematics = quaternion_omega_kinematics(q_n, omega, dt, compute_orientation_hessian);
+        cached_kinematics = &local_kinematics;
+    }
+    assert(!compute_orientation_hessian || cached_kinematics->has_second_derivatives);
 
     for (int i = first_dof; i <= last_dof; ++i) {
         gradients[i] = node_triangle_barrier_gradient(x, x1, x2, x3, d_hat, i, eps, &dr);
         if (compute_orientation_gradient)
-            jacobians[i] = dx_domega(X_centered[i], q_n, omega, dt);
+            jacobians[i] = dx_domega(X_centered[i], *cached_kinematics);
         if (compute_translation_gradient)
             result.translation_gradient += gradients[i];
         if (compute_orientation_gradient)
@@ -932,7 +938,7 @@ RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, c
         }
 
         if (compute_orientation_hessian) {
-            const std::array<Mat33, 3> coordinate_hessians = d2x_domega2(X_centered[i], q_n, omega, dt);
+            const std::array<Mat33, 3> coordinate_hessians = d2x_domega2(X_centered[i], *cached_kinematics);
             for (int coordinate = 0; coordinate < 3; ++coordinate)
                 result.orientation_orientation_hessian += gradients[i][coordinate] * coordinate_hessians[coordinate];
         }
@@ -945,7 +951,7 @@ RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, c
     return result;
 }
 
-RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode, double eps) {
+RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode, double eps, const QuaternionOmegaKinematics* cached_kinematics) {
     const SegmentSegmentDistanceResult dr = segment_segment_distance(x1, x2, x3, x4, eps);
     if (d_hat > 0.0 && dr.distance >= d_hat)
         return RigidEnergyDerivatives{};
@@ -961,11 +967,17 @@ RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2
     const bool compute_translation_hessian = mode == RigidDerivativeMode::Full || mode == RigidDerivativeMode::TranslationHessian;
     const bool compute_orientation_hessian = mode == RigidDerivativeMode::Full || mode == RigidDerivativeMode::OrientationHessian;
     const bool compute_mixed_hessian = mode == RigidDerivativeMode::Full;
+    QuaternionOmegaKinematics local_kinematics;
+    if (compute_orientation_gradient && cached_kinematics == nullptr) {
+        local_kinematics = quaternion_omega_kinematics(q_n, omega, dt, compute_orientation_hessian);
+        cached_kinematics = &local_kinematics;
+    }
+    assert(!compute_orientation_hessian || cached_kinematics->has_second_derivatives);
 
     for (int i = first_dof; i <= last_dof; ++i) {
         gradients[i] = segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, i, eps, &dr);
         if (compute_orientation_gradient)
-            jacobians[i] = dx_domega(X_centered[i], q_n, omega, dt);
+            jacobians[i] = dx_domega(X_centered[i], *cached_kinematics);
         if (compute_translation_gradient)
             result.translation_gradient += gradients[i];
         if (compute_orientation_gradient)
@@ -988,7 +1000,7 @@ RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2
         }
 
         if (compute_orientation_hessian) {
-            const std::array<Mat33, 3> coordinate_hessians = d2x_domega2(X_centered[i], q_n, omega, dt);
+            const std::array<Mat33, 3> coordinate_hessians = d2x_domega2(X_centered[i], *cached_kinematics);
             for (int coordinate = 0; coordinate < 3; ++coordinate)
                 result.orientation_orientation_hessian += gradients[i][coordinate] * coordinate_hessians[coordinate];
         }
