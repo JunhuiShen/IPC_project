@@ -990,9 +990,9 @@ void build_twenty_rigid_polygon_static_stack_example(
 
 
 // ---------------------------------------------------------------------------
-// Example 10: five differently oriented rigid polygons dropping onto one another
+// Example 10: five equally oriented rigid polygons dropping onto one another
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 10 --num_frames 100 --substeps 10 --outdir five_polygon_oriented_stack_output --format obj
+// command line: ./build/3D_sim --example 10 --num_frames 100 --substeps 10 --outdir five_polygon_aligned_stack_output --format obj
 void build_five_rigid_polygon_drop_scatter_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1023,13 +1023,25 @@ void build_five_rigid_polygon_drop_scatter_example(
     constexpr double lowest_center_y = 0.45;
     constexpr double center_spacing = 0.56;
 
-    const Vec3 xyz_angles[polygon_count] = {
-        Vec3( 0.35,  0.15, -0.20),
-        Vec3(-0.45,  0.30,  0.25),
-        Vec3( 0.25, -0.40,  0.50),
-        Vec3(-0.30, -0.20, -0.45),
-        Vec3( 0.55,  0.35,  0.10),
-    };
+    // Previous per-polygon orientations, kept for easy restoration:
+    // const Vec3 xyz_angles[polygon_count] = {
+    //     Vec3( 0.35,  0.15, -0.20),
+    //     Vec3(-0.45,  0.30,  0.25),
+    //     Vec3( 0.25, -0.40,  0.50),
+    //     Vec3(-0.30, -0.20, -0.45),
+    //     Vec3( 0.55,  0.35,  0.10),
+    // };
+    // const auto axis_angle_quaternion =
+    //     [](const Vec3& axis, double angle) {
+    //         const double half_angle = 0.5 * angle;
+    //         const double sin_half_angle = std::sin(half_angle);
+    //         return Vec4(
+    //             std::cos(half_angle),
+    //             sin_half_angle * axis.x(),
+    //             sin_half_angle * axis.y(),
+    //             sin_half_angle * axis.z());
+    //     };
+
     const Vec3 initial_omega[polygon_count] = {
         Vec3( 0.8,  0.3, -0.5),
         Vec3(-0.6,  0.9,  0.4),
@@ -1038,27 +1050,21 @@ void build_five_rigid_polygon_drop_scatter_example(
         Vec3( 0.4,  0.6, -0.8),
     };
 
-    const auto axis_angle_quaternion =
-        [](const Vec3& axis, double angle) {
-            const double half_angle = 0.5 * angle;
-            const double sin_half_angle = std::sin(half_angle);
-            return Vec4(
-                std::cos(half_angle),
-                sin_half_angle * axis.x(),
-                sin_half_angle * axis.y(),
-                sin_half_angle * axis.z());
-        };
+    // Material z is the prism extrusion direction. Keeping it horizontal
+    // makes the polygonal cap planes exactly vertical in world space.
+    const Vec4 common_orientation(1.0, 0.0, 0.0, 0.0);
 
     for (int polygon = 0; polygon < polygon_count; ++polygon) {
-        const Vec4 qx = axis_angle_quaternion(
-            Vec3::UnitX(), xyz_angles[polygon].x());
-        const Vec4 qy = axis_angle_quaternion(
-            Vec3::UnitY(), xyz_angles[polygon].y());
-        const Vec4 qz = axis_angle_quaternion(
-            Vec3::UnitZ(), xyz_angles[polygon].z());
-        const Vec4 orientation = quaternion_normalize(
-            quaternion_multiply(
-                qz, quaternion_multiply(qy, qx)));
+        // Previous per-polygon orientation construction:
+        // const Vec4 qx = axis_angle_quaternion(
+        //     Vec3::UnitX(), xyz_angles[polygon].x());
+        // const Vec4 qy = axis_angle_quaternion(
+        //     Vec3::UnitY(), xyz_angles[polygon].y());
+        // const Vec4 qz = axis_angle_quaternion(
+        //     Vec3::UnitZ(), xyz_angles[polygon].z());
+        // const Vec4 orientation = quaternion_normalize(
+        //     quaternion_multiply(
+        //         qz, quaternion_multiply(qy, qx)));
 
         // All centers share the same x-z position, so the bodies fall onto
         // one another instead of being given an artificial lateral scatter.
@@ -1070,7 +1076,7 @@ void build_five_rigid_polygon_drop_scatter_example(
             6, state, ref_mesh, center,
             radius, density, thickness,
             Vec3::Zero(),
-            orientation, initial_omega[polygon]);
+            common_orientation, initial_omega[polygon]);
     }
 
     // Flat visual ground at the y=0 plane SDF.

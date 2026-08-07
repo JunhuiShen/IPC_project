@@ -172,7 +172,7 @@ void build_twenty_rigid_polygon_static_stack_example(
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris);
 
-// Example 10: five differently oriented rigid polygonal prisms aligned in one
+// Example 10: five equally oriented rigid polygonal prisms aligned in one
 // vertical column and falling onto one another above a horizontal ground plane.
 void build_five_rigid_polygon_drop_scatter_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,

@@ -173,7 +173,6 @@ Common invocations:
     ./build/3D_sim --example 5                              # freely rotating rigid tennis racket
     ./build/3D_sim --example 8 --substeps 10 --format obj   # head-on rigid polygon collision
     ./build/3D_sim --example 9 --substeps 10 --format obj   # static stack of twenty rigid polygons
-    ./build/3D_sim --example 10 --substeps 10 --format obj  # oriented polygons dropping onto one another
     ./build/3D_sim --use_ccd_guess false --use_translation_guess true --fixed_iters
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames

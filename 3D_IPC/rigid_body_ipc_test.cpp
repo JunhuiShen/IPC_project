@@ -1032,10 +1032,6 @@ TEST(RigidBodyIPCSolver, AddsNaiveRigidBarrierTranslationAndOrientationTerms) {
     const Vec4 q_n = quaternion_normalize(state.orientations[rb]);
     const Vec4 expected_q = quaternion_normalize(
         quaternion_from_angular_velocity(q_n, expected_newton_omega, dt));
-    const Vec4 expected_q_dot = (expected_q - q_n) / dt;
-    const Vec3 expected_finite_difference_omega =
-        (2.0 * quaternion_multiply(
-            expected_q_dot, quaternion_inverse(expected_q))).tail<3>();
 
     std::vector<Vec3> x_com_new = state.x_coms;
     std::vector<Vec4> q_new = state.orientations;
@@ -1049,7 +1045,7 @@ TEST(RigidBodyIPCSolver, AddsNaiveRigidBarrierTranslationAndOrientationTerms) {
     EXPECT_TRUE(x_com_new[rb].isApprox(expected_com, 1.0e-11));
     EXPECT_TRUE(q_new[rb].isApprox(expected_q, 1.0e-11));
     EXPECT_TRUE(omega_new[rb].isApprox(
-        expected_finite_difference_omega, 1.0e-11));
+        expected_newton_omega, 1.0e-11));
 }
 
 TEST(BoundQuaternion, ClipsAtFirstExitOfLongArc) {
