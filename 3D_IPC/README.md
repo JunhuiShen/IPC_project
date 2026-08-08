@@ -159,7 +159,7 @@ Built-in example scenes (`--example N`):
 | `8` | Two same-height rigid hexagonal prisms moving toward one another with zero gravity |
 | `9` | Twenty rigid hexagonal prisms initialized as a stationary vertical stack on a ground plane |
 | `10` | Five differently oriented rigid hexagonal prisms falling onto one another in a vertical column |
-| `11` | One hundred identical rigid hexagonal prisms initialized in five layers and falling into a wide open-top box |
+| `11` | One hundred mixed triangular, square, pentagonal, heptagonal, and octagonal prisms initialized in five layers and falling into a wide open-top box |
 
 At startup, every scene reports its vertex and triangle counts; rigid scenes
 also report the rigid-body count. Their vertices and triangles describe the

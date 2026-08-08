@@ -1093,8 +1093,8 @@ void build_five_rigid_polygon_drop_scatter_example(
 }
 
 // ---------------------------------------------------------------------------
-// Example 11: one hundred identical rigid hexagonal prisms falling into an
-// open-top box
+// Example 11: one hundred rigid polygonal prisms of varied shapes falling
+// into an open-top box
 // ---------------------------------------------------------------------------
 // command line: ./build/3D_sim --example 11 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir hundred_polygon_box_output --format obj
 // ./build/3D_sim --example 11 --num_frames 200 --substeps 80 --max_substep_iters 5000 --fixed_iters --outdir hundred_polygon_box_output --format obj
@@ -1142,7 +1142,6 @@ void build_hundred_rigid_polygon_box_drop_example(
     constexpr int row_count = 4;
     constexpr int layer_count = 5;
     constexpr int polygon_count = column_count * row_count * layer_count;
-    constexpr int polygon_sides = 6;
     constexpr double radius = 0.20;
     constexpr double density = 25.0;
     constexpr double thickness = 0.10;
@@ -1161,7 +1160,23 @@ void build_hundred_rigid_polygon_box_drop_example(
             sin_half_angle * axis.z());
     };
 
+    static constexpr int polygon_side_counts[] = {3, 4, 5, 7, 8};
+    static constexpr int shape_count =
+        sizeof(polygon_side_counts) / sizeof(polygon_side_counts[0]);
     for (int index = 0; index < polygon_count; ++index) {
+        const int layer = index / (column_count * row_count);
+        const int index_in_layer = index % (column_count * row_count);
+        const int row = index_in_layer / column_count;
+        const int column = index_in_layer % column_count;
+
+        // Cycle through triangles, squares, pentagons, heptagons, and
+        // octagons. Mixing all three grid coordinates prevents a polygon type
+        // from lining up in a single column or layer. Every prism has the same
+        // circumscribed radius, so the collision-free spacing remains valid.
+        const int shape_index =
+            (column + 2 * row + 3 * layer) % shape_count;
+        const int polygon_sides =
+            polygon_side_counts[shape_index];
         const double x_angle = ((index % 3) - 1) * 0.18;
         const double y_angle = (((index / 3) % 3) - 1) * 0.22;
         const double z_angle = (index % 7) * (kPi / 7.0);
@@ -1172,10 +1187,6 @@ void build_hundred_rigid_polygon_box_drop_example(
             quaternion_multiply(
                 qz, quaternion_multiply(qy, qx)));
 
-        const int layer = index / (column_count * row_count);
-        const int index_in_layer = index % (column_count * row_count);
-        const int row = index_in_layer / column_count;
-        const int column = index_in_layer % column_count;
         const Vec3 center(
             (column - 0.5 * (column_count - 1)) * column_spacing,
             lowest_center_y + layer * vertical_spacing,
