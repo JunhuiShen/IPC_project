@@ -159,6 +159,7 @@ Built-in example scenes (`--example N`):
 | `8` | Two same-height rigid hexagonal prisms moving toward one another with zero gravity |
 | `9` | Twenty rigid hexagonal prisms initialized as a stationary vertical stack on a ground plane |
 | `10` | Five differently oriented rigid hexagonal prisms falling onto one another in a vertical column |
+| `11` | One hundred identical rigid hexagonal prisms initialized in five layers and falling into a wide open-top box |
 
 At startup, every scene reports its vertex and triangle counts; rigid scenes
 also report the rigid-body count. Their vertices and triangles describe the
@@ -173,6 +174,7 @@ Common invocations:
     ./build/3D_sim --example 5                              # freely rotating rigid tennis racket
     ./build/3D_sim --example 8 --substeps 10 --format obj   # head-on rigid polygon collision
     ./build/3D_sim --example 9 --substeps 10 --format obj   # static stack of twenty rigid polygons
+    ./build/3D_sim --example 11 --num_frames 200 --substeps 50 --max_substep_iters 2000 --tol_rel 0.5 --d_hat 0.001 --eps_sdf 0.002 --outdir hundred_polygon_box_output --format obj
     ./build/3D_sim --use_ccd_guess false --use_translation_guess true --fixed_iters
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
@@ -401,7 +403,7 @@ reader can jump to the layer they care about.
 
 ## Tests
 
-The 264 GoogleTest cases are split into focused binaries. To build and run them
+The 265 GoogleTest cases are split into focused binaries. To build and run them
 all:
 
     cmake -B build
@@ -411,7 +413,7 @@ all:
 | Test binary | Cases | What it covers |
 |-------------|-------|----------------|
 | `ccd_test` | 54 | Linear CCD single-moving-DOF, scale/coplanar stress cases, TICCD-backed general NT/SS wrappers, and rigid rotational CCD |
-| `rigid_body_ipc_test` | 49 | Quaternion kinematics/derivatives, reduced inertial energy, rigid solver contact terms, blue-box enforcement, and rigid translation/rotation safe steps |
+| `rigid_body_ipc_test` | 50 | Quaternion kinematics/derivatives, reduced inertial energy, rigid solver contact terms, blue-box enforcement, and rigid translation/rotation safe steps |
 | `broad_phase_test` | 25 | AABB, BVH, pair generation/order, CCD candidates, safe stepping, conservativeness, and `incremental_refresh_vertex` partial refit |
 | `ipc_math_test` | 14 | `matrix3d_inverse`, `segment_closest_point`, barycentric coordinates, and topology caching |
 | `sdf_penalty_energy_test` | 17 | Plane / cylinder / sphere and rigid-body SDF energy derivatives, hard-quadratic limit, and soft-barrier rest at `phi=eps` |

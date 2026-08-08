@@ -1091,3 +1091,143 @@ void build_five_rigid_polygon_drop_scatter_example(
         0, 3, 2,
     };
 }
+
+// ---------------------------------------------------------------------------
+// Example 11: one hundred identical rigid hexagonal prisms falling into an
+// open-top box
+// ---------------------------------------------------------------------------
+// command line: ./build/3D_sim --example 11 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir hundred_polygon_box_output --format obj
+// ./build/3D_sim --example 11 --num_frames 200 --substeps 80 --max_substep_iters 5000 --fixed_iters --outdir hundred_polygon_box_output --format obj
+void build_hundred_rigid_polygon_box_drop_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params,
+    std::vector<Vec3>& static_x, std::vector<int>& static_tris) {
+    clear_model(ref_mesh, state, X, pins);
+    static_x.clear();
+    static_tris.clear();
+
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = args.k_sdf;
+    params.eps_sdf = args.eps_sdf;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+
+    // The positive side of every plane is the box interior. With no ceiling
+    // plane, these five half-spaces form an open-top container.
+    constexpr double box_half_width = 1.60;
+    constexpr double box_half_depth = 1.00;
+    constexpr double wall_height = 1.25;
+    params.sdf_planes.push_back(
+        {Vec3(0.0, 0.0, 0.0), Vec3::UnitY()});
+    params.sdf_planes.push_back(
+        {Vec3(-box_half_width, 0.0, 0.0), Vec3::UnitX()});
+    params.sdf_planes.push_back(
+        {Vec3( box_half_width, 0.0, 0.0), -Vec3::UnitX()});
+    params.sdf_planes.push_back(
+        {Vec3(0.0, 0.0, -box_half_depth), Vec3::UnitZ()});
+    params.sdf_planes.push_back(
+        {Vec3(0.0, 0.0,  box_half_depth), -Vec3::UnitZ()});
+
+    // Arrange the bodies in five collision-free 5 x 4 layers. The enclosing
+    // sphere of every prism has radius sqrt(radius^2 + (t/2)^2), which is
+    // smaller than half of every center-to-center spacing below.
+    constexpr int column_count = 5;
+    constexpr int row_count = 4;
+    constexpr int layer_count = 5;
+    constexpr int polygon_count = column_count * row_count * layer_count;
+    constexpr int polygon_sides = 6;
+    constexpr double radius = 0.20;
+    constexpr double density = 25.0;
+    constexpr double thickness = 0.10;
+    constexpr double column_spacing = 0.55;
+    constexpr double row_spacing = 0.48;
+    constexpr double vertical_spacing = 0.52;
+    constexpr double lowest_center_y = 0.65;
+
+    const auto axis_angle_quaternion = [](const Vec3& axis, double angle) {
+        const double half_angle = 0.5 * angle;
+        const double sin_half_angle = std::sin(half_angle);
+        return Vec4(
+            std::cos(half_angle),
+            sin_half_angle * axis.x(),
+            sin_half_angle * axis.y(),
+            sin_half_angle * axis.z());
+    };
+
+    for (int index = 0; index < polygon_count; ++index) {
+        const double x_angle = ((index % 3) - 1) * 0.18;
+        const double y_angle = (((index / 3) % 3) - 1) * 0.22;
+        const double z_angle = (index % 7) * (kPi / 7.0);
+        const Vec4 qx = axis_angle_quaternion(Vec3::UnitX(), x_angle);
+        const Vec4 qy = axis_angle_quaternion(Vec3::UnitY(), y_angle);
+        const Vec4 qz = axis_angle_quaternion(Vec3::UnitZ(), z_angle);
+        const Vec4 orientation = quaternion_normalize(
+            quaternion_multiply(
+                qz, quaternion_multiply(qy, qx)));
+
+        const int layer = index / (column_count * row_count);
+        const int index_in_layer = index % (column_count * row_count);
+        const int row = index_in_layer / column_count;
+        const int column = index_in_layer % column_count;
+        const Vec3 center(
+            (column - 0.5 * (column_count - 1)) * column_spacing,
+            lowest_center_y + layer * vertical_spacing,
+            (row - 0.5 * (row_count - 1)) * row_spacing);
+
+        append_rigid_polygon(
+            polygon_sides, state, ref_mesh, center,
+            radius, density, thickness,
+            Vec3::Zero(), orientation, Vec3::Zero());
+    }
+
+    // Flat visual quads coincide with the ground and four side SDF planes.
+    const auto append_visual_plane = [&static_x, &static_tris](
+        const Vec3& x0, const Vec3& x1,
+        const Vec3& x2, const Vec3& x3) {
+        const int base = static_cast<int>(static_x.size());
+        static_x.push_back(x0);
+        static_x.push_back(x1);
+        static_x.push_back(x2);
+        static_x.push_back(x3);
+        static_tris.insert(
+            static_tris.end(),
+            {base, base + 1, base + 2,
+             base, base + 2, base + 3});
+    };
+
+    // Ground, upward normal +y.
+    append_visual_plane(
+        Vec3(-box_half_width, 0.0, -box_half_depth),
+        Vec3(-box_half_width, 0.0,  box_half_depth),
+        Vec3( box_half_width, 0.0,  box_half_depth),
+        Vec3( box_half_width, 0.0, -box_half_depth));
+    // Left and right walls, inward normals +x and -x.
+    append_visual_plane(
+        Vec3(-box_half_width, 0.0,         -box_half_depth),
+        Vec3(-box_half_width, wall_height, -box_half_depth),
+        Vec3(-box_half_width, wall_height,  box_half_depth),
+        Vec3(-box_half_width, 0.0,          box_half_depth));
+    append_visual_plane(
+        Vec3(box_half_width, 0.0,          box_half_depth),
+        Vec3(box_half_width, wall_height,  box_half_depth),
+        Vec3(box_half_width, wall_height, -box_half_depth),
+        Vec3(box_half_width, 0.0,         -box_half_depth));
+    // Back and front walls, inward normals +z and -z.
+    append_visual_plane(
+        Vec3( box_half_width, 0.0,         -box_half_depth),
+        Vec3( box_half_width, wall_height, -box_half_depth),
+        Vec3(-box_half_width, wall_height, -box_half_depth),
+        Vec3(-box_half_width, 0.0,         -box_half_depth));
+    append_visual_plane(
+        Vec3(-box_half_width, 0.0,          box_half_depth),
+        Vec3(-box_half_width, wall_height,  box_half_depth),
+        Vec3( box_half_width, wall_height,  box_half_depth),
+        Vec3( box_half_width, 0.0,          box_half_depth));
+}

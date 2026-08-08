@@ -179,3 +179,11 @@ void build_five_rigid_polygon_drop_scatter_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris);
+
+// Example 11: one hundred identical rigid hexagonal prisms initialized in five
+// collision-free layers and falling into a wide open-top box.
+void build_hundred_rigid_polygon_box_drop_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params,
+    std::vector<Vec3>& static_x, std::vector<int>& static_tris);
