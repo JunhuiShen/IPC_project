@@ -542,6 +542,59 @@ bool run_rigid_barrier_convergence_test(const std::string& name, const Vec3& x_c
     return all_passed;
 }
 
+void expect_rigid_derivative_modes_match(
+        const std::string& name,
+        const std::function<RigidEnergyDerivatives(RigidDerivativeMode)>& evaluate,
+        double tolerance = 1.0e-14) {
+    SCOPED_TRACE(name);
+    const RigidEnergyDerivatives full = evaluate(RigidDerivativeMode::Full);
+    const RigidEnergyDerivatives gradient = evaluate(RigidDerivativeMode::Gradient);
+    const RigidEnergyDerivatives translation = evaluate(RigidDerivativeMode::TranslationHessian);
+    const RigidEnergyDerivatives orientation = evaluate(RigidDerivativeMode::OrientationHessian);
+
+    EXPECT_LE(
+        (gradient.translation_gradient - full.translation_gradient).norm(),
+        tolerance * (1.0 + full.translation_gradient.norm()));
+    EXPECT_LE(
+        (gradient.orientation_gradient - full.orientation_gradient).norm(),
+        tolerance * (1.0 + full.orientation_gradient.norm()));
+    EXPECT_TRUE(gradient.translation_translation_hessian.isZero(0.0));
+    EXPECT_TRUE(gradient.translation_orientation_hessian.isZero(0.0));
+    EXPECT_TRUE(gradient.orientation_orientation_hessian.isZero(0.0));
+
+    EXPECT_LE(
+        (translation.translation_gradient - full.translation_gradient).norm(),
+        tolerance * (1.0 + full.translation_gradient.norm()));
+    EXPECT_LE(
+        (translation.translation_translation_hessian
+            - full.translation_translation_hessian).norm(),
+        tolerance * (1.0 + full.translation_translation_hessian.norm()))
+        << "difference="
+        << (translation.translation_translation_hessian
+            - full.translation_translation_hessian).norm()
+        << " full_norm=" << full.translation_translation_hessian.norm()
+        << " tolerance=" << tolerance;
+    EXPECT_TRUE(translation.orientation_gradient.isZero(0.0));
+    EXPECT_TRUE(translation.translation_orientation_hessian.isZero(0.0));
+    EXPECT_TRUE(translation.orientation_orientation_hessian.isZero(0.0));
+
+    EXPECT_LE(
+        (orientation.orientation_gradient - full.orientation_gradient).norm(),
+        tolerance * (1.0 + full.orientation_gradient.norm()));
+    EXPECT_LE(
+        (orientation.orientation_orientation_hessian
+            - full.orientation_orientation_hessian).norm(),
+        tolerance * (1.0 + full.orientation_orientation_hessian.norm()))
+        << "difference="
+        << (orientation.orientation_orientation_hessian
+            - full.orientation_orientation_hessian).norm()
+        << " full_norm=" << full.orientation_orientation_hessian.norm()
+        << " tolerance=" << tolerance;
+    EXPECT_TRUE(orientation.translation_gradient.isZero(0.0));
+    EXPECT_TRUE(orientation.translation_translation_hessian.isZero(0.0));
+    EXPECT_TRUE(orientation.translation_orientation_hessian.isZero(0.0));
+}
+
 } // namespace
 
 // ===========================================================================
@@ -1047,31 +1100,6 @@ TEST(BarrierEnergy, RigidSegmentSegmentChainRuleConvergesQuadratically) {
 }
 
 TEST(BarrierEnergy, RigidSolverDerivativeModesMatchFullDerivatives) {
-    const auto expect_modes_match = [](const std::function<RigidEnergyDerivatives(RigidDerivativeMode)>& evaluate) {
-        const RigidEnergyDerivatives full = evaluate(RigidDerivativeMode::Full);
-        const RigidEnergyDerivatives gradient = evaluate(RigidDerivativeMode::Gradient);
-        const RigidEnergyDerivatives translation = evaluate(RigidDerivativeMode::TranslationHessian);
-        const RigidEnergyDerivatives orientation = evaluate(RigidDerivativeMode::OrientationHessian);
-
-        EXPECT_TRUE(gradient.translation_gradient.isApprox(full.translation_gradient, 1.0e-14));
-        EXPECT_TRUE(gradient.orientation_gradient.isApprox(full.orientation_gradient, 1.0e-14));
-        EXPECT_TRUE(gradient.translation_translation_hessian.isZero(0.0));
-        EXPECT_TRUE(gradient.translation_orientation_hessian.isZero(0.0));
-        EXPECT_TRUE(gradient.orientation_orientation_hessian.isZero(0.0));
-
-        EXPECT_TRUE(translation.translation_gradient.isApprox(full.translation_gradient, 1.0e-14));
-        EXPECT_TRUE(translation.translation_translation_hessian.isApprox(full.translation_translation_hessian, 1.0e-14));
-        EXPECT_TRUE(translation.orientation_gradient.isZero(0.0));
-        EXPECT_TRUE(translation.translation_orientation_hessian.isZero(0.0));
-        EXPECT_TRUE(translation.orientation_orientation_hessian.isZero(0.0));
-
-        EXPECT_TRUE(orientation.orientation_gradient.isApprox(full.orientation_gradient, 1.0e-14));
-        EXPECT_TRUE(orientation.orientation_orientation_hessian.isApprox(full.orientation_orientation_hessian, 1.0e-14));
-        EXPECT_TRUE(orientation.translation_gradient.isZero(0.0));
-        EXPECT_TRUE(orientation.translation_translation_hessian.isZero(0.0));
-        EXPECT_TRUE(orientation.translation_orientation_hessian.isZero(0.0));
-    };
-
     const Vec4 q_n(1.0, 0.0, 0.0, 0.0);
     const Vec3 omega(0.18, -0.12, 0.09);
     constexpr double dt = 0.2;
@@ -1081,11 +1109,92 @@ TEST(BarrierEnergy, RigidSolverDerivativeModesMatchFullDerivatives) {
     const Vec3 fixed_point(0.08, 0.04, 0.22);
     const Vec3 nt_com(0.02, -0.03, 0.01);
     const std::array<Vec3, 4> nt_positions = {fixed_point, world_space_position(nt_references[1], nt_com, q_n, omega, dt), world_space_position(nt_references[2], nt_com, q_n, omega, dt), world_space_position(nt_references[3], nt_com, q_n, omega, dt)};
-    expect_modes_match([&](RigidDerivativeMode mode) { return node_triangle_barrier_rb(nt_positions[0], nt_positions[1], nt_positions[2], nt_positions[3], nt_references, RigidBarrierSide::SecondPrimitive, q_n, omega, dt, d_hat, mode); });
+    expect_rigid_derivative_modes_match(
+        "node-triangle representative",
+        [&](RigidDerivativeMode mode) { return node_triangle_barrier_rb(nt_positions[0], nt_positions[1], nt_positions[2], nt_positions[3], nt_references, RigidBarrierSide::SecondPrimitive, q_n, omega, dt, d_hat, mode); });
 
     const std::array<Vec3, 4> ss_references = {Vec3(-0.6, 0.0, 0.0), Vec3(0.6, 0.0, 0.0), Vec3::Zero(), Vec3::Zero()};
     const Vec3 ss_com(0.01, -0.02, 0.0);
     const Vec3 moving0 = world_space_position(ss_references[0], ss_com, q_n, omega, dt);
     const Vec3 moving1 = world_space_position(ss_references[1], ss_com, q_n, omega, dt);
-    expect_modes_match([&](RigidDerivativeMode mode) { return segment_segment_barrier_rb(moving0, moving1, Vec3(0.0, -0.7, 0.23), Vec3(0.0, 0.7, 0.23), ss_references, RigidBarrierSide::FirstPrimitive, q_n, omega, dt, d_hat, mode); });
+    expect_rigid_derivative_modes_match(
+        "segment-segment representative",
+        [&](RigidDerivativeMode mode) { return segment_segment_barrier_rb(moving0, moving1, Vec3(0.0, -0.7, 0.23), Vec3(0.0, 0.7, 0.23), ss_references, RigidBarrierSide::FirstPrimitive, q_n, omega, dt, d_hat, mode); });
+}
+
+TEST(BarrierEnergy, RigidSolverDerivativeModesMatchAcrossFeatureRegions) {
+    const Vec4 q_n(1.0, 0.0, 0.0, 0.0);
+    const Vec3 omega = Vec3::Zero();
+    constexpr double dt = 0.2;
+
+    for (const TestPoint& tp : make_nt_test_points()) {
+        const std::array<Vec3, 4> references = {
+            tp.x, tp.x1, tp.x2, tp.x3};
+        for (const RigidBarrierSide side : {
+                 RigidBarrierSide::FirstPrimitive,
+                 RigidBarrierSide::SecondPrimitive}) {
+            const std::string side_name =
+                side == RigidBarrierSide::FirstPrimitive ? "point" : "triangle";
+            expect_rigid_derivative_modes_match(
+                "NT " + tp.name + " " + side_name,
+                [&](RigidDerivativeMode mode) {
+                    return node_triangle_barrier_rb(
+                        tp.x, tp.x1, tp.x2, tp.x3, references, side,
+                        q_n, omega, dt, tp.d_hat, mode);
+                },
+                1.0e-12);
+        }
+    }
+
+    for (const SSTestPoint& tp : make_ss_test_points()) {
+        const std::array<Vec3, 4> references = {
+            tp.x1, tp.x2, tp.x3, tp.x4};
+        for (const RigidBarrierSide side : {
+                 RigidBarrierSide::FirstPrimitive,
+                 RigidBarrierSide::SecondPrimitive}) {
+            const std::string side_name =
+                side == RigidBarrierSide::FirstPrimitive ? "first" : "second";
+            expect_rigid_derivative_modes_match(
+                "SS " + tp.name + " " + side_name,
+                [&](RigidDerivativeMode mode) {
+                    return segment_segment_barrier_rb(
+                        tp.x1, tp.x2, tp.x3, tp.x4, references, side,
+                        q_n, omega, dt, tp.d_hat, mode);
+                },
+                1.0e-12);
+        }
+    }
+
+    constexpr double degenerate_eps = 1.0e-4;
+    const std::array<Vec3, 4> degenerate_nt = {
+        Vec3(0.5, -0.2, 0.3), Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0), Vec3(0.2, 5.0e-5, 0.0)};
+    expect_rigid_derivative_modes_match(
+        "NT degenerate triangle",
+        [&](RigidDerivativeMode mode) {
+            return node_triangle_barrier_rb(
+                degenerate_nt[0], degenerate_nt[1], degenerate_nt[2],
+                degenerate_nt[3], degenerate_nt,
+                RigidBarrierSide::SecondPrimitive, q_n, omega, dt, 1.0,
+                mode, degenerate_eps);
+        },
+        1.0e-12);
+
+    constexpr double parallel_eps = 2.0e-2;
+    const std::array<Vec3, 4> parallel_ss = {
+        Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0),
+        Vec3(-1.0, 0.3, 0.2), Vec3(0.5, 0.31, 0.2)};
+    for (const RigidBarrierSide side : {
+             RigidBarrierSide::FirstPrimitive,
+             RigidBarrierSide::SecondPrimitive}) {
+        expect_rigid_derivative_modes_match(
+            "SS parallel active feature",
+            [&](RigidDerivativeMode mode) {
+                return segment_segment_barrier_rb(
+                    parallel_ss[0], parallel_ss[1], parallel_ss[2],
+                    parallel_ss[3], parallel_ss, side,
+                    q_n, omega, dt, 1.0, mode, parallel_eps);
+            },
+            1.0e-12);
+    }
 }

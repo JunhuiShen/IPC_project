@@ -926,6 +926,31 @@ RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, c
     if (mode == RigidDerivativeMode::Gradient)
         return result;
 
+    if (mode == RigidDerivativeMode::TranslationHessian) {
+        result.translation_translation_hessian = node_triangle_barrier_cross_hessian(x, x1, x2, x3, d_hat, 0, 0, eps, &dr);
+        result.translation_translation_hessian = 0.5 * (result.translation_translation_hessian + result.translation_translation_hessian.transpose());
+        return result;
+    }
+
+    if (mode == RigidDerivativeMode::OrientationHessian) {
+        for (int i = first_dof; i <= last_dof; ++i) {
+            const Mat33 Hii = node_triangle_barrier_cross_hessian(x, x1, x2, x3, d_hat, i, i, eps, &dr);
+            result.orientation_orientation_hessian += jacobians[i].transpose() * Hii * jacobians[i];
+
+            for (int j = i + 1; j <= last_dof; ++j) {
+                const Mat33 Hij = node_triangle_barrier_cross_hessian(x, x1, x2, x3, d_hat, i, j, eps, &dr);
+                const Mat33 contribution = jacobians[i].transpose() * Hij * jacobians[j];
+                result.orientation_orientation_hessian += contribution + contribution.transpose();
+            }
+
+            const std::array<Mat33, 3> coordinate_hessians = d2x_domega2(X_centered[i], *cached_kinematics);
+            for (int coordinate = 0; coordinate < 3; ++coordinate)
+                result.orientation_orientation_hessian += gradients[i][coordinate] * coordinate_hessians[coordinate];
+        }
+        result.orientation_orientation_hessian = 0.5 * (result.orientation_orientation_hessian + result.orientation_orientation_hessian.transpose());
+        return result;
+    }
+
     for (int i = first_dof; i <= last_dof; ++i) {
         for (int j = first_dof; j <= last_dof; ++j) {
             const Mat33 Hij = node_triangle_barrier_cross_hessian(x, x1, x2, x3, d_hat, i, j, eps, &dr);
@@ -986,6 +1011,34 @@ RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2
 
     if (mode == RigidDerivativeMode::Gradient)
         return result;
+
+    if (mode == RigidDerivativeMode::TranslationHessian) {
+        const Mat33 H00 = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, first_dof, first_dof, eps, &dr);
+        const Mat33 H01 = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, first_dof, last_dof, eps, &dr);
+        const Mat33 H11 = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, last_dof, last_dof, eps, &dr);
+        result.translation_translation_hessian = H00 + H01 + H01.transpose() + H11;
+        result.translation_translation_hessian = 0.5 * (result.translation_translation_hessian + result.translation_translation_hessian.transpose());
+        return result;
+    }
+
+    if (mode == RigidDerivativeMode::OrientationHessian) {
+        for (int i = first_dof; i <= last_dof; ++i) {
+            const Mat33 Hii = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, i, i, eps, &dr);
+            result.orientation_orientation_hessian += jacobians[i].transpose() * Hii * jacobians[i];
+
+            for (int j = i + 1; j <= last_dof; ++j) {
+                const Mat33 Hij = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, i, j, eps, &dr);
+                const Mat33 contribution = jacobians[i].transpose() * Hij * jacobians[j];
+                result.orientation_orientation_hessian += contribution + contribution.transpose();
+            }
+
+            const std::array<Mat33, 3> coordinate_hessians = d2x_domega2(X_centered[i], *cached_kinematics);
+            for (int coordinate = 0; coordinate < 3; ++coordinate)
+                result.orientation_orientation_hessian += gradients[i][coordinate] * coordinate_hessians[coordinate];
+        }
+        result.orientation_orientation_hessian = 0.5 * (result.orientation_orientation_hessian + result.orientation_orientation_hessian.transpose());
+        return result;
+    }
 
     // Include every cross-node block on the selected rigid primitive.
     for (int i = first_dof; i <= last_dof; ++i) {
