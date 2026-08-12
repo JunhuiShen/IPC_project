@@ -160,7 +160,7 @@ Built-in example scenes (`--example N`):
 | `9` | Twenty rigid hexagonal prisms initialized as a stationary vertical stack on a ground plane |
 | `10` | Five differently oriented rigid hexagonal prisms falling onto one another in a vertical column |
 | `11` | One hundred mixed triangular, square, pentagonal, heptagonal, and octagonal prisms initialized in five layers and falling into a wide open-top box |
-| `12` | Ten small rigid prisms (triangle through dodecagon) falling onto a rectangular cloth pinned at its four corners |
+| `12` | Fifty mixed rigid prisms (triangle through dodecagon) falling onto a large rectangular cloth pinned at its four corners |
 
 At startup, every scene reports its vertex and triangle counts; rigid scenes
 also report the rigid-body count. Their vertices and triangles describe the
@@ -176,7 +176,7 @@ Common invocations:
     ./build/3D_sim --example 8 --substeps 10 --format obj   # head-on rigid polygon collision
     ./build/3D_sim --example 9 --substeps 10 --format obj   # static stack of twenty rigid polygons
     ./build/3D_sim --example 11 --num_frames 200 --substeps 50 --max_substep_iters 2000 --tol_rel 0.5 --d_hat 0.001 --eps_sdf 0.002 --outdir hundred_polygon_box_output --format obj
-    ./build/3D_sim --example 12 --num_frames 120 --substeps 10 --max_substep_iters 500 --tol_abs 1e-5 --damping 0.5 --outdir ten_mixed_polygons_on_pinned_cloth_output --format obj
+    ./build/3D_sim --example 12 --num_frames 120 --substeps 10 --max_substep_iters 500 --tol_abs 1e-5 --damping 0.5 --outdir fifty_mixed_polygons_on_pinned_cloth_output --format obj
     ./build/3D_sim --use_ccd_guess false --use_translation_guess true --fixed_iters
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
