@@ -16,15 +16,17 @@ std::vector<int> build_node_to_block(const std::vector<int>& node_to_rb, const s
 // Per-body broad-phase contacts and their rigid-body conflict graph.
 void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_rb, int num_rbs, std::vector<std::vector<int>>& body_nt_pair_indices, std::vector<std::vector<int>>& body_ss_pair_indices, std::vector<std::vector<int>>& out);
 
-// Mixed graphs use blocks [0, deformable_nodes.size()) for cloth nodes in
-// deformable_nodes order, followed by one block per rigid body.
-void build_block_elastic_adj(const std::vector<std::vector<int>>& nodal_elastic_adj, const std::vector<int>& node_to_rb, const std::vector<int>& deformable_nodes, int num_rbs, std::vector<std::vector<int>>& out);
+// Mixed graphs use cached blocks [0, num_deformable) for cloth nodes, followed
+// by one block per rigid body. node_to_block is built once per topology.
+void build_block_elastic_adj(const std::vector<std::vector<int>>& nodal_elastic_adj, const std::vector<int>& node_to_block, const std::vector<std::vector<int>>& block_nodes, std::vector<std::vector<int>>& out);
 
 // Contact conflicts in mixed block indexing. Every node-triangle and
 // segment-segment candidate contributes a clique among its distinct cloth-node
 // and rigid-body blocks, covering cloth-cloth, cloth-rigid, and rigid-rigid
 // contacts in one graph.
-void build_block_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_rb, const std::vector<int>& deformable_nodes, int num_rbs, std::vector<std::vector<int>>& out);
+// Parallel and fused: each block owns one graph row, and rigid blocks also
+// build their NT/SS pair lists during the same incidence scan.
+void build_block_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_block, const std::vector<std::vector<int>>& block_nodes, int num_deformable_blocks, std::vector<std::vector<int>>& body_nt_pair_indices, std::vector<std::vector<int>>& body_ss_pair_indices, std::vector<std::vector<int>>& out);
 
 // Mesh-adjacency edges of the conflict graph. Invariant for a fixed mesh.
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int num_vertices);

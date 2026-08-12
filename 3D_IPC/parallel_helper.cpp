@@ -161,16 +161,12 @@ std::vector<int> build_node_to_block(
 
 void build_block_elastic_adj(
     const std::vector<std::vector<int>>& nodal_elastic_adj,
-    const std::vector<int>& node_to_rb,
-    const std::vector<int>& deformable_nodes,
-    int num_rbs,
+    const std::vector<int>& node_to_block,
+    const std::vector<std::vector<int>>& block_nodes,
     std::vector<std::vector<int>>& out) {
-    const int num_nodes = static_cast<int>(node_to_rb.size());
-    if (static_cast<int>(nodal_elastic_adj.size()) != num_nodes)
-        throw std::invalid_argument("build_block_elastic_adj: adjacency must cover every node");
+    const int num_nodes = static_cast<int>(node_to_block.size());
+    const int num_blocks = static_cast<int>(block_nodes.size());
 
-    const std::vector<int> node_to_block = build_node_to_block(node_to_rb, deformable_nodes, num_rbs);
-    const int num_blocks = static_cast<int>(deformable_nodes.size()) + num_rbs;
     if (static_cast<int>(out.size()) == num_blocks) {
         for (std::vector<int>& row : out)
             row.clear();
@@ -178,70 +174,124 @@ void build_block_elastic_adj(
         out.assign(num_blocks, {});
     }
 
-    for (int node = 0; node < num_nodes; ++node) {
-        for (const int neighbor : nodal_elastic_adj[node]) {
-            if (neighbor < 0 || neighbor >= num_nodes)
-                throw std::out_of_range("build_block_elastic_adj: neighbor is out of range");
-            const int first = node_to_block[node];
-            const int second = node_to_block[neighbor];
-            if (first != second) {
-                out[first].push_back(second);
-                out[second].push_back(first);
+    #pragma omp parallel for schedule(dynamic, 16)
+    for (int block = 0; block < num_blocks; ++block) {
+        std::vector<int>& row = out[block];
+        for (const int node : block_nodes[block]) {
+            for (const int neighbor : nodal_elastic_adj[node]) {
+                const int neighbor_block = node_to_block[neighbor];
+                if (neighbor_block != block)
+                    row.push_back(neighbor_block);
             }
         }
-    }
-    for (std::vector<int>& row : out) {
         std::sort(row.begin(), row.end());
         row.erase(std::unique(row.begin(), row.end()), row.end());
     }
 }
 
-void build_block_contact_adj(
-    const BroadPhase::Cache& bp_cache,
-    const std::vector<int>& node_to_rb,
-    const std::vector<int>& deformable_nodes,
-    int num_rbs,
-    std::vector<std::vector<int>>& out) {
-    const int num_nodes = static_cast<int>(node_to_rb.size());
-    const std::vector<int> node_to_block = build_node_to_block(node_to_rb, deformable_nodes, num_rbs);
-    const int num_blocks = static_cast<int>(deformable_nodes.size()) + num_rbs;
-    if (static_cast<int>(out.size()) == num_blocks) {
-        for (std::vector<int>& row : out)
+namespace {
+
+void prepare_rows(std::vector<std::vector<int>>& rows, int count) {
+    if (static_cast<int>(rows.size()) == count) {
+        for (std::vector<int>& row : rows)
             row.clear();
     } else {
-        out.assign(num_blocks, {});
+        rows.assign(count, {});
     }
+}
 
-    const auto add_contact_clique = [&](const int nodes[4]) {
-        for (int role = 0; role < 4; ++role) {
-            const int node = nodes[role];
-            if (node < 0 || node >= num_nodes)
-                throw std::out_of_range(
-                    "build_block_contact_adj: contact node is out of range");
+} // namespace
+
+void build_block_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_block, const std::vector<std::vector<int>>& block_nodes, int num_deformable_blocks,
+    std::vector<std::vector<int>>& body_nt_pair_indices, std::vector<std::vector<int>>& body_ss_pair_indices, std::vector<std::vector<int>>& out) {
+    const int num_blocks = static_cast<int>(block_nodes.size());
+    const int num_rbs = num_blocks - num_deformable_blocks;
+
+    prepare_rows(out, num_blocks);
+    prepare_rows(body_nt_pair_indices, num_rbs);
+    prepare_rows(body_ss_pair_indices, num_rbs);
+
+    #pragma omp parallel for schedule(dynamic, 16)
+    for (int block = 0; block < num_blocks; ++block) {
+        std::vector<int>& neighbors = out[block];
+        std::vector<int>* rigid_nt = nullptr;
+        std::vector<int>* rigid_ss = nullptr;
+        if (block >= num_deformable_blocks) {
+            const int rb = block - num_deformable_blocks;
+            rigid_nt = &body_nt_pair_indices[rb];
+            rigid_ss = &body_ss_pair_indices[rb];
         }
-        for (int first = 0; first < 4; ++first) {
-            for (int second = first + 1; second < 4; ++second) {
-                const int first_block = node_to_block[nodes[first]];
-                const int second_block = node_to_block[nodes[second]];
-                if (first_block != second_block) {
-                    out[first_block].push_back(second_block);
-                    out[second_block].push_back(first_block);
+
+        std::size_t incidence_count = 0;
+        for (const int node : block_nodes[block]) {
+            incidence_count += bp_cache.vertex_nt[node].size();
+            incidence_count += bp_cache.vertex_ss[node].size();
+        }
+        neighbors.reserve(3 * incidence_count);
+        if (rigid_nt)
+            rigid_nt->reserve(incidence_count);
+        if (rigid_ss)
+            rigid_ss->reserve(incidence_count);
+
+        const auto add_neighbor_blocks = [&](const int nodes[4]) {
+            for (int role = 0; role < 4; ++role) {
+                const int neighbor_block = node_to_block[nodes[role]];
+                if (neighbor_block != block)
+                    neighbors.push_back(neighbor_block);
+            }
+        };
+
+        for (const int node : block_nodes[block]) {
+            for (const BroadPhase::Cache::VertexPairEntry& entry :
+                 bp_cache.vertex_nt[node]) {
+                const NodeTrianglePair& pair = bp_cache.nt_pairs[entry.pair_index];
+                const int nodes[4] = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+                int representative_role = 0;
+                while (representative_role < 4 && node_to_block[nodes[representative_role]] != block)
+                    ++representative_role;
+                if (entry.dof != representative_role)
+                    continue;
+                add_neighbor_blocks(nodes);
+                if (rigid_nt) {
+                    const int first = node_to_block[pair.node];
+                    const int second = node_to_block[pair.tri_v[0]];
+                    if (first != second && (block == first || block == second))
+                        rigid_nt->push_back(static_cast<int>(entry.pair_index));
+                }
+            }
+            for (const BroadPhase::Cache::VertexPairEntry& entry :
+                 bp_cache.vertex_ss[node]) {
+                const SegmentSegmentPair& pair = bp_cache.ss_pairs[entry.pair_index];
+                int representative_role = 0;
+                while (representative_role < 4 && node_to_block[pair.v[representative_role]] != block)
+                    ++representative_role;
+                if (entry.dof != representative_role)
+                    continue;
+                add_neighbor_blocks(pair.v);
+                if (rigid_ss) {
+                    const int first = node_to_block[pair.v[0]];
+                    const int second = node_to_block[pair.v[2]];
+                    if (first != second && (block == first || block == second))
+                        rigid_ss->push_back(static_cast<int>(entry.pair_index));
                 }
             }
         }
-    };
 
-    for (const NodeTrianglePair& pair : bp_cache.nt_pairs) {
-        const int nodes[4] = {
-            pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
-        add_contact_clique(nodes);
-    }
-    for (const SegmentSegmentPair& pair : bp_cache.ss_pairs)
-        add_contact_clique(pair.v);
-
-    for (std::vector<int>& row : out) {
-        std::sort(row.begin(), row.end());
-        row.erase(std::unique(row.begin(), row.end()), row.end());
+        std::sort(neighbors.begin(), neighbors.end());
+        neighbors.erase(
+            std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
+        if (rigid_nt) {
+            std::sort(rigid_nt->begin(), rigid_nt->end());
+            rigid_nt->erase(
+                std::unique(rigid_nt->begin(), rigid_nt->end()),
+                rigid_nt->end());
+        }
+        if (rigid_ss) {
+            std::sort(rigid_ss->begin(), rigid_ss->end());
+            rigid_ss->erase(
+                std::unique(rigid_ss->begin(), rigid_ss->end()),
+                rigid_ss->end());
+        }
     }
 }
 

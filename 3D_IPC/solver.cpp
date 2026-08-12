@@ -104,10 +104,79 @@ struct BasicSolverWorkspace {
 };
 
 struct MixedAdjacencyWorkspace {
+    const RefMesh* mesh = nullptr;
+    const int* tris_data = nullptr;
+    const Hinge* hinges_data = nullptr;
+    const int* node_to_rb_data = nullptr;
+    const int* deformable_nodes_data = nullptr;
+    std::size_t tris_size = 0;
+    std::size_t hinges_size = 0;
+    std::size_t node_to_rb_size = 0;
+    std::size_t deformable_nodes_size = 0;
+    int num_vertices = -1;
+    int num_rigid_bodies = -1;
+
+    std::vector<int> node_to_block;
+    std::vector<std::vector<int>> block_nodes;
     std::vector<std::vector<int>> elastic_adjacency;
     std::vector<std::vector<int>> contact_adjacency;
     std::vector<std::vector<int>> combined_adjacency;
     std::vector<std::vector<int>> color_groups;
+
+    bool matches(
+        const RefMesh& ref_mesh,
+        const std::vector<int>& deformable_nodes,
+        int num_rbs,
+        int nv) const {
+        return mesh == &ref_mesh
+            && tris_data == ref_mesh.tris.data()
+            && hinges_data == ref_mesh.hinges.data()
+            && node_to_rb_data == ref_mesh.node_to_rb.data()
+            && deformable_nodes_data == deformable_nodes.data()
+            && tris_size == ref_mesh.tris.size()
+            && hinges_size == ref_mesh.hinges.size()
+            && node_to_rb_size == ref_mesh.node_to_rb.size()
+            && deformable_nodes_size == deformable_nodes.size()
+            && num_vertices == nv
+            && num_rigid_bodies == num_rbs;
+    }
+
+    void prepare(
+        const RefMesh& ref_mesh,
+        const std::vector<std::vector<int>>& nodal_elastic_adjacency,
+        const std::vector<int>& deformable_nodes,
+        int num_rbs,
+        int nv) {
+        if (matches(ref_mesh, deformable_nodes, num_rbs, nv))
+            return;
+
+        node_to_block = build_node_to_block(
+            ref_mesh.node_to_rb, deformable_nodes, num_rbs);
+        const int num_blocks =
+            static_cast<int>(deformable_nodes.size()) + num_rbs;
+        block_nodes.assign(num_blocks, {});
+        for (int node = 0; node < nv; ++node)
+            block_nodes[node_to_block[node]].push_back(node);
+
+        build_block_elastic_adj(
+            nodal_elastic_adjacency, node_to_block, block_nodes,
+            elastic_adjacency);
+        contact_adjacency.clear();
+        combined_adjacency.clear();
+        color_groups.clear();
+
+        mesh = &ref_mesh;
+        tris_data = ref_mesh.tris.data();
+        hinges_data = ref_mesh.hinges.data();
+        node_to_rb_data = ref_mesh.node_to_rb.data();
+        deformable_nodes_data = deformable_nodes.data();
+        tris_size = ref_mesh.tris.size();
+        hinges_size = ref_mesh.hinges.size();
+        node_to_rb_size = ref_mesh.node_to_rb.size();
+        deformable_nodes_size = deformable_nodes.size();
+        num_vertices = nv;
+        num_rigid_bodies = num_rbs;
+    }
 };
 
 struct OGCSolverWorkspace {
@@ -921,7 +990,8 @@ SolverResult global_gauss_seidel_solver_basic_general(
     deformable_workspace.prepare(ref_mesh, adj, nv, params.node_box_max);
     rigid_workspace.prepare(ref_mesh, nv, params.node_box_max, params.theta_box_max);
     const std::vector<std::vector<int>>& nodal_elastic_adj = deformable_workspace.elastic_adjacency.get(ref_mesh, adj, nv);
-    build_block_elastic_adj(nodal_elastic_adj, ref_mesh.node_to_rb, deformable_nodes, num_rbs, mixed_adjacency_workspace.elastic_adjacency);
+    mixed_adjacency_workspace.prepare(
+        ref_mesh, nodal_elastic_adj, deformable_nodes, num_rbs, nv);
 
     PinMap& pin_map = deformable_workspace.pin_map;
     for (int pin = 0; pin < static_cast<int>(pins.size()); ++pin)
@@ -969,14 +1039,12 @@ SolverResult global_gauss_seidel_solver_basic_general(
             rigid_workspace.theta_box_radii,
             rigid_workspace.com_box_radii, ref_mesh, blue_boxes);
         broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
-        build_rb_contact_adj(
-            broad_phase.cache(), ref_mesh.node_to_rb, num_rbs,
+        build_block_contact_adj(
+            broad_phase.cache(), mixed_adjacency_workspace.node_to_block,
+            mixed_adjacency_workspace.block_nodes,
+            static_cast<int>(deformable_nodes.size()),
             rigid_workspace.body_nt_pair_indices,
             rigid_workspace.body_ss_pair_indices,
-            rigid_workspace.contact_adjacency);
-        build_block_contact_adj(
-            broad_phase.cache(), ref_mesh.node_to_rb,
-            deformable_nodes, num_rbs,
             mixed_adjacency_workspace.contact_adjacency);
         union_adjacency(
             mixed_adjacency_workspace.elastic_adjacency,

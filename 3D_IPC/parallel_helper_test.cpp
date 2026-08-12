@@ -179,8 +179,13 @@ TEST(ParallelHelper, BlockElasticAdjacencyProjectsNodesAndCollapsesRigidProxies)
     elastic_adj[4] = {1};
 
     std::vector<std::vector<int>> graph{{99}};
+    const std::vector<int> node_to_block =
+        build_node_to_block(node_to_rb, deformable_nodes, 3);
+    std::vector<std::vector<int>> block_nodes(7);
+    for (int node = 0; node < static_cast<int>(node_to_block.size()); ++node)
+        block_nodes[node_to_block[node]].push_back(node);
     build_block_elastic_adj(
-        elastic_adj, node_to_rb, deformable_nodes, 3, graph);
+        elastic_adj, node_to_block, block_nodes, graph);
 
     EXPECT_EQ(graph, (std::vector<std::vector<int>>{
         {1, 2}, {0, 2}, {0, 1}, {}, {}, {}, {}}));
@@ -237,9 +242,40 @@ TEST(ParallelHelper, BlockContactAdjacencyMakesEveryContactABlockClique) {
     internal_ss.v[3] = 8;
     cache.ss_pairs.push_back(internal_ss);
 
+    // Populate the same per-vertex incidence cache as BroadPhase so this test
+    // exercises the parallel row-owned implementation used by the solver.
+    cache.vertex_nt.assign(node_to_rb.size(), {});
+    cache.vertex_ss.assign(node_to_rb.size(), {});
+    for (int pair_index = 0;
+         pair_index < static_cast<int>(cache.nt_pairs.size()); ++pair_index) {
+        const NodeTrianglePair& pair = cache.nt_pairs[pair_index];
+        cache.vertex_nt[pair.node].push_back({
+            static_cast<std::size_t>(pair_index), 0});
+        for (int role = 0; role < 3; ++role) {
+            cache.vertex_nt[pair.tri_v[role]].push_back({
+                static_cast<std::size_t>(pair_index), role + 1});
+        }
+    }
+    for (int pair_index = 0;
+         pair_index < static_cast<int>(cache.ss_pairs.size()); ++pair_index) {
+        const SegmentSegmentPair& pair = cache.ss_pairs[pair_index];
+        for (int role = 0; role < 4; ++role) {
+            cache.vertex_ss[pair.v[role]].push_back({
+                static_cast<std::size_t>(pair_index), role});
+        }
+    }
+
     std::vector<std::vector<int>> graph{{99}};
+    const std::vector<int> node_to_block =
+        build_node_to_block(node_to_rb, deformable_nodes, 3);
+    std::vector<std::vector<int>> block_nodes(7);
+    for (int node = 0; node < static_cast<int>(node_to_block.size()); ++node)
+        block_nodes[node_to_block[node]].push_back(node);
+    std::vector<std::vector<int>> body_nt_pair_indices;
+    std::vector<std::vector<int>> body_ss_pair_indices;
     build_block_contact_adj(
-        cache, node_to_rb, deformable_nodes, 3, graph);
+        cache, node_to_block, block_nodes, 4,
+        body_nt_pair_indices, body_ss_pair_indices, graph);
     EXPECT_EQ(graph, (std::vector<std::vector<int>>{
         {1, 2, 3, 5},
         {0, 2, 3, 4, 5},
@@ -248,6 +284,10 @@ TEST(ParallelHelper, BlockContactAdjacencyMakesEveryContactABlockClique) {
         {1, 2, 3, 6},
         {0, 1},
         {4}}));
+    EXPECT_EQ(body_nt_pair_indices,
+              (std::vector<std::vector<int>>{{1}, {}, {}}));
+    EXPECT_EQ(body_ss_pair_indices,
+              (std::vector<std::vector<int>>{{1}, {0}, {1}}));
     expect_valid_coloring(graph);
 }
 
