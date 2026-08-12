@@ -218,6 +218,29 @@ static Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const Vertex
     return g;
 }
 
+double compute_global_deformable_residual(
+    const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params,
+    const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+    const BroadPhase& broad_phase,
+    const std::vector<int>& deformable_nodes, const PinMap* pin_map) {
+    (void)params.dt2();
+    double r_inf = 0.0;
+    const int num_deformable = static_cast<int>(deformable_nodes.size());
+    #pragma omp parallel for reduction(max:r_inf) schedule(static)
+    for (int i = 0; i < num_deformable; ++i) {
+        const int node = deformable_nodes[i];
+        Vec3 g = compute_local_gradient(
+            node, ref_mesh, adj, pins, params, x, xhat, broad_phase,
+            pin_map);
+        const double m = ref_mesh.mass[node];
+        if (m > 0.0)
+            g /= m;
+        r_inf = std::max(r_inf, g.cwiseAbs().maxCoeff());
+    }
+    return r_inf;
+}
+
 double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                const BroadPhase& broad_phase, const PinMap* pin_map) {

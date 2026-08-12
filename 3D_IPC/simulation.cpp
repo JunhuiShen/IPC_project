@@ -47,8 +47,9 @@ int main(int argc, char** argv) {
     else if (args.example == 9) build_twenty_rigid_polygon_static_stack_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else if (args.example == 10) build_five_rigid_polygon_drop_scatter_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else if (args.example == 11) build_hundred_rigid_polygon_box_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
+    else if (args.example == 12) build_ten_rigid_polygons_drop_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12.\n";
         return 1;
     }
 
@@ -76,7 +77,49 @@ int main(int argc, char** argv) {
         // TODO: avatar clothing pin updater
     }
 
-    if (ref_mesh.total_mass.empty())
+    const int num_vertices = static_cast<int>(state.deformed_positions.size());
+    const std::size_t num_rigid_bodies = ref_mesh.total_mass.size();
+    if (ref_mesh.node_to_rb.empty()) {
+        if (num_rigid_bodies != 0) {
+            throw std::invalid_argument("rigid scene is missing its node ownership map");
+        }
+        ref_mesh.node_to_rb.assign(num_vertices, -1);
+    }
+    if (ref_mesh.node_to_rb.size() != state.deformed_positions.size()) {
+        throw std::invalid_argument("node_to_rb size does not match the particle count");
+    }
+
+    bool has_deformable = false;
+    for (const int owner : ref_mesh.node_to_rb) {
+        if (owner < -1 || owner >= static_cast<int>(num_rigid_bodies)) {
+            throw std::invalid_argument("invalid node_to_rb entry");
+        }
+        has_deformable = has_deformable || owner < 0;
+    }
+    const bool has_rigid = num_rigid_bodies > 0;
+    const bool is_mixed = has_rigid && has_deformable;
+    if (is_mixed && (params.use_ogc || params.use_ogc_solver)) {
+        throw std::invalid_argument("mixed deformable-rigid scenes do not support OGC mode");
+    }
+    if (is_mixed) {
+        for (const Pin& pin : pins) {
+            if (pin.vertex_index < 0
+                || pin.vertex_index >= num_vertices) {
+                throw std::out_of_range(
+                    "mixed-scene pin vertex is out of range");
+            }
+            if (ref_mesh.node_to_rb[pin.vertex_index] >= 0) {
+                throw std::invalid_argument(
+                    "mixed scenes do not support pins on rigid proxy nodes");
+            }
+        }
+    }
+    if (has_rigid && ref_mesh.mass.size() != state.deformed_positions.size()) {
+        throw std::invalid_argument("rigid scene has an incomplete nodal mass array");
+    }
+    if (is_mixed)
+        ref_mesh.build_deformable_lumped_mass(params.density, params.thickness);
+    else if (!has_rigid)
         ref_mesh.build_lumped_mass(params.density, params.thickness);
     VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);
 
@@ -111,7 +154,6 @@ int main(int argc, char** argv) {
     std::cout << "d_hat = " << params.d_hat
               << (params.d_hat > 0.0 ? "  (barrier ON)" : "  (barrier OFF)")
               << "\n";
-    const std::size_t num_rigid_bodies = ref_mesh.total_mass.size();
     std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
     if (num_rigid_bodies > 0)
@@ -184,7 +226,11 @@ int main(int argc, char** argv) {
             };
         }
 
-        if (!ref_mesh.total_mass.empty()) {
+        if (is_mixed) {
+            result = advance_one_frame_general(
+                state, ref_mesh, adj, pins, params, broad_phase,
+                frame_index, pin_updater, substep_cb, outdir);
+        } else if (has_rigid) {
             result = advance_one_frame_rb(
                 state, ref_mesh, params, frame_index, substep_cb);
         } else {
@@ -203,17 +249,62 @@ int main(int argc, char** argv) {
         double solver_ms = std::chrono::duration<double, std::milli>(solver_end - solver_start).count();
         total_solver_ms += solver_ms;
 
-        std::cout << "Frame " << std::setw(4) << frame_index;
-        if (result.has_residual) {
-            std::cout << " | initial_residual = " << std::scientific
-                      << std::setprecision(6)
-                      << result.initial_residual
-                      << " | final_residual = "
-                      << result.final_residual;
+        if (result.has_residual_components) {
+            const auto residual_text = [](double residual) {
+                std::ostringstream text;
+                text << std::scientific << std::setprecision(6) << residual;
+                return text.str();
+            };
+            std::ostringstream time_text;
+            time_text << std::fixed << std::setprecision(3)
+                      << solver_ms << " ms";
+
+            constexpr int row_width = 9;
+            constexpr int residual_width = 16;
+            constexpr int iterations_width = 12;
+            constexpr int time_width = 14;
+            std::cout << "Frame " << std::setw(4) << frame_index << "\n"
+                      << std::left
+                      << std::setw(row_width) << ""
+                      << " | " << std::setw(residual_width) << "cloth"
+                      << " | " << std::setw(residual_width) << "rigid body"
+                      << " | " << std::setw(residual_width) << "total residual"
+                      << " | " << std::setw(iterations_width) << "global_iters"
+                      << " | " << std::setw(time_width) << "solver_time" << "\n"
+                      << std::setw(row_width) << "initial"
+                      << " | " << std::setw(residual_width)
+                      << residual_text(result.initial_cloth_residual)
+                      << " | " << std::setw(residual_width)
+                      << residual_text(result.initial_rigid_residual)
+                      << " | " << std::setw(residual_width)
+                      << residual_text(result.initial_residual)
+                      << " | " << std::setw(iterations_width) << ""
+                      << " | " << std::setw(time_width) << "" << "\n"
+                      << std::setw(row_width) << "final"
+                      << " | " << std::setw(residual_width)
+                      << residual_text(result.final_cloth_residual)
+                      << " | " << std::setw(residual_width)
+                      << residual_text(result.final_rigid_residual)
+                      << " | " << std::setw(residual_width)
+                      << residual_text(result.final_residual)
+                      << " | " << std::setw(iterations_width)
+                      << result.iterations
+                      << " | " << std::setw(time_width) << time_text.str()
+                      << std::right << "\n\n";
+        } else {
+            std::cout << "Frame " << std::setw(4) << frame_index;
+            if (result.has_residual) {
+                std::cout << std::scientific << std::setprecision(6);
+                std::cout << " | initial_residual = "
+                          << result.initial_residual
+                          << " | final_residual = "
+                          << result.final_residual;
+            }
+            std::cout << " | global_iters = " << std::setw(3)
+                      << result.iterations
+                      << " | solver_time = " << std::fixed
+                      << std::setprecision(3) << solver_ms << " ms\n";
         }
-        std::cout << " | global_iters = " << std::setw(3) << result.iterations
-                  << " | solver_time = " << std::fixed << std::setprecision(3)
-                  << solver_ms << " ms\n";
 
         if (!params.write_substeps)
             export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, nullptr);

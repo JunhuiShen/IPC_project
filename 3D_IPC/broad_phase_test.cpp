@@ -952,3 +952,43 @@ TEST(BroadPhaseTest, PerVertexSafeStepClampsCCDAndOGC) {
 
     EXPECT_TRUE(x_ogc[0].isApprox(Vec3(0.0, 0.3, 0.0), 1.0e-12));
 }
+
+TEST(BroadPhaseTest, MixedDeformableSafeStepUpdatesOnlySelectedVertex) {
+    std::vector<Vec3> x = {
+        Vec3(1.5, 0.25, 0.0),
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0),
+    };
+    const std::vector<Vec3> initial = x;
+    const std::vector<Vec3> target = {
+        Vec3(0.75, 0.25, 0.0),
+        x[1], x[2], x[3],
+    };
+
+    BroadPhase broad_phase;
+    auto& cache = broad_phase.mutable_cache();
+    cache.node_boxes.assign(
+        x.size(),
+        AABB(Vec3::Constant(-2.0), Vec3::Constant(2.0)));
+    cache.vertex_nt.resize(x.size());
+    cache.vertex_ss.resize(x.size());
+    NodeTrianglePair pair{};
+    pair.node = 0;
+    pair.tri_v[0] = 1;
+    pair.tri_v[1] = 2;
+    pair.tri_v[2] = 3;
+    cache.nt_pairs.push_back(pair);
+    cache.vertex_nt[0].push_back(
+        {/*pair_index=*/0, /*dof=*/0});
+
+    mixed_deformable_vertex_safe_step(
+        broad_phase, x, 0,
+        [&](int vi) { return target[vi]; },
+        /*safety=*/0.9, /*clip_ccd=*/true,
+        /*use_ticcd=*/false, /*use_ogc=*/false);
+
+    EXPECT_TRUE(x[0].isApprox(Vec3(0.825, 0.25, 0.0), 1.0e-12));
+    for (int vi = 1; vi < static_cast<int>(x.size()); ++vi)
+        EXPECT_TRUE(x[vi].isApprox(initial[vi], 0.0));
+}

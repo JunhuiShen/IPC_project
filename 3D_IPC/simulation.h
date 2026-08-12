@@ -85,6 +85,84 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
     return agg;
 }
 
+// Advance a frame containing both independently deformable nodes and rigid
+// bodies. The previous-step state remains fixed throughout each nonlinear
+// solve; cloth positions and rigid generalized coordinates are committed
+// together only after convergence.
+inline SolverResult advance_one_frame_general(
+    DeformedState& state, const RefMesh& ref_mesh,
+    const VertexTriangleMap& adj, std::vector<Pin>& pins,
+    const SimParams& params, BroadPhase& broad_phase,
+    int frame_index = 1, PinTargetUpdater pin_updater = nullptr,
+    SubstepCallback on_substep = nullptr,
+    const std::string& outdir = "") {
+    if (ref_mesh.node_to_rb.size() != state.deformed_positions.size()
+        || state.velocities.size() != state.deformed_positions.size()) {
+        throw std::invalid_argument(
+            "advance_one_frame_general: inconsistent particle arrays");
+    }
+
+    SolverResult aggregate;
+    const double dt = params.dt();
+    const int nv = static_cast<int>(state.deformed_positions.size());
+
+    for (int substep = 0; substep < params.substeps; ++substep) {
+        if (pin_updater) {
+            const double t_next =
+                ((frame_index - 1) * params.substeps + substep + 1) * dt;
+            pin_updater(pins, t_next);
+        }
+
+        std::vector<Vec3> xhat;
+        build_xhat(xhat, state.deformed_positions, state.velocities, dt);
+        // Rigid inertia is represented by COM/orientation variables. Do not
+        // also give rigid proxies independent particle predictors.
+        for (int node = 0; node < nv; ++node) {
+            if (ref_mesh.node_to_rb[node] >= 0)
+                xhat[node] = state.deformed_positions[node];
+        }
+
+        // Start from the previous collision-free state. Existing particle
+        // initial guesses are not rigid-motion preserving, so they are not
+        // applied to a mixed configuration.
+        std::vector<Vec3> xnew = state.deformed_positions;
+        std::vector<Vec3> x_com_new = state.x_coms;
+        std::vector<Vec4> q_new = state.orientations;
+        std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
+
+        const SolverResult substep_result =
+            global_gauss_seidel_solver_basic_general(
+                ref_mesh, state, adj, pins, params, xnew, xhat,
+                x_com_new, q_new, omega_new, broad_phase,
+                outdir, params.verbose);
+        accumulate_solver_result(aggregate, substep_result, substep == 0);
+        if (!substep_result.converged)
+            return aggregate;
+
+        // Commit independent cloth nodes only. Rigid proxy particles are
+        // synchronized from generalized state below.
+        #pragma omp parallel for schedule(static)
+        for (int node = 0; node < nv; ++node) {
+            if (ref_mesh.node_to_rb[node] >= 0)
+                continue;
+            state.velocities[node] = (xnew[node] - state.deformed_positions[node]) / dt;
+            state.deformed_positions[node] = xnew[node];
+        }
+
+        update_velocity(state.v_coms, x_com_new, state.x_coms, dt);
+        state.x_coms = x_com_new;
+        state.orientations = q_new;
+        state.omega = omega_new;
+        sync_rigid_body_particles(ref_mesh, state);
+
+        if (on_substep) {
+            const int global_substep = (frame_index - 1) * params.substeps + substep;
+            on_substep(global_substep, state.deformed_positions);
+        }
+    }
+    return aggregate;
+}
+
 inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
     std::vector<Pin>& pins, const SimParams& params,
     BroadPhase& broad_phase, int frame_index = 1,

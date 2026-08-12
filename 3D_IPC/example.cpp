@@ -1096,8 +1096,8 @@ void build_five_rigid_polygon_drop_scatter_example(
 // Example 11: one hundred rigid polygonal prisms of varied shapes falling
 // into an open-top box
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 11 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir hundred_polygon_box_output --format obj
-// ./build/3D_sim --example 11 --num_frames 200 --substeps 80 --max_substep_iters 5000 --fixed_iters --outdir hundred_polygon_box_output --format obj
+// command line: ./build/3D_sim --example 11 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir hundred_polygon_box_fixed_iter_output --format obj
+// ./build/3D_sim --example 11 --num_frames 200 --substeps 80 --max_substep_iters 5000 --outdir hundred_polygon_box_output --format obj
 void build_hundred_rigid_polygon_box_drop_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1241,4 +1241,93 @@ void build_hundred_rigid_polygon_box_drop_example(
         Vec3(-box_half_width, wall_height,  box_half_depth),
         Vec3( box_half_width, wall_height,  box_half_depth),
         Vec3( box_half_width, 0.0,          box_half_depth));
+}
+
+// ---------------------------------------------------------------------------
+// Example 12: ten small rigid polygonal prisms falling onto a
+// four-corner-pinned rectangular cloth
+// ---------------------------------------------------------------------------
+// command line: ./build/3D_sim --example 12 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir hex_on_pinned_cloth_output --format obj
+void build_ten_rigid_polygons_drop_on_pinned_cloth_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params) {
+    clear_model(ref_mesh, state, X, pins);
+
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = 0.0;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+    params.use_ogc = false;
+    params.use_ogc_solver = false;
+
+    // build_square_mesh places its grid in the world x-z plane. Using unequal
+    // width and depth makes this a rectangular cloth centered at the origin.
+    constexpr int cloth_nx = 20;
+    constexpr int cloth_nz = 12;
+    constexpr double cloth_width = 2.0;
+    constexpr double cloth_depth = 1.2;
+    constexpr double cloth_height = 0.8;
+    const Vec3 cloth_origin(
+        -0.5 * cloth_width, cloth_height, -0.5 * cloth_depth);
+    const int cloth_base = build_square_mesh(
+        ref_mesh, state, X, cloth_nx, cloth_nz,
+        cloth_width, cloth_depth, cloth_origin);
+    state.velocities.assign(
+        state.deformed_positions.size(), Vec3::Zero());
+
+    const auto cloth_node = [cloth_base](int i, int j) {
+        return cloth_base + j * (cloth_nx + 1) + i;
+    };
+    append_pin(pins, cloth_node(0, 0), state.deformed_positions);
+    append_pin(pins, cloth_node(cloth_nx, 0), state.deformed_positions);
+    append_pin(pins, cloth_node(0, cloth_nz), state.deformed_positions);
+    append_pin(pins, cloth_node(cloth_nx, cloth_nz),state.deformed_positions);
+
+    // The polygon helper extrudes along material z. A -90-degree rotation
+    // about x turns that extrusion into the world y direction, so every prism
+    // lands flat on the horizontal cloth. A world-y yaw gives each footprint
+    // a different in-plane orientation without tilting it.
+    const double half_angle = 0.25 * kPi;
+    const Vec4 flat_orientation(
+        std::cos(half_angle), -std::sin(half_angle), 0.0, 0.0);
+
+    constexpr int polygon_count = 10;
+    constexpr int columns = 5;
+    constexpr double radius = 0.10;
+    constexpr double density = 40.0;
+    constexpr double thickness = 0.06;
+    static constexpr double center_y[polygon_count] = {
+        1.22, 1.30, 1.38, 1.46, 1.54,
+        1.50, 1.42, 1.34, 1.26, 1.18,
+    };
+
+    for (int polygon = 0; polygon < polygon_count; ++polygon) {
+        const int row = polygon / columns;
+        const int column = polygon % columns;
+        const double yaw = polygon * kPi / 17.0;
+        const Vec4 yaw_orientation(
+            std::cos(0.5 * yaw), 0.0,
+            std::sin(0.5 * yaw), 0.0);
+        const Vec4 orientation = quaternion_normalize(
+            quaternion_multiply(yaw_orientation, flat_orientation));
+        const Vec3 center(
+            (column - 2) * 0.34,
+            center_y[polygon],
+            (row == 0) ? -0.22 : 0.22);
+
+        // Use every regular prism from a triangle through a dodecagon.
+        append_rigid_polygon(
+            polygon + 3, state, ref_mesh, center,
+            radius, density, thickness,
+            Vec3::Zero(), orientation, Vec3::Zero());
+    }
+
+    ref_mesh.build_deformable_nodes();
 }

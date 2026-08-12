@@ -62,6 +62,26 @@ void populate_contact_incidence(BroadPhase::Cache& cache, int nv) {
     }
 }
 
+void expect_valid_coloring(const std::vector<std::vector<int>>& graph) {
+    std::vector<std::vector<int>> groups;
+    greedy_color_conflict_graph(graph, groups);
+
+    std::vector<int> block_color(graph.size(), -1);
+    for (int color = 0; color < static_cast<int>(groups.size()); ++color) {
+        for (const int block : groups[color]) {
+            ASSERT_GE(block, 0);
+            ASSERT_LT(block, static_cast<int>(graph.size()));
+            EXPECT_EQ(block_color[block], -1);
+            block_color[block] = color;
+        }
+    }
+    for (int block = 0; block < static_cast<int>(graph.size()); ++block) {
+        EXPECT_GE(block_color[block], 0);
+        for (const int neighbor : graph[block])
+            EXPECT_NE(block_color[block], block_color[neighbor]);
+    }
+}
+
 } // namespace
 
 TEST(ParallelHelper, ContactAdjacencyMatchesPairScanExactly) {
@@ -143,6 +163,92 @@ TEST(ParallelHelper, RigidContactAdjacencyFiltersInternalPairsAndColorsBodies) {
     std::vector<std::vector<int>> groups;
     greedy_color_conflict_graph(adjacency, groups);
     EXPECT_EQ(groups, (std::vector<std::vector<int>>{{0, 2, 3}, {1}}));
+}
+
+TEST(ParallelHelper, BlockElasticAdjacencyProjectsNodesAndCollapsesRigidProxies) {
+    // Global node order is deliberately interleaved. Mixed block order is
+    // C0, C1, C2, C3, R0, R1, R2.
+    const std::vector<int> node_to_rb = {
+        -1, 0, -1, 1, 0, -1, 1, -1, 2, 2};
+    const std::vector<int> deformable_nodes = {0, 2, 5, 7};
+    std::vector<std::vector<int>> elastic_adj(node_to_rb.size());
+    elastic_adj[0] = {2, 5};
+    elastic_adj[2] = {0, 5};
+    elastic_adj[5] = {0, 2};
+    elastic_adj[1] = {4};
+    elastic_adj[4] = {1};
+
+    std::vector<std::vector<int>> graph{{99}};
+    build_block_elastic_adj(
+        elastic_adj, node_to_rb, deformable_nodes, 3, graph);
+
+    EXPECT_EQ(graph, (std::vector<std::vector<int>>{
+        {1, 2}, {0, 2}, {0, 1}, {}, {}, {}, {}}));
+    expect_valid_coloring(graph);
+}
+
+TEST(ParallelHelper, BlockContactAdjacencyMakesEveryContactABlockClique) {
+    // Global node order is deliberately interleaved. Mixed block order is
+    // C0, C1, C2, C3, R0, R1, R2.
+    const std::vector<int> node_to_rb = {
+        -1, 0, -1, 1, 0, -1, 1, -1, 2, 2};
+    const std::vector<int> deformable_nodes = {0, 2, 5, 7};
+    BroadPhase::Cache cache;
+
+    // A cloth-only point-triangle pair creates K4(C0,C1,C2,C3).
+    NodeTrianglePair cloth_nt{};
+    cloth_nt.node = 0;
+    cloth_nt.tri_v[0] = 2;
+    cloth_nt.tri_v[1] = 5;
+    cloth_nt.tri_v[2] = 7;
+    cache.nt_pairs.push_back(cloth_nt);
+
+    // R0 point versus a cloth triangle adds R0-C1, R0-C2, and R0-C3.
+    NodeTrianglePair mixed_nt{};
+    mixed_nt.node = 1;
+    mixed_nt.tri_v[0] = 2;
+    mixed_nt.tri_v[1] = 5;
+    mixed_nt.tri_v[2] = 7;
+    cache.nt_pairs.push_back(mixed_nt);
+
+    // A cloth edge versus an R1 edge adds R1-C0 and R1-C1. Both rigid edge
+    // vertices collapse to the same R1 block.
+    SegmentSegmentPair mixed_ss{};
+    mixed_ss.v[0] = 0;
+    mixed_ss.v[1] = 2;
+    mixed_ss.v[2] = 3;
+    mixed_ss.v[3] = 6;
+    cache.ss_pairs.push_back(mixed_ss);
+
+    // An R0 edge versus an R2 edge adds one R0-R2 edge.
+    SegmentSegmentPair rigid_ss{};
+    rigid_ss.v[0] = 1;
+    rigid_ss.v[1] = 4;
+    rigid_ss.v[2] = 8;
+    rigid_ss.v[3] = 9;
+    cache.ss_pairs.push_back(rigid_ss);
+
+    // A contact internal to R2 maps all four roles to one block and adds no
+    // self edge.
+    SegmentSegmentPair internal_ss{};
+    internal_ss.v[0] = 8;
+    internal_ss.v[1] = 9;
+    internal_ss.v[2] = 9;
+    internal_ss.v[3] = 8;
+    cache.ss_pairs.push_back(internal_ss);
+
+    std::vector<std::vector<int>> graph{{99}};
+    build_block_contact_adj(
+        cache, node_to_rb, deformable_nodes, 3, graph);
+    EXPECT_EQ(graph, (std::vector<std::vector<int>>{
+        {1, 2, 3, 5},
+        {0, 2, 3, 4, 5},
+        {0, 1, 3, 4},
+        {0, 1, 2, 4},
+        {1, 2, 3, 6},
+        {0, 1},
+        {4}}));
+    expect_valid_coloring(graph);
 }
 
 TEST(GreedyColorConflictGraph, DeterministicColoringAndScratchReuse) {

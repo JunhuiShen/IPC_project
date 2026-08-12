@@ -103,6 +103,13 @@ struct BasicSolverWorkspace {
     }
 };
 
+struct MixedAdjacencyWorkspace {
+    std::vector<std::vector<int>> elastic_adjacency;
+    std::vector<std::vector<int>> contact_adjacency;
+    std::vector<std::vector<int>> combined_adjacency;
+    std::vector<std::vector<int>> color_groups;
+};
+
 struct OGCSolverWorkspace {
     ElasticAdjacencyCache elastic_adjacency;
     BroadPhase broad_phase;
@@ -865,5 +872,312 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
 
     if (params.fixed_iters)
         result.converged = true;
+    return result;
+}
+
+// -----------------------------------------------------------------------------
+// General deformable + rigid-body solver entry point
+// -----------------------------------------------------------------------------
+SolverResult global_gauss_seidel_solver_basic_general(
+    const RefMesh& ref_mesh, const DeformedState& state,
+    const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+    const SimParams& params, std::vector<Vec3>& xnew,
+    const std::vector<Vec3>& xhat,
+    std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new,
+    std::vector<Vec3>& omega_new, BroadPhase& broad_phase,
+    const std::string& outdir, bool verbose) {
+
+
+    const int nv = static_cast<int>(xnew.size());
+    const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
+    const std::vector<int>& deformable_nodes = ref_mesh.deformable_nodes;
+    SolverResult result;
+
+    // A mesh without rigid bodies may predate node_to_rb. Preserve the exact
+    // cloth-only path in that case.
+    if (num_rbs == 0) {
+        return global_gauss_seidel_solver_basic(
+            ref_mesh, adj, pins, params, xnew, xhat, state.velocities,
+            broad_phase, outdir, verbose);
+    }
+
+    rb_solver::validate_rigid_solver_state(ref_mesh, state, x_com_new, q_new, omega_new);
+
+    // Preserve the exact rigid-only implementation and synchronize its proxy
+    // positions before returning through the general API.
+    if (deformable_nodes.empty()) {
+        SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new, verbose);
+        for (int rb = 0; rb < num_rbs; ++rb) {
+            for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local) {
+                xnew[ref_mesh.rb_nodes[rb][local]] = world_space_position(ref_mesh.ref_positions[rb][local], x_com_new[rb], q_new[rb]);
+            }
+        }
+        return result;
+    }
+
+    static BasicSolverWorkspace deformable_workspace;
+    static RigidSolverWorkspace rigid_workspace;
+    static MixedAdjacencyWorkspace mixed_adjacency_workspace;
+    deformable_workspace.prepare(ref_mesh, adj, nv, params.node_box_max);
+    rigid_workspace.prepare(ref_mesh, nv, params.node_box_max, params.theta_box_max);
+    const std::vector<std::vector<int>>& nodal_elastic_adj = deformable_workspace.elastic_adjacency.get(ref_mesh, adj, nv);
+    build_block_elastic_adj(nodal_elastic_adj, ref_mesh.node_to_rb, deformable_nodes, num_rbs, mixed_adjacency_workspace.elastic_adjacency);
+
+    PinMap& pin_map = deformable_workspace.pin_map;
+    for (int pin = 0; pin < static_cast<int>(pins.size()); ++pin)
+        pin_map[pins[pin].vertex_index] = pin;
+
+    // xnew is the single live collision configuration. Its deformable entries
+    // come from the caller; overwrite only rigid proxies from generalized
+    // coordinates.
+    for (int rb = 0; rb < num_rbs; ++rb) {
+        const Vec4 orientation = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_new[rb], params.dt()));
+        q_new[rb] = orientation;
+        for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local) {
+            xnew[ref_mesh.rb_nodes[rb][local]] = world_space_position(ref_mesh.ref_positions[rb][local], x_com_new[rb], orientation);
+        }
+    }
+
+    deformable_workspace.xnew_substep_start = xnew;
+    rigid_workspace.substep_start_coms = x_com_new;
+    std::vector<AABB>& blue_boxes = rigid_workspace.blue_boxes;
+    const double dt = params.dt();
+    // SimParams caches these values lazily. Populate both caches before any
+    // heterogeneous color is evaluated by multiple OpenMP workers.
+    (void)params.dt2();
+    constexpr double box_padding = 1.2;
+
+    const auto rebuild_contact_cache = [&](int iteration) {
+        // First fill deformable boxes. build_blue_boxes_rb then overwrites all
+        // rigid proxy entries with spherical-cap plus COM bounds.
+        for (const int node : deformable_nodes) {
+            const double inertial = dt * state.velocities[node].norm();
+            const double radius = std::clamp(box_padding * std::max(deformable_workspace.prev_disp[node], inertial),params.node_box_min, params.node_box_max);
+            const Vec3 half_extent = Vec3::Constant(radius);
+            blue_boxes[node] = AABB(xnew[node] - half_extent, xnew[node] + half_extent);
+        }
+
+        for (int rb = 0; rb < num_rbs; ++rb) {
+            rigid_workspace.com_box_anchors[rb] = x_com_new[rb];
+            rigid_workspace.orientation_box_anchors[rb] = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_new[rb], dt));
+            rigid_workspace.com_box_radii[rb] = std::clamp(box_padding * std::max(rigid_workspace.prev_com_disp[rb], dt * state.v_coms[rb].norm()), params.node_box_min, params.node_box_max);
+            rigid_workspace.theta_box_radii[rb] = std::clamp(box_padding * std::max(rigid_workspace.prev_theta_disp[rb], dt * state.omega[rb].norm()), params.theta_box_min, params.theta_box_max);
+        }
+        build_blue_boxes_rb(
+            rigid_workspace.com_box_anchors,
+            rigid_workspace.orientation_box_anchors,
+            rigid_workspace.theta_box_radii,
+            rigid_workspace.com_box_radii, ref_mesh, blue_boxes);
+        broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
+        build_rb_contact_adj(
+            broad_phase.cache(), ref_mesh.node_to_rb, num_rbs,
+            rigid_workspace.body_nt_pair_indices,
+            rigid_workspace.body_ss_pair_indices,
+            rigid_workspace.contact_adjacency);
+        build_block_contact_adj(
+            broad_phase.cache(), ref_mesh.node_to_rb,
+            deformable_nodes, num_rbs,
+            mixed_adjacency_workspace.contact_adjacency);
+        union_adjacency(
+            mixed_adjacency_workspace.elastic_adjacency,
+            mixed_adjacency_workspace.contact_adjacency,
+            mixed_adjacency_workspace.combined_adjacency);
+        greedy_color_conflict_graph(
+            mixed_adjacency_workspace.combined_adjacency,
+            mixed_adjacency_workspace.color_groups);
+        if (verbose) {
+            std::fprintf(
+                stderr,
+                "  [General GS] iter %d  rebuilding mixed blue boxes and %zu block colors\n",
+                iteration, mixed_adjacency_workspace.color_groups.size());
+        }
+    };
+
+
+    const auto update_final_residual = [&]() {
+        result.final_cloth_residual = compute_global_deformable_residual(
+                                        ref_mesh, adj, pins, params, xnew, xhat, broad_phase,
+                                        deformable_nodes, &pin_map);
+        result.final_rigid_residual = rb_solver::rigid_body_unnormalized_residual(
+                                        ref_mesh, state, broad_phase.cache(),
+                                        rigid_workspace.body_nt_pair_indices,
+                                        rigid_workspace.body_ss_pair_indices,
+                                        rigid_workspace.node_to_rb_local, xnew, params,
+                                        x_com_new, omega_new, dt);
+        result.final_residual = result.final_cloth_residual + result.final_rigid_residual;
+    };
+
+    const auto block_residual_converged = [&](double residual,
+                                               double initial) {
+        double tolerance = 0.0;
+        if (params.tol_abs > 0.0)
+            tolerance = std::max(tolerance, params.tol_abs);
+        if (params.tol_rel > 0.0 && std::isfinite(initial))
+            tolerance = std::max(
+                tolerance, params.tol_rel * initial);
+        return residual <= tolerance;
+    };
+    const auto residual_converged = [&]() {
+        return block_residual_converged(
+                result.final_cloth_residual,
+                result.initial_cloth_residual)
+            && block_residual_converged(
+                   result.final_rigid_residual,
+                   result.initial_rigid_residual);
+    };
+
+    rebuild_contact_cache(1);
+    if (!params.fixed_iters) {
+        result.has_residual = true;
+        result.has_residual_components = true;
+        update_final_residual();
+        result.initial_cloth_residual = result.final_cloth_residual;
+        result.initial_rigid_residual = result.final_rigid_residual;
+        result.initial_residual = result.final_residual;
+        if (residual_converged()) {
+            result.converged = true;
+            return result;
+        }
+    }
+
+    for (int iteration = 1; iteration <= params.max_global_iters; ++iteration) {
+        if (iteration > 1 && (iteration - 1) % params.node_box_update_count == 0) {
+            rebuild_contact_cache(iteration);
+        }
+
+        std::atomic<int> cloth_clip_count{0};
+
+        // COM and orientation remain one indivisible update block: all proxy
+        // positions are committed before another color begins.
+        const auto process_body = [&](int rb) {
+            const Vec3 delta_com = params.damping * rb_solver::compute_com_update(
+                                                    rb, state, ref_mesh, broad_phase.cache(),
+                                                    rigid_workspace.body_nt_pair_indices[rb],
+                                                    rigid_workspace.body_ss_pair_indices[rb],
+                                                    rigid_workspace.node_to_rb_local, xnew,
+                                                    x_com_new, omega_new, params, dt);
+            const Vec3 com_radius = Vec3::Constant(rigid_workspace.com_box_radii[rb]);
+            const Vec3 com_target =(x_com_new[rb] - delta_com).cwiseMax(rigid_workspace.com_box_anchors[rb] - com_radius).cwiseMin(rigid_workspace.com_box_anchors[rb] + com_radius);
+            const Vec3 proposed_com_displacement = com_target - x_com_new[rb];
+            const double com_safe_step = per_rigid_body_translation_safe_step(
+                                        ref_mesh, broad_phase.cache(),
+                                        rigid_workspace.body_nt_pair_indices[rb],
+                                        rigid_workspace.body_ss_pair_indices[rb], xnew, rb,
+                                        proposed_com_displacement);
+            const Vec3 com_displacement = com_safe_step * proposed_com_displacement;
+            x_com_new[rb] += com_displacement;
+            for (const int node : ref_mesh.rb_nodes[rb])
+                xnew[node] += com_displacement;
+
+            const Vec3 delta_omega = rb_solver::compute_omega_update(
+                                    rb, state, ref_mesh, broad_phase.cache(),
+                                    rigid_workspace.body_nt_pair_indices[rb],
+                                    rigid_workspace.body_ss_pair_indices[rb],
+                                    rigid_workspace.node_to_rb_local, xnew,
+                                    x_com_new, omega_new, params, dt);
+            const Vec4 q_current = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_new[rb], dt));
+            const Vec3 omega_target = omega_new[rb] - params.damping * delta_omega;
+            const Vec4 q_target = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_target, dt));
+            const Vec4 q_bounded = bound_quaternion(rigid_workspace.orientation_box_anchors[rb], q_current,q_target, rigid_workspace.theta_box_radii[rb]);
+            const double rotation_safe_step = per_rigid_body_rotation_safe_step(
+                                            ref_mesh, broad_phase.cache(),
+                                                rigid_workspace.body_nt_pair_indices[rb],
+                                                rigid_workspace.body_ss_pair_indices[rb], xnew, rb,
+                                                x_com_new[rb], q_current, q_bounded);
+            const Vec4 q_accepted = interpolate_orientation_full_arc(q_current, q_bounded, rotation_safe_step);
+            q_new[rb] = q_accepted;
+            omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, state.orientations[rb], dt);
+
+            for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size());++local) {
+                xnew[ref_mesh.rb_nodes[rb][local]] = world_space_position(ref_mesh.ref_positions[rb][local],x_com_new[rb], q_accepted);
+            }
+        };
+
+        if (params.use_parallel) {
+            // Block ids [0, num_deformable) map to cloth nodes; subsequent
+            // ids map to whole rigid bodies. Each color is independent under
+            // elastic, NT, and SS reads, and the omp-for barrier separates
+            // successive Gauss-Seidel colors.
+            const int num_deformable = static_cast<int>(deformable_nodes.size());
+            #pragma omp parallel
+            {
+                for (const std::vector<int>& color : mixed_adjacency_workspace.color_groups) {
+                    #pragma omp for schedule(static)
+                    for (int index = 0; index < static_cast<int>(color.size()); ++index) {
+                        const int block = color[index];
+                        // if deformable, then use cloth solver
+                        if (block < num_deformable) {
+                            mixed_deformable_vertex_safe_step(
+                                broad_phase, xnew, deformable_nodes[block],
+                                [&](int node) -> Vec3 {
+                                    return xnew[node] - params.damping
+                                        * gs_vertex_delta_live_barrier(
+                                            node, ref_mesh, adj, pins, params,
+                                            xhat, xnew, broad_phase, &pin_map,
+                                            &deformable_workspace.incident_triangles[node],
+                                            &deformable_workspace.rest_shape_grads);
+                                },
+                                0.9, params.use_ccd, params.use_ticcd,
+                                false,
+                                verbose ? &cloth_clip_count : nullptr);
+                        }
+                        // if rigid, then use rigid solver
+                        else {
+                            process_body(block - num_deformable);
+                        }
+                    }
+                }
+            }
+        } else {
+            // Preserve the original serial ordering: all cloth nodes first,
+            // followed by rigid bodies.
+            for (const int node : deformable_nodes) {
+                mixed_deformable_vertex_safe_step(
+                    broad_phase, xnew, node,
+                    [&](int vi) -> Vec3 {
+                        return xnew[vi] - params.damping
+                            * gs_vertex_delta_live_barrier(
+                                vi, ref_mesh, adj, pins, params, xhat, xnew,
+                                broad_phase, &pin_map,
+                                &deformable_workspace.incident_triangles[vi],
+                                &deformable_workspace.rest_shape_grads);
+                    },
+                    0.9, params.use_ccd, params.use_ticcd, false,
+                    verbose ? &cloth_clip_count : nullptr);
+            }
+            for (int rb = 0; rb < num_rbs; ++rb)
+                process_body(rb);
+        }
+
+        result.iterations = iteration;
+        if (!params.fixed_iters) {
+            update_final_residual();
+            if (verbose) {
+                std::fprintf(
+                    stderr,
+                    "  [General GS] iter %d  cloth residual = %.6e  rigid-body residual = %.6e  total residual = %.6e  cloth clips = %d\n",
+                    iteration, result.final_cloth_residual,
+                    result.final_rigid_residual, result.final_residual,
+                    cloth_clip_count.load());
+            }
+            if (residual_converged()) {
+                result.converged = true;
+                break;
+            }
+        }
+    }
+
+    for (const int node : deformable_nodes) {
+        deformable_workspace.prev_disp[node] = (xnew[node] - deformable_workspace.xnew_substep_start[node]).norm();
+    }
+    for (int rb = 0; rb < num_rbs; ++rb) {
+        rigid_workspace.prev_com_disp[rb] = (x_com_new[rb] - rigid_workspace.substep_start_coms[rb]).norm();
+        rigid_workspace.prev_theta_disp[rb] = dt * omega_new[rb].norm();
+    }
+
+    if (params.fixed_iters)
+        result.converged = true;
+    if (params.write_substeps)
+        write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, nullptr);
     return result;
 }

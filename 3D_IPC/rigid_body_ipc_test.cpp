@@ -3,7 +3,10 @@
 #include "parallel_helper.h"
 #include "physics.h"
 #include "safe_step.h"
+#include "simulation.h"
 #include "solver.h"
+#include "mesh_utils.h"
+#include "time_integration.h"
 
 #include <gtest/gtest.h>
 
@@ -1046,6 +1049,337 @@ TEST(RigidBodyIPCSolver, AddsNaiveRigidBarrierTranslationAndOrientationTerms) {
     EXPECT_TRUE(q_new[rb].isApprox(expected_q, 1.0e-11));
     EXPECT_TRUE(omega_new[rb].isApprox(
         expected_newton_omega, 1.0e-11));
+}
+
+TEST(GeneralSolver, AdvancesDeformableAndRigidInertiaInOneSweep) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    state.deformed_positions = {
+        Vec3(-1.0, -1.0, 0.0),
+        Vec3( 3.0, -1.0, 0.0),
+        Vec3(-1.0,  3.0, 0.0),
+    };
+    state.velocities = {
+        Vec3(0.2, -0.3, 0.1),
+        Vec3(0.2, -0.3, 0.1),
+        Vec3(0.2, -0.3, 0.1),
+    };
+    ref_mesh.tris = {0, 1, 2};
+    ref_mesh.initialize(
+        {Vec2(-1.0, -1.0), Vec2(3.0, -1.0), Vec2(-1.0, 3.0)},
+        state.deformed_positions);
+    ASSERT_TRUE(ref_mesh.Dm_inverse[0].allFinite());
+    ref_mesh.mass.assign(3, 2.0);
+    ref_mesh.node_to_rb.assign(3, -1);
+
+    const Vec3 rigid_velocity(-0.4, 0.25, 0.3);
+    const Vec3 rigid_omega(0.35, -0.2, 0.15);
+    const int rb = create_rigid_body(
+        {Vec3(10.0, 0.0, 0.0), Vec3(11.0, 0.0, 0.0),
+         Vec3(10.0, 1.0, 0.0), Vec3(10.0, 0.0, 1.0)},
+        rigid_velocity, Vec4(1.0, 0.0, 0.0, 0.0), rigid_omega,
+        4.0, ref_mesh, state);
+    ref_mesh.build_deformable_nodes();
+
+    SimParams params = SimParams::zeros();
+    params.fps = 10.0;
+    params.substeps = 1;
+    params.max_global_iters = 1;
+    params.fixed_iters = true;
+    params.damping = 1.0;
+    params.node_box_min = 2.0;
+    params.node_box_max = 2.0;
+    params.theta_box_min = M_PI;
+    params.theta_box_max = M_PI;
+    params.node_box_update_count = 1;
+    params.use_ccd = false;
+    params.use_parallel = true;
+    params.gravity = Vec3(0.0, -1.1, 0.0);
+    const double dt = params.dt();
+
+    const VertexTriangleMap adj =
+        build_incident_triangle_map(ref_mesh.tris);
+    std::vector<Vec3> xhat;
+    build_xhat(
+        xhat, state.deformed_positions, state.velocities, dt);
+    // General rigid motion must not depend on per-proxy xhat values.
+    for (const int node : ref_mesh.rb_nodes[rb])
+        xhat[node] = Vec3(123.0, -456.0, 789.0);
+
+    std::vector<Vec3> xnew = state.deformed_positions;
+    std::vector<Vec3> x_com_new = state.x_coms;
+    std::vector<Vec4> q_new = state.orientations;
+    std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
+    BroadPhase broad_phase;
+
+    const auto [omega_gradient, omega_hessian] =
+        inertia_rotation_gradient_hessian(
+            Vec3::Zero(), state.orientations[rb], state.omega[rb],
+            dt, ref_mesh.I_hat[rb]);
+    const Vec3 expected_omega =
+        -omega_hessian.ldlt().solve(omega_gradient);
+    const Vec4 expected_orientation = quaternion_normalize(
+        quaternion_from_angular_velocity(
+            state.orientations[rb], expected_omega, dt));
+    const Vec3 expected_com =
+        state.x_coms[rb] + dt * state.v_coms[rb]
+        + dt * dt * params.gravity;
+
+    const SolverResult result =
+        global_gauss_seidel_solver_basic_general(
+            ref_mesh, state, adj, {}, params, xnew, xhat,
+            x_com_new, q_new, omega_new, broad_phase);
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_EQ(result.iterations, 1);
+    for (int node = 0; node < 3; ++node) {
+        const Vec3 expected_position =
+            xhat[node] + dt * dt * params.gravity;
+        EXPECT_TRUE(xnew[node].isApprox(
+            expected_position, 1.0e-12));
+    }
+    EXPECT_TRUE(x_com_new[rb].isApprox(expected_com, 1.0e-12));
+    EXPECT_TRUE(omega_new[rb].isApprox(expected_omega, 1.0e-11));
+    EXPECT_TRUE(q_new[rb].isApprox(expected_orientation, 1.0e-11));
+    for (int local = 0;
+         local < static_cast<int>(ref_mesh.rb_nodes[rb].size());
+         ++local) {
+        const Vec3 expected_position = world_space_position(
+            ref_mesh.ref_positions[rb][local], expected_com,
+            expected_orientation);
+        EXPECT_TRUE(xnew[ref_mesh.rb_nodes[rb][local]].isApprox(
+            expected_position, 1.0e-11));
+    }
+
+    // The frame driver commits both subsystems only after the shared solve,
+    // reconstructs their velocities, and then synchronizes rigid proxies.
+    DeformedState committed_state = state;
+    std::vector<Pin> no_pins;
+    BroadPhase frame_broad_phase;
+    const SolverResult frame_result = advance_one_frame_general(
+        committed_state, ref_mesh, adj, no_pins, params,
+        frame_broad_phase);
+    EXPECT_TRUE(frame_result.converged);
+    for (int node = 0; node < 3; ++node) {
+        const Vec3 expected_position =
+            xhat[node] + dt * dt * params.gravity;
+        const Vec3 expected_velocity =
+            state.velocities[node] + dt * params.gravity;
+        EXPECT_TRUE(committed_state.deformed_positions[node].isApprox(
+            expected_position, 1.0e-12));
+        EXPECT_TRUE(committed_state.velocities[node].isApprox(
+            expected_velocity, 1.0e-12));
+    }
+    EXPECT_TRUE(committed_state.x_coms[rb].isApprox(
+        expected_com, 1.0e-12));
+    EXPECT_TRUE(committed_state.v_coms[rb].isApprox(
+        state.v_coms[rb] + dt * params.gravity, 1.0e-12));
+    EXPECT_TRUE(committed_state.orientations[rb].isApprox(
+        expected_orientation, 1.0e-11));
+    EXPECT_TRUE(committed_state.omega[rb].isApprox(
+        expected_omega, 1.0e-11));
+    for (int local = 0;
+         local < static_cast<int>(ref_mesh.rb_nodes[rb].size());
+         ++local) {
+        const int node = ref_mesh.rb_nodes[rb][local];
+        const Vec3 expected_position = world_space_position(
+            ref_mesh.ref_positions[rb][local], expected_com,
+            expected_orientation);
+        EXPECT_TRUE(committed_state.deformed_positions[node].isApprox(
+            expected_position, 1.0e-11));
+    }
+}
+
+TEST(GeneralSolver, RelativeToleranceCannotHideUnconvergedCloth) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    state.deformed_positions = {
+        Vec3(-1.0, -1.0, 0.0),
+        Vec3( 1.0, -1.0, 0.0),
+        Vec3(-1.0,  1.0, 0.0),
+    };
+    state.velocities.assign(3, Vec3::UnitX());
+    ref_mesh.tris = {0, 1, 2};
+    ref_mesh.initialize(
+        {Vec2(-1.0, -1.0), Vec2(1.0, -1.0), Vec2(-1.0, 1.0)},
+        state.deformed_positions);
+    ref_mesh.mass.assign(3, 1.0);
+    ref_mesh.node_to_rb.assign(3, -1);
+
+    constexpr double rigid_mass = 1.0e6;
+    create_rigid_body(
+        {Vec3(10.0, 0.0, 0.0), Vec3(11.0, 0.0, 0.0),
+         Vec3(10.0, 1.0, 0.0), Vec3(10.0, 0.0, 1.0)},
+        Vec3(0.01, 0.0, 0.0),
+        Vec4(1.0, 0.0, 0.0, 0.0), Vec3::Zero(),
+        rigid_mass, ref_mesh, state);
+    ref_mesh.build_deformable_nodes();
+
+    SimParams params = SimParams::zeros();
+    params.fps = 10.0;
+    params.substeps = 1;
+    params.max_global_iters = 1;
+    params.fixed_iters = false;
+    params.tol_abs = 0.0;
+    params.tol_rel = 1.0e-3;
+    params.damping = 1.0;
+    params.node_box_min = 0.002;
+    params.node_box_max = 0.002;
+    params.theta_box_min = 0.01;
+    params.theta_box_max = 0.01;
+    params.node_box_update_count = 1;
+    params.use_ccd = false;
+
+    const DeformedState initial_state = state;
+    const VertexTriangleMap adj =
+        build_incident_triangle_map(ref_mesh.tris);
+    BroadPhase broad_phase;
+    std::vector<Pin> pins;
+    const SolverResult result = advance_one_frame_general(
+        state, ref_mesh, adj, pins, params, broad_phase);
+
+    EXPECT_FALSE(result.converged);
+    EXPECT_TRUE(result.has_residual);
+    EXPECT_TRUE(result.has_residual_components);
+    EXPECT_DOUBLE_EQ(
+        result.initial_residual,
+        result.initial_cloth_residual
+            + result.initial_rigid_residual);
+    EXPECT_DOUBLE_EQ(
+        result.final_residual,
+        result.final_cloth_residual
+            + result.final_rigid_residual);
+    EXPECT_EQ(result.iterations, 1);
+    ASSERT_EQ(state.deformed_positions.size(),
+              initial_state.deformed_positions.size());
+    for (int node = 0;
+         node < static_cast<int>(state.deformed_positions.size());
+         ++node) {
+        EXPECT_TRUE(state.deformed_positions[node].isApprox(
+            initial_state.deformed_positions[node], 0.0));
+        EXPECT_TRUE(state.velocities[node].isApprox(
+            initial_state.velocities[node], 0.0));
+    }
+    ASSERT_EQ(state.x_coms.size(), initial_state.x_coms.size());
+    for (int rb = 0; rb < static_cast<int>(state.x_coms.size()); ++rb) {
+        EXPECT_TRUE(state.x_coms[rb].isApprox(
+            initial_state.x_coms[rb], 0.0));
+        EXPECT_TRUE(state.v_coms[rb].isApprox(
+            initial_state.v_coms[rb], 0.0));
+        EXPECT_TRUE(state.orientations[rb].isApprox(
+            initial_state.orientations[rb], 0.0));
+        EXPECT_TRUE(state.omega[rb].isApprox(
+            initial_state.omega[rb], 0.0));
+    }
+}
+
+TEST(GeneralSolver, ClothRigidBarrierMovesBothSidesApart) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    state.deformed_positions = {
+        Vec3(-1.0, -1.0, 0.0),
+        Vec3( 3.0, -1.0, 0.0),
+        Vec3(-1.0,  3.0, 0.0),
+    };
+    state.velocities.assign(3, Vec3::Zero());
+    ref_mesh.tris = {0, 1, 2};
+    ref_mesh.initialize(
+        {Vec2(-1.0, -1.0), Vec2(3.0, -1.0), Vec2(-1.0, 3.0)},
+        state.deformed_positions);
+    ref_mesh.mass.assign(3, 10.0);
+    ref_mesh.node_to_rb.assign(3, -1);
+
+    const Vec3 center(0.0, 0.0, 0.2);
+    const int rb = create_rigid_body(
+        {center,
+         center + 5.0 * Vec3::UnitX(), center - 5.0 * Vec3::UnitX(),
+         center + 5.0 * Vec3::UnitY(), center - 5.0 * Vec3::UnitY(),
+         center + 5.0 * Vec3::UnitZ(), center - 5.0 * Vec3::UnitZ()},
+        Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0), Vec3::Zero(),
+        7.0, ref_mesh, state);
+    ref_mesh.build_deformable_nodes();
+    const int contact_node = ref_mesh.rb_nodes[rb][0];
+
+    SimParams params = SimParams::zeros();
+    params.fps = 10.0;
+    params.substeps = 1;
+    params.d_hat = 0.5;
+    params.k_barrier = 100.0;
+    params.max_global_iters = 1;
+    params.fixed_iters = true;
+    params.damping = 0.25;
+    params.node_box_min = 1.0;
+    params.node_box_max = 1.0;
+    params.theta_box_min = M_PI;
+    params.theta_box_max = M_PI;
+    params.node_box_update_count = 1;
+    params.use_ccd = false;
+    params.use_parallel = true;
+
+    const VertexTriangleMap adj =
+        build_incident_triangle_map(ref_mesh.tris);
+    std::vector<Vec3> xhat = state.deformed_positions;
+    std::vector<Vec3> xnew = state.deformed_positions;
+    std::vector<Vec3> x_com_new = state.x_coms;
+    std::vector<Vec4> q_new = state.orientations;
+    std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
+    BroadPhase broad_phase;
+
+    const Vec3 initial_cloth_centroid =
+        (xnew[0] + xnew[1] + xnew[2]) / 3.0;
+    const Vec3 initial_com = x_com_new[rb];
+    const double initial_distance = node_triangle_distance(
+        xnew[contact_node], xnew[0], xnew[1], xnew[2]).distance;
+
+    const SolverResult result =
+        global_gauss_seidel_solver_basic_general(
+            ref_mesh, state, adj, {}, params, xnew, xhat,
+            x_com_new, q_new, omega_new, broad_phase);
+
+    const Vec3 final_cloth_centroid =
+        (xnew[0] + xnew[1] + xnew[2]) / 3.0;
+    const double final_distance = node_triangle_distance(
+        xnew[contact_node], xnew[0], xnew[1], xnew[2]).distance;
+    EXPECT_TRUE(result.converged);
+    EXPECT_EQ(result.iterations, 1);
+    EXPECT_LT(final_cloth_centroid.z(), initial_cloth_centroid.z());
+    EXPECT_GT(x_com_new[rb].z(), initial_com.z());
+    EXPECT_GT(final_distance, initial_distance);
+    EXPECT_NEAR(omega_new[rb].norm(), 0.0, 1.0e-11);
+    for (int local = 0;
+         local < static_cast<int>(ref_mesh.rb_nodes[rb].size());
+         ++local) {
+        const Vec3 expected_position = world_space_position(
+            ref_mesh.ref_positions[rb][local], x_com_new[rb], q_new[rb]);
+        EXPECT_TRUE(xnew[ref_mesh.rb_nodes[rb][local]].isApprox(
+            expected_position, 1.0e-11));
+    }
+}
+
+TEST(DeformableResidual, UsesOnlySuppliedDeformableNodes) {
+    RefMesh ref_mesh;
+    ref_mesh.mass = {2.0, 4.0};
+    ref_mesh.node_to_rb = {-1, 0};
+
+    VertexTriangleMap adj;
+    adj.emplace(0, IncidentTriangles{});
+    adj.emplace(1, IncidentTriangles{});
+
+    const std::vector<Vec3> xhat = {Vec3::Zero(), Vec3::Zero()};
+    const std::vector<Vec3> x = {Vec3::Zero(), 9.0 * Vec3::UnitX()};
+    const std::vector<Pin> pins;
+    SimParams params = SimParams::zeros();
+    BroadPhase broad_phase;
+
+    const double deformable_only = compute_global_deformable_residual(
+        ref_mesh, adj, pins, params, x, xhat, broad_phase,
+        std::vector<int>{0});
+    const double both_nodes = compute_global_deformable_residual(
+        ref_mesh, adj, pins, params, x, xhat, broad_phase,
+        std::vector<int>{0, 1});
+
+    EXPECT_DOUBLE_EQ(deformable_only, 0.0);
+    EXPECT_DOUBLE_EQ(both_nodes, 9.0);
 }
 
 TEST(BoundQuaternion, ClipsAtFirstExitOfLongArc) {

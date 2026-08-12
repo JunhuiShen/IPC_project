@@ -160,6 +160,7 @@ Built-in example scenes (`--example N`):
 | `9` | Twenty rigid hexagonal prisms initialized as a stationary vertical stack on a ground plane |
 | `10` | Five differently oriented rigid hexagonal prisms falling onto one another in a vertical column |
 | `11` | One hundred mixed triangular, square, pentagonal, heptagonal, and octagonal prisms initialized in five layers and falling into a wide open-top box |
+| `12` | Ten small rigid prisms (triangle through dodecagon) falling onto a rectangular cloth pinned at its four corners |
 
 At startup, every scene reports its vertex and triangle counts; rigid scenes
 also report the rigid-body count. Their vertices and triangles describe the
@@ -175,6 +176,7 @@ Common invocations:
     ./build/3D_sim --example 8 --substeps 10 --format obj   # head-on rigid polygon collision
     ./build/3D_sim --example 9 --substeps 10 --format obj   # static stack of twenty rigid polygons
     ./build/3D_sim --example 11 --num_frames 200 --substeps 50 --max_substep_iters 2000 --tol_rel 0.5 --d_hat 0.001 --eps_sdf 0.002 --outdir hundred_polygon_box_output --format obj
+    ./build/3D_sim --example 12 --num_frames 120 --substeps 10 --max_substep_iters 500 --tol_abs 1e-5 --damping 0.5 --outdir ten_mixed_polygons_on_pinned_cloth_output --format obj
     ./build/3D_sim --use_ccd_guess false --use_translation_guess true --fixed_iters
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
@@ -243,7 +245,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (per-iteration box/pair refresh solver), `ogc_box_pad` (BVH padding for the refresh; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (translation/node-box radius limits in m), `theta_box_min`, `theta_box_max` (rigid orientation-box angular-radius limits in rad), `node_box_update_count` (GS iterations between broad-phase/contact-color rebuilds; default 10) |
-| Scene | `example` (`1`..`10`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink` |
+| Scene | `example` (`1`..`12`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame`, `datadir` |
 
 Notes:

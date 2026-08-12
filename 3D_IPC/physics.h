@@ -147,7 +147,7 @@ struct RefMesh {
     std::vector<double> mass;
     std::vector<Hinge> hinges;
     VertexHingeMap hinge_adj;
-    size_t num_positions;
+    size_t num_positions = 0;
 
     // Rigid Bodies
     std::vector<std::vector<Vec3>> ref_positions; // body-space particle positions for each rb
@@ -155,6 +155,10 @@ struct RefMesh {
     std::vector<Mat33> I_hat; // IPC inertia tensor for each rb
     std::vector<std::vector<int>> rb_nodes; // global particle indices for each rb
     std::vector<int> node_to_rb; // global particle index -> rb index (-1 if deformable)
+
+
+    // Mixed Solver
+    std::vector<int> deformable_nodes; // global indices of independently deformable nodes
 
     inline void initialize(const std::vector<Vec2>& X, const std::vector<Vec3>& x_rest){
         num_positions = X.size();
@@ -344,6 +348,42 @@ struct RefMesh {
         }
     }
 
+    // Builds masses only for independently deformable nodes in a mixed mesh.
+    // Rigid proxy masses assigned by create_rigid_body are preserved.
+    inline void build_deformable_lumped_mass(
+        double density, double thickness) {
+        mass.resize(num_positions, 0.0);
+        for (std::size_t node = 0; node < num_positions; ++node) {
+            if (node_to_rb[node] < 0)
+                mass[node] = 0.0;
+        }
+
+        const int nt = static_cast<int>(tris.size()) / 3;
+        for (int triangle = 0; triangle < nt; ++triangle) {
+            const int v0 = tris[3 * triangle + 0];
+            const int v1 = tris[3 * triangle + 1];
+            const int v2 = tris[3 * triangle + 2];
+            const int owner = node_to_rb[v0];
+            if (owner >= 0)
+                continue;
+
+            const double nodal_mass =
+                density * area[triangle] * thickness / 3.0;
+            mass[v0] += nodal_mass;
+            mass[v1] += nodal_mass;
+            mass[v2] += nodal_mass;
+        }
+    }
+
+    inline void build_deformable_nodes() {
+        deformable_nodes.clear();
+        deformable_nodes.reserve(num_positions);
+        for (std::size_t node = 0; node < num_positions; ++node) {
+            if (node >= node_to_rb.size() || node_to_rb[node] < 0)
+                deformable_nodes.push_back(static_cast<int>(node));
+        }
+    }
+
 };
 
 inline int tri_vertex(const RefMesh& ref_mesh, int tri_idx, int local) {
@@ -380,6 +420,13 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
                                                                      const PinMap* pin_map = nullptr,
                                                                      const IncidentTriangles* incident_triangles = nullptr,
                                                                      const std::vector<ShapeGrads>* rest_shape_grads = nullptr);
+
+double compute_global_deformable_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+                                          const std::vector<Pin>& pins, const SimParams& params,
+                                          const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                          const BroadPhase& broad_phase,
+                                          const std::vector<int>& deformable_nodes,
+                                          const PinMap* pin_map = nullptr);
 
 double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,

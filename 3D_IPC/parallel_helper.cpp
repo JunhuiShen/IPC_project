@@ -124,6 +124,127 @@ void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<i
     }
 }
 
+std::vector<int> build_node_to_block(
+    const std::vector<int>& node_to_rb,
+    const std::vector<int>& deformable_nodes,
+    int num_rbs) {
+    if (num_rbs < 0)
+        throw std::invalid_argument("mixed adjacency: negative rigid-body count");
+
+    const int num_nodes = static_cast<int>(node_to_rb.size());
+    const int num_deformable = static_cast<int>(deformable_nodes.size());
+    std::vector<int> node_to_block(num_nodes, -1);
+
+    for (int block = 0; block < num_deformable; ++block) {
+        const int node = deformable_nodes[block];
+        if (node < 0 || node >= num_nodes)
+            throw std::out_of_range("mixed adjacency: deformable node is out of range");
+        if (node_to_rb[node] != -1)
+            throw std::invalid_argument("mixed adjacency: deformable node has a rigid owner");
+        if (node_to_block[node] >= 0)
+            throw std::invalid_argument("mixed adjacency: duplicate deformable node");
+        node_to_block[node] = block;
+    }
+
+    for (int node = 0; node < num_nodes; ++node) {
+        const int rb = node_to_rb[node];
+        if (rb < -1 || rb >= num_rbs)
+            throw std::invalid_argument("mixed adjacency: invalid rigid-body owner");
+        if (rb >= 0)
+            node_to_block[node] = num_deformable + rb;
+        else if (node_to_block[node] < 0)
+            throw std::invalid_argument("mixed adjacency: deformable-node list is incomplete");
+    }
+
+    return node_to_block;
+}
+
+void build_block_elastic_adj(
+    const std::vector<std::vector<int>>& nodal_elastic_adj,
+    const std::vector<int>& node_to_rb,
+    const std::vector<int>& deformable_nodes,
+    int num_rbs,
+    std::vector<std::vector<int>>& out) {
+    const int num_nodes = static_cast<int>(node_to_rb.size());
+    if (static_cast<int>(nodal_elastic_adj.size()) != num_nodes)
+        throw std::invalid_argument("build_block_elastic_adj: adjacency must cover every node");
+
+    const std::vector<int> node_to_block = build_node_to_block(node_to_rb, deformable_nodes, num_rbs);
+    const int num_blocks = static_cast<int>(deformable_nodes.size()) + num_rbs;
+    if (static_cast<int>(out.size()) == num_blocks) {
+        for (std::vector<int>& row : out)
+            row.clear();
+    } else {
+        out.assign(num_blocks, {});
+    }
+
+    for (int node = 0; node < num_nodes; ++node) {
+        for (const int neighbor : nodal_elastic_adj[node]) {
+            if (neighbor < 0 || neighbor >= num_nodes)
+                throw std::out_of_range("build_block_elastic_adj: neighbor is out of range");
+            const int first = node_to_block[node];
+            const int second = node_to_block[neighbor];
+            if (first != second) {
+                out[first].push_back(second);
+                out[second].push_back(first);
+            }
+        }
+    }
+    for (std::vector<int>& row : out) {
+        std::sort(row.begin(), row.end());
+        row.erase(std::unique(row.begin(), row.end()), row.end());
+    }
+}
+
+void build_block_contact_adj(
+    const BroadPhase::Cache& bp_cache,
+    const std::vector<int>& node_to_rb,
+    const std::vector<int>& deformable_nodes,
+    int num_rbs,
+    std::vector<std::vector<int>>& out) {
+    const int num_nodes = static_cast<int>(node_to_rb.size());
+    const std::vector<int> node_to_block = build_node_to_block(node_to_rb, deformable_nodes, num_rbs);
+    const int num_blocks = static_cast<int>(deformable_nodes.size()) + num_rbs;
+    if (static_cast<int>(out.size()) == num_blocks) {
+        for (std::vector<int>& row : out)
+            row.clear();
+    } else {
+        out.assign(num_blocks, {});
+    }
+
+    const auto add_contact_clique = [&](const int nodes[4]) {
+        for (int role = 0; role < 4; ++role) {
+            const int node = nodes[role];
+            if (node < 0 || node >= num_nodes)
+                throw std::out_of_range(
+                    "build_block_contact_adj: contact node is out of range");
+        }
+        for (int first = 0; first < 4; ++first) {
+            for (int second = first + 1; second < 4; ++second) {
+                const int first_block = node_to_block[nodes[first]];
+                const int second_block = node_to_block[nodes[second]];
+                if (first_block != second_block) {
+                    out[first_block].push_back(second_block);
+                    out[second_block].push_back(first_block);
+                }
+            }
+        }
+    };
+
+    for (const NodeTrianglePair& pair : bp_cache.nt_pairs) {
+        const int nodes[4] = {
+            pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+        add_contact_clique(nodes);
+    }
+    for (const SegmentSegmentPair& pair : bp_cache.ss_pairs)
+        add_contact_clique(pair.v);
+
+    for (std::vector<int>& row : out) {
+        std::sort(row.begin(), row.end());
+        row.erase(std::unique(row.begin(), row.end()), row.end());
+    }
+}
+
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int nv){
     std::vector<std::vector<int>> out(nv);
     #pragma omp parallel for schedule(static)

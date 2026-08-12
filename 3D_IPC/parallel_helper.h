@@ -11,8 +11,20 @@ void build_blue_boxes_rb(const std::vector<Vec3>& com_box_anchors, const std::ve
 
 int owning_rb_for_node(const std::vector<int>& node_to_rb, int node);
 
+std::vector<int> build_node_to_block(const std::vector<int>& node_to_rb, const std::vector<int>& deformable_nodes, int num_rbs);
+
 // Per-body broad-phase contacts and their rigid-body conflict graph.
 void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_rb, int num_rbs, std::vector<std::vector<int>>& body_nt_pair_indices, std::vector<std::vector<int>>& body_ss_pair_indices, std::vector<std::vector<int>>& out);
+
+// Mixed graphs use blocks [0, deformable_nodes.size()) for cloth nodes in
+// deformable_nodes order, followed by one block per rigid body.
+void build_block_elastic_adj(const std::vector<std::vector<int>>& nodal_elastic_adj, const std::vector<int>& node_to_rb, const std::vector<int>& deformable_nodes, int num_rbs, std::vector<std::vector<int>>& out);
+
+// Contact conflicts in mixed block indexing. Every node-triangle and
+// segment-segment candidate contributes a clique among its distinct cloth-node
+// and rigid-body blocks, covering cloth-cloth, cloth-rigid, and rigid-rigid
+// contacts in one graph.
+void build_block_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_rb, const std::vector<int>& deformable_nodes, int num_rbs, std::vector<std::vector<int>>& out);
 
 // Mesh-adjacency edges of the conflict graph. Invariant for a fixed mesh.
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int num_vertices);
