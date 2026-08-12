@@ -188,9 +188,9 @@ void build_hundred_rigid_polygon_box_drop_example(
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris);
 
-// Example 12: ten small rigid polygonal prisms (3 through 12 sides) falling
-// onto a horizontal rectangular cloth whose four corners are pinned.
-void build_ten_rigid_polygons_drop_on_pinned_cloth_example(
+// Example 12: fifty small rigid polygonal prisms (3 through 12 sides) falling
+// onto a large horizontal rectangular cloth whose four corners are pinned.
+void build_fifty_rigid_polygons_drop_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);

@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
     else if (args.example == 9) build_twenty_rigid_polygon_static_stack_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else if (args.example == 10) build_five_rigid_polygon_drop_scatter_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else if (args.example == 11) build_hundred_rigid_polygon_box_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
-    else if (args.example == 12) build_ten_rigid_polygons_drop_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 12) build_fifty_rigid_polygons_drop_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
     else {
         std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12.\n";
         return 1;

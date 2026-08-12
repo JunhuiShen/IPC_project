@@ -146,7 +146,7 @@ struct IPCArgs3D : ArgParser {
         add_double("damping",                  damping,                  1.0,   "Newton-step damping used by deformable and rigid solvers; <1 can stabilize an update");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=rigid_box_drop, 8=two_polygon_collision, 9=twenty_polygon_stack, 10=five_polygon_scatter, 11=hundred_polygon_box_drop, 12=ten_mixed_polygons_on_pinned_cloth");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=rigid_box_drop, 8=two_polygon_collision, 9=twenty_polygon_stack, 10=five_polygon_scatter, 11=hundred_polygon_box_drop, 12=fifty_mixed_polygons_on_pinned_cloth");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");

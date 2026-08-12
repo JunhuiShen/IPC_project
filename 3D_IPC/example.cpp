@@ -1244,11 +1244,11 @@ void build_hundred_rigid_polygon_box_drop_example(
 }
 
 // ---------------------------------------------------------------------------
-// Example 12: ten small rigid polygonal prisms falling onto a
+// Example 12: fifty small rigid polygonal prisms falling onto a
 // four-corner-pinned rectangular cloth
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 12 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir hex_on_pinned_cloth_output --format obj
-void build_ten_rigid_polygons_drop_on_pinned_cloth_example(
+// command line: ./build/3D_sim --example 12 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir fifty_polygons_on_pinned_cloth_output --format obj
+void build_fifty_rigid_polygons_drop_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params) {
@@ -1269,11 +1269,11 @@ void build_ten_rigid_polygons_drop_on_pinned_cloth_example(
 
     // build_square_mesh places its grid in the world x-z plane. Using unequal
     // width and depth makes this a rectangular cloth centered at the origin.
-    constexpr int cloth_nx = 20;
-    constexpr int cloth_nz = 12;
-    constexpr double cloth_width = 2.0;
-    constexpr double cloth_depth = 1.2;
-    constexpr double cloth_height = 0.8;
+    constexpr int cloth_nx = 40;
+    constexpr int cloth_nz = 40;
+    constexpr double cloth_width = 4.0;
+    constexpr double cloth_depth = 4.0;
+    constexpr double cloth_height = 1.2;
     const Vec3 cloth_origin(
         -0.5 * cloth_width, cloth_height, -0.5 * cloth_depth);
     const int cloth_base = build_square_mesh(
@@ -1298,15 +1298,11 @@ void build_ten_rigid_polygons_drop_on_pinned_cloth_example(
     const Vec4 flat_orientation(
         std::cos(half_angle), -std::sin(half_angle), 0.0, 0.0);
 
-    constexpr int polygon_count = 10;
-    constexpr int columns = 5;
+    constexpr int polygon_count = 50;
+    constexpr int columns = 10;
     constexpr double radius = 0.10;
     constexpr double density = 40.0;
     constexpr double thickness = 0.06;
-    static constexpr double center_y[polygon_count] = {
-        1.22, 1.30, 1.38, 1.46, 1.54,
-        1.50, 1.42, 1.34, 1.26, 1.18,
-    };
 
     for (int polygon = 0; polygon < polygon_count; ++polygon) {
         const int row = polygon / columns;
@@ -1318,13 +1314,14 @@ void build_ten_rigid_polygons_drop_on_pinned_cloth_example(
         const Vec4 orientation = quaternion_normalize(
             quaternion_multiply(yaw_orientation, flat_orientation));
         const Vec3 center(
-            (column - 2) * 0.34,
-            center_y[polygon],
-            (row == 0) ? -0.22 : 0.22);
+            (column - 4.5) * 0.34,
+            2.00 + 0.06 * ((column + 2 * row) % 5),
+            (row - 2) * 0.34);
 
-        // Use every regular prism from a triangle through a dodecagon.
+        // Use every regular prism from a triangle through a dodecagon five
+        // times. The 0.34 spacing leaves a gap between radius-0.10 bodies.
         append_rigid_polygon(
-            polygon + 3, state, ref_mesh, center,
+            3 + polygon % 10, state, ref_mesh, center,
             radius, density, thickness,
             Vec3::Zero(), orientation, Vec3::Zero());
     }
