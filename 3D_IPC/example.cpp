@@ -1460,7 +1460,7 @@ void build_single_deformable_solid_drop_on_pinned_cloth_example(
 // Example 15: ten small rigid and ten larger deformable polygonal prisms
 // falling onto a cloth pinned along two opposite sides
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 15 --num_frames 120 --substeps 10 --max_substep_iters 500 --tol_abs 1e-5 --damping 0.5 --outdir twenty_rigid_deformable_polygons_on_pinned_cloth_output --format obj
+// command line: ./build/3D_sim --example 15 --num_frames 200 --substeps 20 --max_substep_iters 20 --fixed_iters --outdir twenty_rigid_deformable_polygons_on_pinned_cloth_output --format obj --E 1e8 --d_hat 0.019 --k_barrier 500 
 void build_twenty_rigid_deformable_polygons_drop_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
