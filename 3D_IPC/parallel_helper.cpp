@@ -295,6 +295,257 @@ void build_block_contact_adj(const BroadPhase::Cache& bp_cache, const std::vecto
     }
 }
 
+std::vector<std::vector<int>> build_solid_elastic_adjacency(
+    const RefMesh& ref_mesh) {
+    const int num_solid_nodes =
+        static_cast<int>(ref_mesh.tet_nodes.size());
+    std::vector<int> node_to_solid(ref_mesh.num_positions, -1);
+    for (int solid = 0; solid < num_solid_nodes; ++solid) {
+        const int node = ref_mesh.tet_nodes[static_cast<std::size_t>(solid)];
+        node_to_solid[static_cast<std::size_t>(node)] = solid;
+    }
+
+    std::vector<std::vector<int>> adjacency(
+        static_cast<std::size_t>(num_solid_nodes));
+
+    for (int element = 0; element < num_tets(ref_mesh); ++element) {
+        int solid_nodes[4];
+        for (int local = 0; local < 4; ++local) {
+            const int node = tet_vertex(ref_mesh, element, local);
+            solid_nodes[local] =
+                node_to_solid[static_cast<std::size_t>(node)];
+        }
+        for (int first = 0; first < 4; ++first) {
+            for (int second = first + 1; second < 4; ++second) {
+                const int a = solid_nodes[first];
+                const int b = solid_nodes[second];
+                if (a < 0 || b < 0 || a == b)
+                    continue;
+                adjacency[static_cast<std::size_t>(a)].push_back(b);
+                adjacency[static_cast<std::size_t>(b)].push_back(a);
+            }
+        }
+    }
+
+#pragma omp parallel for schedule(static)
+    for (int solid = 0; solid < num_solid_nodes; ++solid) {
+        std::vector<int>& neighbors =
+            adjacency[static_cast<std::size_t>(solid)];
+        std::sort(neighbors.begin(), neighbors.end());
+        neighbors.erase(
+            std::unique(neighbors.begin(), neighbors.end()),
+            neighbors.end());
+    }
+    return adjacency;
+}
+
+void build_solid_contact_adjacency(
+    const RefMesh& ref_mesh,
+    const BroadPhase::Cache& bp_cache,
+    std::vector<std::vector<int>>& out) {
+    const int num_solid_nodes = static_cast<int>(ref_mesh.tet_nodes.size());
+    std::vector<int> node_to_solid(ref_mesh.num_positions, -1);
+    for (int solid = 0; solid < num_solid_nodes; ++solid) {
+        const int node = ref_mesh.tet_nodes[static_cast<std::size_t>(solid)];
+        node_to_solid[static_cast<std::size_t>(node)] = solid;
+    }
+    std::vector<unsigned char> surface_node(ref_mesh.num_positions, 0);
+    for (const int node : ref_mesh.surface_nodes)
+        surface_node[static_cast<std::size_t>(node)] = 1;
+
+    if (static_cast<int>(out.size()) == num_solid_nodes) {
+        for (std::vector<int>& row : out)
+            row.clear();
+    } else {
+        out.assign(static_cast<std::size_t>(num_solid_nodes), {});
+    }
+
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (int solid = 0; solid < num_solid_nodes; ++solid) {
+        const int node = ref_mesh.tet_nodes[static_cast<std::size_t>(solid)];
+        std::vector<int>& neighbors = out[static_cast<std::size_t>(solid)];
+        neighbors.reserve(
+            3 * (bp_cache.vertex_nt[static_cast<std::size_t>(node)].size()
+                 + bp_cache.vertex_ss[static_cast<std::size_t>(node)].size()));
+
+        for (const BroadPhase::Cache::VertexPairEntry& entry :
+             bp_cache.vertex_nt[static_cast<std::size_t>(node)]) {
+            const NodeTrianglePair& pair = bp_cache.nt_pairs[entry.pair_index];
+            const int contact_nodes[4] = {
+                pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+
+            bool contains_interior_solid_node = false;
+            for (const int contact_node : contact_nodes) {
+                const int contact_solid = node_to_solid[
+                    static_cast<std::size_t>(contact_node)];
+                if (contact_solid >= 0
+                    && surface_node[static_cast<std::size_t>(contact_node)]
+                        == 0) {
+                    contains_interior_solid_node = true;
+                    break;
+                }
+            }
+            if (contains_interior_solid_node)
+                continue;
+
+            for (const int contact_node : contact_nodes) {
+                const int neighbor = node_to_solid[
+                    static_cast<std::size_t>(contact_node)];
+                if (neighbor >= 0 && neighbor != solid)
+                    neighbors.push_back(neighbor);
+            }
+        }
+
+        for (const BroadPhase::Cache::VertexPairEntry& entry :
+             bp_cache.vertex_ss[static_cast<std::size_t>(node)]) {
+            const SegmentSegmentPair& pair =
+                bp_cache.ss_pairs[entry.pair_index];
+
+            bool contains_interior_solid_node = false;
+            for (const int contact_node : pair.v) {
+                const int contact_solid = node_to_solid[
+                    static_cast<std::size_t>(contact_node)];
+                if (contact_solid >= 0
+                    && surface_node[static_cast<std::size_t>(contact_node)]
+                        == 0) {
+                    contains_interior_solid_node = true;
+                    break;
+                }
+            }
+            if (contains_interior_solid_node)
+                continue;
+
+            for (const int contact_node : pair.v) {
+                const int neighbor = node_to_solid[
+                    static_cast<std::size_t>(contact_node)];
+                if (neighbor >= 0 && neighbor != solid)
+                    neighbors.push_back(neighbor);
+            }
+        }
+
+        std::sort(neighbors.begin(), neighbors.end());
+        neighbors.erase(
+            std::unique(neighbors.begin(), neighbors.end()),
+            neighbors.end());
+    }
+}
+
+void build_all_block_adjacency_and_contact(
+    const RefMesh& ref_mesh,
+    const std::vector<int>& cloth_nodes,
+    const std::vector<std::vector<int>>& cloth_nodal_elastic_adjacency,
+    const BroadPhase::Cache& bp_cache,
+    std::vector<std::vector<int>>& out) {
+    const int num_cloth = static_cast<int>(cloth_nodes.size());
+    const int num_solid = static_cast<int>(ref_mesh.tet_nodes.size());
+    const int num_rigid = static_cast<int>(ref_mesh.rb_nodes.size());
+    const int solid_begin = num_cloth;
+    const int rigid_begin = solid_begin + num_solid;
+    const int num_blocks = rigid_begin + num_rigid;
+
+    std::vector<int> node_to_block(ref_mesh.num_positions, -1);
+    std::vector<unsigned char> solid_node(ref_mesh.num_positions, 0);
+    std::vector<unsigned char> solid_surface_node(ref_mesh.num_positions, 0);
+
+    for (int cloth = 0; cloth < num_cloth; ++cloth) {
+        const int node = cloth_nodes[static_cast<std::size_t>(cloth)];
+        node_to_block[static_cast<std::size_t>(node)] = cloth;
+    }
+    for (int solid = 0; solid < num_solid; ++solid) {
+        const int node = ref_mesh.tet_nodes[static_cast<std::size_t>(solid)];
+        node_to_block[static_cast<std::size_t>(node)] = solid_begin + solid;
+        solid_node[static_cast<std::size_t>(node)] = 1;
+    }
+    for (const int node : ref_mesh.surface_nodes)
+        solid_surface_node[static_cast<std::size_t>(node)] = 1;
+    for (int rigid = 0; rigid < num_rigid; ++rigid) {
+        const int block = rigid_begin + rigid;
+        for (const int node : ref_mesh.rb_nodes[static_cast<std::size_t>(rigid)])
+            node_to_block[static_cast<std::size_t>(node)] = block;
+    }
+
+    if (static_cast<int>(out.size()) == num_blocks) {
+        for (std::vector<int>& row : out)
+            row.clear();
+    } else {
+        out.assign(static_cast<std::size_t>(num_blocks), {});
+    }
+
+    // Cloth elastic conflicts. Only cloth blocks are projected, so collision
+    // triangles belonging to solids or rigid bodies cannot become cloth
+    // elastic constraints in this graph.
+    for (int cloth = 0; cloth < num_cloth; ++cloth) {
+        const int node = cloth_nodes[static_cast<std::size_t>(cloth)];
+        std::vector<int>& row = out[static_cast<std::size_t>(cloth)];
+        for (const int neighbor_node :
+             cloth_nodal_elastic_adjacency[static_cast<std::size_t>(node)]) {
+            const int neighbor =
+                node_to_block[static_cast<std::size_t>(neighbor_node)];
+            if (neighbor >= 0 && neighbor < num_cloth && neighbor != cloth)
+                row.push_back(neighbor);
+        }
+    }
+
+    // Every tetrahedron couples its four nodal blocks.
+    for (int element = 0; element < num_tets(ref_mesh); ++element) {
+        int blocks[4];
+        for (int local = 0; local < 4; ++local) {
+            const int node = tet_vertex(ref_mesh, element, local);
+            blocks[local] = node_to_block[static_cast<std::size_t>(node)];
+        }
+        for (int first = 0; first < 4; ++first) {
+            for (int second = first + 1; second < 4; ++second) {
+                const int a = blocks[first];
+                const int b = blocks[second];
+                if (a < 0 || b < 0 || a == b)
+                    continue;
+                out[static_cast<std::size_t>(a)].push_back(b);
+                out[static_cast<std::size_t>(b)].push_back(a);
+            }
+        }
+    }
+
+    const auto add_contact_clique = [&](const int nodes[4]) {
+        int blocks[4];
+        for (int role = 0; role < 4; ++role) {
+            const int node = nodes[role];
+            if (solid_node[static_cast<std::size_t>(node)] != 0
+                && solid_surface_node[static_cast<std::size_t>(node)] == 0) {
+                return;
+            }
+            blocks[role] = node_to_block[static_cast<std::size_t>(node)];
+        }
+
+        for (int first = 0; first < 4; ++first) {
+            if (blocks[first] < 0)
+                continue;
+            for (int second = first + 1; second < 4; ++second) {
+                const int a = blocks[first];
+                const int b = blocks[second];
+                if (b < 0 || a == b)
+                    continue;
+                out[static_cast<std::size_t>(a)].push_back(b);
+                out[static_cast<std::size_t>(b)].push_back(a);
+            }
+        }
+    };
+
+    for (const NodeTrianglePair& pair : bp_cache.nt_pairs) {
+        const int nodes[4] = {
+            pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+        add_contact_clique(nodes);
+    }
+    for (const SegmentSegmentPair& pair : bp_cache.ss_pairs)
+        add_contact_clique(pair.v);
+
+#pragma omp parallel for schedule(static)
+    for (int block = 0; block < num_blocks; ++block) {
+        std::vector<int>& row = out[static_cast<std::size_t>(block)];
+        std::sort(row.begin(), row.end());
+        row.erase(std::unique(row.begin(), row.end()), row.end());
+    }
+}
+
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int nv){
     std::vector<std::vector<int>> out(nv);
     #pragma omp parallel for schedule(static)

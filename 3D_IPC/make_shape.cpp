@@ -1,9 +1,11 @@
 #include "make_shape.h"
 #include "rigid_body_ipc.h"
+#include "solid_ipc.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -87,6 +89,100 @@ int append_rigid_polygon(
     return create_rigid_body(
         world_positions, v_com, q, omega, total_mass,
         ref_mesh, state);
+}
+
+int append_deformable_polygon_prism(
+    int number_of_nodes, DeformedState& state, RefMesh& ref_mesh,
+    const Vec3& center, double radius, double density,
+    double thickness, const Vec4& orientation) {
+    if (number_of_nodes < 3) {
+        throw std::invalid_argument(
+            "append_deformable_polygon_prism: number_of_nodes must be at least 3");
+    }
+    if (number_of_nodes
+        > (std::numeric_limits<int>::max() - 1) / 2) {
+        throw std::overflow_error(
+            "append_deformable_polygon_prism: too many polygon nodes");
+    }
+    if (!std::isfinite(radius) || radius <= 0.0) {
+        throw std::invalid_argument(
+            "append_deformable_polygon_prism: radius must be positive and finite");
+    }
+    if (!std::isfinite(density) || density <= 0.0) {
+        throw std::invalid_argument(
+            "append_deformable_polygon_prism: density must be positive and finite");
+    }
+    if (!std::isfinite(thickness) || thickness <= 0.0) {
+        throw std::invalid_argument(
+            "append_deformable_polygon_prism: thickness must be positive and finite");
+    }
+
+    constexpr double kPi = 3.14159265358979323846;
+    const double two_pi = 2.0 * kPi;
+    const double half_thickness = 0.5 * thickness;
+    const Vec4 q = quaternion_normalize(orientation);
+    if (state.deformed_positions.size()
+        > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error(
+            "append_deformable_polygon_prism: global node index exceeds int range");
+    }
+    const int base = static_cast<int>(state.deformed_positions.size());
+
+    // Boundary vertices use the same ordering as append_rigid_polygon:
+    // bottom ring, then top ring. The final vertex is strictly interior.
+    std::vector<Vec3> world_positions;
+    world_positions.reserve(
+        2 * static_cast<std::size_t>(number_of_nodes) + 1);
+    for (int layer = 0; layer < 2; ++layer) {
+        const double z = (layer == 0) ? -half_thickness : half_thickness;
+        for (int i = 0; i < number_of_nodes; ++i) {
+            const double angle = two_pi * static_cast<double>(i)
+                / static_cast<double>(number_of_nodes);
+            const Vec3 material_position(
+                radius * std::cos(angle),
+                radius * std::sin(angle), z);
+            world_positions.push_back(
+                center + quaternion_rotate(q, material_position));
+        }
+    }
+    world_positions.push_back(center);
+
+    const int interior = 2 * number_of_nodes;
+    const auto bottom = [](int i) { return i; };
+    const auto top = [number_of_nodes](int i) {
+        return number_of_nodes + i;
+    };
+
+    // Every outward boundary face (a,b,c) produces the positively oriented
+    // tet (interior,a,b,c). Since the prism is convex, these cones partition
+    // its volume without overlaps or gaps.
+    const std::size_t tet_count =
+        4 * static_cast<std::size_t>(number_of_nodes) - 4;
+    std::vector<int> local_tets;
+    local_tets.reserve(4 * tet_count);
+    const auto append_cone_tet = [&local_tets, interior](
+                                     int a, int b, int c) {
+        local_tets.push_back(interior);
+        local_tets.push_back(a);
+        local_tets.push_back(b);
+        local_tets.push_back(c);
+    };
+
+    // Cap fans point outward: -z on the bottom and +z on the top.
+    for (int i = 1; i + 1 < number_of_nodes; ++i) {
+        append_cone_tet(bottom(0), bottom(i + 1), bottom(i));
+        append_cone_tet(top(0), top(i), top(i + 1));
+    }
+
+    // Two outward triangles for each rectangular side panel.
+    for (int i = 0; i < number_of_nodes; ++i) {
+        const int next = (i + 1) % number_of_nodes;
+        append_cone_tet(bottom(i), bottom(next), top(next));
+        append_cone_tet(bottom(i), top(next), top(i));
+    }
+
+    create_solid(world_positions, local_tets, density, ref_mesh, state);
+    return base;
 }
 
 // Total number of vertices is: (nx + 1) * (ny + 1) and total number of triangles is: 2 * nx * ny

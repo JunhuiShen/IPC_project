@@ -161,11 +161,15 @@ Built-in example scenes (`--example N`):
 | `10` | Five differently oriented rigid hexagonal prisms falling onto one another in a vertical column |
 | `11` | One hundred mixed triangular, square, pentagonal, heptagonal, and octagonal prisms initialized in five layers and falling into a wide open-top box |
 | `12` | Fifty mixed rigid prisms (triangle through dodecagon) falling onto a large rectangular cloth pinned at its four corners |
+| `13` | One density-900 tetrahedralized deformable octagonal prism falling onto a horizontal ground plane |
+| `14` | One tetrahedralized deformable octagonal prism falling onto a cloth pinned along two opposite sides |
+| `15` | Ten small rigid and ten larger tetrahedralized deformable polygonal prisms, spanning 3 through 12 sides, falling onto a cloth pinned along two opposite sides |
+| `16` | Ten flat polygonal prisms, alternating five rigid bodies and five deformable solids, falling onto one another above a cloth pinned along two opposite sides |
 
-At startup, every scene reports its vertex and triangle counts; rigid scenes
-also report the rigid-body count. Their vertices and triangles describe the
-collision surface, while the reduced solver advances only three COM and three
-rotation unknowns per body.
+At startup, every scene reports its vertex and triangle counts; scenes with
+rigid bodies also report their count. Rigid surface vertices are advanced by
+three COM and three rotation unknowns per body, while deformable solids retain
+their tetrahedral vertex degrees of freedom.
 
 Common invocations:
 
@@ -177,6 +181,10 @@ Common invocations:
     ./build/3D_sim --example 9 --substeps 10 --format obj   # static stack of twenty rigid polygons
     ./build/3D_sim --example 11 --num_frames 200 --substeps 50 --max_substep_iters 2000 --tol_rel 0.5 --d_hat 0.001 --eps_sdf 0.002 --outdir hundred_polygon_box_output --format obj
     ./build/3D_sim --example 12 --num_frames 120 --substeps 10 --max_substep_iters 500 --tol_abs 1e-5 --damping 0.5 --outdir fifty_mixed_polygons_on_pinned_cloth_output --format obj
+    ./build/3D_sim --example 13 --num_frames 120 --substeps 20 --max_substep_iters 50 --fixed_iters --damping 0.5 --outdir single_solid_ground_drop_output --format obj
+    ./build/3D_sim --example 14 --num_frames 120 --substeps 10 --max_substep_iters 500 --tol_abs 1e-5 --damping 0.5 --outdir single_solid_on_pinned_cloth_output --format obj
+    ./build/3D_sim --example 15 --num_frames 120 --substeps 10 --max_substep_iters 500 --tol_abs 1e-5 --damping 0.5 --outdir twenty_rigid_deformable_polygons_on_pinned_cloth_output --format obj
+    ./build/3D_sim --example 16 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --damping 0.5 --outdir ten_rigid_solid_flat_stack_on_cloth_output --format obj
     ./build/3D_sim --use_ccd_guess false --use_translation_guess true --fixed_iters
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
@@ -240,15 +248,22 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | Group | Flags |
 |-------|-------|
 | Time integration | `fps`, `substeps`, `num_frames` |
-| Physics | `E`, `nu`, `density`, `thickness`, `kB`, `kpin`, `gx`, `gy`, `gz` |
+| Physics | Shell: `E`, `nu`, `density`, `thickness`, `kB`; volumetric solid: `solid_E`, `solid_nu`, `solid_density`; rigid body: `rigid_density`; shared: `kpin`, `gx`, `gy`, `gz` |
 | Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `damping`, `fixed_iters`, `use_parallel`, `verbose`, `write_substeps` |
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (per-iteration box/pair refresh solver), `ogc_box_pad` (BVH padding for the refresh; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (translation/node-box radius limits in m), `theta_box_min`, `theta_box_max` (rigid orientation-box angular-radius limits in rad), `node_box_update_count` (GS iterations between broad-phase/contact-color rebuilds; default 10) |
-| Scene | `example` (`1`..`12`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink` |
+| Scene | `example` (`1`..`16`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame`, `datadir` |
 
 Notes:
+- Volumetric solids use `solid_E`, `solid_nu`, and `solid_density` independently
+  of the shell parameters. The soft rubber-toy defaults are `solid_E = 5e4` Pa,
+  `solid_nu = 0.45`, and `solid_density = 900` kg/m³. Increase `solid_E` when
+  a stiffer solid is desired.
+- Density-based rigid-body scenes use `--rigid_density`, whose default is
+  `900` kg/m³. Examples 5 and 6 retain their calibrated total masses because
+  their overlapping triangle-proxy geometry does not define a unique volume.
 - `restart_frame` is CLI run-control handled in `simulation.cpp` (from `IPCArgs3D`), not a physics/solver runtime parameter.
 - `SimParams` holds only runtime solver/physics fields used during substeps.
 - The production defaults are `node_box_min/max = 0.001/0.01` m and
@@ -422,7 +437,7 @@ all:
 | `bending_energy_test` | 19 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
 | `parallel_helper_test` | 13 | Contact adjacency, rigid ownership filtering/coloring, spherical-cap AABBs, and rigid blue boxes |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
-| `make_shape_test` | 6 | Incident-triangle maps and icosphere construction |
+| `make_shape_test` | 17 | Incident-triangle maps, mixed cloth/rigid/solid scene construction, tetrahedral polygonal prisms, and icosphere construction |
 | `barrier_energy_test` | 19 | Scalar barrier, all NT/SS feature regions, force partition, deformable/rigid derivative blocks and modes, and stress cases |
 | `corotated_energy_test` | 11 | Rest state, invariance, gradient/Hessian FD convergence, and stress cases |
 | `initial_guess_test` | 5 | CCD no-candidate, Verlet gravity, and translation closed forms for inertia/gravity, pins, and one-step plane-SDF correction |

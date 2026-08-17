@@ -486,6 +486,216 @@ const auto& nt = broad.nt_pairs();
 EXPECT_TRUE(contains_nt_pair(nt, 3, 0, 1, 2) || contains_nt_pair(nt, 4, 0, 1, 2) || contains_nt_pair(nt, 5, 0, 1, 2));
 }
 
+TEST(BroadPhaseTest,
+     SurfaceNodeInitializationExcludesTetInteriorQueriesWithoutChangingAllNodePath) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0),
+        Vec3(0.0, 0.0, 1.0),
+        Vec3(0.2, 0.2, 0.2),
+    };
+    const std::vector<Vec3> v(x.size(), Vec3::Zero());
+    RefMesh mesh = make_mesh(x, {
+        {1, 2, 3},
+        {0, 3, 2},
+        {0, 1, 3},
+        {0, 2, 1},
+    });
+    // Four tets subdivide the outer tet around interior node 4. The collision
+    // triangles above are exactly the extracted outer boundary.
+    mesh.tets = {
+        4, 1, 2, 3,
+        0, 4, 2, 3,
+        0, 1, 4, 3,
+        0, 1, 2, 4,
+    };
+    mesh.tet_nodes = {4, 1, 2, 3, 0};
+    mesh.surface_nodes = {1, 2, 3, 0};
+
+    // The large padding forces every nonincident primitive AABB to overlap,
+    // so node 4 is excluded only by the new surface-query policy.
+    constexpr double d_hat = 2.0;
+    BroadPhase all_nodes;
+    all_nodes.initialize(x, v, mesh, 1.0, d_hat);
+    BroadPhase surface_nodes;
+    surface_nodes.initialize_surface_nodes(x, v, mesh, 1.0, d_hat);
+
+    EXPECT_EQ(all_nodes.nt_pairs().size(), 8U);
+    EXPECT_EQ(surface_nodes.nt_pairs().size(), 4U);
+    EXPECT_TRUE(std::any_of(
+        all_nodes.nt_pairs().begin(), all_nodes.nt_pairs().end(),
+        [](const NodeTrianglePair& pair) { return pair.node == 4; }));
+    EXPECT_TRUE(std::none_of(
+        surface_nodes.nt_pairs().begin(), surface_nodes.nt_pairs().end(),
+        [](const NodeTrianglePair& pair) { return pair.node == 4; }));
+
+    // The initialization policy persists when the existing BVHs are queried
+    // again. The original path remains all-node, while the solid-aware path
+    // continues to exclude node 4.
+    all_nodes.refresh_pairs(mesh);
+    surface_nodes.refresh_pairs(mesh);
+    EXPECT_EQ(all_nodes.nt_pairs().size(), 8U);
+    EXPECT_EQ(surface_nodes.nt_pairs().size(), 4U);
+    EXPECT_TRUE(std::any_of(
+        all_nodes.nt_pairs().begin(), all_nodes.nt_pairs().end(),
+        [](const NodeTrianglePair& pair) { return pair.node == 4; }));
+    EXPECT_TRUE(std::none_of(
+        surface_nodes.nt_pairs().begin(), surface_nodes.nt_pairs().end(),
+        [](const NodeTrianglePair& pair) { return pair.node == 4; }));
+
+    const BroadPhase::Cache& all_cache = all_nodes.cache();
+    const BroadPhase::Cache& surface_cache = surface_nodes.cache();
+    ASSERT_EQ(surface_cache.node_to_tris.size(), x.size());
+    EXPECT_TRUE(surface_cache.node_to_tris[4].empty());
+    EXPECT_EQ(all_cache.vertex_nt[4].size(), 4U);
+    EXPECT_TRUE(surface_cache.vertex_nt[4].empty());
+    EXPECT_TRUE(surface_cache.vertex_ss[4].empty());
+
+    // Edge construction already uses only boundary triangles, so both paths
+    // retain the same six surface edges and three opposite-edge candidates.
+    EXPECT_EQ(all_cache.edges.size(), 6U);
+    EXPECT_EQ(surface_cache.edges.size(), 6U);
+    EXPECT_EQ(all_nodes.ss_pairs().size(), 3U);
+    EXPECT_EQ(surface_nodes.ss_pairs().size(), 3U);
+    EXPECT_EQ(
+        pair_sets_from_broad(all_nodes).ss,
+        pair_sets_from_broad(surface_nodes).ss);
+    for (const std::array<int, 2>& edge : surface_cache.edges) {
+        EXPECT_NE(edge[0], 4);
+        EXPECT_NE(edge[1], 4);
+    }
+}
+
+TEST(BroadPhaseTest, SurfaceNodeInitializationRetainsPointOnlyRigidProxy) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0),
+        Vec3(0.0, 0.0, 1.0),
+        Vec3(0.2, 0.2, 0.2),
+    };
+    const std::vector<Vec3> v(x.size(), Vec3::Zero());
+    RefMesh mesh = make_mesh(x, {
+        {1, 2, 3},
+        {0, 3, 2},
+        {0, 1, 3},
+        {0, 2, 1},
+    });
+    mesh.tets = {0, 1, 2, 3};
+    mesh.tet_nodes = {0, 1, 2, 3};
+    mesh.surface_nodes = {1, 2, 3, 0};
+    mesh.node_to_rb = {-1, -1, -1, -1, 0};
+    mesh.rb_nodes = {{4}};
+
+    BroadPhase broad_phase;
+    broad_phase.initialize_surface_nodes(
+        x, v, mesh, 1.0, /*dhat=*/2.0);
+
+    const BroadPhase::Cache& cache = broad_phase.cache();
+    ASSERT_EQ(cache.node_to_tris.size(), x.size());
+    EXPECT_TRUE(cache.node_to_tris[4].empty());
+    EXPECT_EQ(cache.vertex_nt[4].size(), 4U);
+    EXPECT_EQ(broad_phase.nt_pairs().size(), 8U);
+    EXPECT_EQ(
+        std::count_if(
+            broad_phase.nt_pairs().begin(), broad_phase.nt_pairs().end(),
+            [](const NodeTrianglePair& pair) { return pair.node == 4; }),
+        4);
+    for (const BroadPhase::Cache::VertexPairEntry& entry :
+         cache.vertex_nt[4]) {
+        ASSERT_LT(entry.pair_index, cache.nt_pairs.size());
+        EXPECT_EQ(entry.dof, 0);
+        EXPECT_EQ(cache.nt_pairs[entry.pair_index].node, 4);
+    }
+
+    broad_phase.refresh_pairs(mesh);
+    EXPECT_EQ(broad_phase.cache().vertex_nt[4].size(), 4U);
+    EXPECT_EQ(broad_phase.nt_pairs().size(), 8U);
+}
+
+TEST(BroadPhaseTest,
+     PrebuiltSurfaceNodeBoxesExcludeTetInteriorAndRetainOtherQueries) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0),
+        Vec3(0.0, 0.0, 1.0),
+        Vec3(0.2, 0.2, 0.2),
+        Vec3(0.3, 0.3, 0.3),
+    };
+    RefMesh mesh = make_mesh(x, {
+        {1, 2, 3},
+        {0, 3, 2},
+        {0, 1, 3},
+        {0, 2, 1},
+    });
+    mesh.tets = {
+        4, 1, 2, 3,
+        0, 4, 2, 3,
+        0, 1, 4, 3,
+        0, 1, 2, 4,
+    };
+    mesh.tet_nodes = {4, 1, 2, 3, 0};
+    mesh.surface_nodes = {1, 2, 3, 0};
+    mesh.node_to_rb = {-1, -1, -1, -1, -1, 0};
+    mesh.rb_nodes = {{5}};
+
+    // Give both initializers the exact same conservative boxes. Every box
+    // overlaps every primitive, so differences in the NT results can only
+    // come from the surface-node query policy rather than box construction.
+    const AABB common_box(
+        Vec3::Constant(-2.0), Vec3::Constant(2.0));
+    const std::vector<AABB> boxes(x.size(), common_box);
+
+    BroadPhase all_nodes;
+    all_nodes.initialize(boxes, mesh, /*d_hat=*/0.0);
+    BroadPhase surface_nodes;
+    surface_nodes.initialize_surface_nodes(
+        boxes, mesh, /*d_hat=*/0.0);
+
+    const auto count_point_queries = [](const BroadPhase& broad_phase,
+                                        const int node) {
+        return std::count_if(
+            broad_phase.nt_pairs().begin(), broad_phase.nt_pairs().end(),
+            [node](const NodeTrianglePair& pair) {
+                return pair.node == node;
+            });
+    };
+
+    // Node 4 is the only tet-interior point. The ordinary prebuilt-box path
+    // retains its four queries, while the surface-aware overload removes all
+    // of them.
+    EXPECT_EQ(count_point_queries(all_nodes, 4), 4);
+    EXPECT_EQ(count_point_queries(surface_nodes, 4), 0);
+    EXPECT_EQ(all_nodes.cache().vertex_nt[4].size(), 4U);
+    EXPECT_TRUE(surface_nodes.cache().vertex_nt[4].empty());
+
+    // Boundary node 0 and point-only rigid proxy 5 remain eligible under the
+    // surface policy. Each sees all nonincident boundary triangles allowed by
+    // topology, exactly as in the ordinary initializer.
+    EXPECT_EQ(count_point_queries(surface_nodes, 0),
+              count_point_queries(all_nodes, 0));
+    EXPECT_GT(count_point_queries(surface_nodes, 0), 0);
+    EXPECT_EQ(count_point_queries(surface_nodes, 5), 4);
+    EXPECT_EQ(count_point_queries(surface_nodes, 5),
+              count_point_queries(all_nodes, 5));
+
+    // Surface filtering changes only point queries. Both initializers retain
+    // identical input node boxes and identical boundary-edge SS candidates.
+    ASSERT_EQ(surface_nodes.cache().node_boxes.size(), boxes.size());
+    for (std::size_t node = 0; node < boxes.size(); ++node) {
+        EXPECT_TRUE(surface_nodes.cache().node_boxes[node].min.isApprox(
+            boxes[node].min));
+        EXPECT_TRUE(surface_nodes.cache().node_boxes[node].max.isApprox(
+            boxes[node].max));
+    }
+    EXPECT_FALSE(all_nodes.ss_pairs().empty());
+    EXPECT_EQ(
+        pair_sets_from_broad(surface_nodes).ss,
+        pair_sets_from_broad(all_nodes).ss);
+}
+
 TEST(BroadPhaseTest, DetectsSegmentSegmentPairFromOverlappingBoxes) {
 const std::vector<Vec3> x = {
         Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 0.0), Vec3(0.0, 1.0, 0.0),

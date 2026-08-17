@@ -1,5 +1,6 @@
 #pragma once
 #include "corotated_energy.h"
+#include "volumetric_corotated_energy.h"
 #include "bending_energy.h"
 #include "barrier_energy.h"
 #include "sdf_penalty_energy.h"
@@ -9,6 +10,7 @@
 #include <utility>
 #include <vector>
 #include <cassert>
+#include <stdexcept>
 
 class BroadPhase;
 
@@ -25,7 +27,13 @@ struct Pin {
 struct SimParams {
     double fps;
     int    substeps;
-    double mu, lambda, density, thickness, kpin, tol_abs;
+    // Thickness-scaled shell material and mass parameters.
+    double mu, lambda, density, thickness;
+    // Unscaled volumetric-solid material and mass parameters.
+    double solid_mu, solid_lambda, solid_density;
+    // Density used when constructing rigid bodies from volumetric shapes.
+    double rigid_density;
+    double kpin, tol_abs;
     double tol_rel;   // relative tolerance (factor of initial residual); 0 disables
     double kB;        // bending (flexural) stiffness; 0 disables the bending term
     double d_hat;     // barrier activation distance; 0 disables contact
@@ -66,6 +74,10 @@ struct SimParams {
         p.lambda                    = 0.0;
         p.density                   = 0.0;
         p.thickness                 = 0.0;
+        p.solid_mu                  = 0.0;
+        p.solid_lambda              = 0.0;
+        p.solid_density             = 0.0;
+        p.rigid_density             = 0.0;
         p.kpin                      = 0.0;
         p.tol_abs                   = 0.0;
         p.tol_rel                   = 0.0;
@@ -141,13 +153,31 @@ struct Hinge {
 using VertexHingeMap = std::unordered_map<int, std::vector<std::pair<int,int>>>;
 
 struct RefMesh {
-    std::vector<int>  tris; // flat: every 3 ints = one triangle
+    // Shared particle and collision/render surface data
+    // Collision/render surface. Every three entries form one triangle. For a
+    // tetrahedral solid, this contains only the extracted boundary faces.
+    std::vector<int> tris;
+    std::vector<double> mass;
+    size_t num_positions = 0;
+
+    // Cloth
     std::vector<Mat22> Dm_inverse;
     std::vector<double> area;
-    std::vector<double> mass;
     std::vector<Hinge> hinges;
     VertexHingeMap hinge_adj;
-    size_t num_positions = 0;
+
+    // Deformable Solid
+    std::vector<int> tets; // flat: every 4 ints = one tetrahedron
+    std::vector<TetRestData> tet_rest_data;
+    // Global vertex -> {(tet index, local role in 0..3)}
+    std::vector<std::vector<std::pair<int, int>>> tet_adj;
+    // Unique vertices referenced by tets, in first-connectivity-appearance
+    // order. These are the volumetric solid degrees of freedom.
+    std::vector<int> tet_nodes;
+    // Unique vertices referenced by the extracted boundary tris, in
+    // first-boundary-appearance order. These classify the collision/render
+    // surface; interior tet nodes are deliberately excluded.
+    std::vector<int> surface_nodes;
 
     // Rigid Bodies
     std::vector<std::vector<Vec3>> ref_positions; // body-space particle positions for each rb
@@ -160,6 +190,7 @@ struct RefMesh {
     // Mixed Solver
     std::vector<int> deformable_nodes; // global indices of independently deformable nodes
 
+    // Cloth
     inline void initialize(const std::vector<Vec2>& X, const std::vector<Vec3>& x_rest){
         num_positions = X.size();
         compute_dm_inverse(X);
@@ -207,11 +238,6 @@ struct RefMesh {
             area[t] = 0.5 * std::abs(Dm_local.determinant());
             Dm_inverse[t] = Dm_local.inverse();
         }
-    }
-
-    inline void assert_valid() const {
-        assert(area.size() == Dm_inverse.size());
-        assert(mass.size() == num_positions);
     }
 
     inline void build_hinges(const std::vector<Vec2>& X, const std::vector<Vec3>& x_rest) {
@@ -348,24 +374,56 @@ struct RefMesh {
         }
     }
 
-    // Builds masses only for independently deformable nodes in a mixed mesh.
-    // Rigid proxy masses assigned by create_rigid_body are preserved.
+    // Mixed Solver
+    // Rebuilds shell masses in a mixed mesh. Tetrahedral masses assigned by
+    // create_solid and rigid proxy masses assigned by create_rigid_body are
+    // preserved. Shell triangles occupy the leading triangle prefix described
+    // by Dm_inverse/area; later triangles are collision/render surfaces only.
     inline void build_deformable_lumped_mass(
         double density, double thickness) {
+        if (node_to_rb.size() != num_positions) {
+            throw std::invalid_argument(
+                "build_deformable_lumped_mass: node ownership size mismatch");
+        }
+        if (Dm_inverse.size() != area.size()
+            || area.size() > tris.size() / 3) {
+            throw std::invalid_argument(
+                "build_deformable_lumped_mass: cloth rest data is inconsistent");
+        }
+
         mass.resize(num_positions, 0.0);
+        std::vector<unsigned char> is_tet_node(num_positions, 0);
+        for (const int node : tet_nodes) {
+            if (node < 0 || static_cast<std::size_t>(node) >= num_positions) {
+                throw std::out_of_range(
+                    "build_deformable_lumped_mass: tet node is out of range");
+            }
+            is_tet_node[static_cast<std::size_t>(node)] = 1;
+        }
+
         for (std::size_t node = 0; node < num_positions; ++node) {
-            if (node_to_rb[node] < 0)
+            if (node_to_rb[node] < 0 && is_tet_node[node] == 0)
                 mass[node] = 0.0;
         }
 
-        const int nt = static_cast<int>(tris.size()) / 3;
-        for (int triangle = 0; triangle < nt; ++triangle) {
+        const int shell_triangle_count = static_cast<int>(area.size());
+        for (int triangle = 0; triangle < shell_triangle_count; ++triangle) {
             const int v0 = tris[3 * triangle + 0];
             const int v1 = tris[3 * triangle + 1];
             const int v2 = tris[3 * triangle + 2];
-            const int owner = node_to_rb[v0];
-            if (owner >= 0)
-                continue;
+            const int vertices[3] = {v0, v1, v2};
+            for (const int vertex : vertices) {
+                if (vertex < 0
+                    || static_cast<std::size_t>(vertex) >= num_positions) {
+                    throw std::out_of_range(
+                        "build_deformable_lumped_mass: cloth triangle vertex is out of range");
+                }
+                if (node_to_rb[static_cast<std::size_t>(vertex)] >= 0
+                    || is_tet_node[static_cast<std::size_t>(vertex)] != 0) {
+                    throw std::invalid_argument(
+                        "build_deformable_lumped_mass: cloth rest prefix contains a non-cloth node");
+                }
+            }
 
             const double nodal_mass =
                 density * area[triangle] * thickness / 3.0;
@@ -392,6 +450,14 @@ inline int tri_vertex(const RefMesh& ref_mesh, int tri_idx, int local) {
 
 inline int num_tris(const RefMesh& ref_mesh) {
     return static_cast<int>(ref_mesh.tris.size()) / 3;
+}
+
+inline int tet_vertex(const RefMesh& ref_mesh, int tet_idx, int local) {
+    return ref_mesh.tets[tet_idx * 4 + local];
+}
+
+inline int num_tets(const RefMesh& ref_mesh) {
+    return static_cast<int>(ref_mesh.tets.size()) / 4;
 }
 
 // vertex -> {triangle_index, local_corner in {0,1,2}}

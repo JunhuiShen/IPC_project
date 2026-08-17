@@ -14,6 +14,8 @@ struct SolverResult {
     bool   has_residual_components = false;
     double initial_cloth_residual = 0.0;
     double final_cloth_residual = 0.0;
+    double initial_solid_residual = 0.0;
+    double final_solid_residual = 0.0;
     double initial_rigid_residual = 0.0;
     double final_rigid_residual = 0.0;
 };
@@ -29,12 +31,16 @@ inline void accumulate_solver_result(SolverResult& agg, const SolverResult& sub,
         if (sub.has_residual_components) {
             if (!agg.has_residual_components) {
                 agg.initial_cloth_residual = sub.initial_cloth_residual;
+                agg.initial_solid_residual = sub.initial_solid_residual;
                 agg.initial_rigid_residual = sub.initial_rigid_residual;
             }
             agg.final_cloth_residual = std::max(agg.final_cloth_residual, sub.final_cloth_residual);
+            agg.final_solid_residual = std::max(agg.final_solid_residual, sub.final_solid_residual);
             agg.final_rigid_residual = std::max(agg.final_rigid_residual, sub.final_rigid_residual);
-            agg.initial_residual = agg.initial_cloth_residual + agg.initial_rigid_residual;
-            agg.final_residual = agg.final_cloth_residual + agg.final_rigid_residual;
+            agg.initial_residual = agg.initial_cloth_residual
+                + agg.initial_solid_residual + agg.initial_rigid_residual;
+            agg.final_residual = agg.final_cloth_residual
+                + agg.final_solid_residual + agg.final_rigid_residual;
             agg.has_residual_components = true;
         } else {
             agg.final_residual = std::max(agg.final_residual, sub.final_residual);
@@ -53,11 +59,10 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
 // initialize omega_new to zero.
 SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const DeformedState& state, const SimParams& params, std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new, bool verbose = false);
 
-// General basic solver. Deformable nodes (node_to_rb == -1) are advanced as
-// independent particle blocks, while every rigid body is advanced through its
-// COM and angular-velocity blocks. All blocks share one live position array
-// and one contact cache, enabling cloth-cloth, cloth-rigid, and rigid-rigid
-// contact in the same Gauss-Seidel solve.
+// General basic solver. Cloth vertices and tetrahedral solid vertices are
+// advanced as distinct particle-block types, while every rigid body is
+// advanced through its COM and angular-velocity block. All blocks share one
+// live position array, contact cache, conflict graph, and coloring.
 SolverResult global_gauss_seidel_solver_basic_general(
     const RefMesh& ref_mesh, const DeformedState& state,
     const VertexTriangleMap& adj, const std::vector<Pin>& pins,

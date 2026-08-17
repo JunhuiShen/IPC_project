@@ -237,6 +237,21 @@ namespace {
         return node == a || node == b || node == c;
     }
 
+    static std::vector<unsigned char> build_tet_interior_node_mask(
+        const RefMesh& mesh, int nv) {
+        std::vector<unsigned char> is_interior(
+            static_cast<std::size_t>(nv), 0);
+        for (const int node : mesh.tet_nodes) {
+            if (node >= 0 && node < nv)
+                is_interior[static_cast<std::size_t>(node)] = 1;
+        }
+        for (const int node : mesh.surface_nodes) {
+            if (node >= 0 && node < nv)
+                is_interior[static_cast<std::size_t>(node)] = 0;
+        }
+        return is_interior;
+    }
+
     static inline AABB build_node_box(const std::vector<Vec3>& x, const std::vector<Vec3>& v, int node, double dt, double pad) {
         AABB box;
         const Vec3 x0 = x[node];
@@ -399,9 +414,13 @@ void BroadPhase::set_mesh_topology(const RefMesh& mesh, int nv) {
     topology_valid_ = true;
 }
 
-void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double node_pad, double tri_pad, double edge_pad) {
+void BroadPhase::build(
+    const std::vector<Vec3>& x, const std::vector<Vec3>& v,
+    const RefMesh& mesh, double dt, double node_pad, double tri_pad,
+    double edge_pad, const bool exclude_tet_interior_nt_queries) {
     const int nv = static_cast<int>(x.size());
     const int nt = num_tris(mesh);
+    exclude_tet_interior_nt_queries_ = exclude_tet_interior_nt_queries;
 
     Cache c = take_reusable_cache(cache_, nv);
 
@@ -440,9 +459,16 @@ void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, c
     }
 
     // Parallel BVH queries, followed by serial ordered pair insertion.
+    const std::vector<unsigned char> tet_interior_nodes =
+        exclude_tet_interior_nt_queries
+        ? build_tet_interior_node_mask(mesh, nv)
+        : std::vector<unsigned char>();
     std::vector<std::vector<int>>& node_hits = prepare_hit_rows(c.node_hits, nv);
     #pragma omp parallel for schedule(dynamic, 32)
     for (int node = 0; node < nv; ++node) {
+        if (exclude_tet_interior_nt_queries
+            && tet_interior_nodes[static_cast<std::size_t>(node)] != 0)
+            continue;
         if (c.tri_root < 0) continue;
         query_bvh(c.tri_bvh_nodes, c.tri_root, c.node_boxes[node], node_hits[node]);
     }
@@ -476,12 +502,33 @@ void BroadPhase::build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, c
 }
 
 void BroadPhase::initialize(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double dhat) {
-    build(x, v, mesh, dt, /*node_pad=*/dhat, /*tri_pad=*/0.0, /*edge_pad=*/dhat * 0.5);
+    build(
+        x, v, mesh, dt, /*node_pad=*/dhat, /*tri_pad=*/0.0,
+        /*edge_pad=*/dhat * 0.5,
+        /*exclude_tet_interior_nt_queries=*/false);
+}
+
+void BroadPhase::initialize_surface_nodes(
+    const std::vector<Vec3>& x, const std::vector<Vec3>& v,
+    const RefMesh& mesh, const double dt, const double dhat) {
+    build(
+        x, v, mesh, dt, /*node_pad=*/dhat, /*tri_pad=*/0.0,
+        /*edge_pad=*/dhat * 0.5,
+        /*exclude_tet_interior_nt_queries=*/true);
+}
+
+void BroadPhase::initialize_surface_nodes(
+    const std::vector<AABB>& vertex_boxes, const RefMesh& mesh,
+    const double d_hat) {
+    initialize(vertex_boxes, mesh, d_hat);
+    exclude_tet_interior_nt_queries_ = true;
+    refresh_pairs(mesh);
 }
 
 void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat) {
     const int nv = static_cast<int>(vertex_boxes.size());
     const int nt = num_tris(mesh);
+    exclude_tet_interior_nt_queries_ = false;
 
     Cache c = take_reusable_cache(cache_, nv);
 
@@ -581,9 +628,16 @@ void BroadPhase::refresh_pairs(const RefMesh& mesh) {
     c.ss_pair_edges.clear();
     for (auto& v : c.vertex_ss) v.clear();
 
+    const std::vector<unsigned char> tet_interior_nodes =
+        exclude_tet_interior_nt_queries_
+        ? build_tet_interior_node_mask(mesh, nv)
+        : std::vector<unsigned char>();
     std::vector<std::vector<int>>& node_hits = prepare_hit_rows(c.node_hits, nv);
     #pragma omp parallel for schedule(dynamic, 32)
     for (int node = 0; node < nv; ++node) {
+        if (exclude_tet_interior_nt_queries_
+            && tet_interior_nodes[static_cast<std::size_t>(node)] != 0)
+            continue;
         if (c.tri_root < 0) continue;
         query_bvh(c.tri_bvh_nodes, c.tri_root, c.node_boxes[node], node_hits[node]);
     }
@@ -642,5 +696,8 @@ void incremental_refresh_vertex(BroadPhase::Cache& c, int vi, const std::vector<
 
 void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt) {
     constexpr double epsilon_pad = 1.0e-10;  // fp tie-breaker, not a safety pad
-    build(x, v, mesh, dt, /*node_pad=*/epsilon_pad, /*tri_pad=*/epsilon_pad, /*edge_pad=*/epsilon_pad);
+    build(
+        x, v, mesh, dt, /*node_pad=*/epsilon_pad,
+        /*tri_pad=*/epsilon_pad, /*edge_pad=*/epsilon_pad,
+        /*exclude_tet_interior_nt_queries=*/false);
 }

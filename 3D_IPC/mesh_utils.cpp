@@ -11,6 +11,16 @@ TriangleDef make_def_triangle(const std::vector<Vec3>& x, const RefMesh& ref_mes
 void clear_model(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, std::vector<Pin>& pins) {
     X.clear();
     ref_mesh.tris.clear();
+    ref_mesh.mass.clear();
+    ref_mesh.Dm_inverse.clear();
+    ref_mesh.area.clear();
+    ref_mesh.hinges.clear();
+    ref_mesh.hinge_adj.clear();
+    ref_mesh.tets.clear();
+    ref_mesh.tet_rest_data.clear();
+    ref_mesh.tet_adj.clear();
+    ref_mesh.tet_nodes.clear();
+    ref_mesh.surface_nodes.clear();
     ref_mesh.num_positions = 0;
     state.deformed_positions.clear();
     state.velocities.clear();

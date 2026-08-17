@@ -29,6 +29,31 @@ void build_block_elastic_adj(const std::vector<std::vector<int>>& nodal_elastic_
 void build_block_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_block, const std::vector<std::vector<int>>& block_nodes, int num_deformable_blocks, std::vector<std::vector<int>>& body_nt_pair_indices, std::vector<std::vector<int>>& body_ss_pair_indices, std::vector<std::vector<int>>& out);
 
 // Mesh-adjacency edges of the conflict graph. Invariant for a fixed mesh.
+// Rows use compact solid-node indices: row i corresponds to
+// ref_mesh.tet_nodes[i]. Every tetrahedron contributes a K4 clique.
+std::vector<std::vector<int>> build_solid_elastic_adjacency(
+    const RefMesh& ref_mesh);
+
+// Dynamic contact conflicts projected onto compact solid-node indices. A
+// contact contributes a clique among its participating solid surface nodes;
+// non-solid roles are omitted.
+void build_solid_contact_adjacency(
+    const RefMesh& ref_mesh,
+    const BroadPhase::Cache& bp_cache,
+    std::vector<std::vector<int>>& out);
+
+// One conflict graph for all movable block types. Rows are ordered as
+// [cloth_nodes][ref_mesh.tet_nodes][ref_mesh.rb_nodes]. Cloth and solid
+// vertices each own one block; every rigid body owns one block containing all
+// of its proxy vertices. The graph contains cloth elasticity, tetrahedral K4
+// elasticity, and every cached contact conflict across all three block types.
+void build_all_block_adjacency_and_contact(
+    const RefMesh& ref_mesh,
+    const std::vector<int>& cloth_nodes,
+    const std::vector<std::vector<int>>& cloth_nodal_elastic_adjacency,
+    const BroadPhase::Cache& bp_cache,
+    std::vector<std::vector<int>>& out);
+
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int num_vertices);
 
 // Contact edges of the conflict graph from a BroadPhase-generated cache.

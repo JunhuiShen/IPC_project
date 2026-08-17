@@ -117,6 +117,21 @@ public:
 
     void initialize(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double dhat);
 
+    // Velocity-based initialization for scenes containing tetrahedral solids.
+    // NT queries skip only classified tet-interior nodes (tet_nodes minus
+    // surface_nodes). Non-solid point-only proxies remain eligible, while
+    // triangle and edge topology, including SS candidates, is unchanged.
+    void initialize_surface_nodes(
+        const std::vector<Vec3>& x, const std::vector<Vec3>& v,
+        const RefMesh& mesh, double dt, double dhat);
+
+    // Pre-built-box counterpart used by the mixed cloth/solid/rigid solver.
+    // Tet-interior nodes keep their boxes for elastic updates but do not issue
+    // node-triangle contact queries.
+    void initialize_surface_nodes(
+        const std::vector<AABB>& vertex_boxes, const RefMesh& mesh,
+        double d_hat = 0.0);
+
     // Initialize from pre-built per-vertex AABBs. Triangle and edge boxes are
     // derived as the union of their vertex boxes (i.e. red boxes).
     void initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat = 0.0);
@@ -163,6 +178,9 @@ public:
 private:
     Cache cache_;
     bool topology_valid_ = false;
+    // Candidate-domain policy established by the most recent initialization;
+    // refresh_pairs() must rebuild pairs in the same domain.
+    bool exclude_tet_interior_nt_queries_ = false;
 
     // Static mesh connectivity, reused across every build for the same mesh.
     struct Topology {
@@ -172,7 +190,10 @@ private:
     };
     Topology topo_;
 
-    void build(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double node_pad, double tri_pad, double edge_pad);
+    void build(
+        const std::vector<Vec3>& x, const std::vector<Vec3>& v,
+        const RefMesh& mesh, double dt, double node_pad, double tri_pad,
+        double edge_pad, bool exclude_tet_interior_nt_queries);
 };
 
 void incremental_refresh_vertex(BroadPhase::Cache& c, int vi, const std::vector<Vec3>& x, const RefMesh& mesh, double box_pad, double node_box_radius_padded);

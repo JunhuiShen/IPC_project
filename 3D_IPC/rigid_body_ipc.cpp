@@ -385,6 +385,8 @@ int create_rigid_body(const std::vector<Vec3>& x, const Vec3& v_com_input, const
     state.velocities.resize(state.deformed_positions.size(), Vec3::Zero());
     ref_mesh.mass.resize(state.deformed_positions.size(), 0.0);
     ref_mesh.node_to_rb.resize(state.deformed_positions.size(), -1);
+    if (!ref_mesh.tet_adj.empty())
+        ref_mesh.tet_adj.resize(state.deformed_positions.size());
     ref_mesh.num_positions = state.deformed_positions.size();
 
     std::vector<int> node_indices(x.size());

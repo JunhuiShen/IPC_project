@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <stdexcept>
 
@@ -844,13 +845,16 @@ void build_rigid_box_drop_example(
 
     create_rigid_body(
         x, Vec3::Zero(), Vec4(1, 0.0, 0.0, 0.0),
-        Vec3{1.0, 0.0, 0.0}, 1, ref_mesh, state);
+        Vec3{1.0, 0.0, 0.0},
+        8.0 * box_half_extent.x() * box_half_extent.y()
+            * box_half_extent.z() * params.rigid_density,
+        ref_mesh, state);
 
     append_rigid_polygon(
         6, state, ref_mesh,
         Vec3(0.55, 5.0, 0.0),
         /*radius=*/0.22,
-        /*density=*/30.0,
+        params.rigid_density,
         /*thickness=*/0.28,
         Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
         Vec3(1.0, 0.0, 0.0));
@@ -891,7 +895,7 @@ void build_two_rigid_polygon_collision_example(
     params.use_translation_guess = false;
 
     constexpr double radius = 0.30;
-    constexpr double density = 25.0;
+    const double density = params.rigid_density;
     constexpr double thickness = 0.20;
     // Rotating a regular hexagon by 30 degrees places flat side faces at its
     // +/-x extrema. Giving both bodies this orientation produces side-to-side
@@ -929,7 +933,7 @@ void build_twenty_rigid_polygon_static_stack_example(
     static_x.clear();
     static_tris.clear();
 
-    params.gravity = Vec3::Zero();
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
     params.d_hat = args.d_hat;
     params.k_barrier = args.k_barrier;
     params.k_sdf = args.k_sdf;
@@ -945,7 +949,7 @@ void build_twenty_rigid_polygon_static_stack_example(
 
     constexpr int polygon_count = 20;
     constexpr double radius = 0.28;
-    constexpr double density = 25.0;
+    const double density = params.rigid_density;
     constexpr double thickness = 0.12;
     // Each prism is laid flat: material z (the extrusion direction) maps to
     // world y, so its large polygonal caps form the horizontal contact faces.
@@ -1018,7 +1022,7 @@ void build_five_rigid_polygon_drop_scatter_example(
 
     constexpr int polygon_count = 5;
     constexpr double radius = 0.22;
-    constexpr double density = 25.0;
+    const double density = params.rigid_density;
     constexpr double thickness = 0.14;
     constexpr double lowest_center_y = 0.45;
     constexpr double center_spacing = 0.56;
@@ -1143,7 +1147,7 @@ void build_hundred_rigid_polygon_box_drop_example(
     constexpr int layer_count = 5;
     constexpr int polygon_count = column_count * row_count * layer_count;
     constexpr double radius = 0.20;
-    constexpr double density = 25.0;
+    const double density = params.rigid_density;
     constexpr double thickness = 0.10;
     constexpr double column_spacing = 0.55;
     constexpr double row_spacing = 0.48;
@@ -1269,8 +1273,8 @@ void build_fifty_rigid_polygons_drop_on_pinned_cloth_example(
 
     // build_square_mesh places its grid in the world x-z plane. Using unequal
     // width and depth makes this a rectangular cloth centered at the origin.
-    constexpr int cloth_nx = 40;
-    constexpr int cloth_nz = 40;
+    constexpr int cloth_nx = 100;
+    constexpr int cloth_nz = 100;
     constexpr double cloth_width = 4.0;
     constexpr double cloth_depth = 4.0;
     constexpr double cloth_height = 1.2;
@@ -1301,7 +1305,7 @@ void build_fifty_rigid_polygons_drop_on_pinned_cloth_example(
     constexpr int polygon_count = 50;
     constexpr int columns = 10;
     constexpr double radius = 0.10;
-    constexpr double density = 40.0;
+    const double density = params.rigid_density;
     constexpr double thickness = 0.06;
 
     for (int polygon = 0; polygon < polygon_count; ++polygon) {
@@ -1324,6 +1328,372 @@ void build_fifty_rigid_polygons_drop_on_pinned_cloth_example(
             3 + polygon % 10, state, ref_mesh, center,
             radius, density, thickness,
             Vec3::Zero(), orientation, Vec3::Zero());
+    }
+
+    ref_mesh.build_deformable_nodes();
+}
+
+// ---------------------------------------------------------------------------
+// Example 13: one deformable volumetric solid falling onto an SDF ground
+// ---------------------------------------------------------------------------
+// command line: ./build/3D_sim --example 13 --num_frames 200 --substeps 20 --max_substep_iters 50 --tol_abs 1e-8 --tol_rel 1e-5 --outdir single_solid_ground_drop_output --format obj
+void build_single_deformable_solid_ground_drop_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params,
+    std::vector<Vec3>& static_x, std::vector<int>& static_tris) {
+    clear_model(ref_mesh, state, X, pins);
+    static_x.clear();
+    static_tris.clear();
+
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = args.k_sdf;
+    params.eps_sdf = args.eps_sdf;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.sdf_planes.push_back(
+        PlaneSDF{Vec3::Zero(), Vec3::UnitY()});
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+    params.use_ogc = false;
+    params.use_ogc_solver = false;
+
+    const Vec4 flat_orientation(
+        std::cos(0.25 * kPi), -std::sin(0.25 * kPi), 0.0, 0.0);
+    const double yaw = 0.35;
+    const Vec4 yaw_orientation(
+        std::cos(0.5 * yaw), 0.0, std::sin(0.5 * yaw), 0.0);
+    const double tilt = 0.22;
+    const Vec4 tilt_orientation(
+        std::cos(0.5 * tilt), 0.0, 0.0, std::sin(0.5 * tilt));
+    const Vec4 orientation = quaternion_normalize(
+        quaternion_multiply(
+            yaw_orientation,
+            quaternion_multiply(tilt_orientation, flat_orientation)));
+
+    constexpr int side_count = 8;
+    constexpr double radius = 0.22;
+    constexpr double thickness = 0.16;
+    append_deformable_polygon_prism(
+        side_count, state, ref_mesh, Vec3(0.0, 1.0, 0.0),
+        radius, params.solid_density, thickness, orientation);
+    ref_mesh.build_deformable_nodes();
+
+    // The visual plane coincides exactly with the infinite SDF ground.
+    constexpr double ground_half_extent = 2.0;
+    static_x = {
+        Vec3(-ground_half_extent, 0.0, -ground_half_extent),
+        Vec3(-ground_half_extent, 0.0,  ground_half_extent),
+        Vec3( ground_half_extent, 0.0,  ground_half_extent),
+        Vec3( ground_half_extent, 0.0, -ground_half_extent)};
+    static_tris = {0, 1, 2, 0, 2, 3};
+}
+
+// ---------------------------------------------------------------------------
+// Example 14: one deformable volumetric solid falling onto a pinned cloth (need fix)
+// ---------------------------------------------------------------------------
+// command line: ./build/3D_sim --example 14 --num_frames 200 --substeps 20 --max_substep_iters 30 --fixed_iters  --E 1e8 --outdir stiff_cloth_solid_drop_output --format obj --d_hat 0.019 --k_barrier 500
+// weird if there is no --d_hat and --k_barrier. solid doesn't bounce up and looks like it sticks to the cloth. ccd issue?
+void build_single_deformable_solid_drop_on_pinned_cloth_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params) {
+    clear_model(ref_mesh, state, X, pins);
+
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = 0.0;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+    params.use_ogc = false;
+    params.use_ogc_solver = false;
+
+    // Build and initialize the cloth before appending the solid boundary
+    // triangles. This keeps the shell-elastic triangles as the leading
+    // Dm_inverse/area prefix and the solid surface collision-only.
+    constexpr int cloth_nx = 30;
+    constexpr int cloth_nz = 30;
+    constexpr double cloth_width = 4.0;
+    constexpr double cloth_depth = 4.0;
+    constexpr double cloth_height = 1.2;
+    const int cloth_base = build_square_mesh(
+        ref_mesh, state, X, cloth_nx, cloth_nz,
+        cloth_width, cloth_depth,
+        Vec3(-0.5 * cloth_width, cloth_height,
+             -0.5 * cloth_depth));
+    state.velocities.assign(
+        state.deformed_positions.size(), Vec3::Zero());
+
+    const auto cloth_node = [cloth_base](const int i, const int j) {
+        return cloth_base + j * (cloth_nx + 1) + i;
+    };
+    for (int j = 0; j <= cloth_nz; ++j) {
+        append_pin(
+            pins, cloth_node(0, j), state.deformed_positions);
+        append_pin(
+            pins, cloth_node(cloth_nx, j),
+            state.deformed_positions);
+    }
+
+    // Lay the prism nearly flat so its polygonal cap meets the cloth, with a
+    // small tilt to avoid an exactly simultaneous, perfectly flat impact.
+    const Vec4 flat_orientation(
+        std::cos(0.25 * kPi), -std::sin(0.25 * kPi), 0.0, 0.0);
+    const double yaw = 0.35;
+    const Vec4 yaw_orientation(
+        std::cos(0.5 * yaw), 0.0, std::sin(0.5 * yaw), 0.0);
+    const double tilt = 0.22;
+    const Vec4 tilt_orientation(
+        std::cos(0.5 * tilt), 0.0, 0.0, std::sin(0.5 * tilt));
+    const Vec4 orientation = quaternion_normalize(
+        quaternion_multiply(
+            yaw_orientation,
+            quaternion_multiply(tilt_orientation, flat_orientation)));
+
+    const int solid_base = append_deformable_polygon_prism(
+        /*number_of_nodes=*/8, state, ref_mesh,
+        /*center=*/Vec3(0.0, 1.5, 0.0),
+        /*radius=*/0.30, params.solid_density,
+        /*thickness=*/0.20, orientation);
+    // The unladen cloth begins falling under gravity too; this modest relative
+    // downward speed makes the solid catch and load the sagging sheet early.
+    for (std::size_t node = static_cast<std::size_t>(solid_base);
+         node < state.velocities.size(); ++node) {
+        state.velocities[node] = Vec3(0.0, -0.75, 0.0);
+    }
+
+    // Includes both cloth and tetrahedral nodes. The general solver derives
+    // its disjoint cloth/solid block ranges from ref_mesh.tet_nodes.
+    ref_mesh.build_deformable_nodes();
+}
+
+// ---------------------------------------------------------------------------
+// Example 15: ten small rigid and ten larger deformable polygonal prisms
+// falling onto a cloth pinned along two opposite sides
+// ---------------------------------------------------------------------------
+// command line: ./build/3D_sim --example 15 --num_frames 120 --substeps 10 --max_substep_iters 500 --tol_abs 1e-5 --damping 0.5 --outdir twenty_rigid_deformable_polygons_on_pinned_cloth_output --format obj
+void build_twenty_rigid_deformable_polygons_drop_on_pinned_cloth_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params) {
+    clear_model(ref_mesh, state, X, pins);
+
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = 0.0;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+    params.use_ogc = false;
+    params.use_ogc_solver = false;
+
+    constexpr int cloth_nx = 100;
+    constexpr int cloth_nz = 100;
+    constexpr double cloth_width = 4.0;
+    constexpr double cloth_depth = 4.0;
+    constexpr double cloth_height = 1.2;
+    const int cloth_base = build_square_mesh(
+        ref_mesh, state, X, cloth_nx, cloth_nz,
+        cloth_width, cloth_depth,
+        Vec3(-0.5 * cloth_width, cloth_height,
+             -0.5 * cloth_depth));
+    state.velocities.assign(
+        state.deformed_positions.size(), Vec3::Zero());
+
+    const auto cloth_node = [cloth_base](const int i, const int j) {
+        return cloth_base + j * (cloth_nx + 1) + i;
+    };
+    for (int j = 0; j <= cloth_nz; ++j) {
+        append_pin(
+            pins, cloth_node(0, j), state.deformed_positions);
+        append_pin(
+            pins, cloth_node(cloth_nx, j),
+            state.deformed_positions);
+    }
+
+    // A small integer hash gives stable, random-looking samples on every
+    // platform. Reproducibility keeps the scene and its construction test
+    // deterministic while still varying size, position, and orientation.
+    const auto random_unit = [](std::uint32_t value) {
+        value += 0x9e3779b9U;
+        value = (value ^ (value >> 16U)) * 0x85ebca6bU;
+        value = (value ^ (value >> 13U)) * 0xc2b2ae35U;
+        value ^= value >> 16U;
+        return static_cast<double>(value & 0x00ffffffU)
+            / static_cast<double>(0x01000000U);
+    };
+    const auto sample = [&random_unit](const int polygon,
+                                      const std::uint32_t channel) {
+        return random_unit(
+            static_cast<std::uint32_t>(polygon)
+            + channel * 0x6d2b79f5U);
+    };
+    const auto axis_angle_quaternion = [](const Vec3& axis,
+                                          const double angle) {
+        const double half_angle = 0.5 * angle;
+        return Vec4(
+            std::cos(half_angle),
+            axis.x() * std::sin(half_angle),
+            axis.y() * std::sin(half_angle),
+            axis.z() * std::sin(half_angle));
+    };
+
+    constexpr int polygon_count = 20;
+    constexpr int columns = 5;
+    constexpr double spacing = 0.72;
+    const double rigid_body_density = params.rigid_density;
+    const double deformable_body_density = params.solid_density;
+    for (int polygon = 0; polygon < polygon_count; ++polygon) {
+        const int row = polygon / columns;
+        const int column = polygon % columns;
+        const int side_count = 3 + polygon / 2;
+        const bool is_rigid = polygon % 2 == 0;
+        // Solids are roughly twice as wide and twice as thick as the rigid
+        // bodies, making the two independently solved object types visually
+        // distinguishable in the exported surface mesh.
+        const double radius = is_rigid
+            ? 0.080 + 0.025 * sample(polygon, 0U)
+            : 0.180 + 0.040 * sample(polygon, 0U);
+        const double thickness = is_rigid
+            ? 0.045 + 0.020 * sample(polygon, 1U)
+            : 0.120 + 0.040 * sample(polygon, 1U);
+
+        const double yaw = kTwoPi * sample(polygon, 2U);
+        const double x_tilt = 0.60 * (sample(polygon, 3U) - 0.5);
+        const double z_tilt = 0.60 * (sample(polygon, 4U) - 0.5);
+        const Vec4 qx = axis_angle_quaternion(Vec3::UnitX(), x_tilt);
+        const Vec4 qy = axis_angle_quaternion(Vec3::UnitY(), yaw);
+        const Vec4 qz = axis_angle_quaternion(Vec3::UnitZ(), z_tilt);
+        const Vec4 orientation = quaternion_normalize(
+            quaternion_multiply(
+                qy, quaternion_multiply(qz, qx)));
+
+        const Vec3 center(
+            (column - 2.0) * spacing
+                + 0.024 * (sample(polygon, 5U) - 0.5),
+            2.05 + 0.12 * sample(polygon, 6U),
+            (row - 1.5) * spacing
+                + 0.024 * (sample(polygon, 7U) - 0.5));
+
+        // Alternating rigid/solid pairs give ten bodies of each type and one
+        // of each type for every side count from 3 through 12.
+        if (is_rigid) {
+            append_rigid_polygon(
+                side_count, state, ref_mesh, center,
+                radius, rigid_body_density, thickness,
+                Vec3::Zero(), orientation, Vec3::Zero());
+        } else {
+            append_deformable_polygon_prism(
+                side_count, state, ref_mesh, center,
+                radius, deformable_body_density, thickness, orientation);
+        }
+    }
+
+    // The general solver separates these independent nodes into cloth and
+    // tetrahedral-solid blocks using ref_mesh.tet_nodes.
+    ref_mesh.build_deformable_nodes();
+}
+
+// ---------------------------------------------------------------------------
+// Example 16: ten alternating rigid and deformable polygonal prisms dropping
+// onto one another above a cloth pinned along two opposite sides
+// ---------------------------------------------------------------------------
+// command line: ./build/3D_sim --example 16 --num_frames 200 --substeps 20 --max_substep_iters 20 --fixed_iters --outdir ten_rigid_solid_flat_stack_on_cloth_output --format obj --E 1e8 --d_hat 0.019 --k_barrier 500
+// Has the same problem as Example 14.
+void build_ten_alternating_rigid_solid_flat_stack_on_pinned_cloth_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params) {
+    clear_model(ref_mesh, state, X, pins);
+
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = 0.0;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+    params.use_ogc = false;
+    params.use_ogc_solver = false;
+
+    // Initialize the cloth before appending solid and rigid collision
+    // triangles, so the shell-elastic triangles remain the leading prefix.
+    constexpr int cloth_nx = 40;
+    constexpr int cloth_nz = 40;
+    constexpr double cloth_width = 4.0;
+    constexpr double cloth_depth = 4.0;
+    constexpr double cloth_height = 1.2;
+    const int cloth_base = build_square_mesh(
+        ref_mesh, state, X, cloth_nx, cloth_nz,
+        cloth_width, cloth_depth,
+        Vec3(-0.5 * cloth_width, cloth_height,
+             -0.5 * cloth_depth));
+    state.velocities.assign(
+        state.deformed_positions.size(), Vec3::Zero());
+
+    const auto cloth_node = [cloth_base](const int i, const int j) {
+        return cloth_base + j * (cloth_nx + 1) + i;
+    };
+    for (int j = 0; j <= cloth_nz; ++j) {
+        append_pin(
+            pins, cloth_node(0, j), state.deformed_positions);
+        append_pin(
+            pins, cloth_node(cloth_nx, j),
+            state.deformed_positions);
+    }
+
+    constexpr int object_count = 10;
+    constexpr double radius = 0.24;
+    constexpr double thickness = 0.16;
+    constexpr double lowest_center_y = 1.65;
+    constexpr double center_spacing = 0.42;
+    const Vec3 drop_velocity(0.0, -0.75, 0.0);
+
+    // The material extrusion axis is +z. This exact -90 degree rotation about
+    // x maps it to world +y, so every polygonal cap is horizontal. There is no
+    // yaw or tilt on any rigid or deformable body.
+    const Vec4 flat_orientation(
+        std::cos(0.25 * kPi), -std::sin(0.25 * kPi), 0.0, 0.0);
+
+    for (int object = 0; object < object_count; ++object) {
+        const int side_count = 3 + object;
+        const Vec3 center(
+            0.0, lowest_center_y + center_spacing * object, 0.0);
+
+        // Rigid and deformable objects alternate from the bottom upward. Their
+        // initial gaps make the falling bodies contact the growing stack one
+        // after another instead of starting in simultaneous contact.
+        if (object % 2 == 0) {
+            append_rigid_polygon(
+                side_count, state, ref_mesh, center,
+                radius, params.rigid_density, thickness,
+                drop_velocity, flat_orientation, Vec3::Zero());
+        } else {
+            const int solid_base = append_deformable_polygon_prism(
+                side_count, state, ref_mesh, center,
+                radius, params.solid_density, thickness,
+                flat_orientation);
+            for (std::size_t node = static_cast<std::size_t>(solid_base);
+                 node < state.velocities.size(); ++node) {
+                state.velocities[node] = drop_velocity;
+            }
+        }
     }
 
     ref_mesh.build_deformable_nodes();

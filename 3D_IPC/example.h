@@ -194,3 +194,34 @@ void build_fifty_rigid_polygons_drop_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
+
+// Example 15: ten small rigid and ten larger tetrahedralized deformable
+// polygonal prisms (3 through 12 sides) falling onto a large horizontal cloth
+// whose two opposite sides are pinned.
+void build_twenty_rigid_deformable_polygons_drop_on_pinned_cloth_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params);
+
+// Example 13: one tetrahedralized deformable octagonal prism falling onto a
+// horizontal SDF ground plane. The solid uses a mass density of 900 kg/m^3.
+void build_single_deformable_solid_ground_drop_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params,
+    std::vector<Vec3>& static_x, std::vector<int>& static_tris);
+
+// Example 14: one tetrahedralized deformable octagonal prism falling onto a
+// large horizontal cloth whose two opposite sides are pinned.
+void build_single_deformable_solid_drop_on_pinned_cloth_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params);
+
+// Example 16: ten total polygonal prisms, alternating five rigid bodies and
+// five tetrahedralized deformable solids, falling flat onto one another above
+// a cloth whose two opposite sides are pinned.
+void build_ten_alternating_rigid_solid_flat_stack_on_pinned_cloth_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params);

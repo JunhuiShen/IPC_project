@@ -3,6 +3,11 @@
 #include "mesh_utils.h"
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <numeric>
+
 TEST(BuildIncidentTriangleMap, BasicExample) {
 // [0,1,2, 1,2,5] -- two triangles
 // New format: {tri_idx, local_node_index}
@@ -32,8 +37,8 @@ TEST(MixedExample, FiftyMixedRigidPolygonsAboveFourCornerPinnedCloth) {
     build_fifty_rigid_polygons_drop_on_pinned_cloth_example(
         args, ref_mesh, state, X, pins, params);
 
-    constexpr int cloth_nx = 40;
-    constexpr int cloth_nz = 40;
+    constexpr int cloth_nx = 100;
+    constexpr int cloth_nz = 100;
     constexpr int cloth_vertices =
         (cloth_nx + 1) * (cloth_nz + 1);
     constexpr int cloth_triangles = 2 * cloth_nx * cloth_nz;
@@ -75,6 +80,12 @@ TEST(MixedExample, FiftyMixedRigidPolygonsAboveFourCornerPinnedCloth) {
     ASSERT_EQ(state.v_coms.size(), rigid_body_count);
     ASSERT_EQ(state.orientations.size(), rigid_body_count);
     ASSERT_EQ(state.omega.size(), rigid_body_count);
+    EXPECT_TRUE(std::all_of(
+        state.velocities.begin(), state.velocities.end(),
+        [](const Vec3& velocity) { return velocity.isZero(0.0); }));
+    EXPECT_TRUE(std::all_of(
+        state.v_coms.begin(), state.v_coms.end(),
+        [](const Vec3& velocity) { return velocity.isZero(0.0); }));
 
     for (int node = 0; node < cloth_vertices; ++node)
         EXPECT_EQ(ref_mesh.node_to_rb[node], -1);
@@ -143,11 +154,797 @@ TEST(MixedExample, FiftyMixedRigidPolygonsAboveFourCornerPinnedCloth) {
     EXPECT_NEAR(
         total_cloth_mass,
         params.density * params.thickness * 4.0 * 4.0,
-        1.0e-12);
+        1.0e-10);
     for (const std::vector<int>& body_nodes : ref_mesh.rb_nodes) {
         for (const int node : body_nodes)
             EXPECT_DOUBLE_EQ(ref_mesh.mass[node], masses_before[node]);
     }
+}
+
+TEST(MixedExample,
+     TenSmallRigidAndTenLargerDeformablePolygonsAbovePinnedCloth) {
+    IPCArgs3D args;
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+
+    build_twenty_rigid_deformable_polygons_drop_on_pinned_cloth_example(
+        args, ref_mesh, state, X, pins, params);
+
+    constexpr int cloth_nx = 100;
+    constexpr int cloth_nz = 100;
+    constexpr int cloth_vertices =
+        (cloth_nx + 1) * (cloth_nz + 1);
+    constexpr int cloth_triangles = 2 * cloth_nx * cloth_nz;
+    constexpr int rigid_body_count = 10;
+    // Each class contains one polygon with every side count from 3 through
+    // 12, for 75 sides per class. A solid adds one interior star vertex.
+    constexpr int rigid_vertices = 150;
+    constexpr int rigid_triangles = 260;
+    constexpr int solid_surface_vertices = 150;
+    constexpr int solid_interior_vertices = 10;
+    constexpr int solid_vertices =
+        solid_surface_vertices + solid_interior_vertices;
+    constexpr int solid_tetrahedra = 260;
+    constexpr int total_vertices =
+        cloth_vertices + rigid_vertices + solid_vertices;
+    constexpr int total_triangles =
+        cloth_triangles + rigid_triangles + solid_tetrahedra;
+
+    EXPECT_EQ(state.deformed_positions.size(),
+              static_cast<std::size_t>(total_vertices));
+    EXPECT_EQ(state.velocities.size(),
+              static_cast<std::size_t>(total_vertices));
+    EXPECT_EQ(ref_mesh.num_positions,
+              static_cast<std::size_t>(total_vertices));
+    EXPECT_EQ(ref_mesh.node_to_rb.size(),
+              static_cast<std::size_t>(total_vertices));
+    EXPECT_EQ(ref_mesh.mass.size(),
+              static_cast<std::size_t>(total_vertices));
+    EXPECT_EQ(ref_mesh.tris.size(),
+              static_cast<std::size_t>(3 * total_triangles));
+    EXPECT_EQ(ref_mesh.tets.size(),
+              static_cast<std::size_t>(4 * solid_tetrahedra));
+    EXPECT_EQ(ref_mesh.tet_nodes.size(),
+              static_cast<std::size_t>(solid_vertices));
+    EXPECT_EQ(ref_mesh.surface_nodes.size(),
+              static_cast<std::size_t>(solid_surface_vertices));
+    EXPECT_EQ(ref_mesh.deformable_nodes.size(),
+              static_cast<std::size_t>(cloth_vertices + solid_vertices));
+    EXPECT_EQ(X.size(), static_cast<std::size_t>(cloth_vertices));
+    EXPECT_EQ(ref_mesh.Dm_inverse.size(),
+              static_cast<std::size_t>(cloth_triangles));
+    EXPECT_EQ(ref_mesh.area.size(),
+              static_cast<std::size_t>(cloth_triangles));
+
+    ASSERT_EQ(
+        pins.size(), static_cast<std::size_t>(2 * (cloth_nz + 1)));
+    for (int j = 0; j <= cloth_nz; ++j) {
+        SCOPED_TRACE(j);
+        EXPECT_EQ(
+            pins[static_cast<std::size_t>(2 * j)].vertex_index,
+            j * (cloth_nx + 1));
+        EXPECT_EQ(
+            pins[static_cast<std::size_t>(2 * j + 1)].vertex_index,
+            j * (cloth_nx + 1) + cloth_nx);
+    }
+
+    ASSERT_EQ(ref_mesh.rb_nodes.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.ref_positions.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.total_mass.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.I_hat.size(), rigid_body_count);
+    ASSERT_EQ(state.x_coms.size(), rigid_body_count);
+    ASSERT_EQ(state.v_coms.size(), rigid_body_count);
+    ASSERT_EQ(state.orientations.size(), rigid_body_count);
+    ASSERT_EQ(state.omega.size(), rigid_body_count);
+
+    std::vector<unsigned char> is_rigid(total_vertices, 0);
+    std::vector<unsigned char> is_solid(total_vertices, 0);
+    std::vector<unsigned char> is_solid_surface(total_vertices, 0);
+    for (int rb = 0; rb < rigid_body_count; ++rb) {
+        const int side_count =
+            static_cast<int>(ref_mesh.rb_nodes[rb].size()) / 2;
+        EXPECT_GE(side_count, 3);
+        EXPECT_LE(side_count, 12);
+        EXPECT_NEAR(state.orientations[rb].norm(), 1.0, 1.0e-12);
+        EXPECT_TRUE(state.v_coms[rb].isZero(0.0));
+        EXPECT_TRUE(state.omega[rb].isZero(0.0));
+        EXPECT_GT(ref_mesh.total_mass[rb], 0.0);
+        for (const int node : ref_mesh.rb_nodes[rb]) {
+            ASSERT_GE(node, cloth_vertices);
+            ASSERT_LT(node, total_vertices);
+            EXPECT_EQ(ref_mesh.node_to_rb[node], rb);
+            is_rigid[node] = 1;
+        }
+    }
+    for (const int node : ref_mesh.tet_nodes) {
+        ASSERT_GE(node, cloth_vertices);
+        ASSERT_LT(node, total_vertices);
+        EXPECT_EQ(ref_mesh.node_to_rb[node], -1);
+        is_solid[node] = 1;
+    }
+    for (const int node : ref_mesh.surface_nodes) {
+        ASSERT_GE(node, cloth_vertices);
+        ASSERT_LT(node, total_vertices);
+        EXPECT_EQ(is_solid[node], 1);
+        is_solid_surface[node] = 1;
+    }
+
+    EXPECT_EQ(std::count(is_rigid.begin(), is_rigid.end(), 1),
+              rigid_vertices);
+    EXPECT_EQ(std::count(is_solid.begin(), is_solid.end(), 1),
+              solid_vertices);
+    int interior_count = 0;
+    for (int node = 0; node < total_vertices; ++node) {
+        EXPECT_FALSE(is_rigid[node] && is_solid[node]);
+        if (node < cloth_vertices) {
+            EXPECT_EQ(ref_mesh.node_to_rb[node], -1);
+            EXPECT_EQ(is_rigid[node], 0);
+            EXPECT_EQ(is_solid[node], 0);
+        } else {
+            EXPECT_TRUE(is_rigid[node] != 0 || is_solid[node] != 0);
+        }
+        interior_count +=
+            is_solid[node] != 0 && is_solid_surface[node] == 0;
+    }
+    EXPECT_EQ(interior_count, solid_interior_vertices);
+
+    for (const int node : ref_mesh.tets)
+        EXPECT_EQ(is_solid[node], 1);
+    for (int triangle = 0; triangle < cloth_triangles; ++triangle) {
+        for (int corner = 0; corner < 3; ++corner)
+            EXPECT_LT(ref_mesh.tris[3 * triangle + corner], cloth_vertices);
+    }
+    for (int triangle = cloth_triangles;
+         triangle < total_triangles; ++triangle) {
+        const int v0 = ref_mesh.tris[3 * triangle];
+        const bool triangle_is_rigid = is_rigid[v0] != 0;
+        for (int corner = 0; corner < 3; ++corner) {
+            const int node = ref_mesh.tris[3 * triangle + corner];
+            EXPECT_EQ(is_rigid[node] != 0, triangle_is_rigid);
+            EXPECT_EQ(is_solid[node] != 0, !triangle_is_rigid);
+            if (triangle_is_rigid)
+                EXPECT_EQ(ref_mesh.node_to_rb[node], ref_mesh.node_to_rb[v0]);
+            else
+                EXPECT_EQ(is_solid_surface[node], 1);
+        }
+    }
+
+    // Reconstruct the procedural object order to verify that both classes
+    // cover every side count and that the solids are visibly larger.
+    std::vector<Vec3> object_centers;
+    std::vector<double> object_radii;
+    std::vector<bool> rigid_side_count_seen(10, false);
+    std::vector<bool> solid_side_count_seen(10, false);
+    int node_cursor = cloth_vertices;
+    int rigid_cursor = 0;
+    double maximum_rigid_radius = 0.0;
+    double minimum_solid_radius = std::numeric_limits<double>::infinity();
+    for (int polygon = 0; polygon < 20; ++polygon) {
+        const int side_count = 3 + polygon / 2;
+        const bool object_is_rigid = polygon % 2 == 0;
+        const int node_count = object_is_rigid
+            ? 2 * side_count : 2 * side_count + 1;
+        const Vec3 center = object_is_rigid
+            ? state.x_coms[rigid_cursor]
+            : state.deformed_positions[node_cursor + 2 * side_count];
+
+        if (object_is_rigid) {
+            ASSERT_EQ(ref_mesh.rb_nodes[rigid_cursor].front(), node_cursor);
+            rigid_side_count_seen[side_count - 3] = true;
+            ++rigid_cursor;
+        } else {
+            solid_side_count_seen[side_count - 3] = true;
+        }
+
+        double object_radius = 0.0;
+        for (int local_node = 0; local_node < node_count; ++local_node) {
+            object_radius = std::max(
+                object_radius,
+                (state.deformed_positions[node_cursor + local_node]
+                 - center).norm());
+        }
+        if (object_is_rigid)
+            maximum_rigid_radius = std::max(maximum_rigid_radius, object_radius);
+        else
+            minimum_solid_radius = std::min(minimum_solid_radius, object_radius);
+        object_centers.push_back(center);
+        object_radii.push_back(object_radius);
+        node_cursor += node_count;
+    }
+    EXPECT_EQ(node_cursor, total_vertices);
+    EXPECT_EQ(rigid_cursor, rigid_body_count);
+    EXPECT_TRUE(std::all_of(
+        rigid_side_count_seen.begin(), rigid_side_count_seen.end(),
+        [](const bool seen) { return seen; }));
+    EXPECT_TRUE(std::all_of(
+        solid_side_count_seen.begin(), solid_side_count_seen.end(),
+        [](const bool seen) { return seen; }));
+    EXPECT_GT(minimum_solid_radius, 1.5 * maximum_rigid_radius);
+
+    ASSERT_EQ(object_centers.size(), 20U);
+    ASSERT_EQ(object_radii.size(), object_centers.size());
+    for (std::size_t first = 0; first < object_centers.size(); ++first) {
+        EXPECT_GT(
+            object_centers[first].y() - object_radii[first],
+            1.2 + params.d_hat);
+        for (std::size_t second = first + 1;
+             second < object_centers.size(); ++second) {
+            EXPECT_GT(
+                (object_centers[first] - object_centers[second]).norm(),
+                object_radii[first] + object_radii[second]
+                    + params.d_hat);
+        }
+    }
+
+    // The shell mass pass fills cloth nodes and preserves solid and rigid
+    // masses that their respective object builders already assigned.
+    const std::vector<double> object_masses = ref_mesh.mass;
+    for (int node = cloth_vertices; node < total_vertices; ++node)
+        EXPECT_GT(object_masses[node], 0.0);
+    ref_mesh.build_deformable_lumped_mass(
+        params.density, params.thickness);
+
+    double total_cloth_mass = 0.0;
+    for (int node = 0; node < cloth_vertices; ++node) {
+        EXPECT_GT(ref_mesh.mass[node], 0.0);
+        total_cloth_mass += ref_mesh.mass[node];
+    }
+    EXPECT_NEAR(
+        total_cloth_mass,
+        params.density * params.thickness * 4.0 * 4.0,
+        1.0e-10);
+    for (int node = cloth_vertices; node < total_vertices; ++node)
+        EXPECT_DOUBLE_EQ(ref_mesh.mass[node], object_masses[node]);
+}
+
+TEST(MixedExample, SingleDeformableSolidAboveOppositeEdgePinnedCloth) {
+    IPCArgs3D args;
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+
+    build_single_deformable_solid_drop_on_pinned_cloth_example(
+        args, ref_mesh, state, X, pins, params);
+
+    constexpr int cloth_nx = 30;
+    constexpr int cloth_nz = 30;
+    constexpr int cloth_vertices =
+        (cloth_nx + 1) * (cloth_nz + 1);
+    constexpr int cloth_triangles = 2 * cloth_nx * cloth_nz;
+    constexpr int side_count = 8;
+    constexpr int solid_vertices = 2 * side_count + 1;
+    constexpr int solid_surface_vertices = 2 * side_count;
+    constexpr int solid_tetrahedra = 4 * side_count - 4;
+    constexpr int total_vertices = cloth_vertices + solid_vertices;
+    constexpr int total_triangles =
+        cloth_triangles + solid_tetrahedra;
+    constexpr double cloth_height = 1.2;
+    constexpr double radius = 0.30;
+    constexpr double thickness = 0.20;
+
+    EXPECT_EQ(state.deformed_positions.size(),
+              static_cast<std::size_t>(total_vertices));
+    EXPECT_EQ(state.velocities.size(),
+              static_cast<std::size_t>(total_vertices));
+    EXPECT_EQ(ref_mesh.num_positions,
+              static_cast<std::size_t>(total_vertices));
+    EXPECT_EQ(ref_mesh.tris.size(),
+              static_cast<std::size_t>(3 * total_triangles));
+    EXPECT_EQ(ref_mesh.tets.size(),
+              static_cast<std::size_t>(4 * solid_tetrahedra));
+    EXPECT_EQ(ref_mesh.tet_rest_data.size(),
+              static_cast<std::size_t>(solid_tetrahedra));
+    EXPECT_EQ(ref_mesh.tet_nodes.size(),
+              static_cast<std::size_t>(solid_vertices));
+    EXPECT_EQ(ref_mesh.surface_nodes.size(),
+              static_cast<std::size_t>(solid_surface_vertices));
+    EXPECT_EQ(ref_mesh.deformable_nodes.size(),
+              static_cast<std::size_t>(total_vertices));
+    EXPECT_EQ(ref_mesh.node_to_rb.size(),
+              static_cast<std::size_t>(total_vertices));
+    EXPECT_EQ(ref_mesh.mass.size(),
+              static_cast<std::size_t>(total_vertices));
+    EXPECT_EQ(X.size(), static_cast<std::size_t>(cloth_vertices));
+    EXPECT_EQ(ref_mesh.Dm_inverse.size(),
+              static_cast<std::size_t>(cloth_triangles));
+    EXPECT_EQ(ref_mesh.area.size(),
+              static_cast<std::size_t>(cloth_triangles));
+
+    ASSERT_EQ(
+        pins.size(), static_cast<std::size_t>(2 * (cloth_nz + 1)));
+    for (int j = 0; j <= cloth_nz; ++j) {
+        SCOPED_TRACE(j);
+        EXPECT_EQ(
+            pins[static_cast<std::size_t>(2 * j)].vertex_index,
+            j * (cloth_nx + 1));
+        EXPECT_EQ(
+            pins[static_cast<std::size_t>(2 * j + 1)].vertex_index,
+            j * (cloth_nx + 1) + cloth_nx);
+    }
+
+    EXPECT_TRUE(ref_mesh.rb_nodes.empty());
+    EXPECT_TRUE(ref_mesh.ref_positions.empty());
+    EXPECT_TRUE(ref_mesh.total_mass.empty());
+    EXPECT_TRUE(ref_mesh.I_hat.empty());
+    EXPECT_TRUE(state.x_coms.empty());
+    EXPECT_TRUE(state.v_coms.empty());
+    EXPECT_TRUE(state.orientations.empty());
+    EXPECT_TRUE(state.omega.empty());
+    EXPECT_TRUE(std::all_of(
+        ref_mesh.node_to_rb.begin(), ref_mesh.node_to_rb.end(),
+        [](const int owner) { return owner == -1; }));
+
+    for (int node = 0; node < cloth_vertices; ++node) {
+        EXPECT_DOUBLE_EQ(state.deformed_positions[node].y(), cloth_height);
+        EXPECT_TRUE(state.velocities[node].isZero(0.0));
+    }
+    for (int triangle = 0; triangle < cloth_triangles; ++triangle) {
+        for (int corner = 0; corner < 3; ++corner) {
+            EXPECT_LT(
+                ref_mesh.tris[3 * triangle + corner], cloth_vertices);
+        }
+    }
+
+    std::vector<unsigned char> is_solid_node(total_vertices, 0);
+    for (const int node : ref_mesh.tet_nodes) {
+        ASSERT_GE(node, cloth_vertices);
+        ASSERT_LT(node, total_vertices);
+        EXPECT_EQ(is_solid_node[static_cast<std::size_t>(node)], 0);
+        is_solid_node[static_cast<std::size_t>(node)] = 1;
+    }
+    std::vector<unsigned char> is_solid_surface(total_vertices, 0);
+    for (const int node : ref_mesh.surface_nodes) {
+        ASSERT_GE(node, cloth_vertices);
+        ASSERT_LT(node, total_vertices);
+        is_solid_surface[static_cast<std::size_t>(node)] = 1;
+    }
+    for (int solid = 0; solid < solid_vertices; ++solid) {
+        const int node = cloth_vertices + solid;
+        EXPECT_EQ(is_solid_node[static_cast<std::size_t>(node)], 1);
+        EXPECT_GT(ref_mesh.mass[static_cast<std::size_t>(node)], 0.0);
+        EXPECT_TRUE(state.velocities[static_cast<std::size_t>(node)].isApprox(
+            Vec3(0.0, -0.75, 0.0), 0.0));
+        EXPECT_GT(
+            state.deformed_positions[static_cast<std::size_t>(node)].y(),
+            cloth_height + params.d_hat);
+    }
+    const int solid_interior = total_vertices - 1;
+    EXPECT_TRUE(state.deformed_positions[solid_interior].isApprox(
+        Vec3(0.0, 1.5, 0.0), 1.0e-14));
+    EXPECT_EQ(is_solid_surface[solid_interior], 0);
+
+    for (const int node : ref_mesh.tets) {
+        EXPECT_GE(node, cloth_vertices);
+        EXPECT_LT(node, total_vertices);
+    }
+    for (int triangle = cloth_triangles;
+         triangle < total_triangles; ++triangle) {
+        for (int corner = 0; corner < 3; ++corner) {
+            const int node = ref_mesh.tris[3 * triangle + corner];
+            ASSERT_GE(node, cloth_vertices);
+            ASSERT_LT(node, total_vertices);
+            EXPECT_EQ(is_solid_surface[static_cast<std::size_t>(node)], 1);
+        }
+    }
+
+    EXPECT_DOUBLE_EQ(params.k_sdf, 0.0);
+    EXPECT_TRUE(params.sdf_planes.empty());
+    EXPECT_TRUE(params.sdf_cylinders.empty());
+    EXPECT_TRUE(params.sdf_spheres.empty());
+
+    const double expected_solid_volume =
+        0.5 * side_count * radius * radius
+        * std::sin(2.0 * std::acos(-1.0) / side_count) * thickness;
+    double total_solid_mass = 0.0;
+    for (int node = cloth_vertices; node < total_vertices; ++node)
+        total_solid_mass += ref_mesh.mass[static_cast<std::size_t>(node)];
+    EXPECT_NEAR(
+        total_solid_mass,
+        args.solid_density * expected_solid_volume, 1.0e-11);
+
+    const std::vector<double> solid_masses(
+        ref_mesh.mass.begin() + cloth_vertices, ref_mesh.mass.end());
+    ref_mesh.build_deformable_lumped_mass(
+        params.density, params.thickness);
+    const double total_cloth_mass = std::accumulate(
+        ref_mesh.mass.begin(),
+        ref_mesh.mass.begin() + cloth_vertices, 0.0);
+    EXPECT_NEAR(
+        total_cloth_mass,
+        params.density * params.thickness * 4.0 * 4.0,
+        1.0e-10);
+    EXPECT_TRUE(std::equal(
+        solid_masses.begin(), solid_masses.end(),
+        ref_mesh.mass.begin() + cloth_vertices));
+}
+
+TEST(SolidExample, DensityNineHundredOctagonalPrismAboveGround) {
+    IPCArgs3D args;
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    std::vector<Vec3> static_x;
+    std::vector<int> static_tris;
+
+    build_single_deformable_solid_ground_drop_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris);
+
+    constexpr int side_count = 8;
+    constexpr int solid_nodes = 2 * side_count + 1;
+    constexpr int boundary_nodes = 2 * side_count;
+    constexpr int tetrahedra = 4 * side_count - 4;
+    constexpr double radius = 0.22;
+    constexpr double thickness = 0.16;
+    constexpr double density = 900.0;
+
+    EXPECT_EQ(state.deformed_positions.size(), solid_nodes);
+    EXPECT_EQ(state.velocities.size(), solid_nodes);
+    EXPECT_EQ(ref_mesh.num_positions, solid_nodes);
+    EXPECT_EQ(ref_mesh.tets.size(), 4 * tetrahedra);
+    EXPECT_EQ(ref_mesh.tet_rest_data.size(), tetrahedra);
+    EXPECT_EQ(ref_mesh.tris.size(), 3 * tetrahedra);
+    EXPECT_EQ(ref_mesh.tet_nodes.size(), solid_nodes);
+    EXPECT_EQ(ref_mesh.surface_nodes.size(), boundary_nodes);
+    EXPECT_EQ(ref_mesh.deformable_nodes.size(), solid_nodes);
+    EXPECT_EQ(ref_mesh.mass.size(), solid_nodes);
+    EXPECT_EQ(ref_mesh.node_to_rb.size(), solid_nodes);
+    EXPECT_TRUE(ref_mesh.rb_nodes.empty());
+    EXPECT_TRUE(ref_mesh.total_mass.empty());
+    EXPECT_TRUE(X.empty());
+    EXPECT_TRUE(pins.empty());
+
+    for (int node = 0; node < solid_nodes; ++node) {
+        EXPECT_EQ(ref_mesh.node_to_rb[node], -1);
+        EXPECT_GT(ref_mesh.mass[node], 0.0);
+        EXPECT_TRUE(state.velocities[node].isZero(0.0));
+        EXPECT_GT(state.deformed_positions[node].y(), 0.0);
+    }
+    EXPECT_TRUE(state.deformed_positions.back().isApprox(
+        Vec3(0.0, 1.0, 0.0), 1.0e-14));
+    EXPECT_EQ(
+        std::count(
+            ref_mesh.surface_nodes.begin(), ref_mesh.surface_nodes.end(),
+            solid_nodes - 1),
+        0);
+
+    const double expected_volume =
+        0.5 * side_count * radius * radius
+        * std::sin(2.0 * std::acos(-1.0) / side_count) * thickness;
+    const double total_mass = std::accumulate(
+        ref_mesh.mass.begin(), ref_mesh.mass.end(), 0.0);
+    EXPECT_NEAR(total_mass, density * expected_volume, 1.0e-11);
+    EXPECT_DOUBLE_EQ(args.solid_density, density);
+
+    EXPECT_DOUBLE_EQ(
+        params.solid_mu,
+        args.solid_E / (2.0 * (1.0 + args.solid_nu)));
+    EXPECT_DOUBLE_EQ(
+        params.solid_lambda,
+        args.solid_E * args.solid_nu
+            / ((1.0 + args.solid_nu)
+               * (1.0 - 2.0 * args.solid_nu)));
+    ASSERT_EQ(params.sdf_planes.size(), 1U);
+    EXPECT_TRUE(params.sdf_planes[0].point.isZero(0.0));
+    EXPECT_TRUE(
+        params.sdf_planes[0].normal.isApprox(Vec3::UnitY(), 0.0));
+
+    ASSERT_EQ(static_x.size(), 4U);
+    EXPECT_EQ(static_tris, (std::vector<int>{0, 1, 2, 0, 2, 3}));
+    for (const Vec3& vertex : static_x)
+        EXPECT_DOUBLE_EQ(vertex.y(), 0.0);
+}
+
+TEST(SolidExample, UsesSolidMaterialCommandLineOverrides) {
+    IPCArgs3D args;
+    char program[] = "make_shape_test";
+    char solid_E_key[] = "--solid_E";
+    char solid_E_value[] = "24000";
+    char solid_nu_key[] = "--solid_nu";
+    char solid_nu_value[] = "0.2";
+    char solid_density_key[] = "--solid_density";
+    char solid_density_value[] = "750";
+    char* argv[] = {
+        program,
+        solid_E_key, solid_E_value,
+        solid_nu_key, solid_nu_value,
+        solid_density_key, solid_density_value,
+    };
+    ASSERT_TRUE(args.parse(7, argv));
+
+    // Give the cloth fields deliberately unrelated values. Example 13 must
+    // use only the solid-specific material arguments below.
+    args.E = 123.0;
+    args.nu = 0.1;
+    args.density = 17.0;
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    std::vector<Vec3> static_x;
+    std::vector<int> static_tris;
+
+    build_single_deformable_solid_ground_drop_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris);
+
+    constexpr int side_count = 8;
+    constexpr double radius = 0.22;
+    constexpr double thickness = 0.16;
+    const double expected_volume =
+        0.5 * side_count * radius * radius
+        * std::sin(2.0 * std::acos(-1.0) / side_count) * thickness;
+    const double total_mass = std::accumulate(
+        ref_mesh.mass.begin(), ref_mesh.mass.end(), 0.0);
+    EXPECT_NEAR(
+        total_mass, args.solid_density * expected_volume, 1.0e-11);
+    EXPECT_DOUBLE_EQ(
+        params.solid_mu,
+        args.solid_E / (2.0 * (1.0 + args.solid_nu)));
+    EXPECT_DOUBLE_EQ(
+        params.solid_lambda,
+        args.solid_E * args.solid_nu
+            / ((1.0 + args.solid_nu)
+               * (1.0 - 2.0 * args.solid_nu)));
+    EXPECT_NE(params.solid_mu, params.mu);
+    EXPECT_NE(params.solid_lambda, params.lambda);
+}
+
+TEST(MaterialArguments, SeparateDefaultsAndDensityOverrides) {
+    IPCArgs3D defaults;
+    EXPECT_DOUBLE_EQ(defaults.solid_E, 5.0e4);
+    EXPECT_DOUBLE_EQ(defaults.solid_nu, 0.45);
+    EXPECT_DOUBLE_EQ(defaults.solid_density, 900.0);
+    EXPECT_DOUBLE_EQ(
+        defaults.to_sim_params().solid_mu,
+        defaults.solid_E / (2.0 * (1.0 + defaults.solid_nu)));
+    EXPECT_DOUBLE_EQ(
+        defaults.to_sim_params().solid_lambda,
+        defaults.solid_E * defaults.solid_nu
+            / ((1.0 + defaults.solid_nu)
+               * (1.0 - 2.0 * defaults.solid_nu)));
+    EXPECT_DOUBLE_EQ(defaults.rigid_density, 900.0);
+    EXPECT_DOUBLE_EQ(defaults.to_sim_params().rigid_density, 900.0);
+
+    IPCArgs3D args;
+    char program[] = "make_shape_test";
+    char rigid_density_key[] = "--rigid_density";
+    char rigid_density_value[] = "1234";
+    char solid_density_key[] = "--solid_density";
+    char solid_density_value[] = "567";
+    char shell_density_key[] = "--density";
+    char shell_density_value[] = "18";
+    char* argv[] = {
+        program,
+        rigid_density_key, rigid_density_value,
+        solid_density_key, solid_density_value,
+        shell_density_key, shell_density_value,
+    };
+    ASSERT_TRUE(args.parse(7, argv));
+
+    EXPECT_DOUBLE_EQ(args.rigid_density, 1234.0);
+    EXPECT_DOUBLE_EQ(args.solid_density, 567.0);
+    EXPECT_DOUBLE_EQ(args.density, 18.0);
+
+    const SimParams params = args.to_sim_params();
+    EXPECT_DOUBLE_EQ(params.rigid_density, 1234.0);
+    EXPECT_DOUBLE_EQ(params.solid_density, 567.0);
+    EXPECT_DOUBLE_EQ(params.density, 18.0);
+}
+
+TEST(MixedExample, RigidAndSolidDensitiesAreIndependent) {
+    struct ObjectMasses {
+        std::vector<double> rigid;
+        double solid = 0.0;
+    };
+
+    const auto build_object_masses = [](const double rigid_density,
+                                         const double solid_density) {
+        IPCArgs3D args;
+        args.rigid_density = rigid_density;
+        args.solid_density = solid_density;
+
+        RefMesh ref_mesh;
+        DeformedState state;
+        std::vector<Vec2> X;
+        std::vector<Pin> pins;
+        SimParams params = args.to_sim_params();
+        build_twenty_rigid_deformable_polygons_drop_on_pinned_cloth_example(
+            args, ref_mesh, state, X, pins, params);
+
+        ObjectMasses masses;
+        masses.rigid = ref_mesh.total_mass;
+        for (const int node : ref_mesh.tet_nodes)
+            masses.solid += ref_mesh.mass[node];
+        return masses;
+    };
+
+    const ObjectMasses baseline = build_object_masses(450.0, 600.0);
+    const ObjectMasses denser_rigid =
+        build_object_masses(1350.0, 600.0);
+    const ObjectMasses denser_solid =
+        build_object_masses(450.0, 1200.0);
+
+    ASSERT_EQ(baseline.rigid.size(), 10U);
+    ASSERT_EQ(denser_rigid.rigid.size(), baseline.rigid.size());
+    ASSERT_EQ(denser_solid.rigid.size(), baseline.rigid.size());
+    for (std::size_t rb = 0; rb < baseline.rigid.size(); ++rb) {
+        EXPECT_GT(baseline.rigid[rb], 0.0);
+        EXPECT_NEAR(
+            denser_rigid.rigid[rb], 3.0 * baseline.rigid[rb], 1.0e-12);
+        EXPECT_DOUBLE_EQ(denser_solid.rigid[rb], baseline.rigid[rb]);
+    }
+
+    EXPECT_GT(baseline.solid, 0.0);
+    EXPECT_DOUBLE_EQ(denser_rigid.solid, baseline.solid);
+    EXPECT_NEAR(denser_solid.solid, 2.0 * baseline.solid, 1.0e-12);
+}
+
+// ---------------------------------------------------------------------------
+// append_deformable_polygon_prism tests
+// ---------------------------------------------------------------------------
+
+TEST(AppendDeformablePolygonPrism,
+     CountsOrientationBoundaryAndVolumeForThreeThroughTenSides) {
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double radius = 0.37;
+    constexpr double thickness = 0.21;
+    constexpr double density = 7.3;
+
+    for (int sides = 3; sides <= 10; ++sides) {
+        SCOPED_TRACE(sides);
+        RefMesh ref_mesh;
+        DeformedState state;
+
+        const int base = append_deformable_polygon_prism(
+            sides, state, ref_mesh, Vec3::Zero(), radius, density,
+            thickness);
+        const int expected_nodes = 2 * sides + 1;
+        const int expected_tets = 4 * sides - 4;
+
+        EXPECT_EQ(base, 0);
+        EXPECT_EQ(state.deformed_positions.size(),
+                  static_cast<std::size_t>(expected_nodes));
+        EXPECT_EQ(state.velocities.size(),
+                  static_cast<std::size_t>(expected_nodes));
+        EXPECT_EQ(ref_mesh.tets.size(),
+                  static_cast<std::size_t>(4 * expected_tets));
+        EXPECT_EQ(ref_mesh.tet_rest_data.size(),
+                  static_cast<std::size_t>(expected_tets));
+        EXPECT_EQ(ref_mesh.tris.size(),
+                  static_cast<std::size_t>(3 * expected_tets));
+        EXPECT_EQ(ref_mesh.tet_nodes.size(),
+                  static_cast<std::size_t>(expected_nodes));
+        EXPECT_EQ(ref_mesh.surface_nodes.size(),
+                  static_cast<std::size_t>(2 * sides));
+
+        const int interior = 2 * sides;
+        EXPECT_TRUE(state.deformed_positions[interior].isZero(0.0));
+        EXPECT_EQ(std::count(ref_mesh.surface_nodes.begin(),
+                             ref_mesh.surface_nodes.end(), interior),
+                  0);
+
+        double volume = 0.0;
+        for (const TetRestData& rest : ref_mesh.tet_rest_data) {
+            EXPECT_GT(rest.measure, 0.0);
+            EXPECT_TRUE(rest.Dm_inverse.allFinite());
+            volume += rest.measure;
+        }
+        const double expected_volume =
+            0.5 * static_cast<double>(sides) * radius * radius
+            * std::sin(2.0 * kPi / static_cast<double>(sides))
+            * thickness;
+        EXPECT_NEAR(volume, expected_volume, 1.0e-13);
+        EXPECT_NEAR(
+            std::accumulate(
+                ref_mesh.mass.begin(), ref_mesh.mass.end(), 0.0),
+            density * expected_volume, 1.0e-12);
+
+        // create_solid extracts precisely the original outward surface.
+        for (int triangle = 0;
+             triangle < static_cast<int>(ref_mesh.tris.size() / 3);
+             ++triangle) {
+            const Vec3& a = state.deformed_positions[
+                ref_mesh.tris[3 * triangle]];
+            const Vec3& b = state.deformed_positions[
+                ref_mesh.tris[3 * triangle + 1]];
+            const Vec3& c = state.deformed_positions[
+                ref_mesh.tris[3 * triangle + 2]];
+            const Vec3 normal = (b - a).cross(c - a);
+            EXPECT_GT(normal.dot((a + b + c) / 3.0), 0.0);
+        }
+    }
+}
+
+TEST(AppendDeformablePolygonPrism,
+     AppliesNormalizedQuaternionAndRemapsWhenAppending) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    const int first_base = append_deformable_polygon_prism(
+        3, state, ref_mesh, Vec3(-2.0, 0.0, 0.0),
+        0.2, 4.0, 0.1);
+    const std::size_t first_tet_entries = ref_mesh.tets.size();
+
+    const Vec3 center(1.0, -0.5, 2.0);
+    const double radius = 0.4;
+    const double thickness = 0.3;
+    const Vec4 orientation(2.0, -1.0, 3.0, 0.5);
+    const Vec4 q = quaternion_normalize(orientation);
+    const int second_base = append_deformable_polygon_prism(
+        7, state, ref_mesh, center, radius, 5.0, thickness,
+        orientation);
+
+    EXPECT_EQ(first_base, 0);
+    EXPECT_EQ(second_base, 7);
+    const Vec3 expected_bottom = center + quaternion_rotate(
+        q, Vec3(radius, 0.0, -0.5 * thickness));
+    const Vec3 expected_top = center + quaternion_rotate(
+        q, Vec3(radius, 0.0, 0.5 * thickness));
+    EXPECT_TRUE(state.deformed_positions[second_base].isApprox(
+        expected_bottom, 1.0e-14));
+    EXPECT_TRUE(state.deformed_positions[second_base + 7].isApprox(
+        expected_top, 1.0e-14));
+    EXPECT_TRUE(state.deformed_positions[second_base + 14].isApprox(
+        center, 0.0));
+
+    for (std::size_t occurrence = first_tet_entries;
+         occurrence < ref_mesh.tets.size(); ++occurrence) {
+        EXPECT_GE(ref_mesh.tets[occurrence], second_base);
+        EXPECT_LT(ref_mesh.tets[occurrence], second_base + 15);
+    }
+}
+
+TEST(AppendDeformablePolygonPrism, RejectsInvalidInputsTransactionally) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    const auto expect_empty = [&]() {
+        EXPECT_TRUE(state.deformed_positions.empty());
+        EXPECT_TRUE(state.velocities.empty());
+        EXPECT_TRUE(ref_mesh.tets.empty());
+        EXPECT_TRUE(ref_mesh.tris.empty());
+        EXPECT_TRUE(ref_mesh.mass.empty());
+    };
+
+    EXPECT_THROW(
+        append_deformable_polygon_prism(
+            2, state, ref_mesh, Vec3::Zero(), 1.0, 1.0, 1.0),
+        std::invalid_argument);
+    expect_empty();
+    EXPECT_THROW(
+        append_deformable_polygon_prism(
+            3, state, ref_mesh, Vec3::Zero(), 0.0, 1.0, 1.0),
+        std::invalid_argument);
+    expect_empty();
+    EXPECT_THROW(
+        append_deformable_polygon_prism(
+            3, state, ref_mesh, Vec3::Zero(), 1.0, 0.0, 1.0),
+        std::invalid_argument);
+    expect_empty();
+    EXPECT_THROW(
+        append_deformable_polygon_prism(
+            3, state, ref_mesh, Vec3::Zero(), 1.0, 1.0, 0.0),
+        std::invalid_argument);
+    expect_empty();
+    EXPECT_THROW(
+        append_deformable_polygon_prism(
+            3, state, ref_mesh, Vec3::Zero(), 1.0, 1.0, 1.0,
+            Vec4::Zero()),
+        std::invalid_argument);
+    expect_empty();
+    EXPECT_THROW(
+        append_deformable_polygon_prism(
+            3, state, ref_mesh,
+            Vec3(std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0),
+            1.0, 1.0, 1.0),
+        std::invalid_argument);
+    expect_empty();
 }
 
 // ---------------------------------------------------------------------------
@@ -220,4 +1017,294 @@ TEST(BuildSphereMesh, ReferenceAreasNonDegenerate) {
         const double area2 = std::abs((b.x()-a.x())*(c.y()-a.y()) - (b.y()-a.y())*(c.x()-a.x()));
         EXPECT_GT(area2, 1e-10) << "degenerate ref triangle " << t;
     }
+}
+
+TEST(MixedExample,
+     TenAlternatingRigidAndSolidPolygonsFormAFlatVerticalStackAbovePinnedCloth) {
+    IPCArgs3D args;
+    // Non-default, distinct values catch accidental use of the cloth density
+    // or of one body class's density for the other class.
+    args.rigid_density = 432.0;
+    args.solid_density = 789.0;
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+
+    build_ten_alternating_rigid_solid_flat_stack_on_pinned_cloth_example(
+        args, ref_mesh, state, X, pins, params);
+
+    constexpr int cloth_nx = 40;
+    constexpr int cloth_nz = 40;
+    constexpr int cloth_vertices =
+        (cloth_nx + 1) * (cloth_nz + 1);
+    constexpr int cloth_triangles = 2 * cloth_nx * cloth_nz;
+    constexpr int object_count = 10;
+    constexpr int rigid_body_count = 5;
+    // Rigid sides are 3,5,7,9,11 (35 total); solid sides are
+    // 4,6,8,10,12 (40 total). Every solid also has one interior node.
+    constexpr int rigid_vertices = 2 * 35;
+    constexpr int rigid_triangles = 4 * 35 - 4 * rigid_body_count;
+    constexpr int solid_surface_vertices = 2 * 40;
+    constexpr int solid_vertices = solid_surface_vertices + 5;
+    constexpr int solid_tetrahedra = 4 * 40 - 4 * 5;
+    constexpr int total_vertices =
+        cloth_vertices + rigid_vertices + solid_vertices;
+    constexpr int total_triangles =
+        cloth_triangles + rigid_triangles + solid_tetrahedra;
+
+    EXPECT_EQ(state.deformed_positions.size(), total_vertices);
+    EXPECT_EQ(state.velocities.size(), total_vertices);
+    EXPECT_EQ(ref_mesh.num_positions, total_vertices);
+    EXPECT_EQ(ref_mesh.mass.size(), total_vertices);
+    EXPECT_EQ(ref_mesh.node_to_rb.size(), total_vertices);
+    EXPECT_EQ(ref_mesh.tris.size(), 3 * total_triangles);
+    EXPECT_EQ(ref_mesh.tets.size(), 4 * solid_tetrahedra);
+    EXPECT_EQ(ref_mesh.tet_rest_data.size(), solid_tetrahedra);
+    EXPECT_EQ(ref_mesh.tet_nodes.size(), solid_vertices);
+    EXPECT_EQ(ref_mesh.surface_nodes.size(), solid_surface_vertices);
+    EXPECT_EQ(ref_mesh.deformable_nodes.size(),
+              cloth_vertices + solid_vertices);
+
+    EXPECT_EQ(X.size(), cloth_vertices);
+    EXPECT_EQ(ref_mesh.Dm_inverse.size(), cloth_triangles);
+    EXPECT_EQ(ref_mesh.area.size(), cloth_triangles);
+
+    ASSERT_EQ(
+        pins.size(), static_cast<std::size_t>(2 * (cloth_nz + 1)));
+    for (int j = 0; j <= cloth_nz; ++j) {
+        SCOPED_TRACE(j);
+        EXPECT_EQ(
+            pins[static_cast<std::size_t>(2 * j)].vertex_index,
+            j * (cloth_nx + 1));
+        EXPECT_EQ(
+            pins[static_cast<std::size_t>(2 * j + 1)].vertex_index,
+            j * (cloth_nx + 1) + cloth_nx);
+    }
+
+    ASSERT_EQ(ref_mesh.rb_nodes.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.ref_positions.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.total_mass.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.I_hat.size(), rigid_body_count);
+    ASSERT_EQ(state.x_coms.size(), rigid_body_count);
+    ASSERT_EQ(state.v_coms.size(), rigid_body_count);
+    ASSERT_EQ(state.orientations.size(), rigid_body_count);
+    ASSERT_EQ(state.omega.size(), rigid_body_count);
+
+    std::vector<unsigned char> is_tet_node(total_vertices, 0);
+    std::vector<unsigned char> is_surface_node(total_vertices, 0);
+    std::vector<unsigned char> is_deformable(total_vertices, 0);
+    for (const int node : ref_mesh.tet_nodes) {
+        ASSERT_GE(node, 0);
+        ASSERT_LT(node, total_vertices);
+        EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 0);
+        is_tet_node[static_cast<std::size_t>(node)] = 1;
+    }
+    for (const int node : ref_mesh.surface_nodes) {
+        ASSERT_GE(node, 0);
+        ASSERT_LT(node, total_vertices);
+        EXPECT_EQ(is_surface_node[static_cast<std::size_t>(node)], 0);
+        is_surface_node[static_cast<std::size_t>(node)] = 1;
+        EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 1);
+    }
+    for (const int node : ref_mesh.deformable_nodes) {
+        ASSERT_GE(node, 0);
+        ASSERT_LT(node, total_vertices);
+        EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 0);
+        is_deformable[static_cast<std::size_t>(node)] = 1;
+        EXPECT_EQ(
+            is_tet_node[static_cast<std::size_t>(node)],
+            node < cloth_vertices ? 0 : 1);
+        EXPECT_EQ(ref_mesh.node_to_rb[static_cast<std::size_t>(node)], -1);
+    }
+
+    constexpr double cloth_height = 1.2;
+    for (int node = 0; node < cloth_vertices; ++node) {
+        EXPECT_DOUBLE_EQ(state.deformed_positions[node].y(), cloth_height);
+        EXPECT_TRUE(state.velocities[node].isZero(0.0));
+        EXPECT_EQ(ref_mesh.node_to_rb[node], -1);
+        EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 0);
+        EXPECT_EQ(is_surface_node[static_cast<std::size_t>(node)], 0);
+        EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 1);
+    }
+    for (int triangle = 0; triangle < cloth_triangles; ++triangle) {
+        for (int corner = 0; corner < 3; ++corner) {
+            EXPECT_LT(
+                ref_mesh.tris[3 * triangle + corner], cloth_vertices);
+        }
+    }
+
+    constexpr double kPi = 3.14159265358979323846;
+    const Vec4 flat_orientation(
+        std::cos(0.25 * kPi), -std::sin(0.25 * kPi), 0.0, 0.0);
+    const Vec3 drop_velocity(0.0, -0.75, 0.0);
+    constexpr double lowest_center_y = 1.65;
+    constexpr double center_spacing = 0.42;
+    constexpr double expected_radius = 0.24;
+    constexpr double expected_thickness = 0.16;
+    int node_cursor = cloth_vertices;
+    int rigid_cursor = 0;
+    int tet_cursor = 0;
+    double previous_top = cloth_height;
+    for (int object = 0; object < object_count; ++object) {
+        SCOPED_TRACE(object);
+        const int side_count = 3 + object;
+        const bool is_rigid = object % 2 == 0;
+        const int object_vertices =
+            2 * side_count + (is_rigid ? 0 : 1);
+        const int object_end = node_cursor + object_vertices;
+        ASSERT_LE(object_end, total_vertices);
+
+        const Vec3 center = is_rigid
+            ? state.x_coms[static_cast<std::size_t>(rigid_cursor)]
+            : state.deformed_positions[static_cast<std::size_t>(
+                  node_cursor + 2 * side_count)];
+        EXPECT_NEAR(center.x(), 0.0, 1.0e-14);
+        EXPECT_NEAR(center.z(), 0.0, 1.0e-14);
+        EXPECT_NEAR(
+            center.y(), lowest_center_y + center_spacing * object,
+            1.0e-14);
+
+        const double bottom_y =
+            state.deformed_positions[static_cast<std::size_t>(node_cursor)].y();
+        const double top_y = state.deformed_positions[static_cast<std::size_t>(
+            node_cursor + side_count)].y();
+        ASSERT_GT(top_y, bottom_y);
+        EXPECT_NEAR(center.y(), 0.5 * (bottom_y + top_y), 1.0e-14);
+        EXPECT_GT(bottom_y, previous_top);
+        if (object == 0)
+            EXPECT_GT(bottom_y, cloth_height + params.d_hat);
+        previous_top = top_y;
+
+        const Vec3& first_bottom =
+            state.deformed_positions[static_cast<std::size_t>(node_cursor)];
+        const double radius = std::hypot(
+            first_bottom.x() - center.x(),
+            first_bottom.z() - center.z());
+        const double thickness = top_y - bottom_y;
+        ASSERT_GT(radius, 0.0);
+        ASSERT_GT(thickness, 0.0);
+        EXPECT_NEAR(radius, expected_radius, 1.0e-14);
+        EXPECT_NEAR(thickness, expected_thickness, 1.0e-14);
+        // With exactly Rx(-pi/2), material vertex (radius,0,z) still points
+        // along world +x. This catches both tilt and an unrequested yaw.
+        EXPECT_NEAR(first_bottom.x(), center.x() + radius, 1.0e-14);
+        EXPECT_NEAR(first_bottom.z(), center.z(), 1.0e-14);
+
+        for (int local = 0; local < side_count; ++local) {
+            const Vec3& bottom = state.deformed_positions[
+                static_cast<std::size_t>(node_cursor + local)];
+            const Vec3& top = state.deformed_positions[
+                static_cast<std::size_t>(node_cursor + side_count + local)];
+            EXPECT_NEAR(bottom.y(), bottom_y, 1.0e-14);
+            EXPECT_NEAR(top.y(), top_y, 1.0e-14);
+            EXPECT_NEAR(bottom.x(), top.x(), 1.0e-14);
+            EXPECT_NEAR(bottom.z(), top.z(), 1.0e-14);
+            EXPECT_NEAR(
+                std::hypot(bottom.x() - center.x(),
+                           bottom.z() - center.z()),
+                radius, 1.0e-14);
+        }
+
+        const double polygon_area =
+            0.5 * static_cast<double>(side_count) * radius * radius
+            * std::sin(2.0 * kPi / static_cast<double>(side_count));
+        const double volume = polygon_area * thickness;
+        if (is_rigid) {
+            ASSERT_EQ(
+                ref_mesh.rb_nodes[static_cast<std::size_t>(rigid_cursor)].size(),
+                static_cast<std::size_t>(2 * side_count));
+            EXPECT_EQ(
+                ref_mesh.rb_nodes[static_cast<std::size_t>(rigid_cursor)].front(),
+                node_cursor);
+            EXPECT_TRUE(state.orientations[static_cast<std::size_t>(rigid_cursor)]
+                            .isApprox(flat_orientation, 1.0e-14));
+            EXPECT_TRUE(state.omega[static_cast<std::size_t>(rigid_cursor)]
+                            .isZero(0.0));
+            EXPECT_TRUE(state.v_coms[static_cast<std::size_t>(rigid_cursor)]
+                            .isApprox(drop_velocity, 0.0));
+            EXPECT_NEAR(
+                ref_mesh.total_mass[static_cast<std::size_t>(rigid_cursor)],
+                args.rigid_density * volume,
+                1.0e-10 * std::max(1.0, args.rigid_density * volume));
+
+            double nodal_mass = 0.0;
+            for (int node = node_cursor; node < object_end; ++node) {
+                EXPECT_EQ(
+                    ref_mesh.node_to_rb[static_cast<std::size_t>(node)],
+                    rigid_cursor);
+                EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 0);
+                EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 0);
+                EXPECT_TRUE(
+                    state.velocities[static_cast<std::size_t>(node)]
+                        .isApprox(drop_velocity, 0.0));
+                nodal_mass += ref_mesh.mass[static_cast<std::size_t>(node)];
+            }
+            EXPECT_NEAR(
+                nodal_mass,
+                ref_mesh.total_mass[static_cast<std::size_t>(rigid_cursor)],
+                1.0e-12);
+            ++rigid_cursor;
+        } else {
+            double nodal_mass = 0.0;
+            for (int node = node_cursor; node < object_end; ++node) {
+                EXPECT_EQ(ref_mesh.node_to_rb[static_cast<std::size_t>(node)], -1);
+                EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 1);
+                EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 1);
+                EXPECT_TRUE(
+                    state.velocities[static_cast<std::size_t>(node)]
+                        .isApprox(drop_velocity, 0.0));
+                nodal_mass += ref_mesh.mass[static_cast<std::size_t>(node)];
+            }
+            for (int local = 0; local < 2 * side_count; ++local) {
+                EXPECT_EQ(
+                    is_surface_node[static_cast<std::size_t>(node_cursor + local)],
+                    1);
+            }
+            EXPECT_EQ(
+                is_surface_node[static_cast<std::size_t>(object_end - 1)], 0);
+            EXPECT_NEAR(
+                nodal_mass, args.solid_density * volume,
+                1.0e-10 * std::max(1.0, args.solid_density * volume));
+
+            const int object_tetrahedra = 4 * side_count - 4;
+            for (int local_tet = 0; local_tet < object_tetrahedra;
+                 ++local_tet, ++tet_cursor) {
+                for (int local = 0; local < 4; ++local) {
+                    const int node = ref_mesh.tets[
+                        static_cast<std::size_t>(4 * tet_cursor + local)];
+                    EXPECT_GE(node, node_cursor);
+                    EXPECT_LT(node, object_end);
+                }
+            }
+        }
+        node_cursor = object_end;
+    }
+    EXPECT_EQ(node_cursor, total_vertices);
+    EXPECT_EQ(rigid_cursor, rigid_body_count);
+    EXPECT_EQ(tet_cursor, solid_tetrahedra);
+
+    EXPECT_DOUBLE_EQ(params.k_sdf, 0.0);
+    EXPECT_TRUE(params.sdf_planes.empty());
+    EXPECT_TRUE(params.sdf_cylinders.empty());
+    EXPECT_TRUE(params.sdf_spheres.empty());
+
+    // Shell lumping fills the cloth masses without changing the solid or
+    // rigid-body nodal masses already constructed by their object builders.
+    const std::vector<double> object_masses(
+        ref_mesh.mass.begin() + cloth_vertices, ref_mesh.mass.end());
+    ref_mesh.build_deformable_lumped_mass(
+        params.density, params.thickness);
+    const double total_cloth_mass = std::accumulate(
+        ref_mesh.mass.begin(),
+        ref_mesh.mass.begin() + cloth_vertices, 0.0);
+    EXPECT_NEAR(
+        total_cloth_mass,
+        params.density * params.thickness * 4.0 * 4.0,
+        1.0e-10);
+    EXPECT_TRUE(std::equal(
+        object_masses.begin(), object_masses.end(),
+        ref_mesh.mass.begin() + cloth_vertices));
 }

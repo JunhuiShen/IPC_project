@@ -131,6 +131,7 @@ set(IPC_CORE_SOURCES
     rigid_body_ipc.cpp
     sdf_penalty_energy.cpp
     segment_segment_distance.cpp
+    volumetric_corotated_energy.cpp
 )
 
 add_library(corotated_energy_lib STATIC ${IPC_CORE_SOURCES})
@@ -150,12 +151,15 @@ set(IPC_SIMULATION_SOURCES
     broad_phase.cpp
     example.cpp
     initial_guess.cpp
+    io.cpp
     make_shape.cpp
+    mesh.cpp
     mesh_utils.cpp
     output.cpp
     parallel_helper.cpp
     physics.cpp
     safe_step.cpp
+    solid_ipc.cpp
     solver.cpp
     state_io.cpp
     time_integration.cpp
@@ -219,15 +223,19 @@ if(BUILD_TESTING)
         ccd_test
         corotated_energy_test
         initial_guess_test
+        io_test
         ipc_math_test
         make_shape_test
+        mesh_test
         node_triangle_distance_test
         parallel_helper_test
         rigid_body_ipc_test
         sdf_penalty_energy_test
         segment_segment_distance_test
+        solid_ipc_test
         state_io_test
         time_integration_test
+        volumetric_corotated_energy_test
     )
     foreach(test_target IN LISTS IPC_TEST_TARGETS)
         ipc_add_test("${test_target}")

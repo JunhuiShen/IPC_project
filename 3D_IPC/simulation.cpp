@@ -48,8 +48,12 @@ int main(int argc, char** argv) {
     else if (args.example == 10) build_five_rigid_polygon_drop_scatter_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else if (args.example == 11) build_hundred_rigid_polygon_box_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else if (args.example == 12) build_fifty_rigid_polygons_drop_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 13) build_single_deformable_solid_ground_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
+    else if (args.example == 14) build_single_deformable_solid_drop_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 15) build_twenty_rigid_deformable_polygons_drop_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 16) build_ten_alternating_rigid_solid_flat_stack_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16.\n";
         return 1;
     }
 
@@ -97,7 +101,9 @@ int main(int argc, char** argv) {
         has_deformable = has_deformable || owner < 0;
     }
     const bool has_rigid = num_rigid_bodies > 0;
+    const bool has_solid = !ref_mesh.tet_nodes.empty();
     const bool is_mixed = has_rigid && has_deformable;
+    const bool uses_general_solver = is_mixed || has_solid;
     if (is_mixed && (params.use_ogc || params.use_ogc_solver)) {
         throw std::invalid_argument("mixed deformable-rigid scenes do not support OGC mode");
     }
@@ -117,7 +123,7 @@ int main(int argc, char** argv) {
     if (has_rigid && ref_mesh.mass.size() != state.deformed_positions.size()) {
         throw std::invalid_argument("rigid scene has an incomplete nodal mass array");
     }
-    if (is_mixed)
+    if (uses_general_solver)
         ref_mesh.build_deformable_lumped_mass(params.density, params.thickness);
     else if (!has_rigid)
         ref_mesh.build_lumped_mass(params.density, params.thickness);
@@ -226,7 +232,7 @@ int main(int argc, char** argv) {
             };
         }
 
-        if (is_mixed) {
+        if (uses_general_solver) {
             result = advance_one_frame_general(
                 state, ref_mesh, adj, pins, params, broad_phase,
                 frame_index, pin_updater, substep_cb, outdir);
@@ -267,6 +273,7 @@ int main(int argc, char** argv) {
                       << std::left
                       << std::setw(row_width) << ""
                       << " | " << std::setw(residual_width) << "cloth"
+                      << " | " << std::setw(residual_width) << "solid"
                       << " | " << std::setw(residual_width) << "rigid body"
                       << " | " << std::setw(residual_width) << "total residual"
                       << " | " << std::setw(iterations_width) << "global_iters"
@@ -274,6 +281,8 @@ int main(int argc, char** argv) {
                       << std::setw(row_width) << "initial"
                       << " | " << std::setw(residual_width)
                       << residual_text(result.initial_cloth_residual)
+                      << " | " << std::setw(residual_width)
+                      << residual_text(result.initial_solid_residual)
                       << " | " << std::setw(residual_width)
                       << residual_text(result.initial_rigid_residual)
                       << " | " << std::setw(residual_width)
@@ -283,6 +292,8 @@ int main(int argc, char** argv) {
                       << std::setw(row_width) << "final"
                       << " | " << std::setw(residual_width)
                       << residual_text(result.final_cloth_residual)
+                      << " | " << std::setw(residual_width)
+                      << residual_text(result.final_solid_residual)
                       << " | " << std::setw(residual_width)
                       << residual_text(result.final_rigid_residual)
                       << " | " << std::setw(residual_width)

@@ -19,6 +19,10 @@ struct IPCArgs3D : ArgParser {
     double nu           = 0.3;    // (Poisson ratio)
     double density      = 900.0;  // kg/m^3
     double thickness    = 0.001;  // m
+    double solid_E      = 5e4;    // Pa  (soft rubber-toy stiffness)
+    double solid_nu     = 0.45;   // nearly incompressible jelly-like response
+    double solid_density = 900.0; // kg/m^3 (tetrahedral solids)
+    double rigid_density = 900.0; // kg/m^3 (rigid bodies)
     double kB           = 1e-3;   // J   (bending stiffness; 0 disables bending)
     double kpin         = 1e5;    // N/m (pin spring stiffness)
     double gx           = 0.0;    // m/s^2
@@ -53,7 +57,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_ticcd                   = false;    // true: Tight-Inclusion library | false: self-written linear CCD
 
     // --- scene selection ---
-    int         example      = 1;   // 1-4 deformable, 5-11 rigid, 12=mixed rigid polygons on pinned cloth
+    int         example      = 1;   // Built-in scene ID
     double      sheet_y      = 0.20; // m -- midline y for example 1
 
     // example 1: square cloth twisted in place
@@ -109,10 +113,14 @@ struct IPCArgs3D : ArgParser {
         add_int   ("substeps",    substeps,    3,          "Solver substeps per frame (solver_dt = 1/(fps*substeps))");
         add_int   ("num_frames",  num_frames,  60,        "Number of frames to simulate");
 
-        add_double("E",           E,           1e6,        "Young's modulus (Pa); membrane Lamé parameters use E * thickness");
-        add_double("nu",          nu,          0.3,        "Poisson ratio");
-        add_double("density",     density,     900.0,       "Mass density (kg/m^3)");
+        add_double("E",           E,           1e6,        "Shell Young's modulus (Pa); membrane Lamé parameters use E * thickness");
+        add_double("nu",          nu,          0.3,        "Shell Poisson ratio");
+        add_double("density",     density,     900.0,       "Shell mass density (kg/m^3)");
         add_double("thickness",   thickness,   0.001,       "Shell thickness (m)");
+        add_double("solid_E",     solid_E,     5e4,         "Volumetric-solid Young's modulus (Pa)");
+        add_double("solid_nu",    solid_nu,    0.45,        "Volumetric-solid Poisson ratio");
+        add_double("solid_density", solid_density, 900.0,   "Volumetric-solid mass density (kg/m^3)");
+        add_double("rigid_density", rigid_density, 900.0,   "Rigid-body mass density (kg/m^3)");
         add_double("kB",          kB,          1e-3,       "Bending stiffness (0 disables bending)");
         add_double("kpin",        kpin,        1e5,        "Pin spring stiffness");
         add_double("gx",          gx,          0.0,        "Gravity x-component");
@@ -146,7 +154,7 @@ struct IPCArgs3D : ArgParser {
         add_double("damping",                  damping,                  1.0,   "Newton-step damping used by deformable and rigid solvers; <1 can stabilize an update");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=rigid_box_drop, 8=two_polygon_collision, 9=twenty_polygon_stack, 10=five_polygon_scatter, 11=hundred_polygon_box_drop, 12=fifty_mixed_polygons_on_pinned_cloth");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=rigid_box_drop, 8=two_polygon_collision, 9=twenty_polygon_stack, 10=five_polygon_scatter, 11=hundred_polygon_box_drop, 12=fifty_rigid_polygons_on_pinned_cloth, 13=single_deformable_solid_ground_drop, 14=single_deformable_solid_on_pinned_cloth, 15=twenty_rigid_deformable_polygons_on_pinned_cloth, 16=ten_alternating_rigid_solid_flat_stack_on_pinned_cloth");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -206,6 +214,11 @@ struct IPCArgs3D : ArgParser {
         p.lambda           = E * thickness * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
         p.density          = density;
         p.thickness        = thickness;
+        p.solid_mu         = solid_E / (2.0 * (1.0 + solid_nu));
+        p.solid_lambda     = solid_E * solid_nu
+            / ((1.0 + solid_nu) * (1.0 - 2.0 * solid_nu));
+        p.solid_density    = solid_density;
+        p.rigid_density    = rigid_density;
         p.kB               = kB;
         p.kpin             = kpin;
         p.gravity          = Vec3(gx, gy, gz);
