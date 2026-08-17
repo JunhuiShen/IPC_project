@@ -59,9 +59,11 @@ struct BasicSolverWorkspace {
     int num_vertices = -1;
 
     PinMap pin_map;
+    std::vector<int> pinned_vertices;
     std::vector<IncidentTriangles> incident_triangles;
     std::vector<ShapeGrads> rest_shape_grads;
     std::vector<double> prev_disp;
+    std::vector<double> inertial_disp;
     std::vector<AABB> blue_boxes;
     std::vector<Vec3> xnew_substep_start;
     std::vector<std::vector<int>> contact_adjacency;
@@ -74,7 +76,8 @@ struct BasicSolverWorkspace {
     }
 
     void prepare(const RefMesh& ref_mesh, const VertexTriangleMap& adj,int nv, double initial_prev_disp) {
-        if (!matches(ref_mesh, nv)) {
+        const bool topology_matches = matches(ref_mesh, nv);
+        if (!topology_matches) {
             elastic_adjacency = ElasticAdjacencyCache{};
             incident_triangles.assign(nv, {});
             for (const auto& [vi, row] : adj) {
@@ -86,6 +89,8 @@ struct BasicSolverWorkspace {
                 rest_shape_grads[ti] = shape_function_gradients(ref_mesh.Dm_inverse[ti]);
 
             prev_disp.assign(nv, initial_prev_disp);
+            pin_map.assign(nv, -1);
+            pinned_vertices.clear();
             contact_adjacency.clear();
             combined_adjacency.clear();
             color_groups.clear();
@@ -96,9 +101,13 @@ struct BasicSolverWorkspace {
             dm_size = ref_mesh.Dm_inverse.size();
             hinges_size = ref_mesh.hinges.size();
             num_vertices = nv;
+        } else {
+            for (const int vertex : pinned_vertices)
+                pin_map[vertex] = -1;
+            pinned_vertices.clear();
         }
 
-        pin_map.assign(nv, -1);
+        inertial_disp.resize(nv);
         blue_boxes.resize(nv);
         xnew_substep_start.resize(nv);
     }
@@ -107,12 +116,16 @@ struct BasicSolverWorkspace {
 struct MixedAdjacencyWorkspace {
     const RefMesh* mesh = nullptr;
     const int* tris_data = nullptr;
+    const int* tets_data = nullptr;
     const int* tet_nodes_data = nullptr;
+    const int* surface_nodes_data = nullptr;
     const Hinge* hinges_data = nullptr;
     const int* node_to_rb_data = nullptr;
     const int* deformable_nodes_data = nullptr;
     std::size_t tris_size = 0;
+    std::size_t tets_size = 0;
     std::size_t tet_nodes_size = 0;
+    std::size_t surface_nodes_size = 0;
     std::size_t hinges_size = 0;
     std::size_t node_to_rb_size = 0;
     std::size_t deformable_nodes_size = 0;
@@ -120,6 +133,10 @@ struct MixedAdjacencyWorkspace {
     int num_rigid_bodies = -1;
 
     std::vector<int> cloth_nodes;
+    std::vector<int> node_to_block;
+    std::vector<unsigned char> solid_node_mask;
+    std::vector<unsigned char> surface_node_mask;
+    std::vector<std::size_t> elastic_row_sizes;
     std::vector<std::vector<int>> combined_adjacency;
     std::vector<std::vector<int>> color_groups;
 
@@ -130,12 +147,16 @@ struct MixedAdjacencyWorkspace {
         int nv) const {
         return mesh == &ref_mesh
             && tris_data == ref_mesh.tris.data()
+            && tets_data == ref_mesh.tets.data()
             && tet_nodes_data == ref_mesh.tet_nodes.data()
+            && surface_nodes_data == ref_mesh.surface_nodes.data()
             && hinges_data == ref_mesh.hinges.data()
             && node_to_rb_data == ref_mesh.node_to_rb.data()
             && deformable_nodes_data == deformable_nodes.data()
             && tris_size == ref_mesh.tris.size()
+            && tets_size == ref_mesh.tets.size()
             && tet_nodes_size == ref_mesh.tet_nodes.size()
+            && surface_nodes_size == ref_mesh.surface_nodes.size()
             && hinges_size == ref_mesh.hinges.size()
             && node_to_rb_size == ref_mesh.node_to_rb.size()
             && deformable_nodes_size == deformable_nodes.size()
@@ -151,27 +172,47 @@ struct MixedAdjacencyWorkspace {
         if (matches(ref_mesh, deformable_nodes, num_rbs, nv))
             return;
 
-        std::vector<unsigned char> solid_node(static_cast<std::size_t>(nv), 0);
+        solid_node_mask.assign(static_cast<std::size_t>(nv), 0);
         for (const int node : ref_mesh.tet_nodes)
-            solid_node[static_cast<std::size_t>(node)] = 1;
+            solid_node_mask[static_cast<std::size_t>(node)] = 1;
+        surface_node_mask.assign(static_cast<std::size_t>(nv), 0);
+        for (const int node : ref_mesh.surface_nodes)
+            surface_node_mask[static_cast<std::size_t>(node)] = 1;
         cloth_nodes.clear();
         cloth_nodes.reserve(deformable_nodes.size());
         for (const int node : deformable_nodes) {
-            if (solid_node[static_cast<std::size_t>(node)] == 0)
+            if (solid_node_mask[static_cast<std::size_t>(node)] == 0)
                 cloth_nodes.push_back(node);
         }
 
+        const int solid_begin = static_cast<int>(cloth_nodes.size());
+        const int rigid_begin = solid_begin
+            + static_cast<int>(ref_mesh.tet_nodes.size());
+        node_to_block.assign(static_cast<std::size_t>(nv), -1);
+        for (int cloth = 0; cloth < static_cast<int>(cloth_nodes.size()); ++cloth)
+            node_to_block[static_cast<std::size_t>(cloth_nodes[cloth])] = cloth;
+        for (int solid = 0; solid < static_cast<int>(ref_mesh.tet_nodes.size()); ++solid)
+            node_to_block[static_cast<std::size_t>(ref_mesh.tet_nodes[solid])] = solid_begin + solid;
+        for (int rb = 0; rb < num_rbs; ++rb) {
+            for (const int node : ref_mesh.rb_nodes[static_cast<std::size_t>(rb)])
+                node_to_block[static_cast<std::size_t>(node)] = rigid_begin + rb;
+        }
+        elastic_row_sizes.clear();
         combined_adjacency.clear();
         color_groups.clear();
 
         mesh = &ref_mesh;
         tris_data = ref_mesh.tris.data();
+        tets_data = ref_mesh.tets.data();
         tet_nodes_data = ref_mesh.tet_nodes.data();
+        surface_nodes_data = ref_mesh.surface_nodes.data();
         hinges_data = ref_mesh.hinges.data();
         node_to_rb_data = ref_mesh.node_to_rb.data();
         deformable_nodes_data = deformable_nodes.data();
         tris_size = ref_mesh.tris.size();
+        tets_size = ref_mesh.tets.size();
         tet_nodes_size = ref_mesh.tet_nodes.size();
+        surface_nodes_size = ref_mesh.surface_nodes.size();
         hinges_size = ref_mesh.hinges.size();
         node_to_rb_size = ref_mesh.node_to_rb.size();
         deformable_nodes_size = deformable_nodes.size();
@@ -278,9 +319,11 @@ Vec3 gs_solid_vertex_delta_live_barrier(
     const int node, const RefMesh& ref_mesh,
     const std::vector<Pin>& pins, const SimParams& params,
     const std::vector<Vec3>& xhat, const std::vector<Vec3>& x,
-    const BroadPhase& broad_phase) {
-    const auto [gradient, block] = compute_solid_local_gradient_and_block(
-        node, ref_mesh, pins, params, x, xhat, broad_phase);
+    const BroadPhase& broad_phase,
+    const std::vector<unsigned char>& solid_node_mask,
+    const std::vector<unsigned char>& surface_node_mask,
+    const PinMap& pin_map) {
+    const auto [gradient, block] = compute_solid_local_gradient_and_block(node, ref_mesh, pins, params, x, xhat, broad_phase, &solid_node_mask, &surface_node_mask, &pin_map);
     return matrix3d_inverse(block) * gradient;
 }
 
@@ -336,14 +379,19 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     workspace.prepare(ref_mesh, adj, nv, params.node_box_max);
 
     PinMap& pm = workspace.pin_map;
-    for (int pi = 0; pi < static_cast<int>(pins.size()); ++pi)
+    workspace.pinned_vertices.reserve(pins.size());
+    for (int pi = 0; pi < static_cast<int>(pins.size()); ++pi) {
         pm[pins[pi].vertex_index] = pi;
+        workspace.pinned_vertices.push_back(pins[pi].vertex_index);
+    }
     std::vector<double>& prev_disp = workspace.prev_disp;
+    std::vector<double>& inertial_disp = workspace.inertial_disp;
     constexpr double node_box_padding = 1.2;
     const double dt = params.dt();
+    for (int vi = 0; vi < nv; ++vi)
+        inertial_disp[vi] = v[vi].norm() * dt;
     auto node_box_size_fn = [&](int vi) {
-        const double inertial = v[vi].norm() * dt;
-        return std::clamp(std::max(prev_disp[vi], inertial) * node_box_padding, params.node_box_min, params.node_box_max);
+        return std::clamp(std::max(prev_disp[vi], inertial_disp[vi]) * node_box_padding, params.node_box_min, params.node_box_max);
     };
     std::vector<AABB>& blue_boxes = workspace.blue_boxes;
 
@@ -1001,8 +1049,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
     deformable_workspace.prepare(ref_mesh, adj, nv, params.node_box_max);
     rigid_workspace.prepare(ref_mesh, nv, params.node_box_max, params.theta_box_max);
     const std::vector<std::vector<int>>& nodal_elastic_adj = deformable_workspace.elastic_adjacency.get(ref_mesh, adj, nv);
-    mixed_adjacency_workspace.prepare(
-        ref_mesh, deformable_nodes, num_rbs, nv);
+    mixed_adjacency_workspace.prepare(ref_mesh, deformable_nodes, num_rbs, nv);
     const std::vector<int>& cloth_nodes =
         mixed_adjacency_workspace.cloth_nodes;
     const std::vector<int>& solid_nodes = ref_mesh.tet_nodes;
@@ -1012,8 +1059,11 @@ SolverResult global_gauss_seidel_solver_basic_general(
     const int rigid_begin = solid_begin + num_solid;
 
     PinMap& pin_map = deformable_workspace.pin_map;
-    for (int pin = 0; pin < static_cast<int>(pins.size()); ++pin)
+    deformable_workspace.pinned_vertices.reserve(pins.size());
+    for (int pin = 0; pin < static_cast<int>(pins.size()); ++pin) {
         pin_map[pins[pin].vertex_index] = pin;
+        deformable_workspace.pinned_vertices.push_back(pins[pin].vertex_index);
+    }
 
     // xnew is the single live collision configuration. Its deformable entries
     // come from the caller; overwrite only rigid proxies from generalized
@@ -1030,6 +1080,10 @@ SolverResult global_gauss_seidel_solver_basic_general(
     rigid_workspace.substep_start_coms = x_com_new;
     std::vector<AABB>& blue_boxes = rigid_workspace.blue_boxes;
     const double dt = params.dt();
+    for (const int node : cloth_nodes)
+        deformable_workspace.inertial_disp[node] = dt * state.velocities[node].norm();
+    for (const int node : solid_nodes)
+        deformable_workspace.inertial_disp[node] = dt * state.velocities[node].norm();
     // SimParams caches these values lazily. Populate both caches before any
     // heterogeneous color is evaluated by multiple OpenMP workers.
     (void)params.dt2();
@@ -1039,14 +1093,12 @@ SolverResult global_gauss_seidel_solver_basic_general(
         // First fill deformable boxes. build_blue_boxes_rb then overwrites all
         // rigid proxy entries with spherical-cap plus COM bounds.
         for (const int node : cloth_nodes) {
-            const double inertial = dt * state.velocities[node].norm();
-            const double radius = std::clamp(box_padding * std::max(deformable_workspace.prev_disp[node], inertial),params.node_box_min, params.node_box_max);
+            const double radius = std::clamp(box_padding * std::max(deformable_workspace.prev_disp[node], deformable_workspace.inertial_disp[node]),params.node_box_min, params.node_box_max);
             const Vec3 half_extent = Vec3::Constant(radius);
             blue_boxes[node] = AABB(xnew[node] - half_extent, xnew[node] + half_extent);
         }
         for (const int node : solid_nodes) {
-            const double inertial = dt * state.velocities[node].norm();
-            const double radius = std::clamp(box_padding * std::max(deformable_workspace.prev_disp[node], inertial),params.node_box_min, params.node_box_max);
+            const double radius = std::clamp(box_padding * std::max(deformable_workspace.prev_disp[node], deformable_workspace.inertial_disp[node]),params.node_box_min, params.node_box_max);
             const Vec3 half_extent = Vec3::Constant(radius);
             blue_boxes[node] = AABB(xnew[node] - half_extent, xnew[node] + half_extent);
         }
@@ -1067,10 +1119,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
         else
             broad_phase.initialize_surface_nodes(
                 blue_boxes, ref_mesh, params.d_hat);
-        build_all_block_adjacency_and_contact(
-            ref_mesh, cloth_nodes, nodal_elastic_adj,
-            broad_phase.cache(),
-            mixed_adjacency_workspace.combined_adjacency);
+        build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, nodal_elastic_adj, broad_phase.cache(), mixed_adjacency_workspace.combined_adjacency, &mixed_adjacency_workspace.node_to_block, &mixed_adjacency_workspace.solid_node_mask, &mixed_adjacency_workspace.surface_node_mask, &mixed_adjacency_workspace.elastic_row_sizes);
         build_rb_contact_adj(
             broad_phase.cache(), ref_mesh.node_to_rb, num_rbs,
             rigid_workspace.body_nt_pair_indices,
@@ -1090,7 +1139,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
 
     const auto update_final_residual = [&]() {
         result.final_cloth_residual = compute_global_deformable_residual(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, cloth_nodes, &pin_map);
-        result.final_solid_residual = solid_nodes.empty() ? 0.0 : compute_global_solid_residual(ref_mesh, pins, params, xnew, xhat, broad_phase);
+        result.final_solid_residual = solid_nodes.empty() ? 0.0 : compute_global_solid_residual(ref_mesh, pins, params, xnew, xhat, broad_phase, &pin_map);
         result.final_rigid_residual = rb_solver::rigid_body_unnormalized_residual(
                                         ref_mesh, state, broad_phase.cache(),
                                         rigid_workspace.body_nt_pair_indices,
@@ -1167,9 +1216,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
                 broad_phase, xnew, node,
                 [&](const int vi) -> Vec3 {
                     return xnew[vi] - params.damping
-                        * gs_solid_vertex_delta_live_barrier(
-                            vi, ref_mesh, pins, params, xhat, xnew,
-                            broad_phase);
+                        * gs_solid_vertex_delta_live_barrier(vi, ref_mesh, pins, params, xhat, xnew, broad_phase, mixed_adjacency_workspace.solid_node_mask, mixed_adjacency_workspace.surface_node_mask, pin_map);
                 },
                 0.9, params.use_ccd, params.use_ticcd, false,
                 verbose ? &solid_clip_count : nullptr);

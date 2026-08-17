@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <stdexcept>
 #include <vector>
 
@@ -435,7 +436,11 @@ void build_all_block_adjacency_and_contact(
     const std::vector<int>& cloth_nodes,
     const std::vector<std::vector<int>>& cloth_nodal_elastic_adjacency,
     const BroadPhase::Cache& bp_cache,
-    std::vector<std::vector<int>>& out) {
+    std::vector<std::vector<int>>& out,
+    const std::vector<int>* node_to_block,
+    const std::vector<unsigned char>* solid_node_mask,
+    const std::vector<unsigned char>* surface_node_mask,
+    std::vector<std::size_t>* elastic_row_sizes) {
     const int num_cloth = static_cast<int>(cloth_nodes.size());
     const int num_solid = static_cast<int>(ref_mesh.tet_nodes.size());
     const int num_rigid = static_cast<int>(ref_mesh.rb_nodes.size());
@@ -443,65 +448,82 @@ void build_all_block_adjacency_and_contact(
     const int rigid_begin = solid_begin + num_solid;
     const int num_blocks = rigid_begin + num_rigid;
 
-    std::vector<int> node_to_block(ref_mesh.num_positions, -1);
-    std::vector<unsigned char> solid_node(ref_mesh.num_positions, 0);
-    std::vector<unsigned char> solid_surface_node(ref_mesh.num_positions, 0);
+    const int num_workspace_arguments = static_cast<int>(node_to_block != nullptr) + static_cast<int>(solid_node_mask != nullptr) + static_cast<int>(surface_node_mask != nullptr) + static_cast<int>(elastic_row_sizes != nullptr);
+    if (num_workspace_arguments != 0 && num_workspace_arguments != 4)
+        throw std::invalid_argument("build_all_block_adjacency_and_contact: supply either all workspace arguments or none");
 
-    for (int cloth = 0; cloth < num_cloth; ++cloth) {
-        const int node = cloth_nodes[static_cast<std::size_t>(cloth)];
-        node_to_block[static_cast<std::size_t>(node)] = cloth;
-    }
-    for (int solid = 0; solid < num_solid; ++solid) {
-        const int node = ref_mesh.tet_nodes[static_cast<std::size_t>(solid)];
-        node_to_block[static_cast<std::size_t>(node)] = solid_begin + solid;
-        solid_node[static_cast<std::size_t>(node)] = 1;
-    }
-    for (const int node : ref_mesh.surface_nodes)
-        solid_surface_node[static_cast<std::size_t>(node)] = 1;
-    for (int rigid = 0; rigid < num_rigid; ++rigid) {
-        const int block = rigid_begin + rigid;
-        for (const int node : ref_mesh.rb_nodes[static_cast<std::size_t>(rigid)])
-            node_to_block[static_cast<std::size_t>(node)] = block;
+    std::vector<int> owned_node_to_block;
+    std::vector<unsigned char> owned_solid_node_mask;
+    std::vector<unsigned char> owned_surface_node_mask;
+    std::vector<std::size_t> owned_elastic_row_sizes;
+    if (node_to_block == nullptr) {
+        owned_node_to_block.assign(ref_mesh.num_positions, -1);
+        owned_solid_node_mask.assign(ref_mesh.num_positions, 0);
+        owned_surface_node_mask.assign(ref_mesh.num_positions, 0);
+        for (int cloth = 0; cloth < num_cloth; ++cloth)
+            owned_node_to_block[static_cast<std::size_t>(cloth_nodes[static_cast<std::size_t>(cloth)])] = cloth;
+        for (int solid = 0; solid < num_solid; ++solid) {
+            const int node = ref_mesh.tet_nodes[static_cast<std::size_t>(solid)];
+            owned_node_to_block[static_cast<std::size_t>(node)] = solid_begin + solid;
+            owned_solid_node_mask[static_cast<std::size_t>(node)] = 1;
+        }
+        for (const int node : ref_mesh.surface_nodes)
+            owned_surface_node_mask[static_cast<std::size_t>(node)] = 1;
+        for (int rigid = 0; rigid < num_rigid; ++rigid) {
+            for (const int node : ref_mesh.rb_nodes[static_cast<std::size_t>(rigid)])
+                owned_node_to_block[static_cast<std::size_t>(node)] = rigid_begin + rigid;
+        }
+        node_to_block = &owned_node_to_block;
+        solid_node_mask = &owned_solid_node_mask;
+        surface_node_mask = &owned_surface_node_mask;
+        elastic_row_sizes = &owned_elastic_row_sizes;
     }
 
-    if (static_cast<int>(out.size()) == num_blocks) {
-        for (std::vector<int>& row : out)
-            row.clear();
-    } else {
+    const bool rebuild_elastic = out.size() != static_cast<std::size_t>(num_blocks) || elastic_row_sizes->size() != static_cast<std::size_t>(num_blocks);
+    if (rebuild_elastic) {
         out.assign(static_cast<std::size_t>(num_blocks), {});
-    }
 
-    // Cloth elastic conflicts. Only cloth blocks are projected, so collision
-    // triangles belonging to solids or rigid bodies cannot become cloth
-    // elastic constraints in this graph.
-    for (int cloth = 0; cloth < num_cloth; ++cloth) {
-        const int node = cloth_nodes[static_cast<std::size_t>(cloth)];
-        std::vector<int>& row = out[static_cast<std::size_t>(cloth)];
-        for (const int neighbor_node :
-             cloth_nodal_elastic_adjacency[static_cast<std::size_t>(node)]) {
-            const int neighbor =
-                node_to_block[static_cast<std::size_t>(neighbor_node)];
-            if (neighbor >= 0 && neighbor < num_cloth && neighbor != cloth)
-                row.push_back(neighbor);
-        }
-    }
-
-    // Every tetrahedron couples its four nodal blocks.
-    for (int element = 0; element < num_tets(ref_mesh); ++element) {
-        int blocks[4];
-        for (int local = 0; local < 4; ++local) {
-            const int node = tet_vertex(ref_mesh, element, local);
-            blocks[local] = node_to_block[static_cast<std::size_t>(node)];
-        }
-        for (int first = 0; first < 4; ++first) {
-            for (int second = first + 1; second < 4; ++second) {
-                const int a = blocks[first];
-                const int b = blocks[second];
-                if (a < 0 || b < 0 || a == b)
-                    continue;
-                out[static_cast<std::size_t>(a)].push_back(b);
-                out[static_cast<std::size_t>(b)].push_back(a);
+        for (int cloth = 0; cloth < num_cloth; ++cloth) {
+            const int node = cloth_nodes[static_cast<std::size_t>(cloth)];
+            std::vector<int>& row = out[static_cast<std::size_t>(cloth)];
+            for (const int neighbor_node : cloth_nodal_elastic_adjacency[static_cast<std::size_t>(node)]) {
+                const int neighbor = (*node_to_block)[static_cast<std::size_t>(neighbor_node)];
+                if (neighbor >= 0 && neighbor < num_cloth && neighbor != cloth)
+                    row.push_back(neighbor);
             }
+        }
+
+        for (int element = 0; element < num_tets(ref_mesh); ++element) {
+            int blocks[4];
+            for (int local = 0; local < 4; ++local)
+                blocks[local] = (*node_to_block)[static_cast<std::size_t>(tet_vertex(ref_mesh, element, local))];
+            for (int first = 0; first < 4; ++first) {
+                for (int second = first + 1; second < 4; ++second) {
+                    const int a = blocks[first];
+                    const int b = blocks[second];
+                    if (a < 0 || b < 0 || a == b)
+                        continue;
+                    out[static_cast<std::size_t>(a)].push_back(b);
+                    out[static_cast<std::size_t>(b)].push_back(a);
+                }
+            }
+        }
+
+#pragma omp parallel for schedule(static)
+        for (int block = 0; block < num_blocks; ++block) {
+            std::vector<int>& row = out[static_cast<std::size_t>(block)];
+            std::sort(row.begin(), row.end());
+            row.erase(std::unique(row.begin(), row.end()), row.end());
+        }
+        elastic_row_sizes->resize(static_cast<std::size_t>(num_blocks));
+        for (int block = 0; block < num_blocks; ++block)
+            (*elastic_row_sizes)[static_cast<std::size_t>(block)] = out[static_cast<std::size_t>(block)].size();
+    } else {
+        for (int block = 0; block < num_blocks; ++block) {
+            const std::size_t elastic_size = (*elastic_row_sizes)[static_cast<std::size_t>(block)];
+            if (out[static_cast<std::size_t>(block)].size() < elastic_size)
+                throw std::invalid_argument("build_all_block_adjacency_and_contact: missing elastic prefix");
+            out[static_cast<std::size_t>(block)].resize(elastic_size);
         }
     }
 
@@ -509,13 +531,10 @@ void build_all_block_adjacency_and_contact(
         int blocks[4];
         for (int role = 0; role < 4; ++role) {
             const int node = nodes[role];
-            if (solid_node[static_cast<std::size_t>(node)] != 0
-                && solid_surface_node[static_cast<std::size_t>(node)] == 0) {
+            if ((*solid_node_mask)[static_cast<std::size_t>(node)] != 0 && (*surface_node_mask)[static_cast<std::size_t>(node)] == 0)
                 return;
-            }
-            blocks[role] = node_to_block[static_cast<std::size_t>(node)];
+            blocks[role] = (*node_to_block)[static_cast<std::size_t>(node)];
         }
-
         for (int first = 0; first < 4; ++first) {
             if (blocks[first] < 0)
                 continue;
@@ -529,10 +548,8 @@ void build_all_block_adjacency_and_contact(
             }
         }
     };
-
     for (const NodeTrianglePair& pair : bp_cache.nt_pairs) {
-        const int nodes[4] = {
-            pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+        const int nodes[4] = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
         add_contact_clique(nodes);
     }
     for (const SegmentSegmentPair& pair : bp_cache.ss_pairs)
@@ -541,8 +558,12 @@ void build_all_block_adjacency_and_contact(
 #pragma omp parallel for schedule(static)
     for (int block = 0; block < num_blocks; ++block) {
         std::vector<int>& row = out[static_cast<std::size_t>(block)];
-        std::sort(row.begin(), row.end());
-        row.erase(std::unique(row.begin(), row.end()), row.end());
+        const std::size_t elastic_size = (*elastic_row_sizes)[static_cast<std::size_t>(block)];
+        auto contact_begin = row.begin() + static_cast<std::ptrdiff_t>(elastic_size);
+        std::sort(contact_begin, row.end());
+        auto contact_end = std::unique(contact_begin, row.end());
+        contact_end = std::remove_if(contact_begin, contact_end, [&](const int neighbor) { return std::binary_search(row.begin(), contact_begin, neighbor); });
+        row.erase(contact_end, row.end());
     }
 }
 

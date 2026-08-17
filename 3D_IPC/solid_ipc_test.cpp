@@ -1228,25 +1228,31 @@ TEST(SolidBarrierAssembly, FullWrappersEqualNoBarrierPlusBarrier) {
     EXPECT_NEAR(full, no_barrier + barrier,
                 1.0e-13 * (1.0 + std::abs(full)));
 
+    std::vector<unsigned char> solid_node_mask(fixture.x.size(), 0);
+    std::vector<unsigned char> surface_node_mask(fixture.x.size(), 0);
+    for (const int node : fixture.ref_mesh.tet_nodes)
+        solid_node_mask[static_cast<std::size_t>(node)] = 1;
+    for (const int node : fixture.ref_mesh.surface_nodes)
+        surface_node_mask[static_cast<std::size_t>(node)] = 1;
+    PinMap pin_map(fixture.x.size(), -1);
+    for (int pin = 0; pin < static_cast<int>(fixture.pins.size()); ++pin)
+        pin_map[fixture.pins[static_cast<std::size_t>(pin)].vertex_index] = pin;
+
     for (const int node : fixture.ref_mesh.tet_nodes) {
-        const auto [no_barrier_gradient, no_barrier_block] =
-            compute_solid_local_gradient_and_pbgs_block_no_barrier(
-                node, fixture.ref_mesh, fixture.pins, fixture.params,
-                fixture.x, fixture.xhat);
-        const auto [barrier_gradient, barrier_hessian] =
-            compute_solid_local_barrier_gradient_and_self_hessian(
-                node, fixture.ref_mesh, fixture.params,
-                fixture.x, fixture.broad_phase);
-        const auto [full_gradient, full_block] =
-            compute_solid_local_gradient_and_block(
-                node, fixture.ref_mesh, fixture.pins, fixture.params,
-                fixture.x, fixture.xhat, fixture.broad_phase);
+        const auto [no_barrier_gradient, no_barrier_block] = compute_solid_local_gradient_and_pbgs_block_no_barrier(node, fixture.ref_mesh, fixture.pins, fixture.params, fixture.x, fixture.xhat);
+        const auto [barrier_gradient, barrier_hessian] = compute_solid_local_barrier_gradient_and_self_hessian(node, fixture.ref_mesh, fixture.params, fixture.x, fixture.broad_phase);
+        const auto [full_gradient, full_block] = compute_solid_local_gradient_and_block(node, fixture.ref_mesh, fixture.pins, fixture.params, fixture.x, fixture.xhat, fixture.broad_phase);
+        const auto [precomputed_gradient, precomputed_block] = compute_solid_local_gradient_and_block(node, fixture.ref_mesh, fixture.pins, fixture.params, fixture.x, fixture.xhat, fixture.broad_phase, &solid_node_mask, &surface_node_mask, &pin_map);
 
         EXPECT_TRUE(full_gradient.isApprox(
             no_barrier_gradient + barrier_gradient, 1.0e-13))
             << "node=" << node;
         EXPECT_TRUE(full_block.isApprox(
             no_barrier_block + barrier_hessian, 1.0e-13))
+            << "node=" << node;
+        EXPECT_TRUE(precomputed_gradient.isApprox(full_gradient, 1.0e-13))
+            << "node=" << node;
+        EXPECT_TRUE(precomputed_block.isApprox(full_block, 1.0e-13))
             << "node=" << node;
     }
 }

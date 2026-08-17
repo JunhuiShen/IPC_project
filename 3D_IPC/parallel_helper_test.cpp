@@ -506,3 +506,41 @@ TEST(RigidBodyBlueBoxes, UsesCOMBound) {
     EXPECT_TRUE(boxes[0].min.isApprox(X - Vec3::Constant(0.3), 1.0e-14));
     EXPECT_TRUE(boxes[0].max.isApprox(X + Vec3::Constant(0.3), 1.0e-14));
 }
+
+TEST(AllBlockContactAdjacency, ReusesElasticPrefixesAcrossContactRefreshes) {
+    RefMesh ref_mesh;
+    ref_mesh.num_positions = 4;
+    const std::vector<int> cloth_nodes = {0, 1, 2, 3};
+    const std::vector<std::vector<int>> elastic_adjacency = {{1}, {0}, {3}, {2}};
+    const std::vector<int> node_to_block = {0, 1, 2, 3};
+    const std::vector<unsigned char> no_solid_nodes(4, 0);
+    const std::vector<unsigned char> no_surface_nodes(4, 0);
+    std::vector<std::vector<int>> graph;
+    std::vector<std::size_t> elastic_row_sizes;
+
+    BroadPhase::Cache cache;
+    NodeTrianglePair contact{};
+    contact.node = 0;
+    contact.tri_v[0] = 1;
+    contact.tri_v[1] = 2;
+    contact.tri_v[2] = 3;
+    cache.nt_pairs.push_back(contact);
+    build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, elastic_adjacency, cache, graph, &node_to_block, &no_solid_nodes, &no_surface_nodes, &elastic_row_sizes);
+    EXPECT_EQ(graph, (std::vector<std::vector<int>>{
+        {1, 2, 3}, {0, 2, 3}, {3, 0, 1}, {2, 0, 1}}));
+    expect_valid_coloring(graph);
+
+    // A later refresh drops the old contact suffix but retains every elastic
+    // edge. This contact duplicates the existing 0--1 elastic edge.
+    cache.nt_pairs.clear();
+    SegmentSegmentPair duplicate{};
+    duplicate.v[0] = 0;
+    duplicate.v[1] = 1;
+    duplicate.v[2] = 0;
+    duplicate.v[3] = 1;
+    cache.ss_pairs.push_back(duplicate);
+    build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, elastic_adjacency, cache, graph, &node_to_block, &no_solid_nodes, &no_surface_nodes, &elastic_row_sizes);
+    EXPECT_EQ(graph, (std::vector<std::vector<int>>{
+        {1}, {0}, {3}, {2}}));
+    expect_valid_coloring(graph);
+}

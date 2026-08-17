@@ -5,17 +5,20 @@ build/
 frames_*/
 racket_output/
 polygon_collision_output/
+twenty_rigid_deformable_polygons_on_pinned_cloth_output/
 vis_debug/
 tmp_full/
 
-# Local Python audit / debug scripts
-# tools/<x> rather than tools/ so the !exception below can reach in.
-tools/*
-!tools/decimate_obj.py
+# Generated Python bytecode
+__pycache__/
+*.py[cod]
+
+# Local collision-audit scripts
+collision_validation/
 
 # Stanford XYZ RGB dragon source mesh -- 11 MB, fetch from
 # https://github.com/alecjacobson/common-3d-test-models if you want to
-# regenerate xyzrgb_dragon_12k.obj via tools/decimate_obj.py
+# regenerate xyzrgb_dragon_12k.obj via collision_validation/decimate_obj.py
 xyzrgb_dragon_full.obj
 
 # Top-level run logs from background sim invocations

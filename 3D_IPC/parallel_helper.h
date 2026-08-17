@@ -1,6 +1,7 @@
 #pragma once
 #include "physics.h"
 #include "broad_phase.h"
+#include <cstddef>
 #include <vector>
 
 // Exact AABB of a rigid node's spherical-cap rotation envelope.
@@ -45,14 +46,19 @@ void build_solid_contact_adjacency(
 // One conflict graph for all movable block types. Rows are ordered as
 // [cloth_nodes][ref_mesh.tet_nodes][ref_mesh.rb_nodes]. Cloth and solid
 // vertices each own one block; every rigid body owns one block containing all
-// of its proxy vertices. The graph contains cloth elasticity, tetrahedral K4
-// elasticity, and every cached contact conflict across all three block types.
+// of its proxy vertices. Supplying all four optional workspace arguments lets
+// repeated calls retain the topology-invariant elastic prefix and replace only
+// the current contact suffix.
 void build_all_block_adjacency_and_contact(
     const RefMesh& ref_mesh,
     const std::vector<int>& cloth_nodes,
     const std::vector<std::vector<int>>& cloth_nodal_elastic_adjacency,
     const BroadPhase::Cache& bp_cache,
-    std::vector<std::vector<int>>& out);
+    std::vector<std::vector<int>>& out,
+    const std::vector<int>* node_to_block = nullptr,
+    const std::vector<unsigned char>* solid_node_mask = nullptr,
+    const std::vector<unsigned char>* surface_node_mask = nullptr,
+    std::vector<std::size_t>* elastic_row_sizes = nullptr);
 
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int num_vertices);
 

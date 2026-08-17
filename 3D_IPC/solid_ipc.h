@@ -48,7 +48,9 @@ compute_solid_local_gradient_and_pbgs_block_no_barrier(
     const std::vector<Pin>& pins,
     const SimParams& params,
     const std::vector<Vec3>& x,
-    const std::vector<Vec3>& xhat);
+    const std::vector<Vec3>& xhat,
+    const std::vector<unsigned char>* surface_node_mask = nullptr,
+    const std::vector<int>* pin_map = nullptr);
 
 // The already dt^2*k_barrier-scaled IPC barrier contribution. The broad-phase
 // cache is fixed by the caller; each pair is counted once in the energy.
@@ -66,7 +68,9 @@ compute_solid_local_barrier_gradient_and_self_hessian(
     const RefMesh& ref_mesh,
     const SimParams& params,
     const std::vector<Vec3>& x,
-    const BroadPhase& broad_phase);
+    const BroadPhase& broad_phase,
+    const std::vector<unsigned char>* solid_node_mask = nullptr,
+    const std::vector<unsigned char>* surface_node_mask = nullptr);
 
 // Full solid incremental potential and local system, obtained by adding the
 // barrier contributions above to the no-barrier terms. The complete local
@@ -88,7 +92,10 @@ std::pair<Vec3, Mat33> compute_solid_local_gradient_and_block(
     const SimParams& params,
     const std::vector<Vec3>& x,
     const std::vector<Vec3>& xhat,
-    const BroadPhase& broad_phase);
+    const BroadPhase& broad_phase,
+    const std::vector<unsigned char>* solid_node_mask = nullptr,
+    const std::vector<unsigned char>* surface_node_mask = nullptr,
+    const std::vector<int>* pin_map = nullptr);
 
 // Mass-normalized infinity norm of the full solid gradient, matching the
 // deformable-cloth residual convention. Only tetrahedral solid nodes are
@@ -99,4 +106,5 @@ double compute_global_solid_residual(
     const SimParams& params,
     const std::vector<Vec3>& x,
     const std::vector<Vec3>& xhat,
-    const BroadPhase& broad_phase);
+    const BroadPhase& broad_phase,
+    const std::vector<int>* pin_map = nullptr);

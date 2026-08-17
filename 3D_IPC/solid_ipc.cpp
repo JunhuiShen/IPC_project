@@ -194,7 +194,8 @@ Vec3 compute_solid_local_gradient(
     const std::vector<Vec3>& xhat,
     const BroadPhase& broad_phase,
     const std::vector<unsigned char>& solid_nodes,
-    const std::vector<unsigned char>& surface_nodes) {
+    const std::vector<unsigned char>& surface_nodes,
+    const std::vector<int>* pin_map) {
     const double dt2 = params.dt2();
     const double mass = ref_mesh.mass[static_cast<std::size_t>(node)];
     Vec3 gradient = mass
@@ -202,11 +203,21 @@ Vec3 compute_solid_local_gradient(
            - xhat[static_cast<std::size_t>(node)]);
     gradient += dt2 * (-mass * params.gravity);
 
-    for (const Pin& pin : pins) {
-        if (pin.vertex_index == node) {
+    if (pin_map != nullptr) {
+        const int pin_index = (*pin_map)[static_cast<std::size_t>(node)];
+        if (pin_index >= 0) {
+            const Pin& pin = pins[static_cast<std::size_t>(pin_index)];
             gradient += dt2 * params.kpin
                 * (x[static_cast<std::size_t>(node)]
                    - pin.target_position);
+        }
+    } else {
+        for (const Pin& pin : pins) {
+            if (pin.vertex_index == node) {
+                gradient += dt2 * params.kpin
+                    * (x[static_cast<std::size_t>(node)]
+                       - pin.target_position);
+            }
         }
     }
 
@@ -214,8 +225,7 @@ Vec3 compute_solid_local_gradient(
          ref_mesh.tet_adj[static_cast<std::size_t>(node)]) {
         const std::size_t element =
             static_cast<std::size_t>(element_index);
-        const Mat33 F = ElementF(
-            element, x, ref_mesh.tets, ref_mesh.tet_rest_data);
+        const Mat33 F = ElementF(element, x, ref_mesh.tets, ref_mesh.tet_rest_data);
         CorotatedCache cache;
         cache.UpdateCache(F);
         gradient += dt2 * EFEMElementNodeEnergyGradient(
@@ -462,8 +472,7 @@ double compute_solid_incremental_potential_no_barrier(
 
     for (std::size_t element = 0;
          element < ref_mesh.tets.size() / 4; ++element) {
-        const Mat33 F = ElementF(
-            element, x, ref_mesh.tets, ref_mesh.tet_rest_data);
+        const Mat33 F = ElementF(element, x, ref_mesh.tets, ref_mesh.tet_rest_data);
         CorotatedCache cache;
         cache.UpdateCache(F);
         potential_energy += EFEMElementInternalEnergy(
@@ -491,7 +500,9 @@ std::pair<Vec3, Mat33> compute_solid_local_gradient_and_pbgs_block_no_barrier(
     const std::vector<Pin>& pins,
     const SimParams& params,
     const std::vector<Vec3>& x,
-    const std::vector<Vec3>& xhat) {
+    const std::vector<Vec3>& xhat,
+    const std::vector<unsigned char>* surface_node_mask,
+    const std::vector<int>* pin_map) {
     const double dt2 = params.dt2();
     const double mass = ref_mesh.mass[static_cast<std::size_t>(node)];
     Vec3 gradient = mass
@@ -500,43 +511,106 @@ std::pair<Vec3, Mat33> compute_solid_local_gradient_and_pbgs_block_no_barrier(
     gradient += dt2 * (-mass * params.gravity);
     Mat33 pbgs_block = mass * Mat33::Identity();
 
-    for (const Pin& pin : pins) {
-        if (pin.vertex_index != node)
-            continue;
-        gradient += dt2 * params.kpin
-            * (x[static_cast<std::size_t>(node)] - pin.target_position);
-        pbgs_block += dt2 * params.kpin * Mat33::Identity();
+    if (pin_map != nullptr) {
+        const int pin_index = (*pin_map)[static_cast<std::size_t>(node)];
+        if (pin_index >= 0) {
+            const Pin& pin = pins[static_cast<std::size_t>(pin_index)];
+            gradient += dt2 * params.kpin
+                * (x[static_cast<std::size_t>(node)] - pin.target_position);
+            pbgs_block += dt2 * params.kpin * Mat33::Identity();
+        }
+    } else {
+        for (const Pin& pin : pins) {
+            if (pin.vertex_index != node)
+                continue;
+            gradient += dt2 * params.kpin
+                * (x[static_cast<std::size_t>(node)] - pin.target_position);
+            pbgs_block += dt2 * params.kpin * Mat33::Identity();
+        }
     }
 
     for (const auto& [element_index, local_node] :
          ref_mesh.tet_adj[static_cast<std::size_t>(node)]) {
         const std::size_t element =
             static_cast<std::size_t>(element_index);
-        const Mat33 F = ElementF(
-            element, x, ref_mesh.tets, ref_mesh.tet_rest_data);
+        const Mat33 F = ElementF(element, x, ref_mesh.tets, ref_mesh.tet_rest_data);
         CorotatedCache cache;
         cache.UpdateCache(F);
-        gradient += dt2 * EFEMElementNodeEnergyGradient(
-            cache, F, ref_mesh.tet_rest_data[element],
-            params.solid_mu, params.solid_lambda, local_node);
-        pbgs_block += dt2 * PBGSElementNodeElasticityBlock(
-            cache, ref_mesh.tet_rest_data[element],
-            params.solid_mu, params.solid_lambda, local_node);
+        gradient += dt2 * EFEMElementNodeEnergyGradient(cache, F, ref_mesh.tet_rest_data[element], params.solid_mu, params.solid_lambda, local_node);
+        pbgs_block += dt2 * PBGSElementNodeElasticityBlock(cache, ref_mesh.tet_rest_data[element], params.solid_mu, params.solid_lambda, local_node);
     }
 
-    if (params.k_sdf > 0.0 && is_solid_surface_node(ref_mesh, node)) {
+    const bool is_surface = surface_node_mask != nullptr
+        ? (*surface_node_mask)[static_cast<std::size_t>(node)] != 0
+        : is_solid_surface_node(ref_mesh, node);
+    if (params.k_sdf > 0.0 && is_surface) {
         SDFEvaluation sdf;
-        if (solid_sdf_min_evaluation(
-                params, x[static_cast<std::size_t>(node)], sdf)) {
-            gradient += dt2 * sdf_penalty_gradient(
-                sdf, params.k_sdf, params.eps_sdf);
-            pbgs_block += dt2 * sdf_penalty_hessian(
-                sdf, params.k_sdf, params.eps_sdf,
-                /*include_curvature=*/false);
+        if (solid_sdf_min_evaluation(params, x[static_cast<std::size_t>(node)], sdf)) {
+            gradient += dt2 * sdf_penalty_gradient(sdf, params.k_sdf, params.eps_sdf);
+            pbgs_block += dt2 * sdf_penalty_hessian(sdf, params.k_sdf, params.eps_sdf, /*include_curvature=*/false);
         }
     }
 
     return {gradient, pbgs_block};
+}
+
+std::pair<Vec3, Mat33> compute_solid_local_barrier_gradient_and_self_hessian(
+    const int node,
+    const RefMesh& ref_mesh,
+    const SimParams& params,
+    const std::vector<Vec3>& x,
+    const BroadPhase& broad_phase,
+    const std::vector<unsigned char>* solid_node_mask,
+    const std::vector<unsigned char>* surface_node_mask) {
+    if (params.d_hat <= 0.0 || params.k_barrier <= 0.0)
+        return {Vec3::Zero(), Mat33::Zero()};
+    if ((solid_node_mask == nullptr) != (surface_node_mask == nullptr))
+        throw std::invalid_argument("compute_solid_local_barrier_gradient_and_self_hessian: both node masks must be supplied together");
+
+    std::vector<unsigned char> owned_solid_node_mask;
+    std::vector<unsigned char> owned_surface_node_mask;
+    if (solid_node_mask == nullptr) {
+        owned_solid_node_mask = make_solid_node_mask(ref_mesh.tet_nodes, x.size());
+        owned_surface_node_mask = make_solid_node_mask(ref_mesh.surface_nodes, x.size());
+        solid_node_mask = &owned_solid_node_mask;
+        surface_node_mask = &owned_surface_node_mask;
+    }
+
+    const BroadPhase::Cache& cache = broad_phase.cache();
+    const double barrier_scale = params.dt2() * params.k_barrier;
+    const double d_hat2 = params.d_hat * params.d_hat;
+    Vec3 gradient = Vec3::Zero();
+    Mat33 self_hessian = Mat33::Zero();
+
+    for (const BroadPhase::Cache::VertexPairEntry& entry :
+         cache.vertex_nt[static_cast<std::size_t>(node)]) {
+        const NodeTrianglePair& pair = cache.nt_pairs[entry.pair_index];
+        if (!include_solid_node_triangle_pair(pair, *solid_node_mask, *surface_node_mask)) {
+            continue;
+        }
+        if (!node_triangle_aabbs_within_distance(x[static_cast<std::size_t>(pair.node)], x[static_cast<std::size_t>(pair.tri_v[0])], x[static_cast<std::size_t>(pair.tri_v[1])], x[static_cast<std::size_t>(pair.tri_v[2])], d_hat2)) {
+            continue;
+        }
+        const auto [pair_gradient, pair_self_hessian] = node_triangle_barrier_self_gradient_and_hessian(x[static_cast<std::size_t>(pair.node)], x[static_cast<std::size_t>(pair.tri_v[0])], x[static_cast<std::size_t>(pair.tri_v[1])], x[static_cast<std::size_t>(pair.tri_v[2])], params.d_hat, entry.dof);
+        gradient += barrier_scale * pair_gradient;
+        self_hessian += barrier_scale * pair_self_hessian;
+    }
+
+    for (const BroadPhase::Cache::VertexPairEntry& entry :
+         cache.vertex_ss[static_cast<std::size_t>(node)]) {
+        const SegmentSegmentPair& pair = cache.ss_pairs[entry.pair_index];
+        if (!include_solid_segment_segment_pair(pair, *solid_node_mask, *surface_node_mask)) {
+            continue;
+        }
+        if (!segment_aabbs_within_distance(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])], d_hat2)) {
+            continue;
+        }
+        const auto [pair_gradient, pair_self_hessian] = segment_segment_barrier_self_gradient_and_hessian(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])], params.d_hat, entry.dof);
+        gradient += barrier_scale * pair_gradient;
+        self_hessian += barrier_scale * pair_self_hessian;
+    }
+
+    return {gradient, self_hessian};
 }
 
 double compute_solid_barrier_incremental_potential(
@@ -547,10 +621,8 @@ double compute_solid_barrier_incremental_potential(
     if (params.d_hat <= 0.0 || params.k_barrier <= 0.0)
         return 0.0;
 
-    const std::vector<unsigned char> solid_nodes = make_solid_node_mask(
-        ref_mesh.tet_nodes, x.size());
-    const std::vector<unsigned char> surface_nodes = make_solid_node_mask(
-        ref_mesh.surface_nodes, x.size());
+    const std::vector<unsigned char> solid_nodes = make_solid_node_mask(ref_mesh.tet_nodes, x.size());
+    const std::vector<unsigned char> surface_nodes = make_solid_node_mask(ref_mesh.surface_nodes, x.size());
     const BroadPhase::Cache& cache = broad_phase.cache();
     const double barrier_scale = params.dt2() * params.k_barrier;
     const double d_hat2 = params.d_hat * params.d_hat;
@@ -562,111 +634,22 @@ double compute_solid_barrier_incremental_potential(
         if (!include_solid_node_triangle_pair(pair, solid_nodes, surface_nodes)) {
             continue;
         }
-        if (!node_triangle_aabbs_within_distance(
-                x[static_cast<std::size_t>(pair.node)],
-                x[static_cast<std::size_t>(pair.tri_v[0])],
-                x[static_cast<std::size_t>(pair.tri_v[1])],
-                x[static_cast<std::size_t>(pair.tri_v[2])], d_hat2)) {
+        if (!node_triangle_aabbs_within_distance(x[static_cast<std::size_t>(pair.node)], x[static_cast<std::size_t>(pair.tri_v[0])], x[static_cast<std::size_t>(pair.tri_v[1])], x[static_cast<std::size_t>(pair.tri_v[2])], d_hat2)) {
             continue;
         }
-        energy += barrier_scale * node_triangle_barrier(
-            x[static_cast<std::size_t>(pair.node)],
-            x[static_cast<std::size_t>(pair.tri_v[0])],
-            x[static_cast<std::size_t>(pair.tri_v[1])],
-            x[static_cast<std::size_t>(pair.tri_v[2])], params.d_hat);
+        energy += barrier_scale * node_triangle_barrier(x[static_cast<std::size_t>(pair.node)], x[static_cast<std::size_t>(pair.tri_v[0])], x[static_cast<std::size_t>(pair.tri_v[1])], x[static_cast<std::size_t>(pair.tri_v[2])], params.d_hat);
     }
 
     for (const SegmentSegmentPair& pair : cache.ss_pairs) {
-        if (!include_solid_segment_segment_pair(
-                pair, solid_nodes, surface_nodes)) {
+        if (!include_solid_segment_segment_pair(pair, solid_nodes, surface_nodes)) {
             continue;
         }
-        if (!segment_aabbs_within_distance(
-                x[static_cast<std::size_t>(pair.v[0])],
-                x[static_cast<std::size_t>(pair.v[1])],
-                x[static_cast<std::size_t>(pair.v[2])],
-                x[static_cast<std::size_t>(pair.v[3])], d_hat2)) {
+        if (!segment_aabbs_within_distance(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])], d_hat2)) {
             continue;
         }
-        energy += barrier_scale * segment_segment_barrier(
-            x[static_cast<std::size_t>(pair.v[0])],
-            x[static_cast<std::size_t>(pair.v[1])],
-            x[static_cast<std::size_t>(pair.v[2])],
-            x[static_cast<std::size_t>(pair.v[3])], params.d_hat);
+        energy += barrier_scale * segment_segment_barrier(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])], params.d_hat);
     }
     return energy;
-}
-
-std::pair<Vec3, Mat33>
-compute_solid_local_barrier_gradient_and_self_hessian(
-    const int node,
-    const RefMesh& ref_mesh,
-    const SimParams& params,
-    const std::vector<Vec3>& x,
-    const BroadPhase& broad_phase) {
-    if (params.d_hat <= 0.0 || params.k_barrier <= 0.0)
-        return {Vec3::Zero(), Mat33::Zero()};
-
-    const std::vector<unsigned char> solid_nodes = make_solid_node_mask(
-        ref_mesh.tet_nodes, x.size());
-    const std::vector<unsigned char> surface_nodes = make_solid_node_mask(
-        ref_mesh.surface_nodes, x.size());
-    const BroadPhase::Cache& cache = broad_phase.cache();
-    const double barrier_scale = params.dt2() * params.k_barrier;
-    const double d_hat2 = params.d_hat * params.d_hat;
-    Vec3 gradient = Vec3::Zero();
-    Mat33 self_hessian = Mat33::Zero();
-
-    for (const BroadPhase::Cache::VertexPairEntry& entry :
-         cache.vertex_nt[static_cast<std::size_t>(node)]) {
-        const NodeTrianglePair& pair = cache.nt_pairs[entry.pair_index];
-        if (!include_solid_node_triangle_pair(pair, solid_nodes, surface_nodes)) {
-            continue;
-        }
-        if (!node_triangle_aabbs_within_distance(
-                x[static_cast<std::size_t>(pair.node)],
-                x[static_cast<std::size_t>(pair.tri_v[0])],
-                x[static_cast<std::size_t>(pair.tri_v[1])],
-                x[static_cast<std::size_t>(pair.tri_v[2])], d_hat2)) {
-            continue;
-        }
-        const auto [pair_gradient, pair_self_hessian] =
-            node_triangle_barrier_self_gradient_and_hessian(
-                x[static_cast<std::size_t>(pair.node)],
-                x[static_cast<std::size_t>(pair.tri_v[0])],
-                x[static_cast<std::size_t>(pair.tri_v[1])],
-                x[static_cast<std::size_t>(pair.tri_v[2])],
-                params.d_hat, entry.dof);
-        gradient += barrier_scale * pair_gradient;
-        self_hessian += barrier_scale * pair_self_hessian;
-    }
-
-    for (const BroadPhase::Cache::VertexPairEntry& entry :
-         cache.vertex_ss[static_cast<std::size_t>(node)]) {
-        const SegmentSegmentPair& pair = cache.ss_pairs[entry.pair_index];
-        if (!include_solid_segment_segment_pair(
-                pair, solid_nodes, surface_nodes)) {
-            continue;
-        }
-        if (!segment_aabbs_within_distance(
-                x[static_cast<std::size_t>(pair.v[0])],
-                x[static_cast<std::size_t>(pair.v[1])],
-                x[static_cast<std::size_t>(pair.v[2])],
-                x[static_cast<std::size_t>(pair.v[3])], d_hat2)) {
-            continue;
-        }
-        const auto [pair_gradient, pair_self_hessian] =
-            segment_segment_barrier_self_gradient_and_hessian(
-                x[static_cast<std::size_t>(pair.v[0])],
-                x[static_cast<std::size_t>(pair.v[1])],
-                x[static_cast<std::size_t>(pair.v[2])],
-                x[static_cast<std::size_t>(pair.v[3])],
-                params.d_hat, entry.dof);
-        gradient += barrier_scale * pair_gradient;
-        self_hessian += barrier_scale * pair_self_hessian;
-    }
-
-    return {gradient, self_hessian};
 }
 
 double compute_solid_incremental_potential(
@@ -676,10 +659,7 @@ double compute_solid_incremental_potential(
     const std::vector<Vec3>& x,
     const std::vector<Vec3>& xhat,
     const BroadPhase& broad_phase) {
-    return compute_solid_incremental_potential_no_barrier(
-               ref_mesh, pins, params, x, xhat)
-        + compute_solid_barrier_incremental_potential(
-               ref_mesh, params, x, broad_phase);
+    return compute_solid_incremental_potential_no_barrier(ref_mesh, pins, params, x, xhat) + compute_solid_barrier_incremental_potential(ref_mesh, params, x, broad_phase);
 }
 
 std::pair<Vec3, Mat33> compute_solid_local_gradient_and_block(
@@ -689,13 +669,15 @@ std::pair<Vec3, Mat33> compute_solid_local_gradient_and_block(
     const SimParams& params,
     const std::vector<Vec3>& x,
     const std::vector<Vec3>& xhat,
-    const BroadPhase& broad_phase) {
-    auto [gradient, block] =
-        compute_solid_local_gradient_and_pbgs_block_no_barrier(
-            node, ref_mesh, pins, params, x, xhat);
-    const auto [barrier_gradient, barrier_self_hessian] =
-        compute_solid_local_barrier_gradient_and_self_hessian(
-            node, ref_mesh, params, x, broad_phase);
+    const BroadPhase& broad_phase,
+    const std::vector<unsigned char>* solid_node_mask,
+    const std::vector<unsigned char>* surface_node_mask,
+    const std::vector<int>* pin_map) {
+    if ((solid_node_mask == nullptr) != (surface_node_mask == nullptr))
+        throw std::invalid_argument("compute_solid_local_gradient_and_block: both node masks must be supplied together");
+
+    auto [gradient, block] = compute_solid_local_gradient_and_pbgs_block_no_barrier(node, ref_mesh, pins, params, x, xhat, surface_node_mask, pin_map);
+    const auto [barrier_gradient, barrier_self_hessian] = compute_solid_local_barrier_gradient_and_self_hessian(node, ref_mesh, params, x, broad_phase, solid_node_mask, surface_node_mask);
     gradient += barrier_gradient;
     block += barrier_self_hessian;
     return {gradient, block};
@@ -707,12 +689,11 @@ double compute_global_solid_residual(
     const SimParams& params,
     const std::vector<Vec3>& x,
     const std::vector<Vec3>& xhat,
-    const BroadPhase& broad_phase) {
+    const BroadPhase& broad_phase,
+    const std::vector<int>* pin_map) {
     (void)params.dt2();
-    const std::vector<unsigned char> solid_nodes = make_solid_node_mask(
-        ref_mesh.tet_nodes, x.size());
-    const std::vector<unsigned char> surface_nodes = make_solid_node_mask(
-        ref_mesh.surface_nodes, x.size());
+    const std::vector<unsigned char> solid_nodes = make_solid_node_mask(ref_mesh.tet_nodes, x.size());
+    const std::vector<unsigned char> surface_nodes = make_solid_node_mask(ref_mesh.surface_nodes, x.size());
 
     double r_inf = 0.0;
     const int num_solid_nodes =
@@ -720,9 +701,7 @@ double compute_global_solid_residual(
     #pragma omp parallel for reduction(max:r_inf) schedule(static)
     for (int i = 0; i < num_solid_nodes; ++i) {
         const int node = ref_mesh.tet_nodes[static_cast<std::size_t>(i)];
-        Vec3 gradient = compute_solid_local_gradient(
-            node, ref_mesh, pins, params, x, xhat, broad_phase,
-            solid_nodes, surface_nodes);
+        Vec3 gradient = compute_solid_local_gradient(node, ref_mesh, pins, params, x, xhat, broad_phase, solid_nodes, surface_nodes, pin_map);
         const double mass = ref_mesh.mass[static_cast<std::size_t>(node)];
         if (mass > 0.0)
             gradient /= mass;
