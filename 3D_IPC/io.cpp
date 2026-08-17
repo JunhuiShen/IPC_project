@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstddef>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -189,6 +190,40 @@ void validate_marker_count(
 {
     if (marker_count != 0 && marker_count != 1)
         throw_format_error(filename, line_number, "boundary-marker count must be zero or one");
+}
+
+void validate_tet_mesh_output(
+    const std::vector<Vec3>& positions,
+    const std::vector<int>& tets,
+    const char* function_name)
+{
+    if (positions.empty())
+        throw std::invalid_argument(std::string(function_name) + ": positions cannot be empty");
+    if (tets.size() % 4 != 0) {
+        throw std::invalid_argument(
+            std::string(function_name)
+            + ": tets must contain four indices per element");
+    }
+    if (positions.size()
+            > static_cast<std::size_t>(std::numeric_limits<int>::max())
+        || tets.size() / 4
+            > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error(
+            std::string(function_name) + ": mesh is too large");
+    }
+    for (const Vec3& position : positions) {
+        if (!position.allFinite()) {
+            throw std::invalid_argument(
+                std::string(function_name) + ": positions must be finite");
+        }
+    }
+    for (const int node : tets) {
+        if (node < 0 || node >= static_cast<int>(positions.size())) {
+            throw std::out_of_range(
+                std::string(function_name)
+                + ": tetrahedron node index is out of range");
+        }
+    }
 }
 
 } // namespace
@@ -379,4 +414,45 @@ void read_tetgen_faces(
 
     require_no_additional_records(input, line_number, filename);
     faces.swap(parsed);
+}
+
+void write_tet_mesh_obj(
+    const std::string& filename,
+    const std::vector<Vec3>& positions,
+    const std::vector<int>& tets)
+{
+    validate_tet_mesh_output(positions, tets, "write_tet_mesh_obj");
+
+    std::ofstream output(filename);
+    if (!output)
+        throw std::runtime_error("write_tet_mesh_obj: cannot open '" + filename + "'");
+
+    output << std::setprecision(17);
+    for (const Vec3& position : positions) {
+        output << "v " << position.x() << " " << position.y() << " "
+               << position.z() << '\n';
+    }
+
+    // Outward faces of a positively oriented tet, matching TetFace in
+    // mesh.cpp/TGSL: {1,2,3}, {0,3,2}, {0,1,3}, {0,2,1}.
+    constexpr int local_faces[4][3] = {
+        {1, 2, 3},
+        {0, 3, 2},
+        {0, 1, 3},
+        {0, 2, 1},
+    };
+    const std::size_t num_tets = tets.size() / 4;
+    for (std::size_t element = 0; element < num_tets; ++element) {
+        output << "g tet_" << element << '\n';
+        for (const auto& face : local_faces) {
+            output << "f";
+            for (const int local : face)
+                output << " " << tets[4 * element + local] + 1;
+            output << '\n';
+        }
+    }
+
+    output.close();
+    if (!output)
+        throw std::runtime_error("write_tet_mesh_obj: failed while writing '" + filename + "'");
 }

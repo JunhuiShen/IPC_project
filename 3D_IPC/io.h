@@ -32,3 +32,9 @@ void read_tetgen_faces(
     const std::string& filename,
     std::vector<int>& faces,
     bool zero_based_index = false);
+
+// Write a tetrahedral mesh as an OBJ visualization
+void write_tet_mesh_obj(
+    const std::string& filename,
+    const std::vector<Vec3>& positions,
+    const std::vector<int>& tets);

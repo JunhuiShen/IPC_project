@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -47,6 +49,15 @@ protected:
         if (!output)
             throw std::runtime_error("could not write TetGen test file");
         return path.string();
+    }
+
+    std::string read_file(const fs::path& path) const {
+        std::ifstream input(path);
+        if (!input)
+            throw std::runtime_error("could not open TetGen test file");
+        return std::string(
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>());
     }
 
     fs::path directory_;
@@ -269,6 +280,114 @@ TEST_F(TetGenIOTest, LoadedUnitTetPassesMeshValidation) {
     read_tetgen_tets(ele_file, tets);
 
     EXPECT_NO_THROW(validate_tet_mesh(tets, positions));
+}
+
+TEST_F(TetGenIOTest, WritesObjTetGroupsWithOutwardTetFaceWinding) {
+    const std::vector<Vec3> positions{
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.25, -2.5, 3.75),
+        Vec3(-4.0, 5.5, 6.0),
+        Vec3(0.125, 0.25, 0.5),
+        Vec3(9.0, 8.0, 7.0),
+    };
+    const std::vector<int> tets{
+        0, 1, 2, 3,
+        4, 3, 2, 1,
+    };
+    const fs::path output = directory_ / "two_tets.obj";
+
+    write_tet_mesh_obj(output.string(), positions, tets);
+
+    // Each group preserves one tetrahedral cell for Houdini.  The four local
+    // faces use mesh::TetFace exactly:
+    //   (1,2,3), (0,3,2), (0,1,3), (0,2,1).
+    EXPECT_EQ(
+        read_file(output),
+        "v 0 0 0\n"
+        "v 1.25 -2.5 3.75\n"
+        "v -4 5.5 6\n"
+        "v 0.125 0.25 0.5\n"
+        "v 9 8 7\n"
+        "g tet_0\n"
+        "f 2 3 4\n"
+        "f 1 4 3\n"
+        "f 1 2 4\n"
+        "f 1 3 2\n"
+        "g tet_1\n"
+        "f 4 3 2\n"
+        "f 5 2 3\n"
+        "f 5 4 2\n"
+        "f 5 3 4\n");
+}
+
+TEST_F(TetGenIOTest, ObjWriterRejectsInvalidTetMeshWithoutOverwritingOutput) {
+    const std::vector<Vec3> positions{
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0),
+        Vec3(0.0, 0.0, 1.0),
+    };
+    const fs::path output = directory_ / "preserve.obj";
+    write_file("preserve.obj", "existing mesh\n");
+
+    EXPECT_THROW(
+        write_tet_mesh_obj(
+            output.string(), positions, std::vector<int>{0, 1, 2}),
+        std::invalid_argument);
+    EXPECT_EQ(read_file(output), "existing mesh\n");
+
+    EXPECT_THROW(
+        write_tet_mesh_obj(
+            output.string(), positions, std::vector<int>{-1, 1, 2, 3}),
+        std::out_of_range);
+    EXPECT_EQ(read_file(output), "existing mesh\n");
+
+    EXPECT_THROW(
+        write_tet_mesh_obj(
+            output.string(), positions, std::vector<int>{0, 1, 2, 4}),
+        std::out_of_range);
+    EXPECT_EQ(read_file(output), "existing mesh\n");
+}
+
+TEST_F(TetGenIOTest, ObjWriterRejectsNonfinitePositionsWithoutOverwritingOutput) {
+    const std::vector<int> tets{0, 1, 2, 3};
+    const fs::path output = directory_ / "finite.obj";
+    write_file("finite.obj", "existing mesh\n");
+
+    std::vector<Vec3> positions{
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0),
+        Vec3(0.0, 0.0, 1.0),
+    };
+    positions[1].x() = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(
+        write_tet_mesh_obj(output.string(), positions, tets),
+        std::invalid_argument);
+    EXPECT_EQ(read_file(output), "existing mesh\n");
+
+    positions[1].x() = 1.0;
+    positions[2].z() = std::numeric_limits<double>::infinity();
+    EXPECT_THROW(
+        write_tet_mesh_obj(output.string(), positions, tets),
+        std::invalid_argument);
+    EXPECT_EQ(read_file(output), "existing mesh\n");
+}
+
+TEST_F(TetGenIOTest, ObjWriterReportsOutputOpenFailure) {
+    const std::vector<Vec3> positions{
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0),
+        Vec3(0.0, 0.0, 1.0),
+    };
+    const std::vector<int> tets{0, 1, 2, 3};
+    const fs::path output = directory_ / "missing" / "mesh.obj";
+
+    EXPECT_THROW(
+        write_tet_mesh_obj(output.string(), positions, tets),
+        std::runtime_error);
+    EXPECT_FALSE(fs::exists(output));
 }
 
 } // namespace
