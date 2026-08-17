@@ -8,6 +8,44 @@
 #include <limits>
 #include <numeric>
 
+namespace {
+
+void expect_flat_horizontal_polygon_prism(
+    const std::vector<Vec3>& positions, int base, int side_count,
+    const Vec3& center, double radius, double thickness) {
+    constexpr double tolerance = 1.0e-14;
+    const double bottom_y = center.y() - 0.5 * thickness;
+    const double top_y = center.y() + 0.5 * thickness;
+
+    ASSERT_GE(base, 0);
+    ASSERT_LE(
+        base + 2 * side_count,
+        static_cast<int>(positions.size()));
+
+    // Material vertex zero starts on +x. Keeping it there rules out yaw.
+    const Vec3& first_bottom = positions[static_cast<std::size_t>(base)];
+    EXPECT_NEAR(first_bottom.x(), center.x() + radius, tolerance);
+    EXPECT_NEAR(first_bottom.z(), center.z(), tolerance);
+
+    // Both cap rings must be horizontal, and their corresponding vertices
+    // must differ only in world y. These checks rule out either tilt axis.
+    for (int local = 0; local < side_count; ++local) {
+        SCOPED_TRACE(local);
+        const Vec3& bottom = positions[static_cast<std::size_t>(base + local)];
+        const Vec3& top = positions[
+            static_cast<std::size_t>(base + side_count + local)];
+        EXPECT_NEAR(bottom.y(), bottom_y, tolerance);
+        EXPECT_NEAR(top.y(), top_y, tolerance);
+        EXPECT_NEAR(bottom.x(), top.x(), tolerance);
+        EXPECT_NEAR(bottom.z(), top.z(), tolerance);
+        EXPECT_NEAR(
+            std::hypot(bottom.x() - center.x(), bottom.z() - center.z()),
+            radius, tolerance);
+    }
+}
+
+} // namespace
+
 TEST(BuildIncidentTriangleMap, BasicExample) {
 // [0,1,2, 1,2,5] -- two triangles
 // New format: {tri_idx, local_node_index}
@@ -240,6 +278,10 @@ TEST(MixedExample,
     ASSERT_EQ(state.orientations.size(), rigid_body_count);
     ASSERT_EQ(state.omega.size(), rigid_body_count);
 
+    constexpr double kPi = 3.14159265358979323846;
+    const Vec4 flat_orientation(
+        std::cos(0.25 * kPi), -std::sin(0.25 * kPi), 0.0, 0.0);
+
     std::vector<unsigned char> is_rigid(total_vertices, 0);
     std::vector<unsigned char> is_solid(total_vertices, 0);
     std::vector<unsigned char> is_solid_surface(total_vertices, 0);
@@ -248,7 +290,8 @@ TEST(MixedExample,
             static_cast<int>(ref_mesh.rb_nodes[rb].size()) / 2;
         EXPECT_GE(side_count, 3);
         EXPECT_LE(side_count, 12);
-        EXPECT_NEAR(state.orientations[rb].norm(), 1.0, 1.0e-12);
+        EXPECT_TRUE(state.orientations[rb].isApprox(
+            flat_orientation, 1.0e-14));
         EXPECT_TRUE(state.v_coms[rb].isZero(0.0));
         EXPECT_TRUE(state.omega[rb].isZero(0.0));
         EXPECT_GT(ref_mesh.total_mass[rb], 0.0);
@@ -330,6 +373,19 @@ TEST(MixedExample,
         const Vec3 center = object_is_rigid
             ? state.x_coms[rigid_cursor]
             : state.deformed_positions[node_cursor + 2 * side_count];
+
+        const Vec3& first_bottom = state.deformed_positions[node_cursor];
+        const Vec3& first_top =
+            state.deformed_positions[node_cursor + side_count];
+        const double cap_radius = std::hypot(
+            first_bottom.x() - center.x(),
+            first_bottom.z() - center.z());
+        const double cap_thickness = first_top.y() - first_bottom.y();
+        ASSERT_GT(cap_radius, 0.0);
+        ASSERT_GT(cap_thickness, 0.0);
+        expect_flat_horizontal_polygon_prism(
+            state.deformed_positions, node_cursor, side_count,
+            center, cap_radius, cap_thickness);
 
         if (object_is_rigid) {
             ASSERT_EQ(ref_mesh.rb_nodes[rigid_cursor].front(), node_cursor);
@@ -517,6 +573,9 @@ TEST(MixedExample, SingleDeformableSolidAboveOppositeEdgePinnedCloth) {
     EXPECT_TRUE(state.deformed_positions[solid_interior].isApprox(
         Vec3(0.0, 1.5, 0.0), 1.0e-14));
     EXPECT_EQ(is_solid_surface[solid_interior], 0);
+    expect_flat_horizontal_polygon_prism(
+        state.deformed_positions, cloth_vertices, side_count,
+        Vec3(0.0, 1.5, 0.0), radius, thickness);
 
     for (const int node : ref_mesh.tets) {
         EXPECT_GE(node, cloth_vertices);
@@ -608,6 +667,9 @@ TEST(SolidExample, DensityNineHundredOctagonalPrismAboveGround) {
     }
     EXPECT_TRUE(state.deformed_positions.back().isApprox(
         Vec3(0.0, 1.0, 0.0), 1.0e-14));
+    expect_flat_horizontal_polygon_prism(
+        state.deformed_positions, 0, side_count,
+        Vec3(0.0, 1.0, 0.0), radius, thickness);
     EXPECT_EQ(
         std::count(
             ref_mesh.surface_nodes.begin(), ref_mesh.surface_nodes.end(),

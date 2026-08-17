@@ -161,9 +161,9 @@ Built-in example scenes (`--example N`):
 | `10` | Five differently oriented rigid hexagonal prisms falling onto one another in a vertical column |
 | `11` | One hundred mixed triangular, square, pentagonal, heptagonal, and octagonal prisms initialized in five layers and falling into a wide open-top box |
 | `12` | Fifty mixed rigid prisms (triangle through dodecagon) falling onto a large rectangular cloth pinned at its four corners |
-| `13` | One density-900 tetrahedralized deformable octagonal prism falling onto a horizontal ground plane |
-| `14` | One tetrahedralized deformable octagonal prism falling onto a cloth pinned along two opposite sides |
-| `15` | Ten small rigid and ten larger tetrahedralized deformable polygonal prisms, spanning 3 through 12 sides, falling onto a cloth pinned along two opposite sides |
+| `13` | One flat density-900 tetrahedralized deformable octagonal prism falling onto a horizontal ground plane |
+| `14` | One flat tetrahedralized deformable octagonal prism falling onto a cloth pinned along two opposite sides |
+| `15` | Ten flat small rigid and ten flat larger tetrahedralized deformable polygonal prisms, spanning 3 through 12 sides, falling onto a cloth pinned along two opposite sides |
 | `16` | Ten flat polygonal prisms, alternating five rigid bodies and five deformable solids, falling onto one another above a cloth pinned along two opposite sides |
 
 At startup, every scene reports its vertex and triangle counts; scenes with

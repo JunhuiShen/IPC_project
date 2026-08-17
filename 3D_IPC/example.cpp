@@ -1364,23 +1364,13 @@ void build_single_deformable_solid_ground_drop_example(
 
     const Vec4 flat_orientation(
         std::cos(0.25 * kPi), -std::sin(0.25 * kPi), 0.0, 0.0);
-    const double yaw = 0.35;
-    const Vec4 yaw_orientation(
-        std::cos(0.5 * yaw), 0.0, std::sin(0.5 * yaw), 0.0);
-    const double tilt = 0.22;
-    const Vec4 tilt_orientation(
-        std::cos(0.5 * tilt), 0.0, 0.0, std::sin(0.5 * tilt));
-    const Vec4 orientation = quaternion_normalize(
-        quaternion_multiply(
-            yaw_orientation,
-            quaternion_multiply(tilt_orientation, flat_orientation)));
 
     constexpr int side_count = 8;
     constexpr double radius = 0.22;
     constexpr double thickness = 0.16;
     append_deformable_polygon_prism(
         side_count, state, ref_mesh, Vec3(0.0, 1.0, 0.0),
-        radius, params.solid_density, thickness, orientation);
+        radius, params.solid_density, thickness, flat_orientation);
     ref_mesh.build_deformable_nodes();
 
     // The visual plane coincides exactly with the infinite SDF ground.
@@ -1444,26 +1434,16 @@ void build_single_deformable_solid_drop_on_pinned_cloth_example(
             state.deformed_positions);
     }
 
-    // Lay the prism nearly flat so its polygonal cap meets the cloth, with a
-    // small tilt to avoid an exactly simultaneous, perfectly flat impact.
+    // The material extrusion axis is +z. Rotate it exactly onto world +y so
+    // both polygonal caps are horizontal, with no yaw or tilt.
     const Vec4 flat_orientation(
         std::cos(0.25 * kPi), -std::sin(0.25 * kPi), 0.0, 0.0);
-    const double yaw = 0.35;
-    const Vec4 yaw_orientation(
-        std::cos(0.5 * yaw), 0.0, std::sin(0.5 * yaw), 0.0);
-    const double tilt = 0.22;
-    const Vec4 tilt_orientation(
-        std::cos(0.5 * tilt), 0.0, 0.0, std::sin(0.5 * tilt));
-    const Vec4 orientation = quaternion_normalize(
-        quaternion_multiply(
-            yaw_orientation,
-            quaternion_multiply(tilt_orientation, flat_orientation)));
 
     const int solid_base = append_deformable_polygon_prism(
         /*number_of_nodes=*/8, state, ref_mesh,
         /*center=*/Vec3(0.0, 1.5, 0.0),
         /*radius=*/0.30, params.solid_density,
-        /*thickness=*/0.20, orientation);
+        /*thickness=*/0.20, flat_orientation);
     // The unladen cloth begins falling under gravity too; this modest relative
     // downward speed makes the solid catch and load the sagging sheet early.
     for (std::size_t node = static_cast<std::size_t>(solid_base);
@@ -1526,7 +1506,7 @@ void build_twenty_rigid_deformable_polygons_drop_on_pinned_cloth_example(
 
     // A small integer hash gives stable, random-looking samples on every
     // platform. Reproducibility keeps the scene and its construction test
-    // deterministic while still varying size, position, and orientation.
+    // deterministic while still varying size and position.
     const auto random_unit = [](std::uint32_t value) {
         value += 0x9e3779b9U;
         value = (value ^ (value >> 16U)) * 0x85ebca6bU;
@@ -1541,21 +1521,16 @@ void build_twenty_rigid_deformable_polygons_drop_on_pinned_cloth_example(
             static_cast<std::uint32_t>(polygon)
             + channel * 0x6d2b79f5U);
     };
-    const auto axis_angle_quaternion = [](const Vec3& axis,
-                                          const double angle) {
-        const double half_angle = 0.5 * angle;
-        return Vec4(
-            std::cos(half_angle),
-            axis.x() * std::sin(half_angle),
-            axis.y() * std::sin(half_angle),
-            axis.z() * std::sin(half_angle));
-    };
-
     constexpr int polygon_count = 20;
     constexpr int columns = 5;
     constexpr double spacing = 0.72;
     const double rigid_body_density = params.rigid_density;
     const double deformable_body_density = params.solid_density;
+    // The material extrusion axis is +z. Use the same exact flat orientation
+    // for every rigid body and deformable solid: horizontal caps, no yaw or
+    // tilt.
+    const Vec4 flat_orientation(
+        std::cos(0.25 * kPi), -std::sin(0.25 * kPi), 0.0, 0.0);
     for (int polygon = 0; polygon < polygon_count; ++polygon) {
         const int row = polygon / columns;
         const int column = polygon % columns;
@@ -1571,16 +1546,6 @@ void build_twenty_rigid_deformable_polygons_drop_on_pinned_cloth_example(
             ? 0.045 + 0.020 * sample(polygon, 1U)
             : 0.120 + 0.040 * sample(polygon, 1U);
 
-        const double yaw = kTwoPi * sample(polygon, 2U);
-        const double x_tilt = 0.60 * (sample(polygon, 3U) - 0.5);
-        const double z_tilt = 0.60 * (sample(polygon, 4U) - 0.5);
-        const Vec4 qx = axis_angle_quaternion(Vec3::UnitX(), x_tilt);
-        const Vec4 qy = axis_angle_quaternion(Vec3::UnitY(), yaw);
-        const Vec4 qz = axis_angle_quaternion(Vec3::UnitZ(), z_tilt);
-        const Vec4 orientation = quaternion_normalize(
-            quaternion_multiply(
-                qy, quaternion_multiply(qz, qx)));
-
         const Vec3 center(
             (column - 2.0) * spacing
                 + 0.024 * (sample(polygon, 5U) - 0.5),
@@ -1594,11 +1559,12 @@ void build_twenty_rigid_deformable_polygons_drop_on_pinned_cloth_example(
             append_rigid_polygon(
                 side_count, state, ref_mesh, center,
                 radius, rigid_body_density, thickness,
-                Vec3::Zero(), orientation, Vec3::Zero());
+                Vec3::Zero(), flat_orientation, Vec3::Zero());
         } else {
             append_deformable_polygon_prism(
                 side_count, state, ref_mesh, center,
-                radius, deformable_body_density, thickness, orientation);
+                radius, deformable_body_density, thickness,
+                flat_orientation);
         }
     }
 
