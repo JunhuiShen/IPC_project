@@ -4,7 +4,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <numeric>
 
@@ -854,13 +859,13 @@ TEST(MixedExample, RigidAndSolidDensitiesAreIndependent) {
 // ---------------------------------------------------------------------------
 
 TEST(AppendDeformablePolygonPrism,
-     CountsOrientationBoundaryAndVolumeForThreeThroughTenSides) {
+     CountsOrientationBoundaryAndVolumeForThreeThroughTwelveSides) {
     constexpr double kPi = 3.14159265358979323846;
     constexpr double radius = 0.37;
     constexpr double thickness = 0.21;
     constexpr double density = 7.3;
 
-    for (int sides = 3; sides <= 10; ++sides) {
+    for (int sides = 3; sides <= 12; ++sides) {
         SCOPED_TRACE(sides);
         RefMesh ref_mesh;
         DeformedState state;
@@ -1007,6 +1012,186 @@ TEST(AppendDeformablePolygonPrism, RejectsInvalidInputsTransactionally) {
             1.0, 1.0, 1.0),
         std::invalid_argument);
     expect_empty();
+}
+
+TEST(AppendNormalizedTetGenSolid,
+     RecentersUniformlyScalesAndRepairsNegativeOrientation) {
+    namespace fs = std::filesystem;
+    static std::atomic<std::uint64_t> next_directory{0};
+    const fs::path directory = fs::temp_directory_path()
+        / ("ipc_normalized_tetgen_solid_"
+           + std::to_string(
+               std::chrono::steady_clock::now().time_since_epoch().count())
+           + "_" + std::to_string(next_directory.fetch_add(1)));
+    fs::create_directories(directory);
+    const fs::path node_file = directory / "shape.node";
+    const fs::path element_file = directory / "shape.ele";
+    {
+        std::ofstream output(node_file);
+        ASSERT_TRUE(output.good());
+        output << "4 3 0 0\n"
+               << "0 -2 -1 0\n"
+               << "1  2 -1 0\n"
+               << "2 -2  3 0\n"
+               << "3 -2 -1 1\n";
+    }
+    {
+        std::ofstream output(element_file);
+        ASSERT_TRUE(output.good());
+        // This is the negative ordering of the source tetrahedron. The
+        // importer must flip it before create_solid validates the mesh.
+        output << "1 4 0\n"
+               << "0 0 2 1 3\n";
+    }
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    const Vec3 target_center(5.0, 6.0, 7.0);
+    const int base = append_normalized_tetgen_solid(
+        node_file.string(), element_file.string(), state, ref_mesh,
+        target_center, /*target_max_extent=*/2.0, /*density=*/6.0,
+        /*zero_based_index=*/true);
+
+    EXPECT_EQ(base, 0);
+    ASSERT_EQ(state.deformed_positions.size(), 4U);
+    Vec3 lower = state.deformed_positions.front();
+    Vec3 upper = state.deformed_positions.front();
+    for (const Vec3& position : state.deformed_positions) {
+        lower = lower.cwiseMin(position);
+        upper = upper.cwiseMax(position);
+    }
+    EXPECT_TRUE((0.5 * (lower + upper)).isApprox(target_center, 0.0));
+    EXPECT_DOUBLE_EQ((upper - lower).maxCoeff(), 2.0);
+    ASSERT_EQ(ref_mesh.tet_rest_data.size(), 1U);
+    EXPECT_GT(ref_mesh.tet_rest_data.front().measure, 0.0);
+    EXPECT_NEAR(ref_mesh.tet_rest_data.front().measure, 1.0 / 3.0, 1.0e-15);
+    EXPECT_NEAR(
+        std::accumulate(ref_mesh.mass.begin(), ref_mesh.mass.end(), 0.0),
+        2.0, 1.0e-14);
+
+    std::error_code error;
+    fs::remove_all(directory, error);
+}
+
+TEST(AppendNormalizedObjRigidBody,
+     RemovesOrphansNormalizesRotatesOffsetsTrianglesAndUsesVolumeMass) {
+    namespace fs = std::filesystem;
+    static std::atomic<std::uint64_t> next_directory{0};
+    const fs::path directory = fs::temp_directory_path()
+        / ("ipc_normalized_obj_rigid_"
+           + std::to_string(
+               std::chrono::steady_clock::now().time_since_epoch().count())
+           + "_" + std::to_string(next_directory.fetch_add(1)));
+    fs::create_directories(directory);
+    const fs::path obj_file = directory / "tetrahedron.obj";
+    {
+        std::ofstream output(obj_file);
+        ASSERT_TRUE(output.good());
+        output << "v 0 0 0\n"
+               << "v 2 0 0\n"
+               << "v 0 4 0\n"
+               << "v 0 0 1\n"
+               // This orphan must neither alter normalization nor become a
+               // collision proxy particle.
+               << "v 100 100 100\n"
+               << "f 2 3 4\n"
+               << "f 1 4 3\n"
+               << "f 1 2 4\n"
+               << "f 1 3 2\n";
+    }
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    state.deformed_positions.push_back(Vec3(-10.0, -10.0, -10.0));
+    ref_mesh.tris = {0, 0, 0};
+    const Vec3 target_center(5.0, 6.0, 7.0);
+    const double half_angle = 0.25 * M_PI;
+    const Vec4 orientation(
+        std::cos(half_angle), 0.0, 0.0, std::sin(half_angle));
+    const Vec3 v_com(0.1, 0.2, 0.3);
+    const Vec3 omega(0.0, 0.0, 2.0);
+    const int rigid_body = append_normalized_obj_rigid_body(
+        obj_file.string(), state, ref_mesh, target_center,
+        /*target_max_extent=*/2.0, /*density=*/12.0,
+        v_com, orientation, omega);
+
+    EXPECT_EQ(rigid_body, 0);
+    ASSERT_EQ(state.deformed_positions.size(), 5U);
+    ASSERT_EQ(ref_mesh.rb_nodes.size(), 1U);
+    EXPECT_EQ(
+        ref_mesh.rb_nodes[0], (std::vector<int>{1, 2, 3, 4}));
+    ASSERT_EQ(ref_mesh.tris.size(), 15U);
+    EXPECT_EQ(
+        std::vector<int>(ref_mesh.tris.begin() + 3, ref_mesh.tris.end()),
+        (std::vector<int>{
+            2, 3, 4, 1, 4, 3, 1, 2, 4, 1, 3, 2}));
+
+    Vec3 lower = state.deformed_positions[1];
+    Vec3 upper = state.deformed_positions[1];
+    for (std::size_t node = 1; node < state.deformed_positions.size(); ++node) {
+        lower = lower.cwiseMin(state.deformed_positions[node]);
+        upper = upper.cwiseMax(state.deformed_positions[node]);
+    }
+    EXPECT_TRUE((0.5 * (lower + upper)).isApprox(target_center, 1.0e-14));
+    EXPECT_NEAR((upper - lower).maxCoeff(), 2.0, 1.0e-14);
+    ASSERT_EQ(ref_mesh.total_mass.size(), 1U);
+    // Source volume is 8/6, and normalization scales lengths by 1/2:
+    // 12 * (8/6) * (1/2)^3 = 2.
+    EXPECT_NEAR(ref_mesh.total_mass[0], 2.0, 1.0e-14);
+    EXPECT_TRUE(state.v_coms[0].isApprox(v_com, 0.0));
+    EXPECT_TRUE(state.orientations[0].isApprox(orientation, 1.0e-15));
+    EXPECT_TRUE(state.omega[0].isApprox(omega, 0.0));
+
+    std::error_code error;
+    fs::remove_all(directory, error);
+}
+
+TEST(AppendNormalizedObjRigidBody, RejectsOpenSurfaceBeforeMutation) {
+    namespace fs = std::filesystem;
+    static std::atomic<std::uint64_t> next_directory{0};
+    const fs::path directory = fs::temp_directory_path()
+        / ("ipc_open_obj_rigid_"
+           + std::to_string(
+               std::chrono::steady_clock::now().time_since_epoch().count())
+           + "_" + std::to_string(next_directory.fetch_add(1)));
+    fs::create_directories(directory);
+    const fs::path obj_file = directory / "open.obj";
+    {
+        std::ofstream output(obj_file);
+        ASSERT_TRUE(output.good());
+        output << "v 0 0 0\n"
+               << "v 1 0 0\n"
+               << "v 0 1 0\n"
+               << "f 1 2 3\n";
+    }
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    ref_mesh.tris = {7, 8, 9};
+    ref_mesh.mass = {3.0};
+    ref_mesh.node_to_rb = {-1};
+    ref_mesh.num_positions = 1;
+    state.deformed_positions = {Vec3(1.0, 2.0, 3.0)};
+    state.velocities = {Vec3(4.0, 5.0, 6.0)};
+
+    EXPECT_THROW(
+        append_normalized_obj_rigid_body(
+            obj_file.string(), state, ref_mesh, Vec3::Zero(),
+            1.0, 900.0),
+        std::invalid_argument);
+    EXPECT_EQ(ref_mesh.tris, (std::vector<int>{7, 8, 9}));
+    EXPECT_EQ(ref_mesh.mass, (std::vector<double>{3.0}));
+    EXPECT_EQ(ref_mesh.node_to_rb, (std::vector<int>{-1}));
+    EXPECT_EQ(ref_mesh.num_positions, 1U);
+    ASSERT_EQ(state.deformed_positions.size(), 1U);
+    EXPECT_TRUE(state.deformed_positions[0].isApprox(
+        Vec3(1.0, 2.0, 3.0), 0.0));
+    ASSERT_EQ(state.velocities.size(), 1U);
+    EXPECT_TRUE(state.velocities[0].isApprox(Vec3(4.0, 5.0, 6.0), 0.0));
+    EXPECT_TRUE(ref_mesh.total_mass.empty());
+
+    std::error_code error;
+    fs::remove_all(directory, error);
 }
 
 // ---------------------------------------------------------------------------
@@ -1364,6 +1549,432 @@ TEST(MixedExample,
         ref_mesh.mass.begin() + cloth_vertices, 0.0);
     EXPECT_NEAR(
         total_cloth_mass,
+        params.density * params.thickness * 4.0 * 4.0,
+        1.0e-10);
+    EXPECT_TRUE(std::equal(
+        object_masses.begin(), object_masses.end(),
+        ref_mesh.mass.begin() + cloth_vertices));
+}
+
+TEST(MixedExample,
+     TwoBunnySpotCubeGearCyclesFormOneVerticalStackAbovePinnedCloth) {
+    namespace fs = std::filesystem;
+    static std::atomic<std::uint64_t> next_directory{0};
+    const fs::path directory = fs::temp_directory_path()
+        / ("ipc_bunny_spot_cube_gear_scene_"
+           + std::to_string(
+               std::chrono::steady_clock::now().time_since_epoch().count())
+           + "_" + std::to_string(next_directory.fetch_add(1)));
+    fs::create_directories(directory);
+
+    struct WorkingDirectoryGuard {
+        fs::path previous;
+        fs::path temporary;
+
+        explicit WorkingDirectoryGuard(fs::path path)
+            : previous(fs::current_path()), temporary(std::move(path)) {
+            fs::current_path(temporary);
+        }
+
+        ~WorkingDirectoryGuard() {
+            std::error_code error;
+            fs::current_path(previous, error);
+            fs::remove_all(temporary, error);
+        }
+    } working_directory(directory);
+
+    // Exercise the production scene's fixed repository-relative paths using
+    // tiny, distinct meshes. The Bunny fixture has two tetrahedra while Spot
+    // has one, so the test catches accidental path reuse between solid types.
+    fs::create_directories("example_obj/bunny_coarse");
+    fs::create_directories("example_obj/spot");
+    {
+        std::ofstream nodes(
+            "example_obj/bunny_coarse/bunny_2000f.1.node");
+        ASSERT_TRUE(nodes.good());
+        nodes << "5 3 0 0\n"
+              << "0 0 0 0\n"
+              << "1 8 0 0\n"
+              << "2 0 2 0\n"
+              << "3 0 0 1\n"
+              << "4 0 0 -3\n";
+    }
+    {
+        std::ofstream elements(
+            "example_obj/bunny_coarse/bunny_2000f.1.ele");
+        ASSERT_TRUE(elements.good());
+        elements << "2 4 0\n"
+                 << "0 0 1 2 3\n"
+                 << "1 0 2 1 4\n";
+    }
+    {
+        std::ofstream nodes("example_obj/spot/spot_2000f.1.node");
+        ASSERT_TRUE(nodes.good());
+        nodes << "4 3 0 0\n"
+              << "0 0 0 0\n"
+              << "1 10 0 0\n"
+              << "2 0 4 0\n"
+              << "3 0 0 2\n";
+    }
+    {
+        std::ofstream elements("example_obj/spot/spot_2000f.1.ele");
+        ASSERT_TRUE(elements.good());
+        elements << "1 4 0\n"
+                 << "0 0 1 2 3\n";
+    }
+    {
+        std::ofstream gear("example_obj/gear_z18_coarse.obj");
+        ASSERT_TRUE(gear.good());
+        // Closed, outward-oriented anisotropic octahedron with source AABB
+        // 4 x 2 x 1 and volume 4/3.
+        gear << "v  2  0    0\n"
+             << "v -2  0    0\n"
+             << "v  0  1    0\n"
+             << "v  0 -1    0\n"
+             << "v  0  0  0.5\n"
+             << "v  0  0 -0.5\n"
+             << "f 1 3 5\n"
+             << "f 3 2 5\n"
+             << "f 2 4 5\n"
+             << "f 4 1 5\n"
+             << "f 3 1 6\n"
+             << "f 2 3 6\n"
+             << "f 4 2 6\n"
+             << "f 1 4 6\n";
+    }
+
+    IPCArgs3D args;
+    args.solid_density = 731.0;
+    args.rigid_density = 947.0;
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+
+    build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
+        args, ref_mesh, state, X, pins, params);
+
+    constexpr int cloth_nx = 30;
+    constexpr int cloth_nz = 30;
+    constexpr int cloth_vertices = (cloth_nx + 1) * (cloth_nz + 1);
+    constexpr int cloth_triangles = 2 * cloth_nx * cloth_nz;
+    constexpr int copies = 2;
+    constexpr int bunny_nodes = 5;
+    constexpr int bunny_tets = 2;
+    constexpr int bunny_surface_triangles = 6;
+    constexpr int spot_nodes = 4;
+    constexpr int spot_tets = 1;
+    constexpr int spot_surface_triangles = 4;
+    constexpr int cube_nodes = 8;
+    constexpr int cube_triangles = 12;
+    constexpr int gear_nodes = 6;
+    constexpr int gear_triangles = 8;
+    constexpr int solid_nodes = copies * (bunny_nodes + spot_nodes);
+    constexpr int solid_tets = copies * (bunny_tets + spot_tets);
+    constexpr int rigid_body_count = 2 * copies;
+    constexpr int total_vertices = cloth_vertices
+        + solid_nodes + copies * (cube_nodes + gear_nodes);
+    constexpr int total_triangles = cloth_triangles
+        + copies
+            * (bunny_surface_triangles + spot_surface_triangles
+               + cube_triangles + gear_triangles);
+
+    static_assert(total_vertices == 1007);
+    static_assert(total_triangles == 1860);
+    static_assert(solid_tets == 6);
+
+    ASSERT_EQ(state.deformed_positions.size(), total_vertices);
+    ASSERT_EQ(state.velocities.size(), total_vertices);
+    ASSERT_EQ(ref_mesh.num_positions, total_vertices);
+    ASSERT_EQ(ref_mesh.mass.size(), total_vertices);
+    ASSERT_EQ(ref_mesh.node_to_rb.size(), total_vertices);
+    EXPECT_EQ(ref_mesh.tris.size(), 3 * total_triangles);
+    EXPECT_EQ(ref_mesh.tets.size(), 4 * solid_tets);
+    EXPECT_EQ(ref_mesh.tet_rest_data.size(), solid_tets);
+    EXPECT_EQ(ref_mesh.tet_nodes.size(), solid_nodes);
+    EXPECT_EQ(ref_mesh.surface_nodes.size(), solid_nodes);
+    EXPECT_EQ(
+        ref_mesh.deformable_nodes.size(), cloth_vertices + solid_nodes);
+    EXPECT_EQ(X.size(), cloth_vertices);
+    EXPECT_EQ(ref_mesh.Dm_inverse.size(), cloth_triangles);
+    EXPECT_EQ(ref_mesh.area.size(), cloth_triangles);
+
+    ASSERT_EQ(pins.size(), 2 * (cloth_nz + 1));
+    for (int j = 0; j <= cloth_nz; ++j) {
+        const int left = j * (cloth_nx + 1);
+        const int right = left + cloth_nx;
+        EXPECT_EQ(pins[static_cast<std::size_t>(2 * j)].vertex_index, left);
+        EXPECT_EQ(
+            pins[static_cast<std::size_t>(2 * j + 1)].vertex_index,
+            right);
+        EXPECT_TRUE(pins[static_cast<std::size_t>(2 * j)].target_position
+                        .isApprox(state.deformed_positions[left], 0.0));
+        EXPECT_TRUE(pins[static_cast<std::size_t>(2 * j + 1)].target_position
+                        .isApprox(state.deformed_positions[right], 0.0));
+    }
+
+    std::vector<unsigned char> is_tet_node(total_vertices, 0);
+    std::vector<unsigned char> is_surface_node(total_vertices, 0);
+    std::vector<unsigned char> is_deformable(total_vertices, 0);
+    for (const int node : ref_mesh.tet_nodes) {
+        ASSERT_GE(node, 0);
+        ASSERT_LT(node, total_vertices);
+        is_tet_node[static_cast<std::size_t>(node)] = 1;
+    }
+    for (const int node : ref_mesh.surface_nodes) {
+        ASSERT_GE(node, 0);
+        ASSERT_LT(node, total_vertices);
+        is_surface_node[static_cast<std::size_t>(node)] = 1;
+    }
+    for (const int node : ref_mesh.deformable_nodes) {
+        ASSERT_GE(node, 0);
+        ASSERT_LT(node, total_vertices);
+        is_deformable[static_cast<std::size_t>(node)] = 1;
+    }
+
+    for (int node = 0; node < cloth_vertices; ++node) {
+        EXPECT_DOUBLE_EQ(state.deformed_positions[node].y(), 1.2);
+        EXPECT_TRUE(state.velocities[node].isZero(0.0));
+        EXPECT_EQ(ref_mesh.node_to_rb[node], -1);
+        EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 0);
+        EXPECT_EQ(is_surface_node[static_cast<std::size_t>(node)], 0);
+        EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 1);
+    }
+
+    constexpr double first_center_y = 1.50;
+    constexpr double vertical_spacing = 0.34;
+    constexpr double object_max_extent = 0.22;
+    const auto check_solid =
+        [&](const int node_base, const int node_count,
+            const int first_tet, const int tet_count,
+            const Vec3& expected_center, const double expected_mass) {
+            const int node_end = node_base + node_count;
+            Vec3 lower = state.deformed_positions[node_base];
+            Vec3 upper = lower;
+            double mass = 0.0;
+            for (int node = node_base; node < node_end; ++node) {
+                lower = lower.cwiseMin(state.deformed_positions[node]);
+                upper = upper.cwiseMax(state.deformed_positions[node]);
+                mass += ref_mesh.mass[static_cast<std::size_t>(node)];
+                EXPECT_TRUE(state.velocities[node].isZero(0.0));
+                EXPECT_EQ(ref_mesh.node_to_rb[node], -1);
+                EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 1);
+                EXPECT_EQ(
+                    is_surface_node[static_cast<std::size_t>(node)], 1);
+                EXPECT_EQ(
+                    is_deformable[static_cast<std::size_t>(node)], 1);
+            }
+            const Vec3 actual_center = 0.5 * (lower + upper);
+            EXPECT_TRUE(actual_center.isApprox(expected_center, 1.0e-14));
+            EXPECT_NEAR(
+                (upper - lower).maxCoeff(), object_max_extent, 1.0e-14);
+            EXPECT_NEAR(mass, expected_mass, 1.0e-12);
+
+            for (int element = first_tet;
+                 element < first_tet + tet_count; ++element) {
+                for (int local = 0; local < 4; ++local) {
+                    const int node = ref_mesh.tets[4 * element + local];
+                    EXPECT_GE(node, node_base);
+                    EXPECT_LT(node, node_end);
+                }
+                EXPECT_GT(ref_mesh.tet_rest_data[element].measure, 0.0);
+            }
+            return actual_center;
+        };
+
+    // Bunny source AABB has max extent 8 and the two source tetrahedra have
+    // combined volume 32/3.
+    constexpr double bunny_source_volume = 32.0 / 3.0;
+    constexpr double bunny_scale = object_max_extent / 8.0;
+    const double expected_bunny_mass = args.solid_density
+        * bunny_source_volume * bunny_scale * bunny_scale * bunny_scale;
+    std::array<Vec3, copies> bunny_centers;
+    for (int copy = 0; copy < copies; ++copy) {
+        SCOPED_TRACE("bunny " + std::to_string(copy));
+        const int node_base = cloth_vertices + copy * bunny_nodes;
+        bunny_centers[static_cast<std::size_t>(copy)] = check_solid(
+            node_base, bunny_nodes, copy * bunny_tets, bunny_tets,
+            Vec3(
+                0.0,
+                first_center_y + (4 * copy) * vertical_spacing,
+                0.0),
+            expected_bunny_mass);
+    }
+
+    // Spot source AABB has max extent 10 and source volume 40/3.
+    constexpr double spot_source_volume = 40.0 / 3.0;
+    constexpr double spot_scale = object_max_extent / 10.0;
+    const double expected_spot_mass = args.solid_density
+        * spot_source_volume * spot_scale * spot_scale * spot_scale;
+    constexpr int spot_node_base =
+        cloth_vertices + copies * bunny_nodes;
+    constexpr int spot_tet_base = copies * bunny_tets;
+    std::array<Vec3, copies> spot_centers;
+    for (int copy = 0; copy < copies; ++copy) {
+        SCOPED_TRACE("spot " + std::to_string(copy));
+        spot_centers[static_cast<std::size_t>(copy)] = check_solid(
+            spot_node_base + copy * spot_nodes, spot_nodes,
+            spot_tet_base + copy * spot_tets, spot_tets,
+            Vec3(
+                0.0,
+                first_center_y + (4 * copy + 1) * vertical_spacing,
+                0.0),
+            expected_spot_mass);
+    }
+
+    ASSERT_EQ(ref_mesh.rb_nodes.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.ref_positions.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.total_mass.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.I_hat.size(), rigid_body_count);
+    ASSERT_EQ(state.x_coms.size(), rigid_body_count);
+    ASSERT_EQ(state.v_coms.size(), rigid_body_count);
+    ASSERT_EQ(state.orientations.size(), rigid_body_count);
+    ASSERT_EQ(state.omega.size(), rigid_body_count);
+
+    const double expected_cube_mass = args.rigid_density
+        * object_max_extent * object_max_extent * object_max_extent;
+    for (int copy = 0; copy < copies; ++copy) {
+        SCOPED_TRACE("cube " + std::to_string(copy));
+        const int rb = copy;
+        const Vec3 expected_center(
+            0.0,
+            first_center_y + (4 * copy + 2) * vertical_spacing,
+            0.0);
+        EXPECT_TRUE(
+            state.x_coms[rb].isApprox(expected_center, 1.0e-14));
+        EXPECT_TRUE(state.v_coms[rb].isZero(0.0));
+        EXPECT_TRUE(state.omega[rb].isZero(0.0));
+        EXPECT_TRUE(state.orientations[rb].isApprox(
+            Vec4(1.0, 0.0, 0.0, 0.0), 0.0));
+        EXPECT_NEAR(
+            ref_mesh.total_mass[rb], expected_cube_mass, 1.0e-12);
+        ASSERT_EQ(ref_mesh.rb_nodes[rb].size(), cube_nodes);
+
+        Vec3 lower =
+            state.deformed_positions[ref_mesh.rb_nodes[rb].front()];
+        Vec3 upper = lower;
+        for (const int node : ref_mesh.rb_nodes[rb]) {
+            lower = lower.cwiseMin(state.deformed_positions[node]);
+            upper = upper.cwiseMax(state.deformed_positions[node]);
+            EXPECT_EQ(ref_mesh.node_to_rb[node], rb);
+            EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 0);
+            EXPECT_EQ(is_surface_node[static_cast<std::size_t>(node)], 0);
+            EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 0);
+            EXPECT_TRUE(state.velocities[node].isZero(0.0));
+        }
+        EXPECT_TRUE(
+            (0.5 * (lower + upper)).isApprox(expected_center, 1.0e-14));
+        EXPECT_TRUE((upper - lower).isApprox(
+            Vec3::Constant(object_max_extent), 1.0e-14));
+    }
+
+    constexpr double gear_source_volume = 4.0 / 3.0;
+    constexpr double gear_scale = object_max_extent / 4.0;
+    const double expected_gear_mass = args.rigid_density
+        * gear_source_volume * gear_scale * gear_scale * gear_scale;
+    constexpr double kPi = 3.14159265358979323846;
+    const Vec4 flat_orientation(
+        std::cos(0.25 * kPi), -std::sin(0.25 * kPi), 0.0, 0.0);
+    for (int copy = 0; copy < copies; ++copy) {
+        SCOPED_TRACE("gear " + std::to_string(copy));
+        const int rb = copies + copy;
+        const Vec3 expected_center(
+            0.0,
+            first_center_y + (4 * copy + 3) * vertical_spacing,
+            0.0);
+        const double yaw = static_cast<double>(copy) * kPi / 8.0;
+        const Vec4 yaw_orientation(
+            std::cos(0.5 * yaw), 0.0, std::sin(0.5 * yaw), 0.0);
+        const Vec4 expected_orientation = quaternion_normalize(
+            quaternion_multiply(yaw_orientation, flat_orientation));
+
+        EXPECT_TRUE(
+            state.x_coms[rb].isApprox(expected_center, 1.0e-14));
+        EXPECT_TRUE(state.v_coms[rb].isZero(0.0));
+        EXPECT_TRUE(state.omega[rb].isZero(0.0));
+        EXPECT_TRUE(state.orientations[rb].isApprox(
+            expected_orientation, 1.0e-14));
+        EXPECT_NEAR(
+            ref_mesh.total_mass[rb], expected_gear_mass, 1.0e-12);
+        ASSERT_EQ(ref_mesh.rb_nodes[rb].size(), gear_nodes);
+
+        Vec3 lower = ref_mesh.ref_positions[rb].front();
+        Vec3 upper = lower;
+        for (std::size_t local = 0;
+             local < ref_mesh.rb_nodes[rb].size(); ++local) {
+            const int node = ref_mesh.rb_nodes[rb][local];
+            lower = lower.cwiseMin(ref_mesh.ref_positions[rb][local]);
+            upper = upper.cwiseMax(ref_mesh.ref_positions[rb][local]);
+            EXPECT_EQ(ref_mesh.node_to_rb[node], rb);
+            EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 0);
+            EXPECT_EQ(is_surface_node[static_cast<std::size_t>(node)], 0);
+            EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 0);
+            EXPECT_TRUE(state.velocities[node].isZero(0.0));
+        }
+        EXPECT_TRUE((0.5 * (lower + upper)).isZero(1.0e-14));
+        EXPECT_NEAR(
+            (upper - lower).maxCoeff(), object_max_extent, 1.0e-14);
+    }
+
+    // Verify the actual bottom-to-top order across both cycles.
+    EXPECT_GT(vertical_spacing, object_max_extent);
+    for (int copy = 0; copy < copies; ++copy) {
+        const int cube_rb = copy;
+        const int gear_rb = copies + copy;
+        EXPECT_NEAR(
+            spot_centers[static_cast<std::size_t>(copy)].y()
+                - bunny_centers[static_cast<std::size_t>(copy)].y(),
+            vertical_spacing, 1.0e-14);
+        EXPECT_NEAR(
+            state.x_coms[cube_rb].y()
+                - spot_centers[static_cast<std::size_t>(copy)].y(),
+            vertical_spacing, 1.0e-14);
+        EXPECT_NEAR(
+            state.x_coms[gear_rb].y() - state.x_coms[cube_rb].y(),
+            vertical_spacing, 1.0e-14);
+        if (copy + 1 < copies) {
+            EXPECT_NEAR(
+                bunny_centers[static_cast<std::size_t>(copy + 1)].y()
+                    - state.x_coms[gear_rb].y(),
+                vertical_spacing, 1.0e-14);
+        }
+    }
+
+    EXPECT_DOUBLE_EQ(params.k_sdf, 0.0);
+    EXPECT_TRUE(params.sdf_planes.empty());
+    EXPECT_TRUE(params.sdf_cylinders.empty());
+    EXPECT_TRUE(params.sdf_spheres.empty());
+    EXPECT_FALSE(params.use_ccd_guess);
+    EXPECT_FALSE(params.use_verlet_guess);
+    EXPECT_FALSE(params.use_translation_guess);
+    EXPECT_FALSE(params.use_ogc);
+    EXPECT_FALSE(params.use_ogc_solver);
+
+    double minimum_surface_edge = std::numeric_limits<double>::infinity();
+    for (std::size_t triangle = 0; triangle < ref_mesh.tris.size() / 3;
+         ++triangle) {
+        const int* tri = ref_mesh.tris.data() + 3 * triangle;
+        for (int local = 0; local < 3; ++local) {
+            minimum_surface_edge = std::min(
+                minimum_surface_edge,
+                (state.deformed_positions[tri[(local + 1) % 3]]
+                 - state.deformed_positions[tri[local]])
+                    .norm());
+        }
+    }
+    EXPECT_NEAR(
+        params.d_hat,
+        std::min(args.d_hat, 0.45 * minimum_surface_edge), 1.0e-15);
+
+    const std::vector<double> object_masses(
+        ref_mesh.mass.begin() + cloth_vertices, ref_mesh.mass.end());
+    ref_mesh.build_deformable_lumped_mass(
+        params.density, params.thickness);
+    EXPECT_NEAR(
+        std::accumulate(
+            ref_mesh.mass.begin(),
+            ref_mesh.mass.begin() + cloth_vertices, 0.0),
         params.density * params.thickness * 4.0 * 4.0,
         1.0e-10);
     EXPECT_TRUE(std::equal(

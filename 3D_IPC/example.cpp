@@ -41,6 +41,38 @@ void append_box_mesh(
         tris.push_back(base + index);
 }
 
+int append_rigid_cube(
+    const Vec3& center, const double edge_length, const double density,
+    const Vec3& velocity, RefMesh& ref_mesh, DeformedState& state) {
+    if (!center.allFinite() || !velocity.allFinite())
+        throw std::invalid_argument("append_rigid_cube: inputs must be finite");
+    if (!std::isfinite(edge_length) || edge_length <= 0.0)
+        throw std::invalid_argument("append_rigid_cube: edge length must be positive and finite");
+    if (!std::isfinite(density) || density <= 0.0)
+        throw std::invalid_argument("append_rigid_cube: density must be positive and finite");
+    if (state.deformed_positions.size()
+        > static_cast<std::size_t>(std::numeric_limits<int>::max() - 8)) {
+        throw std::overflow_error("append_rigid_cube: global node index exceeds int range");
+    }
+
+    const double half_extent = 0.5 * edge_length;
+    std::vector<Vec3> positions;
+    std::vector<int> local_tris;
+    append_box_mesh(
+        center - Vec3::Constant(half_extent),
+        center + Vec3::Constant(half_extent), positions, local_tris);
+
+    const int node_base = static_cast<int>(state.deformed_positions.size());
+    ref_mesh.tris.reserve(ref_mesh.tris.size() + local_tris.size());
+    for (const int local_node : local_tris)
+        ref_mesh.tris.push_back(node_base + local_node);
+
+    return create_rigid_body(
+        positions, velocity, Vec4(1.0, 0.0, 0.0, 0.0), Vec3::Zero(),
+        density * edge_length * edge_length * edge_length,
+        ref_mesh, state);
+}
+
 // Rotate `p` about the +x line through `axis_point` by `theta`.
 Vec3 rotate_about_x_axis(const Vec3& p, const Vec3& axis_point, double theta) {
     const double c = std::cos(theta);
@@ -1663,4 +1695,136 @@ void build_ten_alternating_rigid_solid_flat_stack_on_pinned_cloth_example(
     }
 
     ref_mesh.build_deformable_nodes();
+}
+
+// ---------------------------------------------------------------------------
+// Example 17: Bunny-solid / Spot-solid / rigid-cube / rigid-gear cycles,
+// repeated twice in one vertical stack above a pinned cloth
+// ---------------------------------------------------------------------------
+// one-sweep smoke: ./build/3D_sim --example 17 --num_frames 1 --substeps 1 --max_substep_iters 1 --fixed_iters --damping 0.5 --outdir bunny_spot_cube_gear_stack_on_cloth_output --format obj
+void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params) {
+    clear_model(ref_mesh, state, X, pins);
+
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = 0.0;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+    params.use_ogc = false;
+    params.use_ogc_solver = false;
+
+    // Cloth must be initialized before solid and rigid collision triangles so
+    // shell rest data remains the leading triangle prefix.
+    constexpr int cloth_nx = 30;
+    constexpr int cloth_nz = 30;
+    constexpr double cloth_width = 4.0;
+    constexpr double cloth_depth = 4.0;
+    constexpr double cloth_height = 1.2;
+    const int cloth_base = build_square_mesh(
+        ref_mesh, state, X, cloth_nx, cloth_nz,
+        cloth_width, cloth_depth,
+        Vec3(-0.5 * cloth_width, cloth_height,
+             -0.5 * cloth_depth));
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+
+    const auto cloth_node = [cloth_base](const int i, const int j) {
+        return cloth_base + j * (cloth_nx + 1) + i;
+    };
+    for (int j = 0; j <= cloth_nz; ++j) {
+        append_pin(pins, cloth_node(0, j), state.deformed_positions);
+        append_pin(
+            pins, cloth_node(cloth_nx, j), state.deformed_positions);
+    }
+
+    // Every body shares one vertical axis. The physical bottom-to-top order is
+    // Bunny, Spot, cube, gear, repeated twice. The spacing keeps every adjacent
+    // pair initially disjoint so the objects reach the cloth one by one.
+    constexpr int copies = 2;
+    constexpr double first_center_y = 1.50;
+    constexpr double vertical_spacing = 0.34;
+    const auto stack_center = [=](const int stack_index) {
+        return Vec3(
+            0.0,
+            first_center_y + vertical_spacing * stack_index,
+            0.0);
+    };
+    constexpr const char* bunny_node_filename =
+        "example_obj/bunny_coarse/bunny_2000f.1.node";
+    constexpr const char* bunny_element_filename =
+        "example_obj/bunny_coarse/bunny_2000f.1.ele";
+    constexpr double object_max_extent = 0.22;
+    for (int copy = 0; copy < copies; ++copy) {
+        append_normalized_tetgen_solid(
+            bunny_node_filename, bunny_element_filename,
+            state, ref_mesh, stack_center(4 * copy), object_max_extent,
+            params.solid_density,
+            /*zero_based_index=*/true);
+    }
+
+    constexpr const char* spot_node_filename =
+        "example_obj/spot/spot_2000f.1.node";
+    constexpr const char* spot_element_filename =
+        "example_obj/spot/spot_2000f.1.ele";
+    for (int copy = 0; copy < copies; ++copy) {
+        append_normalized_tetgen_solid(
+            spot_node_filename, spot_element_filename,
+            state, ref_mesh, stack_center(4 * copy + 1), object_max_extent,
+            params.solid_density,
+            /*zero_based_index=*/true);
+    }
+
+    for (int copy = 0; copy < copies; ++copy) {
+        append_rigid_cube(
+            stack_center(4 * copy + 2), object_max_extent,
+            params.rigid_density, Vec3::Zero(), ref_mesh, state);
+    }
+
+    // The gear OBJ is extruded along material z. Rotate that axis onto world
+    // y so both gears begin flat, then vary only their in-plane yaw.
+    constexpr const char* gear_filename =
+        "example_obj/gear_z18_coarse.obj";
+    const Vec4 flat_orientation(
+        std::cos(0.25 * kPi), -std::sin(0.25 * kPi), 0.0, 0.0);
+    for (int gear = 0; gear < copies; ++gear) {
+        const double yaw = static_cast<double>(gear) * kPi / 8.0;
+        const Vec4 yaw_orientation(
+            std::cos(0.5 * yaw), 0.0, std::sin(0.5 * yaw), 0.0);
+        const Vec4 orientation = quaternion_normalize(
+            quaternion_multiply(yaw_orientation, flat_orientation));
+        append_normalized_obj_rigid_body(
+            gear_filename, state, ref_mesh,
+            stack_center(4 * gear + 3),
+            object_max_extent, params.rigid_density,
+            Vec3::Zero(), orientation, Vec3::Zero());
+    }
+
+    ref_mesh.build_deformable_nodes();
+
+    // Respect the global IPC discretization requirement automatically rather
+    // than making the default --d_hat reject these detailed surface meshes.
+    double minimum_surface_edge = std::numeric_limits<double>::infinity();
+    for (std::size_t triangle = 0; triangle < ref_mesh.tris.size() / 3;
+         ++triangle) {
+        const int* tri = ref_mesh.tris.data() + 3 * triangle;
+        for (int local = 0; local < 3; ++local) {
+            const Vec3& a = state.deformed_positions[
+                static_cast<std::size_t>(tri[local])];
+            const Vec3& b = state.deformed_positions[
+                static_cast<std::size_t>(tri[(local + 1) % 3])];
+            minimum_surface_edge = std::min(
+                minimum_surface_edge, (b - a).norm());
+        }
+    }
+    if (params.d_hat > 0.0 && std::isfinite(minimum_surface_edge)) {
+        params.d_hat = std::min(
+            params.d_hat, 0.45 * minimum_surface_edge);
+    }
 }

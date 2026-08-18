@@ -1,4 +1,5 @@
 #include "make_shape.h"
+#include "io.h"
 #include "rigid_body_ipc.h"
 #include "solid_ipc.h"
 #include <algorithm>
@@ -7,6 +8,8 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <numeric>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -183,6 +186,333 @@ int append_deformable_polygon_prism(
 
     create_solid(world_positions, local_tets, density, ref_mesh, state);
     return base;
+}
+
+int append_normalized_tetgen_solid(
+    const std::string& node_filename,
+    const std::string& element_filename,
+    DeformedState& state, RefMesh& ref_mesh,
+    const Vec3& center, const double target_max_extent,
+    const double density, const bool zero_based_index) {
+    if (!center.allFinite()) {
+        throw std::invalid_argument(
+            "append_normalized_tetgen_solid: center must be finite");
+    }
+    if (!std::isfinite(target_max_extent) || target_max_extent <= 0.0) {
+        throw std::invalid_argument(
+            "append_normalized_tetgen_solid: target extent must be positive and finite");
+    }
+    if (!std::isfinite(density) || density < 0.0) {
+        throw std::invalid_argument(
+            "append_normalized_tetgen_solid: density must be nonnegative and finite");
+    }
+    if (state.deformed_positions.size()
+        > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error(
+            "append_normalized_tetgen_solid: global node index exceeds int range");
+    }
+
+    std::vector<Vec3> positions;
+    std::vector<int> tets;
+    read_tetgen_nodes(node_filename, positions, zero_based_index);
+    read_tetgen_tets(element_filename, tets, zero_based_index);
+    if (positions.empty()) {
+        throw std::invalid_argument(
+            "append_normalized_tetgen_solid: TetGen node file is empty");
+    }
+
+    Vec3 lower = positions.front();
+    Vec3 upper = positions.front();
+    for (const Vec3& position : positions) {
+        lower = lower.cwiseMin(position);
+        upper = upper.cwiseMax(position);
+    }
+    const double source_max_extent = (upper - lower).maxCoeff();
+    if (!std::isfinite(source_max_extent) || source_max_extent <= 0.0) {
+        throw std::invalid_argument(
+            "append_normalized_tetgen_solid: source bounding box has zero extent");
+    }
+
+    const Vec3 source_center = 0.5 * (lower + upper);
+    const double scale = target_max_extent / source_max_extent;
+    for (Vec3& position : positions)
+        position = center + scale * (position - source_center);
+
+    // TetGen files can use either orientation convention. create_solid and
+    // the TGSL face convention require positive det(Dm), so flip exactly one
+    // pair for every negative element. Full range/degeneracy validation is
+    // still performed transactionally by create_solid below.
+    for (std::size_t element = 0; element < tets.size() / 4; ++element) {
+        int* tet = tets.data() + 4 * element;
+        for (int local = 0; local < 4; ++local) {
+            if (tet[local] < 0
+                || static_cast<std::size_t>(tet[local]) >= positions.size()) {
+                throw std::out_of_range(
+                    "append_normalized_tetgen_solid: tetrahedron index is out of range");
+            }
+        }
+        const Vec3& x0 = positions[static_cast<std::size_t>(tet[0])];
+        const Vec3& x1 = positions[static_cast<std::size_t>(tet[1])];
+        const Vec3& x2 = positions[static_cast<std::size_t>(tet[2])];
+        const Vec3& x3 = positions[static_cast<std::size_t>(tet[3])];
+        const double signed_six_volume =
+            (x1 - x0).dot((x2 - x0).cross(x3 - x0));
+        if (signed_six_volume < 0.0)
+            std::swap(tet[2], tet[3]);
+    }
+
+    const int base = static_cast<int>(state.deformed_positions.size());
+    create_solid(positions, tets, density, ref_mesh, state);
+    return base;
+}
+
+int append_normalized_obj_rigid_body(
+    const std::string& obj_filename,
+    DeformedState& state, RefMesh& ref_mesh,
+    const Vec3& center, const double target_max_extent,
+    const double density, const Vec3& v_com,
+    const Vec4& orientation, const Vec3& omega) {
+    const char* function_name = "append_normalized_obj_rigid_body";
+    if (!center.allFinite() || !v_com.allFinite() || !omega.allFinite()) {
+        throw std::invalid_argument(
+            std::string(function_name) + ": transforms and velocities must be finite");
+    }
+    if (!orientation.allFinite()
+        || orientation.squaredNorm() <= 1.0e-24) {
+        throw std::invalid_argument(
+            std::string(function_name) + ": orientation must be a nonzero finite quaternion");
+    }
+    if (!std::isfinite(target_max_extent) || target_max_extent <= 0.0) {
+        throw std::invalid_argument(
+            std::string(function_name) + ": target extent must be positive and finite");
+    }
+    if (!std::isfinite(density) || density <= 0.0) {
+        throw std::invalid_argument(
+            std::string(function_name) + ": density must be positive and finite");
+    }
+
+    // Parse into local arrays first. No RefMesh or DeformedState storage is
+    // touched until all geometry, topology, and mass validation has passed.
+    std::vector<Vec3> raw_positions;
+    std::vector<int> raw_triangles;
+    load_obj_mesh(
+        obj_filename, raw_positions, raw_triangles,
+        /*scale=*/1.0, Vec3::Zero());
+    if (raw_positions.empty() || raw_triangles.empty()
+        || raw_triangles.size() % 3 != 0) {
+        throw std::invalid_argument(
+            std::string(function_name) + ": OBJ must contain a triangulated surface");
+    }
+    if (raw_positions.size()
+        > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error(
+            std::string(function_name) + ": OBJ has too many vertices");
+    }
+    for (const Vec3& position : raw_positions) {
+        if (!position.allFinite()) {
+            throw std::invalid_argument(
+                std::string(function_name) + ": OBJ contains a non-finite vertex");
+        }
+    }
+
+    // Remove orphan vertices. Besides avoiding wasted rigid proxy particles,
+    // this keeps the requested extent and vertex-lumped inertia independent of
+    // unused records in the OBJ file.
+    std::vector<unsigned char> used(raw_positions.size(), 0);
+    for (const int node : raw_triangles) {
+        if (node < 0
+            || static_cast<std::size_t>(node) >= raw_positions.size()) {
+            throw std::out_of_range(
+                std::string(function_name) + ": OBJ face index is out of range");
+        }
+        used[static_cast<std::size_t>(node)] = 1;
+    }
+    std::vector<int> remap(raw_positions.size(), -1);
+    std::vector<Vec3> positions;
+    positions.reserve(raw_positions.size());
+    for (std::size_t node = 0; node < raw_positions.size(); ++node) {
+        if (used[node] == 0)
+            continue;
+        remap[node] = static_cast<int>(positions.size());
+        positions.push_back(raw_positions[node]);
+    }
+    std::vector<int> triangles = raw_triangles;
+    for (int& node : triangles)
+        node = remap[static_cast<std::size_t>(node)];
+
+    Vec3 lower = positions.front();
+    Vec3 upper = positions.front();
+    for (const Vec3& position : positions) {
+        lower = lower.cwiseMin(position);
+        upper = upper.cwiseMax(position);
+    }
+    const Vec3 source_center = 0.5 * (lower + upper);
+    const double source_max_extent = (upper - lower).maxCoeff();
+    if (!std::isfinite(source_max_extent) || source_max_extent <= 0.0) {
+        throw std::invalid_argument(
+            std::string(function_name) + ": OBJ bounding box has zero extent");
+    }
+
+    // A closed consistently oriented triangle manifold has two oppositely
+    // directed occurrences of every undirected edge. The edge records also
+    // connect triangle components so that disconnected closed shells have
+    // their absolute enclosed volumes added instead of canceling each other.
+    struct EdgeRecord {
+        int count = 0;
+        int direction_balance = 0;
+        int first_triangle = -1;
+    };
+    std::map<std::array<int, 2>, EdgeRecord> edges;
+    std::set<std::array<int, 3>> unique_triangles;
+    const int triangle_count = static_cast<int>(triangles.size() / 3);
+    std::vector<int> component_parent(
+        static_cast<std::size_t>(triangle_count));
+    std::iota(component_parent.begin(), component_parent.end(), 0);
+    const auto find_component = [&component_parent](int triangle) {
+        int root = triangle;
+        while (component_parent[static_cast<std::size_t>(root)] != root)
+            root = component_parent[static_cast<std::size_t>(root)];
+        while (component_parent[static_cast<std::size_t>(triangle)]
+               != triangle) {
+            const int parent =
+                component_parent[static_cast<std::size_t>(triangle)];
+            component_parent[static_cast<std::size_t>(triangle)] = root;
+            triangle = parent;
+        }
+        return root;
+    };
+    const auto unite_components =
+        [&component_parent, &find_component](int first, int second) {
+            first = find_component(first);
+            second = find_component(second);
+            if (first != second)
+                component_parent[static_cast<std::size_t>(second)] = first;
+        };
+
+    const double area_tolerance = 64.0
+        * std::numeric_limits<double>::epsilon()
+        * source_max_extent * source_max_extent;
+    for (int triangle = 0; triangle < triangle_count; ++triangle) {
+        const int nodes[3] = {
+            triangles[3 * triangle], triangles[3 * triangle + 1],
+            triangles[3 * triangle + 2]};
+        if (nodes[0] == nodes[1] || nodes[1] == nodes[2]
+            || nodes[2] == nodes[0]) {
+            throw std::invalid_argument(
+                std::string(function_name) + ": OBJ contains a repeated triangle vertex");
+        }
+        std::array<int, 3> face{nodes[0], nodes[1], nodes[2]};
+        std::sort(face.begin(), face.end());
+        if (!unique_triangles.insert(face).second) {
+            throw std::invalid_argument(
+                std::string(function_name) + ": OBJ contains a duplicate triangle");
+        }
+        const Vec3& x0 = positions[static_cast<std::size_t>(nodes[0])];
+        const Vec3& x1 = positions[static_cast<std::size_t>(nodes[1])];
+        const Vec3& x2 = positions[static_cast<std::size_t>(nodes[2])];
+        if ((x1 - x0).cross(x2 - x0).norm() <= area_tolerance) {
+            throw std::invalid_argument(
+                std::string(function_name) + ": OBJ contains a degenerate triangle");
+        }
+
+        for (int local = 0; local < 3; ++local) {
+            const int first = nodes[local];
+            const int second = nodes[(local + 1) % 3];
+            const std::array<int, 2> edge{
+                std::min(first, second), std::max(first, second)};
+            EdgeRecord& record = edges[edge];
+            ++record.count;
+            record.direction_balance += first < second ? 1 : -1;
+            if (record.first_triangle < 0) {
+                record.first_triangle = triangle;
+            } else {
+                unite_components(record.first_triangle, triangle);
+            }
+        }
+    }
+    for (const auto& [edge, record] : edges) {
+        (void)edge;
+        if (record.count != 2) {
+            throw std::invalid_argument(
+                std::string(function_name) + ": OBJ surface is not closed and edge-manifold");
+        }
+        if (record.direction_balance != 0) {
+            throw std::invalid_argument(
+                std::string(function_name) + ": OBJ triangle winding is inconsistent");
+        }
+    }
+
+    std::vector<double> component_six_volumes(
+        static_cast<std::size_t>(triangle_count), 0.0);
+    for (int triangle = 0; triangle < triangle_count; ++triangle) {
+        const int root = find_component(triangle);
+        const Vec3 x0 = positions[static_cast<std::size_t>(
+                            triangles[3 * triangle])]
+            - source_center;
+        const Vec3 x1 = positions[static_cast<std::size_t>(
+                            triangles[3 * triangle + 1])]
+            - source_center;
+        const Vec3 x2 = positions[static_cast<std::size_t>(
+                            triangles[3 * triangle + 2])]
+            - source_center;
+        component_six_volumes[static_cast<std::size_t>(root)] +=
+            x0.dot(x1.cross(x2));
+    }
+    const double volume_tolerance = 64.0
+        * std::numeric_limits<double>::epsilon()
+        * source_max_extent * source_max_extent * source_max_extent;
+    double source_volume = 0.0;
+    for (int triangle = 0; triangle < triangle_count; ++triangle) {
+        if (find_component(triangle) != triangle)
+            continue;
+        const double six_volume =
+            component_six_volumes[static_cast<std::size_t>(triangle)];
+        if (!std::isfinite(six_volume)
+            || std::abs(six_volume) <= volume_tolerance) {
+            throw std::invalid_argument(
+                std::string(function_name) + ": OBJ encloses zero or invalid volume");
+        }
+        source_volume += std::abs(six_volume) / 6.0;
+    }
+
+    const double scale = target_max_extent / source_max_extent;
+    const double total_mass = density * source_volume
+        * scale * scale * scale;
+    if (!std::isfinite(total_mass) || total_mass <= 0.0) {
+        throw std::invalid_argument(
+            std::string(function_name) + ": normalized mass is not positive and finite");
+    }
+    const Vec4 normalized_orientation = quaternion_normalize(orientation);
+    for (Vec3& position : positions) {
+        position = center + quaternion_rotate(
+            normalized_orientation,
+            scale * (position - source_center));
+    }
+
+    const std::size_t node_base = state.deformed_positions.size();
+    const std::size_t max_int =
+        static_cast<std::size_t>(std::numeric_limits<int>::max());
+    if (node_base > max_int || positions.size() > max_int - node_base) {
+        throw std::overflow_error(
+            std::string(function_name) + ": global vertex index exceeds int range");
+    }
+    if (triangles.size()
+        > ref_mesh.tris.max_size() - ref_mesh.tris.size()) {
+        throw std::overflow_error(
+            std::string(function_name) + ": triangle storage exceeds vector limits");
+    }
+
+    // Reserve before create_rigid_body mutates the particle arrays. All
+    // subsequent triangle insertions are then non-allocating integer writes.
+    ref_mesh.tris.reserve(ref_mesh.tris.size() + triangles.size());
+    const int rigid_body = create_rigid_body(
+        positions, v_com, normalized_orientation, omega, total_mass,
+        ref_mesh, state);
+    for (const int local_node : triangles) {
+        ref_mesh.tris.push_back(
+            static_cast<int>(node_base) + local_node);
+    }
+    return rigid_body;
 }
 
 // Total number of vertices is: (nx + 1) * (ny + 1) and total number of triangles is: 2 * nx * ny

@@ -165,6 +165,24 @@ Built-in example scenes (`--example N`):
 | `14` | One flat tetrahedralized deformable octagonal prism falling onto a cloth pinned along two opposite sides |
 | `15` | Ten flat small rigid and ten flat larger tetrahedralized deformable polygonal prisms, spanning 3 through 12 sides, falling onto a cloth pinned along two opposite sides |
 | `16` | Ten flat polygonal prisms, alternating five rigid bodies and five deformable solids, falling onto one another above a cloth pinned along two opposite sides |
+| `17` | Two repeating Bunny-solid, Spot-solid, rigid-cube, and rigid-gear cycles stacked in one vertical column above a cloth pinned along two opposite sides |
+
+Example 17 reads these repository-relative mesh files directly:
+
+- `example_obj/bunny_coarse/bunny_2000f.1.node`
+- `example_obj/bunny_coarse/bunny_2000f.1.ele`
+- `example_obj/spot/spot_2000f.1.node`
+- `example_obj/spot/spot_2000f.1.ele`
+- `example_obj/gear_z18_coarse.obj`
+
+Run the simulator from the repository root so these fixed paths resolve. The
+Bunny and Spot tetrahedral meshes are each instantiated twice. Both solids,
+the two cubes, and the two watertight coarse gears are uniformly normalized to
+the same 0.22 m maximum extent. The eight objects alternate Bunny, Spot, cube,
+and gear from the bottom upward so they fall onto one another before loading
+the cloth. Together the four solids contain 21,744 tetrahedra. The scene also
+clamps `d_hat` to 45% of its shortest surface edge so startup continues to
+enforce the project's IPC edge-length restriction.
 
 At startup, every scene reports its vertex and triangle counts; scenes with
 rigid bodies also report their count. Rigid surface vertices are advanced by
@@ -185,6 +203,7 @@ Common invocations:
     ./build/3D_sim --example 14 --num_frames 120 --substeps 10 --max_substep_iters 500 --tol_abs 1e-5 --damping 0.5 --outdir single_solid_on_pinned_cloth_output --format obj
     ./build/3D_sim --example 15 --num_frames 120 --substeps 10 --max_substep_iters 500 --tol_abs 1e-5 --damping 0.5 --outdir twenty_rigid_deformable_polygons_on_pinned_cloth_output --format obj
     ./build/3D_sim --example 16 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --damping 0.5 --outdir ten_rigid_solid_flat_stack_on_cloth_output --format obj
+    ./build/3D_sim --example 17 --num_frames 1 --substeps 1 --max_substep_iters 1 --fixed_iters --damping 0.5 --outdir bunny_spot_cube_gear_stack_on_cloth_output --format obj
     ./build/3D_sim --use_ccd_guess false --use_translation_guess true --fixed_iters
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
@@ -437,7 +456,7 @@ all:
 | `bending_energy_test` | 19 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
 | `parallel_helper_test` | 13 | Contact adjacency, rigid ownership filtering/coloring, spherical-cap AABBs, and rigid blue boxes |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
-| `make_shape_test` | 17 | Incident-triangle maps, mixed cloth/rigid/solid scene construction, tetrahedral polygonal prisms, and icosphere construction |
+| `make_shape_test` | 21 | Incident-triangle maps, mixed cloth/rigid/solid scene construction, normalized TetGen solids, tetrahedral polygonal prisms, and icosphere construction |
 | `barrier_energy_test` | 19 | Scalar barrier, all NT/SS feature regions, force partition, deformable/rigid derivative blocks and modes, and stress cases |
 | `corotated_energy_test` | 11 | Rest state, invariance, gradient/Hessian FD convergence, and stress cases |
 | `initial_guess_test` | 5 | CCD no-candidate, Verlet gravity, and translation closed forms for inertia/gravity, pins, and one-step plane-SDF correction |

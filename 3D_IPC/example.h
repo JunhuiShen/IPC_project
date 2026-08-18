@@ -226,3 +226,10 @@ void build_ten_alternating_rigid_solid_flat_stack_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
+
+// Example 17: Bunny-solid / Spot-solid / rigid-cube / rigid-gear cycles,
+// repeated twice in one vertical stack above a cloth pinned on opposite sides.
+void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params);

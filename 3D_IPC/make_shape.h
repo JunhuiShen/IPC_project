@@ -25,6 +25,31 @@ int append_deformable_polygon_prism(
     double thickness,
     const Vec4& orientation = Vec4(1.0, 0.0, 0.0, 0.0));
 
+// Load a linear TetGen mesh, recenter it at `center`, and uniformly scale it
+// so its largest axis-aligned bounding-box extent is `target_max_extent`.
+// `zero_based_index` describes the numbering in both input files. Any
+// negatively oriented input tetrahedra are flipped before create_solid.
+// Returns the first global node index appended for this solid.
+int append_normalized_tetgen_solid(
+    const std::string& node_filename,
+    const std::string& element_filename,
+    DeformedState& state, RefMesh& ref_mesh,
+    const Vec3& center, double target_max_extent, double density,
+    bool zero_based_index = false);
+
+// Load a closed OBJ surface, remove unreferenced vertices, recenter its
+// axis-aligned bounding box, and uniformly scale its largest extent to
+// `target_max_extent`. `orientation` rotates the normalized surface before it
+// is translated to `center`. The rigid body's total mass is the enclosed
+// surface volume times `density`. Returns the appended rigid-body index.
+int append_normalized_obj_rigid_body(
+    const std::string& obj_filename,
+    DeformedState& state, RefMesh& ref_mesh,
+    const Vec3& center, double target_max_extent, double density,
+    const Vec3& v_com = Vec3::Zero(),
+    const Vec4& orientation = Vec4(1.0, 0.0, 0.0, 0.0),
+    const Vec3& omega = Vec3::Zero());
+
 // Grid counts: V = (nx + 1)(ny + 1), T = 2 nx ny.
 int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin);
 

@@ -52,8 +52,9 @@ int main(int argc, char** argv) {
     else if (args.example == 14) build_single_deformable_solid_drop_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 15) build_twenty_rigid_deformable_polygons_drop_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 16) build_ten_alternating_rigid_solid_flat_stack_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 17) build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17.\n";
         return 1;
     }
 
