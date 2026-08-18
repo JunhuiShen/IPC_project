@@ -175,15 +175,6 @@ Example 17 reads these repository-relative mesh files directly:
 - `example_obj/spot/spot_2000f.1.ele`
 - `example_obj/gear_z18_coarse.obj`
 
-Run the simulator from the repository root so these fixed paths resolve. The
-Bunny and Spot tetrahedral meshes are each instantiated twice. Both solids,
-the two cubes, and the two watertight coarse gears are uniformly normalized to
-the same 0.22 m maximum extent. The eight objects alternate Bunny, Spot, cube,
-and gear from the bottom upward so they fall onto one another before loading
-the cloth. Together the four solids contain 21,744 tetrahedra. The scene also
-clamps `d_hat` to 45% of its shortest surface edge so startup continues to
-enforce the project's IPC edge-length restriction.
-
 At startup, every scene reports its vertex and triangle counts; scenes with
 rigid bodies also report their count. Rigid surface vertices are advanced by
 three COM and three rotation unknowns per body, while deformable solids retain
