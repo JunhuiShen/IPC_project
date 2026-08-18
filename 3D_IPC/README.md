@@ -185,20 +185,54 @@ Common invocations:
     ./build/3D_sim --example 1                              # twisting cloth
     ./build/3D_sim --example 2                              # two-cylinder twist
     ./build/3D_sim --example 3                              # cylinder yaws and twists cloth between two clamped top edges
-    ./build/3D_sim --example 5                              # freely rotating rigid tennis racket
-    ./build/3D_sim --example 8 --substeps 10 --format obj   # head-on rigid polygon collision
-    ./build/3D_sim --example 9 --substeps 10 --format obj   # static stack of twenty rigid polygons
-    ./build/3D_sim --example 11 --num_frames 200 --substeps 50 --max_substep_iters 2000 --tol_rel 0.5 --d_hat 0.001 --eps_sdf 0.002 --outdir hundred_polygon_box_output --format obj
-    ./build/3D_sim --example 12 --num_frames 120 --substeps 10 --max_substep_iters 500 --tol_abs 1e-5 --damping 0.5 --outdir fifty_mixed_polygons_on_pinned_cloth_output --format obj
-    ./build/3D_sim --example 13 --num_frames 120 --substeps 20 --max_substep_iters 50 --fixed_iters --damping 0.5 --outdir single_solid_ground_drop_output --format obj
-    ./build/3D_sim --example 14 --num_frames 120 --substeps 10 --max_substep_iters 500 --tol_abs 1e-5 --damping 0.5 --outdir single_solid_on_pinned_cloth_output --format obj
-    ./build/3D_sim --example 15 --num_frames 120 --substeps 10 --max_substep_iters 500 --tol_abs 1e-5 --damping 0.5 --outdir twenty_rigid_deformable_polygons_on_pinned_cloth_output --format obj
-    ./build/3D_sim --example 16 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --damping 0.5 --outdir ten_rigid_solid_flat_stack_on_cloth_output --format obj
-    ./build/3D_sim --example 17 --num_frames 1 --substeps 1 --max_substep_iters 1 --fixed_iters --damping 0.5 --outdir bunny_spot_cube_gear_stack_on_cloth_output --format obj
     ./build/3D_sim --use_ccd_guess false --use_translation_guess true --fixed_iters
     ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
+
+Commands documented alongside Examples 5 through 17 in `example.cpp`:
+
+    # Example 5: freely rotating rigid tennis racket
+    ./build/3D_sim --example 5 --num_frames 500 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output
+
+    # Example 6: freely rotating space tool
+    ./build/3D_sim --example 6 --num_frames 2000 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir space_tool_output
+
+    # Example 7: rigid box and hexagonal prism dropped onto a ground plane
+    ./build/3D_sim --example 7 --num_frames 200 --substeps 10 --tol_abs 1e-12 --tol_rel 1e-10 --outdir drop_box_output --format obj
+
+    # Example 8: head-on rigid polygon collision
+    ./build/3D_sim --example 8 --num_frames 60 --max_substep_iters 500 --substeps 10 --tol_rel 1e-10 --outdir polygon_collision_output --format obj
+
+    # Example 9: stationary stack of twenty rigid polygons
+    ./build/3D_sim --example 9 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --outdir twenty_polygon_static_stack_output --format obj
+
+    # Example 10: five aligned rigid polygons
+    ./build/3D_sim --example 10 --num_frames 100 --substeps 10 --outdir five_polygon_aligned_stack_output --format obj
+
+    # Example 11: one hundred rigid polygons in a box, fixed-iteration mode
+    ./build/3D_sim --example 11 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir hundred_polygon_box_fixed_iter_output --format obj
+
+    # Example 11: residual-convergence alternative
+    ./build/3D_sim --example 11 --num_frames 200 --substeps 80 --max_substep_iters 5000 --outdir hundred_polygon_box_output --format obj
+
+    # Example 12: fifty rigid polygons dropped onto pinned cloth
+    ./build/3D_sim --example 12 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir fifty_polygons_on_pinned_cloth_output --format obj
+
+    # Example 13: one deformable solid dropped onto a ground plane
+    ./build/3D_sim --example 13 --num_frames 200 --substeps 20 --max_substep_iters 50 --tol_abs 1e-8 --tol_rel 1e-5 --outdir single_solid_ground_drop_output --format obj
+
+    # Example 14: one deformable solid dropped onto pinned cloth
+    ./build/3D_sim --example 14 --num_frames 200 --substeps 20 --max_substep_iters 30 --fixed_iters --E 1e8 --outdir stiff_cloth_solid_drop_output --format obj --d_hat 0.019 --k_barrier 500
+
+    # Example 15: rigid and deformable polygons dropped onto pinned cloth
+    ./build/3D_sim --example 15 --num_frames 200 --substeps 20 --max_substep_iters 20 --fixed_iters --outdir twenty_rigid_deformable_polygons_on_pinned_cloth_output --format obj --E 1e8 --d_hat 0.019 --k_barrier 500
+
+    # Example 16: alternating rigid and deformable polygons dropped onto pinned cloth
+    ./build/3D_sim --example 16 --num_frames 200 --substeps 20 --max_substep_iters 20 --fixed_iters --outdir ten_rigid_solid_flat_stack_on_cloth_output --format obj --E 1e8 --d_hat 0.019 --k_barrier 500
+
+    # Example 17: two Bunny-solid, Spot-solid, rigid-cube, and rigid-gear cycles
+    ./build/3D_sim --example 17 --datadir example_obj --num_frames 200 --fps 60 --substeps 20 --max_substep_iters 7000 --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir spot_solids_cubes_gears_on_cloth_output --format obj
 
 Initial guesses are selected before the nonlinear solver starts each substep.
 The default is `ccd_initial_guess`. `--use_verlet_guess true` uses the

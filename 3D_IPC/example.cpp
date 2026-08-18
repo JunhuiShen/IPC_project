@@ -638,7 +638,7 @@ void update_twist_untwist_visual(std::vector<Vec3>& static_x,
 // ---------------------------------------------------------------------------
 // Example 5: freely rotating rigid tennis racket
 // ---------------------------------------------------------------------------
-// Commend line: ./build/3D_sim --example 5 --num_frames 500 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output 
+// Command line: ./build/3D_sim --example 5 --num_frames 500 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output 
 void build_rotating_tennis_racket_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1701,7 +1701,7 @@ void build_ten_alternating_rigid_solid_flat_stack_on_pinned_cloth_example(
 // Example 17: Bunny-solid / Spot-solid / rigid-cube / rigid-gear cycles,
 // repeated twice in one vertical stack above a pinned cloth
 // ---------------------------------------------------------------------------
-// one-sweep smoke: ./build/3D_sim --example 17 --num_frames 1 --substeps 1 --max_substep_iters 1 --fixed_iters --damping 0.5 --outdir bunny_spot_cube_gear_stack_on_cloth_output --format obj
+// command line: ./build/3D_sim --example 17 --datadir example_obj --num_frames 200 --fps 60 --substeps 20 --max_substep_iters 7000 --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir spot_solids_cubes_gears_on_cloth_output --format obj
 void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
