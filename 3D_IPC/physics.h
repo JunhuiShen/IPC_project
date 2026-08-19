@@ -183,6 +183,8 @@ struct RefMesh {
     std::vector<double> total_mass; // total_mass for each rb
     std::vector<Mat33> I_hat; // IPC inertia tensor for each rb
     std::vector<std::vector<int>> rb_nodes; // global particle indices for each rb
+    // One generalized-coordinate solver-update label per rigid body.
+    std::vector<RigidBodyUpdateMode> rb_update_modes;
     std::vector<int> node_to_rb; // global particle index -> rb index (-1 if deformable)
 
 

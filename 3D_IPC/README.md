@@ -78,7 +78,7 @@ performs collision-safe per-vertex Newton updates one color group at a time.
 
 Although the rigid-body and deformable solvers share IPC barrier primitives,
 green/red broad-phase construction, conflict coloring, and convergence logic,
-the rigid-body formulation differs in four main ways:
+the rigid-body formulation differs in five main ways:
 
 - **Reduced state.** Surface nodes are not independent unknowns. Each body has
   three COM-position unknowns and three world-space angular-velocity unknowns;
@@ -94,6 +94,11 @@ the rigid-body formulation differs in four main ways:
   translation box with the spherical cap swept by its allowed orientations.
   COM updates use rigid translation CCD; rotation updates are clipped to the
   quaternion cap and then use rigid-rotation CCD.
+- **Per-body update labels.** `TranslationAndOrientation` is the default.
+  `TranslationOnly`, `OrientationOnly`, and `None` independently disable the
+  corresponding generalized-coordinate updates. Disabled bodies remain in
+  broad phase and IPC contact, so they act as fixed reaction geometry rather
+  than disappearing from collision handling.
 
 Rigid bodies therefore have no per-vertex Newton variables or membrane and
 bending energies. Their triangle and edge connectivity is retained only as the
@@ -166,6 +171,7 @@ Built-in example scenes (`--example N`):
 | `15` | Ten flat small rigid and ten flat larger tetrahedralized deformable polygonal prisms, spanning 3 through 12 sides, falling onto a cloth pinned along two opposite sides |
 | `16` | Ten flat polygonal prisms, alternating five rigid bodies and five deformable solids, falling onto one another above a cloth pinned along two opposite sides |
 | `17` | Two repeating larger Bunny-solid, larger Spot-solid, smaller rigid-box, and smaller rigid-gear cycles stacked in one vertical column above a cloth pinned along two opposite sides |
+| `18` | A fully dynamic threaded bolt starting deeply engaged and falling under gravity through a threaded nut with fixed translation and orientation |
 
 Example 17 reads these repository-relative mesh files directly:
 
@@ -175,10 +181,21 @@ Example 17 reads these repository-relative mesh files directly:
 - `example_obj/spot/spot_2000f.1.ele`
 - `example_obj/gear_z18_coarse.obj`
 
+Example 18 reads these two repository-relative, mutually scaled rigid meshes:
+
+- `example_obj/bolt_and_nut/bolt_coarse_bolt.obj`
+- `example_obj/bolt_and_nut/bolt_coarse_nut.obj`
+
+The nut uses the `None` rigid update label, so it remains active IPC collision
+geometry while neither its center of mass nor its orientation is updated. The
+bolt uses the default `TranslationAndOrientation` label and starts at rest;
+gravity and the frictionless helical contact normals generate its rotation.
+
 At startup, every scene reports its vertex and triangle counts; scenes with
-rigid bodies also report their count. Rigid surface vertices are advanced by
-three COM and three rotation unknowns per body, while deformable solids retain
-their tetrahedral vertex degrees of freedom.
+rigid bodies also report their count. Rigid surface vertices are represented
+by up to three COM and three rotation unknowns per body (subject to its update
+label), while deformable solids retain their tetrahedral vertex degrees of
+freedom.
 
 Common invocations:
 
@@ -190,7 +207,7 @@ Common invocations:
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
 
-Commands documented alongside Examples 5 through 17 in `example.cpp`:
+Commands documented alongside Examples 5 through 18 in `example.cpp`:
 
     # Example 5: freely rotating rigid tennis racket
     ./build/3D_sim --example 5 --num_frames 500 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output
@@ -233,6 +250,9 @@ Commands documented alongside Examples 5 through 17 in `example.cpp`:
 
     # Example 17: two Bunny-solid, Spot-solid, rigid-cube, and rigid-gear cycles
     ./build/3D_sim --example 17 --datadir example_obj --num_frames 200 --fps 60 --substeps 20 --max_substep_iters 7000 --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir spot_solids_cubes_gears_on_cloth_output --format obj
+
+    # Example 18: dynamic threaded bolt falling into a fixed threaded nut
+    ./build/3D_sim --example 18 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj
 
 Initial guesses are selected before the nonlinear solver starts each substep.
 The default is `ccd_initial_guess`. `--use_verlet_guess true` uses the
@@ -474,14 +494,15 @@ all:
 | Test binary | Cases | What it covers |
 |-------------|-------|----------------|
 | `ccd_test` | 54 | Linear CCD single-moving-DOF, scale/coplanar stress cases, TICCD-backed general NT/SS wrappers, and rigid rotational CCD |
-| `rigid_body_ipc_test` | 50 | Quaternion kinematics/derivatives, reduced inertial energy, rigid solver contact terms, blue-box enforcement, and rigid translation/rotation safe steps |
+| `rigid_body_ipc_test` | 65 | Quaternion kinematics/derivatives, reduced inertial energy, rigid solver contact terms, update labels, blue-box enforcement, and rigid translation/rotation safe steps |
 | `broad_phase_test` | 25 | AABB, BVH, pair generation/order, CCD candidates, safe stepping, conservativeness, and `incremental_refresh_vertex` partial refit |
 | `ipc_math_test` | 14 | `matrix3d_inverse`, `segment_closest_point`, barycentric coordinates, and topology caching |
 | `sdf_penalty_energy_test` | 17 | Plane / cylinder / sphere and rigid-body SDF energy derivatives, hard-quadratic limit, and soft-barrier rest at `phi=eps` |
 | `bending_energy_test` | 19 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
 | `parallel_helper_test` | 13 | Contact adjacency, rigid ownership filtering/coloring, spherical-cap AABBs, and rigid blue boxes |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
-| `make_shape_test` | 21 | Incident-triangle maps, mixed cloth/rigid/solid scene construction, normalized TetGen solids, tetrahedral polygonal prisms, and icosphere construction |
+| `make_shape_test` | 22 | Incident-triangle maps, mixed cloth/rigid/solid scene construction, normalized TetGen solids, tetrahedral polygonal prisms, and icosphere construction |
+| `solid_ipc_test` | 33 | Volumetric corotated solid energy/derivatives, mixed general-solver integration, solid contact, and reaction against fixed labeled rigid geometry |
 | `barrier_energy_test` | 19 | Scalar barrier, all NT/SS feature regions, force partition, deformable/rigid derivative blocks and modes, and stress cases |
 | `corotated_energy_test` | 11 | Rest state, invariance, gradient/Hessian FD convergence, and stress cases |
 | `initial_guess_test` | 5 | CCD no-candidate, Verlet gravity, and translation closed forms for inertia/gravity, pins, and one-step plane-SDF correction |

@@ -1988,3 +1988,278 @@ TEST(MixedExample,
         object_masses.begin(), object_masses.end(),
         ref_mesh.mass.begin() + cloth_vertices));
 }
+
+TEST(RigidExample,
+     DynamicBoltStartsDeepInsideFullyFixedNutWithSharedAssetScale) {
+    namespace fs = std::filesystem;
+    static std::atomic<std::uint64_t> next_directory{0};
+    const fs::path directory = fs::temp_directory_path()
+        / ("ipc_fixed_nut_dynamic_bolt_scene_"
+           + std::to_string(
+               std::chrono::steady_clock::now().time_since_epoch().count())
+           + "_" + std::to_string(next_directory.fetch_add(1)));
+    fs::create_directories(directory);
+
+    struct WorkingDirectoryGuard {
+        fs::path previous;
+        fs::path temporary;
+
+        explicit WorkingDirectoryGuard(fs::path path)
+            : previous(fs::current_path()), temporary(std::move(path)) {
+            fs::current_path(temporary);
+        }
+
+        ~WorkingDirectoryGuard() {
+            std::error_code error;
+            fs::current_path(previous, error);
+            fs::remove_all(temporary, error);
+        }
+    } working_directory(directory);
+
+    fs::create_directories("example_obj/bolt_and_nut");
+    const auto write_octahedron = [](
+        const char* filename, const double half_x,
+        const double half_y, const double half_z) {
+        std::ofstream obj(filename);
+        ASSERT_TRUE(obj.good());
+        obj.precision(17);
+        obj << "v " << half_x << " 0 0\n"
+            << "v " << -half_x << " 0 0\n"
+            << "v 0 " << half_y << " 0\n"
+            << "v 0 " << -half_y << " 0\n"
+            << "v 0 0 " << half_z << "\n"
+            << "v 0 0 " << -half_z << "\n"
+            << "f 1 3 5\n"
+            << "f 3 2 5\n"
+            << "f 2 4 5\n"
+            << "f 4 1 5\n"
+            << "f 3 1 6\n"
+            << "f 2 3 6\n"
+            << "f 4 2 6\n"
+            << "f 1 4 6\n";
+        ASSERT_TRUE(obj.good());
+    };
+
+    // These symmetric closed fixtures have the exact source AABB dimensions
+    // used by the production assets. Their simple topology keeps this scene
+    // construction test fast while still detecting independent normalization.
+    constexpr double source_half_x = 15.0;
+    constexpr double source_half_y = 17.32051;
+    constexpr double bolt_source_half_z = 29.0;
+    constexpr double nut_source_half_z = 8.0;
+    write_octahedron(
+        "example_obj/bolt_and_nut/bolt_coarse_bolt.obj",
+        source_half_x, source_half_y, bolt_source_half_z);
+    write_octahedron(
+        "example_obj/bolt_and_nut/bolt_coarse_nut.obj",
+        source_half_x, source_half_y, nut_source_half_z);
+
+    IPCArgs3D args;
+    args.rigid_density = 947.0;
+    // Force the scene's mesh-resolution clamp to be active.
+    args.d_hat = 1.0;
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+
+    build_dynamic_bolt_into_fixed_nut_example(
+        args, ref_mesh, state, X, pins, params);
+
+    constexpr int nodes_per_body = 6;
+    constexpr int triangles_per_body = 8;
+    constexpr int rigid_body_count = 2;
+    constexpr int total_nodes = rigid_body_count * nodes_per_body;
+    constexpr int total_triangles =
+        rigid_body_count * triangles_per_body;
+
+    EXPECT_EQ(state.deformed_positions.size(), total_nodes);
+    EXPECT_EQ(state.velocities.size(), total_nodes);
+    EXPECT_EQ(ref_mesh.num_positions, total_nodes);
+    EXPECT_EQ(ref_mesh.mass.size(), total_nodes);
+    EXPECT_EQ(ref_mesh.node_to_rb.size(), total_nodes);
+    EXPECT_EQ(ref_mesh.tris.size(), 3 * total_triangles);
+    EXPECT_TRUE(ref_mesh.tets.empty());
+    EXPECT_TRUE(ref_mesh.tet_rest_data.empty());
+    EXPECT_TRUE(ref_mesh.tet_nodes.empty());
+    EXPECT_TRUE(ref_mesh.surface_nodes.empty());
+    EXPECT_TRUE(ref_mesh.deformable_nodes.empty());
+    EXPECT_TRUE(ref_mesh.Dm_inverse.empty());
+    EXPECT_TRUE(ref_mesh.area.empty());
+    EXPECT_TRUE(ref_mesh.hinges.empty());
+    EXPECT_TRUE(X.empty());
+    EXPECT_TRUE(pins.empty());
+
+    ASSERT_EQ(ref_mesh.rb_nodes.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.ref_positions.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.total_mass.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.I_hat.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.rb_update_modes.size(), rigid_body_count);
+    ASSERT_EQ(state.x_coms.size(), rigid_body_count);
+    ASSERT_EQ(state.v_coms.size(), rigid_body_count);
+    ASSERT_EQ(state.orientations.size(), rigid_body_count);
+    ASSERT_EQ(state.omega.size(), rigid_body_count);
+    EXPECT_EQ(
+        ref_mesh.rb_update_modes[0], RigidBodyUpdateMode::None);
+    EXPECT_EQ(
+        ref_mesh.rb_update_modes[1],
+        RigidBodyUpdateMode::TranslationAndOrientation);
+
+    constexpr double source_to_world_scale = 0.30 / 58.0;
+    constexpr double nut_center_y = 0.35;
+    constexpr double initial_insertion_source = 14.0;
+    constexpr double bolt_center_y =
+        nut_center_y
+        + source_to_world_scale * (37.0 - initial_insertion_source);
+    const std::array<Vec3, rigid_body_count> expected_centers{
+        Vec3(0.0, nut_center_y, 0.0),
+        Vec3(0.0, bolt_center_y, 0.0)};
+    const std::array<Vec3, rigid_body_count> expected_material_extents{
+        Vec3(30.0, 34.64102, 16.0) * source_to_world_scale,
+        Vec3(30.0, 34.64102, 58.0) * source_to_world_scale};
+    constexpr double kPi = 3.14159265358979323846;
+    const Vec4 upright_orientation(
+        std::cos(0.25 * kPi), -std::sin(0.25 * kPi), 0.0, 0.0);
+    const std::array<Vec4, rigid_body_count> expected_orientations{
+        upright_orientation, upright_orientation};
+    const std::array<Vec3, rigid_body_count> expected_omegas{
+        Vec3::Zero(), Vec3::Zero()};
+    // Both assets map material +z to world +y and retain one common uniform
+    // scale. Their relative axial offset is four complete thread pitches, so
+    // no additional yaw is needed to preserve the authored helical phase.
+    const std::array<Vec3, rigid_body_count> expected_world_extents{
+        Vec3(30.0, 16.0, 34.64102) * source_to_world_scale,
+        Vec3(30.0, 58.0, 34.64102) * source_to_world_scale};
+
+    std::array<Vec3, rigid_body_count> world_lower;
+    std::array<Vec3, rigid_body_count> world_upper;
+    for (int rb = 0; rb < rigid_body_count; ++rb) {
+        SCOPED_TRACE(rb);
+        EXPECT_TRUE(state.x_coms[rb].isApprox(
+            expected_centers[static_cast<std::size_t>(rb)], 1.0e-14));
+        EXPECT_TRUE(state.v_coms[rb].isZero(0.0));
+        EXPECT_TRUE(state.omega[rb].isApprox(
+            expected_omegas[static_cast<std::size_t>(rb)], 0.0));
+        EXPECT_TRUE(state.orientations[rb].isApprox(
+            expected_orientations[static_cast<std::size_t>(rb)],
+            1.0e-14));
+        ASSERT_EQ(ref_mesh.rb_nodes[rb].size(), nodes_per_body);
+        ASSERT_EQ(ref_mesh.ref_positions[rb].size(), nodes_per_body);
+
+        Vec3 material_lower = ref_mesh.ref_positions[rb].front();
+        Vec3 material_upper = material_lower;
+        world_lower[static_cast<std::size_t>(rb)] =
+            state.deformed_positions[ref_mesh.rb_nodes[rb].front()];
+        world_upper[static_cast<std::size_t>(rb)] =
+            world_lower[static_cast<std::size_t>(rb)];
+        double nodal_mass = 0.0;
+        for (std::size_t local = 0;
+             local < ref_mesh.rb_nodes[rb].size(); ++local) {
+            const int expected_node = rb * nodes_per_body
+                + static_cast<int>(local);
+            const int node = ref_mesh.rb_nodes[rb][local];
+            EXPECT_EQ(node, expected_node);
+            EXPECT_EQ(ref_mesh.node_to_rb[node], rb);
+            const Vec3 world_offset =
+                state.deformed_positions[node] - state.x_coms[rb];
+            EXPECT_TRUE(state.velocities[node].isApprox(
+                expected_omegas[static_cast<std::size_t>(rb)].cross(
+                    world_offset),
+                1.0e-14));
+            EXPECT_GT(ref_mesh.mass[node], 0.0);
+            nodal_mass += ref_mesh.mass[node];
+            material_lower = material_lower.cwiseMin(
+                ref_mesh.ref_positions[rb][local]);
+            material_upper = material_upper.cwiseMax(
+                ref_mesh.ref_positions[rb][local]);
+            world_lower[static_cast<std::size_t>(rb)] =
+                world_lower[static_cast<std::size_t>(rb)].cwiseMin(
+                    state.deformed_positions[node]);
+            world_upper[static_cast<std::size_t>(rb)] =
+                world_upper[static_cast<std::size_t>(rb)].cwiseMax(
+                    state.deformed_positions[node]);
+        }
+
+        EXPECT_TRUE((0.5 * (material_lower + material_upper))
+                        .isZero(1.0e-14));
+        EXPECT_TRUE((material_upper - material_lower).isApprox(
+            expected_material_extents[static_cast<std::size_t>(rb)],
+            1.0e-14));
+        EXPECT_TRUE((0.5
+                     * (world_lower[static_cast<std::size_t>(rb)]
+                        + world_upper[static_cast<std::size_t>(rb)]))
+                        .isApprox(
+                            expected_centers[static_cast<std::size_t>(rb)],
+                            1.0e-14));
+        EXPECT_TRUE((world_upper[static_cast<std::size_t>(rb)]
+                     - world_lower[static_cast<std::size_t>(rb)])
+                        .isApprox(
+                            expected_world_extents[
+                                static_cast<std::size_t>(rb)],
+                            1.0e-14));
+        EXPECT_NEAR(
+            nodal_mass, ref_mesh.total_mass[rb],
+            1.0e-14 * ref_mesh.total_mass[rb]);
+    }
+
+    // The octahedron volume is 4*a*b*c/3. Both mass checks use the same
+    // source-to-world scale even though the source maximum extents differ.
+    constexpr double nut_source_volume =
+        (4.0 / 3.0) * source_half_x * source_half_y * nut_source_half_z;
+    constexpr double bolt_source_volume =
+        (4.0 / 3.0) * source_half_x * source_half_y * bolt_source_half_z;
+    const double scaled_volume_factor =
+        source_to_world_scale * source_to_world_scale
+        * source_to_world_scale;
+    EXPECT_NEAR(
+        ref_mesh.total_mass[0],
+        args.rigid_density * nut_source_volume * scaled_volume_factor,
+        1.0e-12);
+    EXPECT_NEAR(
+        ref_mesh.total_mass[1],
+        args.rigid_density * bolt_source_volume * scaled_volume_factor,
+        1.0e-12);
+
+    for (int triangle = 0; triangle < total_triangles; ++triangle) {
+        const int expected_rb = triangle / triangles_per_body;
+        for (int local = 0; local < 3; ++local) {
+            const int node = ref_mesh.tris[3 * triangle + local];
+            EXPECT_EQ(ref_mesh.node_to_rb[node], expected_rb);
+        }
+    }
+
+    const double initial_insertion_depth =
+        world_upper[0].y() - world_lower[1].y();
+    EXPECT_NEAR(
+        initial_insertion_depth,
+        initial_insertion_source * source_to_world_scale,
+        1.0e-14);
+    EXPECT_GT(initial_insertion_depth, 0.0);
+
+    EXPECT_DOUBLE_EQ(params.k_sdf, 0.0);
+    EXPECT_TRUE(params.sdf_planes.empty());
+    EXPECT_TRUE(params.sdf_cylinders.empty());
+    EXPECT_TRUE(params.sdf_spheres.empty());
+    EXPECT_FALSE(params.use_ccd_guess);
+    EXPECT_FALSE(params.use_verlet_guess);
+    EXPECT_FALSE(params.use_translation_guess);
+    EXPECT_FALSE(params.use_ogc);
+    EXPECT_FALSE(params.use_ogc_solver);
+
+    double minimum_surface_edge = std::numeric_limits<double>::infinity();
+    for (int triangle = 0; triangle < total_triangles; ++triangle) {
+        for (int local = 0; local < 3; ++local) {
+            const int first = ref_mesh.tris[3 * triangle + local];
+            const int second =
+                ref_mesh.tris[3 * triangle + (local + 1) % 3];
+            minimum_surface_edge = std::min(
+                minimum_surface_edge,
+                (state.deformed_positions[second]
+                 - state.deformed_positions[first])
+                    .norm());
+        }
+    }
+    EXPECT_LT(params.d_hat, args.d_hat);
+    EXPECT_NEAR(params.d_hat, 0.45 * minimum_surface_edge, 1.0e-15);
+}

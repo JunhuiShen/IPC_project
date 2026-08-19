@@ -19,7 +19,8 @@ int append_rigid_polygon(
     int number_of_nodes, DeformedState& state, RefMesh& ref_mesh,
     const Vec3& center, double radius, double density,
     double thickness, const Vec3& v_com,
-    const Vec4& orientation, const Vec3& omega) {
+    const Vec4& orientation, const Vec3& omega,
+    RigidBodyUpdateMode update_mode) {
     if (number_of_nodes < 3)
         throw std::invalid_argument(
             "append_rigid_polygon: number_of_nodes must be at least 3");
@@ -91,7 +92,7 @@ int append_rigid_polygon(
     const double total_mass = area * thickness * density;
     return create_rigid_body(
         world_positions, v_com, q, omega, total_mass,
-        ref_mesh, state);
+        ref_mesh, state, update_mode);
 }
 
 int append_deformable_polygon_prism(
@@ -271,7 +272,8 @@ int append_normalized_obj_rigid_body(
     DeformedState& state, RefMesh& ref_mesh,
     const Vec3& center, const double target_max_extent,
     const double density, const Vec3& v_com,
-    const Vec4& orientation, const Vec3& omega) {
+    const Vec4& orientation, const Vec3& omega,
+    RigidBodyUpdateMode update_mode) {
     const char* function_name = "append_normalized_obj_rigid_body";
     if (!center.allFinite() || !v_com.allFinite() || !omega.allFinite()) {
         throw std::invalid_argument(
@@ -507,7 +509,7 @@ int append_normalized_obj_rigid_body(
     ref_mesh.tris.reserve(ref_mesh.tris.size() + triangles.size());
     const int rigid_body = create_rigid_body(
         positions, v_com, normalized_orientation, omega, total_mass,
-        ref_mesh, state);
+        ref_mesh, state, update_mode);
     for (const int local_node : triangles) {
         ref_mesh.tris.push_back(
             static_cast<int>(node_base) + local_node);

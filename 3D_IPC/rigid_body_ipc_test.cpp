@@ -211,6 +211,244 @@ TEST(RigidBodyIPCCreation, ComputesAndStoresRigidBodyState) {
     }
 }
 
+TEST(RigidBodyIPCCreation, StoresUpdateModesAndCanonicalizesDisabledVelocities) {
+    const std::array<RigidBodyUpdateMode, 4> modes = {
+        RigidBodyUpdateMode::TranslationAndOrientation,
+        RigidBodyUpdateMode::TranslationOnly,
+        RigidBodyUpdateMode::OrientationOnly,
+        RigidBodyUpdateMode::None,
+    };
+    const Vec3 input_v_com(0.7, -0.4, 0.2);
+    const Vec3 input_omega(-0.3, 0.5, 0.8);
+    const Vec4 orientation = quaternion_normalize(
+        Vec4(0.9, -0.1, 0.2, 0.3));
+    const std::vector<Vec3> offsets = {
+        Vec3(-0.4, -0.3, -0.2),
+        Vec3(0.6, -0.2, -0.1),
+        Vec3(-0.1, 0.7, -0.3),
+        Vec3(-0.1, -0.2, 0.6),
+    };
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    for (int body = 0; body < static_cast<int>(modes.size()); ++body) {
+        const Vec3 center(4.0 * body, 1.0, -2.0);
+        std::vector<Vec3> positions;
+        positions.reserve(offsets.size());
+        for (const Vec3& offset : offsets) {
+            positions.push_back(
+                center + quaternion_rotate(orientation, offset));
+        }
+
+        const int rb = create_rigid_body(
+            positions, input_v_com, orientation, input_omega, 4.0,
+            ref_mesh, state, modes[body]);
+        ASSERT_EQ(rb, body);
+        ASSERT_EQ(ref_mesh.rb_update_modes.size(),
+            static_cast<std::size_t>(body + 1));
+        EXPECT_EQ(ref_mesh.rb_update_modes[rb], modes[body]);
+
+        const Vec3 expected_v_com = updates_rigid_translation(modes[body])
+            ? input_v_com : Vec3::Zero();
+        const Vec3 expected_omega = updates_rigid_orientation(modes[body])
+            ? input_omega : Vec3::Zero();
+        EXPECT_TRUE(state.v_coms[rb].isApprox(expected_v_com, 1.0e-14));
+        EXPECT_TRUE(state.omega[rb].isApprox(expected_omega, 1.0e-14));
+
+        for (const int node : ref_mesh.rb_nodes[rb]) {
+            const Vec3 world_offset =
+                state.deformed_positions[node] - state.x_coms[rb];
+            EXPECT_TRUE(state.velocities[node].isApprox(
+                expected_v_com + expected_omega.cross(world_offset),
+                1.0e-14));
+        }
+    }
+}
+
+TEST(RigidBodyIPCUpdateModes, FixedBodyStaysBitwiseFixedWhileDefaultBodyFalls) {
+    const Vec4 fixed_orientation = quaternion_normalize(
+        Vec4(0.8, -0.2, 0.3, 0.4));
+    const std::vector<Vec3> tetra_offsets = {
+        Vec3(-0.4, -0.3, -0.2),
+        Vec3(0.6, -0.2, -0.1),
+        Vec3(-0.1, 0.7, -0.3),
+        Vec3(-0.1, -0.2, 0.6),
+    };
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec3> fixed_positions;
+    fixed_positions.reserve(tetra_offsets.size());
+    for (const Vec3& offset : tetra_offsets) {
+        fixed_positions.push_back(
+            Vec3(0.0, 1.0, 0.0)
+            + quaternion_rotate(fixed_orientation, offset));
+    }
+    const int fixed_rb = create_rigid_body(
+        fixed_positions, Vec3(1.0, 2.0, 3.0), fixed_orientation,
+        Vec3(-0.5, 0.7, 0.2), 4.0, ref_mesh, state,
+        RigidBodyUpdateMode::None);
+
+    std::vector<Vec3> dynamic_positions;
+    dynamic_positions.reserve(tetra_offsets.size());
+    for (const Vec3& offset : tetra_offsets)
+        dynamic_positions.push_back(Vec3(10.0, 3.0, 0.0) + offset);
+    const int dynamic_rb = create_rigid_body(
+        dynamic_positions, Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
+        Vec3::Zero(), 4.0, ref_mesh, state);
+
+    ASSERT_EQ(ref_mesh.rb_update_modes[fixed_rb],
+        RigidBodyUpdateMode::None);
+    ASSERT_EQ(ref_mesh.rb_update_modes[dynamic_rb],
+        RigidBodyUpdateMode::TranslationAndOrientation);
+
+    // Snapshot a canonical proxy configuration. Reinjecting forbidden rigid
+    // velocities below checks that both the frame driver and proxy sync erase
+    // them without perturbing any fixed generalized coordinate or proxy.
+    sync_rigid_body_particles(ref_mesh, state);
+    const Vec3 fixed_com_before = state.x_coms[fixed_rb];
+    const Vec4 fixed_orientation_before = state.orientations[fixed_rb];
+    std::vector<Vec3> fixed_proxies_before;
+    fixed_proxies_before.reserve(ref_mesh.rb_nodes[fixed_rb].size());
+    for (const int node : ref_mesh.rb_nodes[fixed_rb])
+        fixed_proxies_before.push_back(state.deformed_positions[node]);
+
+    state.v_coms[fixed_rb] = Vec3(4.0, -5.0, 6.0);
+    state.omega[fixed_rb] = Vec3(-1.0, 2.0, -3.0);
+    for (const int node : ref_mesh.rb_nodes[fixed_rb])
+        state.velocities[node] = Vec3(7.0, 8.0, 9.0);
+
+    SimParams params = SimParams::zeros();
+    params.fps = 10.0;
+    params.substeps = 1;
+    params.gravity = Vec3(0.0, -9.81, 0.0);
+    params.max_global_iters = 1;
+    params.fixed_iters = true;
+    params.damping = 1.0;
+    params.node_box_min = 0.5;
+    params.node_box_max = 0.5;
+    params.theta_box_min = 0.5;
+    params.theta_box_max = 0.5;
+    params.node_box_update_count = 1;
+    params.d_hat = 0.0;
+    params.k_barrier = 0.0;
+    params.use_parallel = false;
+
+    const Vec3 dynamic_com_before = state.x_coms[dynamic_rb];
+    const SolverResult result = advance_one_frame_rb(state, ref_mesh, params);
+    ASSERT_TRUE(result.converged);
+    ASSERT_EQ(result.iterations, 1);
+
+    EXPECT_EQ(std::memcmp(state.x_coms[fixed_rb].data(),
+                  fixed_com_before.data(), sizeof(double) * 3),
+        0);
+    EXPECT_EQ(std::memcmp(state.orientations[fixed_rb].data(),
+                  fixed_orientation_before.data(), sizeof(double) * 4),
+        0);
+    EXPECT_TRUE(state.v_coms[fixed_rb].isZero(0.0));
+    EXPECT_TRUE(state.omega[fixed_rb].isZero(0.0));
+    for (int local = 0;
+         local < static_cast<int>(ref_mesh.rb_nodes[fixed_rb].size());
+         ++local) {
+        const int node = ref_mesh.rb_nodes[fixed_rb][local];
+        EXPECT_EQ(std::memcmp(state.deformed_positions[node].data(),
+                      fixed_proxies_before[local].data(), sizeof(double) * 3),
+            0);
+        EXPECT_TRUE(state.velocities[node].isZero(0.0));
+    }
+
+    const double dt = params.dt();
+    const Vec3 expected_dynamic_com =
+        dynamic_com_before + dt * dt * params.gravity;
+    EXPECT_TRUE(state.x_coms[dynamic_rb].isApprox(
+        expected_dynamic_com, 1.0e-14));
+    EXPECT_LT(state.x_coms[dynamic_rb].y(), dynamic_com_before.y());
+    EXPECT_TRUE(state.v_coms[dynamic_rb].isApprox(
+        dt * params.gravity, 1.0e-14));
+}
+
+TEST(RigidBodyIPCUpdateModes, PartialModesAdvanceOnlyTheirEnabledCoordinates) {
+    const std::vector<Vec3> offsets = {
+        Vec3(-0.4, -0.3, -0.2),
+        Vec3(0.6, -0.2, -0.1),
+        Vec3(-0.1, 0.7, -0.3),
+        Vec3(-0.1, -0.2, 0.6),
+    };
+    const Vec4 translation_only_orientation = quaternion_normalize(
+        Vec4(0.9, 0.1, -0.2, 0.3));
+    const Vec4 orientation_only_orientation = quaternion_normalize(
+        Vec4(0.8, -0.3, 0.1, 0.4));
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec3> translation_only_positions;
+    std::vector<Vec3> orientation_only_positions;
+    for (const Vec3& offset : offsets) {
+        translation_only_positions.push_back(
+            Vec3(0.0, 3.0, 0.0)
+            + quaternion_rotate(translation_only_orientation, offset));
+        orientation_only_positions.push_back(
+            Vec3(10.0, 2.0, 0.0)
+            + quaternion_rotate(orientation_only_orientation, offset));
+    }
+    const int translation_only_rb = create_rigid_body(
+        translation_only_positions, Vec3::Zero(),
+        translation_only_orientation, Vec3(0.3, -0.2, 0.4), 4.0,
+        ref_mesh, state, RigidBodyUpdateMode::TranslationOnly);
+    const int orientation_only_rb = create_rigid_body(
+        orientation_only_positions, Vec3(1.0, -2.0, 3.0),
+        orientation_only_orientation, Vec3(0.3, -0.2, 0.4), 4.0,
+        ref_mesh, state, RigidBodyUpdateMode::OrientationOnly);
+
+    const Vec3 translation_com_before = state.x_coms[translation_only_rb];
+    const Vec4 translation_q_before = state.orientations[translation_only_rb];
+    const Vec3 orientation_com_before = state.x_coms[orientation_only_rb];
+    const Vec4 orientation_q_before = state.orientations[orientation_only_rb];
+
+    SimParams params = SimParams::zeros();
+    params.fps = 10.0;
+    params.substeps = 1;
+    params.gravity = Vec3(0.0, -9.81, 0.0);
+    params.max_global_iters = 1;
+    params.fixed_iters = true;
+    params.damping = 1.0;
+    params.node_box_min = 0.5;
+    params.node_box_max = 0.5;
+    params.theta_box_min = 0.5;
+    params.theta_box_max = 0.5;
+    params.node_box_update_count = 1;
+    params.d_hat = 0.0;
+    params.k_barrier = 0.0;
+    params.use_parallel = false;
+
+    const SolverResult result = advance_one_frame_rb(state, ref_mesh, params);
+    ASSERT_TRUE(result.converged);
+    ASSERT_EQ(result.iterations, 1);
+
+    const double dt = params.dt();
+    EXPECT_TRUE(state.x_coms[translation_only_rb].isApprox(
+        translation_com_before + dt * dt * params.gravity, 1.0e-14));
+    EXPECT_TRUE(state.v_coms[translation_only_rb].isApprox(
+        dt * params.gravity, 1.0e-14));
+    EXPECT_EQ(std::memcmp(state.orientations[translation_only_rb].data(),
+                  translation_q_before.data(), sizeof(double) * 4),
+        0);
+    EXPECT_TRUE(state.omega[translation_only_rb].isZero(0.0));
+
+    EXPECT_EQ(std::memcmp(state.x_coms[orientation_only_rb].data(),
+                  orientation_com_before.data(), sizeof(double) * 3),
+        0);
+    EXPECT_TRUE(state.v_coms[orientation_only_rb].isZero(0.0));
+    EXPECT_NE(std::memcmp(state.orientations[orientation_only_rb].data(),
+                  orientation_q_before.data(), sizeof(double) * 4),
+        0);
+    EXPECT_GT(state.omega[orientation_only_rb].norm(), 1.0e-8);
+    EXPECT_TRUE(state.orientations[orientation_only_rb].isApprox(
+        quaternion_from_angular_velocity(
+            orientation_q_before, state.omega[orientation_only_rb], dt),
+        1.0e-13));
+}
+
 TEST(RigidBodyIPCPositionHelpers, OrientationOverloadsRoundTrip) {
     const Vec3 x_com(0.7, -0.4, 1.2);
     const Vec4 orientation =

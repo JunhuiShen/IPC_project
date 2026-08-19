@@ -338,7 +338,11 @@ Mat33 body_second_moment(const std::vector<double>& masses, const std::vector<Ve
     return I_hat;
 }
 
-int create_rigid_body(const std::vector<Vec3>& x, const Vec3& v_com_input, const Vec4& orientation_input, const Vec3& omega_input, double total_mass, RefMesh& ref_mesh, DeformedState& state) {
+int create_rigid_body(
+    const std::vector<Vec3>& x, const Vec3& v_com_input,
+    const Vec4& orientation_input, const Vec3& omega_input,
+    double total_mass, RefMesh& ref_mesh, DeformedState& state,
+    RigidBodyUpdateMode update_mode) {
     if (x.empty())
         throw std::invalid_argument("create_rigid_body: x cannot be empty");
     if (!std::isfinite(total_mass) || total_mass <= 0.0)
@@ -360,6 +364,7 @@ int create_rigid_body(const std::vector<Vec3>& x, const Vec3& v_com_input, const
         ref_mesh.I_hat.size() == num_rbs
         && ref_mesh.ref_positions.size() == num_rbs
         && ref_mesh.rb_nodes.size() == num_rbs
+        && ref_mesh.rb_update_modes.size() == num_rbs
         && state.x_coms.size() == num_rbs
         && state.v_coms.size() == num_rbs
         && state.orientations.size() == num_rbs
@@ -409,22 +414,27 @@ int create_rigid_body(const std::vector<Vec3>& x, const Vec3& v_com_input, const
     const Mat33 I_hat = body_second_moment(nodal_masses, ref_positions);
 
     const int rb = static_cast<int>(num_rbs);
+    const Vec3 v_com = updates_rigid_translation(update_mode)
+        ? v_com_input : Vec3::Zero();
+    const Vec3 omega = updates_rigid_orientation(update_mode)
+        ? omega_input : Vec3::Zero();
     state.x_coms.push_back(x_com);
-    state.v_coms.push_back(v_com_input);
+    state.v_coms.push_back(v_com);
     state.orientations.push_back(orientation);
-    state.omega.push_back(omega_input);
+    state.omega.push_back(omega);
 
     ref_mesh.ref_positions.push_back(ref_positions);
     ref_mesh.total_mass.push_back(total_mass);
     ref_mesh.I_hat.push_back(I_hat);
     ref_mesh.rb_nodes.push_back(node_indices);
+    ref_mesh.rb_update_modes.push_back(update_mode);
 
     for (int node : node_indices) {
         const Vec3 world_offset = state.deformed_positions[node] - x_com;
         ref_mesh.mass[node] = nodal_mass;
         ref_mesh.node_to_rb[node] = rb;
         state.velocities[node] =
-            v_com_input + omega_input.cross(world_offset);
+            v_com + omega.cross(world_offset);
     }
 
     return rb;

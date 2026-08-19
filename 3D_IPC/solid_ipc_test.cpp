@@ -1615,3 +1615,78 @@ TEST(SolidGeneralSolver, AdvancesPureSolidWithoutRigidBodies) {
             params.dt() * params.gravity, 1.0e-12));
     }
 }
+
+TEST(SolidGeneralSolver,
+     FullyPinnedRigidSurfaceRepelsSolidWithoutReceivingReactionMotion) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    const std::vector<Vec3> solid_positions = {
+        Vec3(-0.3, -0.3, 0.2),
+        Vec3( 0.3, -0.3, 0.2),
+        Vec3(-0.3,  0.3, 0.2),
+        Vec3(-0.3, -0.3, 0.8)};
+    create_solid(
+        solid_positions, {0, 1, 2, 3}, 24.0, ref_mesh, state);
+
+    const std::vector<Vec3> rigid_positions = {
+        Vec3(-2.0, -2.0, 0.0), Vec3( 2.0, -2.0, 0.0),
+        Vec3( 2.0,  2.0, 0.0), Vec3(-2.0,  2.0, 0.0)};
+    const int rb = create_rigid_body(
+        rigid_positions, Vec3::Zero(),
+        Vec4(0.8, -0.2, 0.3, 0.4), Vec3::Zero(), 40.0,
+        ref_mesh, state, RigidBodyUpdateMode::None);
+    const std::vector<int>& rigid_nodes = ref_mesh.rb_nodes[rb];
+    ref_mesh.tris.insert(
+        ref_mesh.tris.end(),
+        {rigid_nodes[0], rigid_nodes[1], rigid_nodes[2],
+         rigid_nodes[0], rigid_nodes[2], rigid_nodes[3]});
+    ref_mesh.build_deformable_nodes();
+
+    const std::vector<Vec3> rigid_positions_before = {
+        state.deformed_positions[rigid_nodes[0]],
+        state.deformed_positions[rigid_nodes[1]],
+        state.deformed_positions[rigid_nodes[2]],
+        state.deformed_positions[rigid_nodes[3]]};
+    const Vec3 rigid_com_before = state.x_coms[rb];
+    const Vec4 rigid_orientation_before = state.orientations[rb];
+
+    SimParams params = SimParams::zeros();
+    params.fps = 10.0;
+    params.substeps = 1;
+    params.max_global_iters = 1;
+    params.fixed_iters = true;
+    params.use_parallel = false;
+    params.use_ccd = false;
+    params.damping = 0.25;
+    params.d_hat = 0.5;
+    params.k_barrier = 100.0;
+    params.solid_mu = 0.0;
+    params.solid_lambda = 0.0;
+    params.node_box_min = 1.0;
+    params.node_box_max = 1.0;
+    params.theta_box_min = M_PI;
+    params.theta_box_max = M_PI;
+    params.node_box_update_count = 1;
+
+    const VertexTriangleMap adj =
+        build_incident_triangle_map(ref_mesh.tris);
+    std::vector<Pin> pins;
+    BroadPhase broad_phase;
+    const SolverResult result = advance_one_frame_general(
+        state, ref_mesh, adj, pins, params, broad_phase);
+
+    ASSERT_TRUE(result.converged);
+    EXPECT_EQ(result.iterations, 1);
+    EXPECT_GT(state.deformed_positions[0].z(), solid_positions[0].z());
+    EXPECT_TRUE(state.x_coms[rb].isApprox(rigid_com_before, 0.0));
+    EXPECT_TRUE(state.v_coms[rb].isZero(0.0));
+    EXPECT_TRUE(state.orientations[rb].isApprox(
+        rigid_orientation_before, 0.0));
+    EXPECT_TRUE(state.omega[rb].isZero(0.0));
+    for (int local = 0; local < 4; ++local) {
+        const int node = rigid_nodes[local];
+        EXPECT_TRUE(state.deformed_positions[node].isApprox(
+            rigid_positions_before[local], 1.0e-14));
+        EXPECT_TRUE(state.velocities[node].isZero(0.0));
+    }
+}

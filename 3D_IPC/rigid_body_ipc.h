@@ -8,6 +8,26 @@
 struct DeformedState;
 struct RefMesh;
 
+// Label controlling which generalized coordinates are solved for. Disabled
+// coordinates stay at their previous-step values and contribute reaction
+// forces rather than residual terms.
+enum class RigidBodyUpdateMode : unsigned char {
+    TranslationAndOrientation,
+    TranslationOnly,
+    OrientationOnly,
+    None,
+};
+
+constexpr bool updates_rigid_translation(RigidBodyUpdateMode mode) {
+    return mode == RigidBodyUpdateMode::TranslationAndOrientation
+        || mode == RigidBodyUpdateMode::TranslationOnly;
+}
+
+constexpr bool updates_rigid_orientation(RigidBodyUpdateMode mode) {
+    return mode == RigidBodyUpdateMode::TranslationAndOrientation
+        || mode == RigidBodyUpdateMode::OrientationOnly;
+}
+
 // Gradient and Hessian blocks of an energy in rigid COM and omega coordinates.
 struct RigidEnergyDerivatives {
     Vec3 translation_gradient;
@@ -79,7 +99,12 @@ Mat33 body_second_moment(const std::vector<double>& masses, const std::vector<Ve
 // The input orientation and omega use the scalar-first quaternion and
 // world-space angular-velocity conventions used by this file. Returns the
 // newly assigned rigid-body index.
-int create_rigid_body(const std::vector<Vec3>& x, const Vec3& v_com_input, const Vec4& orientation_input, const Vec3& omega_input, double total_mass, RefMesh& ref_mesh, DeformedState& state);
+int create_rigid_body(
+    const std::vector<Vec3>& x, const Vec3& v_com_input,
+    const Vec4& orientation_input, const Vec3& omega_input,
+    double total_mass, RefMesh& ref_mesh, DeformedState& state,
+    RigidBodyUpdateMode update_mode =
+        RigidBodyUpdateMode::TranslationAndOrientation);
 
 // Rigid-body inertial incremental potential aggregated with I_hat.
 // The candidate quaternion is q(omega) = exp((dt / 2) * omega) * q_n.

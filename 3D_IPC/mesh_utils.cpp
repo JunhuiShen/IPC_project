@@ -32,6 +32,7 @@ void clear_model(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, 
     ref_mesh.total_mass.clear();
     ref_mesh.I_hat.clear();
     ref_mesh.rb_nodes.clear();
+    ref_mesh.rb_update_modes.clear();
     ref_mesh.node_to_rb.clear();
     ref_mesh.deformable_nodes.clear();
     pins.clear();

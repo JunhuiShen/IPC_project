@@ -233,3 +233,11 @@ void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
+
+// Example 18: a fully dynamic threaded bolt starts deeply engaged in a nut and
+// falls coaxially under gravity, rotating as it follows the thread. The nut's
+// translation and orientation are both fixed by its rigid update label.
+void build_dynamic_bolt_into_fixed_nut_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params);

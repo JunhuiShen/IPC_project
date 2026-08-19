@@ -53,8 +53,9 @@ int main(int argc, char** argv) {
     else if (args.example == 15) build_twenty_rigid_deformable_polygons_drop_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 16) build_ten_alternating_rigid_solid_flat_stack_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 17) build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 18) build_dynamic_bolt_into_fixed_nut_example(args, ref_mesh, state, X, pins, params);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18.\n";
         return 1;
     }
 
@@ -102,6 +103,10 @@ int main(int argc, char** argv) {
         has_deformable = has_deformable || owner < 0;
     }
     const bool has_rigid = num_rigid_bodies > 0;
+    if (ref_mesh.rb_update_modes.size() != num_rigid_bodies) {
+        throw std::invalid_argument(
+            "rigid scene is missing its update-mode labels");
+    }
     const bool has_solid = !ref_mesh.tet_nodes.empty();
     const bool is_mixed = has_rigid && has_deformable;
     const bool uses_general_solver = is_mixed || has_solid;

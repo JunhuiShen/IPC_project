@@ -772,6 +772,7 @@ void validate_rigid_solver_state(const RefMesh& ref_mesh, const DeformedState& s
     const bool valid = ref_mesh.I_hat.size() == num_rbs
         && ref_mesh.rb_nodes.size() == num_rbs
         && ref_mesh.ref_positions.size() == num_rbs
+        && ref_mesh.rb_update_modes.size() == num_rbs
         && state.x_coms.size() == num_rbs
         && state.v_coms.size() == num_rbs
         && state.orientations.size() == num_rbs
@@ -791,17 +792,36 @@ double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedS
     // contributions independently, then retain the original body-index sum
     // order so parallel execution does not change the residual value.
     const auto evaluate_body = [&](int rb) {
+        const RigidBodyUpdateMode update_mode =
+            ref_mesh.rb_update_modes[rb];
+        const bool update_translation =
+            updates_rigid_translation(update_mode);
+        const bool update_orientation =
+            updates_rigid_orientation(update_mode);
+        if (!update_translation && !update_orientation) {
+            body_residuals[static_cast<std::size_t>(rb)] = 0.0;
+            return;
+        }
         const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt);
         const Mat33* rotation_predictor = rotation_predictors == nullptr ? nullptr : &(*rotation_predictors)[static_cast<std::size_t>(rb)];
-        Vec3 com_gradient = inertia_translation_gradient(x_com_new[rb], state.x_coms[rb], state.v_coms[rb], dt, ref_mesh.total_mass[rb]);
-        com_gradient -= gravitational_potential_gradient(ref_mesh.total_mass[rb], params.gravity.y(), dt);
-
-        Vec3 orientation_gradient = inertia_rotation_gradient(omega_new[rb], state.orientations[rb], state.omega[rb], dt, ref_mesh.I_hat[rb], &kinematics, rotation_predictor);
+        Vec3 com_gradient = Vec3::Zero();
+        Vec3 orientation_gradient = Vec3::Zero();
+        if (update_translation) {
+            com_gradient = inertia_translation_gradient(x_com_new[rb], state.x_coms[rb], state.v_coms[rb], dt, ref_mesh.total_mass[rb]);
+            com_gradient -= gravitational_potential_gradient(ref_mesh.total_mass[rb], params.gravity.y(), dt);
+        }
+        if (update_orientation) {
+            orientation_gradient = inertia_rotation_gradient(omega_new[rb], state.orientations[rb], state.omega[rb], dt, ref_mesh.I_hat[rb], &kinematics, rotation_predictor);
+        }
         add_rigid_sdf_gradients(ref_mesh.ref_positions[rb], x_com_new[rb], state.orientations[rb], omega_new[rb], params, dt, com_gradient, orientation_gradient, &kinematics);
         const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, body_nt_pair_indices[rb], body_ss_pair_indices[rb], node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::Gradient, &kinematics, frozen_workspace);
-        com_gradient += barrier_scale * barrier.translation_gradient;
-        orientation_gradient += barrier_scale * barrier.orientation_gradient;
-        body_residuals[static_cast<std::size_t>(rb)] = com_gradient.norm() + orientation_gradient.norm();
+        if (update_translation)
+            com_gradient += barrier_scale * barrier.translation_gradient;
+        if (update_orientation)
+            orientation_gradient += barrier_scale * barrier.orientation_gradient;
+        body_residuals[static_cast<std::size_t>(rb)] =
+            (update_translation ? com_gradient.norm() : 0.0)
+            + (update_orientation ? orientation_gradient.norm() : 0.0);
     };
     if (params.use_parallel && num_rbs > 1) {
         std::exception_ptr first_exception;
@@ -953,6 +973,16 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
     SolverResult result;
     const int num_rbs = static_cast<int>(ref_mesh.total_mass.size());
     const double dt = params.dt();
+    for (int rb = 0; rb < num_rbs; ++rb) {
+        const RigidBodyUpdateMode update_mode =
+            ref_mesh.rb_update_modes[rb];
+        if (!updates_rigid_translation(update_mode))
+            x_com_new[rb] = state.x_coms[rb];
+        if (!updates_rigid_orientation(update_mode)) {
+            omega_new[rb] = Vec3::Zero();
+            q_new[rb] = state.orientations[rb];
+        }
+    }
     static RigidSolverWorkspace workspace;
     workspace.prepare(ref_mesh, static_cast<int>(state.deformed_positions.size()), params.node_box_max, params.theta_box_max);
     for (int rb = 0; rb < num_rbs; ++rb)
@@ -1014,33 +1044,34 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
             rebuild_contact_cache();
 
         const auto process_body = [&](int rb) {
+            const RigidBodyUpdateMode update_mode =
+                ref_mesh.rb_update_modes[rb];
             std::vector<Vec3>& node_positions = workspace.positions;
             const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, true);
-            const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], workspace.node_to_rb_local, node_positions, x_com_new, omega_new, params, dt, &kinematics);
-            const Vec3 com_radius = Vec3::Constant(workspace.com_box_radii[rb]);
-            const Vec3 com_target = (x_com_new[rb] - delta_com).cwiseMax(workspace.com_box_anchors[rb] - com_radius).cwiseMin(workspace.com_box_anchors[rb] + com_radius);
-            const Vec3 proposed_com_displacement = com_target - x_com_new[rb];
-            const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], node_positions, rb, proposed_com_displacement);
-            const Vec3 com_displacement = com_safe_step * proposed_com_displacement;
-            x_com_new[rb] += com_displacement;
-            for (const int node : ref_mesh.rb_nodes[rb])
-                node_positions[node] += com_displacement;
+            if (updates_rigid_translation(update_mode)) {
+                const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], workspace.node_to_rb_local, node_positions, x_com_new, omega_new, params, dt, &kinematics);
+                const Vec3 com_radius = Vec3::Constant(workspace.com_box_radii[rb]);
+                const Vec3 com_target = (x_com_new[rb] - delta_com).cwiseMax(workspace.com_box_anchors[rb] - com_radius).cwiseMin(workspace.com_box_anchors[rb] + com_radius);
+                const Vec3 proposed_com_displacement = com_target - x_com_new[rb];
+                const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], node_positions, rb, proposed_com_displacement);
+                const Vec3 com_displacement = com_safe_step * proposed_com_displacement;
+                x_com_new[rb] += com_displacement;
+                for (const int node : ref_mesh.rb_nodes[rb])
+                    node_positions[node] += com_displacement;
+            }
 
-            const Vec3 delta_omega = rb_solver::compute_omega_update(rb, state, ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], workspace.node_to_rb_local, node_positions, x_com_new, omega_new, params, dt, &kinematics, &workspace.rotation_predictors[static_cast<std::size_t>(rb)]);
-            const Vec4 q_current = quaternion_normalize(kinematics.orientation);
-            const Vec3 omega_target = omega_new[rb] - params.damping * delta_omega;
-            const Vec4 q_target = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_target, dt));
-            const Vec4 q_bounded = bound_quaternion(workspace.orientation_box_anchors[rb], q_current, q_target, workspace.theta_box_radii[rb]);
-            const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], node_positions, rb, x_com_new[rb], q_current, q_bounded);
-            const Vec4 q_accepted = interpolate_orientation_full_arc(q_current, q_bounded, rotation_safe_step);
-            q_new[rb] = q_accepted;
-            
-            // const Vec4 q_n = quaternion_normalize(state.orientations[rb]);
-            // const Vec4 q_dot = (q_accepted - q_n) / dt;
-            // const Vec4 omega_quaternion = 2.0 * quaternion_multiply(q_dot, quaternion_inverse(q_accepted));
-            // omega_new[rb] = omega_quaternion.tail<3>();
-            omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, state.orientations[rb], dt);
-
+            Vec4 q_accepted = q_new[rb];
+            if (updates_rigid_orientation(update_mode)) {
+                const Vec3 delta_omega = rb_solver::compute_omega_update(rb, state, ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], workspace.node_to_rb_local, node_positions, x_com_new, omega_new, params, dt, &kinematics, &workspace.rotation_predictors[static_cast<std::size_t>(rb)]);
+                const Vec4 q_current = quaternion_normalize(kinematics.orientation);
+                const Vec3 omega_target = omega_new[rb] - params.damping * delta_omega;
+                const Vec4 q_target = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_target, dt));
+                const Vec4 q_bounded = bound_quaternion(workspace.orientation_box_anchors[rb], q_current, q_target, workspace.theta_box_radii[rb]);
+                const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], node_positions, rb, x_com_new[rb], q_current, q_bounded);
+                q_accepted = interpolate_orientation_full_arc(q_current, q_bounded, rotation_safe_step);
+                q_new[rb] = q_accepted;
+                omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, state.orientations[rb], dt);
+            }
 
             for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local)
                 node_positions[ref_mesh.rb_nodes[rb][local]] = world_space_position(ref_mesh.ref_positions[rb][local], x_com_new[rb], q_accepted);
@@ -1072,8 +1103,13 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
     }
 
     for (int rb = 0; rb < num_rbs; ++rb) {
-        workspace.prev_com_disp[rb] = (x_com_new[rb] - workspace.substep_start_coms[rb]).norm();
-        workspace.prev_theta_disp[rb] = dt * omega_new[rb].norm();
+        workspace.prev_com_disp[rb] = updates_rigid_translation(
+            ref_mesh.rb_update_modes[rb])
+            ? (x_com_new[rb] - workspace.substep_start_coms[rb]).norm()
+            : 0.0;
+        workspace.prev_theta_disp[rb] = updates_rigid_orientation(
+            ref_mesh.rb_update_modes[rb])
+            ? dt * omega_new[rb].norm() : 0.0;
     }
 
     if (params.fixed_iters)
@@ -1119,6 +1155,17 @@ SolverResult global_gauss_seidel_solver_basic_general(
         return result;
     }
 
+    for (int rb = 0; rb < num_rbs; ++rb) {
+        const RigidBodyUpdateMode update_mode =
+            ref_mesh.rb_update_modes[rb];
+        if (!updates_rigid_translation(update_mode))
+            x_com_new[rb] = state.x_coms[rb];
+        if (!updates_rigid_orientation(update_mode)) {
+            omega_new[rb] = Vec3::Zero();
+            q_new[rb] = state.orientations[rb];
+        }
+    }
+
     static BasicSolverWorkspace deformable_workspace;
     static RigidSolverWorkspace rigid_workspace;
     static MixedAdjacencyWorkspace mixed_adjacency_workspace;
@@ -1144,7 +1191,11 @@ SolverResult global_gauss_seidel_solver_basic_general(
     // come from the caller; overwrite only rigid proxies from generalized
     // coordinates.
     for (int rb = 0; rb < num_rbs; ++rb) {
-        const Vec4 orientation = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_new[rb], params.dt()));
+        const Vec4 orientation = updates_rigid_orientation(
+                                     ref_mesh.rb_update_modes[rb])
+            ? quaternion_normalize(quaternion_from_angular_velocity(
+                  state.orientations[rb], omega_new[rb], params.dt()))
+            : state.orientations[rb];
         q_new[rb] = orientation;
         for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local) {
             xnew[ref_mesh.rb_nodes[rb][local]] = world_space_position(ref_mesh.ref_positions[rb][local], x_com_new[rb], orientation);
@@ -1251,26 +1302,33 @@ SolverResult global_gauss_seidel_solver_basic_general(
         // COM and orientation remain one indivisible update block: all proxy
         // positions are committed before another color begins.
         const auto process_body = [&](int rb) {
+            const RigidBodyUpdateMode update_mode =
+                ref_mesh.rb_update_modes[rb];
             const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, true);
-            const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics);
-            const Vec3 com_radius = Vec3::Constant(rigid_workspace.com_box_radii[rb]);
-            const Vec3 com_target =(x_com_new[rb] - delta_com).cwiseMax(rigid_workspace.com_box_anchors[rb] - com_radius).cwiseMin(rigid_workspace.com_box_anchors[rb] + com_radius);
-            const Vec3 proposed_com_displacement = com_target - x_com_new[rb];
-            const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, proposed_com_displacement);
-            const Vec3 com_displacement = com_safe_step * proposed_com_displacement;
-            x_com_new[rb] += com_displacement;
-            for (const int node : ref_mesh.rb_nodes[rb])
-                xnew[node] += com_displacement;
+            if (updates_rigid_translation(update_mode)) {
+                const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics);
+                const Vec3 com_radius = Vec3::Constant(rigid_workspace.com_box_radii[rb]);
+                const Vec3 com_target =(x_com_new[rb] - delta_com).cwiseMax(rigid_workspace.com_box_anchors[rb] - com_radius).cwiseMin(rigid_workspace.com_box_anchors[rb] + com_radius);
+                const Vec3 proposed_com_displacement = com_target - x_com_new[rb];
+                const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, proposed_com_displacement);
+                const Vec3 com_displacement = com_safe_step * proposed_com_displacement;
+                x_com_new[rb] += com_displacement;
+                for (const int node : ref_mesh.rb_nodes[rb])
+                    xnew[node] += com_displacement;
+            }
 
-            const Vec3 delta_omega = rb_solver::compute_omega_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics, &rigid_workspace.rotation_predictors[static_cast<std::size_t>(rb)]);
-            const Vec4 q_current = quaternion_normalize(kinematics.orientation);
-            const Vec3 omega_target = omega_new[rb] - params.damping * delta_omega;
-            const Vec4 q_target = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_target, dt));
-            const Vec4 q_bounded = bound_quaternion(rigid_workspace.orientation_box_anchors[rb], q_current,q_target, rigid_workspace.theta_box_radii[rb]);
-            const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, x_com_new[rb], q_current, q_bounded);
-            const Vec4 q_accepted = interpolate_orientation_full_arc(q_current, q_bounded, rotation_safe_step);
-            q_new[rb] = q_accepted;
-            omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, state.orientations[rb], dt);
+            Vec4 q_accepted = q_new[rb];
+            if (updates_rigid_orientation(update_mode)) {
+                const Vec3 delta_omega = rb_solver::compute_omega_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics, &rigid_workspace.rotation_predictors[static_cast<std::size_t>(rb)]);
+                const Vec4 q_current = quaternion_normalize(kinematics.orientation);
+                const Vec3 omega_target = omega_new[rb] - params.damping * delta_omega;
+                const Vec4 q_target = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_target, dt));
+                const Vec4 q_bounded = bound_quaternion(rigid_workspace.orientation_box_anchors[rb], q_current,q_target, rigid_workspace.theta_box_radii[rb]);
+                const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, x_com_new[rb], q_current, q_bounded);
+                q_accepted = interpolate_orientation_full_arc(q_current, q_bounded, rotation_safe_step);
+                q_new[rb] = q_accepted;
+                omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, state.orientations[rb], dt);
+            }
 
             for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size());++local) {
                 xnew[ref_mesh.rb_nodes[rb][local]] = world_space_position(ref_mesh.ref_positions[rb][local],x_com_new[rb], q_accepted);
@@ -1326,8 +1384,13 @@ SolverResult global_gauss_seidel_solver_basic_general(
         deformable_workspace.prev_disp[node] = (xnew[node] - deformable_workspace.xnew_substep_start[node]).norm();
     }
     for (int rb = 0; rb < num_rbs; ++rb) {
-        rigid_workspace.prev_com_disp[rb] = (x_com_new[rb] - rigid_workspace.substep_start_coms[rb]).norm();
-        rigid_workspace.prev_theta_disp[rb] = dt * omega_new[rb].norm();
+        rigid_workspace.prev_com_disp[rb] = updates_rigid_translation(
+            ref_mesh.rb_update_modes[rb])
+            ? (x_com_new[rb] - rigid_workspace.substep_start_coms[rb]).norm()
+            : 0.0;
+        rigid_workspace.prev_theta_disp[rb] = updates_rigid_orientation(
+            ref_mesh.rb_update_modes[rb])
+            ? dt * omega_new[rb].norm() : 0.0;
     }
 
     if (params.fixed_iters)

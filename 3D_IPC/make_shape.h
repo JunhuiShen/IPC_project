@@ -12,7 +12,9 @@ int append_rigid_polygon(
     double thickness = 0.001,
     const Vec3& v_com = Vec3::Zero(),
     const Vec4& orientation = Vec4(1.0, 0.0, 0.0, 0.0),
-    const Vec3& omega = Vec3::Zero());
+    const Vec3& omega = Vec3::Zero(),
+    RigidBodyUpdateMode update_mode =
+        RigidBodyUpdateMode::TranslationAndOrientation);
 
 // Tetrahedral deformable regular n-gonal prism. The polygon is built in the
 // material x-y plane and extruded along material z by `thickness`;
@@ -48,7 +50,9 @@ int append_normalized_obj_rigid_body(
     const Vec3& center, double target_max_extent, double density,
     const Vec3& v_com = Vec3::Zero(),
     const Vec4& orientation = Vec4(1.0, 0.0, 0.0, 0.0),
-    const Vec3& omega = Vec3::Zero());
+    const Vec3& omega = Vec3::Zero(),
+    RigidBodyUpdateMode update_mode =
+        RigidBodyUpdateMode::TranslationAndOrientation);
 
 // Grid counts: V = (nx + 1)(ny + 1), T = 2 nx ny.
 int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin);

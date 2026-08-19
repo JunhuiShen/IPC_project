@@ -25,6 +25,7 @@ inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& st
     const std::size_t num_rbs = state.x_coms.size();
     if (ref_mesh.rb_nodes.size() != num_rbs
         || ref_mesh.ref_positions.size() != num_rbs
+        || ref_mesh.rb_update_modes.size() != num_rbs
         || state.v_coms.size() != num_rbs
         || state.orientations.size() != num_rbs
         || state.omega.size() != num_rbs) {
@@ -35,6 +36,12 @@ inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& st
         state.velocities.resize(state.deformed_positions.size(), Vec3::Zero());
 
     for (std::size_t rb = 0; rb < num_rbs; ++rb) {
+        const RigidBodyUpdateMode update_mode =
+            ref_mesh.rb_update_modes[rb];
+        if (!updates_rigid_translation(update_mode))
+            state.v_coms[rb] = Vec3::Zero();
+        if (!updates_rigid_orientation(update_mode))
+            state.omega[rb] = Vec3::Zero();
         const auto& nodes = ref_mesh.rb_nodes[rb];
         const auto& ref_positions = ref_mesh.ref_positions[rb];
         if (nodes.size() != ref_positions.size()) {

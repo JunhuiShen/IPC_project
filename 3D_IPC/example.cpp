@@ -1831,3 +1831,100 @@ void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
             params.d_hat, 0.45 * minimum_surface_edge);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Example 18: a dynamic threaded bolt falling into a fixed threaded nut
+// ---------------------------------------------------------------------------
+// command line: ./build/3D_sim --example 18 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj
+void build_dynamic_bolt_into_fixed_nut_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params) {
+    clear_model(ref_mesh, state, X, pins);
+
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = 0.0;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+    params.use_ogc = false;
+    params.use_ogc_solver = false;
+
+    constexpr const char* bolt_filename =
+        "example_obj/bolt_and_nut/bolt_coarse_bolt.obj";
+    constexpr const char* nut_filename =
+        "example_obj/bolt_and_nut/bolt_coarse_nut.obj";
+
+    // Both meshes were authored in one coordinate system with a 3-unit
+    // thread pitch and a +z thread axis. Give them one common scale; normalizing
+    // the two assets independently would change their radial clearance and the
+    // threads would no longer mate.
+    constexpr double source_to_world_scale = 0.30 / 58.0;
+    constexpr double bolt_source_max_extent = 58.0;
+    constexpr double nut_source_max_extent = 34.64102;
+    constexpr double bolt_target_max_extent =
+        source_to_world_scale * bolt_source_max_extent;
+    constexpr double nut_target_max_extent =
+        source_to_world_scale * nut_source_max_extent;
+
+    // Rotate material +z onto world +y. The bolt's source-z=0 tip then points
+    // downward, toward the nut, without changing their shared helical phase.
+    const Vec4 upright_orientation(
+        std::cos(0.25 * kPi), -std::sin(0.25 * kPi), 0.0, 0.0);
+    constexpr double nut_center_y = 0.35;
+    constexpr double initial_insertion_source = 14.0;
+    // The bolt bottom and nut top are 37 source units apart when their AABB
+    // centers coincide. Insert 14 of the nut's 16 source-unit height, leaving
+    // the tip 2 source units above the nut bottom. This matches the deeply
+    // engaged starting configuration of the rigid-IPC bolt benchmark.
+    constexpr double bolt_center_y =
+        nut_center_y
+        + source_to_world_scale * (37.0 - initial_insertion_source);
+    // The resulting relative source-axis translation is 12 units: exactly
+    // four complete 3-unit pitches. The two meshes therefore keep their
+    // authored thread phase with no compensating yaw. Like the reference
+    // benchmark, the bolt starts at rest; gravity and thread-normal contact
+    // generate its rotation.
+
+    // Append the nut first so rigid body 0 is the fixed collision obstacle.
+    // RigidBodyUpdateMode::None suppresses both generalized-coordinate updates
+    // while retaining all of its proxy triangles in broad phase and IPC.
+    append_normalized_obj_rigid_body(
+        nut_filename, state, ref_mesh,
+        Vec3(0.0, nut_center_y, 0.0), nut_target_max_extent,
+        params.rigid_density, Vec3::Zero(), upright_orientation,
+        Vec3::Zero(), RigidBodyUpdateMode::None);
+    append_normalized_obj_rigid_body(
+        bolt_filename, state, ref_mesh,
+        Vec3(0.0, bolt_center_y, 0.0), bolt_target_max_extent,
+        params.rigid_density, Vec3::Zero(), upright_orientation,
+        Vec3::Zero(), RigidBodyUpdateMode::TranslationAndOrientation);
+
+    ref_mesh.build_deformable_nodes();
+
+    // The authored surface edge length is much smaller than the default
+    // activation distance. Clamp to the same strict discretization bound used
+    // by the other imported-mesh example, while preserving a smaller CLI value.
+    double minimum_surface_edge = std::numeric_limits<double>::infinity();
+    for (std::size_t triangle = 0; triangle < ref_mesh.tris.size() / 3;
+         ++triangle) {
+        const int* tri = ref_mesh.tris.data() + 3 * triangle;
+        for (int local = 0; local < 3; ++local) {
+            const Vec3& a = state.deformed_positions[
+                static_cast<std::size_t>(tri[local])];
+            const Vec3& b = state.deformed_positions[
+                static_cast<std::size_t>(tri[(local + 1) % 3])];
+            minimum_surface_edge = std::min(
+                minimum_surface_edge, (b - a).norm());
+        }
+    }
+    if (params.d_hat > 0.0 && std::isfinite(minimum_surface_edge)) {
+        params.d_hat = std::min(
+            params.d_hat, 0.45 * minimum_surface_edge);
+    }
+}
