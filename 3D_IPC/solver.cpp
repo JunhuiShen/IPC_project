@@ -11,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <limits>
 #include <stdexcept>
@@ -69,6 +70,9 @@ struct BasicSolverWorkspace {
     std::vector<std::vector<int>> contact_adjacency;
     std::vector<std::vector<int>> combined_adjacency;
     std::vector<std::vector<int>> color_groups;
+    std::vector<int> deformable_nodes;
+    GreedyColoringWorkspace coloring_workspace;
+    FrozenResidualWorkspace frozen_residual;
 
     bool matches(const RefMesh& ref_mesh, int nv) const {
         return mesh == &ref_mesh && tris_data == ref_mesh.tris.data() && dm_data == ref_mesh.Dm_inverse.data()
@@ -94,6 +98,10 @@ struct BasicSolverWorkspace {
             contact_adjacency.clear();
             combined_adjacency.clear();
             color_groups.clear();
+            deformable_nodes.resize(static_cast<std::size_t>(nv));
+            for (int node = 0; node < nv; ++node) deformable_nodes[static_cast<std::size_t>(node)] = node;
+            coloring_workspace = GreedyColoringWorkspace{};
+            frozen_residual = FrozenResidualWorkspace{};
             mesh = &ref_mesh;
             tris_data = ref_mesh.tris.data();
             dm_data = ref_mesh.Dm_inverse.data();
@@ -402,6 +410,10 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     std::vector<std::vector<int>>& bca = workspace.contact_adjacency;
     std::vector<std::vector<int>>& combined_adj = workspace.combined_adjacency;
     std::vector<std::vector<int>>& color_groups = workspace.color_groups;
+    const auto compute_residual = [&]() {
+        build_frozen_residual_workspace(ref_mesh, params, xnew, broad_phase, workspace.frozen_residual, &workspace.rest_shape_grads);
+        return compute_global_deformable_residual(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, workspace.deformable_nodes, &pm, &workspace.incident_triangles, &workspace.rest_shape_grads, &workspace.frozen_residual);
+    };
 
     SolverResult result;
     // anchor for clip boxes and prev_disp
@@ -422,11 +434,11 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
             build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()), bca);
             //color
             union_adjacency(ea, bca, combined_adj);
-            greedy_color_conflict_graph(combined_adj, color_groups);
+            greedy_color_conflict_graph(combined_adj, color_groups, &workspace.coloring_workspace);
         }
 
         if (iter == 1 && !params.fixed_iters) {
-            r1 = compute_global_residual(ref_mesh,adj,pins,params,xnew,xhat,broad_phase,&pm);
+            r1 = compute_residual();
             result.has_residual = true;
             result.initial_residual = r1;
             result.final_residual = r1;
@@ -437,11 +449,22 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
         }
 
         const auto proposed_position = [&](int vi) -> Vec3 { return xnew[vi] - params.damping * gs_vertex_delta_live_barrier(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads); };
-        per_vertex_safe_step(broad_phase, xnew, proposed_position, 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc, params.use_parallel ? &color_groups : nullptr);
+        const auto process_vertex = [&](int vi) { per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi), 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc); };
+        if (params.use_parallel) {
+            #pragma omp parallel
+            {
+                for (const std::vector<int>& group : color_groups) {
+                    #pragma omp for schedule(static)
+                    for (int i = 0; i < static_cast<int>(group.size()); ++i) process_vertex(group[static_cast<std::size_t>(i)]);
+                }
+            }
+        } else {
+            for (int vi = 0; vi < nv; ++vi) process_vertex(vi);
+        }
 
         result.iterations = iter;
         if (!params.fixed_iters){
-            double residual = compute_global_residual(ref_mesh,adj,pins,params,xnew,xhat,broad_phase,&pm);
+            double residual = compute_residual();
             result.final_residual = residual;
             if(residual < params.tol_rel * r1 || residual < params.tol_abs){
                 result.converged = true;
@@ -871,8 +894,11 @@ struct RigidSolverWorkspace {
     std::vector<std::vector<int>> body_ss_pair_indices;
     std::vector<std::vector<int>> contact_adjacency;
     std::vector<std::vector<int>> color_groups;
+    GreedyColoringWorkspace coloring_workspace;
     std::vector<double> body_residuals;
     std::vector<Mat33> rotation_predictors;
+    bool contact_cache_initialized = false;
+    double contact_cache_d_hat = 0.0;
 
     bool matches(const RefMesh& ref_mesh, int nv) const {
         return mesh == &ref_mesh && tris_data == ref_mesh.tris.data() && rb_nodes_data == ref_mesh.rb_nodes.data() && ref_positions_data == ref_mesh.ref_positions.data() && tris_size == ref_mesh.tris.size() && num_rbs == ref_mesh.rb_nodes.size() && num_vertices == nv;
@@ -881,12 +907,14 @@ struct RigidSolverWorkspace {
     void prepare(const RefMesh& ref_mesh, int nv, double initial_com_disp, double initial_theta_disp) {
         if (!matches(ref_mesh, nv)) {
             broad_phase = BroadPhase{};
+            contact_cache_initialized = false;
             prev_com_disp.assign(ref_mesh.rb_nodes.size(), initial_com_disp);
             prev_theta_disp.assign(ref_mesh.rb_nodes.size(), initial_theta_disp);
             body_nt_pair_indices.clear();
             body_ss_pair_indices.clear();
             contact_adjacency.clear();
             color_groups.clear();
+            coloring_workspace = GreedyColoringWorkspace{};
             body_residuals.clear();
             node_to_rb_local.assign(nv, -1);
             for (int rb = 0; rb < static_cast<int>(ref_mesh.rb_nodes.size()); ++rb) {
@@ -956,9 +984,15 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
             workspace.theta_box_radii[rb] = std::clamp(box_padding * std::max(workspace.prev_theta_disp[rb], dt * state.omega[rb].norm()), params.theta_box_min, params.theta_box_max);
         }
         build_blue_boxes_rb(workspace.com_box_anchors, workspace.orientation_box_anchors, workspace.theta_box_radii, workspace.com_box_radii, ref_mesh, workspace.blue_boxes);
+        const std::vector<AABB>& cached_boxes = workspace.broad_phase.cache().node_boxes;
+        bool boxes_unchanged = workspace.contact_cache_initialized && cached_boxes.size() == workspace.blue_boxes.size() && std::memcmp(&workspace.contact_cache_d_hat, &params.d_hat, sizeof(double)) == 0;
+        for (std::size_t box = 0; boxes_unchanged && box < cached_boxes.size(); ++box) boxes_unchanged = std::memcmp(cached_boxes[box].min.data(), workspace.blue_boxes[box].min.data(), 3 * sizeof(double)) == 0 && std::memcmp(cached_boxes[box].max.data(), workspace.blue_boxes[box].max.data(), 3 * sizeof(double)) == 0;
+        if (boxes_unchanged) return;
         workspace.broad_phase.initialize(workspace.blue_boxes, ref_mesh, params.d_hat);
         build_rb_contact_adj(workspace.broad_phase.cache(), ref_mesh.node_to_rb, num_rbs, workspace.body_nt_pair_indices, workspace.body_ss_pair_indices, workspace.contact_adjacency);
-        greedy_color_conflict_graph(workspace.contact_adjacency, workspace.color_groups);
+        greedy_color_conflict_graph(workspace.contact_adjacency, workspace.color_groups, &workspace.coloring_workspace);
+        workspace.contact_cache_initialized = true;
+        workspace.contact_cache_d_hat = params.d_hat;
     };
 
     rebuild_contact_cache();
@@ -1205,13 +1239,13 @@ SolverResult global_gauss_seidel_solver_basic_general(
         const auto process_cloth_node = [&](const int cloth) {
             const int node = cloth_nodes[static_cast<std::size_t>(cloth)];
             const Vec3 proposed_position = xnew[node] - params.damping * gs_vertex_delta_live_barrier(node, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pin_map, &deformable_workspace.incident_triangles[node], &deformable_workspace.rest_shape_grads);
-            mixed_deformable_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false);
+            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false);
         };
 
         const auto process_solid_node = [&](const int solid) {
             const int node = solid_nodes[static_cast<std::size_t>(solid)];
             const Vec3 proposed_position = xnew[node] - params.damping * gs_solid_vertex_delta_live_barrier(node, ref_mesh, pins, params, xhat, xnew, broad_phase, mixed_adjacency_workspace.solid_node_mask, mixed_adjacency_workspace.surface_node_mask, pin_map);
-            mixed_deformable_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false);
+            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false);
         };
 
         // COM and orientation remain one indivisible update block: all proxy

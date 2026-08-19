@@ -1267,12 +1267,10 @@ TEST(BroadPhaseTest, PerVertexSafeStepClampsCCDAndOGC) {
     cache.nt_pairs.push_back(pair);
     cache.vertex_nt[0].push_back({/*pair_index=*/0, /*dof=*/0});
 
-    per_vertex_safe_step(
-        bp, x, [&](int vi) { return target[vi]; },
-        /*safety=*/0.9, /*clip_ccd=*/true,
-        /*use_ticcd=*/false, /*use_ogc=*/false);
+    const double ccd_weight = per_vertex_safe_step(bp, x, 0, target[0], /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false, /*use_ogc=*/false);
 
     const Vec3 expected(0.825, 0.25, 0.0);
+    EXPECT_DOUBLE_EQ(ccd_weight, 0.9);
     EXPECT_TRUE(x[0].isApprox(expected, 1.0e-12));
 
     // Exercise the production OGC path with an incident pair initially 0.5
@@ -1297,15 +1295,13 @@ TEST(BroadPhaseTest, PerVertexSafeStepClampsCCDAndOGC) {
     ogc_cache.nt_pairs.push_back(pair);
     ogc_cache.vertex_nt[0].push_back({/*pair_index=*/0, /*dof=*/0});
 
-    per_vertex_safe_step(
-        ogc_bp, x_ogc, [&](int vi) { return target_ogc[vi]; },
-        /*safety=*/0.9, /*clip_ccd=*/false,
-        /*use_ticcd=*/false, /*use_ogc=*/true);
+    const double ogc_weight = per_vertex_safe_step(ogc_bp, x_ogc, 0, target_ogc[0], /*safety=*/0.9, /*clip_ccd=*/false, /*use_ticcd=*/false, /*use_ogc=*/true);
 
+    EXPECT_DOUBLE_EQ(ogc_weight, 0.8);
     EXPECT_TRUE(x_ogc[0].isApprox(Vec3(0.0, 0.3, 0.0), 1.0e-12));
 }
 
-TEST(BroadPhaseTest, MixedDeformableSafeStepUpdatesOnlySelectedVertex) {
+TEST(BroadPhaseTest, PerVertexSafeStepUpdatesOnlySelectedVertex) {
     std::vector<Vec3> x = {
         Vec3(1.5, 0.25, 0.0),
         Vec3(0.0, 0.0, 0.0),
@@ -1334,12 +1330,11 @@ TEST(BroadPhaseTest, MixedDeformableSafeStepUpdatesOnlySelectedVertex) {
     cache.vertex_nt[0].push_back(
         {/*pair_index=*/0, /*dof=*/0});
 
-    std::vector<Vec3> reference = initial;
-    per_vertex_safe_step(broad_phase, reference, [&](int vi) { return target[vi]; }, /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false, /*use_ogc=*/false);
-    mixed_deformable_vertex_safe_step(broad_phase, x, 0, target[0], /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false, /*use_ogc=*/false);
+    const double safe_weight = per_vertex_safe_step(broad_phase, x, 0, target[0], /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false, /*use_ogc=*/false);
 
-    for (int axis = 0; axis < 3; ++axis)
-        EXPECT_DOUBLE_EQ(x[0][axis], reference[0][axis]);
+    const Vec3 expected(0.825, 0.25, 0.0);
+    EXPECT_DOUBLE_EQ(safe_weight, 0.9);
+    for (int axis = 0; axis < 3; ++axis) EXPECT_DOUBLE_EQ(x[0][axis], expected[axis]);
     for (int vi = 1; vi < static_cast<int>(x.size()); ++vi)
         EXPECT_TRUE(x[vi].isApprox(initial[vi], 0.0));
 }
