@@ -202,13 +202,13 @@ Commands documented alongside Examples 5 through 17 in `example.cpp`:
     ./build/3D_sim --example 7 --num_frames 200 --substeps 10 --tol_abs 1e-12 --tol_rel 1e-10 --outdir drop_box_output --format obj
 
     # Example 8: head-on rigid polygon collision
-    ./build/3D_sim --example 8 --num_frames 60 --max_substep_iters 500 --substeps 10 --tol_rel 1e-10 --outdir polygon_collision_output --format obj
+    ./build/3D_sim --example 8 --num_frames 60 --max_substep_iters 500 --substeps 10 --tol_rel 1e-10 --rigid_density 25 --outdir polygon_collision_output --format obj
 
     # Example 9: stationary stack of twenty rigid polygons
-    ./build/3D_sim --example 9 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --outdir twenty_polygon_static_stack_output --format obj
+    ./build/3D_sim --example 9 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --rigid_density 25 --gy 0 --outdir twenty_polygon_static_stack_output --format obj
 
     # Example 10: five aligned rigid polygons
-    ./build/3D_sim --example 10 --num_frames 100 --substeps 10 --outdir five_polygon_aligned_stack_output --format obj
+    ./build/3D_sim --example 10 --num_frames 100 --substeps 10 --rigid_density 25 --outdir five_polygon_aligned_stack_output --format obj
 
     # Example 11: one hundred rigid polygons in a box, fixed-iteration mode
     ./build/3D_sim --example 11 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir hundred_polygon_box_fixed_iter_output --format obj

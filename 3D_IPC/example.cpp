@@ -908,7 +908,7 @@ void build_rigid_box_drop_example(
 // ---------------------------------------------------------------------------
 // Example 8: two rigid polygonal prisms moving toward one another
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 8 --num_frames 60 --max_substep_iters 500 --substeps 10 --tol_rel 1e-10 --outdir polygon_collision_output --format obj
+// command line: ./build/3D_sim --example 8 --num_frames 60 --max_substep_iters 500 --substeps 10 --tol_rel 1e-10 --rigid_density 25 --outdir polygon_collision_output --format obj
 void build_two_rigid_polygon_collision_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -955,7 +955,7 @@ void build_two_rigid_polygon_collision_example(
 // ---------------------------------------------------------------------------
 // Example 9: twenty rigid polygonal prisms initialized in a static vertical stack
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 9 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --outdir twenty_polygon_static_stack_output --format obj
+// command line: ./build/3D_sim --example 9 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --rigid_density 25 --gy 0 --outdir twenty_polygon_static_stack_output --format obj
 void build_twenty_rigid_polygon_static_stack_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1028,7 +1028,7 @@ void build_twenty_rigid_polygon_static_stack_example(
 // ---------------------------------------------------------------------------
 // Example 10: five equally oriented rigid polygons dropping onto one another
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 10 --num_frames 100 --substeps 10 --outdir five_polygon_aligned_stack_output --format obj
+// command line: ./build/3D_sim --example 10 --num_frames 100 --substeps 10 --rigid_density 25 --outdir five_polygon_aligned_stack_output --format obj
 void build_five_rigid_polygon_drop_scatter_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
