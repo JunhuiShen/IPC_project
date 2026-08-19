@@ -1701,7 +1701,7 @@ void build_ten_alternating_rigid_solid_flat_stack_on_pinned_cloth_example(
 // Example 17: Bunny-solid / Spot-solid / rigid-cube / rigid-gear cycles,
 // repeated twice in one vertical stack above a pinned cloth
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 17 --datadir example_obj --num_frames 200 --fps 60 --substeps 20 --max_substep_iters 7000 --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir spot_solids_cubes_gears_on_cloth_output --format obj
+// command line: ./build/3D_sim --example 17 --datadir example_obj --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 600 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_output --format obj
 void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1748,7 +1748,11 @@ void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
     // Bunny, Spot, cube, gear, repeated twice. The spacing keeps every adjacent
     // pair initially disjoint so the objects reach the cloth one by one.
     constexpr int copies = 2;
-    constexpr double first_center_y = 1.50;
+    constexpr double solid_max_extent = 0.26;
+    constexpr double rigid_max_extent = 0.14;
+    constexpr double initial_cloth_clearance = 0.02;
+    constexpr double first_center_y =
+        cloth_height + 0.5 * solid_max_extent + initial_cloth_clearance;
     constexpr double vertical_spacing = 0.34;
     const auto stack_center = [=](const int stack_index) {
         return Vec3(
@@ -1760,11 +1764,10 @@ void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
         "example_obj/bunny_coarse/bunny_2000f.1.node";
     constexpr const char* bunny_element_filename =
         "example_obj/bunny_coarse/bunny_2000f.1.ele";
-    constexpr double object_max_extent = 0.22;
     for (int copy = 0; copy < copies; ++copy) {
         append_normalized_tetgen_solid(
             bunny_node_filename, bunny_element_filename,
-            state, ref_mesh, stack_center(4 * copy), object_max_extent,
+            state, ref_mesh, stack_center(4 * copy), solid_max_extent,
             params.solid_density,
             /*zero_based_index=*/true);
     }
@@ -1776,14 +1779,14 @@ void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
     for (int copy = 0; copy < copies; ++copy) {
         append_normalized_tetgen_solid(
             spot_node_filename, spot_element_filename,
-            state, ref_mesh, stack_center(4 * copy + 1), object_max_extent,
+            state, ref_mesh, stack_center(4 * copy + 1), solid_max_extent,
             params.solid_density,
             /*zero_based_index=*/true);
     }
 
     for (int copy = 0; copy < copies; ++copy) {
         append_rigid_cube(
-            stack_center(4 * copy + 2), object_max_extent,
+            stack_center(4 * copy + 2), rigid_max_extent,
             params.rigid_density, Vec3::Zero(), ref_mesh, state);
     }
 
@@ -1802,7 +1805,7 @@ void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
         append_normalized_obj_rigid_body(
             gear_filename, state, ref_mesh,
             stack_center(4 * gear + 3),
-            object_max_extent, params.rigid_density,
+            rigid_max_extent, params.rigid_density,
             Vec3::Zero(), orientation, Vec3::Zero());
     }
 

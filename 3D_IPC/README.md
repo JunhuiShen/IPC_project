@@ -165,7 +165,7 @@ Built-in example scenes (`--example N`):
 | `14` | One flat tetrahedralized deformable octagonal prism falling onto a cloth pinned along two opposite sides |
 | `15` | Ten flat small rigid and ten flat larger tetrahedralized deformable polygonal prisms, spanning 3 through 12 sides, falling onto a cloth pinned along two opposite sides |
 | `16` | Ten flat polygonal prisms, alternating five rigid bodies and five deformable solids, falling onto one another above a cloth pinned along two opposite sides |
-| `17` | Two repeating Bunny-solid, Spot-solid, rigid-cube, and rigid-gear cycles stacked in one vertical column above a cloth pinned along two opposite sides |
+| `17` | Two repeating larger Bunny-solid, larger Spot-solid, smaller rigid-box, and smaller rigid-gear cycles stacked in one vertical column above a cloth pinned along two opposite sides |
 
 Example 17 reads these repository-relative mesh files directly:
 

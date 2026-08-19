@@ -1742,9 +1742,16 @@ TEST(MixedExample,
         EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 1);
     }
 
-    constexpr double first_center_y = 1.50;
+    constexpr double solid_max_extent = 0.26;
+    constexpr double rigid_max_extent = 0.14;
+    constexpr double initial_cloth_clearance = 0.02;
+    constexpr double first_center_y =
+        1.2 + 0.5 * solid_max_extent + initial_cloth_clearance;
     constexpr double vertical_spacing = 0.34;
-    constexpr double object_max_extent = 0.22;
+    EXPECT_NEAR(first_center_y, 1.35, 1.0e-15);
+    EXPECT_GT(
+        first_center_y - 0.5 * solid_max_extent,
+        1.2 + params.d_hat);
     const auto check_solid =
         [&](const int node_base, const int node_count,
             const int first_tet, const int tet_count,
@@ -1768,7 +1775,7 @@ TEST(MixedExample,
             const Vec3 actual_center = 0.5 * (lower + upper);
             EXPECT_TRUE(actual_center.isApprox(expected_center, 1.0e-14));
             EXPECT_NEAR(
-                (upper - lower).maxCoeff(), object_max_extent, 1.0e-14);
+                (upper - lower).maxCoeff(), solid_max_extent, 1.0e-14);
             EXPECT_NEAR(mass, expected_mass, 1.0e-12);
 
             for (int element = first_tet;
@@ -1786,7 +1793,7 @@ TEST(MixedExample,
     // Bunny source AABB has max extent 8 and the two source tetrahedra have
     // combined volume 32/3.
     constexpr double bunny_source_volume = 32.0 / 3.0;
-    constexpr double bunny_scale = object_max_extent / 8.0;
+    constexpr double bunny_scale = solid_max_extent / 8.0;
     const double expected_bunny_mass = args.solid_density
         * bunny_source_volume * bunny_scale * bunny_scale * bunny_scale;
     std::array<Vec3, copies> bunny_centers;
@@ -1804,7 +1811,7 @@ TEST(MixedExample,
 
     // Spot source AABB has max extent 10 and source volume 40/3.
     constexpr double spot_source_volume = 40.0 / 3.0;
-    constexpr double spot_scale = object_max_extent / 10.0;
+    constexpr double spot_scale = solid_max_extent / 10.0;
     const double expected_spot_mass = args.solid_density
         * spot_source_volume * spot_scale * spot_scale * spot_scale;
     constexpr int spot_node_base =
@@ -1833,7 +1840,7 @@ TEST(MixedExample,
     ASSERT_EQ(state.omega.size(), rigid_body_count);
 
     const double expected_cube_mass = args.rigid_density
-        * object_max_extent * object_max_extent * object_max_extent;
+        * rigid_max_extent * rigid_max_extent * rigid_max_extent;
     for (int copy = 0; copy < copies; ++copy) {
         SCOPED_TRACE("cube " + std::to_string(copy));
         const int rb = copy;
@@ -1866,11 +1873,11 @@ TEST(MixedExample,
         EXPECT_TRUE(
             (0.5 * (lower + upper)).isApprox(expected_center, 1.0e-14));
         EXPECT_TRUE((upper - lower).isApprox(
-            Vec3::Constant(object_max_extent), 1.0e-14));
+            Vec3::Constant(rigid_max_extent), 1.0e-14));
     }
 
     constexpr double gear_source_volume = 4.0 / 3.0;
-    constexpr double gear_scale = object_max_extent / 4.0;
+    constexpr double gear_scale = rigid_max_extent / 4.0;
     const double expected_gear_mass = args.rigid_density
         * gear_source_volume * gear_scale * gear_scale * gear_scale;
     constexpr double kPi = 3.14159265358979323846;
@@ -1914,11 +1921,11 @@ TEST(MixedExample,
         }
         EXPECT_TRUE((0.5 * (lower + upper)).isZero(1.0e-14));
         EXPECT_NEAR(
-            (upper - lower).maxCoeff(), object_max_extent, 1.0e-14);
+            (upper - lower).maxCoeff(), rigid_max_extent, 1.0e-14);
     }
 
     // Verify the actual bottom-to-top order across both cycles.
-    EXPECT_GT(vertical_spacing, object_max_extent);
+    EXPECT_GT(vertical_spacing, solid_max_extent);
     for (int copy = 0; copy < copies; ++copy) {
         const int cube_rb = copy;
         const int gear_rb = copies + copy;
