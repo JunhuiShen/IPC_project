@@ -32,6 +32,15 @@ void CheckLocalNode(int local_node) {
     }
 }
 
+Mat33 ElementDsTrusted(std::size_t element, const std::vector<Vec3>& u, const std::vector<int>& mesh) {
+    Mat33 result;
+    for (std::size_t i = 0; i < 3; ++i) {
+        for (std::size_t c = 0; c < 3; ++c)
+            result(c, i) = u[mesh[4 * element + i + 1]][c] - u[mesh[4 * element]][c];
+    }
+    return result;
+}
+
 } // namespace
 
 Mat33 ElementDs(
@@ -39,15 +48,7 @@ Mat33 ElementDs(
     const std::vector<Vec3>& u,
     const std::vector<int>& mesh) {
     CheckElement(element, u, mesh);
-
-    Mat33 result;
-    for (std::size_t i = 0; i < 3; ++i) {
-        for (std::size_t c = 0; c < 3; ++c) {
-            result(c, i) = u[mesh[4 * element + i + 1]][c]
-                - u[mesh[4 * element]][c];
-        }
-    }
-    return result;
+    return ElementDsTrusted(element, u, mesh);
 }
 
 Mat33 ElementF(
@@ -60,7 +61,7 @@ Mat33 ElementF(
         throw std::invalid_argument(
             "tet rest state must contain one record per element");
     }
-    return ElementDs(element, x, mesh) * state[element].Dm_inverse;
+    return ElementDsTrusted(element, x, mesh) * state[element].Dm_inverse;
 }
 
 std::vector<TetRestData> EFEMInitializeElasticMaterialState(
@@ -137,13 +138,21 @@ Mat33 GradJ(const Mat33& F) {
     return grad_J;
 }
 
-void CorotatedCache::UpdateCache(const Mat33& F) {
+void CorotatedCache::UpdateCache(const Mat33& F, CorotatedCacheMode mode) {
     if (!F.allFinite()) {
         throw std::invalid_argument("deformation gradient must be finite");
     }
 
     Mat33 R, S;
-    JIXIE::polarDecomposition(F, R, S);
+    if (mode == CorotatedCacheMode::Full) {
+        JIXIE::polarDecomposition(F, R, S);
+    } else {
+        Mat33 U;
+        Vec3 sigma;
+        Mat33 V;
+        JIXIE::singularValueDecomposition(F, U, sigma, V);
+        R.noalias() = U * V.transpose();
+    }
 
     JFinvT_cache <<
         F(1, 1) * F(2, 2) - F(2, 1) * F(1, 2),
@@ -161,12 +170,11 @@ void CorotatedCache::UpdateCache(const Mat33& F) {
         R(1, 0), R(1, 1), R(1, 2),
         R(2, 0), R(2, 1), R(2, 2);
 
-    Mat33 D = S.trace() * Mat33::Identity() - S;
-    Mat33 Dinv = D.inverse();
-    Dinv_cache <<
-        Dinv(0, 0), Dinv(0, 1), Dinv(0, 2),
-        Dinv(1, 0), Dinv(1, 1), Dinv(1, 2),
-        Dinv(2, 0), Dinv(2, 1), Dinv(2, 2);
+    if (mode == CorotatedCacheMode::Full) {
+        Mat33 D = S.trace() * Mat33::Identity() - S;
+        Mat33 Dinv = D.inverse();
+        Dinv_cache << Dinv(0, 0), Dinv(0, 1), Dinv(0, 2), Dinv(1, 0), Dinv(1, 1), Dinv(1, 2), Dinv(2, 0), Dinv(2, 1), Dinv(2, 2);
+    }
 
     J_cache = F.determinant();
 }
@@ -234,31 +242,19 @@ std::array<Vec3, 4> EFEMElementEnergyGradient(
     return gradient;
 }
 
-Vec3 EFEMElementNodeEnergyGradient(
-    const CorotatedCache& cache,
-    const Mat33& F,
-    const TetRestData& state,
-    double mu,
-    double lambda,
-    int local_node) {
-    CheckLocalNode(local_node);
-    Mat33 Pe = cache.P(F, mu, lambda);
+namespace {
+
+Vec3 EFEMElementNodeEnergyGradientTrusted(const CorotatedCache& cache, const Mat33& F, const TetRestData& state, double mu, double lambda, int local_node, const Mat33* precomputed_first_piola = nullptr) {
+    Mat33 owned_first_piola;
+    if (precomputed_first_piola == nullptr) owned_first_piola = cache.P(F, mu, lambda);
+    const Mat33& Pe = precomputed_first_piola == nullptr ? owned_first_piola : *precomputed_first_piola;
     Vec3 gNi;
-    gNi << state.grad_N[local_node][0],
-        state.grad_N[local_node][1],
-        state.grad_N[local_node][2];
+    gNi << state.grad_N[local_node][0], state.grad_N[local_node][1], state.grad_N[local_node][2];
     Vec3 g = Pe * gNi * state.measure;
     return g;
 }
 
-Mat33 PBGSElementNodeElasticityBlock(
-    const CorotatedCache& cache,
-    const TetRestData& state,
-    double mu,
-    double lambda,
-    int local_node) {
-    CheckLocalNode(local_node);
-
+Mat33 PBGSElementNodeElasticityBlockTrusted(const CorotatedCache& cache, const TetRestData& state, double mu, double lambda, int local_node) {
     Mat33 A = Mat33::Zero();
 
     const Vec3& grad_Ni = state.grad_N[local_node];
@@ -273,11 +269,40 @@ Mat33 PBGSElementNodeElasticityBlock(
         g_Nie(alpha) = grad_Ni[alpha];
     Vec3 ue = grad_Je * g_Nie;
     for (std::size_t alpha = 0; alpha < 3; ++alpha) {
-        for (std::size_t beta = 0; beta < 3; ++beta) {
-            A(alpha, beta) +=
-                lambda * ue(alpha) * ue(beta) * state.measure;
-        }
+        for (std::size_t beta = 0; beta < 3; ++beta)
+            A(alpha, beta) += lambda * ue(alpha) * ue(beta) * state.measure;
     }
 
     return A;
+}
+
+} // namespace
+
+Vec3 EFEMElementNodeEnergyGradient(
+    const CorotatedCache& cache,
+    const Mat33& F,
+    const TetRestData& state,
+    double mu,
+    double lambda,
+    int local_node,
+    const Mat33* precomputed_first_piola) {
+    CheckLocalNode(local_node);
+    return EFEMElementNodeEnergyGradientTrusted(cache, F, state, mu, lambda, local_node, precomputed_first_piola);
+}
+
+Mat33 PBGSElementNodeElasticityBlock(
+    const CorotatedCache& cache,
+    const TetRestData& state,
+    double mu,
+    double lambda,
+    int local_node) {
+    CheckLocalNode(local_node);
+    return PBGSElementNodeElasticityBlockTrusted(cache, state, mu, lambda, local_node);
+}
+
+std::pair<Vec3, Mat33> EFEMElementNodeGradientAndPBGSBlock(const CorotatedCache& cache, const Mat33& F, const TetRestData& state, double mu, double lambda, int local_node) {
+    CheckLocalNode(local_node);
+    const Vec3 gradient = EFEMElementNodeEnergyGradientTrusted(cache, F, state, mu, lambda, local_node);
+    const Mat33 block = PBGSElementNodeElasticityBlockTrusted(cache, state, mu, lambda, local_node);
+    return {gradient, block};
 }

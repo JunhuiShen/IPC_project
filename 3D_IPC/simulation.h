@@ -64,7 +64,7 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
         std::vector<Vec4> q_new = state.orientations;
         std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
 
-        const SolverResult sub_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new, params.verbose);
+        const SolverResult sub_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new);
         accumulate_solver_result(agg, sub_result, sub == 0);
 
         if (!sub_result.converged)
@@ -130,11 +130,7 @@ inline SolverResult advance_one_frame_general(
         std::vector<Vec4> q_new = state.orientations;
         std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
 
-        const SolverResult substep_result =
-            global_gauss_seidel_solver_basic_general(
-                ref_mesh, state, adj, pins, params, xnew, xhat,
-                x_com_new, q_new, omega_new, broad_phase,
-                outdir, params.verbose);
+        const SolverResult substep_result = global_gauss_seidel_solver_basic_general(ref_mesh, state, adj, pins, params, xnew, xhat, x_com_new, q_new, omega_new, broad_phase, outdir);
         accumulate_solver_result(aggregate, substep_result, substep == 0);
         if (!substep_result.converged)
             return aggregate;
@@ -196,7 +192,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         if (params.use_ogc_solver)
             sub_result = global_gauss_seidel_solver_ogc(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir);
         else
-            sub_result = global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, params.verbose);
+            sub_result = global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir);
         
         accumulate_solver_result(agg, sub_result, sub == 0);
 

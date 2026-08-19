@@ -1031,6 +1031,97 @@ double raw_candidate_barrier_energy(
 
 } // namespace
 
+TEST(SolidResidual, SuppliedMasksMatchInternallyBuiltMasks) {
+    SolidBarrierFixture fixture;
+    initialize_solid_barrier_fixture(fixture);
+
+    std::vector<unsigned char> solid_node_mask(fixture.x.size(), 0);
+    for (const int node : fixture.ref_mesh.tet_nodes)
+        solid_node_mask[static_cast<std::size_t>(node)] = 1;
+    std::vector<unsigned char> surface_node_mask(fixture.x.size(), 0);
+    for (const int node : fixture.ref_mesh.surface_nodes)
+        surface_node_mask[static_cast<std::size_t>(node)] = 1;
+    const PinMap pin_map = build_pin_map(fixture.pins, static_cast<int>(fixture.x.size()));
+
+    const double internally_built = compute_global_solid_residual(fixture.ref_mesh, fixture.pins, fixture.params, fixture.x, fixture.xhat, fixture.broad_phase, &pin_map);
+    const double supplied = compute_global_solid_residual(fixture.ref_mesh, fixture.pins, fixture.params, fixture.x, fixture.xhat, fixture.broad_phase, &pin_map, &solid_node_mask, &surface_node_mask);
+
+    EXPECT_DOUBLE_EQ(supplied, internally_built);
+}
+
+TEST(SolidResidual, FrozenWorkspaceIsBitwiseEquivalentForTetAndActiveContactGradients) {
+    SolidBarrierFixture fixture;
+    initialize_solid_barrier_fixture(fixture);
+    fixture.params.use_parallel = false;
+
+    std::vector<unsigned char> solid_node_mask(fixture.x.size(), 0);
+    for (const int node : fixture.ref_mesh.tet_nodes) solid_node_mask[static_cast<std::size_t>(node)] = 1;
+    std::vector<unsigned char> surface_node_mask(fixture.x.size(), 0);
+    for (const int node : fixture.ref_mesh.surface_nodes) surface_node_mask[static_cast<std::size_t>(node)] = 1;
+    const PinMap pin_map = build_pin_map(fixture.pins, static_cast<int>(fixture.x.size()));
+
+    FrozenResidualWorkspace workspace;
+    build_frozen_residual_workspace(fixture.ref_mesh, fixture.params, fixture.x, fixture.broad_phase, workspace);
+    ASSERT_EQ(workspace.tet_gradients.size(), 2u);
+    ASSERT_EQ(workspace.nt_gradients.size(), fixture.broad_phase.cache().nt_pairs.size());
+    ASSERT_EQ(workspace.ss_gradients.size(), fixture.broad_phase.cache().ss_pairs.size());
+    ASSERT_EQ(workspace.nt_barrier_active.size(), fixture.broad_phase.cache().nt_pairs.size());
+    ASSERT_EQ(workspace.ss_barrier_active.size(), fixture.broad_phase.cache().ss_pairs.size());
+    ASSERT_EQ(workspace.nt_gradient_cached.size(), fixture.broad_phase.cache().nt_pairs.size());
+    ASSERT_EQ(workspace.ss_gradient_cached.size(), fixture.broad_phase.cache().ss_pairs.size());
+    EXPECT_GT(std::count(workspace.nt_aabb_active.begin(), workspace.nt_aabb_active.end(), static_cast<unsigned char>(1)), 0);
+    EXPECT_GT(std::count(workspace.ss_aabb_active.begin(), workspace.ss_aabb_active.end(), static_cast<unsigned char>(1)), 0);
+    int active_nt = 0;
+    int active_ss = 0;
+    raw_candidate_barrier_energy(fixture.x, fixture.broad_phase.cache(), fixture.params.d_hat, active_nt, active_ss);
+    ASSERT_GT(active_nt, 0);
+    ASSERT_GT(active_ss, 0);
+
+    for (std::size_t pair_index = 0; pair_index < fixture.broad_phase.cache().nt_pairs.size(); ++pair_index) {
+        const NodeTrianglePair& pair = fixture.broad_phase.cache().nt_pairs[pair_index];
+        const double distance = node_triangle_distance(fixture.x[static_cast<std::size_t>(pair.node)], fixture.x[static_cast<std::size_t>(pair.tri_v[0])], fixture.x[static_cast<std::size_t>(pair.tri_v[1])], fixture.x[static_cast<std::size_t>(pair.tri_v[2])]).distance;
+        EXPECT_EQ(workspace.nt_barrier_active[pair_index], distance < fixture.params.d_hat ? 1 : 0);
+        EXPECT_EQ(workspace.nt_gradient_cached[pair_index], workspace.nt_aabb_active[pair_index] != 0 && distance != 0.0 ? 1 : 0);
+    }
+    for (std::size_t pair_index = 0; pair_index < fixture.broad_phase.cache().ss_pairs.size(); ++pair_index) {
+        const SegmentSegmentPair& pair = fixture.broad_phase.cache().ss_pairs[pair_index];
+        const double distance = segment_segment_distance(fixture.x[static_cast<std::size_t>(pair.v[0])], fixture.x[static_cast<std::size_t>(pair.v[1])], fixture.x[static_cast<std::size_t>(pair.v[2])], fixture.x[static_cast<std::size_t>(pair.v[3])]).distance;
+        EXPECT_EQ(workspace.ss_barrier_active[pair_index], distance < fixture.params.d_hat ? 1 : 0);
+        EXPECT_EQ(workspace.ss_gradient_cached[pair_index], workspace.ss_aabb_active[pair_index] != 0 && distance != 0.0 ? 1 : 0);
+    }
+
+    for (int element_index = 0; element_index < num_tets(fixture.ref_mesh); ++element_index) {
+        const std::size_t element = static_cast<std::size_t>(element_index);
+        const Mat33 F = ElementF(element, fixture.x, fixture.ref_mesh.tets, fixture.ref_mesh.tet_rest_data);
+        CorotatedCache cache;
+        cache.UpdateCache(F, CorotatedCacheMode::Lean);
+        for (int role = 0; role < 4; ++role) {
+            const Vec3 expected = EFEMElementNodeEnergyGradient(cache, F, fixture.ref_mesh.tet_rest_data[element], fixture.params.solid_mu, fixture.params.solid_lambda, role);
+            for (int component = 0; component < 3; ++component) EXPECT_EQ(workspace.tet_gradients[element][static_cast<std::size_t>(role)][component], expected[component]);
+        }
+    }
+    for (std::size_t pair_index = 0; pair_index < fixture.broad_phase.cache().nt_pairs.size(); ++pair_index) {
+        if (workspace.nt_aabb_active[pair_index] == 0) continue;
+        const NodeTrianglePair& pair = fixture.broad_phase.cache().nt_pairs[pair_index];
+        for (int role = 0; role < 4; ++role) {
+            const Vec3 expected = node_triangle_barrier_gradient(fixture.x[static_cast<std::size_t>(pair.node)], fixture.x[static_cast<std::size_t>(pair.tri_v[0])], fixture.x[static_cast<std::size_t>(pair.tri_v[1])], fixture.x[static_cast<std::size_t>(pair.tri_v[2])], fixture.params.d_hat, role);
+            for (int component = 0; component < 3; ++component) EXPECT_EQ(workspace.nt_gradients[pair_index][static_cast<std::size_t>(role)][component], expected[component]);
+        }
+    }
+    for (std::size_t pair_index = 0; pair_index < fixture.broad_phase.cache().ss_pairs.size(); ++pair_index) {
+        if (workspace.ss_aabb_active[pair_index] == 0) continue;
+        const SegmentSegmentPair& pair = fixture.broad_phase.cache().ss_pairs[pair_index];
+        for (int role = 0; role < 4; ++role) {
+            const Vec3 expected = segment_segment_barrier_gradient(fixture.x[static_cast<std::size_t>(pair.v[0])], fixture.x[static_cast<std::size_t>(pair.v[1])], fixture.x[static_cast<std::size_t>(pair.v[2])], fixture.x[static_cast<std::size_t>(pair.v[3])], fixture.params.d_hat, role);
+            for (int component = 0; component < 3; ++component) EXPECT_EQ(workspace.ss_gradients[pair_index][static_cast<std::size_t>(role)][component], expected[component]);
+        }
+    }
+
+    const double uncached = compute_global_solid_residual(fixture.ref_mesh, fixture.pins, fixture.params, fixture.x, fixture.xhat, fixture.broad_phase, &pin_map, &solid_node_mask, &surface_node_mask);
+    const double cached = compute_global_solid_residual(fixture.ref_mesh, fixture.pins, fixture.params, fixture.x, fixture.xhat, fixture.broad_phase, &pin_map, &solid_node_mask, &surface_node_mask, &workspace);
+    EXPECT_EQ(cached, uncached);
+}
+
 TEST(SolidBarrierAssembly, CountsEachCandidateOnceAndAppliesDtSquaredScale) {
     SolidBarrierFixture fixture;
     initialize_solid_barrier_fixture(fixture);

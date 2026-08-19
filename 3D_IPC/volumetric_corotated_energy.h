@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstddef>
+#include <utility>
 #include <vector>
 
 // Fixed reference data for one tetrahedron. TGSL stores these quantities in
@@ -14,15 +15,21 @@ struct TetRestData {
     std::array<Vec3, 4> grad_N;
 };
 
+enum class CorotatedCacheMode {
+    Full,
+    Lean
+};
+
 // Typed equivalent of TGSL::CorotatedCache. Call UpdateCache(F) before Psi,
-// P, or PBGSElementNodeElasticityBlock.
+// P, or PBGSElementNodeElasticityBlock. Lean mode computes every field used by
+// those operations identically to Full mode but leaves Dinv_cache untouched.
 struct CorotatedCache {
     Mat33 JFinvT_cache;
     Mat33 R_cache;
     Mat33 Dinv_cache;
     double J_cache;
 
-    void UpdateCache(const Mat33& F);
+    void UpdateCache(const Mat33& F, CorotatedCacheMode mode = CorotatedCacheMode::Full);
     double Psi(const Mat33& F, double mu, double lambda) const;
     Mat33 P(const Mat33& F, double mu, double lambda) const;
 };
@@ -74,7 +81,8 @@ Vec3 EFEMElementNodeEnergyGradient(
     const TetRestData& state,
     double mu,
     double lambda,
-    int local_node);
+    int local_node,
+    const Mat33* precomputed_first_piola = nullptr);
 
 // TGSL PBGS's PSD per-element/node elasticity contribution, not the exact
 // energy Hessian:
@@ -82,6 +90,14 @@ Vec3 EFEMElementNodeEnergyGradient(
 //   u = JFinvT grad_N.
 Mat33 PBGSElementNodeElasticityBlock(
     const CorotatedCache& cache,
+    const TetRestData& state,
+    double mu,
+    double lambda,
+    int local_node);
+
+std::pair<Vec3, Mat33> EFEMElementNodeGradientAndPBGSBlock(
+    const CorotatedCache& cache,
+    const Mat33& F,
     const TetRestData& state,
     double mu,
     double lambda,

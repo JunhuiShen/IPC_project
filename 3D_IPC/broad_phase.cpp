@@ -408,10 +408,28 @@ namespace {
 // Broad phase
 void BroadPhase::set_mesh_topology(const RefMesh& mesh, int nv) {
     build_unique_edges_and_adjacency(mesh, nv, topo_.edges, topo_.node_to_edges, topo_.node_to_tris);
+    topo_.surface_nt_query_nodes.clear();
+    topo_.surface_nt_query_nodes_valid = false;
     cache_.edges.clear();
     cache_.node_to_edges.clear();
     cache_.node_to_tris.clear();
     topology_valid_ = true;
+}
+
+const std::vector<int>& BroadPhase::surface_nt_query_nodes(
+    const RefMesh& mesh, const int nv) {
+    if (topo_.surface_nt_query_nodes_valid)
+        return topo_.surface_nt_query_nodes;
+
+    const std::vector<unsigned char> tet_interior_nodes = build_tet_interior_node_mask(mesh, nv);
+    topo_.surface_nt_query_nodes.clear();
+    topo_.surface_nt_query_nodes.reserve(static_cast<std::size_t>(nv));
+    for (int node = 0; node < nv; ++node) {
+        if (tet_interior_nodes[static_cast<std::size_t>(node)] == 0)
+            topo_.surface_nt_query_nodes.push_back(node);
+    }
+    topo_.surface_nt_query_nodes_valid = true;
+    return topo_.surface_nt_query_nodes;
 }
 
 void BroadPhase::build(
@@ -429,6 +447,7 @@ void BroadPhase::build(
     if (c.node_to_edges.empty()) c.node_to_edges = topo_.node_to_edges;
     if (c.node_to_tris.empty()) c.node_to_tris = topo_.node_to_tris;
     const int ne = static_cast<int>(c.edges.size());
+    const std::vector<int>* surface_query_nodes = exclude_tet_interior_nt_queries ? &surface_nt_query_nodes(mesh, nv) : nullptr;
 
     c.node_boxes.resize(nv);
     for (int i = 0; i < nv; ++i) {
@@ -459,16 +478,11 @@ void BroadPhase::build(
     }
 
     // Parallel BVH queries, followed by serial ordered pair insertion.
-    const std::vector<unsigned char> tet_interior_nodes =
-        exclude_tet_interior_nt_queries
-        ? build_tet_interior_node_mask(mesh, nv)
-        : std::vector<unsigned char>();
     std::vector<std::vector<int>>& node_hits = prepare_hit_rows(c.node_hits, nv);
+    const int num_nt_query_nodes = exclude_tet_interior_nt_queries ? static_cast<int>(surface_query_nodes->size()) : nv;
     #pragma omp parallel for schedule(dynamic, 32)
-    for (int node = 0; node < nv; ++node) {
-        if (exclude_tet_interior_nt_queries
-            && tet_interior_nodes[static_cast<std::size_t>(node)] != 0)
-            continue;
+    for (int query_index = 0; query_index < num_nt_query_nodes; ++query_index) {
+        const int node = exclude_tet_interior_nt_queries ? (*surface_query_nodes)[static_cast<std::size_t>(query_index)] : query_index;
         if (c.tri_root < 0) continue;
         query_bvh(c.tri_bvh_nodes, c.tri_root, c.node_boxes[node], node_hits[node]);
     }
@@ -520,15 +534,19 @@ void BroadPhase::initialize_surface_nodes(
 void BroadPhase::initialize_surface_nodes(
     const std::vector<AABB>& vertex_boxes, const RefMesh& mesh,
     const double d_hat) {
-    initialize(vertex_boxes, mesh, d_hat);
-    exclude_tet_interior_nt_queries_ = true;
-    refresh_pairs(mesh);
+    initialize_from_vertex_boxes(vertex_boxes, mesh, d_hat, /*exclude_tet_interior_nt_queries=*/true);
 }
 
 void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat) {
+    initialize_from_vertex_boxes(vertex_boxes, mesh, d_hat, /*exclude_tet_interior_nt_queries=*/false);
+}
+
+void BroadPhase::initialize_from_vertex_boxes(
+    const std::vector<AABB>& vertex_boxes, const RefMesh& mesh,
+    const double d_hat, const bool exclude_tet_interior_nt_queries) {
     const int nv = static_cast<int>(vertex_boxes.size());
     const int nt = num_tris(mesh);
-    exclude_tet_interior_nt_queries_ = false;
+    exclude_tet_interior_nt_queries_ = exclude_tet_interior_nt_queries;
 
     Cache c = take_reusable_cache(cache_, nv);
 
@@ -537,6 +555,7 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
     if (c.node_to_edges.empty()) c.node_to_edges = topo_.node_to_edges;
     if (c.node_to_tris.empty()) c.node_to_tris = topo_.node_to_tris;
     const int ne = static_cast<int>(c.edges.size());
+    const std::vector<int>* surface_query_nodes = exclude_tet_interior_nt_queries ? &surface_nt_query_nodes(mesh, nv) : nullptr;
 
     // Blue boxes: one certified motion box per vertex.
     c.node_boxes = vertex_boxes;
@@ -579,8 +598,10 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
 
     // NT candidates: blue node boxes queried against green triangle boxes.
     std::vector<std::vector<int>>& node_hits = prepare_hit_rows(c.node_hits, nv);
+    const int num_nt_query_nodes = exclude_tet_interior_nt_queries ? static_cast<int>(surface_query_nodes->size()) : nv;
     #pragma omp parallel for schedule(dynamic, 32)
-    for (int node = 0; node < nv; ++node) {
+    for (int query_index = 0; query_index < num_nt_query_nodes; ++query_index) {
+        const int node = exclude_tet_interior_nt_queries ? (*surface_query_nodes)[static_cast<std::size_t>(query_index)] : query_index;
         if (c.tri_root < 0) continue;
         query_bvh(c.tri_bvh_nodes, c.tri_root, c.node_boxes[node], node_hits[node]);
     }
@@ -628,16 +649,12 @@ void BroadPhase::refresh_pairs(const RefMesh& mesh) {
     c.ss_pair_edges.clear();
     for (auto& v : c.vertex_ss) v.clear();
 
-    const std::vector<unsigned char> tet_interior_nodes =
-        exclude_tet_interior_nt_queries_
-        ? build_tet_interior_node_mask(mesh, nv)
-        : std::vector<unsigned char>();
+    const std::vector<int>* surface_query_nodes = exclude_tet_interior_nt_queries_ ? &surface_nt_query_nodes(mesh, nv) : nullptr;
     std::vector<std::vector<int>>& node_hits = prepare_hit_rows(c.node_hits, nv);
+    const int num_nt_query_nodes = exclude_tet_interior_nt_queries_ ? static_cast<int>(surface_query_nodes->size()) : nv;
     #pragma omp parallel for schedule(dynamic, 32)
-    for (int node = 0; node < nv; ++node) {
-        if (exclude_tet_interior_nt_queries_
-            && tet_interior_nodes[static_cast<std::size_t>(node)] != 0)
-            continue;
+    for (int query_index = 0; query_index < num_nt_query_nodes; ++query_index) {
+        const int node = exclude_tet_interior_nt_queries_ ? (*surface_query_nodes)[static_cast<std::size_t>(query_index)] : query_index;
         if (c.tri_root < 0) continue;
         query_bvh(c.tri_bvh_nodes, c.tri_root, c.node_boxes[node], node_hits[node]);
     }

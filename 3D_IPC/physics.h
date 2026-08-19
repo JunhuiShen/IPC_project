@@ -5,6 +5,7 @@
 #include "barrier_energy.h"
 #include "sdf_penalty_energy.h"
 #include <algorithm>
+#include <array>
 #include <map>
 #include <unordered_map>
 #include <utility>
@@ -55,7 +56,6 @@ struct SimParams {
     bool   use_ogc_solver;       // if true, route the substep through global_gauss_seidel_solver_ogc
     double ogc_box_pad;          // OGC node-box / tri-edge union pad used by the per-iter BVH rebuild
     bool   fixed_iters;          // if true, run exactly max_global_iters sweeps with no tolerance / convergence check
-    bool   verbose;              // if true, print residual after each GS iteration (only when fixed_iters is false)
 
     double node_box_max;       // upper bound on node box half-extent used by the basic solver
     double node_box_min;       // lower bound on node box half-extent (floor when prev disp is near zero)
@@ -100,7 +100,6 @@ struct SimParams {
         p.use_ogc_solver            = false;
         p.ogc_box_pad               = 0.0;
         p.fixed_iters               = false;
-        p.verbose                   = false;
         p.node_box_max              = 0.0;
         p.node_box_min              = 0.0;
         p.theta_box_min             = 0.0;
@@ -467,6 +466,34 @@ using IncidentTriangles = std::vector<std::pair<int,int>>;
 struct NodeTrianglePair    { int node; int tri_v[3]; };
 struct SegmentSegmentPair  { int v[4]; };
 
+// Raw primitive gradients evaluated at one frozen position vector. Storage can
+// be reused, but values must be rebuilt after x, material parameters, or the
+// broad-phase cache changes. Residual assembly still traverses each node's
+// original incidence rows, so this cache does not reorder floating-point sums.
+// NT/SS gradient entries are defined only when the matching gradient_cached
+// byte is nonzero; the validity arrays are cleared on every rebuild.
+struct FrozenResidualWorkspace {
+    const RefMesh* mesh = nullptr;
+    const SimParams* params = nullptr;
+    const std::vector<Vec3>* positions = nullptr;
+    const BroadPhase* broad_phase = nullptr;
+    std::vector<std::array<Vec3, 3>> cloth_triangle_gradients;
+    std::vector<std::array<Vec3, 4>> hinge_gradients;
+    std::vector<std::array<Vec3, 4>> tet_gradients;
+    std::vector<std::array<Vec3, 4>> nt_gradients;
+    std::vector<std::array<Vec3, 4>> ss_gradients;
+    std::vector<unsigned char> nt_aabb_active;
+    std::vector<unsigned char> ss_aabb_active;
+    std::vector<unsigned char> nt_barrier_active;
+    std::vector<unsigned char> ss_barrier_active;
+    std::vector<unsigned char> nt_gradient_cached;
+    std::vector<unsigned char> ss_gradient_cached;
+
+    bool matches(const RefMesh& ref_mesh, const SimParams& sim_params, const std::vector<Vec3>& x, const BroadPhase& broad_phase_input) const { return mesh == &ref_mesh && params == &sim_params && positions == &x && broad_phase == &broad_phase_input; }
+};
+
+void build_frozen_residual_workspace(const RefMesh& ref_mesh, const SimParams& params, const std::vector<Vec3>& x, const BroadPhase& broad_phase, FrozenResidualWorkspace& workspace, const std::vector<ShapeGrads>* rest_shape_grads = nullptr);
+
 // vertex_index → pins[] index, or -1 if not pinned.
 using PinMap = std::vector<int>;
 
@@ -492,8 +519,13 @@ double compute_global_deformable_residual(const RefMesh& ref_mesh, const VertexT
                                           const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                           const BroadPhase& broad_phase,
                                           const std::vector<int>& deformable_nodes,
-                                          const PinMap* pin_map = nullptr);
+                                          const PinMap* pin_map = nullptr,
+                                          const std::vector<IncidentTriangles>* incident_triangles = nullptr,
+                                          const std::vector<ShapeGrads>* rest_shape_grads = nullptr,
+                                          const FrozenResidualWorkspace* frozen_workspace = nullptr);
 
 double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                               const BroadPhase& broad_phase, const PinMap* pin_map = nullptr);
+                               const BroadPhase& broad_phase, const PinMap* pin_map = nullptr,
+                               const std::vector<IncidentTriangles>* incident_triangles = nullptr,
+                               const std::vector<ShapeGrads>* rest_shape_grads = nullptr);

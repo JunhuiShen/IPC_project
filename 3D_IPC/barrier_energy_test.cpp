@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -482,6 +483,44 @@ std::vector<SSTestPoint> make_ss_test_points() {
     };
 }
 
+TEST(BarrierEnergy, PrecomputedNodeTriangleScalarsAreBitwiseEquivalent) {
+    for (const TestPoint& tp : make_nt_test_points()) {
+        SCOPED_TRACE(tp.name);
+        const NodeTriangleDistanceResult distance = node_triangle_distance(tp.x, tp.x1, tp.x2, tp.x3);
+        const double scalar_gradient = scalar_barrier_gradient(distance.distance, tp.d_hat);
+        const double scalar_hessian = scalar_barrier_hessian(distance.distance, tp.d_hat);
+        for (int row = 0; row < 4; ++row) {
+            const Vec3 uncached_gradient = node_triangle_barrier_gradient(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, row);
+            const Vec3 cached_gradient = node_triangle_barrier_gradient(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, row, 1.0e-12, &distance, &scalar_gradient);
+            EXPECT_EQ(std::memcmp(uncached_gradient.data(), cached_gradient.data(), sizeof(double) * static_cast<std::size_t>(uncached_gradient.size())), 0);
+            for (int col = 0; col < 4; ++col) {
+                const Mat33 uncached_hessian = node_triangle_barrier_cross_hessian(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, row, col);
+                const Mat33 cached_hessian = node_triangle_barrier_cross_hessian(tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, row, col, 1.0e-12, &distance, &scalar_gradient, &scalar_hessian);
+                EXPECT_EQ(std::memcmp(uncached_hessian.data(), cached_hessian.data(), sizeof(double) * static_cast<std::size_t>(uncached_hessian.size())), 0);
+            }
+        }
+    }
+}
+
+TEST(BarrierEnergy, PrecomputedSegmentSegmentScalarsAreBitwiseEquivalent) {
+    for (const SSTestPoint& tp : make_ss_test_points()) {
+        SCOPED_TRACE(tp.name);
+        const SegmentSegmentDistanceResult distance = segment_segment_distance(tp.x1, tp.x2, tp.x3, tp.x4);
+        const double scalar_gradient = scalar_barrier_gradient(distance.distance, tp.d_hat);
+        const double scalar_hessian = scalar_barrier_hessian(distance.distance, tp.d_hat);
+        for (int row = 0; row < 4; ++row) {
+            const Vec3 uncached_gradient = segment_segment_barrier_gradient(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, row);
+            const Vec3 cached_gradient = segment_segment_barrier_gradient(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, row, 1.0e-12, &distance, &scalar_gradient);
+            EXPECT_EQ(std::memcmp(uncached_gradient.data(), cached_gradient.data(), sizeof(double) * static_cast<std::size_t>(uncached_gradient.size())), 0);
+            for (int col = 0; col < 4; ++col) {
+                const Mat33 uncached_hessian = segment_segment_barrier_cross_hessian(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, row, col);
+                const Mat33 cached_hessian = segment_segment_barrier_cross_hessian(tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, row, col, 1.0e-12, &distance, &scalar_gradient, &scalar_hessian);
+                EXPECT_EQ(std::memcmp(uncached_hessian.data(), cached_hessian.data(), sizeof(double) * static_cast<std::size_t>(uncached_hessian.size())), 0);
+            }
+        }
+    }
+}
+
 bool run_rigid_barrier_convergence_test(const std::string& name, const Vec3& x_com, const Vec3& omega, const std::function<RigidEnergyDerivatives(const Vec3&, const Vec3&)>& evaluate, const std::function<double(const Vec3&, const Vec3&)>& energy) {
     const std::vector<double> hs = {5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4, 3.125e-4};
     const RigidEnergyDerivatives analytic = evaluate(x_com, omega);
@@ -636,6 +675,7 @@ TEST(BarrierEnergy, RejectsInvalidDofIndices){
     EXPECT_THROW(
             node_triangle_barrier_self_gradient_and_hessian(x, x1, x2, x3, d_hat, 4),
             std::invalid_argument);
+    EXPECT_THROW(node_triangle_barrier_self_gradient_and_hessian(x, x1, x2, x3, -1.0, 4), std::invalid_argument);
 
     EXPECT_THROW(
             segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, -1),
@@ -646,6 +686,7 @@ TEST(BarrierEnergy, RejectsInvalidDofIndices){
     EXPECT_THROW(
             segment_segment_barrier_self_gradient_and_hessian(x1, x2, x3, x4, d_hat, 4),
             std::invalid_argument);
+    EXPECT_THROW(segment_segment_barrier_self_gradient_and_hessian(x1, x2, x3, x4, -1.0, 4), std::invalid_argument);
 }
 
 TEST(BarrierEnergy, ZeroOutsideActivation){

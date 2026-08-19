@@ -361,6 +361,90 @@ namespace {
         EXPECT_EQ(cache.ss_pair_edges, expected_ss);
     }
 
+    static void expect_aabb_vectors_exact(
+        const std::vector<AABB>& actual, const std::vector<AABB>& expected) {
+        ASSERT_EQ(actual.size(), expected.size());
+        for (std::size_t i = 0; i < actual.size(); ++i) {
+            for (int axis = 0; axis < 3; ++axis) {
+                EXPECT_EQ(actual[i].min[axis], expected[i].min[axis]) << "box " << i << ", min axis " << axis;
+                EXPECT_EQ(actual[i].max[axis], expected[i].max[axis]) << "box " << i << ", max axis " << axis;
+            }
+        }
+    }
+
+    static void expect_bvh_vectors_exact(
+        const std::vector<BVHNode>& actual,
+        const std::vector<BVHNode>& expected) {
+        ASSERT_EQ(actual.size(), expected.size());
+        for (std::size_t i = 0; i < actual.size(); ++i) {
+            EXPECT_EQ(actual[i].left, expected[i].left) << "BVH node " << i;
+            EXPECT_EQ(actual[i].right, expected[i].right) << "BVH node " << i;
+            EXPECT_EQ(actual[i].parent, expected[i].parent) << "BVH node " << i;
+            EXPECT_EQ(actual[i].leafIndex, expected[i].leafIndex) << "BVH node " << i;
+            for (int axis = 0; axis < 3; ++axis) {
+                EXPECT_EQ(actual[i].bbox.min[axis], expected[i].bbox.min[axis]) << "BVH node " << i << ", min axis " << axis;
+                EXPECT_EQ(actual[i].bbox.max[axis], expected[i].bbox.max[axis]) << "BVH node " << i << ", max axis " << axis;
+            }
+        }
+    }
+
+    static void expect_vertex_pair_entries_exact(
+        const std::vector<std::vector<BroadPhase::Cache::VertexPairEntry>>& actual,
+        const std::vector<std::vector<BroadPhase::Cache::VertexPairEntry>>& expected) {
+        ASSERT_EQ(actual.size(), expected.size());
+        for (std::size_t vertex = 0; vertex < actual.size(); ++vertex) {
+            ASSERT_EQ(actual[vertex].size(), expected[vertex].size()) << "vertex " << vertex;
+            for (std::size_t entry = 0; entry < actual[vertex].size(); ++entry) {
+                EXPECT_EQ(actual[vertex][entry].pair_index, expected[vertex][entry].pair_index) << "vertex " << vertex << ", entry " << entry;
+                EXPECT_EQ(actual[vertex][entry].dof, expected[vertex][entry].dof) << "vertex " << vertex << ", entry " << entry;
+            }
+        }
+    }
+
+    static void expect_cache_geometry_and_topology_exact(
+        const BroadPhase::Cache& actual, const BroadPhase::Cache& expected) {
+        expect_aabb_vectors_exact(actual.node_boxes, expected.node_boxes);
+        expect_aabb_vectors_exact(actual.tri_boxes, expected.tri_boxes);
+        expect_aabb_vectors_exact(actual.edge_boxes, expected.edge_boxes);
+        expect_aabb_vectors_exact(actual.red_edge_boxes, expected.red_edge_boxes);
+        expect_bvh_vectors_exact(actual.node_bvh_nodes, expected.node_bvh_nodes);
+        expect_bvh_vectors_exact(actual.tri_bvh_nodes, expected.tri_bvh_nodes);
+        expect_bvh_vectors_exact(actual.edge_bvh_nodes, expected.edge_bvh_nodes);
+        EXPECT_EQ(actual.node_leaf_to_node, expected.node_leaf_to_node);
+        EXPECT_EQ(actual.tri_leaf_to_node, expected.tri_leaf_to_node);
+        EXPECT_EQ(actual.edge_leaf_to_node, expected.edge_leaf_to_node);
+        EXPECT_EQ(actual.node_root, expected.node_root);
+        EXPECT_EQ(actual.tri_root, expected.tri_root);
+        EXPECT_EQ(actual.edge_root, expected.edge_root);
+        EXPECT_EQ(actual.edges, expected.edges);
+        EXPECT_EQ(actual.node_to_tris, expected.node_to_tris);
+        EXPECT_EQ(actual.node_to_edges, expected.node_to_edges);
+    }
+
+    static void expect_cache_exact(
+        const BroadPhase::Cache& actual, const BroadPhase::Cache& expected) {
+        expect_cache_geometry_and_topology_exact(actual, expected);
+        ASSERT_EQ(actual.nt_pairs.size(), expected.nt_pairs.size());
+        for (std::size_t i = 0; i < actual.nt_pairs.size(); ++i) {
+            EXPECT_EQ(actual.nt_pairs[i].node, expected.nt_pairs[i].node) << "NT pair " << i;
+            for (int local = 0; local < 3; ++local) {
+                EXPECT_EQ(actual.nt_pairs[i].tri_v[local], expected.nt_pairs[i].tri_v[local]) << "NT pair " << i << ", triangle vertex " << local;
+            }
+        }
+        ASSERT_EQ(actual.ss_pairs.size(), expected.ss_pairs.size());
+        for (std::size_t i = 0; i < actual.ss_pairs.size(); ++i) {
+            for (int local = 0; local < 4; ++local) {
+                EXPECT_EQ(actual.ss_pairs[i].v[local], expected.ss_pairs[i].v[local]) << "SS pair " << i << ", vertex " << local;
+            }
+        }
+        EXPECT_EQ(actual.nt_pair_tri, expected.nt_pair_tri);
+        EXPECT_EQ(actual.ss_pair_edges, expected.ss_pair_edges);
+        expect_vertex_pair_entries_exact(actual.vertex_nt, expected.vertex_nt);
+        expect_vertex_pair_entries_exact(actual.vertex_ss, expected.vertex_ss);
+        EXPECT_EQ(actual.node_hits, expected.node_hits);
+        EXPECT_EQ(actual.edge_hits, expected.edge_hits);
+    }
+
 } // namespace
 
 TEST(AABBTest, DefaultConstructorStartsEmpty) {
@@ -496,12 +580,7 @@ TEST(BroadPhaseTest,
         Vec3(0.2, 0.2, 0.2),
     };
     const std::vector<Vec3> v(x.size(), Vec3::Zero());
-    RefMesh mesh = make_mesh(x, {
-        {1, 2, 3},
-        {0, 3, 2},
-        {0, 1, 3},
-        {0, 2, 1},
-    });
+    RefMesh mesh = make_mesh(x, {{1, 2, 3}, {0, 3, 2}, {0, 1, 3}, {0, 2, 1}});
     // Four tets subdivide the outer tet around interior node 4. The collision
     // triangles above are exactly the extracted outer boundary.
     mesh.tets = {
@@ -694,6 +773,69 @@ TEST(BroadPhaseTest,
     EXPECT_EQ(
         pair_sets_from_broad(surface_nodes).ss,
         pair_sets_from_broad(all_nodes).ss);
+}
+
+TEST(BroadPhaseTest, PrebuiltSurfaceNodeOnePassMatchesLegacyRefreshResultExactly) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0),
+        Vec3(0.0, 0.0, 1.0),
+        Vec3(0.2, 0.2, 0.2),  // tet-interior node
+        Vec3(0.3, 0.3, 0.3),  // point-only proxy
+    };
+    RefMesh mesh = make_mesh(x, {
+        {1, 2, 3},
+        {0, 3, 2},
+        {0, 1, 3},
+        {0, 2, 1},
+    });
+    mesh.tets = {
+        4, 1, 2, 3,
+        0, 4, 2, 3,
+        0, 1, 4, 3,
+        0, 1, 2, 4,
+    };
+    // Deliberately unordered: query order must still follow ascending node
+    // index, just as it did when the old wrapper called refresh_pairs().
+    mesh.tet_nodes = {4, 2, 0, 3, 1};
+    mesh.surface_nodes = {3, 0, 2, 1};
+    mesh.node_to_rb = {-1, -1, -1, -1, -1, 0};
+    mesh.rb_nodes = {{5}};
+
+    std::vector<AABB> boxes;
+    boxes.reserve(x.size());
+    for (int node = 0; node < static_cast<int>(x.size()); ++node) {
+        // Distinct centroids avoid BVH tie ambiguity, while the generous
+        // extents make the filtered interior query observable.
+        const Vec3 offset = Vec3::Constant(0.01 * node);
+        boxes.emplace_back(Vec3::Constant(-2.0) + offset, Vec3::Constant(2.0) + offset);
+    }
+    constexpr double d_hat = 0.125;
+
+    BroadPhase all_nodes;
+    all_nodes.initialize(boxes, mesh, d_hat);
+
+    BroadPhase surface_nodes;
+    surface_nodes.initialize_surface_nodes(boxes, mesh, d_hat);
+    const BroadPhase::Cache one_pass = surface_nodes.cache();
+
+    // The policy affects queries only. The old wrapper first produced exactly
+    // this all-node geometry/topology before replacing its pair lists.
+    expect_cache_geometry_and_topology_exact(one_pass, all_nodes.cache());
+    ASSERT_EQ(one_pass.node_hits.size(), x.size());
+    EXPECT_TRUE(one_pass.node_hits[4].empty());
+    EXPECT_FALSE(all_nodes.cache().node_hits[4].empty());
+    EXPECT_TRUE(std::none_of(one_pass.nt_pairs.begin(), one_pass.nt_pairs.end(), [](const NodeTrianglePair& pair) { return pair.node == 4; }));
+    EXPECT_TRUE(std::any_of(one_pass.nt_pairs.begin(), one_pass.nt_pairs.end(), [](const NodeTrianglePair& pair) { return pair.node == 5; }));
+
+    // refresh_pairs() is the final operation performed by the former
+    // two-pass wrapper. Exact equality here covers hit order, NT/SS pair
+    // order, pair metadata, and per-vertex incidence indices in addition to
+    // the immutable boxes and BVHs.
+    surface_nodes.refresh_pairs(mesh);
+    expect_cache_exact(surface_nodes.cache(), one_pass);
+    expect_pair_order_matches_query_hits(surface_nodes.cache(), mesh);
 }
 
 TEST(BroadPhaseTest, DetectsSegmentSegmentPairFromOverlappingBoxes) {
@@ -1192,13 +1334,12 @@ TEST(BroadPhaseTest, MixedDeformableSafeStepUpdatesOnlySelectedVertex) {
     cache.vertex_nt[0].push_back(
         {/*pair_index=*/0, /*dof=*/0});
 
-    mixed_deformable_vertex_safe_step(
-        broad_phase, x, 0,
-        [&](int vi) { return target[vi]; },
-        /*safety=*/0.9, /*clip_ccd=*/true,
-        /*use_ticcd=*/false, /*use_ogc=*/false);
+    std::vector<Vec3> reference = initial;
+    per_vertex_safe_step(broad_phase, reference, [&](int vi) { return target[vi]; }, /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false, /*use_ogc=*/false);
+    mixed_deformable_vertex_safe_step(broad_phase, x, 0, target[0], /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false, /*use_ogc=*/false);
 
-    EXPECT_TRUE(x[0].isApprox(Vec3(0.825, 0.25, 0.0), 1.0e-12));
+    for (int axis = 0; axis < 3; ++axis)
+        EXPECT_DOUBLE_EQ(x[0][axis], reference[0][axis]);
     for (int vi = 1; vi < static_cast<int>(x.size()); ++vi)
         EXPECT_TRUE(x[vi].isApprox(initial[vi], 0.0));
 }

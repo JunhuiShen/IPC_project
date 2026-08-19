@@ -105,7 +105,7 @@ double compute_trust_region_bound_for_vertex(int vi, const std::vector<Vec3>& x,
     return gamma_p * d0_min;  // +inf when vi has no incident pairs
 }
 
-void mixed_deformable_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi, const std::function<Vec3(int)>& x_new_fn, double safety, bool clip_ccd, bool use_ticcd, bool use_ogc, std::atomic<int>* clip_count) {
+void mixed_deformable_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi, const Vec3& raw_proposed_position, double safety, bool clip_ccd, bool use_ticcd, bool use_ogc) {
     const BroadPhase::Cache& bp_cache = broad_phase.cache();
     const int nv = static_cast<int>(x.size());
     if (vi < 0 || vi >= nv)
@@ -116,12 +116,9 @@ void mixed_deformable_vertex_safe_step(const BroadPhase& broad_phase, std::vecto
 
     // Clip to the node box.
     constexpr double inset = 1e-10;
-    const Vec3 raw = x_new_fn(vi);
     const Vec3 lo = (box.min + Vec3::Constant(inset)).eval();
     const Vec3 hi = (box.max - Vec3::Constant(inset)).eval();
-    const Vec3 x_new = raw.cwiseMax(lo).cwiseMin(hi);
-    if (clip_count && (x_new - raw).squaredNorm() > 0.0)
-        ++(*clip_count);
+    const Vec3 x_new = raw_proposed_position.cwiseMax(lo).cwiseMin(hi);
 
     const Vec3 dx = x_new - x[vi];
     if (dx.squaredNorm() < 1e-28)
@@ -193,7 +190,7 @@ void mixed_deformable_vertex_safe_step(const BroadPhase& broad_phase, std::vecto
     x[vi] = x[vi] + step * dx;
 }
 
-void per_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety, bool clip_ccd, bool use_ticcd, bool use_ogc, const std::vector<std::vector<int>>* color_groups, std::atomic<int>* clip_count) {
+void per_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x, const std::function<Vec3(int)>& x_new_fn, double safety, bool clip_ccd, bool use_ticcd, bool use_ogc, const std::vector<std::vector<int>>* color_groups) {
     const BroadPhase::Cache& bp_cache = broad_phase.cache();
     const int nv = static_cast<int>(x.size());
 
@@ -207,7 +204,6 @@ void per_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x, c
         const Vec3 lo = (box.min + Vec3::Constant(inset)).eval();
         const Vec3 hi = (box.max - Vec3::Constant(inset)).eval();
         const Vec3 x_new = raw.cwiseMax(lo).cwiseMin(hi);
-        if (clip_count && (x_new - raw).squaredNorm() > 0.0) ++(*clip_count);
 
         const Vec3 dx = x_new - x[vi];
         if (dx.squaredNorm() < 1e-28) return;

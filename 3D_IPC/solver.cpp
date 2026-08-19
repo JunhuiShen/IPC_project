@@ -9,9 +9,9 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <exception>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -139,6 +139,7 @@ struct MixedAdjacencyWorkspace {
     std::vector<std::size_t> elastic_row_sizes;
     std::vector<std::vector<int>> combined_adjacency;
     std::vector<std::vector<int>> color_groups;
+    GreedyColoringWorkspace coloring_workspace;
 
     bool matches(
         const RefMesh& ref_mesh,
@@ -200,6 +201,7 @@ struct MixedAdjacencyWorkspace {
         elastic_row_sizes.clear();
         combined_adjacency.clear();
         color_groups.clear();
+        coloring_workspace = GreedyColoringWorkspace{};
 
         mesh = &ref_mesh;
         tris_data = ref_mesh.tris.data();
@@ -371,7 +373,7 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                                         std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
                                         const std::vector<Vec3>& v,
                                         BroadPhase& broad_phase,
-                                        const std::string& outdir, bool verbose) {
+                                        const std::string& outdir) {
 
     //create node (blue) boxes and create broad phase (red boxes) accordingly
     const int nv = static_cast<int>(xnew.size());
@@ -410,7 +412,6 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     //gs loop
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         if((iter-1)%params.node_box_update_count==0){//rebuild node boxes and color accordingly
-            if (verbose) fprintf(stderr, "  [GS] iter %d  rebuilding node boxes\n", iter);
             //create new node boxes
             for (int i = 0; i < nv; ++i) {
                 const double r = node_box_size_fn(i);
@@ -435,26 +436,13 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
             }
         }
 
-        std::atomic<int> clip_count{0};
-        per_vertex_safe_step(broad_phase, xnew, [&](int vi) -> Vec3 {
-                                             return xnew[vi] - params.damping * gs_vertex_delta_live_barrier(
-                                                     vi, ref_mesh, adj, pins, params, xhat, xnew,
-                                                     broad_phase, &pm,
-                                                     &workspace.incident_triangles[vi],
-                                                     &workspace.rest_shape_grads);
-                                         },
-                                         /*safety=*/0.9, /*clip_ccd=*/params.use_ogc ? false : params.use_ccd,
-                                         /*use_ticcd=*/params.use_ticcd,
-                                         /*use_ogc=*/params.use_ogc,
-                                         params.use_parallel ? &color_groups : nullptr,
-                                         verbose ? &clip_count : nullptr);
+        const auto proposed_position = [&](int vi) -> Vec3 { return xnew[vi] - params.damping * gs_vertex_delta_live_barrier(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads); };
+        per_vertex_safe_step(broad_phase, xnew, proposed_position, 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc, params.use_parallel ? &color_groups : nullptr);
 
         result.iterations = iter;
         if (!params.fixed_iters){
             double residual = compute_global_residual(ref_mesh,adj,pins,params,xnew,xhat,broad_phase,&pm);
             result.final_residual = residual;
-            if (verbose)
-                fprintf(stderr, "  [GS] iter %d  residual = %.6e  node clips = %d\n", iter, residual, clip_count.load());
             if(residual < params.tol_rel * r1 || residual < params.tol_abs){
                 result.converged = true;
                 break;
@@ -606,19 +594,27 @@ void add_rigid_derivatives(RigidEnergyDerivatives& total, const RigidEnergyDeriv
     total.orientation_orientation_hessian += contribution.orientation_orientation_hessian;
 }
 
-RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh, const DeformedState& state, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, RigidDerivativeMode mode) {
+RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh, const DeformedState& state, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, RigidDerivativeMode mode, const QuaternionOmegaKinematics* supplied_kinematics = nullptr, const FrozenResidualWorkspace* frozen_workspace = nullptr) {
     RigidEnergyDerivatives total;
     if (params.d_hat <= 0.0 || params.k_barrier <= 0.0)
         return total;
     const double d_hat2 = params.d_hat * params.d_hat;
     QuaternionOmegaKinematics kinematics;
     const bool needs_orientation_derivatives = mode == RigidDerivativeMode::Full || mode == RigidDerivativeMode::Gradient || mode == RigidDerivativeMode::OrientationHessian;
-    const QuaternionOmegaKinematics* cached_kinematics = nullptr;
-    if (needs_orientation_derivatives && (!nt_pair_indices.empty() || !ss_pair_indices.empty())) {
+    const QuaternionOmegaKinematics* cached_kinematics = supplied_kinematics;
+    if (needs_orientation_derivatives && cached_kinematics == nullptr && (!nt_pair_indices.empty() || !ss_pair_indices.empty())) {
         const bool needs_second_derivatives = mode == RigidDerivativeMode::Full || mode == RigidDerivativeMode::OrientationHessian;
         kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, needs_second_derivatives);
         cached_kinematics = &kinematics;
     }
+    const auto add_frozen_gradient = [&](const std::array<Vec3, 4>& references, const std::array<Vec3, 4>& gradients, int first_dof, int last_dof) {
+        RigidEnergyDerivatives contribution;
+        for (int dof = first_dof; dof <= last_dof; ++dof) {
+            contribution.translation_gradient += gradients[static_cast<std::size_t>(dof)];
+            contribution.orientation_gradient += dx_domega(references[static_cast<std::size_t>(dof)], *cached_kinematics).transpose() * gradients[static_cast<std::size_t>(dof)];
+        }
+        add_rigid_derivatives(total, contribution);
+    };
 
     for (const int pair_index : nt_pair_indices) {
         const NodeTrianglePair& pair = bp_cache.nt_pairs[pair_index];
@@ -628,14 +624,19 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
         const int v2 = pair.tri_v[2];
         const int node_rb = owning_rb_for_node(ref_mesh.node_to_rb, node);
         const int triangle_rb = owning_rb_for_node(ref_mesh.node_to_rb, v0);
-        if (node_rb == triangle_rb || (node_rb != rb && triangle_rb != rb) || !node_triangle_aabbs_within_distance(positions[node], positions[v0], positions[v1], positions[v2], d_hat2))
+        const bool aabb_active = frozen_workspace == nullptr ? node_triangle_aabbs_within_distance(positions[node], positions[v0], positions[v1], positions[v2], d_hat2) : frozen_workspace->nt_aabb_active[static_cast<std::size_t>(pair_index)] != 0;
+        if (node_rb == triangle_rb || (node_rb != rb && triangle_rb != rb) || !aabb_active)
             continue;
         if (node_rb == rb) {
             const std::array<Vec3, 4> references = {rigid_node_body_space_position(node, ref_mesh, node_to_rb_local), Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
-            add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics));
+            if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->nt_barrier_active[static_cast<std::size_t>(pair_index)] == 0) add_rigid_derivatives(total, RigidEnergyDerivatives{});
+            else if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->nt_gradient_cached[static_cast<std::size_t>(pair_index)] != 0) add_frozen_gradient(references, frozen_workspace->nt_gradients[static_cast<std::size_t>(pair_index)], 0, 0);
+            else add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics));
         } else {
             const std::array<Vec3, 4> references = {Vec3::Zero(), rigid_node_body_space_position(v0, ref_mesh, node_to_rb_local), rigid_node_body_space_position(v1, ref_mesh, node_to_rb_local), rigid_node_body_space_position(v2, ref_mesh, node_to_rb_local)};
-            add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics));
+            if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->nt_barrier_active[static_cast<std::size_t>(pair_index)] == 0) add_rigid_derivatives(total, RigidEnergyDerivatives{});
+            else if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->nt_gradient_cached[static_cast<std::size_t>(pair_index)] != 0) add_frozen_gradient(references, frozen_workspace->nt_gradients[static_cast<std::size_t>(pair_index)], 1, 3);
+            else add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics));
         }
     }
 
@@ -647,14 +648,19 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
         const int b1 = pair.v[3];
         const int first_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, a0);
         const int second_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, b0);
-        if (first_edge_rb == second_edge_rb || (first_edge_rb != rb && second_edge_rb != rb) || !segment_aabbs_within_distance(positions[a0], positions[a1], positions[b0], positions[b1], d_hat2))
+        const bool aabb_active = frozen_workspace == nullptr ? segment_aabbs_within_distance(positions[a0], positions[a1], positions[b0], positions[b1], d_hat2) : frozen_workspace->ss_aabb_active[static_cast<std::size_t>(pair_index)] != 0;
+        if (first_edge_rb == second_edge_rb || (first_edge_rb != rb && second_edge_rb != rb) || !aabb_active)
             continue;
         if (first_edge_rb == rb) {
             const std::array<Vec3, 4> references = {rigid_node_body_space_position(a0, ref_mesh, node_to_rb_local), rigid_node_body_space_position(a1, ref_mesh, node_to_rb_local), Vec3::Zero(), Vec3::Zero()};
-            add_rigid_derivatives(total, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics));
+            if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_barrier_active[static_cast<std::size_t>(pair_index)] == 0) add_rigid_derivatives(total, RigidEnergyDerivatives{});
+            else if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_gradient_cached[static_cast<std::size_t>(pair_index)] != 0) add_frozen_gradient(references, frozen_workspace->ss_gradients[static_cast<std::size_t>(pair_index)], 0, 1);
+            else add_rigid_derivatives(total, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics));
         } else {
             const std::array<Vec3, 4> references = {Vec3::Zero(), Vec3::Zero(), rigid_node_body_space_position(b0, ref_mesh, node_to_rb_local), rigid_node_body_space_position(b1, ref_mesh, node_to_rb_local)};
-            add_rigid_derivatives(total, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics));
+            if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_barrier_active[static_cast<std::size_t>(pair_index)] == 0) add_rigid_derivatives(total, RigidEnergyDerivatives{});
+            else if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_gradient_cached[static_cast<std::size_t>(pair_index)] != 0) add_frozen_gradient(references, frozen_workspace->ss_gradients[static_cast<std::size_t>(pair_index)], 2, 3);
+            else add_rigid_derivatives(total, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics));
         }
     }
 
@@ -682,12 +688,13 @@ bool rigid_sdf_min_evaluation(const SimParams& params, const Vec3& x, SDFEvaluat
     return found;
 }
 
-void add_rigid_sdf_gradients(const std::vector<Vec3>& ref_positions, const Vec3& x_com_new, const Vec4& q_n, const Vec3& omega_new, const SimParams& params, double dt, Vec3& translation_gradient, Vec3& orientation_gradient) {
+void add_rigid_sdf_gradients(const std::vector<Vec3>& ref_positions, const Vec3& x_com_new, const Vec4& q_n, const Vec3& omega_new, const SimParams& params, double dt, Vec3& translation_gradient, Vec3& orientation_gradient, const QuaternionOmegaKinematics* supplied_kinematics = nullptr) {
     if (params.k_sdf <= 0.0)
         return;
 
     const double dt2 = dt * dt;
-    const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(q_n, omega_new, dt);
+    const QuaternionOmegaKinematics owned_kinematics = supplied_kinematics == nullptr ? quaternion_omega_kinematics(q_n, omega_new, dt) : QuaternionOmegaKinematics{};
+    const QuaternionOmegaKinematics& kinematics = supplied_kinematics == nullptr ? owned_kinematics : *supplied_kinematics;
     for (const Vec3& X_centered : ref_positions) {
         const Vec3 x = world_space_position(X_centered, x_com_new, kinematics.orientation);
         SDFEvaluation sdf;
@@ -701,12 +708,12 @@ void add_rigid_sdf_gradients(const std::vector<Vec3>& ref_positions, const Vec3&
     }
 }
 
-void add_rigid_sdf_translation_terms(const std::vector<Vec3>& ref_positions, const Vec3& x_com_new, const Vec4& q_n, const Vec3& omega_new, const SimParams& params, double dt, Vec3& gradient, Mat33& hessian) {
+void add_rigid_sdf_translation_terms(const std::vector<Vec3>& ref_positions, const Vec3& x_com_new, const Vec4& q_n, const Vec3& omega_new, const SimParams& params, double dt, Vec3& gradient, Mat33& hessian, const QuaternionOmegaKinematics* supplied_kinematics = nullptr) {
     if (params.k_sdf <= 0.0)
         return;
 
     const double dt2 = dt * dt;
-    const Vec4 orientation = quaternion_from_angular_velocity(q_n, omega_new, dt);
+    const Vec4 orientation = supplied_kinematics == nullptr ? quaternion_from_angular_velocity(q_n, omega_new, dt) : supplied_kinematics->orientation;
     for (const Vec3& X_centered : ref_positions) {
         const Vec3 x = world_space_position(X_centered, x_com_new, orientation);
         SDFEvaluation sdf;
@@ -718,12 +725,13 @@ void add_rigid_sdf_translation_terms(const std::vector<Vec3>& ref_positions, con
     }
 }
 
-void add_rigid_sdf_orientation_terms(const std::vector<Vec3>& ref_positions, const Vec3& x_com_new, const Vec4& q_n, const Vec3& omega_new, const SimParams& params, double dt, Vec3& gradient, Mat33& hessian) {
+void add_rigid_sdf_orientation_terms(const std::vector<Vec3>& ref_positions, const Vec3& x_com_new, const Vec4& q_n, const Vec3& omega_new, const SimParams& params, double dt, Vec3& gradient, Mat33& hessian, const QuaternionOmegaKinematics* supplied_kinematics = nullptr) {
     if (params.k_sdf <= 0.0)
         return;
 
     const double dt2 = dt * dt;
-    const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(q_n, omega_new, dt);
+    const QuaternionOmegaKinematics owned_kinematics = supplied_kinematics == nullptr ? quaternion_omega_kinematics(q_n, omega_new, dt) : QuaternionOmegaKinematics{};
+    const QuaternionOmegaKinematics& kinematics = supplied_kinematics == nullptr ? owned_kinematics : *supplied_kinematics;
     for (const Vec3& X_centered : ref_positions) {
         const Vec3 x = world_space_position(X_centered, x_com_new, kinematics.orientation);
         SDFEvaluation sdf;
@@ -752,25 +760,54 @@ void validate_rigid_solver_state(const RefMesh& ref_mesh, const DeformedState& s
         throw std::invalid_argument("global_gauss_seidel_solver_basic_rb: inconsistent rigid-body array sizes");
 }
 
-double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedState& state, const BroadPhase::Cache& bp_cache, const std::vector<std::vector<int>>& body_nt_pair_indices, const std::vector<std::vector<int>>& body_ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const SimParams& params, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, double dt) {
-    double residual = 0.0;
+double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedState& state, const BroadPhase::Cache& bp_cache, const std::vector<std::vector<int>>& body_nt_pair_indices, const std::vector<std::vector<int>>& body_ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const SimParams& params, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, double dt, std::vector<double>& body_residuals, const std::vector<Mat33>* rotation_predictors = nullptr, const FrozenResidualWorkspace* frozen_workspace = nullptr) {
     const int num_rbs = static_cast<int>(ref_mesh.total_mass.size());
     const double barrier_scale = dt * dt * params.k_barrier;
-    for (int rb = 0; rb < num_rbs; ++rb) {
+    body_residuals.resize(static_cast<std::size_t>(num_rbs));
+    // Bodies only read the frozen residual configuration. Compute their
+    // contributions independently, then retain the original body-index sum
+    // order so parallel execution does not change the residual value.
+    const auto evaluate_body = [&](int rb) {
+        const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt);
+        const Mat33* rotation_predictor = rotation_predictors == nullptr ? nullptr : &(*rotation_predictors)[static_cast<std::size_t>(rb)];
         Vec3 com_gradient = inertia_translation_gradient(x_com_new[rb], state.x_coms[rb], state.v_coms[rb], dt, ref_mesh.total_mass[rb]);
         com_gradient -= gravitational_potential_gradient(ref_mesh.total_mass[rb], params.gravity.y(), dt);
 
-        Vec3 orientation_gradient = inertia_rotation_gradient(omega_new[rb], state.orientations[rb], state.omega[rb], dt, ref_mesh.I_hat[rb]);
-        add_rigid_sdf_gradients(ref_mesh.ref_positions[rb], x_com_new[rb], state.orientations[rb], omega_new[rb], params, dt, com_gradient, orientation_gradient);
-        const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, body_nt_pair_indices[rb], body_ss_pair_indices[rb], node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::Gradient);
+        Vec3 orientation_gradient = inertia_rotation_gradient(omega_new[rb], state.orientations[rb], state.omega[rb], dt, ref_mesh.I_hat[rb], &kinematics, rotation_predictor);
+        add_rigid_sdf_gradients(ref_mesh.ref_positions[rb], x_com_new[rb], state.orientations[rb], omega_new[rb], params, dt, com_gradient, orientation_gradient, &kinematics);
+        const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, body_nt_pair_indices[rb], body_ss_pair_indices[rb], node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::Gradient, &kinematics, frozen_workspace);
         com_gradient += barrier_scale * barrier.translation_gradient;
         orientation_gradient += barrier_scale * barrier.orientation_gradient;
-        residual += com_gradient.norm() + orientation_gradient.norm();
+        body_residuals[static_cast<std::size_t>(rb)] = com_gradient.norm() + orientation_gradient.norm();
+    };
+    if (params.use_parallel && num_rbs > 1) {
+        std::exception_ptr first_exception;
+        int first_exception_body = num_rbs;
+        #pragma omp parallel for schedule(static)
+        for (int rb = 0; rb < num_rbs; ++rb) {
+            try {
+                evaluate_body(rb);
+            } catch (...) {
+                #pragma omp critical(rigid_residual_exception)
+                {
+                    if (rb < first_exception_body) {
+                        first_exception_body = rb;
+                        first_exception = std::current_exception();
+                    }
+                }
+            }
+        }
+        if (first_exception != nullptr) std::rethrow_exception(first_exception);
+    } else {
+        for (int rb = 0; rb < num_rbs; ++rb) evaluate_body(rb);
     }
+    double residual = 0.0;
+    for (const double body_residual : body_residuals)
+        residual += body_residual;
     return residual;
 }
 
-Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, const SimParams& params, double dt) {
+Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, const QuaternionOmegaKinematics* kinematics = nullptr) {
     const Vec3& x_com_n = state.x_coms[rb];
     const Vec3& v_com_n = state.v_coms[rb];
 
@@ -778,7 +815,7 @@ Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_m
     gradient -= gravitational_potential_gradient(ref_mesh.total_mass[rb], params.gravity.y(), dt);
 
     Mat33 hessian = inertia_translation_hessian(ref_mesh.total_mass[rb]);
-    add_rigid_sdf_translation_terms(ref_mesh.ref_positions[rb], x_com_new[rb], state.orientations[rb], omega_new[rb], params, dt, gradient, hessian);
+    add_rigid_sdf_translation_terms(ref_mesh.ref_positions[rb], x_com_new[rb], state.orientations[rb], omega_new[rb], params, dt, gradient, hessian, kinematics);
     const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::TranslationHessian);
     const double barrier_scale = dt * dt * params.k_barrier;
     gradient += barrier_scale * barrier.translation_gradient;
@@ -786,14 +823,16 @@ Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_m
     return hessian.ldlt().solve(gradient);
 }
 
-Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, const SimParams& params, double dt) {
+Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, const QuaternionOmegaKinematics* supplied_kinematics = nullptr, const Mat33* rotation_predictor = nullptr) {
     const Vec4& q_n = state.orientations[rb];
     const Vec3& omega_n = state.omega[rb];
     const Mat33& I_hat = ref_mesh.I_hat[rb];
 
-    auto [gradient, hessian] = inertia_rotation_gradient_hessian(omega_new[rb], q_n, omega_n, dt, I_hat);
-    add_rigid_sdf_orientation_terms(ref_mesh.ref_positions[rb], x_com_new[rb], q_n, omega_new[rb], params, dt, gradient, hessian);
-    const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::OrientationHessian);
+    const QuaternionOmegaKinematics owned_kinematics = supplied_kinematics == nullptr ? quaternion_omega_kinematics(q_n, omega_new[rb], dt, true) : QuaternionOmegaKinematics{};
+    const QuaternionOmegaKinematics& kinematics = supplied_kinematics == nullptr ? owned_kinematics : *supplied_kinematics;
+    auto [gradient, hessian] = inertia_rotation_gradient_hessian(omega_new[rb], q_n, omega_n, dt, I_hat, &kinematics, rotation_predictor);
+    add_rigid_sdf_orientation_terms(ref_mesh.ref_positions[rb], x_com_new[rb], q_n, omega_new[rb], params, dt, gradient, hessian, &kinematics);
+    const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::OrientationHessian, &kinematics);
     const double barrier_scale = dt * dt * params.k_barrier;
     gradient += barrier_scale * barrier.orientation_gradient;
     hessian += barrier_scale * barrier.orientation_orientation_hessian;
@@ -810,6 +849,7 @@ namespace {
 
 struct RigidSolverWorkspace {
     BroadPhase broad_phase;
+    FrozenResidualWorkspace frozen_residual;
     const RefMesh* mesh = nullptr;
     const int* tris_data = nullptr;
     const std::vector<int>* rb_nodes_data = nullptr;
@@ -831,6 +871,8 @@ struct RigidSolverWorkspace {
     std::vector<std::vector<int>> body_ss_pair_indices;
     std::vector<std::vector<int>> contact_adjacency;
     std::vector<std::vector<int>> color_groups;
+    std::vector<double> body_residuals;
+    std::vector<Mat33> rotation_predictors;
 
     bool matches(const RefMesh& ref_mesh, int nv) const {
         return mesh == &ref_mesh && tris_data == ref_mesh.tris.data() && rb_nodes_data == ref_mesh.rb_nodes.data() && ref_positions_data == ref_mesh.ref_positions.data() && tris_size == ref_mesh.tris.size() && num_rbs == ref_mesh.rb_nodes.size() && num_vertices == nv;
@@ -845,6 +887,7 @@ struct RigidSolverWorkspace {
             body_ss_pair_indices.clear();
             contact_adjacency.clear();
             color_groups.clear();
+            body_residuals.clear();
             node_to_rb_local.assign(nv, -1);
             for (int rb = 0; rb < static_cast<int>(ref_mesh.rb_nodes.size()); ++rb) {
                 for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local)
@@ -865,6 +908,8 @@ struct RigidSolverWorkspace {
         theta_box_radii.resize(ref_mesh.rb_nodes.size());
         blue_boxes.resize(nv);
         positions.resize(nv);
+        body_residuals.resize(ref_mesh.rb_nodes.size());
+        rotation_predictors.resize(ref_mesh.rb_nodes.size());
     }
 };
 
@@ -874,7 +919,7 @@ struct RigidSolverWorkspace {
 // Rigid-body solver entry point
 // -----------------------------------------------------------------------------
 
-SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const DeformedState& state, const SimParams& params, std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new, bool verbose) {
+SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const DeformedState& state, const SimParams& params, std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new) {
     rb_solver::validate_rigid_solver_state(ref_mesh, state, x_com_new, q_new, omega_new);
 
     SolverResult result;
@@ -882,6 +927,8 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
     const double dt = params.dt();
     static RigidSolverWorkspace workspace;
     workspace.prepare(ref_mesh, static_cast<int>(state.deformed_positions.size()), params.node_box_max, params.theta_box_max);
+    for (int rb = 0; rb < num_rbs; ++rb)
+        workspace.rotation_predictors[static_cast<std::size_t>(rb)] = rigid_rotation_predictor(state.orientations[rb], state.omega[rb], dt);
 
     // The caller supplies the initial collision-free configuration, with
     // omega_new storing the rotation increment from q_n. The previous physical
@@ -900,7 +947,7 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
         return value <= tolerance;
     };
 
-    const auto rebuild_contact_cache = [&](int iter) {
+    const auto rebuild_contact_cache = [&]() {
         constexpr double box_padding = 1.2;
         for (int rb = 0; rb < num_rbs; ++rb) {
             workspace.com_box_anchors[rb] = x_com_new[rb];
@@ -912,14 +959,12 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
         workspace.broad_phase.initialize(workspace.blue_boxes, ref_mesh, params.d_hat);
         build_rb_contact_adj(workspace.broad_phase.cache(), ref_mesh.node_to_rb, num_rbs, workspace.body_nt_pair_indices, workspace.body_ss_pair_indices, workspace.contact_adjacency);
         greedy_color_conflict_graph(workspace.contact_adjacency, workspace.color_groups);
-        if (verbose)
-            std::fprintf(stderr, "  [RB GS] iter %d  rebuilding rigid blue boxes and coloring\n", iter);
     };
 
-    rebuild_contact_cache(1);
+    rebuild_contact_cache();
 
     if (!params.fixed_iters) {
-        initial_residual = rb_solver::rigid_body_unnormalized_residual(ref_mesh, state, workspace.broad_phase.cache(), workspace.body_nt_pair_indices, workspace.body_ss_pair_indices, workspace.node_to_rb_local, workspace.positions, params, x_com_new, omega_new, dt);
+        initial_residual = rb_solver::rigid_body_unnormalized_residual(ref_mesh, state, workspace.broad_phase.cache(), workspace.body_nt_pair_indices, workspace.body_ss_pair_indices, workspace.node_to_rb_local, workspace.positions, params, x_com_new, omega_new, dt, workspace.body_residuals, &workspace.rotation_predictors);
         result.has_residual = true;
         result.initial_residual = initial_residual;
         result.final_residual = initial_residual;
@@ -932,11 +977,12 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         if (iter > 1 && (iter - 1) % params.node_box_update_count == 0)
-            rebuild_contact_cache(iter);
+            rebuild_contact_cache();
 
         const auto process_body = [&](int rb) {
             std::vector<Vec3>& node_positions = workspace.positions;
-            const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], workspace.node_to_rb_local, node_positions, x_com_new, omega_new, params, dt);
+            const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, true);
+            const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], workspace.node_to_rb_local, node_positions, x_com_new, omega_new, params, dt, &kinematics);
             const Vec3 com_radius = Vec3::Constant(workspace.com_box_radii[rb]);
             const Vec3 com_target = (x_com_new[rb] - delta_com).cwiseMax(workspace.com_box_anchors[rb] - com_radius).cwiseMin(workspace.com_box_anchors[rb] + com_radius);
             const Vec3 proposed_com_displacement = com_target - x_com_new[rb];
@@ -946,8 +992,8 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
             for (const int node : ref_mesh.rb_nodes[rb])
                 node_positions[node] += com_displacement;
 
-            const Vec3 delta_omega = rb_solver::compute_omega_update(rb, state, ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], workspace.node_to_rb_local, node_positions, x_com_new, omega_new, params, dt);
-            const Vec4 q_current = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_new[rb], dt));
+            const Vec3 delta_omega = rb_solver::compute_omega_update(rb, state, ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], workspace.node_to_rb_local, node_positions, x_com_new, omega_new, params, dt, &kinematics, &workspace.rotation_predictors[static_cast<std::size_t>(rb)]);
+            const Vec4 q_current = quaternion_normalize(kinematics.orientation);
             const Vec3 omega_target = omega_new[rb] - params.damping * delta_omega;
             const Vec4 q_target = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_target, dt));
             const Vec4 q_bounded = bound_quaternion(workspace.orientation_box_anchors[rb], q_current, q_target, workspace.theta_box_radii[rb]);
@@ -982,10 +1028,8 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
 
         result.iterations = iter;
         if (!params.fixed_iters) {
-            const double residual = rb_solver::rigid_body_unnormalized_residual(ref_mesh, state, workspace.broad_phase.cache(), workspace.body_nt_pair_indices, workspace.body_ss_pair_indices, workspace.node_to_rb_local, workspace.positions, params, x_com_new, omega_new, dt);
+            const double residual = rb_solver::rigid_body_unnormalized_residual(ref_mesh, state, workspace.broad_phase.cache(), workspace.body_nt_pair_indices, workspace.body_ss_pair_indices, workspace.node_to_rb_local, workspace.positions, params, x_com_new, omega_new, dt, workspace.body_residuals, &workspace.rotation_predictors);
             result.final_residual = residual;
-            if (verbose)
-                std::fprintf(stderr, "  [RB GS] iter %d  residual = %.6e\n", iter, residual);
             if (residual_converged(residual)) {
                 result.converged = true;
                 break;
@@ -1013,7 +1057,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
     const std::vector<Vec3>& xhat,
     std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new,
     std::vector<Vec3>& omega_new, BroadPhase& broad_phase,
-    const std::string& outdir, bool verbose) {
+    const std::string& outdir) {
 
 
     const int nv = static_cast<int>(xnew.size());
@@ -1024,9 +1068,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
     // A mesh without rigid bodies may predate node_to_rb. Preserve the exact
     // cloth-only path in that case.
     if (num_rbs == 0 && ref_mesh.tet_nodes.empty()) {
-        return global_gauss_seidel_solver_basic(
-            ref_mesh, adj, pins, params, xnew, xhat, state.velocities,
-            broad_phase, outdir, verbose);
+        return global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir);
     }
 
     rb_solver::validate_rigid_solver_state(ref_mesh, state, x_com_new, q_new, omega_new);
@@ -1034,7 +1076,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
     // Preserve the exact rigid-only implementation and synchronize its proxy
     // positions before returning through the general API.
     if (deformable_nodes.empty() && ref_mesh.tet_nodes.empty()) {
-        SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new, verbose);
+        SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new);
         for (int rb = 0; rb < num_rbs; ++rb) {
             for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local) {
                 xnew[ref_mesh.rb_nodes[rb][local]] = world_space_position(ref_mesh.ref_positions[rb][local], x_com_new[rb], q_new[rb]);
@@ -1050,8 +1092,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
     rigid_workspace.prepare(ref_mesh, nv, params.node_box_max, params.theta_box_max);
     const std::vector<std::vector<int>>& nodal_elastic_adj = deformable_workspace.elastic_adjacency.get(ref_mesh, adj, nv);
     mixed_adjacency_workspace.prepare(ref_mesh, deformable_nodes, num_rbs, nv);
-    const std::vector<int>& cloth_nodes =
-        mixed_adjacency_workspace.cloth_nodes;
+    const std::vector<int>& cloth_nodes = mixed_adjacency_workspace.cloth_nodes;
     const std::vector<int>& solid_nodes = ref_mesh.tet_nodes;
     const int num_cloth = static_cast<int>(cloth_nodes.size());
     const int num_solid = static_cast<int>(solid_nodes.size());
@@ -1080,6 +1121,8 @@ SolverResult global_gauss_seidel_solver_basic_general(
     rigid_workspace.substep_start_coms = x_com_new;
     std::vector<AABB>& blue_boxes = rigid_workspace.blue_boxes;
     const double dt = params.dt();
+    for (int rb = 0; rb < num_rbs; ++rb)
+        rigid_workspace.rotation_predictors[static_cast<std::size_t>(rb)] = rigid_rotation_predictor(state.orientations[rb], state.omega[rb], dt);
     for (const int node : cloth_nodes)
         deformable_workspace.inertial_disp[node] = dt * state.velocities[node].norm();
     for (const int node : solid_nodes)
@@ -1089,7 +1132,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
     (void)params.dt2();
     constexpr double box_padding = 1.2;
 
-    const auto rebuild_contact_cache = [&](int iteration) {
+    const auto rebuild_contact_cache = [&]() {
         // First fill deformable boxes. build_blue_boxes_rb then overwrites all
         // rigid proxy entries with spherical-cap plus COM bounds.
         for (const int node : cloth_nodes) {
@@ -1109,69 +1152,37 @@ SolverResult global_gauss_seidel_solver_basic_general(
             rigid_workspace.com_box_radii[rb] = std::clamp(box_padding * std::max(rigid_workspace.prev_com_disp[rb], dt * state.v_coms[rb].norm()), params.node_box_min, params.node_box_max);
             rigid_workspace.theta_box_radii[rb] = std::clamp(box_padding * std::max(rigid_workspace.prev_theta_disp[rb], dt * state.omega[rb].norm()), params.theta_box_min, params.theta_box_max);
         }
-        build_blue_boxes_rb(
-            rigid_workspace.com_box_anchors,
-            rigid_workspace.orientation_box_anchors,
-            rigid_workspace.theta_box_radii,
-            rigid_workspace.com_box_radii, ref_mesh, blue_boxes);
+        build_blue_boxes_rb(rigid_workspace.com_box_anchors, rigid_workspace.orientation_box_anchors, rigid_workspace.theta_box_radii, rigid_workspace.com_box_radii, ref_mesh, blue_boxes);
         if (solid_nodes.empty())
             broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
         else
-            broad_phase.initialize_surface_nodes(
-                blue_boxes, ref_mesh, params.d_hat);
-        build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, nodal_elastic_adj, broad_phase.cache(), mixed_adjacency_workspace.combined_adjacency, &mixed_adjacency_workspace.node_to_block, &mixed_adjacency_workspace.solid_node_mask, &mixed_adjacency_workspace.surface_node_mask, &mixed_adjacency_workspace.elastic_row_sizes);
-        build_rb_contact_adj(
-            broad_phase.cache(), ref_mesh.node_to_rb, num_rbs,
-            rigid_workspace.body_nt_pair_indices,
-            rigid_workspace.body_ss_pair_indices,
-            rigid_workspace.contact_adjacency);
-        greedy_color_conflict_graph(
-            mixed_adjacency_workspace.combined_adjacency,
-            mixed_adjacency_workspace.color_groups);
-        if (verbose) {
-            std::fprintf(
-                stderr,
-                "  [General GS] iter %d  rebuilding mixed blue boxes and %zu block colors\n",
-                iteration, mixed_adjacency_workspace.color_groups.size());
-        }
+            broad_phase.initialize_surface_nodes(blue_boxes, ref_mesh, params.d_hat);
+        build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, nodal_elastic_adj, broad_phase.cache(), mixed_adjacency_workspace.combined_adjacency, &mixed_adjacency_workspace.node_to_block, &mixed_adjacency_workspace.solid_node_mask, &mixed_adjacency_workspace.surface_node_mask, &mixed_adjacency_workspace.elastic_row_sizes, &rigid_workspace.body_nt_pair_indices, &rigid_workspace.body_ss_pair_indices);
+        greedy_color_conflict_graph(mixed_adjacency_workspace.combined_adjacency, mixed_adjacency_workspace.color_groups, &mixed_adjacency_workspace.coloring_workspace);
     };
 
 
     const auto update_final_residual = [&]() {
-        result.final_cloth_residual = compute_global_deformable_residual(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, cloth_nodes, &pin_map);
-        result.final_solid_residual = solid_nodes.empty() ? 0.0 : compute_global_solid_residual(ref_mesh, pins, params, xnew, xhat, broad_phase, &pin_map);
-        result.final_rigid_residual = rb_solver::rigid_body_unnormalized_residual(
-                                        ref_mesh, state, broad_phase.cache(),
-                                        rigid_workspace.body_nt_pair_indices,
-                                        rigid_workspace.body_ss_pair_indices,
-                                        rigid_workspace.node_to_rb_local, xnew, params,
-                                        x_com_new, omega_new, dt);
+        build_frozen_residual_workspace(ref_mesh, params, xnew, broad_phase, rigid_workspace.frozen_residual, &deformable_workspace.rest_shape_grads);
+        result.final_cloth_residual = compute_global_deformable_residual(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, cloth_nodes, &pin_map, &deformable_workspace.incident_triangles, &deformable_workspace.rest_shape_grads, &rigid_workspace.frozen_residual);
+        result.final_solid_residual = solid_nodes.empty() ? 0.0 : compute_global_solid_residual(ref_mesh, pins, params, xnew, xhat, broad_phase, &pin_map, &mixed_adjacency_workspace.solid_node_mask, &mixed_adjacency_workspace.surface_node_mask, &rigid_workspace.frozen_residual);
+        result.final_rigid_residual = rb_solver::rigid_body_unnormalized_residual(ref_mesh, state, broad_phase.cache(), rigid_workspace.body_nt_pair_indices, rigid_workspace.body_ss_pair_indices, rigid_workspace.node_to_rb_local, xnew, params, x_com_new, omega_new, dt, rigid_workspace.body_residuals, &rigid_workspace.rotation_predictors, &rigid_workspace.frozen_residual);
         result.final_residual = result.final_cloth_residual + result.final_solid_residual + result.final_rigid_residual;
     };
 
-    const auto block_residual_converged = [&](double residual,
-                                               double initial) {
+    const auto block_residual_converged = [&](double residual, double initial) {
         double tolerance = 0.0;
         if (params.tol_abs > 0.0)
             tolerance = std::max(tolerance, params.tol_abs);
         if (params.tol_rel > 0.0 && std::isfinite(initial))
-            tolerance = std::max(
-                tolerance, params.tol_rel * initial);
+            tolerance = std::max(tolerance, params.tol_rel * initial);
         return residual <= tolerance;
     };
     const auto residual_converged = [&]() {
-        return block_residual_converged(
-                result.final_cloth_residual,
-                result.initial_cloth_residual)
-            && block_residual_converged(
-                   result.final_solid_residual,
-                   result.initial_solid_residual)
-            && block_residual_converged(
-                   result.final_rigid_residual,
-                   result.initial_rigid_residual);
+        return block_residual_converged(result.final_cloth_residual, result.initial_cloth_residual) && block_residual_converged(result.final_solid_residual, result.initial_solid_residual) && block_residual_converged(result.final_rigid_residual, result.initial_rigid_residual);
     };
 
-    rebuild_contact_cache(1);
+    rebuild_contact_cache();
     if (!params.fixed_iters) {
         result.has_residual = true;
         result.has_residual_components = true;
@@ -1188,77 +1199,41 @@ SolverResult global_gauss_seidel_solver_basic_general(
 
     for (int iteration = 1; iteration <= params.max_global_iters; ++iteration) {
         if (iteration > 1 && (iteration - 1) % params.node_box_update_count == 0) {
-            rebuild_contact_cache(iteration);
+            rebuild_contact_cache();
         }
-
-        std::atomic<int> cloth_clip_count{0};
-        std::atomic<int> solid_clip_count{0};
 
         const auto process_cloth_node = [&](const int cloth) {
             const int node = cloth_nodes[static_cast<std::size_t>(cloth)];
-            mixed_deformable_vertex_safe_step(
-                broad_phase, xnew, node,
-                [&](const int vi) -> Vec3 {
-                    return xnew[vi] - params.damping
-                        * gs_vertex_delta_live_barrier(
-                            vi, ref_mesh, adj, pins, params,
-                            xhat, xnew, broad_phase, &pin_map,
-                            &deformable_workspace.incident_triangles[vi],
-                            &deformable_workspace.rest_shape_grads);
-                },
-                0.9, params.use_ccd, params.use_ticcd, false,
-                verbose ? &cloth_clip_count : nullptr);
+            const Vec3 proposed_position = xnew[node] - params.damping * gs_vertex_delta_live_barrier(node, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pin_map, &deformable_workspace.incident_triangles[node], &deformable_workspace.rest_shape_grads);
+            mixed_deformable_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false);
         };
 
         const auto process_solid_node = [&](const int solid) {
             const int node = solid_nodes[static_cast<std::size_t>(solid)];
-            mixed_deformable_vertex_safe_step(
-                broad_phase, xnew, node,
-                [&](const int vi) -> Vec3 {
-                    return xnew[vi] - params.damping
-                        * gs_solid_vertex_delta_live_barrier(vi, ref_mesh, pins, params, xhat, xnew, broad_phase, mixed_adjacency_workspace.solid_node_mask, mixed_adjacency_workspace.surface_node_mask, pin_map);
-                },
-                0.9, params.use_ccd, params.use_ticcd, false,
-                verbose ? &solid_clip_count : nullptr);
+            const Vec3 proposed_position = xnew[node] - params.damping * gs_solid_vertex_delta_live_barrier(node, ref_mesh, pins, params, xhat, xnew, broad_phase, mixed_adjacency_workspace.solid_node_mask, mixed_adjacency_workspace.surface_node_mask, pin_map);
+            mixed_deformable_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false);
         };
 
         // COM and orientation remain one indivisible update block: all proxy
         // positions are committed before another color begins.
         const auto process_body = [&](int rb) {
-            const Vec3 delta_com = params.damping * rb_solver::compute_com_update(
-                                                    rb, state, ref_mesh, broad_phase.cache(),
-                                                    rigid_workspace.body_nt_pair_indices[rb],
-                                                    rigid_workspace.body_ss_pair_indices[rb],
-                                                    rigid_workspace.node_to_rb_local, xnew,
-                                                    x_com_new, omega_new, params, dt);
+            const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, true);
+            const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics);
             const Vec3 com_radius = Vec3::Constant(rigid_workspace.com_box_radii[rb]);
             const Vec3 com_target =(x_com_new[rb] - delta_com).cwiseMax(rigid_workspace.com_box_anchors[rb] - com_radius).cwiseMin(rigid_workspace.com_box_anchors[rb] + com_radius);
             const Vec3 proposed_com_displacement = com_target - x_com_new[rb];
-            const double com_safe_step = per_rigid_body_translation_safe_step(
-                                        ref_mesh, broad_phase.cache(),
-                                        rigid_workspace.body_nt_pair_indices[rb],
-                                        rigid_workspace.body_ss_pair_indices[rb], xnew, rb,
-                                        proposed_com_displacement);
+            const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, proposed_com_displacement);
             const Vec3 com_displacement = com_safe_step * proposed_com_displacement;
             x_com_new[rb] += com_displacement;
             for (const int node : ref_mesh.rb_nodes[rb])
                 xnew[node] += com_displacement;
 
-            const Vec3 delta_omega = rb_solver::compute_omega_update(
-                                    rb, state, ref_mesh, broad_phase.cache(),
-                                    rigid_workspace.body_nt_pair_indices[rb],
-                                    rigid_workspace.body_ss_pair_indices[rb],
-                                    rigid_workspace.node_to_rb_local, xnew,
-                                    x_com_new, omega_new, params, dt);
-            const Vec4 q_current = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_new[rb], dt));
+            const Vec3 delta_omega = rb_solver::compute_omega_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics, &rigid_workspace.rotation_predictors[static_cast<std::size_t>(rb)]);
+            const Vec4 q_current = quaternion_normalize(kinematics.orientation);
             const Vec3 omega_target = omega_new[rb] - params.damping * delta_omega;
             const Vec4 q_target = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_target, dt));
             const Vec4 q_bounded = bound_quaternion(rigid_workspace.orientation_box_anchors[rb], q_current,q_target, rigid_workspace.theta_box_radii[rb]);
-            const double rotation_safe_step = per_rigid_body_rotation_safe_step(
-                                            ref_mesh, broad_phase.cache(),
-                                                rigid_workspace.body_nt_pair_indices[rb],
-                                                rigid_workspace.body_ss_pair_indices[rb], xnew, rb,
-                                                x_com_new[rb], q_current, q_bounded);
+            const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, x_com_new[rb], q_current, q_bounded);
             const Vec4 q_accepted = interpolate_orientation_full_arc(q_current, q_bounded, rotation_safe_step);
             q_new[rb] = q_accepted;
             omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, state.orientations[rb], dt);
@@ -1274,8 +1249,13 @@ SolverResult global_gauss_seidel_solver_basic_general(
             // reads, and the omp-for barrier separates successive GS colors.
             #pragma omp parallel
             {
-                for (const std::vector<int>& color : mixed_adjacency_workspace.color_groups) {
-                    #pragma omp for schedule(static)
+                for (std::size_t color_index = 0; color_index < mixed_adjacency_workspace.color_groups.size(); ++color_index) {
+                    const std::vector<int>& color = mixed_adjacency_workspace.color_groups[color_index];
+                    // The [cloth][solid][rigid] block ordering gives highly
+                    // unequal work per block. Small dynamic chunks balance
+                    // that work while each color remains conflict-free and
+                    // the implicit barrier preserves the GS color order.
+                    #pragma omp for schedule(dynamic, 4)
                     for (int index = 0; index < static_cast<int>(color.size()); ++index) {
                         const int block = color[index];
                         if (block < solid_begin)
@@ -1295,19 +1275,9 @@ SolverResult global_gauss_seidel_solver_basic_general(
             for (int rb = 0; rb < num_rbs; ++rb)
                 process_body(rb);
         }
-
         result.iterations = iteration;
         if (!params.fixed_iters) {
             update_final_residual();
-            if (verbose) {
-                std::fprintf(
-                    stderr,
-                    "  [General GS] iter %d  cloth residual = %.6e  solid residual = %.6e  rigid-body residual = %.6e  total residual = %.6e  cloth clips = %d  solid clips = %d\n",
-                    iteration, result.final_cloth_residual,
-                    result.final_solid_residual,
-                    result.final_rigid_residual, result.final_residual,
-                    cloth_clip_count.load(), solid_clip_count.load());
-            }
             if (residual_converged()) {
                 result.converged = true;
                 break;

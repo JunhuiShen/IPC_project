@@ -44,6 +44,51 @@ void build_contact_adj_pair_scan_reference(const BroadPhase::Cache& cache, int n
     }
 }
 
+void build_block_contact_pair_scan_reference(
+    const BroadPhase::Cache& cache,
+    const std::vector<int>& node_to_block,
+    const std::vector<unsigned char>& solid_node_mask,
+    const std::vector<unsigned char>& surface_node_mask,
+    int num_blocks,
+    std::vector<std::vector<int>>& out) {
+    out.assign(static_cast<std::size_t>(num_blocks), {});
+    const auto add_clique = [&](const int nodes[4]) {
+        int blocks[4];
+        for (int role = 0; role < 4; ++role) {
+            const int node = nodes[role];
+            if (solid_node_mask[static_cast<std::size_t>(node)] != 0 && surface_node_mask[static_cast<std::size_t>(node)] == 0) {
+                return;
+            }
+            blocks[role] = node_to_block[static_cast<std::size_t>(node)];
+        }
+        // This deliberately mirrors the former role-pair emission, including
+        // duplicate mapped blocks, to prove the optimized unique-block clique
+        // produces the exact same finalized graph.
+        for (int first = 0; first < 4; ++first) {
+            if (blocks[first] < 0)
+                continue;
+            for (int second = first + 1; second < 4; ++second) {
+                const int a = blocks[first];
+                const int b = blocks[second];
+                if (b < 0 || a == b)
+                    continue;
+                out[static_cast<std::size_t>(a)].push_back(b);
+                out[static_cast<std::size_t>(b)].push_back(a);
+            }
+        }
+    };
+    for (const NodeTrianglePair& pair : cache.nt_pairs) {
+        const int nodes[4] = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+        add_clique(nodes);
+    }
+    for (const SegmentSegmentPair& pair : cache.ss_pairs)
+        add_clique(pair.v);
+    for (std::vector<int>& row : out) {
+        std::sort(row.begin(), row.end());
+        row.erase(std::unique(row.begin(), row.end()), row.end());
+    }
+}
+
 void populate_contact_incidence(BroadPhase::Cache& cache, int nv) {
     cache.vertex_nt.assign(nv, {});
     cache.vertex_ss.assign(nv, {});
@@ -308,6 +353,28 @@ TEST(GreedyColorConflictGraph, DeterministicColoringAndScratchReuse) {
     EXPECT_TRUE(groups.empty());
 }
 
+TEST(GreedyColorConflictGraph, ReusableWorkspaceMatchesLegacyExactly) {
+    const std::vector<std::vector<std::vector<int>>> graphs = {
+        {{1, 2}, {0, 2}, {0, 1, 3}, {2}, {}},
+        {{4}, {}, {3}, {2}, {0}},
+        {{1, 3}, {0, 2, 4}, {1, 3, 5}, {0, 2, 4}, {1, 3, 5}, {2, 4}},
+        {},
+    };
+
+    GreedyColoringWorkspace workspace;
+    workspace.color = {91, 92, 93};
+    workspace.seen_color = {81, 82, 83};
+    std::vector<std::vector<int>> actual{{99}};
+    for (const std::vector<std::vector<int>>& graph : graphs) {
+        std::vector<std::vector<int>> expected{{98}, {97}};
+        greedy_color_conflict_graph(graph, expected);
+        greedy_color_conflict_graph(graph, actual, &workspace);
+        EXPECT_EQ(actual, expected);
+        EXPECT_EQ(workspace.color.size(), graph.size());
+        EXPECT_EQ(workspace.seen_color.size(), graph.size());
+    }
+}
+
 // ── spherical_cap_node_aabb tests ────────────────────────────────────────────
 
 namespace {
@@ -543,4 +610,137 @@ TEST(AllBlockContactAdjacency, ReusesElasticPrefixesAcrossContactRefreshes) {
     EXPECT_EQ(graph, (std::vector<std::vector<int>>{
         {1}, {0}, {3}, {2}}));
     expect_valid_coloring(graph);
+}
+
+TEST(AllBlockContactAdjacency, UniqueMappedBlockCliqueMatchesRolePairScanExactly) {
+    RefMesh ref_mesh;
+    ref_mesh.num_positions = 8;
+    ref_mesh.rb_nodes = {{4, 5}, {6, 7}};
+    ref_mesh.node_to_rb = {-1, -1, -1, -1, 0, 0, 1, 1};
+    const std::vector<int> cloth_nodes = {0, 1, 2, 3};
+    const std::vector<std::vector<int>> elastic_adjacency(8);
+    const std::vector<int> node_to_block = {0, 1, 2, 3, 4, 4, 5, 5};
+    const std::vector<unsigned char> no_solid_nodes(8, 0);
+    const std::vector<unsigned char> no_surface_nodes(8, 0);
+
+    BroadPhase::Cache cache;
+    NodeTrianglePair repeated_nt{};
+    repeated_nt.node = 4;
+    repeated_nt.tri_v[0] = 5;
+    repeated_nt.tri_v[1] = 0;
+    repeated_nt.tri_v[2] = 1;
+    cache.nt_pairs.push_back(repeated_nt);
+
+    NodeTrianglePair internal_nt{};
+    internal_nt.node = 6;
+    internal_nt.tri_v[0] = 7;
+    internal_nt.tri_v[1] = 6;
+    internal_nt.tri_v[2] = 7;
+    cache.nt_pairs.push_back(internal_nt);
+
+    SegmentSegmentPair repeated_ss{};
+    repeated_ss.v[0] = 0;
+    repeated_ss.v[1] = 1;
+    repeated_ss.v[2] = 6;
+    repeated_ss.v[3] = 7;
+    cache.ss_pairs.push_back(repeated_ss);
+
+    SegmentSegmentPair rigid_ss{};
+    rigid_ss.v[0] = 4;
+    rigid_ss.v[1] = 5;
+    rigid_ss.v[2] = 6;
+    rigid_ss.v[3] = 7;
+    cache.ss_pairs.push_back(rigid_ss);
+
+    std::vector<std::vector<int>> expected;
+    build_block_contact_pair_scan_reference(cache, node_to_block, no_solid_nodes, no_surface_nodes, 6, expected);
+
+    std::vector<std::vector<int>> actual;
+    std::vector<std::size_t> elastic_row_sizes;
+    build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, elastic_adjacency, cache, actual, &node_to_block, &no_solid_nodes, &no_surface_nodes, &elastic_row_sizes);
+
+    EXPECT_EQ(actual, expected);
+    EXPECT_EQ(actual, (std::vector<std::vector<int>>{{1, 4, 5}, {0, 4, 5}, {}, {}, {0, 1, 5}, {0, 1, 4}}));
+    std::vector<std::vector<int>> expected_colors;
+    std::vector<std::vector<int>> actual_colors;
+    greedy_color_conflict_graph(expected, expected_colors);
+    greedy_color_conflict_graph(actual, actual_colors);
+    EXPECT_EQ(actual_colors, expected_colors);
+}
+
+TEST(AllBlockContactAdjacency, FusedRigidPairListsMatchLegacyScanExactly) {
+    RefMesh ref_mesh;
+    ref_mesh.num_positions = 12;
+    ref_mesh.tet_nodes = {2, 3};
+    ref_mesh.surface_nodes = {2};
+    ref_mesh.rb_nodes = {{4, 5}, {6, 7}};
+    ref_mesh.node_to_rb.assign(ref_mesh.num_positions, -1);
+    ref_mesh.node_to_rb[4] = 0;
+    ref_mesh.node_to_rb[5] = 0;
+    ref_mesh.node_to_rb[6] = 1;
+    ref_mesh.node_to_rb[7] = 1;
+
+    const std::vector<int> cloth_nodes = {0, 1};
+    const std::vector<std::vector<int>> elastic_adjacency(ref_mesh.num_positions);
+    const std::vector<int> node_to_block = {
+        0, 1, 2, 3, 4, 4, 5, 5, -1, -1, -1, -1};
+    const std::vector<unsigned char> solid_node_mask = {
+        0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+    const std::vector<unsigned char> surface_node_mask = {
+        0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+    BroadPhase::Cache cache;
+    const auto add_nt = [&](int node, int a, int b, int c) {
+        NodeTrianglePair pair{};
+        pair.node = node;
+        pair.tri_v[0] = a;
+        pair.tri_v[1] = b;
+        pair.tri_v[2] = c;
+        cache.nt_pairs.push_back(pair);
+    };
+    const auto add_ss = [&](int a0, int a1, int b0, int b1) {
+        SegmentSegmentPair pair{};
+        pair.v[0] = a0;
+        pair.v[1] = a1;
+        pair.v[2] = b0;
+        pair.v[3] = b1;
+        cache.ss_pairs.push_back(pair);
+    };
+    add_nt(4, 0, 1, 2); // R0 against deformable triangle.
+    add_nt(4, 6, 7, 6); // R0 against R1.
+    add_nt(4, 5, 4, 5); // Internal to R0.
+    add_nt(0, 1, 2, 0); // Deformable-only.
+    add_nt(6, 3, 0, 1); // R1 list entry; graph rejects interior solid 3.
+    add_ss(4, 5, 6, 7); // R0 against R1.
+    add_ss(6, 7, 6, 7); // Internal to R1.
+    add_ss(4, 5, 0, 1); // R0 against deformable edge.
+    add_ss(6, 7, 3, 0); // R1 list entry; graph rejects interior solid 3.
+
+    std::vector<std::vector<int>> expected_nt;
+    std::vector<std::vector<int>> expected_ss;
+    std::vector<std::vector<int>> unused_rigid_adjacency;
+    build_rb_contact_adj(cache, ref_mesh.node_to_rb, 2, expected_nt, expected_ss, unused_rigid_adjacency);
+
+    std::vector<std::vector<int>> expected_graph;
+    build_block_contact_pair_scan_reference(cache, node_to_block, solid_node_mask, surface_node_mask, 6, expected_graph);
+
+    std::vector<std::vector<int>> actual_graph;
+    std::vector<std::vector<int>> actual_nt{{99}, {98}, {97}};
+    std::vector<std::vector<int>> actual_ss{{89}};
+    std::vector<std::size_t> elastic_row_sizes;
+    build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, elastic_adjacency, cache, actual_graph, &node_to_block, &solid_node_mask, &surface_node_mask, &elastic_row_sizes, &actual_nt, &actual_ss);
+
+    EXPECT_EQ(actual_graph, expected_graph);
+    EXPECT_EQ(actual_nt, expected_nt);
+    EXPECT_EQ(actual_ss, expected_ss);
+    EXPECT_EQ(actual_nt, (std::vector<std::vector<int>>{{0, 1}, {1, 4}}));
+    EXPECT_EQ(actual_ss, (std::vector<std::vector<int>>{{0, 2}, {0, 3}}));
+
+    EXPECT_THROW(build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, elastic_adjacency, cache, actual_graph, &node_to_block, &solid_node_mask, &surface_node_mask, &elastic_row_sizes, &actual_nt, nullptr), std::invalid_argument);
+
+    cache.nt_pairs.clear();
+    cache.ss_pairs.clear();
+    build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, elastic_adjacency, cache, actual_graph, &node_to_block, &solid_node_mask, &surface_node_mask, &elastic_row_sizes, &actual_nt, &actual_ss);
+    EXPECT_EQ(actual_nt, std::vector<std::vector<int>>(2));
+    EXPECT_EQ(actual_ss, std::vector<std::vector<int>>(2));
 }

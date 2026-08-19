@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -16,6 +17,35 @@ namespace {
 
 constexpr double kMu = 2.3;
 constexpr double kLambda = 5.7;
+
+void expect_double_bitwise_equal(const double actual, const double expected) {
+    EXPECT_DOUBLE_EQ(actual, expected);
+    EXPECT_EQ(std::memcmp(&actual, &expected, sizeof(double)), 0);
+}
+
+void expect_vector_bitwise_equal(const Vec3& actual, const Vec3& expected) {
+    for (int row = 0; row < 3; ++row)
+        expect_double_bitwise_equal(actual[row], expected[row]);
+}
+
+void expect_matrix_bitwise_equal(const Mat33& actual, const Mat33& expected) {
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column)
+            expect_double_bitwise_equal(actual(row, column), expected(row, column));
+    }
+}
+
+template <typename Exception, typename Function>
+void expect_exception_message(Function&& function, const char* expected) {
+    bool caught = false;
+    try {
+        function();
+    } catch (const Exception& error) {
+        caught = true;
+        EXPECT_STREQ(error.what(), expected);
+    }
+    EXPECT_TRUE(caught);
+}
 
 const std::vector<int>& single_tet_mesh() {
     static const std::vector<int> mesh = {0, 1, 2, 3};
@@ -273,16 +303,58 @@ TEST(VolumetricCorotatedEnergy, CacheMatchesVendoredTgslPolarExactly) {
     Mat33 tgsl_rotation;
     Mat33 tgsl_stretch;
     JIXIE::polarDecomposition(F, tgsl_rotation, tgsl_stretch);
-    const Mat33 tgsl_Dinv =
-        (tgsl_stretch.trace() * Mat33::Identity() - tgsl_stretch).inverse();
+    const Mat33 tgsl_Dinv = (tgsl_stretch.trace() * Mat33::Identity() - tgsl_stretch).inverse();
 
     CorotatedCache cache;
     cache.UpdateCache(F);
 
-    EXPECT_TRUE(cache.R_cache.isApprox(tgsl_rotation, 0.0));
-    EXPECT_TRUE(cache.Dinv_cache.isApprox(tgsl_Dinv, 0.0));
-    EXPECT_TRUE(cache.JFinvT_cache.isApprox(GradJ(F), 0.0));
-    EXPECT_DOUBLE_EQ(cache.J_cache, F.determinant());
+    expect_matrix_bitwise_equal(cache.R_cache, tgsl_rotation);
+    expect_matrix_bitwise_equal(cache.Dinv_cache, tgsl_Dinv);
+    expect_matrix_bitwise_equal(cache.JFinvT_cache, GradJ(F));
+    expect_double_bitwise_equal(cache.J_cache, F.determinant());
+}
+
+TEST(VolumetricCorotatedEnergy, DefaultAndExplicitFullCacheModesMatchBitwise) {
+    Mat33 F;
+    F << 1.15, 0.12, -0.06, -0.08, 0.91, 0.10, 0.04, -0.09, 1.08;
+    CorotatedCache default_full;
+    CorotatedCache explicit_full;
+    default_full.UpdateCache(F);
+    explicit_full.UpdateCache(F, CorotatedCacheMode::Full);
+    expect_matrix_bitwise_equal(default_full.JFinvT_cache, explicit_full.JFinvT_cache);
+    expect_matrix_bitwise_equal(default_full.R_cache, explicit_full.R_cache);
+    expect_matrix_bitwise_equal(default_full.Dinv_cache, explicit_full.Dinv_cache);
+    expect_double_bitwise_equal(default_full.J_cache, explicit_full.J_cache);
+}
+
+TEST(VolumetricCorotatedEnergy, LeanCachePreservesUsedFieldsAndElementResultsBitwise) {
+    Mat33 F;
+    F << 1.15, 0.12, -0.06, -0.08, 0.91, 0.10, 0.04, -0.09, 1.08;
+    Mat33 dinv_sentinel;
+    dinv_sentinel << -9.0, -8.0, -7.0, -6.0, -5.0, -4.0, -3.0, -2.0, -1.0;
+    CorotatedCache full;
+    CorotatedCache lean;
+    full.UpdateCache(F);
+    lean.Dinv_cache = dinv_sentinel;
+    lean.UpdateCache(F, CorotatedCacheMode::Lean);
+    expect_matrix_bitwise_equal(lean.JFinvT_cache, full.JFinvT_cache);
+    expect_matrix_bitwise_equal(lean.R_cache, full.R_cache);
+    expect_matrix_bitwise_equal(lean.Dinv_cache, dinv_sentinel);
+    expect_double_bitwise_equal(lean.J_cache, full.J_cache);
+    expect_double_bitwise_equal(lean.Psi(F, kMu, kLambda), full.Psi(F, kMu, kLambda));
+    expect_matrix_bitwise_equal(lean.P(F, kMu, kLambda), full.P(F, kMu, kLambda));
+
+    const std::vector<TetRestData> state = EFEMInitializeElasticMaterialState(unit_tet_positions(), single_tet_mesh());
+    const Mat33 first_piola = lean.P(F, kMu, kLambda);
+    for (int node = 0; node < 4; ++node) {
+        const Vec3 full_gradient = EFEMElementNodeEnergyGradient(full, F, state[0], kMu, kLambda, node);
+        const Vec3 cached_gradient = EFEMElementNodeEnergyGradient(lean, F, state[0], kMu, kLambda, node, &first_piola);
+        const Mat33 full_block = PBGSElementNodeElasticityBlock(full, state[0], kMu, kLambda, node);
+        const auto [lean_gradient, lean_block] = EFEMElementNodeGradientAndPBGSBlock(lean, F, state[0], kMu, kLambda, node);
+        expect_vector_bitwise_equal(cached_gradient, full_gradient);
+        expect_vector_bitwise_equal(lean_gradient, full_gradient);
+        expect_matrix_bitwise_equal(lean_block, full_block);
+    }
 }
 
 TEST(VolumetricCorotatedEnergy, RejectsNonPositiveRestMeasure) {
@@ -311,4 +383,13 @@ TEST(VolumetricCorotatedEnergy, ElementAccessRejectsInvalidInput) {
         ElementF(0, X, single_tet_mesh(), {}), std::invalid_argument);
     EXPECT_THROW(
         ElementDs(0, X, {0, 1, 2}), std::invalid_argument);
+}
+
+TEST(VolumetricCorotatedEnergy, ElementFPreservesValidationErrorsAndPrecedence) {
+    const std::vector<Vec3> X = unit_tet_positions();
+    const std::vector<TetRestData> state = EFEMInitializeElasticMaterialState(X, single_tet_mesh());
+    expect_exception_message<std::invalid_argument>([&] { (void)ElementF(0, X, {0, 1, 2}, {}); }, "tet connectivity must contain four indices per element");
+    expect_exception_message<std::out_of_range>([&] { (void)ElementF(1, X, single_tet_mesh(), {}); }, "tet element index is out of range");
+    expect_exception_message<std::out_of_range>([&] { (void)ElementF(0, X, {0, 1, 2, 4}, state); }, "tet node index is out of range");
+    expect_exception_message<std::invalid_argument>([&] { (void)ElementF(0, X, single_tet_mesh(), {}); }, "tet rest state must contain one record per element");
 }

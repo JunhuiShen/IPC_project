@@ -440,7 +440,9 @@ void build_all_block_adjacency_and_contact(
     const std::vector<int>* node_to_block,
     const std::vector<unsigned char>* solid_node_mask,
     const std::vector<unsigned char>* surface_node_mask,
-    std::vector<std::size_t>* elastic_row_sizes) {
+    std::vector<std::size_t>* elastic_row_sizes,
+    std::vector<std::vector<int>>* body_nt_pair_indices,
+    std::vector<std::vector<int>>* body_ss_pair_indices) {
     const int num_cloth = static_cast<int>(cloth_nodes.size());
     const int num_solid = static_cast<int>(ref_mesh.tet_nodes.size());
     const int num_rigid = static_cast<int>(ref_mesh.rb_nodes.size());
@@ -451,6 +453,12 @@ void build_all_block_adjacency_and_contact(
     const int num_workspace_arguments = static_cast<int>(node_to_block != nullptr) + static_cast<int>(solid_node_mask != nullptr) + static_cast<int>(surface_node_mask != nullptr) + static_cast<int>(elastic_row_sizes != nullptr);
     if (num_workspace_arguments != 0 && num_workspace_arguments != 4)
         throw std::invalid_argument("build_all_block_adjacency_and_contact: supply either all workspace arguments or none");
+    if ((body_nt_pair_indices == nullptr) != (body_ss_pair_indices == nullptr))
+        throw std::invalid_argument("build_all_block_adjacency_and_contact: supply both rigid pair-list outputs or neither");
+    if (body_nt_pair_indices != nullptr) {
+        prepare_rows(*body_nt_pair_indices, num_rigid);
+        prepare_rows(*body_ss_pair_indices, num_rigid);
+    }
 
     std::vector<int> owned_node_to_block;
     std::vector<unsigned char> owned_solid_node_mask;
@@ -529,31 +537,58 @@ void build_all_block_adjacency_and_contact(
 
     const auto add_contact_clique = [&](const int nodes[4]) {
         int blocks[4];
+        int num_contact_blocks = 0;
         for (int role = 0; role < 4; ++role) {
             const int node = nodes[role];
             if ((*solid_node_mask)[static_cast<std::size_t>(node)] != 0 && (*surface_node_mask)[static_cast<std::size_t>(node)] == 0)
                 return;
-            blocks[role] = (*node_to_block)[static_cast<std::size_t>(node)];
-        }
-        for (int first = 0; first < 4; ++first) {
-            if (blocks[first] < 0)
+            const int block = (*node_to_block)[static_cast<std::size_t>(node)];
+            if (block < 0)
                 continue;
-            for (int second = first + 1; second < 4; ++second) {
+            bool already_present = false;
+            for (int existing = 0; existing < num_contact_blocks; ++existing) {
+                if (blocks[existing] == block) {
+                    already_present = true;
+                    break;
+                }
+            }
+            if (!already_present)
+                blocks[num_contact_blocks++] = block;
+        }
+        for (int first = 0; first < num_contact_blocks; ++first) {
+            for (int second = first + 1; second < num_contact_blocks; ++second) {
                 const int a = blocks[first];
                 const int b = blocks[second];
-                if (b < 0 || a == b)
-                    continue;
                 out[static_cast<std::size_t>(a)].push_back(b);
                 out[static_cast<std::size_t>(b)].push_back(a);
             }
         }
     };
-    for (const NodeTrianglePair& pair : bp_cache.nt_pairs) {
+
+    const auto add_rigid_pair_index = [&](int first_rb, int second_rb, int pair_index, std::vector<std::vector<int>>& pair_indices) {
+        if (first_rb == second_rb || (first_rb < 0 && second_rb < 0))
+            return;
+        if (first_rb >= 0)
+            pair_indices[static_cast<std::size_t>(first_rb)].push_back(pair_index);
+        if (second_rb >= 0)
+            pair_indices[static_cast<std::size_t>(second_rb)].push_back(pair_index);
+    };
+
+    for (int pair_index = 0; pair_index < static_cast<int>(bp_cache.nt_pairs.size()); ++pair_index) {
+        const NodeTrianglePair& pair = bp_cache.nt_pairs[static_cast<std::size_t>(pair_index)];
+        if (body_nt_pair_indices != nullptr) {
+            add_rigid_pair_index(owning_rb_for_node(ref_mesh.node_to_rb, pair.node), owning_rb_for_node(ref_mesh.node_to_rb, pair.tri_v[0]), pair_index, *body_nt_pair_indices);
+        }
         const int nodes[4] = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
         add_contact_clique(nodes);
     }
-    for (const SegmentSegmentPair& pair : bp_cache.ss_pairs)
+    for (int pair_index = 0; pair_index < static_cast<int>(bp_cache.ss_pairs.size()); ++pair_index) {
+        const SegmentSegmentPair& pair = bp_cache.ss_pairs[static_cast<std::size_t>(pair_index)];
+        if (body_ss_pair_indices != nullptr) {
+            add_rigid_pair_index(owning_rb_for_node(ref_mesh.node_to_rb, pair.v[0]), owning_rb_for_node(ref_mesh.node_to_rb, pair.v[2]), pair_index, *body_ss_pair_indices);
+        }
         add_contact_clique(pair.v);
+    }
 
 #pragma omp parallel for schedule(static)
     for (int block = 0; block < num_blocks; ++block) {
@@ -678,22 +713,27 @@ void union_adjacency(const std::vector<std::vector<int>>& a,const std::vector<st
     }
 }
 
-void greedy_color_conflict_graph(const std::vector<std::vector<int>>& graph, std::vector<std::vector<int>>& groups) {
+void greedy_color_conflict_graph(
+    const std::vector<std::vector<int>>& graph,
+    std::vector<std::vector<int>>& groups,
+    GreedyColoringWorkspace* reusable_workspace) {
+    GreedyColoringWorkspace local_workspace;
+    GreedyColoringWorkspace& workspace = reusable_workspace != nullptr ? *reusable_workspace : local_workspace;
     const int nv = static_cast<int>(graph.size());
-    std::vector<int> color(nv, -1);
+    workspace.color.assign(static_cast<std::size_t>(nv), -1);
     // A timestamped marker array avoids allocating and clearing `used` once per vertex
     // At most `nv` colors can occur in a graph of `nv` vertices.
-    std::vector<int> seen_color(nv, -1);
+    workspace.seen_color.assign(static_cast<std::size_t>(nv), -1);
     int max_color = -1;
 
     for (int vi = 0; vi < nv; ++vi) {
         for (int nb : graph[vi]) {
-            if (nb >= 0 && nb < nv && color[nb] >= 0)
-                seen_color[color[nb]] = vi;
+            if (nb >= 0 && nb < nv && workspace.color[nb] >= 0)
+                workspace.seen_color[workspace.color[nb]] = vi;
         }
         int c = 0;
-        while (c < nv && seen_color[c] == vi) ++c;
-        color[vi] = c;
+        while (c < nv && workspace.seen_color[c] == vi) ++c;
+        workspace.color[vi] = c;
         max_color = std::max(max_color, c);
     }
 
@@ -704,6 +744,7 @@ void greedy_color_conflict_graph(const std::vector<std::vector<int>>& graph, std
         groups.assign(num_groups, {});
     }
     for (int vi = 0; vi < nv; ++vi) {
-        if (color[vi] >= 0) groups[color[vi]].push_back(vi);
+        if (workspace.color[vi] >= 0)
+            groups[workspace.color[vi]].push_back(vi);
     }
 }

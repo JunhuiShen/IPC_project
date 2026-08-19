@@ -50,24 +50,17 @@ inline void accumulate_solver_result(SolverResult& agg, const SolverResult& sub,
 }
 
 // Deformable solvers implemented in solver.cpp.
-SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", bool verbose = false);
+SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "");
 
 SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, const std::string& outdir = "");
 
 // Rigid-body solver implemented in solver.cpp. To start from the previous
 // collision-free state, initialize x_com_new and q_new from state and
 // initialize omega_new to zero.
-SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const DeformedState& state, const SimParams& params, std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new, bool verbose = false);
+SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const DeformedState& state, const SimParams& params, std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new);
 
 // General basic solver. Cloth vertices and tetrahedral solid vertices are
 // advanced as distinct particle-block types, while every rigid body is
 // advanced through its COM and angular-velocity block. All blocks share one
 // live position array, contact cache, conflict graph, and coloring.
-SolverResult global_gauss_seidel_solver_basic_general(
-    const RefMesh& ref_mesh, const DeformedState& state,
-    const VertexTriangleMap& adj, const std::vector<Pin>& pins,
-    const SimParams& params, std::vector<Vec3>& xnew,
-    const std::vector<Vec3>& xhat,
-    std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new,
-    std::vector<Vec3>& omega_new, BroadPhase& broad_phase,
-    const std::string& outdir = "", bool verbose = false);
+SolverResult global_gauss_seidel_solver_basic_general(const RefMesh& ref_mesh, const DeformedState& state, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new, BroadPhase& broad_phase, const std::string& outdir = "");

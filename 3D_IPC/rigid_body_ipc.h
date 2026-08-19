@@ -40,6 +40,11 @@ struct QuaternionOmegaKinematics {
 
 QuaternionOmegaKinematics quaternion_omega_kinematics(const Vec4& q0, const Vec3& omega, double dt, bool with_second_derivatives = false);
 
+// Fixed rotational predictor R(q_n) + dt R_dot_n. It depends only on the
+// previous-step rigid state and can be shared by every candidate omega in one
+// nonlinear solve.
+Mat33 rigid_rotation_predictor(const Vec4& q_n, const Vec3& omega_n, double dt);
+
 // Follow the relative arc encoded by the signs of q_current and q_target,
 // without replacing it by the equivalent shortest arc. This can distinguish,
 // for example, +270 degrees from -90 degrees, but an exact (or numerically
@@ -86,10 +91,10 @@ Vec3 inertia_translation_gradient(const Vec3& x_com, const Vec3& x_com_n, const 
 Mat33 inertia_translation_hessian(double total_mass);
 
 // Exact gradient-only path for residual evaluation
-Vec3 inertia_rotation_gradient(const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, double dt, const Mat33& I_hat);
+Vec3 inertia_rotation_gradient(const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, double dt, const Mat33& I_hat, const QuaternionOmegaKinematics* kinematics = nullptr, const Mat33* rotation_predictor = nullptr);
 
 // Exact gradient and Hessian of the rotational inertial term with respect to omega.
-std::pair<Vec3, Mat33> inertia_rotation_gradient_hessian(const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, double dt, const Mat33& I_hat);
+std::pair<Vec3, Mat33> inertia_rotation_gradient_hessian(const Vec3& omega, const Vec4& q_n, const Vec3& omega_n, double dt, const Mat33& I_hat, const QuaternionOmegaKinematics* kinematics = nullptr, const Mat33* rotation_predictor = nullptr);
 
 // Exact omega-coordinate derivatives of x(t, omega) = t + R(q(omega)) X_centered
 Mat33 dx_domega(const Vec3& X_centered, const QuaternionOmegaKinematics& kinematics);

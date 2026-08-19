@@ -195,7 +195,8 @@ Vec3 compute_solid_local_gradient(
     const BroadPhase& broad_phase,
     const std::vector<unsigned char>& solid_nodes,
     const std::vector<unsigned char>& surface_nodes,
-    const std::vector<int>* pin_map) {
+    const std::vector<int>* pin_map,
+    const FrozenResidualWorkspace* frozen_workspace) {
     const double dt2 = params.dt2();
     const double mass = ref_mesh.mass[static_cast<std::size_t>(node)];
     Vec3 gradient = mass
@@ -225,12 +226,14 @@ Vec3 compute_solid_local_gradient(
          ref_mesh.tet_adj[static_cast<std::size_t>(node)]) {
         const std::size_t element =
             static_cast<std::size_t>(element_index);
-        const Mat33 F = ElementF(element, x, ref_mesh.tets, ref_mesh.tet_rest_data);
-        CorotatedCache cache;
-        cache.UpdateCache(F);
-        gradient += dt2 * EFEMElementNodeEnergyGradient(
-            cache, F, ref_mesh.tet_rest_data[element],
-            params.solid_mu, params.solid_lambda, local_node);
+        if (frozen_workspace != nullptr) {
+            gradient += dt2 * frozen_workspace->tet_gradients[element][static_cast<std::size_t>(local_node)];
+        } else {
+            const Mat33 F = ElementF(element, x, ref_mesh.tets, ref_mesh.tet_rest_data);
+            CorotatedCache cache;
+            cache.UpdateCache(F, CorotatedCacheMode::Lean);
+            gradient += dt2 * EFEMElementNodeEnergyGradient(cache, F, ref_mesh.tet_rest_data[element], params.solid_mu, params.solid_lambda, local_node);
+        }
     }
 
     if (params.k_sdf > 0.0
@@ -256,19 +259,17 @@ Vec3 compute_solid_local_gradient(
                     pair, solid_nodes, surface_nodes)) {
                 continue;
             }
-            if (!node_triangle_aabbs_within_distance(
-                    x[static_cast<std::size_t>(pair.node)],
-                    x[static_cast<std::size_t>(pair.tri_v[0])],
-                    x[static_cast<std::size_t>(pair.tri_v[1])],
-                    x[static_cast<std::size_t>(pair.tri_v[2])], d_hat2)) {
+            if (frozen_workspace != nullptr && frozen_workspace->nt_aabb_active[entry.pair_index] == 0) {
                 continue;
             }
-            gradient += barrier_scale * node_triangle_barrier_gradient(
-                x[static_cast<std::size_t>(pair.node)],
-                x[static_cast<std::size_t>(pair.tri_v[0])],
-                x[static_cast<std::size_t>(pair.tri_v[1])],
-                x[static_cast<std::size_t>(pair.tri_v[2])],
-                params.d_hat, entry.dof);
+            if (frozen_workspace == nullptr && !node_triangle_aabbs_within_distance(x[static_cast<std::size_t>(pair.node)], x[static_cast<std::size_t>(pair.tri_v[0])], x[static_cast<std::size_t>(pair.tri_v[1])], x[static_cast<std::size_t>(pair.tri_v[2])], d_hat2)) {
+                continue;
+            }
+            if (frozen_workspace != nullptr && frozen_workspace->nt_gradient_cached[entry.pair_index] != 0) {
+                gradient += barrier_scale * frozen_workspace->nt_gradients[entry.pair_index][static_cast<std::size_t>(entry.dof)];
+            } else {
+                gradient += barrier_scale * node_triangle_barrier_gradient(x[static_cast<std::size_t>(pair.node)], x[static_cast<std::size_t>(pair.tri_v[0])], x[static_cast<std::size_t>(pair.tri_v[1])], x[static_cast<std::size_t>(pair.tri_v[2])], params.d_hat, entry.dof);
+            }
         }
 
         for (const BroadPhase::Cache::VertexPairEntry& entry :
@@ -279,19 +280,17 @@ Vec3 compute_solid_local_gradient(
                     pair, solid_nodes, surface_nodes)) {
                 continue;
             }
-            if (!segment_aabbs_within_distance(
-                    x[static_cast<std::size_t>(pair.v[0])],
-                    x[static_cast<std::size_t>(pair.v[1])],
-                    x[static_cast<std::size_t>(pair.v[2])],
-                    x[static_cast<std::size_t>(pair.v[3])], d_hat2)) {
+            if (frozen_workspace != nullptr && frozen_workspace->ss_aabb_active[entry.pair_index] == 0) {
                 continue;
             }
-            gradient += barrier_scale * segment_segment_barrier_gradient(
-                x[static_cast<std::size_t>(pair.v[0])],
-                x[static_cast<std::size_t>(pair.v[1])],
-                x[static_cast<std::size_t>(pair.v[2])],
-                x[static_cast<std::size_t>(pair.v[3])],
-                params.d_hat, entry.dof);
+            if (frozen_workspace == nullptr && !segment_aabbs_within_distance(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])], d_hat2)) {
+                continue;
+            }
+            if (frozen_workspace != nullptr && frozen_workspace->ss_gradient_cached[entry.pair_index] != 0) {
+                gradient += barrier_scale * frozen_workspace->ss_gradients[entry.pair_index][static_cast<std::size_t>(entry.dof)];
+            } else {
+                gradient += barrier_scale * segment_segment_barrier_gradient(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])], params.d_hat, entry.dof);
+            }
         }
     }
 
@@ -535,9 +534,10 @@ std::pair<Vec3, Mat33> compute_solid_local_gradient_and_pbgs_block_no_barrier(
             static_cast<std::size_t>(element_index);
         const Mat33 F = ElementF(element, x, ref_mesh.tets, ref_mesh.tet_rest_data);
         CorotatedCache cache;
-        cache.UpdateCache(F);
-        gradient += dt2 * EFEMElementNodeEnergyGradient(cache, F, ref_mesh.tet_rest_data[element], params.solid_mu, params.solid_lambda, local_node);
-        pbgs_block += dt2 * PBGSElementNodeElasticityBlock(cache, ref_mesh.tet_rest_data[element], params.solid_mu, params.solid_lambda, local_node);
+        cache.UpdateCache(F, CorotatedCacheMode::Lean);
+        const auto [element_gradient, element_block] = EFEMElementNodeGradientAndPBGSBlock(cache, F, ref_mesh.tet_rest_data[element], params.solid_mu, params.solid_lambda, local_node);
+        gradient += dt2 * element_gradient;
+        pbgs_block += dt2 * element_block;
     }
 
     const bool is_surface = surface_node_mask != nullptr
@@ -683,25 +683,28 @@ std::pair<Vec3, Mat33> compute_solid_local_gradient_and_block(
     return {gradient, block};
 }
 
-double compute_global_solid_residual(
-    const RefMesh& ref_mesh,
-    const std::vector<Pin>& pins,
-    const SimParams& params,
-    const std::vector<Vec3>& x,
-    const std::vector<Vec3>& xhat,
-    const BroadPhase& broad_phase,
-    const std::vector<int>* pin_map) {
+double compute_global_solid_residual(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const BroadPhase& broad_phase, const std::vector<int>* pin_map, const std::vector<unsigned char>* solid_node_mask, const std::vector<unsigned char>* surface_node_mask, const FrozenResidualWorkspace* frozen_workspace) {
     (void)params.dt2();
-    const std::vector<unsigned char> solid_nodes = make_solid_node_mask(ref_mesh.tet_nodes, x.size());
-    const std::vector<unsigned char> surface_nodes = make_solid_node_mask(ref_mesh.surface_nodes, x.size());
+    if (frozen_workspace != nullptr && !frozen_workspace->matches(ref_mesh, params, x, broad_phase)) throw std::invalid_argument("compute_global_solid_residual: frozen workspace does not match its inputs");
+    if ((solid_node_mask == nullptr) != (surface_node_mask == nullptr)) {
+        throw std::invalid_argument("compute_global_solid_residual: both node masks must be supplied together");
+    }
+
+    std::vector<unsigned char> owned_solid_node_mask;
+    std::vector<unsigned char> owned_surface_node_mask;
+    if (solid_node_mask == nullptr) {
+        owned_solid_node_mask = make_solid_node_mask(ref_mesh.tet_nodes, x.size());
+        owned_surface_node_mask = make_solid_node_mask(ref_mesh.surface_nodes, x.size());
+        solid_node_mask = &owned_solid_node_mask;
+        surface_node_mask = &owned_surface_node_mask;
+    }
 
     double r_inf = 0.0;
-    const int num_solid_nodes =
-        static_cast<int>(ref_mesh.tet_nodes.size());
+    const int num_solid_nodes = static_cast<int>(ref_mesh.tet_nodes.size());
     #pragma omp parallel for reduction(max:r_inf) schedule(static)
     for (int i = 0; i < num_solid_nodes; ++i) {
         const int node = ref_mesh.tet_nodes[static_cast<std::size_t>(i)];
-        Vec3 gradient = compute_solid_local_gradient(node, ref_mesh, pins, params, x, xhat, broad_phase, solid_nodes, surface_nodes, pin_map);
+        Vec3 gradient = compute_solid_local_gradient(node, ref_mesh, pins, params, x, xhat, broad_phase, *solid_node_mask, *surface_node_mask, pin_map, frozen_workspace);
         const double mass = ref_mesh.mass[static_cast<std::size_t>(node)];
         if (mass > 0.0)
             gradient /= mass;

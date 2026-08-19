@@ -48,7 +48,9 @@ void build_solid_contact_adjacency(
 // vertices each own one block; every rigid body owns one block containing all
 // of its proxy vertices. Supplying all four optional workspace arguments lets
 // repeated calls retain the topology-invariant elastic prefix and replace only
-// the current contact suffix.
+// the current contact suffix. Supplying both rigid pair-list outputs fills them
+// during the same ordered NT/SS pair traversal; their contents exactly match
+// the corresponding outputs of build_rb_contact_adj.
 void build_all_block_adjacency_and_contact(
     const RefMesh& ref_mesh,
     const std::vector<int>& cloth_nodes,
@@ -58,7 +60,9 @@ void build_all_block_adjacency_and_contact(
     const std::vector<int>* node_to_block = nullptr,
     const std::vector<unsigned char>* solid_node_mask = nullptr,
     const std::vector<unsigned char>* surface_node_mask = nullptr,
-    std::vector<std::size_t>* elastic_row_sizes = nullptr);
+    std::vector<std::size_t>* elastic_row_sizes = nullptr,
+    std::vector<std::vector<int>>* body_nt_pair_indices = nullptr,
+    std::vector<std::vector<int>>* body_ss_pair_indices = nullptr);
 
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int num_vertices);
 
@@ -68,4 +72,13 @@ void build_contact_adj(const BroadPhase::Cache& bp_cache, int num_vertices, std:
 // Sorted per-vertex union of two sorted neighbor lists.
 void union_adjacency(const std::vector<std::vector<int>>& a, const std::vector<std::vector<int>>& b,  std::vector<std::vector<int>>& out);
 
-void greedy_color_conflict_graph(const std::vector<std::vector<int>>& graph, std::vector<std::vector<int>>& groups);
+struct GreedyColoringWorkspace {
+    std::vector<int> color;
+    std::vector<int> seen_color;
+};
+
+
+void greedy_color_conflict_graph(
+    const std::vector<std::vector<int>>& graph,
+    std::vector<std::vector<int>>& groups,
+    GreedyColoringWorkspace* workspace = nullptr);

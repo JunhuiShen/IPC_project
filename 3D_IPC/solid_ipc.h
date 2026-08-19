@@ -6,6 +6,7 @@
 #include <vector>
 
 struct DeformedState;
+struct FrozenResidualWorkspace;
 class BroadPhase;
 struct Pin;
 struct RefMesh;
@@ -107,4 +108,7 @@ double compute_global_solid_residual(
     const std::vector<Vec3>& x,
     const std::vector<Vec3>& xhat,
     const BroadPhase& broad_phase,
-    const std::vector<int>* pin_map = nullptr);
+    const std::vector<int>* pin_map = nullptr,
+    const std::vector<unsigned char>* solid_node_mask = nullptr,
+    const std::vector<unsigned char>* surface_node_mask = nullptr,
+    const FrozenResidualWorkspace* frozen_workspace = nullptr);

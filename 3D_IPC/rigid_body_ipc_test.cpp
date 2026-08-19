@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -855,6 +856,26 @@ TEST(RigidBodyIPCInertialEnergy, OmegaDerivativesConvergeQuadratically) {
     expect_quadratic_convergence(kConvergenceHs, hessian_errors);
 }
 
+TEST(RigidBodyIPCInertialEnergy, CachedKinematicsAndPredictorAreBitwiseEquivalent) {
+    const std::vector<double> masses = {1.2, 0.7, 1.9};
+    const std::vector<Vec3> references = {Vec3(-0.8, 0.35, 0.2), Vec3(0.45, -0.55, 0.9), Vec3(0.3394736842105263, -0.0184210526315789, -0.4578947368421053)};
+    const Vec4 q_n = quaternion_normalize(Vec4(0.8, -0.2, 0.3, 0.4));
+    const Vec3 omega(0.6, -0.3, 0.7);
+    const Vec3 omega_n(-0.2, 0.5, 0.4);
+    constexpr double dt = 0.31;
+    const Mat33 I_hat = body_second_moment(masses, references);
+    const Vec3 uncached_gradient = inertia_rotation_gradient(omega, q_n, omega_n, dt, I_hat);
+    const auto [uncached_full_gradient, uncached_hessian] = inertia_rotation_gradient_hessian(omega, q_n, omega_n, dt, I_hat);
+    const Mat33 predictor = rigid_rotation_predictor(q_n, omega_n, dt);
+    const QuaternionOmegaKinematics first_order = quaternion_omega_kinematics(q_n, omega, dt);
+    const QuaternionOmegaKinematics second_order = quaternion_omega_kinematics(q_n, omega, dt, true);
+    const Vec3 cached_gradient = inertia_rotation_gradient(omega, q_n, omega_n, dt, I_hat, &first_order, &predictor);
+    const auto [cached_full_gradient, cached_hessian] = inertia_rotation_gradient_hessian(omega, q_n, omega_n, dt, I_hat, &second_order, &predictor);
+    EXPECT_EQ(std::memcmp(cached_gradient.data(), uncached_gradient.data(), sizeof(double) * static_cast<std::size_t>(cached_gradient.size())), 0);
+    EXPECT_EQ(std::memcmp(cached_full_gradient.data(), uncached_full_gradient.data(), sizeof(double) * static_cast<std::size_t>(cached_full_gradient.size())), 0);
+    EXPECT_EQ(std::memcmp(cached_hessian.data(), uncached_hessian.data(), sizeof(double) * static_cast<std::size_t>(cached_hessian.size())), 0);
+}
+
 TEST(RigidBodyIPCInertialEnergy, ReducedEnergyMatchesFullNodalMassQuadratic) {
     const std::vector<double> masses = {1.2, 0.7, 1.9};
     const std::vector<Vec3> R_p = {
@@ -1382,6 +1403,274 @@ TEST(DeformableResidual, UsesOnlySuppliedDeformableNodes) {
     EXPECT_DOUBLE_EQ(both_nodes, 9.0);
 }
 
+TEST(DeformableResidual, CachedIncidenceAndShapeGradientsAreEquivalent) {
+    RefMesh ref_mesh;
+    ref_mesh.tris = {0, 1, 2, 1, 3, 2};
+    const std::vector<Vec3> x_rest = {
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0),
+        Vec3(1.0, 1.0, 0.0),
+    };
+    ref_mesh.initialize({Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.0, 1.0), Vec2(1.0, 1.0)}, x_rest);
+    ref_mesh.mass = {2.0, 3.0, 4.0, 5.0};
+
+    std::vector<Vec3> x = x_rest;
+    x[0] += Vec3(0.03, -0.02, 0.04);
+    x[1] += Vec3(-0.01, 0.05, -0.02);
+    x[2] += Vec3(0.02, 0.01, 0.03);
+    x[3] += Vec3(-0.04, -0.01, 0.02);
+    std::vector<Vec3> xhat = x_rest;
+    xhat[0] += Vec3(-0.01, 0.02, 0.01);
+    xhat[3] += Vec3(0.02, -0.03, -0.01);
+
+    const std::vector<Pin> pins = {
+        Pin{1, x_rest[1] + Vec3(0.02, -0.01, 0.03)},
+    };
+    SimParams params = SimParams::zeros();
+    params.fps = 7.0;
+    params.substeps = 2;
+    params.mu = 2.7;
+    params.lambda = 4.1;
+    params.gravity = Vec3(0.3, -1.2, 0.4);
+    params.kpin = 3.6;
+
+    const VertexTriangleMap adjacency = build_incident_triangle_map(ref_mesh.tris);
+    std::vector<IncidentTriangles> incident_triangles(x.size());
+    for (const auto& [node, incident] : adjacency)
+        incident_triangles[static_cast<std::size_t>(node)] = incident;
+    std::vector<ShapeGrads> rest_shape_grads(ref_mesh.Dm_inverse.size());
+    for (std::size_t triangle = 0; triangle < ref_mesh.Dm_inverse.size(); ++triangle) {
+        rest_shape_grads[triangle] = shape_function_gradients(ref_mesh.Dm_inverse[triangle]);
+    }
+    const PinMap pin_map = build_pin_map(pins, static_cast<int>(x.size()));
+    const std::vector<int> deformable_nodes = {0, 1, 2, 3};
+    BroadPhase broad_phase;
+
+    const double uncached = compute_global_deformable_residual(ref_mesh, adjacency, pins, params, x, xhat, broad_phase, deformable_nodes, &pin_map);
+    const VertexTriangleMap empty_adjacency;
+    const double cached = compute_global_deformable_residual(ref_mesh, empty_adjacency, pins, params, x, xhat, broad_phase, deformable_nodes, &pin_map, &incident_triangles, &rest_shape_grads);
+
+    EXPECT_DOUBLE_EQ(cached, uncached);
+}
+
+TEST(DeformableResidual, FrozenWorkspaceIsBitwiseEquivalentForElasticBendingAndContactGradients) {
+    RefMesh ref_mesh;
+    ref_mesh.tris = {0, 1, 2, 1, 3, 2};
+    const std::vector<Vec3> x_rest = {Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), Vec3(1.0, 1.0, 0.0)};
+    ref_mesh.initialize({Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.0, 1.0), Vec2(1.0, 1.0)}, x_rest);
+    ref_mesh.num_positions = 8;
+    ref_mesh.mass = {2.0, 3.0, 4.0, 5.0, 1.5, 2.5, 3.5, 4.5};
+
+    const std::vector<Vec3> x = {Vec3(0.03, -0.02, 0.04), Vec3(0.99, 0.05, -0.02), Vec3(0.02, 1.01, 0.03), Vec3(0.96, 0.99, 0.14), Vec3(0.25, 0.25, 0.18), Vec3(0.75, 0.25, 0.18), Vec3(0.50, 0.05, 0.34), Vec3(0.50, 0.75, 0.34)};
+    std::vector<Vec3> xhat = x;
+    for (int node = 0; node < static_cast<int>(xhat.size()); ++node) xhat[static_cast<std::size_t>(node)] += static_cast<double>(node + 1) * Vec3(0.001, -0.002, 0.0015);
+
+    SimParams params = SimParams::zeros();
+    params.fps = 8.0;
+    params.substeps = 2;
+    params.mu = 2.7;
+    params.lambda = 4.1;
+    params.kB = 1.9;
+    params.d_hat = 0.4;
+    params.k_barrier = 7.3;
+    params.gravity = Vec3(0.3, -1.2, 0.4);
+    params.kpin = 3.6;
+    params.use_parallel = false;
+    const std::vector<Pin> pins = {Pin{1, x_rest[1] + Vec3(0.02, -0.01, 0.03)}};
+    const PinMap pin_map = build_pin_map(pins, static_cast<int>(x.size()));
+
+    const VertexTriangleMap adjacency = build_incident_triangle_map(ref_mesh.tris);
+    std::vector<IncidentTriangles> incident_triangles(x.size());
+    for (const auto& [node, incident] : adjacency) incident_triangles[static_cast<std::size_t>(node)] = incident;
+    std::vector<ShapeGrads> rest_shape_grads(ref_mesh.Dm_inverse.size());
+    for (std::size_t triangle = 0; triangle < rest_shape_grads.size(); ++triangle) rest_shape_grads[triangle] = shape_function_gradients(ref_mesh.Dm_inverse[triangle]);
+
+    BroadPhase broad_phase;
+    BroadPhase::Cache& broad_phase_cache = broad_phase.mutable_cache();
+    broad_phase_cache.vertex_nt.resize(x.size());
+    broad_phase_cache.vertex_ss.resize(x.size());
+    broad_phase_cache.nt_pairs.push_back(NodeTrianglePair{4, {0, 1, 2}});
+    const int nt_nodes[4] = {4, 0, 1, 2};
+    for (int role = 0; role < 4; ++role) broad_phase_cache.vertex_nt[static_cast<std::size_t>(nt_nodes[role])].push_back({0, role});
+    broad_phase_cache.ss_pairs.push_back(SegmentSegmentPair{{4, 5, 6, 7}});
+    for (int role = 0; role < 4; ++role) broad_phase_cache.vertex_ss[static_cast<std::size_t>(4 + role)].push_back({0, role});
+
+    FrozenResidualWorkspace workspace;
+    build_frozen_residual_workspace(ref_mesh, params, x, broad_phase, workspace, &rest_shape_grads);
+    ASSERT_EQ(workspace.cloth_triangle_gradients.size(), 2u);
+    ASSERT_EQ(workspace.hinge_gradients.size(), 1u);
+    ASSERT_EQ(workspace.nt_gradients.size(), 1u);
+    ASSERT_EQ(workspace.ss_gradients.size(), 1u);
+    ASSERT_EQ(workspace.nt_aabb_active[0], 1);
+    ASSERT_EQ(workspace.ss_aabb_active[0], 1);
+    ASSERT_EQ(workspace.nt_barrier_active[0], 1);
+    ASSERT_EQ(workspace.ss_barrier_active[0], 1);
+    ASSERT_EQ(workspace.nt_gradient_cached[0], 1);
+    ASSERT_EQ(workspace.ss_gradient_cached[0], 1);
+
+    for (int triangle = 0; triangle < num_tris(ref_mesh); ++triangle) {
+        const TriangleDef def = make_def_triangle(x, ref_mesh, triangle);
+        Mat32 Ds;
+        Ds.col(0) = def.x[1] - def.x[0];
+        Ds.col(1) = def.x[2] - def.x[0];
+        const Mat32 F = Ds * ref_mesh.Dm_inverse[static_cast<std::size_t>(triangle)];
+        const CorotatedCache32 cache = buildCorotatedCache(F);
+        const Mat32 P = PCorotated32(cache, F, params.mu, params.lambda);
+        for (int role = 0; role < 3; ++role) {
+            const Vec3 expected = corotated_node_gradient(P, ref_mesh.area[static_cast<std::size_t>(triangle)], rest_shape_grads[static_cast<std::size_t>(triangle)], role);
+            for (int component = 0; component < 3; ++component) EXPECT_EQ(workspace.cloth_triangle_gradients[static_cast<std::size_t>(triangle)][static_cast<std::size_t>(role)][component], expected[component]);
+        }
+    }
+    const Hinge& hinge = ref_mesh.hinges[0];
+    HingeDef hinge_def;
+    for (int role = 0; role < 4; ++role) hinge_def.x[role] = x[static_cast<std::size_t>(hinge.v[role])];
+    for (int role = 0; role < 4; ++role) {
+        const Vec3 expected = bending_node_gradient(hinge_def, params.kB, hinge.c_e, hinge.bar_theta, role);
+        for (int component = 0; component < 3; ++component) EXPECT_EQ(workspace.hinge_gradients[0][static_cast<std::size_t>(role)][component], expected[component]);
+    }
+    const NodeTrianglePair& nt_pair = broad_phase_cache.nt_pairs[0];
+    const SegmentSegmentPair& ss_pair = broad_phase_cache.ss_pairs[0];
+    for (int role = 0; role < 4; ++role) {
+        const Vec3 expected_nt = node_triangle_barrier_gradient(x[static_cast<std::size_t>(nt_pair.node)], x[static_cast<std::size_t>(nt_pair.tri_v[0])], x[static_cast<std::size_t>(nt_pair.tri_v[1])], x[static_cast<std::size_t>(nt_pair.tri_v[2])], params.d_hat, role);
+        const Vec3 expected_ss = segment_segment_barrier_gradient(x[static_cast<std::size_t>(ss_pair.v[0])], x[static_cast<std::size_t>(ss_pair.v[1])], x[static_cast<std::size_t>(ss_pair.v[2])], x[static_cast<std::size_t>(ss_pair.v[3])], params.d_hat, role);
+        for (int component = 0; component < 3; ++component) {
+            EXPECT_EQ(workspace.nt_gradients[0][static_cast<std::size_t>(role)][component], expected_nt[component]);
+            EXPECT_EQ(workspace.ss_gradients[0][static_cast<std::size_t>(role)][component], expected_ss[component]);
+        }
+    }
+
+    for (int node = 0; node < static_cast<int>(x.size()); ++node) {
+        const std::vector<int> one_node = {node};
+        const double uncached = compute_global_deformable_residual(ref_mesh, adjacency, pins, params, x, xhat, broad_phase, one_node, &pin_map, &incident_triangles, &rest_shape_grads);
+        const double cached = compute_global_deformable_residual(ref_mesh, adjacency, pins, params, x, xhat, broad_phase, one_node, &pin_map, &incident_triangles, &rest_shape_grads, &workspace);
+        EXPECT_EQ(cached, uncached) << "node " << node;
+    }
+    const std::vector<int> all_nodes = {0, 1, 2, 3, 4, 5, 6, 7};
+    const double uncached = compute_global_deformable_residual(ref_mesh, adjacency, pins, params, x, xhat, broad_phase, all_nodes, &pin_map, &incident_triangles, &rest_shape_grads);
+    const double cached = compute_global_deformable_residual(ref_mesh, adjacency, pins, params, x, xhat, broad_phase, all_nodes, &pin_map, &incident_triangles, &rest_shape_grads, &workspace);
+    EXPECT_EQ(cached, uncached);
+}
+
+TEST(DeformableResidual, FrozenWorkspaceDistinguishesAabbCandidatesAtBarrierBoundary) {
+    RefMesh ref_mesh;
+    const std::vector<Vec3> x = {Vec3(0.25, 0.25, 0.5), Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 0.0, 0.5), Vec3(1.0, 0.0, 0.5)};
+    SimParams params = SimParams::zeros();
+    params.d_hat = 0.5;
+    params.k_barrier = 1.0;
+    params.use_parallel = false;
+    BroadPhase broad_phase;
+    broad_phase.mutable_cache().nt_pairs.push_back(NodeTrianglePair{0, {1, 2, 3}});
+    broad_phase.mutable_cache().ss_pairs.push_back(SegmentSegmentPair{{4, 5, 6, 7}});
+
+    FrozenResidualWorkspace workspace;
+    build_frozen_residual_workspace(ref_mesh, params, x, broad_phase, workspace);
+
+    ASSERT_EQ(workspace.nt_aabb_active.size(), 1u);
+    ASSERT_EQ(workspace.ss_aabb_active.size(), 1u);
+    EXPECT_EQ(workspace.nt_aabb_active[0], 1);
+    EXPECT_EQ(workspace.ss_aabb_active[0], 1);
+    EXPECT_EQ(workspace.nt_barrier_active[0], 0);
+    EXPECT_EQ(workspace.ss_barrier_active[0], 0);
+    EXPECT_EQ(workspace.nt_gradient_cached[0], 1);
+    EXPECT_EQ(workspace.ss_gradient_cached[0], 1);
+    for (int role = 0; role < 4; ++role) {
+        EXPECT_TRUE(workspace.nt_gradients[0][static_cast<std::size_t>(role)].isZero(0.0));
+        EXPECT_TRUE(workspace.ss_gradients[0][static_cast<std::size_t>(role)].isZero(0.0));
+    }
+}
+
+TEST(DeformableResidual, FrozenWorkspaceDefersZeroDistanceGradientFailureUntilConsumed) {
+    RefMesh ref_mesh;
+    ref_mesh.mass.assign(8, 1.0);
+    const std::vector<Vec3> x = {Vec3(0.25, 0.25, 0.0), Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0), Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.5, -0.5, 0.0), Vec3(0.5, 0.5, 0.0)};
+    VertexTriangleMap adjacency;
+    for (int node = 0; node < static_cast<int>(x.size()); ++node) adjacency.emplace(node, IncidentTriangles{});
+    SimParams params = SimParams::zeros();
+    params.fps = 1.0;
+    params.substeps = 1;
+    params.d_hat = 0.5;
+    params.k_barrier = 1.0;
+    params.use_parallel = false;
+    BroadPhase broad_phase;
+    BroadPhase::Cache& broad_phase_cache = broad_phase.mutable_cache();
+    broad_phase_cache.vertex_nt.resize(x.size());
+    broad_phase_cache.vertex_ss.resize(x.size());
+    broad_phase_cache.nt_pairs.push_back(NodeTrianglePair{0, {1, 2, 3}});
+    const int nt_nodes[4] = {0, 1, 2, 3};
+    for (int role = 0; role < 4; ++role) broad_phase_cache.vertex_nt[static_cast<std::size_t>(nt_nodes[role])].push_back({0, role});
+    broad_phase_cache.ss_pairs.push_back(SegmentSegmentPair{{4, 5, 6, 7}});
+    for (int role = 0; role < 4; ++role) broad_phase_cache.vertex_ss[static_cast<std::size_t>(4 + role)].push_back({0, role});
+
+    FrozenResidualWorkspace workspace;
+    EXPECT_NO_THROW(build_frozen_residual_workspace(ref_mesh, params, x, broad_phase, workspace));
+    ASSERT_EQ(workspace.nt_aabb_active[0], 1);
+    ASSERT_EQ(workspace.ss_aabb_active[0], 1);
+    ASSERT_EQ(workspace.nt_barrier_active[0], 1);
+    ASSERT_EQ(workspace.ss_barrier_active[0], 1);
+    ASSERT_EQ(workspace.nt_gradient_cached[0], 0);
+    ASSERT_EQ(workspace.ss_gradient_cached[0], 0);
+
+    const std::vector<int> nt_consumer = {0};
+    const std::vector<int> ss_consumer = {4};
+    const std::string original_death_test_style = GTEST_FLAG_GET(death_test_style);
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_DEATH({ (void)compute_global_deformable_residual(ref_mesh, adjacency, {}, params, x, x, broad_phase, nt_consumer); }, "delta must be nonzero");
+    EXPECT_DEATH({ (void)compute_global_deformable_residual(ref_mesh, adjacency, {}, params, x, x, broad_phase, nt_consumer, nullptr, nullptr, nullptr, &workspace); }, "delta must be nonzero");
+    EXPECT_DEATH({ (void)compute_global_deformable_residual(ref_mesh, adjacency, {}, params, x, x, broad_phase, ss_consumer); }, "delta must be nonzero");
+    EXPECT_DEATH({ (void)compute_global_deformable_residual(ref_mesh, adjacency, {}, params, x, x, broad_phase, ss_consumer, nullptr, nullptr, nullptr, &workspace); }, "delta must be nonzero");
+    GTEST_FLAG_SET(death_test_style, original_death_test_style);
+}
+
+TEST(DeformableResidual, FarCachedContactsLeaveResidualUnchanged) {
+    constexpr int num_nodes = 8;
+    RefMesh ref_mesh;
+    ref_mesh.mass.assign(num_nodes, 1.0);
+
+    const std::vector<Vec3> x = {
+        Vec3(100.0, 100.0, 100.0),
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 1.0, 0.0),
+        Vec3(100.0, 0.0, 0.0),
+        Vec3(101.0, 0.0, 0.0),
+        Vec3(0.0, 100.0, 0.0),
+        Vec3(1.0, 100.0, 0.0),
+    };
+    std::vector<Vec3> xhat = x;
+    for (int node = 0; node < num_nodes; ++node) {
+        const double scale = static_cast<double>(node + 1);
+        xhat[static_cast<std::size_t>(node)] += scale * Vec3(0.01, -0.02, 0.03);
+    }
+
+    VertexTriangleMap adjacency;
+    for (int node = 0; node < num_nodes; ++node)
+        adjacency.emplace(node, IncidentTriangles{});
+    const std::vector<int> deformable_nodes = {0, 1, 2, 3, 4, 5, 6, 7};
+
+    BroadPhase broad_phase;
+    BroadPhase::Cache& cache = broad_phase.mutable_cache();
+    cache.vertex_nt.resize(num_nodes);
+    cache.vertex_ss.resize(num_nodes);
+    cache.nt_pairs.push_back(NodeTrianglePair{0, {1, 2, 3}});
+    const int nt_nodes[4] = {0, 1, 2, 3};
+    for (int dof = 0; dof < 4; ++dof)
+        cache.vertex_nt[nt_nodes[dof]].push_back({0, dof});
+    cache.ss_pairs.push_back(SegmentSegmentPair{{4, 5, 6, 7}});
+    for (int dof = 0; dof < 4; ++dof)
+        cache.vertex_ss[4 + dof].push_back({0, dof});
+
+    SimParams params = SimParams::zeros();
+    params.d_hat = 0.5;
+    params.k_barrier = 9.0;
+    const double with_far_candidates = compute_global_deformable_residual(ref_mesh, adjacency, {}, params, x, xhat, broad_phase, deformable_nodes);
+    params.k_barrier = 0.0;
+    const double without_barrier = compute_global_deformable_residual(ref_mesh, adjacency, {}, params, x, xhat, broad_phase, deformable_nodes);
+
+    EXPECT_DOUBLE_EQ(with_far_candidates, without_barrier);
+    EXPECT_DOUBLE_EQ(with_far_candidates, 0.24);
+}
+
 TEST(BoundQuaternion, ClipsAtFirstExitOfLongArc) {
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
     const Vec4 target_270 = quaternion_from_angular_velocity(identity, 1.5 * M_PI * Vec3::UnitZ(), 1.0);
@@ -1494,6 +1783,24 @@ TEST(RigidBodyTranslationSafeStep, MovingNodeUsesLinearCCD) {
     EXPECT_NEAR(alpha, 0.45, 1.0e-12);
 }
 
+TEST(RigidBodyTranslationSafeStep, RepeatedCandidatePreservesTOIExactly) {
+    const std::vector<Vec3> x = {Vec3(0.25, 0.25, 1.0), Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)};
+    RefMesh ref_mesh;
+    ref_mesh.tris = {1, 2, 3};
+    ref_mesh.node_to_rb = {0, -1, -1, -1};
+    ref_mesh.rb_nodes = {{0}};
+    const RigidSafeStepCandidates candidates = build_rigid_safe_step_candidates(ref_mesh, {}, static_cast<int>(x.size()), 1);
+    const std::vector<int>& single = candidates.body_nt_pair_indices[0];
+    ASSERT_EQ(single.size(), 1U);
+    std::vector<int> repeated = single;
+    repeated.insert(repeated.end(), single.begin(), single.end());
+
+    const double single_toi = per_rigid_body_translation_safe_step(ref_mesh, candidates.cache, single, {}, x, 0, Vec3(0.0, 0.0, -2.0), 1.0);
+    const double repeated_toi = per_rigid_body_translation_safe_step(ref_mesh, candidates.cache, repeated, {}, x, 0, Vec3(0.0, 0.0, -2.0), 1.0);
+
+    EXPECT_DOUBLE_EQ(repeated_toi, single_toi);
+}
+
 TEST(RigidBodyTranslationSafeStep, MovingTriangleUsesRelativeNodeMotion) {
     const std::vector<Vec3> x = {
         Vec3(0.25, 0.25, 1.0),
@@ -1581,6 +1888,26 @@ TEST(RigidBodyRotationSafeStep, MovingNodeUsesRotationCCD) {
     EXPECT_DOUBLE_EQ(cap_before_alpha, 1.0);
     EXPECT_NEAR(cap_after_alpha, 0.6, 1.0e-12);
     EXPECT_TRUE(interpolate_orientation_full_arc(identity, cap_after_collision, cap_after_alpha).isApprox(interpolate_orientation_full_arc(identity, target, alpha), 1.0e-12));
+}
+
+TEST(RigidBodyRotationSafeStep, RepeatedCandidatePreservesTOIExactly) {
+    const std::vector<Vec3> x = {Vec3(0.0, -2.0, 0.0), Vec3(1.0, 0.0, -1.0), Vec3(3.0, 0.0, -1.0), Vec3(2.0, 0.0, 1.0)};
+    RefMesh ref_mesh;
+    ref_mesh.tris = {1, 2, 3};
+    ref_mesh.node_to_rb = {0, -1, -1, -1};
+    ref_mesh.rb_nodes = {{0}};
+    const RigidSafeStepCandidates candidates = build_rigid_safe_step_candidates(ref_mesh, {}, static_cast<int>(x.size()), 1);
+    const std::vector<int>& single = candidates.body_nt_pair_indices[0];
+    ASSERT_EQ(single.size(), 1U);
+    std::vector<int> repeated = single;
+    repeated.insert(repeated.end(), single.begin(), single.end());
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 target = quaternion_from_angular_velocity(identity, Vec3(0.0, 0.0, M_PI), 1.0);
+
+    const double single_toi = per_rigid_body_rotation_safe_step(ref_mesh, candidates.cache, single, {}, x, 0, Vec3::Zero(), identity, target, 1.0);
+    const double repeated_toi = per_rigid_body_rotation_safe_step(ref_mesh, candidates.cache, repeated, {}, x, 0, Vec3::Zero(), identity, target, 1.0);
+
+    EXPECT_DOUBLE_EQ(repeated_toi, single_toi);
 }
 
 TEST(RigidBodyRotationSafeStep, PreservesFull270DegreeTargetArc) {

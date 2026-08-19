@@ -187,8 +187,19 @@ private:
         std::vector<std::array<int, 2>> edges;
         std::vector<std::vector<int>> node_to_edges;
         std::vector<std::vector<int>> node_to_tris;
+        // Ascending list of every node allowed to issue an NT query under the
+        // surface-node policy. This includes boundary nodes and non-solid
+        // point proxies, and excludes only tet-interior nodes.
+        std::vector<int> surface_nt_query_nodes;
+        bool surface_nt_query_nodes_valid = false;
     };
     Topology topo_;
+
+    void initialize_from_vertex_boxes(
+        const std::vector<AABB>& vertex_boxes, const RefMesh& mesh,
+        double d_hat, bool exclude_tet_interior_nt_queries);
+    const std::vector<int>& surface_nt_query_nodes(
+        const RefMesh& mesh, int nv);
 
     void build(
         const std::vector<Vec3>& x, const std::vector<Vec3>& v,
