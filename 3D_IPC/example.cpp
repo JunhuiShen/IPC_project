@@ -2063,7 +2063,7 @@ void build_armadillo_through_gear_crushers_example(
 // Example 20: four level Bunny / Spot / cube / gear rows falling onto a
 // pinned cloth
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 20 --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 20 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir four_bunny_spot_cube_gear_rows_output --format obj
+// command line: ./build/3D_sim --example 20 --num_frames 200 --substeps 20 --max_substep_iters 400 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_2_output --format obj
 void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
