@@ -424,6 +424,8 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     //gs loop
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         if((iter-1)%params.node_box_update_count==0){//rebuild node boxes and color accordingly
+            if (params.verbose)
+                std::fprintf(stderr, "  [GS] iter %d  rebuilding node boxes\n", iter);
             //create new node boxes
             for (int i = 0; i < nv; ++i) {
                 const double r = node_box_size_fn(i);
@@ -466,6 +468,8 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
         if (!params.fixed_iters){
             double residual = compute_residual();
             result.final_residual = residual;
+            if (params.verbose)
+                std::fprintf(stderr, "  [GS] iter %d  residual = %.6e\n", iter, residual);
             if(residual < params.tol_rel * r1 || residual < params.tol_abs){
                 result.converged = true;
                 break;
@@ -1005,7 +1009,7 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
         return value <= tolerance;
     };
 
-    const auto rebuild_contact_cache = [&]() {
+    const auto rebuild_contact_cache = [&](int iteration) {
         constexpr double box_padding = 1.2;
         for (int rb = 0; rb < num_rbs; ++rb) {
             workspace.com_box_anchors[rb] = x_com_new[rb];
@@ -1017,15 +1021,21 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
         const std::vector<AABB>& cached_boxes = workspace.broad_phase.cache().node_boxes;
         bool boxes_unchanged = workspace.contact_cache_initialized && cached_boxes.size() == workspace.blue_boxes.size() && std::memcmp(&workspace.contact_cache_d_hat, &params.d_hat, sizeof(double)) == 0;
         for (std::size_t box = 0; boxes_unchanged && box < cached_boxes.size(); ++box) boxes_unchanged = std::memcmp(cached_boxes[box].min.data(), workspace.blue_boxes[box].min.data(), 3 * sizeof(double)) == 0 && std::memcmp(cached_boxes[box].max.data(), workspace.blue_boxes[box].max.data(), 3 * sizeof(double)) == 0;
-        if (boxes_unchanged) return;
+        if (boxes_unchanged) {
+            if (params.verbose)
+                std::fprintf(stderr, "  [RB GS] iter %d  reusing rigid contact cache\n", iteration);
+            return;
+        }
         workspace.broad_phase.initialize(workspace.blue_boxes, ref_mesh, params.d_hat);
         build_rb_contact_adj(workspace.broad_phase.cache(), ref_mesh.node_to_rb, num_rbs, workspace.body_nt_pair_indices, workspace.body_ss_pair_indices, workspace.contact_adjacency);
         greedy_color_conflict_graph(workspace.contact_adjacency, workspace.color_groups, &workspace.coloring_workspace);
         workspace.contact_cache_initialized = true;
         workspace.contact_cache_d_hat = params.d_hat;
+        if (params.verbose)
+            std::fprintf(stderr, "  [RB GS] iter %d  rebuilding rigid blue boxes and %zu block colors\n", iteration, workspace.color_groups.size());
     };
 
-    rebuild_contact_cache();
+    rebuild_contact_cache(1);
 
     if (!params.fixed_iters) {
         initial_residual = rb_solver::rigid_body_unnormalized_residual(ref_mesh, state, workspace.broad_phase.cache(), workspace.body_nt_pair_indices, workspace.body_ss_pair_indices, workspace.node_to_rb_local, workspace.positions, params, x_com_new, omega_new, dt, workspace.body_residuals, &workspace.rotation_predictors);
@@ -1041,7 +1051,7 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         if (iter > 1 && (iter - 1) % params.node_box_update_count == 0)
-            rebuild_contact_cache();
+            rebuild_contact_cache(iter);
 
         const auto process_body = [&](int rb) {
             const RigidBodyUpdateMode update_mode =
@@ -1095,6 +1105,8 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
         if (!params.fixed_iters) {
             const double residual = rb_solver::rigid_body_unnormalized_residual(ref_mesh, state, workspace.broad_phase.cache(), workspace.body_nt_pair_indices, workspace.body_ss_pair_indices, workspace.node_to_rb_local, workspace.positions, params, x_com_new, omega_new, dt, workspace.body_residuals, &workspace.rotation_predictors);
             result.final_residual = residual;
+            if (params.verbose)
+                std::fprintf(stderr, "  [RB GS] iter %d  residual = %.6e\n", iter, residual);
             if (residual_converged(residual)) {
                 result.converged = true;
                 break;
@@ -1217,7 +1229,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
     (void)params.dt2();
     constexpr double box_padding = 1.2;
 
-    const auto rebuild_contact_cache = [&]() {
+    const auto rebuild_contact_cache = [&](int iteration) {
         // First fill deformable boxes. build_blue_boxes_rb then overwrites all
         // rigid proxy entries with spherical-cap plus COM bounds.
         for (const int node : cloth_nodes) {
@@ -1244,6 +1256,9 @@ SolverResult global_gauss_seidel_solver_basic_general(
             broad_phase.initialize_surface_nodes(blue_boxes, ref_mesh, params.d_hat);
         build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, nodal_elastic_adj, broad_phase.cache(), mixed_adjacency_workspace.combined_adjacency, &mixed_adjacency_workspace.node_to_block, &mixed_adjacency_workspace.solid_node_mask, &mixed_adjacency_workspace.surface_node_mask, &mixed_adjacency_workspace.elastic_row_sizes, &rigid_workspace.body_nt_pair_indices, &rigid_workspace.body_ss_pair_indices);
         greedy_color_conflict_graph(mixed_adjacency_workspace.combined_adjacency, mixed_adjacency_workspace.color_groups, &mixed_adjacency_workspace.coloring_workspace);
+        if (params.verbose) {
+            std::fprintf(stderr,"  [General GS] iter %d  rebuilding mixed blue boxes and %zu block colors\n", iteration, mixed_adjacency_workspace.color_groups.size());
+        }
     };
 
 
@@ -1267,7 +1282,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
         return block_residual_converged(result.final_cloth_residual, result.initial_cloth_residual) && block_residual_converged(result.final_solid_residual, result.initial_solid_residual) && block_residual_converged(result.final_rigid_residual, result.initial_rigid_residual);
     };
 
-    rebuild_contact_cache();
+    rebuild_contact_cache(1);
     if (!params.fixed_iters) {
         result.has_residual = true;
         result.has_residual_components = true;
@@ -1284,7 +1299,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
 
     for (int iteration = 1; iteration <= params.max_global_iters; ++iteration) {
         if (iteration > 1 && (iteration - 1) % params.node_box_update_count == 0) {
-            rebuild_contact_cache();
+            rebuild_contact_cache(iteration);
         }
 
         const auto process_cloth_node = [&](const int cloth) {
@@ -1370,6 +1385,14 @@ SolverResult global_gauss_seidel_solver_basic_general(
         result.iterations = iteration;
         if (!params.fixed_iters) {
             update_final_residual();
+            if (params.verbose) {
+                std::fprintf(
+                    stderr,
+                    "  [General GS] iter %d  cloth residual = %.6e  solid residual = %.6e  rigid-body residual = %.6e  total residual = %.6e\n",
+                    iteration, result.final_cloth_residual,
+                    result.final_solid_residual,
+                    result.final_rigid_residual, result.final_residual);
+            }
             if (residual_converged()) {
                 result.converged = true;
                 break;

@@ -56,6 +56,7 @@ struct SimParams {
     bool   use_ogc_solver;       // if true, route the substep through global_gauss_seidel_solver_ogc
     double ogc_box_pad;          // OGC node-box / tri-edge union pad used by the per-iter BVH rebuild
     bool   fixed_iters;          // if true, run exactly max_global_iters sweeps with no tolerance / convergence check
+    bool   verbose;              // print cache rebuilds and per-iteration residuals when available
 
     double node_box_max;       // upper bound on node box half-extent used by the basic solver
     double node_box_min;       // lower bound on node box half-extent (floor when prev disp is near zero)
@@ -100,6 +101,7 @@ struct SimParams {
         p.use_ogc_solver            = false;
         p.ogc_box_pad               = 0.0;
         p.fixed_iters               = false;
+        p.verbose                   = false;
         p.node_box_max              = 0.0;
         p.node_box_min              = 0.0;
         p.theta_box_min             = 0.0;

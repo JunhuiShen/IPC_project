@@ -46,6 +46,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_ogc_solver = false;
     double ogc_box_pad = 0.005;
     bool   fixed_iters = false;
+    bool   verbose = false;
     double node_box_max            = 0.01;
     double node_box_min            = 0.001;
     double theta_box_min           = 0.01;
@@ -99,6 +100,9 @@ struct IPCArgs3D : ArgParser {
     int         tu_cyl_nu         = 64;    // circumferential subdivisions for the visual mesh
     double      tu_visual_shrink  = 0.002; // visual cyl this much thinner than pin_r (m); avoids SDF/barrier fighting at contact
 
+    // example 19: fixed-center crushers with initial angular velocities
+    double      crusher_angular_speed = 20.0; // initial |omega_z| (rad/s)
+
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
     std::string format       = "geo";
@@ -143,6 +147,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_ogc_solver", use_ogc_solver, false, "Use the serial OGC Gauss-Seidel solver (rebuilds BVH per iter; partial leaf refit per move)");
         add_double("ogc_box_pad", ogc_box_pad, 0.005, "Padding on OGC node boxes / tri-edge unions for the per-iter BVH rebuild (floored to d_hat at use)");
         add_bool  ("fixed_iters",      fixed_iters,      false, "Run exactly max_substep_iters sweeps per substep with no tolerance / convergence check");
+        add_bool  ("verbose",          verbose,          false, "Print solver cache rebuilds and residuals after each GS iteration (residuals require fixed_iters=false)");
         add_double("node_box_max",         node_box_max,         0.01,  "Upper bound on node box half-extent used by the basic solver");
         add_double("node_box_min",         node_box_min,         0.001, "Lower bound on node box half-extent (floor when prev disp is near zero)");
         add_double("theta_box_min",        theta_box_min,        0.01,  "Lower bound on the rigid orientation-box angular radius (rad)");
@@ -152,7 +157,7 @@ struct IPCArgs3D : ArgParser {
         add_double("damping",                  damping,                  1.0,   "Newton-step damping used by deformable and rigid solvers; <1 can stabilize an update");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=rigid_box_drop, 8=two_polygon_collision, 9=twenty_polygon_stack, 10=five_polygon_scatter, 11=hundred_polygon_box_drop, 12=fifty_rigid_polygons_on_pinned_cloth, 13=single_deformable_solid_ground_drop, 14=single_deformable_solid_on_pinned_cloth, 15=twenty_rigid_deformable_polygons_on_pinned_cloth, 16=ten_alternating_rigid_solid_flat_stack_on_pinned_cloth, 17=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 18=dynamic_bolt_into_fixed_nut");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=rigid_box_drop, 8=two_polygon_collision, 9=twenty_polygon_stack, 10=five_polygon_scatter, 11=hundred_polygon_box_drop, 12=fifty_rigid_polygons_on_pinned_cloth, 13=single_deformable_solid_ground_drop, 14=single_deformable_solid_on_pinned_cloth, 15=twenty_rigid_deformable_polygons_on_pinned_cloth, 16=ten_alternating_rigid_solid_flat_stack_on_pinned_cloth, 17=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 18=dynamic_bolt_into_fixed_nut, 19=armadillo_through_gear_crushers, 20=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 21=cloth_unrolling_down_fixed_ramp");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -190,6 +195,8 @@ struct IPCArgs3D : ArgParser {
         add_double("tu_cyl_length",    tu_cyl_length,    3.9,  "Collider cylinder length along x (m) for example 3");
         add_int   ("tu_cyl_nu",        tu_cyl_nu,        64,   "Circumferential subdivisions for the visual cylinder in example 3");
         add_double("tu_visual_shrink", tu_visual_shrink, 0.002,"Render cylinder this much thinner than the cloth's rest radius (m, visual only). Small offset (~2mm) keeps a visible sliver between cloth + cylinder and avoids SDF/barrier energy fighting at the contact");
+
+        add_double("crusher_angular_speed", crusher_angular_speed, 20.0, "Initial angular-speed magnitude (rad/s) of each Example 19 crusher");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
@@ -236,6 +243,7 @@ struct IPCArgs3D : ArgParser {
         p.ogc_box_pad = ogc_box_pad;
         p.use_translation_guess = use_translation_guess;
         p.fixed_iters = fixed_iters;
+        p.verbose = verbose;
         p.node_box_max            = node_box_max;
         p.node_box_min            = node_box_min;
         p.theta_box_min           = theta_box_min;

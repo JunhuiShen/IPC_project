@@ -627,6 +627,628 @@ TEST(MixedExample, SingleDeformableSolidAboveOppositeEdgePinnedCloth) {
         ref_mesh.mass.begin() + cloth_vertices));
 }
 
+TEST(MixedExample,
+     FourLevelBunnySpotCubeGearRowsAboveOppositeEdgePinnedCloth) {
+    namespace fs = std::filesystem;
+    static std::atomic<std::uint64_t> next_directory{0};
+    const fs::path directory = fs::temp_directory_path()
+        / ("ipc_four_bunny_spot_cube_gear_rows_scene_"
+           + std::to_string(
+               std::chrono::steady_clock::now().time_since_epoch().count())
+           + "_" + std::to_string(next_directory.fetch_add(1)));
+    fs::create_directories(directory);
+
+    struct WorkingDirectoryGuard {
+        fs::path previous;
+        fs::path temporary;
+
+        explicit WorkingDirectoryGuard(fs::path path)
+            : previous(fs::current_path()), temporary(std::move(path)) {
+            fs::current_path(temporary);
+        }
+
+        ~WorkingDirectoryGuard() {
+            std::error_code error;
+            fs::current_path(previous, error);
+            fs::remove_all(temporary, error);
+        }
+    } working_directory(directory);
+
+    // Exercise the production repository-relative asset paths with compact,
+    // distinct fixtures. Bunny has two tetrahedra while Spot has one, so path
+    // reuse and accidental object-type changes are both observable.
+    fs::create_directories("example_obj/bunny_coarse");
+    fs::create_directories("example_obj/spot");
+    {
+        std::ofstream nodes(
+            "example_obj/bunny_coarse/bunny_2000f.1.node");
+        ASSERT_TRUE(nodes.good());
+        nodes << "5 3 0 0\n"
+              << "0 0 0 0\n"
+              << "1 1 0 0\n"
+              << "2 0 0.98996474061363637 0\n"
+              << "3 0 0 0.01\n"
+              << "4 0 0 -0.7530728972409091\n";
+    }
+    {
+        std::ofstream elements(
+            "example_obj/bunny_coarse/bunny_2000f.1.ele");
+        ASSERT_TRUE(elements.good());
+        elements << "2 4 0\n"
+                 << "0 0 1 2 3\n"
+                 << "1 0 2 1 4\n";
+    }
+    {
+        std::ofstream nodes("example_obj/spot/spot_2000f.1.node");
+        ASSERT_TRUE(nodes.good());
+        nodes << "4 3 0 0\n"
+              << "0 0 0 0\n"
+              << "1 0.54916355263863637 0 0\n"
+              << "2 0 0.98558895052954543 0\n"
+              << "3 0 0 1\n";
+    }
+    {
+        std::ofstream elements("example_obj/spot/spot_2000f.1.ele");
+        ASSERT_TRUE(elements.good());
+        elements << "1 4 0\n"
+                 << "0 0 1 2 3\n";
+    }
+    {
+        std::ofstream gear("example_obj/gear_z18_coarse.obj");
+        ASSERT_TRUE(gear.good());
+        // Closed, outward-oriented anisotropic octahedron. Its unequal AABB
+        // extents expose any rotation even if the quaternion stays normalized.
+        gear << "v  0.5  0  0\n"
+             << "v -0.5  0  0\n"
+             << "v  0  0.49536426517656252  0\n"
+             << "v  0 -0.49536426517656252  0\n"
+             << "v  0  0  0.10005811135\n"
+             << "v  0  0 -0.10005811135\n"
+             << "f 1 3 5\n"
+             << "f 3 2 5\n"
+             << "f 2 4 5\n"
+             << "f 4 1 5\n"
+             << "f 3 1 6\n"
+             << "f 2 3 6\n"
+             << "f 4 2 6\n"
+             << "f 1 4 6\n";
+    }
+
+    IPCArgs3D args;
+    args.solid_density = 731.0;
+    args.rigid_density = 947.0;
+    // This deliberately exceeds half the fixture's shortest normalized edge,
+    // forcing the scene builder's production-mesh safety clamp to execute.
+    args.d_hat = 0.1;
+    args.k_barrier = 617.0;
+    args.gx = 1.25;
+    args.gy = -3.5;
+    args.gz = 2.25;
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+
+    build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
+        args, ref_mesh, state, X, pins, params);
+
+    constexpr int cloth_nx = 30;
+    constexpr int cloth_nz = 30;
+    constexpr int cloth_vertices = (cloth_nx + 1) * (cloth_nz + 1);
+    constexpr int cloth_triangles = 2 * cloth_nx * cloth_nz;
+    constexpr int rows = 4;
+    constexpr int bunny_vertices = 5;
+    constexpr int bunny_tetrahedra = 2;
+    constexpr int bunny_surface_triangles = 6;
+    constexpr int spot_vertices = 4;
+    constexpr int spot_tetrahedra = 1;
+    constexpr int spot_surface_triangles = 4;
+    constexpr int cube_vertices = 8;
+    constexpr int cube_triangles = 12;
+    constexpr int gear_vertices = 6;
+    constexpr int gear_triangles = 8;
+    constexpr int solid_vertices =
+        rows * (bunny_vertices + spot_vertices);
+    constexpr int solid_tetrahedra =
+        rows * (bunny_tetrahedra + spot_tetrahedra);
+    constexpr int rigid_body_count = 2 * rows;
+    constexpr int total_vertices = cloth_vertices + solid_vertices
+        + rows * (cube_vertices + gear_vertices);
+    constexpr int total_triangles = cloth_triangles
+        + rows
+            * (bunny_surface_triangles + spot_surface_triangles
+               + cube_triangles + gear_triangles);
+    constexpr double cloth_height = 1.2;
+    constexpr double object_center_y = 1.75;
+    constexpr double solid_max_extent = 0.44;
+    constexpr double rigid_max_extent = 0.22;
+    constexpr double row_spacing = 0.45;
+    enum BodyType {
+        Bunny = 0, Spot = 1, Cube = 2, Gear = 3, BodyTypeCount = 4};
+    static constexpr int expected_row_order[rows][BodyTypeCount] = {
+        {Bunny, Cube, Gear, Spot},
+        {Gear, Spot, Bunny, Cube},
+        {Spot, Gear, Cube, Bunny},
+        {Cube, Bunny, Spot, Gear},
+    };
+    // Literal expected centers keep this regression independent from the
+    // production packing implementation.
+    static constexpr double expected_x[rows][BodyTypeCount] = {
+        {-0.35581598158033034,  0.455,
+         -0.015815981580330304, 0.21418401841966972},
+        { 0.12581598158033028, -0.225,
+          0.46581598158033027, -0.46581598158033033},
+        { 0.35581598158033034, -0.455,
+          0.015815981580330304, -0.21418401841966972},
+        {-0.12581598158033033,  0.225,
+         -0.46581598158033033,  0.46581598158033027},
+    };
+    const Vec3 bunny_extents(
+        0.44, 0.435584485870, 0.335752074786);
+    const Vec3 spot_extents(
+        0.241631963161, 0.433659138233, 0.44);
+    const Vec3 cube_extents = Vec3::Constant(rigid_max_extent);
+    const Vec3 gear_extents(
+        0.22, 0.2179602766776875, 0.044025568994);
+    const Vec3 drop_velocity(0.0, -0.75, 0.0);
+    struct ObjectBounds {
+        Vec3 lower;
+        Vec3 upper;
+    };
+    std::array<ObjectBounds, rows * 4> object_bounds;
+
+    static_assert(total_vertices == 1053);
+    static_assert(total_triangles == 1920);
+    static_assert(solid_tetrahedra == 12);
+
+    ASSERT_EQ(state.deformed_positions.size(), total_vertices);
+    ASSERT_EQ(state.velocities.size(), total_vertices);
+    EXPECT_EQ(ref_mesh.num_positions, total_vertices);
+    ASSERT_EQ(ref_mesh.mass.size(), total_vertices);
+    ASSERT_EQ(ref_mesh.node_to_rb.size(), total_vertices);
+    EXPECT_EQ(ref_mesh.tris.size(), 3 * total_triangles);
+    EXPECT_EQ(ref_mesh.tets.size(), 4 * solid_tetrahedra);
+    EXPECT_EQ(ref_mesh.tet_rest_data.size(), solid_tetrahedra);
+    EXPECT_EQ(ref_mesh.tet_nodes.size(), solid_vertices);
+    EXPECT_EQ(ref_mesh.surface_nodes.size(), solid_vertices);
+    EXPECT_EQ(
+        ref_mesh.deformable_nodes.size(), cloth_vertices + solid_vertices);
+    EXPECT_EQ(X.size(), cloth_vertices);
+    EXPECT_EQ(ref_mesh.Dm_inverse.size(), cloth_triangles);
+    EXPECT_EQ(ref_mesh.area.size(), cloth_triangles);
+
+    ASSERT_EQ(pins.size(), 2 * (cloth_nz + 1));
+    for (int j = 0; j <= cloth_nz; ++j) {
+        SCOPED_TRACE(j);
+        const int left = j * (cloth_nx + 1);
+        const int right = left + cloth_nx;
+        const Pin& left_pin = pins[static_cast<std::size_t>(2 * j)];
+        const Pin& right_pin = pins[static_cast<std::size_t>(2 * j + 1)];
+        EXPECT_EQ(left_pin.vertex_index, left);
+        EXPECT_EQ(right_pin.vertex_index, right);
+        EXPECT_TRUE(left_pin.target_position.isApprox(
+            state.deformed_positions[left], 0.0));
+        EXPECT_TRUE(right_pin.target_position.isApprox(
+            state.deformed_positions[right], 0.0));
+    }
+
+    ASSERT_EQ(ref_mesh.rb_nodes.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.ref_positions.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.total_mass.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.I_hat.size(), rigid_body_count);
+    ASSERT_EQ(ref_mesh.rb_update_modes.size(), rigid_body_count);
+    ASSERT_EQ(state.x_coms.size(), rigid_body_count);
+    ASSERT_EQ(state.v_coms.size(), rigid_body_count);
+    ASSERT_EQ(state.orientations.size(), rigid_body_count);
+    ASSERT_EQ(state.omega.size(), rigid_body_count);
+
+    std::vector<unsigned char> is_tet_node(total_vertices, 0);
+    std::vector<unsigned char> is_surface_node(total_vertices, 0);
+    std::vector<unsigned char> is_deformable(total_vertices, 0);
+    for (const int node : ref_mesh.tet_nodes) {
+        ASSERT_GE(node, cloth_vertices);
+        ASSERT_LT(node, cloth_vertices + solid_vertices);
+        ASSERT_LT(node, total_vertices);
+        EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 0);
+        is_tet_node[static_cast<std::size_t>(node)] = 1;
+    }
+    for (const int node : ref_mesh.surface_nodes) {
+        ASSERT_GE(node, cloth_vertices);
+        ASSERT_LT(node, cloth_vertices + solid_vertices);
+        ASSERT_LT(node, total_vertices);
+        EXPECT_EQ(is_surface_node[static_cast<std::size_t>(node)], 0);
+        is_surface_node[static_cast<std::size_t>(node)] = 1;
+    }
+    for (const int node : ref_mesh.deformable_nodes) {
+        ASSERT_GE(node, 0);
+        ASSERT_LT(node, total_vertices);
+        EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 0);
+        is_deformable[static_cast<std::size_t>(node)] = 1;
+    }
+
+    for (int node = 0; node < cloth_vertices; ++node) {
+        EXPECT_DOUBLE_EQ(state.deformed_positions[node].y(), cloth_height);
+        EXPECT_TRUE(state.velocities[node].isZero(0.0));
+        EXPECT_EQ(ref_mesh.node_to_rb[node], -1);
+        EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 0);
+        EXPECT_EQ(is_surface_node[static_cast<std::size_t>(node)], 0);
+        EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 1);
+    }
+    for (int triangle = 0; triangle < cloth_triangles; ++triangle) {
+        for (int local = 0; local < 3; ++local) {
+            const int node = ref_mesh.tris[3 * triangle + local];
+            EXPECT_GE(node, 0);
+            EXPECT_LT(node, cloth_vertices);
+        }
+    }
+    for (const Hinge& hinge : ref_mesh.hinges) {
+        for (const int node : hinge.v) {
+            EXPECT_GE(node, 0);
+            EXPECT_LT(node, cloth_vertices);
+        }
+    }
+
+    const auto row_z = [=](const int row) {
+        return -1.5 * row_spacing
+            + static_cast<double>(row) * row_spacing;
+    };
+    const auto object_center = [&](const int row, const int type) {
+        return Vec3(
+            expected_x[row][type], object_center_y, row_z(row));
+    };
+    const auto column_for_type = [](const int row, const int type) {
+        for (int column = 0; column < BodyTypeCount; ++column) {
+            if (expected_row_order[row][column] == type)
+                return column;
+        }
+        return -1;
+    };
+    const auto check_solid =
+        [&](const int node_base, const int node_count,
+            const int first_tet, const int tet_count,
+            const Vec3& expected_center, const Vec3& expected_extents,
+            const double expected_mass) {
+            const int node_end = node_base + node_count;
+            Vec3 lower = state.deformed_positions[node_base];
+            Vec3 upper = lower;
+            double actual_mass = 0.0;
+            for (int node = node_base; node < node_end; ++node) {
+                lower = lower.cwiseMin(state.deformed_positions[node]);
+                upper = upper.cwiseMax(state.deformed_positions[node]);
+                actual_mass += ref_mesh.mass[static_cast<std::size_t>(node)];
+                EXPECT_GT(ref_mesh.mass[static_cast<std::size_t>(node)], 0.0);
+                EXPECT_EQ(ref_mesh.node_to_rb[node], -1);
+                EXPECT_TRUE(state.velocities[node].isApprox(
+                    drop_velocity, 0.0));
+                EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 1);
+                EXPECT_EQ(is_surface_node[static_cast<std::size_t>(node)], 1);
+                EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 1);
+            }
+            EXPECT_TRUE((0.5 * (lower + upper)).isApprox(
+                expected_center, 1.0e-14));
+            EXPECT_TRUE((upper - lower).isApprox(
+                expected_extents, 1.0e-14));
+            EXPECT_GT(lower.y(), cloth_height + params.d_hat);
+            EXPECT_NEAR(actual_mass, expected_mass, 1.0e-12);
+
+            for (int element = first_tet;
+                 element < first_tet + tet_count; ++element) {
+                EXPECT_GT(ref_mesh.tet_rest_data[element].measure, 0.0);
+                for (int local = 0; local < 4; ++local) {
+                    const int node = ref_mesh.tets[4 * element + local];
+                    EXPECT_GE(node, node_base);
+                    EXPECT_LT(node, node_end);
+                }
+            }
+            return ObjectBounds{lower, upper};
+        };
+
+    // The two fixture tetrahedra together occupy the axis tetrahedron defined
+    // by the production Bunny AABB dimensions.
+    const double expected_bunny_mass =
+        args.solid_density * bunny_extents.prod() / 6.0;
+    for (int row = 0; row < rows; ++row) {
+        SCOPED_TRACE("bunny row " + std::to_string(row));
+        const int column = column_for_type(row, Bunny);
+        ASSERT_GE(column, 0);
+        object_bounds[static_cast<std::size_t>(4 * row + column)] =
+            check_solid(
+            cloth_vertices + row * bunny_vertices,
+            bunny_vertices, row * bunny_tetrahedra, bunny_tetrahedra,
+            object_center(row, Bunny), bunny_extents,
+            expected_bunny_mass);
+    }
+
+    const double expected_spot_mass =
+        args.solid_density * spot_extents.prod() / 6.0;
+    constexpr int spot_node_base =
+        cloth_vertices + rows * bunny_vertices;
+    constexpr int spot_tet_base = rows * bunny_tetrahedra;
+    for (int row = 0; row < rows; ++row) {
+        SCOPED_TRACE("spot row " + std::to_string(row));
+        const int column = column_for_type(row, Spot);
+        ASSERT_GE(column, 0);
+        object_bounds[static_cast<std::size_t>(4 * row + column)] =
+            check_solid(
+            spot_node_base + row * spot_vertices,
+            spot_vertices, spot_tet_base + row * spot_tetrahedra,
+            spot_tetrahedra, object_center(row, Spot), spot_extents,
+            expected_spot_mass);
+    }
+
+    const double expected_cube_mass = args.rigid_density
+        * rigid_max_extent * rigid_max_extent * rigid_max_extent;
+    constexpr int first_rigid_node = cloth_vertices + solid_vertices;
+    for (int row = 0; row < rows; ++row) {
+        SCOPED_TRACE("cube row " + std::to_string(row));
+        const int rb = row;
+        const int expected_node_base =
+            first_rigid_node + row * cube_vertices;
+        const Vec3 expected_center = object_center(row, Cube);
+        EXPECT_TRUE(state.x_coms[rb].isApprox(expected_center, 1.0e-14));
+        EXPECT_TRUE(state.v_coms[rb].isApprox(drop_velocity, 0.0));
+        EXPECT_TRUE(state.omega[rb].isZero(0.0));
+        EXPECT_TRUE(state.orientations[rb].isApprox(
+            Vec4(1.0, 0.0, 0.0, 0.0), 0.0));
+        EXPECT_EQ(
+            ref_mesh.rb_update_modes[rb],
+            RigidBodyUpdateMode::TranslationAndOrientation);
+        EXPECT_NEAR(ref_mesh.total_mass[rb], expected_cube_mass, 1.0e-12);
+        ASSERT_EQ(ref_mesh.rb_nodes[rb].size(), cube_vertices);
+        EXPECT_EQ(ref_mesh.rb_nodes[rb].front(), expected_node_base);
+
+        Vec3 lower = state.deformed_positions[expected_node_base];
+        Vec3 upper = lower;
+        double nodal_mass = 0.0;
+        for (const int node : ref_mesh.rb_nodes[rb]) {
+            lower = lower.cwiseMin(state.deformed_positions[node]);
+            upper = upper.cwiseMax(state.deformed_positions[node]);
+            nodal_mass += ref_mesh.mass[static_cast<std::size_t>(node)];
+            EXPECT_EQ(ref_mesh.node_to_rb[node], rb);
+            EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 0);
+            EXPECT_EQ(is_surface_node[static_cast<std::size_t>(node)], 0);
+            EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 0);
+            EXPECT_TRUE(state.velocities[node].isApprox(drop_velocity, 0.0));
+        }
+        EXPECT_TRUE((0.5 * (lower + upper)).isApprox(
+            expected_center, 1.0e-14));
+        EXPECT_TRUE((upper - lower).isApprox(
+            cube_extents, 1.0e-14));
+        EXPECT_GT(lower.y(), cloth_height + params.d_hat);
+        EXPECT_NEAR(nodal_mass, ref_mesh.total_mass[rb], 1.0e-12);
+        const int column = column_for_type(row, Cube);
+        ASSERT_GE(column, 0);
+        object_bounds[static_cast<std::size_t>(4 * row + column)] =
+            ObjectBounds{lower, upper};
+    }
+
+    // An axis-aligned octahedron occupies one sixth of its AABB volume.
+    const double expected_gear_mass =
+        args.rigid_density * gear_extents.prod() / 6.0;
+    constexpr int first_gear_node =
+        first_rigid_node + rows * cube_vertices;
+    for (int row = 0; row < rows; ++row) {
+        SCOPED_TRACE("gear row " + std::to_string(row));
+        const int rb = rows + row;
+        const int expected_node_base = first_gear_node + row * gear_vertices;
+        const Vec3 expected_center = object_center(row, Gear);
+        EXPECT_TRUE(state.x_coms[rb].isApprox(expected_center, 1.0e-14));
+        EXPECT_TRUE(state.v_coms[rb].isApprox(drop_velocity, 0.0));
+        EXPECT_TRUE(state.omega[rb].isZero(0.0));
+        EXPECT_TRUE(state.orientations[rb].isApprox(
+            Vec4(1.0, 0.0, 0.0, 0.0), 0.0));
+        EXPECT_EQ(
+            ref_mesh.rb_update_modes[rb],
+            RigidBodyUpdateMode::TranslationAndOrientation);
+        EXPECT_NEAR(ref_mesh.total_mass[rb], expected_gear_mass, 1.0e-12);
+        ASSERT_EQ(ref_mesh.rb_nodes[rb].size(), gear_vertices);
+        EXPECT_EQ(ref_mesh.rb_nodes[rb].front(), expected_node_base);
+
+        Vec3 lower = state.deformed_positions[expected_node_base];
+        Vec3 upper = lower;
+        double nodal_mass = 0.0;
+        for (const int node : ref_mesh.rb_nodes[rb]) {
+            lower = lower.cwiseMin(state.deformed_positions[node]);
+            upper = upper.cwiseMax(state.deformed_positions[node]);
+            nodal_mass += ref_mesh.mass[static_cast<std::size_t>(node)];
+            EXPECT_EQ(ref_mesh.node_to_rb[node], rb);
+            EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 0);
+            EXPECT_EQ(is_surface_node[static_cast<std::size_t>(node)], 0);
+            EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 0);
+            EXPECT_TRUE(state.velocities[node].isApprox(drop_velocity, 0.0));
+        }
+        EXPECT_TRUE((0.5 * (lower + upper)).isApprox(
+            expected_center, 1.0e-14));
+        // Identity orientation keeps the anisotropic source-axis extents on
+        // world x:y:z; a tilted gear would permute these dimensions.
+        EXPECT_TRUE((upper - lower).isApprox(
+            gear_extents,
+            1.0e-14));
+        EXPECT_GT(lower.y(), cloth_height + params.d_hat);
+        EXPECT_NEAR(nodal_mass, ref_mesh.total_mass[rb], 1.0e-12);
+        const int column = column_for_type(row, Gear);
+        ASSERT_GE(column, 0);
+        object_bounds[static_cast<std::size_t>(4 * row + column)] =
+            ObjectBounds{lower, upper};
+    }
+
+    // Every row contains Bunny, Spot, cube, gear across x, and all sixteen
+    // object centers share exactly one height level.
+    for (int row = 0; row < rows; ++row) {
+        EXPECT_DOUBLE_EQ(state.x_coms[row].y(), object_center_y);
+        EXPECT_DOUBLE_EQ(state.x_coms[rows + row].y(), object_center_y);
+        EXPECT_DOUBLE_EQ(state.x_coms[row].z(), row_z(row));
+        EXPECT_DOUBLE_EQ(
+            state.x_coms[rows + row].z(), row_z(row));
+
+        std::array<int, BodyTypeCount> type_counts{};
+        for (int column = 0; column < BodyTypeCount; ++column) {
+            const int type = expected_row_order[row][column];
+            ASSERT_GE(type, 0);
+            ASSERT_LT(type, BodyTypeCount);
+            ++type_counts[static_cast<std::size_t>(type)];
+            const ObjectBounds& bounds = object_bounds[
+                static_cast<std::size_t>(4 * row + column)];
+            const Vec3 actual_center = 0.5 * (bounds.lower + bounds.upper);
+            EXPECT_NEAR(actual_center.x(), expected_x[row][type], 1.0e-14);
+            EXPECT_NEAR(actual_center.y(), object_center_y, 1.0e-14);
+            EXPECT_NEAR(actual_center.z(), row_z(row), 1.0e-14);
+        }
+        for (const int count : type_counts)
+            EXPECT_EQ(count, 1);
+        for (int previous = 0; previous < row; ++previous) {
+            EXPECT_FALSE(std::equal(
+                expected_row_order[row],
+                expected_row_order[row] + BodyTypeCount,
+                expected_row_order[previous]));
+        }
+    }
+
+    // The tighter placement is intentional, but every production-shaped
+    // fixture AABB must still be disjoint before the first solve. Checking all
+    // 120 pairs catches both a spacing regression and a wrong asset rotation.
+    const auto aabb_gap = [](const ObjectBounds& first,
+                             const ObjectBounds& second) {
+        Vec3 axis_gap = Vec3::Zero();
+        for (int axis = 0; axis < 3; ++axis) {
+            axis_gap[axis] = std::max(
+                {0.0,
+                 first.lower[axis] - second.upper[axis],
+                 second.lower[axis] - first.upper[axis]});
+        }
+        return axis_gap.norm();
+    };
+    double minimum_object_gap = std::numeric_limits<double>::infinity();
+    for (int first = 0; first < rows * 4; ++first) {
+        for (int second = first + 1; second < rows * 4; ++second) {
+            SCOPED_TRACE(
+                "object pair " + std::to_string(first) + ","
+                + std::to_string(second));
+            const double gap = aabb_gap(
+                object_bounds[static_cast<std::size_t>(first)],
+                object_bounds[static_cast<std::size_t>(second)]);
+            EXPECT_GT(gap, 0.0);
+            EXPECT_GT(gap, params.d_hat);
+            minimum_object_gap = std::min(minimum_object_gap, gap);
+        }
+    }
+    constexpr double expected_tight_gap = 0.01;
+    EXPECT_NEAR(minimum_object_gap, expected_tight_gap, 5.0e-13);
+
+    // Type-aware packing leaves exactly 10 mm between each consecutive pair,
+    // independent of that row's permutation.
+    const std::array<double, 3> expected_column_gaps = {
+        expected_tight_gap, expected_tight_gap, 0.01};
+    for (int row = 0; row < rows; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            EXPECT_NEAR(
+                aabb_gap(
+                    object_bounds[static_cast<std::size_t>(4 * row + column)],
+                    object_bounds[
+                        static_cast<std::size_t>(4 * row + column + 1)]),
+                expected_column_gaps[static_cast<std::size_t>(column)],
+                5.0e-13);
+        }
+    }
+    double minimum_cloth_gap = std::numeric_limits<double>::infinity();
+    for (int object = 0; object < rows * 4; ++object) {
+        const double gap =
+            object_bounds[static_cast<std::size_t>(object)].lower.y()
+            - cloth_height;
+        EXPECT_GT(gap, params.d_hat);
+        minimum_cloth_gap = std::min(minimum_cloth_gap, gap);
+    }
+    constexpr double expected_cloth_gap = 0.332207757065;
+    EXPECT_NEAR(minimum_cloth_gap, expected_cloth_gap, 1.0e-13);
+
+    // Surface topology follows the same type-major append order as the node
+    // storage. Every collision triangle must stay inside its source object.
+    const auto expect_triangle_range =
+        [&](const int first_triangle, const int triangle_count,
+            const int node_base, const int node_count) {
+            for (int triangle = first_triangle;
+                 triangle < first_triangle + triangle_count; ++triangle) {
+                for (int local = 0; local < 3; ++local) {
+                    const int node = ref_mesh.tris[3 * triangle + local];
+                    EXPECT_GE(node, node_base);
+                    EXPECT_LT(node, node_base + node_count);
+                }
+            }
+        };
+    int triangle_cursor = cloth_triangles;
+    for (int row = 0; row < rows; ++row) {
+        expect_triangle_range(
+            triangle_cursor, bunny_surface_triangles,
+            cloth_vertices + row * bunny_vertices, bunny_vertices);
+        triangle_cursor += bunny_surface_triangles;
+    }
+    for (int row = 0; row < rows; ++row) {
+        expect_triangle_range(
+            triangle_cursor, spot_surface_triangles,
+            spot_node_base + row * spot_vertices, spot_vertices);
+        triangle_cursor += spot_surface_triangles;
+    }
+    for (int row = 0; row < rows; ++row) {
+        expect_triangle_range(
+            triangle_cursor, cube_triangles,
+            first_rigid_node + row * cube_vertices, cube_vertices);
+        triangle_cursor += cube_triangles;
+    }
+    for (int row = 0; row < rows; ++row) {
+        expect_triangle_range(
+            triangle_cursor, gear_triangles,
+            first_gear_node + row * gear_vertices, gear_vertices);
+        triangle_cursor += gear_triangles;
+    }
+    EXPECT_EQ(triangle_cursor, total_triangles);
+
+    EXPECT_TRUE(params.gravity.isApprox(
+        Vec3(args.gx, args.gy, args.gz), 0.0));
+    EXPECT_DOUBLE_EQ(params.k_barrier, args.k_barrier);
+    EXPECT_DOUBLE_EQ(params.k_sdf, 0.0);
+    EXPECT_TRUE(params.sdf_planes.empty());
+    EXPECT_TRUE(params.sdf_cylinders.empty());
+    EXPECT_TRUE(params.sdf_spheres.empty());
+    EXPECT_FALSE(params.use_ccd_guess);
+    EXPECT_FALSE(params.use_verlet_guess);
+    EXPECT_FALSE(params.use_translation_guess);
+    EXPECT_FALSE(params.use_ogc);
+    EXPECT_FALSE(params.use_ogc_solver);
+
+    double minimum_surface_edge = std::numeric_limits<double>::infinity();
+    for (int triangle = 0; triangle < total_triangles; ++triangle) {
+        for (int local = 0; local < 3; ++local) {
+            const int first = ref_mesh.tris[3 * triangle + local];
+            const int second =
+                ref_mesh.tris[3 * triangle + (local + 1) % 3];
+            minimum_surface_edge = std::min(
+                minimum_surface_edge,
+                (state.deformed_positions[second]
+                 - state.deformed_positions[first])
+                    .norm());
+        }
+    }
+    EXPECT_LT(params.d_hat, args.d_hat);
+    EXPECT_NEAR(
+        params.d_hat,
+        std::min(args.d_hat, 0.45 * minimum_surface_edge), 1.0e-15);
+
+    const std::vector<double> object_masses(
+        ref_mesh.mass.begin() + cloth_vertices, ref_mesh.mass.end());
+    ref_mesh.build_deformable_lumped_mass(
+        params.density, params.thickness);
+    EXPECT_NEAR(
+        std::accumulate(
+            ref_mesh.mass.begin(),
+            ref_mesh.mass.begin() + cloth_vertices, 0.0),
+        params.density * params.thickness * 4.0 * 4.0,
+        1.0e-10);
+    EXPECT_TRUE(std::equal(
+        object_masses.begin(), object_masses.end(),
+        ref_mesh.mass.begin() + cloth_vertices));
+}
+
 TEST(SolidExample, DensityNineHundredOctagonalPrismAboveGround) {
     IPCArgs3D args;
     RefMesh ref_mesh;
@@ -779,6 +1401,8 @@ TEST(MaterialArguments, SeparateDefaultsAndDensityOverrides) {
                * (1.0 - 2.0 * defaults.solid_nu)));
     EXPECT_DOUBLE_EQ(defaults.rigid_density, 900.0);
     EXPECT_DOUBLE_EQ(defaults.to_sim_params().rigid_density, 900.0);
+    EXPECT_FALSE(defaults.verbose);
+    EXPECT_FALSE(defaults.to_sim_params().verbose);
 
     IPCArgs3D args;
     char program[] = "make_shape_test";
@@ -788,22 +1412,26 @@ TEST(MaterialArguments, SeparateDefaultsAndDensityOverrides) {
     char solid_density_value[] = "567";
     char shell_density_key[] = "--density";
     char shell_density_value[] = "18";
+    char verbose_key[] = "--verbose";
     char* argv[] = {
         program,
         rigid_density_key, rigid_density_value,
         solid_density_key, solid_density_value,
         shell_density_key, shell_density_value,
+        verbose_key,
     };
-    ASSERT_TRUE(args.parse(7, argv));
+    ASSERT_TRUE(args.parse(8, argv));
 
     EXPECT_DOUBLE_EQ(args.rigid_density, 1234.0);
     EXPECT_DOUBLE_EQ(args.solid_density, 567.0);
     EXPECT_DOUBLE_EQ(args.density, 18.0);
+    EXPECT_TRUE(args.verbose);
 
     const SimParams params = args.to_sim_params();
     EXPECT_DOUBLE_EQ(params.rigid_density, 1234.0);
     EXPECT_DOUBLE_EQ(params.solid_density, 567.0);
     EXPECT_DOUBLE_EQ(params.density, 18.0);
+    EXPECT_TRUE(params.verbose);
 }
 
 TEST(MixedExample, RigidAndSolidDensitiesAreIndependent) {
@@ -2262,4 +2890,996 @@ TEST(RigidExample,
     }
     EXPECT_LT(params.d_hat, args.d_hat);
     EXPECT_NEAR(params.d_hat, 0.45 * minimum_surface_edge, 1.0e-15);
+}
+
+TEST(MixedExample,
+     CrushersUseConfiguredInitialAngularVelocities) {
+    namespace fs = std::filesystem;
+    static std::atomic<std::uint64_t> next_directory{0};
+    const fs::path directory = fs::temp_directory_path()
+        / ("ipc_armadillo_crusher_scene_"
+           + std::to_string(
+               std::chrono::steady_clock::now().time_since_epoch().count())
+           + "_" + std::to_string(next_directory.fetch_add(1)));
+    fs::create_directories(directory);
+
+    struct WorkingDirectoryGuard {
+        fs::path previous;
+        fs::path temporary;
+
+        explicit WorkingDirectoryGuard(fs::path path)
+            : previous(fs::current_path()), temporary(std::move(path)) {
+            fs::current_path(temporary);
+        }
+
+        ~WorkingDirectoryGuard() {
+            std::error_code error;
+            fs::current_path(previous, error);
+            fs::remove_all(temporary, error);
+        }
+    } working_directory(directory);
+
+    fs::create_directories("example_obj/armadillo_coarse");
+    fs::create_directories("example_obj/crusher");
+    {
+        std::ofstream nodes(
+            "example_obj/armadillo_coarse/armadillo_5000f.1.node");
+        ASSERT_TRUE(nodes.good());
+        // One positive tetrahedron whose 151.19197-unit vertical extent
+        // makes the production target use the intended common 0.001 scale.
+        nodes.precision(17);
+        nodes << "4 3 0 0\n"
+              << "0 0 0 0\n"
+              << "1 100 0 0\n"
+              << "2 0 151.19197 0\n"
+              << "3 0 0 50\n";
+        ASSERT_TRUE(nodes.good());
+    }
+    {
+        std::ofstream elements(
+            "example_obj/armadillo_coarse/armadillo_5000f.1.ele");
+        ASSERT_TRUE(elements.good());
+        elements << "1 4 0\n"
+                 << "0 0 1 2 3\n";
+        ASSERT_TRUE(elements.good());
+    }
+
+    const auto write_octahedron = [](
+        const char* filename, const double half_x,
+        const double half_y, const double half_z) {
+        std::ofstream obj(filename);
+        ASSERT_TRUE(obj.good());
+        obj.precision(17);
+        obj << "v " << half_x << " 0 0\n"
+            << "v " << -half_x << " 0 0\n"
+            << "v 0 " << half_y << " 0\n"
+            << "v 0 " << -half_y << " 0\n"
+            << "v 0 0 " << half_z << "\n"
+            << "v 0 0 " << -half_z << "\n"
+            << "f 1 3 5\n"
+            << "f 3 2 5\n"
+            << "f 2 4 5\n"
+            << "f 4 1 5\n"
+            << "f 3 1 6\n"
+            << "f 2 3 6\n"
+            << "f 4 2 6\n"
+            << "f 1 4 6\n";
+        ASSERT_TRUE(obj.good());
+    };
+    // Both crusher fixtures are 400 source units along +z and 170 across
+    // the tooth-tip direction, but distinct x radii catch accidental path
+    // reuse. Their shared maximum extent again implies a 0.001 scale.
+    constexpr double left_half_x = 68.0;
+    constexpr double right_half_x = 80.0;
+    constexpr double crusher_half_y = 85.0;
+    constexpr double crusher_half_z = 200.0;
+    write_octahedron(
+        "example_obj/crusher/crusher_coarse_left.obj",
+        left_half_x, crusher_half_y, crusher_half_z);
+    write_octahedron(
+        "example_obj/crusher/crusher_coarse_right.obj",
+        right_half_x, crusher_half_y, crusher_half_z);
+
+    IPCArgs3D args;
+    args.solid_density = 731.0;
+    args.rigid_density = 947.0;
+    args.crusher_angular_speed = 17.25;
+    args.d_hat = 1.0;
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+
+    build_armadillo_through_gear_crushers_example(
+        args, ref_mesh, state, X, pins, params);
+
+    constexpr int solid_nodes = 4;
+    constexpr int solid_tets = 1;
+    constexpr int solid_boundary_triangles = 4;
+    constexpr int nodes_per_crusher = 6;
+    constexpr int triangles_per_crusher = 8;
+    constexpr int crusher_count = 2;
+    constexpr int total_nodes =
+        solid_nodes + crusher_count * nodes_per_crusher;
+    constexpr int total_triangles =
+        solid_boundary_triangles
+        + crusher_count * triangles_per_crusher;
+
+    EXPECT_EQ(state.deformed_positions.size(), total_nodes);
+    EXPECT_EQ(state.velocities.size(), total_nodes);
+    EXPECT_EQ(ref_mesh.num_positions, total_nodes);
+    EXPECT_EQ(ref_mesh.mass.size(), total_nodes);
+    EXPECT_EQ(ref_mesh.node_to_rb.size(), total_nodes);
+    EXPECT_EQ(ref_mesh.tris.size(), 3 * total_triangles);
+    EXPECT_EQ(ref_mesh.tets.size(), 4 * solid_tets);
+    EXPECT_EQ(ref_mesh.tet_rest_data.size(), solid_tets);
+    EXPECT_EQ(ref_mesh.tet_nodes.size(), solid_nodes);
+    EXPECT_EQ(ref_mesh.surface_nodes.size(), solid_nodes);
+    EXPECT_EQ(ref_mesh.deformable_nodes.size(), solid_nodes);
+    EXPECT_TRUE(ref_mesh.Dm_inverse.empty());
+    EXPECT_TRUE(ref_mesh.area.empty());
+    EXPECT_TRUE(ref_mesh.hinges.empty());
+    EXPECT_TRUE(X.empty());
+    EXPECT_TRUE(pins.empty());
+
+    std::vector<unsigned char> is_tet_node(total_nodes, 0);
+    std::vector<unsigned char> is_surface_node(total_nodes, 0);
+    std::vector<unsigned char> is_deformable(total_nodes, 0);
+    for (const int node : ref_mesh.tet_nodes)
+        is_tet_node[static_cast<std::size_t>(node)] = 1;
+    for (const int node : ref_mesh.surface_nodes)
+        is_surface_node[static_cast<std::size_t>(node)] = 1;
+    for (const int node : ref_mesh.deformable_nodes)
+        is_deformable[static_cast<std::size_t>(node)] = 1;
+
+    Vec3 armadillo_lower = state.deformed_positions[0];
+    Vec3 armadillo_upper = armadillo_lower;
+    double armadillo_mass = 0.0;
+    for (int node = 0; node < solid_nodes; ++node) {
+        armadillo_lower = armadillo_lower.cwiseMin(
+            state.deformed_positions[node]);
+        armadillo_upper = armadillo_upper.cwiseMax(
+            state.deformed_positions[node]);
+        armadillo_mass += ref_mesh.mass[node];
+        EXPECT_EQ(ref_mesh.node_to_rb[node], -1);
+        EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 1);
+        EXPECT_EQ(is_surface_node[static_cast<std::size_t>(node)], 1);
+        EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 1);
+        EXPECT_TRUE(state.velocities[node].isZero(0.0));
+    }
+    // The builder centers the physical tetrahedral volume in x/z, not this
+    // deliberately asymmetric fixture's bounding box.
+    const Vec3 armadillo_aabb_center(0.025, 0.65025, 0.0125);
+    EXPECT_TRUE((0.5 * (armadillo_lower + armadillo_upper)).isApprox(
+        armadillo_aabb_center, 1.0e-14));
+    EXPECT_TRUE((armadillo_upper - armadillo_lower).isApprox(
+        Vec3(0.1, 0.15119197, 0.05), 1.0e-14));
+    constexpr double source_to_world_scale = 0.001;
+    constexpr double armadillo_source_volume =
+        100.0 * 151.19197 * 50.0 / 6.0;
+    EXPECT_NEAR(
+        armadillo_mass,
+        args.solid_density * armadillo_source_volume
+            * source_to_world_scale * source_to_world_scale
+            * source_to_world_scale,
+        1.0e-12);
+    ASSERT_EQ(ref_mesh.tets, (std::vector<int>{0, 1, 2, 3}));
+    EXPECT_GT(ref_mesh.tet_rest_data[0].measure, 0.0);
+    Vec3 armadillo_volume_centroid = Vec3::Zero();
+    for (const int node : ref_mesh.tets) {
+        armadillo_volume_centroid += state.deformed_positions[node];
+    }
+    armadillo_volume_centroid *= 0.25;
+    EXPECT_NEAR(armadillo_volume_centroid.x(), 0.0, 1.0e-14);
+    EXPECT_NEAR(armadillo_volume_centroid.z(), 0.0, 1.0e-14);
+
+    ASSERT_EQ(ref_mesh.rb_nodes.size(), crusher_count);
+    ASSERT_EQ(ref_mesh.ref_positions.size(), crusher_count);
+    ASSERT_EQ(ref_mesh.total_mass.size(), crusher_count);
+    ASSERT_EQ(ref_mesh.I_hat.size(), crusher_count);
+    ASSERT_EQ(ref_mesh.rb_update_modes.size(), crusher_count);
+    ASSERT_EQ(state.x_coms.size(), crusher_count);
+    ASSERT_EQ(state.v_coms.size(), crusher_count);
+    ASSERT_EQ(state.orientations.size(), crusher_count);
+    ASSERT_EQ(state.omega.size(), crusher_count);
+    const std::array<Vec3, crusher_count> expected_centers{
+        Vec3(-0.100, 0.5, 0.0), Vec3(0.100, 0.5, 0.0)};
+    // Preserve the scene's initial signs: positive world z on the left and
+    // negative world z on the right.
+    const std::array<Vec3, crusher_count> expected_omegas{
+        Vec3(0.0, 0.0, args.crusher_angular_speed),
+        Vec3(0.0, 0.0, -args.crusher_angular_speed)};
+    const std::array<double, crusher_count> source_half_x{
+        left_half_x, right_half_x};
+    for (int rb = 0; rb < crusher_count; ++rb) {
+        SCOPED_TRACE(rb);
+        EXPECT_EQ(ref_mesh.rb_update_modes[rb],
+            RigidBodyUpdateMode::OrientationOnly);
+        EXPECT_TRUE(state.x_coms[rb].isApprox(
+            expected_centers[static_cast<std::size_t>(rb)], 1.0e-14));
+        EXPECT_TRUE(state.v_coms[rb].isZero(0.0));
+        EXPECT_TRUE(state.orientations[rb].isApprox(
+            Vec4(1.0, 0.0, 0.0, 0.0), 0.0));
+        EXPECT_TRUE(state.omega[rb].isApprox(
+            expected_omegas[static_cast<std::size_t>(rb)], 0.0));
+        ASSERT_EQ(ref_mesh.rb_nodes[rb].size(), nodes_per_crusher);
+
+        Vec3 lower =
+            state.deformed_positions[ref_mesh.rb_nodes[rb].front()];
+        Vec3 upper = lower;
+        double nodal_mass = 0.0;
+        for (int local = 0;
+             local < static_cast<int>(ref_mesh.rb_nodes[rb].size());
+             ++local) {
+            const int node = ref_mesh.rb_nodes[rb][local];
+            lower = lower.cwiseMin(state.deformed_positions[node]);
+            upper = upper.cwiseMax(state.deformed_positions[node]);
+            nodal_mass += ref_mesh.mass[node];
+            EXPECT_EQ(ref_mesh.node_to_rb[node], rb);
+            EXPECT_EQ(is_tet_node[static_cast<std::size_t>(node)], 0);
+            EXPECT_EQ(is_surface_node[static_cast<std::size_t>(node)], 0);
+            EXPECT_EQ(is_deformable[static_cast<std::size_t>(node)], 0);
+            const Vec3 world_offset =
+                state.deformed_positions[node] - state.x_coms[rb];
+            EXPECT_TRUE(state.velocities[node].isApprox(
+                expected_omegas[static_cast<std::size_t>(rb)].cross(
+                    world_offset),
+                1.0e-14));
+        }
+
+        EXPECT_TRUE((0.5 * (lower + upper)).isApprox(
+            expected_centers[static_cast<std::size_t>(rb)], 1.0e-14));
+        EXPECT_TRUE((upper - lower).isApprox(
+            Vec3(
+                2.0 * source_half_x[static_cast<std::size_t>(rb)]
+                    * source_to_world_scale,
+                2.0 * crusher_half_y * source_to_world_scale,
+                2.0 * crusher_half_z * source_to_world_scale),
+            1.0e-14));
+        EXPECT_NEAR(nodal_mass, ref_mesh.total_mass[rb], 1.0e-14);
+
+        const double source_volume = (4.0 / 3.0)
+            * source_half_x[static_cast<std::size_t>(rb)]
+            * crusher_half_y * crusher_half_z;
+        EXPECT_NEAR(
+            ref_mesh.total_mass[rb],
+            args.rigid_density * source_volume
+                * source_to_world_scale * source_to_world_scale
+                * source_to_world_scale,
+            1.0e-12);
+    }
+
+    // Its AABB starts inside the tip-radius envelope; the production meshes'
+    // actual fluted surfaces remain separated at this placement.
+    EXPECT_NEAR(armadillo_lower.y(), 0.574654015, 1.0e-14);
+    EXPECT_NEAR(0.585 - armadillo_lower.y(), 0.010345985, 1.0e-14);
+
+    for (int triangle = 0; triangle < total_triangles; ++triangle) {
+        const int expected_owner = triangle < solid_boundary_triangles
+            ? -1
+            : (triangle - solid_boundary_triangles)
+                    / triangles_per_crusher;
+        for (int local = 0; local < 3; ++local) {
+            EXPECT_EQ(
+                ref_mesh.node_to_rb[ref_mesh.tris[3 * triangle + local]],
+                expected_owner);
+        }
+    }
+
+    EXPECT_DOUBLE_EQ(params.k_sdf, 0.0);
+    EXPECT_TRUE(params.sdf_planes.empty());
+    EXPECT_TRUE(params.sdf_cylinders.empty());
+    EXPECT_TRUE(params.sdf_spheres.empty());
+    EXPECT_FALSE(params.use_ccd_guess);
+    EXPECT_FALSE(params.use_verlet_guess);
+    EXPECT_FALSE(params.use_translation_guess);
+    EXPECT_FALSE(params.use_ogc);
+    EXPECT_FALSE(params.use_ogc_solver);
+
+    // The 50-source-unit Armadillo edge is the shortest fixture edge after
+    // the shared scale, so the scene clamps d_hat to 0.45 * 0.05.
+    EXPECT_LT(params.d_hat, args.d_hat);
+    EXPECT_NEAR(params.d_hat, 0.0225, 1.0e-15);
+}
+
+TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
+    IPCArgs3D args;
+    args.density = 37.0;
+    args.thickness = 0.004;
+    args.rigid_density = 123.0;
+    // Deliberately exceed the cloth-grid edge bound so the scene's analytic
+    // activation-distance clamp and its dependent initial clearance execute.
+    args.d_hat = 0.1;
+    args.k_barrier = 719.0;
+    args.gx = 0.25;
+    args.gy = -7.5;
+    args.gz = -0.75;
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+
+    build_cloth_unrolling_down_fixed_ramp_example(
+        args, ref_mesh, state, X, pins, params);
+
+    constexpr int cloth_nx = 24;
+    constexpr int cloth_ny = 140;
+    constexpr int cloth_nodes =
+        (cloth_nx + 1) * (cloth_ny + 1);
+    constexpr int cloth_triangles = 2 * cloth_nx * cloth_ny;
+    constexpr int cloth_hinges =
+        cloth_nx * cloth_ny
+        + cloth_nx * (cloth_ny - 1)
+        + (cloth_nx - 1) * cloth_ny;
+    constexpr int wedge_nodes = 6;
+    constexpr int wedge_triangles = 8;
+    constexpr int total_nodes = cloth_nodes + wedge_nodes;
+    constexpr int total_triangles =
+        cloth_triangles + wedge_triangles;
+
+    constexpr double cloth_width = 0.90;
+    constexpr double ramp_width = 1.40;
+    constexpr double ramp_height = 2.40;
+    constexpr double ramp_back_z = -1.20;
+    constexpr double ramp_front_z = 1.20;
+    constexpr int leader_rows = 7;
+    constexpr int roll_offset_reference_rows = 8;
+    constexpr double outer_radius = 0.0925;
+    constexpr double inner_radius = 0.05;
+    constexpr double layer_pitch = 0.0065;
+    constexpr double scene_d_hat_cap = 0.005;
+    constexpr double minimum_clearance = 0.002;
+    constexpr double clearance_margin = 1.0e-4;
+    constexpr double kPi = 3.14159265358979323846;
+    const double spiral_a = layer_pitch / (2.0 * kPi);
+    const auto spiral_primitive = [spiral_a](const double radius) {
+        return 0.5 * (
+            radius * std::hypot(radius, spiral_a)
+            + spiral_a * spiral_a * std::asinh(radius / spiral_a));
+    };
+    const double theta_max =
+        (outer_radius - inner_radius) / spiral_a;
+    const double spiral_length =
+        (spiral_primitive(outer_radius)
+         - spiral_primitive(inner_radius))
+        / spiral_a;
+    const double roll_downslope_offset =
+        static_cast<double>(roll_offset_reference_rows) * spiral_length
+        / static_cast<double>(cloth_ny - roll_offset_reference_rows);
+    const double leader_material_length =
+        static_cast<double>(leader_rows) * spiral_length
+        / static_cast<double>(cloth_ny - leader_rows);
+    const double cloth_length = leader_material_length + spiral_length;
+    const double ramp_length = std::hypot(
+        ramp_height, ramp_front_z - ramp_back_z);
+    const Vec3 ramp_top(0.0, ramp_height, ramp_back_z);
+    const Vec3 downhill =
+        Vec3(0.0, -ramp_height, ramp_front_z - ramp_back_z)
+        / ramp_length;
+    const Vec3 ramp_normal =
+        Vec3(0.0, ramp_front_z - ramp_back_z, ramp_height)
+        / ramp_length;
+    EXPECT_NEAR(-downhill.y(), downhill.z(), 1.0e-15);
+    EXPECT_NEAR(ramp_normal.y(), ramp_normal.z(), 1.0e-15);
+    EXPECT_NEAR(
+        downhill.z(), std::sqrt(0.5), 1.0e-15);
+    EXPECT_NEAR(
+        ramp_normal.y(), std::sqrt(0.5), 1.0e-15);
+
+    ASSERT_EQ(state.deformed_positions.size(), total_nodes);
+    ASSERT_EQ(state.velocities.size(), total_nodes);
+    EXPECT_EQ(ref_mesh.num_positions, total_nodes);
+    ASSERT_EQ(ref_mesh.tris.size(), 3 * total_triangles);
+    ASSERT_EQ(ref_mesh.mass.size(), total_nodes);
+    ASSERT_EQ(ref_mesh.node_to_rb.size(), total_nodes);
+    EXPECT_EQ(X.size(), cloth_nodes);
+    EXPECT_EQ(ref_mesh.Dm_inverse.size(), cloth_triangles);
+    EXPECT_EQ(ref_mesh.area.size(), cloth_triangles);
+    EXPECT_EQ(ref_mesh.hinges.size(), cloth_hinges);
+
+    const double rest_dx = cloth_width / cloth_nx;
+    const double rest_ds = cloth_length / cloth_ny;
+    const double expected_d_hat = std::min(
+        std::min(args.d_hat, scene_d_hat_cap),
+        0.45 * std::min(rest_dx, rest_ds));
+    EXPECT_LT(params.d_hat, args.d_hat);
+    EXPECT_NEAR(params.d_hat, expected_d_hat, 1.0e-15);
+    EXPECT_DOUBLE_EQ(params.d_hat, scene_d_hat_cap);
+    const double clearance = std::max(
+        std::max(expected_d_hat, 0.0) + clearance_margin,
+        minimum_clearance);
+    EXPECT_GT(clearance, params.d_hat);
+    const double outer_spiral_derivative_norm =
+        std::hypot(outer_radius, spiral_a);
+    const double tangent_A = outer_radius
+        + leader_material_length * spiral_a
+            / outer_spiral_derivative_norm;
+    const double tangent_G = leader_material_length * outer_radius
+        / outer_spiral_derivative_norm;
+    const double center_to_pin_distance_squared =
+        tangent_A * tangent_A + tangent_G * tangent_G;
+    const double pin_normal_delta_squared =
+        center_to_pin_distance_squared
+        - roll_downslope_offset * roll_downslope_offset;
+    ASSERT_GT(pin_normal_delta_squared, 0.0);
+    const double pin_normal_delta =
+        std::sqrt(pin_normal_delta_squared);
+    const double pin_clearance =
+        outer_radius + clearance + pin_normal_delta;
+    const double spiral_phase_cosine = (
+        tangent_G * roll_downslope_offset
+        - tangent_A * pin_normal_delta)
+        / center_to_pin_distance_squared;
+    const double spiral_phase_sine = (
+        -tangent_A * roll_downslope_offset
+        - tangent_G * pin_normal_delta)
+        / center_to_pin_distance_squared;
+    const double spiral_phase = std::atan2(
+        spiral_phase_sine, spiral_phase_cosine);
+    const double tangent_downslope =
+        roll_downslope_offset
+        + outer_radius * spiral_phase_sine;
+    const double tangent_clearance =
+        outer_radius + clearance
+        - outer_radius * spiral_phase_cosine;
+
+    EXPECT_TRUE(params.gravity.isApprox(
+        Vec3(args.gx, args.gy, args.gz), 0.0));
+    EXPECT_DOUBLE_EQ(params.k_barrier, args.k_barrier);
+    EXPECT_DOUBLE_EQ(params.k_sdf, 0.0);
+    EXPECT_TRUE(params.sdf_planes.empty());
+    EXPECT_TRUE(params.sdf_cylinders.empty());
+    EXPECT_TRUE(params.sdf_spheres.empty());
+    EXPECT_FALSE(params.use_ccd_guess);
+    EXPECT_FALSE(params.use_verlet_guess);
+    EXPECT_FALSE(params.use_translation_guess);
+    EXPECT_FALSE(params.use_ogc);
+    EXPECT_FALSE(params.use_ogc_solver);
+
+    const auto cloth_node = [](const int i, const int j) {
+        return j * (cloth_nx + 1) + i;
+    };
+
+    // The constitutive metric remains the original flat rectangle even
+    // though its initial world-space pose is a leader followed by a spiral.
+    const double expected_triangle_area = 0.5 * rest_dx * rest_ds;
+    for (int j = 0; j <= cloth_ny; ++j) {
+        for (int i = 0; i <= cloth_nx; ++i) {
+            const int node = cloth_node(i, j);
+            EXPECT_TRUE(X[static_cast<std::size_t>(node)].isApprox(
+                Vec2(i * rest_dx, j * rest_ds), 1.0e-14));
+        }
+    }
+    for (int j = 0; j < cloth_ny; ++j) {
+        for (int i = 0; i < cloth_nx; ++i) {
+            const int triangle = 2 * (j * cloth_nx + i);
+            const int v00 = cloth_node(i, j);
+            const int v10 = cloth_node(i + 1, j);
+            const int v01 = cloth_node(i, j + 1);
+            const int v11 = cloth_node(i + 1, j + 1);
+            EXPECT_EQ(
+                (std::array<int, 3>{
+                    ref_mesh.tris[3 * triangle + 0],
+                    ref_mesh.tris[3 * triangle + 1],
+                    ref_mesh.tris[3 * triangle + 2]}),
+                (std::array<int, 3>{v00, v10, v11}));
+            EXPECT_EQ(
+                (std::array<int, 3>{
+                    ref_mesh.tris[3 * triangle + 3],
+                    ref_mesh.tris[3 * triangle + 4],
+                    ref_mesh.tris[3 * triangle + 5]}),
+                (std::array<int, 3>{v00, v11, v01}));
+        }
+    }
+    double rest_area = 0.0;
+    for (int triangle = 0; triangle < cloth_triangles; ++triangle) {
+        EXPECT_NEAR(
+            ref_mesh.area[static_cast<std::size_t>(triangle)],
+            expected_triangle_area, 1.0e-16);
+        rest_area += ref_mesh.area[static_cast<std::size_t>(triangle)];
+
+        const int v0 = ref_mesh.tris[3 * triangle + 0];
+        const int v1 = ref_mesh.tris[3 * triangle + 1];
+        const int v2 = ref_mesh.tris[3 * triangle + 2];
+        Mat22 Dm;
+        Dm.col(0) = X[static_cast<std::size_t>(v1)]
+            - X[static_cast<std::size_t>(v0)];
+        Dm.col(1) = X[static_cast<std::size_t>(v2)]
+            - X[static_cast<std::size_t>(v0)];
+        EXPECT_TRUE((
+            ref_mesh.Dm_inverse[static_cast<std::size_t>(triangle)] * Dm)
+            .isApprox(Mat22::Identity(), 1.0e-13));
+    }
+    EXPECT_NEAR(rest_area, cloth_width * cloth_length, 1.0e-12);
+
+    double maximum_initial_bending = 0.0;
+    for (const Hinge& hinge : ref_mesh.hinges) {
+        EXPECT_NEAR(hinge.bar_theta, 0.0, 1.0e-14);
+        EXPECT_GT(hinge.c_e, 0.0);
+        HingeDef deformed_hinge;
+        for (int local = 0; local < 4; ++local) {
+            ASSERT_GE(hinge.v[local], 0);
+            ASSERT_LT(hinge.v[local], cloth_nodes);
+            deformed_hinge.x[local] = state.deformed_positions[
+                static_cast<std::size_t>(hinge.v[local])];
+        }
+        maximum_initial_bending = std::max(
+            maximum_initial_bending,
+            std::abs(bending_theta(deformed_hinge) - hinge.bar_theta));
+    }
+    EXPECT_GT(maximum_initial_bending, 1.0e-3);
+
+    EXPECT_NEAR(
+        roll_downslope_offset, 0.17742040770396708, 1.0e-15);
+    EXPECT_NEAR(
+        leader_material_length, 0.154075617216603, 1.0e-15);
+    EXPECT_NEAR(cloth_length, 3.08151234433206, 1.0e-15);
+    EXPECT_NEAR(
+        leader_rows * rest_ds, leader_material_length, 1.0e-15);
+    EXPECT_NEAR(
+        center_to_pin_distance_squared,
+        0.03261431053512491, 1.0e-16);
+    EXPECT_NEAR(pin_normal_delta, 0.03370918962661382, 1.0e-15);
+    EXPECT_NEAR(pin_clearance, 0.1313091896266138, 1.0e-15);
+    EXPECT_NEAR(spiral_phase_cosine, 0.7407259652988947, 1.0e-15);
+    EXPECT_NEAR(spiral_phase_sine, -0.671807297022011, 1.0e-15);
+    EXPECT_NEAR(spiral_phase, -0.7366459958573437, 1.0e-15);
+    EXPECT_NEAR(tangent_downslope, 0.11527823272943105, 1.0e-15);
+    EXPECT_NEAR(tangent_clearance, 0.02908284820985224, 1.0e-15);
+    EXPECT_GT(pin_clearance, outer_radius + clearance);
+    EXPECT_GT(tangent_downslope, 0.0);
+    EXPECT_LT(tangent_downslope, roll_downslope_offset);
+    EXPECT_GT(tangent_clearance, clearance);
+    EXPECT_LT(tangent_clearance, outer_radius + clearance);
+    EXPECT_GT(spiral_phase_cosine, 0.0);
+    EXPECT_LT(spiral_phase_sine, 0.0);
+
+    const Vec3 roll_center =
+        ramp_top + roll_downslope_offset * downhill
+        + (outer_radius + clearance) * ramp_normal;
+    const auto expected_centerline = [&](const double s) -> Vec3 {
+        if (s <= leader_material_length) {
+            const double fraction = s / leader_material_length;
+            const double normal_offset =
+                (1.0 - fraction) * pin_clearance
+                + fraction * tangent_clearance;
+            return ramp_top
+                + fraction * tangent_downslope * downhill
+                + normal_offset * ramp_normal;
+        }
+
+        const double target_arc = s - leader_material_length;
+        double lower_theta = 0.0;
+        double upper_theta = theta_max;
+        for (int iteration = 0; iteration < 100; ++iteration) {
+            const double theta = 0.5 * (lower_theta + upper_theta);
+            const double radius = outer_radius - spiral_a * theta;
+            const double arc =
+                (spiral_primitive(outer_radius)
+                 - spiral_primitive(radius))
+                / spiral_a;
+            if (arc < target_arc)
+                lower_theta = theta;
+            else
+                upper_theta = theta;
+        }
+        const double theta = 0.5 * (lower_theta + upper_theta);
+        const double radius = outer_radius - spiral_a * theta;
+        const double angle = spiral_phase + theta;
+        return roll_center + radius * (
+            std::sin(angle) * downhill
+            - std::cos(angle) * ramp_normal);
+    };
+
+    double minimum_ramp_distance =
+        std::numeric_limits<double>::infinity();
+    std::vector<Vec3> cloth_centerlines;
+    cloth_centerlines.reserve(cloth_ny + 1);
+    for (int j = 0; j <= cloth_ny; ++j) {
+        const double s = j * rest_ds;
+        const Vec3 centerline = expected_centerline(s);
+        for (int i = 0; i <= cloth_nx; ++i) {
+            const int node = cloth_node(i, j);
+            const Vec3 expected = centerline
+                + (0.5 - static_cast<double>(i) / cloth_nx)
+                    * cloth_width * Vec3::UnitX();
+            EXPECT_TRUE(state.deformed_positions[
+                static_cast<std::size_t>(node)].isApprox(
+                    expected, 2.0e-12));
+            EXPECT_TRUE(state.velocities[
+                static_cast<std::size_t>(node)].isZero(0.0));
+            const double ramp_distance =
+                (state.deformed_positions[static_cast<std::size_t>(node)]
+                 - ramp_top).dot(ramp_normal);
+            EXPECT_GE(ramp_distance, clearance - 2.0e-12);
+            minimum_ramp_distance = std::min(
+                minimum_ramp_distance, ramp_distance);
+        }
+        EXPECT_NEAR(
+            (state.deformed_positions[
+                 static_cast<std::size_t>(cloth_node(0, j))]
+             - state.deformed_positions[
+                 static_cast<std::size_t>(cloth_node(cloth_nx, j))])
+                .norm(),
+            cloth_width, 1.0e-14);
+        cloth_centerlines.push_back(0.5 * (
+            state.deformed_positions[static_cast<std::size_t>(
+                cloth_node(0, j))]
+            + state.deformed_positions[static_cast<std::size_t>(
+                cloth_node(cloth_nx, j))]));
+    }
+    EXPECT_GT(minimum_ramp_distance, clearance);
+    EXPECT_LT(minimum_ramp_distance, clearance + layer_pitch);
+    const Vec3 pin_centerline =
+        ramp_top + pin_clearance * ramp_normal;
+    const Vec3 expected_tangent_centerline =
+        ramp_top + tangent_downslope * downhill
+        + tangent_clearance * ramp_normal;
+    const Vec3 expected_leader_tangent =
+        ((outer_radius * spiral_phase_cosine
+          - spiral_a * spiral_phase_sine)
+         / outer_spiral_derivative_norm)
+            * downhill
+        + ((outer_radius * spiral_phase_sine
+            + spiral_a * spiral_phase_cosine)
+           / outer_spiral_derivative_norm)
+            * ramp_normal;
+    EXPECT_NEAR(expected_leader_tangent.norm(), 1.0, 1.0e-15);
+    EXPECT_TRUE((
+        pin_centerline
+        + leader_material_length * expected_leader_tangent)
+        .isApprox(expected_tangent_centerline, 2.0e-14));
+    double previous_leader_offset =
+        std::numeric_limits<double>::infinity();
+    Vec3 previous_leader_centerline = Vec3::Zero();
+    for (int j = 0; j <= leader_rows; ++j) {
+        const Vec3 centerline = 0.5 * (
+            state.deformed_positions[static_cast<std::size_t>(
+                cloth_node(0, j))]
+            + state.deformed_positions[static_cast<std::size_t>(
+                cloth_node(cloth_nx, j))]);
+        const double normal_offset =
+            (centerline - ramp_top).dot(ramp_normal);
+        const double fraction =
+            static_cast<double>(j) / leader_rows;
+        const double expected_offset =
+            (1.0 - fraction) * pin_clearance
+            + fraction * tangent_clearance;
+        EXPECT_NEAR(normal_offset, expected_offset, 2.0e-14);
+        EXPECT_NEAR(
+            (centerline - ramp_top).dot(downhill),
+            fraction * tangent_downslope, 2.0e-14);
+        EXPECT_GE(normal_offset, clearance - 2.0e-14);
+        EXPECT_GT(normal_offset, params.d_hat);
+        const double remaining_leader_length =
+            (1.0 - fraction) * leader_material_length;
+        const double expected_roll_distance_squared =
+            outer_radius * outer_radius
+            + 2.0 * remaining_leader_length * outer_radius * spiral_a
+                / outer_spiral_derivative_norm
+            + remaining_leader_length * remaining_leader_length;
+        EXPECT_NEAR(
+            (centerline - roll_center).squaredNorm(),
+            expected_roll_distance_squared, 2.0e-15);
+        if (j < leader_rows)
+            EXPECT_GT((centerline - roll_center).norm(), outer_radius);
+        else
+            EXPECT_NEAR(
+                (centerline - roll_center).norm(),
+                outer_radius, 2.0e-14);
+        if (j > 0) {
+            EXPECT_LT(normal_offset, previous_leader_offset);
+            EXPECT_NEAR(
+                (centerline - previous_leader_centerline).norm(),
+                rest_ds, 2.0e-14);
+            EXPECT_NEAR(
+                (centerline - previous_leader_centerline).dot(downhill),
+                tangent_downslope / leader_rows, 2.0e-14);
+            EXPECT_NEAR(
+                (centerline - previous_leader_centerline).dot(ramp_normal),
+                (tangent_clearance - pin_clearance) / leader_rows,
+                2.0e-14);
+            for (int i = 0; i <= cloth_nx; ++i) {
+                EXPECT_NEAR(
+                    (state.deformed_positions[static_cast<std::size_t>(
+                         cloth_node(i, j))]
+                     - state.deformed_positions[static_cast<std::size_t>(
+                         cloth_node(i, j - 1))])
+                        .norm(),
+                    rest_ds, 2.0e-14);
+            }
+        }
+        previous_leader_offset = normal_offset;
+        previous_leader_centerline = centerline;
+    }
+    const Vec3 tangent_centerline = 0.5 * (
+        state.deformed_positions[static_cast<std::size_t>(
+            cloth_node(0, leader_rows))]
+        + state.deformed_positions[static_cast<std::size_t>(
+            cloth_node(cloth_nx, leader_rows))]);
+    EXPECT_TRUE(tangent_centerline.isApprox(
+        expected_tangent_centerline, 2.0e-14));
+    EXPECT_NEAR(
+        (tangent_centerline - ramp_top).dot(ramp_normal),
+        tangent_clearance, 2.0e-14);
+    EXPECT_NEAR(
+        (tangent_centerline - ramp_top).dot(downhill),
+        tangent_downslope, 2.0e-14);
+    const Vec3 tangent_radius = tangent_centerline - roll_center;
+    const Vec3 actual_leader_tangent =
+        (tangent_centerline - pin_centerline).normalized();
+    EXPECT_NEAR(tangent_radius.norm(), outer_radius, 2.0e-14);
+    EXPECT_TRUE(actual_leader_tangent.isApprox(
+        expected_leader_tangent, 2.0e-14));
+    // The straight leader is C1 with the shrinking spiral. Its tangent has
+    // the expected small inward radial component, unlike a circle tangent.
+    EXPECT_NEAR(
+        tangent_radius.dot(actual_leader_tangent),
+        -outer_radius * spiral_a / outer_spiral_derivative_norm,
+        2.0e-15);
+    EXPECT_LT(tangent_radius.dot(actual_leader_tangent), 0.0);
+    // The seven-row leader must not move the roll: the center retains the
+    // exact downslope offset authored by the former eight-row leader.
+    const double former_eight_row_leader_length =
+        static_cast<double>(roll_offset_reference_rows) * spiral_length
+        / static_cast<double>(cloth_ny - roll_offset_reference_rows);
+    EXPECT_DOUBLE_EQ(
+        roll_downslope_offset, former_eight_row_leader_length);
+    const Vec3 former_roll_center =
+        ramp_top + former_eight_row_leader_length * downhill
+        + (outer_radius + clearance) * ramp_normal;
+    EXPECT_TRUE(roll_center.isApprox(former_roll_center, 0.0));
+    const Vec3 first_spiral_centerline = 0.5 * (
+        state.deformed_positions[static_cast<std::size_t>(
+            cloth_node(0, leader_rows + 1))]
+        + state.deformed_positions[static_cast<std::size_t>(
+            cloth_node(cloth_nx, leader_rows + 1))]);
+    EXPECT_GT(
+        (first_spiral_centerline - ramp_top).dot(ramp_normal),
+        clearance);
+
+    // All rows have the same x span, so the distance between two segments of
+    // this downslope/normal centerline is the attainable surface distance at
+    // equal x. Check every nonincident pair, including leader-versus-spiral
+    // pairs, rather than relying only on the analytic outer-disk argument.
+    double nearest_nonlocal_cloth_segment_distance =
+        std::numeric_limits<double>::infinity();
+    double nearest_leader_spiral_segment_distance =
+        std::numeric_limits<double>::infinity();
+    for (int first = 0; first < cloth_ny; ++first) {
+        for (int second = first + 2; second < cloth_ny; ++second) {
+            const double distance = segment_segment_distance(
+                cloth_centerlines[static_cast<std::size_t>(first)],
+                cloth_centerlines[static_cast<std::size_t>(first + 1)],
+                cloth_centerlines[static_cast<std::size_t>(second)],
+                cloth_centerlines[static_cast<std::size_t>(second + 1)])
+                                        .distance;
+            nearest_nonlocal_cloth_segment_distance = std::min(
+                nearest_nonlocal_cloth_segment_distance, distance);
+            if (first < leader_rows && second >= leader_rows) {
+                nearest_leader_spiral_segment_distance = std::min(
+                    nearest_leader_spiral_segment_distance, distance);
+            }
+        }
+    }
+    EXPECT_GT(nearest_nonlocal_cloth_segment_distance, params.d_hat);
+    EXPECT_GT(nearest_leader_spiral_segment_distance, params.d_hat);
+    EXPECT_TRUE(std::isfinite(nearest_leader_spiral_segment_distance));
+
+    // Adjacent turns are nonlocal in mesh connectivity. Their nearest sampled
+    // row centers should retain the authored radial pitch, while the true
+    // piecewise-linear centerline segments must still remain outside d_hat.
+    // Because every cloth row is a straight x-line with identical span, this
+    // two-dimensional centerline gap is also attainable by the cloth surface
+    // at equal x and is the relevant inter-layer separation.
+    std::vector<Vec3> spiral_centerlines;
+    spiral_centerlines.reserve(cloth_ny - leader_rows + 1);
+    for (int j = leader_rows; j <= cloth_ny; ++j) {
+        spiral_centerlines.push_back(0.5 * (
+            state.deformed_positions[static_cast<std::size_t>(
+                cloth_node(0, j))]
+            + state.deformed_positions[static_cast<std::size_t>(
+                cloth_node(cloth_nx, j))]));
+    }
+
+    double nearest_nonlocal_row_distance =
+        std::numeric_limits<double>::infinity();
+    int nearest_first_row = -1;
+    int nearest_second_row = -1;
+    for (int first = 0;
+         first < static_cast<int>(spiral_centerlines.size()); ++first) {
+        for (int second = first + 2;
+             second < static_cast<int>(spiral_centerlines.size()); ++second) {
+            const double distance = (
+                spiral_centerlines[static_cast<std::size_t>(second)]
+                - spiral_centerlines[static_cast<std::size_t>(first)])
+                    .norm();
+            if (distance < nearest_nonlocal_row_distance) {
+                nearest_nonlocal_row_distance = distance;
+                nearest_first_row = first;
+                nearest_second_row = second;
+            }
+        }
+    }
+    ASSERT_GE(nearest_first_row, 0);
+    ASSERT_GT(nearest_second_row, nearest_first_row + 1);
+    EXPECT_GT(nearest_nonlocal_row_distance, params.d_hat);
+    EXPECT_NEAR(
+        nearest_nonlocal_row_distance, layer_pitch, 2.0e-5);
+    const Vec3 first_turn_offset =
+        spiral_centerlines[static_cast<std::size_t>(nearest_first_row)]
+        - roll_center;
+    const Vec3 second_turn_offset =
+        spiral_centerlines[static_cast<std::size_t>(nearest_second_row)]
+        - roll_center;
+    EXPECT_GT(
+        first_turn_offset.normalized().dot(
+            second_turn_offset.normalized()),
+        0.999);
+    EXPECT_NEAR(
+        std::abs(first_turn_offset.norm() - second_turn_offset.norm()),
+        layer_pitch, 1.0e-5);
+
+    double nearest_nonlocal_segment_distance =
+        std::numeric_limits<double>::infinity();
+    for (int first = 0;
+         first + 1 < static_cast<int>(spiral_centerlines.size()); ++first) {
+        for (int second = first + 2;
+             second + 1 < static_cast<int>(spiral_centerlines.size());
+             ++second) {
+            nearest_nonlocal_segment_distance = std::min(
+                nearest_nonlocal_segment_distance,
+                segment_segment_distance(
+                    spiral_centerlines[static_cast<std::size_t>(first)],
+                    spiral_centerlines[static_cast<std::size_t>(first + 1)],
+                    spiral_centerlines[static_cast<std::size_t>(second)],
+                    spiral_centerlines[static_cast<std::size_t>(second + 1)])
+                    .distance);
+        }
+    }
+    EXPECT_GT(nearest_nonlocal_segment_distance, params.d_hat);
+    EXPECT_LT(nearest_nonlocal_segment_distance, layer_pitch);
+
+    const Vec3 final_offset = expected_centerline(cloth_length) - roll_center;
+    EXPECT_NEAR(final_offset.norm(), inner_radius, 2.0e-12);
+
+    ASSERT_EQ(pins.size(), cloth_nx + 1);
+    for (int i = 0; i <= cloth_nx; ++i) {
+        SCOPED_TRACE(i);
+        const Pin& pin = pins[static_cast<std::size_t>(i)];
+        EXPECT_EQ(pin.vertex_index, cloth_node(i, 0));
+        EXPECT_TRUE(pin.target_position.isApprox(
+            state.deformed_positions[
+                static_cast<std::size_t>(pin.vertex_index)],
+            0.0));
+        EXPECT_NEAR(
+            (pin.target_position - ramp_top).dot(ramp_normal),
+            pin_clearance, 1.0e-14);
+        EXPECT_NEAR(
+            (pin.target_position - ramp_top).dot(downhill),
+            0.0, 1.0e-14);
+    }
+
+    const std::array<Vec3, wedge_nodes> expected_wedge_positions{
+        Vec3(-0.5 * ramp_width, 0.0, ramp_back_z),
+        Vec3( 0.5 * ramp_width, 0.0, ramp_back_z),
+        Vec3(-0.5 * ramp_width, ramp_height, ramp_back_z),
+        Vec3( 0.5 * ramp_width, ramp_height, ramp_back_z),
+        Vec3(-0.5 * ramp_width, 0.0, ramp_front_z),
+        Vec3( 0.5 * ramp_width, 0.0, ramp_front_z)};
+    const std::array<int, 3 * wedge_triangles> expected_wedge_tris{
+        0, 1, 5, 0, 5, 4,
+        0, 2, 3, 0, 3, 1,
+        2, 4, 5, 2, 5, 3,
+        0, 4, 2, 1, 3, 5};
+    double maximum_wedge_ramp_coordinate =
+        -std::numeric_limits<double>::infinity();
+    for (int local = 0; local < wedge_nodes; ++local) {
+        const int node = cloth_nodes + local;
+        EXPECT_TRUE(state.deformed_positions[
+            static_cast<std::size_t>(node)].isApprox(
+                expected_wedge_positions[static_cast<std::size_t>(local)],
+                0.0));
+        EXPECT_TRUE(state.velocities[
+            static_cast<std::size_t>(node)].isZero(0.0));
+        const double ramp_coordinate =
+            (state.deformed_positions[static_cast<std::size_t>(node)]
+             - ramp_top).dot(ramp_normal);
+        EXPECT_LE(ramp_coordinate, 1.0e-14);
+        maximum_wedge_ramp_coordinate = std::max(
+            maximum_wedge_ramp_coordinate, ramp_coordinate);
+    }
+    EXPECT_NEAR(maximum_wedge_ramp_coordinate, 0.0, 1.0e-14);
+    for (int local = 0; local < 3 * wedge_triangles; ++local) {
+        EXPECT_EQ(
+            ref_mesh.tris[3 * cloth_triangles + local],
+            cloth_nodes
+                + expected_wedge_tris[static_cast<std::size_t>(local)]);
+    }
+
+    EXPECT_TRUE(ref_mesh.tets.empty());
+    EXPECT_TRUE(ref_mesh.tet_rest_data.empty());
+    EXPECT_TRUE(ref_mesh.tet_adj.empty());
+    EXPECT_TRUE(ref_mesh.tet_nodes.empty());
+    EXPECT_TRUE(ref_mesh.surface_nodes.empty());
+    ASSERT_EQ(ref_mesh.rb_nodes.size(), 1U);
+    ASSERT_EQ(ref_mesh.ref_positions.size(), 1U);
+    ASSERT_EQ(ref_mesh.total_mass.size(), 1U);
+    ASSERT_EQ(ref_mesh.I_hat.size(), 1U);
+    ASSERT_EQ(ref_mesh.rb_update_modes.size(), 1U);
+    ASSERT_EQ(state.x_coms.size(), 1U);
+    ASSERT_EQ(state.v_coms.size(), 1U);
+    ASSERT_EQ(state.orientations.size(), 1U);
+    ASSERT_EQ(state.omega.size(), 1U);
+    EXPECT_EQ(
+        ref_mesh.rb_update_modes[0], RigidBodyUpdateMode::None);
+    EXPECT_TRUE(state.x_coms[0].isApprox(
+        Vec3(0.0, ramp_height / 3.0,
+             (2.0 * ramp_back_z + ramp_front_z) / 3.0),
+        1.0e-14));
+    EXPECT_TRUE(state.v_coms[0].isZero(0.0));
+    EXPECT_TRUE(state.orientations[0].isApprox(
+        Vec4(1.0, 0.0, 0.0, 0.0), 0.0));
+    EXPECT_TRUE(state.omega[0].isZero(0.0));
+    ASSERT_EQ(ref_mesh.rb_nodes[0].size(), wedge_nodes);
+
+    const double wedge_volume =
+        0.5 * ramp_width * ramp_height
+        * (ramp_front_z - ramp_back_z);
+    EXPECT_NEAR(wedge_volume, 4.032, 1.0e-15);
+    const double expected_wedge_mass =
+        args.rigid_density * wedge_volume;
+    EXPECT_NEAR(
+        ref_mesh.total_mass[0], expected_wedge_mass, 1.0e-13);
+    std::vector<double> wedge_masses;
+    wedge_masses.reserve(wedge_nodes);
+    for (int node = 0; node < total_nodes; ++node) {
+        if (node < cloth_nodes) {
+            EXPECT_EQ(ref_mesh.node_to_rb[node], -1);
+            EXPECT_DOUBLE_EQ(ref_mesh.mass[node], 0.0);
+        } else {
+            EXPECT_EQ(ref_mesh.node_to_rb[node], 0);
+            EXPECT_DOUBLE_EQ(
+                ref_mesh.mass[node], expected_wedge_mass / wedge_nodes);
+            wedge_masses.push_back(ref_mesh.mass[node]);
+        }
+    }
+    ASSERT_EQ(ref_mesh.deformable_nodes.size(), cloth_nodes);
+    for (int node = 0; node < cloth_nodes; ++node)
+        EXPECT_EQ(ref_mesh.deformable_nodes[node], node);
+
+    // The mixed-scene mass pass fills only the shell entries and must leave
+    // the fixed collider's already assigned proxy masses untouched.
+    ref_mesh.build_deformable_lumped_mass(
+        params.density, params.thickness);
+    double total_cloth_mass = 0.0;
+    for (int node = 0; node < cloth_nodes; ++node) {
+        EXPECT_GT(ref_mesh.mass[node], 0.0);
+        total_cloth_mass += ref_mesh.mass[node];
+    }
+    EXPECT_NEAR(
+        total_cloth_mass,
+        params.density * params.thickness * cloth_width * cloth_length,
+        1.0e-12);
+    EXPECT_TRUE(std::equal(
+        wedge_masses.begin(), wedge_masses.end(),
+        ref_mesh.mass.begin() + cloth_nodes));
+
+    double minimum_mesh_edge = std::numeric_limits<double>::infinity();
+    for (int triangle = 0; triangle < total_triangles; ++triangle) {
+        for (int local = 0; local < 3; ++local) {
+            const int first = ref_mesh.tris[3 * triangle + local];
+            const int second =
+                ref_mesh.tris[3 * triangle + (local + 1) % 3];
+            minimum_mesh_edge = std::min(
+                minimum_mesh_edge,
+                (state.deformed_positions[static_cast<std::size_t>(second)]
+                 - state.deformed_positions[static_cast<std::size_t>(first)])
+                    .norm());
+        }
+    }
+    EXPECT_LT(params.d_hat, 0.5 * minimum_mesh_edge);
 }

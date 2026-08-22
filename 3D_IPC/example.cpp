@@ -1416,7 +1416,7 @@ void build_single_deformable_solid_ground_drop_example(
 }
 
 // ---------------------------------------------------------------------------
-// Example 14: one deformable volumetric solid falling onto a pinned cloth (need fix)
+// Example 14: one deformable volumetric solid falling onto a pinned cloth 
 // ---------------------------------------------------------------------------
 // command line: ./build/3D_sim --example 14 --num_frames 200 --substeps 20 --max_substep_iters 30 --fixed_iters  --E 1e8 --outdir stiff_cloth_solid_drop_output --format obj --d_hat 0.019 --k_barrier 500
 // weird if there is no --d_hat and --k_barrier. solid doesn't bounce up and looks like it sticks to the cloth. ccd issue?
@@ -1927,4 +1927,541 @@ void build_dynamic_bolt_into_fixed_nut_example(
         params.d_hat = std::min(
             params.d_hat, 0.45 * minimum_surface_edge);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Example 19: a deformable Armadillo fed through fixed-center gear crushers (Don't run this example for now. It is not working properly!!!!)
+// ---------------------------------------------------------------------------
+// command line: ./build/3D_sim --example 19 --num_frames 300 --fps 60 --substeps 10 --max_substep_iters 10 --node_box_update_count 2 --fixed_iters --solid_E 290909 --solid_nu 0.454545 --d_hat 0.00025 --k_barrier 1000 --crusher_angular_speed 20 --outdir armadillo_gear_crusher_output --format obj
+void build_armadillo_through_gear_crushers_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params) {
+    if (!std::isfinite(args.crusher_angular_speed)
+        || args.crusher_angular_speed < 0.0) {
+        throw std::invalid_argument(
+            "crusher_angular_speed must be finite and nonnegative");
+    }
+    clear_model(ref_mesh, state, X, pins);
+
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = 0.0;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+    params.use_ogc = false;
+    params.use_ogc_solver = false;
+
+    constexpr const char* armadillo_node_filename =
+        "example_obj/armadillo_coarse/armadillo_5000f.1.node";
+    constexpr const char* armadillo_element_filename =
+        "example_obj/armadillo_coarse/armadillo_5000f.1.ele";
+    constexpr const char* left_crusher_filename =
+        "example_obj/crusher/crusher_coarse_left.obj";
+    constexpr const char* right_crusher_filename =
+        "example_obj/crusher/crusher_coarse_right.obj";
+
+    // All three assets use the same millimeter-like source units. Preserve
+    // that common 0.001 scale: each crusher is 0.4 m long with a 0.17 m tip
+    // diameter, while the upright Armadillo is about 0.151 m tall.
+    constexpr double crusher_center_y = 0.5;
+    // Move both axes 6 mm outward from the authored pair placement. With the
+    // production meshes this widens the tooth-tip gap from about 18.5 mm to
+    // 30.5 mm while retaining a symmetric nip at x = 0.
+    constexpr double crusher_center_x = 0.100;
+    constexpr double crusher_target_max_extent = 0.4;
+    constexpr double armadillo_target_max_extent = 0.15119197;
+    // Start the Armadillo in the nip. The importer initially centers its
+    // bounding box; below we correct the lateral placement using its actual
+    // tetrahedral volume centroid so its physical center lies on the crusher
+    // midplane and axial midpoint.
+    const Vec3 armadillo_aabb_center(0.0, 0.65025, 0.0);
+    const std::size_t armadillo_node_begin =
+        state.deformed_positions.size();
+    const std::size_t armadillo_tet_begin =
+        ref_mesh.tet_rest_data.size();
+
+    append_normalized_tetgen_solid(
+        armadillo_node_filename, armadillo_element_filename,
+        state, ref_mesh, armadillo_aabb_center,
+        armadillo_target_max_extent, params.solid_density,
+        /*zero_based_index=*/true);
+
+    Vec3 armadillo_volume_centroid = Vec3::Zero();
+    double armadillo_volume = 0.0;
+    for (std::size_t element = armadillo_tet_begin;
+         element < ref_mesh.tet_rest_data.size(); ++element) {
+        const double volume = ref_mesh.tet_rest_data[element].measure;
+        Vec3 tet_centroid = Vec3::Zero();
+        for (int local = 0; local < 4; ++local) {
+            tet_centroid += state.deformed_positions[
+                static_cast<std::size_t>(ref_mesh.tets[4 * element + local])];
+        }
+        tet_centroid *= 0.25;
+        armadillo_volume_centroid += volume * tet_centroid;
+        armadillo_volume += volume;
+    }
+    armadillo_volume_centroid /= armadillo_volume;
+    const Vec3 lateral_centering(
+        -armadillo_volume_centroid.x(), 0.0,
+        -armadillo_volume_centroid.z());
+    for (std::size_t node = armadillo_node_begin;
+         node < state.deformed_positions.size(); ++node) {
+        state.deformed_positions[node] += lateral_centering;
+    }
+
+    // The crusher axes are material/world +z. Their authored half-tooth phase
+    // is retained by using identity orientations. Positive z on the left and
+    // negative z on the right make their upper surfaces move toward the gap.
+    // OrientationOnly fixes each center but leaves rotation in the ordinary
+    // rigid-body solve. These angular velocities are initial conditions and
+    // are not prescribed after initialization.
+    append_normalized_obj_rigid_body(
+        left_crusher_filename, state, ref_mesh,
+        Vec3(-crusher_center_x, crusher_center_y, 0.0),
+        crusher_target_max_extent, params.rigid_density,
+        Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
+        Vec3(0.0, 0.0, args.crusher_angular_speed),
+        RigidBodyUpdateMode::OrientationOnly);
+    append_normalized_obj_rigid_body(
+        right_crusher_filename, state, ref_mesh,
+        Vec3(crusher_center_x, crusher_center_y, 0.0),
+        crusher_target_max_extent, params.rigid_density,
+        Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
+        Vec3(0.0, 0.0, -args.crusher_angular_speed),
+        RigidBodyUpdateMode::OrientationOnly);
+
+    ref_mesh.build_deformable_nodes();
+
+    // The Armadillo surface is the finest collision discretization. Clamp the
+    // activation distance so the imported scene passes the global edge bound.
+    double minimum_surface_edge = std::numeric_limits<double>::infinity();
+    for (std::size_t triangle = 0; triangle < ref_mesh.tris.size() / 3;
+         ++triangle) {
+        const int* tri = ref_mesh.tris.data() + 3 * triangle;
+        for (int local = 0; local < 3; ++local) {
+            const Vec3& a = state.deformed_positions[
+                static_cast<std::size_t>(tri[local])];
+            const Vec3& b = state.deformed_positions[
+                static_cast<std::size_t>(tri[(local + 1) % 3])];
+            minimum_surface_edge = std::min(
+                minimum_surface_edge, (b - a).norm());
+        }
+    }
+    if (params.d_hat > 0.0 && std::isfinite(minimum_surface_edge)) {
+        params.d_hat = std::min(
+            params.d_hat, 0.45 * minimum_surface_edge);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Example 20: four level Bunny / Spot / cube / gear rows falling onto a
+// pinned cloth
+// ---------------------------------------------------------------------------
+// command line: ./build/3D_sim --example 20 --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 20 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir four_bunny_spot_cube_gear_rows_output --format obj
+void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params) {
+    clear_model(ref_mesh, state, X, pins);
+
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = 0.0;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+    params.use_ogc = false;
+    params.use_ogc_solver = false;
+
+    // Build and initialize the cloth before appending solid and rigid boundary
+    // triangles, preserving the shell rest-data prefix used by the solver.
+    constexpr int cloth_nx = 30;
+    constexpr int cloth_nz = 30;
+    constexpr double cloth_width = 4.0;
+    constexpr double cloth_depth = 4.0;
+    constexpr double cloth_height = 1.2;
+    const int cloth_base = build_square_mesh(
+        ref_mesh, state, X, cloth_nx, cloth_nz,
+        cloth_width, cloth_depth,
+        Vec3(-0.5 * cloth_width, cloth_height,
+             -0.5 * cloth_depth));
+    state.velocities.assign(
+        state.deformed_positions.size(), Vec3::Zero());
+
+    const auto cloth_node = [cloth_base](const int i, const int j) {
+        return cloth_base + j * (cloth_nx + 1) + i;
+    };
+    for (int j = 0; j <= cloth_nz; ++j) {
+        append_pin(
+            pins, cloth_node(0, j), state.deformed_positions);
+        append_pin(
+            pins, cloth_node(cloth_nx, j),
+            state.deformed_positions);
+    }
+
+    // Four collision-free rows share one height. Each row contains one Bunny,
+    // Spot, cube, and gear in a different deterministic order. Keeping all
+    // imported assets in their authored orientation and using identity rigid
+    // orientations avoids any row-dependent yaw or tilt.
+    constexpr int rows = 4;
+    constexpr double object_center_y = 1.75;
+    constexpr double solid_max_extent = 0.44;
+    constexpr double rigid_max_extent = 0.22;
+    constexpr double object_gap = 0.01;
+    constexpr double row_spacing = 0.45;
+    enum BodyType {
+        Bunny = 0, Spot = 1, Cube = 2, Gear = 3, BodyTypeCount = 4};
+    static constexpr int row_order[rows][BodyTypeCount] = {
+        {Bunny, Cube, Gear, Spot},
+        {Gear, Spot, Bunny, Cube},
+        {Spot, Gear, Cube, Bunny},
+        {Cube, Bunny, Spot, Gear},
+    };
+
+    // Type-aware packing follows the normalized production x AABBs. Spot's
+    // source x/z extent ratio is 0.9425986 / 1.716426; Bunny, cube, and gear
+    // all use their requested maximum extent along x. Center every shuffled
+    // row within the same compact footprint and leave exactly 10 mm between
+    // consecutive AABBs. Spot has the largest z extent (0.44 m), so the row
+    // spacing leaves the same 10 mm minimum gap in z.
+    constexpr double spot_x_extent =
+        solid_max_extent * 0.9425986 / 1.716426;
+    static constexpr double type_x_extent[BodyTypeCount] = {
+        solid_max_extent, spot_x_extent,
+        rigid_max_extent, rigid_max_extent};
+    constexpr double packed_row_width =
+        solid_max_extent + spot_x_extent
+        + 2.0 * rigid_max_extent
+        + (BodyTypeCount - 1) * object_gap;
+    double object_center_x[rows][BodyTypeCount] = {};
+    for (int row = 0; row < rows; ++row) {
+        double cursor = -0.5 * packed_row_width;
+        for (int slot = 0; slot < BodyTypeCount; ++slot) {
+            const int type = row_order[row][slot];
+            object_center_x[row][type] =
+                cursor + 0.5 * type_x_extent[type];
+            cursor += type_x_extent[type] + object_gap;
+        }
+    }
+
+    const Vec3 drop_velocity(0.0, -0.75, 0.0);
+    const Vec4 identity_orientation(1.0, 0.0, 0.0, 0.0);
+    const auto object_center = [&](const int type, const int row) {
+        return Vec3(
+            object_center_x[row][type],
+            object_center_y,
+            (static_cast<double>(row) - 1.5) * row_spacing);
+    };
+
+    constexpr const char* bunny_node_filename =
+        "example_obj/bunny_coarse/bunny_2000f.1.node";
+    constexpr const char* bunny_element_filename =
+        "example_obj/bunny_coarse/bunny_2000f.1.ele";
+    for (int row = 0; row < rows; ++row) {
+        const int body_base = append_normalized_tetgen_solid(
+            bunny_node_filename, bunny_element_filename,
+            state, ref_mesh, object_center(Bunny, row),
+            solid_max_extent, params.solid_density,
+            /*zero_based_index=*/true);
+        for (std::size_t node = static_cast<std::size_t>(body_base);
+             node < state.velocities.size(); ++node) {
+            state.velocities[node] = drop_velocity;
+        }
+    }
+
+    constexpr const char* spot_node_filename =
+        "example_obj/spot/spot_2000f.1.node";
+    constexpr const char* spot_element_filename =
+        "example_obj/spot/spot_2000f.1.ele";
+    for (int row = 0; row < rows; ++row) {
+        const int body_base = append_normalized_tetgen_solid(
+            spot_node_filename, spot_element_filename,
+            state, ref_mesh, object_center(Spot, row),
+            solid_max_extent, params.solid_density,
+            /*zero_based_index=*/true);
+        for (std::size_t node = static_cast<std::size_t>(body_base);
+             node < state.velocities.size(); ++node) {
+            state.velocities[node] = drop_velocity;
+        }
+    }
+
+    for (int row = 0; row < rows; ++row) {
+        append_rigid_cube(
+            object_center(Cube, row), rigid_max_extent,
+            params.rigid_density, drop_velocity, ref_mesh, state);
+    }
+
+    constexpr const char* gear_filename =
+        "example_obj/gear_z18_coarse.obj";
+    for (int row = 0; row < rows; ++row) {
+        append_normalized_obj_rigid_body(
+            gear_filename, state, ref_mesh,
+            object_center(Gear, row), rigid_max_extent,
+            params.rigid_density, drop_velocity, identity_orientation,
+            Vec3::Zero());
+    }
+
+    ref_mesh.build_deformable_nodes();
+
+    // The imported solids and gear are much more finely tessellated than the
+    // cloth. Keep the IPC activation distance strictly below the global
+    // half-edge bound while respecting any smaller value supplied by the
+    // caller.
+    double minimum_surface_edge = std::numeric_limits<double>::infinity();
+    for (std::size_t triangle = 0; triangle < ref_mesh.tris.size() / 3;
+         ++triangle) {
+        const int* tri = ref_mesh.tris.data() + 3 * triangle;
+        for (int local = 0; local < 3; ++local) {
+            const Vec3& a = state.deformed_positions[
+                static_cast<std::size_t>(tri[local])];
+            const Vec3& b = state.deformed_positions[
+                static_cast<std::size_t>(tri[(local + 1) % 3])];
+            minimum_surface_edge = std::min(
+                minimum_surface_edge, (b - a).norm());
+        }
+    }
+    if (params.d_hat > 0.0 && std::isfinite(minimum_surface_edge)) {
+        params.d_hat = std::min(
+            params.d_hat, 0.45 * minimum_surface_edge);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Example 21: a pinned cloth roll unrolling down a fixed prism ramp (Don't run for now. Need scene and parameters tuning!!!)
+// ---------------------------------------------------------------------------
+// command line (dt = 1/600 s): OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE ./build/3D_sim --example 21 --num_frames 120 --fps 30 --substeps 20 --max_substep_iters 20 --node_box_update_count 2 --fixed_iters --use_parallel true --use_ccd true --E 1e6 --kB 0.001 --kpin 1e7 --d_hat 0.005 --k_barrier 500 --outdir cloth_unrolling_down_ramp_output --format obj
+void build_cloth_unrolling_down_fixed_ramp_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params) {
+    clear_model(ref_mesh, state, X, pins);
+
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = 0.0;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+    params.use_ogc = false;
+    params.use_ogc_solver = false;
+
+    constexpr int cloth_nx = 24;
+    constexpr int cloth_ny = 140;
+    constexpr double cloth_width = 0.90;
+    constexpr double ramp_width = 1.40;
+    // Match the 2.4 m horizontal run for a 45-degree incline. The previous
+    // 1.5 m height produced a much shallower roughly 32-degree ramp.
+    constexpr double ramp_height = 2.40;
+    constexpr double ramp_back_z = -1.20;
+    constexpr double ramp_front_z = 1.20;
+    constexpr int leader_rows = 7;
+    constexpr int roll_offset_reference_rows = 8;
+    constexpr double outer_radius = 0.0925;
+    constexpr double inner_radius = 0.05;
+    constexpr double layer_pitch = 0.0065;
+    constexpr double maximum_roll_d_hat = 0.005;
+
+    const double spiral_rate = layer_pitch / kTwoPi;
+    const double theta_max =
+        (outer_radius - inner_radius) / spiral_rate;
+    const auto spiral_primitive = [spiral_rate](const double radius) {
+        const double root = std::sqrt(
+            radius * radius + spiral_rate * spiral_rate);
+        return 0.5 * (
+            radius * root
+            + spiral_rate * spiral_rate
+                * std::asinh(radius / spiral_rate));
+    };
+    const double outer_primitive = spiral_primitive(outer_radius);
+    const double spiral_length =
+        (outer_primitive - spiral_primitive(inner_radius)) / spiral_rate;
+    // Retain the old eight-row downslope offset for the roll, but allocate a
+    // separate integer-row material length to an elevated external-tangent
+    // leader. The tangent construction below keeps this leader strain-free
+    // and prevents it from cutting through the rolled section.
+    const double roll_downslope_offset =
+        static_cast<double>(roll_offset_reference_rows) * spiral_length
+        / static_cast<double>(cloth_ny - roll_offset_reference_rows);
+    const double leader_length =
+        static_cast<double>(leader_rows) * spiral_length
+        / static_cast<double>(cloth_ny - leader_rows);
+    const double cloth_length = leader_length + spiral_length;
+
+    // Keep every caller-provided activation distance strictly inside both the
+    // nominal grid-edge bound and the tightly wound 6.5 mm layer pitch. A
+    // 5 mm activation distance supports neighboring turns after only a small
+    // relative motion instead of allowing the loose roll to collapse first.
+    if (params.d_hat > 0.0) {
+        const double nominal_min_edge = std::min(
+            cloth_width / static_cast<double>(cloth_nx),
+            cloth_length / static_cast<double>(cloth_ny));
+        params.d_hat = std::min(
+            std::min(params.d_hat, maximum_roll_d_hat),
+            0.45 * nominal_min_edge);
+    }
+    // Start immediately outside the barrier activation layer. This avoids a
+    // visible/free-fall gap while preserving a small collision-safe margin.
+    constexpr double clearance_margin = 1.0e-4;
+    const double clearance = std::max(
+        std::max(params.d_hat, 0.0) + clearance_margin, 0.002);
+
+    // build_square_mesh records a flat membrane metric and flat hinge rest
+    // angles. Repositioning afterward winds that same flat-rest sheet without
+    // changing its material coordinates or preferred curvature.
+    const int cloth_base = build_square_mesh(
+        ref_mesh, state, X, cloth_nx, cloth_ny,
+        cloth_width, cloth_length,
+        Vec3(-0.5 * cloth_width, 0.0, 0.0));
+
+    const double ramp_run = ramp_front_z - ramp_back_z;
+    const double slope_length = std::hypot(ramp_height, ramp_run);
+    const Vec3 downslope(
+        0.0, -ramp_height / slope_length, ramp_run / slope_length);
+    const Vec3 ramp_normal(
+        0.0, ramp_run / slope_length, ramp_height / slope_length);
+    const Vec3 ramp_top(0.0, ramp_height, ramp_back_z);
+    const Vec3 roll_center =
+        ramp_top + roll_downslope_offset * downslope
+        + (outer_radius + clearance) * ramp_normal;
+
+    // In the ramp's (downslope, normal) plane, solve for a straight leader of
+    // exactly its material length that is C1-tangent to the outer end of the
+    // Archimedean spiral. The lower external branch keeps the leader outside
+    // the roll, avoids a hinge kink at their join, and determines how high the
+    // pin must sit without moving the roll center.
+    const double spiral_tangent_norm = std::hypot(
+        outer_radius, spiral_rate);
+    const double tangent_system_a = outer_radius
+        + leader_length * spiral_rate / spiral_tangent_norm;
+    const double tangent_system_g =
+        leader_length * outer_radius / spiral_tangent_norm;
+    const double tangent_system_norm2 =
+        tangent_system_a * tangent_system_a
+        + tangent_system_g * tangent_system_g;
+    const double pin_normal_delta = std::sqrt(
+        tangent_system_norm2
+        - roll_downslope_offset * roll_downslope_offset);
+    const double pin_ramp_clearance =
+        outer_radius + clearance + pin_normal_delta;
+    const double spiral_phase_cos = (
+        tangent_system_g * roll_downslope_offset
+        - tangent_system_a * pin_normal_delta)
+        / tangent_system_norm2;
+    const double spiral_phase_sin = (
+        -tangent_system_a * roll_downslope_offset
+        - tangent_system_g * pin_normal_delta)
+        / tangent_system_norm2;
+    const double spiral_phase = std::atan2(
+        spiral_phase_sin, spiral_phase_cos);
+    const double tangent_downslope =
+        roll_downslope_offset + outer_radius * spiral_phase_sin;
+    const double tangent_clearance =
+        outer_radius + clearance - outer_radius * spiral_phase_cos;
+
+    const auto spiral_arc_length = [&](const double theta) {
+        const double radius = outer_radius - spiral_rate * theta;
+        return (outer_primitive - spiral_primitive(radius)) / spiral_rate;
+    };
+    const auto theta_at_arc_length = [&](const double target_length) {
+        double lower = 0.0;
+        double upper = theta_max;
+        for (int iteration = 0; iteration < 60; ++iteration) {
+            const double middle = 0.5 * (lower + upper);
+            if (spiral_arc_length(middle) < target_length)
+                lower = middle;
+            else
+                upper = middle;
+        }
+        return 0.5 * (lower + upper);
+    };
+
+    const auto cloth_node = [cloth_base](const int i, const int j) {
+        return cloth_base + j * (cloth_nx + 1) + i;
+    };
+    for (int j = 0; j <= cloth_ny; ++j) {
+        const double s = cloth_length
+            * static_cast<double>(j) / static_cast<double>(cloth_ny);
+        Vec3 centerline;
+        if (s <= leader_length) {
+            const double leader_fraction = s / leader_length;
+            const double leader_clearance =
+                (1.0 - leader_fraction) * pin_ramp_clearance
+                + leader_fraction * tangent_clearance;
+            centerline = ramp_top
+                + leader_fraction * tangent_downslope * downslope
+                + leader_clearance * ramp_normal;
+        } else {
+            const double theta = theta_at_arc_length(s - leader_length);
+            const double radius = outer_radius - spiral_rate * theta;
+            const double angle = spiral_phase + theta;
+            centerline = roll_center + radius * (
+                std::sin(angle) * downslope
+                - std::cos(angle) * ramp_normal);
+        }
+
+        for (int i = 0; i <= cloth_nx; ++i) {
+            // Reverse the across-ramp traversal in world x so the existing
+            // triangle winding faces along the ramp's outward normal.
+            const double across = cloth_width
+                * (0.5 - static_cast<double>(i)
+                    / static_cast<double>(cloth_nx));
+            state.deformed_positions[cloth_node(i, j)] =
+                centerline + across * Vec3::UnitX();
+        }
+    }
+    state.velocities.assign(
+        state.deformed_positions.size(), Vec3::Zero());
+
+    // The uphill short edge is the only pinned part of the sheet. It stays
+    // about 13.1 cm above the ramp while the strain-free leader follows an
+    // external tangent to the unchanged rolled section.
+    for (int i = 0; i <= cloth_nx; ++i)
+        append_pin(pins, cloth_node(i, 0), state.deformed_positions);
+
+    // Closed triangular prism: unlike an inclined PlaneSDF, this finite IPC
+    // collider lets the unrolled cloth pass over and fall from the toe.
+    const double half_ramp_width = 0.5 * ramp_width;
+    const std::vector<Vec3> ramp_positions = {
+        Vec3(-half_ramp_width, 0.0, ramp_back_z),
+        Vec3( half_ramp_width, 0.0, ramp_back_z),
+        Vec3(-half_ramp_width, ramp_height, ramp_back_z),
+        Vec3( half_ramp_width, ramp_height, ramp_back_z),
+        Vec3(-half_ramp_width, 0.0, ramp_front_z),
+        Vec3( half_ramp_width, 0.0, ramp_front_z),
+    };
+    static constexpr int ramp_triangles[24] = {
+        0, 1, 5, 0, 5, 4,  // bottom, outward -y
+        0, 2, 3, 0, 3, 1,  // back, outward -z
+        2, 4, 5, 2, 5, 3,  // slope, outward ramp_normal
+        0, 4, 2,            // left cap, outward -x
+        1, 3, 5,            // right cap, outward +x
+    };
+    const int ramp_node_base =
+        static_cast<int>(state.deformed_positions.size());
+    const double ramp_volume =
+        0.5 * ramp_width * ramp_height * ramp_run;
+    create_rigid_body(
+        ramp_positions, Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
+        Vec3::Zero(), params.rigid_density * ramp_volume,
+        ref_mesh, state, RigidBodyUpdateMode::None);
+    ref_mesh.tris.reserve(
+        ref_mesh.tris.size() + std::size(ramp_triangles));
+    for (const int local_node : ramp_triangles)
+        ref_mesh.tris.push_back(ramp_node_base + local_node);
+
+    ref_mesh.build_deformable_nodes();
 }

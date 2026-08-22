@@ -241,3 +241,27 @@ void build_dynamic_bolt_into_fixed_nut_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
+
+// Example 19: one tetrahedral Armadillo starts in the nip between two
+// fixed-center, counter-rotating gear crushers. Their initial angular
+// velocities are ordinary rigid-body state and are not prescribed afterward.
+void build_armadillo_through_gear_crushers_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params);
+
+// Example 20: four level rows of a tetrahedral Bunny, tetrahedral Spot, rigid
+// cube, and rigid gear falling onto a horizontal cloth pinned along two
+// opposite sides. All bodies retain their authored, untilted orientations.
+void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params);
+
+// Example 21: a flat-rest cloth starts wound into a roll above a closed
+// prism ramp. Its uphill short edge is pinned while gravity unwinds the free
+// length down the ramp. The ramp is fixed IPC geometry, not an SDF.
+void build_cloth_unrolling_down_fixed_ramp_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params);

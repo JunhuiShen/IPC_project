@@ -172,6 +172,9 @@ Built-in example scenes (`--example N`):
 | `16` | Ten flat polygonal prisms, alternating five rigid bodies and five deformable solids, falling onto one another above a cloth pinned along two opposite sides |
 | `17` | Two repeating larger Bunny-solid, larger Spot-solid, smaller rigid-box, and smaller rigid-gear cycles stacked in one vertical column above a cloth pinned along two opposite sides |
 | `18` | A fully dynamic threaded bolt starting deeply engaged and falling under gravity through a threaded nut with fixed translation and orientation |
+| `19` | One tetrahedral Armadillo starting in the nip between two fixed-center, initially counter-rotating gear crushers |
+| `20` | Four close-packed level rows of Bunny-solid, Spot-solid, rigid cube, and rigid gear dropping together onto the same opposite-edge-pinned cloth used by Example 14 |
+| `21` | A rolled cloth pinned along its upper edge and unrolling under gravity down a finite ramp |
 
 Example 17 reads these repository-relative mesh files directly:
 
@@ -191,6 +194,80 @@ geometry while neither its center of mass nor its orientation is updated. The
 bolt uses the default `TranslationAndOrientation` label and starts at rest;
 gravity and the frictionless helical contact normals generate its rotation.
 
+Example 19 reads these three repository-relative assets (the TetGen solid uses
+one node file and one element file):
+
+- `example_obj/armadillo_coarse/armadillo_5000f.1.node`
+- `example_obj/armadillo_coarse/armadillo_5000f.1.ele`
+- `example_obj/crusher/crusher_coarse_left.obj`
+- `example_obj/crusher/crusher_coarse_right.obj`
+
+The crushers use `OrientationOnly`, so their centers remain fixed while their
+orientations participate in the ordinary coupled rigid/contact solve. The
+left crusher starts at +20 rad/s about world z and the right starts at
+-20 rad/s. `crusher_angular_speed` controls only this initial magnitude; the
+speeds are not prescribed after initialization and may change through inertia
+and contact.
+
+Example 20 reads these repository-relative solid and rigid meshes directly:
+
+- `example_obj/bunny_coarse/bunny_2000f.1.node`
+- `example_obj/bunny_coarse/bunny_2000f.1.ele`
+- `example_obj/spot/spot_2000f.1.node`
+- `example_obj/spot/spot_2000f.1.ele`
+- `example_obj/gear_z18_coarse.obj`
+
+The cube is generated procedurally. The scene forms a 4-by-4 grid in the
+horizontal x-z plane, with one Bunny, Spot, cube, and gear in each row. Their
+left-to-right order and x centers are:
+
+| Row-center z (m) | Deterministically shuffled row, left to right (x center in m) |
+|------------------|--------------------------------------------------------------|
+| -0.675 | Bunny (-0.35581598158), cube (-0.01581598158), gear (0.21418401842), Spot (0.455) |
+| -0.225 | gear (-0.46581598158), Spot (-0.225), Bunny (0.12581598158), cube (0.46581598158) |
+| 0.225 | Spot (-0.455), gear (-0.21418401842), cube (0.01581598158), Bunny (0.35581598158) |
+| 0.675 | cube (-0.46581598158), Bunny (-0.12581598158), Spot (0.225), gear (0.46581598158) |
+
+This shuffled order is a fixed compile-time permutation table, not a runtime
+random draw, so rebuilding the scene reproduces the same placement for
+compatible restart checkpoints. Every row is centered in the common footprint
+x = [-0.57581598158, 0.57581598158] m. Type-aware packing uses x extents of
+0.44 m for Bunny, approximately 0.241631963161 m for Spot, and 0.22 m for each
+cube and gear, leaving exactly 0.010 m between consecutive AABBs. The rows are
+0.45 m apart. The production x-y-z AABB extents are approximately
+(0.44, 0.435584, 0.335752) m for Bunny, (0.241632, 0.433659, 0.44) m for Spot,
+(0.22, 0.22, 0.22) m for the cube, and
+(0.22, 0.217960277, 0.044025569) m for the gear. The minimum distance between
+any two initial object AABBs is exactly 0.010 m, and the minimum initial
+object-to-cloth gap is approximately 0.332207757 m.
+
+All 16 body centers start at y = 1.75 m with a downward velocity of 0.75 m/s
+and no applied tilt or initial angular velocity. The deformable Bunny and Spot
+meshes retain their source orientations and are normalized to a 0.44 m maximum
+AABB extent; the rigid cubes and gears use identity orientation and a 0.22 m
+maximum AABB extent. The scene clamps `d_hat` to 45% of the minimum
+surface-edge length so the imported fine meshes satisfy the global IPC
+edge-length bound; with the repository assets, the documented `0.019` m
+request becomes approximately `0.00208794` m (the minimum edge is approximately
+`0.00463986` m). The close-packed gap therefore
+starts outside the barrier activation distance. The production scene has
+19,221 vertices, 31,616 surface triangles, and eight rigid bodies (the four
+cubes and four gears).
+
+Example 21 starts a flat-rest cloth in a compact rolled configuration with one
+complete cross-width edge pinned approximately 0.131 m normally above the top
+of a finite triangular-prism ramp. A strain-free leader follows an external
+tangent to the roll, avoiding any pass through its layers while leaving the
+roll's center and contact level unchanged. The ramp slope is 45 degrees. The
+ramp uses
+the `None` rigid update label, so it remains fixed while its surface
+participates in IPC barrier contact and CCD. The scene caps
+`d_hat` at 0.005 m, winds neighboring turns about 0.0065 m apart, and places
+the roll/ramp tangent only 0.0001 m outside the activation layer so the roll is
+supported before it can collapse through a loose initial gap. Contact is
+frictionless: gravity, pin tension, and the cloth's flat bending rest shape
+drive the qualitative unrolling rather than a no-slip rolling constraint.
+
 At startup, every scene reports its vertex and triangle counts; scenes with
 rigid bodies also report their count. Rigid surface vertices are represented
 by up to three COM and three rotation unknowns per body (subject to its update
@@ -207,7 +284,7 @@ Common invocations:
     ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
     ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
 
-Commands documented alongside Examples 5 through 18 in `example.cpp`:
+Commands documented alongside Examples 5 through 21 in `example.cpp`:
 
     # Example 5: freely rotating rigid tennis racket
     ./build/3D_sim --example 5 --num_frames 500 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output
@@ -254,6 +331,15 @@ Commands documented alongside Examples 5 through 18 in `example.cpp`:
     # Example 18: dynamic threaded bolt falling into a fixed threaded nut
     ./build/3D_sim --example 18 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj
 
+    # Example 19: deformable Armadillo fed through fixed-center gear crushers (dt = 1/600 s)
+    ./build/3D_sim --example 19 --num_frames 300 --fps 60 --substeps 10 --max_substep_iters 10 --node_box_update_count 2 --fixed_iters --solid_E 290909 --solid_nu 0.454545 --d_hat 0.00025 --k_barrier 1000 --crusher_angular_speed 20 --outdir armadillo_gear_crusher_output --format obj
+
+    # Example 20: four close-packed level Bunny/Spot/cube/gear rows dropped onto pinned cloth
+    OMP_NUM_THREADS=10 OMP_DYNAMIC=FALSE ./build/3D_sim --example 20 --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 20 --fixed_iters --use_parallel true --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir four_bunny_spot_cube_gear_rows_on_cloth_output --format obj
+
+    # Example 21: rolled cloth pinned at the top of a fixed ramp and unrolling under gravity (dt = 1/600 s)
+    OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE ./build/3D_sim --example 21 --num_frames 180 --fps 60 --substeps 10 --max_substep_iters 20 --node_box_update_count 2 --fixed_iters --use_parallel true --use_ccd true --E 1e6 --kB 0.001 --kpin 1e7 --d_hat 0.005 --k_barrier 500 --outdir rolled_cloth_on_ramp_output --format obj
+
 Initial guesses are selected before the nonlinear solver starts each substep.
 The default is `ccd_initial_guess`. `--use_verlet_guess true` uses the
 CCD-clipped Verlet predictor `xhat + dt^2 gravity`; `--use_translation_guess
@@ -292,9 +378,8 @@ Reference command for example 3 (4.0 turns at 0.30 turns/s, twist + untwist, 850
 Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
 (`frame_0000.geo`, `frame_0001.geo`, ...). `--format obj` writes `.obj`;
 `--format ply` writes `.ply`; `--format usd` writes `.usda` text. A binary
-restart snapshot `state_NNNN.bin` is written alongside every frame.
-Checkpoints currently store particle positions and velocities only, so restart
-is supported for deformable scenes but not for the reduced rigid-body state.
+restart snapshot `state_NNNN.bin` is written alongside every frame. Checkpoints
+store particle and reduced rigid-body state.
 
 Per-frame statistics are printed to stdout:
 
@@ -303,6 +388,11 @@ Per-frame statistics are printed to stdout:
 Residual fields are omitted for fixed-iteration solves. `global_iters` is the
 sum across all substeps in that frame. After the run finishes, total / average
 solver time and total simulation time are also printed.
+
+Pass `--verbose` to print contact-cache rebuilds and the residual after every
+Gauss-Seidel sweep. Mixed solves report cloth, solid, rigid-body, and total
+residuals separately. With `--fixed_iters`, residuals are intentionally not
+computed, so verbose output reports cache rebuilds only.
 
 ## CLI reference
 
@@ -313,11 +403,11 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 |-------|-------|
 | Time integration | `fps`, `substeps`, `num_frames` |
 | Physics | Shell: `E`, `nu`, `density`, `thickness`, `kB`; volumetric solid: `solid_E`, `solid_nu`, `solid_density`; rigid body: `rigid_density`; shared: `kpin`, `gx`, `gy`, `gz` |
-| Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `damping`, `fixed_iters`, `use_parallel`, `write_substeps` |
+| Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `damping`, `fixed_iters`, `use_parallel`, `verbose`, `write_substeps` |
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (per-iteration box/pair refresh solver), `ogc_box_pad` (BVH padding for the refresh; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (translation/node-box radius limits in m), `theta_box_min`, `theta_box_max` (rigid orientation-box angular-radius limits in rad), `node_box_update_count` (GS iterations between broad-phase/contact-color rebuilds; default 10) |
-| Scene | `example` (`1`..`17`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink` |
+| Scene | `example` (`1`..`21`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink`, `crusher_angular_speed` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame`, `datadir` |
 
 Notes:
@@ -484,8 +574,8 @@ reader can jump to the layer they care about.
 
 ## Tests
 
-The 265 GoogleTest cases are split into focused binaries. To build and run them
-all:
+CTest currently discovers 380 GoogleTest cases split into focused binaries.
+To build and run them all:
 
     cmake -B build
     cmake --build build --clean-first
@@ -501,13 +591,13 @@ all:
 | `bending_energy_test` | 19 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
 | `parallel_helper_test` | 13 | Contact adjacency, rigid ownership filtering/coloring, spherical-cap AABBs, and rigid blue boxes |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
-| `make_shape_test` | 22 | Incident-triangle maps, mixed cloth/rigid/solid scene construction, normalized TetGen solids, tetrahedral polygonal prisms, and icosphere construction |
+| `make_shape_test` | 25 | Incident-triangle maps, mixed cloth/rigid/solid scene construction, normalized TetGen solids, Example 19 crusher initialization, Example 20 four-row mixed-body construction, Example 21 rolled-cloth ramp construction, tetrahedral polygonal prisms, and icosphere construction |
 | `solid_ipc_test` | 33 | Volumetric corotated solid energy/derivatives, mixed general-solver integration, solid contact, and reaction against fixed labeled rigid geometry |
 | `barrier_energy_test` | 19 | Scalar barrier, all NT/SS feature regions, force partition, deformable/rigid derivative blocks and modes, and stress cases |
 | `corotated_energy_test` | 11 | Rest state, invariance, gradient/Hessian FD convergence, and stress cases |
 | `initial_guess_test` | 5 | CCD no-candidate, Verlet gravity, and translation closed forms for inertia/gravity, pins, and one-step plane-SDF correction |
 | `time_integration_test` | 1 | Position-difference velocity updates |
-| `state_io_test` | 1 | Binary checkpoint serialize/deserialize round trip |
+| `state_io_test` | 1 | Binary checkpoint round trip |
 | `node_triangle_distance_test` | 9 | All 7 proximity regions + signed distance + degenerate |
 | `output_test` | 2 | Debug OBJ/BVH export for manual inspection |
 | `simulation_snapshot_test` | 1 | Golden-file regression over the 100-frame reference trajectory |
