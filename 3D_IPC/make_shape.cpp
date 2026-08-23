@@ -562,6 +562,50 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
     return base;
 }
 
+int build_square_mesh_alternating_diagonals(
+    RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X,
+    int nx, int ny, double width, double height, const Vec3& origin) {
+    const int base = static_cast<int>(state.deformed_positions.size());
+
+    for (int j = 0; j <= ny; ++j) {
+        for (int i = 0; i <= nx; ++i) {
+            const double u = static_cast<double>(i) / nx;
+            const double v = static_cast<double>(j) / ny;
+            const double x_ref = u * width;
+            const double y_ref = v * height;
+
+            X.push_back(Vec2(x_ref, y_ref));
+            state.deformed_positions.push_back(
+                origin + Vec3(x_ref, 0.0, y_ref));
+        }
+    }
+
+    const auto vertex_index = [base, nx](int i, int j) {
+        return base + j * (nx + 1) + i;
+    };
+
+    for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+            const int v00 = vertex_index(i, j);
+            const int v10 = vertex_index(i + 1, j);
+            const int v01 = vertex_index(i, j + 1);
+            const int v11 = vertex_index(i + 1, j + 1);
+
+            if ((i + j) % 2 == 0) {
+                ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v10); ref_mesh.tris.push_back(v11);
+                ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v11); ref_mesh.tris.push_back(v01);
+            } else {
+                ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v10); ref_mesh.tris.push_back(v01);
+                ref_mesh.tris.push_back(v10); ref_mesh.tris.push_back(v11); ref_mesh.tris.push_back(v01);
+            }
+        }
+    }
+
+    ref_mesh.initialize(X, state.deformed_positions);
+
+    return base;
+}
+
 // V = nu(n_rows + 1) + 2 and T = 2nu(n_rows + 1), including both end caps.
 int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X,
                         int nu, double radius, double length, const Vec3& center) {

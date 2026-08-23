@@ -258,10 +258,12 @@ void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
-// Example 21: a flat-rest cloth starts wound into a roll above a closed
-// prism ramp. Its uphill short edge is pinned while gravity unwinds the free
-// length down the ramp. The ramp is fixed IPC geometry, not an SDF.
+// Example 21: a flat-rest cloth starts wound into a roll above an inclined
+// plane SDF joined to a horizontal ground SDF. Its uphill short edge is pinned
+// while gravity unwinds the free length down the ramp. A finite wedge and
+// ground quad are exported through static_x/static_tris for visualization only.
 void build_cloth_unrolling_down_fixed_ramp_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
-    std::vector<Pin>& pins, SimParams& params);
+    std::vector<Pin>& pins, SimParams& params,
+    std::vector<Vec3>& static_x, std::vector<int>& static_tris);

@@ -11,7 +11,9 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <numeric>
+#include <set>
 
 namespace {
 
@@ -67,6 +69,180 @@ TEST(BuildIncidentTriangleMap, EmptyInput) {
 std::vector<int> indices = {};
 auto map = build_incident_triangle_map(indices);
 EXPECT_TRUE(map.empty());
+}
+
+TEST(BuildSquareMeshAlternatingDiagonals,
+     CheckerboardWindingReflectionAndLumpedMass) {
+    constexpr int nx = 24;
+    constexpr int ny = 160;
+    constexpr double width = 0.90;
+    constexpr double height = 3.20;
+    constexpr double density = 37.0;
+    constexpr double thickness = 0.004;
+    const Vec3 origin(-0.45, 1.25, -1.60);
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    const int base = build_square_mesh_alternating_diagonals(
+        ref_mesh, state, X, nx, ny, width, height, origin);
+
+    constexpr int node_count = (nx + 1) * (ny + 1);
+    constexpr int triangle_count = 2 * nx * ny;
+    ASSERT_EQ(base, 0);
+    ASSERT_EQ(state.deformed_positions.size(), node_count);
+    ASSERT_EQ(X.size(), node_count);
+    ASSERT_EQ(ref_mesh.tris.size(), 3 * triangle_count);
+    ASSERT_EQ(ref_mesh.area.size(), triangle_count);
+
+    const auto node = [](const int i, const int j) {
+        return j * (nx + 1) + i;
+    };
+    const auto triangle_vertices = [&ref_mesh](const int triangle) {
+        return std::array<int, 3>{
+            ref_mesh.tris[3 * triangle + 0],
+            ref_mesh.tris[3 * triangle + 1],
+            ref_mesh.tris[3 * triangle + 2]};
+    };
+
+    // Even cells retain build_square_mesh's v00--v11 diagonal; odd cells
+    // use v10--v01. Both choices have positive material-space winding and
+    // the same -y world-space normal.
+    for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+            const int first_triangle = 2 * (j * nx + i);
+            const int v00 = node(i, j);
+            const int v10 = node(i + 1, j);
+            const int v01 = node(i, j + 1);
+            const int v11 = node(i + 1, j + 1);
+            if ((i + j) % 2 == 0) {
+                EXPECT_EQ(
+                    triangle_vertices(first_triangle),
+                    (std::array<int, 3>{v00, v10, v11}));
+                EXPECT_EQ(
+                    triangle_vertices(first_triangle + 1),
+                    (std::array<int, 3>{v00, v11, v01}));
+            } else {
+                EXPECT_EQ(
+                    triangle_vertices(first_triangle),
+                    (std::array<int, 3>{v00, v10, v01}));
+                EXPECT_EQ(
+                    triangle_vertices(first_triangle + 1),
+                    (std::array<int, 3>{v10, v11, v01}));
+            }
+        }
+    }
+    for (int triangle = 0; triangle < triangle_count; ++triangle) {
+        const std::array<int, 3> vertices = triangle_vertices(triangle);
+        const Vec2 material_first =
+            X[static_cast<std::size_t>(vertices[1])]
+            - X[static_cast<std::size_t>(vertices[0])];
+        const Vec2 material_second =
+            X[static_cast<std::size_t>(vertices[2])]
+            - X[static_cast<std::size_t>(vertices[0])];
+        EXPECT_GT(
+            material_first.x() * material_second.y()
+                - material_first.y() * material_second.x(),
+            0.0);
+        const Vec3 world_normal =
+            (state.deformed_positions[static_cast<std::size_t>(vertices[1])]
+             - state.deformed_positions[static_cast<std::size_t>(vertices[0])])
+                .cross(
+                    state.deformed_positions[static_cast<std::size_t>(vertices[2])]
+                    - state.deformed_positions[static_cast<std::size_t>(vertices[0])]);
+        EXPECT_LT(world_normal.y(), 0.0);
+        EXPECT_NEAR(world_normal.x(), 0.0, 1.0e-15);
+        EXPECT_NEAR(world_normal.z(), 0.0, 1.0e-15);
+    }
+
+    // With an even x cell count, reflecting i -> nx-i swaps both the cell
+    // parity and its diagonal. The unoriented triangle and edge sets remain
+    // identical to the original topology.
+    const auto reflect_node = [node](const int vertex) {
+        const int j = vertex / (nx + 1);
+        const int i = vertex % (nx + 1);
+        return node(nx - i, j);
+    };
+    std::set<std::array<int, 3>> triangles;
+    std::set<std::array<int, 3>> reflected_triangles;
+    std::set<std::array<int, 2>> edges;
+    std::set<std::array<int, 2>> reflected_edges;
+    for (int triangle = 0; triangle < triangle_count; ++triangle) {
+        std::array<int, 3> vertices = triangle_vertices(triangle);
+        std::array<int, 3> reflected = {
+            reflect_node(vertices[0]),
+            reflect_node(vertices[1]),
+            reflect_node(vertices[2])};
+        std::sort(vertices.begin(), vertices.end());
+        std::sort(reflected.begin(), reflected.end());
+        triangles.insert(vertices);
+        reflected_triangles.insert(reflected);
+        for (int local = 0; local < 3; ++local) {
+            std::array<int, 2> edge = {
+                vertices[local], vertices[(local + 1) % 3]};
+            std::array<int, 2> reflected_edge = {
+                reflect_node(edge[0]), reflect_node(edge[1])};
+            std::sort(edge.begin(), edge.end());
+            std::sort(reflected_edge.begin(), reflected_edge.end());
+            edges.insert(edge);
+            reflected_edges.insert(reflected_edge);
+        }
+    }
+    EXPECT_EQ(triangles, reflected_triangles);
+    EXPECT_EQ(edges, reflected_edges);
+
+    constexpr int hinge_count =
+        nx * ny + nx * (ny - 1) + (nx - 1) * ny;
+    ASSERT_EQ(ref_mesh.hinges.size(), hinge_count);
+    const auto hinge_signature = [](
+                                     int edge_first, int edge_second,
+                                     int apex_first, int apex_second) {
+        if (edge_second < edge_first)
+            std::swap(edge_first, edge_second);
+        if (apex_second < apex_first)
+            std::swap(apex_first, apex_second);
+        return std::array<int, 4>{
+            edge_first, edge_second, apex_first, apex_second};
+    };
+    std::map<std::array<int, 4>, double> hinge_weights;
+    for (const Hinge& hinge : ref_mesh.hinges) {
+        EXPECT_NEAR(hinge.bar_theta, 0.0, 1.0e-14);
+        EXPECT_GT(hinge.c_e, 0.0);
+        const auto [iterator, inserted] = hinge_weights.emplace(
+            hinge_signature(
+                hinge.v[0], hinge.v[1], hinge.v[2], hinge.v[3]),
+            hinge.c_e);
+        EXPECT_TRUE(inserted);
+        (void)iterator;
+    }
+    for (const Hinge& hinge : ref_mesh.hinges) {
+        const std::array<int, 4> reflected_signature = hinge_signature(
+            reflect_node(hinge.v[0]), reflect_node(hinge.v[1]),
+            reflect_node(hinge.v[2]), reflect_node(hinge.v[3]));
+        const auto reflected_hinge = hinge_weights.find(reflected_signature);
+        ASSERT_NE(reflected_hinge, hinge_weights.end());
+        EXPECT_NEAR(reflected_hinge->second, hinge.c_e, 1.0e-12);
+    }
+
+    ref_mesh.build_lumped_mass(density, thickness);
+    ASSERT_EQ(ref_mesh.mass.size(), node_count);
+    for (int j = 0; j <= ny; ++j) {
+        for (int i = 0; i <= nx; ++i) {
+            EXPECT_NEAR(
+                ref_mesh.mass[static_cast<std::size_t>(node(i, j))],
+                ref_mesh.mass[static_cast<std::size_t>(node(nx - i, j))],
+                1.0e-14);
+        }
+    }
+    const double triangle_mass = density * thickness
+        * 0.5 * width / nx * height / ny;
+    const double expected_corner_mass = 2.0 * triangle_mass / 3.0;
+    EXPECT_NEAR(ref_mesh.mass[node(0, 0)], expected_corner_mass, 1.0e-15);
+    EXPECT_NEAR(ref_mesh.mass[node(nx, 0)], expected_corner_mass, 1.0e-15);
+    EXPECT_NEAR(ref_mesh.mass[node(0, ny)], expected_corner_mass, 1.0e-15);
+    EXPECT_NEAR(ref_mesh.mass[node(nx, ny)], expected_corner_mass, 1.0e-15);
+    EXPECT_NEAR(
+        ref_mesh.mass[node(0, ny)], ref_mesh.mass[node(nx, ny)], 1.0e-15);
 }
 
 TEST(MixedExample, FiftyMixedRigidPolygonsAboveFourCornerPinnedCloth) {
@@ -3183,7 +3359,7 @@ TEST(MixedExample,
     EXPECT_NEAR(params.d_hat, 0.0225, 1.0e-15);
 }
 
-TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
+TEST(ClothExample, RolledClothUsesInclineAndGroundSDFs) {
     IPCArgs3D args;
     args.density = 37.0;
     args.thickness = 0.004;
@@ -3192,6 +3368,8 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
     // activation-distance clamp and its dependent initial clearance execute.
     args.d_hat = 0.1;
     args.k_barrier = 719.0;
+    args.k_sdf = 840000.0;
+    args.eps_sdf = 0.003;
     args.gx = 0.25;
     args.gy = -7.5;
     args.gz = -0.75;
@@ -3201,12 +3379,14 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
     std::vector<Vec2> X;
     std::vector<Pin> pins;
     SimParams params = args.to_sim_params();
+    std::vector<Vec3> static_x;
+    std::vector<int> static_tris;
 
     build_cloth_unrolling_down_fixed_ramp_example(
-        args, ref_mesh, state, X, pins, params);
+        args, ref_mesh, state, X, pins, params, static_x, static_tris);
 
     constexpr int cloth_nx = 24;
-    constexpr int cloth_ny = 140;
+    constexpr int cloth_ny = 160;
     constexpr int cloth_nodes =
         (cloth_nx + 1) * (cloth_ny + 1);
     constexpr int cloth_triangles = 2 * cloth_nx * cloth_ny;
@@ -3216,23 +3396,25 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
         + (cloth_nx - 1) * cloth_ny;
     constexpr int wedge_nodes = 6;
     constexpr int wedge_triangles = 8;
-    constexpr int total_nodes = cloth_nodes + wedge_nodes;
-    constexpr int total_triangles =
-        cloth_triangles + wedge_triangles;
+    constexpr int ground_nodes = 4;
+    constexpr int ground_triangles = 2;
+    constexpr int total_nodes = cloth_nodes;
+    constexpr int total_triangles = cloth_triangles;
 
     constexpr double cloth_width = 0.90;
     constexpr double ramp_width = 1.40;
     constexpr double ramp_height = 2.40;
     constexpr double ramp_back_z = -1.20;
     constexpr double ramp_front_z = 1.20;
-    constexpr int leader_rows = 7;
-    constexpr int roll_offset_reference_rows = 8;
-    constexpr double outer_radius = 0.0925;
+    constexpr int leader_rows = 8;
+    constexpr double outer_radius = 0.100;
     constexpr double inner_radius = 0.05;
     constexpr double layer_pitch = 0.0065;
     constexpr double scene_d_hat_cap = 0.005;
     constexpr double minimum_clearance = 0.002;
-    constexpr double clearance_margin = 1.0e-4;
+    constexpr double minimum_pin_clearance = 0.020;
+    constexpr double roll_clearance_margin = 1.0e-4;
+    constexpr double pin_clearance_margin = 1.0e-3;
     constexpr double kPi = 3.14159265358979323846;
     const double spiral_a = layer_pitch / (2.0 * kPi);
     const auto spiral_primitive = [spiral_a](const double radius) {
@@ -3246,15 +3428,13 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
         (spiral_primitive(outer_radius)
          - spiral_primitive(inner_radius))
         / spiral_a;
-    const double roll_downslope_offset =
-        static_cast<double>(roll_offset_reference_rows) * spiral_length
-        / static_cast<double>(cloth_ny - roll_offset_reference_rows);
     const double leader_material_length =
         static_cast<double>(leader_rows) * spiral_length
         / static_cast<double>(cloth_ny - leader_rows);
     const double cloth_length = leader_material_length + spiral_length;
     const double ramp_length = std::hypot(
         ramp_height, ramp_front_z - ramp_back_z);
+    const double cloth_overhang = cloth_length - ramp_length;
     const Vec3 ramp_top(0.0, ramp_height, ramp_back_z);
     const Vec3 downhill =
         Vec3(0.0, -ramp_height, ramp_front_z - ramp_back_z)
@@ -3273,8 +3453,8 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
     ASSERT_EQ(state.velocities.size(), total_nodes);
     EXPECT_EQ(ref_mesh.num_positions, total_nodes);
     ASSERT_EQ(ref_mesh.tris.size(), 3 * total_triangles);
-    ASSERT_EQ(ref_mesh.mass.size(), total_nodes);
-    ASSERT_EQ(ref_mesh.node_to_rb.size(), total_nodes);
+    EXPECT_TRUE(ref_mesh.mass.empty());
+    EXPECT_TRUE(ref_mesh.node_to_rb.empty());
     EXPECT_EQ(X.size(), cloth_nodes);
     EXPECT_EQ(ref_mesh.Dm_inverse.size(), cloth_triangles);
     EXPECT_EQ(ref_mesh.area.size(), cloth_triangles);
@@ -3288,56 +3468,107 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
     EXPECT_LT(params.d_hat, args.d_hat);
     EXPECT_NEAR(params.d_hat, expected_d_hat, 1.0e-15);
     EXPECT_DOUBLE_EQ(params.d_hat, scene_d_hat_cap);
-    const double clearance = std::max(
-        std::max(expected_d_hat, 0.0) + clearance_margin,
+    const double active_contact_range = std::max(
+        std::max(expected_d_hat, 0.0),
+        std::max(args.eps_sdf, 0.0));
+    const double roll_clearance = std::max(
+        active_contact_range + roll_clearance_margin,
         minimum_clearance);
-    EXPECT_GT(clearance, params.d_hat);
-    const double outer_spiral_derivative_norm =
-        std::hypot(outer_radius, spiral_a);
-    const double tangent_A = outer_radius
-        + leader_material_length * spiral_a
-            / outer_spiral_derivative_norm;
-    const double tangent_G = leader_material_length * outer_radius
-        / outer_spiral_derivative_norm;
-    const double center_to_pin_distance_squared =
-        tangent_A * tangent_A + tangent_G * tangent_G;
-    const double pin_normal_delta_squared =
-        center_to_pin_distance_squared
-        - roll_downslope_offset * roll_downslope_offset;
-    ASSERT_GT(pin_normal_delta_squared, 0.0);
-    const double pin_normal_delta =
-        std::sqrt(pin_normal_delta_squared);
-    const double pin_clearance =
-        outer_radius + clearance + pin_normal_delta;
-    const double spiral_phase_cosine = (
-        tangent_G * roll_downslope_offset
-        - tangent_A * pin_normal_delta)
-        / center_to_pin_distance_squared;
-    const double spiral_phase_sine = (
-        -tangent_A * roll_downslope_offset
-        - tangent_G * pin_normal_delta)
-        / center_to_pin_distance_squared;
-    const double spiral_phase = std::atan2(
-        spiral_phase_sine, spiral_phase_cosine);
-    const double tangent_downslope =
-        roll_downslope_offset
-        + outer_radius * spiral_phase_sine;
-    const double tangent_clearance =
-        outer_radius + clearance
-        - outer_radius * spiral_phase_cosine;
+    const double pin_clearance = std::max(
+        active_contact_range + pin_clearance_margin,
+        minimum_pin_clearance);
+    const double leader_clearance_drop =
+        pin_clearance - roll_clearance;
+    const double leader_downslope_span = std::sqrt(
+        leader_material_length * leader_material_length
+        - leader_clearance_drop * leader_clearance_drop);
+    const double roll_downslope_offset = leader_downslope_span;
+    EXPECT_GT(roll_clearance, params.d_hat);
+    EXPECT_GT(pin_clearance, roll_clearance);
 
     EXPECT_TRUE(params.gravity.isApprox(
         Vec3(args.gx, args.gy, args.gz), 0.0));
     EXPECT_DOUBLE_EQ(params.k_barrier, args.k_barrier);
-    EXPECT_DOUBLE_EQ(params.k_sdf, 0.0);
-    EXPECT_TRUE(params.sdf_planes.empty());
+    EXPECT_DOUBLE_EQ(params.k_sdf, args.k_sdf);
+    EXPECT_DOUBLE_EQ(params.eps_sdf, args.eps_sdf);
+    ASSERT_EQ(params.sdf_planes.size(), 2U);
+    EXPECT_TRUE(params.sdf_planes[0].point.isZero(0.0));
+    EXPECT_TRUE(params.sdf_planes[0].normal.isApprox(
+        Vec3::UnitY(), 0.0));
+    EXPECT_TRUE(params.sdf_planes[1].point.isApprox(
+        ramp_top, 0.0));
+    EXPECT_TRUE(params.sdf_planes[1].normal.isApprox(
+        ramp_normal, 0.0));
     EXPECT_TRUE(params.sdf_cylinders.empty());
     EXPECT_TRUE(params.sdf_spheres.empty());
+
     EXPECT_FALSE(params.use_ccd_guess);
     EXPECT_FALSE(params.use_verlet_guess);
     EXPECT_FALSE(params.use_translation_guess);
     EXPECT_FALSE(params.use_ogc);
     EXPECT_FALSE(params.use_ogc_solver);
+
+    const PlaneSDF& ground_sdf = params.sdf_planes[0];
+    const PlaneSDF& ramp_sdf = params.sdf_planes[1];
+    EXPECT_NEAR(ground_sdf.normal.norm(), 1.0, 0.0);
+    EXPECT_NEAR(ramp_sdf.normal.norm(), 1.0, 1.0e-15);
+    const auto minimum_sdf_evaluation = [&](const Vec3& position) {
+        SDFEvaluation result = evaluate_sdf(ground_sdf, position);
+        const SDFEvaluation ramp_result =
+            evaluate_sdf(ramp_sdf, position);
+        // Match the production minimum-phi reduction: strict comparison
+        // preserves the ground-first ordering when both planes tie at the toe.
+        if (ramp_result.phi < result.phi)
+            result = ramp_result;
+        return result;
+    };
+
+    const Vec3 ramp_midpoint =
+        ramp_top + 0.5 * ramp_length * downhill;
+    const Vec3 ramp_toe(0.0, 0.0, ramp_front_z);
+    const Vec3 ground_surface_probe(0.0, 0.0, 2.0);
+    EXPECT_NEAR(evaluate_sdf(ramp_sdf, ramp_midpoint).phi, 0.0, 1.0e-15);
+    EXPECT_NEAR(
+        evaluate_sdf(ground_sdf, ramp_midpoint).phi,
+        0.5 * ramp_height, 1.0e-15);
+    EXPECT_NEAR(evaluate_sdf(ground_sdf, ramp_toe).phi, 0.0, 0.0);
+    EXPECT_NEAR(evaluate_sdf(ramp_sdf, ramp_toe).phi, 0.0, 1.0e-15);
+    const SDFEvaluation toe_sdf = minimum_sdf_evaluation(ramp_toe);
+    EXPECT_NEAR(toe_sdf.phi, 0.0, 0.0);
+    EXPECT_TRUE(toe_sdf.grad_phi.isApprox(Vec3::UnitY(), 0.0));
+    EXPECT_NEAR(
+        evaluate_sdf(ground_sdf, ground_surface_probe).phi, 0.0, 0.0);
+    EXPECT_GT(evaluate_sdf(ramp_sdf, ground_surface_probe).phi, 0.0);
+    EXPECT_TRUE(minimum_sdf_evaluation(ground_surface_probe)
+                    .grad_phi.isApprox(Vec3::UnitY(), 0.0));
+
+    const Vec3 ramp_force_free_probe =
+        ramp_midpoint + 2.0 * params.eps_sdf * ramp_normal;
+    const Vec3 ground_force_free_probe(
+        0.0, 2.0 * params.eps_sdf, 2.0);
+    for (const Vec3& probe :
+         {ramp_force_free_probe, ground_force_free_probe}) {
+        const SDFEvaluation sdf = minimum_sdf_evaluation(probe);
+        EXPECT_GT(sdf.phi, params.eps_sdf);
+        EXPECT_DOUBLE_EQ(
+            sdf_penalty_energy(sdf, params.k_sdf, params.eps_sdf), 0.0);
+        EXPECT_TRUE(sdf_penalty_gradient(
+            sdf, params.k_sdf, params.eps_sdf).isZero(0.0));
+    }
+    const SDFEvaluation inside_ramp = minimum_sdf_evaluation(
+        ramp_midpoint - 0.001 * ramp_normal);
+    const SDFEvaluation inside_ground = minimum_sdf_evaluation(
+        ground_surface_probe - 0.001 * Vec3::UnitY());
+    EXPECT_NEAR(inside_ramp.phi, -0.001, 1.0e-15);
+    EXPECT_NEAR(inside_ground.phi, -0.001, 1.0e-15);
+    EXPECT_GT(
+        sdf_penalty_energy(
+            inside_ramp, params.k_sdf, params.eps_sdf),
+        0.0);
+    EXPECT_GT(
+        sdf_penalty_energy(
+            inside_ground, params.k_sdf, params.eps_sdf),
+        0.0);
 
     const auto cloth_node = [](const int i, const int j) {
         return j * (cloth_nx + 1) + i;
@@ -3360,18 +3591,33 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
             const int v10 = cloth_node(i + 1, j);
             const int v01 = cloth_node(i, j + 1);
             const int v11 = cloth_node(i + 1, j + 1);
-            EXPECT_EQ(
-                (std::array<int, 3>{
-                    ref_mesh.tris[3 * triangle + 0],
-                    ref_mesh.tris[3 * triangle + 1],
-                    ref_mesh.tris[3 * triangle + 2]}),
-                (std::array<int, 3>{v00, v10, v11}));
-            EXPECT_EQ(
-                (std::array<int, 3>{
-                    ref_mesh.tris[3 * triangle + 3],
-                    ref_mesh.tris[3 * triangle + 4],
-                    ref_mesh.tris[3 * triangle + 5]}),
-                (std::array<int, 3>{v00, v11, v01}));
+            if ((i + j) % 2 == 0) {
+                EXPECT_EQ(
+                    (std::array<int, 3>{
+                        ref_mesh.tris[3 * triangle + 0],
+                        ref_mesh.tris[3 * triangle + 1],
+                        ref_mesh.tris[3 * triangle + 2]}),
+                    (std::array<int, 3>{v00, v10, v11}));
+                EXPECT_EQ(
+                    (std::array<int, 3>{
+                        ref_mesh.tris[3 * triangle + 3],
+                        ref_mesh.tris[3 * triangle + 4],
+                        ref_mesh.tris[3 * triangle + 5]}),
+                    (std::array<int, 3>{v00, v11, v01}));
+            } else {
+                EXPECT_EQ(
+                    (std::array<int, 3>{
+                        ref_mesh.tris[3 * triangle + 0],
+                        ref_mesh.tris[3 * triangle + 1],
+                        ref_mesh.tris[3 * triangle + 2]}),
+                    (std::array<int, 3>{v00, v10, v01}));
+                EXPECT_EQ(
+                    (std::array<int, 3>{
+                        ref_mesh.tris[3 * triangle + 3],
+                        ref_mesh.tris[3 * triangle + 4],
+                        ref_mesh.tris[3 * triangle + 5]}),
+                    (std::array<int, 3>{v10, v11, v01}));
+            }
         }
     }
     double rest_area = 0.0;
@@ -3412,43 +3658,45 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
     }
     EXPECT_GT(maximum_initial_bending, 1.0e-3);
 
+    EXPECT_NEAR(spiral_length, 3.6252731123901647, 1.0e-15);
     EXPECT_NEAR(
-        roll_downslope_offset, 0.17742040770396708, 1.0e-15);
+        roll_downslope_offset, 0.19022118288835083, 1.0e-15);
     EXPECT_NEAR(
-        leader_material_length, 0.154075617216603, 1.0e-15);
-    EXPECT_NEAR(cloth_length, 3.08151234433206, 1.0e-15);
+        leader_material_length, 0.190803848020535, 1.0e-15);
+    EXPECT_NEAR(cloth_length, 3.8160769604106997, 1.0e-15);
+    EXPECT_NEAR(ramp_length, 3.3941125496954281, 1.0e-15);
+    EXPECT_GT(cloth_length, ramp_length);
+    EXPECT_NEAR(cloth_overhang, 0.4219644107152716, 1.0e-15);
     EXPECT_NEAR(
         leader_rows * rest_ds, leader_material_length, 1.0e-15);
+    EXPECT_NEAR(rest_ds, 0.023850481002566874, 1.0e-15);
+    EXPECT_NEAR(roll_clearance, 0.0051, 1.0e-15);
+    EXPECT_NEAR(pin_clearance, 0.020, 1.0e-15);
     EXPECT_NEAR(
-        center_to_pin_distance_squared,
-        0.03261431053512491, 1.0e-16);
-    EXPECT_NEAR(pin_normal_delta, 0.03370918962661382, 1.0e-15);
-    EXPECT_NEAR(pin_clearance, 0.1313091896266138, 1.0e-15);
-    EXPECT_NEAR(spiral_phase_cosine, 0.7407259652988947, 1.0e-15);
-    EXPECT_NEAR(spiral_phase_sine, -0.671807297022011, 1.0e-15);
-    EXPECT_NEAR(spiral_phase, -0.7366459958573437, 1.0e-15);
-    EXPECT_NEAR(tangent_downslope, 0.11527823272943105, 1.0e-15);
-    EXPECT_NEAR(tangent_clearance, 0.02908284820985224, 1.0e-15);
-    EXPECT_GT(pin_clearance, outer_radius + clearance);
-    EXPECT_GT(tangent_downslope, 0.0);
-    EXPECT_LT(tangent_downslope, roll_downslope_offset);
-    EXPECT_GT(tangent_clearance, clearance);
-    EXPECT_LT(tangent_clearance, outer_radius + clearance);
-    EXPECT_GT(spiral_phase_cosine, 0.0);
-    EXPECT_LT(spiral_phase_sine, 0.0);
+        roll_clearance - params.d_hat,
+        roll_clearance_margin, 1.0e-15);
+    EXPECT_DOUBLE_EQ(pin_clearance, minimum_pin_clearance);
+    EXPECT_GT(
+        pin_clearance - params.d_hat, pin_clearance_margin);
+    EXPECT_NEAR(leader_clearance_drop, 0.0149, 1.0e-15);
+    EXPECT_NEAR(
+        leader_material_length - leader_downslope_span,
+        0.0005826651321841625, 1.0e-15);
+    EXPECT_GT(leader_downslope_span, 0.99 * leader_material_length);
+    // The new pin is still far below the former seven-row C1 leader.
+    EXPECT_LT(pin_clearance, 0.1313091896266138);
 
     const Vec3 roll_center =
         ramp_top + roll_downslope_offset * downhill
-        + (outer_radius + clearance) * ramp_normal;
+        + (outer_radius + roll_clearance) * ramp_normal;
     const auto expected_centerline = [&](const double s) -> Vec3 {
         if (s <= leader_material_length) {
-            const double fraction = s / leader_material_length;
-            const double normal_offset =
-                (1.0 - fraction) * pin_clearance
-                + fraction * tangent_clearance;
+            const double leader_fraction = s / leader_material_length;
             return ramp_top
-                + fraction * tangent_downslope * downhill
-                + normal_offset * ramp_normal;
+                + leader_fraction * leader_downslope_span * downhill
+                + (pin_clearance
+                    - leader_fraction * leader_clearance_drop)
+                    * ramp_normal;
         }
 
         const double target_arc = s - leader_material_length;
@@ -3468,14 +3716,16 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
         }
         const double theta = 0.5 * (lower_theta + upper_theta);
         const double radius = outer_radius - spiral_a * theta;
-        const double angle = spiral_phase + theta;
         return roll_center + radius * (
-            std::sin(angle) * downhill
-            - std::cos(angle) * ramp_normal);
+            std::sin(theta) * downhill
+            - std::cos(theta) * ramp_normal);
     };
 
     double minimum_ramp_distance =
         std::numeric_limits<double>::infinity();
+    double minimum_combined_sdf_distance =
+        std::numeric_limits<double>::infinity();
+    double maximum_initial_sdf_energy = 0.0;
     std::vector<Vec3> cloth_centerlines;
     cloth_centerlines.reserve(cloth_ny + 1);
     for (int j = 0; j <= cloth_ny; ++j) {
@@ -3494,9 +3744,32 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
             const double ramp_distance =
                 (state.deformed_positions[static_cast<std::size_t>(node)]
                  - ramp_top).dot(ramp_normal);
-            EXPECT_GE(ramp_distance, clearance - 2.0e-12);
+            EXPECT_GE(ramp_distance, roll_clearance - 2.0e-12);
             minimum_ramp_distance = std::min(
                 minimum_ramp_distance, ramp_distance);
+            const Vec3& position = state.deformed_positions[
+                static_cast<std::size_t>(node)];
+            const SDFEvaluation ground_evaluation =
+                evaluate_sdf(ground_sdf, position);
+            const SDFEvaluation ramp_evaluation =
+                evaluate_sdf(ramp_sdf, position);
+            EXPECT_LT(ramp_evaluation.phi, ground_evaluation.phi);
+            const SDFEvaluation combined_evaluation =
+                minimum_sdf_evaluation(position);
+            EXPECT_NEAR(
+                combined_evaluation.phi,
+                ramp_evaluation.phi, 1.0e-15);
+            EXPECT_GE(
+                combined_evaluation.phi,
+                roll_clearance - 2.0e-12);
+            minimum_combined_sdf_distance = std::min(
+                minimum_combined_sdf_distance,
+                combined_evaluation.phi);
+            maximum_initial_sdf_energy = std::max(
+                maximum_initial_sdf_energy,
+                sdf_penalty_energy(
+                    combined_evaluation,
+                    params.k_sdf, params.eps_sdf));
         }
         EXPECT_NEAR(
             (state.deformed_positions[
@@ -3511,29 +3784,33 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
             + state.deformed_positions[static_cast<std::size_t>(
                 cloth_node(cloth_nx, j))]));
     }
-    EXPECT_GT(minimum_ramp_distance, clearance);
-    EXPECT_LT(minimum_ramp_distance, clearance + layer_pitch);
+    EXPECT_NEAR(minimum_ramp_distance, roll_clearance, 2.0e-12);
+    EXPECT_GT(minimum_ramp_distance, params.d_hat);
+    EXPECT_NEAR(
+        minimum_combined_sdf_distance,
+        roll_clearance, 2.0e-12);
+    EXPECT_GT(minimum_combined_sdf_distance, params.eps_sdf);
+    EXPECT_DOUBLE_EQ(maximum_initial_sdf_energy, 0.0);
+
     const Vec3 pin_centerline =
         ramp_top + pin_clearance * ramp_normal;
-    const Vec3 expected_tangent_centerline =
-        ramp_top + tangent_downslope * downhill
-        + tangent_clearance * ramp_normal;
-    const Vec3 expected_leader_tangent =
-        ((outer_radius * spiral_phase_cosine
-          - spiral_a * spiral_phase_sine)
-         / outer_spiral_derivative_norm)
-            * downhill
-        + ((outer_radius * spiral_phase_sine
-            + spiral_a * spiral_phase_cosine)
-           / outer_spiral_derivative_norm)
-            * ramp_normal;
-    EXPECT_NEAR(expected_leader_tangent.norm(), 1.0, 1.0e-15);
-    EXPECT_TRUE((
-        pin_centerline
-        + leader_material_length * expected_leader_tangent)
-        .isApprox(expected_tangent_centerline, 2.0e-14));
-    double previous_leader_offset =
-        std::numeric_limits<double>::infinity();
+    const Vec3 expected_join_centerline =
+        ramp_top + leader_downslope_span * downhill
+        + roll_clearance * ramp_normal;
+    EXPECT_TRUE((roll_center - outer_radius * ramp_normal).isApprox(
+        expected_join_centerline, 2.0e-14));
+
+    // Every edge in the sloped eight-row leader starts at its material rest
+    // length: across and longitudinal grid edges, plus each cell diagonal.
+    double maximum_leader_edge_strain = 0.0;
+    const auto record_leader_edge_strain = [&maximum_leader_edge_strain](
+                                               const Vec3& first,
+                                               const Vec3& second,
+                                               const double rest_length) {
+        maximum_leader_edge_strain = std::max(
+            maximum_leader_edge_strain,
+            std::abs((second - first).norm() / rest_length - 1.0));
+    };
     Vec3 previous_leader_centerline = Vec3::Zero();
     for (int j = 0; j <= leader_rows; ++j) {
         const Vec3 centerline = 0.5 * (
@@ -3543,24 +3820,25 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
                 cloth_node(cloth_nx, j))]);
         const double normal_offset =
             (centerline - ramp_top).dot(ramp_normal);
-        const double fraction =
-            static_cast<double>(j) / leader_rows;
-        const double expected_offset =
-            (1.0 - fraction) * pin_clearance
-            + fraction * tangent_clearance;
-        EXPECT_NEAR(normal_offset, expected_offset, 2.0e-14);
+        const double leader_distance = j * rest_ds;
+        const double leader_fraction =
+            leader_distance / leader_material_length;
+        const double expected_normal_offset =
+            pin_clearance
+            - leader_fraction * leader_clearance_drop;
+        EXPECT_NEAR(normal_offset, expected_normal_offset, 2.0e-14);
         EXPECT_NEAR(
             (centerline - ramp_top).dot(downhill),
-            fraction * tangent_downslope, 2.0e-14);
-        EXPECT_GE(normal_offset, clearance - 2.0e-14);
+            leader_fraction * leader_downslope_span, 2.0e-14);
         EXPECT_GT(normal_offset, params.d_hat);
-        const double remaining_leader_length =
-            (1.0 - fraction) * leader_material_length;
+        const double remaining_fraction = 1.0 - leader_fraction;
         const double expected_roll_distance_squared =
-            outer_radius * outer_radius
-            + 2.0 * remaining_leader_length * outer_radius * spiral_a
-                / outer_spiral_derivative_norm
-            + remaining_leader_length * remaining_leader_length;
+            remaining_fraction * remaining_fraction
+                * leader_downslope_span * leader_downslope_span
+            + std::pow(
+                outer_radius
+                    - remaining_fraction * leader_clearance_drop,
+                2.0);
         EXPECT_NEAR(
             (centerline - roll_center).squaredNorm(),
             expected_roll_distance_squared, 2.0e-15);
@@ -3570,68 +3848,130 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
             EXPECT_NEAR(
                 (centerline - roll_center).norm(),
                 outer_radius, 2.0e-14);
+
+        for (int i = 0; i < cloth_nx; ++i) {
+            const Vec3& first = state.deformed_positions[
+                static_cast<std::size_t>(cloth_node(i, j))];
+            const Vec3& second = state.deformed_positions[
+                static_cast<std::size_t>(cloth_node(i + 1, j))];
+            EXPECT_NEAR((second - first).norm(), rest_dx, 2.0e-14);
+            record_leader_edge_strain(first, second, rest_dx);
+        }
         if (j > 0) {
-            EXPECT_LT(normal_offset, previous_leader_offset);
             EXPECT_NEAR(
                 (centerline - previous_leader_centerline).norm(),
                 rest_ds, 2.0e-14);
             EXPECT_NEAR(
                 (centerline - previous_leader_centerline).dot(downhill),
-                tangent_downslope / leader_rows, 2.0e-14);
+                rest_ds * leader_downslope_span
+                    / leader_material_length,
+                2.0e-14);
             EXPECT_NEAR(
                 (centerline - previous_leader_centerline).dot(ramp_normal),
-                (tangent_clearance - pin_clearance) / leader_rows,
+                -rest_ds * leader_clearance_drop
+                    / leader_material_length,
                 2.0e-14);
             for (int i = 0; i <= cloth_nx; ++i) {
+                const Vec3& previous = state.deformed_positions[
+                    static_cast<std::size_t>(cloth_node(i, j - 1))];
+                const Vec3& current = state.deformed_positions[
+                    static_cast<std::size_t>(cloth_node(i, j))];
                 EXPECT_NEAR(
-                    (state.deformed_positions[static_cast<std::size_t>(
-                         cloth_node(i, j))]
-                     - state.deformed_positions[static_cast<std::size_t>(
-                         cloth_node(i, j - 1))])
-                        .norm(),
+                    (current - previous).norm(),
                     rest_ds, 2.0e-14);
+                record_leader_edge_strain(previous, current, rest_ds);
+            }
+            const double rest_diagonal = std::hypot(rest_dx, rest_ds);
+            for (int i = 0; i < cloth_nx; ++i) {
+                const bool main_diagonal = (i + j - 1) % 2 == 0;
+                const Vec3& diagonal_first = state.deformed_positions[
+                    static_cast<std::size_t>(cloth_node(
+                        main_diagonal ? i : i + 1, j - 1))];
+                const Vec3& diagonal_second = state.deformed_positions[
+                    static_cast<std::size_t>(cloth_node(
+                        main_diagonal ? i + 1 : i, j))];
+                EXPECT_NEAR(
+                    (diagonal_second - diagonal_first).norm(),
+                    rest_diagonal, 2.0e-14);
+                record_leader_edge_strain(
+                    diagonal_first, diagonal_second, rest_diagonal);
             }
         }
-        previous_leader_offset = normal_offset;
         previous_leader_centerline = centerline;
     }
-    const Vec3 tangent_centerline = 0.5 * (
+    EXPECT_LT(maximum_leader_edge_strain, 1.0e-12);
+
+    const Vec3 join_centerline = 0.5 * (
         state.deformed_positions[static_cast<std::size_t>(
             cloth_node(0, leader_rows))]
         + state.deformed_positions[static_cast<std::size_t>(
             cloth_node(cloth_nx, leader_rows))]);
-    EXPECT_TRUE(tangent_centerline.isApprox(
-        expected_tangent_centerline, 2.0e-14));
+    EXPECT_TRUE(join_centerline.isApprox(
+        expected_join_centerline, 2.0e-14));
     EXPECT_NEAR(
-        (tangent_centerline - ramp_top).dot(ramp_normal),
-        tangent_clearance, 2.0e-14);
+        (join_centerline - ramp_top).dot(ramp_normal),
+        roll_clearance, 2.0e-14);
     EXPECT_NEAR(
-        (tangent_centerline - ramp_top).dot(downhill),
-        tangent_downslope, 2.0e-14);
-    const Vec3 tangent_radius = tangent_centerline - roll_center;
+        (join_centerline - ramp_top).dot(downhill),
+        leader_downslope_span, 2.0e-14);
+    const Vec3 join_radius = join_centerline - roll_center;
     const Vec3 actual_leader_tangent =
-        (tangent_centerline - pin_centerline).normalized();
-    EXPECT_NEAR(tangent_radius.norm(), outer_radius, 2.0e-14);
+        (join_centerline - pin_centerline).normalized();
+    const Vec3 expected_leader_tangent =
+        (leader_downslope_span * downhill
+         - leader_clearance_drop * ramp_normal)
+        / leader_material_length;
+    EXPECT_NEAR(join_radius.norm(), outer_radius, 2.0e-14);
     EXPECT_TRUE(actual_leader_tangent.isApprox(
         expected_leader_tangent, 2.0e-14));
-    // The straight leader is C1 with the shrinking spiral. Its tangent has
-    // the expected small inward radial component, unlike a circle tangent.
+    EXPECT_NEAR(expected_leader_tangent.norm(), 1.0, 2.0e-15);
     EXPECT_NEAR(
-        tangent_radius.dot(actual_leader_tangent),
-        -outer_radius * spiral_a / outer_spiral_derivative_norm,
+        join_radius.dot(actual_leader_tangent),
+        outer_radius * leader_clearance_drop
+            / leader_material_length,
         2.0e-15);
-    EXPECT_LT(tangent_radius.dot(actual_leader_tangent), 0.0);
-    // The seven-row leader must not move the roll: the center retains the
-    // exact downslope offset authored by the former eight-row leader.
-    const double former_eight_row_leader_length =
-        static_cast<double>(roll_offset_reference_rows) * spiral_length
-        / static_cast<double>(cloth_ny - roll_offset_reference_rows);
-    EXPECT_DOUBLE_EQ(
-        roll_downslope_offset, former_eight_row_leader_length);
-    const Vec3 former_roll_center =
-        ramp_top + former_eight_row_leader_length * downhill
-        + (outer_radius + clearance) * ramp_normal;
-    EXPECT_TRUE(roll_center.isApprox(former_roll_center, 0.0));
+
+    // Phase zero puts the join at the roll's lowest point. The straight
+    // leader intentionally gives up exact C1 continuity; the mismatch combines
+    // its gentle downward slope with the spiral's upward radial rate.
+    const Vec3 expected_spiral_join_tangent =
+        (outer_radius * downhill + spiral_a * ramp_normal)
+        / std::hypot(outer_radius, spiral_a);
+    const double leader_slope_angle = std::atan2(
+        leader_clearance_drop, leader_downslope_span);
+    const double spiral_tangent_angle =
+        std::atan2(spiral_a, outer_radius);
+    const double join_tangent_angle =
+        leader_slope_angle + spiral_tangent_angle;
+    EXPECT_NEAR(leader_slope_angle, 0.0781702549948662, 1.0e-15);
+    EXPECT_NEAR(join_tangent_angle, 0.08851495727463299, 1.0e-15);
+    EXPECT_NEAR(
+        join_tangent_angle * 180.0 / kPi,
+        5.071533475617274, 1.0e-13);
+    EXPECT_NEAR(
+        std::acos(std::clamp(
+            expected_leader_tangent.dot(expected_spiral_join_tangent),
+            -1.0, 1.0)),
+        join_tangent_angle, 3.0e-14);
+
+    // The roll retains its normal height while shifting only 0.583 mm
+    // upslope to keep the descending leader exactly strain-free.
+    EXPECT_NEAR(
+        leader_material_length - roll_downslope_offset,
+        0.0005826651321841625, 1.0e-15);
+    EXPECT_NEAR(
+        (roll_center - ramp_top).dot(ramp_normal),
+        outer_radius + roll_clearance, 2.0e-14);
+    const Vec3 lowest_roll_point =
+        roll_center - outer_radius * ramp_normal;
+    EXPECT_TRUE(lowest_roll_point.isApprox(
+        expected_join_centerline, 2.0e-14));
+    EXPECT_NEAR(
+        (lowest_roll_point - ramp_top).dot(ramp_normal),
+        roll_clearance, 2.0e-14);
+    EXPECT_NEAR(
+        (lowest_roll_point - ramp_top).dot(downhill),
+        roll_downslope_offset, 2.0e-14);
     const Vec3 first_spiral_centerline = 0.5 * (
         state.deformed_positions[static_cast<std::size_t>(
             cloth_node(0, leader_rows + 1))]
@@ -3639,7 +3979,7 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
             cloth_node(cloth_nx, leader_rows + 1))]);
     EXPECT_GT(
         (first_spiral_centerline - ramp_top).dot(ramp_normal),
-        clearance);
+        roll_clearance);
 
     // All rows have the same x span, so the distance between two segments of
     // this downslope/normal centerline is the attainable surface distance at
@@ -3666,6 +4006,12 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
         }
     }
     EXPECT_GT(nearest_nonlocal_cloth_segment_distance, params.d_hat);
+    EXPECT_NEAR(
+        nearest_nonlocal_cloth_segment_distance,
+        0.005291213099085894, 1.0e-13);
+    EXPECT_GT(
+        nearest_nonlocal_cloth_segment_distance - params.d_hat,
+        2.5e-4);
     EXPECT_GT(nearest_leader_spiral_segment_distance, params.d_hat);
     EXPECT_TRUE(std::isfinite(nearest_leader_spiral_segment_distance));
 
@@ -3775,19 +4121,30 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
         0, 2, 3, 0, 3, 1,
         2, 4, 5, 2, 5, 3,
         0, 4, 2, 1, 3, 5};
+    const std::array<Vec3, ground_nodes> expected_ground_positions{
+        Vec3(-3.0, -0.001, -2.0),
+        Vec3(-3.0, -0.001,  4.0),
+        Vec3( 3.0, -0.001,  4.0),
+        Vec3( 3.0, -0.001, -2.0)};
+    const std::array<int, 3 * ground_triangles> expected_ground_tris{
+        wedge_nodes, wedge_nodes + 1, wedge_nodes + 2,
+        wedge_nodes, wedge_nodes + 2, wedge_nodes + 3};
+
+    // The finite wedge and ground quad are one static visualization mesh.
+    // Neither contributes a node, triangle, mass, or rigid body to RefMesh.
+    ASSERT_EQ(static_x.size(), wedge_nodes + ground_nodes);
+    ASSERT_EQ(
+        static_tris.size(),
+        3 * (wedge_triangles + ground_triangles));
     double maximum_wedge_ramp_coordinate =
         -std::numeric_limits<double>::infinity();
     for (int local = 0; local < wedge_nodes; ++local) {
-        const int node = cloth_nodes + local;
-        EXPECT_TRUE(state.deformed_positions[
-            static_cast<std::size_t>(node)].isApprox(
+        EXPECT_TRUE(static_x[static_cast<std::size_t>(local)].isApprox(
                 expected_wedge_positions[static_cast<std::size_t>(local)],
                 0.0));
-        EXPECT_TRUE(state.velocities[
-            static_cast<std::size_t>(node)].isZero(0.0));
         const double ramp_coordinate =
-            (state.deformed_positions[static_cast<std::size_t>(node)]
-             - ramp_top).dot(ramp_normal);
+            (static_x[static_cast<std::size_t>(local)] - ramp_top)
+                .dot(ramp_normal);
         EXPECT_LE(ramp_coordinate, 1.0e-14);
         maximum_wedge_ramp_coordinate = std::max(
             maximum_wedge_ramp_coordinate, ramp_coordinate);
@@ -3795,9 +4152,44 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
     EXPECT_NEAR(maximum_wedge_ramp_coordinate, 0.0, 1.0e-14);
     for (int local = 0; local < 3 * wedge_triangles; ++local) {
         EXPECT_EQ(
-            ref_mesh.tris[3 * cloth_triangles + local],
-            cloth_nodes
-                + expected_wedge_tris[static_cast<std::size_t>(local)]);
+            static_tris[static_cast<std::size_t>(local)],
+            expected_wedge_tris[static_cast<std::size_t>(local)]);
+    }
+    const Vec3 visual_ramp_normal =
+        (expected_wedge_positions[4] - expected_wedge_positions[2])
+            .cross(expected_wedge_positions[5]
+                   - expected_wedge_positions[2])
+            .normalized();
+    EXPECT_TRUE(visual_ramp_normal.isApprox(ramp_normal, 1.0e-15));
+    for (int local = 0; local < ground_nodes; ++local) {
+        EXPECT_TRUE(static_x[static_cast<std::size_t>(wedge_nodes + local)]
+            .isApprox(
+                expected_ground_positions[static_cast<std::size_t>(local)],
+                0.0));
+    }
+    for (int local = 0; local < 3 * ground_triangles; ++local) {
+        EXPECT_EQ(
+            static_tris[static_cast<std::size_t>(
+                3 * wedge_triangles + local)],
+            expected_ground_tris[static_cast<std::size_t>(local)]);
+    }
+    EXPECT_DOUBLE_EQ(
+        expected_ground_positions[2].x()
+            - expected_ground_positions[0].x(),
+        6.0);
+    EXPECT_DOUBLE_EQ(
+        expected_ground_positions[1].z()
+            - expected_ground_positions[0].z(),
+        6.0);
+    EXPECT_TRUE((
+        (expected_ground_positions[1] - expected_ground_positions[0])
+            .cross(
+                expected_ground_positions[2]
+                    - expected_ground_positions[0])
+            .normalized()).isApprox(Vec3::UnitY(), 0.0));
+    for (const int static_vertex : static_tris) {
+        EXPECT_GE(static_vertex, 0);
+        EXPECT_LT(static_vertex, static_cast<int>(static_x.size()));
     }
 
     EXPECT_TRUE(ref_mesh.tets.empty());
@@ -3805,58 +4197,29 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
     EXPECT_TRUE(ref_mesh.tet_adj.empty());
     EXPECT_TRUE(ref_mesh.tet_nodes.empty());
     EXPECT_TRUE(ref_mesh.surface_nodes.empty());
-    ASSERT_EQ(ref_mesh.rb_nodes.size(), 1U);
-    ASSERT_EQ(ref_mesh.ref_positions.size(), 1U);
-    ASSERT_EQ(ref_mesh.total_mass.size(), 1U);
-    ASSERT_EQ(ref_mesh.I_hat.size(), 1U);
-    ASSERT_EQ(ref_mesh.rb_update_modes.size(), 1U);
-    ASSERT_EQ(state.x_coms.size(), 1U);
-    ASSERT_EQ(state.v_coms.size(), 1U);
-    ASSERT_EQ(state.orientations.size(), 1U);
-    ASSERT_EQ(state.omega.size(), 1U);
-    EXPECT_EQ(
-        ref_mesh.rb_update_modes[0], RigidBodyUpdateMode::None);
-    EXPECT_TRUE(state.x_coms[0].isApprox(
-        Vec3(0.0, ramp_height / 3.0,
-             (2.0 * ramp_back_z + ramp_front_z) / 3.0),
-        1.0e-14));
-    EXPECT_TRUE(state.v_coms[0].isZero(0.0));
-    EXPECT_TRUE(state.orientations[0].isApprox(
-        Vec4(1.0, 0.0, 0.0, 0.0), 0.0));
-    EXPECT_TRUE(state.omega[0].isZero(0.0));
-    ASSERT_EQ(ref_mesh.rb_nodes[0].size(), wedge_nodes);
-
-    const double wedge_volume =
-        0.5 * ramp_width * ramp_height
-        * (ramp_front_z - ramp_back_z);
-    EXPECT_NEAR(wedge_volume, 4.032, 1.0e-15);
-    const double expected_wedge_mass =
-        args.rigid_density * wedge_volume;
-    EXPECT_NEAR(
-        ref_mesh.total_mass[0], expected_wedge_mass, 1.0e-13);
-    std::vector<double> wedge_masses;
-    wedge_masses.reserve(wedge_nodes);
-    for (int node = 0; node < total_nodes; ++node) {
-        if (node < cloth_nodes) {
-            EXPECT_EQ(ref_mesh.node_to_rb[node], -1);
-            EXPECT_DOUBLE_EQ(ref_mesh.mass[node], 0.0);
-        } else {
-            EXPECT_EQ(ref_mesh.node_to_rb[node], 0);
-            EXPECT_DOUBLE_EQ(
-                ref_mesh.mass[node], expected_wedge_mass / wedge_nodes);
-            wedge_masses.push_back(ref_mesh.mass[node]);
-        }
-    }
+    EXPECT_TRUE(ref_mesh.rb_nodes.empty());
+    EXPECT_TRUE(ref_mesh.ref_positions.empty());
+    EXPECT_TRUE(ref_mesh.total_mass.empty());
+    EXPECT_TRUE(ref_mesh.I_hat.empty());
+    EXPECT_TRUE(ref_mesh.rb_update_modes.empty());
+    EXPECT_TRUE(state.x_coms.empty());
+    EXPECT_TRUE(state.v_coms.empty());
+    EXPECT_TRUE(state.orientations.empty());
+    EXPECT_TRUE(state.omega.empty());
     ASSERT_EQ(ref_mesh.deformable_nodes.size(), cloth_nodes);
     for (int node = 0; node < cloth_nodes; ++node)
         EXPECT_EQ(ref_mesh.deformable_nodes[node], node);
 
-    // The mixed-scene mass pass fills only the shell entries and must leave
-    // the fixed collider's already assigned proxy masses untouched.
-    ref_mesh.build_deformable_lumped_mass(
-        params.density, params.thickness);
+    // Match simulation startup for a pure deformable scene. The builder
+    // leaves ownership and masses empty; neither visual mesh nor SDF plane
+    // contributes an entry when those arrays are initialized.
+    ref_mesh.node_to_rb.assign(total_nodes, -1);
+    ref_mesh.build_lumped_mass(params.density, params.thickness);
+    ASSERT_EQ(ref_mesh.node_to_rb.size(), total_nodes);
+    ASSERT_EQ(ref_mesh.mass.size(), total_nodes);
     double total_cloth_mass = 0.0;
     for (int node = 0; node < cloth_nodes; ++node) {
+        EXPECT_EQ(ref_mesh.node_to_rb[node], -1);
         EXPECT_GT(ref_mesh.mass[node], 0.0);
         total_cloth_mass += ref_mesh.mass[node];
     }
@@ -3864,9 +4227,6 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
         total_cloth_mass,
         params.density * params.thickness * cloth_width * cloth_length,
         1.0e-12);
-    EXPECT_TRUE(std::equal(
-        wedge_masses.begin(), wedge_masses.end(),
-        ref_mesh.mass.begin() + cloth_nodes));
 
     double minimum_mesh_edge = std::numeric_limits<double>::infinity();
     for (int triangle = 0; triangle < total_triangles; ++triangle) {
@@ -3874,6 +4234,10 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
             const int first = ref_mesh.tris[3 * triangle + local];
             const int second =
                 ref_mesh.tris[3 * triangle + (local + 1) % 3];
+            ASSERT_GE(first, 0);
+            ASSERT_GE(second, 0);
+            ASSERT_LT(first, static_cast<int>(state.deformed_positions.size()));
+            ASSERT_LT(second, static_cast<int>(state.deformed_positions.size()));
             minimum_mesh_edge = std::min(
                 minimum_mesh_edge,
                 (state.deformed_positions[static_cast<std::size_t>(second)]
@@ -3882,4 +4246,48 @@ TEST(MixedExample, RolledClothIsPinnedAboveAFixedInclinedWedge) {
         }
     }
     EXPECT_LT(params.d_hat, 0.5 * minimum_mesh_edge);
+}
+
+TEST(ClothExample, RolledClothClearanceTracksLargerSDFRange) {
+    IPCArgs3D args;
+    args.d_hat = 0.001;
+    args.k_sdf = 250000.0;
+    args.eps_sdf = 0.012;
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    std::vector<Vec3> static_x;
+    std::vector<int> static_tris;
+    build_cloth_unrolling_down_fixed_ramp_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris);
+
+    ASSERT_EQ(params.sdf_planes.size(), 2U);
+    EXPECT_DOUBLE_EQ(params.k_sdf, args.k_sdf);
+    EXPECT_DOUBLE_EQ(params.eps_sdf, args.eps_sdf);
+    EXPECT_TRUE(ref_mesh.rb_nodes.empty());
+    EXPECT_TRUE(state.x_coms.empty());
+
+    // eps_sdf, rather than d_hat, controls this construction. Every cloth
+    // node starts outside both SDF penalty ranges and therefore has zero SDF
+    // energy. The roll is authored just 0.1 mm beyond that larger range.
+    double minimum_union_phi = std::numeric_limits<double>::infinity();
+    for (const Vec3& position : state.deformed_positions) {
+        const SDFEvaluation ground =
+            evaluate_sdf(params.sdf_planes[0], position);
+        const SDFEvaluation incline =
+            evaluate_sdf(params.sdf_planes[1], position);
+        const SDFEvaluation& nearest =
+            ground.phi < incline.phi ? ground : incline;
+        minimum_union_phi = std::min(minimum_union_phi, nearest.phi);
+        EXPECT_GT(nearest.phi, params.eps_sdf);
+        EXPECT_DOUBLE_EQ(
+            sdf_penalty_energy(
+                nearest, params.k_sdf, params.eps_sdf),
+            0.0);
+    }
+    EXPECT_NEAR(
+        minimum_union_phi, args.eps_sdf + 1.0e-4, 2.0e-12);
 }

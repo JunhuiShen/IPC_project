@@ -2237,19 +2237,23 @@ void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
 }
 
 // ---------------------------------------------------------------------------
-// Example 21: a pinned cloth roll unrolling down a fixed prism ramp (Don't run for now. Need scene and parameters tuning!!!)
+// Example 21: a pinned cloth roll unrolling down an SDF ramp
 // ---------------------------------------------------------------------------
-// command line (dt = 1/600 s): OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE ./build/3D_sim --example 21 --num_frames 120 --fps 30 --substeps 20 --max_substep_iters 20 --node_box_update_count 2 --fixed_iters --use_parallel true --use_ccd true --E 1e6 --kB 0.001 --kpin 1e7 --d_hat 0.005 --k_barrier 500 --outdir cloth_unrolling_down_ramp_output --format obj
+// command line: ./build/3D_sim --example 21 --num_frames 200 --substeps 150 --max_substep_iters 80 --fixed_iters --outdir rolled_cloth_on_steep_ramp_output_new --format obj --kB 1e-5 
 void build_cloth_unrolling_down_fixed_ramp_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
-    std::vector<Pin>& pins, SimParams& params) {
+    std::vector<Pin>& pins, SimParams& params,
+    std::vector<Vec3>& static_x, std::vector<int>& static_tris) {
     clear_model(ref_mesh, state, X, pins);
+    static_x.clear();
+    static_tris.clear();
 
     params.gravity = Vec3(args.gx, args.gy, args.gz);
     params.d_hat = args.d_hat;
     params.k_barrier = args.k_barrier;
-    params.k_sdf = 0.0;
+    params.k_sdf = args.k_sdf;
+    params.eps_sdf = args.eps_sdf;
     params.sdf_planes.clear();
     params.sdf_cylinders.clear();
     params.sdf_spheres.clear();
@@ -2260,7 +2264,10 @@ void build_cloth_unrolling_down_fixed_ramp_example(
     params.use_ogc_solver = false;
 
     constexpr int cloth_nx = 24;
-    constexpr int cloth_ny = 140;
+    // Keep enough samples around the enlarged roll that its piecewise-linear
+    // layers remain more than the 5 mm d_hat cap apart. With only 140 rows,
+    // chordal shortcuts reduce the nominal 6.5 mm pitch to a 4.89 mm gap.
+    constexpr int cloth_ny = 160;
     constexpr double cloth_width = 0.90;
     constexpr double ramp_width = 1.40;
     // Match the 2.4 m horizontal run for a 45-degree incline. The previous
@@ -2268,9 +2275,11 @@ void build_cloth_unrolling_down_fixed_ramp_example(
     constexpr double ramp_height = 2.40;
     constexpr double ramp_back_z = -1.20;
     constexpr double ramp_front_z = 1.20;
-    constexpr int leader_rows = 7;
-    constexpr int roll_offset_reference_rows = 8;
-    constexpr double outer_radius = 0.0925;
+    constexpr int leader_rows = 8;
+    // The 10 cm outer radius stores 3.81608 m of material without changing
+    // the tight 6.5 mm layer pitch. That is 0.42196 m longer than the finite
+    // 3.39411 m ramp, so the released sheet can visibly pass its toe.
+    constexpr double outer_radius = 0.100;
     constexpr double inner_radius = 0.05;
     constexpr double layer_pitch = 0.0065;
     constexpr double maximum_roll_d_hat = 0.005;
@@ -2289,13 +2298,9 @@ void build_cloth_unrolling_down_fixed_ramp_example(
     const double outer_primitive = spiral_primitive(outer_radius);
     const double spiral_length =
         (outer_primitive - spiral_primitive(inner_radius)) / spiral_rate;
-    // Retain the old eight-row downslope offset for the roll, but allocate a
-    // separate integer-row material length to an elevated external-tangent
-    // leader. The tangent construction below keeps this leader strain-free
-    // and prevents it from cutting through the rolled section.
-    const double roll_downslope_offset =
-        static_cast<double>(roll_offset_reference_rows) * spiral_length
-        / static_cast<double>(cloth_ny - roll_offset_reference_rows);
+    // Give the straight leader exactly eight material rows. Below, its
+    // downslope projection is shortened just enough to accommodate the raised
+    // pin without stretching any of those edges.
     const double leader_length =
         static_cast<double>(leader_rows) * spiral_length
         / static_cast<double>(cloth_ny - leader_rows);
@@ -2313,16 +2318,36 @@ void build_cloth_unrolling_down_fixed_ramp_example(
             std::min(params.d_hat, maximum_roll_d_hat),
             0.45 * nominal_min_edge);
     }
-    // Start immediately outside the barrier activation layer. This avoids a
-    // visible/free-fall gap while preserving a small collision-safe margin.
-    constexpr double clearance_margin = 1.0e-4;
-    const double clearance = std::max(
-        std::max(params.d_hat, 0.0) + clearance_margin, 0.002);
+    // Keep the tightly wound roll immediately outside both the cloth IPC
+    // barrier and the SDF penalty range, but raise the pinned edge to a
+    // visibly separate 2 cm clearance. This also keeps the initial pose
+    // force-free when a caller chooses eps_sdf larger than d_hat.
+    constexpr double roll_clearance_margin = 1.0e-4;
+    constexpr double pin_clearance_margin = 1.0e-3;
+    constexpr double minimum_clearance = 0.002;
+    constexpr double minimum_pin_clearance = 0.020;
+    const double active_contact_range = std::max(
+        std::max(params.d_hat, 0.0),
+        std::max(params.eps_sdf, 0.0));
+    const double roll_clearance = std::max(
+        active_contact_range + roll_clearance_margin,
+        minimum_clearance);
+    const double pin_clearance = std::max(
+        active_contact_range + pin_clearance_margin,
+        minimum_pin_clearance);
+    const double leader_clearance_drop =
+        pin_clearance - roll_clearance;
+    const double leader_downslope_span = std::sqrt(
+        leader_length * leader_length
+        - leader_clearance_drop * leader_clearance_drop);
+    const double roll_downslope_offset = leader_downslope_span;
 
-    // build_square_mesh records a flat membrane metric and flat hinge rest
-    // angles. Repositioning afterward winds that same flat-rest sheet without
-    // changing its material coordinates or preferred curvature.
-    const int cloth_base = build_square_mesh(
+    // The alternating diagonals remove the one-sided hinge pattern of a
+    // uniformly triangulated grid. The helper still records a flat membrane
+    // metric and flat hinge rest angles, so repositioning afterward winds the
+    // same flat-rest sheet without changing its material coordinates or
+    // preferred curvature.
+    const int cloth_base = build_square_mesh_alternating_diagonals(
         ref_mesh, state, X, cloth_nx, cloth_ny,
         cloth_width, cloth_length,
         Vec3(-0.5 * cloth_width, 0.0, 0.0));
@@ -2334,43 +2359,27 @@ void build_cloth_unrolling_down_fixed_ramp_example(
     const Vec3 ramp_normal(
         0.0, ramp_run / slope_length, ramp_height / slope_length);
     const Vec3 ramp_top(0.0, ramp_height, ramp_back_z);
+
+    // The SDF obstacle is the union of the half-spaces below these two
+    // planes. Since obstacle evaluation selects the minimum signed distance,
+    // the incline is active before the toe and the horizontal ground is
+    // active after it. Their zero sets meet at (y=0, z=ramp_front_z), so the
+    // cloth transitions from the finite visible ramp onto the ground without
+    // putting any rigid/static collision geometry into RefMesh.
+    params.sdf_planes.push_back(
+        PlaneSDF{Vec3::Zero(), Vec3::UnitY()});
+    params.sdf_planes.push_back(
+        PlaneSDF{ramp_top, ramp_normal});
+
     const Vec3 roll_center =
         ramp_top + roll_downslope_offset * downslope
-        + (outer_radius + clearance) * ramp_normal;
+        + (outer_radius + roll_clearance) * ramp_normal;
 
-    // In the ramp's (downslope, normal) plane, solve for a straight leader of
-    // exactly its material length that is C1-tangent to the outer end of the
-    // Archimedean spiral. The lower external branch keeps the leader outside
-    // the roll, avoids a hinge kink at their join, and determines how high the
-    // pin must sit without moving the roll center.
-    const double spiral_tangent_norm = std::hypot(
-        outer_radius, spiral_rate);
-    const double tangent_system_a = outer_radius
-        + leader_length * spiral_rate / spiral_tangent_norm;
-    const double tangent_system_g =
-        leader_length * outer_radius / spiral_tangent_norm;
-    const double tangent_system_norm2 =
-        tangent_system_a * tangent_system_a
-        + tangent_system_g * tangent_system_g;
-    const double pin_normal_delta = std::sqrt(
-        tangent_system_norm2
-        - roll_downslope_offset * roll_downslope_offset);
-    const double pin_ramp_clearance =
-        outer_radius + clearance + pin_normal_delta;
-    const double spiral_phase_cos = (
-        tangent_system_g * roll_downslope_offset
-        - tangent_system_a * pin_normal_delta)
-        / tangent_system_norm2;
-    const double spiral_phase_sin = (
-        -tangent_system_a * roll_downslope_offset
-        - tangent_system_g * pin_normal_delta)
-        / tangent_system_norm2;
-    const double spiral_phase = std::atan2(
-        spiral_phase_sin, spiral_phase_cos);
-    const double tangent_downslope =
-        roll_downslope_offset + outer_radius * spiral_phase_sin;
-    const double tangent_clearance =
-        outer_radius + clearance - outer_radius * spiral_phase_cos;
+    // The straight leader drops gently from the raised pin to the roll's outer
+    // bottom point (phase zero). Its downslope projection is chosen with the
+    // Pythagorean relation above, so all eight leader edges remain strain-free
+    // and the roll moves only 0.583 mm upslope. The join is C0; its small
+    // tangent mismatch combines the leader slope and spiral radial rate.
 
     const auto spiral_arc_length = [&](const double theta) {
         const double radius = outer_radius - spiral_rate * theta;
@@ -2398,19 +2407,16 @@ void build_cloth_unrolling_down_fixed_ramp_example(
         Vec3 centerline;
         if (s <= leader_length) {
             const double leader_fraction = s / leader_length;
-            const double leader_clearance =
-                (1.0 - leader_fraction) * pin_ramp_clearance
-                + leader_fraction * tangent_clearance;
             centerline = ramp_top
-                + leader_fraction * tangent_downslope * downslope
-                + leader_clearance * ramp_normal;
+                + leader_fraction * leader_downslope_span * downslope
+                + (pin_clearance
+                    - leader_fraction * leader_clearance_drop) * ramp_normal;
         } else {
             const double theta = theta_at_arc_length(s - leader_length);
             const double radius = outer_radius - spiral_rate * theta;
-            const double angle = spiral_phase + theta;
             centerline = roll_center + radius * (
-                std::sin(angle) * downslope
-                - std::cos(angle) * ramp_normal);
+                std::sin(theta) * downslope
+                - std::cos(theta) * ramp_normal);
         }
 
         for (int i = 0; i <= cloth_nx; ++i) {
@@ -2426,14 +2432,14 @@ void build_cloth_unrolling_down_fixed_ramp_example(
     state.velocities.assign(
         state.deformed_positions.size(), Vec3::Zero());
 
-    // The uphill short edge is the only pinned part of the sheet. It stays
-    // about 13.1 cm above the ramp while the strain-free leader follows an
-    // external tangent to the unchanged rolled section.
+    // The uphill short edge is the only pinned part of the sheet. With the
+    // recommended 5 mm d_hat it starts 2 cm above the ramp, while the straight
+    // leader descends without stretching to the roll's 5.1 mm clearance.
     for (int i = 0; i <= cloth_nx; ++i)
         append_pin(pins, cloth_node(i, 0), state.deformed_positions);
 
-    // Closed triangular prism: unlike an inclined PlaneSDF, this finite IPC
-    // collider lets the unrolled cloth pass over and fall from the toe.
+    // Closed triangular prism used only to visualize the two-plane SDF ramp.
+    // It never enters RefMesh, the broad phase, CCD, or the nonlinear solve.
     const double half_ramp_width = 0.5 * ramp_width;
     const std::vector<Vec3> ramp_positions = {
         Vec3(-half_ramp_width, 0.0, ramp_back_z),
@@ -2450,18 +2456,28 @@ void build_cloth_unrolling_down_fixed_ramp_example(
         0, 4, 2,            // left cap, outward -x
         1, 3, 5,            // right cap, outward +x
     };
-    const int ramp_node_base =
-        static_cast<int>(state.deformed_positions.size());
-    const double ramp_volume =
-        0.5 * ramp_width * ramp_height * ramp_run;
-    create_rigid_body(
-        ramp_positions, Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
-        Vec3::Zero(), params.rigid_density * ramp_volume,
-        ref_mesh, state, RigidBodyUpdateMode::None);
-    ref_mesh.tris.reserve(
-        ref_mesh.tris.size() + std::size(ramp_triangles));
-    for (const int local_node : ramp_triangles)
-        ref_mesh.tris.push_back(ramp_node_base + local_node);
+    static_x = ramp_positions;
+    static_tris.assign(ramp_triangles, ramp_triangles + 24);
+
+    // Large, upward-facing visualization for the y=0 ground SDF. Render it
+    // one millimeter below the analytic surface to avoid coplanar z-fighting
+    // with the bottom of the wedge visualization.
+    constexpr double ground_y = -0.001;
+    constexpr double ground_x_min = -3.0;
+    constexpr double ground_x_max = 3.0;
+    constexpr double ground_z_min = -2.0;
+    constexpr double ground_z_max = 4.0;
+    const int ground_base = static_cast<int>(static_x.size());
+    static_x.insert(
+        static_x.end(),
+        {Vec3(ground_x_min, ground_y, ground_z_min),
+         Vec3(ground_x_min, ground_y, ground_z_max),
+         Vec3(ground_x_max, ground_y, ground_z_max),
+         Vec3(ground_x_max, ground_y, ground_z_min)});
+    static_tris.insert(
+        static_tris.end(),
+        {ground_base, ground_base + 1, ground_base + 2,
+         ground_base, ground_base + 2, ground_base + 3});
 
     ref_mesh.build_deformable_nodes();
 }

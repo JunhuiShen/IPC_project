@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
     else if (args.example == 18) build_dynamic_bolt_into_fixed_nut_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 19) build_armadillo_through_gear_crushers_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 20) build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
-    else if (args.example == 21) build_cloth_unrolling_down_fixed_ramp_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 21) build_cloth_unrolling_down_fixed_ramp_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else {
         std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21.\n";
         return 1;

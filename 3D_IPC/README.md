@@ -174,7 +174,7 @@ Built-in example scenes (`--example N`):
 | `18` | A fully dynamic threaded bolt starting deeply engaged and falling under gravity through a threaded nut with fixed translation and orientation |
 | `19` | One tetrahedral Armadillo starting in the nip between two fixed-center, initially counter-rotating gear crushers |
 | `20` | Four close-packed level rows of Bunny-solid, Spot-solid, rigid cube, and rigid gear dropping together onto the same opposite-edge-pinned cloth used by Example 14 |
-| `21` | A rolled cloth pinned along its upper edge and unrolling under gravity down a finite ramp |
+| `21` | A rolled cloth pinned along its upper edge and unrolling down an analytic SDF incline onto an SDF ground plane |
 
 Example 17 reads these repository-relative mesh files directly:
 
@@ -255,18 +255,59 @@ starts outside the barrier activation distance. The production scene has
 cubes and four gears).
 
 Example 21 starts a flat-rest cloth in a compact rolled configuration with one
-complete cross-width edge pinned approximately 0.131 m normally above the top
-of a finite triangular-prism ramp. A strain-free leader follows an external
-tangent to the roll, avoiding any pass through its layers while leaving the
-roll's center and contact level unchanged. The ramp slope is 45 degrees. The
-ramp uses
-the `None` rigid update label, so it remains fixed while its surface
-participates in IPC barrier contact and CCD. The scene caps
-`d_hat` at 0.005 m, winds neighboring turns about 0.0065 m apart, and places
-the roll/ramp tangent only 0.0001 m outside the activation layer so the roll is
-supported before it can collapse through a loose initial gap. Contact is
-frictionless: gravity, pin tension, and the cloth's flat bending rest shape
-drive the qualitative unrolling rather than a no-slip rolling constraint.
+complete cross-width edge pinned 0.020 m normally above the nominal top of a
+45-degree incline. After the scene caps `d_hat`, let `a` be
+`max(d_hat, eps_sdf, 0)`. The pin clearance is
+`max(0.020, a + 0.001)` m, while the roll clearance is
+`max(0.002, a + 0.0001)` m. With the documented `d_hat = 0.005` m and
+`eps_sdf = 0.002` m, these are 0.020 m and 0.0051 m, respectively. An
+eight-material-row straight leader has a 0.190803848 m material length and
+descends 0.0149 m normally to meet the roll at its phase-zero outer-bottom
+point. Its 0.190221183 m downslope span is chosen by the Pythagorean relation,
+keeping all leader edges strain-free. Relative to the level-leader layout,
+this shifts the roll approximately 0.000582665 m upslope while preserving its
+normal height and closest ramp clearance. The join is position-continuous,
+but not tangent-continuous; the leader slope and Archimedean spiral pitch
+produce a 5.071533-degree tangent mismatch. An exactly tangent-continuous
+join with the same straight, strain-free leader would require changing the
+pin or roll geometry.
+
+Physical support comes from two infinite `PlaneSDF` half-spaces: a horizontal
+ground through `y = 0` and an inclined plane through the nominal ramp top.
+Obstacle evaluation selects their minimum signed distance, representing the
+union of the regions below the planes. Their zero sets meet at the nominal toe
+`z = 1.2`; along the contact boundary, the incline supports the cloth before
+the toe and the ground supports it afterward. The incline is infinite across
+`x` and continues uphill behind the displayed wedge, while the ground extends
+beyond its displayed quad.
+
+These SDFs contribute node-based penalty energy to the nonlinear solve; they
+are not rigid bodies or `RefMesh` triangles and do not use broad-phase
+collision detection, IPC barrier contact, or CCD. The documented
+`k_sdf = 100000` sets the penalty stiffness, and `eps_sdf = 0.002` m sets the
+force-free distance from each plane, so finite stiffness can permit some
+penetration. `d_hat`, `k_barrier`, and `use_ccd` continue to govern cloth
+self-contact only.
+
+The 0.100 m outer roll radius gives the cloth a 3.816076960 m material length,
+while the displayed wedge's sloped face is 3.394112550 m long. The resulting
+0.421964411 m excess (about 12.43% of that length) is intended to let the
+released sheet pass the nominal toe and continue onto the horizontal SDF
+ground instead of ending on the incline. The scene caps `d_hat` at 0.005 m and
+winds neighboring turns about 0.0065 m apart; 160 longitudinal rows keep the
+closest nonincident piecewise-linear cloth segments approximately 0.00529121 m
+apart initially. Contact is frictionless: gravity, pin tension, and the
+cloth's flat bending rest shape drive the qualitative unrolling rather than a
+no-slip rolling constraint.
+
+A finite closed triangular wedge and a 6 m by 6 m ground quad are exported
+together in the one-time `static_colliders` output mesh for visualization. The
+ground quad is rendered at `y = -0.001`, one millimeter below its physical SDF
+plane to avoid z-fighting, with `x` spanning `[-3, 3]` and `z` spanning
+`[-2, 4]`. These triangles do not enter `RefMesh`, the broad phase, CCD, or the
+nonlinear solve; the corresponding infinite analytic planes provide contact.
+The finite visual footprints do not limit that physical support, and Example
+21 has no rigid bodies.
 
 At startup, every scene reports its vertex and triangle counts; scenes with
 rigid bodies also report their count. Rigid surface vertices are represented
@@ -337,8 +378,8 @@ Commands documented alongside Examples 5 through 21 in `example.cpp`:
     # Example 20: four close-packed level Bunny/Spot/cube/gear rows dropped onto pinned cloth
     OMP_NUM_THREADS=10 OMP_DYNAMIC=FALSE ./build/3D_sim --example 20 --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 20 --fixed_iters --use_parallel true --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir four_bunny_spot_cube_gear_rows_on_cloth_output --format obj
 
-    # Example 21: rolled cloth pinned at the top of a fixed ramp and unrolling under gravity (dt = 1/600 s)
-    OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE ./build/3D_sim --example 21 --num_frames 180 --fps 60 --substeps 10 --max_substep_iters 20 --node_box_update_count 2 --fixed_iters --use_parallel true --use_ccd true --E 1e6 --kB 0.001 --kpin 1e7 --d_hat 0.005 --k_barrier 500 --outdir rolled_cloth_on_ramp_output --format obj
+    # Example 21: rolled cloth pinned above an SDF ramp and unrolling onto an SDF ground (dt = 1/600 s)
+    OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE ./build/3D_sim --example 21 --num_frames 180 --fps 60 --substeps 10 --max_substep_iters 20 --node_box_update_count 2 --fixed_iters --use_parallel true --use_ccd true --E 1e6 --kB 0.001 --kpin 1e7 --d_hat 0.005 --k_barrier 500 --k_sdf 100000 --eps_sdf 0.002 --outdir rolled_cloth_on_ramp_output --format obj
 
 Initial guesses are selected before the nonlinear solver starts each substep.
 The default is `ccd_initial_guess`. `--use_verlet_guess true` uses the
@@ -574,7 +615,7 @@ reader can jump to the layer they care about.
 
 ## Tests
 
-CTest currently discovers 380 GoogleTest cases split into focused binaries.
+CTest currently discovers 382 GoogleTest cases split into focused binaries.
 To build and run them all:
 
     cmake -B build
@@ -591,7 +632,7 @@ To build and run them all:
 | `bending_energy_test` | 19 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
 | `parallel_helper_test` | 13 | Contact adjacency, rigid ownership filtering/coloring, spherical-cap AABBs, and rigid blue boxes |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
-| `make_shape_test` | 25 | Incident-triangle maps, mixed cloth/rigid/solid scene construction, normalized TetGen solids, Example 19 crusher initialization, Example 20 four-row mixed-body construction, Example 21 rolled-cloth ramp construction, tetrahedral polygonal prisms, and icosphere construction |
+| `make_shape_test` | 27 | Incident-triangle maps, alternating-diagonal square-mesh symmetry, mixed cloth/rigid/solid scene construction, normalized TetGen solids, Example 19 crusher initialization, Example 20 four-row mixed-body construction, Example 21 rolled-cloth SDF ramp/ground construction with default and larger-`eps_sdf` clearance, tetrahedral polygonal prisms, and icosphere construction |
 | `solid_ipc_test` | 33 | Volumetric corotated solid energy/derivatives, mixed general-solver integration, solid contact, and reaction against fixed labeled rigid geometry |
 | `barrier_energy_test` | 19 | Scalar barrier, all NT/SS feature regions, force partition, deformable/rigid derivative blocks and modes, and stress cases |
 | `corotated_energy_test` | 11 | Rest state, invariance, gradient/Hessian FD convergence, and stress cases |

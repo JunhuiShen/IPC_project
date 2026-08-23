@@ -57,6 +57,13 @@ int append_normalized_obj_rigid_body(
 // Grid counts: V = (nx + 1)(ny + 1), T = 2 nx ny.
 int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin);
 
+// Same grid and winding as build_square_mesh, with the cell diagonal
+// alternating in a checkerboard pattern. For an even nx, the resulting
+// topology is invariant under reflection across the grid's x midpoint.
+int build_square_mesh_alternating_diagonals(
+    RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X,
+    int nx, int ny, double width, double height, const Vec3& origin);
+
 // Cylinder: h = (2 pi radius/nu)sqrt(3)/2, n = max(1, round(length/h)); V = nu(n+1)+2, T = 2nu(n+1).
 int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nu, double radius, double length, const Vec3& center);
 
