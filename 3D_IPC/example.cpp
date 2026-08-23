@@ -2239,7 +2239,8 @@ void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
 // ---------------------------------------------------------------------------
 // Example 21: a pinned cloth roll unrolling down an SDF ramp
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 21 --num_frames 200 --substeps 150 --max_substep_iters 80 --fixed_iters --outdir rolled_cloth_on_steep_ramp_output_new --format obj --kB 1e-5 
+// command line: ./build/3D_sim --example 21 --num_frames 200 --substeps 150 --max_substep_iters 80 --fixed_iters --outdir rolled_cloth_on_steep_ramp_output_new --format obj --kB 0.0025
+// the drift direction switches sharply between 0.00225 and 0.0025
 void build_cloth_unrolling_down_fixed_ramp_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
