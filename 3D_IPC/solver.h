@@ -50,9 +50,28 @@ inline void accumulate_solver_result(SolverResult& agg, const SolverResult& sub,
 }
 
 // Deformable solvers implemented in solver.cpp.
-SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "");
+SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 
-SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, const std::string& outdir = "");
+SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
+
+namespace rb_solver {
+
+// Friction derivatives are already scaled for the incremental potential.
+// Unlike rigid_barrier_derivatives, callers must not multiply these blocks by
+// k_barrier or dt^2 again.
+RigidEnergyDerivatives rigid_friction_derivatives(
+    int rb, const RefMesh& ref_mesh, const DeformedState& state,
+    const BroadPhase::Cache& bp_cache,
+    const std::vector<int>& nt_pair_indices,
+    const std::vector<int>& ss_pair_indices,
+    const std::vector<int>& node_to_rb_local,
+    const std::vector<Vec3>& positions,
+    const std::vector<Vec3>& omega_new,
+    const SimParams& params, double dt, RigidDerivativeMode mode,
+    const QuaternionOmegaKinematics* supplied_kinematics = nullptr,
+    const FrozenResidualWorkspace* frozen_workspace = nullptr);
+
+} // namespace rb_solver
 
 // Rigid-body solver implemented in solver.cpp. To start from the previous
 // collision-free state, initialize x_com_new and q_new from state and

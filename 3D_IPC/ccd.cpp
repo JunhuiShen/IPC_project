@@ -15,7 +15,6 @@
 #include <array>
 #include <cassert>
 #include <cmath>
-#include <iostream>
 #include <limits>
 #include <vector>
 
@@ -718,11 +717,8 @@ static bool point_segment_2d_rb_rotation(
 
     Eigen::Vector2d d = x1 - x0;
     double seg_len = d.norm();
-    if (seg_len < 1e-14) {
-        std::cerr << "Warning: degenerate segment in point_segment_2d_rotation(): seg_len = " << seg_len
-                  << ", threshold = 1e-14\n";
+    if (seg_len < 1e-14)
         return false;
-    }
 
     Eigen::Vector2d d_hat = d / seg_len;
 
@@ -746,10 +742,8 @@ static bool point_segment_2d_rb_rotation(
 
     double best_s = std::numeric_limits<double>::infinity();
     double dtheta = theta_new - theta_n;
-    if (std::abs(dtheta) < 1e-14) {
-        // std::cerr << "Warning: theta_new - theta_n < threshold\n";
+    if (std::abs(dtheta) < 1e-14)
         return false;
-    }
 
     constexpr double two_pi = 2.0 * M_PI;
 
@@ -1085,10 +1079,8 @@ bool point_triangle_rb_rotation_ccd(
 
     Vec3   n_tri      = e1.cross(e2);
     double n_tri_norm = n_tri.norm();
-    if (n_tri_norm * n_tri_norm <= eps * a11 * a22) {
-        std::cerr << "Warning: degenerate triangle detected in point_triangle_rb_rotation_ccd() when computing surface normal\n";
+    if (n_tri_norm * n_tri_norm <= eps * a11 * a22)
         return false; // degenerate triangle
-    }
 
     Vec3 n_tri_hat = n_tri / n_tri_norm;
 
@@ -1098,10 +1090,8 @@ bool point_triangle_rb_rotation_ccd(
 
     // Precompute barycentric system (triangle is stationary)
     double det = a11 * a22 - a12 * a12;
-    if (std::abs(det) <= eps * a11 * a22){
-        std::cerr << "Warning: degenerate triangle detected in point_triangle_rb_rotation_ccd() because of 0 determinant\n";
+    if (std::abs(det) <= eps * a11 * a22)
         return false; // degenerate triangle
-    }
 
     // barycentric inside-check for an arbitrary point 
     auto inside_triangle = [&](const Vec3& p) -> bool {

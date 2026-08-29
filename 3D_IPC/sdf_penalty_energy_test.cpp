@@ -7,6 +7,7 @@
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -202,6 +203,69 @@ TEST(SDFHeaviside, RejectsBadEps){
     EXPECT_THROW(sdf_heaviside_gradient(0.5, -1.0), std::runtime_error);
 }
 
+TEST(SDFMaterialMotion, MapsCurrentMaterialPointBackToPreviousPose) {
+    constexpr double angle = 0.63;
+    Mat33 previous_rotation;
+    previous_rotation <<
+        std::cos(angle), 0.0, std::sin(angle),
+        0.0,             1.0, 0.0,
+       -std::sin(angle), 0.0, std::cos(angle);
+    constexpr double other_angle = -0.41;
+    Mat33 current_rotation;
+    current_rotation <<
+        std::cos(other_angle), -std::sin(other_angle), 0.0,
+        std::sin(other_angle),  std::cos(other_angle), 0.0,
+        0.0,                    0.0,                   1.0;
+
+    SDFMaterialMotion motion;
+    motion.previous.rotation = previous_rotation;
+    motion.previous.translation = Vec3(-0.2, 0.3, 0.4);
+    motion.current.rotation = current_rotation;
+    motion.current.translation = Vec3(0.5, -0.1, 0.2);
+    const Vec3 material_point(0.7, -0.6, 0.25);
+    const Vec3 current_point =
+        motion.current.rotation * material_point
+        + motion.current.translation;
+    const Vec3 expected_previous =
+        motion.previous.rotation * material_point
+        + motion.previous.translation;
+
+    EXPECT_TRUE(sdf_previous_material_point(motion, current_point)
+                    .isApprox(expected_previous, 2.0e-15));
+
+    const SDFMaterialMotion stationary;
+    EXPECT_TRUE(sdf_previous_material_point(stationary, current_point)
+                    .isApprox(current_point, 0.0));
+}
+
+TEST(SDFMaterialMotion, RejectsInvalidDifferingPoses) {
+    SDFMaterialMotion nonorthogonal;
+    nonorthogonal.current.translation = Vec3::UnitX();
+    nonorthogonal.current.rotation(0, 0) = 2.0;
+    EXPECT_THROW(
+        sdf_previous_material_point(nonorthogonal, Vec3::Zero()),
+        std::invalid_argument);
+
+    SDFMaterialMotion reflection;
+    reflection.current.translation = Vec3::UnitX();
+    reflection.current.rotation(0, 0) = -1.0;
+    EXPECT_THROW(
+        sdf_previous_material_point(reflection, Vec3::Zero()),
+        std::invalid_argument);
+
+    SDFMaterialMotion nonfinite;
+    nonfinite.current.translation.x() =
+        std::numeric_limits<double>::infinity();
+    EXPECT_THROW(
+        sdf_previous_material_point(nonfinite, Vec3::Zero()),
+        std::invalid_argument);
+    EXPECT_THROW(
+        sdf_previous_material_point(
+            SDFMaterialMotion{},
+            Vec3(std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0)),
+        std::invalid_argument);
+}
+
 // ============================================================================
 //  Plane SDF
 // ============================================================================
@@ -213,9 +277,11 @@ TEST(PlaneSDF, Evaluate){
     EXPECT_NEAR(r.phi, 2.0, kTol);
     EXPECT_TRUE(r.grad_phi.isApprox(Vec3(0.0, 1.0, 0.0)));
     EXPECT_TRUE(r.hess_phi.isApprox(Mat33::Zero()));
+    EXPECT_TRUE(r.surface_point.isApprox(Vec3(3.0, 0.0, -5.0), kTol));
 
     r = evaluate_sdf(p, Vec3(0.0, -0.3, 0.0));
     EXPECT_NEAR(r.phi, -0.3, kTol);
+    EXPECT_TRUE(r.surface_point.isApprox(Vec3::Zero(), kTol));
 }
 
 TEST(PlaneSDF, EnergyBehavior){
@@ -354,6 +420,7 @@ TEST(CylinderSDF, Evaluate){
     Mat33 expected = Mat33::Zero();
     expected(1, 1) = 1.0 / 0.6;
     EXPECT_TRUE(r.hess_phi.isApprox(expected, kTol));
+    EXPECT_TRUE(r.surface_point.isApprox(Vec3(0.5, 0.0, 10.0), kTol));
 
     //  Point on the axis: phi = -R, derivatives degenerate -> zero sentinels.
     r = evaluate_sdf(c, Vec3(0.0, 0.0, 3.0));
@@ -413,6 +480,7 @@ TEST(SphereSDF, Evaluate){
     expected(1, 1) = 1.0 / 0.6;
     expected(2, 2) = 1.0 / 0.6;
     EXPECT_TRUE(r.hess_phi.isApprox(expected, kTol));
+    EXPECT_TRUE(r.surface_point.isApprox(Vec3(0.5, 0.0, 0.0), kTol));
 
     //  Point on a translated sphere's center: phi = -R, derivatives degenerate
     //  -> zero sentinels (same convention as the cylinder's on-axis case).
@@ -566,4 +634,42 @@ TEST(RigidBodySDFPenalty, HessianConvergesWithCenteredDifferences){
         }
     }
     EXPECT_TRUE(all_passed);
+}
+
+TEST(RigidBodySDFPenalty, CachedInputsMatchDefaultExactly) {
+    const RigidSDFSetup s;
+    const SDFEvaluation sdf = s.sdf_at(s.x_com, s.omega);
+    const QuaternionOmegaKinematics kinematics =
+        quaternion_omega_kinematics(
+            s.q_n, s.omega, s.dt, true);
+    const Mat33 J_xomega = dx_domega(s.X_centered, kinematics);
+
+    for (const bool include_sdf_curvature : {false, true}) {
+        const Vec3 gx = sdf_penalty_gradient(sdf, s.k, s.eps);
+        const Mat33 Hx = sdf_penalty_hessian(
+            sdf, s.k, s.eps, include_sdf_curvature);
+        for (const bool include_rigid_curvature : {false, true}) {
+            SCOPED_TRACE(include_sdf_curvature);
+            SCOPED_TRACE(include_rigid_curvature);
+            const RigidEnergyDerivatives uncached =
+                sdf_penalty_derivatives_rb(
+                    sdf, s.X_centered, kinematics, s.k, s.eps,
+                    include_sdf_curvature, include_rigid_curvature);
+            const RigidEnergyDerivatives cached =
+                sdf_penalty_derivatives_rb(
+                    sdf, s.X_centered, kinematics, s.k, s.eps,
+                    include_sdf_curvature, include_rigid_curvature,
+                    &gx, &Hx, &J_xomega);
+            EXPECT_TRUE(cached.translation_gradient.isApprox(
+                uncached.translation_gradient, 0.0));
+            EXPECT_TRUE(cached.orientation_gradient.isApprox(
+                uncached.orientation_gradient, 0.0));
+            EXPECT_TRUE(cached.translation_translation_hessian.isApprox(
+                uncached.translation_translation_hessian, 0.0));
+            EXPECT_TRUE(cached.translation_orientation_hessian.isApprox(
+                uncached.translation_orientation_hessian, 0.0));
+            EXPECT_TRUE(cached.orientation_orientation_hessian.isApprox(
+                uncached.orientation_orientation_hessian, 0.0));
+        }
+    }
 }

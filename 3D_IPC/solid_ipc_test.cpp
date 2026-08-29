@@ -2,6 +2,7 @@
 
 #include "barrier_energy.h"
 #include "broad_phase.h"
+#include "friction_energy.h"
 #include "mesh.h"
 #include "mesh_utils.h"
 #include "make_shape.h"
@@ -10,6 +11,8 @@
 #include "simulation.h"
 
 #include <gtest/gtest.h>
+
+#include <Eigen/Eigenvalues>
 
 #include <algorithm>
 #include <array>
@@ -1029,7 +1032,456 @@ double raw_candidate_barrier_energy(
     return energy;
 }
 
+struct RawFrictionAssembly {
+    double energy = 0.0;
+    std::vector<Vec3> gradients;
+    std::vector<Mat33> self_hessians;
+    int active_sliding_contacts = 0;
+};
+
+RawFrictionAssembly raw_candidate_friction_assembly(
+    const std::vector<Vec3>& x,
+    const std::vector<Vec3>& previous_positions,
+    const BroadPhase::Cache& cache,
+    const SimParams& params) {
+    RawFrictionAssembly result;
+    result.gradients.assign(x.size(), Vec3::Zero());
+    result.self_hessians.assign(x.size(), Mat33::Zero());
+    const double dt2 = params.dt2();
+
+    for (const NodeTrianglePair& pair : cache.nt_pairs) {
+        const int nodes[4] = {
+            pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+        const std::array<Vec3, 4> current{
+            x[static_cast<std::size_t>(nodes[0])],
+            x[static_cast<std::size_t>(nodes[1])],
+            x[static_cast<std::size_t>(nodes[2])],
+            x[static_cast<std::size_t>(nodes[3])]};
+        const std::array<Vec3, 4> previous{
+            previous_positions[static_cast<std::size_t>(nodes[0])],
+            previous_positions[static_cast<std::size_t>(nodes[1])],
+            previous_positions[static_cast<std::size_t>(nodes[2])],
+            previous_positions[static_cast<std::size_t>(nodes[3])]};
+        const FrozenFrictionContact contact =
+            make_node_triangle_frozen_friction_contact(
+                current, previous, params.d_hat, params.k_barrier,
+                params.dt(), params.friction_velocity_epsilon);
+        result.energy += frozen_friction_energy(
+            contact, params.friction_coefficient, dt2);
+        result.active_sliding_contacts +=
+            contact.active
+                && contact.tangential_displacement.squaredNorm() > 0.0
+            ? 1
+            : 0;
+        for (int role = 0; role < 4; ++role) {
+            const auto [gradient, hessian] =
+                frozen_friction_role_gradient_and_hessian(
+                    contact, role,
+                    params.friction_coefficient, dt2);
+            const std::size_t node =
+                static_cast<std::size_t>(nodes[role]);
+            result.gradients[node] += gradient;
+            result.self_hessians[node] += hessian;
+        }
+    }
+
+    for (const SegmentSegmentPair& pair : cache.ss_pairs) {
+        const std::array<Vec3, 4> current{
+            x[static_cast<std::size_t>(pair.v[0])],
+            x[static_cast<std::size_t>(pair.v[1])],
+            x[static_cast<std::size_t>(pair.v[2])],
+            x[static_cast<std::size_t>(pair.v[3])]};
+        const std::array<Vec3, 4> previous{
+            previous_positions[static_cast<std::size_t>(pair.v[0])],
+            previous_positions[static_cast<std::size_t>(pair.v[1])],
+            previous_positions[static_cast<std::size_t>(pair.v[2])],
+            previous_positions[static_cast<std::size_t>(pair.v[3])]};
+        const FrozenFrictionContact contact =
+            make_segment_segment_frozen_friction_contact(
+                current, previous, params.d_hat, params.k_barrier,
+                params.dt(), params.friction_velocity_epsilon);
+        result.energy += frozen_friction_energy(
+            contact, params.friction_coefficient, dt2);
+        result.active_sliding_contacts +=
+            contact.active
+                && contact.tangential_displacement.squaredNorm() > 0.0
+            ? 1
+            : 0;
+        for (int role = 0; role < 4; ++role) {
+            const auto [gradient, hessian] =
+                frozen_friction_role_gradient_and_hessian(
+                    contact, role,
+                    params.friction_coefficient, dt2);
+            const std::size_t node =
+                static_cast<std::size_t>(pair.v[role]);
+            result.gradients[node] += gradient;
+            result.self_hessians[node] += hessian;
+        }
+    }
+    return result;
+}
+
 } // namespace
+
+TEST(SolidFrictionAssembly,
+     PairOnceEnergyAndLocalRolesMatchFrozenContactKernels) {
+    SolidBarrierFixture fixture;
+    initialize_solid_barrier_fixture(fixture);
+    fixture.params.friction_coefficient = 0.63;
+    fixture.params.friction_velocity_epsilon = 0.08;
+
+    std::vector<Vec3> previous_positions = fixture.x;
+    const Vec3 upper_slip(0.055, -0.012, 0.027);
+    for (std::size_t node = 4; node < previous_positions.size(); ++node)
+        previous_positions[node] -= upper_slip;
+
+    const RawFrictionAssembly expected =
+        raw_candidate_friction_assembly(
+            fixture.x, previous_positions,
+            fixture.broad_phase.cache(), fixture.params);
+    ASSERT_GT(expected.active_sliding_contacts, 0);
+    ASSERT_GT(expected.energy, 0.0);
+
+    const double actual_energy =
+        compute_solid_friction_incremental_potential(
+            fixture.ref_mesh, fixture.params, fixture.x,
+            fixture.broad_phase, &previous_positions);
+    EXPECT_NEAR(
+        actual_energy, expected.energy,
+        1.0e-13 * (1.0 + expected.energy));
+
+    const double no_friction_energy =
+        compute_solid_incremental_potential_no_barrier(
+            fixture.ref_mesh, fixture.pins, fixture.params,
+            fixture.x, fixture.xhat)
+        + compute_solid_barrier_incremental_potential(
+            fixture.ref_mesh, fixture.params, fixture.x,
+            fixture.broad_phase);
+    const double full_energy = compute_solid_incremental_potential(
+        fixture.ref_mesh, fixture.pins, fixture.params,
+        fixture.x, fixture.xhat, fixture.broad_phase,
+        &previous_positions);
+    EXPECT_NEAR(
+        full_energy, no_friction_energy + expected.energy,
+        1.0e-13 * (1.0 + std::abs(full_energy)));
+
+    int nonzero_gradient_nodes = 0;
+    for (const int node : fixture.ref_mesh.tet_nodes) {
+        const auto [base_gradient, base_block] =
+            compute_solid_local_gradient_and_pbgs_block_no_barrier(
+                node, fixture.ref_mesh, fixture.pins, fixture.params,
+                fixture.x, fixture.xhat);
+        const auto [barrier_gradient, barrier_hessian] =
+            compute_solid_local_barrier_gradient_and_self_hessian(
+                node, fixture.ref_mesh, fixture.params,
+                fixture.x, fixture.broad_phase);
+        const auto [full_gradient, full_block] =
+            compute_solid_local_gradient_and_block(
+                node, fixture.ref_mesh, fixture.pins, fixture.params,
+                fixture.x, fixture.xhat, fixture.broad_phase,
+                nullptr, nullptr, nullptr, &previous_positions);
+        const Vec3 friction_gradient =
+            full_gradient - base_gradient - barrier_gradient;
+        const Mat33 friction_hessian =
+            full_block - base_block - barrier_hessian;
+        const std::size_t index = static_cast<std::size_t>(node);
+        EXPECT_LE(
+            (friction_gradient - expected.gradients[index]).norm(),
+            2.0e-14 * (1.0 + expected.gradients[index].norm()))
+            << "node=" << node
+            << " actual=" << friction_gradient.transpose()
+            << " expected=" << expected.gradients[index].transpose();
+        EXPECT_LE(
+            (friction_hessian - expected.self_hessians[index]).norm(),
+            2.0e-14 * (1.0 + expected.self_hessians[index].norm()))
+            << "node=" << node
+            << " actual=\n" << friction_hessian
+            << "\nexpected=\n" << expected.self_hessians[index];
+        nonzero_gradient_nodes += friction_gradient.squaredNorm() > 0.0
+            ? 1
+            : 0;
+    }
+    EXPECT_GT(nonzero_gradient_nodes, 0);
+}
+
+TEST(SolidFrictionAssembly,
+     SmallerTangentialSlipReducesEnergyAndLocalHessianIsPsd) {
+    SolidBarrierFixture fixture;
+    initialize_solid_barrier_fixture(fixture);
+    fixture.params.friction_coefficient = 0.51;
+    fixture.params.friction_velocity_epsilon = 0.11;
+
+    std::vector<Vec3> full_slip_previous = fixture.x;
+    std::vector<Vec3> half_slip_previous = fixture.x;
+    const Vec3 slip(0.048, -0.009, 0.031);
+    for (std::size_t node = 4; node < fixture.x.size(); ++node) {
+        full_slip_previous[node] -= slip;
+        half_slip_previous[node] -= 0.5 * slip;
+    }
+    const double full_slip_energy =
+        compute_solid_friction_incremental_potential(
+            fixture.ref_mesh, fixture.params, fixture.x,
+            fixture.broad_phase, &full_slip_previous);
+    const double half_slip_energy =
+        compute_solid_friction_incremental_potential(
+            fixture.ref_mesh, fixture.params, fixture.x,
+            fixture.broad_phase, &half_slip_previous);
+    ASSERT_GT(full_slip_energy, 0.0);
+    EXPECT_GT(half_slip_energy, 0.0);
+    EXPECT_LT(half_slip_energy, full_slip_energy);
+
+    int nonzero_hessians = 0;
+    for (const int node : fixture.ref_mesh.tet_nodes) {
+        const auto [base_gradient, base_block] =
+            compute_solid_local_gradient_and_pbgs_block_no_barrier(
+                node, fixture.ref_mesh, fixture.pins, fixture.params,
+                fixture.x, fixture.xhat);
+        const auto [barrier_gradient, barrier_hessian] =
+            compute_solid_local_barrier_gradient_and_self_hessian(
+                node, fixture.ref_mesh, fixture.params,
+                fixture.x, fixture.broad_phase);
+        const auto [full_gradient, full_block] =
+            compute_solid_local_gradient_and_block(
+                node, fixture.ref_mesh, fixture.pins, fixture.params,
+                fixture.x, fixture.xhat, fixture.broad_phase,
+                nullptr, nullptr, nullptr, &full_slip_previous);
+        (void)base_gradient;
+        (void)barrier_gradient;
+        const Mat33 friction_hessian =
+            full_block - base_block - barrier_hessian;
+        EXPECT_TRUE(friction_hessian.isApprox(
+            friction_hessian.transpose(), 2.0e-12))
+            << "node=" << node;
+        Eigen::SelfAdjointEigenSolver<Mat33> eigensolver(
+            friction_hessian);
+        ASSERT_EQ(eigensolver.info(), Eigen::Success);
+        const double tolerance =
+            2.0e-12 * (1.0 + friction_hessian.norm());
+        EXPECT_GE(eigensolver.eigenvalues().minCoeff(), -tolerance)
+            << "node=" << node;
+        nonzero_hessians += friction_hessian.norm() > tolerance ? 1 : 0;
+    }
+    EXPECT_GT(nonzero_hessians, 0);
+}
+
+TEST(SolidFrictionAssembly,
+     FrozenResidualWorkspaceRecomputesIdenticalFrictionGradient) {
+    SolidBarrierFixture fixture;
+    initialize_solid_barrier_fixture(fixture);
+    fixture.params.use_parallel = false;
+    fixture.params.friction_coefficient = 0.72;
+    fixture.params.friction_velocity_epsilon = 0.09;
+
+    std::vector<Vec3> previous_positions = fixture.x;
+    for (std::size_t node = 4; node < previous_positions.size(); ++node)
+        previous_positions[node] -= Vec3(0.043, -0.008, 0.019);
+
+    std::vector<unsigned char> solid_node_mask(fixture.x.size(), 0);
+    for (const int node : fixture.ref_mesh.tet_nodes)
+        solid_node_mask[static_cast<std::size_t>(node)] = 1;
+    std::vector<unsigned char> surface_node_mask(fixture.x.size(), 0);
+    for (const int node : fixture.ref_mesh.surface_nodes)
+        surface_node_mask[static_cast<std::size_t>(node)] = 1;
+    const PinMap pin_map = build_pin_map(
+        fixture.pins, static_cast<int>(fixture.x.size()));
+
+    FrozenResidualWorkspace workspace;
+    build_frozen_residual_workspace(
+        fixture.ref_mesh, fixture.params, fixture.x,
+        fixture.broad_phase, workspace);
+    const double uncached = compute_global_solid_residual(
+        fixture.ref_mesh, fixture.pins, fixture.params,
+        fixture.x, fixture.xhat, fixture.broad_phase,
+        &pin_map, &solid_node_mask, &surface_node_mask,
+        nullptr, &previous_positions);
+    const double cached = compute_global_solid_residual(
+        fixture.ref_mesh, fixture.pins, fixture.params,
+        fixture.x, fixture.xhat, fixture.broad_phase,
+        &pin_map, &solid_node_mask, &surface_node_mask,
+        &workspace, &previous_positions);
+    EXPECT_EQ(cached, uncached);
+}
+
+TEST(SolidFrictionAssembly,
+     ZeroCoefficientPreservesOldPathAndDoesNotInspectPreviousPositions) {
+    SolidBarrierFixture fixture;
+    initialize_solid_barrier_fixture(fixture);
+    ASSERT_DOUBLE_EQ(fixture.params.friction_coefficient, 0.0);
+    const std::vector<Vec3> wrong_size_previous{Vec3::Zero()};
+
+    EXPECT_DOUBLE_EQ(
+        compute_solid_friction_incremental_potential(
+            fixture.ref_mesh, fixture.params, fixture.x,
+            fixture.broad_phase, &wrong_size_previous),
+        0.0);
+    const double old_energy = compute_solid_incremental_potential(
+        fixture.ref_mesh, fixture.pins, fixture.params,
+        fixture.x, fixture.xhat, fixture.broad_phase);
+    const double explicit_previous_energy =
+        compute_solid_incremental_potential(
+            fixture.ref_mesh, fixture.pins, fixture.params,
+            fixture.x, fixture.xhat, fixture.broad_phase,
+            &wrong_size_previous);
+    EXPECT_DOUBLE_EQ(explicit_previous_energy, old_energy);
+
+    for (const int node : fixture.ref_mesh.tet_nodes) {
+        const auto old_local = compute_solid_local_gradient_and_block(
+            node, fixture.ref_mesh, fixture.pins, fixture.params,
+            fixture.x, fixture.xhat, fixture.broad_phase);
+        const auto explicit_previous_local =
+            compute_solid_local_gradient_and_block(
+                node, fixture.ref_mesh, fixture.pins, fixture.params,
+                fixture.x, fixture.xhat, fixture.broad_phase,
+                nullptr, nullptr, nullptr, &wrong_size_previous);
+        EXPECT_TRUE((old_local.first.array()
+                     == explicit_previous_local.first.array()).all());
+        EXPECT_TRUE((old_local.second.array()
+                     == explicit_previous_local.second.array()).all());
+    }
+
+    const double old_residual = compute_global_solid_residual(
+        fixture.ref_mesh, fixture.pins, fixture.params,
+        fixture.x, fixture.xhat, fixture.broad_phase);
+    const double explicit_previous_residual =
+        compute_global_solid_residual(
+            fixture.ref_mesh, fixture.pins, fixture.params,
+            fixture.x, fixture.xhat, fixture.broad_phase,
+            nullptr, nullptr, nullptr, nullptr,
+            &wrong_size_previous);
+    EXPECT_DOUBLE_EQ(explicit_previous_residual, old_residual);
+
+    fixture.params.friction_coefficient = 0.4;
+    EXPECT_THROW(
+        compute_solid_friction_incremental_potential(
+            fixture.ref_mesh, fixture.params, fixture.x,
+            fixture.broad_phase),
+        std::invalid_argument);
+    EXPECT_THROW(
+        compute_solid_local_gradient_and_block(
+            0, fixture.ref_mesh, fixture.pins, fixture.params,
+            fixture.x, fixture.xhat, fixture.broad_phase,
+            nullptr, nullptr, nullptr, &wrong_size_previous),
+        std::invalid_argument);
+    EXPECT_THROW(
+        compute_global_solid_residual(
+            fixture.ref_mesh, fixture.pins, fixture.params,
+            fixture.x, fixture.xhat, fixture.broad_phase),
+        std::invalid_argument);
+}
+
+TEST(DeformableFrictionResidual,
+     AddsFrozenRoleGradientAndMatchesFrozenWorkspacePath) {
+    RefMesh ref_mesh;
+    ref_mesh.num_positions = 4;
+    ref_mesh.tris = {1, 2, 3};
+    ref_mesh.Dm_inverse = {Mat22::Identity()};
+    ref_mesh.area = {0.5};
+    ref_mesh.mass.assign(4, 1.0);
+    ref_mesh.node_to_rb.assign(4, -1);
+    const std::vector<Vec3> x{
+        Vec3(0.25, 0.25, 0.10),
+        Vec3(0.00, 0.00, 0.00),
+        Vec3(1.00, 0.00, 0.00),
+        Vec3(0.00, 1.00, 0.00)};
+    std::vector<Vec3> previous_positions = x;
+    previous_positions[0] -= Vec3(0.03, 0.0, 0.0);
+
+    SimParams params = SimParams::zeros();
+    params.fps = 10.0;
+    params.substeps = 1;
+    params.d_hat = 0.2;
+    params.k_barrier = 6.0;
+    params.friction_coefficient = 2.3;
+    params.friction_velocity_epsilon = 0.01;
+
+    BroadPhase broad_phase;
+    broad_phase.initialize(
+        x, std::vector<Vec3>(x.size(), Vec3::Zero()),
+        ref_mesh, params.dt(), params.d_hat);
+    ASSERT_EQ(broad_phase.cache().vertex_nt[0].size(), 1U);
+    EXPECT_TRUE(broad_phase.cache().vertex_ss[0].empty());
+
+    Vec3 expected_gradient = Vec3::Zero();
+    for (const BroadPhase::Cache::VertexPairEntry& entry :
+         broad_phase.cache().vertex_nt[0]) {
+        const NodeTrianglePair& pair =
+            broad_phase.cache().nt_pairs[entry.pair_index];
+        ASSERT_EQ(pair.node, 0);
+        expected_gradient += params.dt2() * params.k_barrier
+            * node_triangle_barrier_gradient(
+                x[static_cast<std::size_t>(pair.node)],
+                x[static_cast<std::size_t>(pair.tri_v[0])],
+                x[static_cast<std::size_t>(pair.tri_v[1])],
+                x[static_cast<std::size_t>(pair.tri_v[2])],
+                params.d_hat, entry.dof);
+        const std::array<Vec3, 4> current{
+            x[static_cast<std::size_t>(pair.node)],
+            x[static_cast<std::size_t>(pair.tri_v[0])],
+            x[static_cast<std::size_t>(pair.tri_v[1])],
+            x[static_cast<std::size_t>(pair.tri_v[2])]};
+        const std::array<Vec3, 4> previous{
+            previous_positions[static_cast<std::size_t>(pair.node)],
+            previous_positions[static_cast<std::size_t>(pair.tri_v[0])],
+            previous_positions[static_cast<std::size_t>(pair.tri_v[1])],
+            previous_positions[static_cast<std::size_t>(pair.tri_v[2])]};
+        const FrozenFrictionContact contact =
+            make_node_triangle_frozen_friction_contact(
+                current, previous, params.d_hat, params.k_barrier,
+                params.dt(), params.friction_velocity_epsilon);
+        expected_gradient += frozen_friction_role_gradient(
+            contact, entry.dof,
+            params.friction_coefficient, params.dt2());
+    }
+    ASSERT_GT(std::abs(expected_gradient.x()),
+              std::abs(expected_gradient.z()));
+
+    VertexTriangleMap adjacency =
+        build_incident_triangle_map(ref_mesh.tris);
+    adjacency[0] = {};
+    const std::vector<int> deformable_nodes{0};
+    const double expected_residual =
+        expected_gradient.cwiseAbs().maxCoeff();
+    const double uncached = compute_global_deformable_residual(
+        ref_mesh, adjacency, {}, params, x, x, broad_phase,
+        deformable_nodes, nullptr, nullptr, nullptr, nullptr,
+        &previous_positions);
+
+    FrozenResidualWorkspace workspace;
+    build_frozen_residual_workspace(
+        ref_mesh, params, x, broad_phase, workspace);
+    const double cached = compute_global_deformable_residual(
+        ref_mesh, adjacency, {}, params, x, x, broad_phase,
+        deformable_nodes, nullptr, nullptr, nullptr, &workspace,
+        &previous_positions);
+    EXPECT_NEAR(
+        uncached, expected_residual,
+        1.0e-13 * (1.0 + expected_residual));
+    EXPECT_EQ(cached, uncached);
+
+    const std::vector<Vec3> wrong_size_previous{Vec3::Zero()};
+    EXPECT_THROW(
+        compute_global_deformable_residual(
+            ref_mesh, adjacency, {}, params, x, x, broad_phase,
+            deformable_nodes),
+        std::invalid_argument);
+    EXPECT_THROW(
+        compute_global_deformable_residual(
+            ref_mesh, adjacency, {}, params, x, x, broad_phase,
+            deformable_nodes, nullptr, nullptr, nullptr, nullptr,
+            &wrong_size_previous),
+        std::invalid_argument);
+
+    params.friction_coefficient = 0.0;
+    const double old_path = compute_global_deformable_residual(
+        ref_mesh, adjacency, {}, params, x, x, broad_phase,
+        deformable_nodes);
+    const double explicit_previous =
+        compute_global_deformable_residual(
+            ref_mesh, adjacency, {}, params, x, x, broad_phase,
+            deformable_nodes, nullptr, nullptr, nullptr, nullptr,
+            &wrong_size_previous);
+    EXPECT_DOUBLE_EQ(explicit_previous, old_path);
+}
 
 TEST(SolidResidual, SuppliedMasksMatchInternallyBuiltMasks) {
     SolidBarrierFixture fixture;
@@ -1404,6 +1856,239 @@ TEST(SolidResidual, IncludesBarrierGradient) {
             fixture.ref_mesh, {}, params, fixture.x, fixture.x,
             fixture.broad_phase),
         0.0);
+}
+
+TEST(SolidSdfFrictionAssembly,
+     EnergyLocalSystemAndResidualMatchFrozenSdfKernel) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    create_solid(
+        unit_tet_positions(), {0, 1, 2, 3}, 24.0,
+        ref_mesh, state);
+
+    std::vector<Vec3> x = state.deformed_positions;
+    x[0] = Vec3(0.0, -0.15, 0.0);
+    x[1] = Vec3(1.0, 0.80, 0.0);
+    x[2] = Vec3(0.0, 0.90, 0.0);
+    x[3] = Vec3(0.0, 0.80, 1.0);
+    const std::vector<Vec3> xhat = x;
+    std::vector<Vec3> previous_positions = x;
+    previous_positions[0] -= Vec3(0.035, 0.0, 0.0);
+
+    SimParams params = SimParams::zeros();
+    params.fps = 4.0;
+    params.substeps = 1;
+    params.k_sdf = 7.5;
+    params.eps_sdf = 0.4;
+    params.friction_coefficient = 2.1;
+    params.friction_velocity_epsilon = 0.08;
+    params.sdf_planes.push_back({Vec3::Zero(), Vec3::UnitY()});
+
+    const SDFEvaluation sdf = evaluate_sdf(params.sdf_planes[0], x[0]);
+    const FrozenFrictionContact contact =
+        make_sdf_frozen_friction_contact(
+            x[0], previous_positions[0], sdf,
+            params.k_sdf, params.eps_sdf,
+            params.dt(), params.friction_velocity_epsilon);
+    ASSERT_TRUE(contact.active);
+    const double expected_friction_energy = frozen_friction_energy(
+        contact, params.friction_coefficient, params.dt2());
+    const auto [expected_friction_gradient,
+                expected_friction_hessian] =
+        frozen_friction_role_gradient_and_hessian(
+            contact, 0,
+            params.friction_coefficient, params.dt2());
+    ASSERT_GT(expected_friction_energy, 0.0);
+
+    EXPECT_NEAR(
+        compute_solid_sdf_friction_incremental_potential(
+            ref_mesh, params, x, &previous_positions),
+        expected_friction_energy,
+        1.0e-14 * (1.0 + expected_friction_energy));
+
+    BroadPhase broad_phase;
+    const double base_energy =
+        compute_solid_incremental_potential_no_barrier(
+            ref_mesh, {}, params, x, xhat);
+    const double full_energy = compute_solid_incremental_potential(
+        ref_mesh, {}, params, x, xhat, broad_phase,
+        &previous_positions);
+    EXPECT_NEAR(
+        full_energy, base_energy + expected_friction_energy,
+        1.0e-14 * (1.0 + std::abs(full_energy)));
+
+    const auto [base_gradient, base_hessian] =
+        compute_solid_local_gradient_and_pbgs_block_no_barrier(
+            0, ref_mesh, {}, params, x, xhat);
+    const auto [full_gradient, full_hessian] =
+        compute_solid_local_gradient_and_block(
+            0, ref_mesh, {}, params, x, xhat, broad_phase,
+            nullptr, nullptr, nullptr, &previous_positions);
+    EXPECT_TRUE((full_gradient - base_gradient).isApprox(
+        expected_friction_gradient, 1.0e-13));
+    EXPECT_TRUE((full_hessian - base_hessian).isApprox(
+        expected_friction_hessian, 1.0e-13));
+    Eigen::SelfAdjointEigenSolver<Mat33> eigensolver(
+        expected_friction_hessian);
+    ASSERT_EQ(eigensolver.info(), Eigen::Success);
+    EXPECT_GE(eigensolver.eigenvalues().minCoeff(), -1.0e-14);
+
+    const Vec3 expected_total_gradient =
+        params.dt2()
+            * sdf_penalty_gradient(sdf, params.k_sdf, params.eps_sdf)
+        + expected_friction_gradient;
+    const double expected_residual =
+        expected_total_gradient.cwiseAbs().maxCoeff()
+        / ref_mesh.mass[0];
+    EXPECT_NEAR(
+        compute_global_solid_residual(
+            ref_mesh, {}, params, x, xhat, broad_phase,
+            nullptr, nullptr, nullptr, nullptr,
+            &previous_positions),
+        expected_residual,
+        1.0e-13 * (1.0 + expected_residual));
+}
+
+TEST(SolidSdfFrictionAssembly,
+     MovingSurfaceCoMotionHasZeroSlipAndInteriorNodesStayExcluded) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    create_solid(
+        unit_tet_positions(), {0, 1, 2, 3}, 0.0,
+        ref_mesh, state);
+
+    std::vector<Vec3> previous_positions = state.deformed_positions;
+    std::vector<Vec3> x = previous_positions;
+    // Keep every other boundary node outside the SDF support so this fixture
+    // isolates the co-moving contact at node 0.
+    for (int node = 1; node < static_cast<int>(x.size()); ++node) {
+        previous_positions[node].y() += 1.0;
+        x[node] = previous_positions[node];
+    }
+    previous_positions[0] = Vec3(0.0, -0.1, 0.0);
+    x[0] = Vec3(0.025, -0.1, 0.0);
+
+    SimParams params = SimParams::zeros();
+    params.fps = 10.0;
+    params.k_sdf = 8.0;
+    params.eps_sdf = 0.2;
+    params.friction_coefficient = 0.7;
+    params.friction_velocity_epsilon = 0.05;
+    PlaneSDF plane{Vec3::Zero(), Vec3::UnitY()};
+    plane.material_motion.current.translation =
+        Vec3(0.025, 0.0, 0.0);
+    params.sdf_planes.push_back(plane);
+
+    // Particle and contacting plane material move together tangentially.
+    const SDFEvaluation sdf = evaluate_sdf(params.sdf_planes[0], x[0]);
+    const FrozenFrictionContact contact =
+        make_sdf_frozen_friction_contact(
+            x[0], previous_positions[0], sdf,
+            params.k_sdf, params.eps_sdf,
+            params.dt(), params.friction_velocity_epsilon);
+    ASSERT_TRUE(contact.active);
+    EXPECT_TRUE(contact.tangential_displacement.isZero(0.0));
+    const auto [expected_gradient, expected_hessian] =
+        frozen_friction_role_gradient_and_hessian(
+            contact, 0, params.friction_coefficient, params.dt2());
+    EXPECT_TRUE(expected_gradient.isZero(0.0));
+    EXPECT_DOUBLE_EQ(
+        compute_solid_sdf_friction_incremental_potential(
+            ref_mesh, params, x, &previous_positions),
+        0.0);
+    BroadPhase broad_phase;
+    const auto base_local =
+        compute_solid_local_gradient_and_pbgs_block_no_barrier(
+            0, ref_mesh, {}, params, x, x);
+    const auto full_local = compute_solid_local_gradient_and_block(
+        0, ref_mesh, {}, params, x, x, broad_phase,
+        nullptr, nullptr, nullptr, &previous_positions);
+    EXPECT_TRUE((full_local.first.array() == base_local.first.array()).all());
+    EXPECT_TRUE(
+        (full_local.second - base_local.second)
+            .isApprox(expected_hessian, 1.0e-13));
+
+    RefMesh subdivided_mesh;
+    DeformedState subdivided_state;
+    const std::vector<Vec3> subdivided_x = subdivided_tet_positions();
+    create_solid(
+        subdivided_x, subdivided_tets(), 0.0,
+        subdivided_mesh, subdivided_state);
+    std::vector<Vec3> subdivided_previous = subdivided_x;
+    subdivided_previous[4] -= Vec3(0.0, 0.04, 0.0);
+    SimParams interior_params = SimParams::zeros();
+    interior_params.fps = 5.0;
+    interior_params.k_sdf = 9.0;
+    interior_params.eps_sdf = 0.0;
+    interior_params.friction_coefficient = 0.8;
+    interior_params.friction_velocity_epsilon = 0.1;
+    interior_params.sdf_spheres.push_back(
+        {subdivided_x[4] + Vec3(0.05, 0.0, 0.0), 0.15});
+    EXPECT_DOUBLE_EQ(
+        compute_solid_sdf_friction_incremental_potential(
+            subdivided_mesh, interior_params, subdivided_x,
+            &subdivided_previous),
+        0.0);
+    const auto interior_local = compute_solid_local_gradient_and_block(
+        4, subdivided_mesh, {}, interior_params,
+        subdivided_x, subdivided_x, broad_phase,
+        nullptr, nullptr, nullptr, &subdivided_previous);
+    EXPECT_TRUE(interior_local.first.isZero(0.0));
+    EXPECT_TRUE(interior_local.second.isZero(0.0));
+}
+
+TEST(SolidSdfFrictionAssembly,
+     ZeroCoefficientDoesNotInspectMotionOrPreviousPositions) {
+    RefMesh ref_mesh;
+    DeformedState state;
+    create_solid(
+        unit_tet_positions(), {0, 1, 2, 3}, 0.0,
+        ref_mesh, state);
+    std::vector<Vec3> x = state.deformed_positions;
+    x[0] = Vec3(0.0, -0.1, 0.0);
+
+    SimParams params = SimParams::zeros();
+    params.fps = 5.0;
+    params.k_sdf = 6.0;
+    params.eps_sdf = 0.2;
+    PlaneSDF invalid_motion_plane{Vec3::Zero(), Vec3::UnitY()};
+    invalid_motion_plane.material_motion.current.rotation = Mat33::Zero();
+    invalid_motion_plane.material_motion.current.translation =
+        Vec3(0.1, 0.0, 0.0);
+    params.sdf_planes.push_back(invalid_motion_plane);
+    ASSERT_DOUBLE_EQ(params.friction_coefficient, 0.0);
+    const std::vector<Vec3> wrong_size_previous{Vec3::Zero()};
+
+    EXPECT_DOUBLE_EQ(
+        compute_solid_sdf_friction_incremental_potential(
+            ref_mesh, params, x, &wrong_size_previous),
+        0.0);
+    BroadPhase broad_phase;
+    const double old_energy = compute_solid_incremental_potential(
+        ref_mesh, {}, params, x, x, broad_phase);
+    EXPECT_DOUBLE_EQ(
+        compute_solid_incremental_potential(
+            ref_mesh, {}, params, x, x, broad_phase,
+            &wrong_size_previous),
+        old_energy);
+    const auto old_local = compute_solid_local_gradient_and_block(
+        0, ref_mesh, {}, params, x, x, broad_phase);
+    const auto explicit_previous_local =
+        compute_solid_local_gradient_and_block(
+            0, ref_mesh, {}, params, x, x, broad_phase,
+            nullptr, nullptr, nullptr, &wrong_size_previous);
+    EXPECT_TRUE((old_local.first.array()
+                 == explicit_previous_local.first.array()).all());
+    EXPECT_TRUE((old_local.second.array()
+                 == explicit_previous_local.second.array()).all());
+    const double old_residual = compute_global_solid_residual(
+        ref_mesh, {}, params, x, x, broad_phase);
+    EXPECT_DOUBLE_EQ(
+        compute_global_solid_residual(
+            ref_mesh, {}, params, x, x, broad_phase,
+            nullptr, nullptr, nullptr, nullptr,
+            &wrong_size_previous),
+        old_residual);
 }
 
 TEST(SolidSdfAssembly,

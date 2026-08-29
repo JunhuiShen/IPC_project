@@ -51,6 +51,28 @@ void expect_flat_horizontal_polygon_prism(
     }
 }
 
+void expect_sdf_material_pose_near(
+    const SDFMaterialPose& actual,
+    const SDFMaterialPose& expected,
+    const double tolerance = 1.0e-14) {
+    EXPECT_TRUE(actual.rotation.isApprox(expected.rotation, tolerance))
+        << "actual rotation:\n" << actual.rotation
+        << "\nexpected rotation:\n" << expected.rotation;
+    EXPECT_TRUE(actual.translation.isApprox(expected.translation, tolerance))
+        << "actual translation=" << actual.translation.transpose()
+        << " expected translation=" << expected.translation.transpose();
+}
+
+void expect_sdf_material_motion_near(
+    const SDFMaterialMotion& actual,
+    const SDFMaterialMotion& expected,
+    const double tolerance = 1.0e-14) {
+    expect_sdf_material_pose_near(
+        actual.previous, expected.previous, tolerance);
+    expect_sdf_material_pose_near(
+        actual.current, expected.current, tolerance);
+}
+
 } // namespace
 
 TEST(BuildIncidentTriangleMap, BasicExample) {
@@ -1577,6 +1599,11 @@ TEST(MaterialArguments, SeparateDefaultsAndDensityOverrides) {
                * (1.0 - 2.0 * defaults.solid_nu)));
     EXPECT_DOUBLE_EQ(defaults.rigid_density, 900.0);
     EXPECT_DOUBLE_EQ(defaults.to_sim_params().rigid_density, 900.0);
+    EXPECT_DOUBLE_EQ(defaults.friction_coefficient, 0.0);
+    EXPECT_DOUBLE_EQ(defaults.friction_velocity_epsilon, 0.01);
+    EXPECT_DOUBLE_EQ(defaults.to_sim_params().friction_coefficient, 0.0);
+    EXPECT_DOUBLE_EQ(
+        defaults.to_sim_params().friction_velocity_epsilon, 0.01);
     EXPECT_FALSE(defaults.verbose);
     EXPECT_FALSE(defaults.to_sim_params().verbose);
 
@@ -1588,26 +1615,61 @@ TEST(MaterialArguments, SeparateDefaultsAndDensityOverrides) {
     char solid_density_value[] = "567";
     char shell_density_key[] = "--density";
     char shell_density_value[] = "18";
+    char friction_key[] = "--friction_coefficient";
+    char friction_value[] = "0.37";
+    char friction_epsilon_key[] = "--friction_velocity_epsilon";
+    char friction_epsilon_value[] = "0.025";
     char verbose_key[] = "--verbose";
     char* argv[] = {
         program,
         rigid_density_key, rigid_density_value,
         solid_density_key, solid_density_value,
         shell_density_key, shell_density_value,
+        friction_key, friction_value,
+        friction_epsilon_key, friction_epsilon_value,
         verbose_key,
     };
-    ASSERT_TRUE(args.parse(8, argv));
+    ASSERT_TRUE(args.parse(12, argv));
 
     EXPECT_DOUBLE_EQ(args.rigid_density, 1234.0);
     EXPECT_DOUBLE_EQ(args.solid_density, 567.0);
     EXPECT_DOUBLE_EQ(args.density, 18.0);
+    EXPECT_DOUBLE_EQ(args.friction_coefficient, 0.37);
+    EXPECT_DOUBLE_EQ(args.friction_velocity_epsilon, 0.025);
     EXPECT_TRUE(args.verbose);
 
     const SimParams params = args.to_sim_params();
     EXPECT_DOUBLE_EQ(params.rigid_density, 1234.0);
     EXPECT_DOUBLE_EQ(params.solid_density, 567.0);
     EXPECT_DOUBLE_EQ(params.density, 18.0);
+    EXPECT_DOUBLE_EQ(params.friction_coefficient, 0.37);
+    EXPECT_DOUBLE_EQ(params.friction_velocity_epsilon, 0.025);
     EXPECT_TRUE(params.verbose);
+
+    IPCArgs3D invalid_coefficient;
+    invalid_coefficient.friction_coefficient = -1.0;
+    EXPECT_THROW(
+        (void)invalid_coefficient.to_sim_params(), std::invalid_argument);
+    invalid_coefficient.friction_coefficient =
+        std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(
+        (void)invalid_coefficient.to_sim_params(), std::invalid_argument);
+
+    IPCArgs3D invalid_epsilon;
+    invalid_epsilon.friction_coefficient = 0.1;
+    invalid_epsilon.friction_velocity_epsilon = 0.0;
+    EXPECT_THROW(
+        (void)invalid_epsilon.to_sim_params(), std::invalid_argument);
+    invalid_epsilon.friction_velocity_epsilon =
+        std::numeric_limits<double>::infinity();
+    EXPECT_THROW(
+        (void)invalid_epsilon.to_sim_params(), std::invalid_argument);
+
+    IPCArgs3D disabled_friction;
+    disabled_friction.friction_coefficient = 0.0;
+    disabled_friction.friction_velocity_epsilon =
+        std::numeric_limits<double>::quiet_NaN();
+    EXPECT_NO_THROW((void)disabled_friction.to_sim_params());
 }
 
 TEST(MixedExample, RigidAndSolidDensitiesAreIndependent) {
@@ -3226,7 +3288,7 @@ TEST(MixedExample,
     }
     // The builder centers the physical tetrahedral volume in x/z, not this
     // deliberately asymmetric fixture's bounding box.
-    const Vec3 armadillo_aabb_center(0.025, 0.65025, 0.0125);
+    const Vec3 armadillo_aabb_center(0.025, 0.64025, 0.0125);
     EXPECT_TRUE((0.5 * (armadillo_lower + armadillo_upper)).isApprox(
         armadillo_aabb_center, 1.0e-14));
     EXPECT_TRUE((armadillo_upper - armadillo_lower).isApprox(
@@ -3326,10 +3388,10 @@ TEST(MixedExample,
             1.0e-12);
     }
 
-    // Its AABB starts inside the tip-radius envelope; the production meshes'
-    // actual fluted surfaces remain separated at this placement.
-    EXPECT_NEAR(armadillo_lower.y(), 0.574654015, 1.0e-14);
-    EXPECT_NEAR(0.585 - armadillo_lower.y(), 0.010345985, 1.0e-14);
+    // Its AABB starts deeper inside the tip-radius envelope; the production
+    // meshes' actual fluted surfaces remain separated at this placement.
+    EXPECT_NEAR(armadillo_lower.y(), 0.564654015, 1.0e-14);
+    EXPECT_NEAR(0.585 - armadillo_lower.y(), 0.020345985, 1.0e-14);
 
     for (int triangle = 0; triangle < total_triangles; ++triangle) {
         const int expected_owner = triangle < solid_boundary_triangles
@@ -4290,4 +4352,194 @@ TEST(ClothExample, RolledClothClearanceTracksLargerSDFRange) {
     }
     EXPECT_NEAR(
         minimum_union_phi, args.eps_sdf + 1.0e-4, 2.0e-12);
+}
+
+TEST(SdfMaterialMotionExample,
+     TwoCylinderUpdateUsesAbsoluteSubstepTimesAndIsRestartSafe) {
+    IPCArgs3D args;
+    args.fps = 20.0;
+    args.substeps = 4;
+    args.tcyl_n_strips = 1;
+    args.tcyl_nx = 2;
+    args.tcyl_ny = 8;
+    args.tcyl_nu = 8;
+    args.tcyl_twist_rate = 0.37;
+    args.tcyl_settle_time = 0.0;
+    args.tcyl_ramp_time = 0.0;
+    args.tcyl_max_turn = 0.0;
+    args.tcyl_untwist = false;
+
+    const auto build_scene = [&](SimParams& params,
+                                 CylinderTwistSpec& spec) {
+        RefMesh ref_mesh;
+        DeformedState state;
+        std::vector<Vec2> X;
+        std::vector<Pin> pins;
+        std::vector<Vec3> static_x;
+        std::vector<int> static_tris;
+        params = args.to_sim_params();
+        build_two_cylinder_twist_example(
+            args, ref_mesh, state, X, pins, params,
+            static_x, static_tris, spec);
+    };
+
+    SimParams sequential_params;
+    CylinderTwistSpec sequential_spec;
+    build_scene(sequential_params, sequential_spec);
+    ASSERT_EQ(sequential_params.sdf_cylinders.size(), 2U);
+    const double dt = sequential_params.dt();
+    constexpr int target_substep = 17;
+    for (int substep = 1; substep <= target_substep; ++substep) {
+        update_cylinder_sdfs(
+            sequential_params, sequential_spec, substep * dt);
+    }
+
+    // A restarted run rebuilds the scene and jumps directly to the next
+    // absolute substep time. It must reconstruct the same previous/current
+    // material poses without relying on updater call history.
+    SimParams restarted_params;
+    CylinderTwistSpec restarted_spec;
+    build_scene(restarted_params, restarted_spec);
+    update_cylinder_sdfs(
+        restarted_params, restarted_spec, target_substep * dt);
+    ASSERT_EQ(restarted_params.sdf_cylinders.size(), 2U);
+
+    SimParams predecessor_params;
+    CylinderTwistSpec predecessor_spec;
+    build_scene(predecessor_params, predecessor_spec);
+    update_cylinder_sdfs(
+        predecessor_params, predecessor_spec,
+        (target_substep - 1) * dt);
+
+    for (std::size_t cylinder_index = 0; cylinder_index < 2;
+         ++cylinder_index) {
+        SCOPED_TRACE(cylinder_index);
+        const CylinderSDF& sequential =
+            sequential_params.sdf_cylinders[cylinder_index];
+        const CylinderSDF& restarted =
+            restarted_params.sdf_cylinders[cylinder_index];
+        const CylinderSDF& predecessor =
+            predecessor_params.sdf_cylinders[cylinder_index];
+        expect_sdf_material_motion_near(
+            restarted.material_motion, sequential.material_motion);
+        expect_sdf_material_pose_near(
+            restarted.material_motion.previous,
+            predecessor.material_motion.current);
+        EXPECT_TRUE(restarted.axis.isApprox(
+            restarted.material_motion.current.rotation * Vec3::UnitX(),
+            1.0e-14));
+
+        // Rotation is about the cylinder center, so that point stays fixed.
+        EXPECT_TRUE((restarted.material_motion.current.rotation
+                     * restarted.point
+                     + restarted.material_motion.current.translation)
+                        .isApprox(restarted.point, 1.0e-14));
+
+        // A material surface point maps to the preceding absolute-time pose.
+        const Vec3 rest_surface =
+            restarted.point + restarted.radius * Vec3::UnitZ();
+        const Vec3 current_surface =
+            restarted.material_motion.current.rotation * rest_surface
+            + restarted.material_motion.current.translation;
+        const Vec3 expected_previous_surface =
+            restarted.material_motion.previous.rotation * rest_surface
+            + restarted.material_motion.previous.translation;
+        EXPECT_NEAR(evaluate_sdf(restarted, current_surface).phi,
+                    0.0, 2.0e-14);
+        EXPECT_TRUE(sdf_previous_material_point(
+                        restarted.material_motion, current_surface)
+                        .isApprox(expected_previous_surface, 2.0e-14));
+    }
+}
+
+TEST(SdfMaterialMotionExample,
+     TwistUntwistCylinderUpdateUsesAbsoluteTimesAndIsRestartSafe) {
+    IPCArgs3D args;
+    args.fps = 24.0;
+    args.substeps = 3;
+    args.tu_nx = 2;
+    args.tu_ny = 8;
+    args.tu_cyl_nu = 8;
+    args.tu_twist_rate = 0.29;
+    args.tu_settle_time = 0.0;
+    args.tu_ramp_time = 0.0;
+    args.tu_max_turn = 0.0;
+    args.tu_untwist = false;
+
+    const auto build_scene = [&](SimParams& params,
+                                 TwistUntwistSpec& spec) {
+        RefMesh ref_mesh;
+        DeformedState state;
+        std::vector<Vec2> X;
+        std::vector<Pin> pins;
+        std::vector<Vec3> static_x;
+        std::vector<int> static_tris;
+        params = args.to_sim_params();
+        build_twist_untwist_example(
+            args, ref_mesh, state, X, pins, params,
+            static_x, static_tris, spec);
+    };
+
+    SimParams sequential_params;
+    TwistUntwistSpec sequential_spec;
+    build_scene(sequential_params, sequential_spec);
+    ASSERT_GE(sequential_spec.cyl_sdf_index, 0);
+    const double dt = sequential_params.dt();
+    constexpr int target_substep = 13;
+    for (int substep = 1; substep <= target_substep; ++substep) {
+        update_twist_untwist_sdf(
+            sequential_params, sequential_spec, substep * dt);
+    }
+
+    SimParams restarted_params;
+    TwistUntwistSpec restarted_spec;
+    build_scene(restarted_params, restarted_spec);
+    update_twist_untwist_sdf(
+        restarted_params, restarted_spec, target_substep * dt);
+
+    SimParams predecessor_params;
+    TwistUntwistSpec predecessor_spec;
+    build_scene(predecessor_params, predecessor_spec);
+    update_twist_untwist_sdf(
+        predecessor_params, predecessor_spec,
+        (target_substep - 1) * dt);
+
+    ASSERT_EQ(restarted_spec.cyl_sdf_index,
+              sequential_spec.cyl_sdf_index);
+    ASSERT_EQ(predecessor_spec.cyl_sdf_index,
+              sequential_spec.cyl_sdf_index);
+    const std::size_t sdf_index = static_cast<std::size_t>(
+        sequential_spec.cyl_sdf_index);
+    const CylinderSDF& sequential =
+        sequential_params.sdf_cylinders[sdf_index];
+    const CylinderSDF& restarted =
+        restarted_params.sdf_cylinders[sdf_index];
+    const CylinderSDF& predecessor =
+        predecessor_params.sdf_cylinders[sdf_index];
+    expect_sdf_material_motion_near(
+        restarted.material_motion, sequential.material_motion);
+    expect_sdf_material_pose_near(
+        restarted.material_motion.previous,
+        predecessor.material_motion.current);
+    EXPECT_TRUE(restarted.axis.isApprox(
+        restarted.material_motion.current.rotation * Vec3::UnitX(),
+        1.0e-14));
+    EXPECT_TRUE((restarted.material_motion.current.rotation
+                 * restarted.point
+                 + restarted.material_motion.current.translation)
+                    .isApprox(restarted.point, 1.0e-14));
+
+    const Vec3 rest_surface =
+        restarted.point + restarted.radius * Vec3::UnitZ();
+    const Vec3 current_surface =
+        restarted.material_motion.current.rotation * rest_surface
+        + restarted.material_motion.current.translation;
+    const Vec3 expected_previous_surface =
+        restarted.material_motion.previous.rotation * rest_surface
+        + restarted.material_motion.previous.translation;
+    EXPECT_NEAR(evaluate_sdf(restarted, current_surface).phi,
+                0.0, 2.0e-14);
+    EXPECT_TRUE(sdf_previous_material_point(
+                    restarted.material_motion, current_surface)
+                    .isApprox(expected_previous_surface, 2.0e-14));
 }

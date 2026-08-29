@@ -95,6 +95,24 @@ Vec3 rotate_about_y_axis(const Vec3& p, const Vec3& axis_point, double theta) {
                 axis_point.z() - s * dx + c * dz);
 }
 
+Mat33 rotation_about_y_matrix(double theta) {
+    const double c = std::cos(theta);
+    const double s = std::sin(theta);
+    Mat33 rotation;
+    rotation << c, 0.0, s,
+                0.0, 1.0, 0.0,
+                -s, 0.0, c;
+    return rotation;
+}
+
+SDFMaterialPose material_pose_about_y_axis(
+    const Vec3& axis_point, double theta) {
+    SDFMaterialPose pose;
+    pose.rotation = rotation_about_y_matrix(theta);
+    pose.translation = axis_point - pose.rotation * axis_point;
+    return pose;
+}
+
 // Rotate `p` about the +z line through `axis_point` by `theta`.
 // Positive theta lifts +x toward +y; in example 3 we pass a negative theta so
 // the +x edge of the catcher drops toward the sphere.
@@ -393,16 +411,31 @@ void build_two_cylinder_twist_example(const IPCArgs3D& args,
 void update_cylinder_sdfs(SimParams& params,
                           const CylinderTwistSpec& spec, double t) {
     if (params.sdf_cylinders.size() < 2) return;
+    const double previous_t = t - params.dt();
     const double theta_top = effective_theta(spec.omega_top, t, spec.t_settle, spec.t_ramp,
                                               spec.max_abs_theta, spec.untwist, spec.t_hold);
     const double theta_bot = effective_theta(spec.omega_bot, t, spec.t_settle, spec.t_ramp,
                                               spec.max_abs_theta, spec.untwist, spec.t_hold);
+    const double previous_theta_top = effective_theta(
+        spec.omega_top, previous_t, spec.t_settle, spec.t_ramp,
+        spec.max_abs_theta, spec.untwist, spec.t_hold);
+    const double previous_theta_bot = effective_theta(
+        spec.omega_bot, previous_t, spec.t_settle, spec.t_ramp,
+        spec.max_abs_theta, spec.untwist, spec.t_hold);
     // Yaw the SDF axis about +y (axis_point at origin → pure direction rotate)
     // by the same theta that drives the pins, so pin and SDF surface co-rotate.
     params.sdf_cylinders[0].point = spec.top_axis_point;
     params.sdf_cylinders[0].axis  = rotate_about_y_axis(Vec3::UnitX(), Vec3::Zero(), theta_top);
+    params.sdf_cylinders[0].material_motion.previous =
+        material_pose_about_y_axis(spec.top_axis_point, previous_theta_top);
+    params.sdf_cylinders[0].material_motion.current =
+        material_pose_about_y_axis(spec.top_axis_point, theta_top);
     params.sdf_cylinders[1].point = spec.bot_axis_point;
     params.sdf_cylinders[1].axis  = rotate_about_y_axis(Vec3::UnitX(), Vec3::Zero(), theta_bot);
+    params.sdf_cylinders[1].material_motion.previous =
+        material_pose_about_y_axis(spec.bot_axis_point, previous_theta_bot);
+    params.sdf_cylinders[1].material_motion.current =
+        material_pose_about_y_axis(spec.bot_axis_point, theta_bot);
 }
 
 void update_cylinder_twist_pins(std::vector<Pin>& pins,
@@ -601,9 +634,16 @@ void update_twist_untwist_sdf(SimParams& params,
     // a lagging SDF mid-step.
     const double theta = effective_theta(spec.omega, t, spec.t_settle, spec.t_ramp,
                                          spec.max_abs_theta, spec.untwist, spec.t_hold);
+    const double previous_theta = effective_theta(
+        spec.omega, t - params.dt(), spec.t_settle, spec.t_ramp,
+        spec.max_abs_theta, spec.untwist, spec.t_hold);
     params.sdf_cylinders[spec.cyl_sdf_index].point = spec.cyl_axis_point;
     params.sdf_cylinders[spec.cyl_sdf_index].axis  =
         rotate_about_y_axis(Vec3::UnitX(), Vec3::Zero(), theta);
+    params.sdf_cylinders[spec.cyl_sdf_index].material_motion.previous =
+        material_pose_about_y_axis(spec.cyl_axis_point, previous_theta);
+    params.sdf_cylinders[spec.cyl_sdf_index].material_motion.current =
+        material_pose_about_y_axis(spec.cyl_axis_point, theta);
 }
 
 void build_avatar_clothing_example(const IPCArgs3D& args,
@@ -979,7 +1019,7 @@ void build_twenty_rigid_polygon_static_stack_example(
     params.use_verlet_guess = false;
     params.use_translation_guess = false;
 
-    constexpr int polygon_count = 20;
+    constexpr int polygon_count = 10;
     constexpr double radius = 0.28;
     const double density = params.rigid_density;
     constexpr double thickness = 0.12;
@@ -1930,9 +1970,9 @@ void build_dynamic_bolt_into_fixed_nut_example(
 }
 
 // ---------------------------------------------------------------------------
-// Example 19: a deformable Armadillo fed through fixed-center gear crushers (Don't run this example for now. It is not working properly!!!!)
+// Example 19: a deformable Armadillo fed through fixed-center gear crushers.
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 19 --num_frames 300 --fps 60 --substeps 10 --max_substep_iters 10 --node_box_update_count 2 --fixed_iters --solid_E 290909 --solid_nu 0.454545 --d_hat 0.00025 --k_barrier 1000 --crusher_angular_speed 20 --outdir armadillo_gear_crusher_output --format obj
+// command line: ./build/3D_sim --example 19 --num_frames 300 --fps 60 --substeps 10 --max_substep_iters 10 --node_box_update_count 2 --fixed_iters --solid_E 290909 --solid_nu 0.454545 --d_hat 0.00025 --k_barrier 1000 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --crusher_angular_speed 20 --outdir armadillo_gear_crusher_output --format obj
 void build_armadillo_through_gear_crushers_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1980,7 +2020,10 @@ void build_armadillo_through_gear_crushers_example(
     // bounding box; below we correct the lateral placement using its actual
     // tetrahedral volume centroid so its physical center lies on the crusher
     // midplane and axial midpoint.
-    const Vec3 armadillo_aabb_center(0.0, 0.65025, 0.0);
+    // Lower it 10 mm into the nip. On the production meshes the closest
+    // Armadillo/crusher primitive gap remains about 1.61 mm, comfortably
+    // outside the recommended 0.25 mm barrier activation distance.
+    const Vec3 armadillo_aabb_center(0.0, 0.64025, 0.0);
     const std::size_t armadillo_node_begin =
         state.deformed_positions.size();
     const std::size_t armadillo_tet_begin =
@@ -2019,22 +2062,24 @@ void build_armadillo_through_gear_crushers_example(
     // is retained by using identity orientations. Positive z on the left and
     // negative z on the right make their upper surfaces move toward the gap.
     // OrientationOnly fixes each center but leaves rotation in the ordinary
-    // rigid-body solve. These angular velocities are initial conditions and
-    // are not prescribed after initialization.
+    // rigid-body solve. These signed angular velocities are initial conditions
+    // only; inertia and contact determine the subsequent speeds.
+    const Vec3 left_initial_omega(
+        0.0, 0.0, args.crusher_angular_speed);
+    const Vec3 right_initial_omega(
+        0.0, 0.0, -args.crusher_angular_speed);
     append_normalized_obj_rigid_body(
         left_crusher_filename, state, ref_mesh,
         Vec3(-crusher_center_x, crusher_center_y, 0.0),
         crusher_target_max_extent, params.rigid_density,
         Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
-        Vec3(0.0, 0.0, args.crusher_angular_speed),
-        RigidBodyUpdateMode::OrientationOnly);
+        left_initial_omega, RigidBodyUpdateMode::OrientationOnly);
     append_normalized_obj_rigid_body(
         right_crusher_filename, state, ref_mesh,
         Vec3(crusher_center_x, crusher_center_y, 0.0),
         crusher_target_max_extent, params.rigid_density,
         Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
-        Vec3(0.0, 0.0, -args.crusher_angular_speed),
-        RigidBodyUpdateMode::OrientationOnly);
+        right_initial_omega, RigidBodyUpdateMode::OrientationOnly);
 
     ref_mesh.build_deformable_nodes();
 
@@ -2063,7 +2108,7 @@ void build_armadillo_through_gear_crushers_example(
 // Example 20: four level Bunny / Spot / cube / gear rows falling onto a
 // pinned cloth
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 20 --num_frames 200 --substeps 20 --max_substep_iters 400 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_2_output --format obj
+// command line: ./build/3D_sim --example 20 --num_frames 200 --substeps 20 --max_substep_iters 200 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_2_output --format obj
 void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -2239,7 +2284,7 @@ void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
 // ---------------------------------------------------------------------------
 // Example 21: a pinned cloth roll unrolling down an SDF ramp
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 21 --num_frames 200 --substeps 20 --max_substep_iters 80 --fixed_iters --outdir rolled_cloth_on_steep_ramp_output_new --format obj --kB 0.0025
+// command line: ./build/3D_sim --example 21 --num_frames 200 --substeps 20 --max_substep_iters 80 --fixed_iters --kB 0.0025 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --outdir rolled_cloth_on_steep_ramp_output_new --format obj
 // the drift direction switches sharply between 0.00225 and 0.0025
 void build_cloth_unrolling_down_fixed_ramp_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,

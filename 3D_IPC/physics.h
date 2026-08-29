@@ -38,6 +38,8 @@ struct SimParams {
     double tol_rel;   // relative tolerance (factor of initial residual); 0 disables
     double kB;        // bending (flexural) stiffness; 0 disables the bending term
     double d_hat;     // barrier activation distance; 0 disables contact
+    double friction_coefficient;       // dimensionless Coulomb coefficient for mesh and analytic-SDF contact; 0 disables
+    double friction_velocity_epsilon;  // m/s smoothing threshold for the lagged friction potential
     double k_sdf;     // SDF penalty stiffness; 0 disables the SDF term
     double eps_sdf;   // SDF soft-barrier range; cloth rest at phi=eps_sdf. 0 = hard quadratic.
     std::vector<PlaneSDF>    sdf_planes;
@@ -84,6 +86,8 @@ struct SimParams {
         p.tol_rel                   = 0.0;
         p.kB                        = 0.0;
         p.d_hat                     = 0.0;
+        p.friction_coefficient      = 0.0;
+        p.friction_velocity_epsilon = 0.01;
         p.k_sdf                     = 0.0;
         p.eps_sdf                   = 0.0;
         p.sdf_planes.clear();
@@ -509,14 +513,32 @@ inline PinMap build_pin_map(const std::vector<Pin>& pins, int nv) {
 }
 
 double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins,
-                                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat);
+                                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                                const std::vector<Vec3>* previous_positions = nullptr);
 
 std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh,
                                                                      const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                                                      const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                                                      const PinMap* pin_map = nullptr,
                                                                      const IncidentTriangles* incident_triangles = nullptr,
-                                                                     const std::vector<ShapeGrads>* rest_shape_grads = nullptr);
+                                                                     const std::vector<ShapeGrads>* rest_shape_grads = nullptr,
+                                                                     const std::vector<Vec3>* previous_positions = nullptr);
+
+namespace physics_detail {
+
+// Solver-only fast path. The enclosing solver entry point must already have
+// validated the friction parameters and previous-position array.
+std::pair<Vec3, Mat33>
+compute_local_gradient_and_hessian_no_barrier_unchecked(
+    int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params,
+    const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+    const PinMap* pin_map,
+    const IncidentTriangles* incident_triangles,
+    const std::vector<ShapeGrads>* rest_shape_grads,
+    const std::vector<Vec3>* previous_positions);
+
+} // namespace physics_detail
 
 double compute_global_deformable_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
                                           const std::vector<Pin>& pins, const SimParams& params,
@@ -526,10 +548,12 @@ double compute_global_deformable_residual(const RefMesh& ref_mesh, const VertexT
                                           const PinMap* pin_map = nullptr,
                                           const std::vector<IncidentTriangles>* incident_triangles = nullptr,
                                           const std::vector<ShapeGrads>* rest_shape_grads = nullptr,
-                                          const FrozenResidualWorkspace* frozen_workspace = nullptr);
+                                          const FrozenResidualWorkspace* frozen_workspace = nullptr,
+                                          const std::vector<Vec3>* previous_positions = nullptr);
 
 double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                const BroadPhase& broad_phase, const PinMap* pin_map = nullptr,
                                const std::vector<IncidentTriangles>* incident_triangles = nullptr,
-                               const std::vector<ShapeGrads>* rest_shape_grads = nullptr);
+                               const std::vector<ShapeGrads>* rest_shape_grads = nullptr,
+                               const std::vector<Vec3>* previous_positions = nullptr);

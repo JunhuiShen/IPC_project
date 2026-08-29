@@ -88,8 +88,8 @@ the rigid-body formulation differs in five main ways:
   `q(omega) = exp((dt / 2) * omega) * q_n`, including the full-arc quaternion
   branch encoded by its sign.
 - **Reduced Newton updates.** Each body alternates a 3x3 COM solve and a 3x3
-  angular-velocity solve. The reduced inertial, IPC barrier, and SDF derivatives
-  are assembled directly in those coordinates.
+  angular-velocity solve. The reduced inertial, IPC barrier, SDF, and friction
+  derivatives are assembled directly in those coordinates.
 - **Rigid trust regions and CCD.** A node's blue box combines an anchored COM
   translation box with the spherical cap swept by its allowed orientations.
   COM updates use rigid translation CCD; rotation updates are clipped to the
@@ -203,11 +203,38 @@ one node file and one element file):
 - `example_obj/crusher/crusher_coarse_right.obj`
 
 The crushers use `OrientationOnly`, so their centers remain fixed while their
-orientations participate in the ordinary coupled rigid/contact solve. The
-left crusher starts at +20 rad/s about world z and the right starts at
--20 rad/s. `crusher_angular_speed` controls only this initial magnitude; the
-speeds are not prescribed after initialization and may change through inertia
-and contact.
+orientations participate in the ordinary coupled rigid/contact solve.
+`crusher_angular_speed` (default 20 rad/s) sets only their initial angular-speed
+magnitude: +z for the left crusher and -z for the right. No motor energy,
+target speed, or prescribed torque is applied afterward, so inertia and
+contact determine the subsequent crusher speeds.
+
+Mesh and analytic-SDF contact can additionally use the smoothed Coulomb
+friction model from
+[Vertex Block Descent, Section 3.6](https://arxiv.org/abs/2403.06321). Set
+`friction_coefficient` to the dimensionless dynamic coefficient (zero, the
+default, disables friction) and `friction_velocity_epsilon` to the smoothing
+velocity in m/s (default `0.01`). For each active node-triangle or edge-edge
+contact, the implementation projects the relative displacement since the
+start of the substep into the current tangent plane and caps the friction
+force at `mu_f` times the normal force supplied by the IPC barrier. It uses the
+paper's lagged positive-semidefinite Hessian approximation in every cloth,
+solid, rigid, mixed, and OGC local solve, and includes the same gradient in
+non-fixed-iteration residuals. SDF friction uses the corresponding analytic
+penalty's outward normal force as its Coulomb cap. Each SDF primitive also
+stores optional previous/current material poses, allowing a translating or
+rotating kinematic collider to transfer its tangential motion even when that
+motion is not visible from the signed-distance geometry alone. Static SDFs use
+identity poses automatically. The coefficient is global rather than
+per-object; the Example 19 command below uses the paper-style value `0.1`.
+
+The option therefore affects both the Armadillo/crusher mesh interface in
+Example 19 and the SDF ramp/ground in Example 21. SDF obstacles remain
+kinematic, so their equal-and-opposite friction reaction is supplied by the
+external driver rather than integrated as collider dynamics. Restart files
+already store the required particle positions; prescribed moving SDF examples
+reconstruct their material poses from absolute time. A restarted run must
+repeat both friction flags because solver parameters are not serialized.
 
 Example 20 reads these repository-relative solid and rigid meshes directly:
 
@@ -296,8 +323,11 @@ released sheet pass the nominal toe and continue onto the horizontal SDF
 ground instead of ending on the incline. The scene caps `d_hat` at 0.005 m and
 winds neighboring turns about 0.0065 m apart; 160 longitudinal rows keep the
 closest nonincident piecewise-linear cloth segments approximately 0.00529121 m
-apart initially. Contact is frictionless: gravity, pin tension, and the
-cloth's flat bending rest shape drive the qualitative unrolling rather than a
+apart initially. With friction disabled, gravity, pin tension, and the
+cloth's flat bending rest shape drive the qualitative unrolling. The
+recommended command enables the paper-style
+coefficient `0.1`, so both cloth self-contact and the SDF incline/ground resist
+tangential slip. This remains regularized Coulomb friction, not an exact
 no-slip rolling constraint.
 
 A finite closed triangular wedge and a 6 m by 6 m ground quad are exported
@@ -373,13 +403,13 @@ Commands documented alongside Examples 5 through 21 in `example.cpp`:
     ./build/3D_sim --example 18 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj
 
     # Example 19: deformable Armadillo fed through fixed-center gear crushers (dt = 1/600 s)
-    ./build/3D_sim --example 19 --num_frames 300 --fps 60 --substeps 10 --max_substep_iters 10 --node_box_update_count 2 --fixed_iters --solid_E 290909 --solid_nu 0.454545 --d_hat 0.00025 --k_barrier 1000 --crusher_angular_speed 20 --outdir armadillo_gear_crusher_output --format obj
+    ./build/3D_sim --example 19 --num_frames 300 --fps 60 --substeps 10 --max_substep_iters 10 --node_box_update_count 2 --fixed_iters --solid_E 290909 --solid_nu 0.454545 --d_hat 0.00025 --k_barrier 1000 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --crusher_angular_speed 20 --outdir armadillo_gear_crusher_output --format obj
 
     # Example 20: four close-packed level Bunny/Spot/cube/gear rows dropped onto pinned cloth
     OMP_NUM_THREADS=10 OMP_DYNAMIC=FALSE ./build/3D_sim --example 20 --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 20 --fixed_iters --use_parallel true --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir four_bunny_spot_cube_gear_rows_on_cloth_output --format obj
 
     # Example 21: rolled cloth pinned above an SDF ramp and unrolling onto an SDF ground (dt = 1/600 s)
-    OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE ./build/3D_sim --example 21 --num_frames 180 --fps 60 --substeps 10 --max_substep_iters 20 --node_box_update_count 2 --fixed_iters --use_parallel true --use_ccd true --E 1e6 --kB 0.001 --kpin 1e7 --d_hat 0.005 --k_barrier 500 --k_sdf 100000 --eps_sdf 0.002 --outdir rolled_cloth_on_ramp_output --format obj
+    OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE ./build/3D_sim --example 21 --num_frames 180 --fps 60 --substeps 10 --max_substep_iters 20 --node_box_update_count 2 --fixed_iters --use_parallel true --use_ccd true --E 1e6 --kB 0.001 --kpin 1e7 --d_hat 0.005 --k_barrier 500 --k_sdf 100000 --eps_sdf 0.002 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --outdir rolled_cloth_on_ramp_output --format obj
 
 Initial guesses are selected before the nonlinear solver starts each substep.
 The default is `ccd_initial_guess`. `--use_verlet_guess true` uses the
@@ -444,7 +474,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 |-------|-------|
 | Time integration | `fps`, `substeps`, `num_frames` |
 | Physics | Shell: `E`, `nu`, `density`, `thickness`, `kB`; volumetric solid: `solid_E`, `solid_nu`, `solid_density`; rigid body: `rigid_density`; shared: `kpin`, `gx`, `gy`, `gz` |
-| Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `k_sdf`, `eps_sdf`, `damping`, `fixed_iters`, `use_parallel`, `verbose`, `write_substeps` |
+| Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `friction_coefficient`, `friction_velocity_epsilon`, `k_sdf`, `eps_sdf`, `damping`, `fixed_iters`, `use_parallel`, `verbose`, `write_substeps` |
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (per-iteration box/pair refresh solver), `ogc_box_pad` (BVH padding for the refresh; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (translation/node-box radius limits in m), `theta_box_min`, `theta_box_max` (rigid orientation-box angular-radius limits in rad), `node_box_update_count` (GS iterations between broad-phase/contact-color rebuilds; default 10) |
@@ -615,7 +645,7 @@ reader can jump to the layer they care about.
 
 ## Tests
 
-CTest currently discovers 382 GoogleTest cases split into focused binaries.
+CTest currently discovers 429 GoogleTest cases split into focused binaries.
 To build and run them all:
 
     cmake -B build
@@ -625,16 +655,17 @@ To build and run them all:
 | Test binary | Cases | What it covers |
 |-------------|-------|----------------|
 | `ccd_test` | 54 | Linear CCD single-moving-DOF, scale/coplanar stress cases, TICCD-backed general NT/SS wrappers, and rigid rotational CCD |
-| `rigid_body_ipc_test` | 65 | Quaternion kinematics/derivatives, reduced inertial energy, rigid solver contact terms, update labels, blue-box enforcement, and rigid translation/rotation safe steps |
+| `rigid_body_ipc_test` | 71 | Quaternion kinematics/derivatives, reduced inertial energy, mesh/SDF friction in deformable and rigid solvers, shared-contact local-assembly parity, update labels, blue-box enforcement, and rigid translation/rotation safe steps |
 | `broad_phase_test` | 25 | AABB, BVH, pair generation/order, CCD candidates, safe stepping, conservativeness, and `incremental_refresh_vertex` partial refit |
 | `ipc_math_test` | 14 | `matrix3d_inverse`, `segment_closest_point`, barycentric coordinates, and topology caching |
-| `sdf_penalty_energy_test` | 17 | Plane / cylinder / sphere and rigid-body SDF energy derivatives, hard-quadratic limit, and soft-barrier rest at `phi=eps` |
+| `sdf_penalty_energy_test` | 20 | Plane / cylinder / sphere and rigid-body SDF energy derivatives, cached rigid derivative parity, material-pose mapping/validation, hard-quadratic limit, and soft-barrier rest at `phi=eps` |
 | `bending_energy_test` | 19 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
 | `parallel_helper_test` | 13 | Contact adjacency, rigid ownership filtering/coloring, spherical-cap AABBs, and rigid blue boxes |
 | `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
-| `make_shape_test` | 27 | Incident-triangle maps, alternating-diagonal square-mesh symmetry, mixed cloth/rigid/solid scene construction, normalized TetGen solids, Example 19 crusher initialization, Example 20 four-row mixed-body construction, Example 21 rolled-cloth SDF ramp/ground construction with default and larger-`eps_sdf` clearance, tetrahedral polygonal prisms, and icosphere construction |
-| `solid_ipc_test` | 33 | Volumetric corotated solid energy/derivatives, mixed general-solver integration, solid contact, and reaction against fixed labeled rigid geometry |
-| `barrier_energy_test` | 19 | Scalar barrier, all NT/SS feature regions, force partition, deformable/rigid derivative blocks and modes, and stress cases |
+| `make_shape_test` | 29 | Incident-triangle maps, alternating-diagonal square-mesh symmetry, mixed cloth/rigid/solid scene construction, normalized TetGen solids, Example 19 crusher initial angular-velocity configuration and input validation, Example 20 four-row mixed-body construction, Example 21 rolled-cloth SDF ramp/ground construction, and restart-safe prescribed SDF material motion |
+| `solid_ipc_test` | 41 | Volumetric corotated solid energy/derivatives, mixed general-solver integration, mesh/SDF friction assembly, boundary-node filtering, and reaction against fixed labeled rigid geometry |
+| `barrier_energy_test` | 29 | Scalar barrier, all NT/SS feature regions, force partition, deformable/rigid derivative blocks and modes, ephemeral shared-contact parity, inactive/zero-stiffness handling, and stress cases |
+| `friction_energy_test` | 21 | Smoothed Coulomb potential, NT/SS and analytic-SDF contacts, prescribed surface motion, frozen gradients, lagged PSD Hessians, exhaustive shared-contact assembly parity, action-reaction cancellation, scaling, and validation |
 | `corotated_energy_test` | 11 | Rest state, invariance, gradient/Hessian FD convergence, and stress cases |
 | `initial_guess_test` | 5 | CCD no-candidate, Verlet gravity, and translation closed forms for inertia/gravity, pins, and one-step plane-SDF correction |
 | `time_integration_test` | 1 | Position-difference velocity updates |

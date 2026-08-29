@@ -126,6 +126,7 @@ set(IPC_CORE_SOURCES
     bending_energy.cpp
     ccd.cpp
     corotated_energy.cpp
+    friction_energy.cpp
     node_triangle_distance.cpp
     quaternion_math.cpp
     rigid_body_ipc.cpp
@@ -222,6 +223,7 @@ if(BUILD_TESTING)
         broad_phase_test
         ccd_test
         corotated_energy_test
+        friction_energy_test
         initial_guess_test
         io_test
         ipc_math_test

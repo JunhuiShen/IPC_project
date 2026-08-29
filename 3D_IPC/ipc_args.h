@@ -4,6 +4,8 @@
 #include "physics.h"
 #include "output.h"
 
+#include <cmath>
+#include <stdexcept>
 #include <string>
 
 // CLI-facing view of SimParams (with scene-placement knobs on top).
@@ -34,6 +36,8 @@ struct IPCArgs3D : ArgParser {
     double tol_abs       = 1e-6;  // residual norm tolerance
     double tol_rel       = 1e-3;  // relative tolerance: stop when residual < tol_rel * initial
     double d_hat         = 0.01;  // barrier activation distance; 0 disables contact
+    double friction_coefficient = 0.0; // dynamic Coulomb coefficient for mesh and analytic-SDF contact; 0 disables
+    double friction_velocity_epsilon = 0.01; // m/s smoothing threshold for contact friction
     double k_sdf         = 1e5;   // SDF penalty stiffness; 0 disables the SDF term
     double eps_sdf       = 0.002; // SDF soft-barrier range (m); cloth rest at phi=eps_sdf. 0 = hard quadratic at the surface.
     bool   use_parallel  = true;
@@ -134,6 +138,8 @@ struct IPCArgs3D : ArgParser {
         add_double("tol_abs",     tol_abs,     1e-6,       "Absolute convergence tolerance (residual force)");
         add_double("tol_rel",     tol_rel,     1e-3,       "Relative tolerance: stop when residual < tol_rel * initial_residual (0 disables)");
         add_double("d_hat",       d_hat,       0.01,       "Barrier activation distance (0 = off)");
+        add_double("friction_coefficient", friction_coefficient, 0.0, "Dynamic Coulomb coefficient for mesh node-triangle/edge-edge and analytic-SDF contact (0 = off)");
+        add_double("friction_velocity_epsilon", friction_velocity_epsilon, 0.01, "Velocity threshold (m/s) that smooths contact friction near zero slip");
         add_double("k_sdf",       k_sdf,       1e5,        "SDF penalty stiffness (0 = off)");
         add_double("eps_sdf",     eps_sdf,     0.002,      "SDF soft-barrier range (m). Cloth's force-free rest is at phi=eps_sdf. 0 = hard quadratic at the surface.");
         add_bool  ("use_parallel",   use_parallel,   true,  "Use parallel Gauss-Seidel (requires coloring)");
@@ -212,6 +218,17 @@ struct IPCArgs3D : ArgParser {
     }
 
     SimParams to_sim_params() const {
+        if (!std::isfinite(friction_coefficient)
+            || friction_coefficient < 0.0) {
+            throw std::invalid_argument(
+                "friction_coefficient must be nonnegative and finite");
+        }
+        if (friction_coefficient > 0.0
+            && (!std::isfinite(friction_velocity_epsilon)
+                || friction_velocity_epsilon <= 0.0)) {
+            throw std::invalid_argument(
+                "friction_velocity_epsilon must be positive and finite");
+        }
         SimParams p = SimParams::zeros();
         p.fps              = fps;
         p.substeps         = substeps;
@@ -231,6 +248,8 @@ struct IPCArgs3D : ArgParser {
         p.tol_abs          = tol_abs;
         p.tol_rel          = tol_rel;
         p.d_hat            = d_hat;
+        p.friction_coefficient = friction_coefficient;
+        p.friction_velocity_epsilon = friction_velocity_epsilon;
         p.k_sdf            = k_sdf;
         p.eps_sdf          = eps_sdf;
         p.use_parallel     = use_parallel;

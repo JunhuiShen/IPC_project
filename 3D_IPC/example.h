@@ -243,8 +243,8 @@ void build_dynamic_bolt_into_fixed_nut_example(
     std::vector<Pin>& pins, SimParams& params);
 
 // Example 19: one tetrahedral Armadillo starts in the nip between two
-// fixed-center, counter-rotating gear crushers. Their initial angular
-// velocities are ordinary rigid-body state and are not prescribed afterward.
+// fixed-center, counter-rotating gear crushers. Their angular velocities are
+// initial conditions and subsequently evolve through inertia and contact.
 void build_armadillo_through_gear_crushers_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,

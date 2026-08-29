@@ -1,6 +1,7 @@
 #include "rigid_body_ipc.h"
 
 #include "parallel_helper.h"
+#include "friction_energy.h"
 #include "physics.h"
 #include "safe_step.h"
 #include "simulation.h"
@@ -9,6 +10,8 @@
 #include "time_integration.h"
 
 #include <gtest/gtest.h>
+
+#include <Eigen/Eigenvalues>
 
 #include <algorithm>
 #include <array>
@@ -2307,6 +2310,588 @@ TEST(RigidBodyRotationSafeStep, SkipsInternalAndUnrelatedPairs) {
 
     ref_mesh.node_to_rb = {-1, -1, -1, -1};
     EXPECT_DOUBLE_EQ(rotation_safe_step_for_test(ref_mesh, edges, x, 0, Vec3::Zero(), identity, target), 1.0);
+}
+
+TEST(RigidFrictionDerivatives,
+     GeneralizedGradientMatchesFrozenEnergyAndHessianIsPsd) {
+    constexpr double dt = 0.1;
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec3 body_reference(0.23, 0.19, 0.10);
+    const Vec3 base_translation(0.04, 0.02, 0.0);
+    const Vec3 base_omega(0.18, -0.11, 0.14);
+
+    RefMesh ref_mesh;
+    ref_mesh.tris = {1, 2, 3};
+    ref_mesh.node_to_rb = {0, -1, -1, -1};
+    ref_mesh.rb_nodes = {{0}};
+    ref_mesh.ref_positions = {{body_reference}};
+    ref_mesh.rb_update_modes = {
+        RigidBodyUpdateMode::TranslationAndOrientation};
+
+    DeformedState state;
+    state.orientations = {identity};
+    state.omega = {Vec3::Zero()};
+    const auto current_positions_for = [&](const Vec3& translation,
+                                           const Vec3& omega) {
+        std::vector<Vec3> positions = {
+            world_space_position(
+                body_reference, translation,
+                quaternion_from_angular_velocity(identity, omega, dt)),
+            Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0),
+            Vec3(0.0, 1.0, 0.0)};
+        return positions;
+    };
+    const std::vector<Vec3> current =
+        current_positions_for(base_translation, base_omega);
+    state.deformed_positions = current;
+    state.deformed_positions[0] -= Vec3(0.037, -0.021, 0.0);
+
+    BroadPhase::Cache cache;
+    cache.nt_pairs.push_back(NodeTrianglePair{0, {1, 2, 3}});
+    const std::vector<int> nt_pair_indices = {0};
+    const std::vector<int> node_to_rb_local = {0, -1, -1, -1};
+    const std::vector<Vec3> omega_new = {base_omega};
+
+    SimParams params = SimParams::zeros();
+    params.friction_coefficient = 0.43;
+    params.friction_velocity_epsilon = 0.02;
+    params.d_hat = 0.5;
+    params.k_barrier = 31.0;
+
+    const RigidEnergyDerivatives derivatives =
+        rb_solver::rigid_friction_derivatives(
+            0, ref_mesh, state, cache, nt_pair_indices, {},
+            node_to_rb_local, current, omega_new, params, dt,
+            RigidDerivativeMode::Full);
+
+    const std::array<Vec3, 4> base_current = {
+        current[0], current[1], current[2], current[3]};
+    const std::array<Vec3, 4> previous = {
+        state.deformed_positions[0], state.deformed_positions[1],
+        state.deformed_positions[2], state.deformed_positions[3]};
+    const FrozenFrictionContact frozen =
+        make_node_triangle_frozen_friction_contact(
+            base_current, previous, params.d_hat, params.k_barrier, dt,
+            params.friction_velocity_epsilon);
+    ASSERT_TRUE(frozen.active);
+    ASSERT_GT(frozen.tangential_displacement.norm(), frozen.eps_u);
+
+    const auto frozen_energy = [&](const Vec6& generalized) {
+        const Vec3 translation = generalized.head<3>();
+        const Vec3 omega = generalized.tail<3>();
+        const std::vector<Vec3> varied =
+            current_positions_for(translation, omega);
+        FrozenFrictionContact varied_contact = frozen;
+        Vec3 relative_displacement = Vec3::Zero();
+        for (int role = 0; role < 4; ++role) {
+            relative_displacement += frozen.weights[role]
+                * (varied[static_cast<std::size_t>(role)]
+                   - previous[static_cast<std::size_t>(role)]);
+        }
+        varied_contact.tangential_displacement =
+            frozen.projector * relative_displacement;
+        return frozen_friction_energy(
+            varied_contact, params.friction_coefficient, dt * dt);
+    };
+
+    Vec6 generalized;
+    generalized.head<3>() = base_translation;
+    generalized.tail<3>() = base_omega;
+    Vec6 analytic_gradient;
+    analytic_gradient.head<3>() = derivatives.translation_gradient;
+    analytic_gradient.tail<3>() = derivatives.orientation_gradient;
+    constexpr double h = 1.0e-7;
+    for (int dof = 0; dof < 6; ++dof) {
+        Vec6 plus = generalized;
+        Vec6 minus = generalized;
+        plus[dof] += h;
+        minus[dof] -= h;
+        const double finite_difference =
+            (frozen_energy(plus) - frozen_energy(minus)) / (2.0 * h);
+        EXPECT_NEAR(analytic_gradient[dof], finite_difference, 2.0e-6)
+            << "generalized dof " << dof;
+    }
+
+    Mat66 hessian = Mat66::Zero();
+    hessian.topLeftCorner<3, 3>() =
+        derivatives.translation_translation_hessian;
+    hessian.topRightCorner<3, 3>() =
+        derivatives.translation_orientation_hessian;
+    hessian.bottomLeftCorner<3, 3>() =
+        derivatives.translation_orientation_hessian.transpose();
+    hessian.bottomRightCorner<3, 3>() =
+        derivatives.orientation_orientation_hessian;
+    Eigen::SelfAdjointEigenSolver<Mat66> eigen_solver(hessian);
+    ASSERT_EQ(eigen_solver.info(), Eigen::Success);
+    EXPECT_GE(eigen_solver.eigenvalues().minCoeff(), -1.0e-10);
+
+    ref_mesh.rb_update_modes[0] = RigidBodyUpdateMode::TranslationOnly;
+    const RigidEnergyDerivatives translation_only =
+        rb_solver::rigid_friction_derivatives(
+            0, ref_mesh, state, cache, nt_pair_indices, {},
+            node_to_rb_local, current, omega_new, params, dt,
+            RigidDerivativeMode::Full);
+    EXPECT_TRUE(translation_only.translation_gradient.isApprox(
+        derivatives.translation_gradient, 0.0));
+    EXPECT_TRUE(translation_only.translation_translation_hessian.isApprox(
+        derivatives.translation_translation_hessian, 0.0));
+    EXPECT_TRUE(translation_only.orientation_gradient.isZero(0.0));
+    EXPECT_TRUE(translation_only.translation_orientation_hessian.isZero(0.0));
+    EXPECT_TRUE(translation_only.orientation_orientation_hessian.isZero(0.0));
+
+    params.friction_coefficient = 0.0;
+    const RigidEnergyDerivatives disabled =
+        rb_solver::rigid_friction_derivatives(
+            0, ref_mesh, state, cache, nt_pair_indices, {},
+            node_to_rb_local, {}, omega_new, params, dt,
+            RigidDerivativeMode::Full);
+    EXPECT_TRUE(disabled.translation_gradient.isZero(0.0));
+    EXPECT_TRUE(disabled.orientation_gradient.isZero(0.0));
+    EXPECT_TRUE(disabled.translation_translation_hessian.isZero(0.0));
+    EXPECT_TRUE(disabled.translation_orientation_hessian.isZero(0.0));
+    EXPECT_TRUE(disabled.orientation_orientation_hessian.isZero(0.0));
+}
+
+TEST(DeformableFrictionSolver,
+     LegacyCallerReconstructsPriorAndExplicitPriorIsValidated) {
+    RefMesh ref_mesh;
+    ref_mesh.mass = {1.0};
+    ref_mesh.num_positions = 1;
+    const VertexTriangleMap adjacency = {{0, IncidentTriangles{}}};
+    const std::vector<Vec3> start = {Vec3(0.2, -0.3, 0.4)};
+    const std::vector<Vec3> velocity = {Vec3(0.7, -0.2, 0.1)};
+
+    SimParams params = SimParams::zeros();
+    params.fps = 10.0;
+    params.substeps = 1;
+    params.d_hat = 0.5;
+    params.k_barrier = 10.0;
+    params.friction_coefficient = 0.4;
+    params.friction_velocity_epsilon = 0.03;
+    params.max_global_iters = 1;
+    params.fixed_iters = true;
+    params.damping = 1.0;
+    params.node_box_min = 0.1;
+    params.node_box_max = 0.1;
+    params.node_box_update_count = 1;
+    params.use_ccd = false;
+    params.use_parallel = false;
+
+    const double dt = params.dt();
+    const std::vector<Vec3> xhat = {start[0] + dt * velocity[0]};
+    const std::vector<Vec3> previous = {xhat[0] - dt * velocity[0]};
+    std::vector<Vec3> explicit_result = start;
+    std::vector<Vec3> reconstructed_result = start;
+    BroadPhase explicit_broad_phase;
+    BroadPhase reconstructed_broad_phase;
+    global_gauss_seidel_solver_basic(
+        ref_mesh, adjacency, {}, params, explicit_result, xhat, velocity,
+        explicit_broad_phase, "", &previous);
+    global_gauss_seidel_solver_basic(
+        ref_mesh, adjacency, {}, params, reconstructed_result, xhat,
+        velocity, reconstructed_broad_phase);
+    EXPECT_EQ(std::memcmp(explicit_result[0].data(),
+                  reconstructed_result[0].data(), 3 * sizeof(double)),
+        0);
+
+    const std::vector<Vec3> wrong_size_previous;
+    std::vector<Vec3> rejected_result = start;
+    BroadPhase rejected_broad_phase;
+    EXPECT_THROW(
+        global_gauss_seidel_solver_basic(
+            ref_mesh, adjacency, {}, params, rejected_result, xhat,
+            velocity, rejected_broad_phase, "", &wrong_size_previous),
+        std::invalid_argument);
+    EXPECT_THROW(
+        global_gauss_seidel_solver_basic(
+            ref_mesh, adjacency, {}, params, rejected_result, xhat, {},
+            rejected_broad_phase),
+        std::invalid_argument);
+
+    params.friction_coefficient = 0.0;
+    params.friction_velocity_epsilon =
+        std::numeric_limits<double>::quiet_NaN();
+    std::vector<Vec3> legacy_result = start;
+    BroadPhase legacy_broad_phase;
+    EXPECT_NO_THROW(global_gauss_seidel_solver_basic(
+        ref_mesh, adjacency, {}, params, legacy_result, xhat, velocity,
+        legacy_broad_phase, "", &wrong_size_previous));
+}
+
+TEST(DeformableFrictionSolver,
+     BasicAndOgcMeshContactsMatchLegacyLocalAssembly) {
+    RefMesh ref_mesh;
+    ref_mesh.num_positions = 4;
+    ref_mesh.tris = {1, 2, 3};
+    ref_mesh.mass.assign(4, 1.0);
+
+    const std::vector<Vec3> initial{
+        Vec3(0.25, 0.25, 0.10),
+        Vec3(0.00, 0.00, 0.00),
+        Vec3(1.00, 0.00, 0.00),
+        Vec3(0.00, 1.00, 0.00)};
+    std::vector<Vec3> previous = initial;
+    previous[0] -= Vec3(0.035, -0.018, 0.0);
+    const std::vector<Vec3> velocities(4, Vec3::Zero());
+    VertexTriangleMap adjacency;
+    for (int node = 0; node < 4; ++node)
+        adjacency[node] = {};
+
+    SimParams params = SimParams::zeros();
+    params.fps = 20.0;
+    params.substeps = 1;
+    params.d_hat = 0.30;
+    params.k_barrier = 29.0;
+    params.friction_coefficient = 0.53;
+    params.friction_velocity_epsilon = 0.08;
+    params.max_global_iters = 1;
+    params.fixed_iters = true;
+    params.damping = 0.13;
+    params.node_box_min = 2.0;
+    params.node_box_max = 2.0;
+    params.node_box_update_count = 1;
+    params.use_ccd = false;
+    params.use_parallel = false;
+
+    const auto legacy_delta = [&](const std::vector<Vec3>& positions,
+                                  const int role) -> Vec3 {
+        const std::array<Vec3, 4> current{
+            positions[0], positions[1], positions[2], positions[3]};
+        const std::array<Vec3, 4> prior{
+            previous[0], previous[1], previous[2], previous[3]};
+        const auto normal =
+            node_triangle_barrier_self_gradient_and_hessian(
+                current[0], current[1], current[2], current[3],
+                params.d_hat, role);
+        const FrozenFrictionContact friction_contact =
+            make_node_triangle_frozen_friction_contact(
+                current, prior, params.d_hat, params.k_barrier,
+                params.dt(), params.friction_velocity_epsilon);
+        const auto friction =
+            frozen_friction_role_gradient_and_hessian(
+                friction_contact, role, params.friction_coefficient,
+                params.dt2());
+        const Vec3 gradient = params.dt2() * params.k_barrier
+                * normal.first
+            + friction.first;
+        const Mat33 hessian = Mat33::Identity()
+            + params.dt2() * params.k_barrier * normal.second
+            + friction.second;
+        return matrix3d_inverse(hessian) * gradient;
+    };
+
+    // Basic GS consumes the live position array, so reproduce the old local
+    // kernel one role at a time in solver order.
+    std::vector<Vec3> expected_basic = initial;
+    for (int role = 0; role < 4; ++role) {
+        expected_basic[static_cast<std::size_t>(role)] -=
+            params.damping * legacy_delta(expected_basic, role);
+    }
+    std::vector<Vec3> actual_basic = initial;
+    BroadPhase basic_broad_phase;
+    const SolverResult basic_result = global_gauss_seidel_solver_basic(
+        ref_mesh, adjacency, {}, params, actual_basic, initial, velocities,
+        basic_broad_phase, "", &previous);
+    ASSERT_TRUE(basic_result.converged);
+    ASSERT_EQ(basic_broad_phase.cache().nt_pairs.size(), 1U);
+    ASSERT_TRUE(basic_broad_phase.cache().ss_pairs.empty());
+    for (int node = 0; node < 4; ++node) {
+        EXPECT_TRUE(actual_basic[static_cast<std::size_t>(node)].isApprox(
+            expected_basic[static_cast<std::size_t>(node)], 2.0e-14))
+            << "basic node=" << node
+            << " actual="
+            << actual_basic[static_cast<std::size_t>(node)].transpose()
+            << " expected="
+            << expected_basic[static_cast<std::size_t>(node)].transpose();
+    }
+
+    // OGC evaluates every contact role from the same iteration-start
+    // snapshot, then applies the same 0.4*d trust-region bound as production.
+    const double frozen_distance = node_triangle_distance(
+        initial[0], initial[1], initial[2], initial[3]).distance;
+    const double trust_region_bound = 0.4 * frozen_distance;
+    std::vector<Vec3> expected_ogc = initial;
+    for (int role = 0; role < 4; ++role) {
+        const Vec3 raw_step =
+            -params.damping * legacy_delta(initial, role);
+        const double step_norm = raw_step.norm();
+        const double alpha = step_norm > 0.0
+            ? std::min(1.0, trust_region_bound / step_norm)
+            : 1.0;
+        expected_ogc[static_cast<std::size_t>(role)] =
+            initial[static_cast<std::size_t>(role)] + alpha * raw_step;
+    }
+    std::vector<Vec3> actual_ogc = initial;
+    const SolverResult ogc_result = global_gauss_seidel_solver_ogc(
+        ref_mesh, adjacency, {}, params, actual_ogc, initial, velocities,
+        "", &previous);
+    ASSERT_TRUE(ogc_result.converged);
+    for (int node = 0; node < 4; ++node) {
+        EXPECT_TRUE(actual_ogc[static_cast<std::size_t>(node)].isApprox(
+            expected_ogc[static_cast<std::size_t>(node)], 2.0e-14))
+            << "OGC node=" << node
+            << " actual="
+            << actual_ogc[static_cast<std::size_t>(node)].transpose()
+            << " expected="
+            << expected_ogc[static_cast<std::size_t>(node)].transpose();
+    }
+}
+
+TEST(GeneralSolverFriction,
+     ClothRigidContactTransfersTangentialMotionAndReducesSlip) {
+    struct Outcome {
+        double rigid_tangential_motion = 0.0;
+        double cloth_tangential_motion = 0.0;
+        double relative_slip = 0.0;
+        double normal_distance = 0.0;
+    };
+
+    const auto run = [](const double friction_coefficient) {
+        RefMesh ref_mesh;
+        DeformedState state;
+        state.deformed_positions = {
+            Vec3(-5.0, -5.0, 0.0), Vec3(5.0, -5.0, 0.0),
+            Vec3(0.0, 5.0, 0.0)};
+        state.velocities.assign(3, Vec3::Zero());
+        ref_mesh.tris = {0, 1, 2};
+        ref_mesh.initialize(
+            {Vec2(-5.0, -5.0), Vec2(5.0, -5.0),
+             Vec2(0.0, 5.0)},
+            state.deformed_positions);
+        ref_mesh.mass.assign(3, 10.0);
+        ref_mesh.node_to_rb.assign(3, -1);
+
+        const int rb = create_rigid_body(
+            {Vec3(0.0, 0.0, 0.2), Vec3(3.0, 0.0, 2.0),
+             Vec3(-3.0, 0.0, 2.0), Vec3(0.0, 3.0, 2.0),
+             Vec3(0.0, -3.0, 2.0), Vec3(0.0, 0.0, 4.0)},
+            Vec3::UnitX(), Vec4(1.0, 0.0, 0.0, 0.0), Vec3::Zero(),
+            6.0, ref_mesh, state, RigidBodyUpdateMode::TranslationOnly);
+        ref_mesh.build_deformable_nodes();
+        const int contact_node = ref_mesh.rb_nodes[rb][0];
+        const Vec3 initial_contact = state.deformed_positions[contact_node];
+        const Vec3 initial_cloth_contact =
+            0.25 * state.deformed_positions[0]
+            + 0.25 * state.deformed_positions[1]
+            + 0.50 * state.deformed_positions[2];
+
+        SimParams params = SimParams::zeros();
+        params.fps = 20.0;
+        params.substeps = 1;
+        params.d_hat = 0.5;
+        params.k_barrier = 200.0;
+        params.friction_coefficient = friction_coefficient;
+        params.friction_velocity_epsilon = 0.02;
+        params.max_global_iters = 6;
+        params.fixed_iters = true;
+        params.damping = 0.2;
+        params.node_box_min = 1.0;
+        params.node_box_max = 1.0;
+        params.theta_box_min = 0.2;
+        params.theta_box_max = 0.2;
+        params.node_box_update_count = 1;
+        params.use_ccd = false;
+        params.use_parallel = false;
+        params.gravity = Vec3::Zero();
+
+        const VertexTriangleMap adjacency =
+            build_incident_triangle_map(ref_mesh.tris);
+        std::vector<Vec3> xhat;
+        build_xhat(
+            xhat, state.deformed_positions, state.velocities,
+            params.dt());
+        std::vector<Vec3> xnew = state.deformed_positions;
+        std::vector<Vec3> x_com_new = state.x_coms;
+        std::vector<Vec4> q_new = state.orientations;
+        std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
+        BroadPhase broad_phase;
+        const SolverResult result =
+            global_gauss_seidel_solver_basic_general(
+                ref_mesh, state, adjacency, {}, params, xnew, xhat,
+                x_com_new, q_new, omega_new, broad_phase);
+        EXPECT_TRUE(result.converged);
+
+        const NodeTriangleDistanceResult final_distance =
+            node_triangle_distance(
+                xnew[contact_node], xnew[0], xnew[1], xnew[2]);
+        Outcome outcome;
+        outcome.rigid_tangential_motion =
+            xnew[contact_node].x() - initial_contact.x();
+        const Vec3 final_cloth_contact =
+            0.25 * xnew[0] + 0.25 * xnew[1] + 0.50 * xnew[2];
+        outcome.cloth_tangential_motion =
+            final_cloth_contact.x() - initial_cloth_contact.x();
+        outcome.relative_slip = std::abs(
+            outcome.rigid_tangential_motion
+            - outcome.cloth_tangential_motion);
+        outcome.normal_distance = final_distance.distance;
+        return outcome;
+    };
+
+    const Outcome frictionless = run(0.0);
+    const Outcome frictional = run(0.5);
+    EXPECT_GT(frictional.cloth_tangential_motion,
+              frictionless.cloth_tangential_motion + 1.0e-7);
+    EXPECT_LT(frictional.rigid_tangential_motion,
+              frictionless.rigid_tangential_motion - 1.0e-7);
+    EXPECT_LT(frictional.relative_slip, frictionless.relative_slip);
+    EXPECT_TRUE(std::isfinite(frictional.normal_distance));
+    EXPECT_GT(frictional.normal_distance, 0.0);
+}
+
+TEST(DeformableSDFFrictionSolver,
+     BasicAndOgcReduceTangentialSlipOnPlane) {
+    const auto run = [](const double friction_coefficient,
+                        const bool use_ogc_solver) {
+        RefMesh ref_mesh;
+        ref_mesh.mass = {1.0};
+        ref_mesh.num_positions = 1;
+        const VertexTriangleMap adjacency = {{0, IncidentTriangles{}}};
+        const std::vector<Vec3> previous = {
+            Vec3(0.0, 0.05, 0.0)};
+        const std::vector<Vec3> velocity = {Vec3::UnitX()};
+
+        SimParams params = SimParams::zeros();
+        params.fps = 10.0;
+        params.substeps = 1;
+        params.k_sdf = 100.0;
+        params.eps_sdf = 0.1;
+        params.sdf_planes = {
+            PlaneSDF{Vec3::Zero(), Vec3::UnitY()}};
+        params.friction_coefficient = friction_coefficient;
+        params.friction_velocity_epsilon = 0.01;
+        params.max_global_iters = 6;
+        params.fixed_iters = true;
+        params.damping = 0.5;
+        params.node_box_min = 0.5;
+        params.node_box_max = 0.5;
+        params.node_box_update_count = 1;
+        params.use_ccd = false;
+        params.use_parallel = false;
+
+        const std::vector<Vec3> xhat = {
+            previous[0] + params.dt() * velocity[0]};
+        std::vector<Vec3> current = previous;
+        BroadPhase broad_phase;
+        if (use_ogc_solver) {
+            global_gauss_seidel_solver_ogc(
+                ref_mesh, adjacency, {}, params, current, xhat, velocity,
+                "", &previous);
+        } else {
+            global_gauss_seidel_solver_basic(
+                ref_mesh, adjacency, {}, params, current, xhat, velocity,
+                broad_phase, "", &previous);
+        }
+        return current[0];
+    };
+
+    for (const bool use_ogc_solver : {false, true}) {
+        SCOPED_TRACE(use_ogc_solver ? "OGC" : "basic");
+        const Vec3 frictionless = run(0.0, use_ogc_solver);
+        const Vec3 frictional = run(0.6, use_ogc_solver);
+        EXPECT_GT(frictionless.x(), 1.0e-3);
+        EXPECT_GT(frictional.x(), 0.0);
+        EXPECT_LT(frictional.x(), frictionless.x() - 1.0e-4);
+        EXPECT_NEAR(frictional.y(), frictionless.y(), 1.0e-12);
+        EXPECT_TRUE(frictional.allFinite());
+    }
+}
+
+TEST(RigidBodySDFFrictionSolver,
+     PlaneFrictionDampsTranslationAndOrientation) {
+    struct Outcome {
+        Vec3 center = Vec3::Zero();
+        Vec3 omega = Vec3::Zero();
+    };
+    const auto run = [](const double friction_coefficient,
+                        const RigidBodyUpdateMode update_mode,
+                        const bool invalid_material_motion) {
+        RefMesh ref_mesh;
+        DeformedState state;
+        const bool orientation_only =
+            update_mode == RigidBodyUpdateMode::OrientationOnly;
+        const Vec3 initial_velocity = orientation_only
+            ? Vec3(0.0, 0.0, 0.0) : Vec3(1.0, 0.0, 0.0);
+        const Vec3 initial_omega = orientation_only
+            ? Vec3(0.0, 1.0, 0.0) : Vec3(0.0, 0.0, 0.0);
+        create_rigid_body(
+            {Vec3(-1.0, 0.05, -1.0), Vec3(1.0, 0.05, -1.0),
+             Vec3(1.0, 0.05, 1.0), Vec3(-1.0, 0.05, 1.0)},
+            initial_velocity, Vec4(1.0, 0.0, 0.0, 0.0),
+            initial_omega, 4.0, ref_mesh, state, update_mode);
+
+        SimParams params = SimParams::zeros();
+        params.fps = 10.0;
+        params.substeps = 1;
+        params.k_sdf = 100.0;
+        params.eps_sdf = 0.1;
+        PlaneSDF plane{Vec3::Zero(), Vec3::UnitY()};
+        if (invalid_material_motion) {
+            plane.material_motion.current.translation = Vec3::UnitX();
+            plane.material_motion.current.rotation(0, 0) = 2.0;
+        }
+        params.sdf_planes = {plane};
+        params.friction_coefficient = friction_coefficient;
+        params.friction_velocity_epsilon = 0.01;
+        params.max_global_iters = 6;
+        params.fixed_iters = true;
+        params.damping = 0.5;
+        params.node_box_min = 1.0;
+        params.node_box_max = 1.0;
+        params.theta_box_min = 1.0;
+        params.theta_box_max = 1.0;
+        params.node_box_update_count = 1;
+        params.use_ccd = false;
+        params.use_parallel = false;
+        params.gravity = Vec3::Zero();
+
+        std::vector<Vec3> centers = state.x_coms;
+        std::vector<Vec4> orientations = state.orientations;
+        std::vector<Vec3> omega(state.omega.size(), Vec3::Zero());
+        const SolverResult result = global_gauss_seidel_solver_basic_rb(
+            ref_mesh, state, params, centers, orientations, omega);
+        EXPECT_TRUE(result.converged);
+        return Outcome{centers[0], omega[0]};
+    };
+
+    const Outcome translation_frictionless = run(
+        0.0, RigidBodyUpdateMode::TranslationOnly, false);
+    const Outcome translation_frictional = run(
+        0.6, RigidBodyUpdateMode::TranslationOnly, false);
+    EXPECT_GT(translation_frictionless.center.x(), 1.0e-3);
+    EXPECT_GT(translation_frictional.center.x(), 0.0);
+    EXPECT_LT(translation_frictional.center.x(),
+              translation_frictionless.center.x() - 1.0e-4);
+    EXPECT_NEAR(translation_frictional.center.y(),
+                translation_frictionless.center.y(), 1.0e-12);
+
+    const Outcome rotation_frictionless = run(
+        0.0, RigidBodyUpdateMode::OrientationOnly, false);
+    const Outcome rotation_frictional = run(
+        0.6, RigidBodyUpdateMode::OrientationOnly, false);
+    EXPECT_GT(rotation_frictionless.omega.y(), 1.0e-3);
+    EXPECT_GT(rotation_frictional.omega.y(), 0.0);
+    EXPECT_LT(rotation_frictional.omega.y(),
+              rotation_frictionless.omega.y() - 1.0e-4);
+    EXPECT_TRUE(translation_frictional.center.allFinite());
+    EXPECT_TRUE(rotation_frictional.omega.allFinite());
+
+    // Normal SDF contact deliberately does not inspect prescribed material
+    // motion. With friction disabled, even invalid motion metadata must retain
+    // the exact legacy result; enabled friction must validate it.
+    const Outcome invalid_motion_disabled = run(
+        0.0, RigidBodyUpdateMode::TranslationOnly, true);
+    EXPECT_EQ(std::memcmp(invalid_motion_disabled.center.data(),
+                  translation_frictionless.center.data(),
+                  3 * sizeof(double)),
+        0);
+    EXPECT_EQ(std::memcmp(invalid_motion_disabled.omega.data(),
+                  translation_frictionless.omega.data(),
+                  3 * sizeof(double)),
+        0);
+    EXPECT_THROW(
+        run(0.6, RigidBodyUpdateMode::TranslationOnly, true),
+        std::invalid_argument);
 }
 
 }  // namespace

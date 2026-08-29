@@ -59,6 +59,76 @@ SegmentSegmentRegion resolve_parallel_segment_region(double s, double t) {
     return SegmentSegmentRegion::ParallelSegments;
 }
 
+void validate_contact_evaluation_parameters(
+        double d_hat, double k_barrier, double eps) {
+    if (!(d_hat > 0.0) || !std::isfinite(d_hat)) {
+        throw std::invalid_argument(
+                "mesh contact evaluation: d_hat must be positive and finite.");
+    }
+    if (k_barrier < 0.0 || !std::isfinite(k_barrier)) {
+        throw std::invalid_argument(
+                "mesh contact evaluation: k_barrier must be nonnegative and finite.");
+    }
+    if (!(eps > 0.0) || !std::isfinite(eps)) {
+        throw std::invalid_argument(
+                "mesh contact evaluation: eps must be positive and finite.");
+    }
+}
+
+void validate_contact_evaluation_distance(double distance) {
+    if (distance < 0.0 || !std::isfinite(distance)) {
+        throw std::invalid_argument(
+                "mesh contact evaluation: distance must be nonnegative and finite.");
+    }
+}
+
+std::pair<double, double> scalar_barrier_gradient_and_hessian(
+        double delta, double d_hat) {
+    if (delta >= d_hat)
+        return {0.0, 0.0};
+    if (delta == 0.0) {
+        throw std::runtime_error(
+                "scalar_barrier_gradient: delta must be nonzero.");
+    }
+
+    const double log_ratio = std::log(delta / d_hat);
+    const double s = delta - d_hat;
+    const double b_prime =
+            -2.0 * s * log_ratio - (s * s) / delta;
+    const double ratio = d_hat / delta;
+    const double b_double_prime = ratio * ratio + 2.0 * ratio - 3.0
+            - 2.0 * log_ratio;
+    return {b_prime, b_double_prime};
+}
+
+template <typename Evaluation>
+void initialize_contact_barrier_data(
+        Evaluation& evaluation, double k_barrier) {
+    // A zero-stiffness packet represents no normal or friction contribution.
+    // Exit before evaluating the singular scalar derivatives so coincident
+    // geometry retains the legacy friction-only behavior.
+    if (k_barrier == 0.0)
+        return;
+
+    const auto derivatives = scalar_barrier_gradient_and_hessian(
+            evaluation.dr.distance, evaluation.d_hat);
+    evaluation.b_prime = derivatives.first;
+    evaluation.b_double_prime = derivatives.second;
+    evaluation.active = evaluation.dr.distance < evaluation.d_hat;
+    if (!evaluation.active)
+        return;
+
+    evaluation.normal_load = -k_barrier * evaluation.b_prime;
+    if (!std::isfinite(evaluation.normal_load)) {
+        throw std::runtime_error(
+                "mesh contact evaluation: normal load is not finite.");
+    }
+    if (!(evaluation.normal_load > 0.0)) {
+        evaluation.normal_load = 0.0;
+        return;
+    }
+}
+
 } // namespace
 
 //  t = ((q - a) * (b - a)) / ||b - a||^2
@@ -72,6 +142,102 @@ double segment_parameter_from_closest_point(const Vec3& q, const Vec3& a, const 
     }
     if (denom <= 0.0) return 0.0;
     return std::clamp(numer / denom, 0.0, 1.0);
+}
+
+std::array<double, 4> node_triangle_contact_weights(
+        const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
+        double eps, const NodeTriangleDistanceResult* precomputed_dr) {
+    const NodeTriangleDistanceResult dr = precomputed_dr
+            ? *precomputed_dr
+            : node_triangle_distance(x, x1, x2, x3, eps);
+    const NodeTriangleRegion region = dr.region == NodeTriangleRegion::DegenerateTriangle
+            ? resolve_degenerate_triangle_region(x, x1, x2, x3)
+            : dr.region;
+
+    std::array<double, 4> weights{{0.0, 0.0, 0.0, 0.0}};
+    switch (region) {
+        case NodeTriangleRegion::FaceInterior:
+            weights = {{1.0,
+                        -dr.barycentric_tilde_x[0],
+                        -dr.barycentric_tilde_x[1],
+                        -dr.barycentric_tilde_x[2]}};
+            break;
+        case NodeTriangleRegion::Edge12: {
+            const double t = segment_parameter_from_closest_point(dr.closest_point, x1, x2);
+            weights = {{1.0, -(1.0 - t), -t, 0.0}};
+            break;
+        }
+        case NodeTriangleRegion::Edge23: {
+            const double t = segment_parameter_from_closest_point(dr.closest_point, x2, x3);
+            weights = {{1.0, 0.0, -(1.0 - t), -t}};
+            break;
+        }
+        case NodeTriangleRegion::Edge31: {
+            const double t = segment_parameter_from_closest_point(dr.closest_point, x3, x1);
+            weights = {{1.0, -t, 0.0, -(1.0 - t)}};
+            break;
+        }
+        case NodeTriangleRegion::Vertex1:
+            weights = {{1.0, -1.0, 0.0, 0.0}};
+            break;
+        case NodeTriangleRegion::Vertex2:
+            weights = {{1.0, 0.0, -1.0, 0.0}};
+            break;
+        case NodeTriangleRegion::Vertex3:
+            weights = {{1.0, 0.0, 0.0, -1.0}};
+            break;
+        case NodeTriangleRegion::DegenerateTriangle:
+            // resolve_degenerate_triangle_region() always selects a feature.
+            break;
+    }
+    return weights;
+}
+
+std::array<double, 4> segment_segment_contact_weights(
+        const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+        double eps, const SegmentSegmentDistanceResult* precomputed_dr) {
+    const SegmentSegmentDistanceResult dr = precomputed_dr
+            ? *precomputed_dr
+            : segment_segment_distance(x1, x2, x3, x4, eps);
+    const SegmentSegmentRegion region = dr.region == SegmentSegmentRegion::ParallelSegments
+            ? resolve_parallel_segment_region(dr.s, dr.t)
+            : dr.region;
+
+    std::array<double, 4> weights{{0.0, 0.0, 0.0, 0.0}};
+    switch (region) {
+        case SegmentSegmentRegion::Interior:
+            weights = {{1.0 - dr.s, dr.s, -(1.0 - dr.t), -dr.t}};
+            break;
+        case SegmentSegmentRegion::Edge_s0:
+            weights = {{1.0, 0.0, -(1.0 - dr.t), -dr.t}};
+            break;
+        case SegmentSegmentRegion::Edge_s1:
+            weights = {{0.0, 1.0, -(1.0 - dr.t), -dr.t}};
+            break;
+        case SegmentSegmentRegion::Edge_t0:
+            weights = {{1.0 - dr.s, dr.s, -1.0, 0.0}};
+            break;
+        case SegmentSegmentRegion::Edge_t1:
+            weights = {{1.0 - dr.s, dr.s, 0.0, -1.0}};
+            break;
+        case SegmentSegmentRegion::Corner_s0t0:
+            weights = {{1.0, 0.0, -1.0, 0.0}};
+            break;
+        case SegmentSegmentRegion::Corner_s0t1:
+            weights = {{1.0, 0.0, 0.0, -1.0}};
+            break;
+        case SegmentSegmentRegion::Corner_s1t0:
+            weights = {{0.0, 1.0, -1.0, 0.0}};
+            break;
+        case SegmentSegmentRegion::Corner_s1t1:
+            weights = {{0.0, 1.0, 0.0, -1.0}};
+            break;
+        case SegmentSegmentRegion::ParallelSegments:
+            // Defensive fallback for an invalid resolved (s,t).
+            weights = {{1.0 - dr.s, dr.s, -(1.0 - dr.t), -dr.t}};
+            break;
+    }
+    return weights;
 }
 
 //  Scalar barrier
@@ -97,6 +263,42 @@ double scalar_barrier_hessian(double delta, double d_hat){
     if (delta == 0.0) throw std::runtime_error("scalar_barrier_hessian: delta must be nonzero.");
     const double ratio = d_hat / delta;
     return ratio * ratio + 2.0 * ratio - 3.0 - 2.0 * std::log(delta / d_hat);
+}
+
+NodeTriangleContactEvaluation make_node_triangle_contact_evaluation(
+        const std::array<Vec3, 4>& positions,
+        double d_hat, double k_barrier, double eps,
+        const NodeTriangleDistanceResult* precomputed_dr) {
+    validate_contact_evaluation_parameters(d_hat, k_barrier, eps);
+
+    NodeTriangleContactEvaluation evaluation;
+    evaluation.d_hat = d_hat;
+    evaluation.dr = precomputed_dr
+            ? *precomputed_dr
+            : node_triangle_distance(
+                    positions[0], positions[1], positions[2], positions[3],
+                    eps);
+    validate_contact_evaluation_distance(evaluation.dr.distance);
+    initialize_contact_barrier_data(evaluation, k_barrier);
+    return evaluation;
+}
+
+SegmentSegmentContactEvaluation make_segment_segment_contact_evaluation(
+        const std::array<Vec3, 4>& positions,
+        double d_hat, double k_barrier, double eps,
+        const SegmentSegmentDistanceResult* precomputed_dr) {
+    validate_contact_evaluation_parameters(d_hat, k_barrier, eps);
+
+    SegmentSegmentContactEvaluation evaluation;
+    evaluation.d_hat = d_hat;
+    evaluation.dr = precomputed_dr
+            ? *precomputed_dr
+            : segment_segment_distance(
+                    positions[0], positions[1], positions[2], positions[3],
+                    eps);
+    validate_contact_evaluation_distance(evaluation.dr.distance);
+    initialize_contact_barrier_data(evaluation, k_barrier);
+    return evaluation;
 }
 
 //  Node--triangle barrier
@@ -869,36 +1071,158 @@ Mat33 segment_segment_barrier_self_hessian(
 
 std::pair<Vec3, Mat33> node_triangle_barrier_self_gradient_and_hessian(
         const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
-        double d_hat, int dof, double eps) {
+        double d_hat, int dof, double eps,
+        const NodeTriangleDistanceResult* precomputed_dr,
+        const double* precomputed_scalar_gradient,
+        const double* precomputed_scalar_hessian) {
     if (dof < 0 || dof >= 4) throw std::invalid_argument("node_triangle_barrier_gradient: DOF index must be in [0, 3].");
-    const auto dr = node_triangle_distance(x, x1, x2, x3, eps);
+    const NodeTriangleDistanceResult dr = precomputed_dr
+            ? *precomputed_dr
+            : node_triangle_distance(x, x1, x2, x3, eps);
     if (d_hat > 0.0 && dr.distance >= d_hat) {
         return {Vec3::Zero(), Mat33::Zero()};
     }
-    const double scalar_gradient = scalar_barrier_gradient(dr.distance, d_hat);
-    const double scalar_hessian = scalar_barrier_hessian(dr.distance, d_hat);
+    const double scalar_gradient = precomputed_scalar_gradient
+            ? *precomputed_scalar_gradient
+            : scalar_barrier_gradient(dr.distance, d_hat);
+    const double scalar_hessian = precomputed_scalar_hessian
+            ? *precomputed_scalar_hessian
+            : scalar_barrier_hessian(dr.distance, d_hat);
     return {node_triangle_barrier_gradient(x, x1, x2, x3, d_hat, dof, eps, &dr, &scalar_gradient), node_triangle_barrier_self_hessian(x, x1, x2, x3, d_hat, dof, eps, &dr, &scalar_gradient, &scalar_hessian)};
 }
 
 std::pair<Vec3, Mat33> segment_segment_barrier_self_gradient_and_hessian(
         const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
-        double d_hat, int dof, double eps) {
+        double d_hat, int dof, double eps,
+        const SegmentSegmentDistanceResult* precomputed_dr,
+        const double* precomputed_scalar_gradient,
+        const double* precomputed_scalar_hessian) {
     if (dof < 0 || dof >= 4) throw std::invalid_argument("segment_segment_barrier_gradient: DOF index must be in [0, 3].");
-    const auto dr = segment_segment_distance(x1, x2, x3, x4, eps);
+    const SegmentSegmentDistanceResult dr = precomputed_dr
+            ? *precomputed_dr
+            : segment_segment_distance(x1, x2, x3, x4, eps);
     if (d_hat > 0.0 && dr.distance >= d_hat) {
         return {Vec3::Zero(), Mat33::Zero()};
     }
-    const double scalar_gradient = scalar_barrier_gradient(dr.distance, d_hat);
-    const double scalar_hessian = scalar_barrier_hessian(dr.distance, d_hat);
+    const double scalar_gradient = precomputed_scalar_gradient
+            ? *precomputed_scalar_gradient
+            : scalar_barrier_gradient(dr.distance, d_hat);
+    const double scalar_hessian = precomputed_scalar_hessian
+            ? *precomputed_scalar_hessian
+            : scalar_barrier_hessian(dr.distance, d_hat);
     return {segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, dof, eps, &dr, &scalar_gradient), segment_segment_barrier_self_hessian(x1, x2, x3, x4, d_hat, dof, eps, &dr, &scalar_gradient, &scalar_hessian)};
 }
 
-RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode, double eps, const QuaternionOmegaKinematics* cached_kinematics) {
-    const NodeTriangleDistanceResult dr = node_triangle_distance(x, x1, x2, x3, eps);
+Vec3 node_triangle_barrier_gradient(
+        const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
+        int dof, const NodeTriangleContactEvaluation& evaluation,
+        double eps) {
+    if (!evaluation.active)
+        return Vec3::Zero();
+    return node_triangle_barrier_gradient(
+            x, x1, x2, x3, evaluation.d_hat, dof, eps,
+            &evaluation.dr, &evaluation.b_prime);
+}
+
+Mat33 node_triangle_barrier_cross_hessian(
+        const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
+        int row_dof, int col_dof,
+        const NodeTriangleContactEvaluation& evaluation,
+        double eps) {
+    if (!evaluation.active)
+        return Mat33::Zero();
+    return node_triangle_barrier_cross_hessian(
+            x, x1, x2, x3, evaluation.d_hat, row_dof, col_dof, eps,
+            &evaluation.dr, &evaluation.b_prime,
+            &evaluation.b_double_prime);
+}
+
+Mat33 node_triangle_barrier_self_hessian(
+        const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
+        int dof, const NodeTriangleContactEvaluation& evaluation,
+        double eps) {
+    if (!evaluation.active)
+        return Mat33::Zero();
+    return node_triangle_barrier_self_hessian(
+            x, x1, x2, x3, evaluation.d_hat, dof, eps,
+            &evaluation.dr, &evaluation.b_prime,
+            &evaluation.b_double_prime);
+}
+
+std::pair<Vec3, Mat33> node_triangle_barrier_self_gradient_and_hessian(
+        const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
+        int dof, const NodeTriangleContactEvaluation& evaluation,
+        double eps) {
+    if (!evaluation.active)
+        return {Vec3::Zero(), Mat33::Zero()};
+    return node_triangle_barrier_self_gradient_and_hessian(
+            x, x1, x2, x3, evaluation.d_hat, dof, eps,
+            &evaluation.dr, &evaluation.b_prime,
+            &evaluation.b_double_prime);
+}
+
+Vec3 segment_segment_barrier_gradient(
+        const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+        int dof, const SegmentSegmentContactEvaluation& evaluation,
+        double eps) {
+    if (!evaluation.active)
+        return Vec3::Zero();
+    return segment_segment_barrier_gradient(
+            x1, x2, x3, x4, evaluation.d_hat, dof, eps,
+            &evaluation.dr, &evaluation.b_prime);
+}
+
+Mat33 segment_segment_barrier_cross_hessian(
+        const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+        int row_dof, int col_dof,
+        const SegmentSegmentContactEvaluation& evaluation,
+        double eps) {
+    if (!evaluation.active)
+        return Mat33::Zero();
+    return segment_segment_barrier_cross_hessian(
+            x1, x2, x3, x4, evaluation.d_hat, row_dof, col_dof, eps,
+            &evaluation.dr, &evaluation.b_prime,
+            &evaluation.b_double_prime);
+}
+
+Mat33 segment_segment_barrier_self_hessian(
+        const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+        int dof, const SegmentSegmentContactEvaluation& evaluation,
+        double eps) {
+    if (!evaluation.active)
+        return Mat33::Zero();
+    return segment_segment_barrier_self_hessian(
+            x1, x2, x3, x4, evaluation.d_hat, dof, eps,
+            &evaluation.dr, &evaluation.b_prime,
+            &evaluation.b_double_prime);
+}
+
+std::pair<Vec3, Mat33> segment_segment_barrier_self_gradient_and_hessian(
+        const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+        int dof, const SegmentSegmentContactEvaluation& evaluation,
+        double eps) {
+    if (!evaluation.active)
+        return {Vec3::Zero(), Mat33::Zero()};
+    return segment_segment_barrier_self_gradient_and_hessian(
+            x1, x2, x3, x4, evaluation.d_hat, dof, eps,
+            &evaluation.dr, &evaluation.b_prime,
+            &evaluation.b_double_prime);
+}
+
+RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode, double eps, const QuaternionOmegaKinematics* cached_kinematics, const NodeTriangleDistanceResult* precomputed_dr, const double* precomputed_scalar_gradient, const double* precomputed_scalar_hessian) {
+    const NodeTriangleDistanceResult dr = precomputed_dr
+            ? *precomputed_dr
+            : node_triangle_distance(x, x1, x2, x3, eps);
     if (d_hat > 0.0 && dr.distance >= d_hat)
         return RigidEnergyDerivatives{};
-    const double scalar_gradient = scalar_barrier_gradient(dr.distance, d_hat);
-    const double scalar_hessian = mode == RigidDerivativeMode::Gradient ? 0.0 : scalar_barrier_hessian(dr.distance, d_hat);
+    const double scalar_gradient = precomputed_scalar_gradient
+            ? *precomputed_scalar_gradient
+            : scalar_barrier_gradient(dr.distance, d_hat);
+    const double scalar_hessian = mode == RigidDerivativeMode::Gradient
+            ? 0.0
+            : (precomputed_scalar_hessian
+                   ? *precomputed_scalar_hessian
+                   : scalar_barrier_hessian(dr.distance, d_hat));
 
     RigidEnergyDerivatives result;
     std::array<Vec3, 4> gradients = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
@@ -981,12 +1305,20 @@ RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, c
     return result;
 }
 
-RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode, double eps, const QuaternionOmegaKinematics* cached_kinematics) {
-    const SegmentSegmentDistanceResult dr = segment_segment_distance(x1, x2, x3, x4, eps);
+RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode, double eps, const QuaternionOmegaKinematics* cached_kinematics, const SegmentSegmentDistanceResult* precomputed_dr, const double* precomputed_scalar_gradient, const double* precomputed_scalar_hessian) {
+    const SegmentSegmentDistanceResult dr = precomputed_dr
+            ? *precomputed_dr
+            : segment_segment_distance(x1, x2, x3, x4, eps);
     if (d_hat > 0.0 && dr.distance >= d_hat)
         return RigidEnergyDerivatives{};
-    const double scalar_gradient = scalar_barrier_gradient(dr.distance, d_hat);
-    const double scalar_hessian = mode == RigidDerivativeMode::Gradient ? 0.0 : scalar_barrier_hessian(dr.distance, d_hat);
+    const double scalar_gradient = precomputed_scalar_gradient
+            ? *precomputed_scalar_gradient
+            : scalar_barrier_gradient(dr.distance, d_hat);
+    const double scalar_hessian = mode == RigidDerivativeMode::Gradient
+            ? 0.0
+            : (precomputed_scalar_hessian
+                   ? *precomputed_scalar_hessian
+                   : scalar_barrier_hessian(dr.distance, d_hat));
 
     RigidEnergyDerivatives result;
     std::array<Vec3, 4> gradients = {Vec3::Zero(), Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};

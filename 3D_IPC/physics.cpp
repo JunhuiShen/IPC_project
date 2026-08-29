@@ -1,9 +1,11 @@
 #include "physics.h"
 #include "broad_phase.h"
+#include "friction_energy.h"
 #include "mesh_utils.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
 
 // Union of all obstacles
 static inline bool sdf_min_evaluation(const SimParams& params, const Vec3& xi, SDFEvaluation& out) {
@@ -24,7 +26,30 @@ static inline bool sdf_min_evaluation(const SimParams& params, const Vec3& xi, S
     return any;
 }
 
-void build_frozen_residual_workspace(const RefMesh& ref_mesh, const SimParams& params, const std::vector<Vec3>& x, const BroadPhase& broad_phase, FrozenResidualWorkspace& workspace, const std::vector<ShapeGrads>* rest_shape_grads) {
+static void validate_friction_previous_positions(
+    const SimParams& params,
+    const std::vector<Vec3>& x,
+    const std::vector<Vec3>* previous_positions,
+    const char* caller) {
+    if (params.friction_coefficient <= 0.0)
+        return;
+    if (previous_positions == nullptr) {
+        throw std::invalid_argument(
+            std::string(caller)
+            + ": previous_positions is required when friction is enabled");
+    }
+    if (previous_positions->size() != x.size()) {
+        throw std::invalid_argument(
+            std::string(caller)
+            + ": previous_positions must match x.size()");
+    }
+}
+
+void build_frozen_residual_workspace(
+    const RefMesh& ref_mesh, const SimParams& params,
+    const std::vector<Vec3>& x, const BroadPhase& broad_phase,
+    FrozenResidualWorkspace& workspace,
+    const std::vector<ShapeGrads>* rest_shape_grads) {
     workspace.mesh = nullptr;
     workspace.params = nullptr;
     workspace.positions = nullptr;
@@ -148,8 +173,9 @@ void build_frozen_residual_workspace(const RefMesh& ref_mesh, const SimParams& p
 }
 
 double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const std::vector<Pin>& pins, const SimParams& params,
-                                                const std::vector<Vec3>& x, const std::vector<Vec3>& xhat) {
-    double E = 0.0, PE = 0.0;
+                                                const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+                                                const std::vector<Vec3>* previous_positions) {
+    double E = 0.0, PE = 0.0, friction_energy = 0.0;
     const double dt2 = params.dt2();
 
     for (int i = 0; i < static_cast<int>(x.size()); ++i)
@@ -175,22 +201,41 @@ double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const s
     }
 
     if (params.k_sdf > 0.0) {
+        if (params.friction_coefficient > 0.0) {
+            validate_friction_previous_positions(
+                params, x, previous_positions,
+                "compute_incremental_potential_no_barrier");
+        }
         for (int i = 0; i < static_cast<int>(x.size()); ++i) {
             SDFEvaluation s;
-            if (sdf_min_evaluation(params, x[i], s))
+            if (sdf_min_evaluation(params, x[i], s)) {
                 PE += sdf_penalty_energy(s, params.k_sdf, params.eps_sdf);
+                if (params.friction_coefficient > 0.0) {
+                    const FrozenFrictionContact contact =
+                        make_sdf_frozen_friction_contact(
+                            x[i], (*previous_positions)[i], s,
+                            params.k_sdf, params.eps_sdf, params.dt(),
+                            params.friction_velocity_epsilon);
+                    friction_energy += frozen_friction_energy(
+                        contact, params.friction_coefficient, dt2);
+                }
+            }
         }
     }
 
-    return E + dt2 * PE;
+    return E + dt2 * PE + friction_energy;
 }
 
-std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
-                                                                     const std::vector<Pin>& pins, const SimParams& params,
-                                                                     const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
-                                                                     const PinMap* pin_map,
-                                                                     const IncidentTriangles* incident_triangles,
-                                                                     const std::vector<ShapeGrads>* rest_shape_grads) {
+static std::pair<Vec3, Mat33>
+compute_local_gradient_and_hessian_no_barrier_impl(
+    int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params,
+    const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+    const PinMap* pin_map,
+    const IncidentTriangles* incident_triangles,
+    const std::vector<ShapeGrads>* rest_shape_grads,
+    const std::vector<Vec3>* previous_positions,
+    const bool validate_friction_inputs) {
     const double dt2 = params.dt2();
     Vec3  g = Vec3::Zero();
     Mat33 H = Mat33::Zero();
@@ -260,20 +305,72 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
     if (params.k_sdf > 0.0) {
         SDFEvaluation s;
         if (sdf_min_evaluation(params, x[vi], s)) {
-            g += dt2 * sdf_penalty_gradient(s, params.k_sdf, params.eps_sdf);
+            const Vec3 sdf_gradient =
+                sdf_penalty_gradient(s, params.k_sdf, params.eps_sdf);
+            g += dt2 * sdf_gradient;
             H += dt2 * sdf_penalty_hessian (s, params.k_sdf, params.eps_sdf, /*include_curvature=*/false);
+            if (params.friction_coefficient > 0.0) {
+                if (validate_friction_inputs) {
+                    validate_friction_previous_positions(
+                        params, x, previous_positions,
+                        "compute_local_gradient_and_hessian_no_barrier");
+                }
+                const FrozenFrictionContact contact =
+                    make_sdf_frozen_friction_contact(
+                        x[vi], (*previous_positions)[vi], s,
+                        params.k_sdf, params.eps_sdf, params.dt(),
+                        params.friction_velocity_epsilon, 1.0e-12,
+                        &sdf_gradient);
+                const auto [friction_gradient, friction_hessian] =
+                    frozen_friction_role_gradient_and_hessian(
+                        contact, 0, params.friction_coefficient, dt2);
+                g += friction_gradient;
+                H += friction_hessian;
+            }
         }
     }
 
     return {g, H};
 }
 
+std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(
+    int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params,
+    const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+    const PinMap* pin_map,
+    const IncidentTriangles* incident_triangles,
+    const std::vector<ShapeGrads>* rest_shape_grads,
+    const std::vector<Vec3>* previous_positions) {
+    return compute_local_gradient_and_hessian_no_barrier_impl(
+        vi, ref_mesh, adj, pins, params, x, xhat, pin_map,
+        incident_triangles, rest_shape_grads, previous_positions, true);
+}
+
+namespace physics_detail {
+
+std::pair<Vec3, Mat33>
+compute_local_gradient_and_hessian_no_barrier_unchecked(
+    int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params,
+    const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+    const PinMap* pin_map,
+    const IncidentTriangles* incident_triangles,
+    const std::vector<ShapeGrads>* rest_shape_grads,
+    const std::vector<Vec3>* previous_positions) {
+    return compute_local_gradient_and_hessian_no_barrier_impl(
+        vi, ref_mesh, adj, pins, params, x, xhat, pin_map,
+        incident_triangles, rest_shape_grads, previous_positions, false);
+}
+
+} // namespace physics_detail
+
 static Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
                                    const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                    const BroadPhase& broad_phase, const PinMap* pin_map,
                                    const IncidentTriangles* incident_triangles,
                                    const std::vector<ShapeGrads>* rest_shape_grads,
-                                   const FrozenResidualWorkspace* frozen_workspace) {
+                                   const FrozenResidualWorkspace* frozen_workspace,
+                                   const std::vector<Vec3>* previous_positions) {
     const double dt2 = params.dt2();
     const auto& bp_cache = broad_phase.cache();
     Vec3 g = Vec3::Zero();
@@ -348,10 +445,55 @@ static Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const Vertex
             if (frozen_workspace == nullptr && !node_triangle_aabbs_within_distance(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], d_hat2)) {
                 continue;
             }
-            if (frozen_workspace != nullptr && frozen_workspace->nt_gradient_cached[entry.pair_index] != 0) {
-                g += dt2k * frozen_workspace->nt_gradients[entry.pair_index][static_cast<std::size_t>(entry.dof)];
+            if (params.friction_coefficient > 0.0) {
+                const std::array<Vec3, 4> current_positions{
+                    x[static_cast<std::size_t>(p.node)],
+                    x[static_cast<std::size_t>(p.tri_v[0])],
+                    x[static_cast<std::size_t>(p.tri_v[1])],
+                    x[static_cast<std::size_t>(p.tri_v[2])]};
+                const std::array<Vec3, 4> prior_positions{
+                    (*previous_positions)[static_cast<std::size_t>(p.node)],
+                    (*previous_positions)[static_cast<std::size_t>(p.tri_v[0])],
+                    (*previous_positions)[static_cast<std::size_t>(p.tri_v[1])],
+                    (*previous_positions)[static_cast<std::size_t>(p.tri_v[2])]};
+                const NodeTriangleContactEvaluation contact_evaluation =
+                    make_node_triangle_contact_evaluation(
+                        current_positions, params.d_hat,
+                        params.k_barrier);
+                if (frozen_workspace != nullptr
+                    && frozen_workspace
+                           ->nt_gradient_cached[entry.pair_index]
+                        != 0) {
+                    g += dt2k
+                        * frozen_workspace
+                              ->nt_gradients[entry.pair_index]
+                                            [static_cast<std::size_t>(
+                                                entry.dof)];
+                } else {
+                    g += dt2k * node_triangle_barrier_gradient(
+                        current_positions[0], current_positions[1],
+                        current_positions[2], current_positions[3],
+                        entry.dof, contact_evaluation);
+                }
+                const FrozenFrictionContact contact =
+                    make_node_triangle_frozen_friction_contact(
+                        current_positions, prior_positions,
+                        contact_evaluation, params.dt(),
+                        params.friction_velocity_epsilon);
+                g += frozen_friction_role_gradient(
+                    contact, entry.dof,
+                    params.friction_coefficient, dt2);
+            } else if (frozen_workspace != nullptr
+                && frozen_workspace->nt_gradient_cached[entry.pair_index]
+                    != 0) {
+                g += dt2k
+                    * frozen_workspace->nt_gradients[entry.pair_index]
+                                                   [static_cast<std::size_t>(
+                                                       entry.dof)];
             } else {
-                g += dt2k * node_triangle_barrier_gradient(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], params.d_hat, entry.dof);
+                g += dt2k * node_triangle_barrier_gradient(
+                    x[p.node], x[p.tri_v[0]], x[p.tri_v[1]],
+                    x[p.tri_v[2]], params.d_hat, entry.dof);
             }
         }
 
@@ -363,18 +505,76 @@ static Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const Vertex
             if (frozen_workspace == nullptr && !segment_aabbs_within_distance(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], d_hat2)) {
                 continue;
             }
-            if (frozen_workspace != nullptr && frozen_workspace->ss_gradient_cached[entry.pair_index] != 0) {
-                g += dt2k * frozen_workspace->ss_gradients[entry.pair_index][static_cast<std::size_t>(entry.dof)];
+            if (params.friction_coefficient > 0.0) {
+                const std::array<Vec3, 4> current_positions{
+                    x[static_cast<std::size_t>(p.v[0])],
+                    x[static_cast<std::size_t>(p.v[1])],
+                    x[static_cast<std::size_t>(p.v[2])],
+                    x[static_cast<std::size_t>(p.v[3])]};
+                const std::array<Vec3, 4> prior_positions{
+                    (*previous_positions)[static_cast<std::size_t>(p.v[0])],
+                    (*previous_positions)[static_cast<std::size_t>(p.v[1])],
+                    (*previous_positions)[static_cast<std::size_t>(p.v[2])],
+                    (*previous_positions)[static_cast<std::size_t>(p.v[3])]};
+                const SegmentSegmentContactEvaluation contact_evaluation =
+                    make_segment_segment_contact_evaluation(
+                        current_positions, params.d_hat,
+                        params.k_barrier);
+                if (frozen_workspace != nullptr
+                    && frozen_workspace
+                           ->ss_gradient_cached[entry.pair_index]
+                        != 0) {
+                    g += dt2k
+                        * frozen_workspace
+                              ->ss_gradients[entry.pair_index]
+                                            [static_cast<std::size_t>(
+                                                entry.dof)];
+                } else {
+                    g += dt2k * segment_segment_barrier_gradient(
+                        current_positions[0], current_positions[1],
+                        current_positions[2], current_positions[3],
+                        entry.dof, contact_evaluation);
+                }
+                const FrozenFrictionContact contact =
+                    make_segment_segment_frozen_friction_contact(
+                        current_positions, prior_positions,
+                        contact_evaluation, params.dt(),
+                        params.friction_velocity_epsilon);
+                g += frozen_friction_role_gradient(
+                    contact, entry.dof,
+                    params.friction_coefficient, dt2);
+            } else if (frozen_workspace != nullptr
+                && frozen_workspace->ss_gradient_cached[entry.pair_index]
+                    != 0) {
+                g += dt2k
+                    * frozen_workspace->ss_gradients[entry.pair_index]
+                                                   [static_cast<std::size_t>(
+                                                       entry.dof)];
             } else {
-                g += dt2k * segment_segment_barrier_gradient(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], params.d_hat, entry.dof);
+                g += dt2k * segment_segment_barrier_gradient(
+                    x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]],
+                    params.d_hat, entry.dof);
             }
         }
     }
 
     if (params.k_sdf > 0.0) {
         SDFEvaluation s;
-        if (sdf_min_evaluation(params, x[vi], s))
-            g += dt2 * sdf_penalty_gradient(s, params.k_sdf, params.eps_sdf);
+        if (sdf_min_evaluation(params, x[vi], s)) {
+            const Vec3 sdf_gradient =
+                sdf_penalty_gradient(s, params.k_sdf, params.eps_sdf);
+            g += dt2 * sdf_gradient;
+            if (params.friction_coefficient > 0.0) {
+                const FrozenFrictionContact contact =
+                    make_sdf_frozen_friction_contact(
+                        x[vi], (*previous_positions)[vi], s,
+                        params.k_sdf, params.eps_sdf, params.dt(),
+                        params.friction_velocity_epsilon, 1.0e-12,
+                        &sdf_gradient);
+                g += frozen_friction_role_gradient(
+                    contact, 0, params.friction_coefficient, dt2);
+            }
+        }
     }
 
     return g;
@@ -388,15 +588,19 @@ double compute_global_deformable_residual(
     const std::vector<int>& deformable_nodes, const PinMap* pin_map,
     const std::vector<IncidentTriangles>* incident_triangles,
     const std::vector<ShapeGrads>* rest_shape_grads,
-    const FrozenResidualWorkspace* frozen_workspace) {
+    const FrozenResidualWorkspace* frozen_workspace,
+    const std::vector<Vec3>* previous_positions) {
     (void)params.dt2();
+    validate_friction_previous_positions(
+        params, x, previous_positions,
+        "compute_global_deformable_residual");
     if (frozen_workspace != nullptr && !frozen_workspace->matches(ref_mesh, params, x, broad_phase)) throw std::invalid_argument("compute_global_deformable_residual: frozen workspace does not match its inputs");
     double r_inf = 0.0;
     const int num_deformable = static_cast<int>(deformable_nodes.size());
     #pragma omp parallel for reduction(max:r_inf) schedule(static)
     for (int i = 0; i < num_deformable; ++i) {
         const int node = deformable_nodes[i];
-        Vec3 g = compute_local_gradient(node, ref_mesh, adj, pins, params, x, xhat, broad_phase, pin_map, incident_triangles ? &(*incident_triangles)[node] : nullptr, rest_shape_grads, frozen_workspace);
+        Vec3 g = compute_local_gradient(node, ref_mesh, adj, pins, params, x, xhat, broad_phase, pin_map, incident_triangles ? &(*incident_triangles)[node] : nullptr, rest_shape_grads, frozen_workspace, previous_positions);
         const double m = ref_mesh.mass[node];
         if (m > 0.0)
             g /= m;
@@ -409,12 +613,15 @@ double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap&
                                const SimParams& params, const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
                                const BroadPhase& broad_phase, const PinMap* pin_map,
                                const std::vector<IncidentTriangles>* incident_triangles,
-                               const std::vector<ShapeGrads>* rest_shape_grads) {
+                               const std::vector<ShapeGrads>* rest_shape_grads,
+                               const std::vector<Vec3>* previous_positions) {
+    validate_friction_previous_positions(
+        params, x, previous_positions, "compute_global_residual");
     const int nv = static_cast<int>(x.size());
     double r_inf = 0.0;
     #pragma omp parallel for reduction(max:r_inf) schedule(static)
     for (int i = 0; i < nv; ++i) {
-        Vec3 g = compute_local_gradient(i, ref_mesh, adj, pins, params, x, xhat, broad_phase, pin_map, incident_triangles ? &(*incident_triangles)[i] : nullptr, rest_shape_grads, nullptr);
+        Vec3 g = compute_local_gradient(i, ref_mesh, adj, pins, params, x, xhat, broad_phase, pin_map, incident_triangles ? &(*incident_triangles)[i] : nullptr, rest_shape_grads, nullptr, previous_positions);
         const double m = ref_mesh.mass[i];
         if (m > 0.0) g /= m;
         r_inf = std::max(r_inf, g.cwiseAbs().maxCoeff());

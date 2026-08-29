@@ -2,8 +2,88 @@
 
 #include "rigid_body_ipc.h"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <string>
+
+namespace {
+
+bool poses_are_identical(
+    const SDFMaterialPose& first,
+    const SDFMaterialPose& second) {
+    return (first.rotation.array() == second.rotation.array()).all()
+        && (first.translation.array() == second.translation.array()).all();
+}
+
+void validate_material_pose(
+    const SDFMaterialPose& pose,
+    const char* name) {
+    if (!pose.rotation.allFinite() || !pose.translation.allFinite()) {
+        throw std::invalid_argument(
+            std::string("sdf_previous_material_point: ") + name
+            + " pose must be finite");
+    }
+
+    constexpr double rotation_tolerance = 1.0e-10;
+    const Mat33 orthogonality_error =
+        pose.rotation.transpose() * pose.rotation - Mat33::Identity();
+    if (orthogonality_error.cwiseAbs().maxCoeff() > rotation_tolerance
+        || std::abs(pose.rotation.determinant() - 1.0)
+            > rotation_tolerance) {
+        throw std::invalid_argument(
+            std::string("sdf_previous_material_point: ") + name
+            + " rotation must be right-handed and orthonormal");
+    }
+}
+
+void initialize_surface_data(
+    SDFEvaluation& evaluation,
+    const Vec3& x,
+    const SDFMaterialMotion& motion) {
+    const double gradient_norm_squared = evaluation.grad_phi.squaredNorm();
+    if (gradient_norm_squared > 0.0
+        && std::isfinite(gradient_norm_squared)) {
+        // This is the exact closest point for the analytic signed-distance
+        // primitives below. Dividing by ||grad phi||^2 also remains robust if
+        // a caller supplies a plane normal with small normalization error.
+        evaluation.surface_point = x
+            - evaluation.phi / gradient_norm_squared * evaluation.grad_phi;
+    } else {
+        // The centerline/center singularities have no well-defined normal and
+        // cannot support friction. Retaining x keeps all diagnostic fields
+        // finite; the friction builder will leave such a contact inactive.
+        evaluation.surface_point = x;
+    }
+    // Deliberately do not map or validate material motion here. Normal SDF
+    // contact must retain its legacy behavior when friction is disabled.
+    evaluation.material_motion = motion;
+}
+
+} // namespace
+
+Vec3 sdf_previous_material_point(
+    const SDFMaterialMotion& motion,
+    const Vec3& current_material_point) {
+    if (!current_material_point.allFinite()) {
+        throw std::invalid_argument(
+            "sdf_previous_material_point: point must be finite");
+    }
+    if (poses_are_identical(motion.previous, motion.current))
+        return current_material_point;
+
+    validate_material_pose(motion.previous, "previous");
+    validate_material_pose(motion.current, "current");
+    const Vec3 material_point = motion.current.rotation.transpose()
+        * (current_material_point - motion.current.translation);
+    const Vec3 previous_point = motion.previous.rotation * material_point
+        + motion.previous.translation;
+    if (!previous_point.allFinite()) {
+        throw std::runtime_error(
+            "sdf_previous_material_point: mapped point is not finite");
+    }
+    return previous_point;
+}
 
 //  H(z) = 1 for z<0, (eps-z)/eps on [0,eps], 0 for z>eps.
 double sdf_heaviside(double z, double eps){
@@ -27,6 +107,7 @@ SDFEvaluation evaluate_sdf(const PlaneSDF& s, const Vec3& x){
     r.phi      = (x - s.point).dot(s.normal);
     r.grad_phi = s.normal;
     r.hess_phi = Mat33::Zero();
+    initialize_surface_data(r, x, s.material_motion);
     return r;
 }
 
@@ -46,6 +127,7 @@ SDFEvaluation evaluate_sdf(const CylinderSDF& s, const Vec3& x){
         r.grad_phi = Vec3::Zero();
         r.hess_phi = Mat33::Zero();
     }
+    initialize_surface_data(r, x, s.material_motion);
     return r;
 }
 
@@ -62,6 +144,7 @@ SDFEvaluation evaluate_sdf(const SphereSDF& s, const Vec3& x){
         r.grad_phi = Vec3::Zero();
         r.hess_phi = Mat33::Zero();
     }
+    initialize_surface_data(r, x, s.material_motion);
     return r;
 }
 
@@ -119,11 +202,35 @@ Mat33 sdf_penalty_hessian(const SDFEvaluation& sdf, double k, double eps, bool i
     return Hess;
 }
 
-RigidEnergyDerivatives sdf_penalty_derivatives_rb(const SDFEvaluation& sdf, const Vec3& X_centered, const QuaternionOmegaKinematics& kinematics, double k, double eps, bool include_sdf_curvature, bool include_rigid_curvature) {
-    const Vec3 gx = sdf_penalty_gradient(sdf, k, eps);
-    const Mat33 Hx = sdf_penalty_hessian(sdf, k, eps, include_sdf_curvature);
+RigidEnergyDerivatives sdf_penalty_derivatives_rb(
+        const SDFEvaluation& sdf, const Vec3& X_centered,
+        const QuaternionOmegaKinematics& kinematics,
+        double k, double eps, bool include_sdf_curvature,
+        bool include_rigid_curvature) {
+    return sdf_penalty_derivatives_rb(
+            sdf, X_centered, kinematics, k, eps,
+            include_sdf_curvature, include_rigid_curvature,
+            nullptr, nullptr, nullptr);
+}
+
+RigidEnergyDerivatives sdf_penalty_derivatives_rb(
+        const SDFEvaluation& sdf, const Vec3& X_centered,
+        const QuaternionOmegaKinematics& kinematics,
+        double k, double eps, bool include_sdf_curvature,
+        bool include_rigid_curvature,
+        const Vec3* precomputed_gradient,
+        const Mat33* precomputed_hessian,
+        const Mat33* precomputed_position_jacobian) {
+    const Vec3 gx = precomputed_gradient
+            ? *precomputed_gradient
+            : sdf_penalty_gradient(sdf, k, eps);
+    const Mat33 Hx = precomputed_hessian
+            ? *precomputed_hessian
+            : sdf_penalty_hessian(sdf, k, eps, include_sdf_curvature);
     const Mat33 Hx_symmetric = rigid_node_translation_hessian(Hx);
-    const Mat33 J_xomega = dx_domega(X_centered, kinematics);
+    const Mat33 J_xomega = precomputed_position_jacobian
+            ? *precomputed_position_jacobian
+            : dx_domega(X_centered, kinematics);
 
     RigidEnergyDerivatives result;
     result.translation_gradient = rigid_node_translation_gradient(gx);

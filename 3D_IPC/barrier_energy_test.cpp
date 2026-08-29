@@ -521,6 +521,372 @@ TEST(BarrierEnergy, PrecomputedSegmentSegmentScalarsAreBitwiseEquivalent) {
     }
 }
 
+TEST(BarrierEnergy,
+     EphemeralNodeTriangleEvaluationMatchesLegacyAcrossAllFeatures) {
+    std::vector<TestPoint> cases = make_nt_test_points();
+    cases.push_back({
+        "degenerate_triangle",
+        Vec3(0.25, 0.2, 0.0),
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(2.0, 0.0, 0.0),
+        1.0,
+        NodeTriangleRegion::DegenerateTriangle});
+
+    constexpr double k_barrier = 37.0;
+    for (const TestPoint& tp : cases) {
+        SCOPED_TRACE(tp.name);
+        const std::array<Vec3, 4> positions{
+            tp.x, tp.x1, tp.x2, tp.x3};
+        const NodeTriangleContactEvaluation evaluation =
+            make_node_triangle_contact_evaluation(
+                positions, tp.d_hat, k_barrier);
+
+        ASSERT_EQ(evaluation.dr.region, tp.expected_region);
+        ASSERT_TRUE(evaluation.active);
+        EXPECT_DOUBLE_EQ(
+            evaluation.b_prime,
+            scalar_barrier_gradient(evaluation.dr.distance, tp.d_hat));
+        EXPECT_DOUBLE_EQ(
+            evaluation.b_double_prime,
+            scalar_barrier_hessian(evaluation.dr.distance, tp.d_hat));
+        EXPECT_DOUBLE_EQ(
+            evaluation.normal_load, -k_barrier * evaluation.b_prime);
+        EXPECT_DOUBLE_EQ(evaluation.d_hat, tp.d_hat);
+
+        for (int row = 0; row < 4; ++row) {
+            const Vec3 legacy_gradient = node_triangle_barrier_gradient(
+                tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, row);
+            const Vec3 shared_gradient = node_triangle_barrier_gradient(
+                tp.x, tp.x1, tp.x2, tp.x3, row, evaluation);
+            EXPECT_EQ(
+                std::memcmp(
+                    legacy_gradient.data(), shared_gradient.data(),
+                    sizeof(double) * 3),
+                0)
+                << "row=" << row;
+
+            const auto legacy_combined =
+                node_triangle_barrier_self_gradient_and_hessian(
+                    tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, row);
+            const auto shared_combined =
+                node_triangle_barrier_self_gradient_and_hessian(
+                    tp.x, tp.x1, tp.x2, tp.x3, row, evaluation);
+            EXPECT_EQ(
+                std::memcmp(
+                    legacy_combined.first.data(),
+                    shared_combined.first.data(), sizeof(double) * 3),
+                0)
+                << "combined gradient row=" << row;
+            EXPECT_EQ(
+                std::memcmp(
+                    legacy_combined.second.data(),
+                    shared_combined.second.data(), sizeof(double) * 9),
+                0)
+                << "combined Hessian row=" << row;
+
+            for (int col = 0; col < 4; ++col) {
+                const Mat33 legacy_hessian =
+                    node_triangle_barrier_cross_hessian(
+                        tp.x, tp.x1, tp.x2, tp.x3,
+                        tp.d_hat, row, col);
+                const Mat33 shared_hessian =
+                    node_triangle_barrier_cross_hessian(
+                        tp.x, tp.x1, tp.x2, tp.x3,
+                        row, col, evaluation);
+                EXPECT_EQ(
+                    std::memcmp(
+                        legacy_hessian.data(), shared_hessian.data(),
+                        sizeof(double) * 9),
+                    0)
+                    << "row=" << row << " col=" << col;
+            }
+        }
+    }
+}
+
+TEST(BarrierEnergy,
+     EphemeralSegmentSegmentEvaluationMatchesLegacyAcrossAllFeatures) {
+    std::vector<SSTestPoint> cases = make_ss_test_points();
+    cases.push_back({
+        "parallel_segments",
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.2, 0.2, 0.0),
+        Vec3(0.8, 0.2, 0.0),
+        1.0,
+        SegmentSegmentRegion::ParallelSegments});
+
+    constexpr double k_barrier = 41.0;
+    for (const SSTestPoint& tp : cases) {
+        SCOPED_TRACE(tp.name);
+        const std::array<Vec3, 4> positions{
+            tp.x1, tp.x2, tp.x3, tp.x4};
+        const SegmentSegmentContactEvaluation evaluation =
+            make_segment_segment_contact_evaluation(
+                positions, tp.d_hat, k_barrier);
+
+        ASSERT_EQ(evaluation.dr.region, tp.expected_region);
+        ASSERT_TRUE(evaluation.active);
+        EXPECT_DOUBLE_EQ(
+            evaluation.b_prime,
+            scalar_barrier_gradient(evaluation.dr.distance, tp.d_hat));
+        EXPECT_DOUBLE_EQ(
+            evaluation.b_double_prime,
+            scalar_barrier_hessian(evaluation.dr.distance, tp.d_hat));
+        EXPECT_DOUBLE_EQ(
+            evaluation.normal_load, -k_barrier * evaluation.b_prime);
+        EXPECT_DOUBLE_EQ(evaluation.d_hat, tp.d_hat);
+
+        for (int row = 0; row < 4; ++row) {
+            const Vec3 legacy_gradient = segment_segment_barrier_gradient(
+                tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, row);
+            const Vec3 shared_gradient = segment_segment_barrier_gradient(
+                tp.x1, tp.x2, tp.x3, tp.x4, row, evaluation);
+            EXPECT_EQ(
+                std::memcmp(
+                    legacy_gradient.data(), shared_gradient.data(),
+                    sizeof(double) * 3),
+                0)
+                << "row=" << row;
+
+            const auto legacy_combined =
+                segment_segment_barrier_self_gradient_and_hessian(
+                    tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, row);
+            const auto shared_combined =
+                segment_segment_barrier_self_gradient_and_hessian(
+                    tp.x1, tp.x2, tp.x3, tp.x4, row, evaluation);
+            EXPECT_EQ(
+                std::memcmp(
+                    legacy_combined.first.data(),
+                    shared_combined.first.data(), sizeof(double) * 3),
+                0)
+                << "combined gradient row=" << row;
+            EXPECT_EQ(
+                std::memcmp(
+                    legacy_combined.second.data(),
+                    shared_combined.second.data(), sizeof(double) * 9),
+                0)
+                << "combined Hessian row=" << row;
+
+            for (int col = 0; col < 4; ++col) {
+                const Mat33 legacy_hessian =
+                    segment_segment_barrier_cross_hessian(
+                        tp.x1, tp.x2, tp.x3, tp.x4,
+                        tp.d_hat, row, col);
+                const Mat33 shared_hessian =
+                    segment_segment_barrier_cross_hessian(
+                        tp.x1, tp.x2, tp.x3, tp.x4,
+                        row, col, evaluation);
+                EXPECT_EQ(
+                    std::memcmp(
+                        legacy_hessian.data(), shared_hessian.data(),
+                        sizeof(double) * 9),
+                    0)
+                    << "row=" << row << " col=" << col;
+            }
+        }
+    }
+}
+
+TEST(BarrierEnergy, EphemeralEvaluationPreservesInactiveContactZeros) {
+    constexpr double d_hat = 0.5;
+    constexpr double k_barrier = 19.0;
+    const std::array<Vec3, 4> nt_positions{
+        Vec3(0.2, 0.3, 0.8), Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)};
+    const NodeTriangleContactEvaluation nt_evaluation =
+        make_node_triangle_contact_evaluation(
+            nt_positions, d_hat, k_barrier);
+    ASSERT_FALSE(nt_evaluation.active);
+    EXPECT_DOUBLE_EQ(nt_evaluation.b_prime, 0.0);
+    EXPECT_DOUBLE_EQ(nt_evaluation.b_double_prime, 0.0);
+    EXPECT_DOUBLE_EQ(nt_evaluation.normal_load, 0.0);
+
+    const std::array<Vec3, 4> ss_positions{
+        Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0),
+        Vec3(0.2, 0.8, 0.0), Vec3(0.8, 0.8, 0.0)};
+    const SegmentSegmentContactEvaluation ss_evaluation =
+        make_segment_segment_contact_evaluation(
+            ss_positions, d_hat, k_barrier);
+    ASSERT_FALSE(ss_evaluation.active);
+    EXPECT_DOUBLE_EQ(ss_evaluation.b_prime, 0.0);
+    EXPECT_DOUBLE_EQ(ss_evaluation.b_double_prime, 0.0);
+    EXPECT_DOUBLE_EQ(ss_evaluation.normal_load, 0.0);
+
+    for (int row = 0; row < 4; ++row) {
+        EXPECT_TRUE(node_triangle_barrier_gradient(
+            nt_positions[0], nt_positions[1], nt_positions[2],
+            nt_positions[3], row, nt_evaluation).isZero(0.0));
+        EXPECT_TRUE(node_triangle_barrier_self_hessian(
+            nt_positions[0], nt_positions[1], nt_positions[2],
+            nt_positions[3], row, nt_evaluation).isZero(0.0));
+        EXPECT_TRUE(segment_segment_barrier_gradient(
+            ss_positions[0], ss_positions[1], ss_positions[2],
+            ss_positions[3], row, ss_evaluation).isZero(0.0));
+        EXPECT_TRUE(segment_segment_barrier_self_hessian(
+            ss_positions[0], ss_positions[1], ss_positions[2],
+            ss_positions[3], row, ss_evaluation).isZero(0.0));
+    }
+}
+
+TEST(BarrierEnergy,
+     ZeroStiffnessEvaluationSkipsSingularBarrierDerivatives) {
+    constexpr double d_hat = 0.5;
+    const std::array<Vec3, 4> nt_positions{
+        Vec3(0.2, 0.3, 0.0), Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)};
+    const NodeTriangleContactEvaluation nt_evaluation =
+        make_node_triangle_contact_evaluation(nt_positions, d_hat, 0.0);
+    ASSERT_DOUBLE_EQ(nt_evaluation.dr.distance, 0.0);
+    EXPECT_FALSE(nt_evaluation.active);
+    EXPECT_DOUBLE_EQ(nt_evaluation.b_prime, 0.0);
+    EXPECT_DOUBLE_EQ(nt_evaluation.b_double_prime, 0.0);
+    EXPECT_DOUBLE_EQ(nt_evaluation.normal_load, 0.0);
+
+    const std::array<Vec3, 4> ss_positions{
+        Vec3(-1.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, -1.0, 0.0), Vec3(0.0, 1.0, 0.0)};
+    const SegmentSegmentContactEvaluation ss_evaluation =
+        make_segment_segment_contact_evaluation(ss_positions, d_hat, 0.0);
+    ASSERT_DOUBLE_EQ(ss_evaluation.dr.distance, 0.0);
+    EXPECT_FALSE(ss_evaluation.active);
+    EXPECT_DOUBLE_EQ(ss_evaluation.b_prime, 0.0);
+    EXPECT_DOUBLE_EQ(ss_evaluation.b_double_prime, 0.0);
+    EXPECT_DOUBLE_EQ(ss_evaluation.normal_load, 0.0);
+
+    for (int role = 0; role < 4; ++role) {
+        EXPECT_TRUE(node_triangle_barrier_gradient(
+            nt_positions[0], nt_positions[1], nt_positions[2],
+            nt_positions[3], role, nt_evaluation).isZero(0.0));
+        EXPECT_TRUE(node_triangle_barrier_self_hessian(
+            nt_positions[0], nt_positions[1], nt_positions[2],
+            nt_positions[3], role, nt_evaluation).isZero(0.0));
+        const auto nt_combined =
+            node_triangle_barrier_self_gradient_and_hessian(
+                nt_positions[0], nt_positions[1], nt_positions[2],
+                nt_positions[3], role, nt_evaluation);
+        EXPECT_TRUE(nt_combined.first.isZero(0.0));
+        EXPECT_TRUE(nt_combined.second.isZero(0.0));
+
+        EXPECT_TRUE(segment_segment_barrier_gradient(
+            ss_positions[0], ss_positions[1], ss_positions[2],
+            ss_positions[3], role, ss_evaluation).isZero(0.0));
+        EXPECT_TRUE(segment_segment_barrier_self_hessian(
+            ss_positions[0], ss_positions[1], ss_positions[2],
+            ss_positions[3], role, ss_evaluation).isZero(0.0));
+        const auto ss_combined =
+            segment_segment_barrier_self_gradient_and_hessian(
+                ss_positions[0], ss_positions[1], ss_positions[2],
+                ss_positions[3], role, ss_evaluation);
+        EXPECT_TRUE(ss_combined.first.isZero(0.0));
+        EXPECT_TRUE(ss_combined.second.isZero(0.0));
+
+        for (int col = 0; col < 4; ++col) {
+            EXPECT_TRUE(node_triangle_barrier_cross_hessian(
+                nt_positions[0], nt_positions[1], nt_positions[2],
+                nt_positions[3], role, col, nt_evaluation).isZero(0.0));
+            EXPECT_TRUE(segment_segment_barrier_cross_hessian(
+                ss_positions[0], ss_positions[1], ss_positions[2],
+                ss_positions[3], role, col, ss_evaluation).isZero(0.0));
+        }
+    }
+}
+
+TEST(BarrierEnergy,
+     CombinedNodeTriangleDerivativesReusePrecomputedContactDataExactly) {
+    std::vector<TestPoint> cases = make_nt_test_points();
+    cases.push_back({
+        "degenerate_triangle",
+        Vec3(0.25, 0.2, 0.0),
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(2.0, 0.0, 0.0),
+        1.0,
+        NodeTriangleRegion::DegenerateTriangle});
+
+    for (const TestPoint& tp : cases) {
+        SCOPED_TRACE(tp.name);
+        const NodeTriangleDistanceResult distance =
+            node_triangle_distance(tp.x, tp.x1, tp.x2, tp.x3);
+        ASSERT_EQ(distance.region, tp.expected_region);
+        const double scalar_gradient =
+            scalar_barrier_gradient(distance.distance, tp.d_hat);
+        const double scalar_hessian =
+            scalar_barrier_hessian(distance.distance, tp.d_hat);
+
+        for (int role = 0; role < 4; ++role) {
+            const auto uncached =
+                node_triangle_barrier_self_gradient_and_hessian(
+                    tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, role);
+            const auto cached =
+                node_triangle_barrier_self_gradient_and_hessian(
+                    tp.x, tp.x1, tp.x2, tp.x3, tp.d_hat, role,
+                    1.0e-12, &distance, &scalar_gradient, &scalar_hessian);
+
+            EXPECT_EQ(
+                std::memcmp(
+                    uncached.first.data(), cached.first.data(),
+                    sizeof(double)
+                        * static_cast<std::size_t>(uncached.first.size())),
+                0);
+            EXPECT_EQ(
+                std::memcmp(
+                    uncached.second.data(), cached.second.data(),
+                    sizeof(double)
+                        * static_cast<std::size_t>(uncached.second.size())),
+                0);
+        }
+    }
+}
+
+TEST(BarrierEnergy,
+     CombinedSegmentSegmentDerivativesReusePrecomputedContactDataExactly) {
+    std::vector<SSTestPoint> cases = make_ss_test_points();
+    cases.push_back({
+        "parallel_segments",
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.2, 0.2, 0.0),
+        Vec3(0.8, 0.2, 0.0),
+        1.0,
+        SegmentSegmentRegion::ParallelSegments});
+
+    for (const SSTestPoint& tp : cases) {
+        SCOPED_TRACE(tp.name);
+        const SegmentSegmentDistanceResult distance =
+            segment_segment_distance(tp.x1, tp.x2, tp.x3, tp.x4);
+        ASSERT_EQ(distance.region, tp.expected_region);
+        const double scalar_gradient =
+            scalar_barrier_gradient(distance.distance, tp.d_hat);
+        const double scalar_hessian =
+            scalar_barrier_hessian(distance.distance, tp.d_hat);
+
+        for (int role = 0; role < 4; ++role) {
+            const auto uncached =
+                segment_segment_barrier_self_gradient_and_hessian(
+                    tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, role);
+            const auto cached =
+                segment_segment_barrier_self_gradient_and_hessian(
+                    tp.x1, tp.x2, tp.x3, tp.x4, tp.d_hat, role,
+                    1.0e-12, &distance, &scalar_gradient, &scalar_hessian);
+
+            EXPECT_EQ(
+                std::memcmp(
+                    uncached.first.data(), cached.first.data(),
+                    sizeof(double)
+                        * static_cast<std::size_t>(uncached.first.size())),
+                0);
+            EXPECT_EQ(
+                std::memcmp(
+                    uncached.second.data(), cached.second.data(),
+                    sizeof(double)
+                        * static_cast<std::size_t>(uncached.second.size())),
+                0);
+        }
+    }
+}
+
 bool run_rigid_barrier_convergence_test(const std::string& name, const Vec3& x_com, const Vec3& omega, const std::function<RigidEnergyDerivatives(const Vec3&, const Vec3&)>& evaluate, const std::function<double(const Vec3&, const Vec3&)>& energy) {
     const std::vector<double> hs = {5.0e-3, 2.5e-3, 1.25e-3, 6.25e-4, 3.125e-4};
     const RigidEnergyDerivatives analytic = evaluate(x_com, omega);
@@ -1161,6 +1527,106 @@ TEST(BarrierEnergy, RigidSolverDerivativeModesMatchFullDerivatives) {
     expect_rigid_derivative_modes_match(
         "segment-segment representative",
         [&](RigidDerivativeMode mode) { return segment_segment_barrier_rb(moving0, moving1, Vec3(0.0, -0.7, 0.23), Vec3(0.0, 0.7, 0.23), ss_references, RigidBarrierSide::FirstPrimitive, q_n, omega, dt, d_hat, mode); });
+}
+
+TEST(BarrierEnergy, CachedRigidBarrierContactDataMatchesUncachedDerivatives) {
+    const Vec4 q_n(1.0, 0.0, 0.0, 0.0);
+    const Vec3 omega(0.18, -0.12, 0.09);
+    constexpr double dt = 0.2;
+    constexpr double d_hat = 0.5;
+    const std::array<RigidDerivativeMode, 4> modes{{
+        RigidDerivativeMode::Full,
+        RigidDerivativeMode::Gradient,
+        RigidDerivativeMode::TranslationHessian,
+        RigidDerivativeMode::OrientationHessian}};
+
+    const auto expect_match = [](
+                                  const RigidEnergyDerivatives& cached,
+                                  const RigidEnergyDerivatives& uncached) {
+        EXPECT_TRUE(cached.translation_gradient.isApprox(
+            uncached.translation_gradient, 1.0e-14));
+        EXPECT_TRUE(cached.orientation_gradient.isApprox(
+            uncached.orientation_gradient, 1.0e-14));
+        EXPECT_TRUE(cached.translation_translation_hessian.isApprox(
+            uncached.translation_translation_hessian, 1.0e-14));
+        EXPECT_TRUE(cached.translation_orientation_hessian.isApprox(
+            uncached.translation_orientation_hessian, 1.0e-14));
+        EXPECT_TRUE(cached.orientation_orientation_hessian.isApprox(
+            uncached.orientation_orientation_hessian, 1.0e-14));
+    };
+
+    const std::array<Vec3, 4> nt_references = {
+        Vec3::Zero(), Vec3(-0.6, -0.5, 0.0),
+        Vec3(0.6, -0.5, 0.0), Vec3(0.0, 0.7, 0.0)};
+    const Vec3 nt_com(0.02, -0.03, 0.01);
+    const std::array<Vec3, 4> nt_positions = {
+        Vec3(0.08, 0.04, 0.22),
+        world_space_position(nt_references[1], nt_com, q_n, omega, dt),
+        world_space_position(nt_references[2], nt_com, q_n, omega, dt),
+        world_space_position(nt_references[3], nt_com, q_n, omega, dt)};
+    const NodeTriangleDistanceResult nt_distance = node_triangle_distance(
+        nt_positions[0], nt_positions[1], nt_positions[2], nt_positions[3]);
+    const double nt_scalar_gradient =
+        scalar_barrier_gradient(nt_distance.distance, d_hat);
+    const double nt_scalar_hessian =
+        scalar_barrier_hessian(nt_distance.distance, d_hat);
+
+    for (const RigidDerivativeMode mode : modes) {
+        SCOPED_TRACE(
+            "node-triangle mode=" + std::to_string(static_cast<int>(mode)));
+        const bool needs_second_derivatives =
+            mode == RigidDerivativeMode::Full
+            || mode == RigidDerivativeMode::OrientationHessian;
+        const QuaternionOmegaKinematics kinematics =
+            quaternion_omega_kinematics(
+                q_n, omega, dt, needs_second_derivatives);
+        const RigidEnergyDerivatives uncached = node_triangle_barrier_rb(
+            nt_positions[0], nt_positions[1], nt_positions[2], nt_positions[3],
+            nt_references, RigidBarrierSide::SecondPrimitive,
+            q_n, omega, dt, d_hat, mode, 1.0e-12, &kinematics);
+        const RigidEnergyDerivatives cached = node_triangle_barrier_rb(
+            nt_positions[0], nt_positions[1], nt_positions[2], nt_positions[3],
+            nt_references, RigidBarrierSide::SecondPrimitive,
+            q_n, omega, dt, d_hat, mode, 1.0e-12, &kinematics,
+            &nt_distance, &nt_scalar_gradient, &nt_scalar_hessian);
+        expect_match(cached, uncached);
+    }
+
+    const std::array<Vec3, 4> ss_references = {
+        Vec3(-0.6, 0.0, 0.0), Vec3(0.6, 0.0, 0.0),
+        Vec3::Zero(), Vec3::Zero()};
+    const Vec3 ss_com(0.01, -0.02, 0.0);
+    const std::array<Vec3, 4> ss_positions = {
+        world_space_position(ss_references[0], ss_com, q_n, omega, dt),
+        world_space_position(ss_references[1], ss_com, q_n, omega, dt),
+        Vec3(0.0, -0.7, 0.23), Vec3(0.0, 0.7, 0.23)};
+    const SegmentSegmentDistanceResult ss_distance = segment_segment_distance(
+        ss_positions[0], ss_positions[1], ss_positions[2], ss_positions[3]);
+    const double ss_scalar_gradient =
+        scalar_barrier_gradient(ss_distance.distance, d_hat);
+    const double ss_scalar_hessian =
+        scalar_barrier_hessian(ss_distance.distance, d_hat);
+
+    for (const RigidDerivativeMode mode : modes) {
+        SCOPED_TRACE(
+            "segment-segment mode=" + std::to_string(static_cast<int>(mode)));
+        const bool needs_second_derivatives =
+            mode == RigidDerivativeMode::Full
+            || mode == RigidDerivativeMode::OrientationHessian;
+        const QuaternionOmegaKinematics kinematics =
+            quaternion_omega_kinematics(
+                q_n, omega, dt, needs_second_derivatives);
+        const RigidEnergyDerivatives uncached = segment_segment_barrier_rb(
+            ss_positions[0], ss_positions[1], ss_positions[2], ss_positions[3],
+            ss_references, RigidBarrierSide::FirstPrimitive,
+            q_n, omega, dt, d_hat, mode, 1.0e-12, &kinematics);
+        const RigidEnergyDerivatives cached = segment_segment_barrier_rb(
+            ss_positions[0], ss_positions[1], ss_positions[2], ss_positions[3],
+            ss_references, RigidBarrierSide::FirstPrimitive,
+            q_n, omega, dt, d_hat, mode, 1.0e-12, &kinematics,
+            &ss_distance, &ss_scalar_gradient, &ss_scalar_hessian);
+        expect_match(cached, uncached);
+    }
 }
 
 TEST(BarrierEnergy, RigidSolverDerivativeModesMatchAcrossFeatureRegions) {
