@@ -655,11 +655,14 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                 blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
             }
             //rebuild bvh and pairs
-            broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
+            broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::DeformableSolver);
             build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()), bca);
             //color
             union_adjacency(ea, bca, combined_adj);
             greedy_color_conflict_graph(combined_adj, color_groups, &workspace.coloring_workspace);
+            const BroadPhase::Cache& bp_cache = broad_phase.cache();
+            // Vertices in one color share no dependencies, so process contact-heavy vertices first to avoid end-of-color stragglers.
+            for (std::vector<int>& group : color_groups) std::stable_sort(group.begin(), group.end(), [&](const int a, const int b) { return bp_cache.vertex_nt[static_cast<std::size_t>(a)].size() + bp_cache.vertex_ss[static_cast<std::size_t>(a)].size() > bp_cache.vertex_nt[static_cast<std::size_t>(b)].size() + bp_cache.vertex_ss[static_cast<std::size_t>(b)].size(); });
         }
 
         if (iter == 1 && !params.fixed_iters) {
@@ -679,7 +682,7 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
             #pragma omp parallel
             {
                 for (const std::vector<int>& group : color_groups) {
-                    #pragma omp for schedule(static)
+                    #pragma omp for schedule(dynamic, 1)
                     for (int i = 0; i < static_cast<int>(group.size()); ++i) process_vertex(group[static_cast<std::size_t>(i)]);
                 }
             }

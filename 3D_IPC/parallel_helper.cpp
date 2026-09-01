@@ -708,6 +708,20 @@ void build_contact_adj(const BroadPhase::Cache& bp_cache, int num_vertices, std:
     for (int vertex = 0; vertex < num_vertices; ++vertex) {
         std::vector<int>& neighbors = out[vertex];
         neighbors.reserve(3 * (bp_cache.vertex_nt[vertex].size() + bp_cache.vertex_ss[vertex].size()));
+        thread_local std::vector<std::size_t> seen_generation;
+        thread_local std::size_t generation = 0;
+        if (seen_generation.size() != static_cast<std::size_t>(num_vertices)) seen_generation.assign(static_cast<std::size_t>(num_vertices), 0);
+        if (++generation == 0) {
+            std::fill(seen_generation.begin(), seen_generation.end(), 0);
+            ++generation;
+        }
+        // Deduplicate before sorting so repeated candidate cliques do not inflate the row or sort workload.
+        const auto append_neighbor = [&](const int neighbor) {
+            if (neighbor >= 0 && neighbor < vertex && seen_generation[static_cast<std::size_t>(neighbor)] != generation) {
+                seen_generation[static_cast<std::size_t>(neighbor)] = generation;
+                neighbors.push_back(neighbor);
+            }
+        };
 
         // Node-triangle contacts containing this vertex.
         for (const auto& cached_nt : bp_cache.vertex_nt[vertex]) {
@@ -717,8 +731,7 @@ void build_contact_adj(const BroadPhase::Cache& bp_cache, int num_vertices, std:
             const int contact_vertices[4] = {contact.node, contact.tri_v[0], contact.tri_v[1], contact.tri_v[2]};
             for (int role = 0; role < 4; ++role) {
                 if (role == cached_nt.dof) continue;
-                const int neighbor = contact_vertices[role];
-                if (neighbor >= 0 && neighbor < vertex) neighbors.push_back(neighbor);
+                append_neighbor(contact_vertices[role]);
             }
         }
 
@@ -729,13 +742,11 @@ void build_contact_adj(const BroadPhase::Cache& bp_cache, int num_vertices, std:
             const SegmentSegmentPair& contact = bp_cache.ss_pairs[cached_ss.pair_index];
             for (int role = 0; role < 4; ++role) {
                 if (role == cached_ss.dof) continue;
-                const int neighbor = contact.v[role];
-                if (neighbor >= 0 && neighbor < vertex) neighbors.push_back(neighbor);
+                append_neighbor(contact.v[role]);
             }
         }
 
         std::sort(neighbors.begin(), neighbors.end());
-        neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
     }
 }
 

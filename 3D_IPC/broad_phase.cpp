@@ -1,5 +1,6 @@
 #include "broad_phase.h"
 
+#include <cmath>
 #include <map>
 
 #ifdef _OPENMP
@@ -88,7 +89,13 @@ inline int build_bvh_impl(const std::vector<AABB>& boxes, std::vector<BVHNode>& 
 bool node_triangle_aabbs_within_distance(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, double distance_squared) {
     const Vec3 lo = a.cwiseMin(b).cwiseMin(c);
     const Vec3 hi = a.cwiseMax(b).cwiseMax(c);
-    return point_aabb_squared_distance(p, lo, hi) <= distance_squared;
+    if (point_aabb_squared_distance(p, lo, hi) > distance_squared) return false;
+    const Vec3 normal = (b - a).cross(c - a);
+    const double normal_squared = normal.squaredNorm();
+    const double scaled_distance = (p - a).dot(normal);
+    const double scaled_distance_squared = scaled_distance * scaled_distance;
+    constexpr double conservative_roundoff = 1.0 + 1.0e-10;
+    return !std::isfinite(scaled_distance_squared) || !std::isfinite(normal_squared) || scaled_distance_squared <= conservative_roundoff * distance_squared * normal_squared;
 }
 
 bool segment_aabbs_within_distance(const Vec3& a0, const Vec3& a1, const Vec3& b0, const Vec3& b1, double distance_squared) {
@@ -105,7 +112,13 @@ bool segment_aabbs_within_distance(const Vec3& a0, const Vec3& a1, const Vec3& b
             distance = alo[axis] - bhi[axis];
         aabb_distance_squared += distance * distance;
     }
-    return aabb_distance_squared <= distance_squared;
+    if (aabb_distance_squared > distance_squared) return false;
+    const Vec3 normal = (a1 - a0).cross(b1 - b0);
+    const double normal_squared = normal.squaredNorm();
+    const double scaled_distance = (b0 - a0).dot(normal);
+    const double scaled_distance_squared = scaled_distance * scaled_distance;
+    constexpr double conservative_roundoff = 1.0 + 1.0e-10;
+    return !std::isfinite(scaled_distance_squared) || !std::isfinite(normal_squared) || scaled_distance_squared <= conservative_roundoff * distance_squared * normal_squared;
 }
 
 int build_bvh(const std::vector<AABB>& boxes, std::vector<BVHNode>& out) {
@@ -356,7 +369,7 @@ namespace {
     }
 
     static inline bool stores_vertex_incidence(const BroadPhase::InitializationMode mode, const RefMesh& mesh, const int node) {
-        if (mode == BroadPhase::InitializationMode::Refittable)
+        if (mode == BroadPhase::InitializationMode::Refittable || mode == BroadPhase::InitializationMode::DeformableSolver)
             return true;
         if (mode == BroadPhase::InitializationMode::GeneralSolver)
             return rigid_owner(mesh, node) < 0;
@@ -432,7 +445,7 @@ namespace {
         const int c = tri_vertex(mesh, tri_idx, 2);
         if (node_in_triangle(node, a, b, c))
             return false;
-        return mode == BroadPhase::InitializationMode::Refittable || !is_rigid_self_nt_pair(mesh, node, tri_idx);
+        return mode == BroadPhase::InitializationMode::Refittable || mode == BroadPhase::InitializationMode::DeformableSolver || !is_rigid_self_nt_pair(mesh, node, tri_idx);
     }
 
     static inline bool accepts_ss_pair(const BroadPhase::Cache& cache, const RefMesh& mesh, const int edge, const int other, const BroadPhase::InitializationMode mode) {
@@ -444,7 +457,7 @@ namespace {
             return false;
         if (earlier_edge_query_already_reported_pair(cache, edge, other))
             return false;
-        return mode == BroadPhase::InitializationMode::Refittable || !is_rigid_self_ss_pair(cache, mesh, edge, other);
+        return mode == BroadPhase::InitializationMode::Refittable || mode == BroadPhase::InitializationMode::DeformableSolver || !is_rigid_self_ss_pair(cache, mesh, edge, other);
     }
 
     static inline void write_nt_pair(BroadPhase::Cache& cache, const std::size_t pair_index, const int node, const int tri_idx, const RefMesh& mesh) {
@@ -468,7 +481,7 @@ namespace {
     }
 
     static void build_solver_vertex_incidence(BroadPhase::Cache& cache, const RefMesh& mesh, const BroadPhase::InitializationMode mode) {
-        if (mode != BroadPhase::InitializationMode::GeneralSolver)
+        if (mode != BroadPhase::InitializationMode::DeformableSolver && mode != BroadPhase::InitializationMode::GeneralSolver)
             return;
 
         const std::size_t nv = cache.vertex_nt.size();
@@ -485,8 +498,8 @@ namespace {
             const std::size_t end = cache.nt_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
             for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
                 const NodeTrianglePair& pair = cache.nt_pairs[pair_index];
-                if (rigid_owner(mesh, pair.node) < 0) ++worker_counts[static_cast<std::size_t>(pair.node)];
-                for (int role = 0; role < 3; ++role) if (rigid_owner(mesh, pair.tri_v[role]) < 0) ++worker_counts[static_cast<std::size_t>(pair.tri_v[role])];
+                if (mode == BroadPhase::InitializationMode::DeformableSolver || rigid_owner(mesh, pair.node) < 0) ++worker_counts[static_cast<std::size_t>(pair.node)];
+                for (int role = 0; role < 3; ++role) if (mode == BroadPhase::InitializationMode::DeformableSolver || rigid_owner(mesh, pair.tri_v[role]) < 0) ++worker_counts[static_cast<std::size_t>(pair.tri_v[role])];
             }
         }
         for (std::size_t node = 0; node < nv; ++node) {
@@ -506,8 +519,8 @@ namespace {
             const std::size_t end = cache.nt_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
             for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
                 const NodeTrianglePair& pair = cache.nt_pairs[pair_index];
-                if (rigid_owner(mesh, pair.node) < 0) cache.vertex_nt[static_cast<std::size_t>(pair.node)][worker_offsets[static_cast<std::size_t>(pair.node)]++] = {pair_index, 0};
-                for (int role = 0; role < 3; ++role) if (rigid_owner(mesh, pair.tri_v[role]) < 0) cache.vertex_nt[static_cast<std::size_t>(pair.tri_v[role])][worker_offsets[static_cast<std::size_t>(pair.tri_v[role])]++] = {pair_index, role + 1};
+                if (mode == BroadPhase::InitializationMode::DeformableSolver || rigid_owner(mesh, pair.node) < 0) cache.vertex_nt[static_cast<std::size_t>(pair.node)][worker_offsets[static_cast<std::size_t>(pair.node)]++] = {pair_index, 0};
+                for (int role = 0; role < 3; ++role) if (mode == BroadPhase::InitializationMode::DeformableSolver || rigid_owner(mesh, pair.tri_v[role]) < 0) cache.vertex_nt[static_cast<std::size_t>(pair.tri_v[role])][worker_offsets[static_cast<std::size_t>(pair.tri_v[role])]++] = {pair_index, role + 1};
             }
         }
 
@@ -519,7 +532,7 @@ namespace {
             const std::size_t end = cache.ss_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
             for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
                 const SegmentSegmentPair& pair = cache.ss_pairs[pair_index];
-                for (int role = 0; role < 4; ++role) if (rigid_owner(mesh, pair.v[role]) < 0) ++worker_counts[static_cast<std::size_t>(pair.v[role])];
+                for (int role = 0; role < 4; ++role) if (mode == BroadPhase::InitializationMode::DeformableSolver || rigid_owner(mesh, pair.v[role]) < 0) ++worker_counts[static_cast<std::size_t>(pair.v[role])];
             }
         }
         for (std::size_t node = 0; node < nv; ++node) {
@@ -539,7 +552,7 @@ namespace {
             const std::size_t end = cache.ss_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
             for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
                 const SegmentSegmentPair& pair = cache.ss_pairs[pair_index];
-                for (int role = 0; role < 4; ++role) if (rigid_owner(mesh, pair.v[role]) < 0) cache.vertex_ss[static_cast<std::size_t>(pair.v[role])][worker_offsets[static_cast<std::size_t>(pair.v[role])]++] = {pair_index, role};
+                for (int role = 0; role < 4; ++role) if (mode == BroadPhase::InitializationMode::DeformableSolver || rigid_owner(mesh, pair.v[role]) < 0) cache.vertex_ss[static_cast<std::size_t>(pair.v[role])][worker_offsets[static_cast<std::size_t>(pair.v[role])]++] = {pair_index, role};
             }
         }
     }
@@ -868,12 +881,12 @@ void BroadPhase::initialize_from_vertex_boxes(const std::vector<AABB>& vertex_bo
             #pragma omp section
             {
                 c.tri_root = build_bvh(c.tri_boxes, c.tri_bvh_nodes);
-                build_bvh_rigid_owners(c.tri_bvh_nodes, topo_.tri_rigid_owner, c.tri_bvh_rigid_owner);
+                if (mode != InitializationMode::DeformableSolver) build_bvh_rigid_owners(c.tri_bvh_nodes, topo_.tri_rigid_owner, c.tri_bvh_rigid_owner);
             }
             #pragma omp section
             {
                 c.edge_root = build_bvh(red_edge_boxes, c.edge_bvh_nodes);
-                build_bvh_rigid_owners(c.edge_bvh_nodes, topo_.edge_rigid_owner, c.edge_bvh_rigid_owner);
+                if (mode != InitializationMode::DeformableSolver) build_bvh_rigid_owners(c.edge_bvh_nodes, topo_.edge_rigid_owner, c.edge_bvh_rigid_owner);
             }
         }
     }
@@ -885,7 +898,7 @@ void BroadPhase::initialize_from_vertex_boxes(const std::vector<AABB>& vertex_bo
     for (int query_index = 0; query_index < num_nt_query_nodes; ++query_index) {
         const int node = exclude_tet_interior_nt_queries ? (*surface_query_nodes)[static_cast<std::size_t>(query_index)] : query_index;
         if (c.tri_root < 0) continue;
-        if (mode == InitializationMode::Refittable) {
+        if (mode == InitializationMode::Refittable || mode == InitializationMode::DeformableSolver) {
             query_bvh(c.tri_bvh_nodes, c.tri_root, c.node_boxes[node], node_hits[node]);
         } else {
             const int owner = rigid_owner(mesh, node);
@@ -898,7 +911,7 @@ void BroadPhase::initialize_from_vertex_boxes(const std::vector<AABB>& vertex_bo
     #pragma omp parallel for schedule(dynamic, 32)
     for (int e = 0; e < ne; ++e) {
         if (c.edge_root < 0) continue;
-        if (mode == InitializationMode::Refittable) {
+        if (mode == InitializationMode::Refittable || mode == InitializationMode::DeformableSolver) {
             query_bvh(c.edge_bvh_nodes, c.edge_root, c.edge_boxes[e], edge_hits[e]);
         } else {
             const int owner = topo_.edge_rigid_owner[static_cast<std::size_t>(e)];

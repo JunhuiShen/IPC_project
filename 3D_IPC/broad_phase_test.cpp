@@ -481,6 +481,24 @@ const AABB b(Vec3(1.0, 1.0, 1.0), Vec3(2.0, 2.0, 2.0));
 EXPECT_TRUE(aabb_intersects(a, b));
 }
 
+TEST(AABBTest, PrimitiveDistanceBoundsRejectSeparatedSupportingGeometryConservatively) {
+    const Vec3 triangle_a(0.0, 0.0, 0.0);
+    const Vec3 triangle_b(1.0, 1.0, 0.0);
+    const Vec3 triangle_c(1.0, 0.0, 1.0);
+    const Vec3 point(0.0, 1.0, 1.0);
+    const double point_triangle_distance = node_triangle_distance(point, triangle_a, triangle_b, triangle_c).distance;
+    EXPECT_FALSE(node_triangle_aabbs_within_distance(point, triangle_a, triangle_b, triangle_c, 0.25));
+    EXPECT_TRUE(node_triangle_aabbs_within_distance(point, triangle_a, triangle_b, triangle_c, point_triangle_distance * point_triangle_distance));
+
+    const Vec3 segment_a0(0.0, 0.0, 0.0);
+    const Vec3 segment_a1(1.0, 0.0, 1.0);
+    const Vec3 segment_b0(0.5, -0.5, 0.75);
+    const Vec3 segment_b1(0.5, 0.5, 0.75);
+    const double segment_distance = segment_segment_distance(segment_a0, segment_a1, segment_b0, segment_b1).distance;
+    EXPECT_FALSE(segment_aabbs_within_distance(segment_a0, segment_a1, segment_b0, segment_b1, 0.01));
+    EXPECT_TRUE(segment_aabbs_within_distance(segment_a0, segment_a1, segment_b0, segment_b1, segment_distance * segment_distance));
+}
+
 TEST(BVH3Test, QueryReturnsExpectedHits) {
 std::vector<AABB> boxes;
 boxes.emplace_back(Vec3(0.0, 0.0, 0.0), Vec3(1.0, 1.0, 1.0));
@@ -1249,11 +1267,35 @@ TEST(BroadPhaseTest, SolverModesPreserveFilteredPairAndIncidenceOrderWithoutRefi
     mesh.rb_nodes = {{0, 1, 2, 3}, {4, 5, 6, 7}};
     const std::vector<AABB> boxes(x.size(), AABB(Vec3::Constant(-2.0), Vec3::Constant(2.0)));
     BroadPhase reference;
+    BroadPhase deformable;
     BroadPhase general;
     BroadPhase rigid;
     reference.initialize(boxes, mesh, 0.1, BroadPhase::InitializationMode::Refittable);
+    deformable.initialize(boxes, mesh, 0.1, BroadPhase::InitializationMode::DeformableSolver);
     general.initialize(boxes, mesh, 0.1, BroadPhase::InitializationMode::GeneralSolver);
     rigid.initialize(boxes, mesh, 0.1, BroadPhase::InitializationMode::RigidSolver);
+
+    ASSERT_EQ(deformable.nt_pairs().size(), reference.nt_pairs().size());
+    ASSERT_EQ(deformable.ss_pairs().size(), reference.ss_pairs().size());
+    for (std::size_t pair_index = 0; pair_index < reference.nt_pairs().size(); ++pair_index) {
+        EXPECT_EQ(deformable.nt_pairs()[pair_index].node, reference.nt_pairs()[pair_index].node);
+        for (int role = 0; role < 3; ++role) EXPECT_EQ(deformable.nt_pairs()[pair_index].tri_v[role], reference.nt_pairs()[pair_index].tri_v[role]);
+    }
+    for (std::size_t pair_index = 0; pair_index < reference.ss_pairs().size(); ++pair_index) for (int role = 0; role < 4; ++role) EXPECT_EQ(deformable.ss_pairs()[pair_index].v[role], reference.ss_pairs()[pair_index].v[role]);
+    ASSERT_EQ(deformable.cache().vertex_nt.size(), reference.cache().vertex_nt.size());
+    ASSERT_EQ(deformable.cache().vertex_ss.size(), reference.cache().vertex_ss.size());
+    for (std::size_t node = 0; node < x.size(); ++node) {
+        ASSERT_EQ(deformable.cache().vertex_nt[node].size(), reference.cache().vertex_nt[node].size());
+        ASSERT_EQ(deformable.cache().vertex_ss[node].size(), reference.cache().vertex_ss[node].size());
+        for (std::size_t entry = 0; entry < reference.cache().vertex_nt[node].size(); ++entry) {
+            EXPECT_EQ(deformable.cache().vertex_nt[node][entry].pair_index, reference.cache().vertex_nt[node][entry].pair_index);
+            EXPECT_EQ(deformable.cache().vertex_nt[node][entry].dof, reference.cache().vertex_nt[node][entry].dof);
+        }
+        for (std::size_t entry = 0; entry < reference.cache().vertex_ss[node].size(); ++entry) {
+            EXPECT_EQ(deformable.cache().vertex_ss[node][entry].pair_index, reference.cache().vertex_ss[node][entry].pair_index);
+            EXPECT_EQ(deformable.cache().vertex_ss[node][entry].dof, reference.cache().vertex_ss[node][entry].dof);
+        }
+    }
 
     const auto node_owner = [&](const int node) { return mesh.node_to_rb[static_cast<std::size_t>(node)]; };
     std::vector<NodeTrianglePair> expected_nt;
@@ -1302,6 +1344,12 @@ TEST(BroadPhaseTest, SolverModesPreserveFilteredPairAndIncidenceOrderWithoutRefi
     }
     EXPECT_TRUE(rigid.cache().vertex_nt.empty());
     EXPECT_TRUE(rigid.cache().vertex_ss.empty());
+    EXPECT_TRUE(deformable.cache().node_bvh_nodes.empty());
+    EXPECT_TRUE(deformable.cache().node_leaf_to_node.empty());
+    EXPECT_TRUE(deformable.cache().tri_leaf_to_node.empty());
+    EXPECT_TRUE(deformable.cache().edge_leaf_to_node.empty());
+    EXPECT_TRUE(deformable.cache().tri_bvh_rigid_owner.empty());
+    EXPECT_TRUE(deformable.cache().edge_bvh_rigid_owner.empty());
     EXPECT_TRUE(general.cache().node_bvh_nodes.empty());
     EXPECT_TRUE(general.cache().node_leaf_to_node.empty());
     EXPECT_TRUE(general.cache().tri_leaf_to_node.empty());

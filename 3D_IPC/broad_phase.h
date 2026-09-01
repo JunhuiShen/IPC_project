@@ -43,7 +43,7 @@ inline bool aabb_intersects(const AABB& a, const AABB& b) {
     return (a.min.array() <= b.max.array()).all() && (a.max.array() >= b.min.array()).all();
 }
 
-// Cheap current-position rejection before exact primitive-distance evaluation.
+// Conservative AABB and supporting-plane/line rejection before exact primitive-distance evaluation.
 bool node_triangle_aabbs_within_distance(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, double distance_squared);
 bool segment_aabbs_within_distance(const Vec3& a0, const Vec3& a1, const Vec3& b0, const Vec3& b1, double distance_squared);
 
@@ -74,6 +74,9 @@ public:
         // Legacy/default storage: retain every candidate, all per-vertex
         // incidence, and the node/leaf maps required by incremental refits.
         Refittable,
+        // Deformable solve: retain every candidate and all per-vertex
+        // incidence, but omit node/leaf storage that this solver never refits.
+        DeformableSolver,
         // Mixed deformable/rigid solve: rigid self-pairs are impossible and
         // rigid proxy vertices do not need per-vertex incidence. Deformable
         // incidence is retained for local Newton and CCD updates.
