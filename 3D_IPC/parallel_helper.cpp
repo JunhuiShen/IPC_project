@@ -67,30 +67,23 @@ void build_blue_boxes_rb(const std::vector<Vec3>& com_box_anchors, const std::ve
 }
 
 void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_rb, int num_rbs, std::vector<std::vector<int>>& body_nt_pair_indices, std::vector<std::vector<int>>& body_ss_pair_indices, std::vector<std::vector<int>>& out) {
-    if (static_cast<int>(out.size()) == num_rbs) {
-        for (std::vector<int>& neighbors : out)
-            neighbors.clear();
-    } else {
-        out.assign(num_rbs, {});
-    }
-    if (static_cast<int>(body_nt_pair_indices.size()) == num_rbs) {
-        for (std::vector<int>& pair_indices : body_nt_pair_indices)
-            pair_indices.clear();
-    } else {
-        body_nt_pair_indices.assign(num_rbs, {});
-    }
-    if (static_cast<int>(body_ss_pair_indices.size()) == num_rbs) {
-        for (std::vector<int>& pair_indices : body_ss_pair_indices)
-            pair_indices.clear();
-    } else {
-        body_ss_pair_indices.assign(num_rbs, {});
-    }
+    out.resize(static_cast<std::size_t>(num_rbs));
+    body_nt_pair_indices.resize(static_cast<std::size_t>(num_rbs));
+    body_ss_pair_indices.resize(static_cast<std::size_t>(num_rbs));
 
-    const auto add_edge = [&](int first, int second) {
-        if (first < 0 || second < 0)
-            return;
-        out[first].push_back(second);
-        out[second].push_back(first);
+    std::vector<std::size_t> nt_counts(static_cast<std::size_t>(num_rbs), 0);
+    std::vector<std::size_t> ss_counts(static_cast<std::size_t>(num_rbs), 0);
+    std::vector<unsigned char> conflicts(static_cast<std::size_t>(num_rbs) * static_cast<std::size_t>(num_rbs), 0);
+
+    const auto record_owners = [&conflicts, num_rbs](const int first, const int second, std::vector<std::size_t>& counts) {
+        if (first >= 0)
+            ++counts[static_cast<std::size_t>(first)];
+        if (second >= 0)
+            ++counts[static_cast<std::size_t>(second)];
+        if (first >= 0 && second >= 0) {
+            conflicts[static_cast<std::size_t>(first) * num_rbs + second] = 1;
+            conflicts[static_cast<std::size_t>(second) * num_rbs + first] = 1;
+        }
     };
 
     for (int pair_index = 0; pair_index < static_cast<int>(bp_cache.nt_pairs.size()); ++pair_index) {
@@ -99,11 +92,7 @@ void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<i
         const int triangle_rb = owning_rb_for_node(node_to_rb, pair.tri_v[0]);
         if (node_rb == triangle_rb || (node_rb < 0 && triangle_rb < 0))
             continue;
-        if (node_rb >= 0)
-            body_nt_pair_indices[node_rb].push_back(pair_index);
-        if (triangle_rb >= 0)
-            body_nt_pair_indices[triangle_rb].push_back(pair_index);
-        add_edge(node_rb, triangle_rb);
+        record_owners(node_rb, triangle_rb, nt_counts);
     }
 
     for (int pair_index = 0; pair_index < static_cast<int>(bp_cache.ss_pairs.size()); ++pair_index) {
@@ -112,16 +101,49 @@ void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<i
         const int second_edge_rb = owning_rb_for_node(node_to_rb, pair.v[2]);
         if (first_edge_rb == second_edge_rb || (first_edge_rb < 0 && second_edge_rb < 0))
             continue;
-        if (first_edge_rb >= 0)
-            body_ss_pair_indices[first_edge_rb].push_back(pair_index);
-        if (second_edge_rb >= 0)
-            body_ss_pair_indices[second_edge_rb].push_back(pair_index);
-        add_edge(first_edge_rb, second_edge_rb);
+        record_owners(first_edge_rb, second_edge_rb, ss_counts);
     }
 
-    for (std::vector<int>& neighbors : out) {
-        std::sort(neighbors.begin(), neighbors.end());
-        neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
+    for (int rb = 0; rb < num_rbs; ++rb) {
+        body_nt_pair_indices[static_cast<std::size_t>(rb)].resize(nt_counts[static_cast<std::size_t>(rb)]);
+        body_ss_pair_indices[static_cast<std::size_t>(rb)].resize(ss_counts[static_cast<std::size_t>(rb)]);
+
+        std::vector<int>& neighbors = out[static_cast<std::size_t>(rb)];
+        neighbors.clear();
+        for (int other = 0; other < num_rbs; ++other) {
+            if (conflicts[static_cast<std::size_t>(rb) * num_rbs + other])
+                neighbors.push_back(other);
+        }
+    }
+
+    std::fill(nt_counts.begin(), nt_counts.end(), 0);
+    std::fill(ss_counts.begin(), ss_counts.end(), 0);
+    for (int pair_index = 0; pair_index < static_cast<int>(bp_cache.nt_pairs.size()); ++pair_index) {
+        const NodeTrianglePair& pair = bp_cache.nt_pairs[pair_index];
+        const int node_rb = owning_rb_for_node(node_to_rb, pair.node);
+        const int triangle_rb = owning_rb_for_node(node_to_rb, pair.tri_v[0]);
+        if (node_rb == triangle_rb || (node_rb < 0 && triangle_rb < 0))
+            continue;
+        if (node_rb >= 0) {
+            body_nt_pair_indices[static_cast<std::size_t>(node_rb)][nt_counts[static_cast<std::size_t>(node_rb)]++] = pair_index;
+        }
+        if (triangle_rb >= 0) {
+            body_nt_pair_indices[static_cast<std::size_t>(triangle_rb)][nt_counts[static_cast<std::size_t>(triangle_rb)]++] = pair_index;
+        }
+    }
+    for (int pair_index = 0; pair_index < static_cast<int>(bp_cache.ss_pairs.size()); ++pair_index) {
+        const SegmentSegmentPair& pair = bp_cache.ss_pairs[pair_index];
+        const int first_edge_rb = owning_rb_for_node(node_to_rb, pair.v[0]);
+        const int second_edge_rb = owning_rb_for_node(node_to_rb, pair.v[2]);
+        if (first_edge_rb == second_edge_rb || (first_edge_rb < 0 && second_edge_rb < 0)) {
+            continue;
+        }
+        if (first_edge_rb >= 0) {
+            body_ss_pair_indices[static_cast<std::size_t>(first_edge_rb)][ss_counts[static_cast<std::size_t>(first_edge_rb)]++] = pair_index;
+        }
+        if (second_edge_rb >= 0) {
+            body_ss_pair_indices[static_cast<std::size_t>(second_edge_rb)][ss_counts[static_cast<std::size_t>(second_edge_rb)]++] = pair_index;
+        }
     }
 }
 
@@ -431,18 +453,7 @@ void build_solid_contact_adjacency(
     }
 }
 
-void build_all_block_adjacency_and_contact(
-    const RefMesh& ref_mesh,
-    const std::vector<int>& cloth_nodes,
-    const std::vector<std::vector<int>>& cloth_nodal_elastic_adjacency,
-    const BroadPhase::Cache& bp_cache,
-    std::vector<std::vector<int>>& out,
-    const std::vector<int>* node_to_block,
-    const std::vector<unsigned char>* solid_node_mask,
-    const std::vector<unsigned char>* surface_node_mask,
-    std::vector<std::size_t>* elastic_row_sizes,
-    std::vector<std::vector<int>>* body_nt_pair_indices,
-    std::vector<std::vector<int>>* body_ss_pair_indices) {
+void build_all_block_adjacency_and_contact(const RefMesh& ref_mesh, const std::vector<int>& cloth_nodes, const std::vector<std::vector<int>>& cloth_nodal_elastic_adjacency, const BroadPhase::Cache& bp_cache, std::vector<std::vector<int>>& out, const std::vector<int>* node_to_block, const std::vector<unsigned char>* solid_node_mask, const std::vector<unsigned char>* surface_node_mask, std::vector<std::size_t>* elastic_row_sizes, const std::vector<std::vector<int>>* body_nt_pair_indices, const std::vector<std::vector<int>>* body_ss_pair_indices) {
     const int num_cloth = static_cast<int>(cloth_nodes.size());
     const int num_solid = static_cast<int>(ref_mesh.tet_nodes.size());
     const int num_rigid = static_cast<int>(ref_mesh.rb_nodes.size());
@@ -453,12 +464,8 @@ void build_all_block_adjacency_and_contact(
     const int num_workspace_arguments = static_cast<int>(node_to_block != nullptr) + static_cast<int>(solid_node_mask != nullptr) + static_cast<int>(surface_node_mask != nullptr) + static_cast<int>(elastic_row_sizes != nullptr);
     if (num_workspace_arguments != 0 && num_workspace_arguments != 4)
         throw std::invalid_argument("build_all_block_adjacency_and_contact: supply either all workspace arguments or none");
-    if ((body_nt_pair_indices == nullptr) != (body_ss_pair_indices == nullptr))
-        throw std::invalid_argument("build_all_block_adjacency_and_contact: supply both rigid pair-list outputs or neither");
-    if (body_nt_pair_indices != nullptr) {
-        prepare_rows(*body_nt_pair_indices, num_rigid);
-        prepare_rows(*body_ss_pair_indices, num_rigid);
-    }
+    if ((body_nt_pair_indices == nullptr) != (body_ss_pair_indices == nullptr)) throw std::invalid_argument("build_all_block_adjacency_and_contact: supply both rigid pair lists or neither");
+    if (body_nt_pair_indices != nullptr && (body_nt_pair_indices->size() != static_cast<std::size_t>(num_rigid) || body_ss_pair_indices->size() != static_cast<std::size_t>(num_rigid))) throw std::invalid_argument("build_all_block_adjacency_and_contact: rigid pair-list size mismatch");
 
     std::vector<int> owned_node_to_block;
     std::vector<unsigned char> owned_solid_node_mask;
@@ -535,70 +542,116 @@ void build_all_block_adjacency_and_contact(
         }
     }
 
-    const auto add_contact_clique = [&](const int nodes[4]) {
-        int blocks[4];
-        int num_contact_blocks = 0;
-        for (int role = 0; role < 4; ++role) {
-            const int node = nodes[role];
-            if ((*solid_node_mask)[static_cast<std::size_t>(node)] != 0 && (*surface_node_mask)[static_cast<std::size_t>(node)] == 0)
-                return;
-            const int block = (*node_to_block)[static_cast<std::size_t>(node)];
-            if (block < 0)
-                continue;
-            bool already_present = false;
-            for (int existing = 0; existing < num_contact_blocks; ++existing) {
-                if (blocks[existing] == block) {
-                    already_present = true;
-                    break;
+    const bool has_vertex_incidence = bp_cache.vertex_nt.size() >= node_to_block->size() && bp_cache.vertex_ss.size() >= node_to_block->size();
+    std::vector<std::vector<int>> owned_body_nt_pair_indices;
+    std::vector<std::vector<int>> owned_body_ss_pair_indices;
+    if (has_vertex_incidence && num_rigid > 0 && body_nt_pair_indices == nullptr) {
+        owned_body_nt_pair_indices.assign(static_cast<std::size_t>(num_rigid), {});
+        owned_body_ss_pair_indices.assign(static_cast<std::size_t>(num_rigid), {});
+        const auto append_rigid_pair = [&](const int first_rigid, const int second_rigid, const int pair_index, std::vector<std::vector<int>>& pair_indices) {
+            if (first_rigid == second_rigid || (first_rigid < 0 && second_rigid < 0)) return;
+            if (first_rigid >= 0) pair_indices[static_cast<std::size_t>(first_rigid)].push_back(pair_index);
+            if (second_rigid >= 0) pair_indices[static_cast<std::size_t>(second_rigid)].push_back(pair_index);
+        };
+        for (int pair_index = 0; pair_index < static_cast<int>(bp_cache.nt_pairs.size()); ++pair_index) {
+            const NodeTrianglePair& pair = bp_cache.nt_pairs[static_cast<std::size_t>(pair_index)];
+            append_rigid_pair(owning_rb_for_node(ref_mesh.node_to_rb, pair.node), owning_rb_for_node(ref_mesh.node_to_rb, pair.tri_v[0]), pair_index, owned_body_nt_pair_indices);
+        }
+        for (int pair_index = 0; pair_index < static_cast<int>(bp_cache.ss_pairs.size()); ++pair_index) {
+            const SegmentSegmentPair& pair = bp_cache.ss_pairs[static_cast<std::size_t>(pair_index)];
+            append_rigid_pair(owning_rb_for_node(ref_mesh.node_to_rb, pair.v[0]), owning_rb_for_node(ref_mesh.node_to_rb, pair.v[2]), pair_index, owned_body_ss_pair_indices);
+        }
+        body_nt_pair_indices = &owned_body_nt_pair_indices;
+        body_ss_pair_indices = &owned_body_ss_pair_indices;
+    }
+
+    if (!has_vertex_incidence) {
+        const auto append_contact_clique = [&](const int nodes[4]) {
+            int blocks[4];
+            int num_contact_blocks = 0;
+            for (int role = 0; role < 4; ++role) {
+                const int node = nodes[role];
+                if (!bp_cache.excludes_tet_interior_nt_queries && (*solid_node_mask)[static_cast<std::size_t>(node)] != 0 && (*surface_node_mask)[static_cast<std::size_t>(node)] == 0) return;
+                const int block = (*node_to_block)[static_cast<std::size_t>(node)];
+                if (block < 0) continue;
+                bool duplicate = false;
+                for (int existing = 0; existing < num_contact_blocks; ++existing) duplicate = duplicate || blocks[existing] == block;
+                if (!duplicate) blocks[num_contact_blocks++] = block;
+            }
+            for (int first = 0; first < num_contact_blocks; ++first) {
+                for (int second = first + 1; second < num_contact_blocks; ++second) {
+                    const int lower = std::min(blocks[first], blocks[second]);
+                    const int upper = std::max(blocks[first], blocks[second]);
+                    out[static_cast<std::size_t>(upper)].push_back(lower);
                 }
             }
-            if (!already_present)
-                blocks[num_contact_blocks++] = block;
+        };
+        for (const NodeTrianglePair& pair : bp_cache.nt_pairs) {
+            const int nodes[4] = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+            append_contact_clique(nodes);
         }
-        for (int first = 0; first < num_contact_blocks; ++first) {
-            for (int second = first + 1; second < num_contact_blocks; ++second) {
-                const int a = blocks[first];
-                const int b = blocks[second];
-                out[static_cast<std::size_t>(a)].push_back(b);
-                out[static_cast<std::size_t>(b)].push_back(a);
-            }
+        for (const SegmentSegmentPair& pair : bp_cache.ss_pairs) append_contact_clique(pair.v);
+        #pragma omp parallel for schedule(static)
+        for (int block = 0; block < num_blocks; ++block) {
+            std::vector<int>& row = out[static_cast<std::size_t>(block)];
+            const std::size_t elastic_size = (*elastic_row_sizes)[static_cast<std::size_t>(block)];
+            auto contact_begin = row.begin() + static_cast<std::ptrdiff_t>(elastic_size);
+            std::sort(contact_begin, row.end());
+            auto contact_end = std::unique(contact_begin, row.end());
+            contact_end = std::remove_if(contact_begin, contact_end, [&](const int neighbor) { return std::binary_search(row.begin(), contact_begin, neighbor); });
+            row.erase(contact_end, row.end());
         }
-    };
-
-    const auto add_rigid_pair_index = [&](int first_rb, int second_rb, int pair_index, std::vector<std::vector<int>>& pair_indices) {
-        if (first_rb == second_rb || (first_rb < 0 && second_rb < 0))
-            return;
-        if (first_rb >= 0)
-            pair_indices[static_cast<std::size_t>(first_rb)].push_back(pair_index);
-        if (second_rb >= 0)
-            pair_indices[static_cast<std::size_t>(second_rb)].push_back(pair_index);
-    };
-
-    for (int pair_index = 0; pair_index < static_cast<int>(bp_cache.nt_pairs.size()); ++pair_index) {
-        const NodeTrianglePair& pair = bp_cache.nt_pairs[static_cast<std::size_t>(pair_index)];
-        if (body_nt_pair_indices != nullptr) {
-            add_rigid_pair_index(owning_rb_for_node(ref_mesh.node_to_rb, pair.node), owning_rb_for_node(ref_mesh.node_to_rb, pair.tri_v[0]), pair_index, *body_nt_pair_indices);
-        }
-        const int nodes[4] = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
-        add_contact_clique(nodes);
-    }
-    for (int pair_index = 0; pair_index < static_cast<int>(bp_cache.ss_pairs.size()); ++pair_index) {
-        const SegmentSegmentPair& pair = bp_cache.ss_pairs[static_cast<std::size_t>(pair_index)];
-        if (body_ss_pair_indices != nullptr) {
-            add_rigid_pair_index(owning_rb_for_node(ref_mesh.node_to_rb, pair.v[0]), owning_rb_for_node(ref_mesh.node_to_rb, pair.v[2]), pair_index, *body_ss_pair_indices);
-        }
-        add_contact_clique(pair.v);
+        return;
     }
 
-#pragma omp parallel for schedule(static)
+    #pragma omp parallel for schedule(dynamic, 32)
     for (int block = 0; block < num_blocks; ++block) {
         std::vector<int>& row = out[static_cast<std::size_t>(block)];
         const std::size_t elastic_size = (*elastic_row_sizes)[static_cast<std::size_t>(block)];
-        auto contact_begin = row.begin() + static_cast<std::ptrdiff_t>(elastic_size);
-        std::sort(contact_begin, row.end());
-        auto contact_end = std::unique(contact_begin, row.end());
-        contact_end = std::remove_if(contact_begin, contact_end, [&](const int neighbor) { return std::binary_search(row.begin(), contact_begin, neighbor); });
-        row.erase(contact_end, row.end());
+        thread_local std::vector<std::size_t> seen_generation;
+        thread_local std::size_t generation = 0;
+        if (seen_generation.size() != static_cast<std::size_t>(num_blocks)) seen_generation.assign(static_cast<std::size_t>(num_blocks), 0);
+        if (++generation == 0) {
+            std::fill(seen_generation.begin(), seen_generation.end(), 0);
+            ++generation;
+        }
+        const auto append_contact = [&](const int nodes[4]) {
+            if (!bp_cache.excludes_tet_interior_nt_queries) {
+                for (int role = 0; role < 4; ++role) {
+                    const int node = nodes[role];
+                    if ((*solid_node_mask)[static_cast<std::size_t>(node)] != 0 && (*surface_node_mask)[static_cast<std::size_t>(node)] == 0) return;
+                }
+            }
+            for (int role = 0; role < 4; ++role) {
+                const int neighbor = (*node_to_block)[static_cast<std::size_t>(nodes[role])];
+                if (neighbor >= 0 && neighbor < block && seen_generation[static_cast<std::size_t>(neighbor)] != generation) {
+                    seen_generation[static_cast<std::size_t>(neighbor)] = generation;
+                    row.push_back(neighbor);
+                }
+            }
+        };
+        const auto append_nt_pair = [&](const std::size_t pair_index) {
+            const NodeTrianglePair& pair = bp_cache.nt_pairs[pair_index];
+            const int nodes[4] = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+            append_contact(nodes);
+        };
+        const auto append_ss_pair = [&](const std::size_t pair_index) { append_contact(bp_cache.ss_pairs[pair_index].v); };
+
+        if (block < rigid_begin) {
+            const int node = block < num_cloth ? cloth_nodes[static_cast<std::size_t>(block)] : ref_mesh.tet_nodes[static_cast<std::size_t>(block - num_cloth)];
+            const std::size_t nt_count = bp_cache.vertex_nt[static_cast<std::size_t>(node)].size();
+            const std::size_t ss_count = bp_cache.vertex_ss[static_cast<std::size_t>(node)].size();
+            row.reserve(elastic_size + 3 * (nt_count + ss_count));
+            for (const BroadPhase::Cache::VertexPairEntry& entry : bp_cache.vertex_nt[static_cast<std::size_t>(node)]) append_nt_pair(entry.pair_index);
+            for (const BroadPhase::Cache::VertexPairEntry& entry : bp_cache.vertex_ss[static_cast<std::size_t>(node)]) append_ss_pair(entry.pair_index);
+        } else {
+            const int rigid = block - rigid_begin;
+            const std::vector<int>& nt_indices = (*body_nt_pair_indices)[static_cast<std::size_t>(rigid)];
+            const std::vector<int>& ss_indices = (*body_ss_pair_indices)[static_cast<std::size_t>(rigid)];
+            row.reserve(elastic_size + 3 * (nt_indices.size() + ss_indices.size()));
+            for (const int pair_index : nt_indices) append_nt_pair(static_cast<std::size_t>(pair_index));
+            for (const int pair_index : ss_indices) append_ss_pair(static_cast<std::size_t>(pair_index));
+        }
     }
 }
 
@@ -642,18 +695,15 @@ void build_contact_adj(const BroadPhase::Cache& bp_cache, int num_vertices, std:
     // segment-segment (ss_pairs) contact pairs. It also records which contacts
     // contain each vertex in vertex_nt and vertex_ss.
     //
-    // No contact search is needed here. For each vertex, read only its cached
-    // contact references, fetch the corresponding contact pair, and add the
-    // other three vertices as neighbors. The resulting adjacency row is then
-    // sorted and deduplicated. Output row capacity is reused between calls.
+    // No contact search is needed here. Each contact edge is stored only in
+    // its larger-index row, which is sufficient for ascending greedy coloring.
     if (static_cast<int>(out.size()) == num_vertices) {
         for (auto& neighbors : out) neighbors.clear();
     } else {
         out.assign(num_vertices, {});
     }
 
-    // Each thread owns one output row. For every cached contact containing
-    // this vertex, add the other three vertices.
+    // Each thread owns one output row.
     #pragma omp parallel for schedule(dynamic, 64)
     for (int vertex = 0; vertex < num_vertices; ++vertex) {
         std::vector<int>& neighbors = out[vertex];
@@ -664,17 +714,11 @@ void build_contact_adj(const BroadPhase::Cache& bp_cache, int num_vertices, std:
             if (cached_nt.pair_index >= bp_cache.nt_pairs.size() || cached_nt.dof < 0 || cached_nt.dof >= 4) continue;
 
             const NodeTrianglePair& contact = bp_cache.nt_pairs[cached_nt.pair_index];
-            const int contact_vertices[4] = {
-                    contact.node,
-                    contact.tri_v[0],
-                    contact.tri_v[1],
-                    contact.tri_v[2],
-            };
+            const int contact_vertices[4] = {contact.node, contact.tri_v[0], contact.tri_v[1], contact.tri_v[2]};
             for (int role = 0; role < 4; ++role) {
                 if (role == cached_nt.dof) continue;
                 const int neighbor = contact_vertices[role];
-                if (neighbor >= 0 && neighbor < num_vertices)
-                    neighbors.push_back(neighbor);
+                if (neighbor >= 0 && neighbor < vertex) neighbors.push_back(neighbor);
             }
         }
 
@@ -686,8 +730,7 @@ void build_contact_adj(const BroadPhase::Cache& bp_cache, int num_vertices, std:
             for (int role = 0; role < 4; ++role) {
                 if (role == cached_ss.dof) continue;
                 const int neighbor = contact.v[role];
-                if (neighbor >= 0 && neighbor < num_vertices)
-                    neighbors.push_back(neighbor);
+                if (neighbor >= 0 && neighbor < vertex) neighbors.push_back(neighbor);
             }
         }
 

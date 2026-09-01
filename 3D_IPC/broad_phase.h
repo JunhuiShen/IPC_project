@@ -70,7 +70,22 @@ void query_bvh(const std::vector<BVHNode>& nodes, int root, const AABB& query, s
 // Swept-AABB broad phase producing candidate node–triangle and segment–segment pairs.
 class BroadPhase {
 public:
+    enum class InitializationMode {
+        // Legacy/default storage: retain every candidate, all per-vertex
+        // incidence, and the node/leaf maps required by incremental refits.
+        Refittable,
+        // Mixed deformable/rigid solve: rigid self-pairs are impossible and
+        // rigid proxy vertices do not need per-vertex incidence. Deformable
+        // incidence is retained for local Newton and CCD updates.
+        GeneralSolver,
+        // Rigid-only solve: retain only cross-body candidate arrays. Per-body
+        // ownership is built by the solver, so no per-vertex incidence or
+        // refit-only BVH storage is needed.
+        RigidSolver,
+    };
+
     struct Cache {
+        bool excludes_tet_interior_nt_queries = false;
         std::vector<AABB> node_boxes;
         std::vector<AABB> tri_boxes;
         std::vector<AABB> edge_boxes;
@@ -113,6 +128,11 @@ public:
         std::vector<std::vector<int>> node_hits;
         std::vector<std::vector<int>> edge_hits;
         std::vector<AABB> red_edge_boxes;
+        // Per-BVH-node rigid ownership used to prune solver-only self-contact
+        // queries. A nonnegative value means every leaf below the node belongs
+        // to that rigid body; -1 means mixed or deformable ownership.
+        std::vector<int> tri_bvh_rigid_owner;
+        std::vector<int> edge_bvh_rigid_owner;
     };
 
     void initialize(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, double dhat);
@@ -128,13 +148,11 @@ public:
     // Pre-built-box counterpart used by the mixed cloth/solid/rigid solver.
     // Tet-interior nodes keep their boxes for elastic updates but do not issue
     // node-triangle contact queries.
-    void initialize_surface_nodes(
-        const std::vector<AABB>& vertex_boxes, const RefMesh& mesh,
-        double d_hat = 0.0);
+    void initialize_surface_nodes(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat = 0.0, InitializationMode mode = InitializationMode::Refittable);
 
     // Initialize from pre-built per-vertex AABBs. Triangle and edge boxes are
     // derived as the union of their vertex boxes (i.e. red boxes).
-    void initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat = 0.0);
+    void initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat = 0.0, InitializationMode mode = InitializationMode::Refittable);
 
     // Re-query NT and SS pair lists from the current BVH state without
     // rebuilding the BVHs. Used by global_gauss_seidel_solver_ogc after
@@ -187,6 +205,8 @@ private:
         std::vector<std::array<int, 2>> edges;
         std::vector<std::vector<int>> node_to_edges;
         std::vector<std::vector<int>> node_to_tris;
+        std::vector<int> tri_rigid_owner;
+        std::vector<int> edge_rigid_owner;
         // Ascending list of every node allowed to issue an NT query under the
         // surface-node policy. This includes boundary nodes and non-solid
         // point proxies, and excludes only tet-interior nodes.
@@ -195,9 +215,7 @@ private:
     };
     Topology topo_;
 
-    void initialize_from_vertex_boxes(
-        const std::vector<AABB>& vertex_boxes, const RefMesh& mesh,
-        double d_hat, bool exclude_tet_interior_nt_queries);
+    void initialize_from_vertex_boxes(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat, bool exclude_tet_interior_nt_queries, InitializationMode mode);
     const std::vector<int>& surface_nt_query_nodes(
         const RefMesh& mesh, int nv);
 

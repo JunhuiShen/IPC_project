@@ -281,6 +281,25 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPha
     const Vec4 relative = quaternion_normalize(quaternion_multiply(proposed, quaternion_conjugate(current)));
     const double theta = 2.0 * std::atan2(relative.tail<3>().norm(), relative[0]);
 
+    // A rigid node participates in many candidate pairs, but its swept
+    // spherical-cap box depends only on this body update. Compute it once per
+    // safe-step call instead of repeating inverse rotations and trigonometry
+    // for every incident candidate.
+    thread_local std::vector<AABB> rotated_node_boxes;
+    rotated_node_boxes.resize(x.size());
+    if (rb < static_cast<int>(ref_mesh.rb_nodes.size()) && !ref_mesh.rb_nodes[static_cast<std::size_t>(rb)].empty()) {
+        for (const int node : ref_mesh.rb_nodes[static_cast<std::size_t>(rb)]) {
+            rotated_node_boxes[static_cast<std::size_t>(node)] = rotated_node_swept_aabb(node, x, ref_mesh.node_to_rb, rb, x_com, current, theta);
+        }
+    } else {
+        for (int node = 0; node < static_cast<int>(x.size()); ++node) {
+            if (owning_rb_for_node(ref_mesh.node_to_rb, node) == rb) {
+                rotated_node_boxes[static_cast<std::size_t>(node)] = rotated_node_swept_aabb(node, x, ref_mesh.node_to_rb, rb, x_com, current, theta);
+            }
+        }
+    }
+    const auto stationary_node_box = [&](const int node) { return AABB(x[static_cast<std::size_t>(node)], x[static_cast<std::size_t>(node)]); };
+
     double toi_min = 1.0;
     bool has_collision = false;
     const auto consider = [&](bool collision, double toi) {
@@ -297,7 +316,7 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPha
         const int triangle_rb = owning_rb_for_node(ref_mesh.node_to_rb, pair.tri_v[0]);
         if (node_rb == triangle_rb || (node_rb != rb && triangle_rb != rb))
             continue;
-        const std::array<AABB, 4> node_boxes = {rotated_node_swept_aabb(node, x, ref_mesh.node_to_rb, rb, x_com, current, theta), rotated_node_swept_aabb(pair.tri_v[0], x, ref_mesh.node_to_rb, rb, x_com, current, theta), rotated_node_swept_aabb(pair.tri_v[1], x, ref_mesh.node_to_rb, rb, x_com, current, theta), rotated_node_swept_aabb(pair.tri_v[2], x, ref_mesh.node_to_rb, rb, x_com, current, theta)};
+        const std::array<AABB, 4> node_boxes = node_rb == rb ? std::array<AABB, 4>{rotated_node_boxes[static_cast<std::size_t>(node)], stationary_node_box(pair.tri_v[0]), stationary_node_box(pair.tri_v[1]), stationary_node_box(pair.tri_v[2])} : std::array<AABB, 4>{stationary_node_box(node), rotated_node_boxes[static_cast<std::size_t>(pair.tri_v[0])], rotated_node_boxes[static_cast<std::size_t>(pair.tri_v[1])], rotated_node_boxes[static_cast<std::size_t>(pair.tri_v[2])]};
         if (!node_triangle_swept_aabbs_intersect(node_boxes))
             continue;
         double toi = 0.0;
@@ -313,7 +332,7 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPha
         const int second_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, pair.v[2]);
         if (first_edge_rb == second_edge_rb || (first_edge_rb != rb && second_edge_rb != rb))
             continue;
-        const std::array<AABB, 4> node_boxes = {rotated_node_swept_aabb(pair.v[0], x, ref_mesh.node_to_rb, rb, x_com, current, theta), rotated_node_swept_aabb(pair.v[1], x, ref_mesh.node_to_rb, rb, x_com, current, theta), rotated_node_swept_aabb(pair.v[2], x, ref_mesh.node_to_rb, rb, x_com, current, theta), rotated_node_swept_aabb(pair.v[3], x, ref_mesh.node_to_rb, rb, x_com, current, theta)};
+        const std::array<AABB, 4> node_boxes = first_edge_rb == rb ? std::array<AABB, 4>{rotated_node_boxes[static_cast<std::size_t>(pair.v[0])], rotated_node_boxes[static_cast<std::size_t>(pair.v[1])], stationary_node_box(pair.v[2]), stationary_node_box(pair.v[3])} : std::array<AABB, 4>{stationary_node_box(pair.v[0]), stationary_node_box(pair.v[1]), rotated_node_boxes[static_cast<std::size_t>(pair.v[2])], rotated_node_boxes[static_cast<std::size_t>(pair.v[3])]};
         if (!segment_segment_swept_aabbs_intersect(node_boxes))
             continue;
         double toi = 0.0;

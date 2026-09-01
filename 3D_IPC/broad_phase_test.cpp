@@ -1242,6 +1242,76 @@ TEST(BroadPhaseTest, IncrementalRefreshIsIdempotentForZeroMove) {
     check_bvh_internal_invariant(c.edge_bvh_nodes);
 }
 
+TEST(BroadPhaseTest, SolverModesPreserveFilteredPairAndIncidenceOrderWithoutRefitStorage) {
+    const std::vector<Vec3> x = {Vec3(0.0, 0.0, 0.00), Vec3(1.0, 0.0, 0.00), Vec3(0.0, 1.0, 0.00), Vec3(1.0, 1.0, 0.00), Vec3(0.1, 0.1, 0.03), Vec3(1.1, 0.1, 0.03), Vec3(0.1, 1.1, 0.03), Vec3(1.1, 1.1, 0.03), Vec3(0.2, 0.2, 0.06), Vec3(1.2, 0.2, 0.06), Vec3(0.2, 1.2, 0.06), Vec3(1.2, 1.2, 0.06)};
+    RefMesh mesh = make_mesh(x, {{0, 1, 2}, {1, 3, 2}, {4, 5, 6}, {5, 7, 6}, {8, 9, 10}, {9, 11, 10}});
+    mesh.node_to_rb = {0, 0, 0, 0, 1, 1, 1, 1, -1, -1, -1, -1};
+    mesh.rb_nodes = {{0, 1, 2, 3}, {4, 5, 6, 7}};
+    const std::vector<AABB> boxes(x.size(), AABB(Vec3::Constant(-2.0), Vec3::Constant(2.0)));
+    BroadPhase reference;
+    BroadPhase general;
+    BroadPhase rigid;
+    reference.initialize(boxes, mesh, 0.1, BroadPhase::InitializationMode::Refittable);
+    general.initialize(boxes, mesh, 0.1, BroadPhase::InitializationMode::GeneralSolver);
+    rigid.initialize(boxes, mesh, 0.1, BroadPhase::InitializationMode::RigidSolver);
+
+    const auto node_owner = [&](const int node) { return mesh.node_to_rb[static_cast<std::size_t>(node)]; };
+    std::vector<NodeTrianglePair> expected_nt;
+    for (const NodeTrianglePair& pair : reference.nt_pairs()) {
+        const int owner = node_owner(pair.node);
+        if (owner < 0 || node_owner(pair.tri_v[0]) != owner || node_owner(pair.tri_v[1]) != owner || node_owner(pair.tri_v[2]) != owner) expected_nt.push_back(pair);
+    }
+    std::vector<SegmentSegmentPair> expected_ss;
+    for (const SegmentSegmentPair& pair : reference.ss_pairs()) {
+        const int owner = node_owner(pair.v[0]);
+        if (owner < 0 || node_owner(pair.v[1]) != owner || node_owner(pair.v[2]) != owner || node_owner(pair.v[3]) != owner) expected_ss.push_back(pair);
+    }
+    const auto expect_pairs = [&](const BroadPhase& broad_phase) {
+        ASSERT_EQ(broad_phase.nt_pairs().size(), expected_nt.size());
+        ASSERT_EQ(broad_phase.ss_pairs().size(), expected_ss.size());
+        for (std::size_t pair_index = 0; pair_index < expected_nt.size(); ++pair_index) {
+            EXPECT_EQ(broad_phase.nt_pairs()[pair_index].node, expected_nt[pair_index].node);
+            for (int role = 0; role < 3; ++role) EXPECT_EQ(broad_phase.nt_pairs()[pair_index].tri_v[role], expected_nt[pair_index].tri_v[role]);
+        }
+        for (std::size_t pair_index = 0; pair_index < expected_ss.size(); ++pair_index) for (int role = 0; role < 4; ++role) EXPECT_EQ(broad_phase.ss_pairs()[pair_index].v[role], expected_ss[pair_index].v[role]);
+    };
+    expect_pairs(general);
+    expect_pairs(rigid);
+
+    std::vector<std::vector<BroadPhase::Cache::VertexPairEntry>> expected_vertex_nt(x.size());
+    std::vector<std::vector<BroadPhase::Cache::VertexPairEntry>> expected_vertex_ss(x.size());
+    for (std::size_t pair_index = 0; pair_index < expected_nt.size(); ++pair_index) {
+        const NodeTrianglePair& pair = expected_nt[pair_index];
+        const int nodes[4] = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+        for (int role = 0; role < 4; ++role) if (node_owner(nodes[role]) < 0) expected_vertex_nt[static_cast<std::size_t>(nodes[role])].push_back({pair_index, role});
+    }
+    for (std::size_t pair_index = 0; pair_index < expected_ss.size(); ++pair_index) for (int role = 0; role < 4; ++role) if (node_owner(expected_ss[pair_index].v[role]) < 0) expected_vertex_ss[static_cast<std::size_t>(expected_ss[pair_index].v[role])].push_back({pair_index, role});
+    ASSERT_EQ(general.cache().vertex_nt.size(), x.size());
+    ASSERT_EQ(general.cache().vertex_ss.size(), x.size());
+    for (std::size_t node = 0; node < x.size(); ++node) {
+        ASSERT_EQ(general.cache().vertex_nt[node].size(), expected_vertex_nt[node].size());
+        ASSERT_EQ(general.cache().vertex_ss[node].size(), expected_vertex_ss[node].size());
+        for (std::size_t entry = 0; entry < expected_vertex_nt[node].size(); ++entry) {
+            EXPECT_EQ(general.cache().vertex_nt[node][entry].pair_index, expected_vertex_nt[node][entry].pair_index);
+            EXPECT_EQ(general.cache().vertex_nt[node][entry].dof, expected_vertex_nt[node][entry].dof);
+        }
+        for (std::size_t entry = 0; entry < expected_vertex_ss[node].size(); ++entry) {
+            EXPECT_EQ(general.cache().vertex_ss[node][entry].pair_index, expected_vertex_ss[node][entry].pair_index);
+            EXPECT_EQ(general.cache().vertex_ss[node][entry].dof, expected_vertex_ss[node][entry].dof);
+        }
+    }
+    EXPECT_TRUE(rigid.cache().vertex_nt.empty());
+    EXPECT_TRUE(rigid.cache().vertex_ss.empty());
+    EXPECT_TRUE(general.cache().node_bvh_nodes.empty());
+    EXPECT_TRUE(general.cache().node_leaf_to_node.empty());
+    EXPECT_TRUE(general.cache().tri_leaf_to_node.empty());
+    EXPECT_TRUE(general.cache().edge_leaf_to_node.empty());
+    EXPECT_TRUE(rigid.cache().node_bvh_nodes.empty());
+    EXPECT_TRUE(rigid.cache().node_leaf_to_node.empty());
+    EXPECT_TRUE(rigid.cache().tri_leaf_to_node.empty());
+    EXPECT_TRUE(rigid.cache().edge_leaf_to_node.empty());
+}
+
 TEST(BroadPhaseTest, PerVertexSafeStepClampsCCDAndOGC) {
     std::vector<Vec3> x = {
         Vec3(1.5, 0.25, 0.0),

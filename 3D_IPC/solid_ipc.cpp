@@ -456,8 +456,7 @@ compute_solid_local_barrier_gradient_and_self_hessian_impl(
     const auto& nt_entries = cache.vertex_nt[static_cast<std::size_t>(node)];
     for (const BroadPhase::Cache::VertexPairEntry& entry : nt_entries) {
         const NodeTrianglePair& pair = cache.nt_pairs[entry.pair_index];
-        if (!include_solid_node_triangle_pair(
-                pair, solid_nodes, surface_nodes)) {
+        if (!cache.excludes_tet_interior_nt_queries && !include_solid_node_triangle_pair(pair, solid_nodes, surface_nodes)) {
             continue;
         }
         const std::array<Vec3, 4> positions =
@@ -480,8 +479,7 @@ compute_solid_local_barrier_gradient_and_self_hessian_impl(
     const auto& ss_entries = cache.vertex_ss[static_cast<std::size_t>(node)];
     for (const BroadPhase::Cache::VertexPairEntry& entry : ss_entries) {
         const SegmentSegmentPair& pair = cache.ss_pairs[entry.pair_index];
-        if (!include_solid_segment_segment_pair(
-                pair, solid_nodes, surface_nodes)) {
+        if (!cache.excludes_tet_interior_nt_queries && !include_solid_segment_segment_pair(pair, solid_nodes, surface_nodes)) {
             continue;
         }
         const std::array<Vec3, 4> positions =
@@ -533,8 +531,7 @@ compute_solid_local_mesh_contact_derivatives(
     for (const BroadPhase::Cache::VertexPairEntry& entry :
          cache.vertex_nt[static_cast<std::size_t>(node)]) {
         const NodeTrianglePair& pair = cache.nt_pairs[entry.pair_index];
-        if (!include_solid_node_triangle_pair(
-                pair, solid_nodes, surface_nodes)) {
+        if (!cache.excludes_tet_interior_nt_queries && !include_solid_node_triangle_pair(pair, solid_nodes, surface_nodes)) {
             continue;
         }
         const std::array<Vec3, 4> current_positions =
@@ -548,6 +545,7 @@ compute_solid_local_mesh_contact_derivatives(
         const NodeTriangleContactEvaluation evaluation =
             make_node_triangle_contact_evaluation(
                 current_positions, params.d_hat, params.k_barrier);
+        if (!evaluation.active) continue;
         const auto [normal_gradient, normal_hessian] =
             node_triangle_barrier_self_gradient_and_hessian(
                 current_positions[0], current_positions[1],
@@ -574,8 +572,7 @@ compute_solid_local_mesh_contact_derivatives(
     for (const BroadPhase::Cache::VertexPairEntry& entry :
          cache.vertex_ss[static_cast<std::size_t>(node)]) {
         const SegmentSegmentPair& pair = cache.ss_pairs[entry.pair_index];
-        if (!include_solid_segment_segment_pair(
-                pair, solid_nodes, surface_nodes)) {
+        if (!cache.excludes_tet_interior_nt_queries && !include_solid_segment_segment_pair(pair, solid_nodes, surface_nodes)) {
             continue;
         }
         const std::array<Vec3, 4> current_positions =
@@ -589,6 +586,7 @@ compute_solid_local_mesh_contact_derivatives(
         const SegmentSegmentContactEvaluation evaluation =
             make_segment_segment_contact_evaluation(
                 current_positions, params.d_hat, params.k_barrier);
+        if (!evaluation.active) continue;
         const auto [normal_gradient, normal_hessian] =
             segment_segment_barrier_self_gradient_and_hessian(
                 current_positions[0], current_positions[1],

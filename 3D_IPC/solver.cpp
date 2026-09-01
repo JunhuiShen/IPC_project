@@ -208,8 +208,8 @@ struct MixedAdjacencyWorkspace {
     std::vector<int> node_to_block;
     std::vector<unsigned char> solid_node_mask;
     std::vector<unsigned char> surface_node_mask;
+    std::vector<std::vector<int>> conflict_adjacency;
     std::vector<std::size_t> elastic_row_sizes;
-    std::vector<std::vector<int>> combined_adjacency;
     std::vector<std::vector<int>> color_groups;
     GreedyColoringWorkspace coloring_workspace;
 
@@ -270,8 +270,8 @@ struct MixedAdjacencyWorkspace {
             for (const int node : ref_mesh.rb_nodes[static_cast<std::size_t>(rb)])
                 node_to_block[static_cast<std::size_t>(node)] = rigid_begin + rb;
         }
+        conflict_adjacency.clear();
         elastic_row_sizes.clear();
-        combined_adjacency.clear();
         color_groups.clear();
         coloring_workspace = GreedyColoringWorkspace{};
 
@@ -882,13 +882,13 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
         kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, needs_second_derivatives);
         cached_kinematics = &kinematics;
     }
-    const auto add_frozen_gradient = [&](const std::array<Vec3, 4>& references, const std::array<Vec3, 4>& gradients, int first_dof, int last_dof) {
+    const auto add_frozen_gradient = [&](RigidEnergyDerivatives& output, const std::array<Vec3, 4>& references, const std::array<Vec3, 4>& gradients, int first_dof, int last_dof) {
         RigidEnergyDerivatives contribution;
         for (int dof = first_dof; dof <= last_dof; ++dof) {
             contribution.translation_gradient += gradients[static_cast<std::size_t>(dof)];
             contribution.orientation_gradient += dx_domega(references[static_cast<std::size_t>(dof)], *cached_kinematics).transpose() * gradients[static_cast<std::size_t>(dof)];
         }
-        add_rigid_derivatives(total, contribution);
+        add_rigid_derivatives(output, contribution);
     };
     const RigidBodyUpdateMode update_mode = ref_mesh.rb_update_modes[rb];
     const bool translation_enabled = updates_rigid_translation(update_mode);
@@ -910,9 +910,7 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
     const bool mixed_hessian_requested = mode == RigidDerivativeMode::Full
         && translation_enabled && orientation_enabled;
     const double friction_dt2 = dt * dt;
-    const auto add_friction_contact = [&] (
-        const std::array<int, 4>& nodes,
-        const FrozenFrictionContact& contact) {
+    const auto add_friction_contact = [&](RigidEnergyDerivatives& output, const std::array<int, 4>& nodes, const FrozenFrictionContact& contact) {
         if (!assemble_friction || !contact.active)
             return;
 
@@ -954,144 +952,125 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
                 contact, params.friction_coefficient, friction_dt2);
         }
         if (translation_gradient_requested) {
-            friction_output->translation_gradient +=
-                translation_jacobian.transpose() * relative_gradient;
+            output.translation_gradient += translation_jacobian.transpose() * relative_gradient;
         }
         if (orientation_gradient_requested) {
-            friction_output->orientation_gradient +=
-                orientation_jacobian.transpose() * relative_gradient;
+            output.orientation_gradient += orientation_jacobian.transpose() * relative_gradient;
         }
 
         if (!hessian_requested)
             return;
         if (translation_hessian_requested) {
-            friction_output->translation_translation_hessian +=
-                translation_jacobian.transpose()
-                * relative_hessian * translation_jacobian;
+            output.translation_translation_hessian += translation_jacobian.transpose() * relative_hessian * translation_jacobian;
         }
         if (mixed_hessian_requested) {
-            friction_output->translation_orientation_hessian +=
-                translation_jacobian.transpose()
-                * relative_hessian * orientation_jacobian;
+            output.translation_orientation_hessian += translation_jacobian.transpose() * relative_hessian * orientation_jacobian;
         }
         if (orientation_hessian_requested) {
-            friction_output->orientation_orientation_hessian +=
-                orientation_jacobian.transpose()
-                * relative_hessian * orientation_jacobian;
+            output.orientation_orientation_hessian += orientation_jacobian.transpose() * relative_hessian * orientation_jacobian;
         }
     };
-    for (const int pair_index : nt_pair_indices) {
-        const NodeTrianglePair& pair = bp_cache.nt_pairs[pair_index];
+    const auto evaluate_nt_pair = [&](const int pair_index, const bool aabb_already_active, RigidEnergyDerivatives& barrier_output, RigidEnergyDerivatives& friction_pair_output) -> bool {
+        const NodeTrianglePair& pair = bp_cache.nt_pairs[static_cast<std::size_t>(pair_index)];
         const int node = pair.node;
         const int v0 = pair.tri_v[0];
         const int v1 = pair.tri_v[1];
         const int v2 = pair.tri_v[2];
         const int node_rb = owning_rb_for_node(ref_mesh.node_to_rb, node);
         const int triangle_rb = owning_rb_for_node(ref_mesh.node_to_rb, v0);
-        const bool aabb_active = frozen_workspace == nullptr ? node_triangle_aabbs_within_distance(positions[node], positions[v0], positions[v1], positions[v2], d_hat2) : frozen_workspace->nt_aabb_active[static_cast<std::size_t>(pair_index)] != 0;
-        if (node_rb == triangle_rb || (node_rb != rb && triangle_rb != rb) || !aabb_active)
-            continue;
+        const bool aabb_active = aabb_already_active || (frozen_workspace == nullptr ? node_triangle_aabbs_within_distance(positions[node], positions[v0], positions[v1], positions[v2], d_hat2) : frozen_workspace->nt_aabb_active[static_cast<std::size_t>(pair_index)] != 0);
+        if (node_rb == triangle_rb || (node_rb != rb && triangle_rb != rb) || !aabb_active) return false;
         std::array<Vec3, 4> current_positions;
         NodeTriangleContactEvaluation contact_evaluation;
         const NodeTriangleContactEvaluation* precomputed_evaluation = nullptr;
         if (assemble_friction) {
-            current_positions = friction_node_triangle_positions(
-                pair, positions);
-            contact_evaluation = make_node_triangle_contact_evaluation(
-                current_positions, params.d_hat, params.k_barrier);
+            current_positions = friction_node_triangle_positions(pair, positions);
+            contact_evaluation = make_node_triangle_contact_evaluation(current_positions, params.d_hat, params.k_barrier);
             precomputed_evaluation = &contact_evaluation;
         }
-        const NodeTriangleDistanceResult* precomputed_distance =
-            precomputed_evaluation == nullptr
-                ? nullptr : &precomputed_evaluation->dr;
-        const double* precomputed_b_prime = precomputed_evaluation == nullptr
-            ? nullptr : &precomputed_evaluation->b_prime;
-        const double* precomputed_b_double_prime =
-            precomputed_evaluation == nullptr
-                ? nullptr : &precomputed_evaluation->b_double_prime;
+        const NodeTriangleDistanceResult* precomputed_distance = precomputed_evaluation == nullptr ? nullptr : &precomputed_evaluation->dr;
+        const double* precomputed_b_prime = precomputed_evaluation == nullptr ? nullptr : &precomputed_evaluation->b_prime;
+        const double* precomputed_b_double_prime = precomputed_evaluation == nullptr ? nullptr : &precomputed_evaluation->b_double_prime;
         if (assemble_barrier) {
             if (node_rb == rb) {
                 const std::array<Vec3, 4> references = {rigid_node_body_space_position(node, ref_mesh, node_to_rb_local), Vec3::Zero(), Vec3::Zero(), Vec3::Zero()};
-                if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->nt_barrier_active[static_cast<std::size_t>(pair_index)] == 0) add_rigid_derivatives(total, RigidEnergyDerivatives{});
-                else if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->nt_gradient_cached[static_cast<std::size_t>(pair_index)] != 0) add_frozen_gradient(references, frozen_workspace->nt_gradients[static_cast<std::size_t>(pair_index)], 0, 0);
-                else add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics, precomputed_distance, precomputed_b_prime, precomputed_b_double_prime));
+                if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->nt_barrier_active[static_cast<std::size_t>(pair_index)] == 0) add_rigid_derivatives(barrier_output, RigidEnergyDerivatives{});
+                else if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->nt_gradient_cached[static_cast<std::size_t>(pair_index)] != 0) add_frozen_gradient(barrier_output, references, frozen_workspace->nt_gradients[static_cast<std::size_t>(pair_index)], 0, 0);
+                else add_rigid_derivatives(barrier_output, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics, precomputed_distance, precomputed_b_prime, precomputed_b_double_prime));
             } else {
                 const std::array<Vec3, 4> references = {Vec3::Zero(), rigid_node_body_space_position(v0, ref_mesh, node_to_rb_local), rigid_node_body_space_position(v1, ref_mesh, node_to_rb_local), rigid_node_body_space_position(v2, ref_mesh, node_to_rb_local)};
-                if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->nt_barrier_active[static_cast<std::size_t>(pair_index)] == 0) add_rigid_derivatives(total, RigidEnergyDerivatives{});
-                else if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->nt_gradient_cached[static_cast<std::size_t>(pair_index)] != 0) add_frozen_gradient(references, frozen_workspace->nt_gradients[static_cast<std::size_t>(pair_index)], 1, 3);
-                else add_rigid_derivatives(total, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics, precomputed_distance, precomputed_b_prime, precomputed_b_double_prime));
+                if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->nt_barrier_active[static_cast<std::size_t>(pair_index)] == 0) add_rigid_derivatives(barrier_output, RigidEnergyDerivatives{});
+                else if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->nt_gradient_cached[static_cast<std::size_t>(pair_index)] != 0) add_frozen_gradient(barrier_output, references, frozen_workspace->nt_gradients[static_cast<std::size_t>(pair_index)], 1, 3);
+                else add_rigid_derivatives(barrier_output, node_triangle_barrier_rb(positions[node], positions[v0], positions[v1], positions[v2], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics, precomputed_distance, precomputed_b_prime, precomputed_b_double_prime));
             }
         }
         if (assemble_friction) {
-            const FrozenFrictionContact contact =
-                make_node_triangle_frozen_friction_contact(
-                    current_positions,
-                    friction_node_triangle_positions(
-                        pair, state.deformed_positions),
-                    contact_evaluation, dt,
-                    params.friction_velocity_epsilon);
-            add_friction_contact(
-                {pair.node, pair.tri_v[0], pair.tri_v[1],
-                 pair.tri_v[2]},
-                contact);
+            const FrozenFrictionContact contact = make_node_triangle_frozen_friction_contact(current_positions, friction_node_triangle_positions(pair, state.deformed_positions), contact_evaluation, dt, params.friction_velocity_epsilon);
+            add_friction_contact(friction_pair_output, {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]}, contact);
         }
-    }
+        return true;
+    };
 
-    for (const int pair_index : ss_pair_indices) {
-        const SegmentSegmentPair& pair = bp_cache.ss_pairs[pair_index];
+    const auto evaluate_ss_pair = [&](const int pair_index, const bool aabb_already_active, RigidEnergyDerivatives& barrier_output, RigidEnergyDerivatives& friction_pair_output) -> bool {
+        const SegmentSegmentPair& pair = bp_cache.ss_pairs[static_cast<std::size_t>(pair_index)];
         const int a0 = pair.v[0];
         const int a1 = pair.v[1];
         const int b0 = pair.v[2];
         const int b1 = pair.v[3];
         const int first_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, a0);
         const int second_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, b0);
-        const bool aabb_active = frozen_workspace == nullptr ? segment_aabbs_within_distance(positions[a0], positions[a1], positions[b0], positions[b1], d_hat2) : frozen_workspace->ss_aabb_active[static_cast<std::size_t>(pair_index)] != 0;
-        if (first_edge_rb == second_edge_rb || (first_edge_rb != rb && second_edge_rb != rb) || !aabb_active)
-            continue;
+        const bool aabb_active = aabb_already_active || (frozen_workspace == nullptr ? segment_aabbs_within_distance(positions[a0], positions[a1], positions[b0], positions[b1], d_hat2) : frozen_workspace->ss_aabb_active[static_cast<std::size_t>(pair_index)] != 0);
+        if (first_edge_rb == second_edge_rb || (first_edge_rb != rb && second_edge_rb != rb) || !aabb_active) return false;
         std::array<Vec3, 4> current_positions;
         SegmentSegmentContactEvaluation contact_evaluation;
         const SegmentSegmentContactEvaluation* precomputed_evaluation = nullptr;
         if (assemble_friction) {
-            current_positions = friction_segment_segment_positions(
-                pair, positions);
-            contact_evaluation = make_segment_segment_contact_evaluation(
-                current_positions, params.d_hat, params.k_barrier);
+            current_positions = friction_segment_segment_positions(pair, positions);
+            contact_evaluation = make_segment_segment_contact_evaluation(current_positions, params.d_hat, params.k_barrier);
             precomputed_evaluation = &contact_evaluation;
         }
-        const SegmentSegmentDistanceResult* precomputed_distance =
-            precomputed_evaluation == nullptr
-                ? nullptr : &precomputed_evaluation->dr;
-        const double* precomputed_b_prime = precomputed_evaluation == nullptr
-            ? nullptr : &precomputed_evaluation->b_prime;
-        const double* precomputed_b_double_prime =
-            precomputed_evaluation == nullptr
-                ? nullptr : &precomputed_evaluation->b_double_prime;
+        const SegmentSegmentDistanceResult* precomputed_distance = precomputed_evaluation == nullptr ? nullptr : &precomputed_evaluation->dr;
+        const double* precomputed_b_prime = precomputed_evaluation == nullptr ? nullptr : &precomputed_evaluation->b_prime;
+        const double* precomputed_b_double_prime = precomputed_evaluation == nullptr ? nullptr : &precomputed_evaluation->b_double_prime;
         if (assemble_barrier) {
             if (first_edge_rb == rb) {
                 const std::array<Vec3, 4> references = {rigid_node_body_space_position(a0, ref_mesh, node_to_rb_local), rigid_node_body_space_position(a1, ref_mesh, node_to_rb_local), Vec3::Zero(), Vec3::Zero()};
-                if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_barrier_active[static_cast<std::size_t>(pair_index)] == 0) add_rigid_derivatives(total, RigidEnergyDerivatives{});
-                else if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_gradient_cached[static_cast<std::size_t>(pair_index)] != 0) add_frozen_gradient(references, frozen_workspace->ss_gradients[static_cast<std::size_t>(pair_index)], 0, 1);
-                else add_rigid_derivatives(total, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics, precomputed_distance, precomputed_b_prime, precomputed_b_double_prime));
+                if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_barrier_active[static_cast<std::size_t>(pair_index)] == 0) add_rigid_derivatives(barrier_output, RigidEnergyDerivatives{});
+                else if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_gradient_cached[static_cast<std::size_t>(pair_index)] != 0) add_frozen_gradient(barrier_output, references, frozen_workspace->ss_gradients[static_cast<std::size_t>(pair_index)], 0, 1);
+                else add_rigid_derivatives(barrier_output, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics, precomputed_distance, precomputed_b_prime, precomputed_b_double_prime));
             } else {
                 const std::array<Vec3, 4> references = {Vec3::Zero(), Vec3::Zero(), rigid_node_body_space_position(b0, ref_mesh, node_to_rb_local), rigid_node_body_space_position(b1, ref_mesh, node_to_rb_local)};
-                if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_barrier_active[static_cast<std::size_t>(pair_index)] == 0) add_rigid_derivatives(total, RigidEnergyDerivatives{});
-                else if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_gradient_cached[static_cast<std::size_t>(pair_index)] != 0) add_frozen_gradient(references, frozen_workspace->ss_gradients[static_cast<std::size_t>(pair_index)], 2, 3);
-                else add_rigid_derivatives(total, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics, precomputed_distance, precomputed_b_prime, precomputed_b_double_prime));
+                if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_barrier_active[static_cast<std::size_t>(pair_index)] == 0) add_rigid_derivatives(barrier_output, RigidEnergyDerivatives{});
+                else if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_gradient_cached[static_cast<std::size_t>(pair_index)] != 0) add_frozen_gradient(barrier_output, references, frozen_workspace->ss_gradients[static_cast<std::size_t>(pair_index)], 2, 3);
+                else add_rigid_derivatives(barrier_output, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics, precomputed_distance, precomputed_b_prime, precomputed_b_double_prime));
             }
         }
         if (assemble_friction) {
-            const FrozenFrictionContact contact =
-                make_segment_segment_frozen_friction_contact(
-                    current_positions,
-                    friction_segment_segment_positions(
-                        pair, state.deformed_positions),
-                    contact_evaluation, dt,
-                    params.friction_velocity_epsilon);
-            add_friction_contact(
-                {pair.v[0], pair.v[1], pair.v[2], pair.v[3]},
-                contact);
+            const FrozenFrictionContact contact = make_segment_segment_frozen_friction_contact(current_positions, friction_segment_segment_positions(pair, state.deformed_positions), contact_evaluation, dt, params.friction_velocity_epsilon);
+            add_friction_contact(friction_pair_output, {pair.v[0], pair.v[1], pair.v[2], pair.v[3]}, contact);
         }
-    }
+        return true;
+    };
+
+    const auto accumulate_nt_pair = [&](const int pair_index, const bool aabb_already_active) {
+        RigidEnergyDerivatives pair_barrier;
+        RigidEnergyDerivatives pair_friction;
+        if (evaluate_nt_pair(pair_index, aabb_already_active, pair_barrier, pair_friction)) {
+            add_rigid_derivatives(total, pair_barrier);
+            if (friction_output != nullptr) add_rigid_derivatives(*friction_output, pair_friction);
+        }
+    };
+    const auto accumulate_ss_pair = [&](const int pair_index, const bool aabb_already_active) {
+        RigidEnergyDerivatives pair_barrier;
+        RigidEnergyDerivatives pair_friction;
+        if (evaluate_ss_pair(pair_index, aabb_already_active, pair_barrier, pair_friction)) {
+            add_rigid_derivatives(total, pair_barrier);
+            if (friction_output != nullptr) add_rigid_derivatives(*friction_output, pair_friction);
+        }
+    };
+
+    for (const int pair_index : nt_pair_indices) accumulate_nt_pair(pair_index, false);
+    for (const int pair_index : ss_pair_indices) accumulate_ss_pair(pair_index, false);
 
     return total;
 }
@@ -1591,7 +1570,7 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
                 std::fprintf(stderr, "  [RB GS] iter %d  reusing rigid contact cache\n", iteration);
             return;
         }
-        workspace.broad_phase.initialize(workspace.blue_boxes, ref_mesh, params.d_hat);
+        workspace.broad_phase.initialize(workspace.blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::RigidSolver);
         build_rb_contact_adj(workspace.broad_phase.cache(), ref_mesh.node_to_rb, num_rbs, workspace.body_nt_pair_indices, workspace.body_ss_pair_indices, workspace.contact_adjacency);
         greedy_color_conflict_graph(workspace.contact_adjacency, workspace.color_groups, &workspace.coloring_workspace);
         workspace.contact_cache_initialized = true;
@@ -1777,7 +1756,6 @@ SolverResult global_gauss_seidel_solver_basic_general(
     const int num_solid = static_cast<int>(solid_nodes.size());
     const int solid_begin = num_cloth;
     const int rigid_begin = solid_begin + num_solid;
-
     PinMap& pin_map = deformable_workspace.pin_map;
     deformable_workspace.pinned_vertices.reserve(pins.size());
     for (int pin = 0; pin < static_cast<int>(pins.size()); ++pin) {
@@ -1836,15 +1814,16 @@ SolverResult global_gauss_seidel_solver_basic_general(
             rigid_workspace.theta_box_radii[rb] = std::clamp(box_padding * std::max(rigid_workspace.prev_theta_disp[rb], dt * state.omega[rb].norm()), params.theta_box_min, params.theta_box_max);
         }
         build_blue_boxes_rb(rigid_workspace.com_box_anchors, rigid_workspace.orientation_box_anchors, rigid_workspace.theta_box_radii, rigid_workspace.com_box_radii, ref_mesh, blue_boxes);
-        if (solid_nodes.empty())
-            broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat);
-        else
-            broad_phase.initialize_surface_nodes(blue_boxes, ref_mesh, params.d_hat);
-        build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, nodal_elastic_adj, broad_phase.cache(), mixed_adjacency_workspace.combined_adjacency, &mixed_adjacency_workspace.node_to_block, &mixed_adjacency_workspace.solid_node_mask, &mixed_adjacency_workspace.surface_node_mask, &mixed_adjacency_workspace.elastic_row_sizes, &rigid_workspace.body_nt_pair_indices, &rigid_workspace.body_ss_pair_indices);
-        greedy_color_conflict_graph(mixed_adjacency_workspace.combined_adjacency, mixed_adjacency_workspace.color_groups, &mixed_adjacency_workspace.coloring_workspace);
-        if (params.verbose) {
-            std::fprintf(stderr,"  [General GS] iter %d  rebuilding mixed blue boxes and %zu block colors\n", iteration, mixed_adjacency_workspace.color_groups.size());
+        if (solid_nodes.empty()) {
+            broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::GeneralSolver);
+        } else {
+            broad_phase.initialize_surface_nodes(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::GeneralSolver);
         }
+        build_rb_contact_adj(broad_phase.cache(), ref_mesh.node_to_rb, num_rbs, rigid_workspace.body_nt_pair_indices, rigid_workspace.body_ss_pair_indices, rigid_workspace.contact_adjacency);
+        build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, nodal_elastic_adj, broad_phase.cache(), mixed_adjacency_workspace.conflict_adjacency, &mixed_adjacency_workspace.node_to_block, &mixed_adjacency_workspace.solid_node_mask, &mixed_adjacency_workspace.surface_node_mask, &mixed_adjacency_workspace.elastic_row_sizes, &rigid_workspace.body_nt_pair_indices, &rigid_workspace.body_ss_pair_indices);
+        greedy_color_conflict_graph(mixed_adjacency_workspace.conflict_adjacency, mixed_adjacency_workspace.color_groups, &mixed_adjacency_workspace.coloring_workspace);
+        if (params.verbose)
+            std::fprintf(stderr, "  [General GS] iter %d  rebuilding mixed blue boxes and %zu block colors\n", iteration, mixed_adjacency_workspace.color_groups.size());
     };
 
 
@@ -1951,7 +1930,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
                     // unequal work per block. Small dynamic chunks balance
                     // that work while each color remains conflict-free and
                     // the implicit barrier preserves the GS color order.
-                    #pragma omp for schedule(dynamic, 4)
+                    #pragma omp for schedule(dynamic, 1)
                     for (int index = 0; index < static_cast<int>(color.size()); ++index) {
                         const int block = color[index];
                         if (block < solid_begin)

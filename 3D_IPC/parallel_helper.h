@@ -43,30 +43,12 @@ void build_solid_contact_adjacency(
     const BroadPhase::Cache& bp_cache,
     std::vector<std::vector<int>>& out);
 
-// One conflict graph for all movable block types. Rows are ordered as
-// [cloth_nodes][ref_mesh.tet_nodes][ref_mesh.rb_nodes]. Cloth and solid
-// vertices each own one block; every rigid body owns one block containing all
-// of its proxy vertices. Supplying all four optional workspace arguments lets
-// repeated calls retain the topology-invariant elastic prefix and replace only
-// the current contact suffix. Supplying both rigid pair-list outputs fills them
-// during the same ordered NT/SS pair traversal; their contents exactly match
-// the corresponding outputs of build_rb_contact_adj.
-void build_all_block_adjacency_and_contact(
-    const RefMesh& ref_mesh,
-    const std::vector<int>& cloth_nodes,
-    const std::vector<std::vector<int>>& cloth_nodal_elastic_adjacency,
-    const BroadPhase::Cache& bp_cache,
-    std::vector<std::vector<int>>& out,
-    const std::vector<int>* node_to_block = nullptr,
-    const std::vector<unsigned char>* solid_node_mask = nullptr,
-    const std::vector<unsigned char>* surface_node_mask = nullptr,
-    std::vector<std::size_t>* elastic_row_sizes = nullptr,
-    std::vector<std::vector<int>>* body_nt_pair_indices = nullptr,
-    std::vector<std::vector<int>>* body_ss_pair_indices = nullptr);
+// One conflict graph for all movable block types. Rows are ordered as [cloth_nodes][ref_mesh.tet_nodes][ref_mesh.rb_nodes]. The topology-invariant elastic prefix is retained between calls, while each contact edge is rebuilt only in its larger-index row. Optional rigid pair lists avoid rescanning the global candidate arrays.
+void build_all_block_adjacency_and_contact(const RefMesh& ref_mesh, const std::vector<int>& cloth_nodes, const std::vector<std::vector<int>>& cloth_nodal_elastic_adjacency, const BroadPhase::Cache& bp_cache, std::vector<std::vector<int>>& out, const std::vector<int>* node_to_block = nullptr, const std::vector<unsigned char>* solid_node_mask = nullptr, const std::vector<unsigned char>* surface_node_mask = nullptr, std::vector<std::size_t>* elastic_row_sizes = nullptr, const std::vector<std::vector<int>>* body_nt_pair_indices = nullptr, const std::vector<std::vector<int>>* body_ss_pair_indices = nullptr);
 
 std::vector<std::vector<int>> build_elastic_adj(const RefMesh& ref_mesh, const VertexTriangleMap& adj, int num_vertices);
 
-// Contact edges of the conflict graph from a BroadPhase-generated cache.
+// Lower-index contact edges of the conflict graph from a BroadPhase-generated cache.
 void build_contact_adj(const BroadPhase::Cache& bp_cache, int num_vertices, std::vector<std::vector<int>>& out);
 
 // Sorted per-vertex union of two sorted neighbor lists.

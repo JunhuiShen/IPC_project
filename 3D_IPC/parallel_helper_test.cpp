@@ -28,8 +28,9 @@ void build_contact_adj_pair_scan_reference(const BroadPhase::Cache& cache, int n
             if (verts[a] < 0 || verts[a] >= nv) continue;
             for (int b = a + 1; b < 4; ++b) {
                 if (verts[b] < 0 || verts[b] >= nv) continue;
-                out[verts[a]].push_back(verts[b]);
-                out[verts[b]].push_back(verts[a]);
+                const int lower = std::min(verts[a], verts[b]);
+                const int upper = std::max(verts[a], verts[b]);
+                if (lower != upper) out[upper].push_back(lower);
             }
         }
     };
@@ -594,7 +595,7 @@ TEST(AllBlockContactAdjacency, ReusesElasticPrefixesAcrossContactRefreshes) {
     cache.nt_pairs.push_back(contact);
     build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, elastic_adjacency, cache, graph, &node_to_block, &no_solid_nodes, &no_surface_nodes, &elastic_row_sizes);
     EXPECT_EQ(graph, (std::vector<std::vector<int>>{
-        {1, 2, 3}, {0, 2, 3}, {3, 0, 1}, {2, 0, 1}}));
+        {1}, {0}, {3, 0, 1}, {2, 0, 1}}));
     expect_valid_coloring(graph);
 
     // A later refresh drops the old contact suffix but retains every elastic
@@ -659,8 +660,7 @@ TEST(AllBlockContactAdjacency, UniqueMappedBlockCliqueMatchesRolePairScanExactly
     std::vector<std::size_t> elastic_row_sizes;
     build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, elastic_adjacency, cache, actual, &node_to_block, &no_solid_nodes, &no_surface_nodes, &elastic_row_sizes);
 
-    EXPECT_EQ(actual, expected);
-    EXPECT_EQ(actual, (std::vector<std::vector<int>>{{1, 4, 5}, {0, 4, 5}, {}, {}, {0, 1, 5}, {0, 1, 4}}));
+    EXPECT_EQ(actual, (std::vector<std::vector<int>>{{}, {0}, {}, {}, {0, 1}, {0, 1, 4}}));
     std::vector<std::vector<int>> expected_colors;
     std::vector<std::vector<int>> actual_colors;
     greedy_color_conflict_graph(expected, expected_colors);
@@ -668,7 +668,7 @@ TEST(AllBlockContactAdjacency, UniqueMappedBlockCliqueMatchesRolePairScanExactly
     EXPECT_EQ(actual_colors, expected_colors);
 }
 
-TEST(AllBlockContactAdjacency, FusedRigidPairListsMatchLegacyScanExactly) {
+TEST(AllBlockContactAdjacency, PrecomputedRigidPairListsPreserveConflictColors) {
     RefMesh ref_mesh;
     ref_mesh.num_positions = 12;
     ref_mesh.tet_nodes = {2, 3};
@@ -720,27 +720,87 @@ TEST(AllBlockContactAdjacency, FusedRigidPairListsMatchLegacyScanExactly) {
     std::vector<std::vector<int>> expected_ss;
     std::vector<std::vector<int>> unused_rigid_adjacency;
     build_rb_contact_adj(cache, ref_mesh.node_to_rb, 2, expected_nt, expected_ss, unused_rigid_adjacency);
+    populate_contact_incidence(cache, ref_mesh.num_positions);
 
     std::vector<std::vector<int>> expected_graph;
     build_block_contact_pair_scan_reference(cache, node_to_block, solid_node_mask, surface_node_mask, 6, expected_graph);
 
     std::vector<std::vector<int>> actual_graph;
-    std::vector<std::vector<int>> actual_nt{{99}, {98}, {97}};
-    std::vector<std::vector<int>> actual_ss{{89}};
     std::vector<std::size_t> elastic_row_sizes;
-    build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, elastic_adjacency, cache, actual_graph, &node_to_block, &solid_node_mask, &surface_node_mask, &elastic_row_sizes, &actual_nt, &actual_ss);
+    build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, elastic_adjacency, cache, actual_graph, &node_to_block, &solid_node_mask, &surface_node_mask, &elastic_row_sizes, &expected_nt, &expected_ss);
+    for (int block = 0; block < static_cast<int>(actual_graph.size()); ++block) for (const int neighbor : actual_graph[static_cast<std::size_t>(block)]) EXPECT_LT(neighbor, block);
+    std::vector<std::vector<int>> expected_colors;
+    std::vector<std::vector<int>> actual_colors;
+    greedy_color_conflict_graph(expected_graph, expected_colors);
+    greedy_color_conflict_graph(actual_graph, actual_colors);
+    EXPECT_EQ(actual_colors, expected_colors);
+    EXPECT_EQ(expected_nt, (std::vector<std::vector<int>>{{0, 1}, {1, 4}}));
+    EXPECT_EQ(expected_ss, (std::vector<std::vector<int>>{{0, 2}, {0, 3}}));
+    EXPECT_THROW(build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, elastic_adjacency, cache, actual_graph, &node_to_block, &solid_node_mask, &surface_node_mask, &elastic_row_sizes, &expected_nt, nullptr), std::invalid_argument);
+}
 
-    EXPECT_EQ(actual_graph, expected_graph);
-    EXPECT_EQ(actual_nt, expected_nt);
-    EXPECT_EQ(actual_ss, expected_ss);
-    EXPECT_EQ(actual_nt, (std::vector<std::vector<int>>{{0, 1}, {1, 4}}));
-    EXPECT_EQ(actual_ss, (std::vector<std::vector<int>>{{0, 2}, {0, 3}}));
+TEST(AllBlockContactAdjacency, DirectCompactStorageColorsExactUndirectedGraph) {
+    RefMesh ref_mesh;
+    ref_mesh.num_positions = 10;
+    ref_mesh.node_to_rb = {-1, -1, -1, -1, 0, 0, 0, 1, 1, 1};
+    ref_mesh.rb_nodes = {{4, 5, 6}, {7, 8, 9}};
+    const std::vector<int> cloth_nodes = {0, 1, 2, 3};
+    const std::vector<std::vector<int>> nodal_elastic_adjacency = {{1}, {0}, {3}, {2}, {}, {}, {}, {}, {}, {}};
+    const std::vector<int> node_to_block = {0, 1, 2, 3, 4, 4, 4, 5, 5, 5};
+    const std::vector<unsigned char> no_solid_nodes(10, 0);
+    const std::vector<unsigned char> no_surface_nodes(10, 0);
+    BroadPhase::Cache cache;
+    cache.excludes_tet_interior_nt_queries = true;
+    NodeTrianglePair nt{};
+    nt.node = 0;
+    nt.tri_v[0] = 4;
+    nt.tri_v[1] = 5;
+    nt.tri_v[2] = 6;
+    cache.nt_pairs = {nt, nt};
+    NodeTrianglePair rigid_nt{};
+    rigid_nt.node = 4;
+    rigid_nt.tri_v[0] = 7;
+    rigid_nt.tri_v[1] = 8;
+    rigid_nt.tri_v[2] = 9;
+    cache.nt_pairs.push_back(rigid_nt);
+    SegmentSegmentPair ss{};
+    ss.v[0] = 2;
+    ss.v[1] = 3;
+    ss.v[2] = 4;
+    ss.v[3] = 5;
+    cache.ss_pairs = {ss, ss};
+    populate_contact_incidence(cache, ref_mesh.num_positions);
 
-    EXPECT_THROW(build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, elastic_adjacency, cache, actual_graph, &node_to_block, &solid_node_mask, &surface_node_mask, &elastic_row_sizes, &actual_nt, nullptr), std::invalid_argument);
+    std::vector<std::vector<int>> body_nt_pair_indices;
+    std::vector<std::vector<int>> body_ss_pair_indices;
+    std::vector<std::vector<int>> rigid_adjacency;
+    build_rb_contact_adj(cache, ref_mesh.node_to_rb, 2, body_nt_pair_indices, body_ss_pair_indices, rigid_adjacency);
+    std::vector<std::vector<int>> graph;
+    std::vector<std::size_t> elastic_row_sizes;
+    build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, nodal_elastic_adjacency, cache, graph, &node_to_block, &no_solid_nodes, &no_surface_nodes, &elastic_row_sizes, &body_nt_pair_indices, &body_ss_pair_indices);
+    for (int block = 0; block < static_cast<int>(graph.size()); ++block) {
+        std::set<int> unique_neighbors;
+        for (std::size_t entry = elastic_row_sizes[static_cast<std::size_t>(block)]; entry < graph[static_cast<std::size_t>(block)].size(); ++entry) {
+            const int neighbor = graph[static_cast<std::size_t>(block)][entry];
+            EXPECT_LT(neighbor, block);
+            EXPECT_TRUE(unique_neighbors.insert(neighbor).second);
+        }
+    }
 
-    cache.nt_pairs.clear();
-    cache.ss_pairs.clear();
-    build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, elastic_adjacency, cache, actual_graph, &node_to_block, &solid_node_mask, &surface_node_mask, &elastic_row_sizes, &actual_nt, &actual_ss);
-    EXPECT_EQ(actual_nt, std::vector<std::vector<int>>(2));
-    EXPECT_EQ(actual_ss, std::vector<std::vector<int>>(2));
+    std::vector<std::vector<int>> full_graph(graph.size());
+    for (int block = 0; block < static_cast<int>(graph.size()); ++block) {
+        for (const int neighbor : graph[static_cast<std::size_t>(block)]) {
+            full_graph[static_cast<std::size_t>(block)].push_back(neighbor);
+            full_graph[static_cast<std::size_t>(neighbor)].push_back(block);
+        }
+    }
+    for (std::vector<int>& row : full_graph) {
+        std::sort(row.begin(), row.end());
+        row.erase(std::unique(row.begin(), row.end()), row.end());
+    }
+    std::vector<std::vector<int>> compact_colors;
+    std::vector<std::vector<int>> full_colors;
+    greedy_color_conflict_graph(graph, compact_colors);
+    greedy_color_conflict_graph(full_graph, full_colors);
+    EXPECT_EQ(compact_colors, full_colors);
 }
