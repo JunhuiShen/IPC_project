@@ -5,7 +5,21 @@ reduced-coordinate rigid bodies built around **Incremental Potential Contact
 (IPC)**. The default deformable and rigid-body solvers use conflict coloring
 for parallel updates and broad-phase contact sets for IPC.
 
-## What the simulator does
+## Contents
+
+- [Overview](#overview)
+- [Solver algorithms](#solver-algorithms)
+- [Getting started](#getting-started)
+- [Command reference](#command-reference)
+- [Built-in scenes](#built-in-scenes)
+- [Runtime behavior](#runtime-behavior)
+- [CLI reference](#cli-reference)
+- [Source layout](#source-layout)
+- [Test coverage](#test-coverage)
+- [Development guidance](#development-guidance)
+- [Acknowledgments](#acknowledgments)
+
+## Overview
 
 For deformable scenes, each time step minimizes an incremental potential made of:
 
@@ -45,7 +59,7 @@ contact-only body conflict graph, then updates each color in parallel when
 Our OGC narrow phase and solver implement the algorithm from Chen et al.
 2025; see Acknowledgments.
 
-## Solver Algorithm
+## Solver algorithms
 
 ### Deformable solver
 
@@ -108,7 +122,39 @@ Rigid meshes are assumed valid: every triangle has three distinct vertices,
 every edge has two distinct endpoints, and every primitive has one uniform
 owner.
 
-## Requirements
+### General mixed solver
+
+Scenes containing a deformable solid, or mixing deformable nodes with rigid
+bodies, use `global_gauss_seidel_solver_basic_general`. It combines the two
+specialized formulations as follows:
+
+- **Unified block state.** Blocks are ordered as cloth vertices, solid
+  vertices, then rigid bodies. A cloth or solid block owns one 3D position;
+  a rigid block owns its reduced COM and orientation variables.
+- **Elastic and contact conflicts.** One graph contains cloth/solid elastic
+  connectivity and current collision candidates. Each color is completed
+  before the next begins, while independent blocks within a color run in
+  parallel.
+- **Type-specific Newton updates.** Cloth blocks assemble membrane, bending,
+  pin, contact, and SDF terms. Solid blocks assemble volumetric corotated and
+  contact terms. Rigid blocks use the same reduced COM and angular-velocity
+  updates as the rigid-only solver.
+- **Shared live configuration.** Every accepted block update is written to the
+  same current position state, so later colors see earlier cloth, solid, and
+  rigid motion consistently.
+- **Mixed broad phase and safe steps.** Contact rebuilding excludes tetrahedral
+  interior node queries and impossible rigid self-contact. Deformable updates
+  use per-vertex clamping; rigid updates use translation and rotation CCD.
+- **Stopping behavior.** The solver either performs the requested fixed number
+  of sweeps or evaluates separate cloth, solid, and rigid residual components
+  and stops from their combined residual.
+
+This gives mixed scenes one contact-consistent Gauss-Seidel solve instead of
+advancing each material type independently.
+
+## Getting started
+
+### Requirements
 
 - C++17 compiler (GCC 9+, Clang 10+, MSVC 2019+)
 - CMake 3.21+
@@ -119,36 +165,182 @@ owner.
 - Tight-Inclusion CCD -- fetched automatically by CMake (requires network on
   first configure)
 
-## Notes for coding agents
+### Build
 
-When working on this project, Claude, Codex, and other coding agents should
-first check the libraries and local wrappers that are already part of the
-codebase before writing new implementations. Start from `CMakeLists.txt` and
-the relevant headers to see what Eigen, Tight-Inclusion CCD, GoogleTest, OpenMP,
-and any fetched or vendored sources already provide; after configuration, also
-inspect `build/_deps/` and `CPM_modules/` when they are relevant. Prefer using
-or adapting a maintained library API or an existing project helper over
-duplicating math, geometry, collision detection, testing, or build logic, and
-only add custom code when the available library path is not suitable.
-
-## Build
-
-    cd IPC_project/3D_IPC
-    cmake -B build
-    cmake --build build --clean-first   # clean rebuild
-    cmake --build build -j              # faster incremental parallel build
+Configure and compile from the `3D_IPC` directory using the commands in
+[Build and test](#build-and-test).
 
 Release builds enable interprocedural optimization when the compiler supports
 it, allowing the solver and its energy kernels to be optimized together. Pass
 `-DIPC_ENABLE_IPO=OFF` at configure time to disable it.
 
-## Run
+### First run
 
-    ./build/3D_sim                      # default scene (twisting cloth)
-    ./build/3D_sim --help               # full argument list
+After building, use [Basic usage](#basic-usage) to launch the default twisting-
+cloth scene or inspect every CLI option.
 
 (`--fixed_iters` is required only by `global_gauss_seidel_solver_ogc`; the
 default basic solver can instead use residual-based convergence.)
+
+## Command reference
+
+All copyable project commands are collected here. Run them from the
+`3D_IPC` directory.
+
+### Basic usage
+
+```bash
+# Default twisting-cloth scene
+./build/3D_sim
+
+# Complete argument list and current defaults
+./build/3D_sim --help
+```
+
+### Build and test
+
+```bash
+# First configure
+cmake -B build
+
+# Incremental parallel build
+cmake --build build -j
+
+# Clean rebuild
+cmake --build build --clean-first
+
+# Complete test suite
+ctest --test-dir build --output-on-failure
+
+# List discovered tests
+ctest --test-dir build -N -V
+
+# Run selected test binaries directly
+./build/ccd_test
+./build/bending_energy_test
+./build/parallel_helper_test
+```
+
+### Output and restart
+
+```bash
+# Export GEO, OBJ, PLY, or USD frames
+./build/3D_sim --format geo --outdir frames_geo
+./build/3D_sim --format obj --outdir frames_obj
+./build/3D_sim --format ply --outdir frames_ply
+./build/3D_sim --format usd --outdir frames_usd
+
+# Resume after frame 30 using state_0030.bin in frames_sim3d
+./build/3D_sim --restart_frame 30 --outdir frames_sim3d
+```
+
+Output defaults to Houdini `.geo` files in `frames_sim3d/`. Available formats
+are `geo`, `obj`, `ply`, and `usd`. Every completed frame also writes a binary
+`state_NNNN.bin` restart checkpoint.
+
+### Initial-guess alternatives
+
+```bash
+# Translation-restricted initial guess instead of the default CCD guess
+./build/3D_sim --use_ccd_guess false --use_translation_guess true --fixed_iters
+
+# CCD-clipped Verlet predictor
+./build/3D_sim --use_ccd_guess false --use_verlet_guess true
+```
+
+### Reference scene commands
+
+Examples 1–3 use the documented cloth parameters:
+
+```bash
+# Example 1: square cloth twisted in place, 240 frames at 0.5 turns/s
+./build/3D_sim --example 1 --num_frames 240 \
+  --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
+  --d_hat 0.005 --k_barrier 100 \
+  --fixed_iters --max_substep_iters 10 --substeps 3 --node_box_update_count 10
+
+# Example 2: two cylinders, 2.0 turns, twist then untwist
+./build/3D_sim --example 2 --num_frames 900 \
+  --E 115000 --nu 0.25 --kB 0.009 --kpin 5e6 \
+  --d_hat 0.005 --k_barrier 100 --tcyl_max_turn 2.0 \
+  --fixed_iters --max_substep_iters 10 --substeps 3 --node_box_update_count 10
+
+# Example 3: one yawing cylinder, 4.0 turns at 0.30 turns/s
+./build/3D_sim --example 3 --num_frames 850 \
+  --E 115000 --nu 0.25 --kB 0.009 --kpin 1e8 \
+  --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 \
+  --tu_max_turn 4.0 --tu_twist_rate 0.30 \
+  --fixed_iters --max_substep_iters 10 --substeps 5 --node_box_update_count 10
+
+# Example 4: avatar collider and dress loaded from a data directory
+./build/3D_sim --example 4 --datadir /path/to/avatar_data
+```
+
+Examples 5–11 are rigid-body scenes. These commands mirror the corresponding
+scene comments in `example.cpp`:
+
+```bash
+# Example 5: freely rotating tennis racket
+./build/3D_sim --example 5 --num_frames 500 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output
+
+# Example 6: freely rotating space tool
+./build/3D_sim --example 6 --num_frames 2000 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir space_tool_output
+
+# Example 7: rigid bodies dropped onto a ground plane
+./build/3D_sim --example 7 --num_frames 200 --substeps 10 --tol_abs 1e-12 --tol_rel 1e-10 --outdir drop_box_output --format obj
+
+# Example 8: head-on rigid polygon collision
+./build/3D_sim --example 8 --num_frames 60 --max_substep_iters 500 --substeps 10 --tol_rel 1e-10 --rigid_density 25 --outdir polygon_collision_output --format obj
+
+# Example 9: stationary stack of twenty rigid polygons
+./build/3D_sim --example 9 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --rigid_density 25 --gy 0 --outdir twenty_polygon_static_stack_output --format obj
+
+# Example 10: five aligned rigid polygons
+./build/3D_sim --example 10 --num_frames 100 --substeps 10 --rigid_density 25 --outdir five_polygon_aligned_stack_output --format obj
+
+# Example 11: one hundred rigid polygons, fixed-iteration mode
+./build/3D_sim --example 11 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir hundred_polygon_box_fixed_iter_output --format obj
+
+# Example 11: residual-convergence alternative
+./build/3D_sim --example 11 --num_frames 200 --substeps 80 --max_substep_iters 5000 --outdir hundred_polygon_box_output --format obj
+```
+
+Examples 12–21 combine cloth, deformable solids, rigid bodies, and SDFs. These
+commands also mirror `example.cpp`:
+
+```bash
+# Example 12: fifty rigid polygons dropped onto pinned cloth
+./build/3D_sim --example 12 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir fifty_polygons_on_pinned_cloth_output --format obj
+
+# Example 13: one deformable solid dropped onto a ground plane
+./build/3D_sim --example 13 --num_frames 200 --substeps 20 --max_substep_iters 50 --tol_abs 1e-8 --tol_rel 1e-5 --outdir single_solid_ground_drop_output --format obj
+
+# Example 14: one deformable solid dropped onto pinned cloth
+./build/3D_sim --example 14 --num_frames 200 --substeps 20 --max_substep_iters 30 --fixed_iters --E 1e8 --outdir stiff_cloth_solid_drop_output --format obj --d_hat 0.019 --k_barrier 500
+
+# Example 15: rigid and deformable polygons dropped onto pinned cloth
+./build/3D_sim --example 15 --num_frames 200 --substeps 20 --max_substep_iters 20 --fixed_iters --outdir twenty_rigid_deformable_polygons_on_pinned_cloth_output --format obj --E 1e8 --d_hat 0.019 --k_barrier 500
+
+# Example 16: alternating rigid and deformable polygons on pinned cloth
+./build/3D_sim --example 16 --num_frames 200 --substeps 20 --max_substep_iters 20 --fixed_iters --outdir ten_rigid_solid_flat_stack_on_cloth_output --format obj --E 1e8 --d_hat 0.019 --k_barrier 500
+
+# Example 17: Bunny/Spot solids with rigid cubes and gears
+./build/3D_sim --example 17 --datadir example_obj --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 600 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_output --format obj
+
+# Example 18: dynamic threaded bolt falling through a fixed nut
+./build/3D_sim --example 18 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj
+
+# Example 19: deformable Armadillo between gear crushers
+./build/3D_sim --example 19 --num_frames 300 --fps 60 --substeps 10 --max_substep_iters 10 --node_box_update_count 2 --fixed_iters --solid_E 290909 --solid_nu 0.454545 --d_hat 0.00025 --k_barrier 1000 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --crusher_angular_speed 20 --outdir armadillo_gear_crusher_output --format obj
+
+# Example 20: four Bunny/Spot/cube/gear rows dropped onto pinned cloth
+./build/3D_sim --example 20 --num_frames 200 --substeps 20 --max_substep_iters 200 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_2_output --format obj
+
+# Example 21: rolled cloth unrolling down an SDF ramp
+./build/3D_sim --example 21 --num_frames 200 --substeps 20 --max_substep_iters 80 --fixed_iters --kB 0.0025 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --outdir rolled_cloth_on_steep_ramp_output_new --format obj
+```
+
+## Built-in scenes
 
 Built-in example scenes (`--example N`):
 
@@ -176,168 +368,19 @@ Built-in example scenes (`--example N`):
 | `20` | Four close-packed level rows of Bunny-solid, Spot-solid, rigid cube, and rigid gear dropping together onto the same opposite-edge-pinned cloth used by Example 14 |
 | `21` | A rolled cloth pinned along its upper edge and unrolling down an analytic SDF incline onto an SDF ground plane |
 
-Example 17 reads these repository-relative mesh files directly:
+### External scene assets
 
-- `example_obj/bunny_coarse/bunny_2000f.1.node`
-- `example_obj/bunny_coarse/bunny_2000f.1.ele`
-- `example_obj/spot/spot_2000f.1.node`
-- `example_obj/spot/spot_2000f.1.ele`
-- `example_obj/gear_z18_coarse.obj`
+All paths below are repository-relative. Examples not listed here are
+procedural or use the directory supplied through `--datadir`.
 
-Example 18 reads these two repository-relative, mutually scaled rigid meshes:
-
-- `example_obj/bolt_and_nut/bolt_coarse_bolt.obj`
-- `example_obj/bolt_and_nut/bolt_coarse_nut.obj`
-
-The nut uses the `None` rigid update label, so it remains active IPC collision
-geometry while neither its center of mass nor its orientation is updated. The
-bolt uses the default `TranslationAndOrientation` label and starts at rest;
-gravity and the frictionless helical contact normals generate its rotation.
-
-Example 19 reads these three repository-relative assets (the TetGen solid uses
-one node file and one element file):
-
-- `example_obj/armadillo_coarse/armadillo_5000f.1.node`
-- `example_obj/armadillo_coarse/armadillo_5000f.1.ele`
-- `example_obj/crusher/crusher_coarse_left.obj`
-- `example_obj/crusher/crusher_coarse_right.obj`
-
-The crushers use `OrientationOnly`, so their centers remain fixed while their
-orientations participate in the ordinary coupled rigid/contact solve.
-`crusher_angular_speed` (default 20 rad/s) sets only their initial angular-speed
-magnitude: +z for the left crusher and -z for the right. No motor energy,
-target speed, or prescribed torque is applied afterward, so inertia and
-contact determine the subsequent crusher speeds.
-
-Mesh and analytic-SDF contact can additionally use the smoothed Coulomb
-friction model from
-[Vertex Block Descent, Section 3.6](https://arxiv.org/abs/2403.06321). Set
-`friction_coefficient` to the dimensionless dynamic coefficient (zero, the
-default, disables friction) and `friction_velocity_epsilon` to the smoothing
-velocity in m/s (default `0.01`). For each active node-triangle or edge-edge
-contact, the implementation projects the relative displacement since the
-start of the substep into the current tangent plane and caps the friction
-force at `mu_f` times the normal force supplied by the IPC barrier. It uses the
-paper's lagged positive-semidefinite Hessian approximation in every cloth,
-solid, rigid, mixed, and OGC local solve, and includes the same gradient in
-non-fixed-iteration residuals. SDF friction uses the corresponding analytic
-penalty's outward normal force as its Coulomb cap. Each SDF primitive also
-stores optional previous/current material poses, allowing a translating or
-rotating kinematic collider to transfer its tangential motion even when that
-motion is not visible from the signed-distance geometry alone. Static SDFs use
-identity poses automatically. The coefficient is global rather than
-per-object; the Example 19 command below uses the paper-style value `0.1`.
-
-The option therefore affects both the Armadillo/crusher mesh interface in
-Example 19 and the SDF ramp/ground in Example 21. SDF obstacles remain
-kinematic, so their equal-and-opposite friction reaction is supplied by the
-external driver rather than integrated as collider dynamics. Restart files
-already store the required particle positions; prescribed moving SDF examples
-reconstruct their material poses from absolute time. A restarted run must
-repeat both friction flags because solver parameters are not serialized.
-
-Example 20 reads these repository-relative solid and rigid meshes directly:
-
-- `example_obj/bunny_coarse/bunny_2000f.1.node`
-- `example_obj/bunny_coarse/bunny_2000f.1.ele`
-- `example_obj/spot/spot_2000f.1.node`
-- `example_obj/spot/spot_2000f.1.ele`
-- `example_obj/gear_z18_coarse.obj`
-
-The cube is generated procedurally. The scene forms a 4-by-4 grid in the
-horizontal x-z plane, with one Bunny, Spot, cube, and gear in each row. Their
-left-to-right order and x centers are:
-
-| Row-center z (m) | Deterministically shuffled row, left to right (x center in m) |
-|------------------|--------------------------------------------------------------|
-| -0.675 | Bunny (-0.35581598158), cube (-0.01581598158), gear (0.21418401842), Spot (0.455) |
-| -0.225 | gear (-0.46581598158), Spot (-0.225), Bunny (0.12581598158), cube (0.46581598158) |
-| 0.225 | Spot (-0.455), gear (-0.21418401842), cube (0.01581598158), Bunny (0.35581598158) |
-| 0.675 | cube (-0.46581598158), Bunny (-0.12581598158), Spot (0.225), gear (0.46581598158) |
-
-This shuffled order is a fixed compile-time permutation table, not a runtime
-random draw, so rebuilding the scene reproduces the same placement for
-compatible restart checkpoints. Every row is centered in the common footprint
-x = [-0.57581598158, 0.57581598158] m. Type-aware packing uses x extents of
-0.44 m for Bunny, approximately 0.241631963161 m for Spot, and 0.22 m for each
-cube and gear, leaving exactly 0.010 m between consecutive AABBs. The rows are
-0.45 m apart. The production x-y-z AABB extents are approximately
-(0.44, 0.435584, 0.335752) m for Bunny, (0.241632, 0.433659, 0.44) m for Spot,
-(0.22, 0.22, 0.22) m for the cube, and
-(0.22, 0.217960277, 0.044025569) m for the gear. The minimum distance between
-any two initial object AABBs is exactly 0.010 m, and the minimum initial
-object-to-cloth gap is approximately 0.332207757 m.
-
-All 16 body centers start at y = 1.75 m with a downward velocity of 0.75 m/s
-and no applied tilt or initial angular velocity. The deformable Bunny and Spot
-meshes retain their source orientations and are normalized to a 0.44 m maximum
-AABB extent; the rigid cubes and gears use identity orientation and a 0.22 m
-maximum AABB extent. The scene clamps `d_hat` to 45% of the minimum
-surface-edge length so the imported fine meshes satisfy the global IPC
-edge-length bound; with the repository assets, the documented `0.019` m
-request becomes approximately `0.00208794` m (the minimum edge is approximately
-`0.00463986` m). The close-packed gap therefore
-starts outside the barrier activation distance. The production scene has
-19,221 vertices, 31,616 surface triangles, and eight rigid bodies (the four
-cubes and four gears).
-
-Example 21 starts a flat-rest cloth in a compact rolled configuration with one
-complete cross-width edge pinned 0.020 m normally above the nominal top of a
-45-degree incline. After the scene caps `d_hat`, let `a` be
-`max(d_hat, eps_sdf, 0)`. The pin clearance is
-`max(0.020, a + 0.001)` m, while the roll clearance is
-`max(0.002, a + 0.0001)` m. With the documented `d_hat = 0.005` m and
-`eps_sdf = 0.002` m, these are 0.020 m and 0.0051 m, respectively. An
-eight-material-row straight leader has a 0.190803848 m material length and
-descends 0.0149 m normally to meet the roll at its phase-zero outer-bottom
-point. Its 0.190221183 m downslope span is chosen by the Pythagorean relation,
-keeping all leader edges strain-free. Relative to the level-leader layout,
-this shifts the roll approximately 0.000582665 m upslope while preserving its
-normal height and closest ramp clearance. The join is position-continuous,
-but not tangent-continuous; the leader slope and Archimedean spiral pitch
-produce a 5.071533-degree tangent mismatch. An exactly tangent-continuous
-join with the same straight, strain-free leader would require changing the
-pin or roll geometry.
-
-Physical support comes from two infinite `PlaneSDF` half-spaces: a horizontal
-ground through `y = 0` and an inclined plane through the nominal ramp top.
-Obstacle evaluation selects their minimum signed distance, representing the
-union of the regions below the planes. Their zero sets meet at the nominal toe
-`z = 1.2`; along the contact boundary, the incline supports the cloth before
-the toe and the ground supports it afterward. The incline is infinite across
-`x` and continues uphill behind the displayed wedge, while the ground extends
-beyond its displayed quad.
-
-These SDFs contribute node-based penalty energy to the nonlinear solve; they
-are not rigid bodies or `RefMesh` triangles and do not use broad-phase
-collision detection, IPC barrier contact, or CCD. The documented
-`k_sdf = 100000` sets the penalty stiffness, and `eps_sdf = 0.002` m sets the
-force-free distance from each plane, so finite stiffness can permit some
-penetration. `d_hat`, `k_barrier`, and `use_ccd` continue to govern cloth
-self-contact only.
-
-The 0.100 m outer roll radius gives the cloth a 3.816076960 m material length,
-while the displayed wedge's sloped face is 3.394112550 m long. The resulting
-0.421964411 m excess (about 12.43% of that length) is intended to let the
-released sheet pass the nominal toe and continue onto the horizontal SDF
-ground instead of ending on the incline. The scene caps `d_hat` at 0.005 m and
-winds neighboring turns about 0.0065 m apart; 160 longitudinal rows keep the
-closest nonincident piecewise-linear cloth segments approximately 0.00529121 m
-apart initially. With friction disabled, gravity, pin tension, and the
-cloth's flat bending rest shape drive the qualitative unrolling. The
-recommended command enables the paper-style
-coefficient `0.1`, so both cloth self-contact and the SDF incline/ground resist
-tangential slip. This remains regularized Coulomb friction, not an exact
-no-slip rolling constraint.
-
-A finite closed triangular wedge and a 6 m by 6 m ground quad are exported
-together in the one-time `static_colliders` output mesh for visualization. The
-ground quad is rendered at `y = -0.001`, one millimeter below its physical SDF
-plane to avoid z-fighting, with `x` spanning `[-3, 3]` and `z` spanning
-`[-2, 4]`. These triangles do not enter `RefMesh`, the broad phase, CCD, or the
-nonlinear solve; the corresponding infinite analytic planes provide contact.
-The finite visual footprints do not limit that physical support, and Example
-21 has no rigid bodies.
+- **Examples 17 and 20:** `example_obj/bunny_coarse/bunny_2000f.1.node` and
+  `.ele`, `example_obj/spot/spot_2000f.1.node` and `.ele`, plus
+  `example_obj/gear_z18_coarse.obj`.
+- **Example 18:** `example_obj/bolt_and_nut/bolt_coarse_bolt.obj` and
+  `example_obj/bolt_and_nut/bolt_coarse_nut.obj`.
+- **Example 19:** `example_obj/armadillo_coarse/armadillo_5000f.1.node` and
+  `.ele`, plus `crusher_coarse_left.obj` and `crusher_coarse_right.obj` under
+  `example_obj/crusher/`.
 
 At startup, every scene reports its vertex and triangle counts; scenes with
 rigid bodies also report their count. Rigid surface vertices are represented
@@ -345,71 +388,9 @@ by up to three COM and three rotation unknowns per body (subject to its update
 label), while deformable solids retain their tetrahedral vertex degrees of
 freedom.
 
-Common invocations:
+## Runtime behavior
 
-    ./build/3D_sim --example 1                              # twisting cloth
-    ./build/3D_sim --example 2                              # two-cylinder twist
-    ./build/3D_sim --example 3                              # cylinder yaws and twists cloth between two clamped top edges
-    ./build/3D_sim --use_ccd_guess false --use_translation_guess true --fixed_iters
-    ./build/3D_sim --format obj --outdir frames_obj         # export .obj frames
-    ./build/3D_sim --format usd --outdir frames_usd         # export .usda frames
-    ./build/3D_sim --restart_frame 30 --outdir frames_sim3d # resume from checkpoint
-
-Commands documented alongside Examples 5 through 21 in `example.cpp`:
-
-    # Example 5: freely rotating rigid tennis racket
-    ./build/3D_sim --example 5 --num_frames 500 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output
-
-    # Example 6: freely rotating space tool
-    ./build/3D_sim --example 6 --num_frames 2000 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir space_tool_output
-
-    # Example 7: rigid box and hexagonal prism dropped onto a ground plane
-    ./build/3D_sim --example 7 --num_frames 200 --substeps 10 --tol_abs 1e-12 --tol_rel 1e-10 --outdir drop_box_output --format obj
-
-    # Example 8: head-on rigid polygon collision
-    ./build/3D_sim --example 8 --num_frames 60 --max_substep_iters 500 --substeps 10 --tol_rel 1e-10 --rigid_density 25 --outdir polygon_collision_output --format obj
-
-    # Example 9: stationary stack of twenty rigid polygons
-    ./build/3D_sim --example 9 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --rigid_density 25 --gy 0 --outdir twenty_polygon_static_stack_output --format obj
-
-    # Example 10: five aligned rigid polygons
-    ./build/3D_sim --example 10 --num_frames 100 --substeps 10 --rigid_density 25 --outdir five_polygon_aligned_stack_output --format obj
-
-    # Example 11: one hundred rigid polygons in a box, fixed-iteration mode
-    ./build/3D_sim --example 11 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir hundred_polygon_box_fixed_iter_output --format obj
-
-    # Example 11: residual-convergence alternative
-    ./build/3D_sim --example 11 --num_frames 200 --substeps 80 --max_substep_iters 5000 --outdir hundred_polygon_box_output --format obj
-
-    # Example 12: fifty rigid polygons dropped onto pinned cloth
-    ./build/3D_sim --example 12 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir fifty_polygons_on_pinned_cloth_output --format obj
-
-    # Example 13: one deformable solid dropped onto a ground plane
-    ./build/3D_sim --example 13 --num_frames 200 --substeps 20 --max_substep_iters 50 --tol_abs 1e-8 --tol_rel 1e-5 --outdir single_solid_ground_drop_output --format obj
-
-    # Example 14: one deformable solid dropped onto pinned cloth
-    ./build/3D_sim --example 14 --num_frames 200 --substeps 20 --max_substep_iters 30 --fixed_iters --E 1e8 --outdir stiff_cloth_solid_drop_output --format obj --d_hat 0.019 --k_barrier 500
-
-    # Example 15: rigid and deformable polygons dropped onto pinned cloth
-    ./build/3D_sim --example 15 --num_frames 200 --substeps 20 --max_substep_iters 20 --fixed_iters --outdir twenty_rigid_deformable_polygons_on_pinned_cloth_output --format obj --E 1e8 --d_hat 0.019 --k_barrier 500
-
-    # Example 16: alternating rigid and deformable polygons dropped onto pinned cloth
-    ./build/3D_sim --example 16 --num_frames 200 --substeps 20 --max_substep_iters 20 --fixed_iters --outdir ten_rigid_solid_flat_stack_on_cloth_output --format obj --E 1e8 --d_hat 0.019 --k_barrier 500
-
-    # Example 17: two Bunny-solid, Spot-solid, rigid-cube, and rigid-gear cycles
-    ./build/3D_sim --example 17 --datadir example_obj --num_frames 200 --fps 60 --substeps 20 --max_substep_iters 7000 --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir spot_solids_cubes_gears_on_cloth_output --format obj
-
-    # Example 18: dynamic threaded bolt falling into a fixed threaded nut
-    ./build/3D_sim --example 18 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj
-
-    # Example 19: deformable Armadillo fed through fixed-center gear crushers (dt = 1/600 s)
-    ./build/3D_sim --example 19 --num_frames 300 --fps 60 --substeps 10 --max_substep_iters 10 --node_box_update_count 2 --fixed_iters --solid_E 290909 --solid_nu 0.454545 --d_hat 0.00025 --k_barrier 1000 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --crusher_angular_speed 20 --outdir armadillo_gear_crusher_output --format obj
-
-    # Example 20: four close-packed level Bunny/Spot/cube/gear rows dropped onto pinned cloth
-    OMP_NUM_THREADS=10 OMP_DYNAMIC=FALSE ./build/3D_sim --example 20 --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 20 --fixed_iters --use_parallel true --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir four_bunny_spot_cube_gear_rows_on_cloth_output --format obj
-
-    # Example 21: rolled cloth pinned above an SDF ramp and unrolling onto an SDF ground (dt = 1/600 s)
-    OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE ./build/3D_sim --example 21 --num_frames 180 --fps 60 --substeps 10 --max_substep_iters 20 --node_box_update_count 2 --fixed_iters --use_parallel true --use_ccd true --E 1e6 --kB 0.001 --kpin 1e7 --d_hat 0.005 --k_barrier 500 --k_sdf 100000 --eps_sdf 0.002 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --outdir rolled_cloth_on_ramp_output --format obj
+### Initial guesses
 
 Initial guesses are selected before the nonlinear solver starts each substep.
 The default is `ccd_initial_guess`. `--use_verlet_guess true` uses the
@@ -421,30 +402,16 @@ then applies one cheap 3D Newton correction for SDF penalty contact. Elastic,
 bending, and cloth-cloth IPC barrier terms are unchanged by a uniform
 translation and therefore do not affect `C`.
 
-Reference command for example 1 (square cloth twisted in place, 240 frames at
-0.5 turns/s):
+### Friction
 
-    ./build/3D_sim --example 1 --num_frames 240 \
-      --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
-      --d_hat 0.005 --k_barrier 100 \
-      --fixed_iters --max_substep_iters 10 --substeps 5 --node_box_update_count 10
+`friction_coefficient` is the global mesh/SDF Coulomb coefficient; zero
+disables friction. `friction_velocity_epsilon` controls smoothing near zero
+slip. The implementation uses the lagged PSD model from
+[Vertex Block Descent, Section 3.6](https://doi.org/10.1145/3658179). Solver
+parameters are not stored in checkpoints, so repeat both friction flags when
+restarting a run.
 
-Reference command for example 2 (2.0 turns per cylinder, twist + untwist, 900
-frames):
-
-    ./build/3D_sim --example 2 --num_frames 900 \
-        --E 115000 --nu 0.25 --kB 0.009 --kpin 5e6 \
-        --d_hat 0.005 --k_barrier 100 \
-        --tcyl_max_turn 2.0 \
-        --fixed_iters --max_substep_iters 10 --node_box_update_count 10
-
-Reference command for example 3 (4.0 turns at 0.30 turns/s, twist + untwist, 850 frames):
-
-    ./build/3D_sim --example 3 --num_frames 850 \
-        --E 115000 --nu 0.25 --kB 0.009 --kpin 1e8 \
-        --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 \
-        --tu_max_turn 4.0 --tu_twist_rate 0.30 \
-        --fixed_iters --max_substep_iters 10 --substeps 5 --node_box_update_count 10
+### Output, restart, and timing
 
 Output frames go to `frames_sim3d/` by default in Houdini `.geo` format
 (`frame_0000.geo`, `frame_0001.geo`, ...). `--format obj` writes `.obj`;
@@ -511,8 +478,8 @@ reader can jump to the layer they care about.
 - `args.h`, `ipc_args.h` -- generic `--key value` argument parser and the
   `IPCArgs3D` struct that defines every CLI flag and its default.
 - `output.h` / `output.cpp` -- frame and diagnostic output, including
-  `export_obj`, `export_geo`, `export_usd`, `export_frame`, broad-phase debug
-  geometry, and `write_substep_data`.
+  `export_obj`, `export_geo`, `export_ply`, `export_usd`, `export_frame`, broad-
+  phase debug geometry, and `write_substep_data`.
 
 ### Mesh & physics state
 
@@ -586,12 +553,12 @@ reader can jump to the layer they care about.
   `SmallRoots` buffer to avoid heap traffic.
 - `broad_phase.h` / `broad_phase.cpp` -- AABB broad phase backed by a per-tree
   BVH. It accepts swept motion or pre-built node boxes, caches mesh topology via
-  `set_mesh_topology`, and builds node-triangle and edge-edge candidates,
-  including rigid blue-node/green-triangle and green-edge/red-edge queries.
-  Per-vertex incident pair lists feed collision-safe stepping.
-  Adds `parent` pointers and per-tree `leaf_to_node` maps so
-  `refit_bvh_leaf` and `incremental_refresh_vertex` can do `O(log N)` partial
-  refits, used by `global_gauss_seidel_solver_ogc`.
+  `set_mesh_topology`, and builds node-triangle and edge-edge candidates. Solver-
+  specific initialization modes omit unused refit/incidence storage and prune
+  rigid self-contact while preserving deterministic candidate order. The
+  refittable mode retains `parent` pointers and per-tree `leaf_to_node` maps so
+  `refit_bvh_leaf` and `incremental_refresh_vertex` can perform `O(log N)`
+  partial refits for `global_gauss_seidel_solver_ogc`.
 - `safe_step.h` / `safe_step.cpp` -- per-vertex node-box clipping, rigid
   quaternion-cap clipping, OGC trust-region bounds, and CCD safe stepping.
 
@@ -616,13 +583,17 @@ reader can jump to the layer they care about.
     updates, rigid barrier and SDF assembly, anchored blue boxes, contact
     coloring, candidate-only barrier/CCD work, and exact solver-requested
     derivative blocks.
+  - `global_gauss_seidel_solver_basic_general`: one block ordering for cloth
+    vertices, solid vertices, and rigid bodies, with a shared compact elastic/
+    contact conflict graph and parallel-by-color updates.
 
   The two deformable solvers share non-barrier per-vertex gradient/Hessian
   assembly and node-box mechanics, but use live versus frozen barrier
   stencils.
 - `parallel_helper.h` / `parallel_helper.cpp` -- helpers for elastic
   adjacency, contact adjacency, rigid-node blue boxes, rigid contact ownership
-  filtering, adjacency union, and deterministic greedy coloring.
+  filtering, compact lower-neighbor conflict graphs, adjacency union, and
+  deterministic greedy coloring.
 
 ### Rigid bodies
 
@@ -643,47 +614,45 @@ reader can jump to the layer they care about.
   and `frame_50_checkpoint`, which are the fixtures consumed by
   `simulation_snapshot_test` and `restart_test`.
 
-## Tests
+## Test coverage
 
-CTest currently discovers 429 GoogleTest cases split into focused binaries.
-To build and run them all:
-
-    cmake -B build
-    cmake --build build --clean-first
-    ctest --test-dir build --output-on-failure
+CTest currently discovers 432 GoogleTest cases across 23 focused binaries. Use
+the centralized [build and test commands](#build-and-test) to run or list them.
 
 | Test binary | Cases | What it covers |
-|-------------|-------|----------------|
-| `ccd_test` | 54 | Linear CCD single-moving-DOF, scale/coplanar stress cases, TICCD-backed general NT/SS wrappers, and rigid rotational CCD |
-| `rigid_body_ipc_test` | 71 | Quaternion kinematics/derivatives, reduced inertial energy, mesh/SDF friction in deformable and rigid solvers, shared-contact local-assembly parity, update labels, blue-box enforcement, and rigid translation/rotation safe steps |
-| `broad_phase_test` | 25 | AABB, BVH, pair generation/order, CCD candidates, safe stepping, conservativeness, and `incremental_refresh_vertex` partial refit |
-| `ipc_math_test` | 14 | `matrix3d_inverse`, `segment_closest_point`, barycentric coordinates, and topology caching |
-| `sdf_penalty_energy_test` | 20 | Plane / cylinder / sphere and rigid-body SDF energy derivatives, cached rigid derivative parity, material-pose mapping/validation, hard-quadratic limit, and soft-barrier rest at `phi=eps` |
-| `bending_energy_test` | 19 | Hinge energy, dihedral angle, gradient/Hessian FD convergence, rigid-motion invariance |
-| `parallel_helper_test` | 13 | Contact adjacency, rigid ownership filtering/coloring, spherical-cap AABBs, and rigid blue boxes |
-| `segment_segment_distance_test` | 17 | All 9 Voronoi regions + parallel + degenerate + symmetry + stress |
-| `make_shape_test` | 29 | Incident-triangle maps, alternating-diagonal square-mesh symmetry, mixed cloth/rigid/solid scene construction, normalized TetGen solids, Example 19 crusher initial angular-velocity configuration and input validation, Example 20 four-row mixed-body construction, Example 21 rolled-cloth SDF ramp/ground construction, and restart-safe prescribed SDF material motion |
-| `solid_ipc_test` | 41 | Volumetric corotated solid energy/derivatives, mixed general-solver integration, mesh/SDF friction assembly, boundary-node filtering, and reaction against fixed labeled rigid geometry |
-| `barrier_energy_test` | 29 | Scalar barrier, all NT/SS feature regions, force partition, deformable/rigid derivative blocks and modes, ephemeral shared-contact parity, inactive/zero-stiffness handling, and stress cases |
-| `friction_energy_test` | 21 | Smoothed Coulomb potential, NT/SS and analytic-SDF contacts, prescribed surface motion, frozen gradients, lagged PSD Hessians, exhaustive shared-contact assembly parity, action-reaction cancellation, scaling, and validation |
-| `corotated_energy_test` | 11 | Rest state, invariance, gradient/Hessian FD convergence, and stress cases |
-| `initial_guess_test` | 5 | CCD no-candidate, Verlet gravity, and translation closed forms for inertia/gravity, pins, and one-step plane-SDF correction |
-| `time_integration_test` | 1 | Position-difference velocity updates |
+|-------------|------:|----------------|
+| `barrier_energy_test` | 29 | Scalar and primitive IPC barriers, deformable/rigid derivatives, inactive contact, and validation |
+| `bending_energy_test` | 19 | Hinge energy, dihedral angle, finite-difference derivatives, and rigid-motion invariance |
+| `broad_phase_test` | 32 | AABBs, BVHs, pair generation/order, solver storage modes, CCD candidates, safe stepping, conservativeness, and partial refits |
+| `ccd_test` | 54 | Linear single-moving-DOF CCD, scale/coplanar stress cases, TICCD general NT/SS wrappers, and rigid rotational CCD |
+| `corotated_energy_test` | 11 | Membrane rest state, invariance, finite-difference derivatives, and stress cases |
+| `friction_energy_test` | 21 | Smoothed Coulomb mesh/SDF contact, prescribed motion, frozen gradients, PSD Hessians, scaling, and validation |
+| `initial_guess_test` | 5 | CCD, Verlet, and translation-restricted initial guesses |
+| `io_test` | 11 | TetGen input, malformed-input handling, and validated OBJ output |
+| `ipc_math_test` | 14 | Matrix inversion, segment closest points, barycentric coordinates, and topology caching |
+| `make_shape_test` | 29 | Mesh construction, imported-scene normalization, Examples 19–21, and restart-safe prescribed SDF motion |
+| `mesh_test` | 8 | Tetrahedral boundary extraction, TGSL ordering, topology validation, and scale-aware degeneracy checks |
+| `node_triangle_distance_test` | 9 | All seven proximity regions, signed distance, and degenerate triangles |
+| `parallel_helper_test` | 20 | Compact contact adjacency, rigid ownership/coloring, spherical-cap AABBs, and rigid blue boxes |
+| `rigid_body_ipc_test` | 71 | Quaternion and reduced-body derivatives, mesh/SDF contact and friction, update labels, trust boxes, and rigid safe steps |
+| `sdf_penalty_energy_test` | 20 | Plane, cylinder, and sphere penalties; rigid derivatives; material poses; and hard/soft limits |
+| `segment_segment_distance_test` | 17 | All nine proximity regions, parallel/degenerate cases, symmetry, and stress cases |
+| `solid_ipc_test` | 41 | Volumetric solids, mixed-solver integration, mesh/SDF friction, boundary filtering, and fixed-rigid reaction |
 | `state_io_test` | 1 | Binary checkpoint round trip |
-| `node_triangle_distance_test` | 9 | All 7 proximity regions + signed distance + degenerate |
-| `output_test` | 2 | Debug OBJ/BVH export for manual inspection |
+| `time_integration_test` | 2 | Scalar and large-array position-difference velocity updates |
+| `volumetric_corotated_energy_test` | 14 | Tet energy and derivatives, TGSL parity, inverted elements, cache modes, and validation |
 | `simulation_snapshot_test` | 1 | Golden-file regression over the 100-frame reference trajectory |
-| `restart_test` | 1 | Checkpoint resume matches golden |
+| `restart_test` | 1 | Checkpoint resume against the golden trajectory |
+| `output_test` | 2 | Debug OBJ and BVH export |
 
-List every discovered test case:
+## Development guidance
 
-    ctest --test-dir build -N -V
-
-Run any suite directly:
-
-    ./build/ccd_test
-    ./build/bending_energy_test
-    ./build/parallel_helper_test
+Before adding an implementation, check the libraries and local wrappers already
+used by the project. Start from `CMakeLists.txt` and the relevant headers to see
+what Eigen, Tight-Inclusion CCD, GoogleTest, and OpenMP provide. After CMake
+configuration, inspect `build/_deps/` and `CPM_modules/` when relevant. Prefer
+an existing project helper or maintained library API over duplicating math,
+geometry, collision detection, testing, or build logic.
 
 ## Acknowledgments
 
@@ -696,6 +665,12 @@ Our general (multi-vertex motion) continuous collision detection is provided by
 
 The library is fetched automatically at configure time via CMake's
 `FetchContent`. See its repository for license and citation details.
+
+Our friction model follows:
+
+> Anka He Chen, Ziheng Liu, Yin Yang, and Cem Yuksel. *Vertex Block Descent.*
+> ACM Transactions on Graphics 43(4), Article 116, July 2024.
+> [doi:10.1145/3658179](https://doi.org/10.1145/3658179)
 
 Our OGC narrow phase and `global_gauss_seidel_solver_ogc` implement:
 
