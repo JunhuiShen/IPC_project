@@ -267,3 +267,38 @@ void build_cloth_unrolling_down_fixed_ramp_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris);
+
+// Example 22: three parallel cloth sheets form a close stack. One complete
+// short edge of every sheet is fixed, while the opposite edge is prescribed
+// to oscillate along +y; the two lateral edges are free. The driven targets
+// are evaluated from their immutable t=0 positions so checkpoint restarts
+// recover the same phase without depending on updater call history.
+struct OscillatingClothLayersSpec {
+    std::vector<int> driven_pin_indices;
+    std::vector<Vec3> driven_initial_targets;
+    Vec3 motion_direction{Vec3::UnitY()};
+    double amplitude = 0.0;
+    double frequency_hz = 0.0;
+};
+
+void build_oscillating_cloth_layers_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params,
+    OscillatingClothLayersSpec& spec);
+
+void update_oscillating_cloth_layer_pins(
+    std::vector<Pin>& pins,
+    const OscillatingClothLayersSpec& spec,
+    double t);
+
+// Example 23: the rigid IPC paper's wrecking-ball benchmark. Thirteen
+// interlinked rigid rings and a ball with an integrated terminal ring swing
+// from one fixed top link into a wall of 560 rigid cubes. The reference's
+// complete scene is translated +1 m in y; its fixed plane is represented at
+// y=0 by an analytic SDF ground plus a visual quad.
+void build_wrecking_ball_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params,
+    std::vector<Vec3>& static_x, std::vector<int>& static_tris);

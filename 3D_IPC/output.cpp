@@ -118,6 +118,7 @@ namespace {
         out << "                    ]\n";
         out << "                ]\n";
         out << "            ],\n";
+
         // Color Attribute
             out << "            [\n";
         // Descriptor array (alternating key/value, not a JSON object)
@@ -546,6 +547,7 @@ void write_substep_data(const SimParams& params, const BroadPhase& broad_phase, 
     const std::string prefix = (outdir.empty() ? "" : outdir + "/");
     const std::string subdir = prefix + "substep_" + std::to_string(step);
     std::filesystem::create_directories(subdir);
+
     const auto& bpc = broad_phase.cache();
 
     // --- barrier distances file ---

@@ -32,6 +32,7 @@ int main(int argc, char** argv) {
     TwistSpec          twist_spec;
     CylinderTwistSpec  cyl_twist_spec;
     TwistUntwistSpec   tu_spec;
+    OscillatingClothLayersSpec oscillating_layers_spec;
 
     std::vector<Vec3> static_x;
     std::vector<int>  static_tris;
@@ -57,8 +58,10 @@ int main(int argc, char** argv) {
     else if (args.example == 19) build_armadillo_through_gear_crushers_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 20) build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 21) build_cloth_unrolling_down_fixed_ramp_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
+    else if (args.example == 22) build_oscillating_cloth_layers_example(args, ref_mesh, state, X, pins, params, oscillating_layers_spec);
+    else if (args.example == 23) build_wrecking_ball_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23.\n";
         return 1;
     }
 
@@ -84,6 +87,12 @@ int main(int argc, char** argv) {
         };
     } else if (args.example == 4) {
         // TODO: avatar clothing pin updater
+    } else if (args.example == 22) {
+        pin_updater = [&oscillating_layers_spec](
+                          std::vector<Pin>& p, double t) {
+            update_oscillating_cloth_layer_pins(
+                p, oscillating_layers_spec, t);
+        };
     }
 
     const int num_vertices = static_cast<int>(state.deformed_positions.size());

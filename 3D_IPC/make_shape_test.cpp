@@ -4543,3 +4543,510 @@ TEST(SdfMaterialMotionExample,
                     restarted.material_motion, current_surface)
                     .isApprox(expected_previous_surface, 2.0e-14));
 }
+
+TEST(OscillatingClothLayersExample,
+     DefaultSceneMatchesPaperFixedAndOppositeDrivenEdges) {
+    IPCArgs3D args;
+    args.E = 2.5e8;
+    args.nu = 0.25;
+    args.thickness = 0.001;
+    args.k_barrier = 1.0e5;
+    args.friction_coefficient = 0.1;
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    OscillatingClothLayersSpec spec;
+    build_oscillating_cloth_layers_example(
+        args, ref_mesh, state, X, pins, params, spec);
+
+    constexpr int layer_count = 3;
+    constexpr int nodes_per_axis = 50;
+    constexpr int cells_per_axis = 49;
+    constexpr int nodes_per_layer = nodes_per_axis * nodes_per_axis;
+    constexpr int triangles_per_layer =
+        2 * cells_per_axis * cells_per_axis;
+    constexpr int hinges_per_layer =
+        3 * cells_per_axis * cells_per_axis
+        - 2 * cells_per_axis;
+
+    EXPECT_EQ(state.deformed_positions.size(), 7500U);
+    EXPECT_EQ(state.velocities.size(), 7500U);
+    EXPECT_EQ(X.size(), 7500U);
+    EXPECT_EQ(ref_mesh.tris.size() / 3, 14406U);
+    EXPECT_EQ(ref_mesh.hinges.size(),
+              static_cast<std::size_t>(layer_count * hinges_per_layer));
+    EXPECT_EQ(ref_mesh.deformable_nodes.size(), 7500U);
+    EXPECT_EQ(pins.size(), 300U);
+    EXPECT_EQ(spec.driven_pin_indices.size(), 150U);
+    EXPECT_EQ(spec.driven_initial_targets.size(), 150U);
+
+    EXPECT_NEAR(params.mu, 1.0e5, 1.0e-10);
+    EXPECT_NEAR(params.lambda, 1.0e5, 1.0e-10);
+    EXPECT_DOUBLE_EQ(params.k_barrier, 1.0e5);
+    EXPECT_DOUBLE_EQ(params.friction_coefficient, 0.1);
+    EXPECT_DOUBLE_EQ(params.d_hat, 0.002);
+    EXPECT_GT(args.osc_layer_gap, params.d_hat);
+    EXPECT_DOUBLE_EQ(params.k_sdf, 0.0);
+    EXPECT_TRUE(params.sdf_planes.empty());
+    EXPECT_TRUE(params.sdf_cylinders.empty());
+    EXPECT_TRUE(params.sdf_spheres.empty());
+    EXPECT_TRUE(ref_mesh.tets.empty());
+    EXPECT_TRUE(ref_mesh.rb_nodes.empty());
+
+    for (const Vec3& velocity : state.velocities)
+        EXPECT_TRUE(velocity.isZero(0.0));
+
+    for (int layer = 0; layer < layer_count; ++layer) {
+        const int node_begin = layer * nodes_per_layer;
+        const int node_end = node_begin + nodes_per_layer;
+        const double expected_y = 0.20
+            + static_cast<double>(layer - 1) * args.osc_layer_gap;
+        for (int local_node = 0; local_node < nodes_per_layer;
+             ++local_node) {
+            EXPECT_NEAR(
+                state.deformed_positions[static_cast<std::size_t>(
+                    node_begin + local_node)].y(),
+                expected_y, 1.0e-15);
+        }
+
+        const int triangle_begin = layer * triangles_per_layer;
+        const int triangle_end = triangle_begin + triangles_per_layer;
+        for (int triangle = triangle_begin; triangle < triangle_end;
+             ++triangle) {
+            for (int local = 0; local < 3; ++local) {
+                const int vertex = ref_mesh.tris[
+                    static_cast<std::size_t>(3 * triangle + local)];
+                EXPECT_GE(vertex, node_begin);
+                EXPECT_LT(vertex, node_end);
+            }
+        }
+
+        for (int j = 0; j < nodes_per_axis; ++j) {
+            const int edge_entry = layer * nodes_per_axis + j;
+            const int driven_pin_index = 2 * edge_entry;
+            const int fixed_pin_index = driven_pin_index + 1;
+            const int driven_vertex = node_begin + j * nodes_per_axis;
+            const int fixed_vertex = driven_vertex + cells_per_axis;
+
+            EXPECT_EQ(spec.driven_pin_indices[
+                          static_cast<std::size_t>(edge_entry)],
+                      driven_pin_index);
+            EXPECT_EQ(pins[static_cast<std::size_t>(driven_pin_index)]
+                          .vertex_index,
+                      driven_vertex);
+            EXPECT_EQ(pins[static_cast<std::size_t>(fixed_pin_index)]
+                          .vertex_index,
+                      fixed_vertex);
+            EXPECT_TRUE(pins[static_cast<std::size_t>(driven_pin_index)]
+                            .target_position.isApprox(
+                                state.deformed_positions[
+                                    static_cast<std::size_t>(driven_vertex)],
+                                0.0));
+            EXPECT_TRUE(pins[static_cast<std::size_t>(fixed_pin_index)]
+                            .target_position.isApprox(
+                                state.deformed_positions[
+                                    static_cast<std::size_t>(fixed_vertex)],
+                                0.0));
+        }
+
+        // Only the fixed and driven edges are constrained. The two lateral
+        // edges are free except at their shared clamped corner vertices.
+        std::vector<bool> is_pinned(
+            static_cast<std::size_t>(nodes_per_layer), false);
+        for (const Pin& pin : pins) {
+            if (pin.vertex_index >= node_begin && pin.vertex_index < node_end) {
+                is_pinned[static_cast<std::size_t>(
+                    pin.vertex_index - node_begin)] = true;
+            }
+        }
+        for (int j = 0; j < nodes_per_axis; ++j) {
+            EXPECT_TRUE(is_pinned[static_cast<std::size_t>(
+                j * nodes_per_axis)]);
+            EXPECT_TRUE(is_pinned[static_cast<std::size_t>(
+                j * nodes_per_axis + cells_per_axis)]);
+        }
+        for (int i = 1; i < cells_per_axis; ++i) {
+            EXPECT_FALSE(is_pinned[static_cast<std::size_t>(i)]);
+            EXPECT_FALSE(is_pinned[static_cast<std::size_t>(
+                (nodes_per_axis - 1) * nodes_per_axis + i)]);
+        }
+    }
+}
+
+TEST(OscillatingClothLayersExample,
+     SignedSinusoidUsesAbsoluteTimeAndLeavesFixedEdgeUnchanged) {
+    IPCArgs3D args;
+    args.osc_nx = 2;
+    args.osc_nz = 2;
+    args.osc_length = 0.60;
+    args.osc_width = 0.30;
+    args.osc_layer_gap = 0.02;
+    args.osc_amplitude = 0.08;
+    args.osc_frequency = 0.25;
+    args.d_hat = 0.01;
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    OscillatingClothLayersSpec spec;
+    build_oscillating_cloth_layers_example(
+        args, ref_mesh, state, X, pins, params, spec);
+
+    ASSERT_EQ(pins.size(), 18U);
+    ASSERT_EQ(spec.driven_pin_indices.size(), 9U);
+    ASSERT_EQ(spec.driven_initial_targets.size(), 9U);
+    const std::vector<Pin> initial_pins = pins;
+
+    const double quarter_period = 0.25 / args.osc_frequency;
+    update_oscillating_cloth_layer_pins(
+        pins, spec, quarter_period);
+    const std::vector<Pin> quarter_period_pins = pins;
+
+    for (std::size_t driven = 0;
+         driven < spec.driven_pin_indices.size(); ++driven) {
+        const std::size_t pin_index = static_cast<std::size_t>(
+            spec.driven_pin_indices[driven]);
+        const Vec3 expected = spec.driven_initial_targets[driven]
+            + args.osc_amplitude * Vec3::UnitY();
+        EXPECT_TRUE(pins[pin_index].target_position.isApprox(
+            expected, 1.0e-14));
+    }
+    for (std::size_t pin_index = 1; pin_index < pins.size();
+         pin_index += 2) {
+        EXPECT_TRUE(pins[pin_index].target_position.isApprox(
+            initial_pins[pin_index].target_position, 0.0));
+    }
+
+    // Visiting another phase first must not change a later result: the
+    // updater reconstructs each target from its immutable t=0 position.
+    const double half_period = 0.5 / args.osc_frequency;
+    update_oscillating_cloth_layer_pins(pins, spec, half_period);
+    for (std::size_t driven = 0;
+         driven < spec.driven_pin_indices.size(); ++driven) {
+        const std::size_t pin_index = static_cast<std::size_t>(
+            spec.driven_pin_indices[driven]);
+        const Vec3& expected = spec.driven_initial_targets[driven];
+        EXPECT_TRUE(pins[pin_index].target_position.isApprox(
+            expected, 1.0e-14));
+    }
+    update_oscillating_cloth_layer_pins(
+        pins, spec, quarter_period);
+    for (std::size_t pin_index = 0; pin_index < pins.size(); ++pin_index) {
+        EXPECT_TRUE(pins[pin_index].target_position.isApprox(
+            quarter_period_pins[pin_index].target_position, 1.0e-14));
+    }
+
+    // A freshly rebuilt scene (the restart path) evaluated directly at the
+    // same absolute time must recover the identical pin targets.
+    RefMesh restarted_ref_mesh;
+    DeformedState restarted_state;
+    std::vector<Vec2> restarted_X;
+    std::vector<Pin> restarted_pins;
+    SimParams restarted_params = args.to_sim_params();
+    OscillatingClothLayersSpec restarted_spec;
+    build_oscillating_cloth_layers_example(
+        args, restarted_ref_mesh, restarted_state, restarted_X,
+        restarted_pins, restarted_params, restarted_spec);
+    update_oscillating_cloth_layer_pins(
+        restarted_pins, restarted_spec, quarter_period);
+    ASSERT_EQ(restarted_pins.size(), quarter_period_pins.size());
+    for (std::size_t pin_index = 0;
+         pin_index < restarted_pins.size(); ++pin_index) {
+        EXPECT_TRUE(restarted_pins[pin_index].target_position.isApprox(
+            quarter_period_pins[pin_index].target_position, 1.0e-14));
+    }
+
+    // A full cycle samples the complete signed range while fixed targets stay
+    // bitwise unchanged.
+    const double period = 1.0 / args.osc_frequency;
+    for (const double time : {
+             0.0, 0.25 * period, 0.5 * period,
+             0.75 * period, period}) {
+        update_oscillating_cloth_layer_pins(pins, spec, time);
+        for (std::size_t driven = 0;
+             driven < spec.driven_pin_indices.size(); ++driven) {
+            const std::size_t pin_index = static_cast<std::size_t>(
+                spec.driven_pin_indices[driven]);
+            const double lift = pins[pin_index].target_position.y()
+                - spec.driven_initial_targets[driven].y();
+            EXPECT_GE(lift, -args.osc_amplitude - 1.0e-14);
+            EXPECT_LE(lift, args.osc_amplitude + 1.0e-14);
+        }
+        for (std::size_t pin_index = 1; pin_index < pins.size();
+             pin_index += 2) {
+            EXPECT_TRUE(pins[pin_index].target_position.isApprox(
+                initial_pins[pin_index].target_position, 0.0));
+        }
+    }
+}
+
+TEST(WreckingBallExample,
+     BuildsTranslatedFigureEightCompositionAndTightlyPackedWall) {
+    IPCArgs3D args;
+    args.d_hat = 0.01; // deliberately large, to exercise the mesh-edge clamp
+    args.eps_sdf = 0.002;
+    args.k_sdf = 123456.0;
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    std::vector<Vec3> static_x;
+    std::vector<int> static_tris;
+
+    build_wrecking_ball_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris);
+
+    constexpr int ordinary_links = 13;
+    constexpr int chain_bodies = 14;
+    constexpr int cubes = 8 * 7 * 10;
+    constexpr int rigid_bodies = chain_bodies + cubes;
+    constexpr int link_vertices = 220;
+    constexpr int link_triangles = 440;
+    constexpr int ball_vertices = 312;
+    constexpr int ball_triangles = 624;
+    constexpr int cube_vertices = 8;
+    constexpr int cube_triangles = 12;
+    constexpr double cube_edge = 1.0;
+    constexpr double cube_density = 1000.0;
+    constexpr double cube_gap = 0.002;
+    constexpr double cube_spacing = cube_edge + cube_gap;
+    constexpr double cube_ground_clearance = 0.002;
+    constexpr int total_vertices =
+        ordinary_links * link_vertices + ball_vertices
+        + cubes * cube_vertices;
+    constexpr int total_triangles =
+        ordinary_links * link_triangles + ball_triangles
+        + cubes * cube_triangles;
+
+    EXPECT_EQ(state.deformed_positions.size(), total_vertices);
+    EXPECT_EQ(state.velocities.size(), total_vertices);
+    EXPECT_EQ(ref_mesh.num_positions, total_vertices);
+    EXPECT_EQ(ref_mesh.tris.size(), 3 * total_triangles);
+    EXPECT_EQ(ref_mesh.mass.size(), total_vertices);
+    EXPECT_EQ(ref_mesh.node_to_rb.size(), total_vertices);
+    EXPECT_EQ(ref_mesh.total_mass.size(), rigid_bodies);
+    EXPECT_EQ(ref_mesh.I_hat.size(), rigid_bodies);
+    EXPECT_EQ(ref_mesh.ref_positions.size(), rigid_bodies);
+    EXPECT_EQ(ref_mesh.rb_nodes.size(), rigid_bodies);
+    EXPECT_EQ(ref_mesh.rb_update_modes.size(), rigid_bodies);
+    EXPECT_EQ(state.x_coms.size(), rigid_bodies);
+    EXPECT_EQ(state.v_coms.size(), rigid_bodies);
+    EXPECT_EQ(state.orientations.size(), rigid_bodies);
+    EXPECT_EQ(state.omega.size(), rigid_bodies);
+    EXPECT_TRUE(X.empty());
+    EXPECT_TRUE(pins.empty());
+    EXPECT_TRUE(ref_mesh.Dm_inverse.empty());
+    EXPECT_TRUE(ref_mesh.area.empty());
+    EXPECT_TRUE(ref_mesh.hinges.empty());
+    EXPECT_TRUE(ref_mesh.tets.empty());
+    EXPECT_TRUE(ref_mesh.tet_nodes.empty());
+    EXPECT_TRUE(ref_mesh.surface_nodes.empty());
+    EXPECT_TRUE(ref_mesh.deformable_nodes.empty());
+
+    ASSERT_EQ(ref_mesh.rb_nodes[0].size(), link_vertices);
+    EXPECT_EQ(
+        ref_mesh.rb_update_modes[0], RigidBodyUpdateMode::None);
+    for (int body = 1; body < rigid_bodies; ++body) {
+        SCOPED_TRACE(body);
+        EXPECT_EQ(
+            ref_mesh.rb_update_modes[body],
+            RigidBodyUpdateMode::TranslationAndOrientation);
+    }
+    for (int link = 0; link < ordinary_links; ++link)
+        EXPECT_EQ(ref_mesh.rb_nodes[link].size(), link_vertices);
+    EXPECT_EQ(ref_mesh.rb_nodes[ordinary_links].size(), ball_vertices);
+    for (int cube = 0; cube < cubes; ++cube) {
+        EXPECT_EQ(
+            ref_mesh.rb_nodes[chain_bodies + cube].size(),
+            cube_vertices);
+    }
+
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double scene_y_translation = 1.0;
+    constexpr double fixture_y_offset = 12.0 + scene_y_translation;
+    constexpr double ground_y = -1.0 + scene_y_translation;
+    const Vec4 even_orientation(
+        std::cos(kPi / 6.0), 0.0, 0.0, -std::sin(kPi / 6.0));
+    const Vec4 odd_orientation = quaternion_normalize(
+        quaternion_multiply(
+            even_orientation,
+            Vec4(std::cos(kPi / 4.0), 0.0,
+                 std::sin(kPi / 4.0), 0.0)));
+    for (int link = 0; link < chain_bodies; ++link) {
+        SCOPED_TRACE(link);
+        const Vec4& expected = link % 2 == 0
+            ? even_orientation : odd_orientation;
+        EXPECT_TRUE(state.orientations[link].isApprox(expected, 1.0e-14));
+        EXPECT_TRUE(state.v_coms[link].isZero(0.0));
+        EXPECT_TRUE(state.omega[link].isZero(0.0));
+    }
+
+    const Vec3 fixed_link_fixture_position(
+        14.0 * 0.9 * std::cos(kPi / 6.0),
+        fixture_y_offset + 14.0 * 0.9 * std::sin(kPi / 6.0),
+        0.0);
+    const Vec3 link_source_volume_center(
+        -3.943106929974605e-08,
+         4.6749638500182615e-17,
+         3.0341234516000693e-07);
+    const Vec3 expected_first_link_vertex = fixed_link_fixture_position
+        + quaternion_rotate(
+            even_orientation, Vec3(-0.5, 0.25, 0.0));
+    EXPECT_TRUE(state.deformed_positions.front().isApprox(
+        expected_first_link_vertex, 1.0e-13));
+    for (int link = 0; link < ordinary_links; ++link) {
+        const double chain_coordinate =
+            static_cast<double>(chain_bodies - link) * 0.9;
+        const Vec3 fixture_position(
+            chain_coordinate * std::cos(kPi / 6.0),
+            fixture_y_offset
+                + chain_coordinate * std::sin(kPi / 6.0), 0.0);
+        const Vec4& orientation = link % 2 == 0
+            ? even_orientation : odd_orientation;
+        const Vec3 expected_volume_center = fixture_position
+            + quaternion_rotate(orientation, link_source_volume_center);
+        SCOPED_TRACE(link);
+        EXPECT_TRUE(state.x_coms[link].isApprox(
+            expected_volume_center, 1.0e-11));
+    }
+
+    // The asymmetric ball OBJ is authored around a model origin at the top
+    // of the sphere/link assembly. Checking the first raw vertices after the
+    // fixture transforms catches accidental AABB recentering by the importer.
+    const double ball_chain_coordinate = 0.9;
+    const Vec3 ball_fixture_position(
+        ball_chain_coordinate * std::cos(kPi / 6.0),
+        fixture_y_offset
+            + ball_chain_coordinate * std::sin(kPi / 6.0),
+        0.0);
+    const Vec3 expected_first_ball_vertex = ball_fixture_position
+        + quaternion_rotate(odd_orientation, Vec3(0.0, -4.0, 0.0));
+    const Vec3 ball_source_volume_center(
+        -6.2641546529628083e-06,
+        -1.9960208409024394,
+         4.4390931976959495e-08);
+    const int first_ball_vertex = ordinary_links * link_vertices;
+    EXPECT_TRUE(state.deformed_positions[first_ball_vertex].isApprox(
+        expected_first_ball_vertex, 1.0e-13));
+    EXPECT_TRUE(state.x_coms[ordinary_links].isApprox(
+        ball_fixture_position
+            + quaternion_rotate(odd_orientation, ball_source_volume_center),
+        1.0e-10));
+
+    constexpr double expected_link_mass = 783.6929009084646;
+    constexpr double expected_ball_mass = 249066.25120239827;
+    for (int link = 0; link < ordinary_links; ++link) {
+        EXPECT_NEAR(
+            ref_mesh.total_mass[link], expected_link_mass, 1.0e-8);
+    }
+    EXPECT_NEAR(
+        ref_mesh.total_mass[ordinary_links], expected_ball_mass, 1.0e-7);
+
+    const double fixed_link_x = 14.0 * 0.9 * std::cos(kPi / 6.0);
+    const Vec3 first_cube_center(
+        fixed_link_x + 0.5 - 4.0,
+        ground_y + 0.5 * cube_edge + cube_ground_clearance,
+        0.5 - 5.0);
+    for (int width = 0; width < 8; ++width) {
+        for (int height = 0; height < 7; ++height) {
+            for (int depth = 0; depth < 10; ++depth) {
+                const int cube = (width * 7 + height) * 10 + depth;
+                const int body = chain_bodies + cube;
+                const Vec3 expected_center = first_cube_center
+                    + cube_spacing * Vec3(
+                        static_cast<double>(width),
+                        static_cast<double>(height),
+                        static_cast<double>(depth));
+                SCOPED_TRACE(cube);
+                EXPECT_TRUE(state.x_coms[body].isApprox(
+                    expected_center, 1.0e-14));
+                EXPECT_DOUBLE_EQ(ref_mesh.total_mass[body], cube_density);
+                EXPECT_TRUE(ref_mesh.I_hat[body].isApprox(
+                    (cube_density / 12.0) * Mat33::Identity(), 1.0e-11));
+                EXPECT_TRUE(state.v_coms[body].isZero(0.0));
+                EXPECT_TRUE(state.omega[body].isZero(0.0));
+            }
+        }
+    }
+
+    for (int body = 0; body < rigid_bodies; ++body) {
+        for (const int node : ref_mesh.rb_nodes[body]) {
+            ASSERT_GE(node, 0);
+            ASSERT_LT(node, total_vertices);
+            EXPECT_EQ(ref_mesh.node_to_rb[node], body);
+            EXPECT_TRUE(state.velocities[node].isZero(0.0));
+        }
+        EXPECT_GT(ref_mesh.total_mass[body], 0.0);
+        EXPECT_TRUE(ref_mesh.I_hat[body].allFinite());
+    }
+
+    EXPECT_TRUE(params.gravity.isApprox(
+        Vec3(args.gx, args.gy, args.gz), 0.0));
+    EXPECT_DOUBLE_EQ(params.k_sdf, args.k_sdf);
+    EXPECT_DOUBLE_EQ(params.eps_sdf, args.eps_sdf);
+    ASSERT_EQ(params.sdf_planes.size(), 1u);
+    EXPECT_TRUE(params.sdf_planes[0].point.isApprox(
+        Vec3(fixed_link_x, ground_y, 0.0), 1.0e-14));
+    EXPECT_DOUBLE_EQ(params.sdf_planes[0].point.y(), 0.0);
+    EXPECT_TRUE(params.sdf_planes[0].normal.isApprox(
+        Vec3::UnitY(), 0.0));
+    EXPECT_TRUE(params.sdf_cylinders.empty());
+    EXPECT_TRUE(params.sdf_spheres.empty());
+    EXPECT_FALSE(params.use_ccd_guess);
+    EXPECT_FALSE(params.use_verlet_guess);
+    EXPECT_FALSE(params.use_translation_guess);
+    EXPECT_FALSE(params.use_ogc);
+    EXPECT_FALSE(params.use_ogc_solver);
+
+    ASSERT_EQ(static_x.size(), 4u);
+    EXPECT_EQ(static_tris, (std::vector<int>{0, 1, 2, 0, 2, 3}));
+    Vec3 visual_lower = static_x.front();
+    Vec3 visual_upper = static_x.front();
+    for (const Vec3& vertex : static_x) {
+        visual_lower = visual_lower.cwiseMin(vertex);
+        visual_upper = visual_upper.cwiseMax(vertex);
+    }
+    EXPECT_TRUE(visual_lower.isApprox(
+        Vec3(fixed_link_x - 10.0, ground_y, -10.0), 1.0e-14));
+    EXPECT_TRUE(visual_upper.isApprox(
+        Vec3(fixed_link_x + 10.0, ground_y, 10.0), 1.0e-14));
+
+    double minimum_surface_edge = std::numeric_limits<double>::infinity();
+    for (int triangle = 0; triangle < total_triangles; ++triangle) {
+        for (int local = 0; local < 3; ++local) {
+            const int first = ref_mesh.tris[3 * triangle + local];
+            const int second = ref_mesh.tris[
+                3 * triangle + (local + 1) % 3];
+            minimum_surface_edge = std::min(
+                minimum_surface_edge,
+                (state.deformed_positions[second]
+                 - state.deformed_positions[first]).norm());
+        }
+    }
+    EXPECT_NEAR(
+        params.d_hat,
+        std::min(0.45 * minimum_surface_edge, 0.5 * cube_gap),
+        1.0e-15);
+    EXPECT_LT(params.d_hat, args.d_hat);
+
+    // Every body starts outside the SDF's active penalty band. The first cube
+    // layer has the same tight 2 mm clearance as adjacent cubes.
+    double minimum_ground_distance = std::numeric_limits<double>::infinity();
+    double minimum_world_y = std::numeric_limits<double>::infinity();
+    for (const Vec3& position : state.deformed_positions) {
+        minimum_ground_distance = std::min(
+            minimum_ground_distance, position.y() - ground_y);
+        minimum_world_y = std::min(minimum_world_y, position.y());
+    }
+    EXPECT_NEAR(
+        minimum_ground_distance, cube_ground_clearance, 1.0e-14);
+    EXPECT_GT(minimum_world_y, 0.0);
+    EXPECT_NEAR(
+        minimum_ground_distance, params.eps_sdf, 1.0e-14);
+}

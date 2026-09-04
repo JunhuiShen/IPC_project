@@ -157,6 +157,12 @@ public:
     // derived as the union of their vertex boxes (i.e. red boxes).
     void initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat = 0.0, InitializationMode mode = InitializationMode::Refittable);
 
+    // Install only the per-vertex motion boxes needed by node-box step
+    // clipping. Contact pairs, contact-incidence arrays, primitive boxes, and
+    // BVHs are cleared; reusable mesh-topology arrays remain. This performs no
+    // contact search and must not be followed by incremental BVH refit/query.
+    void initialize_node_boxes_only(const std::vector<AABB>& vertex_boxes);
+
     // Re-query NT and SS pair lists from the current BVH state without
     // rebuilding the BVHs. Used by global_gauss_seidel_solver_ogc after
     // incremental_refresh_vertex has updated BVH leaves to reflect per-vertex

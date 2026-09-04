@@ -631,6 +631,8 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     std::vector<std::vector<int>>& bca = workspace.contact_adjacency;
     std::vector<std::vector<int>>& combined_adj = workspace.combined_adjacency;
     std::vector<std::vector<int>>& color_groups = workspace.color_groups;
+    const bool needs_mesh_contact_search =
+        params.d_hat > 0.0 || params.use_ccd || params.use_ogc;
     const auto compute_residual = [&]() {
         build_frozen_residual_workspace(
             ref_mesh, params, xnew, broad_phase,
@@ -654,15 +656,23 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                 const double r = node_box_size_fn(i);
                 blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
             }
-            //rebuild bvh and pairs
-            broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::DeformableSolver);
-            build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()), bca);
-            //color
-            union_adjacency(ea, bca, combined_adj);
-            greedy_color_conflict_graph(combined_adj, color_groups, &workspace.coloring_workspace);
-            const BroadPhase::Cache& bp_cache = broad_phase.cache();
-            // Vertices in one color share no dependencies, so process contact-heavy vertices first to avoid end-of-color stragglers.
-            for (std::vector<int>& group : color_groups) std::stable_sort(group.begin(), group.end(), [&](const int a, const int b) { return bp_cache.vertex_nt[static_cast<std::size_t>(a)].size() + bp_cache.vertex_ss[static_cast<std::size_t>(a)].size() > bp_cache.vertex_nt[static_cast<std::size_t>(b)].size() + bp_cache.vertex_ss[static_cast<std::size_t>(b)].size(); });
+            if (needs_mesh_contact_search) {
+                // Rebuild contact candidates, combine their dependencies with
+                // elastic dependencies, and color the resulting graph.
+                broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::DeformableSolver);
+                build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()), bca);
+                union_adjacency(ea, bca, combined_adj);
+                greedy_color_conflict_graph(combined_adj, color_groups, &workspace.coloring_workspace);
+                const BroadPhase::Cache& bp_cache = broad_phase.cache();
+                // Vertices in one color share no dependencies, so process contact-heavy vertices first to avoid end-of-color stragglers.
+                for (std::vector<int>& group : color_groups) std::stable_sort(group.begin(), group.end(), [&](const int a, const int b) { return bp_cache.vertex_nt[static_cast<std::size_t>(a)].size() + bp_cache.vertex_ss[static_cast<std::size_t>(a)].size() > bp_cache.vertex_nt[static_cast<std::size_t>(b)].size() + bp_cache.vertex_ss[static_cast<std::size_t>(b)].size(); });
+            } else {
+                // Collision-free solve: keep node-box step clipping, but do no
+                // primitive BVH construction, pair search, or contact-aware
+                // coloring. Elastic topology alone determines the schedule.
+                broad_phase.initialize_node_boxes_only(blue_boxes);
+                greedy_color_conflict_graph(ea, color_groups, &workspace.coloring_workspace);
+            }
         }
 
         if (iter == 1 && !params.fixed_iters) {

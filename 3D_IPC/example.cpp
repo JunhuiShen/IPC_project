@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <stdexcept>
 
@@ -15,6 +16,35 @@ namespace {
 
 constexpr double kPi    = 3.14159265358979323846;
 constexpr double kTwoPi = 6.28318530717958647692;
+
+std::filesystem::path wrecking_ball_asset_directory(
+    const std::string& data_directory) {
+    namespace fs = std::filesystem;
+    std::vector<fs::path> candidates;
+    if (!data_directory.empty()) {
+        candidates.push_back(fs::path(data_directory) / "wrecking_ball");
+        candidates.push_back(fs::path(data_directory));
+    }
+    candidates.push_back(fs::path("example_obj") / "wrecking_ball");
+    candidates.push_back(
+        fs::path(__FILE__).parent_path() / "example_obj" / "wrecking_ball");
+
+    std::error_code error;
+    for (const fs::path& candidate : candidates) {
+        const bool has_link = fs::is_regular_file(
+            candidate / "link.obj", error);
+        error.clear();
+        const bool has_ball = fs::is_regular_file(
+            candidate / "ball.obj", error);
+        error.clear();
+        if (has_link && has_ball)
+            return candidate;
+    }
+    throw std::runtime_error(
+        "Example 23 could not find link.obj and ball.obj. Run from the "
+        "repository root or pass --datadir example_obj (or the "
+        "wrecking_ball asset directory).");
+}
 
 void append_box_mesh(
     const Vec3& lo, const Vec3& hi,
@@ -71,6 +101,142 @@ int append_rigid_cube(
         positions, velocity, Vec4(1.0, 0.0, 0.0, 0.0), Vec3::Zero(),
         density * edge_length * edge_length * edge_length,
         ref_mesh, state);
+}
+
+// Replaces create_rigid_body's repository-wide equal-vertex mass-property
+// approximation for one already appended, connected closed body. Rigid IPC
+// integrates mass properties over the enclosed volume, so Example 23 applies
+// this local correction without changing the behavior of any existing example.
+void use_closed_volume_rigid_mass_properties(
+    const int rigid_body, const std::size_t triangle_begin,
+    const std::size_t triangle_end,
+    RefMesh& ref_mesh, DeformedState& state) {
+    if (rigid_body < 0
+        || static_cast<std::size_t>(rigid_body)
+            >= ref_mesh.total_mass.size()
+        || triangle_begin >= triangle_end
+        || triangle_end > ref_mesh.tris.size() / 3) {
+        throw std::invalid_argument(
+            "use_closed_volume_rigid_mass_properties: invalid body or triangle range");
+    }
+
+    const Vec3 reference = state.x_coms[
+        static_cast<std::size_t>(rigid_body)];
+    double signed_volume = 0.0;
+    Vec3 signed_first_moment = Vec3::Zero();
+    Mat33 signed_second_moment = Mat33::Zero();
+
+    for (std::size_t triangle = triangle_begin;
+         triangle < triangle_end; ++triangle) {
+        const int* nodes = ref_mesh.tris.data() + 3 * triangle;
+        for (int local = 0; local < 3; ++local) {
+            if (nodes[local] < 0
+                || static_cast<std::size_t>(nodes[local])
+                    >= state.deformed_positions.size()
+                || ref_mesh.node_to_rb[
+                       static_cast<std::size_t>(nodes[local])]
+                    != rigid_body) {
+                throw std::invalid_argument(
+                    "use_closed_volume_rigid_mass_properties: triangle ownership mismatch");
+            }
+        }
+
+        const Vec3 a = state.deformed_positions[
+            static_cast<std::size_t>(nodes[0])] - reference;
+        const Vec3 b = state.deformed_positions[
+            static_cast<std::size_t>(nodes[1])] - reference;
+        const Vec3 c = state.deformed_positions[
+            static_cast<std::size_t>(nodes[2])] - reference;
+        const double tetra_volume = a.dot(b.cross(c)) / 6.0;
+        const Vec3 sum = a + b + c;
+
+        signed_volume += tetra_volume;
+        signed_first_moment += 0.25 * tetra_volume * sum;
+        signed_second_moment += (tetra_volume / 20.0) * (
+            sum * sum.transpose()
+            + a * a.transpose()
+            + b * b.transpose()
+            + c * c.transpose());
+    }
+
+    if (!std::isfinite(signed_volume)
+        || std::abs(signed_volume) <= 1.0e-15
+        || !signed_first_moment.allFinite()
+        || !signed_second_moment.allFinite()) {
+        throw std::invalid_argument(
+            "use_closed_volume_rigid_mass_properties: invalid enclosed volume moments");
+    }
+    const double winding_sign = signed_volume >= 0.0 ? 1.0 : -1.0;
+    const double volume = winding_sign * signed_volume;
+    const Vec3 first_moment = winding_sign * signed_first_moment;
+    const Mat33 second_moment = winding_sign * signed_second_moment;
+    const Vec3 local_center = first_moment / volume;
+    const Vec3 world_center = reference + local_center;
+    Mat33 world_second_moment = second_moment
+        - volume * local_center * local_center.transpose();
+    world_second_moment = 0.5 * (
+        world_second_moment + world_second_moment.transpose());
+
+    const double total_mass = ref_mesh.total_mass[
+        static_cast<std::size_t>(rigid_body)];
+    const double density = total_mass / volume;
+    world_second_moment *= density;
+
+    const Vec4 orientation = quaternion_normalize(
+        state.orientations[static_cast<std::size_t>(rigid_body)]);
+    Mat33 rotation;
+    for (int axis = 0; axis < 3; ++axis) {
+        rotation.col(axis) = quaternion_rotate(
+            orientation, Vec3::Unit(axis));
+    }
+    Mat33 body_second_moment = rotation.transpose()
+        * world_second_moment * rotation;
+    body_second_moment = 0.5 * (
+        body_second_moment + body_second_moment.transpose());
+    if (!body_second_moment.allFinite()) {
+        throw std::invalid_argument(
+            "use_closed_volume_rigid_mass_properties: non-finite body moment");
+    }
+    const Eigen::SelfAdjointEigenSolver<Mat33> eigensolver(
+        body_second_moment, Eigen::EigenvaluesOnly);
+    const double eigenvalue_tolerance = 64.0
+        * std::numeric_limits<double>::epsilon()
+        * std::max(1.0, std::abs(body_second_moment.trace()));
+    if (eigensolver.info() != Eigen::Success
+        || eigensolver.eigenvalues().minCoeff() <= eigenvalue_tolerance) {
+        throw std::invalid_argument(
+            "use_closed_volume_rigid_mass_properties: invalid body moment");
+    }
+
+    state.x_coms[static_cast<std::size_t>(rigid_body)] = world_center;
+    ref_mesh.I_hat[static_cast<std::size_t>(rigid_body)] =
+        body_second_moment;
+
+    const std::vector<int>& body_nodes = ref_mesh.rb_nodes[
+        static_cast<std::size_t>(rigid_body)];
+    std::vector<Vec3>& reference_positions = ref_mesh.ref_positions[
+        static_cast<std::size_t>(rigid_body)];
+    if (body_nodes.empty()
+        || reference_positions.size() != body_nodes.size()) {
+        throw std::invalid_argument(
+            "use_closed_volume_rigid_mass_properties: invalid body node storage");
+    }
+    const double proxy_mass = total_mass
+        / static_cast<double>(body_nodes.size());
+    const Vec3 v_com = state.v_coms[
+        static_cast<std::size_t>(rigid_body)];
+    const Vec3 omega = state.omega[
+        static_cast<std::size_t>(rigid_body)];
+    for (std::size_t local = 0; local < body_nodes.size(); ++local) {
+        const int node = body_nodes[local];
+        const Vec3 world_offset = state.deformed_positions[
+            static_cast<std::size_t>(node)] - world_center;
+        reference_positions[local] = quaternion_inverse_rotate(
+            orientation, world_offset);
+        ref_mesh.mass[static_cast<std::size_t>(node)] = proxy_mass;
+        state.velocities[static_cast<std::size_t>(node)] =
+            v_com + omega.cross(world_offset);
+    }
 }
 
 // Rotate `p` about the +x line through `axis_point` by `theta`.
@@ -2524,6 +2690,315 @@ void build_cloth_unrolling_down_fixed_ramp_example(
         static_tris.end(),
         {ground_base, ground_base + 1, ground_base + 2,
          ground_base, ground_base + 2, ground_base + 3});
+
+    ref_mesh.build_deformable_nodes();
+}
+
+// ---------------------------------------------------------------------------
+// Example 22: three stacked cloth layers between fixed and oscillating edges
+// ---------------------------------------------------------------------------
+// Command line:  OMP_NUM_THREADS=10 OMP_DYNAMIC=FALSE ./build/3D_sim --example 22 --num_frames 200 --substeps 30 --max_substep_iters 100 --fixed_iters --friction_coefficient 0.0 --friction_velocity_epsilon 0.01 --outdir oscillating_cloth_layers_output --format geo --kB 0.01 --osc_amplitude 0.01 --osc_frequency 6.0 --osc_length 1.0 --gy 0
+void build_oscillating_cloth_layers_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params,
+    OscillatingClothLayersSpec& spec) {
+    clear_model(ref_mesh, state, X, pins);
+
+    if (args.osc_nx <= 0 || args.osc_nz <= 0) {
+        throw std::invalid_argument(
+            "example 22 requires osc_nx and osc_nz to be positive");
+    }
+    if (!std::isfinite(args.osc_length) || args.osc_length <= 0.0
+        || !std::isfinite(args.osc_width) || args.osc_width <= 0.0) {
+        throw std::invalid_argument(
+            "example 22 requires positive finite cloth dimensions");
+    }
+    if (!std::isfinite(args.osc_layer_gap) || args.osc_layer_gap <= 0.0) {
+        throw std::invalid_argument(
+            "example 22 requires a positive finite osc_layer_gap");
+    }
+    if (!std::isfinite(args.osc_amplitude) || args.osc_amplitude < 0.0) {
+        throw std::invalid_argument(
+            "example 22 requires a nonnegative finite osc_amplitude");
+    }
+    if (!std::isfinite(args.osc_frequency) || args.osc_frequency < 0.0) {
+        throw std::invalid_argument(
+            "example 22 requires a nonnegative finite osc_frequency");
+    }
+
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.k_sdf = 0.0;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+
+    // Table 1 gives a 2 mm contact radius for this experiment. Interpret it
+    // as this IPC scene's maximum barrier activation distance, while still
+    // respecting the repository-wide half-shortest-edge requirement.
+    constexpr double published_contact_radius = 0.002;
+    const double nominal_min_edge = std::min(
+        args.osc_length / static_cast<double>(args.osc_nx),
+        args.osc_width / static_cast<double>(args.osc_nz));
+    if (params.d_hat > 0.0) {
+        params.d_hat = std::min(
+            params.d_hat,
+            std::min(published_contact_radius,
+                     0.45 * nominal_min_edge));
+    }
+    if (params.d_hat > 0.0 && args.osc_layer_gap <= params.d_hat) {
+        throw std::invalid_argument(
+            "example 22 requires osc_layer_gap > the effective d_hat");
+    }
+
+    spec = OscillatingClothLayersSpec{};
+    spec.motion_direction = Vec3::UnitY();
+    spec.amplitude = args.osc_amplitude;
+    spec.frequency_hz = args.osc_frequency;
+
+    constexpr int layer_count = 3;
+    constexpr double center_y = 0.20;
+    const std::size_t driven_count = static_cast<std::size_t>(layer_count)
+        * static_cast<std::size_t>(args.osc_nz + 1);
+    spec.driven_pin_indices.reserve(driven_count);
+    spec.driven_initial_targets.reserve(driven_count);
+
+    for (int layer = 0; layer < layer_count; ++layer) {
+        const double layer_y = center_y
+            + static_cast<double>(layer - 1) * args.osc_layer_gap;
+        const Vec3 origin(
+            -0.5 * args.osc_length,
+            layer_y,
+            -0.5 * args.osc_width);
+        const int base = build_square_mesh_alternating_diagonals(
+            ref_mesh, state, X,
+            args.osc_nx, args.osc_nz,
+            args.osc_length, args.osc_width, origin);
+
+        // The left edge is prescribed and the opposite right edge is fixed.
+        // The two widthwise edges remain free except at their shared clamped
+        // corner vertices.
+        for (int j = 0; j <= args.osc_nz; ++j) {
+            const int driven_vertex =
+                base + j * (args.osc_nx + 1);
+            const int fixed_vertex = driven_vertex + args.osc_nx;
+
+            spec.driven_pin_indices.push_back(
+                static_cast<int>(pins.size()));
+            append_pin(pins, driven_vertex, state.deformed_positions);
+            spec.driven_initial_targets.push_back(
+                pins.back().target_position);
+
+            append_pin(pins, fixed_vertex, state.deformed_positions);
+        }
+    }
+
+    state.velocities.assign(
+        state.deformed_positions.size(), Vec3::Zero());
+    ref_mesh.build_deformable_nodes();
+}
+
+void update_oscillating_cloth_layer_pins(
+    std::vector<Pin>& pins,
+    const OscillatingClothLayersSpec& spec,
+    const double t) {
+    const double displacement = spec.amplitude * std::sin(
+        kTwoPi * spec.frequency_hz * t);
+    const Vec3 offset = displacement * spec.motion_direction;
+    const std::size_t driven_count = spec.driven_pin_indices.size();
+    for (std::size_t driven = 0; driven < driven_count; ++driven) {
+        pins[static_cast<std::size_t>(
+            spec.driven_pin_indices[driven])].target_position =
+                spec.driven_initial_targets[driven] + offset;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Example 23: rigid IPC Figure 8 wrecking ball and 560-cube wall
+// ---------------------------------------------------------------------------
+// Command line: OMP_NUM_THREADS=10 OMP_DYNAMIC=FALSE ./build/3D_sim --example 23 --num_frames 200 --substeps 30 --max_substep_iters 200 --fixed_iters --d_hat 0.001 --k_barrier 1e9 --k_sdf 1e8 --eps_sdf 0.002 --friction_coefficient 0.1 --outdir wrecking_ball_tuned_output --format geo
+void build_wrecking_ball_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params,
+    std::vector<Vec3>& static_x, std::vector<int>& static_tris) {
+    clear_model(ref_mesh, state, X, pins);
+    static_x.clear();
+    static_tris.clear();
+
+    params.gravity = Vec3(args.gx, args.gy, args.gz);
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = args.k_sdf;
+    params.eps_sdf = args.eps_sdf;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd_guess = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+    params.use_ogc = false;
+    params.use_ogc_solver = false;
+
+    // Use the material densities from rigid-ipc's final paper fixture.
+    constexpr int chain_body_count = 14;
+    constexpr int ordinary_link_count = chain_body_count - 1;
+    constexpr double link_density = 7680.0;
+    constexpr double cube_density = 1000.0;
+    constexpr double link_height = 1.5;
+    constexpr double padded_link_thickness = 0.3;
+    constexpr double link_center_spacing =
+        link_height - 2.0 * padded_link_thickness;
+    constexpr double inclination = kPi / 6.0;
+    // The source fixture uses ground y=-1. Translate the complete scene by
+    // +1 m so its horizontal ground lies at y=0 and all bodies start above it.
+    constexpr double scene_y_translation = 1.0;
+    constexpr double fixture_y_offset = 12.0 + scene_y_translation;
+    constexpr double link_target_max_extent = 1.5;
+    constexpr double ball_target_max_extent = 4.75;
+    const std::filesystem::path asset_directory =
+        wrecking_ball_asset_directory(args.datadir);
+    const std::string link_filename =
+        (asset_directory / "link.obj").string();
+    const std::string ball_filename =
+        (asset_directory / "ball.obj").string();
+
+    // The fixture's XYZ Euler transform is Rz(-60 degrees) Ry(alternating
+    // 0/90 degrees) Rx(0). Quaternion multiplication follows the same active
+    // rotation order. Alternating the ring planes makes adjacent bodies truly
+    // interlinked; there are no artificial joints or springs in this scene.
+    const Vec4 rotate_z_minus_sixty(
+        std::cos(kPi / 6.0), 0.0, 0.0, -std::sin(kPi / 6.0));
+    const Vec4 rotate_y_ninety(
+        std::cos(kPi / 4.0), 0.0, std::sin(kPi / 4.0), 0.0);
+    const Vec4 crossed_link_orientation = quaternion_normalize(
+        quaternion_multiply(rotate_z_minus_sixty, rotate_y_ninety));
+
+    Vec3 fixed_link_fixture_position = Vec3::Zero();
+    for (int link = 0; link < chain_body_count; ++link) {
+        const double chain_coordinate =
+            static_cast<double>(chain_body_count - link)
+            * link_center_spacing;
+        const Vec3 fixture_position(
+            chain_coordinate * std::cos(inclination),
+            fixture_y_offset
+                + chain_coordinate * std::sin(inclination),
+            0.0);
+        if (link == 0)
+            fixed_link_fixture_position = fixture_position;
+
+        const Vec4 orientation = (link % 2 == 0)
+            ? rotate_z_minus_sixty
+            : crossed_link_orientation;
+        const bool is_ball = link == ordinary_link_count;
+        // The normalized importer places the source AABB center at `center`.
+        // link.obj is centered at its model origin. ball.obj is intentionally
+        // not: its sphere hangs below an integrated terminal ring, and its
+        // source AABB center is (0,-1.625,0). This correction reconstructs the
+        // uniformly translated reference transform
+        // x_world = fixture_position + R*x_source. The link's 0.5 micrometre
+        // z offset is retained as authored rather than silently removed by
+        // AABB recentering.
+        const Vec3 source_aabb_center = is_ball
+            ? Vec3(0.0, -1.625, 0.0)
+            : Vec3(0.0, 0.0, 0.0000005);
+        const Vec3 importer_center = fixture_position
+            + quaternion_rotate(orientation, source_aabb_center);
+
+        const std::size_t triangle_begin = ref_mesh.tris.size() / 3;
+        const int rigid_body = append_normalized_obj_rigid_body(
+            is_ball ? ball_filename : link_filename,
+            state, ref_mesh, importer_center,
+            is_ball ? ball_target_max_extent : link_target_max_extent,
+            link_density, Vec3::Zero(), orientation, Vec3::Zero(),
+            link == 0
+                ? RigidBodyUpdateMode::None
+                : RigidBodyUpdateMode::TranslationAndOrientation);
+        use_closed_volume_rigid_mass_properties(
+            rigid_body, triangle_begin, ref_mesh.tris.size() / 3,
+            ref_mesh, state);
+    }
+
+    // The original fixed plane is centered below the top link and spans
+    // 20 by 20 metres. After the uniform scene translation, use y=0 as an
+    // infinite upward-facing SDF plane; the finite quad preserves its footprint.
+    constexpr double ground_y = -1.0 + scene_y_translation;
+    params.sdf_planes.push_back(PlaneSDF{
+        Vec3(fixed_link_fixture_position.x(), ground_y, 0.0),
+        Vec3::UnitY()});
+
+    // Tightly packed version of the paper wall: 8 x 7 x 10 unit cubes. A
+    // nonzero 2 mm separation avoids singular touching contact while removing
+    // the reference fixture's visibly falling 5 cm gaps. Use the same 2 mm
+    // clearance under the first row. itertools.product in the reference makes
+    // z the fastest-moving coordinate, which this loop order preserves.
+    constexpr int wall_width = 8;
+    constexpr int wall_height = 7;
+    constexpr int wall_depth = 10;
+    constexpr double cube_edge = 1.0;
+    constexpr double cube_gap = 0.002;
+    constexpr double cube_spacing = cube_edge + cube_gap;
+    constexpr double cube_ground_clearance = 0.002;
+    const Vec3 first_cube_center = Vec3(
+        fixed_link_fixture_position.x()
+            + 0.5 - 0.5 * static_cast<double>(wall_width),
+        ground_y + 0.5 * cube_edge + cube_ground_clearance,
+        0.5 - 0.5 * static_cast<double>(wall_depth));
+    for (int width = 0; width < wall_width; ++width) {
+        for (int height = 0; height < wall_height; ++height) {
+            for (int depth = 0; depth < wall_depth; ++depth) {
+                const Vec3 center = first_cube_center + cube_spacing * Vec3(
+                    static_cast<double>(width),
+                    static_cast<double>(height),
+                    static_cast<double>(depth));
+                const std::size_t triangle_begin =
+                    ref_mesh.tris.size() / 3;
+                const int rigid_body = append_rigid_cube(
+                    center, cube_edge, cube_density, Vec3::Zero(),
+                    ref_mesh, state);
+                use_closed_volume_rigid_mass_properties(
+                    rigid_body, triangle_begin,
+                    ref_mesh.tris.size() / 3, ref_mesh, state);
+            }
+        }
+    }
+
+    constexpr double ground_half_extent = 10.0;
+    const double ground_center_x = fixed_link_fixture_position.x();
+    static_x = {
+        Vec3(ground_center_x - ground_half_extent, ground_y,
+             -ground_half_extent),
+        Vec3(ground_center_x - ground_half_extent, ground_y,
+              ground_half_extent),
+        Vec3(ground_center_x + ground_half_extent, ground_y,
+              ground_half_extent),
+        Vec3(ground_center_x + ground_half_extent, ground_y,
+             -ground_half_extent),
+    };
+    static_tris = {0, 1, 2, 0, 2, 3};
+
+    // Imported ball triangles contain the finest edges. Retain a caller's
+    // smaller activation distance while enforcing both the simulator-wide
+    // discretization bound and enough separation from the dense cube grid to
+    // avoid activating nearly every lateral neighbor from solver-scale motion.
+    double minimum_surface_edge = std::numeric_limits<double>::infinity();
+    for (std::size_t triangle = 0;
+         triangle < ref_mesh.tris.size() / 3; ++triangle) {
+        const int* nodes = ref_mesh.tris.data() + 3 * triangle;
+        for (int local = 0; local < 3; ++local) {
+            const Vec3& first = state.deformed_positions[
+                static_cast<std::size_t>(nodes[local])];
+            const Vec3& second = state.deformed_positions[
+                static_cast<std::size_t>(nodes[(local + 1) % 3])];
+            minimum_surface_edge = std::min(
+                minimum_surface_edge, (second - first).norm());
+        }
+    }
+    if (params.d_hat > 0.0 && std::isfinite(minimum_surface_edge)) {
+        params.d_hat = std::min({
+            params.d_hat, 0.45 * minimum_surface_edge,
+            0.5 * cube_gap});
+    }
 
     ref_mesh.build_deformable_nodes();
 }

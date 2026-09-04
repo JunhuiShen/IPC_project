@@ -107,6 +107,15 @@ struct IPCArgs3D : ArgParser {
     // example 19: fixed-center crushers with initial angular velocities
     double      crusher_angular_speed = 20.0; // initial |omega_z| (rad/s)
 
+    // example 22: three stacked cloth layers with one sinusoidally driven edge
+    int         osc_nx          = 49;    // subdivisions along the driven direction
+    int         osc_nz          = 49;    // subdivisions across each driven edge
+    double      osc_length      = 1.50;  // fixed-to-driven edge distance (m)
+    double      osc_width       = 0.50;  // sheet width (m)
+    double      osc_layer_gap   = 0.0022;// vertical mid-surface gap (m)
+    double      osc_amplitude   = 0.02;  // driven-edge sinusoid amplitude (m)
+    double      osc_frequency   = 0.50;  // driven-edge frequency (Hz)
+
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
     std::string format       = "geo";
@@ -163,7 +172,7 @@ struct IPCArgs3D : ArgParser {
         add_double("damping",                  damping,                  1.0,   "Newton-step damping used by deformable and rigid solvers; <1 can stabilize an update");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=rigid_box_drop, 8=two_polygon_collision, 9=twenty_polygon_stack, 10=five_polygon_scatter, 11=hundred_polygon_box_drop, 12=fifty_rigid_polygons_on_pinned_cloth, 13=single_deformable_solid_ground_drop, 14=single_deformable_solid_on_pinned_cloth, 15=twenty_rigid_deformable_polygons_on_pinned_cloth, 16=ten_alternating_rigid_solid_flat_stack_on_pinned_cloth, 17=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 18=dynamic_bolt_into_fixed_nut, 19=armadillo_through_gear_crushers, 20=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 21=cloth_unrolling_down_fixed_ramp");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=rigid_box_drop, 8=two_polygon_collision, 9=twenty_polygon_stack, 10=five_polygon_scatter, 11=hundred_polygon_box_drop, 12=fifty_rigid_polygons_on_pinned_cloth, 13=single_deformable_solid_ground_drop, 14=single_deformable_solid_on_pinned_cloth, 15=twenty_rigid_deformable_polygons_on_pinned_cloth, 16=ten_alternating_rigid_solid_flat_stack_on_pinned_cloth, 17=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 18=dynamic_bolt_into_fixed_nut, 19=armadillo_through_gear_crushers, 20=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 21=cloth_unrolling_down_fixed_ramp, 22=oscillating_cloth_layers, 23=wrecking_ball");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -203,6 +212,14 @@ struct IPCArgs3D : ArgParser {
         add_double("tu_visual_shrink", tu_visual_shrink, 0.002,"Render cylinder this much thinner than the cloth's rest radius (m, visual only). Small offset (~2mm) keeps a visible sliver between cloth + cylinder and avoids SDF/barrier energy fighting at the contact");
 
         add_double("crusher_angular_speed", crusher_angular_speed, 20.0, "Initial angular-speed magnitude (rad/s) of each Example 19 crusher");
+
+        add_int   ("osc_nx",        osc_nx,        49,     "Grid subdivisions from fixed to driven edge in example 22");
+        add_int   ("osc_nz",        osc_nz,        49,     "Grid subdivisions across each edge in example 22");
+        add_double("osc_length",    osc_length,    1.50,   "Fixed-to-driven edge distance (m) in example 22");
+        add_double("osc_width",     osc_width,     0.50,   "Width (m) of each cloth layer in example 22");
+        add_double("osc_layer_gap", osc_layer_gap, 0.0022, "Vertical mid-surface gap (m) between layers in example 22");
+        add_double("osc_amplitude", osc_amplitude, 0.02,   "Signed vertical sinusoid amplitude (m) of the driven edges in example 22");
+        add_double("osc_frequency", osc_frequency, 0.50,   "Sinusoid frequency (Hz) of the driven edges in example 22");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");

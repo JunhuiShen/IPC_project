@@ -588,6 +588,50 @@ const auto& nt = broad.nt_pairs();
 EXPECT_TRUE(contains_nt_pair(nt, 3, 0, 1, 2) || contains_nt_pair(nt, 4, 0, 1, 2) || contains_nt_pair(nt, 5, 0, 1, 2));
 }
 
+TEST(BroadPhaseTest, NodeBoxesOnlyClearsContactSearchData) {
+    std::vector<Vec3> x;
+    std::vector<Vec3> v;
+    RefMesh mesh;
+    build_three_sheet_scene(x, v, mesh);
+
+    BroadPhase broad;
+    broad.initialize(x, v, mesh, 1.0, 0.1);
+    ASSERT_FALSE(broad.nt_pairs().empty());
+
+    std::vector<AABB> node_boxes;
+    node_boxes.reserve(x.size());
+    for (const Vec3& position : x) {
+        node_boxes.emplace_back(
+            position - Vec3::Constant(0.02),
+            position + Vec3::Constant(0.02));
+    }
+    broad.initialize_node_boxes_only(node_boxes);
+
+    const BroadPhase::Cache& cache = broad.cache();
+    expect_aabb_vectors_exact(cache.node_boxes, node_boxes);
+    EXPECT_TRUE(cache.tri_boxes.empty());
+    EXPECT_TRUE(cache.edge_boxes.empty());
+    EXPECT_TRUE(cache.red_edge_boxes.empty());
+    EXPECT_TRUE(cache.tri_bvh_nodes.empty());
+    EXPECT_TRUE(cache.edge_bvh_nodes.empty());
+    EXPECT_TRUE(cache.node_bvh_nodes.empty());
+    EXPECT_EQ(cache.tri_root, -1);
+    EXPECT_EQ(cache.edge_root, -1);
+    EXPECT_EQ(cache.node_root, -1);
+    EXPECT_TRUE(cache.nt_pairs.empty());
+    EXPECT_TRUE(cache.ss_pairs.empty());
+    EXPECT_TRUE(cache.nt_pair_tri.empty());
+    EXPECT_TRUE(cache.ss_pair_edges.empty());
+    EXPECT_TRUE(cache.node_hits.empty());
+    EXPECT_TRUE(cache.edge_hits.empty());
+    ASSERT_EQ(cache.vertex_nt.size(), x.size());
+    ASSERT_EQ(cache.vertex_ss.size(), x.size());
+    for (std::size_t vertex = 0; vertex < x.size(); ++vertex) {
+        EXPECT_TRUE(cache.vertex_nt[vertex].empty());
+        EXPECT_TRUE(cache.vertex_ss[vertex].empty());
+    }
+}
+
 TEST(BroadPhaseTest,
      SurfaceNodeInitializationExcludesTetInteriorQueriesWithoutChangingAllNodePath) {
     const std::vector<Vec3> x = {

@@ -813,6 +813,19 @@ void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh
     initialize_from_vertex_boxes(vertex_boxes, mesh, d_hat, /*exclude_tet_interior_nt_queries=*/false, mode);
 }
 
+void BroadPhase::initialize_node_boxes_only(const std::vector<AABB>& vertex_boxes) {
+    Cache c = take_reusable_cache(
+        cache_, static_cast<int>(vertex_boxes.size()),
+        InitializationMode::DeformableSolver);
+    c.excludes_tet_interior_nt_queries = false;
+    c.node_boxes = vertex_boxes;
+    c.node_hits.clear();
+    c.edge_hits.clear();
+    c.red_edge_boxes.clear();
+    exclude_tet_interior_nt_queries_ = false;
+    cache_ = std::move(c);
+}
+
 void BroadPhase::initialize_from_vertex_boxes(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, const double d_hat, const bool exclude_tet_interior_nt_queries, const InitializationMode mode) {
     const int nv = static_cast<int>(vertex_boxes.size());
     const int nt = num_tris(mesh);
