@@ -57,6 +57,7 @@ void union_adjacency(const std::vector<std::vector<int>>& a, const std::vector<s
 struct GreedyColoringWorkspace {
     std::vector<int> color;
     std::vector<int> seen_color;
+    std::vector<int> next_color;
 };
 
 

@@ -257,7 +257,7 @@ Examples 1–3 use the documented cloth parameters:
 ./build/3D_sim --example 1 --num_frames 240 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
   --d_hat 0.005 --k_barrier 100 \
-  --fixed_iters --max_substep_iters 10 --substeps 3 --node_box_update_count 10
+  --fixed_iters --max_substep_iters 10 --substeps 5 --node_box_update_count 10
 
 # Example 2: two cylinders, 2.0 turns, twist then untwist
 ./build/3D_sim --example 2 --num_frames 900 \

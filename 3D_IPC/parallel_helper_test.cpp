@@ -6,6 +6,7 @@
 #include <cmath>
 #include <limits>
 #include <vector>
+#include <omp.h>
 
 namespace {
 
@@ -803,4 +804,154 @@ TEST(AllBlockContactAdjacency, DirectCompactStorageColorsExactUndirectedGraph) {
     greedy_color_conflict_graph(graph, compact_colors);
     greedy_color_conflict_graph(full_graph, full_colors);
     EXPECT_EQ(compact_colors, full_colors);
+}
+
+TEST(ParallelHelper, CachedParallelColoringMatchesFreshGreedyAfterGraphChanges) {
+    struct RestoreThreads {
+        int count = omp_get_max_threads();
+        ~RestoreThreads() { omp_set_num_threads(count); }
+    } restore;
+    const auto reference = [](const std::vector<std::vector<int>>& graph) {
+        std::vector<int> colors(graph.size(), -1);
+        std::vector<std::vector<int>> groups;
+        for (int vertex = 0; vertex < static_cast<int>(graph.size()); ++vertex) {
+            std::vector<bool> used(graph.size(), false);
+            for (const int neighbor : graph[vertex])
+                if (neighbor >= 0 && neighbor < vertex) used[colors[neighbor]] = true;
+            int color = 0;
+            while (used[color]) ++color;
+            colors[vertex] = color;
+            if (groups.size() <= static_cast<std::size_t>(color)) groups.resize(color + 1);
+            groups[color].push_back(vertex);
+        }
+        return groups;
+    };
+    for (const int threads : {1, 4}) {
+        omp_set_num_threads(threads);
+        GreedyColoringWorkspace workspace;
+        std::vector<std::vector<int>> groups, graph(1025);
+        for (int i = 1; i < 1025; ++i) graph[i].push_back(i - 1);
+        greedy_color_conflict_graph(graph, groups, &workspace);
+        EXPECT_EQ(groups, reference(graph));
+        greedy_color_conflict_graph(graph, groups, &workspace);
+        EXPECT_EQ(groups, reference(graph));
+        // Removing the first edge flips every subsequent color. This forces
+        // the bounded repair path to fall back along a long dependency chain.
+        graph[1].clear();
+        greedy_color_conflict_graph(graph, groups, &workspace);
+        EXPECT_EQ(groups, reference(graph));
+        for (int round = 0; round < 6; ++round) {
+            for (int i = 0; i < 1025; ++i) {
+                graph[i].clear();
+                if (i > round) graph[i].push_back(i - round - 1);
+                if (i > 31) graph[i].push_back(i - 31);
+                if (i % 3 == 0 && i > 7) graph[i].push_back(i - 7);
+                graph[i].push_back(i); // self/upper/invalid entries are ignored
+                graph[i].push_back(i + 1);
+                graph[i].push_back(-1);
+            }
+            greedy_color_conflict_graph(graph, groups, &workspace);
+            EXPECT_EQ(groups, reference(graph));
+        }
+        graph.clear();
+        greedy_color_conflict_graph(graph, groups, &workspace);
+        EXPECT_TRUE(groups.empty());
+        graph.resize(129);
+        greedy_color_conflict_graph(graph, groups, &workspace);
+        EXPECT_EQ(groups, reference(graph));
+    }
+}
+
+TEST(ParallelHelper, ParallelRigidPairGatherPreservesExactOrderAndNeighbors) {
+    struct RestoreThreads {
+        int count = omp_get_max_threads();
+        ~RestoreThreads() { omp_set_num_threads(count); }
+    } restore;
+    constexpr int bodies = 37;
+    std::vector<int> owners(4 * (bodies + 1), -1);
+    for (int i = 0; i < 4 * bodies; ++i) owners[i] = i / 4;
+    BroadPhase::Cache cache;
+    std::vector<std::vector<int>> expected_nt(bodies), expected_ss(bodies), expected_adj(bodies);
+    for (int i = 0; i < 4099; ++i) {
+        const int a = (i * 17) % (bodies + 1), b = (i * 7 + 3) % (bodies + 1);
+        NodeTrianglePair nt;
+        nt.node = 4 * a;
+        for (int role = 0; role < 3; ++role) nt.tri_v[role] = 4 * b + role;
+        cache.nt_pairs.push_back(nt);
+        SegmentSegmentPair ss;
+        ss.v[0] = 4 * a; ss.v[1] = 4 * a + 1;
+        ss.v[2] = 4 * b; ss.v[3] = 4 * b + 1;
+        cache.ss_pairs.push_back(ss);
+        if (a == b) continue;
+        for (const int rb : {a, b}) {
+            if (rb == bodies) continue;
+            expected_nt[rb].push_back(i);
+            expected_ss[rb].push_back(i);
+            const int other = rb == a ? b : a;
+            if (other != bodies) expected_adj[rb].push_back(other);
+        }
+    }
+    for (auto& row : expected_adj) {
+        std::sort(row.begin(), row.end());
+        row.erase(std::unique(row.begin(), row.end()), row.end());
+    }
+    for (const int threads : {1, 4}) {
+        omp_set_num_threads(threads);
+        std::vector<std::vector<int>> nt, ss, adjacency;
+        build_rb_contact_adj(cache, owners, bodies, nt, ss, adjacency);
+        EXPECT_EQ(nt, expected_nt);
+        EXPECT_EQ(ss, expected_ss);
+        EXPECT_EQ(adjacency, expected_adj);
+        build_rb_contact_adj({}, owners, bodies, nt, ss, adjacency);
+        EXPECT_EQ(nt, std::vector<std::vector<int>>(bodies));
+        EXPECT_EQ(ss, std::vector<std::vector<int>>(bodies));
+        EXPECT_EQ(adjacency, std::vector<std::vector<int>>(bodies));
+    }
+}
+
+TEST(ParallelHelper, ParallelRigidBlueBoxesMatchScalarAndRethrowInvalidInput) {
+    RefMesh mesh;
+    mesh.rb_nodes.resize(3);
+    mesh.ref_positions.resize(3);
+    // Empty body followed by one large body and a small body.
+    for (int i = 0; i < 263; ++i) {
+        const int rb = i < 260 ? 1 : 2;
+        mesh.rb_nodes[rb].push_back(i);
+        mesh.ref_positions[rb].emplace_back(0.001 * i, 0.002 * (i % 13), -0.003 * (i % 7));
+    }
+    const std::vector<Vec3> coms(3, Vec3(1, 2, 3));
+    const std::vector<Vec4> orientations(3, Vec4(1, 0, 0, 0));
+    const std::vector<double> theta(3, 0.3), radius(3, 0.02);
+    std::vector<AABB> actual(263);
+    build_blue_boxes_rb(coms, orientations, theta, radius, mesh, actual);
+    for (int rb = 1; rb < 3; ++rb) {
+        for (std::size_t local = 0; local < mesh.rb_nodes[rb].size(); ++local) {
+            const auto expected = spherical_cap_node_aabb(coms[rb], orientations[rb], mesh.ref_positions[rb][local], theta[rb]);
+            const int node = mesh.rb_nodes[rb][local];
+            EXPECT_TRUE((actual[node].min.array() == (expected.min - Vec3::Constant(radius[rb])).array()).all());
+            EXPECT_TRUE((actual[node].max.array() == (expected.max + Vec3::Constant(radius[rb])).array()).all());
+        }
+    }
+    mesh.ref_positions.back().back().x() = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(build_blue_boxes_rb(coms, orientations, theta, radius, mesh, actual), std::invalid_argument);
+}
+
+TEST(ParallelHelper, ParallelTetIncidenceMatchesConnectivityScanExactly) {
+    RefMesh mesh;
+    mesh.num_positions = 257;
+    for (int node = 0; node < mesh.num_positions; ++node)
+        mesh.tet_nodes.push_back((node * 17) % mesh.num_positions);
+    for (int element = 0; element < 254; ++element)
+        for (int role = 0; role < 4; ++role) mesh.tets.push_back(element + role);
+    const auto expected_solid = build_solid_elastic_adjacency(mesh);
+    const std::vector<std::vector<int>> cloth_adjacency(mesh.num_positions);
+    std::vector<std::vector<int>> expected_general;
+    build_all_block_adjacency_and_contact(mesh, {}, cloth_adjacency, {}, expected_general);
+    mesh.tet_adj.resize(mesh.num_positions);
+    for (int element = 0; element < 254; ++element)
+        for (int role = 0; role < 4; ++role) mesh.tet_adj[element + role].push_back({element, role});
+    EXPECT_EQ(build_solid_elastic_adjacency(mesh), expected_solid);
+    std::vector<std::vector<int>> actual_general;
+    build_all_block_adjacency_and_contact(mesh, {}, cloth_adjacency, {}, actual_general);
+    EXPECT_EQ(actual_general, expected_general);
 }

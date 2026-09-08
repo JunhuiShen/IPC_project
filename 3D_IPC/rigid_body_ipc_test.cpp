@@ -1,4 +1,5 @@
 #include "rigid_body_ipc.h"
+#include <omp.h>
 
 #include "parallel_helper.h"
 #include "friction_energy.h"
@@ -2895,3 +2896,54 @@ TEST(RigidBodySDFFrictionSolver,
 }
 
 }  // namespace
+
+TEST(RigidBodyIPCSolver, EightBodySetupThresholdPreservesExactColoredResults) {
+    struct RestoreThreads {
+        int count = omp_get_max_threads();
+        ~RestoreThreads() { omp_set_num_threads(count); }
+    } restore;
+    for (const int proxy_nodes : {3, 131}) {
+        for (const int bodies : {7, 8, 9}) {
+            RefMesh meshes[2];
+            DeformedState states[2];
+            std::vector<Vec3> coms[2], omega[2];
+            std::vector<Vec4> orientations[2];
+            SolverResult results[2];
+            for (int run = 0; run < 2; ++run) {
+                for (int rb = 0; rb < bodies; ++rb) {
+                    const Vec3 center(3.0 * (rb / 2), 0, 0.008 * (rb % 2));
+                    std::vector<Vec3> points = {
+                        center + Vec3(-0.5, 0, 0), center + Vec3(0.5, 0, 0), center + Vec3(0, 0.5, 0)};
+                    for (int local = 3; local < proxy_nodes; ++local)
+                        points.push_back(center + Vec3(0.001 * (local % 17), 0.1 + 0.001 * (local % 23), 0));
+                    create_rigid_body(points, Vec3(0.01, -0.02, 0.03), Vec4(1, 0, 0, 0),
+                        Vec3(0.02, 0.01, -0.01), 1.0, meshes[run], states[run]);
+                    for (int role = 0; role < 3; ++role) meshes[run].tris.push_back(meshes[run].rb_nodes.back()[role]);
+                }
+                SimParams params = SimParams::zeros();
+                params.fps = 10; params.substeps = 1;
+                params.max_global_iters = 4; params.fixed_iters = false;
+                params.tol_abs = 0; params.tol_rel = 0;
+                params.damping = 0.5; params.d_hat = 0.015; params.k_barrier = 1;
+                params.node_box_min = 0.01; params.node_box_max = 0.01;
+                params.theta_box_min = 0.05; params.theta_box_max = 0.05;
+                params.node_box_update_count = 1; params.use_parallel = true;
+                params.friction_coefficient = 0.2; params.friction_velocity_epsilon = 0.01;
+                coms[run] = states[run].x_coms;
+                orientations[run] = states[run].orientations;
+                omega[run].assign(bodies, Vec3::Zero());
+                omp_set_num_threads(run == 0 ? 1 : 4);
+                results[run] = global_gauss_seidel_solver_basic_rb(meshes[run], states[run], params,
+                    coms[run], orientations[run], omega[run]);
+            }
+            EXPECT_EQ(results[0].iterations, results[1].iterations);
+            EXPECT_EQ(results[0].initial_residual, results[1].initial_residual);
+            EXPECT_EQ(results[0].final_residual, results[1].final_residual);
+            for (int rb = 0; rb < bodies; ++rb) {
+                EXPECT_EQ(std::memcmp(coms[0][rb].data(), coms[1][rb].data(), 3 * sizeof(double)), 0);
+                EXPECT_EQ(std::memcmp(orientations[0][rb].data(), orientations[1][rb].data(), 4 * sizeof(double)), 0);
+                EXPECT_EQ(std::memcmp(omega[0][rb].data(), omega[1][rb].data(), 3 * sizeof(double)), 0);
+            }
+        }
+    }
+}

@@ -10,6 +10,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <omp.h>
+#include <cstring>
 
 // Tolerance for position comparison
 static constexpr double kTol = 1e-3;
@@ -97,4 +99,48 @@ EXPECT_NEAR(state.deformed_positions[i].z(), expected[i].z(), kTol)
 << "frame=" << frame << " vertex=" << i << " z mismatch";
 }
 }
+}
+
+TEST(SimulationSnapshot, ColoredBasicSolverIsBitwiseEqualAcrossThreadCounts) {
+    struct RestoreThreads {
+        int count = omp_get_max_threads();
+        ~RestoreThreads() { omp_set_num_threads(count); }
+    } restore;
+    RefMesh meshes[2];
+    DeformedState states[2];
+    std::vector<Pin> pins[2];
+    VertexTriangleMap adjacency[2];
+    BroadPhase broad_phases[2];
+    SimParams parameters[2];
+    for (int run = 0; run < 2; ++run) {
+        std::vector<Vec2> material;
+        parameters[run] = SimParams::zeros();
+        build_scene(meshes[run], states[run], pins[run], adjacency[run], parameters[run], material);
+        // Rebuild with two nearby sheets to exercise contacts, CCD and cache
+        // rebuilds above the parallel thresholds.
+        clear_model(meshes[run], states[run], material, pins[run]);
+        build_square_mesh(meshes[run], states[run], material, 12, 12, 1, 1, Vec3::Zero());
+        build_square_mesh(meshes[run], states[run], material, 12, 12, 1, 1, Vec3(0.007, 0.008, 0.003));
+        states[run].velocities.assign(states[run].deformed_positions.size(), Vec3(0.01, -0.02, 0.03));
+        meshes[run].build_lumped_mass(parameters[run].density, parameters[run].thickness);
+        adjacency[run] = build_incident_triangle_map(meshes[run].tris);
+        append_pin(pins[run], 0, states[run].deformed_positions);
+        parameters[run].use_parallel = true;
+        parameters[run].use_ccd = true;
+        parameters[run].max_global_iters = 6;
+        parameters[run].node_box_update_count = 2;
+        parameters[run].d_hat = 0.01;
+        parameters[run].k_barrier = 1.0;
+        parameters[run].friction_coefficient = 0.2;
+        parameters[run].friction_velocity_epsilon = 0.01;
+        omp_set_num_threads(run == 0 ? 1 : 4);
+        for (int frame = 0; frame < 3; ++frame)
+            advance_one_frame(states[run], meshes[run], adjacency[run], pins[run], parameters[run], broad_phases[run]);
+    }
+    ASSERT_EQ(states[0].deformed_positions.size(), states[1].deformed_positions.size());
+    EXPECT_FALSE(broad_phases[0].cache().nt_pairs.empty());
+    for (std::size_t i = 0; i < states[0].deformed_positions.size(); ++i) {
+        EXPECT_EQ(std::memcmp(states[0].deformed_positions[i].data(), states[1].deformed_positions[i].data(), 3 * sizeof(double)), 0) << i;
+        EXPECT_EQ(std::memcmp(states[0].velocities[i].data(), states[1].velocities[i].data(), 3 * sizeof(double)), 0) << i;
+    }
 }

@@ -1,7 +1,6 @@
 #include "broad_phase.h"
 
 #include <cmath>
-#include <map>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -9,6 +8,42 @@
 
 // BVH build / refit / query
 namespace {
+// Integer scan: each worker scans its own interval, then adds the totals of
+// preceding intervals. Only the small worker-total scan is serial.
+void scan_contact_offsets(std::vector<std::size_t>& values) {
+    if (values.size() < 1024 || omp_get_max_threads() == 1) {
+        for (std::size_t i = 1; i < values.size(); ++i) values[i] += values[i - 1];
+        return;
+    }
+    std::vector<std::size_t> totals(static_cast<std::size_t>(omp_get_max_threads()));
+    #pragma omp parallel
+    {
+        const int worker = omp_get_thread_num();
+        const int workers = omp_get_num_threads();
+        const std::size_t begin = values.size() * worker / workers;
+        const std::size_t end = values.size() * (worker + 1) / workers;
+        std::size_t sum = 0;
+        for (std::size_t i = begin; i < end; ++i) {
+            sum += values[i];
+            values[i] = sum;
+        }
+        totals[worker] = sum;
+        #pragma omp barrier
+        #pragma omp single
+        {
+            std::size_t offset = 0;
+            for (int i = 0; i < workers; ++i) {
+                const std::size_t count = totals[i];
+                totals[i] = offset;
+                offset += count;
+            }
+        }
+        const std::size_t offset = totals[worker];
+        for (std::size_t i = begin; i < end; ++i) values[i] += offset;
+    }
+}
+
+
 double point_aabb_squared_distance(const Vec3& p, const Vec3& lo, const Vec3& hi) {
     double distance_squared = 0.0;
     for (int axis = 0; axis < 3; ++axis) {
@@ -22,66 +57,71 @@ double point_aabb_squared_distance(const Vec3& p, const Vec3& lo, const Vec3& hi
     return distance_squared;
 }
 
+// Child slots are assigned from subtree sizes, matching the original serial
+// allocation order. Tasks partition disjoint index ranges and never grow out.
+void build_bvh_subtree(const std::vector<AABB>& boxes, std::vector<int>& idx,
+    std::vector<BVHNode>& out, std::vector<int>* leaf_to_node,
+    int node_index, int children_begin, int start, int end) {
+    AABB node_box;
+    for (int i = start; i < end; ++i) node_box.expand(boxes[idx[i]]);
+    out[node_index].bbox = node_box;
+    const int count = end - start;
+    if (count == 1) {
+        const int leaf = idx[start];
+        out[node_index].leafIndex = leaf;
+        if (leaf_to_node) (*leaf_to_node)[leaf] = node_index;
+        return;
+    }
+    const Vec3 extent = node_box.extent();
+    int axis = 0;
+    if (extent.y() > extent.x() && extent.y() >= extent.z()) axis = 1;
+    else if (extent.z() > extent.x() && extent.z() >= extent.y()) axis = 2;
+    const int mid = start + count / 2;
+    std::nth_element(idx.begin() + start, idx.begin() + mid, idx.begin() + end,
+        [&](int a, int b) {
+            return boxes[a].min[axis] + boxes[a].max[axis]
+                < boxes[b].min[axis] + boxes[b].max[axis];
+        });
+    const int left = children_begin;
+    const int right = children_begin + 1;
+    const int left_children = children_begin + 2;
+    const int right_children = children_begin + 2 * (mid - start);
+    out[node_index].left = left;
+    out[node_index].right = right;
+    out[left].parent = node_index;
+    out[right].parent = node_index;
+    if (count >= 256) {
+        #pragma omp taskgroup
+        {
+            #pragma omp task shared(boxes, idx, out) firstprivate(leaf_to_node, left, left_children, start, mid)
+            build_bvh_subtree(boxes, idx, out, leaf_to_node, left, left_children, start, mid);
+            #pragma omp task shared(boxes, idx, out) firstprivate(leaf_to_node, right, right_children, mid, end)
+            build_bvh_subtree(boxes, idx, out, leaf_to_node, right, right_children, mid, end);
+        }
+    } else {
+        build_bvh_subtree(boxes, idx, out, leaf_to_node, left, left_children, start, mid);
+        build_bvh_subtree(boxes, idx, out, leaf_to_node, right, right_children, mid, end);
+    }
+}
+
 inline int build_bvh_impl(const std::vector<AABB>& boxes, std::vector<BVHNode>& out, std::vector<int>* leaf_to_node) {
     out.clear();
     if (leaf_to_node) leaf_to_node->assign(boxes.size(), -1);
     if (boxes.empty()) return -1;
-
+    out.resize(2 * boxes.size() - 1);
     std::vector<int> idx(boxes.size());
     for (int i = 0; i < static_cast<int>(boxes.size()); ++i) idx[i] = i;
-
-    struct BuildTask {
-        int node_idx;
-        int start;
-        int end;
-    };
-
-    out.emplace_back();
-    std::vector<BuildTask> stack;
-    stack.push_back({0, 0, static_cast<int>(idx.size())});
-
-    while (!stack.empty()) {
-        const BuildTask task = stack.back();
-        stack.pop_back();
-
-        AABB node_box;
-        for (int i = task.start; i < task.end; ++i) {
-            node_box.expand(boxes[idx[i]]);
+    // BroadPhase already builds its trees in parallel sections. Their tasks
+    // share that team; standalone callers get a team only for large trees.
+    if (!omp_in_parallel() && boxes.size() >= 256) {
+        #pragma omp parallel
+        {
+            #pragma omp single
+            build_bvh_subtree(boxes, idx, out, leaf_to_node, 0, 1, 0, static_cast<int>(boxes.size()));
         }
-        out[task.node_idx].bbox = node_box;
-
-        const int count = task.end - task.start;
-        if (count == 1) {
-            const int leaf = idx[task.start];
-            out[task.node_idx].leafIndex = leaf;
-            if (leaf_to_node) (*leaf_to_node)[leaf] = task.node_idx;
-            continue;
-        }
-
-        const Vec3 e = node_box.extent();
-        int axis = 0;
-        if (e.y() > e.x() && e.y() >= e.z()) axis = 1;
-        else if (e.z() > e.x() && e.z() >= e.y()) axis = 2;
-
-        const int mid = task.start + count / 2;
-        std::nth_element( idx.begin() + task.start, idx.begin() + mid, idx.begin() + task.end, [&](int a, int b) {
-                    return boxes[a].min[axis] + boxes[a].max[axis] < boxes[b].min[axis] + boxes[b].max[axis];
-                });
-
-        const int left = static_cast<int>(out.size());
-        out.emplace_back();
-        const int right = static_cast<int>(out.size());
-        out.emplace_back();
-
-        out[task.node_idx].left = left;
-        out[task.node_idx].right = right;
-        out[left].parent = task.node_idx;
-        out[right].parent = task.node_idx;
-
-        stack.push_back({right, mid, task.end});
-        stack.push_back({left, task.start, mid});
+    } else {
+        build_bvh_subtree(boxes, idx, out, leaf_to_node, 0, 1, 0, static_cast<int>(boxes.size()));
     }
-
     return 0;
 }
 }  // namespace
@@ -192,50 +232,82 @@ namespace {
 
     static void build_unique_edges_and_adjacency(const RefMesh& mesh, int nv, std::vector<std::array<int, 2>>& out_edges,
                                                  std::vector<std::vector<int>>& out_node_to_edges, std::vector<std::vector<int>>& out_node_to_tris) {
-        out_edges.clear();
-        out_node_to_edges.assign(nv, {});
-        out_node_to_tris.assign(nv, {});
-
-        std::map<std::pair<int, int>, int> edge_to_idx;
-
         const int nt = num_tris(mesh);
+        out_node_to_tris.resize(nv);
+        out_node_to_edges.resize(nv);
+        std::vector<int> counts(nv, 0);
+        #pragma omp parallel for schedule(static) if(nt >= 128)
         for (int t = 0; t < nt; ++t) {
-            const int a = tri_vertex(mesh, t, 0);
-            const int b = tri_vertex(mesh, t, 1);
-            const int c = tri_vertex(mesh, t, 2);
-
-            out_node_to_tris[a].push_back(t);
-            out_node_to_tris[b].push_back(t);
-            out_node_to_tris[c].push_back(t);
-
-            const Edge e0 = canonical_edge(a, b);
-            const Edge e1 = canonical_edge(b, c);
-            const Edge e2 = canonical_edge(c, a);
-
-            const std::array<Edge, 3> tri_edges = {e0, e1, e2};
-            for (const Edge& e : tri_edges) {
-                const std::pair<int, int> key(e.v0, e.v1);
-                auto it = edge_to_idx.find(key);
-                int edge_idx = -1;
-                if (it == edge_to_idx.end()) {
-                    edge_idx = static_cast<int>(out_edges.size());
-                    edge_to_idx.emplace(key, edge_idx);
-                    out_edges.push_back({e.v0, e.v1});
-                } else {
-                    edge_idx = it->second;
-                }
-
-                out_node_to_edges[e.v0].push_back(edge_idx);
-                out_node_to_edges[e.v1].push_back(edge_idx);
+            for (int role = 0; role < 3; ++role) {
+                const int node = tri_vertex(mesh, t, role);
+                #pragma omp atomic update
+                ++counts[node];
+            }
+        }
+        #pragma omp parallel for schedule(static) if(nv >= 128)
+        for (int node = 0; node < nv; ++node) {
+            out_node_to_tris[node].resize(counts[node]);
+            counts[node] = 0;
+        }
+        #pragma omp parallel for schedule(static) if(nt >= 128)
+        for (int t = 0; t < nt; ++t) {
+            for (int role = 0; role < 3; ++role) {
+                const int node = tri_vertex(mesh, t, role);
+                int slot;
+                #pragma omp atomic capture
+                slot = counts[node]++;
+                out_node_to_tris[node][slot] = t;
             }
         }
 
-        for (int i = 0; i < nv; ++i) {
-            auto& tris = out_node_to_tris[i];
-            std::sort(tris.begin(), tris.end());
-            tris.erase(std::unique(tris.begin(), tris.end()), tris.end());
-
-            auto& edges = out_node_to_edges[i];
+        // Each edge is owned by its smaller endpoint. Record its first
+        // triangle/role occurrence, preserving the legacy edge numbering.
+        std::vector<std::vector<std::pair<int, int>>> owned_edges(nv);
+        std::vector<std::size_t> edge_offsets(static_cast<std::size_t>(3) * nt + 1, 0);
+        #pragma omp parallel for schedule(dynamic, 16) if(nv >= 128)
+        for (int node = 0; node < nv; ++node) {
+            auto& triangles = out_node_to_tris[node];
+            std::sort(triangles.begin(), triangles.end());
+            triangles.erase(std::unique(triangles.begin(), triangles.end()), triangles.end());
+            auto& edges = owned_edges[node];
+            for (const int t : triangles) {
+                for (int role = 0; role < 3; ++role) {
+                    const Edge edge = canonical_edge(tri_vertex(mesh, t, role), tri_vertex(mesh, t, (role + 1) % 3));
+                    if (edge.v0 == node) edges.emplace_back(edge.v1, 3 * t + role);
+                }
+            }
+            std::sort(edges.begin(), edges.end());
+            int previous = -1;
+            for (const auto& [neighbor, occurrence] : edges) {
+                if (neighbor != previous) edge_offsets[occurrence + 1] = 1;
+                previous = neighbor;
+            }
+        }
+        scan_contact_offsets(edge_offsets);
+        out_edges.resize(edge_offsets.back());
+        std::vector<int> occurrence_to_edge(static_cast<std::size_t>(3) * nt);
+        #pragma omp parallel for schedule(dynamic, 16) if(nv >= 128)
+        for (int node = 0; node < nv; ++node) {
+            int previous = -1, edge_id = -1;
+            for (const auto& [neighbor, occurrence] : owned_edges[node]) {
+                if (neighbor != previous) {
+                    edge_id = static_cast<int>(edge_offsets[occurrence]);
+                    out_edges[edge_id] = {node, neighbor};
+                }
+                occurrence_to_edge[occurrence] = edge_id;
+                previous = neighbor;
+            }
+        }
+        #pragma omp parallel for schedule(dynamic, 16) if(nv >= 128)
+        for (int node = 0; node < nv; ++node) {
+            auto& edges = out_node_to_edges[node];
+            edges.clear();
+            for (const int t : out_node_to_tris[node]) {
+                for (int role = 0; role < 3; ++role) {
+                    if (tri_vertex(mesh, t, role) == node || tri_vertex(mesh, t, (role + 1) % 3) == node)
+                        edges.push_back(occurrence_to_edge[3 * t + role]);
+                }
+            }
             std::sort(edges.begin(), edges.end());
             edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
         }
@@ -320,18 +392,32 @@ namespace {
         return owner >= 0 && rigid_owner(mesh, second) == owner ? owner : -1;
     }
 
+    static int build_bvh_rigid_owner_subtree(const std::vector<BVHNode>& nodes,
+        const std::vector<int>& leaf_owners, std::vector<int>& owners, int index, int task_depth) {
+        const BVHNode& node = nodes[index];
+        if (node.leafIndex >= 0) return owners[index] = leaf_owners[node.leafIndex];
+        int left_owner = -1, right_owner = -1;
+        if (task_depth > 0) {
+            #pragma omp taskgroup
+            {
+                #pragma omp task shared(nodes, leaf_owners, owners, left_owner) firstprivate(index, task_depth)
+                left_owner = build_bvh_rigid_owner_subtree(nodes, leaf_owners, owners, nodes[index].left, task_depth - 1);
+                #pragma omp task shared(nodes, leaf_owners, owners, right_owner) firstprivate(index, task_depth)
+                right_owner = build_bvh_rigid_owner_subtree(nodes, leaf_owners, owners, nodes[index].right, task_depth - 1);
+            }
+        } else {
+            left_owner = build_bvh_rigid_owner_subtree(nodes, leaf_owners, owners, node.left, 0);
+            right_owner = build_bvh_rigid_owner_subtree(nodes, leaf_owners, owners, node.right, 0);
+        }
+        return owners[index] = left_owner >= 0 && left_owner == right_owner ? left_owner : -1;
+    }
+
     static void build_bvh_rigid_owners(const std::vector<BVHNode>& nodes, const std::vector<int>& leaf_rigid_owner, std::vector<int>& node_rigid_owner) {
         node_rigid_owner.resize(nodes.size());
-        for (int node_index = static_cast<int>(nodes.size()) - 1; node_index >= 0; --node_index) {
-            const BVHNode& node = nodes[static_cast<std::size_t>(node_index)];
-            if (node.leafIndex >= 0) {
-                node_rigid_owner[static_cast<std::size_t>(node_index)] = leaf_rigid_owner[static_cast<std::size_t>(node.leafIndex)];
-                continue;
-            }
-            const int left_owner = node_rigid_owner[static_cast<std::size_t>(node.left)];
-            const int right_owner = node_rigid_owner[static_cast<std::size_t>(node.right)];
-            node_rigid_owner[static_cast<std::size_t>(node_index)] = left_owner >= 0 && left_owner == right_owner ? left_owner : -1;
-        }
+        if (nodes.empty()) return;
+        int task_depth = 0;
+        for (std::size_t leaves = (nodes.size() + 1) / 2; leaves >= 256; leaves /= 2) ++task_depth;
+        build_bvh_rigid_owner_subtree(nodes, leaf_rigid_owner, node_rigid_owner, 0, task_depth);
     }
 
     static void query_bvh_excluding_rigid_owner(const std::vector<BVHNode>& nodes, const std::vector<int>& node_rigid_owner, const int root, const AABB& query, const int excluded_owner, std::vector<int>& hits) {
@@ -366,62 +452,6 @@ namespace {
     static inline bool is_rigid_self_ss_pair(const BroadPhase::Cache& cache, const RefMesh& mesh, const int e0, const int e1) {
         const int owner = rigid_owner(mesh, cache.edges[e0][0]);
         return owner >= 0 && rigid_owner(mesh, cache.edges[e0][1]) == owner && rigid_owner(mesh, cache.edges[e1][0]) == owner && rigid_owner(mesh, cache.edges[e1][1]) == owner;
-    }
-
-    static inline bool stores_vertex_incidence(const BroadPhase::InitializationMode mode, const RefMesh& mesh, const int node) {
-        if (mode == BroadPhase::InitializationMode::Refittable || mode == BroadPhase::InitializationMode::DeformableSolver)
-            return true;
-        if (mode == BroadPhase::InitializationMode::GeneralSolver)
-            return rigid_owner(mesh, node) < 0;
-        return false;
-    }
-
-    static inline void append_nt_pair(BroadPhase::Cache& cache, int node, int tri_idx, const RefMesh& mesh, const BroadPhase::InitializationMode mode) {
-        const std::size_t idx = cache.nt_pairs.size();
-
-        NodeTrianglePair p;
-        p.node = node;
-        p.tri_v[0] = tri_vertex(mesh, tri_idx, 0);
-        p.tri_v[1] = tri_vertex(mesh, tri_idx, 1);
-        p.tri_v[2] = tri_vertex(mesh, tri_idx, 2);
-
-        cache.nt_pairs.push_back(p);
-        cache.nt_pair_tri.push_back(tri_idx);
-
-        if (!cache.vertex_nt.empty()) {
-            if (stores_vertex_incidence(mode, mesh, p.node))
-                cache.vertex_nt[p.node].push_back({idx, 0});
-            if (stores_vertex_incidence(mode, mesh, p.tri_v[0]))
-                cache.vertex_nt[p.tri_v[0]].push_back({idx, 1});
-            if (stores_vertex_incidence(mode, mesh, p.tri_v[1]))
-                cache.vertex_nt[p.tri_v[1]].push_back({idx, 2});
-            if (stores_vertex_incidence(mode, mesh, p.tri_v[2]))
-                cache.vertex_nt[p.tri_v[2]].push_back({idx, 3});
-        }
-    }
-
-    static inline void append_ss_pair(BroadPhase::Cache& cache, int e0, int e1, const RefMesh& mesh, const BroadPhase::InitializationMode mode) {
-        int a = e0;
-        int b = e1;
-        if (a > b) std::swap(a, b);
-
-        const std::size_t idx = cache.ss_pairs.size();
-
-        SegmentSegmentPair p;
-        p.v[0] = cache.edges[a][0];
-        p.v[1] = cache.edges[a][1];
-        p.v[2] = cache.edges[b][0];
-        p.v[3] = cache.edges[b][1];
-
-        cache.ss_pairs.push_back(p);
-        cache.ss_pair_edges.push_back({a, b});
-
-        if (!cache.vertex_ss.empty()) {
-            for (int role = 0; role < 4; ++role) {
-                if (stores_vertex_incidence(mode, mesh, p.v[role]))
-                    cache.vertex_ss[p.v[role]].push_back({idx, role});
-            }
-        }
     }
 
     static inline bool earlier_edge_query_already_reported_pair(const BroadPhase::Cache& cache, int current_edge, int hit_edge) {
@@ -481,7 +511,7 @@ namespace {
     }
 
     static void build_solver_vertex_incidence(BroadPhase::Cache& cache, const RefMesh& mesh, const BroadPhase::InitializationMode mode) {
-        if (mode != BroadPhase::InitializationMode::DeformableSolver && mode != BroadPhase::InitializationMode::GeneralSolver)
+        if (mode == BroadPhase::InitializationMode::RigidSolver || cache.vertex_nt.empty())
             return;
 
         const std::size_t nv = cache.vertex_nt.size();
@@ -498,10 +528,11 @@ namespace {
             const std::size_t end = cache.nt_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
             for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
                 const NodeTrianglePair& pair = cache.nt_pairs[pair_index];
-                if (mode == BroadPhase::InitializationMode::DeformableSolver || rigid_owner(mesh, pair.node) < 0) ++worker_counts[static_cast<std::size_t>(pair.node)];
-                for (int role = 0; role < 3; ++role) if (mode == BroadPhase::InitializationMode::DeformableSolver || rigid_owner(mesh, pair.tri_v[role]) < 0) ++worker_counts[static_cast<std::size_t>(pair.tri_v[role])];
+                if (mode != BroadPhase::InitializationMode::GeneralSolver || rigid_owner(mesh, pair.node) < 0) ++worker_counts[static_cast<std::size_t>(pair.node)];
+                for (int role = 0; role < 3; ++role) if (mode != BroadPhase::InitializationMode::GeneralSolver || rigid_owner(mesh, pair.tri_v[role]) < 0) ++worker_counts[static_cast<std::size_t>(pair.tri_v[role])];
             }
         }
+        #pragma omp parallel for schedule(static) if(nv >= 128)
         for (std::size_t node = 0; node < nv; ++node) {
             std::size_t offset = 0;
             for (int worker = 0; worker < num_workers; ++worker) {
@@ -519,8 +550,8 @@ namespace {
             const std::size_t end = cache.nt_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
             for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
                 const NodeTrianglePair& pair = cache.nt_pairs[pair_index];
-                if (mode == BroadPhase::InitializationMode::DeformableSolver || rigid_owner(mesh, pair.node) < 0) cache.vertex_nt[static_cast<std::size_t>(pair.node)][worker_offsets[static_cast<std::size_t>(pair.node)]++] = {pair_index, 0};
-                for (int role = 0; role < 3; ++role) if (mode == BroadPhase::InitializationMode::DeformableSolver || rigid_owner(mesh, pair.tri_v[role]) < 0) cache.vertex_nt[static_cast<std::size_t>(pair.tri_v[role])][worker_offsets[static_cast<std::size_t>(pair.tri_v[role])]++] = {pair_index, role + 1};
+                if (mode != BroadPhase::InitializationMode::GeneralSolver || rigid_owner(mesh, pair.node) < 0) cache.vertex_nt[static_cast<std::size_t>(pair.node)][worker_offsets[static_cast<std::size_t>(pair.node)]++] = {pair_index, 0};
+                for (int role = 0; role < 3; ++role) if (mode != BroadPhase::InitializationMode::GeneralSolver || rigid_owner(mesh, pair.tri_v[role]) < 0) cache.vertex_nt[static_cast<std::size_t>(pair.tri_v[role])][worker_offsets[static_cast<std::size_t>(pair.tri_v[role])]++] = {pair_index, role + 1};
             }
         }
 
@@ -532,9 +563,10 @@ namespace {
             const std::size_t end = cache.ss_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
             for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
                 const SegmentSegmentPair& pair = cache.ss_pairs[pair_index];
-                for (int role = 0; role < 4; ++role) if (mode == BroadPhase::InitializationMode::DeformableSolver || rigid_owner(mesh, pair.v[role]) < 0) ++worker_counts[static_cast<std::size_t>(pair.v[role])];
+                for (int role = 0; role < 4; ++role) if (mode != BroadPhase::InitializationMode::GeneralSolver || rigid_owner(mesh, pair.v[role]) < 0) ++worker_counts[static_cast<std::size_t>(pair.v[role])];
             }
         }
+        #pragma omp parallel for schedule(static) if(nv >= 128)
         for (std::size_t node = 0; node < nv; ++node) {
             std::size_t offset = 0;
             for (int worker = 0; worker < num_workers; ++worker) {
@@ -552,14 +584,24 @@ namespace {
             const std::size_t end = cache.ss_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
             for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
                 const SegmentSegmentPair& pair = cache.ss_pairs[pair_index];
-                for (int role = 0; role < 4; ++role) if (mode == BroadPhase::InitializationMode::DeformableSolver || rigid_owner(mesh, pair.v[role]) < 0) cache.vertex_ss[static_cast<std::size_t>(pair.v[role])][worker_offsets[static_cast<std::size_t>(pair.v[role])]++] = {pair_index, role};
+                for (int role = 0; role < 4; ++role) if (mode != BroadPhase::InitializationMode::GeneralSolver || rigid_owner(mesh, pair.v[role]) < 0) cache.vertex_ss[static_cast<std::size_t>(pair.v[role])][worker_offsets[static_cast<std::size_t>(pair.v[role])]++] = {pair_index, role};
             }
         }
     }
 
-    static void materialize_solver_pairs(BroadPhase::Cache& cache, const RefMesh& mesh, const BroadPhase::InitializationMode mode) {
+    static void materialize_solver_pairs(BroadPhase::Cache& cache, const RefMesh& mesh, const BroadPhase::InitializationMode mode, bool forward_edges_only = false) {
         const int nv = static_cast<int>(cache.node_hits.size());
         const int ne = static_cast<int>(cache.edge_hits.size());
+        const auto accept_edge_pair = [&](int edge, int other) {
+            // Velocity-based builds historically emit only forward edge hits;
+            // box-based builds/refits retain asymmetric hits in either direction.
+            if (forward_edges_only) {
+                if (other <= edge) return false;
+                return !share_vertex({cache.edges[edge][0], cache.edges[edge][1]},
+                    {cache.edges[other][0], cache.edges[other][1]});
+            }
+            return accepts_ss_pair(cache, mesh, edge, other, mode);
+        };
 
         // Each query owns one contiguous output interval. Parallel counting,
         // a deterministic prefix sum, and parallel writes preserve the exact
@@ -572,9 +614,7 @@ namespace {
                 count += accepts_nt_pair(mesh, node, tri_idx, mode);
             nt_offsets[static_cast<std::size_t>(node) + 1] = count;
         }
-        for (int node = 0; node < nv; ++node) {
-            nt_offsets[static_cast<std::size_t>(node) + 1] += nt_offsets[static_cast<std::size_t>(node)];
-        }
+        scan_contact_offsets(nt_offsets);
         cache.nt_pairs.resize(nt_offsets.back());
         cache.nt_pair_tri.resize(nt_offsets.back());
         #pragma omp parallel for schedule(dynamic, 32)
@@ -591,19 +631,17 @@ namespace {
         for (int edge = 0; edge < ne; ++edge) {
             std::size_t count = 0;
             for (const int other : cache.edge_hits[edge])
-                count += accepts_ss_pair(cache, mesh, edge, other, mode);
+                count += accept_edge_pair(edge, other);
             ss_offsets[static_cast<std::size_t>(edge) + 1] = count;
         }
-        for (int edge = 0; edge < ne; ++edge) {
-            ss_offsets[static_cast<std::size_t>(edge) + 1] += ss_offsets[static_cast<std::size_t>(edge)];
-        }
+        scan_contact_offsets(ss_offsets);
         cache.ss_pairs.resize(ss_offsets.back());
         cache.ss_pair_edges.resize(ss_offsets.back());
         #pragma omp parallel for schedule(dynamic, 32)
         for (int edge = 0; edge < ne; ++edge) {
             std::size_t pair_index = ss_offsets[static_cast<std::size_t>(edge)];
             for (const int other : cache.edge_hits[edge]) {
-                if (accepts_ss_pair(cache, mesh, edge, other, mode))
+                if (accept_edge_pair(edge, other))
                     write_ss_pair(cache, pair_index++, edge, other);
             }
         }
@@ -641,14 +679,14 @@ namespace {
             c.vertex_ss.clear();
         } else {
             if (static_cast<int>(c.vertex_nt.size()) == nv) {
-                for (auto& row : c.vertex_nt)
-                    row.clear();
+                #pragma omp parallel for schedule(static) if(nv >= 128)
+                for (int node = 0; node < nv; ++node) c.vertex_nt[node].clear();
             } else {
                 c.vertex_nt.assign(nv, {});
             }
             if (static_cast<int>(c.vertex_ss.size()) == nv) {
-                for (auto& row : c.vertex_ss)
-                    row.clear();
+                #pragma omp parallel for schedule(static) if(nv >= 128)
+                for (int node = 0; node < nv; ++node) c.vertex_ss[node].clear();
             } else {
                 c.vertex_ss.assign(nv, {});
             }
@@ -658,7 +696,8 @@ namespace {
 
     static std::vector<std::vector<int>>& prepare_hit_rows(std::vector<std::vector<int>>& rows, int n) {
         if (static_cast<int>(rows.size()) == n) {
-            for (auto& row : rows) row.clear();
+            #pragma omp parallel for schedule(static) if(n >= 128)
+            for (int row = 0; row < n; ++row) rows[row].clear();
         } else {
             rows.assign(n, {});
         }
@@ -671,11 +710,13 @@ namespace {
 void BroadPhase::set_mesh_topology(const RefMesh& mesh, int nv) {
     build_unique_edges_and_adjacency(mesh, nv, topo_.edges, topo_.node_to_edges, topo_.node_to_tris);
     topo_.tri_rigid_owner.resize(static_cast<std::size_t>(num_tris(mesh)));
+    #pragma omp parallel for schedule(static) if(num_tris(mesh) >= 128)
     for (int tri_idx = 0; tri_idx < num_tris(mesh); ++tri_idx) {
         const int owner = common_rigid_owner(mesh, tri_vertex(mesh, tri_idx, 0), tri_vertex(mesh, tri_idx, 1));
         topo_.tri_rigid_owner[static_cast<std::size_t>(tri_idx)] = owner >= 0 && rigid_owner(mesh, tri_vertex(mesh, tri_idx, 2)) == owner ? owner : -1;
     }
     topo_.edge_rigid_owner.resize(topo_.edges.size());
+    #pragma omp parallel for schedule(static) if(topo_.edges.size() >= 128)
     for (std::size_t edge = 0; edge < topo_.edges.size(); ++edge) {
         topo_.edge_rigid_owner[edge] = common_rigid_owner(mesh, topo_.edges[edge][0], topo_.edges[edge][1]);
     }
@@ -723,6 +764,7 @@ void BroadPhase::build(
     const std::vector<int>* surface_query_nodes = exclude_tet_interior_nt_queries ? &surface_nt_query_nodes(mesh, nv) : nullptr;
 
     c.node_boxes.resize(nv);
+    #pragma omp parallel for schedule(static) if(nv >= 128)
     for (int i = 0; i < nv; ++i) {
         c.node_boxes[i] = build_node_box(x, v, i, dt, node_pad);
     }
@@ -737,6 +779,7 @@ void BroadPhase::build(
     }
 
     c.edge_boxes.resize(ne);
+    #pragma omp parallel for schedule(static) if(ne >= 128)
     for (int e = 0; e < ne; ++e) {
         c.edge_boxes[e] = build_edge_box(x, v, c.edges[e][0], c.edges[e][1], dt, edge_pad);
     }
@@ -751,7 +794,7 @@ void BroadPhase::build(
         { c.node_root = build_bvh(c.node_boxes, c.node_bvh_nodes); }
     }
 
-    // Parallel BVH queries, followed by serial ordered pair insertion.
+    // Parallel queries and ordered pair materialization.
     std::vector<std::vector<int>>& node_hits = prepare_hit_rows(c.node_hits, nv);
     const int num_nt_query_nodes = exclude_tet_interior_nt_queries ? static_cast<int>(surface_query_nodes->size()) : nv;
     #pragma omp parallel for schedule(dynamic, 32)
@@ -760,15 +803,6 @@ void BroadPhase::build(
         if (c.tri_root < 0) continue;
         query_bvh(c.tri_bvh_nodes, c.tri_root, c.node_boxes[node], node_hits[node]);
     }
-    for (int node = 0; node < nv; ++node) {
-        for (int t : node_hits[node]) {
-            const int a  = tri_vertex(mesh, t, 0);
-            const int b  = tri_vertex(mesh, t, 1);
-            const int cc = tri_vertex(mesh, t, 2);
-            if (node_in_triangle(node, a, b, cc)) continue;
-            append_nt_pair(c, node, t, mesh, mode);
-        }
-    }
 
     std::vector<std::vector<int>>& edge_hits = prepare_hit_rows(c.edge_hits, ne);
     #pragma omp parallel for schedule(dynamic, 32)
@@ -776,15 +810,7 @@ void BroadPhase::build(
         if (c.edge_root < 0) continue;
         query_bvh(c.edge_bvh_nodes, c.edge_root, c.edge_boxes[e], edge_hits[e]);
     }
-    for (int e = 0; e < ne; ++e) {
-        const Edge e0{c.edges[e][0], c.edges[e][1]};
-        for (int other : edge_hits[e]) {
-            if (other <= e) continue;
-            const Edge e1{c.edges[other][0], c.edges[other][1]};
-            if (share_vertex(e0, e1)) continue;
-            append_ss_pair(c, e, other, mesh, mode);
-        }
-    }
+    materialize_solver_pairs(c, mesh, mode, /*forward_edges_only=*/true);
 
     cache_ = std::move(c);
 }
@@ -842,7 +868,9 @@ void BroadPhase::initialize_from_vertex_boxes(const std::vector<AABB>& vertex_bo
     const std::vector<int>* surface_query_nodes = exclude_tet_interior_nt_queries ? &surface_nt_query_nodes(mesh, nv) : nullptr;
 
     // Blue boxes: one certified motion box per vertex.
-    c.node_boxes = vertex_boxes;
+    c.node_boxes.resize(vertex_boxes.size());
+    #pragma omp parallel for schedule(static) if(nv >= 128)
+    for (int node = 0; node < nv; ++node) c.node_boxes[node] = vertex_boxes[node];
 
     const Vec3 pad = d_hat * Vec3::Ones();
     c.tri_boxes.resize(nt);
@@ -931,22 +959,7 @@ void BroadPhase::initialize_from_vertex_boxes(const std::vector<AABB>& vertex_bo
             query_bvh_excluding_rigid_owner(c.edge_bvh_nodes, c.edge_bvh_rigid_owner, c.edge_root, c.edge_boxes[e], owner, edge_hits[e]);
         }
     }
-    if (mode == InitializationMode::Refittable) {
-        for (int node = 0; node < nv; ++node) {
-            for (const int tri_idx : node_hits[node]) {
-                if (accepts_nt_pair(mesh, node, tri_idx, mode))
-                    append_nt_pair(c, node, tri_idx, mesh, mode);
-            }
-        }
-        for (int edge = 0; edge < ne; ++edge) {
-            for (const int other : edge_hits[edge]) {
-                if (accepts_ss_pair(c, mesh, edge, other, mode))
-                    append_ss_pair(c, edge, other, mesh, mode);
-            }
-        }
-    } else {
-        materialize_solver_pairs(c, mesh, mode);
-    }
+    materialize_solver_pairs(c, mesh, mode);
 
     cache_ = std::move(c);
 }
@@ -958,11 +971,9 @@ void BroadPhase::refresh_pairs(const RefMesh& mesh) {
 
     c.nt_pairs.clear();
     c.nt_pair_tri.clear();
-    for (auto& v : c.vertex_nt) v.clear();
 
     c.ss_pairs.clear();
     c.ss_pair_edges.clear();
-    for (auto& v : c.vertex_ss) v.clear();
 
     const std::vector<int>* surface_query_nodes = exclude_tet_interior_nt_queries_ ? &surface_nt_query_nodes(mesh, nv) : nullptr;
     std::vector<std::vector<int>>& node_hits = prepare_hit_rows(c.node_hits, nv);
@@ -973,15 +984,6 @@ void BroadPhase::refresh_pairs(const RefMesh& mesh) {
         if (c.tri_root < 0) continue;
         query_bvh(c.tri_bvh_nodes, c.tri_root, c.node_boxes[node], node_hits[node]);
     }
-    for (int node = 0; node < nv; ++node) {
-        for (int t : node_hits[node]) {
-            const int a  = tri_vertex(mesh, t, 0);
-            const int b  = tri_vertex(mesh, t, 1);
-            const int cc = tri_vertex(mesh, t, 2);
-            if (node_in_triangle(node, a, b, cc)) continue;
-            append_nt_pair(c, node, t, mesh, InitializationMode::Refittable);
-        }
-    }
 
     std::vector<std::vector<int>>& edge_hits = prepare_hit_rows(c.edge_hits, ne);
     #pragma omp parallel for schedule(dynamic, 32)
@@ -989,16 +991,7 @@ void BroadPhase::refresh_pairs(const RefMesh& mesh) {
         if (c.edge_root < 0) continue;
         query_bvh(c.edge_bvh_nodes, c.edge_root, c.edge_boxes[e], edge_hits[e]);
     }
-    for (int e = 0; e < ne; ++e) {
-        const Edge e0{c.edges[e][0], c.edges[e][1]};
-        for (int other : edge_hits[e]) {
-            if (other == e) continue;
-            const Edge e1{c.edges[other][0], c.edges[other][1]};
-            if (share_vertex(e0, e1)) continue;
-            if (earlier_edge_query_already_reported_pair(c, e, other)) continue;
-            append_ss_pair(c, e, other, mesh, InitializationMode::Refittable);
-        }
-    }
+    materialize_solver_pairs(c, mesh, InitializationMode::Refittable);
 }
 
 void incremental_refresh_vertex(BroadPhase::Cache& c, int vi, const std::vector<Vec3>& x, const RefMesh& mesh, double box_pad, double node_box_radius_padded) {

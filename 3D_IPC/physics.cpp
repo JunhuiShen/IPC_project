@@ -61,8 +61,8 @@ void build_frozen_residual_workspace(
     const int num_solid_elements = num_tets(ref_mesh);
     const BroadPhase::Cache& broad_phase_cache = broad_phase.cache();
     const bool barrier_enabled = params.d_hat > 0.0 && params.k_barrier != 0.0;
-    const int num_nt_pairs = barrier_enabled ? static_cast<int>(broad_phase_cache.nt_pairs.size()) : 0;
-    const int num_ss_pairs = barrier_enabled ? static_cast<int>(broad_phase_cache.ss_pairs.size()) : 0;
+    const int num_nt_pairs = static_cast<int>(broad_phase_cache.nt_pairs.size());
+    const int num_ss_pairs = static_cast<int>(broad_phase_cache.ss_pairs.size());
     const double d_hat2 = params.d_hat * params.d_hat;
     const std::size_t residual_item_count = static_cast<std::size_t>(num_cloth_triangles) + static_cast<std::size_t>(num_hinges) + static_cast<std::size_t>(num_solid_elements) + static_cast<std::size_t>(num_nt_pairs) + static_cast<std::size_t>(num_ss_pairs);
     workspace.cloth_triangle_gradients.resize(static_cast<std::size_t>(num_cloth_triangles));
@@ -70,12 +70,12 @@ void build_frozen_residual_workspace(
     workspace.tet_gradients.resize(static_cast<std::size_t>(num_solid_elements));
     workspace.nt_gradients.resize(broad_phase_cache.nt_pairs.size());
     workspace.ss_gradients.resize(broad_phase_cache.ss_pairs.size());
-    workspace.nt_aabb_active.assign(broad_phase_cache.nt_pairs.size(), 0);
-    workspace.ss_aabb_active.assign(broad_phase_cache.ss_pairs.size(), 0);
-    workspace.nt_barrier_active.assign(broad_phase_cache.nt_pairs.size(), 0);
-    workspace.ss_barrier_active.assign(broad_phase_cache.ss_pairs.size(), 0);
-    workspace.nt_gradient_cached.assign(broad_phase_cache.nt_pairs.size(), 0);
-    workspace.ss_gradient_cached.assign(broad_phase_cache.ss_pairs.size(), 0);
+    workspace.nt_aabb_active.resize(broad_phase_cache.nt_pairs.size());
+    workspace.ss_aabb_active.resize(broad_phase_cache.ss_pairs.size());
+    workspace.nt_barrier_active.resize(broad_phase_cache.nt_pairs.size());
+    workspace.ss_barrier_active.resize(broad_phase_cache.ss_pairs.size());
+    workspace.nt_gradient_cached.resize(broad_phase_cache.nt_pairs.size());
+    workspace.ss_gradient_cached.resize(broad_phase_cache.ss_pairs.size());
 
     const auto build_cloth_triangle_gradient = [&](const int triangle) {
         const TriangleDef def = make_def_triangle(x, ref_mesh, triangle);
@@ -119,6 +119,11 @@ void build_frozen_residual_workspace(
         for (int role = 0; role < 4; ++role) workspace.tet_gradients[element][static_cast<std::size_t>(role)] = EFEMElementNodeEnergyGradient(cache, F, ref_mesh.tet_rest_data[element], params.solid_mu, params.solid_lambda, role, &first_piola);
     };
     const auto build_nt_gradient = [&](const int pair_index) {
+        // Reset flags in the same row-owned pass as gradient evaluation.
+        workspace.nt_aabb_active[pair_index] = 0;
+        workspace.nt_barrier_active[pair_index] = 0;
+        workspace.nt_gradient_cached[pair_index] = 0;
+        if (!barrier_enabled) return;
         const NodeTrianglePair& pair = broad_phase_cache.nt_pairs[static_cast<std::size_t>(pair_index)];
         if (!node_triangle_aabbs_within_distance(x[static_cast<std::size_t>(pair.node)], x[static_cast<std::size_t>(pair.tri_v[0])], x[static_cast<std::size_t>(pair.tri_v[1])], x[static_cast<std::size_t>(pair.tri_v[2])], d_hat2)) return;
         workspace.nt_aabb_active[static_cast<std::size_t>(pair_index)] = 1;
@@ -130,6 +135,11 @@ void build_frozen_residual_workspace(
         workspace.nt_gradient_cached[static_cast<std::size_t>(pair_index)] = 1;
     };
     const auto build_ss_gradient = [&](const int pair_index) {
+        // Reset flags in the same row-owned pass as gradient evaluation.
+        workspace.ss_aabb_active[pair_index] = 0;
+        workspace.ss_barrier_active[pair_index] = 0;
+        workspace.ss_gradient_cached[pair_index] = 0;
+        if (!barrier_enabled) return;
         const SegmentSegmentPair& pair = broad_phase_cache.ss_pairs[static_cast<std::size_t>(pair_index)];
         if (!segment_aabbs_within_distance(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])], d_hat2)) return;
         workspace.ss_aabb_active[static_cast<std::size_t>(pair_index)] = 1;
@@ -144,7 +154,7 @@ void build_frozen_residual_workspace(
     // A residual build has five independent primitive ranges. Keeping them in
     // one team avoids repeated OpenMP startup, while the item threshold keeps
     // tiny and rigid-only scenes entirely outside the OpenMP runtime.
-    if (params.use_parallel && residual_item_count >= 512) {
+    if (params.use_parallel && residual_item_count >= 128) {
         #pragma omp parallel
         {
             #pragma omp for schedule(static) nowait

@@ -25,6 +25,50 @@
 
 namespace {
 
+// For setup kernels that validate inputs, propagate exceptions on the calling
+// thread instead of letting them escape an OpenMP worker and terminate.
+template <typename Function>
+void parallel_body_setup(int count, bool parallel, const Function& function) {
+    if (!parallel) {
+        for (int i = 0; i < count; ++i) function(i);
+        return;
+    }
+    std::exception_ptr failure;
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < count; ++i) {
+        try { function(i); }
+        catch (...) {
+            #pragma omp critical(rigid_setup_exception)
+            { if (!failure) failure = std::current_exception(); }
+        }
+    }
+    if (failure) std::rethrow_exception(failure);
+}
+
+// Task groups finish all proxy writes before the next dependent body phase.
+void translate_rigid_nodes(const std::vector<int>& nodes, const Vec3 displacement,
+    std::vector<Vec3>& positions, bool parallel) {
+    if (parallel && nodes.size() >= 128) {
+        #pragma omp taskloop grainsize(64) shared(nodes, positions) firstprivate(displacement)
+        for (int local = 0; local < static_cast<int>(nodes.size()); ++local)
+            positions[nodes[local]] += displacement;
+    } else {
+        for (const int node : nodes) positions[node] += displacement;
+    }
+}
+
+void place_rigid_nodes(const std::vector<int>& nodes, const std::vector<Vec3>& material,
+    const Vec3 center, const Vec4 orientation, std::vector<Vec3>& positions, bool parallel) {
+    if (parallel && nodes.size() >= 128) {
+        #pragma omp taskloop grainsize(64) shared(nodes, material, positions) firstprivate(center, orientation)
+        for (int local = 0; local < static_cast<int>(nodes.size()); ++local)
+            positions[nodes[local]] = world_space_position(material[local], center, orientation);
+    } else {
+        for (int local = 0; local < static_cast<int>(nodes.size()); ++local)
+            positions[nodes[local]] = world_space_position(material[local], center, orientation);
+    }
+}
+
 void validate_solver_friction_parameters(
     const SimParams& params, const char* caller) {
     if (!std::isfinite(params.friction_coefficient)
@@ -65,6 +109,7 @@ const std::vector<Vec3>* resolve_friction_previous_positions(
     }
     reconstructed_previous_positions.resize(x.size());
     const double dt = params.dt();
+    #pragma omp parallel for schedule(static) if(params.use_parallel && x.size() >= 128)
     for (std::size_t node = 0; node < x.size(); ++node)
         reconstructed_previous_positions[node] = xhat[node] - dt * velocities[node];
     return &reconstructed_previous_positions;
@@ -148,11 +193,14 @@ struct BasicSolverWorkspace {
         if (!topology_matches) {
             elastic_adjacency = ElasticAdjacencyCache{};
             incident_triangles.assign(nv, {});
-            for (const auto& [vi, row] : adj) {
-                if (vi >= 0 && vi < nv) incident_triangles[vi] = row;
+            #pragma omp parallel for schedule(static) if(nv >= 128)
+            for (int vi = 0; vi < nv; ++vi) {
+                const auto found = adj.find(vi);
+                if (found != adj.end()) incident_triangles[vi] = found->second;
             }
 
             rest_shape_grads.resize(ref_mesh.Dm_inverse.size());
+            #pragma omp parallel for schedule(static) if(ref_mesh.Dm_inverse.size() >= 128)
             for (int ti = 0; ti < static_cast<int>(ref_mesh.Dm_inverse.size()); ++ti)
                 rest_shape_grads[ti] = shape_function_gradients(ref_mesh.Dm_inverse[ti]);
 
@@ -163,6 +211,7 @@ struct BasicSolverWorkspace {
             combined_adjacency.clear();
             color_groups.clear();
             deformable_nodes.resize(static_cast<std::size_t>(nv));
+            #pragma omp parallel for schedule(static) if(nv >= 128)
             for (int node = 0; node < nv; ++node) deformable_nodes[static_cast<std::size_t>(node)] = node;
             coloring_workspace = GreedyColoringWorkspace{};
             frozen_residual = FrozenResidualWorkspace{};
@@ -246,11 +295,13 @@ struct MixedAdjacencyWorkspace {
             return;
 
         solid_node_mask.assign(static_cast<std::size_t>(nv), 0);
-        for (const int node : ref_mesh.tet_nodes)
-            solid_node_mask[static_cast<std::size_t>(node)] = 1;
+        #pragma omp parallel for schedule(static) if(ref_mesh.tet_nodes.size() >= 128)
+        for (int solid = 0; solid < static_cast<int>(ref_mesh.tet_nodes.size()); ++solid)
+            solid_node_mask[static_cast<std::size_t>(ref_mesh.tet_nodes[solid])] = 1;
         surface_node_mask.assign(static_cast<std::size_t>(nv), 0);
-        for (const int node : ref_mesh.surface_nodes)
-            surface_node_mask[static_cast<std::size_t>(node)] = 1;
+        #pragma omp parallel for schedule(static) if(ref_mesh.surface_nodes.size() >= 128)
+        for (int surface = 0; surface < static_cast<int>(ref_mesh.surface_nodes.size()); ++surface)
+            surface_node_mask[static_cast<std::size_t>(ref_mesh.surface_nodes[surface])] = 1;
         cloth_nodes.clear();
         cloth_nodes.reserve(deformable_nodes.size());
         for (const int node : deformable_nodes) {
@@ -262,10 +313,13 @@ struct MixedAdjacencyWorkspace {
         const int rigid_begin = solid_begin
             + static_cast<int>(ref_mesh.tet_nodes.size());
         node_to_block.assign(static_cast<std::size_t>(nv), -1);
+        #pragma omp parallel for schedule(static) if(cloth_nodes.size() >= 128)
         for (int cloth = 0; cloth < static_cast<int>(cloth_nodes.size()); ++cloth)
             node_to_block[static_cast<std::size_t>(cloth_nodes[cloth])] = cloth;
+        #pragma omp parallel for schedule(static) if(ref_mesh.tet_nodes.size() >= 128)
         for (int solid = 0; solid < static_cast<int>(ref_mesh.tet_nodes.size()); ++solid)
             node_to_block[static_cast<std::size_t>(ref_mesh.tet_nodes[solid])] = solid_begin + solid;
+        #pragma omp parallel for schedule(static) if(num_rbs >= 8)
         for (int rb = 0; rb < num_rbs; ++rb) {
             for (const int node : ref_mesh.rb_nodes[static_cast<std::size_t>(rb)])
                 node_to_block[static_cast<std::size_t>(node)] = rigid_begin + rb;
@@ -619,6 +673,8 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     std::vector<double>& inertial_disp = workspace.inertial_disp;
     constexpr double node_box_padding = 1.2;
     const double dt = params.dt();
+    (void)params.dt2();
+    #pragma omp parallel for schedule(static) if(params.use_parallel && nv >= 128)
     for (int vi = 0; vi < nv; ++vi)
         inertial_disp[vi] = v[vi].norm() * dt;
     auto node_box_size_fn = [&](int vi) {
@@ -643,7 +699,8 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     SolverResult result;
     // anchor for clip boxes and prev_disp
     std::vector<Vec3>& xnew_substep_start = workspace.xnew_substep_start;
-    xnew_substep_start = xnew;
+    #pragma omp parallel for schedule(static) if(params.use_parallel && nv >= 128)
+    for (int vi = 0; vi < nv; ++vi) xnew_substep_start[vi] = xnew[vi];
  
     double r1=0.;
     //gs loop
@@ -652,6 +709,7 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
             if (params.verbose)
                 std::fprintf(stderr, "  [GS] iter %d  rebuilding node boxes\n", iter);
             //create new node boxes
+            #pragma omp parallel for schedule(static) if(params.use_parallel && nv >= 128)
             for (int i = 0; i < nv; ++i) {
                 const double r = node_box_size_fn(i);
                 blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
@@ -665,7 +723,14 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                 greedy_color_conflict_graph(combined_adj, color_groups, &workspace.coloring_workspace);
                 const BroadPhase::Cache& bp_cache = broad_phase.cache();
                 // Vertices in one color share no dependencies, so process contact-heavy vertices first to avoid end-of-color stragglers.
-                for (std::vector<int>& group : color_groups) std::stable_sort(group.begin(), group.end(), [&](const int a, const int b) { return bp_cache.vertex_nt[static_cast<std::size_t>(a)].size() + bp_cache.vertex_ss[static_cast<std::size_t>(a)].size() > bp_cache.vertex_nt[static_cast<std::size_t>(b)].size() + bp_cache.vertex_ss[static_cast<std::size_t>(b)].size(); });
+                #pragma omp parallel for schedule(dynamic, 1) if(params.use_parallel && nv >= 128)
+                for (int color = 0; color < static_cast<int>(color_groups.size()); ++color) {
+                    auto& group = color_groups[color];
+                    std::stable_sort(group.begin(), group.end(), [&](const int a, const int b) {
+                        return bp_cache.vertex_nt[a].size() + bp_cache.vertex_ss[a].size()
+                            > bp_cache.vertex_nt[b].size() + bp_cache.vertex_ss[b].size();
+                    });
+                }
             } else {
                 // Collision-free solve: keep node-box step clipping, but do no
                 // primitive BVH construction, pair search, or contact-aware
@@ -714,6 +779,7 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     }
 
     //record displacement over sub step
+    #pragma omp parallel for schedule(static) if(params.use_parallel && nv >= 128)
     for (int i = 0; i < nv; ++i)
         prev_disp[i] = (xnew[i] - xnew_substep_start[i]).norm();
 
@@ -847,13 +913,13 @@ const Vec3& rigid_node_body_space_position(int node, const RefMesh& ref_mesh, co
 
 void construct_current_rigid_node_positions(const RefMesh& ref_mesh, const DeformedState& state, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, double dt, std::vector<Vec3>& positions) {
     positions = state.deformed_positions;
-    for (int rb = 0; rb < static_cast<int>(ref_mesh.rb_nodes.size()); ++rb) {
+    parallel_body_setup(static_cast<int>(ref_mesh.rb_nodes.size()), ref_mesh.rb_nodes.size() >= 8, [&](int rb) {
         const Vec4 orientation = quaternion_from_angular_velocity(state.orientations[rb], omega_new[rb], dt);
         for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local) {
             const int node = ref_mesh.rb_nodes[rb][local];
             positions[node] = world_space_position(ref_mesh.ref_positions[rb][local], x_com_new[rb], orientation);
         }
-    }
+    });
 }
 
 void add_rigid_derivatives(RigidEnergyDerivatives& total, const RigidEnergyDerivatives& contribution) {
@@ -1361,7 +1427,7 @@ double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedS
             (update_translation ? com_gradient.norm() : 0.0)
             + (update_orientation ? orientation_gradient.norm() : 0.0);
     };
-    if (params.use_parallel && num_rbs > 1) {
+    if (params.use_parallel && num_rbs >= 8) {
         std::exception_ptr first_exception;
         int first_exception_body = num_rbs;
         #pragma omp parallel for schedule(static)
@@ -1491,6 +1557,7 @@ struct RigidSolverWorkspace {
             coloring_workspace = GreedyColoringWorkspace{};
             body_residuals.clear();
             node_to_rb_local.assign(nv, -1);
+            #pragma omp parallel for schedule(dynamic, 1) if(ref_mesh.rb_nodes.size() >= 8)
             for (int rb = 0; rb < static_cast<int>(ref_mesh.rb_nodes.size()); ++rb) {
                 for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local)
                     node_to_rb_local[ref_mesh.rb_nodes[rb][local]] = local;
@@ -1534,6 +1601,8 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
     SolverResult result;
     const int num_rbs = static_cast<int>(ref_mesh.total_mass.size());
     const double dt = params.dt();
+    (void)params.dt2();
+    #pragma omp parallel for schedule(static) if(params.use_parallel && num_rbs >= 8)
     for (int rb = 0; rb < num_rbs; ++rb) {
         const RigidBodyUpdateMode update_mode =
             ref_mesh.rb_update_modes[rb];
@@ -1546,8 +1615,9 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
     }
     static RigidSolverWorkspace workspace;
     workspace.prepare(ref_mesh, static_cast<int>(state.deformed_positions.size()), params.node_box_max, params.theta_box_max);
-    for (int rb = 0; rb < num_rbs; ++rb)
+    parallel_body_setup(num_rbs, params.use_parallel && num_rbs >= 8, [&](int rb) {
         workspace.rotation_predictors[static_cast<std::size_t>(rb)] = rigid_rotation_predictor(state.orientations[rb], state.omega[rb], dt);
+    });
 
     // The caller supplies the initial collision-free configuration, with
     // omega_new storing the rotation increment from q_n. The previous physical
@@ -1568,16 +1638,22 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
 
     const auto rebuild_contact_cache = [&](int iteration) {
         constexpr double box_padding = 1.2;
-        for (int rb = 0; rb < num_rbs; ++rb) {
+        parallel_body_setup(num_rbs, params.use_parallel && num_rbs >= 8, [&](int rb) {
             workspace.com_box_anchors[rb] = x_com_new[rb];
             workspace.orientation_box_anchors[rb] = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_new[rb], dt));
             workspace.com_box_radii[rb] = std::clamp(box_padding * std::max(workspace.prev_com_disp[rb], dt * state.v_coms[rb].norm()), params.node_box_min, params.node_box_max);
             workspace.theta_box_radii[rb] = std::clamp(box_padding * std::max(workspace.prev_theta_disp[rb], dt * state.omega[rb].norm()), params.theta_box_min, params.theta_box_max);
-        }
+        });
         build_blue_boxes_rb(workspace.com_box_anchors, workspace.orientation_box_anchors, workspace.theta_box_radii, workspace.com_box_radii, ref_mesh, workspace.blue_boxes);
         const std::vector<AABB>& cached_boxes = workspace.broad_phase.cache().node_boxes;
         bool boxes_unchanged = workspace.contact_cache_initialized && cached_boxes.size() == workspace.blue_boxes.size() && std::memcmp(&workspace.contact_cache_d_hat, &params.d_hat, sizeof(double)) == 0;
-        for (std::size_t box = 0; boxes_unchanged && box < cached_boxes.size(); ++box) boxes_unchanged = std::memcmp(cached_boxes[box].min.data(), workspace.blue_boxes[box].min.data(), 3 * sizeof(double)) == 0 && std::memcmp(cached_boxes[box].max.data(), workspace.blue_boxes[box].max.data(), 3 * sizeof(double)) == 0;
+        if (boxes_unchanged) {
+            #pragma omp parallel for schedule(static) reduction(&&:boxes_unchanged) if(params.use_parallel && cached_boxes.size() >= 128)
+            for (std::size_t box = 0; box < cached_boxes.size(); ++box)
+                boxes_unchanged = boxes_unchanged
+                    && std::memcmp(cached_boxes[box].min.data(), workspace.blue_boxes[box].min.data(), 3 * sizeof(double)) == 0
+                    && std::memcmp(cached_boxes[box].max.data(), workspace.blue_boxes[box].max.data(), 3 * sizeof(double)) == 0;
+        }
         if (boxes_unchanged) {
             if (params.verbose)
                 std::fprintf(stderr, "  [RB GS] iter %d  reusing rigid contact cache\n", iteration);
@@ -1635,8 +1711,7 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
                 const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], node_positions, rb, proposed_com_displacement);
                 const Vec3 com_displacement = com_safe_step * proposed_com_displacement;
                 x_com_new[rb] += com_displacement;
-                for (const int node : ref_mesh.rb_nodes[rb])
-                    node_positions[node] += com_displacement;
+                translate_rigid_nodes(ref_mesh.rb_nodes[rb], com_displacement, node_positions, params.use_parallel);
             }
 
             Vec4 q_accepted = q_new[rb];
@@ -1652,8 +1727,7 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
                 omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, state.orientations[rb], dt);
             }
 
-            for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local)
-                node_positions[ref_mesh.rb_nodes[rb][local]] = world_space_position(ref_mesh.ref_positions[rb][local], x_com_new[rb], q_accepted);
+            place_rigid_nodes(ref_mesh.rb_nodes[rb], ref_mesh.ref_positions[rb], x_com_new[rb], q_accepted, node_positions, params.use_parallel);
         };
 
         if (params.use_parallel) {
@@ -1683,6 +1757,7 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
         }
     }
 
+    #pragma omp parallel for schedule(static) if(params.use_parallel && num_rbs >= 8)
     for (int rb = 0; rb < num_rbs; ++rb) {
         workspace.prev_com_disp[rb] = updates_rigid_translation(
             ref_mesh.rb_update_modes[rb])
@@ -1737,6 +1812,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
     // positions before returning through the general API.
     if (deformable_nodes.empty() && ref_mesh.tet_nodes.empty()) {
         SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new);
+        #pragma omp parallel for schedule(dynamic, 1) if(params.use_parallel && num_rbs >= 8)
         for (int rb = 0; rb < num_rbs; ++rb) {
             for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local) {
                 xnew[ref_mesh.rb_nodes[rb][local]] = world_space_position(ref_mesh.ref_positions[rb][local], x_com_new[rb], q_new[rb]);
@@ -1745,6 +1821,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
         return result;
     }
 
+    #pragma omp parallel for schedule(static) if(params.use_parallel && num_rbs >= 8)
     for (int rb = 0; rb < num_rbs; ++rb) {
         const RigidBodyUpdateMode update_mode =
             ref_mesh.rb_update_modes[rb];
@@ -1776,56 +1853,67 @@ SolverResult global_gauss_seidel_solver_basic_general(
         deformable_workspace.pinned_vertices.push_back(pins[pin].vertex_index);
     }
 
+    const double dt = params.dt();
+    (void)params.dt2();
+
     // xnew is the single live collision configuration. Its deformable entries
     // come from the caller; overwrite only rigid proxies from generalized
     // coordinates.
-    for (int rb = 0; rb < num_rbs; ++rb) {
+    parallel_body_setup(num_rbs, params.use_parallel && num_rbs >= 8, [&](int rb) {
         const Vec4 orientation = updates_rigid_orientation(
                                      ref_mesh.rb_update_modes[rb])
             ? quaternion_normalize(quaternion_from_angular_velocity(
-                  state.orientations[rb], omega_new[rb], params.dt()))
+                  state.orientations[rb], omega_new[rb], dt))
             : state.orientations[rb];
         q_new[rb] = orientation;
         for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local) {
             xnew[ref_mesh.rb_nodes[rb][local]] = world_space_position(ref_mesh.ref_positions[rb][local], x_com_new[rb], orientation);
         }
-    }
+    });
 
-    deformable_workspace.xnew_substep_start = xnew;
+    #pragma omp parallel for schedule(static) if(params.use_parallel && nv >= 128)
+    for (int node = 0; node < nv; ++node) deformable_workspace.xnew_substep_start[node] = xnew[node];
     rigid_workspace.substep_start_coms = x_com_new;
     std::vector<AABB>& blue_boxes = rigid_workspace.blue_boxes;
-    const double dt = params.dt();
-    for (int rb = 0; rb < num_rbs; ++rb)
+    parallel_body_setup(num_rbs, params.use_parallel && num_rbs >= 8, [&](int rb) {
         rigid_workspace.rotation_predictors[static_cast<std::size_t>(rb)] = rigid_rotation_predictor(state.orientations[rb], state.omega[rb], dt);
-    for (const int node : cloth_nodes)
+    });
+    #pragma omp parallel for schedule(static) if(params.use_parallel && cloth_nodes.size() >= 128)
+    for (int index = 0; index < static_cast<int>(cloth_nodes.size()); ++index) {
+        const int node = cloth_nodes[index];
         deformable_workspace.inertial_disp[node] = dt * state.velocities[node].norm();
-    for (const int node : solid_nodes)
+    }
+    #pragma omp parallel for schedule(static) if(params.use_parallel && solid_nodes.size() >= 128)
+    for (int index = 0; index < static_cast<int>(solid_nodes.size()); ++index) {
+        const int node = solid_nodes[index];
         deformable_workspace.inertial_disp[node] = dt * state.velocities[node].norm();
-    // SimParams caches these values lazily. Populate both caches before any
-    // heterogeneous color is evaluated by multiple OpenMP workers.
-    (void)params.dt2();
+    }
     constexpr double box_padding = 1.2;
 
     const auto rebuild_contact_cache = [&](int iteration) {
         // First fill deformable boxes. build_blue_boxes_rb then overwrites all
         // rigid proxy entries with spherical-cap plus COM bounds.
-        for (const int node : cloth_nodes) {
+        #pragma omp parallel for schedule(static) if(params.use_parallel && cloth_nodes.size() >= 128)
+        for (int index = 0; index < static_cast<int>(cloth_nodes.size()); ++index) {
+            const int node = cloth_nodes[index];
             const double radius = std::clamp(box_padding * std::max(deformable_workspace.prev_disp[node], deformable_workspace.inertial_disp[node]),params.node_box_min, params.node_box_max);
             const Vec3 half_extent = Vec3::Constant(radius);
             blue_boxes[node] = AABB(xnew[node] - half_extent, xnew[node] + half_extent);
         }
-        for (const int node : solid_nodes) {
+        #pragma omp parallel for schedule(static) if(params.use_parallel && solid_nodes.size() >= 128)
+        for (int index = 0; index < static_cast<int>(solid_nodes.size()); ++index) {
+            const int node = solid_nodes[index];
             const double radius = std::clamp(box_padding * std::max(deformable_workspace.prev_disp[node], deformable_workspace.inertial_disp[node]),params.node_box_min, params.node_box_max);
             const Vec3 half_extent = Vec3::Constant(radius);
             blue_boxes[node] = AABB(xnew[node] - half_extent, xnew[node] + half_extent);
         }
 
-        for (int rb = 0; rb < num_rbs; ++rb) {
+        parallel_body_setup(num_rbs, params.use_parallel && num_rbs >= 8, [&](int rb) {
             rigid_workspace.com_box_anchors[rb] = x_com_new[rb];
             rigid_workspace.orientation_box_anchors[rb] = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_new[rb], dt));
             rigid_workspace.com_box_radii[rb] = std::clamp(box_padding * std::max(rigid_workspace.prev_com_disp[rb], dt * state.v_coms[rb].norm()), params.node_box_min, params.node_box_max);
             rigid_workspace.theta_box_radii[rb] = std::clamp(box_padding * std::max(rigid_workspace.prev_theta_disp[rb], dt * state.omega[rb].norm()), params.theta_box_min, params.theta_box_max);
-        }
+        });
         build_blue_boxes_rb(rigid_workspace.com_box_anchors, rigid_workspace.orientation_box_anchors, rigid_workspace.theta_box_radii, rigid_workspace.com_box_radii, ref_mesh, blue_boxes);
         if (solid_nodes.empty()) {
             broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::GeneralSolver);
@@ -1909,8 +1997,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
                 const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, proposed_com_displacement);
                 const Vec3 com_displacement = com_safe_step * proposed_com_displacement;
                 x_com_new[rb] += com_displacement;
-                for (const int node : ref_mesh.rb_nodes[rb])
-                    xnew[node] += com_displacement;
+                translate_rigid_nodes(ref_mesh.rb_nodes[rb], com_displacement, xnew, params.use_parallel);
             }
 
             Vec4 q_accepted = q_new[rb];
@@ -1926,9 +2013,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
                 omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, state.orientations[rb], dt);
             }
 
-            for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size());++local) {
-                xnew[ref_mesh.rb_nodes[rb][local]] = world_space_position(ref_mesh.ref_positions[rb][local],x_com_new[rb], q_accepted);
-            }
+            place_rigid_nodes(ref_mesh.rb_nodes[rb], ref_mesh.ref_positions[rb], x_com_new[rb], q_accepted, xnew, params.use_parallel);
         };
 
         if (params.use_parallel) {
@@ -1981,12 +2066,17 @@ SolverResult global_gauss_seidel_solver_basic_general(
         }
     }
 
-    for (const int node : cloth_nodes) {
+    #pragma omp parallel for schedule(static) if(params.use_parallel && cloth_nodes.size() >= 128)
+    for (int index = 0; index < static_cast<int>(cloth_nodes.size()); ++index) {
+        const int node = cloth_nodes[index];
         deformable_workspace.prev_disp[node] = (xnew[node] - deformable_workspace.xnew_substep_start[node]).norm();
     }
-    for (const int node : solid_nodes) {
+    #pragma omp parallel for schedule(static) if(params.use_parallel && solid_nodes.size() >= 128)
+    for (int index = 0; index < static_cast<int>(solid_nodes.size()); ++index) {
+        const int node = solid_nodes[index];
         deformable_workspace.prev_disp[node] = (xnew[node] - deformable_workspace.xnew_substep_start[node]).norm();
     }
+    #pragma omp parallel for schedule(static) if(params.use_parallel && num_rbs >= 8)
     for (int rb = 0; rb < num_rbs; ++rb) {
         rigid_workspace.prev_com_disp[rb] = updates_rigid_translation(
             ref_mesh.rb_update_modes[rb])

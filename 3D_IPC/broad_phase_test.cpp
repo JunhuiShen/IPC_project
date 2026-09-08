@@ -13,6 +13,7 @@
 #include <tuple>
 #include <unordered_set>
 #include <vector>
+#include <omp.h>
 
 namespace {
 
@@ -1499,4 +1500,154 @@ TEST(BroadPhaseTest, PerVertexSafeStepUpdatesOnlySelectedVertex) {
     for (int axis = 0; axis < 3; ++axis) EXPECT_DOUBLE_EQ(x[0][axis], expected[axis]);
     for (int vi = 1; vi < static_cast<int>(x.size()); ++vi)
         EXPECT_TRUE(x[vi].isApprox(initial[vi], 0.0));
+}
+
+namespace {
+int build_bvh_serial_reference(const std::vector<AABB>& boxes, std::vector<BVHNode>& out, std::vector<int>* leaf_to_node) {
+    out.clear();
+    if (leaf_to_node) leaf_to_node->assign(boxes.size(), -1);
+    if (boxes.empty()) return -1;
+
+    std::vector<int> idx(boxes.size());
+    for (int i = 0; i < static_cast<int>(boxes.size()); ++i) idx[i] = i;
+
+    struct BuildTask {
+        int node_idx;
+        int start;
+        int end;
+    };
+
+    out.emplace_back();
+    std::vector<BuildTask> stack;
+    stack.push_back({0, 0, static_cast<int>(idx.size())});
+
+    while (!stack.empty()) {
+        const BuildTask task = stack.back();
+        stack.pop_back();
+
+        AABB node_box;
+        for (int i = task.start; i < task.end; ++i) {
+            node_box.expand(boxes[idx[i]]);
+        }
+        out[task.node_idx].bbox = node_box;
+
+        const int count = task.end - task.start;
+        if (count == 1) {
+            const int leaf = idx[task.start];
+            out[task.node_idx].leafIndex = leaf;
+            if (leaf_to_node) (*leaf_to_node)[leaf] = task.node_idx;
+            continue;
+        }
+
+        const Vec3 e = node_box.extent();
+        int axis = 0;
+        if (e.y() > e.x() && e.y() >= e.z()) axis = 1;
+        else if (e.z() > e.x() && e.z() >= e.y()) axis = 2;
+
+        const int mid = task.start + count / 2;
+        std::nth_element( idx.begin() + task.start, idx.begin() + mid, idx.begin() + task.end, [&](int a, int b) {
+                    return boxes[a].min[axis] + boxes[a].max[axis] < boxes[b].min[axis] + boxes[b].max[axis];
+                });
+
+        const int left = static_cast<int>(out.size());
+        out.emplace_back();
+        const int right = static_cast<int>(out.size());
+        out.emplace_back();
+
+        out[task.node_idx].left = left;
+        out[task.node_idx].right = right;
+        out[left].parent = task.node_idx;
+        out[right].parent = task.node_idx;
+
+        stack.push_back({right, mid, task.end});
+        stack.push_back({left, task.start, mid});
+    }
+
+    return 0;
+}
+}
+
+TEST(BVH3Test, ParallelBuildPreservesSerialLayoutQueriesAndRefitsExactly) {
+    struct RestoreThreads {
+        int count = omp_get_max_threads();
+        ~RestoreThreads() { omp_set_num_threads(count); }
+    } restore;
+    for (const int count : {0, 1, 127, 256, 257, 4099}) {
+        std::vector<AABB> boxes;
+        for (int i = 0; i < count; ++i) {
+            // Include repeated centroids and a non-power-of-two tree size.
+            const Vec3 center((i * 17) % 101, (i * 31) % 79, (i * 7) % 53);
+            boxes.emplace_back(center - Vec3::Constant(0.75), center + Vec3::Constant(0.75));
+        }
+        std::vector<BVHNode> expected;
+        std::vector<int> expected_leaves;
+        const int root = build_bvh_serial_reference(boxes, expected, &expected_leaves);
+        for (const int threads : {1, 4}) {
+            omp_set_num_threads(threads);
+            std::vector<BVHNode> actual;
+            std::vector<int> actual_leaves;
+            EXPECT_EQ(build_bvh(boxes, actual, actual_leaves), root);
+            expect_bvh_vectors_exact(actual, expected);
+            EXPECT_EQ(actual_leaves, expected_leaves);
+            for (int query = 0; query < 20; ++query) {
+                const Vec3 center(query * 4, query * 3, query * 2);
+                const AABB box(center, center + Vec3::Constant(12));
+                std::vector<int> actual_hits, expected_hits;
+                query_bvh(actual, root, box, actual_hits);
+                query_bvh(expected, root, box, expected_hits);
+                EXPECT_EQ(actual_hits, expected_hits);
+            }
+            if (count > 0) {
+                auto expected_refit = expected;
+                const AABB moved(Vec3(-10, -20, -30), Vec3(-9, -19, -29));
+                refit_bvh_leaf(actual, actual_leaves, count / 2, moved);
+                refit_bvh_leaf(expected_refit, expected_leaves, count / 2, moved);
+                expect_bvh_vectors_exact(actual, expected_refit);
+            }
+        }
+    }
+}
+
+TEST(BroadPhaseTest, ParallelTopologyPreservesFirstAppearanceAndIncidence) {
+    constexpr int count = 139;
+    RefMesh mesh;
+    mesh.num_positions = count;
+    std::vector<AABB> boxes;
+    for (int node = 0; node < count; ++node) {
+        const Vec3 center(node, node * node, 0);
+        boxes.emplace_back(center, center);
+    }
+    for (int triangle = 0; triangle < 271; ++triangle) {
+        const int a = (triangle * 13) % count;
+        mesh.tris.push_back(a);
+        mesh.tris.push_back(triangle % 7 == 0 ? a : (triangle * 17 + 1) % count);
+        mesh.tris.push_back((triangle * 19 + 2) % count);
+    }
+    std::vector<std::array<int, 2>> expected_edges;
+    std::vector<std::vector<int>> expected_triangles(count), expected_incidence(count);
+    for (int triangle = 0; triangle < num_tris(mesh); ++triangle) {
+        for (int role = 0; role < 3; ++role) {
+            const int a = tri_vertex(mesh, triangle, role);
+            const int b = tri_vertex(mesh, triangle, (role + 1) % 3);
+            expected_triangles[a].push_back(triangle);
+            const std::array<int, 2> edge{std::min(a, b), std::max(a, b)};
+            const auto found = std::find(expected_edges.begin(), expected_edges.end(), edge);
+            const int index = static_cast<int>(found - expected_edges.begin());
+            if (found == expected_edges.end()) expected_edges.push_back(edge);
+            expected_incidence[a].push_back(index);
+            expected_incidence[b].push_back(index);
+        }
+    }
+    for (int node = 0; node < count; ++node) {
+        for (auto* rows : {&expected_triangles, &expected_incidence}) {
+            auto& row = (*rows)[node];
+            std::sort(row.begin(), row.end());
+            row.erase(std::unique(row.begin(), row.end()), row.end());
+        }
+    }
+    BroadPhase phase;
+    phase.initialize(boxes, mesh, 0.0, BroadPhase::InitializationMode::DeformableSolver);
+    EXPECT_EQ(phase.cache().edges, expected_edges);
+    EXPECT_EQ(phase.cache().node_to_tris, expected_triangles);
+    EXPECT_EQ(phase.cache().node_to_edges, expected_incidence);
 }
