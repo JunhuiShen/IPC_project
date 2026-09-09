@@ -9,13 +9,67 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <exception>
+#include <functional>
+#include <omp.h>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <vector>
 
 namespace {
+
+    // Format independent ranges in parallel, then write them in file order.
+    // Copy the stream format so precision, locale and spelling stay identical.
+    void write_formatted_ranges(std::ostream& out, int count,
+                                const std::function<void(std::ostream&, int, int)>& format) {
+        if (count < 4096 || omp_get_max_threads() == 1 || omp_in_parallel()) {
+            format(out, 0, count);
+            return;
+        }
+        constexpr int grain = 1024;
+        const int blocks = 1 + (count - 1) / grain;
+        std::vector<std::string> text(blocks);
+        std::vector<std::exception_ptr> errors(blocks);
+#pragma omp parallel for schedule(static)
+        for (int block = 0; block < blocks; ++block) {
+            try {
+                std::ostringstream buffer;
+                buffer.copyfmt(out);
+                const int begin = block * grain;
+                format(buffer, begin, begin + std::min(grain, count - begin));
+                text[block] = buffer.str();
+            } catch (...) {
+                errors[block] = std::current_exception();
+            }
+        }
+        for (int block = 0; block < blocks; ++block) {
+            if (errors[block]) std::rethrow_exception(errors[block]);
+            out.write(text[block].data(), static_cast<std::streamsize>(text[block].size()));
+        }
+    }
+
+    // Binary packing is cheap and needs fewer workers than text formatting.
+    // Keep a direct serial path, and give up to eight workers 16K-record ranges.
+    template <typename Pack>
+    void pack_binary_ranges(int count, const Pack& pack) {
+        if (count == 0) return;
+        if (count < 131072 || omp_get_max_threads() == 1 || omp_in_parallel()) {
+            pack(0, count);
+            return;
+        }
+        constexpr int grain = 16384;
+        const int blocks = 1 + (count - 1) / grain;
+        const int threads = std::min(8, omp_get_max_threads());
+#pragma omp parallel for schedule(static) num_threads(threads)
+        for (int block = 0; block < blocks; ++block) {
+            const int begin = block * grain;
+            pack(begin, begin + std::min(grain, count - begin));
+        }
+    }
+
 
     void write_aabb_wireframe(std::ofstream& out, const AABB& box, int& v_offset) {
         const Vec3& lo = box.min;
@@ -60,9 +114,18 @@ namespace {
         }
 
         out << std::setprecision(17);
-        for (const auto& p : x) out << "v " << p.x() << " " << p.y() << " " << p.z() << "\n";
-        for (int t = 0; t < static_cast<int>(tris.size()); t += 3)
-            out << "f " << (tris[t] + 1) << " " << (tris[t+1] + 1) << " " << (tris[t+2] + 1) << "\n";
+        write_formatted_ranges(out, static_cast<int>(x.size()), [&](std::ostream& text, int begin, int end) {
+            for (int i = begin; i < end; ++i) {
+                const auto& p = x[i];
+                text << "v " << p.x() << " " << p.y() << " " << p.z() << "\n";
+            }
+        });
+        write_formatted_ranges(out, static_cast<int>(tris.size()) / 3, [&](std::ostream& text, int begin, int end) {
+            for (int face = begin; face < end; ++face) {
+                const int t = 3 * face;
+                text << "f " << (tris[t] + 1) << " " << (tris[t+1] + 1) << " " << (tris[t+2] + 1) << "\n";
+            }
+        });
     }
 
     void export_geo(const std::string& filename, const std::vector<Vec3>& x, const std::vector<int>& tris, const std::vector<std::vector<int>>* color_groups) {
@@ -90,10 +153,12 @@ namespace {
         out << "    \"topology\",\n    [\n";
         out << "        \"pointref\",\n        [\n";
         out << "            \"indices\", [";
-        for (int i = 0; i < static_cast<int>(tris.size()); ++i) {
-            if (i > 0) out << ",";
-            out << tris[i];
-        }
+        write_formatted_ranges(out, static_cast<int>(tris.size()), [&](std::ostream& text, int begin, int end) {
+            for (int i = begin; i < end; ++i) {
+                if (i > 0) text << ",";
+                text << tris[i];
+            }
+        });
         out << "]\n";
         out << "        ]\n";
         out << "    ],\n";
@@ -110,10 +175,12 @@ namespace {
         out << "                        \"size\", 3,\n";
         out << "                        \"storage\", \"fpreal32\",\n";
         out << "                        \"tuples\", [";
-        for (int i = 0; i < npoints; ++i) {
-            if (i > 0) out << ",";
-            out << "[" << x[i].x() << "," << x[i].y() << "," << x[i].z() << "]";
-        }
+        write_formatted_ranges(out, npoints, [&](std::ostream& text, int begin, int end) {
+            for (int i = begin; i < end; ++i) {
+                if (i > 0) text << ",";
+                text << "[" << x[i].x() << "," << x[i].y() << "," << x[i].z() << "]";
+            }
+        });
         out << "]\n";
         out << "                    ]\n";
         out << "                ]\n";
@@ -129,10 +196,12 @@ namespace {
         out << "                        \"size\", 3,\n";
         out << "                        \"storage\", \"fpreal32\",\n";
         out << "                        \"tuples\", [";
-        for (int i = 0; i < npoints; ++i) {
-            if (i > 0) out << ",";
-            out << "[0.5,0.5,0.5]";
-        }
+        write_formatted_ranges(out, npoints, [&](std::ostream& text, int begin, int end) {
+            for (int i = begin; i < end; ++i) {
+                if (i > 0) text << ",";
+                text << "[0.5,0.5,0.5]";
+            }
+        });
         out << "]\n";
         out << "                    ]\n";
         out << "                ]\n";
@@ -162,9 +231,12 @@ namespace {
         out << "                        \"storage\", \"int32\",\n";      
         out << "                        \"tuples\", [";
 
-        for (int i = 0; i < npoints; ++i) {
-            if (i > 0) out << ",";
-            out << "[" << group_id[i] << "]";        }
+        write_formatted_ranges(out, npoints, [&](std::ostream& text, int begin, int end) {
+            for (int i = begin; i < end; ++i) {
+                if (i > 0) text << ",";
+                text << "[" << group_id[i] << "]";
+            }
+        });
 
         out << "]\n";
         out << "                    ]\n";
@@ -206,26 +278,32 @@ namespace {
 
         // Points
         out << "    point3f[] points = [";
-        for (int i = 0; i < npoints; ++i) {
-            if (i > 0) out << ", ";
-            out << "(" << x[i].x() << ", " << x[i].y() << ", " << x[i].z() << ")";
-        }
+        write_formatted_ranges(out, npoints, [&](std::ostream& text, int begin, int end) {
+            for (int i = begin; i < end; ++i) {
+                if (i > 0) text << ", ";
+                text << "(" << x[i].x() << ", " << x[i].y() << ", " << x[i].z() << ")";
+            }
+        });
         out << "]\n";
 
         // Face vertex counts (all triangles = 3)
         out << "    int[] faceVertexCounts = [";
-        for (int i = 0; i < nprims; ++i) {
-            if (i > 0) out << ", ";
-            out << "3";
-        }
+        write_formatted_ranges(out, nprims, [&](std::ostream& text, int begin, int end) {
+            for (int i = begin; i < end; ++i) {
+                if (i > 0) text << ", ";
+                text << "3";
+            }
+        });
         out << "]\n";
 
         // Face vertex indices
         out << "    int[] faceVertexIndices = [";
-        for (int i = 0; i < static_cast<int>(tris.size()); ++i) {
-            if (i > 0) out << ", ";
-            out << tris[i];
-        }
+        write_formatted_ranges(out, static_cast<int>(tris.size()), [&](std::ostream& text, int begin, int end) {
+            for (int i = begin; i < end; ++i) {
+                if (i > 0) text << ", ";
+                text << tris[i];
+            }
+        });
         out << "]\n";
 
         out << "}\n";
@@ -247,25 +325,30 @@ namespace {
             "end_header\n",
             npoints, nprims);
 
-        std::vector<float> buf(npoints * 3);
-        for (int i = 0; i < npoints; ++i) {
-            buf[i*3+0] = static_cast<float>(x[i](0));
-            buf[i*3+1] = static_cast<float>(x[i](1));
-            buf[i*3+2] = static_cast<float>(x[i](2));
-        }
-        fwrite(buf.data(), sizeof(float), npoints * 3, f);
+        // Every record is filled before writing; avoid first zeroing the buffers.
+        std::unique_ptr<float[]> buf(new float[static_cast<std::size_t>(npoints) * 3]);
+        pack_binary_ranges(npoints, [&](int begin, int end) {
+            for (int i = begin; i < end; ++i) {
+                buf[i*3+0] = static_cast<float>(x[i](0));
+                buf[i*3+1] = static_cast<float>(x[i](1));
+                buf[i*3+2] = static_cast<float>(x[i](2));
+            }
+        });
+        fwrite(buf.get(), sizeof(float), npoints * 3, f);
 
         const int stride = 1 + 3 * 4;
-        std::vector<uint8_t> fbuf(nprims * stride);
-        uint8_t* p = fbuf.data();
-        for (int t = 0; t < nprims; ++t) {
-            *p++ = 3;
-            int32_t v0 = tris[t*3+0], v1 = tris[t*3+1], v2 = tris[t*3+2];
-            memcpy(p, &v0, 4); p += 4;
-            memcpy(p, &v1, 4); p += 4;
-            memcpy(p, &v2, 4); p += 4;
-        }
-        fwrite(fbuf.data(), 1, nprims * stride, f);
+        std::unique_ptr<uint8_t[]> fbuf(new uint8_t[static_cast<std::size_t>(nprims) * stride]);
+        pack_binary_ranges(nprims, [&](int begin, int end) {
+            uint8_t* p = fbuf.get() + begin * stride;
+            for (int t = begin; t < end; ++t) {
+                *p++ = 3;
+                int32_t v0 = tris[t*3+0], v1 = tris[t*3+1], v2 = tris[t*3+2];
+                memcpy(p, &v0, 4); p += 4;
+                memcpy(p, &v1, 4); p += 4;
+                memcpy(p, &v2, 4); p += 4;
+            }
+        });
+        fwrite(fbuf.get(), 1, nprims * stride, f);
         fclose(f);
     }
 

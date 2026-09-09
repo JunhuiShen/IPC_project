@@ -47,11 +47,9 @@ void scan_contact_offsets(std::vector<std::size_t>& values) {
 double point_aabb_squared_distance(const Vec3& p, const Vec3& lo, const Vec3& hi) {
     double distance_squared = 0.0;
     for (int axis = 0; axis < 3; ++axis) {
-        double distance = 0.0;
-        if (p[axis] < lo[axis])
-            distance = lo[axis] - p[axis];
-        else if (p[axis] > hi[axis])
-            distance = p[axis] - hi[axis];
+        // A point can lie outside ordered bounds in only one direction.
+        // Keep the original axis-by-axis squared-distance accumulation.
+        const double distance = std::max({0.0, lo[axis] - p[axis], p[axis] - hi[axis]});
         distance_squared += distance * distance;
     }
     return distance_squared;
@@ -150,11 +148,10 @@ bool segment_aabbs_within_distance(const Vec3& a0, const Vec3& a1, const Vec3& b
     const Vec3 bhi = b0.cwiseMax(b1);
     double aabb_distance_squared = 0.0;
     for (int axis = 0; axis < 3; ++axis) {
-        double distance = 0.0;
-        if (ahi[axis] < blo[axis])
-            distance = blo[axis] - ahi[axis];
-        else if (bhi[axis] < alo[axis])
-            distance = alo[axis] - bhi[axis];
+        // Ordered bounds can have a positive gap in at most one direction.
+        // Preserve the original axis-by-axis squared-distance accumulation.
+        const double distance = std::max({
+            0.0, blo[axis] - ahi[axis], alo[axis] - bhi[axis]});
         aabb_distance_squared += distance * distance;
     }
     if (aabb_distance_squared > distance_squared) {

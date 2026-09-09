@@ -6,6 +6,11 @@
 
 #include <gtest/gtest.h>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <limits>
+#include <cmath>
+#include <omp.h>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -87,4 +92,87 @@ TEST(OutputTest, ExportBVHLevels) {
     }
 
     SUCCEED();
+}
+
+TEST(OutputTest, ParallelMeshExportsPreserveEveryByte) {
+    struct RestoreThreads {
+        int threads = omp_get_max_threads();
+        int dynamic = omp_get_dynamic();
+        ~RestoreThreads() {
+            omp_set_num_threads(threads);
+            omp_set_dynamic(dynamic);
+        }
+    } restore;
+    omp_set_dynamic(0);
+    const fs::path dir = fs::path(OUTPUT_TEST_DIR) / "parallel_formats";
+    for (const char* name : {"serial", "parallel", "nested"})
+        fs::create_directories(dir / name);
+    const auto read = [](const fs::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        EXPECT_TRUE(in.is_open());
+        return std::string(std::istreambuf_iterator<char>(in),
+                           std::istreambuf_iterator<char>());
+    };
+    struct Format { ExportFormat value; const char* extension; };
+    const Format formats[] = {
+        {ExportFormat::OBJ, ".obj"}, {ExportFormat::GEO, ".geo"},
+        {ExportFormat::USD, ".usda"}, {ExportFormat::PLY, ".ply"}
+    };
+    // Exercise both text and binary thresholds, and incomplete final ranges.
+    for (int count : {0, 1, 4095, 4096, 16385, 131071, 131072, 131073}) {
+        SCOPED_TRACE(count);
+        std::vector<Vec3> points(count);
+        std::vector<int> triangles;
+        std::vector<std::vector<int>> groups(5);
+        for (int i = 0; i < count; ++i) {
+            points[i] = Vec3(std::sin(0.07 * i), std::cos(0.09 * i), i * 0.00001);
+            groups[i % 5].push_back(i);
+        }
+        if (count > 5) {
+            points[0].x() = -0.0;
+            points[1].y() = std::numeric_limits<double>::denorm_min();
+            points[2].z() = std::numeric_limits<double>::max();
+            points[3].x() = std::numeric_limits<double>::infinity();
+            points[4].y() = -std::numeric_limits<double>::infinity();
+            points[5].z() = std::numeric_limits<double>::quiet_NaN();
+        }
+        for (int i = 0; i + 2 < count; ++i)
+            triangles.insert(triangles.end(), {i, i + 1, i + 2});
+        for (const auto& format : formats) {
+            SCOPED_TRACE(format.extension);
+            // PLY stores float coordinates. Avoid a finite value outside
+            // float's range while still checking its largest finite value.
+            if (count > 5)
+                points[2].z() = format.value == ExportFormat::PLY
+                    ? std::numeric_limits<float>::max()
+                    : std::numeric_limits<double>::max();
+            const std::string filename = std::string("frame_0000") + format.extension;
+            for (bool colored : {false, true}) {
+                if (colored && format.value != ExportFormat::GEO) continue;
+                SCOPED_TRACE(colored);
+                const auto* colors = colored ? &groups : nullptr;
+                omp_set_num_threads(1);
+                export_frame((dir / "serial").string(), 0, points, triangles, format.value, colors);
+                const std::string expected = read(dir / "serial" / filename);
+                if (count != 0 || format.value != ExportFormat::OBJ)
+                    ASSERT_FALSE(expected.empty());
+                for (int threads : {8, 64}) {
+                    SCOPED_TRACE(threads);
+                    omp_set_num_threads(threads);
+                    export_frame((dir / "parallel").string(), 0, points, triangles, format.value, colors);
+                    EXPECT_TRUE(read(dir / "parallel" / filename) == expected);
+                }
+                if (count == 131073) {
+                    // Exporters may be called inside a parallel region;
+                    // their serial fallback must preserve the same bytes.
+#pragma omp parallel num_threads(2)
+                    {
+#pragma omp single
+                        export_frame((dir / "nested").string(), 0, points, triangles, format.value, colors);
+                    }
+                    EXPECT_TRUE(read(dir / "nested" / filename) == expected);
+                }
+            }
+        }
+    }
 }

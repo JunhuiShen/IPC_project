@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cmath>
+#include <limits>
 #include <set>
 #include <tuple>
 #include <unordered_set>
@@ -1700,4 +1702,64 @@ TEST(BroadPhase, SupportingPlaneRejectionDoesNotCertifyAnAabbGap) {
     clear=true;
     EXPECT_FALSE(segment_aabbs_within_distance(Vec3(0,0,0),Vec3(1,1,1),Vec3(0,1,0),Vec3(1,0,.2),.0001,&clear));
     EXPECT_FALSE(clear);
+}
+
+TEST(BroadPhase, SegmentAabbRejectionPreservesDistanceBoundary) {
+    // Collapsed segments reduce the bound to a point distance. Dyadic gaps
+    // make the exact boundary representable, including after translation.
+    for (double scale : {0x1p-100, 1.0, 0x1p100}) {
+        const Vec3 a = Vec3::Constant(1024.0 * scale);
+        const double squared_distance = (21.0 / 64.0) * scale * scale;
+        for (int signs = 0; signs < 8; ++signs) {
+            for (int permutation = 0; permutation < 3; ++permutation) {
+                Vec3 gap;
+                const double lengths[] = {0.125, 0.25, 0.5};
+                for (int axis = 0; axis < 3; ++axis)
+                    gap[axis] = ((signs & (1 << axis)) ? -1.0 : 1.0)
+                        * lengths[(axis + permutation) % 3] * scale;
+                const Vec3 b = a + gap;
+                bool rejected = false;
+                EXPECT_FALSE(segment_aabbs_within_distance(a, a, b, b,
+                    std::nextafter(squared_distance, 0.0), &rejected));
+                EXPECT_TRUE(rejected);
+                EXPECT_TRUE(segment_aabbs_within_distance(a, a, b, b,
+                    squared_distance, &rejected));
+                EXPECT_FALSE(rejected);
+                EXPECT_TRUE(segment_aabbs_within_distance(a, a, b, b,
+                    std::nextafter(squared_distance, std::numeric_limits<double>::infinity()),
+                    &rejected));
+                EXPECT_FALSE(rejected);
+            }
+        }
+    }
+}
+
+TEST(BroadPhase, PointAabbRejectionPreservesDistanceBoundary) {
+    // A point and collapsed triangle reduce the bound to a point distance. Dyadic gaps
+    // make the exact boundary representable, including after translation.
+    for (double scale : {0x1p-100, 1.0, 0x1p100}) {
+        const Vec3 a = Vec3::Constant(1024.0 * scale);
+        const double squared_distance = (21.0 / 64.0) * scale * scale;
+        for (int signs = 0; signs < 8; ++signs) {
+            for (int permutation = 0; permutation < 3; ++permutation) {
+                Vec3 gap;
+                const double lengths[] = {0.125, 0.25, 0.5};
+                for (int axis = 0; axis < 3; ++axis)
+                    gap[axis] = ((signs & (1 << axis)) ? -1.0 : 1.0)
+                        * lengths[(axis + permutation) % 3] * scale;
+                const Vec3 b = a + gap;
+                bool rejected = false;
+                EXPECT_FALSE(node_triangle_aabbs_within_distance(a, b, b, b,
+                    std::nextafter(squared_distance, 0.0), &rejected));
+                EXPECT_TRUE(rejected);
+                EXPECT_TRUE(node_triangle_aabbs_within_distance(a, b, b, b,
+                    squared_distance, &rejected));
+                EXPECT_FALSE(rejected);
+                EXPECT_TRUE(node_triangle_aabbs_within_distance(a, b, b, b,
+                    std::nextafter(squared_distance, std::numeric_limits<double>::infinity()),
+                    &rejected));
+                EXPECT_FALSE(rejected);
+            }
+        }
+    }
 }
