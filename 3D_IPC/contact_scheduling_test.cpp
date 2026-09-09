@@ -1,8 +1,55 @@
-#include "colored_contact_sweep.h"
+#include "contact_scheduling.h"
 #include <cmath>
 #include <cstring>
 #include <gtest/gtest.h>
 #include <limits>
+#include <stdexcept>
+
+TEST(OrderedContactTasks, PreservesContactOrderAndColorDependencies) {
+    const int saved = omp_get_max_threads();
+    const std::vector<std::vector<int>> groups = {{0}, {1, 2}, {3, 4, 5, 6, 7, 8, 9, 10}};
+    std::vector<double> reference;
+    for (int threads : {1, 2, 8, 64}) {
+        omp_set_num_threads(threads);
+        std::vector<double> values(11, 0.0);
+        solver_detail::for_each_colored_block(groups,
+            [](int block) -> std::size_t { return block == 3 ? 8192 : 257; },
+            [&](int block, bool cooperative) {
+                // Depend only on preceding colors, with cancellation that
+                // detects a reassociated or completion-order reduction.
+                double sum = block == 0 ? 1.0 : (block < 3 ? values[0] : values[1] + values[2]);
+                const int count = block == 3 ? 8192 : 257;
+                solver_detail::ordered_contact_tasks(count, cooperative,
+                    [](int i) { return i % 3 == 0 ? 1e16 : (i % 3 == 1 ? 1.0 : -1e16); },
+                    [&](double contribution) { sum += contribution; });
+                values[block] = sum;
+            });
+        if (threads == 1) reference = values;
+        else EXPECT_EQ(0, std::memcmp(reference.data(), values.data(), values.size() * sizeof(double)));
+    }
+    omp_set_num_threads(saved);
+}
+
+TEST(OrderedContactTasks, RethrowsContactFailureAfterJoiningTasks) {
+    const int saved = omp_get_max_threads();
+    omp_set_num_threads(4);
+    bool visited_next_color = false;
+    const auto fail = [&] {
+        solver_detail::for_each_colored_block(
+            std::vector<std::vector<int>>{{0}, {1}}, [](int) { return 256; },
+            [&](int block, bool cooperative) {
+                if (block == 1) visited_next_color = true;
+            solver_detail::ordered_contact_tasks(256, cooperative,
+                [](int i) {
+                    if (i == 3 || i == 17) throw std::runtime_error("contact failure");
+                    return i;
+                }, [](int) {});
+        });
+    };
+    EXPECT_THROW(fail(), std::runtime_error);
+    EXPECT_FALSE(visited_next_color);
+    omp_set_num_threads(saved);
+}
 
 TEST(ColoredContactSweep, PreservesOrderedArithmeticDependenciesAndTeamChanges) {
     struct Restore {

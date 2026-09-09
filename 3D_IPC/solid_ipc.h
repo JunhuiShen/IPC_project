@@ -134,7 +134,7 @@ std::pair<Vec3, Mat33> compute_solid_local_gradient_and_block_unchecked(
     const std::vector<unsigned char>* solid_node_mask,
     const std::vector<unsigned char>* surface_node_mask,
     const std::vector<int>* pin_map,
-    const std::vector<Vec3>* previous_positions);
+    const std::vector<Vec3>* previous_positions, bool cooperative = false);
 
 } // namespace solid_ipc_detail
 

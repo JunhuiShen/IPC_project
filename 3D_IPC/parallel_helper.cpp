@@ -1,3 +1,4 @@
+#include "contact_scheduling.h"
 #include "parallel_helper.h"
 #include "quaternion_math.h"
 
@@ -878,3 +879,34 @@ void greedy_color_conflict_graph(
         }
     }
 }
+
+namespace solver_detail {
+void evaluate_contact_ranges(int count, const std::function<void(int, int)>& evaluate) {
+    std::exception_ptr error;
+    int first_error = count;
+    const int grain = std::max(16, count / (4 * omp_get_num_threads()));
+#pragma omp taskgroup
+    {
+        for (int begin = 0; begin < count; begin += grain) {
+            const int end = std::min(begin + grain, count);
+#pragma omp task shared(evaluate, error, first_error) firstprivate(begin, end)
+            {
+                try {
+                    evaluate(begin, end);
+                } catch (...) {
+#pragma omp critical(ipc_contact_task_error)
+                    {
+                        // Each range visits contacts in order; the earliest
+                        // failing range contains the earliest failing contact.
+                        if (begin < first_error) {
+                            first_error = begin;
+                            error = std::current_exception();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (error) std::rethrow_exception(error);
+}
+} // namespace solver_detail

@@ -1,3 +1,5 @@
+#include <omp.h>
+#include <cstring>
 #include "solid_ipc.h"
 
 #include "barrier_energy.h"
@@ -2373,5 +2375,64 @@ TEST(SolidGeneralSolver,
         EXPECT_TRUE(state.deformed_positions[node].isApprox(
             rigid_positions_before[local], 1.0e-14));
         EXPECT_TRUE(state.velocities[node].isZero(0.0));
+    }
+}
+
+TEST(SolidGeneralSolver, CooperativeMixedContactsPreserveEveryStateComponent) {
+    struct RestoreThreads {
+        int count = omp_get_max_threads();
+        ~RestoreThreads() { omp_set_num_threads(count); }
+    } restore;
+    for (double friction : {0.0, 0.2}) {
+        RefMesh meshes[2];
+        DeformedState states[2];
+        for (int run = 0; run < 2; ++run) {
+            auto& mesh = meshes[run];
+            auto& state = states[run];
+            std::vector<Vec2> material;
+            build_square_mesh(mesh, state, material, 12, 12, 1.0, 1.0, Vec3(-0.5, 0, -0.5));
+            state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+            mesh.build_lumped_mass(900, 0.001);
+            create_solid({Vec3(-0.08, 0.006, -0.08), Vec3(0.08, 0.006, -0.08),
+                          Vec3(-0.08, 0.006, 0.08), Vec3(-0.08, 0.012, -0.08)},
+                         {0, 2, 1, 3}, 900, mesh, state);
+            const int rb = create_rigid_body(
+                {Vec3(-0.4, 0.018, -0.4), Vec3(0.4, 0.018, -0.4), Vec3(0, 0.018, 0.4)},
+                Vec3(0.01, -0.01, 0.02), Vec4(1, 0, 0, 0), Vec3(0.02, -0.01, 0.01),
+                1.0, mesh, state);
+            mesh.tris.insert(mesh.tris.end(), mesh.rb_nodes[rb].begin(), mesh.rb_nodes[rb].end());
+            mesh.build_deformable_nodes();
+            const auto adj = build_incident_triangle_map(mesh.tris);
+            std::vector<Pin> pins;
+            SimParams params = SimParams::zeros();
+            params.fps = 30; params.substeps = 1;
+            params.max_global_iters = 4; params.fixed_iters = true;
+            params.node_box_update_count = 2;
+            params.node_box_min = 0.25; params.node_box_max = 0.25;
+            params.theta_box_min = 0.05; params.theta_box_max = 0.05;
+            params.d_hat = 0.03; params.k_barrier = 1;
+            params.solid_mu = 1; params.solid_lambda = 1;
+            params.damping = 0.1; params.use_parallel = true; params.use_ccd = true;
+            params.friction_coefficient = friction; params.friction_velocity_epsilon = 0.01;
+            omp_set_num_threads(run == 0 ? 1 : 8);
+            BroadPhase broad_phase;
+            for (int frame = 0; frame < 2; ++frame) {
+                const auto result = advance_one_frame_general(state, mesh, adj, pins, params, broad_phase);
+                ASSERT_TRUE(result.converged);
+            }
+            // Enough incident pairs to exercise the task path on a rigid block.
+            EXPECT_GT(broad_phase.cache().nt_pairs.size(), 128u);
+        }
+        const auto compare = [](const auto& a, const auto& b) {
+            ASSERT_EQ(a.size(), b.size());
+            for (std::size_t i = 0; i < a.size(); ++i)
+                EXPECT_EQ(0, std::memcmp(a[i].data(), b[i].data(), a[i].size() * sizeof(double))) << i;
+        };
+        compare(states[0].deformed_positions, states[1].deformed_positions);
+        compare(states[0].velocities, states[1].velocities);
+        compare(states[0].x_coms, states[1].x_coms);
+        compare(states[0].orientations, states[1].orientations);
+        compare(states[0].omega, states[1].omega);
+        compare(states[0].v_coms, states[1].v_coms);
     }
 }

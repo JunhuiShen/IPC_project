@@ -1,13 +1,92 @@
 #pragma once
+
 #include "broad_phase.h"
+
 #include <algorithm>
 #include <atomic>
+#include <exception>
+#include <functional>
 #include <memory>
 #include <new>
 #include <omp.h>
+#include <optional>
 #include <vector>
 
+// Contact scheduling for the cloth, rigid-body, and mixed solvers. All paths
+// preserve color barriers and each block's original arithmetic order.
 namespace solver_detail {
+
+// -----------------------------------------------------------------------------
+// Shared ordered contact evaluation and mixed-block scheduling
+// -----------------------------------------------------------------------------
+
+// Run ranges on the current team and join them before returning. The compiled
+// dispatcher avoids duplicating OpenMP task outlining for every contact type.
+void evaluate_contact_ranges(int count, const std::function<void(int, int)>& evaluate);
+
+// Evaluate independently, then accumulate in original contact order. Each
+// caller owns its scratch and holds contact positions fixed until the join.
+template <class Evaluate, class Accumulate>
+void parallel_contact_tasks(int count,
+                            const Evaluate& evaluate, const Accumulate& accumulate) {
+    using Value = decltype(evaluate(0));
+    std::vector<std::optional<Value>> values(count);
+    evaluate_contact_ranges(count, [&](int begin, int end) {
+        for (int i = begin; i < end; ++i) values[i] = evaluate(i);
+    });
+    for (const auto& value : values) accumulate(*value);
+}
+
+// Keep the scalar traversal outside the OpenMP task region so it can inline
+// into existing small-block and single-thread assembly without scratch copies.
+template <class Evaluate, class Accumulate>
+void ordered_contact_tasks(int count, bool cooperative,
+                           const Evaluate& evaluate, const Accumulate& accumulate) {
+    if (!cooperative || count < 128 || omp_get_num_threads() == 1) {
+        for (int i = 0; i < count; ++i) accumulate(evaluate(i));
+    } else {
+        parallel_contact_tasks(count, evaluate, accumulate);
+    }
+}
+
+// Small colors share contacts within blocks. Large colors distribute whole
+// blocks, but allow unusually expensive blocks to recruit idle team members.
+// Every block (including all its child tasks) finishes before the next color.
+template <class Cost, class Process>
+void for_each_colored_block(const std::vector<std::vector<int>>& groups,
+                            const Cost& cost, const Process& process) {
+    std::vector<std::size_t> totals(groups.size(), 0);
+    for (std::size_t c = 0; c < groups.size(); ++c)
+        for (int block : groups[c]) totals[c] += cost(block);
+    std::vector<std::exception_ptr> errors(groups.size());
+#pragma omp parallel shared(errors)
+    {
+        for (std::size_t c = 0; c < groups.size(); ++c) {
+            const auto& group = groups[c];
+            const std::size_t average = totals[c] / std::max<std::size_t>(1, group.size());
+#pragma omp for schedule(dynamic, 1)
+            for (int i = 0; i < static_cast<int>(group.size()); ++i) {
+                const int block = group[i];
+                const bool cooperate = group.size() < static_cast<std::size_t>(omp_get_num_threads())
+                    || (cost(block) >= 512 && cost(block) > 4 * average);
+                try {
+                    process(block, cooperate);
+                } catch (...) {
+#pragma omp critical(ipc_block_task_error)
+                    { if (!errors[c]) errors[c] = std::current_exception(); }
+                }
+            }
+            if (errors[c]) break;
+        }
+    }
+    for (const auto& error : errors)
+        if (error) std::rethrow_exception(error);
+}
+
+// -----------------------------------------------------------------------------
+// Cloth scheduler: fixed worker groups, compact masks, and reusable scratch
+// -----------------------------------------------------------------------------
+
 inline constexpr int contact_grain = 16;
 // A worker owns 16 consecutive contacts. Compact masks let leaders skip
 // inactive records without loading their gradient/Hessian storage.
@@ -218,4 +297,5 @@ struct ColoredContactSweep {
         }
     }
 };
+
 } // namespace solver_detail

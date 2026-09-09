@@ -1,4 +1,5 @@
 #include "safe_step.h"
+#include "contact_scheduling.h"
 
 #include "broad_phase.h"
 #include "ccd.h"
@@ -144,7 +145,7 @@ double compute_trust_region_bound_for_vertex(int vi, const std::vector<Vec3>& x,
     return gamma_p * d0_min;  // +inf when vi has no incident pairs
 }
 
-double per_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi, const Vec3& raw_proposed_position, double safety, bool clip_ccd, bool use_ticcd, bool use_ogc) {
+double per_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi, const Vec3& raw_proposed_position, double safety, bool clip_ccd, bool use_ticcd, bool use_ogc, bool cooperative) {
     const BroadPhase::Cache& bp_cache = broad_phase.cache();
     const int nv = static_cast<int>(x.size());
     if (vi < 0 || vi >= nv)
@@ -179,27 +180,25 @@ double per_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x,
     }
 
     if (clip_ccd) {
-        for (const auto& entry : bp_cache.vertex_nt[vi]) {
-            const auto& p = bp_cache.nt_pairs[entry.pair_index];
-            const CCDResult r = safe_step_detail::node_triangle_vertex_ccd(
-                p, entry.dof, vi, x, dx, use_ticcd);
-            if (r.collision) {
-                has_collision = true;
-                toi_min = std::min(toi_min, r.t);
-            }
-        }
-    }
-
-    if (clip_ccd) {
-        for (const auto& entry : bp_cache.vertex_ss[vi]) {
-            const auto& p = bp_cache.ss_pairs[entry.pair_index];
-            const CCDResult r = safe_step_detail::segment_segment_vertex_ccd(
-                p, entry.dof, vi, x, dx, use_ticcd);
-            if (r.collision) {
-                has_collision = true;
-                toi_min = std::min(toi_min, r.t);
-            }
-        }
+        const auto& nt = bp_cache.vertex_nt[vi];
+        const auto& ss = bp_cache.vertex_ss[vi];
+        const int nt_count = static_cast<int>(nt.size());
+        solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss.size()), cooperative,
+            [&](int i) {
+                if (i < nt_count) {
+                    const auto& entry = nt[i];
+                    return safe_step_detail::node_triangle_vertex_ccd(
+                        bp_cache.nt_pairs[entry.pair_index], entry.dof, vi, x, dx, use_ticcd);
+                }
+                const auto& entry = ss[i - nt_count];
+                return safe_step_detail::segment_segment_vertex_ccd(
+                    bp_cache.ss_pairs[entry.pair_index], entry.dof, vi, x, dx, use_ticcd);
+            }, [&](const CCDResult& r) {
+                if (r.collision) {
+                    has_collision = true;
+                    toi_min = std::min(toi_min, r.t);
+                }
+            });
     }
 
     const double step = use_ogc
@@ -209,7 +208,7 @@ double per_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x,
     return step;
 }
 
-double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& dx, double safety) {
+double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& dx, double safety, bool cooperative) {
     assert(rb >= 0);
     assert(safety >= 0.0 && safety <= 1.0);
     if (dx.squaredNorm() < 1.0e-28)
@@ -218,43 +217,53 @@ double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const Broad
     double toi_min = 1.0;
     bool has_collision = false;
     const Vec3 zero = Vec3::Zero();
-    const auto consider = [&](const CCDResult& result) {
-        if (!result.collision)
-            return;
-        has_collision = true;
-        toi_min = std::min(toi_min, result.t);
-    };
+    const auto evaluate_nt = [&](int pair_index) {
+        CCDResult value;
+        const auto consider = [&](const CCDResult& result) { value = result; };
 
-    for (const int pair_index : nt_pair_indices) {
         const NodeTrianglePair& pair = bp_cache.nt_pairs[pair_index];
         const int node = pair.node;
         const int node_rb = owning_rb_for_node(ref_mesh.node_to_rb, node);
         const int triangle_rb = owning_rb_for_node(ref_mesh.node_to_rb, pair.tri_v[0]);
         if (node_rb == triangle_rb || (node_rb != rb && triangle_rb != rb))
-            continue;
+            return value;
         const std::array<AABB, 4> node_boxes = {translated_node_swept_aabb(node, x, ref_mesh.node_to_rb, rb, dx), translated_node_swept_aabb(pair.tri_v[0], x, ref_mesh.node_to_rb, rb, dx), translated_node_swept_aabb(pair.tri_v[1], x, ref_mesh.node_to_rb, rb, dx), translated_node_swept_aabb(pair.tri_v[2], x, ref_mesh.node_to_rb, rb, dx)};
         if (!node_triangle_swept_aabbs_intersect(node_boxes))
-            continue;
+            return value;
         if (node_rb == rb)
             consider(node_triangle_only_one_node_moves(x[node], dx, x[pair.tri_v[0]], zero, x[pair.tri_v[1]], zero, x[pair.tri_v[2]], zero, 1.0e-12, false));
         else
             consider(node_triangle_only_one_node_moves(x[node], -dx, x[pair.tri_v[0]], zero, x[pair.tri_v[1]], zero, x[pair.tri_v[2]], zero, 1.0e-12, false));
-    }
+        return value;
+    };
+    const auto evaluate_ss = [&](int pair_index) {
+        CCDResult value;
+        const auto consider = [&](const CCDResult& result) { value = result; };
 
-    for (const int pair_index : ss_pair_indices) {
         const SegmentSegmentPair& pair = bp_cache.ss_pairs[pair_index];
         const int first_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, pair.v[0]);
         const int second_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, pair.v[2]);
         if (first_edge_rb == second_edge_rb || (first_edge_rb != rb && second_edge_rb != rb))
-            continue;
+            return value;
         const std::array<AABB, 4> node_boxes = {translated_node_swept_aabb(pair.v[0], x, ref_mesh.node_to_rb, rb, dx), translated_node_swept_aabb(pair.v[1], x, ref_mesh.node_to_rb, rb, dx), translated_node_swept_aabb(pair.v[2], x, ref_mesh.node_to_rb, rb, dx), translated_node_swept_aabb(pair.v[3], x, ref_mesh.node_to_rb, rb, dx)};
         if (!segment_segment_swept_aabbs_intersect(node_boxes))
-            continue;
+            return value;
         if (first_edge_rb == rb)
             consider(segment_segment_same_displacement_linear_ccd(x[pair.v[0]], dx, x[pair.v[1]], dx, x[pair.v[2]], x[pair.v[3]], 1.0e-12));
         else
             consider(segment_segment_same_displacement_linear_ccd(x[pair.v[2]], dx, x[pair.v[3]], dx, x[pair.v[0]], x[pair.v[1]], 1.0e-12));
-    }
+        return value;
+    };
+    const int nt_count = static_cast<int>(nt_pair_indices.size());
+    solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss_pair_indices.size()), cooperative,
+        [&](int i) { return i < nt_count ? evaluate_nt(nt_pair_indices[i])
+            : evaluate_ss(ss_pair_indices[i - nt_count]); },
+        [&](const CCDResult& value) {
+            if (value.collision) {
+                has_collision = true;
+                toi_min = std::min(toi_min, value.t);
+            }
+        });
 
     return has_collision ? safety * toi_min : 1.0;
 }
@@ -289,7 +298,7 @@ Vec4 bound_quaternion(const Vec4& q_box_anchor, const Vec4& q_current, const Vec
     return interpolate_orientation_full_arc(current, target, alpha);
 }
 
-double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& x_com, const Vec4& q_current, const Vec4& q_target, double safety) {
+double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& x_com, const Vec4& q_current, const Vec4& q_target, double safety, bool cooperative) {
     assert(rb >= 0);
     assert(safety >= 0.0 && safety <= 1.0);
 
@@ -304,7 +313,9 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPha
     // spherical-cap box depends only on this body update. Compute it once per
     // safe-step call instead of repeating inverse rotations and trigonometry
     // for every incident candidate.
-    thread_local std::vector<AABB> rotated_node_boxes;
+    thread_local std::vector<AABB> serial_rotated_node_boxes;
+    std::vector<AABB> task_rotated_node_boxes;
+    auto& rotated_node_boxes = cooperative ? task_rotated_node_boxes : serial_rotated_node_boxes;
     rotated_node_boxes.resize(x.size());
     if (rb < static_cast<int>(ref_mesh.rb_nodes.size()) && !ref_mesh.rb_nodes[static_cast<std::size_t>(rb)].empty()) {
         for (const int node : ref_mesh.rb_nodes[static_cast<std::size_t>(rb)]) {
@@ -321,45 +332,59 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPha
 
     double toi_min = 1.0;
     bool has_collision = false;
-    const auto consider = [&](bool collision, double toi) {
-        if (!collision)
-            return;
-        has_collision = true;
-        toi_min = std::min(toi_min, toi);
-    };
+    const auto evaluate_nt = [&](int pair_index) {
+        CCDResult value;
+        const auto consider = [&](bool collision, double toi) {
+            value.collision = collision; value.t = toi;
+        };
 
-    for (const int pair_index : nt_pair_indices) {
         const NodeTrianglePair& pair = bp_cache.nt_pairs[pair_index];
         const int node = pair.node;
         const int node_rb = owning_rb_for_node(ref_mesh.node_to_rb, node);
         const int triangle_rb = owning_rb_for_node(ref_mesh.node_to_rb, pair.tri_v[0]);
         if (node_rb == triangle_rb || (node_rb != rb && triangle_rb != rb))
-            continue;
+            return value;
         const std::array<AABB, 4> node_boxes = node_rb == rb ? std::array<AABB, 4>{rotated_node_boxes[static_cast<std::size_t>(node)], stationary_node_box(pair.tri_v[0]), stationary_node_box(pair.tri_v[1]), stationary_node_box(pair.tri_v[2])} : std::array<AABB, 4>{stationary_node_box(node), rotated_node_boxes[static_cast<std::size_t>(pair.tri_v[0])], rotated_node_boxes[static_cast<std::size_t>(pair.tri_v[1])], rotated_node_boxes[static_cast<std::size_t>(pair.tri_v[2])]};
         if (!node_triangle_swept_aabbs_intersect(node_boxes))
-            continue;
+            return value;
         double toi = 0.0;
         if (node_rb == rb)
             consider(point_triangle_rb_rotation_ccd(x[node], x_com, proposed, current, x[pair.tri_v[0]], x[pair.tri_v[1]], x[pair.tri_v[2]], toi), toi);
         else
             consider(point_triangle_rb_rotation_ccd(x[node], x_com, q_reverse, identity, x[pair.tri_v[0]], x[pair.tri_v[1]], x[pair.tri_v[2]], toi), toi);
-    }
+        return value;
+    };
+    const auto evaluate_ss = [&](int pair_index) {
+        CCDResult value;
+        const auto consider = [&](bool collision, double toi) {
+            value.collision = collision; value.t = toi;
+        };
 
-    for (const int pair_index : ss_pair_indices) {
         const SegmentSegmentPair& pair = bp_cache.ss_pairs[pair_index];
         const int first_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, pair.v[0]);
         const int second_edge_rb = owning_rb_for_node(ref_mesh.node_to_rb, pair.v[2]);
         if (first_edge_rb == second_edge_rb || (first_edge_rb != rb && second_edge_rb != rb))
-            continue;
+            return value;
         const std::array<AABB, 4> node_boxes = first_edge_rb == rb ? std::array<AABB, 4>{rotated_node_boxes[static_cast<std::size_t>(pair.v[0])], rotated_node_boxes[static_cast<std::size_t>(pair.v[1])], stationary_node_box(pair.v[2]), stationary_node_box(pair.v[3])} : std::array<AABB, 4>{stationary_node_box(pair.v[0]), stationary_node_box(pair.v[1]), rotated_node_boxes[static_cast<std::size_t>(pair.v[2])], rotated_node_boxes[static_cast<std::size_t>(pair.v[3])]};
         if (!segment_segment_swept_aabbs_intersect(node_boxes))
-            continue;
+            return value;
         double toi = 0.0;
         if (first_edge_rb == rb)
             consider(segment_segment_rb_rotation_ccd(x[pair.v[0]], x[pair.v[1]], x_com, proposed, current, x[pair.v[2]], x[pair.v[3]], toi), toi);
         else
             consider(segment_segment_rb_rotation_ccd(x[pair.v[0]], x[pair.v[1]], x_com, q_reverse, identity, x[pair.v[2]], x[pair.v[3]], toi), toi);
-    }
+        return value;
+    };
+    const int nt_count = static_cast<int>(nt_pair_indices.size());
+    solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss_pair_indices.size()), cooperative,
+        [&](int i) { return i < nt_count ? evaluate_nt(nt_pair_indices[i])
+            : evaluate_ss(ss_pair_indices[i - nt_count]); },
+        [&](const CCDResult& value) {
+            if (value.collision) {
+                has_collision = true;
+                toi_min = std::min(toi_min, value.t);
+            }
+        });
 
     return has_collision ? safety * toi_min : 1.0;
 }

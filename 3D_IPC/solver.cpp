@@ -1,5 +1,6 @@
+#include <optional>
 #include "solver.h"
-#include "colored_contact_sweep.h"
+#include "contact_scheduling.h"
 #include "IPC_math.h"
 #include "parallel_helper.h"
 #include "barrier_energy.h"
@@ -414,21 +415,30 @@ Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const VertexT
                                   const std::vector<Vec3>& xhat, std::vector<Vec3>& x, const BroadPhase& broad_phase, const PinMap* pin_map,
                                   const IncidentTriangles* incident_triangles,
                                   const std::vector<ShapeGrads>* rest_shape_grads,
-                                  const std::vector<Vec3>* previous_positions) {
+                                  const std::vector<Vec3>* previous_positions, bool cooperative = false) {
     const auto& bp_cache = broad_phase.cache();
-    auto [g, H] =
+    auto local_derivatives =
         physics_detail::compute_local_gradient_and_hessian_no_barrier_unchecked(
             vi, ref_mesh, adj, pins, params, x, xhat, pin_map,
             incident_triangles, rest_shape_grads, previous_positions);
+    Vec3& g = local_derivatives.first;
+    Mat33& H = local_derivatives.second;
 
     if (params.d_hat > 0.0) {
         const double dt2k = params.dt2() * params.k_barrier;
         const double d_hat2 = params.d_hat * params.d_hat;
 
-        for (const auto& entry : bp_cache.vertex_nt[vi]) {
+        struct Contribution {
+            Vec3 gradient = Vec3::Zero(), friction_gradient = Vec3::Zero();
+            Mat33 hessian = Mat33::Zero(), friction_hessian = Mat33::Zero();
+        };
+        const auto evaluate_nt = [&](const BroadPhase::Cache::VertexPairEntry& entry) {
+            std::optional<Contribution> value;
+
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
             if (!node_triangle_aabbs_within_distance(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], d_hat2))
-                continue;
+                return value;
+            value.emplace();
             if (params.friction_coefficient != 0.0) {
                 const std::array<Vec3, 4> current_positions =
                     friction_node_triangle_positions(p, x);
@@ -441,8 +451,8 @@ Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const VertexT
                         current_positions[0], current_positions[1],
                         current_positions[2], current_positions[3],
                         entry.dof, contact_evaluation);
-                g += dt2k * bg;
-                H += dt2k * bH;
+                value->gradient = bg;
+                value->hessian = bH;
                 const FrozenFrictionContact contact =
                     make_node_triangle_frozen_friction_contact(
                         current_positions,
@@ -454,22 +464,25 @@ Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const VertexT
                     frozen_friction_role_gradient_and_hessian(
                         contact, entry.dof,
                         params.friction_coefficient, params.dt2());
-                g += fg;
-                H += fH;
+                value->friction_gradient = fg;
+                value->friction_hessian = fH;
             } else {
                 const auto [bg, bH] =
                     node_triangle_barrier_self_gradient_and_hessian(
                         x[p.node], x[p.tri_v[0]], x[p.tri_v[1]],
                         x[p.tri_v[2]], params.d_hat, entry.dof);
-                g += dt2k * bg;
-                H += dt2k * bH;
+                value->gradient = bg;
+                value->hessian = bH;
             }
-        }
+            return value;
+        };
+        const auto evaluate_ss = [&](const BroadPhase::Cache::VertexPairEntry& entry) {
+            std::optional<Contribution> value;
 
-        for (const auto& entry : bp_cache.vertex_ss[vi]) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
             if (!segment_aabbs_within_distance(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], d_hat2))
-                continue;
+                return value;
+            value.emplace();
             if (params.friction_coefficient != 0.0) {
                 const std::array<Vec3, 4> current_positions =
                     friction_segment_segment_positions(p, x);
@@ -482,8 +495,8 @@ Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const VertexT
                         current_positions[0], current_positions[1],
                         current_positions[2], current_positions[3],
                         entry.dof, contact_evaluation);
-                g += dt2k * bg;
-                H += dt2k * bH;
+                value->gradient = bg;
+                value->hessian = bH;
                 const FrozenFrictionContact contact =
                     make_segment_segment_frozen_friction_contact(
                         current_positions,
@@ -495,17 +508,32 @@ Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const VertexT
                     frozen_friction_role_gradient_and_hessian(
                         contact, entry.dof,
                         params.friction_coefficient, params.dt2());
-                g += fg;
-                H += fH;
+                value->friction_gradient = fg;
+                value->friction_hessian = fH;
             } else {
                 const auto [bg, bH] =
                     segment_segment_barrier_self_gradient_and_hessian(
                         x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]],
                         params.d_hat, entry.dof);
-                g += dt2k * bg;
-                H += dt2k * bH;
+                value->gradient = bg;
+                value->hessian = bH;
             }
-        }
+            return value;
+        };
+        const auto& nt = bp_cache.vertex_nt[vi];
+        const auto& ss = bp_cache.vertex_ss[vi];
+        const int nt_count = static_cast<int>(nt.size());
+        solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss.size()), cooperative,
+            [&](int i) { return i < nt_count ? evaluate_nt(nt[i]) : evaluate_ss(ss[i - nt_count]); },
+            [&](const std::optional<Contribution>& value) {
+                if (!value) return;
+                g += dt2k * value->gradient;
+                H += dt2k * value->hessian;
+                if (params.friction_coefficient != 0.0) {
+                    g += value->friction_gradient;
+                    H += value->friction_hessian;
+                }
+            });
     }
 
     return matrix3d_inverse(H) * g;
@@ -519,12 +547,12 @@ Vec3 gs_solid_vertex_delta_live_barrier(
     const std::vector<unsigned char>& solid_node_mask,
     const std::vector<unsigned char>& surface_node_mask,
     const PinMap& pin_map,
-    const std::vector<Vec3>* previous_positions) {
+    const std::vector<Vec3>* previous_positions, bool cooperative = false) {
     const auto [gradient, block] =
         solid_ipc_detail::compute_solid_local_gradient_and_block_unchecked(
             node, ref_mesh, pins, params, x, xhat, broad_phase,
             &solid_node_mask, &surface_node_mask, &pin_map,
-            previous_positions);
+            previous_positions, cooperative);
     return matrix3d_inverse(block) * gradient;
 }
 
@@ -1068,7 +1096,7 @@ void add_rigid_derivatives(RigidEnergyDerivatives& total, const RigidEnergyDeriv
 // in the same pair traversal. They retain separate accumulation order, while
 // sharing one ephemeral contact evaluation from this unchanged rigid-position
 // snapshot.
-RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh, const DeformedState& state, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, RigidDerivativeMode mode, const QuaternionOmegaKinematics* supplied_kinematics = nullptr, const FrozenResidualWorkspace* frozen_workspace = nullptr, RigidEnergyDerivatives* friction_output = nullptr, bool assemble_barrier = true) {
+RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh, const DeformedState& state, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, RigidDerivativeMode mode, const QuaternionOmegaKinematics* supplied_kinematics = nullptr, const FrozenResidualWorkspace* frozen_workspace = nullptr, RigidEnergyDerivatives* friction_output = nullptr, bool assemble_barrier = true, bool cooperative = false) {
     RigidEnergyDerivatives total;
     if (friction_output != nullptr)
         *friction_output = RigidEnergyDerivatives{};
@@ -1265,25 +1293,25 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
         return true;
     };
 
-    const auto accumulate_nt_pair = [&](const int pair_index, const bool aabb_already_active) {
-        RigidEnergyDerivatives pair_barrier;
-        RigidEnergyDerivatives pair_friction;
-        if (evaluate_nt_pair(pair_index, aabb_already_active, pair_barrier, pair_friction)) {
-            add_rigid_derivatives(total, pair_barrier);
-            if (friction_output != nullptr) add_rigid_derivatives(*friction_output, pair_friction);
-        }
+    struct PairDerivatives {
+        RigidEnergyDerivatives barrier, friction;
+        bool active = false;
     };
-    const auto accumulate_ss_pair = [&](const int pair_index, const bool aabb_already_active) {
-        RigidEnergyDerivatives pair_barrier;
-        RigidEnergyDerivatives pair_friction;
-        if (evaluate_ss_pair(pair_index, aabb_already_active, pair_barrier, pair_friction)) {
-            add_rigid_derivatives(total, pair_barrier);
-            if (friction_output != nullptr) add_rigid_derivatives(*friction_output, pair_friction);
-        }
-    };
-
-    for (const int pair_index : nt_pair_indices) accumulate_nt_pair(pair_index, false);
-    for (const int pair_index : ss_pair_indices) accumulate_ss_pair(pair_index, false);
+    const int nt_count = static_cast<int>(nt_pair_indices.size());
+    solver_detail::ordered_contact_tasks(
+        nt_count + static_cast<int>(ss_pair_indices.size()), cooperative,
+        [&](int i) {
+            PairDerivatives value;
+            value.active = i < nt_count
+                ? evaluate_nt_pair(nt_pair_indices[i], false, value.barrier, value.friction)
+                : evaluate_ss_pair(ss_pair_indices[i - nt_count], false, value.barrier, value.friction);
+            return value;
+        },
+        [&](const PairDerivatives& value) {
+            if (!value.active) return;
+            add_rigid_derivatives(total, value.barrier);
+            if (friction_output) add_rigid_derivatives(*friction_output, value.friction);
+        });
 
     return total;
 }
@@ -1588,7 +1616,7 @@ double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedS
     return residual;
 }
 
-Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, const QuaternionOmegaKinematics* kinematics = nullptr) {
+Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, const QuaternionOmegaKinematics* kinematics = nullptr, bool cooperative = false) {
     const Vec3& x_com_n = state.x_coms[rb];
     const Vec3& v_com_n = state.v_coms[rb];
 
@@ -1601,7 +1629,7 @@ Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_m
         state.deformed_positions, x_com_new[rb], state.orientations[rb],
         omega_new[rb], params, dt, gradient, hessian, kinematics);
     RigidEnergyDerivatives friction;
-    const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::TranslationHessian, kinematics, nullptr, params.friction_coefficient != 0.0 ? &friction : nullptr);
+    const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::TranslationHessian, kinematics, nullptr, params.friction_coefficient != 0.0 ? &friction : nullptr, true, cooperative);
     const double barrier_scale = dt * dt * params.k_barrier;
     gradient += barrier_scale * barrier.translation_gradient;
     hessian += barrier_scale * barrier.translation_translation_hessian;
@@ -1612,7 +1640,7 @@ Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_m
     return hessian.ldlt().solve(gradient);
 }
 
-Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, const QuaternionOmegaKinematics* supplied_kinematics = nullptr, const Mat33* rotation_predictor = nullptr) {
+Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, const QuaternionOmegaKinematics* supplied_kinematics = nullptr, const Mat33* rotation_predictor = nullptr, bool cooperative = false) {
     const Vec4& q_n = state.orientations[rb];
     const Vec3& omega_n = state.omega[rb];
     const Mat33& I_hat = ref_mesh.I_hat[rb];
@@ -1625,7 +1653,7 @@ Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref
         state.deformed_positions, x_com_new[rb], q_n, omega_new[rb],
         params, dt, gradient, hessian, &kinematics);
     RigidEnergyDerivatives friction;
-    const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::OrientationHessian, &kinematics, nullptr, params.friction_coefficient != 0.0 ? &friction : nullptr);
+    const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::OrientationHessian, &kinematics, nullptr, params.friction_coefficient != 0.0 ? &friction : nullptr, true, cooperative);
     const double barrier_scale = dt * dt * params.k_barrier;
     gradient += barrier_scale * barrier.orientation_gradient;
     hessian += barrier_scale * barrier.orientation_orientation_hessian;
@@ -1832,17 +1860,17 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
         if (iter > 1 && (iter - 1) % params.node_box_update_count == 0)
             rebuild_contact_cache(iter);
 
-        const auto process_body = [&](int rb) {
+        const auto process_body = [&](int rb, bool cooperative = false) {
             const RigidBodyUpdateMode update_mode =
                 ref_mesh.rb_update_modes[rb];
             std::vector<Vec3>& node_positions = workspace.positions;
             const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, true);
             if (updates_rigid_translation(update_mode)) {
-                const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], workspace.node_to_rb_local, node_positions, x_com_new, omega_new, params, dt, &kinematics);
+                const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], workspace.node_to_rb_local, node_positions, x_com_new, omega_new, params, dt, &kinematics, cooperative);
                 const Vec3 com_radius = Vec3::Constant(workspace.com_box_radii[rb]);
                 const Vec3 com_target = (x_com_new[rb] - delta_com).cwiseMax(workspace.com_box_anchors[rb] - com_radius).cwiseMin(workspace.com_box_anchors[rb] + com_radius);
                 const Vec3 proposed_com_displacement = com_target - x_com_new[rb];
-                const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], node_positions, rb, proposed_com_displacement);
+                const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], node_positions, rb, proposed_com_displacement, 0.9, cooperative);
                 const Vec3 com_displacement = com_safe_step * proposed_com_displacement;
                 x_com_new[rb] += com_displacement;
                 translate_rigid_nodes(ref_mesh.rb_nodes[rb], com_displacement, node_positions, params.use_parallel);
@@ -1850,12 +1878,12 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
 
             Vec4 q_accepted = q_new[rb];
             if (updates_rigid_orientation(update_mode)) {
-                const Vec3 delta_omega = rb_solver::compute_omega_update(rb, state, ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], workspace.node_to_rb_local, node_positions, x_com_new, omega_new, params, dt, &kinematics, &workspace.rotation_predictors[static_cast<std::size_t>(rb)]);
+                const Vec3 delta_omega = rb_solver::compute_omega_update(rb, state, ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], workspace.node_to_rb_local, node_positions, x_com_new, omega_new, params, dt, &kinematics, &workspace.rotation_predictors[static_cast<std::size_t>(rb)], cooperative);
                 const Vec4 q_current = quaternion_normalize(kinematics.orientation);
                 const Vec3 omega_trial = omega_new[rb] - params.damping * delta_omega;
                 const Vec4 q_target = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_trial, dt));
                 const Vec4 q_bounded = bound_quaternion(workspace.orientation_box_anchors[rb], q_current, q_target, workspace.theta_box_radii[rb]);
-                const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], node_positions, rb, x_com_new[rb], q_current, q_bounded);
+                const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], node_positions, rb, x_com_new[rb], q_current, q_bounded, 0.9, cooperative);
                 q_accepted = interpolate_orientation_full_arc(q_current, q_bounded, rotation_safe_step);
                 q_new[rb] = q_accepted;
                 omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, state.orientations[rb], dt);
@@ -1865,14 +1893,9 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
         };
 
         if (params.use_parallel) {
-            #pragma omp parallel
-            {
-                for (const std::vector<int>& color : workspace.color_groups) {
-                    #pragma omp for schedule(static)
-                    for (int index = 0; index < static_cast<int>(color.size()); ++index)
-                        process_body(color[index]);
-                }
-            }
+            solver_detail::for_each_colored_block(workspace.color_groups,
+                [&](int rb) { return workspace.body_nt_pair_indices[rb].size()
+                    + workspace.body_ss_pair_indices[rb].size(); }, process_body);
         } else {
             for (int rb = 0; rb < num_rbs; ++rb)
                 process_body(rb);
@@ -2105,30 +2128,30 @@ SolverResult global_gauss_seidel_solver_basic_general(
             rebuild_contact_cache(iteration);
         }
 
-        const auto process_cloth_node = [&](const int cloth) {
+        const auto process_cloth_node = [&](const int cloth, bool cooperative = false) {
             const int node = cloth_nodes[static_cast<std::size_t>(cloth)];
-            const Vec3 proposed_position = xnew[node] - params.damping * gs_vertex_delta_live_barrier(node, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pin_map, &deformable_workspace.incident_triangles[node], &deformable_workspace.rest_shape_grads, previous_positions);
-            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false);
+            const Vec3 proposed_position = xnew[node] - params.damping * gs_vertex_delta_live_barrier(node, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pin_map, &deformable_workspace.incident_triangles[node], &deformable_workspace.rest_shape_grads, previous_positions, cooperative);
+            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative);
         };
 
-        const auto process_solid_node = [&](const int solid) {
+        const auto process_solid_node = [&](const int solid, bool cooperative = false) {
             const int node = solid_nodes[static_cast<std::size_t>(solid)];
-            const Vec3 proposed_position = xnew[node] - params.damping * gs_solid_vertex_delta_live_barrier(node, ref_mesh, pins, params, xhat, xnew, broad_phase, mixed_adjacency_workspace.solid_node_mask, mixed_adjacency_workspace.surface_node_mask, pin_map, previous_positions);
-            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false);
+            const Vec3 proposed_position = xnew[node] - params.damping * gs_solid_vertex_delta_live_barrier(node, ref_mesh, pins, params, xhat, xnew, broad_phase, mixed_adjacency_workspace.solid_node_mask, mixed_adjacency_workspace.surface_node_mask, pin_map, previous_positions, cooperative);
+            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative);
         };
 
         // COM and orientation remain one indivisible update block: all proxy
         // positions are committed before another color begins.
-        const auto process_body = [&](int rb) {
+        const auto process_body = [&](int rb, bool cooperative = false) {
             const RigidBodyUpdateMode update_mode =
                 ref_mesh.rb_update_modes[rb];
             const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, true);
             if (updates_rigid_translation(update_mode)) {
-                const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics);
+                const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics, cooperative);
                 const Vec3 com_radius = Vec3::Constant(rigid_workspace.com_box_radii[rb]);
                 const Vec3 com_target =(x_com_new[rb] - delta_com).cwiseMax(rigid_workspace.com_box_anchors[rb] - com_radius).cwiseMin(rigid_workspace.com_box_anchors[rb] + com_radius);
                 const Vec3 proposed_com_displacement = com_target - x_com_new[rb];
-                const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, proposed_com_displacement);
+                const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, proposed_com_displacement, 0.9, cooperative);
                 const Vec3 com_displacement = com_safe_step * proposed_com_displacement;
                 x_com_new[rb] += com_displacement;
                 translate_rigid_nodes(ref_mesh.rb_nodes[rb], com_displacement, xnew, params.use_parallel);
@@ -2136,12 +2159,12 @@ SolverResult global_gauss_seidel_solver_basic_general(
 
             Vec4 q_accepted = q_new[rb];
             if (updates_rigid_orientation(update_mode)) {
-                const Vec3 delta_omega = rb_solver::compute_omega_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics, &rigid_workspace.rotation_predictors[static_cast<std::size_t>(rb)]);
+                const Vec3 delta_omega = rb_solver::compute_omega_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics, &rigid_workspace.rotation_predictors[static_cast<std::size_t>(rb)], cooperative);
                 const Vec4 q_current = quaternion_normalize(kinematics.orientation);
                 const Vec3 omega_trial = omega_new[rb] - params.damping * delta_omega;
                 const Vec4 q_target = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_trial, dt));
                 const Vec4 q_bounded = bound_quaternion(rigid_workspace.orientation_box_anchors[rb], q_current,q_target, rigid_workspace.theta_box_radii[rb]);
-                const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, x_com_new[rb], q_current, q_bounded);
+                const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, x_com_new[rb], q_current, q_bounded, 0.9, cooperative);
                 q_accepted = interpolate_orientation_full_arc(q_current, q_bounded, rotation_safe_step);
                 q_new[rb] = q_accepted;
                 omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, state.orientations[rb], dt);
@@ -2154,26 +2177,22 @@ SolverResult global_gauss_seidel_solver_basic_general(
             // Block ids are [cloth nodes][solid nodes][rigid bodies]. Each
             // color is independent under cloth/tet elasticity and NT/SS
             // reads, and the omp-for barrier separates successive GS colors.
-            #pragma omp parallel
-            {
-                for (std::size_t color_index = 0; color_index < mixed_adjacency_workspace.color_groups.size(); ++color_index) {
-                    const std::vector<int>& color = mixed_adjacency_workspace.color_groups[color_index];
-                    // The [cloth][solid][rigid] block ordering gives highly
-                    // unequal work per block. Small dynamic chunks balance
-                    // that work while each color remains conflict-free and
-                    // the implicit barrier preserves the GS color order.
-                    #pragma omp for schedule(dynamic, 1)
-                    for (int index = 0; index < static_cast<int>(color.size()); ++index) {
-                        const int block = color[index];
-                        if (block < solid_begin)
-                            process_cloth_node(block);
-                        else if (block < rigid_begin)
-                            process_solid_node(block - solid_begin);
-                        else
-                            process_body(block - rigid_begin);
+            solver_detail::for_each_colored_block(mixed_adjacency_workspace.color_groups,
+                [&](int block) {
+                    if (block >= rigid_begin) {
+                        const int rb = block - rigid_begin;
+                        return rigid_workspace.body_nt_pair_indices[rb].size()
+                            + rigid_workspace.body_ss_pair_indices[rb].size();
                     }
-                }
-            }
+                    const int node = block < solid_begin ? cloth_nodes[block]
+                        : solid_nodes[block - solid_begin];
+                    return broad_phase.cache().vertex_nt[node].size()
+                        + broad_phase.cache().vertex_ss[node].size();
+                }, [&](int block, bool cooperative) {
+                    if (block < solid_begin) process_cloth_node(block, cooperative);
+                    else if (block < rigid_begin) process_solid_node(block - solid_begin, cooperative);
+                    else process_body(block - rigid_begin, cooperative);
+                });
         } else {
             for (int cloth = 0; cloth < num_cloth; ++cloth)
                 process_cloth_node(cloth);
