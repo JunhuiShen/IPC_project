@@ -1,6 +1,7 @@
 #pragma once
 
 #include "broad_phase.h"
+#include "ccd.h"
 
 #include <vector>
 
@@ -20,3 +21,12 @@ Vec4 bound_quaternion(const Vec4& q_box_anchor, const Vec4& q_current, const Vec
 
 // Returns a safe alpha for rotating rigid body rb from q_current to q_target.
 double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& x_com, const Vec4& q_current, const Vec4& q_target, double safety = 0.9);
+
+namespace safe_step_detail {
+// Read-only single-contact tests, including the original swept-AABB rejection.
+// The caller must hold all four pair positions fixed until the test finishes.
+CCDResult node_triangle_vertex_ccd(const NodeTrianglePair& pair, int dof, int vertex,
+    const std::vector<Vec3>& positions, const Vec3& displacement, bool use_ticcd);
+CCDResult segment_segment_vertex_ccd(const SegmentSegmentPair& pair, int dof, int vertex,
+    const std::vector<Vec3>& positions, const Vec3& displacement, bool use_ticcd);
+} // namespace safe_step_detail

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <set>
 #include <tuple>
 #include <unordered_set>
@@ -1650,4 +1651,53 @@ TEST(BroadPhaseTest, ParallelTopologyPreservesFirstAppearanceAndIncidence) {
     EXPECT_EQ(phase.cache().edges, expected_edges);
     EXPECT_EQ(phase.cache().node_to_tris, expected_triangles);
     EXPECT_EQ(phase.cache().node_to_edges, expected_incidence);
+}
+
+TEST(BroadPhase, CachedAabbRejectionCertifiesShortSingleVertexSweeps) {
+    // Independent swept-box construction plus the production CCD entry points.
+    // Include collapsed primitives, all moving roles and translated geometry.
+    std::uint64_t seed=0x51a7b9;
+    auto random=[&](){seed=seed*6364136223846793005ULL+1442695040888963407ULL;return double(seed>>11)*0x1.0p-53;};
+    NodeTrianglePair nt{0,{1,2,3}};
+    SegmentSegmentPair ss{{0,1,2,3}};
+    int certificates=0;
+    for(double scale:{1e-6,0.005,1.,1e6})for(int sample=0;sample<1000;++sample) {
+        std::vector<Vec3> x(4);
+        double offset=sample%2?scale*1e8:0;
+        for(auto& v:x)for(int a=0;a<3;++a)v[a]=offset+scale*(8*random()-4);
+        if(sample%7==0)x[2]=x[1];
+        if(sample%11==0)x[3]=x[2];
+        for(bool is_nt:{false,true}) {
+            bool clear=true;
+            bool accepted=is_nt?node_triangle_aabbs_within_distance(x[0],x[1],x[2],x[3],scale*scale,&clear):segment_aabbs_within_distance(x[0],x[1],x[2],x[3],scale*scale,&clear);
+            EXPECT_EQ(accepted,is_nt?node_triangle_aabbs_within_distance(x[0],x[1],x[2],x[3],scale*scale):segment_aabbs_within_distance(x[0],x[1],x[2],x[3],scale*scale));
+            if(!clear)continue;
+            EXPECT_FALSE(accepted);++certificates;
+            for(int role=0;role<4;++role) {
+                Vec3 dx;
+                for(int a=0;a<3;++a)dx[a]=2*random()-1;
+                dx*=scale*0.249/std::max(1.,dx.norm());
+                AABB first,second;
+                for(int j=0;j<4;++j) {
+                    AABB& box=(is_nt?j==0:j<2)?first:second;
+                    box.expand(x[j]);if(j==role)box.expand(x[j]+dx);
+                }
+                EXPECT_FALSE(aabb_intersects(first,second));
+                for(bool ticcd:{false,true}) {
+                    auto result=is_nt?safe_step_detail::node_triangle_vertex_ccd(nt,role,role,x,dx,ticcd):safe_step_detail::segment_segment_vertex_ccd(ss,role,role,x,dx,ticcd);
+                    EXPECT_FALSE(result.collision);
+                }
+            }
+        }
+    }
+    EXPECT_GT(certificates,1000);
+}
+
+TEST(BroadPhase, SupportingPlaneRejectionDoesNotCertifyAnAabbGap) {
+    bool clear=true;
+    EXPECT_FALSE(node_triangle_aabbs_within_distance(Vec3(.9,.9,.9),Vec3(1,0,0),Vec3(0,1,0),Vec3(0,0,1),.01,&clear));
+    EXPECT_FALSE(clear);
+    clear=true;
+    EXPECT_FALSE(segment_aabbs_within_distance(Vec3(0,0,0),Vec3(1,1,1),Vec3(0,1,0),Vec3(1,0,.2),.0001,&clear));
+    EXPECT_FALSE(clear);
 }

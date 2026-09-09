@@ -44,8 +44,10 @@ inline bool aabb_intersects(const AABB& a, const AABB& b) {
 }
 
 // Conservative AABB and supporting-plane/line rejection before exact primitive-distance evaluation.
-bool node_triangle_aabbs_within_distance(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, double distance_squared);
-bool segment_aabbs_within_distance(const Vec3& a0, const Vec3& a1, const Vec3& b0, const Vec3& b1, double distance_squared);
+// Optional output distinguishes an AABB-distance rejection from the later
+// plane-distance rejection. Only the former certifies separated axis bounds.
+bool node_triangle_aabbs_within_distance(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, double distance_squared, bool* aabb_rejected = nullptr);
+bool segment_aabbs_within_distance(const Vec3& a0, const Vec3& a1, const Vec3& b0, const Vec3& b1, double distance_squared, bool* aabb_rejected = nullptr);
 
 struct BVHNode {
     AABB bbox;

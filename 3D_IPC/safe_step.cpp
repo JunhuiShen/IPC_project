@@ -82,6 +82,45 @@ inline AABB rotated_node_swept_aabb(int node, const std::vector<Vec3>& x, const 
 
 }  // namespace
 
+namespace safe_step_detail {
+CCDResult node_triangle_vertex_ccd(const NodeTrianglePair &p, int dof, int vi,
+                                   const std::vector<Vec3> &x, const Vec3 &dx, bool use_ticcd) {
+    if (!node_triangle_single_vertex_swept_aabbs_intersect(p, dof, x, dx))
+        return {};
+    if (dof == 0)
+        return node_triangle_only_one_node_moves(x[vi], dx, x[p.tri_v[0]], Vec3::Zero(),
+                                                 x[p.tri_v[1]], Vec3::Zero(), x[p.tri_v[2]],
+                                                 Vec3::Zero(), 1e-12, use_ticcd);
+    Vec3 d0 = Vec3::Zero(), d1 = Vec3::Zero(), d2 = Vec3::Zero();
+    if (dof == 1)
+        d0 = dx;
+    else if (dof == 2)
+        d1 = dx;
+    else
+        d2 = dx;
+    return node_triangle_only_one_node_moves(x[p.node], Vec3::Zero(), x[p.tri_v[0]], d0,
+                                             x[p.tri_v[1]], d1, x[p.tri_v[2]], d2, 1e-12,
+                                             use_ticcd);
+}
+CCDResult segment_segment_vertex_ccd(const SegmentSegmentPair &p, int dof, int vi,
+                                     const std::vector<Vec3> &x, const Vec3 &dx, bool use_ticcd) {
+    if (!segment_segment_single_vertex_swept_aabbs_intersect(p, dof, x, dx))
+        return {};
+    if (dof == 0)
+        return segment_segment_only_one_node_moves(x[vi], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]],
+                                                   1e-12, use_ticcd);
+    if (dof == 1)
+        return segment_segment_only_one_node_moves(x[vi], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]],
+                                                   1e-12, use_ticcd);
+    if (dof == 2)
+        return segment_segment_only_one_node_moves(x[vi], dx, x[p.v[3]], x[p.v[0]], x[p.v[1]],
+                                                   1e-12, use_ticcd);
+    return segment_segment_only_one_node_moves(x[vi], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]], 1e-12,
+                                               use_ticcd);
+}
+
+} // namespace safe_step_detail
+
 double compute_trust_region_bound_for_vertex(int vi, const std::vector<Vec3>& x, const BroadPhase& broad_phase, double gamma_p) {
     const BroadPhase::Cache& bp_cache = broad_phase.cache();
     double d0_min = std::numeric_limits<double>::infinity();
@@ -142,19 +181,8 @@ double per_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x,
     if (clip_ccd) {
         for (const auto& entry : bp_cache.vertex_nt[vi]) {
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
-            // Conservatively precheck the swept primitive AABBs to reject impossible collisions before running the more expensive exact CCD test.
-            if (!node_triangle_single_vertex_swept_aabbs_intersect(p, entry.dof, x, dx))
-                continue;
-            CCDResult r;
-            if (entry.dof == 0) {
-                r = node_triangle_only_one_node_moves(x[vi], dx, x[p.tri_v[0]], Vec3::Zero(), x[p.tri_v[1]], Vec3::Zero(), x[p.tri_v[2]], Vec3::Zero(), 1e-12, use_ticcd);
-            } else {
-                Vec3 d0 = Vec3::Zero(), d1 = Vec3::Zero(), d2 = Vec3::Zero();
-                if (entry.dof == 1) d0 = dx;
-                else if (entry.dof == 2) d1 = dx;
-                else d2 = dx;
-                r = node_triangle_only_one_node_moves(x[p.node], Vec3::Zero(), x[p.tri_v[0]], d0, x[p.tri_v[1]], d1, x[p.tri_v[2]], d2, 1e-12, use_ticcd);
-            }
+            const CCDResult r = safe_step_detail::node_triangle_vertex_ccd(
+                p, entry.dof, vi, x, dx, use_ticcd);
             if (r.collision) {
                 has_collision = true;
                 toi_min = std::min(toi_min, r.t);
@@ -165,17 +193,8 @@ double per_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x,
     if (clip_ccd) {
         for (const auto& entry : bp_cache.vertex_ss[vi]) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
-            if (!segment_segment_single_vertex_swept_aabbs_intersect(p, entry.dof, x, dx))
-                continue;
-            CCDResult r;
-            if (entry.dof == 0)
-                r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]], 1e-12, use_ticcd);
-            else if (entry.dof == 1)
-                r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]], 1e-12, use_ticcd);
-            else if (entry.dof == 2)
-                r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[3]], x[p.v[0]], x[p.v[1]], 1e-12, use_ticcd);
-            else
-                r = segment_segment_only_one_node_moves(x[vi], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]], 1e-12, use_ticcd);
+            const CCDResult r = safe_step_detail::segment_segment_vertex_ccd(
+                p, entry.dof, vi, x, dx, use_ticcd);
             if (r.collision) {
                 has_collision = true;
                 toi_min = std::min(toi_min, r.t);

@@ -222,6 +222,7 @@ if(BUILD_TESTING)
         bending_energy_test
         broad_phase_test
         ccd_test
+        colored_contact_sweep_test
         corotated_energy_test
         friction_energy_test
         initial_guess_test

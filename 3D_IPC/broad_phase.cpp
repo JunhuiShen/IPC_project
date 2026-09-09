@@ -126,10 +126,14 @@ inline int build_bvh_impl(const std::vector<AABB>& boxes, std::vector<BVHNode>& 
 }
 }  // namespace
 
-bool node_triangle_aabbs_within_distance(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, double distance_squared) {
+bool node_triangle_aabbs_within_distance(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, double distance_squared, bool* aabb_rejected) {
+    if (aabb_rejected) *aabb_rejected = false;
     const Vec3 lo = a.cwiseMin(b).cwiseMin(c);
     const Vec3 hi = a.cwiseMax(b).cwiseMax(c);
-    if (point_aabb_squared_distance(p, lo, hi) > distance_squared) return false;
+    if (point_aabb_squared_distance(p, lo, hi) > distance_squared) {
+        if (aabb_rejected) *aabb_rejected = true;
+        return false;
+    }
     const Vec3 normal = (b - a).cross(c - a);
     const double normal_squared = normal.squaredNorm();
     const double scaled_distance = (p - a).dot(normal);
@@ -138,7 +142,8 @@ bool node_triangle_aabbs_within_distance(const Vec3& p, const Vec3& a, const Vec
     return !std::isfinite(scaled_distance_squared) || !std::isfinite(normal_squared) || scaled_distance_squared <= conservative_roundoff * distance_squared * normal_squared;
 }
 
-bool segment_aabbs_within_distance(const Vec3& a0, const Vec3& a1, const Vec3& b0, const Vec3& b1, double distance_squared) {
+bool segment_aabbs_within_distance(const Vec3& a0, const Vec3& a1, const Vec3& b0, const Vec3& b1, double distance_squared, bool* aabb_rejected) {
+    if (aabb_rejected) *aabb_rejected = false;
     const Vec3 alo = a0.cwiseMin(a1);
     const Vec3 ahi = a0.cwiseMax(a1);
     const Vec3 blo = b0.cwiseMin(b1);
@@ -152,7 +157,10 @@ bool segment_aabbs_within_distance(const Vec3& a0, const Vec3& a1, const Vec3& b
             distance = alo[axis] - bhi[axis];
         aabb_distance_squared += distance * distance;
     }
-    if (aabb_distance_squared > distance_squared) return false;
+    if (aabb_distance_squared > distance_squared) {
+        if (aabb_rejected) *aabb_rejected = true;
+        return false;
+    }
     const Vec3 normal = (a1 - a0).cross(b1 - b0);
     const double normal_squared = normal.squaredNorm();
     const double scaled_distance = (b0 - a0).dot(normal);
