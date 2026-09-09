@@ -1763,3 +1763,63 @@ TEST(BroadPhase, PointAabbRejectionPreservesDistanceBoundary) {
         }
     }
 }
+
+TEST(BroadPhase, ReusedVertexAabbRejectionsPreserveSafeSteps) {
+    const NodeTrianglePair nt{0, {1, 2, 3}};
+    const SegmentSegmentPair ss{{0, 1, 2, 3}};
+    const std::vector<std::vector<Vec3>> cases = {
+        {Vec3(1.5, .25, 0), Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0)},
+        {Vec3(.25, .25, .01), Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0)},
+        {Vec3(0, 0, 0), Vec3(0, 1, 0), Vec3(1, 0, 0), Vec3(1, 1, 0)},
+        {Vec3(0, 0, .01), Vec3(1, 0, .01), Vec3(.5, -1, 0), Vec3(.5, 1, 0)}
+    };
+    int certified = 0, clipped = 0;
+    for (int fixture = 0; fixture < static_cast<int>(cases.size()); ++fixture) {
+        const auto& initial = cases[fixture];
+        const bool is_nt = fixture < 2;
+        bool clear = false;
+        if (is_nt)
+            node_triangle_aabbs_within_distance(initial[0], initial[1], initial[2], initial[3], .0625, &clear);
+        else
+            segment_aabbs_within_distance(initial[0], initial[1], initial[2], initial[3], .0625, &clear);
+        if (clear) ++certified;
+        for (int role = 0; role < 4; ++role) {
+            BroadPhase phase;
+            auto& cache = phase.mutable_cache();
+            cache.node_boxes.assign(4, AABB(Vec3::Constant(-4), Vec3::Constant(4)));
+            cache.vertex_nt.resize(4);
+            cache.vertex_ss.resize(4);
+            if (is_nt) {
+                cache.nt_pairs.push_back(nt);
+                cache.vertex_nt[role].push_back({0, role});
+            } else {
+                cache.ss_pairs.push_back(ss);
+                cache.vertex_ss[role].push_back({0, role});
+            }
+            for (const Vec3& step : {Vec3(-.01, .005, 0), Vec3(0, 0, -.02),
+                     Vec3(-.0625, 0, 0), Vec3(-std::nextafter(.0625, 0.0), 0, 0),
+                     Vec3(-2, 0, 0), Vec3(2, 0, 0), Vec3::Zero().eval()}) {
+                const Vec3 target = initial[role] + step;
+                auto expected = initial;
+                const double expected_weight = per_vertex_safe_step(phase, expected, role, target, .9, true, false);
+                if (expected_weight > 0 && expected_weight < 1) ++clipped;
+                for (int mode = 0; mode < 4; ++mode) {
+                    safe_step_detail::VertexAabbRejections bounds;
+                    bounds.distance = .25;
+                    bounds.clear = {static_cast<unsigned char>(clear)};
+                    if (mode == 1) bounds.clear.clear();
+                    if (mode == 2) bounds.distance = 0;
+                    if (mode == 3) bounds.distance = std::numeric_limits<double>::infinity();
+                    auto actual = initial;
+                    const double weight = per_vertex_safe_step(phase, actual, role, target, .9, true, false, false, false, &bounds);
+                    ASSERT_EQ(weight, expected_weight);
+                    for (int node = 0; node < 4; ++node)
+                        for (int axis = 0; axis < 3; ++axis)
+                            ASSERT_EQ(actual[node][axis], expected[node][axis]);
+                }
+            }
+        }
+    }
+    EXPECT_GT(certified, 0);
+    EXPECT_GT(clipped, 0);
+}

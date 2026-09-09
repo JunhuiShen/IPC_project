@@ -145,7 +145,11 @@ double compute_trust_region_bound_for_vertex(int vi, const std::vector<Vec3>& x,
     return gamma_p * d0_min;  // +inf when vi has no incident pairs
 }
 
-double per_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi, const Vec3& raw_proposed_position, double safety, bool clip_ccd, bool use_ticcd, bool use_ogc, bool cooperative) {
+double per_vertex_safe_step(
+    const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi,
+    const Vec3& raw_proposed_position, double safety, bool clip_ccd,
+    bool use_ticcd, bool use_ogc, bool cooperative,
+    const safe_step_detail::VertexAabbRejections* rejections) {
     const BroadPhase::Cache& bp_cache = broad_phase.cache();
     const int nv = static_cast<int>(x.size());
     if (vi < 0 || vi >= nv)
@@ -183,8 +187,18 @@ double per_vertex_safe_step(const BroadPhase& broad_phase, std::vector<Vec3>& x,
         const auto& nt = bp_cache.vertex_nt[vi];
         const auto& ss = bp_cache.vertex_ss[vi];
         const int nt_count = static_cast<int>(nt.size());
+        const double distance_squared = rejections
+            ? rejections->distance * rejections->distance : 0.0;
+        // AABB distance > d_hat implies some axis gap > d_hat/sqrt(3).
+        // Moving only this vertex by < d_hat/4 cannot close that gap, so the
+        // original swept-AABB check would also reject the pair.
+        const bool reuse_rejections = rejections && rejections->distance > 1e-8
+            && std::isfinite(distance_squared)
+            && rejections->clear.size() == nt.size() + ss.size()
+            && dx.squaredNorm() < distance_squared / 16.0;
         solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss.size()), cooperative,
             [&](int i) {
+                if (reuse_rejections && rejections->clear[i]) return CCDResult{};
                 if (i < nt_count) {
                     const auto& entry = nt[i];
                     return safe_step_detail::node_triangle_vertex_ccd(

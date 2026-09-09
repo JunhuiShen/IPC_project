@@ -415,8 +415,10 @@ Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const VertexT
                                   const std::vector<Vec3>& xhat, std::vector<Vec3>& x, const BroadPhase& broad_phase, const PinMap* pin_map,
                                   const IncidentTriangles* incident_triangles,
                                   const std::vector<ShapeGrads>* rest_shape_grads,
-                                  const std::vector<Vec3>* previous_positions, bool cooperative = false) {
+                                  const std::vector<Vec3>* previous_positions, bool cooperative = false,
+                                  safe_step_detail::VertexAabbRejections* rejections = nullptr) {
     const auto& bp_cache = broad_phase.cache();
+    if (rejections) rejections->distance = 0.0;
     auto local_derivatives =
         physics_detail::compute_local_gradient_and_hessian_no_barrier_unchecked(
             vi, ref_mesh, adj, pins, params, x, xhat, pin_map,
@@ -428,17 +430,53 @@ Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const VertexT
         const double dt2k = params.dt2() * params.k_barrier;
         const double d_hat2 = params.d_hat * params.d_hat;
 
-        struct Contribution {
-            Vec3 gradient = Vec3::Zero(), friction_gradient = Vec3::Zero();
-            Mat33 hessian = Mat33::Zero(), friction_hessian = Mat33::Zero();
-        };
-        const auto evaluate_nt = [&](const BroadPhase::Cache::VertexPairEntry& entry) {
-            std::optional<Contribution> value;
+        if (params.friction_coefficient == 0.0 && !cooperative) {
+            if (rejections) {
+                rejections->clear.resize(
+                    bp_cache.vertex_nt[vi].size() + bp_cache.vertex_ss[vi].size());
+                rejections->distance = params.d_hat;
+            }
+            std::size_t contact_index = 0;
+            // Whole-vertex work can accumulate directly in contact order,
+            // without materializing optional gradient/Hessian records.
+            for (const auto& entry : bp_cache.vertex_nt[vi]) {
+                const auto& p = bp_cache.nt_pairs[entry.pair_index];
+                bool clear = false;
+                const bool within = node_triangle_aabbs_within_distance(
+                    x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], d_hat2,
+                    rejections ? &clear : nullptr);
+                if (rejections) rejections->clear[contact_index++] = clear;
+                if (!within) continue;
+                const auto [bg, bH] = node_triangle_barrier_self_gradient_and_hessian(
+                    x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]],
+                    params.d_hat, entry.dof);
+                g += dt2k * bg;
+                H += dt2k * bH;
+            }
+            for (const auto& entry : bp_cache.vertex_ss[vi]) {
+                const auto& p = bp_cache.ss_pairs[entry.pair_index];
+                bool clear = false;
+                const bool within = segment_aabbs_within_distance(
+                    x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], d_hat2,
+                    rejections ? &clear : nullptr);
+                if (rejections) rejections->clear[contact_index++] = clear;
+                if (!within) continue;
+                const auto [bg, bH] = segment_segment_barrier_self_gradient_and_hessian(
+                    x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]],
+                    params.d_hat, entry.dof);
+                g += dt2k * bg;
+                H += dt2k * bH;
+            }
+            return matrix3d_inverse(H) * g;
+        }
 
+        // Share contact evaluation between direct accumulation and cooperative
+        // staging so both paths use the same barrier and friction geometry.
+        const auto evaluate_nt = [&](const BroadPhase::Cache::VertexPairEntry& entry,
+                                     const auto& consume) {
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
             if (!node_triangle_aabbs_within_distance(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], d_hat2))
-                return value;
-            value.emplace();
+                return;
             if (params.friction_coefficient != 0.0) {
                 const std::array<Vec3, 4> current_positions =
                     friction_node_triangle_positions(p, x);
@@ -451,8 +489,6 @@ Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const VertexT
                         current_positions[0], current_positions[1],
                         current_positions[2], current_positions[3],
                         entry.dof, contact_evaluation);
-                value->gradient = bg;
-                value->hessian = bH;
                 const FrozenFrictionContact contact =
                     make_node_triangle_frozen_friction_contact(
                         current_positions,
@@ -464,25 +500,20 @@ Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const VertexT
                     frozen_friction_role_gradient_and_hessian(
                         contact, entry.dof,
                         params.friction_coefficient, params.dt2());
-                value->friction_gradient = fg;
-                value->friction_hessian = fH;
+                consume(bg, bH, fg, fH);
             } else {
                 const auto [bg, bH] =
                     node_triangle_barrier_self_gradient_and_hessian(
                         x[p.node], x[p.tri_v[0]], x[p.tri_v[1]],
                         x[p.tri_v[2]], params.d_hat, entry.dof);
-                value->gradient = bg;
-                value->hessian = bH;
+                consume(bg, bH, Vec3::Zero(), Mat33::Zero());
             }
-            return value;
         };
-        const auto evaluate_ss = [&](const BroadPhase::Cache::VertexPairEntry& entry) {
-            std::optional<Contribution> value;
-
+        const auto evaluate_ss = [&](const BroadPhase::Cache::VertexPairEntry& entry,
+                                     const auto& consume) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
             if (!segment_aabbs_within_distance(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], d_hat2))
-                return value;
-            value.emplace();
+                return;
             if (params.friction_coefficient != 0.0) {
                 const std::array<Vec3, 4> current_positions =
                     friction_segment_segment_positions(p, x);
@@ -495,8 +526,6 @@ Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const VertexT
                         current_positions[0], current_positions[1],
                         current_positions[2], current_positions[3],
                         entry.dof, contact_evaluation);
-                value->gradient = bg;
-                value->hessian = bH;
                 const FrozenFrictionContact contact =
                     make_segment_segment_frozen_friction_contact(
                         current_positions,
@@ -508,32 +537,58 @@ Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const VertexT
                     frozen_friction_role_gradient_and_hessian(
                         contact, entry.dof,
                         params.friction_coefficient, params.dt2());
-                value->friction_gradient = fg;
-                value->friction_hessian = fH;
+                consume(bg, bH, fg, fH);
             } else {
                 const auto [bg, bH] =
                     segment_segment_barrier_self_gradient_and_hessian(
                         x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]],
                         params.d_hat, entry.dof);
-                value->gradient = bg;
-                value->hessian = bH;
+                consume(bg, bH, Vec3::Zero(), Mat33::Zero());
             }
-            return value;
+        };
+        const auto accumulate = [&](const Vec3& gradient, const Mat33& hessian,
+                                    const Vec3& friction_gradient, const Mat33& friction_hessian) {
+            g += dt2k * gradient;
+            H += dt2k * hessian;
+            if (params.friction_coefficient != 0.0) {
+                // Friction derivatives already include their dt^2 scaling.
+                g += friction_gradient;
+                H += friction_hessian;
+            }
         };
         const auto& nt = bp_cache.vertex_nt[vi];
         const auto& ss = bp_cache.vertex_ss[vi];
-        const int nt_count = static_cast<int>(nt.size());
-        solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss.size()), cooperative,
-            [&](int i) { return i < nt_count ? evaluate_nt(nt[i]) : evaluate_ss(ss[i - nt_count]); },
-            [&](const std::optional<Contribution>& value) {
-                if (!value) return;
-                g += dt2k * value->gradient;
-                H += dt2k * value->hessian;
-                if (params.friction_coefficient != 0.0) {
-                    g += value->friction_gradient;
-                    H += value->friction_hessian;
-                }
-            });
+        if (!cooperative) {
+            // Whole-vertex friction follows the same NT-then-SS order without
+            // copying each contact's derivatives into a Contribution record.
+            for (const auto& entry : nt) evaluate_nt(entry, accumulate);
+            for (const auto& entry : ss) evaluate_ss(entry, accumulate);
+        } else {
+            struct Contribution {
+                Vec3 gradient = Vec3::Zero(), friction_gradient = Vec3::Zero();
+                Mat33 hessian = Mat33::Zero(), friction_hessian = Mat33::Zero();
+            };
+            const int nt_count = static_cast<int>(nt.size());
+            solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss.size()), cooperative,
+                [&](int i) {
+                    std::optional<Contribution> value;
+                    const auto store = [&](const Vec3& gradient, const Mat33& hessian,
+                                           const Vec3& friction_gradient, const Mat33& friction_hessian) {
+                        value.emplace();
+                        value->gradient = gradient;
+                        value->hessian = hessian;
+                        value->friction_gradient = friction_gradient;
+                        value->friction_hessian = friction_hessian;
+                    };
+                    if (i < nt_count) evaluate_nt(nt[i], store);
+                    else evaluate_ss(ss[i - nt_count], store);
+                    return value;
+                },
+                [&](const std::optional<Contribution>& value) {
+                    if (value) accumulate(value->gradient, value->hessian,
+                                          value->friction_gradient, value->friction_hessian);
+                });
+        }
     }
 
     return matrix3d_inverse(H) * g;
@@ -787,18 +842,26 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
           }
         }
 
-        const auto proposed_position = [&](int vi) -> Vec3 {
+        const auto proposed_position = [&](int vi,
+            safe_step_detail::VertexAabbRejections* rejections) -> Vec3 {
           return xnew[vi] -
                  params.damping *
                      gs_vertex_delta_live_barrier(
                          vi, ref_mesh, adj, pins, params, xhat, xnew,
                          broad_phase, &pm, &workspace.incident_triangles[vi],
-                         &workspace.rest_shape_grads, previous_positions);
+                         &workspace.rest_shape_grads, previous_positions,
+                         false, rejections);
         };
         const auto process_vertex = [&](int vi) {
-          per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi),
+          // Scratch belongs to this worker and is consumed before updating the
+          // vertex. Colors keep every incident pair fixed during these calls.
+          thread_local safe_step_detail::VertexAabbRejections scratch;
+          auto* rejections = params.friction_coefficient == 0.0 && params.use_ccd
+              && !params.use_ogc && params.d_hat > 1e-8 ? &scratch : nullptr;
+          const Vec3 proposed = proposed_position(vi, rejections);
+          per_vertex_safe_step(broad_phase, xnew, vi, proposed,
                                0.9, params.use_ogc ? false : params.use_ccd,
-                               params.use_ticcd, params.use_ogc);
+                               params.use_ticcd, params.use_ogc, false, rejections);
         };
         if (use_contact_sweep) {
           const auto &cache = broad_phase.cache();
