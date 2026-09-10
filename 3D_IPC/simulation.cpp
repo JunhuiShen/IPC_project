@@ -22,7 +22,13 @@ int main(int argc, char** argv) {
     IPCArgs3D args;
     if (!args.parse(argc, argv)) return 1;
 
-    SimParams params = args.to_sim_params();
+    SimParams params = SimParams::zeros();
+    try {
+        params = args.to_sim_params();
+    } catch (const std::invalid_argument& error) {
+        std::cerr << "Error: " << error.what() << "\n";
+        return 1;
+    }
     const int num_frames = args.num_frames;
 
     RefMesh ref_mesh;
@@ -122,6 +128,10 @@ int main(int argc, char** argv) {
     const bool has_solid = !ref_mesh.tet_nodes.empty();
     const bool is_mixed = has_rigid && has_deformable;
     const bool uses_general_solver = is_mixed || has_solid;
+    if (params.use_cloth_grid && (has_rigid || has_solid)) {
+        std::cerr << "Error: --use_cloth_grid is available only for the basic cloth solver; rigid, solid, and mixed scenes are unsupported\n";
+        return 1;
+    }
     if (is_mixed && (params.use_ogc || params.use_ogc_solver)) {
         throw std::invalid_argument("mixed deformable-rigid scenes do not support OGC mode");
     }

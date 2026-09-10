@@ -151,6 +151,7 @@ target_link_libraries(corotated_energy_lib
 set(IPC_SIMULATION_SOURCES
     broad_phase.cpp
     example.cpp
+    grid_coloring.cpp
     initial_guess.cpp
     io.cpp
     make_shape.cpp
@@ -223,8 +224,11 @@ if(BUILD_TESTING)
         broad_phase_test
         ccd_test
         contact_scheduling_test
+        cloth_grid_solver_test
         corotated_energy_test
         friction_energy_test
+        grid_coloring_test
+        grid_contact_scheduling_test
         initial_guess_test
         io_test
         ipc_math_test

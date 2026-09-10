@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 #include <cassert>
+#include <cmath>
 #include <stdexcept>
 
 class BroadPhase;
@@ -49,6 +50,8 @@ struct SimParams {
     int    max_global_iters;
 
     bool   use_parallel;
+    bool   use_cloth_grid;       // basic cloth only: serial vertices within parallel spatial cells
+    double cloth_grid_dx;        // world-space cell side; must exceed twice node_box_max
     bool   write_substeps;       // if true, export a frame file after every substep (not just every frame)
     bool   use_ccd;              // if true, run CCD step clamping in per_vertex_safe_step
     bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
@@ -96,6 +99,8 @@ struct SimParams {
         p.gravity                   = Vec3::Zero();
         p.max_global_iters          = 0;
         p.use_parallel              = false;
+        p.use_cloth_grid            = false;
+        p.cloth_grid_dx             = 0.05;
         p.write_substeps            = false;
         p.use_ccd                   = false;
         p.use_ccd_guess             = true;
@@ -117,6 +122,20 @@ struct SimParams {
         p.cached_dt_                = -1.0;
         p.cached_dt2_               = -1.0;
         return p;
+    }
+
+    void validate_cloth_grid_parameters() const {
+        if (!use_cloth_grid) return;
+        if (use_ogc || use_ogc_solver)
+            throw std::invalid_argument("--use_cloth_grid supports only the basic cloth solver with OGC disabled");
+        if (!std::isfinite(node_box_min) || !std::isfinite(node_box_max)
+            || node_box_min <= 1e-10 || node_box_max < node_box_min)
+            throw std::invalid_argument("cloth grid requires 1e-10 < node_box_min <= node_box_max, both finite");
+        if (!std::isfinite(cloth_grid_dx) || cloth_grid_dx <= 0.0
+            || node_box_max >= cloth_grid_dx * 0.5)
+            throw std::invalid_argument("--cloth_grid_dx must be finite and > 2 * --node_box_max so same-color node boxes cannot overlap");
+        if (node_box_update_count <= 0 || max_global_iters <= 0)
+            throw std::invalid_argument("cloth grid requires positive node_box_update_count and max_substep_iters");
     }
 
     double dt()  const {

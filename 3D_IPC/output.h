@@ -6,12 +6,23 @@
 
 enum class ExportFormat { OBJ, GEO, PLY, USD };
 
+namespace solver_detail { struct ClothGridSchedule; }
+
 void export_obj(const std::string& filename, const std::vector<Vec3>& x, const std::vector<int>& tris);
 void export_geo(const std::string& filename, const std::vector<Vec3>& x, const std::vector<int>& tris, const std::vector<std::vector<int>>* color_groups = nullptr);
 void export_ply(const std::string& filename, const std::vector<Vec3>& x, const std::vector<int>& tris);
 void export_usd(const std::string& filename, const std::vector<Vec3>& x, const std::vector<int>& tris);
 
-void write_substep_data(const SimParams& params, const BroadPhase& broad_phase, const std::vector<Vec3>& xnew, const std::string& outdir, const RefMesh* ref_mesh = nullptr, const std::vector<std::vector<int>>* color_groups = nullptr);
+void write_substep_data(const SimParams& params, const BroadPhase& broad_phase, const std::vector<Vec3>& xnew, const std::string& outdir, const RefMesh* ref_mesh = nullptr, const std::vector<std::vector<int>>* color_groups = nullptr, const solver_detail::ClothGridSchedule* grid = nullptr);
+
+// Houdini GEO grid diagnostics. Boxes include empty cells in the scene bounds;
+// every face has color_id, cell_id, batch_id, grid_i/j/k, vertex_count, and Cd.
+// cell_id indexes schedule.cells and is -1 for empty cells. batch_id identifies
+// the actual conflict-free sweep; equal parity colors can have different batches.
+// Full-grid output is limited to 250,000 boxes and throws if the limit is exceeded.
+void export_cloth_grid_boxes_geo(const std::string& filename, const solver_detail::ClothGridSchedule& grid);
+// One point per cloth vertex, with color_id/cell_id/batch_id and Cd attributes.
+void export_cloth_grid_vertices_geo(const std::string& filename, const std::vector<Vec3>& x, const solver_detail::ClothGridSchedule& grid);
 
 void export_frame(const std::string& outdir, int frame, const std::vector<Vec3>& x, const std::vector<int>& tris, ExportFormat fmt, const std::vector<std::vector<int>>* color_groups = nullptr);
 

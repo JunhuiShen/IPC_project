@@ -88,6 +88,90 @@ the mesh vertices:
 In short, the solver repeatedly builds a conservative contact set and
 performs collision-safe per-vertex Newton updates one color group at a time.
 
+### Spatial grid scheduling for basic cloth
+
+Enable `--use_cloth_grid true --cloth_grid_dx 0.05` to group the basic cloth
+solver's vertices into cubic cells of side `dx`. The grid is aligned to world
+origin zero and expands to cover the cloth's node boxes. Cell indices are
+`floor(position / dx)`, including for negative coordinates. In an XY layer the
+colors repeat red/green and blue/orange; alternating Z layers add four more
+colors. The color ID is `(ix & 1) + 2*(iy & 1) + 4*(iz & 1)`.
+
+Cells in each execution batch run in parallel. Inside a cell, vertices update
+serially in vertex-index order using the existing Newton update, node-box
+clipping, and CCD. The next batch starts after all cells in the current batch
+finish. Setting `--use_parallel false` executes the same grid schedule serially
+for comparison. The grid option defaults to false and is supported only for
+basic cloth, with OGC disabled.
+
+Within each batch, cells are dispatched in descending estimated work order
+(the sum of their vertices' contact-list sizes, plus a base vertex cost).
+For frictionless contact solves with multiple OpenMP threads, expensive cells
+can receive a small worker group. The group evaluates the current vertex's
+contact contributions and CCD tests in parallel; its leader accumulates in
+the original contact order and commits that vertex before the cell advances
+to the next one. Supporting workers never update another vertex in that cell
+concurrently. Light cells retain the scalar vertex kernel and use the remaining
+workers. Frictional and collision-free solves retain whole-cell scheduling.
+Short cooperative waits spin briefly; prolonged waits yield and then park
+temporarily so a delayed group member can make progress.
+This optimization keeps the existing cell ownership, dependency batches,
+node-box bounds, and serial vertex order. It is automatic with
+`--use_cloth_grid true`; no additional solver flag is required.
+
+Use `--verbose true --write_substeps false` for grid setup and synchronization
+diagnostics. These optional timers add overhead, so leave verbose output off
+for scaling measurements.
+
+`dx` must be strictly greater than `2 * node_box_max`. Same-color cells have at
+least one intervening cell along one axis, so this bound ensures node boxes
+belonging to different cells of the same color cannot touch or overlap. Invalid
+sizes are rejected. Each rebuild also checks the actual node boxes against the
+half-cell bound. Grid membership remains anchored to that rebuild until the
+next `node_box_update_count` rebuild; a vertex can cross its original cell face
+while staying inside its assigned node box.
+
+Node-box separation alone does not imply independent cloth updates: long
+triangles, bending hinges, and contact candidates can couple distant cells.
+The scheduler projects these dependencies onto occupied cells and splits a
+parity color into additional batches when needed. `color_id` remains the
+geometric color (0–7), while `batch_id` identifies the actual simultaneous
+update group. Smaller cells can therefore increase the number of batches.
+This changes Gauss-Seidel ordering, so equal fixed iteration counts need not
+produce the same result as the default vertex-color solver.
+
+With `--write_substeps true`, each existing `substep_N` directory also contains:
+
+- `grid_boxes.geo`: the full grid, including empty cells, with primitive
+  `color_id`, `Cd`, `cell_id`, `batch_id`, `grid_i`, `grid_j`, `grid_k`, and
+  `vertex_count` attributes. Empty cells have `cell_id = batch_id = -1`.
+- `grid_vertices.geo`: cloth points with their scheduled `cell_id`, `color_id`,
+  `batch_id`, and `Cd`. These labels describe the last rebuild's assignment.
+- `mesh.geo`: the existing cloth mesh; `group_id` records the execution batch.
+
+Load `substep_$F/grid_boxes.geo` in a Houdini File SOP (the first substep is 0).
+Use `Cd` to view the alternating colors and `batch_id` to inspect concurrent
+cells. Grid exports are always GEO regardless of the frame `--format`. Very
+large dense visualization grids are rejected with a clear size-limit error;
+the solver itself stores only occupied cells.
+
+For example, this uses the twisting-cloth configuration with the grid algorithm
+on a local machine. Omitting `--node_box_max` uses its default of `0.01` m;
+`--cloth_grid_dx 0.05` satisfies the required separation bound:
+
+```bash
+OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE ./build/3D_sim \
+  --example 1 --num_frames 220 --fps 30 \
+  --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
+  --friction_coefficient 0 --use_parallel true \
+  --use_cloth_grid true --cloth_grid_dx 0.05 \
+  --fixed_iters --max_substep_iters 10 --substeps 5 \
+  --node_box_update_count 10 \
+  --d_hat 0.005 --k_barrier 100 --use_ccd_guess true --use_ccd true \
+  --use_ogc false --use_ogc_solver false \
+  --write_substeps true --format obj --outdir outputs/cloth_grid
+```
+
 ### Rigid-body solver
 
 Although the rigid-body and deformable solvers share IPC barrier primitives,
@@ -442,6 +526,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | Time integration | `fps`, `substeps`, `num_frames` |
 | Physics | Shell: `E`, `nu`, `density`, `thickness`, `kB`; volumetric solid: `solid_E`, `solid_nu`, `solid_density`; rigid body: `rigid_density`; shared: `kpin`, `gx`, `gy`, `gz` |
 | Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `friction_coefficient`, `friction_velocity_epsilon`, `k_sdf`, `eps_sdf`, `damping`, `fixed_iters`, `use_parallel`, `verbose`, `write_substeps` |
+| Basic cloth grid | `use_cloth_grid` (default false), `cloth_grid_dx` (default 0.05 m, strictly greater than `2 * node_box_max`) |
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (per-iteration box/pair refresh solver), `ogc_box_pad` (BVH padding for the refresh; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (translation/node-box radius limits in m), `theta_box_min`, `theta_box_max` (rigid orientation-box angular-radius limits in rad), `node_box_update_count` (GS iterations between broad-phase/contact-color rebuilds; default 10) |

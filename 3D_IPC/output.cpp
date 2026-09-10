@@ -1,10 +1,13 @@
 #include "output.h"
 
 #include "barrier_energy.h"
+#include "grid_coloring.h"
 #include "node_triangle_distance.h"
 #include "segment_segment_distance.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -16,7 +19,9 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -624,7 +629,223 @@ void export_ss_pairs_geo(const std::string& filename, const std::vector<Vec3>& x
 
 }  // namespace
 
-void write_substep_data(const SimParams& params, const BroadPhase& broad_phase, const std::vector<Vec3>& xnew, const std::string& outdir, const RefMesh* ref_mesh, const std::vector<std::vector<int>>* color_groups) {
+namespace {
+
+using GridIndex = std::array<std::int64_t, 3>;
+
+int grid_parity_color(const GridIndex& index) {
+    return static_cast<int>(static_cast<std::uint64_t>(index[0]) & 1u)
+        + 2 * static_cast<int>(static_cast<std::uint64_t>(index[1]) & 1u)
+        + 4 * static_cast<int>(static_cast<std::uint64_t>(index[2]) & 1u);
+}
+
+std::array<double, 3> grid_display_color(int color) {
+    static constexpr std::array<std::array<double, 3>, 8> palette{{
+        {{1, 0, 0}}, {{0, 1, 0}}, {{0, 0, 1}}, {{1, 0.5, 0}},
+        {{0.6, 0, 1}}, {{0, 1, 1}}, {{1, 0, 0.6}}, {{1, 1, 0}}
+    }};
+    return color >= 0 && color < 8 ? palette[color]
+                                  : std::array<double, 3>{{0.5, 0.5, 0.5}};
+}
+
+template <typename TupleWriter>
+void write_grid_attribute(std::ostream& out, const char* name, int size,
+                          const char* storage, int count, const TupleWriter& tuple) {
+    out << "[[\"scope\",\"public\",\"type\",\"numeric\",\"name\",\"" << name
+        << "\",\"options\",{}],[\"size\"," << size << ",\"storage\",\"" << storage
+        << "\",\"values\",[\"size\"," << size << ",\"storage\",\"" << storage
+        << "\",\"tuples\",[";
+    write_formatted_ranges(out, count, [&](std::ostream& text, int begin, int end) {
+        for (int i = begin; i < end; ++i) {
+            if (i) text << ',';
+            text << '[';
+            tuple(text, i);
+            text << ']';
+        }
+    });
+    out << "]]]]";
+}
+
+void write_grid_header(std::ostream& out, int points, int vertices, int primitives) {
+    out << std::setprecision(17)
+        << "[\n\"fileversion\",\"18.5.408\",\"hasindex\",false,\n"
+        << "\"pointcount\"," << points << ",\"vertexcount\"," << vertices
+        << ",\"primitivecount\"," << primitives << ",\"info\",{},\n";
+}
+
+struct ExportGridCell {
+    GridIndex index;
+    AABB bounds;
+    int color_id;
+    int cell_id;
+    int batch_id;
+    int vertex_count;
+};
+
+std::vector<ExportGridCell> full_export_grid(const solver_detail::ClothGridSchedule& grid) {
+    if (!std::isfinite(grid.dx) || grid.dx <= 0)
+        throw std::invalid_argument("Cloth grid output requires a finite positive dx");
+    if (grid.cells.empty()) return {};
+
+    constexpr std::uint64_t max_cells = 250000;
+    std::array<std::uint64_t, 3> spans;
+    std::uint64_t count = 1;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (grid.max_index[axis] < grid.min_index[axis])
+            throw std::invalid_argument("Cloth grid output has inverted scene bounds");
+        // Unsigned subtraction avoids signed overflow for far-apart endpoints.
+        const auto difference = static_cast<std::uint64_t>(grid.max_index[axis])
+                              - static_cast<std::uint64_t>(grid.min_index[axis]);
+        if (difference >= max_cells || count > max_cells / (difference + 1))
+            throw std::length_error("Cloth grid output exceeds 250,000 boxes; increase --cloth_grid_dx or disable substep output");
+        spans[axis] = difference + 1;
+        count *= spans[axis];
+    }
+    for (std::size_t i = 0; i < grid.cells.size(); ++i) {
+        const auto& cell = grid.cells[i];
+        if (i && !(grid.cells[i - 1].index < cell.index))
+            throw std::invalid_argument("Cloth grid output requires distinct cells in lexicographic order");
+        for (int axis = 0; axis < 3; ++axis) {
+            if (cell.index[axis] < grid.min_index[axis] || cell.index[axis] > grid.max_index[axis])
+                throw std::invalid_argument("Cloth grid output contains a cell outside scene bounds");
+        }
+        if (cell.color_id != grid_parity_color(cell.index) || cell.batch_id < 0)
+            throw std::invalid_argument("Cloth grid output contains invalid color or batch ids");
+        if (cell.vertices.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+            throw std::length_error("Cloth grid output cell has too many vertices");
+    }
+
+    std::vector<ExportGridCell> boxes;
+    boxes.reserve(static_cast<std::size_t>(count));
+    std::size_t occupied = 0;
+    for (std::uint64_t i = 0; i < spans[0]; ++i)
+        for (std::uint64_t j = 0; j < spans[1]; ++j)
+            for (std::uint64_t k = 0; k < spans[2]; ++k) {
+                ExportGridCell box;
+                box.index = {{grid.min_index[0] + static_cast<std::int64_t>(i),
+                              grid.min_index[1] + static_cast<std::int64_t>(j),
+                              grid.min_index[2] + static_cast<std::int64_t>(k)}};
+                for (int axis = 0; axis < 3; ++axis) {
+                    box.bounds.min[axis] = static_cast<double>(box.index[axis]) * grid.dx;
+                    box.bounds.max[axis] = static_cast<double>(static_cast<long double>(box.index[axis]) + 1) * grid.dx;
+                }
+                if (!box.bounds.min.allFinite() || !box.bounds.max.allFinite())
+                    throw std::invalid_argument("Cloth grid output coordinates are not finite");
+                box.color_id = grid_parity_color(box.index);
+                box.cell_id = -1;
+                box.batch_id = -1;
+                box.vertex_count = 0;
+                if (occupied < grid.cells.size() && grid.cells[occupied].index == box.index) {
+                    const auto& cell = grid.cells[occupied];
+                    box.cell_id = static_cast<int>(occupied++);
+                    box.batch_id = cell.batch_id;
+                    box.vertex_count = static_cast<int>(cell.vertices.size());
+                }
+                boxes.push_back(box);
+            }
+    return boxes;
+}
+
+}  // namespace
+
+void export_cloth_grid_boxes_geo(const std::string& filename, const solver_detail::ClothGridSchedule& grid) {
+    const auto boxes = full_export_grid(grid);
+    const int count = static_cast<int>(boxes.size());
+    std::ofstream out(filename);
+    if (!out) throw std::runtime_error("Cannot write cloth grid GEO: " + filename);
+    write_grid_header(out, 8 * count, 24 * count, 6 * count);
+    constexpr int faces[6][4] = {
+        {0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
+        {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}
+    };
+    out << "\"topology\",[\"pointref\",[\"indices\",[";
+    write_formatted_ranges(out, 24 * count, [&](std::ostream& text, int begin, int end) {
+        for (int i = begin; i < end; ++i) {
+            if (i) text << ',';
+            text << 8 * (i / 24) + faces[(i % 24) / 4][i % 4];
+        }
+    });
+    out << "]]],\n\"attributes\",[\"pointattributes\",[";
+    constexpr int corners[8][3] = {
+        {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+        {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}
+    };
+    write_grid_attribute(out, "P", 3, "fpreal64", 8 * count, [&](std::ostream& text, int i) {
+        const auto& box = boxes[i / 8].bounds;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (axis) text << ',';
+            text << (corners[i % 8][axis] ? box.max[axis] : box.min[axis]);
+        }
+    });
+    out << "],\"primitiveattributes\",[";
+    const char* fields[] = {"color_id", "cell_id", "batch_id", "vertex_count", "grid_i", "grid_j", "grid_k"};
+    for (int field = 0; field < 7; ++field) {
+        if (field) out << ',';
+        write_grid_attribute(out, fields[field], 1, field < 4 ? "int32" : "int64", 6 * count,
+            [&](std::ostream& text, int i) {
+                const auto& box = boxes[i / 6];
+                if (field == 0) text << box.color_id;
+                else if (field == 1) text << box.cell_id;
+                else if (field == 2) text << box.batch_id;
+                else if (field == 3) text << box.vertex_count;
+                else text << box.index[field - 4];
+            });
+    }
+    out << ',';
+    write_grid_attribute(out, "Cd", 3, "fpreal32", 6 * count, [&](std::ostream& text, int i) {
+        const auto color = grid_display_color(boxes[i / 6].color_id);
+        text << color[0] << ',' << color[1] << ',' << color[2];
+    });
+    out << "]],\n\"primitives\",[";
+    if (count) {
+        out << "[[\"type\",\"Polygon_run\"],[\"startvertex\",0,\"nprimitives\"," << 6 * count
+            << ",\"nvertices_rle\",[4," << 6 * count << "]]]";
+    }
+    out << "]\n]\n";
+    if (!out) throw std::runtime_error("Failed writing cloth grid GEO: " + filename);
+}
+
+void export_cloth_grid_vertices_geo(const std::string& filename, const std::vector<Vec3>& x, const solver_detail::ClothGridSchedule& grid) {
+    if (x.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        throw std::length_error("Cloth grid output has too many points");
+    const int count = static_cast<int>(x.size());
+    std::vector<std::array<int, 3>> membership(x.size(), {{-1, -1, -1}});
+    for (std::size_t i = 0; i < grid.cells.size(); ++i) {
+        const auto& cell = grid.cells[i];
+        for (int vertex : cell.vertices) {
+            if (vertex < 0 || vertex >= count || membership[vertex][1] != -1)
+                throw std::invalid_argument("Cloth grid output contains invalid or duplicate vertex membership");
+            membership[vertex] = {{cell.color_id, static_cast<int>(i), cell.batch_id}};
+        }
+    }
+    for (const auto& point : x) {
+        if (!point.allFinite())
+            throw std::invalid_argument("Cloth grid output contains nonfinite positions");
+    }
+    std::ofstream out(filename);
+    if (!out) throw std::runtime_error("Cannot write cloth grid vertices GEO: " + filename);
+    write_grid_header(out, count, 0, 0);
+    out << "\"topology\",[\"pointref\",[\"indices\",[]]],\n\"attributes\",[\"pointattributes\",[";
+    write_grid_attribute(out, "P", 3, "fpreal64", count, [&](std::ostream& text, int i) {
+        text << x[i].x() << ',' << x[i].y() << ',' << x[i].z();
+    });
+    const char* fields[] = {"color_id", "cell_id", "batch_id"};
+    for (int field = 0; field < 3; ++field) {
+        out << ',';
+        write_grid_attribute(out, fields[field], 1, "int32", count, [&](std::ostream& text, int i) {
+            text << membership[i][field];
+        });
+    }
+    out << ',';
+    write_grid_attribute(out, "Cd", 3, "fpreal32", count, [&](std::ostream& text, int i) {
+        const auto color = grid_display_color(membership[i][0]);
+        text << color[0] << ',' << color[1] << ',' << color[2];
+    });
+    out << "]],\n\"primitives\",[]\n]\n";
+    if (!out) throw std::runtime_error("Failed writing cloth grid vertices GEO: " + filename);
+}
+
+void write_substep_data(const SimParams& params, const BroadPhase& broad_phase, const std::vector<Vec3>& xnew, const std::string& outdir, const RefMesh* ref_mesh, const std::vector<std::vector<int>>* color_groups, const solver_detail::ClothGridSchedule* grid) {
     static int substep_counter = 0;
     const int step = substep_counter++;
     const std::string prefix = (outdir.empty() ? "" : outdir + "/");
@@ -696,6 +917,11 @@ void write_substep_data(const SimParams& params, const BroadPhase& broad_phase, 
     // --- colored mesh ---
     if (ref_mesh) {
         export_geo(subdir + "/mesh.geo", xnew, ref_mesh->tris, color_groups);
+    }
+
+    if (grid) {
+        export_cloth_grid_boxes_geo(subdir + "/grid_boxes.geo", *grid);
+        export_cloth_grid_vertices_geo(subdir + "/grid_vertices.geo", xnew, *grid);
     }
 
     // --- NT pairs (combined) ---

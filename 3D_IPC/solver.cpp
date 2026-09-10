@@ -1,6 +1,8 @@
 #include <optional>
 #include "solver.h"
 #include "contact_scheduling.h"
+#include "grid_coloring.h"
+#include "grid_contact_scheduling.h"
 #include "IPC_math.h"
 #include "parallel_helper.h"
 #include "barrier_energy.h"
@@ -735,6 +737,11 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                                         const std::string& outdir,
                                         const std::vector<Vec3>* previous_positions) {
 
+    params.validate_cloth_grid_parameters();
+    if (params.use_cloth_grid && (!ref_mesh.rb_nodes.empty()
+            || !ref_mesh.tet_nodes.empty() || !ref_mesh.tets.empty()))
+        throw std::invalid_argument("cloth grid is available only for the basic cloth solver");
+
     //create node (blue) boxes and create broad phase (red boxes) accordingly
     validate_solver_friction_parameters(
         params, "global_gauss_seidel_solver_basic");
@@ -787,13 +794,21 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
     for (int vi = 0; vi < nv; ++vi) xnew_substep_start[vi] = xnew[vi];
  
     solver_detail::ColoredContactSweep contact_sweep;
-    const bool use_contact_sweep = params.use_parallel && omp_get_max_threads() > 1
+    solver_detail::ClothGridSchedule grid_schedule;
+    solver_detail::ClothGridContactSweep grid_contact_sweep;
+    std::vector<std::size_t> grid_vertex_costs;
+    const bool use_contact_sweep = !params.use_cloth_grid && params.use_parallel && omp_get_max_threads() > 1
         && params.friction_coefficient == 0.0 && params.d_hat > 0.0
         && !params.use_ogc;
+    const bool use_grid_contact_sweep = params.use_cloth_grid && params.use_parallel
+        && omp_get_max_threads() > 1 && params.friction_coefficient == 0.0
+        && params.d_hat > 0.0 && !params.use_ogc;
+    const bool profile_grid = params.use_cloth_grid && params.verbose;
     double r1=0.;
     //gs loop
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         if((iter-1)%params.node_box_update_count==0){//rebuild node boxes and color accordingly
+            const double rebuild_start = profile_grid ? omp_get_wtime() : 0.0;
             if (params.verbose)
                 std::fprintf(stderr, "  [GS] iter %d  rebuilding node boxes\n", iter);
             //create new node boxes
@@ -808,23 +823,59 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                 broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::DeformableSolver);
                 build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()), bca);
                 union_adjacency(ea, bca, combined_adj);
-                greedy_color_conflict_graph(combined_adj, color_groups, &workspace.coloring_workspace);
-                const BroadPhase::Cache& bp_cache = broad_phase.cache();
-                // Vertices in one color share no dependencies, so process contact-heavy vertices first to avoid end-of-color stragglers.
-                #pragma omp parallel for schedule(dynamic, 1) if(params.use_parallel && nv >= 128)
-                for (int color = 0; color < static_cast<int>(color_groups.size()); ++color) {
-                    auto& group = color_groups[color];
-                    std::stable_sort(group.begin(), group.end(), [&](const int a, const int b) {
-                        return bp_cache.vertex_nt[a].size() + bp_cache.vertex_ss[a].size()
-                            > bp_cache.vertex_nt[b].size() + bp_cache.vertex_ss[b].size();
-                    });
+                if (!params.use_cloth_grid) {
+                    greedy_color_conflict_graph(combined_adj, color_groups, &workspace.coloring_workspace);
+                    const BroadPhase::Cache& bp_cache = broad_phase.cache();
+                    // Vertices in one color share no dependencies, so process contact-heavy vertices first to avoid end-of-color stragglers.
+                    #pragma omp parallel for schedule(dynamic, 1) if(params.use_parallel && nv >= 128)
+                    for (int color = 0; color < static_cast<int>(color_groups.size()); ++color) {
+                        auto& group = color_groups[color];
+                        std::stable_sort(group.begin(), group.end(), [&](const int a, const int b) {
+                            return bp_cache.vertex_nt[a].size() + bp_cache.vertex_ss[a].size()
+                                > bp_cache.vertex_nt[b].size() + bp_cache.vertex_ss[b].size();
+                        });
+                    }
                 }
             } else {
                 // Collision-free solve: keep node-box step clipping, but do no
                 // primitive BVH construction, pair search, or contact-aware
                 // coloring. Elastic topology alone determines the schedule.
                 broad_phase.initialize_node_boxes_only(blue_boxes);
-                greedy_color_conflict_graph(ea, color_groups, &workspace.coloring_workspace);
+                if (!params.use_cloth_grid)
+                    greedy_color_conflict_graph(ea, color_groups, &workspace.coloring_workspace);
+            }
+            if (params.use_cloth_grid) {
+                const double schedule_start = profile_grid ? omp_get_wtime() : 0.0;
+                // Anchor cell ownership to the node-box rebuild. Subsequent
+                // moves stay in those node boxes until this schedule is rebuilt.
+                // Contact and elastic dependencies split unsafe parity groups
+                // into batches; no two concurrent cells share a live dependency.
+                grid_schedule.build(xnew, blue_boxes,
+                    needs_mesh_contact_search ? combined_adj : ea, params.cloth_grid_dx);
+                grid_vertex_costs.assign(static_cast<std::size_t>(nv), 1);
+                if (needs_mesh_contact_search) {
+                    const auto& cache = broad_phase.cache();
+                    for (int vi = 0; vi < nv; ++vi)
+                        grid_vertex_costs[vi] += cache.vertex_nt[vi].size()
+                            + cache.vertex_ss[vi].size();
+                }
+                grid_schedule.prioritize_cells(grid_vertex_costs);
+                color_groups = grid_schedule.vertex_color_groups;
+                if (use_grid_contact_sweep) {
+                    grid_contact_sweep.prepare(grid_schedule, broad_phase.cache());
+                    // Shared Newton/CCD callbacks use the same per-vertex
+                    // step storage in the vertex and cell schedulers.
+                    contact_sweep.steps.resize(nv);
+                    contact_sweep.nonzero_step.resize(nv);
+                    contact_sweep.short_step.resize(nv);
+                }
+                if (params.verbose)
+                    std::fprintf(stderr, "  [cloth grid] dx=%.6g occupied_cells=%zu batches=%zu\n",
+                        grid_schedule.dx, grid_schedule.cells.size(), grid_schedule.batches.size());
+                if (profile_grid)
+                    std::fprintf(stderr, "  [cloth grid setup] contacts_and_adjacency_ms=%.3f schedule_ms=%.3f\n",
+                        1000.0 * (schedule_start - rebuild_start),
+                        1000.0 * (omp_get_wtime() - schedule_start));
             }
         }
 
@@ -863,7 +914,9 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                                0.9, params.use_ogc ? false : params.use_ccd,
                                params.use_ticcd, params.use_ogc, false, rejections);
         };
-        if (use_contact_sweep) {
+        if (params.use_cloth_grid && !use_grid_contact_sweep) {
+          grid_schedule.run(params.use_parallel, process_vertex);
+        } else if (use_contact_sweep || use_grid_contact_sweep) {
           const auto &cache = broad_phase.cache();
           const double dh2 = params.d_hat * params.d_hat,
                        dt2k = params.dt2() * params.k_barrier;
@@ -974,8 +1027,25 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
                 double step = collision ? 0.9 * toi : 1.0;
                 xnew[vi] = xnew[vi] + step * contact_sweep.steps[vi];
               };
-          contact_sweep.run(color_groups, compute, apply, process_vertex, ccd,
-                            commit);
+          if (use_grid_contact_sweep) {
+            grid_contact_sweep.run(grid_schedule, compute, apply, process_vertex,
+                                   ccd, commit, profile_grid);
+            if (profile_grid) {
+                for (std::size_t b = 0; b < grid_contact_sweep.batch_stats.size(); ++b) {
+                    const auto& stats = grid_contact_sweep.batch_stats[b];
+                    std::fprintf(stderr,
+                        "  [cloth grid batch] iter=%d batch=%zu cells=%zu cooperative_cells=%d"
+                        " wall_ms=%.3f work_worker_ms=%.3f cooperative_wait_worker_ms=%.3f"
+                        " batch_wait_worker_ms=%.3f max_cell_ms=%.3f\n",
+                        iter, b, grid_schedule.batches[b].size(), stats.cooperative_cells,
+                        1000.0 * stats.wall_seconds, 1000.0 * stats.worker_busy_seconds,
+                        1000.0 * stats.group_wait_seconds, 1000.0 * stats.barrier_wait_seconds,
+                        1000.0 * stats.max_cell_seconds);
+                }
+            }
+          } else
+            contact_sweep.run(color_groups, compute, apply, process_vertex, ccd,
+                              commit);
         } else if (params.use_parallel) {
 #pragma omp parallel
           {
@@ -1012,7 +1082,8 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
 
     //write substep data
     if (params.write_substeps) {
-        write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, &color_groups);
+        write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, &color_groups,
+            params.use_cloth_grid ? &grid_schedule : nullptr);
     }
 
     return result;
