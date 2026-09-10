@@ -62,7 +62,8 @@ double point_aabb_squared_distance(const Vec3& p, const Vec3& lo, const Vec3& hi
 // allocation order. Tasks partition disjoint index ranges and never grow out.
 void build_bvh_subtree(const std::vector<AABB>& boxes, std::vector<int>& idx,
     std::vector<BVHNode>& out, std::vector<int>* leaf_to_node,
-    int node_index, int children_begin, int start, int end) {
+    int node_index, int children_begin, int start, int end,
+    const std::vector<int>* leaf_owners, std::vector<int>* owners) {
     AABB node_box;
     for (int i = start; i < end; ++i) node_box.expand(boxes[idx[i]]);
     out[node_index].bbox = node_box;
@@ -75,6 +76,7 @@ void build_bvh_subtree(const std::vector<AABB>& boxes, std::vector<int>& idx,
         const int leaf = idx[start];
         out[node_index].leafIndex = leaf;
         if (leaf_to_node) (*leaf_to_node)[leaf] = node_index;
+        if (owners) (*owners)[node_index] = (*leaf_owners)[leaf];
         return;
     }
     const Vec3 extent = node_box.extent();
@@ -95,21 +97,28 @@ void build_bvh_subtree(const std::vector<AABB>& boxes, std::vector<int>& idx,
     out[node_index].right = right;
     out[left].parent = node_index;
     out[right].parent = node_index;
-    if (count >= bvh_task_grain) {
+    if (count >= (boxes.size() <= 16384 ? 256 : bvh_task_grain)) {
         #pragma omp taskgroup
         {
-            #pragma omp task shared(boxes, idx, out) firstprivate(leaf_to_node, left, left_children, start, mid)
-            build_bvh_subtree(boxes, idx, out, leaf_to_node, left, left_children, start, mid);
-            #pragma omp task shared(boxes, idx, out) firstprivate(leaf_to_node, right, right_children, mid, end)
-            build_bvh_subtree(boxes, idx, out, leaf_to_node, right, right_children, mid, end);
+            #pragma omp task shared(boxes, idx, out) firstprivate(leaf_to_node, left, left_children, start, mid, leaf_owners, owners)
+            build_bvh_subtree(boxes, idx, out, leaf_to_node, left, left_children, start, mid, leaf_owners, owners);
+            #pragma omp task shared(boxes, idx, out) firstprivate(leaf_to_node, right, right_children, mid, end, leaf_owners, owners)
+            build_bvh_subtree(boxes, idx, out, leaf_to_node, right, right_children, mid, end, leaf_owners, owners);
         }
     } else {
-        build_bvh_subtree(boxes, idx, out, leaf_to_node, left, left_children, start, mid);
-        build_bvh_subtree(boxes, idx, out, leaf_to_node, right, right_children, mid, end);
+        build_bvh_subtree(boxes, idx, out, leaf_to_node, left, left_children, start, mid, leaf_owners, owners);
+        build_bvh_subtree(boxes, idx, out, leaf_to_node, right, right_children, mid, end, leaf_owners, owners);
+    }
+    if (owners) {
+        const int a = (*owners)[left], b = (*owners)[right];
+        (*owners)[node_index] = a >= 0 && a == b ? a : -1;
     }
 }
 
-inline int build_bvh_impl(const std::vector<AABB>& boxes, std::vector<BVHNode>& out, std::vector<int>* leaf_to_node) {
+inline int build_bvh_impl(const std::vector<AABB>& boxes, std::vector<BVHNode>& out,
+    std::vector<int>* leaf_to_node, const std::vector<int>* leaf_owners = nullptr,
+    std::vector<int>* owners = nullptr) {
+    if (owners) owners->resize(boxes.empty() ? 0 : 2 * boxes.size() - 1);
     if (leaf_to_node) leaf_to_node->assign(boxes.size(), -1);
     if (boxes.empty()) {
         out.clear();
@@ -125,10 +134,10 @@ inline int build_bvh_impl(const std::vector<AABB>& boxes, std::vector<BVHNode>& 
         #pragma omp parallel
         {
             #pragma omp single
-            build_bvh_subtree(boxes, idx, out, leaf_to_node, 0, 1, 0, static_cast<int>(boxes.size()));
+            build_bvh_subtree(boxes, idx, out, leaf_to_node, 0, 1, 0, static_cast<int>(boxes.size()), leaf_owners, owners);
         }
     } else {
-        build_bvh_subtree(boxes, idx, out, leaf_to_node, 0, 1, 0, static_cast<int>(boxes.size()));
+        build_bvh_subtree(boxes, idx, out, leaf_to_node, 0, 1, 0, static_cast<int>(boxes.size()), leaf_owners, owners);
     }
     return 0;
 }
@@ -405,34 +414,6 @@ namespace {
     static inline int common_rigid_owner(const RefMesh& mesh, const int first, const int second) {
         const int owner = rigid_owner(mesh, first);
         return owner >= 0 && rigid_owner(mesh, second) == owner ? owner : -1;
-    }
-
-    static int build_bvh_rigid_owner_subtree(const std::vector<BVHNode>& nodes,
-        const std::vector<int>& leaf_owners, std::vector<int>& owners, int index, int task_depth) {
-        const BVHNode& node = nodes[index];
-        if (node.leafIndex >= 0) return owners[index] = leaf_owners[node.leafIndex];
-        int left_owner = -1, right_owner = -1;
-        if (task_depth > 0) {
-            #pragma omp taskgroup
-            {
-                #pragma omp task shared(nodes, leaf_owners, owners, left_owner) firstprivate(index, task_depth)
-                left_owner = build_bvh_rigid_owner_subtree(nodes, leaf_owners, owners, nodes[index].left, task_depth - 1);
-                #pragma omp task shared(nodes, leaf_owners, owners, right_owner) firstprivate(index, task_depth)
-                right_owner = build_bvh_rigid_owner_subtree(nodes, leaf_owners, owners, nodes[index].right, task_depth - 1);
-            }
-        } else {
-            left_owner = build_bvh_rigid_owner_subtree(nodes, leaf_owners, owners, node.left, 0);
-            right_owner = build_bvh_rigid_owner_subtree(nodes, leaf_owners, owners, node.right, 0);
-        }
-        return owners[index] = left_owner >= 0 && left_owner == right_owner ? left_owner : -1;
-    }
-
-    static void build_bvh_rigid_owners(const std::vector<BVHNode>& nodes, const std::vector<int>& leaf_rigid_owner, std::vector<int>& node_rigid_owner) {
-        node_rigid_owner.resize(nodes.size());
-        if (nodes.empty()) return;
-        int task_depth = 0;
-        for (std::size_t leaves = (nodes.size() + 1) / 2; leaves >= 256; leaves /= 2) ++task_depth;
-        build_bvh_rigid_owner_subtree(nodes, leaf_rigid_owner, node_rigid_owner, 0, task_depth);
     }
 
     static void query_bvh_excluding_rigid_owner(const std::vector<BVHNode>& nodes, const std::vector<int>& node_rigid_owner, const int root, const AABB& query, const int excluded_owner, std::vector<int>& hits) {
@@ -942,13 +923,17 @@ void BroadPhase::initialize_from_vertex_boxes(const std::vector<AABB>& vertex_bo
         {
             #pragma omp section
             {
-                c.tri_root = build_bvh(c.tri_boxes, c.tri_bvh_nodes);
-                if (mode != InitializationMode::DeformableSolver) build_bvh_rigid_owners(c.tri_bvh_nodes, topo_.tri_rigid_owner, c.tri_bvh_rigid_owner);
+                c.tri_root = mode == InitializationMode::DeformableSolver
+                    ? build_bvh(c.tri_boxes, c.tri_bvh_nodes)
+                    : build_bvh_impl(c.tri_boxes, c.tri_bvh_nodes, nullptr,
+                        &topo_.tri_rigid_owner, &c.tri_bvh_rigid_owner);
             }
             #pragma omp section
             {
-                c.edge_root = build_bvh(red_edge_boxes, c.edge_bvh_nodes);
-                if (mode != InitializationMode::DeformableSolver) build_bvh_rigid_owners(c.edge_bvh_nodes, topo_.edge_rigid_owner, c.edge_bvh_rigid_owner);
+                c.edge_root = mode == InitializationMode::DeformableSolver
+                    ? build_bvh(red_edge_boxes, c.edge_bvh_nodes)
+                    : build_bvh_impl(red_edge_boxes, c.edge_bvh_nodes, nullptr,
+                        &topo_.edge_rigid_owner, &c.edge_bvh_rigid_owner);
             }
         }
     }

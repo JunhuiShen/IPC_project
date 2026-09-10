@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -445,9 +446,12 @@ compute_solid_local_barrier_gradient_and_self_hessian_impl(
     const std::vector<Vec3>& x,
     const BroadPhase& broad_phase,
     const std::vector<unsigned char>& solid_nodes,
-    const std::vector<unsigned char>& surface_nodes, bool cooperative = false) {
-    if (params.d_hat <= 0.0 || params.k_barrier <= 0.0)
+    const std::vector<unsigned char>& surface_nodes, bool cooperative = false,
+    const std::function<void()>* leader_work = nullptr) {
+    if (params.d_hat <= 0.0 || params.k_barrier <= 0.0) {
+        if (leader_work) (*leader_work)();
         return {Vec3::Zero(), Mat33::Zero()};
+    }
 
     const BroadPhase::Cache& cache = broad_phase.cache();
     const double barrier_scale = params.dt2() * params.k_barrier;
@@ -518,7 +522,7 @@ compute_solid_local_barrier_gradient_and_self_hessian_impl(
             if (!value) return;
             gradient += barrier_scale * value->gradient;
             self_hessian += barrier_scale * value->hessian;
-        });
+        }, leader_work);
 
     return {gradient, self_hessian};
 }
@@ -1266,6 +1270,25 @@ compute_solid_local_gradient_and_block_impl(
             "compute_solid_local_gradient_and_block");
     }
 
+    if (params.friction_coefficient == 0.0 && cooperative
+        && solid_node_mask && surface_node_mask) {
+        // Contact evaluations read the same fixed positions as elasticity.
+        // Overlap their evaluation, then retain the original two-part sum.
+        std::pair<Vec3, Mat33> elastic;
+        const auto compute_elastic = [&] {
+            elastic = compute_solid_local_gradient_and_pbgs_block_no_barrier_impl(
+                node, ref_mesh, pins, params, x, xhat, surface_node_mask, pin_map, true);
+        };
+        const std::function<void()> leader_work = [&compute_elastic] { compute_elastic(); };
+        const auto [barrier_gradient, barrier_block] =
+            compute_solid_local_barrier_gradient_and_self_hessian_impl(
+                node, ref_mesh, params, x, broad_phase,
+                *solid_node_mask, *surface_node_mask, true, &leader_work);
+        elastic.first += barrier_gradient;
+        elastic.second += barrier_block;
+        return elastic;
+    }
+
     const bool friction_enabled = params.friction_coefficient != 0.0;
     auto [gradient, block] = friction_enabled
         ? compute_solid_local_gradient_and_pbgs_block_no_barrier_impl(
@@ -1276,12 +1299,8 @@ compute_solid_local_gradient_and_block_impl(
               surface_node_mask, pin_map);
     if (params.friction_coefficient == 0.0) {
         const auto [barrier_gradient, barrier_self_hessian] =
-            (cooperative && solid_node_mask && surface_node_mask
-                ? compute_solid_local_barrier_gradient_and_self_hessian_impl(
-                    node, ref_mesh, params, x, broad_phase,
-                    *solid_node_mask, *surface_node_mask, true)
-                : compute_solid_local_barrier_gradient_and_self_hessian(
-                    node, ref_mesh, params, x, broad_phase, solid_node_mask, surface_node_mask));
+            compute_solid_local_barrier_gradient_and_self_hessian(
+                node, ref_mesh, params, x, broad_phase, solid_node_mask, surface_node_mask);
         gradient += barrier_gradient;
         block += barrier_self_hessian;
         return {gradient, block};

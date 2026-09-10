@@ -377,6 +377,25 @@ TEST(GreedyColorConflictGraph, ReusableWorkspaceMatchesLegacyExactly) {
     }
 }
 
+TEST(GreedyColorConflictGraph, SmallAndLargePalettesPreserveAscendingGreedyOrder) {
+    struct Restore { int threads = omp_get_max_threads(); ~Restore() { omp_set_num_threads(threads); } } restore;
+    for (int threads : {1, 4, 64}) {
+        omp_set_num_threads(threads);
+        GreedyColoringWorkspace workspace;
+        std::vector<std::vector<int>> groups;
+        for (int palette : {63, 64, 65, 80, 7}) {
+            std::vector<std::vector<int>> graph(257), expected(palette);
+            for (int node = 0; node < 257; ++node) {
+                for (int distance = 1; distance < palette && distance <= node; ++distance)
+                    graph[node].push_back(node - distance);
+                expected[node % palette].push_back(node);
+            }
+            greedy_color_conflict_graph(graph, groups, &workspace);
+            EXPECT_EQ(groups, expected) << "threads=" << threads << " palette=" << palette;
+        }
+    }
+}
+
 // ── spherical_cap_node_aabb tests ────────────────────────────────────────────
 
 namespace {

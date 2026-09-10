@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -1230,12 +1231,14 @@ void add_rigid_derivatives(RigidEnergyDerivatives& total, const RigidEnergyDeriv
 // in the same pair traversal. They retain separate accumulation order, while
 // sharing one ephemeral contact evaluation from this unchanged rigid-position
 // snapshot.
-RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh, const DeformedState& state, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, RigidDerivativeMode mode, const QuaternionOmegaKinematics* supplied_kinematics = nullptr, const FrozenResidualWorkspace* frozen_workspace = nullptr, RigidEnergyDerivatives* friction_output = nullptr, bool assemble_barrier = true, bool cooperative = false) {
+RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh, const DeformedState& state, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, RigidDerivativeMode mode, const QuaternionOmegaKinematics* supplied_kinematics = nullptr, const FrozenResidualWorkspace* frozen_workspace = nullptr, RigidEnergyDerivatives* friction_output = nullptr, bool assemble_barrier = true, bool cooperative = false, const std::function<void()>* leader_work = nullptr) {
     RigidEnergyDerivatives total;
     if (friction_output != nullptr)
         *friction_output = RigidEnergyDerivatives{};
-    if (params.d_hat <= 0.0 || params.k_barrier <= 0.0)
+    if (params.d_hat <= 0.0 || params.k_barrier <= 0.0) {
+        if (leader_work) (*leader_work)();
         return total;
+    }
     const bool assemble_friction = friction_output != nullptr
         && params.friction_coefficient != 0.0;
     // Production solvers validate once at their entry point; the public
@@ -1427,6 +1430,56 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
         return true;
     };
 
+    // A cooperative COM/rotation solve consumes one gradient and one Hessian.
+    // Stage only those fields, and leave AABB-rejected records disengaged.
+    // The scalar path already accumulates without inter-worker staging.
+    if (cooperative && !assemble_friction
+        && (mode == RigidDerivativeMode::TranslationHessian
+            || mode == RigidDerivativeMode::OrientationHessian)) {
+        struct BlockContribution { Vec3 gradient; Mat33 hessian; };
+        const bool translation = mode == RigidDerivativeMode::TranslationHessian;
+        const int nt_count = static_cast<int>(nt_pair_indices.size());
+        solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss_pair_indices.size()), true,
+            [&](int i) -> std::optional<BlockContribution> {
+                const bool is_nt = i < nt_count;
+                const int pair_index = is_nt ? nt_pair_indices[i] : ss_pair_indices[i - nt_count];
+                bool aabb_active;
+                if (frozen_workspace) {
+                    aabb_active = is_nt ? frozen_workspace->nt_aabb_active[pair_index] != 0
+                        : frozen_workspace->ss_aabb_active[pair_index] != 0;
+                } else if (is_nt) {
+                    const auto& p = bp_cache.nt_pairs[pair_index];
+                    aabb_active = node_triangle_aabbs_within_distance(positions[p.node],
+                        positions[p.tri_v[0]], positions[p.tri_v[1]], positions[p.tri_v[2]], d_hat2);
+                } else {
+                    const auto& p = bp_cache.ss_pairs[pair_index];
+                    aabb_active = segment_aabbs_within_distance(positions[p.v[0]], positions[p.v[1]],
+                        positions[p.v[2]], positions[p.v[3]], d_hat2);
+                }
+                if (!aabb_active) return std::nullopt;
+                RigidEnergyDerivatives derivatives;
+                // Friction is disabled in this branch; its output is unused.
+                const bool active = is_nt
+                    ? evaluate_nt_pair(pair_index, true, derivatives, derivatives)
+                    : evaluate_ss_pair(pair_index, true, derivatives, derivatives);
+                if (!active) return std::nullopt;
+                return BlockContribution{
+                    translation ? derivatives.translation_gradient : derivatives.orientation_gradient,
+                    translation ? derivatives.translation_translation_hessian : derivatives.orientation_orientation_hessian};
+            }, [&](const std::optional<BlockContribution>& value) {
+                if (!value) return;
+                if (translation) {
+                    total.translation_gradient += value->gradient;
+                    total.translation_translation_hessian += value->hessian;
+                } else {
+                    total.orientation_gradient += value->gradient;
+                    total.orientation_orientation_hessian += value->hessian;
+                }
+            }, leader_work);
+        return total;
+    }
+
+    if (leader_work) (*leader_work)();
     struct PairDerivatives {
         RigidEnergyDerivatives barrier, friction;
         bool active = false;
@@ -1750,20 +1803,29 @@ double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedS
     return residual;
 }
 
+// Inertia/SDF assembly and contact evaluation read the same fixed state.
+// Cooperative updates overlap them and add the contact totals after the join.
 Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, const QuaternionOmegaKinematics* kinematics = nullptr, bool cooperative = false) {
     const Vec3& x_com_n = state.x_coms[rb];
     const Vec3& v_com_n = state.v_coms[rb];
 
-    Vec3 gradient = inertia_translation_gradient(x_com_new[rb], x_com_n, v_com_n, dt, ref_mesh.total_mass[rb]);
-    gradient -= gravitational_potential_gradient(ref_mesh.total_mass[rb], params.gravity.y(), dt);
+    Vec3 gradient;
+    Mat33 hessian;
+    const auto compute_noncontact = [&] {
+        gradient = inertia_translation_gradient(x_com_new[rb], x_com_n, v_com_n, dt, ref_mesh.total_mass[rb]);
+        gradient -= gravitational_potential_gradient(ref_mesh.total_mass[rb], params.gravity.y(), dt);
 
-    Mat33 hessian = inertia_translation_hessian(ref_mesh.total_mass[rb]);
-    add_rigid_sdf_translation_terms(
-        ref_mesh.ref_positions[rb], ref_mesh.rb_nodes[rb],
-        state.deformed_positions, x_com_new[rb], state.orientations[rb],
-        omega_new[rb], params, dt, gradient, hessian, kinematics);
+        hessian = inertia_translation_hessian(ref_mesh.total_mass[rb]);
+        add_rigid_sdf_translation_terms(
+            ref_mesh.ref_positions[rb], ref_mesh.rb_nodes[rb],
+            state.deformed_positions, x_com_new[rb], state.orientations[rb],
+            omega_new[rb], params, dt, gradient, hessian, kinematics);
+    };
+    const bool overlap_inertia = cooperative && params.friction_coefficient == 0.0;
+    if (!overlap_inertia) compute_noncontact();
+    const std::function<void()> leader_work = [&compute_noncontact] { compute_noncontact(); };
     RigidEnergyDerivatives friction;
-    const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::TranslationHessian, kinematics, nullptr, params.friction_coefficient != 0.0 ? &friction : nullptr, true, cooperative);
+    const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::TranslationHessian, kinematics, nullptr, params.friction_coefficient != 0.0 ? &friction : nullptr, true, cooperative, overlap_inertia ? &leader_work : nullptr);
     const double barrier_scale = dt * dt * params.k_barrier;
     gradient += barrier_scale * barrier.translation_gradient;
     hessian += barrier_scale * barrier.translation_translation_hessian;
@@ -1781,13 +1843,22 @@ Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref
 
     const QuaternionOmegaKinematics owned_kinematics = supplied_kinematics == nullptr ? quaternion_omega_kinematics(q_n, omega_new[rb], dt, true) : QuaternionOmegaKinematics{};
     const QuaternionOmegaKinematics& kinematics = supplied_kinematics == nullptr ? owned_kinematics : *supplied_kinematics;
-    auto [gradient, hessian] = inertia_rotation_gradient_hessian(omega_new[rb], q_n, omega_n, dt, I_hat, &kinematics, rotation_predictor);
-    add_rigid_sdf_orientation_terms(
-        ref_mesh.ref_positions[rb], ref_mesh.rb_nodes[rb],
-        state.deformed_positions, x_com_new[rb], q_n, omega_new[rb],
-        params, dt, gradient, hessian, &kinematics);
+    Vec3 gradient;
+    Mat33 hessian;
+    const auto compute_noncontact = [&] {
+        const auto derivatives = inertia_rotation_gradient_hessian(omega_new[rb], q_n, omega_n, dt, I_hat, &kinematics, rotation_predictor);
+        gradient = derivatives.first;
+        hessian = derivatives.second;
+        add_rigid_sdf_orientation_terms(
+            ref_mesh.ref_positions[rb], ref_mesh.rb_nodes[rb],
+            state.deformed_positions, x_com_new[rb], q_n, omega_new[rb],
+            params, dt, gradient, hessian, &kinematics);
+    };
+    const bool overlap_inertia = cooperative && params.friction_coefficient == 0.0;
+    if (!overlap_inertia) compute_noncontact();
+    const std::function<void()> leader_work = [&compute_noncontact] { compute_noncontact(); };
     RigidEnergyDerivatives friction;
-    const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::OrientationHessian, &kinematics, nullptr, params.friction_coefficient != 0.0 ? &friction : nullptr, true, cooperative);
+    const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::OrientationHessian, &kinematics, nullptr, params.friction_coefficient != 0.0 ? &friction : nullptr, true, cooperative, overlap_inertia ? &leader_work : nullptr);
     const double barrier_scale = dt * dt * params.k_barrier;
     gradient += barrier_scale * barrier.orientation_gradient;
     hessian += barrier_scale * barrier.orientation_orientation_hessian;

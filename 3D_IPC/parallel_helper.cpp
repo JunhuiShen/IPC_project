@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <vector>
 #include <exception>
@@ -812,15 +813,29 @@ void greedy_color_conflict_graph(
                 const int end = std::min(nv, begin + range_size);
                 thread_local std::vector<unsigned char> used;
                 for (int vi = begin; vi < end; ++vi) {
-                    used.assign(graph[vi].size() + 1, 0);
-                    for (const int neighbor : graph[vi]) {
-                        if (neighbor < 0 || neighbor >= vi) continue;
-                        const int color = neighbor >= begin
-                            ? workspace.next_color[neighbor] : workspace.color[neighbor];
-                        if (color >= 0 && static_cast<std::size_t>(color) < used.size()) used[color] = 1;
-                    }
                     int color = 0;
-                    while (used[color]) ++color;
+                    if (graph[vi].size() < 64) {
+                        std::uint64_t mask = 0;
+                        for (const int neighbor : graph[vi]) {
+                            if (neighbor < 0 || neighbor >= vi) continue;
+                            const int previous = neighbor >= begin
+                                ? workspace.next_color[neighbor] : workspace.color[neighbor];
+                            if (previous >= 0 && previous < 64)
+                                mask |= std::uint64_t(1) << previous;
+                        }
+                        // Fewer than 64 neighbors leave at least one free bit.
+                        color = __builtin_ctzll(~mask);
+                    } else {
+                        used.assign(graph[vi].size() + 1, 0);
+                        for (const int neighbor : graph[vi]) {
+                            if (neighbor < 0 || neighbor >= vi) continue;
+                            const int previous = neighbor >= begin
+                                ? workspace.next_color[neighbor] : workspace.color[neighbor];
+                            if (previous >= 0 && static_cast<std::size_t>(previous) < used.size())
+                                used[previous] = 1;
+                        }
+                        while (used[color]) ++color;
+                    }
                     workspace.next_color[vi] = color;
                     changed |= color != workspace.color[vi];
                 }
@@ -843,6 +858,16 @@ void greedy_color_conflict_graph(
             while (workspace.seen_color[color] == vi) ++color;
             workspace.color[vi] = color;
         }
+    }
+    // Small graphs spend more time in the parallel prefix passes than in
+    // grouping. Append in vertex order to preserve the same sweep order.
+    if (nv < 4096) {
+        int max_color = -1;
+        for (const int color : workspace.color) max_color = std::max(max_color, color);
+        groups.resize(max_color + 1);
+        for (auto& group : groups) group.clear();
+        for (int vi = 0; vi < nv; ++vi) groups[workspace.color[vi]].push_back(vi);
+        return;
     }
     int max_color = -1;
     #pragma omp parallel for schedule(static) reduction(max:max_color) if(nv >= 128)
@@ -881,10 +906,22 @@ void greedy_color_conflict_graph(
 }
 
 namespace solver_detail {
-void evaluate_contact_ranges(int count, const std::function<void(int, int)>& evaluate) {
+void evaluate_contact_ranges(int count, const std::function<void(int, int)>& evaluate, int alignment, const std::function<void()>* leader_work) {
+    if (active_contact_task_group != nullptr) {
+        ContactTaskGroup* group = active_contact_task_group;
+        active_contact_task_group = nullptr;
+        struct Restore {
+            ContactTaskGroup* group;
+            ~Restore() { active_contact_task_group = group; }
+        } restore{group};
+        group->dispatch(count, evaluate, alignment, leader_work);
+        return;
+    }
+    if (leader_work) (*leader_work)();
     std::exception_ptr error;
     int first_error = count;
-    const int grain = std::max(16, count / (4 * omp_get_num_threads()));
+    const int desired = std::max(16, count / (4 * omp_get_num_threads()));
+    const int grain = (desired + alignment - 1) / alignment * alignment;
 #pragma omp taskgroup
     {
         for (int begin = 0; begin < count; begin += grain) {
@@ -892,6 +929,14 @@ void evaluate_contact_ranges(int count, const std::function<void(int, int)>& eva
 #pragma omp task shared(evaluate, error, first_error) firstprivate(begin, end)
             {
                 try {
+                    // A task may run on another leader. Its nested evaluation
+                    // must not borrow that leader's unrelated helper group.
+                    ContactTaskGroup* previous = active_contact_task_group;
+                    active_contact_task_group = nullptr;
+                    struct RestoreTaskGroup {
+                        ContactTaskGroup* previous;
+                        ~RestoreTaskGroup() { active_contact_task_group = previous; }
+                    } restore{previous};
                     evaluate(begin, end);
                 } catch (...) {
 #pragma omp critical(ipc_contact_task_error)

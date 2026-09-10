@@ -327,9 +327,9 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPha
     // spherical-cap box depends only on this body update. Compute it once per
     // safe-step call instead of repeating inverse rotations and trigonometry
     // for every incident candidate.
-    thread_local std::vector<AABB> serial_rotated_node_boxes;
-    std::vector<AABB> task_rotated_node_boxes;
-    auto& rotated_node_boxes = cooperative ? task_rotated_node_boxes : serial_rotated_node_boxes;
+    thread_local std::vector<AABB> reusable_rotated_node_boxes;
+    std::vector<AABB> rotated_node_boxes;
+    rotated_node_boxes.swap(reusable_rotated_node_boxes);
     rotated_node_boxes.resize(x.size());
     if (rb < static_cast<int>(ref_mesh.rb_nodes.size()) && !ref_mesh.rb_nodes[static_cast<std::size_t>(rb)].empty()) {
         for (const int node : ref_mesh.rb_nodes[static_cast<std::size_t>(rb)]) {
@@ -400,5 +400,6 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPha
             }
         });
 
+    rotated_node_boxes.swap(reusable_rotated_node_boxes);
     return has_collision ? safety * toi_min : 1.0;
 }
