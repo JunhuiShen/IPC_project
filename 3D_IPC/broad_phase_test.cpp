@@ -1823,3 +1823,80 @@ TEST(BroadPhase, ReusedVertexAabbRejectionsPreserveSafeSteps) {
     EXPECT_GT(certified, 0);
     EXPECT_GT(clipped, 0);
 }
+
+
+TEST(BVH3Test, ReusedStoragePreservesSerialLayoutAcrossTreeSizes) {
+    const int original_threads = omp_get_max_threads();
+    for (const int threads : {1, original_threads}) {
+        omp_set_num_threads(threads);
+        std::vector<BVHNode> actual;
+        std::vector<int> actual_leaves;
+        for (const int count : {4099, 257, 4099, 1, 256, 0, 513}) {
+            std::vector<AABB> boxes;
+            for (int i = 0; i < count; ++i) {
+                const Vec3 center((i * 17 + count) % 101,
+                                  (i * 31) % 79, (i * 7) % 53);
+                boxes.emplace_back(center - Vec3::Constant(0.75),
+                                   center + Vec3::Constant(0.75));
+            }
+            std::vector<BVHNode> expected;
+            std::vector<int> expected_leaves;
+            const int root = build_bvh_serial_reference(boxes, expected, &expected_leaves);
+            EXPECT_EQ(build_bvh(boxes, actual, actual_leaves), root);
+            expect_bvh_vectors_exact(actual, expected);
+            EXPECT_EQ(actual_leaves, expected_leaves);
+            if (count > 0) {
+                // Leave modified bounds in the buffer before the next rebuild.
+                refit_bvh_leaf(actual, actual_leaves, count / 2,
+                              AABB(Vec3(-30, -20, -10), Vec3(-29, -19, -9)));
+            }
+        }
+    }
+    omp_set_num_threads(original_threads);
+}
+
+TEST(BroadPhaseTest, PairOnlyInitialGuessPreservesOrderAndRestoresSolverStorage) {
+    std::vector<Vec3> x, v;
+    RefMesh mesh;
+    build_three_sheet_scene(x, v, mesh);
+    // Swept sheets cross, ensuring both candidate kinds are nonempty.
+    for (int node = 3; node < 9; ++node) v[node].z() = -0.05 * (node / 3);
+    BroadPhase reference, reused;
+    const auto ordered_pairs = [](const BroadPhase& bp) {
+        std::vector<std::array<int, 4>> nt, ss;
+        for (const auto& p : bp.nt_pairs()) nt.push_back({p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2]});
+        for (const auto& p : bp.ss_pairs()) ss.push_back({p.v[0], p.v[1], p.v[2], p.v[3]});
+        return std::make_pair(nt, ss);
+    };
+    for (int pass = 0; pass < 3; ++pass) {
+        x[0] += Vec3(0.001, -0.002, 0.003);
+        reference.build_ccd_candidates(x, v, mesh, 1.0);
+        ASSERT_FALSE(reference.nt_pairs().empty());
+        ASSERT_FALSE(reference.ss_pairs().empty());
+        reused.build_ccd_candidates(x, v, mesh, 1.0, false);
+        EXPECT_EQ(ordered_pairs(reused), ordered_pairs(reference));
+        EXPECT_TRUE(reused.cache().node_bvh_nodes.empty());
+        for (const auto& row : reused.cache().vertex_nt) EXPECT_TRUE(row.empty());
+        for (const auto& row : reused.cache().vertex_ss) EXPECT_TRUE(row.empty());
+
+        reference.initialize(x, v, mesh, 1.0, 0.07);
+        reused.initialize(x, v, mesh, 1.0, 0.07);
+        EXPECT_EQ(ordered_pairs(reused), ordered_pairs(reference));
+        expect_bvh_vectors_exact(reused.cache().tri_bvh_nodes, reference.cache().tri_bvh_nodes);
+        expect_bvh_vectors_exact(reused.cache().edge_bvh_nodes, reference.cache().edge_bvh_nodes);
+        expect_bvh_vectors_exact(reused.cache().node_bvh_nodes, reference.cache().node_bvh_nodes);
+        expect_pair_order_matches_query_hits(reused.cache(), mesh);
+        expect_vertex_pair_entries_exact(reused.cache().vertex_nt, reference.cache().vertex_nt);
+        expect_vertex_pair_entries_exact(reused.cache().vertex_ss, reference.cache().vertex_ss);
+
+        const auto boxes = reused.cache().node_boxes;
+        reused.initialize_node_boxes_only(boxes);
+        EXPECT_TRUE(reused.nt_pairs().empty());
+        EXPECT_TRUE(reused.ss_pairs().empty());
+        EXPECT_TRUE(reused.cache().tri_boxes.empty());
+        EXPECT_TRUE(reused.cache().edge_boxes.empty());
+        EXPECT_TRUE(reused.cache().tri_bvh_nodes.empty());
+        EXPECT_TRUE(reused.cache().edge_bvh_nodes.empty());
+        EXPECT_TRUE(reused.cache().node_bvh_nodes.empty());
+    }
+}

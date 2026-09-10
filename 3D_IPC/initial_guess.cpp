@@ -14,7 +14,8 @@ std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vecto
 
     BroadPhase local_bp;
     BroadPhase& ccd_bp = scratch_broad_phase ? *scratch_broad_phase : local_bp;
-    ccd_bp.build_ccd_candidates(x, dx, ref_mesh, 1.0);
+    // CCD consumes the ordered candidate arrays, not solver incidence or node BVH.
+    ccd_bp.build_ccd_candidates(x, dx, ref_mesh, 1.0, /*retain_solver_data=*/false);
     const auto& cache = ccd_bp.cache();
 
     double toi_min = 1.0;

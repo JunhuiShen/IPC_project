@@ -180,7 +180,10 @@ public:
         return cache_.ss_pairs;
     }
 
-    void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt);
+    // Initial guesses consume only candidate pairs; they can omit solver
+    // incidence and the node BVH while retaining the same ordered pair lists.
+    // The default retains the existing cache interface for other callers.
+    void build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, bool retain_solver_data = true);
 
     // Cache static mesh topology; reused by later build/initialize calls.
     void set_mesh_topology(const RefMesh& mesh, int nv);
@@ -233,7 +236,8 @@ private:
     void build(
         const std::vector<Vec3>& x, const std::vector<Vec3>& v,
         const RefMesh& mesh, double dt, double node_pad, double tri_pad,
-        double edge_pad, bool exclude_tet_interior_nt_queries);
+        double edge_pad, bool exclude_tet_interior_nt_queries,
+        bool retain_solver_data = true);
 };
 
 void incremental_refresh_vertex(BroadPhase::Cache& c, int vi, const std::vector<Vec3>& x, const RefMesh& mesh, double box_pad, double node_box_radius_padded);

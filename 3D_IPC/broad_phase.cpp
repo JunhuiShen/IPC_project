@@ -1,6 +1,7 @@
 #include "broad_phase.h"
 
 #include <cmath>
+#include <memory>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -8,6 +9,8 @@
 
 // BVH build / refit / query
 namespace {
+// Smaller subtrees stay within a worker to amortize task scheduling.
+constexpr int bvh_task_grain = 1024;
 // Integer scan: each worker scans its own interval, then adds the totals of
 // preceding intervals. Only the small worker-total scan is serial.
 void scan_contact_offsets(std::vector<std::size_t>& values) {
@@ -63,6 +66,10 @@ void build_bvh_subtree(const std::vector<AABB>& boxes, std::vector<int>& idx,
     AABB node_box;
     for (int i = start; i < end; ++i) node_box.expand(boxes[idx[i]]);
     out[node_index].bbox = node_box;
+    // Reused nodes must lose old leaf/child links before this subtree is filled.
+    out[node_index].left = -1;
+    out[node_index].right = -1;
+    out[node_index].leafIndex = -1;
     const int count = end - start;
     if (count == 1) {
         const int leaf = idx[start];
@@ -88,7 +95,7 @@ void build_bvh_subtree(const std::vector<AABB>& boxes, std::vector<int>& idx,
     out[node_index].right = right;
     out[left].parent = node_index;
     out[right].parent = node_index;
-    if (count >= 256) {
+    if (count >= bvh_task_grain) {
         #pragma omp taskgroup
         {
             #pragma omp task shared(boxes, idx, out) firstprivate(leaf_to_node, left, left_children, start, mid)
@@ -103,10 +110,13 @@ void build_bvh_subtree(const std::vector<AABB>& boxes, std::vector<int>& idx,
 }
 
 inline int build_bvh_impl(const std::vector<AABB>& boxes, std::vector<BVHNode>& out, std::vector<int>* leaf_to_node) {
-    out.clear();
     if (leaf_to_node) leaf_to_node->assign(boxes.size(), -1);
-    if (boxes.empty()) return -1;
+    if (boxes.empty()) {
+        out.clear();
+        return -1;
+    }
     out.resize(2 * boxes.size() - 1);
+    out[0].parent = -1;
     std::vector<int> idx(boxes.size());
     for (int i = 0; i < static_cast<int>(boxes.size()); ++i) idx[i] = i;
     // BroadPhase already builds its trees in parallel sections. Their tasks
@@ -524,11 +534,14 @@ namespace {
         #ifdef _OPENMP
         num_workers = std::max(1, omp_get_max_threads());
         #endif
-        std::vector<std::size_t> counts(static_cast<std::size_t>(num_workers) * nv, 0);
+        const std::size_t count_size = static_cast<std::size_t>(num_workers) * nv;
+        // Each worker initializes its own row immediately before counting.
+        std::unique_ptr<std::size_t[]> counts(new std::size_t[count_size]);
 
         #pragma omp parallel for schedule(static, 1)
         for (int worker = 0; worker < num_workers; ++worker) {
-            std::size_t* worker_counts = counts.data() + static_cast<std::size_t>(worker) * nv;
+            std::size_t* worker_counts = counts.get() + static_cast<std::size_t>(worker) * nv;
+            std::fill_n(worker_counts, nv, 0);
             const std::size_t begin = cache.nt_pairs.size() * static_cast<std::size_t>(worker) / static_cast<std::size_t>(num_workers);
             const std::size_t end = cache.nt_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
             for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
@@ -550,7 +563,7 @@ namespace {
         }
         #pragma omp parallel for schedule(static, 1)
         for (int worker = 0; worker < num_workers; ++worker) {
-            std::size_t* worker_offsets = counts.data() + static_cast<std::size_t>(worker) * nv;
+            std::size_t* worker_offsets = counts.get() + static_cast<std::size_t>(worker) * nv;
             const std::size_t begin = cache.nt_pairs.size() * static_cast<std::size_t>(worker) / static_cast<std::size_t>(num_workers);
             const std::size_t end = cache.nt_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
             for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
@@ -560,10 +573,10 @@ namespace {
             }
         }
 
-        std::fill(counts.begin(), counts.end(), 0);
         #pragma omp parallel for schedule(static, 1)
         for (int worker = 0; worker < num_workers; ++worker) {
-            std::size_t* worker_counts = counts.data() + static_cast<std::size_t>(worker) * nv;
+            std::size_t* worker_counts = counts.get() + static_cast<std::size_t>(worker) * nv;
+            std::fill_n(worker_counts, nv, 0);
             const std::size_t begin = cache.ss_pairs.size() * static_cast<std::size_t>(worker) / static_cast<std::size_t>(num_workers);
             const std::size_t end = cache.ss_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
             for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
@@ -584,7 +597,7 @@ namespace {
         }
         #pragma omp parallel for schedule(static, 1)
         for (int worker = 0; worker < num_workers; ++worker) {
-            std::size_t* worker_offsets = counts.data() + static_cast<std::size_t>(worker) * nv;
+            std::size_t* worker_offsets = counts.get() + static_cast<std::size_t>(worker) * nv;
             const std::size_t begin = cache.ss_pairs.size() * static_cast<std::size_t>(worker) / static_cast<std::size_t>(num_workers);
             const std::size_t end = cache.ss_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
             for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
@@ -594,7 +607,7 @@ namespace {
         }
     }
 
-    static void materialize_solver_pairs(BroadPhase::Cache& cache, const RefMesh& mesh, const BroadPhase::InitializationMode mode, bool forward_edges_only = false) {
+    static void materialize_solver_pairs(BroadPhase::Cache& cache, const RefMesh& mesh, const BroadPhase::InitializationMode mode, bool forward_edges_only = false, bool retain_solver_data = true) {
         const int nv = static_cast<int>(cache.node_hits.size());
         const int ne = static_cast<int>(cache.edge_hits.size());
         const auto accept_edge_pair = [&](int edge, int other) {
@@ -651,19 +664,15 @@ namespace {
             }
         }
 
-        build_solver_vertex_incidence(cache, mesh, mode);
+        if (retain_solver_data)
+            build_solver_vertex_incidence(cache, mesh, mode);
     }
 
-    // Recycle broad-phase storage/topology to avoid allocation churn; per-build boxes, BVHs, and pairs are cleared.
+    // Keep arrays that the rebuild fully overwrites, avoiding serial value
+    // initialization on every frame. Clear optional data that may be omitted.
     static BroadPhase::Cache take_reusable_cache(BroadPhase::Cache& old_cache, const int nv, const BroadPhase::InitializationMode mode) {
         BroadPhase::Cache c = std::move(old_cache);
 
-        c.node_boxes.clear();
-        c.tri_boxes.clear();
-        c.edge_boxes.clear();
-
-        c.tri_bvh_nodes.clear();
-        c.edge_bvh_nodes.clear();
         c.node_bvh_nodes.clear();
         c.tri_leaf_to_node.clear();
         c.edge_leaf_to_node.clear();
@@ -675,10 +684,6 @@ namespace {
         c.tri_root = -1;
         c.edge_root = -1;
 
-        c.nt_pairs.clear();
-        c.ss_pairs.clear();
-        c.nt_pair_tri.clear();
-        c.ss_pair_edges.clear();
         if (mode == BroadPhase::InitializationMode::RigidSolver) {
             c.vertex_nt.clear();
             c.vertex_ss.clear();
@@ -752,7 +757,8 @@ const std::vector<int>& BroadPhase::surface_nt_query_nodes(
 void BroadPhase::build(
     const std::vector<Vec3>& x, const std::vector<Vec3>& v,
     const RefMesh& mesh, double dt, double node_pad, double tri_pad,
-    double edge_pad, const bool exclude_tet_interior_nt_queries) {
+    double edge_pad, const bool exclude_tet_interior_nt_queries,
+    const bool retain_solver_data) {
     const int nv = static_cast<int>(x.size());
     const int nt = num_tris(mesh);
     exclude_tet_interior_nt_queries_ = exclude_tet_interior_nt_queries;
@@ -796,7 +802,7 @@ void BroadPhase::build(
         #pragma omp section
         { c.edge_root = build_bvh(c.edge_boxes, c.edge_bvh_nodes); }
         #pragma omp section
-        { c.node_root = build_bvh(c.node_boxes, c.node_bvh_nodes); }
+        { if (retain_solver_data) c.node_root = build_bvh(c.node_boxes, c.node_bvh_nodes); }
     }
 
     // Parallel queries and ordered pair materialization.
@@ -815,7 +821,8 @@ void BroadPhase::build(
         if (c.edge_root < 0) continue;
         query_bvh(c.edge_bvh_nodes, c.edge_root, c.edge_boxes[e], edge_hits[e]);
     }
-    materialize_solver_pairs(c, mesh, mode, /*forward_edges_only=*/true);
+    materialize_solver_pairs(c, mesh, mode, /*forward_edges_only=*/true,
+                             retain_solver_data);
 
     cache_ = std::move(c);
 }
@@ -848,6 +855,15 @@ void BroadPhase::initialize_node_boxes_only(const std::vector<AABB>& vertex_boxe
     Cache c = take_reusable_cache(
         cache_, static_cast<int>(vertex_boxes.size()),
         InitializationMode::DeformableSolver);
+    // This path consumes only node boxes; erase all other retained data.
+    c.tri_boxes.clear();
+    c.edge_boxes.clear();
+    c.tri_bvh_nodes.clear();
+    c.edge_bvh_nodes.clear();
+    c.nt_pairs.clear();
+    c.ss_pairs.clear();
+    c.nt_pair_tri.clear();
+    c.ss_pair_edges.clear();
     c.excludes_tet_interior_nt_queries = false;
     c.node_boxes = vertex_boxes;
     c.node_hits.clear();
@@ -1024,10 +1040,10 @@ void incremental_refresh_vertex(BroadPhase::Cache& c, int vi, const std::vector<
     }
 }
 
-void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt) {
+void BroadPhase::build_ccd_candidates(const std::vector<Vec3>& x, const std::vector<Vec3>& v, const RefMesh& mesh, double dt, bool retain_solver_data) {
     constexpr double epsilon_pad = 1.0e-10;  // fp tie-breaker, not a safety pad
     build(
         x, v, mesh, dt, /*node_pad=*/epsilon_pad,
         /*tri_pad=*/epsilon_pad, /*edge_pad=*/epsilon_pad,
-        /*exclude_tet_interior_nt_queries=*/false);
+        /*exclude_tet_interior_nt_queries=*/false, retain_solver_data);
 }
