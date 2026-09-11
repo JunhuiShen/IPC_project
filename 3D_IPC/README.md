@@ -35,7 +35,7 @@ For deformable scenes, each time step minimizes an incremental potential made of
   is at `phi = eps_sdf`; set 0 for a hard quadratic at the surface).
 - **Pin springs** -- soft positional constraints for fixed vertices.
 
-Deformable scenes use one of two Gauss-Seidel solvers, selected by CLI flag:
+Deformable scenes use one of three Gauss-Seidel solvers, selected by CLI flag:
 
 - **`global_gauss_seidel_solver_basic`** (default) -- builds the broad phase
   every `node_box_update_count` iterations and sweeps every vertex with a local
@@ -44,6 +44,10 @@ Deformable scenes use one of two Gauss-Seidel solvers, selected by CLI flag:
   (`--use_ogc`). It uses conflict-graph coloring for parallel-by-color
   commits when `--use_parallel` is enabled. It supports either convergence-
   based stopping or a fixed iteration count with `--fixed_iters`.
+- **`global_gauss_seidel_solver_ambient_grid`** (`--use_cloth_grid`) -- basic
+  cloth only, with dependency-safe parallel grid cells and serial vertex
+  updates inside each cell. Uses the same Newton/contact/CCD kernels as the
+  vertex-coloring solver, but owns its grid schedule and iteration loop.
 - **`global_gauss_seidel_solver_ogc`** (`--use_ogc_solver`) -- alternative
   OGC solver that refreshes vertex boxes through partial BVH leaf refits and
   rebuilds contact pairs before each later outer iteration. Padding is
@@ -89,6 +93,17 @@ In short, the solver repeatedly builds a conservative contact set and
 performs collision-safe per-vertex Newton updates one color group at a time.
 
 ### Spatial grid scheduling for basic cloth
+
+`advance_one_frame()` selects `global_gauss_seidel_solver_ambient_grid` when
+`--use_cloth_grid true`; otherwise basic cloth uses
+`global_gauss_seidel_solver_basic`. Direct calls to these solver functions
+select their named scheduling method regardless of the driver switch.
+The basic solver function is unchanged from pre-grid commit `740b45c9`;
+each solver owns its own workspace and adaptive node-box history.
+The ambient-grid solver mirrors basic's iteration loop and inline Newton,
+contact, clipping, CCD, and convergence logic. Scheduling changes from
+independent vertices to independent cells, with serial updates inside each
+cell; grid validation, diagnostics, and visualization are retained.
 
 Enable `--use_cloth_grid true --cloth_grid_dx 0.05` to group the basic cloth
 solver's vertices into cubic cells of side `dx`. The grid is aligned to world
@@ -558,7 +573,8 @@ reader can jump to the layer they care about.
 - `simulation.cpp` -- `3D_sim` entry point: parses args, builds a scene from
   `example.cpp`, runs the frame loop, handles restart, prints per-frame stats.
 - `simulation.h` -- inline `advance_one_frame()` time-stepping driver; selects
-  the substep initial guess before dispatching to the chosen solver.
+  the substep initial guess, then dispatches to OGC, ambient-grid cloth
+  (`use_cloth_grid`), or original vertex-coloring cloth.
 - `example.h` / `example.cpp` -- built-in scene library selected by `--example`.
 - `args.h`, `ipc_args.h` -- generic `--key value` argument parser and the
   `IPCArgs3D` struct that defines every CLI flag and its default.
@@ -660,6 +676,9 @@ reader can jump to the layer they care about.
     the OGC narrow phase (`--use_ogc`). With `--use_parallel`, the
     conflict-graph coloring built in `parallel_helper` drives parallel-by-color
     commits.
+  - `global_gauss_seidel_solver_ambient_grid` (`--use_cloth_grid`): separate
+    basic-cloth grid solver; preserves node-box ownership, safe execution
+    batches, cooperative contact scheduling, and Houdini grid substep output.
   - `global_gauss_seidel_solver_ogc` (`--use_ogc_solver`): per-iteration broad-
     phase box/pair refresh with `--ogc_box_pad`-padded node boxes, OGC clip
     unconditionally on, and partial BVH leaf refits via

@@ -141,7 +141,7 @@ TEST(ClothGridSolver, ContactFramesMatchSerialGridAcrossThreadCounts) {
     constexpr int frames = 3;
 
     // All eight mesh objects and their buffers stay alive throughout the
-    // test. Switching to a different mesh resets the basic solver's static
+    // test. Switching to a different mesh resets the grid solver's static
     // previous-displacement workspace, without contaminating a later run or
     // discarding the adaptive history between frames of the same run.
     std::array<ClothScene, 8> scenes;
@@ -269,6 +269,272 @@ TEST(ClothGridSolver, DenseSingleCellMatchesSerialWithBothCcdBackendsAndClipping
     }
 }
 
+TEST(ClothGridSolver, SingleCellSerialUpdatesMatchBasicForContactCcdFrictionAndResidualModes) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(1);
+    constexpr std::size_t configuration_count = 16;
+    // Retain every mesh and its buffers until all configurations have finished,
+    // so each entry point resets its topology-dependent workspace per run.
+    std::array<ClothScene, 2 * configuration_count> scenes;
+    for (std::size_t configuration = 0; configuration < configuration_count;
+         ++configuration) {
+        const bool contact = (configuration & 1) != 0;
+        const bool ccd = (configuration & 2) != 0;
+        const double friction = (configuration & 4) != 0 ? 0.2 : 0.0;
+        const bool fixed = (configuration & 8) != 0;
+        for (std::size_t method = 0; method < 2; ++method) {
+            auto& scene = scenes[2 * configuration + method];
+            build_contact_scene(scene, friction);
+            scene.params.use_cloth_grid = method != 0;
+            scene.params.use_parallel = false;
+            scene.params.cloth_grid_dx = 2.0;
+            scene.params.use_ccd = ccd;
+            scene.params.use_ccd_guess = false;
+            scene.params.d_hat = contact ? 0.012 : 0.0;
+            scene.params.k_barrier = contact ? 1.0 : 0.0;
+            scene.params.fixed_iters = fixed;
+            scene.params.max_global_iters = 2;
+            scene.params.node_box_update_count = 1;
+            // Residual mode must execute the same two sweeps rather than exit
+            // at its initial state; only residual reporting differs here.
+            scene.params.tol_abs = 0.0;
+            scene.params.tol_rel = 0.0;
+            for (auto& position : scene.state.deformed_positions)
+                position += Vec3::Ones();
+            for (auto& pin : scene.pins)
+                pin.target_position += Vec3::Ones();
+        }
+    }
+
+    for (std::size_t configuration = 0; configuration < configuration_count;
+         ++configuration) {
+        SCOPED_TRACE(::testing::Message()
+            << "contact=" << ((configuration & 1) != 0)
+            << " ccd=" << ((configuration & 2) != 0)
+            << " friction=" << ((configuration & 4) != 0 ? 0.2 : 0.0)
+            << " fixed=" << ((configuration & 8) != 0));
+        std::array<SolverResult, 2> results;
+        for (std::size_t method = 0; method < 2; ++method) {
+            auto& scene = scenes[2 * configuration + method];
+            const auto initial_positions = scene.state.deformed_positions;
+            std::vector<Vec3> predictor;
+            build_xhat(predictor, initial_positions, scene.state.velocities,
+                scene.params.dt());
+            const auto solver = method == 0
+                ? global_gauss_seidel_solver_basic
+                : global_gauss_seidel_solver_ambient_grid;
+            results[method] = solver(scene.mesh, scene.adjacency, scene.pins,
+                scene.params, scene.state.deformed_positions, predictor,
+                scene.state.velocities, scene.broad_phase, "", &initial_positions);
+            EXPECT_EQ(results[method].iterations, scene.params.max_global_iters);
+            EXPECT_EQ(results[method].converged, scene.params.fixed_iters);
+            EXPECT_EQ(results[method].has_residual, !scene.params.fixed_iters);
+            // Compare the velocity implied by the solved positions even when
+            // zero tolerances deliberately leave residual mode unconverged.
+            update_velocity(scene.state.velocities, scene.state.deformed_positions,
+                initial_positions, scene.params.dt());
+
+            // One cell preserves natural vertex order exactly; this fixture
+            // compares numerical kernels rather than different GS schedules.
+            solver_detail::ClothGridSchedule grid;
+            grid.build(scene.state.deformed_positions,
+                scene.broad_phase.cache().node_boxes, {}, scene.params.cloth_grid_dx);
+            ASSERT_EQ(grid.cells.size(), 1u);
+            const auto& vertices = grid.cells.front().vertices;
+            ASSERT_EQ(vertices.size(), scene.state.deformed_positions.size());
+            for (std::size_t node = 0; node < vertices.size(); ++node)
+                EXPECT_EQ(vertices[node], static_cast<int>(node));
+        }
+
+        const auto& reference = scenes[2 * configuration].state;
+        const auto& actual = scenes[2 * configuration + 1].state;
+        ASSERT_EQ(actual.deformed_positions.size(), reference.deformed_positions.size());
+        ASSERT_EQ(actual.velocities.size(), reference.velocities.size());
+        for (std::size_t node = 0; node < actual.deformed_positions.size(); ++node) {
+            ASSERT_TRUE(actual.deformed_positions[node].allFinite());
+            ASSERT_TRUE(actual.velocities[node].allFinite());
+            EXPECT_EQ(std::memcmp(actual.deformed_positions[node].data(),
+                reference.deformed_positions[node].data(), 3 * sizeof(double)), 0)
+                << "position node=" << node;
+            EXPECT_EQ(std::memcmp(actual.velocities[node].data(),
+                reference.velocities[node].data(), 3 * sizeof(double)), 0)
+                << "velocity node=" << node;
+        }
+        EXPECT_EQ(results[1].iterations, results[0].iterations);
+        EXPECT_EQ(results[1].converged, results[0].converged);
+        EXPECT_EQ(results[1].has_residual, results[0].has_residual);
+        EXPECT_EQ(results[1].has_residual_components, results[0].has_residual_components);
+        const auto residual_values = [](const SolverResult& result) {
+            return std::array<double, 8>{result.initial_residual, result.final_residual,
+                result.initial_cloth_residual, result.final_cloth_residual,
+                result.initial_solid_residual, result.final_solid_residual,
+                result.initial_rigid_residual, result.final_rigid_residual};
+        };
+        const auto expected_residuals = residual_values(results[0]);
+        const auto actual_residuals = residual_values(results[1]);
+        for (std::size_t component = 0; component < actual_residuals.size(); ++component) {
+            ASSERT_TRUE(std::isfinite(actual_residuals[component]));
+            EXPECT_EQ(std::memcmp(&actual_residuals[component],
+                &expected_residuals[component], sizeof(double)), 0)
+                << "residual component=" << component;
+        }
+    }
+}
+
+TEST(ClothGridSolver, FrameDispatchMatchesExplicitSolverForBothMethods) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+
+    for (const bool grid : {false, true}) {
+        for (const double friction : {0.0, 0.2}) {
+            SCOPED_TRACE(::testing::Message() << "grid=" << grid
+                << " friction=" << friction);
+            std::array<ClothScene, 2> scenes;
+            for (auto& scene : scenes) {
+                build_contact_scene(scene, friction);
+                scene.params.use_parallel = true;
+                scene.params.use_cloth_grid = grid;
+            }
+
+            auto& dispatched = scenes[0];
+            const SolverResult frame_result = advance_one_frame(dispatched.state,
+                dispatched.mesh, dispatched.adjacency, dispatched.pins,
+                dispatched.params, dispatched.broad_phase, 1);
+            ASSERT_TRUE(frame_result.converged);
+
+            auto& explicit_entry = scenes[1];
+            // Direct callers select the method by its entry point, not by
+            // the frame driver's flag. Also exercise forwarding the old
+            // positions needed by contact friction on every substep.
+            explicit_entry.params.use_cloth_grid = !grid;
+            const double dt = explicit_entry.params.dt();
+            SolverResult explicit_result;
+            for (int substep = 0; substep < explicit_entry.params.substeps; ++substep) {
+                std::vector<Vec3> predictor;
+                build_xhat(predictor, explicit_entry.state.deformed_positions,
+                    explicit_entry.state.velocities, dt);
+                std::vector<Vec3> positions = ccd_initial_guess(
+                    explicit_entry.state.deformed_positions, predictor,
+                    explicit_entry.mesh, &explicit_entry.broad_phase);
+                const auto solver = grid
+                    ? global_gauss_seidel_solver_ambient_grid
+                    : global_gauss_seidel_solver_basic;
+                const SolverResult sub_result = solver(explicit_entry.mesh,
+                    explicit_entry.adjacency, explicit_entry.pins,
+                    explicit_entry.params, positions, predictor,
+                    explicit_entry.state.velocities, explicit_entry.broad_phase,
+                    "", &explicit_entry.state.deformed_positions);
+                ASSERT_TRUE(sub_result.converged);
+                accumulate_solver_result(explicit_result, sub_result, substep == 0);
+                update_velocity(explicit_entry.state.velocities, positions,
+                    explicit_entry.state.deformed_positions, dt);
+                explicit_entry.state.deformed_positions = positions;
+            }
+
+            EXPECT_EQ(explicit_result.iterations, frame_result.iterations);
+            EXPECT_EQ(explicit_result.converged, frame_result.converged);
+            EXPECT_EQ(explicit_result.has_residual, frame_result.has_residual);
+            EXPECT_DOUBLE_EQ(explicit_result.initial_residual, frame_result.initial_residual);
+            EXPECT_DOUBLE_EQ(explicit_result.final_residual, frame_result.final_residual);
+            ASSERT_EQ(explicit_entry.state.deformed_positions.size(),
+                dispatched.state.deformed_positions.size());
+            ASSERT_EQ(explicit_entry.state.velocities.size(),
+                dispatched.state.velocities.size());
+            for (std::size_t node = 0;
+                 node < explicit_entry.state.deformed_positions.size(); ++node) {
+                EXPECT_EQ(std::memcmp(explicit_entry.state.deformed_positions[node].data(),
+                    dispatched.state.deformed_positions[node].data(), 3 * sizeof(double)), 0)
+                    << "position node=" << node;
+                EXPECT_EQ(std::memcmp(explicit_entry.state.velocities[node].data(),
+                    dispatched.state.velocities[node].data(), 3 * sizeof(double)), 0)
+                    << "velocity node=" << node;
+            }
+        }
+    }
+}
+
+TEST(ClothGridSolver, InterleavingMethodsKeepsAdaptiveNodeBoxHistoryIndependent) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(1);
+    // Keep both meshes and their buffers alive while testing both directions.
+    std::array<ClothScene, 2> scenes;
+    for (auto& scene : scenes) {
+        build_contact_scene(scene, 0.0);
+        scene.params.use_parallel = false;
+        scene.params.max_global_iters = 1;
+        scene.params.node_box_update_count = 1;
+        scene.state.velocities.assign(scene.state.deformed_positions.size(),
+            Vec3::Zero());
+    }
+
+    for (std::size_t direction = 0; direction < scenes.size(); ++direction) {
+        const bool grid_first = direction != 0;
+        SCOPED_TRACE(::testing::Message() << "grid_first=" << grid_first);
+        auto& scene = scenes[direction];
+        const auto first_solver = grid_first
+            ? global_gauss_seidel_solver_ambient_grid
+            : global_gauss_seidel_solver_basic;
+        const auto other_solver = grid_first
+            ? global_gauss_seidel_solver_basic
+            : global_gauss_seidel_solver_ambient_grid;
+        const auto initial_positions = scene.state.deformed_positions;
+        auto positions = initial_positions;
+        ASSERT_TRUE(first_solver(scene.mesh, scene.adjacency, scene.pins,
+            scene.params, positions, initial_positions, scene.state.velocities,
+            scene.broad_phase, "", nullptr).converged);
+        const auto first_result = positions;
+        std::vector<double> expected_radii(positions.size());
+        bool has_adapted_radius = false;
+        for (std::size_t node = 0; node < positions.size(); ++node) {
+            expected_radii[node] = std::clamp(
+                1.2 * (first_result[node] - initial_positions[node]).norm(),
+                scene.params.node_box_min, scene.params.node_box_max);
+            has_adapted_radius = has_adapted_radius
+                || expected_radii[node] < scene.params.node_box_max;
+        }
+        ASSERT_TRUE(has_adapted_radius)
+            << "fixture must distinguish retained history from maximum-sized boxes";
+
+        // Advance the other method on this same mesh with a different target.
+        // Its displacement history must not replace the first method's cache.
+        auto other_predictor = first_result;
+        for (auto& position : other_predictor)
+            position += Vec3(0.006, 0.0, 0.0);
+        ASSERT_TRUE(other_solver(scene.mesh, scene.adjacency, scene.pins,
+            scene.params, positions, other_predictor, scene.state.velocities,
+            scene.broad_phase, "", nullptr).converged);
+        const auto other_result = positions;
+        bool histories_differ = false;
+        for (std::size_t node = 0; node < positions.size(); ++node) {
+            const double other_radius = std::clamp(
+                1.2 * (other_result[node] - first_result[node]).norm(),
+                scene.params.node_box_min, scene.params.node_box_max);
+            histories_differ = histories_differ
+                || std::abs(other_radius - expected_radii[node]) > 1e-8;
+        }
+        ASSERT_TRUE(histories_differ)
+            << "fixture must distinguish each solver's displacement history";
+
+        ASSERT_TRUE(first_solver(scene.mesh, scene.adjacency, scene.pins,
+            scene.params, positions, other_result, scene.state.velocities,
+            scene.broad_phase, "", nullptr).converged);
+        const auto& boxes = scene.broad_phase.cache().node_boxes;
+        ASSERT_EQ(boxes.size(), expected_radii.size());
+        for (std::size_t node = 0; node < boxes.size(); ++node) {
+            for (int axis = 0; axis < 3; ++axis) {
+                EXPECT_NEAR(0.5 * boxes[node].extent()[axis], expected_radii[node], 1e-12)
+                    << "node=" << node << " axis=" << axis;
+                EXPECT_NEAR(0.5 * (boxes[node].min[axis] + boxes[node].max[axis]),
+                    other_result[node][axis], 1e-12)
+                    << "node=" << node << " axis=" << axis;
+            }
+        }
+    }
+}
+
 TEST(ClothGridParameters, RejectsInvalidEnabledConfiguration) {
     const SimParams valid = valid_grid_parameters();
     EXPECT_NO_THROW(valid.validate_cloth_grid_parameters());
@@ -351,8 +617,8 @@ TEST(ClothGridParameters, CliParsesAndSerializesGridSettings) {
     EXPECT_THROW(invalid.to_sim_params(), std::invalid_argument);
 }
 
-TEST(ClothGridSolver, BasicEntryRejectsRigidAndVolumetricMeshes) {
-    const SimParams params = valid_grid_parameters();
+TEST(ClothGridSolver, AmbientGridEntryRejectsRigidAndVolumetricMeshes) {
+    SimParams params = valid_grid_parameters();
     const VertexTriangleMap adjacency;
     const std::vector<Pin> pins;
     const std::vector<Vec3> predictor(4, Vec3::Zero());
@@ -361,16 +627,76 @@ TEST(ClothGridSolver, BasicEntryRejectsRigidAndVolumetricMeshes) {
     BroadPhase broad_phase;
     RefMesh rigid;
     rigid.rb_nodes = {{0, 1, 2, 3}};
-    EXPECT_THROW(global_gauss_seidel_solver_basic(rigid, adjacency, pins,
-        params, positions, predictor, velocity, broad_phase), std::invalid_argument);
-
     RefMesh solid;
     solid.tet_nodes = {0, 1, 2, 3};
     solid.tets = {0, 1, 2, 3};
-    EXPECT_THROW(global_gauss_seidel_solver_basic(solid, adjacency, pins,
-        params, positions, predictor, velocity, broad_phase), std::invalid_argument);
-    // Reject tet connectivity even before a caller has built tet_nodes.
-    solid.tet_nodes.clear();
-    EXPECT_THROW(global_gauss_seidel_solver_basic(solid, adjacency, pins,
-        params, positions, predictor, velocity, broad_phase), std::invalid_argument);
+    RefMesh unclassified_solid;
+    unclassified_solid.tets = solid.tets;
+    for (const bool enabled : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "use_cloth_grid=" << enabled);
+        params.use_cloth_grid = enabled;
+        EXPECT_THROW(global_gauss_seidel_solver_ambient_grid(rigid, adjacency, pins,
+            params, positions, predictor, velocity, broad_phase), std::invalid_argument);
+        EXPECT_THROW(global_gauss_seidel_solver_ambient_grid(solid, adjacency, pins,
+            params, positions, predictor, velocity, broad_phase), std::invalid_argument);
+        // Reject tet connectivity even before a caller has built tet_nodes.
+        EXPECT_THROW(global_gauss_seidel_solver_ambient_grid(unclassified_solid,
+            adjacency, pins, params, positions, predictor, velocity, broad_phase),
+            std::invalid_argument);
+    }
+}
+
+TEST(ClothGridSolver, AmbientGridEntryValidatesParametersRegardlessOfDispatchFlag) {
+    ClothScene scene;
+    build_contact_scene(scene, 0.0);
+    const auto solve = [&](const SimParams& params) {
+        auto positions = scene.state.deformed_positions;
+        return global_gauss_seidel_solver_ambient_grid(scene.mesh,
+            scene.adjacency, scene.pins, params, positions,
+            scene.state.deformed_positions, scene.state.velocities,
+            scene.broad_phase);
+    };
+    for (const bool enabled : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "use_cloth_grid=" << enabled);
+        SimParams params = scene.params;
+        params.use_cloth_grid = enabled;
+        params.cloth_grid_dx = 0.02;
+        EXPECT_THROW(solve(params), std::invalid_argument);
+        params = scene.params;
+        params.use_cloth_grid = enabled;
+        params.node_box_update_count = 0;
+        EXPECT_THROW(solve(params), std::invalid_argument);
+        params = scene.params;
+        params.use_cloth_grid = enabled;
+        params.use_ogc = true;
+        EXPECT_THROW(solve(params), std::invalid_argument);
+        params = scene.params;
+        params.use_cloth_grid = enabled;
+        params.use_ogc_solver = true;
+        EXPECT_THROW(solve(params), std::invalid_argument);
+    }
+}
+
+TEST(ClothGridSolver, FrameDispatchRejectsGridWithEitherOgcModeBeforeAdvancing) {
+    ClothScene scene;
+    build_contact_scene(scene, 0.0);
+    const auto initial_positions = scene.state.deformed_positions;
+    for (const bool ogc_solver : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "use_ogc_solver=" << ogc_solver);
+        scene.params.use_ogc = !ogc_solver;
+        scene.params.use_ogc_solver = ogc_solver;
+        bool pin_updater_called = false;
+        bool substep_callback_called = false;
+        EXPECT_THROW(advance_one_frame(scene.state, scene.mesh,
+            scene.adjacency, scene.pins, scene.params, scene.broad_phase, 1,
+            [&](std::vector<Pin>&, double) { pin_updater_called = true; },
+            [&](int, const std::vector<Vec3>&) { substep_callback_called = true; }),
+            std::invalid_argument);
+        EXPECT_FALSE(pin_updater_called);
+        EXPECT_FALSE(substep_callback_called);
+        ASSERT_EQ(scene.state.deformed_positions.size(), initial_positions.size());
+        for (std::size_t node = 0; node < initial_positions.size(); ++node)
+            EXPECT_EQ(std::memcmp(scene.state.deformed_positions[node].data(),
+                initial_positions[node].data(), 3 * sizeof(double)), 0);
+    }
 }

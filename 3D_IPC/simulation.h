@@ -172,6 +172,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
     std::vector<Pin>& pins, const SimParams& params,
     BroadPhase& broad_phase, int frame_index = 1,
     PinTargetUpdater pin_updater = nullptr, SubstepCallback on_substep = nullptr, const std::string& outdir = "") {
+    params.validate_cloth_grid_parameters();
     SolverResult agg;
     const double dt = params.dt();
     for (int sub = 0; sub < params.substeps; ++sub) {
@@ -206,6 +207,8 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         SolverResult sub_result;
         if (params.use_ogc_solver)
             sub_result = global_gauss_seidel_solver_ogc(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir, &state.deformed_positions);
+        else if (params.use_cloth_grid)
+            sub_result = global_gauss_seidel_solver_ambient_grid(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
         else
             sub_result = global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
         

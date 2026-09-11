@@ -49,8 +49,12 @@ inline void accumulate_solver_result(SolverResult& agg, const SolverResult& sub,
     }
 }
 
-// Deformable solvers implemented in solver.cpp.
+// Deformable solvers implemented in solver.cpp. These explicit entry points
+// select their own schedule; use_cloth_grid is the frame driver's switch.
 SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
+
+// Basic cloth only: serial vertices within dependency-safe parallel grid cells.
+SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 
 SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 

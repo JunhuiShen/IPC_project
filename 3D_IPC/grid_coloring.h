@@ -68,17 +68,17 @@ struct ClothGridSchedule {
         // Separate slots keep a fast worker's next-batch exception from
         // racing a slower worker still checking the preceding batch.
         std::vector<std::exception_ptr> errors(batches.size());
-#pragma omp parallel shared(errors)
+        #pragma omp parallel shared(errors)
         {
             for (std::size_t b = 0; b < batches.size(); ++b) {
                 const auto& batch = batches[b];
-#pragma omp for schedule(dynamic, 1)
+                #pragma omp for schedule(dynamic, 1)
                 for (int i = 0; i < static_cast<int>(batch.size()); ++i) {
                     try {
                         for (int vertex : cells[batch[i]].vertices)
                             process(vertex);
                     } catch (...) {
-#pragma omp critical(ipc_cloth_grid_callback_error)
+                        #pragma omp critical(ipc_cloth_grid_callback_error)
                         { if (!errors[b]) errors[b] = std::current_exception(); }
                     }
                 }
