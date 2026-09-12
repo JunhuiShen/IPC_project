@@ -99,7 +99,7 @@ All three cloth solvers are in `solver.cpp`:
 | Route | Scheduling | Vertex/contact computation | Selection |
 |---|---|---|---|
 | `basic` | Greedy colors | Reference from `1da4c74` | Default |
-| `ambient_grid` | Ambient-grid cells | Same reference computation as `basic` | `--use_cloth_grid true` |
+| `ambient_grid` | Ambient-grid cells | Reference updates with cooperative frictionless contact/CCD work | `--use_cloth_grid true` |
 | `basic_experimental` | Greedy colors | Profiled contact/CCD optimizations | `--use_basic_experimental true` |
 
 The basic iteration loop and local contact derivative assembly come from
@@ -129,15 +129,27 @@ finish. Setting `--use_parallel false` executes the same grid schedule serially
 for comparison. The grid option defaults to false and is supported only for
 basic cloth, with OGC disabled.
 
-Inside each cell, the complete reference Newton update, contact accumulation,
-and CCD traversal run sequentially before advancing to the next vertex.
-Parallelism is across independent cells. Ambient-grid does not use the
-experimental contact buffers, helper-thread contact/CCD sweeps, or cached
-AABB rejections. This makes grid scheduling and the experimental greedy solver
-two separate routes for comparison against basic.
+With `--use_parallel true`, more than one OpenMP thread, zero friction, and
+`d_hat > 0`, expensive cells can also use helper threads for the current
+vertex's barrier gradient/Hessian evaluation and CCD candidate tests. This
+uses grid-specific cooperative callbacks; the experimental vertex-coloring
+solver is unchanged and remains independent. The cell leader accumulates
+contributions in the original node-triangle then segment-segment order and alone commits the
+position. Every helper joins before the next vertex in that cell starts;
+vertices within a cell are **not** updated simultaneously.
 
-Use `--verbose true --write_substeps false` for occupied-cell/batch counts and
-normal solver diagnostics.
+At each rebuild, cells within a batch are ordered by the sum of
+`1 + NT candidates + SS candidates` over their vertices. With collision search
+disabled the cost is just the vertex count. Small helper groups (at most four
+workers per selected cell) share sufficiently contact-heavy vertices; remaining
+workers process whole cells, and finished helpers can take remaining cells in
+the same batch. Small contact lists, friction, serial runs and runtime team-size
+mismatches use the original whole-cell traversal. `--use_ccd false` disables
+the CCD tests but still permits cooperative barrier assembly. The basic solver
+is unchanged, and `--use_basic_experimental` is not required for grid cooperation.
+
+Use `--verbose true --write_substeps false` for occupied-cell/batch and selected
+cooperative-cell counts, along with normal solver diagnostics.
 
 `dx` must be strictly greater than `2 * node_box_max`. Same-color cells have at
 least one intervening cell along one axis, so this bound ensures node boxes
@@ -682,7 +694,8 @@ reader can jump to the layer they care about.
     contact evaluation and CCD for small colors.
   - `global_gauss_seidel_solver_ambient_grid` (`--use_cloth_grid`): separate
     basic-cloth grid solver; preserves node-box ownership, safe execution
-    batches, reference vertex/contact computation, and Houdini grid substep output.
+    batches, serial per-cell commits, cooperative frictionless contact/CCD
+    evaluation, and Houdini grid substep output.
   - `global_gauss_seidel_solver_ogc` (`--use_ogc_solver`): per-iteration broad-
     phase box/pair refresh with `--ogc_box_pad`-padded node boxes, OGC clip
     unconditionally on, and partial BVH leaf refits via

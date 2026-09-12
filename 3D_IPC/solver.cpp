@@ -1,6 +1,7 @@
 #include <optional>
 #include "solver.h"
 #include "contact_scheduling.h"
+#include "grid_contact_scheduling.h"
 #include "grid_coloring.h"
 #include "IPC_math.h"
 #include "parallel_helper.h"
@@ -1424,6 +1425,13 @@ SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, co
     std::vector<Vec3>& xnew_substep_start = workspace.xnew_substep_start;
     xnew_substep_start = xnew;
     solver_detail::ClothGridSchedule grid_schedule;
+    solver_detail::ClothGridContactSweep contact_sweep;
+    solver_detail::ClothGridContactStepState contact_steps;
+    const bool use_contact_sweep = params.use_parallel && omp_get_max_threads() > 1
+        && params.friction_coefficient == 0.0 && params.d_hat > 0.0
+        && !params.use_ogc;
+    if (use_contact_sweep) contact_steps.resize(nv);
+    std::vector<std::size_t> vertex_costs(nv, 1);
 
     double r1=0.;
     //gs loop
@@ -1445,14 +1453,24 @@ SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, co
                 broad_phase.initialize_node_boxes_only(blue_boxes);
             }
             // Cell ownership stays fixed until the next node-box rebuild.
-            // Dependency-safe batches run cells in parallel; vertices inside
-            // each cell use basic's sequential Newton/contact/CCD traversal.
+            // Dependency-safe batches run cells in parallel. Prioritization
+            // changes only cell order, never the serial vertex order inside one.
             grid_schedule.build(xnew, blue_boxes,
                 needs_mesh_contact_search ? combined_adj : ea, params.cloth_grid_dx);
+            if (needs_mesh_contact_search) {
+                const auto& cache = broad_phase.cache();
+                for (int vi = 0; vi < nv; ++vi)
+                    vertex_costs[vi] = 1 + cache.vertex_nt[vi].size()
+                        + cache.vertex_ss[vi].size();
+            }
+            grid_schedule.prioritize_cells(vertex_costs);
             color_groups = grid_schedule.vertex_color_groups;
+            if (use_contact_sweep)
+                contact_sweep.prepare(grid_schedule, broad_phase.cache());
             if (params.verbose)
-                std::fprintf(stderr, "  [cloth grid] dx=%.6g occupied_cells=%zu batches=%zu\n",
-                    grid_schedule.dx, grid_schedule.cells.size(), grid_schedule.batches.size());
+                std::fprintf(stderr, "  [cloth grid] dx=%.6g occupied_cells=%zu batches=%zu cooperative_cells=%zu\n",
+                    grid_schedule.dx, grid_schedule.cells.size(), grid_schedule.batches.size(),
+                    contact_sweep.cooperative_cells.size());
         }
 
         if (iter == 1 && !params.fixed_iters) {
@@ -1468,7 +1486,122 @@ SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, co
 
         const auto proposed_position = [&](int vi) -> Vec3 { return xnew[vi] - params.damping * gs_vertex_delta_live_barrier(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads, previous_positions); };
         const auto process_vertex = [&](int vi) { per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi), 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc); };
-        grid_schedule.run(params.use_parallel, process_vertex);
+        if (use_contact_sweep) {
+            const auto &cache = broad_phase.cache();
+            const double dh2 = params.d_hat * params.d_hat,
+                         dt2k = params.dt2() * params.k_barrier;
+            const auto compute = [&](int vi, int local,
+                                     solver_detail::ContactContribution &value) -> unsigned {
+              bool aabb_clear=false;
+              if (local == 0) {
+                auto pair = physics_detail::
+                    compute_local_gradient_and_hessian_no_barrier_unchecked(
+                        vi, ref_mesh, adj, pins, params, xnew, xhat, &pm,
+                        &workspace.incident_triangles[vi],
+                        &workspace.rest_shape_grads, previous_positions);
+                value.gradient = pair.first;
+                value.hessian = pair.second;
+                return 1;
+              }
+              --local;
+              int nt = cache.vertex_nt[vi].size();
+              if (local < nt) {
+                const auto &entry = cache.vertex_nt[vi][local];
+                const auto &p = cache.nt_pairs[entry.pair_index];
+                if (!node_triangle_aabbs_within_distance(
+                        xnew[p.node], xnew[p.tri_v[0]], xnew[p.tri_v[1]],
+                        xnew[p.tri_v[2]], dh2, &aabb_clear)) {
+                  return aabb_clear?2u:0u;
+                }
+                auto pair = node_triangle_barrier_self_gradient_and_hessian(
+                    xnew[p.node], xnew[p.tri_v[0]], xnew[p.tri_v[1]],
+                    xnew[p.tri_v[2]], params.d_hat, entry.dof);
+                value.gradient = pair.first;
+                value.hessian = pair.second;
+              } else {
+                const auto &entry = cache.vertex_ss[vi][local - nt];
+                const auto &p = cache.ss_pairs[entry.pair_index];
+                if (!segment_aabbs_within_distance(xnew[p.v[0]], xnew[p.v[1]],
+                                                   xnew[p.v[2]], xnew[p.v[3]],
+                                                   dh2, &aabb_clear)) {
+                  return aabb_clear?2u:0u;
+                }
+                auto pair = segment_segment_barrier_self_gradient_and_hessian(
+                    xnew[p.v[0]], xnew[p.v[1]], xnew[p.v[2]], xnew[p.v[3]],
+                    params.d_hat, entry.dof);
+                value.gradient = pair.first;
+                value.hessian = pair.second;
+              }
+              return 1;
+            };
+            const auto apply =
+                [&](int vi, const solver_detail::ContactContribution *values, const solver_detail::ContactMaskWord* mask) {
+                  Vec3 g = values[0].gradient;
+                  Mat33 H = values[0].hessian;
+                  int count =
+                      cache.vertex_nt[vi].size() + cache.vertex_ss[vi].size();
+                  const auto add=[&](int j){g+=dt2k*values[j].gradient;H+=dt2k*values[j].hessian;};
+                  solver_detail::for_active_contact(mask,count,add);
+                  const Vec3 delta = matrix3d_inverse(H) * g;
+                  const Vec3 proposed = xnew[vi] - params.damping * delta;
+                  {
+                    const auto &box = cache.node_boxes[vi];
+                    const Vec3 lo = (box.min + Vec3::Constant(1e-10)).eval();
+                    const Vec3 hi = (box.max - Vec3::Constant(1e-10)).eval();
+                    const Vec3 next = proposed.cwiseMax(lo).cwiseMin(hi);
+                    contact_steps.steps[vi] = next - xnew[vi];
+                    contact_steps.nonzero_step[vi] =
+                        !(contact_steps.steps[vi].squaredNorm() < 1e-28);
+                    contact_steps.short_step[vi]=params.d_hat>1e-8 && std::isfinite(dh2) && contact_steps.steps[vi].squaredNorm()<dh2/16.0;
+                  }
+                };
+            const auto ccd = [&](int vi, int local,
+                                 solver_detail::ContactContribution &value, bool aabb_clear) -> bool {
+              if (!contact_steps.nonzero_step[vi] || !params.use_ccd ||
+                  local == 0)
+                return false;
+              --local;
+              int nt = cache.vertex_nt[vi].size();
+              // A rejected Euclidean AABB distance exceeds d_hat, so some axis
+              // gap exceeds d_hat/sqrt(3). Moving one endpoint by less than
+              // d_hat/4 cannot close that gap. The original swept-AABB test
+              // therefore also rejects this pair; no CCD result is approximated.
+              if(aabb_clear && contact_steps.short_step[vi]) {
+                  return false;
+              }
+              CCDResult result;
+              if (local < nt) {
+                const auto &entry = cache.vertex_nt[vi][local];
+                result = safe_step_detail::node_triangle_vertex_ccd(
+                    cache.nt_pairs[entry.pair_index], entry.dof, vi, xnew,
+                    contact_steps.steps[vi], params.use_ticcd);
+              } else {
+                const auto &entry = cache.vertex_ss[vi][local - nt];
+                result = safe_step_detail::segment_segment_vertex_ccd(
+                    cache.ss_pairs[entry.pair_index], entry.dof, vi, xnew,
+                    contact_steps.steps[vi], params.use_ticcd);
+              }
+              if(result.collision)value.toi=result.t;
+              return result.collision;
+            };
+            const auto commit =
+                [&](int vi, const solver_detail::ContactContribution *values, const solver_detail::ContactMaskWord* mask) {
+                  if (!contact_steps.nonzero_step[vi])
+                    return;
+                  double toi = 1.0;
+                  bool collision = false;
+                  int count =
+                      cache.vertex_nt[vi].size() + cache.vertex_ss[vi].size();
+                  const auto consider=[&](int j){collision=true;toi=std::min(toi,values[j].toi);};
+                  solver_detail::for_active_contact(mask,count,consider);
+                  double step = collision ? 0.9 * toi : 1.0;
+                  xnew[vi] = xnew[vi] + step * contact_steps.steps[vi];
+                };
+            contact_sweep.run(grid_schedule, compute, apply, process_vertex, ccd,
+                              commit);
+        } else {
+            grid_schedule.run(params.use_parallel, process_vertex);
+        }
 
         result.iterations = iter;
         if (!params.fixed_iters){

@@ -1,5 +1,6 @@
 #include "broad_phase.h"
 #include "grid_coloring.h"
+#include "grid_contact_scheduling.h"
 #include "ipc_args.h"
 #include "make_shape.h"
 #include "mesh_utils.h"
@@ -101,6 +102,35 @@ void build_contact_scene(ClothScene& scene, double friction) {
     scene.pins.back().target_position.x() += 0.002;
     scene.mesh.build_lumped_mass(params.density, params.thickness);
     scene.adjacency = build_incident_triangle_map(scene.mesh.tris);
+}
+
+void build_dense_single_cell_scene(ClothScene& scene, double friction = 0.0) {
+    build_contact_scene(scene, friction);
+    scene.params.cloth_grid_dx = 2.0;
+    // Keep contact counts dense after every node-box rebuild, not just the
+    // initial maximum-sized boxes. Every point stays inside the same cell.
+    scene.params.node_box_max = 0.05;
+    scene.params.node_box_min = 0.05;
+    for (auto& position : scene.state.deformed_positions)
+        position += Vec3::Ones();
+    for (auto& pin : scene.pins)
+        pin.target_position += Vec3::Ones();
+}
+
+void expect_states_bitwise_equal(const DeformedState& actual,
+    const DeformedState& reference) {
+    ASSERT_EQ(actual.deformed_positions.size(), reference.deformed_positions.size());
+    ASSERT_EQ(actual.velocities.size(), reference.velocities.size());
+    for (std::size_t node = 0; node < actual.deformed_positions.size(); ++node) {
+        ASSERT_TRUE(actual.deformed_positions[node].allFinite()) << "node=" << node;
+        ASSERT_TRUE(actual.velocities[node].allFinite()) << "node=" << node;
+        EXPECT_EQ(std::memcmp(actual.deformed_positions[node].data(),
+            reference.deformed_positions[node].data(), 3 * sizeof(double)), 0)
+            << "position node=" << node;
+        EXPECT_EQ(std::memcmp(actual.velocities[node].data(),
+            reference.velocities[node].data(), 3 * sizeof(double)), 0)
+            << "velocity node=" << node;
+    }
 }
 
 bool parse_arguments(IPCArgs3D& args, std::vector<std::string> words) {
@@ -219,50 +249,145 @@ TEST(ClothGridSolver, ContactFramesMatchSerialGridAcrossThreadCounts) {
 TEST(ClothGridSolver, DenseSingleCellMatchesSerialWithBothCcdBackendsAndClippingModes) {
     RestoreOpenMPSettings restore;
     omp_set_dynamic(0);
+    constexpr int frames = 2;
+    // Keep all mesh identities alive so adaptive workspace history cannot
+    // accidentally carry between configurations that reuse an allocation.
+    std::array<std::array<ClothScene, 2>, 4> configurations;
+    std::array<std::array<DeformedState, frames>, 4> references;
+    for (auto& scenes : configurations)
+        for (auto& scene : scenes)
+            build_dense_single_cell_scene(scene);
     for (const bool ccd : {false, true}) {
         for (const bool tight_inclusion : {false, true}) {
             SCOPED_TRACE(::testing::Message() << "ccd=" << ccd
                 << " tight_inclusion=" << tight_inclusion);
-            std::array<ClothScene, 2> scenes;
+            const int configuration = 2 * static_cast<int>(ccd)
+                + static_cast<int>(tight_inclusion);
+            auto& scenes = configurations[configuration];
             for (auto& scene : scenes) {
-                build_contact_scene(scene, 0.0);
-                scene.params.cloth_grid_dx = 2.0;
-                scene.params.node_box_max = 0.05;
-                scene.params.node_box_min = 0.05;
                 scene.params.use_ccd = ccd;
                 scene.params.use_ticcd = tight_inclusion;
-                for (auto& point : scene.state.deformed_positions)
-                    point += Vec3::Ones();
-                for (auto& pin : scene.pins)
-                    pin.target_position += Vec3::Ones();
             }
             for (int mode = 0; mode < 2; ++mode) {
+                SCOPED_TRACE(::testing::Message() << "parallel=" << mode);
                 auto& scene = scenes[mode];
                 scene.params.use_parallel = mode != 0;
                 omp_set_num_threads(mode == 0 ? 1 : 4);
-                ASSERT_TRUE(advance_one_frame(scene.state, scene.mesh,
-                    scene.adjacency, scene.pins, scene.params,
-                    scene.broad_phase, 1).converged);
+                int captures = 0;
+                for (int frame = 1; frame <= frames; ++frame) {
+                    SCOPED_TRACE(::testing::Message() << "frame=" << frame);
+                    const auto result = advance_one_frame(scene.state, scene.mesh,
+                        scene.adjacency, scene.pins, scene.params,
+                        scene.broad_phase, frame, nullptr,
+                        [&](int, const std::vector<Vec3>& positions) {
+                            ++captures;
+                            const auto& cache = scene.broad_phase.cache();
+                            ASSERT_FALSE(cache.nt_pairs.empty());
+                            ASSERT_FALSE(cache.ss_pairs.empty());
+                            solver_detail::ClothGridSchedule grid;
+                            grid.build(positions, cache.node_boxes, {},
+                                scene.params.cloth_grid_dx);
+                            ASSERT_EQ(grid.cells.size(), 1u);
+                            if (mode != 0) {
+                                // This is a genuine cooperative fixture, not
+                                // just another whole-cell fallback test.
+                                solver_detail::ClothGridContactSweep sweep;
+                                sweep.prepare(grid, cache);
+                                ASSERT_EQ(sweep.cooperative_cells,
+                                    std::vector<int>({0}));
+                                EXPECT_TRUE(std::any_of(sweep.assignments.begin(),
+                                    sweep.assignments.end(), [](const auto& assignment) {
+                                        return assignment.cell == 0 && assignment.lanes > 1;
+                                    }));
+                            }
+                        });
+                    ASSERT_TRUE(result.converged);
+                    EXPECT_EQ(result.iterations,
+                        scene.params.substeps * scene.params.max_global_iters);
+                    if (mode == 0)
+                        references[configuration][frame - 1] = scene.state;
+                    else
+                        expect_states_bitwise_equal(scene.state,
+                            references[configuration][frame - 1]);
+                }
+                EXPECT_EQ(captures, frames * scene.params.substeps);
             }
-            const auto& reference = scenes[0].state;
-            const auto& actual = scenes[1].state;
-            for (std::size_t node = 0; node < actual.deformed_positions.size(); ++node) {
-                ASSERT_TRUE(actual.deformed_positions[node].allFinite());
-                ASSERT_TRUE(actual.velocities[node].allFinite());
-                EXPECT_EQ(std::memcmp(actual.deformed_positions[node].data(),
-                    reference.deformed_positions[node].data(), 3 * sizeof(double)), 0)
-                    << "position node=" << node;
-                EXPECT_EQ(std::memcmp(actual.velocities[node].data(),
-                    reference.velocities[node].data(), 3 * sizeof(double)), 0)
-                    << "velocity node=" << node;
-            }
-            // A single occupied cell must keep its vertices serial even
-            // when several OpenMP workers are available.
-            const auto& cache = scenes[1].broad_phase.cache();
-            solver_detail::ClothGridSchedule grid;
-            grid.build(actual.deformed_positions, cache.node_boxes, {}, 2.0);
-            ASSERT_EQ(grid.cells.size(), 1u);
         }
+    }
+}
+
+TEST(ClothGridSolver, DenseCellFallbacksMatchSerialAcrossFramesAndThreadCounts) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    constexpr std::array<int, 3> thread_counts = {1, 1, 4};
+    constexpr int frames = 2;
+    // No collision work, CCD-only work, and dense frictional contact each
+    // bypass frictionless cooperative barrier assembly for a different reason.
+    std::array<std::array<ClothScene, 3>, 3> configurations;
+    std::array<std::array<DeformedState, frames>, 3> references;
+    for (std::size_t configuration = 0; configuration < configurations.size(); ++configuration) {
+        for (auto& scene : configurations[configuration]) {
+            build_dense_single_cell_scene(scene, configuration == 2 ? 0.2 : 0.0);
+            scene.params.d_hat = configuration == 2 ? 0.012 : 0.0;
+            scene.params.k_barrier = configuration == 2 ? 1.0 : 0.0;
+            scene.params.use_ccd = configuration != 0;
+            scene.params.use_ccd_guess = configuration != 0;
+        }
+    }
+    for (std::size_t configuration = 0; configuration < configurations.size(); ++configuration) {
+        SCOPED_TRACE(::testing::Message() << "fallback configuration=" << configuration);
+        for (std::size_t run = 0; run < thread_counts.size(); ++run) {
+            SCOPED_TRACE(::testing::Message() << "run=" << run
+                << " threads=" << thread_counts[run]);
+            auto& scene = configurations[configuration][run];
+            scene.params.use_parallel = run != 0;
+            omp_set_num_threads(thread_counts[run]);
+            for (int frame = 1; frame <= frames; ++frame) {
+                SCOPED_TRACE(::testing::Message() << "frame=" << frame);
+                const auto result = advance_one_frame(scene.state, scene.mesh,
+                    scene.adjacency, scene.pins, scene.params, scene.broad_phase, frame);
+                ASSERT_TRUE(result.converged);
+                EXPECT_EQ(result.iterations,
+                    scene.params.substeps * scene.params.max_global_iters);
+                const auto& cache = scene.broad_phase.cache();
+                if (configuration == 0) {
+                    EXPECT_TRUE(cache.nt_pairs.empty());
+                    EXPECT_TRUE(cache.ss_pairs.empty());
+                    EXPECT_TRUE(std::all_of(cache.vertex_nt.begin(), cache.vertex_nt.end(),
+                        [](const auto& entries) { return entries.empty(); }));
+                    EXPECT_TRUE(std::all_of(cache.vertex_ss.begin(), cache.vertex_ss.end(),
+                        [](const auto& entries) { return entries.empty(); }));
+                } else {
+                    EXPECT_FALSE(cache.nt_pairs.empty());
+                    EXPECT_FALSE(cache.ss_pairs.empty());
+                }
+                if (run == 0)
+                    references[configuration][frame - 1] = scene.state;
+                else
+                    expect_states_bitwise_equal(scene.state,
+                        references[configuration][frame - 1]);
+            }
+        }
+    }
+}
+
+TEST(ClothGridSolver, DirectGridEntryRejectsOgcBeforeMutatingState) {
+    ClothScene scene;
+    build_dense_single_cell_scene(scene);
+    // Explicit grid entry selects grid validation even if the dispatch flag
+    // is false. OGC is unsupported, not a silent scheduling fallback.
+    scene.params.use_cloth_grid = false;
+    const auto reference = scene.state;
+    const auto predictor = reference.deformed_positions;
+    for (const bool ogc_solver : {false, true}) {
+        scene.params.use_ogc = !ogc_solver;
+        scene.params.use_ogc_solver = ogc_solver;
+        EXPECT_THROW(global_gauss_seidel_solver_ambient_grid(scene.mesh,
+            scene.adjacency, scene.pins, scene.params,
+            scene.state.deformed_positions, predictor, scene.state.velocities,
+            scene.broad_phase, "", &reference.deformed_positions), std::invalid_argument);
+        expect_states_bitwise_equal(scene.state, reference);
+        EXPECT_TRUE(scene.broad_phase.cache().node_boxes.empty());
     }
 }
 

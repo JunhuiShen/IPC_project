@@ -10,6 +10,19 @@
 
 namespace solver_detail {
 
+// Per-vertex scratch for grid cooperation. A helper group finishes the current
+// vertex's assembly, safe-step tests and commit before moving to the next one.
+struct ClothGridContactStepState {
+    std::vector<Vec3> steps;
+    std::vector<unsigned char> nonzero_step, short_step;
+
+    void resize(std::size_t vertices) {
+        steps.resize(vertices);
+        nonzero_step.resize(vertices);
+        short_step.resize(vertices);
+    }
+};
+
 // Share the contacts of one vertex among a fixed worker group. The group's
 // leader commits that vertex before any worker visits the next vertex in the
 // cell. Different groups and whole-cell workers only visit cells in the same
@@ -339,7 +352,7 @@ private:
                 }
                 double work_end = 0.0;
                 if constexpr (Profile) work_end = omp_get_wtime();
-#pragma omp barrier
+                #pragma omp barrier
                 if constexpr (Profile) {
                     const double end = omp_get_wtime();
                     auto& stats = worker_stats[b * stats_team + worker];
