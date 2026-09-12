@@ -41,6 +41,7 @@ struct IPCArgs3D : ArgParser {
     double k_sdf         = 1e5;   // SDF penalty stiffness; 0 disables the SDF term
     double eps_sdf       = 0.002; // SDF soft-barrier range (m); cloth rest at phi=eps_sdf. 0 = hard quadratic at the surface.
     bool   use_parallel  = true;
+    bool   use_basic_experimental = false;
     bool   use_cloth_grid = false;
     double cloth_grid_dx = 0.05;
     bool   write_substeps = false;
@@ -154,6 +155,7 @@ struct IPCArgs3D : ArgParser {
         add_double("k_sdf",       k_sdf,       1e5,        "SDF penalty stiffness (0 = off)");
         add_double("eps_sdf",     eps_sdf,     0.002,      "SDF soft-barrier range (m). Cloth's force-free rest is at phi=eps_sdf. 0 = hard quadratic at the surface.");
         add_bool  ("use_parallel",   use_parallel,   true,  "Use parallel Gauss-Seidel (requires coloring)");
+        add_bool  ("use_basic_experimental", use_basic_experimental, false, "Use optimized basic cloth assembly/scheduling instead of the 1da4c74 basic solver (grid and OGC keep their own solvers)");
         add_bool  ("use_cloth_grid", use_cloth_grid, false, "Basic cloth only: parallel parity-colored grid cells, serial vertices inside each cell");
         add_double("cloth_grid_dx", cloth_grid_dx, 0.05, "Cloth grid cell side length; must be > 2 * node_box_max. Same-color dependency conflicts run in separate batches");
         add_bool  ("write_substeps", write_substeps, false, "Write an output file after every substep (useful for visual debugging)");
@@ -274,6 +276,7 @@ struct IPCArgs3D : ArgParser {
         p.k_sdf            = k_sdf;
         p.eps_sdf          = eps_sdf;
         p.use_parallel     = use_parallel;
+        p.use_basic_experimental = use_basic_experimental;
         p.use_cloth_grid   = use_cloth_grid;
         p.cloth_grid_dx    = cloth_grid_dx;
         p.write_substeps   = write_substeps;

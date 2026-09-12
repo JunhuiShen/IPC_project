@@ -1,5 +1,5 @@
 #include "broad_phase.h"
-#include "grid_contact_scheduling.h"
+#include "grid_coloring.h"
 #include "ipc_args.h"
 #include "make_shape.h"
 #include "mesh_utils.h"
@@ -256,15 +256,12 @@ TEST(ClothGridSolver, DenseSingleCellMatchesSerialWithBothCcdBackendsAndClipping
                     reference.velocities[node].data(), 3 * sizeof(double)), 0)
                     << "velocity node=" << node;
             }
-            // Confirm this integration fixture actually requests cooperation,
-            // rather than only exercising the small-contact fallback.
+            // A single occupied cell must keep its vertices serial even
+            // when several OpenMP workers are available.
             const auto& cache = scenes[1].broad_phase.cache();
             solver_detail::ClothGridSchedule grid;
             grid.build(actual.deformed_positions, cache.node_boxes, {}, 2.0);
             ASSERT_EQ(grid.cells.size(), 1u);
-            solver_detail::ClothGridContactSweep sweep;
-            sweep.prepare(grid, cache);
-            EXPECT_FALSE(sweep.cooperative_cells.empty());
         }
     }
 }
@@ -382,20 +379,24 @@ TEST(ClothGridSolver, SingleCellSerialUpdatesMatchBasicForContactCcdFrictionAndR
     }
 }
 
-TEST(ClothGridSolver, FrameDispatchMatchesExplicitSolverForBothMethods) {
+TEST(ClothGridSolver, FrameDispatchMatchesExplicitSolverForAllClothMethods) {
     RestoreOpenMPSettings restore;
     omp_set_dynamic(0);
     omp_set_num_threads(4);
 
-    for (const bool grid : {false, true}) {
+    std::array<std::array<ClothScene, 2>, 6> configurations;
+    for (const int method : {0, 1, 2}) {
+        const bool grid = method == 2;
+        const bool experimental = method == 1;
         for (const double friction : {0.0, 0.2}) {
-            SCOPED_TRACE(::testing::Message() << "grid=" << grid
+            SCOPED_TRACE(::testing::Message() << "method=" << method
                 << " friction=" << friction);
-            std::array<ClothScene, 2> scenes;
+            auto& scenes = configurations[2 * method + (friction != 0.0)];
             for (auto& scene : scenes) {
                 build_contact_scene(scene, friction);
                 scene.params.use_parallel = true;
                 scene.params.use_cloth_grid = grid;
+                scene.params.use_basic_experimental = experimental;
             }
 
             auto& dispatched = scenes[0];
@@ -409,6 +410,7 @@ TEST(ClothGridSolver, FrameDispatchMatchesExplicitSolverForBothMethods) {
             // the frame driver's flag. Also exercise forwarding the old
             // positions needed by contact friction on every substep.
             explicit_entry.params.use_cloth_grid = !grid;
+            explicit_entry.params.use_basic_experimental = !experimental;
             const double dt = explicit_entry.params.dt();
             SolverResult explicit_result;
             for (int substep = 0; substep < explicit_entry.params.substeps; ++substep) {
@@ -420,7 +422,8 @@ TEST(ClothGridSolver, FrameDispatchMatchesExplicitSolverForBothMethods) {
                     explicit_entry.mesh, &explicit_entry.broad_phase);
                 const auto solver = grid
                     ? global_gauss_seidel_solver_ambient_grid
-                    : global_gauss_seidel_solver_basic;
+                    : (experimental ? global_gauss_seidel_solver_basic_experimental
+                                    : global_gauss_seidel_solver_basic);
                 const SolverResult sub_result = solver(explicit_entry.mesh,
                     explicit_entry.adjacency, explicit_entry.pins,
                     explicit_entry.params, positions, predictor,
@@ -459,8 +462,15 @@ TEST(ClothGridSolver, InterleavingMethodsKeepsAdaptiveNodeBoxHistoryIndependent)
     RestoreOpenMPSettings restore;
     omp_set_dynamic(0);
     omp_set_num_threads(1);
-    // Keep both meshes and their buffers alive while testing both directions.
-    std::array<ClothScene, 2> scenes;
+    // Each entry point must retain its own adaptive history on the same mesh.
+    using Solver = decltype(&global_gauss_seidel_solver_basic);
+    const std::array<std::pair<Solver, Solver>, 4> methods = {{
+        {global_gauss_seidel_solver_basic, global_gauss_seidel_solver_ambient_grid},
+        {global_gauss_seidel_solver_ambient_grid, global_gauss_seidel_solver_basic},
+        {global_gauss_seidel_solver_basic, global_gauss_seidel_solver_basic_experimental},
+        {global_gauss_seidel_solver_basic_experimental, global_gauss_seidel_solver_basic}
+    }};
+    std::array<ClothScene, 4> scenes;
     for (auto& scene : scenes) {
         build_contact_scene(scene, 0.0);
         scene.params.use_parallel = false;
@@ -471,15 +481,9 @@ TEST(ClothGridSolver, InterleavingMethodsKeepsAdaptiveNodeBoxHistoryIndependent)
     }
 
     for (std::size_t direction = 0; direction < scenes.size(); ++direction) {
-        const bool grid_first = direction != 0;
-        SCOPED_TRACE(::testing::Message() << "grid_first=" << grid_first);
+        SCOPED_TRACE(::testing::Message() << "direction=" << direction);
         auto& scene = scenes[direction];
-        const auto first_solver = grid_first
-            ? global_gauss_seidel_solver_ambient_grid
-            : global_gauss_seidel_solver_basic;
-        const auto other_solver = grid_first
-            ? global_gauss_seidel_solver_basic
-            : global_gauss_seidel_solver_ambient_grid;
+        const auto [first_solver, other_solver] = methods[direction];
         const auto initial_positions = scene.state.deformed_positions;
         auto positions = initial_positions;
         ASSERT_TRUE(first_solver(scene.mesh, scene.adjacency, scene.pins,
@@ -615,6 +619,75 @@ TEST(ClothGridParameters, CliParsesAndSerializesGridSettings) {
     ASSERT_TRUE(parse_arguments(invalid,
         {"3D_sim", "--use_cloth_grid", "true", "--cloth_grid_dx", "0.02"}));
     EXPECT_THROW(invalid.to_sim_params(), std::invalid_argument);
+}
+
+TEST(BasicSolverParameters, ExperimentalDefaultsOffAndRoundTrips) {
+    EXPECT_FALSE(SimParams::zeros().use_basic_experimental);
+    IPCArgs3D defaults;
+    EXPECT_FALSE(defaults.to_sim_params().use_basic_experimental);
+    for (const auto& words : std::vector<std::vector<std::string>>{
+             {"3D_sim", "--use_basic_experimental"},
+             {"3D_sim", "--use_basic_experimental", "true"}}) {
+        IPCArgs3D args;
+        ASSERT_TRUE(parse_arguments(args, words));
+        EXPECT_TRUE(args.to_sim_params().use_basic_experimental);
+        TemporaryArgsFile saved;
+        args.serialize(saved.path.string());
+        IPCArgs3D restored;
+        ASSERT_TRUE(restored.deserialize(saved.path.string()));
+        EXPECT_TRUE(restored.to_sim_params().use_basic_experimental);
+    }
+    IPCArgs3D disabled;
+    ASSERT_TRUE(parse_arguments(disabled,
+        {"3D_sim", "--use_basic_experimental", "false"}));
+    EXPECT_FALSE(disabled.to_sim_params().use_basic_experimental);
+}
+
+TEST(BasicSolver, GeneralClothDispatchMatchesNamedEntryIncludingGridPrecedence) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+    // Keep distinct meshes alive so cached adaptive histories cannot alias.
+    std::array<ClothScene, 16> scenes;
+    for (int configuration = 0; configuration < 8; ++configuration) {
+        const bool experimental = (configuration & 1) != 0;
+        const bool grid = (configuration & 2) != 0;
+        const double friction = (configuration & 4) != 0 ? 0.2 : 0.0;
+        SCOPED_TRACE(::testing::Message() << "configuration=" << configuration);
+        for (int route = 0; route < 2; ++route) {
+            auto& scene = scenes[2 * configuration + route];
+            build_contact_scene(scene, friction);
+            scene.params.use_parallel = true;
+            scene.params.use_basic_experimental = experimental;
+            scene.params.use_cloth_grid = grid;
+        }
+        auto& direct = scenes[2 * configuration];
+        auto& general = scenes[2 * configuration + 1];
+        auto direct_positions = direct.state.deformed_positions;
+        auto general_positions = general.state.deformed_positions;
+        std::vector<Vec3> predictor;
+        build_xhat(predictor, direct_positions, direct.state.velocities,
+            direct.params.dt());
+        const auto solver = grid ? global_gauss_seidel_solver_ambient_grid
+            : (experimental ? global_gauss_seidel_solver_basic_experimental
+                            : global_gauss_seidel_solver_basic);
+        const auto expected = solver(direct.mesh, direct.adjacency, direct.pins,
+            direct.params, direct_positions, predictor, direct.state.velocities,
+            direct.broad_phase, "", &direct.state.deformed_positions);
+        std::vector<Vec3> centers, omegas;
+        std::vector<Vec4> orientations;
+        const auto actual = global_gauss_seidel_solver_basic_general(
+            general.mesh, general.state, general.adjacency, general.pins,
+            general.params, general_positions, predictor, centers, orientations,
+            omegas, general.broad_phase);
+        EXPECT_EQ(actual.iterations, expected.iterations);
+        EXPECT_EQ(actual.converged, expected.converged);
+        EXPECT_EQ(actual.has_residual, expected.has_residual);
+        for (std::size_t node = 0; node < direct_positions.size(); ++node)
+            EXPECT_EQ(std::memcmp(direct_positions[node].data(),
+                general_positions[node].data(), 3 * sizeof(double)), 0)
+                << "node=" << node;
+    }
 }
 
 TEST(ClothGridSolver, AmbientGridEntryRejectsRigidAndVolumetricMeshes) {

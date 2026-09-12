@@ -186,8 +186,6 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
 
         std::vector<Vec3> xnew;
 
-        const bool profile_grid = params.use_cloth_grid && params.verbose;
-        const double guess_start = profile_grid ? omp_get_wtime() : 0.0;
         if (params.use_ogc || params.use_ogc_solver)
             xnew = state.deformed_positions;
         else if (params.use_verlet_guess)
@@ -200,15 +198,13 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         else
             xnew = state.deformed_positions;
 
-        if (profile_grid)
-            std::fprintf(stderr, "  [cloth grid guess] substep=%d initial_guess_ms=%.3f\n",
-                sub + 1, 1000.0 * (omp_get_wtime() - guess_start));
-
         SolverResult sub_result;
         if (params.use_ogc_solver)
             sub_result = global_gauss_seidel_solver_ogc(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir, &state.deformed_positions);
         else if (params.use_cloth_grid)
             sub_result = global_gauss_seidel_solver_ambient_grid(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
+        else if (params.use_basic_experimental)
+            sub_result = global_gauss_seidel_solver_basic_experimental(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
         else
             sub_result = global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
         

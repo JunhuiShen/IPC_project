@@ -50,6 +50,7 @@ struct SimParams {
     int    max_global_iters;
 
     bool   use_parallel;
+    bool   use_basic_experimental; // select optimized cloth basic assembly/scheduling
     bool   use_cloth_grid;       // basic cloth only: serial vertices within parallel spatial cells
     double cloth_grid_dx;        // world-space cell side; must exceed twice node_box_max
     bool   write_substeps;       // if true, export a frame file after every substep (not just every frame)
@@ -99,6 +100,7 @@ struct SimParams {
         p.gravity                   = Vec3::Zero();
         p.max_global_iters          = 0;
         p.use_parallel              = false;
+        p.use_basic_experimental    = false;
         p.use_cloth_grid            = false;
         p.cloth_grid_dx             = 0.05;
         p.write_substeps            = false;

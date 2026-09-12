@@ -92,18 +92,28 @@ the mesh vertices:
 In short, the solver repeatedly builds a conservative contact set and
 performs collision-safe per-vertex Newton updates one color group at a time.
 
-### Spatial grid scheduling for basic cloth
+### Cloth solver selection
 
-`advance_one_frame()` selects `global_gauss_seidel_solver_ambient_grid` when
-`--use_cloth_grid true`; otherwise basic cloth uses
-`global_gauss_seidel_solver_basic`. Direct calls to these solver functions
-select their named scheduling method regardless of the driver switch.
-The basic solver function is unchanged from pre-grid commit `740b45c9`;
-each solver owns its own workspace and adaptive node-box history.
-The ambient-grid solver mirrors basic's iteration loop and inline Newton,
-contact, clipping, CCD, and convergence logic. Scheduling changes from
-independent vertices to independent cells, with serial updates inside each
-cell; grid validation, diagnostics, and visualization are retained.
+All three cloth solvers are in `solver.cpp`:
+
+| Route | Scheduling | Vertex/contact computation | Selection |
+|---|---|---|---|
+| `basic` | Greedy colors | Reference from `1da4c74` | Default |
+| `ambient_grid` | Ambient-grid cells | Same reference computation as `basic` | `--use_cloth_grid true` |
+| `basic_experimental` | Greedy colors | Profiled contact/CCD optimizations | `--use_basic_experimental true` |
+
+The basic iteration loop and local contact derivative assembly come from
+`1da4c74`. Shared geometry, energy, collision-search and CCD utilities remain
+current. The experimental flag defaults to false, is saved in parameter files,
+and also selects cloth assembly in the general solver. Rigid and solid blocks
+keep their existing implementations.
+
+Grid selection takes precedence over the experimental flag. OGC solver
+selection retains its existing precedence. Direct calls to the named cloth
+entry points select that method regardless of driver flags. Each cloth solver
+owns independent workspace and adaptive node-box history.
+
+### Spatial grid scheduling for basic cloth
 
 Enable `--use_cloth_grid true --cloth_grid_dx 0.05` to group the basic cloth
 solver's vertices into cubic cells of side `dx`. The grid is aligned to world
@@ -119,24 +129,15 @@ finish. Setting `--use_parallel false` executes the same grid schedule serially
 for comparison. The grid option defaults to false and is supported only for
 basic cloth, with OGC disabled.
 
-Within each batch, cells are dispatched in descending estimated work order
-(the sum of their vertices' contact-list sizes, plus a base vertex cost).
-For frictionless contact solves with multiple OpenMP threads, expensive cells
-can receive a small worker group. The group evaluates the current vertex's
-contact contributions and CCD tests in parallel; its leader accumulates in
-the original contact order and commits that vertex before the cell advances
-to the next one. Supporting workers never update another vertex in that cell
-concurrently. Light cells retain the scalar vertex kernel and use the remaining
-workers. Frictional and collision-free solves retain whole-cell scheduling.
-Short cooperative waits spin briefly; prolonged waits yield and then park
-temporarily so a delayed group member can make progress.
-This optimization keeps the existing cell ownership, dependency batches,
-node-box bounds, and serial vertex order. It is automatic with
-`--use_cloth_grid true`; no additional solver flag is required.
+Inside each cell, the complete reference Newton update, contact accumulation,
+and CCD traversal run sequentially before advancing to the next vertex.
+Parallelism is across independent cells. Ambient-grid does not use the
+experimental contact buffers, helper-thread contact/CCD sweeps, or cached
+AABB rejections. This makes grid scheduling and the experimental greedy solver
+two separate routes for comparison against basic.
 
-Use `--verbose true --write_substeps false` for grid setup and synchronization
-diagnostics. These optional timers add overhead, so leave verbose output off
-for scaling measurements.
+Use `--verbose true --write_substeps false` for occupied-cell/batch counts and
+normal solver diagnostics.
 
 `dx` must be strictly greater than `2 * node_box_max`. Same-color cells have at
 least one intervening cell along one axis, so this bound ensures node boxes
@@ -676,9 +677,12 @@ reader can jump to the layer they care about.
     the OGC narrow phase (`--use_ogc`). With `--use_parallel`, the
     conflict-graph coloring built in `parallel_helper` drives parallel-by-color
     commits.
+  - `global_gauss_seidel_solver_basic_experimental`
+    (`--use_basic_experimental`): optimized basic cloth, including cooperative
+    contact evaluation and CCD for small colors.
   - `global_gauss_seidel_solver_ambient_grid` (`--use_cloth_grid`): separate
     basic-cloth grid solver; preserves node-box ownership, safe execution
-    batches, cooperative contact scheduling, and Houdini grid substep output.
+    batches, reference vertex/contact computation, and Houdini grid substep output.
   - `global_gauss_seidel_solver_ogc` (`--use_ogc_solver`): per-iteration broad-
     phase box/pair refresh with `--ogc_box_pad`-padded node boxes, OGC clip
     unconditionally on, and partial BVH leaf refits via
