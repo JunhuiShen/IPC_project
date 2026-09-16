@@ -43,6 +43,17 @@ struct ClothGridSchedule {
                const std::vector<std::vector<int>>& dependencies,
                double cell_dx);
 
+    // Enlarge minimum_dx at each rebuild to exceed both the maximum anchor
+    // L-infinity dependency span and twice the actual directional box reach.
+    // A floating-point margin is included. Ownership then stays fixed until
+    // the next rebuild, even as positions move inside their node boxes.
+    // Verifies one batch per occupied parity color; invalid/unrepresentable
+    // inputs or a failed postcondition leave the previous schedule unchanged.
+    void build_auto_dx(const std::vector<Vec3>& positions,
+                       const std::vector<AABB>& node_boxes,
+                       const std::vector<std::vector<int>>& dependencies,
+                       double minimum_dx);
+
     // Start expensive cells first within each conflict-free batch. Costs sum
     // over the vertices in a cell; equal sums retain ascending cell indices.
     // Cell ownership, batch membership, and serial vertex order are unchanged.

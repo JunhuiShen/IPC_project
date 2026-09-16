@@ -4,6 +4,7 @@
 #include "ipc_args.h"
 #include "make_shape.h"
 #include "mesh_utils.h"
+#include "parallel_helper.h"
 #include "simulation.h"
 #include "solver.h"
 
@@ -242,6 +243,109 @@ TEST(ClothGridSolver, ContactFramesMatchSerialGridAcrossThreadCounts) {
                 displacement += (scene.state.deformed_positions[node]
                     - initial_positions[node]).squaredNorm();
             EXPECT_GT(displacement, 1e-10);
+        }
+    }
+}
+
+TEST(ClothGridSolver, AutomaticDxMatchesSerialAcrossCollisionModesAndRebuilds) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    constexpr std::array<int, 3> thread_counts = {1, 1, 4};
+    constexpr int frames = 2;
+    // Separate live mesh identities preserve adaptive history within each run
+    // and reset the solver workspace between independent reference runs.
+    std::array<std::array<ClothScene, 3>, 2> configurations;
+    std::array<std::array<DeformedState, frames>, 2> references;
+    for (std::size_t collision = 0; collision < configurations.size(); ++collision) {
+        for (auto& scene : configurations[collision]) {
+            build_contact_scene(scene, 0.0);
+            scene.params.cloth_grid_auto_dx = true;
+            // Invalid for manual mode, deliberately requiring automatic sizing.
+            scene.params.cloth_grid_dx = 0.001;
+            scene.params.node_box_update_count = 1;
+            scene.params.max_global_iters = 3;
+            if (!collision) {
+                scene.params.d_hat = 0.0;
+                scene.params.k_barrier = 0.0;
+                scene.params.use_ccd = false;
+                scene.params.use_ccd_guess = false;
+            }
+        }
+    }
+    for (std::size_t collision = 0; collision < configurations.size(); ++collision) {
+        for (std::size_t run = 0; run < thread_counts.size(); ++run) {
+            SCOPED_TRACE(::testing::Message() << "collision=" << collision
+                << " run=" << run << " threads=" << thread_counts[run]);
+            auto& scene = configurations[collision][run];
+            scene.params.use_parallel = run != 0;
+            omp_set_num_threads(thread_counts[run]);
+            const auto elastic = build_elastic_adj(scene.mesh, scene.adjacency,
+                static_cast<int>(scene.state.deformed_positions.size()));
+            int captures = 0;
+            for (int frame = 1; frame <= frames; ++frame) {
+                const auto result = advance_one_frame(scene.state, scene.mesh,
+                    scene.adjacency, scene.pins, scene.params, scene.broad_phase,
+                    frame, nullptr,
+                    [&](int global_substep, const std::vector<Vec3>& positions) {
+                        EXPECT_EQ(global_substep, captures++);
+                        const auto& cache = scene.broad_phase.cache();
+                        ASSERT_EQ(cache.node_boxes.size(), positions.size());
+                        if (collision) {
+                            EXPECT_FALSE(cache.nt_pairs.empty());
+                            EXPECT_FALSE(cache.ss_pairs.empty());
+                        } else {
+                            EXPECT_TRUE(cache.nt_pairs.empty());
+                            EXPECT_TRUE(cache.ss_pairs.empty());
+                        }
+                        // Boxes store the most recent fixed cell anchors, not
+                        // the post-sweep positions. Reconstruct their centers
+                        // and verify the automatic sizing invariant for the
+                        // complete current elastic/contact dependency graph.
+                        std::vector<Vec3> anchors(positions.size());
+                        for (std::size_t node = 0; node < positions.size(); ++node) {
+                            const auto& box = cache.node_boxes[node];
+                            EXPECT_TRUE((positions[node].array() >= box.min.array()).all());
+                            EXPECT_TRUE((positions[node].array() <= box.max.array()).all());
+                            anchors[node] = 0.5 * (box.min + box.max);
+                        }
+                        std::vector<std::vector<int>> contact, dependencies;
+                        if (collision) {
+                            build_contact_adj(cache, static_cast<int>(positions.size()), contact);
+                            union_adjacency(elastic, contact, dependencies);
+                        } else {
+                            dependencies = elastic;
+                        }
+                        solver_detail::ClothGridSchedule grid;
+                        grid.build_auto_dx(anchors, cache.node_boxes, dependencies,
+                            scene.params.cloth_grid_dx);
+                        EXPECT_GT(grid.dx, scene.params.cloth_grid_dx);
+                        ASSERT_LE(grid.batches.size(), 8u);
+                        std::array<int, 8> parity_batch;
+                        parity_batch.fill(-1);
+                        std::vector<int> vertex_cell(positions.size(), -1);
+                        for (std::size_t cell = 0; cell < grid.cells.size(); ++cell) {
+                            const auto& item = grid.cells[cell];
+                            int& batch = parity_batch[item.color_id];
+                            if (batch < 0) batch = item.batch_id;
+                            EXPECT_EQ(batch, item.batch_id);
+                            for (int vertex : item.vertices) vertex_cell[vertex] = static_cast<int>(cell);
+                        }
+                        for (std::size_t vertex = 0; vertex < dependencies.size(); ++vertex)
+                            for (int other : dependencies[vertex]) {
+                                const int first = vertex_cell[vertex], second = vertex_cell[other];
+                                ASSERT_GE(first, 0);
+                                ASSERT_GE(second, 0);
+                                if (first != second)
+                                    EXPECT_NE(grid.cells[first].color_id, grid.cells[second].color_id);
+                            }
+                    });
+                ASSERT_TRUE(result.converged);
+                EXPECT_EQ(result.iterations,
+                    scene.params.substeps * scene.params.max_global_iters);
+                if (run == 0) references[collision][frame - 1] = scene.state;
+                else expect_states_bitwise_equal(scene.state, references[collision][frame - 1]);
+            }
+            EXPECT_EQ(captures, frames * scene.params.substeps);
         }
     }
 }
@@ -712,6 +816,8 @@ TEST(ClothGridParameters, RejectsInvalidEnabledConfiguration) {
 TEST(ClothGridParameters, CliParsesAndSerializesGridSettings) {
     IPCArgs3D defaults;
     EXPECT_FALSE(defaults.to_sim_params().use_cloth_grid);
+    EXPECT_FALSE(defaults.to_sim_params().cloth_grid_auto_dx);
+    EXPECT_FALSE(SimParams::zeros().cloth_grid_auto_dx);
     EXPECT_DOUBLE_EQ(defaults.to_sim_params().cloth_grid_dx, 0.05);
 
     IPCArgs3D args;
@@ -720,6 +826,7 @@ TEST(ClothGridParameters, CliParsesAndSerializesGridSettings) {
         "--node_box_update_count", "3", "--use_parallel", "false"}));
     const SimParams params = args.to_sim_params();
     EXPECT_TRUE(params.use_cloth_grid);
+    EXPECT_FALSE(params.cloth_grid_auto_dx);
     EXPECT_FALSE(params.use_parallel);
     EXPECT_DOUBLE_EQ(params.cloth_grid_dx, 0.064);
     EXPECT_DOUBLE_EQ(params.node_box_max, 0.004);
@@ -732,6 +839,7 @@ TEST(ClothGridParameters, CliParsesAndSerializesGridSettings) {
     ASSERT_TRUE(restored.deserialize(saved.path.string()));
     const SimParams round_trip = restored.to_sim_params();
     EXPECT_TRUE(round_trip.use_cloth_grid);
+    EXPECT_FALSE(round_trip.cloth_grid_auto_dx);
     EXPECT_FALSE(round_trip.use_parallel);
     EXPECT_DOUBLE_EQ(round_trip.cloth_grid_dx, params.cloth_grid_dx);
     EXPECT_DOUBLE_EQ(round_trip.node_box_max, params.node_box_max);
@@ -744,6 +852,66 @@ TEST(ClothGridParameters, CliParsesAndSerializesGridSettings) {
     ASSERT_TRUE(parse_arguments(invalid,
         {"3D_sim", "--use_cloth_grid", "true", "--cloth_grid_dx", "0.02"}));
     EXPECT_THROW(invalid.to_sim_params(), std::invalid_argument);
+}
+
+TEST(ClothGridParameters, AutomaticDxAllowsSmallMinimumButRetainsOtherValidation) {
+    SimParams params = valid_grid_parameters();
+    params.cloth_grid_auto_dx = true;
+    for (double minimum : {0.001, 0.01, 0.02, 0.1}) {
+        params.cloth_grid_dx = minimum;
+        EXPECT_NO_THROW(params.validate_cloth_grid_parameters());
+    }
+    const double infinity = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    for (double minimum : {0.0, -0.1, infinity, nan}) {
+        params.cloth_grid_dx = minimum;
+        EXPECT_THROW(params.validate_cloth_grid_parameters(), std::invalid_argument);
+    }
+    params.cloth_grid_dx = 0.001;
+    for (double invalid_radius : {0.0, infinity, nan}) {
+        params.node_box_max = invalid_radius;
+        EXPECT_THROW(params.validate_cloth_grid_parameters(), std::invalid_argument);
+    }
+    params.node_box_max = 0.01;
+    params.use_ogc = true;
+    EXPECT_THROW(params.validate_cloth_grid_parameters(), std::invalid_argument);
+    params.use_ogc = false;
+    params.use_ogc_solver = true;
+    EXPECT_THROW(params.validate_cloth_grid_parameters(), std::invalid_argument);
+    params.use_ogc_solver = false;
+    params.cloth_grid_auto_dx = false;
+    EXPECT_THROW(params.validate_cloth_grid_parameters(), std::invalid_argument);
+}
+
+TEST(ClothGridParameters, AutomaticDxCliFlagRoundTripsAndCanBeDisabled) {
+    for (const auto& words : std::vector<std::vector<std::string>>{
+             {"3D_sim", "--use_cloth_grid", "true", "--cloth_grid_auto_dx",
+                 "--cloth_grid_dx", "0.001"},
+             {"3D_sim", "--use_cloth_grid", "true", "--cloth_grid_auto_dx", "true",
+                 "--cloth_grid_dx", "0.001"}}) {
+        IPCArgs3D args;
+        ASSERT_TRUE(parse_arguments(args, words));
+        const auto params = args.to_sim_params();
+        EXPECT_TRUE(params.use_cloth_grid);
+        EXPECT_TRUE(params.cloth_grid_auto_dx);
+        EXPECT_DOUBLE_EQ(params.cloth_grid_dx, 0.001);
+        TemporaryArgsFile saved;
+        args.serialize(saved.path.string());
+        IPCArgs3D restored;
+        ASSERT_TRUE(restored.deserialize(saved.path.string()));
+        const auto round_trip = restored.to_sim_params();
+        EXPECT_TRUE(round_trip.use_cloth_grid);
+        EXPECT_TRUE(round_trip.cloth_grid_auto_dx);
+        EXPECT_DOUBLE_EQ(round_trip.cloth_grid_dx, params.cloth_grid_dx);
+    }
+    IPCArgs3D disabled;
+    ASSERT_TRUE(parse_arguments(disabled, {"3D_sim", "--use_cloth_grid", "true",
+        "--cloth_grid_auto_dx", "false", "--cloth_grid_dx", "0.001"}));
+    EXPECT_THROW(disabled.to_sim_params(), std::invalid_argument);
+    IPCArgs3D manual;
+    ASSERT_TRUE(parse_arguments(manual, {"3D_sim", "--use_cloth_grid", "true",
+        "--cloth_grid_auto_dx", "false", "--cloth_grid_dx", "0.05"}));
+    EXPECT_FALSE(manual.to_sim_params().cloth_grid_auto_dx);
 }
 
 TEST(BasicSolverParameters, ExperimentalDefaultsOffAndRoundTrips) {

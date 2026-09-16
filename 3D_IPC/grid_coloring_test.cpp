@@ -28,6 +28,44 @@ const GridCell& cell_for_vertex(const ClothGridSchedule& schedule, int vertex) {
     throw std::runtime_error("Test vertex missing from schedule");
 }
 
+void expect_one_batch_per_parity(const ClothGridSchedule& schedule,
+    const std::vector<AABB>& node_boxes,
+    const std::vector<std::vector<int>>& dependencies) {
+    std::array<int, 8> batch_for_color;
+    batch_for_color.fill(-1);
+    ASSERT_LE(schedule.batches.size(), 8u);
+    std::vector<int> occurrences(node_boxes.size(), 0);
+    for (std::size_t batch = 0; batch < schedule.batches.size(); ++batch) {
+        ASSERT_FALSE(schedule.batches[batch].empty());
+        const int color = schedule.cells[schedule.batches[batch].front()].color_id;
+        ASSERT_GE(color, 0);
+        ASSERT_LT(color, 8);
+        EXPECT_EQ(batch_for_color[color], -1) << "repeated parity=" << color;
+        batch_for_color[color] = static_cast<int>(batch);
+        for (int cell_index : schedule.batches[batch]) {
+            const auto& cell = schedule.cells[cell_index];
+            EXPECT_EQ(cell.color_id, color);
+            EXPECT_EQ(cell.batch_id, static_cast<int>(batch));
+            EXPECT_TRUE(std::is_sorted(cell.vertices.begin(), cell.vertices.end()));
+            for (int vertex : cell.vertices) ++occurrences[vertex];
+        }
+    }
+    for (int count : occurrences) EXPECT_EQ(count, 1);
+    for (std::size_t vertex = 0; vertex < dependencies.size(); ++vertex)
+        for (int other : dependencies[vertex]) {
+            const auto& a = cell_for_vertex(schedule, static_cast<int>(vertex));
+            const auto& b = cell_for_vertex(schedule, other);
+            if (a.index != b.index) EXPECT_NE(a.color_id, b.color_id);
+        }
+    for (std::size_t a = 0; a < schedule.cells.size(); ++a)
+        for (std::size_t b = a + 1; b < schedule.cells.size(); ++b) {
+            if (schedule.cells[a].color_id != schedule.cells[b].color_id) continue;
+            for (int first : schedule.cells[a].vertices)
+                for (int second : schedule.cells[b].vertices)
+                    EXPECT_FALSE(aabb_intersects(node_boxes[first], node_boxes[second]));
+        }
+}
+
 struct RestoreOpenMP {
     int threads = omp_get_max_threads();
     int dynamic = omp_get_dynamic();
@@ -184,6 +222,169 @@ TEST(ClothGridSchedule, InvalidDependenciesPreservePreviousSchedule) {
     EXPECT_THROW(schedule.build(positions, boxes(positions), {{}, {}}, 2.0), std::invalid_argument);
     EXPECT_EQ(schedule.dx, 1.0);
     EXPECT_EQ(schedule.vertex_color_groups, groups);
+}
+
+TEST(ClothGridSchedule, AutoDxEliminatesLongOneSidedDependencySubBatches) {
+    const std::vector<Vec3> positions = {
+        Vec3(0.1, 0.1, 0.1), Vec3(2.1, 0.1, 0.1),
+        Vec3(4.1, 0.1, 0.1), Vec3(6.1, 0.1, 0.1), Vec3(0.2, 0.1, 0.1)
+    };
+    std::vector<std::vector<int>> dependencies(positions.size());
+    dependencies[1] = {0, 0};
+    dependencies[2] = {0, 1};
+    dependencies[4] = {0, 4}; // Same-cell and self edges are harmless.
+    const auto node_boxes = boxes(positions, 0.05);
+    ClothGridSchedule manual, automatic;
+    manual.build(positions, node_boxes, dependencies, 1.0);
+    ASSERT_GT(manual.batches.size(), 1u);
+    automatic.build_auto_dx(positions, node_boxes, dependencies, 1.0);
+    EXPECT_GE(automatic.dx, 1.0);
+    EXPECT_GT(static_cast<long double>(automatic.dx),
+        static_cast<long double>(positions[2].x()) - positions[0].x());
+    expect_one_batch_per_parity(automatic, node_boxes, dependencies);
+    // Opting in must not change the manual scheduling contract.
+    ClothGridSchedule unchanged;
+    unchanged.build(positions, node_boxes, dependencies, 1.0);
+    EXPECT_DOUBLE_EQ(unchanged.dx, manual.dx);
+    EXPECT_EQ(unchanged.batches, manual.batches);
+    EXPECT_EQ(unchanged.vertex_color_groups, manual.vertex_color_groups);
+}
+
+TEST(ClothGridSchedule, AutoDxUsesActualAsymmetricNodeBoxReach) {
+    const std::vector<Vec3> positions = {
+        Vec3(0.25, -0.25, 0.25), Vec3(4.25, -0.25, 0.25)
+    };
+    auto node_boxes = boxes(positions, 0.1);
+    node_boxes[0].min.x() = positions[0].x() - 0.8;
+    node_boxes[1].max.z() = positions[1].z() + 0.7;
+    ClothGridSchedule automatic;
+    automatic.build_auto_dx(positions, node_boxes, {}, 0.01);
+    for (std::size_t vertex = 0; vertex < positions.size(); ++vertex)
+        for (int axis = 0; axis < 3; ++axis) {
+            const long double lower = static_cast<long double>(positions[vertex][axis])
+                - node_boxes[vertex].min[axis];
+            const long double upper = static_cast<long double>(node_boxes[vertex].max[axis])
+                - positions[vertex][axis];
+            EXPECT_GT(static_cast<long double>(automatic.dx), 2 * std::max(lower, upper));
+        }
+    expect_one_batch_per_parity(automatic, node_boxes, {});
+}
+
+TEST(ClothGridSchedule, AutoDxPreservesAdequateMinimumAndHandlesEmptyInput) {
+    const std::vector<Vec3> positions = {
+        Vec3(-0.1, 0.2, 0.3), Vec3(0.4, 0.2, 0.3)
+    };
+    const auto node_boxes = boxes(positions, 0.02);
+    const std::vector<std::vector<int>> dependencies = {{}, {0}};
+    ClothGridSchedule automatic;
+    automatic.build_auto_dx(positions, node_boxes, dependencies, 5.0);
+    EXPECT_DOUBLE_EQ(automatic.dx, 5.0);
+    expect_one_batch_per_parity(automatic, node_boxes, dependencies);
+    automatic.build_auto_dx({}, {}, {}, 0.125);
+    EXPECT_DOUBLE_EQ(automatic.dx, 0.125);
+    EXPECT_TRUE(automatic.cells.empty());
+    EXPECT_TRUE(automatic.batches.empty());
+    EXPECT_TRUE(automatic.vertex_color_groups.empty());
+    EXPECT_EQ(automatic.min_index, (std::array<std::int64_t, 3>{{0, 0, 0}}));
+    EXPECT_EQ(automatic.max_index, (std::array<std::int64_t, 3>{{-1, -1, -1}}));
+}
+
+TEST(ClothGridSchedule, AutoDxHandlesNegativeCoordinatesAndAdjacentBoundaryValues) {
+    const double infinity = std::numeric_limits<double>::infinity();
+    const std::vector<Vec3> positions = {
+        Vec3(-2.0, -2.0, -2.0), Vec3(-1.0, -1.0, -1.0),
+        Vec3(std::nextafter(-1.0, -infinity), 0.0, 0.0),
+        Vec3(std::nextafter(-1.0, infinity), 1.0, 1.0),
+        Vec3(0.0, 2.0, 2.0), Vec3(8.0, 8.0, 8.0)
+    };
+    const std::vector<std::vector<int>> dependencies = {
+        {}, {0}, {1}, {2}, {3}, {}
+    };
+    const auto node_boxes = boxes(positions, 0.01);
+    ClothGridSchedule automatic;
+    automatic.build_auto_dx(positions, node_boxes, dependencies, 0.02);
+    EXPECT_GT(automatic.dx, 1.0);
+    expect_one_batch_per_parity(automatic, node_boxes, dependencies);
+    // Stable world origin and correct floor, including negative cells.
+    for (std::size_t vertex = 0; vertex < positions.size(); ++vertex) {
+        const auto& cell = cell_for_vertex(automatic, static_cast<int>(vertex));
+        for (int axis = 0; axis < 3; ++axis)
+            EXPECT_EQ(cell.index[axis], static_cast<std::int64_t>(
+                std::floor(static_cast<long double>(positions[vertex][axis]) / automatic.dx)));
+    }
+}
+
+TEST(ClothGridSchedule, AutoDxInvalidInputsAndOverflowPreservePreviousSchedule) {
+    const std::vector<Vec3> positions = {Vec3(0.1, 0.1, 0.1), Vec3(2.1, 0.1, 0.1)};
+    const auto node_boxes = boxes(positions, 0.05);
+    const std::vector<std::vector<int>> dependencies = {{}, {0}};
+    ClothGridSchedule automatic;
+    automatic.build_auto_dx(positions, node_boxes, dependencies, 0.1);
+    const auto original = automatic;
+    const auto expect_preserved = [&]() {
+        EXPECT_DOUBLE_EQ(automatic.dx, original.dx);
+        EXPECT_EQ(automatic.min_index, original.min_index);
+        EXPECT_EQ(automatic.max_index, original.max_index);
+        EXPECT_EQ(automatic.batches, original.batches);
+        EXPECT_EQ(automatic.vertex_color_groups, original.vertex_color_groups);
+        EXPECT_EQ(automatic.cells.size(), original.cells.size());
+    };
+    const double infinity = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    for (double minimum : {0.0, -1.0, infinity, nan}) {
+        EXPECT_THROW(automatic.build_auto_dx(positions, node_boxes, dependencies, minimum),
+            std::invalid_argument);
+        expect_preserved();
+    }
+    EXPECT_THROW(automatic.build_auto_dx(positions, {}, dependencies, 0.1), std::invalid_argument);
+    expect_preserved();
+    for (const auto& invalid : std::vector<std::vector<std::vector<int>>>{
+             {{}, {-1}}, {{}, {2}}, {{0}}}) {
+        EXPECT_THROW(automatic.build_auto_dx(positions, node_boxes, invalid, 0.1),
+            std::invalid_argument);
+        expect_preserved();
+    }
+    auto invalid_positions = positions;
+    invalid_positions[0].x() = nan;
+    EXPECT_THROW(automatic.build_auto_dx(invalid_positions, node_boxes, dependencies, 0.1),
+        std::invalid_argument);
+    expect_preserved();
+    auto invalid_boxes = node_boxes;
+    invalid_boxes[0].min.x() = positions[0].x() + 0.01;
+    EXPECT_THROW(automatic.build_auto_dx(positions, invalid_boxes, dependencies, 0.1),
+        std::invalid_argument);
+    expect_preserved();
+    invalid_boxes = node_boxes;
+    invalid_boxes[1].max.z() = infinity;
+    EXPECT_THROW(automatic.build_auto_dx(positions, invalid_boxes, dependencies, 0.1),
+        std::invalid_argument);
+    expect_preserved();
+    // Finite endpoints can have a span larger than any finite double dx.
+    const double huge = 0.75 * std::numeric_limits<double>::max();
+    const std::vector<Vec3> distant = {Vec3(-huge, 0.0, 0.0), Vec3(huge, 0.0, 0.0)};
+    EXPECT_THROW(automatic.build_auto_dx(distant, boxes(distant, 0.0), dependencies, 0.1),
+        std::invalid_argument);
+    expect_preserved();
+}
+
+TEST(ClothGridSchedule, AutoDxRecomputesAfterMotionAndCanReturnToConfiguredMinimum) {
+    std::vector<Vec3> positions = {Vec3(-4.0, 0.0, 0.0), Vec3(4.0, 0.0, 0.0)};
+    const std::vector<std::vector<int>> dependencies = {{}, {0}};
+    ClothGridSchedule automatic;
+    automatic.build_auto_dx(positions, boxes(positions, 0.01), dependencies, 0.5);
+    const double initial_dx = automatic.dx;
+    EXPECT_GT(initial_dx, 8.0);
+    positions = {Vec3(-0.1, 0.0, 0.0), Vec3(0.1, 0.0, 0.0)};
+    const auto smaller_boxes = boxes(positions, 0.01);
+    automatic.build_auto_dx(positions, smaller_boxes, dependencies, 0.5);
+    EXPECT_DOUBLE_EQ(automatic.dx, 0.5);
+    EXPECT_LT(automatic.dx, initial_dx);
+    expect_one_batch_per_parity(automatic, smaller_boxes, dependencies);
+    positions[1].z() = 12.0;
+    const auto stretched_boxes = boxes(positions, 0.01);
+    automatic.build_auto_dx(positions, stretched_boxes, dependencies, 0.5);
+    EXPECT_GT(automatic.dx, 12.0);
+    expect_one_batch_per_parity(automatic, stretched_boxes, dependencies);
 }
 
 TEST(ClothGridSchedule, PrioritizesSummedCellCostsWithStableTiesAndPreservesOwnership) {

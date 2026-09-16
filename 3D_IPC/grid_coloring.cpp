@@ -46,6 +46,73 @@ int parity_color(const CellIndex& index) {
 
 } // namespace
 
+void ClothGridSchedule::build_auto_dx(
+    const std::vector<Vec3>& positions,
+    const std::vector<AABB>& node_boxes,
+    const std::vector<std::vector<int>>& dependencies,
+    double minimum_dx) {
+    if (!std::isfinite(minimum_dx) || !(minimum_dx > 0.0))
+        throw std::invalid_argument("Cloth grid minimum dx must be finite and positive");
+    if (positions.size() != node_boxes.size())
+        throw std::invalid_argument("Cloth grid requires one node box per vertex");
+    if (!dependencies.empty() && dependencies.size() != positions.size())
+        throw std::invalid_argument("Cloth grid requires one dependency row per vertex");
+    if (positions.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        throw std::invalid_argument("Cloth grid has too many vertices");
+
+    long double reach = 0.0L, span = 0.0L, scale = minimum_dx;
+    for (std::size_t vertex = 0; vertex < positions.size(); ++vertex) {
+        const auto& p = positions[vertex];
+        const auto& box = node_boxes[vertex];
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(p[axis]) || !std::isfinite(box.min[axis]) ||
+                !std::isfinite(box.max[axis]) || box.min[axis] > p[axis] ||
+                box.max[axis] < p[axis])
+                throw std::invalid_argument("Cloth grid node boxes must be finite and contain their vertices");
+            const long double anchor = p[axis];
+            reach = std::max({reach, anchor - box.min[axis], box.max[axis] - anchor});
+            scale = std::max({scale, std::abs(anchor),
+                std::abs(static_cast<long double>(box.min[axis])),
+                std::abs(static_cast<long double>(box.max[axis]))});
+        }
+    }
+    // Contact adjacency can be one-sided. Scan every supplied edge, including
+    // inactive broad-phase candidates: live geometry reads and CCD need them.
+    for (std::size_t vertex = 0; vertex < dependencies.size(); ++vertex) {
+        for (int other : dependencies[vertex]) {
+            if (other < 0 || static_cast<std::size_t>(other) >= positions.size())
+                throw std::invalid_argument("Cloth grid dependency contains an invalid vertex index");
+            for (int axis = 0; axis < 3; ++axis)
+                span = std::max(span, std::abs(
+                    static_cast<long double>(positions[vertex][axis]) - positions[other][axis]));
+        }
+    }
+    const long double required = std::max(span, 2.0L * reach);
+    scale = std::max(scale, required);
+    // Account for world-coordinate precision as well as span precision. This
+    // also keeps division/floor rounding away from the separation threshold.
+    const long double padded = required +
+        64.0L * std::numeric_limits<double>::epsilon() * scale;
+    if (!std::isfinite(padded) || padded >= std::numeric_limits<double>::max())
+        throw std::invalid_argument("Cloth grid automatic dx is not representable");
+    const double cell_dx = std::max(minimum_dx, std::nextafter(
+        static_cast<double>(padded), std::numeric_limits<double>::infinity()));
+
+    ClothGridSchedule next;
+    next.build(positions, node_boxes, dependencies, cell_dx);
+    // Keep the existing exact dependency-to-cell check in build(). Never
+    // silently discard conflicts if numerical corner cases violate the bound.
+    std::array<int, 8> color_batch;
+    color_batch.fill(-1);
+    for (const auto& cell : next.cells) {
+        int& batch = color_batch[cell.color_id];
+        if (batch != -1 && batch != cell.batch_id)
+            throw std::logic_error("Cloth grid automatic dx left a same-color dependency conflict");
+        batch = cell.batch_id;
+    }
+    *this = std::move(next);
+}
+
 void ClothGridSchedule::build(const std::vector<Vec3>& positions,
                               const std::vector<AABB>& node_boxes,
                               const std::vector<std::vector<int>>& dependencies,

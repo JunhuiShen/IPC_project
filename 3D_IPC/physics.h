@@ -52,7 +52,8 @@ struct SimParams {
     bool   use_parallel;
     bool   use_basic_experimental; // select optimized cloth basic assembly/scheduling
     bool   use_cloth_grid;       // basic cloth only: serial vertices within parallel spatial cells
-    double cloth_grid_dx;        // world-space cell side; must exceed twice node_box_max
+    bool   cloth_grid_auto_dx;   // enlarge dx from dependencies at each grid rebuild
+    double cloth_grid_dx;        // fixed side (must exceed 2*node_box_max), or minimum in auto mode
     bool   write_substeps;       // if true, export a frame file after every substep (not just every frame)
     bool   use_ccd;              // if true, run CCD step clamping in per_vertex_safe_step
     bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
@@ -102,6 +103,7 @@ struct SimParams {
         p.use_parallel              = false;
         p.use_basic_experimental    = false;
         p.use_cloth_grid            = false;
+        p.cloth_grid_auto_dx        = false;
         p.cloth_grid_dx             = 0.05;
         p.write_substeps            = false;
         p.use_ccd                   = false;
@@ -133,9 +135,10 @@ struct SimParams {
         if (!std::isfinite(node_box_min) || !std::isfinite(node_box_max)
             || node_box_min <= 1e-10 || node_box_max < node_box_min)
             throw std::invalid_argument("cloth grid requires 1e-10 < node_box_min <= node_box_max, both finite");
-        if (!std::isfinite(cloth_grid_dx) || cloth_grid_dx <= 0.0
-            || node_box_max >= cloth_grid_dx * 0.5)
-            throw std::invalid_argument("--cloth_grid_dx must be finite and > 2 * --node_box_max so same-color node boxes cannot overlap");
+        if (!std::isfinite(cloth_grid_dx) || cloth_grid_dx <= 0.0)
+            throw std::invalid_argument("--cloth_grid_dx must be finite and positive");
+        if (!cloth_grid_auto_dx && node_box_max >= cloth_grid_dx * 0.5)
+            throw std::invalid_argument("fixed --cloth_grid_dx must be > 2 * --node_box_max so same-color node boxes cannot overlap");
         if (node_box_update_count <= 0 || max_global_iters <= 0)
             throw std::invalid_argument("cloth grid requires positive node_box_update_count and max_substep_iters");
     }

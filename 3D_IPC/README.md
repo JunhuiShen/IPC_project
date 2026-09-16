@@ -151,7 +151,8 @@ is unchanged, and `--use_basic_experimental` is not required for grid cooperatio
 Use `--verbose true --write_substeps false` for occupied-cell/batch and selected
 cooperative-cell counts, along with normal solver diagnostics.
 
-`dx` must be strictly greater than `2 * node_box_max`. Same-color cells have at
+In the default fixed-size mode, `dx` must be strictly greater than
+`2 * node_box_max`. Same-color cells have at
 least one intervening cell along one axis, so this bound ensures node boxes
 belonging to different cells of the same color cannot touch or overlap. Invalid
 sizes are rejected. Each rebuild also checks the actual node boxes against the
@@ -167,6 +168,36 @@ geometric color (0–7), while `batch_id` identifies the actual simultaneous
 update group. Smaller cells can therefore increase the number of batches.
 This changes Gauss-Seidel ordering, so equal fixed iteration counts need not
 produce the same result as the default vertex-color solver.
+
+To eliminate those extra same-color batches, enable
+`--cloth_grid_auto_dx true`. In this opt-in mode, `--cloth_grid_dx` is a positive
+minimum cell size, not the final size. At every node-box rebuild the scheduler
+measures `R`, the largest anchor-position L-infinity span of any dependency edge,
+and `r`, the largest directional node-box reach from its anchor. It chooses a
+cell size at least the requested minimum and strictly greater than
+`max(R, 2*r)`, with a floating-point safety margin. Dependencies include triangle
+elasticity, bending hinges, and all broad-phase contact candidates (not just
+currently active barriers); collision-disabled runs still include elasticity
+and bending. Same-parity distinct cells are separated by more than `dx` in at
+least one anchor coordinate, so they cannot share an edge of span at most `R`.
+The scheduler also verifies that each occupied parity color has exactly one
+batch, failing rather than ignoring a remaining conflict. There are at most
+eight batches; empty parity colors have none. Batch IDs remain compact and are
+not necessarily equal to color IDs.
+
+For the existing small-cell configuration, add:
+
+```bash
+--use_cloth_grid true --cloth_grid_dx 0.021 --cloth_grid_auto_dx true
+```
+
+Actual `dx` can change at each rebuild and is shown by `--verbose true` and in
+the exported grid geometry. Cell ownership stays fixed until the next rebuild.
+This mode changes Gauss-Seidel ordering and can therefore change finite-iteration
+simulation results. Removing batches is not a speedup guarantee: larger cells
+also create fewer parallel tasks and longer serial vertex sequences. The fixed
+mode remains available for performance comparisons. The basic vertex-coloring
+and experimental solvers are unchanged.
 
 With `--write_substeps true`, each existing `substep_N` directory also contains:
 
@@ -554,7 +585,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | Time integration | `fps`, `substeps`, `num_frames` |
 | Physics | Shell: `E`, `nu`, `density`, `thickness`, `kB`; volumetric solid: `solid_E`, `solid_nu`, `solid_density`; rigid body: `rigid_density`; shared: `kpin`, `gx`, `gy`, `gz` |
 | Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `friction_coefficient`, `friction_velocity_epsilon`, `k_sdf`, `eps_sdf`, `damping`, `fixed_iters`, `use_parallel`, `verbose`, `write_substeps` |
-| Basic cloth grid | `use_cloth_grid` (default false), `cloth_grid_dx` (default 0.05 m, strictly greater than `2 * node_box_max`) |
+| Basic cloth grid | `use_cloth_grid` (default false), `cloth_grid_auto_dx` (default false), `cloth_grid_dx` (default 0.05 m; fixed side > `2 * node_box_max`, or positive minimum when auto sizing is enabled) |
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (per-iteration box/pair refresh solver), `ogc_box_pad` (BVH padding for the refresh; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (translation/node-box radius limits in m), `theta_box_min`, `theta_box_max` (rigid orientation-box angular-radius limits in rad), `node_box_update_count` (GS iterations between broad-phase/contact-color rebuilds; default 10) |

@@ -1455,8 +1455,11 @@ SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, co
             // Cell ownership stays fixed until the next node-box rebuild.
             // Dependency-safe batches run cells in parallel. Prioritization
             // changes only cell order, never the serial vertex order inside one.
-            grid_schedule.build(xnew, blue_boxes,
-                needs_mesh_contact_search ? combined_adj : ea, params.cloth_grid_dx);
+            const auto& dependencies = needs_mesh_contact_search ? combined_adj : ea;
+            if (params.cloth_grid_auto_dx)
+                grid_schedule.build_auto_dx(xnew, blue_boxes, dependencies, params.cloth_grid_dx);
+            else
+                grid_schedule.build(xnew, blue_boxes, dependencies, params.cloth_grid_dx);
             if (needs_mesh_contact_search) {
                 const auto& cache = broad_phase.cache();
                 for (int vi = 0; vi < nv; ++vi)
@@ -1468,9 +1471,9 @@ SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, co
             if (use_contact_sweep)
                 contact_sweep.prepare(grid_schedule, broad_phase.cache());
             if (params.verbose)
-                std::fprintf(stderr, "  [cloth grid] dx=%.6g occupied_cells=%zu batches=%zu cooperative_cells=%zu\n",
+                std::fprintf(stderr, "  [cloth grid] dx=%.6g occupied_cells=%zu batches=%zu cooperative_cells=%zu auto_dx=%s\n",
                     grid_schedule.dx, grid_schedule.cells.size(), grid_schedule.batches.size(),
-                    contact_sweep.cooperative_cells.size());
+                    contact_sweep.cooperative_cells.size(), params.cloth_grid_auto_dx ? "true" : "false");
         }
 
         if (iter == 1 && !params.fixed_iters) {
