@@ -212,9 +212,16 @@ if(BUILD_TESTING)
             target_compile_definitions("${target}" PRIVATE ${IPC_TEST_DEFINITIONS})
         endif()
         ipc_enable_ipo("${target}")
+        set(test_properties)
+        if(target MATCHES "^(contact_scheduling_test|rigid_body_ipc_test|solid_ipc_test|simulation_snapshot_test)$")
+            # These suites explicitly request native-sized teams or 64 workers.
+            # Concurrent spin-barrier tests can starve each other on laptops.
+            set(test_properties PROPERTIES RUN_SERIAL TRUE)
+        endif()
         gtest_discover_tests("${target}"
             DISCOVERY_MODE PRE_TEST
             DISCOVERY_TIMEOUT 60
+            ${test_properties}
         )
     endfunction()
 

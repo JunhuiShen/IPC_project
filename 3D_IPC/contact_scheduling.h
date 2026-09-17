@@ -85,6 +85,58 @@ void ordered_contact_tasks(int count, bool cooperative,
 
 inline void contact_spin_hint();
 
+// Reusable color barrier. The caller reserves storage before entering a team
+// and initializes it from an omp single region. Callbacks must join any tasks
+// they create before arriving: this barrier only joins the team's workers.
+class ColoredSweepBarrier {
+    struct alignas(64) WorkerGroup {
+        std::atomic<int> arrived{0};
+        std::atomic<unsigned> phase{0};
+        int size = 0;
+    };
+    static constexpr int group_size = 8;
+    std::unique_ptr<WorkerGroup[]> groups_;
+    int capacity_ = 0, group_count_ = 0;
+    alignas(64) std::atomic<int> arrived_{0};
+
+public:
+    void reserve(int threads) {
+        const int needed = (threads + group_size - 1) / group_size;
+        if (needed > capacity_) {
+            groups_ = std::make_unique<WorkerGroup[]>(needed);
+            capacity_ = needed;
+        }
+    }
+
+    void initialize(int threads) {
+        group_count_ = (threads + group_size - 1) / group_size;
+        for (int g = 0; g < group_count_; ++g) {
+            groups_[g].size = std::min(group_size, threads - g * group_size);
+            groups_[g].arrived.store(0, std::memory_order_relaxed);
+            groups_[g].phase.store(0, std::memory_order_relaxed);
+        }
+        arrived_.store(0, std::memory_order_relaxed);
+    }
+
+    template <class Finish>
+    void wait(int worker, unsigned phase, const Finish& finish) {
+        WorkerGroup& group = groups_[worker / group_size];
+        // Acquire every worker's writes through the two arrival levels, then
+        // publish completion and any scratch resets to all groups together.
+        if (group.arrived.fetch_add(1, std::memory_order_acq_rel) == group.size - 1) {
+            group.arrived.store(0, std::memory_order_relaxed);
+            if (arrived_.fetch_add(1, std::memory_order_acq_rel) == group_count_ - 1) {
+                arrived_.store(0, std::memory_order_relaxed);
+                finish();
+                for (int g = 0; g < group_count_; ++g)
+                    groups_[g].phase.store(phase, std::memory_order_release);
+            }
+        }
+        while (group.phase.load(std::memory_order_acquire) != phase)
+            contact_spin_hint();
+    }
+};
+
 // A block leader publishes independent contact ranges to its assigned helpers.
 // Contributions still return to the leader for accumulation in contact order.
 struct ContactTaskGroup {
@@ -159,8 +211,10 @@ struct ColoredBlockTeams {
     struct Choice { int block; std::size_t cost; int lanes = 1, limit = 1; };
     std::vector<Assignment> assignments;
     std::vector<std::vector<int>> whole;
+    std::vector<std::vector<int>> helper_contexts;
     std::unique_ptr<ContactTaskGroup[]> contexts;
     std::unique_ptr<std::atomic<int>[]> next;
+    ColoredSweepBarrier barrier;
     std::size_t context_capacity = 0, color_capacity = 0;
     int team = 1;
     bool prepared = false;
@@ -192,6 +246,7 @@ struct ColoredBlockTeams {
         const std::size_t count = groups.size() * static_cast<std::size_t>(team);
         assignments.assign(count, Assignment{});
         whole.resize(groups.size());
+        helper_contexts.resize(groups.size());
         if (count > context_capacity) {
             contexts = std::make_unique<ContactTaskGroup[]>(count);
             context_capacity = count;
@@ -240,8 +295,10 @@ struct ColoredBlockTeams {
             std::stable_sort(chosen.begin(), chosen.end(),
                 [](const Choice& a, const Choice& b) { return a.lanes > b.lanes; });
             int worker = 0;
+            helper_contexts[c].clear();
             for (const Choice& item : chosen) {
                 const int context = static_cast<int>(c) * team + worker;
+                if (item.lanes > 1) helper_contexts[c].push_back(context);
                 contexts[context].helpers = item.lanes - 1;
                 contexts[context].sequence.store(0, std::memory_order_relaxed);
                 for (int lane = 0; lane < item.lanes; ++lane)
@@ -260,75 +317,96 @@ struct ColoredBlockTeams {
     }
 };
 
-// Preserve barriers and ordered accumulation while reusing workers within
-// expensive blocks instead of creating an OpenMP task for every short range.
+// Preserve every color barrier and ordered contact accumulation. Fixed-iteration
+// callers may run multiple sweeps on one team, stopping at the next cache rebuild.
+// Contact helpers stay assigned to their original block throughout its update.
 template <class Cost, class Process>
 void for_each_colored_block(const std::vector<std::vector<int>>& groups,
-                            const Cost& cost, const Process& process) {
+                            const Cost& cost, const Process& process,
+                            int sweeps = 1) {
+    if (sweeps <= 0 || groups.empty()) return;
     if (omp_get_max_threads() == 1 || omp_in_parallel()) {
-        for (const auto& group : groups)
-            for (int block : group) process(block, false);
+        for (int sweep = 0; sweep < sweeps; ++sweep)
+            for (const auto& group : groups)
+                for (int block : group) process(block, false);
         return;
     }
     static thread_local ColoredBlockTeams storage;
     ColoredBlockTeams& workspace = storage;
     workspace.prepare(groups, cost);
-    std::vector<std::exception_ptr> errors(groups.size());
-#pragma omp parallel shared(errors, workspace)
+    workspace.barrier.reserve(omp_get_max_threads());
+    std::atomic<bool> failed{false};
+    std::exception_ptr error;
+    const auto invoke = [&](int block, bool cooperative) {
+        if (failed.load(std::memory_order_relaxed)) return;
+        try { process(block, cooperative); }
+        catch (...) {
+            if (!failed.exchange(true, std::memory_order_relaxed))
+                error = std::current_exception();
+        }
+    };
+#pragma omp parallel shared(error, failed, workspace)
     {
         const int worker = omp_get_thread_num();
-        const bool planned_team = omp_get_num_threads() == workspace.team;
-        const auto record_error = [&](std::size_t color) {
-#pragma omp critical(ipc_block_task_error)
-            { if (!errors[color]) errors[color] = std::current_exception(); }
-        };
-        for (std::size_t c = 0; c < groups.size(); ++c) {
-            if (!planned_team) {
-#pragma omp for schedule(dynamic, 1)
-                for (int i = 0; i < static_cast<int>(groups[c].size()); ++i) {
-                    try { process(groups[c][i], false); }
-                    catch (...) { record_error(c); }
-                }
-            } else {
-                const auto assignment = workspace.assignments[c * workspace.team + worker];
-                if (assignment.block >= 0) {
-                    ContactTaskGroup& context = workspace.contexts[assignment.context];
-                    if (assignment.lane == 0) {
-                        ContactTaskGroup* previous = active_contact_task_group;
-                        active_contact_task_group = assignment.lanes > 1 ? &context : nullptr;
-                        try { process(assignment.block, assignment.lanes > 1); }
-                        catch (...) { record_error(c); }
-                        active_contact_task_group = previous;
-                        context.sequence.store(-1, std::memory_order_release);
-                    } else {
-                        context.help();
-                    }
-                }
+        const int team = omp_get_num_threads();
+        const bool planned_team = team == workspace.team;
+#pragma omp single
+        { workspace.barrier.initialize(team); }
+        unsigned phase = 0;
+        for (int sweep = 0; sweep < sweeps; ++sweep) {
+            for (std::size_t c = 0; c < groups.size(); ++c) {
                 const auto& whole = workspace.whole[c];
-                if (whole.size() == groups[c].size()) {
-#pragma omp for schedule(static, 1) nowait
-                    for (int i = 0; i < static_cast<int>(whole.size()); ++i) {
-                        try { process(whole[i], false); }
-                        catch (...) { record_error(c); }
-                    }
-                } else {
-                    constexpr int chunk = 1;
-                    for (;;) {
-                        const int begin = workspace.next[c].fetch_add(chunk, std::memory_order_relaxed);
-                        if (begin >= static_cast<int>(whole.size())) break;
-                        for (int i = begin; i < std::min(begin + chunk, static_cast<int>(whole.size())); ++i) {
-                            try { process(whole[i], false); }
-                            catch (...) { record_error(c); }
+                if (!planned_team || whole.size() == groups[c].size()) {
+                    // Reserve the first wave without contending on a cursor.
+                    // Runtime team-size changes safely use whole-block work.
+                    const auto& group = groups[c];
+                    const int size = static_cast<int>(group.size());
+                    if (planned_team) {
+                        // Preserve the existing round-robin whole-block path
+                        // without a runtime workshare or shared cursor.
+                        for (int item = worker; item < size; item += team)
+                            invoke(group[item], false);
+                    } else {
+                        if (worker < size) invoke(group[worker], false);
+                        while (workspace.next[c].load(std::memory_order_relaxed) < size - team) {
+                            const int item = team + workspace.next[c].fetch_add(1, std::memory_order_relaxed);
+                            if (item < size) invoke(group[item], false);
                         }
                     }
+                } else {
+                    const auto assignment = workspace.assignments[c * workspace.team + worker];
+                    if (assignment.block >= 0) {
+                        ContactTaskGroup& context = workspace.contexts[assignment.context];
+                        if (assignment.lane == 0) {
+                            ContactTaskGroup* previous = active_contact_task_group;
+                            active_contact_task_group = assignment.lanes > 1 ? &context : nullptr;
+                            invoke(assignment.block, assignment.lanes > 1);
+                            active_contact_task_group = previous;
+                            context.sequence.store(-1, std::memory_order_release);
+                        } else {
+                            context.help();
+                        }
+                    }
+                    const int size = static_cast<int>(whole.size());
+                    while (workspace.next[c].load(std::memory_order_relaxed) < size) {
+                        const int item = workspace.next[c].fetch_add(1, std::memory_order_relaxed);
+                        if (item < size) invoke(whole[item], false);
+                    }
                 }
-#pragma omp barrier
+                workspace.barrier.wait(worker, ++phase, [&] {
+                    // No helper or cursor reader survives this color barrier.
+                    // Reset before publishing it, so the next sweep can reuse
+                    // each context without seeing the preceding stop command.
+                    workspace.next[c].store(0, std::memory_order_relaxed);
+                    for (int context : workspace.helper_contexts[c])
+                        workspace.contexts[context].sequence.store(0, std::memory_order_relaxed);
+                });
+                // On failure, drain the identical remaining barriers on every
+                // worker. A next-color failure must not split the current team.
             }
-            if (errors[c]) break;
         }
     }
-    for (const auto& error : errors)
-        if (error) std::rethrow_exception(error);
+    if (error) std::rethrow_exception(error);
 }
 
 // -----------------------------------------------------------------------------
@@ -523,6 +601,63 @@ struct ColoredContactSweep {
                 }
             }
         }
+    }
+};
+
+// -----------------------------------------------------------------------------
+// Whole-vertex colored sweeps
+// -----------------------------------------------------------------------------
+
+// Preserve all color/sweep barriers while avoiding a runtime workshare for
+// every short color. A workspace is reusable across sequential calls/teams.
+class ColoredVertexSweep {
+    ColoredSweepBarrier barrier_;
+    alignas(64) std::atomic<int> cursor_{0};
+
+public:
+    template <class Process>
+    void run(const std::vector<std::vector<int>>& colors, int sweeps,
+             const Process& process) {
+        if (sweeps <= 0 || colors.empty()) return;
+        barrier_.reserve(omp_get_max_threads());
+        std::atomic<bool> failed{false};
+        std::exception_ptr error;
+        const auto invoke = [&](int vertex) {
+            if (failed.load(std::memory_order_relaxed)) return;
+            try { process(vertex); }
+            catch (...) {
+                if (!failed.exchange(true, std::memory_order_relaxed))
+                    error = std::current_exception();
+            }
+        };
+#pragma omp parallel shared(failed, error)
+        {
+            const int worker = omp_get_thread_num();
+            const int team = omp_get_num_threads();
+#pragma omp single
+            {
+                barrier_.initialize(team);
+                cursor_.store(team, std::memory_order_relaxed);
+            }
+            unsigned phase = 0;
+            for (int sweep = 0; sweep < sweeps; ++sweep) {
+                for (const auto& color : colors) {
+                    const int count = static_cast<int>(color.size());
+                    if (worker < count) invoke(color[worker]);
+                    while (cursor_.load(std::memory_order_relaxed) < count) {
+                        const int item = cursor_.fetch_add(1, std::memory_order_relaxed);
+                        if (item < count) invoke(color[item]);
+                    }
+                    barrier_.wait(worker, ++phase, [&] {
+                        cursor_.store(team, std::memory_order_relaxed);
+                    });
+                    // Drain every barrier even on failure. A faster worker
+                    // can throw in the next color before a slower one leaves
+                    // this barrier; testing failed here could split the team.
+                }
+            }
+        }
+        if (error) std::rethrow_exception(error);
     }
 };
 

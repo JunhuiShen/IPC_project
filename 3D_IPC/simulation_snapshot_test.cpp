@@ -4,7 +4,12 @@
 #include "simulation.h"
 #include "solver.h"
 #include "broad_phase.h"
+#include "parallel_helper.h"
+#include "node_triangle_distance.h"
+#include "segment_segment_distance.h"
 #include <gtest/gtest.h>
+#include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -186,5 +191,125 @@ TEST(SimulationSnapshot, CooperativeContactsAreBitwiseEqualToOneThread) {
     for (std::size_t i = 0; i < states[0].deformed_positions.size(); ++i) {
         EXPECT_EQ(std::memcmp(states[0].deformed_positions[i].data(), states[1].deformed_positions[i].data(), 3 * sizeof(double)), 0) << i;
         EXPECT_EQ(std::memcmp(states[0].velocities[i].data(), states[1].velocities[i].data(), 3 * sizeof(double)), 0) << i;
+    }
+}
+
+TEST(SimulationSnapshot, ExperimentalFrictionContactsAreBitwiseEqualAcrossAvailableThreads) {
+    struct RestoreThreads {
+        int count = omp_get_max_threads(), dynamic = omp_get_dynamic();
+        ~RestoreThreads() {
+            omp_set_num_threads(count);
+            omp_set_dynamic(dynamic);
+        }
+    } restore;
+    omp_set_dynamic(0);
+    // Use native 64-thread coverage on the benchmark server without making
+    // the default laptop suite oversubscribe busy-waiting scheduler workers.
+    const int parallel_threads = std::min(64, omp_get_num_procs());
+    RefMesh meshes[2];
+    DeformedState states[2];
+    std::vector<Pin> pins[2];
+    VertexTriangleMap adjacency[2];
+    BroadPhase broad_phases[2];
+    SimParams parameters[2];
+    std::vector<DeformedState> frames[2];
+    for (int run = 0; run < 2; ++run) {
+        std::vector<Vec2> material;
+        parameters[run] = SimParams::zeros();
+        build_scene(meshes[run], states[run], pins[run], adjacency[run],
+                    parameters[run], material);
+        clear_model(meshes[run], states[run], material, pins[run]);
+        // Dense, nearby sheets exercise narrow and broad color groups,
+        // with active friction and CCD contacts throughout the trajectory.
+        constexpr int subdivisions = 8;
+        constexpr int sheet_vertices = (subdivisions + 1) * (subdivisions + 1);
+        build_square_mesh(meshes[run], states[run], material,
+            subdivisions, subdivisions, 0.25, 0.25, Vec3::Zero());
+        build_square_mesh(meshes[run], states[run], material,
+            subdivisions, subdivisions, 0.25, 0.25, Vec3(0.007, 0.008, 0.003));
+        for (std::size_t node = 0; node < states[run].deformed_positions.size(); ++node) {
+            Vec3& position = states[run].deformed_positions[node];
+            position.y() += 0.003 * std::sin(8.0 * position.x())
+                * std::sin(7.0 * position.z());
+            const double direction = node < sheet_vertices ? 1.0 : -1.0;
+            states[run].velocities.emplace_back(0.03 * direction, -0.02, 0.01);
+        }
+        meshes[run].build_lumped_mass(parameters[run].density, parameters[run].thickness);
+        adjacency[run] = build_incident_triangle_map(meshes[run].tris);
+        append_pin(pins[run], 0, states[run].deformed_positions);
+        append_pin(pins[run], sheet_vertices, states[run].deformed_positions);
+        auto& params = parameters[run];
+        params.use_parallel = true;
+        params.use_basic_experimental = true;
+        params.fixed_iters = true;
+        params.use_ccd = true;
+        params.use_ticcd = false;
+        params.substeps = 2;
+        // Each substep must execute batches of 3 + 3 + 1 sweeps. The last
+        // partial batch checks both rebuilding and final iteration accounting.
+        params.max_global_iters = 7;
+        params.node_box_update_count = 3;
+        params.node_box_min = params.node_box_max = 0.05;
+        params.kB = 0.0025;
+        params.d_hat = 0.012;
+        params.k_barrier = 1.0;
+        params.friction_coefficient = 0.1;
+        params.friction_velocity_epsilon = 0.01;
+        omp_set_num_threads(run == 0 ? 1 : parallel_threads);
+        for (int frame = 0; frame < 3; ++frame) {
+            SCOPED_TRACE(::testing::Message() << "run=" << run << " frame=" << frame);
+            const auto result = advance_one_frame(states[run], meshes[run],
+                adjacency[run], pins[run], params, broad_phases[run]);
+            ASSERT_TRUE(result.converged);
+            ASSERT_EQ(result.iterations, 14);
+            ASSERT_FALSE(result.has_residual);
+
+            const auto& cache = broad_phases[run].cache();
+            const auto& positions = states[run].deformed_positions;
+            const int vertices = static_cast<int>(positions.size());
+            ASSERT_EQ(vertices, 162);
+            ASSERT_FALSE(cache.nt_pairs.empty());
+            ASSERT_FALSE(cache.ss_pairs.empty());
+            // Require geometrically active contacts, not only broad-phase
+            // candidates, throughout the multiframe friction regression.
+            ASSERT_TRUE(std::any_of(cache.nt_pairs.begin(), cache.nt_pairs.end(),
+                [&](const NodeTrianglePair& pair) {
+                    return node_triangle_distance(positions[pair.node],
+                        positions[pair.tri_v[0]], positions[pair.tri_v[1]],
+                        positions[pair.tri_v[2]]).distance < params.d_hat;
+                }));
+            ASSERT_TRUE(std::any_of(cache.ss_pairs.begin(), cache.ss_pairs.end(),
+                [&](const SegmentSegmentPair& pair) {
+                    return segment_segment_distance(positions[pair.v[0]],
+                        positions[pair.v[1]], positions[pair.v[2]],
+                        positions[pair.v[3]]).distance < params.d_hat;
+                }));
+
+            // Check the actual last-rebuild graph has many color barriers;
+            // a collision-free fixture would miss the targeted scheduling path.
+            const auto elastic = build_elastic_adj(meshes[run], adjacency[run], vertices);
+            std::vector<std::vector<int>> contacts, combined, colors;
+            build_contact_adj(cache, vertices, contacts);
+            union_adjacency(elastic, contacts, combined);
+            greedy_color_conflict_graph(combined, colors);
+            ASSERT_GE(vertices, 128);
+            ASSERT_GE(colors.size(), std::size_t(32));
+            frames[run].push_back(states[run]);
+        }
+    }
+
+    const int vertices = static_cast<int>(states[1].deformed_positions.size());
+    for (int frame = 0; frame < 3; ++frame) {
+        ASSERT_EQ(frames[0][frame].deformed_positions.size(),
+                  frames[1][frame].deformed_positions.size());
+        for (int node = 0; node < vertices; ++node) {
+            SCOPED_TRACE(::testing::Message() << "frame=" << frame << " node=" << node);
+            ASSERT_TRUE(frames[1][frame].deformed_positions[node].allFinite());
+            ASSERT_TRUE(frames[1][frame].velocities[node].allFinite());
+            EXPECT_EQ(std::memcmp(frames[0][frame].deformed_positions[node].data(),
+                frames[1][frame].deformed_positions[node].data(), 3 * sizeof(double)), 0);
+            EXPECT_EQ(std::memcmp(frames[0][frame].velocities[node].data(),
+                frames[1][frame].velocities[node].data(), 3 * sizeof(double)), 0);
+        }
     }
 }

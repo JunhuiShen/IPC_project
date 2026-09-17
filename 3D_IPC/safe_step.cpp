@@ -21,7 +21,7 @@
 
 namespace {
 
-inline bool node_triangle_single_vertex_swept_aabbs_intersect(const NodeTrianglePair& p, int moving_dof, const std::vector<Vec3>& x, const Vec3& dx) {
+inline bool node_triangle_single_vertex_swept_aabbs_intersect_reference(const NodeTrianglePair& p, int moving_dof, const std::vector<Vec3>& x, const Vec3& dx) {
     AABB node_box;
     node_box.expand(x[p.node]);
     if (moving_dof == 0) node_box.expand(x[p.node] + dx);
@@ -35,7 +35,7 @@ inline bool node_triangle_single_vertex_swept_aabbs_intersect(const NodeTriangle
     return aabb_intersects(node_box, tri_box);
 }
 
-inline bool segment_segment_single_vertex_swept_aabbs_intersect(const SegmentSegmentPair& p, int moving_dof, const std::vector<Vec3>& x, const Vec3& dx) {
+inline bool segment_segment_single_vertex_swept_aabbs_intersect_reference(const SegmentSegmentPair& p, int moving_dof, const std::vector<Vec3>& x, const Vec3& dx) {
     AABB first_box;
     AABB second_box;
     for (int role = 0; role < 4; ++role) {
@@ -45,6 +45,67 @@ inline bool segment_segment_single_vertex_swept_aabbs_intersect(const SegmentSeg
         if (moving_dof == role) box.expand(xi + dx);
     }
     return aabb_intersects(first_box, second_box);
+}
+
+// An independent non-NaN axis can reject before the remaining coordinates
+// are loaded or expanded. Ordered interval min/max also supports infinities;
+// only NaNs require the original Eigen min/max behavior. Check the moved
+// coordinate as well, including a NaN produced by infinity plus its opposite.
+inline bool node_triangle_single_vertex_swept_aabbs_intersect(const NodeTrianglePair& p, int moving_dof, const std::vector<Vec3>& x, const Vec3& dx) {
+    const Vec3& node = x[p.node];
+    const Vec3& a = x[p.tri_v[0]];
+    const Vec3& b = x[p.tri_v[1]];
+    const Vec3& c = x[p.tri_v[2]];
+    const bool moves = moving_dof >= 0 && moving_dof < 4;
+    const Vec3& moving = moving_dof == 0 ? node
+        : moving_dof == 1 ? a : moving_dof == 2 ? b : c;
+    for (int axis = 0; axis < 3; ++axis) {
+        const double q = node[axis], u = a[axis], v = b[axis], w = c[axis];
+        const double moved = moves ? moving[axis] + dx[axis] : 0.0;
+        if (std::isnan(q) || std::isnan(u) || std::isnan(v)
+            || std::isnan(w) || std::isnan(moved))
+            return node_triangle_single_vertex_swept_aabbs_intersect_reference(p, moving_dof, x, dx);
+        double node_lo = q, node_hi = q;
+        double tri_lo = std::min({u, v, w});
+        double tri_hi = std::max({u, v, w});
+        if (moving_dof == 0) {
+            node_lo = std::min(node_lo, moved);
+            node_hi = std::max(node_hi, moved);
+        } else if (moves) {
+            tri_lo = std::min(tri_lo, moved);
+            tri_hi = std::max(tri_hi, moved);
+        }
+        if (node_hi < tri_lo || tri_hi < node_lo) return false;
+    }
+    return true;
+}
+
+inline bool segment_segment_single_vertex_swept_aabbs_intersect(const SegmentSegmentPair& p, int moving_dof, const std::vector<Vec3>& x, const Vec3& dx) {
+    const Vec3& a = x[p.v[0]];
+    const Vec3& b = x[p.v[1]];
+    const Vec3& c = x[p.v[2]];
+    const Vec3& d = x[p.v[3]];
+    const bool moves = moving_dof >= 0 && moving_dof < 4;
+    const Vec3& moving = moving_dof == 0 ? a
+        : moving_dof == 1 ? b : moving_dof == 2 ? c : d;
+    for (int axis = 0; axis < 3; ++axis) {
+        const double u = a[axis], v = b[axis], w = c[axis], z = d[axis];
+        const double moved = moves ? moving[axis] + dx[axis] : 0.0;
+        if (std::isnan(u) || std::isnan(v) || std::isnan(w)
+            || std::isnan(z) || std::isnan(moved))
+            return segment_segment_single_vertex_swept_aabbs_intersect_reference(p, moving_dof, x, dx);
+        double first_lo = std::min(u, v), first_hi = std::max(u, v);
+        double second_lo = std::min(w, z), second_hi = std::max(w, z);
+        if (moves && moving_dof < 2) {
+            first_lo = std::min(first_lo, moved);
+            first_hi = std::max(first_hi, moved);
+        } else if (moves) {
+            second_lo = std::min(second_lo, moved);
+            second_hi = std::max(second_hi, moved);
+        }
+        if (first_hi < second_lo || second_hi < first_lo) return false;
+    }
+    return true;
 }
 
 inline bool node_triangle_swept_aabbs_intersect(const std::array<AABB, 4>& node_boxes) {

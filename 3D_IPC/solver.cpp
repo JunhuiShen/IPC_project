@@ -635,12 +635,14 @@ Vec3 gs_vertex_delta_live_barrier_experimental(int vi, const RefMesh& ref_mesh, 
         const double dt2k = params.dt2() * params.k_barrier;
         const double d_hat2 = params.d_hat * params.d_hat;
 
+        if (rejections) {
+            // Allocate before helpers run. Every contact writes a distinct
+            // byte, and safe-step consumes these certificates after the join.
+            rejections->clear.resize(
+                bp_cache.vertex_nt[vi].size() + bp_cache.vertex_ss[vi].size());
+            rejections->distance = params.d_hat;
+        }
         if (params.friction_coefficient == 0.0 && !cooperative) {
-            if (rejections) {
-                rejections->clear.resize(
-                    bp_cache.vertex_nt[vi].size() + bp_cache.vertex_ss[vi].size());
-                rejections->distance = params.d_hat;
-            }
             std::size_t contact_index = 0;
             // Whole-vertex work can accumulate directly in contact order,
             // without materializing optional gradient/Hessian records.
@@ -678,10 +680,15 @@ Vec3 gs_vertex_delta_live_barrier_experimental(int vi, const RefMesh& ref_mesh, 
         // Share contact evaluation between direct accumulation and cooperative
         // staging so both paths use the same barrier and friction geometry.
         const auto evaluate_nt = [&](const BroadPhase::Cache::VertexPairEntry& entry,
+                                     std::size_t contact_index,
                                      const auto& consume) {
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
-            if (!node_triangle_aabbs_within_distance(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], d_hat2))
-                return;
+            bool clear = false;
+            const bool within = node_triangle_aabbs_within_distance(
+                x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]],
+                d_hat2, rejections ? &clear : nullptr);
+            if (rejections) rejections->clear[contact_index] = clear;
+            if (!within) return;
             if (params.friction_coefficient != 0.0) {
                 const std::array<Vec3, 4> current_positions =
                     friction_node_triangle_positions(p, x);
@@ -715,10 +722,15 @@ Vec3 gs_vertex_delta_live_barrier_experimental(int vi, const RefMesh& ref_mesh, 
             }
         };
         const auto evaluate_ss = [&](const BroadPhase::Cache::VertexPairEntry& entry,
+                                     std::size_t contact_index,
                                      const auto& consume) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
-            if (!segment_aabbs_within_distance(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], d_hat2))
-                return;
+            bool clear = false;
+            const bool within = segment_aabbs_within_distance(
+                x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]],
+                d_hat2, rejections ? &clear : nullptr);
+            if (rejections) rejections->clear[contact_index] = clear;
+            if (!within) return;
             if (params.friction_coefficient != 0.0) {
                 const std::array<Vec3, 4> current_positions =
                     friction_segment_segment_positions(p, x);
@@ -766,8 +778,10 @@ Vec3 gs_vertex_delta_live_barrier_experimental(int vi, const RefMesh& ref_mesh, 
         if (!cooperative) {
             // Whole-vertex friction follows the same NT-then-SS order without
             // copying each contact's derivatives into a Contribution record.
-            for (const auto& entry : nt) evaluate_nt(entry, accumulate);
-            for (const auto& entry : ss) evaluate_ss(entry, accumulate);
+            for (std::size_t i = 0; i < nt.size(); ++i)
+                evaluate_nt(nt[i], i, accumulate);
+            for (std::size_t i = 0; i < ss.size(); ++i)
+                evaluate_ss(ss[i], nt.size() + i, accumulate);
         } else {
             struct Contribution {
                 Vec3 gradient = Vec3::Zero(), friction_gradient = Vec3::Zero();
@@ -785,8 +799,8 @@ Vec3 gs_vertex_delta_live_barrier_experimental(int vi, const RefMesh& ref_mesh, 
                         value->friction_gradient = friction_gradient;
                         value->friction_hessian = friction_hessian;
                     };
-                    if (i < nt_count) evaluate_nt(nt[i], store);
-                    else evaluate_ss(ss[i - nt_count], store);
+                    if (i < nt_count) evaluate_nt(nt[i], i, store);
+                    else evaluate_ss(ss[i - nt_count], i, store);
                     return value;
                 },
                 [&](const std::optional<Contribution>& value) {
@@ -1128,6 +1142,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
     for (int vi = 0; vi < nv; ++vi) xnew_substep_start[vi] = xnew[vi];
  
     solver_detail::ColoredContactSweep contact_sweep;
+    solver_detail::ColoredVertexSweep colored_vertex_sweep;
     const bool use_contact_sweep = params.use_parallel && omp_get_max_threads() > 1
         && params.friction_coefficient == 0.0 && params.d_hat > 0.0
         && !params.use_ogc;
@@ -1184,25 +1199,26 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
         }
 
         const auto proposed_position = [&](int vi,
-            safe_step_detail::VertexAabbRejections* rejections) -> Vec3 {
+            safe_step_detail::VertexAabbRejections* rejections,
+            bool cooperative) -> Vec3 {
           return xnew[vi] -
                  params.damping *
                      gs_vertex_delta_live_barrier_experimental(
                          vi, ref_mesh, adj, pins, params, xhat, xnew,
                          broad_phase, &pm, &workspace.incident_triangles[vi],
                          &workspace.rest_shape_grads, previous_positions,
-                         false, rejections);
+                         cooperative, rejections);
         };
-        const auto process_vertex = [&](int vi) {
+        const auto process_vertex = [&](int vi, bool cooperative = false) {
           // Scratch belongs to this worker and is consumed before updating the
           // vertex. Colors keep every incident pair fixed during these calls.
           thread_local safe_step_detail::VertexAabbRejections scratch;
-          auto* rejections = params.friction_coefficient == 0.0 && params.use_ccd
-              && !params.use_ogc && params.d_hat > 1e-8 ? &scratch : nullptr;
-          const Vec3 proposed = proposed_position(vi, rejections);
+          auto* rejections = params.use_ccd && !params.use_ogc
+              && params.d_hat > 1e-8 ? &scratch : nullptr;
+          const Vec3 proposed = proposed_position(vi, rejections, cooperative);
           per_vertex_safe_step(broad_phase, xnew, vi, proposed,
                                0.9, params.use_ogc ? false : params.use_ccd,
-                               params.use_ticcd, params.use_ogc, false, rejections);
+                               params.use_ticcd, params.use_ogc, cooperative, rejections);
         };
         if (use_contact_sweep) {
           const auto &cache = broad_phase.cache();
@@ -1318,14 +1334,27 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
           contact_sweep.run(color_groups, compute, apply, process_vertex, ccd,
                             commit);
         } else if (params.use_parallel) {
+          // Fixed-iteration friction solves can reuse one team until the next
+          // node-box rebuild. Keep every color barrier, including the final
+          // color of each sweep, and retain each vertex's scalar arithmetic.
+          // Convergence-controlled solves still return after every sweep so
+          // their residual checks and stopping iteration remain unchanged.
+          const int sweeps = params.fixed_iters && params.friction_coefficient > 0.0 && !use_contact_sweep ? std::min(params.max_global_iters - iter + 1, params.node_box_update_count - (iter - 1) % params.node_box_update_count) : 1;
+          if (params.fixed_iters && params.friction_coefficient > 0.0) {
+            colored_vertex_sweep.run(color_groups, sweeps, process_vertex);
+          } else {
 #pragma omp parallel
           {
-            for (const std::vector<int> &group : color_groups) {
+            for (int sweep = 0; sweep < sweeps; ++sweep) {
+              for (const std::vector<int> &group : color_groups) {
 #pragma omp for schedule(dynamic, 1)
-              for (int i = 0; i < static_cast<int>(group.size()); ++i)
-                process_vertex(group[static_cast<std::size_t>(i)]);
+                for (int i = 0; i < static_cast<int>(group.size()); ++i)
+                  process_vertex(group[static_cast<std::size_t>(i)]);
+              }
             }
           }
+          }
+          iter += sweeps - 1;
         } else {
           for (int vi = 0; vi < nv; ++vi)
             process_vertex(vi);
@@ -2641,9 +2670,16 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
         };
 
         if (params.use_parallel) {
+            // Fixed solves can share a team until the next cache rebuild.
+            // Residual-controlled solves still check convergence every sweep.
+            const int sweeps = params.fixed_iters
+                ? std::min(params.max_global_iters - iter + 1,
+                    params.node_box_update_count - (iter - 1) % params.node_box_update_count)
+                : 1;
             solver_detail::for_each_colored_block(workspace.color_groups,
                 [&](int rb) { return workspace.body_nt_pair_indices[rb].size()
-                    + workspace.body_ss_pair_indices[rb].size(); }, process_body);
+                    + workspace.body_ss_pair_indices[rb].size(); }, process_body, sweeps);
+            iter += sweeps - 1;
         } else {
             for (int rb = 0; rb < num_rbs; ++rb)
                 process_body(rb);
@@ -2929,9 +2965,14 @@ SolverResult global_gauss_seidel_solver_basic_general(
         };
 
         if (params.use_parallel) {
+            const int sweeps = params.fixed_iters
+                ? std::min(params.max_global_iters - iteration + 1,
+                    params.node_box_update_count - (iteration - 1) % params.node_box_update_count)
+                : 1;
             // Block ids are [cloth nodes][solid nodes][rigid bodies]. Each
             // color is independent under cloth/tet elasticity and NT/SS
-            // reads, and the omp-for barrier separates successive GS colors.
+            // reads. Keep every color barrier and each body's joined proxy
+            // writes while reusing the team between contact-cache rebuilds.
             solver_detail::for_each_colored_block(mixed_adjacency_workspace.color_groups,
                 [&](int block) {
                     if (block >= rigid_begin) {
@@ -2950,7 +2991,8 @@ SolverResult global_gauss_seidel_solver_basic_general(
                     if (block < solid_begin) process_cloth_node(block, cooperative);
                     else if (block < rigid_begin) process_solid_node(block - solid_begin, cooperative);
                     else process_body(block - rigid_begin, cooperative);
-                });
+                }, sweeps);
+            iteration += sweeps - 1;
         } else {
             for (int cloth = 0; cloth < num_cloth; ++cloth)
                 process_cloth_node(cloth);
