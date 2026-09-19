@@ -7,9 +7,12 @@
 
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <iomanip>
+#include <locale>
 #include <limits>
 #include <cmath>
 #include <omp.h>
@@ -417,4 +420,329 @@ TEST(OutputTest, ClothGridSubstepsKeepExistingFilesAndAddOptionalDiagnostics) {
         }
         EXPECT_TRUE(found_substep);
     }
+}
+
+
+namespace {
+
+// Fixed framing captured from the original GEO exporter before the buffering
+// optimization. Dynamic values below use its original ostream conventions,
+// independently of every production exporter and formatting helper.
+std::string original_geo_bytes(const std::vector<Vec3>& points,
+    const std::vector<int>& triangles,
+    const std::vector<std::vector<int>>* groups) {
+    std::string result = R"original_geo([
+    "fileversion", "18.5.408",
+    "hasindex", false,
+    "pointcount", @POINTCOUNT@,
+    "vertexcount", @VERTEXCOUNT@,
+    "primitivecount", @PRIMITIVECOUNT@,
+    "info", {},
+    "topology",
+    [
+        "pointref",
+        [
+            "indices", @INDICES@
+        ]
+    ],
+    "attributes",
+    [
+        "pointattributes",
+        [
+            [
+                ["scope","public","type","numeric","name","P","options",{}],
+                ["size",3,"storage","fpreal32","values",
+                    [
+                        "size", 3,
+                        "storage", "fpreal32",
+                        "tuples", @POSITIONS@
+                    ]
+                ]
+            ],
+            [
+                ["scope","public","type","numeric","name","Cd","options",{}],
+                ["size",3,"storage","fpreal32","values",
+                    [
+                        "size", 3,
+                        "storage", "fpreal32",
+                        "tuples", @COLORS@
+                    ]
+                ]
+            ],
+            [
+                ["scope","public","type","numeric","name","group_id","options",{}],
+                ["size",1,"storage","int32","values",
+                    [
+                        "size", 1,
+                        "storage", "int32",
+                        "tuples", @GROUPS@
+                    ]
+                ]
+            ]
+        ]
+    ],
+    "primitives",
+    [
+        [
+            ["type","Polygon_run"],
+            [
+                "startvertex", 0,
+                "nprimitives", @PRIMITIVECOUNT@,
+                "nvertices_rle", [3,@PRIMITIVECOUNT@]
+            ]
+        ]
+    ]
+]
+)original_geo";
+    const auto formatted = [](const auto& write) {
+        std::ostringstream text;
+        text << std::setprecision(10);
+        write(text);
+        return text.str();
+    };
+    const auto replace_field = [&](const std::string& field, const std::string& value) {
+        const std::string marker = "@" + field + "@";
+        for (std::size_t begin = result.find(marker); begin != std::string::npos;
+             begin = result.find(marker, begin + value.size()))
+            result.replace(begin, marker.size(), value);
+    };
+    const auto number = [&](std::size_t value) {
+        return formatted([&](std::ostream& text) { text << value; });
+    };
+    replace_field("POINTCOUNT", number(points.size()));
+    replace_field("VERTEXCOUNT", number(3 * (triangles.size() / 3)));
+    replace_field("PRIMITIVECOUNT", number(triangles.size() / 3));
+    replace_field("INDICES", formatted([&](std::ostream& text) {
+        text << '[';
+        for (std::size_t i = 0; i < triangles.size(); ++i) {
+            if (i) text << ',';
+            text << triangles[i];
+        }
+        text << ']';
+    }));
+    replace_field("POSITIONS", formatted([&](std::ostream& text) {
+        text << '[';
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            if (i) text << ',';
+            text << '[' << points[i].x() << ',' << points[i].y()
+                 << ',' << points[i].z() << ']';
+        }
+        text << ']';
+    }));
+    replace_field("COLORS", formatted([&](std::ostream& text) {
+        text << '[';
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            if (i) text << ',';
+            text << "[0.5,0.5,0.5]";
+        }
+        text << ']';
+    }));
+    std::vector<int> group_ids(points.size(), -1);
+    if (groups)
+        for (std::size_t group = 0; group < groups->size(); ++group)
+            for (int vertex : (*groups)[group])
+                if (vertex >= 0 && vertex < static_cast<int>(points.size()))
+                    group_ids[vertex] = static_cast<int>(group);
+    replace_field("GROUPS", formatted([&](std::ostream& text) {
+        text << '[';
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            if (i) text << ',';
+            text << '[' << group_ids[i] << ']';
+        }
+        text << ']';
+    }));
+    return result;
+}
+
+struct RestoreOutputSettings {
+    std::locale locale = std::locale();
+    int threads = omp_get_max_threads();
+    int dynamic = omp_get_dynamic();
+    ~RestoreOutputSettings() {
+        std::locale::global(locale);
+        omp_set_num_threads(threads);
+        omp_set_dynamic(dynamic);
+    }
+};
+
+// Original serial OBJ/USD spelling, independent of the buffered integer paths.
+std::string original_obj_bytes(const std::vector<Vec3>& points,
+    const std::vector<int>& triangles) {
+    std::ostringstream out;
+    out << std::setprecision(17);
+    for (const auto& point : points)
+        out << "v " << point.x() << ' ' << point.y() << ' ' << point.z() << '\n';
+    for (std::size_t face = 0; face < triangles.size() / 3; ++face)
+        out << "f " << triangles[3 * face] + 1 << ' '
+            << triangles[3 * face + 1] + 1 << ' '
+            << triangles[3 * face + 2] + 1 << '\n';
+    return out.str();
+}
+
+std::string original_usd_bytes(const std::vector<Vec3>& points,
+    const std::vector<int>& triangles) {
+    std::ostringstream out;
+    out << std::setprecision(10) << "#usda 1.0\n\ndef Mesh \"mesh\"\n{\n"
+        << "    point3f[] points = [";
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (i) out << ", ";
+        out << '(' << points[i].x() << ", " << points[i].y()
+            << ", " << points[i].z() << ')';
+    }
+    out << "]\n    int[] faceVertexCounts = [";
+    for (std::size_t face = 0; face < triangles.size() / 3; ++face) {
+        if (face) out << ", ";
+        out << "3";
+    }
+    out << "]\n    int[] faceVertexIndices = [";
+    for (std::size_t i = 0; i < triangles.size(); ++i) {
+        if (i) out << ", ";
+        out << triangles[i];
+    }
+    out << "]\n}\n";
+    return out.str();
+}
+
+struct GroupedOutputPunctuation : std::numpunct<char> {
+    char do_decimal_point() const override { return ','; }
+    char do_thousands_sep() const override { return '_'; }
+    std::string do_grouping() const override { return "\3"; }
+};
+
+} // namespace
+
+TEST(OutputTest, GeoMatchesOriginalBytesAcrossBuffersGroupsAndLocales) {
+    RestoreOutputSettings restore;
+    omp_set_dynamic(0);
+    const fs::path directory = fs::path(OUTPUT_TEST_DIR) / "original_geo_compatibility";
+    fs::create_directories(directory);
+    const auto filename = directory / "mesh.geo";
+    for (bool custom_locale : {false, true}) {
+        SCOPED_TRACE(custom_locale);
+        std::locale::global(custom_locale
+            ? std::locale(std::locale::classic(), new GroupedOutputPunctuation)
+            : std::locale::classic());
+        for (int count : {0, 1, 4095, 4096, 8201}) {
+            SCOPED_TRACE(count);
+            std::vector<Vec3> points(count);
+            std::vector<int> triangles;
+            for (int i = 0; i < count; ++i)
+                points[i] = Vec3(std::ldexp(1.234567891234, i % 100 - 50),
+                    -12345.67891234 + .013 * i, 1.0 / (i + 1));
+            const double specials[] = {-0.0, std::numeric_limits<double>::denorm_min(),
+                -std::numeric_limits<double>::denorm_min(),
+                std::numeric_limits<double>::min(), std::numeric_limits<double>::max(),
+                std::numeric_limits<double>::infinity(),
+                -std::numeric_limits<double>::infinity(),
+                std::numeric_limits<double>::quiet_NaN()};
+            for (int i = 0; i < std::min(count * 3, 8); ++i)
+                points[i / 3][i % 3] = specials[i];
+            for (int i = 0; i + 2 < count; ++i)
+                triangles.insert(triangles.end(), {i, i + 1, i + 2});
+            if (!triangles.empty()) {
+                // Export preserves integer spelling without interpreting mesh
+                // connectivity, including the full signed int range.
+                triangles[0] = std::numeric_limits<int>::min();
+                triangles[1] = std::numeric_limits<int>::max();
+                triangles[2] = -1;
+            }
+            std::vector<std::vector<int>> empty_groups, groups(1101);
+            groups[0] = {-1, 0, count, count + 7};
+            groups[1] = {0, 0, 1};
+            groups.back() = {0, count - 1};
+            const std::array<const std::vector<std::vector<int>>*, 3> group_cases = {{
+                nullptr, &empty_groups, &groups}};
+            for (const auto* color_groups : group_cases) {
+                SCOPED_TRACE(color_groups == nullptr ? "null groups"
+                    : color_groups->empty() ? "empty groups" : "populated groups");
+                const auto expected = original_geo_bytes(points, triangles, color_groups);
+                for (int threads : {1, 8, 64}) {
+                    SCOPED_TRACE(threads);
+                    omp_set_num_threads(threads);
+                    export_geo(filename.string(), points, triangles, color_groups);
+                    std::ifstream input(filename, std::ios::binary);
+                    ASSERT_TRUE(input.is_open());
+                    const std::string actual{std::istreambuf_iterator<char>(input),
+                        std::istreambuf_iterator<char>()};
+                    ASSERT_EQ(actual.size(), expected.size());
+                    EXPECT_TRUE(actual == expected) << "First differing byte: "
+                        << std::distance(actual.begin(),
+                            std::mismatch(actual.begin(), actual.end(), expected.begin()).first);
+                }
+            }
+        }
+    }
+    fs::remove_all(directory);
+}
+
+
+TEST(OutputTest, ObjAndUsdMatchOriginalBytesAcrossBuffersAndLocales) {
+    RestoreOutputSettings restore;
+    omp_set_dynamic(0);
+    const fs::path directory = fs::path(OUTPUT_TEST_DIR) / "original_obj_usd_compatibility";
+    fs::create_directories(directory);
+    for (bool custom_locale : {false, true}) {
+        SCOPED_TRACE(custom_locale);
+        std::locale::global(custom_locale
+            ? std::locale(std::locale::classic(), new GroupedOutputPunctuation)
+            : std::locale::classic());
+        for (int count : {0, 1, 4095, 4096, 8201}) {
+            SCOPED_TRACE(count);
+            std::vector<Vec3> points(count);
+            std::vector<int> triangles;
+            for (int i = 0; i < count; ++i)
+                points[i] = Vec3(-12345.67891234567 + .0013 * i,
+                    std::ldexp(1.234567891234567, i % 100 - 50), 1.0 / (i + 1));
+            const double specials[] = {-0.0, std::numeric_limits<double>::denorm_min(),
+                -std::numeric_limits<double>::denorm_min(),
+                std::numeric_limits<double>::max(), std::numeric_limits<double>::min(),
+                std::numeric_limits<double>::infinity(),
+                -std::numeric_limits<double>::infinity(),
+                std::numeric_limits<double>::quiet_NaN()};
+            for (int i = 0; i < std::min(count * 3, 8); ++i)
+                points[i / 3][i % 3] = specials[i];
+            for (int i = 0; i + 2 < count; ++i)
+                triangles.insert(triangles.end(), {i, i + 1, i + 2});
+            if (!triangles.empty()) {
+                // OBJ adds one to each stored index; stay within its defined
+                // signed-int range while checking the largest rendered value.
+                triangles[0] = std::numeric_limits<int>::min();
+                triangles[1] = std::numeric_limits<int>::max() - 1;
+                triangles[2] = -1;
+            }
+            for (ExportFormat format : {ExportFormat::OBJ, ExportFormat::USD}) {
+                SCOPED_TRACE(format == ExportFormat::OBJ ? "OBJ" : "USD");
+                const auto expected = format == ExportFormat::OBJ
+                    ? original_obj_bytes(points, triangles) : original_usd_bytes(points, triangles);
+                const auto filename = directory / (format == ExportFormat::OBJ ? "mesh.obj" : "mesh.usda");
+                const auto export_and_compare = [&]() {
+                    if (format == ExportFormat::OBJ)
+                        export_obj(filename.string(), points, triangles);
+                    else
+                        export_usd(filename.string(), points, triangles);
+                    std::ifstream input(filename, std::ios::binary);
+                    ASSERT_TRUE(input.is_open());
+                    const std::string actual{std::istreambuf_iterator<char>(input),
+                        std::istreambuf_iterator<char>()};
+                    ASSERT_EQ(actual.size(), expected.size());
+                    EXPECT_TRUE(actual == expected) << "First differing byte: "
+                        << std::distance(actual.begin(),
+                            std::mismatch(actual.begin(), actual.end(), expected.begin()).first);
+                };
+                for (int threads : {1, 8, 64}) {
+                    SCOPED_TRACE(threads);
+                    omp_set_num_threads(threads);
+                    export_and_compare();
+                }
+                if (count == 8201) {
+#pragma omp parallel num_threads(2)
+                    {
+#pragma omp single
+                        export_and_compare();
+                    }
+                }
+            }
+        }
+    }
+    fs::remove_all(directory);
 }

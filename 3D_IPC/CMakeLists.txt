@@ -121,6 +121,7 @@ endfunction()
 
 # Geometry, constitutive models, and contact kernels.
 set(IPC_CORE_SOURCES
+    SIMD.cpp
     IPC_math.cpp
     barrier_energy.cpp
     bending_energy.cpp
@@ -181,8 +182,9 @@ target_link_libraries(ipc
 # -----------------------------------------------------------------------------
 
 if(IPC_BUILD_SIMULATOR)
+    find_package(Threads REQUIRED)
     add_executable(3D_sim simulation.cpp)
-    target_link_libraries(3D_sim PRIVATE IPC::ipc)
+    target_link_libraries(3D_sim PRIVATE IPC::ipc Threads::Threads)
     ipc_enable_ipo(3D_sim)
 endif()
 
@@ -226,6 +228,7 @@ if(BUILD_TESTING)
     endfunction()
 
     set(IPC_TEST_TARGETS
+        SIMD_test
         barrier_energy_test
         bending_energy_test
         broad_phase_test

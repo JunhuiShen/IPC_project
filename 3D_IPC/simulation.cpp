@@ -1,6 +1,7 @@
 #include "example.h"
 #include "mesh_utils.h"
 #include "physics.h"
+#include "SIMD.h"
 #include "simulation.h"
 #include "solver.h"
 #include "state_io.h"
@@ -10,6 +11,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -190,6 +192,12 @@ int main(int argc, char** argv) {
               << "\n";
     std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
+    if (params.use_basic_experimental && !params.use_cloth_grid
+        && !params.use_ogc && !params.use_ogc_solver) {
+        const bool simd = physics_detail::collision_off_energy_simd_enabled(ref_mesh, params);
+        std::cout << "Non-collision energy kernels (inertia/gravity/pins/membrane/bending): " << (simd ? ipc_simd::backend_name() : "scalar reference");
+        std::cout << "\n";
+    }
     if (num_rigid_bodies > 0)
         std::cout << "Rigid bodies: " << num_rigid_bodies << "\n";
 
@@ -220,11 +228,22 @@ int main(int argc, char** argv) {
     // the one-time "static_colliders".
     const bool collider_is_dynamic = (args.example == 2 || args.example == 3 || args.example == 4);
 
+    // Geometry and checkpoints read the same completed state. Overlap their
+    // independent writes, then wait before the next frame can change it.
+    const auto start_checkpoint = [&](int frame, bool has_geometry_output) {
+        const auto policy = params.use_parallel && has_geometry_output
+            ? std::launch::async | std::launch::deferred
+            : std::launch::deferred;
+        return std::async(policy, [&outdir, &state, frame] {
+            serialize_state(outdir, frame, state);
+        });
+    };
+
     if (restart_frame < 0) {
         if (fs::exists(outdir)) fs::remove_all(outdir);
         fs::create_directories(outdir);
+        auto checkpoint = start_checkpoint(0, true);
         export_frame(outdir, 0, state.deformed_positions, ref_mesh.tris, fmt);
-        serialize_state(outdir, 0, state);
         if (!static_x.empty()) {
             if (collider_is_dynamic) {
                 write_collider_mesh(frame_collider_path(0));
@@ -232,6 +251,7 @@ int main(int argc, char** argv) {
                 write_collider_mesh(outdir + "/static_colliders" + collider_ext);
             }
         }
+        checkpoint.get();
     } else {
         if (!fs::exists(outdir)) {
             std::cerr << "Error: restart requested but output directory does not exist: " << outdir << "\n";
@@ -345,6 +365,8 @@ int main(int argc, char** argv) {
                       << std::setprecision(3) << solver_ms << " ms\n";
         }
 
+        auto checkpoint = start_checkpoint(frame_index,
+            !params.write_substeps || (collider_is_dynamic && !static_x.empty()));
         if (!params.write_substeps)
             export_frame(outdir, frame_index, state.deformed_positions, ref_mesh.tris, fmt, nullptr);
 
@@ -358,7 +380,7 @@ int main(int argc, char** argv) {
             write_collider_mesh(frame_collider_path(frame_index));
         }
 
-        serialize_state(outdir, frame_index, state);
+        checkpoint.get();
     }
 
     auto sim_end = Clock::now();

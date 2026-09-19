@@ -285,6 +285,7 @@ struct ExperimentalSolverWorkspace {
     std::vector<std::vector<int>> contact_adjacency;
     std::vector<std::vector<int>> combined_adjacency;
     std::vector<std::vector<int>> color_groups;
+    std::vector<std::vector<int>> elastic_color_groups;
     std::vector<int> deformable_nodes;
     GreedyColoringWorkspace coloring_workspace;
     FrozenResidualWorkspace frozen_residual;
@@ -316,6 +317,7 @@ struct ExperimentalSolverWorkspace {
             contact_adjacency.clear();
             combined_adjacency.clear();
             color_groups.clear();
+            elastic_color_groups.clear();
             deformable_nodes.resize(static_cast<std::size_t>(nv));
             #pragma omp parallel for schedule(static) if(nv >= 128)
             for (int node = 0; node < nv; ++node) deformable_nodes[static_cast<std::size_t>(node)] = node;
@@ -1125,9 +1127,10 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
     const std::vector<std::vector<int>>& ea = workspace.elastic_adjacency.get(ref_mesh, adj, nv);
     std::vector<std::vector<int>>& bca = workspace.contact_adjacency;
     std::vector<std::vector<int>>& combined_adj = workspace.combined_adjacency;
-    std::vector<std::vector<int>>& color_groups = workspace.color_groups;
     const bool needs_mesh_contact_search =
         params.d_hat > 0.0 || params.use_ccd || params.use_ogc;
+    std::vector<std::vector<int>>& color_groups = needs_mesh_contact_search
+        ? workspace.color_groups : workspace.elastic_color_groups;
     const auto compute_residual = [&]() {
         build_frozen_residual_workspace(
             ref_mesh, params, xnew, broad_phase,
@@ -1180,7 +1183,9 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
                 // primitive BVH construction, pair search, or contact-aware
                 // coloring. Elastic topology alone determines the schedule.
                 broad_phase.initialize_node_boxes_only(blue_boxes);
-                greedy_color_conflict_graph(ea, color_groups, &workspace.coloring_workspace);
+                // The workspace invalidates these colors with elastic topology.
+                if (color_groups.empty())
+                    greedy_color_conflict_graph(ea, color_groups, &workspace.coloring_workspace);
             }
         }
 
@@ -1334,12 +1339,18 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
           contact_sweep.run(color_groups, compute, apply, process_vertex, ccd,
                             commit);
         } else if (params.use_parallel) {
-          // Fixed-iteration friction solves can reuse one team until the next
-          // node-box rebuild. Keep every color barrier, including the final
-          // color of each sweep, and retain each vertex's scalar arithmetic.
+          // Fixed-iteration collision-free and friction solves can reuse one
+          // team until the next node-box rebuild. Keep every color barrier,
+          // including the final color of each sweep, and each vertex's arithmetic.
           // Convergence-controlled solves still return after every sweep so
           // their residual checks and stopping iteration remain unchanged.
-          const int sweeps = params.fixed_iters && params.friction_coefficient > 0.0 && !use_contact_sweep ? std::min(params.max_global_iters - iter + 1, params.node_box_update_count - (iter - 1) % params.node_box_update_count) : 1;
+          const bool collision_free = !needs_mesh_contact_search
+              && params.k_sdf == 0.0 && params.friction_coefficient == 0.0;
+          const int sweeps = params.fixed_iters
+              && (collision_free || params.friction_coefficient > 0.0)
+              ? std::min(params.max_global_iters - iter + 1,
+                         params.node_box_update_count - (iter - 1) % params.node_box_update_count)
+              : 1;
           if (params.fixed_iters && params.friction_coefficient > 0.0) {
             colored_vertex_sweep.run(color_groups, sweeps, process_vertex);
           } else {
