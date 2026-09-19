@@ -51,6 +51,7 @@ struct SimParams {
 
     bool   use_parallel;
     bool   use_basic_experimental; // select optimized cloth basic assembly/scheduling
+    bool   use_simd;             // experimental collision-off cloth energy batching
     bool   use_cloth_grid;       // basic cloth only: serial vertices within parallel spatial cells
     bool   cloth_grid_auto_dx;   // enlarge dx from dependencies at each grid rebuild
     double cloth_grid_dx;        // fixed side (must exceed 2*node_box_max), or minimum in auto mode
@@ -102,6 +103,7 @@ struct SimParams {
         p.max_global_iters          = 0;
         p.use_parallel              = false;
         p.use_basic_experimental    = false;
+        p.use_simd                  = false;
         p.use_cloth_grid            = false;
         p.cloth_grid_auto_dx        = false;
         p.cloth_grid_dx             = 0.05;
@@ -549,6 +551,10 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
                                                                      const std::vector<Vec3>* previous_positions = nullptr);
 
 namespace physics_detail {
+
+// SIMD is deliberately limited to the basic experimental collision-off
+// cloth route. Shared by assembly and startup diagnostics.
+bool collision_off_energy_simd_enabled(const RefMesh& mesh, const SimParams& params);
 
 // Solver-only fast path. The enclosing solver entry point must already have
 // validated the friction parameters and previous-position array.

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -20,6 +21,7 @@
 #include <iostream>
 #include <memory>
 #include <limits>
+#include <locale>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -54,6 +56,73 @@ namespace {
             if (errors[block]) std::rethrow_exception(errors[block]);
             out.write(text[block].data(), static_cast<std::streamsize>(text[block].size()));
         }
+    }
+
+    // Repeated literals need neither numeric formatting nor worker threads.
+    template <std::size_t N, std::size_t S>
+    void write_repeated_value(std::ostream& out, int count,
+                              const char (&value)[N], const char (&separator)[S]) {
+        if (count <= 0) return;
+        out.write(value, N - 1);
+        if (--count == 0) return;
+        constexpr int capacity = 256;
+        constexpr std::size_t stride = N + S - 2;
+        std::array<char, stride * capacity> buffer;
+        const int filled = std::min(count, capacity);
+        for (int i = 0; i < filled; ++i) {
+            std::memcpy(buffer.data() + i * stride, separator, S - 1);
+            std::memcpy(buffer.data() + i * stride + S - 1, value, N - 1);
+        }
+        while (count > 0) {
+            const int records = std::min(count, capacity);
+            out.write(buffer.data(), static_cast<std::streamsize>(records * stride));
+            count -= records;
+        }
+    }
+
+    // Integer-only records use default decimal formatting. This small writer
+    // avoids a stream sentry and locale lookup for each integer or delimiter.
+    class IntegerTextBuffer {
+        std::ostream& out_;
+        std::array<char, 16384> buffer_;
+        char* cursor_ = buffer_.data();
+        char* const end_ = buffer_.data() + buffer_.size();
+    public:
+        explicit IntegerTextBuffer(std::ostream& out) : out_(out) {}
+        void flush() {
+            if (cursor_ != buffer_.data())
+                out_.write(buffer_.data(), cursor_ - buffer_.data());
+            cursor_ = buffer_.data();
+        }
+        IntegerTextBuffer& operator<<(char value) {
+            if (cursor_ == end_) flush();
+            *cursor_++ = value;
+            return *this;
+        }
+        IntegerTextBuffer& operator<<(const char* value) {
+            for (; *value; ++value) *this << *value;
+            return *this;
+        }
+        IntegerTextBuffer& operator<<(int value) {
+            if (end_ - cursor_ < std::numeric_limits<int>::digits10 + 2) flush();
+            cursor_ = std::to_chars(cursor_, end_, value).ptr;
+            return *this;
+        }
+    };
+
+    template <typename Format>
+    void write_integer_ranges(std::ostream& out, int count, const Format& format) {
+        const bool classic = out.getloc() == std::locale::classic();
+        write_formatted_ranges(out, count, [&](std::ostream& text, int begin, int end) {
+            if (classic) {
+                IntegerTextBuffer buffer(text);
+                format(buffer, begin, end);
+                buffer.flush();
+            } else {
+                // Keep custom num_put/numpunct facets, including grouping.
+                format(text, begin, end);
+            }
+        });
     }
 
     // Binary packing is cheap and needs fewer workers than text formatting.
@@ -125,7 +194,7 @@ namespace {
                 text << "v " << p.x() << " " << p.y() << " " << p.z() << "\n";
             }
         });
-        write_formatted_ranges(out, static_cast<int>(tris.size()) / 3, [&](std::ostream& text, int begin, int end) {
+        write_integer_ranges(out, static_cast<int>(tris.size()) / 3, [&](auto& text, int begin, int end) {
             for (int face = begin; face < end; ++face) {
                 const int t = 3 * face;
                 text << "f " << (tris[t] + 1) << " " << (tris[t+1] + 1) << " " << (tris[t+2] + 1) << "\n";
@@ -158,9 +227,9 @@ namespace {
         out << "    \"topology\",\n    [\n";
         out << "        \"pointref\",\n        [\n";
         out << "            \"indices\", [";
-        write_formatted_ranges(out, static_cast<int>(tris.size()), [&](std::ostream& text, int begin, int end) {
+        write_integer_ranges(out, static_cast<int>(tris.size()), [&](auto& text, int begin, int end) {
             for (int i = begin; i < end; ++i) {
-                if (i > 0) text << ",";
+                if (i > 0) text << ',';
                 text << tris[i];
             }
         });
@@ -201,31 +270,12 @@ namespace {
         out << "                        \"size\", 3,\n";
         out << "                        \"storage\", \"fpreal32\",\n";
         out << "                        \"tuples\", [";
-        write_formatted_ranges(out, npoints, [&](std::ostream& text, int begin, int end) {
-            for (int i = begin; i < end; ++i) {
-                if (i > 0) text << ",";
-                text << "[0.5,0.5,0.5]";
-            }
-        });
+        write_repeated_value(out, npoints, "[0.5,0.5,0.5]", ",");
         out << "]\n";
         out << "                    ]\n";
         out << "                ]\n";
         out << "            ],\n";
         
-
-        // Group Coloring
-        std::vector<int> group_id(npoints, -1);
-
-        bool has_groups = (color_groups && !color_groups->empty());
-
-        if (has_groups) {
-            for (int gi = 0; gi < (int)color_groups->size(); ++gi) {
-                for (int v : (*color_groups)[gi]) {
-                    if (v >= 0 && v < npoints)
-                        group_id[v] = gi;
-                }
-            }
-        }
 
         // Attribute block (always written, no conditional commas)
         out << "            [\n";
@@ -236,12 +286,25 @@ namespace {
         out << "                        \"storage\", \"int32\",\n";      
         out << "                        \"tuples\", [";
 
-        write_formatted_ranges(out, npoints, [&](std::ostream& text, int begin, int end) {
-            for (int i = begin; i < end; ++i) {
-                if (i > 0) text << ",";
-                text << "[" << group_id[i] << "]";
+        const bool has_groups = color_groups && !color_groups->empty();
+        if (!has_groups && out.getloc() == std::locale::classic()) {
+            write_repeated_value(out, npoints, "[-1]", ",");
+        } else {
+            std::vector<int> group_id(npoints, -1);
+            if (has_groups) {
+                for (int gi = 0; gi < static_cast<int>(color_groups->size()); ++gi) {
+                    for (int v : (*color_groups)[gi]) {
+                        if (v >= 0 && v < npoints) group_id[v] = gi;
+                    }
+                }
             }
-        });
+            write_integer_ranges(out, npoints, [&](auto& text, int begin, int end) {
+                for (int i = begin; i < end; ++i) {
+                    if (i > 0) text << ',';
+                    text << '[' << group_id[i] << ']';
+                }
+            });
+        }
 
         out << "]\n";
         out << "                    ]\n";
@@ -293,17 +356,12 @@ namespace {
 
         // Face vertex counts (all triangles = 3)
         out << "    int[] faceVertexCounts = [";
-        write_formatted_ranges(out, nprims, [&](std::ostream& text, int begin, int end) {
-            for (int i = begin; i < end; ++i) {
-                if (i > 0) text << ", ";
-                text << "3";
-            }
-        });
+        write_repeated_value(out, nprims, "3", ", ");
         out << "]\n";
 
         // Face vertex indices
         out << "    int[] faceVertexIndices = [";
-        write_formatted_ranges(out, static_cast<int>(tris.size()), [&](std::ostream& text, int begin, int end) {
+        write_integer_ranges(out, static_cast<int>(tris.size()), [&](auto& text, int begin, int end) {
             for (int i = begin; i < end; ++i) {
                 if (i > 0) text << ", ";
                 text << tris[i];

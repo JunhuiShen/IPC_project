@@ -20,44 +20,42 @@ std::string state_filename(const std::string& dir, int frame) {
     return ss.str();
 }
 
+template <typename Vector>
+void write_vectors(std::ostream& out, const std::vector<Vector>& values) {
+    const uint64_t count = values.size();
+    out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    if (values.empty()) return;
+
+    constexpr std::size_t components = Vector::SizeAtCompileTime;
+    constexpr std::size_t records_per_block = 8192 / components;
+    std::array<double, records_per_block * components> buffer;
+    for (std::size_t begin = 0; begin < values.size(); begin += records_per_block) {
+        const std::size_t records = std::min(records_per_block, values.size() - begin);
+        // Pack components explicitly: Eigen vectors may have alignment padding,
+        // while the checkpoint format stores only consecutive scalar doubles.
+        for (std::size_t i = 0; i < records; ++i)
+            std::copy_n(values[begin + i].data(), components,
+                        buffer.data() + i * components);
+        out.write(reinterpret_cast<const char*>(buffer.data()),
+                  static_cast<std::streamsize>(records * components * sizeof(double)));
+    }
+}
+
 }  // namespace
 
 void serialize_state(const std::string& dir, int frame, const DeformedState& state) {
     std::ofstream out(state_filename(dir, frame), std::ios::binary);
     if (!out) { std::cerr << "Error: cannot write state file for frame " << frame << "\n"; return; }
 
-    auto write_vec3 = [&](const std::vector<Vec3>& v) {
-        uint64_t n = v.size();
-        out.write(reinterpret_cast<const char*>(&n), sizeof(n));
-        for (const auto& p : v) {
-            double x = p.x(), y = p.y(), z = p.z();
-            out.write(reinterpret_cast<const char*>(&x), sizeof(double));
-            out.write(reinterpret_cast<const char*>(&y), sizeof(double));
-            out.write(reinterpret_cast<const char*>(&z), sizeof(double));
-        }
-    };
-
-    auto write_vec4 = [&](const std::vector<Vec4>& v) {
-        const uint64_t n = v.size();
-        out.write(reinterpret_cast<const char*>(&n), sizeof(n));
-        for (const Vec4& q : v) {
-            for (int component = 0; component < 4; ++component) {
-                const double value = q[component];
-                out.write(
-                    reinterpret_cast<const char*>(&value), sizeof(value));
-            }
-        }
-    };
-
     // Keep the original two arrays at the front for compatibility with old
     // checkpoints, then append a tagged generalized rigid-body state block.
-    write_vec3(state.deformed_positions);
-    write_vec3(state.velocities);
+    write_vectors(out, state.deformed_positions);
+    write_vectors(out, state.velocities);
     out.write(kGeneralizedStateMagic.data(), kGeneralizedStateMagic.size());
-    write_vec3(state.x_coms);
-    write_vec3(state.v_coms);
-    write_vec4(state.orientations);
-    write_vec3(state.omega);
+    write_vectors(out, state.x_coms);
+    write_vectors(out, state.v_coms);
+    write_vectors(out, state.orientations);
+    write_vectors(out, state.omega);
 }
 
 bool deserialize_state(const std::string& dir, int frame, DeformedState& state) {
