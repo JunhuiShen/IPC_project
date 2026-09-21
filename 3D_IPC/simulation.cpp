@@ -1,7 +1,6 @@
 #include "example.h"
 #include "mesh_utils.h"
 #include "physics.h"
-#include "SIMD.h"
 #include "simulation.h"
 #include "solver.h"
 #include "state_io.h"
@@ -192,20 +191,10 @@ int main(int argc, char** argv) {
               << "\n";
     std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
-    if ((params.use_basic_experimental || params.use_basic_experimental_v2) && !params.use_cloth_grid
-        && !params.use_ogc && !params.use_ogc_solver) {
-        if (params.use_basic_experimental_v2)
-            std::cout << "Experimental cloth solver: v2 (per-color triangle storage)\n";
-        const bool simd = physics_detail::collision_off_energy_simd_enabled(ref_mesh, params);
-        if (params.use_basic_experimental_v2 && params.use_parallel) {
-            std::cout << "Membrane assembly: stored per-color scalar derivatives\n";
-            std::cout << "Other non-collision energy kernels (inertia/gravity/pins/bending): ";
-        } else {
-            std::cout << "Non-collision energy kernels (inertia/gravity/pins/membrane/bending): ";
-        }
-        std::cout << (simd ? ipc_simd::backend_name() : "scalar reference");
-        std::cout << "\n";
-    }
+    if (params.use_basic_experimental_v2 && !params.use_cloth_grid
+        && !params.use_ogc && !params.use_ogc_solver
+        && ref_mesh.rb_nodes.empty() && ref_mesh.tets.empty())
+        std::cout << "Experimental cloth solver: v2 (per-color triangle storage)\n";
     if (num_rigid_bodies > 0)
         std::cout << "Rigid bodies: " << num_rigid_bodies << "\n";
 

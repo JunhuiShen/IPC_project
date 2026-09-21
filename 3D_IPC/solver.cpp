@@ -1594,7 +1594,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
 
         // Prepare shared storage before the color sweep's worker team starts.
         // Re-size when colors are rebuilt (including contact-cost reordering),
-        // for either contact or ordinary color sweeps, independent of use_simd.
+        // for either contact or ordinary color sweeps.
         if (params.use_parallel && (iter - 1) % params.node_box_update_count == 0) {
             color_triangle_storage.resize(color_groups.size());
             color_triangle_derivatives.resize(color_groups.size());

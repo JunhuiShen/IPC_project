@@ -944,50 +944,66 @@ TEST(BasicSolverParameters, ExperimentalDefaultsOffAndRoundTrips) {
     EXPECT_FALSE(disabled.to_sim_params().use_basic_experimental);
 }
 
-TEST(BasicSolverParameters, ExperimentalV2FlagIsIndependentAndRoundTrips) {
+TEST(BasicSolverParameters, StoredMembraneSelectorDefaultsOffAndRoundTrips) {
     EXPECT_FALSE(SimParams::zeros().use_basic_experimental_v2);
     IPCArgs3D defaults;
     EXPECT_FALSE(defaults.to_sim_params().use_basic_experimental_v2);
-    IPCArgs3D bare;
-    ASSERT_TRUE(parse_arguments(bare, {"3D_sim", "--use_basic_experimental_v2"}));
-    EXPECT_TRUE(bare.to_sim_params().use_basic_experimental_v2);
-    EXPECT_FALSE(bare.to_sim_params().use_basic_experimental);
-
+    for (const auto& words : std::vector<std::vector<std::string>>{
+             {"3D_sim", "--use_basic_experimental_v2"},
+             {"3D_sim", "--use_basic_experimental_v2", "true"},
+             {"3D_sim", "--use_basic_experimental_v2", "false"}}) {
+        IPCArgs3D args;
+        ASSERT_TRUE(parse_arguments(args, words));
+        const bool enabled = words.back() != "false";
+        EXPECT_EQ(args.to_sim_params().use_basic_experimental_v2, enabled);
+        EXPECT_FALSE(args.to_sim_params().use_basic_experimental);
+        TemporaryArgsFile saved;
+        args.serialize(saved.path.string());
+        IPCArgs3D restored;
+        ASSERT_TRUE(restored.deserialize(saved.path.string()));
+        EXPECT_EQ(restored.to_sim_params().use_basic_experimental_v2, enabled);
+    }
     for (const bool original : {false, true}) {
-        for (const bool v2 : {false, true}) {
-            SCOPED_TRACE(::testing::Message() << "original=" << original << " v2=" << v2);
+        for (const bool stored : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "original=" << original << " stored=" << stored);
             IPCArgs3D args;
             ASSERT_TRUE(parse_arguments(args, {"3D_sim", "--use_basic_experimental",
-                original ? "true" : "false", "--use_basic_experimental_v2",
-                v2 ? "true" : "false"}));
+                original ? "true" : "false", "--use_basic_experimental_v2", stored ? "true" : "false"}));
             EXPECT_EQ(args.to_sim_params().use_basic_experimental, original);
-            EXPECT_EQ(args.to_sim_params().use_basic_experimental_v2, v2);
+            EXPECT_EQ(args.to_sim_params().use_basic_experimental_v2, stored);
             TemporaryArgsFile saved;
             args.serialize(saved.path.string());
             IPCArgs3D restored;
             ASSERT_TRUE(restored.deserialize(saved.path.string()));
             EXPECT_EQ(restored.to_sim_params().use_basic_experimental, original);
-            EXPECT_EQ(restored.to_sim_params().use_basic_experimental_v2, v2);
+            EXPECT_EQ(restored.to_sim_params().use_basic_experimental_v2, stored);
         }
     }
+    IPCArgs3D removed_flag;
+    testing::internal::CaptureStderr();
+    const bool accepted = parse_arguments(removed_flag,
+        {"3D_sim", "--use_simd", "true"});
+    const std::string error = testing::internal::GetCapturedStderr();
+    EXPECT_FALSE(accepted);
+    EXPECT_NE(error.find("unknown argument"), std::string::npos);
 }
 
 TEST(BasicSolver, ExperimentalV2MatchesOriginalAcrossContactModesAndGroupedSweeps) {
     RestoreOpenMPSettings restore;
     omp_set_dynamic(0);
     constexpr int frames = 2;
-    // Contact modes x scalar/SIMD x serial/parallel-1/parallel-4. Keep every
-    // independent mesh alive to avoid aliasing static workspace keys.
-    std::array<ClothScene, 36> scenes;
-    for (int configuration = 0; configuration < 18; ++configuration) {
-        const int mode = configuration / 6;
+    // Contact modes x serial/parallel-1/parallel-4. The selector chooses the
+    // stored-membrane organizer; both methods use the same scalar kernels.
+    // Keep every independent mesh alive to avoid aliasing static workspace keys.
+    std::array<ClothScene, 18> scenes;
+    for (int configuration = 0; configuration < 9; ++configuration) {
+        const int mode = configuration / 3;
         for (int method = 0; method < 2; ++method) {
             auto& scene = scenes[2 * configuration + method];
             build_contact_scene(scene, mode == 2 ? 0.2 : 0.0);
             scene.params.use_cloth_grid = false;
             scene.params.use_basic_experimental = method == 0;
             scene.params.use_basic_experimental_v2 = method == 1;
-            scene.params.use_simd = (configuration / 3) % 2 != 0;
             scene.params.use_parallel = configuration % 3 != 0;
             // Two grouped sweeps (3 + 2) exercise refreshes both with and
             // without a node-box/color rebuild in each physical substep.
@@ -1001,13 +1017,12 @@ TEST(BasicSolver, ExperimentalV2MatchesOriginalAcrossContactModesAndGroupedSweep
             }
         }
     }
-    for (int configuration = 0; configuration < 18; ++configuration) {
-        const int mode = configuration / 6;
-        const bool simd = (configuration / 3) % 2 != 0;
+    for (int configuration = 0; configuration < 9; ++configuration) {
+        const int mode = configuration / 3;
         const bool parallel = configuration % 3 != 0;
         const int threads = configuration % 3 == 2 ? 4 : 1;
         SCOPED_TRACE(::testing::Message() << "mode=" << mode
-            << " simd=" << simd << " parallel=" << parallel << " threads=" << threads);
+            << " parallel=" << parallel << " threads=" << threads);
         omp_set_num_threads(threads);
         std::array<DeformedState, frames> references;
         std::array<SolverResult, frames> reference_results;
@@ -1025,11 +1040,10 @@ TEST(BasicSolver, ExperimentalV2MatchesOriginalAcrossContactModesAndGroupedSweep
                     reference_results[frame - 1] = result;
                 } else {
                     const auto& reference = references[frame - 1];
-                    if (mode == 0 && simd && parallel) {
-                        // Only this combination compares different membrane
-                        // arithmetic: v2's stored scalar blocks versus the
-                        // original SIMD analytic kernels. Use the established
-                        // scalar/SIMD integration budgets from SIMD_test.cpp.
+                    if (parallel) {
+                        // Materializing weighted membrane entries introduces a
+                        // rounding boundary that differs from live accumulation
+                        // on some compilers. Compare within established budgets.
                         ASSERT_EQ(scene.state.deformed_positions.size(), reference.deformed_positions.size());
                         ASSERT_EQ(scene.state.velocities.size(), reference.velocities.size());
                         for (std::size_t node = 0; node < reference.deformed_positions.size(); ++node) {
@@ -1043,8 +1057,7 @@ TEST(BasicSolver, ExperimentalV2MatchesOriginalAcrossContactModesAndGroupedSweep
                                 << "velocity node=" << node;
                         }
                     } else {
-                        // Scalar/contact paths retain the same contribution
-                        // arithmetic; serial v2 must keep its original fallback.
+                        // Serial v2 retains the original live-assembly fallback.
                         expect_states_bitwise_equal(scene.state, reference);
                     }
                     const auto& expected = reference_results[frame - 1];
@@ -1070,7 +1083,6 @@ TEST(BasicSolver, ExperimentalV2StoredMembraneIsThreadDeterministicAcrossStoppin
             scene.params.use_cloth_grid = false;
             scene.params.use_basic_experimental_v2 = true;
             scene.params.use_parallel = true;
-            scene.params.use_simd = true;
             scene.params.fixed_iters = configuration % 2 == 0;
             scene.params.max_global_iters = 5;
             scene.params.node_box_update_count = 3;
@@ -1135,7 +1147,6 @@ TEST(BasicSolver, ExperimentalV2DerivativePreparationFailureJoinsWorkersAndRecov
             scene.params.use_cloth_grid = false;
             scene.params.use_basic_experimental_v2 = true;
             scene.params.use_parallel = true;
-            scene.params.use_simd = false;
             scene.params.fixed_iters = true; // Do not evaluate an initial residual.
             scene.params.max_global_iters = 5;
             scene.params.node_box_update_count = 3;
@@ -1409,4 +1420,125 @@ TEST(ClothGridSolver, FrameDispatchRejectsGridWithEitherOgcModeBeforeAdvancing) 
             EXPECT_EQ(std::memcmp(scene.state.deformed_positions[node].data(),
                 initial_positions[node].data(), 3 * sizeof(double)), 0);
     }
+}
+
+TEST(StoredMembraneAssembly, UsesWeightedBuffersInOrderWithoutReadingMembraneInputs) {
+    ClothScene scene;
+    build_contact_scene(scene, 0.0);
+    scene.params.fps = 17.0;
+    scene.params.substeps = 3;
+    scene.params.kB = 0.0;
+    scene.params.kpin = 0.0;
+    scene.pins.clear();
+    std::fill(scene.mesh.mass.begin(), scene.mesh.mass.end(), 0.0);
+    // Stale incidence and poisoned rest data must not be consulted when
+    // already weighted membrane derivatives are supplied by the organizer.
+    scene.adjacency.clear();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    for (auto& inverse : scene.mesh.Dm_inverse) inverse.setConstant(nan);
+    std::fill(scene.mesh.area.begin(), scene.mesh.area.end(), nan);
+    const IncidentTriangles stale_incident{{0, 0}};
+    const std::array<Vec3, 3> gradients{
+        Vec3::Constant(1e16), Vec3::Constant(-1e16), Vec3(1.0, 2.0, 3.0)};
+    const Mat33 final_hessian = (Mat33() <<
+        2.0, 0.1, 0.2, 0.1, 3.0, 0.3, 0.2, 0.3, 4.0).finished();
+    const std::array<Mat33, 3> hessians{
+        Mat33::Constant(1e16), Mat33::Constant(-1e16), final_hessian};
+    const physics_detail::MembraneDerivativeView stored{
+        gradients.data(), hessians.data(), gradients.size()};
+
+    for (bool cached_incident : {false, true}) {
+        std::pair<Vec3, Mat33> actual;
+        ASSERT_NO_THROW(actual = physics_detail::
+            compute_local_gradient_and_hessian_with_stored_membrane_unchecked(
+                0, scene.mesh, scene.adjacency, scene.pins, scene.params,
+                scene.state.deformed_positions, scene.state.deformed_positions,
+                nullptr, cached_incident ? &stale_incident : nullptr,
+                nullptr, nullptr, stored));
+        // Cancellation exposes a changed addition order. dt^2 and area are
+        // already included in these entries and must not be applied again.
+        EXPECT_EQ((actual.first - gradients.back()).norm(), 0.0);
+        EXPECT_EQ((actual.second - final_hessian).norm(), 0.0);
+    }
+}
+
+TEST(StoredMembraneAssembly, EmptyViewPreservesPointAndBendingTerms) {
+    ClothScene scene;
+    build_contact_scene(scene, 0.0);
+    std::vector<Vec3> predictor;
+    build_xhat(predictor, scene.state.deformed_positions,
+        scene.state.velocities, scene.params.dt());
+    auto no_membrane = scene.params;
+    no_membrane.mu = no_membrane.lambda = 0.0;
+    const auto expected = compute_local_gradient_and_hessian_no_barrier(
+        0, scene.mesh, scene.adjacency, scene.pins, no_membrane,
+        scene.state.deformed_positions, predictor);
+    ASSERT_GT(expected.first.norm(), 0.0);
+    ASSERT_GT(expected.second.norm(), 0.0);
+    scene.adjacency.clear();
+    const auto actual = physics_detail::
+        compute_local_gradient_and_hessian_with_stored_membrane_unchecked(
+            0, scene.mesh, scene.adjacency, scene.pins, scene.params,
+            scene.state.deformed_positions, predictor,
+            nullptr, nullptr, nullptr, nullptr, {});
+    EXPECT_LE((actual.first - expected.first).norm(),
+        2e-11 * (1.0 + expected.first.norm()));
+    EXPECT_LE((actual.second - expected.second).norm(),
+        2e-11 * (1.0 + expected.second.norm()));
+}
+
+TEST(StoredMembraneAssembly, ComputedTriangleEntriesMatchFullAssemblyForAllNodes) {
+    ClothScene scene;
+    build_contact_scene(scene, 0.0);
+    scene.params.fps = 17.0;
+    scene.params.substeps = 3;
+    scene.params.gravity = Vec3(0.7, -9.81, -0.4);
+    for (std::size_t i = 0; i < scene.mesh.hinges.size(); ++i)
+        scene.mesh.hinges[i].bar_theta = 0.08 * std::sin(0.37 * i);
+    std::vector<Vec3> predictor;
+    build_xhat(predictor, scene.state.deformed_positions,
+        scene.state.velocities, scene.params.dt());
+    const PinMap pin_map = build_pin_map(scene.pins,
+        static_cast<int>(scene.state.deformed_positions.size()));
+    const VertexTriangleMap unused_adjacency;
+    std::array<bool, 3> visited_roles{};
+    for (std::size_t node = 0; node < scene.state.deformed_positions.size(); ++node) {
+        SCOPED_TRACE(::testing::Message() << "node=" << node);
+        const int vi = static_cast<int>(node);
+        std::vector<Vec3> gradients;
+        std::vector<Mat33> hessians;
+        for (const auto& [triangle, role] : scene.adjacency.at(vi)) {
+            visited_roles[role] = true;
+            const int* corners = &scene.mesh.tris[3 * triangle];
+            const auto& x = scene.state.deformed_positions;
+            Mat32 Ds;
+            Ds.col(0) = x[corners[1]] - x[corners[0]];
+            Ds.col(1) = x[corners[2]] - x[corners[0]];
+            const Mat32 F = Ds * scene.mesh.Dm_inverse[triangle];
+            const auto cache = buildCorotatedCache(F);
+            const auto gradN = shape_function_gradients(scene.mesh.Dm_inverse[triangle]);
+            const Mat32 P = PCorotated32(cache, F, scene.params.mu, scene.params.lambda);
+            Mat66 dPdF;
+            dPdFCorotated32(cache, scene.params.mu, scene.params.lambda, dPdF);
+            gradients.push_back(scene.params.dt2() * corotated_node_gradient(
+                P, scene.mesh.area[triangle], gradN, role));
+            hessians.push_back(scene.params.dt2() * corotated_node_hessian(
+                dPdF, scene.mesh.area[triangle], gradN, role));
+        }
+        const auto expected = compute_local_gradient_and_hessian_no_barrier(
+            vi, scene.mesh, scene.adjacency, scene.pins, scene.params,
+            scene.state.deformed_positions, predictor);
+        const physics_detail::MembraneDerivativeView stored{
+            gradients.data(), hessians.data(), gradients.size()};
+        const auto actual = physics_detail::
+            compute_local_gradient_and_hessian_with_stored_membrane_unchecked(
+                vi, scene.mesh, unused_adjacency, scene.pins, scene.params,
+                scene.state.deformed_positions, predictor,
+                &pin_map, nullptr, nullptr, nullptr, stored);
+        EXPECT_LE((actual.first - expected.first).norm(),
+            2e-11 * (1.0 + expected.first.norm()));
+        EXPECT_LE((actual.second - expected.second).norm(),
+            2e-11 * (1.0 + expected.second.norm()));
+    }
+    for (bool visited : visited_roles) EXPECT_TRUE(visited);
 }
