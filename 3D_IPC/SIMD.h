@@ -23,7 +23,7 @@ void accumulate_point_terms(
 // Add membrane elasticity to existing local accumulators in incident order.
 // This computes the same corotated gradient and exact self Hessian as the
 // scalar assembly; contact and the local solve remain with the caller.
-void accumulate_membrane(
+void accumulated_corotated_elasticity(
     const RefMesh& mesh, const std::vector<Vec3>& positions,
     const IncidentTriangles& incident,
     const std::vector<ShapeGrads>* rest_shape_grads,

@@ -73,7 +73,7 @@ void compare(const Inputs& input, double mu, double lambda, double dt2,
     for (bool cached : {false, true}) {
         Vec3 g = seed_g;
         Mat33 H = seed_H;
-        ipc_simd::accumulate_membrane(input.mesh, input.x, input.incident,
+        ipc_simd::accumulated_corotated_elasticity(input.mesh, input.x, input.incident,
             cached ? &input.rest_shape_grads : nullptr, mu, lambda, dt2, g, H);
         ASSERT_TRUE(g.allFinite());
         ASSERT_TRUE(H.allFinite());
@@ -108,7 +108,7 @@ TEST(SIMDKernel, RestAndRotatedRestMatchForAllVertexRoles) {
         compare(input, 46000.0, 46000.0, 1.0 / 22500.0);
         Vec3 g = Vec3::Zero();
         Mat33 H = Mat33::Zero();
-        ipc_simd::accumulate_membrane(input.mesh, input.x, input.incident,
+        ipc_simd::accumulated_corotated_elasticity(input.mesh, input.x, input.incident,
             &input.rest_shape_grads, 46000.0, 46000.0, 1.0 / 22500.0, g, H);
         EXPECT_LT(g.norm(), 1e-12);
     }
@@ -187,7 +187,7 @@ TEST(SIMDKernel, ExactSelfHessianMatchesFiniteDifferencesOfGradient) {
         const auto evaluate = [&]() {
             Vec3 g = Vec3::Zero();
             Mat33 H = Mat33::Zero();
-            ipc_simd::accumulate_membrane(input.mesh, input.x, input.incident,
+            ipc_simd::accumulated_corotated_elasticity(input.mesh, input.x, input.incident,
                 &input.rest_shape_grads, 2.3, 4.7, 1.0, g, H);
             return std::make_pair(g, H);
         };

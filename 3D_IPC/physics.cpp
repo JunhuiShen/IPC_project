@@ -295,7 +295,7 @@ compute_local_gradient_and_hessian_no_barrier_impl(
 
     const IncidentTriangles& incident = incident_triangles ? *incident_triangles : adj.at(vi);
     if (simd_energy) {
-        ipc_simd::accumulate_membrane(ref_mesh, x, incident, rest_shape_grads,
+        ipc_simd::accumulated_corotated_elasticity(ref_mesh, x, incident, rest_shape_grads,
             params.mu, params.lambda, dt2, g, H);
     } else {
         for (const auto& [ti, a] : incident) {

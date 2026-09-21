@@ -431,7 +431,7 @@ void accumulate_bending(
     }
 }
 
-void accumulate_membrane(
+void accumulated_corotated_elasticity(
     const RefMesh& mesh, const std::vector<Vec3>& positions,
     const IncidentTriangles& incident,
     const std::vector<ShapeGrads>* rest_shape_grads,
