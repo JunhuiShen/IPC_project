@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -11,6 +12,7 @@
 #include <numeric>
 #include <omp.h>
 #include <optional>
+#include <type_traits>
 #include <vector>
 
 // Contact scheduling for the cloth, rigid-body, and mixed solvers. All paths
@@ -520,9 +522,15 @@ struct ColoredContactSweep {
         values.resize(maximum);
         masks.resize(maximum_masks);
     }
-    template <class Compute, class Apply, class Baseline, class CCD, class Commit>
+    // Optional before_color is called collectively by every worker before any
+    // updates of that color, including fallback paths. It must not throw and
+    // must join its writes before returning (e.g. an omp for without nowait).
+    // The default adds no work or barriers for existing callers.
+    template <class Compute, class Apply, class Baseline, class CCD, class Commit,
+              class BeforeColor = std::nullptr_t>
     void run(const std::vector<std::vector<int>> &groups, const Compute &compute,
-             const Apply &apply, const Baseline &baseline, const CCD &ccd, const Commit &commit) {
+             const Apply &apply, const Baseline &baseline, const CCD &ccd, const Commit &commit,
+             const BeforeColor& before_color = nullptr) {
         constexpr int chunk = contact_grain;
         for (int c = 0; c < static_cast<int>(groups.size()); ++c)
             next_whole[c].store(split_count[c], std::memory_order_relaxed);
@@ -536,6 +544,8 @@ struct ColoredContactSweep {
         {
             for (int c = 0; c < static_cast<int>(groups.size()); ++c) {
                 const auto &group = groups[c];
+                if constexpr (!std::is_same_v<BeforeColor, std::nullptr_t>)
+                    before_color(static_cast<std::size_t>(c));
                 if (split_count[c] == 0 || omp_get_num_threads() != team) {
 #pragma omp for schedule(dynamic, 1)
                     for (int i = 0; i < static_cast<int>(group.size()); ++i)
@@ -615,9 +625,10 @@ class ColoredVertexSweep {
     alignas(64) std::atomic<int> cursor_{0};
 
 public:
-    template <class Process>
+    // Same collective, nonthrowing before_color contract as ColoredContactSweep.
+    template <class Process, class BeforeColor = std::nullptr_t>
     void run(const std::vector<std::vector<int>>& colors, int sweeps,
-             const Process& process) {
+             const Process& process, const BeforeColor& before_color = nullptr) {
         if (sweeps <= 0 || colors.empty()) return;
         barrier_.reserve(omp_get_max_threads());
         std::atomic<bool> failed{false};
@@ -641,7 +652,12 @@ public:
             }
             unsigned phase = 0;
             for (int sweep = 0; sweep < sweeps; ++sweep) {
-                for (const auto& color : colors) {
+                for (std::size_t c = 0; c < colors.size(); ++c) {
+                    const auto& color = colors[c];
+                    // All workers must still enter a collective callback when
+                    // draining a failed sweep, just like the end-color barrier.
+                    if constexpr (!std::is_same_v<BeforeColor, std::nullptr_t>)
+                        before_color(c);
                     const int count = static_cast<int>(color.size());
                     if (worker < count) invoke(color[worker]);
                     while (cursor_.load(std::memory_order_relaxed) < count) {

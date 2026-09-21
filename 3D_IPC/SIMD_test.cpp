@@ -646,6 +646,14 @@ TEST(SIMDSolver, ActivationRequiresExperimentalCollisionOffCloth) {
     ASSERT_TRUE(physics_detail::collision_off_energy_simd_enabled(scene.mesh, scene.params));
 
     const auto enabled = scene.params;
+    // The storage variant keeps the same optional energy-kernel selection;
+    // selecting v2 does not require also enabling the original solver flag.
+    auto v2 = enabled;
+    v2.use_basic_experimental = false;
+    v2.use_basic_experimental_v2 = true;
+    EXPECT_TRUE(physics_detail::collision_off_energy_simd_enabled(scene.mesh, v2));
+    v2.use_simd = false;
+    EXPECT_FALSE(physics_detail::collision_off_energy_simd_enabled(scene.mesh, v2));
     for (bool SimParams::*flag : {&SimParams::use_simd,
              &SimParams::use_basic_experimental}) {
         auto params = enabled;
@@ -720,6 +728,137 @@ TEST(SIMDSolver, AllFiveEnergyTermsMatchCompleteScalarLocalAssembly) {
                 2e-11 * (1.0 + expected.second.norm())) << "cached=" << cached;
         }
     }
+}
+
+TEST(StoredMembraneAssembly, UsesWeightedBuffersInOrderWithoutReadingMembraneInputs) {
+    ClothScene scene;
+    build_scene(scene);
+    scene.params.fps = 17.0;
+    scene.params.substeps = 3;
+    scene.params.kB = 0.0;
+    scene.params.kpin = 0.0;
+    scene.pins.clear();
+    std::fill(scene.mesh.mass.begin(), scene.mesh.mass.end(), 0.0);
+    // A stale adjacency map must not be consulted, and poisoned rest data
+    // must not leak into assembly when weighted derivatives are supplied.
+    scene.adjacency.clear();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    for (auto& inverse : scene.mesh.Dm_inverse) inverse.setConstant(nan);
+    std::fill(scene.mesh.area.begin(), scene.mesh.area.end(), nan);
+    const IncidentTriangles stale_incident{{0, 0}};
+    const std::array<Vec3, 3> gradients{
+        Vec3::Constant(1e16), Vec3::Constant(-1e16), Vec3(1.0, 2.0, 3.0)};
+    const Mat33 final_hessian = (Mat33() <<
+        2.0, 0.1, 0.2, 0.1, 3.0, 0.3, 0.2, 0.3, 4.0).finished();
+    const std::array<Mat33, 3> hessians{
+        Mat33::Constant(1e16), Mat33::Constant(-1e16), final_hessian};
+    const physics_detail::MembraneDerivativeView stored{
+        gradients.data(), hessians.data(), gradients.size()};
+
+    for (bool simd : {false, true}) {
+        scene.params.use_simd = simd;
+        for (bool cached_incident : {false, true}) {
+            std::pair<Vec3, Mat33> actual;
+            ASSERT_NO_THROW(actual = physics_detail::
+                compute_local_gradient_and_hessian_with_stored_membrane_unchecked(
+                    0, scene.mesh, scene.adjacency, scene.pins, scene.params,
+                    scene.state.deformed_positions, scene.state.deformed_positions,
+                    nullptr, cached_incident ? &stale_incident : nullptr,
+                    nullptr, nullptr, stored));
+            // Cancellation makes a changed reduction order observable. The
+            // supplied entries already include dt^2 and area: do not rescale.
+            EXPECT_EQ((actual.first - gradients.back()).norm(), 0.0);
+            EXPECT_EQ((actual.second - final_hessian).norm(), 0.0);
+        }
+    }
+}
+
+TEST(StoredMembraneAssembly, EmptyViewPreservesPointAndBendingTerms) {
+    ClothScene scene;
+    build_scene(scene);
+    scene.params.use_simd = false;
+    std::vector<Vec3> predictor;
+    build_xhat(predictor, scene.state.deformed_positions,
+        scene.state.velocities, scene.params.dt());
+    auto no_membrane = scene.params;
+    no_membrane.mu = no_membrane.lambda = 0.0;
+    const auto expected = compute_local_gradient_and_hessian_no_barrier(
+        0, scene.mesh, scene.adjacency, scene.pins, no_membrane,
+        scene.state.deformed_positions, predictor);
+    ASSERT_GT(expected.first.norm(), 0.0);
+    ASSERT_GT(expected.second.norm(), 0.0);
+    scene.adjacency.clear();
+    for (bool simd : {false, true}) {
+        scene.params.use_simd = simd;
+        const auto actual = physics_detail::
+            compute_local_gradient_and_hessian_with_stored_membrane_unchecked(
+                0, scene.mesh, scene.adjacency, scene.pins, scene.params,
+                scene.state.deformed_positions, predictor,
+                nullptr, nullptr, nullptr, nullptr, {});
+        EXPECT_LE((actual.first - expected.first).norm(),
+            2e-11 * (1.0 + expected.first.norm()));
+        EXPECT_LE((actual.second - expected.second).norm(),
+            2e-11 * (1.0 + expected.second.norm()));
+    }
+}
+
+TEST(StoredMembraneAssembly, ComputedTriangleEntriesMatchFullAssemblyForAllNodes) {
+    ClothScene scene;
+    build_scene(scene);
+    scene.params.fps = 17.0;
+    scene.params.substeps = 3;
+    scene.params.gravity = Vec3(0.7, -9.81, -0.4);
+    for (std::size_t i = 0; i < scene.mesh.hinges.size(); ++i)
+        scene.mesh.hinges[i].bar_theta = 0.08 * std::sin(0.37 * i);
+    std::vector<Vec3> predictor;
+    build_xhat(predictor, scene.state.deformed_positions,
+        scene.state.velocities, scene.params.dt());
+    const PinMap pin_map = build_pin_map(scene.pins,
+        static_cast<int>(scene.state.deformed_positions.size()));
+    const VertexTriangleMap unused_adjacency;
+    std::array<bool, 3> visited_roles{};
+    for (std::size_t node = 0; node < scene.state.deformed_positions.size(); ++node) {
+        SCOPED_TRACE(::testing::Message() << "node=" << node);
+        const int vi = static_cast<int>(node);
+        std::vector<Vec3> gradients;
+        std::vector<Mat33> hessians;
+        for (const auto& [triangle, role] : scene.adjacency.at(vi)) {
+            visited_roles[role] = true;
+            const int* corners = &scene.mesh.tris[3 * triangle];
+            const auto& x = scene.state.deformed_positions;
+            Mat32 Ds;
+            Ds.col(0) = x[corners[1]] - x[corners[0]];
+            Ds.col(1) = x[corners[2]] - x[corners[0]];
+            const Mat32 F = Ds * scene.mesh.Dm_inverse[triangle];
+            const auto cache = buildCorotatedCache(F);
+            const auto gradN = shape_function_gradients(scene.mesh.Dm_inverse[triangle]);
+            const Mat32 P = PCorotated32(cache, F, scene.params.mu, scene.params.lambda);
+            Mat66 dPdF;
+            dPdFCorotated32(cache, scene.params.mu, scene.params.lambda, dPdF);
+            gradients.push_back(scene.params.dt2() * corotated_node_gradient(
+                P, scene.mesh.area[triangle], gradN, role));
+            hessians.push_back(scene.params.dt2() * corotated_node_hessian(
+                dPdF, scene.mesh.area[triangle], gradN, role));
+        }
+        const auto expected = compute_local_gradient_and_hessian_no_barrier(
+            vi, scene.mesh, scene.adjacency, scene.pins, scene.params,
+            scene.state.deformed_positions, predictor);
+        const physics_detail::MembraneDerivativeView stored{
+            gradients.data(), hessians.data(), gradients.size()};
+        for (bool simd : {false, true}) {
+            scene.params.use_simd = simd;
+            const auto actual = physics_detail::
+                compute_local_gradient_and_hessian_with_stored_membrane_unchecked(
+                    vi, scene.mesh, unused_adjacency, scene.pins, scene.params,
+                    scene.state.deformed_positions, predictor,
+                    &pin_map, nullptr, nullptr, nullptr, stored);
+            EXPECT_LE((actual.first - expected.first).norm(),
+                2e-11 * (1.0 + expected.first.norm()));
+            EXPECT_LE((actual.second - expected.second).norm(),
+                2e-11 * (1.0 + expected.second.norm()));
+        }
+    }
+    for (bool visited : visited_roles) EXPECT_TRUE(visited);
 }
 
 TEST(SIMDSolver, CollisionOffFixedFramesMatchScalarAndAreThreadDeterministic) {

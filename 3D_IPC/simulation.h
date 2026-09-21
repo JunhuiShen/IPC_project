@@ -203,6 +203,8 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
             sub_result = global_gauss_seidel_solver_ogc(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir, &state.deformed_positions);
         else if (params.use_cloth_grid)
             sub_result = global_gauss_seidel_solver_ambient_grid(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
+        else if (params.use_basic_experimental_v2)
+            sub_result = global_gauss_seidel_solver_basic_experimental_v2(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
         else if (params.use_basic_experimental)
             sub_result = global_gauss_seidel_solver_basic_experimental(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
         else

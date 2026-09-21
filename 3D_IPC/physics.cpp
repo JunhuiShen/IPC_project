@@ -10,7 +10,7 @@
 
 bool physics_detail::collision_off_energy_simd_enabled(
     const RefMesh& mesh, const SimParams& params) {
-    return params.use_basic_experimental && params.use_simd
+    return (params.use_basic_experimental || params.use_basic_experimental_v2) && params.use_simd
         && !params.use_cloth_grid && !params.use_ogc && !params.use_ogc_solver
         && params.d_hat == 0.0 && params.k_barrier == 0.0
         && !params.use_ccd && !params.use_ccd_guess
@@ -247,6 +247,7 @@ double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const s
     return E + dt2 * PE + friction_energy;
 }
 
+template <bool UseStoredMembrane = false>
 static std::pair<Vec3, Mat33>
 compute_local_gradient_and_hessian_no_barrier_impl(
     int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
@@ -256,13 +257,15 @@ compute_local_gradient_and_hessian_no_barrier_impl(
     const IncidentTriangles* incident_triangles,
     const std::vector<ShapeGrads>* rest_shape_grads,
     const std::vector<Vec3>* previous_positions,
-    const bool validate_friction_inputs) {
+    const bool validate_friction_inputs,
+    const physics_detail::MembraneDerivativeView* membrane = nullptr) {
     const double dt2 = params.dt2();
     Vec3  g = Vec3::Zero();
     Mat33 H = Mat33::Zero();
 
     // The CLI-selected experimental collision-off route opts into all five
     // non-contact energy kernels. The checked reference assembly stays scalar.
+    // The stored-membrane specialization replaces only that assembly stage.
     const bool simd_energy = !validate_friction_inputs
         && physics_detail::collision_off_energy_simd_enabled(ref_mesh, params);
 
@@ -293,35 +296,44 @@ compute_local_gradient_and_hessian_no_barrier_impl(
         }
     }
 
-    const IncidentTriangles& incident = incident_triangles ? *incident_triangles : adj.at(vi);
-    if (simd_energy) {
-        ipc_simd::accumulated_corotated_elasticity(ref_mesh, x, incident, rest_shape_grads,
-            params.mu, params.lambda, dt2, g, H);
+    if constexpr (UseStoredMembrane) {
+        // Contributions are already weighted. Preserve each node's original
+        // incident addition order and avoid even looking up its triangles.
+        for (std::size_t e = 0; e < membrane->count; ++e) {
+            g += membrane->gradients[e];
+            H += membrane->hessians[e];
+        }
     } else {
-        for (const auto& [ti, a] : incident) {
-            const TriangleDef def = make_def_triangle(x, ref_mesh, ti);
-            Mat32 Ds_mat;
-            Ds_mat.col(0) = def.x[1] - def.x[0];
-            Ds_mat.col(1) = def.x[2] - def.x[0];
-            const Mat22& Dm_inv = ref_mesh.Dm_inverse[ti];
-            const Mat32  F      = Ds_mat * Dm_inv;
-            const double A      = ref_mesh.area[ti];
+        const IncidentTriangles& incident = incident_triangles ? *incident_triangles : adj.at(vi);
+        if (simd_energy) {
+            ipc_simd::accumulated_corotated_elasticity(ref_mesh, x, incident, rest_shape_grads,
+                params.mu, params.lambda, dt2, g, H);
+        } else {
+            for (const auto& [ti, a] : incident) {
+                const TriangleDef def = make_def_triangle(x, ref_mesh, ti);
+                Mat32 Ds_mat;
+                Ds_mat.col(0) = def.x[1] - def.x[0];
+                Ds_mat.col(1) = def.x[2] - def.x[0];
+                const Mat22& Dm_inv = ref_mesh.Dm_inverse[ti];
+                const Mat32  F      = Ds_mat * Dm_inv;
+                const double A      = ref_mesh.area[ti];
 
-            const CorotatedCache32 cache = buildCorotatedCache(F);
-            ShapeGrads local_gradN;
-            const ShapeGrads* gradN = nullptr;
-            if (rest_shape_grads) {
-                gradN = &(*rest_shape_grads)[ti];
-            } else {
-                local_gradN = shape_function_gradients(Dm_inv);
-                gradN = &local_gradN;
+                const CorotatedCache32 cache = buildCorotatedCache(F);
+                ShapeGrads local_gradN;
+                const ShapeGrads* gradN = nullptr;
+                if (rest_shape_grads) {
+                    gradN = &(*rest_shape_grads)[ti];
+                } else {
+                    local_gradN = shape_function_gradients(Dm_inv);
+                    gradN = &local_gradN;
+                }
+                const Mat32 P = PCorotated32(cache, F, params.mu, params.lambda);
+                Mat66 dPdF;
+                dPdFCorotated32(cache, params.mu, params.lambda, dPdF);
+
+                g += dt2 * corotated_node_gradient(P, A, *gradN, a);
+                H += dt2 * corotated_node_hessian(dPdF, A, *gradN, a);
             }
-            const Mat32 P = PCorotated32(cache, F, params.mu, params.lambda);
-            Mat66 dPdF;
-            dPdFCorotated32(cache, params.mu, params.lambda, dPdF);
-
-            g += dt2 * corotated_node_gradient(P, A, *gradN, a);
-            H += dt2 * corotated_node_hessian(dPdF, A, *gradN, a);
         }
     }
 
@@ -402,6 +414,21 @@ compute_local_gradient_and_hessian_no_barrier_unchecked(
     return compute_local_gradient_and_hessian_no_barrier_impl(
         vi, ref_mesh, adj, pins, params, x, xhat, pin_map,
         incident_triangles, rest_shape_grads, previous_positions, false);
+}
+
+std::pair<Vec3, Mat33>
+compute_local_gradient_and_hessian_with_stored_membrane_unchecked(
+    int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params,
+    const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+    const PinMap* pin_map,
+    const IncidentTriangles* incident_triangles,
+    const std::vector<ShapeGrads>* rest_shape_grads,
+    const std::vector<Vec3>* previous_positions,
+    const MembraneDerivativeView& membrane) {
+    return compute_local_gradient_and_hessian_no_barrier_impl<true>(
+        vi, ref_mesh, adj, pins, params, x, xhat, pin_map,
+        incident_triangles, rest_shape_grads, previous_positions, false, &membrane);
 }
 
 } // namespace physics_detail

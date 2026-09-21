@@ -56,6 +56,13 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
 // Optimized basic cloth implementation; selected by --use_basic_experimental.
 SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 
+// Separate experimental cloth variant with per-color triangle input/output
+// storage. Inputs and membrane derivative outputs refresh before each color;
+// parallel vertex updates consume those buffers instead of recomputing membrane
+// derivatives. Other terms stay live; serial mode keeps the original GS path.
+// --use_basic_experimental_v2 takes precedence over --use_basic_experimental.
+SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
+
 // Basic cloth only: serial vertices within dependency-safe parallel grid cells.
 SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 

@@ -432,6 +432,150 @@ TEST(ColoredVertexSweep, EmptyScheduleAndZeroSweepsDoNoWork) {
     EXPECT_EQ(calls, 0);
 }
 
+namespace {
+// Model a color-start geometry snapshot: inactive neighbors must reflect all
+// preceding updates, while every node in this color sees the same snapshot.
+struct ColorPreparationProbe {
+    const ColoredSweepReference& reference;
+    std::vector<double> live, gathered;
+    std::vector<int> visits, current_color;
+    std::atomic<bool> ordered{true};
+    std::atomic<int> actual_team{0};
+
+    ColorPreparationProbe(const ColoredSweepReference& ref, int workers)
+        : reference(ref), live(ref.initial()),
+          gathered(live.size(), std::numeric_limits<double>::quiet_NaN()),
+          visits(workers), current_color(workers, -1) {}
+
+    void prepare(std::size_t color) noexcept {
+        const int worker = omp_get_thread_num();
+        actual_team.store(omp_get_num_threads());
+        if (color != static_cast<std::size_t>(visits[worker]) % reference.groups.size())
+            ordered.store(false);
+        ++visits[worker];
+        current_color[worker] = static_cast<int>(color);
+#pragma omp for schedule(static)
+        for (int v = 0; v < static_cast<int>(live.size()); ++v)
+            gathered[v] = live[v];
+        // The workshare's implicit barrier must precede every compute call.
+    }
+
+    double proposed(int v) {
+        if (current_color[omp_get_thread_num()] != reference.color[v]
+            || gathered[v] != live[v]) ordered.store(false);
+        double value = gathered[v] * 0.25 + 0.125;
+        for (int c = 0; c < static_cast<int>(reference.groups.size()); ++c)
+            if (c != reference.color[v])
+                for (int other : reference.groups[c]) {
+                    if (gathered[other] != live[other]) ordered.store(false);
+                    value += gathered[other] / (1.0 + other % 13);
+                }
+        return std::fmod(value, 64.0) + 0.000125 * v;
+    }
+
+    void expect_visits(int sweeps) const {
+        EXPECT_TRUE(ordered.load());
+        ASSERT_GT(actual_team.load(), 0);
+        for (int worker = 0; worker < actual_team.load(); ++worker)
+            EXPECT_EQ(visits[worker], sweeps * static_cast<int>(reference.groups.size()));
+    }
+};
+} // namespace
+
+TEST(ColoredContactSweep, CollectivePreparationPrecedesCooperationAndFallbacks) {
+    RestoreColoredSweepThreads restore;
+    const ColoredSweepReference reference({0, 1, 3, 0, 9, 1});
+    for (int runtime_threads : {1, 2, 4}) {
+        SCOPED_TRACE(runtime_threads);
+        omp_set_num_threads(4);
+        BroadPhase::Cache cache;
+        cache.vertex_nt.resize(reference.color.size());
+        cache.vertex_ss.resize(reference.color.size());
+        for (int v = 0; v < static_cast<int>(reference.color.size()); ++v)
+            if (reference.color[v] != 4) cache.vertex_nt[v].resize(513);
+        solver_detail::ColoredContactSweep scheduler;
+        scheduler.prepare(reference.groups, cache);
+        ASSERT_GT(scheduler.split_count[1], 0); // Several helpers for one node.
+        ASSERT_EQ(scheduler.split_count[4], 0); // Independent whole-node work.
+        omp_set_num_threads(runtime_threads); // Also exercise prepared-team mismatch.
+        ColorPreparationProbe probe(reference, 4);
+        std::vector<double> proposed(reference.color.size());
+        std::atomic<int> computed{0}, baseline_calls{0};
+        auto expected = reference.initial();
+        for (int repeat = 0; repeat < 3; ++repeat) {
+            reference.run(expected, 1);
+            scheduler.run(reference.groups,
+                [&](int v, int j, solver_detail::ContactContribution& value) -> unsigned {
+                    computed.fetch_add(1);
+                    const double next = probe.proposed(v); // Also check helper lanes.
+                    if (j != 0) return 0u;
+                    value.gradient[0] = next;
+                    return 1u;
+                },
+                [&](int v, const solver_detail::ContactContribution* values,
+                    const solver_detail::ContactMaskWord*) { proposed[v] = values[0].gradient[0]; },
+                [&](int v) { ++baseline_calls; probe.live[v] = probe.proposed(v); },
+                [](int, int, solver_detail::ContactContribution&, bool) { return false; },
+                [&](int v, const solver_detail::ContactContribution*,
+                    const solver_detail::ContactMaskWord*) { probe.live[v] = proposed[v]; },
+                [&](std::size_t color) noexcept { probe.prepare(color); });
+            probe.expect_visits(repeat + 1);
+            expect_colored_sweep_equal(probe.live, expected);
+        }
+        EXPECT_GT(baseline_calls.load(), 0);
+        if (probe.actual_team.load() == scheduler.team) EXPECT_GT(computed.load(), 0);
+        else EXPECT_EQ(computed.load(), 0);
+    }
+}
+
+TEST(ColoredVertexSweep, CollectivePreparationRefreshesEveryColorAndSweep) {
+    RestoreColoredSweepThreads restore;
+    const ColoredSweepReference reference({0, 1, 7, 0, 13, 2, 0});
+    solver_detail::ColoredVertexSweep scheduler;
+    for (int threads : {1, 4}) {
+        omp_set_num_threads(threads);
+        ColorPreparationProbe probe(reference, threads);
+        auto expected = reference.initial();
+        int total = 0;
+        for (int sweeps : {1, 3, 2}) {
+            reference.run(expected, sweeps);
+            scheduler.run(reference.groups, sweeps,
+                [&](int v) { probe.live[v] = probe.proposed(v); },
+                [&](std::size_t color) noexcept { probe.prepare(color); });
+            total += sweeps;
+            probe.expect_visits(total);
+            expect_colored_sweep_equal(probe.live, expected);
+        }
+    }
+}
+
+TEST(ColoredVertexSweep, CollectivePreparationDrainsAfterFailureAndAllowsReuse) {
+    RestoreColoredSweepThreads restore;
+    const ColoredSweepReference reference({0, 1, 0, 9, 2, 0});
+    solver_detail::ColoredVertexSweep scheduler;
+    for (int threads : {1, 4}) {
+        omp_set_num_threads(threads);
+        ColorPreparationProbe probe(reference, threads);
+        std::atomic<int> processed{0};
+        EXPECT_THROW(scheduler.run(reference.groups, 3,
+            [&](int v) {
+                ++processed;
+                if (v == 0) throw std::runtime_error("after collective preparation");
+            }, [&](std::size_t color) noexcept { probe.prepare(color); }), std::runtime_error);
+        // Every worker must enter every callback, even while draining later
+        // colors/sweeps after the first node fails. Otherwise its omp for hangs.
+        EXPECT_EQ(processed.load(), 1);
+        probe.expect_visits(3);
+        auto expected = reference.initial();
+        reference.run(expected, 2);
+        scheduler.run(reference.groups, 2,
+            [&](int v) { probe.live[v] = probe.proposed(v); },
+            [&](std::size_t color) noexcept { probe.prepare(color); });
+        probe.expect_visits(5);
+        expect_colored_sweep_equal(probe.live, expected);
+    }
+}
+
 TEST(ColoredVertexSweep, ExceptionsAtColorAndSweepBoundariesAlwaysJoinTheTeam) {
     RestoreColoredSweepThreads restore;
     solver_detail::ColoredVertexSweep scheduler;

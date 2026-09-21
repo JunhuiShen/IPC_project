@@ -192,10 +192,18 @@ int main(int argc, char** argv) {
               << "\n";
     std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
-    if (params.use_basic_experimental && !params.use_cloth_grid
+    if ((params.use_basic_experimental || params.use_basic_experimental_v2) && !params.use_cloth_grid
         && !params.use_ogc && !params.use_ogc_solver) {
+        if (params.use_basic_experimental_v2)
+            std::cout << "Experimental cloth solver: v2 (per-color triangle storage)\n";
         const bool simd = physics_detail::collision_off_energy_simd_enabled(ref_mesh, params);
-        std::cout << "Non-collision energy kernels (inertia/gravity/pins/membrane/bending): " << (simd ? ipc_simd::backend_name() : "scalar reference");
+        if (params.use_basic_experimental_v2 && params.use_parallel) {
+            std::cout << "Membrane assembly: stored per-color scalar derivatives\n";
+            std::cout << "Other non-collision energy kernels (inertia/gravity/pins/bending): ";
+        } else {
+            std::cout << "Non-collision energy kernels (inertia/gravity/pins/membrane/bending): ";
+        }
+        std::cout << (simd ? ipc_simd::backend_name() : "scalar reference");
         std::cout << "\n";
     }
     if (num_rigid_bodies > 0)

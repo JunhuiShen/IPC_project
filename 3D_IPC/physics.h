@@ -6,6 +6,7 @@
 #include "sdf_penalty_energy.h"
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <map>
 #include <unordered_map>
 #include <utility>
@@ -51,6 +52,7 @@ struct SimParams {
 
     bool   use_parallel;
     bool   use_basic_experimental; // select optimized cloth basic assembly/scheduling
+    bool   use_basic_experimental_v2; // separate variant with per-color triangle storage
     bool   use_simd;             // experimental collision-off cloth energy batching
     bool   use_cloth_grid;       // basic cloth only: serial vertices within parallel spatial cells
     bool   cloth_grid_auto_dx;   // enlarge dx from dependencies at each grid rebuild
@@ -103,6 +105,7 @@ struct SimParams {
         p.max_global_iters          = 0;
         p.use_parallel              = false;
         p.use_basic_experimental    = false;
+        p.use_basic_experimental_v2 = false;
         p.use_simd                  = false;
         p.use_cloth_grid            = false;
         p.cloth_grid_auto_dx        = false;
@@ -556,6 +559,16 @@ namespace physics_detail {
 // cloth route. Shared by assembly and startup diagnostics.
 bool collision_off_energy_simd_enabled(const RefMesh& mesh, const SimParams& params);
 
+// Non-owning, active-node membrane contributions in original incident order.
+// Each gradient/Hessian already includes dt^2 and the triangle's rest area.
+// A zero-count view may have null pointers; otherwise both arrays must contain
+// count entries evaluated at the current color's frozen input positions.
+struct MembraneDerivativeView {
+    const Vec3* gradients = nullptr;
+    const Mat33* hessians = nullptr;
+    std::size_t count = 0;
+};
+
 // Solver-only fast path. The enclosing solver entry point must already have
 // validated the friction parameters and previous-position array.
 std::pair<Vec3, Mat33>
@@ -567,6 +580,20 @@ compute_local_gradient_and_hessian_no_barrier_unchecked(
     const IncidentTriangles* incident_triangles,
     const std::vector<ShapeGrads>* rest_shape_grads,
     const std::vector<Vec3>* previous_positions);
+
+// Same solver-only contract as above, but add the supplied membrane blocks
+// instead of reading triangle incidence or recomputing membrane derivatives.
+// All other energy terms and their accumulation order remain unchanged.
+std::pair<Vec3, Mat33>
+compute_local_gradient_and_hessian_with_stored_membrane_unchecked(
+    int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params,
+    const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+    const PinMap* pin_map,
+    const IncidentTriangles* incident_triangles,
+    const std::vector<ShapeGrads>* rest_shape_grads,
+    const std::vector<Vec3>* previous_positions,
+    const MembraneDerivativeView& membrane);
 
 } // namespace physics_detail
 

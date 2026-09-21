@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -618,18 +619,28 @@ static Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const 
 
     return matrix3d_inverse(H) * g;
 }
+template <bool UseStoredMembrane = false>
 Vec3 gs_vertex_delta_live_barrier_experimental(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
                                   const std::vector<Vec3>& xhat, std::vector<Vec3>& x, const BroadPhase& broad_phase, const PinMap* pin_map,
                                   const IncidentTriangles* incident_triangles,
                                   const std::vector<ShapeGrads>* rest_shape_grads,
                                   const std::vector<Vec3>* previous_positions, bool cooperative = false,
-                                  safe_step_detail::VertexAabbRejections* rejections = nullptr) {
+                                  safe_step_detail::VertexAabbRejections* rejections = nullptr,
+                                  const physics_detail::MembraneDerivativeView* stored_membrane = nullptr) {
     const auto& bp_cache = broad_phase.cache();
     if (rejections) rejections->distance = 0.0;
-    auto local_derivatives =
-        physics_detail::compute_local_gradient_and_hessian_no_barrier_unchecked(
-            vi, ref_mesh, adj, pins, params, x, xhat, pin_map,
-            incident_triangles, rest_shape_grads, previous_positions);
+    auto local_derivatives = [&]() {
+        if constexpr (UseStoredMembrane) {
+            return physics_detail::compute_local_gradient_and_hessian_with_stored_membrane_unchecked(
+                vi, ref_mesh, adj, pins, params, x, xhat, pin_map,
+                incident_triangles, rest_shape_grads, previous_positions,
+                *stored_membrane);
+        } else {
+            return physics_detail::compute_local_gradient_and_hessian_no_barrier_unchecked(
+                vi, ref_mesh, adj, pins, params, x, xhat, pin_map,
+                incident_triangles, rest_shape_grads, previous_positions);
+        }
+    }();
     Vec3& g = local_derivatives.first;
     Mat33& H = local_derivatives.second;
 
@@ -1399,8 +1410,521 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
     return result;
 }
 
+// Per-color triangle storage for experimental v2. Entry e is one
+// incident triangle of one node, in the existing group/incident order.
+// For group[i], its entries are [node_offsets[i], node_offsets[i + 1]).
+struct ColorTriangleStorage {
+    std::vector<std::size_t> node_offsets;
+    std::vector<int> triangle_indices;
+    std::vector<int> local_corners;
+    // [x_0^0, x_1^0, x_2^0, x_0^1, x_1^1, x_2^1, ...]
+    // Snapshot immediately before this color's most recent vertex updates.
+    std::vector<Vec3> positions;
+    std::vector<Mat22> dm_inverse;
+    std::vector<double> areas;
+    std::vector<Vec2> shape_gradients;
+};
+
+// Output storage with exactly the same entry order as ColorTriangleStorage.
+// Entry e is that triangle's contribution to its active node, NOT the sum of
+// all triangles incident on the node, nor a full 9x9 triangle Hessian.
+// The matching input's node_offsets also delimit these output arrays.
+// Values include rest area and dt^2, matching the incremental-potential
+// membrane terms. Gradient is +dE/dx; Hessian is the exact self block (no PSD
+// projection). Other energies and contact contributions are not included.
+struct ColorTriangleDerivatives {
+    std::vector<Vec3> gradients;
+    std::vector<Mat33> hessians;
+};
+
+SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
+                                        std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
+                                        const std::vector<Vec3>& v,
+                                        BroadPhase& broad_phase,
+                                        const std::string& outdir,
+                                        const std::vector<Vec3>* previous_positions) {
+
+    //create node (blue) boxes and create broad phase (red boxes) accordingly
+    validate_solver_friction_parameters(
+        params, "global_gauss_seidel_solver_basic_experimental_v2");
+    std::vector<Vec3> reconstructed_previous_positions;
+    previous_positions = resolve_experimental_friction_previous_positions(
+        params, xnew, xhat, v, previous_positions,
+        reconstructed_previous_positions,
+        "global_gauss_seidel_solver_basic_experimental_v2");
+    const int nv = static_cast<int>(xnew.size());
+    static ExperimentalSolverWorkspace workspace;
+    workspace.prepare(ref_mesh, adj, nv, params.node_box_max);
+
+    PinMap& pm = workspace.pin_map;
+    workspace.pinned_vertices.reserve(pins.size());
+    for (int pi = 0; pi < static_cast<int>(pins.size()); ++pi) {
+        pm[pins[pi].vertex_index] = pi;
+        workspace.pinned_vertices.push_back(pins[pi].vertex_index);
+    }
+    std::vector<double>& prev_disp = workspace.prev_disp;
+    std::vector<double>& inertial_disp = workspace.inertial_disp;
+    constexpr double node_box_padding = 1.2;
+    const double dt = params.dt();
+    const double dt2 = params.dt2();
+    #pragma omp parallel for schedule(static) if(params.use_parallel && nv >= 128)
+    for (int vi = 0; vi < nv; ++vi)
+        inertial_disp[vi] = v[vi].norm() * dt;
+    auto node_box_size_fn = [&](int vi) {
+        return std::clamp(std::max(prev_disp[vi], inertial_disp[vi]) * node_box_padding, params.node_box_min, params.node_box_max);
+    };
+    std::vector<AABB>& blue_boxes = workspace.blue_boxes;
+
+    // Elastic adjacency depends only on mesh topology, so reuse it across GS calls.
+    const std::vector<std::vector<int>>& ea = workspace.elastic_adjacency.get(ref_mesh, adj, nv);
+    std::vector<std::vector<int>>& bca = workspace.contact_adjacency;
+    std::vector<std::vector<int>>& combined_adj = workspace.combined_adjacency;
+    const bool needs_mesh_contact_search =
+        params.d_hat > 0.0 || params.use_ccd || params.use_ogc;
+    std::vector<std::vector<int>>& color_groups = needs_mesh_contact_search
+        ? workspace.color_groups : workspace.elastic_color_groups;
+    const auto compute_residual = [&]() {
+        build_frozen_residual_workspace(
+            ref_mesh, params, xnew, broad_phase,
+            workspace.frozen_residual, &workspace.rest_shape_grads);
+        return compute_global_deformable_residual(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, workspace.deformable_nodes, &pm, &workspace.incident_triangles, &workspace.rest_shape_grads, &workspace.frozen_residual, previous_positions);
+    };
+
+    SolverResult result;
+    // anchor for clip boxes and prev_disp
+    std::vector<Vec3>& xnew_substep_start = workspace.xnew_substep_start;
+    #pragma omp parallel for schedule(static) if(params.use_parallel && nv >= 128)
+    for (int vi = 0; vi < nv; ++vi) xnew_substep_start[vi] = xnew[vi];
+
+    solver_detail::ColoredContactSweep contact_sweep;
+    solver_detail::ColoredVertexSweep colored_vertex_sweep;
+    const bool use_contact_sweep = params.use_parallel && omp_get_max_threads() > 1
+        && params.friction_coefficient == 0.0 && params.d_hat > 0.0
+        && !params.use_ogc;
+    // Prepare membrane derivatives once per color visit, then consume them
+    // in parallel vertex updates. Other energy terms and contact/CCD retain
+    // their existing live assembly. The prepass has no SIMD dependency.
+    std::vector<ColorTriangleStorage> color_triangle_storage;
+    std::vector<ColorTriangleDerivatives> color_triangle_derivatives;
+    // Indexed by global vertex ID. Views are rebuilt after buffer resizing;
+    // their backing arrays remain stable throughout the ensuing color sweeps.
+    std::vector<physics_detail::MembraneDerivativeView> vertex_membrane(
+        params.use_parallel ? nv : 0);
+    std::atomic<bool> color_derivative_failed{false};
+    std::exception_ptr color_derivative_error;
+    // Every worker enters this callback before EVERY color visit. Gather and
+    // compute each independent entry from the same pre-update snapshot. The
+    // implicit barrier joins all results before any vertex of this color moves.
+    // Catch geometry/derivative failures here: exceptions cannot escape an
+    // OpenMP worker. All paths drain their barriers with updates disabled, then
+    // the calling thread rethrows after the team has finished.
+    const auto prepare_color_derivatives = [&](std::size_t color) noexcept {
+        auto& storage = color_triangle_storage[color];
+        auto& derivatives = color_triangle_derivatives[color];
+        #pragma omp for schedule(static)
+        for (std::size_t e = 0; e < storage.triangle_indices.size(); ++e) {
+            if (color_derivative_failed.load(std::memory_order_relaxed)) continue;
+            try {
+                const std::size_t base = 3 * static_cast<std::size_t>(storage.triangle_indices[e]);
+                for (int corner = 0; corner < 3; ++corner)
+                    storage.positions[3 * e + corner] = xnew[ref_mesh.tris[base + corner]];
+
+                Mat32 Ds;
+                Ds.col(0) = storage.positions[3 * e + 1] - storage.positions[3 * e];
+                Ds.col(1) = storage.positions[3 * e + 2] - storage.positions[3 * e];
+                const Mat32 F = Ds * storage.dm_inverse[e];
+                const CorotatedCache32 cache = buildCorotatedCache(F);
+                const Mat32 P = PCorotated32(cache, F, params.mu, params.lambda);
+                Mat66 dPdF;
+                dPdFCorotated32(cache, params.mu, params.lambda, dPdF);
+
+                // The helpers read only the active corner's shape gradient.
+                const int corner = storage.local_corners[e];
+                ShapeGrads gradN{Vec2::Zero(), Vec2::Zero(), Vec2::Zero()};
+                gradN[corner] = storage.shape_gradients[e];
+                derivatives.gradients[e] = dt2 * corotated_node_gradient(
+                    P, storage.areas[e], gradN, corner);
+                derivatives.hessians[e] = dt2 * corotated_node_hessian(
+                    dPdF, storage.areas[e], gradN, corner);
+            } catch (...) {
+                if (!color_derivative_failed.exchange(true, std::memory_order_relaxed))
+                    color_derivative_error = std::current_exception();
+            }
+        }
+    };
+    double r1=0.;
+    //gs loop
+    for (int iter = 1; iter <= params.max_global_iters; ++iter) {
+        if((iter-1)%params.node_box_update_count==0){//rebuild node boxes and color accordingly
+            if (params.verbose)
+                std::fprintf(stderr, "  [GS] iter %d  rebuilding node boxes\n", iter);
+            //create new node boxes
+            #pragma omp parallel for schedule(static) if(params.use_parallel && nv >= 128)
+            for (int i = 0; i < nv; ++i) {
+                const double r = node_box_size_fn(i);
+                blue_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
+            }
+            if (needs_mesh_contact_search) {
+                // Rebuild contact candidates, combine their dependencies with
+                // elastic dependencies, and color the resulting graph.
+                broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::DeformableSolver);
+                build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()), bca);
+                union_adjacency(ea, bca, combined_adj);
+                greedy_color_conflict_graph(combined_adj, color_groups, &workspace.coloring_workspace);
+                const BroadPhase::Cache& bp_cache = broad_phase.cache();
+                // Vertices in one color share no dependencies, so process contact-heavy vertices first to avoid end-of-color stragglers.
+                #pragma omp parallel for schedule(dynamic, 1) if(params.use_parallel && nv >= 128)
+                for (int color = 0; color < static_cast<int>(color_groups.size()); ++color) {
+                    auto& group = color_groups[color];
+                    std::stable_sort(group.begin(), group.end(), [&](const int a, const int b) {
+                        return bp_cache.vertex_nt[a].size() + bp_cache.vertex_ss[a].size()
+                            > bp_cache.vertex_nt[b].size() + bp_cache.vertex_ss[b].size();
+                    });
+                }
+            } else {
+                // Collision-free solve: keep node-box step clipping, but do no
+                // primitive BVH construction, pair search, or contact-aware
+                // coloring. Elastic topology alone determines the schedule.
+                broad_phase.initialize_node_boxes_only(blue_boxes);
+                // The workspace invalidates these colors with elastic topology.
+                if (color_groups.empty())
+                    greedy_color_conflict_graph(ea, color_groups, &workspace.coloring_workspace);
+            }
+        }
+
+        // Prepare shared storage before the color sweep's worker team starts.
+        // Re-size when colors are rebuilt (including contact-cost reordering),
+        // for either contact or ordinary color sweeps, independent of use_simd.
+        if (params.use_parallel && (iter - 1) % params.node_box_update_count == 0) {
+            color_triangle_storage.resize(color_groups.size());
+            color_triangle_derivatives.resize(color_groups.size());
+            for (std::size_t color = 0; color < color_groups.size(); ++color) {
+                const auto& group = color_groups[color];
+                auto& storage = color_triangle_storage[color];
+                storage.node_offsets.resize(group.size() + 1);
+                storage.node_offsets[0] = 0;
+                for (std::size_t i = 0; i < group.size(); ++i)
+                    storage.node_offsets[i + 1] = storage.node_offsets[i]
+                        + workspace.incident_triangles[group[i]].size();
+                const std::size_t count = storage.node_offsets.back();
+                storage.triangle_indices.resize(count);
+                storage.local_corners.resize(count);
+                storage.positions.resize(3 * count);
+                storage.dm_inverse.resize(count);
+                storage.areas.resize(count);
+                storage.shape_gradients.resize(count);
+                // Allocate outside the worker team. Each visited color
+                // overwrites all entries with its current membrane derivatives.
+                auto& derivatives = color_triangle_derivatives[color];
+                derivatives.gradients.assign(count, Vec3::Zero());
+                derivatives.hessians.assign(count, Mat33::Zero());
+                // Match every field to the same incident triangle and retain
+                // each node's original incident order. These rest quantities
+                // stay fixed during the sweeps; only positions need refreshing.
+                for (std::size_t i = 0; i < group.size(); ++i) {
+                    const std::size_t begin = storage.node_offsets[i];
+                    const std::size_t node_count = storage.node_offsets[i + 1] - begin;
+                    vertex_membrane[group[i]] = {
+                        node_count ? derivatives.gradients.data() + begin : nullptr,
+                        node_count ? derivatives.hessians.data() + begin : nullptr,
+                        node_count
+                    };
+                    std::size_t e = begin;
+                    for (const auto& [triangle, corner] : workspace.incident_triangles[group[i]]) {
+                        storage.triangle_indices[e] = triangle;
+                        storage.local_corners[e] = corner;
+                        storage.dm_inverse[e] = ref_mesh.Dm_inverse[triangle];
+                        storage.areas[e] = ref_mesh.area[triangle];
+                        storage.shape_gradients[e] = shape_function_gradients(storage.dm_inverse[e])[corner];
+                        ++e;
+                    }
+                }
+            }
+        }
+
+        if (use_contact_sweep && (iter - 1) % params.node_box_update_count == 0)
+            contact_sweep.prepare(color_groups, broad_phase.cache());
+
+        if (iter == 1 && !params.fixed_iters) {
+          r1 = compute_residual();
+          result.has_residual = true;
+          result.initial_residual = r1;
+          result.final_residual = r1;
+          if (r1 < params.tol_rel * r1 || r1 < params.tol_abs) {
+            result.converged = true;
+            break;
+          }
+        }
+
+        const auto proposed_position = [&](int vi,
+            safe_step_detail::VertexAabbRejections* rejections,
+            bool cooperative) -> Vec3 {
+          if (params.use_parallel) {
+            // Stored entries are already dt^2/area weighted and are added in
+            // incident order, in place of (not in addition to) live membrane work.
+            return xnew[vi] -
+                   params.damping *
+                       gs_vertex_delta_live_barrier_experimental<true>(
+                           vi, ref_mesh, adj, pins, params, xhat, xnew,
+                           broad_phase, &pm, &workspace.incident_triangles[vi],
+                           &workspace.rest_shape_grads, previous_positions,
+                           cooperative, rejections, &vertex_membrane[vi]);
+          }
+          // Serial mode keeps the original vertex-by-vertex GS ordering,
+          // which has no per-color snapshot or stored membrane derivatives.
+          return xnew[vi] -
+                 params.damping *
+                     gs_vertex_delta_live_barrier_experimental(
+                         vi, ref_mesh, adj, pins, params, xhat, xnew,
+                         broad_phase, &pm, &workspace.incident_triangles[vi],
+                         &workspace.rest_shape_grads, previous_positions,
+                         cooperative, rejections);
+        };
+        const auto process_vertex = [&](int vi, bool cooperative = false) {
+          if (color_derivative_failed.load(std::memory_order_relaxed)) return;
+          // Scratch belongs to this worker and is consumed before updating the
+          // vertex. Colors keep every incident pair fixed during these calls.
+          thread_local safe_step_detail::VertexAabbRejections scratch;
+          auto* rejections = params.use_ccd && !params.use_ogc
+              && params.d_hat > 1e-8 ? &scratch : nullptr;
+          const Vec3 proposed = proposed_position(vi, rejections, cooperative);
+          per_vertex_safe_step(broad_phase, xnew, vi, proposed,
+                               0.9, params.use_ogc ? false : params.use_ccd,
+                               params.use_ticcd, params.use_ogc, cooperative, rejections);
+        };
+        if (use_contact_sweep) {
+          const auto &cache = broad_phase.cache();
+          const double dh2 = params.d_hat * params.d_hat,
+                       dt2k = params.dt2() * params.k_barrier;
+          const auto compute = [&](int vi, int local,
+                                   solver_detail::ContactContribution &value) -> unsigned {
+            if (color_derivative_failed.load(std::memory_order_relaxed)) return 0u;
+            bool aabb_clear=false;
+            if (local == 0) {
+              auto pair = physics_detail::
+                  compute_local_gradient_and_hessian_with_stored_membrane_unchecked(
+                      vi, ref_mesh, adj, pins, params, xnew, xhat, &pm,
+                      &workspace.incident_triangles[vi],
+                      &workspace.rest_shape_grads, previous_positions,
+                      vertex_membrane[vi]);
+              value.gradient = pair.first;
+              value.hessian = pair.second;
+              return 1;
+            }
+            --local;
+            int nt = cache.vertex_nt[vi].size();
+            if (local < nt) {
+              const auto &entry = cache.vertex_nt[vi][local];
+              const auto &p = cache.nt_pairs[entry.pair_index];
+              if (!node_triangle_aabbs_within_distance(
+                      xnew[p.node], xnew[p.tri_v[0]], xnew[p.tri_v[1]],
+                      xnew[p.tri_v[2]], dh2, &aabb_clear)) {
+                return aabb_clear?2u:0u;
+              }
+              auto pair = node_triangle_barrier_self_gradient_and_hessian(
+                  xnew[p.node], xnew[p.tri_v[0]], xnew[p.tri_v[1]],
+                  xnew[p.tri_v[2]], params.d_hat, entry.dof);
+              value.gradient = pair.first;
+              value.hessian = pair.second;
+            } else {
+              const auto &entry = cache.vertex_ss[vi][local - nt];
+              const auto &p = cache.ss_pairs[entry.pair_index];
+              if (!segment_aabbs_within_distance(xnew[p.v[0]], xnew[p.v[1]],
+                                                 xnew[p.v[2]], xnew[p.v[3]],
+                                                 dh2, &aabb_clear)) {
+                return aabb_clear?2u:0u;
+              }
+              auto pair = segment_segment_barrier_self_gradient_and_hessian(
+                  xnew[p.v[0]], xnew[p.v[1]], xnew[p.v[2]], xnew[p.v[3]],
+                  params.d_hat, entry.dof);
+              value.gradient = pair.first;
+              value.hessian = pair.second;
+            }
+            return 1;
+          };
+          const auto apply =
+              [&](int vi, const solver_detail::ContactContribution *values, const solver_detail::ContactMaskWord* mask) {
+                if (color_derivative_failed.load(std::memory_order_relaxed)) return;
+                Vec3 g = values[0].gradient;
+                Mat33 H = values[0].hessian;
+                int count =
+                    cache.vertex_nt[vi].size() + cache.vertex_ss[vi].size();
+                const auto add=[&](int j){g+=dt2k*values[j].gradient;H+=dt2k*values[j].hessian;};
+                solver_detail::for_active_contact(mask,count,add);
+                const Vec3 delta = matrix3d_inverse(H) * g;
+                const Vec3 proposed = xnew[vi] - params.damping * delta;
+                {
+                  const auto &box = cache.node_boxes[vi];
+                  const Vec3 lo = (box.min + Vec3::Constant(1e-10)).eval();
+                  const Vec3 hi = (box.max - Vec3::Constant(1e-10)).eval();
+                  const Vec3 next = proposed.cwiseMax(lo).cwiseMin(hi);
+                  contact_sweep.steps[vi] = next - xnew[vi];
+                  contact_sweep.nonzero_step[vi] =
+                      !(contact_sweep.steps[vi].squaredNorm() < 1e-28);
+                  contact_sweep.short_step[vi]=params.d_hat>1e-8 && std::isfinite(dh2) && contact_sweep.steps[vi].squaredNorm()<dh2/16.0;
+                }
+              };
+          const auto ccd = [&](int vi, int local,
+                               solver_detail::ContactContribution &value, bool aabb_clear) -> bool {
+            if (color_derivative_failed.load(std::memory_order_relaxed)) return false;
+            if (!contact_sweep.nonzero_step[vi] || !params.use_ccd ||
+                local == 0)
+              return false;
+            --local;
+            int nt = cache.vertex_nt[vi].size();
+            // A rejected Euclidean AABB distance exceeds d_hat, so some axis
+            // gap exceeds d_hat/sqrt(3). Moving one endpoint by less than
+            // d_hat/4 cannot close that gap. The original swept-AABB test
+            // therefore also rejects this pair; no CCD result is approximated.
+            if(aabb_clear && contact_sweep.short_step[vi]) {
+                return false;
+            }
+            CCDResult result;
+            if (local < nt) {
+              const auto &entry = cache.vertex_nt[vi][local];
+              result = safe_step_detail::node_triangle_vertex_ccd(
+                  cache.nt_pairs[entry.pair_index], entry.dof, vi, xnew,
+                  contact_sweep.steps[vi], params.use_ticcd);
+            } else {
+              const auto &entry = cache.vertex_ss[vi][local - nt];
+              result = safe_step_detail::segment_segment_vertex_ccd(
+                  cache.ss_pairs[entry.pair_index], entry.dof, vi, xnew,
+                  contact_sweep.steps[vi], params.use_ticcd);
+            }
+            if(result.collision)value.toi=result.t;
+            return result.collision;
+          };
+          const auto commit =
+              [&](int vi, const solver_detail::ContactContribution *values, const solver_detail::ContactMaskWord* mask) {
+                if (color_derivative_failed.load(std::memory_order_relaxed)) return;
+                if (!contact_sweep.nonzero_step[vi])
+                  return;
+                double toi = 1.0;
+                bool collision = false;
+                int count =
+                    cache.vertex_nt[vi].size() + cache.vertex_ss[vi].size();
+                const auto consider=[&](int j){collision=true;toi=std::min(toi,values[j].toi);};
+                solver_detail::for_active_contact(mask,count,consider);
+                double step = collision ? 0.9 * toi : 1.0;
+                xnew[vi] = xnew[vi] + step * contact_sweep.steps[vi];
+              };
+          contact_sweep.run(color_groups, compute, apply, process_vertex, ccd,
+                            commit, prepare_color_derivatives);
+        } else if (params.use_parallel) {
+          // Fixed-iteration collision-free and friction solves can reuse one
+          // team until the next node-box rebuild. Keep every color barrier,
+          // including the final color of each sweep, and each vertex's arithmetic.
+          // Convergence-controlled solves still return after every sweep so
+          // their residual checks and stopping iteration remain unchanged.
+          const bool collision_free = !needs_mesh_contact_search
+              && params.k_sdf == 0.0 && params.friction_coefficient == 0.0;
+          const int sweeps = params.fixed_iters
+              && (collision_free || params.friction_coefficient > 0.0)
+              ? std::min(params.max_global_iters - iter + 1,
+                         params.node_box_update_count - (iter - 1) % params.node_box_update_count)
+              : 1;
+          if (params.fixed_iters && params.friction_coefficient > 0.0) {
+            colored_vertex_sweep.run(color_groups, sweeps, process_vertex,
+                                     prepare_color_derivatives);
+          } else {
+            #pragma omp parallel
+          {
+            for (int sweep = 0; sweep < sweeps; ++sweep) {
+              for (std::size_t color = 0; color < color_groups.size(); ++color) {
+                const auto& group = color_groups[color];
+                prepare_color_derivatives(color);
+            #pragma omp for schedule(dynamic, 1)
+                for (int i = 0; i < static_cast<int>(group.size()); ++i)
+                  process_vertex(group[static_cast<std::size_t>(i)]);
+              }
+            }
+          }
+          }
+          iter += sweeps - 1;
+        } else {
+          for (int vi = 0; vi < nv; ++vi)
+            process_vertex(vi);
+        }
+
+        if (color_derivative_error) std::rethrow_exception(color_derivative_error);
+
+        result.iterations = iter;
+        if (!params.fixed_iters){
+            double residual = compute_residual();
+            result.final_residual = residual;
+            if (params.verbose)
+                std::fprintf(stderr, "  [GS] iter %d  residual = %.6e\n", iter, residual);
+            if(residual < params.tol_rel * r1 || residual < params.tol_abs){
+                result.converged = true;
+                break;
+            }
+        }
+    }
+
+    //record displacement over sub step
+    #pragma omp parallel for schedule(static) if(params.use_parallel && nv >= 128)
+    for (int i = 0; i < nv; ++i)
+        prev_disp[i] = (xnew[i] - xnew_substep_start[i]).norm();
+
+    if (params.fixed_iters) result.converged = true;
+
+    //write substep data
+    if (params.write_substeps) {
+        write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, &color_groups);
+    }
+
+    return result;
+}
+
 // Same per-vertex numerical updates as basic; schedule independent grid cells
 // instead of independent vertices, keeping each cell's vertices serial.
+//
+// Grid scheduling and cooperative contact work (grid_contact_scheduling.h):
+// The following decisions are made at each node-box/grid rebuild, per
+// conflict-free batch. Automatic dx gives one batch per occupied parity color;
+// fixed dx can require multiple batches for a color. Let T be the thread count.
+//
+// 1. Estimate work, using candidate counts rather than measured execution time:
+//      vertex_cost = 1 + node-triangle candidates + segment-segment candidates;
+//      cell_cost = sum(vertex_cost); max_vertex_cost = max(vertex_cost).
+//    The 1 represents the base non-barrier contribution. With no contact
+//    search, cell prioritization uses vertex_cost = 1 (i.e. vertex count).
+//
+// 2. Sort cells in each batch by descending cell_cost. Never reorder vertices
+//    within a cell: they retain ascending vertex-ID order and update serially.
+//    Changing that order would change the Gauss-Seidel dependency/update order.
+//
+// 3. Select cells that may reserve workers for cooperative contact processing.
+//    This path requires parallel execution, T > 1, zero friction, d_hat > 0,
+//    and OGC disabled. Otherwise use ordinary serial-within-cell processing.
+//    - Fewer than T cells: select all cells; worker budget = T.
+//    - At least T cells: worker budget = floor(3*T/4), leaving the remaining
+//      workers for dynamic whole-cell processing. Examine the sorted prefix,
+//      selecting at most floor(budget/2) cells. Each must satisfy all of:
+//        max_vertex_cost >= 128;
+//        cell_cost >= 512;
+//        cell_cost >= 0.75 * total_batch_cost / T.
+//      Stop selecting at the FIRST failure; do not skip ahead to later cells.
+//    For T = 64, the latter case has budget 48, at most 24 selected cells,
+//    and at least 16 workers available for other whole cells.
+//
+// 4. Start with one worker per selected cell. While budget remains, consider
+//    cells with max_vertex_cost >= 128 and fewer than four assigned workers.
+//    Give one extra worker to the cell maximizing cell_cost / assigned_workers.
+//    Repeat until the budget is exhausted or no cell can accept another worker.
+//    Thus 128 is eligibility for helpers, NOT a guarantee of four workers.
+//    Four means one leader plus three helpers, not four additional helpers.
+//    If no helpers are allocated, fall back to dynamic whole-cell processing.
+//
+// 5. Execute vertices one by one within each cell, including cooperative cells:
+//    - vertex_cost < 128: only the leader processes it; its helpers wait.
+//    - vertex_cost >= 128: the assigned group shares contact/CCD work in chunks
+//      of 16 contributions; the leader performs ordered reduction and commit.
+//    Finish and join the current vertex before reading/updating the next one.
+//    Unselected cells are claimed dynamically and each is handled by one worker.
+//    Cell group sizes are fixed until the next rebuild; idle workers do not
+//    dynamically join another active cell. A runtime OpenMP team-size mismatch
+//    also falls back to ordinary whole-cell processing.
 SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
                                         std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
                                         const std::vector<Vec3>& v,
@@ -2757,6 +3281,8 @@ SolverResult global_gauss_seidel_solver_basic_general(
     if (num_rbs == 0 && ref_mesh.tet_nodes.empty()) {
         if (params.use_cloth_grid)
             return global_gauss_seidel_solver_ambient_grid(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
+        if (params.use_basic_experimental_v2)
+            return global_gauss_seidel_solver_basic_experimental_v2(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
         if (params.use_basic_experimental)
             return global_gauss_seidel_solver_basic_experimental(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
         return global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
