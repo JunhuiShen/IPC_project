@@ -8,9 +8,11 @@
 struct RefMesh;
 
 namespace safe_step_detail {
-// AABB-distance rejections from the current vertex's barrier assembly, in NT
-// then SS incidence order. Pair positions and incidence lists must remain fixed
-// until safe-step evaluation; supporting-plane rejections do not qualify.
+// Distance certificates from current barrier assembly, in NT then SS incidence
+// order: AABB distance, or a verified gap between finite-primitive projections.
+// Positions and incidence lists must remain fixed until safe-step evaluation.
+// Raw supporting-plane rejections do not qualify; projected certificates are
+// supplied only for linear CCD, preserving tight-inclusion tolerance behavior.
 struct VertexAabbRejections {
     std::vector<unsigned char> clear;
     double distance = 0.0;

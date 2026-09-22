@@ -2,8 +2,16 @@
 #pragma once
 #include "physics.h"
 #include "broad_phase.h"
+#include <array>
 #include <string>
 #include <vector>
+
+namespace solver_detail {
+// Certifies separation throughout the supplied node boxes. The current
+// positions choose a candidate direction; every box must support the proof.
+bool contact_boxes_separated(const std::array<Vec3, 4>& positions,
+    const std::array<AABB, 4>& boxes, bool segment_segment, double d_hat);
+}
 
 struct SolverResult {
     int    iterations = 0;
@@ -56,12 +64,9 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
 // Scalar v1; selected by --use_basic_experimental true --use_simd false.
 SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 
-// Separate experimental cloth variant with cached per-color material layout.
-// Collision-off SIMD gathers private AoS ranges, evaluates local tiles,
-// then accumulates entries in incident order on the same worker. Dynamic vertex
-// batches preserve color barriers. Scalar/contact prepasses and serial order
-// retain the original paths.
-// Selected by --use_basic_experimental true --use_simd true.
+// SIMD v2; selected by --use_basic_experimental true --use_simd true.
+// Gathered AoS inputs feed local energy/contact tiles and ordered accumulation.
+// Parallel batches preserve color barriers; serial updates keep vertex order.
 SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 
 // Basic cloth only: serial vertices within dependency-safe parallel grid cells.

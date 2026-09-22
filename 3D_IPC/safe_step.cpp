@@ -250,9 +250,10 @@ double per_vertex_safe_step(
         const int nt_count = static_cast<int>(nt.size());
         const double distance_squared = rejections
             ? rejections->distance * rejections->distance : 0.0;
-        // AABB distance > d_hat implies some axis gap > d_hat/sqrt(3).
-        // Moving only this vertex by < d_hat/4 cannot close that gap, so the
-        // original swept-AABB check would also reject the pair.
+        // AABB distance > d_hat gives an axis gap > d_hat/sqrt(3). A verified
+        // finite-primitive projection certificate instead gives a directional
+        // gap > d_hat. Moving one vertex by < d_hat/4 cannot close either gap.
+        // Projected certificates are supplied only when using linear CCD.
         const bool reuse_rejections = rejections && rejections->distance > 1e-8
             && std::isfinite(distance_squared)
             && rejections->clear.size() == nt.size() + ss.size()

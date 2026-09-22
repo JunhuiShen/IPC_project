@@ -174,8 +174,10 @@ TEST(ColoredContactSweep, PreservesOrderedArithmeticDependenciesAndTeamChanges) 
                     color.push_back(c);
                 }
             std::vector<double> expected(color.size(), 1), actual = expected;
-            for (int reference = 0; reference < 2; ++reference) {
+            for (int reference = 0; reference < 3; ++reference) {
                 auto &x = reference == 0 ? expected : actual;
+                x.assign(color.size(), 1.0);
+                std::atomic<int> assigned_calls{0};
                 BroadPhase::Cache cache;
                 cache.vertex_nt.resize(color.size());
                 cache.vertex_ss.resize(color.size());
@@ -250,10 +252,32 @@ TEST(ColoredContactSweep, PreservesOrderedArithmeticDependenciesAndTeamChanges) 
                                 whole(v);
                     else {
                         omp_set_num_threads(change_team && iter % 3 == 0 ? 1 : threads);
-                        sweep.run(groups, compute, apply, whole, ccd, commit);
+                        if (reference == 1) sweep.run(groups, compute, apply, whole, ccd, commit);
+                        else {
+                            const auto assigned = [&](const solver_detail::ColoredContactSweep::Assignment& assignment,
+                                solver_detail::ContactContribution* values,
+                                solver_detail::ContactMaskWord* masks) {
+                                ++assigned_calls;
+                                constexpr int grain = solver_detail::contact_grain;
+                                for (int start = assignment.lane * grain; start < assignment.count;
+                                     start += assignment.lanes * grain) {
+                                    unsigned bits = 0, clear_bits = 0;
+                                    for (int j = start; j < std::min(start + grain, assignment.count); ++j) {
+                                        const unsigned flags = compute(assignment.vertex, j, values[j]);
+                                        bits |= (flags & 1u) << (j - start);
+                                        clear_bits |= ((flags >> 1) & 1u) << (j - start);
+                                    }
+                                    masks[start / grain] = {bits, clear_bits};
+                                }
+                            };
+                            sweep.run_assigned(groups, compute, apply, whole, ccd, commit, nullptr, assigned);
+                        }
                         omp_set_num_threads(threads);
                     }
                 }
+                if (reference != 0) EXPECT_EQ(0,
+                    std::memcmp(expected.data(), actual.data(), expected.size()*sizeof(double)));
+                if (reference == 2 && threads > 1) EXPECT_GT(assigned_calls.load(), 0);
             }
             EXPECT_EQ(0,
                       std::memcmp(expected.data(), actual.data(), expected.size() * sizeof(double)))

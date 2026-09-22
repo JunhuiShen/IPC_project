@@ -26,7 +26,7 @@ For deformable scenes, each time step minimizes an incremental potential made of
 - **Inertial term** -- implicit Euler predictor against the current velocity field.
 - **Gravity** -- constant body-force potential `-m*g*x` set by `gx`, `gy`, `gz`
   (default `(0, -9.81, 0)` m/s^2).
-- **Elastic term** -- corotated membrane energy + Grinspun-style discrete-shell
+- **Elastic term** -- corotated elasticity + Grinspun-style discrete-shell
   hinge bending (`kB` controls bending stiffness; `kB = 0` disables it).
 - **IPC log-barrier contact** -- node-triangle and segment-segment barriers built
   from a swept-AABB BVH broad phase.
@@ -100,31 +100,33 @@ Choose a solver configuration below:
 |---|---|---|
 | `basic` | Original cloth solver and reference behavior | Default |
 | `basic_experimental` (v1) | Optimized scalar cloth solver and comparison baseline | `--use_basic_experimental true --use_simd false` |
-| `basic_experimental_v2` (v2) | Tiled SIMD with closer agreement to v1 scalar | `--use_basic_experimental true --use_simd true` |
+| `basic_experimental_v2` (v2) | Cloth energy and contact assembly with SIMD | `--use_basic_experimental true --use_simd true` |
 | `ambient_grid` | Alternative parallel scheduling using spatial cells | `--use_cloth_grid true` |
 
 With the experimental solver enabled, `--use_simd` selects the version: false
 (the default) gives scalar v1, and true gives SIMD v2. SIMD applies to the
-cloth's corotated elasticity, inertia, gravity, pins, and bending terms.
-Collision, SDF, and friction can remain enabled and use their existing
-implementations.
-V2 follows the separate gather, local transpose, and accumulation layout.
+cloth's corotated elasticity, inertia, gravity, pins, bending, mesh barriers,
+SDF penalties, and friction. Contact search and CCD use the shared routines.
+V2 gathers AoS inputs, evaluates local SIMD tiles, and
+accumulates contributions in order.
 Use `--use_parallel true` for parallel updates.
 
-For example, run 240 frames of Example 1 with v2, bending on, and collisions off:
+For example, run the reference 240-frame Example 1 with v2, bending, and self-contact:
 
 ```bash
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE ./build/3D_sim \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=close OMP_PLACES=cores \
+  ./build/3D_sim \
     --example 1 --num_frames 240 --substeps 5 \
     --max_substep_iters 10 --fixed_iters true --node_box_update_count 10 \
     --use_basic_experimental true --use_parallel true --use_simd true \
-    --kB 0.009 --d_hat 0 --k_barrier 0 --k_sdf 0 \
-    --use_ccd false --use_ccd_guess false --friction_coefficient 0 \
+    --E 115000 --nu 0.25 --kpin 1e9 --twist_rate 0.5 \
+    --kB 0.009 --d_hat 0.005 --k_barrier 100 \
     --outdir example1_v2_output --format geo
 ```
 
 Set `OMP_NUM_THREADS` to the desired thread count. To compare with v1 scalar,
-change only `--use_simd true` to `--use_simd false`.
+change only `--use_simd true` to `--use_simd false`. Example 1 has no SDF
+obstacles; friction is zero by default.
 
 ### Spatial grid scheduling for basic cloth
 
@@ -270,7 +272,7 @@ the rigid-body formulation differs in five main ways:
   broad phase and IPC contact, so they act as fixed reaction geometry rather
   than disappearing from collision handling.
 
-Rigid bodies therefore have no per-vertex Newton variables or membrane and
+Rigid bodies therefore have no per-vertex Newton variables or elasticity and
 bending energies. Their triangle and edge connectivity is retained only as the
 collision surface used by the shared contact pipeline.
 
@@ -291,7 +293,7 @@ specialized formulations as follows:
   connectivity and current collision candidates. Each color is completed
   before the next begins, while independent blocks within a color run in
   parallel.
-- **Type-specific Newton updates.** Cloth blocks assemble membrane, bending,
+- **Type-specific Newton updates.** Cloth blocks assemble elasticity, bending,
   pin, contact, and SDF terms. Solid blocks assemble volumetric corotated and
   contact terms. Rigid blocks use the same reduced COM and angular-velocity
   updates as the rigid-only solver.
@@ -329,6 +331,9 @@ Configure and compile from the `3D_IPC` directory using the commands in
 Release builds enable interprocedural optimization when the compiler supports
 it, allowing the solver and its energy kernels to be optimized together. Pass
 `-DIPC_ENABLE_IPO=OFF` at configure time to disable it.
+
+For an x86 build that will run on the build machine, configure with
+`-DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -march=native"` to enable its SIMD instructions.
 
 ### First run
 
@@ -657,8 +662,8 @@ reader can jump to the layer they care about.
 
 ### Energy terms
 
-- `SIMD.h` / `SIMD.cpp` -- vectorized non-contact energy assembly for
-  experimental v2 cloth.
+- `SIMD.h` / `SIMD.cpp` -- local SIMD kernels for experimental v2 cloth
+  energies, mesh barriers, SDF penalties, and friction.
 - `corotated_energy.h` / `corotated_energy.cpp` -- corotated elasticity energy on
   each triangle, per-vertex nodal gradient and Hessian.
 - `bending_energy.h` / `bending_energy.cpp` -- Grinspun-style discrete-shell
@@ -789,12 +794,12 @@ the GoogleTest cases discovered by CTest.
 
 | Test binary | Cases | What it covers |
 |-------------|------:|----------------|
-| `SIMD_test` | 35 | SIMD energy kernels, scalar parity, mixed-scene contact/SDF/friction coexistence, tile tails, cache invalidation, and solver failure recovery |
+| `SIMD_test` | 51 | Energy, barrier, SDF, and friction kernels; scalar and finite-difference checks, contact features, tile tails, mixed scenes, cache invalidation, and failure recovery |
 | `barrier_energy_test` | 29 | Scalar and primitive IPC barriers, deformable/rigid derivatives, inactive contact, and validation |
 | `bending_energy_test` | 19 | Hinge energy, dihedral angle, finite-difference derivatives, and rigid-motion invariance |
-| `broad_phase_test` | 32 | AABBs, BVHs, pair generation/order, solver storage modes, CCD candidates, safe stepping, conservativeness, and partial refits |
+| `broad_phase_test` | 42 | AABBs, BVHs, pair generation/order, solver storage modes, CCD candidates, safe stepping, conservativeness, and partial refits |
 | `ccd_test` | 54 | Linear single-moving-DOF CCD, scale/coplanar stress cases, TICCD general NT/SS wrappers, and rigid rotational CCD |
-| `corotated_energy_test` | 11 | Membrane rest state, invariance, finite-difference derivatives, and stress cases |
+| `corotated_energy_test` | 11 | Elasticity rest state, invariance, finite-difference derivatives, and stress cases |
 | `friction_energy_test` | 21 | Smoothed Coulomb mesh/SDF contact, prescribed motion, frozen gradients, PSD Hessians, scaling, and validation |
 | `initial_guess_test` | 5 | CCD, Verlet, and translation-restricted initial guesses |
 | `io_test` | 11 | TetGen input, malformed-input handling, and validated OBJ output |

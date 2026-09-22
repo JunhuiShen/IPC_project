@@ -6,20 +6,12 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <string>
 
-bool physics_detail::noncontact_energy_simd_enabled(const SimParams& params) {
+bool physics_detail::energy_simd_enabled(const SimParams& params) {
     return params.use_basic_experimental_v2 && params.use_simd
         && !params.use_cloth_grid && !params.use_ogc_solver;
-}
-
-bool physics_detail::private_simd_batches_enabled(
-    const RefMesh& mesh, const SimParams& params) {
-    return noncontact_energy_simd_enabled(params) && !params.use_ogc
-        && params.d_hat == 0.0 && params.k_barrier == 0.0
-        && !params.use_ccd && !params.use_ccd_guess
-        && params.k_sdf == 0.0 && params.friction_coefficient == 0.0
-        && mesh.tets.empty() && mesh.rb_nodes.empty();
 }
 
 // Union of all obstacles
@@ -39,6 +31,43 @@ static inline bool sdf_min_evaluation(const SimParams& params, const Vec3& xi, S
         if (!any || s.phi < out.phi) { out = s; any = true; }
     }
     return any;
+}
+
+void physics_detail::compute_sdf_derivatives_tile(const SimParams& params,
+    const Vec3* positions, const Vec3* previous_positions, std::size_t count,
+    SdfDerivatives* outputs) {
+    assert(count <= ipc_simd::tile_width);
+    std::array<SDFEvaluation, ipc_simd::tile_width> evaluations;
+    std::array<bool, ipc_simd::tile_width> present{};
+    std::array<Vec3, ipc_simd::tile_width> gradients, friction_gradients;
+    std::array<Mat33, ipc_simd::tile_width> hessians, friction_hessians;
+    for (std::size_t e = 0; e < count; ++e) {
+        outputs[e] = SdfDerivatives{};
+        present[e] = sdf_min_evaluation(params, positions[e], evaluations[e]);
+        if (!present[e]) evaluations[e].phi = std::max(0.0, params.eps_sdf);
+    }
+    ipc_simd::sdf_derivatives_tile(evaluations.data(), count, params.k_sdf,
+        params.eps_sdf, gradients.data(), hessians.data(), false);
+    const bool any_present = std::any_of(present.begin(), present.begin() + count, [](bool value) { return value; });
+    if (params.friction_coefficient > 0.0) {
+        if (any_present && !previous_positions)
+            throw std::invalid_argument("SIMD SDF friction requires previous positions.");
+        std::array<FrozenFrictionContact, ipc_simd::tile_width> frozen;
+        std::array<int, ipc_simd::tile_width> roles{};
+        for (std::size_t e = 0; e < count; ++e)
+            if (present[e]) frozen[e] = make_sdf_frozen_friction_contact(positions[e],
+                previous_positions[e], evaluations[e], params.k_sdf, params.eps_sdf,
+                params.dt(), params.friction_velocity_epsilon, 1e-12, &gradients[e]);
+        ipc_simd::friction_derivatives_tile(frozen.data(), roles.data(), count,
+            params.friction_coefficient, params.dt2(), friction_gradients.data(), friction_hessians.data());
+    }
+    for (std::size_t e = 0; e < count; ++e) {
+        outputs[e].gradient = gradients[e]; outputs[e].hessian = hessians[e];
+        if (params.friction_coefficient > 0.0) {
+            outputs[e].friction_gradient = friction_gradients[e];
+            outputs[e].friction_hessian = friction_hessians[e];
+        }
+    }
 }
 
 static void validate_friction_previous_positions(
@@ -333,7 +362,7 @@ compute_local_gradient_and_hessian_no_barrier_impl(
     // V1 and the checked reference assembly stay scalar.
     // The stored-membrane specialization replaces only that assembly stage.
     const bool simd_energy = !validate_friction_inputs
-        && physics_detail::noncontact_energy_simd_enabled(params);
+        && physics_detail::energy_simd_enabled(params);
 
     // Point energy terms: inertia, gravity and the first matching pin.
     const Vec3* pin_target = nullptr;
@@ -349,8 +378,12 @@ compute_local_gradient_and_hessian_no_barrier_impl(
         }
     }
     if (simd_energy) {
-        ipc_simd::accumulate_point_terms(ref_mesh.mass[vi], x[vi], xhat[vi],
-            params.gravity, pin_target, params.kpin, dt2, g, H);
+        ipc_simd::PointInput input;
+        input.mass = ref_mesh.mass[vi];
+        input.position = x[vi];
+        input.predicted_position = xhat[vi];
+        if (pin_target) input.pin_target = *pin_target;
+        ipc_simd::point_derivatives_tile(&input, 1, params.gravity, params.kpin, dt2, &g, &H);
     } else {
         g += ref_mesh.mass[vi] * (x[vi] - xhat[vi]);
         g += dt2 * (-ref_mesh.mass[vi] * params.gravity);
@@ -363,8 +396,8 @@ compute_local_gradient_and_hessian_no_barrier_impl(
     }
 
     if constexpr (UseStoredMembrane) {
-        // Contributions are already weighted. Preserve each node's original
-        // incident addition order and avoid even looking up its triangles.
+        // Stored contributions include dt^2. Preserve incident order without
+        // looking up triangles or evaluating their derivatives again.
         for (std::size_t e = 0; e < membrane->count; ++e) {
             g += membrane->gradients[e];
             H += membrane->hessians[e];
@@ -422,7 +455,22 @@ compute_local_gradient_and_hessian_no_barrier_impl(
         }
     }
 
-    if (params.k_sdf > 0.0) {
+    if (params.k_sdf > 0.0 && simd_energy
+        && (!params.sdf_planes.empty() || !params.sdf_cylinders.empty() || !params.sdf_spheres.empty())) {
+        const Vec3 position = x[vi];
+        std::optional<Vec3> previous;
+        if (params.friction_coefficient > 0.0 && previous_positions)
+            previous = (*previous_positions)[vi];
+        physics_detail::SdfDerivatives local;
+        physics_detail::compute_sdf_derivatives_tile(params, &position,
+            previous ? &*previous : nullptr, 1, &local);
+        g += dt2 * local.gradient;
+        H += dt2 * local.hessian;
+        if (params.friction_coefficient > 0.0) {
+            g += local.friction_gradient;
+            H += local.friction_hessian;
+        }
+    } else if (params.k_sdf > 0.0) {
         SDFEvaluation s;
         if (sdf_min_evaluation(params, x[vi], s)) {
             const Vec3 sdf_gradient =
@@ -770,14 +818,24 @@ std::pair<Vec3, Mat33> compute_local_simd_v2_derivatives(
     int vi, const RefMesh& mesh, const std::vector<Pin>& pins,
     const SimParams& params, const std::vector<Vec3>& x,
     const std::vector<Vec3>& xhat, const PinMap& pin_map,
-    const SimdDerivativeView& elasticity, const SimdDerivativeView& bending) {
+    const SimdDerivativeView& elasticity, const SimdDerivativeView& bending,
+    const SimdDerivativeView* point) {
     Vec3 g = Vec3::Zero();
     Mat33 H = Mat33::Zero();
-    const int pin = pin_map[vi];
-    const Vec3* pin_target = pin >= 0 ? &pins[pin].target_position : nullptr;
     const double dt2 = params.dt2();
-    ipc_simd::accumulate_point_terms(mesh.mass[vi], x[vi], xhat[vi],
-        params.gravity, pin_target, params.kpin, dt2, g, H);
+    if (point) {
+        assert(point->count == 1);
+        g = point->gradients[0];
+        H = point->hessians[0];
+    } else {
+        ipc_simd::PointInput input;
+        input.mass = mesh.mass[vi];
+        input.position = x[vi];
+        input.predicted_position = xhat[vi];
+        const int pin = pin_map[vi];
+        if (pin >= 0) input.pin_target = pins[pin].target_position;
+        ipc_simd::point_derivatives_tile(&input, 1, params.gravity, params.kpin, dt2, &g, &H);
+    }
     const auto accumulate = [&](const SimdDerivativeView& entries) {
         for (std::size_t e = 0; e < entries.count; ++e) {
             g += dt2 * entries.gradients[e];

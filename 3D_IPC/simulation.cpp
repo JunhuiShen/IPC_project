@@ -198,19 +198,14 @@ int main(int argc, char** argv) {
             std::cout << "Experimental cloth solver: v2\n";
         else
             std::cout << "Experimental cloth solver: v1 (scalar)\n";
-        const bool simd = physics_detail::noncontact_energy_simd_enabled(params);
-        if (params.use_basic_experimental_v2 && params.use_parallel && simd) {
-            std::cout << "Elasticity/bending assembly: AoS gather, local SIMD tiles, ordered accumulation\n";
-            std::cout << "Non-collision energy kernels (inertia/gravity/pins/elasticity/bending): ";
-        } else if (params.use_basic_experimental_v2 && params.use_parallel) {
-            std::cout << "Elasticity assembly: stored per-color scalar derivatives\n";
-            std::cout << "Other non-collision energy kernels (inertia/gravity/pins/bending): ";
+        const bool simd = physics_detail::energy_simd_enabled(params);
+        if (simd) {
+            std::cout << "Energy/contact assembly: AoS gather, local SIMD tiles, ordered accumulation\n";
+            std::cout << "SIMD elasticity/bending: " << ipc_simd::tile_backend_name()
+                      << "; point/contact: " << ipc_simd::backend_name() << "\n";
         } else {
-            std::cout << "Non-collision energy kernels (inertia/gravity/pins/elasticity/bending): ";
+            std::cout << "Non-collision energy kernels (inertia/gravity/pins/elasticity/bending): scalar reference\n";
         }
-        std::cout << (simd ? (params.use_basic_experimental_v2
-            ? ipc_simd::tile_backend_name() : ipc_simd::backend_name()) : "scalar reference");
-        std::cout << "\n";
     }
     if (num_rigid_bodies > 0)
         std::cout << "Rigid bodies: " << num_rigid_bodies << "\n";

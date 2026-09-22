@@ -416,8 +416,8 @@ void for_each_colored_block(const std::vector<std::vector<int>>& groups,
 // -----------------------------------------------------------------------------
 
 inline constexpr int contact_grain = 16;
-// A worker owns 16 consecutive contacts. Compact masks let leaders skip
-// inactive records without loading their gradient/Hessian storage.
+// Each worker owns strided groups of 16 contacts and their compact masks.
+// Leaders skip inactive derivative storage during ordered accumulation.
 struct alignas(32) ContactMaskWord {
     unsigned bits = 0, clear = 0;
 };
@@ -605,6 +605,115 @@ struct ColoredContactSweep {
                             const int i = next_whole[c].fetch_add(batch, std::memory_order_relaxed);
                             for (int j = i; j < std::min(i + batch, size); ++j)
                                 baseline(group[j]);
+                        }
+                    }
+#pragma omp barrier
+                }
+            }
+        }
+    }
+
+    // V2 compacts each worker's strided contacts without changing ownership.
+    // compute_assigned receives vertex-relative result/mask pointers and must
+    // initialize its mask words, finish its writes, and return without throwing.
+    template <class Compute, class Apply, class Baseline, class CCD, class Commit,
+              class BeforeColor = std::nullptr_t, class ComputeAssigned = std::nullptr_t,
+              class BaselineBatch = std::nullptr_t>
+    void run_assigned(const std::vector<std::vector<int>> &groups, const Compute &compute,
+             const Apply &apply, const Baseline &baseline, const CCD &ccd, const Commit &commit,
+             const BeforeColor& before_color = nullptr, const ComputeAssigned& compute_assigned = nullptr,
+             const BaselineBatch& baseline_batch = nullptr) {
+        for (int c = 0; c < static_cast<int>(groups.size()); ++c)
+            next_whole[c].store(split_count[c], std::memory_order_relaxed);
+        // Reset before entering the team, including after any runtime team-size
+        // fallback. Do not assume that every preceding sweep used this path.
+        for (int v : cooperative_vertices) {
+            states[v].arrived.store(0, std::memory_order_relaxed);
+            states[v].ready.store(0, std::memory_order_relaxed);
+        }
+#pragma omp parallel
+        {
+            for (int c = 0; c < static_cast<int>(groups.size()); ++c) {
+                const auto &group = groups[c];
+                if constexpr (!std::is_same_v<BeforeColor, std::nullptr_t>)
+                    before_color(static_cast<std::size_t>(c));
+                if (split_count[c] == 0 || omp_get_num_threads() != team) {
+                    if constexpr (std::is_same_v<BaselineBatch, std::nullptr_t>) {
+#pragma omp for schedule(dynamic, 1)
+                    for (int i = 0; i < static_cast<int>(group.size()); ++i)
+                        baseline(group[i]);
+                    } else {
+                        const int workers = omp_get_num_threads();
+                        const int batch = std::clamp(
+                            (static_cast<int>(group.size()) + 2 * workers - 1) / (2 * workers), 1, 8);
+#pragma omp for schedule(dynamic, 1)
+                        for (int i = 0; i < static_cast<int>(group.size()); i += batch)
+                            baseline_batch(group, i, std::min(i + batch, static_cast<int>(group.size())));
+                    }
+                } else {
+                    const Assignment a = assignments[c * team + omp_get_thread_num()];
+                    if (a.vertex >= 0) {
+                        auto *result = values.data() + a.offset;
+                        State &state = states[a.vertex];
+                        if constexpr (!std::is_same_v<ComputeAssigned, std::nullptr_t>) {
+                            compute_assigned(a, result, masks.data() + a.mask_offset);
+                        } else {
+                            for (int start = a.lane * contact_grain; start < a.count;
+                                 start += a.lanes * contact_grain) {
+                                unsigned bits = 0, clear = 0;
+                                for (int j = start; j < std::min(start + contact_grain, a.count); ++j) {
+                                    const unsigned flags = compute(a.vertex, j, result[j]);
+                                    bits |= (flags & 1u) << (j - start);
+                                    clear |= ((flags >> 1) & 1u) << (j - start);
+                                }
+                                masks[a.mask_offset + start / contact_grain].bits = bits;
+                                masks[a.mask_offset + start / contact_grain].clear = clear;
+                            }
+                        }
+                        state.arrived.fetch_add(1, std::memory_order_acq_rel);
+                        if (a.lane == 0) {
+                            while (state.arrived.load(std::memory_order_acquire) != a.lanes)
+                                contact_spin_hint();
+                            apply(a.vertex, result, masks.data() + a.mask_offset);
+                            state.ready.store(1, std::memory_order_release);
+                        } else
+                            while (state.ready.load(std::memory_order_acquire) < 1)
+                                contact_spin_hint();
+                        for (int start = a.lane * contact_grain; start < a.count;
+                             start += a.lanes * contact_grain) {
+                            unsigned bits = 0;
+                            const unsigned clear = masks[a.mask_offset + start / contact_grain].clear;
+                            for (int j = start; j < std::min(start + contact_grain, a.count); ++j) {
+                                if (ccd(a.vertex, j, result[j], (clear >> (j - start)) & 1u))
+                                    bits |= 1u << (j - start);
+                            }
+                            masks[a.mask_offset + start / contact_grain].bits = bits;
+                        }
+                        state.arrived.fetch_add(1, std::memory_order_acq_rel);
+                        if (a.lane == 0) {
+                            while (state.arrived.load(std::memory_order_acquire) != 2 * a.lanes)
+                                contact_spin_hint();
+                            commit(a.vertex, result, masks.data() + a.mask_offset);
+                        }
+                    }
+                    if (split_count[c] < static_cast<int>(group.size())) {
+                        while (true) {
+                            const int size = group.size();
+                            const int remaining =
+                                size - next_whole[c].load(std::memory_order_relaxed);
+                            if (remaining <= 0)
+                                break;
+                            // Batch only while ample independent work remains; use one
+                            // vertex near the tail to limit end-of-color imbalance.
+                            const int batch = std::is_same_v<BaselineBatch, std::nullptr_t>
+                                ? (remaining > 2 * team ? 2 : 1)
+                                : std::clamp((remaining + 2 * team - 1) / (2 * team), 1, 8);
+                            const int i = next_whole[c].fetch_add(batch, std::memory_order_relaxed);
+                            if constexpr (std::is_same_v<BaselineBatch, std::nullptr_t>) {
+                                for (int j = i; j < std::min(i + batch, size); ++j)
+                                    baseline(group[j]);
+                            } else if (i < size)
+                                baseline_batch(group, i, std::min(i + batch, size));
                         }
                     }
 #pragma omp barrier

@@ -1,9 +1,15 @@
 #include "SIMD.h"
+#include "bending_energy.h"
+#include "corotated_energy.h"
+#include "friction_energy.h"
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <limits>
+#include <optional>
+#include <stdexcept>
+#include <type_traits>
 
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -58,12 +64,6 @@ struct Pack {
         return raw(*x);
 #endif
     }
-#if defined(__AVX2__)
-    template <typename Get>
-    static Pack gather(const Get& get) {
-        return raw(_mm256_setr_pd(get(0), get(1), get(2), get(3)));
-    }
-#endif
     void store(double* x) const {
 #if defined(__AVX2__)
         _mm256_storeu_pd(x, value);
@@ -142,17 +142,6 @@ struct Pack {
         return Pack(a.value > b.value ? 1.0 : 0.0);
 #endif
     }
-    friend Pack not_less_equal(Pack a, Pack b) {
-#if defined(__AVX2__)
-        return raw(_mm256_cmp_pd(a.value, b.value, _CMP_NLE_UQ));
-#elif defined(__aarch64__) || defined(_M_ARM64)
-        return raw(vreinterpretq_f64_u32(vmvnq_u32(vreinterpretq_u32_u64(vcleq_f64(a.value, b.value)))));
-#elif defined(__SSE2__) || defined(_M_X64)
-        return raw(_mm_cmpnle_pd(a.value, b.value));
-#else
-        return Pack(!(a.value <= b.value) ? 1.0 : 0.0);
-#endif
-    }
     friend Pack equal(Pack a, Pack b) {
 #if defined(__AVX2__)
         return raw(_mm256_cmp_pd(a.value, b.value, _CMP_EQ_OQ));
@@ -162,17 +151,6 @@ struct Pack {
         return raw(_mm_cmpeq_pd(a.value, b.value));
 #else
         return Pack(a.value == b.value ? 1.0 : 0.0);
-#endif
-    }
-    friend Pack mask_and(Pack a, Pack b) {
-#if defined(__AVX2__)
-        return raw(_mm256_and_pd(a.value, b.value));
-#elif defined(__aarch64__) || defined(_M_ARM64)
-        return raw(vreinterpretq_f64_u64(vandq_u64(vreinterpretq_u64_f64(a.value), vreinterpretq_u64_f64(b.value))));
-#elif defined(__SSE2__) || defined(_M_X64)
-        return raw(_mm_and_pd(a.value, b.value));
-#else
-        return Pack(a.value != 0.0 && b.value != 0.0 ? 1.0 : 0.0);
 #endif
     }
     friend Pack select(Pack mask, Pack yes, Pack no) {
@@ -186,113 +164,11 @@ struct Pack {
         return mask.value != 0.0 ? yes : no;
 #endif
     }
-    friend Pack abs(Pack a) {
-#if defined(__AVX2__)
-        return raw(_mm256_andnot_pd(_mm256_set1_pd(-0.0), a.value));
-#elif defined(__aarch64__) || defined(_M_ARM64)
-        return raw(vabsq_f64(a.value));
-#elif defined(__SSE2__) || defined(_M_X64)
-        return raw(_mm_andnot_pd(_mm_set1_pd(-0.0), a.value));
-#else
-        return Pack(std::abs(a.value));
-#endif
-    }
-    friend Pack copy_sign(Pack magnitude, Pack sign) {
-#if defined(__AVX2__)
-        const auto signbit = _mm256_set1_pd(-0.0);
-        return raw(_mm256_or_pd(_mm256_andnot_pd(signbit, magnitude.value), _mm256_and_pd(signbit, sign.value)));
-#elif defined(__aarch64__) || defined(_M_ARM64)
-        const auto signbit = vreinterpretq_u64_f64(vdupq_n_f64(-0.0));
-        return raw(vbslq_f64(signbit, sign.value, magnitude.value));
-#elif defined(__SSE2__) || defined(_M_X64)
-        const auto signbit = _mm_set1_pd(-0.0);
-        return raw(_mm_or_pd(_mm_andnot_pd(signbit, magnitude.value), _mm_and_pd(signbit, sign.value)));
-#else
-        return Pack(std::copysign(magnitude.value, sign.value));
-#endif
-    }
 };
 
 constexpr int W = Pack::width;
 
-// Atan polynomial coefficients and split pi constants are from fdlibm:
-// https://www.netlib.org/fdlibm/s_atan.c and e_atan2.c.
-// The ratio reduction and SIMD masks below replace its scalar interval tree.
-/*
- * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
- * Developed at SunSoft, a Sun Microsystems, Inc. business.
- * Permission to use, copy, modify, and distribute this software is freely
- * granted, provided that this notice is preserved.
- */
-Pack packed_atan2(Pack y, Pack x) {
-    const Pack zero(0.0), one(1.0);
-    const Pack ax = abs(x), ay = abs(y);
-    const Pack swap = greater(ay, ax);
-    const Pack numerator = select(swap, ax, ay);
-    const Pack denominator = select(swap, ay, ax);
-    const Pack both_inf = equal(numerator, Pack(std::numeric_limits<double>::infinity()));
-    // No overflow in the ratio. Avoid 0/0 and infinity/infinity before blend.
-    const Pack r = select(both_inf, one, numerator)
-        / select(both_inf, one, select(greater(denominator, zero), denominator, one));
-    const Pack fold = greater(r, Pack(4.14213562373095048802e-01));
-    const Pack t = select(fold, (r - one) / (r + one), r);
-    const Pack z = t * t, w = z * z;
-    const Pack odd = z * (Pack(3.33333333333329318027e-01)
-        + w * (Pack(1.42857142725034663711e-01)
-        + w * (Pack(9.09088713343650656196e-02)
-        + w * (Pack(6.66107313738753120669e-02)
-        + w * (Pack(4.97687799461593236017e-02)
-        + w * Pack(1.62858201153657823623e-02))))));
-    const Pack even = w * (Pack(-1.99999999998764832476e-01)
-        + w * (Pack(-1.11111104054623557880e-01)
-        + w * (Pack(-7.69187620504482999495e-02)
-        + w * (Pack(-5.83357013379057348645e-02)
-        + w * Pack(-3.65315727442169155270e-02)))));
-    const Pack correction = t * (odd + even);
-    Pack angle = select(fold,
-        Pack(7.85398163397448278999e-01) - ((correction - Pack(3.06161699786838301793e-17)) - t),
-        t - correction);
-    angle = select(swap, Pack(1.57079632679489655800e+00)
-        - (angle - Pack(6.12323399573676603587e-17)), angle);
-    const Pack negative_x = greater(zero, copy_sign(one, x));
-    angle = select(negative_x, Pack(3.14159265358979311600e+00)
-        - (angle - Pack(1.22464679914735317720e-16)), angle);
-    angle = copy_sign(angle, y);
-    const Pack ordered = mask_and(equal(x, x), equal(y, y));
-    return select(ordered, angle, x + y);
-}
-
-using PackedVec3 = std::array<Pack, 3>;
-Pack dot(const PackedVec3& a, const PackedVec3& b) {
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-PackedVec3 cross(const PackedVec3& a, const PackedVec3& b) {
-    return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
-}
-
-void accumulate_scalar(
-    const RefMesh& mesh, const std::vector<Vec3>& x,
-    int triangle, int role, const std::vector<ShapeGrads>* rest_shape_grads,
-    double mu, double lambda, double dt2, Vec3& g, Mat33& H) {
-    const int* v = &mesh.tris[3 * triangle];
-    Mat32 Ds;
-    Ds.col(0) = x[v[1]] - x[v[0]];
-    Ds.col(1) = x[v[2]] - x[v[0]];
-    const Mat32 F = Ds * mesh.Dm_inverse[triangle];
-    const CorotatedCache32 cache = buildCorotatedCache(F);
-    const ShapeGrads gradN = rest_shape_grads
-        ? (*rest_shape_grads)[triangle]
-        : shape_function_gradients(mesh.Dm_inverse[triangle]);
-    const Mat32 P = PCorotated32(cache, F, mu, lambda);
-    Mat66 dPdF;
-    dPdFCorotated32(cache, mu, lambda, dPdF);
-    g += dt2 * corotated_node_gradient(P, mesh.area[triangle], gradN, role);
-    H += dt2 * corotated_node_hessian(dPdF, mesh.area[triangle], gradN, role);
-}
-
 } // namespace
-
-int lane_width() { return W; }
 
 const char* backend_name() {
 #if defined(__AVX2__)
@@ -306,343 +182,59 @@ const char* backend_name() {
 #endif
 }
 
-void atan2_batch(const double* y, const double* x, double* angles, std::size_t count) {
-    for (std::size_t begin = 0; begin < count; begin += W) {
-        const int active = static_cast<int>(std::min<std::size_t>(W, count - begin));
-        if (active == W) {
-            packed_atan2(Pack::load(y + begin), Pack::load(x + begin)).store(angles + begin);
-        } else {
-            alignas(32) double local_x[W], local_y[W], output[W];
-            for (int lane = 0; lane < W; ++lane) {
-                local_x[lane] = lane < active ? x[begin + lane] : 1.0;
-                local_y[lane] = lane < active ? y[begin + lane] : 0.0;
-            }
-            packed_atan2(Pack::load(local_y), Pack::load(local_x)).store(output);
-            for (int lane = 0; lane < active; ++lane) angles[begin + lane] = output[lane];
-        }
-    }
-}
-
-void accumulate_point_terms(
-    double mass, const Vec3& x, const Vec3& xhat, const Vec3& gravity,
-    const Vec3* pin_target, double kpin, double dt2,
-    Vec3& gradient, Mat33& hessian) {
-    const Pack m(mass), minus_m(-mass), timestep2(dt2), pin_scale(dt2 * kpin);
-    for (int begin = 0; begin < 3; begin += W) {
-        const int count = std::min(W, 3 - begin);
-        alignas(32) double x_data[W] = {}, xhat_data[W] = {}, gravity_data[W] = {};
-        alignas(32) double pin_data[W] = {}, g_data[W] = {}, H_data[W] = {};
-        for (int lane = 0; lane < count; ++lane) {
-            const int axis = begin + lane;
-            x_data[lane] = x[axis]; xhat_data[lane] = xhat[axis];
-            gravity_data[lane] = gravity[axis];
-            if (pin_target) pin_data[lane] = (*pin_target)[axis];
-            g_data[lane] = gradient[axis]; H_data[lane] = hessian(axis, axis);
-        }
-        const Pack current = Pack::load(x_data);
-        Pack g = Pack::load(g_data) + m * (current - Pack::load(xhat_data));
-        g = g + timestep2 * (minus_m * Pack::load(gravity_data));
-        Pack H = Pack::load(H_data) + m;
-        if (pin_target) {
-            g = g + pin_scale * (current - Pack::load(pin_data));
-            H = H + pin_scale;
-        }
-        g.store(g_data); H.store(H_data);
-        for (int lane = 0; lane < count; ++lane) {
-            const int axis = begin + lane;
-            gradient[axis] = g_data[lane]; hessian(axis, axis) = H_data[lane];
-        }
-    }
-}
-
-void accumulate_bending(
-    const RefMesh& mesh, const std::vector<Vec3>& positions,
-    const std::vector<std::pair<int, int>>& incident,
-    double kB, double dt2, Vec3& gradient, Mat33& hessian) {
-    const Pack zero(0.0), one(1.0), twice_kB(2.0 * kB);
-    for (std::size_t begin = 0; begin < incident.size(); begin += W) {
-        const int count = static_cast<int>(std::min<std::size_t>(W, incident.size() - begin));
-        alignas(32) double points[4][3][W], ce_data[W], rest_data[W], role_data[W];
-        for (int lane = 0; lane < W; ++lane) {
-            const auto [hi, role] = incident[begin + std::min(lane, count - 1)];
-            const Hinge& hinge = mesh.hinges[hi];
-            for (int vertex = 0; vertex < 4; ++vertex)
-                for (int axis = 0; axis < 3; ++axis)
-                    points[vertex][axis][lane] = positions[hinge.v[vertex]][axis];
-            ce_data[lane] = hinge.c_e; rest_data[lane] = hinge.bar_theta;
-            role_data[lane] = static_cast<double>(role);
-        }
-        const Pack role = Pack::load(role_data);
-        const Pack role0 = equal(role, zero), role2 = equal(role, Pack(2.0));
-        const Pack role3 = equal(role, Pack(3.0));
-        PackedVec3 e, a, b, cA, cB;
-        for (int axis = 0; axis < 3; ++axis) {
-            const Pack p0 = Pack::load(points[0][axis]), p1 = Pack::load(points[1][axis]);
-            const Pack p2 = Pack::load(points[2][axis]), p3 = Pack::load(points[3][axis]);
-            e[axis] = p1 - p0; a[axis] = p2 - p0; b[axis] = p3 - p0;
-            cA[axis] = p2 - p1; cB[axis] = p3 - p1;
-        }
-        const PackedVec3 mA = cross(e, a), mB = cross(b, e);
-        const Pack muA2 = dot(mA, mA), muB2 = dot(mB, mB), ell = sqrt(dot(e, e));
-        // Negate the reference's <= 0 checks, including its NaN behavior;
-        // nonfinite geometry is not silently converted into zero force.
-        const Pack valid = mask_and(not_less_equal(ell, zero),
-            mask_and(not_less_equal(muA2, zero), not_less_equal(muB2, zero)));
-        const Pack safe_ell = select(valid, ell, one);
-        PackedVec3 ehat;
-        for (int axis = 0; axis < 3; ++axis) ehat[axis] = e[axis] / safe_ell;
-        const Pack X = dot(mA, mB), Y = dot(cross(mA, mB), ehat);
-        const Pack theta = packed_atan2(select(valid, Y, zero), select(valid, X, one));
-
-        // For edge endpoints, write the existing chain rule using u/v:
-        // role 0: u=x2-x1, v=x3-x1; role 1: u=-a, v=-b.
-        // Apex derivatives retain their direct formulas to avoid extra
-        // cancellation from dot products that are theoretically zero.
-        PackedVec3 u, v;
-        for (int axis = 0; axis < 3; ++axis) {
-            u[axis] = select(role0, cA[axis], zero - a[axis]);
-            v[axis] = select(role0, cB[axis], zero - b[axis]);
-        }
-        const PackedVec3 mB_cross_u = cross(mB, u), mA_cross_v = cross(mA, v);
-        const PackedVec3 role2_dX = cross(mB, e), role3_dX = cross(e, mA);
-        const Pack edge_coefficient = dot(u, mB) + dot(mA, v);
-        const Pack ehat_u = dot(ehat, u), ehat_v = dot(ehat, v);
-        const Pack denominator = select(valid, muA2 * muB2, one);
-        const Pack scale = twice_kB * Pack::load(ce_data);
-        const Pack g_scale = scale * (theta - Pack::load(rest_data));
-        PackedVec3 gtheta;
-        alignas(32) double g_data[3][W], H_data[3][3][W];
-        for (int axis = 0; axis < 3; ++axis) {
-            Pack dX = mB_cross_u[axis] - mA_cross_v[axis];
-            Pack dY = edge_coefficient * ehat[axis] - ehat_u * mB[axis] - ehat_v * mA[axis];
-            dX = select(role2, role2_dX[axis], select(role3, role3_dX[axis], dX));
-            dY = select(role2, (zero - ell) * mB[axis], select(role3, (zero - ell) * mA[axis], dY));
-            gtheta[axis] = select(valid, (X * dY - Y * dX) / denominator, zero);
-            select(valid, g_scale * gtheta[axis], zero).store(g_data[axis]);
-        }
-        for (int row = 0; row < 3; ++row)
-            for (int col = 0; col < 3; ++col)
-                select(valid, scale * (gtheta[row] * gtheta[col]), zero).store(H_data[row][col]);
-        for (int lane = 0; lane < count; ++lane)
-            for (int row = 0; row < 3; ++row) {
-                gradient[row] += dt2 * g_data[row][lane];
-                for (int col = 0; col < 3; ++col)
-                    hessian(row, col) += dt2 * H_data[row][col][lane];
-            }
-    }
-}
-
-void accumulated_corotated_elasticity(
-    const RefMesh& mesh, const std::vector<Vec3>& positions,
-    const IncidentTriangles& incident,
-    const std::vector<ShapeGrads>* rest_shape_grads,
-    double mu, double lambda, double dt2, Vec3& gradient, Mat33& hessian) {
-    const Pack zero(0.0), one(1.0), two(2.0);
-    const Pack twice_mu(2.0 * mu), bulk(lambda);
-    for (std::size_t begin = 0; begin < incident.size(); begin += W) {
-        const int count = static_cast<int>(std::min<std::size_t>(W, incident.size() - begin));
-
-#if defined(__AVX2__)
-        // Gather directly into SIMD registers; preserve original tail inputs.
-        std::array<int, W> triangles, roles;
-        std::array<const Mat22*, W> dm;
-        std::array<std::array<const Vec3*, W>, 3> points;
-        for (int lane = 0; lane < W; ++lane) {
-            const auto [triangle, role] = incident[begin + std::min(lane, count - 1)];
-            triangles[lane] = triangle;
-            roles[lane] = role;
-            dm[lane] = &mesh.Dm_inverse[triangle];
-            const int* v = &mesh.tris[3 * triangle];
-            for (int vertex = 0; vertex < 3; ++vertex)
-                points[vertex][lane] = &positions[v[vertex]];
-        }
-        Pack F[3][2];
-        const Pack dm00 = Pack::gather([&](int lane) { return (*dm[lane])(0, 0); });
-        const Pack dm01 = Pack::gather([&](int lane) { return (*dm[lane])(0, 1); });
-        const Pack dm10 = Pack::gather([&](int lane) { return (*dm[lane])(1, 0); });
-        const Pack dm11 = Pack::gather([&](int lane) { return (*dm[lane])(1, 1); });
-        for (int row = 0; row < 3; ++row) {
-            const Pack e0 = Pack::gather([&](int lane) { return (*points[1][lane])[row] - (*points[0][lane])[row]; });
-            const Pack e1 = Pack::gather([&](int lane) { return (*points[2][lane])[row] - (*points[0][lane])[row]; });
-            F[row][0] = e0 * dm00 + e1 * dm10;
-            F[row][1] = e0 * dm01 + e1 * dm11;
-        }
+// V2 receives gathered AoS tiles, transposes locally, and returns per-entry
+// AoS derivatives. Regular elasticity and bending arithmetic use element lanes.
+const char* tile_backend_name() {
+#if defined(__AVX512F__)
+    return "AVX-512 (8 doubles)";
 #else
-        // Gather a small AoSoA packet. Tail lanes repeat the last real triangle
-        // and are never scattered, so they cannot create singular dummy input.
-        alignas(32) double edges[3][2][W], dm[2][2][W], b_data[2][W], area_data[W];
+    return backend_name();
+#endif
+}
+
+void point_derivatives_tile(const PointInput* inputs, std::size_t entry_count,
+    const Vec3& gravity, double kpin, double dt2,
+    Vec3* gradients, Mat33* hessians) {
+    assert(entry_count <= tile_width);
+    const Pack zero(0.0), one(1.0), timestep2(dt2), pin_scale(dt2 * kpin);
+    for (std::size_t begin = 0; begin < entry_count; begin += W) {
+        const int count = static_cast<int>(std::min<std::size_t>(W, entry_count-begin));
+        alignas(32) double mass[W], pinned[W], position[3][W], predicted[3][W], target[3][W];
         for (int lane = 0; lane < W; ++lane) {
-            const auto [triangle, role] = incident[begin + std::min(lane, count - 1)];
-            const int* v = &mesh.tris[3 * triangle];
-            const Mat22& Dm_inv = mesh.Dm_inverse[triangle];
-            for (int row = 0; row < 3; ++row) {
-                edges[row][0][lane] = positions[v[1]][row] - positions[v[0]][row];
-                edges[row][1][lane] = positions[v[2]][row] - positions[v[0]][row];
-            }
-            for (int row = 0; row < 2; ++row)
-                for (int col = 0; col < 2; ++col)
-                    dm[row][col][lane] = Dm_inv(row, col);
-            for (int col = 0; col < 2; ++col) {
-                b_data[col][lane] = rest_shape_grads
-                    ? (*rest_shape_grads)[triangle][role][col]
-                    : (role == 0 ? -Dm_inv(0, col) - Dm_inv(1, col) : Dm_inv(role - 1, col));
-            }
-            area_data[lane] = mesh.area[triangle];
-        }
-
-        Pack F[3][2];
-        const Pack dm00 = Pack::load(dm[0][0]), dm01 = Pack::load(dm[0][1]);
-        const Pack dm10 = Pack::load(dm[1][0]), dm11 = Pack::load(dm[1][1]);
-        for (int row = 0; row < 3; ++row) {
-            const Pack e0 = Pack::load(edges[row][0]), e1 = Pack::load(edges[row][1]);
-            F[row][0] = e0 * dm00 + e1 * dm10;
-            F[row][1] = e0 * dm01 + e1 * dm11;
-        }
-#endif
-        Pack c00 = F[0][0] * F[0][0] + F[1][0] * F[1][0] + F[2][0] * F[2][0];
-        Pack c01 = F[0][0] * F[0][1] + F[1][0] * F[1][1] + F[2][0] * F[2][1];
-        Pack c11 = F[0][1] * F[0][1] + F[1][1] * F[1][1] + F[2][1] * F[2][1];
-        Pack det = c00 * c11 - c01 * c01;
-        Pack trace = c00 + c11;
-
-        // The analytic square root applies to the positive-definite, unclamped
-        // branch. Preserve Eigen's 1e-12 eigenvalue clamp and its behavior on
-        // ill-conditioned inputs by evaluating those individual lanes exactly
-        // through the established scalar kernel. det/trace bounds lambda_min;
-        // det/trace^2 > 1e-6 also limits determinant cancellation to the tested
-        // regime (roughly condition(C) < 1e6).
-        alignas(32) double det_data[W], trace_data[W];
-        det.store(det_data);
-        trace.store(trace_data);
-        bool fallback[W];
-        bool any_fallback = false;
-        int fallback_count = 0;
-        for (int lane = 0; lane < W; ++lane) {
-            fallback[lane] = !std::isfinite(det_data[lane])
-                || !std::isfinite(trace_data[lane])
-                || !(det_data[lane] > 1e-10 * trace_data[lane])
-                || !(det_data[lane] > 1e-6 * trace_data[lane] * trace_data[lane]);
-            any_fallback = any_fallback || fallback[lane];
-            if (lane < count && fallback[lane]) ++fallback_count;
-        }
-        if (fallback_count == count) {
-            for (int lane = 0; lane < count; ++lane) {
-                const auto [triangle, role] = incident[begin + lane];
-                accumulate_scalar(mesh, positions, triangle, role, rest_shape_grads,
-                                  mu, lambda, dt2, gradient, hessian);
-            }
-            continue;
-        }
-        if (any_fallback) {
-            // Substitute benign matrices before SIMD division/sqrt. These
-            // lanes' outputs are ignored in favor of scalar results below.
-            alignas(32) double values[W];
-            for (int row = 0; row < 3; ++row)
-                for (int col = 0; col < 2; ++col) {
-                    F[row][col].store(values);
-                    for (int lane = 0; lane < W; ++lane)
-                        if (fallback[lane]) values[lane] = row == col ? 1.0 : 0.0;
-                    F[row][col] = Pack::load(values);
-                }
-            const auto replace = [&](Pack p, double benign) {
-                p.store(values);
-                for (int lane = 0; lane < W; ++lane)
-                    if (fallback[lane]) values[lane] = benign;
-                return Pack::load(values);
-            };
-            c00 = replace(c00, 1.0);
-            c01 = replace(c01, 0.0);
-            c11 = replace(c11, 1.0);
-            det = replace(det, 1.0);
-            trace = replace(trace, 2.0);
-        }
-
-        // For C=F^T F, sqrt(C)=(C+sqrt(det(C))*I)/sqrt(tr(C)+2sqrt(det(C))).
-        const Pack J = sqrt(det);
-        const Pack traceS = sqrt(trace + two * J);
-        const Pack inv_s_denominator = one / (J * traceS);
-        const Pack s00 = (c11 + J) * inv_s_denominator;
-        const Pack s01 = (zero - c01) * inv_s_denominator;
-        const Pack s11 = (c00 + J) * inv_s_denominator;
-        const Pack inv_det = one / det;
-        const Pack ci00 = c11 * inv_det, ci01 = (zero - c01) * inv_det, ci11 = c00 * inv_det;
-#if defined(__AVX2__)
-        const auto gather_b = [&](int col) {
-            return Pack::gather([&](int lane) {
-                const int role = roles[lane];
-                const Mat22& Dm_inv = *dm[lane];
-                return rest_shape_grads
-                    ? (*rest_shape_grads)[triangles[lane]][role][col]
-                    : (role == 0 ? -Dm_inv(0, col) - Dm_inv(1, col) : Dm_inv(role - 1, col));
-            });
-        };
-        const Pack b0 = gather_b(0), b1 = gather_b(1);
-#else
-        const Pack b0 = Pack::load(b_data[0]), b1 = Pack::load(b_data[1]);
-#endif
-        const Pack b_norm2 = b0 * b0 + b1 * b1;
-        const Pack b_s_b = b0 * (s00 * b0 + s01 * b1) + b1 * (s01 * b0 + s11 * b1);
-        const Pack b_c_b = b0 * (ci00 * b0 + ci01 * b1) + b1 * (ci01 * b0 + ci11 * b1);
-        const Pack volumetric = bulk * (J - one) * J;
-        const Pack lambda_J2 = bulk * J * J;
-        const Pack inv_traceS = one / traceS;
-#if defined(__AVX2__)
-        const Pack area = Pack::gather([&](int lane) { return mesh.area[triangles[lane]]; });
-#else
-        const Pack area = Pack::load(area_data);
-#endif
-        Pack R[3][2], B[3][2], Bb[3], Reb[3];
-        alignas(32) double g_data[3][W], H_data[3][3][W];
-        for (int row = 0; row < 3; ++row) {
-            R[row][0] = F[row][0] * s00 + F[row][1] * s01;
-            R[row][1] = F[row][0] * s01 + F[row][1] * s11;
-            B[row][0] = F[row][0] * ci00 + F[row][1] * ci01;
-            B[row][1] = F[row][0] * ci01 + F[row][1] * ci11;
-            Bb[row] = B[row][0] * b0 + B[row][1] * b1;
-            Reb[row] = R[row][1] * b0 - R[row][0] * b1;
-            const Pack p0 = twice_mu * (F[row][0] - R[row][0]) + volumetric * B[row][0];
-            const Pack p1 = twice_mu * (F[row][1] - R[row][1]) + volumetric * B[row][1];
-            (area * (p0 * b0 + p1 * b1)).store(g_data[row]);
-        }
-
-        // Contract the existing 6x6 dP/dF analytically into the node's 3x3
-        // diagonal block. With b=grad(N), B=F C^-1 and Q=B F^T:
-        // H/A = 2mu[|b|^2 I-(I-RR^T)(b^T S^-1 b)
-        //                  -(Re b)(Re b)^T/tr(S)]
-        //       +lambda(J-1)J(I-Q)(b^T C^-1 b)+lambda J^2(Bb)(Bb)^T.
-        for (int row = 0; row < 3; ++row) {
-            for (int col = 0; col < 3; ++col) {
-                const Pack identity = row == col ? one : zero;
-                const Pack RRT = R[row][0] * R[col][0] + R[row][1] * R[col][1];
-                const Pack Q = B[row][0] * F[col][0] + B[row][1] * F[col][1];
-                const Pack dR = (identity - RRT) * b_s_b + Reb[row] * Reb[col] * inv_traceS;
-                const Pack H = twice_mu * (identity * b_norm2 - dR)
-                    + volumetric * (identity - Q) * b_c_b + lambda_J2 * Bb[row] * Bb[col];
-                (area * H).store(H_data[row][col]);
+            const auto& input = inputs[begin + std::min(lane,count-1)];
+            mass[lane] = input.mass;
+            pinned[lane] = input.pin_target ? 1.0 : 0.0;
+            for (int axis = 0; axis < 3; ++axis) {
+                position[axis][lane] = input.position[axis];
+                predicted[axis][lane] = input.predicted_position[axis];
+                target[axis][lane] = input.pin_target ? (*input.pin_target)[axis] : input.position[axis];
             }
         }
-
-        // Scatter only into this active vertex, in exactly the original
-        // incident order. No shared element output or atomic addition is used.
+        const Pack m = Pack::load(mass), minus_m = Pack(-1.0) * m;
+        const Pack has_pin = equal(Pack::load(pinned), one);
+        const Pack masked_pin_scale = select(has_pin, pin_scale, zero);
+        alignas(32) double g[3][W], diagonal[W];
+        for (int axis = 0; axis < 3; ++axis) {
+            const Pack current = Pack::load(position[axis]);
+            Pack value = zero + m * (current - Pack::load(predicted[axis]));
+            value = value + timestep2 * (minus_m * Pack(gravity[axis]));
+            select(has_pin, value + masked_pin_scale * (current - Pack::load(target[axis])), value).store(g[axis]);
+        }
+        const Pack inertial_hessian = zero + m;
+        select(has_pin, inertial_hessian + masked_pin_scale, inertial_hessian).store(diagonal);
         for (int lane = 0; lane < count; ++lane) {
-            if (fallback[lane]) {
-                const auto [triangle, role] = incident[begin + lane];
-                accumulate_scalar(mesh, positions, triangle, role, rest_shape_grads,
-                                  mu, lambda, dt2, gradient, hessian);
-            } else {
-                for (int row = 0; row < 3; ++row) {
-                    gradient[row] += dt2 * g_data[row][lane];
-                    for (int col = 0; col < 3; ++col)
-                        hessian(row, col) += dt2 * H_data[row][col][lane];
-                }
+            const auto entry = begin + lane;
+            hessians[entry].setZero();
+            for (int axis = 0; axis < 3; ++axis) {
+                gradients[entry][axis] = g[axis][lane];
+                hessians[entry](axis,axis) = diagonal[lane];
             }
         }
     }
 }
 
-// V2 kernels retain the scalar spectral/angle evaluation and arithmetic order.
-// Gathered inputs are transposed locally; independent element lanes evaluate
-// derivatives and return AoS contributions for the caller's ordered reduction.
+namespace {
+
 #if defined(__AVX512F__)
 struct ElementPack {
     using Native = __m512d;
@@ -669,14 +261,6 @@ struct ElementPack {
 using ElementPack = Pack;
 #endif
 
-const char* tile_backend_name() {
-#if defined(__AVX512F__)
-    return "AVX-512 (8 doubles)";
-#else
-    return backend_name();
-#endif
-}
-
 // Match the scalar kernel's fused operations where hardware supports them.
 // The operand order matters: algebraic reassociation changes long trajectories.
 static ElementPack element_multiply_add(ElementPack a, ElementPack b, ElementPack c) {
@@ -690,6 +274,16 @@ static ElementPack element_multiply_add(ElementPack a, ElementPack b, ElementPac
     return a * b + c;
 #endif
 }
+
+template <typename T, std::size_t N>
+static void pad_prepared_lanes(T (&values)[N], int count) {
+    if constexpr (std::is_same_v<T, double>)
+        std::fill(values + count, values + N, values[count - 1]);
+    else
+        for (auto& row : values) pad_prepared_lanes(row, count);
+}
+
+} // namespace
 
 void corotated_derivatives_tile(
     const Vec3* positions, const Mat22* dm_inverse, const double* areas,
@@ -705,8 +299,8 @@ void corotated_derivatives_tile(
         alignas(64) double p[3][2][W], gd[3][W], hd[3][3][W];
         // Layout conversion uses only the already-gathered AoS tile.
         alignas(64) double points[3][3][W], material[2][2][W];
-        for (int lane = 0; lane < W; ++lane) {
-            const std::size_t entry = begin + std::min(lane, count - 1);
+        for (int lane = 0; lane < count; ++lane) {
+            const std::size_t entry = begin + lane;
             for (int vertex = 0; vertex < 3; ++vertex)
                 for (int axis = 0; axis < 3; ++axis)
                     points[vertex][axis][lane] = positions[3*entry+vertex][axis];
@@ -716,8 +310,8 @@ void corotated_derivatives_tile(
         }
         // Preserve the scalar eigensolver and its clamping decisions. Only
         // local tile data are read; the derivative contractions below use SIMD.
-        for (int lane = 0; lane < W; ++lane) {
-            const std::size_t entry = begin + std::min(lane, count - 1);
+        for (int lane = 0; lane < count; ++lane) {
+            const std::size_t entry = begin + lane;
             Mat32 ds;
             Mat22 dm;
             for (int axis = 0; axis < 3; ++axis) {
@@ -747,6 +341,14 @@ void corotated_derivatives_tile(
             area[lane] = areas[entry];
             jd[lane] = cache.J;
             tr[lane] = cache.traceS;
+        }
+        // Fill unused lanes from prepared values without repeating the eigensolve.
+        if (count < W) {
+            pad_prepared_lanes(s, count); pad_prepared_lanes(ci, count);
+            pad_prepared_lanes(r, count); pad_prepared_lanes(b, count);
+            pad_prepared_lanes(f_data, count); pad_prepared_lanes(p, count);
+            pad_prepared_lanes(q, count); pad_prepared_lanes(area, count);
+            pad_prepared_lanes(jd, count); pad_prepared_lanes(tr, count);
         }
         const ElementPack J = ElementPack::load(jd), trace = ElementPack::load(tr), A = ElementPack::load(area);
         const ElementPack volumetric = bulk * (J - one) * J;
@@ -797,7 +399,6 @@ void corotated_derivatives_tile(
     }
 }
 
-
 void bending_derivatives_tile(
     const Vec3* positions, const int* active_nodes, const double* coefficients,
     const double* rest_angles, std::size_t entry_count, double kB,
@@ -810,13 +411,13 @@ void bending_derivatives_tile(
         alignas(64) double c[4][3][W], ca[3][W], cb[3][W], aa[3][W], bb[3][W];
         alignas(64) double X[W],Y[W],theta[W],ell[W],denominator[W],scale[W],roles[W],valid[W];
         alignas(64) double points[4][3][W];
-        for(int lane=0;lane<W;++lane) {
-            const auto e=begin+std::min(lane,count-1);
+        for(int lane=0;lane<count;++lane) {
+            const auto e=begin+lane;
             for(int vertex=0;vertex<4;++vertex)
                 for(int axis=0;axis<3;++axis) points[vertex][axis][lane]=positions[4*e+vertex][axis];
         }
-        for(int lane=0;lane<W;++lane) {
-            const auto e=begin+std::min(lane,count-1);
+        for(int lane=0;lane<count;++lane) {
+            const auto e=begin+lane;
             assert(active_nodes[e] >= 0 && active_nodes[e] < 4);
             HingeDef def;
             for(int vertex=0;vertex<4;++vertex)
@@ -832,6 +433,16 @@ void bending_derivatives_tile(
             X[lane]=cache.X;Y[lane]=cache.Y;theta[lane]=cache.theta-rest_angles[e];
             ell[lane]=cache.ell;denominator[lane]=cache.degenerate?1.0:cache.muA2*cache.muB2;
             scale[lane]=2.0*kB*coefficients[e];roles[lane]=active_nodes[e];valid[lane]=cache.degenerate?0.0:1.0;
+        }
+        // Angle/geometry evaluation is needed only for real hinge entries.
+        if (count < W) {
+            pad_prepared_lanes(c, count);
+            pad_prepared_lanes(ca, count); pad_prepared_lanes(cb, count);
+            pad_prepared_lanes(aa, count); pad_prepared_lanes(bb, count);
+            pad_prepared_lanes(X, count); pad_prepared_lanes(Y, count);
+            pad_prepared_lanes(theta, count); pad_prepared_lanes(ell, count);
+            pad_prepared_lanes(denominator, count); pad_prepared_lanes(scale, count);
+            pad_prepared_lanes(roles, count); pad_prepared_lanes(valid, count);
         }
         std::array<ElementPack,3> mA,mB,ehat,e,A,B,a,b;
         for(int i=0;i<3;++i) {
@@ -882,6 +493,851 @@ void bending_derivatives_tile(
                 gradients[begin+lane][i]=gg[i][lane];
                 for(int j=0;j<3;++j) hessians[begin+lane](i,j)=hh[i][j][lane];
             }
+    }
+}
+
+namespace {
+
+// Contact features use independent lanes in the same hardware pack.
+using ContactElementPack = Pack;
+static ContactElementPack contact_vector_multiply_add(ContactElementPack a, ContactElementPack b, ContactElementPack c) {
+#if defined(__AVX2__) && defined(__FMA__)
+    return ContactElementPack::raw(_mm256_fmadd_pd(a.value, b.value, c.value));
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return ContactElementPack::raw(vfmaq_f64(c.value, a.value, b.value));
+#else
+    return a * b + c;
+#endif
+}
+
+// Arithmetic lanes are independent contacts; no mesh indices enter this layer.
+struct ContactPack {
+    ContactElementPack value;
+    ContactPack() : value(0.0) {}
+    ContactPack(double x) : value(x) {}
+    ContactPack(ContactElementPack x) : value(x) {}
+    static ContactPack load(const double* x) { return ContactElementPack::load(x); }
+    void store(double* x) const { value.store(x); }
+    friend ContactPack operator+(ContactPack a, ContactPack b) { return a.value + b.value; }
+    friend ContactPack operator-(ContactPack a, ContactPack b) { return a.value - b.value; }
+    friend ContactPack operator*(ContactPack a, ContactPack b) { return a.value * b.value; }
+    friend ContactPack operator/(ContactPack a, ContactPack b) { return a.value / b.value; }
+    friend ContactPack operator-(ContactPack a) { return ContactElementPack(-1.0) * a.value; }
+    ContactPack& operator+=(ContactPack b) { value = value + b.value; return *this; }
+    ContactPack& operator-=(ContactPack b) { value = value - b.value; return *this; }
+    ContactPack& operator/=(ContactPack b) { value = value / b.value; return *this; }
+};
+
+static ContactElementPack contact_greater(ContactElementPack a, ContactElementPack b) {
+    return greater(a, b);
+}
+static ContactPack contact_sqrt(ContactPack x) {
+    return sqrt(x.value);
+}
+static ContactPack contact_multiply_add(ContactPack a, ContactPack b, ContactPack c) {
+    return contact_vector_multiply_add(a.value, b.value, c.value);
+}
+// Keep the scalar kernel's rounded products separate from later fused sums.
+// The empty register constraint emits no instructions or memory accesses.
+static ContactPack contact_separate_product(ContactPack a, ContactPack b) {
+    auto result = (a * b).value;
+#if defined(__GNUC__) && (defined(__AVX2__) || defined(__SSE2__))
+    __asm__("" : "+v"(result.value));
+#elif defined(__GNUC__) && defined(__aarch64__)
+    __asm__("" : "+w"(result.value));
+#endif
+    return result;
+}
+// The scalar reduction rounds its xy products before adding the fused z tail.
+static ContactPack contact_ordered_dot(const ContactPack* a, const ContactPack* b) {
+    return contact_multiply_add(a[2], b[2],
+        (ContactPack(0.0) + contact_separate_product(a[0], b[0])) + contact_separate_product(a[1], b[1]));
+}
+
+static ContactPack contact_sign(ContactPack x) {
+    return select(contact_greater(x.value, ContactElementPack(0.0)), ContactElementPack(1.0),
+        select(contact_greater(ContactElementPack(0.0), x.value), ContactElementPack(-1.0), ContactElementPack(0.0)));
+}
+struct ContactVector {
+    ContactPack data[3];
+    ContactPack& operator()(int i) { return data[i]; }
+    const ContactPack& operator()(int i) const { return data[i]; }
+};
+struct ContactMatrix {
+    ContactPack data[3][3];
+    ContactPack& operator()(int i, int j) { return data[i][j]; }
+    const ContactPack& operator()(int i, int j) const { return data[i][j]; }
+};
+struct ContactPacket {
+    ContactVector x[4], separation;
+    ContactPack delta, bp, bpp, sa, sb, sw, query, edge_a;
+};
+
+enum class ContactFeature { Point, Edge, Face, Interior };
+struct PreparedMeshContact {
+    std::array<Vec3, 4> positions;
+    Vec3 gradient_direction, separation;
+    double gradient_scale;
+    double delta, bp, bpp;
+    double sa, sb, sw, query, edge_a;
+    ContactFeature feature;
+    bool active;
+};
+static ContactMatrix contact_point_hessian(const ContactPacket& data) {
+    ContactMatrix H;
+    ContactPack u[3];
+    for (int i = 0; i < 3; ++i) u[i] = (data.x[0](i) - data.x[1](i)) / data.delta;
+    const ContactPack c2 = data.bp / data.delta;
+    for (int k = 0; k < 3; ++k)
+        for (int l = 0; l < 3; ++l)
+    {
+        const ContactPack normal = contact_multiply_add(-u[k], u[l], k == l ? 1.0 : 0.0);
+        const ContactPack left = data.bpp * u[k];
+        // Preserve which product the scalar self block contracts into the sum.
+        H(k,l) = data.query * (k == 1 && l == 1
+            ? contact_multiply_add(c2, normal, left * u[l])
+            : contact_multiply_add(left, u[l], c2 * normal));
+    }
+    return H;
+}
+
+// Use the scalar reference for lanes with poor conditioning or cancellation.
+// Regular lanes evaluate the original derivative expressions below.
+static ContactPack contact_expression_fallback(const ContactPacket& data, ContactFeature feature) {
+    if (feature == ContactFeature::Point) return 0.0;
+    ContactPack a[3], b[3], r[3];
+    for (int i = 0; i < 3; ++i) {
+        r[i] = data.separation(i);
+        a[i] = feature == ContactFeature::Interior
+            ? data.x[1](i) - data.x[0](i) : data.x[2](i) - data.x[1](i);
+        b[i] = feature == ContactFeature::Interior
+            ? data.x[3](i) - data.x[2](i) : data.x[3](i) - data.x[1](i);
+    }
+    const ContactPack A = contact_ordered_dot(a, a);
+    const auto stationarity_bad = [&](const ContactPack* direction, ContactPack length2) {
+        const ContactPack residual = contact_multiply_add(r[2], direction[2],
+            contact_multiply_add(r[1], direction[1], r[0] * direction[0]));
+        const ContactPack bound = ContactPack(1e-24) * data.delta * data.delta * length2;
+        return contact_greater((residual * residual).value, bound.value);
+    };
+    ContactPack fallback;
+    if (feature == ContactFeature::Edge) {
+        ContactPack offset[3];
+        for (int i = 0; i < 3; ++i) offset[i] = data.x[0](i) - data.x[1](i);
+        const ContactPack t = contact_ordered_dot(offset, a) / A;
+        const auto valid = select(contact_greater(A.value, ContactElementPack(0.0)),
+            select(contact_greater(t.value, ContactElementPack(0.0)),
+                contact_greater(ContactElementPack(1.0), t.value), ContactElementPack(0.0)),
+            ContactElementPack(0.0));
+        fallback = select(valid, ContactElementPack(0.0), ContactElementPack(1.0));
+        fallback = select(stationarity_bad(a, A), ContactElementPack(1.0), fallback.value);
+    } else {
+        const ContactPack B = contact_ordered_dot(a, b), C = contact_ordered_dot(b, b);
+        const ContactPack det = contact_multiply_add(A, C, -(B * B));
+        fallback = select(contact_greater(det.value, (ContactPack(1e-8) * A * C).value),
+            ContactElementPack(0.0), ContactElementPack(1.0));
+        fallback = select(stationarity_bad(a, A), ContactElementPack(1.0), fallback.value);
+        fallback = select(stationarity_bad(b, C), ContactElementPack(1.0), fallback.value);
+    }
+    return fallback;
+}
+
+static ContactMatrix contact_edge_hessian(const ContactPacket& data) {
+    const int p = 0, q = 0, requested_dof_count = 1;
+    const int requested_dofs[1] = {0};
+    const ContactPack delta = data.delta, bp = data.bp, bpp = data.bpp;
+    ContactMatrix H;
+    const ContactPack omega[4] = {data.sa, 0.0, 0.0, 0.0};
+    const ContactPack epsilon[4] = {data.sb, 0.0, 0.0, 0.0};
+    const auto& x = data.x[0];
+    const auto& xa = data.x[1];
+    const auto& xb = data.x[2];
+    ContactPack e[3], w[3];
+    for (int i = 0; i < 3; ++i) { e[i] = xb(i) - xa(i); w[i] = x(i) - xa(i); }
+
+    const ContactPack alpha = contact_ordered_dot(w, e), beta = contact_ordered_dot(e, e);
+    const ContactPack t = alpha / beta;
+
+    ContactPack r[3], u[3];
+    for (int i = 0; i < 3; ++i) {
+        r[i] = x(i) - (xa(i) + t * e[i]);
+        u[i] = r[i] / delta;
+    }
+
+    ContactPack t_d[4][3];
+    ContactPack r_d[4][3][3];
+    for (int di = 0; di < requested_dof_count; ++di) {
+        const int pp = requested_dofs[di];
+        for (int k = 0; k < 3; ++k) {
+            const ContactPack alpha_pk = omega[pp] * e[k] + epsilon[pp] * w[k];
+            const ContactPack beta_pk  = 2.0 * epsilon[pp] * e[k];
+            t_d[pp][k] = alpha_pk / beta - alpha * beta_pk / (beta * beta);
+            for (int i = 0; i < 3; ++i) {
+                const ContactPack dik = (i == k) ? 1.0 : 0.0;
+                const ContactPack dpa = data.edge_a;
+                const ContactPack dpx = data.query;
+                const ContactPack q_d = dpa * dik + t_d[pp][k] * e[i] + t * epsilon[pp] * dik;
+                r_d[pp][k][i] = dpx * dik - q_d;
+            }
+        }
+    }
+
+    for (int k = 0; k < 3; ++k) {
+        for (int l = 0; l < 3; ++l) {
+            const ContactPack dkl = (k == l) ? 1.0 : 0.0;
+
+            const ContactPack alpha_pk = omega[p] * e[k] + epsilon[p] * w[k];
+            const ContactPack alpha_ql = omega[q] * e[l] + epsilon[q] * w[l];
+            const ContactPack alpha_pkql =
+                    (omega[p] * epsilon[q] + epsilon[p] * omega[q]) * dkl;
+            const ContactPack beta_pk   = 2.0 * epsilon[p] * e[k];
+            const ContactPack beta_ql   = 2.0 * epsilon[q] * e[l];
+            const ContactPack beta_pkql = 2.0 * epsilon[p] * epsilon[q] * dkl;
+
+            const ContactPack t_pkql = alpha_pkql / beta
+                                 - contact_multiply_add(alpha, beta_pkql, contact_multiply_add(alpha_pk, beta_ql, alpha_ql * beta_pk)) / (beta * beta)
+                                 + 2.0 * alpha * beta_pk * beta_ql / (beta * beta * beta);
+
+            ContactPack ddelta_pk = 0.0, ddelta_ql = 0.0;
+            for (int i = 0; i < 3; ++i) {
+                ddelta_pk += u[i] * r_d[p][k][i];
+                ddelta_ql += u[i] * r_d[q][l][i];
+            }
+
+            ContactPack proj_term = 0.0;
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j) {
+                    const ContactPack dij = (i == j) ? 1.0 : 0.0;
+                    proj_term = contact_multiply_add(contact_multiply_add(-u[i], u[j], dij) * r_d[p][k][i], r_d[q][l][j], proj_term);
+                }
+            }
+            proj_term /= delta;
+
+            ContactPack uq_term = 0.0;
+            for (int i = 0; i < 3; ++i) {
+                const ContactPack dik = (i == k) ? 1.0 : 0.0;
+                const ContactPack dil = (i == l) ? 1.0 : 0.0;
+                const ContactPack q_ipkql = t_pkql * e[i]
+                                     + t_d[p][k] * epsilon[q] * dil
+                                     + t_d[q][l] * epsilon[p] * dik;
+                uq_term += u[i] * q_ipkql;
+            }
+
+            const ContactPack d2delta = proj_term - uq_term;
+            H(k, l) = contact_multiply_add(bpp * ddelta_pk, ddelta_ql, bp * d2delta);
+        }
+    }
+    return H;
+}
+
+// Keep the SIMD coefficient lookup independent of scalar-kernel inlining.
+static constexpr int contact_levi_civita(int i, int j, int k) {
+    if (i == j || j == k || i == k) return 0;
+    return ((i == 0 && j == 1 && k == 2) || (i == 1 && j == 2 && k == 0) || (i == 2 && j == 0 && k == 1)) ? 1 : -1;
+}
+
+static ContactMatrix contact_face_hessian(const ContactPacket& data) {
+    const int p = 0, q = 0, requested_dof_count = 1;
+    const int requested_dofs[1] = {0};
+    const ContactPack delta = data.delta, bp = data.bp, bpp = data.bpp;
+    ContactMatrix H;
+    const auto& x = data.x[0];
+    const auto& x1 = data.x[1];
+    const auto& x2 = data.x[2];
+    const auto& x3 = data.x[3];
+
+    const ContactPack sig_a[4] = {data.sa, 0.0, 0.0, 0.0};
+    const ContactPack sig_b[4] = {data.sb, 0.0, 0.0, 0.0};
+    const ContactPack sig_w[4] = {data.sw, 0.0, 0.0, 0.0};
+
+    ContactPack a[3], b[3], w[3];
+    for (int i = 0; i < 3; ++i) {
+        a[i] = x2(i) - x1(i);
+        b[i] = x3(i) - x1(i);
+        w[i] = x(i)  - x1(i);
+    }
+
+    ContactPack N[3] = {0.0, 0.0, 0.0};
+    for (int i = 0; i < 3; ++i) {
+        for (int m = 0; m < 3; ++m) {
+            for (int n = 0; n < 3; ++n) {
+                N[i] = i < 2
+                    ? N[i] + contact_separate_product(contact_levi_civita(i, m, n) * a[m], b[n])
+                    : contact_multiply_add(contact_levi_civita(i, m, n) * a[m], b[n], N[i]);
+            }
+        }
+    }
+
+    ContactPack eta = 0.0;
+    for (int i = 0; i < 3; ++i) eta = contact_multiply_add(N[i], N[i], eta);
+    eta = contact_sqrt(eta);
+
+    ContactPack n[3];
+    for (int i = 0; i < 3; ++i) n[i] = N[i] / eta;
+
+    const ContactPack psi = contact_ordered_dot(N, w);
+    const ContactPack phi = psi / eta;
+    const ContactPack s_sign = contact_sign(phi);
+
+    ContactPack Nd[4][3][3];
+    for (int di = 0; di < requested_dof_count; ++di) {
+        const int pp = requested_dofs[di];
+        for (int k = 0; k < 3; ++k) {
+            for (int i = 0; i < 3; ++i) {
+                ContactPack val = 0.0;
+                for (int nn = 0; nn < 3; ++nn) val += sig_a[pp] * contact_levi_civita(i, k, nn) * b[nn];
+                for (int m = 0; m < 3; ++m)    val += sig_b[pp] * contact_levi_civita(i, m, k) * a[m];
+                Nd[pp][k][i] = val;
+            }
+        }
+    }
+
+    ContactPack eta_d[4][3], psi_d[4][3], phi_d[4][3];
+    for (int di = 0; di < requested_dof_count; ++di) {
+        const int pp = requested_dofs[di];
+        for (int k = 0; k < 3; ++k) {
+            ContactPack eta_pk = 0.0;
+            for (int i = 0; i < 3; ++i) eta_pk += n[i] * Nd[pp][k][i];
+            eta_d[pp][k] = eta_pk;
+
+            ContactPack psi_pk = 0.0;
+            for (int i = 0; i < 3; ++i) psi_pk += Nd[pp][k][i] * w[i];
+            psi_pk += sig_w[pp] * N[k];
+            psi_d[pp][k] = psi_pk;
+
+            phi_d[pp][k] = psi_pk / eta - psi * eta_pk / (eta * eta);
+        }
+    }
+
+    for (int k = 0; k < 3; ++k) {
+        for (int l = 0; l < 3; ++l) {
+            const ContactPack coeff_N2 = sig_a[p] * sig_b[q] - sig_b[p] * sig_a[q];
+
+            ContactPack nN2 = 0.0;
+            for (int i = 0; i < 3; ++i) nN2 += n[i] * coeff_N2 * contact_levi_civita(i, k, l);
+
+            ContactPack proj_NN = 0.0;
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j) {
+                    const ContactPack dij = (i == j) ? 1.0 : 0.0;
+                    proj_NN = contact_multiply_add(contact_multiply_add(-n[i], n[j], dij) * Nd[p][k][i], Nd[q][l][j], proj_NN);
+                }
+            }
+
+            const ContactPack eta_pkql = nN2 + proj_NN / eta;
+
+            ContactPack psi_pkql = 0.0;
+            for (int i = 0; i < 3; ++i) psi_pkql += coeff_N2 * contact_levi_civita(i, k, l) * w[i];
+            psi_pkql += sig_w[q] * Nd[p][k][l];
+            psi_pkql += sig_w[p] * Nd[q][l][k];
+
+            const ContactPack phi_pkql = psi_pkql / eta
+                                  - contact_multiply_add(psi, eta_pkql, contact_multiply_add(psi_d[p][k], eta_d[q][l], psi_d[q][l] * eta_d[p][k])) / (eta * eta)
+                                  + 2.0 * psi * eta_d[p][k] * eta_d[q][l] / (eta * eta * eta);
+
+            H(k, l) = contact_multiply_add(bpp * phi_d[p][k], phi_d[q][l], s_sign * bp * phi_pkql);
+        }
+    }
+    return H;
+}
+
+static ContactMatrix contact_interior_hessian(const ContactPacket& data) {
+    const int p = 0, q = 0, requested_dof_count = 1;
+    const int requested_dofs[1] = {0};
+    const ContactPack delta = data.delta, bp = data.bp, bpp = data.bpp;
+    ContactMatrix H;
+    const auto& x1 = data.x[0];
+    const auto& x2 = data.x[1];
+    const auto& x3 = data.x[2];
+    const auto& x4 = data.x[3];
+
+    const ContactPack sig_a[4] = {data.sa, 0.0, 0.0, 0.0};
+    const ContactPack sig_b[4] = {data.sb, 0.0, 0.0, 0.0};
+    const ContactPack sig_c[4] = {data.sw, 0.0, 0.0, 0.0};
+
+    ContactPack a[3], b[3], c[3];
+    for (int i = 0; i < 3; ++i) {
+        a[i] = x2(i) - x1(i);
+        b[i] = x4(i) - x3(i);
+        c[i] = x1(i) - x3(i);
+    }
+
+    const ContactPack A = contact_ordered_dot(a, a), B = contact_ordered_dot(a, b),
+        C = contact_ordered_dot(b, b), D = contact_ordered_dot(a, c), E = contact_ordered_dot(b, c);
+
+    const ContactPack Delta = contact_multiply_add(A, C, -(B * B));
+    const ContactPack nu    = contact_multiply_add(B, E, -(C * D));
+    const ContactPack zeta  = contact_multiply_add(A, E, -(B * D));
+    const ContactPack s_val = nu / Delta;
+    const ContactPack t_val = zeta / Delta;
+
+    ContactPack Ad[4][3], Bd[4][3], Cd[4][3], Dd[4][3], Ed[4][3];
+    for (int di = 0; di < requested_dof_count; ++di) {
+        const int pp = requested_dofs[di];
+        for (int k = 0; k < 3; ++k) {
+            Ad[pp][k] = 2.0 * sig_a[pp] * a[k];
+            Bd[pp][k] = sig_a[pp] * b[k] + sig_b[pp] * a[k];
+            Cd[pp][k] = 2.0 * sig_b[pp] * b[k];
+            Dd[pp][k] = sig_a[pp] * c[k] + sig_c[pp] * a[k];
+            Ed[pp][k] = sig_b[pp] * c[k] + sig_c[pp] * b[k];
+        }
+    }
+
+    ContactPack nu_d[4][3], zeta_d[4][3], Delta_d[4][3];
+    for (int di = 0; di < requested_dof_count; ++di) {
+        const int pp = requested_dofs[di];
+        for (int k = 0; k < 3; ++k) {
+            nu_d[pp][k] = contact_multiply_add(Bd[pp][k], E, B * Ed[pp][k]);
+            nu_d[pp][k] = contact_multiply_add(-Cd[pp][k], D, nu_d[pp][k]);
+            nu_d[pp][k] = contact_multiply_add(-C, Dd[pp][k], nu_d[pp][k]);
+            zeta_d[pp][k] = k < 2
+                ? contact_multiply_add(A, Ed[pp][k], Ad[pp][k] * E)
+                : contact_multiply_add(Ad[pp][k], E, A * Ed[pp][k]);
+            zeta_d[pp][k] = contact_multiply_add(-Bd[pp][k], D, zeta_d[pp][k]);
+            zeta_d[pp][k] = contact_multiply_add(-B, Dd[pp][k], zeta_d[pp][k]);
+            Delta_d[pp][k] = k < 2
+                ? contact_multiply_add(A, Cd[pp][k], Ad[pp][k] * C)
+                : contact_multiply_add(Ad[pp][k], C, A * Cd[pp][k]);
+            Delta_d[pp][k] = contact_multiply_add(-2.0 * B, Bd[pp][k], Delta_d[pp][k]);
+        }
+    }
+
+    ContactPack s_d[4][3], t_d[4][3];
+    for (int di = 0; di < requested_dof_count; ++di) {
+        const int pp = requested_dofs[di];
+        for (int k = 0; k < 3; ++k) {
+            s_d[pp][k] = nu_d[pp][k] / Delta   - nu   * Delta_d[pp][k] / (Delta * Delta);
+            t_d[pp][k] = zeta_d[pp][k] / Delta - zeta * Delta_d[pp][k] / (Delta * Delta);
+        }
+    }
+
+    ContactPack r_vec[3], u[3];
+    for (int i = 0; i < 3; ++i) {
+        r_vec[i] = (x1(i) + s_val * a[i]) - (x3(i) + t_val * b[i]);
+        u[i] = r_vec[i] / delta;
+    }
+
+    ContactPack p_d[4][3][3], q_d_arr[4][3][3], r_d[4][3][3];
+    for (int di = 0; di < requested_dof_count; ++di) {
+        const int pp = requested_dofs[di];
+        for (int k = 0; k < 3; ++k) {
+            for (int i = 0; i < 3; ++i) {
+                const ContactPack dik = (i == k) ? 1.0 : 0.0;
+                const ContactPack dp0 = data.query;
+                const ContactPack dp2 = data.edge_a;
+                p_d[pp][k][i]     = dp0 * dik + s_d[pp][k] * a[i] + s_val * sig_a[pp] * dik;
+                q_d_arr[pp][k][i] = dp2 * dik + t_d[pp][k] * b[i] + t_val * sig_b[pp] * dik;
+                r_d[pp][k][i]     = p_d[pp][k][i] - q_d_arr[pp][k][i];
+            }
+        }
+    }
+
+    for (int k = 0; k < 3; ++k) {
+        for (int l = 0; l < 3; ++l) {
+            const ContactPack dkl = (k == l) ? 1.0 : 0.0;
+
+            const ContactPack A_pkql = 2.0 * sig_a[p] * sig_a[q] * dkl;
+            const ContactPack B_pkql =
+                    (sig_a[p] * sig_b[q] + sig_b[p] * sig_a[q]) * dkl;
+            const ContactPack C_pkql = 2.0 * sig_b[p] * sig_b[q] * dkl;
+            const ContactPack D_pkql =
+                    (sig_a[p] * sig_c[q] + sig_c[p] * sig_a[q]) * dkl;
+            const ContactPack E_pkql =
+                    (sig_b[p] * sig_c[q] + sig_c[p] * sig_b[q]) * dkl;
+
+            ContactPack nu_pkql = contact_multiply_add(B_pkql, E, Bd[p][k] * Ed[q][l]);
+            nu_pkql = contact_multiply_add(Bd[q][l], Ed[p][k], nu_pkql);
+            nu_pkql = contact_multiply_add(B, E_pkql, nu_pkql);
+            nu_pkql = contact_multiply_add(-C_pkql, D, nu_pkql);
+            nu_pkql = contact_multiply_add(-Cd[p][k], Dd[q][l], nu_pkql);
+            nu_pkql = contact_multiply_add(-Cd[q][l], Dd[p][k], nu_pkql);
+            nu_pkql = contact_multiply_add(-C, D_pkql, nu_pkql);
+            ContactPack Delta_pkql = contact_multiply_add(A_pkql, C, Ad[p][k] * Cd[q][l]);
+            Delta_pkql = contact_multiply_add(Ad[q][l], Cd[p][k], Delta_pkql);
+            Delta_pkql = contact_multiply_add(A, C_pkql, Delta_pkql);
+            Delta_pkql -= 2.0 * contact_multiply_add(Bd[p][k], Bd[q][l], B * B_pkql);
+            ContactPack zeta_pkql = contact_multiply_add(A_pkql, E, Ad[p][k] * Ed[q][l]);
+            zeta_pkql = contact_multiply_add(Ad[q][l], Ed[p][k], zeta_pkql);
+            zeta_pkql = contact_multiply_add(A, E_pkql, zeta_pkql);
+            zeta_pkql = contact_multiply_add(-B_pkql, D, zeta_pkql);
+            zeta_pkql = contact_multiply_add(-Bd[p][k], Dd[q][l], zeta_pkql);
+            zeta_pkql = contact_multiply_add(-Bd[q][l], Dd[p][k], zeta_pkql);
+            zeta_pkql = contact_multiply_add(-B, D_pkql, zeta_pkql);
+
+            const ContactPack s_pkql = nu_pkql / Delta
+                                - contact_multiply_add(nu, Delta_pkql, contact_multiply_add(nu_d[p][k], Delta_d[q][l], nu_d[q][l] * Delta_d[p][k])) / (Delta * Delta)
+                                + 2.0 * nu * Delta_d[p][k] * Delta_d[q][l] / (Delta * Delta * Delta);
+            const ContactPack t_pkql = zeta_pkql / Delta
+                                - contact_multiply_add(zeta, Delta_pkql, contact_multiply_add(zeta_d[p][k], Delta_d[q][l], zeta_d[q][l] * Delta_d[p][k])) / (Delta * Delta)
+                                + 2.0 * zeta * Delta_d[p][k] * Delta_d[q][l] / (Delta * Delta * Delta);
+
+            ContactPack ddelta_pk = 0.0, ddelta_ql = 0.0;
+            for (int i = 0; i < 3; ++i) {
+                ddelta_pk += u[i] * r_d[p][k][i];
+                ddelta_ql += u[i] * r_d[q][l][i];
+            }
+
+            ContactPack proj_term = 0.0;
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j) {
+                    const ContactPack dij = (i == j) ? 1.0 : 0.0;
+                    proj_term = contact_multiply_add(contact_multiply_add(-u[i], u[j], dij) * r_d[p][k][i], r_d[q][l][j], proj_term);
+                }
+            }
+            proj_term /= delta;
+
+            ContactPack ur_term = 0.0;
+            for (int i = 0; i < 3; ++i) {
+                const ContactPack dik = (i == k) ? 1.0 : 0.0;
+                const ContactPack dil = (i == l) ? 1.0 : 0.0;
+                ContactPack p_ipkql = contact_multiply_add(s_pkql, a[i], s_d[p][k] * sig_a[q] * dil);
+                p_ipkql = contact_multiply_add(s_d[q][l] * sig_a[p], dik, p_ipkql);
+                ContactPack q_ipkql = contact_multiply_add(t_pkql, b[i], t_d[p][k] * sig_b[q] * dil);
+                q_ipkql = contact_multiply_add(t_d[q][l] * sig_b[p], dik, q_ipkql);
+                ur_term += u[i] * (p_ipkql - q_ipkql);
+            }
+
+            H(k, l) = contact_multiply_add(bpp * ddelta_pk, ddelta_ql, bp * (proj_term + ur_term));
+        }
+    }
+    return H;
+}
+static void prepare_point(PreparedMeshContact& out, const MeshContactInput& input,
+                          int first, int second) {
+    out.feature = ContactFeature::Point;
+    out.positions[0] = input.positions[first];
+    out.positions[1] = input.positions[second];
+    out.query = input.role == first || input.role == second ? 1.0 : 0.0;
+}
+static void prepare_edge(PreparedMeshContact& out, const MeshContactInput& input,
+                         int query, int first, int second) {
+    out.feature = ContactFeature::Edge;
+    out.positions[0] = input.positions[query];
+    out.positions[1] = input.positions[first];
+    out.positions[2] = input.positions[second];
+    out.query = input.role == query ? 1.0 : 0.0;
+    out.edge_a = input.role == first ? 1.0 : 0.0;
+    out.sa = out.query - out.edge_a;
+    out.sb = input.role == second ? 1.0 : -out.edge_a;
+}
+
+} // namespace
+
+void mesh_contact_derivatives_tile(const MeshContactInput* inputs, std::size_t count,
+    double d_hat, double k_barrier, double friction, double dt, double eps_v,
+    MeshContactOutput* outputs, unsigned char* derivative_active) {
+    assert(count <= contact_tile_width);
+    if (derivative_active) std::fill(derivative_active, derivative_active + count, 0);
+    std::array<PreparedMeshContact, contact_tile_width> prepared;
+    std::optional<std::array<FrozenFrictionContact, contact_tile_width>> frozen;
+    if (friction != 0.0) frozen.emplace();
+    std::array<int, contact_tile_width> roles;
+    for (std::size_t e = 0; e < count; ++e) {
+        outputs[e].gradient.setZero();
+        outputs[e].hessian.setZero();
+        outputs[e].friction_gradient.setZero();
+        outputs[e].friction_hessian.setZero();
+        const auto& input = inputs[e];
+        const auto& x = input.positions;
+        const int role = input.role;
+        if (role < 0 || role > 3) throw std::invalid_argument("SIMD contact: role must be in [0, 3].");
+        roles[e] = role;
+        auto& out = prepared[e];
+        out.active = false;
+        out.feature = ContactFeature::Point;
+        out.sa = out.sb = out.sw = out.query = out.edge_a = 0.0;
+        if (!input.segment_segment) {
+            const auto evaluation = make_node_triangle_contact_evaluation(x, d_hat,
+                friction != 0.0 ? k_barrier : 1.0);
+            if (friction != 0.0)
+                (*frozen)[e] = make_node_triangle_frozen_friction_contact(x, input.previous_positions,
+                    evaluation, dt, eps_v);
+            if (!evaluation.active) continue;
+            const auto& dr = evaluation.dr;
+            out.positions = x;
+            out.active = true; out.delta = dr.distance;
+            out.bp = evaluation.b_prime; out.bpp = evaluation.b_double_prime;
+            const auto weights = friction != 0.0 && (*frozen)[e].active
+                ? (*frozen)[e].weights
+                : node_triangle_contact_weights(x[0], x[1], x[2], x[3], 1e-12, &dr);
+            out.separation = x[0] - dr.closest_point;
+            auto region = dr.region;
+            if (region == NodeTriangleRegion::FaceInterior) out.separation = dr.phi * dr.normal;
+            if (region == NodeTriangleRegion::DegenerateTriangle) {
+                if (weights[1] == -1.0) region = NodeTriangleRegion::Vertex1;
+                else if (weights[2] == -1.0) region = NodeTriangleRegion::Vertex2;
+                else if (weights[3] == -1.0) region = NodeTriangleRegion::Vertex3;
+                else if (weights[3] == 0.0) region = NodeTriangleRegion::Edge12;
+                else if (weights[1] == 0.0) region = NodeTriangleRegion::Edge23;
+                else region = NodeTriangleRegion::Edge31;
+            }
+            if (region == NodeTriangleRegion::FaceInterior) {
+                out.feature = ContactFeature::Face;
+                out.sa = role == 2 ? 1.0 : (role == 1 ? -1.0 : 0.0);
+                out.sb = role == 3 ? 1.0 : (role == 1 ? -1.0 : 0.0);
+                out.sw = role == 0 ? 1.0 : (role == 1 ? -1.0 : 0.0);
+                const double sign = dr.phi > 0.0 ? 1.0 : (dr.phi < 0.0 ? -1.0 : 0.0);
+                out.gradient_scale = (out.bp * sign) * weights[role];
+                out.gradient_direction = dr.normal;
+            } else {
+                out.gradient_scale = out.bp * weights[role];
+                for (int i = 0; i < 3; ++i)
+                    out.gradient_direction[i] = (x[0][i] - dr.closest_point[i]) / dr.distance;
+                switch (region) {
+                    case NodeTriangleRegion::Edge12: prepare_edge(out,input,0,1,2); break;
+                    case NodeTriangleRegion::Edge23: prepare_edge(out,input,0,2,3); break;
+                    case NodeTriangleRegion::Edge31: prepare_edge(out,input,0,3,1); break;
+                    case NodeTriangleRegion::Vertex1: prepare_point(out,input,0,1); break;
+                    case NodeTriangleRegion::Vertex2: prepare_point(out,input,0,2); break;
+                    case NodeTriangleRegion::Vertex3: prepare_point(out,input,0,3); break;
+                    default: break;
+                }
+            }
+        } else {
+            const auto evaluation = make_segment_segment_contact_evaluation(x, d_hat,
+                friction != 0.0 ? k_barrier : 1.0);
+            if (friction != 0.0)
+                (*frozen)[e] = make_segment_segment_frozen_friction_contact(x, input.previous_positions,
+                    evaluation, dt, eps_v);
+            if (!evaluation.active) continue;
+            const auto& dr = evaluation.dr;
+            out.positions = x;
+            out.active = true; out.delta = dr.distance;
+            out.bp = evaluation.b_prime; out.bpp = evaluation.b_double_prime;
+            const auto weights = friction != 0.0 && (*frozen)[e].active
+                ? (*frozen)[e].weights
+                : segment_segment_contact_weights(x[0],x[1],x[2],x[3],1e-12,&dr);
+            out.separation = dr.closest_point_1 - dr.closest_point_2;
+            out.gradient_scale = out.bp * weights[role];
+            for (int i = 0; i < 3; ++i)
+                out.gradient_direction[i] = (dr.closest_point_1[i] - dr.closest_point_2[i]) / dr.distance;
+            auto region = dr.region;
+            if (region == SegmentSegmentRegion::ParallelSegments) {
+                const bool s0 = dr.s <= 1e-14, s1 = dr.s >= 1.0-1e-14;
+                const bool t0 = dr.t <= 1e-14, t1 = dr.t >= 1.0-1e-14;
+                if (s0 && t0) region = SegmentSegmentRegion::Corner_s0t0;
+                else if (s0 && t1) region = SegmentSegmentRegion::Corner_s0t1;
+                else if (s1 && t0) region = SegmentSegmentRegion::Corner_s1t0;
+                else if (s1 && t1) region = SegmentSegmentRegion::Corner_s1t1;
+                else if (s0) region = SegmentSegmentRegion::Edge_s0;
+                else if (s1) region = SegmentSegmentRegion::Edge_s1;
+                else if (t0) region = SegmentSegmentRegion::Edge_t0;
+                else if (t1) region = SegmentSegmentRegion::Edge_t1;
+                else {
+                    const auto value = segment_segment_barrier_self_gradient_and_hessian(
+                        x[0],x[1],x[2],x[3],role,evaluation);
+                    outputs[e].gradient=value.first;outputs[e].hessian=value.second;
+                    if (derivative_active) derivative_active[e] = 1;
+                    out.active=false;continue;
+                }
+            }
+            switch (region) {
+                case SegmentSegmentRegion::Corner_s0t0: prepare_point(out,input,0,2); break;
+                case SegmentSegmentRegion::Corner_s0t1: prepare_point(out,input,0,3); break;
+                case SegmentSegmentRegion::Corner_s1t0: prepare_point(out,input,1,2); break;
+                case SegmentSegmentRegion::Corner_s1t1: prepare_point(out,input,1,3); break;
+                case SegmentSegmentRegion::Edge_s0: prepare_edge(out,input,0,2,3); break;
+                case SegmentSegmentRegion::Edge_s1: prepare_edge(out,input,1,2,3); break;
+                case SegmentSegmentRegion::Edge_t0: prepare_edge(out,input,2,0,1); break;
+                case SegmentSegmentRegion::Edge_t1: prepare_edge(out,input,3,0,1); break;
+                case SegmentSegmentRegion::Interior:
+                    out.feature=ContactFeature::Interior;
+                    out.sa=role==1?1.0:(role==0?-1.0:0.0);
+                    out.sb=role==3?1.0:(role==2?-1.0:0.0);
+                    out.sw=role==0?1.0:(role==2?-1.0:0.0);
+                    out.query=role==0?1.0:0.0;out.edge_a=role==2?1.0:0.0;
+                    break;
+                default: break;
+            }
+        }
+    }
+    for (std::size_t e = 0; e < count; ++e) {
+        auto& value = prepared[e];
+        if (!value.active) continue;
+        if (value.feature == ContactFeature::Point && value.query == 0.0) value.active = false;
+        if (value.feature == ContactFeature::Edge && value.sa == 0.0 && value.sb == 0.0) value.active = false;
+        if (derivative_active && value.active) derivative_active[e] = 1;
+    }
+    constexpr int W=ContactElementPack::width;
+    for (auto feature : {ContactFeature::Point, ContactFeature::Edge, ContactFeature::Face, ContactFeature::Interior}) {
+        std::array<std::size_t,contact_tile_width> indices;
+        std::size_t entries=0;
+        for (std::size_t e=0;e<count;++e)
+            if (prepared[e].active && prepared[e].feature==feature) indices[entries++]=e;
+        for (std::size_t begin=0;begin<entries;begin+=W) {
+            const int active=static_cast<int>(std::min<std::size_t>(W,entries-begin));
+            alignas(64) double x[4][3][W],parameters[8][W],direction[3][W],scale[W],separation[3][W];
+            for (int lane=0;lane<W;++lane) {
+                const auto& record=prepared[indices[begin+std::min(lane,active-1)]];
+                for(int v=0;v<4;++v) for(int axis=0;axis<3;++axis) x[v][axis][lane]=record.positions[v][axis];
+                const double fields[]={record.delta,record.bp,record.bpp,record.sa,record.sb,record.sw,record.query,record.edge_a};
+                for(int f=0;f<8;++f) parameters[f][lane]=fields[f];
+                for(int axis=0;axis<3;++axis) direction[axis][lane]=record.gradient_direction[axis];
+                scale[lane]=record.gradient_scale;
+                for(int axis=0;axis<3;++axis)separation[axis][lane]=record.separation[axis];
+            }
+            ContactPacket packet;
+            for(int axis=0;axis<3;++axis)packet.separation(axis)=ContactPack::load(separation[axis]);
+            for(int v=0;v<4;++v) for(int axis=0;axis<3;++axis) packet.x[v](axis)=ContactPack::load(x[v][axis]);
+            packet.delta=ContactPack::load(parameters[0]);packet.bp=ContactPack::load(parameters[1]);packet.bpp=ContactPack::load(parameters[2]);
+            packet.sa=ContactPack::load(parameters[3]);packet.sb=ContactPack::load(parameters[4]);packet.sw=ContactPack::load(parameters[5]);
+            packet.query=ContactPack::load(parameters[6]);packet.edge_a=ContactPack::load(parameters[7]);
+            ContactMatrix H;
+            switch (feature) {
+                case ContactFeature::Point: H = contact_point_hessian(packet); break;
+                case ContactFeature::Edge: H = contact_edge_hessian(packet); break;
+                case ContactFeature::Face: H = contact_face_hessian(packet); break;
+                case ContactFeature::Interior: H = contact_interior_hessian(packet); break;
+            }
+            alignas(64) double g[3][W],h[3][3][W],fallback[W];
+            contact_expression_fallback(packet,feature).store(fallback);
+            for(int axis=0;axis<3;++axis) (ContactPack::load(scale)*ContactPack::load(direction[axis])).store(g[axis]);
+            for(int row=0;row<3;++row) for(int col=0;col<3;++col) H(row,col).store(h[row][col]);
+            for(int lane=0;lane<active;++lane) {
+                auto& out=outputs[indices[begin+lane]];
+                for(int row=0;row<3;++row) {
+                    out.gradient[row]=g[row][lane];
+                    for(int col=0;col<3;++col) out.hessian(row,col)=h[row][col][lane];
+                }
+                if(fallback[lane]!=0.0 || !out.hessian.allFinite()) {
+                    const auto& input=inputs[indices[begin+lane]];
+                    const auto& p=input.positions;
+                    out.hessian=input.segment_segment
+                        ? segment_segment_barrier_self_gradient_and_hessian(p[0],p[1],p[2],p[3],d_hat,input.role).second
+                        : node_triangle_barrier_self_gradient_and_hessian(p[0],p[1],p[2],p[3],d_hat,input.role).second;
+                }
+            }
+        }
+    }
+    if (friction != 0.0) {
+        std::array<Vec3,contact_tile_width> gradients;
+        std::array<Mat33,contact_tile_width> hessians;
+        friction_derivatives_tile(frozen->data(),roles.data(),count,friction,dt*dt,gradients.data(),hessians.data());
+        for(std::size_t e=0;e<count;++e) {
+            outputs[e].friction_gradient=gradients[e];outputs[e].friction_hessian=hessians[e];
+            if (derivative_active && !derivative_active[e] && (*frozen)[e].active) {
+                // Preserve nonzero and exceptional friction outputs, including
+                // a possible nonfinite intermediate at a zero-weight role.
+                if ((*frozen)[e].weights[roles[e]] != 0.0
+                    || !(gradients[e].array() == 0.0).all()
+                    || !(hessians[e].array() == 0.0).all())
+                    derivative_active[e] = 1;
+            }
+        }
+    }
+}
+
+void friction_derivatives_tile(const FrozenFrictionContact* contacts, const int* roles,
+    std::size_t count, double friction, double dt2, Vec3* gradients, Mat33* hessians) {
+    assert(count <= contact_tile_width);
+    constexpr int W=ContactElementPack::width;
+    for(std::size_t begin=0;begin<count;begin+=W) {
+        const int active=static_cast<int>(std::min<std::size_t>(W,count-begin));
+        alignas(64) double slips[W],eps[W],normal[W],weights[W],u[3][W],projector[3][3][W];
+        for(int lane=0;lane<W;++lane) {
+            const std::size_t entry=begin+std::min(lane,active-1);
+            const auto& c=contacts[entry];
+            if(roles[entry]<0 || roles[entry]>=4)
+                throw std::invalid_argument("frozen friction: role index must be in [0, 3].");
+            const bool on=c.active && friction!=0.0 && dt2!=0.0;
+            if(!std::isfinite(friction) || friction<0 || !std::isfinite(dt2) || dt2<0
+                || (on && (!(c.eps_u>0) || !std::isfinite(c.eps_u)
+                    || !(c.normal_force>0) || !std::isfinite(c.normal_force)
+                    || !c.tangential_displacement.allFinite()))) {
+                // Preserve the scalar API's validation and exception type.
+                (void)frozen_friction_role_gradient_and_hessian(c,roles[entry],friction,dt2);
+            }
+            const double slip=on?c.tangential_displacement.norm():0.0;
+            if(!std::isfinite(slip)) throw std::runtime_error("frozen friction: slip is not finite.");
+            slips[lane]=slip;eps[lane]=on?c.eps_u:1.0;normal[lane]=on?c.normal_force:0.0;
+            weights[lane]=c.weights[roles[entry]];
+            for(int i=0;i<3;++i) {
+                u[i][lane]=on?c.tangential_displacement[i]:0.0;
+                for(int j=0;j<3;++j) projector[i][j][lane]=on?c.projector(i,j):0.0;
+            }
+        }
+        const ContactElementPack zero(0.0),one(1.0),two(2.0);
+        const auto slip=ContactElementPack::load(slips),epsilon=ContactElementPack::load(eps);
+        const auto smooth=contact_greater(epsilon,slip);
+        const auto safe_slip=select(smooth,one,slip);
+        const auto mollifier=select(smooth,two/epsilon-slip/(epsilon*epsilon),one/safe_slip);
+        const auto load=ContactElementPack::load(normal);
+        const auto common=select(contact_greater(load,zero),ContactElementPack(dt2*friction),zero);
+        const auto scale=common*load*mollifier;
+        alignas(64) double scale_data[W],g[3][W],H[3][3][W];
+        scale.store(scale_data);
+        for(int lane=0;lane<active;++lane) {
+            if(!std::isfinite(scale_data[lane]))
+                throw std::runtime_error("frozen friction: derivative scale is not finite.");
+            if(scale_data[lane]!=0.0 && !contacts[begin+lane].projector.allFinite())
+                throw std::invalid_argument("frozen friction: contact data must be finite.");
+        }
+        const auto nonzero=contact_greater(scale,zero);
+        const auto weight=ContactElementPack::load(weights),weight2=weight*weight;
+        for(int i=0;i<3;++i) {
+            (weight*select(nonzero,scale*ContactElementPack::load(u[i]),zero)).store(g[i]);
+            for(int j=0;j<3;++j)
+                (weight2*select(nonzero,scale*ContactElementPack::load(projector[i][j]),zero)).store(H[i][j]);
+        }
+        for(int lane=0;lane<active;++lane) for(int i=0;i<3;++i) {
+            gradients[begin+lane][i]=g[i][lane];
+            for(int j=0;j<3;++j) hessians[begin+lane](i,j)=H[i][j][lane];
+        }
+    }
+}
+
+void sdf_derivatives_tile(const SDFEvaluation* evaluations, std::size_t count,
+    double stiffness, double epsilon, Vec3* gradients, Mat33* hessians, bool include_curvature) {
+    assert(count <= tile_width);
+    constexpr int W=ContactElementPack::width;
+    for(std::size_t begin=0;begin<count;begin+=W) {
+        const int active=static_cast<int>(std::min<std::size_t>(W,count-begin));
+        alignas(64) double phi[W],normal[3][W],curvature[3][3][W];
+        bool fallback[W]{};
+        for(int lane=0;lane<W;++lane) {
+            const auto& s=evaluations[begin+std::min(lane,active-1)];
+            fallback[lane]=!std::isfinite(s.phi) || !std::isfinite(stiffness) || !std::isfinite(epsilon)
+                || !s.grad_phi.allFinite() || (include_curvature && !s.hess_phi.allFinite());
+            phi[lane]=fallback[lane]?0.0:s.phi;
+            for(int i=0;i<3;++i) {
+                normal[i][lane]=fallback[lane]?0.0:s.grad_phi[i];
+                for(int j=0;j<3;++j) curvature[i][j][lane]=!include_curvature || fallback[lane]?0.0:s.hess_phi(i,j);
+            }
+        }
+        const ContactElementPack zero(0.0),one(1.0),two(2.0),four(4.0),k(stiffness);
+        const auto z=ContactElementPack::load(phi);
+        ContactElementPack first,second,enabled;
+        if(epsilon<=0.0) {
+            enabled=contact_greater(zero,z);first=k*z;second=k;
+        } else {
+            const ContactElementPack eps(epsilon);
+            enabled=contact_greater(eps,z);
+            const auto H=select(contact_greater(zero,z),one,select(enabled,(eps-z)/eps,zero));
+            const auto Hp=select(contact_greater(z,zero),select(enabled,zero-one/eps,zero),zero);
+            const auto d=eps-z;
+            first=ContactElementPack(0.5*stiffness)*(Hp*d*d-two*H*d);
+            second=ContactElementPack(0.5*stiffness)*((zero-four*Hp)*d+two*H);
+        }
+        alignas(64) double g[3][W],h[3][3][W];
+        for(int i=0;i<3;++i) {
+            const auto ni=ContactElementPack::load(normal[i]);
+            select(enabled,first*ni,zero).store(g[i]);
+            for(int j=0;j<3;++j) {
+                auto value=second*(ni*ContactElementPack::load(normal[j]));
+                if(include_curvature) value=contact_vector_multiply_add(first,ContactElementPack::load(curvature[i][j]),value);
+                select(enabled,value,zero).store(h[i][j]);
+            }
+        }
+        for(int lane=0;lane<active;++lane) {
+            const std::size_t entry=begin+lane;
+            if(fallback[lane]) {
+                gradients[entry]=sdf_penalty_gradient(evaluations[entry],stiffness,epsilon);
+                hessians[entry]=sdf_penalty_hessian(evaluations[entry],stiffness,epsilon,include_curvature);
+            } else for(int i=0;i<3;++i) {
+                gradients[entry][i]=g[i][lane];
+                for(int j=0;j<3;++j) hessians[entry](i,j)=h[i][j][lane];
+            }
+        }
     }
 }
 

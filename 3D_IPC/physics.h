@@ -53,7 +53,7 @@ struct SimParams {
     bool   use_parallel;
     bool   use_basic_experimental; // select the experimental cloth solver family
     bool   use_basic_experimental_v2; // resolved from use_basic_experimental && use_simd
-    bool   use_simd;             // v2 non-contact cloth energy batching
+    bool   use_simd;             // select v2 SIMD cloth energy/contact assembly
     bool   use_cloth_grid;       // basic cloth only: serial vertices within parallel spatial cells
     bool   cloth_grid_auto_dx;   // enlarge dx from dependencies at each grid rebuild
     double cloth_grid_dx;        // fixed side (must exceed 2*node_box_max), or minimum in auto mode
@@ -556,12 +556,9 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
 namespace physics_detail {
 
 // SIMD applies to cloth energy terms independently of contact settings.
-bool noncontact_energy_simd_enabled(const SimParams& params);
-// Collision-free cloth additionally uses private per-worker batch storage.
-bool private_simd_batches_enabled(const RefMesh& mesh, const SimParams& params);
-
-// Non-owning, active-node membrane contributions in original incident order.
-// Each gradient/Hessian already includes dt^2 and the triangle's rest area.
+bool energy_simd_enabled(const SimParams& params);
+// Non-owning, active-node elasticity contributions in original incident order.
+// Entries include rest area and dt^2.
 // A zero-count view may have null pointers; otherwise both arrays must contain
 // count entries evaluated at the current color's frozen input positions.
 struct MembraneDerivativeView {
@@ -569,6 +566,16 @@ struct MembraneDerivativeView {
     const Mat33* hessians = nullptr;
     std::size_t count = 0;
 };
+
+struct SdfDerivatives {
+    Vec3 gradient = Vec3::Zero(), friction_gradient = Vec3::Zero();
+    Mat33 hessian = Mat33::Zero(), friction_hessian = Mat33::Zero();
+};
+
+// Geometry selection produces AoS SDF evaluations before the SIMD kernels.
+// Normal terms are unweighted; friction terms include dt^2.
+void compute_sdf_derivatives_tile(const SimParams& params, const Vec3* positions,
+    const Vec3* previous_positions, std::size_t count, SdfDerivatives* outputs);
 
 // Solver-only fast path. The enclosing solver entry point must already have
 // validated the friction parameters and previous-position array.
@@ -582,8 +589,8 @@ compute_local_gradient_and_hessian_no_barrier_unchecked(
     const std::vector<ShapeGrads>* rest_shape_grads,
     const std::vector<Vec3>* previous_positions);
 
-// Same solver-only contract as above, but add the supplied membrane blocks
-// instead of reading triangle incidence or recomputing membrane derivatives.
+// Same solver-only contract as above, but add the supplied elasticity blocks
+// instead of reading triangle incidence or recomputing elasticity derivatives.
 // All other energy terms and their accumulation order remain unchanged.
 std::pair<Vec3, Mat33>
 compute_local_gradient_and_hessian_with_stored_membrane_unchecked(
@@ -596,19 +603,21 @@ compute_local_gradient_and_hessian_with_stored_membrane_unchecked(
     const std::vector<Vec3>* previous_positions,
     const MembraneDerivativeView& membrane);
 
-// V2-only unweighted AoS contributions. The caller applies time-step scaling
-// and accumulates each vertex's entries in incident order.
+// V2 AoS derivative spans, consumed in entry order.
 struct SimdDerivativeView {
     const Vec3* gradients = nullptr;
     const Mat33* hessians = nullptr;
     std::size_t count = 0;
 };
 
+// Elasticity/bending entries omit dt^2; an optional single point entry already
+// includes inertia and the time-scaled gravity/pin terms.
 std::pair<Vec3, Mat33> compute_local_simd_v2_derivatives(
     int vi, const RefMesh& mesh, const std::vector<Pin>& pins,
     const SimParams& params, const std::vector<Vec3>& x,
     const std::vector<Vec3>& xhat, const PinMap& pin_map,
-    const SimdDerivativeView& elasticity, const SimdDerivativeView& bending);
+    const SimdDerivativeView& elasticity, const SimdDerivativeView& bending,
+    const SimdDerivativeView* point = nullptr);
 
 } // namespace physics_detail
 

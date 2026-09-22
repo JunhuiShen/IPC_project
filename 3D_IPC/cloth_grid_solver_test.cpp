@@ -1,4 +1,5 @@
 #include "broad_phase.h"
+#include "contact_scheduling.h"
 #include "grid_coloring.h"
 #include "grid_contact_scheduling.h"
 #include "ipc_args.h"
@@ -7,6 +8,8 @@
 #include "parallel_helper.h"
 #include "simulation.h"
 #include "solver.h"
+#include "safe_step.h"
+#include "SIMD.h"
 
 #include <gtest/gtest.h>
 #include <omp.h>
@@ -19,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -1053,6 +1057,510 @@ TEST(BasicSolver, ExperimentalV2MatchesOriginalAcrossContactModesAndGroupedSweep
                 }
             }
         }
+    }
+}
+
+TEST(BasicSolver, SimdInactiveDerivativesPreserveCcdAcrossMaskWords) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+    std::array<ClothScene, 4> scenes;
+    auto& base = scenes[0];
+    build_contact_scene(base, 0.0);
+    base.params.use_cloth_grid = false;
+    base.params.use_basic_experimental = true;
+    base.params.use_parallel = true;
+    base.params.use_ticcd = true;
+    base.params.k_sdf = 1.0;
+    base.params.eps_sdf = .003;
+    base.params.sdf_planes.push_back(PlaneSDF{Vec3(0, -.02, 0), Vec3::UnitY()});
+    base.params.node_box_min = base.params.node_box_max = .1;
+    base.params.max_global_iters = base.params.node_box_update_count = 2;
+    for (std::size_t scene = 1; scene < scenes.size(); ++scene) scenes[scene] = base;
+    const auto initial = base.state.deformed_positions;
+    std::vector<AABB> boxes;
+    for (const auto& point : initial)
+        boxes.emplace_back(point - Vec3::Constant(.1), point + Vec3::Constant(.1));
+    BroadPhase witness;
+    witness.initialize(boxes, base.mesh, base.params.d_hat, BroadPhase::InitializationMode::DeformableSolver);
+    const auto& cache = witness.cache();
+    std::vector<std::vector<int>> contact_adjacency, combined, colors;
+    build_contact_adj(cache, static_cast<int>(initial.size()), contact_adjacency);
+    union_adjacency(build_elastic_adj(base.mesh, base.adjacency, static_cast<int>(initial.size())),
+        contact_adjacency, combined);
+    greedy_color_conflict_graph(combined, colors);
+    for (auto& color : colors)
+        std::stable_sort(color.begin(), color.end(), [&](int a, int b) {
+            return cache.vertex_nt[a].size() + cache.vertex_ss[a].size()
+                > cache.vertex_nt[b].size() + cache.vertex_ss[b].size();
+        });
+    solver_detail::ColoredContactSweep schedule;
+    schedule.prepare(colors, cache);
+    bool mixed_partial_word = false, shared_fem_tiles = false;
+    for (const auto& assignment : schedule.assignments) {
+        if (assignment.vertex < 0) continue;
+        const std::size_t triangles = base.adjacency.at(assignment.vertex).size();
+        const auto hinge = base.mesh.hinge_adj.find(assignment.vertex);
+        const std::size_t hinges = hinge == base.mesh.hinge_adj.end() ? 0 : hinge->second.size();
+        shared_fem_tiles |= assignment.lanes > 1
+            && (triangles + ipc_simd::tile_width - 1) / ipc_simd::tile_width
+                + (hinges + ipc_simd::tile_width - 1) / ipc_simd::tile_width > 1;
+        std::array<ipc_simd::MeshContactInput, ipc_simd::contact_tile_width> inputs;
+        std::array<ipc_simd::MeshContactOutput, ipc_simd::contact_tile_width> outputs;
+        std::array<unsigned char, ipc_simd::contact_tile_width> derivative_active;
+        std::size_t count = 0;
+        const auto& nt = cache.vertex_nt[assignment.vertex];
+        for (int start = assignment.lane * solver_detail::contact_grain; start < assignment.count;
+             start += assignment.lanes * solver_detail::contact_grain) {
+            for (int entry = start; entry < std::min(start + solver_detail::contact_grain, assignment.count); ++entry) {
+                if (entry == 0) continue;
+                auto& input = inputs[count];
+                const std::size_t local = entry - 1;
+                input.segment_segment = local >= nt.size();
+                std::array<int, 4> nodes;
+                if (input.segment_segment) {
+                    const auto& incident = cache.vertex_ss[assignment.vertex][local - nt.size()];
+                    const auto& pair = cache.ss_pairs[incident.pair_index];
+                    nodes = {pair.v[0], pair.v[1], pair.v[2], pair.v[3]};
+                    input.role = incident.dof;
+                } else {
+                    const auto& incident = nt[local];
+                    const auto& pair = cache.nt_pairs[incident.pair_index];
+                    nodes = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+                    input.role = incident.dof;
+                }
+                for (int node = 0; node < 4; ++node) input.positions[node] = initial[nodes[node]];
+                const auto& x = input.positions;
+                const double d2 = base.params.d_hat * base.params.d_hat;
+                if (!(input.segment_segment ? segment_aabbs_within_distance(x[0], x[1], x[2], x[3], d2)
+                                             : node_triangle_aabbs_within_distance(x[0], x[1], x[2], x[3], d2))) continue;
+                if (++count == ipc_simd::contact_tile_width) {
+                    ipc_simd::mesh_contact_derivatives_tile(inputs.data(), count, base.params.d_hat,
+                        base.params.k_barrier, 0.0, base.params.dt(), .01, outputs.data(), derivative_active.data());
+                    const bool any_active = std::any_of(derivative_active.begin(), derivative_active.end(), [](unsigned char value) { return value != 0; });
+                    const bool any_inactive = std::any_of(derivative_active.begin(), derivative_active.end(), [](unsigned char value) { return value == 0; });
+                    mixed_partial_word |= any_active && any_inactive
+                        && entry % solver_detail::contact_grain != solver_detail::contact_grain - 1;
+                    count = 0;
+                }
+            }
+        }
+        if (mixed_partial_word && shared_fem_tiles) break;
+    }
+    ASSERT_TRUE(mixed_partial_word);
+    ASSERT_TRUE(shared_fem_tiles);
+    std::vector<Vec3> predictor;
+    build_xhat(predictor, initial, base.state.velocities, base.params.dt());
+    for (int configuration = 0; configuration < 2; ++configuration) {
+        omp_set_num_threads(configuration ? 4 : 1);
+        for (int method = 0; method < 2; ++method) {
+            auto& scene = scenes[2 * configuration + method];
+            scene.params.use_simd = scene.params.use_basic_experimental_v2 = method != 0;
+            const auto solve = method ? global_gauss_seidel_solver_basic_experimental_v2
+                                     : global_gauss_seidel_solver_basic_experimental;
+            ASSERT_TRUE(solve(scene.mesh, scene.adjacency, scene.pins, scene.params,
+                scene.state.deformed_positions, predictor, scene.state.velocities,
+                scene.broad_phase, "", nullptr).converged);
+        }
+        const auto& reference = scenes[2 * configuration].state.deformed_positions;
+        const auto& actual = scenes[2 * configuration + 1].state.deformed_positions;
+        double movement = 0.0;
+        for (std::size_t node = 0; node < actual.size(); ++node) {
+            ASSERT_TRUE(actual[node].allFinite());
+            EXPECT_LE((actual[node] - reference[node]).cwiseAbs().maxCoeff(), 1e-10) << node;
+            movement += (actual[node] - initial[node]).squaredNorm();
+        }
+        EXPECT_GT(movement, 1e-8);
+    }
+}
+
+TEST(BasicSolver, SimdEnergyFailureJoinsContactWorkersAndRecovers) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+    std::array<ClothScene, 2> scenes;
+    auto& healthy = scenes[1];
+    healthy.params = valid_grid_parameters();
+    auto& params = healthy.params;
+    params.use_cloth_grid = false;
+    params.use_basic_experimental = params.use_basic_experimental_v2 = params.use_simd = true;
+    params.use_parallel = true;
+    params.use_ccd = params.use_ccd_guess = false;
+    params.fps = 100.0;
+    params.substeps = 1;
+    params.mu = 20.0;
+    params.lambda = 25.0;
+    params.density = params.thickness = 1.0;
+    params.gravity = Vec3(0, -.1, 0);
+    params.fixed_iters = true;
+    params.max_global_iters = params.node_box_update_count = 1;
+    params.node_box_min = params.node_box_max = .001;
+    params.d_hat = .01;
+    constexpr int triangles = 18;
+    std::vector<Vec2> material{Vec2::Zero()};
+    healthy.state.deformed_positions.push_back(Vec3::Zero());
+    for (int node = 0; node < triangles; ++node) {
+        const double angle = 2.0 * std::acos(-1.0) * node / triangles;
+        material.emplace_back(std::cos(angle), std::sin(angle));
+        healthy.state.deformed_positions.emplace_back(std::cos(angle), 0, std::sin(angle));
+        healthy.mesh.tris.insert(healthy.mesh.tris.end(), {0, node + 1, (node + 1) % triangles + 1});
+    }
+    healthy.mesh.initialize(material, healthy.state.deformed_positions);
+    healthy.mesh.build_lumped_mass(params.density, params.thickness);
+    healthy.adjacency = build_incident_triangle_map(healthy.mesh.tris);
+    healthy.state.velocities.assign(healthy.state.deformed_positions.size(), Vec3::Zero());
+    std::vector<AABB> boxes;
+    for (const auto& point : healthy.state.deformed_positions)
+        boxes.emplace_back(point - Vec3::Constant(.001), point + Vec3::Constant(.001));
+    BroadPhase witness;
+    witness.initialize(boxes, healthy.mesh, params.d_hat, BroadPhase::InitializationMode::DeformableSolver);
+    std::vector<std::vector<int>> contacts, combined, colors;
+    build_contact_adj(witness.cache(), static_cast<int>(boxes.size()), contacts);
+    union_adjacency(build_elastic_adj(healthy.mesh, healthy.adjacency, static_cast<int>(boxes.size())), contacts, combined);
+    greedy_color_conflict_graph(combined, colors);
+    ASSERT_EQ(colors.front(), (std::vector<int>{0}));
+    solver_detail::ColoredContactSweep schedule;
+    schedule.prepare(colors, witness.cache());
+    ASSERT_EQ(schedule.assignments[1].vertex, 0);
+    ASSERT_EQ(schedule.assignments[1].lane, 1);
+    ASSERT_GT(healthy.adjacency.at(0).size(), ipc_simd::tile_width);
+    scenes[0] = healthy;
+    scenes[0].mesh.Dm_inverse[ipc_simd::tile_width].setConstant(std::numeric_limits<double>::quiet_NaN());
+    const auto initial = healthy.state.deformed_positions;
+    auto& failing = scenes[0];
+    EXPECT_THROW(global_gauss_seidel_solver_basic_experimental_v2(failing.mesh, failing.adjacency,
+        failing.pins, failing.params, failing.state.deformed_positions, initial,
+        failing.state.velocities, failing.broad_phase), std::runtime_error);
+    for (std::size_t node = 0; node < initial.size(); ++node)
+        EXPECT_EQ((failing.state.deformed_positions[node] - initial[node]).norm(), 0.0);
+    SolverResult result;
+    ASSERT_NO_THROW(result = global_gauss_seidel_solver_basic_experimental_v2(healthy.mesh,
+        healthy.adjacency, healthy.pins, healthy.params, healthy.state.deformed_positions,
+        initial, healthy.state.velocities, healthy.broad_phase));
+    EXPECT_TRUE(result.converged);
+    for (const auto& point : healthy.state.deformed_positions) EXPECT_TRUE(point.allFinite());
+}
+
+TEST(BasicSolver, WholeBoxLongStepsMatchScalarForBothPrimitiveTypes) {
+    struct Restore {
+        int threads = omp_get_max_threads(), dynamic = omp_get_dynamic();
+        ~Restore() { omp_set_num_threads(threads); omp_set_dynamic(dynamic); }
+    } restore;
+    omp_set_dynamic(0); omp_set_num_threads(4);
+    RefMesh mesh; DeformedState state; std::vector<Vec2> material;
+    build_square_mesh(mesh, state, material, 1, 1, 2.0, .1, Vec3::Zero());
+    build_square_mesh(mesh, state, material, 1, 1, 2.0, .1, Vec3(.6, 0, .3));
+    const double c = std::sqrt(.5);
+    for (auto& position : state.deformed_positions) {
+        const double x = position.x(), z = position.z();
+        position = Vec3(c * (x - z), 0, c * (x + z));
+    }
+    mesh.build_lumped_mass(1.0, 1.0);
+    const auto adjacency = build_incident_triangle_map(mesh.tris);
+    const auto initial = state.deformed_positions;
+    const std::vector<Vec3> velocity(initial.size(), Vec3::Zero());
+    auto predictor = initial;
+    for (auto& point : predictor) point.y() += .005;
+    SimParams params = SimParams::zeros();
+    params.fps = 100.0; params.substeps = 1;
+    params.use_basic_experimental = params.use_parallel = params.use_ccd = true;
+    params.use_ticcd = params.use_ccd_guess = false;
+    params.fixed_iters = true;
+    params.max_global_iters = params.node_box_update_count = 1;
+    params.node_box_min = params.node_box_max = .01;
+    params.d_hat = .005; params.k_barrier = 1.0;
+    std::vector<AABB> boxes;
+    for (const auto& point : initial)
+        boxes.emplace_back(point - Vec3::Constant(.01), point + Vec3::Constant(.01));
+    BroadPhase witness;
+    witness.initialize(boxes, mesh, params.d_hat, BroadPhase::InitializationMode::DeformableSolver);
+    const auto& cache = witness.cache();
+    int certified_nt = 0, certified_ss = 0;
+    const auto verify = [&](const std::array<int, 4>& nodes, bool segment) {
+        std::array<Vec3, 4> points;
+        std::array<AABB, 4> bounds;
+        for (int node = 0; node < 4; ++node) { points[node] = initial[nodes[node]]; bounds[node] = boxes[nodes[node]]; }
+        return solver_detail::contact_boxes_separated(points, bounds, segment, params.d_hat);
+    };
+    for (const auto& pair : cache.nt_pairs)
+        certified_nt += verify({pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]}, false);
+    for (const auto& pair : cache.ss_pairs)
+        certified_ss += verify({pair.v[0], pair.v[1], pair.v[2], pair.v[3]}, true);
+    ASSERT_GT(certified_nt, 0); ASSERT_GT(certified_ss, 0);
+    std::vector<std::vector<int>> contacts, combined, colors;
+    build_contact_adj(cache, static_cast<int>(initial.size()), contacts);
+    union_adjacency(build_elastic_adj(mesh, adjacency, static_cast<int>(initial.size())), contacts, combined);
+    greedy_color_conflict_graph(combined, colors);
+    solver_detail::ColoredContactSweep schedule; schedule.prepare(colors, cache);
+    ASSERT_TRUE(std::any_of(schedule.assignments.begin(), schedule.assignments.end(),
+        [](const auto& assignment) { return assignment.vertex >= 0; }));
+    std::array<std::vector<Vec3>, 2> result{initial, initial};
+    std::array<BroadPhase, 2> phases;
+    const std::vector<Pin> pins;
+    ASSERT_TRUE(global_gauss_seidel_solver_basic_experimental(mesh, adjacency, pins, params,
+        result[0], predictor, velocity, phases[0]).converged);
+    params.use_simd = params.use_basic_experimental_v2 = true;
+    ASSERT_TRUE(global_gauss_seidel_solver_basic_experimental_v2(mesh, adjacency, pins, params,
+        result[1], predictor, velocity, phases[1]).converged);
+    for (std::size_t node = 0; node < initial.size(); ++node) {
+        ASSERT_TRUE(result[1][node].allFinite());
+        EXPECT_LE((result[1][node] - result[0][node]).cwiseAbs().maxCoeff(), 1e-12);
+        EXPECT_GT((result[1][node] - initial[node]).norm(), params.d_hat / 4.0);
+        EXPECT_TRUE((result[1][node].array() >= boxes[node].min.array()).all());
+        EXPECT_TRUE((result[1][node].array() <= boxes[node].max.array()).all());
+    }
+}
+
+TEST(BasicSolver, UncertainContactBoxesPreserveCrossingCcd) {
+    std::vector<Vec3> points{Vec3(.2, .2, .1), Vec3::Zero(), Vec3::UnitX(), Vec3::UnitY()};
+    std::array<Vec3, 4> current{points[0], points[1], points[2], points[3]};
+    std::array<AABB, 4> boxes;
+    for (int node = 0; node < 4; ++node)
+        boxes[node] = AABB(points[node] - Vec3::Constant(.3), points[node] + Vec3::Constant(.3));
+    ASSERT_FALSE(solver_detail::contact_boxes_separated(current, boxes, false, .01));
+    BroadPhase phase; auto& cache = phase.mutable_cache();
+    cache.node_boxes.assign(boxes.begin(), boxes.end());
+    cache.vertex_nt.resize(4); cache.vertex_ss.resize(4);
+    cache.nt_pairs.push_back({0, {1, 2, 3}});
+    cache.vertex_nt[0].push_back({0, 0});
+    const double fraction = per_vertex_safe_step(phase, points, 0, Vec3(.2, .2, -.1), .9, true, false);
+    EXPECT_GT(fraction, 0.0); EXPECT_LT(fraction, 1.0);
+    EXPECT_GT(points[0].z(), 0.0);
+}
+
+TEST(BasicSolver, ContactBoxCertificatesMatchIndependentCornerBounds) {
+    std::mt19937_64 generator(913721);
+    std::uniform_real_distribution<double> coordinate(-1.0, 1.0);
+    int certified = 0;
+    for (int sample = 0; sample < 512; ++sample) {
+        const bool segment = sample % 2 != 0;
+        const double scale = std::pow(10.0, sample % 7 - 3);
+        const Vec3 offset = sample % 3 ? Vec3::Zero() : Vec3(1e5, -1e5, 1e5);
+        std::array<Vec3, 4> positions;
+        std::array<AABB, 4> boxes;
+        for (int node = 0; node < 4; ++node) {
+            positions[node] = offset + scale * Vec3(coordinate(generator), coordinate(generator), coordinate(generator));
+            const double radius = scale * .002;
+            boxes[node] = AABB(positions[node] - Vec3::Constant(radius), positions[node] + Vec3::Constant(radius));
+        }
+        const double distance = .01 * scale;
+        if (!solver_detail::contact_boxes_separated(positions, boxes, segment, distance)) continue;
+        ++certified;
+        Vec3 direction;
+        if (segment) {
+            const auto nearest = segment_segment_distance(positions[0], positions[1], positions[2], positions[3]);
+            direction = nearest.closest_point_1 - nearest.closest_point_2;
+        } else {
+            direction = positions[0] - node_triangle_distance(positions[0], positions[1], positions[2], positions[3]).closest_point;
+        }
+        direction /= direction.cwiseAbs().maxCoeff();
+        std::array<long double, 4> lower, upper;
+        for (int node = 0; node < 4; ++node) {
+            lower[node] = std::numeric_limits<long double>::infinity();
+            upper[node] = -std::numeric_limits<long double>::infinity();
+            // Enumerate all corners independently of the sign-selected extrema
+            // and double-precision error allowance in the certificate helper.
+            for (int corner = 0; corner < 8; ++corner) {
+                long double projection = 0.0L;
+                for (int axis = 0; axis < 3; ++axis) {
+                    const double value = corner & (1 << axis) ? boxes[node].max[axis] : boxes[node].min[axis];
+                    projection += static_cast<long double>(direction[axis]) * value;
+                }
+                lower[node] = std::min(lower[node], projection);
+                upper[node] = std::max(upper[node], projection);
+            }
+        }
+        const long double first_min = segment ? std::min(lower[0], lower[1]) : lower[0];
+        const long double first_max = segment ? std::max(upper[0], upper[1]) : upper[0];
+        const long double second_min = segment ? std::min(lower[2], lower[3]) : std::min({lower[1], lower[2], lower[3]});
+        const long double second_max = segment ? std::max(upper[2], upper[3]) : std::max({upper[1], upper[2], upper[3]});
+        long double norm_squared = 0.0L;
+        for (int axis = 0; axis < 3; ++axis)
+            norm_squared += static_cast<long double>(direction[axis]) * direction[axis];
+        EXPECT_GT(std::max(first_min - second_max, second_min - first_max),
+            static_cast<long double>(distance) * std::sqrt(norm_squared)) << sample;
+    }
+    EXPECT_GT(certified, 300);
+
+    std::array<Vec3, 4> positions{{Vec3(.2, .2, .3), Vec3::Zero(), Vec3::UnitX(), Vec3::UnitY()}};
+    std::array<AABB, 4> boxes;
+    for (int node = 0; node < 4; ++node)
+        boxes[node] = AABB(positions[node] - Vec3::Constant(.001), positions[node] + Vec3::Constant(.001));
+    ASSERT_TRUE(solver_detail::contact_boxes_separated(positions, boxes, false, .1));
+    for (int invalid = 0; invalid < 5; ++invalid) {
+        auto points = positions;
+        auto bounds = boxes;
+        if (invalid == 0) bounds[0].max = bounds[0].min;
+        if (invalid == 1) bounds[0] = AABB(points[0] - Vec3::Constant(5e-11), points[0] + Vec3::Constant(5e-11));
+        if (invalid == 2) points[0].x() += .01;
+        if (invalid == 3) points[0].z() = std::numeric_limits<double>::quiet_NaN();
+        if (invalid == 4) bounds.fill(AABB(Vec3::Constant(-2.0), Vec3::Constant(2.0)));
+        EXPECT_FALSE(solver_detail::contact_boxes_separated(points, bounds, false, .1)) << invalid;
+    }
+}
+
+TEST(BasicSolver, ContactBoxCertificatesRefreshAfterGeometryAndBoxChanges) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    std::array<ClothScene, 4> scenes;
+    auto& base = scenes[0];
+    base.params = valid_grid_parameters();
+    auto& params = base.params;
+    params.use_cloth_grid = false;
+    params.use_basic_experimental = true;
+    params.use_parallel = true;
+    params.use_ccd = true;
+    params.use_ticcd = false;
+    params.use_ccd_guess = false;
+    params.fps = 1000.0;
+    params.substeps = 1;
+    params.mu = 20.0;
+    params.lambda = 25.0;
+    params.density = params.thickness = 1.0;
+    params.gravity = Vec3(0, -.1, 0);
+    params.fixed_iters = true;
+    params.max_global_iters = 4;
+    params.node_box_update_count = 2;
+    params.node_box_min = params.node_box_max = .00005;
+    params.d_hat = .0001;
+    params.k_barrier = 1.0;
+    std::vector<Vec2> material;
+    for (int strip = 0; strip < 32; ++strip)
+        build_square_mesh(base.mesh, base.state, material, 1, 1, 2.0, .001,
+            Vec3(.006 * strip, 0, .003 * strip));
+    const double c = std::sqrt(.5);
+    for (auto& position : base.state.deformed_positions) {
+        const double x = position.x(), z = position.z();
+        position = Vec3(c * (x - z), 0, c * (x + z));
+    }
+    base.state.velocities.assign(base.state.deformed_positions.size(), Vec3::Zero());
+    base.mesh.build_lumped_mass(params.density, params.thickness);
+    base.adjacency = build_incident_triangle_map(base.mesh.tris);
+    for (std::size_t scene = 1; scene < scenes.size(); ++scene) scenes[scene] = base;
+    const auto initial = base.state.deformed_positions;
+    for (int configuration = 0; configuration < 2; ++configuration) {
+        omp_set_num_threads(configuration ? 4 : 1);
+        for (int phase = 0; phase < 3; ++phase) {
+            SCOPED_TRACE(::testing::Message() << "threads=" << (configuration ? 4 : 1) << " phase=" << phase);
+            auto predictor = initial;
+            if (phase > 0)
+                for (int node = 4; node < 8; ++node) predictor[node] -= .00195 * Vec3(-c, 0, c);
+            for (int method = 0; method < 2; ++method) {
+                auto& scene = scenes[2 * configuration + method];
+                scene.state.deformed_positions = predictor;
+                scene.params.use_simd = scene.params.use_basic_experimental_v2 = method != 0;
+                scene.params.node_box_min = scene.params.node_box_max = phase == 2 ? .001 : .00005;
+                scene.params.d_hat = phase == 2 ? .001 : .0001;
+                const std::array<int, 4> nodes{{4, 0, 3, 2}};
+                std::array<Vec3, 4> points;
+                std::array<AABB, 4> boxes;
+                for (int node = 0; node < 4; ++node) {
+                    points[node] = predictor[nodes[node]];
+                    boxes[node] = AABB(points[node] - Vec3::Constant(scene.params.node_box_max),
+                        points[node] + Vec3::Constant(scene.params.node_box_max));
+                }
+                EXPECT_EQ(solver_detail::contact_boxes_separated(points, boxes, false, scene.params.d_hat), phase == 0);
+                const auto solve = method ? global_gauss_seidel_solver_basic_experimental_v2
+                                         : global_gauss_seidel_solver_basic_experimental;
+                ASSERT_TRUE(solve(scene.mesh, scene.adjacency, scene.pins, scene.params,
+                    scene.state.deformed_positions, predictor, scene.state.velocities, scene.broad_phase,
+                    "", nullptr).converged);
+                bool tracked_pair = false;
+                for (const auto& pair : scene.broad_phase.cache().nt_pairs)
+                    tracked_pair |= pair.node == 4 && pair.tri_v[0] == 0 && pair.tri_v[1] == 3 && pair.tri_v[2] == 2;
+                ASSERT_TRUE(tracked_pair);
+            }
+            const auto& expected = scenes[2 * configuration].state.deformed_positions;
+            const auto& actual = scenes[2 * configuration + 1].state.deformed_positions;
+            for (std::size_t node = 0; node < actual.size(); ++node) {
+                ASSERT_TRUE(actual[node].allFinite());
+                EXPECT_LE((actual[node] - expected[node]).cwiseAbs().maxCoeff(), 1e-10) << node;
+            }
+        }
+    }
+}
+
+TEST(BasicSolver, ExperimentalV2ContactFailureJoinsWorkersAndAllowsAnotherSolve) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    struct Configuration { int threads, clusters; bool split; };
+    const std::array<Configuration, 3> configurations{{{1, 1, false}, {8, 1, true}, {2, 2, false}}};
+    std::array<ClothScene, configurations.size()> scenes;
+    for (std::size_t run = 0; run < configurations.size(); ++run) {
+        const auto configuration = configurations[run];
+        SCOPED_TRACE(::testing::Message() << "threads=" << configuration.threads
+            << " clusters=" << configuration.clusters);
+        omp_set_num_threads(configuration.threads);
+        auto& scene = scenes[run];
+        auto& params = scene.params;
+        params = valid_grid_parameters();
+        params.use_cloth_grid = false;
+        params.use_basic_experimental = true;
+        params.use_basic_experimental_v2 = true;
+        params.use_simd = true;
+        params.use_parallel = true;
+        params.use_ccd = false;
+        params.use_ccd_guess = false;
+        params.fps = 30.0;
+        params.substeps = 1;
+        params.mu = 20.0;
+        params.lambda = 25.0;
+        params.density = 1.0;
+        params.thickness = 0.1;
+        params.fixed_iters = true;
+        params.max_global_iters = 1;
+        params.node_box_min = params.node_box_max = 0.01;
+        params.d_hat = 0.01;
+        params.k_barrier = 1.0;
+        std::vector<Vec2> material;
+        for (int cluster = 0; cluster < configuration.clusters; ++cluster)
+            for (int sheet = 0; sheet < 2; ++sheet)
+                build_square_mesh(scene.mesh, scene.state, material, 1, 1,
+                    0.4, 0.4, Vec3(10.0 * cluster, 0.0, 0.0));
+        auto& positions = scene.state.deformed_positions;
+        scene.state.velocities.assign(positions.size(), Vec3::Zero());
+        scene.mesh.build_lumped_mass(params.density, params.thickness);
+        scene.adjacency = build_incident_triangle_map(scene.mesh.tris);
+
+        // Distinct coincident sheets have valid elasticity but singular contact.
+        // Two distant clusters provide ordinary whole-vertex work; one small
+        // cluster assigns several workers to each vertex's contacts.
+        std::vector<AABB> boxes;
+        for (const auto& position : positions)
+            boxes.emplace_back(position - Vec3::Constant(params.node_box_max),
+                position + Vec3::Constant(params.node_box_max));
+        scene.broad_phase.initialize(boxes, scene.mesh, params.d_hat,
+            BroadPhase::InitializationMode::DeformableSolver);
+        const auto& cache = scene.broad_phase.cache();
+        ASSERT_FALSE(cache.nt_pairs.empty());
+        std::vector<std::vector<int>> contacts, combined, colors;
+        build_contact_adj(cache, static_cast<int>(positions.size()), contacts);
+        union_adjacency(build_elastic_adj(scene.mesh, scene.adjacency,
+            static_cast<int>(positions.size())), contacts, combined);
+        greedy_color_conflict_graph(combined, colors);
+        solver_detail::ColoredContactSweep schedule;
+        schedule.prepare(colors, cache);
+        ASSERT_FALSE(schedule.split_count.empty());
+        EXPECT_EQ(configuration.threads > 1 && schedule.split_count.front() > 0,
+            configuration.split);
+
+        std::vector<Vec3> predictor = positions;
+        const auto solve = [&] {
+            return global_gauss_seidel_solver_basic_experimental_v2(scene.mesh,
+                scene.adjacency, scene.pins, params, positions, predictor,
+                scene.state.velocities, scene.broad_phase);
+        };
+        EXPECT_THROW(solve(), std::runtime_error);
+
+        // Reuse the same mesh, buffers, and team with nonsingular active contacts.
+        for (std::size_t node = 0; node < positions.size(); ++node)
+            positions[node].y() = node % 8 >= 4 ? 0.005 : 0.0;
+        predictor = positions;
+        SolverResult result;
+        ASSERT_NO_THROW(result = solve());
+        EXPECT_TRUE(result.converged);
+        EXPECT_EQ(result.iterations, 1);
+        for (const auto& position : positions) EXPECT_TRUE(position.allFinite());
     }
 }
 
