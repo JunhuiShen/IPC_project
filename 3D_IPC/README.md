@@ -94,30 +94,37 @@ performs collision-safe per-vertex Newton updates one color group at a time.
 
 ### Cloth solver selection
 
-All three cloth solvers are in `solver.cpp`:
+Choose a solver configuration below:
 
-| Route | Scheduling | Vertex/contact computation | Selection |
-|---|---|---|---|
-| `basic` | Greedy colors | Reference from `1da4c74` | Default |
-| `ambient_grid` | Ambient-grid cells | Reference updates with cooperative frictionless contact/CCD work | `--use_cloth_grid true` |
-| `basic_experimental` | Greedy colors | Collision-off SIMD assembly and contact/CCD optimizations | `--use_basic_experimental true` |
+| Version | When to use it | Selection |
+|---|---|---|
+| `basic` | Original cloth solver and reference behavior | Default |
+| `basic_experimental` (v1) | Optimized scalar cloth solver and comparison baseline | `--use_basic_experimental true --use_simd false` |
+| `basic_experimental_v2` (v2) | Tiled SIMD with closer agreement to v1 scalar | `--use_basic_experimental true --use_simd true` |
+| `ambient_grid` | Alternative parallel scheduling using spatial cells | `--use_cloth_grid true` |
 
-The experimental route supports SIMD for inertia, gravity, pins, membrane
-elasticity, and bending (`--use_simd true`, default). This requires pure cloth,
-grid/OGC disabled, and `--d_hat 0 --k_barrier 0 --use_ccd false
---use_ccd_guess false --k_sdf 0 --friction_coefficient 0`. Use
-`--use_simd false` for scalar assembly; floating-point results can differ.
+With the experimental solver enabled, `--use_simd` selects the version: false
+(the default) gives scalar v1, and true gives SIMD v2. SIMD applies to the
+cloth's corotated elasticity, inertia, gravity, pins, and bending terms.
+Collision, SDF, and friction can remain enabled and use their existing
+implementations.
+V2 follows the separate gather, local transpose, and accumulation layout.
+Use `--use_parallel true` for parallel updates.
 
-The basic iteration loop and local contact derivative assembly come from
-`1da4c74`. Shared geometry, energy, collision-search and CCD utilities remain
-current. The experimental flag defaults to false, is saved in parameter files,
-and also selects cloth assembly in the general solver. Rigid and solid blocks
-keep their existing implementations.
+For example, run 240 frames of Example 1 with v2, bending on, and collisions off:
 
-Grid selection takes precedence over the experimental flag. OGC solver
-selection retains its existing precedence. Direct calls to the named cloth
-entry points select that method regardless of driver flags. Each cloth solver
-owns independent workspace and adaptive node-box history.
+```bash
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE ./build/3D_sim \
+    --example 1 --num_frames 240 --substeps 5 \
+    --max_substep_iters 10 --fixed_iters true --node_box_update_count 10 \
+    --use_basic_experimental true --use_parallel true --use_simd true \
+    --kB 0.009 --d_hat 0 --k_barrier 0 --k_sdf 0 \
+    --use_ccd false --use_ccd_guess false --friction_coefficient 0 \
+    --outdir example1_v2_output --format geo
+```
+
+Set `OMP_NUM_THREADS` to the desired thread count. To compare with v1 scalar,
+change only `--use_simd true` to `--use_simd false`.
 
 ### Spatial grid scheduling for basic cloth
 
@@ -591,7 +598,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | Time integration | `fps`, `substeps`, `num_frames` |
 | Physics | Shell: `E`, `nu`, `density`, `thickness`, `kB`; volumetric solid: `solid_E`, `solid_nu`, `solid_density`; rigid body: `rigid_density`; shared: `kpin`, `gx`, `gy`, `gz` |
 | Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `friction_coefficient`, `friction_velocity_epsilon`, `k_sdf`, `eps_sdf`, `damping`, `fixed_iters`, `use_parallel`, `verbose`, `write_substeps` |
-| Experimental cloth | `use_basic_experimental` (default false), `use_simd` (default true; collision-off cloth only) |
+| Experimental cloth | `use_basic_experimental` enables the experimental solver; `use_simd` selects scalar v1 (`false`, default) or SIMD v2 (`true`) |
 | Basic cloth grid | `use_cloth_grid` (default false), `cloth_grid_auto_dx` (default false), `cloth_grid_dx` (default 0.05 m; fixed side > `2 * node_box_max`, or positive minimum when auto sizing is enabled) |
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (per-iteration box/pair refresh solver), `ogc_box_pad` (BVH padding for the refresh; floored to `d_hat`) |
@@ -651,8 +658,8 @@ reader can jump to the layer they care about.
 ### Energy terms
 
 - `SIMD.h` / `SIMD.cpp` -- vectorized non-contact energy assembly for
-  collision-off experimental cloth.
-- `corotated_energy.h` / `corotated_energy.cpp` -- corotated membrane energy on
+  experimental v2 cloth.
+- `corotated_energy.h` / `corotated_energy.cpp` -- corotated elasticity energy on
   each triangle, per-vertex nodal gradient and Hessian.
 - `bending_energy.h` / `bending_energy.cpp` -- Grinspun-style discrete-shell
   hinge bending over adjacent triangle pairs; per-node gradient and PSD
@@ -782,7 +789,7 @@ the GoogleTest cases discovered by CTest.
 
 | Test binary | Cases | What it covers |
 |-------------|------:|----------------|
-| `SIMD_test` | 20 | SIMD energy kernels, scalar parity, derivative checks, and solver integration |
+| `SIMD_test` | 35 | SIMD energy kernels, scalar parity, mixed-scene contact/SDF/friction coexistence, tile tails, cache invalidation, and solver failure recovery |
 | `barrier_energy_test` | 29 | Scalar and primitive IPC barriers, deformable/rigid derivatives, inactive contact, and validation |
 | `bending_energy_test` | 19 | Hinge energy, dihedral angle, finite-difference derivatives, and rigid-motion invariance |
 | `broad_phase_test` | 32 | AABBs, BVHs, pair generation/order, solver storage modes, CCD candidates, safe stepping, conservativeness, and partial refits |

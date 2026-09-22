@@ -639,46 +639,40 @@ void expect_state_bitwise_equal(const DeformedState& actual,
 
 } // namespace
 
-TEST(SIMDSolver, ActivationRequiresExperimentalCollisionOffCloth) {
+TEST(SIMDSolver, PrivateBatchesRequireCollisionOffCloth) {
     ClothScene scene;
     build_scene(scene);
     scene.params.use_simd = true;
-    ASSERT_TRUE(physics_detail::collision_off_energy_simd_enabled(scene.mesh, scene.params));
-
+    EXPECT_FALSE(physics_detail::private_simd_batches_enabled(scene.mesh, scene.params));
+    scene.params.use_basic_experimental = false;
+    scene.params.use_basic_experimental_v2 = true;
+    ASSERT_TRUE(physics_detail::private_simd_batches_enabled(scene.mesh, scene.params));
     const auto enabled = scene.params;
-    // The storage variant keeps the same optional energy-kernel selection;
-    // selecting v2 does not require also enabling the original solver flag.
-    auto v2 = enabled;
-    v2.use_basic_experimental = false;
-    v2.use_basic_experimental_v2 = true;
-    EXPECT_TRUE(physics_detail::collision_off_energy_simd_enabled(scene.mesh, v2));
-    v2.use_simd = false;
-    EXPECT_FALSE(physics_detail::collision_off_energy_simd_enabled(scene.mesh, v2));
     for (bool SimParams::*flag : {&SimParams::use_simd,
-             &SimParams::use_basic_experimental}) {
+             &SimParams::use_basic_experimental_v2}) {
         auto params = enabled;
         params.*flag = false;
-        EXPECT_FALSE(physics_detail::collision_off_energy_simd_enabled(scene.mesh, params));
+        EXPECT_FALSE(physics_detail::private_simd_batches_enabled(scene.mesh, params));
     }
     for (bool SimParams::*flag : {&SimParams::use_ccd,
              &SimParams::use_ccd_guess, &SimParams::use_cloth_grid,
              &SimParams::use_ogc, &SimParams::use_ogc_solver}) {
         auto params = enabled;
         params.*flag = true;
-        EXPECT_FALSE(physics_detail::collision_off_energy_simd_enabled(scene.mesh, params));
+        EXPECT_FALSE(physics_detail::private_simd_batches_enabled(scene.mesh, params));
     }
     for (double SimParams::*coefficient : {&SimParams::d_hat,
              &SimParams::k_barrier, &SimParams::k_sdf,
              &SimParams::friction_coefficient}) {
         auto params = enabled;
         params.*coefficient = 0.01;
-        EXPECT_FALSE(physics_detail::collision_off_energy_simd_enabled(scene.mesh, params));
+        EXPECT_FALSE(physics_detail::private_simd_batches_enabled(scene.mesh, params));
     }
     scene.mesh.tets = {0, 1, 2, 3};
-    EXPECT_FALSE(physics_detail::collision_off_energy_simd_enabled(scene.mesh, enabled));
+    EXPECT_FALSE(physics_detail::private_simd_batches_enabled(scene.mesh, enabled));
     scene.mesh.tets.clear();
     scene.mesh.rb_nodes = {{0, 1, 2}};
-    EXPECT_FALSE(physics_detail::collision_off_energy_simd_enabled(scene.mesh, enabled));
+    EXPECT_FALSE(physics_detail::private_simd_batches_enabled(scene.mesh, enabled));
 }
 
 TEST(SIMDSolver, AllFiveEnergyTermsMatchCompleteScalarLocalAssembly) {
@@ -688,6 +682,8 @@ TEST(SIMDSolver, AllFiveEnergyTermsMatchCompleteScalarLocalAssembly) {
     ClothScene scene;
     build_scene(scene);
     scene.params.use_simd = true;
+    scene.params.use_basic_experimental = false;
+    scene.params.use_basic_experimental_v2 = true;
     scene.params.gravity = Vec3(.7, -9.81, -.4);
     // Nonzero rest angles exercise the bending energy residual independently
     // of the reference fixture's initially flat material configuration.
@@ -727,6 +723,120 @@ TEST(SIMDSolver, AllFiveEnergyTermsMatchCompleteScalarLocalAssembly) {
             EXPECT_LE((actual.second - expected.second).norm(),
                 2e-11 * (1.0 + expected.second.norm())) << "cached=" << cached;
         }
+    }
+}
+
+TEST(SIMDSolver, NoncontactSimdRemainsEnabledWithContactSdfAndFriction) {
+    auto params = SimParams::zeros();
+    params.use_basic_experimental = true;
+    params.use_basic_experimental_v2 = true;
+    params.use_simd = true;
+    params.d_hat = 0.02;
+    params.k_barrier = 3.0;
+    params.use_ccd = params.use_ccd_guess = true;
+    params.k_sdf = 100.0;
+    params.friction_coefficient = 0.4;
+    EXPECT_TRUE(physics_detail::noncontact_energy_simd_enabled(params));
+    params.use_basic_experimental_v2 = false;
+    EXPECT_FALSE(physics_detail::noncontact_energy_simd_enabled(params));
+    params.use_basic_experimental_v2 = true;
+    params.use_simd = false;
+    EXPECT_FALSE(physics_detail::noncontact_energy_simd_enabled(params));
+}
+
+TEST(SIMDSolver, SimdEnergyAssemblyPreservesActiveSdfAndFrictionTerms) {
+    ClothScene scene;
+    build_scene(scene);
+    auto& params = scene.params;
+    params.use_basic_experimental_v2 = true;
+    params.use_simd = true;
+    params.d_hat = 0.02;
+    params.k_barrier = 1.0;
+    params.use_ccd = params.use_ccd_guess = true;
+    params.k_sdf = 37.0;
+    params.eps_sdf = 0.003;
+    params.friction_coefficient = 0.4;
+    params.sdf_planes.push_back(PlaneSDF{Vec3(0.0, 0.04, 0.0), Vec3::UnitY()});
+    const auto& positions = scene.state.deformed_positions;
+    auto previous = positions;
+    for (auto& point : previous) point -= params.dt() * Vec3(0.12, -0.03, 0.08);
+    std::vector<Vec3> predictor;
+    build_xhat(predictor, positions, scene.state.velocities, params.dt());
+    const auto pin_map = build_pin_map(scene.pins, static_cast<int>(positions.size()));
+    double sdf_contribution = 0.0;
+    for (std::size_t node = 0; node < positions.size(); node += 7) {
+        const int vi = static_cast<int>(node);
+        const auto expected = compute_local_gradient_and_hessian_no_barrier(
+            vi, scene.mesh, scene.adjacency, scene.pins, params, positions, predictor,
+            &pin_map, nullptr, nullptr, &previous);
+        const auto actual = physics_detail::compute_local_gradient_and_hessian_no_barrier_unchecked(
+            vi, scene.mesh, scene.adjacency, scene.pins, params, positions, predictor,
+            &pin_map, nullptr, nullptr, &previous);
+        ASSERT_TRUE(actual.first.allFinite());
+        ASSERT_TRUE(actual.second.allFinite());
+        EXPECT_LE((actual.first - expected.first).norm(), 2e-11 * (1.0 + expected.first.norm()));
+        EXPECT_LE((actual.second - expected.second).norm(), 2e-11 * (1.0 + expected.second.norm()));
+        auto without_sdf = params;
+        without_sdf.k_sdf = 0.0;
+        const auto no_sdf = compute_local_gradient_and_hessian_no_barrier(
+            vi, scene.mesh, scene.adjacency, scene.pins, without_sdf, positions, predictor,
+            &pin_map, nullptr, nullptr, &previous);
+        sdf_contribution += (expected.first - no_sdf.first).norm();
+    }
+    EXPECT_GT(sdf_contribution, 1e-8);
+}
+
+TEST(SIMDSolver, V1RemainsScalarRegardlessOfSimdOrV2Flags) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+    std::array<ClothScene, 3> scenes;
+    for (auto& scene : scenes) build_scene(scene);
+    for (std::size_t run = 0; run < scenes.size(); ++run) {
+        auto& scene = scenes[run];
+        scene.params.use_simd = run != 0;
+        scene.params.use_basic_experimental_v2 = run == 2;
+        std::vector<Vec3> predictor;
+        build_xhat(predictor, scene.state.deformed_positions,
+            scene.state.velocities, scene.params.dt());
+        ASSERT_TRUE(global_gauss_seidel_solver_basic_experimental(scene.mesh,
+            scene.adjacency, scene.pins, scene.params, scene.state.deformed_positions,
+            predictor, scene.state.velocities, scene.broad_phase).converged);
+        if (run != 0) expect_state_bitwise_equal(scene.state, scenes[0].state);
+    }
+}
+
+TEST(SIMDSolver, MixedClothRigidSceneMatchesScalarWithContactAndFriction) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+    std::array<ClothScene, 2> scenes;
+    for (std::size_t mode = 0; mode < scenes.size(); ++mode) {
+        auto& scene = scenes[mode];
+        build_scene(scene);
+        append_rigid_polygon(6, scene.state, scene.mesh, Vec3(0.0, 0.08, 0.0),
+            0.035, 1000.0, 0.015, Vec3(0.02, -0.1, 0.01));
+        scene.mesh.build_deformable_nodes();
+        scene.adjacency = build_incident_triangle_map(scene.mesh.tris);
+        scene.params.use_basic_experimental = true;
+        scene.params.use_basic_experimental_v2 = mode == 1;
+        scene.params.use_simd = mode == 1;
+        scene.params.d_hat = 0.02;
+        scene.params.k_barrier = 1.0;
+        scene.params.use_ccd = true;
+        scene.params.use_ticcd = false;
+        scene.params.friction_coefficient = 0.2;
+        scene.params.theta_box_min = 0.001;
+        scene.params.theta_box_max = 0.02;
+    }
+    for (int frame = 1; frame <= 4; ++frame) {
+        for (auto& scene : scenes)
+            ASSERT_TRUE(advance_one_frame_general(scene.state, scene.mesh, scene.adjacency,
+                scene.pins, scene.params, scene.broad_phase, frame).converged);
+        expect_state_near(scenes[1].state, scenes[0].state);
+        EXPECT_LE((scenes[1].state.x_coms[0] - scenes[0].state.x_coms[0]).norm(), 1e-10);
+        EXPECT_LE((scenes[1].state.orientations[0] - scenes[0].state.orientations[0]).norm(), 1e-10);
+        EXPECT_FALSE(scenes[1].broad_phase.cache().nt_pairs.empty());
     }
 }
 
@@ -884,6 +994,8 @@ TEST(SIMDSolver, CollisionOffFixedFramesMatchScalarAndAreThreadDeterministic) {
                 << " run=" << run << " threads=" << thread_counts[run]);
             auto& scene = scenes[configuration][run];
             scene.params.use_simd = run != 0;
+            scene.params.use_basic_experimental = run == 0;
+            scene.params.use_basic_experimental_v2 = run != 0;
             scene.params.node_box_update_count = rebuild_interval;
             scene.params.max_global_iters = iteration_limits[configuration];
             omp_set_num_threads(thread_counts[run]);
@@ -947,6 +1059,8 @@ TEST(SIMDSolver, SerialVertexOrderMatchesScalarWithSimdEnabled) {
     for (std::size_t run = 0; run < scenes.size(); ++run) {
         auto& scene = scenes[run];
         scene.params.use_simd = run != 0;
+        scene.params.use_basic_experimental = run == 0;
+        scene.params.use_basic_experimental_v2 = run != 0;
         const auto result = advance_one_frame(scene.state, scene.mesh,
             scene.adjacency, scene.pins, scene.params, scene.broad_phase);
         ASSERT_TRUE(result.converged);
@@ -978,11 +1092,15 @@ TEST(SIMDSolver, ResidualStoppingMatchesScalarAcrossThreadCounts) {
         SCOPED_TRACE(::testing::Message() << "run=" << run);
         auto& scene = scenes[run];
         scene.params.use_simd = run != 0;
+        scene.params.use_basic_experimental = run == 0;
+        scene.params.use_basic_experimental_v2 = run != 0;
         omp_set_num_threads(run == 2 ? 4 : 1);
         positions[run] = scene.state.deformed_positions;
         std::vector<Vec3> predictor;
         build_xhat(predictor, positions[run], scene.state.velocities, scene.params.dt());
-        results[run] = global_gauss_seidel_solver_basic_experimental(
+        const auto solve = run == 0 ? global_gauss_seidel_solver_basic_experimental
+            : global_gauss_seidel_solver_basic_experimental_v2;
+        results[run] = solve(
             scene.mesh, scene.adjacency, scene.pins, scene.params,
             positions[run], predictor, scene.state.velocities, scene.broad_phase,
             "", &scene.state.deformed_positions);
@@ -1007,4 +1125,295 @@ TEST(SIMDSolver, ResidualStoppingMatchesScalarAcrossThreadCounts) {
                     positions[1][node].data(), 3 * sizeof(double)), 0) << "node=" << node;
         }
     }
+}
+
+TEST(SIMDV2Kernel, AoSTriangleTilesMatchScalarAccumulation) {
+    for (int count = 0; count <= 3 * static_cast<int>(ipc_simd::tile_width) + 1; ++count) {
+        Inputs input;
+        for (int i = 0; i < count; ++i) {
+            Mat32 F = rotation(0.17 * i).leftCols<2>();
+            F.col(0) *= 0.8 + 0.03 * i;
+            F.col(1) *= 1.2;
+            input.append(F, (Mat22() << 1.1, 0.2, -0.1, 0.9).finished(), i % 3);
+        }
+        std::reverse(input.incident.begin(), input.incident.end());
+        std::vector<Vec3> positions(3 * count), gradients(count + 1, Vec3::Constant(12345.0));
+        std::vector<Mat33> hessians(count + 1, Mat33::Constant(12345.0));
+        std::vector<Mat22> dm(count);
+        std::vector<Vec2> q(count);
+        std::vector<double> area(count);
+        for (int i = 0; i < count; ++i) {
+            const auto [triangle, role] = input.incident[i];
+            for (int corner = 0; corner < 3; ++corner)
+                positions[3*i+corner] = input.x[input.mesh.tris[3*triangle+corner]];
+            dm[i] = input.mesh.Dm_inverse[triangle];
+            q[i] = input.rest_shape_grads[triangle][role];
+            area[i] = input.mesh.area[triangle];
+        }
+        Vec3 expected_g(0.13, -0.2, 0.03), actual_g = expected_g;
+        Mat33 expected_h = 0.7 * Mat33::Identity(), actual_h = expected_h;
+        constexpr double dt2 = 0.004;
+        reference(input, 1.3, 2.7, dt2, expected_g, expected_h);
+        for (std::size_t begin = 0; begin < static_cast<std::size_t>(count); begin += ipc_simd::tile_width) {
+            const auto size = std::min(ipc_simd::tile_width, static_cast<std::size_t>(count) - begin);
+            ipc_simd::corotated_derivatives_tile(positions.data()+3*begin, dm.data()+begin,
+                area.data()+begin, q.data()+begin, size, 1.3, 2.7,
+                gradients.data()+begin, hessians.data()+begin);
+        }
+        for (int e = 0; e < count; ++e) {
+            actual_g += dt2 * gradients[e];
+            actual_h += dt2 * hessians[e];
+        }
+        EXPECT_LE((actual_g - expected_g).norm(), 16.0 * std::numeric_limits<double>::epsilon() * (1.0 + expected_g.norm())) << count;
+        EXPECT_LE((actual_h - expected_h).norm(), 16.0 * std::numeric_limits<double>::epsilon() * (1.0 + expected_h.norm())) << count;
+        EXPECT_TRUE((gradients.back().array() == 12345.0).all());
+        EXPECT_TRUE((hessians.back().array() == 12345.0).all());
+    }
+}
+
+TEST(SIMDV2Kernel, AoSTriangleClampedInputsMatchScalarWithinRoundoff) {
+    for (int count = 0; count <= 3 * static_cast<int>(ipc_simd::tile_width) + 1; ++count) {
+        Inputs input;
+        for (int i = 0; i < count; ++i) {
+            Mat32 F = rotation(0.17 * i).leftCols<2>();
+            F.col(0) *= 0.8 + 0.03 * i;
+            F.col(1) *= i == 5 ? 1e-7 : 1.2;
+            input.append(F, (Mat22() << 1.1, 0.2, -0.1, 0.9).finished(), i % 3);
+        }
+        std::reverse(input.incident.begin(), input.incident.end());
+        std::vector<Vec3> positions(3 * count), gradients(count + 1, Vec3::Constant(12345.0));
+        std::vector<Mat33> hessians(count + 1, Mat33::Constant(12345.0));
+        std::vector<Mat22> dm(count);
+        std::vector<Vec2> q(count);
+        std::vector<double> area(count);
+        for (int i = 0; i < count; ++i) {
+            const auto [triangle, role] = input.incident[i];
+            for (int corner = 0; corner < 3; ++corner)
+                positions[3*i+corner] = input.x[input.mesh.tris[3*triangle+corner]];
+            dm[i] = input.mesh.Dm_inverse[triangle];
+            q[i] = input.rest_shape_grads[triangle][role];
+            area[i] = input.mesh.area[triangle];
+        }
+        Vec3 expected_g(0.13, -0.2, 0.03), actual_g = expected_g;
+        Mat33 expected_h = 0.7 * Mat33::Identity(), actual_h = expected_h;
+        constexpr double dt2 = 0.004;
+        reference(input, 1.3, 2.7, dt2, expected_g, expected_h);
+        for (std::size_t begin = 0; begin < static_cast<std::size_t>(count); begin += ipc_simd::tile_width) {
+            const auto size = std::min(ipc_simd::tile_width, static_cast<std::size_t>(count) - begin);
+            ipc_simd::corotated_derivatives_tile(positions.data()+3*begin, dm.data()+begin,
+                area.data()+begin, q.data()+begin, size, 1.3, 2.7,
+                gradients.data()+begin, hessians.data()+begin);
+        }
+        for (int e = 0; e < count; ++e) {
+            actual_g += dt2 * gradients[e];
+            actual_h += dt2 * hessians[e];
+        }
+        EXPECT_LE((actual_g - expected_g).norm(), 16.0 * std::numeric_limits<double>::epsilon() * (1.0 + expected_g.norm())) << count;
+        EXPECT_LE((actual_h - expected_h).norm(), 16.0 * std::numeric_limits<double>::epsilon() * (1.0 + expected_h.norm())) << count;
+        EXPECT_TRUE((gradients.back().array() == 12345.0).all());
+        EXPECT_TRUE((hessians.back().array() == 12345.0).all());
+    }
+}
+
+TEST(SIMDV2Kernel, AoSHingeTilesMatchScalarAccumulation) {
+    for (int count = 0; count <= 3 * static_cast<int>(ipc_simd::tile_width) + 1; ++count) {
+        BendingInputs input;
+        for (int i = 0; i < count; ++i)
+            input.append(folded_hinge(0.08 * i - 0.7), i % 4, 0.8 + 0.02*i, -0.2);
+        std::reverse(input.incident.begin(), input.incident.end());
+        std::vector<Vec3> positions(4 * count), gradients(count + 1, Vec3::Constant(12345.0));
+        std::vector<Mat33> hessians(count + 1, Mat33::Constant(12345.0));
+        std::vector<int> roles(count);
+        std::vector<double> ce(count), rest(count);
+        for (int i = 0; i < count; ++i) {
+            const auto [hinge, role] = input.incident[i];
+            for (int corner = 0; corner < 4; ++corner)
+                positions[4*i+corner] = input.positions[input.mesh.hinges[hinge].v[corner]];
+            roles[i] = role;
+            ce[i] = input.mesh.hinges[hinge].c_e;
+            rest[i] = input.mesh.hinges[hinge].bar_theta;
+        }
+        Vec3 expected_g(0.13, -0.2, 0.03), actual_g = expected_g;
+        Mat33 expected_h = 0.7 * Mat33::Identity(), actual_h = expected_h;
+        constexpr double dt2 = 0.004, stiffness = 0.009;
+        for (const auto& [hinge, role] : input.incident) {
+            const auto contribution = bending_node_gradient_hessian_psd(input.def(hinge),
+                stiffness, input.mesh.hinges[hinge].c_e, input.mesh.hinges[hinge].bar_theta, role);
+            expected_g += dt2 * contribution.first;
+            expected_h += dt2 * contribution.second;
+        }
+        for (std::size_t begin = 0; begin < static_cast<std::size_t>(count); begin += ipc_simd::tile_width) {
+            const auto size = std::min(ipc_simd::tile_width, static_cast<std::size_t>(count) - begin);
+            ipc_simd::bending_derivatives_tile(positions.data()+4*begin, roles.data()+begin,
+                ce.data()+begin, rest.data()+begin, size, stiffness,
+                gradients.data()+begin, hessians.data()+begin);
+        }
+        for (int e = 0; e < count; ++e) {
+            actual_g += dt2 * gradients[e];
+            actual_h += dt2 * hessians[e];
+        }
+        EXPECT_LE((actual_g - expected_g).norm(), 16.0 * std::numeric_limits<double>::epsilon() * (1.0 + expected_g.norm())) << count;
+        EXPECT_LE((actual_h - expected_h).norm(), 16.0 * std::numeric_limits<double>::epsilon() * (1.0 + expected_h.norm())) << count;
+        EXPECT_TRUE((gradients.back().array() == 12345.0).all());
+        EXPECT_TRUE((hessians.back().array() == 12345.0).all());
+    }
+}
+
+TEST(SIMDV2Solver, SimdFailureRestoresTheWholeColorAndJoinsWorkers) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+    ClothScene scene;
+    build_scene(scene);
+    scene.params.use_basic_experimental = false;
+    scene.params.use_basic_experimental_v2 = true;
+    scene.params.use_simd = true;
+    scene.params.use_parallel = true;
+    scene.params.fixed_iters = true;
+    scene.mesh.Dm_inverse[0].setConstant(std::numeric_limits<double>::quiet_NaN());
+    const auto initial = scene.state.deformed_positions;
+    std::vector<Vec3> predictor;
+    build_xhat(predictor, initial, scene.state.velocities, scene.params.dt());
+    EXPECT_THROW(global_gauss_seidel_solver_basic_experimental_v2(scene.mesh,
+        scene.adjacency, scene.pins, scene.params, scene.state.deformed_positions,
+        predictor, scene.state.velocities, scene.broad_phase), std::runtime_error);
+    for (std::size_t i = 0; i < initial.size(); ++i)
+        EXPECT_EQ(std::memcmp(initial[i].data(), scene.state.deformed_positions[i].data(),
+            3*sizeof(double)), 0) << i;
+}
+
+TEST(SIMDV2Kernel, DegenerateHingesPreserveScalarZeroOutputsInMixedTiles) {
+    constexpr std::size_t width = ipc_simd::tile_width;
+    std::array<Vec3, 4 * width> positions;
+    std::array<Vec3, width> gradients;
+    std::array<Mat33, width> hessians;
+    std::array<int, width> roles;
+    std::array<double, width> coefficients, rest_angles;
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    for (std::size_t count = 1; count <= width; ++count) {
+        for (std::size_t e = 0; e < count; ++e) {
+            auto def = folded_hinge(0.3);
+            const bool degenerate = e % 2 == 0;
+            if (degenerate) def.x[3] = def.x[0];
+            for (int corner = 0; corner < 4; ++corner)
+                positions[4 * e + corner] = def.x[corner];
+            roles[e] = static_cast<int>(e % 4);
+            coefficients[e] = degenerate ? nan : 1.2;
+            rest_angles[e] = degenerate ? nan : -0.1;
+        }
+        ipc_simd::bending_derivatives_tile(positions.data(), roles.data(), coefficients.data(),
+            rest_angles.data(), count, 0.009, gradients.data(), hessians.data());
+        for (std::size_t e = 0; e < count; ++e) {
+            HingeDef def;
+            for (int corner = 0; corner < 4; ++corner) def.x[corner] = positions[4 * e + corner];
+            const auto expected = bending_node_gradient_hessian_psd(
+                def, 0.009, coefficients[e], rest_angles[e], roles[e]);
+            ASSERT_TRUE(gradients[e].allFinite());
+            ASSERT_TRUE(hessians[e].allFinite());
+            EXPECT_LE((gradients[e] - expected.first).norm(),
+                16.0 * std::numeric_limits<double>::epsilon() * (1.0 + expected.first.norm()));
+            EXPECT_LE((hessians[e] - expected.second).norm(),
+                16.0 * std::numeric_limits<double>::epsilon() * (1.0 + expected.second.norm()));
+        }
+    }
+}
+
+TEST(SIMDV2Solver, WorkerBuffersTrackScalarResultsAcrossFramesAndTeamSizes) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    std::vector<DeformedState> reference;
+    std::array<ClothScene, 3> scenes;
+    for (auto& scene : scenes) build_scene(scene);
+    for (int run = 0; run < 3; ++run) {
+        auto& scene = scenes[run];
+        scene.params.use_basic_experimental = run == 0;
+        scene.params.use_basic_experimental_v2 = run != 0;
+        scene.params.use_simd = run != 0;
+        omp_set_num_threads(run == 1 ? 1 : 4);
+        for (int frame = 1; frame <= 48; ++frame) {
+            scene.pins[0].target_position.y() = 0.03 + 0.02 * std::sin(0.07 * frame);
+            scene.pins[1].target_position.z() = -0.22 + 0.015 * std::sin(0.11 * frame);
+            ASSERT_TRUE(advance_one_frame(scene.state, scene.mesh, scene.adjacency,
+                scene.pins, scene.params, scene.broad_phase, frame).converged);
+            if (run == 0) reference.push_back(scene.state);
+            else expect_state_near(scene.state, reference[frame - 1]);
+        }
+    }
+}
+
+TEST(SIMDV2Solver, CachedAoSLayoutRefreshesChangedHingePropertiesAndBendingMode) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+    std::array<ClothScene, 2> scenes;
+    for (int method = 0; method < 2; ++method) {
+        auto& scene = scenes[method];
+        build_scene(scene);
+        scene.params.use_basic_experimental = method == 0;
+        scene.params.use_basic_experimental_v2 = method == 1;
+        scene.params.use_simd = method == 1;
+        scene.params.use_parallel = true;
+        scene.params.fixed_iters = true;
+        scene.params.max_global_iters = 5;
+        scene.params.node_box_update_count = 3;
+    }
+    for (int frame = 1; frame <= 4; ++frame) {
+        for (auto& scene : scenes) {
+            if (frame == 2) {
+                scene.mesh.hinges[0].bar_theta += 0.17;
+                scene.mesh.hinges[0].c_e *= 1.3;
+            }
+            if (frame == 3) scene.params.kB = 0.0;
+            if (frame == 4) scene.params.kB = 0.009;
+            ASSERT_TRUE(advance_one_frame(scene.state, scene.mesh, scene.adjacency,
+                scene.pins, scene.params, scene.broad_phase, frame).converged);
+        }
+        expect_state_near(scenes[1].state, scenes[0].state);
+    }
+}
+
+TEST(SIMDV2Solver, LaterColorFailurePreservesCompletedColorsAndJoinsWorkers) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+    ClothScene scene;
+    build_scene(scene);
+    scene.params.use_basic_experimental = false;
+    scene.params.use_basic_experimental_v2 = true;
+    scene.params.use_simd = true;
+    scene.params.use_parallel = true;
+    scene.params.fixed_iters = true;
+    scene.params.max_global_iters = 3;
+    std::vector<std::vector<int>> groups;
+    greedy_color_conflict_graph(build_elastic_adj(scene.mesh, scene.adjacency,
+        static_cast<int>(scene.state.deformed_positions.size())), groups);
+    std::vector<int> color(scene.state.deformed_positions.size(), -1);
+    for (std::size_t c = 0; c < groups.size(); ++c)
+        for (int node : groups[c]) color[node] = static_cast<int>(c);
+    int failed_color = -1;
+    for (std::size_t triangle = 0; triangle < scene.mesh.Dm_inverse.size(); ++triangle) {
+        const int earliest = std::min({color[scene.mesh.tris[3*triangle]],
+            color[scene.mesh.tris[3*triangle+1]], color[scene.mesh.tris[3*triangle+2]]});
+        if (earliest > 0) {
+            scene.mesh.Dm_inverse[triangle].setConstant(std::numeric_limits<double>::quiet_NaN());
+            failed_color = earliest;
+            break;
+        }
+    }
+    ASSERT_GT(failed_color, 0);
+    const auto initial = scene.state.deformed_positions;
+    std::vector<Vec3> predictor;
+    build_xhat(predictor, initial, scene.state.velocities, scene.params.dt());
+    EXPECT_THROW(global_gauss_seidel_solver_basic_experimental_v2(scene.mesh,
+        scene.adjacency, scene.pins, scene.params, scene.state.deformed_positions,
+        predictor, scene.state.velocities, scene.broad_phase), std::runtime_error);
+    double completed_movement = 0.0;
+    for (std::size_t i = 0; i < initial.size(); ++i) {
+        if (color[i] >= failed_color)
+            EXPECT_EQ(std::memcmp(initial[i].data(), scene.state.deformed_positions[i].data(),
+                3*sizeof(double)), 0) << i;
+        else
+            completed_movement += (initial[i] - scene.state.deformed_positions[i]).squaredNorm();
+    }
+    EXPECT_GT(completed_movement, 0.0);
 }

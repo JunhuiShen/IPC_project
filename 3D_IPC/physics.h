@@ -51,9 +51,9 @@ struct SimParams {
     int    max_global_iters;
 
     bool   use_parallel;
-    bool   use_basic_experimental; // select optimized cloth basic assembly/scheduling
-    bool   use_basic_experimental_v2; // separate variant with per-color triangle storage
-    bool   use_simd;             // experimental collision-off cloth energy batching
+    bool   use_basic_experimental; // select the experimental cloth solver family
+    bool   use_basic_experimental_v2; // resolved from use_basic_experimental && use_simd
+    bool   use_simd;             // v2 non-contact cloth energy batching
     bool   use_cloth_grid;       // basic cloth only: serial vertices within parallel spatial cells
     bool   cloth_grid_auto_dx;   // enlarge dx from dependencies at each grid rebuild
     double cloth_grid_dx;        // fixed side (must exceed 2*node_box_max), or minimum in auto mode
@@ -555,9 +555,10 @@ std::pair<Vec3, Mat33> compute_local_gradient_and_hessian_no_barrier(int vi, con
 
 namespace physics_detail {
 
-// SIMD is deliberately limited to the basic experimental collision-off
-// cloth route. Shared by assembly and startup diagnostics.
-bool collision_off_energy_simd_enabled(const RefMesh& mesh, const SimParams& params);
+// SIMD applies to cloth energy terms independently of contact settings.
+bool noncontact_energy_simd_enabled(const SimParams& params);
+// Collision-free cloth additionally uses private per-worker batch storage.
+bool private_simd_batches_enabled(const RefMesh& mesh, const SimParams& params);
 
 // Non-owning, active-node membrane contributions in original incident order.
 // Each gradient/Hessian already includes dt^2 and the triangle's rest area.
@@ -594,6 +595,20 @@ compute_local_gradient_and_hessian_with_stored_membrane_unchecked(
     const std::vector<ShapeGrads>* rest_shape_grads,
     const std::vector<Vec3>* previous_positions,
     const MembraneDerivativeView& membrane);
+
+// V2-only unweighted AoS contributions. The caller applies time-step scaling
+// and accumulates each vertex's entries in incident order.
+struct SimdDerivativeView {
+    const Vec3* gradients = nullptr;
+    const Mat33* hessians = nullptr;
+    std::size_t count = 0;
+};
+
+std::pair<Vec3, Mat33> compute_local_simd_v2_derivatives(
+    int vi, const RefMesh& mesh, const std::vector<Pin>& pins,
+    const SimParams& params, const std::vector<Vec3>& x,
+    const std::vector<Vec3>& xhat, const PinMap& pin_map,
+    const SimdDerivativeView& elasticity, const SimdDerivativeView& bending);
 
 } // namespace physics_detail
 

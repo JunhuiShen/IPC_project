@@ -1,6 +1,7 @@
 #include "SIMD.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <limits>
 
@@ -636,6 +637,251 @@ void accumulated_corotated_elasticity(
                 }
             }
         }
+    }
+}
+
+// V2 kernels retain the scalar spectral/angle evaluation and arithmetic order.
+// Gathered inputs are transposed locally; independent element lanes evaluate
+// derivatives and return AoS contributions for the caller's ordered reduction.
+#if defined(__AVX512F__)
+struct ElementPack {
+    using Native = __m512d;
+    static constexpr int width = 8;
+    Native value;
+    ElementPack() = default;
+    explicit ElementPack(double x) : value(_mm512_set1_pd(x)) {}
+    static ElementPack raw(Native x) { ElementPack p; p.value=x; return p; }
+    static ElementPack load(const double* x) { return raw(_mm512_loadu_pd(x)); }
+    void store(double* x) const { _mm512_storeu_pd(x,value); }
+    friend ElementPack operator+(ElementPack a, ElementPack b) { return raw(_mm512_add_pd(a.value,b.value)); }
+    friend ElementPack operator-(ElementPack a, ElementPack b) { return raw(_mm512_sub_pd(a.value,b.value)); }
+    friend ElementPack operator*(ElementPack a, ElementPack b) { return raw(_mm512_mul_pd(a.value,b.value)); }
+    friend ElementPack operator/(ElementPack a, ElementPack b) { return raw(_mm512_div_pd(a.value,b.value)); }
+    friend ElementPack equal(ElementPack a, ElementPack b) {
+        return raw(_mm512_castsi512_pd(_mm512_maskz_set1_epi64(_mm512_cmp_pd_mask(a.value,b.value,_CMP_EQ_OQ),-1)));
+    }
+    friend ElementPack select(ElementPack mask, ElementPack yes, ElementPack no) {
+        const auto bits=_mm512_cmp_epi64_mask(_mm512_castpd_si512(mask.value),_mm512_setzero_si512(),_MM_CMPINT_NE);
+        return raw(_mm512_mask_blend_pd(bits,no.value,yes.value));
+    }
+};
+#else
+using ElementPack = Pack;
+#endif
+
+const char* tile_backend_name() {
+#if defined(__AVX512F__)
+    return "AVX-512 (8 doubles)";
+#else
+    return backend_name();
+#endif
+}
+
+// Match the scalar kernel's fused operations where hardware supports them.
+// The operand order matters: algebraic reassociation changes long trajectories.
+static ElementPack element_multiply_add(ElementPack a, ElementPack b, ElementPack c) {
+#if defined(__AVX512F__)
+    return ElementPack::raw(_mm512_fmadd_pd(a.value, b.value, c.value));
+#elif defined(__AVX2__) && defined(__FMA__)
+    return ElementPack::raw(_mm256_fmadd_pd(a.value, b.value, c.value));
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return ElementPack::raw(vfmaq_f64(c.value, a.value, b.value));
+#else
+    return a * b + c;
+#endif
+}
+
+void corotated_derivatives_tile(
+    const Vec3* positions, const Mat22* dm_inverse, const double* areas,
+    const Vec2* shape_gradients, std::size_t entry_count,
+    double mu, double lambda, Vec3* gradients, Mat33* hessians) {
+    constexpr int W = ElementPack::width;
+    assert(entry_count <= tile_width);
+    const ElementPack zero(0.0), one(1.0), twice_mu(2.0 * mu), bulk(lambda);
+    for (std::size_t begin = 0; begin < entry_count; begin += W) {
+        const int count = static_cast<int>(std::min<std::size_t>(W, entry_count - begin));
+        alignas(64) double s[2][2][W], ci[2][2][W], r[3][2][W], b[3][2][W];
+        alignas(64) double f_data[3][2][W], q[2][W], area[W], jd[W], tr[W];
+        alignas(64) double p[3][2][W], gd[3][W], hd[3][3][W];
+        // Layout conversion uses only the already-gathered AoS tile.
+        alignas(64) double points[3][3][W], material[2][2][W];
+        for (int lane = 0; lane < W; ++lane) {
+            const std::size_t entry = begin + std::min(lane, count - 1);
+            for (int vertex = 0; vertex < 3; ++vertex)
+                for (int axis = 0; axis < 3; ++axis)
+                    points[vertex][axis][lane] = positions[3*entry+vertex][axis];
+            for (int row = 0; row < 2; ++row)
+                for (int col = 0; col < 2; ++col)
+                    material[row][col][lane] = dm_inverse[entry](row,col);
+        }
+        // Preserve the scalar eigensolver and its clamping decisions. Only
+        // local tile data are read; the derivative contractions below use SIMD.
+        for (int lane = 0; lane < W; ++lane) {
+            const std::size_t entry = begin + std::min(lane, count - 1);
+            Mat32 ds;
+            Mat22 dm;
+            for (int axis = 0; axis < 3; ++axis) {
+                ds(axis,0) = points[1][axis][lane] - points[0][axis][lane];
+                ds(axis,1) = points[2][axis][lane] - points[0][axis][lane];
+            }
+            for (int row = 0; row < 2; ++row)
+                for (int col = 0; col < 2; ++col) dm(row,col) = material[row][col][lane];
+            const Mat32 f = ds * dm;
+            const CorotatedCache32 cache = buildCorotatedCache(f);
+            const Mat32 stress = PCorotated32(cache, f, mu, lambda);
+            for (int i = 0; i < 2; ++i) {
+                q[i][lane] = shape_gradients[entry][i];
+                for (int j = 0; j < 2; ++j) {
+                    s[i][j][lane] = cache.SInv(i,j);
+                    ci[i][j][lane] = cache.FTFinv(i,j);
+                }
+            }
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 2; ++j) {
+                    r[i][j][lane] = cache.R(i,j);
+                    b[i][j][lane] = cache.FFTFInv(i,j);
+                    p[i][j][lane] = stress(i,j);
+                    f_data[i][j][lane] = f(i,j);
+                }
+            }
+            area[lane] = areas[entry];
+            jd[lane] = cache.J;
+            tr[lane] = cache.traceS;
+        }
+        const ElementPack J = ElementPack::load(jd), trace = ElementPack::load(tr), A = ElementPack::load(area);
+        const ElementPack volumetric = bulk * (J - one) * J;
+        const ElementPack positive = ElementPack(0.5 * lambda) * (ElementPack(2.0) * J - one) * J;
+        const ElementPack shape[2] = {ElementPack::load(q[0]), ElementPack::load(q[1])};
+        // Retain the scalar beta/eta contraction order for each self block.
+        #pragma GCC unroll 3
+        for (int i = 0; i < 3; ++i) {
+            ElementPack g = zero;
+            for (int beta = 0; beta < 2; ++beta)
+                g = g + ElementPack::load(p[i][beta]) * shape[beta];
+            (A * g).store(gd[i]);
+            #pragma GCC unroll 3
+            for (int j = 0; j < 3; ++j) {
+                const ElementPack RRT = element_multiply_add(ElementPack::load(r[i][1]), ElementPack::load(r[j][1]),
+                    ElementPack::load(r[i][0]) * ElementPack::load(r[j][0]));
+                const ElementPack Q = element_multiply_add(ElementPack::load(b[i][1]), ElementPack::load(f_data[j][1]),
+                    ElementPack::load(b[i][0]) * ElementPack::load(f_data[j][0]));
+                ElementPack sum = zero;
+                #pragma GCC unroll 2
+                for (int beta = 0; beta < 2; ++beta) {
+                    #pragma GCC unroll 2
+                    for (int eta = 0; eta < 2; ++eta) {
+                        const ElementPack sinv = ElementPack::load(s[eta][beta]);
+                        const ElementPack cinv = ElementPack::load(ci[eta][beta]);
+                        const ElementPack dcdF = (eta == 0 ? zero - ElementPack::load(r[j][1]) : ElementPack::load(r[j][0])) / trace;
+                        const ElementPack re = beta == 0 ? ElementPack::load(r[i][1]) : zero - ElementPack::load(r[i][0]);
+                        ElementPack dr = i == j ? sinv : zero;
+                        dr = element_multiply_add(ElementPack(-1.0) * RRT, sinv, dr);
+                        dr = element_multiply_add(ElementPack(-1.0) * dcdF, re, dr);
+                        ElementPack dp = i == j ? volumetric * cinv : zero;
+                        dp = element_multiply_add(ElementPack(-1.0) * volumetric, element_multiply_add(ElementPack::load(b[i][eta]), ElementPack::load(b[j][beta]), Q * cinv), dp);
+                        const ElementPack product = ElementPack::load(b[j][eta]) * ElementPack::load(b[i][beta]);
+                        dp = element_multiply_add(positive, product + product, dp);
+                        dp = element_multiply_add(twice_mu, (i == j && beta == eta ? one : zero) - dr, dp);
+                        sum = element_multiply_add(dp * shape[beta], shape[eta], sum);
+                    }
+                }
+                (A * sum).store(hd[i][j]);
+            }
+        }
+        for (int lane = 0; lane < count; ++lane)
+            for (int i = 0; i < 3; ++i) {
+                gradients[begin + lane][i] = gd[i][lane];
+                for (int j = 0; j < 3; ++j)
+                    hessians[begin + lane](i,j) = hd[i][j][lane];
+            }
+    }
+}
+
+
+void bending_derivatives_tile(
+    const Vec3* positions, const int* active_nodes, const double* coefficients,
+    const double* rest_angles, std::size_t entry_count, double kB,
+    Vec3* gradients, Mat33* hessians) {
+    assert(entry_count <= tile_width);
+    constexpr int W = ElementPack::width;
+    const ElementPack zero(0.0), one(1.0);
+    for (std::size_t begin=0; begin<entry_count; begin+=W) {
+        const int count=static_cast<int>(std::min<std::size_t>(W,entry_count-begin));
+        alignas(64) double c[4][3][W], ca[3][W], cb[3][W], aa[3][W], bb[3][W];
+        alignas(64) double X[W],Y[W],theta[W],ell[W],denominator[W],scale[W],roles[W],valid[W];
+        alignas(64) double points[4][3][W];
+        for(int lane=0;lane<W;++lane) {
+            const auto e=begin+std::min(lane,count-1);
+            for(int vertex=0;vertex<4;++vertex)
+                for(int axis=0;axis<3;++axis) points[vertex][axis][lane]=positions[4*e+vertex][axis];
+        }
+        for(int lane=0;lane<W;++lane) {
+            const auto e=begin+std::min(lane,count-1);
+            assert(active_nodes[e] >= 0 && active_nodes[e] < 4);
+            HingeDef def;
+            for(int vertex=0;vertex<4;++vertex)
+                for(int axis=0;axis<3;++axis) def.x[vertex][axis]=points[vertex][axis][lane];
+            const auto cache=make_bending_cache(def);
+            const Vec3 A=def.x[2]-def.x[1],B=def.x[3]-def.x[1];
+            for(int i=0;i<3;++i) {
+                c[0][i][lane]=cache.mA[i];c[1][i][lane]=cache.mB[i];
+                c[2][i][lane]=cache.e_hat[i];c[3][i][lane]=cache.e[i];
+                ca[i][lane]=A[i];cb[i][lane]=B[i];
+                aa[i][lane]=cache.a[i];bb[i][lane]=cache.b[i];
+            }
+            X[lane]=cache.X;Y[lane]=cache.Y;theta[lane]=cache.theta-rest_angles[e];
+            ell[lane]=cache.ell;denominator[lane]=cache.degenerate?1.0:cache.muA2*cache.muB2;
+            scale[lane]=2.0*kB*coefficients[e];roles[lane]=active_nodes[e];valid[lane]=cache.degenerate?0.0:1.0;
+        }
+        std::array<ElementPack,3> mA,mB,ehat,e,A,B,a,b;
+        for(int i=0;i<3;++i) {
+            mA[i]=ElementPack::load(c[0][i]);mB[i]=ElementPack::load(c[1][i]);
+            ehat[i]=ElementPack::load(c[2][i]);e[i]=ElementPack::load(c[3][i]);
+            A[i]=ElementPack::load(ca[i]);B[i]=ElementPack::load(cb[i]);
+            a[i]=ElementPack::load(aa[i]);b[i]=ElementPack::load(bb[i]);
+        }
+        const auto ordered_dot=[](const std::array<ElementPack,3>& a,const std::array<ElementPack,3>& b) {
+            // Match Eigen's pair reduction before the fused third product.
+            // Volatile prevents contraction across the pair's rounding boundary.
+            volatile ElementPack::Native p0=(a[0]*b[0]).value,p1=(a[1]*b[1]).value;
+            return element_multiply_add(a[2],b[2],ElementPack::raw(p0)+ElementPack::raw(p1));
+        };
+        const auto ordered_cross=[](const std::array<ElementPack,3>& a,const std::array<ElementPack,3>& b) {
+            return std::array<ElementPack,3>{
+                element_multiply_add(a[1],b[2],ElementPack(-1.0)*(a[2]*b[1])),
+                element_multiply_add(a[2],b[0],ElementPack(-1.0)*(a[0]*b[2])),
+                element_multiply_add(a[0],b[1],ElementPack(-1.0)*(a[1]*b[0]))};
+        };
+        const auto mbA=ordered_cross(mB,A),maB=ordered_cross(mA,B);
+        const auto mab=ordered_cross(mA,b),mba=ordered_cross(mB,a);
+        const auto mbe=ordered_cross(mB,e),ema=ordered_cross(e,mA);
+        const ElementPack coef0=ordered_dot(A,mB)+ordered_dot(mA,B);
+        const ElementPack coef1=ElementPack(-1.0)*(ordered_dot(a,mB)+ordered_dot(mA,b));
+        const ElementPack ehA=ordered_dot(ehat,A),ehB=ordered_dot(ehat,B);
+        const ElementPack eha=ordered_dot(ehat,a),ehb=ordered_dot(ehat,b);
+        const ElementPack r=ElementPack::load(roles),r0=equal(r,zero),r1=equal(r,one),r2=equal(r,ElementPack(2.0));
+        const ElementPack v=equal(ElementPack::load(valid),one),xx=ElementPack::load(X),yy=ElementPack::load(Y);
+        const ElementPack ss=ElementPack::load(scale),gs=ss*ElementPack::load(theta),den=ElementPack::load(denominator),negative_ell=ElementPack(-1.0)*ElementPack::load(ell);
+        ElementPack gtheta[3];
+        alignas(64) double gg[3][W],hh[3][3][W];
+        for(int i=0;i<3;++i) {
+            const ElementPack dX=select(r0,mbA[i]-maB[i],select(r1,mab[i]-mba[i],select(r2,mbe[i],ema[i])));
+            ElementPack dY0=element_multiply_add(ElementPack(-1.0)*ehA,mB[i],coef0*ehat[i]);
+            dY0=element_multiply_add(ElementPack(-1.0)*ehB,mA[i],dY0);
+            ElementPack dY1=element_multiply_add(eha,mB[i],coef1*ehat[i]);
+            dY1=element_multiply_add(ehb,mA[i],dY1);
+            const ElementPack dY=select(r0,dY0,select(r1,dY1,negative_ell*select(r2,mB[i],mA[i])));
+            gtheta[i]=select(v,element_multiply_add(ElementPack(-1.0)*yy,dX,xx*dY)/den,zero);
+            select(v, gs*gtheta[i], zero).store(gg[i]);
+        }
+        // Eigen scales the left vector before forming the outer product.
+        for(int i=0;i<3;++i)
+            for(int j=0;j<3;++j) select(v, (ss*gtheta[i])*gtheta[j], zero).store(hh[i][j]);
+        for(int lane=0;lane<count;++lane)
+            for(int i=0;i<3;++i) {
+                gradients[begin+lane][i]=gg[i][lane];
+                for(int j=0;j<3;++j) hessians[begin+lane](i,j)=hh[i][j][lane];
+            }
     }
 }
 

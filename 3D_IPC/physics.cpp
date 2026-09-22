@@ -8,10 +8,14 @@
 #include <limits>
 #include <string>
 
-bool physics_detail::collision_off_energy_simd_enabled(
+bool physics_detail::noncontact_energy_simd_enabled(const SimParams& params) {
+    return params.use_basic_experimental_v2 && params.use_simd
+        && !params.use_cloth_grid && !params.use_ogc_solver;
+}
+
+bool physics_detail::private_simd_batches_enabled(
     const RefMesh& mesh, const SimParams& params) {
-    return (params.use_basic_experimental || params.use_basic_experimental_v2) && params.use_simd
-        && !params.use_cloth_grid && !params.use_ogc && !params.use_ogc_solver
+    return noncontact_energy_simd_enabled(params) && !params.use_ogc
         && params.d_hat == 0.0 && params.k_barrier == 0.0
         && !params.use_ccd && !params.use_ccd_guess
         && params.k_sdf == 0.0 && params.friction_coefficient == 0.0
@@ -247,6 +251,68 @@ double compute_incremental_potential_no_barrier(const RefMesh& ref_mesh, const s
     return E + dt2 * PE + friction_energy;
 }
 
+// Mesh gather and ordered accumulation stay outside the local SIMD kernels.
+static void accumulate_v2_elasticity(
+    const RefMesh& mesh, const std::vector<Vec3>& x, const IncidentTriangles& incident,
+    const std::vector<ShapeGrads>* rest_shape_grads, double mu, double lambda,
+    double dt2, Vec3& g, Mat33& H) {
+    constexpr std::size_t width = ipc_simd::tile_width;
+    std::array<Vec3, 3 * width> positions;
+    std::array<Mat22, width> dm;
+    std::array<Vec2, width> shape;
+    std::array<double, width> area;
+    std::array<Vec3, width> gradients;
+    std::array<Mat33, width> hessians;
+    for (std::size_t begin = 0; begin < incident.size(); begin += width) {
+        const std::size_t count = std::min(width, incident.size() - begin);
+        for (std::size_t e = 0; e < count; ++e) {
+            const auto [triangle, role] = incident[begin + e];
+            for (int corner = 0; corner < 3; ++corner)
+                positions[3 * e + corner] = x[mesh.tris[3 * triangle + corner]];
+            dm[e] = mesh.Dm_inverse[triangle];
+            area[e] = mesh.area[triangle];
+            shape[e] = rest_shape_grads ? (*rest_shape_grads)[triangle][role]
+                : shape_function_gradients(dm[e])[role];
+        }
+        ipc_simd::corotated_derivatives_tile(positions.data(), dm.data(), area.data(),
+            shape.data(), count, mu, lambda, gradients.data(), hessians.data());
+        for (std::size_t e = 0; e < count; ++e) {
+            g += dt2 * gradients[e];
+            H += dt2 * hessians[e];
+        }
+    }
+}
+
+static void accumulate_v2_bending(
+    const RefMesh& mesh, const std::vector<Vec3>& x,
+    const std::vector<std::pair<int, int>>& incident, double stiffness,
+    double dt2, Vec3& g, Mat33& H) {
+    constexpr std::size_t width = ipc_simd::tile_width;
+    std::array<Vec3, 4 * width> positions;
+    std::array<int, width> roles;
+    std::array<double, width> coefficients, rest_angles;
+    std::array<Vec3, width> gradients;
+    std::array<Mat33, width> hessians;
+    for (std::size_t begin = 0; begin < incident.size(); begin += width) {
+        const std::size_t count = std::min(width, incident.size() - begin);
+        for (std::size_t e = 0; e < count; ++e) {
+            const auto [index, role] = incident[begin + e];
+            const auto& hinge = mesh.hinges[index];
+            for (int corner = 0; corner < 4; ++corner)
+                positions[4 * e + corner] = x[hinge.v[corner]];
+            roles[e] = role;
+            coefficients[e] = hinge.c_e;
+            rest_angles[e] = hinge.bar_theta;
+        }
+        ipc_simd::bending_derivatives_tile(positions.data(), roles.data(), coefficients.data(),
+            rest_angles.data(), count, stiffness, gradients.data(), hessians.data());
+        for (std::size_t e = 0; e < count; ++e) {
+            g += dt2 * gradients[e];
+            H += dt2 * hessians[e];
+        }
+    }
+}
+
 template <bool UseStoredMembrane = false>
 static std::pair<Vec3, Mat33>
 compute_local_gradient_and_hessian_no_barrier_impl(
@@ -263,11 +329,11 @@ compute_local_gradient_and_hessian_no_barrier_impl(
     Vec3  g = Vec3::Zero();
     Mat33 H = Mat33::Zero();
 
-    // The CLI-selected experimental collision-off route opts into all five
-    // non-contact energy kernels. The checked reference assembly stays scalar.
+    // V2 vectorizes these energy terms independently of contact/SDF/friction.
+    // V1 and the checked reference assembly stay scalar.
     // The stored-membrane specialization replaces only that assembly stage.
     const bool simd_energy = !validate_friction_inputs
-        && physics_detail::collision_off_energy_simd_enabled(ref_mesh, params);
+        && physics_detail::noncontact_energy_simd_enabled(params);
 
     // Point energy terms: inertia, gravity and the first matching pin.
     const Vec3* pin_target = nullptr;
@@ -306,7 +372,7 @@ compute_local_gradient_and_hessian_no_barrier_impl(
     } else {
         const IncidentTriangles& incident = incident_triangles ? *incident_triangles : adj.at(vi);
         if (simd_energy) {
-            ipc_simd::accumulated_corotated_elasticity(ref_mesh, x, incident, rest_shape_grads,
+            accumulate_v2_elasticity(ref_mesh, x, incident, rest_shape_grads,
                 params.mu, params.lambda, dt2, g, H);
         } else {
             for (const auto& [ti, a] : incident) {
@@ -341,7 +407,7 @@ compute_local_gradient_and_hessian_no_barrier_impl(
         auto it = ref_mesh.hinge_adj.find(vi);
         if (it != ref_mesh.hinge_adj.end()) {
             if (simd_energy) {
-                ipc_simd::accumulate_bending(ref_mesh, x, it->second,
+                accumulate_v2_bending(ref_mesh, x, it->second,
                     params.kB, dt2, g, H);
             } else {
                 for (const auto& [hi, role] : it->second) {
@@ -697,3 +763,30 @@ double compute_global_residual(const RefMesh& ref_mesh, const VertexTriangleMap&
     }
     return r_inf;
 }
+
+namespace physics_detail {
+
+std::pair<Vec3, Mat33> compute_local_simd_v2_derivatives(
+    int vi, const RefMesh& mesh, const std::vector<Pin>& pins,
+    const SimParams& params, const std::vector<Vec3>& x,
+    const std::vector<Vec3>& xhat, const PinMap& pin_map,
+    const SimdDerivativeView& elasticity, const SimdDerivativeView& bending) {
+    Vec3 g = Vec3::Zero();
+    Mat33 H = Mat33::Zero();
+    const int pin = pin_map[vi];
+    const Vec3* pin_target = pin >= 0 ? &pins[pin].target_position : nullptr;
+    const double dt2 = params.dt2();
+    ipc_simd::accumulate_point_terms(mesh.mass[vi], x[vi], xhat[vi],
+        params.gravity, pin_target, params.kpin, dt2, g, H);
+    const auto accumulate = [&](const SimdDerivativeView& entries) {
+        for (std::size_t e = 0; e < entries.count; ++e) {
+            g += dt2 * entries.gradients[e];
+            H += dt2 * entries.hessians[e];
+        }
+    };
+    accumulate(elasticity);
+    if (params.kB > 0.0) accumulate(bending);
+    return {g, H};
+}
+
+} // namespace physics_detail

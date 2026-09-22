@@ -2,9 +2,24 @@
 
 #include "physics.h"
 
-// Element lanes are independent incident triangles/hinges for one active
-// vertex. Point terms pack xyz components. The caller owns g/H and scheduling.
+// Element lanes are independent triangle/hinge contributions. Point terms pack
+// xyz components. The caller owns accumulation and scheduling.
 namespace ipc_simd {
+
+// V2's organizer gathers AoS entries before calling these kernels. Each call
+// transposes only a local tile and returns private AoS contributions. They do
+// not read mesh indices or scatter into shared vertices. Outputs include rest
+// area/coefficient but not dt^2, which is applied during ordered accumulation.
+inline constexpr std::size_t tile_width = 8;
+const char* tile_backend_name();
+void corotated_derivatives_tile(
+    const Vec3* positions, const Mat22* dm_inverse, const double* areas,
+    const Vec2* shape_gradients, std::size_t count, double mu, double lambda,
+    Vec3* gradients, Mat33* hessians);
+void bending_derivatives_tile(
+    const Vec3* positions, const int* active_nodes, const double* coefficients,
+    const double* rest_angles, std::size_t count, double stiffness,
+    Vec3* gradients, Mat33* hessians);
 
 int lane_width();
 const char* backend_name();
@@ -20,7 +35,7 @@ void accumulate_point_terms(
     const Vec3* pin_target, double kpin, double dt2,
     Vec3& gradient, Mat33& hessian);
 
-// Add membrane elasticity to existing local accumulators in incident order.
+// Add corotated elasticity to existing local accumulators in incident order.
 // This computes the same corotated gradient and exact self Hessian as the
 // scalar assembly; contact and the local solve remain with the caller.
 void accumulated_corotated_elasticity(

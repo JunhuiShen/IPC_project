@@ -944,30 +944,31 @@ TEST(BasicSolverParameters, ExperimentalDefaultsOffAndRoundTrips) {
     EXPECT_FALSE(disabled.to_sim_params().use_basic_experimental);
 }
 
-TEST(BasicSolverParameters, ExperimentalV2FlagIsIndependentAndRoundTrips) {
-    EXPECT_FALSE(SimParams::zeros().use_basic_experimental_v2);
+TEST(BasicSolverParameters, SimdFlagSelectsExperimentalVersionAndRoundTrips) {
     IPCArgs3D defaults;
+    EXPECT_FALSE(defaults.to_sim_params().use_simd);
     EXPECT_FALSE(defaults.to_sim_params().use_basic_experimental_v2);
     IPCArgs3D bare;
-    ASSERT_TRUE(parse_arguments(bare, {"3D_sim", "--use_basic_experimental_v2"}));
+    ASSERT_TRUE(parse_arguments(bare, {"3D_sim", "--use_basic_experimental", "--use_simd"}));
+    EXPECT_TRUE(bare.to_sim_params().use_basic_experimental);
     EXPECT_TRUE(bare.to_sim_params().use_basic_experimental_v2);
-    EXPECT_FALSE(bare.to_sim_params().use_basic_experimental);
 
-    for (const bool original : {false, true}) {
-        for (const bool v2 : {false, true}) {
-            SCOPED_TRACE(::testing::Message() << "original=" << original << " v2=" << v2);
+    for (const bool experimental : {false, true}) {
+        for (const bool simd : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "experimental=" << experimental << " simd=" << simd);
             IPCArgs3D args;
             ASSERT_TRUE(parse_arguments(args, {"3D_sim", "--use_basic_experimental",
-                original ? "true" : "false", "--use_basic_experimental_v2",
-                v2 ? "true" : "false"}));
-            EXPECT_EQ(args.to_sim_params().use_basic_experimental, original);
-            EXPECT_EQ(args.to_sim_params().use_basic_experimental_v2, v2);
+                experimental ? "true" : "false", "--use_simd", simd ? "true" : "false"}));
+            EXPECT_EQ(args.to_sim_params().use_basic_experimental, experimental);
+            EXPECT_EQ(args.to_sim_params().use_simd, simd);
+            EXPECT_EQ(args.to_sim_params().use_basic_experimental_v2, experimental && simd);
             TemporaryArgsFile saved;
             args.serialize(saved.path.string());
             IPCArgs3D restored;
             ASSERT_TRUE(restored.deserialize(saved.path.string()));
-            EXPECT_EQ(restored.to_sim_params().use_basic_experimental, original);
-            EXPECT_EQ(restored.to_sim_params().use_basic_experimental_v2, v2);
+            EXPECT_EQ(restored.to_sim_params().use_basic_experimental, experimental);
+            EXPECT_EQ(restored.to_sim_params().use_simd, simd);
+            EXPECT_EQ(restored.to_sim_params().use_basic_experimental_v2, experimental && simd);
         }
     }
 }
@@ -1025,11 +1026,9 @@ TEST(BasicSolver, ExperimentalV2MatchesOriginalAcrossContactModesAndGroupedSweep
                     reference_results[frame - 1] = result;
                 } else {
                     const auto& reference = references[frame - 1];
-                    if (mode == 0 && simd && parallel) {
-                        // Only this combination compares different membrane
-                        // arithmetic: v2's stored scalar blocks versus the
-                        // original SIMD analytic kernels. Use the established
-                        // scalar/SIMD integration budgets from SIMD_test.cpp.
+                    if (parallel || simd) {
+                        // SIMD and stored scalar blocks can round differently.
+                        // Compare these routes at the integration tolerance.
                         ASSERT_EQ(scene.state.deformed_positions.size(), reference.deformed_positions.size());
                         ASSERT_EQ(scene.state.velocities.size(), reference.velocities.size());
                         for (std::size_t node = 0; node < reference.deformed_positions.size(); ++node) {
@@ -1043,8 +1042,7 @@ TEST(BasicSolver, ExperimentalV2MatchesOriginalAcrossContactModesAndGroupedSweep
                                 << "velocity node=" << node;
                         }
                     } else {
-                        // Scalar/contact paths retain the same contribution
-                        // arithmetic; serial v2 must keep its original fallback.
+                        // Both routes use the same live scalar assembly here.
                         expect_states_bitwise_equal(scene.state, reference);
                     }
                     const auto& expected = reference_results[frame - 1];

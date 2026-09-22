@@ -1,5 +1,6 @@
 #include <optional>
 #include "solver.h"
+#include "SIMD.h"
 #include "contact_scheduling.h"
 #include "grid_contact_scheduling.h"
 #include "grid_coloring.h"
@@ -1102,6 +1103,14 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
                                         BroadPhase& broad_phase,
                                         const std::string& outdir,
                                         const std::vector<Vec3>* previous_positions) {
+    // A direct call to v1 always selects scalar assembly, regardless of driver flags.
+    if (params.use_basic_experimental_v2) {
+        SimParams scalar_params = params;
+        scalar_params.use_basic_experimental_v2 = false;
+        scalar_params.use_simd = false;
+        return global_gauss_seidel_solver_basic_experimental(ref_mesh, adj, pins, scalar_params,
+            xnew, xhat, v, broad_phase, outdir, previous_positions);
+    }
 
     //create node (blue) boxes and create broad phase (red boxes) accordingly
     validate_solver_friction_parameters(
@@ -1429,13 +1438,81 @@ struct ColorTriangleStorage {
 // Entry e is that triangle's contribution to its active node, NOT the sum of
 // all triangles incident on the node, nor a full 9x9 triangle Hessian.
 // The matching input's node_offsets also delimit these output arrays.
-// Values include rest area and dt^2, matching the incremental-potential
-// membrane terms. Gradient is +dE/dx; Hessian is the exact self block (no PSD
-// projection). Other energies and contact contributions are not included.
+// Scalar prepass values include rest area and dt^2. Gradient is +dE/dx;
+// Hessian is the exact self block (no PSD projection). Other energies and
+// contact contributions are not included.
 struct ColorTriangleDerivatives {
     std::vector<Vec3> gradients;
     std::vector<Mat33> hessians;
 };
+
+struct ColorHingeStorage {
+    std::vector<std::size_t> node_offsets;
+    std::vector<int> hinge_indices;
+    std::vector<int> active_nodes;
+    std::vector<double> coefficients;
+    std::vector<double> rest_angles;
+    std::vector<Mat33> hessians;
+};
+
+// Static AoS layout/material preparation belongs to the organizer. Compare
+// value snapshots so an in-place rest-property edit also refreshes the buffers.
+struct SimdColorStorageKey {
+    const RefMesh* mesh = nullptr;
+    bool valid = false, bending = false;
+    std::vector<int> triangles;
+    std::vector<Mat22> dm_inverse;
+    std::vector<double> areas;
+    std::vector<Hinge> hinges;
+    std::vector<std::vector<int>> colors;
+
+    template <class T>
+    static bool same_bytes(const std::vector<T>& a, const std::vector<T>& b) {
+        return a.size() == b.size() && (a.empty()
+            || std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0);
+    }
+    bool matches(const RefMesh& candidate, const std::vector<std::vector<int>>& groups,
+                 bool with_bending) const {
+        static_assert(sizeof(Mat22) == 4 * sizeof(double));
+        static_assert(sizeof(Hinge) == 4 * sizeof(int) + 2 * sizeof(double));
+        return valid && mesh == &candidate && bending == with_bending && colors == groups
+            && same_bytes(triangles, candidate.tris)
+            && same_bytes(dm_inverse, candidate.Dm_inverse)
+            && same_bytes(areas, candidate.area) && same_bytes(hinges, candidate.hinges);
+    }
+    void capture(const RefMesh& candidate, const std::vector<std::vector<int>>& groups,
+                 bool with_bending) {
+        mesh = &candidate;
+        bending = with_bending;
+        triangles = candidate.tris;
+        dm_inverse = candidate.Dm_inverse;
+        areas = candidate.area;
+        hinges = candidate.hinges;
+        colors = groups;
+        valid = true;
+    }
+};
+
+// Mesh gather only. The separate SIMD kernels receive contiguous AoS records.
+static void gather_color_triangles(
+    const RefMesh& mesh, const std::vector<Vec3>& x, const ColorTriangleStorage& storage,
+    std::size_t begin, std::size_t count, Vec3* positions) {
+    for (std::size_t e = begin; e < begin + count; ++e) {
+        const std::size_t base = 3 * static_cast<std::size_t>(storage.triangle_indices[e]);
+        for (int corner = 0; corner < 3; ++corner)
+            positions[3 * (e-begin) + corner] = x[mesh.tris[base + corner]];
+    }
+}
+
+static void gather_color_hinges(
+    const RefMesh& mesh, const std::vector<Vec3>& x, const ColorHingeStorage& storage,
+    std::size_t begin, std::size_t count, Vec3* positions) {
+    for (std::size_t e = begin; e < begin + count; ++e) {
+        const auto& hinge = mesh.hinges[storage.hinge_indices[e]];
+        for (int corner = 0; corner < 4; ++corner)
+            positions[4 * (e-begin) + corner] = x[hinge.v[corner]];
+    }
+}
 
 SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
                                         std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
@@ -1501,15 +1578,28 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
     const bool use_contact_sweep = params.use_parallel && omp_get_max_threads() > 1
         && params.friction_coefficient == 0.0 && params.d_hat > 0.0
         && !params.use_ogc;
-    // Prepare membrane derivatives once per color visit, then consume them
-    // in parallel vertex updates. Other energy terms and contact/CCD retain
-    // their existing live assembly. The prepass has no SIMD dependency.
-    std::vector<ColorTriangleStorage> color_triangle_storage;
-    std::vector<ColorTriangleDerivatives> color_triangle_derivatives;
-    // Indexed by global vertex ID. Views are rebuilt after buffer resizing;
-    // their backing arrays remain stable throughout the ensuing color sweeps.
-    std::vector<physics_detail::MembraneDerivativeView> vertex_membrane(
-        params.use_parallel ? nv : 0);
+    // Contact-aware paths use a collective color prepass. Collision-free
+    // SIMD instead gathers and computes private ranges within independent
+    // batches; color conflicts ensure their inputs cannot change concurrently.
+    // Retain capacity across substeps. Static mappings/rest data are refreshed
+    // when their key changes; dynamic positions/derivatives refresh on use.
+    static std::vector<ColorTriangleStorage> color_triangle_storage;
+    static std::vector<ColorTriangleDerivatives> color_triangle_derivatives;
+    const bool use_v2_simd = params.use_parallel
+        && physics_detail::private_simd_batches_enabled(ref_mesh, params);
+    static SimdColorStorageKey simd_storage_key;
+    if (!use_v2_simd) simd_storage_key.valid = false;
+    static std::vector<ColorHingeStorage> color_hinge_storage;
+    static std::vector<physics_detail::SimdDerivativeView> vertex_elasticity_simd;
+    vertex_elasticity_simd.resize(use_v2_simd ? nv : 0);
+    static std::vector<physics_detail::SimdDerivativeView> vertex_bending;
+    vertex_bending.resize(use_v2_simd && params.kB > 0.0 ? nv : 0);
+    static std::vector<Vec3> color_rollback;
+    color_rollback.resize(use_v2_simd ? nv : 0);
+    // Scalar views refer to per-color arrays. SIMD views are rebound to a
+    // worker's private results for each batch and consumed before its next batch.
+    static std::vector<physics_detail::MembraneDerivativeView> vertex_membrane;
+    vertex_membrane.resize(params.use_parallel ? nv : 0);
     std::atomic<bool> color_derivative_failed{false};
     std::exception_ptr color_derivative_error;
     // Every worker enters this callback before EVERY color visit. Gather and
@@ -1521,10 +1611,26 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
     const auto prepare_color_derivatives = [&](std::size_t color) noexcept {
         auto& storage = color_triangle_storage[color];
         auto& derivatives = color_triangle_derivatives[color];
+        const bool simd = physics_detail::noncontact_energy_simd_enabled(params);
+        const std::size_t stride = simd ? ipc_simd::tile_width : 1;
         #pragma omp for schedule(static)
-        for (std::size_t e = 0; e < storage.triangle_indices.size(); ++e) {
+        for (std::size_t e = 0; e < storage.triangle_indices.size(); e += stride) {
             if (color_derivative_failed.load(std::memory_order_relaxed)) continue;
             try {
+                if (simd) {
+                    const std::size_t count = std::min(stride, storage.triangle_indices.size() - e);
+                    gather_color_triangles(ref_mesh, xnew, storage, e, count,
+                        storage.positions.data() + 3 * e);
+                    ipc_simd::corotated_derivatives_tile(storage.positions.data() + 3 * e,
+                        storage.dm_inverse.data() + e, storage.areas.data() + e,
+                        storage.shape_gradients.data() + e, count, params.mu, params.lambda,
+                        derivatives.gradients.data() + e, derivatives.hessians.data() + e);
+                    for (std::size_t i = e; i < e + count; ++i) {
+                        derivatives.gradients[i] *= dt2;
+                        derivatives.hessians[i] *= dt2;
+                    }
+                    continue;
+                }
                 const std::size_t base = 3 * static_cast<std::size_t>(storage.triangle_indices[e]);
                 for (int corner = 0; corner < 3; ++corner)
                     storage.positions[3 * e + corner] = xnew[ref_mesh.tris[base + corner]];
@@ -1549,6 +1655,57 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
             } catch (...) {
                 if (!color_derivative_failed.exchange(true, std::memory_order_relaxed))
                     color_derivative_error = std::current_exception();
+            }
+        }
+    };
+    // SIMD work owns complete vertex ranges. The gather, local transpose/
+    // compute, and ordered accumulation stay separate, but independent batches
+    // of one color need no whole-color handoff between these operations.
+    const auto prepare_simd_batch = [&](std::size_t color, std::size_t first, std::size_t last) {
+        // Per-worker AoS results live through the following vertex updates.
+        static thread_local std::vector<Vec3> elasticity_g, bending_g;
+        static thread_local std::vector<Mat33> elasticity_H, bending_H;
+        std::array<Vec3, 4 * ipc_simd::tile_width> positions;
+        const auto& group = color_groups[color];
+        const auto& storage = color_triangle_storage[color];
+        const std::size_t triangle_begin = storage.node_offsets[first];
+        const std::size_t triangle_end = storage.node_offsets[last];
+        const std::size_t triangles = triangle_end-triangle_begin;
+        if (elasticity_g.size() < triangles) elasticity_g.resize(triangles);
+        if (elasticity_H.size() < triangles) elasticity_H.resize(triangles);
+        for (std::size_t e = triangle_begin; e < triangle_end; e += ipc_simd::tile_width) {
+            const std::size_t count = std::min(ipc_simd::tile_width, triangle_end-e);
+            gather_color_triangles(ref_mesh, xnew, storage, e, count, positions.data());
+            ipc_simd::corotated_derivatives_tile(positions.data(), storage.dm_inverse.data()+e,
+                storage.areas.data()+e, storage.shape_gradients.data()+e, count,
+                params.mu, params.lambda, elasticity_g.data()+e-triangle_begin,
+                elasticity_H.data()+e-triangle_begin);
+        }
+        for (std::size_t i = first; i < last; ++i) {
+            const std::size_t offset = storage.node_offsets[i]-triangle_begin;
+            const std::size_t count = storage.node_offsets[i+1]-storage.node_offsets[i];
+            vertex_elasticity_simd[group[i]] = {count ? elasticity_g.data()+offset : nullptr,
+                count ? elasticity_H.data()+offset : nullptr, count};
+        }
+        if (params.kB > 0.0) {
+            const auto& hinges = color_hinge_storage[color];
+            const std::size_t hinge_begin = hinges.node_offsets[first];
+            const std::size_t hinge_end = hinges.node_offsets[last];
+            const std::size_t count = hinge_end-hinge_begin;
+            if (bending_g.size() < count) bending_g.resize(count);
+            if (bending_H.size() < count) bending_H.resize(count);
+            for (std::size_t e = hinge_begin; e < hinge_end; e += ipc_simd::tile_width) {
+                const std::size_t count = std::min(ipc_simd::tile_width, hinge_end-e);
+                gather_color_hinges(ref_mesh, xnew, hinges, e, count, positions.data());
+                ipc_simd::bending_derivatives_tile(positions.data(), hinges.active_nodes.data()+e,
+                    hinges.coefficients.data()+e, hinges.rest_angles.data()+e, count, params.kB,
+                    bending_g.data()+e-hinge_begin, bending_H.data()+e-hinge_begin);
+            }
+            for (std::size_t i = first; i < last; ++i) {
+                const std::size_t offset = hinges.node_offsets[i]-hinge_begin;
+                const std::size_t count = hinges.node_offsets[i+1]-hinges.node_offsets[i];
+                vertex_bending[group[i]] = {count ? bending_g.data()+offset : nullptr,
+                    count ? bending_H.data()+offset : nullptr, count};
             }
         }
     };
@@ -1593,11 +1750,14 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
         }
 
         // Prepare shared storage before the color sweep's worker team starts.
-        // Re-size when colors are rebuilt (including contact-cost reordering),
-        // for either contact or ordinary color sweeps, independent of use_simd.
-        if (params.use_parallel && (iter - 1) % params.node_box_update_count == 0) {
+        // Re-size after color changes (including contact-cost reordering). The
+        // collision-off SIMD path can retain unchanged layout/material data.
+        if (params.use_parallel && (iter - 1) % params.node_box_update_count == 0
+            && (!use_v2_simd || !simd_storage_key.matches(ref_mesh, color_groups, params.kB > 0.0))) {
             color_triangle_storage.resize(color_groups.size());
             color_triangle_derivatives.resize(color_groups.size());
+            if (use_v2_simd && params.kB > 0.0)
+                color_hinge_storage.resize(color_groups.size());
             for (std::size_t color = 0; color < color_groups.size(); ++color) {
                 const auto& group = color_groups[color];
                 auto& storage = color_triangle_storage[color];
@@ -1609,22 +1769,24 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
                 const std::size_t count = storage.node_offsets.back();
                 storage.triangle_indices.resize(count);
                 storage.local_corners.resize(count);
-                storage.positions.resize(3 * count);
+                if (!use_v2_simd) storage.positions.resize(3 * count);
                 storage.dm_inverse.resize(count);
                 storage.areas.resize(count);
                 storage.shape_gradients.resize(count);
-                // Allocate outside the worker team. Each visited color
-                // overwrites all entries with its current membrane derivatives.
+                // The scalar path stores a complete color's derivatives.
+                // SIMD derivatives use the worker's private batch buffers.
                 auto& derivatives = color_triangle_derivatives[color];
-                derivatives.gradients.assign(count, Vec3::Zero());
-                derivatives.hessians.assign(count, Mat33::Zero());
+                if (!use_v2_simd) {
+                    derivatives.gradients.resize(count);
+                    derivatives.hessians.resize(count);
+                }
                 // Match every field to the same incident triangle and retain
                 // each node's original incident order. These rest quantities
                 // stay fixed during the sweeps; only positions need refreshing.
                 for (std::size_t i = 0; i < group.size(); ++i) {
                     const std::size_t begin = storage.node_offsets[i];
                     const std::size_t node_count = storage.node_offsets[i + 1] - begin;
-                    vertex_membrane[group[i]] = {
+                    if (!use_v2_simd) vertex_membrane[group[i]] = {
                         node_count ? derivatives.gradients.data() + begin : nullptr,
                         node_count ? derivatives.hessians.data() + begin : nullptr,
                         node_count
@@ -1639,7 +1801,37 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
                         ++e;
                     }
                 }
+                if (use_v2_simd && params.kB > 0.0) {
+                    auto& hinges = color_hinge_storage[color];
+                    hinges.node_offsets.resize(group.size() + 1);
+                    hinges.node_offsets[0] = 0;
+                    for (std::size_t i = 0; i < group.size(); ++i) {
+                        const auto it = ref_mesh.hinge_adj.find(group[i]);
+                        hinges.node_offsets[i + 1] = hinges.node_offsets[i]
+                            + (it == ref_mesh.hinge_adj.end() ? 0 : it->second.size());
+                    }
+                    const std::size_t count = hinges.node_offsets.back();
+                    hinges.hinge_indices.resize(count);
+                    hinges.active_nodes.resize(count);
+                    hinges.coefficients.resize(count);
+                    hinges.rest_angles.resize(count);
+                    for (std::size_t i = 0; i < group.size(); ++i) {
+                        const std::size_t begin = hinges.node_offsets[i];
+                        const auto it = ref_mesh.hinge_adj.find(group[i]);
+                        if (it == ref_mesh.hinge_adj.end()) continue;
+                        std::size_t e = begin;
+                        for (const auto& [index, role] : it->second) {
+                            hinges.hinge_indices[e] = index;
+                            hinges.active_nodes[e] = role;
+                            hinges.coefficients[e] = ref_mesh.hinges[index].c_e;
+                            hinges.rest_angles[e] = ref_mesh.hinges[index].bar_theta;
+                            ++e;
+                        }
+                    }
+                }
             }
+            if (use_v2_simd)
+                simd_storage_key.capture(ref_mesh, color_groups, params.kB > 0.0);
         }
 
         if (use_contact_sweep && (iter - 1) % params.node_box_update_count == 0)
@@ -1659,9 +1851,16 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
         const auto proposed_position = [&](int vi,
             safe_step_detail::VertexAabbRejections* rejections,
             bool cooperative) -> Vec3 {
+          if (use_v2_simd) {
+            const auto [g, H] = physics_detail::compute_local_simd_v2_derivatives(
+                vi, ref_mesh, pins, params, xnew, xhat, pm, vertex_elasticity_simd[vi],
+                params.kB > 0.0 ? vertex_bending[vi] : physics_detail::SimdDerivativeView{});
+            const Vec3 delta = matrix3d_inverse(H) * g;
+            return xnew[vi] - params.damping * delta;
+          }
           if (params.use_parallel) {
             // Stored entries are already dt^2/area weighted and are added in
-            // incident order, in place of (not in addition to) live membrane work.
+            // incident order, replacing live elasticity evaluation.
             return xnew[vi] -
                    params.damping *
                        gs_vertex_delta_live_barrier_experimental<true>(
@@ -1671,7 +1870,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
                            cooperative, rejections, &vertex_membrane[vi]);
           }
           // Serial mode keeps the original vertex-by-vertex GS ordering,
-          // which has no per-color snapshot or stored membrane derivatives.
+          // which has no per-color snapshot or stored elasticity derivatives.
           return xnew[vi] -
                  params.damping *
                      gs_vertex_delta_live_barrier_experimental(
@@ -1823,7 +2022,51 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
               ? std::min(params.max_global_iters - iter + 1,
                          params.node_box_update_count - (iter - 1) % params.node_box_update_count)
               : 1;
-          if (params.fixed_iters && params.friction_coefficient > 0.0) {
+          if (use_v2_simd) {
+            constexpr std::size_t max_vertices_per_batch = 8;
+            std::vector<std::atomic<bool>> failed_colors(color_groups.size());
+            for (auto& failed : failed_colors) failed.store(false, std::memory_order_relaxed);
+            #pragma omp parallel
+            {
+                const std::size_t team = static_cast<std::size_t>(omp_get_num_threads());
+                for (int sweep = 0; sweep < sweeps; ++sweep) {
+                    for (std::size_t color = 0; color < color_groups.size(); ++color) {
+                        const auto& group = color_groups[color];
+                        // Retain multiple requests per worker on small colors;
+                        // large colors amortize dispatch without fixing owners.
+                        const std::size_t vertices_per_batch = std::min(max_vertices_per_batch,
+                            std::max(std::size_t(1), group.size() / (2 * team)));
+                        #pragma omp for schedule(dynamic, 1)
+                        for (std::size_t first = 0; first < group.size(); first += vertices_per_batch) {
+                            const std::size_t last = std::min(first + vertices_per_batch, group.size());
+                            // Each vertex is exclusive to this batch. Save even
+                            // after a failure so the whole color can be restored.
+                            for (std::size_t i = first; i < last; ++i)
+                                color_rollback[group[i]] = xnew[group[i]];
+                            if (color_derivative_failed.load(std::memory_order_relaxed)) continue;
+                            try {
+                                prepare_simd_batch(color, first, last);
+                                for (std::size_t i = first; i < last; ++i)
+                                    process_vertex(group[i]);
+                            } catch (...) {
+                                failed_colors[color].store(true, std::memory_order_relaxed);
+                                if (!color_derivative_failed.exchange(true, std::memory_order_relaxed))
+                                    color_derivative_error = std::current_exception();
+                            }
+                        }
+                        // Preserve v2's failed-color behavior without adding a
+                        // success-path barrier between independent batches.
+                        // A faster worker may already fail in the NEXT color.
+                        // Only this color's flag may control its rollback join.
+                        if (failed_colors[color].load(std::memory_order_relaxed)) {
+                            #pragma omp for schedule(static)
+                            for (std::size_t i = 0; i < group.size(); ++i)
+                                xnew[group[i]] = color_rollback[group[i]];
+                        }
+                    }
+                }
+            }
+          } else if (params.fixed_iters && params.friction_coefficient > 0.0) {
             colored_vertex_sweep.run(color_groups, sweeps, process_vertex,
                                      prepare_color_derivatives);
           } else {
