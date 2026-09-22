@@ -1,4 +1,5 @@
 #include "physics.h"
+#include "SIMD.h"
 #include "broad_phase.h"
 #include "friction_energy.h"
 #include "mesh_utils.h"
@@ -6,6 +7,16 @@
 #include <cmath>
 #include <limits>
 #include <string>
+
+bool physics_detail::collision_off_energy_simd_enabled(
+    const RefMesh& mesh, const SimParams& params) {
+    return (params.use_basic_experimental || params.use_basic_experimental_v2) && params.use_simd
+        && !params.use_cloth_grid && !params.use_ogc && !params.use_ogc_solver
+        && params.d_hat == 0.0 && params.k_barrier == 0.0
+        && !params.use_ccd && !params.use_ccd_guess
+        && params.k_sdf == 0.0 && params.friction_coefficient == 0.0
+        && mesh.tets.empty() && mesh.rb_nodes.empty();
+}
 
 // Union of all obstacles
 static inline bool sdf_min_evaluation(const SimParams& params, const Vec3& xi, SDFEvaluation& out) {
@@ -252,24 +263,36 @@ compute_local_gradient_and_hessian_no_barrier_impl(
     Vec3  g = Vec3::Zero();
     Mat33 H = Mat33::Zero();
 
-    g += ref_mesh.mass[vi] * (x[vi] - xhat[vi]);
-    g += dt2 * (-ref_mesh.mass[vi] * params.gravity);
-    H += ref_mesh.mass[vi] * Mat33::Identity();
+    // The CLI-selected experimental collision-off route opts into all five
+    // non-contact energy kernels. The checked reference assembly stays scalar.
+    // The stored-membrane specialization replaces only that assembly stage.
+    const bool simd_energy = !validate_friction_inputs
+        && physics_detail::collision_off_energy_simd_enabled(ref_mesh, params);
 
+    // Point energy terms: inertia, gravity and the first matching pin.
+    const Vec3* pin_target = nullptr;
     if (pin_map) {
         const int pi = (*pin_map)[vi];
-        if (pi >= 0) {
-            const Pin& pin = pins[pi];
-            g += dt2 * params.kpin * (x[vi] - pin.target_position);
-            H += dt2 * params.kpin * Mat33::Identity();
-        }
+        if (pi >= 0) pin_target = &pins[pi].target_position;
     } else {
         for (const Pin& pin : pins) {
             if (pin.vertex_index == vi) {
-                g += dt2 * params.kpin * (x[vi] - pin.target_position);
-                H += dt2 * params.kpin * Mat33::Identity();
+                pin_target = &pin.target_position;
                 break;
             }
+        }
+    }
+    if (simd_energy) {
+        ipc_simd::accumulate_point_terms(ref_mesh.mass[vi], x[vi], xhat[vi],
+            params.gravity, pin_target, params.kpin, dt2, g, H);
+    } else {
+        g += ref_mesh.mass[vi] * (x[vi] - xhat[vi]);
+        g += dt2 * (-ref_mesh.mass[vi] * params.gravity);
+        H += ref_mesh.mass[vi] * Mat33::Identity();
+
+        if (pin_target) {
+            g += dt2 * params.kpin * (x[vi] - *pin_target);
+            H += dt2 * params.kpin * Mat33::Identity();
         }
     }
 
@@ -282,43 +305,53 @@ compute_local_gradient_and_hessian_no_barrier_impl(
         }
     } else {
         const IncidentTriangles& incident = incident_triangles ? *incident_triangles : adj.at(vi);
-        for (const auto& [ti, a] : incident) {
-            const TriangleDef def = make_def_triangle(x, ref_mesh, ti);
-            Mat32 Ds_mat;
-            Ds_mat.col(0) = def.x[1] - def.x[0];
-            Ds_mat.col(1) = def.x[2] - def.x[0];
-            const Mat22& Dm_inv = ref_mesh.Dm_inverse[ti];
-            const Mat32  F      = Ds_mat * Dm_inv;
-            const double A      = ref_mesh.area[ti];
+        if (simd_energy) {
+            ipc_simd::accumulated_corotated_elasticity(ref_mesh, x, incident, rest_shape_grads,
+                params.mu, params.lambda, dt2, g, H);
+        } else {
+            for (const auto& [ti, a] : incident) {
+                const TriangleDef def = make_def_triangle(x, ref_mesh, ti);
+                Mat32 Ds_mat;
+                Ds_mat.col(0) = def.x[1] - def.x[0];
+                Ds_mat.col(1) = def.x[2] - def.x[0];
+                const Mat22& Dm_inv = ref_mesh.Dm_inverse[ti];
+                const Mat32  F      = Ds_mat * Dm_inv;
+                const double A      = ref_mesh.area[ti];
 
-            const CorotatedCache32 cache = buildCorotatedCache(F);
-            ShapeGrads local_gradN;
-            const ShapeGrads* gradN = nullptr;
-            if (rest_shape_grads) {
-                gradN = &(*rest_shape_grads)[ti];
-            } else {
-                local_gradN = shape_function_gradients(Dm_inv);
-                gradN = &local_gradN;
+                const CorotatedCache32 cache = buildCorotatedCache(F);
+                ShapeGrads local_gradN;
+                const ShapeGrads* gradN = nullptr;
+                if (rest_shape_grads) {
+                    gradN = &(*rest_shape_grads)[ti];
+                } else {
+                    local_gradN = shape_function_gradients(Dm_inv);
+                    gradN = &local_gradN;
+                }
+                const Mat32 P = PCorotated32(cache, F, params.mu, params.lambda);
+                Mat66 dPdF;
+                dPdFCorotated32(cache, params.mu, params.lambda, dPdF);
+
+                g += dt2 * corotated_node_gradient(P, A, *gradN, a);
+                H += dt2 * corotated_node_hessian(dPdF, A, *gradN, a);
             }
-            const Mat32 P = PCorotated32(cache, F, params.mu, params.lambda);
-            Mat66 dPdF;
-            dPdFCorotated32(cache, params.mu, params.lambda, dPdF);
-
-            g += dt2 * corotated_node_gradient(P, A, *gradN, a);
-            H += dt2 * corotated_node_hessian(dPdF, A, *gradN, a);
         }
     }
 
     if (params.kB > 0.0) {
         auto it = ref_mesh.hinge_adj.find(vi);
         if (it != ref_mesh.hinge_adj.end()) {
-            for (const auto& [hi, role] : it->second) {
-                const Hinge& h = ref_mesh.hinges[hi];
-                HingeDef def;
-                for (int k = 0; k < 4; ++k) def.x[k] = x[h.v[k]];
-                auto [bg, bH] = bending_node_gradient_hessian_psd(def, params.kB, h.c_e, h.bar_theta, role);
-                g += dt2 * bg;
-                H += dt2 * bH;
+            if (simd_energy) {
+                ipc_simd::accumulate_bending(ref_mesh, x, it->second,
+                    params.kB, dt2, g, H);
+            } else {
+                for (const auto& [hi, role] : it->second) {
+                    const Hinge& h = ref_mesh.hinges[hi];
+                    HingeDef def;
+                    for (int k = 0; k < 4; ++k) def.x[k] = x[h.v[k]];
+                    auto [bg, bH] = bending_node_gradient_hessian_psd(def, params.kB, h.c_e, h.bar_theta, role);
+                    g += dt2 * bg;
+                    H += dt2 * bH;
+                }
             }
         }
     }

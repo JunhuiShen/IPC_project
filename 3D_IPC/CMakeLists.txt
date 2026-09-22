@@ -121,6 +121,7 @@ endfunction()
 
 # Geometry, constitutive models, and contact kernels.
 set(IPC_CORE_SOURCES
+    SIMD.cpp
     IPC_math.cpp
     barrier_energy.cpp
     bending_energy.cpp
@@ -227,6 +228,7 @@ if(BUILD_TESTING)
     endfunction()
 
     set(IPC_TEST_TARGETS
+        SIMD_test
         barrier_energy_test
         bending_energy_test
         broad_phase_test

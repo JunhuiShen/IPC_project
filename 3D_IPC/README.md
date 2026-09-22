@@ -94,17 +94,19 @@ performs collision-safe per-vertex Newton updates one color group at a time.
 
 ### Cloth solver selection
 
-All four cloth solvers are in `solver.cpp`:
+All three cloth solvers are in `solver.cpp`:
 
 | Route | Scheduling | Vertex/contact computation | Selection |
 |---|---|---|---|
 | `basic` | Greedy colors | Reference from `1da4c74` | Default |
 | `ambient_grid` | Ambient-grid cells | Reference updates with cooperative frictionless contact/CCD work | `--use_cloth_grid true` |
-| `basic_experimental` | Greedy colors | Profiled contact/CCD optimizations | `--use_basic_experimental true` |
-| `basic_experimental_v2` | Greedy colors | Per-color triangle input and membrane-derivative storage | `--use_basic_experimental_v2 true` |
+| `basic_experimental` | Greedy colors | Collision-off SIMD assembly and contact/CCD optimizations | `--use_basic_experimental true` |
 
-The v2 route refreshes triangle positions and membrane derivatives before each
-color. Other energy terms remain live, and every color finishes before the next.
+The experimental route supports SIMD for inertia, gravity, pins, membrane
+elasticity, and bending (`--use_simd true`, default). This requires pure cloth,
+grid/OGC disabled, and `--d_hat 0 --k_barrier 0 --use_ccd false
+--use_ccd_guess false --k_sdf 0 --friction_coefficient 0`. Use
+`--use_simd false` for scalar assembly; floating-point results can differ.
 
 The basic iteration loop and local contact derivative assembly come from
 `1da4c74`. Shared geometry, energy, collision-search and CCD utilities remain
@@ -589,7 +591,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | Time integration | `fps`, `substeps`, `num_frames` |
 | Physics | Shell: `E`, `nu`, `density`, `thickness`, `kB`; volumetric solid: `solid_E`, `solid_nu`, `solid_density`; rigid body: `rigid_density`; shared: `kpin`, `gx`, `gy`, `gz` |
 | Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `friction_coefficient`, `friction_velocity_epsilon`, `k_sdf`, `eps_sdf`, `damping`, `fixed_iters`, `use_parallel`, `verbose`, `write_substeps` |
-| Experimental cloth | `use_basic_experimental`, `use_basic_experimental_v2` (both default false; v2 takes precedence) |
+| Experimental cloth | `use_basic_experimental` (default false), `use_simd` (default true; collision-off cloth only) |
 | Basic cloth grid | `use_cloth_grid` (default false), `cloth_grid_auto_dx` (default false), `cloth_grid_dx` (default 0.05 m; fixed side > `2 * node_box_max`, or positive minimum when auto sizing is enabled) |
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (per-iteration box/pair refresh solver), `ogc_box_pad` (BVH padding for the refresh; floored to `d_hat`) |
@@ -648,6 +650,8 @@ reader can jump to the layer they care about.
 
 ### Energy terms
 
+- `SIMD.h` / `SIMD.cpp` -- vectorized non-contact energy assembly for
+  collision-off experimental cloth.
 - `corotated_energy.h` / `corotated_energy.cpp` -- corotated membrane energy on
   each triangle, per-vertex nodal gradient and Hessian.
 - `bending_energy.h` / `bending_energy.cpp` -- Grinspun-style discrete-shell
@@ -778,6 +782,7 @@ the GoogleTest cases discovered by CTest.
 
 | Test binary | Cases | What it covers |
 |-------------|------:|----------------|
+| `SIMD_test` | 20 | SIMD energy kernels, scalar parity, derivative checks, and solver integration |
 | `barrier_energy_test` | 29 | Scalar and primitive IPC barriers, deformable/rigid derivatives, inactive contact, and validation |
 | `bending_energy_test` | 19 | Hinge energy, dihedral angle, finite-difference derivatives, and rigid-motion invariance |
 | `broad_phase_test` | 32 | AABBs, BVHs, pair generation/order, solver storage modes, CCD candidates, safe stepping, conservativeness, and partial refits |
