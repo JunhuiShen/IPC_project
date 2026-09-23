@@ -591,7 +591,8 @@ struct ContactPacket {
 enum class ContactFeature { Point, Edge, Face, Interior };
 struct PreparedMeshContact {
     std::array<Vec3, 4> positions;
-    Vec3 gradient_direction, separation;
+    // Face normal, or closest-point displacement for other features.
+    Vec3 gradient_vector, separation;
     double gradient_scale;
     double delta, bp, bpp;
     double sa, sb, sw, query, edge_a;
@@ -826,11 +827,8 @@ static ContactMatrix contact_face_hessian(const ContactPacket& data) {
 
     for (int k = 0; k < 3; ++k) {
         for (int l = 0; l < 3; ++l) {
-            const ContactPack coeff_N2 = sig_a[p] * sig_b[q] - sig_b[p] * sig_a[q];
-
-            ContactPack nN2 = 0.0;
-            for (int i = 0; i < 3; ++i) nN2 += n[i] * coeff_N2 * contact_levi_civita(i, k, l);
-
+            // p == q: the cross product's second derivative for one vertex
+            // is exactly zero. Exceptional geometry still uses the fallback.
             ContactPack proj_NN = 0.0;
             for (int i = 0; i < 3; ++i) {
                 for (int j = 0; j < 3; ++j) {
@@ -839,10 +837,9 @@ static ContactMatrix contact_face_hessian(const ContactPacket& data) {
                 }
             }
 
-            const ContactPack eta_pkql = nN2 + proj_NN / eta;
+            const ContactPack eta_pkql = ContactPack(0.0) + proj_NN / eta;
 
             ContactPack psi_pkql = 0.0;
-            for (int i = 0; i < 3; ++i) psi_pkql += coeff_N2 * contact_levi_civita(i, k, l) * w[i];
             psi_pkql += sig_w[q] * Nd[p][k][l];
             psi_pkql += sig_w[p] * Nd[q][l][k];
 
@@ -1093,11 +1090,10 @@ void mesh_contact_derivatives_tile(const MeshContactInput* inputs, std::size_t c
                 out.sw = role == 0 ? 1.0 : (role == 1 ? -1.0 : 0.0);
                 const double sign = dr.phi > 0.0 ? 1.0 : (dr.phi < 0.0 ? -1.0 : 0.0);
                 out.gradient_scale = (out.bp * sign) * weights[role];
-                out.gradient_direction = dr.normal;
+                out.gradient_vector = dr.normal;
             } else {
                 out.gradient_scale = out.bp * weights[role];
-                for (int i = 0; i < 3; ++i)
-                    out.gradient_direction[i] = (x[0][i] - dr.closest_point[i]) / dr.distance;
+                out.gradient_vector = out.separation;
                 switch (region) {
                     case NodeTriangleRegion::Edge12: prepare_edge(out,input,0,1,2); break;
                     case NodeTriangleRegion::Edge23: prepare_edge(out,input,0,2,3); break;
@@ -1124,8 +1120,7 @@ void mesh_contact_derivatives_tile(const MeshContactInput* inputs, std::size_t c
                 : segment_segment_contact_weights(x[0],x[1],x[2],x[3],1e-12,&dr);
             out.separation = dr.closest_point_1 - dr.closest_point_2;
             out.gradient_scale = out.bp * weights[role];
-            for (int i = 0; i < 3; ++i)
-                out.gradient_direction[i] = (dr.closest_point_1[i] - dr.closest_point_2[i]) / dr.distance;
+            out.gradient_vector = out.separation;
             auto region = dr.region;
             if (region == SegmentSegmentRegion::ParallelSegments) {
                 const bool s0 = dr.s <= 1e-14, s1 = dr.s >= 1.0-1e-14;
@@ -1166,19 +1161,23 @@ void mesh_contact_derivatives_tile(const MeshContactInput* inputs, std::size_t c
             }
         }
     }
+    std::array<std::array<std::size_t, contact_tile_width>, 4> feature_indices;
+    std::array<std::size_t, 4> feature_counts{};
     for (std::size_t e = 0; e < count; ++e) {
         auto& value = prepared[e];
         if (!value.active) continue;
         if (value.feature == ContactFeature::Point && value.query == 0.0) value.active = false;
         if (value.feature == ContactFeature::Edge && value.sa == 0.0 && value.sb == 0.0) value.active = false;
-        if (derivative_active && value.active) derivative_active[e] = 1;
+        if (value.active) {
+            const auto feature = static_cast<std::size_t>(value.feature);
+            feature_indices[feature][feature_counts[feature]++] = e;
+            if (derivative_active) derivative_active[e] = 1;
+        }
     }
     constexpr int W=ContactElementPack::width;
     for (auto feature : {ContactFeature::Point, ContactFeature::Edge, ContactFeature::Face, ContactFeature::Interior}) {
-        std::array<std::size_t,contact_tile_width> indices;
-        std::size_t entries=0;
-        for (std::size_t e=0;e<count;++e)
-            if (prepared[e].active && prepared[e].feature==feature) indices[entries++]=e;
+        const auto& indices = feature_indices[static_cast<std::size_t>(feature)];
+        const auto entries = feature_counts[static_cast<std::size_t>(feature)];
         for (std::size_t begin=0;begin<entries;begin+=W) {
             const int active=static_cast<int>(std::min<std::size_t>(W,entries-begin));
             alignas(64) double x[4][3][W],parameters[8][W],direction[3][W],scale[W],separation[3][W];
@@ -1187,7 +1186,7 @@ void mesh_contact_derivatives_tile(const MeshContactInput* inputs, std::size_t c
                 for(int v=0;v<4;++v) for(int axis=0;axis<3;++axis) x[v][axis][lane]=record.positions[v][axis];
                 const double fields[]={record.delta,record.bp,record.bpp,record.sa,record.sb,record.sw,record.query,record.edge_a};
                 for(int f=0;f<8;++f) parameters[f][lane]=fields[f];
-                for(int axis=0;axis<3;++axis) direction[axis][lane]=record.gradient_direction[axis];
+                for(int axis=0;axis<3;++axis) direction[axis][lane]=record.gradient_vector[axis];
                 scale[lane]=record.gradient_scale;
                 for(int axis=0;axis<3;++axis)separation[axis][lane]=record.separation[axis];
             }
@@ -1206,7 +1205,11 @@ void mesh_contact_derivatives_tile(const MeshContactInput* inputs, std::size_t c
             }
             alignas(64) double g[3][W],h[3][3][W],fallback[W];
             contact_expression_fallback(packet,feature).store(fallback);
-            for(int axis=0;axis<3;++axis) (ContactPack::load(scale)*ContactPack::load(direction[axis])).store(g[axis]);
+            for (int axis = 0; axis < 3; ++axis) {
+                const auto vector = ContactPack::load(direction[axis]);
+                const auto unit = feature == ContactFeature::Face ? vector : vector / packet.delta;
+                (ContactPack::load(scale) * unit).store(g[axis]);
+            }
             for(int row=0;row<3;++row) for(int col=0;col<3;++col) H(row,col).store(h[row][col]);
             for(int lane=0;lane<active;++lane) {
                 auto& out=outputs[indices[begin+lane]];

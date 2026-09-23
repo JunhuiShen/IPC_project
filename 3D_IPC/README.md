@@ -794,7 +794,7 @@ the GoogleTest cases discovered by CTest.
 
 | Test binary | Cases | What it covers |
 |-------------|------:|----------------|
-| `SIMD_test` | 51 | Energy, barrier, SDF, and friction kernels; scalar and finite-difference checks, contact features, tile tails, mixed scenes, cache invalidation, and failure recovery |
+| `SIMD_test` | 53 | Energy, barrier, SDF, and friction kernels; scalar and finite-difference checks, contact features, tile tails, mixed scenes, cache invalidation, and failure recovery |
 | `barrier_energy_test` | 29 | Scalar and primitive IPC barriers, deformable/rigid derivatives, inactive contact, and validation |
 | `bending_energy_test` | 19 | Hinge energy, dihedral angle, finite-difference derivatives, and rigid-motion invariance |
 | `broad_phase_test` | 42 | AABBs, BVHs, pair generation/order, solver storage modes, CCD candidates, safe stepping, conservativeness, and partial refits |

@@ -1682,21 +1682,30 @@ TEST(SIMDContact, FrictionTilesCoverSlipBranchesInactiveDataAndValidation) {
 
 TEST(SIMDContact, ColoredSdfAndFrictionAssemblyTracksScalarAcrossFrames) {
     RestoreOpenMPSettings restore;
-    omp_set_dynamic(0);omp_set_num_threads(4);
-    std::array<ClothScene,2> scenes;
-    for(std::size_t mode=0;mode<scenes.size();++mode) {
-        auto& scene=scenes[mode];build_scene(scene);
-        scene.params.use_basic_experimental_v2=mode==1;
-        scene.params.use_simd=mode==1;
-        scene.params.k_sdf=37.0;scene.params.eps_sdf=.003;
-        scene.params.friction_coefficient=.2;
-        scene.params.sdf_planes.push_back(PlaneSDF{Vec3(0,.04,0),Vec3::UnitY()});
-    }
-    for(int frame=1;frame<=12;++frame) {
-        for(auto& scene:scenes)
-            ASSERT_TRUE(advance_one_frame(scene.state,scene.mesh,scene.adjacency,scene.pins,
-                scene.params,scene.broad_phase,frame).converged);
-        expect_state_near(scenes[1].state,scenes[0].state);
+    omp_set_dynamic(0);
+    std::vector<int> teams{1,4};
+    if (omp_get_num_procs() >= 64) teams.push_back(64);
+    // Keep each mesh alive so independent runs have distinct workspace keys.
+    std::vector<std::array<ClothScene,2>> cases(teams.size());
+    for (std::size_t run = 0; run < teams.size(); ++run) {
+        const int threads = teams[run];
+        SCOPED_TRACE(threads);
+        omp_set_num_threads(threads);
+        auto& scenes = cases[run];
+        for(std::size_t mode=0;mode<scenes.size();++mode) {
+            auto& scene=scenes[mode];build_scene(scene);
+            scene.params.use_basic_experimental_v2=mode==1;
+            scene.params.use_simd=mode==1;
+            scene.params.k_sdf=37.0;scene.params.eps_sdf=.003;
+            scene.params.friction_coefficient=.2;
+            scene.params.sdf_planes.push_back(PlaneSDF{Vec3(0,.04,0),Vec3::UnitY()});
+        }
+        for(int frame=1;frame<=12;++frame) {
+            for(auto& scene:scenes)
+                ASSERT_TRUE(advance_one_frame(scene.state,scene.mesh,scene.adjacency,scene.pins,
+                    scene.params,scene.broad_phase,frame).converged);
+            expect_state_near(scenes[1].state,scenes[0].state);
+        }
     }
 }
 
@@ -2101,3 +2110,80 @@ TEST(SIMDEnergy, NonfiniteGeometryRetainsScalarBehavior) {
     compare(g,expected.first,2e-11);compare(H,expected.second,2e-11);
 }
 } // namespace simd_energy_test
+
+TEST(SIMDContact, FaceQuerySelfBlocksMatchRotatedScaledFacesAndEnergyDerivatives) {
+    constexpr std::size_t width = ipc_simd::contact_tile_width;
+    std::array<ipc_simd::MeshContactInput, width> inputs;
+    std::array<ipc_simd::MeshContactOutput, width> outputs;
+    for (double scale : {0.01, 1.0, 100.0}) {
+        const double distance = 0.12 * scale, d_hat = 0.8 * scale;
+        for (std::size_t e = 0; e < width; ++e) {
+            const Mat33 rotation = Eigen::AngleAxisd(0.19 * e, Vec3(1, -2, 3).normalized()).toRotationMatrix();
+            const Vec3 origin = scale * Vec3(0.13, -0.27, 0.39);
+            const Vec3 a = scale * rotation.col(0);
+            const Vec3 b = scale * (0.3 * rotation.col(0) + rotation.col(1));
+            auto& input = inputs[e];
+            input.positions = {origin + 0.2 * a + 0.3 * b + distance * rotation.col(2),
+                origin, origin + a, origin + b};
+            input.previous_positions = input.positions;
+            input.role = e < 8 ? 0 : (e % 5 == 0 ? 1 : (e % 3 == 0 ? 2 : 0));
+        }
+        for (std::size_t count : {1, 3, 4, 5, 7, 8, 9, 15, 16, 31, 32}) {
+            ipc_simd::mesh_contact_derivatives_tile(inputs.data(), count, d_hat, 1.0, 0.0,
+                0.02, 0.01, outputs.data());
+            for (std::size_t e = 0; e < count; ++e) {
+                SCOPED_TRACE(::testing::Message() << "scale=" << scale << " count=" << count << " entry=" << e);
+                const auto& x = inputs[e].positions;
+                const int role = inputs[e].role;
+                const auto reference = node_triangle_barrier_self_gradient_and_hessian(
+                    x[0], x[1], x[2], x[3], d_hat, role);
+                EXPECT_LE((outputs[e].gradient - reference.first).norm(), 2e-11 * (1.0 + reference.first.norm()));
+                EXPECT_LE((outputs[e].hessian - reference.second).norm(), 2e-11 * (1.0 + reference.second.norm()));
+                if (role != 0) continue;
+                Mat33 finite_difference;
+                const double h = 1e-6 * scale;
+                for (int axis = 0; axis < 3; ++axis) {
+                    auto plus = x, minus = x;
+                    plus[0][axis] += h;
+                    minus[0][axis] -= h;
+                    finite_difference.col(axis) = (node_triangle_barrier_gradient(
+                        plus[0], plus[1], plus[2], plus[3], d_hat, 0)
+                        - node_triangle_barrier_gradient(minus[0], minus[1], minus[2], minus[3], d_hat, 0)) / (2.0 * h);
+                }
+                EXPECT_LE((outputs[e].hessian - finite_difference).norm(), 2e-7 * (1.0 + finite_difference.norm()));
+            }
+        }
+    }
+}
+
+TEST(SIMDContact, QueryEdgePacketsPreserveNodeTriangleAndSegmentSegmentReferenceBehavior) {
+    std::array<ipc_simd::MeshContactInput, 8> inputs;
+    std::array<ipc_simd::MeshContactOutput, 8> outputs;
+    for (bool segment : {false, true}) {
+        for (double scale : {1e-60, 0.01, 1.0, 100.0, 1e60}) {
+            const double d_hat = scale;
+            for (std::size_t e = 0; e < inputs.size(); ++e) {
+                const Vec3 query = scale * Vec3(0.2 + 0.05 * e, -0.1, 0.02);
+                inputs[e].segment_segment = segment;
+                inputs[e].role = 0;
+                inputs[e].positions = segment
+                    ? std::array<Vec3,4>{query, query + scale * Vec3(0,-1,0), Vec3::Zero(), scale * Vec3::UnitX()}
+                    : std::array<Vec3,4>{query, Vec3::Zero(), scale * Vec3::UnitX(), scale * Vec3::UnitY()};
+                inputs[e].previous_positions = inputs[e].positions;
+            }
+            for (std::size_t count : {1, 3, 5, 8}) {
+                ipc_simd::mesh_contact_derivatives_tile(inputs.data(), count, d_hat, 1.0, 0.0,
+                    0.02, 0.01, outputs.data());
+                for (std::size_t e = 0; e < count; ++e) {
+                    SCOPED_TRACE(::testing::Message() << "ss=" << segment << " scale=" << scale << " count=" << count);
+                    const auto& x = inputs[e].positions;
+                    const auto reference = segment
+                        ? segment_segment_barrier_self_gradient_and_hessian(x[0],x[1],x[2],x[3],d_hat,0)
+                        : node_triangle_barrier_self_gradient_and_hessian(x[0],x[1],x[2],x[3],d_hat,0);
+                    simd_energy_test::compare(outputs[e].gradient, reference.first, 2e-11);
+                    simd_energy_test::compare(outputs[e].hessian, reference.second, 2e-11);
+                }
+            }
+        }
+    }
+}
