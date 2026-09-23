@@ -683,12 +683,13 @@ namespace {
 
 struct SimdBoxContactCertificates {
     std::vector<unsigned char> node_triangle, segment_segment;
+    std::vector<std::vector<unsigned>> vertex_clear_words;
     bool valid = false;
 };
 
 static void rebuild_simd_box_certificates(const BroadPhase::Cache& cache,
     const std::vector<Vec3>& positions, double d_hat, bool parallel,
-    SimdBoxContactCertificates& certificates) {
+    bool prepare_contact_masks, SimdBoxContactCertificates& certificates) {
     certificates.valid = false;
     certificates.node_triangle.resize(cache.nt_pairs.size());
     certificates.segment_segment.resize(cache.ss_pairs.size());
@@ -722,6 +723,31 @@ static void rebuild_simd_box_certificates(const BroadPhase::Cache& cache,
         }
     }
     if (error) std::rethrow_exception(error);
+    if (prepare_contact_masks) {
+        // Build immutable word masks once for all sweeps in this node-box block.
+        // Bit zero is the local FEM contribution; contact bits retain incident order.
+        certificates.vertex_clear_words.resize(cache.vertex_nt.size());
+        #pragma omp parallel for schedule(static) if(parallel && cache.vertex_nt.size() >= 128)
+        for (std::size_t vertex = 0; vertex < cache.vertex_nt.size(); ++vertex) {
+            if (failed.load(std::memory_order_relaxed)) continue;
+            try {
+                const auto& nt = cache.vertex_nt[vertex];
+                const auto& ss = cache.vertex_ss[vertex];
+                auto& words = certificates.vertex_clear_words[vertex];
+                constexpr unsigned grain = solver_detail::contact_grain;
+                words.assign((1 + nt.size() + ss.size() + grain - 1) / grain, 0u);
+                for (std::size_t local = 0; local < nt.size() + ss.size(); ++local) {
+                    const bool clear = local < nt.size()
+                        ? certificates.node_triangle[nt[local].pair_index]
+                        : certificates.segment_segment[ss[local - nt.size()].pair_index];
+                    if (clear) words[(local + 1) / grain] |= 1u << ((local + 1) % grain);
+                }
+            } catch (...) {
+                if (!failed.exchange(true, std::memory_order_relaxed)) error = std::current_exception();
+            }
+        }
+        if (error) std::rethrow_exception(error);
+    }
     certificates.valid = true;
 }
 
@@ -2216,7 +2242,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
                 broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::DeformableSolver);
                 if (use_box_certificates)
                     rebuild_simd_box_certificates(broad_phase.cache(), xnew, params.d_hat,
-                        params.use_parallel, box_certificates);
+                        params.use_parallel, use_contact_sweep && use_v2_simd, box_certificates);
                 build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()), bca);
                 union_adjacency(ea, bca, combined_adj);
                 greedy_color_conflict_graph(combined_adj, color_groups, &workspace.coloring_workspace);
@@ -2531,14 +2557,20 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
                     }
                     assembling_word = start / grain;
                     inactive_bits = 0;
-                    unsigned bits = 0, clear = 0;
-                    for (int j = start; j < std::min(start + grain, assignment.count); ++j) {
+                    unsigned bits = 0;
+                    unsigned clear = contact_certificates && contact_certificates->valid
+                        ? contact_certificates->vertex_clear_words[assignment.vertex][start / grain] : 0u;
+                    unsigned pending = ((1u << std::min(grain, assignment.count - start)) - 1u) & ~clear;
+                    while (pending) {
+                        const int j = start + __builtin_ctz(pending);
+                        pending &= pending - 1u;
                         unsigned flags;
                         if (j == 0) {
                             flags = compute(assignment.vertex, j, values[j]);
                         } else {
+                            // The word mask already removed whole-box rejections.
                             flags = gather_simd_contact(assignment.vertex, j - 1,
-                                cache, params, xnew, previous_positions, inputs[active], contact_certificates);
+                                cache, params, xnew, previous_positions, inputs[active]);
                             if (flags & 1u) {
                                 indices[active++] = j;
                                 if (active == ipc_simd::contact_tile_width) flush();
@@ -2631,10 +2663,26 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
                 double step = collision ? 0.9 * toi : 1.0;
                 xnew[vi] = xnew[vi] + step * contact_sweep.steps[vi];
               };
-          if (use_v2_simd)
+          if (use_v2_simd) {
+              // Reuse the team while the contact set and color layout are fixed.
+              const int sweeps = params.fixed_iters
+                  ? std::min(params.max_global_iters - iter + 1,
+                      params.node_box_update_count - (iter - 1) % params.node_box_update_count)
+                  : 1;
+              const auto ccd_candidates = [&](int vertex, int start, unsigned clear) {
+                  if (!contact_sweep.nonzero_step[vertex] || !params.use_ccd) return 0u;
+                  unsigned skipped = start == 0 ? 1u : 0u;
+                  if (contact_sweep.short_step[vertex]) return ~(skipped | clear);
+                  if (contact_certificates && contact_certificates->valid
+                      && contact_sweep.steps[vertex].allFinite())
+                      skipped |= contact_certificates->vertex_clear_words[vertex][start / solver_detail::contact_grain];
+                  return ~skipped;
+              };
               contact_sweep.run_assigned(color_groups, compute, apply, process_vertex, ccd,
-                  commit, prepare_color_derivatives, compute_assigned, process_vertex_batch);
-          else
+                  commit, prepare_color_derivatives, compute_assigned, process_vertex_batch, sweeps,
+                  ccd_candidates);
+              iter += sweeps - 1;
+          } else
               contact_sweep.run(color_groups, compute, apply, process_vertex, ccd,
                   commit, prepare_color_derivatives);
         } else if (params.use_parallel) {

@@ -174,7 +174,7 @@ TEST(ColoredContactSweep, PreservesOrderedArithmeticDependenciesAndTeamChanges) 
                     color.push_back(c);
                 }
             std::vector<double> expected(color.size(), 1), actual = expected;
-            for (int reference = 0; reference < 3; ++reference) {
+            for (int reference = 0; reference < 6; ++reference) {
                 auto &x = reference == 0 ? expected : actual;
                 x.assign(color.size(), 1.0);
                 std::atomic<int> assigned_calls{0};
@@ -270,14 +270,32 @@ TEST(ColoredContactSweep, PreservesOrderedArithmeticDependenciesAndTeamChanges) 
                                     masks[start / grain] = {bits, clear_bits};
                                 }
                             };
-                            sweep.run_assigned(groups, compute, apply, whole, ccd, commit, nullptr, assigned);
+                            const int sweeps = reference >= 3 ? 4 : 1;
+                            if (reference >= 4) {
+                                const auto batch = [&](const std::vector<int>& group, int first, int last) {
+                                    for (int i = first; i < last; ++i) whole(group[i]);
+                                };
+                                if (reference == 5) {
+                                    const auto candidates = [](int, int start, unsigned clear) {
+                                        return ~(clear | (start == 0 ? 1u : 0u));
+                                    };
+                                    sweep.run_assigned(groups, compute, apply, whole, ccd, commit,
+                                        nullptr, assigned, batch, sweeps, candidates);
+                                } else
+                                    sweep.run_assigned(groups, compute, apply, whole, ccd, commit,
+                                        nullptr, assigned, batch, sweeps);
+                            } else {
+                                sweep.run_assigned(groups, compute, apply, whole, ccd, commit,
+                                    nullptr, assigned, nullptr, sweeps);
+                            }
+                            iter += sweeps - 1;
                         }
                         omp_set_num_threads(threads);
                     }
                 }
                 if (reference != 0) EXPECT_EQ(0,
                     std::memcmp(expected.data(), actual.data(), expected.size()*sizeof(double)));
-                if (reference == 2 && threads > 1) EXPECT_GT(assigned_calls.load(), 0);
+                if (reference >= 2 && threads > 1) EXPECT_GT(assigned_calls.load(), 0);
             }
             EXPECT_EQ(0,
                       std::memcmp(expected.data(), actual.data(), expected.size() * sizeof(double)))

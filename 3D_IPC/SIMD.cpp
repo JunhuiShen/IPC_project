@@ -1,5 +1,4 @@
 #include "SIMD.h"
-#include "bending_energy.h"
 #include "corotated_energy.h"
 #include "friction_energy.h"
 
@@ -249,6 +248,7 @@ struct ElementPack {
     friend ElementPack operator-(ElementPack a, ElementPack b) { return raw(_mm512_sub_pd(a.value,b.value)); }
     friend ElementPack operator*(ElementPack a, ElementPack b) { return raw(_mm512_mul_pd(a.value,b.value)); }
     friend ElementPack operator/(ElementPack a, ElementPack b) { return raw(_mm512_div_pd(a.value,b.value)); }
+    friend ElementPack sqrt(ElementPack a) { return raw(_mm512_sqrt_pd(a.value)); }
     friend ElementPack equal(ElementPack a, ElementPack b) {
         return raw(_mm512_castsi512_pd(_mm512_maskz_set1_epi64(_mm512_cmp_pd_mask(a.value,b.value,_CMP_EQ_OQ),-1)));
     }
@@ -273,6 +273,20 @@ static ElementPack element_multiply_add(ElementPack a, ElementPack b, ElementPac
 #else
     return a * b + c;
 #endif
+}
+
+// Preserve the rounded product without spilling it to volatile memory.
+static ElementPack element_separate_product(ElementPack a, ElementPack b) {
+    auto value = (a * b).value;
+#if defined(__GNUC__) && (defined(__AVX2__) || defined(__SSE2__))
+    __asm__("" : "+v"(value));
+#elif defined(__GNUC__) && defined(__aarch64__)
+    __asm__("" : "+w"(value));
+#else
+    volatile ElementPack::Native rounded = value;
+    value = rounded;
+#endif
+    return ElementPack::raw(value);
 }
 
 template <typename T, std::size_t N>
@@ -408,54 +422,18 @@ void bending_derivatives_tile(
     const ElementPack zero(0.0), one(1.0);
     for (std::size_t begin=0; begin<entry_count; begin+=W) {
         const int count=static_cast<int>(std::min<std::size_t>(W,entry_count-begin));
-        alignas(64) double c[4][3][W], ca[3][W], cb[3][W], aa[3][W], bb[3][W];
-        alignas(64) double X[W],Y[W],theta[W],ell[W],denominator[W],scale[W],roles[W],valid[W];
         alignas(64) double points[4][3][W];
-        for(int lane=0;lane<count;++lane) {
-            const auto e=begin+lane;
-            for(int vertex=0;vertex<4;++vertex)
-                for(int axis=0;axis<3;++axis) points[vertex][axis][lane]=positions[4*e+vertex][axis];
+        for (int lane = 0; lane < count; ++lane) {
+            const auto entry = begin + lane;
+            for (int vertex = 0; vertex < 4; ++vertex)
+                for (int axis = 0; axis < 3; ++axis)
+                    points[vertex][axis][lane] = positions[4 * entry + vertex][axis];
         }
-        for(int lane=0;lane<count;++lane) {
-            const auto e=begin+lane;
-            assert(active_nodes[e] >= 0 && active_nodes[e] < 4);
-            HingeDef def;
-            for(int vertex=0;vertex<4;++vertex)
-                for(int axis=0;axis<3;++axis) def.x[vertex][axis]=points[vertex][axis][lane];
-            const auto cache=make_bending_cache(def);
-            const Vec3 A=def.x[2]-def.x[1],B=def.x[3]-def.x[1];
-            for(int i=0;i<3;++i) {
-                c[0][i][lane]=cache.mA[i];c[1][i][lane]=cache.mB[i];
-                c[2][i][lane]=cache.e_hat[i];c[3][i][lane]=cache.e[i];
-                ca[i][lane]=A[i];cb[i][lane]=B[i];
-                aa[i][lane]=cache.a[i];bb[i][lane]=cache.b[i];
-            }
-            X[lane]=cache.X;Y[lane]=cache.Y;theta[lane]=cache.theta-rest_angles[e];
-            ell[lane]=cache.ell;denominator[lane]=cache.degenerate?1.0:cache.muA2*cache.muB2;
-            scale[lane]=2.0*kB*coefficients[e];roles[lane]=active_nodes[e];valid[lane]=cache.degenerate?0.0:1.0;
-        }
-        // Angle/geometry evaluation is needed only for real hinge entries.
-        if (count < W) {
-            pad_prepared_lanes(c, count);
-            pad_prepared_lanes(ca, count); pad_prepared_lanes(cb, count);
-            pad_prepared_lanes(aa, count); pad_prepared_lanes(bb, count);
-            pad_prepared_lanes(X, count); pad_prepared_lanes(Y, count);
-            pad_prepared_lanes(theta, count); pad_prepared_lanes(ell, count);
-            pad_prepared_lanes(denominator, count); pad_prepared_lanes(scale, count);
-            pad_prepared_lanes(roles, count); pad_prepared_lanes(valid, count);
-        }
-        std::array<ElementPack,3> mA,mB,ehat,e,A,B,a,b;
-        for(int i=0;i<3;++i) {
-            mA[i]=ElementPack::load(c[0][i]);mB[i]=ElementPack::load(c[1][i]);
-            ehat[i]=ElementPack::load(c[2][i]);e[i]=ElementPack::load(c[3][i]);
-            A[i]=ElementPack::load(ca[i]);B[i]=ElementPack::load(cb[i]);
-            a[i]=ElementPack::load(aa[i]);b[i]=ElementPack::load(bb[i]);
-        }
+        if (count < W) pad_prepared_lanes(points, count);
         const auto ordered_dot=[](const std::array<ElementPack,3>& a,const std::array<ElementPack,3>& b) {
             // Match Eigen's pair reduction before the fused third product.
-            // Volatile prevents contraction across the pair's rounding boundary.
-            volatile ElementPack::Native p0=(a[0]*b[0]).value,p1=(a[1]*b[1]).value;
-            return element_multiply_add(a[2],b[2],ElementPack::raw(p0)+ElementPack::raw(p1));
+            return element_multiply_add(a[2], b[2],
+                element_separate_product(a[0], b[0]) + element_separate_product(a[1], b[1]));
         };
         const auto ordered_cross=[](const std::array<ElementPack,3>& a,const std::array<ElementPack,3>& b) {
             return std::array<ElementPack,3>{
@@ -463,6 +441,43 @@ void bending_derivatives_tile(
                 element_multiply_add(a[2],b[0],ElementPack(-1.0)*(a[0]*b[2])),
                 element_multiply_add(a[0],b[1],ElementPack(-1.0)*(a[1]*b[0]))};
         };
+        std::array<ElementPack, 3> e, a, b, A, B, ehat;
+        for (int axis = 0; axis < 3; ++axis) {
+            const auto x0 = ElementPack::load(points[0][axis]);
+            const auto x1 = ElementPack::load(points[1][axis]);
+            const auto x2 = ElementPack::load(points[2][axis]);
+            const auto x3 = ElementPack::load(points[3][axis]);
+            e[axis] = x1 - x0;
+            a[axis] = x2 - x0;
+            b[axis] = x3 - x0;
+            A[axis] = x2 - x1;
+            B[axis] = x3 - x1;
+        }
+        const auto mA = ordered_cross(e, a), mB = ordered_cross(b, e);
+        alignas(64) double muA2[W], muB2[W], ell[W], safe_ell[W];
+        alignas(64) double X[W], Y[W], theta[W], denominator[W], scale[W], roles[W], valid[W];
+        ordered_dot(mA, mA).store(muA2);
+        ordered_dot(mB, mB).store(muB2);
+        sqrt(ordered_dot(e, e)).store(ell);
+        for (int lane = 0; lane < W; ++lane) {
+            const auto entry = begin + std::min(lane, count - 1);
+            assert(active_nodes[entry] >= 0 && active_nodes[entry] < 4);
+            const bool degenerate = ell[lane] <= 0.0 || muA2[lane] <= 0.0 || muB2[lane] <= 0.0;
+            valid[lane] = degenerate ? 0.0 : 1.0;
+            safe_ell[lane] = degenerate ? 1.0 : ell[lane];
+            denominator[lane] = degenerate ? 1.0 : muA2[lane] * muB2[lane];
+            scale[lane] = 2.0 * kB * coefficients[entry];
+            roles[lane] = active_nodes[entry];
+        }
+        const auto nondegenerate = equal(ElementPack::load(valid), one);
+        for (int axis = 0; axis < 3; ++axis)
+            ehat[axis] = select(nondegenerate, e[axis] / ElementPack::load(safe_ell), zero);
+        select(nondegenerate, ordered_dot(mA, mB), zero).store(X);
+        select(nondegenerate, ordered_dot(ordered_cross(mA, mB), ehat), zero).store(Y);
+        // Keep the reference angle function and evaluate only real entries.
+        for (int lane = 0; lane < count; ++lane)
+            theta[lane] = (valid[lane] ? std::atan2(Y[lane], X[lane]) : 0.0) - rest_angles[begin + lane];
+        if (count < W) pad_prepared_lanes(theta, count);
         const auto mbA=ordered_cross(mB,A),maB=ordered_cross(mA,B);
         const auto mab=ordered_cross(mA,b),mba=ordered_cross(mB,a);
         const auto mbe=ordered_cross(mB,e),ema=ordered_cross(e,mA);
