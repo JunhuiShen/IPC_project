@@ -13,6 +13,7 @@
 #include <cmath>
 #include <limits>
 #include <set>
+#include <stdexcept>
 #include <tuple>
 #include <unordered_set>
 #include <vector>
@@ -1306,6 +1307,123 @@ TEST(BroadPhaseTest, IncrementalRefreshIsIdempotentForZeroMove) {
     check_bvh_internal_invariant(c.node_bvh_nodes);
     check_bvh_internal_invariant(c.tri_bvh_nodes);
     check_bvh_internal_invariant(c.edge_bvh_nodes);
+}
+
+TEST(BroadPhaseTest, BulkBoxRefitMatchesIncrementalBoxesAndOrderedPairs) {
+    std::vector<Vec3> x, v;
+    RefMesh mesh;
+    build_three_sheet_scene(x, v, mesh);
+    const auto sheet_positions = x;
+    const auto sheet_triangles = mesh.tris;
+    // Also exercise the parallel bulk-refit path, with separate clusters
+    // keeping the exact pair-order comparison small.
+    for (int copy = 1; copy < 16; ++copy) {
+        const int offset = static_cast<int>(x.size());
+        for (const auto& position : sheet_positions)
+            x.push_back(position + Vec3(3.0 * copy, 0.0, 0.0));
+        for (const int node : sheet_triangles)
+            mesh.tris.push_back(offset + node);
+    }
+    mesh.num_positions = x.size();
+    const int nv = static_cast<int>(x.size());
+    constexpr double pad = 0.07;
+    std::vector<double> radii(nv);
+    std::vector<AABB> boxes(nv);
+    for (int i = 0; i < nv; ++i) {
+        radii[i] = 0.015 + 0.003 * (i % 5);
+        boxes[i] = AABB(x[i] - Vec3::Constant(radii[i]),
+                        x[i] + Vec3::Constant(radii[i]));
+    }
+    BroadPhase incremental;
+    incremental.initialize(boxes, mesh, pad);
+    BroadPhase bulk = incremental;
+
+    for (int step = 0; step < 3; ++step) {
+        SCOPED_TRACE(step);
+        const auto previous_nt = bulk.cache().nt_pair_tri;
+        const auto previous_ss = bulk.cache().ss_pair_edges;
+        for (int i = 0; i < nv; ++i) {
+            x[i] += Vec3(0.025 * (i % 3 - 1),
+                         -0.018 * (i % 2), 0.021 * (step - i % 3));
+            radii[i] += 0.002 * (1 + (i + step) % 3);
+            boxes[i] = AABB(x[i] - Vec3::Constant(radii[i]),
+                            x[i] + Vec3::Constant(radii[i]));
+            incremental_refresh_vertex(incremental.mutable_cache(), i,
+                                       x, mesh, pad, radii[i]);
+        }
+        bulk.refit_boxes(boxes, mesh, pad);
+        const auto& a = incremental.cache();
+        const auto& b = bulk.cache();
+        expect_cache_geometry_and_topology_exact(a, b);
+        EXPECT_EQ(b.nt_pair_tri, previous_nt);
+        EXPECT_EQ(b.ss_pair_edges, previous_ss);
+
+        incremental.refresh_pairs(mesh);
+        bulk.refresh_pairs(mesh);
+        expect_cache_exact(a, b);
+        expect_pair_order_matches_query_hits(b, mesh);
+    }
+}
+
+TEST(BroadPhaseTest, IncrementalRefreshKeepsMovedRedBoxesForPairDeduplication) {
+    std::vector<Vec3> x = {
+        Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0),
+        Vec3(0.0, 0.0, 5.0), Vec3(1.0, 0.0, 5.0), Vec3(0.0, 1.0, 5.0)};
+    const RefMesh mesh = make_mesh(x, {{0, 1, 2}, {3, 4, 5}});
+    constexpr double radius = 0.02;
+    constexpr double pad = 0.07;
+    std::vector<AABB> boxes(x.size());
+    for (std::size_t i = 0; i < x.size(); ++i)
+        boxes[i] = AABB(x[i] - Vec3::Constant(radius),
+                        x[i] + Vec3::Constant(radius));
+    BroadPhase broad;
+    broad.initialize(boxes, mesh, pad);
+    ASSERT_TRUE(broad.ss_pairs().empty());
+
+    for (int i = 3; i < 6; ++i) {
+        x[i].z() = 0.03;
+        incremental_refresh_vertex(broad.mutable_cache(), i, x, mesh,
+                                   pad, radius);
+    }
+    broad.refresh_pairs(mesh);
+    const auto& c = broad.cache();
+    ASSERT_FALSE(c.ss_pairs.empty());
+    const std::set<std::array<int, 2>> unique_pairs(c.ss_pair_edges.begin(),
+                                                 c.ss_pair_edges.end());
+    EXPECT_EQ(unique_pairs.size(), c.ss_pairs.size());
+    for (std::size_t e = 0; e < c.edges.size(); ++e) {
+        const auto& leaf = c.edge_bvh_nodes[c.edge_leaf_to_node[e]];
+        EXPECT_TRUE(aabb_equal(c.red_edge_boxes[e], leaf.bbox, 0.0));
+    }
+    expect_pair_order_matches_query_hits(c, mesh);
+}
+
+TEST(BroadPhaseTest, BulkBoxRefitRequiresMatchingBoxInitialization) {
+    const std::vector<Vec3> x = {
+        Vec3(0.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0), Vec3(0.0, 1.0, 0.0)};
+    const RefMesh mesh = make_mesh(x, {{0, 1, 2}});
+    const std::vector<AABB> boxes(x.size(), AABB(Vec3::Zero(), Vec3::Ones()));
+    BroadPhase broad;
+    EXPECT_THROW(broad.refit_boxes(boxes, mesh, 0.01), std::logic_error);
+    broad.initialize(x, std::vector<Vec3>(x.size(), Vec3::Zero()), mesh, 0.1, 0.01);
+    EXPECT_THROW(broad.refit_boxes(boxes, mesh, 0.01), std::logic_error);
+    broad.initialize(boxes, mesh, 0.01, BroadPhase::InitializationMode::DeformableSolver);
+    EXPECT_THROW(broad.refit_boxes(boxes, mesh, 0.01), std::logic_error);
+    broad.initialize(boxes, mesh, 0.01);
+    auto fewer_boxes = boxes;
+    fewer_boxes.pop_back();
+    EXPECT_THROW(broad.refit_boxes(fewer_boxes, mesh, 0.01), std::invalid_argument);
+    RefMesh fewer_triangles = mesh;
+    fewer_triangles.tris.clear();
+    EXPECT_THROW(broad.refit_boxes(boxes, fewer_triangles, 0.01), std::invalid_argument);
+
+    const RefMesh empty_mesh;
+    BroadPhase empty;
+    empty.initialize(std::vector<AABB>{}, empty_mesh, 0.01);
+    EXPECT_NO_THROW(empty.refit_boxes({}, empty_mesh, 0.01));
+    empty.refresh_pairs(empty_mesh);
+    EXPECT_TRUE(empty.nt_pairs().empty());
+    EXPECT_TRUE(empty.ss_pairs().empty());
 }
 
 TEST(BroadPhaseTest, SolverModesPreserveFilteredPairAndIncidenceOrderWithoutRefitStorage) {

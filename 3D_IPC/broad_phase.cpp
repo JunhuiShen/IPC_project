@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <memory>
+#include <stdexcept>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -970,6 +971,60 @@ void BroadPhase::initialize_from_vertex_boxes(const std::vector<AABB>& vertex_bo
     cache_ = std::move(c);
 }
 
+void BroadPhase::refit_boxes(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, const double box_pad) {
+    Cache& c = cache_;
+    const int nv = static_cast<int>(c.node_boxes.size());
+    const int nt = num_tris(mesh);
+    const int ne = static_cast<int>(c.edges.size());
+    if (!topology_valid_
+        || c.node_leaf_to_node.size() != c.node_boxes.size()
+        || c.tri_leaf_to_node.size() != c.tri_boxes.size()
+        || c.edge_leaf_to_node.size() != c.edges.size()
+        || c.red_edge_boxes.size() != c.edges.size())
+        throw std::logic_error("BroadPhase::refit_boxes requires box-based Refittable initialization");
+    if (vertex_boxes.size() != c.node_boxes.size()
+        || static_cast<std::size_t>(nt) != c.tri_boxes.size())
+        throw std::invalid_argument("BroadPhase::refit_boxes requires unchanged mesh sizes");
+
+    const Vec3 pad = Vec3::Constant(box_pad);
+    #pragma omp parallel if(nv >= 128)
+    {
+        #pragma omp for schedule(static)
+        for (int node = 0; node < nv; ++node)
+            c.node_boxes[node] = vertex_boxes[node];
+
+        #pragma omp for schedule(static)
+        for (int t = 0; t < nt; ++t) {
+            AABB box = c.node_boxes[tri_vertex(mesh, t, 0)];
+            box.expand(c.node_boxes[tri_vertex(mesh, t, 1)]);
+            box.expand(c.node_boxes[tri_vertex(mesh, t, 2)]);
+            box.min -= pad;
+            box.max += pad;
+            c.tri_boxes[t] = box;
+        }
+
+        #pragma omp for schedule(static)
+        for (int e = 0; e < ne; ++e) {
+            AABB red = c.node_boxes[c.edges[e][0]];
+            red.expand(c.node_boxes[c.edges[e][1]]);
+            c.red_edge_boxes[e] = red;
+            c.edge_boxes[e] = AABB(red.min - pad, red.max + pad);
+        }
+
+        // Each tree is independent; its reverse traversal visits children
+        // before parents while retaining the existing query order.
+        #pragma omp sections
+        {
+            #pragma omp section
+            { refit_bvh(c.node_bvh_nodes, c.node_boxes); }
+            #pragma omp section
+            { refit_bvh(c.tri_bvh_nodes, c.tri_boxes); }
+            #pragma omp section
+            { refit_bvh(c.edge_bvh_nodes, c.red_edge_boxes); }
+        }
+    }
+}
+
 void BroadPhase::refresh_pairs(const RefMesh& mesh) {
     Cache& c = cache_;
     const int nv = static_cast<int>(c.node_boxes.size());
@@ -1020,6 +1075,8 @@ void incremental_refresh_vertex(BroadPhase::Cache& c, int vi, const std::vector<
     for (int e : c.node_to_edges[vi]) {
         AABB red = c.node_boxes[c.edges[e][0]];
         red.expand(c.node_boxes[c.edges[e][1]]);
+        if (e < static_cast<int>(c.red_edge_boxes.size()))
+            c.red_edge_boxes[e] = red;
         c.edge_boxes[e] = AABB(red.min - pad, red.max + pad);
         refit_bvh_leaf(c.edge_bvh_nodes, c.edge_leaf_to_node, e, red);
     }

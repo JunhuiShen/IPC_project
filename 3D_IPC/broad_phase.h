@@ -165,11 +165,14 @@ public:
     // contact search and must not be followed by incremental BVH refit/query.
     void initialize_node_boxes_only(const std::vector<AABB>& vertex_boxes);
 
+    // Update all boxes and refit the existing BVHs without changing their
+    // topology or pair lists. Requires box-based Refittable initialization
+    // with the same mesh and vertex count. Call refresh_pairs afterwards.
+    void refit_boxes(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double box_pad);
+
     // Re-query NT and SS pair lists from the current BVH state without
-    // rebuilding the BVHs. Used by global_gauss_seidel_solver_ogc after
-    // incremental_refresh_vertex has updated BVH leaves to reflect per-vertex
-    // moves: this rebuilds vertex_nt/vertex_ss/nt_pairs/ss_pairs so that the
-    // next outer iteration sees pair lists reflecting the current mesh state.
+    // rebuilding the BVHs. After box refits, rebuild vertex_nt/vertex_ss and
+    // the ordered pair arrays for the next solver iteration.
     void refresh_pairs(const RefMesh& mesh);
 
     const std::vector<NodeTrianglePair>& nt_pairs() const {

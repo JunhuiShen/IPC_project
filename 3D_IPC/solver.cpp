@@ -478,6 +478,8 @@ struct OGCSolverWorkspace {
     std::vector<Vec3> xnew_substep_start;
     std::vector<Vec3> xnew_copy;
     std::vector<double> bounds;
+    std::vector<NodeTriangleDistanceResult> nt_distances;
+    std::vector<SegmentSegmentDistanceResult> ss_distances;
     bool matches(const RefMesh& ref_mesh, int nv) const {
         return mesh == &ref_mesh && tris_data == ref_mesh.tris.data()
             && dm_data == ref_mesh.Dm_inverse.data()
@@ -501,6 +503,10 @@ struct OGCSolverWorkspace {
         rest_shape_grads.resize(ref_mesh.Dm_inverse.size());
         for (int ti = 0; ti < static_cast<int>(ref_mesh.Dm_inverse.size()); ++ti)
             rest_shape_grads[ti] = shape_function_gradients(ref_mesh.Dm_inverse[ti]);
+
+        // Contact terms read a frozen snapshot, so only the unchanged elastic
+        // topology constrains colors. Rebuild them with the topology cache.
+        greedy_color_conflict_graph(elastic_adjacency.get(ref_mesh, adj, nv), color_groups);
 
         mesh = &ref_mesh;
         tris_data = ref_mesh.tris.data();
@@ -1172,7 +1178,9 @@ Vec3 gs_solid_vertex_delta_live_barrier(
 Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params,
                                     const std::vector<Vec3>& xhat, const std::vector<Vec3>& x_elastic, const std::vector<Vec3>& x_barrier, const BroadPhase& broad_phase, const PinMap* pin_map,
                                     const IncidentTriangles* incident_triangles,  const std::vector<ShapeGrads>* rest_shape_grads,
-                                    const std::vector<Vec3>* previous_positions) {
+                                    const std::vector<Vec3>* previous_positions,
+                                    const std::vector<NodeTriangleDistanceResult>& nt_distances,
+                                    const std::vector<SegmentSegmentDistanceResult>& ss_distances) {
     const auto& bp_cache = broad_phase.cache();
     auto [g, H] =
         physics_detail::compute_local_gradient_and_hessian_no_barrier_unchecked(
@@ -1197,7 +1205,7 @@ Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const Verte
                 const NodeTriangleContactEvaluation contact_evaluation =
                     make_node_triangle_contact_evaluation(
                         current_positions, params.d_hat,
-                        params.k_barrier);
+                        params.k_barrier, 1.0e-12, &nt_distances[entry.pair_index]);
                 const auto [bg, bH] =
                     node_triangle_barrier_self_gradient_and_hessian(
                         current_positions[0], current_positions[1],
@@ -1223,7 +1231,7 @@ Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const Verte
                     node_triangle_barrier_self_gradient_and_hessian(
                         x_barrier[p.node], x_barrier[p.tri_v[0]],
                         x_barrier[p.tri_v[1]], x_barrier[p.tri_v[2]],
-                        params.d_hat, entry.dof);
+                        params.d_hat, entry.dof, 1.0e-12, &nt_distances[entry.pair_index]);
                 g += dt2k * bg;
                 H += dt2k * bH;
             }
@@ -1242,7 +1250,7 @@ Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const Verte
                 const SegmentSegmentContactEvaluation contact_evaluation =
                     make_segment_segment_contact_evaluation(
                         current_positions, params.d_hat,
-                        params.k_barrier);
+                        params.k_barrier, 1.0e-12, &ss_distances[entry.pair_index]);
                 const auto [bg, bH] =
                     segment_segment_barrier_self_gradient_and_hessian(
                         current_positions[0], current_positions[1],
@@ -1268,7 +1276,7 @@ Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const Verte
                     segment_segment_barrier_self_gradient_and_hessian(
                         x_barrier[p.v[0]], x_barrier[p.v[1]],
                         x_barrier[p.v[2]], x_barrier[p.v[3]],
-                        params.d_hat, entry.dof);
+                        params.d_hat, entry.dof, 1.0e-12, &ss_distances[entry.pair_index]);
                 g += dt2k * bg;
                 H += dt2k * bH;
             }
@@ -3162,10 +3170,7 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
     }
     broad_phase.initialize(bvh_node_boxes, ref_mesh, pad);
 
-    // Color from elastic adjacency only since barrier pairs are handled by reading  a frozen snapshot (xnew_copy) inside each color, so they don't need to constrain the coloring
-    const std::vector<std::vector<int>>& elastic_adj = workspace.elastic_adjacency.get(ref_mesh, adj, nv);
-    std::vector<std::vector<int>>& color_groups = workspace.color_groups;
-    greedy_color_conflict_graph(elastic_adj, color_groups);
+    const std::vector<std::vector<int>>& color_groups = workspace.color_groups;
 
     if (params.write_substeps)
         write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, nullptr);
@@ -3179,17 +3184,46 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         if (iter > 1) {
+            #pragma omp parallel for schedule(static)
             for (int vi = 0; vi < nv; ++vi) {
-                const double R_vi = node_box_size_fn(vi);
-                incremental_refresh_vertex(bp_cache, vi, xnew, ref_mesh, pad, R_vi + pad);
+                const Vec3 r = Vec3::Constant(node_box_size_fn(vi) + pad);
+                bvh_node_boxes[vi] = AABB(xnew[vi] - r, xnew[vi] + r);
             }
+            broad_phase.refit_boxes(bvh_node_boxes, ref_mesh, pad);
             broad_phase.refresh_pairs(ref_mesh);
         }
 
         xnew_copy = xnew;
+        // Bounds and barrier assembly use exactly this iteration's frozen
+        // geometry. Evaluate each contact once, sharing it across its vertices.
+        auto& nt_distances = workspace.nt_distances;
+        auto& ss_distances = workspace.ss_distances;
+        nt_distances.resize(bp_cache.nt_pairs.size());
+        ss_distances.resize(bp_cache.ss_pairs.size());
+        #pragma omp parallel for schedule(static)
+        for (std::size_t pair = 0; pair < bp_cache.nt_pairs.size(); ++pair) {
+            const auto& p = bp_cache.nt_pairs[pair];
+            nt_distances[pair] = node_triangle_distance(xnew_copy[p.node],
+                xnew_copy[p.tri_v[0]], xnew_copy[p.tri_v[1]], xnew_copy[p.tri_v[2]]);
+        }
+        #pragma omp parallel for schedule(static)
+        for (std::size_t pair = 0; pair < bp_cache.ss_pairs.size(); ++pair) {
+            const auto& p = bp_cache.ss_pairs[pair];
+            ss_distances[pair] = segment_segment_distance(xnew_copy[p.v[0]],
+                xnew_copy[p.v[1]], xnew_copy[p.v[2]], xnew_copy[p.v[3]]);
+        }
         #pragma omp parallel for schedule(static)
         for (int vi = 0; vi < nv; ++vi) {
-            double b = compute_trust_region_bound_for_vertex(vi, xnew_copy, broad_phase, 0.4);
+            double minimum = std::numeric_limits<double>::infinity();
+            for (const auto& entry : bp_cache.vertex_nt[vi]) {
+                const double distance = nt_distances[entry.pair_index].distance;
+                if (distance < minimum) minimum = distance;
+            }
+            for (const auto& entry : bp_cache.vertex_ss[vi]) {
+                const double distance = ss_distances[entry.pair_index].distance;
+                if (distance < minimum) minimum = distance;
+            }
+            double b = 0.4 * minimum;
             if (!std::isfinite(b)) b = node_box_size_fn(vi);
             bounds[vi] = b;
         }
@@ -3202,7 +3236,8 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
                 // Elastic stencil reads live xnew (GS across colors); barrier
                 // stencil reads frozen xnew_copy (Jacobi).
                 const Vec3 dx = - params.damping * gs_vertex_delta_frozen_barrier(vi, ref_mesh, adj, pins, params, xhat, xnew, xnew_copy, 
-                    broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads, previous_positions);
+                    broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads,
+                    previous_positions, nt_distances, ss_distances);
                 if (dx.squaredNorm() < 1e-28) {
                     xnew[vi] = xnew_copy[vi];
                     continue;
@@ -4375,8 +4410,11 @@ SolverResult global_gauss_seidel_solver_basic_general(
         const auto process_cloth_node = [&](const int cloth, bool cooperative = false) {
             const int node = cloth_nodes[static_cast<std::size_t>(cloth)];
             const Vec3 delta = [&]() {
-                if (params.use_basic_experimental) {
-                    if (physics_detail::energy_simd_enabled(params))
+                // Helper assignment follows contact work for every cloth
+                // block; solver flags only select its arithmetic kernel.
+                if (params.use_basic_experimental || cooperative) {
+                    if (params.use_basic_experimental
+                        && physics_detail::energy_simd_enabled(params))
                         return gs_vertex_delta_live_barrier_simd(node, ref_mesh, adj, pins,
                             params, xhat, xnew, broad_phase, &pin_map,
                             &deformable_workspace.incident_triangles[node],
@@ -4392,7 +4430,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
                     &deformable_workspace.rest_shape_grads, previous_positions);
             }();
             const Vec3 proposed_position = xnew[node] - params.damping * delta;
-            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, params.use_basic_experimental && cooperative);
+            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative);
         };
 
         const auto process_solid_node = [&](const int solid, bool cooperative = false) {
@@ -4450,9 +4488,6 @@ SolverResult global_gauss_seidel_solver_basic_general(
                         return rigid_workspace.body_nt_pair_indices[rb].size()
                             + rigid_workspace.body_ss_pair_indices[rb].size();
                     }
-                    // Historical cloth traversal does not use contact helpers.
-                    if (block < solid_begin && !params.use_basic_experimental)
-                        return std::size_t(0);
                     const int node = block < solid_begin ? cloth_nodes[block]
                         : solid_nodes[block - solid_begin];
                     return broad_phase.cache().vertex_nt[node].size()

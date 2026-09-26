@@ -2380,11 +2380,18 @@ TEST(SolidGeneralSolver,
 
 TEST(SolidGeneralSolver, CooperativeMixedContactsPreserveEveryStateComponent) {
     struct RestoreThreads {
-        int count = omp_get_max_threads();
-        ~RestoreThreads() { omp_set_num_threads(count); }
+        int count = omp_get_max_threads(), dynamic = omp_get_dynamic();
+        ~RestoreThreads() {
+            omp_set_num_threads(count);
+            omp_set_dynamic(dynamic);
+        }
     } restore;
-    for (bool experimental : {false, true}) {
+    omp_set_dynamic(0);
+    // Legacy cloth must also receive helpers with experimental mode disabled,
+    // even when the independent SIMD preference is enabled.
+    for (int mode : {0, 1, 2}) {
         for (double friction : {0.0, 0.2}) {
+            SCOPED_TRACE(::testing::Message() << "mode=" << mode << " friction=" << friction);
             RefMesh meshes[2];
             DeformedState states[2];
             for (int run = 0; run < 2; ++run) {
@@ -2392,6 +2399,7 @@ TEST(SolidGeneralSolver, CooperativeMixedContactsPreserveEveryStateComponent) {
                 auto& state = states[run];
                 std::vector<Vec2> material;
                 build_square_mesh(mesh, state, material, 12, 12, 1.0, 1.0, Vec3(-0.5, 0, -0.5));
+                const std::size_t cloth_node_count = state.deformed_positions.size();
                 state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
                 mesh.build_lumped_mass(900, 0.001);
                 create_solid({Vec3(-0.08, 0.006, -0.08), Vec3(0.08, 0.006, -0.08),
@@ -2408,7 +2416,9 @@ TEST(SolidGeneralSolver, CooperativeMixedContactsPreserveEveryStateComponent) {
                 SimParams params = SimParams::zeros();
                 params.fps = 30; params.substeps = 1;
                 params.max_global_iters = 7; params.fixed_iters = true;
-                params.use_basic_experimental = experimental;
+                params.use_basic_experimental = mode != 0;
+                params.use_basic_experimental_v2 = mode == 2;
+                params.use_simd = mode != 1;
                 params.node_box_update_count = 3;
                 params.node_box_min = 0.25; params.node_box_max = 0.25;
                 params.theta_box_min = 0.05; params.theta_box_max = 0.05;
@@ -2425,6 +2435,13 @@ TEST(SolidGeneralSolver, CooperativeMixedContactsPreserveEveryStateComponent) {
                 }
                 // Enough incident pairs to exercise the task path on a rigid block.
                 EXPECT_GT(broad_phase.cache().nt_pairs.size(), 128u);
+                // Establish cloth eligibility as well as rigid contact load.
+                std::size_t max_cloth_contacts = 0;
+                for (std::size_t node = 0; node < cloth_node_count; ++node)
+                    max_cloth_contacts = std::max(max_cloth_contacts,
+                        broad_phase.cache().vertex_nt[node].size()
+                        + broad_phase.cache().vertex_ss[node].size());
+                EXPECT_GE(max_cloth_contacts, 32u);
             }
             const auto compare = [](const auto& a, const auto& b) {
                 ASSERT_EQ(a.size(), b.size());
