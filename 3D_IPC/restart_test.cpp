@@ -66,6 +66,9 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state,
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
     append_pin(pins, base + ny * (nx + 1),      state.deformed_positions);
     append_pin(pins, base + ny * (nx + 1) + nx, state.deformed_positions);
+    // Break the symmetric fixture's sensitivity to one-ULP input changes.
+    // Keep this offset identical in the generator and both trajectory tests.
+    pins.front().target_position.y() += 1.0 / 32.0;
     ref_mesh.build_lumped_mass(params.density, params.thickness);
     adj = build_incident_triangle_map(ref_mesh.tris);
 }

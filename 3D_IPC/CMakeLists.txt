@@ -52,6 +52,9 @@ target_include_directories(Eigen3::Eigen SYSTEM INTERFACE
 
 FetchContent_MakeAvailable(tight_inclusion)
 
+# Exact rational predicates for ambiguous linear CCD queries (header-only).
+find_package(Boost 1.70 CONFIG REQUIRED)
+
 # AppleClang needs Homebrew's libomp and a compiler-specific OpenMP flag. Feed
 # those paths to FindOpenMP instead of adding a global include directory.
 if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
@@ -139,11 +142,22 @@ set(IPC_CORE_SOURCES
 add_library(corotated_energy_lib STATIC ${IPC_CORE_SOURCES})
 add_library(IPC::core ALIAS corotated_energy_lib)
 ipc_configure_library(corotated_energy_lib)
+# Keep the volumetric polar decomposition and its bitwise reference consistent.
+# Other kernels retain their normal compiler settings, including fused arithmetic.
+# GCC merges contraction flags conservatively during LTO; isolate these objects
+# so their strict rounding does not spread to the cloth and CCD kernels.
+set_source_files_properties(
+    volumetric_corotated_energy.cpp
+    volumetric_corotated_energy_test.cpp
+    PROPERTIES COMPILE_OPTIONS
+        "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-ffp-contract=off>;$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-fno-lto>"
+)
 target_link_libraries(corotated_energy_lib
     PUBLIC
         Eigen3::Eigen
         OpenMP::OpenMP_CXX
     PRIVATE
+        Boost::headers
         tight_inclusion::tight_inclusion
 )
 

@@ -424,10 +424,12 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPha
         if (!node_triangle_swept_aabbs_intersect(node_boxes))
             return value;
         double toi = 0.0;
+        bool collision;
         if (node_rb == rb)
-            consider(point_triangle_rb_rotation_ccd(x[node], x_com, proposed, current, x[pair.tri_v[0]], x[pair.tri_v[1]], x[pair.tri_v[2]], toi), toi);
+            collision = point_triangle_rb_rotation_ccd(x[node], x_com, proposed, current, x[pair.tri_v[0]], x[pair.tri_v[1]], x[pair.tri_v[2]], toi);
         else
-            consider(point_triangle_rb_rotation_ccd(x[node], x_com, q_reverse, identity, x[pair.tri_v[0]], x[pair.tri_v[1]], x[pair.tri_v[2]], toi), toi);
+            collision = point_triangle_rb_rotation_ccd(x[node], x_com, q_reverse, identity, x[pair.tri_v[0]], x[pair.tri_v[1]], x[pair.tri_v[2]], toi);
+        consider(collision, toi);
         return value;
     };
     const auto evaluate_ss = [&](int pair_index) {
@@ -445,10 +447,12 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPha
         if (!segment_segment_swept_aabbs_intersect(node_boxes))
             return value;
         double toi = 0.0;
+        bool collision;
         if (first_edge_rb == rb)
-            consider(segment_segment_rb_rotation_ccd(x[pair.v[0]], x[pair.v[1]], x_com, proposed, current, x[pair.v[2]], x[pair.v[3]], toi), toi);
+            collision = segment_segment_rb_rotation_ccd(x[pair.v[0]], x[pair.v[1]], x_com, proposed, current, x[pair.v[2]], x[pair.v[3]], toi);
         else
-            consider(segment_segment_rb_rotation_ccd(x[pair.v[0]], x[pair.v[1]], x_com, q_reverse, identity, x[pair.v[2]], x[pair.v[3]], toi), toi);
+            collision = segment_segment_rb_rotation_ccd(x[pair.v[0]], x[pair.v[1]], x_com, q_reverse, identity, x[pair.v[2]], x[pair.v[3]], toi);
+        consider(collision, toi);
         return value;
     };
     const int nt_count = static_cast<int>(nt_pair_indices.size());

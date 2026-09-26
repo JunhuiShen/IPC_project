@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 
 int main() {
     SimParams params = SimParams::zeros();
@@ -35,6 +36,9 @@ int main() {
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
     append_pin(pins, base + ny * (nx + 1),      state.deformed_positions);
     append_pin(pins, base + ny * (nx + 1) + nx, state.deformed_positions);
+    // Break the symmetric fixture's sensitivity to one-ULP input changes.
+    // Keep this offset identical in the generator and both trajectory tests.
+    pins.front().target_position.y() += 1.0 / 32.0;
     ref_mesh.build_lumped_mass(params.density, params.thickness);
     VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);
 
@@ -44,7 +48,7 @@ int main() {
     std::filesystem::create_directories(checkpoint_dir);
 
     std::ofstream out(std::string(GOLDEN_DIR) + "/golden_frames.txt");
-    out << std::setprecision(15);
+    out << std::setprecision(std::numeric_limits<double>::max_digits10);
 
     for (int frame = 1; frame <= 100; ++frame) {
         advance_one_frame(state, ref_mesh, adj, pins, params, broad_phase);

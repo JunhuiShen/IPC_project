@@ -12,6 +12,7 @@
 #include <cmath>
 #include <fstream>
 #include <map>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -46,7 +47,7 @@ static std::map<int, std::vector<Vec3>> load_golden(const std::string& path) {
 }
 
 // ---------------------------------------------------------------------------
-// Same scene setup as simulation.cpp / dump_frames.cpp
+// Keep this fixture consistent with restart_test.cpp and generate_golden.cpp.
 // ---------------------------------------------------------------------------
 static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin>& pins, VertexTriangleMap& adj, SimParams& params, std::vector<Vec2> X) {
     params.fps          = 30.0;
@@ -70,6 +71,9 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
     append_pin(pins, base + ny * (nx + 1),      state.deformed_positions);
     append_pin(pins, base + ny * (nx + 1) + nx, state.deformed_positions);
+    // Break the symmetric fixture's sensitivity to one-ULP input changes.
+    // Keep this offset identical in the generator and both trajectory tests.
+    pins.front().target_position.y() += 1.0 / 32.0;
     ref_mesh.build_lumped_mass(params.density, params.thickness);
     adj         = build_incident_triangle_map(ref_mesh.tris);
 }
@@ -77,33 +81,49 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin
 // ---------------------------------------------------------------------------
 // Snapshot test
 // ---------------------------------------------------------------------------
-TEST(SimulationSnapshot, First5FramesMatchGolden) {
-const std::string golden_path = std::string(GOLDEN_DIR) + "/golden_frames.txt";
-auto golden = load_golden(golden_path);
-ASSERT_FALSE(golden.empty()) << "Golden file empty or missing";
+static void expect_trajectory_matches_golden(bool perturb_initial_position) {
+    const auto golden = load_golden(std::string(GOLDEN_DIR) + "/golden_frames.txt");
+    ASSERT_EQ(golden.size(), 100u);
 
-RefMesh ref_mesh; DeformedState state; std::vector<Pin> pins;
-VertexTriangleMap adj; SimParams params = SimParams::zeros(); std::vector<Vec2> X;
-build_scene(ref_mesh, state, pins, adj, params, X);
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Pin> pins;
+    VertexTriangleMap adj;
+    SimParams params = SimParams::zeros();
+    std::vector<Vec2> X;
+    build_scene(ref_mesh, state, pins, adj, params, X);
+    if (perturb_initial_position) {
+        state.deformed_positions.front().x() = std::nextafter(
+            state.deformed_positions.front().x(),
+            std::numeric_limits<double>::infinity());
+    }
+    BroadPhase broad_phase;
 
-BroadPhase broad_phase;
-
-for (int frame = 1; frame <= 100; ++frame) {
-advance_one_frame(state, ref_mesh, adj, pins, params, broad_phase);
-
-ASSERT_TRUE(golden.count(frame)) << "No golden data for frame " << frame;
-const auto& expected = golden[frame];
-ASSERT_EQ(state.deformed_positions.size(), expected.size());
-
-for (int i = 0; i < (int)expected.size(); ++i) {
-EXPECT_NEAR(state.deformed_positions[i].x(), expected[i].x(), kTol)
-<< "frame=" << frame << " vertex=" << i << " x mismatch";
-EXPECT_NEAR(state.deformed_positions[i].y(), expected[i].y(), kTol)
-<< "frame=" << frame << " vertex=" << i << " y mismatch";
-EXPECT_NEAR(state.deformed_positions[i].z(), expected[i].z(), kTol)
-<< "frame=" << frame << " vertex=" << i << " z mismatch";
+    for (int frame = 1; frame <= 100; ++frame) {
+        SCOPED_TRACE(::testing::Message() << "frame=" << frame);
+        const auto result = advance_one_frame(state, ref_mesh, adj, pins, params, broad_phase);
+        ASSERT_TRUE(result.converged);
+        ASSERT_TRUE(golden.count(frame));
+        const auto& expected = golden.at(frame);
+        ASSERT_EQ(state.deformed_positions.size(), expected.size());
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            SCOPED_TRACE(::testing::Message() << "vertex=" << i);
+            ASSERT_TRUE(state.deformed_positions[i].allFinite());
+            EXPECT_NEAR(state.deformed_positions[i].x(), expected[i].x(), kTol);
+            EXPECT_NEAR(state.deformed_positions[i].y(), expected[i].y(), kTol);
+            EXPECT_NEAR(state.deformed_positions[i].z(), expected[i].z(), kTol);
+        }
+    }
 }
+
+TEST(SimulationSnapshot, All100FramesMatchGolden) {
+    expect_trajectory_matches_golden(false);
 }
+
+TEST(SimulationSnapshot, OneUlpPerturbationStaysWithinGoldenTolerance) {
+    // A snapshot reference must tolerate ordinary input rounding, rather than
+    // encode the arbitrary branch selected by a perfectly symmetric scene.
+    expect_trajectory_matches_golden(true);
 }
 
 TEST(SimulationSnapshot, ColoredBasicSolverIsBitwiseEqualAcrossThreadCounts) {

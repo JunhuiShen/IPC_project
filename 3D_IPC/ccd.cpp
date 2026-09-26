@@ -1,6 +1,6 @@
 // Two CCD backends behind the public dispatchers in ccd.h:
-//   - Linear   : closed-form, exact when one of the four vertices moves
-//                over the step (Gauss-Seidel safe-step query).
+//   - Linear   : closed-form for one moving vertex (Gauss-Seidel safe-step
+//                query), with independent exact arithmetic for ambiguous cases.
 //   - TICCD    : Tight-Inclusion CCD library [Wang et al. 2021] for the
 //                general case where multiple vertices move.
 // `node_triangle_general_ccd` / `segment_segment_general_ccd` are TICCD-only.
@@ -10,11 +10,14 @@
 #include "quaternion_math.h"
 
 #include <tight_inclusion/ccd.hpp>
+#include <boost/multiprecision/cpp_int.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -23,8 +26,428 @@
 // -----------------------------------------------------------------------------
 namespace {
 
-bool is_effectively_zero(double value, double magnitude_bound, double relative_eps) {
-    return magnitude_bound == 0.0? value == 0.0 : std::abs(value) <= relative_eps * magnitude_bound;
+namespace exact_linear {
+
+using Rational = boost::multiprecision::cpp_rational;
+using Point = std::array<Rational, 3>;
+using Points = std::array<Point, 4>;
+
+Point add(const Point& a, const Point& b) {
+    return {{a[0] + b[0], a[1] + b[1], a[2] + b[2]}};
+}
+
+Point subtract(const Point& a, const Point& b) {
+    return {{a[0] - b[0], a[1] - b[1], a[2] - b[2]}};
+}
+
+Point multiply(const Point& a, const Rational& scale) {
+    return {{a[0] * scale, a[1] * scale, a[2] * scale}};
+}
+
+Rational dot(const Point& a, const Point& b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+Point cross(const Point& a, const Point& b) {
+    return {{a[1] * b[2] - a[2] * b[1],
+             a[2] * b[0] - a[0] * b[2],
+             a[0] * b[1] - a[1] * b[0]}};
+}
+
+Rational point_segment_distance_squared(const Point& p, const Point& a,
+                                         const Point& b) {
+    const Point edge = subtract(b, a), offset = subtract(p, a);
+    const Rational length_squared = dot(edge, edge);
+    const Rational projection = dot(offset, edge);
+    if (length_squared == 0 || projection <= 0) return dot(offset, offset);
+    if (projection >= length_squared) {
+        const Point endpoint_offset = subtract(p, b);
+        return dot(endpoint_offset, endpoint_offset);
+    }
+    return dot(offset, offset) - projection * projection / length_squared;
+}
+
+Rational point_triangle_distance_squared(const Points& p) {
+    const Point edge1 = subtract(p[2], p[1]), edge2 = subtract(p[3], p[1]);
+    const Point offset = subtract(p[0], p[1]);
+    const Point normal = cross(edge1, edge2);
+    const Rational area_squared = dot(normal, normal);
+    if (area_squared != 0) {
+        const Rational e11 = dot(edge1, edge1), e12 = dot(edge1, edge2);
+        const Rational e22 = dot(edge2, edge2);
+        const Rational p1 = dot(offset, edge1), p2 = dot(offset, edge2);
+        // Exact Gram numerators are safe even for arbitrarily thin triangles.
+        const Rational u = e22 * p1 - e12 * p2;
+        const Rational v = e11 * p2 - e12 * p1;
+        if (u >= 0 && v >= 0 && u + v <= area_squared) {
+            const Rational height = dot(offset, normal);
+            return height * height / area_squared;
+        }
+    }
+    // A zero-area triangle is the union of its edges, including point edges.
+    return std::min({point_segment_distance_squared(p[0], p[1], p[2]),
+                     point_segment_distance_squared(p[0], p[2], p[3]),
+                     point_segment_distance_squared(p[0], p[3], p[1])});
+}
+
+Rational segment_segment_distance_squared(const Points& p) {
+    Rational best = std::min({point_segment_distance_squared(p[0], p[2], p[3]),
+                             point_segment_distance_squared(p[1], p[2], p[3]),
+                             point_segment_distance_squared(p[2], p[0], p[1]),
+                             point_segment_distance_squared(p[3], p[0], p[1])});
+    if (best == 0) return best;
+    const Point a = subtract(p[1], p[0]), b = subtract(p[3], p[2]);
+    const Point offset = subtract(p[0], p[2]);
+    const Rational aa = dot(a, a), ab = dot(a, b), bb = dot(b, b);
+    const Rational denominator = aa * bb - ab * ab;
+    if (denominator != 0) {
+        const Rational ar = dot(a, offset), br = dot(b, offset);
+        const Rational alpha = ab * br - bb * ar;
+        const Rational beta = aa * br - ab * ar;
+        if (alpha >= 0 && alpha <= denominator && beta >= 0 && beta <= denominator) {
+            const Point delta = subtract(add(offset, multiply(a, alpha / denominator)),
+                                         multiply(b, beta / denominator));
+            const Rational interior_distance = dot(delta, delta);
+            best = std::min(best, interior_distance);
+        }
+    }
+    return best;
+}
+
+Points evaluate(const Points& positions, const Points& motion, const Rational& time) {
+    Points result;
+    for (int i = 0; i < 4; ++i) result[i] = add(positions[i], multiply(motion[i], time));
+    return result;
+}
+
+Rational determinant(const Points& p) {
+    return dot(cross(subtract(p[1], p[0]), subtract(p[2], p[0])),
+               subtract(p[3], p[0]));
+}
+
+CCDResult contact_result(const Rational& time) {
+    double rounded = time.convert_to<double>();
+    // Conversion may round upward. Preserve a conservative representable TOI.
+    if (Rational(rounded) > time) rounded = std::nextafter(rounded, 0.0);
+    return {true, rounded};
+}
+
+CCDResult resolve_exact(const std::array<Vec3, 4>& positions,
+                        const std::array<Vec3, 4>& motion, bool vertex_face) {
+    Points x, dx;
+    int moving_vertices = 0;
+    for (int i = 0; i < 4; ++i) {
+        assert(positions[i].allFinite() && motion[i].allFinite());
+        moving_vertices += motion[i].cwiseAbs().maxCoeff() != 0.0;
+        for (int axis = 0; axis < 3; ++axis) {
+            // The rational double constructor preserves every input bit. Use
+            // original inputs so local-frame subtraction cannot hide error.
+            x[i][axis] = Rational(positions[i][axis]);
+            dx[i][axis] = Rational(motion[i][axis]);
+        }
+    }
+    assert(moving_vertices <= 1 || (!vertex_face && dx[0] == dx[1]
+        && dx[2] == Point{} && dx[3] == Point{}));
+
+    // This is exact-contact CCD with a fixed world-space tolerance for finite
+    // primitive validation at initial time and analytic candidate events.
+    // It is not a sweep of offset surfaces: no time padding or subdivision is
+    // performed, and membership never uses a condition-dependent tolerance.
+    static const Rational separation_squared = Rational(1.0e-10) * Rational(1.0e-10);
+    const auto intersects = [&](const Rational& time) {
+        const Points p = evaluate(x, dx, time);
+        return (vertex_face ? point_triangle_distance_squared(p)
+                            : segment_segment_distance_squared(p)) <= separation_squared;
+    };
+    if (intersects(Rational(0))) return {true, 0.0};
+    if (moving_vertices == 0) return {};
+
+    // Under the supported motions the tetrahedron determinant is affine.
+    // Exact evaluation at 0 and 1 recovers its coefficients without loss.
+    const Rational intercept = determinant(x);
+    const Rational slope = determinant(evaluate(x, dx, Rational(1))) - intercept;
+    if (slope != 0) {
+        const Rational time = -intercept / slope;
+        return time >= 0 && time <= 1 && intersects(time) ? contact_result(time) : CCDResult{};
+    }
+    if (intercept != 0) return {};
+
+    std::vector<Rational> events;
+    events.reserve(31);
+    events.emplace_back(1);
+    const auto add_root = [&](const Rational& value, const Rational& velocity) {
+        if (velocity == 0) return;
+        const Rational time = -value / velocity;
+        if (time > 0 && time <= 1) events.push_back(time);
+    };
+
+    // Coplanar membership changes at point/edge incidence, triangle collapse,
+    // or a collinear endpoint crossing. All components from every triple
+    // retain events when a chosen 2D projection becomes degenerate. Their
+    // quadratic terms vanish for one moving vertex or a translating edge.
+    for (int i = 0; i < 4; ++i) {
+        for (int j = i + 1; j < 4; ++j) {
+            const Point edge = subtract(x[j], x[i]);
+            const Point velocity = subtract(dx[j], dx[i]);
+            for (int axis = 0; axis < 3; ++axis) add_root(edge[axis], velocity[axis]);
+            for (int k = j + 1; k < 4; ++k) {
+                const Point other = subtract(x[k], x[i]);
+                const Point other_velocity = subtract(dx[k], dx[i]);
+                const Point value = cross(edge, other);
+                const Point derivative = add(cross(velocity, other), cross(edge, other_velocity));
+                for (int axis = 0; axis < 3; ++axis) add_root(value[axis], derivative[axis]);
+            }
+        }
+    }
+    std::sort(events.begin(), events.end());
+    events.erase(std::unique(events.begin(), events.end()), events.end());
+    for (const Rational& time : events) {
+        if (intersects(time)) return contact_result(time);
+    }
+    return {};
+}
+
+} // namespace exact_linear
+
+
+
+// FMA recovers the rounding error of the second product. This matters for
+// almost parallel edges; a Gram determinant squares their condition number.
+double difference_of_products(double a, double b, double c, double d) {
+    const double cd = c * d;
+    return std::fma(a, b, -cd) + std::fma(-c, d, cd);
+}
+
+double orient2(const Vec2& a, const Vec2& b) {
+    return difference_of_products(a.x(), b.y(), a.y(), b.x());
+}
+
+Vec3 stable_cross(const Vec3& a, const Vec3& b) {
+    return Vec3(difference_of_products(a.y(), b.z(), a.z(), b.y()),
+                difference_of_products(a.z(), b.x(), a.x(), b.z()),
+                difference_of_products(a.x(), b.y(), a.y(), b.x()));
+}
+
+constexpr double kRoundoff = 64.0 * std::numeric_limits<double>::epsilon();
+constexpr double kLinearTimePrecision = 1.0e-8;
+constexpr double kLinearValidationDistance = 1.0e-10;
+
+struct LinearCCDGuard {
+    bool uncertain = false;
+    double separation = 0.0;
+    double error = 0.0;
+    double time_error = 0.0;
+
+    double orientation(const Vec2& a, const Vec2& b) {
+        const double value = orient2(a, b);
+        error = kRoundoff * (std::abs(a.x() * b.y()) + std::abs(a.y() * b.x()));
+        if (error > 0.0 && std::abs(value) <= error) uncertain = true;
+        return value;
+    }
+
+    double triple(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& normal) {
+        const double value = normal.dot(c);
+        // Bound cancellation by the sum of absolute products, rather than
+        // declaring a small determinant zero using the lengths of the edges.
+        const double magnitude =
+            (std::abs(a.y() * b.z()) + std::abs(a.z() * b.y())) * std::abs(c.x()) +
+            (std::abs(a.z() * b.x()) + std::abs(a.x() * b.z())) * std::abs(c.y()) +
+            (std::abs(a.x() * b.y()) + std::abs(a.y() * b.x())) * std::abs(c.z());
+        error = kRoundoff * magnitude;
+        if (!std::isfinite(value) || (magnitude > 0.0 && std::abs(value) <= error)) {
+            uncertain = true;
+        }
+        // Extremely thin features require exact finite-primitive validation.
+        // A small plane determinant alone is not a reliable contact test.
+        if (!uncertain) {
+            // A max-component bound cheaply certifies ordinary triangles.
+            // ||n||_2 >= ||n||_inf and ||edge||_2 <= sqrt(3)*||edge||_inf;
+            // the factor four leaves ample room for roundoff. Retain the
+            // stable norms when this certificate cannot rule out thinness.
+            const double edge_max = std::max(a.cwiseAbs().maxCoeff(), b.cwiseAbs().maxCoeff());
+            if (!(normal.cwiseAbs().maxCoeff() > 4.0 * separation * edge_max)) {
+                const double area = normal.stableNorm();
+                if (area > 0.0 && area <= separation * std::max(a.stableNorm(), b.stableNorm())) uncertain = true;
+            }
+        }
+        return value;
+    }
+
+    double root(double d, double c, double d_error) {
+        const double t = -d / c;
+        // Resolving the signs is insufficient when a small slope amplifies
+        // coefficient error into a substantially different impact time.
+        const double bound = d_error + std::abs(t) * error;
+        if (bound > kLinearTimePrecision * std::abs(c)) uncertain = true;
+        if (std::isfinite(t)) time_error = std::max(time_error, bound / std::abs(c));
+        return t;
+    }
+};
+
+double orientation_root(const Vec2& u, const Vec2& du, const Vec2& v, const Vec2& dv,
+                        const Vec2& point, const Vec2& dp, LinearCCDGuard& guard) {
+    const double intercept = guard.orientation(v - u, point - u);
+    const double intercept_error = guard.error;
+    // Exactly one of these three points can move. Avoid an expanded slope
+    // with two large cancelling terms when the first endpoint moves.
+    double slope;
+    if (du.cwiseAbs().maxCoeff() != 0.0) slope = guard.orientation(du, v - point);
+    else if (dv.cwiseAbs().maxCoeff() != 0.0) slope = guard.orientation(dv, point - u);
+    else slope = guard.orientation(v - u, dp);
+    return slope == 0.0 ? std::numeric_limits<double>::quiet_NaN()
+                        : guard.root(intercept, slope, intercept_error);
+}
+
+// Work in a local frame and rescale by an exact power of two. This both keeps
+// products in range and avoids rounding x + t*dx in large world coordinates.
+struct LinearQuery {
+    std::array<Vec3, 4> x;
+    std::array<Vec3, 4> dx;
+    int exponent = 0; // original lengths = local lengths * 2^exponent
+    bool requires_exact = false;
+    double validation_distance = 0.0;
+
+    LinearQuery(const std::array<Vec3, 4>& positions, const std::array<Vec3, 4>& motion)
+        : x(positions), dx(motion) {
+        const Vec3 origin = x[3];
+        for (auto& v : x) v -= origin;
+        bool finite = true;
+        for (const auto& v : x) finite = finite && v.allFinite();
+        if (!finite) {
+            requires_exact = true;
+            // Opposite finite coordinates can overflow during subtraction.
+            double world_max = 0.0;
+            for (const auto& v : positions) world_max = std::max(world_max, v.cwiseAbs().maxCoeff());
+            std::frexp(world_max, &exponent);
+            for (int i = 0; i < 4; ++i) {
+                for (int j = 0; j < 3; ++j) {
+                    x[i][j] = std::scalbn(positions[i][j], -exponent) - std::scalbn(origin[j], -exponent);
+                    dx[i][j] = std::scalbn(motion[i][j], -exponent);
+                }
+            }
+        }
+        double magnitude = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            magnitude = std::max({magnitude, x[i].cwiseAbs().maxCoeff(), dx[i].cwiseAbs().maxCoeff()});
+        }
+        int local_exponent = 0;
+        // A normal, exactly represented power of two gives the same rounded
+        // values as scalbn, while avoiding 24 library calls per ordinary query.
+        // Keep scalbn itself when forming that normal scale is not possible.
+        bool normal_scale = false;
+        double scale = 1.0;
+        if constexpr (std::numeric_limits<double>::is_iec559
+                      && std::numeric_limits<double>::radix == 2
+                      && std::numeric_limits<double>::digits == 53
+                      && std::numeric_limits<double>::max_exponent == 1024
+                      && sizeof(double) == sizeof(std::uint64_t)) {
+            std::uint64_t magnitude_bits;
+            std::memcpy(&magnitude_bits, &magnitude, sizeof(magnitude_bits));
+            const int biased_exponent = static_cast<int>((magnitude_bits >> 52) & 0x7ff);
+            if (biased_exponent >= 1 && biased_exponent <= 2044) {
+                // For positive normal binary64 values, frexp's exponent is
+                // stored exponent - 1022. Construct its reciprocal power of
+                // two directly; memcpy preserves strict aliasing rules.
+                local_exponent = biased_exponent - 1022;
+                const std::uint64_t scale_bits = std::uint64_t(2045 - biased_exponent) << 52;
+                std::memcpy(&scale, &scale_bits, sizeof(scale));
+                normal_scale = true;
+            }
+        }
+        if (!normal_scale) {
+            std::frexp(magnitude, &local_exponent);
+            normal_scale = local_exponent >= -1023 && local_exponent <= 1022;
+            if (normal_scale) scale = std::scalbn(1.0, -local_exponent);
+        }
+        exponent += local_exponent;
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                x[i][j] = normal_scale ? x[i][j] * scale : std::scalbn(x[i][j], -local_exponent);
+                dx[i][j] = normal_scale ? dx[i][j] * scale : std::scalbn(dx[i][j], -local_exponent);
+                // Uniform scaling cannot protect an arbitrarily anisotropic
+                // query. Leave exponent headroom for determinant products,
+                // cancellation residuals, and their error bounds.
+                constexpr double minimum_safe_component = 0x1p-200;
+                if ((x[i][j] != 0.0 && std::abs(x[i][j]) < minimum_safe_component)
+                    || (dx[i][j] != 0.0 && std::abs(dx[i][j]) < minimum_safe_component)) {
+                    requires_exact = true;
+                }
+                if (motion[i][j] != 0.0 && dx[i][j] == 0.0) requires_exact = true;
+                for (int k = 0; k < i; ++k) {
+                    if (positions[i][j] != positions[k][j] && x[i][j] == x[k][j]) requires_exact = true;
+                }
+            }
+        }
+        validation_distance = normal_scale && exponent == local_exponent
+            ? kLinearValidationDistance * scale : std::scalbn(kLinearValidationDistance, -exponent);
+    }
+};
+
+// Every linearly swept primitive lies in the convex hull of its vertices at
+// t=0 and t=1. A strict projection gap between these two hulls therefore
+// certifies separation throughout the step, even for coplanar queries whose
+// analytic predicates were uncertain. Candidate axes need not be exact:
+// any finite direction is valid once all hull vertices pass the same test.
+bool swept_hulls_separated(const LinearQuery& q, bool vertex_face, double separation) {
+    std::array<std::array<Vec3, 4>, 2> points{{q.x, {}}};
+    for (int i = 0; i < 4; ++i) points[1][i] = q.x[i] + q.dx[i];
+    const int split = vertex_face ? 1 : 2;
+    const auto separates = [&](Vec3 axis) {
+        const double magnitude = axis.cwiseAbs().maxCoeff();
+        if (!(magnitude > 0.0) || !axis.allFinite()) return false;
+        axis /= magnitude;
+        double first_lo = std::numeric_limits<double>::infinity();
+        double first_hi = -first_lo;
+        double second_lo = first_lo, second_hi = first_hi;
+        for (const auto& endpoint : points) {
+            for (int i = 0; i < 4; ++i) {
+                const double value = axis.dot(endpoint[i]);
+                if (i < split) {
+                    first_lo = std::min(first_lo, value);
+                    first_hi = std::max(first_hi, value);
+                } else {
+                    second_lo = std::min(second_lo, value);
+                    second_hi = std::max(second_hi, value);
+                }
+            }
+        }
+        // Normalized starts and displacements have components below one;
+        // endpoints are below two. Cover local-frame subtraction, endpoint
+        // addition and dot-product rounding, plus the validation tolerance.
+        // This absolute bound also covers collapsed/underflowed components.
+        // Such queries still need exact predicates if no separation is proven.
+        const double margin = (4.0 * kRoundoff + 2.0 * separation) * axis.lpNorm<1>();
+        return std::max(second_lo - first_hi, first_lo - second_hi) > margin;
+    };
+    for (int axis = 0; axis < 3; ++axis)
+        if (separates(Vec3::Unit(axis))) return true;
+
+    for (const auto& p : points) {
+        if (vertex_face) {
+            const Vec3 normal = stable_cross(p[2] - p[1], p[3] - p[1]);
+            if (separates(normal)) return true;
+            for (int edge = 0; edge < 3; ++edge)
+                if (separates(stable_cross(normal, p[1 + (edge + 1) % 3] - p[1 + edge])))
+                    return true;
+        } else {
+            const Vec3 u = p[1] - p[0], v = p[3] - p[2], w = p[2] - p[0];
+            if (separates(stable_cross(u, v))
+                || separates(stable_cross(stable_cross(u, w), u))
+                || separates(stable_cross(stable_cross(v, w), v))) return true;
+            // Endpoint-to-segment directions also separate collinear segments
+            // and cases where the closest points are outside the edge lines.
+            for (int endpoint = 0; endpoint < 4; ++endpoint) {
+                const int other = endpoint < 2 ? 2 : 0;
+                const Vec3 edge = p[other + 1] - p[other];
+                const Vec3 offset = p[endpoint] - p[other];
+                const double length_squared = edge.squaredNorm();
+                const double t = length_squared > 0.0
+                    ? std::clamp(offset.dot(edge) / length_squared, 0.0, 1.0) : 0.0;
+                if (separates(offset - t * edge)) return true;
+            }
+        }
+    }
+    return false;
 }
 
 bool in_unit_interval(double t, double eps) {
@@ -44,48 +467,69 @@ int dominant_drop_axis(const Vec3& n0, const Vec3& n1) {
     return 2;
 }
 
-// Test whether segments [a0, a1] and [b0, b1] intersect by checking (b0 - a0) * ((a1 - a0) x (b1 - b0)) = 0
-bool segments_intersect(const Vec3& a0, const Vec3& a1, const Vec3& b0, const Vec3& b1, double geometry_relative_eps) {
-    const Vec3 u = a1 - a0;
-    const Vec3 v = b1 - b0;
-    const Vec3 w = b0 - a0;
-    const Vec3 normal = u.cross(v);
-    const double normal2 = normal.squaredNorm();
-    const double u2 = u.squaredNorm();
-    const double v2 = v.squaredNorm();
-    if (u2 == 0.0 || v2 == 0.0) return false;
-
-    const double local_length = std::max({std::sqrt(u2), std::sqrt(v2), w.norm()});
-    const double distance_tolerance = geometry_relative_eps * local_length;
-
-    // Parallel or near-parallel case
-    if (normal2 <= geometry_relative_eps * geometry_relative_eps * u2 * v2) {
-        if (w.cross(u).squaredNorm() > distance_tolerance * distance_tolerance * u2) {
+// Use the dominant 2D projection for finite-segment coordinates. Squaring
+// the normal or solving the Gram system loses thin, nearly parallel contacts.
+bool segments_intersect(const Vec3& a0, const Vec3& a1, const Vec3& b0, const Vec3& b1,
+                        double eps, LinearCCDGuard& guard, bool coplanar = false,
+                        double evaluation_error = 0.0, bool known_collinear = false) {
+    const Vec3 u = a1 - a0, v = b1 - b0, w = b0 - a0;
+    if (u.cwiseAbs().maxCoeff() == 0.0 || v.cwiseAbs().maxCoeff() == 0.0) {
+        guard.uncertain = true;
+        return false;
+    }
+    const Vec3 normal = stable_cross(u, v);
+    const int axis = dominant_drop_axis(normal, Vec3::Zero());
+    if (normal[axis] == 0.0) {
+        const Vec3 offset = stable_cross(w, u);
+        if (!known_collinear && offset.cwiseAbs().maxCoeff() != 0.0) {
+            const double scale = w.stableNorm() * u.stableNorm();
+            if (offset.cwiseAbs().maxCoeff() <= kRoundoff * scale
+                + (evaluation_error + 2 * guard.separation) * u.stableNorm()) guard.uncertain = true;
             return false;
         }
-
-        const double ax = std::fabs(u.x());
-        const double ay = std::fabs(u.y());
-        const double az = std::fabs(u.z());
-        const int axis = (ax >= ay && ax >= az) ? 0 : (ay >= ax && ay >= az ? 1 : 2);
-        const auto component = [&](const Vec3& point) {
-            return axis == 0 ? point.x() : (axis == 1 ? point.y() : point.z());
-        };
-
-        double A = component(a0), B = component(a1);
-        double C = component(b0), D = component(b1);
+        int along = 0;
+        u.cwiseAbs().maxCoeff(&along);
+        double A = 0.0, B = u[along], C = w[along], D = w[along] + v[along];
         if (A > B) std::swap(A, B);
         if (C > D) std::swap(C, D);
-        return A <= D + distance_tolerance && C <= B + distance_tolerance;
+        if (A > D || C > B) {
+            const double gap = std::max(A - D, C - B);
+            const double tolerance = eps * std::max({std::abs(B), std::abs(C), std::abs(D)});
+            if (gap <= tolerance + 2 * guard.separation) guard.uncertain = true;
+            return false;
+        }
+        return true;
     }
-
-    if (std::fabs(w.dot(normal)) > distance_tolerance * std::sqrt(normal2)) return false;
-    const double alpha = w.cross(v).dot(normal) / normal2;
-    const double beta = w.cross(u).dot(normal) / normal2;
-    const Vec3 point_a = a0 + u * alpha;
-    const Vec3 point_b = b0 + v * beta;
-    if ((point_a - point_b).squaredNorm() > distance_tolerance * distance_tolerance) return false;
-    return alpha >= -1.0e-8 && alpha <= 1.0 + 1.0e-8 && beta >= -1.0e-8 && beta <= 1.0 + 1.0e-8;
+    if (!coplanar) {
+        const double plane = guard.triple(u, v, w, normal);
+        if (plane != 0.0) {
+            if (std::abs(plane) <= 2 * guard.separation * normal.stableNorm()) guard.uncertain = true;
+            return false;
+        }
+    }
+    const Vec2 pu = project_drop_axis(u, axis), pv = project_drop_axis(v, axis);
+    const double denom = orient2(pu, pv);
+    const double denom_magnitude = std::abs(pu.x() * pv.y()) + std::abs(pu.y() * pv.x());
+    if (kRoundoff * denom_magnitude > kLinearTimePrecision * std::abs(denom)) guard.uncertain = true;
+    const Vec2 pw = project_drop_axis(w, axis);
+    const double alpha = orient2(pw, pv) / denom;
+    const double beta = orient2(pw, pu) / denom;
+    if (!std::isfinite(alpha) || !std::isfinite(beta)) {
+        guard.uncertain = true;
+        return false;
+    }
+    const double outside = std::max({-alpha, alpha - 1.0, -beta, beta - 1.0});
+    if (outside > 0.0) {
+        // A resolved plane root may still round across a finite endpoint.
+        // Include interpolation/subtraction error before declaring a miss.
+        const double coordinate_error = evaluation_error + kRoundoff * std::max({a0.cwiseAbs().maxCoeff(),
+            a1.cwiseAbs().maxCoeff(), b0.cwiseAbs().maxCoeff(), b1.cwiseAbs().maxCoeff()});
+        const double bound = (8 * coordinate_error + 2 * guard.separation)
+            * (u.lpNorm<1>() + v.lpNorm<1>() + w.lpNorm<1>() + coordinate_error);
+        if (outside * std::abs(denom) <= std::max(bound, eps * std::abs(denom))) guard.uncertain = true;
+        return false;
+    }
+    return true;
 }
 
 bool clip_affine_to_interval(
@@ -102,44 +546,82 @@ bool clip_affine_to_interval(
     return t_min <= t_max;
 }
 
+template <std::size_t N, typename Predicate>
+CCDResult first_coplanar_contact(std::array<double, N>& roots, std::size_t count,
+                                const Predicate& intersects, LinearCCDGuard& guard) {
+    std::sort(roots.begin(), roots.begin() + count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const double t = roots[i];
+        const bool prior_uncertainty = guard.uncertain;
+        const bool boundary_hit = intersects(t);
+        const bool boundary_uncertainty = guard.uncertain;
+        if (boundary_hit && !boundary_uncertainty) return {true, t};
+
+        const double next = i + 1 < count ? roots[i + 1] : 1.0;
+        if (next > t) {
+            // Between successive events, membership is constant. A resolved
+            // interior hit proves that the left event is conservative even
+            // if evaluating its boundary rounded just outside the primitive.
+            // Preserve coefficient/earlier uncertainty, not this one probe's.
+            guard.uncertain = prior_uncertainty;
+            if (intersects(t + 0.5 * (next - t))) return {true, t};
+            guard.uncertain = guard.uncertain || boundary_uncertainty;
+        }
+        if (boundary_hit) return {true, t};
+    }
+    return intersects(1.0) ? CCDResult{true, 1.0} : CCDResult{};
+}
+
 // -----------------------------------------------------------------------------
 // One-moving-vertex linear CCD
 // -----------------------------------------------------------------------------
 
 CCDResult node_triangle_linear_ccd(const Vec3& x,  const Vec3& dx, const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2,
-                                   const Vec3& x3, const Vec3& dx3, double eps) {
+                                   const Vec3& x3, const Vec3& dx3, double eps, LinearCCDGuard& guard) {
     CCDResult result;
-    const double geometry_relative_eps = std::max(eps, 1.0e-8);
+    const double geometry_relative_eps = std::max(eps, kRoundoff);
 
-    const auto point_in_triangle_at = [&](double t) {
+    const auto point_in_triangle_at = [&](double t, bool coplanar = false) {
         const Vec3 point = x + dx * t;
         const Vec3 a = x1 + dx1 * t;
         const Vec3 edge1 = x2 + dx2 * t - a;
         const Vec3 edge2 = x3 + dx3 * t - a;
         const Vec3 offset = point - a;
-        const Vec3 normal = edge1.cross(edge2);
-        const double normal2 = normal.squaredNorm();
-        const double e11 = edge1.dot(edge1);
-        const double e12 = edge1.dot(edge2);
-        const double e22 = edge2.dot(edge2);
-
-        // Degenerate triangles are outside the supported input domain.
-        const double area_scale2 = e11 * e22;
-        if (area_scale2 == 0.0 || normal2 <= geometry_relative_eps * geometry_relative_eps * area_scale2) {
+        const Vec3 normal = stable_cross(edge1, edge2);
+        const int axis = dominant_drop_axis(normal, Vec3::Zero());
+        const Vec2 e1 = project_drop_axis(edge1, axis), e2 = project_drop_axis(edge2, axis);
+        const double area = orient2(e1, e2);
+        const double area_magnitude = std::abs(e1.x() * e2.y()) + std::abs(e1.y() * e2.x());
+        if (area == 0.0 || kRoundoff * area_magnitude > kLinearTimePrecision * std::abs(area)) {
+            guard.uncertain = true;
             return false;
         }
-
-        const double local_length = std::max({std::sqrt(e11), std::sqrt(e22), offset.norm()});
-        if (std::fabs(normal.dot(offset)) > geometry_relative_eps * std::sqrt(normal2) * local_length) {
+        if (!coplanar) {
+            const double plane = guard.triple(edge1, edge2, offset, normal);
+            if (plane != 0.0) {
+                if (std::abs(plane) <= 2 * guard.separation * normal.stableNorm()) guard.uncertain = true;
+                return false;
+            }
+        }
+        const Vec2 q = project_drop_axis(offset, axis);
+        const double lambda2 = orient2(q, e2) / area;
+        const double lambda3 = orient2(e1, q) / area;
+        const double lambda1 = orient2(e1 - q, e2 - q) / area;
+        const double minimum = std::min({lambda1, lambda2, lambda3});
+        if (!std::isfinite(minimum)) { guard.uncertain = true; return false; }
+        if (minimum < 0.0) {
+            const double position_scale = std::max({x.cwiseAbs().maxCoeff(), x1.cwiseAbs().maxCoeff(),
+                x2.cwiseAbs().maxCoeff(), x3.cwiseAbs().maxCoeff()});
+            const double motion_scale = std::max({dx.cwiseAbs().maxCoeff(), dx1.cwiseAbs().maxCoeff(),
+                dx2.cwiseAbs().maxCoeff(), dx3.cwiseAbs().maxCoeff()});
+            const double coordinate_error = kRoundoff * (position_scale + t * motion_scale)
+                + guard.time_error * motion_scale;
+            const double bound = (8 * coordinate_error + 2 * guard.separation)
+                * (edge1.lpNorm<1>() + edge2.lpNorm<1>() + offset.lpNorm<1>() + coordinate_error);
+            if (-minimum * std::abs(area) <= std::max(bound, geometry_relative_eps * std::abs(area))) guard.uncertain = true;
             return false;
         }
-
-        const double b1 = edge1.dot(offset);
-        const double b2 = edge2.dot(offset);
-        const double lambda2 = (e22 * b1 - e12 * b2) / normal2;
-        const double lambda3 = (e11 * b2 - e12 * b1) / normal2;
-        const double lambda1 = 1.0 - lambda2 - lambda3;
-        return lambda1 >= -1.0e-8 && lambda2 >= -1.0e-8 && lambda3 >= -1.0e-8;
+        return true;
     };
 
     if (point_in_triangle_at(0.0)) {
@@ -147,23 +629,35 @@ CCDResult node_triangle_linear_ccd(const Vec3& x,  const Vec3& dx, const Vec3& x
         result.t = 0.0;
         return result;
     }
+    // The dispatcher resolves uncertainty independently. Further floating
+    // event work cannot clear uncertainty established at the initial state.
+    if (guard.uncertain) return {};
 
-    // Ordinary case: f(t) = d + c t because at most one vertex moves.
-    const Vec3 p = x2 - x1, dp = dx2 - dx1;
-    const Vec3 q = x3 - x1, dq = dx3 - dx1;
-    const Vec3 r = x  - x1, dr = dx  - dx1;
-    const Vec3 pxq = p.cross(q);
-    const double d = pxq.dot(r);
-    const double c = dp.cross(q).dot(r) + p.cross(dq).dot(r) + pxq.dot(dr);
-    const double d_scale = p.norm() * q.norm() * r.norm();
-    const double c_scale = dp.norm() * q.norm() * r.norm() + p.norm() * dq.norm() * r.norm() + p.norm() * q.norm() * dr.norm();
-    const bool coplanar_for_entire_step = is_effectively_zero(c, c_scale, eps) && is_effectively_zero(d, d_scale, eps);
+    // Put the moving vertex last in a tetrahedron determinant. The other
+    // three vertices are static, so the slope is a SINGLE triple product.
+    // Expanding about a moving triangle corner adds cancelling large terms.
+    const std::array<Vec3, 4> positions{{x, x1, x2, x3}};
+    const std::array<Vec3, 4> motion{{dx, dx1, dx2, dx3}};
+    int moving = 0;
+    for (int i = 0; i < 4; ++i) if (motion[i].cwiseAbs().maxCoeff() != 0.0) moving = i;
+    std::array<int, 3> fixed{};
+    int count = 0;
+    for (int i = 0; i < 4; ++i) if (i != moving) fixed[count++] = i;
+    const Vec3 p = positions[fixed[1]] - positions[fixed[0]];
+    const Vec3 q = positions[fixed[2]] - positions[fixed[0]];
+    const Vec3 plane_normal = stable_cross(p, q);
+    const double d = guard.triple(p, q, positions[moving] - positions[fixed[0]], plane_normal);
+    const double d_error = guard.error;
+    const double c = guard.triple(p, q, motion[moving], plane_normal);
+    const bool coplanar_for_entire_step = c == 0.0 && d == 0.0;
+    if (guard.uncertain) return {};
 
     if (c != 0.0) {
-        const double t = -d / c;
+        const double t = guard.root(d, c, d_error);
+        if (guard.uncertain) return {};
         if (in_unit_interval(t, eps)) {
             const double candidate_t = std::clamp(t, 0.0, 1.0);
-            if (point_in_triangle_at(candidate_t)) {
+            if (point_in_triangle_at(candidate_t, candidate_t == t)) {
                 result.collision = true;
                 result.t = candidate_t;
             }
@@ -174,8 +668,8 @@ CCDResult node_triangle_linear_ccd(const Vec3& x,  const Vec3& dx, const Vec3& x
 
     // Fully coplanar step: project along the most stable coordinate plane.
     // Point-triangle membership can change only when the point crosses one of the three projected triangle-edge lines.
-    const Vec3 normal0 = (x2 - x1).cross(x3 - x1);
-    const Vec3 normal1 = (x2 + dx2 - x1 - dx1).cross(x3 + dx3 - x1 - dx1);
+    const Vec3 normal0 = stable_cross(x2 - x1, x3 - x1);
+    const Vec3 normal1 = stable_cross(x2 - x1 + dx2 - dx1, x3 - x1 + dx3 - dx1);
     const int drop_axis = dominant_drop_axis(normal0, normal1);
 
     const Vec2 point0 = project_drop_axis(x, drop_axis);
@@ -192,16 +686,8 @@ CCDResult node_triangle_linear_ccd(const Vec3& x,  const Vec3& dx, const Vec3& x
     std::array<double, 3> roots{};
     std::size_t root_count = 0;
     const auto add_orientation_root = [&](const Vec2& u0, const Vec2& du,  const Vec2& v0, const Vec2& dv,  const Vec2& query0, const Vec2& dquery) {
-        const Vec2 edge = v0 - u0;
-        const Vec2 dedge = dv - du;
-        const Vec2 offset = query0 - u0;
-        const Vec2 doffset = dquery - du;
-        const double intercept = cross_product_in_2d(edge, offset);
-        const double slope = cross_product_in_2d(dedge, offset) + cross_product_in_2d(edge, doffset);
-        const double scale = std::max(std::fabs(slope), std::fabs(intercept));
-        if (std::fabs(slope) <= eps * scale) return;
 
-        double t = -intercept / slope;
+        double t = orientation_root(u0, du, v0, dv, query0, dquery, guard);
         if (!in_unit_interval(t, eps)) return;
         t = std::clamp(t, 0.0, 1.0);
         roots[root_count++] = t;
@@ -210,48 +696,21 @@ CCDResult node_triangle_linear_ccd(const Vec3& x,  const Vec3& dx, const Vec3& x
     add_orientation_root(a0, da, b0, db, point0, dpoint);
     add_orientation_root(b0, db, c0, dc, point0, dpoint);
     add_orientation_root(c0, dc, a0, da, point0, dpoint);
-    std::sort(roots.begin(), roots.begin() + root_count);
-
-    // Test every event with the full 3D predicate. Between consecutive events, exact membership is constant, so one midpoint represents that interval.
-    for (std::size_t i = 0; i < root_count; ++i) {
-        const double t = roots[i];
-        if (point_in_triangle_at(t)) {
-            result.collision = true;
-            result.t = t;
-            return result;
-        }
-
-        const double next_t = (i + 1 < root_count) ? roots[i + 1] : 1.0;
-        if (next_t > t) {
-            const double midpoint = t + 0.5 * (next_t - t);
-            if (point_in_triangle_at(midpoint)) {
-                // No boundary event occurs inside this interval, so contact starts at its left endpoint.
-                // Returning t is conservative if the fixed-time predicate is tolerance-padded.
-                result.collision = true;
-                result.t = t;
-                return result;
-            }
-        }
-    }
-
-    // t=0 was tested before the coplanar branch; close the sweep at t=1.
-    if (point_in_triangle_at(1.0)) {
-        result.collision = true;
-        result.t = 1.0;
-    }
-    return result;
+    if (guard.uncertain) return {};
+    return first_coplanar_contact(roots, root_count, point_in_triangle_at, guard);
 }
 
-CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double eps) {
+CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double eps, LinearCCDGuard& guard) {
     CCDResult result;
-    const double geometry_relative_eps = std::max(eps, 1.0e-8);
+    const double geometry_relative_eps = std::max(eps, kRoundoff);
 
-    const auto segments_intersect_at = [&](double t) {
+    const auto segments_intersect_at = [&](double t, bool coplanar = false) {
         const Vec3 a0 = x1 + dx1 * t;
         const Vec3 a1 = x2;
         const Vec3 b0 = x3;
         const Vec3 b1 = x4;
-        return segments_intersect(a0, a1, b0, b1, geometry_relative_eps);
+        return segments_intersect(a0, a1, b0, b1, geometry_relative_eps, guard, coplanar,
+            (kRoundoff * t + guard.time_error) * dx1.cwiseAbs().maxCoeff());
     };
 
     if (segments_intersect_at(0.0)) {
@@ -259,23 +718,27 @@ CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1, const Vec3
         result.t = 0.0;
         return result;
     }
+    // The dispatcher resolves uncertainty independently. Further floating
+    // event work cannot clear uncertainty established at the initial state.
+    if (guard.uncertain) return {};
 
     // Ordinary case: f(t) = -N . (y + t dx1) = d + c t.
     const Vec3 h = x2 - x3;
     const Vec3 b = x4 - x3;
     const Vec3 y = x1 - x3;
-    const Vec3 normal = h.cross(b);
-    const double d = -normal.dot(y);
-    const double c = -normal.dot(dx1);
-    const double d_scale = normal.norm() * y.norm();
-    const double c_scale = normal.norm() * dx1.norm();
-    const bool coplanar_for_entire_step = is_effectively_zero(c, c_scale, eps) && is_effectively_zero(d, d_scale, eps);
+    const Vec3 plane_normal = stable_cross(h, b);
+    const double d = -guard.triple(h, b, y, plane_normal);
+    const double d_error = guard.error;
+    const double c = -guard.triple(h, b, dx1, plane_normal);
+    const bool coplanar_for_entire_step = c == 0.0 && d == 0.0;
+    if (guard.uncertain) return {};
 
     if (c != 0.0) {
-        const double t = -d / c;
+        const double t = guard.root(d, c, d_error);
+        if (guard.uncertain) return {};
         if (in_unit_interval(t, eps)) {
             const double candidate_t = std::clamp(t, 0.0, 1.0);
-            if (segments_intersect_at(candidate_t)) {
+            if (segments_intersect_at(candidate_t, candidate_t == t)) {
                 result.collision = true;
                 result.t = candidate_t;
             }
@@ -299,8 +762,7 @@ CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1, const Vec3
         std::array<double, 2> roots{};
         std::size_t root_count = 0;
         const auto add_root = [&](double slope, double intercept) {
-            const double scale = std::max(std::fabs(slope), std::fabs(intercept));
-            if (std::fabs(slope) <= eps * scale) return;
+            if (slope == 0.0) return;
             double t = -intercept / slope;
             if (!in_unit_interval(t, eps)) return;
             roots[root_count++] = std::clamp(t, 0.0, 1.0);
@@ -347,17 +809,10 @@ CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1, const Vec3
     const Vec3 direction0 = x2 - x1;
     const Vec3 direction1 = x2 - x1 - dx1;
     const Vec3 static_direction = x4 - x3;
-    const Vec3 normal0 = direction0.cross(static_direction);
-    const Vec3 normal1 = direction1.cross(static_direction);
-    const auto relatively_parallel = [&](const Vec3& u, const Vec3& n) {
-        const double scale2 = u.squaredNorm() * static_direction.squaredNorm();
-        return scale2 == 0.0 || n.squaredNorm() <= eps * eps * scale2;
-    };
-
-    // Permanently parallel motion reduces to 1D interval overlap.
-    // Validate the earliest 1D event with the full 3D segment predicate before returning it.
-    if (relatively_parallel(direction0, normal0)
-        && relatively_parallel(direction1, normal1)) {
+    const Vec3 normal0 = stable_cross(direction0, static_direction);
+    const Vec3 normal1 = stable_cross(direction1, static_direction);
+    // Only truly parallel directions reduce to a one-dimensional overlap.
+    if (normal0.cwiseAbs().maxCoeff() == 0.0 && normal1.cwiseAbs().maxCoeff() == 0.0) {
         const double collinear_t = earliest_collinear_time();
         if (segments_intersect_at(collinear_t)) {
             result.collision = true;
@@ -379,15 +834,7 @@ CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1, const Vec3
     std::array<double, 4> roots{};
     std::size_t root_count = 0;
     const auto add_orientation_root = [&](const Vec2& u0, const Vec2& du, const Vec2& v0, const Vec2& dv, const Vec2& query0, const Vec2& dquery) {
-        const Vec2 edge = v0 - u0;
-        const Vec2 dedge = dv - du;
-        const Vec2 offset = query0 - u0;
-        const Vec2 doffset = dquery - du;
-        const double intercept = cross_product_in_2d(edge, offset);
-        const double slope = cross_product_in_2d(dedge, offset) + cross_product_in_2d(edge, doffset);
-        const double scale = std::max(std::fabs(slope), std::fabs(intercept));
-        if (std::fabs(slope) <= eps * scale) return;
-        double t = -intercept / slope;
+        double t = orientation_root(u0, du, v0, dv, query0, dquery, guard);
         if (!in_unit_interval(t, eps)) return;
         roots[root_count++] = std::clamp(t, 0.0, 1.0);
     };
@@ -397,50 +844,20 @@ CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1, const Vec3
     add_orientation_root(a0, da, b0, zero, d0, zero);
     add_orientation_root(c0, zero, d0, zero, a0, da);
     add_orientation_root(c0, zero, d0, zero, b0, zero);
-    std::sort(roots.begin(), roots.begin() + root_count);
-
-    // Test every event with the full 3D predicate.
-    // Exact intersection is constant between events, so one midpoint represents each open interval.
-    for (std::size_t i = 0; i < root_count; ++i) {
-        const double t = roots[i];
-        if (segments_intersect_at(t)) {
-            result.collision = true;
-            result.t = t;
-            return result;
-        }
-
-        const double next_t = (i + 1 < root_count) ? roots[i + 1] : 1.0;
-        if (next_t > t) {
-            const double midpoint = t + 0.5 * (next_t - t);
-            if (segments_intersect_at(midpoint)) {
-                // The intersection state is constant between orientation events.
-                // Return the left endpoint as a conservative TOI.
-                result.collision = true;
-                result.t = t;
-                return result;
-            }
-        }
-    }
-
-    // t=0 was tested before the coplanar branch; close the sweep at t=1.
-    if (segments_intersect_at(1.0)) {
-        result.collision = true;
-        result.t = 1.0;
-    }
-    return result;
+    if (guard.uncertain) return {};
+    return first_coplanar_contact(roots, root_count, segments_intersect_at, guard);
 }
 
-}  // namespace
-
-CCDResult segment_segment_same_displacement_linear_ccd(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2, const Vec3& x3, const Vec3& x4, double eps) {
-    assert((dx1 - dx2).squaredNorm() == 0.0 && "endpoint displacements must match");
+CCDResult translating_segment_linear_ccd(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2, const Vec3& x3, const Vec3& x4, double eps, LinearCCDGuard& guard) {
+    assert((dx1.array() == dx2.array()).all() && "endpoint displacements must match");
     (void)dx2;
     const Vec3& dx = dx1;
     CCDResult result;
-    const double geometry_relative_eps = std::max(eps, 1.0e-8);
+    const double geometry_relative_eps = std::max(eps, kRoundoff);
 
-    const auto segments_intersect_at = [&](double t) {
-        return segments_intersect( x1 + dx * t, x2 + dx * t, x3, x4, geometry_relative_eps);
+    const auto segments_intersect_at = [&](double t, bool coplanar = false) {
+        return segments_intersect(x1 + dx * t, x2 + dx * t, x3, x4, geometry_relative_eps, guard, coplanar,
+            (kRoundoff * t + guard.time_error) * dx.cwiseAbs().maxCoeff());
     };
 
     if (segments_intersect_at(0.0)) {
@@ -448,6 +865,9 @@ CCDResult segment_segment_same_displacement_linear_ccd(const Vec3& x1, const Vec
         result.t = 0.0;
         return result;
     }
+    // The dispatcher resolves uncertainty independently. Further floating
+    // event work cannot clear uncertainty established at the initial state.
+    if (guard.uncertain) return {};
 
     const Vec3 a = x2 - x1;
     const Vec3 b = x4 - x3;
@@ -455,26 +875,27 @@ CCDResult segment_segment_same_displacement_linear_ccd(const Vec3& x1, const Vec
     const double a2 = a.squaredNorm();
     const double b2 = b.squaredNorm();
 
-    if (a2 == 0.0 || b2 == 0.0) return result;
+    if (a2 == 0.0 || b2 == 0.0) { guard.uncertain = true; return result; }
 
-    const Vec3 normal = a.cross(b);
-    const double normal2 = normal.squaredNorm();
-    const bool parallel = normal2 == 0.0;
+    const Vec3 normal = stable_cross(a, b);
+    const int drop_axis = dominant_drop_axis(normal, Vec3::Zero());
+    const double denominator = orient2(project_drop_axis(a, drop_axis), project_drop_axis(b, drop_axis));
+    const bool parallel = denominator == 0.0;
 
     if (!parallel) {
-        // Ordinary case: f(t) = (a x b) . (r - t dx) = d + c t = 0
-        const double d = normal.dot(r);
-        const double c = -normal.dot(dx);
-        const double d_scale = std::sqrt(normal2) * r.norm();
-        const double c_scale = std::sqrt(normal2) * dx.norm();
-        const bool coplanar_for_entire_step = is_effectively_zero(c, c_scale, eps) && is_effectively_zero(d, d_scale, eps);
+        const double d = guard.triple(a, b, r, normal);
+        const double d_error = guard.error;
+        const double c = -guard.triple(a, b, dx, normal);
+        const bool coplanar_for_entire_step = c == 0.0 && d == 0.0;
+        if (guard.uncertain) return {};
 
         // When c != 0, this gives the single candidate time t = -d / c
         if (c != 0.0) {
-            const double t = -d / c;
+            const double t = guard.root(d, c, d_error);
+            if (guard.uncertain) return {};
             if (in_unit_interval(t, eps)) {
                 const double candidate_t = std::clamp(t, 0.0, 1.0);
-                if (segments_intersect_at(candidate_t)) {
+                if (segments_intersect_at(candidate_t, candidate_t == t)) {
                     result.collision = true;
                     result.t = candidate_t;
                     return result;
@@ -487,10 +908,12 @@ CCDResult segment_segment_same_displacement_linear_ccd(const Vec3& x1, const Vec
 
         // Nonparallel and coplanar for the entire step: alpha(t) and beta(t) are affine.
         // Clip [0, 1] against 0 <= alpha,beta <= 1 to obtain the first finite-segment overlap.
-        const double alpha0 = r.cross(b).dot(normal) / normal2;
-        const double alpha_slope = -dx.cross(b).dot(normal) / normal2;
-        const double beta0 = r.cross(a).dot(normal) / normal2;
-        const double beta_slope = -dx.cross(a).dot(normal) / normal2;
+        const Vec2 pa = project_drop_axis(a, drop_axis), pb = project_drop_axis(b, drop_axis);
+        const Vec2 pr = project_drop_axis(r, drop_axis), pdx = project_drop_axis(dx, drop_axis);
+        const double alpha0 = orient2(pr, pb) / denominator;
+        const double alpha_slope = -orient2(pdx, pb) / denominator;
+        const double beta0 = orient2(pr, pa) / denominator;
+        const double beta_slope = -orient2(pdx, pa) / denominator;
         double t_min = 0.0;
         double t_max = 1.0;
         if (!clip_affine_to_interval(alpha0, alpha_slope, 0.0, 1.0, t_min, t_max) || !clip_affine_to_interval(beta0, beta_slope, 0.0, 1.0, t_min, t_max)) {
@@ -499,7 +922,7 @@ CCDResult segment_segment_same_displacement_linear_ccd(const Vec3& x1, const Vec
 
         if (in_unit_interval(t_min, eps)) {
             const double candidate_t = std::clamp(t_min, 0.0, 1.0);
-            if (segments_intersect_at(candidate_t)) {
+            if (segments_intersect_at(candidate_t, true)) {
                 result.collision = true;
                 result.t = candidate_t;
             }
@@ -509,20 +932,38 @@ CCDResult segment_segment_same_displacement_linear_ccd(const Vec3& x1, const Vec
 
     // Parallel case: a x b = 0, so f(t) is identically zero regardless of  the separation between the supporting lines.
     // Test collinearity first, then test overlap of the finite segments.
-    const Vec3 direction = a2 >= b2 ? a : b;
-    const double direction2 = direction.squaredNorm();
-    const Vec3 transverse_offset = r.cross(direction);
-    const Vec3 transverse_velocity = dx.cross(direction);
-    const double transverse_velocity2 = transverse_velocity.squaredNorm();
-    const bool no_transverse_motion = transverse_velocity2 == 0.0;
+    const Vec3 direction = a.stableNorm() >= b.stableNorm() ? a : b;
+    const Vec3 transverse_offset = stable_cross(r, direction);
+    const Vec3 transverse_velocity = stable_cross(dx, direction);
+    int transverse_axis = 0;
+    const double transverse_speed = transverse_velocity.cwiseAbs().maxCoeff(&transverse_axis);
+    const bool no_transverse_motion = transverse_speed == 0.0;
 
     if (!no_transverse_motion) {
+        const double offset_size = transverse_offset.cwiseAbs().maxCoeff();
+        bool known_collinear = offset_size == 0.0;
+        if (!known_collinear) {
+            // All transverse components must vanish at the SAME time. An
+            // unrelated large tangential velocity is not a spatial tolerance
+            // for a persistent gap in another coordinate.
+            const Vec3 u = transverse_offset / offset_size;
+            const Vec3 v = transverse_velocity / transverse_speed;
+            const Vec3 mismatch = stable_cross(u, v);
+            known_collinear = mismatch.cwiseAbs().maxCoeff() == 0.0;
+            if (!known_collinear) {
+                if (mismatch.cwiseAbs().maxCoeff() <= kRoundoff) guard.uncertain = true;
+                return result;
+            }
+        }
         // Solve transverse_offset - t * transverse_velocity = 0.
-        // The scalar projection gives the only candidate; the fixed-time predicate rejects it when the two vector quantities are not parallel.
-        const double t = transverse_offset.dot(transverse_velocity) / transverse_velocity2;
+        // Use the dominant component, avoiding squares that can underflow
+        // even after scaling an extremely long, narrowly separated pair.
+        // The 3D predicate still rejects inconsistent transverse components.
+        const double t = transverse_offset[transverse_axis] / transverse_velocity[transverse_axis];
         if (in_unit_interval(t, eps)) {
             const double candidate_t = std::clamp(t, 0.0, 1.0);
-            if (segments_intersect_at(candidate_t)) {
+            if (segments_intersect(x1 + dx * candidate_t, x2 + dx * candidate_t, x3, x4,
+                    geometry_relative_eps, guard, false, 0.0, known_collinear && candidate_t == t)) {
                 result.collision = true;
                 result.t = candidate_t;
             }
@@ -530,9 +971,7 @@ CCDResult segment_segment_same_displacement_linear_ccd(const Vec3& x1, const Vec
         return result;
     }
 
-    const double transverse_offset_scale2 = r.squaredNorm() * direction2;
-    const bool collinear_for_entire_step =
-        transverse_offset_scale2 == 0.0 ? transverse_offset.squaredNorm() == 0.0 : transverse_offset.squaredNorm() <= geometry_relative_eps * geometry_relative_eps * transverse_offset_scale2;
+    const bool collinear_for_entire_step = transverse_offset.cwiseAbs().maxCoeff() == 0.0;
     if (!collinear_for_entire_step) return result;
 
     // The supporting lines remain collinear.
@@ -570,7 +1009,57 @@ CCDResult segment_segment_same_displacement_linear_ccd(const Vec3& x1, const Vec
     return result;
 }
 
-namespace {
+namespace linear_ccd_detail {
+
+CCDResult node_triangle(const Vec3& x, const Vec3& dx,
+                        const Vec3& x1, const Vec3& dx1,
+                        const Vec3& x2, const Vec3& dx2,
+                        const Vec3& x3, const Vec3& dx3, double eps) {
+    const std::array<Vec3, 4> positions{{x, x1, x2, x3}}, motion{{dx, dx1, dx2, dx3}};
+    const LinearQuery q(positions, motion);
+    if (q.requires_exact) {
+        if (swept_hulls_separated(q, true, q.validation_distance)) return {};
+        return exact_linear::resolve_exact(positions, motion, true);
+    }
+    LinearCCDGuard guard{false, q.validation_distance};
+    const auto result = node_triangle_linear_ccd(q.x[0], q.dx[0], q.x[1], q.dx[1],
+        q.x[2], q.dx[2], q.x[3], q.dx[3], eps, guard);
+    if (guard.uncertain && swept_hulls_separated(q, true, guard.separation)) return {};
+    return guard.uncertain ? exact_linear::resolve_exact(positions, motion, true) : result;
+}
+
+CCDResult segment_segment(const Vec3& x1, const Vec3& dx1, const Vec3& x2,
+                          const Vec3& x3, const Vec3& x4, double eps) {
+    const Vec3 zero = Vec3::Zero();
+    const std::array<Vec3, 4> positions{{x1, x2, x3, x4}}, motion{{dx1, zero, zero, zero}};
+    const LinearQuery q(positions, motion);
+    if (q.requires_exact) {
+        if (swept_hulls_separated(q, false, q.validation_distance)) return {};
+        return exact_linear::resolve_exact(positions, motion, false);
+    }
+    LinearCCDGuard guard{false, q.validation_distance};
+    const auto result = segment_segment_linear_ccd(q.x[0], q.dx[0], q.x[1], q.x[2], q.x[3], eps, guard);
+    if (guard.uncertain && swept_hulls_separated(q, false, guard.separation)) return {};
+    return guard.uncertain ? exact_linear::resolve_exact(positions, motion, false) : result;
+}
+
+CCDResult translating_segment(const Vec3& x1, const Vec3& dx1, const Vec3& x2,
+                              const Vec3& dx2, const Vec3& x3, const Vec3& x4, double eps) {
+    assert((dx1.array() == dx2.array()).all() && "endpoint displacements must match");
+    const Vec3 zero = Vec3::Zero();
+    const std::array<Vec3, 4> positions{{x1, x2, x3, x4}}, motion{{dx1, dx2, zero, zero}};
+    const LinearQuery q(positions, motion);
+    if (q.requires_exact) {
+        if (swept_hulls_separated(q, false, q.validation_distance)) return {};
+        return exact_linear::resolve_exact(positions, motion, false);
+    }
+    LinearCCDGuard guard{false, q.validation_distance};
+    const auto result = translating_segment_linear_ccd(q.x[0], q.dx[0], q.x[1], q.dx[1], q.x[2], q.x[3], eps, guard);
+    if (guard.uncertain && swept_hulls_separated(q, false, guard.separation)) return {};
+    return guard.uncertain ? exact_linear::resolve_exact(positions, motion, false) : result;
+}
+
+} // namespace linear_ccd_detail
 
 // TICCD configuration (see Wang et al. 2021, "A Large-Scale Benchmark and an
 // Inclusion-Based Algorithm for Continuous Collision Detection", and the
@@ -626,10 +1115,19 @@ double clamp_toi(double toi) {
     return toi;
 }
 
-CCDResult ccd_result_from_toi(double toi) {
-    CCDResult r;
-    if (toi < 1.0) { r.collision = true; r.t = toi; }
-    return r;
+CCDResult inclusion_ccd(const std::array<Vec3, 4>& x, const std::array<Vec3, 4>& dx,
+                        bool vertex_face, double separation = kTiccdMinSeparation,
+                        double tolerance = kTiccdTolerance) {
+    const ticcd::Array3 err = ticcd::Array3::Constant(-1.0);
+    double toi = std::numeric_limits<double>::infinity();
+    double output_tolerance = tolerance;
+    const auto ccd = vertex_face ? ticcd::vertexFaceCCD : ticcd::edgeEdgeCCD;
+    const bool collision = ccd(x[0], x[1], x[2], x[3],
+        x[0] + dx[0], x[1] + dx[1], x[2] + dx[2], x[3] + dx[3],
+        err, separation, toi, tolerance, 1.0,
+        kTiccdMaxIter, output_tolerance, kTiccdNoZeroToi, kTiccdMethod);
+    // Keep the collision flag: t == 1 is a valid endpoint contact.
+    return collision ? CCDResult{true, clamp_toi(toi)} : CCDResult{};
 }
 
 }  // namespace
@@ -642,36 +1140,22 @@ double node_triangle_general_ccd(const Vec3& x,  const Vec3& dx,
                                  const Vec3& x1, const Vec3& dx1,
                                  const Vec3& x2, const Vec3& dx2,
                                  const Vec3& x3, const Vec3& dx3) {
-    const ticcd::Array3 err = ticcd::Array3::Constant(-1.0);
-    double toi = std::numeric_limits<double>::infinity();
-    double output_tolerance = kTiccdTolerance;
-    const bool collision = ticcd::vertexFaceCCD(
-        x,      x1,       x2,       x3,
-        x + dx, x1 + dx1, x2 + dx2, x3 + dx3,
-        err, kTiccdMinSeparation, toi, kTiccdTolerance, /*t_max=*/1.0,
-        kTiccdMaxIter, output_tolerance, kTiccdNoZeroToi, kTiccdMethod);
-    return collision ? clamp_toi(toi) : 1.0;
+    const auto r = inclusion_ccd({{x, x1, x2, x3}}, {{dx, dx1, dx2, dx3}}, true);
+    return r.collision ? r.t : 1.0;
 }
 
 double segment_segment_general_ccd(const Vec3& x1, const Vec3& dx1,
                                    const Vec3& x2, const Vec3& dx2,
                                    const Vec3& x3, const Vec3& dx3,
                                    const Vec3& x4, const Vec3& dx4) {
-    const ticcd::Array3 err = ticcd::Array3::Constant(-1.0);
-    double toi = std::numeric_limits<double>::infinity();
-    double output_tolerance = kTiccdTolerance;
-    const bool collision = ticcd::edgeEdgeCCD(
-        x1,       x2,       x3,       x4,
-        x1 + dx1, x2 + dx2, x3 + dx3, x4 + dx4,
-        err, kTiccdMinSeparation, toi, kTiccdTolerance, /*t_max=*/1.0,
-        kTiccdMaxIter, output_tolerance, kTiccdNoZeroToi, kTiccdMethod);
-    return collision ? clamp_toi(toi) : 1.0;
+    const auto r = inclusion_ccd({{x1, x2, x3, x4}}, {{dx1, dx2, dx3, dx4}}, false);
+    return r.collision ? r.t : 1.0;
 }
 
 // -----------------------------------------------------------------------------
 // Public one-moving-node dispatchers. `use_ticcd` selects the backend:
 //   true  (default) -> TICCD library (conservative, robust)
-//   false           -> closed-form linear (faster; exact for one moving node)
+//   false           -> independent closed-form linear backend
 // -----------------------------------------------------------------------------
 
 CCDResult node_triangle_only_one_node_moves(const Vec3& x,  const Vec3& dx,
@@ -680,9 +1164,9 @@ CCDResult node_triangle_only_one_node_moves(const Vec3& x,  const Vec3& dx,
                                             const Vec3& x3, const Vec3& dx3,
                                             double eps, bool use_ticcd) {
     if (use_ticcd) {
-        return ccd_result_from_toi(node_triangle_general_ccd(x, dx, x1, dx1, x2, dx2, x3, dx3));
+        return inclusion_ccd({{x, x1, x2, x3}}, {{dx, dx1, dx2, dx3}}, true);
     }
-    return node_triangle_linear_ccd(x, dx, x1, dx1, x2, dx2, x3, dx3, eps);
+    return linear_ccd_detail::node_triangle(x, dx, x1, dx1, x2, dx2, x3, dx3, eps);
 }
 
 CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1,
@@ -690,9 +1174,15 @@ CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1,
                                               double eps, bool use_ticcd) {
     if (use_ticcd) {
         const Vec3 zero = Vec3::Zero();
-        return ccd_result_from_toi(segment_segment_general_ccd(x1, dx1, x2, zero, x3, zero, x4, zero));
+        return inclusion_ccd({{x1, x2, x3, x4}}, {{dx1, zero, zero, zero}}, false);
     }
-    return segment_segment_linear_ccd(x1, dx1, x2, x3, x4, eps);
+    return linear_ccd_detail::segment_segment(x1, dx1, x2, x3, x4, eps);
+}
+
+CCDResult segment_segment_same_displacement_linear_ccd(
+        const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2,
+        const Vec3& x3, const Vec3& x4, double eps) {
+    return linear_ccd_detail::translating_segment(x1, dx1, x2, dx2, x3, x4, eps);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

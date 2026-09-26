@@ -11,8 +11,12 @@ struct CCDResult {
 
 // One-moving-node NT CCD. Dispatches based on `use_ticcd`:
 //   true  (default) -> Tight-Inclusion CCD library (conservative, robust)
-//   false           -> self-written closed-form linear CCD (faster, exact
-//                       when only one of the four vertices moves).
+//   false           -> closed-form linear CCD in a scaled local frame;
+//                       ambiguous/degenerate cases use exact rational arithmetic.
+// Linear mode never calls TICCD.
+// At most one of the four displacements may be nonzero in linear mode.
+// eps sets dimensionless time/membership ambiguity tolerances, not a distance pad.
+// Exact event validation uses a fixed 1e-10 world-space boundary tolerance.
 CCDResult node_triangle_only_one_node_moves(
         const Vec3& x,  const Vec3& dx,
         const Vec3& x1, const Vec3& dx1,
@@ -28,6 +32,7 @@ CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1,
 
 // Translating-edge SS CCD. Both endpoints of [x1, x2] must have the same
 // displacement (`dx1 == dx2`), while [x3, x4] remains fixed.
+// Uses the same independent local-frame and exact predicates as above.
 CCDResult segment_segment_same_displacement_linear_ccd(const Vec3& x1, const Vec3& dx1,
         const Vec3& x2, const Vec3& dx2,
         const Vec3& x3, const Vec3& x4,
