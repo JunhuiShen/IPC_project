@@ -11,6 +11,7 @@ class BroadPhase;
 struct Pin;
 struct RefMesh;
 struct SimParams;
+namespace safe_step_detail { struct VertexAabbRejections; }
 
 // Append one disconnected deformable solid.
 //
@@ -123,6 +124,8 @@ namespace solid_ipc_detail {
 
 // Solver-only fast path. The enclosing solver entry point must already have
 // validated the friction parameters and previous-position array.
+// Optional AABB rejections remain valid only until these contact positions or
+// incidence rows change; safe-step applies its finite, short-step reuse guard.
 std::pair<Vec3, Mat33> compute_solid_local_gradient_and_block_unchecked(
     int node,
     const RefMesh& ref_mesh,
@@ -134,7 +137,8 @@ std::pair<Vec3, Mat33> compute_solid_local_gradient_and_block_unchecked(
     const std::vector<unsigned char>* solid_node_mask,
     const std::vector<unsigned char>* surface_node_mask,
     const std::vector<int>* pin_map,
-    const std::vector<Vec3>* previous_positions, bool cooperative = false);
+    const std::vector<Vec3>* previous_positions, bool cooperative = false,
+    safe_step_detail::VertexAabbRejections* rejections = nullptr);
 
 } // namespace solid_ipc_detail
 

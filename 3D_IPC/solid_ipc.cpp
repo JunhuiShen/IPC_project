@@ -7,6 +7,7 @@
 #include "friction_energy.h"
 #include "mesh.h"
 #include "physics.h"
+#include "safe_step.h"
 #include "volumetric_corotated_energy.h"
 
 #include <algorithm>
@@ -447,13 +448,21 @@ compute_solid_local_barrier_gradient_and_self_hessian_impl(
     const BroadPhase& broad_phase,
     const std::vector<unsigned char>& solid_nodes,
     const std::vector<unsigned char>& surface_nodes, bool cooperative = false,
-    const std::function<void()>* leader_work = nullptr) {
+    const std::function<void()>* leader_work = nullptr,
+    safe_step_detail::VertexAabbRejections* rejections = nullptr) {
+    if (rejections) rejections->distance = 0.0;
     if (params.d_hat <= 0.0 || params.k_barrier <= 0.0) {
         if (leader_work) (*leader_work)();
         return {Vec3::Zero(), Mat33::Zero()};
     }
 
     const BroadPhase::Cache& cache = broad_phase.cache();
+    if (rejections) {
+        // Each contact owns one byte, in the same NT-then-SS order consumed
+        // by safe-step after all helpers have joined.
+        rejections->clear.resize(cache.vertex_nt[node].size() + cache.vertex_ss[node].size());
+        rejections->distance = params.d_hat;
+    }
     const double barrier_scale = params.dt2() * params.k_barrier;
     const double d_hat2 = params.d_hat * params.d_hat;
     Vec3 gradient = Vec3::Zero();
@@ -463,18 +472,23 @@ compute_solid_local_barrier_gradient_and_self_hessian_impl(
         Vec3 gradient = Vec3::Zero();
         Mat33 hessian = Mat33::Zero();
     };
-    const auto evaluate_nt = [&](const BroadPhase::Cache::VertexPairEntry& entry) {
+    const auto evaluate_nt = [&](const BroadPhase::Cache::VertexPairEntry& entry,
+                                 std::size_t contact_index) {
         std::optional<Contribution> value;
 
         const NodeTrianglePair& pair = cache.nt_pairs[entry.pair_index];
         if (!cache.excludes_tet_interior_nt_queries && !include_solid_node_triangle_pair(pair, solid_nodes, surface_nodes)) {
+            if (rejections) rejections->clear[contact_index] = 0;
             return value;
         }
         const std::array<Vec3, 4> positions =
             node_triangle_positions(pair, x);
-        if (!node_triangle_aabbs_within_distance(
+        bool clear = false;
+        const bool within = node_triangle_aabbs_within_distance(
                 positions[0], positions[1], positions[2], positions[3],
-                d_hat2)) {
+                d_hat2, rejections ? &clear : nullptr);
+        if (rejections) rejections->clear[contact_index] = clear;
+        if (!within) {
             return value;
         }
 
@@ -488,18 +502,23 @@ compute_solid_local_barrier_gradient_and_self_hessian_impl(
         value->hessian = pair_self_hessian;
         return value;
     };
-    const auto evaluate_ss = [&](const BroadPhase::Cache::VertexPairEntry& entry) {
+    const auto evaluate_ss = [&](const BroadPhase::Cache::VertexPairEntry& entry,
+                                 std::size_t contact_index) {
         std::optional<Contribution> value;
 
         const SegmentSegmentPair& pair = cache.ss_pairs[entry.pair_index];
         if (!cache.excludes_tet_interior_nt_queries && !include_solid_segment_segment_pair(pair, solid_nodes, surface_nodes)) {
+            if (rejections) rejections->clear[contact_index] = 0;
             return value;
         }
         const std::array<Vec3, 4> positions =
             segment_segment_positions(pair, x);
-        if (!segment_aabbs_within_distance(
+        bool clear = false;
+        const bool within = segment_aabbs_within_distance(
                 positions[0], positions[1], positions[2], positions[3],
-                d_hat2)) {
+                d_hat2, rejections ? &clear : nullptr);
+        if (rejections) rejections->clear[contact_index] = clear;
+        if (!within) {
             return value;
         }
 
@@ -517,7 +536,7 @@ compute_solid_local_barrier_gradient_and_self_hessian_impl(
     const auto& ss = cache.vertex_ss[static_cast<std::size_t>(node)];
     const int nt_count = static_cast<int>(nt.size());
     solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss.size()), cooperative,
-        [&](int i) { return i < nt_count ? evaluate_nt(nt[i]) : evaluate_ss(ss[i - nt_count]); },
+        [&](int i) { return i < nt_count ? evaluate_nt(nt[i], i) : evaluate_ss(ss[i - nt_count], i); },
         [&](const std::optional<Contribution>& value) {
             if (!value) return;
             gradient += barrier_scale * value->gradient;
@@ -542,30 +561,42 @@ compute_solid_local_mesh_contact_derivatives(
     const BroadPhase& broad_phase,
     const std::vector<unsigned char>& solid_nodes,
     const std::vector<unsigned char>& surface_nodes,
-    const std::vector<Vec3>* previous_positions, bool cooperative = false) {
+    const std::vector<Vec3>* previous_positions, bool cooperative = false,
+    safe_step_detail::VertexAabbRejections* rejections = nullptr) {
     SolidLocalMeshContactDerivatives derivatives;
+    if (rejections) rejections->distance = 0.0;
     if (params.d_hat <= 0.0 || params.k_barrier <= 0.0)
         return derivatives;
 
     const BroadPhase::Cache& cache = broad_phase.cache();
+    if (rejections) {
+        rejections->clear.resize(cache.vertex_nt[node].size() + cache.vertex_ss[node].size());
+        rejections->distance = params.d_hat;
+    }
     const double d_hat2 = params.d_hat * params.d_hat;
     const double dt2 = params.dt2();
     const double barrier_scale = dt2 * params.k_barrier;
     const bool friction_enabled = params.friction_coefficient > 0.0;
 
     using Contribution = SolidLocalMeshContactDerivatives;
-    const auto evaluate_nt = [&](const BroadPhase::Cache::VertexPairEntry& entry) {
+    const auto evaluate_nt = [&](const BroadPhase::Cache::VertexPairEntry& entry,
+                                 std::size_t contact_index) {
         std::optional<Contribution> value;
 
         const NodeTrianglePair& pair = cache.nt_pairs[entry.pair_index];
         if (!cache.excludes_tet_interior_nt_queries && !include_solid_node_triangle_pair(pair, solid_nodes, surface_nodes)) {
+            if (rejections) rejections->clear[contact_index] = 0;
             return value;
         }
         const std::array<Vec3, 4> current_positions =
             node_triangle_positions(pair, x);
-        if (!node_triangle_aabbs_within_distance(
+        bool clear = false;
+        const bool within = node_triangle_aabbs_within_distance(
                 current_positions[0], current_positions[1],
-                current_positions[2], current_positions[3], d_hat2)) {
+                current_positions[2], current_positions[3], d_hat2,
+                rejections ? &clear : nullptr);
+        if (rejections) rejections->clear[contact_index] = clear;
+        if (!within) {
             return value;
         }
 
@@ -597,18 +628,24 @@ compute_solid_local_mesh_contact_derivatives(
         }
         return value;
     };
-    const auto evaluate_ss = [&](const BroadPhase::Cache::VertexPairEntry& entry) {
+    const auto evaluate_ss = [&](const BroadPhase::Cache::VertexPairEntry& entry,
+                                 std::size_t contact_index) {
         std::optional<Contribution> value;
 
         const SegmentSegmentPair& pair = cache.ss_pairs[entry.pair_index];
         if (!cache.excludes_tet_interior_nt_queries && !include_solid_segment_segment_pair(pair, solid_nodes, surface_nodes)) {
+            if (rejections) rejections->clear[contact_index] = 0;
             return value;
         }
         const std::array<Vec3, 4> current_positions =
             segment_segment_positions(pair, x);
-        if (!segment_aabbs_within_distance(
+        bool clear = false;
+        const bool within = segment_aabbs_within_distance(
                 current_positions[0], current_positions[1],
-                current_positions[2], current_positions[3], d_hat2)) {
+                current_positions[2], current_positions[3], d_hat2,
+                rejections ? &clear : nullptr);
+        if (rejections) rejections->clear[contact_index] = clear;
+        if (!within) {
             return value;
         }
 
@@ -644,7 +681,7 @@ compute_solid_local_mesh_contact_derivatives(
     const auto& ss = cache.vertex_ss[static_cast<std::size_t>(node)];
     const int nt_count = static_cast<int>(nt.size());
     solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss.size()), cooperative,
-        [&](int i) { return i < nt_count ? evaluate_nt(nt[i]) : evaluate_ss(ss[i - nt_count]); },
+        [&](int i) { return i < nt_count ? evaluate_nt(nt[i], i) : evaluate_ss(ss[i - nt_count], i); },
         [&](const std::optional<Contribution>& value) {
             if (!value) return;
             derivatives.normal_gradient += value->normal_gradient;
@@ -1261,7 +1298,9 @@ compute_solid_local_gradient_and_block_impl(
     const std::vector<unsigned char>* surface_node_mask,
     const std::vector<int>* pin_map,
     const std::vector<Vec3>* previous_positions,
-    const bool validate_friction_inputs, bool cooperative = false) {
+    const bool validate_friction_inputs, bool cooperative = false,
+    safe_step_detail::VertexAabbRejections* rejections = nullptr) {
+    if (rejections) rejections->distance = 0.0;
     if ((solid_node_mask == nullptr) != (surface_node_mask == nullptr))
         throw std::invalid_argument("compute_solid_local_gradient_and_block: both node masks must be supplied together");
     if (validate_friction_inputs) {
@@ -1283,7 +1322,7 @@ compute_solid_local_gradient_and_block_impl(
         const auto [barrier_gradient, barrier_block] =
             compute_solid_local_barrier_gradient_and_self_hessian_impl(
                 node, ref_mesh, params, x, broad_phase,
-                *solid_node_mask, *surface_node_mask, true, &leader_work);
+                *solid_node_mask, *surface_node_mask, true, &leader_work, rejections);
         elastic.first += barrier_gradient;
         elastic.second += barrier_block;
         return elastic;
@@ -1298,9 +1337,22 @@ compute_solid_local_gradient_and_block_impl(
               node, ref_mesh, pins, params, x, xhat,
               surface_node_mask, pin_map);
     if (params.friction_coefficient == 0.0) {
-        const auto [barrier_gradient, barrier_self_hessian] =
-            compute_solid_local_barrier_gradient_and_self_hessian(
-                node, ref_mesh, params, x, broad_phase, solid_node_mask, surface_node_mask);
+        const auto [barrier_gradient, barrier_self_hessian] = [&] {
+            if (!rejections || params.d_hat <= 0.0 || params.k_barrier <= 0.0)
+                return compute_solid_local_barrier_gradient_and_self_hessian(
+                    node, ref_mesh, params, x, broad_phase, solid_node_mask, surface_node_mask);
+            std::vector<unsigned char> owned_solid_node_mask;
+            std::vector<unsigned char> owned_surface_node_mask;
+            if (solid_node_mask == nullptr) {
+                owned_solid_node_mask = make_solid_node_mask(ref_mesh.tet_nodes, x.size());
+                owned_surface_node_mask = make_solid_node_mask(ref_mesh.surface_nodes, x.size());
+                solid_node_mask = &owned_solid_node_mask;
+                surface_node_mask = &owned_surface_node_mask;
+            }
+            return compute_solid_local_barrier_gradient_and_self_hessian_impl(
+                node, ref_mesh, params, x, broad_phase,
+                *solid_node_mask, *surface_node_mask, false, nullptr, rejections);
+        }();
         gradient += barrier_gradient;
         block += barrier_self_hessian;
         return {gradient, block};
@@ -1325,7 +1377,7 @@ compute_solid_local_gradient_and_block_impl(
     const SolidLocalMeshContactDerivatives mesh_derivatives =
         compute_solid_local_mesh_contact_derivatives(
             node, params, x, broad_phase,
-            *solid_node_mask, *surface_node_mask, previous_positions, cooperative);
+            *solid_node_mask, *surface_node_mask, previous_positions, cooperative, rejections);
     gradient += mesh_derivatives.normal_gradient;
     block += mesh_derivatives.normal_hessian;
     gradient += mesh_derivatives.friction_gradient;
@@ -1365,10 +1417,11 @@ std::pair<Vec3, Mat33> compute_solid_local_gradient_and_block_unchecked(
     const std::vector<unsigned char>* solid_node_mask,
     const std::vector<unsigned char>* surface_node_mask,
     const std::vector<int>* pin_map,
-    const std::vector<Vec3>* previous_positions, bool cooperative) {
+    const std::vector<Vec3>* previous_positions, bool cooperative,
+    safe_step_detail::VertexAabbRejections* rejections) {
     return compute_solid_local_gradient_and_block_impl(
         node, ref_mesh, pins, params, x, xhat, broad_phase,
-        solid_node_mask, surface_node_mask, pin_map, previous_positions, false, cooperative);
+        solid_node_mask, surface_node_mask, pin_map, previous_positions, false, cooperative, rejections);
 }
 
 } // namespace solid_ipc_detail

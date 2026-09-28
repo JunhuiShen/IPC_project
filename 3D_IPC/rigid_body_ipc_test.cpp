@@ -453,6 +453,86 @@ TEST(RigidBodyIPCUpdateModes, PartialModesAdvanceOnlyTheirEnabledCoordinates) {
         1.0e-13));
 }
 
+TEST(RigidBodyIPCUpdateModes, FixedProxyPlacementMatchesRepeatedReferenceAcrossCalls) {
+    struct RestoreThreads {
+        int count = omp_get_max_threads(), dynamic = omp_get_dynamic();
+        ~RestoreThreads() { omp_set_num_threads(count); omp_set_dynamic(dynamic); }
+    } restore;
+    omp_set_dynamic(0);
+    for (bool mixed : {false, true}) {
+        for (int nodes : {3, 131}) {
+            for (int threads : {1, std::min(8, omp_get_num_procs())}) {
+                SCOPED_TRACE(::testing::Message() << mixed << ',' << nodes << ',' << threads);
+                omp_set_num_threads(threads);
+                RefMesh mesh;
+                DeformedState state;
+                if (mixed) {
+                    state.deformed_positions = {Vec3(-1, -1, 0), Vec3(3, -1, 0), Vec3(-1, 3, 0)};
+                    state.velocities.assign(3, Vec3::Zero());
+                    mesh.tris = {0, 1, 2};
+                    mesh.initialize({Vec2(-1, -1), Vec2(3, -1), Vec2(-1, 3)}, state.deformed_positions);
+                    mesh.mass.assign(3, 10.0);
+                    mesh.node_to_rb.assign(3, -1);
+                }
+                std::vector<Vec3> points{Vec3(0, 0, 0.2)};
+                for (int local = 1; local < nodes; ++local)
+                    points.emplace_back(5 + 0.1 * local, 3 + 0.02 * (local % 7), 1 + 0.003 * local);
+                const int rb = create_rigid_body(points, Vec3::Zero(),
+                    Vec4(0.8, -0.2, 0.3, 0.4), Vec3::Zero(), nodes,
+                    mesh, state, RigidBodyUpdateMode::None);
+                mesh.build_deformable_nodes();
+                const VertexTriangleMap adjacency = build_incident_triangle_map(mesh.tris);
+                SimParams params = SimParams::zeros();
+                params.fps = 10; params.substeps = 1;
+                params.max_global_iters = 25; params.fixed_iters = true;
+                params.damping = 0.25; params.d_hat = mixed ? 0.5 : 0.0;
+                params.k_barrier = mixed ? 100.0 : 0.0;
+                params.node_box_min = 1.0; params.node_box_max = 1.0;
+                params.theta_box_min = M_PI; params.theta_box_max = M_PI;
+                params.node_box_update_count = 7; params.use_parallel = true;
+                BroadPhase broad_phase;
+                for (int call = 0; call < 3; ++call) {
+                    // Reuse the same mesh/workspace with a different prescribed
+                    // fixed pose. Caller-supplied candidates must be reset, and
+                    // the first placement must still run on every solver call.
+                    if (call != 0) {
+                        state.x_coms[rb] += Vec3(0.013, -0.009, 0.011);
+                        state.orientations[rb] = quaternion_normalize(
+                            Vec4(0.8, -0.2 + 0.01 * call, 0.3, 0.4));
+                    }
+                    std::vector<Vec3> expected(nodes);
+                    for (int sweep = 0; sweep < params.max_global_iters; ++sweep) {
+                        for (int local = 0; local < nodes; ++local) {
+                            const Vec3 placed = world_space_position(mesh.ref_positions[rb][local],
+                                state.x_coms[rb], state.orientations[rb]);
+                            if (sweep != 0)
+                                EXPECT_EQ(std::memcmp(placed.data(), expected[local].data(), 3 * sizeof(double)), 0);
+                            expected[local] = placed;
+                        }
+                    }
+                    auto xnew = state.deformed_positions;
+                    const auto xhat = state.deformed_positions;
+                    std::vector<Vec3> coms(1, Vec3(9, 8, 7)), omega(1, Vec3(3, 2, 1));
+                    std::vector<Vec4> orientations(1, Vec4(1, 0, 0, 0));
+                    const SolverResult result = global_gauss_seidel_solver_basic_general(
+                        mesh, state, adjacency, {}, params, xnew, xhat,
+                        coms, orientations, omega, broad_phase);
+                    EXPECT_TRUE(result.converged);
+                    EXPECT_EQ(result.iterations, 25);
+                    EXPECT_EQ(std::memcmp(coms[rb].data(), state.x_coms[rb].data(), 3 * sizeof(double)), 0);
+                    EXPECT_EQ(std::memcmp(orientations[rb].data(), state.orientations[rb].data(), 4 * sizeof(double)), 0);
+                    EXPECT_TRUE(omega[rb].isZero(0.0));
+                    for (int local = 0; local < nodes; ++local)
+                        EXPECT_EQ(std::memcmp(xnew[mesh.rb_nodes[rb][local]].data(),
+                            expected[local].data(), 3 * sizeof(double)), 0);
+                    if (mixed && call == 0)
+                        EXPECT_LT((xnew[0].z() + xnew[1].z() + xnew[2].z()) / 3.0, -1e-5);
+                }
+            }
+        }
+    }
+}
+
 TEST(RigidBodyIPCPositionHelpers, OrientationOverloadsRoundTrip) {
     const Vec3 x_com(0.7, -0.4, 1.2);
     const Vec4 orientation =

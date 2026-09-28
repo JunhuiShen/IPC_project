@@ -213,6 +213,7 @@ struct ColoredBlockTeams {
     struct Choice { int block; std::size_t cost; int lanes = 1, limit = 1; };
     std::vector<Assignment> assignments;
     std::vector<std::vector<int>> whole;
+    std::vector<unsigned char> dynamic_whole;
     std::vector<std::vector<int>> helper_contexts;
     std::unique_ptr<ContactTaskGroup[]> contexts;
     std::unique_ptr<std::atomic<int>[]> next;
@@ -248,6 +249,7 @@ struct ColoredBlockTeams {
         const std::size_t count = groups.size() * static_cast<std::size_t>(team);
         assignments.assign(count, Assignment{});
         whole.resize(groups.size());
+        dynamic_whole.assign(groups.size(), 0);
         helper_contexts.resize(groups.size());
         if (count > context_capacity) {
             contexts = std::make_unique<ContactTaskGroup[]>(count);
@@ -257,15 +259,24 @@ struct ColoredBlockTeams {
             next = std::make_unique<std::atomic<int>[]>(groups.size());
             color_capacity = groups.size();
         }
+        std::size_t cost_offset = 0;
         for (std::size_t c = 0; c < groups.size(); ++c) {
             const auto& group = groups[c];
             const bool small = group.size() < static_cast<std::size_t>(team);
-            std::size_t total = 0;
-            for (int block : group) total += cost(block);
+            const std::size_t first_cost = cost_offset;
+            cost_offset += group.size();
+            std::size_t total = 0, minimum = 0, maximum = 0;
+            for (std::size_t i = 0; i < group.size(); ++i) {
+                const auto weight = saved_costs[first_cost + i];
+                total += weight;
+                minimum = i == 0 ? weight : std::min(minimum, weight);
+                maximum = std::max(maximum, weight);
+            }
             const std::size_t average = total / std::max<std::size_t>(1, group.size());
             std::vector<Choice> chosen;
-            for (int block : group) {
-                const std::size_t weight = cost(block);
+            for (std::size_t i = 0; i < group.size(); ++i) {
+                const int block = group[i];
+                const std::size_t weight = saved_costs[first_cost + i];
                 if (small || (weight >= 512 && weight > 4 * average)) {
                     const int limit = weight < 32 ? 1
                         : static_cast<int>(std::min<std::size_t>(team, (weight + 7) / 8));
@@ -312,6 +323,22 @@ struct ColoredBlockTeams {
                 const bool selected = std::any_of(chosen.begin(), chosen.end(),
                     [block](const Choice& item) { return item.block == block; });
                 if (!selected) unsplit.push_back(block);
+            }
+            // Independent whole blocks with uneven contact work can leave a
+            // round-robin worker finishing several expensive updates alone.
+            // Keep cheap/uniform colors cursor-free, and cache a heavy-first
+            // order only when enough work remains beyond the initial wave.
+            if (chosen.empty() && group.size() > static_cast<std::size_t>(team)
+                && maximum >= 64 && maximum / 2 > minimum) {
+                std::vector<Choice> ordered;
+                ordered.reserve(group.size());
+                for (std::size_t i = 0; i < group.size(); ++i)
+                    ordered.push_back({group[i], saved_costs[first_cost + i]});
+                std::stable_sort(ordered.begin(), ordered.end(),
+                    [](const Choice& a, const Choice& b) { return a.cost > b.cost; });
+                for (std::size_t i = 0; i < ordered.size(); ++i)
+                    unsplit[i] = ordered[i].block;
+                dynamic_whole[c] = 1;
             }
             next[c].store(0, std::memory_order_relaxed);
         }
@@ -361,18 +388,25 @@ void for_each_colored_block(const std::vector<std::vector<int>>& groups,
                 if (!planned_team || whole.size() == groups[c].size()) {
                     // Reserve the first wave without contending on a cursor.
                     // Runtime team-size changes safely use whole-block work.
-                    const auto& group = groups[c];
+                    const bool dynamic = planned_team && workspace.dynamic_whole[c];
+                    const auto& group = dynamic ? whole : groups[c];
                     const int size = static_cast<int>(group.size());
-                    if (planned_team) {
+                    if (planned_team && !dynamic) {
                         // Preserve the existing round-robin whole-block path
                         // without a runtime workshare or shared cursor.
                         for (int item = worker; item < size; item += team)
                             invoke(group[item], false);
                     } else {
                         if (worker < size) invoke(group[worker], false);
-                        while (workspace.next[c].load(std::memory_order_relaxed) < size - team) {
-                            const int item = team + workspace.next[c].fetch_add(1, std::memory_order_relaxed);
-                            if (item < size) invoke(group[item], false);
+                        for (;;) {
+                            const int remaining = size - team
+                                - workspace.next[c].load(std::memory_order_relaxed);
+                            if (remaining <= 0) break;
+                            const int batch = dynamic
+                                ? std::min(8, std::max(1, remaining / (4 * team))) : 1;
+                            const int first = team + workspace.next[c].fetch_add(batch, std::memory_order_relaxed);
+                            for (int item = first; item < std::min(first + batch, size); ++item)
+                                invoke(group[item], false);
                         }
                     }
                 } else {

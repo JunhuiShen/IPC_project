@@ -10,6 +10,7 @@
 #include "make_shape.h"
 #include "physics.h"
 #include "rigid_body_ipc.h"
+#include "safe_step.h"
 #include "simulation.h"
 
 #include <gtest/gtest.h>
@@ -1593,6 +1594,121 @@ TEST(SolidBarrierAssembly, CountsEachCandidateOnceAndAppliesDtSquaredScale) {
     const double actual = compute_solid_barrier_incremental_potential(
         fixture.ref_mesh, fixture.params, fixture.x, fixture.broad_phase);
     EXPECT_NEAR(actual, expected, 1.0e-13 * (1.0 + std::abs(expected)));
+}
+
+TEST(SolidBarrierAssembly, CcdRejectionsPreserveAssemblyAndRejectOnlyAabbGaps) {
+    RefMesh mesh;
+    DeformedState state;
+    create_solid(unit_tet_positions(), {0, 1, 2, 3}, 24.0, mesh, state);
+    create_solid(translated(unit_tet_positions(), Vec3(0, 0, 1.1)),
+                 {0, 1, 2, 3}, 24.0, mesh, state);
+    const auto& x = state.deformed_positions;
+    std::vector<Vec3> xhat = x, previous = x;
+    for (std::size_t node = 0; node < x.size(); ++node) {
+        xhat[node] += Vec3(0.001 * (node + 1), -0.002, 0.003);
+        previous[node] -= Vec3(0.001 * (node + 1), 0.002, 0.0);
+    }
+    SimParams params = SimParams::zeros();
+    params.fps = 30; params.substeps = 1;
+    params.solid_mu = 1.7; params.solid_lambda = 4.2;
+    params.d_hat = 0.2; params.k_barrier = 7.3;
+    params.friction_velocity_epsilon = 0.01;
+    std::vector<unsigned char> solid(x.size(), 1), surface(x.size(), 1);
+    std::vector<AABB> boxes(x.size());
+    for (std::size_t node = 0; node < x.size(); ++node)
+        boxes[node] = AABB(x[node] - Vec3::Constant(3), x[node] + Vec3::Constant(3));
+    BroadPhase broad_phase;
+    broad_phase.initialize(boxes, mesh, params.d_hat);
+    auto& cache = broad_phase.mutable_cache();
+    // Repeated incidence exercises helper staging even for this small mesh.
+    for (std::size_t node = 0; node < x.size(); ++node) {
+        const auto nt = cache.vertex_nt[node], ss = cache.vertex_ss[node];
+        while (cache.vertex_nt[node].size() + cache.vertex_ss[node].size() < 32) {
+            cache.vertex_nt[node].insert(cache.vertex_nt[node].end(), nt.begin(), nt.end());
+            cache.vertex_ss[node].insert(cache.vertex_ss[node].end(), ss.begin(), ss.end());
+        }
+    }
+    safe_step_detail::VertexAabbRejections rejections;
+    std::size_t aabb_rejected = 0, projection_rejected = 0, accepted = 0;
+    for (double friction : {0.0, 0.2}) {
+        params.friction_coefficient = friction;
+        for (bool cooperative : {false, true}) {
+            for (int node = 0; node < static_cast<int>(x.size()); ++node) {
+                SCOPED_TRACE(::testing::Message() << "node=" << node
+                    << " friction=" << friction << " cooperative=" << cooperative);
+                const auto evaluate = [&](safe_step_detail::VertexAabbRejections* output) {
+                    std::pair<Vec3, Mat33> result;
+                    const auto compute = [&] {
+                        result = solid_ipc_detail::compute_solid_local_gradient_and_block_unchecked(
+                            node, mesh, {}, params, x, xhat, broad_phase, &solid,
+                            &surface, nullptr, &previous, cooperative, output);
+                    };
+                    if (cooperative) {
+                        #pragma omp parallel num_threads(4)
+                        {
+                            #pragma omp single
+                            compute();
+                        }
+                    } else compute();
+                    return result;
+                };
+                const auto reference = evaluate(nullptr);
+                rejections.clear.assign(cache.vertex_nt[node].size() + cache.vertex_ss[node].size(), 1);
+                const auto cached = evaluate(&rejections);
+                EXPECT_EQ(0, std::memcmp(reference.first.data(), cached.first.data(), 3 * sizeof(double)));
+                EXPECT_EQ(0, std::memcmp(reference.second.data(), cached.second.data(), 9 * sizeof(double)));
+                ASSERT_EQ(rejections.distance, params.d_hat);
+                std::size_t local = 0;
+                const auto check = [&](bool within, bool clear) {
+                    EXPECT_EQ(rejections.clear[local++], clear);
+                    aabb_rejected += clear;
+                    projection_rejected += !within && !clear;
+                    accepted += within;
+                };
+                for (const auto& entry : cache.vertex_nt[node]) {
+                    const auto& p = cache.nt_pairs[entry.pair_index];
+                    bool clear = false;
+                    const bool within = node_triangle_aabbs_within_distance(
+                        x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]],
+                        params.d_hat * params.d_hat, &clear);
+                    check(within, clear);
+                }
+                for (const auto& entry : cache.vertex_ss[node]) {
+                    const auto& p = cache.ss_pairs[entry.pair_index];
+                    bool clear = false;
+                    const bool within = segment_aabbs_within_distance(
+                        x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]],
+                        params.d_hat * params.d_hat, &clear);
+                    check(within, clear);
+                }
+                ASSERT_EQ(local, rejections.clear.size());
+                auto plain_x = x, cached_x = x;
+                const Vec3 proposal = x[node] + Vec3(0.002, -0.001, 0.003);
+                const double plain_step = per_vertex_safe_step(broad_phase, plain_x, node,
+                    proposal, 0.9, true, false);
+                const double cached_step = per_vertex_safe_step(broad_phase, cached_x, node,
+                    proposal, 0.9, true, false, false, false, &rejections);
+                EXPECT_EQ(plain_step, cached_step);
+                EXPECT_EQ(0, std::memcmp(plain_x[node].data(), cached_x[node].data(), 3 * sizeof(double)));
+
+                // Reused bytes from the previous assembly must not certify
+                // a pair removed by the solid surface policy.
+                surface[node] = 0;
+                evaluate(&rejections);
+                EXPECT_TRUE(std::all_of(rejections.clear.begin(), rejections.clear.end(),
+                    [](unsigned char value) { return value == 0; }));
+                surface[node] = 1;
+            }
+        }
+    }
+    EXPECT_GT(aabb_rejected, 0u);
+    EXPECT_GT(projection_rejected, 0u);
+    EXPECT_GT(accepted, 0u);
+    params.k_barrier = 0.0;
+    solid_ipc_detail::compute_solid_local_gradient_and_block_unchecked(
+        0, mesh, {}, params, x, xhat, broad_phase, &solid, &surface,
+        nullptr, &previous, false, &rejections);
+    EXPECT_EQ(rejections.distance, 0.0);
 }
 
 TEST(SolidBarrierAssembly,
