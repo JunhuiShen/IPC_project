@@ -125,6 +125,7 @@ endfunction()
 # Geometry, constitutive models, and contact kernels.
 set(IPC_CORE_SOURCES
     SIMD.cpp
+    general_simd_solid.cpp
     IPC_math.cpp
     barrier_energy.cpp
     bending_energy.cpp
@@ -164,6 +165,8 @@ target_link_libraries(corotated_energy_lib
 # Mesh setup, broad phase, safe stepping, physics assembly, output, and nonlinear solvers.
 # Keeping these sources in a library prevents every test from recompiling them.
 set(IPC_SIMULATION_SOURCES
+    general_simd_assembly.cpp
+    general_simd_rigid.cpp
     broad_phase.cpp
     example.cpp
     grid_coloring.cpp
@@ -243,6 +246,12 @@ if(BUILD_TESTING)
 
     set(IPC_TEST_TARGETS
         SIMD_test
+        general_simd_solid_test
+        general_simd_rigid_test
+        general_simd_contact_bitwise_test
+        general_simd_solver_test
+        general_simd_materials_test
+        general_simd_bitwise_test
         barrier_energy_test
         bending_energy_test
         broad_phase_test

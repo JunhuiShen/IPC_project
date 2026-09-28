@@ -1,6 +1,8 @@
 #include "SIMD.h"
 #include "corotated_energy.h"
+#include "bending_energy.h"
 #include "friction_energy.h"
+#include "general_simd_cloth.h"
 
 #include <algorithm>
 #include <cassert>
@@ -299,7 +301,8 @@ static void pad_prepared_lanes(T (&values)[N], int count) {
 
 } // namespace
 
-void corotated_derivatives_tile(
+template<bool GeneralReference>
+static void corotated_derivatives_tile_impl(
     const Vec3* positions, const Mat22* dm_inverse, const double* areas,
     const Vec2* shape_gradients, std::size_t entry_count,
     double mu, double lambda, Vec3* gradients, Mat33* hessians) {
@@ -311,6 +314,7 @@ void corotated_derivatives_tile(
         alignas(64) double s[2][2][W], ci[2][2][W], r[3][2][W], b[3][2][W];
         alignas(64) double f_data[3][2][W], q[2][W], area[W], jd[W], tr[W];
         alignas(64) double p[3][2][W], gd[3][W], hd[3][3][W];
+        alignas(64) double reference_rrt[3][3][W], reference_q[3][3][W];
         // Layout conversion uses only the already-gathered AoS tile.
         alignas(64) double points[3][3][W], material[2][2][W];
         for (int lane = 0; lane < count; ++lane) {
@@ -337,6 +341,17 @@ void corotated_derivatives_tile(
             const Mat32 f = ds * dm;
             const CorotatedCache32 cache = buildCorotatedCache(f);
             const Mat32 stress = PCorotated32(cache, f, mu, lambda);
+            if constexpr (GeneralReference) {
+                // Eigen's packet rows and scalar tail use different fused
+                // operand orders for these two-column matrix products. Reuse
+                // the exact reference products before SIMD differentiation.
+                const Mat33 rrt = cache.R * cache.R.transpose();
+                for (int i = 0; i < 3; ++i)
+                    for (int j = 0; j < 3; ++j) {
+                        reference_rrt[i][j][lane] = rrt(i, j);
+                        reference_q[i][j][lane] = cache.FFTFInvFT(i, j);
+                    }
+            }
             for (int i = 0; i < 2; ++i) {
                 q[i][lane] = shape_gradients[entry][i];
                 for (int j = 0; j < 2; ++j) {
@@ -363,6 +378,10 @@ void corotated_derivatives_tile(
             pad_prepared_lanes(f_data, count); pad_prepared_lanes(p, count);
             pad_prepared_lanes(q, count); pad_prepared_lanes(area, count);
             pad_prepared_lanes(jd, count); pad_prepared_lanes(tr, count);
+            if constexpr (GeneralReference) {
+                pad_prepared_lanes(reference_rrt, count);
+                pad_prepared_lanes(reference_q, count);
+            }
         }
         const ElementPack J = ElementPack::load(jd), trace = ElementPack::load(tr), A = ElementPack::load(area);
         const ElementPack volumetric = bulk * (J - one) * J;
@@ -372,15 +391,29 @@ void corotated_derivatives_tile(
         #pragma GCC unroll 3
         for (int i = 0; i < 3; ++i) {
             ElementPack g = zero;
-            for (int beta = 0; beta < 2; ++beta)
-                g = g + ElementPack::load(p[i][beta]) * shape[beta];
+            for (int beta = 0; beta < 2; ++beta) {
+                if constexpr (GeneralReference)
+                    g = element_multiply_add(ElementPack::load(p[i][beta]), shape[beta], g);
+                else
+                    g = g + ElementPack::load(p[i][beta]) * shape[beta];
+            }
             (A * g).store(gd[i]);
             #pragma GCC unroll 3
             for (int j = 0; j < 3; ++j) {
-                const ElementPack RRT = element_multiply_add(ElementPack::load(r[i][1]), ElementPack::load(r[j][1]),
-                    ElementPack::load(r[i][0]) * ElementPack::load(r[j][0]));
-                const ElementPack Q = element_multiply_add(ElementPack::load(b[i][1]), ElementPack::load(f_data[j][1]),
-                    ElementPack::load(b[i][0]) * ElementPack::load(f_data[j][0]));
+                const ElementPack RRT = [&] {
+                    if constexpr (GeneralReference)
+                        return ElementPack::load(reference_rrt[i][j]);
+                    else
+                        return element_multiply_add(ElementPack::load(r[i][1]), ElementPack::load(r[j][1]),
+                            ElementPack::load(r[i][0]) * ElementPack::load(r[j][0]));
+                }();
+                const ElementPack Q = [&] {
+                    if constexpr (GeneralReference)
+                        return ElementPack::load(reference_q[i][j]);
+                    else
+                        return element_multiply_add(ElementPack::load(b[i][1]), ElementPack::load(f_data[j][1]),
+                            ElementPack::load(b[i][0]) * ElementPack::load(f_data[j][0]));
+                }();
                 ElementPack sum = zero;
                 #pragma GCC unroll 2
                 for (int beta = 0; beta < 2; ++beta) {
@@ -397,7 +430,10 @@ void corotated_derivatives_tile(
                         dp = element_multiply_add(ElementPack(-1.0) * volumetric, element_multiply_add(ElementPack::load(b[i][eta]), ElementPack::load(b[j][beta]), Q * cinv), dp);
                         const ElementPack product = ElementPack::load(b[j][eta]) * ElementPack::load(b[i][beta]);
                         dp = element_multiply_add(positive, product + product, dp);
-                        dp = element_multiply_add(twice_mu, (i == j && beta == eta ? one : zero) - dr, dp);
+                        if constexpr (GeneralReference)
+                            dp = dp + element_separate_product(twice_mu, (i == j && beta == eta ? one : zero) - dr);
+                        else
+                            dp = element_multiply_add(twice_mu, (i == j && beta == eta ? one : zero) - dr, dp);
                         sum = element_multiply_add(dp * shape[beta], shape[eta], sum);
                     }
                 }
@@ -411,6 +447,22 @@ void corotated_derivatives_tile(
                     hessians[begin + lane](i,j) = hd[i][j][lane];
             }
     }
+}
+
+void corotated_derivatives_tile(
+    const Vec3* positions, const Mat22* dm_inverse, const double* areas,
+    const Vec2* shape_gradients, std::size_t count, double mu, double lambda,
+    Vec3* gradients, Mat33* hessians) {
+    corotated_derivatives_tile_impl<false>(positions, dm_inverse, areas,
+        shape_gradients, count, mu, lambda, gradients, hessians);
+}
+
+void general_corotated_derivatives_tile(
+    const Vec3* positions, const Mat22* dm_inverse, const double* areas,
+    const Vec2* shape_gradients, std::size_t count, double mu, double lambda,
+    Vec3* gradients, Mat33* hessians) {
+    corotated_derivatives_tile_impl<true>(positions, dm_inverse, areas,
+        shape_gradients, count, mu, lambda, gradients, hessians);
 }
 
 void bending_derivatives_tile(
@@ -569,6 +621,14 @@ static ContactPack contact_ordered_dot(const ContactPack* a, const ContactPack* 
         (ContactPack(0.0) + contact_separate_product(a[0], b[0])) + contact_separate_product(a[1], b[1]));
 }
 
+template <bool General>
+static ContactPack contact_kernel_dot(const ContactPack* a, const ContactPack* b) {
+    if constexpr (General)
+        return contact_multiply_add(a[2], b[2], contact_multiply_add(a[1], b[1],
+            contact_multiply_add(a[0], b[0], ContactPack(0.0))));
+    return contact_ordered_dot(a, b);
+}
+
 static ContactPack contact_sign(ContactPack x) {
     return select(contact_greater(x.value, ContactElementPack(0.0)), ContactElementPack(1.0),
         select(contact_greater(ContactElementPack(0.0), x.value), ContactElementPack(-1.0), ContactElementPack(0.0)));
@@ -599,6 +659,7 @@ struct PreparedMeshContact {
     ContactFeature feature;
     bool active;
 };
+template <bool General = false>
 static ContactMatrix contact_point_hessian(const ContactPacket& data) {
     ContactMatrix H;
     ContactPack u[3];
@@ -610,7 +671,7 @@ static ContactMatrix contact_point_hessian(const ContactPacket& data) {
         const ContactPack normal = contact_multiply_add(-u[k], u[l], k == l ? 1.0 : 0.0);
         const ContactPack left = data.bpp * u[k];
         // Preserve which product the scalar self block contracts into the sum.
-        H(k,l) = data.query * (k == 1 && l == 1
+        H(k,l) = data.query * (!General && k == 1 && l == 1
             ? contact_multiply_add(c2, normal, left * u[l])
             : contact_multiply_add(left, u[l], c2 * normal));
     }
@@ -658,6 +719,7 @@ static ContactPack contact_expression_fallback(const ContactPacket& data, Contac
     return fallback;
 }
 
+template <bool General = false>
 static ContactMatrix contact_edge_hessian(const ContactPacket& data) {
     const int p = 0, q = 0, requested_dof_count = 1;
     const int requested_dofs[1] = {0};
@@ -671,12 +733,13 @@ static ContactMatrix contact_edge_hessian(const ContactPacket& data) {
     ContactPack e[3], w[3];
     for (int i = 0; i < 3; ++i) { e[i] = xb(i) - xa(i); w[i] = x(i) - xa(i); }
 
-    const ContactPack alpha = contact_ordered_dot(w, e), beta = contact_ordered_dot(e, e);
+    const ContactPack alpha = contact_kernel_dot<General>(w, e), beta = contact_kernel_dot<General>(e, e);
     const ContactPack t = alpha / beta;
 
     ContactPack r[3], u[3];
     for (int i = 0; i < 3; ++i) {
-        r[i] = x(i) - (xa(i) + t * e[i]);
+        if constexpr (General) r[i] = x(i) - contact_multiply_add(t, e[i], xa(i));
+        else r[i] = x(i) - (xa(i) + t * e[i]);
         u[i] = r[i] / delta;
     }
 
@@ -716,8 +779,13 @@ static ContactMatrix contact_edge_hessian(const ContactPacket& data) {
 
             ContactPack ddelta_pk = 0.0, ddelta_ql = 0.0;
             for (int i = 0; i < 3; ++i) {
-                ddelta_pk += u[i] * r_d[p][k][i];
-                ddelta_ql += u[i] * r_d[q][l][i];
+                if constexpr (General) {
+                    ddelta_pk = contact_multiply_add(u[i], r_d[p][k][i], ddelta_pk);
+                    ddelta_ql = contact_multiply_add(u[i], r_d[q][l][i], ddelta_ql);
+                } else {
+                    ddelta_pk += u[i] * r_d[p][k][i];
+                    ddelta_ql += u[i] * r_d[q][l][i];
+                }
             }
 
             ContactPack proj_term = 0.0;
@@ -733,10 +801,14 @@ static ContactMatrix contact_edge_hessian(const ContactPacket& data) {
             for (int i = 0; i < 3; ++i) {
                 const ContactPack dik = (i == k) ? 1.0 : 0.0;
                 const ContactPack dil = (i == l) ? 1.0 : 0.0;
-                const ContactPack q_ipkql = t_pkql * e[i]
-                                     + t_d[p][k] * epsilon[q] * dil
-                                     + t_d[q][l] * epsilon[p] * dik;
-                uq_term += u[i] * q_ipkql;
+                const ContactPack q_ipkql = General
+                    ? contact_multiply_add(t_d[q][l] * epsilon[p], dik,
+                        contact_multiply_add(t_pkql, e[i], t_d[p][k] * epsilon[q] * dil))
+                    : t_pkql * e[i]
+                        + t_d[p][k] * epsilon[q] * dil
+                        + t_d[q][l] * epsilon[p] * dik;
+                if constexpr (General) uq_term = contact_multiply_add(u[i], q_ipkql, uq_term);
+                else uq_term += u[i] * q_ipkql;
             }
 
             const ContactPack d2delta = proj_term - uq_term;
@@ -752,6 +824,7 @@ static constexpr int contact_levi_civita(int i, int j, int k) {
     return ((i == 0 && j == 1 && k == 2) || (i == 1 && j == 2 && k == 0) || (i == 2 && j == 0 && k == 1)) ? 1 : -1;
 }
 
+template <bool General = false>
 static ContactMatrix contact_face_hessian(const ContactPacket& data) {
     const int p = 0, q = 0, requested_dof_count = 1;
     const int requested_dofs[1] = {0};
@@ -777,7 +850,7 @@ static ContactMatrix contact_face_hessian(const ContactPacket& data) {
     for (int i = 0; i < 3; ++i) {
         for (int m = 0; m < 3; ++m) {
             for (int n = 0; n < 3; ++n) {
-                N[i] = i < 2
+                N[i] = !General && i < 2
                     ? N[i] + contact_separate_product(contact_levi_civita(i, m, n) * a[m], b[n])
                     : contact_multiply_add(contact_levi_civita(i, m, n) * a[m], b[n], N[i]);
             }
@@ -791,7 +864,7 @@ static ContactMatrix contact_face_hessian(const ContactPacket& data) {
     ContactPack n[3];
     for (int i = 0; i < 3; ++i) n[i] = N[i] / eta;
 
-    const ContactPack psi = contact_ordered_dot(N, w);
+    const ContactPack psi = contact_kernel_dot<General>(N, w);
     const ContactPack phi = psi / eta;
     const ContactPack s_sign = contact_sign(phi);
 
@@ -801,8 +874,14 @@ static ContactMatrix contact_face_hessian(const ContactPacket& data) {
         for (int k = 0; k < 3; ++k) {
             for (int i = 0; i < 3; ++i) {
                 ContactPack val = 0.0;
-                for (int nn = 0; nn < 3; ++nn) val += sig_a[pp] * contact_levi_civita(i, k, nn) * b[nn];
-                for (int m = 0; m < 3; ++m)    val += sig_b[pp] * contact_levi_civita(i, m, k) * a[m];
+                for (int nn = 0; nn < 3; ++nn) {
+                    if constexpr (General) val = contact_multiply_add(sig_a[pp] * contact_levi_civita(i, k, nn), b[nn], val);
+                    else val += sig_a[pp] * contact_levi_civita(i, k, nn) * b[nn];
+                }
+                for (int m = 0; m < 3; ++m) {
+                    if constexpr (General) val = contact_multiply_add(sig_b[pp] * contact_levi_civita(i, m, k), a[m], val);
+                    else val += sig_b[pp] * contact_levi_civita(i, m, k) * a[m];
+                }
                 Nd[pp][k][i] = val;
             }
         }
@@ -813,12 +892,19 @@ static ContactMatrix contact_face_hessian(const ContactPacket& data) {
         const int pp = requested_dofs[di];
         for (int k = 0; k < 3; ++k) {
             ContactPack eta_pk = 0.0;
-            for (int i = 0; i < 3; ++i) eta_pk += n[i] * Nd[pp][k][i];
+            for (int i = 0; i < 3; ++i) {
+                if constexpr (General) eta_pk = contact_multiply_add(n[i], Nd[pp][k][i], eta_pk);
+                else eta_pk += n[i] * Nd[pp][k][i];
+            }
             eta_d[pp][k] = eta_pk;
 
             ContactPack psi_pk = 0.0;
-            for (int i = 0; i < 3; ++i) psi_pk += Nd[pp][k][i] * w[i];
-            psi_pk += sig_w[pp] * N[k];
+            for (int i = 0; i < 3; ++i) {
+                if constexpr (General) psi_pk = contact_multiply_add(Nd[pp][k][i], w[i], psi_pk);
+                else psi_pk += Nd[pp][k][i] * w[i];
+            }
+            if constexpr (General) psi_pk = contact_multiply_add(sig_w[pp], N[k], psi_pk);
+            else psi_pk += sig_w[pp] * N[k];
             psi_d[pp][k] = psi_pk;
 
             phi_d[pp][k] = psi_pk / eta - psi * eta_pk / (eta * eta);
@@ -840,8 +926,13 @@ static ContactMatrix contact_face_hessian(const ContactPacket& data) {
             const ContactPack eta_pkql = ContactPack(0.0) + proj_NN / eta;
 
             ContactPack psi_pkql = 0.0;
-            psi_pkql += sig_w[q] * Nd[p][k][l];
-            psi_pkql += sig_w[p] * Nd[q][l][k];
+            if constexpr (General) {
+                psi_pkql = contact_multiply_add(sig_w[q], Nd[p][k][l], psi_pkql);
+                psi_pkql = contact_multiply_add(sig_w[p], Nd[q][l][k], psi_pkql);
+            } else {
+                psi_pkql += sig_w[q] * Nd[p][k][l];
+                psi_pkql += sig_w[p] * Nd[q][l][k];
+            }
 
             const ContactPack phi_pkql = psi_pkql / eta
                                   - contact_multiply_add(psi, eta_pkql, contact_multiply_add(psi_d[p][k], eta_d[q][l], psi_d[q][l] * eta_d[p][k])) / (eta * eta)
@@ -853,6 +944,7 @@ static ContactMatrix contact_face_hessian(const ContactPacket& data) {
     return H;
 }
 
+template <bool General = false>
 static ContactMatrix contact_interior_hessian(const ContactPacket& data) {
     const int p = 0, q = 0, requested_dof_count = 1;
     const int requested_dofs[1] = {0};
@@ -874,8 +966,8 @@ static ContactMatrix contact_interior_hessian(const ContactPacket& data) {
         c[i] = x1(i) - x3(i);
     }
 
-    const ContactPack A = contact_ordered_dot(a, a), B = contact_ordered_dot(a, b),
-        C = contact_ordered_dot(b, b), D = contact_ordered_dot(a, c), E = contact_ordered_dot(b, c);
+    const ContactPack A = contact_kernel_dot<General>(a, a), B = contact_kernel_dot<General>(a, b),
+        C = contact_kernel_dot<General>(b, b), D = contact_kernel_dot<General>(a, c), E = contact_kernel_dot<General>(b, c);
 
     const ContactPack Delta = contact_multiply_add(A, C, -(B * B));
     const ContactPack nu    = contact_multiply_add(B, E, -(C * D));
@@ -902,12 +994,12 @@ static ContactMatrix contact_interior_hessian(const ContactPacket& data) {
             nu_d[pp][k] = contact_multiply_add(Bd[pp][k], E, B * Ed[pp][k]);
             nu_d[pp][k] = contact_multiply_add(-Cd[pp][k], D, nu_d[pp][k]);
             nu_d[pp][k] = contact_multiply_add(-C, Dd[pp][k], nu_d[pp][k]);
-            zeta_d[pp][k] = k < 2
+            zeta_d[pp][k] = !General && k < 2
                 ? contact_multiply_add(A, Ed[pp][k], Ad[pp][k] * E)
                 : contact_multiply_add(Ad[pp][k], E, A * Ed[pp][k]);
             zeta_d[pp][k] = contact_multiply_add(-Bd[pp][k], D, zeta_d[pp][k]);
             zeta_d[pp][k] = contact_multiply_add(-B, Dd[pp][k], zeta_d[pp][k]);
-            Delta_d[pp][k] = k < 2
+            Delta_d[pp][k] = !General && k < 2
                 ? contact_multiply_add(A, Cd[pp][k], Ad[pp][k] * C)
                 : contact_multiply_add(Ad[pp][k], C, A * Cd[pp][k]);
             Delta_d[pp][k] = contact_multiply_add(-2.0 * B, Bd[pp][k], Delta_d[pp][k]);
@@ -925,7 +1017,9 @@ static ContactMatrix contact_interior_hessian(const ContactPacket& data) {
 
     ContactPack r_vec[3], u[3];
     for (int i = 0; i < 3; ++i) {
-        r_vec[i] = (x1(i) + s_val * a[i]) - (x3(i) + t_val * b[i]);
+        if constexpr (General) r_vec[i] = contact_multiply_add(s_val, a[i], x1(i))
+            - contact_multiply_add(t_val, b[i], x3(i));
+        else r_vec[i] = (x1(i) + s_val * a[i]) - (x3(i) + t_val * b[i]);
         u[i] = r_vec[i] / delta;
     }
 
@@ -985,8 +1079,13 @@ static ContactMatrix contact_interior_hessian(const ContactPacket& data) {
 
             ContactPack ddelta_pk = 0.0, ddelta_ql = 0.0;
             for (int i = 0; i < 3; ++i) {
-                ddelta_pk += u[i] * r_d[p][k][i];
-                ddelta_ql += u[i] * r_d[q][l][i];
+                if constexpr (General) {
+                    ddelta_pk = contact_multiply_add(u[i], r_d[p][k][i], ddelta_pk);
+                    ddelta_ql = contact_multiply_add(u[i], r_d[q][l][i], ddelta_ql);
+                } else {
+                    ddelta_pk += u[i] * r_d[p][k][i];
+                    ddelta_ql += u[i] * r_d[q][l][i];
+                }
             }
 
             ContactPack proj_term = 0.0;
@@ -1006,7 +1105,8 @@ static ContactMatrix contact_interior_hessian(const ContactPacket& data) {
                 p_ipkql = contact_multiply_add(s_d[q][l] * sig_a[p], dik, p_ipkql);
                 ContactPack q_ipkql = contact_multiply_add(t_pkql, b[i], t_d[p][k] * sig_b[q] * dil);
                 q_ipkql = contact_multiply_add(t_d[q][l] * sig_b[p], dik, q_ipkql);
-                ur_term += u[i] * (p_ipkql - q_ipkql);
+                if constexpr (General) ur_term = contact_multiply_add(u[i], p_ipkql - q_ipkql, ur_term);
+                else ur_term += u[i] * (p_ipkql - q_ipkql);
             }
 
             H(k, l) = contact_multiply_add(bpp * ddelta_pk, ddelta_ql, bp * (proj_term + ur_term));
@@ -1035,7 +1135,8 @@ static void prepare_edge(PreparedMeshContact& out, const MeshContactInput& input
 
 } // namespace
 
-void mesh_contact_derivatives_tile(const MeshContactInput* inputs, std::size_t count,
+template <bool General>
+static void mesh_contact_derivatives_tile_impl(const MeshContactInput* inputs, std::size_t count,
     double d_hat, double k_barrier, double friction, double dt, double eps_v,
     MeshContactOutput* outputs, unsigned char* derivative_active) {
     assert(count <= contact_tile_width);
@@ -1166,6 +1267,17 @@ void mesh_contact_derivatives_tile(const MeshContactInput* inputs, std::size_t c
     for (std::size_t e = 0; e < count; ++e) {
         auto& value = prepared[e];
         if (!value.active) continue;
+        if constexpr (General) {
+            const bool zero_role = (value.feature == ContactFeature::Point && value.query == 0.0)
+                || (value.feature == ContactFeature::Edge && value.sa == 0.0 && value.sb == 0.0);
+            if (zero_role)
+                // The scalar gradient retains the signs of zero-weight roles.
+                // These lanes need no Hessian work, but zeroing their gradient
+                // unconditionally would discard those reference bit patterns.
+                for (int axis = 0; axis < 3; ++axis)
+                    outputs[e].gradient[axis] = 0.0
+                        * (value.gradient_vector[axis] / value.delta);
+        }
         if (value.feature == ContactFeature::Point && value.query == 0.0) value.active = false;
         if (value.feature == ContactFeature::Edge && value.sa == 0.0 && value.sb == 0.0) value.active = false;
         if (value.active) {
@@ -1198,10 +1310,10 @@ void mesh_contact_derivatives_tile(const MeshContactInput* inputs, std::size_t c
             packet.query=ContactPack::load(parameters[6]);packet.edge_a=ContactPack::load(parameters[7]);
             ContactMatrix H;
             switch (feature) {
-                case ContactFeature::Point: H = contact_point_hessian(packet); break;
-                case ContactFeature::Edge: H = contact_edge_hessian(packet); break;
-                case ContactFeature::Face: H = contact_face_hessian(packet); break;
-                case ContactFeature::Interior: H = contact_interior_hessian(packet); break;
+                case ContactFeature::Point: H = contact_point_hessian<General>(packet); break;
+                case ContactFeature::Edge: H = contact_edge_hessian<General>(packet); break;
+                case ContactFeature::Face: H = contact_face_hessian<General>(packet); break;
+                case ContactFeature::Interior: H = contact_interior_hessian<General>(packet); break;
             }
             alignas(64) double g[3][W],h[3][3][W],fallback[W];
             contact_expression_fallback(packet,feature).store(fallback);
@@ -1243,6 +1355,20 @@ void mesh_contact_derivatives_tile(const MeshContactInput* inputs, std::size_t c
             }
         }
     }
+}
+
+void mesh_contact_derivatives_tile(const MeshContactInput* inputs, std::size_t count,
+    double d_hat, double k_barrier, double friction, double dt, double eps_v,
+    MeshContactOutput* outputs, unsigned char* derivative_active) {
+    mesh_contact_derivatives_tile_impl<false>(inputs, count, d_hat, k_barrier,
+        friction, dt, eps_v, outputs, derivative_active);
+}
+
+void general_mesh_contact_derivatives_tile(const MeshContactInput* inputs, std::size_t count,
+    double d_hat, double k_barrier, double friction, double dt, double eps_v,
+    MeshContactOutput* outputs, unsigned char* derivative_active) {
+    mesh_contact_derivatives_tile_impl<true>(inputs, count, d_hat, k_barrier,
+        friction, dt, eps_v, outputs, derivative_active);
 }
 
 void friction_derivatives_tile(const FrozenFrictionContact* contacts, const int* roles,

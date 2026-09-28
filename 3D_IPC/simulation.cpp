@@ -195,7 +195,8 @@ int main(int argc, char** argv) {
     if ((params.use_basic_experimental || params.use_basic_experimental_v2) && !params.use_cloth_grid
         && !params.use_ogc && !params.use_ogc_solver) {
         if (params.use_basic_experimental_v2)
-            std::cout << "Experimental cloth solver: v2\n";
+            std::cout << ((uses_general_solver || has_rigid)
+                ? "Experimental general solver: v2\n" : "Experimental cloth solver: v2\n");
         else
             std::cout << "Experimental cloth solver: v1 (scalar)\n";
         const bool simd = physics_detail::energy_simd_enabled(params);

@@ -103,3 +103,8 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
 // advanced through its COM and angular-velocity block. All blocks share one
 // live position array, contact cache, conflict graph, and coloring.
 SolverResult global_gauss_seidel_solver_basic_general(const RefMesh& ref_mesh, const DeformedState& state, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new, BroadPhase& broad_phase, const std::string& outdir = "");
+
+// Experimental v2 for the general cloth/solid/rigid system. Independent
+// particle batches gather AoS inputs, use local SIMD tiles, and accumulate
+// privately in incident order. Rigid contacts retain all coupled blocks.
+SolverResult global_gauss_seidel_solver_general_experimental_v2(const RefMesh& ref_mesh, const DeformedState& state, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new, BroadPhase& broad_phase, const std::string& outdir = "");

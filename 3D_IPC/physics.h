@@ -51,9 +51,9 @@ struct SimParams {
     int    max_global_iters;
 
     bool   use_parallel;
-    bool   use_basic_experimental; // select the experimental cloth solver family
+    bool   use_basic_experimental; // experimental cloth; with SIMD also selects general v2
     bool   use_basic_experimental_v2; // resolved from use_basic_experimental && use_simd
-    bool   use_simd;             // select v2 SIMD cloth energy/contact assembly
+    bool   use_simd;             // select v2 SIMD cloth/general energy/contact assembly
     bool   use_cloth_grid;       // basic cloth only: serial vertices within parallel spatial cells
     bool   cloth_grid_auto_dx;   // enlarge dx from dependencies at each grid rebuild
     double cloth_grid_dx;        // fixed side (must exceed 2*node_box_max), or minimum in auto mode

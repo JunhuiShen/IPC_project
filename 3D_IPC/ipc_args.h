@@ -157,8 +157,8 @@ struct IPCArgs3D : ArgParser {
         add_double("k_sdf",       k_sdf,       1e5,        "SDF penalty stiffness (0 = off)");
         add_double("eps_sdf",     eps_sdf,     0.002,      "SDF soft-barrier range (m). Cloth's force-free rest is at phi=eps_sdf. 0 = hard quadratic at the surface.");
         add_bool  ("use_parallel",   use_parallel,   true,  "Use parallel Gauss-Seidel (requires coloring)");
-        add_bool  ("use_basic_experimental", use_basic_experimental, false, "Use the experimental cloth solver: scalar v1 by default");
-        add_bool  ("use_simd", use_simd, false, "With use_basic_experimental, select SIMD v2 instead of scalar v1");
+        add_bool  ("use_basic_experimental", use_basic_experimental, false, "Use experimental cloth solving; with use_simd also selects experimental general solving");
+        add_bool  ("use_simd", use_simd, false, "With use_basic_experimental, select SIMD v2 for cloth or the general cloth/solid/rigid solver");
         add_bool  ("use_cloth_grid", use_cloth_grid, false, "Basic cloth only: parallel parity-colored grid cells, serial vertices inside each cell");
         add_bool  ("cloth_grid_auto_dx", cloth_grid_auto_dx, false, "Grid only: enlarge dx from dependency spans and node boxes at every rebuild for one batch per occupied parity color");
         add_double("cloth_grid_dx", cloth_grid_dx, 0.05, "Cloth grid side length, or minimum side with cloth_grid_auto_dx. Fixed mode requires > 2 * node_box_max and can split colors into batches");

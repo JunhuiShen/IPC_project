@@ -1,6 +1,9 @@
 #include <optional>
 #include "solver.h"
 #include "SIMD.h"
+#include "general_simd_assembly.h"
+#include "general_simd_rigid.h"
+#include "general_simd_scheduling.h"
 #include "contact_scheduling.h"
 #include "grid_contact_scheduling.h"
 #include "grid_coloring.h"
@@ -3897,7 +3900,7 @@ double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedS
 
 // Inertia/SDF assembly and contact evaluation read the same fixed state.
 // Cooperative updates overlap them and add the contact totals after the join.
-Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, const QuaternionOmegaKinematics* kinematics = nullptr, bool cooperative = false) {
+Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, const QuaternionOmegaKinematics* kinematics = nullptr, bool cooperative = false, bool general_simd_v2 = false) {
     const Vec3& x_com_n = state.x_coms[rb];
     const Vec3& v_com_n = state.v_coms[rb];
 
@@ -3917,7 +3920,17 @@ Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_m
     if (!overlap_inertia) compute_noncontact();
     const std::function<void()> leader_work = [&compute_noncontact] { compute_noncontact(); };
     RigidEnergyDerivatives friction;
-    const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::TranslationHessian, kinematics, nullptr, params.friction_coefficient != 0.0 ? &friction : nullptr, true, cooperative, overlap_inertia ? &leader_work : nullptr);
+    const RigidEnergyDerivatives barrier = [&] {
+        if (general_simd_v2) {
+            const auto value = ipc_simd::rigid_contact_derivatives(rb, ref_mesh, state,
+                bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local,
+                positions, omega_new, params, dt, RigidDerivativeMode::TranslationHessian,
+                kinematics, cooperative, overlap_inertia ? &leader_work : nullptr);
+            friction = value.friction;
+            return value.barrier;
+        }
+        return rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::TranslationHessian, kinematics, nullptr, params.friction_coefficient != 0.0 ? &friction : nullptr, true, cooperative, overlap_inertia ? &leader_work : nullptr);
+    }();
     const double barrier_scale = dt * dt * params.k_barrier;
     gradient += barrier_scale * barrier.translation_gradient;
     hessian += barrier_scale * barrier.translation_translation_hessian;
@@ -3928,7 +3941,7 @@ Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_m
     return hessian.ldlt().solve(gradient);
 }
 
-Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, const QuaternionOmegaKinematics* supplied_kinematics = nullptr, const Mat33* rotation_predictor = nullptr, bool cooperative = false) {
+Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, const SimParams& params, double dt, const QuaternionOmegaKinematics* supplied_kinematics = nullptr, const Mat33* rotation_predictor = nullptr, bool cooperative = false, bool general_simd_v2 = false) {
     const Vec4& q_n = state.orientations[rb];
     const Vec3& omega_n = state.omega[rb];
     const Mat33& I_hat = ref_mesh.I_hat[rb];
@@ -3950,7 +3963,17 @@ Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref
     if (!overlap_inertia) compute_noncontact();
     const std::function<void()> leader_work = [&compute_noncontact] { compute_noncontact(); };
     RigidEnergyDerivatives friction;
-    const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::OrientationHessian, &kinematics, nullptr, params.friction_coefficient != 0.0 ? &friction : nullptr, true, cooperative, overlap_inertia ? &leader_work : nullptr);
+    const RigidEnergyDerivatives barrier = [&] {
+        if (general_simd_v2) {
+            const auto value = ipc_simd::rigid_contact_derivatives(rb, ref_mesh, state,
+                bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local,
+                positions, omega_new, params, dt, RigidDerivativeMode::OrientationHessian,
+                &kinematics, cooperative, overlap_inertia ? &leader_work : nullptr);
+            friction = value.friction;
+            return value.barrier;
+        }
+        return rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, nt_pair_indices, ss_pair_indices, node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::OrientationHessian, &kinematics, nullptr, params.friction_coefficient != 0.0 ? &friction : nullptr, true, cooperative, overlap_inertia ? &leader_work : nullptr);
+    }();
     const double barrier_scale = dt * dt * params.k_barrier;
     gradient += barrier_scale * barrier.orientation_gradient;
     hessian += barrier_scale * barrier.orientation_orientation_hessian;
@@ -4576,6 +4599,409 @@ SolverResult global_gauss_seidel_solver_basic_general(
     // All colored updates and residual tasks have joined. Use the full solve's
     // reuse rate when selecting whether later solves should consult the memo.
     if (prepared_solid) prepared_solid->end_solve();
+
+    #pragma omp parallel for schedule(static) if(params.use_parallel && cloth_nodes.size() >= 128)
+    for (int index = 0; index < static_cast<int>(cloth_nodes.size()); ++index) {
+        const int node = cloth_nodes[index];
+        deformable_workspace.prev_disp[node] = (xnew[node] - deformable_workspace.xnew_substep_start[node]).norm();
+    }
+    #pragma omp parallel for schedule(static) if(params.use_parallel && solid_nodes.size() >= 128)
+    for (int index = 0; index < static_cast<int>(solid_nodes.size()); ++index) {
+        const int node = solid_nodes[index];
+        deformable_workspace.prev_disp[node] = (xnew[node] - deformable_workspace.xnew_substep_start[node]).norm();
+    }
+    #pragma omp parallel for schedule(static) if(params.use_parallel && num_rbs >= 8)
+    for (int rb = 0; rb < num_rbs; ++rb) {
+        rigid_workspace.prev_com_disp[rb] = updates_rigid_translation(
+            ref_mesh.rb_update_modes[rb])
+            ? (x_com_new[rb] - rigid_workspace.substep_start_coms[rb]).norm()
+            : 0.0;
+        rigid_workspace.prev_theta_disp[rb] = updates_rigid_orientation(
+            ref_mesh.rb_update_modes[rb])
+            ? dt * omega_new[rb].norm() : 0.0;
+    }
+
+    if (params.fixed_iters)
+        result.converged = true;
+    if (params.write_substeps)
+        write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, nullptr);
+    return result;
+}
+
+// -----------------------------------------------------------------------------
+// General experimental v2 solver: private SIMD batches and cooperative contacts
+// -----------------------------------------------------------------------------
+SolverResult global_gauss_seidel_solver_general_experimental_v2(
+    const RefMesh& ref_mesh, const DeformedState& state,
+    const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+    const SimParams& input_params, std::vector<Vec3>& xnew,
+    const std::vector<Vec3>& xhat,
+    std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new,
+    std::vector<Vec3>& omega_new, BroadPhase& broad_phase,
+    const std::string& outdir) {
+    if (input_params.use_cloth_grid || input_params.use_ogc || input_params.use_ogc_solver)
+        throw std::invalid_argument("general experimental_v2 requires conflict coloring and does not support OGC");
+    // An explicit named entry chooses its algorithm independently of driver
+    // flags. The driver resolves the existing experimental + SIMD CLI flags.
+    SimParams params = input_params;
+    params.use_basic_experimental = true;
+    params.use_basic_experimental_v2 = true;
+    params.use_simd = true;
+
+    validate_solver_friction_parameters(
+        params, "global_gauss_seidel_solver_general_experimental_v2");
+    const int nv = static_cast<int>(xnew.size());
+    if (params.friction_coefficient != 0.0
+        && state.deformed_positions.size() != xnew.size()) {
+        throw std::invalid_argument(
+            "global_gauss_seidel_solver_general_experimental_v2: previous positions must match xnew.size()");
+    }
+    const std::vector<Vec3>* previous_positions =
+        params.friction_coefficient == 0.0
+        ? nullptr : &state.deformed_positions;
+    const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
+    const std::vector<int>& deformable_nodes = ref_mesh.deformable_nodes;
+    SolverResult result;
+
+    // A mesh without rigid bodies may predate node_to_rb. Preserve the exact
+    // cloth-only path in that case.
+    if (num_rbs == 0 && ref_mesh.tet_nodes.empty()) {
+        return global_gauss_seidel_solver_basic_experimental_v2(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
+    }
+
+    rb_solver::validate_rigid_solver_state(ref_mesh, state, x_com_new, q_new, omega_new);
+
+    #pragma omp parallel for schedule(static) if(params.use_parallel && num_rbs >= 8)
+    for (int rb = 0; rb < num_rbs; ++rb) {
+        const RigidBodyUpdateMode update_mode =
+            ref_mesh.rb_update_modes[rb];
+        if (!updates_rigid_translation(update_mode))
+            x_com_new[rb] = state.x_coms[rb];
+        if (!updates_rigid_orientation(update_mode)) {
+            omega_new[rb] = Vec3::Zero();
+            q_new[rb] = state.orientations[rb];
+        }
+    }
+
+    static ExperimentalSolverWorkspace deformable_workspace;
+    static RigidSolverWorkspace rigid_workspace;
+    static MixedAdjacencyWorkspace mixed_adjacency_workspace;
+    deformable_workspace.prepare(ref_mesh, adj, nv, params.node_box_max);
+    // Cloth v2 invalidates material snapshots by value, not just pointer.
+    // Retain that guarantee for in-place edits of rest matrices here too.
+    static std::vector<Mat22> shape_source;
+    if (!SimdVertexMaterials::same_bytes(shape_source, ref_mesh.Dm_inverse)) {
+        #pragma omp parallel for schedule(static) if(params.use_parallel && ref_mesh.Dm_inverse.size() >= 128)
+        for (int triangle = 0; triangle < static_cast<int>(ref_mesh.Dm_inverse.size()); ++triangle)
+            deformable_workspace.rest_shape_grads[triangle] = shape_function_gradients(ref_mesh.Dm_inverse[triangle]);
+        shape_source = ref_mesh.Dm_inverse;
+    }
+    static solver_detail::GeneralSimdMaterials simd_materials;
+    simd_materials.prepare(ref_mesh, deformable_workspace.incident_triangles,
+        static_cast<std::size_t>(nv), params.kB > 0.0);
+    rigid_workspace.prepare(ref_mesh, nv, params.node_box_max, params.theta_box_max);
+    const std::vector<std::vector<int>>& nodal_elastic_adj = deformable_workspace.elastic_adjacency.get(ref_mesh, adj, nv);
+    mixed_adjacency_workspace.prepare(ref_mesh, deformable_nodes, num_rbs, nv);
+    const std::vector<int>& cloth_nodes = mixed_adjacency_workspace.cloth_nodes;
+    const std::vector<int>& solid_nodes = ref_mesh.tet_nodes;
+    const int num_cloth = static_cast<int>(cloth_nodes.size());
+    const int num_solid = static_cast<int>(solid_nodes.size());
+    const int solid_begin = num_cloth;
+    const int rigid_begin = solid_begin + num_solid;
+    PinMap& pin_map = deformable_workspace.pin_map;
+    deformable_workspace.pinned_vertices.reserve(pins.size());
+    for (int pin = 0; pin < static_cast<int>(pins.size()); ++pin) {
+        pin_map[pins[pin].vertex_index] = pin;
+        deformable_workspace.pinned_vertices.push_back(pins[pin].vertex_index);
+    }
+
+    const double dt = params.dt();
+    (void)params.dt2();
+
+    // xnew is the single live collision configuration. Its deformable entries
+    // come from the caller; overwrite only rigid proxies from generalized
+    // coordinates.
+    parallel_body_setup(num_rbs, params.use_parallel && num_rbs >= 8, [&](int rb) {
+        const Vec4 orientation = updates_rigid_orientation(
+                                     ref_mesh.rb_update_modes[rb])
+            ? quaternion_normalize(quaternion_from_angular_velocity(
+                  state.orientations[rb], omega_new[rb], dt))
+            : state.orientations[rb];
+        q_new[rb] = orientation;
+        for (int local = 0; local < static_cast<int>(ref_mesh.rb_nodes[rb].size()); ++local) {
+            xnew[ref_mesh.rb_nodes[rb][local]] = world_space_position(ref_mesh.ref_positions[rb][local], x_com_new[rb], orientation);
+        }
+    });
+
+    #pragma omp parallel for schedule(static) if(params.use_parallel && nv >= 128)
+    for (int node = 0; node < nv; ++node) deformable_workspace.xnew_substep_start[node] = xnew[node];
+    rigid_workspace.substep_start_coms = x_com_new;
+    std::vector<AABB>& blue_boxes = rigid_workspace.blue_boxes;
+    parallel_body_setup(num_rbs, params.use_parallel && num_rbs >= 8, [&](int rb) {
+        rigid_workspace.rotation_predictors[static_cast<std::size_t>(rb)] = rigid_rotation_predictor(state.orientations[rb], state.omega[rb], dt);
+    });
+    #pragma omp parallel for schedule(static) if(params.use_parallel && cloth_nodes.size() >= 128)
+    for (int index = 0; index < static_cast<int>(cloth_nodes.size()); ++index) {
+        const int node = cloth_nodes[index];
+        deformable_workspace.inertial_disp[node] = dt * state.velocities[node].norm();
+    }
+    #pragma omp parallel for schedule(static) if(params.use_parallel && solid_nodes.size() >= 128)
+    for (int index = 0; index < static_cast<int>(solid_nodes.size()); ++index) {
+        const int node = solid_nodes[index];
+        deformable_workspace.inertial_disp[node] = dt * state.velocities[node].norm();
+    }
+    constexpr double box_padding = 1.2;
+
+    solver_detail::GeneralSimdBatches simd_batches;
+    // Rigid translation/rotation retain the original general solver's CCD
+    // checks even when the particle CCD flag is off. Only skip contact search
+    // when no rigid block can require those candidates.
+    const bool needs_mesh_contact_search = params.d_hat > 0.0
+        || params.use_ccd || num_rbs > 0;
+    std::vector<Vec3> rollback_positions, rollback_coms, rollback_omega;
+    std::vector<Vec4> rollback_orientations;
+    std::vector<unsigned char> rollback_fixed_body_placed(num_rbs);
+    rollback_positions.resize(nv);
+    rollback_coms.resize(num_rbs);
+    rollback_orientations.resize(num_rbs);
+    rollback_omega.resize(num_rbs);
+    const auto simd_block_cost = [&](int block) -> std::size_t {
+        if (block >= rigid_begin) {
+            const int rb = block - rigid_begin;
+            return rigid_workspace.body_nt_pair_indices[rb].size()
+                + rigid_workspace.body_ss_pair_indices[rb].size();
+        }
+        const int node = block < solid_begin ? cloth_nodes[block] : solid_nodes[block - solid_begin];
+        return broad_phase.cache().vertex_nt[node].size()
+            + broad_phase.cache().vertex_ss[node].size();
+    };
+
+    const auto rebuild_contact_cache = [&](int iteration) {
+        // First fill deformable boxes. build_blue_boxes_rb then overwrites all
+        // rigid proxy entries with spherical-cap plus COM bounds.
+        #pragma omp parallel for schedule(static) if(params.use_parallel && cloth_nodes.size() >= 128)
+        for (int index = 0; index < static_cast<int>(cloth_nodes.size()); ++index) {
+            const int node = cloth_nodes[index];
+            const double radius = std::clamp(box_padding * std::max(deformable_workspace.prev_disp[node], deformable_workspace.inertial_disp[node]),params.node_box_min, params.node_box_max);
+            const Vec3 half_extent = Vec3::Constant(radius);
+            blue_boxes[node] = AABB(xnew[node] - half_extent, xnew[node] + half_extent);
+        }
+        #pragma omp parallel for schedule(static) if(params.use_parallel && solid_nodes.size() >= 128)
+        for (int index = 0; index < static_cast<int>(solid_nodes.size()); ++index) {
+            const int node = solid_nodes[index];
+            const double radius = std::clamp(box_padding * std::max(deformable_workspace.prev_disp[node], deformable_workspace.inertial_disp[node]),params.node_box_min, params.node_box_max);
+            const Vec3 half_extent = Vec3::Constant(radius);
+            blue_boxes[node] = AABB(xnew[node] - half_extent, xnew[node] + half_extent);
+        }
+
+        parallel_body_setup(num_rbs, params.use_parallel && num_rbs >= 8, [&](int rb) {
+            rigid_workspace.com_box_anchors[rb] = x_com_new[rb];
+            rigid_workspace.orientation_box_anchors[rb] = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_new[rb], dt));
+            rigid_workspace.com_box_radii[rb] = std::clamp(box_padding * std::max(rigid_workspace.prev_com_disp[rb], dt * state.v_coms[rb].norm()), params.node_box_min, params.node_box_max);
+            rigid_workspace.theta_box_radii[rb] = std::clamp(box_padding * std::max(rigid_workspace.prev_theta_disp[rb], dt * state.omega[rb].norm()), params.theta_box_min, params.theta_box_max);
+        });
+        build_blue_boxes_rb(rigid_workspace.com_box_anchors, rigid_workspace.orientation_box_anchors, rigid_workspace.theta_box_radii, rigid_workspace.com_box_radii, ref_mesh, blue_boxes);
+        if (!needs_mesh_contact_search) {
+            broad_phase.initialize_node_boxes_only(blue_boxes);
+        } else if (solid_nodes.empty()) {
+            broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::GeneralSolver);
+        } else {
+            broad_phase.initialize_surface_nodes(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::GeneralSolver);
+        }
+        build_rb_contact_adj(broad_phase.cache(), ref_mesh.node_to_rb, num_rbs, rigid_workspace.body_nt_pair_indices, rigid_workspace.body_ss_pair_indices, rigid_workspace.contact_adjacency);
+        build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, nodal_elastic_adj, broad_phase.cache(), mixed_adjacency_workspace.conflict_adjacency, &mixed_adjacency_workspace.node_to_block, &mixed_adjacency_workspace.solid_node_mask, &mixed_adjacency_workspace.surface_node_mask, &mixed_adjacency_workspace.elastic_row_sizes, &rigid_workspace.body_nt_pair_indices, &rigid_workspace.body_ss_pair_indices);
+        greedy_color_conflict_graph(mixed_adjacency_workspace.conflict_adjacency, mixed_adjacency_workspace.color_groups, &mixed_adjacency_workspace.coloring_workspace);
+        // Match basic v2: issue contact-heavy independent blocks first so
+        // late, expensive updates do not strand the rest of a color's workers.
+        for (auto& group : mixed_adjacency_workspace.color_groups)
+            std::stable_sort(group.begin(), group.end(), [&](int a, int b) {
+                return simd_block_cost(a) > simd_block_cost(b);
+            });
+        simd_batches.prepare(mixed_adjacency_workspace.color_groups, rigid_begin, simd_block_cost);
+        if (params.verbose)
+            std::fprintf(stderr, "  [General GS] iter %d  rebuilding mixed blue boxes and %zu block colors\n", iteration, mixed_adjacency_workspace.color_groups.size());
+    };
+
+
+    const auto update_final_residual = [&]() {
+        build_frozen_residual_workspace(
+            ref_mesh, params, xnew, broad_phase,
+            rigid_workspace.frozen_residual,
+            &deformable_workspace.rest_shape_grads);
+        result.final_cloth_residual = compute_global_deformable_residual(ref_mesh, adj, pins, params, xnew, xhat, broad_phase, cloth_nodes, &pin_map, &deformable_workspace.incident_triangles, &deformable_workspace.rest_shape_grads, &rigid_workspace.frozen_residual, previous_positions);
+        result.final_solid_residual = solid_nodes.empty() ? 0.0 : compute_global_solid_residual(ref_mesh, pins, params, xnew, xhat, broad_phase, &pin_map, &mixed_adjacency_workspace.solid_node_mask, &mixed_adjacency_workspace.surface_node_mask, &rigid_workspace.frozen_residual, previous_positions);
+        result.final_rigid_residual = rb_solver::rigid_body_unnormalized_residual(ref_mesh, state, broad_phase.cache(), rigid_workspace.body_nt_pair_indices, rigid_workspace.body_ss_pair_indices, rigid_workspace.node_to_rb_local, xnew, params, x_com_new, omega_new, dt, rigid_workspace.body_residuals, &rigid_workspace.rotation_predictors, &rigid_workspace.frozen_residual);
+        result.final_residual = result.final_cloth_residual + result.final_solid_residual + result.final_rigid_residual;
+    };
+
+    const auto block_residual_converged = [&](double residual, double initial) {
+        double tolerance = 0.0;
+        if (params.tol_abs > 0.0)
+            tolerance = std::max(tolerance, params.tol_abs);
+        if (params.tol_rel > 0.0 && std::isfinite(initial))
+            tolerance = std::max(tolerance, params.tol_rel * initial);
+        return residual <= tolerance;
+    };
+    const auto residual_converged = [&]() {
+        return block_residual_converged(result.final_cloth_residual, result.initial_cloth_residual) && block_residual_converged(result.final_solid_residual, result.initial_solid_residual) && block_residual_converged(result.final_rigid_residual, result.initial_rigid_residual);
+    };
+
+    rebuild_contact_cache(1);
+    if (!params.fixed_iters) {
+        result.has_residual = true;
+        result.has_residual_components = true;
+        update_final_residual();
+        result.initial_cloth_residual = result.final_cloth_residual;
+        result.initial_solid_residual = result.final_solid_residual;
+        result.initial_rigid_residual = result.final_rigid_residual;
+        result.initial_residual = result.final_residual;
+        if (residual_converged()) {
+            result.converged = true;
+            return result;
+        }
+    }
+
+    for (int iteration = 1; iteration <= params.max_global_iters; ++iteration) {
+        if (iteration > 1 && (iteration - 1) % params.node_box_update_count == 0) {
+            rebuild_contact_cache(iteration);
+        }
+
+        // COM and orientation remain one indivisible update block: all proxy
+        // positions are committed before another color begins.
+        const auto process_body = [&](int rb, bool cooperative = false) {
+            const RigidBodyUpdateMode update_mode =
+                ref_mesh.rb_update_modes[rb];
+            if (update_mode == RigidBodyUpdateMode::None && rigid_workspace.fixed_body_placed[rb])
+                return;
+            const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, updates_rigid_orientation(update_mode));
+            if (updates_rigid_translation(update_mode)) {
+                const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics, cooperative, true);
+                const Vec3 com_radius = Vec3::Constant(rigid_workspace.com_box_radii[rb]);
+                const Vec3 com_target =(x_com_new[rb] - delta_com).cwiseMax(rigid_workspace.com_box_anchors[rb] - com_radius).cwiseMin(rigid_workspace.com_box_anchors[rb] + com_radius);
+                const Vec3 proposed_com_displacement = com_target - x_com_new[rb];
+                const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, proposed_com_displacement, 0.9, cooperative);
+                const Vec3 com_displacement = com_safe_step * proposed_com_displacement;
+                x_com_new[rb] += com_displacement;
+                translate_rigid_nodes(ref_mesh.rb_nodes[rb], com_displacement, xnew, params.use_parallel);
+            }
+
+            Vec4 q_accepted = q_new[rb];
+            if (updates_rigid_orientation(update_mode)) {
+                const Vec3 delta_omega = rb_solver::compute_omega_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics, &rigid_workspace.rotation_predictors[static_cast<std::size_t>(rb)], cooperative, true);
+                const Vec4 q_current = quaternion_normalize(kinematics.orientation);
+                const Vec3 omega_trial = omega_new[rb] - params.damping * delta_omega;
+                const Vec4 q_target = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_trial, dt));
+                const Vec4 q_bounded = bound_quaternion(rigid_workspace.orientation_box_anchors[rb], q_current,q_target, rigid_workspace.theta_box_radii[rb]);
+                const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, x_com_new[rb], q_current, q_bounded, 0.9, cooperative);
+                q_accepted = interpolate_orientation_full_arc(q_current, q_bounded, rotation_safe_step);
+                q_new[rb] = q_accepted;
+                omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, state.orientations[rb], dt);
+            }
+
+            place_rigid_nodes(ref_mesh.rb_nodes[rb], ref_mesh.ref_positions[rb], x_com_new[rb], q_accepted, xnew, params.use_parallel);
+            if (update_mode == RigidBodyUpdateMode::None) rigid_workspace.fixed_body_placed[rb] = 1;
+        };
+
+        const auto process_simd_batch = [&](const solver_detail::GeneralSimdBatch& batch, bool cooperative) {
+            if (batch.blocks[0] >= rigid_begin) {
+                process_body(batch.blocks[0] - rigid_begin, cooperative);
+                return;
+            }
+            std::array<int, ipc_simd::tile_width> nodes;
+            std::array<solver_detail::GeneralSimdVertexSystem, ipc_simd::tile_width> systems;
+            for (std::size_t i = 0; i < batch.size; ++i) {
+                const int block = batch.blocks[i];
+                nodes[i] = block < solid_begin ? cloth_nodes[block] : solid_nodes[block - solid_begin];
+            }
+            const auto prepare_local = [&] {
+                solver_detail::prepare_general_simd_batch(nodes.data(), batch.size,
+                    ref_mesh, deformable_workspace.incident_triangles,
+                    deformable_workspace.rest_shape_grads, pins, pin_map, params,
+                    xnew, xhat, previous_positions, mixed_adjacency_workspace.solid_node_mask,
+                    mixed_adjacency_workspace.surface_node_mask, systems.data(), &simd_materials);
+            };
+            // A split singleton follows basic v2's contact-sweep organization:
+            // helpers evaluate contacts while the leader prepares local energy.
+            // Unsplit batches keep their private gather/compute/update pipeline.
+            const bool overlap_local = cooperative && batch.size == 1;
+            if (!overlap_local) prepare_local();
+            const std::function<void()> leader_work = [&] { prepare_local(); };
+            for (std::size_t i = 0; i < batch.size; ++i) {
+                const int node = nodes[i];
+                thread_local safe_step_detail::VertexAabbRejections scratch;
+                auto* rejections = params.use_ccd && params.d_hat > 1e-8
+                    ? &scratch : nullptr;
+                solver_detail::accumulate_general_simd_contacts(node,
+                    batch.blocks[i] >= solid_begin, broad_phase.cache(), params,
+                    xnew, previous_positions, mixed_adjacency_workspace.solid_node_mask,
+                    mixed_adjacency_workspace.surface_node_mask, cooperative, systems[i],
+                    rejections, overlap_local ? &leader_work : nullptr);
+                const Vec3 delta = matrix3d_inverse(systems[i].hessian) * systems[i].gradient;
+                const Vec3 target = xnew[node] - params.damping * delta;
+                per_vertex_safe_step(broad_phase, xnew, node, target, 0.9,
+                    params.use_ccd, params.use_ticcd, false, cooperative, rejections);
+            }
+        };
+        const auto snapshot_simd_batch = [&](int item, bool restore) {
+            const auto& batch = simd_batches.batches[item];
+            for (std::size_t i = 0; i < batch.size; ++i) {
+                const int block = batch.blocks[i];
+                if (block < rigid_begin) {
+                    const int node = block < solid_begin ? cloth_nodes[block] : solid_nodes[block - solid_begin];
+                    if (restore) xnew[node] = rollback_positions[node];
+                    else rollback_positions[node] = xnew[node];
+                } else {
+                    const int rb = block - rigid_begin;
+                    if (restore) {
+                        x_com_new[rb] = rollback_coms[rb]; q_new[rb] = rollback_orientations[rb];
+                        omega_new[rb] = rollback_omega[rb];
+                        rigid_workspace.fixed_body_placed[rb] = rollback_fixed_body_placed[rb];
+                        for (int node : ref_mesh.rb_nodes[rb]) xnew[node] = rollback_positions[node];
+                    } else {
+                        rollback_coms[rb] = x_com_new[rb]; rollback_orientations[rb] = q_new[rb];
+                        rollback_omega[rb] = omega_new[rb];
+                        rollback_fixed_body_placed[rb] = rigid_workspace.fixed_body_placed[rb];
+                        for (int node : ref_mesh.rb_nodes[rb]) rollback_positions[node] = xnew[node];
+                    }
+                }
+            }
+        };
+
+        if (params.use_parallel) {
+            const int sweeps = params.fixed_iters
+                ? std::min(params.max_global_iters - iteration + 1,
+                    params.node_box_update_count - (iteration - 1) % params.node_box_update_count) : 1;
+            solver_detail::run_general_simd_batches(simd_batches, sweeps,
+                [&](int item, bool cooperative) { process_simd_batch(simd_batches.batches[item], cooperative); },
+                [&](int item) { snapshot_simd_batch(item, false); },
+                [&](int item) { snapshot_simd_batch(item, true); });
+            iteration += sweeps - 1;
+        } else {
+            // Serial GS preserves [cloth][solid][rigid] order; never pre-gather
+            // dependent nodes. A singleton may still pack its incident elements.
+            for (int block = 0; block < rigid_begin + num_rbs; ++block) {
+                solver_detail::GeneralSimdBatch batch;
+                batch.blocks[0] = block; batch.size = 1;
+                process_simd_batch(batch, false);
+            }
+        }
+        result.iterations = iteration;
+        if (!params.fixed_iters) {
+            update_final_residual();
+            if (params.verbose) {
+                std::fprintf(
+                    stderr,
+                    "  [General GS] iter %d  cloth residual = %.6e  solid residual = %.6e  rigid-body residual = %.6e  total residual = %.6e\n",
+                    iteration, result.final_cloth_residual,
+                    result.final_solid_residual,
+                    result.final_rigid_residual, result.final_residual);
+            }
+            if (residual_converged()) {
+                result.converged = true;
+                break;
+            }
+        }
+    }
 
     #pragma omp parallel for schedule(static) if(params.use_parallel && cloth_nodes.size() >= 128)
     for (int index = 0; index < static_cast<int>(cloth_nodes.size()); ++index) {

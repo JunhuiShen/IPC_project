@@ -73,7 +73,24 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
         std::vector<Vec4> q_new = state.orientations;
         std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
 
-        const SolverResult sub_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new);
+        SolverResult sub_result;
+        if (params.use_basic_experimental_v2) {
+            std::vector<Vec3> xnew = state.deformed_positions;
+            const std::vector<Vec3> xhat = state.deformed_positions;
+            const VertexTriangleMap adjacency;
+            const std::vector<Pin> pins;
+            BroadPhase broad_phase;
+            // The rigid-only driver writes through on_substep. It has no
+            // diagnostic outdir, so do not create general debug files in cwd.
+            SimParams solver_params = params;
+            solver_params.write_substeps = false;
+            sub_result = global_gauss_seidel_solver_general_experimental_v2(
+                ref_mesh, state, adjacency, pins, solver_params, xnew, xhat,
+                x_com_new, q_new, omega_new, broad_phase);
+        } else {
+            sub_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state,
+                params, x_com_new, q_new, omega_new);
+        }
         accumulate_solver_result(agg, sub_result, sub == 0);
 
         if (!sub_result.converged)
@@ -139,7 +156,11 @@ inline SolverResult advance_one_frame_general(
         std::vector<Vec4> q_new = state.orientations;
         std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
 
-        const SolverResult substep_result = global_gauss_seidel_solver_basic_general(ref_mesh, state, adj, pins, params, xnew, xhat, x_com_new, q_new, omega_new, broad_phase, outdir);
+        const SolverResult substep_result = params.use_basic_experimental_v2
+            ? global_gauss_seidel_solver_general_experimental_v2(ref_mesh, state,
+                adj, pins, params, xnew, xhat, x_com_new, q_new, omega_new, broad_phase, outdir)
+            : global_gauss_seidel_solver_basic_general(ref_mesh, state, adj, pins,
+                params, xnew, xhat, x_com_new, q_new, omega_new, broad_phase, outdir);
         accumulate_solver_result(aggregate, substep_result, substep == 0);
         if (!substep_result.converged)
             return aggregate;
