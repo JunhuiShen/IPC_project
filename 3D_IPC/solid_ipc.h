@@ -1,7 +1,9 @@
 #pragma once
 
 #include "IPC_math.h"
+#include "volumetric_corotated_energy.h"
 
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -11,6 +13,7 @@ class BroadPhase;
 struct Pin;
 struct RefMesh;
 struct SimParams;
+namespace safe_step_detail { struct VertexAabbRejections; }
 
 // Append one disconnected deformable solid.
 //
@@ -121,8 +124,44 @@ std::pair<Vec3, Mat33> compute_solid_local_gradient_and_block(
 
 namespace solid_ipc_detail {
 
+// Rebuilt once per solve, so in-place rest/material changes cannot leave stale
+// coefficients. Mutable geometry entries belong only to dependency-colored
+// nodal updates, never parallel nodal residual evaluation.
+// Both solid_mu and solid_lambda must stay fixed until the next prepare().
+// Connectivity changes also require refreshing the enclosing solver's colors.
+struct PreparedSolidWorkspace {
+    using Geometry = volumetric_detail::PreparedTetGeometry;
+    std::vector<volumetric_detail::PreparedTet> elements;
+    std::vector<std::optional<Geometry>> geometry;
+
+    // Production policy: probe initially and every sixteenth solve, deciding
+    // from the complete solve so late settling contributes to the hit rate.
+    // Low reuse disables only the geometry memo, retaining prepared material.
+    void begin_solve(const RefMesh& mesh, const std::vector<Vec3>& positions,
+        const SimParams& params);
+    void end_solve();
+    std::pair<Vec3, Mat33> evaluate(std::size_t element, int local_node,
+        const std::vector<Vec3>& positions, const SimParams& params);
+
+private:
+    enum class Mode { Probe, Cached, Prepared };
+    void prepare(const RefMesh& mesh, const std::vector<Vec3>& positions,
+        const SimParams& params, bool with_geometry_cache);
+    struct alignas(64) ProbeCounts { std::size_t calls = 0, hits = 0; };
+    std::vector<ProbeCounts> probe_counts_;
+    Mode mode_ = Mode::Cached;
+    Mode selected_mode_ = Mode::Cached;
+    int solves_until_probe_ = 0;
+    const RefMesh* policy_mesh_ = nullptr;
+    const int* policy_tets_ = nullptr;
+    std::size_t policy_tet_count_ = 0, policy_position_count_ = 0;
+    double policy_mu_ = 0.0, policy_lambda_ = 0.0;
+};
+
 // Solver-only fast path. The enclosing solver entry point must already have
 // validated the friction parameters and previous-position array.
+// Optional AABB rejections remain valid only until these contact positions or
+// incidence rows change; safe-step applies its finite, short-step reuse guard.
 std::pair<Vec3, Mat33> compute_solid_local_gradient_and_block_unchecked(
     int node,
     const RefMesh& ref_mesh,
@@ -134,7 +173,9 @@ std::pair<Vec3, Mat33> compute_solid_local_gradient_and_block_unchecked(
     const std::vector<unsigned char>* solid_node_mask,
     const std::vector<unsigned char>* surface_node_mask,
     const std::vector<int>* pin_map,
-    const std::vector<Vec3>* previous_positions, bool cooperative = false);
+    const std::vector<Vec3>* previous_positions, bool cooperative = false,
+    safe_step_detail::VertexAabbRejections* rejections = nullptr,
+    PreparedSolidWorkspace* prepared = nullptr);
 
 } // namespace solid_ipc_detail
 

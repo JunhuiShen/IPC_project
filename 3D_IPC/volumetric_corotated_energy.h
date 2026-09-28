@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -47,6 +48,69 @@ Mat33 ElementF(
     const std::vector<Vec3>& x,
     const std::vector<int>& mesh,
     const std::vector<TetRestData>& state);
+
+namespace volumetric_detail {
+
+// Organizer-owned snapshot, refreshed whenever connectivity, rest data, or mu
+// changes. Keeping derived material values here leaves TetRestData mutable.
+struct PreparedTet {
+    std::array<int, 4> nodes;
+    TetRestData rest;
+    std::array<double, 4> isotropic_diagonal;
+};
+
+// Initialized geometry fields used by every node role at exactly the same F.
+// The organizer must clear this memo when material parameters change.
+struct PreparedTetGeometry {
+    Mat33 F;
+    Mat33 first_piola;
+    Mat33 cofactor;
+};
+
+// Validate connectivity and rest storage with ElementF's error precedence,
+// then prepare all four roles without retaining references to those arrays.
+PreparedTet prepare_tet(
+    std::size_t element,
+    const std::vector<Vec3>& positions,
+    const std::vector<int>& mesh,
+    const std::vector<TetRestData>& rest,
+    double mu);
+
+// Keep prepared material/topology data even when geometry reuse is disabled.
+// The same position/local-role/material preconditions as the cached path apply.
+std::pair<Vec3, Mat33> evaluate_prepared_tet(
+    const PreparedTet& element,
+    const std::vector<Vec3>& positions,
+    double mu,
+    double lambda,
+    int local_node);
+
+// Reuse geometry only for a bitwise-equal live F. A failed refresh leaves the
+// previous initialized entry intact. The organizer owns exclusive access.
+// First use and role-zero misses refresh the entry; other misses evaluate the
+// current geometry without replacing the saved key.
+// Position storage must contain every prepared node, local_node must be in
+// [0, 3], and mu must match prepare_tet. Parameters stay fixed until memo reset.
+std::pair<Vec3, Mat33> evaluate_prepared_tet_cached(
+    const PreparedTet& element,
+    const std::vector<Vec3>& positions,
+    double mu,
+    double lambda,
+    int local_node,
+    std::optional<PreparedTetGeometry>& geometry);
+
+// Probe-only entry: report whether this successful evaluation reused geometry.
+// The normal entry above does not update probe counters or reporting state.
+std::pair<Vec3, Mat33> evaluate_prepared_tet_cached_probe(
+    const PreparedTet& element,
+    const std::vector<Vec3>& positions,
+    double mu,
+    double lambda,
+    int local_node,
+    std::optional<PreparedTetGeometry>& geometry,
+    bool& cache_hit);
+
+} // namespace volumetric_detail
 
 // TGSL EFEMInitializeElasticMaterialState equivalent. For every element this
 // builds measure=det(Dm)/6, Dm_inverse, and all four grad_N values. TGSL PBGS

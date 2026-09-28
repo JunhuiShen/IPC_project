@@ -773,3 +773,86 @@ TEST(OrderedContactTasks, BatchedExceptionsDrainHelpersAtSweepBoundariesAndAllow
         }
     }
 }
+
+TEST(OrderedContactTasks, UnevenWholeBlocksPreserveSweepsCostsAndTeamChanges) {
+    RestoreColoredSweepThreads restore;
+    const int native = std::max(2, std::min(64, omp_get_num_procs()));
+    const ColoredSweepReference reference({0, 2 * native + 5, 1, 0,
+        6 * native + 17, 2 * native + 1});
+    const auto original_groups = reference.groups;
+    const int count = static_cast<int>(reference.color.size());
+    for (int threads : {1, 2, std::min(7, native), native, 3, 1, native}) {
+        SCOPED_TRACE(threads);
+        omp_set_num_threads(threads);
+        auto expected = reference.initial(), actual = expected;
+        auto visits = std::make_unique<std::atomic<int>[]>(count);
+        for (int v = 0; v < count; ++v) visits[v].store(0);
+        std::vector<std::size_t> costs(count);
+        int total_sweeps = 0;
+        for (int phase = 0; phase < 3; ++phase) {
+            // Expensive entries line up on a round-robin worker initially.
+            // Then remove contact work and change its distribution, exercising
+            // both cached schedules and invalidation without changing colors.
+            for (int v = 0; v < count; ++v)
+                costs[v] = phase == 1 ? 0
+                    : ((v + phase) % native == 0 ? 400 : 64);
+            for (int repeat = 0; repeat < 2; ++repeat) {
+                const int sweeps = repeat + 1;
+                reference.run(expected, sweeps);
+                solver_detail::for_each_colored_block(reference.groups,
+                    [&](int v) { return costs[v]; },
+                    [&](int v, bool) {
+                        visits[v].fetch_add(1);
+                        if ((v + phase) % 17 == 0) std::this_thread::yield();
+                        reference.update(actual, v);
+                    }, sweeps);
+                total_sweeps += sweeps;
+                expect_colored_sweep_equal(actual, expected);
+                for (int v = 0; v < count; ++v)
+                    EXPECT_EQ(visits[v].load(), total_sweeps) << "block=" << v;
+            }
+        }
+        EXPECT_EQ(reference.groups, original_groups);
+    }
+}
+
+TEST(OrderedContactTasks, UnevenWholeBlockFailureJoinsAndAllowsReuse) {
+    RestoreColoredSweepThreads restore;
+    const int native = std::max(2, std::min(64, omp_get_num_procs()));
+    const int count = 6 * native + 17;
+    std::vector<std::vector<int>> groups(3);
+    groups[0].resize(count);
+    std::iota(groups[0].begin(), groups[0].end(), 0);
+    groups[2] = {count};
+    for (int threads : {2, native}) {
+        SCOPED_TRACE(threads);
+        omp_set_num_threads(threads);
+        auto visits = std::make_unique<std::atomic<int>[]>(count + 1);
+        for (int v = 0; v <= count; ++v) visits[v].store(0);
+        std::atomic<int> active{0};
+        const auto run = [&](bool fail) {
+            solver_detail::for_each_colored_block(groups,
+                [native](int v) -> std::size_t { return v % native == 0 ? 400 : 64; },
+                [&](int v, bool) {
+                    struct Guard {
+                        std::atomic<int>& active;
+                        explicit Guard(std::atomic<int>& count) : active(count) { ++active; }
+                        ~Guard() { --active; }
+                    } guard(active);
+                    const int visit = visits[v].fetch_add(1);
+                    if (fail && v == 0 && visit == 1)
+                        throw std::runtime_error("whole block failure");
+                    if (v % 17 == 0) std::this_thread::yield();
+                }, 3);
+        };
+        EXPECT_THROW(run(true), std::runtime_error);
+        EXPECT_EQ(active.load(), 0);
+        EXPECT_EQ(visits[0].load(), 2);
+        EXPECT_EQ(visits[count].load(), 1);
+        for (int v = 0; v <= count; ++v) visits[v].store(0);
+        EXPECT_NO_THROW(run(false));
+        EXPECT_EQ(active.load(), 0);
+        for (int v = 0; v <= count; ++v)
+            EXPECT_EQ(visits[v].load(), 3) << "block=" << v;
+    }
+}

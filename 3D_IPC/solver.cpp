@@ -52,10 +52,16 @@ void parallel_body_setup(int count, bool parallel, const Function& function) {
     if (failure) std::rethrow_exception(failure);
 }
 
-// Task groups finish all proxy writes before the next dependent body phase.
+// Every dispatch joins proxy writes before the next dependent body phase.
 void translate_rigid_nodes(const std::vector<int>& nodes, const Vec3 displacement,
     std::vector<Vec3>& positions, bool parallel) {
-    if (parallel && nodes.size() >= 128) {
+    if (parallel && nodes.size() >= 128 && solver_detail::active_contact_task_group) {
+        solver_detail::evaluate_contact_ranges(static_cast<int>(nodes.size()),
+            [&](int begin, int end) {
+                for (int local = begin; local < end; ++local)
+                    positions[nodes[local]] += displacement;
+            }, 8);
+    } else if (parallel && nodes.size() >= 128) {
         #pragma omp taskloop grainsize(64) shared(nodes, positions) firstprivate(displacement)
         for (int local = 0; local < static_cast<int>(nodes.size()); ++local)
             positions[nodes[local]] += displacement;
@@ -66,7 +72,13 @@ void translate_rigid_nodes(const std::vector<int>& nodes, const Vec3 displacemen
 
 void place_rigid_nodes(const std::vector<int>& nodes, const std::vector<Vec3>& material,
     const Vec3 center, const Vec4 orientation, std::vector<Vec3>& positions, bool parallel) {
-    if (parallel && nodes.size() >= 128) {
+    if (parallel && nodes.size() >= 128 && solver_detail::active_contact_task_group) {
+        solver_detail::evaluate_contact_ranges(static_cast<int>(nodes.size()),
+            [&](int begin, int end) {
+                for (int local = begin; local < end; ++local)
+                    positions[nodes[local]] = world_space_position(material[local], center, orientation);
+            }, 8);
+    } else if (parallel && nodes.size() >= 128) {
         #pragma omp taskloop grainsize(64) shared(nodes, material, positions) firstprivate(center, orientation)
         for (int local = 0; local < static_cast<int>(nodes.size()); ++local)
             positions[nodes[local]] = world_space_position(material[local], center, orientation);
@@ -530,8 +542,10 @@ static Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const 
                                   const std::vector<Vec3>& xhat, std::vector<Vec3>& x, const BroadPhase& broad_phase, const PinMap* pin_map,
                                   const IncidentTriangles* incident_triangles,
                                   const std::vector<ShapeGrads>* rest_shape_grads,
-                                  const std::vector<Vec3>* previous_positions) {
+                                  const std::vector<Vec3>* previous_positions,
+                                  safe_step_detail::VertexAabbRejections* rejections = nullptr) {
     const auto& bp_cache = broad_phase.cache();
+    if (rejections) rejections->distance = 0.0;
     auto [g, H] =
         physics_detail::compute_local_gradient_and_hessian_no_barrier_unchecked(
             vi, ref_mesh, adj, pins, params, x, xhat, pin_map,
@@ -540,10 +554,20 @@ static Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const 
     if (params.d_hat > 0.0) {
         const double dt2k = params.dt2() * params.k_barrier;
         const double d_hat2 = params.d_hat * params.d_hat;
+        if (rejections) {
+            rejections->clear.resize(bp_cache.vertex_nt[vi].size() + bp_cache.vertex_ss[vi].size());
+            rejections->distance = params.d_hat;
+        }
+        std::size_t contact_index = 0;
 
         for (const auto& entry : bp_cache.vertex_nt[vi]) {
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
-            if (!node_triangle_aabbs_within_distance(x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], d_hat2))
+            bool clear = false;
+            const bool within = node_triangle_aabbs_within_distance(
+                x[p.node], x[p.tri_v[0]], x[p.tri_v[1]], x[p.tri_v[2]], d_hat2,
+                rejections ? &clear : nullptr);
+            if (rejections) rejections->clear[contact_index++] = clear;
+            if (!within)
                 continue;
             if (params.friction_coefficient != 0.0) {
                 const std::array<Vec3, 4> current_positions =
@@ -584,7 +608,12 @@ static Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const 
 
         for (const auto& entry : bp_cache.vertex_ss[vi]) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
-            if (!segment_aabbs_within_distance(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], d_hat2))
+            bool clear = false;
+            const bool within = segment_aabbs_within_distance(
+                x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], d_hat2,
+                rejections ? &clear : nullptr);
+            if (rejections) rejections->clear[contact_index++] = clear;
+            if (!within)
                 continue;
             if (params.friction_coefficient != 0.0) {
                 const std::array<Vec3, 4> current_positions =
@@ -1163,12 +1192,14 @@ Vec3 gs_solid_vertex_delta_live_barrier(
     const std::vector<unsigned char>& solid_node_mask,
     const std::vector<unsigned char>& surface_node_mask,
     const PinMap& pin_map,
-    const std::vector<Vec3>* previous_positions, bool cooperative = false) {
+    const std::vector<Vec3>* previous_positions, bool cooperative = false,
+    safe_step_detail::VertexAabbRejections* rejections = nullptr,
+    solid_ipc_detail::PreparedSolidWorkspace* prepared = nullptr) {
     const auto [gradient, block] =
         solid_ipc_detail::compute_solid_local_gradient_and_block_unchecked(
             node, ref_mesh, pins, params, x, xhat, broad_phase,
             &solid_node_mask, &surface_node_mask, &pin_map,
-            previous_positions, cooperative);
+            previous_positions, cooperative, rejections, prepared);
     return matrix3d_inverse(block) * gradient;
 }
 
@@ -3965,6 +3996,7 @@ struct RigidSolverWorkspace {
     GreedyColoringWorkspace coloring_workspace;
     std::vector<double> body_residuals;
     std::vector<Mat33> rotation_predictors;
+    std::vector<unsigned char> fixed_body_placed;
     bool contact_cache_initialized = false;
     double contact_cache_d_hat = 0.0;
 
@@ -4007,6 +4039,7 @@ struct RigidSolverWorkspace {
         positions.resize(nv);
         body_residuals.resize(ref_mesh.rb_nodes.size());
         rotation_predictors.resize(ref_mesh.rb_nodes.size());
+        fixed_body_placed.assign(ref_mesh.rb_nodes.size(), 0);
     }
 };
 
@@ -4129,8 +4162,10 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
         const auto process_body = [&](int rb, bool cooperative = false) {
             const RigidBodyUpdateMode update_mode =
                 ref_mesh.rb_update_modes[rb];
+            if (update_mode == RigidBodyUpdateMode::None && workspace.fixed_body_placed[rb])
+                return;
             std::vector<Vec3>& node_positions = workspace.positions;
-            const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, true);
+            const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, updates_rigid_orientation(update_mode));
             if (updates_rigid_translation(update_mode)) {
                 const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], workspace.node_to_rb_local, node_positions, x_com_new, omega_new, params, dt, &kinematics, cooperative);
                 const Vec3 com_radius = Vec3::Constant(workspace.com_box_radii[rb]);
@@ -4156,6 +4191,9 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
             }
 
             place_rigid_nodes(ref_mesh.rb_nodes[rb], ref_mesh.ref_positions[rb], x_com_new[rb], q_accepted, node_positions, params.use_parallel);
+            // Preserve the first callback's exact placement arithmetic. Its
+            // task group has joined, and later sweeps cannot move this body.
+            if (update_mode == RigidBodyUpdateMode::None) workspace.fixed_body_placed[rb] = 1;
         };
 
         if (params.use_parallel) {
@@ -4272,6 +4310,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
     static ExperimentalSolverWorkspace deformable_workspace;
     static RigidSolverWorkspace rigid_workspace;
     static MixedAdjacencyWorkspace mixed_adjacency_workspace;
+    static solid_ipc_detail::PreparedSolidWorkspace solid_workspace;
     deformable_workspace.prepare(ref_mesh, adj, nv, params.node_box_max);
     rigid_workspace.prepare(ref_mesh, nv, params.node_box_max, params.theta_box_max);
     const std::vector<std::vector<int>>& nodal_elastic_adj = deformable_workspace.elastic_adjacency.get(ref_mesh, adj, nv);
@@ -4291,6 +4330,9 @@ SolverResult global_gauss_seidel_solver_basic_general(
 
     const double dt = params.dt();
     (void)params.dt2();
+
+    auto* prepared_solid = solid_nodes.empty() ? nullptr : &solid_workspace;
+    if (prepared_solid) prepared_solid->begin_solve(ref_mesh, xnew, params);
 
     // xnew is the single live collision configuration. Its deformable entries
     // come from the caller; overwrite only rigid proxies from generalized
@@ -4356,7 +4398,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
         } else {
             broad_phase.initialize_surface_nodes(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::GeneralSolver);
         }
-        build_rb_contact_adj(broad_phase.cache(), ref_mesh.node_to_rb, num_rbs, rigid_workspace.body_nt_pair_indices, rigid_workspace.body_ss_pair_indices, rigid_workspace.contact_adjacency);
+        build_rb_contact_incidence(broad_phase.cache(), ref_mesh.node_to_rb, num_rbs, rigid_workspace.body_nt_pair_indices, rigid_workspace.body_ss_pair_indices);
         build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, nodal_elastic_adj, broad_phase.cache(), mixed_adjacency_workspace.conflict_adjacency, &mixed_adjacency_workspace.node_to_block, &mixed_adjacency_workspace.solid_node_mask, &mixed_adjacency_workspace.surface_node_mask, &mixed_adjacency_workspace.elastic_row_sizes, &rigid_workspace.body_nt_pair_indices, &rigid_workspace.body_ss_pair_indices);
         greedy_color_conflict_graph(mixed_adjacency_workspace.conflict_adjacency, mixed_adjacency_workspace.color_groups, &mixed_adjacency_workspace.coloring_workspace);
         if (params.verbose)
@@ -4409,6 +4451,8 @@ SolverResult global_gauss_seidel_solver_basic_general(
 
         const auto process_cloth_node = [&](const int cloth, bool cooperative = false) {
             const int node = cloth_nodes[static_cast<std::size_t>(cloth)];
+            thread_local safe_step_detail::VertexAabbRejections scratch;
+            auto* rejections = params.use_ccd && params.d_hat > 1e-8 ? &scratch : nullptr;
             const Vec3 delta = [&]() {
                 // Helper assignment follows contact work for every cloth
                 // block; solver flags only select its arithmetic kernel.
@@ -4418,25 +4462,27 @@ SolverResult global_gauss_seidel_solver_basic_general(
                         return gs_vertex_delta_live_barrier_simd(node, ref_mesh, adj, pins,
                             params, xhat, xnew, broad_phase, &pin_map,
                             &deformable_workspace.incident_triangles[node],
-                            &deformable_workspace.rest_shape_grads, previous_positions, cooperative);
+                            &deformable_workspace.rest_shape_grads, previous_positions, cooperative, rejections);
                     return gs_vertex_delta_live_barrier_experimental(node, ref_mesh, adj, pins,
                         params, xhat, xnew, broad_phase, &pin_map,
                         &deformable_workspace.incident_triangles[node],
-                        &deformable_workspace.rest_shape_grads, previous_positions, cooperative);
+                        &deformable_workspace.rest_shape_grads, previous_positions, cooperative, rejections);
                 }
                 return gs_vertex_delta_live_barrier(node, ref_mesh, adj, pins, params,
                     xhat, xnew, broad_phase, &pin_map,
                     &deformable_workspace.incident_triangles[node],
-                    &deformable_workspace.rest_shape_grads, previous_positions);
+                    &deformable_workspace.rest_shape_grads, previous_positions, rejections);
             }();
             const Vec3 proposed_position = xnew[node] - params.damping * delta;
-            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative);
+            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections);
         };
 
         const auto process_solid_node = [&](const int solid, bool cooperative = false) {
             const int node = solid_nodes[static_cast<std::size_t>(solid)];
-            const Vec3 proposed_position = xnew[node] - params.damping * gs_solid_vertex_delta_live_barrier(node, ref_mesh, pins, params, xhat, xnew, broad_phase, mixed_adjacency_workspace.solid_node_mask, mixed_adjacency_workspace.surface_node_mask, pin_map, previous_positions, cooperative);
-            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative);
+            thread_local safe_step_detail::VertexAabbRejections scratch;
+            auto* rejections = params.use_ccd && params.d_hat > 1e-8 ? &scratch : nullptr;
+            const Vec3 proposed_position = xnew[node] - params.damping * gs_solid_vertex_delta_live_barrier(node, ref_mesh, pins, params, xhat, xnew, broad_phase, mixed_adjacency_workspace.solid_node_mask, mixed_adjacency_workspace.surface_node_mask, pin_map, previous_positions, cooperative, rejections, prepared_solid);
+            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections);
         };
 
         // COM and orientation remain one indivisible update block: all proxy
@@ -4444,7 +4490,9 @@ SolverResult global_gauss_seidel_solver_basic_general(
         const auto process_body = [&](int rb, bool cooperative = false) {
             const RigidBodyUpdateMode update_mode =
                 ref_mesh.rb_update_modes[rb];
-            const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, true);
+            if (update_mode == RigidBodyUpdateMode::None && rigid_workspace.fixed_body_placed[rb])
+                return;
+            const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, updates_rigid_orientation(update_mode));
             if (updates_rigid_translation(update_mode)) {
                 const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics, cooperative);
                 const Vec3 com_radius = Vec3::Constant(rigid_workspace.com_box_radii[rb]);
@@ -4470,6 +4518,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
             }
 
             place_rigid_nodes(ref_mesh.rb_nodes[rb], ref_mesh.ref_positions[rb], x_com_new[rb], q_accepted, xnew, params.use_parallel);
+            if (update_mode == RigidBodyUpdateMode::None) rigid_workspace.fixed_body_placed[rb] = 1;
         };
 
         if (params.use_parallel) {
@@ -4523,6 +4572,10 @@ SolverResult global_gauss_seidel_solver_basic_general(
             }
         }
     }
+
+    // All colored updates and residual tasks have joined. Use the full solve's
+    // reuse rate when selecting whether later solves should consult the memo.
+    if (prepared_solid) prepared_solid->end_solve();
 
     #pragma omp parallel for schedule(static) if(params.use_parallel && cloth_nodes.size() >= 128)
     for (int index = 0; index < static_cast<int>(cloth_nodes.size()); ++index) {

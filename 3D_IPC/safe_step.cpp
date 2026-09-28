@@ -133,11 +133,12 @@ inline AABB translated_node_swept_aabb(int node, const std::vector<Vec3>& x, con
     return box;
 }
 
-inline AABB rotated_node_swept_aabb(int node, const std::vector<Vec3>& x, const std::vector<int>& node_to_rb, int rb, const Vec3& x_com, const Vec4& q_current, double theta) {
+inline AABB rotated_node_swept_aabb(int node, const std::vector<Vec3>& x, const std::vector<int>& node_to_rb, int rb, const Vec3& x_com, const Vec4& q_current,
+    const parallel_helper_detail::SphericalCapRotation& cap) {
     AABB box(x[node], x[node]);
     if (owning_rb_for_node(node_to_rb, node) == rb) {
         const Vec3 material_position = quaternion_inverse_rotate(q_current, x[node] - x_com);
-        box.expand(spherical_cap_node_aabb(x_com, q_current, material_position, theta));
+        box.expand(parallel_helper_detail::spherical_cap_node_aabb_prepared(x_com, cap, material_position));
     }
     return box;
 }
@@ -383,7 +384,30 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPha
     const Vec4 q_reverse = quaternion_normalize(quaternion_multiply(current, quaternion_conjugate(proposed)));
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
     const Vec4 relative = quaternion_normalize(quaternion_multiply(proposed, quaternion_conjugate(current)));
+    const auto visit_body_nodes = [&](const auto& visit) {
+        if (rb < static_cast<int>(ref_mesh.rb_nodes.size()) && !ref_mesh.rb_nodes[static_cast<std::size_t>(rb)].empty()) {
+            for (const int node : ref_mesh.rb_nodes[static_cast<std::size_t>(rb)]) visit(node);
+        } else {
+            for (int node = 0; node < static_cast<int>(x.size()); ++node)
+                if (owning_rb_for_node(ref_mesh.node_to_rb, node) == rb) visit(node);
+        }
+    };
+    if (nt_pair_indices.empty() && ss_pair_indices.empty()) {
+        // Preserve the old cap path's validation, including overflow while
+        // converting finite world positions into body space. No swept boxes
+        // or angular trigonometry are needed when no pair can consume them.
+        visit_body_nodes([&](int node) {
+            if (owning_rb_for_node(ref_mesh.node_to_rb, node) != rb) return;
+            const Vec3 material_position = quaternion_inverse_rotate(current, x[node] - x_com);
+            if (!x_com.allFinite() || !material_position.allFinite())
+                throw std::invalid_argument("spherical_cap_node_aabb requires finite positions");
+        });
+        return 1.0;
+    }
     const double theta = 2.0 * std::atan2(relative.tail<3>().norm(), relative[0]);
+    // The inverse rotation below still uses current. Cap evaluation retains
+    // the additional normalization that the old per-node helper performed.
+    const auto cap = parallel_helper_detail::prepare_spherical_cap_rotation(current, theta);
 
     // A rigid node participates in many candidate pairs, but its swept
     // spherical-cap box depends only on this body update. Compute it once per
@@ -393,17 +417,10 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPha
     std::vector<AABB> rotated_node_boxes;
     rotated_node_boxes.swap(reusable_rotated_node_boxes);
     rotated_node_boxes.resize(x.size());
-    if (rb < static_cast<int>(ref_mesh.rb_nodes.size()) && !ref_mesh.rb_nodes[static_cast<std::size_t>(rb)].empty()) {
-        for (const int node : ref_mesh.rb_nodes[static_cast<std::size_t>(rb)]) {
-            rotated_node_boxes[static_cast<std::size_t>(node)] = rotated_node_swept_aabb(node, x, ref_mesh.node_to_rb, rb, x_com, current, theta);
-        }
-    } else {
-        for (int node = 0; node < static_cast<int>(x.size()); ++node) {
-            if (owning_rb_for_node(ref_mesh.node_to_rb, node) == rb) {
-                rotated_node_boxes[static_cast<std::size_t>(node)] = rotated_node_swept_aabb(node, x, ref_mesh.node_to_rb, rb, x_com, current, theta);
-            }
-        }
-    }
+    visit_body_nodes([&](int node) {
+        rotated_node_boxes[static_cast<std::size_t>(node)] = rotated_node_swept_aabb(
+            node, x, ref_mesh.node_to_rb, rb, x_com, current, cap);
+    });
     const auto stationary_node_box = [&](const int node) { return AABB(x[static_cast<std::size_t>(node)], x[static_cast<std::size_t>(node)]); };
 
     double toi_min = 1.0;
