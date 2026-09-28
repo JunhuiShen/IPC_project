@@ -38,6 +38,8 @@ double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const Broad
 Vec4 bound_quaternion(const Vec4& q_box_anchor, const Vec4& q_current, const Vec4& q_target, double theta_bound);
 
 // Returns a safe alpha for rotating rigid body rb from q_current to q_target.
+// Empty contact lists return one after the same orientation/body-position
+// validation, without constructing unused swept boxes.
 double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& x_com, const Vec4& q_current, const Vec4& q_target, double safety = 0.9, bool cooperative = false);
 
 namespace safe_step_detail {

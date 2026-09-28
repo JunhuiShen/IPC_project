@@ -1193,12 +1193,13 @@ Vec3 gs_solid_vertex_delta_live_barrier(
     const std::vector<unsigned char>& surface_node_mask,
     const PinMap& pin_map,
     const std::vector<Vec3>* previous_positions, bool cooperative = false,
-    safe_step_detail::VertexAabbRejections* rejections = nullptr) {
+    safe_step_detail::VertexAabbRejections* rejections = nullptr,
+    solid_ipc_detail::PreparedSolidWorkspace* prepared = nullptr) {
     const auto [gradient, block] =
         solid_ipc_detail::compute_solid_local_gradient_and_block_unchecked(
             node, ref_mesh, pins, params, x, xhat, broad_phase,
             &solid_node_mask, &surface_node_mask, &pin_map,
-            previous_positions, cooperative, rejections);
+            previous_positions, cooperative, rejections, prepared);
     return matrix3d_inverse(block) * gradient;
 }
 
@@ -4309,6 +4310,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
     static ExperimentalSolverWorkspace deformable_workspace;
     static RigidSolverWorkspace rigid_workspace;
     static MixedAdjacencyWorkspace mixed_adjacency_workspace;
+    static solid_ipc_detail::PreparedSolidWorkspace solid_workspace;
     deformable_workspace.prepare(ref_mesh, adj, nv, params.node_box_max);
     rigid_workspace.prepare(ref_mesh, nv, params.node_box_max, params.theta_box_max);
     const std::vector<std::vector<int>>& nodal_elastic_adj = deformable_workspace.elastic_adjacency.get(ref_mesh, adj, nv);
@@ -4328,6 +4330,9 @@ SolverResult global_gauss_seidel_solver_basic_general(
 
     const double dt = params.dt();
     (void)params.dt2();
+
+    auto* prepared_solid = solid_nodes.empty() ? nullptr : &solid_workspace;
+    if (prepared_solid) prepared_solid->begin_solve(ref_mesh, xnew, params);
 
     // xnew is the single live collision configuration. Its deformable entries
     // come from the caller; overwrite only rigid proxies from generalized
@@ -4393,7 +4398,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
         } else {
             broad_phase.initialize_surface_nodes(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::GeneralSolver);
         }
-        build_rb_contact_adj(broad_phase.cache(), ref_mesh.node_to_rb, num_rbs, rigid_workspace.body_nt_pair_indices, rigid_workspace.body_ss_pair_indices, rigid_workspace.contact_adjacency);
+        build_rb_contact_incidence(broad_phase.cache(), ref_mesh.node_to_rb, num_rbs, rigid_workspace.body_nt_pair_indices, rigid_workspace.body_ss_pair_indices);
         build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, nodal_elastic_adj, broad_phase.cache(), mixed_adjacency_workspace.conflict_adjacency, &mixed_adjacency_workspace.node_to_block, &mixed_adjacency_workspace.solid_node_mask, &mixed_adjacency_workspace.surface_node_mask, &mixed_adjacency_workspace.elastic_row_sizes, &rigid_workspace.body_nt_pair_indices, &rigid_workspace.body_ss_pair_indices);
         greedy_color_conflict_graph(mixed_adjacency_workspace.conflict_adjacency, mixed_adjacency_workspace.color_groups, &mixed_adjacency_workspace.coloring_workspace);
         if (params.verbose)
@@ -4476,7 +4481,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
             const int node = solid_nodes[static_cast<std::size_t>(solid)];
             thread_local safe_step_detail::VertexAabbRejections scratch;
             auto* rejections = params.use_ccd && params.d_hat > 1e-8 ? &scratch : nullptr;
-            const Vec3 proposed_position = xnew[node] - params.damping * gs_solid_vertex_delta_live_barrier(node, ref_mesh, pins, params, xhat, xnew, broad_phase, mixed_adjacency_workspace.solid_node_mask, mixed_adjacency_workspace.surface_node_mask, pin_map, previous_positions, cooperative, rejections);
+            const Vec3 proposed_position = xnew[node] - params.damping * gs_solid_vertex_delta_live_barrier(node, ref_mesh, pins, params, xhat, xnew, broad_phase, mixed_adjacency_workspace.solid_node_mask, mixed_adjacency_workspace.surface_node_mask, pin_map, previous_positions, cooperative, rejections, prepared_solid);
             per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections);
         };
 
@@ -4567,6 +4572,10 @@ SolverResult global_gauss_seidel_solver_basic_general(
             }
         }
     }
+
+    // All colored updates and residual tasks have joined. Use the full solve's
+    // reuse rate when selecting whether later solves should consult the memo.
+    if (prepared_solid) prepared_solid->end_solve();
 
     #pragma omp parallel for schedule(static) if(params.use_parallel && cloth_nodes.size() >= 128)
     for (int index = 0; index < static_cast<int>(cloth_nodes.size()); ++index) {

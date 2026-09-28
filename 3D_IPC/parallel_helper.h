@@ -7,6 +7,20 @@
 // Exact AABB of a rigid node's spherical-cap rotation envelope.
 AABB spherical_cap_node_aabb(const Vec3& x_com, const Vec4& q, const Vec3& X, double theta_bound);
 
+namespace parallel_helper_detail {
+// Shared body inputs for the same exact per-node cap arithmetic. Preparation
+// performs the public helper's normalization, even for an already unit input.
+struct SphericalCapRotation {
+    Vec4 orientation;
+    double angular_extent;
+    double cos_extent;
+    double sin_extent;
+};
+SphericalCapRotation prepare_spherical_cap_rotation(const Vec4& q, double theta_bound);
+AABB spherical_cap_node_aabb_prepared(const Vec3& x_com,
+    const SphericalCapRotation& cap, const Vec3& X);
+} // namespace parallel_helper_detail
+
 // Rigid-node blue boxes: spherical-cap rotation plus padded COM translation.
 void build_blue_boxes_rb(const std::vector<Vec3>& com_box_anchors, const std::vector<Vec4>& orientation_box_anchors, const std::vector<double>& theta_box_radii, const std::vector<double>& com_box_radii, const RefMesh& ref_mesh, std::vector<AABB>& blue_boxes);
 
@@ -16,6 +30,10 @@ std::vector<int> build_node_to_block(const std::vector<int>& node_to_rb, const s
 
 // Per-body broad-phase contacts and their rigid-body conflict graph.
 void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_rb, int num_rbs, std::vector<std::vector<int>>& body_nt_pair_indices, std::vector<std::vector<int>>& body_ss_pair_indices, std::vector<std::vector<int>>& out);
+
+// Same ordered contact lists without constructing the unused rigid-only graph
+// when the caller builds and colors a mixed graph instead.
+void build_rb_contact_incidence(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_rb, int num_rbs, std::vector<std::vector<int>>& body_nt_pair_indices, std::vector<std::vector<int>>& body_ss_pair_indices);
 
 // Mixed graphs use cached blocks [0, num_deformable) for cloth nodes, followed
 // by one block per rigid body. node_to_block is built once per topology.

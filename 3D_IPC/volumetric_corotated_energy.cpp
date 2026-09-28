@@ -2,7 +2,9 @@
 
 #include "third_party/tgsl/ImplicitQRSVD.h"
 
+#include <cassert>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 
 namespace {
@@ -41,6 +43,16 @@ Mat33 ElementDsTrusted(std::size_t element, const std::vector<Vec3>& u, const st
     return result;
 }
 
+inline Mat33 ElementFPreparedTrusted(
+    const volumetric_detail::PreparedTet& element, const std::vector<Vec3>& x) {
+    Mat33 Ds;
+    for (std::size_t i = 0; i < 3; ++i) {
+        for (std::size_t c = 0; c < 3; ++c)
+            Ds(c, i) = x[element.nodes[i + 1]][c] - x[element.nodes[0]][c];
+    }
+    return Ds * element.rest.Dm_inverse;
+}
+
 } // namespace
 
 Mat33 ElementDs(
@@ -62,6 +74,29 @@ Mat33 ElementF(
             "tet rest state must contain one record per element");
     }
     return ElementDsTrusted(element, x, mesh) * state[element].Dm_inverse;
+}
+
+volumetric_detail::PreparedTet volumetric_detail::prepare_tet(
+    std::size_t element,
+    const std::vector<Vec3>& positions,
+    const std::vector<int>& mesh,
+    const std::vector<TetRestData>& rest,
+    double mu) {
+    CheckElement(element, positions, mesh);
+    if (rest.size() != mesh.size() / 4) {
+        throw std::invalid_argument(
+            "tet rest state must contain one record per element");
+    }
+    PreparedTet prepared;
+    prepared.rest = rest[element];
+    for (int local = 0; local < 4; ++local) {
+        prepared.nodes[local] = mesh[4 * element + local];
+        const Vec3& grad_Ni = prepared.rest.grad_N[local];
+        const double grad_Ni_dot_grad_Ni = grad_Ni.dot(grad_Ni);
+        prepared.isotropic_diagonal[local] =
+            2.0 * mu * grad_Ni_dot_grad_Ni * prepared.rest.measure;
+    }
+    return prepared;
 }
 
 std::vector<TetRestData> EFEMInitializeElasticMaterialState(
@@ -138,13 +173,18 @@ Mat33 GradJ(const Mat33& F) {
     return grad_J;
 }
 
-void CorotatedCache::UpdateCache(const Mat33& F, CorotatedCacheMode mode) {
+namespace {
+
+// Internal linkage lets the fused hot path specialize Lean even in a PIC,
+// non-LTO build, without changing arithmetic in the public cache modes.
+template <CorotatedCacheMode Mode>
+inline void UpdateCorotatedCacheTrusted(CorotatedCache& cache, const Mat33& F) {
     if (!F.allFinite()) {
         throw std::invalid_argument("deformation gradient must be finite");
     }
 
     Mat33 R, S;
-    if (mode == CorotatedCacheMode::Full) {
+    if constexpr (Mode == CorotatedCacheMode::Full) {
         JIXIE::polarDecomposition(F, R, S);
     } else {
         Mat33 U;
@@ -154,7 +194,7 @@ void CorotatedCache::UpdateCache(const Mat33& F, CorotatedCacheMode mode) {
         R.noalias() = U * V.transpose();
     }
 
-    JFinvT_cache <<
+    cache.JFinvT_cache <<
         F(1, 1) * F(2, 2) - F(2, 1) * F(1, 2),
         F(2, 0) * F(1, 2) - F(1, 0) * F(2, 2),
         F(1, 0) * F(2, 1) - F(2, 0) * F(1, 1),
@@ -165,18 +205,27 @@ void CorotatedCache::UpdateCache(const Mat33& F, CorotatedCacheMode mode) {
         F(1, 0) * F(0, 2) - F(0, 0) * F(1, 2),
         F(0, 0) * F(1, 1) - F(1, 0) * F(0, 1);
 
-    R_cache <<
+    cache.R_cache <<
         R(0, 0), R(0, 1), R(0, 2),
         R(1, 0), R(1, 1), R(1, 2),
         R(2, 0), R(2, 1), R(2, 2);
 
-    if (mode == CorotatedCacheMode::Full) {
+    if constexpr (Mode == CorotatedCacheMode::Full) {
         Mat33 D = S.trace() * Mat33::Identity() - S;
         Mat33 Dinv = D.inverse();
-        Dinv_cache << Dinv(0, 0), Dinv(0, 1), Dinv(0, 2), Dinv(1, 0), Dinv(1, 1), Dinv(1, 2), Dinv(2, 0), Dinv(2, 1), Dinv(2, 2);
+        cache.Dinv_cache << Dinv(0, 0), Dinv(0, 1), Dinv(0, 2), Dinv(1, 0), Dinv(1, 1), Dinv(1, 2), Dinv(2, 0), Dinv(2, 1), Dinv(2, 2);
     }
 
-    J_cache = F.determinant();
+    cache.J_cache = F.determinant();
+}
+
+} // namespace
+
+void CorotatedCache::UpdateCache(const Mat33& F, CorotatedCacheMode mode) {
+    if (mode == CorotatedCacheMode::Full)
+        UpdateCorotatedCacheTrusted<CorotatedCacheMode::Full>(*this, F);
+    else
+        UpdateCorotatedCacheTrusted<CorotatedCacheMode::Lean>(*this, F);
 }
 
 double CorotatedCache::Psi(
@@ -192,23 +241,30 @@ double CorotatedCache::Psi(
         + lambda * (J_cache - 1.0) * (J_cache - 1.0) / 2.0;
 }
 
-Mat33 CorotatedCache::P(
-    const Mat33& F,
-    double mu,
-    double lambda) const {
+namespace {
+
+inline Mat33 FirstPiolaTrusted(
+    const CorotatedCache& cache, const Mat33& F, double mu, double lambda) {
     Mat33 R, JFinvT;
     R <<
-        R_cache(0, 0), R_cache(0, 1), R_cache(0, 2),
-        R_cache(1, 0), R_cache(1, 1), R_cache(1, 2),
-        R_cache(2, 0), R_cache(2, 1), R_cache(2, 2);
+        cache.R_cache(0, 0), cache.R_cache(0, 1), cache.R_cache(0, 2),
+        cache.R_cache(1, 0), cache.R_cache(1, 1), cache.R_cache(1, 2),
+        cache.R_cache(2, 0), cache.R_cache(2, 1), cache.R_cache(2, 2);
     JFinvT <<
-        JFinvT_cache(0, 0), JFinvT_cache(0, 1), JFinvT_cache(0, 2),
-        JFinvT_cache(1, 0), JFinvT_cache(1, 1), JFinvT_cache(1, 2),
-        JFinvT_cache(2, 0), JFinvT_cache(2, 1), JFinvT_cache(2, 2);
+        cache.JFinvT_cache(0, 0), cache.JFinvT_cache(0, 1), cache.JFinvT_cache(0, 2),
+        cache.JFinvT_cache(1, 0), cache.JFinvT_cache(1, 1), cache.JFinvT_cache(1, 2),
+        cache.JFinvT_cache(2, 0), cache.JFinvT_cache(2, 1), cache.JFinvT_cache(2, 2);
     Mat33 first_piola;
     first_piola = 2.0 * mu * (F - R)
-        + lambda * (J_cache - 1.0) * JFinvT;
+        + lambda * (cache.J_cache - 1.0) * JFinvT;
     return first_piola;
+}
+
+} // namespace
+
+Mat33 CorotatedCache::P(
+    const Mat33& F, double mu, double lambda) const {
+    return FirstPiolaTrusted(*this, F, mu, lambda);
 }
 
 double EFEMElementInternalEnergy(
@@ -244,9 +300,9 @@ std::array<Vec3, 4> EFEMElementEnergyGradient(
 
 namespace {
 
-Vec3 EFEMElementNodeEnergyGradientTrusted(const CorotatedCache& cache, const Mat33& F, const TetRestData& state, double mu, double lambda, int local_node, const Mat33* precomputed_first_piola = nullptr) {
+inline Vec3 EFEMElementNodeEnergyGradientTrusted(const CorotatedCache& cache, const Mat33& F, const TetRestData& state, double mu, double lambda, int local_node, const Mat33* precomputed_first_piola = nullptr) {
     Mat33 owned_first_piola;
-    if (precomputed_first_piola == nullptr) owned_first_piola = cache.P(F, mu, lambda);
+    if (precomputed_first_piola == nullptr) owned_first_piola = FirstPiolaTrusted(cache, F, mu, lambda);
     const Mat33& Pe = precomputed_first_piola == nullptr ? owned_first_piola : *precomputed_first_piola;
     Vec3 gNi;
     gNi << state.grad_N[local_node][0], state.grad_N[local_node][1], state.grad_N[local_node][2];
@@ -305,4 +361,87 @@ std::pair<Vec3, Mat33> EFEMElementNodeGradientAndPBGSBlock(const CorotatedCache&
     const Vec3 gradient = EFEMElementNodeEnergyGradientTrusted(cache, F, state, mu, lambda, local_node);
     const Mat33 block = PBGSElementNodeElasticityBlockTrusted(cache, state, mu, lambda, local_node);
     return {gradient, block};
+}
+
+namespace {
+
+inline std::pair<Vec3, Mat33> PreparedTetDerivativesTrusted(
+    const CorotatedCache& cache, const Mat33& F, const volumetric_detail::PreparedTet& element,
+    double mu, double lambda, int local_node,
+    const Mat33* precomputed_first_piola) {
+    assert(local_node >= 0 && local_node < 4);
+    const TetRestData& state = element.rest;
+    const Vec3 gradient = EFEMElementNodeEnergyGradientTrusted(
+        cache, F, state, mu, lambda, local_node, precomputed_first_piola);
+    Mat33 A = Mat33::Zero();
+    A(0, 0) += element.isotropic_diagonal[local_node];
+    A(1, 1) += element.isotropic_diagonal[local_node];
+    A(2, 2) += element.isotropic_diagonal[local_node];
+
+    Mat33 grad_Je = cache.JFinvT_cache;
+    Vec3 g_Nie;
+    for (std::size_t alpha = 0; alpha < 3; ++alpha)
+        g_Nie(alpha) = state.grad_N[local_node][alpha];
+    Vec3 ue = grad_Je * g_Nie;
+    for (std::size_t alpha = 0; alpha < 3; ++alpha) {
+        for (std::size_t beta = 0; beta < 3; ++beta)
+            A(alpha, beta) += lambda * ue(alpha) * ue(beta) * state.measure;
+    }
+    return {gradient, A};
+}
+
+template <bool ReportHit>
+inline std::pair<Vec3, Mat33> EvaluatePreparedTetCachedTrusted(
+    const volumetric_detail::PreparedTet& element, const std::vector<Vec3>& positions,
+    double mu, double lambda, int local_node,
+    std::optional<volumetric_detail::PreparedTetGeometry>& geometry, bool* cache_hit) {
+    const Mat33 F = ElementFPreparedTrusted(element, positions);
+    CorotatedCache cache;
+    if (geometry && std::memcmp(F.data(), geometry->F.data(), 9 * sizeof(double)) == 0) {
+        cache.JFinvT_cache = geometry->cofactor;
+        const auto result = PreparedTetDerivativesTrusted(
+            cache, F, element, mu, lambda, local_node, &geometry->first_piola);
+        if constexpr (ReportHit) *cache_hit = true;
+        return result;
+    }
+
+    UpdateCorotatedCacheTrusted<CorotatedCacheMode::Lean>(cache, F);
+    const Mat33 first_piola = FirstPiolaTrusted(cache, F, mu, lambda);
+    const auto result = PreparedTetDerivativesTrusted(
+        cache, F, element, mu, lambda, local_node, &first_piola);
+    // Other roles use fresh derivatives without repeatedly overwriting a key
+    // shared across colors. Only fully initialized consumer fields are saved.
+    if (!geometry || local_node == 0)
+        geometry = volumetric_detail::PreparedTetGeometry{F, first_piola, cache.JFinvT_cache};
+    if constexpr (ReportHit) *cache_hit = false;
+    return result;
+}
+
+} // namespace
+
+std::pair<Vec3, Mat33> volumetric_detail::evaluate_prepared_tet(
+    const PreparedTet& element, const std::vector<Vec3>& positions,
+    double mu, double lambda, int local_node) {
+    const Mat33 F = ElementFPreparedTrusted(element, positions);
+    CorotatedCache cache;
+    UpdateCorotatedCacheTrusted<CorotatedCacheMode::Lean>(cache, F);
+    const Mat33 first_piola = FirstPiolaTrusted(cache, F, mu, lambda);
+    return PreparedTetDerivativesTrusted(
+        cache, F, element, mu, lambda, local_node, &first_piola);
+}
+
+std::pair<Vec3, Mat33> volumetric_detail::evaluate_prepared_tet_cached(
+    const PreparedTet& element, const std::vector<Vec3>& positions,
+    double mu, double lambda, int local_node,
+    std::optional<PreparedTetGeometry>& geometry) {
+    return EvaluatePreparedTetCachedTrusted<false>(
+        element, positions, mu, lambda, local_node, geometry, nullptr);
+}
+
+std::pair<Vec3, Mat33> volumetric_detail::evaluate_prepared_tet_cached_probe(
+    const PreparedTet& element, const std::vector<Vec3>& positions,
+    double mu, double lambda, int local_node,
+    std::optional<PreparedTetGeometry>& geometry, bool& cache_hit) {
+    return EvaluatePreparedTetCachedTrusted<true>(
+        element, positions, mu, lambda, local_node, geometry, &cache_hit);
 }

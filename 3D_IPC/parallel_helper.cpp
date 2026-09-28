@@ -9,31 +9,40 @@
 #include <stdexcept>
 #include <vector>
 #include <exception>
+#include <optional>
 #include <omp.h>
 
 int owning_rb_for_node(const std::vector<int>& node_to_rb, int node) {
     return node >= 0 && node < static_cast<int>(node_to_rb.size()) ? node_to_rb[node] : -1;
 }
 
-AABB spherical_cap_node_aabb(const Vec3& x_com, const Vec4& q, const Vec3& X, double theta_bound) {
-    if (!x_com.allFinite() || !X.allFinite())
-        throw std::invalid_argument("spherical_cap_node_aabb requires finite positions");
+parallel_helper_detail::SphericalCapRotation
+parallel_helper_detail::prepare_spherical_cap_rotation(const Vec4& q, double theta_bound) {
+    SphericalCapRotation cap{quaternion_normalize(q), std::max(0.0, theta_bound), 0.0, 0.0};
+    if (cap.angular_extent < M_PI) {
+        cap.cos_extent = std::cos(cap.angular_extent);
+        cap.sin_extent = std::sin(cap.angular_extent);
+    }
+    return cap;
+}
 
-    const Vec4 q_current = quaternion_normalize(q);
-    const Vec3 world_space_offset = quaternion_rotate(q_current, X);
+namespace {
+
+AABB spherical_cap_node_aabb_unchecked(const Vec3& x_com,
+    const parallel_helper_detail::SphericalCapRotation& cap, const Vec3& X) {
+    const Vec3 world_space_offset = quaternion_rotate(cap.orientation, X);
     const double radius = world_space_offset.norm();
     if (radius == 0.0)
         return AABB(x_com, x_com);
 
-    const double angular_extent = std::max(0.0, theta_bound);
-    if (angular_extent >= M_PI) {
+    if (cap.angular_extent >= M_PI) {
         const Vec3 sphere_radius = Vec3::Constant(radius);
         return AABB(x_com - sphere_radius, x_com + sphere_radius);
     }
 
     const Vec3 direction = world_space_offset / radius;
-    const double cos_extent = std::cos(angular_extent);
-    const double sin_extent = std::sin(angular_extent);
+    const double cos_extent = cap.cos_extent;
+    const double sin_extent = cap.sin_extent;
     Vec3 cap_min;
     Vec3 cap_max;
 
@@ -55,12 +64,40 @@ AABB spherical_cap_node_aabb(const Vec3& x_com, const Vec4& q, const Vec3& X, do
     return AABB(x_com + radius * cap_min, x_com + radius * cap_max);
 }
 
+} // namespace
+
+AABB parallel_helper_detail::spherical_cap_node_aabb_prepared(const Vec3& x_com,
+    const SphericalCapRotation& cap, const Vec3& X) {
+    if (!x_com.allFinite() || !X.allFinite())
+        throw std::invalid_argument("spherical_cap_node_aabb requires finite positions");
+    return spherical_cap_node_aabb_unchecked(x_com, cap, X);
+}
+
+AABB spherical_cap_node_aabb(const Vec3& x_com, const Vec4& q, const Vec3& X, double theta_bound) {
+    // Retain the public validation order when both positions and q are invalid.
+    if (!x_com.allFinite() || !X.allFinite())
+        throw std::invalid_argument("spherical_cap_node_aabb requires finite positions");
+    const auto cap = parallel_helper_detail::prepare_spherical_cap_rotation(q, theta_bound);
+    return spherical_cap_node_aabb_unchecked(x_com, cap, X);
+}
+
 void build_blue_boxes_rb(const std::vector<Vec3>& com_box_anchors, const std::vector<Vec4>& orientation_box_anchors, const std::vector<double>& theta_box_radii, const std::vector<double>& com_box_radii, const RefMesh& ref_mesh, std::vector<AABB>& blue_boxes) {
     const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
 
     std::vector<std::size_t> offsets(static_cast<std::size_t>(num_rbs) + 1, 0);
     for (int rb = 0; rb < num_rbs; ++rb)
         offsets[rb + 1] = offsets[rb] + ref_mesh.rb_nodes[rb].size();
+    std::vector<std::optional<parallel_helper_detail::SphericalCapRotation>> caps(num_rbs);
+    for (int rb = 0; rb < num_rbs; ++rb) {
+        if (ref_mesh.rb_nodes[rb].empty()) continue;
+        try {
+            caps[rb] = parallel_helper_detail::prepare_spherical_cap_rotation(
+                orientation_box_anchors[rb], theta_box_radii[rb]);
+        } catch (const std::invalid_argument&) {
+            // Let the existing per-node path report invalid inputs in its
+            // original order, including finite-position checks before q.
+        }
+    }
     std::exception_ptr failure;
     // Flatten the proxy nodes so even a single large body uses the team.
     #pragma omp parallel if(offsets.back() >= 128)
@@ -74,7 +111,11 @@ void build_blue_boxes_rb(const std::vector<Vec3>& com_box_anchors, const std::ve
                 const std::size_t local = flat - offsets[rb];
                 const int node = ref_mesh.rb_nodes[rb][local];
                 const Vec3 com_radius = Vec3::Constant(com_box_radii[rb]);
-                const AABB spherical_cap_box = spherical_cap_node_aabb(com_box_anchors[rb], orientation_box_anchors[rb], ref_mesh.ref_positions[rb][local], theta_box_radii[rb]);
+                const AABB spherical_cap_box = caps[rb]
+                    ? parallel_helper_detail::spherical_cap_node_aabb_prepared(
+                        com_box_anchors[rb], *caps[rb], ref_mesh.ref_positions[rb][local])
+                    : spherical_cap_node_aabb(com_box_anchors[rb], orientation_box_anchors[rb],
+                        ref_mesh.ref_positions[rb][local], theta_box_radii[rb]);
                 blue_boxes[node] = AABB(spherical_cap_box.min - com_radius, spherical_cap_box.max + com_radius);
             }
         } catch (...) {
@@ -85,8 +126,7 @@ void build_blue_boxes_rb(const std::vector<Vec3>& com_box_anchors, const std::ve
     if (failure) std::rethrow_exception(failure);
 }
 
-void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_rb, int num_rbs, std::vector<std::vector<int>>& body_nt_pair_indices, std::vector<std::vector<int>>& body_ss_pair_indices, std::vector<std::vector<int>>& out) {
-    out.resize(static_cast<std::size_t>(num_rbs));
+void build_rb_contact_incidence(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_rb, int num_rbs, std::vector<std::vector<int>>& body_nt_pair_indices, std::vector<std::vector<int>>& body_ss_pair_indices) {
     body_nt_pair_indices.resize(static_cast<std::size_t>(num_rbs));
     body_ss_pair_indices.resize(static_cast<std::size_t>(num_rbs));
 
@@ -139,6 +179,19 @@ void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<i
     };
     gather_pairs(bp_cache.nt_pairs, nt_owners, body_nt_pair_indices);
     gather_pairs(bp_cache.ss_pairs, ss_owners, body_ss_pair_indices);
+}
+
+void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<int>& node_to_rb, int num_rbs, std::vector<std::vector<int>>& body_nt_pair_indices, std::vector<std::vector<int>>& body_ss_pair_indices, std::vector<std::vector<int>>& out) {
+    out.resize(static_cast<std::size_t>(num_rbs));
+    build_rb_contact_incidence(bp_cache, node_to_rb, num_rbs, body_nt_pair_indices, body_ss_pair_indices);
+    const auto nt_owners = [&](const NodeTrianglePair& pair) {
+        return std::pair<int, int>{owning_rb_for_node(node_to_rb, pair.node),
+            owning_rb_for_node(node_to_rb, pair.tri_v[0])};
+    };
+    const auto ss_owners = [&](const SegmentSegmentPair& pair) {
+        return std::pair<int, int>{owning_rb_for_node(node_to_rb, pair.v[0]),
+            owning_rb_for_node(node_to_rb, pair.v[2])};
+    };
     #pragma omp parallel for schedule(dynamic, 1) if(num_rbs >= 8)
     for (int rb = 0; rb < num_rbs; ++rb) {
         auto& neighbors = out[rb];
