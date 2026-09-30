@@ -21,8 +21,7 @@
 namespace {
 
 // Validate organizer data before constructing the prepared snapshots.
-void validate_prepared_solid_inputs(const RefMesh& mesh, const std::vector<Vec3>& positions,
-                                  std::vector<unsigned char>& batch_nodes) {
+void validate_prepared_solid_inputs(const RefMesh& mesh, const std::vector<Vec3>& positions) {
     if (mesh.tets.size() % 4 != 0)
         throw std::invalid_argument("tet connectivity must contain four indices per element");
     if (mesh.tet_rest_data.size() != mesh.tets.size() / 4)
@@ -30,13 +29,10 @@ void validate_prepared_solid_inputs(const RefMesh& mesh, const std::vector<Vec3>
     for (const int node : mesh.tets)
         if (node < 0 || static_cast<std::size_t>(node) >= positions.size())
             throw std::out_of_range("tet node index is out of range");
-    batch_nodes.assign(positions.size(), 0);
     for (const int node : mesh.tet_nodes) {
         if (node < 0 || static_cast<std::size_t>(node) >= positions.size()
             || static_cast<std::size_t>(node) >= mesh.tet_adj.size())
             throw std::out_of_range("solid node incidence is out of range");
-        int previous = -1;
-        bool ordered = mesh.tet_adj[node].size() >= 4;
         for (const auto& [element, role] : mesh.tet_adj[node]) {
             if (element < 0 || static_cast<std::size_t>(element) >= mesh.tet_rest_data.size())
                 throw std::out_of_range("tet incidence element is out of range");
@@ -44,10 +40,7 @@ void validate_prepared_solid_inputs(const RefMesh& mesh, const std::vector<Vec3>
                 throw std::out_of_range("tet local node must be in [0, 3]");
             if (mesh.tets[4 * static_cast<std::size_t>(element) + role] != node)
                 throw std::invalid_argument("tet incidence does not match connectivity");
-            ordered = ordered && element > previous;
-            previous = element;
         }
-        batch_nodes[node] = ordered;
     }
 }
 
@@ -58,7 +51,7 @@ void solid_ipc_detail::PreparedSolidWorkspace::prepare(
     const SimParams& params, bool with_geometry_cache) {
     geometry.clear();
     elements.clear();
-    validate_prepared_solid_inputs(mesh, positions, batch_nodes_);
+    validate_prepared_solid_inputs(mesh, positions);
     elements.reserve(mesh.tet_rest_data.size());
     for (std::size_t e = 0; e < mesh.tet_rest_data.size(); ++e)
         elements.push_back(volumetric_detail::prepare_tet(
@@ -123,22 +116,6 @@ std::pair<Vec3, Mat33> solid_ipc_detail::PreparedSolidWorkspace::evaluate(
     return volumetric_detail::evaluate_prepared_tet_cached(elements[element],
         positions, params.solid_mu, params.solid_lambda, local_node,
         geometry[element]);
-}
-
-void solid_ipc_detail::PreparedSolidWorkspace::evaluate_batch(
-    const std::pair<int, int>* incidence, std::size_t count,
-    const std::vector<Vec3>& positions, const SimParams& params,
-    std::pair<Vec3, Mat33>* outputs) {
-    std::size_t hits = 0;
-    volumetric_detail::evaluate_prepared_tet_batch(elements.data(), incidence, count,
-        positions, params.solid_mu, params.solid_lambda,
-        mode_ == Mode::Prepared ? nullptr : geometry.data(), outputs,
-        mode_ == Mode::Probe ? &hits : nullptr);
-    if (mode_ == Mode::Probe) {
-        auto& counts = probe_counts_[static_cast<std::size_t>(omp_get_thread_num())];
-        counts.calls += count;
-        counts.hits += hits;
-    }
 }
 
 namespace {
@@ -1111,19 +1088,6 @@ compute_solid_local_gradient_and_pbgs_block_no_barrier_impl(
         }
     }
 
-    if (prepared && prepared->can_batch(node)) {
-        constexpr std::size_t width = volumetric_detail::prepared_tet_batch_size;
-        const auto& incident = ref_mesh.tet_adj[node];
-        std::array<std::pair<Vec3, Mat33>, width> derivatives;
-        for (std::size_t first = 0; first < incident.size(); first += width) {
-            const std::size_t count = std::min(width, incident.size() - first);
-            prepared->evaluate_batch(incident.data() + first, count, x, params, derivatives.data());
-            for (std::size_t i = 0; i < count; ++i) {
-                gradient += dt2 * derivatives[i].first;
-                pbgs_block += dt2 * derivatives[i].second;
-            }
-        }
-    } else {
     for (const auto& [element_index, local_node] :
          ref_mesh.tet_adj[static_cast<std::size_t>(node)]) {
         const std::size_t element =
@@ -1140,7 +1104,6 @@ compute_solid_local_gradient_and_pbgs_block_no_barrier_impl(
         const auto& [element_gradient, element_block] = derivatives;
         gradient += dt2 * element_gradient;
         pbgs_block += dt2 * element_block;
-    }
     }
 
     if (include_sdf && params.k_sdf > 0.0) {

@@ -405,55 +405,6 @@ TEST(VolumetricCorotatedEnergy, BatchedPolarMatchesScalarAcrossDivergentRanksAnd
     EXPECT_THROW(volumetric_detail::batched_signed_polar(inputs.data(), actual.data(), 8), std::invalid_argument);
 }
 
-TEST(VolumetricCorotatedEnergy, PreparedBatchPreservesEveryRoleMemoHitAndRefreshBitwise) {
-    constexpr int count = 32;
-    std::vector<Vec3> positions;
-    std::vector<int> mesh;
-    for (int i = 0; i < count; ++i) {
-        auto tet = unit_tet_positions();
-        for (Vec3& p : tet) positions.push_back(p + Vec3(2.0 * i, 0.0, 0.0));
-        for (int role = 0; role < 4; ++role) mesh.push_back(4 * i + role);
-    }
-    const auto rest = EFEMInitializeElasticMaterialState(positions, mesh);
-    std::vector<volumetric_detail::PreparedTet> elements;
-    for (int i = 0; i < count; ++i)
-        elements.push_back(volumetric_detail::prepare_tet(i, positions, mesh, rest, kMu));
-    std::vector<std::optional<volumetric_detail::PreparedTetGeometry>> scalar_memo(count), batch_memo(count);
-    std::array<std::pair<int, int>, count> incidence;
-    std::array<std::pair<Vec3, Mat33>, count> expected, actual;
-    for (bool cached : {false, true}) {
-        for (int pass = 0; pass < 12; ++pass) {
-            const int role = pass % 4;
-            if (pass % 3 == 0) positions[4 * (pass % count) + 1].y() += 0.01;
-            std::size_t expected_hits = 0, actual_hits = 0;
-            for (int i = 0; i < count; ++i) {
-                incidence[i] = {i, role};
-                if (cached) {
-                    bool hit = false;
-                    expected[i] = volumetric_detail::evaluate_prepared_tet_cached_probe(
-                        elements[i], positions, kMu, kLambda, role, scalar_memo[i], hit);
-                    expected_hits += hit;
-                } else expected[i] = volumetric_detail::evaluate_prepared_tet(elements[i], positions, kMu, kLambda, role);
-            }
-            volumetric_detail::evaluate_prepared_tet_batch(elements.data(), incidence.data(), count,
-                positions, kMu, kLambda, cached ? batch_memo.data() : nullptr, actual.data(), &actual_hits);
-            EXPECT_EQ(actual_hits, expected_hits);
-            for (int i = 0; i < count; ++i) {
-                expect_vector_bitwise_equal(actual[i].first, expected[i].first);
-                expect_matrix_bitwise_equal(actual[i].second, expected[i].second);
-                if (cached) {
-                    ASSERT_EQ(batch_memo[i].has_value(), scalar_memo[i].has_value());
-                    if (batch_memo[i]) {
-                        expect_matrix_bitwise_equal(batch_memo[i]->F, scalar_memo[i]->F);
-                        expect_matrix_bitwise_equal(batch_memo[i]->first_piola, scalar_memo[i]->first_piola);
-                        expect_matrix_bitwise_equal(batch_memo[i]->cofactor, scalar_memo[i]->cofactor);
-                    }
-                }
-            }
-        }
-    }
-}
-
 TEST(VolumetricCorotatedEnergy, BatchedLeanCachePreservesAllFieldsAndLeavesInverseUntouched) {
     constexpr std::size_t size = 33;
     std::array<Mat33, size> inputs;

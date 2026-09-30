@@ -51,9 +51,10 @@ Mat33 ElementF(
 
 namespace volumetric_detail {
 
-// Populate the same fields as CorotatedCacheMode::Lean, leaving Dinv_cache
-// untouched. Independent inputs share the exact batched signed QR-SVD kernel;
-// determinant and cofactor arithmetic stays in this strict-rounding module.
+// SIMD v2 assembly entry point. Populate the same fields as
+// CorotatedCacheMode::Lean, leaving Dinv_cache untouched. Independent inputs
+// share the exact batched signed QR-SVD kernel; determinant and cofactor
+// arithmetic stays in this strict-rounding module.
 // Zero count permits null pointers.
 void update_corotated_cache_batch(const Mat33* inputs,
     CorotatedCache* caches, std::size_t count);
@@ -73,16 +74,6 @@ struct PreparedTetGeometry {
     Mat33 first_piola;
     Mat33 cofactor;
 };
-
-inline constexpr std::size_t prepared_tet_batch_size = 32;
-// Same per-element results as evaluate_prepared_tet[_cached]. Incidence must
-// contain distinct valid elements and roles, count <= prepared_tet_batch_size.
-// A null geometry pointer selects the uncached material-only path.
-void evaluate_prepared_tet_batch(const PreparedTet* elements,
-    const std::pair<int, int>* incidence, std::size_t count,
-    const std::vector<Vec3>& positions, double mu, double lambda,
-    std::optional<PreparedTetGeometry>* geometry,
-    std::pair<Vec3, Mat33>* outputs, std::size_t* cache_hits = nullptr);
 
 // Validate connectivity and rest storage with ElementF's error precedence,
 // then prepare all four roles without retaining references to those arrays.
