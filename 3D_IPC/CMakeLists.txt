@@ -125,6 +125,7 @@ endfunction()
 # Geometry, constitutive models, and contact kernels.
 set(IPC_CORE_SOURCES
     SIMD.cpp
+    batched_polar.cpp
     general_simd_solid.cpp
     IPC_math.cpp
     barrier_energy.cpp
@@ -148,10 +149,11 @@ ipc_configure_library(corotated_energy_lib)
 # GCC merges contraction flags conservatively during LTO; isolate these objects
 # so their strict rounding does not spread to the cloth and CCD kernels.
 set_source_files_properties(
+    batched_polar.cpp
     volumetric_corotated_energy.cpp
     volumetric_corotated_energy_test.cpp
     PROPERTIES COMPILE_OPTIONS
-        "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-ffp-contract=off>;$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-fno-lto>"
+        "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-ffp-contract=off;-fno-math-errno>;$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-fno-lto>"
 )
 target_link_libraries(corotated_energy_lib
     PUBLIC

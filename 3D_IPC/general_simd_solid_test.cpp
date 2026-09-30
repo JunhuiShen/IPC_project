@@ -181,6 +181,35 @@ TEST(GeneralSimdSolid, PacketBoundariesDoNotChangeOrderedAccumulation) {
     }
 }
 
+TEST(GeneralSimdSolid, MixedSignedSvdBranchesAndTailsMatchSingleEntryTilesBitwise) {
+    Records records;
+    const std::array<Vec3, 8> values = {Vec3(1, 1, 1), Vec3(-0.8, 1.1, 0.7),
+        Vec3(0, 0.9, 1.2), Vec3::Zero(), Vec3(1e-12, 0.8, 1.3),
+        Vec3(0, 0, 1), Vec3(1e-13, 2e-13, -1e-13), Vec3(1e25, 2e25, -1e25)};
+    for (int sample = 0; sample < 37; ++sample) {
+        const Mat33 rotation = Eigen::AngleAxisd(0.07 * sample,
+            Vec3(0.3, -0.2, 1.0).normalized()).toRotationMatrix();
+        records.append(rotation * values[sample % values.size()].asDiagonal(), sample % 4);
+    }
+    std::vector<Vec3> reference_g(records.role.size());
+    std::vector<Mat33> reference_H(records.role.size());
+    for (std::size_t i = 0; i < records.role.size(); ++i)
+        records.tile(i, 1, &reference_g[i], &reference_H[i]);
+    for (std::size_t width = 1; width <= ipc_simd::tile_width; ++width) {
+        for (std::size_t first = 0; first < records.role.size(); first += width) {
+            const std::size_t count = std::min(width, records.role.size() - first);
+            std::array<Vec3, ipc_simd::tile_width> g;
+            std::array<Mat33, ipc_simd::tile_width> H;
+            records.tile(first, count, g.data(), H.data());
+            for (std::size_t i = 0; i < count; ++i) {
+                SCOPED_TRACE(::testing::Message() << "width=" << width << " record=" << first + i);
+                ASSERT_EQ(std::memcmp(g[i].data(), reference_g[first + i].data(), 3 * sizeof(double)), 0);
+                ASSERT_EQ(std::memcmp(H[i].data(), reference_H[first + i].data(), 9 * sizeof(double)), 0);
+            }
+        }
+    }
+}
+
 TEST(GeneralSimdSolid, GradientMatchesFiniteDifferenceOfCorotatedEnergy) {
     Records records;
     Mat33 F;

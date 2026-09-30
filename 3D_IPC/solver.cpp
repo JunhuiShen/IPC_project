@@ -64,10 +64,6 @@ void translate_rigid_nodes(const std::vector<int>& nodes, const Vec3 displacemen
                 for (int local = begin; local < end; ++local)
                     positions[nodes[local]] += displacement;
             }, 8);
-    } else if (parallel && nodes.size() >= 128) {
-        #pragma omp taskloop grainsize(64) shared(nodes, positions) firstprivate(displacement)
-        for (int local = 0; local < static_cast<int>(nodes.size()); ++local)
-            positions[nodes[local]] += displacement;
     } else {
         for (const int node : nodes) positions[node] += displacement;
     }
@@ -81,10 +77,6 @@ void place_rigid_nodes(const std::vector<int>& nodes, const std::vector<Vec3>& m
                 for (int local = begin; local < end; ++local)
                     positions[nodes[local]] = world_space_position(material[local], center, orientation);
             }, 8);
-    } else if (parallel && nodes.size() >= 128) {
-        #pragma omp taskloop grainsize(64) shared(nodes, material, positions) firstprivate(center, orientation)
-        for (int local = 0; local < static_cast<int>(nodes.size()); ++local)
-            positions[nodes[local]] = world_space_position(material[local], center, orientation);
     } else {
         for (int local = 0; local < static_cast<int>(nodes.size()); ++local)
             positions[nodes[local]] = world_space_position(material[local], center, orientation);
@@ -3534,7 +3526,7 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
         struct BlockContribution { Vec3 gradient; Mat33 hessian; };
         const bool translation = mode == RigidDerivativeMode::TranslationHessian;
         const int nt_count = static_cast<int>(nt_pair_indices.size());
-        solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss_pair_indices.size()), true,
+        solver_detail::sparse_contact_tasks(nt_count + static_cast<int>(ss_pair_indices.size()),
             [&](int i) -> std::optional<BlockContribution> {
                 const bool is_nt = i < nt_count;
                 const int pair_index = is_nt ? nt_pair_indices[i] : ss_pair_indices[i - nt_count];
@@ -3561,14 +3553,13 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
                 return BlockContribution{
                     translation ? derivatives.translation_gradient : derivatives.orientation_gradient,
                     translation ? derivatives.translation_translation_hessian : derivatives.orientation_orientation_hessian};
-            }, [&](const std::optional<BlockContribution>& value) {
-                if (!value) return;
+            }, [&](const BlockContribution& value) {
                 if (translation) {
-                    total.translation_gradient += value->gradient;
-                    total.translation_translation_hessian += value->hessian;
+                    total.translation_gradient += value.gradient;
+                    total.translation_translation_hessian += value.hessian;
                 } else {
-                    total.orientation_gradient += value->gradient;
-                    total.orientation_orientation_hessian += value->hessian;
+                    total.orientation_gradient += value.gradient;
+                    total.orientation_orientation_hessian += value.hessian;
                 }
             }, leader_work);
         return total;

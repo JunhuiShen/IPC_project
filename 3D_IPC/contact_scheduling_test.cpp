@@ -71,6 +71,49 @@ TEST(OrderedContactTasks, LeaderFailureJoinsHelpersBeforeRethrowing) {
     }
 }
 
+TEST(OrderedContactTasks, SparseRecordsPreserveOrderLeaderWorkAndExceptionRecovery) {
+    struct Restore { int threads = omp_get_max_threads(); ~Restore() { omp_set_num_threads(threads); } } restore;
+    for (int threads : {1, 8, 64}) {
+        omp_set_num_threads(threads);
+        for (int count : {0, 17, 257, 1024}) {
+            const auto contribution = [](int i) -> std::optional<double> {
+                if (i % 5 != 0) return std::nullopt;
+                return i % 3 == 0 ? 1e16 : i % 3 == 1 ? 1.0 : -1e16;
+            };
+            double reference = 19.0;
+            for (int i = 0; i < count; ++i)
+                if (auto value = contribution(i)) reference += *value;
+            for (bool fail : {true, false}) {
+                int accumulated = 0;
+                double result = -1.0;
+                const auto run = [&] {
+                    solver_detail::for_each_colored_block({{0}, {1}},
+                        [](int) { return std::size_t(4096); },
+                        [&](int block, bool) {
+                            if (block == 1) {
+                                EXPECT_EQ(0, std::memcmp(&reference, &result, sizeof(double)));
+                                return;
+                            }
+                            const std::function<void()> leader = [&] { result = 19.0; };
+                            solver_detail::sparse_contact_tasks(count,
+                                [&](int i) {
+                                    if (fail && i == 13) throw std::runtime_error("sparse failure");
+                                    return contribution(i);
+                                }, [&](double value) { result += value; ++accumulated; }, &leader);
+                        });
+                };
+                if (fail && count > 13) EXPECT_THROW(run(), std::runtime_error);
+                else {
+                    EXPECT_NO_THROW(run());
+                    EXPECT_EQ(accumulated, (count + 4) / 5);
+                    EXPECT_EQ(0, std::memcmp(&reference, &result, sizeof(double)));
+                }
+            }
+        }
+    }
+}
+
+
 TEST(OrderedContactTasks, PreservesContactOrderAndColorDependencies) {
     const int saved = omp_get_max_threads();
     const std::vector<std::vector<int>> groups = {{0}, {1, 2}, {3, 4, 5, 6, 7, 8, 9, 10}};

@@ -1283,6 +1283,12 @@ static Vec2 project2D(const Vec3& p, const Vec3& x_com, const Vec3& e1, const Ve
     return Vec2(dp.dot(e1), dp.dot(e2));
 }
 
+bool ccd_detail::negligible_rigid_rotation(const Vec4& q_new, const Vec4& q_n) {
+    const Vec4 q_rel = quaternion_multiply(q_new, quaternion_conjugate(q_n));
+    const Vec3 v_rel(q_rel[1], q_rel[2], q_rel[3]);
+    return v_rel.norm() < rigid_rotation_epsilon;
+}
+
 bool segment_segment_rb_rotation_ccd(
     const Vec3& x0, const Vec3& x1, // moving segment world space posiitons
     const Vec3& x_com, // moving segment rigid body center of mass
@@ -1301,7 +1307,7 @@ bool segment_segment_rb_rotation_ccd(
 
     Vec3 v_rel(q_rel[1], q_rel[2], q_rel[3]);
     double v_rel_norm = v_rel.norm();
-    if (v_rel_norm < eps) return false;
+    if (v_rel_norm < ccd_detail::rigid_rotation_epsilon) return false;
 
     Vec3 n_hat = v_rel / v_rel_norm;
 
@@ -1536,7 +1542,7 @@ bool point_triangle_rb_rotation_ccd(
 
     Vec3 v_rel(q_rel[1], q_rel[2], q_rel[3]);
     double v_rel_norm = v_rel.norm();
-    if (v_rel_norm < eps) return false; // no rotation
+    if (v_rel_norm < ccd_detail::rigid_rotation_epsilon) return false; // no rotation
 
     Vec3 n_hat = v_rel / v_rel_norm;
 

@@ -2,6 +2,8 @@
 #include <omp.h>
 
 #include "parallel_helper.h"
+#include "ccd.h"
+#include "contact_scheduling.h"
 #include "friction_energy.h"
 #include "physics.h"
 #include "safe_step.h"
@@ -2230,6 +2232,66 @@ TEST(RigidBodyRotationSafeStep, RepeatedCandidatePreservesTOIExactly) {
     const double repeated_toi = per_rigid_body_rotation_safe_step(ref_mesh, candidates.cache, repeated, {}, x, 0, Vec3::Zero(), identity, target, 1.0);
 
     EXPECT_DOUBLE_EQ(repeated_toi, single_toi);
+}
+
+TEST(RigidBodyRotationSafeStep, CooperativeSweptBoxesJoinBeforeCCDAndNextColor) {
+    struct Restore { int threads = omp_get_max_threads(); ~Restore() { omp_set_num_threads(threads); } } restore;
+    std::vector<Vec3> x = {Vec3(0.0, -2.0, 0.0), Vec3(1.0, 0.0, -1.0),
+        Vec3(3.0, 0.0, -1.0), Vec3(2.0, 0.0, 1.0)};
+    RefMesh mesh;
+    mesh.tris = {1, 2, 3};
+    mesh.node_to_rb = {0, -1, -1, -1};
+    mesh.rb_nodes = {{0}};
+    for (int i = 0; i < 255; ++i) {
+        mesh.rb_nodes[0].push_back(static_cast<int>(x.size()));
+        x.push_back(Vec3(10.0 + i, 3.0, 2.0));
+        mesh.node_to_rb.push_back(0);
+    }
+    const auto candidates = build_rigid_safe_step_candidates(mesh, {}, x.size(), 1);
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 target = quaternion_from_angular_velocity(identity, Vec3(0.0, 0.0, M_PI), 1.0);
+    const double reference = per_rigid_body_rotation_safe_step(mesh, candidates.cache,
+        candidates.body_nt_pair_indices[0], {}, x, 0, Vec3::Zero(), identity, target, 0.9);
+    ASSERT_LT(reference, 1.0);
+    for (int threads : {2, 8, 64}) {
+        omp_set_num_threads(threads);
+        double actual = -1.0;
+        solver_detail::for_each_colored_block({{0}, {1}},
+            [](int) { return std::size_t(4096); },
+            [&](int block, bool cooperative) {
+                if (block == 0) {
+                    actual = per_rigid_body_rotation_safe_step(mesh, candidates.cache,
+                        candidates.body_nt_pair_indices[0], {}, x, 0, Vec3::Zero(), identity, target, 0.9, cooperative);
+                } else {
+                    EXPECT_EQ(0, std::memcmp(&reference, &actual, sizeof(double)));
+                }
+            }, 3);
+    }
+}
+
+TEST(RigidBodyRotationSafeStep, NegligibleRotationKeepsValidationAndKernelThreshold) {
+    RefMesh mesh;
+    mesh.tris = {1, 2, 3};
+    mesh.node_to_rb = {0, -1, -1, -1};
+    mesh.rb_nodes = {{0}};
+    std::vector<Vec3> x = {Vec3(0.0, -2.0, 0.0), Vec3(1.0, 0.0, -1.0),
+        Vec3(3.0, 0.0, -1.0), Vec3(2.0, 0.0, 1.0)};
+    const auto candidates = build_rigid_safe_step_candidates(mesh, {}, x.size(), 1);
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    for (double half_angle : {0.0, 0.5e-10, std::nextafter(1.0e-10, 0.0), 1.0e-10, 2.0e-10}) {
+        const Vec4 target(std::cos(half_angle), 0.0, 0.0, std::sin(half_angle));
+        EXPECT_EQ(ccd_detail::negligible_rigid_rotation(target, identity), half_angle < 1.0e-10);
+        if (half_angle < 1.0e-10) {
+            double toi = -1.0;
+            EXPECT_FALSE(point_triangle_rb_rotation_ccd(x[0], Vec3::Zero(), target, identity, x[1], x[2], x[3], toi));
+            EXPECT_FALSE(segment_segment_rb_rotation_ccd(x[0], x[1], Vec3::Zero(), target, identity, x[2], x[3], toi));
+            EXPECT_DOUBLE_EQ(per_rigid_body_rotation_safe_step(mesh, candidates.cache,
+                candidates.body_nt_pair_indices[0], {}, x, 0, Vec3::Zero(), identity, target), 1.0);
+        }
+    }
+    x[0][0] = std::numeric_limits<double>::infinity();
+    EXPECT_THROW(per_rigid_body_rotation_safe_step(mesh, candidates.cache,
+        candidates.body_nt_pair_indices[0], {}, x, 0, Vec3::Zero(), identity, identity), std::invalid_argument);
 }
 
 TEST(RigidBodyRotationSafeStep, PreservesFull270DegreeTargetArc) {

@@ -21,6 +21,44 @@
 
 namespace {
 
+// CCD consumes an ordered minimum, unlike the derivative sums. Reduce small
+// consecutive batches before staging them, preserving the first equal minimum
+// (including signed zero), collision flags, and std::min's treatment of NaNs.
+// This avoids a large per-contact scratch array and serial scan on the leader.
+template <class Evaluate, class Accumulate>
+void ordered_ccd_tasks(int count, bool cooperative,
+                       const Evaluate& evaluate, const Accumulate& accumulate) {
+    if (!cooperative || count < 32 || omp_get_num_threads() == 1) {
+        for (int i = 0; i < count; ++i) accumulate(evaluate(i));
+        return;
+    }
+    constexpr int batch_size = 16;
+    struct alignas(64) Slot { CCDResult value; };
+    static thread_local std::vector<Slot> reusable;
+    std::vector<Slot> results;
+    results.swap(reusable);
+    results.resize(count / batch_size + (count % batch_size != 0));
+    // Dispatch in units of raw queries, not batches. Otherwise the scheduler's
+    // minimum grain would multiply by batch_size and leave a few large CCD
+    // ranges running after their peers had finished.
+    solver_detail::evaluate_contact_ranges(count, [&](int begin, int end) {
+        for (int first = begin; first < end; first += batch_size) {
+            CCDResult minimum;
+            minimum.t = 1.0;
+            for (int i = first; i < std::min(first + batch_size, end); ++i) {
+                const CCDResult value = evaluate(i);
+                if (value.collision) {
+                    minimum.collision = true;
+                    minimum.t = std::min(minimum.t, value.t);
+                }
+            }
+            results[first / batch_size].value = minimum;
+        }
+    }, batch_size);
+    for (const auto& result : results) accumulate(result.value);
+    results.swap(reusable);
+}
+
 inline bool node_triangle_single_vertex_swept_aabbs_intersect_reference(const NodeTrianglePair& p, int moving_dof, const std::vector<Vec3>& x, const Vec3& dx) {
     AABB node_box;
     node_box.expand(x[p.node]);
@@ -259,7 +297,7 @@ double per_vertex_safe_step(
             && std::isfinite(distance_squared)
             && rejections->clear.size() == nt.size() + ss.size()
             && dx.squaredNorm() < distance_squared / 16.0;
-        solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss.size()), cooperative,
+        ordered_ccd_tasks(nt_count + static_cast<int>(ss.size()), cooperative,
             [&](int i) {
                 if (reuse_rejections && rejections->clear[i]) return CCDResult{};
                 if (i < nt_count) {
@@ -332,7 +370,7 @@ double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const Broad
         return value;
     };
     const int nt_count = static_cast<int>(nt_pair_indices.size());
-    solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss_pair_indices.size()), cooperative,
+    ordered_ccd_tasks(nt_count + static_cast<int>(ss_pair_indices.size()), cooperative,
         [&](int i) { return i < nt_count ? evaluate_nt(nt_pair_indices[i])
             : evaluate_ss(ss_pair_indices[i - nt_count]); },
         [&](const CCDResult& value) {
@@ -392,7 +430,15 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPha
                 if (owning_rb_for_node(ref_mesh.node_to_rb, node) == rb) visit(node);
         }
     };
-    if (nt_pair_indices.empty() && ss_pair_indices.empty()) {
+    const bool no_pairs = nt_pair_indices.empty() && ss_pair_indices.empty();
+    // Every retained NT/SS query uses one of these two quaternion paths.
+    // If both hit the kernels' existing first rejection, no candidate can
+    // collide. Hoist that exact predicate before swept-box construction and
+    // helper dispatch, while retaining the old per-node input validation.
+    const bool no_rotation = !no_pairs
+        && ccd_detail::negligible_rigid_rotation(proposed, current)
+        && ccd_detail::negligible_rigid_rotation(q_reverse, identity);
+    if (no_pairs || no_rotation) {
         // Preserve the old cap path's validation, including overflow while
         // converting finite world positions into body space. No swept boxes
         // or angular trigonometry are needed when no pair can consume them.
@@ -417,10 +463,24 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPha
     std::vector<AABB> rotated_node_boxes;
     rotated_node_boxes.swap(reusable_rotated_node_boxes);
     rotated_node_boxes.resize(x.size());
-    visit_body_nodes([&](int node) {
+    const auto build_rotated_box = [&](int node) {
         rotated_node_boxes[static_cast<std::size_t>(node)] = rotated_node_swept_aabb(
             node, x, ref_mesh.node_to_rb, rb, x_com, current, cap);
-    });
+    };
+    if (cooperative && solver_detail::active_contact_task_group
+        && rb < static_cast<int>(ref_mesh.rb_nodes.size())
+        && ref_mesh.rb_nodes[rb].size() >= 128) {
+        // The body's helpers otherwise wait while the leader constructs all
+        // swept boxes. Boxes are independent; join every write before contact
+        // evaluation, using the same per-node arithmetic as the serial path.
+        const auto& nodes = ref_mesh.rb_nodes[rb];
+        solver_detail::evaluate_contact_ranges(static_cast<int>(nodes.size()),
+            [&](int begin, int end) {
+                for (int i = begin; i < end; ++i) build_rotated_box(nodes[i]);
+            }, 4);
+    } else {
+        visit_body_nodes(build_rotated_box);
+    }
     const auto stationary_node_box = [&](const int node) { return AABB(x[static_cast<std::size_t>(node)], x[static_cast<std::size_t>(node)]); };
 
     double toi_min = 1.0;
@@ -473,7 +533,7 @@ double per_rigid_body_rotation_safe_step(const RefMesh& ref_mesh, const BroadPha
         return value;
     };
     const int nt_count = static_cast<int>(nt_pair_indices.size());
-    solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss_pair_indices.size()), cooperative,
+    ordered_ccd_tasks(nt_count + static_cast<int>(ss_pair_indices.size()), cooperative,
         [&](int i) { return i < nt_count ? evaluate_nt(nt_pair_indices[i])
             : evaluate_ss(ss_pair_indices[i - nt_count]); },
         [&](const CCDResult& value) {

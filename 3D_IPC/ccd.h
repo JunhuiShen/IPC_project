@@ -49,6 +49,13 @@ double segment_segment_general_ccd(const Vec3& x1, const Vec3& dx1, const Vec3& 
 
 ///////////////////// Rigid Body CCD ////////////////////////////
 
+namespace ccd_detail {
+inline constexpr double rigid_rotation_epsilon = 1.0e-10;
+// The common first rejection in both rotation CCD kernels, evaluated using
+// their raw quaternion product (without an additional normalization).
+bool negligible_rigid_rotation(const Vec4& q_new, const Vec4& q_n);
+}
+
 // Segment [x0, x1] rotating rigidly about x_com from orientation q_n to q_new
 // against the fixed segment [x2, x3]. Returns the earliest time of impact `s`
 // in [0, 1], or false if none.

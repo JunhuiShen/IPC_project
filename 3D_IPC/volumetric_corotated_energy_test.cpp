@@ -1,4 +1,5 @@
 #include "volumetric_corotated_energy.h"
+#include "batched_polar.h"
 #include "third_party/tgsl/ImplicitQRSVD.h"
 
 #include <gtest/gtest.h>
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
+#include <random>
 #include <utility>
 #include <vector>
 
@@ -355,6 +357,140 @@ TEST(VolumetricCorotatedEnergy, LeanCachePreservesUsedFieldsAndElementResultsBit
         expect_vector_bitwise_equal(lean_gradient, full_gradient);
         expect_matrix_bitwise_equal(lean_block, full_block);
     }
+}
+
+TEST(VolumetricCorotatedEnergy, BatchedPolarMatchesScalarAcrossDivergentRanksAndTails) {
+    std::vector<Mat33> inputs{Mat33::Zero(), Mat33::Identity(), -Mat33::Identity()};
+    Mat33 signed_zero = Mat33::Identity();
+    signed_zero(0, 1) = -0.0;
+    inputs.push_back(signed_zero);
+    for (double scale : {1e-40, 1e-14, 1.0, 1e12, 1e24}) {
+        for (int rank = 0; rank < 4; ++rank) {
+            Mat33 m = Mat33::Zero();
+            for (int i = 0; i < rank; ++i) m(i, i) = scale * (i == 2 ? -1.0 : 1.0);
+            inputs.push_back(m);
+        }
+    }
+    std::mt19937_64 random(0x4241544348504f4cULL);
+    std::uniform_real_distribution<double> value(-2.0, 2.0);
+    for (int i = 0; i < 8192; ++i) {
+        Mat33 m;
+        for (int j = 0; j < 9; ++j) m.data()[j] = value(random);
+        if (i % 4 == 0) m.col(2) = m.col(0) + m.col(1);
+        if (i % 7 == 0) m.row(1).setZero();
+        if (i % 11 == 0) m *= 1e-13;
+        inputs.push_back(m);
+    }
+    std::vector<Mat33> expected(inputs.size()), actual(inputs.size());
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+        CorotatedCache scalar;
+        scalar.UpdateCache(inputs[i], CorotatedCacheMode::Lean);
+        expected[i] = scalar.R_cache;
+    }
+    volumetric_detail::batched_signed_polar(nullptr, nullptr, 0);
+    for (std::size_t stride : {1u, 3u, 4u, 7u, 8u, 13u, 32u, 65u}) {
+        for (std::size_t i = 0; i < inputs.size(); i += stride)
+            volumetric_detail::batched_signed_polar(inputs.data() + i, actual.data() + i,
+                std::min(stride, inputs.size() - i));
+        for (std::size_t i = 0; i < inputs.size(); ++i) {
+            SCOPED_TRACE(::testing::Message() << "stride=" << stride << " matrix=" << i);
+            ASSERT_EQ(std::memcmp(actual[i].data(), expected[i].data(), 9 * sizeof(double)), 0);
+        }
+    }
+    actual = inputs;
+    volumetric_detail::batched_signed_polar(actual.data(), actual.data(), actual.size());
+    for (std::size_t i = 0; i < inputs.size(); ++i)
+        ASSERT_EQ(std::memcmp(actual[i].data(), expected[i].data(), 9 * sizeof(double)), 0);
+    inputs[3](0, 0) = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(volumetric_detail::batched_signed_polar(inputs.data(), actual.data(), 8), std::invalid_argument);
+}
+
+TEST(VolumetricCorotatedEnergy, PreparedBatchPreservesEveryRoleMemoHitAndRefreshBitwise) {
+    constexpr int count = 32;
+    std::vector<Vec3> positions;
+    std::vector<int> mesh;
+    for (int i = 0; i < count; ++i) {
+        auto tet = unit_tet_positions();
+        for (Vec3& p : tet) positions.push_back(p + Vec3(2.0 * i, 0.0, 0.0));
+        for (int role = 0; role < 4; ++role) mesh.push_back(4 * i + role);
+    }
+    const auto rest = EFEMInitializeElasticMaterialState(positions, mesh);
+    std::vector<volumetric_detail::PreparedTet> elements;
+    for (int i = 0; i < count; ++i)
+        elements.push_back(volumetric_detail::prepare_tet(i, positions, mesh, rest, kMu));
+    std::vector<std::optional<volumetric_detail::PreparedTetGeometry>> scalar_memo(count), batch_memo(count);
+    std::array<std::pair<int, int>, count> incidence;
+    std::array<std::pair<Vec3, Mat33>, count> expected, actual;
+    for (bool cached : {false, true}) {
+        for (int pass = 0; pass < 12; ++pass) {
+            const int role = pass % 4;
+            if (pass % 3 == 0) positions[4 * (pass % count) + 1].y() += 0.01;
+            std::size_t expected_hits = 0, actual_hits = 0;
+            for (int i = 0; i < count; ++i) {
+                incidence[i] = {i, role};
+                if (cached) {
+                    bool hit = false;
+                    expected[i] = volumetric_detail::evaluate_prepared_tet_cached_probe(
+                        elements[i], positions, kMu, kLambda, role, scalar_memo[i], hit);
+                    expected_hits += hit;
+                } else expected[i] = volumetric_detail::evaluate_prepared_tet(elements[i], positions, kMu, kLambda, role);
+            }
+            volumetric_detail::evaluate_prepared_tet_batch(elements.data(), incidence.data(), count,
+                positions, kMu, kLambda, cached ? batch_memo.data() : nullptr, actual.data(), &actual_hits);
+            EXPECT_EQ(actual_hits, expected_hits);
+            for (int i = 0; i < count; ++i) {
+                expect_vector_bitwise_equal(actual[i].first, expected[i].first);
+                expect_matrix_bitwise_equal(actual[i].second, expected[i].second);
+                if (cached) {
+                    ASSERT_EQ(batch_memo[i].has_value(), scalar_memo[i].has_value());
+                    if (batch_memo[i]) {
+                        expect_matrix_bitwise_equal(batch_memo[i]->F, scalar_memo[i]->F);
+                        expect_matrix_bitwise_equal(batch_memo[i]->first_piola, scalar_memo[i]->first_piola);
+                        expect_matrix_bitwise_equal(batch_memo[i]->cofactor, scalar_memo[i]->cofactor);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(VolumetricCorotatedEnergy, BatchedLeanCachePreservesAllFieldsAndLeavesInverseUntouched) {
+    constexpr std::size_t size = 33;
+    std::array<Mat33, size> inputs;
+    std::array<CorotatedCache, size> expected, actual;
+    for (std::size_t i = 0; i < size; ++i) {
+        inputs[i] << 1.0 + 0.07 * i, -0.13, 0.07,
+            0.03, 0.89 - 0.04 * i, -0.11, -0.06, 0.17, 1.13;
+        if (i % 5 == 0) inputs[i].col(1).setZero();
+        if (i % 7 == 0) inputs[i].setZero();
+        expected[i].Dinv_cache.setConstant(-731.0);
+        expected[i].UpdateCache(inputs[i], CorotatedCacheMode::Lean);
+    }
+    volumetric_detail::update_corotated_cache_batch(nullptr, nullptr, 0);
+    for (std::size_t count = 0; count <= size; ++count) {
+        for (auto& cache : actual) {
+            cache.R_cache.setConstant(123.0);
+            cache.JFinvT_cache.setConstant(456.0);
+            cache.J_cache = 789.0;
+            cache.Dinv_cache.setConstant(-731.0);
+        }
+        volumetric_detail::update_corotated_cache_batch(inputs.data(), actual.data(), count);
+        for (std::size_t i = 0; i < size; ++i) {
+            SCOPED_TRACE(::testing::Message() << "count=" << count << " lane=" << i);
+            expect_matrix_bitwise_equal(actual[i].Dinv_cache, expected[i].Dinv_cache);
+            if (i < count) {
+                expect_matrix_bitwise_equal(actual[i].R_cache, expected[i].R_cache);
+                expect_matrix_bitwise_equal(actual[i].JFinvT_cache, expected[i].JFinvT_cache);
+                expect_double_bitwise_equal(actual[i].J_cache, expected[i].J_cache);
+            } else {
+                expect_matrix_bitwise_equal(actual[i].R_cache, Mat33::Constant(123.0));
+                expect_matrix_bitwise_equal(actual[i].JFinvT_cache, Mat33::Constant(456.0));
+                expect_double_bitwise_equal(actual[i].J_cache, 789.0);
+            }
+        }
+    }
+    inputs[3](0, 0) = std::numeric_limits<double>::infinity();
+    EXPECT_THROW(volumetric_detail::update_corotated_cache_batch(inputs.data(), actual.data(), 8), std::invalid_argument);
 }
 
 TEST(VolumetricCorotatedEnergy, RejectsNonPositiveRestMeasure) {

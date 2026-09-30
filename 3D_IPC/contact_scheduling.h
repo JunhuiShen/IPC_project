@@ -85,6 +85,42 @@ void ordered_contact_tasks(int count, bool cooperative,
     }
 }
 
+// The caller explicitly declares that disengaged results have no contribution.
+// Keep activity bytes contiguous so the leader need not read a large gradient /
+// Hessian record for every AABB-rejected contact. Only active records are stored.
+template <class Evaluate, class Accumulate>
+void sparse_contact_tasks(int count, const Evaluate& evaluate, const Accumulate& accumulate,
+                          const std::function<void()>* leader_work = nullptr) {
+    using Value = typename decltype(evaluate(0))::value_type;
+    if (count < 32 || omp_get_num_threads() == 1) {
+        if (leader_work) (*leader_work)();
+        for (int i = 0; i < count; ++i)
+            if (const auto value = evaluate(i)) accumulate(*value);
+        return;
+    }
+    struct Storage {
+        std::vector<Value, CacheAlignedAllocator<Value>> values;
+        std::vector<unsigned char, CacheAlignedAllocator<unsigned char>> active;
+    };
+    static thread_local Storage reusable;
+    Storage storage;
+    storage.values.swap(reusable.values);
+    storage.active.swap(reusable.active);
+    storage.values.resize(count);
+    storage.active.resize(count);
+    evaluate_contact_ranges(count, [&](int begin, int end) {
+        for (int i = begin; i < end; ++i) {
+            const auto value = evaluate(i);
+            storage.active[i] = value.has_value();
+            if (value) storage.values[i] = *value;
+        }
+    }, 64, leader_work);
+    for (int i = 0; i < count; ++i)
+        if (storage.active[i]) accumulate(storage.values[i]);
+    storage.values.swap(reusable.values);
+    storage.active.swap(reusable.active);
+}
+
 inline void contact_spin_hint();
 
 // Reusable color barrier. The caller reserves storage before entering a team
@@ -171,7 +207,7 @@ struct ContactTaskGroup {
                   const std::function<void()>* leader_work = nullptr) {
         evaluator = &evaluate;
         count = n;
-        grain = std::max(4, n / (4 * (helpers + 1)));
+        grain = std::max(4, std::min(32, n / (4 * (helpers + 1))));
         grain = (grain + alignment - 1) / alignment * alignment;
         first_error = n;
         error = nullptr;

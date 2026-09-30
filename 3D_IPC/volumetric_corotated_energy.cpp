@@ -1,7 +1,9 @@
 #include "volumetric_corotated_energy.h"
+#include "batched_polar.h"
 
 #include "third_party/tgsl/ImplicitQRSVD.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -228,6 +230,32 @@ void CorotatedCache::UpdateCache(const Mat33& F, CorotatedCacheMode mode) {
         UpdateCorotatedCacheTrusted<CorotatedCacheMode::Lean>(*this, F);
 }
 
+void volumetric_detail::update_corotated_cache_batch(const Mat33* inputs,
+    CorotatedCache* caches, std::size_t count) {
+    constexpr std::size_t width = 8;
+#if defined(__AVX512F__)
+    std::array<Mat33, width> rotations;
+#endif
+    for (std::size_t first = 0; first < count; first += width) {
+        const std::size_t lanes = std::min(width, count - first);
+#if defined(__AVX512F__)
+        if (lanes >= 4) {
+            batched_signed_polar(inputs + first, rotations.data(), lanes);
+            for (std::size_t i = 0; i < lanes; ++i) {
+                auto& cache = caches[first + i];
+                cache.R_cache = rotations[i];
+                cache.JFinvT_cache = GradJ(inputs[first + i]);
+                cache.J_cache = inputs[first + i].determinant();
+            }
+            continue;
+        }
+#endif
+        for (std::size_t i = 0; i < lanes; ++i)
+            UpdateCorotatedCacheTrusted<CorotatedCacheMode::Lean>(
+                caches[first + i], inputs[first + i]);
+    }
+}
+
 double CorotatedCache::Psi(
     const Mat33& F,
     double mu,
@@ -444,4 +472,47 @@ std::pair<Vec3, Mat33> volumetric_detail::evaluate_prepared_tet_cached_probe(
     std::optional<PreparedTetGeometry>& geometry, bool& cache_hit) {
     return EvaluatePreparedTetCachedTrusted<true>(
         element, positions, mu, lambda, local_node, geometry, &cache_hit);
+}
+
+void volumetric_detail::evaluate_prepared_tet_batch(const PreparedTet* elements,
+    const std::pair<int, int>* incidence, std::size_t count,
+    const std::vector<Vec3>& positions, double mu, double lambda,
+    std::optional<PreparedTetGeometry>* geometry,
+    std::pair<Vec3, Mat33>* outputs, std::size_t* cache_hits) {
+    assert(count <= prepared_tet_batch_size);
+    std::array<Mat33, prepared_tet_batch_size> gradients, rotations;
+    std::array<std::size_t, prepared_tet_batch_size> misses;
+    std::size_t miss_count = 0, hits = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto [element, role] = incidence[i];
+        const Mat33 F = ElementFPreparedTrusted(elements[element], positions);
+        if (geometry && geometry[element]
+            && std::memcmp(F.data(), geometry[element]->F.data(), 9 * sizeof(double)) == 0) {
+            CorotatedCache cache;
+            cache.JFinvT_cache = geometry[element]->cofactor;
+            outputs[i] = PreparedTetDerivativesTrusted(cache, F, elements[element],
+                mu, lambda, role, &geometry[element]->first_piola);
+            ++hits;
+        } else {
+            if (!F.allFinite()) throw std::invalid_argument("deformation gradient must be finite");
+            gradients[miss_count] = F;
+            misses[miss_count++] = i;
+        }
+    }
+    batched_signed_polar(gradients.data(), rotations.data(), miss_count);
+    for (std::size_t miss = 0; miss < miss_count; ++miss) {
+        const std::size_t i = misses[miss];
+        const auto [element, role] = incidence[i];
+        const Mat33& F = gradients[miss];
+        CorotatedCache cache;
+        cache.R_cache = rotations[miss];
+        cache.JFinvT_cache = GradJ(F);
+        cache.J_cache = F.determinant();
+        const Mat33 first_piola = FirstPiolaTrusted(cache, F, mu, lambda);
+        outputs[i] = PreparedTetDerivativesTrusted(cache, F, elements[element],
+            mu, lambda, role, &first_piola);
+        if (geometry && (!geometry[element] || role == 0))
+            geometry[element] = PreparedTetGeometry{F, first_piola, cache.JFinvT_cache};
+    }
+    if (cache_hits) *cache_hits = hits;
 }

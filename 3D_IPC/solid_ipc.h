@@ -142,6 +142,16 @@ struct PreparedSolidWorkspace {
     void end_solve();
     std::pair<Vec3, Mat33> evaluate(std::size_t element, int local_node,
         const std::vector<Vec3>& positions, const SimParams& params);
+    bool can_batch(int node) const {
+#if defined(__AVX512F__)
+        return batch_nodes_[node] != 0;
+#else
+        return false;
+#endif
+    }
+    void evaluate_batch(const std::pair<int, int>* incidence, std::size_t count,
+        const std::vector<Vec3>& positions, const SimParams& params,
+        std::pair<Vec3, Mat33>* outputs);
 
 private:
     enum class Mode { Probe, Cached, Prepared };
@@ -149,6 +159,7 @@ private:
         const SimParams& params, bool with_geometry_cache);
     struct alignas(64) ProbeCounts { std::size_t calls = 0, hits = 0; };
     std::vector<ProbeCounts> probe_counts_;
+    std::vector<unsigned char> batch_nodes_;
     Mode mode_ = Mode::Cached;
     Mode selected_mode_ = Mode::Cached;
     int solves_until_probe_ = 0;

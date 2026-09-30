@@ -208,15 +208,20 @@ void solid_derivatives_tile(
                     SolidPack::load(inverse[1][column]), SolidPack::load(inverse[2][column])};
                 matrix_row_product(row, a, b).store(deformation[row][column]);
             }
-        // Retain the reference's signed SVD for singular/inverted elements.
+        // Batch the signed QR-SVD as well as the surrounding material work.
+        // The helper preserves the scalar reference's rounding boundaries,
+        // including determinant/cofactor calculations and partial batches.
+        Mat33 matrices[width];
+        CorotatedCache caches[width];
         for (int lane = 0; lane < count; ++lane) {
-            const std::size_t entry = begin + lane;
-            Mat33 F;
             for (int row = 0; row < 3; ++row)
                 for (int column = 0; column < 3; ++column)
-                    F(row, column) = deformation[row][column][lane];
-            CorotatedCache cache;
-            cache.UpdateCache(F, CorotatedCacheMode::Lean);
+                    matrices[lane](row, column) = deformation[row][column][lane];
+        }
+        volumetric_detail::update_corotated_cache_batch(matrices, caches, count);
+        for (int lane = 0; lane < count; ++lane) {
+            const std::size_t entry = begin + lane;
+            const CorotatedCache& cache = caches[lane];
             measure[lane] = measures[entry];
             determinant[lane] = cache.J_cache;
             for (int row = 0; row < 3; ++row) {
