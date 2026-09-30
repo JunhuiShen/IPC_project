@@ -110,7 +110,8 @@ void prepare_general_simd_batch(
         };
         assemble_elements(materials->triangles, [&](const Mat22* inverse,
                                                    const double* area, const Vec2* shape) {
-            ipc_simd::general_corotated_derivatives_tile(gathered.data(), inverse, area,
+            // Share basic v2's membrane arithmetic as well as its physics.
+            ipc_simd::corotated_derivatives_tile(gathered.data(), inverse, area,
                 shape, pending, params.mu, params.lambda, gradients.data(), hessians.data());
         });
         assemble_elements(materials->tets, [&](const Mat33* inverse,
@@ -164,7 +165,7 @@ void prepare_general_simd_batch(
         std::array<Vec2, width> triangle_shapes;
         const auto flush_triangles = [&] {
             if (!pending) return;
-            ipc_simd::general_corotated_derivatives_tile(gathered.data(), triangle_dm.data(),
+            ipc_simd::corotated_derivatives_tile(gathered.data(), triangle_dm.data(),
                 measures.data(), triangle_shapes.data(), pending, params.mu,
                 params.lambda, gradients.data(), hessians.data());
             distribute();

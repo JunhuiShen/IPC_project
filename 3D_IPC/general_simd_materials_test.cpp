@@ -2,7 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -145,5 +147,94 @@ TEST(GeneralSimdMaterials, CachedAndLiveGatherAgreeForSingletonAndMixedBatches) 
         fixture.positions[7].x() -= 0.07;
         fixture.mesh.mass[0] *= 1.4;
         EXPECT_FALSE(materials.prepare(fixture.mesh, fixture.incident, 8, true));
+    }
+}
+
+TEST(GeneralSimdMaterials, ClothMembraneUsesBasicV2KernelAndIncidentOrder) {
+    MaterialFixture fixture;
+    fixture.mesh = RefMesh{};
+    fixture.params = SimParams::zeros();
+    fixture.params.fps = 30.0;
+    fixture.params.substeps = 5;
+    fixture.params.mu = 2.1;
+    fixture.params.lambda = 3.2;
+    fixture.positions = {Vec3(0.13, -0.07, 0.1)};
+    // The center's incident span crosses a full tile and ends with a tail.
+    constexpr int triangles = static_cast<int>(ipc_simd::tile_width) + 3;
+    for (int i = 0; i < triangles; ++i) {
+        const double angle = 2.0 * std::acos(-1.0) * i / triangles;
+        fixture.positions.emplace_back(0.13 + 1.1 * std::cos(angle),
+            -0.07 + 0.9 * std::sin(angle), 0.1);
+        fixture.mesh.tris.insert(fixture.mesh.tris.end(),
+            {0, 1 + i, 1 + (i + 1) % triangles});
+    }
+    const auto node_count = fixture.positions.size();
+    fixture.mesh.num_positions = node_count;
+    fixture.mesh.mass.assign(node_count, 0.0);
+    fixture.mesh.node_to_rb.assign(node_count, -1);
+    fixture.mesh.compute_dm_inverse(fixture.positions);
+    fixture.incident.assign(node_count, {});
+    fixture.shapes.clear();
+    for (int triangle = 0; triangle < triangles; ++triangle) {
+        for (int role = 0; role < 3; ++role)
+            fixture.incident[fixture.mesh.tris[3 * triangle + role]].emplace_back(triangle, role);
+        fixture.shapes.push_back(shape_function_gradients(fixture.mesh.Dm_inverse[triangle]));
+    }
+    for (std::size_t node = 0; node < node_count; ++node) {
+        auto& x = fixture.positions[node];
+        x.x() *= 1.037;
+        x.y() += 0.019 * std::sin(0.7 * node);
+        x.z() += 0.08 * std::cos(0.4 * node);
+    }
+    fixture.predicted = fixture.positions;
+    fixture.pins.clear();
+    fixture.pin_map.assign(node_count, -1);
+    fixture.solid.assign(node_count, 0);
+    fixture.surface.assign(node_count, 0);
+    // Zero mass/gravity, no pins/hinges/SDF/contact: only membrane remains.
+    // Compare to basic v2, not to scalar arithmetic that may round differently.
+    const auto basic_membrane = [&](int node) {
+        solver_detail::GeneralSimdVertexSystem result;
+        for (const auto& [triangle, role] : fixture.incident[node]) {
+            std::array<Vec3, 3> positions;
+            for (int corner = 0; corner < 3; ++corner)
+                positions[corner] = fixture.positions[fixture.mesh.tris[3 * triangle + corner]];
+            Vec3 gradient;
+            Mat33 hessian;
+            ipc_simd::corotated_derivatives_tile(positions.data(),
+                &fixture.mesh.Dm_inverse[triangle], &fixture.mesh.area[triangle],
+                &fixture.shapes[triangle][role], 1, fixture.params.mu,
+                fixture.params.lambda, &gradient, &hessian);
+            result.gradient += fixture.params.dt2() * gradient;
+            result.hessian += fixture.params.dt2() * hessian;
+        }
+        return result;
+    };
+    std::vector<int> order;
+    for (std::size_t node = 0; node < node_count; ++node)
+        order.push_back(static_cast<int>(node_count - 1 - node));
+    for (int reversed = 0; reversed < 2; ++reversed) {
+        SCOPED_TRACE(reversed);
+        solver_detail::GeneralSimdMaterials materials;
+        ASSERT_TRUE(materials.prepare(fixture.mesh, fixture.incident, node_count, false));
+        for (std::size_t width = 1; width <= ipc_simd::tile_width; ++width) {
+            SCOPED_TRACE(width);
+            for (std::size_t first = 0; first < order.size(); first += width) {
+                const auto count = std::min(width, order.size() - first);
+                std::array<solver_detail::GeneralSimdVertexSystem, ipc_simd::tile_width> cached, live;
+                fixture.evaluate(order.data() + first, count, cached.data(), &materials);
+                fixture.evaluate(order.data() + first, count, live.data(), nullptr);
+                for (std::size_t i = 0; i < count; ++i) {
+                    SCOPED_TRACE(order[first + i]);
+                    const auto expected = basic_membrane(order[first + i]);
+                    ASSERT_TRUE(expected.gradient.allFinite());
+                    ASSERT_TRUE(expected.hessian.allFinite());
+                    expect_same(cached[i], expected);
+                    expect_same(live[i], expected);
+                }
+            }
+        }
+        for (auto& incident : fixture.incident)
+            std::reverse(incident.begin(), incident.end());
     }
 }
