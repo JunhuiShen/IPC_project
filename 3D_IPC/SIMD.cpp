@@ -236,6 +236,77 @@ void point_derivatives_tile(const PointInput* inputs, std::size_t entry_count,
 
 namespace {
 
+static Pack point_multiply_add(Pack a, Pack b, Pack c) {
+#if defined(__AVX2__) && defined(__FMA__)
+    return Pack::raw(_mm256_fmadd_pd(a.value, b.value, c.value));
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return Pack::raw(vfmaq_f64(c.value, a.value, b.value));
+#else
+    return a * b + c;
+#endif
+}
+
+static Pack point_separate_product(Pack a, Pack b) {
+    auto value = (a * b).value;
+#if defined(__GNUC__) && (defined(__AVX2__) || defined(__SSE2__))
+    __asm__("" : "+v"(value));
+#elif defined(__GNUC__) && defined(__aarch64__)
+    __asm__("" : "+w"(value));
+#else
+    volatile Pack::Native rounded = value;
+    value = rounded;
+#endif
+    return Pack::raw(value);
+}
+
+} // namespace
+
+void solid_point_derivatives_tile(const PointInput* inputs, std::size_t entry_count,
+    const Vec3& gravity, double kpin, double dt2,
+    Vec3* gradients, Mat33* hessians) {
+    assert(entry_count <= tile_width);
+    const Pack zero(0.0), one(1.0), timestep2(dt2), pin_scale(dt2 * kpin);
+    for (std::size_t begin = 0; begin < entry_count; begin += W) {
+        const int count = static_cast<int>(std::min<std::size_t>(W, entry_count - begin));
+        alignas(32) double mass[W], pinned[W], position[3][W], predicted[3][W], target[3][W];
+        for (int lane = 0; lane < W; ++lane) {
+            const auto& input = inputs[begin + std::min(lane, count - 1)];
+            mass[lane] = input.mass;
+            pinned[lane] = input.pin_target ? 1.0 : 0.0;
+            for (int axis = 0; axis < 3; ++axis) {
+                position[axis][lane] = input.position[axis];
+                predicted[axis][lane] = input.predicted_position[axis];
+                target[axis][lane] = input.pin_target ? (*input.pin_target)[axis] : input.position[axis];
+            }
+        }
+        const Pack m = Pack::load(mass), minus_m = Pack(-1.0) * m;
+        const Pack has_pin = equal(Pack::load(pinned), one);
+        alignas(32) double g[3][W], diagonal[W];
+        for (int axis = 0; axis < 3; ++axis) {
+            const Pack current = Pack::load(position[axis]);
+            // Match the scalar solid kernel's native FMA order: gravity is
+            // rounded first; inertia is fused into it, not the reverse.
+            const Pack gravity_force = point_separate_product(minus_m, Pack(gravity[axis]));
+            const Pack gravity_step = point_separate_product(timestep2, gravity_force);
+            const Pack value = point_multiply_add(m,
+                current - Pack::load(predicted[axis]), gravity_step);
+            select(has_pin, point_multiply_add(pin_scale,
+                current - Pack::load(target[axis]), value), value).store(g[axis]);
+        }
+        select(has_pin, m + pin_scale, m).store(diagonal);
+        for (int lane = 0; lane < count; ++lane) {
+            const auto entry = begin + lane;
+            hessians[entry].setZero();
+            for (int axis = 0; axis < 3; ++axis) {
+                gradients[entry][axis] = g[axis][lane];
+                hessians[entry](axis, axis) = diagonal[lane];
+            }
+        }
+    }
+}
+
+namespace {
+
 #if defined(__AVX512F__)
 struct ElementPack {
     using Native = __m512d;
@@ -966,8 +1037,10 @@ static ContactMatrix contact_interior_hessian(const ContactPacket& data) {
         c[i] = x1(i) - x3(i);
     }
 
-    const ContactPack A = contact_kernel_dot<General>(a, a), B = contact_kernel_dot<General>(a, b),
-        C = contact_kernel_dot<General>(b, b), D = contact_kernel_dot<General>(a, c), E = contact_kernel_dot<General>(b, c);
+    // Both solvers must preserve the scalar SS-interior reduction order.
+    // Chained FMAs change the independently recomputed Hessian geometry.
+    const ContactPack A = contact_ordered_dot(a, a), B = contact_ordered_dot(a, b),
+        C = contact_ordered_dot(b, b), D = contact_ordered_dot(a, c), E = contact_ordered_dot(b, c);
 
     const ContactPack Delta = contact_multiply_add(A, C, -(B * B));
     const ContactPack nu    = contact_multiply_add(B, E, -(C * D));
@@ -994,7 +1067,7 @@ static ContactMatrix contact_interior_hessian(const ContactPacket& data) {
             nu_d[pp][k] = contact_multiply_add(Bd[pp][k], E, B * Ed[pp][k]);
             nu_d[pp][k] = contact_multiply_add(-Cd[pp][k], D, nu_d[pp][k]);
             nu_d[pp][k] = contact_multiply_add(-C, Dd[pp][k], nu_d[pp][k]);
-            zeta_d[pp][k] = !General && k < 2
+            zeta_d[pp][k] = k < 2
                 ? contact_multiply_add(A, Ed[pp][k], Ad[pp][k] * E)
                 : contact_multiply_add(Ad[pp][k], E, A * Ed[pp][k]);
             zeta_d[pp][k] = contact_multiply_add(-Bd[pp][k], D, zeta_d[pp][k]);

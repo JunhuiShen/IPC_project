@@ -28,21 +28,32 @@ void prepare_general_simd_batch(
     assert(count <= width);
     const double dt2 = params.dt2();
     std::array<ipc_simd::PointInput, width> points;
+    std::array<std::size_t, width> point_owners;
     std::array<Vec3, width> gradients;
     std::array<Mat33, width> hessians;
+    std::size_t cloth_count = 0;
+    for (std::size_t i = 0; i < count; ++i)
+        cloth_count += !solid_mask[nodes[i]];
+    std::size_t cloth_entry = 0, solid_entry = cloth_count;
     for (std::size_t i = 0; i < count; ++i) {
         const int node = nodes[i];
-        points[i].mass = mesh.mass[node];
-        points[i].position = positions[node];
-        points[i].predicted_position = predicted[node];
-        if (pin_map[node] >= 0) points[i].pin_target = pins[pin_map[node]].target_position;
+        const auto entry = solid_mask[node] ? solid_entry++ : cloth_entry++;
+        point_owners[entry] = i;
+        points[entry].mass = mesh.mass[node];
+        points[entry].position = positions[node];
+        points[entry].predicted_position = predicted[node];
+        if (pin_map[node] >= 0) points[entry].pin_target = pins[pin_map[node]].target_position;
         outputs[i] = GeneralSimdVertexSystem{};
     }
-    ipc_simd::point_derivatives_tile(points.data(), count, params.gravity,
+    // A color batch can contain both materials. Preserve the cloth point
+    // kernel, and use scalar-solid rounding only for the solid entries.
+    ipc_simd::point_derivatives_tile(points.data(), cloth_count, params.gravity,
         params.kpin, dt2, gradients.data(), hessians.data());
+    ipc_simd::solid_point_derivatives_tile(points.data() + cloth_count, count - cloth_count,
+        params.gravity, params.kpin, dt2, gradients.data() + cloth_count, hessians.data() + cloth_count);
     for (std::size_t i = 0; i < count; ++i) {
-        outputs[i].gradient = gradients[i];
-        outputs[i].hessian = hessians[i];
+        outputs[point_owners[i]].gradient = gradients[i];
+        outputs[point_owners[i]].hessian = hessians[i];
     }
 
     // Pack across complete independent nodes, retaining every node's incident

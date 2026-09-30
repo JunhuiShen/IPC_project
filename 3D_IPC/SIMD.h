@@ -42,6 +42,12 @@ void point_derivatives_tile(const PointInput* inputs, std::size_t count,
     const Vec3& gravity, double kpin, double dt2,
     Vec3* gradients, Mat33* hessians);
 
+// Solid assembly contracts inertia into the rounded gravity contribution.
+// Keep its arithmetic separate from the basic-v2 cloth point kernel above.
+void solid_point_derivatives_tile(const PointInput* inputs, std::size_t count,
+    const Vec3& gravity, double kpin, double dt2,
+    Vec3* gradients, Mat33* hessians);
+
 struct MeshContactInput {
     std::array<Vec3, 4> positions;
     int role = 0;

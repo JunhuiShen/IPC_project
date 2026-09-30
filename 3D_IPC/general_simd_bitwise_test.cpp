@@ -1,6 +1,7 @@
 #include "general_simd_assembly.h"
 #include "general_simd_cloth.h"
 #include "bending_energy.h"
+#include "solid_ipc.h"
 
 #include <gtest/gtest.h>
 
@@ -178,6 +179,102 @@ TEST(GeneralSimdBitwise, PointMatchesOriginalAssembly) {
     ClothFixture fixture;
     fixture.disable_membrane(); fixture.params.kB = 0;
     fixture.compare();
+}
+
+TEST(GeneralSimdBitwise, MixedSolidClothPointRoundingPinsAndBatchTails) {
+    constexpr std::size_t width = ipc_simd::tile_width;
+    static_assert(width == 8);
+    RefMesh mesh;
+    mesh.num_positions = width;
+    mesh.node_to_rb.assign(width, -1);
+    mesh.tet_adj.resize(width);
+    mesh.mass.resize(width);
+    std::vector<Vec3> positions(width), predicted(width);
+    std::vector<IncidentTriangles> incident(width);
+    const std::vector<ShapeGrads> shapes;
+    std::vector<Pin> pins;
+    PinMap pin_map(width, -1);
+    std::vector<unsigned char> solid(width), surface(width, 1);
+    SimParams params = SimParams::zeros();
+    params.fps = 30; params.substeps = 20;
+    params.gravity = Vec3(0.0, -9.81, 0.0);
+    params.kpin = 100000.0;
+    for (std::size_t node = 0; node < width; ++node) {
+        // Node zero retains the exact frame-28/substep-1/sweep-1 inputs
+        // captured for solid vertex 1134 on the GCC native server build.
+        mesh.mass[node] = 0x1.d865de9b0ba24p-8 + .001 * node;
+        positions[node] = Vec3(-0x1.9c2762463df2bp-2,
+            0x1.35198b5adc71cp+0, -0x1.fd7319a438896p-2);
+        predicted[node] = Vec3(-0x1.9bf14a748594fp-2,
+            0x1.357131181ab89p+0, -0x1.fd71b59147924p-2);
+        predicted[node] += Vec3(.00001 * node, -.00003 * node, .00007 * node);
+        if (node % 4 >= 2) {
+            pin_map[node] = static_cast<int>(pins.size());
+            pins.push_back(Pin{static_cast<int>(node),
+                positions[node] + Vec3(.00013, -.00027, .00019)});
+        }
+    }
+    // Permutation makes it impossible to accidentally use the batch lane as
+    // the global node ID when selecting the cloth/solid arithmetic.
+    const std::array<int, width> nodes{7, 0, 5, 2, 3, 4, 1, 6};
+    for (int pattern = 0; pattern < 3; ++pattern) {
+        mesh.tet_nodes.clear();
+        for (std::size_t node = 0; node < width; ++node) {
+            solid[node] = pattern == 1 || (pattern == 2 && node % 2 == 0);
+            if (solid[node]) mesh.tet_nodes.push_back(static_cast<int>(node));
+        }
+        solver_detail::GeneralSimdMaterials materials;
+        materials.prepare(mesh, incident, width, false);
+        for (bool cached : {false, true}) {
+            for (std::size_t count = 1; count <= width; ++count) {
+                std::array<solver_detail::GeneralSimdVertexSystem, width> output;
+                for (auto& value : output) {
+                    value.gradient.setConstant(1234567.0);
+                    value.hessian.setConstant(1234567.0);
+                }
+                solver_detail::prepare_general_simd_batch(nodes.data(), count,
+                    mesh, incident, shapes, pins, pin_map, params, positions,
+                    predicted, nullptr, solid, surface, output.data(),
+                    cached ? &materials : nullptr);
+                for (std::size_t lane = 0; lane < count; ++lane) {
+                    const int node = nodes[lane];
+                    SCOPED_TRACE(::testing::Message() << "pattern=" << pattern
+                        << " cached=" << cached << " count=" << count
+                        << " lane=" << lane << " node=" << node);
+                    if (solid[node]) {
+                        const auto expected = compute_solid_local_gradient_and_pbgs_block_no_barrier(
+                            node, mesh, pins, params, positions, predicted, &surface, &pin_map);
+#if defined(__AVX512F__) && defined(__FMA__) && defined(__GNUC__) && !defined(__clang__)
+                        // Exactness is a contract for the diagnosed GCC native
+                        // build, not a claim of cross-compiler reproducibility.
+                        expect_bitwise(output[lane].gradient, expected.first, "solid_gradient");
+                        expect_bitwise(output[lane].hessian, expected.second, "solid_hessian");
+                        if (node == 0)
+                            EXPECT_EQ(bits(output[lane].gradient.y()), UINT64_C(0xbee3ce1a61699710));
+#else
+                        expect_numerically_equal(output[lane].gradient, expected.first, "solid_gradient");
+                        expect_numerically_equal(output[lane].hessian, expected.second, "solid_hessian");
+#endif
+                    } else {
+                        ipc_simd::PointInput input;
+                        input.mass = mesh.mass[node]; input.position = positions[node];
+                        input.predicted_position = predicted[node];
+                        if (pin_map[node] >= 0) input.pin_target = pins[pin_map[node]].target_position;
+                        Vec3 gradient; Mat33 hessian;
+                        ipc_simd::point_derivatives_tile(&input, 1, params.gravity,
+                            params.kpin, params.dt2(), &gradient, &hessian);
+                        // The solid fix must not change basic-v2 cloth arithmetic.
+                        expect_bitwise(output[lane].gradient, gradient, "cloth_gradient");
+                        expect_bitwise(output[lane].hessian, hessian, "cloth_hessian");
+                    }
+                }
+                for (std::size_t lane = count; lane < width; ++lane) {
+                    EXPECT_TRUE((output[lane].gradient.array() == 1234567.0).all());
+                    EXPECT_TRUE((output[lane].hessian.array() == 1234567.0).all());
+                }
+            }
+        }
+    }
 }
 
 TEST(GeneralSimdBitwise, MembraneMatchesOriginalAssembly) {
