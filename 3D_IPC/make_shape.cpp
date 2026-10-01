@@ -606,16 +606,24 @@ int build_square_mesh_alternating_diagonals(
     return base;
 }
 
-// V = nu(n_rows + 1) + 2 and T = 2nu(n_rows + 1), including both end caps.
+// Closed cylinder with staggered wall rows and radially subdivided end caps.
 int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X,
-                        int nu, double radius, double length, const Vec3& center) {
+                        int nu, double radius, double length, const Vec3& center, int cap_rings) {
+    if (nu < 3 || cap_rings < 1 || !std::isfinite(radius) || radius <= 0.0
+        || !std::isfinite(length) || length <= 0.0 || !center.allFinite())
+        throw std::invalid_argument("cylinder requires nu >= 3, positive cap_rings and dimensions, and a finite center");
     constexpr double kPi = 3.14159265358979323846;
-    const int    base        = static_cast<int>(state.deformed_positions.size());
     const double two_pi      = 2.0 * kPi;
     const double theta_start = -0.5 * kPi;
 
     const double iso_row_h = (two_pi * radius / nu) * 0.5 * std::sqrt(3.0);
-    const int    n_rows    = std::max(1, static_cast<int>(std::round(length / iso_row_h)));
+    const double rows = std::max(1.0, std::round(length / iso_row_h));
+    const double vertex_count = nu * (rows + 1.0 + 2.0 * (cap_rings - 1.0)) + 2.0;
+    if (!std::isfinite(vertex_count) || vertex_count + state.deformed_positions.size()
+            > static_cast<double>(std::numeric_limits<int>::max()))
+        throw std::invalid_argument("cylinder tessellation exceeds mesh index limits");
+    const int base = static_cast<int>(state.deformed_positions.size());
+    const int n_rows = static_cast<int>(rows);
 
     for (int j = 0; j <= n_rows; ++j) {
         const double v        = static_cast<double>(j) / n_rows;
@@ -670,10 +678,8 @@ int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec
         }
     }
 
-    // End caps: fan triangles around a center vertex on each circular end.
     // Cap centers sit off the unrolled strip (y=0 and y=length are occupied
-    // by the boundary rings) so the fan triangles stay non-degenerate in
-    // parameter space and buildCorotatedCache's Eigen decomposition succeeds.
+    // by the boundary rings) to keep the reference triangles nondegenerate.
     const double cap_offset = radius;
     const int bot_center = static_cast<int>(state.deformed_positions.size());
     X.push_back(Vec2(kPi * radius, -cap_offset));
@@ -685,16 +691,43 @@ int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec
     state.deformed_positions.push_back(
         Vec3(center.x(), center.y(), center.z() + 0.5 * length));
 
-    for (int i = 0; i < nu; ++i) {
-        const int i_next = (i + 1) % nu;
-        // Bottom cap faces -z: winding (center, ring[i_next], ring[i]).
-        ref_mesh.tris.push_back(bot_center);
-        ref_mesh.tris.push_back(vertex_index(i_next, 0));
-        ref_mesh.tris.push_back(vertex_index(i,      0));
-        // Top cap faces +z: winding (center, ring[i], ring[i_next]).
-        ref_mesh.tris.push_back(top_center);
-        ref_mesh.tris.push_back(vertex_index(i,      n_rows));
-        ref_mesh.tris.push_back(vertex_index(i_next, n_rows));
+    // Interior rings reuse the wall's boundary vertices at the outer edge.
+    // Interpolate the existing cap reference chart as well as world positions,
+    // keeping every parameter-space triangle nondegenerate across the seam.
+    const int centers[2] = {bot_center, top_center};
+    const int cap_base = static_cast<int>(state.deformed_positions.size());
+    for (int end = 0; end < 2; ++end) {
+        for (int ring = 1; ring < cap_rings; ++ring) {
+            const double fraction = static_cast<double>(ring) / cap_rings;
+            for (int i = 0; i < nu; ++i) {
+                const int outer = vertex_index(i, end == 0 ? 0 : n_rows);
+                const Vec2 material = X[centers[end]] + fraction * (X[outer] - X[centers[end]]);
+                const Vec3 point = state.deformed_positions[centers[end]]
+                    + fraction * (state.deformed_positions[outer] - state.deformed_positions[centers[end]]);
+                X.push_back(material);
+                state.deformed_positions.push_back(point);
+            }
+        }
+    }
+    const auto cap_vertex_index = [&](int end, int ring, int i) {
+        if (ring == 0) return centers[end];
+        if (ring == cap_rings) return vertex_index(i, end == 0 ? 0 : n_rows);
+        return cap_base + (end * (cap_rings - 1) + ring - 1) * nu + i;
+    };
+    for (int ring = 1; ring <= cap_rings; ++ring) {
+        for (int i = 0; i < nu; ++i) {
+            const int next = (i + 1) % nu;
+            for (int end = 0; end < 2; ++end) {
+                const auto emit = [&](int a, int b, int c) {
+                    if (end == 0) std::swap(b, c); // -z bottom; +z top
+                    ref_mesh.tris.insert(ref_mesh.tris.end(), {a, b, c});
+                };
+                const int inner = cap_vertex_index(end, ring - 1, i);
+                const int outer_next = cap_vertex_index(end, ring, next);
+                emit(inner, cap_vertex_index(end, ring, i), outer_next);
+                if (ring > 1) emit(inner, outer_next, cap_vertex_index(end, ring - 1, next));
+            }
+        }
     }
 
     ref_mesh.initialize(X, state.deformed_positions);

@@ -3012,24 +3012,24 @@ void build_cloth_cylinder_drop_example(
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris) {
     if (args.drop_stack_count < 1 || args.drop_cloth_nx < 1
-        || args.drop_cloth_ny < 1 || args.cyl_nu < 3) {
+        || args.drop_cloth_ny < 1 || args.cyl_nu < 3 || args.cyl_cap_rings < 1) {
         throw std::invalid_argument(
             "example 24 requires positive cloth count and grid subdivisions, "
-            "and cyl_nu >= 3");
+            "cyl_cap_rings >= 1, and cyl_nu >= 3");
     }
     for (const double length : {args.drop_cloth_w, args.drop_cloth_h,
-                               args.drop_spacing, args.cyl_ground_size,
+                               args.drop_spacing, args.cyl_ground_size, args.cyl_ground_cell_size,
                                args.cyl_radius, args.cyl_length}) {
         if (!std::isfinite(length) || length <= 0.0) {
             throw std::invalid_argument(
                 "example 24 requires positive finite cloth dimensions, "
-                "drop_spacing, ground size, cylinder radius and length");
+                "drop_spacing, ground size and cell size, cylinder radius and length");
         }
     }
-    if (!std::isfinite(args.drop_k_sdf) || args.drop_k_sdf < 0.0
+    if (!std::isfinite(args.k_sdf) || args.k_sdf < 0.0
         || !std::isfinite(args.cyl_sdf_padding) || args.cyl_sdf_padding < 0.0) {
         throw std::invalid_argument(
-            "example 24 requires nonnegative finite drop_k_sdf and cyl_sdf_padding");
+            "example 24 requires nonnegative finite k_sdf and cyl_sdf_padding");
     }
     if (!std::isfinite(params.d_hat) || params.d_hat > args.drop_spacing) {
         throw std::invalid_argument(
@@ -3049,26 +3049,33 @@ void build_cloth_cylinder_drop_example(
             "padded top, with eps_sdf clearance");
     }
 
+    // Export-only tessellation: contact still uses the analytic SDFs below.
+    // The cylinder SDF is infinite along z, as in the other cylinder examples.
+    const double ground_cells = std::ceil(args.cyl_ground_size / args.cyl_ground_cell_size);
+    if (!std::isfinite(ground_cells)
+        || ground_cells >= std::sqrt(static_cast<double>(std::numeric_limits<int>::max())) - 1.0) {
+        throw std::invalid_argument("example 24 ground tessellation exceeds mesh index limits");
+    }
+    const int ground_n = std::max(1, static_cast<int>(ground_cells));
     clear_model(ref_mesh, state, X, pins);
-    params.k_sdf = args.drop_k_sdf;
+    params.k_sdf = args.k_sdf;
     params.sdf_planes.clear();
     params.sdf_cylinders.clear();
     params.sdf_spheres.clear();
-
-    // Export-only geometry: contact uses the analytic SDFs below, so a single
-    // quad is sufficient for the ground. The cylinder has two visible caps;
-    // its SDF is infinite along z, matching the existing cylinder examples.
     RefMesh static_ref;
     DeformedState static_state;
     std::vector<Vec2> static_X;
     build_square_mesh(
-        static_ref, static_state, static_X, 1, 1,
+        static_ref, static_state, static_X, ground_n, ground_n,
         args.cyl_ground_size, args.cyl_ground_size,
         Vec3(args.cyl_cx - 0.5 * args.cyl_ground_size, 0.0,
              args.cyl_cz - 0.5 * args.cyl_ground_size));
+    // The cloth grid's winding faces -y; the visible floor should face +y.
+    for (std::size_t triangle = 0; triangle < static_ref.tris.size(); triangle += 3)
+        std::swap(static_ref.tris[triangle + 1], static_ref.tris[triangle + 2]);
     build_cylinder_mesh(
         static_ref, static_state, static_X,
-        args.cyl_nu, args.cyl_radius, args.cyl_length, cylinder_center);
+        args.cyl_nu, args.cyl_radius, args.cyl_length, cylinder_center, args.cyl_cap_rings);
     static_x = std::move(static_state.deformed_positions);
     static_tris = std::move(static_ref.tris);
 

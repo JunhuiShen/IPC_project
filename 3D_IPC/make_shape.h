@@ -64,8 +64,10 @@ int build_square_mesh_alternating_diagonals(
     RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X,
     int nx, int ny, double width, double height, const Vec3& origin);
 
-// Cylinder: h = (2 pi radius/nu)sqrt(3)/2, n = max(1, round(length/h)); V = nu(n+1)+2, T = 2nu(n+1).
-int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nu, double radius, double length, const Vec3& center);
+// Closed cylinder: h = (2 pi radius/nu)sqrt(3)/2, n = max(1, round(length/h)).
+// With k=cap_rings: V = nu(n+1)+2+2nu(k-1), T = 2nu*n+2nu(2k-1).
+// One cap ring preserves the original center-fan topology.
+int build_cylinder_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nu, double radius, double length, const Vec3& center, int cap_rings = 1);
 
 // Icosphere counts: V = 10(4^subdiv) + 2, T = 20(4^subdiv); X uses xz projection.
 int build_sphere_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int subdiv, double radius, const Vec3& center);

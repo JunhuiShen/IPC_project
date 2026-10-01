@@ -4785,6 +4785,57 @@ TEST(OscillatingClothLayersExample,
     }
 }
 
+TEST(CylinderMesh, RadialCapsAreClosedOutwardAndHaveFiniteReferenceTriangles) {
+    constexpr int nu = 12;
+    constexpr double radius = .4;
+    const Vec3 center(2.0, 3.0, 4.0);
+    for (int cap_rings : {1, 5}) for (double length : {.2, .4}) {
+        SCOPED_TRACE(::testing::Message() << "rings=" << cap_rings << " length=" << length);
+        RefMesh mesh;
+        DeformedState state;
+        std::vector<Vec2> X;
+        build_square_mesh(mesh, state, X, 1, 1, 1.0, 1.0, Vec3(10,0,0));
+        const auto prior_tris = mesh.tris;
+        const int base = build_cylinder_mesh(mesh, state, X, nu, radius, length, center, cap_rings);
+        ASSERT_EQ(base, 4);
+        const int rows = std::max(1, static_cast<int>(std::round(
+            length / ((2.0 * M_PI * radius / nu) * .5 * std::sqrt(3.0)))));
+        EXPECT_EQ(state.deformed_positions.size(),
+            4U + nu * (rows + 1) + 2 + 2 * nu * (cap_rings - 1));
+        EXPECT_EQ(mesh.tris.size() / 3, 2U + 2 * nu * rows + 2 * nu * (2 * cap_rings - 1));
+        EXPECT_TRUE(std::equal(prior_tris.begin(), prior_tris.end(), mesh.tris.begin()));
+        std::map<std::pair<int,int>,int> edges;
+        int caps[2] = {0,0};
+        for (std::size_t t = prior_tris.size(); t < mesh.tris.size(); t += 3) {
+            const Vec3 a = state.deformed_positions[mesh.tris[t]] - center;
+            const Vec3 b = state.deformed_positions[mesh.tris[t+1]] - center;
+            const Vec3 c = state.deformed_positions[mesh.tris[t+2]] - center;
+            const Vec3 normal = (b-a).cross(c-a);
+            EXPECT_GT(normal.squaredNorm(), 0.0);
+            if (std::abs(a.z()-b.z()) < 1e-12 && std::abs(a.z()-c.z()) < 1e-12) {
+                const int end = a.z() < 0 ? 0 : 1;
+                ++caps[end];
+                EXPECT_NEAR(std::abs(a.z()), .5 * length, 1e-12);
+                EXPECT_GT((end == 0 ? -1.0 : 1.0) * normal.z(), 0.0);
+            } else {
+                const Vec3 midpoint = (a+b+c)/3.0;
+                EXPECT_GT(normal.head<2>().dot(midpoint.head<2>()), 0.0);
+            }
+            for (int j = 0; j < 3; ++j) {
+                int first = mesh.tris[t+j], second = mesh.tris[t+(j+1)%3];
+                if (first > second) std::swap(first, second);
+                ++edges[{first,second}];
+            }
+            EXPECT_TRUE(mesh.Dm_inverse[t/3].allFinite());
+            EXPECT_GT(mesh.area[t/3], 0.0);
+        }
+        for (const auto& edge : edges) EXPECT_EQ(edge.second, 2);
+        EXPECT_EQ(caps[0], nu * (2 * cap_rings - 1));
+        EXPECT_EQ(caps[1], nu * (2 * cap_rings - 1));
+        EXPECT_THROW(build_cylinder_mesh(mesh,state,X,nu,radius,length,center,0), std::invalid_argument);
+    }
+}
+
 TEST(ClothCylinderDropExample, DefaultSheetsAreSeparateFreeAndClearOfColliders) {
     IPCArgs3D args;
     RefMesh ref_mesh;
@@ -4810,8 +4861,7 @@ TEST(ClothCylinderDropExample, DefaultSheetsAreSeparateFreeAndClearOfColliders) 
     ASSERT_EQ(params.sdf_planes.size(), 1U);
     ASSERT_EQ(params.sdf_cylinders.size(), 1U);
     EXPECT_TRUE(params.sdf_spheres.empty());
-    EXPECT_DOUBLE_EQ(params.k_sdf, args.drop_k_sdf);
-    EXPECT_GT(params.k_sdf, args.k_sdf);
+    EXPECT_DOUBLE_EQ(params.k_sdf, args.k_sdf);
     EXPECT_GT(params.d_hat, 0.0);
     EXPECT_GE(args.drop_spacing, params.d_hat);
     for (std::size_t node = 0; node < state.deformed_positions.size(); ++node) {
@@ -4838,18 +4888,29 @@ TEST(ClothCylinderDropExample, DefaultSheetsAreSeparateFreeAndClearOfColliders) 
     EXPECT_NEAR(std::accumulate(ref_mesh.area.begin(), ref_mesh.area.end(), 0.0),
                 10.0 * args.drop_cloth_w * args.drop_cloth_h, 1.0e-10);
 
-    ASSERT_GT(static_x.size(), 4U);
-    ASSERT_GT(static_tris.size(), 6U);
+    const int ground_n = static_cast<int>(std::ceil(args.cyl_ground_size / args.cyl_ground_cell_size));
+    const std::size_t ground_vertices = (ground_n + 1) * (ground_n + 1);
+    const std::size_t ground_indices = 6 * ground_n * ground_n;
+    ASSERT_GT(static_x.size(), ground_vertices);
+    ASSERT_GT(static_tris.size(), ground_indices);
+    for (std::size_t t = 0; t < ground_indices; t += 3) {
+        const Vec3& a = static_x[static_tris[t]];
+        const Vec3& b = static_x[static_tris[t + 1]];
+        const Vec3& c = static_x[static_tris[t + 2]];
+        EXPECT_GT((b - a).cross(c - a).y(), 0.0);
+    }
     for (const int index : static_tris) {
         EXPECT_GE(index, 0);
         EXPECT_LT(static_cast<std::size_t>(index), static_x.size());
     }
-    // The padded SDF surrounds the visible cylinder. Cap centers lie on its
-    // axis; the other visual vertices sit padding meters inside its surface.
-    for (std::size_t node = 4; node < static_x.size(); ++node) {
-        const double phi = evaluate_sdf(params.sdf_cylinders[0], static_x[node]).phi;
-        EXPECT_TRUE(std::abs(phi + args.cyl_sdf_padding) < 1.0e-12
-                    || std::abs(phi + params.sdf_cylinders[0].radius) < 1.0e-12);
+    // The wall sits inside the padded SDF; end-cap rings fill each disk.
+    const Vec3 center(args.cyl_cx, args.cyl_cy, args.cyl_cz);
+    for (std::size_t node = ground_vertices; node < static_x.size(); ++node) {
+        const Vec3 relative = static_x[node] - center;
+        const double radial = relative.head<2>().norm();
+        if (std::abs(std::abs(relative.z()) - .5 * args.cyl_length) < 1e-12)
+            EXPECT_LE(radial, args.cyl_radius + 1e-12);
+        else EXPECT_NEAR(radial, args.cyl_radius, 1e-12);
     }
 
     // Keeping vertices outside an unpadded cylinder does not keep a coarse
@@ -4895,7 +4956,7 @@ TEST(ClothCylinderDropExample, RebuildUsesIndependentClothAndCylinderLocations) 
     args.cyl_cz = -2.0;
     args.cyl_radius = 0.5;
     args.cyl_sdf_padding = 0.02;
-    args.drop_k_sdf = 2e8;
+    args.k_sdf = 2e8;
     args.cyl_length = 4.0;
     args.cyl_nu = 16;
     build_cloth_cylinder_drop_example(
@@ -4918,14 +4979,25 @@ TEST(ClothCylinderDropExample, RebuildUsesIndependentClothAndCylinderLocations) 
         center /= 35.0;
         EXPECT_TRUE(center.isApprox(Vec3(0.75, 2.0 + sheet * 0.2, 0.25)));
     }
-    Vec3 lo = static_x[4];
+    const int ground_n = static_cast<int>(std::ceil(args.cyl_ground_size / args.cyl_ground_cell_size));
+    const std::size_t ground_vertices = (ground_n + 1) * (ground_n + 1);
+    Vec3 lo = static_x[ground_vertices];
     Vec3 hi = lo;
-    for (std::size_t node = 4; node < static_x.size(); ++node) {
+    for (std::size_t node = ground_vertices; node < static_x.size(); ++node) {
         lo = lo.cwiseMin(static_x[node]);
         hi = hi.cwiseMax(static_x[node]);
     }
     EXPECT_TRUE(lo.isApprox(Vec3(2.5, 0.5, -4.0)));
     EXPECT_TRUE(hi.isApprox(Vec3(3.5, 1.5, 0.0)));
+
+    args.cyl_ground_cell_size = 0.0;
+    EXPECT_THROW(build_cloth_cylinder_drop_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris), std::invalid_argument);
+    args.cyl_ground_cell_size = 0.25;
+    args.cyl_cap_rings = 0;
+    EXPECT_THROW(build_cloth_cylinder_drop_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris), std::invalid_argument);
+    args.cyl_cap_rings = 12;
 
     // Reject coincident sheets and an initially intersecting cylinder.
     args.drop_spacing = 0.0;

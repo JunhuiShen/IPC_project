@@ -114,19 +114,17 @@ Use `--use_parallel true` for parallel updates.
 For example, run the reference 240-frame Example 1 with v2, bending, and self-contact:
 
 ```bash
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=close OMP_PLACES=cores \
-  ./build/3D_sim \
-    --example 1 --num_frames 240 --substeps 5 \
-    --max_substep_iters 10 --fixed_iters true --node_box_update_count 10 \
-    --use_basic_experimental true --use_parallel true --use_simd true \
-    --E 115000 --nu 0.25 --kpin 1e9 --twist_rate 0.5 \
-    --kB 0.009 --d_hat 0.005 --k_barrier 100 \
-    --outdir example1_v2_output --format geo
+./build/3D_sim \
+  --example 1 --num_frames 240 --substeps 5 \
+  --max_substep_iters 10 --fixed_iters true --node_box_update_count 10 \
+  --use_basic_experimental true --use_parallel true --use_simd true \
+  --E 115000 --nu 0.25 --kpin 1e9 --twist_rate 0.5 \
+  --kB 0.009 --d_hat 0.005 --k_barrier 100 \
+  --outdir example1_v2_output --format geo
 ```
 
-Set `OMP_NUM_THREADS` to the desired thread count. To compare with v1 scalar,
-change only `--use_simd true` to `--use_simd false`. Example 1 has no SDF
-obstacles; friction is zero by default.
+To compare with v1 scalar, change only `--use_simd true` to `--use_simd false`.
+Example 1 has no SDF obstacles; friction is zero by default.
 
 ### Spatial grid scheduling for basic cloth
 
@@ -234,7 +232,7 @@ on a local machine. Omitting `--node_box_max` uses its default of `0.01` m;
 `--cloth_grid_dx 0.05` satisfies the required separation bound:
 
 ```bash
-OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE ./build/3D_sim \
+./build/3D_sim \
   --example 1 --num_frames 220 --fps 30 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
   --friction_coefficient 0 --use_parallel true \
@@ -501,27 +499,25 @@ commands for examples 12–23 mirror the scene comments in `example.cpp`:
 ./build/3D_sim --example 21 --num_frames 200 --substeps 20 --max_substep_iters 80 --fixed_iters --kB 0.0025 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --outdir rolled_cloth_on_steep_ramp_output_new --format obj
 
 # Example 22: three cloth layers with one fixed edge and one oscillating edge
-OMP_NUM_THREADS=10 OMP_DYNAMIC=FALSE ./build/3D_sim --example 22 \
+./build/3D_sim --example 22 \
   --num_frames 200 --substeps 30 --max_substep_iters 100 --fixed_iters \
   --friction_coefficient 0.0 --friction_velocity_epsilon 0.01 \
   --kB 0.01 --osc_amplitude 0.01 --osc_frequency 6.0 --osc_length 1.0 --gy 0 \
   --outdir oscillating_cloth_layers_output --format geo
 
 # Example 23: a rigid wrecking ball swings into a wall of 560 cubes
-OMP_NUM_THREADS=10 OMP_DYNAMIC=FALSE ./build/3D_sim --example 23 \
+./build/3D_sim --example 23 \
   --num_frames 200 --substeps 30 --max_substep_iters 200 --fixed_iters \
   --d_hat 0.001 --k_barrier 1e9 --k_sdf 1e8 --eps_sdf 0.002 \
   --friction_coefficient 0.1 --outdir wrecking_ball_tuned_output --format geo
 
 # Example 24: fifty cloth sheets dropped onto a cylinder offset to the left
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 24 --drop_stack_count 50 --num_frames 120 \
-  --fps 30 --substeps 5 --max_substep_iters 30 --fixed_iters \
+  --substeps 5 --max_substep_iters 30 --fixed_iters \
   --use_basic_experimental --use_simd \
-  --density 900 --thickness 0.001 --E 1e6 --nu 0.3 --kB 0.01 \
-  --d_hat 0.01 --drop_spacing 0.012 --k_barrier 1000 \
-  --drop_k_sdf 1e8 --eps_sdf 0.005 --cyl_sdf_padding 0.012 \
-  --friction_coefficient 0 --cyl_ground_size 60 \
+  --E 1e6 --nu 0.3 --kB 0.01 \
+  --d_hat 0.01 --k_barrier 1000 \
+  --k_sdf 1e8 --eps_sdf 0.005 --friction_coefficient 0 \
   --outdir cloth_cylinder_drop_output --format geo
 ```
 
@@ -638,7 +634,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (per-iteration box/pair refresh solver), `ogc_box_pad` (BVH padding for the refresh; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (translation/node-box radius limits in m), `theta_box_min`, `theta_box_max` (rigid orientation-box angular-radius limits in rad), `node_box_update_count` (GS iterations between broad-phase/contact-color rebuilds; default 10) |
-| Scene | `example` (`1`..`24`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink`, `crusher_angular_speed`; Example 22: `osc_nx`, `osc_nz`, `osc_length`, `osc_width`, `osc_layer_gap`, `osc_amplitude`, `osc_frequency`; Example 24: `drop_stack_count`, `drop_cloth_nx`, `drop_cloth_ny`, `drop_first_y`, `drop_spacing`, `drop_cloth_w`, `drop_cloth_h`, `drop_cx`, `drop_cz`, `drop_k_sdf`, `cyl_ground_size`, `cyl_nu`, `cyl_radius`, `cyl_sdf_padding`, `cyl_length`, `cyl_cx`, `cyl_cy`, `cyl_cz` |
+| Scene | `example` (`1`..`24`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink`, `crusher_angular_speed`; Example 22: `osc_nx`, `osc_nz`, `osc_length`, `osc_width`, `osc_layer_gap`, `osc_amplitude`, `osc_frequency`; Example 24: `drop_stack_count`, `drop_cloth_nx`, `drop_cloth_ny`, `drop_first_y`, `drop_spacing`, `drop_cloth_w`, `drop_cloth_h`, `drop_cx`, `drop_cz`, `cyl_ground_size`, `cyl_ground_cell_size`, `cyl_nu`, `cyl_cap_rings`, `cyl_radius`, `cyl_sdf_padding`, `cyl_length`, `cyl_cx`, `cyl_cy`, `cyl_cz` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame`, `datadir` |
 
 Notes:

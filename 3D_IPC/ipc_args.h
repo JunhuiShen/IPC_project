@@ -126,14 +126,15 @@ struct IPCArgs3D : ArgParser {
     int         drop_cloth_nx    = 16;   // subdivisions along x
     int         drop_cloth_ny    = 16;   // subdivisions along z
     double      drop_first_y     = 1.20; // lowest sheet's initial height (m)
-    double      drop_spacing     = 0.01; // vertical sheet spacing (m)
+    double      drop_spacing     = 0.012;// vertical sheet spacing (m)
     double      drop_cloth_w     = 2.0;  // sheet width along x (m)
     double      drop_cloth_h     = 2.0;  // sheet length along z (m)
     double      drop_cx          = 0.0;  // cloth-stack center x (m)
     double      drop_cz          = 0.0;  // cloth-stack center z (m)
-    double      drop_k_sdf       = 1e8;  // example 24 cylinder/ground stiffness
-    double      cyl_ground_size  = 12.0; // visual ground edge length (m)
+    double      cyl_ground_size  = 28.0; // visual ground edge length (m)
+    double      cyl_ground_cell_size = 0.25; // maximum visual ground cell edge (m)
     int         cyl_nu           = 64;   // circumferential visual subdivisions
+    int         cyl_cap_rings    = 12;   // radial subdivisions of the visual end caps
     double      cyl_radius       = 0.35; // visible cylinder radius (m)
     double      cyl_sdf_padding  = 0.012;// extra collision radius for coarse cloth faces (m)
     double      cyl_length       = 3.4;  // visual length along z (m); covers the observed contact region
@@ -255,14 +256,15 @@ struct IPCArgs3D : ArgParser {
         add_int   ("drop_cloth_nx",    drop_cloth_nx,    16,   "Grid subdivisions along x per sheet in example 24");
         add_int   ("drop_cloth_ny",    drop_cloth_ny,    16,   "Grid subdivisions along z per sheet in example 24");
         add_double("drop_first_y",     drop_first_y,     1.20, "Initial lowest-sheet height (m) in example 24; must clear the padded cylinder top and eps_sdf");
-        add_double("drop_spacing",     drop_spacing,     0.01, "Initial vertical spacing (m) between cloth sheets in example 24");
+        add_double("drop_spacing",     drop_spacing,     0.012,"Initial vertical spacing (m) between cloth sheets in example 24");
         add_double("drop_cloth_w",     drop_cloth_w,     2.0,  "Cloth width along x (m) in example 24");
         add_double("drop_cloth_h",     drop_cloth_h,     2.0,  "Cloth length along z (m) in example 24");
         add_double("drop_cx",          drop_cx,          0.0,  "Cloth-stack center x (m) in example 24, independent of the cylinder");
         add_double("drop_cz",          drop_cz,          0.0,  "Cloth-stack center z (m) in example 24, independent of the cylinder");
-        add_double("drop_k_sdf",       drop_k_sdf,       1e8,  "Cylinder and ground SDF stiffness in example 24 (overrides k_sdf; 0 disables)");
-        add_double("cyl_ground_size",  cyl_ground_size,  12.0, "Visual ground edge length (m) in example 24");
+        add_double("cyl_ground_size",  cyl_ground_size,  28.0, "Visual ground edge length (m) in example 24");
+        add_double("cyl_ground_cell_size", cyl_ground_cell_size, 0.25, "Maximum visual ground cell edge (m) in example 24");
         add_int   ("cyl_nu",           cyl_nu,           64,   "Circumferential visual cylinder subdivisions in example 24");
+        add_int   ("cyl_cap_rings",    cyl_cap_rings,    12,   "Radial subdivisions per visual cylinder end cap in example 24");
         add_double("cyl_radius",       cyl_radius,       0.35, "Visible cylinder radius (m) in example 24");
         add_double("cyl_sdf_padding",  cyl_sdf_padding,  0.012,"Extra cylinder SDF radius (m) in example 24 to keep coarse cloth faces outside the visible cylinder");
         add_double("cyl_length",       cyl_length,       3.4,  "Visual cylinder length along z (m) in example 24; collision SDF is infinite");
