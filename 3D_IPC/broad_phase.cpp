@@ -8,6 +8,48 @@
 #include <omp.h>
 #endif
 
+void BroadPhase::discard_separated_contact_incidence(
+    const std::vector<unsigned char>& nt_separated,
+    const std::vector<unsigned char>& ss_separated,
+    bool parallel,
+    std::vector<std::vector<int>>* body_nt,
+    std::vector<std::vector<int>>* body_ss) {
+    if (nt_separated.size() != cache_.nt_pairs.size()
+        || ss_separated.size() != cache_.ss_pairs.size()) {
+        throw std::invalid_argument("separation flags must match contact pairs");
+    }
+    if ((body_nt == nullptr) != (body_ss == nullptr)
+        || (body_nt && body_nt->size() != body_ss->size())) {
+        throw std::invalid_argument("rigid contact incidence must have matching body rows");
+    }
+    const int count = static_cast<int>(cache_.vertex_nt.size());
+    #pragma omp parallel for schedule(static) if(parallel && count >= 128)
+    for (int node = 0; node < count; ++node) {
+        auto& nt = cache_.vertex_nt[node];
+        auto& ss = cache_.vertex_ss[node];
+        nt.erase(std::remove_if(nt.begin(), nt.end(), [&](const auto& entry) {
+            return nt_separated[entry.pair_index] != 0;
+        }), nt.end());
+        ss.erase(std::remove_if(ss.begin(), ss.end(), [&](const auto& entry) {
+            return ss_separated[entry.pair_index] != 0;
+        }), ss.end());
+    }
+    if (body_nt) {
+        const int bodies = static_cast<int>(body_nt->size());
+        #pragma omp parallel for schedule(static) if(parallel && bodies >= 8)
+        for (int body = 0; body < bodies; ++body) {
+            auto& nt = (*body_nt)[body];
+            auto& ss = (*body_ss)[body];
+            nt.erase(std::remove_if(nt.begin(), nt.end(), [&](int pair) {
+                return nt_separated[pair] != 0;
+            }), nt.end());
+            ss.erase(std::remove_if(ss.begin(), ss.end(), [&](int pair) {
+                return ss_separated[pair] != 0;
+            }), ss.end());
+        }
+    }
+}
+
 // BVH build / refit / query
 namespace {
 // Smaller subtrees stay within a worker to amortize task scheduling.

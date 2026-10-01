@@ -68,8 +68,9 @@ int main(int argc, char** argv) {
     else if (args.example == 21) build_cloth_unrolling_down_fixed_ramp_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else if (args.example == 22) build_oscillating_cloth_layers_example(args, ref_mesh, state, X, pins, params, oscillating_layers_spec);
     else if (args.example == 23) build_wrecking_ball_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
+    else if (args.example == 24) build_cloth_cylinder_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24.\n";
         return 1;
     }
 

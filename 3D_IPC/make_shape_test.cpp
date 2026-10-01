@@ -4785,6 +4785,168 @@ TEST(OscillatingClothLayersExample,
     }
 }
 
+TEST(ClothCylinderDropExample, DefaultSheetsAreSeparateFreeAndClearOfColliders) {
+    IPCArgs3D args;
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    std::vector<Vec3> static_x;
+    std::vector<int> static_tris;
+    build_cloth_cylinder_drop_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris);
+
+    ASSERT_EQ(args.drop_stack_count, 10);
+    const int nodes_per_sheet = (args.drop_cloth_nx + 1)
+        * (args.drop_cloth_ny + 1);
+    ASSERT_EQ(state.deformed_positions.size(), 10U * nodes_per_sheet);
+    ASSERT_EQ(state.velocities.size(), state.deformed_positions.size());
+    EXPECT_EQ(X.size(), state.deformed_positions.size());
+    EXPECT_EQ(ref_mesh.deformable_nodes.size(), state.deformed_positions.size());
+    EXPECT_TRUE(pins.empty());
+    EXPECT_TRUE(ref_mesh.rb_nodes.empty());
+    EXPECT_TRUE(ref_mesh.tets.empty());
+    ASSERT_EQ(params.sdf_planes.size(), 1U);
+    ASSERT_EQ(params.sdf_cylinders.size(), 1U);
+    EXPECT_TRUE(params.sdf_spheres.empty());
+    EXPECT_DOUBLE_EQ(params.k_sdf, args.drop_k_sdf);
+    EXPECT_GT(params.k_sdf, args.k_sdf);
+    EXPECT_GT(params.d_hat, 0.0);
+    EXPECT_GE(args.drop_spacing, params.d_hat);
+    for (std::size_t node = 0; node < state.deformed_positions.size(); ++node) {
+        const Vec3& position = state.deformed_positions[node];
+        EXPECT_TRUE(position.allFinite());
+        EXPECT_TRUE(state.velocities[node].isZero(0.0));
+        EXPECT_NEAR(position.y(), args.drop_first_y
+            + (node / nodes_per_sheet) * args.drop_spacing, 1.0e-14);
+        EXPECT_GT(evaluate_sdf(params.sdf_cylinders[0], position).phi,
+                  params.eps_sdf);
+        EXPECT_GT(evaluate_sdf(params.sdf_planes[0], position).phi,
+                  params.eps_sdf);
+    }
+
+    // No triangle may stitch two sheets together; their contact must be
+    // handled by the mesh barrier, with all sheets retaining free boundaries.
+    ASSERT_EQ(ref_mesh.tris.size(),
+              10U * 6 * args.drop_cloth_nx * args.drop_cloth_ny);
+    for (std::size_t t = 0; t < ref_mesh.tris.size(); t += 3) {
+        const int sheet = ref_mesh.tris[t] / nodes_per_sheet;
+        EXPECT_EQ(ref_mesh.tris[t + 1] / nodes_per_sheet, sheet);
+        EXPECT_EQ(ref_mesh.tris[t + 2] / nodes_per_sheet, sheet);
+    }
+    EXPECT_NEAR(std::accumulate(ref_mesh.area.begin(), ref_mesh.area.end(), 0.0),
+                10.0 * args.drop_cloth_w * args.drop_cloth_h, 1.0e-10);
+
+    ASSERT_GT(static_x.size(), 4U);
+    ASSERT_GT(static_tris.size(), 6U);
+    for (const int index : static_tris) {
+        EXPECT_GE(index, 0);
+        EXPECT_LT(static_cast<std::size_t>(index), static_x.size());
+    }
+    // The padded SDF surrounds the visible cylinder. Cap centers lie on its
+    // axis; the other visual vertices sit padding meters inside its surface.
+    for (std::size_t node = 4; node < static_x.size(); ++node) {
+        const double phi = evaluate_sdf(params.sdf_cylinders[0], static_x[node]).phi;
+        EXPECT_TRUE(std::abs(phi + args.cyl_sdf_padding) < 1.0e-12
+                    || std::abs(phi + params.sdf_cylinders[0].radius) < 1.0e-12);
+    }
+
+    // Keeping vertices outside an unpadded cylinder does not keep a coarse
+    // chord outside. Even a rest-length diagonal should clear the visual
+    // cylinder when its endpoints sit on the padded contact surface.
+    const double half_diagonal = 0.5 * std::hypot(
+        args.drop_cloth_w / args.drop_cloth_nx,
+        args.drop_cloth_h / args.drop_cloth_ny);
+    const double contact_radius = params.sdf_cylinders[0].radius;
+    ASSERT_GT(contact_radius, half_diagonal);
+    const double chord_radius = std::sqrt(
+        contact_radius * contact_radius - half_diagonal * half_diagonal);
+    EXPECT_GT(chord_radius, args.cyl_radius);
+    EXPECT_TRUE(params.sdf_planes[0].point.isZero(0.0));
+    EXPECT_LT(evaluate_sdf(params.sdf_planes[0], Vec3(0.0, -0.001, 0.0)).phi, 0.0);
+}
+
+TEST(ClothCylinderDropExample, RebuildUsesIndependentClothAndCylinderLocations) {
+    IPCArgs3D args;
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    std::vector<Vec3> static_x;
+    std::vector<int> static_tris;
+    build_cloth_cylinder_drop_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris);
+    pins.push_back(Pin{0, Vec3::Zero()});
+    params.sdf_spheres.push_back(SphereSDF{Vec3::Zero(), 1.0});
+
+    args.drop_stack_count = 3;
+    args.drop_cloth_nx = 4;
+    args.drop_cloth_ny = 6;
+    args.drop_cloth_w = 1.5;
+    args.drop_cloth_h = 2.5;
+    args.drop_cx = 0.75;
+    args.drop_cz = 0.25;
+    args.drop_first_y = 2.0;
+    args.drop_spacing = 0.2;
+    args.cyl_cx = 3.0;
+    args.cyl_cy = 1.0;
+    args.cyl_cz = -2.0;
+    args.cyl_radius = 0.5;
+    args.cyl_sdf_padding = 0.02;
+    args.drop_k_sdf = 2e8;
+    args.cyl_length = 4.0;
+    args.cyl_nu = 16;
+    build_cloth_cylinder_drop_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris);
+
+    ASSERT_EQ(state.deformed_positions.size(), 105U);
+    EXPECT_EQ(ref_mesh.tris.size() / 3, 144U);
+    EXPECT_TRUE(pins.empty());
+    EXPECT_TRUE(params.sdf_spheres.empty());
+    ASSERT_EQ(params.sdf_planes.size(), 1U);
+    ASSERT_EQ(params.sdf_cylinders.size(), 1U);
+    EXPECT_TRUE(params.sdf_cylinders[0].point.isApprox(Vec3(3.0, 1.0, -2.0)));
+    EXPECT_TRUE(params.sdf_cylinders[0].axis.isApprox(Vec3::UnitZ()));
+    EXPECT_DOUBLE_EQ(params.sdf_cylinders[0].radius, 0.52);
+    EXPECT_DOUBLE_EQ(params.k_sdf, 2e8);
+    for (int sheet = 0; sheet < 3; ++sheet) {
+        Vec3 center = Vec3::Zero();
+        for (int node = 0; node < 35; ++node)
+            center += state.deformed_positions[sheet * 35 + node];
+        center /= 35.0;
+        EXPECT_TRUE(center.isApprox(Vec3(0.75, 2.0 + sheet * 0.2, 0.25)));
+    }
+    Vec3 lo = static_x[4];
+    Vec3 hi = lo;
+    for (std::size_t node = 4; node < static_x.size(); ++node) {
+        lo = lo.cwiseMin(static_x[node]);
+        hi = hi.cwiseMax(static_x[node]);
+    }
+    EXPECT_TRUE(lo.isApprox(Vec3(2.5, 0.5, -4.0)));
+    EXPECT_TRUE(hi.isApprox(Vec3(3.5, 1.5, 0.0)));
+
+    // Reject coincident sheets and an initially intersecting cylinder.
+    args.drop_spacing = 0.0;
+    EXPECT_THROW(build_cloth_cylinder_drop_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris),
+        std::invalid_argument);
+    args.drop_spacing = 0.2;
+    params.d_hat = 0.21;
+    EXPECT_THROW(build_cloth_cylinder_drop_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris),
+        std::invalid_argument);
+    params.d_hat = args.drop_spacing;
+    EXPECT_NO_THROW(build_cloth_cylinder_drop_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris));
+    params.d_hat = args.d_hat;
+    args.drop_first_y = 1.25;
+    EXPECT_THROW(build_cloth_cylinder_drop_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris),
+        std::invalid_argument);
+}
+
 TEST(WreckingBallExample,
      BuildsTranslatedFigureEightCompositionAndTightlyPackedWall) {
     IPCArgs3D args;

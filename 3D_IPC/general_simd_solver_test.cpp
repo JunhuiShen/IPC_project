@@ -325,6 +325,57 @@ TEST(GeneralSIMDSolver, CoupledClothSolidRigidMatchesScalarWithAndWithoutFrictio
     }
 }
 
+TEST(GeneralSIMDSolver, ScalarAndV2PruneSeparatedMixedIncidenceAndRestoreForTiccd) {
+    RestoreOpenMP restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+    for (bool simd : {false,true}) {
+        GeneralScene scene;
+        build_scene(scene);
+        scene.params.node_box_min = scene.params.node_box_max = .002;
+        scene.params.theta_box_min = scene.params.theta_box_max = .002;
+        // Oblique faces produce overlapping AABBs for separated primitives.
+        const Vec4 rotation = quaternion_from_angular_velocity(
+            Vec4(1,0,0,0), Vec3(0,.61,0), 1.0);
+        auto& state = scene.state;
+        for (auto& x : state.deformed_positions) x = quaternion_rotate(rotation,x);
+        for (auto& v : state.velocities) v = quaternion_rotate(rotation,v);
+        for (auto& x : state.x_coms) x = quaternion_rotate(rotation,x);
+        for (auto& v : state.v_coms) v = quaternion_rotate(rotation,v);
+        for (auto& w : state.omega) w = quaternion_rotate(rotation,w);
+        for (auto& q : state.orientations) q = quaternion_multiply(rotation,q);
+        for (auto& pin : scene.pins) pin.target_position = quaternion_rotate(rotation,pin.target_position);
+        for (bool ticcd : {false,true,false}) {
+            SCOPED_TRACE(::testing::Message() << "simd=" << simd << " ticcd=" << ticcd);
+            scene.params.use_ticcd = ticcd;
+            ASSERT_TRUE(solve_and_commit(scene,simd).converged);
+            const auto& actual = scene.broad_phase.cache();
+            BroadPhase unpruned;
+            unpruned.initialize_surface_nodes(actual.node_boxes,scene.mesh,scene.params.d_hat,
+                BroadPhase::InitializationMode::GeneralSolver);
+            const auto& full = unpruned.cache();
+            ASSERT_EQ(actual.nt_pairs.size(),full.nt_pairs.size());
+            ASSERT_EQ(actual.ss_pairs.size(),full.ss_pairs.size());
+            std::size_t removed = 0;
+            for (int node : scene.mesh.deformable_nodes) {
+                removed += full.vertex_nt[node].size()-actual.vertex_nt[node].size();
+                removed += full.vertex_ss[node].size()-actual.vertex_ss[node].size();
+                for (const Vec3& direction : {Vec3(.004,0,0),Vec3(0,-.004,0),Vec3(0,0,.004)}) {
+                    auto expected = state.deformed_positions, result = expected;
+                    const Vec3 target = expected[node]+direction;
+                    const double a = per_vertex_safe_step(unpruned,expected,node,target,.9,true,ticcd);
+                    const double b = per_vertex_safe_step(scene.broad_phase,result,node,target,.9,true,ticcd);
+                    EXPECT_DOUBLE_EQ(a,b);
+                    EXPECT_TRUE((expected[node].array()==result[node].array()).all());
+                }
+            }
+            if (ticcd) EXPECT_EQ(removed,0u);
+            else EXPECT_GT(removed,0u);
+            expect_active_coupling(scene);
+        }
+    }
+}
+
 TEST(GeneralSIMDSolver, ColoredContactHelpersPreserveEveryStateAcrossTeamSizes) {
     RestoreOpenMP restore;
     omp_set_dynamic(0);

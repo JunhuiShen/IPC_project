@@ -3,6 +3,9 @@
 #include "make_shape.h"
 #include "node_triangle_distance.h"
 #include "safe_step.h"
+#include "solver.h"
+#include "parallel_helper.h"
+#include "quaternion_math.h"
 #include "segment_segment_distance.h"
 
 #include <gtest/gtest.h>
@@ -2016,5 +2019,157 @@ TEST(BroadPhaseTest, PairOnlyInitialGuessPreservesOrderAndRestoresSolverStorage)
         EXPECT_TRUE(reused.cache().tri_bvh_nodes.empty());
         EXPECT_TRUE(reused.cache().edge_bvh_nodes.empty());
         EXPECT_TRUE(reused.cache().node_bvh_nodes.empty());
+    }
+}
+
+TEST(BroadPhaseTest, CertifiedIncidencePruningPreservesCcdAndRebuilds) {
+    std::vector<Vec3> x, v;
+    RefMesh mesh;
+    build_three_sheet_scene(x, v, mesh);
+    for (int node = 6; node < 9; ++node) x[node] += Vec3(.55, .55, 0.0);
+    std::vector<AABB> boxes;
+    for (const Vec3& position : x)
+        boxes.emplace_back(position - Vec3::Constant(.04), position + Vec3::Constant(.04));
+    BroadPhase reference, pruned;
+    reference.initialize(boxes, mesh, .005, BroadPhase::InitializationMode::DeformableSolver);
+    pruned.initialize(boxes, mesh, .005, BroadPhase::InitializationMode::DeformableSolver);
+    const auto& cache = reference.cache();
+    std::vector<unsigned char> nt(cache.nt_pairs.size()), ss(cache.ss_pairs.size());
+    const auto separated = [&](const std::array<int, 4>& nodes, bool segment) {
+        std::array<Vec3, 4> positions;
+        std::array<AABB, 4> bounds;
+        for (int i = 0; i < 4; ++i) { positions[i] = x[nodes[i]]; bounds[i] = boxes[nodes[i]]; }
+        return solver_detail::contact_boxes_separated(positions, bounds, segment, .005);
+    };
+    for (std::size_t i = 0; i < nt.size(); ++i) {
+        const auto& p = cache.nt_pairs[i];
+        nt[i] = separated({p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2]}, false);
+    }
+    for (std::size_t i = 0; i < ss.size(); ++i) {
+        const auto& p = cache.ss_pairs[i];
+        ss[i] = separated({p.v[0], p.v[1], p.v[2], p.v[3]}, true);
+    }
+    ASSERT_GT(std::count(nt.begin(), nt.end(), 1) + std::count(ss.begin(), ss.end(), 1), 0);
+    auto bad = nt;
+    bad.push_back(0);
+    EXPECT_THROW(pruned.discard_separated_contact_incidence(bad, ss, false), std::invalid_argument);
+    expect_vertex_pair_entries_exact(pruned.cache().vertex_nt, cache.vertex_nt);
+    pruned.discard_separated_contact_incidence(nt, ss, false);
+    EXPECT_EQ(pruned.nt_pairs().size(), reference.nt_pairs().size());
+    EXPECT_EQ(pruned.ss_pairs().size(), reference.ss_pairs().size());
+    for (const auto& row : pruned.cache().vertex_nt)
+        for (const auto& entry : row) EXPECT_EQ(nt[entry.pair_index], 0);
+    for (const auto& row : pruned.cache().vertex_ss)
+        for (const auto& entry : row) EXPECT_EQ(ss[entry.pair_index], 0);
+
+    bool observed_collision = false;
+    for (int node = 0; node < static_cast<int>(x.size()); ++node)
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dz = -1; dz <= 1; ++dz) {
+                    auto a = x, b = x;
+                    const Vec3 target = x[node] + .12 * Vec3(dx, dy, dz);
+                    const double alpha = per_vertex_safe_step(reference, a, node, target, .9, true, false);
+                    const double beta = per_vertex_safe_step(pruned, b, node, target, .9, true, false);
+                    EXPECT_DOUBLE_EQ(alpha, beta);
+                    EXPECT_TRUE((a[node].array() == b[node].array()).all());
+                    observed_collision = observed_collision || (alpha > 0.0 && alpha < .99);
+                }
+    EXPECT_TRUE(observed_collision);
+    pruned.initialize(boxes, mesh, .005, BroadPhase::InitializationMode::DeformableSolver);
+    expect_vertex_pair_entries_exact(pruned.cache().vertex_nt, cache.vertex_nt);
+    expect_vertex_pair_entries_exact(pruned.cache().vertex_ss, cache.vertex_ss);
+}
+
+TEST(BroadPhaseTest, CertifiedRigidAndMixedIncidencePreservesTranslationAndRotationCcd) {
+    for (bool mixed : {false, true}) {
+        SCOPED_TRACE(mixed);
+        std::vector<Vec3> x, v;
+        RefMesh mesh;
+        build_three_sheet_scene(x, v, mesh);
+        for (int node = 6; node < 9; ++node) x[node] += Vec3(.65, .65, 0.0);
+        const int bodies = mixed ? 2 : 3;
+        mesh.node_to_rb.assign(x.size(), -1);
+        mesh.rb_nodes.resize(bodies);
+        mesh.ref_positions.resize(bodies);
+        std::vector<Vec3> coms(bodies, Vec3::Zero());
+        const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+        std::vector<Vec4> orientations(bodies, identity);
+        for (int rb = 0; rb < bodies; ++rb) {
+            const int first = 3 * (rb + (mixed ? 1 : 0));
+            coms[rb] = (x[first] + x[first+1] + x[first+2]) / 3.0;
+            for (int i = 0; i < 3; ++i) {
+                mesh.node_to_rb[first+i] = rb;
+                mesh.rb_nodes[rb].push_back(first+i);
+                mesh.ref_positions[rb].push_back(x[first+i] - coms[rb]);
+            }
+        }
+        constexpr double radius = .04, angle = .12, d_hat = .005;
+        std::vector<AABB> boxes;
+        for (const auto& point : x)
+            boxes.emplace_back(point-Vec3::Constant(radius), point+Vec3::Constant(radius));
+        build_blue_boxes_rb(coms, orientations, std::vector<double>(bodies, angle),
+            std::vector<double>(bodies, radius), mesh, boxes);
+        const auto mode = mixed ? BroadPhase::InitializationMode::GeneralSolver
+                                : BroadPhase::InitializationMode::RigidSolver;
+        BroadPhase reference, pruned;
+        reference.initialize(boxes, mesh, d_hat, mode);
+        pruned.initialize(boxes, mesh, d_hat, mode);
+        const auto& cache = reference.cache();
+        std::vector<std::vector<int>> full_nt, full_ss;
+        build_rb_contact_incidence(cache, mesh.node_to_rb, bodies, full_nt, full_ss);
+        auto nt_rows = full_nt, ss_rows = full_ss;
+        std::vector<unsigned char> nt(cache.nt_pairs.size()), ss(cache.ss_pairs.size());
+        const auto separated = [&](const std::array<int,4>& nodes, bool segment) {
+            std::array<Vec3,4> positions;
+            std::array<AABB,4> bounds;
+            for (int i = 0; i < 4; ++i) { positions[i] = x[nodes[i]]; bounds[i] = boxes[nodes[i]]; }
+            return solver_detail::contact_boxes_separated(positions, bounds, segment, d_hat);
+        };
+        for (std::size_t i = 0; i < nt.size(); ++i) {
+            const auto& p = cache.nt_pairs[i];
+            nt[i] = separated({p.node,p.tri_v[0],p.tri_v[1],p.tri_v[2]}, false);
+        }
+        for (std::size_t i = 0; i < ss.size(); ++i) {
+            const auto& p = cache.ss_pairs[i];
+            ss[i] = separated({p.v[0],p.v[1],p.v[2],p.v[3]}, true);
+        }
+        ASSERT_GT(std::count(nt.begin(),nt.end(),1)+std::count(ss.begin(),ss.end(),1),0);
+        EXPECT_THROW(pruned.discard_separated_contact_incidence(nt,ss,false,&nt_rows,nullptr),std::invalid_argument);
+        EXPECT_EQ(nt_rows,full_nt);
+        pruned.discard_separated_contact_incidence(nt,ss,false,&nt_rows,&ss_rows);
+        EXPECT_EQ(pruned.nt_pairs().size(),cache.nt_pairs.size());
+        EXPECT_EQ(pruned.ss_pairs().size(),cache.ss_pairs.size());
+        bool translated_collision = false, rotated_collision = false;
+        for (int rb = 0; rb < bodies; ++rb) {
+            for (int pair : nt_rows[rb]) EXPECT_EQ(nt[pair],0);
+            for (int pair : ss_rows[rb]) EXPECT_EQ(ss[pair],0);
+            for (int dx = -1; dx <= 1; ++dx)
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        const Vec3 step = radius*Vec3(dx,dy,dz);
+                        const double expected = per_rigid_body_translation_safe_step(
+                            mesh,cache,full_nt[rb],full_ss[rb],x,rb,step,.9);
+                        EXPECT_DOUBLE_EQ(per_rigid_body_translation_safe_step(
+                            mesh,pruned.cache(),nt_rows[rb],ss_rows[rb],x,rb,step,.9),expected);
+                        translated_collision |= expected > 0.0 && expected < .99;
+                    }
+            for (int axis = 0; axis < 3; ++axis) for (double turn : {-.3,.3}) {
+                const Vec4 target = bound_quaternion(identity,identity,
+                    quaternion_from_angular_velocity(identity,turn*Vec3::Unit(axis),1.0),angle);
+                const double expected = per_rigid_body_rotation_safe_step(
+                    mesh,cache,full_nt[rb],full_ss[rb],x,rb,coms[rb],identity,target,.9);
+                EXPECT_DOUBLE_EQ(per_rigid_body_rotation_safe_step(
+                    mesh,pruned.cache(),nt_rows[rb],ss_rows[rb],x,rb,coms[rb],identity,target,.9),expected);
+                rotated_collision |= expected > 0.0 && expected < .99;
+            }
+        }
+        EXPECT_TRUE(translated_collision);
+        EXPECT_TRUE(rotated_collision);
+        // A rebuild restores full incidence before a new set of movement bounds.
+        pruned.initialize(boxes,mesh,d_hat,mode);
+        build_rb_contact_incidence(pruned.cache(),mesh.node_to_rb,bodies,nt_rows,ss_rows);
+        EXPECT_EQ(nt_rows,full_nt);
+        EXPECT_EQ(ss_rows,full_ss);
     }
 }

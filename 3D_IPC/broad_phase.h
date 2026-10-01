@@ -207,6 +207,17 @@ public:
         return cache_;
     }
 
+    // Remove incidence for pairs certified separated for every
+    // position inside the current node boxes. Pair arrays/indices and BVHs stay
+    // unchanged. Call after coloring to preserve the GS update order, and
+    // rebuild before any vertex can leave these boxes.
+    void discard_separated_contact_incidence(
+        const std::vector<unsigned char>& nt_separated,
+        const std::vector<unsigned char>& ss_separated,
+        bool parallel,
+        std::vector<std::vector<int>>* body_nt = nullptr,
+        std::vector<std::vector<int>>* body_ss = nullptr);
+
     // Used by global_gauss_seidel_solver_ogc for partial leaf refit; other callers should use cache().
     Cache& mutable_cache() { return cache_; }
 

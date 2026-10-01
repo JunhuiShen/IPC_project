@@ -3002,3 +3002,96 @@ void build_wrecking_ball_example(
 
     ref_mesh.build_deformable_nodes();
 }
+
+// ---------------------------------------------------------------------------
+// Example 24: separated cloth sheets falling onto a long horizontal cylinder
+// ---------------------------------------------------------------------------
+void build_cloth_cylinder_drop_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params,
+    std::vector<Vec3>& static_x, std::vector<int>& static_tris) {
+    if (args.drop_stack_count < 1 || args.drop_cloth_nx < 1
+        || args.drop_cloth_ny < 1 || args.cyl_nu < 3) {
+        throw std::invalid_argument(
+            "example 24 requires positive cloth count and grid subdivisions, "
+            "and cyl_nu >= 3");
+    }
+    for (const double length : {args.drop_cloth_w, args.drop_cloth_h,
+                               args.drop_spacing, args.cyl_ground_size,
+                               args.cyl_radius, args.cyl_length}) {
+        if (!std::isfinite(length) || length <= 0.0) {
+            throw std::invalid_argument(
+                "example 24 requires positive finite cloth dimensions, "
+                "drop_spacing, ground size, cylinder radius and length");
+        }
+    }
+    if (!std::isfinite(args.drop_k_sdf) || args.drop_k_sdf < 0.0
+        || !std::isfinite(args.cyl_sdf_padding) || args.cyl_sdf_padding < 0.0) {
+        throw std::invalid_argument(
+            "example 24 requires nonnegative finite drop_k_sdf and cyl_sdf_padding");
+    }
+    if (!std::isfinite(params.d_hat) || params.d_hat > args.drop_spacing) {
+        throw std::invalid_argument(
+            "example 24 requires a finite d_hat <= drop_spacing");
+    }
+    const double collision_radius = args.cyl_radius + args.cyl_sdf_padding;
+    const Vec3 cylinder_center(args.cyl_cx, args.cyl_cy, args.cyl_cz);
+    if (!cylinder_center.allFinite() || !std::isfinite(args.drop_first_y)
+        || !std::isfinite(args.drop_cx) || !std::isfinite(args.drop_cz)) {
+        throw std::invalid_argument(
+            "example 24 requires finite cylinder and cloth-stack coordinates");
+    }
+    if (args.drop_first_y <= std::max(0.0, args.cyl_cy + collision_radius)
+                                + std::max(0.0, params.eps_sdf)) {
+        throw std::invalid_argument(
+            "example 24 requires drop_first_y above the ground and cylinder "
+            "padded top, with eps_sdf clearance");
+    }
+
+    clear_model(ref_mesh, state, X, pins);
+    params.k_sdf = args.drop_k_sdf;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+
+    // Export-only geometry: contact uses the analytic SDFs below, so a single
+    // quad is sufficient for the ground. The cylinder has two visible caps;
+    // its SDF is infinite along z, matching the existing cylinder examples.
+    RefMesh static_ref;
+    DeformedState static_state;
+    std::vector<Vec2> static_X;
+    build_square_mesh(
+        static_ref, static_state, static_X, 1, 1,
+        args.cyl_ground_size, args.cyl_ground_size,
+        Vec3(args.cyl_cx - 0.5 * args.cyl_ground_size, 0.0,
+             args.cyl_cz - 0.5 * args.cyl_ground_size));
+    build_cylinder_mesh(
+        static_ref, static_state, static_X,
+        args.cyl_nu, args.cyl_radius, args.cyl_length, cylinder_center);
+    static_x = std::move(static_state.deformed_positions);
+    static_tris = std::move(static_ref.tris);
+
+    // Match the visible floor at y=0. Lowering this plane also lowers the
+    // penalty's force-free height and lets cloth sink through the visual mesh.
+    params.sdf_planes.push_back(PlaneSDF{Vec3::Zero(), Vec3::UnitY()});
+    // SDF forces act at cloth vertices. Coarse edges/faces can chord through
+    // the curved cylinder even with every vertex outside it, so enlarge only
+    // the collision radius. This margin is tunable without changing resolution.
+    params.sdf_cylinders.push_back(CylinderSDF{
+        cylinder_center, Vec3::UnitZ(), collision_radius});
+
+    // Place the cloth stack independently so an off-center cylinder gives
+    // unequal overhangs and gravity can pull the sheets toward the ground.
+    for (int sheet = 0; sheet < args.drop_stack_count; ++sheet) {
+        const Vec3 origin(
+            args.drop_cx - 0.5 * args.drop_cloth_w,
+            args.drop_first_y + sheet * args.drop_spacing,
+            args.drop_cz - 0.5 * args.drop_cloth_h);
+        build_square_mesh(
+            ref_mesh, state, X, args.drop_cloth_nx, args.drop_cloth_ny,
+            args.drop_cloth_w, args.drop_cloth_h, origin);
+    }
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+    ref_mesh.build_deformable_nodes();
+}
