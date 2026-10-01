@@ -4851,6 +4851,7 @@ TEST(ClothCylinderDropExample, DefaultSheetsAreSeparateFreeAndClearOfColliders) 
     ASSERT_EQ(args.drop_stack_count, 10);
     const int nodes_per_sheet = (args.drop_cloth_nx + 1)
         * (args.drop_cloth_ny + 1);
+    ASSERT_EQ(nodes_per_sheet, 400);
     ASSERT_EQ(state.deformed_positions.size(), 10U * nodes_per_sheet);
     ASSERT_EQ(state.velocities.size(), state.deformed_positions.size());
     EXPECT_EQ(X.size(), state.deformed_positions.size());
@@ -4863,7 +4864,7 @@ TEST(ClothCylinderDropExample, DefaultSheetsAreSeparateFreeAndClearOfColliders) 
     EXPECT_TRUE(params.sdf_spheres.empty());
     EXPECT_DOUBLE_EQ(params.k_sdf, args.k_sdf);
     EXPECT_GT(params.d_hat, 0.0);
-    EXPECT_GE(args.drop_spacing, params.d_hat);
+    EXPECT_GT(args.drop_spacing, params.d_hat);
     for (std::size_t node = 0; node < state.deformed_positions.size(); ++node) {
         const Vec3& position = state.deformed_positions[node];
         EXPECT_TRUE(position.allFinite());
@@ -5010,8 +5011,9 @@ TEST(ClothCylinderDropExample, RebuildUsesIndependentClothAndCylinderLocations) 
         args, ref_mesh, state, X, pins, params, static_x, static_tris),
         std::invalid_argument);
     params.d_hat = args.drop_spacing;
-    EXPECT_NO_THROW(build_cloth_cylinder_drop_example(
-        args, ref_mesh, state, X, pins, params, static_x, static_tris));
+    EXPECT_THROW(build_cloth_cylinder_drop_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris),
+        std::invalid_argument);
     params.d_hat = args.d_hat;
     args.drop_first_y = 1.25;
     EXPECT_THROW(build_cloth_cylinder_drop_example(

@@ -3031,9 +3031,9 @@ void build_cloth_cylinder_drop_example(
         throw std::invalid_argument(
             "example 24 requires nonnegative finite k_sdf and cyl_sdf_padding");
     }
-    if (!std::isfinite(params.d_hat) || params.d_hat > args.drop_spacing) {
+    if (!std::isfinite(params.d_hat) || params.d_hat >= args.drop_spacing) {
         throw std::invalid_argument(
-            "example 24 requires a finite d_hat <= drop_spacing");
+            "example 24 requires a finite d_hat < drop_spacing");
     }
     const double collision_radius = args.cyl_radius + args.cyl_sdf_padding;
     const Vec3 cylinder_center(args.cyl_cx, args.cyl_cy, args.cyl_cz);
