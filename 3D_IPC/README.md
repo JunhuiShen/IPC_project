@@ -511,13 +511,14 @@ commands for examples 12–23 mirror the scene comments in `example.cpp`:
   --d_hat 0.001 --k_barrier 1e9 --k_sdf 1e8 --eps_sdf 0.002 \
   --friction_coefficient 0.1 --outdir wrecking_ball_tuned_output --format geo
 
-# Example 24: fifty 20x20-vertex cloth sheets dropped onto a cylinder offset to the left
-./build/3D_sim --example 24 --drop_stack_count 50 --num_frames 120 \
-  --substeps 6 --max_substep_iters 30 --fixed_iters \
+# Example 24: fifty 20x20-vertex cloth sheets, spaced 5 mm apart, dropped onto an offset cylinder
+./build/3D_sim --example 24 --drop_stack_count 50 --drop_spacing 0.005 --num_frames 120 \
+  --substeps 15 --max_substep_iters 20 --fixed_iters \
   --use_basic_experimental --use_simd \
   --E 1e6 --nu 0.3 --kB 0.01 \
-  --d_hat 0.01 --k_barrier 1000 \
-  --k_sdf 1e8 --eps_sdf 0.005 --friction_coefficient 0 \
+  --d_hat 0.0048 --k_barrier 10000 \
+  --k_sdf 1e6 --eps_sdf 0.015 --friction_coefficient 0 \
+  --node_box_min 0.0002 --node_box_max 0.002 --node_box_update_count 5 \
   --outdir results/frames --format geo
 ```
 
