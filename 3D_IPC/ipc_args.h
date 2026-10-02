@@ -125,7 +125,7 @@ struct IPCArgs3D : ArgParser {
     int         drop_stack_count = 10;
     int         drop_cloth_nx    = 19;   // 20 vertices along x
     int         drop_cloth_ny    = 19;   // 20 vertices along z
-    double      drop_first_y     = 0.84; // lowest sheet's initial height (m)
+    double      drop_first_y     = 1.20; // lowest sheet's initial height (m)
     double      drop_spacing     = 0.012;// vertical sheet spacing (m)
     double      drop_cloth_w     = 2.0;  // sheet width along x (m)
     double      drop_cloth_h     = 2.0;  // sheet length along z (m)
@@ -139,7 +139,7 @@ struct IPCArgs3D : ArgParser {
     double      cyl_sdf_padding  = 0.012;// extra collision radius for coarse cloth faces (m)
     double      cyl_length       = 4.0;  // visual length along z (m); covers the observed contact region
     double      cyl_cx           = -0.70;// offset left beneath the cloth stack
-    double      cyl_cy           = 0.45;
+    double      cyl_cy           = 0.60;
     double      cyl_cz           = 0.0;
 
     // --- output / restart ---
@@ -255,7 +255,7 @@ struct IPCArgs3D : ArgParser {
         add_int   ("drop_stack_count", drop_stack_count, 10,   "Number of falling cloth sheets in example 24");
         add_int   ("drop_cloth_nx",    drop_cloth_nx,    19,   "Grid subdivisions along x per sheet in example 24 (vertices = subdivisions + 1)");
         add_int   ("drop_cloth_ny",    drop_cloth_ny,    19,   "Grid subdivisions along z per sheet in example 24 (vertices = subdivisions + 1)");
-        add_double("drop_first_y",     drop_first_y,     0.84, "Initial lowest-sheet height (m) in example 24; must clear the padded cylinder top and eps_sdf");
+        add_double("drop_first_y",     drop_first_y,     1.20, "Initial lowest-sheet height (m) in example 24; must clear the padded cylinder top and eps_sdf");
         add_double("drop_spacing",     drop_spacing,     0.012,"Initial vertical spacing (m) between cloth sheets in example 24");
         add_double("drop_cloth_w",     drop_cloth_w,     2.0,  "Cloth width along x (m) in example 24");
         add_double("drop_cloth_h",     drop_cloth_h,     2.0,  "Cloth length along z (m) in example 24");
@@ -269,7 +269,7 @@ struct IPCArgs3D : ArgParser {
         add_double("cyl_sdf_padding",  cyl_sdf_padding,  0.012,"Extra cylinder SDF radius (m) in example 24 to keep coarse cloth faces outside the visible cylinder");
         add_double("cyl_length",       cyl_length,       4.0,  "Visual cylinder length along z (m) in example 24; collision SDF is infinite");
         add_double("cyl_cx",           cyl_cx,          -0.70, "Cylinder center x (m) in example 24; negative offsets it left of the cloth stack");
-        add_double("cyl_cy",           cyl_cy,           0.45, "Cylinder center y (m) in example 24");
+        add_double("cyl_cy",           cyl_cy,           0.60, "Cylinder center y (m) in example 24");
         add_double("cyl_cz",           cyl_cz,           0.0,  "Cylinder center z (m) in example 24");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
