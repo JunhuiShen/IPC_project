@@ -124,16 +124,16 @@ struct IPCArgs3D : ArgParser {
     double      osc_frequency   = 0.50;  // driven-edge frequency (Hz)
 
     // example 24: vertically separated cloth sheets falling onto a long cylinder
-    int         drop_stack_count = 10;
-    int         drop_cloth_nx    = 19;   // 20 vertices along x
-    int         drop_cloth_ny    = 19;   // 20 vertices along z
+    int         drop_stack_count = 50;
+    int         drop_cloth_nx    = 69;   // 70 vertices along x
+    int         drop_cloth_ny    = 69;   // 70 vertices along z
     double      drop_first_y     = 1.20; // lowest sheet's initial height (m)
-    double      drop_spacing     = 0.012;// vertical sheet spacing (m)
-    double      drop_cloth_w     = 2.0;  // sheet width along x (m)
-    double      drop_cloth_h     = 2.0;  // sheet length along z (m)
+    double      drop_spacing     = 0.005;// vertical sheet spacing (m)
+    double      drop_cloth_w     = 2.07; // sheet width along x (m), 3 cm cells
+    double      drop_cloth_h     = 2.07; // sheet length along z (m), 3 cm cells
     double      drop_cx          = 0.0;  // cloth-stack center x (m)
     double      drop_cz          = 0.0;  // cloth-stack center z (m)
-    double      cyl_ground_size  = 34.0; // visual ground edge length (m)
+    double      cyl_ground_size  = 12.5; // visual ground edge length (m)
     double      cyl_ground_cell_size = 0.25; // maximum visual ground cell edge (m)
     int         cyl_nu           = 64;   // circumferential visual subdivisions
     int         cyl_cap_rings    = 12;   // radial subdivisions of the visual end caps
@@ -256,16 +256,16 @@ struct IPCArgs3D : ArgParser {
         add_double("osc_amplitude", osc_amplitude, 0.02,   "Signed vertical sinusoid amplitude (m) of the driven edges in example 22");
         add_double("osc_frequency", osc_frequency, 0.50,   "Sinusoid frequency (Hz) of the driven edges in example 22");
 
-        add_int   ("drop_stack_count", drop_stack_count, 10,   "Number of falling cloth sheets in example 24");
-        add_int   ("drop_cloth_nx",    drop_cloth_nx,    19,   "Grid subdivisions along x per sheet in example 24 (vertices = subdivisions + 1)");
-        add_int   ("drop_cloth_ny",    drop_cloth_ny,    19,   "Grid subdivisions along z per sheet in example 24 (vertices = subdivisions + 1)");
+        add_int   ("drop_stack_count", drop_stack_count, 50,   "Number of falling cloth sheets in example 24");
+        add_int   ("drop_cloth_nx",    drop_cloth_nx,    69,   "Grid subdivisions along x per sheet in example 24 (vertices = subdivisions + 1)");
+        add_int   ("drop_cloth_ny",    drop_cloth_ny,    69,   "Grid subdivisions along z per sheet in example 24 (vertices = subdivisions + 1)");
         add_double("drop_first_y",     drop_first_y,     1.20, "Initial lowest-sheet height (m) in example 24; must clear the padded cylinder top and eps_sdf");
-        add_double("drop_spacing",     drop_spacing,     0.012,"Initial vertical spacing (m) between cloth sheets in example 24");
-        add_double("drop_cloth_w",     drop_cloth_w,     2.0,  "Cloth width along x (m) in example 24");
-        add_double("drop_cloth_h",     drop_cloth_h,     2.0,  "Cloth length along z (m) in example 24");
+        add_double("drop_spacing",     drop_spacing,     0.005,"Initial vertical spacing (m) between cloth sheets in example 24");
+        add_double("drop_cloth_w",     drop_cloth_w,     2.07, "Cloth width along x (m) in example 24");
+        add_double("drop_cloth_h",     drop_cloth_h,     2.07, "Cloth length along z (m) in example 24");
         add_double("drop_cx",          drop_cx,          0.0,  "Cloth-stack center x (m) in example 24, independent of the cylinder");
         add_double("drop_cz",          drop_cz,          0.0,  "Cloth-stack center z (m) in example 24, independent of the cylinder");
-        add_double("cyl_ground_size",  cyl_ground_size,  34.0, "Visual ground edge length (m) in example 24");
+        add_double("cyl_ground_size",  cyl_ground_size,  12.5, "Visual ground edge length (m) in example 24");
         add_double("cyl_ground_cell_size", cyl_ground_cell_size, 0.25, "Maximum visual ground cell edge (m) in example 24");
         add_int   ("cyl_nu",           cyl_nu,           64,   "Circumferential visual cylinder subdivisions in example 24");
         add_int   ("cyl_cap_rings",    cyl_cap_rings,    12,   "Radial subdivisions per visual cylinder end cap in example 24");
@@ -280,6 +280,19 @@ struct IPCArgs3D : ArgParser {
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
         add_int   ("restart_frame", restart_frame, -1,            "Frame to restart from (-1 = no restart)");
         add_string("datadir",      datadir,       "",             "Path to input data directory (e.g. meshes for example 4)");
+    }
+
+    bool parse(int argc, char** argv) {
+        if (!ArgParser::parse(argc, argv)) return false;
+        if (example == 24) {
+            // The general 5 mm contact band equals this scene's release gap.
+            // Keep the default strictly smaller, while honoring explicit flags.
+            bool explicit_d_hat = false;
+            for (int i = 1; i < argc; ++i)
+                explicit_d_hat |= std::string(argv[i]) == "--d_hat";
+            if (!explicit_d_hat) d_hat = 0.0048;
+        }
+        return true;
     }
 
     ExportFormat to_export_format() const {

@@ -549,7 +549,34 @@ namespace {
         cache.ss_pair_edges[pair_index] = {a, b};
     }
 
-    static void build_solver_vertex_incidence(BroadPhase::Cache& cache, const RefMesh& mesh, const BroadPhase::InitializationMode mode) {
+    template <typename Count>
+    static void resize_incidence_rows(
+        std::vector<std::vector<BroadPhase::Cache::VertexPairEntry>>& rows,
+        Count* counts, const std::size_t nv, const int num_workers) {
+        // Scan contiguous blocks from each worker row, retaining worker order
+        // at every node so the incidence lists remain sorted by pair index.
+        constexpr std::size_t block_size = 256;
+        const std::size_t blocks = (nv + block_size - 1) / block_size;
+        #pragma omp parallel for schedule(static) if(nv >= 128)
+        for (std::size_t block = 0; block < blocks; ++block) {
+            const std::size_t begin = block * block_size;
+            const std::size_t length = std::min(block_size, nv - begin);
+            Count offsets[block_size]{};
+            for (int worker = 0; worker < num_workers; ++worker) {
+                Count* row = counts + static_cast<std::size_t>(worker) * nv + begin;
+                for (std::size_t local = 0; local < length; ++local) {
+                    const Count count = row[local];
+                    row[local] = offsets[local];
+                    offsets[local] += count;
+                }
+            }
+            for (std::size_t local = 0; local < length; ++local)
+                rows[begin + local].resize(offsets[local]);
+        }
+    }
+
+    template <typename Count>
+    static void build_solver_vertex_incidence_impl(BroadPhase::Cache& cache, const RefMesh& mesh, const BroadPhase::InitializationMode mode) {
         if (mode == BroadPhase::InitializationMode::RigidSolver || cache.vertex_nt.empty())
             return;
 
@@ -560,11 +587,22 @@ namespace {
         #endif
         const std::size_t count_size = static_cast<std::size_t>(num_workers) * nv;
         // Each worker initializes its own row immediately before counting.
-        std::unique_ptr<std::size_t[]> counts(new std::size_t[count_size]);
+        // A caller owns its scratch; OpenMP workers share only the captured
+        // pointer. Reuse avoids repeatedly mapping a large counter matrix.
+        struct Scratch {
+            std::unique_ptr<Count[]> data;
+            std::size_t capacity = 0;
+        };
+        static thread_local Scratch scratch;
+        if (scratch.capacity < count_size) {
+            scratch.data.reset(new Count[count_size]);
+            scratch.capacity = count_size;
+        }
+        Count* const counts = scratch.data.get();
 
         #pragma omp parallel for schedule(static, 1)
         for (int worker = 0; worker < num_workers; ++worker) {
-            std::size_t* worker_counts = counts.get() + static_cast<std::size_t>(worker) * nv;
+            Count* worker_counts = counts + static_cast<std::size_t>(worker) * nv;
             std::fill_n(worker_counts, nv, 0);
             const std::size_t begin = cache.nt_pairs.size() * static_cast<std::size_t>(worker) / static_cast<std::size_t>(num_workers);
             const std::size_t end = cache.nt_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
@@ -574,20 +612,10 @@ namespace {
                 for (int role = 0; role < 3; ++role) if (mode != BroadPhase::InitializationMode::GeneralSolver || rigid_owner(mesh, pair.tri_v[role]) < 0) ++worker_counts[static_cast<std::size_t>(pair.tri_v[role])];
             }
         }
-        #pragma omp parallel for schedule(static) if(nv >= 128)
-        for (std::size_t node = 0; node < nv; ++node) {
-            std::size_t offset = 0;
-            for (int worker = 0; worker < num_workers; ++worker) {
-                std::size_t& count = counts[static_cast<std::size_t>(worker) * nv + node];
-                const std::size_t worker_count = count;
-                count = offset;
-                offset += worker_count;
-            }
-            cache.vertex_nt[node].resize(offset);
-        }
+        resize_incidence_rows(cache.vertex_nt, counts, nv, num_workers);
         #pragma omp parallel for schedule(static, 1)
         for (int worker = 0; worker < num_workers; ++worker) {
-            std::size_t* worker_offsets = counts.get() + static_cast<std::size_t>(worker) * nv;
+            Count* worker_offsets = counts + static_cast<std::size_t>(worker) * nv;
             const std::size_t begin = cache.nt_pairs.size() * static_cast<std::size_t>(worker) / static_cast<std::size_t>(num_workers);
             const std::size_t end = cache.nt_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
             for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
@@ -599,7 +627,7 @@ namespace {
 
         #pragma omp parallel for schedule(static, 1)
         for (int worker = 0; worker < num_workers; ++worker) {
-            std::size_t* worker_counts = counts.get() + static_cast<std::size_t>(worker) * nv;
+            Count* worker_counts = counts + static_cast<std::size_t>(worker) * nv;
             std::fill_n(worker_counts, nv, 0);
             const std::size_t begin = cache.ss_pairs.size() * static_cast<std::size_t>(worker) / static_cast<std::size_t>(num_workers);
             const std::size_t end = cache.ss_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
@@ -608,20 +636,10 @@ namespace {
                 for (int role = 0; role < 4; ++role) if (mode != BroadPhase::InitializationMode::GeneralSolver || rigid_owner(mesh, pair.v[role]) < 0) ++worker_counts[static_cast<std::size_t>(pair.v[role])];
             }
         }
-        #pragma omp parallel for schedule(static) if(nv >= 128)
-        for (std::size_t node = 0; node < nv; ++node) {
-            std::size_t offset = 0;
-            for (int worker = 0; worker < num_workers; ++worker) {
-                std::size_t& count = counts[static_cast<std::size_t>(worker) * nv + node];
-                const std::size_t worker_count = count;
-                count = offset;
-                offset += worker_count;
-            }
-            cache.vertex_ss[node].resize(offset);
-        }
+        resize_incidence_rows(cache.vertex_ss, counts, nv, num_workers);
         #pragma omp parallel for schedule(static, 1)
         for (int worker = 0; worker < num_workers; ++worker) {
-            std::size_t* worker_offsets = counts.get() + static_cast<std::size_t>(worker) * nv;
+            Count* worker_offsets = counts + static_cast<std::size_t>(worker) * nv;
             const std::size_t begin = cache.ss_pairs.size() * static_cast<std::size_t>(worker) / static_cast<std::size_t>(num_workers);
             const std::size_t end = cache.ss_pairs.size() * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(num_workers);
             for (std::size_t pair_index = begin; pair_index < end; ++pair_index) {
@@ -629,6 +647,17 @@ namespace {
                 for (int role = 0; role < 4; ++role) if (mode != BroadPhase::InitializationMode::GeneralSolver || rigid_owner(mesh, pair.v[role]) < 0) cache.vertex_ss[static_cast<std::size_t>(pair.v[role])][worker_offsets[static_cast<std::size_t>(pair.v[role])]++] = {pair_index, role};
             }
         }
+    }
+
+    static void build_solver_vertex_incidence(BroadPhase::Cache& cache, const RefMesh& mesh, const BroadPhase::InitializationMode mode) {
+        // A vertex can receive at most four entries per pair, including
+        // degenerate repeated roles. Keep the wide path for larger inputs.
+        constexpr std::size_t narrow_limit =
+            std::numeric_limits<std::uint32_t>::max() / 4;
+        if (std::max(cache.nt_pairs.size(), cache.ss_pairs.size()) <= narrow_limit)
+            build_solver_vertex_incidence_impl<std::uint32_t>(cache, mesh, mode);
+        else
+            build_solver_vertex_incidence_impl<std::size_t>(cache, mesh, mode);
     }
 
     static void materialize_solver_pairs(BroadPhase::Cache& cache, const RefMesh& mesh, const BroadPhase::InitializationMode mode, bool forward_edges_only = false, bool retain_solver_data = true) {

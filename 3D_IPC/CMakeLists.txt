@@ -16,6 +16,18 @@ endif()
 option(IPC_BUILD_SIMULATOR "Build the 3D simulator" ON)
 option(IPC_BUILD_TOOLS "Build developer tools" ON)
 option(IPC_ENABLE_IPO "Enable interprocedural optimization in Release builds" ON)
+option(IPC_ENABLE_NATIVE_ARCH "Enable host CPU instructions on supported x86 compilers (disable for portable binaries)" ON)
+
+set(IPC_USE_NATIVE_ARCH FALSE)
+if(IPC_ENABLE_NATIVE_ARCH AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i[3-6]86)$"
+   AND CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-march=native" IPC_HAS_MARCH_NATIVE)
+    if(IPC_HAS_MARCH_NATIVE)
+        set(IPC_USE_NATIVE_ARCH TRUE)
+        message(STATUS "IPC: enabling host CPU instructions with -march=native")
+    endif()
+endif()
 
 include(CTest)
 include(FetchContent)
@@ -108,6 +120,10 @@ endfunction()
 
 function(ipc_configure_library target)
     target_compile_features("${target}" PUBLIC cxx_std_17)
+    if(IPC_USE_NATIVE_ARCH)
+        # Eigen packet ABI and alignment must match in linked consumers.
+        target_compile_options("${target}" PUBLIC -march=native)
+    endif()
     set_target_properties("${target}" PROPERTIES
         CXX_EXTENSIONS OFF
         POSITION_INDEPENDENT_CODE ON

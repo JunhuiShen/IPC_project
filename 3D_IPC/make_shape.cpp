@@ -519,6 +519,12 @@ int append_normalized_obj_rigid_body(
 
 // Total number of vertices is: (nx + 1) * (ny + 1) and total number of triangles is: 2 * nx * ny
 int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin) {
+    const int base = append_square_mesh(ref_mesh, state, X, nx, ny, width, height, origin);
+    ref_mesh.initialize(X, state.deformed_positions);
+    return base;
+}
+
+int append_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin) {
     int base = static_cast<int>(state.deformed_positions.size());
 
     for (int j = 0; j <= ny; ++j) {
@@ -556,8 +562,6 @@ int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>
             ref_mesh.tris.push_back(v00); ref_mesh.tris.push_back(v11); ref_mesh.tris.push_back(v01);
         }
     }
-
-    ref_mesh.initialize(X, state.deformed_positions);
 
     return base;
 }

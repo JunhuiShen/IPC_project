@@ -2173,3 +2173,60 @@ TEST(BroadPhaseTest, CertifiedRigidAndMixedIncidencePreservesTranslationAndRotat
         EXPECT_EQ(ss_rows,full_ss);
     }
 }
+
+TEST(BroadPhaseTest, RepeatedIncidenceRebuildsPreserveOrderAcrossSizesModesAnd64Threads) {
+    struct RestoreThreads {
+        int threads = omp_get_max_threads();
+        ~RestoreThreads() { omp_set_num_threads(threads); }
+    } restore;
+    BroadPhase reused;
+    for (const int workers : {1, 8, 64}) {
+        omp_set_num_threads(workers);
+        for (const int triangles : {80, 240, 97, 80}) {
+            std::vector<Vec3> x;
+            std::vector<std::array<int, 3>> tris;
+            for (int t = 0; t < triangles; ++t) {
+                const int first = static_cast<int>(x.size());
+                const Vec3 base(.01 * (t % 13), .002 * (t % 7), .01 * (t / 13));
+                x.push_back(base);
+                x.push_back(base + Vec3(.025, 0, 0));
+                x.push_back(base + Vec3(0, 0, .025));
+                tris.push_back({first, first + 1, first + 2});
+            }
+            RefMesh mesh = make_mesh(x, tris);
+            mesh.node_to_rb.resize(x.size());
+            for (std::size_t node = 0; node < x.size(); ++node) {
+                const int owner = static_cast<int>((node / 3) % 3);
+                mesh.node_to_rb[node] = owner == 2 ? -1 : owner;
+            }
+            const std::vector<AABB> boxes(x.size(), AABB(Vec3::Constant(-1), Vec3::Constant(1)));
+            for (const auto mode : {BroadPhase::InitializationMode::DeformableSolver,
+                                   BroadPhase::InitializationMode::GeneralSolver,
+                                   BroadPhase::InitializationMode::RigidSolver,
+                                   BroadPhase::InitializationMode::Refittable}) {
+                reused.initialize(boxes, mesh, .0048, mode);
+                const auto& cache = reused.cache();
+                if (mode == BroadPhase::InitializationMode::RigidSolver) {
+                    EXPECT_TRUE(cache.vertex_nt.empty());
+                    EXPECT_TRUE(cache.vertex_ss.empty());
+                    continue;
+                }
+                std::vector<std::vector<BroadPhase::Cache::VertexPairEntry>> nt(x.size()), ss(x.size());
+                const auto retain = [&](int node) {
+                    return mode != BroadPhase::InitializationMode::GeneralSolver || mesh.node_to_rb[node] < 0;
+                };
+                for (std::size_t i = 0; i < cache.nt_pairs.size(); ++i) {
+                    const auto& pair = cache.nt_pairs[i];
+                    const int nodes[] = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+                    for (int role = 0; role < 4; ++role)
+                        if (retain(nodes[role])) nt[nodes[role]].push_back({i, role});
+                }
+                for (std::size_t i = 0; i < cache.ss_pairs.size(); ++i)
+                    for (int role = 0; role < 4; ++role)
+                        if (retain(cache.ss_pairs[i].v[role])) ss[cache.ss_pairs[i].v[role]].push_back({i, role});
+                expect_vertex_pair_entries_exact(cache.vertex_nt, nt);
+                expect_vertex_pair_entries_exact(cache.vertex_ss, ss);
+            }
+        }
+    }
+}

@@ -57,6 +57,10 @@ int append_normalized_obj_rigid_body(
 // Grid counts: V = (nx + 1)(ny + 1), T = 2 nx ny.
 int build_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin);
 
+// Append the same grid without rebuilding rest data. Initialize ref_mesh once
+// after all grids have been appended.
+int append_square_mesh(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, int nx, int ny, double width, double height, const Vec3& origin);
+
 // Same grid and winding as build_square_mesh, with the cell diagonal
 // alternating in a checkerboard pattern. For an even nx, the resulting
 // topology is invariant under reflection across the grid's x midpoint.

@@ -94,6 +94,13 @@ performs collision-safe per-vertex Newton updates one color group at a time.
 
 ### Cloth solver selection
 
+On x86 GCC/Clang builds, CMake enables `-march=native` by default through
+`IPC_ENABLE_NATIVE_ARCH`, letting SIMD v2 use the build machine's AVX2 and
+AVX-512 instructions when available. The option propagates to applications
+and tests so Eigen's packet alignment agrees with the libraries. Set
+`-DIPC_ENABLE_NATIVE_ARCH=OFF` for binaries intended for other CPUs. Other
+architectures use their existing compiler settings.
+
 Choose a solver configuration below:
 
 | Version | When to use it | Selection |
@@ -320,6 +327,13 @@ advancing each material type independently.
   first configure)
 - Tight-Inclusion CCD -- fetched automatically by CMake (requires network on
   first configure)
+- SIMD v2 (`--use_basic_experimental --use_simd`): AVX2 is recommended on
+  x86; AVX-512 enables wider contact tiles when available. SSE2, ARM NEON,
+  and scalar fallbacks allow builds without AVX2/AVX-512.
+- For host-specific SIMD instructions, use GCC/Clang on x86 with
+  `IPC_ENABLE_NATIVE_ARCH=ON` (the default). The resulting binary requires a
+  compatible CPU; configure with `-DIPC_ENABLE_NATIVE_ARCH=OFF` for a portable
+  build. OpenMP supplies the parallel threads independently of SIMD.
 
 ### Build
 
@@ -330,8 +344,8 @@ Release builds enable interprocedural optimization when the compiler supports
 it, allowing the solver and its energy kernels to be optimized together. Pass
 `-DIPC_ENABLE_IPO=OFF` at configure time to disable it.
 
-For an x86 build that will run on the build machine, configure with
-`-DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -march=native"` to enable its SIMD instructions.
+On supported x86 GCC/Clang builds, CMake enables the host's SIMD instructions
+through `IPC_ENABLE_NATIVE_ARCH`; no manual compiler flags are needed.
 
 ### First run
 
@@ -511,15 +525,30 @@ commands for examples 12–23 mirror the scene comments in `example.cpp`:
   --d_hat 0.001 --k_barrier 1e9 --k_sdf 1e8 --eps_sdf 0.002 \
   --friction_coefficient 0.1 --outdir wrecking_ball_tuned_output --format geo
 
-# Example 24: fifty 20x20-vertex cloth sheets, spaced 5 mm apart, dropped onto an offset cylinder
-./build/3D_sim --example 24 --drop_stack_count 50 --drop_spacing 0.005 --num_frames 120 \
-  --substeps 15 --max_substep_iters 20 --fixed_iters \
-  --use_basic_experimental --use_simd \
-  --E 1e6 --nu 0.3 --kB 0.01 \
-  --d_hat 0.0048 --k_barrier 10000 \
-  --k_sdf 1e6 --eps_sdf 0.015 --friction_coefficient 0 \
-  --node_box_min 0.0002 --node_box_max 0.002 --node_box_update_count 5 \
-  --outdir results/frames --format geo
+```
+
+Example 24: fifty free cloth sheets with 70x70 vertices fall over a fixed
+cylinder offset to the left and spread onto the ground. The first 10 frames
+use 50 substeps x 3 iterations; the continuation through frame 120 uses
+50 substeps x 2 iterations.
+
+```bash
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 24 --num_frames 10 \
+  --fps 30 --substeps 50 --max_substep_iters 3 --fixed_iters \
+  --use_basic_experimental --use_simd --use_parallel true --use_ccd true \
+  --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
+  --k_sdf 1e5 --eps_sdf 0.015 \
+  --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 3 \
+  --outdir results/example24_70x70/frames --format geo && \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 24 --restart_frame 10 --num_frames 120 \
+  --fps 30 --substeps 50 --max_substep_iters 2 --fixed_iters \
+  --use_basic_experimental --use_simd --use_parallel true --use_ccd true \
+  --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
+  --k_sdf 1e5 --eps_sdf 0.015 \
+  --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 2 \
+  --outdir results/example24_70x70/frames --format geo
 ```
 
 ## Built-in scenes
@@ -551,7 +580,7 @@ Built-in example scenes (`--example N`):
 | `21` | A rolled cloth pinned along its upper edge and unrolling down an analytic SDF incline onto an SDF ground plane |
 | `22` | Three closely stacked cloth sheets, each with one short edge fixed and the opposite edge driven by a vertical sinusoid |
 | `23` | Thirteen interlinked rigid rings and a ball with an integrated terminal ring swinging from a fixed top link into a wall of 560 rigid cubes above an SDF ground plane |
-| `24` | Ten free horizontal cloth sheets above a fixed cylinder aligned with z and offset 0.40 m to the left; the longer right overhang pulls the sheets toward the ground |
+| `24` | Fifty free horizontal cloth sheets, each with 70x70 vertices, above a fixed z-aligned cylinder offset 0.70 m to the left; the longer right overhang pulls the sheets toward the ground. |
 
 ### External scene assets
 

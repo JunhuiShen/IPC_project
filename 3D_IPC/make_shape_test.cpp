@@ -4836,8 +4836,93 @@ TEST(CylinderMesh, RadialCapsAreClosedOutwardAndHaveFiniteReferenceTriangles) {
     }
 }
 
+TEST(ClothCylinderDropExample, BatchedRestDataMatchesIncrementalGridConstruction) {
+    IPCArgs3D args;
+    args.d_hat = 0.0048;
+    args.drop_stack_count = 4;
+    args.drop_cloth_nx = 5;
+    args.drop_cloth_ny = 7;
+    args.drop_cloth_w = 3.1;
+    args.drop_cloth_h = 2.3;
+    RefMesh batched, incremental;
+    DeformedState state, expected;
+    std::vector<Vec2> X, expected_X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    std::vector<Vec3> static_x;
+    std::vector<int> static_tris;
+    build_cloth_cylinder_drop_example(args, batched, state, X, pins,
+        params, static_x, static_tris);
+    for (int sheet = 0; sheet < args.drop_stack_count; ++sheet) {
+        build_square_mesh(incremental, expected, expected_X,
+            args.drop_cloth_nx, args.drop_cloth_ny,
+            args.drop_cloth_w, args.drop_cloth_h,
+            Vec3(args.drop_cx - 0.5 * args.drop_cloth_w,
+                 args.drop_first_y + sheet * args.drop_spacing,
+                 args.drop_cz - 0.5 * args.drop_cloth_h));
+    }
+    EXPECT_EQ(batched.tris, incremental.tris);
+    EXPECT_EQ(batched.area, incremental.area);
+    EXPECT_EQ(batched.hinge_adj, incremental.hinge_adj);
+    ASSERT_EQ(batched.num_positions, incremental.num_positions);
+    ASSERT_EQ(batched.hinges.size(), incremental.hinges.size());
+    for (std::size_t i = 0; i < X.size(); ++i) {
+        EXPECT_TRUE((X[i].array() == expected_X[i].array()).all());
+        EXPECT_TRUE((state.deformed_positions[i].array()
+            == expected.deformed_positions[i].array()).all());
+    }
+    for (std::size_t i = 0; i < batched.Dm_inverse.size(); ++i)
+        EXPECT_TRUE((batched.Dm_inverse[i].array()
+            == incremental.Dm_inverse[i].array()).all());
+    for (std::size_t i = 0; i < batched.hinges.size(); ++i) {
+        const auto& actual = batched.hinges[i];
+        const auto& reference = incremental.hinges[i];
+        for (int role = 0; role < 4; ++role)
+            EXPECT_EQ(actual.v[role], reference.v[role]);
+        EXPECT_DOUBLE_EQ(actual.bar_theta, reference.bar_theta);
+        EXPECT_DOUBLE_EQ(actual.c_e, reference.c_e);
+    }
+}
+
+TEST(ClothCylinderDropExample, RejectsStackBeyondIntegerIndexLimits) {
+    IPCArgs3D args;
+    args.drop_stack_count = 200;
+    args.drop_cloth_nx = std::numeric_limits<int>::max();
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    std::vector<Vec3> static_x;
+    std::vector<int> static_tris;
+    EXPECT_THROW(build_cloth_cylinder_drop_example(args, mesh, state, X,
+        pins, params, static_x, static_tris), std::invalid_argument);
+}
+
+TEST(ClothCylinderDropExample, ContactDefaultIsSceneSpecificAndFlagsOverrideIt) {
+    IPCArgs3D args;
+    char program[] = "3D_sim";
+    char option[] = "--example";
+    char scene[] = "24";
+    char distance_option[] = "--d_hat";
+    char distance[] = "0.0015";
+    char* argv[] = {program, option, scene, distance_option, distance};
+    ASSERT_TRUE(args.parse(3, argv));
+    EXPECT_DOUBLE_EQ(args.d_hat, 0.0048);
+    ASSERT_TRUE(args.parse(5, argv));
+    EXPECT_DOUBLE_EQ(args.d_hat, 0.0015);
+    IPCArgs3D other_scene;
+    ASSERT_TRUE(other_scene.parse(1, argv));
+    EXPECT_DOUBLE_EQ(other_scene.d_hat, 0.005);
+}
+
 TEST(ClothCylinderDropExample, DefaultSheetsAreSeparateFreeAndClearOfColliders) {
     IPCArgs3D args;
+    char program[] = "3D_sim";
+    char option[] = "--example";
+    char scene[] = "24";
+    char* argv[] = {program, option, scene};
+    ASSERT_TRUE(args.parse(3, argv));
     RefMesh ref_mesh;
     DeformedState state;
     std::vector<Vec2> X;
@@ -4848,11 +4933,17 @@ TEST(ClothCylinderDropExample, DefaultSheetsAreSeparateFreeAndClearOfColliders) 
     build_cloth_cylinder_drop_example(
         args, ref_mesh, state, X, pins, params, static_x, static_tris);
 
-    ASSERT_EQ(args.drop_stack_count, 10);
+    ASSERT_EQ(args.drop_stack_count, 50);
     const int nodes_per_sheet = (args.drop_cloth_nx + 1)
         * (args.drop_cloth_ny + 1);
-    ASSERT_EQ(nodes_per_sheet, 400);
-    ASSERT_EQ(state.deformed_positions.size(), 10U * nodes_per_sheet);
+    ASSERT_EQ(nodes_per_sheet, 4900);
+    ASSERT_EQ(state.deformed_positions.size(), 245000U);
+    EXPECT_DOUBLE_EQ(args.drop_cloth_w / args.drop_cloth_nx, 0.03);
+    EXPECT_DOUBLE_EQ(args.drop_cloth_h / args.drop_cloth_ny, 0.03);
+    EXPECT_DOUBLE_EQ(args.drop_spacing, 0.005);
+    EXPECT_DOUBLE_EQ(params.density, 900.0);
+    EXPECT_DOUBLE_EQ(params.thickness, 0.001);
+    EXPECT_DOUBLE_EQ(params.friction_coefficient, 0.0);
     ASSERT_EQ(state.velocities.size(), state.deformed_positions.size());
     EXPECT_EQ(X.size(), state.deformed_positions.size());
     EXPECT_EQ(ref_mesh.deformable_nodes.size(), state.deformed_positions.size());
@@ -4880,14 +4971,14 @@ TEST(ClothCylinderDropExample, DefaultSheetsAreSeparateFreeAndClearOfColliders) 
     // No triangle may stitch two sheets together; their contact must be
     // handled by the mesh barrier, with all sheets retaining free boundaries.
     ASSERT_EQ(ref_mesh.tris.size(),
-              10U * 6 * args.drop_cloth_nx * args.drop_cloth_ny);
+              50U * 6 * args.drop_cloth_nx * args.drop_cloth_ny);
     for (std::size_t t = 0; t < ref_mesh.tris.size(); t += 3) {
         const int sheet = ref_mesh.tris[t] / nodes_per_sheet;
         EXPECT_EQ(ref_mesh.tris[t + 1] / nodes_per_sheet, sheet);
         EXPECT_EQ(ref_mesh.tris[t + 2] / nodes_per_sheet, sheet);
     }
     EXPECT_NEAR(std::accumulate(ref_mesh.area.begin(), ref_mesh.area.end(), 0.0),
-                10.0 * args.drop_cloth_w * args.drop_cloth_h, 1.0e-10);
+                50.0 * args.drop_cloth_w * args.drop_cloth_h, 1.0e-8);
 
     const int ground_n = static_cast<int>(std::ceil(args.cyl_ground_size / args.cyl_ground_cell_size));
     const std::size_t ground_vertices = (ground_n + 1) * (ground_n + 1);
@@ -4931,6 +5022,7 @@ TEST(ClothCylinderDropExample, DefaultSheetsAreSeparateFreeAndClearOfColliders) 
 
 TEST(ClothCylinderDropExample, RebuildUsesIndependentClothAndCylinderLocations) {
     IPCArgs3D args;
+    args.d_hat = 0.0048;
     RefMesh ref_mesh;
     DeformedState state;
     std::vector<Vec2> X;

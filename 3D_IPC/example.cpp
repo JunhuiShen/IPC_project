@@ -3017,6 +3017,16 @@ void build_cloth_cylinder_drop_example(
             "example 24 requires positive cloth count and grid subdivisions, "
             "cyl_cap_rings >= 1, and cyl_nu >= 3");
     }
+    const std::size_t sheets = static_cast<std::size_t>(args.drop_stack_count);
+    const std::size_t nx = static_cast<std::size_t>(args.drop_cloth_nx);
+    const std::size_t ny = static_cast<std::size_t>(args.drop_cloth_ny);
+    const std::size_t index_limit = static_cast<std::size_t>(std::numeric_limits<int>::max());
+    if (nx + 1 > index_limit / (ny + 1) / sheets
+        || nx > index_limit / 6 / ny / sheets) {
+        throw std::invalid_argument("example 24 cloth stack exceeds mesh index limits");
+    }
+    const std::size_t cloth_vertices = sheets * (nx + 1) * (ny + 1);
+    const std::size_t cloth_indices = sheets * 6 * nx * ny;
     for (const double length : {args.drop_cloth_w, args.drop_cloth_h,
                                args.drop_spacing, args.cyl_ground_size, args.cyl_ground_cell_size,
                                args.cyl_radius, args.cyl_length}) {
@@ -3090,15 +3100,19 @@ void build_cloth_cylinder_drop_example(
 
     // Place the cloth stack independently so an off-center cylinder gives
     // unequal overhangs and gravity can pull the sheets toward the ground.
+    X.reserve(cloth_vertices);
+    state.deformed_positions.reserve(cloth_vertices);
+    ref_mesh.tris.reserve(cloth_indices);
     for (int sheet = 0; sheet < args.drop_stack_count; ++sheet) {
         const Vec3 origin(
             args.drop_cx - 0.5 * args.drop_cloth_w,
             args.drop_first_y + sheet * args.drop_spacing,
             args.drop_cz - 0.5 * args.drop_cloth_h);
-        build_square_mesh(
+        append_square_mesh(
             ref_mesh, state, X, args.drop_cloth_nx, args.drop_cloth_ny,
             args.drop_cloth_w, args.drop_cloth_h, origin);
     }
+    ref_mesh.initialize(X, state.deformed_positions);
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
     ref_mesh.build_deformable_nodes();
 }
