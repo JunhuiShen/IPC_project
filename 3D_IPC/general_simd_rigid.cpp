@@ -213,14 +213,18 @@ struct PreparedContact {
     std::array<Mat33, 4> jacobians;
     std::array<std::array<Mat33, 4>, 4> hessians;
     std::array<std::array<Mat33, 3>, 4> curvature;
-    std::array<double, 4> friction_weights{};
-    Mat33 translation_hessian = Mat33::Zero();
-    PreparedContact() {
+    std::array<double, 4> friction_weights;
+    Mat33 translation_hessian;
+    void clear(const Modes& flags) {
+        friction_weights.fill(0.0);
+        translation_hessian.setZero();
         for (int i = 0; i < 4; ++i) {
             gradients[i].setZero();
-            jacobians[i].setZero();
-            for (auto& h : hessians[i]) h.setZero();
-            for (auto& h : curvature[i]) h.setZero();
+            if (flags.og) jacobians[i].setZero();
+            if (flags.th || flags.oh)
+                for (auto& h : hessians[i]) h.setZero();
+            if (flags.oh)
+                for (auto& h : curvature[i]) h.setZero();
         }
     }
 };
@@ -326,6 +330,9 @@ void rigid_contact_derivatives_tile(const RigidContactInput* inputs,
     std::array<Mat33, contact_tile_width> friction_hessian;
     const Modes flags(mode);
     for (std::size_t e = 0; e < count; ++e) {
+        // Tail packets and gradient/COM-only requests never read the unused
+        // records or orientation-Hessian fields. Initialize only live work.
+        prepared[e].clear(flags);
         outputs[e] = RigidContactOutput{};
         const auto& input = inputs[e];
         const auto& x = input.positions;

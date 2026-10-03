@@ -1,7 +1,6 @@
 #include "example.h"
 #include "mesh_utils.h"
 #include "physics.h"
-#include "SIMD.h"
 #include "simulation.h"
 #include "solver.h"
 #include "state_io.h"
@@ -185,18 +184,12 @@ int main(int argc, char** argv) {
                          "the shortest edge in the mesh.\n";
             return 1;
         }
-        std::cout << "min_edge_length = " << min_edge_len
-                  << " (d_hat limit = " << d_hat_limit << ")\n";
     }
 
     BroadPhase broad_phase;
 
-    std::cout << "num_frames = " << num_frames << "\n";
-    std::cout << "d_hat = " << params.d_hat
-              << (params.d_hat > 0.0 ? "  (barrier ON)" : "  (barrier OFF)")
-              << "\n";
-    std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
-    std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
+    std::cout << "Total vertices:  " << state.deformed_positions.size() + static_x.size() << "\n";
+    std::cout << "Total triangles: " << ref_mesh.tris.size() / 3 + static_tris.size() / 3 << "\n";
     if (params.use_colored_ccd_guess) {
         if (params.use_ogc || params.use_ogc_solver)
             std::cout << "Cloth initial guess: previous positions (OGC overrides colored CCD guess)\n";
@@ -211,14 +204,6 @@ int main(int argc, char** argv) {
                 ? "Experimental general solver: v2\n" : "Experimental cloth solver: v2\n");
         else
             std::cout << "Experimental cloth solver: v1 (scalar)\n";
-        const bool simd = physics_detail::energy_simd_enabled(params);
-        if (simd) {
-            std::cout << "Energy/contact assembly: AoS gather, local SIMD tiles, ordered accumulation\n";
-            std::cout << "SIMD elasticity/bending: " << ipc_simd::tile_backend_name()
-                      << "; point/contact: " << ipc_simd::backend_name() << "\n";
-        } else {
-            std::cout << "Non-collision energy kernels (inertia/gravity/pins/elasticity/bending): scalar reference\n";
-        }
     }
     if (num_rigid_bodies > 0)
         std::cout << "Rigid bodies: " << num_rigid_bodies << "\n";

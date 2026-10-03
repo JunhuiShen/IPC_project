@@ -127,18 +127,25 @@ inline void contact_spin_hint();
 // and initializes it from an omp single region. Callbacks must join any tasks
 // they create before arriving: this barrier only joins the team's workers.
 class ColoredSweepBarrier {
+    struct alignas(64) WorkerArrival {
+        std::atomic<unsigned> phase{0};
+    };
     struct alignas(64) WorkerGroup {
-        std::atomic<int> arrived{0};
+        std::atomic<unsigned> ready{0};
         std::atomic<unsigned> phase{0};
         int size = 0;
     };
     static constexpr int group_size = 8;
+    std::unique_ptr<WorkerArrival[]> workers_;
     std::unique_ptr<WorkerGroup[]> groups_;
-    int capacity_ = 0, group_count_ = 0;
-    alignas(64) std::atomic<int> arrived_{0};
+    int capacity_ = 0, worker_capacity_ = 0, group_count_ = 0;
 
 public:
     void reserve(int threads) {
+        if (threads > worker_capacity_) {
+            workers_ = std::make_unique<WorkerArrival[]>(threads);
+            worker_capacity_ = threads;
+        }
         const int needed = (threads + group_size - 1) / group_size;
         if (needed > capacity_) {
             groups_ = std::make_unique<WorkerGroup[]>(needed);
@@ -148,23 +155,32 @@ public:
 
     void initialize(int threads) {
         group_count_ = (threads + group_size - 1) / group_size;
+        for (int worker = 0; worker < threads; ++worker)
+            workers_[worker].phase.store(0, std::memory_order_relaxed);
         for (int g = 0; g < group_count_; ++g) {
             groups_[g].size = std::min(group_size, threads - g * group_size);
-            groups_[g].arrived.store(0, std::memory_order_relaxed);
+            groups_[g].ready.store(0, std::memory_order_relaxed);
             groups_[g].phase.store(0, std::memory_order_relaxed);
         }
-        arrived_.store(0, std::memory_order_relaxed);
     }
 
     template <class Finish>
     void wait(int worker, unsigned phase, const Finish& finish) {
         WorkerGroup& group = groups_[worker / group_size];
-        // Acquire every worker's writes through the two arrival levels, then
-        // publish completion and any scratch resets to all groups together.
-        if (group.arrived.fetch_add(1, std::memory_order_acq_rel) == group.size - 1) {
-            group.arrived.store(0, std::memory_order_relaxed);
-            if (arrived_.fetch_add(1, std::memory_order_acq_rel) == group_count_ - 1) {
-                arrived_.store(0, std::memory_order_relaxed);
+        // Each worker publishes to its own cache line. Group leaders join
+        // those writes, then worker zero joins the leaders before finishing.
+        // Avoid a shared read-modify-write arrival counter: early arrivals
+        // can otherwise invalidate the cache line on which their peers spin.
+        workers_[worker].phase.store(phase, std::memory_order_release);
+        if (worker % group_size == 0) {
+            for (int lane = 1; lane < group.size; ++lane)
+                while (workers_[worker + lane].phase.load(std::memory_order_acquire) != phase)
+                    contact_spin_hint();
+            group.ready.store(phase, std::memory_order_release);
+            if (worker == 0) {
+                for (int g = 1; g < group_count_; ++g)
+                    while (groups_[g].ready.load(std::memory_order_acquire) != phase)
+                        contact_spin_hint();
                 finish();
                 for (int g = 0; g < group_count_; ++g)
                     groups_[g].phase.store(phase, std::memory_order_release);

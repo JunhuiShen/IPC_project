@@ -1632,16 +1632,16 @@ TEST(BasicSolver, ExperimentalV2DerivativePreparationFailureJoinsWorkersAndRecov
 
     // Keep failed and healthy meshes alive with distinct workspace identities.
     // Repairing Dm_inverse in place would leave cached rest gradients stale.
-    std::array<ClothScene, 12> scenes;
-    for (int configuration = 0; configuration < 6; ++configuration) {
-        const int mode = configuration / 2;
+    std::array<ClothScene, 24> scenes;
+    for (int configuration = 0; configuration < 12; ++configuration) {
+        const int mode = configuration / 4;
         for (int variant = 0; variant < 2; ++variant) {
             auto& scene = scenes[2 * configuration + variant];
             build_contact_scene(scene, mode == 2 ? 0.2 : 0.0);
             scene.params.use_cloth_grid = false;
             scene.params.use_basic_experimental_v2 = true;
             scene.params.use_parallel = true;
-            scene.params.use_simd = false;
+            scene.params.use_simd = (configuration / 2) % 2 != 0;
             scene.params.fixed_iters = true; // Do not evaluate an initial residual.
             scene.params.max_global_iters = 5;
             scene.params.node_box_update_count = 3;
@@ -1655,10 +1655,10 @@ TEST(BasicSolver, ExperimentalV2DerivativePreparationFailureJoinsWorkersAndRecov
                 for (auto& inverse : scene.mesh.Dm_inverse) inverse.setConstant(nan);
         }
     }
-    for (int configuration = 0; configuration < 6; ++configuration) {
+    for (int configuration = 0; configuration < 12; ++configuration) {
         const int threads = configuration % 2 == 0 ? 1 : 4;
-        SCOPED_TRACE(::testing::Message() << "mode=" << configuration / 2
-            << " threads=" << threads);
+        SCOPED_TRACE(::testing::Message() << "mode=" << configuration / 4
+            << " threads=" << threads << " simd=" << ((configuration / 2) % 2));
         omp_set_num_threads(threads);
         auto& failing = scenes[2 * configuration];
         DeformedState attempted = failing.state;

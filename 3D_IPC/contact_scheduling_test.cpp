@@ -6,6 +6,40 @@
 #include <stdexcept>
 #include <thread>
 
+TEST(ColoredSweepBarrier, PublishesWorkerAndFinishWritesAcrossPhasesAndTeamSizes) {
+    solver_detail::ColoredSweepBarrier barrier;
+    // Reuse storage across smaller/larger teams, including partial groups.
+    for (int requested : {1, 3, 8, 9, 16, 64, 5}) {
+        barrier.reserve(requested);
+        std::vector<int> values(requested, 0);
+        int finished = 0, actual = 0;
+        std::atomic<bool> invalid{false};
+        const unsigned phases = requested > 16 ? 32 : 256;
+        #pragma omp parallel num_threads(requested)
+        {
+            const int worker = omp_get_thread_num();
+            #pragma omp single
+            {
+                actual = omp_get_num_threads();
+                barrier.initialize(actual);
+            }
+            for (unsigned phase = 1; phase <= phases; ++phase) {
+                if ((worker + phase) % 7 == 0) std::this_thread::yield();
+                values[worker] = static_cast<int>(phase);
+                barrier.wait(worker, phase, [&] {
+                    for (int index = 0; index < actual; ++index)
+                        if (values[index] != static_cast<int>(phase)) invalid.store(true);
+                    if (finished != static_cast<int>(phase) - 1) invalid.store(true);
+                    finished = static_cast<int>(phase);
+                });
+                if (finished != static_cast<int>(phase)) invalid.store(true);
+            }
+        }
+        EXPECT_FALSE(invalid.load()) << "requested workers=" << requested;
+        EXPECT_EQ(finished, static_cast<int>(phases));
+    }
+}
+
 TEST(OrderedContactTasks, LeaderWorkPrecedesOrderedAccumulationForEveryPath) {
     struct Restore { int threads = omp_get_max_threads(); ~Restore() { omp_set_num_threads(threads); } } restore;
     const std::vector<std::vector<int>> groups = {{0}, {1, 2}};

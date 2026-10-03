@@ -78,7 +78,12 @@ void run_general_simd_batches(const GeneralSimdBatches& batches, int sweeps,
         }
         return;
     }
-    ColoredBlockTeams workspace;
+    // Fixed sweeps revisit the same batches until the next contact rebuild.
+    // Retain team storage and let prepare reuse an unchanged helper plan,
+    // rather than allocating every color's contexts at each sweep interval.
+    // Nested calls take the serial path above before borrowing this storage.
+    static thread_local ColoredBlockTeams storage;
+    ColoredBlockTeams& workspace = storage;
     workspace.prepare(groups, [&](int item) { return batches.batches[item].contact_cost; });
     workspace.barrier.reserve(omp_get_max_threads());
     std::atomic<bool> failed{false};
@@ -141,10 +146,12 @@ void run_general_simd_batches(const GeneralSimdBatches& batches, int sweeps,
                             context.sequence.store(-1, std::memory_order_release);
                         } else context.help();
                     }
-                    for (;;) {
+                    const int size = static_cast<int>(whole.size());
+                    // Helper-only colors have no unassigned batches. Avoid
+                    // making every worker contend on an already empty queue.
+                    while (workspace.next[c].load(std::memory_order_relaxed) < size) {
                         const int item = workspace.next[c].fetch_add(1, std::memory_order_relaxed);
-                        if (item >= static_cast<int>(whole.size())) break;
-                        invoke(whole[item], c, false);
+                        if (item < size) invoke(whole[item], c, false);
                     }
                 }
                 workspace.barrier.wait(worker, ++phase, [&] {

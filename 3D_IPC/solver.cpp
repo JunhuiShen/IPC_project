@@ -2233,6 +2233,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
         }
         return result;
     };
+    solver_detail::GeneralSimdBatches friction_batches;
     double r1=0.;
     //gs loop
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
@@ -2369,6 +2370,14 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
 
         if (use_contact_sweep && (iter - 1) % params.node_box_update_count == 0) {
             contact_sweep.prepare(color_groups, broad_phase.cache());
+        }
+
+        if (use_v2_simd && params.friction_coefficient > 0.0
+            && (iter - 1) % params.node_box_update_count == 0) {
+            friction_batches.prepare(color_groups, nv, [&](int vertex) {
+                return broad_phase.cache().vertex_nt[vertex].size()
+                    + broad_phase.cache().vertex_ss[vertex].size();
+            });
         }
 
         if (iter == 1 && !params.fixed_iters) {
@@ -2705,7 +2714,29 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
               ? std::min(params.max_global_iters - iter + 1,
                          params.node_box_update_count - (iter - 1) % params.node_box_update_count)
               : 1;
-          if (use_v2_simd) {
+          if (use_v2_simd && params.friction_coefficient > 0.0) {
+            // Lend idle workers to contact-heavy vertices while retaining
+            // color barriers, ordered reductions, and failed-color rollback.
+            solver_detail::run_general_simd_batches(friction_batches, sweeps,
+                [&](int item, bool cooperative) {
+                    const auto& batch = friction_batches.batches[item];
+                    const auto color = vertex_color[batch.blocks[0]];
+                    const auto first = vertex_slot[batch.blocks[0]];
+                    prepare_simd_batch(color, first, first + batch.size);
+                    for (std::size_t i = 0; i < batch.size; ++i)
+                        process_vertex(batch.blocks[i], cooperative, true);
+                },
+                [&](int item) {
+                    const auto& batch = friction_batches.batches[item];
+                    for (std::size_t i = 0; i < batch.size; ++i)
+                        color_rollback[batch.blocks[i]] = xnew[batch.blocks[i]];
+                },
+                [&](int item) {
+                    const auto& batch = friction_batches.batches[item];
+                    for (std::size_t i = 0; i < batch.size; ++i)
+                        xnew[batch.blocks[i]] = color_rollback[batch.blocks[i]];
+                });
+          } else if (use_v2_simd) {
             constexpr std::size_t max_vertices_per_batch = 8;
             std::vector<std::atomic<bool>> failed_colors(color_groups.size());
             for (auto& failed : failed_colors) failed.store(false, std::memory_order_relaxed);
