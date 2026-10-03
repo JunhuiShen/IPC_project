@@ -7,16 +7,13 @@
 
 #include <algorithm>
 #include <cmath>
-#include <exception>
 #include <limits>
 #include <stdexcept>
 
 std::vector<Vec3> collision_colored_ccd_initial_guess(
     const std::vector<Vec3>& x,
     const std::vector<Vec3>& intended_displacement,
-    const RefMesh& ref_mesh, const SimParams& params, int ccd_iterations,
-    const CollisionColoredCCDObserver& observer,
-    const CollisionColoredCCDColorObserver& color_observer) {
+    const RefMesh& ref_mesh, const SimParams& params, int ccd_iterations) {
     if (x.size() != intended_displacement.size())
         throw std::invalid_argument("collision_colored_ccd_initial_guess: position/displacement size mismatch");
     if (ccd_iterations < 0)
@@ -49,7 +46,7 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
             throw std::invalid_argument("collision_colored_ccd_initial_guess: target overflow");
     }
     std::vector<Vec3> xnew = x;
-    if ((ccd_iterations == 0 || nv == 0) && !observer) return xnew;
+    if (ccd_iterations == 0 || nv == 0) return xnew;
 
     std::vector<AABB> node_boxes(x.size());
     for (int vertex = 0; vertex < nv; ++vertex) {
@@ -80,23 +77,16 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
     std::vector<std::vector<int>> contact_adjacency, color_groups;
     build_contact_adj(broad_phase.cache(), nv, contact_adjacency);
     greedy_color_conflict_graph(contact_adjacency, color_groups);
-    if (observer) observer(0, xnew, targets, broad_phase, color_groups);
-    if (ccd_iterations == 0 || nv == 0) return xnew;
 
     // Every candidate's four vertices form a clique, so a same-color update
     // cannot write any other position read by a vertex's CCD query. The omp
     // for barrier is essential: all updates finish before the next color.
     // Keep one team alive across all colors/sweeps. Targets, boxes, pairs and
     // coloring stay fixed; only xnew changes toward the original targets.
-    // Keep color and sweep errors separate: after the final color barrier, a
-    // fast primary thread may enter the sweep callback while another worker
-    // is still checking the color callback's status.
-    std::exception_ptr color_observer_error, observer_error;
     #pragma omp parallel if(params.use_parallel)
     {
         for (int iteration = 0; iteration < ccd_iterations; ++iteration) {
-            for (int color = 0; color < static_cast<int>(color_groups.size()); ++color) {
-                const auto& group = color_groups[color];
+            for (const auto& group : color_groups) {
                 #pragma omp for schedule(dynamic, 1)
                 for (int index = 0; index < static_cast<int>(group.size()); ++index) {
                     const int vertex = group[index];
@@ -104,42 +94,9 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
                         /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false,
                         /*use_ogc=*/false, /*cooperative=*/false);
                 }
-                if (color_observer) {
-                    // The for barrier finishes this color; the explicit
-                    // barrier keeps the next color from changing the snapshot
-                    // while the primary thread exports it.
-                    #pragma omp master
-                    {
-                        try {
-                            color_observer(iteration + 1, color, xnew, targets,
-                                broad_phase, color_groups);
-                        } catch (...) {
-                            color_observer_error = std::current_exception();
-                        }
-                    }
-                    #pragma omp barrier
-                    if (color_observer_error) break;
-                }
-            }
-            if (color_observer_error) break;
-            if (observer) {
-                // The last color's implicit barrier makes this a snapshot of
-                // the actual completed sweep, not a replay or a partial update.
-                #pragma omp master
-                {
-                    try {
-                        observer(iteration + 1, xnew, targets, broad_phase, color_groups);
-                    } catch (...) {
-                        observer_error = std::current_exception();
-                    }
-                }
-                #pragma omp barrier
-                if (observer_error) break;
             }
         }
     }
-    if (color_observer_error) std::rethrow_exception(color_observer_error);
-    if (observer_error) std::rethrow_exception(observer_error);
     return xnew;
 }
 

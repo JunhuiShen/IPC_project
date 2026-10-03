@@ -162,21 +162,17 @@ TEST(ColoredCCDGuessParameters, ValidatesEnabledSettingsWithoutChangingLegacyCon
     EXPECT_NO_THROW(params.validate_colored_ccd_guess_parameters());
 }
 
-TEST_F(CollisionColoredCCDInitialGuess, ParallelSettingControlsTheWorkerTeam) {
+TEST_F(CollisionColoredCCDInitialGuess, ParallelSettingPreservesResults) {
     const auto x = point_above_triangle();
     const auto mesh = point_triangle_mesh();
     const std::vector<Vec3> displacement(x.size(), Vec3(0.25, 0, 0));
-    for (bool parallel : {false, true}) {
-        params.use_parallel = parallel;
-        int completed = 0;
-        collision_colored_ccd_initial_guess(x, displacement, mesh, params, 2,
-            [&](int iteration, const auto&, const auto&, const BroadPhase&, const auto&) {
-                if (iteration == 0) return;
-                ++completed;
-                EXPECT_EQ(omp_get_num_threads(), parallel ? 4 : 1);
-            });
-        EXPECT_EQ(completed, 2);
-    }
+    params.use_parallel = false;
+    const auto serial = collision_colored_ccd_initial_guess(x, displacement, mesh, params, 2);
+    params.use_parallel = true;
+    const auto parallel = collision_colored_ccd_initial_guess(x, displacement, mesh, params, 2);
+    expect_positions_identical(parallel, serial);
+    for (std::size_t vertex = 0; vertex < x.size(); ++vertex)
+        expect_vec_near(serial[vertex], x[vertex] + displacement[vertex], 0.0);
 }
 
 TEST_F(CollisionColoredCCDInitialGuess, ClothInitialGuessUsesXhatWithoutAddingGravity) {
@@ -427,6 +423,10 @@ TEST_F(CollisionColoredCCDInitialGuess, SerialAndParallelSweepsAreBitwiseIdentic
     omp_set_num_threads(1);
     const auto serial = collision_colored_ccd_initial_guess(x, displacement, mesh, params, 3);
     omp_set_num_threads(4);
+    params.use_parallel = false;
+    expect_positions_identical(
+        collision_colored_ccd_initial_guess(x, displacement, mesh, params, 3), serial);
+    params.use_parallel = true;
     for (int repeat = 0; repeat < 3; ++repeat) {
         const auto parallel = collision_colored_ccd_initial_guess(x, displacement, mesh, params, 3);
         expect_positions_identical(parallel, serial);
@@ -435,369 +435,9 @@ TEST_F(CollisionColoredCCDInitialGuess, SerialAndParallelSweepsAreBitwiseIdentic
         EXPECT_NEAR(serial[4 * copy].z(), copy % 2 ? -1.0 : 0.001, 1e-12);
 }
 
-TEST_F(CollisionColoredCCDInitialGuess, ObserverSeesCompletedSweepsAndFixedDiagnostics) {
-    const auto x = point_above_triangle();
-    const auto mesh = point_triangle_mesh();
-    std::vector<Vec3> displacement(x.size(), Vec3::Zero());
-    displacement[0] = Vec3(0, 0, -2);
-    std::vector<Vec3> targets = x;
-    for (std::size_t vertex = 0; vertex < x.size(); ++vertex)
-        targets[vertex] += displacement[vertex];
-
-    std::vector<std::vector<Vec3>> snapshots;
-    std::vector<std::vector<int>> original_colors;
-    std::vector<AABB> original_boxes;
-    const auto result = collision_colored_ccd_initial_guess(
-        x, displacement, mesh, params, 3,
-        [&](int iteration, const std::vector<Vec3>& positions,
-            const std::vector<Vec3>& observed_targets, const BroadPhase& broad_phase,
-            const std::vector<std::vector<int>>& colors) {
-            EXPECT_EQ(omp_get_thread_num(), 0);
-            EXPECT_EQ(iteration, static_cast<int>(snapshots.size()));
-            expect_positions_identical(observed_targets, targets);
-            snapshots.push_back(positions);
-            const auto& cache = broad_phase.cache();
-            ASSERT_EQ(cache.node_boxes.size(), x.size());
-            ASSERT_EQ(cache.tri_boxes.size(), mesh.tris.size() / 3);
-            ASSERT_FALSE(cache.nt_pairs.empty());
-            if (iteration == 0) {
-                original_colors = colors;
-                original_boxes = cache.node_boxes;
-                expect_positions_identical(positions, x);
-                // A two-unit displacement receives 20% extra total width.
-                EXPECT_DOUBLE_EQ(cache.node_boxes[0].min.z(), -1.2);
-                EXPECT_DOUBLE_EQ(cache.node_boxes[0].max.z(), 1.2);
-            } else {
-                EXPECT_EQ(colors, original_colors);
-                expect_vec_near(positions[0], Vec3(0, 0, std::pow(0.1, iteration)), 1e-12);
-            }
-            for (std::size_t vertex = 0; vertex < x.size(); ++vertex) {
-                SCOPED_TRACE(vertex);
-                expect_vec_near(cache.node_boxes[vertex].min, original_boxes[vertex].min, 0.0);
-                expect_vec_near(cache.node_boxes[vertex].max, original_boxes[vertex].max, 0.0);
-                for (const Vec3& position : {x[vertex], targets[vertex], positions[vertex]}) {
-                    EXPECT_TRUE((position.array() >= cache.node_boxes[vertex].min.array()).all());
-                    EXPECT_TRUE((position.array() <= cache.node_boxes[vertex].max.array()).all());
-                }
-            }
-            for (std::size_t triangle = 0; triangle < cache.tri_boxes.size(); ++triangle) {
-                AABB expected;
-                for (int corner = 0; corner < 3; ++corner)
-                    expected.expand(cache.node_boxes[mesh.tris[3 * triangle + corner]]);
-                expect_vec_near(cache.tri_boxes[triangle].min,
-                    expected.min - Vec3::Constant(params.d_hat), 0.0);
-                expect_vec_near(cache.tri_boxes[triangle].max,
-                    expected.max + Vec3::Constant(params.d_hat), 0.0);
-            }
-            ASSERT_EQ(cache.edge_boxes.size(), cache.edges.size());
-            for (std::size_t edge = 0; edge < cache.edges.size(); ++edge) {
-                AABB expected = cache.node_boxes[cache.edges[edge][0]];
-                expected.expand(cache.node_boxes[cache.edges[edge][1]]);
-                expect_vec_near(cache.edge_boxes[edge].min,
-                    expected.min - Vec3::Constant(params.d_hat), 0.0);
-                expect_vec_near(cache.edge_boxes[edge].max,
-                    expected.max + Vec3::Constant(params.d_hat), 0.0);
-            }
-            std::vector<int> vertex_color(x.size(), -1);
-            for (std::size_t color = 0; color < colors.size(); ++color) {
-                for (const int vertex : colors[color]) {
-                    ASSERT_GE(vertex, 0);
-                    ASSERT_LT(static_cast<std::size_t>(vertex), x.size());
-                    EXPECT_EQ(vertex_color[vertex], -1);
-                    vertex_color[vertex] = static_cast<int>(color);
-                }
-            }
-            for (const int color : vertex_color) EXPECT_GE(color, 0);
-            const auto expect_clique = [&](const std::array<int, 4>& vertices) {
-                for (int a = 0; a < 4; ++a)
-                    for (int b = a + 1; b < 4; ++b)
-                        EXPECT_NE(vertex_color[vertices[a]], vertex_color[vertices[b]]);
-            };
-            for (const auto& pair : cache.nt_pairs)
-                expect_clique({pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]});
-            for (const auto& pair : cache.ss_pairs)
-                expect_clique({pair.v[0], pair.v[1], pair.v[2], pair.v[3]});
-        });
-    ASSERT_EQ(snapshots.size(), 4u);
-    expect_positions_identical(result, snapshots.back());
-    expect_positions_identical(result,
-        collision_colored_ccd_initial_guess(x, displacement, mesh, params, 3));
-}
-
-TEST_F(CollisionColoredCCDInitialGuess, ObserverReceivesInitialDiagnosticsForZeroSweepsAndEmptyMesh) {
-    const auto x = point_above_triangle();
-    const std::vector<Vec3> displacement(x.size(), Vec3(0, 0, -2));
-    int observations = 0;
-    const auto result = collision_colored_ccd_initial_guess(
-        x, displacement, point_triangle_mesh(), params, 0,
-        [&](int iteration, const std::vector<Vec3>& positions,
-            const std::vector<Vec3>& targets, const BroadPhase& broad_phase,
-            const std::vector<std::vector<int>>& colors) {
-            ++observations;
-            EXPECT_EQ(iteration, 0);
-            expect_positions_identical(positions, x);
-            ASSERT_EQ(targets.size(), x.size());
-            EXPECT_EQ(broad_phase.cache().node_boxes.size(), x.size());
-            EXPECT_FALSE(colors.empty());
-        });
-    EXPECT_EQ(observations, 1);
-    expect_positions_identical(result, x);
-
-    for (const int sweeps : {0, 3}) {
-        observations = 0;
-        EXPECT_TRUE(collision_colored_ccd_initial_guess(
-            {}, {}, RefMesh{}, params, sweeps,
-            [&](int iteration, const std::vector<Vec3>& positions,
-                const std::vector<Vec3>& targets, const BroadPhase& broad_phase,
-                const std::vector<std::vector<int>>& colors) {
-                ++observations;
-                EXPECT_EQ(iteration, 0);
-                EXPECT_TRUE(positions.empty());
-                EXPECT_TRUE(targets.empty());
-                EXPECT_TRUE(broad_phase.cache().node_boxes.empty());
-                EXPECT_TRUE(colors.empty());
-            }).empty());
-        EXPECT_EQ(observations, 1);
-    }
-}
-
-TEST_F(CollisionColoredCCDInitialGuess, ObserverExceptionsPropagateAfterJoiningWorkers) {
-    const auto x = point_above_triangle();
-    const std::vector<Vec3> displacement(x.size(), Vec3(0, 0, -2));
-    const auto mesh = point_triangle_mesh();
-    for (const int failure_iteration : {0, 1}) {
-        int observations = 0;
-        try {
-            collision_colored_ccd_initial_guess(
-                x, displacement, mesh, params, 3,
-                [&](int iteration, const std::vector<Vec3>&,
-                    const std::vector<Vec3>&, const BroadPhase&,
-                    const std::vector<std::vector<int>>&) {
-                    ++observations;
-                    if (iteration == failure_iteration)
-                        throw std::runtime_error("snapshot write failed");
-                });
-            FAIL() << "observer exception was not propagated";
-        } catch (const std::runtime_error& error) {
-            EXPECT_STREQ(error.what(), "snapshot write failed");
-        }
-        EXPECT_EQ(observations, failure_iteration + 1);
-        EXPECT_FALSE(omp_in_parallel());
-        // A failed output callback must not strand workers in an OpenMP team.
-        EXPECT_NO_THROW(collision_colored_ccd_initial_guess(x, displacement, mesh, params, 1));
-    }
-}
-
-TEST_F(CollisionColoredCCDInitialGuess, ColorObserverSeesOnlyTheCompletedGroupsUpdates) {
-    RefMesh mesh;
-    std::vector<Vec3> x, displacement;
-    // Two disjoint cliques give multiple vertices per color, exercising the
-    // group-completion barrier rather than only single-vertex color groups.
-    for (int copy = 0; copy < 2; ++copy) {
-        const int offset = static_cast<int>(x.size());
-        for (const Vec3& p : point_above_triangle())
-            x.push_back(p + Vec3(12 * copy, 0, 0));
-        mesh.tris.insert(mesh.tris.end(), {offset + 1, offset + 2, offset + 3});
-        displacement.push_back(Vec3(0, 0, -2));
-        for (int corner = 0; corner < 3; ++corner)
-            displacement.push_back(Vec3(4, 0, 0));
-    }
-    mesh.num_positions = x.size();
-    mesh.mass.assign(x.size(), 1.0);
-    std::vector<Vec3> targets = x;
-    for (std::size_t vertex = 0; vertex < x.size(); ++vertex)
-        targets[vertex] += displacement[vertex];
-
-    for (const int threads : {1, 4}) {
-        SCOPED_TRACE(threads);
-        omp_set_num_threads(threads);
-        std::vector<Vec3> previous = x;
-        std::vector<std::vector<int>> original_colors;
-        int color_observations = 0;
-        int sweep_observations = 0;
-        const auto result = collision_colored_ccd_initial_guess(
-            x, displacement, mesh, params, 3,
-            [&](int iteration, const std::vector<Vec3>& positions,
-                const std::vector<Vec3>& observed_targets, const BroadPhase&,
-                const std::vector<std::vector<int>>& colors) {
-                EXPECT_EQ(omp_get_thread_num(), 0);
-                EXPECT_EQ(iteration, sweep_observations++);
-                if (iteration == 0) {
-                    original_colors = colors;
-                    ASSERT_EQ(colors.size(), 4u);
-                    for (const auto& group : colors) EXPECT_EQ(group.size(), 2u);
-                }
-                EXPECT_EQ(color_observations, iteration * static_cast<int>(colors.size()));
-                // The final color's snapshot and the complete sweep snapshot
-                // must be exactly the same live state.
-                expect_positions_identical(positions, previous);
-                expect_positions_identical(observed_targets, targets);
-            },
-            [&](int iteration, int color, const std::vector<Vec3>& positions,
-                const std::vector<Vec3>& observed_targets, const BroadPhase&,
-                const std::vector<std::vector<int>>& colors) {
-                EXPECT_EQ(omp_get_thread_num(), 0);
-                EXPECT_EQ(colors, original_colors);
-                ASSERT_FALSE(colors.empty());
-                const int number_of_colors = static_cast<int>(colors.size());
-                EXPECT_EQ(iteration, color_observations / number_of_colors + 1);
-                EXPECT_EQ(color, color_observations % number_of_colors);
-                EXPECT_EQ(sweep_observations, iteration);
-                ASSERT_GE(color, 0);
-                ASSERT_LT(color, number_of_colors);
-                std::vector<bool> belongs_to_group(x.size(), false);
-                for (const int vertex : colors[color]) belongs_to_group[vertex] = true;
-                for (std::size_t vertex = 0; vertex < positions.size(); ++vertex) {
-                    if (!belongs_to_group[vertex]) {
-                        EXPECT_EQ(std::memcmp(positions[vertex].data(), previous[vertex].data(),
-                            3 * sizeof(double)), 0);
-                    } else if (iteration == 1) {
-                        EXPECT_GT((positions[vertex] - previous[vertex]).norm(), 0.0);
-                    }
-                }
-                expect_positions_identical(observed_targets, targets);
-                previous = positions;
-                ++color_observations;
-            });
-        EXPECT_EQ(sweep_observations, 4);
-        EXPECT_EQ(color_observations, 12);
-        expect_positions_identical(result, previous);
-        expect_positions_identical(result,
-            collision_colored_ccd_initial_guess(x, displacement, mesh, params, 3));
-    }
-}
-
-TEST_F(CollisionColoredCCDInitialGuess, ColorObserverWorksWithoutSweepObserver) {
-    const auto x = point_above_triangle();
-    const auto mesh = point_triangle_mesh();
-    std::vector<Vec3> displacement(x.size(), Vec3::Zero());
-    displacement[0] = Vec3(0, 0, -2);
-    std::vector<Vec3> last_positions;
-    int observations = 0;
-    const auto result = collision_colored_ccd_initial_guess(
-        x, displacement, mesh, params, 3, {},
-        [&](int iteration, int color, const std::vector<Vec3>& positions,
-            const std::vector<Vec3>&, const BroadPhase&,
-            const std::vector<std::vector<int>>& colors) {
-            ASSERT_EQ(colors.size(), 4u);
-            EXPECT_EQ(iteration, observations / 4 + 1);
-            EXPECT_EQ(color, observations % 4);
-            last_positions = positions;
-            ++observations;
-        });
-    EXPECT_EQ(observations, 12);
-    expect_positions_identical(result, last_positions);
-    expect_positions_identical(result,
-        collision_colored_ccd_initial_guess(x, displacement, mesh, params, 3));
-}
-
-TEST_F(CollisionColoredCCDInitialGuess, ColorObserverSkipsZeroSweepsAndEmptyMesh) {
-    int color_observations = 0;
-    const CollisionColoredCCDColorObserver color_observer =
-        [&](int, int, const std::vector<Vec3>&, const std::vector<Vec3>&,
-            const BroadPhase&, const std::vector<std::vector<int>>&) {
-            ++color_observations;
-        };
-    const auto x = point_above_triangle();
-    const std::vector<Vec3> displacement(x.size(), Vec3(0, 0, -2));
-    for (const bool use_sweep_observer : {false, true}) {
-        int sweep_observations = 0;
-        CollisionColoredCCDObserver observer;
-        if (use_sweep_observer) {
-            observer = [&](int iteration, const std::vector<Vec3>&,
-                const std::vector<Vec3>&, const BroadPhase&,
-                const std::vector<std::vector<int>>&) {
-                EXPECT_EQ(iteration, 0);
-                ++sweep_observations;
-            };
-        }
-        expect_positions_identical(collision_colored_ccd_initial_guess(
-            x, displacement, point_triangle_mesh(), params, 0, observer, color_observer), x);
-        for (const int sweeps : {0, 3}) {
-            EXPECT_TRUE(collision_colored_ccd_initial_guess(
-                {}, {}, RefMesh{}, params, sweeps, observer, color_observer).empty());
-        }
-        EXPECT_EQ(sweep_observations, use_sweep_observer ? 3 : 0);
-        EXPECT_EQ(color_observations, 0);
-    }
-}
-
-TEST_F(CollisionColoredCCDInitialGuess, ColorObserverExceptionsStopAllWorkersAndPropagate) {
-    const auto x = point_above_triangle();
-    const auto mesh = point_triangle_mesh();
-    const std::vector<Vec3> displacement(x.size(), Vec3(0, 0, -2));
-    for (const int failure_iteration : {1, 2}) {
-        for (const int failure_color : {0, 3}) {
-            int color_observations = 0;
-            int sweep_observations = 0;
-            try {
-                collision_colored_ccd_initial_guess(
-                    x, displacement, mesh, params, 3,
-                    [&](int, const std::vector<Vec3>&, const std::vector<Vec3>&,
-                        const BroadPhase&, const std::vector<std::vector<int>>&) {
-                        ++sweep_observations;
-                    },
-                    [&](int iteration, int color, const std::vector<Vec3>&,
-                        const std::vector<Vec3>&, const BroadPhase&,
-                        const std::vector<std::vector<int>>& colors) {
-                        EXPECT_EQ(colors.size(), 4u);
-                        ++color_observations;
-                        if (iteration == failure_iteration && color == failure_color)
-                            throw std::runtime_error("color snapshot write failed");
-                    });
-                FAIL() << "color observer exception was not propagated";
-            } catch (const std::runtime_error& error) {
-                EXPECT_STREQ(error.what(), "color snapshot write failed");
-            }
-            EXPECT_EQ(color_observations, 4 * (failure_iteration - 1) + failure_color + 1);
-            // Include initial state but do not emit a completed-sweep callback
-            // after a color callback fails, even if it was the final color.
-            EXPECT_EQ(sweep_observations, failure_iteration);
-            EXPECT_FALSE(omp_in_parallel());
-            EXPECT_NO_THROW(collision_colored_ccd_initial_guess(x, displacement, mesh, params, 1));
-        }
-    }
-}
-
-TEST_F(CollisionColoredCCDInitialGuess, SweepObserverExceptionWithColorObserverStopsAllWorkers) {
-    const auto x = point_above_triangle();
-    const auto mesh = point_triangle_mesh();
-    const std::vector<Vec3> displacement(x.size(), Vec3(0, 0, -2));
-    for (const int failure_iteration : {1, 2}) {
-        int color_observations = 0;
-        int sweep_observations = 0;
-        try {
-            collision_colored_ccd_initial_guess(
-                x, displacement, mesh, params, 3,
-                [&](int iteration, const std::vector<Vec3>&,
-                    const std::vector<Vec3>&, const BroadPhase&,
-                    const std::vector<std::vector<int>>&) {
-                    ++sweep_observations;
-                    if (iteration == failure_iteration)
-                        throw std::runtime_error("completed sweep write failed");
-                },
-                [&](int, int, const std::vector<Vec3>&, const std::vector<Vec3>&,
-                    const BroadPhase&, const std::vector<std::vector<int>>& colors) {
-                    EXPECT_EQ(colors.size(), 4u);
-                    ++color_observations;
-                });
-            FAIL() << "sweep observer exception was not propagated";
-        } catch (const std::runtime_error& error) {
-            EXPECT_STREQ(error.what(), "completed sweep write failed");
-        }
-        EXPECT_EQ(color_observations, 4 * failure_iteration);
-        EXPECT_EQ(sweep_observations, failure_iteration + 1);
-        EXPECT_FALSE(omp_in_parallel());
-        EXPECT_NO_THROW(collision_colored_ccd_initial_guess(x, displacement, mesh, params, 1));
-    }
-}
-
-TEST_F(CollisionColoredCCDInitialGuess, FallingSquaresSnapshotsRetryOriginalGravityTargets) {
-    // Match the Houdini demo: the lower square is smaller, and each square is
-    // represented by exactly four vertices and two triangles. Both are free
-    // falling from rest for one implicit-Euler step, hence dx = dt^2 * gravity.
-    // Cover both the close-gap scene and the separated visualization default;
-    // neither square is fixed.
+TEST_F(CollisionColoredCCDInitialGuess, FallingSquaresRetryOriginalGravityTargets) {
+    // Both squares are free falling from rest for one implicit-Euler step,
+    // hence dx = dt^2 * gravity. The lower square is smaller; neither is fixed.
     // Number the upper square first so colored partial updates encounter the
     // lower square before it has completed its matching downward movement.
     RefMesh mesh = ref_mesh_with_masses({1, 1, 1, 1, 1, 1, 1, 1});
@@ -819,48 +459,35 @@ TEST_F(CollisionColoredCCDInitialGuess, FallingSquaresSnapshotsRetryOriginalGrav
         for (std::size_t vertex = 0; vertex < x.size(); ++vertex)
             fixed_targets[vertex] += displacement[vertex];
 
-        std::vector<std::vector<Vec3>> snapshots;
-        const auto result = collision_colored_ccd_initial_guess(
-            x, displacement, mesh, params, 10,
-            [&](int iteration, const std::vector<Vec3>& positions,
-                const std::vector<Vec3>& targets, const BroadPhase&,
-                const std::vector<std::vector<int>>&) {
-                EXPECT_EQ(iteration, static_cast<int>(snapshots.size()));
-                expect_positions_identical(targets, fixed_targets);
-                for (std::size_t vertex = 0; vertex < x.size(); ++vertex) {
-                    SCOPED_TRACE(vertex);
-                    EXPECT_DOUBLE_EQ(positions[vertex].x(), x[vertex].x());
-                    EXPECT_DOUBLE_EQ(positions[vertex].z(), x[vertex].z());
-                    EXPECT_GE(positions[vertex].y(), targets[vertex].y());
-                    EXPECT_LE(positions[vertex].y(), x[vertex].y());
-                    if (!snapshots.empty()) {
-                        EXPECT_LE(positions[vertex].y(), snapshots.back()[vertex].y());
-                        EXPECT_LE((targets[vertex] - positions[vertex]).norm(),
-                                  (targets[vertex] - snapshots.back()[vertex]).norm());
-                    }
-                }
-                snapshots.push_back(positions);
-            });
-        ASSERT_EQ(snapshots.size(), 11u);
-        expect_positions_identical(snapshots.front(), x);
-        expect_positions_identical(snapshots.back(), result);
+        // Restart each call from the same initial state so extra sweeps retry
+        // the remaining displacement rather than applying gravity again.
+        const auto first = collision_colored_ccd_initial_guess(x, displacement, mesh, params, 1);
+        const auto second = collision_colored_ccd_initial_guess(x, displacement, mesh, params, 2);
+        const auto final = collision_colored_ccd_initial_guess(x, displacement, mesh, params, 10);
         expect_positions_identical(x, original_x);
         expect_positions_identical(displacement, original_displacement);
         bool has_remaining_displacement_after_first_sweep = false;
-        for (std::size_t vertex = 0; vertex < x.size(); ++vertex)
-            has_remaining_displacement_after_first_sweep |=
-                (fixed_targets[vertex] - snapshots[1][vertex]).norm() > 0.0;
-        EXPECT_TRUE(has_remaining_displacement_after_first_sweep);
-        for (std::size_t vertex = 4; vertex < x.size(); ++vertex) {
-            SCOPED_TRACE(vertex);
-            EXPECT_LT(snapshots[1][vertex].y(), x[vertex].y());
-        }
         for (std::size_t vertex = 0; vertex < x.size(); ++vertex) {
             SCOPED_TRACE(vertex);
-            expect_vec_near(result[vertex], fixed_targets[vertex], 1e-12);
-            EXPECT_NEAR(result[vertex].y() - x[vertex].y(), -0.3924, 1e-12);
+            has_remaining_displacement_after_first_sweep |=
+                (fixed_targets[vertex] - first[vertex]).norm() > 0.0;
+            Vec3 previous = x[vertex];
+            for (const auto* positions : {&first, &second, &final}) {
+                EXPECT_DOUBLE_EQ((*positions)[vertex].x(), x[vertex].x());
+                EXPECT_DOUBLE_EQ((*positions)[vertex].z(), x[vertex].z());
+                EXPECT_GE((*positions)[vertex].y(), fixed_targets[vertex].y());
+                EXPECT_LE((*positions)[vertex].y(), previous.y());
+                EXPECT_LE((fixed_targets[vertex] - (*positions)[vertex]).norm(),
+                          (fixed_targets[vertex] - previous).norm());
+                previous = (*positions)[vertex];
+            }
+            EXPECT_LT(first[vertex].y(), x[vertex].y());
+            expect_vec_near(second[vertex], fixed_targets[vertex], 1e-12);
+            expect_vec_near(final[vertex], fixed_targets[vertex], 1e-12);
+            EXPECT_NEAR(final[vertex].y() - x[vertex].y(), -0.3924, 1e-12);
         }
-        expect_positions_identical(result,
+        EXPECT_TRUE(has_remaining_displacement_after_first_sweep);
+        expect_positions_identical(final,
             collision_colored_ccd_initial_guess(x, displacement, mesh, params, 10));
     }
 }
