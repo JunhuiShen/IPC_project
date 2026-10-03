@@ -208,6 +208,10 @@ if(IPC_BUILD_SIMULATOR)
 endif()
 
 if(IPC_BUILD_TOOLS)
+    add_executable(ccd_initial_guess_visualize ccd_initial_guess_visualize.cpp)
+    target_link_libraries(ccd_initial_guess_visualize PRIVATE IPC::ipc)
+    ipc_enable_ipo(ccd_initial_guess_visualize)
+
     add_executable(generate_golden generate_golden.cpp)
     target_compile_definitions(generate_golden PRIVATE
         GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}"

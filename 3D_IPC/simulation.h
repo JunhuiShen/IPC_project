@@ -5,6 +5,7 @@
 #include "initial_guess.h"
 #include "rigid_body_ipc.h"
 #include "time_integration.h"
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <omp.h>
@@ -194,6 +195,14 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
     BroadPhase& broad_phase, int frame_index = 1,
     PinTargetUpdater pin_updater = nullptr, SubstepCallback on_substep = nullptr, const std::string& outdir = "") {
     params.validate_cloth_grid_parameters();
+    params.validate_colored_ccd_guess_parameters();
+    if (params.use_colored_ccd_guess
+        && (!ref_mesh.rb_nodes.empty() || !ref_mesh.tets.empty()
+            || !ref_mesh.tet_nodes.empty()
+            || std::any_of(ref_mesh.node_to_rb.begin(), ref_mesh.node_to_rb.end(),
+                [](int owner) { return owner >= 0; }))) {
+        throw std::invalid_argument("--use_colored_ccd_guess supports cloth-only scenes, not rigid or solid nodes");
+    }
     SolverResult agg;
     const double dt = params.dt();
     for (int sub = 0; sub < params.substeps; ++sub) {
@@ -209,6 +218,16 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
 
         if (params.use_ogc || params.use_ogc_solver)
             xnew = state.deformed_positions;
+        else if (params.use_colored_ccd_guess) {
+            // xhat is the fixed target for this substep. The colored CCD
+            // helper accepts a displacement and retries its remainder after
+            // each color sweep; do not add another gravity predictor here.
+            std::vector<Vec3> intended_displacement(xhat.size());
+            for (std::size_t vertex = 0; vertex < xhat.size(); ++vertex)
+                intended_displacement[vertex] = xhat[vertex] - state.deformed_positions[vertex];
+            xnew = collision_colored_ccd_initial_guess(state.deformed_positions,
+                intended_displacement, ref_mesh, params, params.colored_ccd_guess_iters);
+        }
         else if (params.use_verlet_guess)
             xnew = verlet_initial_guess(state.deformed_positions, xhat, ref_mesh, params, &broad_phase);
         else if (params.use_ccd_guess)

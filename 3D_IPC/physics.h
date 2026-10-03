@@ -60,6 +60,8 @@ struct SimParams {
     bool   write_substeps;       // if true, export a frame file after every substep (not just every frame)
     bool   use_ccd;              // if true, run CCD step clamping in per_vertex_safe_step
     bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
+    bool   use_colored_ccd_guess; // cloth only: collision-colored linear CCD toward xhat; OGC takes priority
+    int    colored_ccd_guess_iters; // complete color sweeps, retrying the remaining displacement (0 keeps x^n)
     bool   use_verlet_guess;     // if true, start GS from xhat + dt²*gravity (Verlet predictor)
     bool   use_translation_guess;        // if true, start GS from x^n + C
     bool   use_ogc;     // if true, use trust_region_initial_guess instead of CCD
@@ -113,6 +115,8 @@ struct SimParams {
         p.write_substeps            = false;
         p.use_ccd                   = false;
         p.use_ccd_guess             = true;
+        p.use_colored_ccd_guess     = false;
+        p.colored_ccd_guess_iters   = 10;
         p.use_translation_guess             = false;
         p.use_verlet_guess          = false;
         p.use_ogc          = false;
@@ -131,6 +135,14 @@ struct SimParams {
         p.cached_dt_                = -1.0;
         p.cached_dt2_               = -1.0;
         return p;
+    }
+
+    void validate_colored_ccd_guess_parameters() const {
+        if (!use_colored_ccd_guess) return;
+        if (colored_ccd_guess_iters < 0)
+            throw std::invalid_argument("--colored_ccd_guess_iters must be nonnegative (0 keeps the current positions)");
+        if (!std::isfinite(d_hat) || d_hat < 0.0)
+            throw std::invalid_argument("--use_colored_ccd_guess requires finite, nonnegative --d_hat");
     }
 
     void validate_cloth_grid_parameters() const {
