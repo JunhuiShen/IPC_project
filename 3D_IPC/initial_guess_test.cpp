@@ -754,6 +754,55 @@ TEST_F(CollisionColoredCCDInitialGuess, LaterColorClearsObstacleForNextSweep) {
     }
 }
 
+TEST_F(CollisionColoredCCDInitialGuess, StalledPointRetriesAfterLaterColorsClearItsObstacle) {
+    auto x = point_above_triangle();
+    x[0].z() = 5e-9;
+    const auto mesh = point_triangle_mesh();
+    std::vector<Vec3> displacement(x.size(), Vec3(4, 0, 0));
+    displacement[0] = Vec3(0, 0, -2);
+    const auto first = collision_colored_ccd_initial_guess(x, displacement, mesh, params, 1);
+    expect_positions_identical({first[0]}, {x[0]});
+    const auto retried = collision_colored_ccd_initial_guess(x, displacement, mesh, params, 20);
+    for (std::size_t i = 0; i < x.size(); ++i)
+        expect_vec_near(retried[i], x[i] + displacement[i], 1e-12);
+}
+
+TEST_F(CollisionColoredCCDInitialGuess, BarrierRangeDoesNotAddSeparatedGuessCandidates) {
+    auto mesh = ref_mesh_with_masses({1, 1, 1, 1, 1, 1, 1});
+    mesh.tris = {1, 2, 3, 4, 5, 6};
+    auto x = point_above_triangle();
+    x.insert(x.end(), {Vec3(10, -1, 0), Vec3(12, -1, 0), Vec3(11, 1, 0)});
+    std::vector<Vec3> displacement(x.size(), Vec3::Zero());
+    displacement[0] = Vec3(0, 0, -2);
+    for (int i = 1; i < 4; ++i) displacement[i] = Vec3(4, 0, 0);
+    std::vector<Vec3> expected;
+    std::size_t nt_count = 0, ss_count = 0;
+    for (const double activation_distance : {0.0, 0.005, 25.0}) {
+        SCOPED_TRACE(activation_distance);
+        params.d_hat = activation_distance;
+        BroadPhase scratch;
+        const auto result = collision_colored_ccd_initial_guess(
+            x, displacement, mesh, params, 2, &scratch);
+        if (expected.empty()) {
+            expected = result;
+            nt_count = scratch.nt_pairs().size();
+            ss_count = scratch.ss_pairs().size();
+            EXPECT_GT(nt_count, 0U);
+        } else {
+            expect_positions_identical(result, expected);
+            EXPECT_EQ(scratch.nt_pairs().size(), nt_count);
+            EXPECT_EQ(scratch.ss_pairs().size(), ss_count);
+        }
+        expect_vec_near(result[0], x[0] + displacement[0], 1e-12);
+        for (const auto& pair : scratch.nt_pairs()) {
+            EXPECT_LT(pair.node, 4);
+            for (int node : pair.tri_v) EXPECT_LT(node, 4);
+        }
+        for (const auto& pair : scratch.ss_pairs())
+            for (int node : pair.v) EXPECT_LT(node, 4);
+    }
+}
+
 TEST_F(CollisionColoredCCDInitialGuess, ReusedBroadPhaseRebuildsChangingMotionAndContacts) {
     const auto mesh = point_triangle_mesh();
     BroadPhase scratch;
@@ -780,6 +829,58 @@ TEST_F(CollisionColoredCCDInitialGuess, ReusedBroadPhaseRebuildsChangingMotionAn
                 expect_positions_identical(collision_colored_ccd_initial_guess(
                     x, displacement, mesh, params, sweeps, &scratch), expected);
             }
+        }
+    }
+}
+
+TEST_F(CollisionColoredCCDInitialGuess, SeparationCertificateCoversTheWholeSweep) {
+    const auto mesh = point_triangle_mesh();
+    const std::vector<Vec3> x = {Vec3(.25, .25, 0), Vec3(0, 1, 0),
+        Vec3(1, 0, 0), Vec3(1, 1, 0)};
+    std::vector<Vec3> displacement(x.size(), Vec3::Zero());
+    BroadPhase scratch;
+    // The point lies inside the triangle's AABB but outside its finite face.
+    // This entire short motion remains separated along a diagonal direction.
+    displacement[0] = Vec3(.01, .01, 0);
+    const auto clear = collision_colored_ccd_initial_guess(
+        x, displacement, mesh, params, 1, &scratch);
+    ASSERT_EQ(scratch.nt_pairs().size(), 1U);
+    for (const auto& row : scratch.cache().vertex_nt) EXPECT_TRUE(row.empty());
+    expect_vec_near(clear[0], x[0] + displacement[0], 1e-12);
+
+    // The same starting separation cannot certify a longer segment that
+    // crosses the face. Preserve the candidate and clip before its first hit.
+    displacement[0] = Vec3(.5, .5, 0);
+    const auto crossing = collision_colored_ccd_initial_guess(
+        x, displacement, mesh, params, 1, &scratch);
+    ASSERT_EQ(scratch.nt_pairs().size(), 1U);
+    EXPECT_FALSE(scratch.cache().vertex_nt[0].empty());
+    EXPECT_LT(crossing[0].x(), .5);
+    EXPECT_LT(crossing[0].y(), .5);
+}
+
+TEST_F(CollisionColoredCCDInitialGuess, CachedColoringRebuildsForChangedTopology) {
+    RefMesh mesh;
+    std::vector<Vec3> x, displacement;
+    std::vector<int> triangles;
+    for (int copy = 0; copy < 48; ++copy) {
+        const int base = static_cast<int>(x.size());
+        for (const auto& point : point_above_triangle())
+            x.push_back(point + Vec3(12 * copy, 0, 0));
+        triangles.insert(triangles.end(), {base + 1, base + 2, base + 3});
+        displacement.insert(displacement.end(), {Vec3(0, 0, -2),
+            Vec3::Zero(), Vec3::Zero(), Vec3::Zero()});
+    }
+    mesh.num_positions = x.size();
+    mesh.mass.assign(x.size(), 1.0);
+    for (const int threads : {1, 8, 64}) {
+        omp_set_num_threads(threads);
+        for (const bool obstacles : {true, false, true}) {
+            mesh.tris = obstacles ? triangles : std::vector<int>{};
+            const auto result = collision_colored_ccd_initial_guess(
+                x, displacement, mesh, params, 1);
+            for (int copy = 0; copy < 48; ++copy)
+                EXPECT_NEAR(result[4 * copy].z(), obstacles ? .1 : -1.0, 1e-12);
         }
     }
 }

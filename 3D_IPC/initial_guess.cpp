@@ -6,6 +6,7 @@
 #include "parallel_helper.h"
 #include "safe_step.h"
 #include "segment_segment_distance.h"
+#include "solver.h"
 
 #include <algorithm>
 #include <cmath>
@@ -17,6 +18,46 @@
 // separating update can return TOI=0. This is a contact gap, not a target
 // offset, and is intentionally local to the colored initial guess.
 static constexpr double colored_guess_min_separation = 1.0e-8;
+
+struct ColoredCCDGuessWorkspace {
+    std::vector<Vec3> targets;
+    std::vector<AABB> node_boxes;
+    std::vector<std::vector<int>> contact_adjacency, color_groups;
+    GreedyColoringWorkspace coloring;
+    std::vector<unsigned char> nt_separated, ss_separated;
+};
+
+static void discard_separated_guess_contacts(BroadPhase& broad_phase,
+    const std::vector<Vec3>& x, bool parallel, ColoredCCDGuessWorkspace& workspace) {
+    const auto& cache = broad_phase.cache();
+    workspace.nt_separated.resize(cache.nt_pairs.size());
+    workspace.ss_separated.resize(cache.ss_pairs.size());
+    const std::size_t count = cache.nt_pairs.size() + cache.ss_pairs.size();
+    #pragma omp parallel for schedule(static) if(parallel && count >= 128)
+    for (std::size_t entry = 0; entry < count; ++entry) {
+        const bool segment = entry >= cache.nt_pairs.size();
+        const std::size_t index = segment ? entry - cache.nt_pairs.size() : entry;
+        std::array<int, 4> nodes;
+        if (segment) {
+            const auto& pair = cache.ss_pairs[index];
+            nodes = {pair.v[0], pair.v[1], pair.v[2], pair.v[3]};
+        } else {
+            const auto& pair = cache.nt_pairs[index];
+            nodes = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+        }
+        std::array<Vec3, 4> positions;
+        std::array<AABB, 4> boxes;
+        for (int role = 0; role < 4; ++role) {
+            positions[role] = x[nodes[role]];
+            boxes[role] = cache.node_boxes[nodes[role]];
+        }
+        auto& separated = segment ? workspace.ss_separated : workspace.nt_separated;
+        separated[index] = solver_detail::contact_boxes_separated(
+            positions, boxes, segment, colored_guess_min_separation);
+    }
+    broad_phase.discard_separated_contact_incidence(
+        workspace.nt_separated, workspace.ss_separated, parallel);
+}
 
 static double guess_point_triangle_distance(
     const Vec3& point, const Vec3& a, const Vec3& b, const Vec3& c) {
@@ -138,7 +179,11 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
     const auto is_rigid = [&](int vertex) {
         return !ref_mesh.node_to_rb.empty() && ref_mesh.node_to_rb[vertex] >= 0;
     };
-    std::vector<Vec3> targets(x.size());
+    // Rebuild all geometry/dependencies, while retaining per-caller storage.
+    // Warm coloring still converges to the canonical ascending greedy result.
+    static thread_local ColoredCCDGuessWorkspace workspace;
+    auto& targets = workspace.targets;
+    targets.resize(x.size());
     for (int vertex = 0; vertex < nv; ++vertex) {
         if (!x[vertex].allFinite() || !intended_displacement[vertex].allFinite())
             throw std::invalid_argument("collision_colored_ccd_initial_guess: positions and displacements must be finite");
@@ -152,7 +197,8 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
     std::vector<Vec3> xnew = x;
     if (ccd_iterations == 0 || nv == 0) return xnew;
 
-    std::vector<AABB> node_boxes(x.size());
+    auto& node_boxes = workspace.node_boxes;
+    node_boxes.resize(x.size());
     for (int vertex = 0; vertex < nv; ++vertex) {
         // Enclose the entire start-to-target segment, with 20% extra width
         // (10% at each end). Keep stationary axes wider than safe_step's 1e-10
@@ -176,31 +222,42 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
     BroadPhase& broad_phase = scratch_broad_phase ? *scratch_broad_phase : local_broad_phase;
     // Keep every candidate and vertex's contact incidence, but omit the node
     // BVH and leaf maps: these fixed swept boxes are never incrementally refit.
-    // Green primitive boxes add params.d_hat to the node-box unions, matching
-    // the solver broad phase. This expands candidates, not the CCD thickness.
+    // This predictor has no barrier forces. Pad primitive boxes only by the
+    // endpoint gap safeguard, rather than the solver's activation distance.
+    // Every intermediate position remains in its swept node box, so omitted
+    // pairs cannot collide or violate that gap, even during colored updates.
     // Tet interiors are not contact points. Boundary triangles and edges,
     // including fixed rigid proxies, still participate in collision checks.
     if (!ref_mesh.tets.empty() || !ref_mesh.tet_nodes.empty())
-        broad_phase.initialize_surface_nodes(node_boxes, ref_mesh, params.d_hat,
+        broad_phase.initialize_surface_nodes(node_boxes, ref_mesh, colored_guess_min_separation,
             BroadPhase::InitializationMode::DeformableSolver);
     else
-        broad_phase.initialize(node_boxes, ref_mesh, params.d_hat,
+        broad_phase.initialize(node_boxes, ref_mesh, colored_guess_min_separation,
             BroadPhase::InitializationMode::DeformableSolver);
-    std::vector<std::vector<int>> contact_adjacency, color_groups;
+    // A supporting-plane certificate covers every position in all four swept
+    // boxes, so these pairs need neither read dependencies nor gap/CCD queries.
+    // Checking just their current distances would not justify this pruning.
+    discard_separated_guess_contacts(broad_phase, x, params.use_parallel, workspace);
+    auto& contact_adjacency = workspace.contact_adjacency;
+    auto& color_groups = workspace.color_groups;
     build_contact_adj(broad_phase.cache(), nv, contact_adjacency);
-    greedy_color_conflict_graph(contact_adjacency, color_groups);
+    greedy_color_conflict_graph(contact_adjacency, color_groups, &workspace.coloring);
 
     // Every candidate's four vertices form a clique, so a same-color update
     // cannot write any other position read by a vertex's CCD query. The omp
     // for barrier is essential: all updates finish before the next color.
     // Keep one team alive across all colors/sweeps. Targets, boxes, pairs and
     // coloring stay fixed; only xnew changes toward the original targets.
+    // Bit 0 records movement; bit 1 records a remaining nontrivial target move.
+    int sweep_status = 0;
     #pragma omp parallel if(params.use_parallel)
     {
         std::vector<double> required_distances; // reused, private to each worker
         for (int iteration = 0; iteration < ccd_iterations; ++iteration) {
+            #pragma omp single
+            { sweep_status = 0; }
             for (const auto& group : color_groups) {
-                #pragma omp for schedule(dynamic, 1)
+                #pragma omp for schedule(dynamic, 8) reduction(|:sweep_status)
                 for (int index = 0; index < static_cast<int>(group.size()); ++index) {
                     const int vertex = group[index];
                     if (is_rigid(vertex)) continue;
@@ -211,8 +268,22 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
                     if (step > 0.0)
                         preserve_guess_separation(broad_phase.cache(), xnew,
                             vertex, before, required_distances);
+                    if ((xnew[vertex].array() != before.array()).any()) sweep_status |= 1;
+                    // Targets lie inside their padded boxes. Match safe_step's
+                    // existing no-op threshold, without requiring exact equality.
+                    if (!((targets[vertex] - xnew[vertex]).squaredNorm() < 1e-28))
+                        sweep_status |= 2;
                 }
             }
+            // All colors have joined. Fixed targets and an unchanged complete
+            // sweep imply that every subsequent sweep would do identical work.
+            // A stalled early color alone is insufficient: a later color can
+            // still clear its obstacle and allow progress on the next sweep.
+            const bool finished = !(sweep_status & 1) || !(sweep_status & 2);
+            // Every worker must capture the decision before the next single
+            // region can reset the shared flag for another sweep.
+            #pragma omp barrier
+            if (finished) break;
         }
     }
     return xnew;
