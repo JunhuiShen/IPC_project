@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cmath>
 #include <limits>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <tuple>
@@ -455,6 +456,35 @@ namespace {
 
 } // namespace
 
+TEST(BroadPhaseCacheTest, PackedIncidenceRetainsWideIndicesRolesAndValueSemantics) {
+    using Entry = BroadPhase::Cache::VertexPairEntry;
+    const std::size_t largest_pair = std::max(
+        std::vector<NodeTrianglePair>().max_size(),
+        std::vector<SegmentSegmentPair>().max_size()) - 1;
+    ASSERT_LE(largest_pair, Entry::max_pair_index);
+    const std::array<std::size_t, 3> indices{0, largest_pair / 2, largest_pair};
+    std::vector<Entry> entries;
+    for (const std::size_t index : indices)
+        for (int role = 0; role < 4; ++role) entries.push_back({index, role});
+    auto copy = entries;
+    entries.assign(entries.size(), Entry{});
+    for (std::size_t i = 0; i < copy.size(); ++i) {
+        EXPECT_EQ(copy[i].pair_index, indices[i / 4]);
+        EXPECT_EQ(copy[i].dof, static_cast<int>(i % 4));
+        EXPECT_EQ(entries[i].pair_index, 0u);
+        EXPECT_EQ(entries[i].dof, 0);
+    }
+    BroadPhase::Cache cache;
+    cache.vertex_nt.push_back(copy);
+    BroadPhase::Cache copied_cache = cache;
+    cache.vertex_nt[0].clear();
+    ASSERT_EQ(copied_cache.vertex_nt[0].size(), copy.size());
+    for (std::size_t i = 0; i < copy.size(); ++i) {
+        EXPECT_EQ(copied_cache.vertex_nt[0][i].pair_index, copy[i].pair_index);
+        EXPECT_EQ(copied_cache.vertex_nt[0][i].dof, copy[i].dof);
+    }
+}
+
 TEST(AABBTest, DefaultConstructorStartsEmpty) {
 AABB box;
 EXPECT_GT(box.min.x(), box.max.x());
@@ -535,6 +565,75 @@ EXPECT_TRUE(nodes.empty());
 std::vector<int> hits;
 query_bvh(nodes, root, AABB(Vec3::Zero(), Vec3::Zero()), hits);
 EXPECT_TRUE(hits.empty());
+}
+
+TEST(BVH3Test, QueryTilesPreserveScalarHitOrderTailsAndAppendSemantics) {
+    std::vector<AABB> boxes;
+    for (int z = 0; z < 4; ++z)
+        for (int y = 0; y < 9; ++y)
+            for (int x = 0; x < 17; ++x) {
+                const Vec3 lo(x * .17, y * .21, z * .31);
+                boxes.emplace_back(lo, lo + Vec3(.19, .23, .33));
+            }
+    std::vector<BVHNode> nodes;
+    const int root = build_bvh(boxes, nodes);
+    std::mt19937 random(24);
+    std::uniform_real_distribution<double> coordinate(-.5, 3.5);
+    std::uniform_real_distribution<double> reach(0.0, 1.0);
+    for (int trial = 0; trial < 100; ++trial) {
+        std::array<AABB, bvh_query_tile_width> queries;
+        for (auto& query : queries) {
+            const Vec3 lo(coordinate(random), coordinate(random), coordinate(random));
+            query = AABB(lo, lo + Vec3::Constant(reach(random)));
+        }
+        if (trial == 0) {
+            const double inf = std::numeric_limits<double>::infinity();
+            const double nan = std::numeric_limits<double>::quiet_NaN();
+            queries = {boxes[0], AABB(Vec3::Constant(-inf), Vec3::Constant(inf)),
+                AABB(), AABB(Vec3(nan, 0, 0), Vec3::Ones()),
+                AABB(Vec3::Zero(), Vec3(nan, 1, 1)),
+                AABB(boxes[0].max, boxes[0].max),
+                AABB(Vec3::Constant(10), Vec3::Constant(11)), boxes.back()};
+        }
+        for (std::size_t count = 0; count <= bvh_query_tile_width; ++count) {
+            std::array<std::vector<int>, bvh_query_tile_width> actual, expected;
+            std::array<std::vector<int>*, bvh_query_tile_width> outputs;
+            for (std::size_t lane = 0; lane < bvh_query_tile_width; ++lane) {
+                actual[lane] = expected[lane] = {-7};
+                outputs[lane] = &actual[lane];
+                if (lane < count) query_bvh(nodes, root, queries[lane], expected[lane]);
+            }
+            query_bvh_tile(nodes, root, queries.data(), count, outputs.data());
+            EXPECT_EQ(actual, expected) << "trial=" << trial << " count=" << count;
+        }
+    }
+    query_bvh_tile(nodes, root, nullptr, 0, nullptr);
+    query_bvh_tile(nodes, -1, nullptr, bvh_query_tile_width, nullptr);
+}
+
+TEST(BroadPhaseTest, LargeClothAcceptanceMasksPreserveRawHitsPairsAndIncidenceAcrossRebuilds) {
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> material_positions;
+    for (int layer = 0; layer < 2; ++layer)
+        append_square_mesh(mesh, state, material_positions, 31, 23, .93, .69, Vec3(0, layer * .01, 0));
+    BroadPhase actual, expected;
+    for (double radius : {.0004, .025, .0002}) {
+        std::vector<AABB> boxes;
+        for (const auto& position : state.deformed_positions)
+            boxes.emplace_back(position - Vec3::Constant(radius), position + Vec3::Constant(radius));
+        expected.initialize(boxes, mesh, .01, BroadPhase::InitializationMode::Refittable);
+        actual.initialize(boxes, mesh, .01, BroadPhase::InitializationMode::DeformableSolver);
+        const auto& a = actual.cache();
+        const auto& e = expected.cache();
+        ASSERT_GE(a.edges.size(), 4096u);
+        EXPECT_EQ(a.node_hits, e.node_hits);
+        EXPECT_EQ(a.edge_hits, e.edge_hits);
+        EXPECT_EQ(a.nt_pair_tri, e.nt_pair_tri);
+        EXPECT_EQ(a.ss_pair_edges, e.ss_pair_edges);
+        expect_vertex_pair_entries_exact(a.vertex_nt, e.vertex_nt);
+        expect_vertex_pair_entries_exact(a.vertex_ss, e.vertex_ss);
+    }
 }
 
 TEST(BVH3Test, RefitUpdatesQueryResults) {
@@ -1696,7 +1795,7 @@ TEST(BVH3Test, ParallelBuildPreservesSerialLayoutQueriesAndRefitsExactly) {
         int count = omp_get_max_threads();
         ~RestoreThreads() { omp_set_num_threads(count); }
     } restore;
-    for (const int count : {0, 1, 127, 256, 257, 4099}) {
+    for (const int count : {0, 1, 127, 256, 257, 4099, 16384, 16385}) {
         std::vector<AABB> boxes;
         for (int i = 0; i < count; ++i) {
             // Include repeated centroids and a non-power-of-two tree size.
@@ -1711,6 +1810,16 @@ TEST(BVH3Test, ParallelBuildPreservesSerialLayoutQueriesAndRefitsExactly) {
             std::vector<BVHNode> actual;
             std::vector<int> actual_leaves;
             EXPECT_EQ(build_bvh(boxes, actual, actual_leaves), root);
+            expect_bvh_vectors_exact(actual, expected);
+            EXPECT_EQ(actual_leaves, expected_leaves);
+            // BroadPhase invokes construction from an existing team. The
+            // centroid/index preparation tasks must write the caller's buffers
+            // and finish before any recursive partition reads them.
+            #pragma omp parallel
+            {
+                #pragma omp single
+                build_bvh(boxes, actual, actual_leaves);
+            }
             expect_bvh_vectors_exact(actual, expected);
             EXPECT_EQ(actual_leaves, expected_leaves);
             for (int query = 0; query < 20; ++query) {

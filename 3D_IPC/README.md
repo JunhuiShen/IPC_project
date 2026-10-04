@@ -364,8 +364,8 @@ All copyable project commands are collected here. Run them from the
 ### Basic usage
 
 ```bash
-# Default twisting-cloth scene
-./build/3D_sim
+# Default twisting-cloth scene with SIMD v2
+./build/3D_sim --use_basic_experimental true --use_simd true
 
 # Complete argument list and current defaults
 ./build/3D_sim --help
@@ -399,13 +399,13 @@ ctest --test-dir build -N -V
 
 ```bash
 # Export GEO, OBJ, PLY, or USD frames
-./build/3D_sim --format geo --outdir frames_geo
-./build/3D_sim --format obj --outdir frames_obj
-./build/3D_sim --format ply --outdir frames_ply
-./build/3D_sim --format usd --outdir frames_usd
+./build/3D_sim --format geo --outdir frames_geo --use_basic_experimental true --use_simd true
+./build/3D_sim --format obj --outdir frames_obj --use_basic_experimental true --use_simd true
+./build/3D_sim --format ply --outdir frames_ply --use_basic_experimental true --use_simd true
+./build/3D_sim --format usd --outdir frames_usd --use_basic_experimental true --use_simd true
 
 # Resume after frame 30 using state_0030.bin in frames_sim3d
-./build/3D_sim --restart_frame 30 --outdir frames_sim3d
+./build/3D_sim --restart_frame 30 --outdir frames_sim3d --use_basic_experimental true --use_simd true
 ```
 
 Output defaults to Houdini `.geo` files in `frames_sim3d/`. Available formats
@@ -416,16 +416,21 @@ are `geo`, `obj`, `ply`, and `usd`. Every completed frame also writes a binary
 
 ```bash
 # Translation-restricted initial guess instead of the default CCD guess
-./build/3D_sim --use_ccd_guess false --use_translation_guess true --fixed_iters
+./build/3D_sim --use_ccd_guess false --use_translation_guess true --fixed_iters --use_basic_experimental true --use_simd true
 
 # CCD-clipped Verlet predictor
-./build/3D_sim --use_ccd_guess false --use_verlet_guess true
+./build/3D_sim --use_ccd_guess false --use_verlet_guess true --use_basic_experimental true --use_simd true
 
 # collision_colored_ccd_initial_guess: cloth-only colored CCD sweeps toward xhat
-./build/3D_sim --use_colored_ccd_guess true --colored_ccd_guess_iters 10
+./build/3D_sim --use_colored_ccd_guess true --colored_ccd_guess_iters 10 --use_basic_experimental true --use_simd true
 ```
 
 ### Reference scene commands
+
+All scene commands below enable SIMD v2 with
+`--use_basic_experimental true --use_simd true`. Cloth scenes use the cloth
+v2 solver; rigid, solid, and mixed scenes use the general v2 solver. Each
+build uses its available SIMD backend or scalar fallbacks.
 
 ```bash
 # Example 1: square cloth twisted in place, 240 frames at 0.5 turns/s
@@ -457,75 +462,96 @@ are `geo`, `obj`, `ply`, and `usd`. Every completed frame also writes a binary
   --outdir example3_output
 
 # Example 4: avatar collider and dress loaded from a data directory
-./build/3D_sim --example 4 --datadir /path/to/avatar_data
+./build/3D_sim --example 4 --datadir /path/to/avatar_data \
+  --use_basic_experimental true --use_simd true
 ```
 
-Examples 5–11 are rigid-body scenes. These commands mirror the corresponding
-scene comments in `example.cpp`:
+Examples 5–11 are rigid-body scenes. These commands use the corresponding
+scene presets from `example.cpp` with SIMD v2 enabled:
 
 ```bash
 # Example 5: freely rotating tennis racket
-./build/3D_sim --example 5 --num_frames 500 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output
+./build/3D_sim --example 5 --num_frames 500 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output \
+  --use_basic_experimental true --use_simd true
 
 # Example 6: freely rotating space tool
-./build/3D_sim --example 6 --num_frames 2000 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir space_tool_output
+./build/3D_sim --example 6 --num_frames 2000 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir space_tool_output \
+  --use_basic_experimental true --use_simd true
 
 # Example 7: rigid bodies dropped onto a ground plane
-./build/3D_sim --example 7 --num_frames 200 --substeps 10 --tol_abs 1e-12 --tol_rel 1e-10 --outdir drop_box_output --format obj
+./build/3D_sim --example 7 --num_frames 200 --substeps 10 --tol_abs 1e-12 --tol_rel 1e-10 --outdir drop_box_output --format obj \
+  --use_basic_experimental true --use_simd true
 
 # Example 8: head-on rigid polygon collision
-./build/3D_sim --example 8 --num_frames 60 --max_substep_iters 500 --substeps 10 --tol_rel 1e-10 --rigid_density 25 --outdir polygon_collision_output --format obj
+./build/3D_sim --example 8 --num_frames 60 --max_substep_iters 500 --substeps 10 --tol_rel 1e-10 --rigid_density 25 --outdir polygon_collision_output --format obj \
+  --use_basic_experimental true --use_simd true
 
 # Example 9: stationary stack of twenty rigid polygons
-./build/3D_sim --example 9 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --rigid_density 25 --gy 0 --outdir twenty_polygon_static_stack_output --format obj
+./build/3D_sim --example 9 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --rigid_density 25 --gy 0 --outdir twenty_polygon_static_stack_output --format obj \
+  --use_basic_experimental true --use_simd true
 
 # Example 10: five aligned rigid polygons
-./build/3D_sim --example 10 --num_frames 100 --substeps 10 --rigid_density 25 --outdir five_polygon_aligned_stack_output --format obj
+./build/3D_sim --example 10 --num_frames 100 --substeps 10 --rigid_density 25 --outdir five_polygon_aligned_stack_output --format obj \
+  --use_basic_experimental true --use_simd true
 
 # Example 11: one hundred rigid polygons, fixed-iteration mode
-./build/3D_sim --example 11 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir hundred_polygon_box_fixed_iter_output --format obj
+./build/3D_sim --example 11 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir hundred_polygon_box_fixed_iter_output --format obj \
+  --use_basic_experimental true --use_simd true
+
+```
 
 Examples 12–24 cover cloth, deformable solids, rigid bodies, and SDFs. The
-commands for examples 12–23 mirror the scene comments in `example.cpp`:
+commands for examples 12–23 use the scene presets from `example.cpp` with
+SIMD v2 enabled:
 
 ```bash
 # Example 12: fifty rigid polygons dropped onto pinned cloth
-./build/3D_sim --example 12 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir fifty_polygons_on_pinned_cloth_output --format obj
+./build/3D_sim --example 12 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir fifty_polygons_on_pinned_cloth_output --format obj \
+  --use_basic_experimental true --use_simd true
 
 # Example 13: one deformable solid dropped onto a ground plane
-./build/3D_sim --example 13 --num_frames 200 --substeps 20 --max_substep_iters 50 --tol_abs 1e-8 --tol_rel 1e-5 --outdir single_solid_ground_drop_output --format obj
+./build/3D_sim --example 13 --num_frames 200 --substeps 20 --max_substep_iters 50 --tol_abs 1e-8 --tol_rel 1e-5 --outdir single_solid_ground_drop_output --format obj \
+  --use_basic_experimental true --use_simd true
 
 # Example 14: one deformable solid dropped onto pinned cloth
-./build/3D_sim --example 14 --num_frames 200 --substeps 20 --max_substep_iters 30 --fixed_iters --E 1e8 --outdir stiff_cloth_solid_drop_output --format obj --d_hat 0.019 --k_barrier 500
+./build/3D_sim --example 14 --num_frames 200 --substeps 20 --max_substep_iters 30 --fixed_iters --E 1e8 --outdir stiff_cloth_solid_drop_output --format obj --d_hat 0.019 --k_barrier 500 \
+  --use_basic_experimental true --use_simd true
 
 # Example 15: rigid and deformable polygons dropped onto pinned cloth
-./build/3D_sim --example 15 --num_frames 200 --substeps 20 --max_substep_iters 20 --fixed_iters --outdir twenty_rigid_deformable_polygons_on_pinned_cloth_output --format obj --E 1e8 --d_hat 0.019 --k_barrier 500
+./build/3D_sim --example 15 --num_frames 200 --substeps 20 --max_substep_iters 20 --fixed_iters --outdir twenty_rigid_deformable_polygons_on_pinned_cloth_output --format obj --E 1e8 --d_hat 0.019 --k_barrier 500 \
+  --use_basic_experimental true --use_simd true
 
 # Example 16: alternating rigid and deformable polygons on pinned cloth
-./build/3D_sim --example 16 --num_frames 200 --substeps 20 --max_substep_iters 20 --fixed_iters --outdir ten_rigid_solid_flat_stack_on_cloth_output --format obj --E 1e8 --d_hat 0.019 --k_barrier 500
+./build/3D_sim --example 16 --num_frames 200 --substeps 20 --max_substep_iters 20 --fixed_iters --outdir ten_rigid_solid_flat_stack_on_cloth_output --format obj --E 1e8 --d_hat 0.019 --k_barrier 500 \
+  --use_basic_experimental true --use_simd true
 
 # Example 17: Bunny/Spot solids with rigid cubes and gears
-./build/3D_sim --example 17 --datadir example_obj --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 600 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_output --format obj
+./build/3D_sim --example 17 --datadir example_obj --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 600 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_output --format obj \
+  --use_basic_experimental true --use_simd true
 
 # Example 18: dynamic threaded bolt falling through a fixed nut
-./build/3D_sim --example 18 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj
+./build/3D_sim --example 18 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj \
+  --use_basic_experimental true --use_simd true
 
 # Example 19: deformable Armadillo between gear crushers
-./build/3D_sim --example 19 --num_frames 300 --fps 60 --substeps 10 --max_substep_iters 10 --node_box_update_count 2 --fixed_iters --solid_E 290909 --solid_nu 0.454545 --d_hat 0.00025 --k_barrier 1000 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --crusher_angular_speed 20 --outdir armadillo_gear_crusher_output --format obj
+./build/3D_sim --example 19 --num_frames 300 --fps 60 --substeps 10 --max_substep_iters 10 --node_box_update_count 2 --fixed_iters --solid_E 290909 --solid_nu 0.454545 --d_hat 0.00025 --k_barrier 1000 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --crusher_angular_speed 20 --outdir armadillo_gear_crusher_output --format obj \
+  --use_basic_experimental true --use_simd true
 
 # Example 20: four Bunny/Spot/cube/gear rows dropped onto pinned cloth
 ./build/3D_sim --example 20 --num_frames 200 --fps 30 --substeps 15 --max_substep_iters 25 --fixed_iters \
   --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 \
   --d_hat 0.019 --k_barrier 1000 --friction_coefficient 0 --use_ccd true \
- --node_box_update_count 10 --use_parallel true --use_basic_experimental true --use_simd true \
+  --node_box_update_count 10 --use_parallel true --use_basic_experimental true --use_simd true \
   --write_substeps false --format obj --outdir outputs/example20_general_v2 \
   --use_colored_ccd_guess true --colored_ccd_guess_iters 10
 
 # Example 21: rolled cloth unrolling down an SDF ramp
-./build/3D_sim --example 21 --num_frames 200 --substeps 20 --max_substep_iters 80 --fixed_iters --kB 0.0025 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --outdir rolled_cloth_on_steep_ramp_output_new --format obj
+./build/3D_sim --example 21 --num_frames 200 --substeps 20 --max_substep_iters 80 --fixed_iters --kB 0.0025 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --outdir rolled_cloth_on_steep_ramp_output_new --format obj \
+  --use_basic_experimental true --use_simd true
 
 # Example 22: three cloth layers with one fixed edge and one oscillating edge
 ./build/3D_sim --example 22 \
+  --use_basic_experimental true --use_simd true \
   --num_frames 200 --substeps 30 --max_substep_iters 100 --fixed_iters \
   --friction_coefficient 0.0 --friction_velocity_epsilon 0.01 \
   --kB 0.01 --osc_amplitude 0.01 --osc_frequency 6.0 --osc_length 1.0 --gy 0 \
@@ -533,6 +559,7 @@ commands for examples 12–23 mirror the scene comments in `example.cpp`:
 
 # Example 23: a rigid wrecking ball swings into a wall of 560 cubes
 ./build/3D_sim --example 23 \
+  --use_basic_experimental true --use_simd true \
   --num_frames 200 --substeps 30 --max_substep_iters 200 --fixed_iters \
   --d_hat 0.001 --k_barrier 1e9 --k_sdf 1e8 --eps_sdf 0.002 \
   --friction_coefficient 0.1 --outdir wrecking_ball_tuned_output --format geo
@@ -871,7 +898,7 @@ the GoogleTest cases discovered by CTest.
 | `SIMD_test` | 53 | Energy, barrier, SDF, and friction kernels; scalar and finite-difference checks, contact features, tile tails, mixed scenes, cache invalidation, and failure recovery |
 | `barrier_energy_test` | 29 | Scalar and primitive IPC barriers, deformable/rigid derivatives, inactive contact, and validation |
 | `bending_energy_test` | 19 | Hinge energy, dihedral angle, finite-difference derivatives, and rigid-motion invariance |
-| `broad_phase_test` | 42 | AABBs, BVHs, pair generation/order, solver storage modes, CCD candidates, safe stepping, conservativeness, and partial refits |
+| `broad_phase_test` | 51 | AABBs, BVHs, pair generation/order, solver storage modes, CCD candidates, safe stepping, conservativeness, and partial refits |
 | `ccd_test` | 54 | Linear single-moving-DOF CCD, scale/coplanar stress cases, TICCD general NT/SS wrappers, and rigid rotational CCD |
 | `corotated_energy_test` | 11 | Elasticity rest state, invariance, finite-difference derivatives, and stress cases |
 | `friction_energy_test` | 21 | Smoothed Coulomb mesh/SDF contact, prescribed motion, frozen gradients, PSD Hessians, scaling, and validation |
@@ -888,7 +915,7 @@ the GoogleTest cases discovered by CTest.
 | `solid_ipc_test` | 41 | Volumetric solids, mixed-solver integration, mesh/SDF friction, boundary filtering, and fixed-rigid reaction |
 | `state_io_test` | 1 | Binary checkpoint round trip |
 | `time_integration_test` | 2 | Scalar and large-array position-difference velocity updates |
-| `volumetric_corotated_energy_test` | 14 | Tet energy and derivatives, TGSL parity, inverted elements, cache modes, and validation |
+| `volumetric_corotated_energy_test` | 17 | Tet energy and derivatives, TGSL parity, inverted elements, cache modes, SoA polar tiles and tails, and validation |
 | `simulation_snapshot_test` | 1 | Golden-file regression over the 100-frame reference trajectory |
 | `restart_test` | 1 | Checkpoint resume against the golden trajectory |
 | `output_test` | 2 | Debug OBJ and BVH export |

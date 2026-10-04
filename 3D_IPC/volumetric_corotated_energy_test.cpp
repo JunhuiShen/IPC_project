@@ -10,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <random>
 #include <utility>
@@ -403,6 +404,60 @@ TEST(VolumetricCorotatedEnergy, BatchedPolarMatchesScalarAcrossDivergentRanksAnd
         ASSERT_EQ(std::memcmp(actual[i].data(), expected[i].data(), 9 * sizeof(double)), 0);
     inputs[3](0, 0) = std::numeric_limits<double>::quiet_NaN();
     EXPECT_THROW(volumetric_detail::batched_signed_polar(inputs.data(), actual.data(), 8), std::invalid_argument);
+}
+
+TEST(VolumetricCorotatedEnergy, SoaPolarPreservesScalarBitsAndInactiveLanes) {
+    std::mt19937_64 random(0x534f41504f4c4152ULL);
+    std::uniform_real_distribution<double> value(-2.0, 2.0);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    volumetric_detail::signed_polar_soa_tile(nullptr, nullptr, 0);
+    EXPECT_THROW(volumetric_detail::signed_polar_soa_tile(nullptr, nullptr, 9), std::invalid_argument);
+    for (int sample = 0; sample < 64; ++sample) {
+        std::array<Mat33, 8> matrices, expected;
+        for (int lane = 0; lane < 8; ++lane) {
+            auto& matrix = matrices[lane];
+            for (int entry = 0; entry < 9; ++entry) matrix.data()[entry] = value(random);
+            if (lane == 0) matrix.setZero();
+            if (lane == 1) { matrix.setIdentity(); matrix(0, 1) = -0.0; }
+            if (lane == 2) matrix.col(2) = matrix.col(0) + matrix.col(1);
+            if (lane == 3) matrix.row(1).setZero();
+            if (sample % 7 == 0 && lane == 5) matrix *= 1e-40;
+            if (sample % 11 == 0 && lane == 6) matrix *= 1e24;
+            CorotatedCache scalar;
+            scalar.UpdateCache(matrix, CorotatedCacheMode::Lean);
+            expected[lane] = scalar.R_cache;
+        }
+        for (std::size_t count = 0; count <= 8; ++count) {
+            std::array<double, 72> inputs, output;
+            inputs.fill(nan);
+            output.fill(731.0);
+            for (int row = 0; row < 3; ++row)
+                for (int column = 0; column < 3; ++column)
+                    for (std::size_t lane = 0; lane < count; ++lane)
+                        inputs[8 * (3 * row + column) + lane] = matrices[lane](row, column);
+            volumetric_detail::signed_polar_soa_tile(inputs.data(), output.data(), count);
+            for (int row = 0; row < 3; ++row)
+                for (int column = 0; column < 3; ++column)
+                    for (std::size_t lane = 0; lane < 8; ++lane) {
+                        SCOPED_TRACE(::testing::Message() << "sample=" << sample << " count=" << count << " lane=" << lane);
+                        expect_double_bitwise_equal(output[8 * (3 * row + column) + lane],
+                            lane < count ? expected[lane](row, column) : 731.0);
+                    }
+            // In-place tiles must gather before overwriting any active entry.
+            auto in_place = inputs;
+            volumetric_detail::signed_polar_soa_tile(in_place.data(), in_place.data(), count);
+            for (int row = 0; row < 3; ++row)
+                for (int column = 0; column < 3; ++column)
+                    for (std::size_t lane = 0; lane < count; ++lane)
+                        expect_double_bitwise_equal(in_place[8 * (3 * row + column) + lane], expected[lane](row, column));
+        }
+    }
+    std::array<double, 72> invalid{};
+    std::array<double, 72> output{};
+    invalid[3] = nan;
+    EXPECT_THROW(volumetric_detail::signed_polar_soa_tile(invalid.data(), output.data(), 8), std::invalid_argument);
+    invalid[3] = std::numeric_limits<double>::infinity();
+    EXPECT_THROW(volumetric_detail::signed_polar_soa_tile(invalid.data(), output.data(), 8), std::invalid_argument);
 }
 
 TEST(VolumetricCorotatedEnergy, BatchedLeanCachePreservesAllFieldsAndLeavesInverseUntouched) {

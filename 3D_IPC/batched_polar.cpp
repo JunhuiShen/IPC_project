@@ -236,14 +236,8 @@ void sort(Matrix& u, P (&sigma)[3], Matrix& v, Mask mask) {
     }
 }
 
-void polar_eight(const Mat33* inputs, Mat33* outputs, int count) {
-    Matrix b, u = identity(), v = identity();
-    alignas(64) double lanes[8];
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) {
-            for (int k = 0; k < 8; ++k) lanes[k] = inputs[std::min(k, count - 1)](i, j);
-            b.v[i][j] = P(_mm512_load_pd(lanes));
-        }
+Matrix polar_matrix(Matrix b) {
+    Matrix u = identity(), v = identity();
     Givens first(b.v[1][0], b.v[2][0]);
     first.row(b, 1, 2); first.column(u, 1, 2);
     zero_chase(b, u, v);
@@ -300,6 +294,7 @@ void polar_eight(const Mat33* inputs, Mat33* outputs, int count) {
     // disabled for the surrounding scalar SVD.
     using Packet = typename Eigen::internal::find_best_packet<double, 3>::type;
     constexpr int packet_rows = Eigen::internal::unpacket_traits<Packet>::size;
+    Matrix rotation;
     for (int row = 0; row < 3; ++row) {
         for (int column = 0; column < 3; ++column) {
             const P a0 = u.v[row][0], a1 = u.v[row][1], a2 = u.v[row][2];
@@ -312,10 +307,26 @@ void polar_eight(const Mat33* inputs, Mat33* outputs, int count) {
                         _mm512_fmadd_pd(a1.v, b1.v, first.v)));
                 } else result = a0 * b0 + (a1 * b1 + a2 * b2);
             } else result = a0 * b0 + (a1 * b1 + a2 * b2);
-            _mm512_store_pd(lanes, result.v);
-            for (int lane = 0; lane < count; ++lane) outputs[lane](row, column) = lanes[lane];
+            rotation.v[row][column] = result;
         }
     }
+    return rotation;
+}
+
+void polar_eight(const Mat33* inputs, Mat33* outputs, int count) {
+    Matrix b;
+    alignas(64) double lanes[8];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+            for (int k = 0; k < 8; ++k) lanes[k] = inputs[std::min(k, count - 1)](i, j);
+            b.v[i][j] = P(_mm512_load_pd(lanes));
+        }
+    const Matrix rotation = polar_matrix(b);
+    for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column) {
+            _mm512_store_pd(lanes, rotation.v[row][column].v);
+            for (int lane = 0; lane < count; ++lane) outputs[lane](row, column) = lanes[lane];
+        }
 }
 #endif
 } // namespace
@@ -333,6 +344,50 @@ void batched_signed_polar(const Mat33* inputs, Mat33* rotations, std::size_t cou
         if (ordinary) { polar_eight(inputs + first, rotations + first, lanes); continue; }
 #endif
         for (int i = 0; i < lanes; ++i) scalar_polar(inputs[first + i], rotations[first + i]);
+    }
+}
+
+void signed_polar_soa_tile(const double* inputs, double* rotations, std::size_t count) {
+    if (count > 8) throw std::invalid_argument("polar tile exceeds eight lanes");
+    if (!count) return;
+#if defined(__AVX512F__)
+    const Mask active = static_cast<Mask>((1u << count) - 1u);
+    Matrix b;
+    P scale(0.0);
+    for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column) {
+            const double* entry = inputs + 8 * (3 * row + column);
+            // Match the AoS entry's duplicate-last-lane padding. Masked loads
+            // do not read uninitialized tails, including NaN sentinel lanes.
+            b.v[row][column] = P(_mm512_mask_loadu_pd(
+                _mm512_set1_pd(entry[count - 1]), active, entry));
+            scale = max(scale, abs(b.v[row][column]));
+        }
+    const Mask ordinary = le(scale, P(1e20))
+        & (ge(scale, P(1e-20)) | _mm512_cmp_pd_mask(scale.v, P(0.0).v, _CMP_EQ_OQ));
+    // Test every entry for NaNs as well: max() can select a finite operand.
+    Mask finite = all;
+    for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column)
+            finite &= lt(abs(b.v[row][column]), P(std::numeric_limits<double>::infinity()));
+    if (count >= 4 && (ordinary & finite & active) == active) {
+        const Matrix rotation = polar_matrix(b);
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 3; ++column)
+                _mm512_mask_storeu_pd(rotations + 8 * (3 * row + column), active,
+                    rotation.v[row][column].v);
+        return;
+    }
+#endif
+    for (std::size_t lane = 0; lane < count; ++lane) {
+        Mat33 input, rotation;
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 3; ++column)
+                input(row, column) = inputs[8 * (3 * row + column) + lane];
+        scalar_polar(input, rotation);
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 3; ++column)
+                rotations[8 * (3 * row + column) + lane] = rotation(row, column);
     }
 }
 } // namespace volumetric_detail

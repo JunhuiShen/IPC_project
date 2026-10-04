@@ -1,5 +1,6 @@
 #include "general_simd_solid.h"
 #include "volumetric_corotated_energy.h"
+#include "batched_polar.h"
 
 #include <algorithm>
 #include <cassert>
@@ -208,9 +209,42 @@ void solid_derivatives_tile(
                     SolidPack::load(inverse[1][column]), SolidPack::load(inverse[2][column])};
                 matrix_row_product(row, a, b).store(deformation[row][column]);
             }
-        // Batch the signed QR-SVD as well as the surrounding material work.
-        // The helper preserves the scalar reference's rounding boundaries,
-        // including determinant/cofactor calculations and partial batches.
+        // Keep v2's deformation, polar factor and cofactors in SIMD lanes.
+        // The AoS cache path remains the reference/fallback on other backends.
+#if defined(__AVX512F__)
+        volumetric_detail::signed_polar_soa_tile(&deformation[0][0][0],
+            &rotation[0][0][0], count);
+        SolidPack f[3][3], c[3][3];
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 3; ++column)
+                f[row][column] = SolidPack::load(deformation[row][column]);
+        const auto minor = [&](int a, int b, int d, int e) {
+            return separate_product(f[a][b], f[d][e])
+                - separate_product(f[d][b], f[a][e]);
+        };
+        // GradJ's exact operand order, including the negative cofactor entries.
+        c[0][0] = minor(1, 1, 2, 2);
+        c[0][1] = minor(2, 0, 1, 2);
+        c[0][2] = minor(1, 0, 2, 1);
+        c[1][0] = minor(2, 1, 0, 2);
+        c[1][1] = minor(0, 0, 2, 2);
+        c[1][2] = minor(2, 0, 0, 1);
+        c[2][0] = minor(0, 1, 1, 2);
+        c[2][1] = minor(1, 0, 0, 2);
+        c[2][2] = minor(0, 0, 1, 1);
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 3; ++column)
+                c[row][column].store(cofactor[row][column]);
+        // Eigen's det3 expands row zero, with separately rounded products
+        // and a left-associated subtract/add. Do not rewrite as F:cofactor.
+        const SolidPack a = separate_product(f[0][0],
+            separate_product(f[1][1], f[2][2]) - separate_product(f[1][2], f[2][1]));
+        const SolidPack b = separate_product(f[0][1],
+            separate_product(f[1][0], f[2][2]) - separate_product(f[1][2], f[2][0]));
+        const SolidPack d = separate_product(f[0][2],
+            separate_product(f[1][0], f[2][1]) - separate_product(f[1][1], f[2][0]));
+        ((a - b) + d).store(determinant);
+#else
         Mat33 matrices[width];
         CorotatedCache caches[width];
         for (int lane = 0; lane < count; ++lane) {
@@ -219,18 +253,22 @@ void solid_derivatives_tile(
                     matrices[lane](row, column) = deformation[row][column][lane];
         }
         volumetric_detail::update_corotated_cache_batch(matrices, caches, count);
+#endif
         for (int lane = 0; lane < count; ++lane) {
             const std::size_t entry = begin + lane;
-            const CorotatedCache& cache = caches[lane];
             measure[lane] = measures[entry];
+            for (int row = 0; row < 3; ++row)
+                shape[row][lane] = shape_gradients[entry][row];
+#if !defined(__AVX512F__)
+            const CorotatedCache& cache = caches[lane];
             determinant[lane] = cache.J_cache;
             for (int row = 0; row < 3; ++row) {
-                shape[row][lane] = shape_gradients[entry][row];
                 for (int column = 0; column < 3; ++column) {
                     rotation[row][column][lane] = cache.R_cache(row, column);
                     cofactor[row][column][lane] = cache.JFinvT_cache(row, column);
                 }
             }
+#endif
         }
         if (count < width) {
             pad_lanes(deformation, count); pad_lanes(rotation, count);

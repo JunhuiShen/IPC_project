@@ -69,6 +69,11 @@ void refit_bvh_leaf(std::vector<BVHNode>& nodes, const std::vector<int>& leaf_to
 
 void query_bvh(const std::vector<BVHNode>& nodes, int root, const AABB& query, std::vector<int>& hits);
 
+// Independent AoS query records are transposed only inside this fixed tile.
+// Each output row retains the scalar traversal's exact hit/append order.
+inline constexpr std::size_t bvh_query_tile_width = 8;
+void query_bvh_tile(const std::vector<BVHNode>& nodes, int root, const AABB* queries, std::size_t count, std::vector<int>* const* hits);
+
 // Swept-AABB broad phase producing candidate node–triangle and segment–segment pairs.
 class BroadPhase {
 public:
@@ -119,12 +124,24 @@ public:
         std::vector<std::array<int, 2>> ss_pair_edges;
 
         struct VertexPairEntry {
-            // Index of the actual contact in nt_pairs (for vertex_nt) or ss_pairs (for vertex_ss)
-            std::size_t pair_index;
+            // Keep each incidence in one machine word. Three signed role bits
+            // leave 61 index bits on 64-bit hosts, more than any allocated pair
+            // vector can contain (each pair occupies at least eight bytes).
+            // This retains wide indices without a separate narrow/wide cache.
+            static constexpr int pair_index_bits =
+                std::numeric_limits<std::size_t>::digits - 3;
+            static constexpr std::size_t max_pair_index =
+                std::numeric_limits<std::size_t>::max() >> 3;
+            // Index of the contact in nt_pairs or ss_pairs.
+            std::size_t pair_index : pair_index_bits;
             // Role of this vertex within that four-vertex contact:
             // 0=node/v[0], 1=tri_v[0]/v[1], 2=tri_v[1]/v[2], 3=tri_v[2]/v[3].
-            int dof;
+            int dof : 3;
         };
+        static_assert(sizeof(NodeTrianglePair) >= 8 && sizeof(SegmentSegmentPair) >= 8,
+            "Packed incidence indices must cover every allocatable contact pair");
+        static_assert(sizeof(VertexPairEntry) == sizeof(std::size_t),
+            "Contact incidence should occupy one machine word");
         // Per-vertex references to the actual contact-pair arrays above.
         std::vector<std::vector<VertexPairEntry>> vertex_nt;
         std::vector<std::vector<VertexPairEntry>> vertex_ss;

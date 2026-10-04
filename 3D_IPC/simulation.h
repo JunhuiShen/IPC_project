@@ -217,6 +217,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
     }
     SolverResult agg;
     const double dt = params.dt();
+    BroadPhase predictor_broad_phase;
     for (int sub = 0; sub < params.substeps; ++sub) {
         if (pin_updater) {
             const double t_next = ((frame_index - 1) * params.substeps + (sub + 1)) * dt;
@@ -242,9 +243,9 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
                 &broad_phase);
         }
         else if (params.use_verlet_guess)
-            xnew = verlet_initial_guess(state.deformed_positions, xhat, ref_mesh, params, &broad_phase);
+            xnew = verlet_initial_guess(state.deformed_positions, xhat, ref_mesh, params, &predictor_broad_phase);
         else if (params.use_ccd_guess)
-            xnew = ccd_initial_guess(state.deformed_positions, xhat, ref_mesh, &broad_phase);
+            xnew = ccd_initial_guess(state.deformed_positions, xhat, ref_mesh, &predictor_broad_phase);
         else if (params.use_translation_guess){
             xnew = translation_initial_guess(state.deformed_positions, xhat, ref_mesh, pins, params);
         }
