@@ -250,9 +250,13 @@ void build_armadillo_through_gear_crushers_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
-// Example 20: four level rows of a tetrahedral Bunny, tetrahedral Spot, rigid
-// cube, and rigid gear falling onto a horizontal cloth pinned along two
-// opposite sides. All bodies retain their authored, untilted orientations.
+// Example 20: four rows of a tetrahedral Bunny, tetrahedral Spot, rigid cube,
+// and rigid gear above a horizontal cloth pinned along two opposite sides.
+// One body per row starts 0.35 higher and directly over another body: cube
+// over Bunny, gear over Spot, Bunny over cube, and Spot over gear. All bodies
+// retain their authored, untilted orientations and initial downward velocity.
+// Each row packs into three occupied columns with 0.01 horizontal clearance;
+// stacked pairs have at least 0.02 initial vertical clearance.
 void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,

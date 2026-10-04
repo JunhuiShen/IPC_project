@@ -189,8 +189,8 @@ struct IPCArgs3D : ArgParser {
 
         add_bool  ("use_ccd",      use_ccd,      true,   "Run CCD step clamping in per_vertex_safe_step");
         add_bool  ("use_ccd_guess",    use_ccd_guess,    true,  "Use ccd_initial_guess as the substep start point (ignored if use_ogc is on)");
-        add_bool  ("use_colored_ccd_guess", use_colored_ccd_guess, false, "Cloth only: collision-colored linear CCD initial guess toward xhat; overrides CCD, Verlet, and translation guess flags, but is ignored with use_ogc or use_ogc_solver");
-        add_int   ("colored_ccd_guess_iters", colored_ccd_guess_iters, 10, "Complete collision-color sweeps for the cloth-only colored CCD initial guess (0 keeps current positions)");
+        add_bool  ("use_colored_ccd_guess", use_colored_ccd_guess, false, "Cloth/solid: collision-colored linear CCD initial guess toward xhat; rigid bodies stay fixed during the guess; overrides CCD, Verlet, and translation guess flags, but is ignored with use_ogc or use_ogc_solver");
+        add_int   ("colored_ccd_guess_iters", colored_ccd_guess_iters, 10, "Complete collision-color sweeps for the cloth/solid colored CCD initial guess (0 keeps current positions)");
         add_bool  ("use_verlet_guess", use_verlet_guess, false, "Start GS from xhat + dt^2*gravity (Verlet predictor)");
         add_bool  ("use_translation_guess", use_translation_guess, false, "Start GS from x^n + C");
         add_bool  ("use_ogc", use_ogc, false, "Use trust-region narrow phase instead of CCD for step clamping");

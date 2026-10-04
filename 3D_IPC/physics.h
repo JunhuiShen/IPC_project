@@ -60,7 +60,7 @@ struct SimParams {
     bool   write_substeps;       // if true, export a frame file after every substep (not just every frame)
     bool   use_ccd;              // if true, run CCD step clamping in per_vertex_safe_step
     bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
-    bool   use_colored_ccd_guess; // cloth only: collision-colored linear CCD toward xhat; OGC takes priority
+    bool   use_colored_ccd_guess; // cloth/solid: collision-colored linear CCD toward xhat; rigid proxies fixed; OGC takes priority
     int    colored_ccd_guess_iters; // complete color sweeps, retrying the remaining displacement (0 keeps x^n)
     bool   use_verlet_guess;     // if true, start GS from xhat + dt²*gravity (Verlet predictor)
     bool   use_translation_guess;        // if true, start GS from x^n + C

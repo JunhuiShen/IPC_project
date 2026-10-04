@@ -826,7 +826,7 @@ TEST(MixedExample, SingleDeformableSolidAboveOppositeEdgePinnedCloth) {
 }
 
 TEST(MixedExample,
-     FourLevelBunnySpotCubeGearRowsAboveOppositeEdgePinnedCloth) {
+     StaggeredBunnySpotCubeGearDropsAboveOppositeEdgePinnedCloth) {
     namespace fs = std::filesystem;
     static std::atomic<std::uint64_t> next_directory{0};
     const fs::path directory = fs::temp_directory_path()
@@ -959,6 +959,7 @@ TEST(MixedExample,
                + cube_triangles + gear_triangles);
     constexpr double cloth_height = 1.2;
     constexpr double object_center_y = 1.75;
+    constexpr double upper_object_center_y = 2.10;
     constexpr double solid_max_extent = 0.44;
     constexpr double rigid_max_extent = 0.22;
     constexpr double row_spacing = 0.45;
@@ -970,17 +971,19 @@ TEST(MixedExample,
         {Spot, Gear, Cube, Bunny},
         {Cube, Bunny, Spot, Gear},
     };
+    static constexpr int upper_type[rows] = {Cube, Gear, Bunny, Spot};
+    static constexpr int lower_type[rows] = {Bunny, Spot, Cube, Gear};
     // Literal expected centers keep this regression independent from the
     // production packing implementation.
     static constexpr double expected_x[rows][BodyTypeCount] = {
-        {-0.35581598158033034,  0.455,
-         -0.015815981580330304, 0.21418401841966972},
-        { 0.12581598158033028, -0.225,
-          0.46581598158033027, -0.46581598158033033},
-        { 0.35581598158033034, -0.455,
-          0.015815981580330304, -0.21418401841966972},
-        {-0.12581598158033033,  0.225,
-         -0.46581598158033033,  0.46581598158033027},
+        {-0.24081598158033032,  0.33999999999999997,
+         -0.24081598158033032,  0.09918401841966969},
+        { 0.010815981580330286, -0.33999999999999997,
+          0.3508159815803303, -0.33999999999999997},
+        { 0.24081598158033024, -0.34,
+          0.24081598158033024, -0.09918401841966977},
+        {-0.010815981580330314,  0.33999999999999997,
+         -0.35081598158033034,  0.33999999999999997},
     };
     const Vec3 bunny_extents(
         0.44, 0.435584485870, 0.335752074786);
@@ -1093,7 +1096,9 @@ TEST(MixedExample,
     };
     const auto object_center = [&](const int row, const int type) {
         return Vec3(
-            expected_x[row][type], object_center_y, row_z(row));
+            expected_x[row][type],
+            type == upper_type[row] ? upper_object_center_y : object_center_y,
+            row_z(row));
     };
     const auto column_for_type = [](const int row, const int type) {
         for (int column = 0; column < BodyTypeCount; ++column) {
@@ -1271,11 +1276,16 @@ TEST(MixedExample,
             ObjectBounds{lower, upper};
     }
 
-    // Every row contains Bunny, Spot, cube, gear across x, and all sixteen
-    // object centers share exactly one height level.
+    // Preserve all four types in every row, with one lifted object directly
+    // over its chosen lower object. The other eight objects are repacked
+    // horizontally, while their original height and row depth are unchanged.
+    int upper_object_count = 0;
+    int lower_object_count = 0;
+    int independent_object_count = 0;
     for (int row = 0; row < rows; ++row) {
-        EXPECT_DOUBLE_EQ(state.x_coms[row].y(), object_center_y);
-        EXPECT_DOUBLE_EQ(state.x_coms[rows + row].y(), object_center_y);
+        EXPECT_DOUBLE_EQ(state.x_coms[row].y(), object_center(row, Cube).y());
+        EXPECT_DOUBLE_EQ(
+            state.x_coms[rows + row].y(), object_center(row, Gear).y());
         EXPECT_DOUBLE_EQ(state.x_coms[row].z(), row_z(row));
         EXPECT_DOUBLE_EQ(
             state.x_coms[rows + row].z(), row_z(row));
@@ -1290,8 +1300,19 @@ TEST(MixedExample,
                 static_cast<std::size_t>(4 * row + column)];
             const Vec3 actual_center = 0.5 * (bounds.lower + bounds.upper);
             EXPECT_NEAR(actual_center.x(), expected_x[row][type], 1.0e-14);
-            EXPECT_NEAR(actual_center.y(), object_center_y, 1.0e-14);
+            EXPECT_NEAR(
+                actual_center.y(), object_center(row, type).y(), 1.0e-14);
             EXPECT_NEAR(actual_center.z(), row_z(row), 1.0e-14);
+            if (type == upper_type[row]) {
+                ++upper_object_count;
+                EXPECT_NEAR(actual_center.y(), 2.10, 1.0e-14);
+            } else {
+                EXPECT_NEAR(actual_center.y(), 1.75, 1.0e-14);
+                if (type == lower_type[row])
+                    ++lower_object_count;
+                else
+                    ++independent_object_count;
+            }
         }
         for (const int count : type_counts)
             EXPECT_EQ(count, 1);
@@ -1302,6 +1323,9 @@ TEST(MixedExample,
                 expected_row_order[previous]));
         }
     }
+    EXPECT_EQ(upper_object_count, 4);
+    EXPECT_EQ(lower_object_count, 4);
+    EXPECT_EQ(independent_object_count, 8);
 
     // The tighter placement is intentional, but every production-shaped
     // fixture AABB must still be disjoint before the first solve. Checking all
@@ -1334,20 +1358,55 @@ TEST(MixedExample,
     constexpr double expected_tight_gap = 0.01;
     EXPECT_NEAR(minimum_object_gap, expected_tight_gap, 5.0e-13);
 
-    // Type-aware packing leaves exactly 10 mm between each consecutive pair,
-    // independent of that row's permutation.
-    const std::array<double, 3> expected_column_gaps = {
-        expected_tight_gap, expected_tight_gap, 0.01};
+    // Each upper object has its x/z center aligned with its chosen lower
+    // object, but starts with a positive vertical gap rather than an overlap.
     for (int row = 0; row < rows; ++row) {
-        for (int column = 0; column < 3; ++column) {
-            EXPECT_NEAR(
-                aabb_gap(
-                    object_bounds[static_cast<std::size_t>(4 * row + column)],
-                    object_bounds[
-                        static_cast<std::size_t>(4 * row + column + 1)]),
-                expected_column_gaps[static_cast<std::size_t>(column)],
-                5.0e-13);
+        SCOPED_TRACE("vertical drop pair in row " + std::to_string(row));
+        const ObjectBounds& upper = object_bounds[static_cast<std::size_t>(
+            4 * row + column_for_type(row, upper_type[row]))];
+        const ObjectBounds& lower = object_bounds[static_cast<std::size_t>(
+            4 * row + column_for_type(row, lower_type[row]))];
+        const Vec3 upper_center = 0.5 * (upper.lower + upper.upper);
+        const Vec3 lower_center = 0.5 * (lower.lower + lower.upper);
+        EXPECT_NEAR(upper_center.x(), lower_center.x(), 1.0e-14);
+        EXPECT_NEAR(upper_center.z(), lower_center.z(), 1.0e-14);
+        EXPECT_NEAR(upper_center.y() - lower_center.y(), 0.35, 1.0e-14);
+        EXPECT_GE(upper.lower.y() - lower.upper.y(), 0.02 - 1.0e-14);
+
+        // Packing occupies exactly three x columns: the stacked pair counts
+        // as one column whose bounds include both objects. Neighboring column
+        // AABBs retain a 10 mm horizontal gap, and the row stays centered.
+        std::array<ObjectBounds, 3> occupied_columns;
+        int occupied_count = 0;
+        for (int column = 0; column < BodyTypeCount; ++column) {
+            const int type = expected_row_order[row][column];
+            if (type == upper_type[row])
+                continue;
+            ASSERT_LT(occupied_count, 3);
+            ObjectBounds bounds = object_bounds[static_cast<std::size_t>(
+                4 * row + column)];
+            if (type == lower_type[row]) {
+                bounds.lower = bounds.lower.cwiseMin(upper.lower);
+                bounds.upper = bounds.upper.cwiseMax(upper.upper);
+            }
+            occupied_columns[static_cast<std::size_t>(occupied_count++)] = bounds;
         }
+        ASSERT_EQ(occupied_count, 3);
+        for (int column = 1; column < occupied_count; ++column) {
+            EXPECT_NEAR(
+                occupied_columns[static_cast<std::size_t>(column)].lower.x()
+                    - occupied_columns[static_cast<std::size_t>(column - 1)]
+                          .upper.x(),
+                0.01, 5.0e-13);
+        }
+        EXPECT_NEAR(
+            occupied_columns.front().lower.x()
+                + occupied_columns.back().upper.x(),
+            0.0, 5.0e-13);
+        EXPECT_NEAR(
+            occupied_columns.back().upper.x()
+                - occupied_columns.front().lower.x(),
+            0.9216319631606606, 5.0e-13);
     }
     double minimum_cloth_gap = std::numeric_limits<double>::infinity();
     for (int object = 0; object < rows * 4; ++object) {

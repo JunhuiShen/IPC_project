@@ -134,10 +134,6 @@ int main(int argc, char** argv) {
         std::cerr << "Error: --use_cloth_grid is available only for the basic cloth solver; rigid, solid, and mixed scenes are unsupported\n";
         return 1;
     }
-    if (params.use_colored_ccd_guess && (has_rigid || has_solid)) {
-        std::cerr << "Error: --use_colored_ccd_guess is available only for cloth-only scenes; rigid, solid, and mixed scenes are unsupported\n";
-        return 1;
-    }
     if (is_mixed && (params.use_ogc || params.use_ogc_solver)) {
         throw std::invalid_argument("mixed deformable-rigid scenes do not support OGC mode");
     }
@@ -191,11 +187,14 @@ int main(int argc, char** argv) {
     std::cout << "Total vertices:  " << state.deformed_positions.size() + static_x.size() << "\n";
     std::cout << "Total triangles: " << ref_mesh.tris.size() / 3 + static_tris.size() / 3 << "\n";
     if (params.use_colored_ccd_guess) {
-        if (params.use_ogc || params.use_ogc_solver)
-            std::cout << "Cloth initial guess: previous positions (OGC overrides colored CCD guess)\n";
+        if (!has_deformable)
+            std::cout << "Colored CCD initial guess: ignored for rigid-only scenes\n";
+        else if (params.use_ogc || params.use_ogc_solver)
+            std::cout << "Deformable initial guess: previous positions (OGC overrides colored CCD guess)\n";
         else
-            std::cout << "Cloth initial guess: collision-colored linear CCD, target=x_hat, sweeps="
-                      << params.colored_ccd_guess_iters << "\n";
+            std::cout << "Deformable initial guess: collision-colored linear CCD, target=x_hat, sweeps="
+                      << params.colored_ccd_guess_iters
+                      << (has_rigid ? " (rigid bodies unchanged during guess)" : "") << "\n";
     }
     if ((params.use_basic_experimental || params.use_basic_experimental_v2) && !params.use_cloth_grid
         && !params.use_ogc && !params.use_ogc_solver) {

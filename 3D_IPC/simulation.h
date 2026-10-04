@@ -114,7 +114,7 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
 
 // Advance a frame containing both independently deformable nodes and rigid
 // bodies. The previous-step state remains fixed throughout each nonlinear
-// solve; cloth positions and rigid generalized coordinates are committed
+// solve; cloth/solid positions and rigid generalized coordinates are committed
 // together only after convergence.
 inline SolverResult advance_one_frame_general(
     DeformedState& state, const RefMesh& ref_mesh,
@@ -123,6 +123,7 @@ inline SolverResult advance_one_frame_general(
     int frame_index = 1, PinTargetUpdater pin_updater = nullptr,
     SubstepCallback on_substep = nullptr,
     const std::string& outdir = "") {
+    params.validate_colored_ccd_guess_parameters();
     if (ref_mesh.node_to_rb.size() != state.deformed_positions.size()
         || state.velocities.size() != state.deformed_positions.size()) {
         throw std::invalid_argument(
@@ -149,10 +150,20 @@ inline SolverResult advance_one_frame_general(
                 xhat[node] = state.deformed_positions[node];
         }
 
-        // Start from the previous collision-free state. Existing particle
-        // initial guesses are not rigid-motion preserving, so they are not
-        // applied to a mixed configuration.
+        // The opt-in guess moves cloth/solid nodes only. Rigid proxies remain
+        // at their previous positions and participate as fixed CCD obstacles;
+        // COM/orientation are left to the general solver. Legacy particle
+        // guesses remain disabled here because they do not preserve rigidity.
         std::vector<Vec3> xnew = state.deformed_positions;
+        if (params.use_colored_ccd_guess && !params.use_ogc && !params.use_ogc_solver) {
+            std::vector<Vec3> intended_displacement(nv, Vec3::Zero());
+            for (int node = 0; node < nv; ++node) {
+                if (ref_mesh.node_to_rb[node] < 0)
+                    intended_displacement[node] = xhat[node] - state.deformed_positions[node];
+            }
+            xnew = collision_colored_ccd_initial_guess(state.deformed_positions,
+                intended_displacement, ref_mesh, params, params.colored_ccd_guess_iters);
+        }
         std::vector<Vec3> x_com_new = state.x_coms;
         std::vector<Vec4> q_new = state.orientations;
         std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
@@ -166,7 +177,7 @@ inline SolverResult advance_one_frame_general(
         if (!substep_result.converged)
             return aggregate;
 
-        // Commit independent cloth nodes only. Rigid proxy particles are
+        // Commit independent cloth/solid nodes only. Rigid proxy particles are
         // synchronized from generalized state below.
         #pragma omp parallel for schedule(static)
         for (int node = 0; node < nv; ++node) {
@@ -201,7 +212,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
             || !ref_mesh.tet_nodes.empty()
             || std::any_of(ref_mesh.node_to_rb.begin(), ref_mesh.node_to_rb.end(),
                 [](int owner) { return owner >= 0; }))) {
-        throw std::invalid_argument("--use_colored_ccd_guess supports cloth-only scenes, not rigid or solid nodes");
+        throw std::invalid_argument("advance_one_frame is cloth-only; use advance_one_frame_general for solid or mixed scenes");
     }
     SolverResult agg;
     const double dt = params.dt();

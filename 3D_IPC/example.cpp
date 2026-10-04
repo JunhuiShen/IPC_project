@@ -2271,10 +2271,24 @@ void build_armadillo_through_gear_crushers_example(
 }
 
 // ---------------------------------------------------------------------------
-// Example 20: four level Bunny / Spot / cube / gear rows falling onto a
-// pinned cloth
+// Example 20: four Bunny / Spot / cube / gear rows, each with one elevated
+// object above another, falling onto a pinned cloth
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 20 --num_frames 200 --substeps 20 --max_substep_iters 200 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_2_output --format obj
+// command line: (old) ./build/3D_sim --example 20 --num_frames 200 --substeps 20 --max_substep_iters 200 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_2_output --format obj
+// (one can still decreases the substeps and the iterations but couldn't see the cubes bounce up) \
+    OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
+    ./build/3D_sim \
+  --example 20 --num_frames 200 --fps 30 \
+  --substeps 15 --max_substep_iters 25 --fixed_iters \
+  --E 1.25e9 --nu 0.25 --thickness 0.001 \
+  --solid_E 1.25e5 --solid_nu 0.25 \
+  --d_hat 0.019 --k_barrier 1000 \
+  --friction_coefficient 0 --use_ccd true \
+  --node_box_update_count 10 \
+  --use_parallel true \
+  --use_basic_experimental true --use_simd true \
+  --write_substeps false --format obj \
+  --outdir outputs/example20_general_v2 --use_colored_ccd_guess true --colored_ccd_guess_iters 10
 void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -2320,10 +2334,10 @@ void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
             state.deformed_positions);
     }
 
-    // Four collision-free rows share one height. Each row contains one Bunny,
-    // Spot, cube, and gear in a different deterministic order. Keeping all
-    // imported assets in their authored orientation and using identity rigid
-    // orientations avoids any row-dependent yaw or tilt.
+    // Pack four collision-free rows containing one Bunny, Spot, cube, and
+    // gear each into three occupied columns per row. One column is a pair
+    // with an upper body that can fall onto the lower body as the cloth slows
+    // it down. Keep authored orientations, scales and velocities unchanged.
     constexpr int rows = 4;
     constexpr double object_center_y = 1.75;
     constexpr double solid_max_extent = 0.44;
@@ -2338,39 +2352,53 @@ void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
         {Spot, Gear, Cube, Bunny},
         {Cube, Bunny, Spot, Gear},
     };
+    static constexpr int upper_body[rows] = {Cube, Gear, Bunny, Spot};
+    static constexpr int lower_body[rows] = {Bunny, Spot, Cube, Gear};
+    // A solid's half extent is at most 0.22 and a rigid body's at most 0.11,
+    // leaving at least 0.02 of initial vertical AABB clearance for each pair.
+    constexpr double upper_body_lift = 0.35;
 
     // Type-aware packing follows the normalized production x AABBs. Spot's
     // source x/z extent ratio is 0.9425986 / 1.716426; Bunny, cube, and gear
-    // all use their requested maximum extent along x. Center every shuffled
-    // row within the same compact footprint and leave exactly 10 mm between
-    // consecutive AABBs. Spot has the largest z extent (0.44 m), so the row
-    // spacing leaves the same 10 mm minimum gap in z.
+    // all use their requested maximum extent along x. Give a stacked column
+    // the larger body's width, remove the lifted body's old slot, and leave
+    // 10 mm between occupied column AABBs. Spot has the largest z extent
+    // (0.44 m), so the unchanged row spacing also leaves 10 mm between rows.
     constexpr double spot_x_extent =
         solid_max_extent * 0.9425986 / 1.716426;
     static constexpr double type_x_extent[BodyTypeCount] = {
         solid_max_extent, spot_x_extent,
         rigid_max_extent, rigid_max_extent};
-    constexpr double packed_row_width =
-        solid_max_extent + spot_x_extent
-        + 2.0 * rigid_max_extent
-        + (BodyTypeCount - 1) * object_gap;
     double object_center_x[rows][BodyTypeCount] = {};
     for (int row = 0; row < rows; ++row) {
+        const auto column_width = [&](const int type) {
+            return type == lower_body[row]
+                ? std::max(type_x_extent[type], type_x_extent[upper_body[row]])
+                : type_x_extent[type];
+        };
+        double packed_row_width = (BodyTypeCount - 2) * object_gap;
+        for (int type = 0; type < BodyTypeCount; ++type) {
+            if (type != upper_body[row]) packed_row_width += column_width(type);
+        }
         double cursor = -0.5 * packed_row_width;
         for (int slot = 0; slot < BodyTypeCount; ++slot) {
             const int type = row_order[row][slot];
+            if (type == upper_body[row]) continue;
+            const double width = column_width(type);
             object_center_x[row][type] =
-                cursor + 0.5 * type_x_extent[type];
-            cursor += type_x_extent[type] + object_gap;
+                cursor + 0.5 * width;
+            cursor += width + object_gap;
         }
+        object_center_x[row][upper_body[row]] = object_center_x[row][lower_body[row]];
     }
 
     const Vec3 drop_velocity(0.0, -0.75, 0.0);
     const Vec4 identity_orientation(1.0, 0.0, 0.0, 0.0);
     const auto object_center = [&](const int type, const int row) {
+        const bool elevated = type == upper_body[row];
         return Vec3(
             object_center_x[row][type],
-            object_center_y,
+            object_center_y + (elevated ? upper_body_lift : 0.0),
             (static_cast<double>(row) - 1.5) * row_spacing);
     };
 
