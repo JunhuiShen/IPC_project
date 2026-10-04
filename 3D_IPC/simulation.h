@@ -162,7 +162,8 @@ inline SolverResult advance_one_frame_general(
                     intended_displacement[node] = xhat[node] - state.deformed_positions[node];
             }
             xnew = collision_colored_ccd_initial_guess(state.deformed_positions,
-                intended_displacement, ref_mesh, params, params.colored_ccd_guess_iters);
+                intended_displacement, ref_mesh, params, params.colored_ccd_guess_iters,
+                &broad_phase);
         }
         std::vector<Vec3> x_com_new = state.x_coms;
         std::vector<Vec4> q_new = state.orientations;
@@ -237,7 +238,8 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
             for (std::size_t vertex = 0; vertex < xhat.size(); ++vertex)
                 intended_displacement[vertex] = xhat[vertex] - state.deformed_positions[vertex];
             xnew = collision_colored_ccd_initial_guess(state.deformed_positions,
-                intended_displacement, ref_mesh, params, params.colored_ccd_guess_iters);
+                intended_displacement, ref_mesh, params, params.colored_ccd_guess_iters,
+                &broad_phase);
         }
         else if (params.use_verlet_guess)
             xnew = verlet_initial_guess(state.deformed_positions, xhat, ref_mesh, params, &broad_phase);

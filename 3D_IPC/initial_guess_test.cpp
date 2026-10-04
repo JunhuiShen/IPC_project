@@ -754,6 +754,36 @@ TEST_F(CollisionColoredCCDInitialGuess, LaterColorClearsObstacleForNextSweep) {
     }
 }
 
+TEST_F(CollisionColoredCCDInitialGuess, ReusedBroadPhaseRebuildsChangingMotionAndContacts) {
+    const auto mesh = point_triangle_mesh();
+    BroadPhase scratch;
+    for (const int threads : {1, 8, 64}) {
+        omp_set_num_threads(threads);
+        for (const double height : {1.0, 20.0, 5e-9, 1.0}) {
+            auto x = point_above_triangle();
+            x[0].z() = height;
+            std::vector<Vec3> displacement(x.size(), Vec3::Zero());
+            displacement[0] = Vec3(0, 0, -2 * height);
+            // The later colors clear the obstacle on alternating calls.
+            if (height == 1.0)
+                for (int i = 1; i < 4; ++i) displacement[i] = Vec3(4, 0, 0);
+            for (const int sweeps : {0, 1, 4, 20}) {
+                SCOPED_TRACE(::testing::Message() << "threads=" << threads
+                    << " height=" << height << " sweeps=" << sweeps);
+                params.d_hat = height == 20.0 ? 0.0 : 0.005;
+                const auto expected = collision_colored_ccd_initial_guess(
+                    x, displacement, mesh, params, sweeps);
+                // A solver/other guess can overwrite the shared cache between
+                // calls. The colored guess must replace its boxes and pairs.
+                scratch.build_ccd_candidates(x, displacement, mesh, 0.01,
+                    /*retain_solver_data=*/false);
+                expect_positions_identical(collision_colored_ccd_initial_guess(
+                    x, displacement, mesh, params, sweeps, &scratch), expected);
+            }
+        }
+    }
+}
+
 TEST_F(CollisionColoredCCDInitialGuess, EdgeEdgeCrossingClipsMovingEndpoint) {
     RefMesh mesh = ref_mesh_with_masses({1, 1, 1, 1, 1, 1});
     mesh.tris = {0, 1, 4, 2, 3, 5};

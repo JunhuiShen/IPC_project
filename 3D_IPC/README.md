@@ -514,7 +514,19 @@ commands for examples 12–23 mirror the scene comments in `example.cpp`:
 ./build/3D_sim --example 19 --num_frames 300 --fps 60 --substeps 10 --max_substep_iters 10 --node_box_update_count 2 --fixed_iters --solid_E 290909 --solid_nu 0.454545 --d_hat 0.00025 --k_barrier 1000 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --crusher_angular_speed 20 --outdir armadillo_gear_crusher_output --format obj
 
 # Example 20: four Bunny/Spot/cube/gear rows dropped onto pinned cloth
-./build/3D_sim --example 20 --num_frames 200 --substeps 20 --max_substep_iters 200 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_2_output --format obj
+OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
+./build/3D_sim \
+  --example 20 --num_frames 200 --fps 30 \
+  --substeps 15 --max_substep_iters 25 --fixed_iters \
+  --E 1.25e9 --nu 0.25 --thickness 0.001 \
+  --solid_E 1.25e5 --solid_nu 0.25 \
+  --d_hat 0.019 --k_barrier 1000 \
+  --friction_coefficient 0 --use_ccd true \
+  --node_box_update_count 10 --use_parallel true \
+  --use_basic_experimental true --use_simd true \
+  --write_substeps false --format obj \
+  --outdir outputs/example20_general_v2 \
+  --use_colored_ccd_guess true --colored_ccd_guess_iters 10
 
 # Example 21: rolled cloth unrolling down an SDF ramp
 ./build/3D_sim --example 21 --num_frames 200 --substeps 20 --max_substep_iters 80 --fixed_iters --kB 0.0025 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --outdir rolled_cloth_on_steep_ramp_output_new --format obj

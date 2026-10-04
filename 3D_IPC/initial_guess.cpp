@@ -107,7 +107,8 @@ static void preserve_guess_separation(const BroadPhase::Cache& cache,
 std::vector<Vec3> collision_colored_ccd_initial_guess(
     const std::vector<Vec3>& x,
     const std::vector<Vec3>& intended_displacement,
-    const RefMesh& ref_mesh, const SimParams& params, int ccd_iterations) {
+    const RefMesh& ref_mesh, const SimParams& params, int ccd_iterations,
+    BroadPhase* scratch_broad_phase) {
     if (x.size() != intended_displacement.size())
         throw std::invalid_argument("collision_colored_ccd_initial_guess: position/displacement size mismatch");
     if (ccd_iterations < 0)
@@ -171,17 +172,20 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
             throw std::invalid_argument("collision_colored_ccd_initial_guess: padded node box overflow");
     }
 
-    BroadPhase broad_phase;
-    // Refittable mode retains every vertex's contact incidence for both
-    // conflict coloring and the subsequent per-vertex CCD sweeps.
+    BroadPhase local_broad_phase;
+    BroadPhase& broad_phase = scratch_broad_phase ? *scratch_broad_phase : local_broad_phase;
+    // Keep every candidate and vertex's contact incidence, but omit the node
+    // BVH and leaf maps: these fixed swept boxes are never incrementally refit.
     // Green primitive boxes add params.d_hat to the node-box unions, matching
     // the solver broad phase. This expands candidates, not the CCD thickness.
     // Tet interiors are not contact points. Boundary triangles and edges,
     // including fixed rigid proxies, still participate in collision checks.
     if (!ref_mesh.tets.empty() || !ref_mesh.tet_nodes.empty())
-        broad_phase.initialize_surface_nodes(node_boxes, ref_mesh, params.d_hat);
+        broad_phase.initialize_surface_nodes(node_boxes, ref_mesh, params.d_hat,
+            BroadPhase::InitializationMode::DeformableSolver);
     else
-        broad_phase.initialize(node_boxes, ref_mesh, params.d_hat);
+        broad_phase.initialize(node_boxes, ref_mesh, params.d_hat,
+            BroadPhase::InitializationMode::DeformableSolver);
     std::vector<std::vector<int>> contact_adjacency, color_groups;
     build_contact_adj(broad_phase.cache(), nv, contact_adjacency);
     greedy_color_conflict_graph(contact_adjacency, color_groups);

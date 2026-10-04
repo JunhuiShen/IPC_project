@@ -23,6 +23,9 @@ std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vecto
 // must not decrease. This is an endpoint safeguard, not offset-surface CCD;
 // clear targets are unchanged, and it does not repair an already locked state.
 // params.use_parallel=false keeps the CCD sweep team serial.
+// Optional scratch storage must belong to this mesh, just as for the global
+// CCD guess. Candidate boxes/pairs are rebuilt; topology and allocations reuse
+// the caller's broad phase across guesses and subsequent solver calls.
 // Green primitive boxes use params.d_hat padding, as in the solver broad phase.
 // Solid contacts use boundary geometry only; interior tet nodes still move but
 // do not issue node-triangle queries, matching the general solver broad phase.
@@ -32,7 +35,8 @@ std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vecto
 std::vector<Vec3> collision_colored_ccd_initial_guess(
     const std::vector<Vec3>& x,
     const std::vector<Vec3>& intended_displacement,
-    const RefMesh& ref_mesh, const SimParams& params, int ccd_iterations);
+    const RefMesh& ref_mesh, const SimParams& params, int ccd_iterations,
+    BroadPhase* scratch_broad_phase = nullptr);
 
 std::vector<Vec3> verlet_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh, const SimParams& params, BroadPhase* scratch_broad_phase = nullptr);
 

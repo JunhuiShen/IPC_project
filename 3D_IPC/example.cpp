@@ -2274,10 +2274,10 @@ void build_armadillo_through_gear_crushers_example(
 // Example 20: four Bunny / Spot / cube / gear rows, each with one elevated
 // object above another, falling onto a pinned cloth
 // ---------------------------------------------------------------------------
-// command line: (old) ./build/3D_sim --example 20 --num_frames 200 --substeps 20 --max_substep_iters 200 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_2_output --format obj
-// (one can still decreases the substeps and the iterations but couldn't see the cubes bounce up) \
-    OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
-    ./build/3D_sim \
+// Smaller substep/iteration budgets can suppress the cubes' bounce.
+/* command line:
+OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
+./build/3D_sim \
   --example 20 --num_frames 200 --fps 30 \
   --substeps 15 --max_substep_iters 25 --fixed_iters \
   --E 1.25e9 --nu 0.25 --thickness 0.001 \
@@ -2288,7 +2288,9 @@ void build_armadillo_through_gear_crushers_example(
   --use_parallel true \
   --use_basic_experimental true --use_simd true \
   --write_substeps false --format obj \
-  --outdir outputs/example20_general_v2 --use_colored_ccd_guess true --colored_ccd_guess_iters 10
+  --outdir outputs/example20_general_v2 \
+  --use_colored_ccd_guess true --colored_ccd_guess_iters 10
+*/
 void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
