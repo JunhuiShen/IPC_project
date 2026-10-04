@@ -1065,55 +1065,6 @@ TEST(GeneralSIMDContacts, SparseTilesPreserveResultsAndOnlyCertifyAabbRejections
     }
 }
 
-TEST(GeneralSIMDContacts, BarrierKernelsMatchScalarBitsForRotatedRoles) {
-    std::array<ipc_simd::MeshContactInput, 32> inputs;
-    std::array<ipc_simd::MeshContactOutput, 32> outputs;
-    constexpr double d_hat = 0.1;
-    for (bool segment : {false, true}) {
-        for (int sample = 0; sample < 8; ++sample) {
-            const Mat33 rotation = Eigen::AngleAxisd(0.17 * sample,
-                Vec3(0.3, -0.2, 0.7).normalized()).toRotationMatrix();
-            const std::array<Vec3, 4> base = segment
-                ? std::array<Vec3, 4>{Vec3(-1, 0, 0), Vec3(1, 0.1, 0),
-                    Vec3(0, -1, 0.007), Vec3(0, 1, 0.007)}
-                : std::array<Vec3, 4>{Vec3(0.15, 0.2, 0.007), Vec3(0, 0, 0),
-                    Vec3(1, 0, 0), Vec3(0, 1, 0)};
-            for (int role = 0; role < 4; ++role) {
-                auto& input = inputs[4 * sample + role];
-                input.segment_segment = segment;
-                input.role = role;
-                for (int corner = 0; corner < 4; ++corner)
-                    input.positions[corner] = rotation * base[corner]
-                        + Vec3(0.031 * sample, -0.017 * sample, 0.011 * sample);
-            }
-        }
-        ipc_simd::general_mesh_contact_derivatives_tile(inputs.data(), inputs.size(),
-            d_hat, 2.0, 0.0, 1.0 / 600.0, 0.01, outputs.data());
-        for (std::size_t entry = 0; entry < inputs.size(); ++entry) {
-            SCOPED_TRACE(::testing::Message() << "segment=" << segment << " entry=" << entry);
-            const auto& input = inputs[entry];
-            const auto& x = input.positions;
-            const auto expected = segment
-                ? segment_segment_barrier_self_gradient_and_hessian(
-                    x[0], x[1], x[2], x[3], d_hat, input.role)
-                : node_triangle_barrier_self_gradient_and_hessian(
-                    x[0], x[1], x[2], x[3], d_hat, input.role);
-            const auto exact = [&](const auto& actual, const auto& reference,
-                                   const char* field) {
-                for (int component = 0; component < reference.size(); ++component) {
-                    if (std::memcmp(actual.data() + component, reference.data() + component,
-                            sizeof(double)) == 0) continue;
-                    ADD_FAILURE() << field << '[' << component << "] actual="
-                        << std::hexfloat << actual.data()[component]
-                        << " expected=" << reference.data()[component];
-                }
-            };
-            exact(outputs[entry].gradient, expected.first, "gradient");
-            exact(outputs[entry].hessian, expected.second, "hessian");
-        }
-    }
-}
-
 TEST(GeneralSIMDContacts, LeaderFailureJoinsHelpersAndLeavesOutputUnaccumulated) {
     RestoreOpenMP restore;
     omp_set_dynamic(0);

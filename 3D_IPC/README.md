@@ -118,7 +118,8 @@ V2 gathers AoS inputs, evaluates local SIMD tiles, and
 accumulates contributions in order.
 Use `--use_parallel true` for parallel updates.
 
-For example, run the reference 240-frame Example 1 with v2, bending, and self-contact:
+For example, run the 240-frame Example 1 benchmark baseline with v2, bending,
+and self-contact:
 
 ```bash
 ./build/3D_sim \
@@ -419,31 +420,41 @@ are `geo`, `obj`, `ply`, and `usd`. Every completed frame also writes a binary
 
 # CCD-clipped Verlet predictor
 ./build/3D_sim --use_ccd_guess false --use_verlet_guess true
+
+# collision_colored_ccd_initial_guess: cloth-only colored CCD sweeps toward xhat
+./build/3D_sim --use_colored_ccd_guess true --colored_ccd_guess_iters 10
 ```
 
 ### Reference scene commands
-
-Examples 1–3 use the documented cloth parameters:
 
 ```bash
 # Example 1: square cloth twisted in place, 240 frames at 0.5 turns/s
 ./build/3D_sim --example 1 --num_frames 240 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
   --d_hat 0.005 --k_barrier 100 \
-  --fixed_iters --max_substep_iters 10 --substeps 3 --node_box_update_count 10
+  --node_box_min 0.001 --node_box_max 0.01 \
+  --fixed_iters --max_substep_iters 6 --substeps 5 --node_box_update_count 10 \
+  --use_basic_experimental true --use_simd true --use_parallel true \
+  --outdir example1_output
 
 # Example 2: two cylinders, 2.0 turns, twist then untwist
 ./build/3D_sim --example 2 --num_frames 900 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 5e6 \
-  --d_hat 0.005 --k_barrier 100 --tcyl_max_turn 2.0 \
-  --fixed_iters --max_substep_iters 10 --substeps 3 --node_box_update_count 10
+  --d_hat 0.005 --k_barrier 100 --k_sdf 1e5 --eps_sdf 0.002 \
+  --node_box_min 0.001 --node_box_max 0.01 --tcyl_max_turn 2.0 \
+  --fixed_iters --max_substep_iters 6 --substeps 3 --node_box_update_count 10 \
+  --use_basic_experimental true --use_simd true --use_parallel true \
+  --outdir example2_output
 
 # Example 3: one yawing cylinder, 4.0 turns at 0.30 turns/s
 ./build/3D_sim --example 3 --num_frames 850 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e8 \
-  --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 \
+  --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 --eps_sdf 0.002 \
+  --node_box_min 0.001 --node_box_max 0.01 \
   --tu_max_turn 4.0 --tu_twist_rate 0.30 \
-  --fixed_iters --max_substep_iters 10 --substeps 5 --node_box_update_count 10
+  --fixed_iters --max_substep_iters 8 --substeps 5 --node_box_update_count 10 \
+  --use_basic_experimental true --use_simd true --use_parallel true \
+  --outdir example3_output
 
 # Example 4: avatar collider and dress loaded from a data directory
 ./build/3D_sim --example 4 --datadir /path/to/avatar_data
@@ -473,10 +484,6 @@ scene comments in `example.cpp`:
 
 # Example 11: one hundred rigid polygons, fixed-iteration mode
 ./build/3D_sim --example 11 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir hundred_polygon_box_fixed_iter_output --format obj
-
-# Example 11: residual-convergence alternative
-./build/3D_sim --example 11 --num_frames 200 --substeps 80 --max_substep_iters 5000 --outdir hundred_polygon_box_output --format obj
-```
 
 Examples 12–24 cover cloth, deformable solids, rigid bodies, and SDFs. The
 commands for examples 12–23 mirror the scene comments in `example.cpp`:
@@ -619,6 +626,11 @@ then applies one cheap 3D Newton correction for SDF penalty contact. Elastic,
 bending, and cloth-cloth IPC barrier terms are unchanged by a uniform
 translation and therefore do not affect `C`.
 
+`--use_colored_ccd_guess true` selects the cloth-only
+`collision_colored_ccd_initial_guess`: parallel-by-color linear CCD sweeps
+toward `xhat`. `--colored_ccd_guess_iters` sets the sweep count (default 10).
+It overrides the other guess flags and is ignored in OGC mode.
+
 ### Friction
 
 `friction_coefficient` is the global mesh/SDF Coulomb coefficient; zero
@@ -661,7 +673,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | Solver core | `max_substep_iters`, `tol_abs`, `tol_rel`, `d_hat`, `k_barrier`, `friction_coefficient`, `friction_velocity_epsilon`, `k_sdf`, `eps_sdf`, `damping`, `fixed_iters`, `use_parallel`, `verbose`, `write_substeps` |
 | Experimental cloth | `use_basic_experimental` enables the experimental solver; `use_simd` selects scalar v1 (`false`, default) or SIMD v2 (`true`) |
 | Basic cloth grid | `use_cloth_grid` (default false), `cloth_grid_auto_dx` (default false), `cloth_grid_dx` (default 0.05 m; fixed side > `2 * node_box_max`, or positive minimum when auto sizing is enabled) |
-| CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
+| CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_colored_ccd_guess` (cloth-only, default false), `colored_ccd_guess_iters` (default 10), `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (per-iteration box/pair refresh solver), `ogc_box_pad` (BVH padding for the refresh; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (translation/node-box radius limits in m), `theta_box_min`, `theta_box_max` (rigid orientation-box angular-radius limits in rad), `node_box_update_count` (GS iterations between broad-phase/contact-color rebuilds; default 10) |
 | Scene | `example` (`1`..`24`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink`, `crusher_angular_speed`; Example 22: `osc_nx`, `osc_nz`, `osc_length`, `osc_width`, `osc_layer_gap`, `osc_amplitude`, `osc_frequency`; Example 24: `drop_stack_count`, `drop_cloth_nx`, `drop_cloth_ny`, `drop_first_y`, `drop_spacing`, `drop_cloth_w`, `drop_cloth_h`, `drop_cx`, `drop_cz`, `cyl_ground_size`, `cyl_ground_cell_size`, `cyl_nu`, `cyl_cap_rings`, `cyl_radius`, `cyl_sdf_padding`, `cyl_length`, `cyl_cx`, `cyl_cy`, `cyl_cz` |
@@ -786,8 +798,9 @@ reader can jump to the layer they care about.
 
 ### Solver
 
-- `initial_guess.h` / `initial_guess.cpp` -- CCD-projected, Verlet, and
-  translation-restricted initial guesses selected by `advance_one_frame()`.
+- `initial_guess.h` / `initial_guess.cpp` -- CCD-projected,
+  `collision_colored_ccd_initial_guess`, Verlet, and translation-restricted
+  initial guesses selected by `advance_one_frame()`.
 - `solver.h` / `solver.cpp` -- common solver result and organized deformable
   and rigid-body solver implementations:
   - `global_gauss_seidel_solver_basic` (default): broad-phase/contact-color
@@ -857,7 +870,7 @@ the GoogleTest cases discovered by CTest.
 | `ccd_test` | 54 | Linear single-moving-DOF CCD, scale/coplanar stress cases, TICCD general NT/SS wrappers, and rigid rotational CCD |
 | `corotated_energy_test` | 11 | Elasticity rest state, invariance, finite-difference derivatives, and stress cases |
 | `friction_energy_test` | 21 | Smoothed Coulomb mesh/SDF contact, prescribed motion, frozen gradients, PSD Hessians, scaling, and validation |
-| `initial_guess_test` | 5 | CCD, Verlet, and translation-restricted initial guesses |
+| `initial_guess_test` | 23 | CCD, collision-colored CCD, Verlet, and translation-restricted initial guesses; selection, validation, and serial/parallel behavior |
 | `io_test` | 11 | TetGen input, malformed-input handling, and validated OBJ output |
 | `ipc_math_test` | 14 | Matrix inversion, segment closest points, barycentric coordinates, and topology caching |
 | `make_shape_test` | 29 | Mesh construction, imported-scene normalization, Examples 19–21, and restart-safe prescribed SDF motion |

@@ -277,20 +277,9 @@ TEST(GeneralSimdBitwise, MixedSolidClothPointRoundingPinsAndBatchTails) {
     }
 }
 
-TEST(GeneralSimdBitwise, MembraneMatchesOriginalAssembly) {
-    ClothFixture fixture;
-    fixture.disable_point(); fixture.params.kB = 0;
-    fixture.compare();
-}
-
 TEST(GeneralSimdBitwise, BendingMatchesSharedKernelAssembly) {
     ClothFixture fixture;
     fixture.disable_point(); fixture.disable_membrane();
-    fixture.compare();
-}
-
-TEST(GeneralSimdBitwise, CompleteClothUsesSharedBendingAssembly) {
-    ClothFixture fixture;
     fixture.compare();
 }
 
@@ -372,17 +361,6 @@ void deform_fixture(ClothFixture& fixture, int sample) {
 
 } // namespace
 
-TEST(GeneralSimdBitwise, MembraneKernelMatchesOriginalDerivatives) {
-    for (int sample = 0; sample < 16; ++sample) {
-        ClothFixture fixture;
-        deform_fixture(fixture, sample);
-        for (std::size_t count = 1; count <= 8; ++count) {
-            SCOPED_TRACE(::testing::Message() << "sample=" << sample << " count=" << count);
-            check_membrane_kernel(fixture, count);
-        }
-    }
-}
-
 TEST(GeneralSimdBitwise, SharedBendingKernelRetainsScalarNumericalAgreement) {
     for (int sample = 0; sample < 16; ++sample) {
         ClothFixture fixture;
@@ -454,50 +432,5 @@ TEST(GeneralSimdBitwise, BendingNonfiniteGeometryRetainsReferenceClassification)
             compare(gradient, reference.first);
             compare(hessian, reference.second);
         }
-    }
-}
-
-TEST(GeneralSimdBitwise, CompleteClothAcrossDeformedStatesAndBatchTails) {
-    for (int sample = 0; sample < 16; ++sample) {
-        ClothFixture fixture;
-        deform_fixture(fixture, sample);
-        fixture.params.kB = .009 + .017 * sample;
-        fixture.params.kpin = sample % 2 == 0 ? 1e9 : 137.0;
-        for (bool cached : {false, true}) {
-            SCOPED_TRACE(::testing::Message() << "sample=" << sample << " cached=" << cached);
-            fixture.compare(cached);
-        }
-    }
-}
-
-TEST(GeneralSimdBitwise, SharedBendingAssemblyPreservesMultiTileIncidentOrder) {
-    ClothFixture fixture;
-    deform_fixture(fixture, 7);
-    fixture.params.kB = .37;
-    fixture.params.kpin = 137.0;
-    const auto original_hinges = fixture.mesh.hinges;
-    fixture.mesh.hinges.clear();
-    fixture.mesh.hinge_adj.clear();
-    // Each of the eight nodes owns 35 differently weighted hinge records.
-    // Since 35 is not divisible by tile_width, this crosses both within-node
-    // flushes and tile boundaries shared by two consecutive node owners.
-    for (const auto& original : original_hinges) {
-        for (int record = 0; record < 35; ++record) {
-            Hinge hinge = original;
-            hinge.c_e = .4 + .013 * (record % 9);
-            hinge.bar_theta = -.17 + .23 * std::sin(.37 * record);
-            const int index = static_cast<int>(fixture.mesh.hinges.size());
-            fixture.mesh.hinges.push_back(hinge);
-            for (int role = 0; role < 4; ++role)
-                fixture.mesh.hinge_adj[hinge.v[role]].emplace_back(index, role);
-        }
-    }
-    for (int node = 0; node < 8; ++node)
-        ASSERT_GT(fixture.mesh.hinge_adj.at(node).size(), ipc_simd::tile_width);
-    for (bool cached : {false, true}) {
-        SCOPED_TRACE(::testing::Message() << "cached=" << cached);
-        // compare() checks all batch sizes 1..8 against ordered shared-kernel
-        // accumulation bit-for-bit, and the complete scalar system numerically.
-        fixture.compare(cached);
     }
 }

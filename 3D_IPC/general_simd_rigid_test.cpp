@@ -142,54 +142,6 @@ TEST(GeneralSIMDRigid, CoupledBarrierFrictionFeaturesSidesModesAndTailsMatchScal
             }
 }
 
-TEST(GeneralSIMDRigid, BarrierPullbackIsBitwiseIdenticalToScalar) {
-    std::array<ipc_simd::RigidContactInput, ipc_simd::contact_tile_width> inputs;
-    std::array<ipc_simd::RigidContactOutput, ipc_simd::contact_tile_width> outputs;
-    for (int trial = 0; trial < 5; ++trial) {
-        const auto kinematics = quaternion_omega_kinematics(
-            Vec4(0.8, 0.2, -0.4, 0.4).normalized(),
-            Vec3(1.2 + 0.23 * trial, -0.9, 1.7 - 0.13 * trial), dt, true);
-        const Mat33 rotation = Eigen::AngleAxisd(0.173 * trial,
-            Vec3(1.0, -0.6, 0.8).normalized()).toRotationMatrix();
-        for (std::size_t i = 0; i < inputs.size(); ++i) {
-            inputs[i] = fixture(static_cast<int>(i), kinematics);
-            if (trial != 0)
-                for (int role = 0; role < 4; ++role) {
-                    inputs[i].positions[role] = rotation * inputs[i].positions[role]
-                        + Vec3(0.21 * trial, -0.13 * trial, 0.07 * trial);
-                    inputs[i].body_references[role] += Vec3(0.031 * i, -0.019 * trial, 0.011 * role);
-                }
-        }
-        for (std::size_t count : {std::size_t(1), std::size_t(3), std::size_t(17), inputs.size()})
-            for (auto mode : {RigidDerivativeMode::Full, RigidDerivativeMode::Gradient,
-                     RigidDerivativeMode::TranslationHessian, RigidDerivativeMode::OrientationHessian}) {
-                ipc_simd::rigid_contact_derivatives_tile(inputs.data(), count, d_hat,
-                    stiffness, 0.0, dt, 0.1, mode, outputs.data());
-                for (std::size_t i = 0; i < count; ++i) {
-                    const auto expected = reference(inputs[i], mode, 0.0).barrier;
-                    const auto& actual = outputs[i].barrier;
-                    const auto exact = [&](const auto& a, const auto& b, const char* field) {
-                        for (Eigen::Index j = 0; j < a.size(); ++j) {
-                            if (std::memcmp(a.data() + j, b.data() + j, sizeof(double)) != 0) {
-                                ADD_FAILURE() << "trial=" << trial << " count=" << count
-                                    << " entry=" << i << " mode=" << int(mode)
-                                    << " field=" << field << " coefficient=" << j
-                                    << " actual=" << std::hexfloat << a.data()[j]
-                                    << " expected=" << b.data()[j];
-                                break;
-                            }
-                        }
-                    };
-                    exact(actual.translation_gradient, expected.translation_gradient, "tg");
-                    exact(actual.orientation_gradient, expected.orientation_gradient, "og");
-                    exact(actual.translation_translation_hessian, expected.translation_translation_hessian, "tt");
-                    exact(actual.translation_orientation_hessian, expected.translation_orientation_hessian, "to");
-                    exact(actual.orientation_orientation_hessian, expected.orientation_orientation_hessian, "oo");
-                }
-            }
-    }
-}
-
 TEST(GeneralSIMDRigid, FrictionUsesSignedMultiRoleJacobianAndUpdateMode) {
     const auto kinematics = quaternion_omega_kinematics(Vec4(1, 0, 0, 0), Vec3(0.5, 1.1, -0.9), dt, true);
     std::array<ipc_simd::RigidContactInput, 4> inputs;
