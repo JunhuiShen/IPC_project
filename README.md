@@ -94,22 +94,6 @@ Small smoke runs from the repository root:
   --outdir 3D_IPC/frames_smoke
 ```
 
-Some representative scenes:
-
-```sh
-# 2D rigid polygons colliding without gravity
-./2D_IPC/build/simulation \
-  --example 3 --gy 0 --num_frames 100 --outdir 2D_IPC/frames_collision
-
-# 3D freely rotating tennis racket
-./3D_IPC/build/3D_sim \
-  --example 5 --format obj --outdir 3D_IPC/frames_racket
-
-# 3D rigid prisms falling onto one another
-./3D_IPC/build/3D_sim \
-  --example 10 --substeps 10 --format obj --outdir 3D_IPC/frames_prisms
-```
-
 ## Repository layout
 
 ```text

@@ -149,22 +149,7 @@ void build_rotating_space_tool_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
-// Example 7: a rigid box and an extruded hexagon falling under gravity onto a
-// horizontal ground SDF.
-void build_rigid_box_drop_example(
-    const IPCArgs3D& args, RefMesh& ref_mesh,
-    DeformedState& state, std::vector<Vec2>& X,
-    std::vector<Pin>& pins, SimParams& params,
-    std::vector<Vec3>& static_x, std::vector<int>& static_tris);
-
-// Example 8: two rigid polygonal prisms at the same height moving toward one
-// another with zero gravity.
-void build_two_rigid_polygon_collision_example(
-    const IPCArgs3D& args, RefMesh& ref_mesh,
-    DeformedState& state, std::vector<Vec2>& X,
-    std::vector<Pin>& pins, SimParams& params);
-
-// Example 9: twenty vertically aligned rigid polygonal prisms initialized as a
+// Example 7: twenty vertically aligned rigid polygonal prisms initialized as a
 // stationary stack immediately above a horizontal ground plane.
 void build_twenty_rigid_polygon_static_stack_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
@@ -172,69 +157,21 @@ void build_twenty_rigid_polygon_static_stack_example(
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris);
 
-// Example 10: five equally oriented rigid polygonal prisms aligned in one
-// vertical column and falling onto one another above a horizontal ground plane.
-void build_five_rigid_polygon_drop_scatter_example(
-    const IPCArgs3D& args, RefMesh& ref_mesh,
-    DeformedState& state, std::vector<Vec2>& X,
-    std::vector<Pin>& pins, SimParams& params,
-    std::vector<Vec3>& static_x, std::vector<int>& static_tris);
-
-// Example 11: one hundred varied regular polygonal prisms initialized in five
-// collision-free layers and falling into a wide open-top box.
-void build_hundred_rigid_polygon_box_drop_example(
-    const IPCArgs3D& args, RefMesh& ref_mesh,
-    DeformedState& state, std::vector<Vec2>& X,
-    std::vector<Pin>& pins, SimParams& params,
-    std::vector<Vec3>& static_x, std::vector<int>& static_tris);
-
-// Example 12: fifty small rigid polygonal prisms (3 through 12 sides) falling
+// Example 8: fifty small rigid polygonal prisms (3 through 12 sides) falling
 // onto a large horizontal rectangular cloth whose four corners are pinned.
 void build_fifty_rigid_polygons_drop_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
-// Example 15: ten small rigid and ten larger tetrahedralized deformable
-// polygonal prisms (3 through 12 sides), all initialized flat, falling onto a
-// large horizontal cloth whose two opposite sides are pinned.
-void build_twenty_rigid_deformable_polygons_drop_on_pinned_cloth_example(
-    const IPCArgs3D& args, RefMesh& ref_mesh,
-    DeformedState& state, std::vector<Vec2>& X,
-    std::vector<Pin>& pins, SimParams& params);
-
-// Example 13: one flat tetrahedralized deformable octagonal prism falling
-// onto a horizontal SDF ground plane. The solid uses a mass density of
-// 900 kg/m^3.
-void build_single_deformable_solid_ground_drop_example(
-    const IPCArgs3D& args, RefMesh& ref_mesh,
-    DeformedState& state, std::vector<Vec2>& X,
-    std::vector<Pin>& pins, SimParams& params,
-    std::vector<Vec3>& static_x, std::vector<int>& static_tris);
-
-// Example 14: one flat tetrahedralized deformable octagonal prism falling
-// onto a large horizontal cloth whose two opposite sides are pinned.
-void build_single_deformable_solid_drop_on_pinned_cloth_example(
-    const IPCArgs3D& args, RefMesh& ref_mesh,
-    DeformedState& state, std::vector<Vec2>& X,
-    std::vector<Pin>& pins, SimParams& params);
-
-// Example 16: ten total polygonal prisms, alternating five rigid bodies and
-// five tetrahedralized deformable solids, falling flat onto one another above
-// a cloth whose two opposite sides are pinned.
-void build_ten_alternating_rigid_solid_flat_stack_on_pinned_cloth_example(
-    const IPCArgs3D& args, RefMesh& ref_mesh,
-    DeformedState& state, std::vector<Vec2>& X,
-    std::vector<Pin>& pins, SimParams& params);
-
-// Example 17: Bunny-solid / Spot-solid / rigid-cube / rigid-gear cycles,
+// Example 9: Bunny-solid / Spot-solid / rigid-cube / rigid-gear cycles,
 // repeated twice in one vertical stack above a cloth pinned on opposite sides.
 void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
-// Example 18: a fully dynamic threaded bolt starts deeply engaged in a nut and
+// Example 10: a fully dynamic threaded bolt starts deeply engaged in a nut and
 // falls coaxially under gravity, rotating as it follows the thread. The nut's
 // translation and orientation are both fixed by its rigid update label.
 void build_dynamic_bolt_into_fixed_nut_example(
@@ -242,15 +179,7 @@ void build_dynamic_bolt_into_fixed_nut_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
-// Example 19: one tetrahedral Armadillo starts in the nip between two
-// fixed-center, counter-rotating gear crushers. Their angular velocities are
-// initial conditions and subsequently evolve through inertia and contact.
-void build_armadillo_through_gear_crushers_example(
-    const IPCArgs3D& args, RefMesh& ref_mesh,
-    DeformedState& state, std::vector<Vec2>& X,
-    std::vector<Pin>& pins, SimParams& params);
-
-// Example 20: four rows of a tetrahedral Bunny, tetrahedral Spot, rigid cube,
+// Example 11: four rows of a tetrahedral Bunny, tetrahedral Spot, rigid cube,
 // and rigid gear above a horizontal cloth pinned along two opposite sides.
 // One body per row starts 0.35 higher and directly over another body: cube
 // over Bunny, gear over Spot, Bunny over cube, and Spot over gear. All bodies
@@ -262,7 +191,7 @@ void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
-// Example 21: a flat-rest cloth starts wound into a roll above an inclined
+// Example 12: a flat-rest cloth starts wound into a roll above an inclined
 // plane SDF joined to a horizontal ground SDF. Its uphill short edge is pinned
 // while gravity unwinds the free length down the ramp. A finite wedge and
 // ground quad are exported through static_x/static_tris for visualization only.
@@ -272,7 +201,7 @@ void build_cloth_unrolling_down_fixed_ramp_example(
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris);
 
-// Example 22: three parallel cloth sheets form a close stack. One complete
+// Example 13: three parallel cloth sheets form a close stack. One complete
 // short edge of every sheet is fixed, while the opposite edge is prescribed
 // to oscillate along +y; the two lateral edges are free. The driven targets
 // are evaluated from their immutable t=0 positions so checkpoint restarts
@@ -296,7 +225,7 @@ void update_oscillating_cloth_layer_pins(
     const OscillatingClothLayersSpec& spec,
     double t);
 
-// Example 23: the rigid IPC paper's wrecking-ball benchmark. Thirteen
+// Example 14: the rigid IPC paper's wrecking-ball benchmark. Thirteen
 // interlinked rigid rings and a ball with an integrated terminal ring swing
 // from one fixed top link into a wall of 560 rigid cubes. The reference's
 // complete scene is translated +1 m in y; its fixed plane is represented at
@@ -307,7 +236,7 @@ void build_wrecking_ball_example(
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris);
 
-// Example 24: free horizontal cloth sheets stacked above a fixed cylinder
+// Example 15: free horizontal cloth sheets stacked above a fixed cylinder
 // aligned with +z. Ground and cylinder use analytic SDF contact; the capped
 // cylinder mesh and ground in static_x/static_tris are for visualization only.
 void build_cloth_cylinder_drop_example(
