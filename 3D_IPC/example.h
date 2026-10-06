@@ -157,21 +157,14 @@ void build_twenty_rigid_polygon_static_stack_example(
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris);
 
-// Example 8: fifty small rigid polygonal prisms (3 through 12 sides) falling
-// onto a large horizontal rectangular cloth whose four corners are pinned.
-void build_fifty_rigid_polygons_drop_on_pinned_cloth_example(
-    const IPCArgs3D& args, RefMesh& ref_mesh,
-    DeformedState& state, std::vector<Vec2>& X,
-    std::vector<Pin>& pins, SimParams& params);
-
-// Example 9: Bunny-solid / Spot-solid / rigid-cube / rigid-gear cycles,
+// Example 8: Bunny-solid / Spot-solid / rigid-cube / rigid-gear cycles,
 // repeated twice in one vertical stack above a cloth pinned on opposite sides.
 void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
-// Example 10: a fully dynamic threaded bolt starts deeply engaged in a nut and
+// Example 9: a fully dynamic threaded bolt starts deeply engaged in a nut and
 // falls coaxially under gravity, rotating as it follows the thread. The nut's
 // translation and orientation are both fixed by its rigid update label.
 void build_dynamic_bolt_into_fixed_nut_example(
@@ -179,7 +172,7 @@ void build_dynamic_bolt_into_fixed_nut_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
-// Example 11: four rows of a tetrahedral Bunny, tetrahedral Spot, rigid cube,
+// Example 10: four rows of a tetrahedral Bunny, tetrahedral Spot, rigid cube,
 // and rigid gear above a horizontal cloth pinned along two opposite sides.
 // One body per row starts 0.35 higher and directly over another body: cube
 // over Bunny, gear over Spot, Bunny over cube, and Spot over gear. All bodies
@@ -191,7 +184,7 @@ void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
-// Example 12: a flat-rest cloth starts wound into a roll above an inclined
+// Example 11: a flat-rest cloth starts wound into a roll above an inclined
 // plane SDF joined to a horizontal ground SDF. Its uphill short edge is pinned
 // while gravity unwinds the free length down the ramp. A finite wedge and
 // ground quad are exported through static_x/static_tris for visualization only.
@@ -201,7 +194,7 @@ void build_cloth_unrolling_down_fixed_ramp_example(
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris);
 
-// Example 13: three parallel cloth sheets form a close stack. One complete
+// Example 12: three parallel cloth sheets form a close stack. One complete
 // short edge of every sheet is fixed, while the opposite edge is prescribed
 // to oscillate along +y; the two lateral edges are free. The driven targets
 // are evaluated from their immutable t=0 positions so checkpoint restarts
@@ -225,7 +218,7 @@ void update_oscillating_cloth_layer_pins(
     const OscillatingClothLayersSpec& spec,
     double t);
 
-// Example 14: the rigid IPC paper's wrecking-ball benchmark. Thirteen
+// Example 13: the rigid IPC paper's wrecking-ball benchmark. Thirteen
 // interlinked rigid rings and a ball with an integrated terminal ring swing
 // from one fixed top link into a wall of 560 rigid cubes. The reference's
 // complete scene is translated +1 m in y; its fixed plane is represented at
@@ -236,7 +229,7 @@ void build_wrecking_ball_example(
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris);
 
-// Example 15: free horizontal cloth sheets stacked above a fixed cylinder
+// Example 14: free horizontal cloth sheets stacked above a fixed cylinder
 // aligned with +z. Ground and cylinder use analytic SDF contact; the capped
 // cylinder mesh and ground in static_x/static_tris are for visualization only.
 void build_cloth_cylinder_drop_example(

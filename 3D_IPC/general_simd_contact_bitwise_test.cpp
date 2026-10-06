@@ -81,7 +81,7 @@ struct CapturedInteriorContact {
     std::array<double, 9> hessian_column_major;
 };
 
-// Original general-solver captures from example 11, frame 28, substep 1,
+// Original general-solver captures from example 10, frame 28, substep 1,
 // sweep 1: vertex 3255 (first three pairs), then vertex 5976. Hex literals
 // preserve the actual input/output bits from the GCC 11.4 native server build.
 std::array<CapturedInteriorContact, 4> captured_interior_contacts() {

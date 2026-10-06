@@ -111,7 +111,7 @@ struct IPCArgs3D : ArgParser {
     int         tu_cyl_nu         = 64;    // circumferential subdivisions for the visual mesh
     double      tu_visual_shrink  = 0.002; // visual cyl this much thinner than pin_r (m); avoids SDF/barrier fighting at contact
 
-    // example 13: three stacked cloth layers with one sinusoidally driven edge
+    // example 12: three stacked cloth layers with one sinusoidally driven edge
     int         osc_nx          = 49;    // subdivisions along the driven direction
     int         osc_nz          = 49;    // subdivisions across each driven edge
     double      osc_length      = 1.50;  // fixed-to-driven edge distance (m)
@@ -120,7 +120,7 @@ struct IPCArgs3D : ArgParser {
     double      osc_amplitude   = 0.02;  // driven-edge sinusoid amplitude (m)
     double      osc_frequency   = 0.50;  // driven-edge frequency (Hz)
 
-    // example 15: vertically separated cloth sheets falling onto a long cylinder
+    // example 14: vertically separated cloth sheets falling onto a long cylinder
     int         drop_stack_count = 50;
     int         drop_cloth_nx    = 69;   // 70 vertices along x
     int         drop_cloth_ny    = 69;   // 70 vertices along z
@@ -204,7 +204,7 @@ struct IPCArgs3D : ArgParser {
         add_double("damping",                  damping,                  1.0,   "Newton-step damping used by deformable and rigid solvers; <1 can stabilize an update");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=twenty_polygon_stack, 8=fifty_rigid_polygons_on_pinned_cloth, 9=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 10=dynamic_bolt_into_fixed_nut, 11=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 12=cloth_unrolling_down_fixed_ramp, 13=oscillating_cloth_layers, 14=wrecking_ball, 15=cloth_cylinder_drop");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=twenty_polygon_stack, 8=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 9=dynamic_bolt_into_fixed_nut, 10=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 11=cloth_unrolling_down_fixed_ramp, 12=oscillating_cloth_layers, 13=wrecking_ball, 14=cloth_cylinder_drop");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -243,33 +243,33 @@ struct IPCArgs3D : ArgParser {
         add_int   ("tu_cyl_nu",        tu_cyl_nu,        64,   "Circumferential subdivisions for the visual cylinder in example 3");
         add_double("tu_visual_shrink", tu_visual_shrink, 0.002,"Render cylinder this much thinner than the cloth's rest radius (m, visual only). Small offset (~2mm) keeps a visible sliver between cloth + cylinder and avoids SDF/barrier energy fighting at the contact");
 
-        add_int   ("osc_nx",        osc_nx,        49,     "Grid subdivisions from fixed to driven edge in example 13");
-        add_int   ("osc_nz",        osc_nz,        49,     "Grid subdivisions across each edge in example 13");
-        add_double("osc_length",    osc_length,    1.50,   "Fixed-to-driven edge distance (m) in example 13");
-        add_double("osc_width",     osc_width,     0.50,   "Width (m) of each cloth layer in example 13");
-        add_double("osc_layer_gap", osc_layer_gap, 0.0022, "Vertical mid-surface gap (m) between layers in example 13");
-        add_double("osc_amplitude", osc_amplitude, 0.02,   "Signed vertical sinusoid amplitude (m) of the driven edges in example 13");
-        add_double("osc_frequency", osc_frequency, 0.50,   "Sinusoid frequency (Hz) of the driven edges in example 13");
+        add_int   ("osc_nx",        osc_nx,        49,     "Grid subdivisions from fixed to driven edge in example 12");
+        add_int   ("osc_nz",        osc_nz,        49,     "Grid subdivisions across each edge in example 12");
+        add_double("osc_length",    osc_length,    1.50,   "Fixed-to-driven edge distance (m) in example 12");
+        add_double("osc_width",     osc_width,     0.50,   "Width (m) of each cloth layer in example 12");
+        add_double("osc_layer_gap", osc_layer_gap, 0.0022, "Vertical mid-surface gap (m) between layers in example 12");
+        add_double("osc_amplitude", osc_amplitude, 0.02,   "Signed vertical sinusoid amplitude (m) of the driven edges in example 12");
+        add_double("osc_frequency", osc_frequency, 0.50,   "Sinusoid frequency (Hz) of the driven edges in example 12");
 
-        add_int   ("drop_stack_count", drop_stack_count, 50,   "Number of falling cloth sheets in example 15");
-        add_int   ("drop_cloth_nx",    drop_cloth_nx,    69,   "Grid subdivisions along x per sheet in example 15 (vertices = subdivisions + 1)");
-        add_int   ("drop_cloth_ny",    drop_cloth_ny,    69,   "Grid subdivisions along z per sheet in example 15 (vertices = subdivisions + 1)");
-        add_double("drop_first_y",     drop_first_y,     1.20, "Initial lowest-sheet height (m) in example 15; must clear the padded cylinder top and eps_sdf");
-        add_double("drop_spacing",     drop_spacing,     0.005,"Initial vertical spacing (m) between cloth sheets in example 15");
-        add_double("drop_cloth_w",     drop_cloth_w,     2.07, "Cloth width along x (m) in example 15");
-        add_double("drop_cloth_h",     drop_cloth_h,     2.07, "Cloth length along z (m) in example 15");
-        add_double("drop_cx",          drop_cx,          0.0,  "Cloth-stack center x (m) in example 15, independent of the cylinder");
-        add_double("drop_cz",          drop_cz,          0.0,  "Cloth-stack center z (m) in example 15, independent of the cylinder");
-        add_double("cyl_ground_size",  cyl_ground_size,  12.5, "Visual ground edge length (m) in example 15");
-        add_double("cyl_ground_cell_size", cyl_ground_cell_size, 0.25, "Maximum visual ground cell edge (m) in example 15");
-        add_int   ("cyl_nu",           cyl_nu,           64,   "Circumferential visual cylinder subdivisions in example 15");
-        add_int   ("cyl_cap_rings",    cyl_cap_rings,    12,   "Radial subdivisions per visual cylinder end cap in example 15");
-        add_double("cyl_radius",       cyl_radius,       0.35, "Visible cylinder radius (m) in example 15");
-        add_double("cyl_sdf_padding",  cyl_sdf_padding,  0.012,"Extra cylinder SDF radius (m) in example 15 to keep coarse cloth faces outside the visible cylinder");
-        add_double("cyl_length",       cyl_length,       4.0,  "Visual cylinder length along z (m) in example 15; collision SDF is infinite");
-        add_double("cyl_cx",           cyl_cx,          -0.70, "Cylinder center x (m) in example 15; negative offsets it left of the cloth stack");
-        add_double("cyl_cy",           cyl_cy,           0.60, "Cylinder center y (m) in example 15");
-        add_double("cyl_cz",           cyl_cz,           0.0,  "Cylinder center z (m) in example 15");
+        add_int   ("drop_stack_count", drop_stack_count, 50,   "Number of falling cloth sheets in example 14");
+        add_int   ("drop_cloth_nx",    drop_cloth_nx,    69,   "Grid subdivisions along x per sheet in example 14 (vertices = subdivisions + 1)");
+        add_int   ("drop_cloth_ny",    drop_cloth_ny,    69,   "Grid subdivisions along z per sheet in example 14 (vertices = subdivisions + 1)");
+        add_double("drop_first_y",     drop_first_y,     1.20, "Initial lowest-sheet height (m) in example 14; must clear the padded cylinder top and eps_sdf");
+        add_double("drop_spacing",     drop_spacing,     0.005,"Initial vertical spacing (m) between cloth sheets in example 14");
+        add_double("drop_cloth_w",     drop_cloth_w,     2.07, "Cloth width along x (m) in example 14");
+        add_double("drop_cloth_h",     drop_cloth_h,     2.07, "Cloth length along z (m) in example 14");
+        add_double("drop_cx",          drop_cx,          0.0,  "Cloth-stack center x (m) in example 14, independent of the cylinder");
+        add_double("drop_cz",          drop_cz,          0.0,  "Cloth-stack center z (m) in example 14, independent of the cylinder");
+        add_double("cyl_ground_size",  cyl_ground_size,  12.5, "Visual ground edge length (m) in example 14");
+        add_double("cyl_ground_cell_size", cyl_ground_cell_size, 0.25, "Maximum visual ground cell edge (m) in example 14");
+        add_int   ("cyl_nu",           cyl_nu,           64,   "Circumferential visual cylinder subdivisions in example 14");
+        add_int   ("cyl_cap_rings",    cyl_cap_rings,    12,   "Radial subdivisions per visual cylinder end cap in example 14");
+        add_double("cyl_radius",       cyl_radius,       0.35, "Visible cylinder radius (m) in example 14");
+        add_double("cyl_sdf_padding",  cyl_sdf_padding,  0.012,"Extra cylinder SDF radius (m) in example 14 to keep coarse cloth faces outside the visible cylinder");
+        add_double("cyl_length",       cyl_length,       4.0,  "Visual cylinder length along z (m) in example 14; collision SDF is infinite");
+        add_double("cyl_cx",           cyl_cx,          -0.70, "Cylinder center x (m) in example 14; negative offsets it left of the cloth stack");
+        add_double("cyl_cy",           cyl_cy,           0.60, "Cylinder center y (m) in example 14");
+        add_double("cyl_cz",           cyl_cz,           0.0,  "Cylinder center z (m) in example 14");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
@@ -279,7 +279,7 @@ struct IPCArgs3D : ArgParser {
 
     bool parse(int argc, char** argv) {
         if (!ArgParser::parse(argc, argv)) return false;
-        if (example == 15) {
+        if (example == 14) {
             // The general 5 mm contact band equals this scene's release gap.
             // Keep the default strictly smaller, while honoring explicit flags.
             bool explicit_d_hat = false;

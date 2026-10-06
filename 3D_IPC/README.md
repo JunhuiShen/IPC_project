@@ -484,73 +484,69 @@ corresponding scene presets from `example.cpp` with SIMD v2 enabled:
 
 ```
 
-Examples 8–15 cover cloth, deformable solids, rigid bodies,
+Examples 8–14 cover cloth, deformable solids, rigid bodies,
 and SDFs. The commands below use the scene presets from `example.cpp` with
 SIMD v2 enabled:
 
 ```bash
-# Example 8: fifty rigid polygons dropped onto pinned cloth
-./build/3D_sim --example 8 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir fifty_polygons_on_pinned_cloth_output --format obj \
+# Example 8: Bunny/Spot solids with rigid cubes and gears
+./build/3D_sim --example 8 --datadir example_obj --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 600 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_output --format obj \
   --use_basic_experimental true --use_simd true
 
-# Example 9: Bunny/Spot solids with rigid cubes and gears
-./build/3D_sim --example 9 --datadir example_obj --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 600 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_output --format obj \
+# Example 9: dynamic threaded bolt falling through a fixed nut
+./build/3D_sim --example 9 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj \
   --use_basic_experimental true --use_simd true
 
-# Example 10: dynamic threaded bolt falling through a fixed nut
-./build/3D_sim --example 10 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj \
-  --use_basic_experimental true --use_simd true
-
-# Example 11: four Bunny/Spot/cube/gear rows dropped onto pinned cloth
-./build/3D_sim --example 11 --num_frames 200 --fps 30 --substeps 15 --max_substep_iters 25 --fixed_iters \
+# Example 10: four Bunny/Spot/cube/gear rows dropped onto pinned cloth
+./build/3D_sim --example 10 --num_frames 200 --fps 30 --substeps 15 --max_substep_iters 25 --fixed_iters \
   --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 \
   --d_hat 0.019 --k_barrier 1000 --friction_coefficient 0 --use_ccd true \
   --node_box_update_count 10 --use_parallel true --use_basic_experimental true --use_simd true \
-  --write_substeps false --format obj --outdir outputs/example11_general_v2 \
+  --write_substeps false --format obj --outdir outputs/example10_general_v2 \
   --use_colored_ccd_guess true --colored_ccd_guess_iters 10
 
-# Example 12: rolled cloth unrolling down an SDF ramp
-./build/3D_sim --example 12 --num_frames 200 --substeps 20 --max_substep_iters 80 --fixed_iters --kB 0.0025 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --outdir rolled_cloth_on_steep_ramp_output_new --format obj \
+# Example 11: rolled cloth unrolling down an SDF ramp
+./build/3D_sim --example 11 --num_frames 200 --substeps 20 --max_substep_iters 80 --fixed_iters --kB 0.0025 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --outdir rolled_cloth_on_steep_ramp_output_new --format obj \
   --use_basic_experimental true --use_simd true
 
-# Example 13: three cloth layers with one fixed edge and one oscillating edge
-./build/3D_sim --example 13 \
+# Example 12: three cloth layers with one fixed edge and one oscillating edge
+./build/3D_sim --example 12 \
   --use_basic_experimental true --use_simd true \
   --num_frames 200 --substeps 30 --max_substep_iters 100 --fixed_iters \
   --friction_coefficient 0.0 --friction_velocity_epsilon 0.01 \
   --kB 0.01 --osc_amplitude 0.01 --osc_frequency 6.0 --osc_length 1.0 --gy 0 \
   --outdir oscillating_cloth_layers_output --format geo
 
-# Example 14: a rigid wrecking ball swings into a wall of 560 cubes
-./build/3D_sim --example 14 \
+# Example 13: a rigid wrecking ball swings into a wall of 560 cubes
+./build/3D_sim --example 13 \
   --use_basic_experimental true --use_simd true \
   --num_frames 200 --substeps 30 --max_substep_iters 200 --fixed_iters \
   --d_hat 0.001 --k_barrier 1e9 --k_sdf 1e8 --eps_sdf 0.002 \
   --friction_coefficient 0.1 --outdir wrecking_ball_tuned_output --format geo
 
-# Example 15: fifty free cloth sheets fall over a fixed cylinder offset to the left and spread onto the ground.
+# Example 14: fifty free cloth sheets fall over a fixed cylinder offset to the left and spread onto the ground.
 
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 15 --num_frames 10 \
+./build/3D_sim --example 14 --num_frames 10 \
   --fps 30 --substeps 50 --max_substep_iters 3 --fixed_iters \
   --use_basic_experimental --use_simd --use_parallel true --use_ccd true \
   --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 3 \
-  --outdir results/example15_70x70/frames --format geo && \
+  --outdir results/example14_70x70/frames --format geo && \
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 15 --restart_frame 10 --num_frames 120 \
+./build/3D_sim --example 14 --restart_frame 10 --num_frames 120 \
   --fps 30 --substeps 50 --max_substep_iters 2 --fixed_iters \
   --use_basic_experimental --use_simd --use_parallel true --use_ccd true \
   --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 2 \
-  --outdir results/example15_70x70/frames --format geo
+  --outdir results/example14_70x70/frames --format geo
 ```
 
 ## Built-in scenes
 
-Built-in example scenes are numbered consecutively from 1 to 15 (`--example N`).
+Built-in example scenes are numbered consecutively from 1 to 14 (`--example N`).
 
 | `--example` | Scene |
 |-------------|-------|
@@ -561,26 +557,25 @@ Built-in example scenes are numbered consecutively from 1 to 15 (`--example N`).
 | `5` | Freely rotating rigid tennis racket with a prescribed initial angular velocity and no gravity |
 | `6` | Freely rotating space tool initialized near its intermediate principal axis |
 | `7` | Twenty rigid hexagonal prisms initialized as a stationary vertical stack on a ground plane |
-| `8` | Fifty mixed rigid prisms (triangle through dodecagon) falling onto a large rectangular cloth pinned at its four corners |
-| `9` | Two repeating larger Bunny-solid, larger Spot-solid, smaller rigid-box, and smaller rigid-gear cycles stacked in one vertical column above a cloth pinned along two opposite sides |
-| `10` | A fully dynamic threaded bolt starting deeply engaged and falling under gravity through a threaded nut with fixed translation and orientation |
-| `11` | Four close-packed level rows of Bunny-solid, Spot-solid, rigid cube, and rigid gear dropping together onto a horizontal cloth pinned along two opposite sides |
-| `12` | A rolled cloth pinned along its upper edge and unrolling down an analytic SDF incline onto an SDF ground plane |
-| `13` | Three closely stacked cloth sheets, each with one short edge fixed and the opposite edge driven by a vertical sinusoid |
-| `14` | Thirteen interlinked rigid rings and a ball with an integrated terminal ring swinging from a fixed top link into a wall of 560 rigid cubes above an SDF ground plane |
-| `15` | Fifty free horizontal cloth sheets, each with 70x70 vertices, above a fixed z-aligned cylinder offset 0.70 m to the left; the longer right overhang pulls the sheets toward the ground. |
+| `8` | Two repeating larger Bunny-solid, larger Spot-solid, smaller rigid-box, and smaller rigid-gear cycles stacked in one vertical column above a cloth pinned along two opposite sides |
+| `9` | A fully dynamic threaded bolt starting deeply engaged and falling under gravity through a threaded nut with fixed translation and orientation |
+| `10` | Four close-packed level rows of Bunny-solid, Spot-solid, rigid cube, and rigid gear dropping together onto a horizontal cloth pinned along two opposite sides |
+| `11` | A rolled cloth pinned along its upper edge and unrolling down an analytic SDF incline onto an SDF ground plane |
+| `12` | Three closely stacked cloth sheets, each with one short edge fixed and the opposite edge driven by a vertical sinusoid |
+| `13` | Thirteen interlinked rigid rings and a ball with an integrated terminal ring swinging from a fixed top link into a wall of 560 rigid cubes above an SDF ground plane |
+| `14` | Fifty free horizontal cloth sheets, each with 70x70 vertices, above a fixed z-aligned cylinder offset 0.70 m to the left; the longer right overhang pulls the sheets toward the ground. |
 
 ### External scene assets
 
 All paths below are repository-relative. Examples not listed here are
 procedural or use the directory supplied through `--datadir`.
 
-- **Examples 9 and 11:** `example_obj/bunny_coarse/bunny_2000f.1.node` and
+- **Examples 8 and 10:** `example_obj/bunny_coarse/bunny_2000f.1.node` and
   `.ele`, `example_obj/spot/spot_2000f.1.node` and `.ele`, plus
   `example_obj/gear_z18_coarse.obj`.
-- **Example 10:** `example_obj/bolt_and_nut/bolt_coarse_bolt.obj` and
+- **Example 9:** `example_obj/bolt_and_nut/bolt_coarse_bolt.obj` and
   `example_obj/bolt_and_nut/bolt_coarse_nut.obj`.
-- **Example 14:** `example_obj/wrecking_ball/link.obj` and
+- **Example 13:** `example_obj/wrecking_ball/link.obj` and
   `example_obj/wrecking_ball/ball.obj`. Run from the repository root, or pass
   `--datadir example_obj` (or the `wrecking_ball` directory itself).
 
@@ -654,7 +649,7 @@ See `./build/3D_sim --help` for defaults and full descriptions.
 | CCD / step clamping | `use_ccd`, `use_ccd_guess`, `use_colored_ccd_guess` (cloth-only, default false), `colored_ccd_guess_iters` (default 10), `use_verlet_guess`, `use_translation_guess`, `use_ticcd` |
 | OGC trust region | `use_ogc` (clip in basic solver), `use_ogc_solver` (per-iteration box/pair refresh solver), `ogc_box_pad` (BVH padding for the refresh; floored to `d_hat`) |
 | Node-box sizing | `node_box_min`, `node_box_max` (translation/node-box radius limits in m), `theta_box_min`, `theta_box_max` (rigid orientation-box angular-radius limits in rad), `node_box_update_count` (GS iterations between broad-phase/contact-color rebuilds; default 10) |
-| Scene | `example` (`1`–`15`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink`; Example 13: `osc_nx`, `osc_nz`, `osc_length`, `osc_width`, `osc_layer_gap`, `osc_amplitude`, `osc_frequency`; Example 15: `drop_stack_count`, `drop_cloth_nx`, `drop_cloth_ny`, `drop_first_y`, `drop_spacing`, `drop_cloth_w`, `drop_cloth_h`, `drop_cx`, `drop_cz`, `cyl_ground_size`, `cyl_ground_cell_size`, `cyl_nu`, `cyl_cap_rings`, `cyl_radius`, `cyl_sdf_padding`, `cyl_length`, `cyl_cx`, `cyl_cy`, `cyl_cz` |
+| Scene | `example` (`1`–`14`), `sheet_y` + per-example knobs: `twist_rate`, `twist_nx`, `twist_ny`, `twist_size`, `tcyl_n_strips`, `tcyl_strip_w`, `tcyl_strip_span_z`, `tcyl_cloth_h`, `tcyl_nx`, `tcyl_ny`, `tcyl_radius`, `tcyl_length`, `tcyl_nu`, `tcyl_visual_shrink`, `tcyl_twist_rate`, `tcyl_settle_time`, `tcyl_ramp_time`, `tcyl_max_turn`, `tcyl_untwist`, `tcyl_hold_time`, `tu_size`, `tu_width`, `tu_nx`, `tu_ny`, `tu_twist_rate`, `tu_settle_time`, `tu_ramp_time`, `tu_max_turn`, `tu_untwist`, `tu_hold_time`, `tu_cyl_radius`, `tu_cyl_length`, `tu_cyl_nu`, `tu_visual_shrink`; Example 12: `osc_nx`, `osc_nz`, `osc_length`, `osc_width`, `osc_layer_gap`, `osc_amplitude`, `osc_frequency`; Example 14: `drop_stack_count`, `drop_cloth_nx`, `drop_cloth_ny`, `drop_first_y`, `drop_spacing`, `drop_cloth_w`, `drop_cloth_h`, `drop_cx`, `drop_cz`, `cyl_ground_size`, `cyl_ground_cell_size`, `cyl_nu`, `cyl_cap_rings`, `cyl_radius`, `cyl_sdf_padding`, `cyl_length`, `cyl_cx`, `cyl_cy`, `cyl_cz` |
 | Output / restart | `outdir`, `format` (`obj \| geo \| ply \| usd`), `restart_frame`, `datadir` |
 
 Notes:
@@ -851,7 +846,7 @@ the GoogleTest cases discovered by CTest.
 | `initial_guess_test` | 23 | CCD, collision-colored CCD, Verlet, and translation-restricted initial guesses; selection, validation, and serial/parallel behavior |
 | `io_test` | 11 | TetGen input, malformed-input handling, and validated OBJ output |
 | `ipc_math_test` | 14 | Matrix inversion, segment closest points, barycentric coordinates, and topology caching |
-| `make_shape_test` | 33 | Mesh construction, material overrides, retained built-in scenes, and restart-safe prescribed SDF motion |
+| `make_shape_test` | 32 | Mesh construction, material overrides, retained built-in scenes, and restart-safe prescribed SDF motion |
 | `mesh_test` | 8 | Tetrahedral boundary extraction, TGSL ordering, topology validation, and scale-aware degeneracy checks |
 | `node_triangle_distance_test` | 9 | All seven proximity regions, signed distance, and degenerate triangles |
 | `parallel_helper_test` | 20 | Compact contact adjacency, rigid ownership/coloring, spherical-cap AABBs, and rigid blue boxes |

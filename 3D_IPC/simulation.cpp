@@ -51,16 +51,15 @@ int main(int argc, char** argv) {
     else if (args.example == 5) build_rotating_tennis_racket_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 6) build_rotating_space_tool_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 7) build_twenty_rigid_polygon_static_stack_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
-    else if (args.example == 8) build_fifty_rigid_polygons_drop_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
-    else if (args.example == 9) build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
-    else if (args.example == 10) build_dynamic_bolt_into_fixed_nut_example(args, ref_mesh, state, X, pins, params);
-    else if (args.example == 11) build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
-    else if (args.example == 12) build_cloth_unrolling_down_fixed_ramp_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
-    else if (args.example == 13) build_oscillating_cloth_layers_example(args, ref_mesh, state, X, pins, params, oscillating_layers_spec);
-    else if (args.example == 14) build_wrecking_ball_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
-    else if (args.example == 15) build_cloth_cylinder_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
+    else if (args.example == 8) build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 9) build_dynamic_bolt_into_fixed_nut_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 10) build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 11) build_cloth_unrolling_down_fixed_ramp_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
+    else if (args.example == 12) build_oscillating_cloth_layers_example(args, ref_mesh, state, X, pins, params, oscillating_layers_spec);
+    else if (args.example == 13) build_wrecking_ball_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
+    else if (args.example == 14) build_cloth_cylinder_drop_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14.\n";
         return 1;
     }
 
@@ -86,7 +85,7 @@ int main(int argc, char** argv) {
         };
     } else if (args.example == 4) {
         // TODO: avatar clothing pin updater
-    } else if (args.example == 13) {
+    } else if (args.example == 12) {
         pin_updater = [&oscillating_layers_spec](
                           std::vector<Pin>& p, double t) {
             update_oscillating_cloth_layer_pins(

@@ -41,7 +41,7 @@ std::filesystem::path wrecking_ball_asset_directory(
             return candidate;
     }
     throw std::runtime_error(
-        "Example 14 could not find link.obj and ball.obj. Run from the "
+        "Example 13 could not find link.obj and ball.obj. Run from the "
         "repository root or pass --datadir example_obj (or the "
         "wrecking_ball asset directory).");
 }
@@ -105,7 +105,7 @@ int append_rigid_cube(
 
 // Replaces create_rigid_body's repository-wide equal-vertex mass-property
 // approximation for one already appended, connected closed body. Rigid IPC
-// integrates mass properties over the enclosed volume, so Example 14 applies
+// integrates mass properties over the enclosed volume, so Example 13 applies
 // this local correction without changing the behavior of any existing example.
 void use_closed_volume_rigid_mass_properties(
     const int rigid_body, const std::size_t triangle_begin,
@@ -1113,96 +1113,10 @@ void build_twenty_rigid_polygon_static_stack_example(
 
 
 // ---------------------------------------------------------------------------
-// Example 8: fifty small rigid polygonal prisms falling onto a
-// four-corner-pinned rectangular cloth
-// ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 8 --num_frames 200 --substeps 10 --max_substep_iters 20 --fixed_iters --outdir fifty_polygons_on_pinned_cloth_output --format obj
-void build_fifty_rigid_polygons_drop_on_pinned_cloth_example(
-    const IPCArgs3D& args, RefMesh& ref_mesh,
-    DeformedState& state, std::vector<Vec2>& X,
-    std::vector<Pin>& pins, SimParams& params) {
-    clear_model(ref_mesh, state, X, pins);
-
-    params.gravity = Vec3(args.gx, args.gy, args.gz);
-    params.d_hat = args.d_hat;
-    params.k_barrier = args.k_barrier;
-    params.k_sdf = 0.0;
-    params.sdf_planes.clear();
-    params.sdf_cylinders.clear();
-    params.sdf_spheres.clear();
-    params.use_ccd_guess = false;
-    params.use_verlet_guess = false;
-    params.use_translation_guess = false;
-    params.use_ogc = false;
-    params.use_ogc_solver = false;
-
-    // build_square_mesh places its grid in the world x-z plane. Using unequal
-    // width and depth makes this a rectangular cloth centered at the origin.
-    constexpr int cloth_nx = 100;
-    constexpr int cloth_nz = 100;
-    constexpr double cloth_width = 4.0;
-    constexpr double cloth_depth = 4.0;
-    constexpr double cloth_height = 1.2;
-    const Vec3 cloth_origin(
-        -0.5 * cloth_width, cloth_height, -0.5 * cloth_depth);
-    const int cloth_base = build_square_mesh(
-        ref_mesh, state, X, cloth_nx, cloth_nz,
-        cloth_width, cloth_depth, cloth_origin);
-    state.velocities.assign(
-        state.deformed_positions.size(), Vec3::Zero());
-
-    const auto cloth_node = [cloth_base](int i, int j) {
-        return cloth_base + j * (cloth_nx + 1) + i;
-    };
-    append_pin(pins, cloth_node(0, 0), state.deformed_positions);
-    append_pin(pins, cloth_node(cloth_nx, 0), state.deformed_positions);
-    append_pin(pins, cloth_node(0, cloth_nz), state.deformed_positions);
-    append_pin(pins, cloth_node(cloth_nx, cloth_nz),state.deformed_positions);
-
-    // The polygon helper extrudes along material z. A -90-degree rotation
-    // about x turns that extrusion into the world y direction, so every prism
-    // lands flat on the horizontal cloth. A world-y yaw gives each footprint
-    // a different in-plane orientation without tilting it.
-    const double half_angle = 0.25 * kPi;
-    const Vec4 flat_orientation(
-        std::cos(half_angle), -std::sin(half_angle), 0.0, 0.0);
-
-    constexpr int polygon_count = 50;
-    constexpr int columns = 10;
-    constexpr double radius = 0.10;
-    const double density = params.rigid_density;
-    constexpr double thickness = 0.06;
-
-    for (int polygon = 0; polygon < polygon_count; ++polygon) {
-        const int row = polygon / columns;
-        const int column = polygon % columns;
-        const double yaw = polygon * kPi / 17.0;
-        const Vec4 yaw_orientation(
-            std::cos(0.5 * yaw), 0.0,
-            std::sin(0.5 * yaw), 0.0);
-        const Vec4 orientation = quaternion_normalize(
-            quaternion_multiply(yaw_orientation, flat_orientation));
-        const Vec3 center(
-            (column - 4.5) * 0.34,
-            2.00 + 0.06 * ((column + 2 * row) % 5),
-            (row - 2) * 0.34);
-
-        // Use every regular prism from a triangle through a dodecagon five
-        // times. The 0.34 spacing leaves a gap between radius-0.10 bodies.
-        append_rigid_polygon(
-            3 + polygon % 10, state, ref_mesh, center,
-            radius, density, thickness,
-            Vec3::Zero(), orientation, Vec3::Zero());
-    }
-
-    ref_mesh.build_deformable_nodes();
-}
-
-// ---------------------------------------------------------------------------
-// Example 9: Bunny-solid / Spot-solid / rigid-cube / rigid-gear cycles,
+// Example 8: Bunny-solid / Spot-solid / rigid-cube / rigid-gear cycles,
 // repeated twice in one vertical stack above a pinned cloth
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 9 --datadir example_obj --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 600 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_output --format obj
+// command line: ./build/3D_sim --example 8 --datadir example_obj --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 600 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_output --format obj
 void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1334,9 +1248,9 @@ void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
 }
 
 // ---------------------------------------------------------------------------
-// Example 10: a dynamic threaded bolt falling into a fixed threaded nut
+// Example 9: a dynamic threaded bolt falling into a fixed threaded nut
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 10 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj
+// command line: ./build/3D_sim --example 9 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj
 void build_dynamic_bolt_into_fixed_nut_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1431,14 +1345,14 @@ void build_dynamic_bolt_into_fixed_nut_example(
 }
 
 // ---------------------------------------------------------------------------
-// Example 11: four Bunny / Spot / cube / gear rows, each with one elevated
+// Example 10: four Bunny / Spot / cube / gear rows, each with one elevated
 // object above another, falling onto a pinned cloth
 // ---------------------------------------------------------------------------
 // Smaller substep/iteration budgets can suppress the cubes' bounce.
 /* command line:
 OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
 ./build/3D_sim \
-  --example 11 --num_frames 200 --fps 30 \
+  --example 10 --num_frames 200 --fps 30 \
   --substeps 15 --max_substep_iters 25 --fixed_iters \
   --E 1.25e9 --nu 0.25 --thickness 0.001 \
   --solid_E 1.25e5 --solid_nu 0.25 \
@@ -1448,7 +1362,7 @@ OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --use_parallel true \
   --use_basic_experimental true --use_simd true \
   --write_substeps false --format obj \
-  --outdir outputs/example11_general_v2 \
+  --outdir outputs/example10_general_v2 \
   --use_colored_ccd_guess true --colored_ccd_guess_iters 10
 */
 void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
@@ -1638,9 +1552,9 @@ void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
 }
 
 // ---------------------------------------------------------------------------
-// Example 12: a pinned cloth roll unrolling down an SDF ramp
+// Example 11: a pinned cloth roll unrolling down an SDF ramp
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 12 --num_frames 200 --substeps 20 --max_substep_iters 80 --fixed_iters --kB 0.0025 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --outdir rolled_cloth_on_steep_ramp_output_new --format obj
+// command line: ./build/3D_sim --example 11 --num_frames 200 --substeps 20 --max_substep_iters 80 --fixed_iters --kB 0.0025 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --outdir rolled_cloth_on_steep_ramp_output_new --format obj
 // the drift direction switches sharply between 0.00225 and 0.0025
 void build_cloth_unrolling_down_fixed_ramp_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
@@ -1885,9 +1799,9 @@ void build_cloth_unrolling_down_fixed_ramp_example(
 }
 
 // ---------------------------------------------------------------------------
-// Example 13: three stacked cloth layers between fixed and oscillating edges
+// Example 12: three stacked cloth layers between fixed and oscillating edges
 // ---------------------------------------------------------------------------
-// Command line:  OMP_NUM_THREADS=10 OMP_DYNAMIC=FALSE ./build/3D_sim --example 13 --num_frames 200 --substeps 30 --max_substep_iters 100 --fixed_iters --friction_coefficient 0.0 --friction_velocity_epsilon 0.01 --outdir oscillating_cloth_layers_output --format geo --kB 0.01 --osc_amplitude 0.01 --osc_frequency 6.0 --osc_length 1.0 --gy 0
+// Command line:  OMP_NUM_THREADS=10 OMP_DYNAMIC=FALSE ./build/3D_sim --example 12 --num_frames 200 --substeps 30 --max_substep_iters 100 --fixed_iters --friction_coefficient 0.0 --friction_velocity_epsilon 0.01 --outdir oscillating_cloth_layers_output --format geo --kB 0.01 --osc_amplitude 0.01 --osc_frequency 6.0 --osc_length 1.0 --gy 0
 void build_oscillating_cloth_layers_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1897,24 +1811,24 @@ void build_oscillating_cloth_layers_example(
 
     if (args.osc_nx <= 0 || args.osc_nz <= 0) {
         throw std::invalid_argument(
-            "example 13 requires osc_nx and osc_nz to be positive");
+            "example 12 requires osc_nx and osc_nz to be positive");
     }
     if (!std::isfinite(args.osc_length) || args.osc_length <= 0.0
         || !std::isfinite(args.osc_width) || args.osc_width <= 0.0) {
         throw std::invalid_argument(
-            "example 13 requires positive finite cloth dimensions");
+            "example 12 requires positive finite cloth dimensions");
     }
     if (!std::isfinite(args.osc_layer_gap) || args.osc_layer_gap <= 0.0) {
         throw std::invalid_argument(
-            "example 13 requires a positive finite osc_layer_gap");
+            "example 12 requires a positive finite osc_layer_gap");
     }
     if (!std::isfinite(args.osc_amplitude) || args.osc_amplitude < 0.0) {
         throw std::invalid_argument(
-            "example 13 requires a nonnegative finite osc_amplitude");
+            "example 12 requires a nonnegative finite osc_amplitude");
     }
     if (!std::isfinite(args.osc_frequency) || args.osc_frequency < 0.0) {
         throw std::invalid_argument(
-            "example 13 requires a nonnegative finite osc_frequency");
+            "example 12 requires a nonnegative finite osc_frequency");
     }
 
     params.gravity = Vec3(args.gx, args.gy, args.gz);
@@ -1938,7 +1852,7 @@ void build_oscillating_cloth_layers_example(
     }
     if (params.d_hat > 0.0 && args.osc_layer_gap <= params.d_hat) {
         throw std::invalid_argument(
-            "example 13 requires osc_layer_gap > the effective d_hat");
+            "example 12 requires osc_layer_gap > the effective d_hat");
     }
 
     spec = OscillatingClothLayersSpec{};
@@ -2004,9 +1918,9 @@ void update_oscillating_cloth_layer_pins(
 }
 
 // ---------------------------------------------------------------------------
-// Example 14: rigid IPC Figure 8 wrecking ball and 560-cube wall
+// Example 13: rigid IPC Figure 8 wrecking ball and 560-cube wall
 // ---------------------------------------------------------------------------
-// Command line: OMP_NUM_THREADS=10 OMP_DYNAMIC=FALSE ./build/3D_sim --example 14 --num_frames 200 --substeps 30 --max_substep_iters 200 --fixed_iters --d_hat 0.001 --k_barrier 1e9 --k_sdf 1e8 --eps_sdf 0.002 --friction_coefficient 0.1 --outdir wrecking_ball_tuned_output --format geo
+// Command line: OMP_NUM_THREADS=10 OMP_DYNAMIC=FALSE ./build/3D_sim --example 13 --num_frames 200 --substeps 30 --max_substep_iters 200 --fixed_iters --d_hat 0.001 --k_barrier 1e9 --k_sdf 1e8 --eps_sdf 0.002 --friction_coefficient 0.1 --outdir wrecking_ball_tuned_output --format geo
 void build_wrecking_ball_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -2194,7 +2108,7 @@ void build_wrecking_ball_example(
 }
 
 // ---------------------------------------------------------------------------
-// Example 15: separated cloth sheets falling onto a long horizontal cylinder
+// Example 14: separated cloth sheets falling onto a long horizontal cylinder
 // ---------------------------------------------------------------------------
 void build_cloth_cylinder_drop_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
@@ -2204,7 +2118,7 @@ void build_cloth_cylinder_drop_example(
     if (args.drop_stack_count < 1 || args.drop_cloth_nx < 1
         || args.drop_cloth_ny < 1 || args.cyl_nu < 3 || args.cyl_cap_rings < 1) {
         throw std::invalid_argument(
-            "example 15 requires positive cloth count and grid subdivisions, "
+            "example 14 requires positive cloth count and grid subdivisions, "
             "cyl_cap_rings >= 1, and cyl_nu >= 3");
     }
     const std::size_t sheets = static_cast<std::size_t>(args.drop_stack_count);
@@ -2213,7 +2127,7 @@ void build_cloth_cylinder_drop_example(
     const std::size_t index_limit = static_cast<std::size_t>(std::numeric_limits<int>::max());
     if (nx + 1 > index_limit / (ny + 1) / sheets
         || nx > index_limit / 6 / ny / sheets) {
-        throw std::invalid_argument("example 15 cloth stack exceeds mesh index limits");
+        throw std::invalid_argument("example 14 cloth stack exceeds mesh index limits");
     }
     const std::size_t cloth_vertices = sheets * (nx + 1) * (ny + 1);
     const std::size_t cloth_indices = sheets * 6 * nx * ny;
@@ -2222,30 +2136,30 @@ void build_cloth_cylinder_drop_example(
                                args.cyl_radius, args.cyl_length}) {
         if (!std::isfinite(length) || length <= 0.0) {
             throw std::invalid_argument(
-                "example 15 requires positive finite cloth dimensions, "
+                "example 14 requires positive finite cloth dimensions, "
                 "drop_spacing, ground size and cell size, cylinder radius and length");
         }
     }
     if (!std::isfinite(args.k_sdf) || args.k_sdf < 0.0
         || !std::isfinite(args.cyl_sdf_padding) || args.cyl_sdf_padding < 0.0) {
         throw std::invalid_argument(
-            "example 15 requires nonnegative finite k_sdf and cyl_sdf_padding");
+            "example 14 requires nonnegative finite k_sdf and cyl_sdf_padding");
     }
     if (!std::isfinite(params.d_hat) || params.d_hat >= args.drop_spacing) {
         throw std::invalid_argument(
-            "example 15 requires a finite d_hat < drop_spacing");
+            "example 14 requires a finite d_hat < drop_spacing");
     }
     const double collision_radius = args.cyl_radius + args.cyl_sdf_padding;
     const Vec3 cylinder_center(args.cyl_cx, args.cyl_cy, args.cyl_cz);
     if (!cylinder_center.allFinite() || !std::isfinite(args.drop_first_y)
         || !std::isfinite(args.drop_cx) || !std::isfinite(args.drop_cz)) {
         throw std::invalid_argument(
-            "example 15 requires finite cylinder and cloth-stack coordinates");
+            "example 14 requires finite cylinder and cloth-stack coordinates");
     }
     if (args.drop_first_y <= std::max(0.0, args.cyl_cy + collision_radius)
                                 + std::max(0.0, params.eps_sdf)) {
         throw std::invalid_argument(
-            "example 15 requires drop_first_y above the ground and cylinder "
+            "example 14 requires drop_first_y above the ground and cylinder "
             "padded top, with eps_sdf clearance");
     }
 
@@ -2254,7 +2168,7 @@ void build_cloth_cylinder_drop_example(
     const double ground_cells = std::ceil(args.cyl_ground_size / args.cyl_ground_cell_size);
     if (!std::isfinite(ground_cells)
         || ground_cells >= std::sqrt(static_cast<double>(std::numeric_limits<int>::max())) - 1.0) {
-        throw std::invalid_argument("example 15 ground tessellation exceeds mesh index limits");
+        throw std::invalid_argument("example 14 ground tessellation exceeds mesh index limits");
     }
     const int ground_n = std::max(1, static_cast<int>(ground_cells));
     clear_model(ref_mesh, state, X, pins);
