@@ -1,6 +1,8 @@
 #include "barrier_energy.h"
 #include "rigid_body_ipc.h"
 
+#include <boost/multiprecision/cpp_int.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -199,6 +201,7 @@ std::array<double, 4> segment_segment_contact_weights(
     const SegmentSegmentDistanceResult dr = precomputed_dr
             ? *precomputed_dr
             : segment_segment_distance(x1, x2, x3, x4, eps);
+    if (dr.robust) return dr.weights;
     const SegmentSegmentRegion region = dr.region == SegmentSegmentRegion::ParallelSegments
             ? resolve_parallel_segment_region(dr.s, dr.t)
             : dr.region;
@@ -672,6 +675,89 @@ Mat33 node_triangle_barrier_self_hessian(const Vec3& x, const Vec3& x1, const Ve
 //  Segment--segment barrier
 // ====================================================================
 
+// Rare ill-conditioned contacts use the same exact active feature as the
+// distance query. Differentiate q = 1/2 ||c + s*a - t*b||^2 after minimizing
+// over its free segment parameters. The Schur complement removes those
+// parameters without constructing/subtracting world-space closest points.
+// Keeping Hq - grad(d)*grad(d)^T exact avoids catastrophic cancellation when
+// dividing this curvature term by a machine-scale gap. Normal contacts retain
+// the existing fast derivative kernels below; this is not a PSD approximation.
+static Mat33 robust_segment_segment_barrier_cross_hessian(
+        const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+        const SegmentSegmentDistanceResult& dr, int p, int q,
+        double bp, double bpp) {
+    using Rational = boost::multiprecision::cpp_rational;
+    using ExactVector = std::array<Rational, 3>;
+    ExactVector a, b, c;
+    for (int k = 0; k < 3; ++k) {
+        // Convert endpoints before subtraction, not rounded edge vectors.
+        a[k] = Rational(x2[k]) - Rational(x1[k]);
+        b[k] = Rational(x4[k]) - Rational(x3[k]);
+        c[k] = Rational(x1[k]) - Rational(x3[k]);
+    }
+    const auto dot = [](const ExactVector& u, const ExactVector& v) -> Rational {
+        return u[0]*v[0] + u[1]*v[1] + u[2]*v[2];
+    };
+    const Rational A = dot(a, a), B = dot(a, b), C = dot(b, b);
+    const Rational D = dot(a, c), E = dot(b, c);
+    Rational s = 0, t = 0;
+    bool free_s = false, free_t = false;
+    switch (dr.active_region) {
+        case SegmentSegmentRegion::Interior: {
+            const Rational determinant = A*C - B*B;
+            s = (B*E - C*D) / determinant;
+            t = (A*E - B*D) / determinant;
+            free_s = free_t = true;
+            break;
+        }
+        case SegmentSegmentRegion::Edge_s0:
+            t = E/C; free_t = true; break;
+        case SegmentSegmentRegion::Edge_s1:
+            s = 1; t = (E+B)/C; free_t = true; break;
+        case SegmentSegmentRegion::Edge_t0:
+            s = -D/A; free_s = true; break;
+        case SegmentSegmentRegion::Edge_t1:
+            t = 1; s = (B-D)/A; free_s = true; break;
+        case SegmentSegmentRegion::Corner_s0t0: break;
+        case SegmentSegmentRegion::Corner_s0t1: t = 1; break;
+        case SegmentSegmentRegion::Corner_s1t0: s = 1; break;
+        case SegmentSegmentRegion::Corner_s1t1: s = t = 1; break;
+        case SegmentSegmentRegion::ParallelSegments:
+            throw std::logic_error("robust segment contact has no active finite feature");
+    }
+    ExactVector residual;
+    for (int k = 0; k < 3; ++k) residual[k] = c[k] + s*a[k] - t*b[k];
+    const Rational distance_squared = dot(residual, residual);
+    if (distance_squared == 0)
+        throw std::runtime_error("segment_segment_barrier_cross_hessian: distance must be nonzero.");
+    const Rational weights[4] = {1-s, s, t-1, -t};
+    const int ds[4] = {-1, 1, 0, 0};
+    const int dt[4] = {0, 0, 1, -1};
+    const Rational weight_product = weights[p] * weights[q];
+    Mat33 H;
+    for (int k = 0; k < 3; ++k) {
+        for (int l = 0; l < 3; ++l) {
+            const Rational ps = weights[p]*a[k] + ds[p]*residual[k];
+            const Rational qs = weights[q]*a[l] + ds[q]*residual[l];
+            const Rational pt = -weights[p]*b[k] + dt[p]*residual[k];
+            const Rational qt = -weights[q]*b[l] + dt[q]*residual[l];
+            Rational hq = k == l ? weight_product : Rational(0);
+            if (free_s && free_t) {
+                hq -= (C*ps*qs + B*(ps*qt + pt*qs) + A*pt*qt)/(A*C-B*B);
+            } else if (free_s) {
+                hq -= ps*qs/A;
+            } else if (free_t) {
+                hq -= pt*qt/C;
+            }
+            const Rational normal_term = weight_product * residual[k]*residual[l]/distance_squared;
+            const Rational curvature = hq - normal_term;
+            H(k,l) = bpp * normal_term.convert_to<double>()
+                + (bp/dr.distance) * curvature.convert_to<double>();
+        }
+    }
+    return H;
+}
+
 double segment_segment_barrier(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, double eps){
     const auto dr = segment_segment_distance(x1, x2, x3, x4, eps);
     return scalar_barrier(dr.distance, d_hat);
@@ -693,7 +779,13 @@ Vec3 segment_segment_barrier_gradient(const Vec3& x1, const Vec3& x2, const Vec3
     if (bp == 0.0) return g;
     if (delta == 0.0) throw std::runtime_error("segment_segment_barrier_gradient: distance must be nonzero.");
 
-    const Vec3 r = dr.closest_point_1 - dr.closest_point_2;
+    if (dr.robust) {
+        const double coefficient = bp * dr.weights[dof];
+        for (int k = 0; k < 3; ++k) g[k] = coefficient * (dr.separation[k] / delta);
+        return g;
+    }
+
+    const Vec3& r = dr.separation;
     double u[3];
     for (int k = 0; k < 3; ++k) u[k] = r(k) / delta;
 
@@ -704,7 +796,8 @@ Vec3 segment_segment_barrier_gradient(const Vec3& x1, const Vec3& x2, const Vec3
     // mu[p] such that grad_p = mu[p] * u[k]
     double mu[4] = {0.0, 0.0, 0.0, 0.0};
 
-    const SegmentSegmentRegion region =dr.region == SegmentSegmentRegion::ParallelSegments? resolve_parallel_segment_region(s, t): dr.region;
+    const SegmentSegmentRegion region = dr.region == SegmentSegmentRegion::ParallelSegments
+        ? resolve_parallel_segment_region(s, t) : dr.region;
 
     switch (region) {
 
@@ -776,6 +869,10 @@ Mat33 segment_segment_barrier_cross_hessian(
 
     if (bp == 0.0 && bpp == 0.0) return H;
     if (delta == 0.0) throw std::runtime_error("segment_segment_barrier_cross_hessian: distance must be nonzero.");
+
+    if (dr.robust)
+        return robust_segment_segment_barrier_cross_hessian(
+            x1, x2, x3, x4, dr, row_dof, col_dof, bp, bpp);
 
     const Vec3* Y[4] = {&x1, &x2, &x3, &x4};
     const int p = row_dof;

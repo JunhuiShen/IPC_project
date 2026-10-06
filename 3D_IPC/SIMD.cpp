@@ -1286,13 +1286,24 @@ static void mesh_contact_derivatives_tile_impl(const MeshContactInput* inputs, s
                     evaluation, dt, eps_v);
             if (!evaluation.active) continue;
             const auto& dr = evaluation.dr;
+            if (dr.robust) {
+                // Rationally resolved geometry needs the matching scalar
+                // derivatives; packet feature formulas reconstruct the
+                // cancellation-sensitive closest-point problem in double.
+                const auto value = segment_segment_barrier_self_gradient_and_hessian(
+                    x[0], x[1], x[2], x[3], role, evaluation);
+                outputs[e].gradient = value.first;
+                outputs[e].hessian = value.second;
+                if (derivative_active) derivative_active[e] = 1;
+                continue;
+            }
             out.positions = x;
             out.active = true; out.delta = dr.distance;
             out.bp = evaluation.b_prime; out.bpp = evaluation.b_double_prime;
             const auto weights = friction != 0.0 && (*frozen)[e].active
                 ? (*frozen)[e].weights
                 : segment_segment_contact_weights(x[0],x[1],x[2],x[3],1e-12,&dr);
-            out.separation = dr.closest_point_1 - dr.closest_point_2;
+            out.separation = dr.separation;
             out.gradient_scale = out.bp * weights[role];
             out.gradient_vector = out.separation;
             auto region = dr.region;

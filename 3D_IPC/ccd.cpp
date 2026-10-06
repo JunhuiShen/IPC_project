@@ -19,6 +19,8 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 // -----------------------------------------------------------------------------
@@ -31,6 +33,17 @@ namespace exact_linear {
 using Rational = boost::multiprecision::cpp_rational;
 using Point = std::array<Rational, 3>;
 using Points = std::array<Point, 4>;
+
+Points from_positions(const std::array<Vec3, 4>& positions) {
+    Points result;
+    for (int i = 0; i < 4; ++i) {
+        if (!positions[i].allFinite())
+            throw std::invalid_argument("exact contact query: positions must be finite");
+        for (int axis = 0; axis < 3; ++axis)
+            result[i][axis] = Rational(positions[i][axis]);
+    }
+    return result;
+}
 
 Point add(const Point& a, const Point& b) {
     return {{a[0] + b[0], a[1] + b[1], a[2] + b[2]}};
@@ -91,11 +104,6 @@ Rational point_triangle_distance_squared(const Points& p) {
 }
 
 Rational segment_segment_distance_squared(const Points& p) {
-    Rational best = std::min({point_segment_distance_squared(p[0], p[2], p[3]),
-                             point_segment_distance_squared(p[1], p[2], p[3]),
-                             point_segment_distance_squared(p[2], p[0], p[1]),
-                             point_segment_distance_squared(p[3], p[0], p[1])});
-    if (best == 0) return best;
     const Point a = subtract(p[1], p[0]), b = subtract(p[3], p[2]);
     const Point offset = subtract(p[0], p[2]);
     const Rational aa = dot(a, a), ab = dot(a, b), bb = dot(b, b);
@@ -105,13 +113,235 @@ Rational segment_segment_distance_squared(const Points& p) {
         const Rational alpha = ab * br - bb * ar;
         const Rational beta = aa * br - ab * ar;
         if (alpha >= 0 && alpha <= denominator && beta >= 0 && beta <= denominator) {
-            const Point delta = subtract(add(offset, multiply(a, alpha / denominator)),
-                                         multiply(b, beta / denominator));
-            const Rational interior_distance = dot(delta, delta);
-            best = std::min(best, interior_distance);
+            // The unconstrained line minimum is inside both finite segments,
+            // including endpoint ties, so no boundary can improve it. Keep
+            // dyadic products until this single rational division instead of
+            // constructing two rational closest-point parameters/vectors.
+            const Rational height = dot(offset, cross(a, b));
+            return height * height / denominator;
         }
     }
+    // Parallel/point edges, or an infeasible line minimum: the constrained
+    // minimum lies on a boundary of the (s,t) parameter square.
+    return std::min({point_segment_distance_squared(p[0], p[2], p[3]),
+                     point_segment_distance_squared(p[1], p[2], p[3]),
+                     point_segment_distance_squared(p[2], p[0], p[1]),
+                     point_segment_distance_squared(p[3], p[0], p[1])});
+}
+
+// Exact contact predicates need comparisons, not normalized rationals. Put
+// every original binary64 coordinate and distance threshold on one dyadic
+// grid. Its common squared unit cancels from all distance comparisons below.
+using Integer = boost::multiprecision::cpp_int;
+using IntegerPoint = std::array<Integer, 3>;
+using IntegerPoints = std::array<IntegerPoint, 4>;
+
+struct IntegerDistanceSquared {
+    Integer numerator;
+    Integer denominator; // Strictly positive; deliberately not reduced.
+};
+
+int contact_integer_unit_exponent(const std::array<Vec3, 4>& start,
+    const std::array<Vec3, 4>& end, double floor) {
+    static_assert(std::numeric_limits<double>::radix == 2
+        && std::numeric_limits<double>::digits == 53,
+        "exact dyadic contact comparison requires binary64 doubles");
+    int exponent;
+    std::frexp(floor, &exponent); // The caller already validated floor > 0.
+    int unit_exponent = exponent - 53;
+    for (int configuration = 0; configuration < 2; ++configuration) {
+        const auto& positions = configuration == 0 ? start : end;
+        for (const Vec3& point : positions) {
+            if (!point.allFinite())
+                throw std::invalid_argument("exact contact query: positions must be finite");
+            for (int axis = 0; axis < 3; ++axis) {
+                if (point[axis] == 0.0) continue;
+                std::frexp(point[axis], &exponent);
+                unit_exponent = std::min(unit_exponent, exponent - 53);
+            }
+        }
+    }
+    return unit_exponent;
+}
+
+Integer contact_integer_from_double(double value, int unit_exponent) {
+    if (value == 0.0) return 0;
+    int exponent;
+    const double fraction = std::frexp(value, &exponent);
+    // frexp normalizes even subnormal inputs. Scaling its fraction by 2^53
+    // produces an exact signed integer of magnitude < 2^53, hence fits int64.
+    const std::int64_t mantissa = static_cast<std::int64_t>(std::ldexp(fraction, 53));
+    Integer result = mantissa < 0 ? -mantissa : mantissa;
+    assert(exponent - 53 >= unit_exponent);
+    result <<= static_cast<unsigned>(exponent - 53 - unit_exponent);
+    if (mantissa < 0) result = -result;
+    return result;
+}
+
+IntegerPoints contact_integer_positions(const std::array<Vec3, 4>& positions,
+    int unit_exponent) {
+    IntegerPoints result;
+    for (int i = 0; i < 4; ++i)
+        for (int axis = 0; axis < 3; ++axis)
+            result[i][axis] = contact_integer_from_double(positions[i][axis], unit_exponent);
+    return result;
+}
+
+IntegerPoint integer_subtract(const IntegerPoint& a, const IntegerPoint& b) {
+    return {{a[0] - b[0], a[1] - b[1], a[2] - b[2]}};
+}
+
+Integer integer_dot(const IntegerPoint& a, const IntegerPoint& b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+IntegerPoint integer_cross(const IntegerPoint& a, const IntegerPoint& b) {
+    return {{a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]}};
+}
+
+bool integer_distance_less(const IntegerDistanceSquared& a,
+    const IntegerDistanceSquared& b) {
+    assert(a.denominator > 0 && b.denominator > 0);
+    return a.numerator * b.denominator < b.numerator * a.denominator;
+}
+
+void integer_distance_min_assign(IntegerDistanceSquared& best,
+    IntegerDistanceSquared candidate) {
+    if (integer_distance_less(candidate, best)) best = std::move(candidate);
+}
+
+IntegerDistanceSquared integer_point_segment_distance_squared(
+    const IntegerPoint& p, const IntegerPoint& a, const IntegerPoint& b) {
+    const auto edge = integer_subtract(b, a), offset = integer_subtract(p, a);
+    const Integer length_squared = integer_dot(edge, edge);
+    const Integer projection = integer_dot(offset, edge);
+    if (length_squared == 0 || projection <= 0)
+        return {integer_dot(offset, offset), Integer(1)};
+    if (projection >= length_squared) {
+        const auto endpoint_offset = integer_subtract(p, b);
+        return {integer_dot(endpoint_offset, endpoint_offset), Integer(1)};
+    }
+    return {integer_dot(offset, offset) * length_squared - projection * projection,
+        length_squared};
+}
+
+IntegerDistanceSquared integer_point_triangle_distance_squared(const IntegerPoints& p) {
+    const auto edge1 = integer_subtract(p[2], p[1]);
+    const auto edge2 = integer_subtract(p[3], p[1]);
+    const auto offset = integer_subtract(p[0], p[1]);
+    const auto normal = integer_cross(edge1, edge2);
+    const Integer area_squared = integer_dot(normal, normal);
+    if (area_squared > 0) {
+        const Integer e11 = integer_dot(edge1, edge1), e12 = integer_dot(edge1, edge2);
+        const Integer e22 = integer_dot(edge2, edge2);
+        const Integer p1 = integer_dot(offset, edge1), p2 = integer_dot(offset, edge2);
+        const Integer u = e22 * p1 - e12 * p2, v = e11 * p2 - e12 * p1;
+        if (u >= 0 && v >= 0 && u + v <= area_squared) {
+            const Integer height = integer_dot(offset, normal);
+            return {height * height, area_squared};
+        }
+    }
+    auto best = integer_point_segment_distance_squared(p[0], p[1], p[2]);
+    integer_distance_min_assign(best, integer_point_segment_distance_squared(p[0], p[2], p[3]));
+    integer_distance_min_assign(best, integer_point_segment_distance_squared(p[0], p[3], p[1]));
     return best;
+}
+
+IntegerDistanceSquared integer_segment_segment_distance_squared(const IntegerPoints& p) {
+    const auto a = integer_subtract(p[1], p[0]), b = integer_subtract(p[3], p[2]);
+    const auto offset = integer_subtract(p[0], p[2]);
+    const Integer aa = integer_dot(a, a), ab = integer_dot(a, b), bb = integer_dot(b, b);
+    // This exact Gram determinant is nonnegative by Cauchy-Schwarz. A zero
+    // value includes parallel and collapsed edges, handled by boundaries.
+    const Integer denominator = aa * bb - ab * ab;
+    if (denominator > 0) {
+        const Integer ar = integer_dot(a, offset), br = integer_dot(b, offset);
+        const Integer alpha = ab * br - bb * ar, beta = aa * br - ab * ar;
+        if (alpha >= 0 && alpha <= denominator && beta >= 0 && beta <= denominator) {
+            const Integer height = integer_dot(offset, integer_cross(a, b));
+            return {height * height, denominator};
+        }
+    }
+    auto best = integer_point_segment_distance_squared(p[0], p[2], p[3]);
+    integer_distance_min_assign(best, integer_point_segment_distance_squared(p[1], p[2], p[3]));
+    integer_distance_min_assign(best, integer_point_segment_distance_squared(p[2], p[0], p[1]));
+    integer_distance_min_assign(best, integer_point_segment_distance_squared(p[3], p[0], p[1]));
+    return best;
+}
+
+Integer integer_determinant(const IntegerPoints& p) {
+    return integer_dot(integer_cross(integer_subtract(p[1], p[0]),
+        integer_subtract(p[2], p[0])), integer_subtract(p[3], p[0]));
+}
+
+// Returns false only when the path is identically coplanar and therefore
+// requires the unchanged rational incidence-event enumeration. At most one
+// vertex changes; the public caller validates this before entering here.
+bool try_integer_step_result(const IntegerPoints& start, const IntegerPoints& end,
+    bool vertex_face, bool changed, const Integer& floor_squared,
+    const Integer& validation_squared, ExactContactStepResult& result) {
+    const auto start_squared = vertex_face
+        ? integer_point_triangle_distance_squared(start)
+        : integer_segment_segment_distance_squared(start);
+    if (start_squared.numerator == 0) {
+        result = ExactContactStepResult::InitialContact;
+        return true;
+    }
+    if (!changed) {
+        result = ExactContactStepResult::Safe;
+        return true;
+    }
+    const auto end_squared = vertex_face
+        ? integer_point_triangle_distance_squared(end)
+        : integer_segment_segment_distance_squared(end);
+    const IntegerDistanceSquared floor_distance = {floor_squared, Integer(1)};
+    const auto& minimum = integer_distance_less(start_squared, floor_distance)
+        ? start_squared : floor_distance;
+    if (integer_distance_less(end_squared, minimum)) {
+        result = ExactContactStepResult::Unsafe;
+        return true;
+    }
+
+    // For one moving vertex this exact determinant is affine in time. No
+    // finite NT/SS intersection is possible away from its coplanarity root.
+    const Integer intercept = integer_determinant(start);
+    Integer denominator = integer_determinant(end) - intercept;
+    if (denominator == 0) {
+        if (intercept == 0) return false;
+        result = ExactContactStepResult::Safe;
+        return true;
+    }
+    Integer numerator = -intercept;
+    if (denominator < 0) {
+        denominator = -denominator;
+        numerator = -numerator;
+    }
+    // Exclude t=0: the initial finite-primitive intersection was already
+    // checked exactly, independently of the future-event validation band.
+    if (numerator <= 0 || numerator > denominator) {
+        result = ExactContactStepResult::Safe;
+        return true;
+    }
+
+    // Evaluate the root N/Q without division: H_i=Q*start_i+N*(end_i-start_i).
+    // Distance(H)^2 is Q^2 times the squared distance in the original integer
+    // grid, so cross-multiplication retains exactly the rational predicate.
+    IntegerPoints event;
+    for (int i = 0; i < 4; ++i)
+        for (int axis = 0; axis < 3; ++axis)
+            event[i][axis] = denominator * start[i][axis]
+                + numerator * (end[i][axis] - start[i][axis]);
+    const auto event_squared = vertex_face
+        ? integer_point_triangle_distance_squared(event)
+        : integer_segment_segment_distance_squared(event);
+    const bool exact_membership = start_squared.numerator
+        <= validation_squared * start_squared.denominator;
+    const bool collision = exact_membership ? event_squared.numerator == 0
+        : event_squared.numerator <= event_squared.denominator
+            * denominator * denominator * validation_squared;
+    result = collision ? ExactContactStepResult::Unsafe : ExactContactStepResult::Safe;
+    return true;
 }
 
 Points evaluate(const Points& positions, const Points& motion, const Rational& time) {
@@ -132,35 +362,28 @@ CCDResult contact_result(const Rational& time) {
     return {true, rounded};
 }
 
-CCDResult resolve_exact(const std::array<Vec3, 4>& positions,
-                        const std::array<Vec3, 4>& motion, bool vertex_face) {
-    Points x, dx;
+CCDResult resolve_exact_points(const Points& x, const Points& dx, bool vertex_face,
+                               const Rational& initial_distance_squared) {
     int moving_vertices = 0;
-    for (int i = 0; i < 4; ++i) {
-        assert(positions[i].allFinite() && motion[i].allFinite());
-        moving_vertices += motion[i].cwiseAbs().maxCoeff() != 0.0;
-        for (int axis = 0; axis < 3; ++axis) {
-            // The rational double constructor preserves every input bit. Use
-            // original inputs so local-frame subtraction cannot hide error.
-            x[i][axis] = Rational(positions[i][axis]);
-            dx[i][axis] = Rational(motion[i][axis]);
-        }
-    }
+    for (int i = 0; i < 4; ++i) moving_vertices += dx[i] != Point{};
     assert(moving_vertices <= 1 || (!vertex_face && dx[0] == dx[1]
         && dx[2] == Point{} && dx[3] == Point{}));
 
-    // This is exact-contact CCD with a fixed world-space tolerance for finite
-    // primitive validation at initial time and analytic candidate events.
-    // It is not a sweep of offset surfaces: no time padding or subdivision is
-    // performed, and membership never uses a condition-dependent tolerance.
-    static const Rational separation_squared = Rational(1.0e-10) * Rational(1.0e-10);
+    // Only a genuine initial intersection blocks all motion. A positive gap
+    // must not be converted into t=0 by the future-event validation tolerance.
+    if (initial_distance_squared == 0) return {true, 0.0};
+    if (moving_vertices == 0) return {};
+    static const Rational validation_squared = Rational(1.0e-10) * Rational(1.0e-10);
+    // Queries already inside that band need exact membership at every event:
+    // otherwise an unrelated near-zero coplanar root can still cause a freeze.
+    // Far-start queries retain the existing conservative boundary validation.
+    const Rational separation_squared = initial_distance_squared <= validation_squared
+        ? Rational(0) : validation_squared;
     const auto intersects = [&](const Rational& time) {
         const Points p = evaluate(x, dx, time);
         return (vertex_face ? point_triangle_distance_squared(p)
                             : segment_segment_distance_squared(p)) <= separation_squared;
     };
-    if (intersects(Rational(0))) return {true, 0.0};
-    if (moving_vertices == 0) return {};
 
     // Under the supported motions the tetrahedron determinant is affine.
     // Exact evaluation at 0 and 1 recovers its coefficients without loss.
@@ -168,7 +391,7 @@ CCDResult resolve_exact(const std::array<Vec3, 4>& positions,
     const Rational slope = determinant(evaluate(x, dx, Rational(1))) - intercept;
     if (slope != 0) {
         const Rational time = -intercept / slope;
-        return time >= 0 && time <= 1 && intersects(time) ? contact_result(time) : CCDResult{};
+        return time > 0 && time <= 1 && intersects(time) ? contact_result(time) : CCDResult{};
     }
     if (intercept != 0) return {};
 
@@ -205,6 +428,40 @@ CCDResult resolve_exact(const std::array<Vec3, 4>& positions,
         if (intersects(time)) return contact_result(time);
     }
     return {};
+}
+
+CCDResult resolve_exact_points(const Points& x, const Points& dx, bool vertex_face) {
+    const Rational initial_distance_squared = vertex_face
+        ? point_triangle_distance_squared(x) : segment_segment_distance_squared(x);
+    return resolve_exact_points(x, dx, vertex_face, initial_distance_squared);
+}
+
+ExactContactStepResult step_result(const Points& start, const Points& end,
+    const Points& motion, bool vertex_face, const Rational& start_squared,
+    const Rational& minimum_squared) {
+    if (start_squared == 0) return ExactContactStepResult::InitialContact;
+    if (std::all_of(motion.begin(), motion.end(),
+            [](const Point& dx) { return dx == Point{}; }))
+        return ExactContactStepResult::Safe;
+    const Rational end_squared = vertex_face
+        ? point_triangle_distance_squared(end) : segment_segment_distance_squared(end);
+    if (end_squared < minimum_squared) return ExactContactStepResult::Unsafe;
+    return resolve_exact_points(start, motion, vertex_face, start_squared).collision
+        ? ExactContactStepResult::Unsafe : ExactContactStepResult::Safe;
+}
+
+CCDResult resolve_exact(const std::array<Vec3, 4>& positions,
+                        const std::array<Vec3, 4>& motion, bool vertex_face) {
+    Points x, dx;
+    for (int i = 0; i < 4; ++i) {
+        assert(positions[i].allFinite() && motion[i].allFinite());
+        for (int axis = 0; axis < 3; ++axis) {
+            // Convert original inputs before subtracting/scaling anything.
+            x[i][axis] = Rational(positions[i][axis]);
+            dx[i][axis] = Rational(motion[i][axis]);
+        }
+    }
+    return resolve_exact_points(x, dx, vertex_face);
 }
 
 } // namespace exact_linear
@@ -1024,8 +1281,9 @@ CCDResult node_triangle(const Vec3& x, const Vec3& dx,
     LinearCCDGuard guard{false, q.validation_distance};
     const auto result = node_triangle_linear_ccd(q.x[0], q.dx[0], q.x[1], q.dx[1],
         q.x[2], q.dx[2], q.x[3], q.dx[3], eps, guard);
-    if (guard.uncertain && swept_hulls_separated(q, true, guard.separation)) return {};
-    return guard.uncertain ? exact_linear::resolve_exact(positions, motion, true) : result;
+    const bool needs_exact = guard.uncertain || (result.collision && result.t == 0.0);
+    if (needs_exact && swept_hulls_separated(q, true, guard.separation)) return {};
+    return needs_exact ? exact_linear::resolve_exact(positions, motion, true) : result;
 }
 
 CCDResult segment_segment(const Vec3& x1, const Vec3& dx1, const Vec3& x2,
@@ -1039,8 +1297,9 @@ CCDResult segment_segment(const Vec3& x1, const Vec3& dx1, const Vec3& x2,
     }
     LinearCCDGuard guard{false, q.validation_distance};
     const auto result = segment_segment_linear_ccd(q.x[0], q.dx[0], q.x[1], q.x[2], q.x[3], eps, guard);
-    if (guard.uncertain && swept_hulls_separated(q, false, guard.separation)) return {};
-    return guard.uncertain ? exact_linear::resolve_exact(positions, motion, false) : result;
+    const bool needs_exact = guard.uncertain || (result.collision && result.t == 0.0);
+    if (needs_exact && swept_hulls_separated(q, false, guard.separation)) return {};
+    return needs_exact ? exact_linear::resolve_exact(positions, motion, false) : result;
 }
 
 CCDResult translating_segment(const Vec3& x1, const Vec3& dx1, const Vec3& x2,
@@ -1055,8 +1314,9 @@ CCDResult translating_segment(const Vec3& x1, const Vec3& dx1, const Vec3& x2,
     }
     LinearCCDGuard guard{false, q.validation_distance};
     const auto result = translating_segment_linear_ccd(q.x[0], q.dx[0], q.x[1], q.dx[1], q.x[2], q.x[3], eps, guard);
-    if (guard.uncertain && swept_hulls_separated(q, false, guard.separation)) return {};
-    return guard.uncertain ? exact_linear::resolve_exact(positions, motion, false) : result;
+    const bool needs_exact = guard.uncertain || (result.collision && result.t == 0.0);
+    if (needs_exact && swept_hulls_separated(q, false, guard.separation)) return {};
+    return needs_exact ? exact_linear::resolve_exact(positions, motion, false) : result;
 }
 
 } // namespace linear_ccd_detail
@@ -1131,6 +1391,151 @@ CCDResult inclusion_ccd(const std::array<Vec3, 4>& x, const std::array<Vec3, 4>&
 }
 
 }  // namespace
+
+int compare_contact_distance_exact(const std::array<Vec3, 4>& positions,
+                                   bool vertex_face, double distance) {
+    if (!(distance >= 0.0) || !std::isfinite(distance))
+        throw std::invalid_argument("exact contact query: comparison distance must be finite and nonnegative");
+    const auto x = exact_linear::from_positions(positions);
+    const exact_linear::Rational distance_squared = vertex_face
+        ? exact_linear::point_triangle_distance_squared(x)
+        : exact_linear::segment_segment_distance_squared(x);
+    const exact_linear::Rational threshold = exact_linear::Rational(distance)
+        * exact_linear::Rational(distance);
+    return distance_squared < threshold ? -1 : (distance_squared > threshold ? 1 : 0);
+}
+
+bool contact_preserves_separation_exact(const std::array<Vec3, 4>& start,
+                                        const std::array<Vec3, 4>& end,
+                                        bool vertex_face, double floor) {
+    if (!(floor > 0.0) || !std::isfinite(floor))
+        throw std::invalid_argument("exact contact query: separation floor must be finite and positive");
+    const int unit_exponent = exact_linear::contact_integer_unit_exponent(start, end, floor);
+    const auto x = exact_linear::contact_integer_positions(start, unit_exponent);
+    const auto y = exact_linear::contact_integer_positions(end, unit_exponent);
+    const auto start_squared = vertex_face
+        ? exact_linear::integer_point_triangle_distance_squared(x)
+        : exact_linear::integer_segment_segment_distance_squared(x);
+    if (start_squared.numerator == 0) return false;
+    const auto end_squared = vertex_face
+        ? exact_linear::integer_point_triangle_distance_squared(y)
+        : exact_linear::integer_segment_segment_distance_squared(y);
+    const auto floor_integer = exact_linear::contact_integer_from_double(floor, unit_exponent);
+    const exact_linear::IntegerDistanceSquared floor_squared = {
+        floor_integer * floor_integer, exact_linear::Integer(1)};
+    const auto& minimum = exact_linear::integer_distance_less(start_squared, floor_squared)
+        ? start_squared : floor_squared;
+    return !exact_linear::integer_distance_less(end_squared, minimum);
+}
+
+CCDResult single_vertex_ccd_between_exact(const std::array<Vec3, 4>& start,
+                                          const std::array<Vec3, 4>& end,
+                                          bool vertex_face) {
+    const auto x = exact_linear::from_positions(start);
+    const auto y = exact_linear::from_positions(end);
+    exact_linear::Points motion;
+    int changed_vertices = 0;
+    for (int i = 0; i < 4; ++i) {
+        // A rounded `end-start` can represent a different segment from the
+        // actual stored endpoints. Subtract only after exact conversion.
+        motion[i] = exact_linear::subtract(y[i], x[i]);
+        changed_vertices += motion[i] != exact_linear::Point{};
+    }
+    if (changed_vertices > 1)
+        throw std::invalid_argument("exact endpoint CCD: at most one vertex may change");
+    return exact_linear::resolve_exact_points(x, motion, vertex_face);
+}
+
+ExactContactStepResult exact_contact_step_result(const std::array<Vec3, 4>& start,
+    const std::array<Vec3, 4>& end, bool vertex_face, double floor) {
+    if (!(floor > 0.0) || !std::isfinite(floor))
+        throw std::invalid_argument("exact contact query: separation floor must be finite and positive");
+    // Include the original binary64 validation constant in the shared unit,
+    // not a decimal approximation or a rounded product of two doubles.
+    constexpr double validation = 1.0e-10;
+    int validation_exponent;
+    std::frexp(validation, &validation_exponent);
+    const int unit_exponent = std::min(
+        exact_linear::contact_integer_unit_exponent(start, end, floor),
+        validation_exponent - 53);
+    const auto integer_start = exact_linear::contact_integer_positions(start, unit_exponent);
+    const auto integer_end = exact_linear::contact_integer_positions(end, unit_exponent);
+    int changed_vertices = 0;
+    for (int i = 0; i < 4; ++i)
+        changed_vertices += integer_start[i] != integer_end[i];
+    if (changed_vertices > 1)
+        throw std::invalid_argument("exact endpoint CCD: at most one vertex may change");
+    const auto integer_floor = exact_linear::contact_integer_from_double(floor, unit_exponent);
+    const auto integer_validation = exact_linear::contact_integer_from_double(validation, unit_exponent);
+    ExactContactStepResult result;
+    if (exact_linear::try_integer_step_result(integer_start, integer_end,
+            vertex_face, changed_vertices != 0, integer_floor * integer_floor,
+            integer_validation * integer_validation, result))
+        return result;
+
+    // Identically coplanar motion needs the additional incidence events.
+    // Keep its rational resolver, and every other public CCD API, unchanged.
+    const auto x = exact_linear::from_positions(start);
+    const auto y = exact_linear::from_positions(end);
+    exact_linear::Points motion;
+    for (int i = 0; i < 4; ++i)
+        motion[i] = exact_linear::subtract(y[i], x[i]);
+
+    // Only this coplanar fallback repeats the finite-feature solves using
+    // rationals; its event generation and membership decisions stay unchanged.
+    const exact_linear::Rational start_squared = vertex_face
+        ? exact_linear::point_triangle_distance_squared(x)
+        : exact_linear::segment_segment_distance_squared(x);
+    const exact_linear::Rational floor_squared = exact_linear::Rational(floor)
+        * exact_linear::Rational(floor);
+    return exact_linear::step_result(x, y, motion, vertex_face, start_squared,
+        std::min(start_squared, floor_squared));
+}
+
+struct PreparedExactContactStep::Impl {
+    exact_linear::Points start;
+    exact_linear::Rational start_squared;
+    exact_linear::Rational minimum_squared;
+    bool vertex_face;
+    int moving_dof;
+
+    Impl(const std::array<Vec3, 4>& positions, bool face, double floor, int dof)
+        : start(exact_linear::from_positions(positions)), vertex_face(face), moving_dof(dof) {
+        start_squared = vertex_face
+            ? exact_linear::point_triangle_distance_squared(start)
+            : exact_linear::segment_segment_distance_squared(start);
+        const exact_linear::Rational floor_squared = exact_linear::Rational(floor)
+            * exact_linear::Rational(floor);
+        minimum_squared = std::min(start_squared, floor_squared);
+    }
+};
+
+PreparedExactContactStep::PreparedExactContactStep(const std::array<Vec3, 4>& start,
+    bool vertex_face, double floor, int moving_dof) {
+    if (!(floor > 0.0) || !std::isfinite(floor))
+        throw std::invalid_argument("exact contact query: separation floor must be finite and positive");
+    if (moving_dof < 0 || moving_dof >= 4)
+        throw std::invalid_argument("prepared exact contact query: moving role must be in [0,3]");
+    impl_ = std::make_unique<Impl>(start, vertex_face, floor, moving_dof);
+}
+
+PreparedExactContactStep::~PreparedExactContactStep() = default;
+PreparedExactContactStep::PreparedExactContactStep(PreparedExactContactStep&&) noexcept = default;
+PreparedExactContactStep& PreparedExactContactStep::operator=(PreparedExactContactStep&&) noexcept = default;
+
+ExactContactStepResult PreparedExactContactStep::test(const Vec3& endpoint) const {
+    if (!impl_) throw std::logic_error("prepared exact contact query: moved-from context");
+    if (!endpoint.allFinite())
+        throw std::invalid_argument("exact contact query: positions must be finite");
+    auto end = impl_->start;
+    for (int axis = 0; axis < 3; ++axis)
+        end[impl_->moving_dof][axis] = exact_linear::Rational(endpoint[axis]);
+    exact_linear::Points motion{};
+    motion[impl_->moving_dof] = exact_linear::subtract(
+        end[impl_->moving_dof], impl_->start[impl_->moving_dof]);
+    return exact_linear::step_result(impl_->start, end, motion, impl_->vertex_face,
+        impl_->start_squared, impl_->minimum_squared);
+}
 
 // -----------------------------------------------------------------------------
 // TICCD-backed general (all-vertices-may-move) entry points (public).

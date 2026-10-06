@@ -1336,7 +1336,11 @@ TEST(BarrierEnergy, ParallelSegmentsActiveFeatureHessian){
     };
 
     const auto dr = segment_segment_distance(y[0], y[1], y[2], y[3], eps);
-    ASSERT_EQ(dr.region, SegmentSegmentRegion::ParallelSegments);
+    // The edges are not actually parallel. A large legacy eps used to force
+    // that label; the robust finite-segment solve preserves the real feature.
+    ASSERT_TRUE(dr.robust);
+    ASSERT_EQ(dr.region, SegmentSegmentRegion::Edge_s0);
+    ASSERT_EQ(dr.active_region, SegmentSegmentRegion::Edge_s0);
 
     double total_hessian_norm = 0.0;
     for (int dof = 0; dof < 4; ++dof) {
@@ -1704,4 +1708,157 @@ TEST(BarrierEnergy, RigidSolverDerivativeModesMatchAcrossFeatureRegions) {
             },
             1.0e-12);
     }
+}
+
+TEST(BarrierEnergy, RobustSegmentGeometryHasFiniteOrderedDerivatives) {
+    const double next = std::nextafter(1.5, 2.0);
+    const std::vector<std::array<Vec3, 4>> cases = {
+        {{Vec3(0.30643120172698846, 1.2537041974945615, 0.345215273017485),
+          Vec3(0.2716303759805404, 1.2435156840614272, 0.3522099917587509),
+          Vec3(0.3476899357030978, 1.254750762137517, 0.34482031348588066),
+          Vec3(0.12785112730426101, 1.247125469633767, 0.34839148080369126)}},
+        {{Vec3::Zero(), Vec3::UnitX(),
+          Vec3(0.0, -5.0e-9, 1.0e-6), Vec3(1.0, 5.0e-9, 1.0e-6)}},
+        {{Vec3(1.5, next, 1.5), Vec3(1.5, next, 1.5),
+          Vec3(1.0, 1.0, 1.0), Vec3(2.0, 2.0, 2.0)}}
+    };
+    constexpr double d_hat = 0.0020879357425860772;
+    for (std::size_t which = 0; which < cases.size(); ++which) {
+        SCOPED_TRACE(which);
+        const auto& x = cases[which];
+        const auto dr = segment_segment_distance(x[0], x[1], x[2], x[3]);
+        ASSERT_TRUE(dr.robust);
+        ASSERT_GT(dr.distance, 0.0);
+        const auto evaluation = make_segment_segment_contact_evaluation(
+            x, d_hat, 1.0, 1.0e-12, &dr);
+        ASSERT_TRUE(evaluation.active);
+        EXPECT_TRUE(std::isfinite(segment_segment_barrier(
+            x[0], x[1], x[2], x[3], d_hat)));
+        EXPECT_TRUE(std::isfinite(evaluation.b_prime));
+        EXPECT_TRUE(std::isfinite(evaluation.b_double_prime));
+        const auto weights = segment_segment_contact_weights(
+            x[0], x[1], x[2], x[3], 1.0e-12, &dr);
+        const Vec3 normal = dr.separation / dr.distance;
+        Vec3 sum = Vec3::Zero();
+        double gradient_scale = 0.0;
+        for (int row = 0; row < 4; ++row) {
+            const Vec3 g = segment_segment_barrier_gradient(
+                x[0], x[1], x[2], x[3], d_hat, row);
+            const Vec3 cached_g = segment_segment_barrier_gradient(
+                x[0], x[1], x[2], x[3], row, evaluation);
+            ASSERT_TRUE(g.allFinite());
+            ASSERT_TRUE(cached_g.allFinite());
+            const Vec3 expected_g = evaluation.b_prime * weights[row] * normal;
+            EXPECT_LE((g - expected_g).norm(),
+                      2.0e-12 * std::max(1.0, expected_g.norm()));
+            EXPECT_LE((cached_g - g).norm(), 2.0e-12 * std::max(1.0, g.norm()));
+            sum += g;
+            gradient_scale += g.norm();
+            const auto both = segment_segment_barrier_self_gradient_and_hessian(
+                x[0], x[1], x[2], x[3], row, evaluation);
+            const Mat33 self = segment_segment_barrier_self_hessian(
+                x[0], x[1], x[2], x[3], d_hat, row);
+            ASSERT_TRUE(both.first.allFinite());
+            ASSERT_TRUE(both.second.allFinite());
+            ASSERT_TRUE(self.allFinite());
+            EXPECT_LE((both.first - g).norm(), 2.0e-12 * std::max(1.0, g.norm()));
+            EXPECT_LE((both.second - self).norm(),
+                      2.0e-12 * std::max(1.0, self.norm()));
+            for (int col = 0; col < 4; ++col) {
+                const Mat33 h = segment_segment_barrier_cross_hessian(
+                    x[0], x[1], x[2], x[3], d_hat, row, col);
+                const Mat33 reverse = segment_segment_barrier_cross_hessian(
+                    x[0], x[1], x[2], x[3], col, row, evaluation);
+                ASSERT_TRUE(h.allFinite());
+                ASSERT_TRUE(reverse.allFinite());
+                EXPECT_LE((h - reverse.transpose()).norm(),
+                          2.0e-12 * std::max(1.0, h.norm()));
+                if (row == col)
+                    EXPECT_LE((h - self).norm(),
+                              2.0e-12 * std::max(1.0, self.norm()));
+            }
+        }
+        EXPECT_LE(sum.norm(), 2.0e-14 * std::max(1.0, gradient_scale));
+    }
+}
+
+TEST(BarrierEnergy, RobustNearParallelTranslationMatchesFiniteDifferences) {
+    // Unlike the 1e-17 saved gap, this gap permits representable FD increments
+    // that are small relative to its distance and preserve the active feature.
+    const std::array<Vec3, 4> x{{
+        Vec3::Zero(), Vec3::UnitX(),
+        Vec3(0.0, -5.0e-9, 1.0e-6), Vec3(1.0, 5.0e-9, 1.0e-6)}};
+    constexpr double d_hat = 0.01;
+    constexpr double h = 1.0e-10;
+    const auto dr = segment_segment_distance(x[0], x[1], x[2], x[3]);
+    ASSERT_TRUE(dr.robust);
+    ASSERT_EQ(dr.region, SegmentSegmentRegion::Interior);
+    auto plus = x, minus = x;
+    for (int role : {2, 3}) {
+        plus[role].z() += h;
+        minus[role].z() -= h;
+    }
+    const auto energy = [&](const std::array<Vec3, 4>& y) {
+        return segment_segment_barrier(y[0], y[1], y[2], y[3], d_hat);
+    };
+    const auto translation_gradient = [&](const std::array<Vec3, 4>& y) {
+        double g = 0.0;
+        for (int role : {2, 3})
+            g += segment_segment_barrier_gradient(
+                y[0], y[1], y[2], y[3], d_hat, role).z();
+        return g;
+    };
+    const double g = translation_gradient(x);
+    const double g_fd = (energy(plus) - energy(minus)) / (2.0 * h);
+    EXPECT_NEAR(g, g_fd, 2.0e-7 * std::max(1.0, std::abs(g)));
+    double H = 0.0;
+    for (int row : {2, 3})
+        for (int col : {2, 3})
+            H += segment_segment_barrier_cross_hessian(
+                x[0], x[1], x[2], x[3], d_hat, row, col)(2, 2);
+    const double H_fd = (translation_gradient(plus)
+                         - translation_gradient(minus)) / (2.0 * h);
+    EXPECT_NEAR(H, H_fd, 2.0e-7 * std::max(1.0, std::abs(H_fd)));
+}
+
+TEST(BarrierEnergy, RobustSegmentTrueIntersectionIsNotArtificiallySeparated) {
+    const std::array<Vec3, 4> x{{
+        Vec3::Zero(), Vec3::UnitX(),
+        Vec3(0.5, -1.0, 0.0), Vec3(0.5, 1.0, 0.0)}};
+    const auto dr = segment_segment_distance(x[0], x[1], x[2], x[3]);
+    ASSERT_DOUBLE_EQ(dr.distance, 0.0);
+    EXPECT_TRUE(dr.separation.isZero(0.0));
+    EXPECT_THROW(make_segment_segment_contact_evaluation(
+        x, 0.5, 23.0, 1.0e-12, &dr), std::runtime_error);
+    for (int role = 0; role < 4; ++role)
+        EXPECT_THROW(segment_segment_barrier_gradient(
+            x[0], x[1], x[2], x[3], 0.5, role), std::runtime_error);
+}
+
+TEST(BarrierEnergy, RobustSegmentRetainsGradientForSubUlpEndpointWeight) {
+    const Vec3 x0 = Vec3::Zero(), x1(1.0, 2.0, 0.0);
+    const Vec3 point(std::nextafter(1.0, 0.0), 2.0, 0.0);
+    const auto dr = segment_segment_distance(x0, x1, point, point);
+    ASSERT_TRUE(dr.robust);
+    ASSERT_DOUBLE_EQ(dr.s, 1.0);
+    ASSERT_GT(dr.weights[0], 0.0);
+    constexpr double d_hat = 0.5;
+    const std::array<Vec3, 4> x{{x0, x1, point, point}};
+    const auto evaluation = make_segment_segment_contact_evaluation(
+        x, d_hat, 1.0, 1.0e-12, &dr);
+    const auto weights = segment_segment_contact_weights(
+        x0, x1, point, point, 1.0e-12, &dr);
+    EXPECT_DOUBLE_EQ(weights[0], dr.weights[0]);
+    const Vec3 expected = evaluation.b_prime * dr.weights[0]
+        * (dr.separation / dr.distance);
+    ASSERT_GT(expected.norm(), 0.01);
+    const Vec3 direct = segment_segment_barrier_gradient(
+        x0, x1, point, point, d_hat, 0);
+    const Vec3 cached = segment_segment_barrier_gradient(
+        x0, x1, point, point, 0, evaluation);
+    EXPECT_LE((direct - expected).norm(), 2.0e-14);
+    EXPECT_LE((cached - expected).norm(), 2.0e-14);
+    // If recomputed as 1-dr.s this endpoint's nonzero force would disappear.
+    EXPECT_NEAR(direct.x(), -0.05, 1.0e-13);
+    EXPECT_NEAR(direct.y(), 0.025, 1.0e-13);
 }

@@ -25,6 +25,11 @@ double compute_trust_region_bound_for_vertex(int vi, const std::vector<Vec3>& x,
 // Cooperative calls share contact checks on the existing OpenMP team and join
 // before applying any position update. Serial callers can keep the default.
 // Applies the box/CCD-clipped update to one vertex and returns its safe weight.
+// Linear CCD additionally preserves a numerical contact gap (1e-8, enlarged
+// at large coordinate scales), or the existing gap if it is already smaller.
+// Near-contact rounded endpoints and their full paths are checked exactly.
+// Exact initial contact without side history is rejected explicitly; this
+// routine cannot repair an initially intersecting/singular barrier state.
 double per_vertex_safe_step(
     const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi,
     const Vec3& raw_proposed_position, double safety = 0.9, bool clip_ccd = true,

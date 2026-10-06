@@ -142,6 +142,42 @@ TEST(GeneralSIMDRigid, CoupledBarrierFrictionFeaturesSidesModesAndTailsMatchScal
             }
 }
 
+TEST(GeneralSIMDRigid, RobustTinyGapUsesScalarGeometryForBothBodiesAndAllModes) {
+    const std::array<Vec3,4> positions{
+        Vec3(0.30643120172698846,1.2537041974945615,0.345215273017485),
+        Vec3(0.2716303759805404,1.2435156840614272,0.3522099917587509),
+        Vec3(0.3476899357030978,1.254750762137517,0.34482031348588066),
+        Vec3(0.12785112730426101,1.247125469633767,0.34839148080369126)};
+    ASSERT_TRUE(segment_segment_distance(positions[0], positions[1], positions[2], positions[3]).robust);
+    const auto kinematics = quaternion_omega_kinematics(
+        Vec4(0.8, 0.2, -0.4, 0.4).normalized(), Vec3(1.2, -0.9, 1.7), dt, true);
+    std::array<ipc_simd::RigidContactInput,3> inputs;
+    std::array<ipc_simd::RigidContactOutput,3> outputs;
+    for (std::size_t entry = 0; entry < inputs.size(); ++entry) {
+        inputs[entry] = fixture(static_cast<int>(entry) + 2, kinematics);
+        if (entry == 2) continue; // Keep an ordinary contact in the tail packet.
+        inputs[entry].positions = positions;
+        for (int role = 0; role < 4; ++role) {
+            inputs[entry].body_references[role] = positions[role] + Vec3(.4,-.7,.9);
+            inputs[entry].previous_positions[role] = positions[role]
+                - (role + 1) * Vec3(.001,-.003,.002);
+        }
+    }
+    for (auto mode : {RigidDerivativeMode::Full, RigidDerivativeMode::Gradient,
+             RigidDerivativeMode::TranslationHessian, RigidDerivativeMode::OrientationHessian})
+        for (double friction : {0.0, .37}) {
+            SCOPED_TRACE(::testing::Message() << "mode=" << int(mode) << " friction=" << friction);
+            ipc_simd::rigid_contact_derivatives_tile(inputs.data(), inputs.size(), d_hat,
+                stiffness, friction, dt, .1, mode, outputs.data());
+            for (std::size_t entry = 0; entry < inputs.size(); ++entry) {
+                SCOPED_TRACE(::testing::Message() << "entry=" << entry);
+                const auto expected = reference(inputs[entry], mode, friction);
+                compare(outputs[entry].barrier, expected.barrier);
+                compare(outputs[entry].friction, expected.friction);
+            }
+        }
+}
+
 TEST(GeneralSIMDRigid, FrictionUsesSignedMultiRoleJacobianAndUpdateMode) {
     const auto kinematics = quaternion_omega_kinematics(Vec4(1, 0, 0, 0), Vec3(0.5, 1.1, -0.9), dt, true);
     std::array<ipc_simd::RigidContactInput, 4> inputs;

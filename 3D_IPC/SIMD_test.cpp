@@ -1,6 +1,7 @@
 #include "SIMD.h"
 #include "broad_phase.h"
 #include "friction_energy.h"
+#include "general_simd_contact.h"
 #include "make_shape.h"
 #include "mesh_utils.h"
 #include "parallel_helper.h"
@@ -1627,6 +1628,75 @@ TEST(SIMDContact, TinyGapInteriorContactsRetainScalarHessians) {
         const auto expected = segment_segment_barrier_self_gradient_and_hessian(
             positions[0],positions[1],positions[2],positions[3],.01,role);
         EXPECT_LE((outputs[role].hessian-expected.second).norm(),2e-11*(1.0+expected.second.norm()));
+    }
+}
+
+TEST(SIMDContact, RobustTinyGapPropagatesThroughBothBarrierAndFrictionTiles) {
+    // Saved example-20 pair whose world-space closest points lose the gap.
+    const std::array<Vec3,4> positions{
+        Vec3(0.30643120172698846,1.2537041974945615,0.345215273017485),
+        Vec3(0.2716303759805404,1.2435156840614272,0.3522099917587509),
+        Vec3(0.3476899357030978,1.254750762137517,0.34482031348588066),
+        Vec3(0.12785112730426101,1.247125469633767,0.34839148080369126)};
+    constexpr double dhat = .01, k = 200.0, step = .02, epsv = .3;
+    const auto evaluation = make_segment_segment_contact_evaluation(positions, dhat, k);
+    ASSERT_TRUE(evaluation.dr.robust);
+    ASSERT_GT(evaluation.dr.distance, 0.0);
+    ASSERT_TRUE(evaluation.dr.separation.allFinite());
+    std::array<ipc_simd::MeshContactInput,8> inputs;
+    std::array<ipc_simd::MeshContactOutput,8> outputs;
+    std::array<unsigned char,8> active;
+    for (double slip : {1e-5, .01}) {
+        for (std::size_t entry = 0; entry < inputs.size(); ++entry) {
+            auto& input = inputs[entry];
+            input.positions = positions;
+            // Interleave ordinary packets with all four robust roles.
+            if (entry % 2 != 0)
+                input.positions = {Vec3::Zero(), Vec3::UnitX(),
+                    Vec3(.4,-.3,.005), Vec3(.4,.7,.005)};
+            input.previous_positions = input.positions;
+            input.role = static_cast<int>(entry / 2);
+            input.segment_segment = true;
+            for (int role = 0; role < 4; ++role)
+                input.previous_positions[role] -= (role + 1) * slip * Vec3(1.0,-.7,.3);
+        }
+        for (bool general : {false, true})
+            for (double friction : {0.0, .3})
+                for (std::size_t count : {std::size_t(1), std::size_t(3), inputs.size()}) {
+                    SCOPED_TRACE(::testing::Message() << "general=" << general
+                        << " friction=" << friction << " slip=" << slip << " count=" << count);
+                    const auto tile = general ? ipc_simd::general_mesh_contact_derivatives_tile
+                                              : ipc_simd::mesh_contact_derivatives_tile;
+                    tile(inputs.data(), count, dhat, k, friction, step, epsv,
+                        outputs.data(), active.data());
+                    for (std::size_t entry = 0; entry < count; ++entry) {
+                        SCOPED_TRACE(::testing::Message() << "entry=" << entry);
+                        const auto& input = inputs[entry];
+                        const auto& x = input.positions;
+                        const auto cached = make_segment_segment_contact_evaluation(x, dhat, k);
+                        const auto expected = segment_segment_barrier_self_gradient_and_hessian(
+                            x[0], x[1], x[2], x[3], input.role, cached);
+                        ASSERT_TRUE(outputs[entry].gradient.allFinite());
+                        ASSERT_TRUE(outputs[entry].hessian.allFinite());
+                        EXPECT_EQ(active[entry], 1);
+                        EXPECT_LE((outputs[entry].gradient - expected.first).norm(),
+                            2e-11 * (1.0 + expected.first.norm()));
+                        EXPECT_LE((outputs[entry].hessian - expected.second).norm(),
+                            2e-11 * (1.0 + expected.second.norm()));
+                        if (friction != 0.0) {
+                            const auto frozen = make_segment_segment_frozen_friction_contact(
+                                x, input.previous_positions, cached, step, epsv);
+                            const auto expected_friction = frozen_friction_role_gradient_and_hessian(
+                                frozen, input.role, friction, step * step);
+                            ASSERT_TRUE(outputs[entry].friction_gradient.allFinite());
+                            ASSERT_TRUE(outputs[entry].friction_hessian.allFinite());
+                            EXPECT_LE((outputs[entry].friction_gradient - expected_friction.first).norm(),
+                                2e-11 * (1.0 + expected_friction.first.norm()));
+                            EXPECT_LE((outputs[entry].friction_hessian - expected_friction.second).norm(),
+                                2e-11 * (1.0 + expected_friction.second.norm()));
+                        }
+                    }
+                }
     }
 }
 

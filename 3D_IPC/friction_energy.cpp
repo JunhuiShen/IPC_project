@@ -83,8 +83,9 @@ Vec3 weighted_relative_displacement(
 }
 
 void initialize_mesh_contact_tangent_frame(
-        FrozenFrictionContact& contact, const Vec3& separation) {
-    const double separation_norm = separation.norm();
+        FrozenFrictionContact& contact, const Vec3& separation,
+        bool robust = false) {
+    const double separation_norm = robust ? separation.stableNorm() : separation.norm();
     if (!(separation_norm > 0.0) || !std::isfinite(separation_norm)) {
         throw std::runtime_error(
                 "friction contact: separation must have nonzero finite norm.");
@@ -205,9 +206,17 @@ FrozenFrictionContact make_node_triangle_frozen_friction_contact(
                         current_positions[0], current_positions[1],
                         current_positions[2], current_positions[3],
                         1.0e-12, &evaluation.dr);
-                initialize_mesh_contact_tangent_frame(
-                        contact,
-                        current_positions[0] - evaluation.dr.closest_point);
+                Vec3 direction = current_positions[0] - evaluation.dr.closest_point;
+                if (evaluation.dr.region == NodeTriangleRegion::FaceInterior) {
+                    // The projection can round back to the query point when
+                    // the gap is tiny. Use the same signed face normal as the
+                    // barrier gradient, without subtracting world positions
+                    // or scaling by a gap whose squared norm may underflow.
+                    const double phi = evaluation.dr.phi;
+                    const double sign = (phi > 0.0) ? 1.0 : (phi < 0.0) ? -1.0 : 0.0;
+                    direction = sign * evaluation.dr.normal;
+                }
+                initialize_mesh_contact_tangent_frame(contact, direction);
             });
 }
 
@@ -257,8 +266,7 @@ FrozenFrictionContact make_segment_segment_frozen_friction_contact(
                         current_positions[2], current_positions[3],
                         1.0e-12, &evaluation.dr);
                 initialize_mesh_contact_tangent_frame(
-                        contact, evaluation.dr.closest_point_1
-                                - evaluation.dr.closest_point_2);
+                        contact, evaluation.dr.separation, evaluation.dr.robust);
             });
 }
 

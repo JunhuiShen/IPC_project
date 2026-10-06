@@ -2,11 +2,71 @@
 
 #include "IPC_math.h"
 
+#include <array>
 #include <limits>
+#include <memory>
 
 struct CCDResult {
     bool collision = false;
     double t = std::numeric_limits<double>::quiet_NaN();
+};
+
+// Cold-path checks for a represented NT (point, a, b, c; vertex_face=true) or
+// SS (a, b, c, d; false) configuration. Original binary64 coordinates are
+// converted before arithmetic; no positive gap is clamped to a tolerance.
+// Returns -1/0/+1 according to gap < / == / > distance. distance must be finite
+// and nonnegative; comparison against zero distinguishes true intersections.
+int compare_contact_distance_exact(const std::array<Vec3, 4>& positions,
+                                   bool vertex_face, double distance);
+
+// Check the actual rounded endpoint against gap_end >= min(gap_start, floor).
+// A true initial intersection returns false: this is not an overlap-repair or
+// contact-side inference policy. floor must be finite and strictly positive.
+// This endpoint test alone does not establish a collision-free path.
+bool contact_preserves_separation_exact(const std::array<Vec3, 4>& start,
+                                        const std::array<Vec3, 4>& end,
+                                        bool vertex_face, double floor);
+
+// CCD for the segment between two ACTUAL represented endpoint configurations,
+// using exact subtraction rather than rounded end-start displacements. At most
+// one vertex may differ. True initial intersections still return t=0; ordinary
+// linear-CCD future-event semantics below apply. All inputs must be finite.
+CCDResult single_vertex_ccd_between_exact(const std::array<Vec3, 4>& start,
+                                          const std::array<Vec3, 4>& end,
+                                          bool vertex_face);
+
+enum class ExactContactStepResult { Safe, Unsafe, InitialContact };
+
+// Combined cold-path check: distinguish initial contact, preserve the endpoint
+// gap >= min(initial gap, floor), then validate the actual represented path.
+// Uses exact integer predicates, with rational fallback for coplanar paths.
+// All coordinates must be finite, floor finite and positive, and at most one
+// vertex may change; invalid inputs throw std::invalid_argument. InitialContact
+// is not permission to separate without a known contact side/history.
+ExactContactStepResult exact_contact_step_result(const std::array<Vec3, 4>& start,
+    const std::array<Vec3, 4>& end, bool vertex_face, double floor);
+
+// Immutable exact start snapshot for repeated backtracking trials of ONE
+// vertex. Reuse only while all four start positions and the floor stay fixed;
+// each test receives the actual represented position of moving_dof in [0,3].
+// Owns its snapshot, so later caller-array changes do not update this context.
+// Constructor/test validation and results match exact_contact_step_result.
+class PreparedExactContactStep {
+public:
+    PreparedExactContactStep(const std::array<Vec3, 4>& start, bool vertex_face,
+                             double floor, int moving_dof);
+    ~PreparedExactContactStep();
+    PreparedExactContactStep(PreparedExactContactStep&&) noexcept;
+    PreparedExactContactStep& operator=(PreparedExactContactStep&&) noexcept;
+    PreparedExactContactStep(const PreparedExactContactStep&) = delete;
+    PreparedExactContactStep& operator=(const PreparedExactContactStep&) = delete;
+
+    // Calling test on a moved-from context throws std::logic_error.
+    ExactContactStepResult test(const Vec3& endpoint) const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 // One-moving-node NT CCD. Dispatches based on `use_ticcd`:
@@ -16,7 +76,10 @@ struct CCDResult {
 // Linear mode never calls TICCD.
 // At most one of the four displacements may be nonzero in linear mode.
 // eps sets dimensionless time/membership ambiguity tolerances, not a distance pad.
-// Exact event validation uses a fixed 1e-10 world-space boundary tolerance.
+// A true initial intersection returns t=0. Positive initial gaps, even below
+// 1e-10, are not initial contact. Far-start future events retain a fixed 1e-10
+// world-space boundary tolerance; starts within that band use exact membership
+// throughout the motion so separating near-contact queries can escape.
 CCDResult node_triangle_only_one_node_moves(
         const Vec3& x,  const Vec3& dx,
         const Vec3& x1, const Vec3& dx1,

@@ -498,6 +498,105 @@ TEST(FrictionCacheIntegration,
 }
 
 TEST(FrictionCacheIntegration,
+     FaceFrictionRemainsFiniteWhenProjectionRoundsToQuery) {
+    const std::array<Vec3, 4> current{{
+        Vec3(-0.3539305692252924, 1.3435683666814457, -0.22266830166457185),
+        Vec3(-0.3187397271207064, 1.3441180045077383, -0.22866172838829296),
+        Vec3(-0.3633351044380084, 1.3436642977232678, -0.22699410519352584),
+        Vec3(-0.34673275561605016, 1.3431630608376874, -0.21125579467627867)}};
+    const auto previous = previous_with_general_slip(current);
+    constexpr double d_hat = 0.5;
+    constexpr double k_barrier = 23.0;
+    constexpr double dt = 0.02;
+    constexpr double eps_v = 0.3;
+    constexpr double mu = 0.6;
+
+    // Preserve the rounded projection from a near-contact solve explicitly,
+    // so the regression does not depend on platform-specific dot products.
+    NodeTriangleDistanceResult dr{};
+    dr.closest_point = current[0];
+    dr.tilde_x = current[0];
+    dr.normal = Vec3(
+        -0.008634434706119177, 0.9991247571300894, 0.040928794595558045);
+    dr.barycentric_tilde_x = {{
+        0.10443944139323297, 0.6096360205860905, 0.2859245380206766}};
+    dr.distance = 2.1196152472091612e-17;
+    dr.region = NodeTriangleRegion::FaceInterior;
+    ASSERT_GT(dr.distance, 0.0);
+    ASSERT_TRUE((current[0] - dr.closest_point).isZero(0.0));
+
+    for (double side : {-1.0, 1.0}) {
+        SCOPED_TRACE(side);
+        dr.phi = side * dr.distance;
+        const NodeTriangleContactEvaluation evaluation =
+            make_node_triangle_contact_evaluation(
+                current, d_hat, k_barrier, 1.0e-12, &dr);
+        ASSERT_TRUE(evaluation.active);
+        FrozenFrictionContact shared_contact;
+        ASSERT_NO_THROW(shared_contact =
+            make_node_triangle_frozen_friction_contact(
+                current, previous, evaluation, dt, eps_v));
+        FrozenFrictionContact cached_contact;
+        ASSERT_NO_THROW(cached_contact =
+            make_node_triangle_frozen_friction_contact(
+                current, previous, d_hat, k_barrier, dt, eps_v,
+                1.0e-12, &dr));
+        expect_contact_exact(shared_contact, cached_contact);
+        ASSERT_TRUE(shared_contact.active);
+        EXPECT_TRUE(std::isfinite(shared_contact.normal_force));
+        EXPECT_GT(shared_contact.normal_force, 0.0);
+        EXPECT_TRUE(shared_contact.normal.allFinite());
+        EXPECT_TRUE(shared_contact.projector.allFinite());
+        EXPECT_TRUE(shared_contact.tangential_displacement.allFinite());
+        expect_vec_near(shared_contact.normal, side * dr.normal.normalized());
+        EXPECT_NEAR(shared_contact.normal.norm(), 1.0, 1.0e-14);
+        expect_mat_near(
+            shared_contact.projector,
+            Mat33::Identity() - dr.normal.normalized()
+                * dr.normal.normalized().transpose());
+        expect_vec_near(
+            shared_contact.projector * shared_contact.normal, Vec3::Zero());
+        EXPECT_NEAR(shared_contact.tangential_displacement.dot(
+                        shared_contact.normal),
+                    0.0, 1.0e-14);
+        EXPECT_TRUE(std::isfinite(
+            frozen_friction_energy(shared_contact, mu, dt * dt)));
+        for (int role = 0; role < 4; ++role) {
+            const auto derivatives =
+                frozen_friction_role_gradient_and_hessian(
+                    shared_contact, role, mu, dt * dt);
+            EXPECT_TRUE(derivatives.first.allFinite());
+            EXPECT_TRUE(derivatives.second.allFinite());
+        }
+    }
+}
+
+TEST(FrictionCacheIntegration,
+     FaceFrictionNormalOrientationIsIndependentOfTriangleWinding) {
+    for (double side : {-1.0, 1.0}) {
+        for (bool reverse_winding : {false, true}) {
+            SCOPED_TRACE(side);
+            SCOPED_TRACE(reverse_winding);
+            const std::array<Vec3, 4> current{{
+                Vec3(0.2, 0.3, side * 0.1), Vec3::Zero(),
+                reverse_winding ? Vec3::UnitY() : Vec3::UnitX(),
+                reverse_winding ? Vec3::UnitX() : Vec3::UnitY()}};
+            const auto evaluation =
+                make_node_triangle_contact_evaluation(current, 0.5, 23.0);
+            ASSERT_EQ(evaluation.dr.region, NodeTriangleRegion::FaceInterior);
+            const auto contact = make_node_triangle_frozen_friction_contact(
+                current, previous_with_node_slip(current), evaluation,
+                0.02, 0.3);
+            ASSERT_TRUE(contact.active);
+            expect_vec_near(contact.normal, side * Vec3::UnitZ());
+            expect_mat_near(
+                contact.projector,
+                Mat33::Identity() - Vec3::UnitZ() * Vec3::UnitZ().transpose());
+        }
+    }
+}
+
+TEST(FrictionCacheIntegration,
      SharedSegmentSegmentEvaluationMatchesLegacyAcrossAllFeatures) {
     struct Case {
         const char* name;
@@ -1130,6 +1229,21 @@ TEST(FrozenFrictionContact, InactiveContactsAndZeroCoefficientAreZero) {
             Vec3::Zero(), 0.0);
 }
 
+TEST(FrozenFrictionValidation, RejectsExactZeroDistanceFaceWithPositiveStiffness) {
+    const std::array<Vec3, 4> current{{
+        Vec3(0.2, 0.3, 0.0), Vec3::Zero(), Vec3::UnitX(), Vec3::UnitY()}};
+    const auto dr = node_triangle_distance(
+        current[0], current[1], current[2], current[3]);
+    ASSERT_EQ(dr.region, NodeTriangleRegion::FaceInterior);
+    ASSERT_DOUBLE_EQ(dr.distance, 0.0);
+    ASSERT_DOUBLE_EQ(dr.phi, 0.0);
+    EXPECT_THROW(
+        make_node_triangle_frozen_friction_contact(
+            current, previous_with_node_slip(current),
+            0.5, 23.0, 0.02, 0.3, 1.0e-12, &dr),
+        std::runtime_error);
+}
+
 TEST(FrozenFrictionValidation, RejectsInvalidPhysicalParameters) {
     const std::array<Vec3, 4> positions = {{
         Vec3(0.2, 0.3, 0.1), Vec3(0.0, 0.0, 0.0),
@@ -1173,4 +1287,88 @@ TEST(FrozenFrictionValidation, RejectsInvalidPhysicalParameters) {
                     positions, previous, 0.5,
                     std::numeric_limits<double>::infinity(), 0.01, 1.0),
             std::invalid_argument);
+}
+
+TEST(FrictionCacheIntegration, RobustSegmentSeparationProducesFiniteTangentialForces) {
+    const std::array<Vec3, 4> saved{{
+        Vec3(0.30643120172698846, 1.2537041974945615, 0.345215273017485),
+        Vec3(0.2716303759805404, 1.2435156840614272, 0.3522099917587509),
+        Vec3(0.3476899357030978, 1.254750762137517, 0.34482031348588066),
+        Vec3(0.12785112730426101, 1.247125469633767, 0.34839148080369126)}};
+    const std::vector<std::array<Vec3, 4>> cases = {
+        saved,
+        {{saved[2], saved[3], saved[0], saved[1]}},
+        {{Vec3::Zero(), Vec3::UnitX(),
+          Vec3(0.0, -5.0e-9, 1.0e-6), Vec3(1.0, 5.0e-9, 1.0e-6)}}
+    };
+    constexpr double d_hat = 0.0020879357425860772;
+    constexpr double stiffness = 1000.0;
+    constexpr double dt = 1.0 / 600.0;
+    constexpr double eps_v = 0.3;
+    constexpr double mu = 0.6;
+    for (std::size_t which = 0; which < cases.size(); ++which) {
+        SCOPED_TRACE(which);
+        const auto& current = cases[which];
+        const auto previous = previous_with_general_slip(current);
+        const auto dr = segment_segment_distance(
+            current[0], current[1], current[2], current[3]);
+        ASSERT_TRUE(dr.robust);
+        ASSERT_GT(dr.distance, 0.0);
+        const auto evaluation = make_segment_segment_contact_evaluation(
+            current, d_hat, stiffness, 1.0e-12, &dr);
+        ASSERT_TRUE(evaluation.active);
+        FrozenFrictionContact contact;
+        ASSERT_NO_THROW(contact = make_segment_segment_frozen_friction_contact(
+            current, previous, evaluation, dt, eps_v));
+        const auto cached = make_segment_segment_frozen_friction_contact(
+            current, previous, d_hat, stiffness, dt, eps_v, 1.0e-12, &dr);
+        const auto uncached = make_segment_segment_frozen_friction_contact(
+            current, previous, d_hat, stiffness, dt, eps_v);
+        expect_contact_exact(contact, cached);
+        expect_contact_exact(contact, uncached);
+        ASSERT_TRUE(contact.active);
+        ASSERT_TRUE(contact.normal.allFinite());
+        ASSERT_TRUE(contact.projector.allFinite());
+        ASSERT_TRUE(contact.tangential_displacement.allFinite());
+        EXPECT_TRUE(std::isfinite(contact.normal_force));
+        EXPECT_GT(contact.normal_force, 0.0);
+        EXPECT_NEAR(contact.normal.norm(), 1.0, 2.0e-14);
+        expect_vec_near(contact.normal, dr.separation / dr.distance, 2.0e-14);
+        expect_vec_near(contact.projector * contact.normal, Vec3::Zero(), 2.0e-14);
+        EXPECT_NEAR(contact.tangential_displacement.dot(contact.normal), 0.0,
+                    2.0e-14 * std::max(1.0, contact.tangential_displacement.norm()));
+        EXPECT_TRUE(std::isfinite(frozen_friction_energy(contact, mu, dt * dt)));
+        Vec3 sum = Vec3::Zero();
+        double scale = 0.0;
+        for (int role = 0; role < 4; ++role) {
+            const auto derivatives = frozen_friction_role_gradient_and_hessian(
+                contact, role, mu, dt * dt);
+            const Vec3& gradient = derivatives.first;
+            const Mat33& hessian = derivatives.second;
+            ASSERT_TRUE(gradient.allFinite());
+            ASSERT_TRUE(hessian.allFinite());
+            EXPECT_NEAR(gradient.dot(contact.normal), 0.0,
+                        3.0e-14 * std::max(1.0, gradient.norm()));
+            EXPECT_LE((hessian - hessian.transpose()).norm(),
+                      3.0e-14 * std::max(1.0, hessian.norm()));
+            EXPECT_LE((hessian * contact.normal).norm(),
+                      3.0e-14 * std::max(1.0, hessian.norm()));
+            sum += gradient;
+            scale += gradient.norm();
+        }
+        EXPECT_LE(sum.norm(), 3.0e-14 * std::max(1.0, scale));
+    }
+}
+
+TEST(FrozenFrictionValidation, RejectsTrueSegmentIntersectionWithoutDistanceClamp) {
+    const std::array<Vec3, 4> current{{
+        Vec3::Zero(), Vec3::UnitX(),
+        Vec3(0.5, -1.0, 0.0), Vec3(0.5, 1.0, 0.0)}};
+    const auto dr = segment_segment_distance(
+        current[0], current[1], current[2], current[3]);
+    ASSERT_DOUBLE_EQ(dr.distance, 0.0);
+    EXPECT_TRUE(dr.separation.isZero(0.0));
+    EXPECT_THROW(make_segment_segment_frozen_friction_contact(
+        current, previous_with_general_slip(current),
+        0.5, 23.0, 0.02, 0.3, 1.0e-12, &dr), std::runtime_error);
 }

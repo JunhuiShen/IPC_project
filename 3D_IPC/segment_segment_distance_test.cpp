@@ -1,6 +1,7 @@
 #include "segment_segment_distance.h"
 
 #include <gtest/gtest.h>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -293,4 +294,118 @@ TEST(SegmentSegmentDistance, VeryShortSegmentStress){
     std::cout << "  distance = " << r.distance << "  region=" << to_string(r.region) << "\n";
     EXPECT_TRUE(std::isfinite(r.distance)) << "short segment distance should be finite";
     EXPECT_GT(r.distance, 0.0) << "short segment distance should be positive";
+}
+
+TEST(SegmentSegmentDistance, SavedExample20ContactPreservesSubUlpSeparation) {
+    // The former world-space closest-point subtraction returned exactly zero
+    // for this saved contact. These reference values were evaluated with exact
+    // rationals from the binary64 input coordinates, not from a distance clamp.
+    const std::array<Vec3, 4> x{{
+        Vec3(0.30643120172698846, 1.2537041974945615, 0.345215273017485),
+        Vec3(0.2716303759805404, 1.2435156840614272, 0.3522099917587509),
+        Vec3(0.3476899357030978, 1.254750762137517, 0.34482031348588066),
+        Vec3(0.12785112730426101, 1.247125469633767, 0.34839148080369126)}};
+    constexpr double exact_gap = 2.81637760742210603e-17;
+    const Vec3 exact_separation(
+        -1.96611440957398385e-19, 1.63932584825574502e-17,
+        2.29002336892925505e-17);
+    const auto dr = segment_segment_distance(x[0], x[1], x[2], x[3]);
+    ASSERT_EQ(dr.region, SegmentSegmentRegion::Interior);
+    EXPECT_TRUE(dr.robust);
+    ASSERT_GT(dr.distance, 0.0);
+    EXPECT_NEAR(dr.distance, exact_gap, exact_gap * 2.0e-14);
+    EXPECT_NEAR(dr.s, 0.0428138387495429762, 3.0e-16);
+    EXPECT_NEAR(dr.t, 0.194454706288313905, 3.0e-16);
+    EXPECT_LE((dr.separation - exact_separation).norm(), exact_gap * 2.0e-14);
+    const Vec3 normal = dr.separation / dr.distance;
+    EXPECT_TRUE(normal.allFinite());
+    EXPECT_NEAR(normal.norm(), 1.0, 2.0e-14);
+    EXPECT_NEAR(normal.dot(x[1] - x[0]), 0.0, 2.0e-16);
+    EXPECT_NEAR(normal.dot(x[3] - x[2]), 0.0, 2.0e-16);
+
+    const auto swapped = segment_segment_distance(x[2], x[3], x[0], x[1]);
+    const auto reversed = segment_segment_distance(x[1], x[0], x[3], x[2]);
+    EXPECT_NEAR(swapped.distance, exact_gap, exact_gap * 2.0e-14);
+    EXPECT_NEAR(reversed.distance, exact_gap, exact_gap * 2.0e-14);
+    EXPECT_LE((swapped.separation + dr.separation).norm(), exact_gap * 2.0e-14);
+    EXPECT_LE((reversed.separation - dr.separation).norm(), exact_gap * 2.0e-14);
+    EXPECT_NEAR(swapped.s, dr.t, 3.0e-16);
+    EXPECT_NEAR(swapped.t, dr.s, 3.0e-16);
+    EXPECT_NEAR(reversed.s, 1.0 - dr.s, 3.0e-16);
+    EXPECT_NEAR(reversed.t, 1.0 - dr.t, 3.0e-16);
+}
+
+TEST(SegmentSegmentDistance, NearParallelInteriorIsNotReplacedByAnEndpoint) {
+    // A*C-B*B rounds to zero here, but the represented edges are not parallel.
+    const Vec3 x0(0.0, 0.0, 0.0), x1(1.0, 0.0, 0.0);
+    const Vec3 x2(0.0, -5.0e-9, 0.125), x3(1.0, 5.0e-9, 0.125);
+    const auto dr = segment_segment_distance(x0, x1, x2, x3);
+    EXPECT_TRUE(dr.robust);
+    EXPECT_EQ(dr.region, SegmentSegmentRegion::Interior);
+    EXPECT_NEAR(dr.s, 0.5, 1.0e-14);
+    EXPECT_NEAR(dr.t, 0.5, 1.0e-14);
+    EXPECT_DOUBLE_EQ(dr.distance, 0.125);
+    EXPECT_LE((dr.separation - Vec3(0.0, 0.0, -0.125)).norm(), 1.0e-15);
+}
+
+TEST(SegmentSegmentDistance, DegenerateEndpointRetainsObliqueSubUlpGap) {
+    const double next = std::nextafter(1.5, 2.0);
+    const Vec3 point(1.5, next, 1.5);
+    const auto dr = segment_segment_distance(
+        point, point, Vec3(1.0, 1.0, 1.0), Vec3(2.0, 2.0, 2.0));
+    const double ulp = next - 1.5;
+    const Vec3 expected(-ulp / 3.0, 2.0 * ulp / 3.0, -ulp / 3.0);
+    EXPECT_TRUE(dr.robust);
+    ASSERT_GT(dr.distance, 0.0);
+    EXPECT_NEAR(dr.distance, ulp * std::sqrt(2.0 / 3.0), ulp * 2.0e-14);
+    EXPECT_LE((dr.separation - expected).norm(), ulp * 2.0e-14);
+    EXPECT_NEAR(dr.t, 0.5, 3.0e-16);
+}
+
+TEST(SegmentSegmentDistance, TranslatedEndpointAndTrueContactAreNotClamped) {
+    const double offset = std::ldexp(1.0, 40);
+    const double gap = std::nextafter(offset, INFINITY) - offset;
+    const Vec3 origin(offset, offset, offset);
+    const auto endpoint = segment_segment_distance(
+        origin, origin + Vec3(1.0, 0.0, 0.0),
+        origin + Vec3(-1.0, gap, 0.0), origin + Vec3(0.0, gap, 0.0));
+    EXPECT_DOUBLE_EQ(endpoint.distance, gap);
+    EXPECT_DOUBLE_EQ(endpoint.s, 0.0);
+    EXPECT_DOUBLE_EQ(endpoint.t, 1.0);
+    EXPECT_LE((endpoint.separation - Vec3(0.0, -gap, 0.0)).norm(), gap * 1.0e-14);
+
+    for (const Vec3& translation : {Vec3::Zero().eval(), origin}) {
+        const auto crossing = segment_segment_distance(
+            translation, translation + Vec3(1.0, 0.0, 0.0),
+            translation + Vec3(0.5, -1.0, 0.0),
+            translation + Vec3(0.5, 1.0, 0.0));
+        EXPECT_DOUBLE_EQ(crossing.distance, 0.0);
+        EXPECT_TRUE(crossing.separation.isZero(0.0));
+        const auto touching = segment_segment_distance(
+            translation, translation + Vec3(1.0, 0.0, 0.0),
+            translation + Vec3(1.0, 0.0, 0.0),
+            translation + Vec3(2.0, 1.0, 0.0));
+        EXPECT_DOUBLE_EQ(touching.distance, 0.0);
+        EXPECT_TRUE(touching.separation.isZero(0.0));
+    }
+}
+
+TEST(SegmentSegmentDistance, RobustEndpointWeightsPrecedeParameterRounding) {
+    const double near_one = std::nextafter(1.0, 0.0);
+    const double deficit = 1.0 - near_one;
+    const Vec3 point(near_one, 2.0, 0.0);
+    const auto dr = segment_segment_distance(
+        Vec3::Zero(), Vec3(1.0, 2.0, 0.0), point, point);
+    ASSERT_TRUE(dr.robust);
+    // Exact s is 1-deficit/5: s rounds to one, but 1-s must remain nonzero
+    // when constructing the contact weights for gradient/Hessian assembly.
+    EXPECT_DOUBLE_EQ(dr.s, 1.0);
+    ASSERT_GT(dr.weights[0], 0.0);
+    EXPECT_NEAR(dr.weights[0], deficit / 5.0, deficit * 1.0e-15);
+    EXPECT_DOUBLE_EQ(dr.weights[1], 1.0);
+    EXPECT_DOUBLE_EQ(dr.weights[2], -1.0);
+    EXPECT_DOUBLE_EQ(dr.weights[3], 0.0);
+    EXPECT_NEAR(dr.distance, deficit * 2.0 / std::sqrt(5.0), deficit * 1.0e-14);
+    const Vec3 expected(deficit * 4.0 / 5.0, -deficit * 2.0 / 5.0, 0.0);
+    EXPECT_LE((dr.separation - expected).norm(), deficit * 1.0e-14);
 }

@@ -13,6 +13,7 @@
 #include <cassert>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 
 #ifdef _OPENMP
@@ -245,6 +246,256 @@ double compute_trust_region_bound_for_vertex(int vi, const std::vector<Vec3>& x,
     return gamma_p * d0_min;  // +inf when vi has no incident pairs
 }
 
+// This is a numerical safeguard, not the barrier activation distance or a
+// contact-force modification. Match the colored guess's existing gap floor,
+// and enlarge it when the world-coordinate spacing makes 1e-8 unrepresentable.
+static double vertex_contact_gap_floor(const std::array<Vec3, 4>& points) {
+    double scale = 0.0;
+    for (const auto& point : points)
+        scale = std::max(scale, point.cwiseAbs().maxCoeff());
+    return std::max(1e-8, 128.0 * std::numeric_limits<double>::epsilon() * scale);
+}
+
+// The bounds contain the actual stored endpoints, hence also every position
+// on their segment. Strict separation of their convex projections certifies
+// the whole rounded path, independently of approximate closest-point regions.
+static bool vertex_swept_axis_separated(const std::array<Vec3, 4>& start,
+    const std::array<Vec3, 4>& end, bool face, double floor) {
+    const int split = face ? 1 : 2;
+    for (int axis = 0; axis < 3; ++axis) {
+        double alo = std::numeric_limits<double>::infinity(), ahi = -alo;
+        double blo = alo, bhi = -alo;
+        for (int i = 0; i < 4; ++i) {
+            const double lo = std::min(start[i][axis], end[i][axis]);
+            const double hi = std::max(start[i][axis], end[i][axis]);
+            if (i < split) { alo = std::min(alo, lo); ahi = std::max(ahi, hi); }
+            else { blo = std::min(blo, lo); bhi = std::max(bhi, hi); }
+        }
+        if (std::max(alo - bhi, blo - ahi) > 2.0 * floor) return true;
+    }
+    return false;
+}
+
+static bool vertex_swept_projection_separated(const std::array<Vec3, 4>& start,
+    const std::array<Vec3, 4>& end, bool face, double floor, Vec3 direction) {
+    const double scale = direction.cwiseAbs().maxCoeff();
+    if (!(scale > 0.0) || !std::isfinite(scale)) return false;
+    direction /= scale;
+    if (!direction.allFinite()) return false;
+    const int split = face ? 1 : 2;
+    double alo = std::numeric_limits<double>::infinity(), ahi = -alo;
+    double blo = alo, bhi = -alo, magnitude = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        const double a = direction.dot(start[i]), b = direction.dot(end[i]);
+        const double absolute_sum = direction.cwiseAbs().dot(
+            start[i].cwiseAbs().cwiseMax(end[i].cwiseAbs()));
+        if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(absolute_sum))
+            return false;
+        magnitude = std::max(magnitude, absolute_sum);
+        const double lo = std::min(a, b), hi = std::max(a, b);
+        if (i < split) { alo = std::min(alo, lo); ahi = std::max(ahi, hi); }
+        else { blo = std::min(blo, lo); bhi = std::max(bhi, hi); }
+    }
+    const double threshold = floor * direction.norm();
+    const double gap = std::max(alo - bhi, blo - ahi);
+    const double padding = 512.0 * std::numeric_limits<double>::epsilon()
+        * (magnitude + threshold) + 512.0 * std::numeric_limits<double>::denorm_min();
+    return std::isfinite(gap) && std::isfinite(threshold) && std::isfinite(padding)
+        && gap > threshold + padding;
+}
+
+static Vec3 vertex_contact_separating_direction(const std::array<Vec3, 4>& p,
+    bool face) {
+    if (!face)
+        return segment_segment_distance(p[0], p[1], p[2], p[3]).separation;
+    const auto result = node_triangle_distance(p[0], p[1], p[2], p[3]);
+    return result.region == NodeTriangleRegion::FaceInterior
+        ? result.normal : Vec3(p[0] - result.closest_point);
+}
+
+// This is only a proposed projection direction, not a distance or feature
+// classification. The swept projection certificate below still has to prove
+// separation for all four vertices at BOTH represented endpoints. In
+// particular, a rounded/ill-conditioned cross product cannot approve a step
+// on its own. Trying it first avoids a robust closest-feature solve (which
+// can require rational arithmetic for nearly parallel edges) merely to find
+// a direction. Zero/nonfinite directions fail the certificate and fall back.
+static Vec3 vertex_contact_plane_direction(const std::array<Vec3, 4>& p,
+    bool face) {
+    return face ? Vec3((p[2] - p[1]).cross(p[3] - p[1]))
+                : Vec3((p[1] - p[0]).cross(p[3] - p[2]));
+}
+
+struct VertexContactInterval {
+    double lower, upper;
+};
+
+static VertexContactInterval vertex_contact_outward(double lower, double upper) {
+    const double infinity = std::numeric_limits<double>::infinity();
+    if (!std::isfinite(lower) || !std::isfinite(upper))
+        return {-infinity, infinity};
+    return {std::nextafter(lower, -infinity), std::nextafter(upper, infinity)};
+}
+
+static VertexContactInterval vertex_contact_interval_subtract(
+    const VertexContactInterval& a, const VertexContactInterval& b) {
+    return vertex_contact_outward(a.lower - b.upper, a.upper - b.lower);
+}
+
+static VertexContactInterval vertex_contact_interval_add(
+    const VertexContactInterval& a, const VertexContactInterval& b) {
+    return vertex_contact_outward(a.lower + b.lower, a.upper + b.upper);
+}
+
+static VertexContactInterval vertex_contact_interval_multiply(
+    const VertexContactInterval& a, const VertexContactInterval& b) {
+    const std::array<double, 4> products{{a.lower * b.lower, a.lower * b.upper,
+        a.upper * b.lower, a.upper * b.upper}};
+    for (double product : products)
+        if (!std::isfinite(product)) {
+            const double infinity = std::numeric_limits<double>::infinity();
+            return {-infinity, infinity};
+        }
+    const auto bounds = std::minmax_element(products.begin(), products.end());
+    return vertex_contact_outward(*bounds.first, *bounds.second);
+}
+
+// Enclose the determinant of the ORIGINAL represented coordinates, including
+// subtraction roundoff. Every elementary operation is rounded outwards;
+// overflow, cancellation, and underflow can only make the filter inconclusive.
+// No floating-point sign without an enclosing interval is used as a verdict.
+static int vertex_contact_determinant_sign(const std::array<Vec3, 4>& p) {
+    std::array<VertexContactInterval, 3> a, b, c;
+    for (int axis = 0; axis < 3; ++axis) {
+        a[axis] = vertex_contact_outward(p[1][axis] - p[0][axis], p[1][axis] - p[0][axis]);
+        b[axis] = vertex_contact_outward(p[2][axis] - p[0][axis], p[2][axis] - p[0][axis]);
+        c[axis] = vertex_contact_outward(p[3][axis] - p[0][axis], p[3][axis] - p[0][axis]);
+    }
+    VertexContactInterval determinant{0.0, 0.0};
+    for (int axis = 0; axis < 3; ++axis) {
+        const int j = (axis + 1) % 3, k = (axis + 2) % 3;
+        const auto cross = vertex_contact_interval_subtract(
+            vertex_contact_interval_multiply(a[j], b[k]),
+            vertex_contact_interval_multiply(a[k], b[j]));
+        determinant = vertex_contact_interval_add(determinant,
+            vertex_contact_interval_multiply(cross, c[axis]));
+    }
+    if (!std::isfinite(determinant.lower) || !std::isfinite(determinant.upper)) return 0;
+    return determinant.lower > 0.0 ? 1 : (determinant.upper < 0.0 ? -1 : 0);
+}
+
+static bool vertex_contact_filtered_path_is_clear(
+    const std::array<Vec3, 4>& start, const std::array<Vec3, 4>& end) {
+    // For one moving vertex the determinant is affine along the ACTUAL stored
+    // endpoint segment. Equal certified nonzero signs exclude all coplanar
+    // events, hence initial contact and every possible NT/SS intersection.
+    // This certifies the path only; the endpoint gap is checked separately.
+    const int start_sign = vertex_contact_determinant_sign(start);
+    return start_sign != 0 && vertex_contact_determinant_sign(end) == start_sign;
+}
+
+// Allocated only for a backtracking update. All other vertices stay fixed
+// throughout that update, so its starting floor/direction are invariant.
+// In particular, do not repeat an exact SS closest-feature solve on every
+// trial just to propose the same separating direction.
+struct VertexContactEndpointCache {
+    double floor = 0.0;
+    Vec3 direction;
+    bool direction_ready = false;
+    std::optional<PreparedExactContactStep> exact;
+};
+
+static bool vertex_contact_endpoint_is_safe(const std::array<Vec3, 4>& start,
+    const std::array<Vec3, 4>& end, bool face, int vertex, int moving_dof,
+    VertexContactEndpointCache* cache, double certified_distance = 0.0) {
+    if (cache && cache->floor == 0.0) cache->floor = vertex_contact_gap_floor(start);
+    const double floor = cache ? cache->floor : vertex_contact_gap_floor(start);
+    // The caller has bounded the ACTUAL represented displacement by d_hat/8.
+    // A current barrier certificate provides initial distance > d_hat/2,
+    // even allowing ample roundoff slack for its AABB-distance calculation.
+    // Thus the whole path stays > 3*d_hat/8, beyond this numerical gap floor.
+    if (certified_distance > 0.0 && floor <= certified_distance / 8.0
+        && std::all_of(start.begin(), start.end(), [](const Vec3& p) { return p.allFinite(); })) return true;
+    if (vertex_swept_axis_separated(start, end, face, floor)) return true;
+    if (vertex_swept_projection_separated(start, end, face, floor,
+            vertex_contact_plane_direction(start, face))) return true;
+    if (vertex_swept_projection_separated(start, end, face, floor,
+            vertex_contact_plane_direction(end, face))) return true;
+    if (cache && !cache->direction_ready) {
+        cache->direction = vertex_contact_separating_direction(start, face);
+        cache->direction_ready = true;
+    }
+    if (vertex_swept_projection_separated(start, end, face, floor,
+            cache ? cache->direction : vertex_contact_separating_direction(start, face))) return true;
+    if (vertex_swept_projection_separated(start, end, face, floor,
+            vertex_contact_separating_direction(end, face))) return true;
+    if (vertex_contact_filtered_path_is_clear(start, end)) {
+        // Even when a gap is too close to the numerical floor for a floating
+        // certificate, the path proof remains useful: retain the EXACT gap
+        // comparison but do not solve the certified-clear path a second time.
+        if (vertex_swept_projection_separated(end, end, face, floor,
+                vertex_contact_plane_direction(end, face))) return true;
+        if (!cache) return contact_preserves_separation_exact(start, end, face, floor);
+    }
+
+    // Convert the represented endpoints and compute the exact starting gap
+    // once, sharing them between the gap-floor and whole-path checks.
+    if (cache && !cache->exact)
+        cache->exact.emplace(start, face, floor, moving_dof);
+    const auto result = cache ? cache->exact->test(end[moving_dof])
+        : exact_contact_step_result(start, end, face, floor);
+    if (result == ExactContactStepResult::InitialContact)
+        throw std::runtime_error("per_vertex_safe_step: exact initial "
+            + std::string(face ? "point-triangle" : "edge-edge")
+            + " contact at vertex " + std::to_string(vertex)
+            + "; a strictly separated state is required (no safe side history).");
+    return result == ExactContactStepResult::Safe;
+}
+
+static bool vertex_contact_endpoints_are_safe(const BroadPhase::Cache& cache,
+    const std::vector<Vec3>& x, int vertex, const Vec3& endpoint,
+    std::vector<VertexContactEndpointCache>* scratch = nullptr,
+    const safe_step_detail::VertexAabbRejections* rejections = nullptr) {
+    bool reuse_rejections = rejections && rejections->distance > 0.0
+        && std::isnormal(rejections->distance * rejections->distance)
+        && rejections->clear.size() == cache.vertex_nt[vertex].size() + cache.vertex_ss[vertex].size();
+    if (reuse_rejections) {
+        // One outward rounding encloses subtraction of the two original
+        // binary64 coordinates. An infinity/NaN cannot qualify. This is
+        // checked again for EVERY bisection endpoint, not inferred from alpha
+        // or the differently rounded proposed displacement.
+        for (int axis = 0; axis < 3; ++axis) {
+            const double bound = std::nextafter(std::abs(endpoint[axis] - x[vertex][axis]),
+                std::numeric_limits<double>::infinity());
+            reuse_rejections = reuse_rejections
+                && bound < rejections->distance / 16.0;
+        }
+    }
+    std::size_t contact = 0;
+    for (const auto& entry : cache.vertex_nt[vertex]) {
+        const auto& p = cache.nt_pairs[entry.pair_index];
+        const std::array<Vec3, 4> start = {x[p.node], x[p.tri_v[0]],
+            x[p.tri_v[1]], x[p.tri_v[2]]};
+        auto end = start;
+        end[entry.dof] = endpoint;
+        if (!vertex_contact_endpoint_is_safe(start, end, true, vertex, entry.dof,
+                scratch ? &(*scratch)[contact] : nullptr,
+                reuse_rejections && rejections->clear[contact] ? rejections->distance : 0.0)) return false;
+        ++contact;
+    }
+    for (const auto& entry : cache.vertex_ss[vertex]) {
+        const auto& p = cache.ss_pairs[entry.pair_index];
+        const std::array<Vec3, 4> start = {x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]]};
+        auto end = start;
+        end[entry.dof] = endpoint;
+        if (!vertex_contact_endpoint_is_safe(start, end, false, vertex, entry.dof,
+                scratch ? &(*scratch)[contact] : nullptr,
+                reuse_rejections && rejections->clear[contact] ? rejections->distance : 0.0)) return false;
+        ++contact;
+    }
+    return true;
+}
+
 double per_vertex_safe_step(
     const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi,
     const Vec3& raw_proposed_position, double safety, bool clip_ccd,
@@ -265,7 +516,9 @@ double per_vertex_safe_step(
     const Vec3 x_new = raw_proposed_position.cwiseMax(lo).cwiseMin(hi);
 
     const Vec3 dx = x_new - x[vi];
-    if (dx.squaredNorm() < 1e-28) return 0.0;
+    // A representable separating displacement can be smaller than 1e-14.
+    // Only a true stored-position no-op is discarded here.
+    if ((x_new.array() == x[vi].array()).all()) return 0.0;
 
     double toi_min = 1.0;
     bool has_collision = false;
@@ -316,10 +569,45 @@ double per_vertex_safe_step(
             });
     }
 
-    const double step = use_ogc
+    double step = use_ogc
         ? toi_min
         : (has_collision ? safety * toi_min : 1.0);
-    x[vi] = x[vi] + step * dx;
+    const Vec3 before = x[vi];
+    Vec3 accepted = before + step * dx;
+    if (clip_ccd && !use_ticcd && !use_ogc
+        && !vertex_contact_endpoints_are_safe(bp_cache, x, vi, accepted, nullptr, rejections)) {
+        // Search only within the CCD-approved prefix. Keep a verified endpoint
+        // (not just a floating alpha), validating all contacts for each new
+        // candidate before accepting it.
+        double lower = 0.0, upper = step;
+        Vec3 best = before;
+        Vec3 rejected = accepted;
+        std::vector<VertexContactEndpointCache> scratch(
+            bp_cache.vertex_nt[vi].size() + bp_cache.vertex_ss[vi].size());
+        for (int attempt = 0; attempt < 64; ++attempt) {
+            const double middle = lower + 0.5 * (upper - lower);
+            if (middle == lower || middle == upper) break;
+            const Vec3 trial = before + middle * dx;
+            if ((trial.array() == before.array()).all()) {
+                lower = middle;
+            } else if ((trial.array() == rejected.array()).all()) {
+                // Different alphas can round to exactly the same stored
+                // position. Reuse its verdict without changing the search.
+                upper = middle;
+            } else if ((trial.array() == best.array()).all()
+                || vertex_contact_endpoints_are_safe(bp_cache, x, vi, trial, &scratch, rejections)) {
+                lower = middle;
+                best = trial;
+            } else {
+                upper = middle;
+                rejected = trial;
+            }
+        }
+        step = lower;
+        accepted = best;
+    }
+    x[vi] = accepted;
+    if ((accepted.array() == before.array()).all()) return 0.0;
     return step;
 }
 
