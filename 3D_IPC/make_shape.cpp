@@ -194,7 +194,8 @@ int append_normalized_tetgen_solid(
     const std::string& element_filename,
     DeformedState& state, RefMesh& ref_mesh,
     const Vec3& center, const double target_max_extent,
-    const double density, const bool zero_based_index) {
+    const double density, const bool zero_based_index,
+    const Vec4& orientation) {
     if (!center.allFinite()) {
         throw std::invalid_argument(
             "append_normalized_tetgen_solid: center must be finite");
@@ -207,6 +208,7 @@ int append_normalized_tetgen_solid(
         throw std::invalid_argument(
             "append_normalized_tetgen_solid: density must be nonnegative and finite");
     }
+    const Vec4 q = quaternion_normalize(orientation);
     if (state.deformed_positions.size()
         > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         throw std::overflow_error(
@@ -236,8 +238,17 @@ int append_normalized_tetgen_solid(
 
     const Vec3 source_center = 0.5 * (lower + upper);
     const double scale = target_max_extent / source_max_extent;
-    for (Vec3& position : positions)
-        position = center + scale * (position - source_center);
+    if (q[1] == 0.0 && q[2] == 0.0 && q[3] == 0.0) {
+        // Preserve the existing arithmetic for unrotated callers.
+        for (Vec3& position : positions)
+            position = center + scale * (position - source_center);
+    } else {
+        // Rotate before create_solid so the tet rest data describes this
+        // orientation and the imported solid starts without elastic strain.
+        for (Vec3& position : positions)
+            position = center + quaternion_rotate(
+                q, scale * (position - source_center));
+    }
 
     // TetGen files can use either orientation convention. create_solid and
     // the TGSL face convention require positive det(Dm), so flip exactly one

@@ -234,7 +234,7 @@ TEST(BuildSquareMeshAlternatingDiagonals,
 }
 
 TEST(MixedExample,
-     StaggeredBunnySpotCubeGearDropsAboveOppositeEdgePinnedCloth) {
+     FourMixedObjectLayersAboveOppositeEdgePinnedCloth) {
     namespace fs = std::filesystem;
     static std::atomic<std::uint64_t> next_directory{0};
     const fs::path directory = fs::temp_directory_path()
@@ -366,37 +366,35 @@ TEST(MixedExample,
             * (bunny_surface_triangles + spot_surface_triangles
                + cube_triangles + gear_triangles);
     constexpr double cloth_height = 1.2;
-    constexpr double object_center_y = 1.75;
-    constexpr double upper_object_center_y = 2.10;
     constexpr double solid_max_extent = 0.44;
     constexpr double rigid_max_extent = 0.22;
-    constexpr double row_spacing = 0.45;
     enum BodyType {
         Bunny = 0, Spot = 1, Cube = 2, Gear = 3, BodyTypeCount = 4};
-    static constexpr int expected_row_order[rows][BodyTypeCount] = {
-        {Bunny, Cube, Gear, Spot},
-        {Gear, Spot, Bunny, Cube},
-        {Spot, Gear, Cube, Bunny},
-        {Cube, Bunny, Spot, Gear},
+    static constexpr int expected_layer_order[rows][BodyTypeCount] = {
+        {Cube, Spot, Gear, Bunny},
+        {Gear, Bunny, Cube, Spot},
+        {Bunny, Spot, Gear, Cube},
+        {Gear, Cube, Bunny, Spot},
     };
-    static constexpr int upper_type[rows] = {Cube, Gear, Bunny, Spot};
-    static constexpr int lower_type[rows] = {Bunny, Spot, Cube, Gear};
     // Literal expected centers keep this regression independent from the
     // production packing implementation.
     static constexpr double expected_x[rows][BodyTypeCount] = {
-        {-0.24081598158033032,  0.33999999999999997,
-         -0.24081598158033032,  0.09918401841966969},
-        { 0.010815981580330286, -0.33999999999999997,
-          0.3508159815803303, -0.33999999999999997},
-        { 0.24081598158033024, -0.34,
-          0.24081598158033024, -0.09918401841966977},
-        {-0.010815981580330314,  0.33999999999999997,
-         -0.35081598158033034,  0.33999999999999997},
+        { 0.28, 0.28, -0.28, -0.28},
+        { 0.28, 0.28, -0.28, -0.28},
+        {-0.28, 0.28,  0.28, -0.28},
+        {-0.28, 0.28,  0.28, -0.28},
+    };
+    static constexpr double expected_y[rows] = {1.52, 1.985, 2.45, 2.915};
+    static constexpr double expected_z[rows][BodyTypeCount] = {
+        { 0.27, -0.27, -0.27,  0.27},
+        {-0.27,  0.27,  0.27, -0.27},
+        {-0.27, -0.27,  0.27,  0.27},
+        { 0.27,  0.27, -0.27, -0.27},
     };
     const Vec3 bunny_extents(
-        0.44, 0.435584485870, 0.335752074786);
+        solid_max_extent, 0.335752074786, 0.435584485870);
     const Vec3 spot_extents(
-        0.241631963161, 0.433659138233, 0.44);
+        0.433659138233, 0.241631963161, solid_max_extent);
     const Vec3 cube_extents = Vec3::Constant(rigid_max_extent);
     const Vec3 gear_extents(
         0.22, 0.2179602766776875, 0.044025568994);
@@ -498,19 +496,13 @@ TEST(MixedExample,
         }
     }
 
-    const auto row_z = [=](const int row) {
-        return -1.5 * row_spacing
-            + static_cast<double>(row) * row_spacing;
-    };
     const auto object_center = [&](const int row, const int type) {
         return Vec3(
-            expected_x[row][type],
-            type == upper_type[row] ? upper_object_center_y : object_center_y,
-            row_z(row));
+            expected_x[row][type], expected_y[row], expected_z[row][type]);
     };
     const auto column_for_type = [](const int row, const int type) {
         for (int column = 0; column < BodyTypeCount; ++column) {
-            if (expected_row_order[row][column] == type)
+            if (expected_layer_order[row][column] == type)
                 return column;
         }
         return -1;
@@ -519,6 +511,7 @@ TEST(MixedExample,
         [&](const int node_base, const int node_count,
             const int first_tet, const int tet_count,
             const Vec3& expected_center, const Vec3& expected_extents,
+            const std::array<Vec3, 3>& expected_material_edges,
             const double expected_mass) {
             const int node_end = node_base + node_count;
             Vec3 lower = state.deformed_positions[node_base];
@@ -543,6 +536,17 @@ TEST(MixedExample,
             EXPECT_GT(lower.y(), cloth_height + params.d_hat);
             EXPECT_NEAR(actual_mass, expected_mass, 1.0e-12);
 
+            // Verify each animal's rotation using its material +x, +y,
+            // and +z fixture edges, independently of its AABB dimensions.
+            for (int axis = 0; axis < 3; ++axis) {
+                const Vec3 actual_edge =
+                    state.deformed_positions[node_base + axis + 1]
+                    - state.deformed_positions[node_base];
+                EXPECT_LT((actual_edge - expected_material_edges[
+                              static_cast<std::size_t>(axis)]).norm(),
+                    1.0e-14);
+            }
+
             for (int element = first_tet;
                  element < first_tet + tet_count; ++element) {
                 EXPECT_GT(ref_mesh.tet_rest_data[element].measure, 0.0);
@@ -551,6 +555,17 @@ TEST(MixedExample,
                     EXPECT_GE(node, node_base);
                     EXPECT_LT(node, node_end);
                 }
+                const Vec3& x0 =
+                    state.deformed_positions[ref_mesh.tets[4 * element]];
+                Mat33 Ds;
+                for (int axis = 0; axis < 3; ++axis) {
+                    Ds.col(axis) = state.deformed_positions[
+                        ref_mesh.tets[4 * element + axis + 1]] - x0;
+                }
+                // Rotation belongs to the rest pose, so no tetrahedron may
+                // begin with elastic strain.
+                EXPECT_TRUE((Ds * ref_mesh.tet_rest_data[element].Dm_inverse)
+                                .isApprox(Mat33::Identity(), 1.0e-13));
             }
             return ObjectBounds{lower, upper};
         };
@@ -559,8 +574,15 @@ TEST(MixedExample,
     // by the production Bunny AABB dimensions.
     const double expected_bunny_mass =
         args.solid_density * bunny_extents.prod() / 6.0;
+    // A +90-degree turn about X keeps Bunny's front/back axis horizontal:
+    // material +x -> world +x, +y -> +z, and +z -> -y.
+    const std::array<Vec3, 3> expected_bunny_edges = {
+        Vec3(solid_max_extent, 0.0, 0.0),
+        Vec3(0.0, 0.0, 0.435584485870),
+        Vec3(0.0, -0.01 * solid_max_extent, 0.0),
+    };
     for (int row = 0; row < rows; ++row) {
-        SCOPED_TRACE("bunny row " + std::to_string(row));
+        SCOPED_TRACE("bunny layer " + std::to_string(row));
         const int column = column_for_type(row, Bunny);
         ASSERT_GE(column, 0);
         object_bounds[static_cast<std::size_t>(4 * row + column)] =
@@ -568,16 +590,22 @@ TEST(MixedExample,
             cloth_vertices + row * bunny_vertices,
             bunny_vertices, row * bunny_tetrahedra, bunny_tetrahedra,
             object_center(row, Bunny), bunny_extents,
-            expected_bunny_mass);
+            expected_bunny_edges, expected_bunny_mass);
     }
 
     const double expected_spot_mass =
         args.solid_density * spot_extents.prod() / 6.0;
+    // Spot's +90-degree turn about Z maps +x -> +y and +y -> -x.
+    const std::array<Vec3, 3> expected_spot_edges = {
+        Vec3(0.0, 0.241631963161, 0.0),
+        Vec3(-0.433659138233, 0.0, 0.0),
+        Vec3(0.0, 0.0, solid_max_extent),
+    };
     constexpr int spot_node_base =
         cloth_vertices + rows * bunny_vertices;
     constexpr int spot_tet_base = rows * bunny_tetrahedra;
     for (int row = 0; row < rows; ++row) {
-        SCOPED_TRACE("spot row " + std::to_string(row));
+        SCOPED_TRACE("spot layer " + std::to_string(row));
         const int column = column_for_type(row, Spot);
         ASSERT_GE(column, 0);
         object_bounds[static_cast<std::size_t>(4 * row + column)] =
@@ -585,14 +613,14 @@ TEST(MixedExample,
             spot_node_base + row * spot_vertices,
             spot_vertices, spot_tet_base + row * spot_tetrahedra,
             spot_tetrahedra, object_center(row, Spot), spot_extents,
-            expected_spot_mass);
+            expected_spot_edges, expected_spot_mass);
     }
 
     const double expected_cube_mass = args.rigid_density
         * rigid_max_extent * rigid_max_extent * rigid_max_extent;
     constexpr int first_rigid_node = cloth_vertices + solid_vertices;
     for (int row = 0; row < rows; ++row) {
-        SCOPED_TRACE("cube row " + std::to_string(row));
+        SCOPED_TRACE("cube layer " + std::to_string(row));
         const int rb = row;
         const int expected_node_base =
             first_rigid_node + row * cube_vertices;
@@ -640,7 +668,7 @@ TEST(MixedExample,
     constexpr int first_gear_node =
         first_rigid_node + rows * cube_vertices;
     for (int row = 0; row < rows; ++row) {
-        SCOPED_TRACE("gear row " + std::to_string(row));
+        SCOPED_TRACE("gear layer " + std::to_string(row));
         const int rb = rows + row;
         const int expected_node_base = first_gear_node + row * gear_vertices;
         const Vec3 expected_center = object_center(row, Gear);
@@ -684,23 +712,13 @@ TEST(MixedExample,
             ObjectBounds{lower, upper};
     }
 
-    // Preserve all four types in every row, with one lifted object directly
-    // over its chosen lower object. The other eight objects are repacked
-    // horizontally, while their original height and row depth are unchanged.
-    int upper_object_count = 0;
-    int lower_object_count = 0;
-    int independent_object_count = 0;
+    // Each horizontal layer has four distinct occupied columns at a common
+    // height, one of every object type, and its own ordering.
     for (int row = 0; row < rows; ++row) {
-        EXPECT_DOUBLE_EQ(state.x_coms[row].y(), object_center(row, Cube).y());
-        EXPECT_DOUBLE_EQ(
-            state.x_coms[rows + row].y(), object_center(row, Gear).y());
-        EXPECT_DOUBLE_EQ(state.x_coms[row].z(), row_z(row));
-        EXPECT_DOUBLE_EQ(
-            state.x_coms[rows + row].z(), row_z(row));
-
+        SCOPED_TRACE("horizontal layer " + std::to_string(row));
         std::array<int, BodyTypeCount> type_counts{};
         for (int column = 0; column < BodyTypeCount; ++column) {
-            const int type = expected_row_order[row][column];
+            const int type = expected_layer_order[row][column];
             ASSERT_GE(type, 0);
             ASSERT_LT(type, BodyTypeCount);
             ++type_counts[static_cast<std::size_t>(type)];
@@ -708,32 +726,34 @@ TEST(MixedExample,
                 static_cast<std::size_t>(4 * row + column)];
             const Vec3 actual_center = 0.5 * (bounds.lower + bounds.upper);
             EXPECT_NEAR(actual_center.x(), expected_x[row][type], 1.0e-14);
+            EXPECT_NEAR(actual_center.y(), expected_y[row], 1.0e-14);
+            EXPECT_NEAR(actual_center.z(), expected_z[row][type], 1.0e-14);
             EXPECT_NEAR(
-                actual_center.y(), object_center(row, type).y(), 1.0e-14);
-            EXPECT_NEAR(actual_center.z(), row_z(row), 1.0e-14);
-            if (type == upper_type[row]) {
-                ++upper_object_count;
-                EXPECT_NEAR(actual_center.y(), 2.10, 1.0e-14);
-            } else {
-                EXPECT_NEAR(actual_center.y(), 1.75, 1.0e-14);
-                if (type == lower_type[row])
-                    ++lower_object_count;
-                else
-                    ++independent_object_count;
+                actual_center.x(), column % 2 == 0 ? -0.28 : 0.28, 1.0e-14);
+            EXPECT_NEAR(
+                actual_center.z(), column < 2 ? -0.27 : 0.27, 1.0e-14);
+            for (int previous = 0; previous < column; ++previous) {
+                const ObjectBounds& previous_bounds = object_bounds[
+                    static_cast<std::size_t>(4 * row + previous)];
+                const Vec3 previous_center =
+                    0.5 * (previous_bounds.lower + previous_bounds.upper);
+                EXPECT_NEAR(
+                    actual_center.y(), previous_center.y(), 1.0e-14);
+                EXPECT_GT(
+                    std::hypot(actual_center.x() - previous_center.x(),
+                               actual_center.z() - previous_center.z()),
+                    0.5);
             }
         }
         for (const int count : type_counts)
             EXPECT_EQ(count, 1);
         for (int previous = 0; previous < row; ++previous) {
             EXPECT_FALSE(std::equal(
-                expected_row_order[row],
-                expected_row_order[row] + BodyTypeCount,
-                expected_row_order[previous]));
+                expected_layer_order[row],
+                expected_layer_order[row] + BodyTypeCount,
+                expected_layer_order[previous]));
         }
     }
-    EXPECT_EQ(upper_object_count, 4);
-    EXPECT_EQ(lower_object_count, 4);
-    EXPECT_EQ(independent_object_count, 8);
 
     // The tighter placement is intentional, but every production-shaped
     // fixture AABB must still be disjoint before the first solve. Checking all
@@ -763,68 +783,65 @@ TEST(MixedExample,
             minimum_object_gap = std::min(minimum_object_gap, gap);
         }
     }
-    constexpr double expected_tight_gap = 0.01;
+    constexpr double expected_tight_gap = 0.102207757065;
     EXPECT_NEAR(minimum_object_gap, expected_tight_gap, 5.0e-13);
 
-    // Each upper object has its x/z center aligned with its chosen lower
-    // object, but starts with a positive vertical gap rather than an overlap.
-    for (int row = 0; row < rows; ++row) {
-        SCOPED_TRACE("vertical drop pair in row " + std::to_string(row));
-        const ObjectBounds& upper = object_bounds[static_cast<std::size_t>(
-            4 * row + column_for_type(row, upper_type[row]))];
-        const ObjectBounds& lower = object_bounds[static_cast<std::size_t>(
-            4 * row + column_for_type(row, lower_type[row]))];
-        const Vec3 upper_center = 0.5 * (upper.lower + upper.upper);
-        const Vec3 lower_center = 0.5 * (lower.lower + lower.upper);
-        EXPECT_NEAR(upper_center.x(), lower_center.x(), 1.0e-14);
-        EXPECT_NEAR(upper_center.z(), lower_center.z(), 1.0e-14);
-        EXPECT_NEAR(upper_center.y() - lower_center.y(), 0.35, 1.0e-14);
-        EXPECT_GE(upper.lower.y() - lower.upper.y(), 0.02 - 1.0e-14);
-
-        // Packing occupies exactly three x columns: the stacked pair counts
-        // as one column whose bounds include both objects. Neighboring column
-        // AABBs retain a 10 mm horizontal gap, and the row stays centered.
-        std::array<ObjectBounds, 3> occupied_columns;
-        int occupied_count = 0;
+    // All twelve adjacent-layer pairs are aligned for successive landings.
+    // Their projected footprints overlap, with positive vertical clearance.
+    int aligned_pair_count = 0;
+    bool gear_above_cube = false;
+    bool bunny_above_spot = false;
+    bool gear_above_bunny = false;
+    bool bunny_above_gear = false;
+    for (int row = 1; row < rows; ++row) {
+        SCOPED_TRACE("vertical pairs below layer " + std::to_string(row));
         for (int column = 0; column < BodyTypeCount; ++column) {
-            const int type = expected_row_order[row][column];
-            if (type == upper_type[row])
-                continue;
-            ASSERT_LT(occupied_count, 3);
-            ObjectBounds bounds = object_bounds[static_cast<std::size_t>(
+            SCOPED_TRACE("column " + std::to_string(column));
+            const ObjectBounds& upper = object_bounds[static_cast<std::size_t>(
                 4 * row + column)];
-            if (type == lower_type[row]) {
-                bounds.lower = bounds.lower.cwiseMin(upper.lower);
-                bounds.upper = bounds.upper.cwiseMax(upper.upper);
-            }
-            occupied_columns[static_cast<std::size_t>(occupied_count++)] = bounds;
-        }
-        ASSERT_EQ(occupied_count, 3);
-        for (int column = 1; column < occupied_count; ++column) {
+            const ObjectBounds& lower = object_bounds[static_cast<std::size_t>(
+                4 * (row - 1) + column)];
+            const Vec3 upper_center = 0.5 * (upper.lower + upper.upper);
+            const Vec3 lower_center = 0.5 * (lower.lower + lower.upper);
+            EXPECT_NEAR(upper_center.x(), lower_center.x(), 1.0e-14);
+            EXPECT_NEAR(upper_center.z(), lower_center.z(), 1.0e-14);
             EXPECT_NEAR(
-                occupied_columns[static_cast<std::size_t>(column)].lower.x()
-                    - occupied_columns[static_cast<std::size_t>(column - 1)]
-                          .upper.x(),
-                0.01, 5.0e-13);
+                upper_center.y() - lower_center.y(), 0.465, 1.0e-14);
+            EXPECT_GE(upper.lower.y() - lower.upper.y(), 0.025 - 1.0e-14);
+            for (const int axis : {0, 2}) {
+                EXPECT_GT(
+                    std::min(upper.upper[axis], lower.upper[axis])
+                        - std::max(upper.lower[axis], lower.lower[axis]),
+                    0.0);
+            }
+            ++aligned_pair_count;
+            const int upper_type = expected_layer_order[row][column];
+            const int lower_type = expected_layer_order[row - 1][column];
+            gear_above_cube |= upper_type == Gear && lower_type == Cube;
+            bunny_above_spot |= upper_type == Bunny && lower_type == Spot;
+            gear_above_bunny |= upper_type == Gear && lower_type == Bunny;
+            bunny_above_gear |= upper_type == Bunny && lower_type == Gear;
+            EXPECT_FALSE(upper_type == Spot && lower_type == Gear);
         }
-        EXPECT_NEAR(
-            occupied_columns.front().lower.x()
-                + occupied_columns.back().upper.x(),
-            0.0, 5.0e-13);
-        EXPECT_NEAR(
-            occupied_columns.back().upper.x()
-                - occupied_columns.front().lower.x(),
-            0.9216319631606606, 5.0e-13);
     }
+    EXPECT_EQ(aligned_pair_count, 12);
+    EXPECT_TRUE(gear_above_cube);
+    EXPECT_TRUE(bunny_above_spot);
+    EXPECT_TRUE(gear_above_bunny);
+    EXPECT_TRUE(bunny_above_gear);
     double minimum_cloth_gap = std::numeric_limits<double>::infinity();
     for (int object = 0; object < rows * 4; ++object) {
-        const double gap =
-            object_bounds[static_cast<std::size_t>(object)].lower.y()
-            - cloth_height;
+        const ObjectBounds& bounds =
+            object_bounds[static_cast<std::size_t>(object)];
+        const double gap = bounds.lower.y() - cloth_height;
         EXPECT_GT(gap, params.d_hat);
+        for (const int axis : {0, 2}) {
+            EXPECT_GT(bounds.lower[axis], -2.0);
+            EXPECT_LT(bounds.upper[axis], 2.0);
+        }
         minimum_cloth_gap = std::min(minimum_cloth_gap, gap);
     }
-    constexpr double expected_cloth_gap = 0.332207757065;
+    constexpr double expected_cloth_gap = 0.152123962607;
     EXPECT_NEAR(minimum_cloth_gap, expected_cloth_gap, 1.0e-13);
 
     // Surface topology follows the same type-major append order as the node
@@ -1325,6 +1342,127 @@ TEST(AppendNormalizedTetGenSolid,
 
     std::error_code error;
     fs::remove_all(directory, error);
+}
+
+TEST(AppendNormalizedTetGenSolid,
+     RotatesRestPosePreservesMassAndRejectsInvalidOrientationsTransactionally) {
+    namespace fs = std::filesystem;
+    static std::atomic<std::uint64_t> next_directory{0};
+    const fs::path directory = fs::temp_directory_path()
+        / ("ipc_rotated_normalized_tetgen_solid_"
+           + std::to_string(
+               std::chrono::steady_clock::now().time_since_epoch().count())
+           + "_" + std::to_string(next_directory.fetch_add(1)));
+    fs::create_directories(directory);
+    struct TemporaryDirectoryGuard {
+        fs::path path;
+        ~TemporaryDirectoryGuard() {
+            std::error_code error;
+            fs::remove_all(path, error);
+        }
+    } directory_guard{directory};
+    const fs::path node_file = directory / "shape.node";
+    const fs::path element_file = directory / "shape.ele";
+    {
+        std::ofstream output(node_file);
+        ASSERT_TRUE(output.good());
+        output << "4 3 0 0\n"
+               << "0 -2 -1 0\n"
+               << "1  2 -1 0\n"
+               << "2 -2  1 0\n"
+               << "3 -2 -1 1\n";
+    }
+    {
+        std::ofstream output(element_file);
+        ASSERT_TRUE(output.good());
+        output << "1 4 0\n"
+               << "0 0 1 2 3\n";
+    }
+
+    RefMesh ref_mesh;
+    DeformedState state;
+    ASSERT_EQ(append_normalized_tetgen_solid(
+        node_file.string(), element_file.string(), state, ref_mesh,
+        Vec3(-3.0, -4.0, -5.0), 2.0, 6.0, true), 0);
+    const Vec3 target_center(5.0, 6.0, 7.0);
+    // Scaling the quaternion also verifies that the importer normalizes it.
+    const double half_angle = 0.25 * std::acos(-1.0);
+    const Vec4 orientation(
+        3.0 * std::cos(half_angle), 0.0, 0.0,
+        3.0 * std::sin(half_angle));
+    const int base = append_normalized_tetgen_solid(
+        node_file.string(), element_file.string(), state, ref_mesh,
+        target_center, 2.0, 6.0, true, orientation);
+    ASSERT_EQ(base, 4);
+    ASSERT_EQ(state.deformed_positions.size(), 8U);
+    const std::array<Vec3, 4> expected_offsets = {
+        Vec3(0.5, -1.0, -0.25), Vec3(0.5, 1.0, -0.25),
+        Vec3(-0.5, -1.0, -0.25), Vec3(0.5, -1.0, 0.25),
+    };
+    for (int local = 0; local < 4; ++local) {
+        EXPECT_TRUE(state.deformed_positions[base + local].isApprox(
+            target_center + expected_offsets[local], 1.0e-14));
+        EXPECT_NEAR(ref_mesh.mass[base + local], ref_mesh.mass[local], 1.0e-14);
+    }
+    ASSERT_EQ(ref_mesh.tet_rest_data.size(), 2U);
+    const TetRestData& rest = ref_mesh.tet_rest_data[1];
+    EXPECT_GT(rest.measure, 0.0);
+    EXPECT_NEAR(rest.measure, 1.0 / 6.0, 1.0e-15);
+    EXPECT_NEAR(rest.measure, ref_mesh.tet_rest_data[0].measure, 1.0e-15);
+    EXPECT_NEAR(
+        std::accumulate(ref_mesh.mass.begin() + base, ref_mesh.mass.end(), 0.0),
+        1.0, 1.0e-14);
+    const Vec3& x0 = state.deformed_positions[ref_mesh.tets[4]];
+    Mat33 Ds;
+    for (int axis = 0; axis < 3; ++axis) {
+        Ds.col(axis) =
+            state.deformed_positions[ref_mesh.tets[5 + axis]] - x0;
+    }
+    EXPECT_GT(Ds.determinant(), 0.0);
+    EXPECT_TRUE((Ds * rest.Dm_inverse).isApprox(Mat33::Identity(), 1.0e-14));
+
+    // Rejected orientations must preserve the already populated solid state.
+    const RefMesh previous_mesh = ref_mesh;
+    const DeformedState previous_state = state;
+    const std::array<Vec4, 3> invalid_orientations = {
+        Vec4::Zero(),
+        Vec4(std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0, 1.0),
+        Vec4(1.0, 0.0, 0.0, std::numeric_limits<double>::infinity()),
+    };
+    for (const Vec4& invalid_orientation : invalid_orientations) {
+        EXPECT_THROW(
+            append_normalized_tetgen_solid(
+                node_file.string(), element_file.string(), state, ref_mesh,
+                target_center, 2.0, 6.0, true, invalid_orientation),
+            std::invalid_argument);
+        ASSERT_EQ(state.deformed_positions.size(),
+                  previous_state.deformed_positions.size());
+        ASSERT_EQ(state.velocities.size(), previous_state.velocities.size());
+        for (std::size_t node = 0; node < state.deformed_positions.size(); ++node) {
+            EXPECT_TRUE(state.deformed_positions[node].isApprox(
+                previous_state.deformed_positions[node], 0.0));
+            EXPECT_TRUE(state.velocities[node].isApprox(
+                previous_state.velocities[node], 0.0));
+        }
+        EXPECT_EQ(ref_mesh.num_positions, previous_mesh.num_positions);
+        EXPECT_EQ(ref_mesh.tets, previous_mesh.tets);
+        EXPECT_EQ(ref_mesh.tris, previous_mesh.tris);
+        EXPECT_EQ(ref_mesh.mass, previous_mesh.mass);
+        EXPECT_EQ(ref_mesh.tet_adj, previous_mesh.tet_adj);
+        EXPECT_EQ(ref_mesh.tet_nodes, previous_mesh.tet_nodes);
+        EXPECT_EQ(ref_mesh.surface_nodes, previous_mesh.surface_nodes);
+        EXPECT_EQ(ref_mesh.node_to_rb, previous_mesh.node_to_rb);
+        EXPECT_EQ(ref_mesh.deformable_nodes, previous_mesh.deformable_nodes);
+        ASSERT_EQ(ref_mesh.tet_rest_data.size(),
+                  previous_mesh.tet_rest_data.size());
+        for (std::size_t element = 0;
+             element < ref_mesh.tet_rest_data.size(); ++element) {
+            EXPECT_DOUBLE_EQ(ref_mesh.tet_rest_data[element].measure,
+                             previous_mesh.tet_rest_data[element].measure);
+            EXPECT_TRUE(ref_mesh.tet_rest_data[element].Dm_inverse.isApprox(
+                previous_mesh.tet_rest_data[element].Dm_inverse, 0.0));
+        }
+    }
 }
 
 TEST(AppendNormalizedObjRigidBody,
@@ -3721,6 +3859,93 @@ TEST(ClothCylinderDropExample, ContactDefaultIsSceneSpecificAndFlagsOverrideIt) 
     IPCArgs3D other_scene;
     ASSERT_TRUE(other_scene.parse(1, argv));
     EXPECT_DOUBLE_EQ(other_scene.d_hat, 0.005);
+}
+
+TEST(ClothCylinderDropExample,
+     RaisedCenteredPlacementOverridesPreserveClearanceAndGroundHeight) {
+    IPCArgs3D args;
+    char program[] = "make_shape_test";
+    char example_key[] = "--example";
+    char example_value[] = "14";
+    char height_key[] = "--drop_first_y";
+    char height_value[] = "2.20";
+    char cylinder_height_key[] = "--cyl_cy";
+    char cylinder_height_value[] = "1.60";
+    char spacing_key[] = "--drop_spacing";
+    char spacing_value[] = "0.012";
+    char cylinder_x_key[] = "--cyl_cx";
+    char cylinder_x_value[] = "0.0";
+    char* argv[] = {program, example_key, example_value,
+                    height_key, height_value,
+                    cylinder_height_key, cylinder_height_value,
+                    spacing_key, spacing_value,
+                    cylinder_x_key, cylinder_x_value};
+    ASSERT_TRUE(args.parse(11, argv));
+    EXPECT_DOUBLE_EQ(args.drop_first_y, 2.20);
+    EXPECT_DOUBLE_EQ(args.cyl_cy, 1.60);
+    EXPECT_DOUBLE_EQ(args.cyl_cx, args.drop_cx);
+    EXPECT_DOUBLE_EQ(args.cyl_cz, args.drop_cz);
+    EXPECT_DOUBLE_EQ(args.drop_spacing, 0.012);
+    EXPECT_DOUBLE_EQ(args.cyl_radius, 0.35);
+    EXPECT_DOUBLE_EQ(args.cyl_sdf_padding, 0.012);
+
+    // Exercise explicit raised/centered placement without changing defaults.
+    args.drop_stack_count = 2;
+    args.drop_cloth_nx = 2;
+    args.drop_cloth_ny = 2;
+    args.cyl_ground_size = 1.0;
+    args.cyl_ground_cell_size = 1.0;
+    args.cyl_nu = 8;
+    args.cyl_cap_rings = 1;
+    RefMesh ref_mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    std::vector<Vec3> static_x;
+    std::vector<int> static_tris;
+    build_cloth_cylinder_drop_example(
+        args, ref_mesh, state, X, pins, params, static_x, static_tris);
+
+    ASSERT_EQ(params.sdf_cylinders.size(), 1U);
+    const CylinderSDF& cylinder = params.sdf_cylinders[0];
+    EXPECT_DOUBLE_EQ(cylinder.point.y(), 1.60);
+    EXPECT_NEAR(cylinder.radius, 0.362, 1.0e-14);
+    ASSERT_EQ(state.deformed_positions.size(), 18U);
+    for (int node = 0; node < 9; ++node) {
+        const double lower_y = state.deformed_positions[node].y();
+        const double upper_y = state.deformed_positions[9 + node].y();
+        EXPECT_DOUBLE_EQ(lower_y, 2.20);
+        EXPECT_NEAR(upper_y - lower_y, 0.012, 1.0e-14);
+        EXPECT_NEAR(lower_y - cylinder.point.y(), 0.60, 1.0e-14);
+        EXPECT_NEAR(lower_y - cylinder.point.y() - cylinder.radius,
+                    0.238, 1.0e-14);
+    }
+    for (int sheet = 0; sheet < args.drop_stack_count; ++sheet) {
+        Vec3 center = Vec3::Zero();
+        for (int node = 0; node < 9; ++node)
+            center += state.deformed_positions[9 * sheet + node];
+        center /= 9;
+        EXPECT_NEAR(center.x(), cylinder.point.x(), 1.0e-14);
+        EXPECT_NEAR(center.z(), cylinder.point.z(), 1.0e-14);
+    }
+
+    ASSERT_EQ(params.sdf_planes.size(), 1U);
+    EXPECT_TRUE(params.sdf_planes[0].point.isZero(0.0));
+    EXPECT_TRUE(params.sdf_planes[0].normal.isApprox(Vec3::UnitY()));
+    constexpr std::size_t ground_vertices = 4;
+    ASSERT_GT(static_x.size(), ground_vertices);
+    for (std::size_t node = 0; node < ground_vertices; ++node)
+        EXPECT_DOUBLE_EQ(static_x[node].y(), 0.0);
+    double cylinder_min_y = std::numeric_limits<double>::infinity();
+    double cylinder_max_y = -std::numeric_limits<double>::infinity();
+    for (std::size_t node = ground_vertices; node < static_x.size(); ++node) {
+        cylinder_min_y = std::min(cylinder_min_y, static_x[node].y());
+        cylinder_max_y = std::max(cylinder_max_y, static_x[node].y());
+    }
+    EXPECT_NEAR(cylinder_min_y, 1.25, 1.0e-14);
+    EXPECT_NEAR(cylinder_max_y, 1.95, 1.0e-14);
+    EXPECT_NEAR(0.5 * (cylinder_min_y + cylinder_max_y), 1.60, 1.0e-14);
 }
 
 TEST(ClothCylinderDropExample, DefaultSheetsAreSeparateFreeAndClearOfColliders) {

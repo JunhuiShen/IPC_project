@@ -28,7 +28,9 @@ int append_deformable_polygon_prism(
     const Vec4& orientation = Vec4(1.0, 0.0, 0.0, 0.0));
 
 // Load a linear TetGen mesh, recenter it at `center`, and uniformly scale it
-// so its largest axis-aligned bounding-box extent is `target_max_extent`.
+// so its largest source-axis bounding-box extent is `target_max_extent`.
+// `orientation` rotates the normalized mesh about its bounding-box center
+// before translation and rest-data initialization. The default is unrotated.
 // `zero_based_index` describes the numbering in both input files. Any
 // negatively oriented input tetrahedra are flipped before create_solid.
 // Returns the first global node index appended for this solid.
@@ -37,7 +39,8 @@ int append_normalized_tetgen_solid(
     const std::string& element_filename,
     DeformedState& state, RefMesh& ref_mesh,
     const Vec3& center, double target_max_extent, double density,
-    bool zero_based_index = false);
+    bool zero_based_index = false,
+    const Vec4& orientation = Vec4(1.0, 0.0, 0.0, 0.0));
 
 // Load a closed OBJ surface, remove unreferenced vertices, recenter its
 // axis-aligned bounding box, and uniformly scale its largest extent to

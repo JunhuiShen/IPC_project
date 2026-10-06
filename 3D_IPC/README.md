@@ -95,7 +95,7 @@ There is no solid-only scene among the categorized examples.
 | 7 | — | Ten rigid hexagonal prisms stacked above a ground plane. |
 | 8 | Mixed | Two Bunny/Spot solid, rigid cube, and rigid gear cycles stacked above pinned cloth. |
 | 9 | Rigid body only | A dynamic threaded bolt falling through a nut with fixed position and orientation. |
-| 10 | Mixed | Four rows of Bunny/Spot solids, rigid cubes, and rigid gears dropping onto pinned cloth. |
+| 10 | Mixed | Four horizontal layers of side-lying Bunny/Spot solids, rigid cubes, and rigid gears dropping onto pinned cloth. |
 | 11 | Cloth only | A pinned cloth roll unrolling down an SDF ramp onto the ground. |
 | 12 | Cloth only | Three cloth layers with one fixed edge and one oscillating edge. |
 | 13 | Rigid body only | A linked wrecking ball swinging into a wall of 560 rigid cubes. |
@@ -268,7 +268,7 @@ Examples 8–14 use the following scene presets from `example.cpp`:
 ./build/3D_sim --example 9 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj \
   --use_basic_experimental true --use_simd true
 
-# Example 10: four Bunny/Spot/cube/gear rows dropped onto pinned cloth
+# Example 10: four horizontal layers of differently ordered Bunny/Spot/cube/gear groups; Bunny and Spot lie on their sides
 ./build/3D_sim --example 10 --num_frames 200 --fps 30 --substeps 15 --max_substep_iters 25 --fixed_iters \
   --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 \
   --d_hat 0.019 --k_barrier 1000 --friction_coefficient 0 --use_ccd true \

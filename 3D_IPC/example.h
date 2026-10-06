@@ -172,13 +172,14 @@ void build_dynamic_bolt_into_fixed_nut_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
-// Example 10: four rows of a tetrahedral Bunny, tetrahedral Spot, rigid cube,
-// and rigid gear above a horizontal cloth pinned along two opposite sides.
-// One body per row starts 0.35 higher and directly over another body: cube
-// over Bunny, gear over Spot, Bunny over cube, and Spot over gear. All bodies
-// retain their authored, untilted orientations and initial downward velocity.
-// Each row packs into three occupied columns with 0.01 horizontal clearance;
-// stacked pairs have at least 0.02 initial vertical clearance.
+// Example 10: four horizontal layers above a cloth pinned along two opposite
+// sides. Each layer contains one Bunny, Spot, cube and gear at the same center
+// height in a compact 2x2 arrangement, using a different permutation per layer.
+// Layers share their four x/z column positions and have at least 0.025 vertical
+// clearance. The lowest objects start at least 0.10 above the cloth.
+// Bunny rolls 90 degrees about x and Spot 90 degrees about z to lie on their
+// sides, matching each asset's forward axis. These orientations are baked into
+// their rest shapes. Rigid orientations, scales and downward velocities remain.
 void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,

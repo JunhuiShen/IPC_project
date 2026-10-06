@@ -1345,8 +1345,8 @@ void build_dynamic_bolt_into_fixed_nut_example(
 }
 
 // ---------------------------------------------------------------------------
-// Example 10: four Bunny / Spot / cube / gear rows, each with one elevated
-// object above another, falling onto a pinned cloth
+// Example 10: four horizontal layers, each with a Bunny, Spot, cube and gear,
+// falling onto a pinned cloth with a different ordering in each layer
 // ---------------------------------------------------------------------------
 // Smaller substep/iteration budgets can suppress the cubes' bounce.
 /* command line:
@@ -1410,84 +1410,68 @@ void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
             state.deformed_positions);
     }
 
-    // Pack four collision-free rows containing one Bunny, Spot, cube, and
-    // gear each into three occupied columns per row. One column is a pair
-    // with an upper body that can fall onto the lower body as the cloth slows
-    // it down. Keep authored orientations, scales and velocities unchanged.
-    constexpr int rows = 4;
-    constexpr double object_center_y = 1.75;
+    // Four horizontal layers make successive object-on-object landings visible.
+    // Retain scales, velocities and type-major append order. Lay the Bunny
+    // and Spot solids on their sides while leaving rigid orientations alone.
+    constexpr int layers = 4;
     constexpr double solid_max_extent = 0.44;
     constexpr double rigid_max_extent = 0.22;
-    constexpr double object_gap = 0.01;
-    constexpr double row_spacing = 0.45;
+    constexpr double cloth_drop_clearance = 0.10;
+    constexpr double layer_clearance = 0.025;
     enum BodyType {
         Bunny = 0, Spot = 1, Cube = 2, Gear = 3, BodyTypeCount = 4};
-    static constexpr int row_order[rows][BodyTypeCount] = {
-        {Bunny, Cube, Gear, Spot},
-        {Gear, Spot, Bunny, Cube},
-        {Spot, Gear, Cube, Bunny},
-        {Cube, Bunny, Spot, Gear},
+    // Rows run bottom to top; columns are front-left, front-right, back-left,
+    // back-right. Each layer contains every type once in a different order.
+    // Adjacent layers include gear-over-cube and Bunny-over-Spot contacts,
+    // plus both gear/Bunny orders, without a Spot directly above a gear.
+    static constexpr int layer_order[layers][BodyTypeCount] = {
+        {Cube, Spot, Gear, Bunny},
+        {Gear, Bunny, Cube, Spot},
+        {Bunny, Spot, Gear, Cube},
+        {Gear, Cube, Bunny, Spot},
     };
-    static constexpr int upper_body[rows] = {Cube, Gear, Bunny, Spot};
-    static constexpr int lower_body[rows] = {Bunny, Spot, Cube, Gear};
-    // A solid's half extent is at most 0.22 and a rigid body's at most 0.11,
-    // leaving at least 0.02 of initial vertical AABB clearance for each pair.
-    constexpr double upper_body_lift = 0.35;
-
-    // Type-aware packing follows the normalized production x AABBs. Spot's
-    // source x/z extent ratio is 0.9425986 / 1.716426; Bunny, cube, and gear
-    // all use their requested maximum extent along x. Give a stacked column
-    // the larger body's width, remove the lifted body's old slot, and leave
-    // 10 mm between occupied column AABBs. Spot has the largest z extent
-    // (0.44 m), so the unchanged row spacing also leaves 10 mm between rows.
-    constexpr double spot_x_extent =
-        solid_max_extent * 0.9425986 / 1.716426;
-    static constexpr double type_x_extent[BodyTypeCount] = {
-        solid_max_extent, spot_x_extent,
-        rigid_max_extent, rigid_max_extent};
-    double object_center_x[rows][BodyTypeCount] = {};
-    for (int row = 0; row < rows; ++row) {
-        const auto column_width = [&](const int type) {
-            return type == lower_body[row]
-                ? std::max(type_x_extent[type], type_x_extent[upper_body[row]])
-                : type_x_extent[type];
-        };
-        double packed_row_width = (BodyTypeCount - 2) * object_gap;
-        for (int type = 0; type < BodyTypeCount; ++type) {
-            if (type != upper_body[row]) packed_row_width += column_width(type);
+    const Vec3 column_anchor[BodyTypeCount] = {
+        Vec3(-0.28, 0.0, -0.27), Vec3(0.28, 0.0, -0.27),
+        Vec3(-0.28, 0.0, 0.27), Vec3(0.28, 0.0, 0.27)
+    };
+    // Use the largest normalized extent to keep even consecutive solids
+    // separate. Every object in a layer has the same bounding-box center y.
+    const double maximum_extent = std::max(solid_max_extent, rigid_max_extent);
+    const double first_layer_y =
+        cloth_height + cloth_drop_clearance + 0.5 * maximum_extent;
+    const double layer_spacing = maximum_extent + layer_clearance;
+    Vec3 object_centers[layers][BodyTypeCount];
+    for (int layer = 0; layer < layers; ++layer) {
+        for (int column = 0; column < BodyTypeCount; ++column) {
+            const int type = layer_order[layer][column];
+            object_centers[layer][type] = Vec3(
+                column_anchor[column].x(), first_layer_y + layer * layer_spacing,
+                column_anchor[column].z());
         }
-        double cursor = -0.5 * packed_row_width;
-        for (int slot = 0; slot < BodyTypeCount; ++slot) {
-            const int type = row_order[row][slot];
-            if (type == upper_body[row]) continue;
-            const double width = column_width(type);
-            object_center_x[row][type] =
-                cursor + 0.5 * width;
-            cursor += width + object_gap;
-        }
-        object_center_x[row][upper_body[row]] = object_center_x[row][lower_body[row]];
     }
 
     const Vec3 drop_velocity(0.0, -0.75, 0.0);
     const Vec4 identity_orientation(1.0, 0.0, 0.0, 0.0);
-    const auto object_center = [&](const int type, const int row) {
-        const bool elevated = type == upper_body[row];
-        return Vec3(
-            object_center_x[row][type],
-            object_center_y + (elevated ? upper_body_lift : 0.0),
-            (static_cast<double>(row) - 1.5) * row_spacing);
+    // These assets have different forward axes: Bunny uses x, Spot uses z.
+    // Roll about each asset's forward axis to lie on a side, not its head.
+    const Vec4 bunny_side_orientation(
+        std::cos(0.25 * kPi), std::sin(0.25 * kPi), 0.0, 0.0);
+    const Vec4 spot_side_orientation(
+        std::cos(0.25 * kPi), 0.0, 0.0, std::sin(0.25 * kPi));
+    const auto object_center = [&](const int type, const int layer) {
+        return object_centers[layer][type];
     };
 
     constexpr const char* bunny_node_filename =
         "example_obj/bunny_coarse/bunny_2000f.1.node";
     constexpr const char* bunny_element_filename =
         "example_obj/bunny_coarse/bunny_2000f.1.ele";
-    for (int row = 0; row < rows; ++row) {
+    for (int layer = 0; layer < layers; ++layer) {
         const int body_base = append_normalized_tetgen_solid(
             bunny_node_filename, bunny_element_filename,
-            state, ref_mesh, object_center(Bunny, row),
+            state, ref_mesh, object_center(Bunny, layer),
             solid_max_extent, params.solid_density,
-            /*zero_based_index=*/true);
+            /*zero_based_index=*/true, bunny_side_orientation);
         for (std::size_t node = static_cast<std::size_t>(body_base);
              node < state.velocities.size(); ++node) {
             state.velocities[node] = drop_velocity;
@@ -1498,30 +1482,30 @@ void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
         "example_obj/spot/spot_2000f.1.node";
     constexpr const char* spot_element_filename =
         "example_obj/spot/spot_2000f.1.ele";
-    for (int row = 0; row < rows; ++row) {
+    for (int layer = 0; layer < layers; ++layer) {
         const int body_base = append_normalized_tetgen_solid(
             spot_node_filename, spot_element_filename,
-            state, ref_mesh, object_center(Spot, row),
+            state, ref_mesh, object_center(Spot, layer),
             solid_max_extent, params.solid_density,
-            /*zero_based_index=*/true);
+            /*zero_based_index=*/true, spot_side_orientation);
         for (std::size_t node = static_cast<std::size_t>(body_base);
              node < state.velocities.size(); ++node) {
             state.velocities[node] = drop_velocity;
         }
     }
 
-    for (int row = 0; row < rows; ++row) {
+    for (int layer = 0; layer < layers; ++layer) {
         append_rigid_cube(
-            object_center(Cube, row), rigid_max_extent,
+            object_center(Cube, layer), rigid_max_extent,
             params.rigid_density, drop_velocity, ref_mesh, state);
     }
 
     constexpr const char* gear_filename =
         "example_obj/gear_z18_coarse.obj";
-    for (int row = 0; row < rows; ++row) {
+    for (int layer = 0; layer < layers; ++layer) {
         append_normalized_obj_rigid_body(
             gear_filename, state, ref_mesh,
-            object_center(Gear, row), rigid_max_extent,
+            object_center(Gear, layer), rigid_max_extent,
             params.rigid_density, drop_velocity, identity_orientation,
             Vec3::Zero());
     }
