@@ -9,17 +9,17 @@ and reduced-coordinate rigid-body dynamics.
 
 | | [`2D_IPC/`](2D_IPC/) | [`3D_IPC/`](3D_IPC/) |
 |---|---|---|
-| Geometry | Explicit spring-edge networks and polygonal rigid bodies | Deformable triangle meshes (cloth / thin shells) and triangle-mesh rigid bodies |
+| Geometry | Explicit spring-edge networks and polygonal rigid bodies | Cloth / thin shells, tetrahedral deformable solids, and triangle-mesh rigid bodies |
 | IPC pairs | Node--segment | Node--triangle and segment--segment |
-| Elasticity | Axial springs | Corotated membrane energy and discrete-shell hinge bending |
+| Elasticity | Axial springs | Corotated membrane, discrete-shell bending, and volumetric corotated energy |
 | Static contact | Analytic 2D SDFs | Plane, cylinder, and sphere SDFs |
-| Solver | Per-node or reduced rigid-body nonlinear Gauss--Seidel | Per-vertex basic/OGC or reduced rigid-body nonlinear Gauss--Seidel |
+| Solver | Per-node or reduced rigid-body nonlinear Gauss--Seidel | Cloth, solid, rigid, or combined nonlinear Gauss--Seidel |
 | Safe steps | Linear CCD or a distance-based trust region | Linear and Tight-Inclusion CCD routes or an OGC trust region |
 | Parallelism | Conflict-colored OpenMP updates in the basic deformable and rigid-body solvers | Conflict-colored OpenMP updates in the basic deformable and rigid-body solvers |
 | Output | Houdini `.geo`, Wavefront `.obj`, binary checkpoints | Houdini `.geo`, Wavefront `.obj`, `.ply`, ASCII USD `.usda`, binary checkpoints |
 
-See the subproject guides for the complete algorithms, scene catalogues, CLI
-options, output conventions, and source maps:
+See the subproject guides for setup, scene commands, CLI options, output
+conventions, and source maps:
 
 - [2D simulator guide](2D_IPC/README.md)
 - [3D simulator guide](3D_IPC/README.md)
@@ -40,14 +40,17 @@ Both simulators follow the same broad loop:
 
 The 2D project is the smaller testbed for spring networks and planar rigid
 bodies. The 3D project is the full simulator: it adds shell membrane and bending
-energies, node--triangle and edge--edge contact, quaternion rigid-body motion,
+energies, node--triangle and edge--edge contact, quaternion rigid-body motion, tetrahedral deformable solids, combined solving,
 alternative OGC solver mechanics, richer output, and regression fixtures.
 
 ## Requirements
 
 - A C++17 compiler
 - CMake 3.16+ for 2D and CMake 3.21+ for 3D
-- GoogleTest (required by the configured test targets)
+- GoogleTest for test targets (required in 2D; optional in 3D with
+  `-DBUILD_TESTING=OFF`)
+- Boost 1.70+ with its CMake package configuration for 3D
+- Git for the fetched 3D dependencies
 - OpenMP (optional in 2D and required in 3D; on macOS, install Homebrew
   `libomp`)
 - Network access during the first configure so CMake can fetch Eigen 3.4.0;
@@ -91,8 +94,15 @@ Small smoke runs from the repository root:
 
 ./3D_IPC/build/3D_sim \
   --example 1 --twist_nx 9 --twist_ny 9 --num_frames 1 \
+  --max_substep_iters 20 --fixed_iters --format obj \
   --outdir 3D_IPC/frames_smoke
 ```
+
+A fresh run replaces its output folder; choose a dedicated path. Frame 0 is
+the initial mesh, and each completed frame has a matching restart checkpoint.
+For a guided first run, categorized scenes, asset paths, and restart examples,
+see the [3D quick guide](3D_IPC/README.md#getting-started). Its scene commands
+run from `3D_IPC/`, where the bundled `example_obj/` assets live.
 
 ## Repository layout
 
