@@ -1250,7 +1250,13 @@ void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
 // ---------------------------------------------------------------------------
 // Example 9: a dynamic threaded bolt falling into a fixed threaded nut
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 9 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj
+/* Command line (use OMP_NUM_THREADS=64 on the server):
+OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
+./build/3D_sim --example 9 --num_frames 200 \
+  --substeps 10 --max_substep_iters 10 --fixed_iters \
+  --use_parallel true --use_basic_experimental true --use_simd true \
+  --outdir bolt_into_fixed_nut_output --format obj
+*/
 void build_dynamic_bolt_into_fixed_nut_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1365,6 +1371,7 @@ OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --outdir outputs/example10_general_v2 \
   --use_colored_ccd_guess true --colored_ccd_guess_iters 10
 */
+// With friction coefficient 0.1, need to use 15 substeps and 40 max_substep_iters.
 void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1538,8 +1545,15 @@ void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
 // ---------------------------------------------------------------------------
 // Example 11: a pinned cloth roll unrolling down an SDF ramp
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 11 --num_frames 200 --substeps 20 --max_substep_iters 80 --fixed_iters --kB 0.0025 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --outdir rolled_cloth_on_steep_ramp_output_new --format obj
-// the drift direction switches sharply between 0.00225 and 0.0025
+/* Command line:
+OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
+./build/3D_sim --example 11 --num_frames 200 \
+  --substeps 10 --max_substep_iters 2 --fixed_iters \
+  --kB 0.0025 --friction_coefficient 0.1 \
+  --use_parallel true --use_basic_experimental true --use_simd true \
+  --use_colored_ccd_guess true --colored_ccd_guess_iters 10 \
+  --outdir rolled_cloth_on_steep_ramp_output_new --format geo
+*/
 void build_cloth_unrolling_down_fixed_ramp_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1785,7 +1799,16 @@ void build_cloth_unrolling_down_fixed_ramp_example(
 // ---------------------------------------------------------------------------
 // Example 12: three stacked cloth layers between fixed and oscillating edges
 // ---------------------------------------------------------------------------
-// Command line:  OMP_NUM_THREADS=10 OMP_DYNAMIC=FALSE ./build/3D_sim --example 12 --num_frames 200 --substeps 30 --max_substep_iters 100 --fixed_iters --friction_coefficient 0.0 --friction_velocity_epsilon 0.01 --outdir oscillating_cloth_layers_output --format geo --kB 0.01 --osc_amplitude 0.01 --osc_frequency 6.0 --osc_length 1.0 --gy 0
+/* Command line:
+OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE \
+./build/3D_sim --example 12 --num_frames 200 \
+  --substeps 10 --max_substep_iters 2 --fixed_iters \
+  --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 \
+  --kB 0.01 --osc_amplitude 0.01 --osc_frequency 6.0 --osc_length 1.0 --gy 0 \
+  --use_parallel true --use_basic_experimental true --use_simd true \
+  --use_colored_ccd_guess true --colored_ccd_guess_iters 10 \
+  --outdir oscillating_cloth_layers_output --format geo
+*/
 void build_oscillating_cloth_layers_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,

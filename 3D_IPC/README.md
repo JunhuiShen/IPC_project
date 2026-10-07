@@ -265,10 +265,15 @@ Examples 8–14 use the following scene presets from `example.cpp`:
   --use_basic_experimental true --use_simd true
 
 # Example 9: dynamic threaded bolt falling through a fixed nut
-./build/3D_sim --example 9 --num_frames 200 --substeps 20 --max_substep_iters 10 --fixed_iters --outdir bolt_into_fixed_nut_output --format obj \
-  --use_basic_experimental true --use_simd true
+# Use OMP_NUM_THREADS=64 on the server.
+OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
+./build/3D_sim --example 9 --num_frames 200 \
+  --substeps 10 --max_substep_iters 10 --fixed_iters \
+  --use_parallel true --use_basic_experimental true --use_simd true \
+  --outdir bolt_into_fixed_nut_output --format obj
 
 # Example 10: four horizontal layers of differently ordered Bunny/Spot/cube/gear groups; Bunny and Spot lie on their sides
+# With friction coefficient 0.1, use 15 substeps and 40 max_substep_iters.
 ./build/3D_sim --example 10 --num_frames 200 --fps 30 --substeps 15 --max_substep_iters 25 --fixed_iters \
   --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 \
   --d_hat 0.019 --k_barrier 1000 --friction_coefficient 0 --use_ccd true \
@@ -277,15 +282,22 @@ Examples 8–14 use the following scene presets from `example.cpp`:
   --use_colored_ccd_guess true --colored_ccd_guess_iters 10
 
 # Example 11: rolled cloth unrolling down an SDF ramp
-./build/3D_sim --example 11 --num_frames 200 --substeps 20 --max_substep_iters 80 --fixed_iters --kB 0.0025 --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 --outdir rolled_cloth_on_steep_ramp_output_new --format obj \
-  --use_basic_experimental true --use_simd true
+OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
+./build/3D_sim --example 11 --num_frames 200 \
+  --substeps 10 --max_substep_iters 2 --fixed_iters \
+  --kB 0.0025 --friction_coefficient 0.1 \
+  --use_parallel true --use_basic_experimental true --use_simd true \
+  --use_colored_ccd_guess true --colored_ccd_guess_iters 10 \
+  --outdir rolled_cloth_on_steep_ramp_output_new --format geo
 
 # Example 12: three cloth layers with one fixed edge and one oscillating edge
-./build/3D_sim --example 12 \
-  --use_basic_experimental true --use_simd true \
-  --num_frames 200 --substeps 30 --max_substep_iters 100 --fixed_iters \
-  --friction_coefficient 0.0 --friction_velocity_epsilon 0.01 \
+OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE \
+./build/3D_sim --example 12 --num_frames 200 \
+  --substeps 10 --max_substep_iters 2 --fixed_iters \
+  --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 \
   --kB 0.01 --osc_amplitude 0.01 --osc_frequency 6.0 --osc_length 1.0 --gy 0 \
+  --use_parallel true --use_basic_experimental true --use_simd true \
+  --use_colored_ccd_guess true --colored_ccd_guess_iters 10 \
   --outdir oscillating_cloth_layers_output --format geo
 
 # Example 13: a rigid wrecking ball swings into a wall of 560 cubes
