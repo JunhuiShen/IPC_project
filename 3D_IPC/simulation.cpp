@@ -174,8 +174,8 @@ int main(int argc, char** argv) {
 
     BroadPhase broad_phase;
 
-    std::cout << "Total vertices:  " << state.deformed_positions.size() + static_x.size() << "\n";
-    std::cout << "Total triangles: " << ref_mesh.tris.size() / 3 + static_tris.size() / 3 << "\n";
+    std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
+    std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
     if (params.use_colored_ccd_guess) {
         if (!has_deformable)
             std::cout << "Colored CCD initial guess: ignored for rigid-only scenes\n";

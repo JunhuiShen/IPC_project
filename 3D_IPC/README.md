@@ -22,7 +22,7 @@ further processing; it does not open a viewer.
 
 ### Requirements
 
-- A C++17 compiler and CMake 3.21+.
+- A C++17 compiler and CMake 3.24+.
 - OpenMP. On macOS with AppleClang, CMake looks for Homebrew `libomp`.
 - Boost 1.70+ with its CMake package configuration.
 - Git and network access for the first configuration. CMake fetches Eigen
@@ -32,30 +32,33 @@ further processing; it does not open a viewer.
 
 ### Build and run a small scene
 
-From the repository root:
+The commands in this README use 64 OpenMP threads. From the repository root,
+configure the build directory before building:
 
 ```sh
 cd 3D_IPC
+export OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE
+export OMP_PROC_BIND=spread OMP_PLACES=cores OMP_WAIT_POLICY=PASSIVE
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_TESTING=OFF -DIPC_BUILD_TOOLS=OFF
-cmake --build build --target 3D_sim -j 4
+cmake --build build --target 3D_sim -j 64
 ```
 
 **All remaining commands run from `3D_IPC/`.** Start with a 100-vertex cloth:
 
 ```sh
-OMP_NUM_THREADS=4 ./build/3D_sim \
+OMP_NUM_THREADS=64 ./build/3D_sim \
   --example 1 --twist_nx 9 --twist_ny 9 \
   --fps 30 --num_frames 30 --substeps 3 \
   --max_substep_iters 20 --fixed_iters \
   --use_basic_experimental true --use_simd true \
-  --format obj --outdir results/quickstart
+  --format geo --outdir results/quickstart
 ```
 
-This simulates one second and writes `frame_0000.obj` through `frame_0030.obj`,
-plus matching `state_NNNN.bin` checkpoints. Frame 0 is the initial state. Open
-an OBJ in a mesh viewer, or load the numbered files as a sequence in your
-visualization tool. The reference commands below provide longer, larger runs.
+This simulates one second and writes `frame_0000.geo` through `frame_0030.geo`,
+plus matching `state_NNNN.bin` checkpoints. Frame 0 is the initial state. Load
+the numbered GEO files as a sequence in Houdini. The scene commands below
+provide longer, larger runs.
 
 A fresh run replaces the existing `--outdir` folder. Use a dedicated results
 folder and a different path for each run you want to keep.
@@ -63,7 +66,7 @@ folder and a different path for each run you want to keep.
 To see every option and its default:
 
 ```sh
-./build/3D_sim --help
+OMP_NUM_THREADS=64 ./build/3D_sim --help
 ```
 
 ### Build options
@@ -175,12 +178,12 @@ it false for a normal frame sequence. Checkpoints still use frame numbers.
 To continue the quick-start run from frame 30 through frame 60:
 
 ```sh
-OMP_NUM_THREADS=4 ./build/3D_sim \
+OMP_NUM_THREADS=64 ./build/3D_sim \
   --example 1 --twist_nx 9 --twist_ny 9 \
   --fps 30 --num_frames 60 --substeps 3 \
   --max_substep_iters 20 --fixed_iters \
   --use_basic_experimental true --use_simd true \
-  --format obj --outdir results/quickstart --restart_frame 30
+  --format geo --outdir results/quickstart --restart_frame 30
 ```
 
 A restart preserves the folder and loads `state_0030.bin`. `num_frames` is the
@@ -192,15 +195,7 @@ The console reports mesh counts, solver iterations, and time per frame, then
 total and average timing. Mixed solves with convergence checks also report
 cloth, solid, and rigid residuals separately.
 
-## Reference scene commands
-
-These are full-scene presets, with larger meshes and iteration budgets than
-the quick start. Example 14's command uses 64 OpenMP threads; adjust the thread
-count for your machine. Change `--num_frames` and `--outdir` for shorter runs
-or separate results.
-
-<details>
-<summary>Show commands for all 14 examples</summary>
+## Example scene commands
 
 All scene commands below enable SIMD v2 with
 `--use_basic_experimental true --use_simd true`. Each build uses its available
@@ -208,81 +203,81 @@ SIMD backend or scalar fallbacks.
 
 ```bash
 # Example 1: square cloth twisted in place, 240 frames at 0.5 turns/s
-./build/3D_sim --example 1 --num_frames 240 \
+OMP_NUM_THREADS=64 ./build/3D_sim --example 1 --num_frames 240 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
   --d_hat 0.005 --k_barrier 100 \
   --node_box_min 0.001 --node_box_max 0.01 \
-  --fixed_iters --max_substep_iters 6 --substeps 5 --node_box_update_count 10 \
+  --fixed_iters --substeps 5 --max_substep_iters 4 --node_box_update_count 10 \
   --use_basic_experimental true --use_simd true --use_parallel true \
-  --outdir example1_output
+  --outdir example1_output --format geo
 
 # Example 2: two cylinders, 2.0 turns, twist then untwist
-./build/3D_sim --example 2 --num_frames 900 \
+OMP_NUM_THREADS=64 ./build/3D_sim --example 2 --num_frames 900 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 5e6 \
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e5 --eps_sdf 0.002 \
   --node_box_min 0.001 --node_box_max 0.01 --tcyl_max_turn 2.0 \
-  --fixed_iters --max_substep_iters 6 --substeps 3 --node_box_update_count 10 \
+  --fixed_iters --substeps 3 --max_substep_iters 6 --node_box_update_count 10 \
   --use_basic_experimental true --use_simd true --use_parallel true \
-  --outdir example2_output
+  --outdir example2_output --format geo
 
 # Example 3: one yawing cylinder, 4.0 turns at 0.30 turns/s
-./build/3D_sim --example 3 --num_frames 850 \
+OMP_NUM_THREADS=64 ./build/3D_sim --example 3 --num_frames 850 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e8 \
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 --eps_sdf 0.002 \
   --node_box_min 0.001 --node_box_max 0.01 \
   --tu_max_turn 4.0 --tu_twist_rate 0.30 \
-  --fixed_iters --max_substep_iters 8 --substeps 5 --node_box_update_count 10 \
+  --fixed_iters --substeps 5 --max_substep_iters 8 --node_box_update_count 10 \
   --use_basic_experimental true --use_simd true --use_parallel true \
-  --outdir example3_output
+  --outdir example3_output --format geo
 
 # Example 4: avatar collider and dress loaded from a data directory
-./build/3D_sim --example 4 --datadir /path/to/avatar_data \
-  --use_basic_experimental true --use_simd true
+OMP_NUM_THREADS=64 ./build/3D_sim --example 4 --datadir /path/to/avatar_data \
+  --use_basic_experimental true --use_simd true --format geo
 ```
 
 Examples 5, 6, and 7 use the corresponding scene presets from `example.cpp`:
 
 ```bash
 # Example 5: freely rotating tennis racket
-./build/3D_sim --example 5 --num_frames 500 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output \
-  --use_basic_experimental true --use_simd true
+OMP_NUM_THREADS=64 ./build/3D_sim --example 5 --num_frames 500 --substeps 30 --rigid_density 25 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output \
+  --use_basic_experimental true --use_simd true --format geo
 
 # Example 6: freely rotating space tool
-./build/3D_sim --example 6 --num_frames 2000 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir space_tool_output \
-  --use_basic_experimental true --use_simd true
+OMP_NUM_THREADS=64 ./build/3D_sim --example 6 --num_frames 2000 --substeps 30 --rigid_density 25 --tol_abs 1e-12 --tol_rel 1e-10 --outdir space_tool_output \
+  --use_basic_experimental true --use_simd true --format geo
 
 # Example 7: stationary stack of ten rigid polygons
-./build/3D_sim --example 7 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --rigid_density 25 --gy 0 --outdir twenty_polygon_static_stack_output --format obj \
+OMP_NUM_THREADS=64 ./build/3D_sim --example 7 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --rigid_density 25 --gy 0 --outdir twenty_polygon_static_stack_output --format geo \
   --use_basic_experimental true --use_simd true
 
 ```
 
-Examples 8–14 use the following scene presets from `example.cpp`:
+Examples 8–14 use the following scene commands:
 
 ```bash
 # Example 8: Bunny/Spot solids with rigid cubes and gears
-./build/3D_sim --example 8 --datadir example_obj --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 600 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_output --format obj \
-  --use_basic_experimental true --use_simd true
+OMP_NUM_THREADS=64 ./build/3D_sim --example 8 --datadir example_obj --num_frames 200 --fps 30 --substeps 10 --max_substep_iters 150 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_output --format geo \
+  --use_basic_experimental true --use_simd true \
+  --use_colored_ccd_guess true --colored_ccd_guess_iters 10
 
 # Example 9: dynamic threaded bolt falling through a fixed nut
-# Use OMP_NUM_THREADS=64 on the server.
-OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
 ./build/3D_sim --example 9 --num_frames 200 \
-  --substeps 10 --max_substep_iters 10 --fixed_iters \
+  --substeps 10 --max_substep_iters 2 --fixed_iters \
   --use_parallel true --use_basic_experimental true --use_simd true \
-  --outdir bolt_into_fixed_nut_output --format obj
+  --outdir bolt_into_fixed_nut_output --format geo
 
 # Example 10: four horizontal layers of differently ordered Bunny/Spot/cube/gear groups; Bunny and Spot lie on their sides
 # With friction coefficient 0.1, use 15 substeps and 40 max_substep_iters.
-./build/3D_sim --example 10 --num_frames 200 --fps 30 --substeps 15 --max_substep_iters 25 --fixed_iters \
+OMP_NUM_THREADS=64 ./build/3D_sim --example 10 --num_frames 200 --fps 30 --substeps 15 --max_substep_iters 25 --fixed_iters \
   --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 \
   --d_hat 0.019 --k_barrier 1000 --friction_coefficient 0 --use_ccd true \
   --node_box_update_count 10 --use_parallel true --use_basic_experimental true --use_simd true \
-  --write_substeps false --format obj --outdir outputs/example10_general_v2 \
+  --write_substeps false --format geo --outdir outputs/example10_general_v2 \
   --use_colored_ccd_guess true --colored_ccd_guess_iters 10
 
 # Example 11: rolled cloth unrolling down an SDF ramp
-OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
 ./build/3D_sim --example 11 --num_frames 200 \
   --substeps 10 --max_substep_iters 2 --fixed_iters \
   --kB 0.0025 --friction_coefficient 0.1 \
@@ -291,7 +286,7 @@ OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --outdir rolled_cloth_on_steep_ramp_output_new --format geo
 
 # Example 12: three cloth layers with one fixed edge and one oscillating edge
-OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE \
 ./build/3D_sim --example 12 --num_frames 200 \
   --substeps 10 --max_substep_iters 2 --fixed_iters \
   --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 \
@@ -301,18 +296,18 @@ OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE \
   --outdir oscillating_cloth_layers_output --format geo
 
 # Example 13: a rigid wrecking ball swings into a wall of 560 cubes
-./build/3D_sim --example 13 \
+OMP_NUM_THREADS=64 ./build/3D_sim --example 13 \
   --use_basic_experimental true --use_simd true \
-  --num_frames 200 --substeps 30 --max_substep_iters 200 --fixed_iters \
+  --num_frames 200 --substeps 20 --max_substep_iters 150 --fixed_iters \
   --d_hat 0.001 --k_barrier 1e9 --k_sdf 1e8 --eps_sdf 0.002 \
   --friction_coefficient 0.1 --outdir wrecking_ball_tuned_output --format geo
 
-# Example 14: fifty free cloth sheets fall over a fixed cylinder offset to the left and spread onto the ground.
-
+# Example 14: fifty free cloth sheets fall over the cylinder and spread onto the ground.
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 14 --num_frames 10 \
-  --fps 30 --substeps 50 --max_substep_iters 3 --fixed_iters \
+  --fps 30 --substeps 40 --max_substep_iters 3 --fixed_iters \
   --use_basic_experimental --use_simd --use_parallel true --use_ccd true \
+  --use_colored_ccd_guess true --colored_ccd_guess_iters 10 \
   --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 3 \
@@ -321,6 +316,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 14 --restart_frame 10 --num_frames 120 \
   --fps 30 --substeps 50 --max_substep_iters 2 --fixed_iters \
   --use_basic_experimental --use_simd --use_parallel true --use_ccd true \
+  --use_ccd_guess true --use_colored_ccd_guess false \
   --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 2 \
@@ -336,12 +332,12 @@ test suite, install GoogleTest, then use:
 
 ```sh
 cmake -S . -B build -DBUILD_TESTING=ON
-cmake --build build -j 4
-ctest --test-dir build --output-on-failure
+cmake --build build -j 64
+OMP_NUM_THREADS=64 ctest --test-dir build --output-on-failure
 ```
 
 List discovered tests with `ctest --test-dir build -N`, or run a test binary
-such as `./build/make_shape_test` directly. Set `-DIPC_BUILD_TOOLS=ON` to build
+such as `OMP_NUM_THREADS=64 ./build/make_shape_test` directly. Set `-DIPC_BUILD_TOOLS=ON` to build
 `generate_golden`, which rewrites regression fixtures; it is not needed to run
 simulations.
 
