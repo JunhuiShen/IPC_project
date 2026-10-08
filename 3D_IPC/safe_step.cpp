@@ -186,13 +186,13 @@ inline AABB rotated_node_swept_aabb(int node, const std::vector<Vec3>& x, const 
 
 namespace safe_step_detail {
 CCDResult node_triangle_vertex_ccd(const NodeTrianglePair &p, int dof, int vi,
-                                   const std::vector<Vec3> &x, const Vec3 &dx, bool use_ticcd) {
+                                   const std::vector<Vec3> &x, const Vec3 &dx, bool use_ticcd, bool original) {
     if (!node_triangle_single_vertex_swept_aabbs_intersect(p, dof, x, dx))
         return {};
     if (dof == 0)
         return node_triangle_only_one_node_moves(x[vi], dx, x[p.tri_v[0]], Vec3::Zero(),
                                                  x[p.tri_v[1]], Vec3::Zero(), x[p.tri_v[2]],
-                                                 Vec3::Zero(), 1e-12, use_ticcd);
+                                                 Vec3::Zero(), 1e-12, use_ticcd, original);
     Vec3 d0 = Vec3::Zero(), d1 = Vec3::Zero(), d2 = Vec3::Zero();
     if (dof == 1)
         d0 = dx;
@@ -202,28 +202,28 @@ CCDResult node_triangle_vertex_ccd(const NodeTrianglePair &p, int dof, int vi,
         d2 = dx;
     return node_triangle_only_one_node_moves(x[p.node], Vec3::Zero(), x[p.tri_v[0]], d0,
                                              x[p.tri_v[1]], d1, x[p.tri_v[2]], d2, 1e-12,
-                                             use_ticcd);
+                                             use_ticcd, original);
 }
 CCDResult segment_segment_vertex_ccd(const SegmentSegmentPair &p, int dof, int vi,
-                                     const std::vector<Vec3> &x, const Vec3 &dx, bool use_ticcd) {
+                                     const std::vector<Vec3> &x, const Vec3 &dx, bool use_ticcd, bool original) {
     if (!segment_segment_single_vertex_swept_aabbs_intersect(p, dof, x, dx))
         return {};
     if (dof == 0)
         return segment_segment_only_one_node_moves(x[vi], dx, x[p.v[1]], x[p.v[2]], x[p.v[3]],
-                                                   1e-12, use_ticcd);
+                                                   1e-12, use_ticcd, original);
     if (dof == 1)
         return segment_segment_only_one_node_moves(x[vi], dx, x[p.v[0]], x[p.v[2]], x[p.v[3]],
-                                                   1e-12, use_ticcd);
+                                                   1e-12, use_ticcd, original);
     if (dof == 2)
         return segment_segment_only_one_node_moves(x[vi], dx, x[p.v[3]], x[p.v[0]], x[p.v[1]],
-                                                   1e-12, use_ticcd);
+                                                   1e-12, use_ticcd, original);
     return segment_segment_only_one_node_moves(x[vi], dx, x[p.v[2]], x[p.v[0]], x[p.v[1]], 1e-12,
-                                               use_ticcd);
+                                               use_ticcd, original);
 }
 
 } // namespace safe_step_detail
 
-double compute_trust_region_bound_for_vertex(int vi, const std::vector<Vec3>& x, const BroadPhase& broad_phase, double gamma_p) {
+double compute_trust_region_bound_for_vertex(int vi, const std::vector<Vec3>& x, const BroadPhase& broad_phase, double gamma_p, bool exact_computation_fallback) {
     const BroadPhase::Cache& bp_cache = broad_phase.cache();
     double d0_min = std::numeric_limits<double>::infinity();
 
@@ -238,7 +238,7 @@ double compute_trust_region_bound_for_vertex(int vi, const std::vector<Vec3>& x,
     if (vi >= 0 && vi < static_cast<int>(bp_cache.vertex_ss.size())) {
         for (const auto& entry : bp_cache.vertex_ss[vi]) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
-            const double d0 = segment_segment_distance(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]]).distance;
+            const double d0 = segment_segment_distance(x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]], 1e-12, exact_computation_fallback).distance;
             if (d0 < d0_min) d0_min = d0;
         }
     }
@@ -500,7 +500,8 @@ double per_vertex_safe_step(
     const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi,
     const Vec3& raw_proposed_position, double safety, bool clip_ccd,
     bool use_ticcd, bool use_ogc, bool cooperative,
-    const safe_step_detail::VertexAabbRejections* rejections) {
+    const safe_step_detail::VertexAabbRejections* rejections, bool exact_computation_fallback) {
+    const bool original = !exact_computation_fallback && !use_ticcd;
     const BroadPhase::Cache& bp_cache = broad_phase.cache();
     const int nv = static_cast<int>(x.size());
     if (vi < 0 || vi >= nv)
@@ -525,7 +526,7 @@ double per_vertex_safe_step(
 
     if (use_ogc) {
         double bound = compute_trust_region_bound_for_vertex(
-            vi, x, broad_phase, 0.4);
+            vi, x, broad_phase, 0.4, exact_computation_fallback);
         if (!std::isfinite(bound)) {
             // No-pair fallback: half min-extent of the cubic node box.
             const Vec3 e = bp_cache.node_boxes[vi].extent();
@@ -556,11 +557,11 @@ double per_vertex_safe_step(
                 if (i < nt_count) {
                     const auto& entry = nt[i];
                     return safe_step_detail::node_triangle_vertex_ccd(
-                        bp_cache.nt_pairs[entry.pair_index], entry.dof, vi, x, dx, use_ticcd);
+                        bp_cache.nt_pairs[entry.pair_index], entry.dof, vi, x, dx, use_ticcd, original);
                 }
                 const auto& entry = ss[i - nt_count];
                 return safe_step_detail::segment_segment_vertex_ccd(
-                    bp_cache.ss_pairs[entry.pair_index], entry.dof, vi, x, dx, use_ticcd);
+                    bp_cache.ss_pairs[entry.pair_index], entry.dof, vi, x, dx, use_ticcd, original);
             }, [&](const CCDResult& r) {
                 if (r.collision) {
                     has_collision = true;
@@ -574,7 +575,7 @@ double per_vertex_safe_step(
         : (has_collision ? safety * toi_min : 1.0);
     const Vec3 before = x[vi];
     Vec3 accepted = before + step * dx;
-    if (clip_ccd && !use_ticcd && !use_ogc
+    if (clip_ccd && !use_ticcd && !use_ogc && !original
         && !vertex_contact_endpoints_are_safe(bp_cache, x, vi, accepted, nullptr, rejections)) {
         // Search only within the CCD-approved prefix. Keep a verified endpoint
         // (not just a floating alpha), validating all contacts for each new
@@ -607,11 +608,12 @@ double per_vertex_safe_step(
         accepted = best;
     }
     x[vi] = accepted;
+    if (original && clip_ccd && !use_ticcd && !use_ogc) return step;
     if ((accepted.array() == before.array()).all()) return 0.0;
     return step;
 }
 
-double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& dx, double safety, bool cooperative) {
+double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& dx, double safety, bool cooperative, bool original) {
     assert(rb >= 0);
     assert(safety >= 0.0 && safety <= 1.0);
     if (dx.squaredNorm() < 1.0e-28)
@@ -634,9 +636,9 @@ double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const Broad
         if (!node_triangle_swept_aabbs_intersect(node_boxes))
             return value;
         if (node_rb == rb)
-            consider(node_triangle_only_one_node_moves(x[node], dx, x[pair.tri_v[0]], zero, x[pair.tri_v[1]], zero, x[pair.tri_v[2]], zero, 1.0e-12, false));
+            consider(node_triangle_only_one_node_moves(x[node], dx, x[pair.tri_v[0]], zero, x[pair.tri_v[1]], zero, x[pair.tri_v[2]], zero, 1.0e-12, false, original));
         else
-            consider(node_triangle_only_one_node_moves(x[node], -dx, x[pair.tri_v[0]], zero, x[pair.tri_v[1]], zero, x[pair.tri_v[2]], zero, 1.0e-12, false));
+            consider(node_triangle_only_one_node_moves(x[node], -dx, x[pair.tri_v[0]], zero, x[pair.tri_v[1]], zero, x[pair.tri_v[2]], zero, 1.0e-12, false, original));
         return value;
     };
     const auto evaluate_ss = [&](int pair_index) {
@@ -652,9 +654,9 @@ double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const Broad
         if (!segment_segment_swept_aabbs_intersect(node_boxes))
             return value;
         if (first_edge_rb == rb)
-            consider(segment_segment_same_displacement_linear_ccd(x[pair.v[0]], dx, x[pair.v[1]], dx, x[pair.v[2]], x[pair.v[3]], 1.0e-12));
+            consider(segment_segment_same_displacement_linear_ccd(x[pair.v[0]], dx, x[pair.v[1]], dx, x[pair.v[2]], x[pair.v[3]], 1.0e-12, original));
         else
-            consider(segment_segment_same_displacement_linear_ccd(x[pair.v[2]], dx, x[pair.v[3]], dx, x[pair.v[0]], x[pair.v[1]], 1.0e-12));
+            consider(segment_segment_same_displacement_linear_ccd(x[pair.v[2]], dx, x[pair.v[3]], dx, x[pair.v[0]], x[pair.v[1]], 1.0e-12, original));
         return value;
     };
     const int nt_count = static_cast<int>(nt_pair_indices.size());

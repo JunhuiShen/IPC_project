@@ -187,11 +187,11 @@ void build_frozen_residual_workspace(
         const SegmentSegmentPair& pair = broad_phase_cache.ss_pairs[static_cast<std::size_t>(pair_index)];
         if (!segment_aabbs_within_distance(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])], d_hat2)) return;
         workspace.ss_aabb_active[static_cast<std::size_t>(pair_index)] = 1;
-        const SegmentSegmentDistanceResult distance = segment_segment_distance(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])]);
+        const SegmentSegmentDistanceResult distance = segment_segment_distance(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])], 1e-12, params.exact_computation_fallback);
         workspace.ss_barrier_active[static_cast<std::size_t>(pair_index)] = distance.distance >= params.d_hat ? 0 : 1;
         if (distance.distance == 0.0) return;
         const double scalar_gradient = scalar_barrier_gradient(distance.distance, params.d_hat);
-        for (int role = 0; role < 4; ++role) workspace.ss_gradients[static_cast<std::size_t>(pair_index)][static_cast<std::size_t>(role)] = segment_segment_barrier_gradient(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])], params.d_hat, role, 1.0e-12, &distance, &scalar_gradient);
+        for (int role = 0; role < 4; ++role) workspace.ss_gradients[static_cast<std::size_t>(pair_index)][static_cast<std::size_t>(role)] = segment_segment_barrier_gradient(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])], params.d_hat, role, 1.0e-12, &distance, &scalar_gradient, params.exact_computation_fallback);
         workspace.ss_gradient_cached[static_cast<std::size_t>(pair_index)] = 1;
     };
 
@@ -642,7 +642,7 @@ static Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const Vertex
                 const NodeTriangleContactEvaluation contact_evaluation =
                     make_node_triangle_contact_evaluation(
                         current_positions, params.d_hat,
-                        params.k_barrier);
+                        params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
                 if (frozen_workspace != nullptr
                     && frozen_workspace
                            ->nt_gradient_cached[entry.pair_index]
@@ -702,7 +702,7 @@ static Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const Vertex
                 const SegmentSegmentContactEvaluation contact_evaluation =
                     make_segment_segment_contact_evaluation(
                         current_positions, params.d_hat,
-                        params.k_barrier);
+                        params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
                 if (frozen_workspace != nullptr
                     && frozen_workspace
                            ->ss_gradient_cached[entry.pair_index]
@@ -736,7 +736,7 @@ static Vec3 compute_local_gradient(int vi, const RefMesh& ref_mesh, const Vertex
             } else {
                 g += dt2k * segment_segment_barrier_gradient(
                     x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]],
-                    params.d_hat, entry.dof);
+                    params.d_hat, entry.dof, 1e-12, nullptr, nullptr, params.exact_computation_fallback);
             }
         }
     }

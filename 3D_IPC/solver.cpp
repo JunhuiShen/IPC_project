@@ -570,7 +570,7 @@ static Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const 
                 const NodeTriangleContactEvaluation contact_evaluation =
                     make_node_triangle_contact_evaluation(
                         current_positions, params.d_hat,
-                        params.k_barrier);
+                        params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
                 const auto [bg, bH] =
                     node_triangle_barrier_self_gradient_and_hessian(
                         current_positions[0], current_positions[1],
@@ -616,7 +616,7 @@ static Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const 
                 const SegmentSegmentContactEvaluation contact_evaluation =
                     make_segment_segment_contact_evaluation(
                         current_positions, params.d_hat,
-                        params.k_barrier);
+                        params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
                 const auto [bg, bH] =
                     segment_segment_barrier_self_gradient_and_hessian(
                         current_positions[0], current_positions[1],
@@ -641,7 +641,7 @@ static Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const 
                 const auto [bg, bH] =
                     segment_segment_barrier_self_gradient_and_hessian(
                         x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]],
-                        params.d_hat, entry.dof);
+                        params.d_hat, entry.dof, 1e-12, nullptr, nullptr, nullptr, params.exact_computation_fallback);
                 g += dt2k * bg;
                 H += dt2k * bH;
             }
@@ -651,7 +651,7 @@ static Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const 
     return matrix3d_inverse(H) * g;
 }
 bool solver_detail::contact_boxes_separated(const std::array<Vec3, 4>& positions,
-    const std::array<AABB, 4>& boxes, bool segment_segment, double d_hat) {
+    const std::array<AABB, 4>& boxes, bool segment_segment, double d_hat, bool exact_computation_fallback) {
     if (!(d_hat > 0.0) || !std::isfinite(d_hat)) return false;
     for (int node = 0; node < 4; ++node) {
         const auto& box = boxes[node];
@@ -665,7 +665,8 @@ bool solver_detail::contact_boxes_separated(const std::array<Vec3, 4>& positions
     }
     Vec3 direction;
     if (segment_segment) {
-        const auto distance = segment_segment_distance(positions[0], positions[1], positions[2], positions[3]);
+        const auto distance = segment_segment_distance(positions[0], positions[1], positions[2], positions[3],
+            1e-12, exact_computation_fallback);
         direction = distance.closest_point_1 - distance.closest_point_2;
     } else {
         const auto distance = node_triangle_distance(positions[0], positions[1], positions[2], positions[3]);
@@ -728,7 +729,7 @@ static bool can_prune_box_contacts(const SimParams& params) {
 
 static void rebuild_box_contact_certificates(const BroadPhase::Cache& cache,
     const std::vector<Vec3>& positions, double d_hat, bool parallel,
-    BoxContactCertificates& certificates) {
+    BoxContactCertificates& certificates, bool exact_computation_fallback) {
     certificates.node_triangle.resize(cache.nt_pairs.size());
     certificates.segment_segment.resize(cache.ss_pairs.size());
     const std::size_t count = cache.nt_pairs.size() + cache.ss_pairs.size();
@@ -755,7 +756,7 @@ static void rebuild_box_contact_certificates(const BroadPhase::Cache& cache,
                 boxes[node] = cache.node_boxes[nodes[node]];
             }
             auto& flags = segment ? certificates.segment_segment : certificates.node_triangle;
-            flags[index] = solver_detail::contact_boxes_separated(points, boxes, segment, d_hat);
+            flags[index] = solver_detail::contact_boxes_separated(points, boxes, segment, d_hat, exact_computation_fallback);
         } catch (...) {
             if (!failed.exchange(true, std::memory_order_relaxed)) error = std::current_exception();
         }
@@ -807,6 +808,7 @@ static unsigned gather_simd_contact(
     if (!within) return clear ? 2u : 0u;
     input.role = role;
     input.segment_segment = segment;
+    input.exact_computation_fallback = params.exact_computation_fallback;
     for (int node = 0; node < 4; ++node) {
         input.positions[node] = x[nodes[node]];
         if (params.friction_coefficient != 0.0)
@@ -984,7 +986,7 @@ Vec3 gs_vertex_delta_live_barrier_experimental(int vi, const RefMesh& ref_mesh, 
                 if (!within) continue;
                 const auto [bg, bH] = segment_segment_barrier_self_gradient_and_hessian(
                     x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]],
-                    params.d_hat, entry.dof);
+                    params.d_hat, entry.dof, 1e-12, nullptr, nullptr, nullptr, params.exact_computation_fallback);
                 g += dt2k * bg;
                 H += dt2k * bH;
             }
@@ -1009,7 +1011,7 @@ Vec3 gs_vertex_delta_live_barrier_experimental(int vi, const RefMesh& ref_mesh, 
                 const NodeTriangleContactEvaluation contact_evaluation =
                     make_node_triangle_contact_evaluation(
                         current_positions, params.d_hat,
-                        params.k_barrier);
+                        params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
                 const auto [bg, bH] =
                     node_triangle_barrier_self_gradient_and_hessian(
                         current_positions[0], current_positions[1],
@@ -1051,7 +1053,7 @@ Vec3 gs_vertex_delta_live_barrier_experimental(int vi, const RefMesh& ref_mesh, 
                 const SegmentSegmentContactEvaluation contact_evaluation =
                     make_segment_segment_contact_evaluation(
                         current_positions, params.d_hat,
-                        params.k_barrier);
+                        params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
                 const auto [bg, bH] =
                     segment_segment_barrier_self_gradient_and_hessian(
                         current_positions[0], current_positions[1],
@@ -1073,7 +1075,7 @@ Vec3 gs_vertex_delta_live_barrier_experimental(int vi, const RefMesh& ref_mesh, 
                 const auto [bg, bH] =
                     segment_segment_barrier_self_gradient_and_hessian(
                         x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]],
-                        params.d_hat, entry.dof);
+                        params.d_hat, entry.dof, 1e-12, nullptr, nullptr, nullptr, params.exact_computation_fallback);
                 consume(bg, bH, Vec3::Zero(), Mat33::Zero());
             }
         };
@@ -1207,7 +1209,7 @@ Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const Verte
                 const NodeTriangleContactEvaluation contact_evaluation =
                     make_node_triangle_contact_evaluation(
                         current_positions, params.d_hat,
-                        params.k_barrier, 1.0e-12, &nt_distances[entry.pair_index]);
+                        params.k_barrier, 1.0e-12, &nt_distances[entry.pair_index], params.exact_computation_fallback);
                 const auto [bg, bH] =
                     node_triangle_barrier_self_gradient_and_hessian(
                         current_positions[0], current_positions[1],
@@ -1252,7 +1254,7 @@ Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const Verte
                 const SegmentSegmentContactEvaluation contact_evaluation =
                     make_segment_segment_contact_evaluation(
                         current_positions, params.d_hat,
-                        params.k_barrier, 1.0e-12, &ss_distances[entry.pair_index]);
+                        params.k_barrier, 1.0e-12, &ss_distances[entry.pair_index], params.exact_computation_fallback);
                 const auto [bg, bH] =
                     segment_segment_barrier_self_gradient_and_hessian(
                         current_positions[0], current_positions[1],
@@ -1278,7 +1280,7 @@ Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const Verte
                     segment_segment_barrier_self_gradient_and_hessian(
                         x_barrier[p.v[0]], x_barrier[p.v[1]],
                         x_barrier[p.v[2]], x_barrier[p.v[3]],
-                        params.d_hat, entry.dof, 1.0e-12, &ss_distances[entry.pair_index]);
+                        params.d_hat, entry.dof, 1.0e-12, &ss_distances[entry.pair_index], nullptr, nullptr, params.exact_computation_fallback);
                 g += dt2k * bg;
                 H += dt2k * bH;
             }
@@ -1390,7 +1392,7 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
         }
 
         const auto proposed_position = [&](int vi) -> Vec3 { return xnew[vi] - params.damping * gs_vertex_delta_live_barrier(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads, previous_positions); };
-        const auto process_vertex = [&](int vi) { per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi), 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc); };
+        const auto process_vertex = [&](int vi) { per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi), 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc, false, nullptr, params.exact_computation_fallback); };
         if (params.use_parallel) {
             // Keep color and sweep barriers, but reuse the team until the
             // next box rebuild. Residual-controlled solves still check after
@@ -1579,7 +1581,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
           const Vec3 proposed = proposed_position(vi, rejections, cooperative);
           per_vertex_safe_step(broad_phase, xnew, vi, proposed,
                                0.9, params.use_ogc ? false : params.use_ccd,
-                               params.use_ticcd, params.use_ogc, cooperative, rejections);
+                               params.use_ticcd, params.use_ogc, cooperative, rejections, params.exact_computation_fallback);
         };
         if (use_contact_sweep) {
           const auto &cache = broad_phase.cache();
@@ -1623,7 +1625,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
               }
               auto pair = segment_segment_barrier_self_gradient_and_hessian(
                   xnew[p.v[0]], xnew[p.v[1]], xnew[p.v[2]], xnew[p.v[3]],
-                  params.d_hat, entry.dof);
+                  params.d_hat, entry.dof, 1e-12, nullptr, nullptr, nullptr, params.exact_computation_fallback);
               value.gradient = pair.first;
               value.hessian = pair.second;
             }
@@ -1669,12 +1671,12 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
               const auto &entry = cache.vertex_nt[vi][local];
               result = safe_step_detail::node_triangle_vertex_ccd(
                   cache.nt_pairs[entry.pair_index], entry.dof, vi, xnew,
-                  contact_sweep.steps[vi], params.use_ticcd);
+                  contact_sweep.steps[vi], params.use_ticcd, params.use_original_linear_ccd());
             } else {
               const auto &entry = cache.vertex_ss[vi][local - nt];
               result = safe_step_detail::segment_segment_vertex_ccd(
                   cache.ss_pairs[entry.pair_index], entry.dof, vi, xnew,
-                  contact_sweep.steps[vi], params.use_ticcd);
+                  contact_sweep.steps[vi], params.use_ticcd, params.use_original_linear_ccd());
             }
             if(result.collision)value.toi=result.t;
             return result.collision;
@@ -2252,7 +2254,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
                 broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::DeformableSolver);
                 if (use_box_certificates)
                     rebuild_box_contact_certificates(broad_phase.cache(), xnew, params.d_hat,
-                        params.use_parallel, box_certificates);
+                        params.use_parallel, box_certificates, params.exact_computation_fallback);
                 build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()), bca);
                 union_adjacency(ea, bca, combined_adj);
                 greedy_color_conflict_graph(combined_adj, color_groups, &workspace.coloring_workspace);
@@ -2441,7 +2443,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
             const Vec3 proposed = proposed_position(vi, rejections, cooperative);
             per_vertex_safe_step(broad_phase, xnew, vi, proposed,
                 0.9, params.use_ogc ? false : params.use_ccd,
-                params.use_ticcd, params.use_ogc, cooperative, rejections);
+                params.use_ticcd, params.use_ogc, cooperative, rejections, params.exact_computation_fallback);
           };
           // Prepared batches have an enclosing catch which can roll back the
           // failed color. Standalone callbacks must never escape a worker.
@@ -2514,7 +2516,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
               }
               auto pair = segment_segment_barrier_self_gradient_and_hessian(
                   xnew[p.v[0]], xnew[p.v[1]], xnew[p.v[2]], xnew[p.v[3]],
-                  params.d_hat, entry.dof);
+                  params.d_hat, entry.dof, 1e-12, nullptr, nullptr, nullptr, params.exact_computation_fallback);
               value.gradient = pair.first;
               value.hessian = pair.second;
             }
@@ -2658,12 +2660,12 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
               const auto &entry = cache.vertex_nt[vi][local];
               result = safe_step_detail::node_triangle_vertex_ccd(
                   cache.nt_pairs[entry.pair_index], entry.dof, vi, xnew,
-                  contact_sweep.steps[vi], params.use_ticcd);
+                  contact_sweep.steps[vi], params.use_ticcd, params.use_original_linear_ccd());
             } else {
               const auto &entry = cache.vertex_ss[vi][local - nt];
               result = safe_step_detail::segment_segment_vertex_ccd(
                   cache.ss_pairs[entry.pair_index], entry.dof, vi, xnew,
-                  contact_sweep.steps[vi], params.use_ticcd);
+                  contact_sweep.steps[vi], params.use_ticcd, params.use_original_linear_ccd());
             }
             if(result.collision)value.toi=result.t;
             return result.collision;
@@ -3009,7 +3011,7 @@ SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, co
         }
 
         const auto proposed_position = [&](int vi) -> Vec3 { return xnew[vi] - params.damping * gs_vertex_delta_live_barrier(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads, previous_positions); };
-        const auto process_vertex = [&](int vi) { per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi), 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc); };
+        const auto process_vertex = [&](int vi) { per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi), 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc, false, nullptr, params.exact_computation_fallback); };
         if (use_contact_sweep) {
             const auto &cache = broad_phase.cache();
             const double dh2 = params.d_hat * params.d_hat,
@@ -3052,7 +3054,7 @@ SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, co
                 }
                 auto pair = segment_segment_barrier_self_gradient_and_hessian(
                     xnew[p.v[0]], xnew[p.v[1]], xnew[p.v[2]], xnew[p.v[3]],
-                    params.d_hat, entry.dof);
+                    params.d_hat, entry.dof, 1e-12, nullptr, nullptr, nullptr, params.exact_computation_fallback);
                 value.gradient = pair.first;
                 value.hessian = pair.second;
               }
@@ -3098,12 +3100,12 @@ SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, co
                 const auto &entry = cache.vertex_nt[vi][local];
                 result = safe_step_detail::node_triangle_vertex_ccd(
                     cache.nt_pairs[entry.pair_index], entry.dof, vi, xnew,
-                    contact_steps.steps[vi], params.use_ticcd);
+                    contact_steps.steps[vi], params.use_ticcd, params.use_original_linear_ccd());
               } else {
                 const auto &entry = cache.vertex_ss[vi][local - nt];
                 result = safe_step_detail::segment_segment_vertex_ccd(
                     cache.ss_pairs[entry.pair_index], entry.dof, vi, xnew,
-                    contact_steps.steps[vi], params.use_ticcd);
+                    contact_steps.steps[vi], params.use_ticcd, params.use_original_linear_ccd());
               }
               if(result.collision)value.toi=result.t;
               return result.collision;
@@ -3240,7 +3242,7 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
         for (std::size_t pair = 0; pair < bp_cache.ss_pairs.size(); ++pair) {
             const auto& p = bp_cache.ss_pairs[pair];
             ss_distances[pair] = segment_segment_distance(xnew_copy[p.v[0]],
-                xnew_copy[p.v[1]], xnew_copy[p.v[2]], xnew_copy[p.v[3]]);
+                xnew_copy[p.v[1]], xnew_copy[p.v[2]], xnew_copy[p.v[3]], 1e-12, params.exact_computation_fallback);
         }
         #pragma omp parallel for schedule(static)
         for (int vi = 0; vi < nv; ++vi) {
@@ -3454,7 +3456,7 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
         const NodeTriangleContactEvaluation* precomputed_evaluation = nullptr;
         if (assemble_friction) {
             current_positions = friction_node_triangle_positions(pair, positions);
-            contact_evaluation = make_node_triangle_contact_evaluation(current_positions, params.d_hat, params.k_barrier);
+            contact_evaluation = make_node_triangle_contact_evaluation(current_positions, params.d_hat, params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
             precomputed_evaluation = &contact_evaluation;
         }
         const NodeTriangleDistanceResult* precomputed_distance = precomputed_evaluation == nullptr ? nullptr : &precomputed_evaluation->dr;
@@ -3495,7 +3497,7 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
         const SegmentSegmentContactEvaluation* precomputed_evaluation = nullptr;
         if (assemble_friction) {
             current_positions = friction_segment_segment_positions(pair, positions);
-            contact_evaluation = make_segment_segment_contact_evaluation(current_positions, params.d_hat, params.k_barrier);
+            contact_evaluation = make_segment_segment_contact_evaluation(current_positions, params.d_hat, params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
             precomputed_evaluation = &contact_evaluation;
         }
         const SegmentSegmentDistanceResult* precomputed_distance = precomputed_evaluation == nullptr ? nullptr : &precomputed_evaluation->dr;
@@ -3506,12 +3508,12 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
                 const std::array<Vec3, 4> references = {rigid_node_body_space_position(a0, ref_mesh, node_to_rb_local), rigid_node_body_space_position(a1, ref_mesh, node_to_rb_local), Vec3::Zero(), Vec3::Zero()};
                 if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_barrier_active[static_cast<std::size_t>(pair_index)] == 0) add_rigid_derivatives(barrier_output, RigidEnergyDerivatives{});
                 else if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_gradient_cached[static_cast<std::size_t>(pair_index)] != 0) add_frozen_gradient(barrier_output, references, frozen_workspace->ss_gradients[static_cast<std::size_t>(pair_index)], 0, 1);
-                else add_rigid_derivatives(barrier_output, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics, precomputed_distance, precomputed_b_prime, precomputed_b_double_prime));
+                else add_rigid_derivatives(barrier_output, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::FirstPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics, precomputed_distance, precomputed_b_prime, precomputed_b_double_prime, params.exact_computation_fallback));
             } else {
                 const std::array<Vec3, 4> references = {Vec3::Zero(), Vec3::Zero(), rigid_node_body_space_position(b0, ref_mesh, node_to_rb_local), rigid_node_body_space_position(b1, ref_mesh, node_to_rb_local)};
                 if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_barrier_active[static_cast<std::size_t>(pair_index)] == 0) add_rigid_derivatives(barrier_output, RigidEnergyDerivatives{});
                 else if (mode == RigidDerivativeMode::Gradient && frozen_workspace != nullptr && frozen_workspace->ss_gradient_cached[static_cast<std::size_t>(pair_index)] != 0) add_frozen_gradient(barrier_output, references, frozen_workspace->ss_gradients[static_cast<std::size_t>(pair_index)], 2, 3);
-                else add_rigid_derivatives(barrier_output, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics, precomputed_distance, precomputed_b_prime, precomputed_b_double_prime));
+                else add_rigid_derivatives(barrier_output, segment_segment_barrier_rb(positions[a0], positions[a1], positions[b0], positions[b1], references, RigidBarrierSide::SecondPrimitive, state.orientations[rb], omega_new[rb], dt, params.d_hat, mode, 1.0e-12, cached_kinematics, precomputed_distance, precomputed_b_prime, precomputed_b_double_prime, params.exact_computation_fallback));
             }
         }
         if (assemble_friction) {
@@ -4030,7 +4032,7 @@ struct RigidSolverWorkspace {
     void discard_separated_contacts(BroadPhase& phase,
         const std::vector<Vec3>& current, const SimParams& params) {
         rebuild_box_contact_certificates(phase.cache(), current,
-            params.d_hat, params.use_parallel, box_certificates);
+            params.d_hat, params.use_parallel, box_certificates, params.exact_computation_fallback);
         phase.discard_separated_contact_incidence(
             box_certificates.node_triangle, box_certificates.segment_segment,
             params.use_parallel, &body_nt_pair_indices, &body_ss_pair_indices);
@@ -4209,7 +4211,7 @@ SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const 
                 const Vec3 com_radius = Vec3::Constant(workspace.com_box_radii[rb]);
                 const Vec3 com_target = (x_com_new[rb] - delta_com).cwiseMax(workspace.com_box_anchors[rb] - com_radius).cwiseMin(workspace.com_box_anchors[rb] + com_radius);
                 const Vec3 proposed_com_displacement = com_target - x_com_new[rb];
-                const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], node_positions, rb, proposed_com_displacement, 0.9, cooperative);
+                const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, workspace.broad_phase.cache(), workspace.body_nt_pair_indices[rb], workspace.body_ss_pair_indices[rb], node_positions, rb, proposed_com_displacement, 0.9, cooperative, params.use_original_linear_ccd());
                 const Vec3 com_displacement = com_safe_step * proposed_com_displacement;
                 x_com_new[rb] += com_displacement;
                 translate_rigid_nodes(ref_mesh.rb_nodes[rb], com_displacement, node_positions, params.use_parallel);
@@ -4515,7 +4517,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
                     &deformable_workspace.rest_shape_grads, previous_positions, rejections);
             }();
             const Vec3 proposed_position = xnew[node] - params.damping * delta;
-            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections);
+            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback);
         };
 
         const auto process_solid_node = [&](const int solid, bool cooperative = false) {
@@ -4523,7 +4525,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
             thread_local safe_step_detail::VertexAabbRejections scratch;
             auto* rejections = params.use_ccd && params.d_hat > 1e-8 ? &scratch : nullptr;
             const Vec3 proposed_position = xnew[node] - params.damping * gs_solid_vertex_delta_live_barrier(node, ref_mesh, pins, params, xhat, xnew, broad_phase, mixed_adjacency_workspace.solid_node_mask, mixed_adjacency_workspace.surface_node_mask, pin_map, previous_positions, cooperative, rejections, prepared_solid);
-            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections);
+            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback);
         };
 
         // COM and orientation remain one indivisible update block: all proxy
@@ -4539,7 +4541,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
                 const Vec3 com_radius = Vec3::Constant(rigid_workspace.com_box_radii[rb]);
                 const Vec3 com_target =(x_com_new[rb] - delta_com).cwiseMax(rigid_workspace.com_box_anchors[rb] - com_radius).cwiseMin(rigid_workspace.com_box_anchors[rb] + com_radius);
                 const Vec3 proposed_com_displacement = com_target - x_com_new[rb];
-                const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, proposed_com_displacement, 0.9, cooperative);
+                const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, proposed_com_displacement, 0.9, cooperative, params.use_original_linear_ccd());
                 const Vec3 com_displacement = com_safe_step * proposed_com_displacement;
                 x_com_new[rb] += com_displacement;
                 translate_rigid_nodes(ref_mesh.rb_nodes[rb], com_displacement, xnew, params.use_parallel);
@@ -4900,7 +4902,7 @@ SolverResult global_gauss_seidel_solver_general_experimental_v2(
                 const Vec3 com_radius = Vec3::Constant(rigid_workspace.com_box_radii[rb]);
                 const Vec3 com_target =(x_com_new[rb] - delta_com).cwiseMax(rigid_workspace.com_box_anchors[rb] - com_radius).cwiseMin(rigid_workspace.com_box_anchors[rb] + com_radius);
                 const Vec3 proposed_com_displacement = com_target - x_com_new[rb];
-                const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, proposed_com_displacement, 0.9, cooperative);
+                const double com_safe_step = per_rigid_body_translation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, proposed_com_displacement, 0.9, cooperative, params.use_original_linear_ccd());
                 const Vec3 com_displacement = com_safe_step * proposed_com_displacement;
                 x_com_new[rb] += com_displacement;
                 translate_rigid_nodes(ref_mesh.rb_nodes[rb], com_displacement, xnew, params.use_parallel);
@@ -4960,7 +4962,7 @@ SolverResult global_gauss_seidel_solver_general_experimental_v2(
                 const Vec3 delta = matrix3d_inverse(systems[i].hessian) * systems[i].gradient;
                 const Vec3 target = xnew[node] - params.damping * delta;
                 per_vertex_safe_step(broad_phase, xnew, node, target, 0.9,
-                    params.use_ccd, params.use_ticcd, false, cooperative, rejections);
+                    params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback);
             }
         };
         const auto snapshot_simd_batch = [&](int item, bool restore) {

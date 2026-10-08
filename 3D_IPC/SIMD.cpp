@@ -1234,7 +1234,8 @@ static void mesh_contact_derivatives_tile_impl(const MeshContactInput* inputs, s
         out.sa = out.sb = out.sw = out.query = out.edge_a = 0.0;
         if (!input.segment_segment) {
             const auto evaluation = make_node_triangle_contact_evaluation(x, d_hat,
-                friction != 0.0 ? k_barrier : 1.0);
+                friction != 0.0 ? k_barrier : 1.0, 1e-12, nullptr,
+                input.exact_computation_fallback);
             if (friction != 0.0)
                 (*frozen)[e] = make_node_triangle_frozen_friction_contact(x, input.previous_positions,
                     evaluation, dt, eps_v);
@@ -1280,7 +1281,8 @@ static void mesh_contact_derivatives_tile_impl(const MeshContactInput* inputs, s
             }
         } else {
             const auto evaluation = make_segment_segment_contact_evaluation(x, d_hat,
-                friction != 0.0 ? k_barrier : 1.0);
+                friction != 0.0 ? k_barrier : 1.0, 1e-12, nullptr,
+                input.exact_computation_fallback);
             if (friction != 0.0)
                 (*frozen)[e] = make_segment_segment_frozen_friction_contact(x, input.previous_positions,
                     evaluation, dt, eps_v);
@@ -1417,7 +1419,8 @@ static void mesh_contact_derivatives_tile_impl(const MeshContactInput* inputs, s
                     const auto& input=inputs[indices[begin+lane]];
                     const auto& p=input.positions;
                     out.hessian=input.segment_segment
-                        ? segment_segment_barrier_self_gradient_and_hessian(p[0],p[1],p[2],p[3],d_hat,input.role).second
+                        ? segment_segment_barrier_self_gradient_and_hessian(p[0],p[1],p[2],p[3],d_hat,input.role,1e-12,nullptr,nullptr,nullptr,
+                            input.exact_computation_fallback).second
                         : node_triangle_barrier_self_gradient_and_hessian(p[0],p[1],p[2],p[3],d_hat,input.role).second;
                 }
             }

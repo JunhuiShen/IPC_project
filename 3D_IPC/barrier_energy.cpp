@@ -197,10 +197,10 @@ std::array<double, 4> node_triangle_contact_weights(
 
 std::array<double, 4> segment_segment_contact_weights(
         const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
-        double eps, const SegmentSegmentDistanceResult* precomputed_dr) {
+        double eps, const SegmentSegmentDistanceResult* precomputed_dr, bool exact_computation_fallback) {
     const SegmentSegmentDistanceResult dr = precomputed_dr
             ? *precomputed_dr
-            : segment_segment_distance(x1, x2, x3, x4, eps);
+            : segment_segment_distance(x1, x2, x3, x4, eps, exact_computation_fallback);
     if (dr.robust) return dr.weights;
     const SegmentSegmentRegion region = dr.region == SegmentSegmentRegion::ParallelSegments
             ? resolve_parallel_segment_region(dr.s, dr.t)
@@ -271,11 +271,12 @@ double scalar_barrier_hessian(double delta, double d_hat){
 NodeTriangleContactEvaluation make_node_triangle_contact_evaluation(
         const std::array<Vec3, 4>& positions,
         double d_hat, double k_barrier, double eps,
-        const NodeTriangleDistanceResult* precomputed_dr) {
+        const NodeTriangleDistanceResult* precomputed_dr, bool exact_computation_fallback) {
     validate_contact_evaluation_parameters(d_hat, k_barrier, eps);
 
     NodeTriangleContactEvaluation evaluation;
     evaluation.d_hat = d_hat;
+    evaluation.exact_computation_fallback = exact_computation_fallback;
     evaluation.dr = precomputed_dr
             ? *precomputed_dr
             : node_triangle_distance(
@@ -289,16 +290,17 @@ NodeTriangleContactEvaluation make_node_triangle_contact_evaluation(
 SegmentSegmentContactEvaluation make_segment_segment_contact_evaluation(
         const std::array<Vec3, 4>& positions,
         double d_hat, double k_barrier, double eps,
-        const SegmentSegmentDistanceResult* precomputed_dr) {
+        const SegmentSegmentDistanceResult* precomputed_dr, bool exact_computation_fallback) {
     validate_contact_evaluation_parameters(d_hat, k_barrier, eps);
 
     SegmentSegmentContactEvaluation evaluation;
     evaluation.d_hat = d_hat;
+    evaluation.exact_computation_fallback = exact_computation_fallback;
     evaluation.dr = precomputed_dr
             ? *precomputed_dr
             : segment_segment_distance(
                     positions[0], positions[1], positions[2], positions[3],
-                    eps);
+                    eps, exact_computation_fallback);
     validate_contact_evaluation_distance(evaluation.dr.distance);
     initialize_contact_barrier_data(evaluation, k_barrier);
     return evaluation;
@@ -758,20 +760,20 @@ static Mat33 robust_segment_segment_barrier_cross_hessian(
     return H;
 }
 
-double segment_segment_barrier(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, double eps){
-    const auto dr = segment_segment_distance(x1, x2, x3, x4, eps);
+double segment_segment_barrier(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, double eps, bool exact_computation_fallback){
+    const auto dr = segment_segment_distance(x1, x2, x3, x4, eps, exact_computation_fallback);
     return scalar_barrier(dr.distance, d_hat);
 }
 
 // Single-DOF gradient for segment-segment barrier.
 // dof: 0=x1, 1=x2, 2=x3, 3=x4
 Vec3 segment_segment_barrier_gradient(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
-                                      double d_hat, int dof, double eps, const SegmentSegmentDistanceResult* precomputed_dr, const double* precomputed_scalar_gradient){
+                                      double d_hat, int dof, double eps, const SegmentSegmentDistanceResult* precomputed_dr, const double* precomputed_scalar_gradient, bool exact_computation_fallback){
     if (dof < 0 || dof >= 4) {
         throw std::invalid_argument( "segment_segment_barrier_gradient: DOF index must be in [0, 3].");
     }
 
-    const SegmentSegmentDistanceResult dr = precomputed_dr ? *precomputed_dr : segment_segment_distance(x1, x2, x3, x4, eps);
+    const SegmentSegmentDistanceResult dr = precomputed_dr ? *precomputed_dr : segment_segment_distance(x1, x2, x3, x4, eps, exact_computation_fallback);
     const double delta = dr.distance;
     const double bp = precomputed_scalar_gradient == nullptr ? scalar_barrier_gradient(delta, d_hat) : *precomputed_scalar_gradient;
 
@@ -854,7 +856,7 @@ Vec3 segment_segment_barrier_gradient(const Vec3& x1, const Vec3& x2, const Vec3
 Mat33 segment_segment_barrier_cross_hessian(
         const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
         double d_hat, int row_dof, int col_dof, double eps,
-        const SegmentSegmentDistanceResult* precomputed_dr, const double* precomputed_scalar_gradient, const double* precomputed_scalar_hessian){
+        const SegmentSegmentDistanceResult* precomputed_dr, const double* precomputed_scalar_gradient, const double* precomputed_scalar_hessian, bool exact_computation_fallback){
     Mat33 H = Mat33::Zero();
 
     if (row_dof < 0 || row_dof >= 4 || col_dof < 0 || col_dof >= 4) {
@@ -862,7 +864,7 @@ Mat33 segment_segment_barrier_cross_hessian(
                 "segment_segment_barrier_cross_hessian: DOF indices must be in [0, 3].");
     }
 
-    const SegmentSegmentDistanceResult dr = precomputed_dr ? *precomputed_dr : segment_segment_distance(x1, x2, x3, x4, eps);
+    const SegmentSegmentDistanceResult dr = precomputed_dr ? *precomputed_dr : segment_segment_distance(x1, x2, x3, x4, eps, exact_computation_fallback);
     const double delta = dr.distance;
     const double bp = precomputed_scalar_gradient == nullptr ? scalar_barrier_gradient(delta, d_hat) : *precomputed_scalar_gradient;
     const double bpp = precomputed_scalar_hessian == nullptr ? scalar_barrier_hessian(delta, d_hat) : *precomputed_scalar_hessian;
@@ -1162,8 +1164,8 @@ Mat33 segment_segment_barrier_cross_hessian(
 Mat33 segment_segment_barrier_self_hessian(
         const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
         double d_hat, int dof, double eps,
-        const SegmentSegmentDistanceResult* precomputed_dr, const double* precomputed_scalar_gradient, const double* precomputed_scalar_hessian){
-    return segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, dof, dof, eps, precomputed_dr, precomputed_scalar_gradient, precomputed_scalar_hessian);
+        const SegmentSegmentDistanceResult* precomputed_dr, const double* precomputed_scalar_gradient, const double* precomputed_scalar_hessian, bool exact_computation_fallback){
+    return segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, dof, dof, eps, precomputed_dr, precomputed_scalar_gradient, precomputed_scalar_hessian, exact_computation_fallback);
 }
 
 std::pair<Vec3, Mat33> node_triangle_barrier_self_gradient_and_hessian(
@@ -1193,11 +1195,11 @@ std::pair<Vec3, Mat33> segment_segment_barrier_self_gradient_and_hessian(
         double d_hat, int dof, double eps,
         const SegmentSegmentDistanceResult* precomputed_dr,
         const double* precomputed_scalar_gradient,
-        const double* precomputed_scalar_hessian) {
+        const double* precomputed_scalar_hessian, bool exact_computation_fallback) {
     if (dof < 0 || dof >= 4) throw std::invalid_argument("segment_segment_barrier_gradient: DOF index must be in [0, 3].");
     const SegmentSegmentDistanceResult dr = precomputed_dr
             ? *precomputed_dr
-            : segment_segment_distance(x1, x2, x3, x4, eps);
+            : segment_segment_distance(x1, x2, x3, x4, eps, exact_computation_fallback);
     if (d_hat > 0.0 && dr.distance >= d_hat) {
         return {Vec3::Zero(), Mat33::Zero()};
     }
@@ -1266,7 +1268,7 @@ Vec3 segment_segment_barrier_gradient(
         return Vec3::Zero();
     return segment_segment_barrier_gradient(
             x1, x2, x3, x4, evaluation.d_hat, dof, eps,
-            &evaluation.dr, &evaluation.b_prime);
+            &evaluation.dr, &evaluation.b_prime, evaluation.exact_computation_fallback);
 }
 
 Mat33 segment_segment_barrier_cross_hessian(
@@ -1279,7 +1281,7 @@ Mat33 segment_segment_barrier_cross_hessian(
     return segment_segment_barrier_cross_hessian(
             x1, x2, x3, x4, evaluation.d_hat, row_dof, col_dof, eps,
             &evaluation.dr, &evaluation.b_prime,
-            &evaluation.b_double_prime);
+            &evaluation.b_double_prime, evaluation.exact_computation_fallback);
 }
 
 Mat33 segment_segment_barrier_self_hessian(
@@ -1291,7 +1293,7 @@ Mat33 segment_segment_barrier_self_hessian(
     return segment_segment_barrier_self_hessian(
             x1, x2, x3, x4, evaluation.d_hat, dof, eps,
             &evaluation.dr, &evaluation.b_prime,
-            &evaluation.b_double_prime);
+            &evaluation.b_double_prime, evaluation.exact_computation_fallback);
 }
 
 std::pair<Vec3, Mat33> segment_segment_barrier_self_gradient_and_hessian(
@@ -1303,7 +1305,7 @@ std::pair<Vec3, Mat33> segment_segment_barrier_self_gradient_and_hessian(
     return segment_segment_barrier_self_gradient_and_hessian(
             x1, x2, x3, x4, evaluation.d_hat, dof, eps,
             &evaluation.dr, &evaluation.b_prime,
-            &evaluation.b_double_prime);
+            &evaluation.b_double_prime, evaluation.exact_computation_fallback);
 }
 
 RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode, double eps, const QuaternionOmegaKinematics* cached_kinematics, const NodeTriangleDistanceResult* precomputed_dr, const double* precomputed_scalar_gradient, const double* precomputed_scalar_hessian) {
@@ -1402,10 +1404,10 @@ RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, c
     return result;
 }
 
-RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode, double eps, const QuaternionOmegaKinematics* cached_kinematics, const SegmentSegmentDistanceResult* precomputed_dr, const double* precomputed_scalar_gradient, const double* precomputed_scalar_hessian) {
+RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode, double eps, const QuaternionOmegaKinematics* cached_kinematics, const SegmentSegmentDistanceResult* precomputed_dr, const double* precomputed_scalar_gradient, const double* precomputed_scalar_hessian, bool exact_computation_fallback) {
     const SegmentSegmentDistanceResult dr = precomputed_dr
             ? *precomputed_dr
-            : segment_segment_distance(x1, x2, x3, x4, eps);
+            : segment_segment_distance(x1, x2, x3, x4, eps, exact_computation_fallback);
     if (d_hat > 0.0 && dr.distance >= d_hat)
         return RigidEnergyDerivatives{};
     const double scalar_gradient = precomputed_scalar_gradient
@@ -1436,7 +1438,7 @@ RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2
     assert(!compute_orientation_hessian || cached_kinematics->has_second_derivatives);
 
     for (int i = first_dof; i <= last_dof; ++i) {
-        gradients[i] = segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, i, eps, &dr, &scalar_gradient);
+        gradients[i] = segment_segment_barrier_gradient(x1, x2, x3, x4, d_hat, i, eps, &dr, &scalar_gradient, exact_computation_fallback);
         if (compute_orientation_gradient)
             jacobians[i] = dx_domega(X_centered[i], *cached_kinematics);
         if (compute_translation_gradient)
@@ -1449,9 +1451,9 @@ RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2
         return result;
 
     if (mode == RigidDerivativeMode::TranslationHessian) {
-        const Mat33 H00 = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, first_dof, first_dof, eps, &dr, &scalar_gradient, &scalar_hessian);
-        const Mat33 H01 = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, first_dof, last_dof, eps, &dr, &scalar_gradient, &scalar_hessian);
-        const Mat33 H11 = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, last_dof, last_dof, eps, &dr, &scalar_gradient, &scalar_hessian);
+        const Mat33 H00 = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, first_dof, first_dof, eps, &dr, &scalar_gradient, &scalar_hessian, exact_computation_fallback);
+        const Mat33 H01 = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, first_dof, last_dof, eps, &dr, &scalar_gradient, &scalar_hessian, exact_computation_fallback);
+        const Mat33 H11 = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, last_dof, last_dof, eps, &dr, &scalar_gradient, &scalar_hessian, exact_computation_fallback);
         result.translation_translation_hessian = H00 + H01 + H01.transpose() + H11;
         result.translation_translation_hessian = 0.5 * (result.translation_translation_hessian + result.translation_translation_hessian.transpose());
         return result;
@@ -1459,11 +1461,11 @@ RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2
 
     if (mode == RigidDerivativeMode::OrientationHessian) {
         for (int i = first_dof; i <= last_dof; ++i) {
-            const Mat33 Hii = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, i, i, eps, &dr, &scalar_gradient, &scalar_hessian);
+            const Mat33 Hii = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, i, i, eps, &dr, &scalar_gradient, &scalar_hessian, exact_computation_fallback);
             result.orientation_orientation_hessian += jacobians[i].transpose() * Hii * jacobians[i];
 
             for (int j = i + 1; j <= last_dof; ++j) {
-                const Mat33 Hij = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, i, j, eps, &dr, &scalar_gradient, &scalar_hessian);
+                const Mat33 Hij = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, i, j, eps, &dr, &scalar_gradient, &scalar_hessian, exact_computation_fallback);
                 const Mat33 contribution = jacobians[i].transpose() * Hij * jacobians[j];
                 result.orientation_orientation_hessian += contribution + contribution.transpose();
             }
@@ -1479,7 +1481,7 @@ RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2
     // Include every cross-node block on the selected rigid primitive.
     for (int i = first_dof; i <= last_dof; ++i) {
         for (int j = first_dof; j <= last_dof; ++j) {
-            const Mat33 Hij = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, i, j, eps, &dr, &scalar_gradient, &scalar_hessian);
+            const Mat33 Hij = segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, i, j, eps, &dr, &scalar_gradient, &scalar_hessian, exact_computation_fallback);
             if (compute_translation_hessian)
                 result.translation_translation_hessian += Hij;
             if (compute_mixed_hessian)

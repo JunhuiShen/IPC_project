@@ -28,7 +28,7 @@ FrozenFrictionContact make_node_triangle_frozen_friction_contact(
         const std::array<Vec3, 4>& previous_positions,
         double d_hat, double k_barrier, double dt, double eps_v,
         double eps = 1.0e-12,
-        const NodeTriangleDistanceResult* precomputed_dr = nullptr);
+        const NodeTriangleDistanceResult* precomputed_dr = nullptr, bool exact_computation_fallback = true);
 
 FrozenFrictionContact make_node_triangle_frozen_friction_contact(
         const std::array<Vec3, 4>& current_positions,
@@ -41,7 +41,7 @@ FrozenFrictionContact make_segment_segment_frozen_friction_contact(
         const std::array<Vec3, 4>& previous_positions,
         double d_hat, double k_barrier, double dt, double eps_v,
         double eps = 1.0e-12,
-        const SegmentSegmentDistanceResult* precomputed_dr = nullptr);
+        const SegmentSegmentDistanceResult* precomputed_dr = nullptr, bool exact_computation_fallback = true);
 
 FrozenFrictionContact make_segment_segment_frozen_friction_contact(
         const std::array<Vec3, 4>& current_positions,

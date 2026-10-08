@@ -10,7 +10,7 @@ namespace solver_detail {
 // Certifies separation throughout the supplied node boxes. The current
 // positions choose a candidate direction; every box must support the proof.
 bool contact_boxes_separated(const std::array<Vec3, 4>& positions,
-    const std::array<AABB, 4>& boxes, bool segment_segment, double d_hat);
+    const std::array<AABB, 4>& boxes, bool segment_segment, double d_hat, bool exact_computation_fallback = true);
 }
 
 struct SolverResult {

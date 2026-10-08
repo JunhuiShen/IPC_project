@@ -11,6 +11,16 @@ struct CCDResult {
     double t = std::numeric_limits<double>::quiet_NaN();
 };
 
+// Versioned linear kernels. Tight-Inclusion dispatch below is independent.
+CCDResult node_triangle_linear_ccd_v1(
+    const Vec3&, const Vec3&, const Vec3&, const Vec3&,
+    const Vec3&, const Vec3&, const Vec3&, const Vec3&, double eps = 1e-12);
+CCDResult node_triangle_linear_ccd_v2(
+    const Vec3&, const Vec3&, const Vec3&, const Vec3&,
+    const Vec3&, const Vec3&, const Vec3&, const Vec3&, double eps = 1e-12);
+CCDResult segment_segment_linear_ccd_v1(
+    const Vec3&, const Vec3&, const Vec3&, const Vec3&, const Vec3&, double eps = 1e-12);
+
 // Cold-path checks for a represented NT (point, a, b, c; vertex_face=true) or
 // SS (a, b, c, d; false) configuration. Original binary64 coordinates are
 // converted before arithmetic; no positive gap is clamped to a tolerance.
@@ -86,12 +96,12 @@ CCDResult node_triangle_only_one_node_moves(
         const Vec3& x2, const Vec3& dx2,
         const Vec3& x3, const Vec3& dx3,
         double eps = 1.0e-12,
-        bool use_ticcd = true);
+        bool use_ticcd = true, bool original = false);
 
 // One-moving-node SS CCD. Same dispatch semantics as above.
 CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1,
         const Vec3& x2, const Vec3& x3, const Vec3& x4,
-        double eps = 1.0e-12, bool use_ticcd = true);
+        double eps = 1.0e-12, bool use_ticcd = true, bool original = false);
 
 // Translating-edge SS CCD. Both endpoints of [x1, x2] must have the same
 // displacement (`dx1 == dx2`), while [x3, x4] remains fixed.
@@ -99,7 +109,7 @@ CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1,
 CCDResult segment_segment_same_displacement_linear_ccd(const Vec3& x1, const Vec3& dx1,
         const Vec3& x2, const Vec3& dx2,
         const Vec3& x3, const Vec3& x4,
-        double eps = 1.0e-12);
+        double eps = 1.0e-12, bool original = false);
 
 // General NT/SS CCD: all vertices may move. Backed by Tight-Inclusion CCD.
 // Returns the earliest time of impact in [0, 1], or 1.0 when no collision

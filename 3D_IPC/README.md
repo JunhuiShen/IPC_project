@@ -140,6 +140,7 @@ and +y as the up direction.
 | `--d_hat --k_barrier` | Mesh contact activation distance and barrier stiffness. `d_hat=0` disables mesh barriers. |
 | `--k_sdf --eps_sdf` | Prescribed-obstacle contact stiffness and soft contact range. |
 | `--friction_coefficient` | Mesh/SDF Coulomb friction; zero disables it. `friction_velocity_epsilon` smooths near-zero slip. |
+| `--exact_computation_fallback true` | Enable additional exact CCD/contact calculations, matching barrier/friction handling, and colored-predictor path checks (default). |
 | `--use_parallel true` | Parallel solver updates; set the thread count with `OMP_NUM_THREADS`. |
 | `--verbose` | Print solver diagnostics. Fixed-iteration solves omit residual evaluation. |
 
@@ -212,7 +213,7 @@ OMP_NUM_THREADS=64 ./build/3D_sim --example 1 --num_frames 240 \
   --outdir example1_output --format geo
 
 # Example 2: two cylinders, 2.0 turns, twist then untwist
-OMP_NUM_THREADS=64 ./build/3D_sim --example 2 --num_frames 900 \
+OMP_NUM_THREADS=64 ./build/3D_sim --example 2 --exact_computation_fallback false --num_frames 900 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 5e6 \
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e5 --eps_sdf 0.002 \
   --node_box_min 0.001 --node_box_max 0.01 --tcyl_max_turn 2.0 \
@@ -221,7 +222,7 @@ OMP_NUM_THREADS=64 ./build/3D_sim --example 2 --num_frames 900 \
   --outdir example2_output --format geo
 
 # Example 3: one yawing cylinder, 4.0 turns at 0.30 turns/s
-OMP_NUM_THREADS=64 ./build/3D_sim --example 3 --num_frames 850 \
+OMP_NUM_THREADS=64 ./build/3D_sim --example 3 --exact_computation_fallback false --num_frames 850 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e8 \
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 --eps_sdf 0.002 \
   --node_box_min 0.001 --node_box_max 0.01 \
@@ -304,7 +305,7 @@ OMP_NUM_THREADS=64 ./build/3D_sim --example 13 \
 
 # Example 14: fifty free cloth sheets fall over the cylinder and spread onto the ground.
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 14 --num_frames 10 \
+./build/3D_sim --example 14 --exact_computation_fallback false --num_frames 10 \
   --fps 30 --substeps 40 --max_substep_iters 3 --fixed_iters \
   --use_basic_experimental --use_simd --use_parallel true --use_ccd true \
   --use_colored_ccd_guess true --colored_ccd_guess_iters 10 \
@@ -313,7 +314,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores \
   --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 3 \
   --outdir results/example14_70x70/frames --format geo && \
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 14 --restart_frame 10 --num_frames 120 \
+./build/3D_sim --example 14 --exact_computation_fallback false --restart_frame 10 --num_frames 120 \
   --fps 30 --substeps 50 --max_substep_iters 2 --fixed_iters \
   --use_basic_experimental --use_simd --use_parallel true --use_ccd true \
   --use_ccd_guess true --use_colored_ccd_guess false \
@@ -324,6 +325,15 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ```
 
 </details>
+
+`--exact_computation_fallback` is **true by default**. It enables additional
+exact-arithmetic fallbacks for linear CCD and contact distances, matching barrier
+derivatives, scalar SIMD fallback for difficult contacts, stable friction geometry,
+and rounded-path checks in colored CCD guesses.
+
+`--use_colored_ccd_guess` controls whether the colored predictor is used, and
+`--colored_ccd_guess_iters` sets its sweep count. `--use_ticcd true` selects
+Tight-Inclusion independently of this flag.
 
 ## Build and test
 

@@ -339,9 +339,9 @@ void rigid_contact_derivatives_tile(const RigidContactInput* inputs,
         auto* contact = friction != 0.0 ? &frozen[e] : nullptr;
         if (input.segment_segment) {
             SegmentSegmentContactEvaluation evaluation;
-            if (contact) evaluation = make_segment_segment_contact_evaluation(x, d_hat, k_barrier);
+            if (contact) evaluation = make_segment_segment_contact_evaluation(x, d_hat, k_barrier, 1e-12, nullptr, input.exact_computation_fallback);
             else {
-                evaluation.dr = segment_segment_distance(x[0], x[1], x[2], x[3]);
+                evaluation.dr = segment_segment_distance(x[0], x[1], x[2], x[3], 1e-12, input.exact_computation_fallback);
                 evaluation.d_hat = d_hat;
                 evaluation.active = !(d_hat > 0.0 && evaluation.dr.distance >= d_hat);
                 if (evaluation.active) {
@@ -353,7 +353,7 @@ void rigid_contact_derivatives_tile(const RigidContactInput* inputs,
             prepare_contact(input, evaluation, mode, prepared[e], contact, dt, eps_v);
         } else {
             NodeTriangleContactEvaluation evaluation;
-            if (contact) evaluation = make_node_triangle_contact_evaluation(x, d_hat, k_barrier);
+            if (contact) evaluation = make_node_triangle_contact_evaluation(x, d_hat, k_barrier, 1e-12, nullptr, input.exact_computation_fallback);
             else {
                 evaluation.dr = node_triangle_distance(x[0], x[1], x[2], x[3]);
                 evaluation.d_hat = d_hat;
@@ -536,6 +536,7 @@ RigidContactOutput rigid_contact_derivatives(
             : node_triangle_aabbs_within_distance(positions[nodes[0]], positions[nodes[1]], positions[nodes[2]], positions[nodes[3]], distance2);
         if (!nearby) return false;
         input.segment_segment = segment;
+        input.exact_computation_fallback = params.exact_computation_fallback;
         input.side = first_owner == rb ? RigidBarrierSide::FirstPrimitive : RigidBarrierSide::SecondPrimitive;
         input.kinematics = kinematics;
         input.update_mode = ref_mesh.rb_update_modes[rb];

@@ -735,6 +735,23 @@ TEST_F(CollisionColoredCCDInitialGuess, MovingTriangleVertexKeepsTheSurfaceGap) 
         expect_positions_identical({result[node]}, {x[node]});
 }
 
+TEST_F(CollisionColoredCCDInitialGuess, OriginalCCDStillPreservesTheColoredGuessGap) {
+    params.use_ticcd = false;
+    params.exact_computation_fallback = false;
+    const auto x = point_above_triangle();
+    const auto mesh = point_triangle_mesh();
+    std::vector<Vec3> displacement(x.size(), Vec3::Zero());
+    displacement[0] = Vec3(0, 0, -2);
+    const auto result = collision_colored_ccd_initial_guess(
+        x, displacement, mesh, params, 40);
+    const double gap = node_triangle_distance(
+        result[0], result[1], result[2], result[3]).distance;
+    EXPECT_GE(gap, 1e-8);
+    EXPECT_LT(gap, 1e-7);
+    for (std::size_t node = 1; node < x.size(); ++node)
+        expect_positions_identical({result[node]}, {x[node]});
+}
+
 TEST_F(CollisionColoredCCDInitialGuess, LaterColorClearsObstacleForNextSweep) {
     const auto x = point_above_triangle();
     const auto mesh = point_triangle_mesh();

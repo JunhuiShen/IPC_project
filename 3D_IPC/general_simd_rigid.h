@@ -18,6 +18,7 @@ struct RigidContactInput {
     std::array<Vec3, 4> previous_positions;
     std::array<Vec3, 4> body_references;
     bool segment_segment = false;
+    bool exact_computation_fallback = true;
     RigidBarrierSide side = RigidBarrierSide::FirstPrimitive;
     const QuaternionOmegaKinematics* kinematics = nullptr;
     RigidBodyUpdateMode update_mode = RigidBodyUpdateMode::TranslationAndOrientation;

@@ -924,7 +924,7 @@ void write_substep_data(const SimParams& params, const BroadPhase& broad_phase, 
             fprintf(dist_file, "NT %d %d %d %d %.10e %.10e\n", p.node, p.tri_v[0], p.tri_v[1], p.tri_v[2], dr.distance, fsum);
         }
         for (const auto& p : bpc.ss_pairs) {
-            const auto dr = segment_segment_distance(xnew[p.v[0]], xnew[p.v[1]], xnew[p.v[2]], xnew[p.v[3]]);
+            const auto dr = segment_segment_distance(xnew[p.v[0]], xnew[p.v[1]], xnew[p.v[2]], xnew[p.v[3]], 1e-12, params.exact_computation_fallback);
             double fsum = 0.0;
             for (int dof = 0; dof < 4; ++dof)
                 fsum += segment_segment_barrier_gradient(xnew[p.v[0]], xnew[p.v[1]], xnew[p.v[2]], xnew[p.v[3]], params.d_hat, dof, 1e-12, &dr).norm();

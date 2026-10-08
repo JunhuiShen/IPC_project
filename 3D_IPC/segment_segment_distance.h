@@ -39,4 +39,5 @@ struct SegmentSegmentDistanceResult{
     std::array<double, 4> weights{{0.0, 0.0, 0.0, 0.0}};
 };
 
-SegmentSegmentDistanceResult segment_segment_distance(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double eps = 1.0e-12);
+// Disabling the exact fallback returns the original floating-point solve.
+SegmentSegmentDistanceResult segment_segment_distance(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double eps = 1.0e-12, bool exact_computation_fallback = true);

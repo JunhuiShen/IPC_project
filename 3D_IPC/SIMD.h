@@ -52,6 +52,7 @@ struct MeshContactInput {
     std::array<Vec3, 4> positions;
     int role = 0;
     bool segment_segment = false;
+    bool exact_computation_fallback = true;
     std::array<Vec3, 4> previous_positions;
 };
 

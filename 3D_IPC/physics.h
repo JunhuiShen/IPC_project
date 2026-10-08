@@ -78,6 +78,9 @@ struct SimParams {
     double k_barrier;              // barrier stiffness multiplier
     double damping;                // Newton-step damping used by deformable and rigid solvers
     bool   use_ticcd;              // true (default) -> Tight-Inclusion CCD library; false -> self-written linear CCD
+    bool   exact_computation_fallback = true; // modified linear CCD and exact contact calculations
+
+    bool use_original_linear_ccd() const { return !exact_computation_fallback && !use_ticcd; }
 
     static SimParams zeros() {
         SimParams p;
@@ -132,6 +135,7 @@ struct SimParams {
         p.k_barrier                     = 1.0;
         p.damping                       = 1.0;
         p.use_ticcd                     = true;
+        p.exact_computation_fallback    = true;
         p.cached_dt_                = -1.0;
         p.cached_dt2_               = -1.0;
         return p;

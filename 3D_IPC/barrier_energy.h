@@ -26,6 +26,7 @@ struct MeshContactEvaluation {
     double b_double_prime = 0.0;
     double normal_load = 0.0;
     double d_hat = 0.0;
+    bool exact_computation_fallback = true;
 };
 
 using NodeTriangleContactEvaluation =
@@ -36,12 +37,12 @@ using SegmentSegmentContactEvaluation =
 NodeTriangleContactEvaluation make_node_triangle_contact_evaluation(
         const std::array<Vec3, 4>& positions,
         double d_hat, double k_barrier, double eps = 1.0e-12,
-        const NodeTriangleDistanceResult* precomputed_dr = nullptr);
+        const NodeTriangleDistanceResult* precomputed_dr = nullptr, bool exact_computation_fallback = true);
 
 SegmentSegmentContactEvaluation make_segment_segment_contact_evaluation(
         const std::array<Vec3, 4>& positions,
         double d_hat, double k_barrier, double eps = 1.0e-12,
-        const SegmentSegmentDistanceResult* precomputed_dr = nullptr);
+        const SegmentSegmentDistanceResult* precomputed_dr = nullptr, bool exact_computation_fallback = true);
 
 std::array<double, 4> node_triangle_contact_weights(
         const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
@@ -51,7 +52,7 @@ std::array<double, 4> node_triangle_contact_weights(
 std::array<double, 4> segment_segment_contact_weights(
         const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
         double eps = 1.0e-12,
-        const SegmentSegmentDistanceResult* precomputed_dr = nullptr);
+        const SegmentSegmentDistanceResult* precomputed_dr = nullptr, bool exact_computation_fallback = true);
 
 // Node--triangle barrier with DOF ordering: 0=x, 1=x1, 2=x2, 3=x3
 double node_triangle_barrier(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double d_hat, double eps = 1.0e-12);
@@ -106,12 +107,12 @@ std::pair<Vec3, Mat33> node_triangle_barrier_self_gradient_and_hessian(
         double eps = 1.0e-12);
 
 // Segment--segment barrier with DOF ordering: 0=x1, 1=x2, 2=x3, 3=x4
-double segment_segment_barrier(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, double eps = 1.0e-12);
+double segment_segment_barrier(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double d_hat, double eps = 1.0e-12, bool exact_computation_fallback = true);
 
 Vec3 segment_segment_barrier_gradient(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
                                       double d_hat, int dof, double eps = 1.0e-12,
                                       const SegmentSegmentDistanceResult* precomputed_dr = nullptr,
-                                      const double* precomputed_scalar_gradient = nullptr);
+                                      const double* precomputed_scalar_gradient = nullptr, bool exact_computation_fallback = true);
 
 Vec3 segment_segment_barrier_gradient(
         const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
@@ -125,7 +126,7 @@ Mat33 segment_segment_barrier_cross_hessian(
         double d_hat, int row_dof, int col_dof, double eps = 1.0e-12,
         const SegmentSegmentDistanceResult* precomputed_dr = nullptr,
         const double* precomputed_scalar_gradient = nullptr,
-        const double* precomputed_scalar_hessian = nullptr);
+        const double* precomputed_scalar_hessian = nullptr, bool exact_computation_fallback = true);
 
 Mat33 segment_segment_barrier_cross_hessian(
         const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
@@ -139,7 +140,7 @@ Mat33 segment_segment_barrier_self_hessian(
         double d_hat, int dof, double eps = 1.0e-12,
         const SegmentSegmentDistanceResult* precomputed_dr = nullptr,
         const double* precomputed_scalar_gradient = nullptr,
-        const double* precomputed_scalar_hessian = nullptr);
+        const double* precomputed_scalar_hessian = nullptr, bool exact_computation_fallback = true);
 
 Mat33 segment_segment_barrier_self_hessian(
         const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
@@ -151,7 +152,7 @@ std::pair<Vec3, Mat33> segment_segment_barrier_self_gradient_and_hessian(const V
                                                                          double d_hat, int dof, double eps = 1.0e-12,
                                                                          const SegmentSegmentDistanceResult* precomputed_dr = nullptr,
                                                                          const double* precomputed_scalar_gradient = nullptr,
-                                                                         const double* precomputed_scalar_hessian = nullptr);
+                                                                         const double* precomputed_scalar_hessian = nullptr, bool exact_computation_fallback = true);
 
 std::pair<Vec3, Mat33> segment_segment_barrier_self_gradient_and_hessian(
         const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
@@ -176,4 +177,4 @@ RigidEnergyDerivatives node_triangle_barrier_rb(const Vec3& x, const Vec3& x1, c
 
 // FirstPrimitive selects (x1,x2); SecondPrimitive selects (x3,x4).
 // X_centered entries on the unselected side are ignored and may be zero.
-RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode = RigidDerivativeMode::Full, double eps = 1.0e-12, const QuaternionOmegaKinematics* cached_kinematics = nullptr, const SegmentSegmentDistanceResult* precomputed_dr = nullptr, const double* precomputed_scalar_gradient = nullptr, const double* precomputed_scalar_hessian = nullptr);
+RigidEnergyDerivatives segment_segment_barrier_rb(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, const std::array<Vec3, 4>& X_centered, RigidBarrierSide side, const Vec4& q_n, const Vec3& omega, double dt, double d_hat, RigidDerivativeMode mode = RigidDerivativeMode::Full, double eps = 1.0e-12, const QuaternionOmegaKinematics* cached_kinematics = nullptr, const SegmentSegmentDistanceResult* precomputed_dr = nullptr, const double* precomputed_scalar_gradient = nullptr, const double* precomputed_scalar_hessian = nullptr, bool exact_computation_fallback = true);

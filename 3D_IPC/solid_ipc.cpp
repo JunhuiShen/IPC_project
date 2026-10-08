@@ -429,7 +429,7 @@ Vec3 compute_solid_local_gradient(
                 const NodeTriangleContactEvaluation contact_evaluation =
                     make_node_triangle_contact_evaluation(
                         current_positions, params.d_hat,
-                        params.k_barrier);
+                        params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
                 if (frozen_workspace != nullptr
                     && frozen_workspace
                            ->nt_gradient_cached[entry.pair_index]
@@ -492,7 +492,7 @@ Vec3 compute_solid_local_gradient(
                 const SegmentSegmentContactEvaluation contact_evaluation =
                     make_segment_segment_contact_evaluation(
                         current_positions, params.d_hat,
-                        params.k_barrier);
+                        params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
                 if (frozen_workspace != nullptr
                     && frozen_workspace
                            ->ss_gradient_cached[entry.pair_index]
@@ -531,7 +531,7 @@ Vec3 compute_solid_local_gradient(
                     x[static_cast<std::size_t>(pair.v[1])],
                     x[static_cast<std::size_t>(pair.v[2])],
                     x[static_cast<std::size_t>(pair.v[3])],
-                    params.d_hat, entry.dof);
+                    params.d_hat, entry.dof, 1e-12, nullptr, nullptr, params.exact_computation_fallback);
             }
         }
     }
@@ -626,7 +626,7 @@ compute_solid_local_barrier_gradient_and_self_hessian_impl(
         const std::pair<Vec3, Mat33> pair_derivatives =
             segment_segment_barrier_self_gradient_and_hessian(
                 positions[0], positions[1], positions[2], positions[3],
-                params.d_hat, entry.dof);
+                params.d_hat, entry.dof, 1e-12, nullptr, nullptr, nullptr, params.exact_computation_fallback);
         const auto& [pair_gradient, pair_self_hessian] = pair_derivatives;
         value->gradient = pair_gradient;
         value->hessian = pair_self_hessian;
@@ -702,7 +702,7 @@ compute_solid_local_mesh_contact_derivatives(
 
         const NodeTriangleContactEvaluation evaluation =
             make_node_triangle_contact_evaluation(
-                current_positions, params.d_hat, params.k_barrier);
+                current_positions, params.d_hat, params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
         if (!evaluation.active) return value;
         value.emplace();
         const auto [normal_gradient, normal_hessian] =
@@ -751,7 +751,7 @@ compute_solid_local_mesh_contact_derivatives(
 
         const SegmentSegmentContactEvaluation evaluation =
             make_segment_segment_contact_evaluation(
-                current_positions, params.d_hat, params.k_barrier);
+                current_positions, params.d_hat, params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
         if (!evaluation.active) return value;
         value.emplace();
         const auto [normal_gradient, normal_hessian] =
@@ -1197,7 +1197,7 @@ double compute_solid_barrier_incremental_potential(
         if (!segment_aabbs_within_distance(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])], d_hat2)) {
             continue;
         }
-        energy += barrier_scale * segment_segment_barrier(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])], params.d_hat);
+        energy += barrier_scale * segment_segment_barrier(x[static_cast<std::size_t>(pair.v[0])], x[static_cast<std::size_t>(pair.v[1])], x[static_cast<std::size_t>(pair.v[2])], x[static_cast<std::size_t>(pair.v[3])], params.d_hat, 1e-12, params.exact_computation_fallback);
     }
     return energy;
 }
@@ -1249,7 +1249,7 @@ static double compute_solid_friction_incremental_potential_impl(
                 node_triangle_positions(pair, x),
                 node_triangle_positions(pair, *previous_positions),
                 params.d_hat, params.k_barrier, params.dt(),
-                params.friction_velocity_epsilon);
+                params.friction_velocity_epsilon, 1e-12, nullptr, params.exact_computation_fallback);
         energy += frozen_friction_energy(
             contact, params.friction_coefficient, dt2);
     }
@@ -1271,7 +1271,7 @@ static double compute_solid_friction_incremental_potential_impl(
                 segment_segment_positions(pair, x),
                 segment_segment_positions(pair, *previous_positions),
                 params.d_hat, params.k_barrier, params.dt(),
-                params.friction_velocity_epsilon);
+                params.friction_velocity_epsilon, 1e-12, nullptr, params.exact_computation_fallback);
         energy += frozen_friction_energy(
             contact, params.friction_coefficient, dt2);
     }

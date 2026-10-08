@@ -450,6 +450,106 @@ ExactContactStepResult step_result(const Points& start, const Points& end,
         ? ExactContactStepResult::Unsafe : ExactContactStepResult::Safe;
 }
 
+// Original linear CCD event policy, preserved from the original implementation.
+Rational original_segment_segment_distance_squared(const Points& p) {
+    Rational best = std::min({point_segment_distance_squared(p[0], p[2], p[3]),
+                             point_segment_distance_squared(p[1], p[2], p[3]),
+                             point_segment_distance_squared(p[2], p[0], p[1]),
+                             point_segment_distance_squared(p[3], p[0], p[1])});
+    if (best == 0) return best;
+    const Point a = subtract(p[1], p[0]), b = subtract(p[3], p[2]);
+    const Point offset = subtract(p[0], p[2]);
+    const Rational aa = dot(a, a), ab = dot(a, b), bb = dot(b, b);
+    const Rational denominator = aa * bb - ab * ab;
+    if (denominator != 0) {
+        const Rational ar = dot(a, offset), br = dot(b, offset);
+        const Rational alpha = ab * br - bb * ar;
+        const Rational beta = aa * br - ab * ar;
+        if (alpha >= 0 && alpha <= denominator && beta >= 0 && beta <= denominator) {
+            const Point delta = subtract(add(offset, multiply(a, alpha / denominator)),
+                                         multiply(b, beta / denominator));
+            const Rational interior_distance = dot(delta, delta);
+            best = std::min(best, interior_distance);
+        }
+    }
+    return best;
+}
+
+CCDResult resolve_original(const std::array<Vec3, 4>& positions,
+                        const std::array<Vec3, 4>& motion, bool vertex_face) {
+    Points x, dx;
+    int moving_vertices = 0;
+    for (int i = 0; i < 4; ++i) {
+        assert(positions[i].allFinite() && motion[i].allFinite());
+        moving_vertices += motion[i].cwiseAbs().maxCoeff() != 0.0;
+        for (int axis = 0; axis < 3; ++axis) {
+            // The rational double constructor preserves every input bit. Use
+            // original inputs so local-frame subtraction cannot hide error.
+            x[i][axis] = Rational(positions[i][axis]);
+            dx[i][axis] = Rational(motion[i][axis]);
+        }
+    }
+    assert(moving_vertices <= 1 || (!vertex_face && dx[0] == dx[1]
+        && dx[2] == Point{} && dx[3] == Point{}));
+
+    // This is exact-contact CCD with a fixed world-space tolerance for finite
+    // primitive validation at initial time and analytic candidate events.
+    // It is not a sweep of offset surfaces: no time padding or subdivision is
+    // performed, and membership never uses a condition-dependent tolerance.
+    static const Rational separation_squared = Rational(1.0e-10) * Rational(1.0e-10);
+    const auto intersects = [&](const Rational& time) {
+        const Points p = evaluate(x, dx, time);
+        return (vertex_face ? point_triangle_distance_squared(p)
+                            : original_segment_segment_distance_squared(p)) <= separation_squared;
+    };
+    if (intersects(Rational(0))) return {true, 0.0};
+    if (moving_vertices == 0) return {};
+
+    // Under the supported motions the tetrahedron determinant is affine.
+    // Exact evaluation at 0 and 1 recovers its coefficients without loss.
+    const Rational intercept = determinant(x);
+    const Rational slope = determinant(evaluate(x, dx, Rational(1))) - intercept;
+    if (slope != 0) {
+        const Rational time = -intercept / slope;
+        return time >= 0 && time <= 1 && intersects(time) ? contact_result(time) : CCDResult{};
+    }
+    if (intercept != 0) return {};
+
+    std::vector<Rational> events;
+    events.reserve(31);
+    events.emplace_back(1);
+    const auto add_root = [&](const Rational& value, const Rational& velocity) {
+        if (velocity == 0) return;
+        const Rational time = -value / velocity;
+        if (time > 0 && time <= 1) events.push_back(time);
+    };
+
+    // Coplanar membership changes at point/edge incidence, triangle collapse,
+    // or a collinear endpoint crossing. All components from every triple
+    // retain events when a chosen 2D projection becomes degenerate. Their
+    // quadratic terms vanish for one moving vertex or a translating edge.
+    for (int i = 0; i < 4; ++i) {
+        for (int j = i + 1; j < 4; ++j) {
+            const Point edge = subtract(x[j], x[i]);
+            const Point velocity = subtract(dx[j], dx[i]);
+            for (int axis = 0; axis < 3; ++axis) add_root(edge[axis], velocity[axis]);
+            for (int k = j + 1; k < 4; ++k) {
+                const Point other = subtract(x[k], x[i]);
+                const Point other_velocity = subtract(dx[k], dx[i]);
+                const Point value = cross(edge, other);
+                const Point derivative = add(cross(velocity, other), cross(edge, other_velocity));
+                for (int axis = 0; axis < 3; ++axis) add_root(value[axis], derivative[axis]);
+            }
+        }
+    }
+    std::sort(events.begin(), events.end());
+    events.erase(std::unique(events.begin(), events.end()), events.end());
+    for (const Rational& time : events) {
+        if (intersects(time)) return contact_result(time);
+    }
+    return {};
+}
+
 CCDResult resolve_exact(const std::array<Vec3, 4>& positions,
                         const std::array<Vec3, 4>& motion, bool vertex_face) {
     Points x, dx;
@@ -1268,10 +1368,61 @@ CCDResult translating_segment_linear_ccd(const Vec3& x1, const Vec3& dx1, const 
 
 namespace linear_ccd_detail {
 
-CCDResult node_triangle(const Vec3& x, const Vec3& dx,
+// Original linear kernels; only the exact resolver name is adapted.
+CCDResult node_triangle_original(const Vec3& x, const Vec3& dx,
                         const Vec3& x1, const Vec3& dx1,
                         const Vec3& x2, const Vec3& dx2,
                         const Vec3& x3, const Vec3& dx3, double eps) {
+    const std::array<Vec3, 4> positions{{x, x1, x2, x3}}, motion{{dx, dx1, dx2, dx3}};
+    const LinearQuery q(positions, motion);
+    if (q.requires_exact) {
+        if (swept_hulls_separated(q, true, q.validation_distance)) return {};
+        return exact_linear::resolve_original(positions, motion, true);
+    }
+    LinearCCDGuard guard{false, q.validation_distance};
+    const auto result = node_triangle_linear_ccd(q.x[0], q.dx[0], q.x[1], q.dx[1],
+        q.x[2], q.dx[2], q.x[3], q.dx[3], eps, guard);
+    if (guard.uncertain && swept_hulls_separated(q, true, guard.separation)) return {};
+    return guard.uncertain ? exact_linear::resolve_original(positions, motion, true) : result;
+}
+
+CCDResult segment_segment_original(const Vec3& x1, const Vec3& dx1, const Vec3& x2,
+                          const Vec3& x3, const Vec3& x4, double eps) {
+    const Vec3 zero = Vec3::Zero();
+    const std::array<Vec3, 4> positions{{x1, x2, x3, x4}}, motion{{dx1, zero, zero, zero}};
+    const LinearQuery q(positions, motion);
+    if (q.requires_exact) {
+        if (swept_hulls_separated(q, false, q.validation_distance)) return {};
+        return exact_linear::resolve_original(positions, motion, false);
+    }
+    LinearCCDGuard guard{false, q.validation_distance};
+    const auto result = segment_segment_linear_ccd(q.x[0], q.dx[0], q.x[1], q.x[2], q.x[3], eps, guard);
+    if (guard.uncertain && swept_hulls_separated(q, false, guard.separation)) return {};
+    return guard.uncertain ? exact_linear::resolve_original(positions, motion, false) : result;
+}
+
+CCDResult translating_segment_original(const Vec3& x1, const Vec3& dx1, const Vec3& x2,
+                              const Vec3& dx2, const Vec3& x3, const Vec3& x4, double eps) {
+    assert((dx1.array() == dx2.array()).all() && "endpoint displacements must match");
+    const Vec3 zero = Vec3::Zero();
+    const std::array<Vec3, 4> positions{{x1, x2, x3, x4}}, motion{{dx1, dx2, zero, zero}};
+    const LinearQuery q(positions, motion);
+    if (q.requires_exact) {
+        if (swept_hulls_separated(q, false, q.validation_distance)) return {};
+        return exact_linear::resolve_original(positions, motion, false);
+    }
+    LinearCCDGuard guard{false, q.validation_distance};
+    const auto result = translating_segment_linear_ccd(q.x[0], q.dx[0], q.x[1], q.dx[1], q.x[2], q.x[3], eps, guard);
+    if (guard.uncertain && swept_hulls_separated(q, false, guard.separation)) return {};
+    return guard.uncertain ? exact_linear::resolve_original(positions, motion, false) : result;
+}
+
+
+CCDResult node_triangle(const Vec3& x, const Vec3& dx,
+                        const Vec3& x1, const Vec3& dx1,
+                        const Vec3& x2, const Vec3& dx2,
+                        const Vec3& x3, const Vec3& dx3, double eps, bool original = false) {
+    if (original) return node_triangle_original(x, dx, x1, dx1, x2, dx2, x3, dx3, eps);
     const std::array<Vec3, 4> positions{{x, x1, x2, x3}}, motion{{dx, dx1, dx2, dx3}};
     const LinearQuery q(positions, motion);
     if (q.requires_exact) {
@@ -1287,7 +1438,8 @@ CCDResult node_triangle(const Vec3& x, const Vec3& dx,
 }
 
 CCDResult segment_segment(const Vec3& x1, const Vec3& dx1, const Vec3& x2,
-                          const Vec3& x3, const Vec3& x4, double eps) {
+                          const Vec3& x3, const Vec3& x4, double eps, bool original = false) {
+    if (original) return segment_segment_original(x1, dx1, x2, x3, x4, eps);
     const Vec3 zero = Vec3::Zero();
     const std::array<Vec3, 4> positions{{x1, x2, x3, x4}}, motion{{dx1, zero, zero, zero}};
     const LinearQuery q(positions, motion);
@@ -1303,7 +1455,8 @@ CCDResult segment_segment(const Vec3& x1, const Vec3& dx1, const Vec3& x2,
 }
 
 CCDResult translating_segment(const Vec3& x1, const Vec3& dx1, const Vec3& x2,
-                              const Vec3& dx2, const Vec3& x3, const Vec3& x4, double eps) {
+                              const Vec3& dx2, const Vec3& x3, const Vec3& x4, double eps, bool original = false) {
+    if (original) return translating_segment_original(x1, dx1, x2, dx2, x3, x4, eps);
     assert((dx1.array() == dx2.array()).all() && "endpoint displacements must match");
     const Vec3 zero = Vec3::Zero();
     const std::array<Vec3, 4> positions{{x1, x2, x3, x4}}, motion{{dx1, dx2, zero, zero}};
@@ -1563,31 +1716,48 @@ double segment_segment_general_ccd(const Vec3& x1, const Vec3& dx1,
 //   false           -> independent closed-form linear backend
 // -----------------------------------------------------------------------------
 
+CCDResult node_triangle_linear_ccd_v1(const Vec3& x, const Vec3& dx,
+    const Vec3& a, const Vec3& da, const Vec3& b, const Vec3& db,
+    const Vec3& c, const Vec3& dc, double eps) {
+    return linear_ccd_detail::node_triangle(x, dx, a, da, b, db, c, dc, eps, true);
+}
+
+CCDResult node_triangle_linear_ccd_v2(const Vec3& x, const Vec3& dx,
+    const Vec3& a, const Vec3& da, const Vec3& b, const Vec3& db,
+    const Vec3& c, const Vec3& dc, double eps) {
+    return linear_ccd_detail::node_triangle(x, dx, a, da, b, db, c, dc, eps, false);
+}
+
+CCDResult segment_segment_linear_ccd_v1(const Vec3& a, const Vec3& da,
+    const Vec3& b, const Vec3& c, const Vec3& d, double eps) {
+    return linear_ccd_detail::segment_segment(a, da, b, c, d, eps, true);
+}
+
 CCDResult node_triangle_only_one_node_moves(const Vec3& x,  const Vec3& dx,
                                             const Vec3& x1, const Vec3& dx1,
                                             const Vec3& x2, const Vec3& dx2,
                                             const Vec3& x3, const Vec3& dx3,
-                                            double eps, bool use_ticcd) {
+                                            double eps, bool use_ticcd, bool original) {
     if (use_ticcd) {
         return inclusion_ccd({{x, x1, x2, x3}}, {{dx, dx1, dx2, dx3}}, true);
     }
-    return linear_ccd_detail::node_triangle(x, dx, x1, dx1, x2, dx2, x3, dx3, eps);
+    return linear_ccd_detail::node_triangle(x, dx, x1, dx1, x2, dx2, x3, dx3, eps, original);
 }
 
 CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1,
                                               const Vec3& x2, const Vec3& x3, const Vec3& x4,
-                                              double eps, bool use_ticcd) {
+                                              double eps, bool use_ticcd, bool original) {
     if (use_ticcd) {
         const Vec3 zero = Vec3::Zero();
         return inclusion_ccd({{x1, x2, x3, x4}}, {{dx1, zero, zero, zero}}, false);
     }
-    return linear_ccd_detail::segment_segment(x1, dx1, x2, x3, x4, eps);
+    return linear_ccd_detail::segment_segment(x1, dx1, x2, x3, x4, eps, original);
 }
 
 CCDResult segment_segment_same_displacement_linear_ccd(
         const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2,
-        const Vec3& x3, const Vec3& x4, double eps) {
-    return linear_ccd_detail::translating_segment(x1, dx1, x2, dx2, x3, x4, eps);
+        const Vec3& x3, const Vec3& x4, double eps, bool original) {
+    return linear_ccd_detail::translating_segment(x1, dx1, x2, dx2, x3, x4, eps, original);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

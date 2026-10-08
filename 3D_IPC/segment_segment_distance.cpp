@@ -293,9 +293,11 @@ static SegmentSegmentDistanceResult segment_segment_distance_exact(
 }
 
 SegmentSegmentDistanceResult segment_segment_distance(
-    const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double eps)
+    const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double eps,
+    bool exact_computation_fallback)
 {
     const auto out = segment_segment_distance_fast(x1, x2, x3, x4, eps);
+    if (!exact_computation_fallback) return out;
     // Rational conversion requires finite inputs. Preserve the pre-existing
     // handling of invalid input rather than introducing conversion exceptions.
     if (!x1.allFinite() || !x2.allFinite() || !x3.allFinite() || !x4.allFinite()) {

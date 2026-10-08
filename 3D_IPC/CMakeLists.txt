@@ -281,6 +281,7 @@ if(BUILD_TESTING)
         grid_coloring_test
         grid_contact_scheduling_test
         initial_guess_test
+        exact_computation_fallback_test
         io_test
         ipc_math_test
         make_shape_test

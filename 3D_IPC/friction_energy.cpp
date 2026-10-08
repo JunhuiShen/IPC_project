@@ -159,7 +159,7 @@ FrozenFrictionContact make_node_triangle_frozen_friction_contact(
         const std::array<Vec3, 4>& current_positions,
         const std::array<Vec3, 4>& previous_positions,
         double d_hat, double k_barrier, double dt, double eps_v,
-        double eps, const NodeTriangleDistanceResult* precomputed_dr) {
+        double eps, const NodeTriangleDistanceResult* precomputed_dr, bool exact_computation_fallback) {
     validate_builder_parameters(d_hat, k_barrier, dt, eps_v, eps);
 
     const NodeTriangleDistanceResult dr = precomputed_dr
@@ -186,7 +186,7 @@ FrozenFrictionContact make_node_triangle_frozen_friction_contact(
 
     const NodeTriangleContactEvaluation evaluation =
             make_node_triangle_contact_evaluation(
-                    current_positions, d_hat, k_barrier, eps, &dr);
+                    current_positions, d_hat, k_barrier, eps, &dr, exact_computation_fallback);
     return make_node_triangle_frozen_friction_contact(
             current_positions, previous_positions, evaluation, dt, eps_v);
 }
@@ -207,7 +207,8 @@ FrozenFrictionContact make_node_triangle_frozen_friction_contact(
                         current_positions[2], current_positions[3],
                         1.0e-12, &evaluation.dr);
                 Vec3 direction = current_positions[0] - evaluation.dr.closest_point;
-                if (evaluation.dr.region == NodeTriangleRegion::FaceInterior) {
+                if (evaluation.exact_computation_fallback
+                    && evaluation.dr.region == NodeTriangleRegion::FaceInterior) {
                     // The projection can round back to the query point when
                     // the gap is tiny. Use the same signed face normal as the
                     // barrier gradient, without subtracting world positions
@@ -224,14 +225,14 @@ FrozenFrictionContact make_segment_segment_frozen_friction_contact(
         const std::array<Vec3, 4>& current_positions,
         const std::array<Vec3, 4>& previous_positions,
         double d_hat, double k_barrier, double dt, double eps_v,
-        double eps, const SegmentSegmentDistanceResult* precomputed_dr) {
+        double eps, const SegmentSegmentDistanceResult* precomputed_dr, bool exact_computation_fallback) {
     validate_builder_parameters(d_hat, k_barrier, dt, eps_v, eps);
 
     const SegmentSegmentDistanceResult dr = precomputed_dr
             ? *precomputed_dr
             : segment_segment_distance(
                     current_positions[0], current_positions[1],
-                    current_positions[2], current_positions[3], eps);
+                    current_positions[2], current_positions[3], eps, exact_computation_fallback);
     validate_distance(dr.distance);
 
     if (k_barrier == 0.0) {
@@ -248,7 +249,7 @@ FrozenFrictionContact make_segment_segment_frozen_friction_contact(
 
     const SegmentSegmentContactEvaluation evaluation =
             make_segment_segment_contact_evaluation(
-                    current_positions, d_hat, k_barrier, eps, &dr);
+                    current_positions, d_hat, k_barrier, eps, &dr, exact_computation_fallback);
     return make_segment_segment_frozen_friction_contact(
             current_positions, previous_positions, evaluation, dt, eps_v);
 }

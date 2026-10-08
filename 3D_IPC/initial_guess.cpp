@@ -27,7 +27,7 @@ struct ColoredCCDGuessWorkspace {
 
 static void discard_separated_guess_contacts(BroadPhase& broad_phase,
     const std::vector<Vec3>& x, bool parallel, ColoredCCDGuessWorkspace& workspace,
-    double minimum_separation) {
+    double minimum_separation, bool exact_computation_fallback) {
     const auto& cache = broad_phase.cache();
     workspace.nt_separated.resize(cache.nt_pairs.size());
     workspace.ss_separated.resize(cache.ss_pairs.size());
@@ -52,10 +52,96 @@ static void discard_separated_guess_contacts(BroadPhase& broad_phase,
         }
         auto& separated = segment ? workspace.ss_separated : workspace.nt_separated;
         separated[index] = solver_detail::contact_boxes_separated(
-            positions, boxes, segment, minimum_separation);
+            positions, boxes, segment, minimum_separation, exact_computation_fallback);
     }
     broad_phase.discard_separated_contact_incidence(
         workspace.nt_separated, workspace.ss_separated, parallel);
+}
+
+static double guess_point_triangle_distance(
+    const Vec3& point, const Vec3& a, const Vec3& b, const Vec3& c) {
+    const auto result = node_triangle_distance(point, a, b, c);
+    if (result.region == NodeTriangleRegion::FaceInterior)
+        return result.distance;
+    // Outside the face, test every finite edge: barycentric sign regions
+    // alone need not select the nearest edge for an obtuse triangle.
+    double t;
+    return std::min({(point - segment_closest_point(point, a, b, t)).norm(),
+        (point - segment_closest_point(point, b, c, t)).norm(),
+        (point - segment_closest_point(point, c, a, t)).norm()});
+}
+
+template <class AcceptDistance>
+static bool check_guess_contact_distances(const BroadPhase::Cache& cache,
+    const std::vector<Vec3>& x, int vertex, AcceptDistance accept) {
+    std::size_t index = 0;
+    for (const auto& entry : cache.vertex_nt[vertex]) {
+        const auto& pair = cache.nt_pairs[entry.pair_index];
+        const double distance = guess_point_triangle_distance(x[pair.node],
+            x[pair.tri_v[0]], x[pair.tri_v[1]], x[pair.tri_v[2]]);
+        if (!std::isfinite(distance) || !accept(index++, distance)) return false;
+    }
+    for (const auto& entry : cache.vertex_ss[vertex]) {
+        const auto& pair = cache.ss_pairs[entry.pair_index];
+        const double distance = segment_segment_distance(x[pair.v[0]],
+            x[pair.v[1]], x[pair.v[2]], x[pair.v[3]], 1e-12, false).distance;
+        if (!std::isfinite(distance) || !accept(index++, distance)) return false;
+    }
+    return true;
+}
+
+static void preserve_guess_separation(const BroadPhase::Cache& cache,
+    std::vector<Vec3>& x, int vertex, const Vec3& before,
+    std::vector<double>& required_distances) {
+    // Leave an unobstructed/adequately separated CCD endpoint untouched.
+    if (check_guess_contact_distances(cache, x, vertex,
+            [](std::size_t, double distance) {
+                return distance >= colored_guess_min_separation;
+            })) return;
+
+    const Vec3 accepted = x[vertex];
+    const Vec3 displacement = accepted - before;
+    x[vertex] = before;
+    required_distances.clear();
+    // A pre-existing smaller gap is not repaired or pushed apart. Preserve
+    // its own value without relaxing the floor for any other contact pair.
+    if (!check_guess_contact_distances(cache, x, vertex,
+            [&](std::size_t, double distance) {
+                required_distances.push_back(
+                    std::min(colored_guess_min_separation, distance));
+                return true;
+            })) return;
+
+    const auto acceptable = [&] {
+        return check_guess_contact_distances(cache, x, vertex,
+            [&](std::size_t index, double distance) {
+                return distance >= required_distances[index];
+            });
+    };
+    // A move away from an already small gap need not attain the full floor
+    // at once. Preserve the full CCD endpoint if it meets the per-pair bounds.
+    x[vertex] = accepted;
+    if (acceptable()) return;
+
+    // Keep a verified acceptable endpoint while refining the bracket, rather
+    // than discarding half of an otherwise long safe move on every sweep.
+    // Distances need not be globally monotone: only tested endpoints are
+    // accepted, and all trials lie on the already CCD-approved segment.
+    // The coloring ensures no concurrent same-color query reads this vertex.
+    double lower = 0.0, upper = 1.0;
+    Vec3 best = before;
+    const double length = displacement.stableNorm();
+    for (int attempt = 0; attempt < 48 && (upper - lower) * length > 1e-14; ++attempt) {
+        const double weight = 0.5 * (lower + upper);
+        x[vertex] = before + weight * displacement;
+        if (acceptable()) {
+            lower = weight;
+            best = x[vertex];
+        } else {
+            upper = weight;
+        }
+    }
+    x[vertex] = best;
 }
 
 std::vector<Vec3> collision_colored_ccd_initial_guess(
@@ -111,7 +197,7 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
     if (ccd_iterations == 0 || nv == 0) return xnew;
 
     double minimum_separation = colored_guess_min_separation;
-    for (int vertex = 0; vertex < nv; ++vertex) {
+    if (params.exact_computation_fallback) for (int vertex = 0; vertex < nv; ++vertex) {
         const double scale = std::max(x[vertex].cwiseAbs().maxCoeff(),
             targets[vertex].cwiseAbs().maxCoeff());
         minimum_separation = std::max(minimum_separation,
@@ -159,26 +245,28 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
     // boxes, so these pairs need neither read dependencies nor gap/CCD queries.
     // Checking just their current distances would not justify this pruning.
     discard_separated_guess_contacts(broad_phase, x, params.use_parallel, workspace,
-        minimum_separation);
+        minimum_separation, params.exact_computation_fallback);
     auto& contact_adjacency = workspace.contact_adjacency;
     auto& color_groups = workspace.color_groups;
     build_contact_adj(broad_phase.cache(), nv, contact_adjacency);
     greedy_color_conflict_graph(contact_adjacency, color_groups, &workspace.coloring);
 
-    // Start the contact-heavy independent vertices first. Coloring and the
-    // order of colors do not change: within a color no query reads another
-    // updated vertex. One-vertex dispatch avoids making a worker finish a
-    // whole chunk of expensive backtracking queries while its peers wait.
-    const auto& cache = broad_phase.cache();
-    const auto cost = [&](int vertex) -> std::size_t {
-        return is_rigid(vertex) ? 0
-            : cache.vertex_nt[vertex].size() + cache.vertex_ss[vertex].size();
-    };
-    for (auto& group : color_groups) {
-        std::sort(group.begin(), group.end(), [&](int a, int b) {
-            const auto ca = cost(a), cb = cost(b);
-            return ca != cb ? ca > cb : a < b;
-        });
+    if (params.exact_computation_fallback) {
+        // Start the contact-heavy independent vertices first. Coloring and the
+        // order of colors do not change: within a color no query reads another
+        // updated vertex. One-vertex dispatch avoids making a worker finish a
+        // whole chunk of expensive backtracking queries while its peers wait.
+        const auto& cache = broad_phase.cache();
+        const auto cost = [&](int vertex) -> std::size_t {
+            return is_rigid(vertex) ? 0
+                : cache.vertex_nt[vertex].size() + cache.vertex_ss[vertex].size();
+        };
+        for (auto& group : color_groups) {
+            std::sort(group.begin(), group.end(), [&](int a, int b) {
+                const auto ca = cost(a), cb = cost(b);
+                return ca != cb ? ca > cb : a < b;
+            });
+        }
     }
 
     // Every candidate's four vertices form a clique, so a same-color update
@@ -187,21 +275,27 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
     // Keep one team alive across all colors/sweeps. Targets, boxes, pairs and
     // coloring stay fixed; only xnew changes toward the original targets.
     // Bit 0 records movement; bit 1 records a remaining nontrivial target move.
+    const int schedule_chunk = params.exact_computation_fallback ? 1 : 8;
     int sweep_status = 0;
     #pragma omp parallel if(params.use_parallel)
     {
+        std::vector<double> required_distances; // original predictor, private to each worker
         for (int iteration = 0; iteration < ccd_iterations; ++iteration) {
             #pragma omp single
             { sweep_status = 0; }
             for (const auto& group : color_groups) {
-                #pragma omp for schedule(dynamic, 1) reduction(|:sweep_status)
+                #pragma omp for schedule(dynamic, schedule_chunk) reduction(|:sweep_status)
                 for (int index = 0; index < static_cast<int>(group.size()); ++index) {
                     const int vertex = group[index];
                     if (is_rigid(vertex)) continue;
                     const Vec3 before = xnew[vertex];
-                    per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
+                    const double step = per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
                         /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false,
-                        /*use_ogc=*/false, /*cooperative=*/false);
+                        /*use_ogc=*/false, /*cooperative=*/false, nullptr,
+                        params.exact_computation_fallback);
+                    if (!params.exact_computation_fallback && step > 0.0)
+                        preserve_guess_separation(broad_phase.cache(), xnew,
+                            vertex, before, required_distances);
                     if ((xnew[vertex].array() != before.array()).any()) sweep_status |= 1;
                     // Predictor convergence tolerance only; safe_step itself
                     // still allows smaller, representable separating updates.

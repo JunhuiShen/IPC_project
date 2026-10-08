@@ -3861,6 +3861,26 @@ TEST(ClothCylinderDropExample, ContactDefaultIsSceneSpecificAndFlagsOverrideIt) 
     EXPECT_DOUBLE_EQ(other_scene.d_hat, 0.005);
 }
 
+TEST(IPCArgsCCD, ExactFallbackFlagKeepsTightInclusionIndependent) {
+    IPCArgs3D args;
+    std::vector<std::string> values = {"3D_sim", "--use_ticcd", "true",
+        "--exact_computation_fallback"};
+    std::vector<char*> argv;
+    for (auto& value : values) argv.push_back(value.data());
+    ASSERT_TRUE(args.parse(static_cast<int>(argv.size()), argv.data()));
+    EXPECT_TRUE(args.exact_computation_fallback);
+    EXPECT_TRUE(args.to_sim_params().use_ticcd);
+    EXPECT_FALSE(args.to_sim_params().use_original_linear_ccd());
+
+    IPCArgs3D tight_inclusion;
+    values = {"3D_sim", "--use_ticcd", "true", "--exact_computation_fallback", "false"};
+    argv.clear();
+    for (auto& value : values) argv.push_back(value.data());
+    ASSERT_TRUE(tight_inclusion.parse(static_cast<int>(argv.size()), argv.data()));
+    EXPECT_FALSE(tight_inclusion.exact_computation_fallback);
+    EXPECT_TRUE(tight_inclusion.to_sim_params().use_ticcd);
+}
+
 TEST(ClothCylinderDropExample,
      RaisedCenteredPlacementOverridesPreserveClearanceAndGroundHeight) {
     IPCArgs3D args;
