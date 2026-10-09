@@ -2115,7 +2115,7 @@ void build_wrecking_ball_example(
 }
 
 // ---------------------------------------------------------------------------
-// Example 14: separated cloth sheets falling onto a long horizontal cylinder
+// Examples 14/15: separated cloth sheets falling onto a long horizontal cylinder
 // ---------------------------------------------------------------------------
 void build_cloth_cylinder_drop_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
@@ -2125,7 +2125,7 @@ void build_cloth_cylinder_drop_example(
     if (args.drop_stack_count < 1 || args.drop_cloth_nx < 1
         || args.drop_cloth_ny < 1 || args.cyl_nu < 3 || args.cyl_cap_rings < 1) {
         throw std::invalid_argument(
-            "example 14 requires positive cloth count and grid subdivisions, "
+            "cloth-cylinder drop example requires positive cloth count and grid subdivisions, "
             "cyl_cap_rings >= 1, and cyl_nu >= 3");
     }
     const std::size_t sheets = static_cast<std::size_t>(args.drop_stack_count);
@@ -2134,7 +2134,7 @@ void build_cloth_cylinder_drop_example(
     const std::size_t index_limit = static_cast<std::size_t>(std::numeric_limits<int>::max());
     if (nx + 1 > index_limit / (ny + 1) / sheets
         || nx > index_limit / 6 / ny / sheets) {
-        throw std::invalid_argument("example 14 cloth stack exceeds mesh index limits");
+        throw std::invalid_argument("cloth-cylinder drop example cloth stack exceeds mesh index limits");
     }
     const std::size_t cloth_vertices = sheets * (nx + 1) * (ny + 1);
     const std::size_t cloth_indices = sheets * 6 * nx * ny;
@@ -2143,30 +2143,30 @@ void build_cloth_cylinder_drop_example(
                                args.cyl_radius, args.cyl_length}) {
         if (!std::isfinite(length) || length <= 0.0) {
             throw std::invalid_argument(
-                "example 14 requires positive finite cloth dimensions, "
+                "cloth-cylinder drop example requires positive finite cloth dimensions, "
                 "drop_spacing, ground size and cell size, cylinder radius and length");
         }
     }
     if (!std::isfinite(args.k_sdf) || args.k_sdf < 0.0
         || !std::isfinite(args.cyl_sdf_padding) || args.cyl_sdf_padding < 0.0) {
         throw std::invalid_argument(
-            "example 14 requires nonnegative finite k_sdf and cyl_sdf_padding");
+            "cloth-cylinder drop example requires nonnegative finite k_sdf and cyl_sdf_padding");
     }
     if (!std::isfinite(params.d_hat) || params.d_hat >= args.drop_spacing) {
         throw std::invalid_argument(
-            "example 14 requires a finite d_hat < drop_spacing");
+            "cloth-cylinder drop example requires a finite d_hat < drop_spacing");
     }
     const double collision_radius = args.cyl_radius + args.cyl_sdf_padding;
     const Vec3 cylinder_center(args.cyl_cx, args.cyl_cy, args.cyl_cz);
     if (!cylinder_center.allFinite() || !std::isfinite(args.drop_first_y)
         || !std::isfinite(args.drop_cx) || !std::isfinite(args.drop_cz)) {
         throw std::invalid_argument(
-            "example 14 requires finite cylinder and cloth-stack coordinates");
+            "cloth-cylinder drop example requires finite cylinder and cloth-stack coordinates");
     }
     if (args.drop_first_y <= std::max(0.0, args.cyl_cy + collision_radius)
                                 + std::max(0.0, params.eps_sdf)) {
         throw std::invalid_argument(
-            "example 14 requires drop_first_y above the ground and cylinder "
+            "cloth-cylinder drop example requires drop_first_y above the ground and cylinder "
             "padded top, with eps_sdf clearance");
     }
 
@@ -2175,7 +2175,7 @@ void build_cloth_cylinder_drop_example(
     const double ground_cells = std::ceil(args.cyl_ground_size / args.cyl_ground_cell_size);
     if (!std::isfinite(ground_cells)
         || ground_cells >= std::sqrt(static_cast<double>(std::numeric_limits<int>::max())) - 1.0) {
-        throw std::invalid_argument("example 14 ground tessellation exceeds mesh index limits");
+        throw std::invalid_argument("cloth-cylinder drop example ground tessellation exceeds mesh index limits");
     }
     const int ground_n = std::max(1, static_cast<int>(ground_cells));
     clear_model(ref_mesh, state, X, pins);

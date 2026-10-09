@@ -3881,6 +3881,49 @@ TEST(IPCArgsCCD, ExactFallbackFlagKeepsTightInclusionIndependent) {
     EXPECT_TRUE(tight_inclusion.to_sim_params().use_ticcd);
 }
 
+TEST(ClothCylinderDropExample, Example15PresetPreservesScaleAndRequestedBudget) {
+    IPCArgs3D args;
+    char program[]="3D_sim", option[]="--example", scene[]="15";
+    char* argv[]={program,option,scene};
+    ASSERT_TRUE(args.parse(3,argv));
+    EXPECT_EQ(args.drop_stack_count,200);
+    EXPECT_EQ(args.drop_cloth_nx,140);
+    EXPECT_EQ(args.drop_cloth_ny,140);
+    EXPECT_EQ(args.drop_stack_count*(args.drop_cloth_nx+1)*(args.drop_cloth_ny+1),3976200);
+    EXPECT_DOUBLE_EQ(args.drop_cloth_w/args.drop_cloth_nx,.03);
+    EXPECT_DOUBLE_EQ(args.drop_cloth_h/args.drop_cloth_ny,.03);
+    EXPECT_DOUBLE_EQ(args.drop_spacing,.005);
+    EXPECT_DOUBLE_EQ(args.E,1e6);
+    EXPECT_DOUBLE_EQ(args.nu,.25);
+    EXPECT_DOUBLE_EQ(args.kB,.001);
+    EXPECT_EQ(args.num_frames,120);
+    EXPECT_EQ(args.substeps,100);
+    EXPECT_EQ(args.max_substep_iters,4);
+    EXPECT_EQ(args.node_box_update_count,args.max_substep_iters);
+    EXPECT_TRUE(args.fixed_iters);
+    EXPECT_TRUE(args.use_simd);
+    EXPECT_TRUE(args.exact_computation_fallback);
+    EXPECT_GT(args.drop_first_y,args.cyl_cy+args.cyl_radius+args.cyl_sdf_padding+args.eps_sdf);
+}
+
+TEST(ClothCylinderDropExample, Example15FreeFallOverridesKeepUpdateCountConsistent) {
+    IPCArgs3D args;
+    std::vector<std::string> values={"3D_sim","--example","15","--substeps","40",
+        "--max_substep_iters","3","--d_hat","0.0025","--node_box_max","0.001",
+        "--exact_computation_fallback","false","--nu","0.3"};
+    std::vector<char*> argv;
+    for(auto& value:values)argv.push_back(value.data());
+    ASSERT_TRUE(args.parse(static_cast<int>(argv.size()),argv.data()));
+    EXPECT_EQ(args.substeps,40);
+    EXPECT_EQ(args.max_substep_iters,3);
+    EXPECT_EQ(args.node_box_update_count,3);
+    EXPECT_DOUBLE_EQ(args.d_hat,.0025);
+    EXPECT_DOUBLE_EQ(args.node_box_max,.001);
+    EXPECT_DOUBLE_EQ(args.nu,.3);
+    EXPECT_FALSE(args.exact_computation_fallback);
+    EXPECT_TRUE(args.to_sim_params().use_original_linear_ccd());
+}
+
 TEST(ClothCylinderDropExample,
      RaisedCenteredPlacementOverridesPreserveClearanceAndGroundHeight) {
     IPCArgs3D args;

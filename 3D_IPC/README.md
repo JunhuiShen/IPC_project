@@ -80,7 +80,7 @@ threads independently.
 
 ## Built-in scenes
 
-Select a scene with `--example N`; IDs run consecutively from 1 to 14.
+Select a scene with `--example N`; IDs run consecutively from 1 to 15.
 Categories describe the simulated material models: **cloth** uses shell
 meshes, **rigid body** uses rigid motion, and **solid** uses deformable
 tetrahedral meshes. **Mixed** scenes below contain cloth, rigid bodies, and
@@ -103,6 +103,7 @@ There is no solid-only scene among the categorized examples.
 | 12 | Cloth only | Three cloth layers with one fixed edge and one oscillating edge. |
 | 13 | Rigid body only | A linked wrecking ball swinging into a wall of 560 rigid cubes. |
 | 14 | Cloth only | Fifty free cloth sheets falling over an off-center fixed cylinder toward the ground. |
+| 15 | Cloth only | Two hundred 141 × 141 free cloth sheets over an off-center cylinder; 3,976,200 vertices. |
 
 ### Scene assets
 
@@ -119,7 +120,12 @@ Example 4 needs a directory supplied with `--datadir`, containing
 `body_0000.obj` and `dress_0000.obj`. Other scenes are generated procedurally.
 Resolution flags are scene-specific: `twist_nx/ny` affect Example 1,
 `osc_nx/nz` affect Example 12, and `drop_stack_count` plus `drop_cloth_nx/ny`
-affect Example 14. Its default 50 sheets contain 245,000 cloth vertices.
+affect Examples 14 and 15. Example 14's default 50 sheets contain 245,000 cloth
+vertices. Example 15 uses 4.2 m square sheets with 3 cm edges and 5 mm gaps,
+`E=1e6`, `nu=0.25`, and `kB=0.001`. Its lowest sheet starts at 1.8 m, centered
+at x=0.8 m; the cylinder has radius 0.55 m and center (-0.7, 0.65, 0) m.
+Explicit command-line settings override the scene presets. The staged Example 15
+run below is being tested; full contact and spreading acceptance is pending.
 
 ## Common settings
 
@@ -322,18 +328,28 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores \
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 2 \
   --outdir results/example14_70x70/frames --format geo
+
+# Example 15: two hundred free cloth sheets fall over the cylinder and spread onto the ground.
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 15 --exact_computation_fallback false --num_frames 9 \
+  --fps 30 --substeps 40 --max_substep_iters 3 --fixed_iters \
+  --use_basic_experimental --use_simd --use_parallel true --use_ccd true \
+  --use_ccd_guess true --use_colored_ccd_guess false \
+  --E 1e6 --nu 0.25 --kB 0.001 --d_hat 0.0025 --k_barrier 10000 \
+  --k_sdf 1e5 --eps_sdf 0.015 \
+  --node_box_min 0.0001 --node_box_max 0.001 --node_box_update_count 3 \
+  --outdir example15_200x141x141/frames --format geo && \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 15 --exact_computation_fallback false \
+  --restart_frame 9 --num_frames 120 \
+  --fps 30 --substeps 100 --max_substep_iters 4 --fixed_iters \
+  --use_basic_experimental --use_simd --use_parallel true --use_ccd true \
+  --use_ccd_guess true --use_colored_ccd_guess false \
+  --E 1e6 --nu 0.25 --kB 0.001 --d_hat 0.0048 --k_barrier 10000 \
+  --k_sdf 1e5 --eps_sdf 0.015 \
+  --node_box_min 0.0001 --node_box_max 0.003 --node_box_update_count 4 \
+  --outdir example15_200x141x141/frames --format geo
 ```
-
-</details>
-
-`--exact_computation_fallback` is **true by default**. It enables additional
-exact-arithmetic fallbacks for linear CCD and contact distances, matching barrier
-derivatives, scalar SIMD fallback for difficult contacts, stable friction geometry,
-and rounded-path checks in colored CCD guesses.
-
-`--use_colored_ccd_guess` controls whether the colored predictor is used, and
-`--colored_ccd_guess_iters` sets its sweep count. `--use_ticcd true` selects
-Tight-Inclusion independently of this flag.
 
 ## Build and test
 

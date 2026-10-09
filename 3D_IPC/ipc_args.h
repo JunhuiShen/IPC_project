@@ -121,7 +121,7 @@ struct IPCArgs3D : ArgParser {
     double      osc_amplitude   = 0.02;  // driven-edge sinusoid amplitude (m)
     double      osc_frequency   = 0.50;  // driven-edge frequency (Hz)
 
-    // example 14: vertically separated cloth sheets falling onto a long cylinder
+    // examples 14/15: vertically separated cloth sheets falling onto a long cylinder
     int         drop_stack_count = 50;
     int         drop_cloth_nx    = 69;   // 70 vertices along x
     int         drop_cloth_ny    = 69;   // 70 vertices along z
@@ -206,7 +206,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
         add_bool  ("exact_computation_fallback", exact_computation_fallback, true, "Enable additional exact-arithmetic CCD/contact fallbacks, matching barrier/friction calculations, and colored-predictor path checks (default: true)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=twenty_polygon_stack, 8=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 9=dynamic_bolt_into_fixed_nut, 10=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 11=cloth_unrolling_down_fixed_ramp, 12=oscillating_cloth_layers, 13=wrecking_ball, 14=cloth_cylinder_drop");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=twenty_polygon_stack, 8=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 9=dynamic_bolt_into_fixed_nut, 10=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 11=cloth_unrolling_down_fixed_ramp, 12=oscillating_cloth_layers, 13=wrecking_ball, 14=cloth_cylinder_drop, 15=200_sheet_cylinder_drop");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -253,25 +253,25 @@ struct IPCArgs3D : ArgParser {
         add_double("osc_amplitude", osc_amplitude, 0.02,   "Signed vertical sinusoid amplitude (m) of the driven edges in example 12");
         add_double("osc_frequency", osc_frequency, 0.50,   "Sinusoid frequency (Hz) of the driven edges in example 12");
 
-        add_int   ("drop_stack_count", drop_stack_count, 50,   "Number of falling cloth sheets in example 14");
-        add_int   ("drop_cloth_nx",    drop_cloth_nx,    69,   "Grid subdivisions along x per sheet in example 14 (vertices = subdivisions + 1)");
-        add_int   ("drop_cloth_ny",    drop_cloth_ny,    69,   "Grid subdivisions along z per sheet in example 14 (vertices = subdivisions + 1)");
-        add_double("drop_first_y",     drop_first_y,     1.20, "Initial lowest-sheet height (m) in example 14; must clear the padded cylinder top and eps_sdf");
-        add_double("drop_spacing",     drop_spacing,     0.005,"Initial vertical spacing (m) between cloth sheets in example 14");
-        add_double("drop_cloth_w",     drop_cloth_w,     2.07, "Cloth width along x (m) in example 14");
-        add_double("drop_cloth_h",     drop_cloth_h,     2.07, "Cloth length along z (m) in example 14");
-        add_double("drop_cx",          drop_cx,          0.0,  "Cloth-stack center x (m) in example 14, independent of the cylinder");
-        add_double("drop_cz",          drop_cz,          0.0,  "Cloth-stack center z (m) in example 14, independent of the cylinder");
-        add_double("cyl_ground_size",  cyl_ground_size,  12.5, "Visual ground edge length (m) in example 14");
-        add_double("cyl_ground_cell_size", cyl_ground_cell_size, 0.25, "Maximum visual ground cell edge (m) in example 14");
-        add_int   ("cyl_nu",           cyl_nu,           64,   "Circumferential visual cylinder subdivisions in example 14");
-        add_int   ("cyl_cap_rings",    cyl_cap_rings,    12,   "Radial subdivisions per visual cylinder end cap in example 14");
-        add_double("cyl_radius",       cyl_radius,       0.35, "Visible cylinder radius (m) in example 14");
-        add_double("cyl_sdf_padding",  cyl_sdf_padding,  0.012,"Extra cylinder SDF radius (m) in example 14 to keep coarse cloth faces outside the visible cylinder");
-        add_double("cyl_length",       cyl_length,       4.0,  "Visual cylinder length along z (m) in example 14; collision SDF is infinite");
-        add_double("cyl_cx",           cyl_cx,          -0.70, "Cylinder center x (m) in example 14; negative offsets it left of the cloth stack");
-        add_double("cyl_cy",           cyl_cy,           0.60, "Cylinder center y (m) in example 14");
-        add_double("cyl_cz",           cyl_cz,           0.0,  "Cylinder center z (m) in example 14");
+        add_int   ("drop_stack_count", drop_stack_count, 50,   "Number of falling cloth sheets in examples 14 and 15");
+        add_int   ("drop_cloth_nx",    drop_cloth_nx,    69,   "Grid subdivisions along x per sheet in examples 14 and 15 (vertices = subdivisions + 1)");
+        add_int   ("drop_cloth_ny",    drop_cloth_ny,    69,   "Grid subdivisions along z per sheet in examples 14 and 15 (vertices = subdivisions + 1)");
+        add_double("drop_first_y",     drop_first_y,     1.20, "Initial lowest-sheet height (m) in examples 14 and 15; must clear the padded cylinder top and eps_sdf");
+        add_double("drop_spacing",     drop_spacing,     0.005,"Initial vertical spacing (m) between cloth sheets in examples 14 and 15");
+        add_double("drop_cloth_w",     drop_cloth_w,     2.07, "Cloth width along x (m) in examples 14 and 15");
+        add_double("drop_cloth_h",     drop_cloth_h,     2.07, "Cloth length along z (m) in examples 14 and 15");
+        add_double("drop_cx",          drop_cx,          0.0,  "Cloth-stack center x (m) in examples 14 and 15, independent of the cylinder");
+        add_double("drop_cz",          drop_cz,          0.0,  "Cloth-stack center z (m) in examples 14 and 15, independent of the cylinder");
+        add_double("cyl_ground_size",  cyl_ground_size,  12.5, "Visual ground edge length (m) in examples 14 and 15");
+        add_double("cyl_ground_cell_size", cyl_ground_cell_size, 0.25, "Maximum visual ground cell edge (m) in examples 14 and 15");
+        add_int   ("cyl_nu",           cyl_nu,           64,   "Circumferential visual cylinder subdivisions in examples 14 and 15");
+        add_int   ("cyl_cap_rings",    cyl_cap_rings,    12,   "Radial subdivisions per visual cylinder end cap in examples 14 and 15");
+        add_double("cyl_radius",       cyl_radius,       0.35, "Visible cylinder radius (m) in examples 14 and 15");
+        add_double("cyl_sdf_padding",  cyl_sdf_padding,  0.012,"Extra cylinder SDF radius (m) in examples 14 and 15 to keep coarse cloth faces outside the visible cylinder");
+        add_double("cyl_length",       cyl_length,       4.0,  "Visual cylinder length along z (m) in examples 14 and 15; collision SDF is infinite");
+        add_double("cyl_cx",           cyl_cx,          -0.70, "Cylinder center x (m) in examples 14 and 15; negative offsets it left of the cloth stack");
+        add_double("cyl_cy",           cyl_cy,           0.60, "Cylinder center y (m) in examples 14 and 15");
+        add_double("cyl_cz",           cyl_cz,           0.0,  "Cylinder center z (m) in examples 14 and 15");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
@@ -281,13 +281,47 @@ struct IPCArgs3D : ArgParser {
 
     bool parse(int argc, char** argv) {
         if (!ArgParser::parse(argc, argv)) return false;
-        if (example == 14) {
+        const auto supplied = [&](const char* flag) {
+            for (int i = 1; i < argc; ++i)
+                if (std::string(argv[i]) == flag) return true;
+            return false;
+        };
+        if (example == 15) {
+            const auto preset = [&](const char* flag, auto& field, auto value) {
+                if (!supplied(flag)) field = value;
+            };
+            // 140 cells give 141 vertices and 3 cm edges on each 4.2 m sheet.
+            // Defaults use the stronger contact budget; the README begins
+            // with an explicit 40x3 free-fall phase before restarting here.
+            preset("--drop_stack_count", drop_stack_count, 200);
+            preset("--drop_cloth_nx", drop_cloth_nx, 140);
+            preset("--drop_cloth_ny", drop_cloth_ny, 140);
+            preset("--drop_cloth_w", drop_cloth_w, 4.2);
+            preset("--drop_cloth_h", drop_cloth_h, 4.2);
+            preset("--drop_first_y", drop_first_y, 1.8);
+            preset("--drop_cx", drop_cx, 0.8);
+            preset("--cyl_radius", cyl_radius, 0.55);
+            preset("--cyl_cy", cyl_cy, 0.65);
+            preset("--cyl_length", cyl_length, 8.0);
+            preset("--cyl_sdf_padding", cyl_sdf_padding, 0.006);
+            preset("--cyl_ground_size", cyl_ground_size, 40.0);
+            preset("--nu", nu, 0.25);
+            preset("--substeps", substeps, 100);
+            preset("--max_substep_iters", max_substep_iters, 4);
+            preset("--node_box_update_count", node_box_update_count, max_substep_iters);
+            preset("--fixed_iters", fixed_iters, true);
+            preset("--use_basic_experimental", use_basic_experimental, true);
+            preset("--use_simd", use_simd, true);
+            preset("--eps_sdf", eps_sdf, 0.015);
+            preset("--k_barrier", k_barrier, 10000.0);
+            preset("--node_box_min", node_box_min, 0.0001);
+            preset("--node_box_max", node_box_max, 0.003);
+            preset("--num_frames", num_frames, 120);
+        }
+        if (example == 14 || example == 15) {
             // The general 5 mm contact band equals this scene's release gap.
             // Keep the default strictly smaller, while honoring explicit flags.
-            bool explicit_d_hat = false;
-            for (int i = 1; i < argc; ++i)
-                explicit_d_hat |= std::string(argv[i]) == "--d_hat";
-            if (!explicit_d_hat) d_hat = 0.0048;
+            if (!supplied("--d_hat")) d_hat = 0.0048;
         }
         return true;
     }

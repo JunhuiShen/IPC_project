@@ -230,7 +230,7 @@ void build_wrecking_ball_example(
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris);
 
-// Example 14: free horizontal cloth sheets stacked above a fixed cylinder
+// Examples 14/15: free horizontal cloth sheets stacked above a fixed cylinder
 // aligned with +z. Ground and cylinder use analytic SDF contact; the capped
 // cylinder mesh and ground in static_x/static_tris are for visualization only.
 void build_cloth_cylinder_drop_example(
