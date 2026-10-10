@@ -11,6 +11,7 @@
 #include <omp.h>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 // Per-substep pin-target updater. The closure captures whichever spec the
@@ -64,10 +65,14 @@ inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& st
     }
 }
 
-// Advance a rigid-body-only frame.
-inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& ref_mesh, const SimParams& params, int frame_index = 1, SubstepCallback on_substep = nullptr) {
+// The caller owns storage for this simulation and joins each frame before reuse.
+// Refresh topology at the frame boundary just as the fresh-workspace entry does;
+// every substep still rebuilds its current motion boxes and contact candidates.
+inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& ref_mesh, const SimParams& params,
+    BroadPhase& broad_phase, int frame_index = 1, SubstepCallback on_substep = nullptr) {
     SolverResult agg;
     const double dt = params.dt();
+    broad_phase.invalidate_mesh_topology();
 
     for (int sub = 0; sub < params.substeps; ++sub) {
         std::vector<Vec3> x_com_new = state.x_coms;
@@ -80,7 +85,6 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
             const std::vector<Vec3> xhat = state.deformed_positions;
             const VertexTriangleMap adjacency;
             const std::vector<Pin> pins;
-            BroadPhase broad_phase;
             // The rigid-only driver writes through on_substep. It has no
             // diagnostic outdir, so do not create general debug files in cwd.
             SimParams solver_params = params;
@@ -110,6 +114,14 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
         }
     }
     return agg;
+}
+
+// Preserve the existing fresh-workspace API for callers that do not own one.
+inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& ref_mesh, const SimParams& params,
+    int frame_index = 1, SubstepCallback on_substep = nullptr) {
+    BroadPhase broad_phase;
+    return advance_one_frame_rb(state, ref_mesh, params, broad_phase,
+        frame_index, std::move(on_substep));
 }
 
 // Advance a frame containing both independently deformable nodes and rigid

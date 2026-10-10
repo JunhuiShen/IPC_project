@@ -5,6 +5,7 @@
 #include "general_simd_rigid.h"
 #include "general_simd_scheduling.h"
 #include "contact_scheduling.h"
+#include "rigid_contact_scheduling.h"
 #include "grid_contact_scheduling.h"
 #include "grid_coloring.h"
 #include "IPC_math.h"
@@ -764,21 +765,7 @@ static void rebuild_box_contact_certificates(const BroadPhase::Cache& cache,
     if (error) std::rethrow_exception(error);
 }
 
-struct SimdContactBatch {
-    std::array<ipc_simd::MeshContactOutput, ipc_simd::contact_tile_width> values;
-    std::array<unsigned, ipc_simd::contact_tile_width> flags{};
-    std::size_t count = 0;
 
-    SimdContactBatch() {
-        // Returned batches may copy every slot, including rejected contacts.
-        for (auto& value : values) {
-            value.gradient.setZero();
-            value.hessian.setZero();
-            value.friction_gradient.setZero();
-            value.friction_hessian.setZero();
-        }
-    }
-};
 
 static unsigned gather_simd_contact(
     int vertex, std::size_t local, const BroadPhase::Cache& cache,
@@ -864,7 +851,6 @@ static void accumulate_simd_mesh_contacts(
     const std::size_t count = cache.vertex_nt[vertex].size() + cache.vertex_ss[vertex].size();
     if (count == 0) return;
     const std::size_t width = ipc_simd::contact_tile_width;
-    const int batches = static_cast<int>((count + width - 1) / width);
     const double dt2k = params.dt2() * params.k_barrier;
     const auto accumulate_value = [&](const ipc_simd::MeshContactOutput& value) {
         g += dt2k * value.gradient;
@@ -874,26 +860,28 @@ static void accumulate_simd_mesh_contacts(
             H += value.friction_hessian;
         }
     };
-    const auto evaluate = [&](int index) {
-        const std::size_t begin = static_cast<std::size_t>(index) * width;
-        SimdContactBatch result;
-        result.count = std::min(width, count - begin);
-        evaluate_simd_contact_batch(vertex, begin, result.count, cache, params, x, previous,
-            [&](std::size_t i, unsigned flags, const ipc_simd::MeshContactOutput* value) {
-                result.flags[i] = flags;
-                if (value) result.values[i] = *value;
-                if (rejections) rejections->clear[begin + i] = (flags & 2u) != 0;
+    if (cooperative && count >= 32 && omp_get_num_threads() > 1) {
+        solver_detail::ordered_nodal_contact_ranges(static_cast<int>(count), true,
+            params.friction_coefficient != 0.0,
+            [&](int begin, int end, const auto& emit) {
+                // Retain the original raw-contact packet boundaries.
+                for (std::size_t first = begin; first < static_cast<std::size_t>(end); first += width) {
+                    const std::size_t length = std::min(width, static_cast<std::size_t>(end) - first);
+                    evaluate_simd_contact_batch(vertex, first, length, cache, params, x, previous,
+                        [&](std::size_t i, unsigned flags, const ipc_simd::MeshContactOutput* value) {
+                            if (rejections) rejections->clear[first + i] = (flags & 2u) != 0;
+                            if (value) emit(first + i, value->gradient, value->hessian,
+                                value->friction_gradient, value->friction_hessian);
+                        });
+                }
+            }, [&](const Vec3& gradient, const Mat33& hessian,
+                   const Vec3& friction_gradient, const Mat33& friction_hessian) {
+                ipc_simd::MeshContactOutput value;
+                value.gradient = gradient; value.hessian = hessian;
+                value.friction_gradient = friction_gradient; value.friction_hessian = friction_hessian;
+                accumulate_value(value);
             });
-        return result;
-    };
-    const auto accumulate = [&](const SimdContactBatch& batch) {
-        for (std::size_t i = 0; i < batch.count; ++i) {
-            if (!(batch.flags[i] & 1u)) continue;
-            accumulate_value(batch.values[i]);
-        }
-    };
-    if (cooperative && count >= 32 && omp_get_num_threads() > 1)
-        solver_detail::parallel_contact_tasks(batches, evaluate, accumulate);
+    }
     else {
         std::array<ipc_simd::MeshContactInput, ipc_simd::contact_tile_width> inputs;
         std::array<ipc_simd::MeshContactOutput, ipc_simd::contact_tile_width> outputs;
@@ -1099,30 +1087,20 @@ Vec3 gs_vertex_delta_live_barrier_experimental(int vi, const RefMesh& ref_mesh, 
             for (std::size_t i = 0; i < ss.size(); ++i)
                 evaluate_ss(ss[i], nt.size() + i, accumulate);
         } else {
-            struct Contribution {
-                Vec3 gradient = Vec3::Zero(), friction_gradient = Vec3::Zero();
-                Mat33 hessian = Mat33::Zero(), friction_hessian = Mat33::Zero();
-            };
             const int nt_count = static_cast<int>(nt.size());
-            solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss.size()), cooperative,
-                [&](int i) {
-                    std::optional<Contribution> value;
-                    const auto store = [&](const Vec3& gradient, const Mat33& hessian,
-                                           const Vec3& friction_gradient, const Mat33& friction_hessian) {
-                        value.emplace();
-                        value->gradient = gradient;
-                        value->hessian = hessian;
-                        value->friction_gradient = friction_gradient;
-                        value->friction_hessian = friction_hessian;
-                    };
-                    if (i < nt_count) evaluate_nt(nt[i], i, store);
-                    else evaluate_ss(ss[i - nt_count], i, store);
-                    return value;
-                },
-                [&](const std::optional<Contribution>& value) {
-                    if (value) accumulate(value->gradient, value->hessian,
-                                          value->friction_gradient, value->friction_hessian);
-                });
+            solver_detail::ordered_nodal_contact_ranges(
+                nt_count + static_cast<int>(ss.size()), cooperative,
+                params.friction_coefficient != 0.0,
+                [&](int begin, int end, const auto& emit) {
+                    for (int i = begin; i < end; ++i) {
+                        const auto store = [&](const Vec3& gradient, const Mat33& hessian,
+                            const Vec3& friction_gradient, const Mat33& friction_hessian) {
+                            emit(i, gradient, hessian, friction_gradient, friction_hessian);
+                        };
+                        if (i < nt_count) evaluate_nt(nt[i], i, store);
+                        else evaluate_ss(ss[i - nt_count], i, store);
+                    }
+                }, accumulate);
         }
     }
 
@@ -3523,74 +3501,35 @@ RigidEnergyDerivatives rigid_barrier_derivatives(int rb, const RefMesh& ref_mesh
         return true;
     };
 
-    // A cooperative COM/rotation solve consumes one gradient and one Hessian.
-    // Stage only those fields, and leave AABB-rejected records disengaged.
-    // The scalar path already accumulates without inter-worker staging.
-    if (cooperative && !assemble_friction
-        && (mode == RigidDerivativeMode::TranslationHessian
-            || mode == RigidDerivativeMode::OrientationHessian)) {
-        struct BlockContribution { Vec3 gradient; Mat33 hessian; };
-        const bool translation = mode == RigidDerivativeMode::TranslationHessian;
-        const int nt_count = static_cast<int>(nt_pair_indices.size());
-        solver_detail::sparse_contact_tasks(nt_count + static_cast<int>(ss_pair_indices.size()),
-            [&](int i) -> std::optional<BlockContribution> {
+    const int nt_count = static_cast<int>(nt_pair_indices.size());
+    solver_detail::ordered_rigid_contact_ranges(
+        nt_count + static_cast<int>(ss_pair_indices.size()), cooperative, mode,
+        [&](int begin, int end, const auto& emit) {
+            for (int i = begin; i < end; ++i) {
                 const bool is_nt = i < nt_count;
-                const int pair_index = is_nt ? nt_pair_indices[i] : ss_pair_indices[i - nt_count];
-                bool aabb_active;
+                const int pair_index = is_nt ? nt_pair_indices[i]
+                    : ss_pair_indices[i - nt_count];
+                bool nearby;
                 if (frozen_workspace) {
-                    aabb_active = is_nt ? frozen_workspace->nt_aabb_active[pair_index] != 0
+                    nearby = is_nt ? frozen_workspace->nt_aabb_active[pair_index] != 0
                         : frozen_workspace->ss_aabb_active[pair_index] != 0;
                 } else if (is_nt) {
                     const auto& p = bp_cache.nt_pairs[pair_index];
-                    aabb_active = node_triangle_aabbs_within_distance(positions[p.node],
+                    nearby = node_triangle_aabbs_within_distance(positions[p.node],
                         positions[p.tri_v[0]], positions[p.tri_v[1]], positions[p.tri_v[2]], d_hat2);
                 } else {
                     const auto& p = bp_cache.ss_pairs[pair_index];
-                    aabb_active = segment_aabbs_within_distance(positions[p.v[0]], positions[p.v[1]],
+                    nearby = segment_aabbs_within_distance(positions[p.v[0]], positions[p.v[1]],
                         positions[p.v[2]], positions[p.v[3]], d_hat2);
                 }
-                if (!aabb_active) return std::nullopt;
-                RigidEnergyDerivatives derivatives;
-                // Friction is disabled in this branch; its output is unused.
+                if (!nearby) continue;
+                RigidEnergyDerivatives barrier_value, friction_value;
                 const bool active = is_nt
-                    ? evaluate_nt_pair(pair_index, true, derivatives, derivatives)
-                    : evaluate_ss_pair(pair_index, true, derivatives, derivatives);
-                if (!active) return std::nullopt;
-                return BlockContribution{
-                    translation ? derivatives.translation_gradient : derivatives.orientation_gradient,
-                    translation ? derivatives.translation_translation_hessian : derivatives.orientation_orientation_hessian};
-            }, [&](const BlockContribution& value) {
-                if (translation) {
-                    total.translation_gradient += value.gradient;
-                    total.translation_translation_hessian += value.hessian;
-                } else {
-                    total.orientation_gradient += value.gradient;
-                    total.orientation_orientation_hessian += value.hessian;
-                }
-            }, leader_work);
-        return total;
-    }
-
-    if (leader_work) (*leader_work)();
-    struct PairDerivatives {
-        RigidEnergyDerivatives barrier, friction;
-        bool active = false;
-    };
-    const int nt_count = static_cast<int>(nt_pair_indices.size());
-    solver_detail::ordered_contact_tasks(
-        nt_count + static_cast<int>(ss_pair_indices.size()), cooperative,
-        [&](int i) {
-            PairDerivatives value;
-            value.active = i < nt_count
-                ? evaluate_nt_pair(nt_pair_indices[i], false, value.barrier, value.friction)
-                : evaluate_ss_pair(ss_pair_indices[i - nt_count], false, value.barrier, value.friction);
-            return value;
-        },
-        [&](const PairDerivatives& value) {
-            if (!value.active) return;
-            add_rigid_derivatives(total, value.barrier);
-            if (friction_output) add_rigid_derivatives(*friction_output, value.friction);
-        });
+                    ? evaluate_nt_pair(pair_index, true, barrier_value, friction_value)
+                    : evaluate_ss_pair(pair_index, true, barrier_value, friction_value);
+                if (active) emit(i, barrier_value, friction_value);
+            }
+        }, total, assemble_friction ? friction_output : nullptr, 64, leader_work);
 
     return total;
 }

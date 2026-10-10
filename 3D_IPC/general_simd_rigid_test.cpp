@@ -250,7 +250,10 @@ TEST(GeneralSIMDRigid, OrderedAccumulatorMatchesTilesAndCooperativeHelpers) {
     params.k_barrier = stiffness;
     params.friction_coefficient = 0.37;
     params.friction_velocity_epsilon = 0.1;
-    for (auto mode : {RigidDerivativeMode::TranslationHessian, RigidDerivativeMode::OrientationHessian}) {
+    for (double friction : {0.0, 0.37}) {
+        params.friction_coefficient = friction;
+    for (auto mode : {RigidDerivativeMode::Full, RigidDerivativeMode::Gradient,
+             RigidDerivativeMode::TranslationHessian, RigidDerivativeMode::OrientationHessian}) {
         ipc_simd::RigidContactOutput expected;
         const auto nt_value = reference(nt, mode, params.friction_coefficient);
         const auto ss_value = reference(ss, mode, params.friction_coefficient);
@@ -273,6 +276,44 @@ TEST(GeneralSIMDRigid, OrderedAccumulatorMatchesTilesAndCooperativeHelpers) {
         EXPECT_EQ(leader_calls, 1);
         compare(parallel.barrier, serial.barrier);
         compare(parallel.friction, serial.friction);
+    }
+    }
+    // Repeated solves change both admission and derivative mode. Reusing
+    // contact storage must not retain contributions from an earlier solve.
+    for (int pass = 0; pass < 16; ++pass) {
+        params.friction_coefficient = pass % 2 ? 0.37 : 0.0;
+        const RigidDerivativeMode modes[] = {RigidDerivativeMode::Full, RigidDerivativeMode::Gradient,
+            RigidDerivativeMode::TranslationHessian, RigidDerivativeMode::OrientationHessian};
+        const auto mode = modes[(pass / 2) % 4];
+        positions[0] = nt.positions[0] + (pass == 2 || pass == 3 ? Vec3(30, 0, 0) : Vec3::Zero());
+        nt_indices.resize(pass % 3 == 0 ? 321 : pass % 3 == 1 ? 35 : 80);
+        for (std::size_t i = 0; i < nt_indices.size(); ++i) nt_indices[i] = i % 40;
+        const auto serial = ipc_simd::rigid_contact_derivatives(0, mesh, state, cache,
+            nt_indices, ss_indices, local, positions, omega, params, dt, mode, &kinematics);
+        ipc_simd::RigidContactOutput parallel;
+        #pragma omp parallel num_threads(4)
+        {
+            #pragma omp master
+            parallel = ipc_simd::rigid_contact_derivatives(0, mesh, state, cache,
+                nt_indices, ss_indices, local, positions, omega, params, dt, mode,
+                &kinematics, true);
+        }
+        compare(parallel.barrier, serial.barrier);
+        compare(parallel.friction, serial.friction);
+        for (int c = 0; c < 3; ++c) {
+            EXPECT_EQ(parallel.barrier.translation_gradient[c], serial.barrier.translation_gradient[c]);
+            EXPECT_EQ(parallel.barrier.orientation_gradient[c], serial.barrier.orientation_gradient[c]);
+            EXPECT_EQ(parallel.friction.translation_gradient[c], serial.friction.translation_gradient[c]);
+            EXPECT_EQ(parallel.friction.orientation_gradient[c], serial.friction.orientation_gradient[c]);
+        }
+        for (int c = 0; c < 9; ++c) {
+            EXPECT_EQ(parallel.barrier.translation_translation_hessian.data()[c], serial.barrier.translation_translation_hessian.data()[c]);
+            EXPECT_EQ(parallel.barrier.orientation_orientation_hessian.data()[c], serial.barrier.orientation_orientation_hessian.data()[c]);
+            EXPECT_EQ(parallel.barrier.translation_orientation_hessian.data()[c], serial.barrier.translation_orientation_hessian.data()[c]);
+            EXPECT_EQ(parallel.friction.translation_translation_hessian.data()[c], serial.friction.translation_translation_hessian.data()[c]);
+            EXPECT_EQ(parallel.friction.orientation_orientation_hessian.data()[c], serial.friction.orientation_orientation_hessian.data()[c]);
+            EXPECT_EQ(parallel.friction.translation_orientation_hessian.data()[c], serial.friction.translation_orientation_hessian.data()[c]);
+        }
     }
     // Friction-free calls do not read previous positions, even if absent.
     params.friction_coefficient = 0.0;

@@ -569,8 +569,9 @@ compute_solid_local_barrier_gradient_and_self_hessian_impl(
     Mat33 self_hessian = Mat33::Zero();
 
     struct Contribution {
-        Vec3 gradient = Vec3::Zero();
-        Mat33 hessian = Mat33::Zero();
+        Vec3 gradient;
+        Mat33 hessian;
+        Contribution() {}
     };
     const auto evaluate_nt = [&](const BroadPhase::Cache::VertexPairEntry& entry,
                                  std::size_t contact_index) {
@@ -635,12 +636,11 @@ compute_solid_local_barrier_gradient_and_self_hessian_impl(
     const auto& nt = cache.vertex_nt[static_cast<std::size_t>(node)];
     const auto& ss = cache.vertex_ss[static_cast<std::size_t>(node)];
     const int nt_count = static_cast<int>(nt.size());
-    solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss.size()), cooperative,
+    solver_detail::ordered_sparse_contact_tasks(nt_count + static_cast<int>(ss.size()), cooperative,
         [&](int i) { return i < nt_count ? evaluate_nt(nt[i], i) : evaluate_ss(ss[i - nt_count], i); },
-        [&](const std::optional<Contribution>& value) {
-            if (!value) return;
-            gradient += barrier_scale * value->gradient;
-            self_hessian += barrier_scale * value->hessian;
+        [&](const Contribution& value) {
+            gradient += barrier_scale * value.gradient;
+            self_hessian += barrier_scale * value.hessian;
         }, leader_work);
 
     return {gradient, self_hessian};
@@ -780,15 +780,22 @@ compute_solid_local_mesh_contact_derivatives(
     const auto& nt = cache.vertex_nt[static_cast<std::size_t>(node)];
     const auto& ss = cache.vertex_ss[static_cast<std::size_t>(node)];
     const int nt_count = static_cast<int>(nt.size());
-    solver_detail::ordered_contact_tasks(nt_count + static_cast<int>(ss.size()), cooperative,
-        [&](int i) { return i < nt_count ? evaluate_nt(nt[i], i) : evaluate_ss(ss[i - nt_count], i); },
-        [&](const std::optional<Contribution>& value) {
-            if (!value) return;
-            derivatives.normal_gradient += value->normal_gradient;
-            derivatives.normal_hessian += value->normal_hessian;
+    solver_detail::ordered_nodal_contact_ranges(
+        nt_count + static_cast<int>(ss.size()), cooperative, friction_enabled,
+        [&](int begin, int end, const auto& emit) {
+            for (int i = begin; i < end; ++i) {
+                const auto value = i < nt_count ? evaluate_nt(nt[i], i)
+                    : evaluate_ss(ss[i - nt_count], i);
+                if (value) emit(i, value->normal_gradient, value->normal_hessian,
+                    value->friction_gradient, value->friction_hessian);
+            }
+        }, [&](const Vec3& gradient, const Mat33& hessian,
+               const Vec3& friction_gradient, const Mat33& friction_hessian) {
+            derivatives.normal_gradient += gradient;
+            derivatives.normal_hessian += hessian;
             if (friction_enabled) {
-                derivatives.friction_gradient += value->friction_gradient;
-                derivatives.friction_hessian += value->friction_hessian;
+                derivatives.friction_gradient += friction_gradient;
+                derivatives.friction_hessian += friction_hessian;
             }
         });
 

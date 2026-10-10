@@ -84,7 +84,10 @@ AABB spherical_cap_node_aabb(const Vec3& x_com, const Vec4& q, const Vec3& X, do
 void build_blue_boxes_rb(const std::vector<Vec3>& com_box_anchors, const std::vector<Vec4>& orientation_box_anchors, const std::vector<double>& theta_box_radii, const std::vector<double>& com_box_radii, const RefMesh& ref_mesh, std::vector<AABB>& blue_boxes) {
     const int num_rbs = static_cast<int>(ref_mesh.rb_nodes.size());
 
-    std::vector<std::size_t> offsets(static_cast<std::size_t>(num_rbs) + 1, 0);
+    solver_detail::BorrowedContactBuffer<std::size_t, std::allocator<std::size_t>> offset_storage;
+    offset_storage.resize(static_cast<std::size_t>(num_rbs) + 1);
+    auto& offsets = offset_storage.values();
+    std::fill(offsets.begin(), offsets.end(), 0);
     for (int rb = 0; rb < num_rbs; ++rb)
         offsets[rb + 1] = offsets[rb] + ref_mesh.rb_nodes[rb].size();
     std::vector<std::optional<parallel_helper_detail::SphericalCapRotation>> caps(num_rbs);
@@ -134,7 +137,10 @@ void build_rb_contact_incidence(const BroadPhase::Cache& bp_cache, const std::ve
     // pairs. Concatenating worker intervals preserves ascending pair order.
     const auto gather_pairs = [&](const auto& pairs, const auto& owners, std::vector<std::vector<int>>& body_pairs) {
         const int workers = pairs.size() >= 128 ? omp_get_max_threads() : 1;
-        std::vector<std::size_t> offsets(static_cast<std::size_t>(workers) * num_rbs, 0);
+        solver_detail::BorrowedContactBuffer<std::size_t, std::allocator<std::size_t>> offset_storage;
+        offset_storage.resize(static_cast<std::size_t>(workers) * num_rbs);
+        auto& offsets = offset_storage.values();
+        std::fill(offsets.begin(), offsets.end(), 0);
         #pragma omp parallel for schedule(static, 1) if(workers > 1)
         for (int worker = 0; worker < workers; ++worker) {
             const std::size_t begin = pairs.size() * worker / workers;
@@ -200,8 +206,27 @@ void build_rb_contact_adj(const BroadPhase::Cache& bp_cache, const std::vector<i
             const int other = owners.first == rb ? owners.second : owners.first;
             if (other >= 0) neighbors.push_back(other);
         };
-        for (const int i : body_nt_pair_indices[rb]) append_other(nt_owners(bp_cache.nt_pairs[i]));
-        for (const int i : body_ss_pair_indices[rb]) append_other(ss_owners(bp_cache.ss_pairs[i]));
+        if (num_rbs <= 8) {
+            // Once every other rigid body is a neighbor, further primitive
+            // pairs cannot add a graph edge. Avoid collecting duplicate owners.
+            const auto append_unique = [&](const std::pair<int, int>& owners) {
+                const int other = owners.first == rb ? owners.second : owners.first;
+                if (other >= 0 && std::find(neighbors.begin(), neighbors.end(), other) == neighbors.end())
+                    neighbors.push_back(other);
+            };
+            const auto complete = [&] { return neighbors.size() == static_cast<std::size_t>(num_rbs - 1); };
+            for (const int i : body_nt_pair_indices[rb]) {
+                if (complete()) break;
+                append_unique(nt_owners(bp_cache.nt_pairs[i]));
+            }
+            for (const int i : body_ss_pair_indices[rb]) {
+                if (complete()) break;
+                append_unique(ss_owners(bp_cache.ss_pairs[i]));
+            }
+        } else {
+            for (const int i : body_nt_pair_indices[rb]) append_other(nt_owners(bp_cache.nt_pairs[i]));
+            for (const int i : body_ss_pair_indices[rb]) append_other(ss_owners(bp_cache.ss_pairs[i]));
+        }
         std::sort(neighbors.begin(), neighbors.end());
         neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
     }
@@ -688,6 +713,8 @@ void build_all_block_adjacency_and_contact(const RefMesh& ref_mesh, const std::v
     for (int block = 0; block < num_blocks; ++block) {
         std::vector<int>& row = out[static_cast<std::size_t>(block)];
         const std::size_t elastic_size = (*elastic_row_sizes)[static_cast<std::size_t>(block)];
+        // Contact rows store only lower-index neighbors; block zero has none.
+        if (block == 0) continue;
         thread_local std::vector<std::size_t> seen_generation;
         thread_local std::size_t generation = 0;
         if (seen_generation.size() != static_cast<std::size_t>(num_blocks)) seen_generation.assign(static_cast<std::size_t>(num_blocks), 0);
@@ -728,9 +755,24 @@ void build_all_block_adjacency_and_contact(const RefMesh& ref_mesh, const std::v
             const int rigid = block - rigid_begin;
             const std::vector<int>& nt_indices = (*body_nt_pair_indices)[static_cast<std::size_t>(rigid)];
             const std::vector<int>& ss_indices = (*body_ss_pair_indices)[static_cast<std::size_t>(rigid)];
-            row.reserve(elastic_size + 3 * (nt_indices.size() + ss_indices.size()));
-            for (const int pair_index : nt_indices) append_nt_pair(static_cast<std::size_t>(pair_index));
-            for (const int pair_index : ss_indices) append_ss_pair(static_cast<std::size_t>(pair_index));
+            row.reserve(elastic_size + std::min(static_cast<std::size_t>(block),
+                3 * (nt_indices.size() + ss_indices.size())));
+            if (num_blocks <= 8) {
+                // All possible lower neighbors already occur in this row.
+                // Remaining contacts cannot change its conflict edges.
+                const auto complete = [&] { return row.size() - elastic_size == static_cast<std::size_t>(block); };
+                for (const int pair_index : nt_indices) {
+                    if (complete()) break;
+                    append_nt_pair(static_cast<std::size_t>(pair_index));
+                }
+                for (const int pair_index : ss_indices) {
+                    if (complete()) break;
+                    append_ss_pair(static_cast<std::size_t>(pair_index));
+                }
+            } else {
+                for (const int pair_index : nt_indices) append_nt_pair(static_cast<std::size_t>(pair_index));
+                for (const int pair_index : ss_indices) append_ss_pair(static_cast<std::size_t>(pair_index));
+            }
         }
     }
 }
@@ -959,7 +1001,7 @@ void greedy_color_conflict_graph(
 }
 
 namespace solver_detail {
-void evaluate_contact_ranges(int count, const std::function<void(int, int)>& evaluate, int alignment, const std::function<void()>* leader_work) {
+void evaluate_contact_ranges(int count, const std::function<void(int, int)>& evaluate, int alignment, const std::function<void()>* leader_work, int cooperative_grain_limit) {
     if (active_contact_task_group != nullptr) {
         ContactTaskGroup* group = active_contact_task_group;
         active_contact_task_group = nullptr;
@@ -967,7 +1009,7 @@ void evaluate_contact_ranges(int count, const std::function<void(int, int)>& eva
             ContactTaskGroup* group;
             ~Restore() { active_contact_task_group = group; }
         } restore{group};
-        group->dispatch(count, evaluate, alignment, leader_work);
+        group->dispatch(count, evaluate, alignment, leader_work, cooperative_grain_limit);
         return;
     }
     if (leader_work) (*leader_work)();

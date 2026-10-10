@@ -207,6 +207,9 @@ public:
 
     // Cache static mesh topology; reused by later build/initialize calls.
     void set_mesh_topology(const RefMesh& mesh, int nv);
+    // The next initialization must rebuild topology, while keeping candidate,
+    // hit-row and BVH buffer capacity. No query is valid until initialization.
+    void invalidate_mesh_topology();
     bool has_topology() const { return topology_valid_; }
 
     static std::uint64_t nt_key(int node, int tri) {

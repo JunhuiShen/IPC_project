@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -47,7 +49,95 @@ bool operator!=(const CacheAlignedAllocator<T> &, const CacheAlignedAllocator<U>
 // Optional leader work must be independent of the range evaluations. It joins
 // before accumulation; its failure takes precedence after all helpers finish.
 void evaluate_contact_ranges(int count, const std::function<void(int, int)>& evaluate, int alignment = 1,
-    const std::function<void()>* leader_work = nullptr);
+    const std::function<void()>* leader_work = nullptr, int cooperative_grain_limit = 32);
+
+// Scratch contents have no value between evaluations. Grow without moving old
+// entries: inactive derivative records may intentionally contain unwritten
+// coefficients. Moving those records would read uninitialized values.
+template <class T, class Allocator>
+void resize_contact_scratch(std::vector<T, Allocator>& values, std::size_t count) {
+    if (count > values.capacity()) {
+        std::vector<T, Allocator> replacement(values.get_allocator());
+        const std::size_t increment = values.capacity() / 2;
+        const std::size_t grown = values.capacity() > values.max_size() - increment
+            ? values.max_size() : values.capacity() + increment;
+        replacement.reserve(std::max(count, grown));
+        replacement.resize(count);
+        values.swap(replacement);
+    } else {
+        values.resize(count);
+    }
+}
+
+// Borrow capacity from the calling thread, not the contact snapshot or its
+// computed results. Nested calls borrow separate arrays. Joining evaluation
+// before destruction also returns storage when a callback throws.
+template <class T, class Allocator = CacheAlignedAllocator<T>>
+class BorrowedContactBuffer {
+    using Storage = std::vector<T, Allocator>;
+    Storage values_;
+    static Storage& reusable() {
+        static thread_local Storage storage;
+        return storage;
+    }
+public:
+    BorrowedContactBuffer() { values_.swap(reusable()); }
+    ~BorrowedContactBuffer() { values_.swap(reusable()); }
+    BorrowedContactBuffer(const BorrowedContactBuffer&) = delete;
+    BorrowedContactBuffer& operator=(const BorrowedContactBuffer&) = delete;
+    void resize(std::size_t count) { resize_contact_scratch(values_, count); }
+    Storage& values() { return values_; }
+};
+
+template <class T>
+void reserve_contact_scratch(std::unique_ptr<T[]>& values,
+    std::size_t& capacity, std::size_t count) {
+    if (count > capacity) {
+        values = std::make_unique<T[]>(count);
+        capacity = count;
+    }
+}
+
+// A range evaluator emits only contributing records, in increasing index
+// order within its range. Helpers own disjoint ranges; the leader folds the
+// resulting records in the original global order. This supports scalar and
+// SIMD evaluators without wrapping every large record in another optional.
+template <class Value, class EvaluateRanges, class Accumulate>
+void ordered_sparse_contact_ranges(int count, bool cooperative,
+    const EvaluateRanges& evaluate, const Accumulate& accumulate,
+    int alignment = 64, const std::function<void()>* leader_work = nullptr,
+    int cooperative_grain_limit = 32) {
+    if (!cooperative || count < 32 || omp_get_num_threads() == 1) {
+        if (leader_work) (*leader_work)();
+        evaluate(0, count, [&](std::size_t, const Value& value) { accumulate(value); });
+        return;
+    }
+    BorrowedContactBuffer<Value> value_storage;
+    BorrowedContactBuffer<unsigned char> mask_storage;
+    value_storage.resize(count);
+    mask_storage.resize(count);
+    auto& values = value_storage.values();
+    auto& active = mask_storage.values();
+    evaluate_contact_ranges(count, [&](int begin, int end) {
+        std::fill(active.begin() + begin, active.begin() + end, 0);
+        evaluate(begin, end, [&](std::size_t index, const Value& value) {
+            values[index] = value;
+            active[index] = 1;
+        });
+    }, alignment, leader_work, cooperative_grain_limit);
+    // A zero word represents eight known-inactive records. Read only the
+    // initialized activity bytes; preserve the original order of every add.
+    int i = 0;
+    for (; count - i >= 8; i += 8) {
+        std::uint64_t word;
+        std::memcpy(&word, active.data() + i, sizeof(word));
+        if (word == 0) continue;
+        for (int j = 0; j < 8; ++j)
+            if (active[i + j]) accumulate(values[i + j]);
+    }
+    for (; i < count; ++i)
+        if (active[i]) accumulate(values[i]);
+}
 
 // Evaluate independently, then accumulate in original contact order. Each
 // caller owns its scratch and holds contact positions fixed until the join.
@@ -58,17 +148,14 @@ void parallel_contact_tasks(int count,
     using Value = decltype(evaluate(0));
     // The caller lends its previous buffer to this invocation. A nested call
     // receives a separate buffer, and exceptions release the borrowed storage.
-    using Storage = std::vector<std::optional<Value>, CacheAlignedAllocator<std::optional<Value>>>;
-    static thread_local Storage reusable;
-    Storage values;
-    values.swap(reusable);
-    values.resize(count);
+    BorrowedContactBuffer<std::optional<Value>> storage;
+    storage.resize(count);
+    auto& values = storage.values();
     constexpr int alignment = 64 / std::gcd(std::size_t(64), sizeof(std::optional<Value>));
     evaluate_contact_ranges(count, [&](int begin, int end) {
         for (int i = begin; i < end; ++i) values[i] = evaluate(i);
     }, alignment, leader_work);
     for (const auto& value : values) accumulate(*value);
-    values.swap(reusable);
 }
 
 // Keep the scalar traversal outside the OpenMP task region so it can inline
@@ -89,36 +176,77 @@ void ordered_contact_tasks(int count, bool cooperative,
 // Keep activity bytes contiguous so the leader need not read a large gradient /
 // Hessian record for every AABB-rejected contact. Only active records are stored.
 template <class Evaluate, class Accumulate>
-void sparse_contact_tasks(int count, const Evaluate& evaluate, const Accumulate& accumulate,
-                          const std::function<void()>* leader_work = nullptr) {
+void ordered_sparse_contact_tasks(int count, bool cooperative,
+    const Evaluate& evaluate, const Accumulate& accumulate,
+    const std::function<void()>* leader_work = nullptr) {
     using Value = typename decltype(evaluate(0))::value_type;
-    if (count < 32 || omp_get_num_threads() == 1) {
-        if (leader_work) (*leader_work)();
-        for (int i = 0; i < count; ++i)
-            if (const auto value = evaluate(i)) accumulate(*value);
-        return;
-    }
-    struct Storage {
-        std::vector<Value, CacheAlignedAllocator<Value>> values;
-        std::vector<unsigned char, CacheAlignedAllocator<unsigned char>> active;
-    };
-    static thread_local Storage reusable;
-    Storage storage;
-    storage.values.swap(reusable.values);
-    storage.active.swap(reusable.active);
-    storage.values.resize(count);
-    storage.active.resize(count);
-    evaluate_contact_ranges(count, [&](int begin, int end) {
-        for (int i = begin; i < end; ++i) {
-            const auto value = evaluate(i);
-            storage.active[i] = value.has_value();
-            if (value) storage.values[i] = *value;
-        }
-    }, 64, leader_work);
-    for (int i = 0; i < count; ++i)
-        if (storage.active[i]) accumulate(storage.values[i]);
-    storage.values.swap(reusable.values);
-    storage.active.swap(reusable.active);
+    ordered_sparse_contact_ranges<Value>(count, cooperative,
+        [&](int begin, int end, const auto& emit) {
+            for (int i = begin; i < end; ++i) {
+                const auto value = evaluate(i);
+                if (value) emit(i, *value);
+            }
+        }, accumulate, 64, leader_work);
+}
+
+template <class Evaluate, class Accumulate>
+void sparse_contact_tasks(int count, const Evaluate& evaluate, const Accumulate& accumulate,
+    const std::function<void()>* leader_work = nullptr) {
+    ordered_sparse_contact_tasks(count, true, evaluate, accumulate, leader_work);
+}
+
+struct StoredContactBlock {
+    Vec3 gradient;
+    Mat33 hessian;
+    StoredContactBlock() {}
+};
+template <bool Friction> struct StoredNodalContact;
+template <> struct StoredNodalContact<false> {
+    StoredContactBlock barrier;
+    StoredNodalContact() {}
+};
+template <> struct StoredNodalContact<true> {
+    StoredContactBlock barrier, friction;
+    StoredNodalContact() {}
+};
+
+template <bool Friction, class EvaluateRanges, class Accumulate>
+void ordered_nodal_contact_ranges_impl(int count, bool cooperative,
+    const EvaluateRanges& evaluate, const Accumulate& accumulate,
+    const std::function<void()>* leader_work) {
+    using Value = StoredNodalContact<Friction>;
+    ordered_sparse_contact_ranges<Value>(count, cooperative,
+        [&](int begin, int end, const auto& emit) {
+            evaluate(begin, end, [&](std::size_t index, const Vec3& gradient,
+                const Mat33& hessian, const Vec3& friction_gradient,
+                const Mat33& friction_hessian) {
+                Value value;
+                value.barrier.gradient = gradient;
+                value.barrier.hessian = hessian;
+                if constexpr (Friction) {
+                    value.friction.gradient = friction_gradient;
+                    value.friction.hessian = friction_hessian;
+                }
+                emit(index, value);
+            });
+        }, [&](const Value& value) {
+            if constexpr (Friction)
+                accumulate(value.barrier.gradient, value.barrier.hessian,
+                    value.friction.gradient, value.friction.hessian);
+            else
+                accumulate(value.barrier.gradient, value.barrier.hessian,
+                    Vec3::Zero(), Mat33::Zero());
+        }, 64, leader_work);
+}
+
+template <class EvaluateRanges, class Accumulate>
+void ordered_nodal_contact_ranges(int count, bool cooperative, bool friction,
+    const EvaluateRanges& evaluate, const Accumulate& accumulate,
+    const std::function<void()>* leader_work = nullptr) {
+    if (friction)
+        ordered_nodal_contact_ranges_impl<true>(count, cooperative, evaluate, accumulate, leader_work);
+    else
+        ordered_nodal_contact_ranges_impl<false>(count, cooperative, evaluate, accumulate, leader_work);
 }
 
 inline void contact_spin_hint();
@@ -220,10 +348,11 @@ struct ContactTaskGroup {
     }
 
     void dispatch(int n, const std::function<void(int, int)>& evaluate, int alignment,
-                  const std::function<void()>* leader_work = nullptr) {
+                  const std::function<void()>* leader_work = nullptr,
+                  int cooperative_grain_limit = 32) {
         evaluator = &evaluate;
         count = n;
-        grain = std::max(4, std::min(32, n / (4 * (helpers + 1))));
+        grain = std::max(4, std::min(cooperative_grain_limit, n / (4 * (helpers + 1))));
         grain = (grain + alignment - 1) / alignment * alignment;
         first_error = n;
         error = nullptr;
@@ -547,9 +676,11 @@ struct ColoredContactSweep {
     std::vector<ContactContribution, CacheAlignedAllocator<ContactContribution>> values;
     std::vector<ContactMaskWord> masks;
     std::unique_ptr<State[]> states;
+    std::size_t states_capacity = 0;
     int team = 0, threshold = 0;
     std::vector<int> split_count;
     std::unique_ptr<std::atomic<int>[]> next_whole;
+    std::size_t queue_capacity = 0;
     std::vector<int> cooperative_vertices;
     std::vector<Vec3> steps;
     std::vector<unsigned char> nonzero_step, short_step;
@@ -561,11 +692,11 @@ struct ColoredContactSweep {
         short_step.resize(cache.vertex_nt.size());
         cooperative_vertices.clear();
         assignments.assign(groups.size() * team, Assignment{});
-        states = std::make_unique<State[]>(cache.vertex_nt.size());
+        reserve_contact_scratch(states, states_capacity, cache.vertex_nt.size());
         const int heavy_count = std::min(24, std::max(1, team * 24 / 64));
         const int heavy_budget = 48 * team / 64;
         split_count.assign(groups.size(), 0);
-        next_whole = std::make_unique<std::atomic<int>[]>(groups.size());
+        reserve_contact_scratch(next_whole, queue_capacity, groups.size());
         std::size_t maximum = 0, maximum_masks = 0;
         for (int c = 0; c < static_cast<int>(groups.size()); ++c) {
             const auto &group = groups[c];
@@ -605,7 +736,7 @@ struct ColoredContactSweep {
             maximum = std::max(maximum, static_cast<std::size_t>(offset));
             maximum_masks = std::max(maximum_masks, static_cast<std::size_t>(mask_offset));
         }
-        values.resize(maximum);
+        resize_contact_scratch(values, maximum);
         masks.resize(maximum_masks);
     }
     // Optional before_color is called collectively by every worker before any

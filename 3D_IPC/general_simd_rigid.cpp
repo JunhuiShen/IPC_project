@@ -1,6 +1,6 @@
 #include "general_simd_rigid.h"
 
-#include "contact_scheduling.h"
+#include "rigid_contact_scheduling.h"
 #include "friction_energy.h"
 #include "parallel_helper.h"
 
@@ -308,13 +308,7 @@ Pack gather(int active, const Getter& get) {
     return Pack::load(values);
 }
 
-void add_derivatives(RigidEnergyDerivatives& total, const RigidEnergyDerivatives& value) {
-    total.translation_gradient += value.translation_gradient;
-    total.orientation_gradient += value.orientation_gradient;
-    total.translation_translation_hessian += value.translation_translation_hessian;
-    total.translation_orientation_hessian += value.translation_orientation_hessian;
-    total.orientation_orientation_hessian += value.orientation_orientation_hessian;
-}
+
 
 } // namespace
 
@@ -554,10 +548,6 @@ RigidContactOutput rigid_contact_derivatives(
         }
         return true;
     };
-    const auto accumulate = [&](const RigidContactOutput& value) {
-        add_derivatives(total.barrier, value.barrier);
-        if (params.friction_coefficient != 0.0) add_derivatives(total.friction, value.friction);
-    };
     const auto evaluate = [&](std::size_t begin, std::size_t end, const auto& emit) {
         std::array<RigidContactInput, contact_tile_width> inputs;
         std::array<RigidContactOutput, contact_tile_width> outputs;
@@ -578,17 +568,14 @@ RigidContactOutput rigid_contact_derivatives(
         }
         flush();
     };
-    if (cooperative && count >= 32 && omp_get_num_threads() > 1) {
-        using Value = std::optional<RigidContactOutput>;
-        std::vector<Value, solver_detail::CacheAlignedAllocator<Value>> values(count);
-        solver_detail::evaluate_contact_ranges(static_cast<int>(count), [&](int begin, int end) {
-            evaluate(begin, end, [&](std::size_t index, const auto& value) { values[index] = value; });
-        }, static_cast<int>(contact_tile_width), leader_work);
-        for (const auto& value : values) if (value) accumulate(*value);
-    } else {
-        if (leader_work) (*leader_work)();
-        evaluate(0, count, [&](std::size_t, const auto& value) { accumulate(value); });
-    }
+    solver_detail::ordered_rigid_contact_ranges(static_cast<int>(count),
+        cooperative, mode,
+        [&](int begin, int end, const auto& emit) {
+            evaluate(begin, end, [&](std::size_t index, const auto& value) {
+                emit(index, value.barrier, value.friction);
+            });
+        }, total.barrier, params.friction_coefficient != 0.0 ? &total.friction : nullptr,
+        static_cast<int>(contact_tile_width), leader_work);
     return total;
 }
 

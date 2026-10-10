@@ -1252,7 +1252,7 @@ void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
 // ---------------------------------------------------------------------------
 /* Command line (use OMP_NUM_THREADS=64 on the server):
 OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
-./build/3D_sim --example 9 --num_frames 200 \
+./build/3D_sim --example 9 --num_frames 150 \
   --substeps 10 --max_substep_iters 2 --fixed_iters \
   --use_parallel true --use_basic_experimental true --use_simd true \
   --outdir bolt_into_fixed_nut_output --format obj

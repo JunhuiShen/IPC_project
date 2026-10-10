@@ -573,6 +573,60 @@ TEST(GeneralSIMDSolver, PureRigidContactAndFrameDispatchMatchExplicitEntryPoints
     }
 }
 
+TEST(GeneralSIMDSolver, RigidFrameStorageReuseIsBitwiseEqualToFreshFrames) {
+    RestoreOpenMP restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+    BroadPhase reusable;
+    for (double friction : {0.0, 0.2}) {
+        std::array<GeneralScene, 2> scenes;
+        for (auto& scene : scenes) {
+            build_scene(scene, false, false, true);
+            scene.params.use_basic_experimental = true;
+            scene.params.use_basic_experimental_v2 = true;
+            scene.params.use_simd = true;
+            scene.params.friction_coefficient = friction;
+        }
+        for (int frame = 1; frame <= 4; ++frame) {
+            if (frame == 3) {
+                for (auto& scene : scenes)
+                    std::swap(scene.mesh.tris[1], scene.mesh.tris[2]);
+            }
+            SCOPED_TRACE(::testing::Message() << "friction=" << friction << " frame=" << frame);
+            ASSERT_TRUE(advance_one_frame_rb(scenes[0].state, scenes[0].mesh,
+                scenes[0].params, frame).converged);
+            ASSERT_TRUE(advance_one_frame_rb(scenes[1].state, scenes[1].mesh,
+                scenes[1].params, reusable, frame).converged);
+            expect_states_bitwise_equal(scenes[1].state, scenes[0].state);
+        }
+    }
+}
+
+TEST(GeneralSIMDSolver, FreshRigidFrameEntryPreservesCallbackCopyCount) {
+    struct Callback {
+        int* copies;
+        int* calls;
+        Callback(int& copied, int& invoked) : copies(&copied), calls(&invoked) {}
+        Callback(const Callback& other) : copies(other.copies), calls(other.calls) { ++*copies; }
+        void operator()(int, const std::vector<Vec3>&) const { ++*calls; }
+    };
+    GeneralScene scene;
+    build_scene(scene, false, false, true);
+    scene.params.use_basic_experimental_v2 = true;
+    scene.params.use_simd = true;
+    scene.params.d_hat = 0.0;
+    scene.params.use_ccd = false;
+    int copies = 0, calls = 0;
+    SubstepCallback callback = Callback(copies, calls);
+    copies = 0;
+    ASSERT_TRUE(advance_one_frame_rb(scene.state, scene.mesh, scene.params,
+        1, callback).converged);
+    // Preserve the original one copy into the public by-value argument.
+    // The compatibility wrapper must transfer it to the implementation.
+    EXPECT_EQ(copies, 1);
+    EXPECT_EQ(calls, scene.params.substeps);
+}
+
 TEST(GeneralSIMDSolver, SdfAndFrictionContributionsRemainActiveForAllBlockTypes) {
     RestoreOpenMP restore;
     omp_set_dynamic(0);

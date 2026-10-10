@@ -1,4 +1,5 @@
 #include "broad_phase.h"
+#include "contact_scheduling.h"
 
 #include <cmath>
 #include <cassert>
@@ -66,7 +67,10 @@ void scan_contact_offsets(std::vector<std::size_t>& values) {
         for (std::size_t i = 1; i < values.size(); ++i) values[i] += values[i - 1];
         return;
     }
-    std::vector<std::size_t> totals(static_cast<std::size_t>(omp_get_max_threads()));
+    solver_detail::BorrowedContactBuffer<std::size_t, std::allocator<std::size_t>> total_storage;
+    total_storage.resize(static_cast<std::size_t>(omp_get_max_threads()));
+    auto& totals = total_storage.values();
+    std::fill(totals.begin(), totals.end(), 0);
     #pragma omp parallel
     {
         const int worker = omp_get_thread_num();
@@ -180,11 +184,21 @@ inline int build_bvh_impl(const std::vector<AABB>& boxes, std::vector<BVHNode>& 
     }
     out.resize(2 * boxes.size() - 1);
     out[0].parent = -1;
-    std::vector<int> idx(boxes.size());
+    struct BuildScratch {
+        std::vector<int> indices;
+        std::vector<Vec3> centroids;
+    };
+    // A loan owns its arrays until all construction tasks join. Concurrent or
+    // nested builds receive separate arrays, and every used entry is rewritten.
+    solver_detail::BorrowedContactBuffer<BuildScratch, std::allocator<BuildScratch>> build_storage;
+    build_storage.resize(1);
+    auto& idx = build_storage.values()[0].indices;
+    idx.resize(boxes.size());
     // Large builds repeatedly compare the same box centroids. Keep exactly
     // the original min+max sums in compact AoS records, without multiplying
     // by one half or changing tie behavior. Tasks own separate entries.
-    std::vector<Vec3> centroid_sums(boxes.size() >= 16384 ? boxes.size() : 0);
+    auto& centroid_sums = build_storage.values()[0].centroids;
+    centroid_sums.resize(boxes.size() >= 16384 ? boxes.size() : 0);
     #pragma omp taskloop shared(boxes, idx, centroid_sums) grainsize(8192) if(omp_in_parallel() && boxes.size() >= 16384)
     for (int i = 0; i < static_cast<int>(boxes.size()); ++i) {
         idx[i] = i;
@@ -748,7 +762,16 @@ namespace {
         // Each query owns one contiguous output interval. Parallel counting,
         // a deterministic prefix sum, and parallel writes preserve the exact
         // legacy pair order without a serial push_back bottleneck.
-        std::vector<std::size_t> nt_offsets(static_cast<std::size_t>(nv) + 1, 0);
+        struct PairOffsetScratch {
+            std::vector<std::size_t> node_triangle, segment_segment;
+        };
+        // Keep both arrays in one loan: their lifetimes overlap, so borrowing
+        // the same scalar-vector pool twice would discard one cached capacity.
+        solver_detail::BorrowedContactBuffer<PairOffsetScratch,
+            std::allocator<PairOffsetScratch>> offset_storage;
+        offset_storage.resize(1);
+        auto& nt_offsets = offset_storage.values()[0].node_triangle;
+        nt_offsets.assign(static_cast<std::size_t>(nv) + 1, 0);
         #pragma omp parallel for schedule(dynamic, 32)
         for (int node = 0; node < nv; ++node) {
             std::size_t count = 0;
@@ -793,7 +816,8 @@ namespace {
             acceptance_words.resize(acceptance_offsets.back());
         }
 
-        std::vector<std::size_t> ss_offsets(static_cast<std::size_t>(ne) + 1, 0);
+        auto& ss_offsets = offset_storage.values()[0].segment_segment;
+        ss_offsets.assign(static_cast<std::size_t>(ne) + 1, 0);
         #pragma omp parallel for schedule(dynamic, 32)
         for (int edge = 0; edge < ne; ++edge) {
             std::size_t count = 0;
@@ -929,6 +953,14 @@ namespace {
 }
 
 // Broad phase
+void BroadPhase::invalidate_mesh_topology() {
+    topology_valid_ = false;
+    topo_.surface_nt_query_nodes_valid = false;
+    cache_.edges.clear();
+    cache_.node_to_edges.clear();
+    cache_.node_to_tris.clear();
+}
+
 void BroadPhase::set_mesh_topology(const RefMesh& mesh, int nv) {
     build_unique_edges_and_adjacency(mesh, nv, topo_.edges, topo_.node_to_edges, topo_.node_to_tris);
     topo_.tri_rigid_owner.resize(static_cast<std::size_t>(num_tris(mesh)));

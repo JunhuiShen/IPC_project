@@ -59,8 +59,8 @@ struct ClothGridContactSweep {
         split_count.assign(batch_count, 0);
         cooperative_cells.clear();
         batch_stats.clear();
-        states = std::make_unique<State[]>(schedule.cells.size());
-        next_whole = std::make_unique<std::atomic<int>[]>(batch_count);
+        reserve_contact_scratch(states, states_capacity, schedule.cells.size());
+        reserve_contact_scratch(next_whole, queue_capacity, batch_count);
         vertex_counts.resize(cache.vertex_nt.size());
         for (std::size_t v = 0; v < vertex_counts.size(); ++v)
             vertex_counts[v] = 1 + static_cast<int>(cache.vertex_nt[v].size())
@@ -142,7 +142,7 @@ struct ClothGridContactSweep {
             maximum_values = std::max(maximum_values, offset);
             maximum_masks = std::max(maximum_masks, mask_offset);
         }
-        values.resize(maximum_values);
+        resize_contact_scratch(values, maximum_values);
         masks.resize(maximum_masks);
     }
 
@@ -161,6 +161,7 @@ private:
     std::vector<ContactMaskWord> masks;
     std::unique_ptr<State[]> states;
     std::unique_ptr<std::atomic<int>[]> next_whole;
+    std::size_t states_capacity = 0, queue_capacity = 0;
 
     template <bool Profile, class Compute, class Apply, class Baseline, class CCD, class Commit>
     void run_impl(const ClothGridSchedule& schedule, const Compute& compute,

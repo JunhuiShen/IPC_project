@@ -269,7 +269,7 @@ OMP_NUM_THREADS=64 ./build/3D_sim --example 8 --datadir example_obj --num_frames
 
 # Example 9: dynamic threaded bolt falling through a fixed nut
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
-./build/3D_sim --example 9 --num_frames 200 \
+./build/3D_sim --example 9 --num_frames 150 \
   --substeps 10 --max_substep_iters 2 --fixed_iters \
   --use_parallel true --use_basic_experimental true --use_simd true \
   --outdir bolt_into_fixed_nut_output --format geo

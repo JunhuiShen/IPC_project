@@ -282,7 +282,7 @@ int main(int argc, char** argv) {
                 frame_index, pin_updater, substep_cb, outdir);
         } else if (has_rigid) {
             result = advance_one_frame_rb(
-                state, ref_mesh, params, frame_index, substep_cb);
+                state, ref_mesh, params, broad_phase, frame_index, substep_cb);
         } else {
             result = advance_one_frame(
                 state, ref_mesh, adj, pins, params, broad_phase,

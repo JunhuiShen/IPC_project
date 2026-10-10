@@ -933,3 +933,134 @@ TEST(OrderedContactTasks, UnevenWholeBlockFailureJoinsAndAllowsReuse) {
             EXPECT_EQ(visits[v].load(), 3) << "block=" << v;
     }
 }
+
+namespace {
+struct ScratchGrowthProbe {
+    int value;
+    bool assigned = false;
+    inline static int copies_of_unwritten = 0;
+    ScratchGrowthProbe() {}
+    explicit ScratchGrowthProbe(int v) : value(v), assigned(true) {}
+    ScratchGrowthProbe(const ScratchGrowthProbe& other) : assigned(other.assigned) {
+        if (assigned) value = other.value;
+        else ++copies_of_unwritten;
+    }
+    ScratchGrowthProbe& operator=(const ScratchGrowthProbe& other) {
+        assigned = other.assigned;
+        if (assigned) value = other.value;
+        else ++copies_of_unwritten;
+        return *this;
+    }
+};
+}
+
+TEST(OrderedContactTasks, ScratchGrowthDiscardsUnwrittenRecordsAndNestedLoansAreIndependent) {
+    ScratchGrowthProbe::copies_of_unwritten = 0;
+    {
+        solver_detail::BorrowedContactBuffer<ScratchGrowthProbe> outer;
+        outer.resize(65);
+        outer.values()[0] = ScratchGrowthProbe(19);
+        auto* original = outer.values().data();
+        {
+            solver_detail::BorrowedContactBuffer<ScratchGrowthProbe> nested;
+            nested.resize(300);
+            EXPECT_NE(original, nested.values().data());
+            nested.values()[0] = ScratchGrowthProbe(71);
+        }
+        EXPECT_EQ(outer.values()[0].value, 19);
+        outer.resize(1001);
+        EXPECT_EQ(ScratchGrowthProbe::copies_of_unwritten, 0);
+        outer.values()[1000] = ScratchGrowthProbe(23);
+    }
+    solver_detail::BorrowedContactBuffer<ScratchGrowthProbe> reused;
+    reused.resize(1001);
+    EXPECT_EQ(reused.values()[1000].value, 23);
+    EXPECT_EQ(ScratchGrowthProbe::copies_of_unwritten, 0);
+}
+
+TEST(OrderedContactTasks, SparseRangesPreserveOrderAcrossGrowthNestedCallsAndFailures) {
+    struct Restore { int threads = omp_get_max_threads(); ~Restore() { omp_set_num_threads(threads); } } restore;
+    omp_set_num_threads(4);
+    for (int count : {0, 17, 65, 401, 35, 1001, 65539}) {
+        for (bool fail : {true, false}) {
+            std::vector<int> actual, nested;
+            std::atomic<int> active{0};
+            int leader_calls = 0;
+            bool staged = false;
+            const auto run = [&] {
+                solver_detail::for_each_colored_block({{0}},
+                    [](int) { return std::size_t(4096); },
+                    [&](int, bool cooperative) {
+                        staged = cooperative && count >= 32 && omp_get_num_threads() > 1;
+                        const std::function<void()> leader = [&] {
+                            ++leader_calls;
+                            solver_detail::ordered_sparse_contact_ranges<int>(67, true,
+                                [&](int begin, int end, const auto& emit) {
+                                    for (int i = begin; i < end; ++i)
+                                        if (i % 7 == 0) emit(i, i + 1000);
+                                }, [&](int value) { nested.push_back(value); });
+                        };
+                        solver_detail::ordered_sparse_contact_ranges<int>(count, cooperative,
+                            [&](int begin, int end, const auto& emit) {
+                                ++active;
+                                struct Join { std::atomic<int>& n; ~Join() { --n; } } join{active};
+                                for (int i = begin; i < end; ++i) {
+                                    if (fail && (i == 13 || i == 75))
+                                        throw std::runtime_error(std::to_string(i));
+                                    if (i % 5 == 0) emit(i, i);
+                                }
+                            }, [&](int value) { actual.push_back(value); }, 64, &leader);
+                    });
+            };
+            if (fail && count > 13) {
+                try { run(); FAIL() << "Expected contact failure"; }
+                catch (const std::runtime_error& e) { EXPECT_EQ(std::string(e.what()), "13"); }
+                if (staged) EXPECT_TRUE(actual.empty()) << "count=" << count;
+                else EXPECT_EQ(actual, (std::vector<int>{0,5,10}));
+            } else {
+                EXPECT_NO_THROW(run());
+                std::vector<int> expected;
+                for (int i = 0; i < count; ++i) if (i % 5 == 0) expected.push_back(i);
+                EXPECT_EQ(actual, expected);
+            }
+            if (count >= 32) EXPECT_TRUE(staged) << "count=" << count;
+            EXPECT_EQ(active.load(), 0);
+            EXPECT_EQ(leader_calls, 1);
+            EXPECT_EQ(nested, (std::vector<int>{1000,1007,1014,1021,1028,1035,1042,1049,1056,1063}));
+        }
+    }
+}
+
+TEST(OrderedContactTasks, SparseWordBoundariesAndCoarseRangesPreserveExactOrderAcrossReuse) {
+    struct Restore {
+        int threads = omp_get_max_threads(), dynamic = omp_get_dynamic();
+        ~Restore() { omp_set_num_threads(threads); omp_set_dynamic(dynamic); }
+    } restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+    const std::vector<int> boundaries = {0,7,8,31,32,63,64,65,1023,1024,1025,65535,65536,65538};
+    for (int count : {65539,0,17,31,32,63,64,65,4099,65539}) {
+        for (int pass = 0; pass < 4; ++pass) {
+            SCOPED_TRACE(::testing::Message() << "count=" << count << " pass=" << pass);
+            const auto contributes = [&](int i) {
+                if (pass == 0) return std::binary_search(boundaries.begin(), boundaries.end(), i);
+                if (pass == 1) return i % 4096 == 2;
+                return pass == 3;
+            };
+            std::vector<int> actual, expected;
+            for (int i = 0; i < count; ++i)
+                if (contributes(i)) expected.push_back(3 * i + pass);
+            solver_detail::for_each_colored_block({{0}},
+                [](int) { return std::size_t(1 << 20); },
+                [&](int, bool cooperative) {
+                    if (count >= 32) EXPECT_TRUE(cooperative);
+                    solver_detail::ordered_sparse_contact_ranges<int>(count, cooperative,
+                        [&](int begin, int end, const auto& emit) {
+                            for (int i = begin; i < end; ++i)
+                                if (contributes(i)) emit(i, 3 * i + pass);
+                        }, [&](int value) { actual.push_back(value); }, 64, nullptr, 1024);
+                });
+            EXPECT_EQ(actual, expected);
+        }
+    }
+}

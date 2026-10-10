@@ -974,3 +974,27 @@ TEST(ParallelHelper, ParallelTetIncidenceMatchesConnectivityScanExactly) {
     build_all_block_adjacency_and_contact(mesh, {}, cloth_adjacency, {}, actual_general);
     EXPECT_EQ(actual_general, expected_general);
 }
+
+
+TEST(ParallelHelper, SmallRigidGraphKeepsLateNeighborsAndAllPhysicalPairs) {
+    BroadPhase::Cache cache;
+    const std::vector<int> owners = {0,0,0,1,1,1,2,2,2,3,3,3};
+    NodeTrianglePair pair;
+    pair.node = 0; pair.tri_v[0] = 3; pair.tri_v[1] = 4; pair.tri_v[2] = 5;
+    cache.nt_pairs.assign(200, pair);
+    pair.tri_v[0] = 6; pair.tri_v[1] = 7; pair.tri_v[2] = 8;
+    cache.nt_pairs.push_back(pair);
+    SegmentSegmentPair edge;
+    edge.v[0] = 0; edge.v[1] = 1; edge.v[2] = 9; edge.v[3] = 10;
+    cache.ss_pairs.push_back(edge);
+    std::vector<std::vector<int>> nt, ss, graph;
+    build_rb_contact_adj(cache, owners, 4, nt, ss, graph);
+    EXPECT_EQ(graph, (std::vector<std::vector<int>>{{1,2,3},{0},{0},{0}}));
+    EXPECT_EQ(nt[0].size(), 201U);
+    EXPECT_EQ(ss[0].size(), 1U);
+    cache.nt_pairs.resize(200); cache.ss_pairs.clear();
+    build_rb_contact_adj(cache, owners, 4, nt, ss, graph);
+    EXPECT_EQ(graph, (std::vector<std::vector<int>>{{1},{0},{},{}}));
+    EXPECT_EQ(nt[0].size(), 200U);
+    EXPECT_TRUE(ss[0].empty());
+}

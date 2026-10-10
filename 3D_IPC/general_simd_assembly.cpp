@@ -356,39 +356,35 @@ void accumulate_general_simd_contacts(
             }
         };
         if (cooperative && total >= 32 && omp_get_num_threads() > 1) {
-            struct Tile {
-                std::array<ipc_simd::MeshContactOutput, width> values;
-                std::array<unsigned char, width> active{};
-                std::size_t count = 0;
-                Tile() {
-                    // Returned packets may copy unused slots too.
-                    for (auto& value : values) {
-                        value.gradient.setZero(); value.hessian.setZero();
-                        value.friction_gradient.setZero(); value.friction_hessian.setZero();
+            ordered_nodal_contact_ranges(static_cast<int>(total), true,
+                params.friction_coefficient != 0.0,
+                [&](int begin, int end, const auto& emit) {
+                    for (std::size_t first = begin; first < static_cast<std::size_t>(end); first += width) {
+                        std::array<ipc_simd::MeshContactInput, width> inputs;
+                        std::array<ipc_simd::MeshContactOutput, width> values;
+                        std::array<unsigned char, width> active;
+                        std::array<std::size_t, width> indices;
+                        std::size_t count = 0;
+                        const auto stop = std::min(static_cast<std::size_t>(end), first + width);
+                        for (std::size_t index = first; index < stop; ++index) {
+                            if (gather(index, inputs[count])) indices[count++] = index;
+                        }
+                        ipc_simd::general_mesh_contact_derivatives_tile(inputs.data(), count,
+                            params.d_hat, params.k_barrier, params.friction_coefficient,
+                            params.dt(), params.friction_velocity_epsilon, values.data(),
+                            use_derivative_mask ? active.data() : nullptr);
+                        for (std::size_t e = 0; e < count; ++e)
+                            if (!use_derivative_mask || active[e])
+                                emit(indices[e], values[e].gradient, values[e].hessian,
+                                    values[e].friction_gradient, values[e].friction_hessian);
                     }
-                }
-            };
-            const auto evaluate = [&](int batch) {
-                Tile tile;
-                std::array<ipc_simd::MeshContactInput, width> inputs;
-                const auto end = std::min(total, (batch + 1) * width);
-                for (std::size_t index = batch * width; index < end; ++index)
-                    if (gather(index, inputs[tile.count])) ++tile.count;
-            ipc_simd::general_mesh_contact_derivatives_tile(inputs.data(), tile.count,
-                    params.d_hat, params.k_barrier, params.friction_coefficient,
-                    params.dt(), params.friction_velocity_epsilon, tile.values.data(),
-                    use_derivative_mask ? tile.active.data() : nullptr);
-                return tile;
-            };
-            const auto accumulate = [&](const Tile& tile) {
-                for (std::size_t e = 0; e < tile.count; ++e)
-                    if (!use_derivative_mask || tile.active[e]) accumulate_value(tile.values[e]);
-            };
-            const int batches = static_cast<int>((total + width - 1) / width);
-            // As in basic v2's split-contact sweep, the leader may prepare
-            // local point/elastic/SDF terms while helpers evaluate contacts.
-            // Both read the same fixed positions; reduction starts after join.
-            parallel_contact_tasks(batches, evaluate, accumulate, leader_work);
+                }, [&](const Vec3& gradient, const Mat33& hessian,
+                       const Vec3& friction_gradient, const Mat33& friction_hessian) {
+                    ipc_simd::MeshContactOutput value;
+                    value.gradient = gradient; value.hessian = hessian;
+                    value.friction_gradient = friction_gradient; value.friction_hessian = friction_hessian;
+                    accumulate_value(value);
+                }, leader_work);
         } else {
             if (leader_work) (*leader_work)();
             std::array<ipc_simd::MeshContactInput, width> inputs;

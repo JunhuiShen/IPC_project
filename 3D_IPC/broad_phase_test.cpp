@@ -2085,6 +2085,76 @@ TEST(BVH3Test, ReusedStoragePreservesSerialLayoutAcrossTreeSizes) {
     omp_set_num_threads(original_threads);
 }
 
+TEST(BVH3Test, ConcurrentScratchLoansPreserveFreshLayoutsAcrossGeometryAndSizes) {
+    struct RestoreThreads {
+        int count = omp_get_max_threads();
+        ~RestoreThreads() { omp_set_num_threads(count); }
+    } restore;
+    omp_set_num_threads(4);
+    const std::array<std::array<int, 2>, 5> sizes{{
+        {{16385, 257}}, {{0, 32771}}, {{17303, 16384}},
+        {{513, 1}}, {{16385, 257}}
+    }};
+    for (std::size_t pass = 0; pass < sizes.size(); ++pass) {
+        std::array<std::vector<AABB>, 2> boxes;
+        std::array<std::vector<BVHNode>, 2> actual, expected;
+        std::array<std::vector<int>, 2> actual_leaves, expected_leaves;
+        std::array<int, 2> roots{}, expected_roots{};
+        for (int tree = 0; tree < 2; ++tree) {
+            for (int i = 0; i < sizes[pass][tree]; ++i) {
+                const Vec3 center((i * 17 + 13 * pass + tree) % 101,
+                    (i * 31 + 7 * pass) % 79, (i * 7 + tree) % 53);
+                boxes[tree].emplace_back(center - Vec3::Constant(0.75),
+                    center + Vec3::Constant(0.75));
+            }
+            expected_roots[tree] = build_bvh_serial_reference(
+                boxes[tree], expected[tree], &expected_leaves[tree]);
+        }
+        // Match the concurrent triangle/edge-tree construction path. Repeated
+        // calls cross the centroid-cache threshold and overwrite old geometry.
+        #pragma omp parallel sections
+        {
+            #pragma omp section
+            roots[0] = build_bvh(boxes[0], actual[0], actual_leaves[0]);
+            #pragma omp section
+            roots[1] = build_bvh(boxes[1], actual[1], actual_leaves[1]);
+        }
+        for (int tree = 0; tree < 2; ++tree) {
+            SCOPED_TRACE(::testing::Message() << "pass=" << pass << " tree=" << tree);
+            EXPECT_EQ(roots[tree], expected_roots[tree]);
+            expect_bvh_vectors_exact(actual[tree], expected[tree]);
+            EXPECT_EQ(actual_leaves[tree], expected_leaves[tree]);
+        }
+    }
+}
+
+TEST(BroadPhaseTest, InvalidatedTopologyMatchesFreshConnectivityAndGeometry) {
+    std::vector<Vec3> x, v;
+    RefMesh mesh;
+    build_three_sheet_scene(x, v, mesh);
+    BroadPhase reused;
+    for (int pass = 0; pass < 4; ++pass) {
+        if (pass > 0) {
+            // Change connectivity in place, without relying on pointer/size
+            // changes to identify a new topology epoch.
+            std::swap(mesh.tris[1], mesh.tris[4]);
+            x[0] += Vec3(0.001, -0.002, 0.003);
+            const auto capacity = reused.cache().nt_pairs.capacity();
+            reused.invalidate_mesh_topology();
+            EXPECT_FALSE(reused.has_topology());
+            EXPECT_EQ(reused.cache().nt_pairs.capacity(), capacity);
+        }
+        std::vector<AABB> boxes;
+        for (const Vec3& p : x)
+            boxes.emplace_back(p - Vec3::Constant(0.02), p + Vec3::Constant(0.02));
+        BroadPhase fresh;
+        fresh.initialize(boxes, mesh, 0.005, BroadPhase::InitializationMode::GeneralSolver);
+        reused.initialize(boxes, mesh, 0.005, BroadPhase::InitializationMode::GeneralSolver);
+        ASSERT_TRUE(reused.has_topology());
+        expect_cache_exact(reused.cache(), fresh.cache());
+    }
+}
+
 TEST(BroadPhaseTest, PairOnlyInitialGuessPreservesOrderAndRestoresSolverStorage) {
     std::vector<Vec3> x, v;
     RefMesh mesh;
