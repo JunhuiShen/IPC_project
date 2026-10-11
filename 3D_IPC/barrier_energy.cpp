@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <stdexcept>
 
 namespace {
@@ -684,79 +686,155 @@ Mat33 node_triangle_barrier_self_hessian(const Vec3& x, const Vec3& x1, const Ve
 // Keeping Hq - grad(d)*grad(d)^T exact avoids catastrophic cancellation when
 // dividing this curvature term by a machine-scale gap. Normal contacts retain
 // the existing fast derivative kernels below; this is not a PSD approximation.
+namespace {
+
+// One contact per worker: reuse only when every endpoint bit and the selected
+// exact feature still match. Cache unscaled geometry; the barrier coefficients
+// and distance are taken from the current call, including precomputed inputs.
+struct ExactSegmentHessianGeometry {
+    using Rational = boost::multiprecision::cpp_rational;
+    using ExactVector = std::array<Rational, 3>;
+
+    std::array<std::uint64_t, 12> endpoint_bits{};
+    SegmentSegmentRegion feature = SegmentSegmentRegion::ParallelSegments;
+    bool valid = false;
+    bool free_s = false, free_t = false;
+    Rational A, B, C, determinant;
+    std::array<Rational, 4> weights;
+    std::array<ExactVector, 4> s_derivatives, t_derivatives;
+    std::array<ExactVector, 3> normal_base;
+    std::array<Mat33, 16> normal, curvature;
+    std::array<bool, 16> ready{};
+
+    void prepare(const Vec3& x1, const Vec3& x2,
+                 const Vec3& x3, const Vec3& x4,
+                 SegmentSegmentRegion active_feature) {
+        std::array<std::uint64_t, 12> bits;
+        const Vec3* endpoints[4] = {&x1, &x2, &x3, &x4};
+        static_assert(sizeof(double) == sizeof(std::uint64_t));
+        for (int i = 0; i < 4; ++i)
+            std::memcpy(bits.data() + 3*i, endpoints[i]->data(), 3*sizeof(double));
+        if (valid && feature == active_feature && endpoint_bits == bits) return;
+
+        // An exception must leave no partially prepared geometry reusable.
+        valid = false;
+        ready.fill(false);
+        free_s = free_t = false;
+        ExactVector a, b, c;
+        for (int k = 0; k < 3; ++k) {
+            // Convert endpoints before subtraction, not rounded edge vectors.
+            a[k] = Rational(x2[k]) - Rational(x1[k]);
+            b[k] = Rational(x4[k]) - Rational(x3[k]);
+            c[k] = Rational(x1[k]) - Rational(x3[k]);
+        }
+        const auto dot = [](const ExactVector& u, const ExactVector& v) -> Rational {
+            return u[0]*v[0] + u[1]*v[1] + u[2]*v[2];
+        };
+        A = dot(a, a); B = dot(a, b); C = dot(b, b);
+        const Rational D = dot(a, c), E = dot(b, c);
+        Rational s = 0, t = 0;
+        switch (active_feature) {
+            case SegmentSegmentRegion::Interior:
+                determinant = A*C - B*B;
+                s = (B*E - C*D) / determinant;
+                t = (A*E - B*D) / determinant;
+                free_s = free_t = true;
+                break;
+            case SegmentSegmentRegion::Edge_s0:
+                t = E/C; free_t = true; break;
+            case SegmentSegmentRegion::Edge_s1:
+                s = 1; t = (E+B)/C; free_t = true; break;
+            case SegmentSegmentRegion::Edge_t0:
+                s = -D/A; free_s = true; break;
+            case SegmentSegmentRegion::Edge_t1:
+                t = 1; s = (B-D)/A; free_s = true; break;
+            case SegmentSegmentRegion::Corner_s0t0: break;
+            case SegmentSegmentRegion::Corner_s0t1: t = 1; break;
+            case SegmentSegmentRegion::Corner_s1t0: s = 1; break;
+            case SegmentSegmentRegion::Corner_s1t1: s = t = 1; break;
+            case SegmentSegmentRegion::ParallelSegments:
+                throw std::logic_error("robust segment contact has no active finite feature");
+        }
+        ExactVector residual;
+        for (int k = 0; k < 3; ++k) residual[k] = c[k] + s*a[k] - t*b[k];
+        const Rational distance_squared = dot(residual, residual);
+        if (distance_squared == 0)
+            throw std::runtime_error("segment_segment_barrier_cross_hessian: distance must be nonzero.");
+        weights = {{1-s, s, t-1, -t}};
+        const int ds[4] = {-1, 1, 0, 0};
+        const int dt[4] = {0, 0, 1, -1};
+        for (int i = 0; i < 4; ++i) {
+            for (int k = 0; k < 3; ++k) {
+                if (free_s)
+                    s_derivatives[i][k] = weights[i]*a[k] + ds[i]*residual[k];
+                if (free_t)
+                    t_derivatives[i][k] = -weights[i]*b[k] + dt[i]*residual[k];
+            }
+        }
+        for (int k = 0; k < 3; ++k)
+            for (int l = 0; l < 3; ++l)
+                normal_base[k][l] = residual[k]*residual[l]/distance_squared;
+        endpoint_bits = bits;
+        feature = active_feature;
+        valid = true;
+    }
+
+    void prepare_block(int p, int q) {
+        const int block = 4*p + q;
+        if (ready[block]) return;
+        const Rational weight_product = weights[p] * weights[q];
+        for (int k = 0; k < 3; ++k) {
+            for (int l = 0; l < 3; ++l) {
+                Rational hq = k == l ? weight_product : Rational(0);
+                if (free_s && free_t) {
+                    const Rational& ps = s_derivatives[p][k];
+                    const Rational& qs = s_derivatives[q][l];
+                    const Rational& pt = t_derivatives[p][k];
+                    const Rational& qt = t_derivatives[q][l];
+                    hq -= (C*ps*qs + B*(ps*qt + pt*qs) + A*pt*qt)/determinant;
+                } else if (free_s) {
+                    hq -= s_derivatives[p][k]*s_derivatives[q][l]/A;
+                } else if (free_t) {
+                    hq -= t_derivatives[p][k]*t_derivatives[q][l]/C;
+                }
+                const Rational normal_term = weight_product * normal_base[k][l];
+                const Rational curvature_term = hq - normal_term;
+                normal[block](k,l) = normal_term.convert_to<double>();
+                curvature[block](k,l) = curvature_term.convert_to<double>();
+            }
+        }
+        ready[block] = true;
+    }
+};
+
+} // namespace
+
 static Mat33 robust_segment_segment_barrier_cross_hessian(
         const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
         const SegmentSegmentDistanceResult& dr, int p, int q,
         double bp, double bpp) {
-    using Rational = boost::multiprecision::cpp_rational;
-    using ExactVector = std::array<Rational, 3>;
-    ExactVector a, b, c;
-    for (int k = 0; k < 3; ++k) {
-        // Convert endpoints before subtraction, not rounded edge vectors.
-        a[k] = Rational(x2[k]) - Rational(x1[k]);
-        b[k] = Rational(x4[k]) - Rational(x3[k]);
-        c[k] = Rational(x1[k]) - Rational(x3[k]);
-    }
-    const auto dot = [](const ExactVector& u, const ExactVector& v) -> Rational {
-        return u[0]*v[0] + u[1]*v[1] + u[2]*v[2];
-    };
-    const Rational A = dot(a, a), B = dot(a, b), C = dot(b, b);
-    const Rational D = dot(a, c), E = dot(b, c);
-    Rational s = 0, t = 0;
-    bool free_s = false, free_t = false;
-    switch (dr.active_region) {
-        case SegmentSegmentRegion::Interior: {
-            const Rational determinant = A*C - B*B;
-            s = (B*E - C*D) / determinant;
-            t = (A*E - B*D) / determinant;
-            free_s = free_t = true;
-            break;
-        }
-        case SegmentSegmentRegion::Edge_s0:
-            t = E/C; free_t = true; break;
-        case SegmentSegmentRegion::Edge_s1:
-            s = 1; t = (E+B)/C; free_t = true; break;
-        case SegmentSegmentRegion::Edge_t0:
-            s = -D/A; free_s = true; break;
-        case SegmentSegmentRegion::Edge_t1:
-            t = 1; s = (B-D)/A; free_s = true; break;
-        case SegmentSegmentRegion::Corner_s0t0: break;
-        case SegmentSegmentRegion::Corner_s0t1: t = 1; break;
-        case SegmentSegmentRegion::Corner_s1t0: s = 1; break;
-        case SegmentSegmentRegion::Corner_s1t1: s = t = 1; break;
-        case SegmentSegmentRegion::ParallelSegments:
-            throw std::logic_error("robust segment contact has no active finite feature");
-    }
-    ExactVector residual;
-    for (int k = 0; k < 3; ++k) residual[k] = c[k] + s*a[k] - t*b[k];
-    const Rational distance_squared = dot(residual, residual);
-    if (distance_squared == 0)
-        throw std::runtime_error("segment_segment_barrier_cross_hessian: distance must be nonzero.");
-    const Rational weights[4] = {1-s, s, t-1, -t};
-    const int ds[4] = {-1, 1, 0, 0};
-    const int dt[4] = {0, 0, 1, -1};
-    const Rational weight_product = weights[p] * weights[q];
+    thread_local ExactSegmentHessianGeometry geometry;
+    geometry.prepare(x1, x2, x3, x4, dr.active_region);
+    geometry.prepare_block(p, q);
+    const int block = 4*p + q;
     Mat33 H;
+#if defined(__GNUC__) && !defined(__clang__)
     for (int k = 0; k < 3; ++k) {
         for (int l = 0; l < 3; ++l) {
-            const Rational ps = weights[p]*a[k] + ds[p]*residual[k];
-            const Rational qs = weights[q]*a[l] + ds[q]*residual[l];
-            const Rational pt = -weights[p]*b[k] + dt[p]*residual[k];
-            const Rational qt = -weights[q]*b[l] + dt[q]*residual[l];
-            Rational hq = k == l ? weight_product : Rational(0);
-            if (free_s && free_t) {
-                hq -= (C*ps*qs + B*(ps*qt + pt*qs) + A*pt*qt)/(A*C-B*B);
-            } else if (free_s) {
-                hq -= ps*qs/A;
-            } else if (free_t) {
-                hq -= pt*qt/C;
-            }
-            const Rational normal_term = weight_product * residual[k]*residual[l]/distance_squared;
-            const Rational curvature = hq - normal_term;
-            H(k,l) = bpp * normal_term.convert_to<double>()
-                + (bp/dr.distance) * curvature.convert_to<double>();
+            // The original exact path rounds this product before converting
+            // the curvature term. Preserve that rounding boundary when the
+            // converted geometry is cached; otherwise native GCC may contract
+            // the other product and change the result by one bit.
+            const volatile double normal_product = bpp * geometry.normal[block](k,l);
+            H(k,l) = normal_product + (bp/dr.distance) * geometry.curvature[block](k,l);
         }
     }
+#else
+    for (int k = 0; k < 3; ++k)
+        for (int l = 0; l < 3; ++l)
+            H(k,l) = bpp * geometry.normal[block](k,l)
+                + (bp/dr.distance) * geometry.curvature[block](k,l);
+#endif
     return H;
 }
 

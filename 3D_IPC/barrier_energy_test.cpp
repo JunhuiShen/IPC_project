@@ -1862,3 +1862,107 @@ TEST(BarrierEnergy, RobustSegmentRetainsGradientForSubUlpEndpointWeight) {
     EXPECT_NEAR(direct.x(), -0.05, 1.0e-13);
     EXPECT_NEAR(direct.y(), 0.025, 1.0e-13);
 }
+
+TEST(BarrierEnergy, RobustSegmentHessiansAreIndependentOfCallHistoryAndWorker) {
+    using Contact = std::array<Vec3, 4>;
+    const std::vector<Contact> seeds = {
+        {{Vec3::Zero(), Vec3::UnitX(),
+          Vec3(0.0, -5.0e-9, 1.0e-6), Vec3(1.0, 5.0e-9, 1.0e-6)}},
+        {{Vec3::Zero(), Vec3::UnitX(), Vec3(.2,.02,.01), Vec3(.8,.02,.01)}},
+        {{Vec3::Zero(), Vec3::Zero(), Vec3(.02,.01,.03), Vec3(.02,.01,.03)}}
+    };
+    std::vector<Contact> contacts;
+    for (const auto& seed : seeds) {
+        contacts.push_back(seed);
+        // A representable change in any endpoint must be observed immediately.
+        for (int role = 0; role < 4; ++role) {
+            for (int axis = 0; axis < 3; ++axis) {
+                auto changed = seed;
+                changed[role][axis] = std::nextafter(changed[role][axis], 2.0);
+                contacts.push_back(changed);
+            }
+        }
+    }
+    const Contact unrelated{{Vec3(4,5,6),Vec3(4,5,6),Vec3(4.1,5.2,6.3),Vec3(4.1,5.2,6.3)}};
+    const auto evict = [&] {
+        return segment_segment_barrier_self_hessian(
+            unrelated[0], unrelated[1], unrelated[2], unrelated[3], 1.0, 0);
+    };
+    struct Query {
+        Contact x;
+        SegmentSegmentDistanceResult dr;
+        double bp, bpp;
+        std::array<Mat33, 16> expected;
+    };
+    std::vector<Query> queries;
+    for (const auto& x : contacts) {
+        const auto dr = segment_segment_distance(x[0],x[1],x[2],x[3]);
+        for (double band : {.4, .8, 1.2}) {
+            Query query;
+            query.x = x;
+            query.dr = dr;
+            // Precomputed coefficients and distance are current-call inputs,
+            // even when the geometric endpoints are unchanged.
+            query.dr.distance *= 1.25;
+            query.bp = 1.7 * scalar_barrier_gradient(dr.distance, band);
+            query.bpp = .3 * scalar_barrier_hessian(dr.distance, band);
+            for (int p = 0; p < 4; ++p) for (int q = 0; q < 4; ++q) {
+                const Mat33 ignored = evict();
+                ASSERT_TRUE(ignored.allFinite());
+                query.expected[4*p+q] = segment_segment_barrier_cross_hessian(
+                    x[0],x[1],x[2],x[3],band,p,q,1e-12,
+                    &query.dr,&query.bp,&query.bpp);
+            }
+            queries.push_back(std::move(query));
+        }
+    }
+    std::vector<unsigned char> equal(queries.size(), 1);
+    #pragma omp parallel for num_threads(4) schedule(dynamic, 1)
+    for (int i = 0; i < static_cast<int>(queries.size()); ++i) {
+        const auto& query = queries[i];
+        const auto& x = query.x;
+        // Reversed block order and repeated reads also exercise warm geometry.
+        for (int pass = 0; pass < 2; ++pass) {
+            for (int p = 3; p >= 0; --p) for (int q = 3; q >= 0; --q) {
+                const Mat33 H = segment_segment_barrier_cross_hessian(
+                    x[0],x[1],x[2],x[3],.8,p,q,1e-12,
+                    &query.dr,&query.bp,&query.bpp);
+                if (std::memcmp(H.data(), query.expected[4*p+q].data(),
+                                9*sizeof(double)) != 0) equal[i] = 0;
+            }
+        }
+    }
+    for (std::size_t i = 0; i < equal.size(); ++i)
+        EXPECT_TRUE(equal[i]) << "query " << i;
+}
+
+TEST(BarrierEnergy, RobustSegmentUsesCurrentFeatureAndRecoversAfterInvalidFeature) {
+    const std::array<Vec3, 4> x{{Vec3::Zero(),Vec3::UnitX(),
+                                Vec3(1,.02,.01),Vec3(2,.02,.01)}};
+    auto dr = segment_segment_distance(x[0],x[1],x[2],x[3]);
+    ASSERT_TRUE(dr.robust);
+    const auto hessian = [&](const SegmentSegmentDistanceResult& distance) {
+        return segment_segment_barrier_self_hessian(
+            x[0],x[1],x[2],x[3],.4,1,1e-12,&distance);
+    };
+    // The same closest point lies on a corner and two feature boundaries.
+    // Preserve the constrained feature supplied by each precomputed record.
+    const std::array<SegmentSegmentRegion, 3> features{{
+        SegmentSegmentRegion::Corner_s1t0,
+        SegmentSegmentRegion::Edge_s1,
+        SegmentSegmentRegion::Edge_t0}};
+    std::array<Mat33, 3> expected;
+    for (int i = 0; i < 3; ++i) {
+        dr.active_region = features[i];
+        expected[i] = hessian(dr);
+        ASSERT_TRUE(expected[i].allFinite());
+    }
+    EXPECT_GT((expected[0] - expected[1]).norm(), 1.0);
+    dr.active_region = SegmentSegmentRegion::ParallelSegments;
+    EXPECT_THROW(hessian(dr), std::logic_error);
+    for (int pass = 0; pass < 2; ++pass) for (int i = 2; i >= 0; --i) {
+        dr.active_region = features[i];
+        const Mat33 H = hessian(dr);
+        EXPECT_EQ(std::memcmp(H.data(),expected[i].data(),9*sizeof(double)),0);
+    }
+}

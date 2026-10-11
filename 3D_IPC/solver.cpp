@@ -736,7 +736,9 @@ static void rebuild_box_contact_certificates(const BroadPhase::Cache& cache,
     const std::size_t count = cache.nt_pairs.size() + cache.ss_pairs.size();
     std::atomic<bool> failed{false};
     std::exception_ptr error;
-    #pragma omp parallel for schedule(static) if(parallel && count >= 128)
+    // Exact predicates have uneven cost. Distribute independent certificate
+    // records in small chunks; each record keeps its original computation.
+    #pragma omp parallel for schedule(dynamic, 64) if(parallel && count >= 128)
     for (std::size_t entry = 0; entry < count; ++entry) {
         if (failed.load(std::memory_order_relaxed)) continue;
         try {
@@ -4768,7 +4770,9 @@ SolverResult global_gauss_seidel_solver_general_experimental_v2(
         } else {
             broad_phase.initialize_surface_nodes(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::GeneralSolver);
         }
-        build_rb_contact_adj(broad_phase.cache(), ref_mesh.node_to_rb, num_rbs, rigid_workspace.body_nt_pair_indices, rigid_workspace.body_ss_pair_indices, rigid_workspace.contact_adjacency);
+        // The mixed conflict graph below owns the color dependencies. Only
+        // incidence is consumed here; avoid constructing a second unused graph.
+        build_rb_contact_incidence(broad_phase.cache(), ref_mesh.node_to_rb, num_rbs, rigid_workspace.body_nt_pair_indices, rigid_workspace.body_ss_pair_indices);
         build_all_block_adjacency_and_contact(ref_mesh, cloth_nodes, nodal_elastic_adj, broad_phase.cache(), mixed_adjacency_workspace.conflict_adjacency, &mixed_adjacency_workspace.node_to_block, &mixed_adjacency_workspace.solid_node_mask, &mixed_adjacency_workspace.surface_node_mask, &mixed_adjacency_workspace.elastic_row_sizes, &rigid_workspace.body_nt_pair_indices, &rigid_workspace.body_ss_pair_indices);
         greedy_color_conflict_graph(mixed_adjacency_workspace.conflict_adjacency, mixed_adjacency_workspace.color_groups, &mixed_adjacency_workspace.coloring_workspace);
         // Match basic v2: issue contact-heavy independent blocks first so

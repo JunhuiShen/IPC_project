@@ -354,3 +354,129 @@ TEST(GeneralSIMDRigid, RejectedContactsSkipExactOverlapAndPreviousPositionAccess
     EXPECT_THROW(ipc_simd::rigid_contact_derivatives_tile(&input, 1, d_hat,
         stiffness, 0.4, dt, 0.0, RigidDerivativeMode::Full, &output), std::invalid_argument);
 }
+
+TEST(GeneralSIMDRigid, RepeatedNodePullbacksPreserveBitsAcrossTilesKeysAndKinematics) {
+    std::array<QuaternionOmegaKinematics, 2> kinematics;
+    std::array<ipc_simd::RigidContactInput, ipc_simd::contact_tile_width> inputs;
+    std::array<ipc_simd::RigidContactOutput, ipc_simd::contact_tile_width> expected, actual;
+    const auto equal = [](const RigidEnergyDerivatives& a, const RigidEnergyDerivatives& b) {
+        const auto field = [](const auto& x, const auto& y) {
+            EXPECT_TRUE(x.allFinite());
+            EXPECT_EQ(std::memcmp(x.data(),y.data(),x.size()*sizeof(double)),0);
+        };
+        field(a.translation_gradient,b.translation_gradient);
+        field(a.orientation_gradient,b.orientation_gradient);
+        field(a.translation_translation_hessian,b.translation_translation_hessian);
+        field(a.translation_orientation_hessian,b.translation_orientation_hessian);
+        field(a.orientation_orientation_hessian,b.orientation_orientation_hessian);
+    };
+    for (int round = 0; round < 4; ++round) {
+        // The same object addresses hold different kinematics on later calls.
+        kinematics[0] = quaternion_omega_kinematics(Vec4(.8,.2,-.4,.4).normalized(),
+            Vec3(1.2,-.9,1.7)+round*Vec3(.01,.02,-.03),dt,true);
+        kinematics[1] = quaternion_omega_kinematics(Vec4(.3,-.2,.6,.7).normalized(),
+            Vec3(-.2,.6,.5),dt,true);
+        for (std::size_t e = 0; e < inputs.size(); ++e) {
+            inputs[e] = fixture(static_cast<int>(e),kinematics[(e/4)%2]);
+            for (int role = 0; role < 4; ++role) {
+                const int node = (e+role)%8;
+                inputs[e].body_references[role] = Vec3(node&1?1.:-1.,node&2?1.:-1.,node&4?1.:-1.);
+                if (round == 1) inputs[e].body_references[role].x() =
+                    std::nextafter(inputs[e].body_references[role].x(),2.);
+                if (round == 2) inputs[e].body_references[role] += Vec3(e*.001,role*.003,e*.002);
+            }
+            if (round == 3) inputs[e].body_references[0].x() = e%2 ? -0. : 0.;
+        }
+        for (auto mode : {RigidDerivativeMode::Full,RigidDerivativeMode::Gradient,
+                 RigidDerivativeMode::TranslationHessian,RigidDerivativeMode::OrientationHessian})
+            for (double friction : {0.,.37}) {
+                for (std::size_t e = 0; e < inputs.size(); ++e)
+                    ipc_simd::rigid_contact_derivatives_tile(&inputs[e],1,d_hat,
+                        stiffness,friction,dt,.1,mode,&expected[e]);
+                ipc_simd::rigid_contact_derivatives_tile(inputs.data(),inputs.size(),d_hat,
+                    stiffness,friction,dt,.1,mode,actual.data());
+                for (std::size_t e = 0; e < inputs.size(); ++e) {
+                    SCOPED_TRACE(::testing::Message()<<"round="<<round<<" entry="<<e<<" mode="<<int(mode));
+                    equal(actual[e].barrier,expected[e].barrier);
+                    equal(actual[e].friction,expected[e].friction);
+                }
+            }
+    }
+}
+
+TEST(GeneralSIMDRigid, PointTranslationPacketsMatchMixedPacketsAndClearUnrequestedFields) {
+    const auto kinematics=quaternion_omega_kinematics(Vec4(.8,.2,-.4,.4).normalized(),Vec3(1.2,-.9,1.7),dt,true);
+    std::array<ipc_simd::RigidContactInput,ipc_simd::contact_tile_width> inputs;
+    std::array<ipc_simd::RigidContactOutput,ipc_simd::contact_tile_width> expected,actual;
+    const auto poison=[](RigidEnergyDerivatives& x){
+        const double n=std::numeric_limits<double>::quiet_NaN();
+        x.translation_gradient.setConstant(n);x.orientation_gradient.setConstant(n);
+        x.translation_translation_hessian.setConstant(n);x.translation_orientation_hessian.setConstant(n);x.orientation_orientation_hessian.setConstant(n);
+    };
+    const auto equal=[](const RigidEnergyDerivatives& x,const RigidEnergyDerivatives& y){
+        const auto field=[](const auto& a,const auto& b){EXPECT_TRUE(a.allFinite());EXPECT_EQ(std::memcmp(a.data(),b.data(),a.size()*sizeof(double)),0);};
+        field(x.translation_gradient,y.translation_gradient);field(x.orientation_gradient,y.orientation_gradient);
+        field(x.translation_translation_hessian,y.translation_translation_hessian);field(x.translation_orientation_hessian,y.translation_orientation_hessian);field(x.orientation_orientation_hessian,y.orientation_orientation_hessian);
+    };
+    for(int pattern:{0,1,2}) {
+        for(std::size_t e=0;e<inputs.size();++e) {
+            const bool segment=pattern==1 || (pattern==2 && e%2);
+            inputs[e]=fixture(4*(e%6)+(segment?2:0)+(e%2),kinematics);
+        }
+        for(auto mode:{RigidDerivativeMode::Full,RigidDerivativeMode::TranslationHessian,RigidDerivativeMode::Gradient,RigidDerivativeMode::OrientationHessian,RigidDerivativeMode::TranslationHessian})
+            for(double friction:{0.,.37})for(std::size_t count:{std::size_t(1),std::size_t(3),std::size_t(7),std::size_t(8),std::size_t(9),std::size_t(17),inputs.size()}) {
+                for(std::size_t e=0;e<count;++e) {
+                    poison(actual[e].barrier);poison(actual[e].friction);
+                    ipc_simd::rigid_contact_derivatives_tile(&inputs[e],1,d_hat,stiffness,friction,dt,.1,mode,&expected[e]);
+                }
+                ipc_simd::rigid_contact_derivatives_tile(inputs.data(),count,d_hat,stiffness,friction,dt,.1,mode,actual.data());
+                for(std::size_t e=0;e<count;++e) {
+                    SCOPED_TRACE(::testing::Message()<<"pattern="<<pattern<<" mode="<<int(mode)<<" count="<<count<<" entry="<<e);
+                    equal(actual[e].barrier,expected[e].barrier);equal(actual[e].friction,expected[e].friction);
+                }
+            }
+    }
+}
+
+TEST(GeneralSIMDRigid, MultiTileRangesMatchFreshContactsWhenKinematicsAndReferencesChange) {
+    RefMesh mesh;
+    DeformedState state;
+    mesh.node_to_rb = {-1, 0, 0, 0};
+    mesh.rb_update_modes = {RigidBodyUpdateMode::TranslationAndOrientation};
+    const std::vector<int> local = {-1, 0, 1, 2}, empty;
+    BroadPhase::Cache cache;
+    cache.nt_pairs.resize(1);
+    cache.nt_pairs[0].node = 0;
+    for (int i=0;i<3;++i) cache.nt_pairs[0].tri_v[i]=i+1;
+    SimParams params;
+    params.d_hat=d_hat;params.k_barrier=stiffness;params.friction_velocity_epsilon=.1;
+    QuaternionOmegaKinematics kinematics;
+    const auto equal=[](const RigidEnergyDerivatives& a,const RigidEnergyDerivatives& b){
+        const auto check=[](const auto& x,const auto& y){EXPECT_TRUE(x.allFinite());EXPECT_EQ(std::memcmp(x.data(),y.data(),sizeof(double)*x.size()),0);};
+        check(a.translation_gradient,b.translation_gradient);check(a.orientation_gradient,b.orientation_gradient);
+        check(a.translation_translation_hessian,b.translation_translation_hessian);check(a.translation_orientation_hessian,b.translation_orientation_hessian);check(a.orientation_orientation_hessian,b.orientation_orientation_hessian);
+    };
+    for(int pass=0;pass<8;++pass) {
+        state.orientations={Vec4(.8+.01*pass,.2,-.4,.4).normalized()};
+        const std::vector<Vec3> omega={Vec3(.4+.03*pass,-.8,.6-.01*pass)};
+        // Reassign the same object: an address alone must not survive a call.
+        kinematics=quaternion_omega_kinematics(state.orientations[0],omega[0],dt,true);
+        auto input=fixture(1,kinematics);
+        input.positions[0][2]+=.003*pass;
+        for(int i=1;i<4;++i)input.body_references[i][pass%3]+=.001*pass;
+        mesh.ref_positions={{input.body_references[1],input.body_references[2],input.body_references[3]}};
+        const std::vector<Vec3> positions(input.positions.begin(),input.positions.end());
+        state.deformed_positions.assign(input.previous_positions.begin(),input.previous_positions.end());
+        for(auto mode:{RigidDerivativeMode::Full,RigidDerivativeMode::Gradient,RigidDerivativeMode::OrientationHessian,RigidDerivativeMode::TranslationHessian})
+            for(double friction:{0.,.37})for(int count:{31,32,33,65,257,1031}) {
+                params.friction_coefficient=friction;
+                std::vector<int> indices(count,0);
+                ipc_simd::RigidContactOutput one,expected;
+                ipc_simd::rigid_contact_derivatives_tile(&input,1,d_hat,stiffness,friction,dt,.1,mode,&one);
+                for(int i=0;i<count;++i){add(expected.barrier,one.barrier);add(expected.friction,one.friction);}
+                const auto actual=ipc_simd::rigid_contact_derivatives(0,mesh,state,cache,indices,empty,local,positions,omega,params,dt,mode,&kinematics);
+                SCOPED_TRACE(::testing::Message()<<"pass="<<pass<<" count="<<count<<" mode="<<int(mode));
+                equal(actual.barrier,expected.barrier);equal(actual.friction,expected.friction);
+            }
+    }
+}

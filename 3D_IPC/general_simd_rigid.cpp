@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstring>
 #include <stdexcept>
 #include <type_traits>
 
@@ -215,13 +216,13 @@ struct PreparedContact {
     std::array<std::array<Mat33, 3>, 4> curvature;
     std::array<double, 4> friction_weights;
     Mat33 translation_hessian;
-    void clear(const Modes& flags) {
+    void clear(const Modes& flags, bool cross_hessians) {
         friction_weights.fill(0.0);
         translation_hessian.setZero();
         for (int i = 0; i < 4; ++i) {
             gradients[i].setZero();
             if (flags.og) jacobians[i].setZero();
-            if (flags.th || flags.oh)
+            if ((flags.th || flags.oh) && cross_hessians)
                 for (auto& h : hessians[i]) h.setZero();
             if (flags.oh)
                 for (auto& h : curvature[i]) h.setZero();
@@ -229,10 +230,57 @@ struct PreparedContact {
     }
 };
 
+// Reuse node pullbacks within an immutable contact evaluation range. The
+// kinematics objects remain unchanged until the range joins. Match their
+// address and all reference-coordinate bits; retain at most sixteen nodes.
+// Every public tile call and every range starts with an empty cache, so no
+// body update, derivative call or helper range can inherit another's entries.
+struct NodeKinematicsCache {
+    struct Entry {
+        const QuaternionOmegaKinematics* kinematics;
+        Vec3 reference;
+        Mat33 jacobian;
+        std::array<Mat33, 3> curvature;
+        bool has_curvature;
+    };
+    std::array<Entry, 16> entries;
+    std::size_t used = 0, next = 0;
+
+    const Entry& get(const Vec3& reference,
+                     const QuaternionOmegaKinematics* kinematics,
+                     bool with_curvature) {
+        Entry* found = nullptr;
+        for (std::size_t i = 0; i < used; ++i) {
+            auto& entry = entries[i];
+            if (entry.kinematics == kinematics
+                && std::memcmp(entry.reference.data(), reference.data(),
+                               3 * sizeof(double)) == 0) {
+                found = &entry;
+                break;
+            }
+        }
+        if (!found) {
+            const std::size_t slot = used < entries.size() ? used++ : next;
+            if (used == entries.size()) next = (slot + 1) % entries.size();
+            found = &entries[slot];
+            found->reference = reference;
+            found->kinematics = kinematics;
+            found->jacobian = dx_domega(reference, *kinematics);
+            found->has_curvature = false;
+        }
+        if (with_curvature && !found->has_curvature) {
+            found->curvature = d2x_domega2(reference, *kinematics);
+            found->has_curvature = true;
+        }
+        return *found;
+    }
+};
+
 template <class Evaluation>
 void prepare_contact(const RigidContactInput& input, const Evaluation& evaluation,
     RigidDerivativeMode mode, PreparedContact& prepared,
-    FrozenFrictionContact* frozen, double dt, double eps_v) {
+    FrozenFrictionContact* frozen, double dt, double eps_v,
+    NodeKinematicsCache& node_kinematics) {
     constexpr bool segment = std::is_same_v<Evaluation, SegmentSegmentContactEvaluation>;
     const auto& x = input.positions;
     // The scalar builder validates dt/eps_v even for a geometrically inactive
@@ -263,10 +311,12 @@ void prepare_contact(const RigidContactInput& input, const Evaluation& evaluatio
         throw std::invalid_argument("SIMD rigid contact: requested orientation kinematics are missing.");
     for (int i = first; i <= last; ++i) {
         prepared.gradients[i] = gradient(i);
-        if (flags.og)
-            prepared.jacobians[i] = dx_domega(input.body_references[i], *input.kinematics);
-        if (flags.oh)
-            prepared.curvature[i] = d2x_domega2(input.body_references[i], *input.kinematics);
+        if (flags.og) {
+            const auto& node = node_kinematics.get(input.body_references[i],
+                input.kinematics, flags.oh);
+            prepared.jacobians[i] = node.jacobian;
+            if (flags.oh) prepared.curvature[i] = node.curvature;
+        }
     }
     if (mode == RigidDerivativeMode::TranslationHessian) {
         // These are the scalar solver's exact COM shortcuts. In particular,
@@ -291,7 +341,8 @@ void prepare_contact(const RigidContactInput& input, const Evaluation& evaluatio
                 prepared.friction_weights[i] = frozen->weights[i];
                 if (flags.og && updates_rigid_orientation(input.update_mode)
                     && (i < first || i > last))
-                    prepared.jacobians[i] = dx_domega(input.body_references[i], *input.kinematics);
+                    prepared.jacobians[i] = node_kinematics.get(input.body_references[i],
+                        input.kinematics, false).jacobian;
             }
         }
         // Existing SIMD friction then computes the common relative gradient
@@ -312,12 +363,18 @@ Pack gather(int active, const Getter& get) {
 
 } // namespace
 
-void rigid_contact_derivatives_tile(const RigidContactInput* inputs,
+static void rigid_contact_derivatives_tile_cached(const RigidContactInput* inputs,
     std::size_t count, double d_hat, double k_barrier, double friction,
     double dt, double eps_v, RigidDerivativeMode mode,
-    RigidContactOutput* outputs) {
+    RigidContactOutput* outputs, NodeKinematicsCache& node_kinematics) {
     assert(count <= contact_tile_width);
     if (count == 0) return;
+    // Every packet of an all-NT translation tile bypasses the cross-block
+    // loop below. Only its point self Hessian is live; mixed tiles retain
+    // all cross-block initialization, including NT lanes in mixed packets.
+    const bool point_translation_tile = mode == RigidDerivativeMode::TranslationHessian
+        && std::none_of(inputs, inputs + count,
+            [](const RigidContactInput& input) { return input.segment_segment; });
     std::array<PreparedContact, contact_tile_width> prepared;
     std::array<FrozenFrictionContact, contact_tile_width> frozen;
     std::array<Vec3, contact_tile_width> friction_gradient;
@@ -326,7 +383,7 @@ void rigid_contact_derivatives_tile(const RigidContactInput* inputs,
     for (std::size_t e = 0; e < count; ++e) {
         // Tail packets and gradient/COM-only requests never read the unused
         // records or orientation-Hessian fields. Initialize only live work.
-        prepared[e].clear(flags);
+        prepared[e].clear(flags, !point_translation_tile);
         outputs[e] = RigidContactOutput{};
         const auto& input = inputs[e];
         const auto& x = input.positions;
@@ -344,7 +401,7 @@ void rigid_contact_derivatives_tile(const RigidContactInput* inputs,
                         evaluation.b_double_prime = scalar_barrier_hessian(evaluation.dr.distance, d_hat);
                 }
             }
-            prepare_contact(input, evaluation, mode, prepared[e], contact, dt, eps_v);
+            prepare_contact(input, evaluation, mode, prepared[e], contact, dt, eps_v, node_kinematics);
         } else {
             NodeTriangleContactEvaluation evaluation;
             if (contact) evaluation = make_node_triangle_contact_evaluation(x, d_hat, k_barrier, 1e-12, nullptr, input.exact_computation_fallback);
@@ -358,7 +415,7 @@ void rigid_contact_derivatives_tile(const RigidContactInput* inputs,
                         evaluation.b_double_prime = scalar_barrier_hessian(evaluation.dr.distance, d_hat);
                 }
             }
-            prepare_contact(input, evaluation, mode, prepared[e], contact, dt, eps_v);
+            prepare_contact(input, evaluation, mode, prepared[e], contact, dt, eps_v, node_kinematics);
         }
     }
     if (friction != 0.0) {
@@ -369,6 +426,11 @@ void rigid_contact_derivatives_tile(const RigidContactInput* inputs,
 
     for (std::size_t begin = 0; begin < count; begin += Pack::width) {
         const int active = static_cast<int>(std::min<std::size_t>(Pack::width, count - begin));
+        // NT COM uses the point self block below. Its temporary cross-block
+        // sum is overwritten, so an all-NT packet needs none of that work.
+        const bool point_translation_packet = mode == RigidDerivativeMode::TranslationHessian
+            && std::none_of(inputs + begin, inputs + begin + active,
+                [](const RigidContactInput& input) { return input.segment_segment; });
         const auto scalar = [&](const auto& get) {
             return gather(active, [&](int lane) { return get(prepared[begin + lane]); });
         };
@@ -406,7 +468,7 @@ void rigid_contact_derivatives_tile(const RigidContactInput* inputs,
                 if (flags.tg) tg[r] += g[r];
                 if (flags.og) og[r] += (J[i][0][r] * g[0] + J[i][1][r] * g[1]) + J[i][2][r] * g[2];
             }
-            if (mode != RigidDerivativeMode::Gradient) {
+            if (mode != RigidDerivativeMode::Gradient && !point_translation_packet) {
                 for (int j = mode == RigidDerivativeMode::OrientationHessian ? i : 0; j < 4; ++j) {
                     const Matrix H = matrix([&](const auto& p) -> const Mat33& { return p.hessians[i][j]; });
                     if (flags.th) add(tt, H);
@@ -443,11 +505,11 @@ void rigid_contact_derivatives_tile(const RigidContactInput* inputs,
         }
         if (flags.th) symmetrize(tt);
         if (flags.oh) symmetrize(oo);
-        store_vector(tg, [](auto& o) -> Vec3& { return o.barrier.translation_gradient; });
-        store_vector(og, [](auto& o) -> Vec3& { return o.barrier.orientation_gradient; });
-        store_matrix(tt, [](auto& o) -> Mat33& { return o.barrier.translation_translation_hessian; });
-        store_matrix(to, [](auto& o) -> Mat33& { return o.barrier.translation_orientation_hessian; });
-        store_matrix(oo, [](auto& o) -> Mat33& { return o.barrier.orientation_orientation_hessian; });
+        if (flags.tg) store_vector(tg, [](auto& o) -> Vec3& { return o.barrier.translation_gradient; });
+        if (flags.og) store_vector(og, [](auto& o) -> Vec3& { return o.barrier.orientation_gradient; });
+        if (flags.th) store_matrix(tt, [](auto& o) -> Mat33& { return o.barrier.translation_translation_hessian; });
+        if (flags.mh) store_matrix(to, [](auto& o) -> Mat33& { return o.barrier.translation_orientation_hessian; });
+        if (flags.oh) store_matrix(oo, [](auto& o) -> Mat33& { return o.barrier.orientation_orientation_hessian; });
 
         if (friction == 0.0) continue;
         Pack weight;
@@ -468,7 +530,8 @@ void rigid_contact_derivatives_tile(const RigidContactInput* inputs,
         }
         const Pack translation = gather(active, [&](int lane) { return updates_rigid_translation(inputs[begin + lane].update_mode) ? 1.0 : 0.0; });
         const Pack orientation = gather(active, [&](int lane) { return updates_rigid_orientation(inputs[begin + lane].update_mode) ? 1.0 : 0.0; });
-        const Matrix fHj = multiply_column_major(fH, FJ);
+        Matrix fHj;
+        if (flags.mh || flags.oh) fHj = multiply_column_major(fH, FJ);
         if (flags.oh) foo = multiply(transpose(FJ), fHj);
         for (int r = 0; r < 3; ++r) {
             if (flags.tg) ftg[r] = translation * (weight * fg[r]);
@@ -480,12 +543,21 @@ void rigid_contact_derivatives_tile(const RigidContactInput* inputs,
             }
         }
         // Frozen friction intentionally has no quaternion-curvature term.
-        store_vector(ftg, [](auto& o) -> Vec3& { return o.friction.translation_gradient; });
-        store_vector(fog, [](auto& o) -> Vec3& { return o.friction.orientation_gradient; });
-        store_matrix(ftt, [](auto& o) -> Mat33& { return o.friction.translation_translation_hessian; });
-        store_matrix(fto, [](auto& o) -> Mat33& { return o.friction.translation_orientation_hessian; });
-        store_matrix(foo, [](auto& o) -> Mat33& { return o.friction.orientation_orientation_hessian; });
+        if (flags.tg) store_vector(ftg, [](auto& o) -> Vec3& { return o.friction.translation_gradient; });
+        if (flags.og) store_vector(fog, [](auto& o) -> Vec3& { return o.friction.orientation_gradient; });
+        if (flags.th) store_matrix(ftt, [](auto& o) -> Mat33& { return o.friction.translation_translation_hessian; });
+        if (flags.mh) store_matrix(fto, [](auto& o) -> Mat33& { return o.friction.translation_orientation_hessian; });
+        if (flags.oh) store_matrix(foo, [](auto& o) -> Mat33& { return o.friction.orientation_orientation_hessian; });
     }
+}
+
+void rigid_contact_derivatives_tile(const RigidContactInput* inputs,
+    std::size_t count, double d_hat, double k_barrier, double friction,
+    double dt, double eps_v, RigidDerivativeMode mode,
+    RigidContactOutput* outputs) {
+    NodeKinematicsCache node_kinematics;
+    rigid_contact_derivatives_tile_cached(inputs, count, d_hat, k_barrier,
+        friction, dt, eps_v, mode, outputs, node_kinematics);
 }
 
 RigidContactOutput rigid_contact_derivatives(
@@ -549,15 +621,18 @@ RigidContactOutput rigid_contact_derivatives(
         return true;
     };
     const auto evaluate = [&](std::size_t begin, std::size_t end, const auto& emit) {
+        // Input kinematics and body references are fixed for this range.
+        // Helpers own separate range stacks; all finish before the body moves.
+        NodeKinematicsCache node_kinematics;
         std::array<RigidContactInput, contact_tile_width> inputs;
         std::array<RigidContactOutput, contact_tile_width> outputs;
         std::array<std::size_t, contact_tile_width> indices;
         std::size_t active = 0;
         const auto flush = [&] {
             if (active == 0) return;
-            rigid_contact_derivatives_tile(inputs.data(), active, params.d_hat,
+            rigid_contact_derivatives_tile_cached(inputs.data(), active, params.d_hat,
                 params.k_barrier, params.friction_coefficient, dt,
-                params.friction_velocity_epsilon, mode, outputs.data());
+                params.friction_velocity_epsilon, mode, outputs.data(), node_kinematics);
             for (std::size_t e = 0; e < active; ++e) emit(indices[e], outputs[e]);
             active = 0;
         };

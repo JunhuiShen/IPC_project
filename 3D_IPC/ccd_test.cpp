@@ -1,3 +1,4 @@
+#include "contact_scheduling.h"
 #include "ccd.h"
 #include "ipc_args.h"
 #include "make_shape.h"
@@ -2658,5 +2659,85 @@ TEST(CCDIntegration, TenSeparatedClothsFollowGravityAtTenFixedIterations) {
         for (std::size_t i = 0; i < initial.size(); ++i) {
             EXPECT_LT((scene.state.deformed_positions[i] - scenes[0].state.deformed_positions[i]).norm(), 2e-6);
         }
+    }
+}
+
+TEST(CCDSafeStepMargin, CooperativeEndpointChecksMatchSerialBitsAcrossModesAndBacktracking) {
+    struct Restore {int n=omp_get_max_threads(); ~Restore(){omp_set_num_threads(n);}} restore;
+    const std::vector<std::array<Vec3,4>> fixtures={
+        {Vec3(.25,.25,1e-9),Vec3::Zero(),Vec3::UnitX(),Vec3::UnitY()},
+        {Vec3(.25,.25,1e-6),Vec3::Zero(),Vec3::UnitX(),Vec3::UnitY()},
+        {Vec3(-1,0,1e-9),Vec3(1,0,1e-9),Vec3(0,-1,0),Vec3(0,1,0)},
+        {Vec3(-1,0,1e-6),Vec3(1,0,1e-6),Vec3(0,-1,0),Vec3(0,1,0)}
+    };
+    for(std::size_t fixture=0;fixture<fixtures.size();++fixture) {
+        const bool segment=fixture>=2;
+        for(int role=0;role<4;++role)for(bool fallback:{false,true}) {
+            const auto& points=fixtures[fixture];
+            std::vector<Vec3> initial(points.begin(),points.end());
+            BroadPhase phase;
+            prepare_single_vertex_contact(phase,initial,segment,role);
+            auto& cache=phase.mutable_cache();
+            for(int i=1;i<257;++i) {
+                if(segment) {cache.ss_pairs.push_back(cache.ss_pairs[0]);cache.vertex_ss[role].push_back({std::size_t(i),role});}
+                else {cache.nt_pairs.push_back(cache.nt_pairs[0]);cache.vertex_nt[role].push_back({std::size_t(i),role});}
+            }
+            for(double dz:{0.,1e-4,-1e-4,1e-16,-1e-16}) {
+                Vec3 target=initial[role];target[2]+=dz;
+                auto expected=initial;
+                const double reference=per_vertex_safe_step(phase,expected,role,target,.9,true,false,false,false,nullptr,fallback);
+                for(int threads:{1,4,8}) {
+                    omp_set_num_threads(threads);
+                    auto actual=initial;double step=-1.;
+                    solver_detail::for_each_colored_block({{0}},[](int){return std::size_t(4096);},
+                        [&](int,bool cooperative) {
+                            step=per_vertex_safe_step(phase,actual,role,target,.9,true,false,false,cooperative,nullptr,fallback);
+                        });
+                    EXPECT_EQ(0,std::memcmp(&step,&reference,sizeof(double)))<<"fixture="<<fixture<<" role="<<role<<" dz="<<dz;
+                    for(std::size_t i=0;i<actual.size();++i)
+                        EXPECT_EQ(0,std::memcmp(actual[i].data(),expected[i].data(),3*sizeof(double)));
+                }
+            }
+        }
+    }
+}
+
+TEST(CCDExactEndpoints, PreparedExponentRefinementMatchesIndependentRationalQueries) {
+    const double tiny=std::numeric_limits<double>::denorm_min();
+    for(bool segment:{false,true})for(int role=0;role<4;++role) {
+        const auto points=planar_contact(segment);
+        std::array<Vec3,4> start{{points[0],points[1],points[2],points[3]}};
+        start[role].z()=1e-9;
+        const PreparedExactContactStep prepared(start,!segment,1e-13,role);
+        for(double height:{2e-9,1e-9,std::nextafter(1e-9,0.0),5e-10,tiny,0.0,-tiny,-1e-9}) {
+            auto end=start;end[role].z()=height;
+            SCOPED_TRACE(::testing::Message()<<"segment="<<segment<<" role="<<role<<" height="<<height);
+            EXPECT_EQ(prepared.test(end[role]),reference_exact_contact_step(start,end,!segment,1e-13));
+        }
+    }
+}
+
+TEST(CCDExactEndpoints, PreparedSnapshotSupportsConcurrentOrdinaryAndCoplanarReads) {
+    for(bool segment:{false,true})for(int role=0;role<4;++role)for(bool coplanar:{false,true}) {
+        const auto points=planar_contact(segment);
+        std::array<Vec3,4> start{{points[0],points[1],points[2],points[3]}};
+        if(!coplanar)start[role].z()=.125;
+        else if(segment) {start[2].x()+=3.0;start[3].x()+=3.0;}
+        else start[0].x()=-.25;
+        ASSERT_GT(compare_contact_distance_exact(start,!segment,0.0),0);
+        const PreparedExactContactStep prepared(start,!segment,1e-8,role);
+        std::array<Vec3,8> endpoints;
+        std::array<ExactContactStepResult,8> expected;
+        for(int i=0;i<8;++i) {
+            auto end=start;
+            if(coplanar)end[role].x()+=(i-4)*.125;
+            else end[role].z()=(i-4)*.0625;
+            endpoints[i]=end[role];
+            expected[i]=reference_exact_contact_step(start,end,!segment,1e-8);
+        }
+        std::array<ExactContactStepResult,128> actual;
+        #pragma omp parallel for num_threads(8) schedule(dynamic,1)
+        for(int i=0;i<128;++i)actual[i]=prepared.test(endpoints[i%8]);
+        for(int i=0;i<128;++i)EXPECT_EQ(actual[i],expected[i%8]);
     }
 }

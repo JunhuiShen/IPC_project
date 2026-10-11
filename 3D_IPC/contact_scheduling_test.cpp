@@ -1064,3 +1064,58 @@ TEST(OrderedContactTasks, SparseWordBoundariesAndCoarseRangesPreserveExactOrderA
         }
     }
 }
+
+TEST(OrderedContactPredicate, OrderedFailuresAndExceptionsJoinHelpersAcrossReuse) {
+    struct Restore { int n=omp_get_max_threads(); ~Restore(){omp_set_num_threads(n);} } restore;
+    for (int threads : {1,4,8}) {
+        omp_set_num_threads(threads);
+        for (int count : {0,17,127,128,129,513,4097,128}) {
+            for (int scenario=0;scenario<4;++scenario) {
+                SCOPED_TRACE(::testing::Message()<<"threads="<<threads<<" count="<<count<<" scenario="<<scenario);
+                std::atomic<int> active{0};
+                std::vector<int> completed(count,0);
+                bool actual=true;
+                std::string error;
+                const int false_at=scenario==1 ? 3 : scenario==2 ? 35 : -1;
+                const int throw_at=scenario==2 ? 3 : scenario==1 ? 35 : scenario==3 ? 19 : -1;
+                try {
+                    solver_detail::for_each_colored_block({{0}},
+                        [](int){return std::size_t(8192);},
+                        [&](int,bool cooperative) {
+                            actual=solver_detail::ordered_contact_predicate(count,cooperative,[&](int i) {
+                                struct Exit {std::atomic<int>& n; ~Exit(){--n;}} exit{active};
+                                ++active;
+                                if(i%17==0)std::this_thread::yield();
+                                completed[i]=1;
+                                if(i==throw_at)throw std::runtime_error(std::to_string(i));
+                                return i!=false_at;
+                            });
+                        });
+                } catch(const std::runtime_error& e) {error=e.what();}
+                EXPECT_EQ(active.load(),0);
+                if(throw_at>=0 && throw_at<count && (false_at<0 || throw_at<false_at)) {
+                    EXPECT_EQ(error,std::to_string(throw_at));
+                } else {
+                    EXPECT_TRUE(error.empty());
+                    EXPECT_EQ(actual,!(false_at>=0 && false_at<count));
+                }
+                const auto snapshot=completed;
+                std::this_thread::yield();
+                EXPECT_EQ(completed,snapshot);
+            }
+        }
+    }
+}
+
+TEST(OrderedContactPredicate, NestedPredicatesBorrowIndependentStorage) {
+    struct Restore {int n=omp_get_max_threads(); ~Restore(){omp_set_num_threads(n);}} restore;
+    omp_set_num_threads(4);
+    bool actual=false;
+    solver_detail::for_each_colored_block({{0}},[](int){return std::size_t(4096);},
+        [&](int,bool cooperative) {
+            actual=solver_detail::ordered_contact_predicate(257,cooperative,[&](int i) {
+                return solver_detail::ordered_contact_predicate(129,true,[&](int j){return i+j>=0;});
+            });
+        });
+    EXPECT_TRUE(actual);
+}

@@ -3,6 +3,7 @@ build/
 
 # Simulation output
 /results/
+/output/
 frames_*/
 racket_output/
 polygon_collision_output/

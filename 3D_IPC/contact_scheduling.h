@@ -15,6 +15,7 @@
 #include <omp.h>
 #include <optional>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 // Contact scheduling for the cloth, rigid-body, and mixed solvers. All paths
@@ -88,6 +89,46 @@ public:
     void resize(std::size_t count) { resize_contact_scratch(values_, count); }
     Storage& values() { return values_; }
 };
+
+// Read-only predicates may share the current contact helpers. Preserve serial
+// short-circuit semantics: only the first false result or exception in index
+// order is observable. Later chunks may run ahead, so evaluations may write
+// only their own scratch and must not publish an update to solver state.
+template <class Evaluate>
+bool ordered_contact_predicate(int count, bool cooperative, const Evaluate& evaluate) {
+    if (!cooperative || count < 128 || omp_get_num_threads() == 1) {
+        for (int i = 0; i < count; ++i)
+            if (!evaluate(i)) return false;
+        return true;
+    }
+    constexpr int chunk = 16;
+    struct Result {
+        bool value = true;
+        std::exception_ptr error;
+    };
+    BorrowedContactBuffer<Result> storage;
+    storage.resize(count / chunk + (count % chunk != 0));
+    auto& results = storage.values();
+    evaluate_contact_ranges(count, [&](int begin, int end) {
+        for (int first = begin; first < end; first += chunk) {
+            Result result;
+            try {
+                for (int i = first; i < std::min(first + chunk, end); ++i) {
+                    if (!evaluate(i)) { result.value = false; break; }
+                }
+            } catch (...) {
+                result.error = std::current_exception();
+            }
+            results[first / chunk] = std::move(result);
+        }
+    }, chunk);
+    // Every helper has joined before a verdict can permit rollback or a move.
+    for (const auto& result : results) {
+        if (result.error) std::rethrow_exception(result.error);
+        if (!result.value) return false;
+    }
+    return true;
+}
 
 template <class T>
 void reserve_contact_scratch(std::unique_ptr<T[]>& values,

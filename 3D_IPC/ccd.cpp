@@ -1599,10 +1599,11 @@ CCDResult single_vertex_ccd_between_exact(const std::array<Vec3, 4>& start,
     return exact_linear::resolve_exact_points(x, motion, vertex_face);
 }
 
-ExactContactStepResult exact_contact_step_result(const std::array<Vec3, 4>& start,
-    const std::array<Vec3, 4>& end, bool vertex_face, double floor) {
-    if (!(floor > 0.0) || !std::isfinite(floor))
-        throw std::invalid_argument("exact contact query: separation floor must be finite and positive");
+// Shared exact dyadic predicate; false requests the unchanged rational
+// coplanar resolver. All temporary integers belong to this invocation.
+static bool try_exact_integer_contact_step(const std::array<Vec3,4>& start,
+    const std::array<Vec3,4>& end,bool vertex_face,double floor,
+    ExactContactStepResult& result) {
     // Include the original binary64 validation constant in the shared unit,
     // not a decimal approximation or a rounded product of two doubles.
     constexpr double validation = 1.0e-10;
@@ -1620,10 +1621,17 @@ ExactContactStepResult exact_contact_step_result(const std::array<Vec3, 4>& star
         throw std::invalid_argument("exact endpoint CCD: at most one vertex may change");
     const auto integer_floor = exact_linear::contact_integer_from_double(floor, unit_exponent);
     const auto integer_validation = exact_linear::contact_integer_from_double(validation, unit_exponent);
+    return exact_linear::try_integer_step_result(integer_start, integer_end,
+        vertex_face, changed_vertices != 0, integer_floor * integer_floor,
+        integer_validation * integer_validation, result);
+}
+
+ExactContactStepResult exact_contact_step_result(const std::array<Vec3, 4>& start,
+    const std::array<Vec3, 4>& end, bool vertex_face, double floor) {
+    if (!(floor > 0.0) || !std::isfinite(floor))
+        throw std::invalid_argument("exact contact query: separation floor must be finite and positive");
     ExactContactStepResult result;
-    if (exact_linear::try_integer_step_result(integer_start, integer_end,
-            vertex_face, changed_vertices != 0, integer_floor * integer_floor,
-            integer_validation * integer_validation, result))
+    if (try_exact_integer_contact_step(start,end,vertex_face,floor,result))
         return result;
 
     // Identically coplanar motion needs the additional incidence events.
@@ -1646,6 +1654,10 @@ ExactContactStepResult exact_contact_step_result(const std::array<Vec3, 4>& star
 }
 
 struct PreparedExactContactStep::Impl {
+    // Original represented endpoints and threshold are immutable snapshots.
+    // Keep the existing rational cache for identically coplanar queries.
+    std::array<Vec3,4> positions;
+    double floor;
     exact_linear::Points start;
     exact_linear::Rational start_squared;
     exact_linear::Rational minimum_squared;
@@ -1653,7 +1665,8 @@ struct PreparedExactContactStep::Impl {
     int moving_dof;
 
     Impl(const std::array<Vec3, 4>& positions, bool face, double floor, int dof)
-        : start(exact_linear::from_positions(positions)), vertex_face(face), moving_dof(dof) {
+        : positions(positions), floor(floor), start(exact_linear::from_positions(positions)),
+          vertex_face(face), moving_dof(dof) {
         start_squared = vertex_face
             ? exact_linear::point_triangle_distance_squared(start)
             : exact_linear::segment_segment_distance_squared(start);
@@ -1680,6 +1693,12 @@ ExactContactStepResult PreparedExactContactStep::test(const Vec3& endpoint) cons
     if (!impl_) throw std::logic_error("prepared exact contact query: moved-from context");
     if (!endpoint.allFinite())
         throw std::invalid_argument("exact contact query: positions must be finite");
+    auto represented_end=impl_->positions;
+    represented_end[impl_->moving_dof]=endpoint;
+    ExactContactStepResult integer_result;
+    if (try_exact_integer_contact_step(impl_->positions,represented_end,
+            impl_->vertex_face,impl_->floor,integer_result))
+        return integer_result;
     auto end = impl_->start;
     for (int axis = 0; axis < 3; ++axis)
         end[impl_->moving_dof][axis] = exact_linear::Rational(endpoint[axis]);

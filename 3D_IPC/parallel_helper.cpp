@@ -1002,6 +1002,28 @@ void greedy_color_conflict_graph(
 
 namespace solver_detail {
 void evaluate_contact_ranges(int count, const std::function<void(int, int)>& evaluate, int alignment, const std::function<void()>* leader_work, int cooperative_grain_limit) {
+#if defined(__APPLE__)
+    // The outer contact range already owns parallel work. Avoid creating a
+    // second runtime task tree from its callbacks on Mac libomp. This path
+    // keeps nested contributions ordered and requires no helper dispatch.
+    static thread_local unsigned contact_evaluation_depth = 0;
+    if (contact_evaluation_depth != 0) {
+        if (leader_work) (*leader_work)();
+        evaluate(0, count);
+        return;
+    }
+    const std::function<void(int, int)> guarded_evaluate = [&](int begin, int end) {
+        struct Depth {
+            unsigned& value;
+            explicit Depth(unsigned& v) : value(v) { ++value; }
+            ~Depth() { --value; }
+        } depth(contact_evaluation_depth);
+        evaluate(begin, end);
+    };
+    const auto& range_evaluate = guarded_evaluate;
+#else
+    const auto& range_evaluate = evaluate;
+#endif
     if (active_contact_task_group != nullptr) {
         ContactTaskGroup* group = active_contact_task_group;
         active_contact_task_group = nullptr;
@@ -1009,7 +1031,7 @@ void evaluate_contact_ranges(int count, const std::function<void(int, int)>& eva
             ContactTaskGroup* group;
             ~Restore() { active_contact_task_group = group; }
         } restore{group};
-        group->dispatch(count, evaluate, alignment, leader_work, cooperative_grain_limit);
+        group->dispatch(count, range_evaluate, alignment, leader_work, cooperative_grain_limit);
         return;
     }
     if (leader_work) (*leader_work)();
@@ -1021,7 +1043,7 @@ void evaluate_contact_ranges(int count, const std::function<void(int, int)>& eva
     {
         for (int begin = 0; begin < count; begin += grain) {
             const int end = std::min(begin + grain, count);
-#pragma omp task shared(evaluate, error, first_error) firstprivate(begin, end)
+#pragma omp task shared(range_evaluate, error, first_error) firstprivate(begin, end)
             {
                 try {
                     // A task may run on another leader. Its nested evaluation
@@ -1032,7 +1054,7 @@ void evaluate_contact_ranges(int count, const std::function<void(int, int)>& eva
                         ContactTaskGroup* previous;
                         ~RestoreTaskGroup() { active_contact_task_group = previous; }
                     } restore{previous};
-                    evaluate(begin, end);
+                    range_evaluate(begin, end);
                 } catch (...) {
 #pragma omp critical(ipc_contact_task_error)
                     {

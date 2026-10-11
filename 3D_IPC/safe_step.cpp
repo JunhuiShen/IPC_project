@@ -455,7 +455,8 @@ static bool vertex_contact_endpoint_is_safe(const std::array<Vec3, 4>& start,
 static bool vertex_contact_endpoints_are_safe(const BroadPhase::Cache& cache,
     const std::vector<Vec3>& x, int vertex, const Vec3& endpoint,
     std::vector<VertexContactEndpointCache>* scratch = nullptr,
-    const safe_step_detail::VertexAabbRejections* rejections = nullptr) {
+    const safe_step_detail::VertexAabbRejections* rejections = nullptr,
+    bool cooperative = false) {
     bool reuse_rejections = rejections && rejections->distance > 0.0
         && std::isnormal(rejections->distance * rejections->distance)
         && rejections->clear.size() == cache.vertex_nt[vertex].size() + cache.vertex_ss[vertex].size();
@@ -471,29 +472,34 @@ static bool vertex_contact_endpoints_are_safe(const BroadPhase::Cache& cache,
                 && bound < rejections->distance / 16.0;
         }
     }
-    std::size_t contact = 0;
-    for (const auto& entry : cache.vertex_nt[vertex]) {
-        const auto& p = cache.nt_pairs[entry.pair_index];
-        const std::array<Vec3, 4> start = {x[p.node], x[p.tri_v[0]],
-            x[p.tri_v[1]], x[p.tri_v[2]]};
-        auto end = start;
-        end[entry.dof] = endpoint;
-        if (!vertex_contact_endpoint_is_safe(start, end, true, vertex, entry.dof,
+    const auto& nt = cache.vertex_nt[vertex];
+    const auto& ss = cache.vertex_ss[vertex];
+    const std::size_t nt_count = nt.size();
+    // Each contact owns its backtracking cache. Positions and incidence stay
+    // immutable until this joined check returns, including on an exception.
+    return solver_detail::ordered_contact_predicate(
+        static_cast<int>(nt_count + ss.size()), cooperative, [&](int index) {
+        const std::size_t contact = static_cast<std::size_t>(index);
+        if (contact < nt_count) {
+            const auto& entry = nt[contact];
+            const auto& p = cache.nt_pairs[entry.pair_index];
+            const std::array<Vec3, 4> start = {x[p.node], x[p.tri_v[0]],
+                x[p.tri_v[1]], x[p.tri_v[2]]};
+            auto end = start;
+            end[entry.dof] = endpoint;
+            return vertex_contact_endpoint_is_safe(start, end, true, vertex, entry.dof,
                 scratch ? &(*scratch)[contact] : nullptr,
-                reuse_rejections && rejections->clear[contact] ? rejections->distance : 0.0)) return false;
-        ++contact;
-    }
-    for (const auto& entry : cache.vertex_ss[vertex]) {
+                reuse_rejections && rejections->clear[contact] ? rejections->distance : 0.0);
+        }
+        const auto& entry = ss[contact - nt_count];
         const auto& p = cache.ss_pairs[entry.pair_index];
         const std::array<Vec3, 4> start = {x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]]};
         auto end = start;
         end[entry.dof] = endpoint;
-        if (!vertex_contact_endpoint_is_safe(start, end, false, vertex, entry.dof,
+        return vertex_contact_endpoint_is_safe(start, end, false, vertex, entry.dof,
                 scratch ? &(*scratch)[contact] : nullptr,
-                reuse_rejections && rejections->clear[contact] ? rejections->distance : 0.0)) return false;
-        ++contact;
-    }
-    return true;
+                reuse_rejections && rejections->clear[contact] ? rejections->distance : 0.0);
+    });
 }
 
 double per_vertex_safe_step(
@@ -576,7 +582,7 @@ double per_vertex_safe_step(
     const Vec3 before = x[vi];
     Vec3 accepted = before + step * dx;
     if (clip_ccd && !use_ticcd && !use_ogc && !original
-        && !vertex_contact_endpoints_are_safe(bp_cache, x, vi, accepted, nullptr, rejections)) {
+        && !vertex_contact_endpoints_are_safe(bp_cache, x, vi, accepted, nullptr, rejections, cooperative)) {
         // Search only within the CCD-approved prefix. Keep a verified endpoint
         // (not just a floating alpha), validating all contacts for each new
         // candidate before accepting it.
@@ -596,7 +602,7 @@ double per_vertex_safe_step(
                 // position. Reuse its verdict without changing the search.
                 upper = middle;
             } else if ((trial.array() == best.array()).all()
-                || vertex_contact_endpoints_are_safe(bp_cache, x, vi, trial, &scratch, rejections)) {
+                || vertex_contact_endpoints_are_safe(bp_cache, x, vi, trial, &scratch, rejections, cooperative)) {
                 lower = middle;
                 best = trial;
             } else {
