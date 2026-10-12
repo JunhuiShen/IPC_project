@@ -252,7 +252,9 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
                 intended_displacement[vertex] = xhat[vertex] - state.deformed_positions[vertex];
             xnew = collision_colored_ccd_initial_guess(state.deformed_positions,
                 intended_displacement, ref_mesh, params, params.colored_ccd_guess_iters,
-                &broad_phase);
+                (params.fixed_iters && params.max_global_iters > 0
+                    && params.use_basic_experimental_v2 && !params.use_ogc
+                    && !params.use_ogc_solver && !params.use_cloth_grid) ? &predictor_broad_phase : &broad_phase);
         }
         else if (params.use_verlet_guess)
             xnew = verlet_initial_guess(state.deformed_positions, xhat, ref_mesh, params, &predictor_broad_phase);

@@ -898,6 +898,10 @@ struct ColoredContactSweep {
 #pragma omp parallel
         {
             const int worker = omp_get_thread_num();
+            // Only whole-vertex request size changes; assigned helper lanes,
+            // contact ordering and every sequential color join stay intact.
+            const int max_whole_batch = omp_get_num_threads() >= 32
+                && steps.size() <= 16384 ? 1 : 4;
 #pragma omp single
             { barrier.initialize(omp_get_num_threads()); }
             unsigned phase = 0;
@@ -914,7 +918,7 @@ struct ColoredContactSweep {
                         } else {
                             const int workers = omp_get_num_threads();
                             const int batch = std::clamp(
-                                (static_cast<int>(group.size()) + 4 * workers - 1) / (4 * workers), 1, 4);
+                                (static_cast<int>(group.size()) + 4 * workers - 1) / (4 * workers), 1, group.size() <= static_cast<std::size_t>(16 * workers) ? max_whole_batch : 4);
 #pragma omp for schedule(dynamic, 1) nowait
                             for (int i = 0; i < static_cast<int>(group.size()); i += batch)
                                 baseline_batch(group, i, std::min(i + batch, static_cast<int>(group.size())));
@@ -984,7 +988,7 @@ struct ColoredContactSweep {
                                 // vertex near the tail to limit end-of-color imbalance.
                                 const int batch = std::is_same_v<BaselineBatch, std::nullptr_t>
                                     ? (remaining > 2 * team ? 2 : 1)
-                                    : std::clamp((remaining + 4 * team - 1) / (4 * team), 1, 4);
+                                    : std::clamp((remaining + 4 * team - 1) / (4 * team), 1, size <= 16 * team ? max_whole_batch : 4);
                                 const int i = next_whole[c].fetch_add(batch, std::memory_order_relaxed);
                                 if constexpr (std::is_same_v<BaselineBatch, std::nullptr_t>) {
                                     for (int j = i; j < std::min(i + batch, size); ++j)
