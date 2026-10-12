@@ -1,0 +1,4 @@
+/build*/
+/deps/
+/validation_*/
+__pycache__/
