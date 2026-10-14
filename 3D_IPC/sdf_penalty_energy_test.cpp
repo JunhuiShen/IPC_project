@@ -1,9 +1,11 @@
 #include "sdf_penalty_energy.h"
 
+#include "friction_energy.h"
 #include "rigid_body_ipc.h"
 
 #include <gtest/gtest.h>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -91,6 +93,73 @@ bool check_convergence(const std::string& label, double analytic,
 }
 
 using SDFClosure = std::function<SDFEvaluation(const Vec3&)>;
+
+template <class Values>
+void expect_same_bits(const Values& expected, const Values& actual) {
+    ASSERT_EQ(expected.size(), actual.size());
+    EXPECT_EQ(std::memcmp(expected.data(), actual.data(),
+                         expected.size() * sizeof(double)), 0);
+}
+
+void expect_same_normal_fields(
+        const SDFEvaluation& expected, const SDFEvaluation& actual) {
+    EXPECT_EQ(std::memcmp(&expected.phi, &actual.phi, sizeof(double)), 0);
+    expect_same_bits(expected.grad_phi, actual.grad_phi);
+    expect_same_bits(expected.surface_point, actual.surface_point);
+    expect_same_bits(expected.material_motion.previous.rotation,
+                     actual.material_motion.previous.rotation);
+    expect_same_bits(expected.material_motion.previous.translation,
+                     actual.material_motion.previous.translation);
+    expect_same_bits(expected.material_motion.current.rotation,
+                     actual.material_motion.current.rotation);
+    expect_same_bits(expected.material_motion.current.translation,
+                     actual.material_motion.current.translation);
+}
+
+template <class Shape>
+void check_normal_only_consumer(const Shape& shape, const Vec3& x) {
+    const auto full = evaluate_sdf(shape, x);
+    const auto explicit_full = evaluate_sdf(shape, x, true);
+    const auto normal = evaluate_sdf(shape, x, false);
+    expect_same_normal_fields(full, explicit_full);
+    expect_same_bits(full.hess_phi, explicit_full.hess_phi);
+    expect_same_normal_fields(full, normal);
+    EXPECT_TRUE(normal.hess_phi.isZero(0.0));
+
+    constexpr double stiffness = 100.0, epsilon = 0.1;
+    const Vec3 full_gradient = sdf_penalty_gradient(full, stiffness, epsilon);
+    const Vec3 normal_gradient = sdf_penalty_gradient(normal, stiffness, epsilon);
+    expect_same_bits(full_gradient, normal_gradient);
+    const Mat33 full_block = sdf_penalty_hessian(full, stiffness, epsilon, false);
+    const Mat33 normal_block = sdf_penalty_hessian(normal, stiffness, epsilon, false);
+    expect_same_bits(full_block, normal_block);
+    EXPECT_DOUBLE_EQ(sdf_penalty_energy(full, stiffness, epsilon),
+                     sdf_penalty_energy(normal, stiffness, epsilon));
+
+    // Friction consumes the retained surface/material fields even though the
+    // normal solver never consumes the primitive curvature.
+    const Vec3 previous = x - Vec3(0.001, -0.002, 0.003);
+    const auto full_contact = make_sdf_frozen_friction_contact(
+        x, previous, full, stiffness, epsilon, 0.01, 0.001, 1e-12,
+        &full_gradient);
+    const auto normal_contact = make_sdf_frozen_friction_contact(
+        x, previous, normal, stiffness, epsilon, 0.01, 0.001, 1e-12,
+        &normal_gradient);
+    EXPECT_EQ(full_contact.active, normal_contact.active);
+    EXPECT_DOUBLE_EQ(full_contact.normal_force, normal_contact.normal_force);
+    EXPECT_DOUBLE_EQ(full_contact.eps_u, normal_contact.eps_u);
+    expect_same_bits(full_contact.weights, normal_contact.weights);
+    expect_same_bits(full_contact.normal, normal_contact.normal);
+    expect_same_bits(full_contact.projector, normal_contact.projector);
+    expect_same_bits(full_contact.tangential_displacement,
+                     normal_contact.tangential_displacement);
+    const auto full_friction = frozen_friction_role_gradient_and_hessian(
+        full_contact, 0, 0.3, 0.0001);
+    const auto normal_friction = frozen_friction_role_gradient_and_hessian(
+        normal_contact, 0, 0.3, 0.0001);
+    expect_same_bits(full_friction.first, normal_friction.first);
+    expect_same_bits(full_friction.second, normal_friction.second);
+}
 
 //  Gradient convergence test: dE/dx_k  vs  central-difference of E.
 bool run_sdf_gradient_convergence(const std::string& name, const Vec3& x,
@@ -429,6 +498,21 @@ TEST(CylinderSDF, Evaluate){
     EXPECT_TRUE(r.hess_phi.isApprox(Mat33::Zero()));
 }
 
+TEST(CylinderSDF, NormalOnlyRetainsPenaltyAndMovingFrictionInputs) {
+    CylinderSDF cylinder{Vec3(0.1, -0.2, 0.3), Vec3::UnitZ(), 0.6};
+    cylinder.material_motion.previous.translation = Vec3(-0.02, 0.01, 0.03);
+    cylinder.material_motion.current.translation = Vec3(0.01, -0.03, 0.02);
+    cylinder.material_motion.current.rotation =
+        Eigen::AngleAxisd(0.2, Vec3::UnitZ()).toRotationMatrix();
+    for (const Vec3& offset : {Vec3(0.23, -0.31, 0.17),
+                              Vec3(0.8, 0.2, -0.4), Vec3(0.0, 0.0, 0.5)}) {
+        SCOPED_TRACE(offset.transpose());
+        check_normal_only_consumer(cylinder, cylinder.point + offset);
+    }
+    EXPECT_FALSE(evaluate_sdf(cylinder, cylinder.point + Vec3(0.3, 0.2, 0.1))
+                     .hess_phi.isZero(0.0));
+}
+
 TEST(CylinderSDF, GradientConvergence){
     //  phi = -0.08: inside by 0.08, safe for h up to 1e-2.
     CylinderSDF c{Vec3(0.1, -0.2, 0.05),
@@ -489,6 +573,21 @@ TEST(SphereSDF, Evaluate){
     EXPECT_NEAR(r.phi, -0.4, kTol);
     EXPECT_TRUE(r.grad_phi.isApprox(Vec3::Zero()));
     EXPECT_TRUE(r.hess_phi.isApprox(Mat33::Zero()));
+}
+
+TEST(SphereSDF, NormalOnlyRetainsPenaltyAndMovingFrictionInputs) {
+    SphereSDF sphere{Vec3(-0.1, 0.2, -0.3), 0.6};
+    sphere.material_motion.previous.translation = Vec3(0.02, -0.01, 0.03);
+    sphere.material_motion.current.translation = Vec3(-0.01, 0.03, 0.02);
+    sphere.material_motion.current.rotation =
+        Eigen::AngleAxisd(-0.3, Vec3::UnitY()).toRotationMatrix();
+    for (const Vec3& offset : {Vec3(0.23, -0.31, 0.17),
+                              Vec3(0.8, 0.2, -0.4), Vec3(0.0, 0.0, 0.0)}) {
+        SCOPED_TRACE(offset.transpose());
+        check_normal_only_consumer(sphere, sphere.center + offset);
+    }
+    EXPECT_FALSE(evaluate_sdf(sphere, sphere.center + Vec3(0.3, 0.2, 0.1))
+                     .hess_phi.isZero(0.0));
 }
 
 TEST(SphereSDF, GradientConvergence){

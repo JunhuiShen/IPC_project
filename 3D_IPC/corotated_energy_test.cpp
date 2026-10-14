@@ -1,5 +1,6 @@
 #include "IPC_math.h"
 #include "corotated_energy.h"
+#include "SIMD.h"
 
 #include <gtest/gtest.h>
 
@@ -9,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -495,4 +497,147 @@ TEST(CorotatedEnergy, LargeCoordinates){
     const auto def_origin = MakeDeformedTriangle();
     double E_origin = corotated_energy(tri.ref_area, tri.Dm_inv, def_origin, kMu, kLambda);
     EXPECT_NEAR(E2, E_origin, 1e-4) << "energy should match regardless of coordinate magnitude";
+}
+
+namespace {
+
+// A second-order scalar jet differentiates the smooth invariant energy, without
+// using the polar cache, material tensor, or compact contraction being checked.
+struct SmoothEnergyJet {
+    long double value = 0;
+    std::array<long double,3> gradient{};
+    std::array<long double,9> hessian{};
+    SmoothEnergyJet(long double v = 0) : value(v) {}
+    friend SmoothEnergyJet operator+(const SmoothEnergyJet& a, const SmoothEnergyJet& b) {
+        SmoothEnergyJet c(a.value+b.value);
+        for (int i=0;i<3;++i) c.gradient[i]=a.gradient[i]+b.gradient[i];
+        for (int i=0;i<9;++i) c.hessian[i]=a.hessian[i]+b.hessian[i];
+        return c;
+    }
+    friend SmoothEnergyJet operator-(const SmoothEnergyJet& a, const SmoothEnergyJet& b) {
+        SmoothEnergyJet c(a.value-b.value);
+        for (int i=0;i<3;++i) c.gradient[i]=a.gradient[i]-b.gradient[i];
+        for (int i=0;i<9;++i) c.hessian[i]=a.hessian[i]-b.hessian[i];
+        return c;
+    }
+    friend SmoothEnergyJet operator*(const SmoothEnergyJet& a, const SmoothEnergyJet& b) {
+        SmoothEnergyJet c(a.value*b.value);
+        for (int i=0;i<3;++i) c.gradient[i]=a.gradient[i]*b.value+a.value*b.gradient[i];
+        for (int i=0;i<3;++i) for (int j=0;j<3;++j)
+            c.hessian[3*i+j]=a.hessian[3*i+j]*b.value+a.value*b.hessian[3*i+j]
+                +a.gradient[i]*b.gradient[j]+b.gradient[i]*a.gradient[j];
+        return c;
+    }
+    friend SmoothEnergyJet sqrt(const SmoothEnergyJet& a) {
+        SmoothEnergyJet c(std::sqrt(a.value));
+        const long double first=.5L/c.value, second=-.25L/(a.value*c.value);
+        for (int i=0;i<3;++i) c.gradient[i]=first*a.gradient[i];
+        for (int i=0;i<3;++i) for (int j=0;j<3;++j)
+            c.hessian[3*i+j]=first*a.hessian[3*i+j]+second*a.gradient[i]*a.gradient[j];
+        return c;
+    }
+};
+
+SmoothEnergyJet independently_differentiated_membrane(const Mat32& F, const Vec2& shape,
+    double area, double mu, double lambda) {
+    SmoothEnergyJet c00, c01, c11;
+    for (int axis=0;axis<3;++axis) {
+        SmoothEnergyJet a(F(axis,0)), b(F(axis,1));
+        a.gradient[axis]=shape[0]; b.gradient[axis]=shape[1];
+        c00=c00+a*a; c01=c01+a*b; c11=c11+b*b;
+    }
+    const auto J=sqrt(c00*c11-c01*c01);
+    const auto trace_s=sqrt(c00+c11+SmoothEnergyJet(2)*J);
+    return SmoothEnergyJet(area)*(SmoothEnergyJet(mu)*(c00+c11-SmoothEnergyJet(2)*trace_s+SmoothEnergyJet(2))
+        +SmoothEnergyJet(.5L*lambda)*(J-SmoothEnergyJet(1))*(J-SmoothEnergyJet(1)));
+}
+
+// Preserve the old basic SIMD operation graph as a fallback regression oracle.
+// The independent energy jet above, rather than this graph, validates the math.
+double old_basic_fma(double a,double b,double c) {
+#if defined(__AVX512F__) || (defined(__AVX2__) && defined(__FMA__)) || defined(__aarch64__) || defined(_M_ARM64)
+    return std::fma(a,b,c);
+#else
+    volatile double product=a*b;
+    return product+c;
+#endif
+}
+
+Mat33 old_basic_membrane_block(const Mat32& F, const Vec2& shape, double area, double mu, double lambda) {
+    const auto cache=buildCorotatedCache(F);
+    const double volumetric=lambda*(cache.J-1)*cache.J;
+    const double positive=(.5*lambda)*(2*cache.J-1)*cache.J;
+    Mat33 H;
+    for (int i=0;i<3;++i) for (int j=0;j<3;++j) {
+        const double rrt=old_basic_fma(cache.R(i,1),cache.R(j,1),cache.R(i,0)*cache.R(j,0));
+        const double Q=old_basic_fma(cache.FFTFInv(i,1),F(j,1),cache.FFTFInv(i,0)*F(j,0));
+        double sum=0;
+        for (int beta=0;beta<2;++beta) for (int eta=0;eta<2;++eta) {
+            const double si=cache.SInv(eta,beta),ci=cache.FTFinv(eta,beta);
+            const double dcd=(eta==0?0.0-cache.R(j,1):cache.R(j,0))/cache.traceS;
+            const double re=beta==0?cache.R(i,1):0.0-cache.R(i,0);
+            double dr=i==j?si:0;
+            dr=old_basic_fma(-1.0*rrt,si,dr);
+            dr=old_basic_fma(-1.0*dcd,re,dr);
+            double dp=i==j?volumetric*ci:0;
+            dp=old_basic_fma(-1.0*volumetric,old_basic_fma(cache.FFTFInv(i,eta),cache.FFTFInv(j,beta),Q*ci),dp);
+            const double product=cache.FFTFInv(j,eta)*cache.FFTFInv(i,beta);
+            dp=old_basic_fma(positive,product+product,dp);
+            dp=old_basic_fma(2*mu,(i==j && beta==eta?1.0:0.0)-dr,dp);
+            sum=old_basic_fma(dp*shape[beta],shape[eta],sum);
+        }
+        H(i,j)=area*sum;
+    }
+    return H;
+}
+
+} // namespace
+
+TEST(CorotatedEnergy, BasicSIMDCompactBlockMatchesIndependentSmoothEnergy) {
+    const auto tri=MakeTestTriangle();
+    const auto shapes=shape_function_gradients(tri.Dm_inv);
+    for (int sample=0;sample<18;++sample) for (int role=0;role<3;++role) {
+        const Mat33 rotation=Eigen::AngleAxisd(.13*sample,Vec3(1,-2,3).normalized()).toRotationMatrix();
+        Mat32 F=rotation.leftCols<2>();
+        F.col(0)*=.5+.07*sample;
+        F.col(1)=1.1*F.col(1)+.12*F.col(0);
+        std::array<Vec3,3> x{Vec3(.1,-.2,.3),Vec3::Zero(),Vec3::Zero()};
+        const Mat22 dm=tri.Dm_inv.inverse();
+        x[1]=x[0]+F*dm.col(0);x[2]=x[0]+F*dm.col(1);
+        Mat32 ds;ds.col(0)=x[1]-x[0];ds.col(1)=x[2]-x[0];F=ds*tri.Dm_inv;
+        const auto reference=independently_differentiated_membrane(F,shapes[role],tri.ref_area,kMu,kLambda);
+        Vec3 g;Mat33 H;
+        ipc_simd::corotated_derivatives_tile(x.data(),&tri.Dm_inv,&tri.ref_area,&shapes[role],1,kMu,kLambda,&g,&H);
+        Vec3 expected_g;Mat33 expected_H;
+        for (int i=0;i<3;++i) {
+            expected_g[i]=static_cast<double>(reference.gradient[i]);
+            for (int j=0;j<3;++j) expected_H(i,j)=static_cast<double>(reference.hessian[3*i+j]);
+        }
+        EXPECT_LE((g-expected_g).norm(),2e-12*(1+expected_g.norm()));
+        EXPECT_LE((H-expected_H).norm(),2e-12*(1+expected_H.norm()));
+    }
+}
+
+TEST(CorotatedEnergy, BasicSIMDFallbackRetainsClampedAndExtremeOperationGraph) {
+    const Mat22 identity=Mat22::Identity();
+    const Vec2 shape(-.75,.625);const double area=.5;
+    for (double second_scale : {0x1p-150,0x1p-22,0x1p-20,0.01,0x1p40}) {
+        Mat32 F=Mat32::Zero();F(0,0)=second_scale>1?second_scale:1;F(1,1)=second_scale;
+        const std::array<Vec3,3> x{Vec3::Zero(),F.col(0),F.col(1)};
+        Vec3 g;Mat33 H;
+        ipc_simd::corotated_derivatives_tile(x.data(),&identity,&area,&shape,1,kMu,kLambda,&g,&H);
+        const Mat33 old=old_basic_membrane_block(F,shape,area,kMu,kLambda);
+        EXPECT_EQ(std::memcmp(H.data(),old.data(),9*sizeof(double)),0)
+            << "fallback changed at scale=" << second_scale;
+    }
+    for (const auto& values : std::array<std::array<double,3>,3>{{
+            {{.125,.125,kLambda}}, {{3.0,3.0,kLambda}}, {{1.0,1.0,64.0}}}}) {
+        Mat32 F=Mat32::Zero();F(0,0)=values[0];F(1,1)=values[1];
+        const std::array<Vec3,3> x{Vec3::Zero(),F.col(0),F.col(1)};
+        Vec3 g;Mat33 H;
+        ipc_simd::corotated_derivatives_tile(x.data(),&identity,&area,&shape,1,kMu,values[2],&g,&H);
+        const Mat33 old=old_basic_membrane_block(F,shape,area,kMu,values[2]);
+        EXPECT_EQ(std::memcmp(H.data(),old.data(),9*sizeof(double)),0)
+            << "fallback changed for compressed/stretched or high-bulk material";
+    }
 }

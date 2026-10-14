@@ -9,6 +9,7 @@ racket_output/
 polygon_collision_output/
 twenty_rigid_deformable_polygons_on_pinned_cloth_output/
 vis_debug/
+tmp/
 tmp_full/
 
 # Generated Python bytecode

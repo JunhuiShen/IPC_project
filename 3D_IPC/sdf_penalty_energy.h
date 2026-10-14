@@ -71,6 +71,11 @@ struct CylinderSDF {
 
 SDFEvaluation evaluate_sdf(const CylinderSDF& s, const Vec3& x);
 
+// Normal-only consumers may omit primitive curvature. With false, hess_phi
+// remains zero; distance, normal, surface point and material motion are retained.
+SDFEvaluation evaluate_sdf(
+    const CylinderSDF& s, const Vec3& x, bool include_curvature);
+
 //  Solid sphere
 struct SphereSDF {
     Vec3   center;
@@ -79,6 +84,9 @@ struct SphereSDF {
 };
 
 SDFEvaluation evaluate_sdf(const SphereSDF& s, const Vec3& x);
+
+SDFEvaluation evaluate_sdf(
+    const SphereSDF& s, const Vec3& x, bool include_curvature);
 
 double sdf_penalty_energy(const SDFEvaluation& sdf, double k, double eps);
 

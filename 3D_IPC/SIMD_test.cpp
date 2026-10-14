@@ -2257,3 +2257,111 @@ TEST(SIMDContact, QueryEdgePacketsPreserveNodeTriangleAndSegmentSegmentReference
         }
     }
 }
+
+TEST(SIMDContact, CompactEdgeBlocksCoverRotationsScalesFeatureMappingsAndRoles) {
+    constexpr std::size_t width = ipc_simd::contact_tile_width;
+    std::array<ipc_simd::MeshContactInput, width> inputs;
+    std::array<ipc_simd::MeshContactOutput, width> outputs;
+    const Vec3 query(0.4, -0.2, 0.15), away(0.0, -1.0, 0.0);
+    const std::array<Vec3,3> triangle{Vec3::Zero(), Vec3::UnitX(), Vec3::UnitY()};
+    const std::array<NodeTriangleRegion,3> nt_regions{
+        NodeTriangleRegion::Edge12, NodeTriangleRegion::Edge31, NodeTriangleRegion::Edge23};
+    const std::array<SegmentSegmentRegion,4> ss_regions{
+        SegmentSegmentRegion::Edge_s0, SegmentSegmentRegion::Edge_s1,
+        SegmentSegmentRegion::Edge_t0, SegmentSegmentRegion::Edge_t1};
+    for (int feature = 0; feature < 7; ++feature) {
+        std::array<Vec3,4> base;
+        if (feature < 3) {
+            base[0] = query;
+            for (int corner = 0; corner < 3; ++corner)
+                base[corner+1] = triangle[(corner+feature)%3];
+        } else {
+            base = {query, query+away, Vec3::Zero(), Vec3::UnitX()};
+            if (feature == 4) std::swap(base[0], base[1]);
+            if (feature >= 5) base = {base[2], base[3], base[0], base[1]};
+            if (feature == 6) std::swap(base[2], base[3]);
+        }
+        for (double scale : {0.01, 1.0, 100.0}) {
+            const double d_hat = scale;
+            for (std::size_t e = 0; e < width; ++e) {
+                const Mat33 R = rotation(0.23 + 0.13*e);
+                auto& input = inputs[e];
+                for (int corner = 0; corner < 4; ++corner)
+                    input.positions[corner] = scale*(R*base[corner] + Vec3(0.13,-0.27,0.39));
+                input.previous_positions = input.positions;
+                input.role = e%4;
+                input.segment_segment = feature >= 3;
+                const auto& x = input.positions;
+                if (input.segment_segment)
+                    ASSERT_EQ(segment_segment_distance(x[0],x[1],x[2],x[3]).region,
+                              ss_regions[feature-3]);
+                else ASSERT_EQ(node_triangle_distance(x[0],x[1],x[2],x[3]).region,
+                               nt_regions[feature]);
+            }
+            for (std::size_t count : {std::size_t(1),std::size_t(3),std::size_t(4),
+                    std::size_t(5),std::size_t(7),std::size_t(9),width-1,width}) {
+                ipc_simd::mesh_contact_derivatives_tile(inputs.data(), count, d_hat, 1.0,
+                    0.0, 0.02, 0.01, outputs.data());
+                for (std::size_t e = 0; e < count; ++e) {
+                    SCOPED_TRACE(::testing::Message() << "feature=" << feature << " scale="
+                        << scale << " count=" << count << " role=" << inputs[e].role);
+                    const auto& input = inputs[e];
+                    const auto& x = input.positions;
+                    const auto expected = input.segment_segment
+                        ? segment_segment_barrier_self_gradient_and_hessian(
+                            x[0],x[1],x[2],x[3],d_hat,input.role)
+                        : node_triangle_barrier_self_gradient_and_hessian(
+                            x[0],x[1],x[2],x[3],d_hat,input.role);
+                    simd_energy_test::compare(outputs[e].gradient, expected.first, 2e-11);
+                    simd_energy_test::compare(outputs[e].hessian, expected.second, 2e-11);
+                    if (count != 4) continue;
+                    // These fixtures are strictly inside their smooth selected
+                    // features. Differentiate the scalar gradient independently
+                    // of both the original and compact Hessian expressions.
+                    Mat33 finite;
+                    const double h = 1e-5*scale;
+                    const auto gradient = [&](const std::array<Vec3,4>& p) {
+                        return input.segment_segment
+                            ? segment_segment_barrier_gradient(p[0],p[1],p[2],p[3],d_hat,input.role)
+                            : node_triangle_barrier_gradient(p[0],p[1],p[2],p[3],d_hat,input.role);
+                    };
+                    for (int axis = 0; axis < 3; ++axis) {
+                        auto plus=x, minus=x;
+                        plus[input.role][axis]+=h;minus[input.role][axis]-=h;
+                        finite.col(axis)=(gradient(plus)-gradient(minus))/(2*h);
+                    }
+                    EXPECT_LE((outputs[e].hessian-finite).norm(),2e-7*(1.0+finite.norm()));
+                }
+            }
+        }
+    }
+}
+
+TEST(SIMDContact, ClampedEdgeFallbackRetainsLegacyZeroWeightEndpointHessianBits) {
+    constexpr std::size_t width = ipc_simd::contact_tile_width;
+    const std::array<Vec3,4> x{Vec3(-0.25,0.125,0.125), Vec3::Zero(),
+                              Vec3::UnitX(), Vec3(1.0,1.0,0.0)};
+    ASSERT_EQ(node_triangle_distance(x[0],x[1],x[2],x[3]).region,
+              NodeTriangleRegion::Edge31);
+    std::array<ipc_simd::MeshContactInput,width> inputs;
+    std::array<ipc_simd::MeshContactOutput,width> outputs;
+    for (std::size_t e=0;e<width;++e) {
+        inputs[e].positions=x;inputs[e].previous_positions=x;inputs[e].role=e%4;
+    }
+    for (std::size_t count : {std::size_t(1),std::size_t(3),std::size_t(5),width}) {
+        ipc_simd::mesh_contact_derivatives_tile(inputs.data(),count,1.0,1.0,0.0,
+                                               0.02,0.01,outputs.data());
+        for (std::size_t e=0;e<count;++e) {
+            const auto expected=node_triangle_barrier_self_gradient_and_hessian(
+                x[0],x[1],x[2],x[3],1.0,inputs[e].role);
+            EXPECT_EQ(std::memcmp(outputs[e].hessian.data(),expected.second.data(),
+                                  9*sizeof(double)),0) << "role=" << inputs[e].role;
+            // Preserve the known clamped-feature inconsistency: endpoint 3
+            // has zero gradient weight but the old supporting-line H is nonzero.
+            if (inputs[e].role==3) {
+                EXPECT_EQ(expected.first.squaredNorm(),0.0);
+                EXPECT_GT(expected.second.norm(),0.0);
+            }
+        }
+    }
+}

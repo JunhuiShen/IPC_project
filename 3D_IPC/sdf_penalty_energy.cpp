@@ -113,6 +113,11 @@ SDFEvaluation evaluate_sdf(const PlaneSDF& s, const Vec3& x){
 
 //  Infinite cylinder SDF
 SDFEvaluation evaluate_sdf(const CylinderSDF& s, const Vec3& x){
+    return evaluate_sdf(s, x, true);
+}
+
+SDFEvaluation evaluate_sdf(
+        const CylinderSDF& s, const Vec3& x, bool include_curvature){
     SDFEvaluation r;
     const Vec3 v = x - s.point;
     const Vec3 w = v - s.axis * (s.axis.dot(v));
@@ -120,9 +125,11 @@ SDFEvaluation evaluate_sdf(const CylinderSDF& s, const Vec3& x){
     r.phi = r_perp - s.radius;
     if (r_perp > 0.0) {
         r.grad_phi = w / r_perp;
-        r.hess_phi = (Mat33::Identity()
-                      - s.axis * s.axis.transpose()
-                      - r.grad_phi * r.grad_phi.transpose()) / r_perp;
+        if (include_curvature) {
+            r.hess_phi = (Mat33::Identity()
+                          - s.axis * s.axis.transpose()
+                          - r.grad_phi * r.grad_phi.transpose()) / r_perp;
+        }
     } else {
         r.grad_phi = Vec3::Zero();
         r.hess_phi = Mat33::Zero();
@@ -133,13 +140,20 @@ SDFEvaluation evaluate_sdf(const CylinderSDF& s, const Vec3& x){
 
 //  Sphere SDF
 SDFEvaluation evaluate_sdf(const SphereSDF& s, const Vec3& x){
+    return evaluate_sdf(s, x, true);
+}
+
+SDFEvaluation evaluate_sdf(
+        const SphereSDF& s, const Vec3& x, bool include_curvature){
     SDFEvaluation r;
     const Vec3   d      = x - s.center;
     const double r_dist = d.norm();
     r.phi = r_dist - s.radius;
     if (r_dist > 0.0) {
         r.grad_phi = d / r_dist;
-        r.hess_phi = (Mat33::Identity() - r.grad_phi * r.grad_phi.transpose()) / r_dist;
+        if (include_curvature) {
+            r.hess_phi = (Mat33::Identity() - r.grad_phi * r.grad_phi.transpose()) / r_dist;
+        }
     } else {
         r.grad_phi = Vec3::Zero();
         r.hess_phi = Mat33::Zero();

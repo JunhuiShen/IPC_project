@@ -14,7 +14,8 @@ bool physics_detail::energy_simd_enabled(const SimParams& params) {
         && !params.use_cloth_grid && !params.use_ogc_solver;
 }
 
-// Union of all obstacles
+// These consumers use energy/gradient or a normal-only Hessian. Retain surface
+// and material-motion fields for friction without constructing unused curvature.
 static inline bool sdf_min_evaluation(const SimParams& params, const Vec3& xi, SDFEvaluation& out) {
     bool any = false;
     out.phi = std::numeric_limits<double>::infinity();
@@ -23,11 +24,11 @@ static inline bool sdf_min_evaluation(const SimParams& params, const Vec3& xi, S
         if (!any || s.phi < out.phi) { out = s; any = true; }
     }
     for (const CylinderSDF& c : params.sdf_cylinders) {
-        const SDFEvaluation s = evaluate_sdf(c, xi);
+        const SDFEvaluation s = evaluate_sdf(c, xi, false);
         if (!any || s.phi < out.phi) { out = s; any = true; }
     }
     for (const SphereSDF& sp : params.sdf_spheres) {
-        const SDFEvaluation s = evaluate_sdf(sp, xi);
+        const SDFEvaluation s = evaluate_sdf(sp, xi, false);
         if (!any || s.phi < out.phi) { out = s; any = true; }
     }
     return any;
