@@ -1,3 +1,4 @@
+#define IPC_GPU_TU_FINITE_CCD 1
 #include "resident_linear_pipeline.h"
 #include "resident_profile.h"
 #include "resident_ccd.cuh"

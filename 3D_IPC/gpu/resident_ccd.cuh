@@ -38,7 +38,18 @@ struct ClipResult {
 
 namespace detail {
 
+#if defined(IPC_GPU_TU_FINITE_CCD)
+IPC_RESIDENT_CCD_HD inline bool finite(double x) {
+#if defined(__CUDA_ARCH__)
+    const unsigned long long bits = static_cast<unsigned long long>(__double_as_longlong(x));
+    return (bits & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL;
+#else
+    return x - x == 0.0;
+#endif
+}
+#else
 IPC_RESIDENT_CCD_HD inline bool finite(double x) { return x - x == 0.0; }
+#endif
 IPC_RESIDENT_CCD_HD inline double minimum(double a, double b) { return a < b ? a : b; }
 IPC_RESIDENT_CCD_HD inline double maximum(double a, double b) { return a > b ? a : b; }
 IPC_RESIDENT_CCD_HD inline double clamp01(double x) { return maximum(0.0, minimum(1.0, x)); }

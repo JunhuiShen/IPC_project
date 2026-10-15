@@ -222,7 +222,7 @@ struct ResidentSolver::Impl {
             active_color_stages.size()*sizeof(unsigned int),cudaMemcpyDeviceToHost));
     }
     void deformable_step(int color,bool use_ccd) {
-        const auto incidence=contacts.incidence();
+        const auto incidence=contacts.incidence(color);
         {
         ResidentProfileScope ccd_profile("ccd");
         clipper.clip_deformable_color(scene,state,elastic,broad,incidence.block_offsets,incidence.pair_indices,

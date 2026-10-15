@@ -2,6 +2,11 @@
 #include "resident_profile.h"
 
 #include <cuda_runtime.h>
+#include <cusparse.h>
+#include <cstdlib>
+#include <climits>
+#include <fstream>
+#include <thrust/fill.h>
 #include <math_constants.h>
 #include <thrust/device_ptr.h>
 #include <thrust/execution_policy.h>
@@ -18,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace ipc_gpu {
 namespace resident {
@@ -374,6 +380,9 @@ __global__ void csr_rows(const std::uint64_t* keys, std::size_t count,
         columns[i] = static_cast<int>(static_cast<unsigned>(keys[i]));
     }
 }
+#include "pbgs_coloring.cuh"
+#include "pbgs_label_compaction.cuh"
+
 __global__ void greedy_color(const std::size_t* offsets, const int* adjacency,
                              int count, int* colors, int* forbidden,
                              int* color_count) {
@@ -434,6 +443,7 @@ struct ResidentBroadPhase::Impl {
     Buffer<BpContact> contacts;
     Buffer<std::uint64_t> graph_keys;
     Buffer<int> adjacency, colors, forbidden, color_count, color_blocks, sorted_colors, color_offsets;
+    PbgsColoringStorage coloring;
     BroadPhaseView result;
 };
 
@@ -568,14 +578,55 @@ BroadPhaseView ResidentBroadPhase::rebuild(const BroadPhaseTopology& t,
     }
 
     int colors = 0;
+    int vendor_palette_extent = -1; // Diagnostic only; never an allocation/index bound.
+    const int color_mode=pbgs_coloring_mode();
     {
     ResidentProfileScope coloring_profile("coloring");
     p.colors.reserve(t.block_count); p.forbidden.reserve(t.block_count); p.color_count.reserve(1);
     if (t.block_count) check(cudaMemset(p.forbidden.data, 0xff, t.block_count * sizeof(int)), "clear GPU greedy color marks");
-    greedy_color<<<1, 1>>>(p.adjacency_offsets.data, p.adjacency.data, t.block_count,
-        p.colors.data, p.forbidden.data, p.color_count.data);
+    if(color_mode==1&&t.block_count&&graph_edges) {
+        if(graph_edges>INT_MAX)throw std::overflow_error("cuSPARSE coloring requires 32-bit edge indices");
+        p.coloring.vendor_init();p.coloring.offsets.reserve(t.block_count+1);p.coloring.values.reserve(graph_edges);
+        pbgs_convert_offsets<<<blocks(t.block_count+1),threads>>>(p.adjacency_offsets.data,p.coloring.offsets.data,t.block_count);
+        thrust::fill(thrust::device,thrust::device_pointer_cast(p.coloring.values.data),thrust::device_pointer_cast(p.coloring.values.data+graph_edges),1.f);
+        check(cudaMemset(p.colors.data,0xff,std::size_t(t.block_count)*sizeof(int)),"initialize vendor output labels");
+        const float fraction=1.f;
+        sparse_check(cusparseScsrcolor(p.coloring.handle,t.block_count,int(graph_edges),p.coloring.descriptor,
+            p.coloring.values.data,p.coloring.offsets.data,p.adjacency.data,&fraction,&vendor_palette_extent,p.colors.data,nullptr,p.coloring.info));
+        // Vendor labels can have holes. Preserve each occupied independent set
+        // and its ascending execution order while deriving a dense GPU palette.
+        colors=pbgs_compact_occupied_labels(p.coloring.occupied,p.colors.data,t.block_count,p.error.data);
+        require_status(p.error,"cuSPARSE nonnegative output label validation");
+    } else if(color_mode>=2&&t.block_count) {
+        p.coloring.order.reserve(t.block_count);p.coloring.keys.reserve(t.block_count);
+        double dx=.05;
+        if(color_mode==3) {
+        p.coloring.anchors.reserve(t.block_count);
+        // Use INT_MAX exactly, including blocks with no owned vertex.
+        thrust::fill(thrust::device,thrust::device_pointer_cast(p.coloring.anchors.data),thrust::device_pointer_cast(p.coloring.anchors.data+t.block_count),INT_MAX);
+        if(t.vertex_count)pbgs_anchors<<<blocks(t.vertex_count),threads>>>(t.vertex_block,t.vertex_count,p.coloring.anchors.data);
+        if(const char* value=std::getenv("IPC_GPU_SPATIAL_COLOR_DX")){char* end=nullptr;dx=std::strtod(value,&end);if(!end||*end)throw std::invalid_argument("invalid spatial ordering dx");}
+        if(!std::isfinite(dx)||dx<=0)throw std::invalid_argument("spatial ordering dx must be finite and positive");
+        }
+        // dx only orders vertices. Safety never relies on a spatial radius:
+        // every original dependency remains in CSR and is checked below.
+        pbgs_priority<<<blocks(t.block_count),threads>>>(p.adjacency_offsets.data,t.block_count,p.coloring.keys.data,
+            p.coloring.anchors.data,blue_boxes,color_mode,dx,p.error.data);
+        require_status(p.error,"spatial ordering coordinates");
+        thrust::sequence(thrust::device,thrust::device_pointer_cast(p.coloring.order.data),thrust::device_pointer_cast(p.coloring.order.data+t.block_count));
+        thrust::stable_sort_by_key(thrust::device,thrust::device_pointer_cast(p.coloring.keys.data),thrust::device_pointer_cast(p.coloring.keys.data+t.block_count),thrust::device_pointer_cast(p.coloring.order.data));
+        check(cudaMemset(p.colors.data,0xff,t.block_count*sizeof(int)),"initialize ordered colors");
+        pbgs_ordered_greedy<<<1,1>>>(p.adjacency_offsets.data,p.adjacency.data,t.block_count,p.coloring.order.data,p.colors.data,p.forbidden.data,p.color_count.data);
+        check(cudaMemcpy(&colors,p.color_count.data,sizeof(int),cudaMemcpyDeviceToHost),"ordered color count");
+    } else {
+        greedy_color<<<1, 1>>>(p.adjacency_offsets.data, p.adjacency.data, t.block_count,
+            p.colors.data, p.forbidden.data, p.color_count.data);
+        check(cudaMemcpy(&colors, p.color_count.data, sizeof(int), cudaMemcpyDeviceToHost), "GPU color count readback");
+    }
     launched("GPU graph coloring");
-    check(cudaMemcpy(&colors, p.color_count.data, sizeof(int), cudaMemcpyDeviceToHost), "GPU color count readback");
+    if(colors<0||colors>t.block_count||(t.block_count&&colors==0))throw std::runtime_error("invalid PBGS color count");
+    if(t.block_count)pbgs_validate<<<blocks(t.block_count),threads>>>(p.adjacency_offsets.data,p.adjacency.data,t.block_count,p.colors.data,colors,p.error.data);
+    require_status(p.error,"PBGS full dependency conflict validation");
     p.color_blocks.reserve(t.block_count); p.sorted_colors.reserve(t.block_count); p.color_offsets.reserve(colors + 1);
     check(cudaMemset(p.color_offsets.data, 0, (colors + 1) * sizeof(int)), "clear GPU color counts");
     if (t.block_count) {
@@ -590,6 +641,15 @@ BroadPhaseView ResidentBroadPhase::rebuild(const BroadPhaseTopology& t,
     auto color_offsets = thrust::device_pointer_cast(p.color_offsets.data);
     thrust::exclusive_scan(thrust::device, color_offsets, color_offsets + colors + 1, color_offsets);
     check(cudaDeviceSynchronize(), "resident broadphase completion");
+    }
+    if(const char* path=std::getenv("IPC_GPU_COLORING_CSV")) {
+        if(!p.coloring.diagnostics.is_open())p.coloring.diagnostics.open(path,std::ios::app);
+        if(!p.coloring.diagnostics)throw std::runtime_error("cannot open coloring diagnostics");
+        std::vector<int> offsets(colors+1);check(cudaMemcpy(offsets.data(),p.color_offsets.data,offsets.size()*sizeof(int),cudaMemcpyDeviceToHost),"color distribution diagnostic");
+        p.coloring.diagnostics<<(t.include_triangle_dependencies?"solver":"guess")<<','<<color_mode<<','<<t.block_count<<','<<graph_edges<<','<<colors<<',';
+        for(int c=0;c<colors;++c){if(c)p.coloring.diagnostics<<';';p.coloring.diagnostics<<offsets[c+1]-offsets[c];}
+        p.coloring.diagnostics<<','<<vendor_palette_extent<<'\n';p.coloring.diagnostics.flush();
+        if(!p.coloring.diagnostics)throw std::runtime_error("cannot write coloring diagnostics");
     }
     p.result = {p.contacts.data, contacts, p.adjacency_offsets.data, p.adjacency.data, graph_edges,
                 p.colors.data, p.color_blocks.data, p.color_offsets.data, colors};

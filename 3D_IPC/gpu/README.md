@@ -1,104 +1,166 @@
-# CUDA cloth, solid, and rigid solvers
+# CUDA solver for 3D IPC
 
-There are **two different executables** in this folder:
+**`3D_sim_gpu_resident` is the current simulator.** It keeps evolving cloth,
+solid, rigid-body, and contact state and numerical substeps on the GPU,
+including device exact-arithmetic fallbacks. It shares [3D IPC](../README.md)'s
+scene setup, material data, command-line options, and mesh/checkpoint formats.
+The solver is experimental: qualification applies to a particular build,
+configuration, and scene; GPU execution alone establishes no general speedup.
 
-| Executable | Numerical work |
-| --- | --- |
-| `3D_sim_gpu_resident` | GPU-resident solver, including GPU exact fallbacks; current implementation |
-| `3D_sim_gpu` | Earlier hybrid prototype; many numerical stages still run on CPU |
+## Where to start reading
 
-The CPU source was fast-forwarded to `71c7716573658` on October 10, 2026, and
-the server's `../build/3D_sim` was rebuilt, as requested. GPU-specific changes
-remain in this folder; they do not modify the production CPU algorithms.
-Both GPU implementations are experimental, not production-validated.
+1. [The parent README](../README.md) explains scenes, materials, and outputs.
+2. [CMakeLists.txt](CMakeLists.txt) defines the actual compiled targets and
+   includes three build modules: [GeneratedSources.cmake](cmake/GeneratedSources.cmake)
+   for checked overlays, [Hybrid.cmake](cmake/Hybrid.cmake) for explicit legacy
+   targets, and [Validation.cmake](cmake/Validation.cmake) for optional tests.
+3. [resident_bridge.cpp](resident_bridge.cpp) maps project data and parameters
+   into the resident interfaces.
+4. [resident_solver.cu](resident_solver.cu), especially
+   `ResidentSolver::advance_substep`, shows the full update order.
+5. Follow the stage below into its pipeline and arithmetic headers. Read the
+   corresponding `*_test*` files for supported cases and error behavior.
 
-## GPU-resident solver
+### Source map
 
-`resident_solver.cu` keeps positions, velocities, rigid COMs/quaternions,
-incident element records, collision candidates, and color groups on the device.
-The numerical substep is:
+| Area | Files and role |
+|---|---|
+| Driver integration | [resident_driver_step.inc](resident_driver_step.inc) replaces the CPU frame-advance dispatch in generated `simulation_resident.cpp`. |
+| Host/device boundary | [resident_bridge.h](resident_bridge.h), [resident_bridge.cpp](resident_bridge.cpp): `describe_scene`, `describe_step`, prescribed inputs, and `copy_snapshot`. |
+| Persistent solver | [resident_solver.h](resident_solver.h), [resident_solver.cu](resident_solver.cu): state ownership, rebuilds, iteration/color loops, and failure handling. |
+| Elastic assembly | [resident_elastic.h](resident_elastic.h), [resident_elastic.cu](resident_elastic.cu): gather incident records, evaluate, reduce, propose, and commit deformable updates. |
+| Elastic arithmetic | [cloth_math.cuh](cloth_math.cuh), [solid_math.cuh](solid_math.cuh), [rigid_math.cuh](rigid_math.cuh): material gradients, Hessians, and rigid kinematics. |
+| Broad phase and colors | [resident_broadphase.cu](resident_broadphase.cu), [pbgs_coloring.cuh](pbgs_coloring.cuh), [pbgs_label_compaction.cuh](pbgs_label_compaction.cuh): boxes, candidates, graph/color construction, and compact labels. |
+| Contact pipeline | [resident_contact_pipeline.cu](resident_contact_pipeline.cu): gather/fast evaluation, exact queues/retries, and ordered assembly into local systems. |
+| Contact arithmetic | [resident_contact.cuh](resident_contact.cuh), [resident_contact_exact.cuh](resident_contact_exact.cuh), [resident_contact_cooperative.cuh](resident_contact_cooperative.cuh): contact derivatives and scalar/cooperative exact paths. |
+| Compact point tiers | [resident_contact_compact_point.cu](resident_contact_compact_point.cu), [cooperative_compact_point_study.cu](cooperative_compact_point_study.cu), [compact_point_prefix.cuh](compact_point_prefix.cuh), [direct_native_point.cuh](direct_native_point.cuh): guarded point-contact routes with existing fallback queues. |
+| Local solve | [resident_solve.cuh](resident_solve.cuh): `solve3`, including the rank-deficient fallback. |
+| Linear CCD | [resident_linear_pipeline.cu](resident_linear_pipeline.cu), [resident_ccd.cuh](resident_ccd.cuh), [resident_exact.cuh](resident_exact.cuh): clipping certificates and device exact predicates. |
+| Rigid updates | [resident_rigid_pipeline.cu](resident_rigid_pipeline.cu), [resident_rigid_ccd.cuh](resident_rigid_ccd.cuh): translation/orientation proposals, curved-motion CCD, and commits. |
+| Initial guess and boxes | [resident_global_guess.cu](resident_global_guess.cu), [resident_global_guess.cuh](resident_global_guess.cuh), [resident_adaptive_boxes.cu](resident_adaptive_boxes.cu): predictor CCD and movement limits. |
+| Public records | [resident_sdf_types.h](resident_sdf_types.h), [resident_scene_types.h](resident_scene_types.h): plain SDF/scene records used by the host API and numerical callers. |
+| SDFs and storage | [resident_sdf.cuh](resident_sdf.cuh), [resident_scene.h](resident_scene.h), [resident_memory.h](resident_memory.h): obstacle evaluation, complete numerical includes, and device buffers. |
 
-1. Predict deformable targets and save previous deformable/rigid state.
-2. Apply the selected initial guess entirely on GPU. The cloth-only default
-   is the standard all-moving global CCD guess: Tight-Inclusion BFS queries,
-   a global minimum TOI, and the CPU's 0.9 safety factor. The opt-in colored
-   guess instead sweeps colors toward the original target. As on CPU, general
-   solid/mixed scenes ignore the legacy global guess; their colored guess
-   keeps rigid bodies fixed.
-3. Rebuild blue/primitive boxes, BVHs, contact candidates, dependency graph and
-   colors on GPU at the requested node-box rebuild interval.
-4. For each color, gather current element/contact data, compute private
-   derivatives, accumulate in incident order, solve, CCD-clip, and commit.
-   Cloth membrane/bending, solid tetrahedra, points/pins/gravity/inertia,
-   barrier contact, friction and plane/cylinder/sphere SDFs run on GPU.
-5. A rigid body performs COM assembly/update/commit, then freshly gathers for
-   its orientation assembly/update/commit. Its proxy vertices remain resident.
-6. Update velocities on GPU; download a snapshot only for requested frame or
-   substep output/checkpoints.
+Most `.cuh` headers hold device arithmetic; `.cu` files combine kernels and
+launch orchestration. CMake links nine CUDA units into `ipc_resident_solver`, two into
+`ipc_resident_components`, and the C++ bridge into `ipc_resident_bridge`.
+The components library publicly links CUDA runtime and cuSPARSE dependencies.
 
-The CPU still loads meshes, prepares immutable rest data, supplies prescribed
-pin/SDF motion, launches kernels, reads allocation counts/error status, and
-writes files. It does **not** evaluate a numerical solver or CCD fallback for
-the resident executable. This is a device-resident numerical solver, not a
-claim that CUDA host launch/runtime calls or file I/O disappear.
+The public solver header includes the type-only scene boundary rather than the
+SDF evaluator. Record definitions and defaults were moved verbatim; public solver
+signatures and mathematical bodies stay unchanged. Numerical callers can still
+include `resident_scene.h` for its complete evaluator contract. This reduces
+header fanout; it does not establish a compile-time or runtime speedup.
 
-### Exact fallback and safety
+A name containing `study` does **not** mean test-only:
+`cooperative_compact_point_study.cu` is compiled into the resident solver.
+Runtime flags select its use. Active-point/finite-CCD selections are local to
+that unit; the linear pipeline also selects finite-CCD locally. Do not enable selectors
+globally or infer production inclusion from a filename alone.
 
-Linear CCD first tries conservative floating-point interval certificates.
-Uncertain cases are queued for **GPU multiword integer/rational predicates**;
-there is no CPU retry. Exact conversion starts from the original binary64
-coordinates before subtraction. A 128-limb fast exact path retries with
-2,048 limbs (65,536 bits), covering the documented degree/input-range bounds
-in `resident_exact.cuh`. Contact geometry/derivatives similarly retry from
-256 to 1,600 limbs. GPU scratch arenas avoid enormous per-thread stack frames.
-Exact geometry, rational derivative terms and predicates do not make the whole
-physics arbitrary precision: final square roots, logarithms, barrier/friction
-values and solver state remain binary64.
+## What one substep does
 
-Each linear trial checks all incident pairs at the **same proposed endpoint**.
-The broad phase also protects the coordinate-scaled numerical gap independently
-of `d_hat`: GPU reductions set conservative query padding without enlarging the
-allowed movement boxes. Initial-guess boxes account for both start and target
-coordinate scales, including when `d_hat` is zero.
-Rejected proposals are halved; after 64 unsuccessful trials the unchanged
-endpoint is itself certified. Nothing is accepted solely because a retry
-budget expired. Accepted rounded coordinates are copied verbatim at commit.
-Detected true zero-gap contact, invalid/nonfinite state, or allocation failure
-invalidates the substep and prevents export/reuse of the partially updated
-state; these are not triggers for a CPU fallback.
-
-Rigid rotation uses the existing CPU algorithm's analytic curved-motion CCD,
-ported to CUDA; it is neither a linear-chord substitute nor a new exact-rational
-curved CCD algorithm. The exact fallback described above is for linear CCD and
-contact geometry. Its tests do not establish a stronger formal guarantee for
-the pre-existing rotational CCD algorithm.
-
-### Build and validate on biot
-
-Use the existing configured `gpu/build` on the server, or configure as below
-(offline dependency settings are explained in the hybrid build section):
-
-```sh
-cmake -S gpu -B gpu/build \
-  -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.6/bin/nvcc \
-  -DCMAKE_CXX_COMPILER=/usr/bin/g++ \
-  -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_BUILD_TYPE=Release
-cmake --build gpu/build --target gpu_resident_validation -j 8
-ctest --test-dir gpu/build -R gpu_resident --output-on-failure
+```text
+generated driver → bridge → ResidentSolver::advance_substep
+  predict/rebuild → colors → elastic + contact → local solve → CCD → commit
+  finish velocities → snapshot → shared mesh/checkpoint output
 ```
 
-The CUDA build uses double precision, no fast math, and `--fmad=false`.
-Twelve resident suites cover elastic kernels, BVH/graph completeness, contact
-derivatives, rank-deficient small solves, rigid kinematics/curved CCD, SDFs,
-exact linear CCD, each update pipeline and an integrated active-contact
-cloth/solid/rigid fixture. The latter exercises four substeps with friction
-0 and 0.1 and with the colored initial guess, checking finite state and positive
-contact gaps. Exact tests include full-range integer retries and cases where
-ordinary subtraction cannot resolve the geometry.
+The host loads meshes, builds immutable rest data, supplies prescribed pin/SDF
+motion, allocates storage, and launches work. Positions, velocities, rigid
+poses, gathered records, derivatives, and numerical fallback work stay on the
+device between output snapshots. Counts, launch metadata, and error status
+can still return to the host.
 
-### Run the resident solver
+1. Save previous state, predict targets, and apply the requested initial guess.
+   The global cloth guess and colored guess have separate CCD paths.
+2. Rebuild movement boxes, broad-phase candidates, dependency colors, and
+   optional worklists at the configured interval.
+3. Visit colors **sequentially**. Independent blocks within a color update in
+   parallel; later colors see the preceding committed state.
+4. For deformables, `assemble_elastic_color` and
+   `ResidentContactPipeline::assemble_color` gather current data, evaluate
+   derivatives, and accumulate incident contributions in their defined order.
+5. `propose_deformable_color` solves `H * delta = gradient`, then proposes
+   `x - damping * delta`. CCD clips the proposal; `commit_deformable_endpoints`
+   copies the accepted represented coordinates.
+6. Rigid translation is assembled, clipped, and committed before a fresh
+   orientation assembly/curved-CCD/commit. The two phases are sequential.
+7. Finish velocities and check device status before exposing a snapshot.
 
-For a small cloth smoke test, from the repository root:
+Preserve this order, fixed budgets, models, signs, clamps, degeneracy behavior,
+and fallback/error contracts. Fixed sweep completion does not prove convergence.
+
+### Arithmetic and collision safety
+
+Resident calculations use binary64 and CUDA targets use `--fmad=false`, with
+explicit `fma` calls retained where the source requires them. Do not substitute
+fast math when comparing or qualifying these paths.
+
+Linear CCD first uses conservative floating-point certificates; uncertain
+queries enter the existing device integer/rational fallback and retry paths.
+Contact geometry has its own exact-arithmetic queues and capacity checks.
+There is no CPU numerical retry. Exact predicates do not make the entire
+simulation arbitrary precision: square roots, logarithms, derivatives, and
+evolving state still involve rounded floating-point arithmetic.
+
+Uncertainty is not permission to accept motion. Commit uses the certified
+rounded endpoint rather than recomputing it. An unrecoverable device error
+invalidates the substep/state and blocks output or reuse of partial updates.
+Rigid rotation retains the existing curved-motion algorithm; linear exact
+predicate tests do not establish a stronger guarantee for that algorithm.
+
+## Build and run
+
+Run the following commands from `3D_IPC/`, the repository root.
+
+### Requirements
+
+- CMake 3.24+, a C++17 compiler, and an NVIDIA GPU with a compatible CUDA toolkit.
+- OpenMP, Boost, Eigen, and Tight-Inclusion; see [the main build instructions](../README.md#build-and-test).
+- The tested Linux configuration uses CUDA 12.6, GCC 11, and an RTX 6000 Ada
+  GPU (`sm_89`). Other toolkit/compiler/device combinations need validation.
+
+These commands assume `nvcc` and `g++-11` are on `PATH`; substitute their paths
+when needed. Architecture 89 is also the current CMake default.
+
+```sh
+cmake -S gpu -B gpu/build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_COMPILER=nvcc \
+  -DCMAKE_CXX_COMPILER=g++-11 -DCMAKE_CUDA_HOST_COMPILER=g++-11 \
+  -DCMAKE_CUDA_ARCHITECTURES=89
+cmake --build gpu/build -j 8
+```
+
+The ordinary build selects `3D_sim_gpu_resident` and its required libraries and
+host support. Optional test and control targets are excluded from `ALL`.
+An explicit `--target 3D_sim_gpu_resident` selects the same simulator.
+Build and run the resident validation callers separately:
+
+```sh
+cmake --build gpu/build --target gpu_resident_validation -j 8
+ctest --test-dir gpu/build -R '^gpu_resident_' --output-on-failure
+```
+
+Initial configuration may fetch dependencies.
+Offline builds can supply
+`FETCHCONTENT_SOURCE_DIR_EIGEN3` and `FETCHCONTENT_SOURCE_DIR_TIGHT_INCLUSION`.
+Use a dedicated Tight-Inclusion source copy: its configuration generates a
+header in that tree.
+
+The selected CPU tree supplies scenes, types, setup, and outputs, not a resident
+numerical fallback. `IPC_CPU_SOURCE` defaults to the parent directory; to select a
+separate compatible checkout, add `-DIPC_CPU_SOURCE=/path/to/compatible/3D_IPC`.
+CMake leaves the selected CPU base unchanged and writes checked driver/solver
+overlays into the build directory. The shared generators require unique
+insertion anchors and write only changed content, so a no-change reconfigure
+preserves generated-source timestamps. [check_overlay.cmake](check_overlay.cmake)
+uses those same generators for its explicit overlay checks. Reconfigure after
+changing the selected CPU source.
+
+### Small resident run
+
+Use a fresh output directory for each run:
 
 ```sh
 OMP_NUM_THREADS=1 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
@@ -107,531 +169,108 @@ OMP_NUM_THREADS=1 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
   --fixed_iters --substeps 5 --max_substep_iters 2 \
   --node_box_update_count 1 --d_hat 0.005 --k_barrier 100 \
-  --friction_coefficient 0 --use_ccd true --use_ticcd false \
-  --exact_computation_fallback true --use_ccd_guess false \
-  --use_colored_ccd_guess true --colored_ccd_guess_iters 2 \
-  --write_substeps false --format geo --outdir outputs/gpu_resident_cloth_NEW
+  --use_ccd true --use_ticcd false --exact_computation_fallback true \
+  --use_ccd_guess false --use_colored_ccd_guess true \
+  --colored_ccd_guess_iters 2 --write_substeps false \
+  --format geo --outdir results/gpu_resident_smoke
 ```
 
-Use a new output directory: the resident driver refuses to replace an existing
-directory for a fresh run. OMP does not control CUDA worker count. CPU SIMD,
-experimental-v2 and CPU scheduling flags do not select GPU kernels; choosing
-the resident executable does. Supported material/scene/output parameters remain
-those of the project driver, including cloth, solid, rigid and mixed scenes.
+This writes frame meshes and `state_NNNN.bin` checkpoints, including frame 0.
+The resident driver refuses to replace an existing directory on a fresh run.
+Restart with `--restart_frame N` in the same directory, repeating the original
+scene/material/solver settings; `--num_frames` is the final frame number.
+See [output and restart](../README.md#output-and-restart) for file formats.
 
-The root README's full Example 1 command is supported with the resident
-executable substituted and a fresh output directory. Its default
-`--use_ccd_guess true` / `--use_colored_ccd_guess false` combination is no
-longer replaced by a colored guess. GEO output uses the shared driver writer.
+OpenMP controls host work, not CUDA block width. The resident executable selects
+the GPU solver; CPU SIMD/experimental-solver flags do not choose its kernels.
+Keep fixed iteration/substep budgets when comparing configurations.
 
-Fixed iterations and conflict-graph coloring are currently required. Grid/OGC,
-the `--use_ticcd true` per-vertex backend, disabling exact fallback, and
-Verlet/translation initial guesses are explicitly rejected rather than routed
-to CPU. This per-vertex backend limitation does not apply to the standard
-all-moving initial guess, whose Tight-Inclusion algorithm is ported to CUDA.
-As in the general CPU solver, the particle
-`use_ccd` switch does not disable rigid CCD or CCD inside the colored guess.
-It also does not disable barrier energy; that is controlled by contact parameters.
+## Defaults, experiments, and diagnostics
 
-### Current limitations and interpretation
+Scene/solver arguments and `IPC_GPU_*` environment switches are different
+interfaces; leave them unset for quickstart defaults. Selected examples:
 
-- This remains experimental, **not a demonstrated speedup over CPU**. Inactive
-  contact rejection and parallel exact-contact queues removed the previous
-  dominant bottleneck in a two-frame test; greedy coloring remains serial and
-  per-color launches/whole-array filtering can be expensive. That short test
-  used a colored initial guess and is not the README-default full-run result.
-- Deformable node boxes now use the CPU adaptive rule:
-  `clamp(1.2 * max(previous_solver_displacement, norm(v) * dt), min, max)`.
-  History persists across substeps and excludes initial-guess displacement.
-  Radii stay fixed within a solve; rebuilds recenter them. Rigid COM boxes and
-  angular caps still use fixed `node_box_max`/`theta_box_max` values.
-- Certified linear backtracking is not the CPU earliest-TOI-times-0.9 step
-  selection. Rotational clipping retains its 0.9 factor. Together with different
-  coloring and floating-point order, this means no byte-identical trajectory or
-  identical convergence-rate claim.
-- Passing kernel and short mixed-scene tests is not full validation of long
-  production scenes. In particular, a completed full 200/240-frame resident
-  benchmark is still required; the initial two-frame result cannot predict it.
+| Environment setting | Default / purpose |
+|---|---|
+| `IPC_GPU_COLOR_PAIR_QUEUES` | `1`; per-color contact queues. |
+| `IPC_GPU_COOPERATIVE_EXACT_CONTACT` | `1`; cooperative exact evaluation. |
+| `IPC_GPU_ELASTIC_COLOR_WORKLISTS` | `0`; opt-in stable elastic color worklists. |
+| `IPC_GPU_ELASTIC_NODE_THREADS`, `IPC_GPU_ELASTIC_ELEMENT_THREADS` | `1`, `8` when worklists are enabled; powers of two through 128. |
+| `IPC_GPU_COMPACT_POINT_FIRST_TIER`, `IPC_GPU_COMPACT_POINT_COOPERATIVE`, `IPC_GPU_CONTACT_INPLACE_RATIO` | `0`; optional compact point routing. Cooperative routing also requires the first tier, cooperative exact path, and in-place ratio selection. |
+| `IPC_GPU_COMPACT_DEFORMABLE_CONTACTS`, `IPC_GPU_CONTACT_OUTPUT_ACTIVITY` | `0`; optional compact output/storage behavior. |
+| `IPC_GPU_PROFILE_CSV` | Unset; optional per-frame stage timing CSV at a fresh path. |
+| `IPC_GPU_CONTACT_QUEUE_CSV` | Unset; optional queue diagnostics, including extra count readbacks. |
 
-### README-compatible global initial guess
+See [resident_contact_pipeline.cu](resident_contact_pipeline.cu),
+[resident_contact_schedule.h](resident_contact_schedule.h), and
+[resident_elastic.h](resident_elastic.h) for parsing, dependencies, and bounds.
+Options are often captured at object construction; set them before launch.
+Record the complete environment when comparing builds. An opt-in route is
+not automatically the selected or fastest full-solver configuration.
 
-`resident_global_guess.cuh/.cu` ports the CPU standard predictor's all-moving
-Tight-Inclusion breadth-first queries: minimum separation `1e-10`, geometric
-tolerance `1e-6`, maximum refinement count `1000000`, and zero TOI allowed.
-It uses the same reconstructed motion endpoints and swept-box padding as
-`ccd_initial_guess`, then reduces the minimum collision time on the GPU and
-applies `omega = toi >= 1 ? 1 : 0.9 * toi` to the entire cloth.
+Stage CUDA-event intervals can include idle gaps and overlap host spans; do not
+add these times. Instrumentation adds overhead. Compare full solver times on
+matched representative workloads before attributing application gains to a kernel.
 
-Per-query queues grow through explicit device retries rather than dropping
-unresolved cells. Host orchestration reads only counts/error status, not query
-geometry or TOIs. Arithmetic/depth/resource failures stop before committing
-the guess. This ports the CPU predictor's existing interval algorithm; it does
-not replace the separate one-moving-vertex exact safety checks in solver sweeps.
+### Studied Example 1 environment
 
-`gpu_resident_global_guess_test` compares all-moving point/triangle and
-edge/edge queries against the CPU library, including known crossings,
-degeneracies, and a wide-frontier case requiring queue growth. Adaptive radius
-history is checked independently by `gpu_resident_adaptive_boxes_test`.
-
-Server validation for this port (October 10, 2026): all 17 resident tests
-passed. The standard-guess test matched the CPU TOI exactly on all 541
-fixtures, including the 262,144-entry queue-growth stress case. CUDA memcheck
-reported zero errors for adaptive boxes, the integrated solver, and the
-540-case `--quick` global-guess test. Quick mode deliberately omits the wide
-frontier and uses nonparallel whole-scene test geometry; the full stress test
-was checked without memcheck. A two-frame full-resolution README smoke run
-also completed and its GEO meshes passed topology/finite-coordinate checks.
-These are correctness checks, not the completed 240-frame performance result.
-
-The full comparison uses `wait_example1_comparison.py --readme-command
---frames 240 --cpu-first`, which verifies the root README argument list and
-uses identical 64-thread OpenMP settings for both applications. Only the
-executable and output directories differ. Geometry and timing are downloaded
-by `download_example1_when_ready.py`; `report_example1_full.py` reports a
-speed ratio only after both complete runs have passed output validation.
-
-### All-frame stage profiling (same numerical logic)
-
-Set `IPC_GPU_PROFILE_CSV` to a fresh CSV path to enable resident-solver timing.
-The profiler records every completed frame, with hierarchical host and CUDA
-stream intervals, direct-child-subtracted exclusive times, candidate/color
-counts, and global-guess queue retries. It pools events and resolves them after
-the existing substep synchronization, rather than synchronizing every kernel.
-Contact gathering and fast evaluation remain a fused kernel and are labeled
-as such. No numerical kernels or launch parameters are changed by these hooks.
-
-`profile_example1_full.py` runs all 240 frames using the root README arguments,
-after an idle-server check, and preserves the accepted CPU baseline. Its
-`analyze_example1_full_profile.py` report includes all individual frames,
-60-frame chronological ranges, and candidate-count quartiles. Candidate counts
-are broadphase work proxies, not counts of active contacts. It saves SHA-256
-hashes for every GEO and binary checkpoint, providing a full-precision reference
-for later optimization checks. `download_example1_profile.py` downloads the
-reports and GEO files; binary checkpoints remain on the server with their hashes.
-
-CUDA event intervals include host-fed stream gaps, not just active kernels.
-Host and CUDA intervals overlap: never add them together. Inclusive stage times
-contain their children; sum exclusive times only. Instrumentation overhead is
-reported but must not be subtracted as an exact correction to clean runtime.
-The regular printed solver timer also includes final profiling CSV output.
-
-Before the full profile, `validate_example1_profile.py` confirmed byte-identical
-GEO and binary checkpoints between the preserved GPU executable, the instrumented
-executable with profiling disabled, and profiling enabled: frames 1–2, plus
-contact-heavy frame 111 restarted from the same frame-110 checkpoint. These are
-correctness tests, not a completed full-run optimization result. CPU source and
-its production executable are unchanged.
-
-### Exact-contact optimization and validation
-
-#### Result-preserving contact/worklist trial (October 11)
-
-Three additional execution switches remain opt-in:
-
-- `IPC_GPU_COMPACT_DEFORMABLE_CONTACTS=1`: stores the selected deformable
-  role's gradient, self-Hessian and relative friction derivatives in a
-  216-byte hot record rather than the 1,416-byte full contact record. Packing
-  does no arithmetic; accumulation order is unchanged. Rigid and multiple-role
-  masks retain the full record. This path bypasses the original full-record
-  warp reducer; the round-4 compact-aware experiment below is separate.
-- `IPC_GPU_BOX_CONTACT_PRUNING=1`: after graph coloring, removes incidences
-  certified separated over their entire blue boxes by more than both `d_hat`
-  and the coordinate-scaled CCD gap floor. The original graph/color IDs stay
-  unchanged. Certificates are invalidated at every rebuild and reused by
-  linear CCD. Initially only all-deformable contacts qualify; rigid arcs are
-  deliberately excluded. Ordinary solver steps without CCD do not prune.
-- `IPC_GPU_ELASTIC_COLOR_WORKLISTS=1`: GPU-built stable node/incident lists
-  limit gather, compute, reduction, solve and commit launches to the current
-  color. Arrays and per-node accumulation order remain unchanged. Optional
-  `IPC_GPU_ELASTIC_NODE_THREADS` / `IPC_GPU_ELASTIC_ELEMENT_THREADS` default
-  to 1 / 8, respectively, to spread small colors across multiprocessors.
-
-These switches do **not** weaken exact-fallback thresholds, change precision,
-or replace the existing iterative CCD certification/halving rule with CPU TOI
-clipping. CPU and GPU numerical trajectories are not claimed identical.
-New certificate, compact-record, pruning, and elastic-worklist tests augment
-the existing resident tests. `validate_contact_round3.py` gates repeated clean
-early/middle/late trials and an optional continuous 240-frame checkpoint-byte
-comparison on a successful, hash-bound isolated build/test record. A faster
-short trial alone is not a measured full-simulation speedup.
-
-The isolated round-3 build completed all 240 README Example 1 frames with
-903.817696 solver seconds versus the prior 1066.265610 seconds (1.179735x),
-and all 482 GEO/BIN files matched. This is GPU-to-GPU identity, not CPU parity.
-
-#### Round-4 execution experiments (opt-in)
-
-- `IPC_GPU_CONTACT_SELECTED_NODE_REDUCE=1` launches the original scalar
-  contact accumulation only for blocks of the current color.
-  `IPC_GPU_CONTACT_SELECTED_NODE_THREADS` accepts powers of two from 1 to 128
-  (default 8). Mapping and launch counts refresh on rebuild; arithmetic is
-  unchanged. The feature itself defaults to 0.
-- `IPC_GPU_COMPACT_WARP_REDUCE=1` assigns independent gradient/Hessian
-  components of high-degree deformable nodes to lanes while retaining each
-  component's original incident/role/addition order. It requires compact
-  contacts, uses selected scalar reduction below
-  `IPC_GPU_COMPACT_WARP_REDUCE_MIN_DEGREE` (default 32, positive integer),
-  and defaults to 0. It is not a tree summation.
-- `IPC_GPU_COOPERATIVE_GEOMETRY_CONVERSIONS=1` distributes the seven exact
-  residual/weight conversions across private lane arenas before Hessian
-  preparation. The default is 0; scalar replay and large-capacity retry remain.
-- `IPC_GPU_GLOBAL_GUESS_CANDIDATES_ONLY=1` skips unused graph/color work in
-  the global initial guess, retaining identical candidates and their order.
-  It defaults to 0. The ordinary solver and colored guess still build graphs.
-- `IPC_GPU_GLOBAL_GUESS_WORKERS` (1..8192, default 512) and
-  `IPC_GPU_GLOBAL_GUESS_THREADS` (1/2/4/8/16/32, default 32) vary independent
-  query scheduling. The 64 MiB scratch budget still caps effective workers;
-  heap operations, tolerances and capacity retries do not change.
-
-`finish_contact_round4.py` builds an isolated snapshot, executes regression
-and sanitizer tests, and seals their evidence. `experiment_contact_round4.py`
-then compares individual configurations on early/middle/late cold restarts,
-confirms selected combinations with two alternating-order repetitions, and
-runs a continuous 240-frame byte/timing check only for a confirmed improvement.
-Phase profiles are separate from clean timing. Its explicit monitoring policy
-permits routine editor I/O while still rejecting competing jobs, transfers,
-swapping and excessive external CPU work. Neither script pushes Git changes
-or replaces production executables.
-
-The completed round-4 trial measured **752.128292 solver seconds** over all
-240 README Example 1 frames, versus round 3's 903.817696 seconds: **1.201680x
-faster, or 16.8% less solver time**. Average solver time was 3.133868 seconds
-per frame; total simulation time was 755.691938 seconds. All 482 GEO/BIN files
-were byte-identical to the previous GPU reference. The 26 scheduled resident
-regression tests, global-guess quick test, contact/cooperative memory checks,
-and global-guess initialization check passed. The quick global-guess suite
-does not include the wide-frontier stress fixture.
-
-The winning configuration retained the round-3 execution settings and enabled
-only the global-guess changes from this round:
+This separate profile controls contact routing/storage, worklists, CCD launches,
+coloring, and host scheduling. It is not enabled by the default quickstart:
 
 ```sh
-export IPC_GPU_COMPACT_DEFORMABLE_CONTACTS=1
-export IPC_GPU_BOX_CONTACT_PRUNING=1
-export IPC_GPU_ELASTIC_COLOR_WORKLISTS=1
-export IPC_GPU_COLOR_PAIR_QUEUES=1
-export IPC_GPU_WARP_CONTACT_REDUCE=0
-export IPC_GPU_COOPERATIVE_EXACT_CONTACT=1
-export IPC_GPU_CONTACT_EXACT_SMALL_WORKERS=1024
-export IPC_GPU_CONTACT_EXACT_SMALL_THREADS=1
-export IPC_GPU_CONTACT_EXACT_LARGE_WORKERS=256
-export IPC_GPU_CONTACT_EXACT_LARGE_THREADS=4
-export IPC_GPU_CONTACT_SELECTED_NODE_REDUCE=0
-export IPC_GPU_COMPACT_WARP_REDUCE=0
-export IPC_GPU_COOPERATIVE_GEOMETRY_CONVERSIONS=0
-export IPC_GPU_GLOBAL_GUESS_CANDIDATES_ONLY=1
-export IPC_GPU_GLOBAL_GUESS_WORKERS=8192
-export IPC_GPU_GLOBAL_GUESS_THREADS=32
+export OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE
+export IPC_GPU_COMPACT_DEFORMABLE_CONTACTS=1 IPC_GPU_BOX_CONTACT_PRUNING=1
+export IPC_GPU_GLOBAL_GUESS_CANDIDATES_ONLY=1 IPC_GPU_GLOBAL_GUESS_WORKERS=8192 IPC_GPU_GLOBAL_GUESS_THREADS=32
+export IPC_GPU_ELASTIC_COLOR_WORKLISTS=1 IPC_GPU_CONTACT_OUTPUT_ACTIVITY=1
+export IPC_GPU_CONTACT_PREFETCH_REDUCE=1 IPC_GPU_COOPERATIVE_GEOMETRY_CONVERSIONS=1
+export IPC_GPU_CONTACT_INPLACE_RATIO=1 IPC_GPU_CCD_CURRENT_COLOR_LAUNCH=1
+export IPC_GPU_DEFER_CONTACT_INPUTS=1 IPC_GPU_CANONICAL_POINT_HESSIAN=1
+export IPC_GPU_COLORING=degree IPC_GPU_COMPACT_POINT_FIRST_TIER=1 IPC_GPU_COMPACT_POINT_COOPERATIVE=1
+export OMP_PROC_BIND=close OMP_PLACES=cores
 ```
 
-These are opt-in run settings, not changed defaults. Selected-node/compact-warp
-reduction and parallel exact conversions were not selected for the full run.
-The GPU remains 20.30x slower than the preserved 37.049037-second, 64-thread
-CPU baseline; GPU-to-GPU byte identity does not establish CPU/GPU trajectory
-identity or comparable numerical work.
+The first eight exports contain the studied 19 settings; the last records host
+affinity. These flags alone do not reproduce a measured runtime: retain the
+exact build, scene, fixed budgets, and output/checkpoint options with each result.
 
-The exact rational-to-binary64 conversion reuses its largest shifted integer
-denominator and shifts it right exactly between quotient bits. It retains the
-same subtraction, rounding-to-nearest/ties-to-even, capacity failures, and GPU
-fallback. It does not lower precision or change contact/CCD thresholds.
-`gpu_resident_ratio_host` and `gpu_resident_ratio_cuda` compare the old and new
-implementations, including boundary rounding and device allocator failures.
+The current source includes the active point and finite-CCD selections.
+Compact membrane, guarded bending, and Schur prototypes remain separate;
+the names “compact contact” and “compact membrane” do not mean the same feature.
 
-Exact-contact launch scheduling can be tuned once per pipeline through
-`IPC_GPU_CONTACT_EXACT_SMALL_WORKERS` (default 1024, maximum 4096),
-`IPC_GPU_CONTACT_EXACT_SMALL_THREADS` (candidate default 1),
-`IPC_GPU_CONTACT_EXACT_LARGE_WORKERS` (default 256, maximum 1024), and
-`IPC_GPU_CONTACT_EXACT_LARGE_THREADS` (default 4). Threads per block must be
-1, 2, 4, 8, 16, or 32, and divide the worker count. Both passes retain their
-256- and 1600-limb capacities. The ordered per-node contact accumulation is
-unchanged. Larger worker populations require more GPU scratch memory.
+## Supported scope and validation
 
-`IPC_GPU_CONTACT_QUEUE_CSV=/fresh/path.csv` enables per-color exact/retry queue
-counts; it deliberately synchronizes for diagnostics and must be OFF for timing.
-`tune_example1_contact.py` runs clean, idle-guarded early/middle/late trials against
-a preserved executable. It compares both GEO and binary checkpoints against
-matching cold restarts, not against continuous-run checkpoint hashes.
-`validate_optimized_example1_full.py` runs the complete README simulation with
-timers disabled and compares every output checkpoint against the original full
-GPU manifest. Short-trial speedups are not full-simulation speedup claims.
+The resident path implements cloth, tetrahedral solids, rigid bodies, mixed
+scenes, mesh barriers/friction, and plane/cylinder/sphere SDFs. The bridge
+currently requires fixed iterations, conflict-graph coloring, and exact
+fallback enabled. OGC/grid modes and standalone Verlet/translation guesses
+are rejected. Set `--use_ticcd false`: the per-update Tight-Inclusion backend
+is not the resident linear clipper; the global predictor has its own port.
 
-### CPU update and matching GPU changes — October 10, 2026
+`*_test.cpp` and `*_test.cu` files are component/integration callers, not solver
+entry points. The validation target covers elastic assembly/worklists,
+broad-phase/coloring, contact queues/derivatives, local solves, CCD/exact pools,
+SDFs, initial guesses, and integrated updates. Python `validate*`, `profile*`,
+`analyze*`, and tuning scripts support particular experiments; inspect their
+paths and assumptions before reuse. They do not select the simulator backend.
 
-The CPU base is now `71c7716573658789867ada8078f1342df681c026`
-(`optimize contact geometry and evaluation and helper scheduling`). The local
-and server source trees were fast-forwarded; the server CPU executable was
-rebuilt. The existing server-only GoogleTest compatibility edit was preserved.
+Changes need numerical/source-expression checks, guard/fallback/error cases,
+actual pipeline callers, and appropriate sanitizer coverage. Combined solver
+changes also need representative full runs and collision/physical checks.
+CPU and GPU trajectories need not be bitwise identical. Passing local tests
+or saved-frame collision checks does not prove swept-path or global physical
+acceptance for every scene.
 
-The resident port carries over the applicable work-reduction ideas:
+## Legacy hybrid reference
 
-- Contact evaluation computes only the Hessian blocks consumed by the active
-  update. Deformable nodes need their self block; rigid point/triangle COM
-  updates need the point `H00`; rigid orientation needs the selected upper
-  cross blocks. Gradients and relative friction retain their existing formulas.
-- Exact contact evaluation reuses per-endpoint geometric derivatives within
-  the current contact. It does not cache geometry across state changes.
-- Rigid orientation assembly prepares each needed proxy's Jacobian/curvature
-  once, on GPU, and reuses it for its incident contacts and SDF contributions.
-  This storage is refreshed for every orientation assembly, after COM commits.
-- Independent initial endpoint certificates run per contact on GPU, so a
-  contact-heavy deformable node can use multiple CUDA workers. Only proven-safe
-  certificates are reused at the identical first endpoint. Backtracking
-  invalidates that reuse and checks every incident pair again. The exact cold
-  path still runs on GPU; its arithmetic and gap thresholds are unchanged.
-- GPU-generated per-color stage masks suppress empty deformable/COM/orientation
-  launches. Fixed bodies remain in collision detection and graph construction;
-  soft-pinned deformable nodes remain updateable.
+`3D_sim_gpu` is retained for historical comparison and source reuse. Its
+generated `solver_gpu.cpp` keeps CPU update and safety stages. It is not the
+current solver or part of the ordinary build/run instructions above.
+See [color_bridge.h](color_bridge.h), [general_bridge.cpp](general_bridge.cpp),
+[rigid_bridge.cpp](rigid_bridge.cpp), and the `*_sweep.inc` hooks. Its separate
+`ipc_gpu_hybrid_overlay` archive links ahead of the unchanged CPU base;
+resident targets use that base without this legacy overlay. Shared material
+records and useful legacy implementations remain preserved.
 
-CPU OpenMP helper counts, chunk sizes and thread-local scratch pools are not
-copied literally to CUDA. The resident solver already retains its device
-allocation capacity and uses a single unified dependency graph. The CPU's new
-rigid-only driver API and Example 15 scene dispatch are inherited through the
-checked driver generator. `check_overlay.cmake` also verifies that the generated
-resident driver contains no CPU `advance_one_frame*` calls.
-
-After building, the correctness-only runner is:
-
-```sh
-python3 gpu/validate_resident_update.py --output NEW_VALIDATION_DIRECTORY
-```
-
-It checks all resident suites, rigid kernel compatibility, CUDA memory and
-uninitialized-memory checks, and small Example 1 / Example 15 driver runs.
-The Example 15 smoke test explicitly reduces the 200-sheet scene to two tiny
-sheets; it is not validation of the full production-size scene. This update
-does not establish a CPU/GPU speedup or byte-identical trajectories.
-
-Validation on the server passed: 262 CPU regression tests (including the long
-CCD integration test), all 12 resident GPU suites, the shared rigid-kernel
-suite, four CUDA memory checks and two uninitialized-memory checks (zero
-errors). The two small driver runs completed with finite output meshes.
-The CPU tests used the system C++ runtime where the older Conda runtime could
-not load the rebuilt test binary; no global runtime settings were changed.
-The report, commands, executable hashes, logs and smoke meshes are in
-[`validation_update_71c7716_20261010.bnurUZ/report.json`](validation_update_71c7716_20261010.bnurUZ/report.json),
-mirrored locally and on the server. The old performance queue remains stopped;
-these validation timings are not benchmark results.
-
-### Resident verification — October 9, 2026
-
-The final server build passed all 12 resident suites. CUDA compute-sanitizer
-reported **zero errors** for exact CCD, exact contact and the integrated mixed
-solver; the mixed solver also passed uninitialized-memory checking. The actual
-resident driver completed a two-frame, 100-vertex Example 1 smoke run with the
-colored CCD guess. These are correctness checks, not performance measurements:
-another user's CPU job and our GPU sanitizers were active during portions of
-validation. Production `build/3D_sim` retained its original SHA-256 hash.
-
-The machine-readable report, complete logs and small smoke-run geometry are in
-[`validation_resident_20261009.H43ECK/report.json`](validation_resident_20261009.H43ECK/report.json),
-mirrored on the server and locally. No Git push was performed.
-
-## Earlier hybrid prototype (historical results below)
-
-This is an **experimental hybrid CPU/GPU implementation**, not a complete
-GPU-resident simulator. Production CPU files and `../build/3D_sim` are unchanged.
-The starting CPU commit is `eb16601aafddef90b8db62186e66f1047f613c9b`.
-
-## Implemented scope
-
-- GPU, double precision: cloth membrane (including 2x2 polar/eigen preparation),
-  bending PSD derivatives, inertia, gravity, and pins; solid tetrahedral
-  elasticity including signed 3x3 QR-SVD/polar preparation and PSD PBGS blocks;
-  rigid translation/rotation inertia and contact/friction generalized-coordinate
-  pullbacks (COM/omega gradients, Hessians, mixed blocks, quaternion curvature).
-- CPU: mesh gathering, ordered incident-element accumulation, SDF and deformable
-  contact/friction; rigid closest-feature geometry, Cartesian barrier/friction
-  derivatives, quaternion kinematics and frozen-friction preparation;
-  small node/body solves, safe-step/CCD (including exact fallbacks),
-  BVH, coloring, initial guesses, integration, and output.
-- Whole-color GPU batches preserve conflict-graph Gauss–Seidel color order.
-  Vertices update only after all that color's GPU derivatives have returned.
-- Cloth-only, solid-only, rigid-only, and mixed general-v2 routing are supported.
-  Grid coloring, OGC, and serial driver selection are explicitly rejected.
-
-This stage does **not** promise speedup or byte-identical CPU trajectories.
-Host/device transfers, CPU gather/accumulation, and small colors can dominate.
-The existing cooperative CPU contact/CCD sweep is retained: a collective
-before-color hook submits GPU derivatives, then the same CPU helpers and
-acceptance rules resume. Other modes use whole-color device compute followed
-by the existing independent CPU per-vertex update/safe-step functions.
-
-For mixed scenes, `general_bridge.cpp` snapshots all deformable nodes in a
-color, evaluates point/triangle/tet/hinge records on CUDA, then the existing
-general batch scheduler handles contact and node updates. It retains CPU
-cooperative helpers, but starts an OpenMP team per color. Rigid bodies preserve
-the original **COM update/commit, then orientation update/commit** sequence;
-each body phase regathers current geometry before CUDA contact pullback. The
-rigid contact organizer uses a whole-body CUDA batch instead of CPU SIMD contact
-tiles. Its robust host geometry preparation is currently serial per body, and
-the old CPU contact-helper sharing is not used for that GPU batch (CCD helpers
-are unchanged). This is a correctness-first extension, not a tuned GPU solver.
-
-The CUDA workspace/stream is serialized with a mutex across submitting host
-threads. Rigid inertia currently launches once per body phase, even for one
-record; this has significant overhead. No hidden CPU fallback is used for any
-of the GPU derivative families listed above.
-
-## Following SIMDIFICATION_PLAN.md
-
-`color_bridge.h` gathers per-incident-element AoS snapshots from a color, then
-`kernels.cu` computes private AoS derivatives, then the original host arithmetic
-accumulates contributions in incident order. Each CUDA thread handles one record.
-There are no per-vertex device atomics or full-mesh SoA arrays. Tail records are
-bounds checked. Allocations are reused between colors.
-
-This starts with the plan's simple thread-per-element option. It deliberately
-uses neither shared-memory staging nor a tile transpose yet. Adjacent AoS
-records **do not imply optimal field-wise coalescing** for large structs; this
-must be measured before choosing a padded/shared-memory or warp-shuffle tile.
-See NVIDIA's [memory-access explanation](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html).
-
-The CPU reference's eigenvalue floor (`1e-12`), unclamped metric inverse, and
-bending PSD model are preserved. Nonfinite device results raise an error before
-the color updates. CUDA uses no fast math or implicit FMA contraction; explicit
-FMA expressions retain their specified operation. Numerical comparisons, rather
-than cross-device bitwise equality, validate this implementation.
-
-## Build on biot
-
-CUDA 12.6, GCC 11, RTX 6000 Ada (SM 89):
-
-```sh
-cmake -S gpu -B gpu/build \
-  -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.6/bin/nvcc \
-  -DCMAKE_CXX_COMPILER=/usr/bin/g++ \
-  -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_BUILD_TYPE=Release
-cmake --build gpu/build --target \
-  3D_sim_gpu 3D_sim_cpu_control \
-  gpu_kernel_test gpu_solid_kernel_test gpu_rigid_kernel_test \
-  gpu_contact_fixture cpu_contact_fixture gpu_mixed_fixture cpu_mixed_fixture -j 8
-ctest --test-dir gpu/build --output-on-failure
-python3 gpu/validate.py --threads 8 --full-size --scene-smoke
-```
-
-For offline configuration the server build additionally points
-`FETCHCONTENT_SOURCE_DIR_EIGEN3` and `FETCHCONTENT_SOURCE_DIR_TIGHT_INCLUSION`
-at private copies in `gpu/deps/`. Do not share the production Tight-Inclusion
-source directory: its configuration writes a header into that directory.
-
-CMake reads the CPU source and makes a checked solver/driver overlay **only
-inside `gpu/build/`**. If insertion anchors change, configuration fails for
-review. Reconfigure/revalidate after an upstream change. No production source
-patch, CUDA installation, Git commit, or push is performed by this build.
-
-## Run
-
-From the CPU repository root, with a **new output directory** (the existing
-driver replaces output files on a fresh run):
-
-```sh
-OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
-./gpu/build/3D_sim_gpu \
-  --example 1 --num_frames 2 --fps 30 \
-  --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
-  --fixed_iters --max_substep_iters 10 --substeps 5 \
-  --node_box_update_count 10 --d_hat 0.005 --k_barrier 100 \
-  --friction_coefficient 0 --use_ccd true \
-  --use_parallel true --use_basic_experimental true --use_simd true \
-  --write_substeps false --format obj --outdir outputs/gpu_example1_NEW
-```
-
-OMP controls the remaining CPU work, not the number of GPU threads. The CUDA
-block width is 128, with bounds-checked record counts. Final output includes GPU
-device name, successful launch/record counts, and CUDA-event upload/compute/
-download durations; these are not total solver time.
-
-## Verification
-
-`gpu_kernel_test` compares point, membrane, and bending gradients/Hessians with
-the CPU SIMD reference at counts 0, 1, 31, 32, 33, 127, 128, 129. It covers pins,
-all hinge roles, thin and degenerate geometry, disabled terms, tail canaries,
-nonfinite rejection/recovery, and device counters. Regular tolerances are
-`2e-9 + 2e-9 * max(abs(cpu),abs(gpu))`; thin-case tolerances are explicitly
-reported by the test. Those tolerances are tests, not a promise about arbitrary
-long nonlinear trajectories.
-
-`3D_sim_cpu_control` uses the same host flags/core/dependencies but the original
-CPU solver. Integration comparisons must report position errors and successful
-CUDA calls as well as runtime, and must cover contact-heavy trajectories before
-production use. The separate resident implementation above now covers device
-gather/reduction, contact, small solves and device-only exact fallbacks; the
-hybrid executable described in this section has not changed into that solver.
-
-`contact_fixture.cpp` supplies two bent cloth sheets with an initial gap below
-`d_hat`, opposing velocities, pins, bending, and actual active normal barriers.
-It runs four substeps with friction 0 and 0.1 in separate matched CPU/GPU
-executables. The validation runner compares all final vertex positions and
-records contact counts/gaps. This does not replace long full-scene validation.
-
-`gpu_solid_kernel_test` compares 36,576 components against scalar volumetric
-derivatives, including all four node roles, signed inversions, rank-deficient
-tets, material switches, and launch tails. `gpu_rigid_kernel_test` covers
-translation/orientation/full/gradient-only modes, both primitive sides, body
-update masks, friction, near-degenerate contacts, current COM snapshots,
-whole-body batching, and inertia. Their optional host-arithmetic test defines
-are diagnostic only; host results explicitly do **not** validate CUDA.
-
-`mixed_fixture.cpp` includes cloth with bending, a four-tet solid with an
-interior node, and a rigid triangle. All three cross-object contact types are
-active. It compares positions, velocities, COMs, quaternions, and omega over
-four substeps, with friction 0 and 0.1, while requiring positive CUDA counters
-for every derivative family. `validate.py` also runs device memcheck for all
-three standalone derivative tests. Passing these tests is not a claim of long
-trajectory equivalence or byte-identical CPU/GPU results.
-
-## Initial cloth-only server results (October 9, 2026)
-
-- Device-vs-CPU SIMD reference: 75,948 derivative components passed; CUDA
-  compute-sanitizer memcheck reported zero errors.
-- 12x12-subdivision cloth, three frames: collision off/on, friction 0.1, and
-  bending disabled passed; maximum coordinate difference `4.44e-16`.
-- 10,000-vertex Example 1, two frames, five substeps, ten iterations:
-  collision-off max coordinate difference `5.77e-15`; collision-on `8.88e-16`.
-- Active-contact two-sheet fixture, four substeps: friction 0 and 0.1 passed;
-  maximum coordinate difference `5.55e-17` in both cases.
-- One short, eight-CPU-thread timing sample (not a benchmark): collision off
-  CPU `0.283 s`, hybrid `0.998 s`; collision on CPU `0.919 s`, hybrid `2.575 s`.
-  The hybrid is currently slower. CUDA kernel time was only `20.6 ms` / `53.0 ms`
-  respectively; transfers plus remaining host work dominate. In the cooperative
-  contact prepass, nested host gather/unpack loops currently execute serially
-  under the submitting worker with the default OpenMP nesting policy.
-
-Reports are in the server's `gpu/validation_*/report.json`; source and tests
-are mirrored in the local `gpu/` folder. No result claims byte identity or
-production readiness, and no Git push has been performed.
-
-## All-three extension verification (October 9, 2026)
-
-The actual CUDA build passes all three kernel tests on the RTX 6000 Ada:
-75,948 point/cloth components, 36,576 solid components, and 455,652 rigid
-components. All three compute-sanitizer memchecks pass. The mixed fixture
-executes every CUDA family, with maximum position error `5.00e-16` without
-friction and `5.55e-17` with friction 0.1; maximum velocity error is `3.34e-15`.
-These results cover four substeps, not a long nonlinear trajectory.
-
-The application-driver checks also pass: one frame of mixed Example 10
-(`15` substeps, `2` iterations, friction `0.1`) differs by at most `2.18e-14`
-in position; one frame of rigid-only Example 9 (`10` substeps, `2` iterations)
-differs by at most `7.84e-15`. The Example 10 first frame has no active rigid
-contacts, so the active mixed-contact fixture above is an essential extra test.
-
-Single eight-host-thread timing samples, not repeated/warmed benchmarks:
-
-| Scene / one frame | CPU control solver | Hybrid GPU solver |
-| --- | ---: | ---: |
-| Example 10, 15×2 | 2.566 s | 3.164 s |
-| Example 9, 10×2 | 109.860 s | 19.765 s |
-
-These are complete solver times, including CPU work, transfers and scheduler
-differences—not isolated GPU compute speedups. Performance is scene-dependent;
-the mixed scene is slower in this sample. Full report and logs:
-[`validation_8so1zypq/report.json`](validation_8so1zypq/report.json), mirrored
-locally. Simulation geometry outputs remain in that server validation folder.
-
-For an existing cloth, solid, rigid, or mixed command, replace `./build/3D_sim`
-with `./gpu/build/3D_sim_gpu`, retain `--use_parallel true
---use_basic_experimental true --use_simd true`, and choose a **new** output
-directory. Keep normal scene parameters; GPU support does not remove contact,
-time-step, or convergence requirements. Use the CPU production executable for
-unsupported grid/OGC modes. This extension does not promise a general speedup.
+Historical callers can explicitly build `3D_sim_gpu`, `3D_sim_cpu_control`,
+or the `gpu_hybrid_validation` aggregate. None joins ordinary `ALL`.
+Keep results from the resident, hybrid, and CPU-control executables distinct.

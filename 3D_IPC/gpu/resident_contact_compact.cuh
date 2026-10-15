@@ -28,7 +28,17 @@ IPC_COMPACT_HD inline int compact_contact_role(unsigned mask) {
 }
 
 IPC_COMPACT_HD inline void store_contact_output(const ContactInput& in,
-    const ContactOutput& out,ContactOutput* full,CompactDeformableContact* compact) {
+    const ContactOutput& out,ContactOutput* full,CompactDeformableContact* compact,
+    unsigned char* output_activity=nullptr) {
+    // This optional byte is the pipeline's existing per-pair publication gate.
+    // Only a successful, mathematically inactive result may clear it. Pending
+    // exact geometry and every failure MUST keep the status/payload observable.
+    // Kernel completion publishes both this byte and the payload to the next
+    // ordered assembly stage; no consumer races a producer within a kernel.
+    if(output_activity) {
+        *output_activity=static_cast<unsigned char>(out.status!=ContactStatus::Ok||out.active!=0);
+        if(!*output_activity)return;
+    }
     if(!compact){*full=out;return;}
     compact->status=out.status;compact->active=out.active;
     compact->role=compact_contact_role(in.hessian_blocks);

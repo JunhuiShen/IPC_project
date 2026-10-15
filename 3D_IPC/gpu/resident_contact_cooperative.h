@@ -44,4 +44,17 @@ void launch_cooperative_exact_contacts(
     CompactDeformableContact* compact_outputs = nullptr,
     bool parallel_geometry_conversions = cooperative_geometry_conversions_enabled());
 
+
+// Pipeline-only overload: successful inactive outputs clear the existing dense
+// publication byte and may leave their unconsumed payload untouched. The legacy
+// overload above remains ABI-compatible and still publishes every full output.
+void launch_cooperative_exact_contacts(
+    const ContactInput* inputs, ContactOutput* outputs,
+    const int* exact_queue, const unsigned* count,
+    int* retry_queue, unsigned* retry_count, unsigned* next,
+    std::uint32_t* words, int* free_slots, unsigned workers,
+    int* failed, cudaStream_t stream,
+    CompactDeformableContact* compact_outputs,
+    bool parallel_geometry_conversions, unsigned char* output_activity);
+
 } // namespace ipc_gpu::resident

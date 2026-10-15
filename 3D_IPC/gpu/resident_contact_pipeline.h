@@ -44,6 +44,11 @@ public:
                  const unsigned char* surface_query=nullptr,
                  const ContactBoxPruning& pruning={});
     ContactIncidence incidence()const;
+    // Explicit current-color launch bound from this completed rebuild. When
+    // IPC_GPU_CCD_CURRENT_COLOR_LAUNCH is off, or indexed queues are absent,
+    // retain incidence()'s original bound. No per-color device readback.
+    // The view must be consumed for this color before the next rebuild.
+    ContactIncidence incidence(int color)const;
     void assemble_color(const DeformableScene&,const DeformableState&,
                         const ElasticWorkspace&,const RigidScene&,const RigidState&,
                         const RigidWorkspace&,const SdfScene&,

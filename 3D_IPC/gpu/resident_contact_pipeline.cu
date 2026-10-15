@@ -1,9 +1,13 @@
 #include "resident_contact_pipeline.h"
 #include "resident_profile.h"
 #include "resident_contact_schedule.h"
+#include "resident_contact_color_launch.h"
 #include "resident_contact_exact.cuh"
 #include "resident_contact_cooperative.h"
+#include "resident_contact_compact_point.h"
+#include "cooperative_compact_point_study.h"
 #include "resident_contact_execution.h"
+#include "resident_contact_input_publication.cuh"
 #include "resident_box_certificate.cuh"
 #include "resident_rigid.cuh"
 #include <cuda_runtime.h>
@@ -36,6 +40,12 @@ int selected_reduce_threads() {
         throw std::invalid_argument("IPC_GPU_CONTACT_SELECTED_NODE_THREADS must be one of 1,2,4,8,16,32,64,128");
     return value;
 }
+int component_reduce_groups() {
+    const int groups=ExactContactSchedule::environment_integer("IPC_GPU_CONTACT_COMPONENT_GROUPS",12,12);
+    if(groups!=1&&groups!=2&&groups!=3&&groups!=4&&groups!=6&&groups!=12)
+        throw std::invalid_argument("IPC_GPU_CONTACT_COMPONENT_GROUPS must be one of 1,2,3,4,6,12");
+    return groups;
+}
 template<class T> class Buffer {
 public:
     T* data=nullptr;std::size_t capacity=0;
@@ -66,6 +76,7 @@ struct Work {
     ContactOutput* outputs;
     CompactDeformableContact* compact;
     unsigned char* active;
+    unsigned char* output_activity;
     int* exact_queue;
     unsigned* exact_count;
     int* exact_retry_queue;
@@ -172,6 +183,7 @@ __device__ bool selected_node(const DeformableScene& scene,const RigidScene& rig
     if(body<0)return false;
     return phase==ContactAssemblyPhase::RigidTranslation?rigid.translate[body]!=0:rigid.rotate[body]!=0;
 }
+template<bool DeferredInput>
 __global__ void gather_compute(BroadPhaseView broad,DeformableScene scene,DeformableState state,
     RigidScene rigid,ContactParameters params,Work work,int color,ContactAssemblyPhase phase,int* failed,
     ColorContactWorklist color_pairs) {
@@ -190,7 +202,8 @@ __global__ void gather_compute(BroadPhaseView broad,DeformableScene scene,Deform
         any_selected=any_selected||selected[role];
     }
     if(!any_selected)return;
-    auto& in=work.inputs[pair];
+    ContactInputPublication<DeferredInput> publication(work.inputs+pair);
+    auto& in=publication.input;
     in.kind=contact.kind==0?ContactKind::PointTriangle:ContactKind::EdgeEdge;
     in.d_hat=params.d_hat;in.k_barrier=params.k_barrier;in.dt=params.dt;
     in.friction=params.friction;in.eps_v=params.eps_v;in.eps=params.eps;
@@ -210,9 +223,10 @@ __global__ void gather_compute(BroadPhaseView broad,DeformableScene scene,Deform
     }
     work.active[pair]=1;
     const auto result=evaluate_contact(in);
-    store_contact_output(in,result,work.outputs+pair,work.compact?work.compact+pair:nullptr);
+    store_contact_output(in,result,work.outputs+pair,work.compact?work.compact+pair:nullptr,
+        work.output_activity?work.output_activity+pair:nullptr);
     const auto status=result.status;
-    if(status==ContactStatus::NeedsExactGeometry||status==ContactStatus::ZeroDistance||status==ContactStatus::NonFiniteDerivative) {
+    if(publication.publish_if_queued(status)) {
         const unsigned index=atomicAdd(work.exact_count,1u);work.exact_queue[index]=static_cast<int>(pair);
     } else if(status!=ContactStatus::Ok)error(failed,code(status));
 }
@@ -243,7 +257,8 @@ __global__ void evaluate_exact_queue(Work work,int* failed) {
             }
         }
         if(result.status!=ContactStatus::Ok){error(failed,code(result.status));break;}
-        store_contact_output(work.inputs[pair],result,work.outputs+pair,work.compact?work.compact+pair:nullptr);
+        store_contact_output(work.inputs[pair],result,work.outputs+pair,work.compact?work.compact+pair:nullptr,
+            work.output_activity?work.output_activity+pair:nullptr);
     }
     resident_exact::release_pool();
 }
@@ -342,6 +357,8 @@ __global__ void reduce_deformable_selected(BroadPhaseView broad,DeformableScene 
 }
 
 #include "resident_contact_warp_reduce.cuh"
+#include "resident_contact_component_reduce.cuh"
+#include "resident_contact_prefetch_reduce.cuh"
 
 __device__ void add_rigid_contact(Derivatives& system,const ContactOutput& out,
     const BpContact& contact,int body,RigidScene rigid,const NodePullback* pullbacks,
@@ -459,15 +476,29 @@ __global__ void reduce_rigid(BroadPhaseView broad,DeformableState deformable,Rig
 
 struct ResidentContactPipeline::Impl {
     const ExactContactSchedule schedule=ExactContactSchedule::from_environment();
+    const bool use_current_color_ccd_launch=contact_execution_option("IPC_GPU_CCD_CURRENT_COLOR_LAUNCH",false);
+    ContactColorLaunchBinding color_launch_binding;
     const bool use_color_pairs=contact_execution_option("IPC_GPU_COLOR_PAIR_QUEUES");
+    const bool defer_inputs=contact_execution_option("IPC_GPU_DEFER_CONTACT_INPUTS",false);
     const bool use_warp_reduce=contact_execution_option("IPC_GPU_WARP_CONTACT_REDUCE");
     const bool use_selected_reduce=contact_execution_option("IPC_GPU_CONTACT_SELECTED_NODE_REDUCE",false);
+    const bool use_component_reduce=contact_execution_option("IPC_GPU_CONTACT_COMPONENT_REDUCE",false);
+    const bool use_prefetch_reduce=contact_execution_option("IPC_GPU_CONTACT_PREFETCH_REDUCE",false);
+    const int component_groups=component_reduce_groups();
+    const int component_grain=ExactContactSchedule::environment_integer("IPC_GPU_CONTACT_COMPONENT_GRAIN",64,INT_MAX);
+    const int component_max_color_blocks=ExactContactSchedule::environment_integer("IPC_GPU_CONTACT_COMPONENT_MAX_COLOR_BLOCKS",128,INT_MAX);
     const int selected_threads=selected_reduce_threads();
     const bool use_compact_warp_reduce=contact_execution_option("IPC_GPU_COMPACT_WARP_REDUCE",false);
     const int compact_warp_degree_cutoff=ExactContactSchedule::environment_integer(
         "IPC_GPU_COMPACT_WARP_REDUCE_MIN_DEGREE",32,INT_MAX);
     const bool use_cooperative_exact=contact_execution_option("IPC_GPU_COOPERATIVE_EXACT_CONTACT");
+    const bool use_compact_point=contact_execution_option("IPC_GPU_COMPACT_POINT_FIRST_TIER",false);
+    const bool use_cooperative_compact_point=contact_execution_option("IPC_GPU_COMPACT_POINT_COOPERATIVE",false);
+    // Preserve the original scalar/disabled paths, including flag parsing.
+    const bool compact_point_ratio=use_compact_point&&use_cooperative_exact
+        ?contact_execution_option("IPC_GPU_CONTACT_INPLACE_RATIO",false):false;
     const bool use_compact=contact_execution_option("IPC_GPU_COMPACT_DEFORMABLE_CONTACTS",false);
+    const bool use_output_activity=contact_execution_option("IPC_GPU_CONTACT_OUTPUT_ACTIVITY",false);
     const bool use_box_pruning=contact_execution_option("IPC_GPU_BOX_CONTACT_PRUNING",false);
     std::ofstream queue_log;
     unsigned long long rebuild_index=0,assembly_index=0;
@@ -488,6 +519,7 @@ struct ResidentContactPipeline::Impl {
     std::size_t mapped_nodes=0;
     const int* mapped_node_blocks=nullptr;
     const unsigned char* mapped_deformable=nullptr;
+    Buffer<Derivatives> component_systems;
     Buffer<ContactInput> inputs;
     Buffer<ContactOutput> outputs;
     Buffer<CompactDeformableContact> compact;
@@ -516,12 +548,16 @@ struct ResidentContactPipeline::Impl {
             queue_log<<"rebuild,assembly,color,phase,candidates,exact_queries,retry_queries,device_status,small_workers,small_threads,large_workers,large_threads\n";
         }
     }
-    void record_queues(int color,ContactAssemblyPhase phase,const int* failed) {
+    void record_queues(int color,ContactAssemblyPhase phase,const int* failed,
+        bool compact_queue_swap=false,unsigned original_exact_count=0) {
         if(!queue_log.is_open())return;
-        unsigned count=0,retries=0;int status=0;
-        checked(cudaMemcpy(&count,exact_count.data,sizeof(count),cudaMemcpyDeviceToHost),"diagnostic exact count");
+        unsigned count=original_exact_count,retries=0;int status=0;
+        // CSV exact_queries remains original M; retry_queries remains actual
+        // scalar256-to1600 W. B's compact-unresolved R is never mislabeled.
+        if(!compact_queue_swap)
+            checked(cudaMemcpy(&count,exact_count.data,sizeof(count),cudaMemcpyDeviceToHost),"diagnostic exact count");
         if(broad.contact_count)
-            checked(cudaMemcpy(&retries,exact_retry_count.data,sizeof(retries),cudaMemcpyDeviceToHost),"diagnostic retry count");
+            checked(cudaMemcpy(&retries,compact_queue_swap?exact_count.data:exact_retry_count.data,sizeof(retries),cudaMemcpyDeviceToHost),"diagnostic retry count");
         checked(cudaMemcpy(&status,failed,sizeof(status),cudaMemcpyDeviceToHost),"diagnostic device status");
         const char* phase_name=phase==ContactAssemblyPhase::Deformable?"deformable":
             phase==ContactAssemblyPhase::RigidTranslation?"rigid_translation":"rigid_orientation";
@@ -531,7 +567,7 @@ struct ResidentContactPipeline::Impl {
         queue_log.flush();
         if(!queue_log)throw std::runtime_error("failed writing contact queue diagnostic output");
     }
-    Work work(bool compact_phase=false)const{return {inputs.data,outputs.data,compact_phase?compact.data:nullptr,active.data,exact_queue.data,exact_count.data,
+    Work work(bool compact_phase=false)const{return {inputs.data,outputs.data,compact_phase?compact.data:nullptr,active.data,use_output_activity?active.data:nullptr,exact_queue.data,exact_count.data,
         exact_retry_queue.data,exact_retry_count.data,exact_next.data,
         exact_words.data,exact_free_slots.data,incidents.data,offsets.data,vertex_block,surface_query,node_pullbacks.data};}
     ColorContactWorklist color_worklist()const {
@@ -543,18 +579,26 @@ struct ResidentContactPipeline::Impl {
 ResidentContactPipeline::ResidentContactPipeline():impl_(std::make_unique<Impl>()){}
 ResidentContactPipeline::~ResidentContactPipeline()=default;
 void ResidentContactPipeline::rebuild(const BroadPhaseView& broad,int block_count,const int* vertex_block,const unsigned char* surface_query,const ContactBoxPruning& pruning) {
+    auto& p=*impl_;
+    p.color_launch_binding.begin_rebuild();
     if(block_count<0||(!vertex_block&&block_count)||broad.contact_count>std::size_t(INT_MAX))
         throw std::invalid_argument("resident contact topology/count unsupported");
-    auto& p=*impl_;p.broad=broad;p.block_count=block_count;p.vertex_block=vertex_block;p.surface_query=surface_query;
+    p.broad=broad;p.block_count=block_count;p.vertex_block=vertex_block;p.surface_query=surface_query;
     p.mapping_dirty=true;
     p.host_selected_offsets.clear();
-    if((p.use_selected_reduce||p.use_compact_warp_reduce)&&broad.color_count>0&&broad.color_blocks&&broad.color_offsets) {
+    if((p.use_selected_reduce||p.use_compact_warp_reduce||p.use_component_reduce||p.use_prefetch_reduce)&&broad.color_count>0&&broad.color_blocks&&broad.color_offsets) {
         p.host_selected_offsets.resize(static_cast<std::size_t>(broad.color_count)+1);
         checked(cudaMemcpy(p.host_selected_offsets.data(),broad.color_offsets,
             p.host_selected_offsets.size()*sizeof(int),cudaMemcpyDeviceToHost),"selected node launch metadata");
         if(p.host_selected_offsets.front()!=0||p.host_selected_offsets.back()>block_count
             ||!std::is_sorted(p.host_selected_offsets.begin(),p.host_selected_offsets.end()))
             throw std::invalid_argument("resident contact selected color offsets are invalid");
+    }
+    if(p.use_component_reduce&&!p.host_selected_offsets.empty()) {
+        std::size_t maximum=0;
+        for(int color=0;color<broad.color_count;++color)
+            maximum=std::max(maximum,static_cast<std::size_t>(p.host_selected_offsets[color+1]-p.host_selected_offsets[color]));
+        p.component_systems.reserve(std::min(maximum,static_cast<std::size_t>(p.component_max_color_blocks)));
     }
     const auto& q=pruning.parameters;
     p.pruning_ready=p.use_box_pruning&&broad.block_colors&&pruning.boxes&&pruning.deformable&&pruning.positions&&pruning.previous
@@ -607,9 +651,16 @@ void ResidentContactPipeline::rebuild(const BroadPhaseView& broad,int block_coun
         for(int color=0;color<broad.color_count;++color)
             p.max_color_pairs=std::max(p.max_color_pairs,p.host_color_offsets[color+1]-p.host_color_offsets[color]);
     }
+    p.color_launch_binding.publish(p.broad,p.color_worklist(),p.host_color_offsets,
+        p.use_current_color_ccd_launch);
 }
 ContactIncidence ResidentContactPipeline::incidence()const {
     return {impl_->offsets.data,impl_->pair_indices.data,impl_->color_worklist()};
+}
+ContactIncidence ResidentContactPipeline::incidence(int color)const {
+    auto result=incidence();
+    result.color_pairs=impl_->color_launch_binding.for_color(impl_->broad,result.color_pairs,color);
+    return result;
 }
 void ResidentContactPipeline::assemble_color(const DeformableScene& scene,const DeformableState& state,
     const ElasticWorkspace& elastic,const RigidScene& rigid,const RigidState& rigid_state,
@@ -633,7 +684,14 @@ void ResidentContactPipeline::assemble_color(const DeformableScene& scene,const 
     const bool selected_ready=phase==ContactAssemblyPhase::Deformable&&!p.host_selected_offsets.empty()
         &&(p.use_selected_reduce||(compact_phase&&p.use_compact_warp_reduce));
     const bool compact_warp_ready=selected_ready&&compact_phase&&p.use_compact_warp_reduce&&p.broad.contact_count;
-    if((warp_ready||selected_ready)&&(p.mapping_dirty||p.mapped_nodes!=scene.nodes
+    const auto component_selected_count=p.host_selected_offsets.empty()?0:
+        static_cast<std::size_t>(p.host_selected_offsets[color+1]-p.host_selected_offsets[color]);
+    const bool component_ready=p.use_component_reduce&&phase==ContactAssemblyPhase::Deformable
+        &&p.broad.contact_count&&component_selected_count
+        &&component_selected_count<=static_cast<std::size_t>(p.component_max_color_blocks);
+    const bool prefetch_ready=p.use_prefetch_reduce&&phase==ContactAssemblyPhase::Deformable
+        &&!p.host_selected_offsets.empty();
+    if((warp_ready||selected_ready||component_ready||prefetch_ready)&&(p.mapping_dirty||p.mapped_nodes!=scene.nodes
         ||p.mapped_node_blocks!=scene.node_blocks||p.mapped_deformable!=scene.deformable)) {
         p.block_to_deformable_node.reserve(p.block_count);
         if(p.block_count)checked(cudaMemsetAsync(p.block_to_deformable_node.data,0xff,p.block_count*sizeof(int)),"clear deformable block map");
@@ -646,29 +704,67 @@ void ResidentContactPipeline::assemble_color(const DeformableScene& scene,const 
     checked(cudaMemsetAsync(p.exact_count.data,0,sizeof(unsigned)),"clear exact queue");
     }
     const auto gather_count=p.color_worklist().offsets?p.host_color_offsets[color+1]-p.host_color_offsets[color]:p.broad.contact_count;
+    bool compact_queue_swap=false;
+    unsigned original_exact_count_for_diagnostic=0;
     if(p.broad.contact_count) {
         {
         ResidentProfileScope fast_profile("fused_gather_fast_compute");
         checked(cudaMemsetAsync(p.exact_retry_count.data,0,sizeof(unsigned)),"clear exact retry queue");
         checked(cudaMemsetAsync(p.exact_next.data,0,sizeof(unsigned)),"clear exact cursor");
-        if(gather_count)gather_compute<<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist());
+        if(gather_count) {
+            if(p.defer_inputs)
+                gather_compute<true><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist());
+            else
+                gather_compute<false><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist());
+        }
+        }
+        Work exact_work=p.work(compact_phase);
+        if(p.use_compact_point&&p.use_cooperative_exact) {
+            ResidentProfileScope compact_profile("exact_compact_point_first");
+            // Both original arena reservations remain. Reuse cooperative
+            // scratch only across whole ordered default-stream launches.
+            if(p.use_cooperative_compact_point&&p.compact_point_ratio) {
+                launch_cooperative_compact_point_inplace_study(p.inputs.data,p.outputs.data,p.exact_queue.data,p.exact_count.data,
+                    p.exact_retry_queue.data,p.exact_retry_count.data,p.exact_next.data,
+                    p.cooperative_words.data,p.cooperative_slots.data,p.cooperative_workers,elastic.error,nullptr,
+                    compact_phase?p.compact.data:nullptr,p.use_output_activity?p.active.data:nullptr);
+            } else {
+                launch_compact_point_contacts(p.inputs.data,p.outputs.data,p.exact_queue.data,p.exact_count.data,
+                    p.exact_retry_queue.data,p.exact_retry_count.data,p.exact_next.data,
+                    p.exact_words.data,p.exact_free_slots.data,p.schedule.small_workers,p.schedule.small_threads,
+                    elastic.error,nullptr,compact_phase?p.compact.data:nullptr,
+                    p.use_output_activity?p.active.data:nullptr,p.compact_point_ratio);
+            }
+            checked(cudaGetLastError(),"compact point first-tier kernel");
+            // This optional read belongs ONLY to the existing explicit queue
+            // diagnostic mode. Production does not read any per-color count.
+            if(p.queue_log.is_open())
+                checked(cudaMemcpy(&original_exact_count_for_diagnostic,p.exact_count.data,sizeof(unsigned),cudaMemcpyDeviceToHost),"diagnostic original compact-tier exact count");
+            // A is dead after this ordered launch. B contains unresolved R;
+            // cooperative256 consumes B and appends true wide retries to A.
+            checked(cudaMemsetAsync(p.exact_count.data,0,sizeof(unsigned)),"clear compact-tier wide retry queue");
+            checked(cudaMemsetAsync(p.exact_next.data,0,sizeof(unsigned)),"clear compact-tier fallback cursor");
+            std::swap(exact_work.exact_queue,exact_work.exact_retry_queue);
+            std::swap(exact_work.exact_count,exact_work.exact_retry_count);
+            compact_queue_swap=true;
         }
         {
         ResidentProfileScope exact_profile("exact_small");
         if(p.use_cooperative_exact)
-            launch_cooperative_exact_contacts(p.inputs.data,p.outputs.data,p.exact_queue.data,p.exact_count.data,
-                p.exact_retry_queue.data,p.exact_retry_count.data,p.exact_next.data,
+            launch_cooperative_exact_contacts(p.inputs.data,p.outputs.data,exact_work.exact_queue,exact_work.exact_count,
+                exact_work.exact_retry_queue,exact_work.exact_retry_count,p.exact_next.data,
                 p.cooperative_words.data,p.cooperative_slots.data,p.cooperative_workers,elastic.error,nullptr,
-                compact_phase?p.compact.data:nullptr);
-        else evaluate_exact_queue<exact_small_limbs,false><<<p.schedule.small_workers/p.schedule.small_threads,p.schedule.small_threads>>>(p.work(compact_phase),elastic.error);
+                compact_phase?p.compact.data:nullptr,cooperative_geometry_conversions_enabled(),
+                p.use_output_activity?p.active.data:nullptr);
+        else evaluate_exact_queue<exact_small_limbs,false><<<p.schedule.small_workers/p.schedule.small_threads,p.schedule.small_threads>>>(exact_work,elastic.error);
         }
         ResidentProfileScope retry_profile("exact_large_retry");
         checked(cudaMemsetAsync(p.exact_next.data,0,sizeof(unsigned)),"clear exact retry cursor");
-        evaluate_exact_queue<exact_large_limbs,true><<<p.schedule.large_workers/p.schedule.large_threads,p.schedule.large_threads>>>(p.work(compact_phase),elastic.error);
+        evaluate_exact_queue<exact_large_limbs,true><<<p.schedule.large_workers/p.schedule.large_threads,p.schedule.large_threads>>>(exact_work,elastic.error);
     }
     if(p.queue_log.is_open()) {
         ResidentProfileScope diagnostic_profile("queue_diagnostic_readback");
-        p.record_queues(color,phase,elastic.error);
+        p.record_queues(color,phase,elastic.error,compact_queue_swap,original_exact_count_for_diagnostic);
     }
     if(phase==ContactAssemblyPhase::RigidOrientation&&rigid.bodies) {
         ResidentProfileScope pullback_profile("rigid_pullback");
@@ -685,7 +781,28 @@ void ResidentContactPipeline::assemble_color(const DeformableScene& scene,const 
     ResidentProfileScope reduce_profile("reduce_sdf");
     if(phase==ContactAssemblyPhase::Deformable) {
         if(scene.nodes) {
-            if(selected_ready) {
+            if(prefetch_ready) {
+                // Prefetch is an alternative to the component-split candidate;
+                // when explicitly enabled it takes precedence for this phase.
+                if(component_selected_count)
+                    reduce_deformable_prefetch_warp<<<static_cast<unsigned>(std::min<std::size_t>(component_selected_count,256)),32>>>(
+                        p.broad,scene,state,elastic,sdf,parameters,p.work(compact_phase),color,
+                        p.block_to_deformable_node.data,p.block_count);
+            } else if(component_ready) {
+                // More blocks only for heavier nodes in colors with limited
+                // parallel work. Each block owns complete scalar chains.
+                const auto tasks=component_selected_count*static_cast<std::size_t>(p.component_groups);
+                const auto chain_blocks=static_cast<unsigned>(std::min<std::size_t>(tasks,65535));
+                reduce_deformable_component_chains<<<chain_blocks,32>>>(p.broad,scene,elastic,parameters,
+                    p.work(compact_phase),color,p.block_to_deformable_node.data,p.block_count,
+                    static_cast<std::size_t>(p.component_grain),static_cast<unsigned>(p.component_groups),p.component_systems.data);
+                // Ordered default-stream completion publishes every pending
+                // component before this once-per-node SDF/check/commit stage.
+                const auto final_blocks=static_cast<unsigned>((component_selected_count+p.selected_threads-1)/p.selected_threads);
+                finalize_deformable_component_chains<<<final_blocks,p.selected_threads>>>(p.broad,scene,state,elastic,sdf,
+                    parameters,p.work(compact_phase),color,p.block_to_deformable_node.data,p.block_count,
+                    static_cast<std::size_t>(p.component_grain),static_cast<unsigned>(p.component_groups),p.component_systems.data);
+            } else if(selected_ready) {
                 const auto selected_count=static_cast<std::size_t>(p.host_selected_offsets[color+1]-p.host_selected_offsets[color]);
                 if(selected_count) {
                     // Small blocks spread narrow colors across SMs; this

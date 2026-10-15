@@ -1,6 +1,6 @@
 #pragma once
 
-#include "resident_scene.h"
+#include "resident_scene_types.h"
 #include <array>
 #include <memory>
 #include <vector>

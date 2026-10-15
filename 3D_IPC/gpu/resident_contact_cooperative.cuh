@@ -1,6 +1,7 @@
 #pragma once
 
 #include "resident_contact_exact.cuh"
+#include "resident_contact_ratio_remainder.cuh"
 
 #if defined(__CUDACC__)
 #define IPC_CONTACT_COOP_HD __host__ __device__
@@ -78,11 +79,20 @@ struct SharedConversions {
 
 struct EntryResult { double value; bool ok; };
 
-template<int C> IPC_CONTACT_COOP_HD inline EntryResult convert_geometry_component(
+template<int C,bool InplaceRatio> IPC_CONTACT_COOP_HD inline double contact_ratio(
+    const resident_exact::Integer<C>& numerator,const resident_exact::Integer<C>& denominator,
+    int scale_exponent,bool* okay) {
+    if constexpr(InplaceRatio)
+        return contact_ratio_detail::ratio_to_double(numerator,denominator,scale_exponent,okay);
+    else return resident_exact::ratio_to_double(numerator,denominator,scale_exponent,okay);
+}
+
+
+template<int C,bool InplaceRatio=false> IPC_CONTACT_COOP_HD inline EntryResult convert_geometry_component(
     const SharedConversions& shared, int component) {
     const ReadOnlyInteger<C> numerator(shared.numerator[component]), denominator(shared.denominator);
     bool okay = true;
-    const double value = resident_exact::ratio_to_double(numerator.get(), denominator.get(),
+    const double value = contact_ratio<C,InplaceRatio>(numerator.get(), denominator.get(),
         component < 3 ? shared.unit : 0, &okay);
     return {value, okay};
 }
@@ -206,21 +216,21 @@ template<int C> IPC_CONTACT_COOP_HD inline bool prepare_derivatives(
 
 // Serial preparation remains the default and the portable reference. Splitting
 // it into stages does not change its conversion calls or arithmetic order.
-template<int C> IPC_CONTACT_COOP_HD inline bool prepare_geometry(
+template<int C,bool InplaceRatio=false> IPC_CONTACT_COOP_HD inline bool prepare_geometry(
     const ContactInput& in, int role, GeometryOwner<C>& owner,
     ContactOutput& out, SharedGeometry& shared) {
     if (!prepare_feature(in, owner, out)) return false;
     const auto& f = owner.feature;
     bool okay = true;
     for (int k = 0; k < 3; ++k)
-        owner.residual[k] = resident_exact::ratio_to_double(f.residual[k], f.denominator, owner.unit, &okay);
+        owner.residual[k] = contact_ratio<C,InplaceRatio>(f.residual[k], f.denominator, owner.unit, &okay);
     for (int i = 0; i < 4; ++i)
-        out.weights[i] = resident_exact::ratio_to_double(f.weight[i], f.denominator, 0, &okay);
+        out.weights[i] = contact_ratio<C,InplaceRatio>(f.weight[i], f.denominator, 0, &okay);
     if (!okay) { out.status = ContactStatus::ExactCapacityExceeded; return false; }
     return prepare_derivatives(in, role, owner, out, shared);
 }
 
-template<int C> IPC_CONTACT_COOP_HD inline EntryResult compute_entry(
+template<int C,bool InplaceRatio=false> IPC_CONTACT_COOP_HD inline EntryResult compute_entry(
     const SharedGeometry& shared, int entry) {
     using I = resident_exact::Integer<C>;
     const int k = entry / 3, l = entry % 3, n = shared.free_parameters;
@@ -238,8 +248,8 @@ template<int C> IPC_CONTACT_COOP_HD inline EntryResult compute_entry(
         a.mul(g01.get(), a.sum(a.mul(vi0.get(), vj1.get()), a.mul(vi1.get(), vj0.get()))));
     const I hq_num = a.sub(k == l ? a.mul(ww.get(), z.get()) : I(0), schur);
     const I curvature_num = a.sub(a.mul(hq_num, squared.get()), a.mul(normal_num, z.get()));
-    const double normal_term = resident_exact::ratio_to_double(normal_num, normal_den.get(), 0, &a.ok);
-    const double curvature = resident_exact::ratio_to_double(curvature_num, curvature_den.get(), 0, &a.ok);
+    const double normal_term = contact_ratio<C,InplaceRatio>(normal_num, normal_den.get(), 0, &a.ok);
+    const double curvature = contact_ratio<C,InplaceRatio>(curvature_num, curvature_den.get(), 0, &a.ok);
     return {shared.bpp*normal_term+(shared.bp/shared.distance)*curvature, a.ok};
 }
 
