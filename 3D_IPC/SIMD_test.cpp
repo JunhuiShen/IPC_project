@@ -2258,7 +2258,7 @@ TEST(SIMDContact, QueryEdgePacketsPreserveNodeTriangleAndSegmentSegmentReference
     }
 }
 
-TEST(SIMDContact, CompactEdgeBlocksCoverRotationsScalesFeatureMappingsAndRoles) {
+TEST(SIMDContact, EdgeBlocksCoverRotationsScalesFeatureMappingsAndRoles) {
     constexpr std::size_t width = ipc_simd::contact_tile_width;
     std::array<ipc_simd::MeshContactInput, width> inputs;
     std::array<ipc_simd::MeshContactOutput, width> outputs;
@@ -2317,7 +2317,7 @@ TEST(SIMDContact, CompactEdgeBlocksCoverRotationsScalesFeatureMappingsAndRoles) 
                     if (count != 4) continue;
                     // These fixtures are strictly inside their smooth selected
                     // features. Differentiate the scalar gradient independently
-                    // of both the original and compact Hessian expressions.
+                    // of the Hessian expressions under test.
                     Mat33 finite;
                     const double h = 1e-5*scale;
                     const auto gradient = [&](const std::array<Vec3,4>& p) {

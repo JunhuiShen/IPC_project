@@ -397,10 +397,6 @@ static void corotated_derivatives_tile_impl(
                 for (int col = 0; col < 2; ++col)
                     material[row][col][lane] = dm_inverse[entry](row,col);
         }
-        bool compact_packet = false;
-        if constexpr (!GeneralReference)
-            compact_packet = mu >= 0x1p-16 && mu <= 0x1p15
-                && lambda >= 0.0 && lambda <= 0x1p16 && lambda <= 16.0 * mu;
         // Preserve the scalar eigensolver and its clamping decisions. Only
         // local tile data are read; the derivative contractions below use SIMD.
         for (int lane = 0; lane < count; ++lane) {
@@ -416,28 +412,6 @@ static void corotated_derivatives_tile_impl(
             const Mat32 f = ds * dm;
             const CorotatedCache32 cache = buildCorotatedCache(f);
             const Mat32 stress = PCorotated32(cache, f, mu, lambda);
-            if constexpr (!GeneralReference) {
-                // The contraction is exact algebraically for the represented
-                // cache. Restrict reassociation to moderate, unclamped Gram
-                // matrices; an unsafe lane retains the old whole-packet path.
-                constexpr double limit = 0x1p16;
-                const double ci_trace = cache.FTFinv.trace();
-                const double ci_det = cache.FTFinv.determinant();
-                const double shape_max = shape_gradients[entry].cwiseAbs().maxCoeff();
-                compact_packet = compact_packet
-                    && cache.traceS >= 0x1p-16 && cache.traceS <= limit
-                    && cache.J >= 0.25 && cache.J <= 4.0
-                    && cache.J >= 0x1p-8 * cache.traceS
-                    && cache.FTFinv(0,0) > 0.0 && cache.FTFinv(1,1) > 0.0
-                    && ci_det >= 0.0625 * ci_trace * ci_trace
-                    && std::abs(areas[entry]) >= 0x1p-16 && std::abs(areas[entry]) <= limit
-                    && shape_max >= 0x1p-16 && (shape_gradients[entry].array().abs() <= limit).all()
-                    && (f.array().abs() <= limit).all()
-                    && (cache.SInv.array().abs() <= limit).all()
-                    && (cache.FTFinv.array().abs() <= limit).all()
-                    && (cache.R.array().abs() <= limit).all()
-                    && (cache.FFTFInv.array().abs() <= limit).all();
-            }
             if constexpr (GeneralReference) {
                 // Eigen's packet rows and scalar tail use different fused
                 // operand orders for these two-column matrix products. Reuse
@@ -484,21 +458,6 @@ static void corotated_derivatives_tile_impl(
         const ElementPack volumetric = bulk * (J - one) * J;
         const ElementPack positive = ElementPack(0.5 * lambda) * (ElementPack(2.0) * J - one) * J;
         const ElementPack shape[2] = {ElementPack::load(q[0]), ElementPack::load(q[1])};
-        ElementPack shape_norm, shape_sinv, shape_cinv, projected_b[3], rotated_shape[3], scaled_rotation[3];
-        if constexpr (!GeneralReference) {
-            if (compact_packet) {
-                shape_norm = shape[0] * shape[0] + shape[1] * shape[1];
-                shape_sinv = (shape[0] * ElementPack::load(s[0][0]) + shape[1] * ElementPack::load(s[1][0])) * shape[0]
-                    + (shape[0] * ElementPack::load(s[0][1]) + shape[1] * ElementPack::load(s[1][1])) * shape[1];
-                shape_cinv = (shape[0] * ElementPack::load(ci[0][0]) + shape[1] * ElementPack::load(ci[1][0])) * shape[0]
-                    + (shape[0] * ElementPack::load(ci[0][1]) + shape[1] * ElementPack::load(ci[1][1])) * shape[1];
-                for (int i = 0; i < 3; ++i) {
-                    projected_b[i] = ElementPack::load(b[i][0]) * shape[0] + ElementPack::load(b[i][1]) * shape[1];
-                    rotated_shape[i] = ElementPack::load(r[i][1]) * shape[0] - ElementPack::load(r[i][0]) * shape[1];
-                    scaled_rotation[i] = rotated_shape[i] / trace;
-                }
-            }
-        }
         // Retain the scalar beta/eta contraction order for each self block.
         #pragma GCC unroll 3
         for (int i = 0; i < 3; ++i) {
@@ -526,18 +485,6 @@ static void corotated_derivatives_tile_impl(
                         return element_multiply_add(ElementPack::load(b[i][1]), ElementPack::load(f_data[j][1]),
                             ElementPack::load(b[i][0]) * ElementPack::load(f_data[j][0]));
                 }();
-                if constexpr (!GeneralReference) {
-                    if (compact_packet) {
-                        const ElementPack delta = i == j ? one : zero;
-                        const ElementPack dr = (delta - RRT) * shape_sinv + scaled_rotation[i] * rotated_shape[j];
-                        const ElementPack rank = (positive + positive) - volumetric;
-                        const ElementPack sum = twice_mu * (delta * shape_norm - dr)
-                            + (volumetric * shape_cinv) * (delta - Q)
-                            + rank * (projected_b[i] * projected_b[j]);
-                        (A * sum).store(hd[i][j]);
-                        continue;
-                    }
-                }
                 ElementPack sum = zero;
                 #pragma GCC unroll 2
                 for (int beta = 0; beta < 2; ++beta) {
@@ -803,8 +750,7 @@ static ContactMatrix contact_point_hessian(const ContactPacket& data) {
 }
 
 // Use the scalar reference for lanes with poor conditioning or cancellation.
-// Regular basic edge lanes use the algebraically contracted expression below.
-template <bool CompactEdge = false>
+// Regular lanes evaluate the original derivative expressions below.
 static ContactPack contact_expression_fallback(const ContactPacket& data, ContactFeature feature) {
     if (feature == ContactFeature::Point) return 0.0;
     ContactPack a[3], b[3], r[3];
@@ -833,26 +779,6 @@ static ContactPack contact_expression_fallback(const ContactPacket& data, Contac
             ContactElementPack(0.0));
         fallback = select(valid, ContactElementPack(0.0), ContactElementPack(1.0));
         fallback = select(stationarity_bad(a, A), ContactElementPack(1.0), fallback.value);
-        if constexpr (CompactEdge) {
-            // The old expression contains beta^2 and beta^3 denominators.
-            // Replay it outside a moderate range even if compact H is finite.
-            const ContactElementPack zero(0.0);
-            const ContactPack lower(0x1p-32), upper(0x1p32), coordinate_limit(0x1p16);
-            const auto bounded = [&](ContactPack value, ContactPack limit) {
-                return select(contact_greater(value.value, (-limit).value),
-                    contact_greater(limit.value, value.value), zero);
-            };
-            auto admitted = select(contact_greater(A.value, lower.value),
-                contact_greater(upper.value, A.value), zero);
-            admitted = select(contact_greater(data.delta.value, lower.value), admitted, zero);
-            admitted = select(contact_greater(upper.value, data.delta.value), admitted, zero);
-            admitted = select(bounded(data.bp, upper), admitted, zero);
-            admitted = select(bounded(data.bpp, upper), admitted, zero);
-            for (int vertex = 0; vertex < 3; ++vertex)
-                for (int axis = 0; axis < 3; ++axis)
-                    admitted = select(bounded(data.x[vertex](axis), coordinate_limit), admitted, zero);
-            fallback = select(admitted, fallback.value, ContactElementPack(1.0));
-        }
     } else {
         const ContactPack B = contact_ordered_dot(a, b), C = contact_ordered_dot(b, b);
         const ContactPack det = contact_multiply_add(A, C, -(B * B));
@@ -866,33 +792,6 @@ static ContactPack contact_expression_fallback(const ContactPacket& data, Contac
 
 template <bool General = false>
 static ContactMatrix contact_edge_hessian(const ContactPacket& data) {
-    if constexpr (!General) {
-        ContactPack e[3], w[3], r[3], u[3], v[3];
-        for (int i = 0; i < 3; ++i) {
-            e[i] = data.x[2](i) - data.x[1](i);
-            w[i] = data.x[0](i) - data.x[1](i);
-        }
-        const ContactPack beta = contact_kernel_dot<General>(e, e);
-        const ContactPack t = contact_kernel_dot<General>(w, e) / beta;
-        const ContactPack c = data.sa - t * data.sb, cc = c * c;
-        for (int i = 0; i < 3; ++i) {
-            r[i] = data.x[0](i) - (data.x[1](i) + t * e[i]);
-            u[i] = r[i] / data.delta;
-            v[i] = c * e[i] + data.sb * r[i];
-        }
-        const ContactPack bd = data.bp / data.delta;
-        const ContactPack identity_scale = bd * cc;
-        const ContactPack normal_scale = (data.bpp - bd) * cc;
-        const ContactPack edge_scale = -bd / beta;
-        ContactMatrix H;
-        // Contract the existing supporting-line formula before differentiation
-        // tables are expanded. Feature selection and scalar replay are unchanged.
-        for (int i = 0; i < 3; ++i)
-            for (int j = 0; j < 3; ++j)
-                H(i,j) = identity_scale * ContactPack(i == j ? 1.0 : 0.0)
-                    + normal_scale * u[i] * u[j] + edge_scale * v[i] * v[j];
-        return H;
-    }
     const int p = 0, q = 0, requested_dof_count = 1;
     const int requested_dofs[1] = {0};
     const ContactPack delta = data.delta, bp = data.bp, bpp = data.bpp;
@@ -1503,7 +1402,7 @@ static void mesh_contact_derivatives_tile_impl(const MeshContactInput* inputs, s
                 case ContactFeature::Interior: H = contact_interior_hessian<General>(packet); break;
             }
             alignas(64) double g[3][W],h[3][3][W],fallback[W];
-            contact_expression_fallback<!General>(packet,feature).store(fallback);
+            contact_expression_fallback(packet,feature).store(fallback);
             for (int axis = 0; axis < 3; ++axis) {
                 const auto vector = ContactPack::load(direction[axis]);
                 const auto unit = feature == ContactFeature::Face ? vector : vector / packet.delta;

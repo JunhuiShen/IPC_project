@@ -64,8 +64,42 @@ target_include_directories(Eigen3::Eigen SYSTEM INTERFACE
 
 FetchContent_MakeAvailable(tight_inclusion)
 
-# Exact rational predicates for ambiguous linear CCD queries (header-only).
-find_package(Boost 1.70 CONFIG REQUIRED)
+# Exact rational predicates require Boost 1.83 or newer (header-only).
+set(_ipc_requested_boost_dir "${Boost_DIR}")
+find_package(Boost 1.83 CONFIG QUIET)
+if(NOT Boost_FOUND)
+    # Some system packages retain an older CMake package version after their
+    # headers are upgraded. Verify the selected target's actual headers below.
+    if(_ipc_requested_boost_dir)
+        set(Boost_DIR "${_ipc_requested_boost_dir}" CACHE PATH
+            "Directory containing the Boost package configuration" FORCE
+        )
+    endif()
+    find_package(Boost CONFIG REQUIRED)
+endif()
+unset(_ipc_requested_boost_dir)
+
+include(CMakePushCheckState)
+include(CheckCXXSourceCompiles)
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_LIBRARIES Boost::headers)
+# Recheck on every configure, including when headers change in place.
+unset(IPC_BOOST_HEADERS_AT_LEAST_1_83 CACHE)
+unset(IPC_BOOST_HEADERS_AT_LEAST_1_83)
+check_cxx_source_compiles("
+    #include <boost/version.hpp>
+    #if !defined(BOOST_VERSION) || BOOST_VERSION < 108300
+    #error Boost headers must be version 1.83 or newer
+    #endif
+    int main() { return 0; }
+" IPC_BOOST_HEADERS_AT_LEAST_1_83)
+cmake_pop_check_state()
+if(NOT IPC_BOOST_HEADERS_AT_LEAST_1_83)
+    message(FATAL_ERROR
+        "Boost 1.83 or newer headers are required by Boost::headers. "
+        "Select a compatible installation with Boost_DIR."
+    )
+endif()
 
 # AppleClang needs Homebrew's libomp and a compiler-specific OpenMP flag. Feed
 # those paths to FindOpenMP instead of adding a global include directory.
@@ -244,6 +278,10 @@ if(BUILD_TESTING)
         cmake_parse_arguments(PARSE_ARGV 1 IPC_TEST "" "" "DEFINITIONS")
 
         add_executable("${target}" "${target}.cpp")
+        if(target STREQUAL "ccd_test")
+            # Select the oracle's Boost headers before GTest's system include root.
+            target_link_libraries("${target}" PRIVATE Boost::headers)
+        endif()
         target_link_libraries("${target}" PRIVATE IPC::ipc GTest::gtest_main)
         if(IPC_TEST_DEFINITIONS)
             target_compile_definitions("${target}" PRIVATE ${IPC_TEST_DEFINITIONS})

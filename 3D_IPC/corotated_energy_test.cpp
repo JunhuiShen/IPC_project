@@ -502,7 +502,7 @@ TEST(CorotatedEnergy, LargeCoordinates){
 namespace {
 
 // A second-order scalar jet differentiates the smooth invariant energy, without
-// using the polar cache, material tensor, or compact contraction being checked.
+// using the polar cache, material tensor, or SIMD derivative expressions.
 struct SmoothEnergyJet {
     long double value = 0;
     std::array<long double,3> gradient{};
@@ -552,7 +552,7 @@ SmoothEnergyJet independently_differentiated_membrane(const Mat32& F, const Vec2
         +SmoothEnergyJet(.5L*lambda)*(J-SmoothEnergyJet(1))*(J-SmoothEnergyJet(1)));
 }
 
-// Preserve the old basic SIMD operation graph as a fallback regression oracle.
+// Preserve the old basic SIMD operation graph as a regression oracle.
 // The independent energy jet above, rather than this graph, validates the math.
 double old_basic_fma(double a,double b,double c) {
 #if defined(__AVX512F__) || (defined(__AVX2__) && defined(__FMA__)) || defined(__aarch64__) || defined(_M_ARM64)
@@ -593,7 +593,7 @@ Mat33 old_basic_membrane_block(const Mat32& F, const Vec2& shape, double area, d
 
 } // namespace
 
-TEST(CorotatedEnergy, BasicSIMDCompactBlockMatchesIndependentSmoothEnergy) {
+TEST(CorotatedEnergy, BasicSIMDBlockMatchesIndependentSmoothEnergy) {
     const auto tri=MakeTestTriangle();
     const auto shapes=shape_function_gradients(tri.Dm_inv);
     for (int sample=0;sample<18;++sample) for (int role=0;role<3;++role) {
@@ -618,7 +618,7 @@ TEST(CorotatedEnergy, BasicSIMDCompactBlockMatchesIndependentSmoothEnergy) {
     }
 }
 
-TEST(CorotatedEnergy, BasicSIMDFallbackRetainsClampedAndExtremeOperationGraph) {
+TEST(CorotatedEnergy, BasicSIMDRetainsClampedAndExtremeOperationGraph) {
     const Mat22 identity=Mat22::Identity();
     const Vec2 shape(-.75,.625);const double area=.5;
     for (double second_scale : {0x1p-150,0x1p-22,0x1p-20,0.01,0x1p40}) {
@@ -628,7 +628,7 @@ TEST(CorotatedEnergy, BasicSIMDFallbackRetainsClampedAndExtremeOperationGraph) {
         ipc_simd::corotated_derivatives_tile(x.data(),&identity,&area,&shape,1,kMu,kLambda,&g,&H);
         const Mat33 old=old_basic_membrane_block(F,shape,area,kMu,kLambda);
         EXPECT_EQ(std::memcmp(H.data(),old.data(),9*sizeof(double)),0)
-            << "fallback changed at scale=" << second_scale;
+            << "operation graph changed at scale=" << second_scale;
     }
     for (const auto& values : std::array<std::array<double,3>,3>{{
             {{.125,.125,kLambda}}, {{3.0,3.0,kLambda}}, {{1.0,1.0,64.0}}}}) {
@@ -638,6 +638,6 @@ TEST(CorotatedEnergy, BasicSIMDFallbackRetainsClampedAndExtremeOperationGraph) {
         ipc_simd::corotated_derivatives_tile(x.data(),&identity,&area,&shape,1,kMu,values[2],&g,&H);
         const Mat33 old=old_basic_membrane_block(F,shape,area,kMu,values[2]);
         EXPECT_EQ(std::memcmp(H.data(),old.data(),9*sizeof(double)),0)
-            << "fallback changed for compressed/stretched or high-bulk material";
+            << "operation graph changed for compressed/stretched or high-bulk material";
     }
 }

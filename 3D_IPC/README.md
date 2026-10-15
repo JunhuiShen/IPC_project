@@ -24,7 +24,7 @@ further processing; it does not open a viewer.
 
 - A C++17 compiler and CMake 3.24+.
 - OpenMP. On macOS with AppleClang, CMake looks for Homebrew `libomp`.
-- Boost 1.70+ with its CMake package configuration.
+- Boost 1.83+ with its CMake package configuration.
 - Git and network access for the first configuration. CMake fetches Eigen
   3.4.0 and Tight-Inclusion CCD 1.0.6, plus their configured dependencies.
 - GoogleTest when building tests. It is optional for the simulator-only build
@@ -47,7 +47,8 @@ cmake --build build --target 3D_sim -j 64
 **All remaining commands run from `3D_IPC/`.** Start with a 100-vertex cloth:
 
 ```sh
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE ./build/3D_sim \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim \
   --example 1 --twist_nx 9 --twist_ny 9 \
   --fps 30 --num_frames 30 --substeps 3 \
   --max_substep_iters 20 --fixed_iters \
@@ -66,7 +67,8 @@ folder and a different path for each run you want to keep.
 To see every option and its default:
 
 ```sh
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE ./build/3D_sim --help
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --help
 ```
 
 ### Build options
@@ -185,7 +187,8 @@ it false for a normal frame sequence. Checkpoints still use frame numbers.
 To continue the quick-start run from frame 30 through frame 60:
 
 ```sh
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE ./build/3D_sim \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim \
   --example 1 --twist_nx 9 --twist_ny 9 \
   --fps 30 --num_frames 60 --substeps 3 \
   --max_substep_iters 20 --fixed_iters \
@@ -204,13 +207,9 @@ cloth, solid, and rigid residuals separately.
 
 ## Example scene commands
 
-All scene commands below enable SIMD v2 with
-`--use_basic_experimental true --use_simd true`. Each build uses its available
-SIMD backend or scalar fallbacks.
-
 ```bash
 # Example 1: square cloth twisted in place, 240 frames at 0.5 turns/s
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 1 --num_frames 240 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
   --d_hat 0.005 --k_barrier 100 \
@@ -220,7 +219,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
   --outdir example1_output --format geo
 
 # Example 2: two cylinders, 2.0 turns, twist then untwist
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 2 --exact_computation_fallback false --num_frames 900 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 5e6 \
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e5 --eps_sdf 0.002 \
@@ -230,7 +229,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
   --outdir example2_output --format geo
 
 # Example 3: one yawing cylinder, 4.0 turns at 0.30 turns/s
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 3 --exact_computation_fallback false --num_frames 850 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e8 \
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 --eps_sdf 0.002 \
@@ -241,7 +240,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
   --outdir example3_output --format geo
 
 # Example 4: avatar collider and dress loaded from a data directory
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 4 --datadir /path/to/avatar_data \
   --use_basic_experimental true --use_simd true --format geo
 ```
@@ -250,17 +249,17 @@ Examples 5, 6, and 7 use the corresponding scene presets from `example.cpp`:
 
 ```bash
 # Example 5: freely rotating tennis racket
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
  ./build/3D_sim --example 5 --num_frames 500 --substeps 30 --rigid_density 25 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output \
   --use_basic_experimental true --use_simd true --format geo
 
 # Example 6: freely rotating space tool
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 6 --num_frames 2000 --substeps 30 --rigid_density 25 --tol_abs 1e-12 --tol_rel 1e-10 --outdir space_tool_output \
   --use_basic_experimental true --use_simd true --format geo
 
 # Example 7: stationary stack of ten rigid polygons
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 7 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --rigid_density 25 --gy 0 --outdir twenty_polygon_static_stack_output --format geo \
   --use_basic_experimental true --use_simd true
 
@@ -270,7 +269,7 @@ Examples 8–14 use the following scene commands:
 
 ```bash
 # Example 8: Bunny/Spot solids with rigid cubes and gears
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
  ./build/3D_sim --example 8 --datadir example_obj \
  --num_frames 200 --fps 30 --substeps 10 --max_substep_iters 150 \
  --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 \
@@ -280,15 +279,15 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
   --use_colored_ccd_guess true --colored_ccd_guess_iters 10
 
 # Example 9: dynamic threaded bolt falling through a fixed nut
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 9 --num_frames 150 \
   --substeps 10 --max_substep_iters 2 --fixed_iters \
-  --use_parallel true --use_basic_experimental true --use_simd true \
+  --use_parallel true --use_basic_experimental true --use_simd false \
   --outdir bolt_into_fixed_nut_output --format geo
 
 # Example 10: four horizontal layers of differently ordered Bunny/Spot/cube/gear groups; Bunny and Spot lie on their sides
 # With friction coefficient 0.1, use 15 substeps and 40 max_substep_iters.
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 10 --num_frames 200 --fps 30 --substeps 15 --max_substep_iters 25 --fixed_iters \
   --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 \
   --d_hat 0.019 --k_barrier 1000 --friction_coefficient 0 --use_ccd true \
@@ -297,7 +296,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
   --use_colored_ccd_guess true --colored_ccd_guess_iters 10
 
 # Example 11: rolled cloth unrolling down an SDF ramp
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 11 --num_frames 200 \
   --substeps 10 --max_substep_iters 2 --fixed_iters \
   --kB 0.0025 --friction_coefficient 0.1 \
@@ -306,7 +305,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
   --outdir rolled_cloth_on_steep_ramp_output_new --format geo
 
 # Example 12: three cloth layers with one fixed edge and one oscillating edge
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 12 --num_frames 200 \
   --substeps 10 --max_substep_iters 2 --fixed_iters \
   --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 \
@@ -316,7 +315,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
   --outdir oscillating_cloth_layers_output --format geo
 
 # Example 13: a rigid wrecking ball swings into a wall of 560 cubes
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 13 \
   --use_basic_experimental true --use_simd true \
   --num_frames 200 --substeps 20 --max_substep_iters 150 --fixed_iters \
@@ -373,13 +372,20 @@ test suite, install GoogleTest, then use:
 ```sh
 cmake -S . -B build -DBUILD_TESTING=ON
 cmake --build build -j 64
-OMP_NUM_THREADS=64 ctest --test-dir build --output-on-failure
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+ctest --test-dir build --output-on-failure
 ```
 
 List discovered tests with `ctest --test-dir build -N`, or run a test binary
-such as `OMP_NUM_THREADS=64 ./build/make_shape_test` directly. Set `-DIPC_BUILD_TOOLS=ON` to build
-`generate_golden`, which rewrites regression fixtures; it is not needed to run
-simulations.
+directly:
+
+```sh
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/make_shape_test
+```
+
+Set `-DIPC_BUILD_TOOLS=ON` to build `generate_golden`, which rewrites regression
+fixtures; it is not needed to run simulations.
 
 ## Troubleshooting
 
