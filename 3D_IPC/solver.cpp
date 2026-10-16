@@ -3425,14 +3425,35 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
                 #pragma omp for schedule(static)
                 for (int vi = 0; vi < nv; ++vi) {
                     double minimum = std::numeric_limits<double>::infinity();
-                    for (const auto& entry : bp_cache.vertex_nt[vi]) {
+                    auto& nt_entries = bp_cache.vertex_nt[vi];
+                    auto& ss_entries = bp_cache.vertex_ss[vi];
+                    const auto* nt_active = cache_contact_operands
+                        ? &contact_operands.nt_aabb_active : cache_friction_operands
+                        ? &friction_operands.nt_aabb_active : nullptr;
+                    const auto* ss_active = cache_contact_operands
+                        ? &contact_operands.ss_aabb_active : cache_friction_operands
+                        ? &friction_operands.ss_aabb_active : nullptr;
+                    std::size_t retained_nt = 0, retained_ss = 0;
+                    // Bounds still include every candidate. During the same
+                    // traversal, stably retain only incidence that the frozen
+                    // barrier assembly can accept. No arithmetic is skipped:
+                    // that assembly already rejects the other entries before
+                    // accumulating anything. refresh_pairs restores complete
+                    // incidence from all pairs before the next sweep.
+                    for (const auto& entry : nt_entries) {
                         const double distance = nt_distances[entry.pair_index].distance;
                         if (distance < minimum) minimum = distance;
+                        if (nt_active && (*nt_active)[entry.pair_index])
+                            nt_entries[retained_nt++] = entry;
                     }
-                    for (const auto& entry : bp_cache.vertex_ss[vi]) {
+                    for (const auto& entry : ss_entries) {
                         const double distance = ss_distances[entry.pair_index].distance;
                         if (distance < minimum) minimum = distance;
+                        if (ss_active && (*ss_active)[entry.pair_index])
+                            ss_entries[retained_ss++] = entry;
                     }
+                    if (nt_active) nt_entries.resize(retained_nt);
+                    if (ss_active) ss_entries.resize(retained_ss);
                     double b = 0.4 * minimum;
                     if (!std::isfinite(b)) b = node_box_size_fn(vi);
                     bounds[vi] = b;

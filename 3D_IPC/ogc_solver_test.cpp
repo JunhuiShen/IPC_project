@@ -709,6 +709,82 @@ TEST(OGCSolver, TrustRegionSafeStepClampsToIncidentContactDistance) {
 
     EXPECT_DOUBLE_EQ(ogc_weight, 0.8);
     EXPECT_TRUE(x_ogc[0].isApprox(Vec3(0.0, 0.3, 0.0), 1.0e-12));
+
+    // A barrier-inactive pair must still limit the production solver's trust
+    // radius. The isolated node approaches a collision-only triangle; empty
+    // elastic rows keep the expected update independent of material terms.
+    RefMesh mesh;
+    mesh.num_positions = 4;
+    mesh.tris = {1, 2, 3};
+    mesh.mass.assign(4, 1.0);
+    const std::vector<Vec3> initial{
+        Vec3(.25, .5, .25), Vec3(0, 0, 0),
+        Vec3(1, 0, 0), Vec3(0, 0, 1)};
+    VertexTriangleMap adjacency;
+    for (int node = 0; node < 4; ++node) adjacency[node] = {};
+    std::vector<Vec3> xhat = initial;
+    xhat[0].y() = -.5;
+    const std::vector<Vec3> velocity(4, Vec3::Zero());
+    const std::vector<Pin> pins;
+    SimParams params = SimParams::zeros();
+    params.fps = 60.0;
+    params.substeps = 1;
+    params.fixed_iters = true;
+    params.use_ccd = false;
+    params.damping = 1.0;
+    params.node_box_min = params.node_box_max = 1.0;
+    params.d_hat = .01;
+    params.k_barrier = 1.0;
+
+    std::vector<AABB> boxes;
+    const Vec3 radius = Vec3::Constant(params.node_box_max + params.d_hat);
+    for (const Vec3& point : initial)
+        boxes.emplace_back(point - radius, point + radius);
+    BroadPhase search;
+    search.initialize(boxes, mesh, params.d_hat,
+        BroadPhase::InitializationMode::BulkRefittable);
+    ASSERT_EQ(search.nt_pairs().size(), 1U);
+    ASSERT_EQ(search.nt_pairs()[0].node, 0);
+    const auto& candidate = search.nt_pairs()[0];
+    const auto distance = node_triangle_distance(initial[candidate.node],
+        initial[candidate.tri_v[0]], initial[candidate.tri_v[1]],
+        initial[candidate.tri_v[2]]);
+    ASSERT_DOUBLE_EQ(distance.distance, .5);
+    solver_detail::OGCFrozenContactOperands operands;
+    operands.resize(search.nt_pairs().size(), search.ss_pairs().size());
+    operands.prepare_node_triangle(0, candidate, initial, distance, params.d_hat);
+    ASSERT_EQ(operands.nt_aabb_active[0], 0);
+
+    for (const double friction : {0.0, .45}) {
+        params.friction_coefficient = friction;
+        // Five sweeps require full incidence to return after each frozen AABB
+        // compaction. Restarting at one sweep also checks the next solve call.
+        for (const int iterations : {1, 5, 1}) {
+            SCOPED_TRACE(::testing::Message()
+                << "inactive contact: friction=" << friction
+                << " iterations=" << iterations);
+            params.max_global_iters = iterations;
+            std::vector<Vec3> current = initial;
+            const SolverResult result = global_gauss_seidel_solver_ogc(
+                mesh, adjacency, pins, params, current, xhat, velocity,
+                "", &initial);
+            ASSERT_TRUE(result.converged);
+            ASSERT_EQ(result.iterations, iterations);
+            // Each sweep can travel only .4 times its current distance, so
+            // y decreases by exactly the geometric factor .6 up to rounding.
+            const double expected_y = .5 * std::pow(.6, iterations);
+            ASSERT_GT(expected_y, params.d_hat);
+            EXPECT_NEAR(current[0].y(), expected_y, 1e-14);
+            EXPECT_DOUBLE_EQ(current[0].x(), initial[0].x());
+            EXPECT_DOUBLE_EQ(current[0].z(), initial[0].z());
+            for (std::size_t node = 0; node < current.size(); ++node) {
+                ASSERT_TRUE(current[node].allFinite());
+                if (node != 0)
+                    EXPECT_EQ(std::memcmp(current[node].data(),
+                        initial[node].data(), 3 * sizeof(double)), 0);
+            }
+        }
+    }
 }
 
 } // namespace

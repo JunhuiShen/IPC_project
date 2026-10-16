@@ -720,60 +720,86 @@ struct ExactSegmentHessianGeometry {
         valid = false;
         ready.fill(false);
         free_s = free_t = false;
-        ExactVector a, b, c;
-        for (int k = 0; k < 3; ++k) {
-            // Convert endpoints before subtraction, not rounded edge vectors.
-            a[k] = Rational(x2[k]) - Rational(x1[k]);
-            b[k] = Rational(x4[k]) - Rational(x3[k]);
-            c[k] = Rational(x1[k]) - Rational(x3[k]);
-        }
         const auto dot = [](const ExactVector& u, const ExactVector& v) -> Rational {
             return u[0]*v[0] + u[1]*v[1] + u[2]*v[2];
         };
-        A = dot(a, a); B = dot(a, b); C = dot(b, b);
-        const Rational D = dot(a, c), E = dot(b, c);
-        Rational s = 0, t = 0;
+        int corner_first = -1, corner_second = -1;
         switch (active_feature) {
-            case SegmentSegmentRegion::Interior:
-                determinant = A*C - B*B;
-                s = (B*E - C*D) / determinant;
-                t = (A*E - B*D) / determinant;
-                free_s = free_t = true;
-                break;
-            case SegmentSegmentRegion::Edge_s0:
-                t = E/C; free_t = true; break;
-            case SegmentSegmentRegion::Edge_s1:
-                s = 1; t = (E+B)/C; free_t = true; break;
-            case SegmentSegmentRegion::Edge_t0:
-                s = -D/A; free_s = true; break;
-            case SegmentSegmentRegion::Edge_t1:
-                t = 1; s = (B-D)/A; free_s = true; break;
-            case SegmentSegmentRegion::Corner_s0t0: break;
-            case SegmentSegmentRegion::Corner_s0t1: t = 1; break;
-            case SegmentSegmentRegion::Corner_s1t0: s = 1; break;
-            case SegmentSegmentRegion::Corner_s1t1: s = t = 1; break;
-            case SegmentSegmentRegion::ParallelSegments:
-                throw std::logic_error("robust segment contact has no active finite feature");
+            case SegmentSegmentRegion::Corner_s0t0: corner_first = 0; corner_second = 2; break;
+            case SegmentSegmentRegion::Corner_s0t1: corner_first = 0; corner_second = 3; break;
+            case SegmentSegmentRegion::Corner_s1t0: corner_first = 1; corner_second = 2; break;
+            case SegmentSegmentRegion::Corner_s1t1: corner_first = 1; corner_second = 3; break;
+            default: break;
         }
-        ExactVector residual;
-        for (int k = 0; k < 3; ++k) residual[k] = c[k] + s*a[k] - t*b[k];
+        ExactVector residual, a, b;
+        if (corner_first >= 0 && x1.allFinite() && x2.allFinite()
+            && x3.allFinite() && x4.allFinite()) {
+            // A corner has no free parameter. Form its exact residual directly
+            // from the participating endpoints rather than unused edge dots.
+            // Check all endpoints so precomputed contacts retain the original
+            // conversion errors for an unused nonfinite endpoint.
+            for (int k = 0; k < 3; ++k)
+                residual[k] = Rational((*endpoints[corner_first])[k])
+                    - Rational((*endpoints[corner_second])[k]);
+            weights.fill(Rational(0));
+            weights[corner_first] = 1;
+            weights[corner_second] = -1;
+        } else {
+            ExactVector c;
+            for (int k = 0; k < 3; ++k) {
+                // Convert endpoints before subtraction, not rounded edge vectors.
+                a[k] = Rational(x2[k]) - Rational(x1[k]);
+                b[k] = Rational(x4[k]) - Rational(x3[k]);
+                c[k] = Rational(x1[k]) - Rational(x3[k]);
+            }
+            A = dot(a, a); B = dot(a, b); C = dot(b, b);
+            const Rational D = dot(a, c), E = dot(b, c);
+            Rational s = 0, t = 0;
+            switch (active_feature) {
+                case SegmentSegmentRegion::Interior:
+                    determinant = A*C - B*B;
+                    s = (B*E - C*D) / determinant;
+                    t = (A*E - B*D) / determinant;
+                    free_s = free_t = true;
+                    break;
+                case SegmentSegmentRegion::Edge_s0:
+                    t = E/C; free_t = true; break;
+                case SegmentSegmentRegion::Edge_s1:
+                    s = 1; t = (E+B)/C; free_t = true; break;
+                case SegmentSegmentRegion::Edge_t0:
+                    s = -D/A; free_s = true; break;
+                case SegmentSegmentRegion::Edge_t1:
+                    t = 1; s = (B-D)/A; free_s = true; break;
+                case SegmentSegmentRegion::Corner_s0t0: break;
+                case SegmentSegmentRegion::Corner_s0t1: t = 1; break;
+                case SegmentSegmentRegion::Corner_s1t0: s = 1; break;
+                case SegmentSegmentRegion::Corner_s1t1: s = t = 1; break;
+                case SegmentSegmentRegion::ParallelSegments:
+                    throw std::logic_error("robust segment contact has no active finite feature");
+            }
+            for (int k = 0; k < 3; ++k) residual[k] = c[k] + s*a[k] - t*b[k];
+            weights = {{1-s, s, t-1, -t}};
+        }
         const Rational distance_squared = dot(residual, residual);
         if (distance_squared == 0)
             throw std::runtime_error("segment_segment_barrier_cross_hessian: distance must be nonzero.");
-        weights = {{1-s, s, t-1, -t}};
-        const int ds[4] = {-1, 1, 0, 0};
-        const int dt[4] = {0, 0, 1, -1};
-        for (int i = 0; i < 4; ++i) {
-            for (int k = 0; k < 3; ++k) {
-                if (free_s)
-                    s_derivatives[i][k] = weights[i]*a[k] + ds[i]*residual[k];
-                if (free_t)
-                    t_derivatives[i][k] = -weights[i]*b[k] + dt[i]*residual[k];
+        if (free_s || free_t) {
+            const int ds[4] = {-1, 1, 0, 0};
+            const int dt[4] = {0, 0, 1, -1};
+            for (int i = 0; i < 4; ++i) {
+                for (int k = 0; k < 3; ++k) {
+                    if (free_s)
+                        s_derivatives[i][k] = weights[i]*a[k] + ds[i]*residual[k];
+                    if (free_t)
+                        t_derivatives[i][k] = -weights[i]*b[k] + dt[i]*residual[k];
+                }
             }
         }
         for (int k = 0; k < 3; ++k)
-            for (int l = 0; l < 3; ++l)
+            for (int l = k; l < 3; ++l) {
                 normal_base[k][l] = residual[k]*residual[l]/distance_squared;
+                if (k != l) normal_base[l][k] = normal_base[k][l];
+            }
         endpoint_bits = bits;
         feature = active_feature;
         valid = true;
@@ -782,9 +808,36 @@ struct ExactSegmentHessianGeometry {
     void prepare_block(int p, int q) {
         const int block = 4*p + q;
         if (ready[block]) return;
+        unsigned active_roles = 0x0f;
+        bool corner = false;
+        if (p == q) {
+            switch (feature) {
+                case SegmentSegmentRegion::Edge_s0: active_roles = 0x0d; break;
+                case SegmentSegmentRegion::Edge_s1: active_roles = 0x0e; break;
+                case SegmentSegmentRegion::Edge_t0: active_roles = 0x07; break;
+                case SegmentSegmentRegion::Edge_t1: active_roles = 0x0b; break;
+                case SegmentSegmentRegion::Corner_s0t0: active_roles = 0x05; corner = true; break;
+                case SegmentSegmentRegion::Corner_s0t1: active_roles = 0x09; corner = true; break;
+                case SegmentSegmentRegion::Corner_s1t0: active_roles = 0x06; corner = true; break;
+                case SegmentSegmentRegion::Corner_s1t1: active_roles = 0x0a; corner = true; break;
+                default: break;
+            }
+            // An endpoint absent from the exact active feature has identically
+            // zero geometry. Keep the floating barrier combination below even
+            // for these blocks, including its treatment of signed zeros.
+            if (!(active_roles & (1u << p))) {
+                normal[block].setZero();
+                curvature[block].setZero();
+                ready[block] = true;
+                return;
+            }
+        }
         const Rational weight_product = weights[p] * weights[q];
         for (int k = 0; k < 3; ++k) {
-            for (int l = 0; l < 3; ++l) {
+            // Self blocks are symmetric before conversion: both halves are
+            // the same rational, so sharing their converted doubles preserves
+            // the original rounding without changing floating arithmetic.
+            for (int l = p == q ? k : 0; l < 3; ++l) {
                 Rational hq = k == l ? weight_product : Rational(0);
                 if (free_s && free_t) {
                     const Rational& ps = s_derivatives[p][k];
@@ -801,9 +854,26 @@ struct ExactSegmentHessianGeometry {
                 const Rational curvature_term = hq - normal_term;
                 normal[block](k,l) = normal_term.convert_to<double>();
                 curvature[block](k,l) = curvature_term.convert_to<double>();
+                if (p == q && k != l) {
+                    normal[block](l,k) = normal[block](k,l);
+                    curvature[block](l,k) = curvature[block](k,l);
+                }
             }
         }
         ready[block] = true;
+        if (corner) {
+            // The two participating corner endpoints have weights +/-1 and
+            // no free parameters. Their self geometry is identical, while
+            // each caller still applies its current barrier coefficients.
+            for (int role = 0; role < 4; ++role) {
+                if (role != p && (active_roles & (1u << role))) {
+                    const int peer = 5*role;
+                    normal[peer] = normal[block];
+                    curvature[peer] = curvature[block];
+                    ready[peer] = true;
+                }
+            }
+        }
     }
 };
 

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -134,15 +135,25 @@ namespace {
             EXPECT_EQ(bits(actual.weights[role]), bits(expected.weights[role]));
     }
 
-    void expect_batches_match_scalar(const std::vector<std::array<Vec3, 4>>& fixtures) {
+    void expect_batches_match_scalar(const std::vector<std::array<Vec3, 4>>& fixtures,
+                                     double forced_eps = 128.0) {
         std::vector<Vec3> positions;
         std::vector<std::array<int, 2>> edges, pairs;
+        std::map<std::array<std::uint64_t, 3>, int> vertex_indices;
         for (const auto& fixture : fixtures) {
-            const int vertex = static_cast<int>(positions.size());
+            std::array<int, 4> vertices;
+            for (std::size_t corner = 0; corner < fixture.size(); ++corner) {
+                // Share identical source vertices across distinct edges, while
+                // retaining signed zeros and NaN payloads as separate inputs.
+                std::array<std::uint64_t, 3> key;
+                std::memcpy(key.data(), fixture[corner].data(), sizeof(key));
+                const auto entry = vertex_indices.emplace(key, static_cast<int>(positions.size()));
+                if (entry.second) positions.push_back(fixture[corner]);
+                vertices[corner] = entry.first->second;
+            }
             const int edge = static_cast<int>(edges.size());
-            positions.insert(positions.end(), fixture.begin(), fixture.end());
-            edges.push_back({vertex, vertex + 1});
-            edges.push_back({vertex + 2, vertex + 3});
+            edges.push_back({vertices[0], vertices[1]});
+            edges.push_back({vertices[2], vertices[3]});
             // Repeat/reverse the pair to exercise shared-edge reuse without
             // assuming symmetry of tied closest-feature witnesses.
             pairs.push_back({edge, edge + 1});
@@ -156,7 +167,7 @@ namespace {
         for (int threads : {1, 4}) {
             int epoch = 0;
             for (bool exact : {true, false}) {
-                for (double eps : {1.0e-12, 128.0}) {
+                for (double eps : {1.0e-12, forced_eps}) {
                     SCOPED_TRACE(::testing::Message() << threads << ':' << exact << ':' << eps);
                     // Reuse the workspace across changed frozen snapshots.
                     // prepare() must not read positions before this workshare.
@@ -593,6 +604,44 @@ TEST(SegmentSegmentDistance, RobustEndpointWeightsPrecedeParameterRounding) {
     EXPECT_NEAR(dr.distance, deficit * 2.0 / std::sqrt(5.0), deficit * 1.0e-14);
     const Vec3 expected(deficit * 4.0 / 5.0, -deficit * 2.0 / 5.0, 0.0);
     EXPECT_LE((dr.separation - expected).norm(), deficit * 1.0e-14);
+
+    std::vector<std::array<Vec3, 4>> weight_fixtures{{{
+        Vec3::Zero(), Vec3(1.0,2.0,0.0), point, point}}};
+    // Exact positive parameters can round below the smallest subnormal. Their
+    // negative role weights must retain -0, while exact zero remains +0.
+    // Reversing the long edge instead makes the exact complementary weight
+    // tiny and negative although its rounded parameter is exactly one.
+    constexpr std::array<std::array<int, 2>, 3> exponents{{
+        {{600,-473}}, {{600,-475}}, {{700,-700}}}};
+    for (const auto& exponent : exponents) {
+        const double extent = std::ldexp(1.0, exponent[0]);
+        const double axial = std::ldexp(1.0, exponent[1]);
+        const Vec3 query(axial, 1.0, 0.0);
+        for (unsigned permutation = 0; permutation < 4; ++permutation) {
+            SCOPED_TRACE(::testing::Message() << exponent[0] << ':' << exponent[1] << ':' << permutation);
+            std::array<Vec3, 4> points{{query, query, Vec3::Zero(), Vec3(extent,0,0)}};
+            if (permutation & 1u) std::swap(points[2], points[3]);
+            if (permutation & 2u) {
+                std::swap(points[0], points[2]); std::swap(points[1], points[3]);
+            }
+            alignas(16) const auto scalar = segment_segment_distance(
+                points[0], points[1], points[2], points[3]);
+            alignas(16) const auto exhaustive = exhaustive_exact_distance(points);
+            expect_same_exact_result(scalar, exhaustive);
+            if (permutation == 0u) {
+                EXPECT_TRUE(std::signbit(scalar.weights[3]));
+                if (exponent[1] - exponent[0] <= -1075) {
+                    EXPECT_DOUBLE_EQ(scalar.t, 0.0);
+                    EXPECT_DOUBLE_EQ(scalar.weights[3], 0.0);
+                }
+            } else if (permutation == 1u) {
+                EXPECT_DOUBLE_EQ(scalar.t, 1.0);
+                EXPECT_TRUE(std::signbit(scalar.weights[2]));
+            }
+            weight_fixtures.push_back(points);
+        }
+    }
+    expect_batches_match_scalar(weight_fixtures);
 }
 
 TEST(SegmentSegmentDistance, ExactBoundarySelectionMatchesExhaustiveReference) {
@@ -646,6 +695,28 @@ TEST(SegmentSegmentDistance, ExactBoundarySelectionMatchesExhaustiveReference) {
     // A nonempty batch with no exact fallbacks skips edge preparation too.
     expect_batches_match_scalar({{{Vec3::Zero(), Vec3::UnitX(),
         Vec3(0.5, -1, 1), Vec3(0.5, 1, 1)}}});
+
+    // Preserve numerator-first feasibility and clipping at each boundary and
+    // corner even when exact coefficients are huge or their floating Gram
+    // determinant underflows. Negative scales also reverse both directions.
+    std::vector<std::array<Vec3, 4>> scaled_boundaries;
+    const double forced_eps = std::ldexp(1.0, 401);
+    for (double scale : {std::ldexp(1.0, -520), -std::ldexp(1.0, -520),
+                         std::ldexp(1.0, 200), -std::ldexp(1.0, 200)}) {
+        for (double horizontal : {-1.0, 0.5, 2.0}) {
+            for (double vertical : {-2.0, -0.5, 1.0}) {
+                const std::array<Vec3, 4> points{{Vec3::Zero(), scale * Vec3::UnitX(),
+                    scale * Vec3(horizontal, vertical, 0.125),
+                    scale * Vec3(horizontal, vertical + 1.0, 0.125)}};
+                alignas(16) const auto scalar = segment_segment_distance(
+                    points[0], points[1], points[2], points[3], forced_eps, true);
+                alignas(16) const auto exhaustive = exhaustive_exact_distance(points);
+                expect_same_exact_result(scalar, exhaustive);
+                scaled_boundaries.push_back(points);
+            }
+        }
+    }
+    expect_batches_match_scalar(scaled_boundaries, forced_eps);
 }
 
 TEST(SegmentSegmentDistance, ExactParallelTiesAndDegeneracyMatchExhaustiveReference) {

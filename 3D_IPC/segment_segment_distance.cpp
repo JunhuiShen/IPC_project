@@ -211,6 +211,16 @@ static Exact exact_clamp_unit(const Exact& value)
     return value;
 }
 
+// Denominator is strictly positive. Decide clipped endpoints before building
+// a quotient, avoiding normalization of exact fractions that would be thrown
+// away. Interior quotients are unchanged in scalar and cached-batch solves.
+static Exact exact_clamped_positive_ratio(const Exact& numerator, const Exact& denominator)
+{
+    if (numerator <= 0) return Exact(0);
+    if (numerator >= denominator) return Exact(1);
+    return numerator / denominator;
+}
+
 static SegmentSegmentRegion exact_region(const Exact& s, const Exact& t)
 {
     if (s == 0 && t == 0) return SegmentSegmentRegion::Corner_s0t0;
@@ -291,12 +301,30 @@ static SegmentSegmentDistanceResult segment_segment_distance_exact_edges(
             choose(parameters.first, parameters.second);
         } else {
             const Exact E = exact_dot(b, c);
+            const auto clamped_ratio = [&](const Exact& numerator, const Exact& denominator) -> Exact {
+                if (mode == ExactResultMode::CachedBatch)
+                    return exact_clamped_positive_ratio(numerator, denominator);
+                return exact_clamp_unit(numerator / denominator);
+            };
             // q(s,t) = 1/2 ||c+s*a-t*b||^2 is convex. A feasible unconstrained
             // minimizer is already global; checking the boundaries cannot improve it.
             if (determinant > 0) {
-                const Exact s = (B * E - C * D) / determinant;
-                const Exact t = (A * E - B * D) / determinant;
-                if (s >= 0 && s <= 1 && t >= 0 && t <= 1) choose(s, t);
+                if (mode == ExactResultMode::CachedBatch) {
+                    const Exact s_numerator = B * E - C * D;
+                    // Multiplication by positive determinant preserves every
+                    // feasibility comparison. Do not form either discarded
+                    // quotient, or t's numerator when s is already infeasible.
+                    if (s_numerator >= 0 && s_numerator <= determinant) {
+                        const Exact t_numerator = A * E - B * D;
+                        if (t_numerator >= 0 && t_numerator <= determinant)
+                            choose(exact_clamped_positive_ratio(s_numerator, determinant),
+                                exact_clamped_positive_ratio(t_numerator, determinant));
+                    }
+                } else {
+                    const Exact s = (B * E - C * D) / determinant;
+                    const Exact t = (A * E - B * D) / determinant;
+                    if (s >= 0 && s <= 1 && t >= 0 && t <= 1) choose(s, t);
+                }
             }
             // Each clamped boundary candidate already minimizes along that boundary.
             // The remaining exact KKT sign proves global optimality: dq/ds is
@@ -304,22 +332,61 @@ static SegmentSegmentDistanceResult segment_segment_distance_exact_edges(
             // order and select the first global minimizer, preserving strict-< ties
             // even for parallel/zero-length segments. If A or C vanishes, its cross
             // products vanish too, so the same signs handle the degenerate case.
-            if (!have_best) {
-                const Exact t = C > 0 ? exact_clamp_unit(E / C) : Exact(0);
-                if (D - B * t >= 0) choose(Exact(0), t);
-            }
-            if (!have_best) {
-                const Exact t = C > 0 ? exact_clamp_unit((E + B) / C) : Exact(0);
-                if (D + A - B * t <= 0) choose(Exact(1), t);
-            }
-            if (!have_best) {
-                const Exact s = A > 0 ? exact_clamp_unit(-D / A) : Exact(0);
-                if (E + B * s <= 0) choose(s, Exact(0));
+            if (mode == ExactResultMode::CachedBatch) {
+                // For strict interior boundary ratios, multiply KKT by the
+                // positive denominator before dividing. Failed candidates
+                // stay dyadic polynomials instead of normalized quotients.
+                // Clipped endpoints use their original signs and tie order.
+                if (!have_best) {
+                    if (C <= 0 || E <= 0) {
+                        if (D >= 0) choose(Exact(0), Exact(0));
+                    } else if (E >= C) {
+                        if (D - B >= 0) choose(Exact(0), Exact(1));
+                    } else if (D * C - B * E >= 0) {
+                        choose(Exact(0), E / C);
+                    }
+                }
+                if (!have_best) {
+                    const Exact numerator = E + B;
+                    const Exact offset = D + A;
+                    if (C <= 0 || numerator <= 0) {
+                        if (offset <= 0) choose(Exact(1), Exact(0));
+                    } else if (numerator >= C) {
+                        if (offset - B <= 0) choose(Exact(1), Exact(1));
+                    } else if (offset * C - B * numerator <= 0) {
+                        choose(Exact(1), numerator / C);
+                    }
+                }
+                if (!have_best) {
+                    const Exact numerator = -D;
+                    if (A <= 0 || numerator <= 0) {
+                        if (E <= 0) choose(Exact(0), Exact(0));
+                    } else if (numerator >= A) {
+                        if (E + B <= 0) choose(Exact(1), Exact(0));
+                    } else if (E * A + B * numerator <= 0) {
+                        choose(numerator / A, Exact(0));
+                    }
+                }
+            } else {
+                if (!have_best) {
+                    const Exact t = C > 0 ? exact_clamp_unit(E / C) : Exact(0);
+                    if (D - B * t >= 0) choose(Exact(0), t);
+                }
+                if (!have_best) {
+                    const Exact t = C > 0 ? exact_clamp_unit((E + B) / C) : Exact(0);
+                    if (D + A - B * t <= 0) choose(Exact(1), t);
+                }
+                if (!have_best) {
+                    const Exact s = A > 0 ? exact_clamp_unit(-D / A) : Exact(0);
+                    if (E + B * s <= 0) choose(s, Exact(0));
+                }
             }
             // At least one boundary candidate satisfies KKT. If the first three
             // failed, t=1 is the remaining global minimizer (dq/dt <= 0 there).
-            if (!have_best)
-                choose(A > 0 ? exact_clamp_unit((B - D) / A) : Exact(0), Exact(1));
+            if (!have_best) {
+                const Exact s = A > 0 ? clamped_ratio(B - D, A) : Exact(0);
+                choose(s, Exact(1));
+            }
         }
     }
 
@@ -331,10 +398,21 @@ static SegmentSegmentDistanceResult segment_segment_distance_exact_edges(
     SegmentSegmentDistanceResult out;
     out.s = best_s.convert_to<double>();
     out.t = best_t.convert_to<double>();
-    const std::array<Exact, 4> exact_weights = {
-        Exact(1) - best_s, best_s, best_t - Exact(1), -best_t};
-    for (int i = 0; i < 4; ++i) {
-        out.weights[i] = exact_weights[i].convert_to<double>();
+    if (mode == ExactResultMode::CachedBatch) {
+        const Exact complement_s = Exact(1) - best_s;
+        const Exact complement_t = best_t - Exact(1);
+        out.weights[0] = complement_s.convert_to<double>();
+        out.weights[1] = out.s;
+        out.weights[2] = complement_t.convert_to<double>();
+        // Exact zero converts to +0, while a tiny negative rational rounds to
+        // -0. Reuse t's symmetric rounding without losing that distinction.
+        out.weights[3] = best_t == 0 ? 0.0 : -out.t;
+    } else {
+        const std::array<Exact, 4> exact_weights = {
+            Exact(1) - best_s, best_s, best_t - Exact(1), -best_t};
+        for (int i = 0; i < 4; ++i) {
+            out.weights[i] = exact_weights[i].convert_to<double>();
+        }
     }
     for (int i = 0; i < 3; ++i) {
         const Exact closest_1 = p[i] + best_s * a[i];
@@ -434,6 +512,10 @@ struct SegmentSegmentDistanceBatchWorkspace::Impl {
     std::vector<int> edge_to_exact;
     std::vector<std::size_t> used_edges;
     std::vector<ExactEdge> exact_edges;
+    std::vector<unsigned char> needed_vertices;
+    std::vector<int> vertex_to_exact;
+    std::vector<std::size_t> used_vertices;
+    std::vector<ExactVec3> exact_vertices;
     std::atomic<std::size_t> fallback_count{0};
     std::atomic<bool> failed{false};
     std::exception_ptr error;
@@ -466,10 +548,15 @@ void SegmentSegmentDistanceBatchWorkspace::prepare(
     w.failed.store(false, std::memory_order_relaxed);
     w.error = nullptr;
     w.used_edges.clear();
+    w.used_vertices.clear();
     outputs.resize(pair_edges.size());
     if (!exact_computation_fallback) return;
     w.fallback_pairs.resize(pair_edges.size());
     w.edge_to_exact.resize(edges.size());
+    w.needed_vertices.assign(positions.size(), 0);
+    // Only currently marked/compacted vertices are referenced by used edges;
+    // inactive retained map entries need no reset, just like edge_to_exact.
+    w.vertex_to_exact.resize(positions.size());
     if (edges.size() > w.needed_capacity) {
         w.needed_edges = std::make_unique<std::atomic<unsigned char>[]>(edges.size());
         w.needed_capacity = edges.size();
@@ -533,22 +620,39 @@ void SegmentSegmentDistanceBatchWorkspace::compute_collective()
                     if (w.needed_edges[edge].load(std::memory_order_relaxed)) {
                         w.edge_to_exact[edge] = static_cast<int>(w.used_edges.size());
                         w.used_edges.push_back(edge);
+                        for (int vertex : edges[edge]) w.needed_vertices[vertex] = 1;
                     }
                 }
+                for (std::size_t vertex = 0; vertex < x.size(); ++vertex) {
+                    if (w.needed_vertices[vertex]) {
+                        w.vertex_to_exact[vertex] = static_cast<int>(w.used_vertices.size());
+                        w.used_vertices.push_back(vertex);
+                    }
+                }
+                w.exact_vertices.resize(w.used_vertices.size());
                 w.exact_edges.resize(w.used_edges.size());
             }
         } catch (...) { w.capture_failure(); }
     }
     // The single's join publishes one uniform branch to the entire team.
     if (w.used_edges.empty()) return;
+    // Adjacent used edges share source vertices. Convert each original binary64
+    // coordinate once in this frozen snapshot, then join before edge reads.
+    #pragma omp for schedule(static)
+    for (std::size_t record = 0; record < w.used_vertices.size(); ++record) {
+        if (w.failed.load(std::memory_order_relaxed)) continue;
+        try {
+            w.exact_vertices[record] = exact_vec(x[w.used_vertices[record]]);
+        } catch (...) { w.capture_failure(); }
+    }
     #pragma omp for schedule(static)
     for (std::size_t record = 0; record < w.used_edges.size(); ++record) {
         if (w.failed.load(std::memory_order_relaxed)) continue;
         try {
             auto& exact = w.exact_edges[record];
             const auto& edge = edges[w.used_edges[record]];
-            exact.start = exact_vec(x[edge[0]]);
-            exact.direction = exact_subtract(exact_vec(x[edge[1]]), exact.start);
+            exact.start = w.exact_vertices[w.vertex_to_exact[edge[0]]];
+            exact.direction = exact_subtract(w.exact_vertices[w.vertex_to_exact[edge[1]]], exact.start);
             exact.squared_length = exact_dot(exact.direction, exact.direction);
             exact.axis = -1;
             for (int axis = 0; axis < 3; ++axis) {
