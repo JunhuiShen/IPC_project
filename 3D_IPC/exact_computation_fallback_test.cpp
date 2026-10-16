@@ -117,6 +117,36 @@ TEST(ExactComputationFallback, BothModesKeepTinyRepresentableVertexMoves) {
     }
 }
 
+TEST(ExactComputationFallback, OGCTrustRadiusUsesTheSelectedDistancePolicy) {
+    // The legacy absolute determinant threshold selects a boundary feature
+    // for these short crossing edges; exact fallback resolves the interior gap.
+    constexpr double length=1e-7, gap=1e-9;
+    const std::vector<Vec3> initial{
+        Vec3(-length/2,0,0),Vec3(length/2,0,0),
+        Vec3(0,-length/2,gap),Vec3(0,length/2,gap)};
+    BroadPhase phase;
+    auto& cache=phase.mutable_cache();
+    cache.node_boxes.assign(4,AABB(Vec3::Constant(-1),Vec3::Constant(1)));
+    cache.vertex_nt.resize(4);
+    cache.vertex_ss.resize(4);
+    SegmentSegmentPair pair{};
+    for(int i=0;i<4;++i)pair.v[i]=i;
+    cache.ss_pairs.push_back(pair);
+    cache.vertex_ss[0].push_back({0,0});
+    for(bool fallback:{false,true}) {
+        const double expected=.4*(fallback ? gap : std::hypot(length/2,gap));
+        EXPECT_NEAR(compute_trust_region_bound_for_vertex(0,initial,phase,.4,fallback),expected,1e-20);
+        for(bool ticcd:{false,true}) {
+            auto x=initial;
+            const Vec3 target=x[0]+Vec3(0,0,length);
+            const double step=per_vertex_safe_step(phase,x,0,target,.9,false,ticcd,
+                                                  true,false,nullptr,fallback);
+            EXPECT_NEAR(step,expected/length,1e-13);
+            EXPECT_NEAR(x[0].z(),expected,1e-20);
+        }
+    }
+}
+
 TEST(ExactComputationFallback, ScalarAndSIMDUseMatchingOriginalContactDerivatives) {
     const std::array<Vec3,4> x{Vec3(0,0,0),Vec3(1,0,0),
         Vec3(0,-5e-9,.125),Vec3(1,5e-9,.125)};

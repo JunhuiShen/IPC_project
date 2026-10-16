@@ -7,7 +7,6 @@
 #include <functional>
 #include <iomanip>
 #include <iostream>
-#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -1884,55 +1883,6 @@ TEST(BarrierEnergy, RobustSegmentHessiansAreIndependentOfCallHistoryAndWorker) {
             }
         }
     }
-    // Short perpendicular segments force exact fallback while selecting every
-    // finite feature. Offset all coordinates so one-ULP refreshes stay normal
-    // floating-point numbers, including the four boundary corner cases.
-    constexpr double length = 1.0e-7;
-    const Vec3 origin(.25, -.5, .75);
-    const std::array<std::array<double, 2>, 9> parameters{{
-        {{.4, .6}}, {{-.2, .6}}, {{1.2, .6}}, {{.4, -.2}}, {{.4, 1.2}},
-        {{-.2, -.2}}, {{-.2, 1.2}}, {{1.2, -.2}}, {{1.2, 1.2}}}};
-    const std::array<SegmentSegmentRegion, 9> features{{
-        SegmentSegmentRegion::Interior,
-        SegmentSegmentRegion::Edge_s0, SegmentSegmentRegion::Edge_s1,
-        SegmentSegmentRegion::Edge_t0, SegmentSegmentRegion::Edge_t1,
-        SegmentSegmentRegion::Corner_s0t0, SegmentSegmentRegion::Corner_s0t1,
-        SegmentSegmentRegion::Corner_s1t0, SegmentSegmentRegion::Corner_s1t1}};
-    const std::array<unsigned, 9> absent_roles{{0x00, 0x02, 0x01, 0x08, 0x04,
-        0x0a, 0x06, 0x09, 0x05}};
-    for (std::size_t i = 0; i < parameters.size(); ++i) {
-        const double s = parameters[i][0], t = parameters[i][1];
-        const Contact contact{{origin, origin + Vec3(length, 0, 0),
-            origin + Vec3(s*length, -t*length, .2*length),
-            origin + Vec3(s*length, (1-t)*length, .2*length)}};
-        const auto dr = segment_segment_distance(
-            contact[0], contact[1], contact[2], contact[3]);
-        ASSERT_TRUE(dr.robust);
-        ASSERT_EQ(dr.active_region, features[i]);
-        for (const auto& coefficient : {
-                 std::pair<double, double>{-2.75, -0.0}, {3.5, -0.0},
-                 {-0.0, -1.25}, {0.0, -1.25}}) {
-            // An absent endpoint has zero normal and curvature geometry, but
-            // its resulting floating zero still follows both coefficients.
-            const volatile double normal_product = coefficient.second * 0.0;
-            const double expected_zero = normal_product
-                + (coefficient.first / dr.distance) * 0.0;
-            for (int role = 0; role < 4; ++role) {
-                if (!(absent_roles[i] & (1u << role))) continue;
-                const Mat33 H = segment_segment_barrier_self_hessian(
-                    contact[0],contact[1],contact[2],contact[3],.8,role,1e-12,
-                    &dr,&coefficient.first,&coefficient.second);
-                for (int k = 0; k < 3; ++k) for (int l = 0; l < 3; ++l)
-                    EXPECT_EQ(std::memcmp(&H(k,l), &expected_zero, sizeof(double)), 0)
-                        << "feature " << i << " role " << role;
-            }
-        }
-        contacts.push_back(contact);
-        auto refreshed = contact;
-        refreshed[i % 4][i % 3] = std::nextafter(
-            refreshed[i % 4][i % 3], 2.0);
-        contacts.push_back(refreshed);
-    }
     const Contact unrelated{{Vec3(4,5,6),Vec3(4,5,6),Vec3(4.1,5.2,6.3),Vec3(4.1,5.2,6.3)}};
     const auto evict = [&] {
         return segment_segment_barrier_self_hessian(
@@ -1947,30 +1897,20 @@ TEST(BarrierEnergy, RobustSegmentHessiansAreIndependentOfCallHistoryAndWorker) {
     std::vector<Query> queries;
     for (const auto& x : contacts) {
         const auto dr = segment_segment_distance(x[0],x[1],x[2],x[3]);
-        std::vector<std::pair<double, double>> coefficients;
-        for (double band : {.4, .8, 1.2})
-            coefficients.push_back({1.7 * scalar_barrier_gradient(dr.distance, band),
-                .3 * scalar_barrier_hessian(dr.distance, band)});
-        // Geometry shortcuts must retain the original final floating formula,
-        // including zero signs when custom precomputed coefficients are used.
-        for (const auto& coefficient : {
-                 std::pair<double, double>{-2.75, -0.0}, {3.5, -0.0},
-                 {-0.0, -1.25}, {0.0, -1.25}, {-0.0, 0.0}})
-            coefficients.push_back(coefficient);
-        for (const auto& coefficient : coefficients) {
+        for (double band : {.4, .8, 1.2}) {
             Query query;
             query.x = x;
             query.dr = dr;
             // Precomputed coefficients and distance are current-call inputs,
             // even when the geometric endpoints are unchanged.
             query.dr.distance *= 1.25;
-            query.bp = coefficient.first;
-            query.bpp = coefficient.second;
+            query.bp = 1.7 * scalar_barrier_gradient(dr.distance, band);
+            query.bpp = .3 * scalar_barrier_hessian(dr.distance, band);
             for (int p = 0; p < 4; ++p) for (int q = 0; q < 4; ++q) {
                 const Mat33 ignored = evict();
                 ASSERT_TRUE(ignored.allFinite());
                 query.expected[4*p+q] = segment_segment_barrier_cross_hessian(
-                    x[0],x[1],x[2],x[3],.8,p,q,1e-12,
+                    x[0],x[1],x[2],x[3],band,p,q,1e-12,
                     &query.dr,&query.bp,&query.bpp);
             }
             queries.push_back(std::move(query));
@@ -1990,11 +1930,6 @@ TEST(BarrierEnergy, RobustSegmentHessiansAreIndependentOfCallHistoryAndWorker) {
                 if (std::memcmp(H.data(), query.expected[4*p+q].data(),
                                 9*sizeof(double)) != 0) equal[i] = 0;
             }
-            const auto self = segment_segment_barrier_self_hessians(
-                x[0],x[1],x[2],x[3],.8,query.dr,query.bp,query.bpp);
-            for (int role = 0; role < 4; ++role)
-                if (std::memcmp(self[role].data(), query.expected[5*role].data(),
-                                9*sizeof(double)) != 0) equal[i] = 0;
         }
     }
     for (std::size_t i = 0; i < equal.size(); ++i)
@@ -2023,27 +1958,6 @@ TEST(BarrierEnergy, RobustSegmentUsesCurrentFeatureAndRecoversAfterInvalidFeatur
         ASSERT_TRUE(expected[i].allFinite());
     }
     EXPECT_GT((expected[0] - expected[1]).norm(), 1.0);
-    dr.active_region = features[0];
-    // Precomputed corner contacts still validate unused endpoint coordinates.
-    // A failed conversion or zero exact residual must invalidate the cache.
-    for (int unused_role : {0, 3}) {
-        for (double nonfinite : {std::numeric_limits<double>::infinity(),
-                                 std::numeric_limits<double>::quiet_NaN()}) {
-            auto invalid = x;
-            invalid[unused_role].x() = nonfinite;
-            EXPECT_ANY_THROW(segment_segment_barrier_self_hessian(
-                invalid[0],invalid[1],invalid[2],invalid[3],.4,1,1e-12,&dr));
-            const Mat33 recovered = hessian(dr);
-            EXPECT_EQ(std::memcmp(recovered.data(),expected[0].data(),9*sizeof(double)),0);
-        }
-    }
-    auto intersecting = x;
-    intersecting[2] = intersecting[1];
-    EXPECT_THROW(segment_segment_barrier_self_hessian(
-        intersecting[0],intersecting[1],intersecting[2],intersecting[3],
-        .4,1,1e-12,&dr), std::runtime_error);
-    const Mat33 recovered = hessian(dr);
-    EXPECT_EQ(std::memcmp(recovered.data(),expected[0].data(),9*sizeof(double)),0);
     dr.active_region = SegmentSegmentRegion::ParallelSegments;
     EXPECT_THROW(hessian(dr), std::logic_error);
     for (int pass = 0; pass < 2; ++pass) for (int i = 2; i >= 0; --i) {

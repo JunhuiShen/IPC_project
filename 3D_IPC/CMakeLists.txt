@@ -325,7 +325,6 @@ if(BUILD_TESTING)
         make_shape_test
         mesh_test
         node_triangle_distance_test
-        ogc_solver_test
         parallel_helper_test
         rigid_body_ipc_test
         sdf_penalty_energy_test

@@ -411,25 +411,18 @@ namespace {
     }
 
     static void expect_cache_geometry_and_topology_exact(
-        const BroadPhase::Cache& actual, const BroadPhase::Cache& expected,
-        bool compare_node_hierarchy = true) {
+        const BroadPhase::Cache& actual, const BroadPhase::Cache& expected) {
         expect_aabb_vectors_exact(actual.node_boxes, expected.node_boxes);
         expect_aabb_vectors_exact(actual.tri_boxes, expected.tri_boxes);
         expect_aabb_vectors_exact(actual.edge_boxes, expected.edge_boxes);
         expect_aabb_vectors_exact(actual.red_edge_boxes, expected.red_edge_boxes);
-        if (compare_node_hierarchy) {
-            expect_bvh_vectors_exact(actual.node_bvh_nodes, expected.node_bvh_nodes);
-            EXPECT_EQ(actual.node_leaf_to_node, expected.node_leaf_to_node);
-            EXPECT_EQ(actual.node_root, expected.node_root);
-        } else {
-            EXPECT_TRUE(actual.node_bvh_nodes.empty());
-            EXPECT_TRUE(actual.node_leaf_to_node.empty());
-            EXPECT_EQ(actual.node_root, -1);
-        }
+        expect_bvh_vectors_exact(actual.node_bvh_nodes, expected.node_bvh_nodes);
         expect_bvh_vectors_exact(actual.tri_bvh_nodes, expected.tri_bvh_nodes);
         expect_bvh_vectors_exact(actual.edge_bvh_nodes, expected.edge_bvh_nodes);
+        EXPECT_EQ(actual.node_leaf_to_node, expected.node_leaf_to_node);
         EXPECT_EQ(actual.tri_leaf_to_node, expected.tri_leaf_to_node);
         EXPECT_EQ(actual.edge_leaf_to_node, expected.edge_leaf_to_node);
+        EXPECT_EQ(actual.node_root, expected.node_root);
         EXPECT_EQ(actual.tri_root, expected.tri_root);
         EXPECT_EQ(actual.edge_root, expected.edge_root);
         EXPECT_EQ(actual.edges, expected.edges);
@@ -438,9 +431,8 @@ namespace {
     }
 
     static void expect_cache_exact(
-        const BroadPhase::Cache& actual, const BroadPhase::Cache& expected,
-        bool compare_node_hierarchy = true) {
-        expect_cache_geometry_and_topology_exact(actual, expected, compare_node_hierarchy);
+        const BroadPhase::Cache& actual, const BroadPhase::Cache& expected) {
+        expect_cache_geometry_and_topology_exact(actual, expected);
         ASSERT_EQ(actual.nt_pairs.size(), expected.nt_pairs.size());
         for (std::size_t i = 0; i < actual.nt_pairs.size(); ++i) {
             EXPECT_EQ(actual.nt_pairs[i].node, expected.nt_pairs[i].node) << "NT pair " << i;
@@ -1435,9 +1427,6 @@ TEST(BroadPhaseTest, BulkBoxRefitMatchesIncrementalBoxesAndOrderedPairs) {
             mesh.tris.push_back(offset + node);
     }
     mesh.num_positions = x.size();
-    // The compact mode must retain Refittable's all-pair policy even when
-    // ownership labels would make solver-only modes prune rigid self-pairs.
-    mesh.node_to_rb.assign(x.size(), 0);
     const int nv = static_cast<int>(x.size());
     constexpr double pad = 0.07;
     std::vector<double> radii(nv);
@@ -1450,9 +1439,6 @@ TEST(BroadPhaseTest, BulkBoxRefitMatchesIncrementalBoxesAndOrderedPairs) {
     BroadPhase incremental;
     incremental.initialize(boxes, mesh, pad);
     BroadPhase bulk = incremental;
-    BroadPhase compact;
-    compact.initialize(boxes, mesh, pad, BroadPhase::InitializationMode::BulkRefittable);
-    expect_cache_exact(compact.cache(), bulk.cache(), false);
 
     for (int step = 0; step < 3; ++step) {
         SCOPED_TRACE(step);
@@ -1468,79 +1454,16 @@ TEST(BroadPhaseTest, BulkBoxRefitMatchesIncrementalBoxesAndOrderedPairs) {
                                        x, mesh, pad, radii[i]);
         }
         bulk.refit_boxes(boxes, mesh, pad);
-        compact.refit_boxes(boxes, mesh, pad);
         const auto& a = incremental.cache();
         const auto& b = bulk.cache();
         expect_cache_geometry_and_topology_exact(a, b);
-        expect_cache_geometry_and_topology_exact(compact.cache(), b, false);
         EXPECT_EQ(b.nt_pair_tri, previous_nt);
         EXPECT_EQ(b.ss_pair_edges, previous_ss);
 
         incremental.refresh_pairs(mesh);
         bulk.refresh_pairs(mesh);
-        compact.refresh_pairs(mesh);
         expect_cache_exact(a, b);
-        expect_cache_exact(compact.cache(), b, false);
         expect_pair_order_matches_query_hits(b, mesh);
-    }
-
-    // Reusing pair sizes must still discard all stale pairs and incidence
-    // when the contact domain empties, then restore the original ordering.
-    const auto populated_positions = x;
-    const auto populated_nt = bulk.cache().nt_pair_tri;
-    const auto populated_ss = bulk.cache().ss_pair_edges;
-    ASSERT_FALSE(populated_nt.empty());
-    ASSERT_FALSE(populated_ss.empty());
-    for (const bool separated : {true, false}) {
-        SCOPED_TRACE(separated);
-        for (int i = 0; i < nv; ++i) {
-            x[i] = populated_positions[i];
-            if (separated) x[i].z() += 10.0 * (i / 3);
-            boxes[i] = AABB(x[i] - Vec3::Constant(radii[i]),
-                            x[i] + Vec3::Constant(radii[i]));
-            incremental_refresh_vertex(incremental.mutable_cache(), i,
-                                       x, mesh, pad, radii[i]);
-        }
-        bulk.refit_boxes(boxes, mesh, pad);
-        compact.refit_boxes(boxes, mesh, pad);
-        incremental.refresh_pairs(mesh);
-        bulk.refresh_pairs(mesh);
-        compact.refresh_pairs(mesh);
-        expect_cache_exact(incremental.cache(), bulk.cache());
-        expect_cache_exact(compact.cache(), bulk.cache(), false);
-        expect_pair_order_matches_query_hits(bulk.cache(), mesh);
-        if (separated) {
-            EXPECT_TRUE(bulk.nt_pairs().empty());
-            EXPECT_TRUE(bulk.ss_pairs().empty());
-            for (int i = 0; i < nv; ++i) {
-                EXPECT_TRUE(bulk.cache().vertex_nt[i].empty());
-                EXPECT_TRUE(bulk.cache().vertex_ss[i].empty());
-            }
-        } else {
-            EXPECT_EQ(bulk.cache().nt_pair_tri, populated_nt);
-            EXPECT_EQ(bulk.cache().ss_pair_edges, populated_ss);
-        }
-    }
-
-    // Switching back to the default mode must restore and refit its node
-    // hierarchy; every initialization still freshly builds triangle/edge trees.
-    for (const auto mode : {BroadPhase::InitializationMode::Refittable,
-                           BroadPhase::InitializationMode::BulkRefittable,
-                           BroadPhase::InitializationMode::Refittable}) {
-        compact.initialize(boxes, mesh, pad, mode);
-        BroadPhase fresh;
-        fresh.initialize(boxes, mesh, pad);
-        for (int i = 0; i < nv; ++i) {
-            x[i] += Vec3(.004, -.003, .002);
-            boxes[i] = AABB(x[i] - Vec3::Constant(radii[i]),
-                            x[i] + Vec3::Constant(radii[i]));
-        }
-        fresh.refit_boxes(boxes, mesh, pad);
-        compact.refit_boxes(boxes, mesh, pad);
-        fresh.refresh_pairs(mesh);
-        compact.refresh_pairs(mesh);
-        expect_cache_exact(compact.cache(), fresh.cache(),
-            mode == BroadPhase::InitializationMode::Refittable);
     }
 }
 
@@ -1584,15 +1507,9 @@ TEST(BroadPhaseTest, BulkBoxRefitRequiresMatchingBoxInitialization) {
     const std::vector<AABB> boxes(x.size(), AABB(Vec3::Zero(), Vec3::Ones()));
     BroadPhase broad;
     EXPECT_THROW(broad.refit_boxes(boxes, mesh, 0.01), std::logic_error);
-    broad.initialize(boxes, mesh, 0.01, BroadPhase::InitializationMode::BulkRefittable);
-    EXPECT_NO_THROW(broad.refit_boxes(boxes, mesh, 0.01));
     broad.initialize(x, std::vector<Vec3>(x.size(), Vec3::Zero()), mesh, 0.1, 0.01);
     EXPECT_THROW(broad.refit_boxes(boxes, mesh, 0.01), std::logic_error);
-    broad.initialize(boxes, mesh, 0.01, BroadPhase::InitializationMode::BulkRefittable);
     broad.initialize(boxes, mesh, 0.01, BroadPhase::InitializationMode::DeformableSolver);
-    EXPECT_THROW(broad.refit_boxes(boxes, mesh, 0.01), std::logic_error);
-    broad.initialize(boxes, mesh, 0.01, BroadPhase::InitializationMode::BulkRefittable);
-    broad.initialize_node_boxes_only(boxes);
     EXPECT_THROW(broad.refit_boxes(boxes, mesh, 0.01), std::logic_error);
     broad.initialize(boxes, mesh, 0.01);
     auto fewer_boxes = boxes;
@@ -1711,7 +1628,7 @@ TEST(BroadPhaseTest, SolverModesPreserveFilteredPairAndIncidenceOrderWithoutRefi
     EXPECT_TRUE(rigid.cache().edge_leaf_to_node.empty());
 }
 
-TEST(BroadPhaseTest, PerVertexSafeStepClampsCCD) {
+TEST(BroadPhaseTest, PerVertexSafeStepClampsCCDAndOGC) {
     std::vector<Vec3> x = {
         Vec3(1.5, 0.25, 0.0),
         Vec3(0.0, 0.0, 0.0),
@@ -1741,6 +1658,33 @@ TEST(BroadPhaseTest, PerVertexSafeStepClampsCCD) {
     const Vec3 expected(0.825, 0.25, 0.0);
     EXPECT_DOUBLE_EQ(ccd_weight, 0.9);
     EXPECT_TRUE(x[0].isApprox(expected, 1.0e-12));
+
+    // Exercise the production OGC path with an incident pair initially 0.5
+    // apart. Its trust radius is 0.4 * 0.5 = 0.2, so a 0.25 displacement is
+    // scaled to 0.8 even though CCD clipping is disabled.
+    std::vector<Vec3> x_ogc = {
+        Vec3(0.0, 0.5, 0.0),
+        Vec3(0.0, 0.0, 0.0),
+        Vec3(1.0, 0.0, 0.0),
+        Vec3(0.0, 0.0, 1.0),
+    };
+    const std::vector<Vec3> target_ogc = {
+        Vec3(0.0, 0.25, 0.0),
+        x_ogc[1], x_ogc[2], x_ogc[3],
+    };
+
+    BroadPhase ogc_bp;
+    auto& ogc_cache = ogc_bp.mutable_cache();
+    ogc_cache.node_boxes.assign(x_ogc.size(), AABB(Vec3::Constant(-2.0), Vec3::Constant(2.0)));
+    ogc_cache.vertex_nt.resize(x_ogc.size());
+    ogc_cache.vertex_ss.resize(x_ogc.size());
+    ogc_cache.nt_pairs.push_back(pair);
+    ogc_cache.vertex_nt[0].push_back({/*pair_index=*/0, /*dof=*/0});
+
+    const double ogc_weight = per_vertex_safe_step(ogc_bp, x_ogc, 0, target_ogc[0], /*safety=*/0.9, /*clip_ccd=*/false, /*use_ticcd=*/false, /*use_ogc=*/true);
+
+    EXPECT_DOUBLE_EQ(ogc_weight, 0.8);
+    EXPECT_TRUE(x_ogc[0].isApprox(Vec3(0.0, 0.3, 0.0), 1.0e-12));
 }
 
 TEST(BroadPhaseTest, PerVertexSafeStepUpdatesOnlySelectedVertex) {
@@ -1892,77 +1836,6 @@ TEST(BVH3Test, ParallelBuildPreservesSerialLayoutQueriesAndRefitsExactly) {
                 refit_bvh_leaf(actual, actual_leaves, count / 2, moved);
                 refit_bvh_leaf(expected_refit, expected_leaves, count / 2, moved);
                 expect_bvh_vectors_exact(actual, expected_refit);
-            }
-        }
-    }
-}
-
-TEST(BroadPhaseTest, ParallelBulkBoxRefitPreservesSerialBoundsAndQueries) {
-    struct RestoreThreads {
-        int count = omp_get_max_threads();
-        ~RestoreThreads() { omp_set_num_threads(count); }
-    } restore;
-    // Include both sides of the triangle-tree task threshold and uneven
-    // subtrees. Node and edge trees are larger, exercising deeper task splits.
-    for (const int count : {0, 1, 4096, 4097, 8193}) {
-        SCOPED_TRACE(count);
-        std::vector<Vec3> positions;
-        std::vector<std::array<int, 3>> triangles;
-        std::vector<AABB> boxes;
-        for (int i = 0; i < count; ++i) {
-            const int first = static_cast<int>(positions.size());
-            const Vec3 center(3 * (i % 101), 3 * (i / 101), 0);
-            positions.push_back(center);
-            positions.push_back(center + Vec3(1, 0, 0));
-            positions.push_back(center + Vec3(0, 1, 0));
-            triangles.push_back({first, first + 1, first + 2});
-        }
-        const RefMesh mesh = make_mesh(positions, triangles);
-        for (const auto& position : positions)
-            boxes.emplace_back(position - Vec3::Constant(.01), position + Vec3::Constant(.01));
-        for (const int threads : {1, 4}) {
-            SCOPED_TRACE(threads);
-            omp_set_num_threads(threads);
-            BroadPhase actual;
-            actual.initialize(boxes, mesh, .02);
-            BroadPhase expected = actual;
-            BroadPhase compact;
-            compact.initialize(boxes, mesh, .02, BroadPhase::InitializationMode::BulkRefittable);
-            expect_cache_exact(compact.cache(), actual.cache(), false);
-            for (int step = 0; step < 3; ++step) {
-                for (std::size_t i = 0; i < positions.size(); ++i) {
-                    const Vec3 center = positions[i] + Vec3(.01 * (i % 3), -.02 * step, .03 * step);
-                    const double radius = .01 + .002 * ((i + step) % 5);
-                    boxes[i] = AABB(center - Vec3::Constant(radius), center + Vec3::Constant(radius));
-                }
-                // Build the reference primitive boxes independently and use
-                // the public serial refit for each tree.
-                auto& cache = expected.mutable_cache();
-                cache.node_boxes = boxes;
-                for (int tri = 0; tri < count; ++tri) {
-                    AABB box = boxes[tri_vertex(mesh, tri, 0)];
-                    box.expand(boxes[tri_vertex(mesh, tri, 1)]);
-                    box.expand(boxes[tri_vertex(mesh, tri, 2)]);
-                    cache.tri_boxes[tri] = AABB(box.min - Vec3::Constant(.02), box.max + Vec3::Constant(.02));
-                }
-                for (std::size_t edge = 0; edge < cache.edges.size(); ++edge) {
-                    AABB box = boxes[cache.edges[edge][0]];
-                    box.expand(boxes[cache.edges[edge][1]]);
-                    cache.red_edge_boxes[edge] = box;
-                    cache.edge_boxes[edge] = AABB(box.min - Vec3::Constant(.02), box.max + Vec3::Constant(.02));
-                }
-                refit_bvh(cache.node_bvh_nodes, cache.node_boxes);
-                refit_bvh(cache.tri_bvh_nodes, cache.tri_boxes);
-                refit_bvh(cache.edge_bvh_nodes, cache.red_edge_boxes);
-                actual.refit_boxes(boxes, mesh, .02);
-                compact.refit_boxes(boxes, mesh, .02);
-                expect_cache_geometry_and_topology_exact(actual.cache(), cache);
-                expect_cache_geometry_and_topology_exact(compact.cache(), cache, false);
-                actual.refresh_pairs(mesh);
-                compact.refresh_pairs(mesh);
-                expected.refresh_pairs(mesh);
-                expect_cache_exact(actual.cache(), cache);
-                expect_cache_exact(compact.cache(), cache, false);
             }
         }
     }
@@ -2488,7 +2361,7 @@ TEST(BroadPhaseTest, RepeatedIncidenceRebuildsPreserveOrderAcrossSizesModesAnd64
     BroadPhase reused;
     for (const int workers : {1, 8, 64}) {
         omp_set_num_threads(workers);
-        for (const int triangles : {80, 2, 240, 20, 1, 0, 97, 80}) {
+        for (const int triangles : {80, 240, 97, 80}) {
             std::vector<Vec3> x;
             std::vector<std::array<int, 3>> tris;
             for (int t = 0; t < triangles; ++t) {
@@ -2499,9 +2372,6 @@ TEST(BroadPhaseTest, RepeatedIncidenceRebuildsPreserveOrderAcrossSizesModesAnd64
                 x.push_back(base + Vec3(0, 0, .025));
                 tris.push_back({first, first + 1, first + 2});
             }
-            // Sparse cases exercise capped partitions, NT-only incidence,
-            // and clearing both empty types while vertices still exist.
-            if (triangles <= 1) x.push_back(Vec3(.001, .002, .003));
             RefMesh mesh = make_mesh(x, tris);
             mesh.node_to_rb.resize(x.size());
             for (std::size_t node = 0; node < x.size(); ++node) {
@@ -2509,14 +2379,10 @@ TEST(BroadPhaseTest, RepeatedIncidenceRebuildsPreserveOrderAcrossSizesModesAnd64
                 mesh.node_to_rb[node] = owner == 2 ? -1 : owner;
             }
             const std::vector<AABB> boxes(x.size(), AABB(Vec3::Constant(-1), Vec3::Constant(1)));
-            // Mesh sizes/connectivity change, while cache and scratch buffer
-            // capacity should remain reusable across every mode below.
-            reused.invalidate_mesh_topology();
             for (const auto mode : {BroadPhase::InitializationMode::DeformableSolver,
                                    BroadPhase::InitializationMode::GeneralSolver,
                                    BroadPhase::InitializationMode::RigidSolver,
-                                   BroadPhase::InitializationMode::Refittable,
-                                   BroadPhase::InitializationMode::BulkRefittable}) {
+                                   BroadPhase::InitializationMode::Refittable}) {
                 reused.initialize(boxes, mesh, .0048, mode);
                 const auto& cache = reused.cache();
                 if (mode == BroadPhase::InitializationMode::RigidSolver) {

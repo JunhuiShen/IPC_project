@@ -92,10 +92,6 @@ public:
         // ownership is built by the solver, so no per-vertex incidence or
         // refit-only BVH storage is needed.
         RigidSolver,
-        // Full-box refits: retain the same candidates, incidence, and
-        // triangle/edge leaf maps, but omit the unused node BVH and its map.
-        // Use refit_boxes(), not incremental_refresh_vertex(), in this mode.
-        BulkRefittable,
     };
 
     struct Cache {
@@ -187,9 +183,8 @@ public:
     void initialize_node_boxes_only(const std::vector<AABB>& vertex_boxes);
 
     // Update all boxes and refit the existing BVHs without changing their
-    // topology or pair lists. Requires box-based Refittable or BulkRefittable
-    // initialization with the same mesh and vertex count. Call refresh_pairs
-    // afterwards.
+    // topology or pair lists. Requires box-based Refittable initialization
+    // with the same mesh and vertex count. Call refresh_pairs afterwards.
     void refit_boxes(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double box_pad);
 
     // Re-query NT and SS pair lists from the current BVH state without
@@ -252,9 +247,6 @@ private:
     // Candidate-domain policy established by the most recent initialization;
     // refresh_pairs() must rebuild pairs in the same domain.
     bool exclude_tet_interior_nt_queries_ = false;
-    // Full-box initialization may omit the node hierarchy. Other entry
-    // points reset this flag so their refit validation remains unchanged.
-    bool bulk_refittable_ = false;
 
     // Static mesh connectivity, reused across every build for the same mesh.
     struct Topology {
