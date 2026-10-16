@@ -147,6 +147,14 @@ Mat33 segment_segment_barrier_self_hessian(
         int dof, const SegmentSegmentContactEvaluation& evaluation,
         double eps = 1.0e-12);
 
+// Evaluate roles 0..3 consecutively from the same distance/scalar operands.
+// Robust contacts reuse the existing per-worker exact geometry across all
+// four blocks; each block retains the single-role kernel's arithmetic.
+std::array<Mat33, 4> segment_segment_barrier_self_hessians(
+        const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+        double d_hat, const SegmentSegmentDistanceResult& distance,
+        double scalar_gradient, double scalar_hessian);
+
 // Returns both the gradient and self/diagonal Hessian block for dof.
 std::pair<Vec3, Mat33> segment_segment_barrier_self_gradient_and_hessian(const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
                                                                          double d_hat, int dof, double eps = 1.0e-12,

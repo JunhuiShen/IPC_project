@@ -16,10 +16,13 @@
 #include "rigid_body_ipc.h"
 #include "safe_step.h"
 #include "solid_ipc.h"
+#include "ogc_contact_cache.h"
+#include "segment_segment_distance_batch.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -488,6 +491,10 @@ struct OGCSolverWorkspace {
     std::vector<double> bounds;
     std::vector<NodeTriangleDistanceResult> nt_distances;
     std::vector<SegmentSegmentDistanceResult> ss_distances;
+    SegmentSegmentDistanceBatchWorkspace ss_distance_batch;
+    solver_detail::OGCFrozenContactOperands contact_operands;
+    solver_detail::OGCFrozenFrictionOperands friction_operands;
+    solver_detail::OGCFrozenSegmentHessians segment_hessians;
     bool matches(const RefMesh& ref_mesh, int nv) const {
         return mesh == &ref_mesh && tris_data == ref_mesh.tris.data()
             && dm_data == ref_mesh.Dm_inverse.data()
@@ -1164,7 +1171,10 @@ Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const Verte
                                     const IncidentTriangles* incident_triangles,  const std::vector<ShapeGrads>* rest_shape_grads,
                                     const std::vector<Vec3>* previous_positions,
                                     const std::vector<NodeTriangleDistanceResult>& nt_distances,
-                                    const std::vector<SegmentSegmentDistanceResult>& ss_distances) {
+                                    const std::vector<SegmentSegmentDistanceResult>& ss_distances,
+                                    const solver_detail::OGCFrozenContactOperands* operands = nullptr,
+                                    const solver_detail::OGCFrozenFrictionOperands* friction_operands = nullptr,
+                                    const solver_detail::OGCFrozenSegmentHessians* segment_hessians = nullptr) {
     const auto& bp_cache = broad_phase.cache();
     auto [g, H] =
         physics_detail::compute_local_gradient_and_hessian_no_barrier_unchecked(
@@ -1177,7 +1187,9 @@ Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const Verte
 
         for (const auto& entry : bp_cache.vertex_nt[vi]) {
             const auto& p = bp_cache.nt_pairs[entry.pair_index];
-            if (!node_triangle_aabbs_within_distance(
+            if (operands ? !operands->nt_aabb_active[entry.pair_index]
+                : friction_operands ? !friction_operands->nt_aabb_active[entry.pair_index]
+                : !node_triangle_aabbs_within_distance(
                     x_barrier[p.node], x_barrier[p.tri_v[0]],
                     x_barrier[p.tri_v[1]], x_barrier[p.tri_v[2]],
                     d_hat2)) {
@@ -1187,7 +1199,8 @@ Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const Verte
                 const std::array<Vec3, 4> current_positions =
                     friction_node_triangle_positions(p, x_barrier);
                 const NodeTriangleContactEvaluation contact_evaluation =
-                    make_node_triangle_contact_evaluation(
+                    friction_operands ? friction_operands->node_triangle_evaluation(entry.pair_index)
+                    : make_node_triangle_contact_evaluation(
                         current_positions, params.d_hat,
                         params.k_barrier, 1.0e-12, &nt_distances[entry.pair_index], params.exact_computation_fallback);
                 const auto [bg, bH] =
@@ -1197,17 +1210,23 @@ Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const Verte
                         entry.dof, contact_evaluation);
                 g += dt2k * bg;
                 H += dt2k * bH;
-                const FrozenFrictionContact contact =
-                    make_node_triangle_frozen_friction_contact(
-                        current_positions,
-                        friction_node_triangle_positions(
-                            p, *previous_positions),
-                        contact_evaluation, params.dt(),
-                        params.friction_velocity_epsilon);
-                const auto [fg, fH] =
-                    frozen_friction_role_gradient_and_hessian(
-                        contact, entry.dof,
-                        params.friction_coefficient, params.dt2());
+                std::pair<Vec3, Mat33> friction_derivatives;
+                if (friction_operands) {
+                    friction_derivatives = friction_operands->node_triangle_role_derivatives(
+                        entry.pair_index, entry.dof);
+                } else {
+                    const FrozenFrictionContact contact =
+                        make_node_triangle_frozen_friction_contact(
+                            current_positions,
+                            friction_node_triangle_positions(
+                                p, *previous_positions),
+                            contact_evaluation, params.dt(),
+                            params.friction_velocity_epsilon);
+                    friction_derivatives = frozen_friction_role_gradient_and_hessian(
+                            contact, entry.dof,
+                            params.friction_coefficient, params.dt2());
+                }
+                const auto& [fg, fH] = friction_derivatives;
                 g += fg;
                 H += fH;
             } else {
@@ -1215,7 +1234,9 @@ Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const Verte
                     node_triangle_barrier_self_gradient_and_hessian(
                         x_barrier[p.node], x_barrier[p.tri_v[0]],
                         x_barrier[p.tri_v[1]], x_barrier[p.tri_v[2]],
-                        params.d_hat, entry.dof, 1.0e-12, &nt_distances[entry.pair_index]);
+                        params.d_hat, entry.dof, 1.0e-12, &nt_distances[entry.pair_index],
+                        operands ? &operands->nt_b_prime[entry.pair_index] : nullptr,
+                        operands ? &operands->nt_b_double_prime[entry.pair_index] : nullptr);
                 g += dt2k * bg;
                 H += dt2k * bH;
             }
@@ -1223,44 +1244,68 @@ Vec3 gs_vertex_delta_frozen_barrier(int vi, const RefMesh& ref_mesh, const Verte
 
         for (const auto& entry : bp_cache.vertex_ss[vi]) {
             const auto& p = bp_cache.ss_pairs[entry.pair_index];
-            if (!segment_aabbs_within_distance(
+            if (operands ? !operands->ss_aabb_active[entry.pair_index]
+                : friction_operands ? !friction_operands->ss_aabb_active[entry.pair_index]
+                : !segment_aabbs_within_distance(
                     x_barrier[p.v[0]], x_barrier[p.v[1]],
                     x_barrier[p.v[2]], x_barrier[p.v[3]], d_hat2)) {
                 continue;
             }
+            const Mat33* cached_hessian = segment_hessians
+                ? segment_hessians->self_hessian(entry.pair_index, entry.dof) : nullptr;
             if (params.friction_coefficient != 0.0) {
                 const std::array<Vec3, 4> current_positions =
                     friction_segment_segment_positions(p, x_barrier);
                 const SegmentSegmentContactEvaluation contact_evaluation =
-                    make_segment_segment_contact_evaluation(
+                    friction_operands ? friction_operands->segment_segment_evaluation(entry.pair_index)
+                    : make_segment_segment_contact_evaluation(
                         current_positions, params.d_hat,
                         params.k_barrier, 1.0e-12, &ss_distances[entry.pair_index], params.exact_computation_fallback);
-                const auto [bg, bH] =
-                    segment_segment_barrier_self_gradient_and_hessian(
+                const auto [bg, bH] = cached_hessian
+                    ? std::make_pair(segment_segment_barrier_gradient(
+                        current_positions[0], current_positions[1],
+                        current_positions[2], current_positions[3],
+                        entry.dof, contact_evaluation), *cached_hessian)
+                    : segment_segment_barrier_self_gradient_and_hessian(
                         current_positions[0], current_positions[1],
                         current_positions[2], current_positions[3],
                         entry.dof, contact_evaluation);
                 g += dt2k * bg;
                 H += dt2k * bH;
-                const FrozenFrictionContact contact =
-                    make_segment_segment_frozen_friction_contact(
-                        current_positions,
-                        friction_segment_segment_positions(
-                            p, *previous_positions),
-                        contact_evaluation, params.dt(),
-                        params.friction_velocity_epsilon);
-                const auto [fg, fH] =
-                    frozen_friction_role_gradient_and_hessian(
-                        contact, entry.dof,
-                        params.friction_coefficient, params.dt2());
+                std::pair<Vec3, Mat33> friction_derivatives;
+                if (friction_operands) {
+                    friction_derivatives = friction_operands->segment_segment_role_derivatives(
+                        entry.pair_index, entry.dof);
+                } else {
+                    const FrozenFrictionContact contact =
+                        make_segment_segment_frozen_friction_contact(
+                            current_positions,
+                            friction_segment_segment_positions(
+                                p, *previous_positions),
+                            contact_evaluation, params.dt(),
+                            params.friction_velocity_epsilon);
+                    friction_derivatives = frozen_friction_role_gradient_and_hessian(
+                            contact, entry.dof,
+                            params.friction_coefficient, params.dt2());
+                }
+                const auto& [fg, fH] = friction_derivatives;
                 g += fg;
                 H += fH;
             } else {
-                const auto [bg, bH] =
-                    segment_segment_barrier_self_gradient_and_hessian(
+                const auto [bg, bH] = cached_hessian
+                    ? std::make_pair(segment_segment_barrier_gradient(
                         x_barrier[p.v[0]], x_barrier[p.v[1]],
                         x_barrier[p.v[2]], x_barrier[p.v[3]],
-                        params.d_hat, entry.dof, 1.0e-12, &ss_distances[entry.pair_index], nullptr, nullptr, params.exact_computation_fallback);
+                        params.d_hat, entry.dof, 1.0e-12, &ss_distances[entry.pair_index],
+                        operands ? &operands->ss_b_prime[entry.pair_index] : nullptr,
+                        params.exact_computation_fallback), *cached_hessian)
+                    : segment_segment_barrier_self_gradient_and_hessian(
+                        x_barrier[p.v[0]], x_barrier[p.v[1]],
+                        x_barrier[p.v[2]], x_barrier[p.v[3]],
+                        params.d_hat, entry.dof, 1.0e-12, &ss_distances[entry.pair_index],
+                        operands ? &operands->ss_b_prime[entry.pair_index] : nullptr,
+                        operands ? &operands->ss_b_double_prime[entry.pair_index] : nullptr,
+                        params.exact_computation_fallback);
                 g += dt2k * bg;
                 H += dt2k * bH;
             }
@@ -3141,6 +3186,16 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
                                             const std::vector<Vec3>& v,
                                             const std::string& outdir,
                                             const std::vector<Vec3>* previous_positions) {
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point phase_start;
+    std::array<double, 5> phase_ms{};
+    if (params.verbose) phase_start = Clock::now();
+    const auto finish_phase = [&](int phase) {
+        if (!params.verbose) return;
+        const auto now = Clock::now();
+        phase_ms[phase] += std::chrono::duration<double, std::milli>(now - phase_start).count();
+        phase_start = now;
+    };
     validate_solver_friction_parameters(
         params, "global_gauss_seidel_solver_ogc");
     std::vector<Vec3> reconstructed_previous_positions;
@@ -3154,6 +3209,7 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
     }
 
     const int nv = static_cast<int>(xnew.size());
+    const bool parallel = params.use_parallel && nv >= 128;
     const PinMap pm = build_pin_map(pins, nv);
 
     static OGCSolverWorkspace workspace;
@@ -3176,11 +3232,14 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
 
     std::vector<AABB>& bvh_node_boxes = workspace.bvh_node_boxes;
     bvh_node_boxes.resize(nv);
+    #pragma omp parallel for schedule(static) if(parallel)
     for (int i = 0; i < nv; ++i) {
         const double r = node_box_size_fn(i) + pad;
         bvh_node_boxes[i] = AABB(xnew[i] - Vec3::Constant(r), xnew[i] + Vec3::Constant(r));
     }
-    broad_phase.initialize(bvh_node_boxes, ref_mesh, pad);
+    broad_phase.initialize(bvh_node_boxes, ref_mesh, pad,
+        params.write_substeps ? BroadPhase::InitializationMode::Refittable
+                              : BroadPhase::InitializationMode::BulkRefittable);
 
     const std::vector<std::vector<int>>& color_groups = workspace.color_groups;
 
@@ -3193,10 +3252,20 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
     std::vector<double>& bounds = workspace.bounds;
     xnew_copy.resize(nv);
     bounds.resize(nv);
+    auto& distance_batch = workspace.ss_distance_batch;
+    auto& contact_operands = workspace.contact_operands;
+    auto& friction_operands = workspace.friction_operands;
+    auto& segment_hessians = workspace.segment_hessians;
+    const bool cache_contact_operands = params.d_hat > 0.0
+        && params.friction_coefficient == 0.0;
+    const bool cache_friction_operands = params.d_hat > 0.0
+        && params.friction_coefficient != 0.0;
+    std::size_t exact_pair_evaluations = 0, exact_edge_preparations = 0;
+    finish_phase(0);
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
         if (iter > 1) {
-            #pragma omp parallel for schedule(static)
+            #pragma omp parallel for schedule(static) if(parallel)
             for (int vi = 0; vi < nv; ++vi) {
                 const Vec3 r = Vec3::Constant(node_box_size_fn(vi) + pad);
                 bvh_node_boxes[vi] = AABB(xnew[vi] - r, xnew[vi] + r);
@@ -3204,68 +3273,216 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
             broad_phase.refit_boxes(bvh_node_boxes, ref_mesh, pad);
             broad_phase.refresh_pairs(ref_mesh);
         }
+        finish_phase(1);
 
-        xnew_copy = xnew;
         // Bounds and barrier assembly use exactly this iteration's frozen
         // geometry. Evaluate each contact once, sharing it across its vertices.
         auto& nt_distances = workspace.nt_distances;
         auto& ss_distances = workspace.ss_distances;
         nt_distances.resize(bp_cache.nt_pairs.size());
         ss_distances.resize(bp_cache.ss_pairs.size());
-        #pragma omp parallel for schedule(static)
-        for (std::size_t pair = 0; pair < bp_cache.nt_pairs.size(); ++pair) {
-            const auto& p = bp_cache.nt_pairs[pair];
-            nt_distances[pair] = node_triangle_distance(xnew_copy[p.node],
-                xnew_copy[p.tri_v[0]], xnew_copy[p.tri_v[1]], xnew_copy[p.tri_v[2]]);
-        }
-        #pragma omp parallel for schedule(static)
-        for (std::size_t pair = 0; pair < bp_cache.ss_pairs.size(); ++pair) {
-            const auto& p = bp_cache.ss_pairs[pair];
-            ss_distances[pair] = segment_segment_distance(xnew_copy[p.v[0]],
-                xnew_copy[p.v[1]], xnew_copy[p.v[2]], xnew_copy[p.v[3]], 1e-12, params.exact_computation_fallback);
-        }
-        #pragma omp parallel for schedule(static)
-        for (int vi = 0; vi < nv; ++vi) {
-            double minimum = std::numeric_limits<double>::infinity();
-            for (const auto& entry : bp_cache.vertex_nt[vi]) {
-                const double distance = nt_distances[entry.pair_index].distance;
-                if (distance < minimum) minimum = distance;
-            }
-            for (const auto& entry : bp_cache.vertex_ss[vi]) {
-                const double distance = ss_distances[entry.pair_index].distance;
-                if (distance < minimum) minimum = distance;
-            }
-            double b = 0.4 * minimum;
-            if (!std::isfinite(b)) b = node_box_size_fn(vi);
-            bounds[vi] = b;
-        }
+        distance_batch.prepare(xnew_copy, bp_cache.edges, bp_cache.ss_pair_edges,
+            1e-12, params.exact_computation_fallback, ss_distances);
+        if (cache_contact_operands)
+            contact_operands.resize(bp_cache.nt_pairs.size(), bp_cache.ss_pairs.size());
+        if (cache_friction_operands)
+            friction_operands.resize(bp_cache.nt_pairs.size(), bp_cache.ss_pairs.size());
+        const bool cache_segment_hessians = params.exact_computation_fallback
+            && params.d_hat > 0.0 && !bp_cache.ss_pairs.empty();
+        std::size_t active_robust_ss = 0;
+        std::atomic<bool> contact_failed{false};
+        std::exception_ptr contact_error;
+        const auto capture_contact_error = [&] {
+            if (!contact_failed.exchange(true, std::memory_order_relaxed))
+                contact_error = std::current_exception();
+        };
+        // Reuse one team through all frozen-contact and colored-update work,
+        // as in the basic experimental solvers. Each dependent phase and each
+        // elastic color retains its barrier and per-vertex arithmetic order.
+        #pragma omp parallel if(parallel)
+        {
+            #pragma omp for schedule(static)
+            for (int vi = 0; vi < nv; ++vi)
+                xnew_copy[vi] = xnew[vi];
 
-        for (const auto& color : color_groups) {
-            const int csz = static_cast<int>(color.size());
-            #pragma omp parallel for schedule(static)
-            for (int idx = 0; idx < csz; ++idx) {
-                const int vi = color[idx];
-                // Elastic stencil reads live xnew (GS across colors); barrier
-                // stencil reads frozen xnew_copy (Jacobi).
-                const Vec3 dx = - params.damping * gs_vertex_delta_frozen_barrier(vi, ref_mesh, adj, pins, params, xhat, xnew, xnew_copy, 
-                    broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads,
-                    previous_positions, nt_distances, ss_distances);
-                if (dx.squaredNorm() < 1e-28) {
-                    xnew[vi] = xnew_copy[vi];
-                    continue;
+            #pragma omp for schedule(static) nowait
+            for (std::size_t pair = 0; pair < bp_cache.nt_pairs.size(); ++pair) {
+                const auto& p = bp_cache.nt_pairs[pair];
+                nt_distances[pair] = node_triangle_distance(xnew_copy[p.node],
+                    xnew_copy[p.tri_v[0]], xnew_copy[p.tri_v[1]], xnew_copy[p.tri_v[2]]);
+                if (cache_contact_operands && !contact_failed.load(std::memory_order_relaxed)) {
+                    try {
+                        contact_operands.prepare_node_triangle(pair, p, xnew_copy,
+                            nt_distances[pair], params.d_hat);
+                    } catch (...) { capture_contact_error(); }
                 }
-                const double dx_norm = dx.norm();
-                const double toi = (dx_norm > 0.0) ? std::min(1.0, bounds[vi] / dx_norm) : 1.0;
-                xnew[vi] = xnew_copy[vi] + toi * dx;
+                if (cache_friction_operands) {
+                    friction_operands.classify_node_triangle(pair, p, xnew_copy,
+                        nt_distances[pair], params.d_hat, params.k_barrier);
+                }
+            }
+            // Pair classification and exact solves share immutable edge data
+            // prepared once per frozen iteration, and retain the scalar gate.
+            distance_batch.compute_collective();
+            if (cache_contact_operands && !distance_batch.failed()) {
+                #pragma omp for schedule(static) reduction(+:active_robust_ss)
+                for (std::size_t pair = 0; pair < bp_cache.ss_pairs.size(); ++pair) {
+                    if (contact_failed.load(std::memory_order_relaxed)) continue;
+                    try {
+                        contact_operands.prepare_segment_segment(pair, bp_cache.ss_pairs[pair],
+                            xnew_copy, ss_distances[pair], params.d_hat);
+                        if (cache_segment_hessians && ss_distances[pair].robust
+                            && ss_distances[pair].distance < params.d_hat
+                            && contact_operands.ss_aabb_active[pair])
+                            ++active_robust_ss;
+                    } catch (...) { capture_contact_error(); }
+                }
+            }
+            if (cache_friction_operands && !distance_batch.failed()) {
+                #pragma omp for schedule(static) reduction(+:active_robust_ss)
+                for (std::size_t pair = 0; pair < bp_cache.ss_pairs.size(); ++pair) {
+                    friction_operands.classify_segment_segment(pair, bp_cache.ss_pairs[pair],
+                        xnew_copy, ss_distances[pair], params.d_hat, params.k_barrier);
+                    if (cache_segment_hessians && params.k_barrier != 0.0
+                        && ss_distances[pair].robust
+                        && ss_distances[pair].distance < params.d_hat
+                        && friction_operands.ss_aabb_active[pair])
+                        ++active_robust_ss;
+                }
+                #pragma omp single
+                {
+                    try { friction_operands.compact(); }
+                    catch (...) { capture_contact_error(); }
+                }
+                #pragma omp for schedule(static) nowait
+                for (std::size_t pair = 0; pair < bp_cache.nt_pairs.size(); ++pair) {
+                    if (contact_failed.load(std::memory_order_relaxed)) continue;
+                    try {
+                        friction_operands.prepare_node_triangle(pair, bp_cache.nt_pairs[pair],
+                            xnew_copy, *previous_positions, nt_distances[pair], params);
+                    } catch (...) { capture_contact_error(); }
+                }
+                #pragma omp for schedule(static)
+                for (std::size_t pair = 0; pair < bp_cache.ss_pairs.size(); ++pair) {
+                    if (contact_failed.load(std::memory_order_relaxed)) continue;
+                    try {
+                        friction_operands.prepare_segment_segment(pair, bp_cache.ss_pairs[pair],
+                            xnew_copy, *previous_positions, ss_distances[pair], params);
+                    } catch (...) { capture_contact_error(); }
+                }
+            }
+            // Few reusable contacts do not repay the slot scan and joins.
+            // Keep their original vertex-local path without allocating records.
+            const bool use_segment_hessians = cache_segment_hessians
+                && active_robust_ss >= std::max<std::size_t>(8, bp_cache.ss_pairs.size() / 512);
+            if (use_segment_hessians && !distance_batch.failed()
+                && !contact_failed.load(std::memory_order_relaxed)) {
+                #pragma omp single
+                {
+                    try { segment_hessians.resize(bp_cache.ss_pairs.size()); }
+                    catch (...) { capture_contact_error(); }
+                }
+                #pragma omp for schedule(static)
+                for (std::size_t pair = 0; pair < bp_cache.ss_pairs.size(); ++pair) {
+                    if (contact_failed.load(std::memory_order_relaxed)) continue;
+                    const bool aabb_active = cache_contact_operands
+                        ? contact_operands.ss_aabb_active[pair] != 0
+                        : friction_operands.ss_aabb_active[pair] != 0;
+                    segment_hessians.classify(pair, ss_distances[pair], params.d_hat,
+                        aabb_active, !cache_friction_operands || params.k_barrier != 0.0);
+                }
+                #pragma omp single
+                {
+                    try {
+                        if (!contact_failed.load(std::memory_order_relaxed))
+                            segment_hessians.compact();
+                    }
+                    catch (...) { capture_contact_error(); }
+                }
+                // Consecutive roles share the worker's exact geometry cache.
+                #pragma omp for schedule(dynamic, 16)
+                for (std::size_t pair = 0; pair < bp_cache.ss_pairs.size(); ++pair) {
+                    if (contact_failed.load(std::memory_order_relaxed)) continue;
+                    try {
+                        double b_prime, b_double_prime;
+                        if (cache_contact_operands) {
+                            b_prime = contact_operands.ss_b_prime[pair];
+                            b_double_prime = contact_operands.ss_b_double_prime[pair];
+                        } else {
+                            const auto& evaluation = friction_operands.segment_segment_evaluation(pair);
+                            b_prime = evaluation.b_prime;
+                            b_double_prime = evaluation.b_double_prime;
+                        }
+                        segment_hessians.prepare_segment_segment(pair, bp_cache.ss_pairs[pair],
+                            xnew_copy, ss_distances[pair], params.d_hat, b_prime, b_double_prime);
+                    } catch (...) { capture_contact_error(); }
+                }
+            }
+            #pragma omp master
+            { finish_phase(2); }
+            // A failed preparation drains the team without committing moves.
+            if (!distance_batch.failed() && !contact_failed.load(std::memory_order_relaxed)) {
+                #pragma omp for schedule(static)
+                for (int vi = 0; vi < nv; ++vi) {
+                    double minimum = std::numeric_limits<double>::infinity();
+                    for (const auto& entry : bp_cache.vertex_nt[vi]) {
+                        const double distance = nt_distances[entry.pair_index].distance;
+                        if (distance < minimum) minimum = distance;
+                    }
+                    for (const auto& entry : bp_cache.vertex_ss[vi]) {
+                        const double distance = ss_distances[entry.pair_index].distance;
+                        if (distance < minimum) minimum = distance;
+                    }
+                    double b = 0.4 * minimum;
+                    if (!std::isfinite(b)) b = node_box_size_fn(vi);
+                    bounds[vi] = b;
+                }
+                #pragma omp master
+                { finish_phase(3); }
+
+                for (const auto& color : color_groups) {
+                    const int csz = static_cast<int>(color.size());
+                    #pragma omp for schedule(static)
+                    for (int idx = 0; idx < csz; ++idx) {
+                        const int vi = color[idx];
+                        // Elastic stencil reads live xnew (GS across colors); barrier
+                        // stencil reads frozen xnew_copy (Jacobi).
+                        const Vec3 dx = - params.damping * gs_vertex_delta_frozen_barrier(vi, ref_mesh, adj, pins, params, xhat, xnew, xnew_copy,
+                            broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads,
+                            previous_positions, nt_distances, ss_distances,
+                            cache_contact_operands ? &contact_operands : nullptr,
+                            cache_friction_operands ? &friction_operands : nullptr,
+                            use_segment_hessians ? &segment_hessians : nullptr);
+                        if (dx.squaredNorm() < 1e-28) {
+                            xnew[vi] = xnew_copy[vi];
+                            continue;
+                        }
+                        const double dx_norm = dx.norm();
+                        const double toi = (dx_norm > 0.0) ? std::min(1.0, bounds[vi] / dx_norm) : 1.0;
+                        xnew[vi] = xnew_copy[vi] + toi * dx;
+                    }
+                }
             }
         }
+        distance_batch.rethrow_if_failed();
+        if (contact_error) std::rethrow_exception(contact_error);
+        exact_pair_evaluations += distance_batch.fallback_pair_count();
+        exact_edge_preparations += distance_batch.prepared_edge_count();
+        finish_phase(4);
 
         result.iterations = iter;
     }
 
+    #pragma omp parallel for schedule(static) if(parallel)
     for (int i = 0; i < nv; ++i)
         prev_disp[i] = (xnew[i] - xnew_substep_start[i]).norm();
 
+    if (params.verbose) {
+        std::fprintf(stderr,
+            "  [OGC] %d sweeps, %zu elastic colors | setup %.3f ms | refit/pairs %.3f ms | frozen distances %.3f ms | bounds %.3f ms | vertex updates %.3f ms | exact pairs %zu, prepared edges %zu\n",
+            result.iterations, color_groups.size(), phase_ms[0], phase_ms[1],
+            phase_ms[2], phase_ms[3], phase_ms[4], exact_pair_evaluations, exact_edge_preparations);
+    }
     result.converged = true;
     return result;
 }

@@ -1246,6 +1246,18 @@ Mat33 segment_segment_barrier_self_hessian(
     return segment_segment_barrier_cross_hessian(x1, x2, x3, x4, d_hat, dof, dof, eps, precomputed_dr, precomputed_scalar_gradient, precomputed_scalar_hessian, exact_computation_fallback);
 }
 
+std::array<Mat33, 4> segment_segment_barrier_self_hessians(
+        const Vec3& x1, const Vec3& x2, const Vec3& x3, const Vec3& x4,
+        double d_hat, const SegmentSegmentDistanceResult& distance,
+        double scalar_gradient, double scalar_hessian) {
+    std::array<Mat33, 4> hessians;
+    for (int role = 0; role < 4; ++role)
+        hessians[role] = segment_segment_barrier_self_hessian(
+            x1, x2, x3, x4, d_hat, role, 1.0e-12,
+            &distance, &scalar_gradient, &scalar_hessian);
+    return hessians;
+}
+
 std::pair<Vec3, Mat33> node_triangle_barrier_self_gradient_and_hessian(
         const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3,
         double d_hat, int dof, double eps,
