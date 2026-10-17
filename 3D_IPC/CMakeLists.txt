@@ -64,9 +64,9 @@ target_include_directories(Eigen3::Eigen SYSTEM INTERFACE
 
 FetchContent_MakeAvailable(tight_inclusion)
 
-# Exact rational predicates require Boost 1.83 or newer (header-only).
+# Exact rational predicates require Boost 1.70 or newer (header-only).
 set(_ipc_requested_boost_dir "${Boost_DIR}")
-find_package(Boost 1.83 CONFIG QUIET)
+find_package(Boost 1.70 CONFIG QUIET)
 if(NOT Boost_FOUND)
     # Some system packages retain an older CMake package version after their
     # headers are upgraded. Verify the selected target's actual headers below.
@@ -86,17 +86,19 @@ set(CMAKE_REQUIRED_LIBRARIES Boost::headers)
 # Recheck on every configure, including when headers change in place.
 unset(IPC_BOOST_HEADERS_AT_LEAST_1_83 CACHE)
 unset(IPC_BOOST_HEADERS_AT_LEAST_1_83)
+unset(IPC_BOOST_HEADERS_AT_LEAST_1_70 CACHE)
+unset(IPC_BOOST_HEADERS_AT_LEAST_1_70)
 check_cxx_source_compiles("
     #include <boost/version.hpp>
-    #if !defined(BOOST_VERSION) || BOOST_VERSION < 108300
-    #error Boost headers must be version 1.83 or newer
+    #if !defined(BOOST_VERSION) || BOOST_VERSION < 107000
+    #error Boost headers must be version 1.70 or newer
     #endif
     int main() { return 0; }
-" IPC_BOOST_HEADERS_AT_LEAST_1_83)
+" IPC_BOOST_HEADERS_AT_LEAST_1_70)
 cmake_pop_check_state()
-if(NOT IPC_BOOST_HEADERS_AT_LEAST_1_83)
+if(NOT IPC_BOOST_HEADERS_AT_LEAST_1_70)
     message(FATAL_ERROR
-        "Boost 1.83 or newer headers are required by Boost::headers. "
+        "Boost 1.70 or newer headers are required by Boost::headers. "
         "Select a compatible installation with Boost_DIR."
     )
 endif()
