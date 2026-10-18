@@ -393,8 +393,10 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
     const std::vector<Vec3>& intended_displacement,
     const RefMesh& ref_mesh, const SimParams& params, int ccd_iterations,
     BroadPhase* scratch_broad_phase, ColoredCCDGuessTrace* trace) {
-    // Keep the original scheduling for exact fallback and per-group tracing.
-    const bool optimize_level_schedule = !trace && !params.exact_computation_fallback;
+    // Scheduling only: preserve the level/color/within-group update order and
+    // pass the exact-fallback setting unchanged to every CCD query. Per-group
+    // tracing retains the original loop so each intermediate state is recorded.
+    const bool optimize_level_schedule = !trace;
     constexpr std::size_t small_group_limit = 32;
     BroadPhase local_broad_phase;
     BroadPhase& broad_phase = scratch_broad_phase ? *scratch_broad_phase : local_broad_phase;

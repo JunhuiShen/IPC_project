@@ -343,6 +343,48 @@ void expect_traces_identical(const ColoredCCDGuessTrace& actual,
     }
 }
 
+std::vector<Vec3> expect_exact_level_schedules_identical(
+    const std::vector<Vec3>& x, const std::vector<Vec3>& displacement,
+    const RefMesh& mesh, SimParams params, int cap, int expected_point_group = 0) {
+    params.exact_computation_fallback = true;
+    params.use_parallel = false;
+    const auto reference = replay_bfs_guess(x, displacement, mesh, params, cap);
+    ColoredCCDGuessTrace trace;
+    const auto baseline = collision_colored_ccd_initial_guess_level_based(
+        x, displacement, mesh, params, cap, nullptr, &trace);
+    expect_positions_identical(baseline, reference.result);
+    EXPECT_EQ(trace.level_ids, reference.levels);
+    expect_trace_consistent(trace, x, displacement, baseline, cap, true);
+    if (expected_point_group > 0) {
+        const auto group = std::find_if(trace.steps.begin(), trace.steps.end(),
+            [&](const ColoredCCDGuessTraceStep& step) {
+                return step.stage == ColoredCCDGuessTraceStage::ColorUpdate
+                    && step.iteration == 1 && step.active_level == 0
+                    && step.active_color == trace.color_ids[0];
+            });
+        EXPECT_NE(group, trace.steps.end());
+        if (group != trace.steps.end())
+            EXPECT_EQ(group->active_vertices.size(), expected_point_group);
+    }
+
+    std::vector<Vec3> actual;
+    BroadPhase scratch;
+    for (const int workers : {0, 1, 4}) {
+        SCOPED_TRACE(::testing::Message() << "workers=" << workers);
+        params.use_parallel = workers != 0;
+        omp_set_num_threads(std::max(1, workers));
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            SCOPED_TRACE(repeat);
+            // A trace keeps the reference schedule. Explicitly pass nullptr
+            // here so exact mode exercises the production scheduling path.
+            actual = collision_colored_ccd_initial_guess_level_based(
+                x, displacement, mesh, params, cap, &scratch, nullptr);
+            expect_positions_identical(actual, baseline);
+        }
+    }
+    return actual;
+}
+
 bool parse_initial_guess_arguments(IPCArgs3D& args, std::vector<std::string> words) {
     std::vector<char*> argv;
     for (auto& word : words) argv.push_back(word.data());
@@ -1666,6 +1708,96 @@ TEST_F(CollisionColoredCCDInitialGuessNew, EdgeEdgeRetriesRetainTheSameGapGuard)
         for (std::size_t node = 1; node < x.size(); ++node)
             expect_positions_identical({result[node]}, {x[node]});
     }
+}
+
+TEST_F(CollisionColoredCCDInitialGuessNew, ExactNearMissGroupsPreserveGapAndCanEscape) {
+    params.exact_computation_fallback = true;
+    for (const int copies : {31, 32, 33}) {
+        SCOPED_TRACE(copies);
+        RefMesh mesh;
+        std::vector<Vec3> x, displacement;
+        for (int copy = 0; copy < copies; ++copy) {
+            const int base = static_cast<int>(x.size());
+            const Vec3 offset(12 * copy, 0, 0);
+            for (const auto& point : point_above_triangle()) x.push_back(point + offset);
+            mesh.tris.insert(mesh.tris.end(), {base + 1, base + 2, base + 3});
+            displacement.insert(displacement.end(), {Vec3(0, 0, 5e-9 - 1.0),
+                Vec3::Zero(), Vec3::Zero(), Vec3::Zero()});
+        }
+        mesh.num_positions = x.size();
+        mesh.mass.assign(x.size(), 1.0);
+        // Every point shares a level/color. The target does not cross the
+        // triangle, so exact endpoint backtracking must enforce the gap floor
+        // on both sides of the small-group scheduling threshold.
+        const auto close = expect_exact_level_schedules_identical(x, displacement, mesh, params, 40, copies);
+        for (int copy = 0; copy < copies; ++copy) {
+            SCOPED_TRACE(copy);
+            const int base = 4 * copy;
+            const double gap = node_triangle_distance(close[base], close[base + 1],
+                close[base + 2], close[base + 3]).distance;
+            EXPECT_GE(gap, 1e-8);
+            EXPECT_LT(gap, 1e-7);
+            EXPECT_GT(close[base].z(), (x[base] + displacement[base]).z());
+            for (int node = 1; node < 4; ++node)
+                expect_positions_identical({close[base + node]}, {x[base + node]});
+            displacement[base] = Vec3(close[base].x(), close[base].y(), 2e-8) - close[base];
+        }
+        const auto escaped = expect_exact_level_schedules_identical(close, displacement, mesh, params, 1);
+        for (std::size_t node = 0; node < x.size(); ++node)
+            expect_positions_identical({escaped[node]}, {close[node] + displacement[node]});
+    }
+}
+
+TEST_F(CollisionColoredCCDInitialGuessNew, ExactSubFloorLocksAndTinyEscapesMatchReference) {
+    params.exact_computation_fallback = true;
+    const auto mesh = point_triangle_mesh();
+    for (const double gap : {5e-9, 5e-11, 5e-17}) {
+        SCOPED_TRACE(gap);
+        auto x = point_above_triangle();
+        x[0].z() = gap;
+        std::vector<Vec3> displacement(x.size(), Vec3::Zero());
+        displacement[0] = Vec3(0, 0, 0.5 * gap) - x[0];
+        const auto inward = expect_exact_level_schedules_identical(x, displacement, mesh, params, 20);
+        expect_positions_identical(inward, x);
+
+        // Exact CCD must permit representable separation even below both the
+        // initial-contact and predictor convergence tolerances.
+        displacement[0] = Vec3(0, 0, 2 * gap) - x[0];
+        const auto outward = expect_exact_level_schedules_identical(x, displacement, mesh, params, 1);
+        expect_positions_identical({outward[0]}, {x[0] + displacement[0]});
+        EXPECT_GT(outward[0].z(), x[0].z());
+        for (std::size_t node = 1; node < x.size(); ++node)
+            expect_positions_identical({outward[node]}, {x[node]});
+    }
+    auto x = point_above_triangle();
+    x[0].z() = 5e-9;
+    std::vector<Vec3> displacement(x.size(), Vec3::Zero());
+    displacement[0] = Vec3(0, 0, 1e-15);
+    const auto tiny_escape = expect_exact_level_schedules_identical(x, displacement, mesh, params, 1);
+    expect_positions_identical({tiny_escape[0]}, {x[0] + displacement[0]});
+    EXPECT_GT(tiny_escape[0].z(), x[0].z());
+}
+
+TEST_F(CollisionColoredCCDInitialGuessNew, ExactEdgeGapSchedulingMatchesReferenceAndCanEscape) {
+    params.exact_computation_fallback = true;
+    auto mesh = ref_mesh_with_masses({1, 1, 1, 1, 1, 1});
+    mesh.tris = {0, 1, 4, 2, 3, 5};
+    const std::vector<Vec3> x = {Vec3(0, 0, 1), Vec3(1, 0, 0),
+        Vec3(0.5, -1, 0), Vec3(0.5, 1, 0), Vec3(-2, 0, 2), Vec3(0.5, 0, -2)};
+    std::vector<Vec3> displacement(x.size(), Vec3::Zero());
+    displacement[0] = Vec3(0, 0, -2);
+    const auto close = expect_exact_level_schedules_identical(x, displacement, mesh, params, 20);
+    const double gap = segment_segment_distance(close[0], close[1], close[2], close[3]).distance;
+    EXPECT_GE(gap, 1e-8);
+    EXPECT_LT(gap, 1e-7);
+    EXPECT_GT(close[0].z(), 0.0);
+    for (std::size_t node = 1; node < x.size(); ++node)
+        expect_positions_identical({close[node]}, {x[node]});
+    displacement[0] = Vec3(0, 0, 0.25);
+    const auto escaped = expect_exact_level_schedules_identical(close, displacement, mesh, params, 1);
+    for (std::size_t node = 0; node < x.size(); ++node)
+        expect_positions_identical({escaped[node]}, {close[node] + displacement[node]});
+    EXPECT_GT(segment_segment_distance(escaped[0], escaped[1], escaped[2], escaped[3]).distance, gap);
 }
 
 TEST_F(CollisionColoredCCDInitialGuessNew, AllTiedRootsPrecedeEarlierColorsAndKeepRigidsFixed) {
