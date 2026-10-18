@@ -167,15 +167,18 @@ inline SolverResult advance_one_frame_general(
         // COM/orientation are left to the general solver. Legacy particle
         // guesses remain disabled here because they do not preserve rigidity.
         std::vector<Vec3> xnew = state.deformed_positions;
-        if (params.use_colored_ccd_guess && !params.use_ogc && !params.use_ogc_solver) {
+        if ((params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based)
+            && !params.use_ogc && !params.use_ogc_solver) {
             std::vector<Vec3> intended_displacement(nv, Vec3::Zero());
             for (int node = 0; node < nv; ++node) {
                 if (ref_mesh.node_to_rb[node] < 0)
                     intended_displacement[node] = xhat[node] - state.deformed_positions[node];
             }
-            xnew = collision_colored_ccd_initial_guess(state.deformed_positions,
+            const auto colored_guess = params.use_colored_ccd_guess_level_based
+                ? collision_colored_ccd_initial_guess_level_based : collision_colored_ccd_initial_guess;
+            xnew = colored_guess(state.deformed_positions,
                 intended_displacement, ref_mesh, params, params.colored_ccd_guess_iters,
-                &broad_phase);
+                &broad_phase, nullptr);
         }
         std::vector<Vec3> x_com_new = state.x_coms;
         std::vector<Vec4> q_new = state.orientations;
@@ -220,7 +223,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
     PinTargetUpdater pin_updater = nullptr, SubstepCallback on_substep = nullptr, const std::string& outdir = "") {
     params.validate_cloth_grid_parameters();
     params.validate_colored_ccd_guess_parameters();
-    if (params.use_colored_ccd_guess
+    if ((params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based)
         && (!ref_mesh.rb_nodes.empty() || !ref_mesh.tets.empty()
             || !ref_mesh.tet_nodes.empty()
             || std::any_of(ref_mesh.node_to_rb.begin(), ref_mesh.node_to_rb.end(),
@@ -243,16 +246,18 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
 
         if (params.use_ogc || params.use_ogc_solver)
             xnew = state.deformed_positions;
-        else if (params.use_colored_ccd_guess) {
+        else if (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based) {
             // xhat is the fixed target for this substep. The colored CCD
             // helper accepts a displacement and retries its remainder after
             // each color sweep; do not add another gravity predictor here.
             std::vector<Vec3> intended_displacement(xhat.size());
             for (std::size_t vertex = 0; vertex < xhat.size(); ++vertex)
                 intended_displacement[vertex] = xhat[vertex] - state.deformed_positions[vertex];
-            xnew = collision_colored_ccd_initial_guess(state.deformed_positions,
+            const auto colored_guess = params.use_colored_ccd_guess_level_based
+                ? collision_colored_ccd_initial_guess_level_based : collision_colored_ccd_initial_guess;
+            xnew = colored_guess(state.deformed_positions,
                 intended_displacement, ref_mesh, params, params.colored_ccd_guess_iters,
-                &broad_phase);
+                &broad_phase, nullptr);
         }
         else if (params.use_verlet_guess)
             xnew = verlet_initial_guess(state.deformed_positions, xhat, ref_mesh, params, &predictor_broad_phase);

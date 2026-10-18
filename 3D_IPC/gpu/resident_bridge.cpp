@@ -140,6 +140,8 @@ SceneDescription describe_scene(const RefMesh& mesh,const DeformedState& state,
 
 StepParameters describe_step(const SimParams& p) {
     // Never silently reroute an unported solver/initial-guess mode to CPU.
+    if(p.use_colored_ccd_guess_level_based)
+        throw std::invalid_argument("resident GPU: --use_colored_ccd_guess_level_based is not ported; use the CPU simulator for this initial guess");
     if(!p.fixed_iters || p.use_ogc || p.use_ogc_solver || p.use_cloth_grid)
         throw std::invalid_argument("resident GPU currently requires fixed iterations and conflict-graph coloring, with OGC/grid disabled");
     if(!p.use_colored_ccd_guess && (p.use_verlet_guess || p.use_translation_guess))

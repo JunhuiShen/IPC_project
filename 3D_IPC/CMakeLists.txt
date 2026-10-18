@@ -266,6 +266,11 @@ if(IPC_BUILD_TOOLS)
     )
     target_link_libraries(generate_golden PRIVATE IPC::ipc)
     ipc_enable_ipo(generate_golden)
+
+    # Opt-in Houdini trace of one free-fall step through the level-ordered CCD guess.
+    add_executable(colored_ccd_new_visual_test colored_ccd_new_visual_test.cpp)
+    target_link_libraries(colored_ccd_new_visual_test PRIVATE IPC::ipc)
+    ipc_enable_ipo(colored_ccd_new_visual_test)
 endif()
 
 # -----------------------------------------------------------------------------

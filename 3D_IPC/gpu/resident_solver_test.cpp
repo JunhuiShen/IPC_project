@@ -160,6 +160,17 @@ int main() {
         try {(void)ipc_gpu::resident::describe_step(unsupported);}
         catch(const std::invalid_argument&){rejected=true;}
         require(rejected,"resident solver must not silently replace Tight-Inclusion");
+        unsupported.use_ticcd=false;
+        unsupported.use_colored_ccd_guess_level_based=true;
+        for(bool global_guess:{false,true}) {
+            unsupported.use_ccd_guess=global_guess;
+            rejected=false;
+            try {(void)ipc_gpu::resident::describe_step(unsupported);}
+            catch(const std::invalid_argument& error) {
+                rejected=std::string(error.what()).find("--use_colored_ccd_guess_level_based")!=std::string::npos;
+            }
+            require(rejected,"resident solver must explicitly reject the CPU level-based colored guess");
+        }
         readme_defaults_test();
         stage_skip_test();
         run(0,false);run(.1,false);run(.1,true);

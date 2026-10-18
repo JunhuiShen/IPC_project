@@ -176,15 +176,20 @@ int main(int argc, char** argv) {
 
     std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
-    if (params.use_colored_ccd_guess) {
+    if (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based) {
         if (!has_deformable)
             std::cout << "Colored CCD initial guess: ignored for rigid-only scenes\n";
         else if (params.use_ogc || params.use_ogc_solver)
             std::cout << "Deformable initial guess: previous positions (OGC overrides colored CCD guess)\n";
-        else
-            std::cout << "Deformable initial guess: collision-colored linear CCD, target=x_hat, sweeps="
-                      << params.colored_ccd_guess_iters
-                      << (has_rigid ? " (rigid bodies unchanged during guess)" : "") << "\n";
+        else {
+            std::cout << "Deformable initial guess: "
+                      << (params.use_colored_ccd_guess_level_based
+                          ? "level-based collision-colored linear CCD" : "collision-colored linear CCD")
+                      << ", target=x_hat, sweeps=" << params.colored_ccd_guess_iters;
+            if (params.use_colored_ccd_guess_level_based && params.colored_ccd_guess_iters > 0)
+                std::cout << " (plus one discarded trial sweep)";
+            std::cout << (has_rigid ? " (rigid bodies unchanged during guess)" : "") << "\n";
+        }
     }
     if ((params.use_basic_experimental || params.use_basic_experimental_v2) && !params.use_cloth_grid
         && !params.use_ogc && !params.use_ogc_solver) {

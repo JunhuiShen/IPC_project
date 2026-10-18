@@ -25,6 +25,59 @@ struct ColoredCCDGuessWorkspace {
     std::vector<unsigned char> nt_separated, ss_separated;
 };
 
+// Both predictors use the same setup. The level predictor consumes this
+// workspace immediately after its trial original-colored sweep; no graph,
+// coloring, or target array needs to be constructed a second time.
+static ColoredCCDGuessWorkspace& colored_ccd_guess_workspace() {
+    static thread_local ColoredCCDGuessWorkspace workspace;
+    return workspace;
+}
+
+struct ColoredCCDLevelGuessWorkspace {
+    std::vector<double> first_sweep_movement;
+    std::vector<int> levels, colors, component, queue, ordered_vertices;
+    std::vector<std::size_t> group_offsets;
+};
+
+static ColoredCCDGuessTraceStep& append_colored_guess_trace(
+    ColoredCCDGuessTrace& trace, const std::vector<Vec3>& positions,
+    ColoredCCDGuessTraceStage stage, int iteration, int level = -1, int color = -1) {
+    trace.steps.emplace_back();
+    auto& step = trace.steps.back();
+    step.stage = stage;
+    step.iteration = iteration;
+    step.active_level = level;
+    step.active_color = color;
+    step.positions = positions;
+    return step;
+}
+
+static void initialize_colored_guess_trace(ColoredCCDGuessTrace& trace,
+    const std::vector<Vec3>& initial, const std::vector<Vec3>& targets) {
+    trace = ColoredCCDGuessTrace{};
+    trace.targets = targets;
+    trace.color_ids.assign(initial.size(), -1);
+    trace.level_ids.assign(initial.size(), -1);
+    trace.first_sweep_movement.assign(initial.size(), 0.0);
+    trace.reached_targets = true;
+    for (std::size_t vertex = 0; vertex < initial.size(); ++vertex)
+        if (!((targets[vertex] - initial[vertex]).squaredNorm() < 1e-28))
+            trace.reached_targets = false;
+    append_colored_guess_trace(trace, initial, ColoredCCDGuessTraceStage::Initial, 0);
+}
+
+static void finish_colored_guess_trace_sweep(ColoredCCDGuessTrace& trace,
+    const std::vector<Vec3>& positions, const std::vector<Vec3>& initial,
+    int iteration, int sweep_status) {
+    append_colored_guess_trace(trace, positions, ColoredCCDGuessTraceStage::SweepEnd, iteration);
+    trace.completed_iterations = iteration;
+    trace.reached_targets = !(sweep_status & 2);
+    trace.stalled = !(sweep_status & 1);
+    if (iteration == 1 && !trace.probe_completed)
+        for (std::size_t vertex = 0; vertex < initial.size(); ++vertex)
+            trace.first_sweep_movement[vertex] = (positions[vertex] - initial[vertex]).stableNorm();
+}
+
 static void discard_separated_guess_contacts(BroadPhase& broad_phase,
     const std::vector<Vec3>& x, bool parallel, ColoredCCDGuessWorkspace& workspace,
     double minimum_separation, bool exact_computation_fallback) {
@@ -148,7 +201,7 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
     const std::vector<Vec3>& x,
     const std::vector<Vec3>& intended_displacement,
     const RefMesh& ref_mesh, const SimParams& params, int ccd_iterations,
-    BroadPhase* scratch_broad_phase) {
+    BroadPhase* scratch_broad_phase, ColoredCCDGuessTrace* trace) {
     if (x.size() != intended_displacement.size())
         throw std::invalid_argument("collision_colored_ccd_initial_guess: position/displacement size mismatch");
     if (ccd_iterations < 0)
@@ -180,7 +233,7 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
     };
     // Rebuild all geometry/dependencies, while retaining per-caller storage.
     // Warm coloring still converges to the canonical ascending greedy result.
-    static thread_local ColoredCCDGuessWorkspace workspace;
+    auto& workspace = colored_ccd_guess_workspace();
     auto& targets = workspace.targets;
     targets.resize(x.size());
     for (int vertex = 0; vertex < nv; ++vertex) {
@@ -194,6 +247,7 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
             throw std::invalid_argument("collision_colored_ccd_initial_guess: target overflow");
     }
     std::vector<Vec3> xnew = x;
+    if (trace) initialize_colored_guess_trace(*trace, x, targets);
     if (ccd_iterations == 0 || nv == 0) return xnew;
 
     double minimum_separation = colored_guess_min_separation;
@@ -250,6 +304,9 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
     auto& color_groups = workspace.color_groups;
     build_contact_adj(broad_phase.cache(), nv, contact_adjacency);
     greedy_color_conflict_graph(contact_adjacency, color_groups, &workspace.coloring);
+    if (trace)
+        for (int color = 0; color < static_cast<int>(color_groups.size()); ++color)
+            for (const int vertex : color_groups[color]) trace->color_ids[vertex] = color;
 
     if (params.exact_computation_fallback) {
         // Start the contact-heavy independent vertices first. Coloring and the
@@ -302,6 +359,16 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
                     if (!((targets[vertex] - xnew[vertex]).squaredNorm() < 1e-28))
                         sweep_status |= 2;
                 }
+                if (trace) {
+                    #pragma omp single
+                    {
+                        const int color = static_cast<int>(&group - color_groups.data());
+                        auto& snapshot = append_colored_guess_trace(*trace, xnew,
+                            ColoredCCDGuessTraceStage::ColorUpdate, iteration + 1, -1, color);
+                        for (const int vertex : group)
+                            if (!is_rigid(vertex)) snapshot.active_vertices.push_back(vertex);
+                    }
+                }
             }
             // All colors have joined. Fixed targets and an unchanged complete
             // sweep imply that every subsequent sweep would do identical work.
@@ -311,6 +378,187 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
             // Every worker must capture the decision before the next single
             // region can reset the shared flag for another sweep.
             #pragma omp barrier
+            if (trace) {
+                #pragma omp single
+                { finish_colored_guess_trace_sweep(*trace, xnew, x, iteration + 1, sweep_status); }
+            }
+            if (finished) break;
+        }
+    }
+    return xnew;
+}
+
+std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
+    const std::vector<Vec3>& x,
+    const std::vector<Vec3>& intended_displacement,
+    const RefMesh& ref_mesh, const SimParams& params, int ccd_iterations,
+    BroadPhase* scratch_broad_phase, ColoredCCDGuessTrace* trace) {
+    BroadPhase local_broad_phase;
+    BroadPhase& broad_phase = scratch_broad_phase ? *scratch_broad_phase : local_broad_phase;
+    // Trial only: run one original-colored sweep on a temporary position copy
+    // to measure movement for level selection. Also reuse its input validation,
+    // swept boxes, pruned contacts, graph and scheduled color groups. Do not
+    // record trial positions as actual updates or rebuild contacts: boxes cover
+    // every original start-to-target path.
+    auto xnew = collision_colored_ccd_initial_guess(x, intended_displacement,
+        ref_mesh, params, std::min(ccd_iterations, 1), &broad_phase);
+
+    const int nv = static_cast<int>(x.size());
+    const auto is_rigid = [&](int vertex) {
+        return !ref_mesh.node_to_rb.empty() && ref_mesh.node_to_rb[vertex] >= 0;
+    };
+    static thread_local ColoredCCDLevelGuessWorkspace workspace;
+    auto& trial_workspace = colored_ccd_guess_workspace();
+    const auto& targets = trial_workspace.targets;
+    auto& movement = workspace.first_sweep_movement;
+    movement.resize(x.size());
+    for (int vertex = 0; vertex < nv; ++vertex)
+        movement[vertex] = (xnew[vertex] - x[vertex]).stableNorm();
+    // Keep only the trial distances. Even a trial reaching every target does
+    // not count as convergence: actual motion has not started yet.
+    xnew = x;
+    if (trace) initialize_colored_guess_trace(*trace, x, targets);
+    if (ccd_iterations == 0 || x.empty()) return xnew;
+    if (trace) {
+        trace->probe_completed = true;
+        trace->first_sweep_movement = movement;
+    }
+
+    auto& adjacency = trial_workspace.contact_adjacency;
+    const auto& color_groups = trial_workspace.color_groups;
+    // Coloring stores an edge only at its higher-index endpoint. BFS needs
+    // both directions. Ascending traversal appends reverse edges only to rows
+    // already visited here, leaving the current lower-neighbor row unchanged.
+    // The next predictor call rebuilds/clears every row before coloring, so
+    // these added reverse edges cannot leak into a later trial or legacy sweep.
+    for (int vertex = 0; vertex < nv; ++vertex)
+        for (const int neighbor : adjacency[vertex])
+            adjacency[neighbor].push_back(vertex);
+
+    auto& levels = workspace.levels;
+    auto& component = workspace.component;
+    auto& queue = workspace.queue;
+    levels.assign(x.size(), -2); // -2: undiscovered; -1: component found, no level yet.
+    for (int start = 0; start < nv; ++start) {
+        if (levels[start] != -2) continue;
+        component.clear();
+        component.push_back(start);
+        levels[start] = -1;
+        for (std::size_t head = 0; head < component.size(); ++head) {
+            for (const int neighbor : adjacency[component[head]]) {
+                if (levels[neighbor] != -2) continue;
+                levels[neighbor] = -1;
+                component.push_back(neighbor);
+            }
+        }
+
+        // Trial absolute distance moved, not intended distance or remaining
+        // distance. Seed every exact tie. Each disconnected component needs
+        // its own seeds, including components with zero first-sweep movement.
+        double largest_movement = -1.0;
+        for (const int vertex : component)
+            if (!is_rigid(vertex))
+                largest_movement = std::max(largest_movement, movement[vertex]);
+        queue.clear();
+        for (const int vertex : component) {
+            if (!is_rigid(vertex) && movement[vertex] == largest_movement) {
+                levels[vertex] = 0;
+                queue.push_back(vertex);
+            }
+        }
+        if (queue.empty()) { // Entirely rigid component: no updates to schedule.
+            for (const int vertex : component) levels[vertex] = 0;
+            continue;
+        }
+        for (std::size_t head = 0; head < queue.size(); ++head) {
+            const int vertex = queue[head];
+            for (const int neighbor : adjacency[vertex]) {
+                if (levels[neighbor] != -1) continue;
+                levels[neighbor] = levels[vertex] + 1;
+                queue.push_back(neighbor);
+            }
+        }
+    }
+
+    // Start with the trial's scheduled color order. A stable level sort retains
+    // color order inside each level and, in exact-fallback mode, the original
+    // heavy-first order within each independent level/color group. No extra
+    // cost sort or potentially large levels x colors table is needed.
+    auto& colors = workspace.colors;
+    auto& ordered_vertices = workspace.ordered_vertices;
+    auto& group_offsets = workspace.group_offsets;
+    colors.resize(x.size());
+    ordered_vertices.clear();
+    ordered_vertices.reserve(x.size());
+    for (int color = 0; color < static_cast<int>(color_groups.size()); ++color) {
+        for (const int vertex : color_groups[color]) {
+            colors[vertex] = color;
+            if (!is_rigid(vertex)) ordered_vertices.push_back(vertex);
+        }
+    }
+    std::stable_sort(ordered_vertices.begin(), ordered_vertices.end(),
+        [&](int a, int b) { return levels[a] < levels[b]; });
+    group_offsets.clear();
+    group_offsets.push_back(0);
+    for (std::size_t index = 1; index < ordered_vertices.size(); ++index) {
+        const int a = ordered_vertices[index - 1], b = ordered_vertices[index];
+        if (levels[a] != levels[b] || colors[a] != colors[b])
+            group_offsets.push_back(index);
+    }
+    if (!ordered_vertices.empty()) group_offsets.push_back(ordered_vertices.size());
+    if (trace) {
+        trace->color_ids = colors;
+        trace->level_ids = levels;
+        append_colored_guess_trace(*trace, xnew, ColoredCCDGuessTraceStage::LevelsBuilt, 0);
+    }
+
+    const int schedule_chunk = params.exact_computation_fallback ? 1 : 8;
+    int sweep_status = 0;
+    #pragma omp parallel if(params.use_parallel)
+    {
+        std::vector<double> required_distances;
+        for (int iteration = 0; iteration < ccd_iterations; ++iteration) {
+            #pragma omp single
+            { sweep_status = 0; }
+            for (std::size_t group = 0; group + 1 < group_offsets.size(); ++group) {
+                // A level alone is NOT independent. Finish each color within
+                // it before advancing; all four vertices of each candidate
+                // form a clique in the same contact-only coloring as before.
+                #pragma omp for schedule(dynamic, schedule_chunk) reduction(|:sweep_status)
+                for (std::size_t index = group_offsets[group];
+                     index < group_offsets[group + 1]; ++index) {
+                    const int vertex = ordered_vertices[index];
+                    const Vec3 before = xnew[vertex];
+                    const double step = per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
+                        /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false,
+                        /*use_ogc=*/false, /*cooperative=*/false, nullptr,
+                        params.exact_computation_fallback);
+                    if (!params.exact_computation_fallback && step > 0.0)
+                        preserve_guess_separation(broad_phase.cache(), xnew,
+                            vertex, before, required_distances);
+                    if ((xnew[vertex].array() != before.array()).any()) sweep_status |= 1;
+                    if (!((targets[vertex] - xnew[vertex]).squaredNorm() < 1e-28))
+                        sweep_status |= 2;
+                }
+                if (trace) {
+                    #pragma omp single
+                    {
+                        const int first = ordered_vertices[group_offsets[group]];
+                        auto& snapshot = append_colored_guess_trace(*trace, xnew,
+                            ColoredCCDGuessTraceStage::ColorUpdate, iteration + 1,
+                            levels[first], colors[first]);
+                        snapshot.active_vertices.assign(
+                            ordered_vertices.begin() + group_offsets[group],
+                            ordered_vertices.begin() + group_offsets[group + 1]);
+                    }
+                }
+            }
+            const bool finished = !(sweep_status & 1) || !(sweep_status & 2);
+            #pragma omp barrier // Capture the decision before the next reset.
+            if (trace) {
+                #pragma omp single
+                { finish_colored_guess_trace_sweep(*trace, xnew, x, iteration + 1, sweep_status); }
+            }
             if (finished) break;
         }
     }

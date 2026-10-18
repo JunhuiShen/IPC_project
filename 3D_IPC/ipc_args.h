@@ -50,6 +50,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_ccd       = true;
     bool   use_ccd_guess = true;
     bool   use_colored_ccd_guess = false;
+    bool   use_colored_ccd_guess_level_based = false;
     int    colored_ccd_guess_iters = 10;
     bool   use_verlet_guess = false;
     bool   use_translation_guess = false;
@@ -187,8 +188,9 @@ struct IPCArgs3D : ArgParser {
 
         add_bool  ("use_ccd",      use_ccd,      true,   "Run CCD step clamping in per_vertex_safe_step");
         add_bool  ("use_ccd_guess",    use_ccd_guess,    true,  "Use ccd_initial_guess as the substep start point (ignored if use_ogc is on)");
-        add_bool  ("use_colored_ccd_guess", use_colored_ccd_guess, false, "Cloth/solid: collision-colored linear CCD initial guess toward xhat; rigid bodies stay fixed during the guess; overrides CCD, Verlet, and translation guess flags, but is ignored with use_ogc or use_ogc_solver");
-        add_int   ("colored_ccd_guess_iters", colored_ccd_guess_iters, 10, "Complete collision-color sweeps for the cloth/solid colored CCD initial guess (0 keeps current positions)");
+        add_bool  ("use_colored_ccd_guess", use_colored_ccd_guess, false, "Cloth/solid: original collision-colored linear CCD initial guess toward xhat; mutually exclusive with use_colored_ccd_guess_level_based; rigid bodies stay fixed; overrides CCD, Verlet, and translation guess flags, but is ignored with use_ogc or use_ogc_solver");
+        add_bool  ("use_colored_ccd_guess_level_based", use_colored_ccd_guess_level_based, false, "Cloth/solid: level-based colored CCD toward xhat, with one discarded trial sweep to build levels; mutually exclusive with use_colored_ccd_guess; rigid bodies stay fixed; overrides CCD, Verlet, and translation guess flags, but is ignored with use_ogc or use_ogc_solver");
+        add_int   ("colored_ccd_guess_iters", colored_ccd_guess_iters, 10, "Maximum actual updating sweeps for either colored CCD initial guess; excludes the level-based trial sweep (0 skips trial and updates)");
         add_bool  ("use_verlet_guess", use_verlet_guess, false, "Start GS from xhat + dt^2*gravity (Verlet predictor)");
         add_bool  ("use_translation_guess", use_translation_guess, false, "Start GS from x^n + C");
         add_bool  ("use_ogc", use_ogc, false, "Use trust-region narrow phase instead of CCD for step clamping");
@@ -379,6 +381,7 @@ struct IPCArgs3D : ArgParser {
         p.use_ccd          = use_ccd;
         p.use_ccd_guess    = use_ccd_guess;
         p.use_colored_ccd_guess = use_colored_ccd_guess;
+        p.use_colored_ccd_guess_level_based = use_colored_ccd_guess_level_based;
         p.colored_ccd_guess_iters = colored_ccd_guess_iters;
         p.use_verlet_guess = use_verlet_guess;
         p.use_ogc = use_ogc;

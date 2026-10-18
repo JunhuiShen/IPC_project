@@ -191,9 +191,22 @@ and +y as the up direction.
 | Experimental scalar cloth v1 | `--use_basic_experimental true --use_simd false`. |
 | Basic cloth grid | `--use_cloth_grid true`; cloth only, with OGC disabled. See `--help` for grid sizing flags. |
 
-`--use_colored_ccd_guess true` enables collision-colored initial guesses for
-cloth/solid vertices, keeping rigid bodies fixed during the guess. It overrides
-the other guess flags and is ignored in OGC mode. Alternative OGC solving
+Two separate flags select collision-colored initial guesses for cloth/solid
+vertices, keeping rigid bodies fixed during the guess:
+
+- `--use_colored_ccd_guess true`: original color-ordered CCD sweeps.
+- `--use_colored_ccd_guess_level_based true`: one discarded original-colored
+  trial sweep builds fixed collision-graph levels, then actual updates restart
+  at the current positions and proceed by level, then color.
+
+Both flags default to `false`; enable only one (enabling both is an error).
+`--colored_ccd_guess_iters N` sets the maximum number of actual updating sweeps
+for either method (default `10`). The level-based trial is additional and does
+not count toward `N`; `N=0` skips both the trial and updates. Both methods stop
+early if all nodes reach their targets or a complete sweep makes no progress.
+The level-based mode is currently CPU-only; the resident GPU solver rejects it.
+Either colored guess overrides the CCD, Verlet, and translation guess flags
+and is ignored in OGC mode. Alternative OGC solving
 (`--use_ogc_solver`) requires `--fixed_iters`; mixed deformable/rigid scenes
 use the basic/general route. Some scenes enforce their own guess/contact
 presets in [example.cpp](example.cpp).

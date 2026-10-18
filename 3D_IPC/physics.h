@@ -61,7 +61,8 @@ struct SimParams {
     bool   use_ccd;              // if true, run CCD step clamping in per_vertex_safe_step
     bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
     bool   use_colored_ccd_guess; // cloth/solid: collision-colored linear CCD toward xhat; rigid proxies fixed; OGC takes priority
-    int    colored_ccd_guess_iters; // complete color sweeps, retrying the remaining displacement (0 keeps x^n)
+    bool   use_colored_ccd_guess_level_based; // alternative: discarded trial sweep, then level/color-ordered CCD
+    int    colored_ccd_guess_iters; // actual updating sweeps for either colored guess; excludes level trial (0 keeps x^n)
     bool   use_verlet_guess;     // if true, start GS from xhat + dt²*gravity (Verlet predictor)
     bool   use_translation_guess;        // if true, start GS from x^n + C
     bool   use_ogc;     // if true, use trust_region_initial_guess instead of CCD
@@ -119,6 +120,7 @@ struct SimParams {
         p.use_ccd                   = false;
         p.use_ccd_guess             = true;
         p.use_colored_ccd_guess     = false;
+        p.use_colored_ccd_guess_level_based = false;
         p.colored_ccd_guess_iters   = 10;
         p.use_translation_guess             = false;
         p.use_verlet_guess          = false;
@@ -142,11 +144,13 @@ struct SimParams {
     }
 
     void validate_colored_ccd_guess_parameters() const {
-        if (!use_colored_ccd_guess) return;
+        if (use_colored_ccd_guess && use_colored_ccd_guess_level_based)
+            throw std::invalid_argument("Choose only one of --use_colored_ccd_guess and --use_colored_ccd_guess_level_based");
+        if (!use_colored_ccd_guess && !use_colored_ccd_guess_level_based) return;
         if (colored_ccd_guess_iters < 0)
             throw std::invalid_argument("--colored_ccd_guess_iters must be nonnegative (0 keeps the current positions)");
         if (!std::isfinite(d_hat) || d_hat < 0.0)
-            throw std::invalid_argument("--use_colored_ccd_guess requires finite, nonnegative --d_hat");
+            throw std::invalid_argument("Colored CCD initial guesses require finite, nonnegative --d_hat");
     }
 
     void validate_cloth_grid_parameters() const {
