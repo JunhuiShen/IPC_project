@@ -110,10 +110,10 @@ struct UnevenContactGuessScene {
     RefMesh mesh;
     std::vector<Vec3> x, displacement;
 
-    UnevenContactGuessScene() {
+    explicit UnevenContactGuessScene(int copies = 32) {
         // Every moving point has its own component. Alternate one and two
         // crossed triangles so the points share a level/color but not a cost.
-        for (int copy = 0; copy < 32; ++copy) {
+        for (int copy = 0; copy < copies; ++copy) {
             const int base = static_cast<int>(x.size());
             const Vec3 offset(12 * copy, 0, 0);
             for (const auto& point : point_above_triangle()) x.push_back(point + offset);
@@ -1948,6 +1948,97 @@ TEST_F(CollisionColoredCCDInitialGuessNew, TraceSeparatesTheSameColorAcrossDiffe
     }
     EXPECT_TRUE(saw_level_zero);
     EXPECT_TRUE(saw_level_one);
+}
+
+TEST_F(CollisionColoredCCDInitialGuessNew, SchedulingThresholdPreservesTracedAndUntracedResults) {
+    struct Scene {
+        std::vector<Vec3> x, displacement;
+        RefMesh mesh;
+        int expected_point_group = 0;
+    };
+    std::vector<Scene> scenes;
+    scenes.push_back({point_above_triangle(),
+        {Vec3(0, 0, -2), Vec3(4, 0, 0), Vec3(4, 0, 0), Vec3(4, 0, 0)},
+        point_triangle_mesh()});
+    // Exercise both sides of the small-group scheduling threshold, including
+    // unequal contact costs and stable heavy-first ties within the point group.
+    for (const int copies : {31, 32, 33}) {
+        const UnevenContactGuessScene uneven(copies);
+        scenes.push_back({uneven.x, uneven.displacement, uneven.mesh, copies});
+    }
+    auto rigid_mesh = point_triangle_mesh();
+    rigid_mesh.node_to_rb = {-1, 0, 0, 0};
+    rigid_mesh.rb_nodes = {{1, 2, 3}};
+    scenes.push_back({point_above_triangle(),
+        {Vec3(0, 0, -2), Vec3(1, -2, 3), Vec3(1, -2, 3), Vec3(1, -2, 3)},
+        rigid_mesh});
+    scenes.push_back({{Vec3(0, 0, 0), Vec3(5, 2, 1)},
+        {Vec3(0, -0.5, 0), Vec3::Zero()}, ref_mesh_with_masses({1, 1})});
+
+    for (const bool exact : {false, true}) {
+        params.exact_computation_fallback = exact;
+        for (const int cap : {0, 1, 6}) {
+            for (std::size_t scene_id = 0; scene_id < scenes.size(); ++scene_id) {
+                SCOPED_TRACE(::testing::Message() << "exact=" << exact
+                    << " cap=" << cap << " scene=" << scene_id);
+                const auto& scene = scenes[scene_id];
+                params.use_parallel = false;
+                ColoredCCDGuessTrace serial_trace;
+                const auto baseline = collision_colored_ccd_initial_guess_level_based(
+                    scene.x, scene.displacement, scene.mesh, params, cap, nullptr, &serial_trace);
+                if (cap > 0 && scene.expected_point_group > 0) {
+                    const auto point_group = std::find_if(serial_trace.steps.begin(),
+                        serial_trace.steps.end(), [&](const ColoredCCDGuessTraceStep& step) {
+                            return step.stage == ColoredCCDGuessTraceStage::ColorUpdate
+                                && step.iteration == 1 && step.active_level == 0
+                                && step.active_color == serial_trace.color_ids[0];
+                        });
+                    ASSERT_NE(point_group, serial_trace.steps.end());
+                    EXPECT_EQ(point_group->active_vertices.size(), scene.expected_point_group);
+                }
+                if (cap == 1) {
+                    // Stable level scattering must retain each trial color's
+                    // original order, including exact-mode cost ties.
+                    ColoredCCDGuessTrace trial_trace;
+                    collision_colored_ccd_initial_guess(scene.x, scene.displacement,
+                        scene.mesh, params, 1, nullptr, &trial_trace);
+                    for (const auto& step : serial_trace.steps) {
+                        if (step.stage != ColoredCCDGuessTraceStage::ColorUpdate) continue;
+                        std::vector<int> expected;
+                        for (const auto& trial_step : trial_trace.steps) {
+                            if (trial_step.stage != ColoredCCDGuessTraceStage::ColorUpdate
+                                || trial_step.active_color != step.active_color) continue;
+                            for (const int vertex : trial_step.active_vertices)
+                                if (serial_trace.level_ids[vertex] == step.active_level)
+                                    expected.push_back(vertex);
+                        }
+                        EXPECT_EQ(step.active_vertices, expected);
+                    }
+                }
+                // The production path does not request a trace. Keep this
+                // comparison explicit so trace-only scheduling cannot mask it.
+                expect_positions_identical(collision_colored_ccd_initial_guess_level_based(
+                    scene.x, scene.displacement, scene.mesh, params, cap), baseline);
+                params.use_parallel = true;
+                for (const int threads : {1, 4}) {
+                    SCOPED_TRACE(threads);
+                    omp_set_num_threads(threads);
+                    ColoredCCDGuessTrace trace;
+                    const auto traced = collision_colored_ccd_initial_guess_level_based(
+                        scene.x, scene.displacement, scene.mesh, params, cap, nullptr, &trace);
+                    expect_positions_identical(traced, baseline);
+                    expect_traces_identical(trace, serial_trace);
+                    BroadPhase scratch;
+                    for (int repeat = 0; repeat < 2; ++repeat) {
+                        SCOPED_TRACE(repeat);
+                        expect_positions_identical(collision_colored_ccd_initial_guess_level_based(
+                            scene.x, scene.displacement, scene.mesh, params, cap, &scratch, nullptr),
+                            baseline);
+                    }
+                }
+            }
+        }
+    }
 }
 
 TEST_F(CollisionColoredCCDInitialGuessNew, AlternatingPredictorsRebuildSharedWorkspaceAndScratch) {
