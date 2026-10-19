@@ -35,8 +35,8 @@ static ColoredCCDGuessWorkspace& colored_ccd_guess_workspace() {
 
 struct ColoredCCDLevelGuessWorkspace {
     std::vector<double> first_sweep_movement;
-    std::vector<int> levels, colors, component, queue, ordered_vertices;
-    std::vector<std::size_t> group_offsets;
+    std::vector<int> levels, colors, component, queue, ordered_vertices, level_order_scratch;
+    std::vector<std::size_t> group_offsets, level_offsets;
 };
 
 static ColoredCCDGuessTraceStep& append_colored_guess_trace(
@@ -396,6 +396,11 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
     const std::vector<Vec3>& intended_displacement,
     const RefMesh& ref_mesh, const SimParams& params, int ccd_iterations,
     BroadPhase* scratch_broad_phase, ColoredCCDGuessTrace* trace) {
+    // Scheduling only: preserve the level/color/within-group update order and
+    // pass the exact-fallback setting unchanged to every CCD query. Per-group
+    // tracing retains the original loop so each intermediate state is recorded.
+    const bool optimize_level_schedule = !trace;
+    constexpr std::size_t small_group_limit = 32;
     BroadPhase local_broad_phase;
     BroadPhase& broad_phase = scratch_broad_phase ? *scratch_broad_phase : local_broad_phase;
     // Trial only: run one original-colored sweep on a temporary position copy
@@ -499,8 +504,26 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
             if (!is_rigid(vertex)) ordered_vertices.push_back(vertex);
         }
     }
-    std::stable_sort(ordered_vertices.begin(), ordered_vertices.end(),
-        [&](int a, int b) { return levels[a] < levels[b]; });
+    if (optimize_level_schedule && !ordered_vertices.empty()) {
+        // Stable scatter preserves the original color and within-color order.
+        auto& level_offsets = workspace.level_offsets;
+        auto& level_order_scratch = workspace.level_order_scratch;
+        int largest_level = 0;
+        for (const int vertex : ordered_vertices)
+            largest_level = std::max(largest_level, levels[vertex]);
+        level_offsets.assign(static_cast<std::size_t>(largest_level) + 2, 0);
+        for (const int vertex : ordered_vertices)
+            ++level_offsets[static_cast<std::size_t>(levels[vertex]) + 1];
+        for (std::size_t level_index = 1; level_index < level_offsets.size(); ++level_index)
+            level_offsets[level_index] += level_offsets[level_index - 1];
+        level_order_scratch.resize(ordered_vertices.size());
+        for (const int vertex : ordered_vertices)
+            level_order_scratch[level_offsets[static_cast<std::size_t>(levels[vertex])]++] = vertex;
+        ordered_vertices.swap(level_order_scratch);
+    } else {
+        std::stable_sort(ordered_vertices.begin(), ordered_vertices.end(),
+            [&](int a, int b) { return levels[a] < levels[b]; });
+    }
     group_offsets.clear();
     group_offsets.push_back(0);
     for (std::size_t index = 1; index < ordered_vertices.size(); ++index) {
@@ -524,6 +547,35 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
             #pragma omp single
             { sweep_status = 0; }
             for (std::size_t group = 0; group + 1 < group_offsets.size(); ++group) {
+                if (optimize_level_schedule
+                    && group_offsets[group + 1] - group_offsets[group] <= small_group_limit) {
+                    std::size_t batch_end = group + 1;
+                    while (batch_end + 1 < group_offsets.size()
+                        && group_offsets[batch_end + 1] - group_offsets[batch_end] <= small_group_limit)
+                        ++batch_end;
+                    // The preceding work-sharing region has joined. One worker
+                    // advances consecutive small groups in their original order.
+                    #pragma omp single
+                    {
+                        for (std::size_t index = group_offsets[group];
+                             index < group_offsets[batch_end]; ++index) {
+                            const int vertex = ordered_vertices[index];
+                            const Vec3 before = xnew[vertex];
+                            const double step = per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
+                                /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false,
+                                /*use_ogc=*/false, /*cooperative=*/false, nullptr,
+                                params.exact_computation_fallback, params.exact_computation_fallback_2);
+                            if (!params.exact_computation_fallback && step > 0.0)
+                                preserve_guess_separation(broad_phase.cache(), xnew,
+                                    vertex, before, required_distances);
+                            if ((xnew[vertex].array() != before.array()).any()) sweep_status |= 1;
+                            if (!((targets[vertex] - xnew[vertex]).squaredNorm() < 1e-28))
+                                sweep_status |= 2;
+                        }
+                    } // Implicit barrier publishes updates before the next group.
+                    group = batch_end - 1;
+                    continue;
+                }
                 // A level alone is NOT independent. Finish each color within
                 // it before advancing; all four vertices of each candidate
                 // form a clique in the same contact-only coloring as before.
