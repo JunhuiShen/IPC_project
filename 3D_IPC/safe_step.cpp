@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -259,7 +261,7 @@ static double vertex_contact_gap_floor(const std::array<Vec3, 4>& points) {
 // The bounds contain the actual stored endpoints, hence also every position
 // on their segment. Strict separation of their convex projections certifies
 // the whole rounded path, independently of approximate closest-point regions.
-static bool vertex_swept_axis_separated(const std::array<Vec3, 4>& start,
+[[gnu::always_inline]] static inline bool vertex_swept_axis_separated(const std::array<Vec3, 4>& start,
     const std::array<Vec3, 4>& end, bool face, double floor) {
     const int split = face ? 1 : 2;
     for (int axis = 0; axis < 3; ++axis) {
@@ -405,9 +407,70 @@ struct VertexContactEndpointCache {
     std::optional<PreparedExactContactStep> exact;
 };
 
+// Read the binary64 representation without evaluating a floating expression.
+[[gnu::always_inline]] static inline std::uint64_t vertex_contact_binary64_bits(
+    const double& value) {
+    static_assert(sizeof(double) == sizeof(std::uint64_t)
+        && std::numeric_limits<double>::is_iec559
+        && std::numeric_limits<double>::digits == 53
+        && std::numeric_limits<double>::max_exponent == 1024,
+        "exact endpoint reuse requires IEEE binary64");
+    std::uint64_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+// A sufficient subset of the existing certified-distance reuse condition.
+// The guarded power-of-two scaling is exact; failed bit tests add no FP flags.
+[[gnu::always_inline]] static inline bool vertex_contact_start_proves_reuse_without_floor(
+    const std::array<Vec3, 4>& start, double certified_distance) {
+    constexpr double floor_scale = 128.0 * std::numeric_limits<double>::epsilon();
+    constexpr double proof_scale = 2048.0 * std::numeric_limits<double>::epsilon();
+    constexpr double minimum_distance = 16.0 * 1e-8;
+    constexpr double maximum_distance = std::numeric_limits<double>::max() * proof_scale;
+    const std::uint64_t distance_bits = vertex_contact_binary64_bits(certified_distance);
+    if (distance_bits < vertex_contact_binary64_bits(minimum_distance)
+        || distance_bits > vertex_contact_binary64_bits(maximum_distance)) return false;
+
+    constexpr std::uint64_t absolute_mask = UINT64_C(0x7fffffffffffffff);
+    const std::uint64_t first_absolute = vertex_contact_binary64_bits(start[0][0]) & absolute_mask;
+    constexpr double minimum_normal_scale = std::numeric_limits<double>::min() / floor_scale;
+    if (first_absolute < vertex_contact_binary64_bits(minimum_normal_scale)) return false;
+
+    const double bound = certified_distance / proof_scale;
+    const std::uint64_t bound_bits = vertex_contact_binary64_bits(bound);
+    return first_absolute <= bound_bits
+        && (vertex_contact_binary64_bits(start[0][1]) & absolute_mask) <= bound_bits
+        && (vertex_contact_binary64_bits(start[0][2]) & absolute_mask) <= bound_bits
+        && (vertex_contact_binary64_bits(start[1][0]) & absolute_mask) <= bound_bits
+        && (vertex_contact_binary64_bits(start[1][1]) & absolute_mask) <= bound_bits
+        && (vertex_contact_binary64_bits(start[1][2]) & absolute_mask) <= bound_bits
+        && (vertex_contact_binary64_bits(start[2][0]) & absolute_mask) <= bound_bits
+        && (vertex_contact_binary64_bits(start[2][1]) & absolute_mask) <= bound_bits
+        && (vertex_contact_binary64_bits(start[2][2]) & absolute_mask) <= bound_bits
+        && (vertex_contact_binary64_bits(start[3][0]) & absolute_mask) <= bound_bits
+        && (vertex_contact_binary64_bits(start[3][1]) & absolute_mask) <= bound_bits
+        && (vertex_contact_binary64_bits(start[3][2]) & absolute_mask) <= bound_bits;
+}
+
+// Classification only: no Eigen boolean reduction is needed for these
+// twelve represented binary64 coordinates.
+[[gnu::always_inline]] static inline bool vertex_contact_start_all_finite(
+    const std::array<Vec3, 4>& start) {
+    return std::isfinite(start[0][0]) && std::isfinite(start[0][1]) && std::isfinite(start[0][2])
+        && std::isfinite(start[1][0]) && std::isfinite(start[1][1]) && std::isfinite(start[1][2])
+        && std::isfinite(start[2][0]) && std::isfinite(start[2][1]) && std::isfinite(start[2][2])
+        && std::isfinite(start[3][0]) && std::isfinite(start[3][1]) && std::isfinite(start[3][2]);
+}
+
+template <bool optimized>
 static bool vertex_contact_endpoint_is_safe(const std::array<Vec3, 4>& start,
     const std::array<Vec3, 4>& end, bool face, int vertex, int moving_dof,
     VertexContactEndpointCache* cache, double certified_distance = 0.0) {
+    if constexpr (optimized) {
+        if (!cache && vertex_contact_start_proves_reuse_without_floor(start, certified_distance))
+            return true;
+    }
     if (cache && cache->floor == 0.0) cache->floor = vertex_contact_gap_floor(start);
     const double floor = cache ? cache->floor : vertex_contact_gap_floor(start);
     // The caller has bounded the ACTUAL represented displacement by d_hat/8.
@@ -415,7 +478,8 @@ static bool vertex_contact_endpoint_is_safe(const std::array<Vec3, 4>& start,
     // even allowing ample roundoff slack for its AABB-distance calculation.
     // Thus the whole path stays > 3*d_hat/8, beyond this numerical gap floor.
     if (certified_distance > 0.0 && floor <= certified_distance / 8.0
-        && std::all_of(start.begin(), start.end(), [](const Vec3& p) { return p.allFinite(); })) return true;
+        && (optimized ? vertex_contact_start_all_finite(start)
+            : std::all_of(start.begin(), start.end(), [](const Vec3& p) { return p.allFinite(); }))) return true;
     if (vertex_swept_axis_separated(start, end, face, floor)) return true;
     if (vertex_swept_projection_separated(start, end, face, floor,
             vertex_contact_plane_direction(start, face))) return true;
@@ -429,7 +493,8 @@ static bool vertex_contact_endpoint_is_safe(const std::array<Vec3, 4>& start,
             cache ? cache->direction : vertex_contact_separating_direction(start, face))) return true;
     if (vertex_swept_projection_separated(start, end, face, floor,
             vertex_contact_separating_direction(end, face))) return true;
-    if (vertex_contact_filtered_path_is_clear(start, end)) {
+    const bool path_is_clear = vertex_contact_filtered_path_is_clear(start, end);
+    if (path_is_clear) {
         // Even when a gap is too close to the numerical floor for a floating
         // certificate, the path proof remains useful: retain the EXACT gap
         // comparison but do not solve the certified-clear path a second time.
@@ -441,7 +506,14 @@ static bool vertex_contact_endpoint_is_safe(const std::array<Vec3, 4>& start,
     // Convert the represented endpoints and compute the exact starting gap
     // once, sharing them between the gap-floor and whole-path checks.
     if (cache && !cache->exact)
-        cache->exact.emplace(start, face, floor, moving_dof);
+        cache->exact.emplace(start, face, floor, moving_dof, optimized);
+    // Equal certified nonzero determinant signs exclude all coplanarity
+    // events, including the initial intersection. The exact endpoint gap is
+    // then the only remaining condition; do not solve the same path again.
+    if constexpr (optimized) {
+        if (cache && path_is_clear)
+            return cache->exact->preserves_separation(end[moving_dof]);
+    }
     const auto result = cache ? cache->exact->test(end[moving_dof])
         : exact_contact_step_result(start, end, face, floor);
     if (result == ExactContactStepResult::InitialContact)
@@ -452,6 +524,7 @@ static bool vertex_contact_endpoint_is_safe(const std::array<Vec3, 4>& start,
     return result == ExactContactStepResult::Safe;
 }
 
+template <bool optimized>
 static bool vertex_contact_endpoints_are_safe(const BroadPhase::Cache& cache,
     const std::vector<Vec3>& x, int vertex, const Vec3& endpoint,
     std::vector<VertexContactEndpointCache>* scratch = nullptr,
@@ -487,7 +560,7 @@ static bool vertex_contact_endpoints_are_safe(const BroadPhase::Cache& cache,
                 x[p.tri_v[1]], x[p.tri_v[2]]};
             auto end = start;
             end[entry.dof] = endpoint;
-            return vertex_contact_endpoint_is_safe(start, end, true, vertex, entry.dof,
+            return vertex_contact_endpoint_is_safe<optimized>(start, end, true, vertex, entry.dof,
                 scratch ? &(*scratch)[contact] : nullptr,
                 reuse_rejections && rejections->clear[contact] ? rejections->distance : 0.0);
         }
@@ -496,36 +569,21 @@ static bool vertex_contact_endpoints_are_safe(const BroadPhase::Cache& cache,
         const std::array<Vec3, 4> start = {x[p.v[0]], x[p.v[1]], x[p.v[2]], x[p.v[3]]};
         auto end = start;
         end[entry.dof] = endpoint;
-        return vertex_contact_endpoint_is_safe(start, end, false, vertex, entry.dof,
+        return vertex_contact_endpoint_is_safe<optimized>(start, end, false, vertex, entry.dof,
                 scratch ? &(*scratch)[contact] : nullptr,
                 reuse_rejections && rejections->clear[contact] ? rejections->distance : 0.0);
     });
 }
 
-double per_vertex_safe_step(
+template <bool optimized_fallback>
+[[gnu::noinline]] static double per_vertex_safe_step_impl(
     const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi,
-    const Vec3& raw_proposed_position, double safety, bool clip_ccd,
+    double dx0, double dx1, double dx2, double safety, bool clip_ccd,
     bool use_ticcd, bool use_ogc, bool cooperative,
     const safe_step_detail::VertexAabbRejections* rejections, bool exact_computation_fallback) {
     const bool original = !exact_computation_fallback && !use_ticcd;
     const BroadPhase::Cache& bp_cache = broad_phase.cache();
-    const int nv = static_cast<int>(x.size());
-    if (vi < 0 || vi >= nv)
-        throw std::out_of_range("per_vertex_safe_step: vertex is out of range");
-
-    const AABB& box = bp_cache.node_boxes[vi];
-    assert((x[vi].array() >= box.min.array()).all() && (x[vi].array() <= box.max.array()).all() && "per_vertex_safe_step: current position is outside its cached node box");
-
-    // Clip to the node box.
-    constexpr double inset = 1e-10;
-    const Vec3 lo = (box.min + Vec3::Constant(inset)).eval();
-    const Vec3 hi = (box.max - Vec3::Constant(inset)).eval();
-    const Vec3 x_new = raw_proposed_position.cwiseMax(lo).cwiseMin(hi);
-
-    const Vec3 dx = x_new - x[vi];
-    // A representable separating displacement can be smaller than 1e-14.
-    // Only a true stored-position no-op is discarded here.
-    if ((x_new.array() == x[vi].array()).all()) return 0.0;
+    const Vec3 dx(dx0, dx1, dx2);
 
     double toi_min = 1.0;
     bool has_collision = false;
@@ -582,7 +640,8 @@ double per_vertex_safe_step(
     const Vec3 before = x[vi];
     Vec3 accepted = before + step * dx;
     if (clip_ccd && !use_ticcd && !use_ogc && !original
-        && !vertex_contact_endpoints_are_safe(bp_cache, x, vi, accepted, nullptr, rejections, cooperative)) {
+        && !vertex_contact_endpoints_are_safe<optimized_fallback>(
+            bp_cache, x, vi, accepted, nullptr, rejections, cooperative)) {
         // Search only within the CCD-approved prefix. Keep a verified endpoint
         // (not just a floating alpha), validating all contacts for each new
         // candidate before accepting it.
@@ -602,7 +661,8 @@ double per_vertex_safe_step(
                 // position. Reuse its verdict without changing the search.
                 upper = middle;
             } else if ((trial.array() == best.array()).all()
-                || vertex_contact_endpoints_are_safe(bp_cache, x, vi, trial, &scratch, rejections, cooperative)) {
+                || vertex_contact_endpoints_are_safe<optimized_fallback>(
+                    bp_cache, x, vi, trial, &scratch, rejections, cooperative)) {
                 lower = middle;
                 best = trial;
             } else {
@@ -617,6 +677,40 @@ double per_vertex_safe_step(
     if (original && clip_ccd && !use_ticcd && !use_ogc) return step;
     if ((accepted.array() == before.array()).all()) return 0.0;
     return step;
+}
+
+
+[[gnu::noinline]] double per_vertex_safe_step(
+    const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi,
+    const Vec3& raw_proposed_position, double safety, bool clip_ccd,
+    bool use_ticcd, bool use_ogc, bool cooperative,
+    const safe_step_detail::VertexAabbRejections* rejections, bool exact_computation_fallback,
+    bool exact_computation_fallback_2) {
+    const BroadPhase::Cache& bp_cache = broad_phase.cache();
+    const int nv = static_cast<int>(x.size());
+    if (vi < 0 || vi >= nv)
+        throw std::out_of_range("per_vertex_safe_step: vertex is out of range");
+
+    const AABB& box = bp_cache.node_boxes[vi];
+    assert((x[vi].array() >= box.min.array()).all() && (x[vi].array() <= box.max.array()).all() && "per_vertex_safe_step: current position is outside its cached node box");
+
+    // Clip to the node box.
+    constexpr double inset = 1e-10;
+    const Vec3 lo = (box.min + Vec3::Constant(inset)).eval();
+    const Vec3 hi = (box.max - Vec3::Constant(inset)).eval();
+    const Vec3 x_new = raw_proposed_position.cwiseMax(lo).cwiseMin(hi);
+
+    const Vec3 dx = x_new - x[vi];
+    // A representable separating displacement can be smaller than 1e-14.
+    // Only a true stored-position no-op is discarded here.
+    if ((x_new.array() == x[vi].array()).all()) return 0.0;
+    if (exact_computation_fallback && exact_computation_fallback_2)
+        return per_vertex_safe_step_impl<true>(broad_phase, x, vi,
+            dx[0], dx[1], dx[2], safety, clip_ccd, use_ticcd, use_ogc,
+            cooperative, rejections, exact_computation_fallback);
+    return per_vertex_safe_step_impl<false>(broad_phase, x, vi,
+        dx[0], dx[1], dx[2], safety, clip_ccd, use_ticcd, use_ogc,
+        cooperative, rejections, exact_computation_fallback);
 }
 
 double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& dx, double safety, bool cooperative, bool original) {

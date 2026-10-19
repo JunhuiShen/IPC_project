@@ -651,8 +651,91 @@ static Vec3 gs_vertex_delta_live_barrier(int vi, const RefMesh& ref_mesh, const 
 
     return matrix3d_inverse(H) * g;
 }
-bool solver_detail::contact_boxes_separated(const std::array<Vec3, 4>& positions,
+static bool contact_box_node_is_valid(const Vec3& position, const AABB& box) {
+    if (!position.allFinite() || !box.min.allFinite() || !box.max.allFinite()) return false;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!(box.max[axis] - box.min[axis] >= 2e-10)
+            || !(box.min[axis] + 1e-10 <= box.max[axis] - 1e-10)
+            || position[axis] < box.min[axis] || position[axis] > box.max[axis])
+            return false;
+    }
+    return true;
+}
+
+static bool cross_primitive_boxes_overlap(const std::array<AABB, 4>& boxes, bool segment_segment) {
+    // A shared point in opposite vertex boxes prevents every possible
+    // supporting-plane certificate. Reject before proposing a closest-point
+    // direction, which can otherwise require exact rational geometry merely
+    // to rediscover that the complete swept boxes cannot be separated.
+    const int first_count = segment_segment ? 2 : 1;
+    for (int a = 0; a < first_count; ++a) {
+        for (int b = first_count; b < 4; ++b) {
+            bool overlap = true;
+            for (int axis = 0; axis < 3; ++axis) {
+                if (boxes[a].max[axis] < boxes[b].min[axis]
+                    || boxes[b].max[axis] < boxes[a].min[axis]) {
+                    overlap = false;
+                    break;
+                }
+            }
+            if (overlap) return true;
+        }
+    }
+    return false;
+}
+
+static bool contact_boxes_separated_validated(const std::array<Vec3, 4>& positions,
     const std::array<AABB, 4>& boxes, bool segment_segment, double d_hat, bool exact_computation_fallback) {
+    Vec3 direction;
+    if (segment_segment) {
+        const auto distance = segment_segment_distance(positions[0], positions[1], positions[2], positions[3],
+            1e-12, exact_computation_fallback);
+        direction = distance.closest_point_1 - distance.closest_point_2;
+    } else {
+        const auto distance = node_triangle_distance(positions[0], positions[1], positions[2], positions[3]);
+        direction = positions[0] - distance.closest_point;
+    }
+    if (!direction.allFinite()) return false;
+    const double scale = direction.cwiseAbs().maxCoeff();
+    if (!(scale > 0.0) || !std::isfinite(scale)) return false;
+    direction /= scale;
+    if (!direction.allFinite()) return false;
+    double lower[4], upper[4], magnitude = 0.0;
+    for (int node = 0; node < 4; ++node) {
+        lower[node] = upper[node] = 0.0;
+        double absolute_sum = 0.0;
+        for (int axis = 0; axis < 3; ++axis) {
+            const auto& box = boxes[node];
+            const double lo = direction[axis] >= 0.0 ? box.min[axis] : box.max[axis];
+            const double hi = direction[axis] >= 0.0 ? box.max[axis] : box.min[axis];
+            lower[node] += direction[axis] * lo;
+            upper[node] += direction[axis] * hi;
+            absolute_sum += std::abs(direction[axis]) * std::max(std::abs(lo), std::abs(hi));
+        }
+        if (!std::isfinite(lower[node]) || !std::isfinite(upper[node])
+            || !std::isfinite(absolute_sum)) return false;
+        magnitude = std::max(magnitude, absolute_sum);
+    }
+    const int split = segment_segment ? 2 : 1;
+    double alo = lower[0], ahi = upper[0], blo = lower[split], bhi = upper[split];
+    for (int node = 1; node < split; ++node) {
+        alo = std::min(alo, lower[node]); ahi = std::max(ahi, upper[node]);
+    }
+    for (int node = split + 1; node < 4; ++node) {
+        blo = std::min(blo, lower[node]); bhi = std::max(bhi, upper[node]);
+    }
+    const double threshold = d_hat * direction.norm();
+    const double gap = std::max(alo - bhi, blo - ahi);
+    // Cover projection, norm, and comparison roundoff, including subnormals.
+    const double padding = 512.0 * std::numeric_limits<double>::epsilon()
+        * (magnitude + threshold) + 512.0 * std::numeric_limits<double>::denorm_min();
+    return std::isfinite(threshold) && std::isfinite(gap) && std::isfinite(padding)
+        && gap > threshold + padding;
+}
+
+bool solver_detail::contact_boxes_separated(const std::array<Vec3, 4>& positions,
+    const std::array<AABB, 4>& boxes, bool segment_segment, double d_hat, bool exact_computation_fallback,
+    bool exact_computation_fallback_2) {
     if (!(d_hat > 0.0) || !std::isfinite(d_hat)) return false;
     for (int node = 0; node < 4; ++node) {
         const auto& box = boxes[node];
@@ -715,6 +798,7 @@ namespace {
 
 struct BoxContactCertificates {
     std::vector<unsigned char> node_triangle, segment_segment;
+    std::vector<unsigned char> node_valid;
 };
 
 // Finite force scales and the exact CCD path are required to discard a zero
@@ -730,38 +814,100 @@ static bool can_prune_box_contacts(const SimParams& params) {
 
 static void rebuild_box_contact_certificates(const BroadPhase::Cache& cache,
     const std::vector<Vec3>& positions, double d_hat, bool parallel,
-    BoxContactCertificates& certificates, bool exact_computation_fallback) {
+    BoxContactCertificates& certificates, bool exact_computation_fallback, bool exact_computation_fallback_2) {
     certificates.node_triangle.resize(cache.nt_pairs.size());
     certificates.segment_segment.resize(cache.ss_pairs.size());
     const std::size_t count = cache.nt_pairs.size() + cache.ss_pairs.size();
+    const std::size_t nv = positions.size();
+    // The cache is rebuilt from this immutable snapshot every time. Leave the
+    // light/empty path alone, including avoiding any node-sized allocation.
+    // Division avoids overflow in the conservative count >= 4*nv threshold.
+    const bool use_node_validation = exact_computation_fallback && exact_computation_fallback_2
+        && d_hat > 0.0 && std::isfinite(d_hat)
+        && positions.size() == cache.node_boxes.size() && count >= 128 && count / 4 >= nv;
     std::atomic<bool> failed{false};
     std::exception_ptr error;
-    // Exact predicates have uneven cost. Distribute independent certificate
-    // records in small chunks; each record keeps its original computation.
-    #pragma omp parallel for schedule(dynamic, 64) if(parallel && count >= 128)
-    for (std::size_t entry = 0; entry < count; ++entry) {
-        if (failed.load(std::memory_order_relaxed)) continue;
-        try {
-            const bool segment = entry >= cache.nt_pairs.size();
-            const std::size_t index = segment ? entry - cache.nt_pairs.size() : entry;
-            std::array<int, 4> nodes;
-            if (segment) {
-                const auto& pair = cache.ss_pairs[index];
-                nodes = {pair.v[0], pair.v[1], pair.v[2], pair.v[3]};
-            } else {
-                const auto& pair = cache.nt_pairs[index];
-                nodes = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+    if (!use_node_validation) {
+        // Exact predicates have uneven cost. Distribute independent certificate
+        // records in small chunks; each record keeps its original computation.
+        #pragma omp parallel for schedule(dynamic, 64) if(parallel && count >= 128)
+        for (std::size_t entry = 0; entry < count; ++entry) {
+            if (failed.load(std::memory_order_relaxed)) continue;
+            try {
+                const bool segment = entry >= cache.nt_pairs.size();
+                const std::size_t index = segment ? entry - cache.nt_pairs.size() : entry;
+                std::array<int, 4> nodes;
+                if (segment) {
+                    const auto& pair = cache.ss_pairs[index];
+                    nodes = {pair.v[0], pair.v[1], pair.v[2], pair.v[3]};
+                } else {
+                    const auto& pair = cache.nt_pairs[index];
+                    nodes = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+                }
+                std::array<Vec3, 4> points;
+                std::array<AABB, 4> boxes;
+                for (int node = 0; node < 4; ++node) {
+                    points[node] = positions[nodes[node]];
+                    boxes[node] = cache.node_boxes[nodes[node]];
+                }
+                auto& flags = segment ? certificates.segment_segment : certificates.node_triangle;
+                flags[index] = solver_detail::contact_boxes_separated(points, boxes, segment, d_hat, exact_computation_fallback, exact_computation_fallback_2);
+            } catch (...) {
+                if (!failed.exchange(true, std::memory_order_relaxed)) error = std::current_exception();
             }
-            std::array<Vec3, 4> points;
-            std::array<AABB, 4> boxes;
-            for (int node = 0; node < 4; ++node) {
-                points[node] = positions[nodes[node]];
-                boxes[node] = cache.node_boxes[nodes[node]];
+        }
+        if (error) std::rethrow_exception(error);
+        return;
+    }
+
+    certificates.node_valid.resize(nv);
+    #pragma omp parallel if(parallel && count >= 128)
+    {
+        #pragma omp for schedule(static)
+        for (std::size_t node = 0; node < nv; ++node)
+            certificates.node_valid[node] = contact_box_node_is_valid(positions[node], cache.node_boxes[node]);
+        // The implicit barrier above publishes all freshly computed flags
+        // before any pair can read them. Pair scheduling and errors are unchanged.
+        #pragma omp for schedule(dynamic, 64)
+        for (std::size_t entry = 0; entry < count; ++entry) {
+            if (failed.load(std::memory_order_relaxed)) continue;
+            try {
+                const bool segment = entry >= cache.nt_pairs.size();
+                const std::size_t index = segment ? entry - cache.nt_pairs.size() : entry;
+                std::array<int, 4> nodes;
+                if (segment) {
+                    const auto& pair = cache.ss_pairs[index];
+                    nodes = {pair.v[0], pair.v[1], pair.v[2], pair.v[3]};
+                } else {
+                    const auto& pair = cache.nt_pairs[index];
+                    nodes = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+                }
+                auto& flags = segment ? certificates.segment_segment : certificates.node_triangle;
+                std::array<AABB, 4> boxes;
+                for (int node = 0; node < 4; ++node) boxes[node] = cache.node_boxes[nodes[node]];
+                // Retain the early overlap rejection: neither node flags nor
+                // positions need to be loaded for these failed proposals.
+                if (cross_primitive_boxes_overlap(boxes, segment)) {
+                    flags[index] = false;
+                    continue;
+                }
+                bool valid = true;
+                for (int node = 0; node < 4; ++node) {
+                    if (!certificates.node_valid[nodes[node]]) {
+                        valid = false;
+                        break;
+                    }
+                }
+                if (!valid) {
+                    flags[index] = false;
+                    continue;
+                }
+                std::array<Vec3, 4> points;
+                for (int node = 0; node < 4; ++node) points[node] = positions[nodes[node]];
+                flags[index] = contact_boxes_separated_validated(points, boxes, segment, d_hat, exact_computation_fallback);
+            } catch (...) {
+                if (!failed.exchange(true, std::memory_order_relaxed)) error = std::current_exception();
             }
-            auto& flags = segment ? certificates.segment_segment : certificates.node_triangle;
-            flags[index] = solver_detail::contact_boxes_separated(points, boxes, segment, d_hat, exact_computation_fallback);
-        } catch (...) {
-            if (!failed.exchange(true, std::memory_order_relaxed)) error = std::current_exception();
         }
     }
     if (error) std::rethrow_exception(error);
@@ -1372,7 +1518,7 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
         }
 
         const auto proposed_position = [&](int vi) -> Vec3 { return xnew[vi] - params.damping * gs_vertex_delta_live_barrier(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads, previous_positions); };
-        const auto process_vertex = [&](int vi) { per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi), 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc, false, nullptr, params.exact_computation_fallback); };
+        const auto process_vertex = [&](int vi) { per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi), 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc, false, nullptr, params.exact_computation_fallback, params.exact_computation_fallback_2); };
         if (params.use_parallel) {
             // Keep color and sweep barriers, but reuse the team until the
             // next box rebuild. Residual-controlled solves still check after
@@ -1561,7 +1707,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
           const Vec3 proposed = proposed_position(vi, rejections, cooperative);
           per_vertex_safe_step(broad_phase, xnew, vi, proposed,
                                0.9, params.use_ogc ? false : params.use_ccd,
-                               params.use_ticcd, params.use_ogc, cooperative, rejections, params.exact_computation_fallback);
+                               params.use_ticcd, params.use_ogc, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2);
         };
         if (use_contact_sweep) {
           const auto &cache = broad_phase.cache();
@@ -2234,7 +2380,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
                 broad_phase.initialize(blue_boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::DeformableSolver);
                 if (use_box_certificates)
                     rebuild_box_contact_certificates(broad_phase.cache(), xnew, params.d_hat,
-                        params.use_parallel, box_certificates, params.exact_computation_fallback);
+                        params.use_parallel, box_certificates, params.exact_computation_fallback, params.exact_computation_fallback_2);
                 build_contact_adj(broad_phase.cache(), static_cast<int>(xnew.size()), bca);
                 union_adjacency(ea, bca, combined_adj);
                 greedy_color_conflict_graph(combined_adj, color_groups, &workspace.coloring_workspace);
@@ -2423,7 +2569,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
             const Vec3 proposed = proposed_position(vi, rejections, cooperative);
             per_vertex_safe_step(broad_phase, xnew, vi, proposed,
                 0.9, params.use_ogc ? false : params.use_ccd,
-                params.use_ticcd, params.use_ogc, cooperative, rejections, params.exact_computation_fallback);
+                params.use_ticcd, params.use_ogc, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2);
           };
           // Prepared batches have an enclosing catch which can roll back the
           // failed color. Standalone callbacks must never escape a worker.
@@ -2991,7 +3137,7 @@ SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, co
         }
 
         const auto proposed_position = [&](int vi) -> Vec3 { return xnew[vi] - params.damping * gs_vertex_delta_live_barrier(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads, previous_positions); };
-        const auto process_vertex = [&](int vi) { per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi), 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc, false, nullptr, params.exact_computation_fallback); };
+        const auto process_vertex = [&](int vi) { per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi), 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc, false, nullptr, params.exact_computation_fallback, params.exact_computation_fallback_2); };
         if (use_contact_sweep) {
             const auto &cache = broad_phase.cache();
             const double dh2 = params.d_hat * params.d_hat,
@@ -3973,7 +4119,7 @@ struct RigidSolverWorkspace {
     void discard_separated_contacts(BroadPhase& phase,
         const std::vector<Vec3>& current, const SimParams& params) {
         rebuild_box_contact_certificates(phase.cache(), current,
-            params.d_hat, params.use_parallel, box_certificates, params.exact_computation_fallback);
+            params.d_hat, params.use_parallel, box_certificates, params.exact_computation_fallback, params.exact_computation_fallback_2);
         phase.discard_separated_contact_incidence(
             box_certificates.node_triangle, box_certificates.segment_segment,
             params.use_parallel, &body_nt_pair_indices, &body_ss_pair_indices);
@@ -4458,7 +4604,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
                     &deformable_workspace.rest_shape_grads, previous_positions, rejections);
             }();
             const Vec3 proposed_position = xnew[node] - params.damping * delta;
-            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback);
+            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2);
         };
 
         const auto process_solid_node = [&](const int solid, bool cooperative = false) {
@@ -4466,7 +4612,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
             thread_local safe_step_detail::VertexAabbRejections scratch;
             auto* rejections = params.use_ccd && params.d_hat > 1e-8 ? &scratch : nullptr;
             const Vec3 proposed_position = xnew[node] - params.damping * gs_solid_vertex_delta_live_barrier(node, ref_mesh, pins, params, xhat, xnew, broad_phase, mixed_adjacency_workspace.solid_node_mask, mixed_adjacency_workspace.surface_node_mask, pin_map, previous_positions, cooperative, rejections, prepared_solid);
-            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback);
+            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2);
         };
 
         // COM and orientation remain one indivisible update block: all proxy
@@ -4905,7 +5051,7 @@ SolverResult global_gauss_seidel_solver_general_experimental_v2(
                 const Vec3 delta = matrix3d_inverse(systems[i].hessian) * systems[i].gradient;
                 const Vec3 target = xnew[node] - params.damping * delta;
                 per_vertex_safe_step(broad_phase, xnew, node, target, 0.9,
-                    params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback);
+                    params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2);
             }
         };
         const auto snapshot_simd_batch = [&](int item, bool restore) {

@@ -80,7 +80,8 @@ static void finish_colored_guess_trace_sweep(ColoredCCDGuessTrace& trace,
 
 static void discard_separated_guess_contacts(BroadPhase& broad_phase,
     const std::vector<Vec3>& x, bool parallel, ColoredCCDGuessWorkspace& workspace,
-    double minimum_separation, bool exact_computation_fallback) {
+    double minimum_separation, bool exact_computation_fallback,
+    bool exact_computation_fallback_2) {
     const auto& cache = broad_phase.cache();
     workspace.nt_separated.resize(cache.nt_pairs.size());
     workspace.ss_separated.resize(cache.ss_pairs.size());
@@ -105,7 +106,8 @@ static void discard_separated_guess_contacts(BroadPhase& broad_phase,
         }
         auto& separated = segment ? workspace.ss_separated : workspace.nt_separated;
         separated[index] = solver_detail::contact_boxes_separated(
-            positions, boxes, segment, minimum_separation, exact_computation_fallback);
+            positions, boxes, segment, minimum_separation, exact_computation_fallback,
+            exact_computation_fallback_2);
     }
     broad_phase.discard_separated_contact_incidence(
         workspace.nt_separated, workspace.ss_separated, parallel);
@@ -299,7 +301,8 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
     // boxes, so these pairs need neither read dependencies nor gap/CCD queries.
     // Checking just their current distances would not justify this pruning.
     discard_separated_guess_contacts(broad_phase, x, params.use_parallel, workspace,
-        minimum_separation, params.exact_computation_fallback);
+        minimum_separation, params.exact_computation_fallback,
+        params.exact_computation_fallback_2);
     auto& contact_adjacency = workspace.contact_adjacency;
     auto& color_groups = workspace.color_groups;
     build_contact_adj(broad_phase.cache(), nv, contact_adjacency);
@@ -349,7 +352,7 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
                     const double step = per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
                         /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false,
                         /*use_ogc=*/false, /*cooperative=*/false, nullptr,
-                        params.exact_computation_fallback);
+                        params.exact_computation_fallback, params.exact_computation_fallback_2);
                     if (!params.exact_computation_fallback && step > 0.0)
                         preserve_guess_separation(broad_phase.cache(), xnew,
                             vertex, before, required_distances);
@@ -532,7 +535,7 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
                     const double step = per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
                         /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false,
                         /*use_ogc=*/false, /*cooperative=*/false, nullptr,
-                        params.exact_computation_fallback);
+                        params.exact_computation_fallback, params.exact_computation_fallback_2);
                     if (!params.exact_computation_fallback && step > 0.0)
                         preserve_guess_separation(broad_phase.cache(), xnew,
                             vertex, before, required_distances);

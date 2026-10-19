@@ -63,8 +63,9 @@ ExactContactStepResult exact_contact_step_result(const std::array<Vec3, 4>& star
 // Constructor/test validation and results match exact_contact_step_result.
 class PreparedExactContactStep {
 public:
+    // optimized=false retains the original prepared setup for fallback mode 1.
     PreparedExactContactStep(const std::array<Vec3, 4>& start, bool vertex_face,
-                             double floor, int moving_dof);
+                             double floor, int moving_dof, bool optimized = true);
     ~PreparedExactContactStep();
     PreparedExactContactStep(PreparedExactContactStep&&) noexcept;
     PreparedExactContactStep& operator=(PreparedExactContactStep&&) noexcept;
@@ -73,6 +74,11 @@ public:
 
     // Calling test on a moved-from context throws std::logic_error.
     ExactContactStepResult test(const Vec3& endpoint) const;
+
+    // Endpoint gap comparison only, matching contact_preserves_separation_exact.
+    // Does not establish a collision-free path; returns false for initial contact.
+    // Uses the same snapshot, finite-endpoint validation and moved-from checks.
+    bool preserves_separation(const Vec3& endpoint) const;
 
 private:
     struct Impl;

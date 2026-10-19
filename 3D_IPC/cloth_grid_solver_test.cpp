@@ -1328,6 +1328,132 @@ TEST(BasicSolver, UncertainContactBoxesPreserveCrossingCcd) {
     EXPECT_GT(points[0].z(), 0.0);
 }
 
+TEST(BasicSolver, ContactBoxCertificatesRejectSharedClosedBoundaries) {
+    // Either primitive can place one of its vertices on the shared boundary,
+    // so its complete boxes cannot have a strictly positive separating gap.
+    const std::array<Vec3, 3> shifts{{Vec3(1, 0, 0), Vec3(1, 1, 0), Vec3(1, 1, 1)}};
+    for (bool segment : {false, true}) for (bool exact : {false, true})
+        for (bool variant2 : {false, true}) {
+        const int first_count = segment ? 2 : 1;
+        for (int a = 0; a < first_count; ++a) for (int b = first_count; b < 4; ++b) {
+            for (std::size_t boundary = 0; boundary < shifts.size(); ++boundary) {
+                SCOPED_TRACE(::testing::Message() << "segment=" << segment << " exact=" << exact << " variant2=" << variant2
+                    << " vertices=" << a << ',' << b << " boundary=" << boundary);
+                std::array<Vec3, 4> positions;
+                std::array<AABB, 4> boxes;
+                for (int node = 0; node < 4; ++node) {
+                    positions[node] = Vec3(10 + 3 * node, 10, 10);
+                    boxes[node] = AABB(positions[node] - Vec3::Constant(.25),
+                        positions[node] + Vec3::Constant(.25));
+                }
+                positions[a] = Vec3::Constant(.5);
+                positions[b] = shifts[boundary] + Vec3::Constant(.5);
+                boxes[a] = AABB(Vec3::Zero(), Vec3::Ones());
+                boxes[b] = AABB(shifts[boundary], shifts[boundary] + Vec3::Ones());
+                EXPECT_FALSE(solver_detail::contact_boxes_separated(positions, boxes, segment, .125, exact, variant2));
+            }
+        }
+    }
+}
+
+TEST(BasicSolver, ContactBoxCertificatesPreserveValidationAndSeparatedControls) {
+    for (bool segment : {false, true}) for (bool exact : {false, true})
+        for (bool variant2 : {false, true}) {
+        const std::array<Vec3, 4> positions = segment
+            ? std::array<Vec3, 4>{{Vec3(-.5, 0, 0), Vec3(.5, 0, 0), Vec3(-.5, 0, 4), Vec3(.5, 0, 4)}}
+            : std::array<Vec3, 4>{{Vec3(0, 0, 4), Vec3(-.5, 0, 0), Vec3(.5, 0, 0), Vec3(0, 1, 0)}};
+        std::array<AABB, 4> separated;
+        for (int node = 0; node < 4; ++node)
+            separated[node] = AABB(positions[node] - Vec3::Constant(1.25),
+                positions[node] + Vec3::Constant(1.25));
+        // Boxes within each multi-vertex primitive overlap, while the two
+        // primitives retain a 1.5-unit gap along z throughout their boxes.
+        ASSERT_TRUE(solver_detail::contact_boxes_separated(positions, separated, segment, .125, exact, variant2));
+        EXPECT_FALSE(solver_detail::contact_boxes_separated(positions, separated, segment, 2.0, exact, variant2));
+        for (bool overlap : {false, true}) {
+            auto valid_boxes = separated;
+            if (overlap) valid_boxes.fill(AABB(Vec3::Constant(-2), Vec3(2, 2, 6)));
+            for (double invalid_distance : {0.0, -1.0, std::numeric_limits<double>::infinity(),
+                     std::numeric_limits<double>::quiet_NaN()})
+                EXPECT_FALSE(solver_detail::contact_boxes_separated(
+                    positions, valid_boxes, segment, invalid_distance, exact, variant2));
+            for (int invalid = 0; invalid < 8; ++invalid) {
+                SCOPED_TRACE(::testing::Message() << "segment=" << segment << " exact=" << exact << " variant2=" << variant2
+                    << " overlap=" << overlap << " invalid=" << invalid);
+                auto points = positions;
+                auto boxes = valid_boxes;
+                if (invalid == 0) points[0].x() = std::numeric_limits<double>::quiet_NaN();
+                if (invalid == 1) points[3].y() = std::numeric_limits<double>::infinity();
+                if (invalid == 2) boxes[0].min.x() = std::numeric_limits<double>::quiet_NaN();
+                if (invalid == 3) boxes[3].max.y() = std::numeric_limits<double>::infinity();
+                if (invalid == 4) boxes[2].max.x() = boxes[2].min.x() - 1.0;
+                if (invalid == 5) boxes[0].max.x() = boxes[0].min.x();
+                if (invalid == 6) {
+                    boxes[1].max.x() = boxes[1].min.x() + 1e-11;
+                    points[1].x() = boxes[1].min.x() + 5e-12;
+                }
+                if (invalid == 7) points[2].z() = boxes[2].max.z() + .25;
+                EXPECT_FALSE(solver_detail::contact_boxes_separated(points, boxes, segment, .125, exact, variant2));
+            }
+        }
+    }
+}
+
+TEST(BasicSolver, Fallback2HeavyCertificatesRemainBitwiseIdenticalAcrossRebuilds) {
+    RestoreOpenMPSettings restore;
+    omp_set_dynamic(0);
+    // Keep all meshes alive while the solver's static workspaces alternate
+    // between legacy/variant2 calls. Both configurations enable certificates;
+    // a scalar-only route would not exercise this SIMD-gated cache.
+    std::array<ClothScene, 4> scenes;
+    for (int configuration = 0; configuration < 2; ++configuration) {
+        for (int mode = 0; mode < 2; ++mode) {
+            auto& scene = scenes[2 * configuration + mode];
+            build_contact_scene(scene, configuration ? .1 : 0.0);
+            auto& params = scene.params;
+            params.use_cloth_grid = false;
+            params.use_basic_experimental = params.use_basic_experimental_v2 = true;
+            params.use_simd = params.use_parallel = params.use_ccd = true;
+            params.use_ticcd = false;
+            params.exact_computation_fallback = true;
+            params.exact_computation_fallback_2 = mode != 0;
+            params.max_global_iters = 2;
+            params.node_box_update_count = 1;
+        }
+    }
+    for (int configuration = 0; configuration < 2; ++configuration) {
+        omp_set_num_threads(configuration ? 4 : 1);
+        for (int frame = 1; frame <= 2; ++frame) {
+            SCOPED_TRACE(::testing::Message() << "configuration=" << configuration
+                << " frame=" << frame);
+            const double radius = frame == 1 ? .01 : .02;
+            std::array<SolverResult, 2> results;
+            for (int mode = 0; mode < 2; ++mode) {
+                SCOPED_TRACE(::testing::Message() << "variant2=" << mode);
+                auto& scene = scenes[2 * configuration + mode];
+                scene.params.node_box_min = scene.params.node_box_max = radius;
+                results[mode] = advance_one_frame(scene.state, scene.mesh,
+                    scene.adjacency, scene.pins, scene.params, scene.broad_phase, frame);
+                ASSERT_TRUE(results[mode].converged);
+                EXPECT_EQ(results[mode].iterations,
+                    scene.params.substeps * scene.params.max_global_iters);
+                const auto& cache = scene.broad_phase.cache();
+                const std::size_t vertices = scene.state.deformed_positions.size();
+                const std::size_t count = cache.nt_pairs.size() + cache.ss_pairs.size();
+                ASSERT_EQ(vertices, 162u);
+                ASSERT_EQ(cache.node_boxes.size(), vertices);
+                ASSERT_GE(count, 128u);
+                ASSERT_GE(count / 4, vertices); // Prove the heavy eligibility gate.
+                EXPECT_NEAR(cache.node_boxes[0].max.x() - cache.node_boxes[0].min.x(),
+                    2 * radius, 1e-12);
+            }
+            EXPECT_EQ(results[0].iterations, results[1].iterations);
+            expect_states_bitwise_equal(scenes[2 * configuration + 1].state,
+                scenes[2 * configuration].state);
+        }
+    }
+}
+
 TEST(BasicSolver, ContactBoxCertificatesMatchIndependentCornerBounds) {
     std::mt19937_64 generator(913721);
     std::uniform_real_distribution<double> coordinate(-1.0, 1.0);

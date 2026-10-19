@@ -399,6 +399,7 @@ struct IPCArgs3D : ArgParser {
         p.damping                     = damping;
         p.use_ticcd = use_ticcd;
         p.exact_computation_fallback = exact_computation_fallback;
+        p.exact_computation_fallback_2 = exact_computation_fallback;
         p.validate_colored_ccd_guess_parameters();
         p.validate_cloth_grid_parameters();
         return p;

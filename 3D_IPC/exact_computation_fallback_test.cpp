@@ -177,3 +177,57 @@ TEST(ExactComputationFallback, ScalarAndSIMDUseMatchingOriginalContactDerivative
     EXPECT_DOUBLE_EQ(old_gradient.norm(),0.0);
     EXPECT_GT(new_gradient.norm(),0.0);
 }
+
+
+TEST(ExactComputationFallbackCLI, DefaultsSelectOptimizedExactMode) {
+    const SimParams zero = SimParams::zeros();
+    EXPECT_TRUE(zero.exact_computation_fallback);
+    EXPECT_TRUE(zero.exact_computation_fallback_2);
+    IPCArgs3D args;
+    ASSERT_TRUE(parse_flags(args, {"3D_sim"}));
+    const auto params = args.to_sim_params();
+    EXPECT_TRUE(params.exact_computation_fallback_2);
+    EXPECT_TRUE(params.exact_computation_fallback);
+    EXPECT_FALSE(params.use_original_linear_ccd());
+    EXPECT_FALSE(params.use_ticcd);
+}
+
+TEST(ExactComputationFallbackCLI, ExplicitOnSelectsOptimizedExactMode) {
+    IPCArgs3D args;
+    ASSERT_TRUE(parse_flags(args, {"3D_sim", "--exact_computation_fallback", "true"}));
+    const auto params = args.to_sim_params();
+    EXPECT_TRUE(params.exact_computation_fallback_2);
+    EXPECT_TRUE(params.exact_computation_fallback);
+    EXPECT_FALSE(params.use_original_linear_ccd());
+    EXPECT_FALSE(params.use_ticcd);
+}
+
+TEST(ExactComputationFallbackCLI, ExplicitOffKeepsOriginalMode) {
+    IPCArgs3D args;
+    ASSERT_TRUE(parse_flags(args, {"3D_sim", "--exact_computation_fallback", "false"}));
+    const auto params = args.to_sim_params();
+    EXPECT_FALSE(params.exact_computation_fallback);
+    EXPECT_FALSE(params.exact_computation_fallback_2);
+    EXPECT_TRUE(params.use_original_linear_ccd());
+    EXPECT_FALSE(params.use_ticcd);
+}
+
+TEST(ExactComputationFallbackCLI, ObsoleteSecondPublicFlagIsRejected) {
+    for (const auto* value : {"false", "true"}) {
+        IPCArgs3D args;
+        EXPECT_FALSE(parse_flags(args, {"3D_sim", "--exact_computation_fallback_2", value}));
+    }
+}
+
+TEST(ExactComputationFallbackCLI, TightInclusionRemainsIndependent) {
+    for (bool exact : {false, true}) {
+        IPCArgs3D args;
+        ASSERT_TRUE(parse_flags(args, {"3D_sim", "--exact_computation_fallback",
+            exact ? "true" : "false", "--use_ticcd", "true"}));
+        const auto params = args.to_sim_params();
+        EXPECT_EQ(params.exact_computation_fallback, exact);
+        EXPECT_EQ(params.exact_computation_fallback_2, exact);
+        EXPECT_TRUE(params.use_ticcd);
+        EXPECT_FALSE(params.use_original_linear_ccd());
+    }
+}

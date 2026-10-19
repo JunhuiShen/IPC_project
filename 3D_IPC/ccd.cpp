@@ -275,9 +275,55 @@ Integer integer_determinant(const IntegerPoints& p) {
         integer_subtract(p[2], p[0])), integer_subtract(p[3], p[0]));
 }
 
-// Returns false only when the path is identically coplanar and therefore
-// requires the unchanged rational incidence-event enumeration. At most one
-// vertex changes; the public caller validates this before entering here.
+// The initial-contact and endpoint-gap checks have already passed. Sharing
+// just this path check lets prepared trials reuse the exact starting geometry
+// without changing the unprepared query's evaluation or event policy.
+// Returns false only for identically coplanar motion, which needs the rational
+// incidence-event enumeration. At most one vertex changes.
+bool try_integer_step_path_result(const IntegerPoints& start, const IntegerPoints& end,
+    bool vertex_face, const IntegerDistanceSquared& start_squared,
+    const Integer& intercept, const Integer& validation_squared,
+    ExactContactStepResult& result) {
+    // For one moving vertex this exact determinant is affine in time. No
+    // finite NT/SS intersection is possible away from its coplanarity root.
+    Integer denominator = integer_determinant(end) - intercept;
+    if (denominator == 0) {
+        if (intercept == 0) return false;
+        result = ExactContactStepResult::Safe;
+        return true;
+    }
+    Integer numerator = -intercept;
+    if (denominator < 0) {
+        denominator = -denominator;
+        numerator = -numerator;
+    }
+    // Exclude t=0: the initial finite-primitive intersection was already
+    // checked exactly, independently of the future-event validation band.
+    if (numerator <= 0 || numerator > denominator) {
+        result = ExactContactStepResult::Safe;
+        return true;
+    }
+
+    // Evaluate the root N/Q without division: H_i=Q*start_i+N*(end_i-start_i).
+    // Distance(H)^2 is Q^2 times the squared distance in the original integer
+    // grid, so cross-multiplication retains exactly the rational predicate.
+    IntegerPoints event;
+    for (int i = 0; i < 4; ++i)
+        for (int axis = 0; axis < 3; ++axis)
+            event[i][axis] = denominator * start[i][axis]
+                + numerator * (end[i][axis] - start[i][axis]);
+    const auto event_squared = vertex_face
+        ? integer_point_triangle_distance_squared(event)
+        : integer_segment_segment_distance_squared(event);
+    const bool exact_membership = start_squared.numerator
+        <= validation_squared * start_squared.denominator;
+    const bool collision = exact_membership ? event_squared.numerator == 0
+        : event_squared.numerator <= event_squared.denominator
+            * denominator * denominator * validation_squared;
+    result = collision ? ExactContactStepResult::Unsafe : ExactContactStepResult::Safe;
+    return true;
+}
+
 bool try_integer_step_result(const IntegerPoints& start, const IntegerPoints& end,
     bool vertex_face, bool changed, const Integer& floor_squared,
     const Integer& validation_squared, ExactContactStepResult& result) {
@@ -1654,35 +1700,160 @@ ExactContactStepResult exact_contact_step_result(const std::array<Vec3, 4>& star
 }
 
 struct PreparedExactContactStep::Impl {
-    // Original represented endpoints and threshold are immutable snapshots.
-    // Keep the existing rational cache for identically coplanar queries.
-    std::array<Vec3,4> positions;
+    using Integer = exact_linear::Integer;
+    using IntegerPoints = exact_linear::IntegerPoints;
+    using Distance = exact_linear::IntegerDistanceSquared;
+
+    // Immutable base grid and starting geometry. Ordinary trials only convert
+    // the moving endpoint; finer endpoint grids use invocation-local copies so
+    // const queries can safely run concurrently on the same snapshot.
+    std::array<Vec3, 4> positions;
     double floor;
-    exact_linear::Points start;
-    exact_linear::Rational start_squared;
-    exact_linear::Rational minimum_squared;
+    bool optimized;
+    int unit_exponent;
+    IntegerPoints integer_start;
+    Distance integer_start_squared;
+    Distance integer_minimum_squared;
+    Integer integer_intercept;
+    Integer integer_validation_squared;
     bool vertex_face;
     int moving_dof;
 
-    Impl(const std::array<Vec3, 4>& positions, bool face, double floor, int dof)
-        : positions(positions), floor(floor), start(exact_linear::from_positions(positions)),
-          vertex_face(face), moving_dof(dof) {
-        start_squared = vertex_face
-            ? exact_linear::point_triangle_distance_squared(start)
-            : exact_linear::segment_segment_distance_squared(start);
-        const exact_linear::Rational floor_squared = exact_linear::Rational(floor)
-            * exact_linear::Rational(floor);
-        minimum_squared = std::min(start_squared, floor_squared);
+    struct CoplanarStart {
+        exact_linear::Points positions;
+        exact_linear::Rational squared;
+        exact_linear::Rational minimum_squared;
+
+        CoplanarStart(const std::array<Vec3, 4>& start, bool face, double floor)
+            : positions(exact_linear::from_positions(start)) {
+            squared = face ? exact_linear::point_triangle_distance_squared(positions)
+                : exact_linear::segment_segment_distance_squared(positions);
+            const exact_linear::Rational floor_squared = exact_linear::Rational(floor)
+                * exact_linear::Rational(floor);
+            minimum_squared = std::min(squared, floor_squared);
+        }
+
+        static exact_linear::Rational distance_in_world_units(
+            const Distance& distance, int unit_exponent) {
+            // The cached ratio is a squared distance measured in the common
+            // integer grid. Move its exact 2^(2*unit_exponent) world-unit
+            // factor into the integer numerator or denominator before the
+            // single canonical rational conversion. Actual binary64 queries
+            // have unit_exponent in [-1126,-86], but both signs are supported.
+            Integer numerator = distance.numerator;
+            Integer denominator = distance.denominator;
+            const long long shift = 2LL * unit_exponent;
+            if (shift < 0)
+                denominator <<= static_cast<unsigned long long>(-shift);
+            else if (shift > 0)
+                numerator <<= static_cast<unsigned long long>(shift);
+            // Rational/rational division is required: a cpp_int divisor can
+            // leave zero/one noncanonical in some Boost mixed operations.
+            return exact_linear::Rational(numerator) / exact_linear::Rational(denominator);
+        }
+
+        CoplanarStart(const std::array<Vec3, 4>& start,
+            const Distance& start_squared, const Distance& minimum_squared,
+            int unit_exponent)
+            : positions(exact_linear::from_positions(start)),
+              squared(distance_in_world_units(start_squared, unit_exponent)),
+              minimum_squared(distance_in_world_units(minimum_squared, unit_exponent)) {}
+    };
+    std::unique_ptr<const CoplanarStart> coplanar;
+
+    Impl(const std::array<Vec3, 4>& positions, bool face, double floor, int dof, bool optimized)
+        : positions(positions), floor(floor), optimized(optimized), vertex_face(face), moving_dof(dof) {
+        if (!optimized) {
+            // Preserve the original rational start cache and per-trial integer setup.
+            coplanar = std::make_unique<CoplanarStart>(positions, face, floor);
+            return;
+        }
+        int validation_exponent;
+        std::frexp(1.0e-10, &validation_exponent);
+        unit_exponent = std::min(
+            exact_linear::contact_integer_unit_exponent(positions, positions, floor),
+            validation_exponent - 53);
+        integer_start = exact_linear::contact_integer_positions(positions, unit_exponent);
+        integer_start_squared = vertex_face
+            ? exact_linear::integer_point_triangle_distance_squared(integer_start)
+            : exact_linear::integer_segment_segment_distance_squared(integer_start);
+        const Integer floor_integer = exact_linear::contact_integer_from_double(floor, unit_exponent);
+        const Distance floor_squared{floor_integer * floor_integer, Integer(1)};
+        integer_minimum_squared = exact_linear::integer_distance_less(integer_start_squared, floor_squared)
+            ? integer_start_squared : floor_squared;
+        integer_intercept = exact_linear::integer_determinant(integer_start);
+        const Integer validation = exact_linear::contact_integer_from_double(1.0e-10, unit_exponent);
+        integer_validation_squared = validation * validation;
+        // A nonzero starting determinant cannot have identically coplanar
+        // motion. Avoid rational construction/GCD work for those queries.
+        if (integer_intercept == 0 && integer_start_squared.numerator != 0)
+            coplanar = std::make_unique<CoplanarStart>(positions, integer_start_squared,
+                integer_minimum_squared, unit_exponent);
+    }
+
+    bool test_integer(const Vec3& endpoint, bool gap_only, ExactContactStepResult& result) const {
+        if (integer_start_squared.numerator == 0) {
+            result = ExactContactStepResult::InitialContact;
+            return true;
+        }
+        if ((endpoint.array() == positions[moving_dof].array()).all()) {
+            result = ExactContactStepResult::Safe;
+            return true;
+        }
+        int endpoint_unit = unit_exponent;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (endpoint[axis] == 0.0) continue;
+            int exponent;
+            std::frexp(endpoint[axis], &exponent);
+            endpoint_unit = std::min(endpoint_unit, exponent - 53);
+        }
+        const auto evaluate = [&](const IntegerPoints& start, const Distance& start_squared,
+            const Distance& minimum_squared, const Integer& intercept,
+            const Integer& validation_squared) {
+            auto end = start;
+            for (int axis = 0; axis < 3; ++axis)
+                end[moving_dof][axis] = exact_linear::contact_integer_from_double(endpoint[axis], endpoint_unit);
+            const auto end_squared = vertex_face
+                ? exact_linear::integer_point_triangle_distance_squared(end)
+                : exact_linear::integer_segment_segment_distance_squared(end);
+            if (exact_linear::integer_distance_less(end_squared, minimum_squared)) {
+                result = ExactContactStepResult::Unsafe;
+                return true;
+            }
+            if (gap_only) {
+                result = ExactContactStepResult::Safe;
+                return true;
+            }
+            return exact_linear::try_integer_step_path_result(start, end, vertex_face,
+                start_squared, intercept, validation_squared, result);
+        };
+        if (endpoint_unit == unit_exponent)
+            return evaluate(integer_start, integer_start_squared, integer_minimum_squared,
+                integer_intercept, integer_validation_squared);
+
+        const unsigned shift = static_cast<unsigned>(unit_exponent - endpoint_unit);
+        auto start = integer_start;
+        for (auto& point : start)
+            for (auto& coordinate : point) coordinate <<= shift;
+        // Distances on the refined grid gain 2^(2*shift); their unreduced
+        // fractions need only scale the numerator, independent of the feature.
+        const Distance start_squared{integer_start_squared.numerator << (2 * shift),
+            integer_start_squared.denominator};
+        const Distance minimum_squared{integer_minimum_squared.numerator << (2 * shift),
+            integer_minimum_squared.denominator};
+        const Integer intercept = integer_intercept << (3 * shift);
+        const Integer validation_squared = integer_validation_squared << (2 * shift);
+        return evaluate(start, start_squared, minimum_squared, intercept, validation_squared);
     }
 };
 
 PreparedExactContactStep::PreparedExactContactStep(const std::array<Vec3, 4>& start,
-    bool vertex_face, double floor, int moving_dof) {
+    bool vertex_face, double floor, int moving_dof, bool optimized) {
     if (!(floor > 0.0) || !std::isfinite(floor))
         throw std::invalid_argument("exact contact query: separation floor must be finite and positive");
     if (moving_dof < 0 || moving_dof >= 4)
         throw std::invalid_argument("prepared exact contact query: moving role must be in [0,3]");
-    impl_ = std::make_unique<Impl>(start, vertex_face, floor, moving_dof);
+    impl_ = std::make_unique<Impl>(start, vertex_face, floor, moving_dof, optimized);
 }
 
 PreparedExactContactStep::~PreparedExactContactStep() = default;
@@ -1693,20 +1864,39 @@ ExactContactStepResult PreparedExactContactStep::test(const Vec3& endpoint) cons
     if (!impl_) throw std::logic_error("prepared exact contact query: moved-from context");
     if (!endpoint.allFinite())
         throw std::invalid_argument("exact contact query: positions must be finite");
-    auto represented_end=impl_->positions;
-    represented_end[impl_->moving_dof]=endpoint;
     ExactContactStepResult integer_result;
-    if (try_exact_integer_contact_step(impl_->positions,represented_end,
-            impl_->vertex_face,impl_->floor,integer_result))
-        return integer_result;
-    auto end = impl_->start;
+    if (impl_->optimized) {
+        if (impl_->test_integer(endpoint, false, integer_result)) return integer_result;
+    } else {
+        auto represented_end = impl_->positions;
+        represented_end[impl_->moving_dof] = endpoint;
+        if (try_exact_integer_contact_step(impl_->positions, represented_end,
+                impl_->vertex_face, impl_->floor, integer_result)) return integer_result;
+    }
+    assert(impl_->coplanar);
+    const auto& coplanar = *impl_->coplanar;
+    auto end = coplanar.positions;
     for (int axis = 0; axis < 3; ++axis)
         end[impl_->moving_dof][axis] = exact_linear::Rational(endpoint[axis]);
     exact_linear::Points motion{};
     motion[impl_->moving_dof] = exact_linear::subtract(
-        end[impl_->moving_dof], impl_->start[impl_->moving_dof]);
-    return exact_linear::step_result(impl_->start, end, motion, impl_->vertex_face,
-        impl_->start_squared, impl_->minimum_squared);
+        end[impl_->moving_dof], coplanar.positions[impl_->moving_dof]);
+    return exact_linear::step_result(coplanar.positions, end, motion, impl_->vertex_face,
+        coplanar.squared, coplanar.minimum_squared);
+}
+
+bool PreparedExactContactStep::preserves_separation(const Vec3& endpoint) const {
+    if (!impl_) throw std::logic_error("prepared exact contact query: moved-from context");
+    if (!endpoint.allFinite())
+        throw std::invalid_argument("exact contact query: positions must be finite");
+    if (!impl_->optimized) {
+        auto end = impl_->positions;
+        end[impl_->moving_dof] = endpoint;
+        return contact_preserves_separation_exact(impl_->positions, end, impl_->vertex_face, impl_->floor);
+    }
+    ExactContactStepResult result;
+    impl_->test_integer(endpoint, true, result);
+    return result == ExactContactStepResult::Safe;
 }
 
 // -----------------------------------------------------------------------------

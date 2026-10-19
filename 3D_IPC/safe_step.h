@@ -35,7 +35,7 @@ double per_vertex_safe_step(
     const Vec3& raw_proposed_position, double safety = 0.9, bool clip_ccd = true,
     bool use_ticcd = true, bool use_ogc = false, bool cooperative = false,
     const safe_step_detail::VertexAabbRejections* rejections = nullptr,
-    bool exact_computation_fallback = true);
+    bool exact_computation_fallback = true, bool exact_computation_fallback_2 = true);
 
 // Returns a safe alpha for translating rigid body rb by alpha * dx using linear CCD.
 double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& dx, double safety = 0.9, bool cooperative = false, bool original = false);
