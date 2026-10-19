@@ -179,6 +179,7 @@ and +y as the up direction.
 | `--k_sdf --eps_sdf` | Prescribed-obstacle contact stiffness and soft contact range. |
 | `--friction_coefficient` | Mesh/SDF Coulomb friction; zero disables it. `friction_velocity_epsilon` smooths near-zero slip. |
 | `--exact_computation_fallback true` | Enable optimized exact CCD/contact calculations, matching barrier/friction handling, and colored-predictor path checks (default). Set `false` for the original non-exact mode. |
+| `--ccd_exact_step_bound true` | Experimental direct exact separating-plane gap bound before legacy backtracking; rounded endpoint and path safety checks remain. Default `false`; requires exact fallback enabled, `--use_ticcd false`, and OGC disabled. |
 | `--use_parallel true` | Parallel solver updates; set the thread count with `OMP_NUM_THREADS`. |
 | `--verbose` | Print solver diagnostics. Fixed-iteration solves omit residual evaluation. |
 

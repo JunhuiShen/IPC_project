@@ -129,6 +129,90 @@ Rational segment_segment_distance_squared(const Points& p) {
                      point_segment_distance_squared(p[3], p[0], p[1])});
 }
 
+// Exact closest residuals used only by the opt-in direct-step proposal. Keep
+// all feature decisions and residual coordinates rational; the public distance
+// routines return rounded doubles and cannot provide this supporting plane.
+Point point_segment_closest_residual(const Point& p, const Point& a, const Point& b) {
+    const Point edge = subtract(b, a), offset = subtract(p, a);
+    const Rational length_squared = dot(edge, edge), projection = dot(offset, edge);
+    if (length_squared == 0 || projection <= 0) return offset;
+    if (projection >= length_squared) return subtract(p, b);
+    return subtract(offset, multiply(edge, Rational(projection / length_squared)));
+}
+
+Point contact_closest_residual(const Points& p, bool face) {
+    if (face) {
+        const Point a = subtract(p[2], p[1]), b = subtract(p[3], p[1]);
+        const Point offset = subtract(p[0], p[1]), normal = cross(a, b);
+        const Rational area = dot(normal, normal);
+        if (area != 0) {
+            const Rational aa = dot(a, a), ab = dot(a, b), bb = dot(b, b);
+            const Rational ar = dot(offset, a), br = dot(offset, b);
+            const Rational u = bb * ar - ab * br, v = aa * br - ab * ar;
+            if (u >= 0 && v >= 0 && u + v <= area)
+                return multiply(normal, Rational(dot(offset, normal) / area));
+        }
+        Point best = point_segment_closest_residual(p[0], p[1], p[2]);
+        Rational squared = dot(best, best);
+        for (const auto& edge : {std::array<int, 2>{2, 3}, std::array<int, 2>{3, 1}}) {
+            Point candidate = point_segment_closest_residual(p[0], p[edge[0]], p[edge[1]]);
+            const Rational candidate_squared = dot(candidate, candidate);
+            if (candidate_squared < squared) {
+                best = std::move(candidate);
+                squared = candidate_squared;
+            }
+        }
+        return best;
+    }
+
+    const Point a = subtract(p[1], p[0]), b = subtract(p[3], p[2]);
+    const Point offset = subtract(p[0], p[2]), normal = cross(a, b);
+    const Rational aa = dot(a, a), ab = dot(a, b), bb = dot(b, b);
+    const Rational denominator = aa * bb - ab * ab;
+    if (denominator != 0) {
+        const Rational ar = dot(a, offset), br = dot(b, offset);
+        const Rational alpha = ab * br - bb * ar, beta = aa * br - ab * ar;
+        if (alpha >= 0 && alpha <= denominator && beta >= 0 && beta <= denominator)
+            return multiply(normal, Rational(dot(offset, normal) / denominator));
+    }
+    Point best = point_segment_closest_residual(p[0], p[2], p[3]);
+    Rational squared = dot(best, best);
+    const std::array<Point, 3> candidates = {
+        point_segment_closest_residual(p[1], p[2], p[3]),
+        multiply(point_segment_closest_residual(p[2], p[0], p[1]), Rational(-1)),
+        multiply(point_segment_closest_residual(p[3], p[0], p[1]), Rational(-1))};
+    for (const Point& candidate : candidates) {
+        const Rational candidate_squared = dot(candidate, candidate);
+        if (candidate_squared < squared) {
+            best = candidate;
+            squared = candidate_squared;
+        }
+    }
+    return best;
+}
+
+// sqrt(q) is generally irrational. Compute an UPWARD rational bound using an
+// exact integer square root, not a floating sqrt or a sequence of CCD trials.
+// 192 significant binary places keep the bound tight; correctness depends on
+// its rounding direction, not on this precision. A too-coarse proposal simply
+// returns to the unchanged backtracking path after represented-endpoint checks.
+Rational square_root_upper_bound(const Rational& q) {
+    using Int = boost::multiprecision::cpp_int;
+    if (q <= 0) return Rational(0);
+    Int numerator = boost::multiprecision::numerator(q);
+    Int denominator = boost::multiprecision::denominator(q);
+    const int exponent = static_cast<int>(boost::multiprecision::msb(numerator))
+        - static_cast<int>(boost::multiprecision::msb(denominator));
+    const int scale = 192 - exponent / 2;
+    if (scale >= 0) numerator <<= 2 * scale;
+    else denominator <<= -2 * scale;
+    const Int ceiling = (numerator + denominator - 1) / denominator;
+    Int root = boost::multiprecision::sqrt(ceiling);
+    if (root * root < ceiling) ++root;
+    if (scale >= 0) return Rational(root) / Rational(Int(1) << scale);
+    return Rational(root << -scale);
+}
+
 // Exact contact predicates need comparisons, not normalized rationals. Put
 // every original binary64 coordinate and distance threshold on one dyadic
 // grid. Its common squared unit cancels from all distance comparisons below.
@@ -1697,6 +1781,50 @@ ExactContactStepResult exact_contact_step_result(const std::array<Vec3, 4>& star
         * exact_linear::Rational(floor);
     return exact_linear::step_result(x, y, motion, vertex_face, start_squared,
         std::min(start_squared, floor_squared));
+}
+
+double exact_contact_separation_step_bound(const std::array<Vec3, 4>& start,
+    const std::array<Vec3, 4>& end, bool vertex_face, double floor) {
+    if (!(floor > 0.0) || !std::isfinite(floor))
+        throw std::invalid_argument("exact step bound: separation floor must be finite and positive");
+    const auto x = exact_linear::from_positions(start);
+    const auto y = exact_linear::from_positions(end);
+    int moving_dof = -1;
+    for (int i = 0; i < 4; ++i) {
+        if (x[i] == y[i]) continue;
+        if (moving_dof >= 0)
+            throw std::invalid_argument("exact step bound: at most one vertex may change");
+        moving_dof = i;
+    }
+    using Rational = exact_linear::Rational;
+    const auto normal = exact_linear::contact_closest_residual(x, vertex_face);
+    const Rational squared = exact_linear::dot(normal, normal);
+    if (squared == 0) return 0.0;
+    if (moving_dof < 0) return 1.0;
+    const Rational floor_squared = Rational(floor) * Rational(floor);
+    // At/below the floor, min(start_gap,floor)*|normal| equals |normal|^2
+    // exactly. Do not add an approximation that could lock separating motion.
+    const Rational required = squared <= floor_squared ? squared
+        : exact_linear::square_root_upper_bound(Rational(floor_squared * squared));
+    const Rational motion = exact_linear::dot(
+        exact_linear::subtract(y[moving_dof], x[moving_dof]), normal);
+    Rational fraction = 1;
+    const int split = vertex_face ? 1 : 2;
+    for (int a = 0; a < split; ++a) for (int b = split; b < 4; ++b) {
+        const Rational projection = exact_linear::dot(exact_linear::subtract(x[a], x[b]), normal);
+        // Guard against the upward sqrt bound landing above a near-floor start.
+        // Returning zero is inconclusive, not permission to freeze the vertex.
+        if (projection < required) return 0.0;
+        const Rational slope = (a == moving_dof ? motion : Rational(0))
+            - (b == moving_dof ? motion : Rational(0));
+        if (slope < 0) {
+            const Rational limit = (projection - required) / -slope;
+            if (limit < fraction) fraction = limit;
+        }
+    }
+    double rounded = fraction.convert_to<double>();
+    if (Rational(rounded) > fraction) rounded = std::nextafter(rounded, 0.0);
+    return rounded;
 }
 
 struct PreparedExactContactStep::Impl {

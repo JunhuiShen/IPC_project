@@ -709,6 +709,7 @@ inline void contact_spin_hint() {
 struct ColoredContactSweep {
     struct Assignment {
         int vertex = -1, lane = 0, lanes = 1, count = 0, offset = 0, mask_offset = 0;
+        int commit_context = -1;
     };
     struct alignas(64) State {
         std::atomic<int> arrived{0}, ready{0};
@@ -723,6 +724,8 @@ struct ColoredContactSweep {
     std::unique_ptr<std::atomic<int>[]> next_whole;
     std::size_t queue_capacity = 0;
     std::vector<int> cooperative_vertices;
+    std::unique_ptr<ContactTaskGroup[]> commit_contexts;
+    std::size_t commit_context_capacity = 0;
     std::vector<Vec3> steps;
     std::vector<unsigned char> nonzero_step, short_step;
     void prepare(const std::vector<std::vector<int>> &groups, const BroadPhase::Cache &cache) {
@@ -752,6 +755,7 @@ struct ColoredContactSweep {
             if (!small && cache.vertex_nt[group[0]].size() + cache.vertex_ss[group[0]].size() < 512)
                 continue;
             split_count[c] = selected;
+            const int first_context = static_cast<int>(cooperative_vertices.size());
             cooperative_vertices.insert(cooperative_vertices.end(), group.begin(),
                                         group.begin() + selected);
             std::vector<int> lanes(selected, 1), counts(selected);
@@ -769,7 +773,7 @@ struct ColoredContactSweep {
             for (int i = 0; i < selected; ++i) {
                 for (int lane = 0; lane < lanes[i]; ++lane)
                     assignments[c * team + t++] = {group[i],  lane,   lanes[i],
-                                                   counts[i], offset, mask_offset};
+                                                   counts[i], offset, mask_offset, first_context + i};
                 offset += counts[i];
                 offset = (offset + 7) & ~7;
                 mask_offset += (counts[i] + contact_grain - 1) / contact_grain;
@@ -780,16 +784,74 @@ struct ColoredContactSweep {
         resize_contact_scratch(values, maximum);
         masks.resize(maximum_masks);
     }
+    // Allocate helper contexts only for the optional endpoint-validation phase.
+    // Each selected vertex owns one context, reused after all helpers exit.
+    void prepare_commit_contexts() {
+        reserve_contact_scratch(commit_contexts, commit_context_capacity, cooperative_vertices.size());
+        for (const Assignment& a : assignments) {
+            if (a.vertex < 0 || a.lane != 0) continue;
+            auto& context = commit_contexts[a.commit_context];
+            context.helpers = a.lanes - 1;
+            context.sequence.store(0, std::memory_order_relaxed);
+        }
+    }
+    struct CommitFailure {
+        std::atomic<bool> failed{false};
+        std::exception_ptr error;
+        // Published only at a color barrier. Reading failed at the next color's
+        // entry could let a fast worker's NEW error split that color's team.
+        bool stop = false;
+        void capture() {
+            if (!failed.exchange(true, std::memory_order_relaxed))
+                error = std::current_exception();
+        }
+    };
+    template <class Commit>
+    void commit_with_helpers(const Assignment& a, ContactContribution* result,
+        const ContactMaskWord* mask, const Commit& commit, CommitFailure& failure) {
+        auto& context = commit_contexts[a.commit_context];
+        State& state = states[a.vertex];
+        if (a.lane == 0) {
+            while (state.arrived.load(std::memory_order_acquire) != 2 * a.lanes)
+                contact_spin_hint();
+            auto* previous = active_contact_task_group;
+            active_contact_task_group = a.lanes > 1 ? &context : nullptr;
+            try {
+                if (!failure.failed.load(std::memory_order_relaxed))
+                    commit(a.vertex, result, mask);
+            } catch (...) {
+                failure.capture();
+            }
+            active_contact_task_group = previous;
+            // dispatch joins its range writes even when it throws. The extra
+            // acknowledgment also joins helpers leaving help(), so resetting
+            // sequence cannot hide this stop command from a slower helper.
+            context.sequence.store(-1, std::memory_order_release);
+            while (state.arrived.load(std::memory_order_acquire) != 3 * a.lanes - 1)
+                contact_spin_hint();
+            context.sequence.store(0, std::memory_order_relaxed);
+            state.arrived.store(0, std::memory_order_relaxed);
+            state.ready.store(0, std::memory_order_relaxed);
+        } else {
+            context.help();
+            state.arrived.fetch_add(1, std::memory_order_release);
+        }
+    }
     // Optional before_color is called collectively by every worker before any
     // updates of that color, including fallback paths. It must not throw and
     // must join its writes before returning (e.g. an omp for without nowait).
     // The default adds no work or barriers for existing callers.
+    // Optional cooperative_commit lends each selected vertex's existing helper
+    // lanes to commit after CCD. Only commit may throw through this interface;
+    // its error is rethrown after helpers and the entire worker team join.
     template <class Compute, class Apply, class Baseline, class CCD, class Commit,
               class BeforeColor = std::nullptr_t>
     void run(const std::vector<std::vector<int>> &groups, const Compute &compute,
              const Apply &apply, const Baseline &baseline, const CCD &ccd, const Commit &commit,
-             const BeforeColor& before_color = nullptr) {
+             const BeforeColor& before_color = nullptr, bool cooperative_commit = false) {
         constexpr int chunk = contact_grain;
+        CommitFailure commit_failure;
+        if (cooperative_commit) prepare_commit_contexts();
         for (int c = 0; c < static_cast<int>(groups.size()); ++c)
             next_whole[c].store(split_count[c], std::memory_order_relaxed);
         // Reset before entering the team, including after any runtime team-size
@@ -801,6 +863,7 @@ struct ColoredContactSweep {
 #pragma omp parallel
         {
             for (int c = 0; c < static_cast<int>(groups.size()); ++c) {
+                if (cooperative_commit && commit_failure.stop) continue;
                 const auto &group = groups[c];
                 if constexpr (!std::is_same_v<BeforeColor, std::nullptr_t>)
                     before_color(static_cast<std::size_t>(c));
@@ -844,7 +907,9 @@ struct ColoredContactSweep {
                             masks[a.mask_offset + start / contact_grain].bits = bits;
                         }
                         state.arrived.fetch_add(1, std::memory_order_acq_rel);
-                        if (a.lane == 0) {
+                        if (cooperative_commit) {
+                            commit_with_helpers(a, result, masks.data() + a.mask_offset, commit, commit_failure);
+                        } else if (a.lane == 0) {
                             while (state.arrived.load(std::memory_order_acquire) != 2 * a.lanes)
                                 contact_spin_hint();
                             commit(a.vertex, result, masks.data() + a.mask_offset);
@@ -867,8 +932,13 @@ struct ColoredContactSweep {
                     }
 #pragma omp barrier
                 }
+                if (cooperative_commit) {
+#pragma omp single
+                    { commit_failure.stop = commit_failure.failed.load(std::memory_order_relaxed); }
+                }
             }
         }
+        if (commit_failure.error) std::rethrow_exception(commit_failure.error);
     }
 
     // V2 compacts each worker's strided contacts without changing ownership.
@@ -876,6 +946,7 @@ struct ColoredContactSweep {
     // initialize its mask words, finish its writes, and return without throwing.
     // ccd_candidates optionally returns eligible bits for a word after apply;
     // the caller must prove that omitted entries cannot affect the CCD result.
+    // cooperative_commit has the same joined-helper/error contract as run().
     template <class Compute, class Apply, class Baseline, class CCD, class Commit,
               class BeforeColor = std::nullptr_t, class ComputeAssigned = std::nullptr_t,
               class BaselineBatch = std::nullptr_t, class CCDCandidates = std::nullptr_t>
@@ -883,8 +954,10 @@ struct ColoredContactSweep {
              const Apply &apply, const Baseline &baseline, const CCD &ccd, const Commit &commit,
              const BeforeColor& before_color = nullptr, const ComputeAssigned& compute_assigned = nullptr,
              const BaselineBatch& baseline_batch = nullptr, int sweeps = 1,
-             const CCDCandidates& ccd_candidates = nullptr) {
+             const CCDCandidates& ccd_candidates = nullptr, bool cooperative_commit = false) {
         if (sweeps <= 0 || groups.empty()) return;
+        CommitFailure commit_failure;
+        if (cooperative_commit) prepare_commit_contexts();
         ColoredSweepBarrier barrier;
         barrier.reserve(omp_get_max_threads());
         for (int c = 0; c < static_cast<int>(groups.size()); ++c)
@@ -903,6 +976,7 @@ struct ColoredContactSweep {
             unsigned phase = 0;
             for (int sweep = 0; sweep < sweeps; ++sweep) {
                 for (int c = 0; c < static_cast<int>(groups.size()); ++c) {
+                    if (cooperative_commit && commit_failure.stop) continue;
                     const auto &group = groups[c];
                     if constexpr (!std::is_same_v<BeforeColor, std::nullptr_t>)
                         before_color(static_cast<std::size_t>(c));
@@ -964,7 +1038,9 @@ struct ColoredContactSweep {
                                 masks[a.mask_offset + start / contact_grain].bits = bits;
                             }
                             state.arrived.fetch_add(1, std::memory_order_acq_rel);
-                            if (a.lane == 0) {
+                            if (cooperative_commit) {
+                                commit_with_helpers(a, result, masks.data() + a.mask_offset, commit, commit_failure);
+                            } else if (a.lane == 0) {
                                 while (state.arrived.load(std::memory_order_acquire) != 2 * a.lanes)
                                     contact_spin_hint();
                                 commit(a.vertex, result, masks.data() + a.mask_offset);
@@ -997,10 +1073,13 @@ struct ColoredContactSweep {
                     barrier.wait(worker, ++phase, [&] {
                         // Reset after all cursor readers and vertex updates finish.
                         next_whole[c].store(split_count[c], std::memory_order_relaxed);
+                        if (cooperative_commit)
+                            commit_failure.stop = commit_failure.failed.load(std::memory_order_relaxed);
                     });
                 }
             }
         }
+        if (commit_failure.error) std::rethrow_exception(commit_failure.error);
     }
 };
 

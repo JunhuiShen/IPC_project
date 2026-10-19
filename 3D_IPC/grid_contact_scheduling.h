@@ -36,6 +36,7 @@ struct ClothGridContactSweep {
         std::atomic<int> arrived{0};
         std::atomic<std::uint64_t> ready{0};
         std::atomic<std::uint64_t> failed_phase{0};
+        std::atomic<std::uint64_t> commit_ready{0};
     };
     struct BatchStats {
         double wall_seconds = 0.0;
@@ -146,12 +147,14 @@ struct ClothGridContactSweep {
         masks.resize(maximum_masks);
     }
 
+    // With cooperative_commit, fixed helpers also serve ordered contact work
+    // requested by the leader's commit callback after the ordinary CCD join.
     template <class Compute, class Apply, class Baseline, class CCD, class Commit>
     void run(const ClothGridSchedule& schedule, const Compute& compute,
              const Apply& apply, const Baseline& baseline, const CCD& ccd,
-             const Commit& commit, bool profile = false) {
-        if (profile) run_impl<true>(schedule, compute, apply, baseline, ccd, commit);
-        else run_impl<false>(schedule, compute, apply, baseline, ccd, commit);
+             const Commit& commit, bool profile = false, bool cooperative_commit = false) {
+        if (profile) run_impl<true>(schedule, compute, apply, baseline, ccd, commit, cooperative_commit);
+        else run_impl<false>(schedule, compute, apply, baseline, ccd, commit, cooperative_commit);
     }
 
 private:
@@ -160,22 +163,28 @@ private:
     std::vector<ContactContribution, CacheAlignedAllocator<ContactContribution>> values;
     std::vector<ContactMaskWord> masks;
     std::unique_ptr<State[]> states;
+    std::unique_ptr<ContactTaskGroup[]> commit_contexts;
     std::unique_ptr<std::atomic<int>[]> next_whole;
     std::size_t states_capacity = 0, queue_capacity = 0;
+    std::size_t commit_context_capacity = 0;
 
     template <bool Profile, class Compute, class Apply, class Baseline, class CCD, class Commit>
     void run_impl(const ClothGridSchedule& schedule, const Compute& compute,
                   const Apply& apply, const Baseline& baseline, const CCD& ccd,
-                  const Commit& commit) {
+                  const Commit& commit, bool cooperative_commit) {
         const std::size_t batch_count = schedule.batches.size();
         batch_stats.clear();
         if (batch_count == 0) return;
+        if (cooperative_commit)
+            reserve_contact_scratch(commit_contexts, commit_context_capacity, schedule.cells.size());
         for (std::size_t b = 0; b < batch_count; ++b)
             next_whole[b].store(split_count[b], std::memory_order_relaxed);
         for (int cell : cooperative_cells) {
             states[cell].arrived.store(0, std::memory_order_relaxed);
             states[cell].ready.store(0, std::memory_order_relaxed);
             states[cell].failed_phase.store(0, std::memory_order_relaxed);
+            if (cooperative_commit)
+                states[cell].commit_ready.store(0, std::memory_order_relaxed);
         }
         std::vector<std::exception_ptr> errors(batch_count);
         std::vector<BatchStats> worker_stats;
@@ -318,13 +327,42 @@ private:
                                         return state.arrived.load(std::memory_order_acquire)
                                             == 2 * a.lanes;
                                     });
-                                    if (!state.failed_phase.load(std::memory_order_acquire)) {
+                                    if (cooperative_commit) {
+                                        ContactTaskGroup& context = commit_contexts[a.cell];
+                                        context.helpers = a.lanes - 1;
+                                        context.sequence.store(0, std::memory_order_relaxed);
+                                        // All CCD readers joined. Publish the new
+                                        // context before helpers inspect its sequence.
+                                        state.commit_ready.store(phase, std::memory_order_release);
+                                        ContactTaskGroup* previous = active_contact_task_group;
+                                        active_contact_task_group = &context;
+                                        if (!state.failed_phase.load(std::memory_order_acquire)) {
+                                            try { commit(v, result, mask); }
+                                            catch (...) { record_error(&state, phase); }
+                                        }
+                                        active_contact_task_group = previous;
+                                        context.sequence.store(-1, std::memory_order_release);
+                                        // A helper must leave help(), not merely
+                                        // finish its last range, before this context
+                                        // can be reused by the next vertex.
+                                        wait_until([&] {
+                                            return state.arrived.load(std::memory_order_acquire)
+                                                == 3 * a.lanes - 1;
+                                        });
+                                    } else if (!state.failed_phase.load(std::memory_order_acquire)) {
                                         try { commit(v, result, mask); }
                                         catch (...) { record_error(&state, phase); }
                                     }
                                     state.arrived.store(0, std::memory_order_relaxed);
                                     state.ready.store(phase, std::memory_order_release);
                                 } else {
+                                    if (cooperative_commit) {
+                                        wait_until([&] {
+                                            return state.commit_ready.load(std::memory_order_acquire) >= phase;
+                                        });
+                                        commit_contexts[a.cell].help();
+                                        state.arrived.fetch_add(1, std::memory_order_acq_rel);
+                                    }
                                     // This join keeps the next vertex from reading
                                     // positions or scratch before this commit ends.
                                     wait_until([&] {

@@ -81,6 +81,7 @@ struct SimParams {
     bool   use_ticcd;              // true (default) -> Tight-Inclusion CCD library; false -> self-written linear CCD
     bool   exact_computation_fallback = true; // modified linear CCD and exact contact calculations
     bool   exact_computation_fallback_2 = true; // internal selector retained for exact-mode comparisons
+    bool   ccd_exact_step_bound = false; // experimental direct exact gap bound before backtracking
 
     bool use_original_linear_ccd() const { return !exact_computation_fallback && !use_ticcd; }
 
@@ -140,9 +141,16 @@ struct SimParams {
         p.use_ticcd                     = true;
         p.exact_computation_fallback    = true;
         p.exact_computation_fallback_2  = true;
+        p.ccd_exact_step_bound          = false;
         p.cached_dt_                = -1.0;
         p.cached_dt2_               = -1.0;
         return p;
+    }
+
+    void validate_ccd_exact_step_bound_parameters() const {
+        if (!ccd_exact_step_bound) return;
+        if (!exact_computation_fallback || use_ticcd || use_ogc || use_ogc_solver)
+            throw std::invalid_argument("--ccd_exact_step_bound requires --exact_computation_fallback true, --use_ticcd false, and OGC disabled");
     }
 
     void validate_colored_ccd_guess_parameters() const {

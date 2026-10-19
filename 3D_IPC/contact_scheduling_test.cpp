@@ -1119,3 +1119,191 @@ TEST(OrderedContactPredicate, NestedPredicatesBorrowIndependentStorage) {
         });
     EXPECT_TRUE(actual);
 }
+
+TEST(ColoredContactSweep, OptionalCommitHelpersPreserveCCDOrderAcrossColorsAndSweeps) {
+    struct Restore {
+        int threads = omp_get_max_threads(), dynamic = omp_get_dynamic();
+        ~Restore() { omp_set_num_threads(threads); omp_set_dynamic(dynamic); }
+    } restore;
+    omp_set_dynamic(0);
+    for (int threads : {1, 4}) for (bool assigned : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "threads=" << threads << " assigned=" << assigned);
+        omp_set_num_threads(threads);
+        const std::vector<std::vector<int>> groups = {{}, {0}, {}, {1}, {2}};
+        constexpr int contacts = 513, repetitions = 3;
+        BroadPhase::Cache cache;
+        cache.vertex_nt.resize(3);
+        cache.vertex_ss.resize(3);
+        for (auto& entries : cache.vertex_nt) entries.resize(contacts);
+        solver_detail::ColoredContactSweep scheduler;
+        scheduler.prepare(groups, cache);
+        EXPECT_EQ(scheduler.commit_context_capacity, 0u);
+        const auto contribution = [](int index) {
+            return index % 3 == 0 ? 1e16 : index % 3 == 1 ? 1.0 : -1e16;
+        };
+        std::vector<double> expected(3, 1.0);
+        for (int repeat = 0; repeat < repetitions; ++repeat)
+            for (int vertex = 0; vertex < 3; ++vertex) {
+                double value = expected[vertex] + (vertex == 0 ? 2.0 : expected[vertex - 1]);
+                for (int index = 1; index <= contacts; ++index)
+                    value += double(index + vertex) / 1024.0;
+                for (int round = 0; round < 3; ++round)
+                    for (int index = 0; index < 257; ++index) value += contribution(index);
+                expected[vertex] = value;
+            }
+        // Switch back to the default path after contexts have been used, then
+        // reuse them again. Neither prior stop commands nor active TLS may leak.
+        bool contexts_used = false;
+        for (int mode : {0, 1, 2, 0, 2}) {
+            SCOPED_TRACE(mode);
+            const bool cooperative_commit = mode == 2;
+            std::vector<double> actual(3, 1.0), proposed(3);
+            std::atomic<int> helper_calls{0}, context_calls{0}, commits{0}, observed_team{0};
+            std::atomic<bool> unexpected_context{false};
+            const auto compute = [&](int vertex, int index, solver_detail::ContactContribution& value) {
+                observed_team.store(omp_get_num_threads(), std::memory_order_relaxed);
+                if (index != 0) return 0u;
+                value.gradient[0] = actual[vertex] + (vertex == 0 ? 2.0 : actual[vertex - 1]);
+                return 1u;
+            };
+            const auto apply = [&](int vertex, const solver_detail::ContactContribution* values,
+                const solver_detail::ContactMaskWord*) { proposed[vertex] = values[0].gradient[0]; };
+            const auto ccd = [](int vertex, int index, solver_detail::ContactContribution& value, bool) {
+                if (index == 0) return false;
+                value.toi = double(index + vertex) / 1024.0;
+                return true;
+            };
+            const auto commit = [&](int vertex, const solver_detail::ContactContribution* values,
+                const solver_detail::ContactMaskWord* masks) {
+                ++commits;
+                const bool have_helpers = solver_detail::active_contact_task_group != nullptr;
+                if (have_helpers) ++context_calls;
+                if (have_helpers && !cooperative_commit) unexpected_context.store(true);
+                double value = proposed[vertex];
+                solver_detail::for_active_contact(masks, contacts, [&](int index) { value += values[index].toi; });
+                for (int round = 0; round < 3; ++round) {
+                    const int leader = omp_get_thread_num();
+                    std::atomic<bool> helper_started{false};
+                    const std::function<void()> leader_work = [&] {
+                        // The leader cannot consume every range before a helper
+                        // is scheduled, making helper participation deterministic.
+                        if (have_helpers)
+                            while (!helper_started.load(std::memory_order_acquire))
+                                std::this_thread::yield();
+                    };
+                    solver_detail::ordered_contact_tasks(257, have_helpers,
+                        [&](int index) {
+                            if (omp_get_thread_num() != leader) {
+                                ++helper_calls;
+                                helper_started.store(true, std::memory_order_release);
+                            }
+                            return contribution(index);
+                        }, [&](double add) { value += add; }, &leader_work);
+                }
+                actual[vertex] = value;
+            };
+            const auto whole = [&](int vertex) {
+                // Only used if the OpenMP runtime cannot supply the prepared team.
+                double value = actual[vertex] + (vertex == 0 ? 2.0 : actual[vertex - 1]);
+                for (int index = 1; index <= contacts; ++index) value += double(index + vertex) / 1024.0;
+                for (int round = 0; round < 3; ++round)
+                    for (int index = 0; index < 257; ++index) value += contribution(index);
+                actual[vertex] = value;
+            };
+            if (assigned) {
+                if (mode == 0)
+                    scheduler.run_assigned(groups, compute, apply, whole, ccd, commit,
+                        nullptr, nullptr, nullptr, repetitions);
+                else
+                    scheduler.run_assigned(groups, compute, apply, whole, ccd, commit,
+                        nullptr, nullptr, nullptr, repetitions, nullptr, cooperative_commit);
+            } else {
+                for (int repeat = 0; repeat < repetitions; ++repeat) {
+                    if (mode == 0) scheduler.run(groups, compute, apply, whole, ccd, commit);
+                    else scheduler.run(groups, compute, apply, whole, ccd, commit, nullptr, cooperative_commit);
+                }
+            }
+            EXPECT_EQ(0, std::memcmp(expected.data(), actual.data(), expected.size() * sizeof(double)));
+            EXPECT_FALSE(unexpected_context.load());
+            EXPECT_EQ(solver_detail::active_contact_task_group, nullptr);
+            if (observed_team.load() == threads) {
+                EXPECT_EQ(commits.load(), 3 * repetitions);
+                if (cooperative_commit && threads > 1) {
+                    EXPECT_EQ(context_calls.load(), commits.load());
+                    EXPECT_GT(helper_calls.load(), 0);
+                } else {
+                    EXPECT_EQ(context_calls.load(), 0);
+                    EXPECT_EQ(helper_calls.load(), 0);
+                }
+            }
+            contexts_used = contexts_used || cooperative_commit;
+            if (!contexts_used) {
+                EXPECT_EQ(scheduler.commit_context_capacity, 0u);
+                EXPECT_EQ(scheduler.commit_contexts, nullptr);
+            }
+        }
+    }
+}
+
+TEST(ColoredContactSweep, CommitFailureReleasesHelpersSkipsLaterColorsAndRecovers) {
+    struct Restore {
+        int threads = omp_get_max_threads(), dynamic = omp_get_dynamic();
+        ~Restore() { omp_set_num_threads(threads); omp_set_dynamic(dynamic); }
+    } restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+    const std::vector<std::vector<int>> groups = {{0}, {}, {1}};
+    BroadPhase::Cache cache;
+    cache.vertex_nt.resize(2);
+    cache.vertex_ss.resize(2);
+    for (auto& entries : cache.vertex_nt) entries.resize(513);
+    for (bool assigned : {false, true}) for (int failure_kind : {0, 1, 2}) {
+        SCOPED_TRACE(::testing::Message() << "assigned=" << assigned << " failure_kind=" << failure_kind);
+        solver_detail::ColoredContactSweep scheduler;
+        scheduler.prepare(groups, cache);
+        std::atomic<int> active{0}, later_color_calls{0}, completed_commits{0};
+        bool inject = true;
+        const auto compute = [&](int vertex, int, solver_detail::ContactContribution&) {
+            if (vertex == 1) ++later_color_calls;
+            return 0u;
+        };
+        const auto apply = [](int, const solver_detail::ContactContribution*, const solver_detail::ContactMaskWord*) {};
+        const auto whole = [](int) {};
+        const auto ccd = [](int, int, solver_detail::ContactContribution&, bool) { return false; };
+        const auto commit = [&](int, const solver_detail::ContactContribution*, const solver_detail::ContactMaskWord*) {
+            if (inject && failure_kind == 0) throw std::logic_error("before dispatch");
+            const bool cooperative = solver_detail::active_contact_task_group != nullptr;
+            solver_detail::ordered_contact_tasks(513, cooperative,
+                [&](int index) {
+                    ++active;
+                    struct Done { std::atomic<int>& active; ~Done() { --active; } } done{active};
+                    if (index % 7 == 0) std::this_thread::yield();
+                    if (inject && failure_kind == 1 && index == 17)
+                        throw std::runtime_error("contact evaluation");
+                    return index;
+                }, [](int) {});
+            if (inject && failure_kind == 2) throw std::logic_error("after dispatch");
+            ++completed_commits;
+        };
+        const auto run = [&] {
+            if (assigned)
+                scheduler.run_assigned(groups, compute, apply, whole, ccd, commit,
+                    nullptr, nullptr, nullptr, 3, nullptr, true);
+            else
+                scheduler.run(groups, compute, apply, whole, ccd, commit, nullptr, true);
+        };
+        if (failure_kind == 1) EXPECT_THROW(run(), std::runtime_error);
+        else EXPECT_THROW(run(), std::logic_error);
+        EXPECT_EQ(active.load(), 0);
+        EXPECT_EQ(later_color_calls.load(), 0);
+        EXPECT_EQ(completed_commits.load(), 0);
+        EXPECT_EQ(solver_detail::active_contact_task_group, nullptr);
+        EXPECT_FALSE(omp_in_parallel());
+        inject = false;
+        EXPECT_NO_THROW(run());
+        EXPECT_EQ(active.load(), 0);
+        EXPECT_EQ(completed_commits.load(), assigned ? 6 : 2);
+        EXPECT_GT(later_color_calls.load(), 0);
+        EXPECT_EQ(solver_detail::active_contact_task_group, nullptr);
+    }
+}

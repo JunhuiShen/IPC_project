@@ -1518,7 +1518,7 @@ SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const Ver
         }
 
         const auto proposed_position = [&](int vi) -> Vec3 { return xnew[vi] - params.damping * gs_vertex_delta_live_barrier(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads, previous_positions); };
-        const auto process_vertex = [&](int vi) { per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi), 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc, false, nullptr, params.exact_computation_fallback, params.exact_computation_fallback_2); };
+        const auto process_vertex = [&](int vi) { per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi), 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc, false, nullptr, params.exact_computation_fallback, params.exact_computation_fallback_2, params.ccd_exact_step_bound); };
         if (params.use_parallel) {
             // Keep color and sweep barriers, but reuse the team until the
             // next box rebuild. Residual-controlled solves still check after
@@ -1633,6 +1633,8 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
     const bool use_contact_sweep = params.use_parallel && omp_get_max_threads() > 1
         && params.friction_coefficient == 0.0 && params.d_hat > 0.0
         && !params.use_ogc;
+    const bool validate_cooperative_step = params.exact_computation_fallback
+        && params.use_ccd && !params.use_ticcd && !params.use_ogc;
     double r1=0.;
     //gs loop
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
@@ -1707,7 +1709,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
           const Vec3 proposed = proposed_position(vi, rejections, cooperative);
           per_vertex_safe_step(broad_phase, xnew, vi, proposed,
                                0.9, params.use_ogc ? false : params.use_ccd,
-                               params.use_ticcd, params.use_ogc, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2);
+                               params.use_ticcd, params.use_ogc, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2, params.ccd_exact_step_bound);
         };
         if (use_contact_sweep) {
           const auto &cache = broad_phase.cache();
@@ -1774,7 +1776,8 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
                   const Vec3 next = proposed.cwiseMax(lo).cwiseMin(hi);
                   contact_sweep.steps[vi] = next - xnew[vi];
                   contact_sweep.nonzero_step[vi] =
-                      !(contact_sweep.steps[vi].squaredNorm() < 1e-28);
+                      validate_cooperative_step ? !(next.array() == xnew[vi].array()).all()
+                      : !(contact_sweep.steps[vi].squaredNorm() < 1e-28);
                   contact_sweep.short_step[vi]=params.d_hat>1e-8 && std::isfinite(dh2) && contact_sweep.steps[vi].squaredNorm()<dh2/16.0;
                 }
               };
@@ -1818,10 +1821,16 @@ SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_me
                 const auto consider=[&](int j){collision=true;toi=std::min(toi,values[j].toi);};
                 solver_detail::for_active_contact(mask,count,consider);
                 double step = collision ? 0.9 * toi : 1.0;
-                xnew[vi] = xnew[vi] + step * contact_sweep.steps[vi];
+                if (validate_cooperative_step)
+                    safe_step_detail::commit_vertex_ccd_step(broad_phase, xnew, vi,
+                        contact_sweep.steps[vi], step,
+                        solver_detail::active_contact_task_group != nullptr, nullptr,
+                        params.exact_computation_fallback_2, params.ccd_exact_step_bound);
+                else
+                    xnew[vi] = xnew[vi] + step * contact_sweep.steps[vi];
               };
           contact_sweep.run(color_groups, compute, apply, process_vertex, ccd,
-                            commit);
+                            commit, nullptr, validate_cooperative_step);
         } else if (params.use_parallel) {
           // Fixed-iteration collision-free and friction solves can reuse one
           // team until the next node-box rebuild. Keep every color barrier,
@@ -2107,6 +2116,8 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
     const bool use_contact_sweep = params.use_parallel && omp_get_max_threads() > 1
         && params.friction_coefficient == 0.0 && params.d_hat > 0.0
         && !params.use_ogc;
+    const bool validate_cooperative_step = params.exact_computation_fallback
+        && params.use_ccd && !params.use_ticcd && !params.use_ogc;
     // SIMD gathers private AoS batches with or without contacts. Coloring
     // keeps each batch's inputs fixed while independent vertices update.
     // The scalar v2 path retains its collective color prepass.
@@ -2569,7 +2580,7 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
             const Vec3 proposed = proposed_position(vi, rejections, cooperative);
             per_vertex_safe_step(broad_phase, xnew, vi, proposed,
                 0.9, params.use_ogc ? false : params.use_ccd,
-                params.use_ticcd, params.use_ogc, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2);
+                params.use_ticcd, params.use_ogc, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2, params.ccd_exact_step_bound);
           };
           // Prepared batches have an enclosing catch which can roll back the
           // failed color. Standalone callbacks must never escape a worker.
@@ -2763,7 +2774,8 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
                   const Vec3 next = proposed.cwiseMax(lo).cwiseMin(hi);
                   contact_sweep.steps[vi] = next - xnew[vi];
                   contact_sweep.nonzero_step[vi] =
-                      !(contact_sweep.steps[vi].squaredNorm() < 1e-28);
+                      validate_cooperative_step ? !(next.array() == xnew[vi].array()).all()
+                      : !(contact_sweep.steps[vi].squaredNorm() < 1e-28);
                   contact_sweep.short_step[vi]=params.d_hat>1e-8 && std::isfinite(dh2) && contact_sweep.steps[vi].squaredNorm()<dh2/16.0;
                 }
               };
@@ -2808,7 +2820,13 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
                 const auto consider=[&](int j){collision=true;toi=std::min(toi,values[j].toi);};
                 solver_detail::for_active_contact(mask,count,consider);
                 double step = collision ? 0.9 * toi : 1.0;
-                xnew[vi] = xnew[vi] + step * contact_sweep.steps[vi];
+                if (validate_cooperative_step)
+                    safe_step_detail::commit_vertex_ccd_step(broad_phase, xnew, vi,
+                        contact_sweep.steps[vi], step,
+                        solver_detail::active_contact_task_group != nullptr, nullptr,
+                        params.exact_computation_fallback_2, params.ccd_exact_step_bound);
+                else
+                    xnew[vi] = xnew[vi] + step * contact_sweep.steps[vi];
               };
           if (use_v2_simd) {
               // Reuse the team while the contact set and color layout are fixed.
@@ -2824,11 +2842,11 @@ SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref
               };
               contact_sweep.run_assigned(color_groups, compute, apply, process_vertex, ccd,
                   commit, prepare_color_derivatives, compute_assigned, process_vertex_batch, sweeps,
-                  ccd_candidates);
+                  ccd_candidates, validate_cooperative_step);
               iter += sweeps - 1;
           } else
               contact_sweep.run(color_groups, compute, apply, process_vertex, ccd,
-                  commit, prepare_color_derivatives);
+                  commit, prepare_color_derivatives, validate_cooperative_step);
         } else if (params.use_parallel) {
           // Fixed-iteration collision-free and friction solves can reuse one
           // team until the next node-box rebuild. Keep every color barrier,
@@ -3079,6 +3097,8 @@ SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, co
     const bool use_contact_sweep = params.use_parallel && omp_get_max_threads() > 1
         && params.friction_coefficient == 0.0 && params.d_hat > 0.0
         && !params.use_ogc;
+    const bool validate_cooperative_step = params.exact_computation_fallback
+        && params.use_ccd && !params.use_ticcd && !params.use_ogc;
     if (use_contact_sweep) contact_steps.resize(nv);
     std::vector<std::size_t> vertex_costs(nv, 1);
 
@@ -3137,7 +3157,7 @@ SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, co
         }
 
         const auto proposed_position = [&](int vi) -> Vec3 { return xnew[vi] - params.damping * gs_vertex_delta_live_barrier(vi, ref_mesh, adj, pins, params, xhat, xnew, broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads, previous_positions); };
-        const auto process_vertex = [&](int vi) { per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi), 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc, false, nullptr, params.exact_computation_fallback, params.exact_computation_fallback_2); };
+        const auto process_vertex = [&](int vi) { per_vertex_safe_step(broad_phase, xnew, vi, proposed_position(vi), 0.9, params.use_ogc ? false : params.use_ccd, params.use_ticcd, params.use_ogc, false, nullptr, params.exact_computation_fallback, params.exact_computation_fallback_2, params.ccd_exact_step_bound); };
         if (use_contact_sweep) {
             const auto &cache = broad_phase.cache();
             const double dh2 = params.d_hat * params.d_hat,
@@ -3203,7 +3223,8 @@ SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, co
                     const Vec3 next = proposed.cwiseMax(lo).cwiseMin(hi);
                     contact_steps.steps[vi] = next - xnew[vi];
                     contact_steps.nonzero_step[vi] =
-                        !(contact_steps.steps[vi].squaredNorm() < 1e-28);
+                        validate_cooperative_step ? !(next.array() == xnew[vi].array()).all()
+                        : !(contact_steps.steps[vi].squaredNorm() < 1e-28);
                     contact_steps.short_step[vi]=params.d_hat>1e-8 && std::isfinite(dh2) && contact_steps.steps[vi].squaredNorm()<dh2/16.0;
                   }
                 };
@@ -3247,10 +3268,16 @@ SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, co
                   const auto consider=[&](int j){collision=true;toi=std::min(toi,values[j].toi);};
                   solver_detail::for_active_contact(mask,count,consider);
                   double step = collision ? 0.9 * toi : 1.0;
-                  xnew[vi] = xnew[vi] + step * contact_steps.steps[vi];
+                  if (validate_cooperative_step)
+                      safe_step_detail::commit_vertex_ccd_step(broad_phase, xnew, vi,
+                          contact_steps.steps[vi], step,
+                          solver_detail::active_contact_task_group != nullptr, nullptr,
+                          params.exact_computation_fallback_2, params.ccd_exact_step_bound);
+                  else
+                      xnew[vi] = xnew[vi] + step * contact_steps.steps[vi];
                 };
             contact_sweep.run(grid_schedule, compute, apply, process_vertex, ccd,
-                              commit);
+                              commit, false, validate_cooperative_step);
         } else {
             grid_schedule.run(params.use_parallel, process_vertex);
         }
@@ -4604,7 +4631,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
                     &deformable_workspace.rest_shape_grads, previous_positions, rejections);
             }();
             const Vec3 proposed_position = xnew[node] - params.damping * delta;
-            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2);
+            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2, params.ccd_exact_step_bound);
         };
 
         const auto process_solid_node = [&](const int solid, bool cooperative = false) {
@@ -4612,7 +4639,7 @@ SolverResult global_gauss_seidel_solver_basic_general(
             thread_local safe_step_detail::VertexAabbRejections scratch;
             auto* rejections = params.use_ccd && params.d_hat > 1e-8 ? &scratch : nullptr;
             const Vec3 proposed_position = xnew[node] - params.damping * gs_solid_vertex_delta_live_barrier(node, ref_mesh, pins, params, xhat, xnew, broad_phase, mixed_adjacency_workspace.solid_node_mask, mixed_adjacency_workspace.surface_node_mask, pin_map, previous_positions, cooperative, rejections, prepared_solid);
-            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2);
+            per_vertex_safe_step(broad_phase, xnew, node, proposed_position, 0.9, params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2, params.ccd_exact_step_bound);
         };
 
         // COM and orientation remain one indivisible update block: all proxy
@@ -5051,7 +5078,7 @@ SolverResult global_gauss_seidel_solver_general_experimental_v2(
                 const Vec3 delta = matrix3d_inverse(systems[i].hessian) * systems[i].gradient;
                 const Vec3 target = xnew[node] - params.damping * delta;
                 per_vertex_safe_step(broad_phase, xnew, node, target, 0.9,
-                    params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2);
+                    params.use_ccd, params.use_ticcd, false, cooperative, rejections, params.exact_computation_fallback, params.exact_computation_fallback_2, params.ccd_exact_step_bound);
             }
         };
         const auto snapshot_simd_batch = [&](int item, bool restore) {

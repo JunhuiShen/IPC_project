@@ -17,6 +17,16 @@ struct VertexAabbRejections {
     std::vector<unsigned char> clear;
     double distance = 0.0;
 };
+
+// Commit a box-clipped, ordinary-CCD-approved step in exact-fallback mode.
+// The caller must finish all ordinary contact checks first and keep pair
+// positions fixed until this joined validation returns. This does not repeat
+// CCD or box clipping; it shares the normal safe step's endpoint safeguards.
+double commit_vertex_ccd_step(
+    const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi,
+    const Vec3& clipped_displacement, double ccd_step,
+    bool cooperative = false, const VertexAabbRejections* rejections = nullptr,
+    bool exact_computation_fallback_2 = true, bool ccd_exact_step_bound = false);
 } // namespace safe_step_detail
 
 // Returns gamma_p times the minimum incident NT/SS distance.
@@ -30,12 +40,15 @@ double compute_trust_region_bound_for_vertex(int vi, const std::vector<Vec3>& x,
 // Near-contact rounded endpoints and their full paths are checked exactly.
 // Exact initial contact without side history is rejected explicitly; this
 // routine cannot repair an initially intersecting/singular barrier state.
+// ccd_exact_step_bound tries a direct exact separating-plane gap bound before
+// backtracking, with the same exact checks for the rounded endpoint and path.
 double per_vertex_safe_step(
     const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi,
     const Vec3& raw_proposed_position, double safety = 0.9, bool clip_ccd = true,
     bool use_ticcd = true, bool use_ogc = false, bool cooperative = false,
     const safe_step_detail::VertexAabbRejections* rejections = nullptr,
-    bool exact_computation_fallback = true, bool exact_computation_fallback_2 = true);
+    bool exact_computation_fallback = true, bool exact_computation_fallback_2 = true,
+    bool ccd_exact_step_bound = false);
 
 // Returns a safe alpha for translating rigid body rb by alpha * dx using linear CCD.
 double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& dx, double safety = 0.9, bool cooperative = false, bool original = false);

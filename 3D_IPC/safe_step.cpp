@@ -575,12 +575,135 @@ static bool vertex_contact_endpoints_are_safe(const BroadPhase::Cache& cache,
     });
 }
 
+// Propose a step only for contacts that reject the original endpoint. Other
+// contacts may still become limiting after shortening, so this is NEVER an
+// acceptance test: the caller rechecks every contact at the rounded candidate.
+template <bool optimized>
+static double vertex_contact_direct_step_fraction(const BroadPhase::Cache& cache,
+    const std::vector<Vec3>& x, int vertex, const Vec3& endpoint,
+    std::vector<VertexContactEndpointCache>& scratch, bool cooperative) {
+    const auto& nt = cache.vertex_nt[vertex];
+    const auto& ss = cache.vertex_ss[vertex];
+    const int nt_count = static_cast<int>(nt.size());
+    double fraction = 1.0;
+    ordered_ccd_tasks(nt_count + static_cast<int>(ss.size()), cooperative,
+        [&](int index) {
+            std::array<Vec3, 4> start;
+            int dof;
+            const bool face = index < nt_count;
+            if (face) {
+                const auto& entry = nt[index];
+                const auto& pair = cache.nt_pairs[entry.pair_index];
+                start = {x[pair.node], x[pair.tri_v[0]], x[pair.tri_v[1]], x[pair.tri_v[2]]};
+                dof = entry.dof;
+            } else {
+                const auto& entry = ss[index - nt_count];
+                const auto& pair = cache.ss_pairs[entry.pair_index];
+                start = {x[pair.v[0]], x[pair.v[1]], x[pair.v[2]], x[pair.v[3]]};
+                dof = entry.dof;
+            }
+            auto end = start;
+            end[dof] = endpoint;
+            if (vertex_contact_endpoint_is_safe<optimized>(start, end, face,
+                    vertex, dof, &scratch[index])) return CCDResult{};
+            const double bound = exact_contact_separation_step_bound(
+                start, end, face, vertex_contact_gap_floor(start));
+            return CCDResult{true, bound};
+        }, [&](const CCDResult& result) {
+            if (result.collision) fraction = std::min(fraction, result.t);
+        });
+    return fraction;
+}
+
+template <bool optimized_fallback>
+static double commit_vertex_ccd_step_impl(
+    const BroadPhase::Cache& bp_cache, std::vector<Vec3>& x, int vi,
+    const Vec3& dx, double step, bool cooperative,
+    const safe_step_detail::VertexAabbRejections* rejections,
+    bool ccd_exact_step_bound) {
+    const Vec3 before = x[vi];
+    Vec3 accepted = before + step * dx;
+    if (!vertex_contact_endpoints_are_safe<optimized_fallback>(
+            bp_cache, x, vi, accepted, nullptr, rejections, cooperative)) {
+        // Search only within the CCD-approved prefix. Keep a verified endpoint
+        // (not just a floating alpha), validating all contacts for each new
+        // candidate before accepting it.
+        double lower = 0.0, upper = step;
+        Vec3 best = before;
+        Vec3 rejected = accepted;
+        std::vector<VertexContactEndpointCache> scratch(
+            bp_cache.vertex_nt[vi].size() + bp_cache.vertex_ss[vi].size());
+        if (ccd_exact_step_bound) {
+            const double fraction = vertex_contact_direct_step_fraction<optimized_fallback>(
+                bp_cache, x, vi, accepted, scratch, cooperative);
+            if (fraction > 0.0 && fraction < 1.0 && std::isfinite(fraction)) {
+                const double candidate_step = std::nextafter(step * fraction, 0.0);
+                const Vec3 trial = before + candidate_step * dx;
+                if (candidate_step > 0.0 && !(trial.array() == before.array()).all()
+                    && !(trial.array() == accepted.array()).all()
+                    && vertex_contact_endpoints_are_safe<optimized_fallback>(
+                        bp_cache, x, vi, trial, &scratch, rejections, cooperative)) {
+                    x[vi] = trial;
+                    return candidate_step;
+                }
+            }
+            // A fixed separating direction can be too restrictive, and double
+            // endpoint rounding can invalidate its ideal-segment bound. Retain
+            // the ORIGINAL search interval and checks in either case. Zero is
+            // inconclusive here; it must not introduce a new locking rule.
+        }
+        for (int attempt = 0; attempt < 64; ++attempt) {
+            const double middle = lower + 0.5 * (upper - lower);
+            if (middle == lower || middle == upper) break;
+            const Vec3 trial = before + middle * dx;
+            if ((trial.array() == before.array()).all()) {
+                lower = middle;
+            } else if ((trial.array() == rejected.array()).all()) {
+                // Different alphas can round to exactly the same stored
+                // position. Reuse its verdict without changing the search.
+                upper = middle;
+            } else if ((trial.array() == best.array()).all()
+                || vertex_contact_endpoints_are_safe<optimized_fallback>(
+                    bp_cache, x, vi, trial, &scratch, rejections, cooperative)) {
+                lower = middle;
+                best = trial;
+            } else {
+                upper = middle;
+                rejected = trial;
+            }
+        }
+        step = lower;
+        accepted = best;
+    }
+    x[vi] = accepted;
+    if ((accepted.array() == before.array()).all()) return 0.0;
+    return step;
+}
+
+double safe_step_detail::commit_vertex_ccd_step(
+    const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi,
+    const Vec3& clipped_displacement, double ccd_step, bool cooperative,
+    const VertexAabbRejections* rejections, bool exact_computation_fallback_2,
+    bool ccd_exact_step_bound) {
+    if (vi < 0 || static_cast<std::size_t>(vi) >= x.size())
+        throw std::out_of_range("commit_vertex_ccd_step: vertex is out of range");
+    if (!clipped_displacement.allFinite() || !std::isfinite(ccd_step)
+        || ccd_step < 0.0 || ccd_step > 1.0)
+        throw std::invalid_argument("commit_vertex_ccd_step: invalid approved step");
+    if (exact_computation_fallback_2)
+        return commit_vertex_ccd_step_impl<true>(broad_phase.cache(), x, vi,
+            clipped_displacement, ccd_step, cooperative, rejections, ccd_exact_step_bound);
+    return commit_vertex_ccd_step_impl<false>(broad_phase.cache(), x, vi,
+        clipped_displacement, ccd_step, cooperative, rejections, ccd_exact_step_bound);
+}
+
 template <bool optimized_fallback>
 [[gnu::noinline]] static double per_vertex_safe_step_impl(
     const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi,
     double dx0, double dx1, double dx2, double safety, bool clip_ccd,
     bool use_ticcd, bool use_ogc, bool cooperative,
-    const safe_step_detail::VertexAabbRejections* rejections, bool exact_computation_fallback) {
+    const safe_step_detail::VertexAabbRejections* rejections, bool exact_computation_fallback,
+    bool ccd_exact_step_bound) {
     const bool original = !exact_computation_fallback && !use_ticcd;
     const BroadPhase::Cache& bp_cache = broad_phase.cache();
     const Vec3 dx(dx0, dx1, dx2);
@@ -637,42 +760,11 @@ template <bool optimized_fallback>
     double step = use_ogc
         ? toi_min
         : (has_collision ? safety * toi_min : 1.0);
+    if (clip_ccd && !use_ticcd && !use_ogc && !original)
+        return commit_vertex_ccd_step_impl<optimized_fallback>(
+            bp_cache, x, vi, dx, step, cooperative, rejections, ccd_exact_step_bound);
     const Vec3 before = x[vi];
-    Vec3 accepted = before + step * dx;
-    if (clip_ccd && !use_ticcd && !use_ogc && !original
-        && !vertex_contact_endpoints_are_safe<optimized_fallback>(
-            bp_cache, x, vi, accepted, nullptr, rejections, cooperative)) {
-        // Search only within the CCD-approved prefix. Keep a verified endpoint
-        // (not just a floating alpha), validating all contacts for each new
-        // candidate before accepting it.
-        double lower = 0.0, upper = step;
-        Vec3 best = before;
-        Vec3 rejected = accepted;
-        std::vector<VertexContactEndpointCache> scratch(
-            bp_cache.vertex_nt[vi].size() + bp_cache.vertex_ss[vi].size());
-        for (int attempt = 0; attempt < 64; ++attempt) {
-            const double middle = lower + 0.5 * (upper - lower);
-            if (middle == lower || middle == upper) break;
-            const Vec3 trial = before + middle * dx;
-            if ((trial.array() == before.array()).all()) {
-                lower = middle;
-            } else if ((trial.array() == rejected.array()).all()) {
-                // Different alphas can round to exactly the same stored
-                // position. Reuse its verdict without changing the search.
-                upper = middle;
-            } else if ((trial.array() == best.array()).all()
-                || vertex_contact_endpoints_are_safe<optimized_fallback>(
-                    bp_cache, x, vi, trial, &scratch, rejections, cooperative)) {
-                lower = middle;
-                best = trial;
-            } else {
-                upper = middle;
-                rejected = trial;
-            }
-        }
-        step = lower;
-        accepted = best;
-    }
+    const Vec3 accepted = before + step * dx;
     x[vi] = accepted;
     if (original && clip_ccd && !use_ticcd && !use_ogc) return step;
     if ((accepted.array() == before.array()).all()) return 0.0;
@@ -685,7 +777,7 @@ template <bool optimized_fallback>
     const Vec3& raw_proposed_position, double safety, bool clip_ccd,
     bool use_ticcd, bool use_ogc, bool cooperative,
     const safe_step_detail::VertexAabbRejections* rejections, bool exact_computation_fallback,
-    bool exact_computation_fallback_2) {
+    bool exact_computation_fallback_2, bool ccd_exact_step_bound) {
     const BroadPhase::Cache& bp_cache = broad_phase.cache();
     const int nv = static_cast<int>(x.size());
     if (vi < 0 || vi >= nv)
@@ -707,10 +799,10 @@ template <bool optimized_fallback>
     if (exact_computation_fallback && exact_computation_fallback_2)
         return per_vertex_safe_step_impl<true>(broad_phase, x, vi,
             dx[0], dx[1], dx[2], safety, clip_ccd, use_ticcd, use_ogc,
-            cooperative, rejections, exact_computation_fallback);
+            cooperative, rejections, exact_computation_fallback, ccd_exact_step_bound);
     return per_vertex_safe_step_impl<false>(broad_phase, x, vi,
         dx[0], dx[1], dx[2], safety, clip_ccd, use_ticcd, use_ogc,
-        cooperative, rejections, exact_computation_fallback);
+        cooperative, rejections, exact_computation_fallback, ccd_exact_step_bound);
 }
 
 double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& dx, double safety, bool cooperative, bool original) {

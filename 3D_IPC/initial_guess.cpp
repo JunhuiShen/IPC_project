@@ -352,7 +352,8 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
                     const double step = per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
                         /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false,
                         /*use_ogc=*/false, /*cooperative=*/false, nullptr,
-                        params.exact_computation_fallback, params.exact_computation_fallback_2);
+                        params.exact_computation_fallback, params.exact_computation_fallback_2,
+                        params.ccd_exact_step_bound);
                     if (!params.exact_computation_fallback && step > 0.0)
                         preserve_guess_separation(broad_phase.cache(), xnew,
                             vertex, before, required_distances);
@@ -564,7 +565,8 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
                             const double step = per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
                                 /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false,
                                 /*use_ogc=*/false, /*cooperative=*/false, nullptr,
-                                params.exact_computation_fallback, params.exact_computation_fallback_2);
+                                params.exact_computation_fallback, params.exact_computation_fallback_2,
+                                params.ccd_exact_step_bound);
                             if (!params.exact_computation_fallback && step > 0.0)
                                 preserve_guess_separation(broad_phase.cache(), xnew,
                                     vertex, before, required_distances);
@@ -587,7 +589,8 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
                     const double step = per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
                         /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false,
                         /*use_ogc=*/false, /*cooperative=*/false, nullptr,
-                        params.exact_computation_fallback, params.exact_computation_fallback_2);
+                        params.exact_computation_fallback, params.exact_computation_fallback_2,
+                        params.ccd_exact_step_bound);
                     if (!params.exact_computation_fallback && step > 0.0)
                         preserve_guess_separation(broad_phase.cache(), xnew,
                             vertex, before, required_distances);

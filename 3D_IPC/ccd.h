@@ -56,6 +56,17 @@ enum class ExactContactStepResult { Safe, Unsafe, InitialContact };
 ExactContactStepResult exact_contact_step_result(const std::array<Vec3, 4>& start,
     const std::array<Vec3, 4>& end, bool vertex_face, double floor);
 
+// Experimental direct bound from exact closest-feature geometry at start.
+// Returns a fraction in [0,1] along start -> end, with at most one vertex moving.
+// The initial separating direction gives a conservative whole-path gap bound,
+// NOT the largest step allowed by the changing finite-feature distance. A true
+// initial intersection returns zero; invalid inputs throw invalid_argument.
+// The square-root threshold is bounded upward rationally, and the fraction is
+// rounded downward. The caller MUST still validate the actual stored endpoint:
+// rounding its coordinates can change the represented path and endpoint gap.
+double exact_contact_separation_step_bound(const std::array<Vec3, 4>& start,
+    const std::array<Vec3, 4>& end, bool vertex_face, double floor);
+
 // Immutable exact start snapshot for repeated backtracking trials of ONE
 // vertex. Reuse only while all four start positions and the floor stay fixed;
 // each test receives the actual represented position of moving_dof in [0,3].

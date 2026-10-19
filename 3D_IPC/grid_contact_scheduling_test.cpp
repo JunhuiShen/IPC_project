@@ -503,3 +503,135 @@ TEST(ClothGridContactSweep, CallbackFailuresJoinCurrentVertexAndSkipLaterBatches
         EXPECT_EQ(committed[3].load(), 0) << "later batch ran after failure";
     }
 }
+
+TEST(ClothGridContactSweep, CommitHelpersAreOptInAndReusableAcrossVerticesAndBatches) {
+    RestoreOpenMP restore;
+    omp_set_dynamic(0);
+    const auto schedule = make_schedule({{0, 1, 2}, {3, 4}, {5, 6}}, {{0}, {1}, {2}});
+    const auto cache = make_cache({{129, 128}, {0, 0}, {129, 128}, {129, 128},
+                                   {129, 128}, {129, 128}, {129, 128}});
+    const std::vector<std::vector<int>> dependencies = {{}, {0}, {1}, {2}, {3}, {4}, {5}};
+    for (int threads : {2, 4, 8}) {
+        omp_set_num_threads(threads);
+        SyntheticModel expected(cache, dependencies), actual(cache, dependencies);
+        solver_detail::ClothGridContactSweep sweep;
+        sweep.prepare(schedule, cache);
+        ASSERT_EQ(sweep.cooperative_cells.size(), 3u);
+        for (bool cooperative_commit : {false, true, true, false}) {
+            expected.reset_sweep();
+            actual.reset_sweep();
+            run_scalar(schedule, expected);
+            std::atomic<int> helper_commits{0};
+            const auto compute = [&](int v, int j, solver_detail::ContactContribution& value) {
+                return actual.compute(v, j, value);
+            };
+            const auto apply = [&](int v, const solver_detail::ContactContribution* values,
+                                   const solver_detail::ContactMaskWord* mask) { actual.apply(v, values, mask); };
+            const auto baseline = [&](int v) { actual.scalar_vertex(v); };
+            const auto ccd = [&](int v, int j, solver_detail::ContactContribution& value, bool certified) {
+                return actual.ccd(v, j, value, certified);
+            };
+            const auto commit = [&](int v, const solver_detail::ContactContribution* values,
+                                    const solver_detail::ContactMaskWord* mask) {
+                EXPECT_EQ(solver_detail::active_contact_task_group != nullptr, cooperative_commit);
+                if (cooperative_commit) {
+                    if (!solver_detail::active_contact_task_group)
+                        throw std::runtime_error("commit helpers were not installed");
+                    const int leader = omp_get_thread_num();
+                    std::atomic<bool> helper_seen{false};
+                    int sum = 0;
+                    const std::function<void()> leader_work = [&] {
+                        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                        while (!helper_seen.load(std::memory_order_acquire)) {
+                            if (std::chrono::steady_clock::now() >= deadline)
+                                throw std::runtime_error("commit helpers did not participate");
+                            std::this_thread::yield();
+                        }
+                    };
+                    solver_detail::ordered_contact_tasks(257, true,
+                        [&](int j) {
+                            if (omp_get_thread_num() != leader)
+                                helper_seen.store(true, std::memory_order_release);
+                            return j;
+                        }, [&](int value) { sum += value; }, &leader_work);
+                    EXPECT_EQ(sum, 257 * 256 / 2);
+                    EXPECT_TRUE(helper_seen.load());
+                    helper_commits.fetch_add(1, std::memory_order_relaxed);
+                }
+                actual.commit(v, values, mask);
+            };
+            if (cooperative_commit)
+                sweep.run(schedule, compute, apply, baseline, ccd, commit, true, true);
+            else
+                sweep.run(schedule, compute, apply, baseline, ccd, commit);
+            expect_bitwise_equal(expected.x, actual.x);
+            EXPECT_EQ(actual.dependency_violations.load(), 0);
+            EXPECT_EQ(actual.certificate_mismatches.load(), 0);
+            EXPECT_EQ(helper_commits.load(), cooperative_commit ? 6 : 0);
+            EXPECT_EQ(solver_detail::active_contact_task_group, nullptr);
+        }
+    }
+}
+
+TEST(ClothGridContactSweep, CooperativeCommitFailuresJoinHelpersAndAllowReuse) {
+    RestoreOpenMP restore;
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+    const auto schedule = make_schedule({{0, 1, 2}, {3}}, {{0}, {1}});
+    const auto cache = make_cache({{129, 128}, {129, 128}, {129, 128}, {129, 128}});
+    enum class Failure { Compute, Apply, CCD, BeforeDispatch, Helper, AfterDispatch };
+    for (Failure failure : {Failure::Compute, Failure::Apply, Failure::CCD,
+                            Failure::BeforeDispatch, Failure::Helper, Failure::AfterDispatch}) {
+        solver_detail::ClothGridContactSweep sweep;
+        sweep.prepare(schedule, cache);
+        std::array<int, 4> committed{};
+        std::atomic<int> active{0};
+        bool fail = true;
+        const auto run = [&] {
+            sweep.run(schedule,
+                [&](int v, int j, solver_detail::ContactContribution&) {
+                    if (fail && v == 1 && failure == Failure::Compute && j == 17)
+                        throw std::runtime_error("compute before cooperative commit");
+                    return 0u;
+                },
+                [&](int v, const solver_detail::ContactContribution*, const solver_detail::ContactMaskWord*) {
+                    if (fail && v == 1 && failure == Failure::Apply)
+                        throw std::runtime_error("apply before cooperative commit");
+                },
+                [&](int) { throw std::runtime_error("unexpected whole-cell fallback"); },
+                [&](int v, int j, solver_detail::ContactContribution&, bool) {
+                    if (fail && v == 1 && failure == Failure::CCD && j == 17)
+                        throw std::runtime_error("CCD before cooperative commit");
+                    return false;
+                },
+                [&](int v, const solver_detail::ContactContribution*, const solver_detail::ContactMaskWord*) {
+                    if (fail && v == 1 && failure == Failure::BeforeDispatch)
+                        throw std::runtime_error("commit before dispatch");
+                    solver_detail::ordered_contact_tasks(257, true,
+                        [&](int j) {
+                            struct Active {
+                                std::atomic<int>& count;
+                                explicit Active(std::atomic<int>& c) : count(c) { ++count; }
+                                ~Active() { --count; }
+                            } guard(active);
+                            if (fail && v == 1 && failure == Failure::Helper && j == 17)
+                                throw std::runtime_error("commit contact failure");
+                            return j;
+                        }, [](int) {});
+                    if (fail && v == 1 && failure == Failure::AfterDispatch)
+                        throw std::runtime_error("commit after dispatch");
+                    ++committed[v];
+                }, false, true);
+        };
+        EXPECT_THROW(run(), std::runtime_error);
+        EXPECT_EQ(active.load(), 0);
+        EXPECT_EQ(committed, (std::array<int, 4>{1, 0, 0, 0}));
+        EXPECT_EQ(solver_detail::active_contact_task_group, nullptr);
+        committed.fill(0);
+        fail = false;
+        EXPECT_NO_THROW(run());
+        EXPECT_EQ(active.load(), 0);
+        EXPECT_EQ(committed, (std::array<int, 4>{1, 1, 1, 1}));
+        EXPECT_EQ(solver_detail::active_contact_task_group, nullptr);
+    }
+}

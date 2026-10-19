@@ -2908,3 +2908,577 @@ TEST(CCDExactEndpoints, PreparedSnapshotSupportsConcurrentOrdinaryAndCoplanarRea
         }
     }
 }
+
+TEST(CCDExactStepBound, AnalyticFaceApproachStopsAtTheSeparationFloor) {
+    const std::array<Vec3, 4> start{{Vec3(.25, .25, 1),
+        Vec3::Zero(), Vec3::UnitX(), Vec3::UnitY()}};
+    auto end = start;
+    end[0].z() = -1;
+    const double step = exact_contact_separation_step_bound(start, end, true, .25);
+    // The initial unit normal is vertical: 1 - 2*t >= 1/4.
+    EXPECT_GT(step, 0.0);
+    EXPECT_LE(step, .375);
+    EXPECT_NEAR(step, .375, 4 * std::numeric_limits<double>::epsilon());
+    end[0] = start[0] + step * (end[0] - start[0]);
+    EXPECT_EQ(exact_contact_step_result(start, end, true, .25), ExactContactStepResult::Safe);
+    EXPECT_GE(compare_contact_distance_exact(end, true, .25), 0);
+
+    end = start;
+    end[0].z() = 2;
+    EXPECT_DOUBLE_EQ(exact_contact_separation_step_bound(start, end, true, .25), 1.0);
+    end[0] = start[0] + Vec3(.125, 0, 0);
+    EXPECT_DOUBLE_EQ(exact_contact_separation_step_bound(start, end, true, .25), 1.0);
+    EXPECT_DOUBLE_EQ(exact_contact_separation_step_bound(start, start, true, .25), 1.0);
+}
+
+TEST(CCDExactStepBound, AllMovingRolesCoverFaceEdgePointAndParallelClosestFeatures) {
+    struct Fixture { bool face; std::array<Vec3, 4> points; };
+    const std::vector<Fixture> fixtures{
+        {true, {Vec3(.25, .25, 1), Vec3::Zero(), Vec3::UnitX(), Vec3::UnitY()}},
+        {true, {Vec3(.25, 0, 1), Vec3::Zero(), Vec3(.5, 0, 0), Vec3::UnitX()}},
+        {true, {Vec3(0, 0, 1), Vec3::Zero(), Vec3::Zero(), Vec3::Zero()}},
+        {false, {Vec3(-1, 0, 1), Vec3(1, 0, 1), Vec3(0, -1, 0), Vec3(0, 1, 0)}},
+        {false, {Vec3(-1, 0, 1), Vec3(1, 0, 1), Vec3(-1, 0, 0), Vec3(1, 0, 0)}},
+        {false, {Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(-1, 0, 0), Vec3(1, 0, 0)}},
+        {false, {Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3::Zero(), Vec3::Zero()}}
+    };
+    for (std::size_t index = 0; index < fixtures.size(); ++index) {
+        const auto& fixture = fixtures[index];
+        for (int role = 0; role < 4; ++role) {
+            SCOPED_TRACE(::testing::Message() << "fixture=" << index << " role=" << role);
+            const auto& start = fixture.points;
+            auto target = start;
+            target[role].z() += role < (fixture.face ? 1 : 2) ? -2.0 : 2.0;
+            const double step = exact_contact_separation_step_bound(start, target, fixture.face, .125);
+            // Every fixture starts with a vertical gap of one. A moving
+            // support vertex reduces its fixed-normal gap at rate two.
+            EXPECT_GT(step, 0.0);
+            EXPECT_LE(step, .4375);
+            EXPECT_NEAR(step, .4375, 4 * std::numeric_limits<double>::epsilon());
+            for (double fraction : {.5 * step, step}) {
+                auto end = start;
+                end[role] = start[role] + fraction * (target[role] - start[role]);
+                EXPECT_EQ(exact_contact_step_result(start, end, fixture.face, .125),
+                    ExactContactStepResult::Safe);
+                EXPECT_GE(compare_contact_distance_exact(end, fixture.face, .125), 0);
+            }
+        }
+    }
+}
+
+TEST(CCDExactStepBound, IrrationalNormalLengthRoundsTheBoundConservatively) {
+    // The plane is x+y+z=0. Its exact closest displacement is (1,1,1)/3,
+    // so the initial gap is 1/sqrt(3), which binary64 cannot represent.
+    const std::array<Vec3, 4> start{{Vec3(1, 0, 0), Vec3::Zero(),
+        Vec3(2, -2, 0), Vec3(2, 0, -2)}};
+    auto target = start;
+    target[0].x() = -1;
+    const double step = exact_contact_separation_step_bound(start, target, true, .25);
+    const double analytic_step = .5 * (1 - .25 * std::sqrt(3.0));
+    EXPECT_GT(step, 0.0);
+    EXPECT_NEAR(step, analytic_step, 4 * std::numeric_limits<double>::epsilon());
+    using Rational = boost::multiprecision::cpp_rational;
+    const Rational projected_numerator = Rational(1) - 2 * Rational(step);
+    EXPECT_GT(projected_numerator, 0);
+    // This rational inequality independently checks the returned parameter,
+    // including its last bit, without rounding sqrt(3) in the oracle.
+    EXPECT_TRUE(projected_numerator * projected_numerator >= Rational(3) / 16);
+    auto end = start;
+    end[0] = start[0] + step * (target[0] - start[0]);
+    EXPECT_EQ(exact_contact_step_result(start, end, true, .25), ExactContactStepResult::Safe);
+
+    // At a sub-floor irrational gap, preserving the original squared norm
+    // must still allow tangential or separating motion without losing a bit.
+    target = start;
+    target[0].x() = .5;
+    EXPECT_DOUBLE_EQ(exact_contact_separation_step_bound(start, target, true, 1), 0.0);
+    target[0].x() = 2;
+    EXPECT_DOUBLE_EQ(exact_contact_separation_step_bound(start, target, true, 1), 1.0);
+    target[0] = start[0] + Vec3(1, -1, 0);
+    EXPECT_DOUBLE_EQ(exact_contact_separation_step_bound(start, target, true, 1), 1.0);
+}
+
+TEST(CCDExactStepBound, DyadicScaleChangesPreserveTheAnalyticBound) {
+    for (bool segment : {false, true}) {
+        for (int exponent : {-300, 0, 300}) {
+            SCOPED_TRACE(::testing::Message() << "segment=" << segment << " exponent=" << exponent);
+            const double scale = std::ldexp(1.0, exponent);
+            auto points = planar_contact(segment);
+            for (int role = 0; role < (segment ? 2 : 1); ++role) points[role].z() = 1;
+            std::array<Vec3, 4> start;
+            for (int role = 0; role < 4; ++role) start[role] = scale * points[role];
+            auto target = start;
+            target[0].z() = -scale;
+            const double floor = .125 * scale;
+            const double step = exact_contact_separation_step_bound(start, target, !segment, floor);
+            EXPECT_GT(step, 0.0);
+            EXPECT_LE(step, .4375);
+            EXPECT_NEAR(step, .4375, 4 * std::numeric_limits<double>::epsilon());
+            auto end = start;
+            end[0] = start[0] + step * (target[0] - start[0]);
+            EXPECT_EQ(exact_contact_step_result(start, end, !segment, floor), ExactContactStepResult::Safe);
+        }
+    }
+}
+
+TEST(CCDExactStepBound, SubFloorMotionPreservesTheInitialGapAcrossAllRoles) {
+    for (bool segment : {false, true}) {
+        const int split = segment ? 2 : 1;
+        auto points = planar_contact(segment);
+        for (int role = 0; role < split; ++role) points[role].z() = .0625;
+        const std::array<Vec3, 4> start{{points[0], points[1], points[2], points[3]}};
+        for (int role = 0; role < 4; ++role) {
+            SCOPED_TRACE(::testing::Message() << "segment=" << segment << " role=" << role);
+            auto end = start;
+            end[role].z() += role < split ? -.03125 : .03125;
+            EXPECT_DOUBLE_EQ(exact_contact_separation_step_bound(start, end, !segment, .125), 0.0);
+            end = start;
+            end[role].z() += role < split ? .0625 : -.0625;
+            EXPECT_DOUBLE_EQ(exact_contact_separation_step_bound(start, end, !segment, .125), 1.0);
+            EXPECT_EQ(exact_contact_step_result(start, end, !segment, .125), ExactContactStepResult::Safe);
+            end = start;
+            end[role].x() += .125;
+            EXPECT_DOUBLE_EQ(exact_contact_separation_step_bound(start, end, !segment, .125), 1.0);
+            EXPECT_EQ(exact_contact_step_result(start, end, !segment, .125), ExactContactStepResult::Safe);
+        }
+        EXPECT_DOUBLE_EQ(exact_contact_separation_step_bound(start, start, !segment, .125), 1.0);
+    }
+}
+
+TEST(CCDExactStepBound, InitialContactReturnsZeroAndInvalidInputsThrow) {
+    for (bool segment : {false, true}) {
+        const auto points = planar_contact(segment);
+        const std::array<Vec3, 4> touching{{points[0], points[1], points[2], points[3]}};
+        for (int role = 0; role < 4; ++role) {
+            auto end = touching;
+            end[role].z() = 1;
+            EXPECT_DOUBLE_EQ(exact_contact_separation_step_bound(touching, end, !segment, .125), 0.0);
+        }
+        EXPECT_DOUBLE_EQ(exact_contact_separation_step_bound(touching, touching, !segment, .125), 0.0);
+        auto start = touching;
+        start[0].z() = 1;
+        for (double floor : {0.0, -1.0, std::numeric_limits<double>::infinity(),
+                             std::numeric_limits<double>::quiet_NaN()})
+            EXPECT_THROW(exact_contact_separation_step_bound(start, start, !segment, floor),
+                std::invalid_argument);
+        for (double value : {std::numeric_limits<double>::infinity(),
+                             -std::numeric_limits<double>::infinity(),
+                             std::numeric_limits<double>::quiet_NaN()}) {
+            auto bad = start;
+            bad[3].x() = value;
+            EXPECT_THROW(exact_contact_separation_step_bound(bad, start, !segment, .125),
+                std::invalid_argument);
+            EXPECT_THROW(exact_contact_separation_step_bound(start, bad, !segment, .125),
+                std::invalid_argument);
+            EXPECT_THROW(exact_contact_separation_step_bound(bad, bad, !segment, .125),
+                std::invalid_argument);
+        }
+        auto end = start;
+        end[0].z() += 1;
+        end[1].z() += 1;
+        EXPECT_THROW(exact_contact_separation_step_bound(start, end, !segment, .125),
+            std::invalid_argument);
+    }
+}
+
+TEST(CCDSafeStepMargin, ExperimentalExactBoundCertifiesAllRolesAndMatchesCooperativeResults) {
+    struct RestoreThreads {
+        int count = omp_get_max_threads();
+        ~RestoreThreads() { omp_set_num_threads(count); }
+    } restore;
+    for (bool segment : {false, true}) {
+        const int split = segment ? 2 : 1;
+        for (int role = 0; role < 4; ++role) {
+            SCOPED_TRACE(::testing::Message() << "segment=" << segment << " role=" << role);
+            auto initial = planar_contact(segment);
+            for (int index = 0; index < split; ++index) initial[index].z() = 2e-8;
+            BroadPhase phase;
+            prepare_single_vertex_contact(phase, initial, segment, role);
+            auto& cache = phase.mutable_cache();
+            for (std::size_t index = 1; index < 257; ++index) {
+                if (segment) {
+                    cache.ss_pairs.push_back(cache.ss_pairs[0]);
+                    cache.vertex_ss[role].push_back({index, role});
+                } else {
+                    cache.nt_pairs.push_back(cache.nt_pairs[0]);
+                    cache.vertex_nt[role].push_back({index, role});
+                }
+            }
+            Vec3 target = initial[role];
+            target.z() += role < split ? -2e-6 : 2e-6;
+            const std::array<Vec3, 4> start{{initial[0], initial[1], initial[2], initial[3]}};
+            auto serial = initial;
+            const double serial_step = per_vertex_safe_step(phase, serial, role, target,
+                .9, true, false, false, false, nullptr, true, true, true);
+            EXPECT_GT(serial_step, 0.0);
+            EXPECT_LE(serial_step, 1.0);
+            const std::array<Vec3, 4> end{{serial[0], serial[1], serial[2], serial[3]}};
+            EXPECT_EQ(exact_contact_step_result(start, end, !segment, 1e-8), ExactContactStepResult::Safe);
+            omp_set_num_threads(4);
+            auto cooperative = initial;
+            double cooperative_step = -1;
+            solver_detail::for_each_colored_block({{0}}, [](int) { return std::size_t(4096); },
+                [&](int, bool enabled) {
+                    cooperative_step = per_vertex_safe_step(phase, cooperative, role, target,
+                        .9, true, false, false, enabled, nullptr, true, true, true);
+                });
+            EXPECT_EQ(0, std::memcmp(&serial_step, &cooperative_step, sizeof(double)));
+            for (int index = 0; index < 4; ++index) {
+                EXPECT_EQ(0, std::memcmp(serial[index].data(), cooperative[index].data(), 3 * sizeof(double)));
+                if (index != role)
+                    EXPECT_TRUE((serial[index].array() == initial[index].array()).all());
+            }
+        }
+    }
+}
+
+TEST(CCDSafeStepMargin, ExperimentalExactBoundCombinesEveryContactRegardlessOfOrder) {
+    double first_step = -1;
+    Vec3 first_position = Vec3::Zero();
+    for (bool reverse : {false, true}) {
+        std::vector<Vec3> initial{Vec3(.25, .25, 0),
+            Vec3(0, 0, -2e-8), Vec3(1, 0, -2e-8), Vec3(0, 1, -2e-8),
+            Vec3(0, 0, -3e-8), Vec3(1, 0, -3e-8), Vec3(0, 1, -3e-8)};
+        BroadPhase phase;
+        auto& cache = phase.mutable_cache();
+        cache.vertex_nt.resize(initial.size());
+        cache.vertex_ss.resize(initial.size());
+        cache.node_boxes.assign(initial.size(), AABB(Vec3::Constant(-4), Vec3::Constant(4)));
+        cache.nt_pairs = {NodeTrianglePair{0, {1, 2, 3}}, NodeTrianglePair{0, {4, 5, 6}}};
+        cache.vertex_nt[0].push_back({reverse ? 1u : 0u, 0});
+        cache.vertex_nt[0].push_back({reverse ? 0u : 1u, 0});
+        auto actual = initial;
+        const double step = per_vertex_safe_step(phase, actual, 0, Vec3(.25, .25, -1e-6),
+            .9, true, false, false, false, nullptr, true, true, true);
+        EXPECT_GT(step, 0.0);
+        EXPECT_LT(step, 1.0);
+        for (int base : {1, 4}) {
+            const std::array<Vec3, 4> start{{initial[0], initial[base], initial[base + 1], initial[base + 2]}};
+            auto end = start;
+            end[0] = actual[0];
+            EXPECT_EQ(exact_contact_step_result(start, end, true, 1e-8), ExactContactStepResult::Safe);
+        }
+        if (!reverse) { first_step = step; first_position = actual[0]; }
+        else {
+            EXPECT_EQ(0, std::memcmp(&step, &first_step, sizeof(double)));
+            EXPECT_EQ(0, std::memcmp(actual[0].data(), first_position.data(), 3 * sizeof(double)));
+        }
+    }
+}
+
+TEST(CCDSafeStepMargin, ExperimentalExactBoundRetainsSubFloorRoundedAndInitialContactSafety) {
+    for (bool segment : {false, true}) {
+        for (int role = 0; role < 4; ++role) {
+            for (double plane : {0.0, 1.0, 1e8}) {
+                SCOPED_TRACE(::testing::Message() << "segment=" << segment << " role=" << role << " plane=" << plane);
+                auto initial = planar_contact(segment);
+                for (auto& point : initial) point.z() = plane;
+                initial[role].z() = plane == 0 ? 5e-9 : std::nextafter(plane, INFINITY);
+                BroadPhase phase;
+                prepare_single_vertex_contact(phase, initial, segment, role);
+                auto actual = initial;
+                Vec3 target = initial[role];
+                target.z() = plane - .5;
+                EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, actual, role, target,
+                    .9, true, false, false, false, nullptr, true, true, true), 0.0);
+                EXPECT_TRUE((actual[role].array() == initial[role].array()).all());
+                target.z() = plane + 1e-4;
+                EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, actual, role, target,
+                    .9, true, false, false, false, nullptr, true, true, true), 1.0);
+                EXPECT_TRUE((actual[role].array() == target.array()).all());
+            }
+            auto touching = planar_contact(segment);
+            const auto before = touching;
+            BroadPhase phase;
+            prepare_single_vertex_contact(phase, touching, segment, role);
+            EXPECT_THROW(per_vertex_safe_step(phase, touching, role, touching[role] + Vec3(0, 0, .1),
+                .9, true, false, false, false, nullptr, true, true, true), std::runtime_error);
+            for (int index = 0; index < 4; ++index)
+                EXPECT_TRUE((touching[index].array() == before[index].array()).all());
+        }
+    }
+}
+
+TEST(CCDSafeStepMargin, PostCcdCommitRetainsTheApprovedFraction) {
+    const std::vector<Vec3> initial{Vec3(.25, .25, 1),
+        Vec3::Zero(), Vec3::UnitX(), Vec3::UnitY()};
+    BroadPhase phase;
+    prepare_single_vertex_contact(phase, initial, false, 0);
+    const Vec3 displacement(0, 0, -2);
+    const auto collision = safe_step_detail::node_triangle_vertex_ccd(
+        phase.cache().nt_pairs[0], 0, 0, initial, displacement, false);
+    ASSERT_TRUE(collision.collision);
+    ASSERT_DOUBLE_EQ(collision.t, .5);
+    // The caller can supply a more conservative prefix than .9 * TOI. The
+    // finalizer must use that prefix, without clipping or applying CCD again.
+    for (double approved : {0.0, .125, .25}) {
+        for (bool optimized : {false, true}) {
+            for (bool direct_bound : {false, true}) {
+                auto actual = initial;
+                const double step = safe_step_detail::commit_vertex_ccd_step(
+                    phase, actual, 0, displacement, approved, false, nullptr,
+                    optimized, direct_bound);
+                EXPECT_DOUBLE_EQ(step, approved);
+                const Vec3 expected = initial[0] + approved * displacement;
+                EXPECT_EQ(0, std::memcmp(actual[0].data(), expected.data(), 3 * sizeof(double)));
+                for (int vertex = 1; vertex < 4; ++vertex)
+                    EXPECT_TRUE((actual[vertex].array() == initial[vertex].array()).all());
+            }
+        }
+    }
+}
+
+TEST(CCDSafeStepMargin, PostCcdCommitMatchesOrdinaryStepAcrossContactRolesAndModes) {
+    for (bool segment : {false, true}) {
+        const int split = segment ? 2 : 1;
+        for (int role = 0; role < 4; ++role) {
+            for (double gap : {5e-9, 2e-8}) {
+                auto initial = planar_contact(segment);
+                for (int vertex = 0; vertex < split; ++vertex) initial[vertex].z() = gap;
+                BroadPhase phase;
+                prepare_single_vertex_contact(phase, initial, segment, role);
+                const std::array<Vec3, 4> start{{initial[0], initial[1], initial[2], initial[3]}};
+                for (bool approaching : {false, true}) {
+                    Vec3 target = initial[role];
+                    target.z() += (role < split ? 1 : -1) * (approaching ? -2e-6 : 2e-6);
+                    const Vec3 displacement = target - initial[role];
+                    const auto collision = segment
+                        ? safe_step_detail::segment_segment_vertex_ccd(
+                            phase.cache().ss_pairs[0], role, role, initial, displacement, false)
+                        : safe_step_detail::node_triangle_vertex_ccd(
+                            phase.cache().nt_pairs[0], role, role, initial, displacement, false);
+                    const double approved = collision.collision ? .9 * collision.t : 1.0;
+                    for (bool optimized : {false, true}) {
+                        for (bool direct_bound : {false, true}) {
+                            SCOPED_TRACE(::testing::Message() << "segment=" << segment
+                                << " role=" << role << " gap=" << gap
+                                << " approaching=" << approaching << " optimized=" << optimized
+                                << " direct_bound=" << direct_bound);
+                            auto expected = initial, actual = initial;
+                            const double ordinary = per_vertex_safe_step(phase, expected, role, target,
+                                .9, true, false, false, false, nullptr, true, optimized, direct_bound);
+                            const double finalized = safe_step_detail::commit_vertex_ccd_step(
+                                phase, actual, role, displacement, approved, false, nullptr,
+                                optimized, direct_bound);
+                            EXPECT_EQ(0, std::memcmp(&finalized, &ordinary, sizeof(double)));
+                            for (int vertex = 0; vertex < 4; ++vertex)
+                                EXPECT_EQ(0, std::memcmp(actual[vertex].data(), expected[vertex].data(),
+                                    3 * sizeof(double))) << "vertex=" << vertex;
+                            const std::array<Vec3, 4> end{{actual[0], actual[1], actual[2], actual[3]}};
+                            EXPECT_EQ(exact_contact_step_result(start, end, !segment, 1e-8),
+                                ExactContactStepResult::Safe);
+                            if (approaching) EXPECT_LT(finalized, approved);
+                            else EXPECT_DOUBLE_EQ(finalized, 1.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(CCDSafeStepMargin, DisabledExactModeKeepsItsOrdinaryCcdEndpoint) {
+    const std::vector<Vec3> initial{Vec3(.25, .25, 2e-8),
+        Vec3::Zero(), Vec3::UnitX(), Vec3::UnitY()};
+    const Vec3 target(.25, .25, 5e-9);
+    BroadPhase phase;
+    prepare_single_vertex_contact(phase, initial, false, 0);
+    const Vec3 expected = initial[0] + (target - initial[0]);
+    for (bool optimized : {false, true}) {
+        auto actual = initial;
+        const double step = per_vertex_safe_step(phase, actual, 0, target,
+            .9, true, false, false, false, nullptr, false, optimized, false);
+        EXPECT_DOUBLE_EQ(step, 1.0);
+        EXPECT_EQ(0, std::memcmp(actual[0].data(), expected.data(), 3 * sizeof(double)));
+        EXPECT_LT(actual[0].z(), 1e-8);
+        EXPECT_GT(actual[0].z(), 0.0);
+    }
+}
+
+TEST(CCDSafeStepMargin, ExperimentalExactBoundRechecksPreviouslySafeContactsBeforeAcceptance) {
+    constexpr double floor = 1e-8;
+    const std::vector<Vec3> initial{Vec3(-4 * floor, 0, 0),
+        Vec3(0, -1, -1), Vec3(0, 1, -1), Vec3(0, 0, 1),
+        Vec3(-floor, .5 * floor, 0), Vec3(-floor, .5 * floor, 0),
+        Vec3(-floor, .5 * floor, 0)};
+    const Vec3 target = Vec3::Zero();
+    const std::array<Vec3, 4> wall{{initial[0], initial[1], initial[2], initial[3]}};
+    const std::array<Vec3, 4> point{{initial[0], initial[4], initial[5], initial[6]}};
+    auto wall_end = wall;
+    auto point_end = point;
+    wall_end[0] = target;
+    point_end[0] = target;
+    ASSERT_EQ(exact_contact_step_result(wall, wall_end, true, floor), ExactContactStepResult::Unsafe);
+    ASSERT_EQ(exact_contact_step_result(point, point_end, true, floor), ExactContactStepResult::Safe);
+    const double fraction = exact_contact_separation_step_bound(wall, wall_end, true, floor);
+    ASSERT_GT(fraction, 0.0);
+    ASSERT_LT(fraction, 1.0);
+    const double candidate_step = std::nextafter(fraction, 0.0);
+    const Vec3 candidate = initial[0] + candidate_step * (target - initial[0]);
+    wall_end[0] = candidate;
+    point_end[0] = candidate;
+    ASSERT_EQ(exact_contact_step_result(wall, wall_end, true, floor), ExactContactStepResult::Safe);
+    // The original endpoint clears this point by sqrt(1.25)*floor. At the
+    // wall's shortened candidate it passes only half a floor from the point.
+    // Skipping a contact merely because its original endpoint was safe would
+    // therefore approve an unsafe update here.
+    ASSERT_EQ(exact_contact_step_result(point, point_end, true, floor), ExactContactStepResult::Unsafe);
+
+    for (bool optimized : {false, true}) {
+        BroadPhase phase;
+        auto& cache = phase.mutable_cache();
+        cache.vertex_nt.resize(initial.size());
+        cache.vertex_ss.resize(initial.size());
+        cache.node_boxes.assign(initial.size(), AABB(Vec3::Constant(-4), Vec3::Constant(4)));
+        cache.nt_pairs = {NodeTrianglePair{0, {1, 2, 3}}, NodeTrianglePair{0, {4, 5, 6}}};
+        cache.vertex_nt[0] = {{0, 0}, {1, 0}};
+        const Vec3 displacement = target - initial[0];
+        const auto wall_collision = safe_step_detail::node_triangle_vertex_ccd(
+            cache.nt_pairs[0], 0, 0, initial, displacement, false);
+        ASSERT_TRUE(wall_collision.collision);
+        ASSERT_DOUBLE_EQ(wall_collision.t, 1.0);
+        ASSERT_FALSE(safe_step_detail::node_triangle_vertex_ccd(
+            cache.nt_pairs[1], 0, 0, initial, displacement, false).collision);
+        auto original = initial;
+        auto experimental = initial;
+        const double original_step = per_vertex_safe_step(phase, original, 0, target,
+            1.0, true, false, false, false, nullptr, true, optimized, false);
+        const double experimental_step = per_vertex_safe_step(phase, experimental, 0, target,
+            1.0, true, false, false, false, nullptr, true, optimized, true);
+        auto finalized = initial;
+        const double finalized_step = safe_step_detail::commit_vertex_ccd_step(
+            phase, finalized, 0, displacement, 1.0, false, nullptr, optimized, true);
+        EXPECT_GT(experimental_step, 0.0);
+        EXPECT_LT(experimental_step, candidate_step);
+        EXPECT_EQ(0, std::memcmp(&original_step, &experimental_step, sizeof(double)));
+        EXPECT_EQ(0, std::memcmp(&finalized_step, &experimental_step, sizeof(double)));
+        for (std::size_t vertex = 0; vertex < initial.size(); ++vertex) {
+            EXPECT_EQ(0, std::memcmp(original[vertex].data(), experimental[vertex].data(), 3 * sizeof(double)));
+            EXPECT_EQ(0, std::memcmp(finalized[vertex].data(), experimental[vertex].data(), 3 * sizeof(double)));
+        }
+        wall_end[0] = experimental[0];
+        point_end[0] = experimental[0];
+        EXPECT_EQ(exact_contact_step_result(wall, wall_end, true, floor), ExactContactStepResult::Safe);
+        EXPECT_EQ(exact_contact_step_result(point, point_end, true, floor), ExactContactStepResult::Safe);
+    }
+}
+
+TEST(CCDIntegration, BasicV2SplitCommitPreservesTheExactFloorAcrossRepeatedSweeps) {
+    struct RestoreOpenMPSettings {
+        const int threads = omp_get_max_threads(), dynamic = omp_get_dynamic();
+        ~RestoreOpenMPSettings() { omp_set_num_threads(threads); omp_set_dynamic(dynamic); }
+    } restore;
+    omp_set_dynamic(0);
+    constexpr int contacts = 257;
+    const std::vector<Vec3> initial{Vec3(.25, .25, 2e-8),
+        Vec3::Zero(), Vec3::UnitX(), Vec3::UnitY()};
+    RefMesh mesh;
+    mesh.num_positions = initial.size();
+    mesh.mass.assign(initial.size(), 1.0);
+    mesh.node_to_rb.assign(initial.size(), -1);
+    // Repeated copies share triangle vertices, so only the isolated point
+    // acquires contacts: no coincident, nonincident surface pairs are added.
+    // This keeps the solver fixture small while exceeding both helper grains.
+    for (int contact = 0; contact < contacts; ++contact)
+        mesh.tris.insert(mesh.tris.end(), {1, 2, 3});
+    mesh.compute_dm_inverse(initial);
+    mesh.build_deformable_nodes();
+    const auto adjacency = build_incident_triangle_map(mesh.tris);
+    const std::vector<Pin> pins;
+    const std::vector<Vec3> velocities(initial.size(), Vec3::Zero());
+    auto predicted = initial;
+    predicted[0].z() = -2e-6;
+    for (bool simd : {false, true}) {
+        for (int mode : {0, 1, 2}) {
+            std::vector<Vec3> serial;
+            for (int threads : {1, 4}) {
+                SCOPED_TRACE(::testing::Message() << "simd=" << simd
+                    << " mode=" << mode << " threads=" << threads);
+                omp_set_num_threads(threads);
+                SimParams params = SimParams::zeros();
+                params.use_parallel = true;
+                params.use_basic_experimental = true;
+                params.use_basic_experimental_v2 = true;
+                params.use_simd = simd;
+                params.use_ccd = true;
+                params.use_ticcd = false;
+                params.use_ccd_guess = false;
+                params.exact_computation_fallback = mode != 0;
+                params.ccd_exact_step_bound = mode == 2;
+                params.d_hat = 1e-3;
+                params.k_barrier = 0.0;
+                params.node_box_min = params.node_box_max = .1;
+                params.max_global_iters = params.node_box_update_count = 2;
+                params.fixed_iters = true;
+                auto actual = initial;
+                BroadPhase phase;
+                const auto result = global_gauss_seidel_solver_basic_experimental_v2(
+                    mesh, adjacency, pins, params, actual, predicted, velocities, phase);
+                ASSERT_TRUE(result.converged);
+                EXPECT_EQ(result.iterations, 2);
+                ASSERT_EQ(phase.cache().vertex_nt[0].size(), contacts);
+                ASSERT_TRUE(phase.cache().vertex_ss[0].empty());
+                if (threads > 1) {
+                    // All four vertices conflict through every NT pair, so
+                    // each color is a singleton and receives the whole team.
+                    solver_detail::ColoredContactSweep scheduled;
+                    scheduled.prepare({{0}, {1}, {2}, {3}}, phase.cache());
+                    ASSERT_EQ(scheduled.assignments[0].vertex, 0);
+                    ASSERT_EQ(scheduled.assignments[0].lanes, threads);
+                }
+                EXPECT_GT(actual[0].z(), 0.0);
+                EXPECT_LT(actual[0].z(), initial[0].z());
+                if (mode == 0) EXPECT_LT(actual[0].z(), 1e-8);
+                else {
+                    const std::array<Vec3, 4> end{{actual[0], actual[1], actual[2], actual[3]}};
+                    EXPECT_GE(compare_contact_distance_exact(end, true, 1e-8), 0);
+                    EXPECT_NEAR(actual[0].z(), 1e-8, 1e-20);
+                }
+                for (int vertex = 1; vertex < 4; ++vertex)
+                    EXPECT_TRUE((actual[vertex].array() == initial[vertex].array()).all());
+                if (threads == 1) serial = actual;
+                else {
+                    for (int vertex = 0; vertex < 4; ++vertex)
+                        EXPECT_EQ(0, std::memcmp(actual[vertex].data(), serial[vertex].data(),
+                            3 * sizeof(double))) << "vertex=" << vertex;
+                }
+            }
+        }
+    }
+}
+
+TEST(CCDIntegration, ExperimentalExactBoundAdvancesClothThroughTheSolver) {
+    IPCArgs3D args;
+    args.substeps = 2;
+    args.max_substep_iters = 5;
+    args.fixed_iters = true;
+    args.use_parallel = false;
+    args.use_ccd = true;
+    args.use_ticcd = false;
+    args.use_ccd_guess = false;
+    args.ccd_exact_step_bound = true;
+    const SimParams params = args.to_sim_params();
+    ASSERT_TRUE(params.ccd_exact_step_bound);
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> material;
+    build_square_mesh(mesh, state, material, 2, 2, 1.0, 1.0, Vec3(-.5, .8, -.5));
+    state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
+    mesh.node_to_rb.assign(state.deformed_positions.size(), -1);
+    mesh.build_deformable_nodes();
+    mesh.build_lumped_mass(params.density, params.thickness);
+    const auto adjacency = build_incident_triangle_map(mesh.tris);
+    const auto initial = state.deformed_positions;
+    std::vector<Pin> pins;
+    BroadPhase broad_phase;
+    const auto result = advance_one_frame(state, mesh, adjacency, pins, params, broad_phase, 1);
+    ASSERT_TRUE(result.converged);
+    EXPECT_EQ(result.iterations, 10);
+    double total_vertical_displacement = 0.0;
+    for (std::size_t vertex = 0; vertex < initial.size(); ++vertex) {
+        EXPECT_TRUE(state.deformed_positions[vertex].allFinite());
+        EXPECT_TRUE(state.velocities[vertex].allFinite());
+        total_vertical_displacement += state.deformed_positions[vertex].y() - initial[vertex].y();
+    }
+    EXPECT_LT(total_vertical_displacement, 0.0);
+}

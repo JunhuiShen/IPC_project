@@ -68,6 +68,7 @@ struct IPCArgs3D : ArgParser {
     double damping                     = 1.0;    
     bool   use_ticcd                   = false;    // true: Tight-Inclusion library | false: self-written linear CCD
     bool   exact_computation_fallback  = true;
+    bool   ccd_exact_step_bound        = false;
 
     // --- scene selection ---
     int         example      = 1;   // Built-in scene ID
@@ -207,6 +208,7 @@ struct IPCArgs3D : ArgParser {
         add_double("damping",                  damping,                  1.0,   "Newton-step damping used by deformable and rigid solvers; <1 can stabilize an update");
         add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
         add_bool  ("exact_computation_fallback", exact_computation_fallback, true, "Enable additional exact-arithmetic CCD/contact fallbacks, matching barrier/friction calculations, and colored-predictor path checks (default: true)");
+        add_bool  ("ccd_exact_step_bound", ccd_exact_step_bound, false, "Experimental direct exact separating-plane gap bound before legacy backtracking; requires exact fallback with linear CCD and OGC disabled (default: false)");
 
         add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=twenty_polygon_stack, 8=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 9=dynamic_bolt_into_fixed_nut, 10=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 11=cloth_unrolling_down_fixed_ramp, 12=oscillating_cloth_layers, 13=wrecking_ball, 14=cloth_cylinder_drop, 15=200_sheet_cylinder_drop");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
@@ -400,6 +402,8 @@ struct IPCArgs3D : ArgParser {
         p.use_ticcd = use_ticcd;
         p.exact_computation_fallback = exact_computation_fallback;
         p.exact_computation_fallback_2 = exact_computation_fallback;
+        p.ccd_exact_step_bound = ccd_exact_step_bound;
+        p.validate_ccd_exact_step_bound_parameters();
         p.validate_colored_ccd_guess_parameters();
         p.validate_cloth_grid_parameters();
         return p;

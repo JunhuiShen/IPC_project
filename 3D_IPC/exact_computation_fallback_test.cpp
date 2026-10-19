@@ -231,3 +231,48 @@ TEST(ExactComputationFallbackCLI, TightInclusionRemainsIndependent) {
         EXPECT_FALSE(params.use_original_linear_ccd());
     }
 }
+
+TEST(CCDExactStepBoundCLI, DefaultsOff) {
+    EXPECT_FALSE(SimParams::zeros().ccd_exact_step_bound);
+    IPCArgs3D args;
+    ASSERT_TRUE(parse_flags(args, {"3D_sim"}));
+    EXPECT_FALSE(args.ccd_exact_step_bound);
+    EXPECT_FALSE(args.to_sim_params().ccd_exact_step_bound);
+}
+
+TEST(CCDExactStepBoundCLI, ExplicitOnSelectsTheExperiment) {
+    IPCArgs3D args;
+    ASSERT_TRUE(parse_flags(args, {"3D_sim", "--ccd_exact_step_bound", "true"}));
+    const auto params = args.to_sim_params();
+    EXPECT_TRUE(params.ccd_exact_step_bound);
+    EXPECT_TRUE(params.exact_computation_fallback);
+    EXPECT_TRUE(params.exact_computation_fallback_2);
+    EXPECT_FALSE(params.use_ticcd);
+    EXPECT_FALSE(params.use_ogc);
+    EXPECT_FALSE(params.use_ogc_solver);
+}
+
+TEST(CCDExactStepBoundCLI, ExplicitOffPreservesOtherModes) {
+    for (const auto* flag : {"--exact_computation_fallback", "--use_ticcd", "--use_ogc", "--use_ogc_solver"}) {
+        SCOPED_TRACE(flag);
+        IPCArgs3D args;
+        ASSERT_TRUE(parse_flags(args, {"3D_sim", "--ccd_exact_step_bound", "false",
+            flag, std::string(flag) == "--exact_computation_fallback" ? "false" : "true"}));
+        EXPECT_FALSE(args.to_sim_params().ccd_exact_step_bound);
+    }
+}
+
+TEST(CCDExactStepBoundCLI, RejectsIncompatibleModes) {
+    for (const auto* flag : {"--exact_computation_fallback", "--use_ticcd", "--use_ogc", "--use_ogc_solver"}) {
+        SCOPED_TRACE(flag);
+        IPCArgs3D args;
+        ASSERT_TRUE(parse_flags(args, {"3D_sim", "--ccd_exact_step_bound", "true",
+            flag, std::string(flag) == "--exact_computation_fallback" ? "false" : "true"}));
+        EXPECT_THROW(args.to_sim_params(), std::invalid_argument);
+    }
+}
+
+TEST(CCDExactStepBoundCLI, RejectsInvalidBoolean) {
+    IPCArgs3D args;
+    EXPECT_FALSE(parse_flags(args, {"3D_sim", "--ccd_exact_step_bound", "sometimes"}));
+}
