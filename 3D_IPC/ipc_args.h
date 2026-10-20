@@ -52,6 +52,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_colored_ccd_guess = false;
     bool   use_colored_ccd_guess_level_based = false;
     int    colored_ccd_guess_iters = 10;
+    double colored_ccd_guess_fraction = 1.0;
     bool   use_verlet_guess = false;
     bool   use_translation_guess = false;
     bool   use_ogc = false;
@@ -192,6 +193,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_colored_ccd_guess", use_colored_ccd_guess, false, "Cloth/solid: original collision-colored linear CCD initial guess toward xhat; mutually exclusive with use_colored_ccd_guess_level_based; rigid bodies stay fixed; overrides CCD, Verlet, and translation guess flags, but is ignored with use_ogc or use_ogc_solver");
         add_bool  ("use_colored_ccd_guess_level_based", use_colored_ccd_guess_level_based, false, "Cloth/solid: level-based colored CCD toward xhat, with one discarded trial sweep to build levels; mutually exclusive with use_colored_ccd_guess; rigid bodies stay fixed; overrides CCD, Verlet, and translation guess flags, but is ignored with use_ogc or use_ogc_solver");
         add_int   ("colored_ccd_guess_iters", colored_ccd_guess_iters, 10, "Maximum actual updating sweeps for either colored CCD initial guess; excludes the level-based trial sweep (0 skips trial and updates)");
+        add_double("colored_ccd_guess_fraction", colored_ccd_guess_fraction, 1.0, "Fixed target fraction of xhat minus current positions for either colored CCD initial guess, finite in [0, 1]; applied once before sweeps and the level trial; does not change the solver's xhat");
         add_bool  ("use_verlet_guess", use_verlet_guess, false, "Start GS from xhat + dt^2*gravity (Verlet predictor)");
         add_bool  ("use_translation_guess", use_translation_guess, false, "Start GS from x^n + C");
         add_bool  ("use_ogc", use_ogc, false, "Use trust-region narrow phase instead of CCD for step clamping");
@@ -385,6 +387,7 @@ struct IPCArgs3D : ArgParser {
         p.use_colored_ccd_guess = use_colored_ccd_guess;
         p.use_colored_ccd_guess_level_based = use_colored_ccd_guess_level_based;
         p.colored_ccd_guess_iters = colored_ccd_guess_iters;
+        p.colored_ccd_guess_fraction = colored_ccd_guess_fraction;
         p.use_verlet_guess = use_verlet_guess;
         p.use_ogc = use_ogc;
         p.use_ogc_solver = use_ogc_solver;

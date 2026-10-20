@@ -63,6 +63,7 @@ struct SimParams {
     bool   use_colored_ccd_guess; // cloth/solid: collision-colored linear CCD toward xhat; rigid proxies fixed; OGC takes priority
     bool   use_colored_ccd_guess_level_based; // alternative: discarded trial sweep, then level/color-ordered CCD
     int    colored_ccd_guess_iters; // actual updating sweeps for either colored guess; excludes level trial (0 keeps x^n)
+    double colored_ccd_guess_fraction; // fraction of xhat-x^n used only for either colored predictor's fixed target
     bool   use_verlet_guess;     // if true, start GS from xhat + dt²*gravity (Verlet predictor)
     bool   use_translation_guess;        // if true, start GS from x^n + C
     bool   use_ogc;     // if true, use trust_region_initial_guess instead of CCD
@@ -124,6 +125,7 @@ struct SimParams {
         p.use_colored_ccd_guess     = false;
         p.use_colored_ccd_guess_level_based = false;
         p.colored_ccd_guess_iters   = 10;
+        p.colored_ccd_guess_fraction = 1.0;
         p.use_translation_guess             = false;
         p.use_verlet_guess          = false;
         p.use_ogc          = false;
@@ -156,6 +158,9 @@ struct SimParams {
     void validate_colored_ccd_guess_parameters() const {
         if (use_colored_ccd_guess && use_colored_ccd_guess_level_based)
             throw std::invalid_argument("Choose only one of --use_colored_ccd_guess and --use_colored_ccd_guess_level_based");
+        if (!std::isfinite(colored_ccd_guess_fraction)
+            || colored_ccd_guess_fraction < 0.0 || colored_ccd_guess_fraction > 1.0)
+            throw std::invalid_argument("--colored_ccd_guess_fraction must be finite and in [0, 1]");
         if (!use_colored_ccd_guess && !use_colored_ccd_guess_level_based) return;
         if (colored_ccd_guess_iters < 0)
             throw std::invalid_argument("--colored_ccd_guess_iters must be nonnegative (0 keeps the current positions)");

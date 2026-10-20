@@ -171,8 +171,12 @@ inline SolverResult advance_one_frame_general(
             && !params.use_ogc && !params.use_ogc_solver) {
             std::vector<Vec3> intended_displacement(nv, Vec3::Zero());
             for (int node = 0; node < nv; ++node) {
-                if (ref_mesh.node_to_rb[node] < 0)
+                if (ref_mesh.node_to_rb[node] < 0) {
                     intended_displacement[node] = xhat[node] - state.deformed_positions[node];
+                    // Scale the predictor target once; retain the solver's xhat.
+                    if (params.colored_ccd_guess_fraction != 1.0)
+                        intended_displacement[node] *= params.colored_ccd_guess_fraction;
+                }
             }
             const auto colored_guess = params.use_colored_ccd_guess_level_based
                 ? collision_colored_ccd_initial_guess_level_based : collision_colored_ccd_initial_guess;
@@ -247,12 +251,15 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         if (params.use_ogc || params.use_ogc_solver)
             xnew = state.deformed_positions;
         else if (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based) {
-            // xhat is the fixed target for this substep. The colored CCD
-            // helper accepts a displacement and retries its remainder after
-            // each color sweep; do not add another gravity predictor here.
+            // Only the predictor targets a fraction of the displacement to
+            // xhat. Scale once here; every sweep (including the level trial)
+            // retries toward that same target. Keep the solver's xhat intact.
             std::vector<Vec3> intended_displacement(xhat.size());
-            for (std::size_t vertex = 0; vertex < xhat.size(); ++vertex)
+            for (std::size_t vertex = 0; vertex < xhat.size(); ++vertex) {
                 intended_displacement[vertex] = xhat[vertex] - state.deformed_positions[vertex];
+                if (params.colored_ccd_guess_fraction != 1.0)
+                    intended_displacement[vertex] *= params.colored_ccd_guess_fraction;
+            }
             const auto colored_guess = params.use_colored_ccd_guess_level_based
                 ? collision_colored_ccd_initial_guess_level_based : collision_colored_ccd_initial_guess;
             xnew = colored_guess(state.deformed_positions,
