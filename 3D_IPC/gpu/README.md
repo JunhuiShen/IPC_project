@@ -1,166 +1,137 @@
 # CUDA solver for 3D IPC
 
-**`3D_sim_gpu_resident` is the current simulator.** It keeps evolving cloth,
-solid, rigid-body, and contact state and numerical substeps on the GPU,
-including device exact-arithmetic fallbacks. It shares [3D IPC](../README.md)'s
-scene setup, material data, command-line options, and mesh/checkpoint formats.
-The solver is experimental: qualification applies to a particular build,
-configuration, and scene; GPU execution alone establishes no general speedup.
+`3D_sim_gpu_resident` runs cloth, solid, rigid-body and contact updates on the
+GPU. It shares scene definitions, command-line options and output formats with
+[3D IPC](../README.md).
 
 ## Where to start reading
 
-1. [The parent README](../README.md) explains scenes, materials, and outputs.
-2. [CMakeLists.txt](CMakeLists.txt) defines the actual compiled targets and
-   includes three build modules: [GeneratedSources.cmake](cmake/GeneratedSources.cmake)
-   for checked overlays, [Hybrid.cmake](cmake/Hybrid.cmake) for explicit legacy
-   targets, and [Validation.cmake](cmake/Validation.cmake) for optional tests.
-3. [resident_bridge.cpp](resident_bridge.cpp) maps project data and parameters
-   into the resident interfaces.
-4. [resident_solver.cu](resident_solver.cu), especially
-   `ResidentSolver::advance_substep`, shows the full update order.
-5. Follow the stage below into its pipeline and arithmetic headers. Read the
-   corresponding `*_test*` files for supported cases and error behavior.
+1. [The parent README](../README.md) introduces scenes, materials, options and
+   output formats.
+2. [CMakeLists.txt](CMakeLists.txt) defines the compiled targets.
+   [GeneratedSources.cmake](cmake/GeneratedSources.cmake) generates the shared
+   driver overlays; [Validation.cmake](cmake/Validation.cmake) defines the
+   component tests; [Hybrid.cmake](cmake/Hybrid.cmake) holds the legacy targets.
+3. [resident_driver_step.inc](resident_driver_step.inc) and
+   [resident_bridge.cpp](resident_bridge.cpp) show how scene data, prescribed
+   motion and timestep settings reach the GPU solver.
+4. [resident_solver.h](resident_solver.h) defines `SceneDescription`,
+   `StepParameters` and the public solver API. Read `ResidentSolver::advance_substep`
+   in [resident_solver.cu](resident_solver.cu) for the update order described below.
+5. Follow each stage into its pipeline and arithmetic headers using the source
+   map. Corresponding `*_test.cpp` and `*_test.cu` callers show supported inputs,
+   fallback cases and error behavior.
 
 ### Source map
 
 | Area | Files and role |
 |---|---|
-| Driver integration | [resident_driver_step.inc](resident_driver_step.inc) replaces the CPU frame-advance dispatch in generated `simulation_resident.cpp`. |
-| Host/device boundary | [resident_bridge.h](resident_bridge.h), [resident_bridge.cpp](resident_bridge.cpp): `describe_scene`, `describe_step`, prescribed inputs, and `copy_snapshot`. |
-| Persistent solver | [resident_solver.h](resident_solver.h), [resident_solver.cu](resident_solver.cu): state ownership, rebuilds, iteration/color loops, and failure handling. |
-| Elastic assembly | [resident_elastic.h](resident_elastic.h), [resident_elastic.cu](resident_elastic.cu): gather incident records, evaluate, reduce, propose, and commit deformable updates. |
-| Elastic arithmetic | [cloth_math.cuh](cloth_math.cuh), [solid_math.cuh](solid_math.cuh), [rigid_math.cuh](rigid_math.cuh): material gradients, Hessians, and rigid kinematics. |
-| Broad phase and colors | [resident_broadphase.cu](resident_broadphase.cu), [pbgs_coloring.cuh](pbgs_coloring.cuh), [pbgs_label_compaction.cuh](pbgs_label_compaction.cuh): boxes, candidates, graph/color construction, and compact labels. |
-| Contact pipeline | [resident_contact_pipeline.cu](resident_contact_pipeline.cu): gather/fast evaluation, exact queues/retries, and ordered assembly into local systems. |
-| Contact arithmetic | [resident_contact.cuh](resident_contact.cuh), [resident_contact_exact.cuh](resident_contact_exact.cuh), [resident_contact_cooperative.cuh](resident_contact_cooperative.cuh): contact derivatives and scalar/cooperative exact paths. |
-| Compact point tiers | [resident_contact_compact_point.cu](resident_contact_compact_point.cu), [cooperative_compact_point_study.cu](cooperative_compact_point_study.cu), [compact_point_prefix.cuh](compact_point_prefix.cuh), [direct_native_point.cuh](direct_native_point.cuh): guarded point-contact routes with existing fallback queues. |
-| Local solve | [resident_solve.cuh](resident_solve.cuh): `solve3`, including the rank-deficient fallback. |
-| Linear CCD | [resident_linear_pipeline.cu](resident_linear_pipeline.cu), [resident_ccd.cuh](resident_ccd.cuh), [resident_exact.cuh](resident_exact.cuh): clipping certificates and device exact predicates. |
-| Rigid updates | [resident_rigid_pipeline.cu](resident_rigid_pipeline.cu), [resident_rigid_ccd.cuh](resident_rigid_ccd.cuh): translation/orientation proposals, curved-motion CCD, and commits. |
-| Initial guess and boxes | [resident_global_guess.cu](resident_global_guess.cu), [resident_global_guess.cuh](resident_global_guess.cuh), [resident_adaptive_boxes.cu](resident_adaptive_boxes.cu): predictor CCD and movement limits. |
-| Public records | [resident_sdf_types.h](resident_sdf_types.h), [resident_scene_types.h](resident_scene_types.h): plain SDF/scene records used by the host API and numerical callers. |
-| SDFs and storage | [resident_sdf.cuh](resident_sdf.cuh), [resident_scene.h](resident_scene.h), [resident_memory.h](resident_memory.h): obstacle evaluation, complete numerical includes, and device buffers. |
+| Driver integration | [resident_driver_step.inc](resident_driver_step.inc): replaces frame-advance dispatch in generated `simulation_resident.cpp`. |
+| Host/device boundary | [resident_bridge.h](resident_bridge.h), [resident_bridge.cpp](resident_bridge.cpp): scene and step descriptions, prescribed inputs and snapshot transfer. |
+| Persistent solver | [resident_solver.h](resident_solver.h), [resident_solver.cu](resident_solver.cu): device state ownership, rebuilds, iteration/color loops and failure handling. |
+| Elastic assembly | [resident_elastic.h](resident_elastic.h), [resident_elastic.cu](resident_elastic.cu): incident gathers, derivative evaluation, reduction, proposals and deformable commits. |
+| Elastic arithmetic | [cloth_math.cuh](cloth_math.cuh), [solid_math.cuh](solid_math.cuh), [rigid_math.cuh](rigid_math.cuh): material gradients, Hessians and rigid kinematics. |
+| Broad phase and coloring | [resident_broadphase.cu](resident_broadphase.cu), [pbgs_coloring.cuh](pbgs_coloring.cuh), [pbgs_warp_ordered_exact.cuh](pbgs_warp_ordered_exact.cuh), [pbgs_warp_shared_forbidden_exact.cuh](pbgs_warp_shared_forbidden_exact.cuh), [parallel_scene_bounds.cuh](parallel_scene_bounds.cuh), [pbgs_label_compaction.cuh](pbgs_label_compaction.cuh): boxes, parallel scene bounds, candidates, dependency graph, ordered coloring and compact labels. |
+| Contact pipeline | [resident_contact_pipeline.cu](resident_contact_pipeline.cu): gathers, ordinary evaluation, exact queues/retries and ordered assembly into local systems. |
+| Contact arithmetic | [resident_contact.cuh](resident_contact.cuh), [resident_contact_selected_ordinary.cuh](resident_contact_selected_ordinary.cuh), [resident_contact_exact.cuh](resident_contact_exact.cuh), [resident_contact_cooperative.cuh](resident_contact_cooperative.cuh): ordinary derivatives and scalar/cooperative exact paths. |
+| Compact point contacts | [resident_contact_compact_point.cu](resident_contact_compact_point.cu), [cooperative_compact_point_study.cu](cooperative_compact_point_study.cu), [compact_point_prefix.cuh](compact_point_prefix.cuh), [direct_native_point.cuh](direct_native_point.cuh): guarded point-contact routes and fallback queues. |
+| Local solve | [resident_solve.cuh](resident_solve.cuh): `solve3` and its rank-deficient fallback. |
+| Linear CCD | [resident_linear_pipeline.cu](resident_linear_pipeline.cu), [resident_ccd.cuh](resident_ccd.cuh), [resident_exact.cuh](resident_exact.cuh), [resident_direct_bound.cuh](resident_direct_bound.cuh): conservative clipping, exact predicates and optional exact step proposals. |
+| Rigid updates | [resident_rigid_pipeline.cu](resident_rigid_pipeline.cu), [resident_rigid_ccd.cuh](resident_rigid_ccd.cuh): translation/orientation proposals, curved-motion CCD and commits. |
+| Initial guesses and movement boxes | [resident_global_guess.cu](resident_global_guess.cu), [resident_adaptive_boxes.cu](resident_adaptive_boxes.cu), [resident_level_schedule.cu](resident_level_schedule.cu): predictor CCD, movement limits and optional trial/BFS level scheduling. |
+| Scene records, SDFs and buffers | [resident_scene_types.h](resident_scene_types.h), [resident_sdf_types.h](resident_sdf_types.h), [resident_sdf.cuh](resident_sdf.cuh), [resident_scene.h](resident_scene.h), [resident_memory.h](resident_memory.h): public records, obstacle evaluation and device storage. |
 
-Most `.cuh` headers hold device arithmetic; `.cu` files combine kernels and
-launch orchestration. CMake links nine CUDA units into `ipc_resident_solver`, two into
-`ipc_resident_components`, and the C++ bridge into `ipc_resident_bridge`.
-The components library publicly links CUDA runtime and cuSPARSE dependencies.
-
-The public solver header includes the type-only scene boundary rather than the
-SDF evaluator. Record definitions and defaults were moved verbatim; public solver
-signatures and mathematical bodies stay unchanged. Numerical callers can still
-include `resident_scene.h` for its complete evaluator contract. This reduces
-header fanout; it does not establish a compile-time or runtime speedup.
-
-A name containing `study` does **not** mean test-only:
-`cooperative_compact_point_study.cu` is compiled into the resident solver.
-Runtime flags select its use. Active-point/finite-CCD selections are local to
-that unit; the linear pipeline also selects finite-CCD locally. Do not enable selectors
-globally or infer production inclusion from a filename alone.
+Most `.cuh` files contain device arithmetic; `.cu` files contain kernels and
+launch orchestration. The numerical libraries are `ipc_resident_solver` and
+`ipc_resident_components`; `ipc_resident_bridge` connects them to shared scene
+and IO support. `cooperative_compact_point_study.cu` is compiled into the solver
+despite its name; runtime options select its routes.
 
 ## What one substep does
 
 ```text
 generated driver → bridge → ResidentSolver::advance_substep
-  predict/rebuild → colors → elastic + contact → local solve → CCD → commit
-  finish velocities → snapshot → shared mesh/checkpoint output
+  save state / predict / initial guess
+  fixed iterations:
+    rebuild boxes, candidates and colors at the configured interval
+    each color in sequence:
+      elastic + contact → local solve → CCD → commit
+  finish velocities / check status
+snapshot when requested → shared mesh/checkpoint output
 ```
 
-The host loads meshes, builds immutable rest data, supplies prescribed pin/SDF
-motion, allocates storage, and launches work. Positions, velocities, rigid
-poses, gathered records, derivatives, and numerical fallback work stay on the
-device between output snapshots. Counts, launch metadata, and error status
-can still return to the host.
-
-1. Save previous state, predict targets, and apply the requested initial guess.
-   The global cloth guess and colored guess have separate CCD paths.
-2. Rebuild movement boxes, broad-phase candidates, dependency colors, and
-   optional worklists at the configured interval.
+1. Upload prescribed pin/SDF inputs, save previous state and predict targets.
+   Apply the requested global cloth guess or colored guess with its CCD path.
+2. Initialize adaptive movement limits. During the fixed iteration loop,
+   rebuild movement boxes, broad-phase candidates, dependency colors, contact
+   incidence and enabled worklists at the configured interval.
 3. Visit colors **sequentially**. Independent blocks within a color update in
    parallel; later colors see the preceding committed state.
 4. For deformables, `assemble_elastic_color` and
    `ResidentContactPipeline::assemble_color` gather current data, evaluate
-   derivatives, and accumulate incident contributions in their defined order.
-5. `propose_deformable_color` solves `H * delta = gradient`, then proposes
-   `x - damping * delta`. CCD clips the proposal; `commit_deformable_endpoints`
-   copies the accepted represented coordinates.
-6. Rigid translation is assembled, clipped, and committed before a fresh
-   orientation assembly/curved-CCD/commit. The two phases are sequential.
-7. Finish velocities and check device status before exposing a snapshot.
+   derivatives and accumulate contributions in their defined order.
+   `propose_deformable_color` solves `H * delta = gradient` and proposes
+   `x - damping * delta`; CCD clips the proposal before
+   `commit_deformable_endpoints` copies the accepted coordinates.
+5. For rigid bodies, assemble, propose, clip and commit translation first.
+   Then perform a fresh orientation assembly, curved-motion CCD and commit.
+6. Finish velocities, synchronize and check device status. The driver requests
+   snapshots for mesh/checkpoint output.
 
-Preserve this order, fixed budgets, models, signs, clamps, degeneracy behavior,
-and fallback/error contracts. Fixed sweep completion does not prove convergence.
+The host handles scene setup, prescribed inputs, allocation, launch scheduling
+and output. Positions, velocities, rigid poses, gathered records, derivatives
+and numerical fallbacks remain on the device between snapshots. Counts,
+launch metadata and error status can still return to the host.
 
 ### Arithmetic and collision safety
 
-Resident calculations use binary64 and CUDA targets use `--fmad=false`, with
-explicit `fma` calls retained where the source requires them. Do not substitute
-fast math when comparing or qualifying these paths.
+Calculations use binary64 with CUDA `--fmad=false`; explicit source `fma` calls
+are retained. Linear CCD uses conservative floating-point certificates and
+device integer/rational fallback for uncertain queries. Contact geometry has
+separate exact queues and capacity checks. Rigid rotation uses its curved-motion
+CCD path. Exact predicates do not make the entire simulation arbitrary precision.
 
-Linear CCD first uses conservative floating-point certificates; uncertain
-queries enter the existing device integer/rational fallback and retry paths.
-Contact geometry has its own exact-arithmetic queues and capacity checks.
-There is no CPU numerical retry. Exact predicates do not make the entire
-simulation arbitrary precision: square roots, logarithms, derivatives, and
-evolving state still involve rounded floating-point arithmetic.
+Preserve the models, clamps, fixed budgets, contribution order and fallback
+contracts. CCD commits the certified represented endpoint. An unrecoverable
+error invalidates the state and prevents output or reuse of partial updates.
 
-Uncertainty is not permission to accept motion. Commit uses the certified
-rounded endpoint rather than recomputing it. An unrecoverable device error
-invalidates the substep/state and blocks output or reuse of partial updates.
-Rigid rotation retains the existing curved-motion algorithm; linear exact
-predicate tests do not establish a stronger guarantee for that algorithm.
+## Dependencies
 
-## Build and run
+| Dependency | Version / configuration |
+|---|---|
+| CUDA Toolkit | 12.6 used, including CUDA runtime and cuSPARSE |
+| NVIDIA GPU | RTX 6000 Ada used; default CUDA architecture `89` |
+| C++ compiler | C++17; GCC 11 used |
+| CMake | 3.24 or newer |
+| Boost | **1.92.0** |
+| Eigen | **3.4.0** |
+| Tight-Inclusion | **1.0.6** |
+| OpenMP | Required by the shared scene/IO support |
 
-Run the following commands from `3D_IPC/`, the repository root.
+CMake fetches Eigen and Tight-Inclusion. Set `Boost_DIR` to your installed
+Boost 1.92.0 CMake package directory.
 
-### Requirements
+## Build
 
-- CMake 3.24+, a C++17 compiler, and an NVIDIA GPU with a compatible CUDA toolkit.
-- OpenMP, Boost, Eigen, and Tight-Inclusion; see [the main build instructions](../README.md#build-and-test).
-- The tested Linux configuration uses CUDA 12.6, GCC 11, and an RTX 6000 Ada
-  GPU (`sm_89`). Other toolkit/compiler/device combinations need validation.
-
-These commands assume `nvcc` and `g++-11` are on `PATH`; substitute their paths
-when needed. Architecture 89 is also the current CMake default.
+Run from the `3D_IPC/` directory:
 
 ```sh
 cmake -S gpu -B gpu/build -DCMAKE_BUILD_TYPE=Release \
+  -DBoost_DIR=/path/to/boost-1.92.0/lib/cmake/Boost-1.92.0 \
   -DCMAKE_CUDA_COMPILER=nvcc \
   -DCMAKE_CXX_COMPILER=g++-11 -DCMAKE_CUDA_HOST_COMPILER=g++-11 \
   -DCMAKE_CUDA_ARCHITECTURES=89
-cmake --build gpu/build -j 8
+cmake --build gpu/build --target 3D_sim_gpu_resident -j 8
 ```
 
-The ordinary build selects `3D_sim_gpu_resident` and its required libraries and
-host support. Optional test and control targets are excluded from `ALL`.
-An explicit `--target 3D_sim_gpu_resident` selects the same simulator.
-Build and run the resident validation callers separately:
+The shared CPU source defaults to the parent directory. To use another
+compatible checkout, add `-DIPC_CPU_SOURCE=/path/to/3D_IPC`.
+For offline builds, set `FETCHCONTENT_SOURCE_DIR_EIGEN3` and
+`FETCHCONTENT_SOURCE_DIR_TIGHT_INCLUSION` to local dependency directories.
 
-```sh
-cmake --build gpu/build --target gpu_resident_validation -j 8
-ctest --test-dir gpu/build -R '^gpu_resident_' --output-on-failure
-```
+## Run
 
-Initial configuration may fetch dependencies.
-Offline builds can supply
-`FETCHCONTENT_SOURCE_DIR_EIGEN3` and `FETCHCONTENT_SOURCE_DIR_TIGHT_INCLUSION`.
-Use a dedicated Tight-Inclusion source copy: its configuration generates a
-header in that tree.
-
-The selected CPU tree supplies scenes, types, setup, and outputs, not a resident
-numerical fallback. `IPC_CPU_SOURCE` defaults to the parent directory; to select a
-separate compatible checkout, add `-DIPC_CPU_SOURCE=/path/to/compatible/3D_IPC`.
-CMake leaves the selected CPU base unchanged and writes checked driver/solver
-overlays into the build directory. The shared generators require unique
-insertion anchors and write only changed content, so a no-change reconfigure
-preserves generated-source timestamps. [check_overlay.cmake](check_overlay.cmake)
-uses those same generators for its explicit overlay checks. Reconfigure after
-changing the selected CPU source.
-
-### Small resident run
-
-Use a fresh output directory for each run:
+This small Example 1 run uses a 9-by-9 mesh:
 
 ```sh
 OMP_NUM_THREADS=1 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
@@ -175,102 +146,82 @@ OMP_NUM_THREADS=1 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --format geo --outdir results/gpu_resident_smoke
 ```
 
-This writes frame meshes and `state_NNNN.bin` checkpoints, including frame 0.
-The resident driver refuses to replace an existing directory on a fresh run.
-Restart with `--restart_frame N` in the same directory, repeating the original
-scene/material/solver settings; `--num_frames` is the final frame number.
-See [output and restart](../README.md#output-and-restart) for file formats.
+Two optional CPU features also have resident GPU implementations. Both default
+to false. `--use_colored_ccd_guess_level_based true` selects a discarded colored
+CCD trial followed by component/BFS level and color groups. Choose one colored
+mode; either suppresses the global guess and uses `--colored_ccd_guess_iters` actual sweeps.
+To select level mode in the example above, replace `--use_colored_ccd_guess true`
+with `--use_colored_ccd_guess false --use_colored_ccd_guess_level_based true`;
+setting both colored-mode flags is rejected. Zero sweeps performs no trial.
+`--ccd_exact_step_bound true` proposes an exact
+partial step for rejected deformable endpoints. Every proposal still passes
+GPU CCD and rounded-endpoint checks; an inconclusive proposal retains the
+existing conservative fallback. These options keep numerical work on the GPU.
+The GPU's existing conservative CCD can choose different steps from the CPU.
 
-OpenMP controls host work, not CUDA block width. The resident executable selects
-the GPU solver; CPU SIMD/experimental-solver flags do not choose its kernels.
-Keep fixed iteration/substep budgets when comparing configurations.
+Use a new output directory for each fresh run. Output includes frame meshes
+and `state_NNNN.bin` checkpoints, starting at frame 0. Restart in the same
+directory with `--restart_frame N`, preserving the original scene and solver
+settings. `--num_frames` specifies the final frame number.
+See [output and restart](../README.md#output-and-restart).
 
-## Defaults, experiments, and diagnostics
+The resident driver requires fixed iterations, conflict-graph coloring and
+exact fallback. Use `--use_ticcd false`. Colors execute sequentially, with
+independent updates within each color running in parallel. Numerical fallback
+and CCD execute on the GPU; an unrecoverable device error stops the substep.
 
-Scene/solver arguments and `IPC_GPU_*` environment switches are different
-interfaces; leave them unset for quickstart defaults. Selected examples:
-
-| Environment setting | Default / purpose |
-|---|---|
-| `IPC_GPU_COLOR_PAIR_QUEUES` | `1`; per-color contact queues. |
-| `IPC_GPU_COOPERATIVE_EXACT_CONTACT` | `1`; cooperative exact evaluation. |
-| `IPC_GPU_ELASTIC_COLOR_WORKLISTS` | `0`; opt-in stable elastic color worklists. |
-| `IPC_GPU_ELASTIC_NODE_THREADS`, `IPC_GPU_ELASTIC_ELEMENT_THREADS` | `1`, `8` when worklists are enabled; powers of two through 128. |
-| `IPC_GPU_COMPACT_POINT_FIRST_TIER`, `IPC_GPU_COMPACT_POINT_COOPERATIVE`, `IPC_GPU_CONTACT_INPLACE_RATIO` | `0`; optional compact point routing. Cooperative routing also requires the first tier, cooperative exact path, and in-place ratio selection. |
-| `IPC_GPU_COMPACT_DEFORMABLE_CONTACTS`, `IPC_GPU_CONTACT_OUTPUT_ACTIVITY` | `0`; optional compact output/storage behavior. |
-| `IPC_GPU_PROFILE_CSV` | Unset; optional per-frame stage timing CSV at a fresh path. |
-| `IPC_GPU_CONTACT_QUEUE_CSV` | Unset; optional queue diagnostics, including extra count readbacks. |
-
-See [resident_contact_pipeline.cu](resident_contact_pipeline.cu),
-[resident_contact_schedule.h](resident_contact_schedule.h), and
-[resident_elastic.h](resident_elastic.h) for parsing, dependencies, and bounds.
-Options are often captured at object construction; set them before launch.
-Record the complete environment when comparing builds. An opt-in route is
-not automatically the selected or fastest full-solver configuration.
-
-Stage CUDA-event intervals can include idle gaps and overlap host spans; do not
-add these times. Instrumentation adds overhead. Compare full solver times on
-matched representative workloads before attributing application gains to a kernel.
-
-### Studied Example 1 environment
-
-This separate profile controls contact routing/storage, worklists, CCD launches,
-coloring, and host scheduling. It is not enabled by the default quickstart:
+## Validation
 
 ```sh
-export OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE
-export IPC_GPU_COMPACT_DEFORMABLE_CONTACTS=1 IPC_GPU_BOX_CONTACT_PRUNING=1
-export IPC_GPU_GLOBAL_GUESS_CANDIDATES_ONLY=1 IPC_GPU_GLOBAL_GUESS_WORKERS=8192 IPC_GPU_GLOBAL_GUESS_THREADS=32
-export IPC_GPU_ELASTIC_COLOR_WORKLISTS=1 IPC_GPU_CONTACT_OUTPUT_ACTIVITY=1
-export IPC_GPU_CONTACT_PREFETCH_REDUCE=1 IPC_GPU_COOPERATIVE_GEOMETRY_CONVERSIONS=1
-export IPC_GPU_CONTACT_INPLACE_RATIO=1 IPC_GPU_CCD_CURRENT_COLOR_LAUNCH=1
-export IPC_GPU_DEFER_CONTACT_INPUTS=1 IPC_GPU_CANONICAL_POINT_HESSIAN=1
-export IPC_GPU_COLORING=degree IPC_GPU_COMPACT_POINT_FIRST_TIER=1 IPC_GPU_COMPACT_POINT_COOPERATIVE=1
-export OMP_PROC_BIND=close OMP_PLACES=cores
+cmake --build gpu/build --target gpu_resident_validation gpu_resident_core_validation -j 8
+ctest --test-dir gpu/build -R '^gpu_resident_' --output-on-failure
 ```
 
-The first eight exports contain the studied 19 settings; the last records host
-affinity. These flags alone do not reproduce a measured runtime: retain the
-exact build, scene, fixed budgets, and output/checkpoint options with each result.
+The validation targets cover elastic assembly, broad phase, coloring,
+contacts, local solves, CCD, SDFs, exact arithmetic and integrated updates.
 
-The current source includes the active point and finite-CCD selections.
-Compact membrane, guarded bending, and Schur prototypes remain separate;
-the names “compact contact” and “compact membrane” do not mean the same feature.
+## Standalone numerical core
 
-## Supported scope and validation
+To build the CUDA libraries without shared CPU scene/IO support, Boost, Eigen
+or Tight-Inclusion:
 
-The resident path implements cloth, tetrahedral solids, rigid bodies, mixed
-scenes, mesh barriers/friction, and plane/cylinder/sphere SDFs. The bridge
-currently requires fixed iterations, conflict-graph coloring, and exact
-fallback enabled. OGC/grid modes and standalone Verlet/translation guesses
-are rejected. Set `--use_ticcd false`: the per-update Tight-Inclusion backend
-is not the resident linear clipper; the global predictor has its own port.
+```sh
+cmake -S gpu -B gpu/build-core -DCMAKE_BUILD_TYPE=Release \
+  -DIPC_GPU_BUILD_DRIVER=OFF -DIPC_GPU_BUILD_VALIDATION=OFF \
+  -DIPC_GPU_BUILD_HYBRID=OFF \
+  -DCMAKE_CUDA_COMPILER=nvcc \
+  -DCMAKE_CXX_COMPILER=g++-11 -DCMAKE_CUDA_HOST_COMPILER=g++-11 \
+  -DCMAKE_CUDA_ARCHITECTURES=89
+cmake --build gpu/build-core --target gpu_resident_core_validation -j 8
+ctest --test-dir gpu/build-core -R '^gpu_resident_core_smoke$' --output-on-failure
+```
 
-`*_test.cpp` and `*_test.cu` files are component/integration callers, not solver
-entry points. The validation target covers elastic assembly/worklists,
-broad-phase/coloring, contact queues/derivatives, local solves, CCD/exact pools,
-SDFs, initial guesses, and integrated updates. Python `validate*`, `profile*`,
-`analyze*`, and tuning scripts support particular experiments; inspect their
-paths and assumptions before reuse. They do not select the simulator backend.
+This builds `ipc_resident_solver`, `ipc_resident_components` and a public-API
+smoke caller. The shared-scene simulator is built by the normal configuration.
 
-Changes need numerical/source-expression checks, guard/fallback/error cases,
-actual pipeline callers, and appropriate sanitizer coverage. Combined solver
-changes also need representative full runs and collision/physical checks.
-CPU and GPU trajectories need not be bitwise identical. Passing local tests
-or saved-frame collision checks does not prove swept-path or global physical
-acceptance for every scene.
+## Runtime diagnostics
+
+`IPC_GPU_COLORING` selects `greedy` (default), `degree`, `spatial` or `cusparse`.
+The ordered `degree` and `spatial` modes use warp-cooperative coloring with
+shared marks when its palette fits the shared-memory budget; larger palettes
+use global marks. `IPC_GPU_WARP_SHARED_MARKS=0` selects global marks, and
+`IPC_GPU_WARP_ORDERED_COLOR=0` selects serial coloring with the same labels and
+execution order. Scene bounds use parallel reduction, with the original serial
+scan for exceptional coordinates. `IPC_GPU_PARALLEL_SCENE_BOUNDS=0` selects the
+serial scan for all coordinates.
+
+- `IPC_GPU_PROFILE_CSV=/new/path/profile.csv` enables per-frame stage timings.
+- `IPC_GPU_CONTACT_QUEUE_CSV=/new/path/queues.csv` enables contact queue counts.
+
+Set environment options before launching the executable. CUDA stage timings
+measure stream intervals, which can include gaps while the host submits work;
+they are not kernel-active totals. Instrumentation adds overhead, so use
+uninstrumented runs for performance comparisons. Options for contact routing and worklists are parsed in
+[resident_contact_pipeline.cu](resident_contact_pipeline.cu),
+[resident_contact_schedule.h](resident_contact_schedule.h) and
+[resident_elastic.h](resident_elastic.h).
 
 ## Legacy hybrid reference
 
-`3D_sim_gpu` is retained for historical comparison and source reuse. Its
-generated `solver_gpu.cpp` keeps CPU update and safety stages. It is not the
-current solver or part of the ordinary build/run instructions above.
-See [color_bridge.h](color_bridge.h), [general_bridge.cpp](general_bridge.cpp),
-[rigid_bridge.cpp](rigid_bridge.cpp), and the `*_sweep.inc` hooks. Its separate
-`ipc_gpu_hybrid_overlay` archive links ahead of the unchanged CPU base;
-resident targets use that base without this legacy overlay. Shared material
-records and useful legacy implementations remain preserved.
-
-Historical callers can explicitly build `3D_sim_gpu`, `3D_sim_cpu_control`,
-or the `gpu_hybrid_validation` aggregate. None joins ordinary `ALL`.
-Keep results from the resident, hybrid, and CPU-control executables distinct.
+The legacy hybrid executable `3D_sim_gpu` remains available as an explicit
+build target. Use `3D_sim_gpu_resident` for the resident solver.

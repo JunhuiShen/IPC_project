@@ -3,6 +3,7 @@
 #include "resident_profile.h"
 #include "resident_ccd.cuh"
 #include "resident_exact.cuh"
+#include "resident_direct_bound.cuh"
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <stdexcept>
@@ -165,6 +166,109 @@ __global__ void resolve_nodes(DeformableScene scene,DeformableState state,BroadP
     exact::release_pool();
 }
 
+// The optional direct-bound mode gets a separate kernel so its exact-arithmetic
+// liveness cannot enlarge the legacy resolver's registers or stack. A bound
+// proposes one represented endpoint; it never accepts a trajectory itself.
+__host__ __device__ inline bool useful_direct_proposal(double fraction,
+    const double* start,const double* target,const double* trial) {
+    if(!(fraction>0.&&fraction<1.))return false;
+    bool moved=false,different_target=false;
+    for(int k=0;k<3;++k) {
+        moved=moved||trial[k]!=start[k];
+        different_target=different_target||trial[k]!=target[k];
+    }
+    return moved&&different_target;
+}
+
+__device__ bool checked_direct_endpoint(DeformableState state,BroadPhaseView bp,
+    const std::size_t* offsets,const int* indices,int block,int node,
+    const double* trial,const BpAabb& box,int* error) {
+    if(!inside(trial,box))return false;
+    for(auto pair=offsets[block];pair<offsets[block+1];++pair) {
+        const auto q=node_query(bp.contacts[indices[pair]],state.positions,node,trial);
+        const auto quick=cert::validate_linear(q);
+        if(quick==cert::Status::Safe)continue;
+        const auto status=quick==cert::Status::Invalid?exact::Status::Invalid:exact_endpoint(q);
+        if(map_failure(status,error)||status==exact::Status::Unsafe)return false;
+    }
+    return true;
+}
+
+__global__ void resolve_nodes_direct_bound(DeformableScene scene,DeformableState state,BroadPhaseView bp,
+    const std::size_t*offsets,const int*indices,const BpAabb*boxes,const unsigned int*pending,
+    const unsigned char*initial_safe,
+    double(*accepted)[3],int*error,std::uint32_t*words,int*slots) {
+    if(blockIdx.x||threadIdx.x||*error||!pending[scene.nodes])return;
+    namespace direct=ipc_gpu::resident_direct_bound;
+    exact::DevicePool pool;exact::initialize_pool(pool,words,slots,arena_width,arena_slots);
+    for(std::size_t node=0;node<scene.nodes&&!*error;++node)if(pending[node]) {
+        const int block=scene.node_blocks[node];double target[3],delta[3];
+        for(int k=0;k<3;++k) { target[k]=accepted[node][k];delta[k]=target[k]-state.positions[node][k]; }
+        bool rejected=false,hint_available=true,complete=false;
+        double hint=1.;
+        // The original represented endpoint is checked before requesting a
+        // proposal. Only contacts which reject it contribute direct bounds.
+        for(auto pair=offsets[block];pair<offsets[block+1];++pair) {
+            const int index=indices[pair];
+            if(initial_safe[index])continue;
+            const auto q=node_query(bp.contacts[index],state.positions,int(node),target);
+            const auto status=exact_endpoint(q);
+            if(map_failure(status,error))break;
+            if(status!=exact::Status::Unsafe)continue;
+            rejected=true;
+            const auto bound=direct::separation_step_bound<arena_width>(q.start,q.end,q.vertex_face,q.gap_floor);
+            if(bound.status==direct::BoundStatus::InvalidResourceContext||pool.failed
+                ||pool.available!=pool.slot_count) {
+                fail(error,LinearClipError::ExactResources);break;
+            }
+            // Zero, malformed or resource-inconclusive hints retain the old
+            // backtracking schedule. In particular, zero cannot lock a node.
+            if(bound.status!=direct::BoundStatus::Computed||!finite(bound.fraction)
+                ||bound.fraction<0.||bound.fraction>1.)hint_available=false;
+            else hint=fmin(hint,bound.fraction);
+        }
+        if(*error)break;
+        if(!rejected)complete=true;
+        if(rejected&&hint_available&&hint>0.&&hint<1.) {
+            const double fraction=nextafter(hint,0.);
+            double trial[3];for(int k=0;k<3;++k)trial[k]=fma(fraction,delta[k],state.positions[node][k]);
+            // Every incident contact is rechecked at the actual rounded
+            // endpoint; even original Safe certificates are invalid here.
+            if(useful_direct_proposal(fraction,state.positions[node],target,trial)
+                &&checked_direct_endpoint(state,bp,offsets,indices,block,int(node),trial,boxes[node],error)) {
+                for(int k=0;k<3;++k)accepted[node][k]=trial[k];complete=true;
+            }
+        }
+        // An unsuccessful proposal does not narrow or replace the original
+        // interval. Preserve its 64 halvings, final strict start-state check,
+        // FMA endpoints, error mapping and original-proposal certificates.
+        double fraction=1.;
+        for(int attempt=0;!complete&&!*error&&attempt<=64;++attempt) {
+            double trial[3];for(int k=0;k<3;++k)trial[k]=attempt==64?state.positions[node][k]
+                :attempt?fma(fraction,delta[k],state.positions[node][k]):target[k];
+            bool safe=inside(trial,boxes[node]);
+            if(safe)for(std::size_t pair=offsets[block];pair<offsets[block+1];++pair) {
+                const int pair_index=indices[pair];
+                if(attempt==0&&initial_safe[pair_index])continue;
+                const auto q=node_query(bp.contacts[pair_index],state.positions,int(node),trial);
+                const auto quick=attempt?cert::validate_linear(q):cert::Status::Uncertain;
+                if(quick==cert::Status::Safe)continue;
+                const auto status=quick==cert::Status::Invalid?exact::Status::Invalid:exact_endpoint(q);
+                if(map_failure(status,error)) { safe=false;break; }
+                if(status==exact::Status::Unsafe) { safe=false;break; }
+            }
+            if(*error)break;
+            if(safe) {
+                for(int k=0;k<3;++k)accepted[node][k]=trial[k];complete=true;break;
+            }
+            fraction*=.5;
+        }
+        if(!complete&&!*error)fail(error,LinearClipError::Unresolved);
+        if(pool.failed||pool.available!=pool.slot_count)fail(error,LinearClipError::ExactResources);
+    }
+    exact::release_pool();
+}
+
 __device__ bool body_trial(RigidScene scene,RigidState state,RigidWorkspace work,
     DeformableState vertices,const BpAabb*boxes,int body,double fraction,
     double(*accepted)[3],double*delta,int*error) {
@@ -277,7 +381,7 @@ ResidentLinearClipper::~ResidentLinearClipper()=default;
 void ResidentLinearClipper::clip_deformable_color(const DeformableScene&scene,
     const DeformableState&state,const ElasticWorkspace&work,const BroadPhaseView&bp,
     const std::size_t*offsets,const int*indices,const BpAabb*boxes,const int*colors,int color,
-    double(*accepted)[3],int*error,bool use_ccd,cudaStream_t stream,ColorContactWorklist color_pairs) {
+    double(*accepted)[3],int*error,bool use_ccd,cudaStream_t stream,ColorContactWorklist color_pairs,bool exact_step_bound) {
     {
     ResidentProfileScope prepare_profile("prepare",stream);
     impl_->reserve(scene.nodes,use_ccd?bp.contact_count:0);if(!scene.nodes)return;
@@ -293,8 +397,13 @@ void ResidentLinearClipper::clip_deformable_color(const DeformableScene&scene,
             impl_->pending,impl_->initial_safe,error,color_pairs);check(cudaGetLastError());
     }
     ResidentProfileScope resolve_profile("serial_resolve",stream);
+    if(exact_step_bound)
+        resolve_nodes_direct_bound<<<1,1,0,stream>>>(scene,state,bp,offsets,indices,boxes,impl_->pending,impl_->initial_safe,accepted,error,
+            impl_->words,impl_->slots);
+    else
     resolve_nodes<<<1,1,0,stream>>>(scene,state,bp,offsets,indices,boxes,impl_->pending,impl_->initial_safe,accepted,error,
-        impl_->words,impl_->slots);check(cudaGetLastError());
+        impl_->words,impl_->slots);
+    check(cudaGetLastError());
 }
 
 void ResidentLinearClipper::clip_rigid_translation_color(const RigidScene&scene,const RigidState&state,

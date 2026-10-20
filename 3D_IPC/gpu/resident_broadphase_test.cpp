@@ -295,8 +295,227 @@ static void gap_padding_test() {
     run_case(ee_boxes,{},{{{0,1}},{{2,3}}},{},{0,1,2,3},{},4,0,1,false,true);
 }
 
-int main() {
+
+// Focused public-API check. Snapshots own every downloaded payload before a
+// later rebuild can reuse the ResidentBroadPhase allocation owner.
+class ScopedTestEnvironment {
+    const char* name_;
+    bool present_;
+    std::string previous_;
+public:
+    explicit ScopedTestEnvironment(const char* name) : name_(name),
+        present_(std::getenv(name) != nullptr),
+        previous_(present_ ? std::getenv(name) : "") {}
+    ~ScopedTestEnvironment() {
+        if (present_) (void)setenv(name_, previous_.c_str(), 1);
+        else (void)unsetenv(name_);
+    }
+    void assign(const char* value) {
+        require((value ? setenv(name_, value, 1) : unsetenv(name_)) == 0,
+            "cannot configure focused broadphase test environment");
+    }
+    ScopedTestEnvironment(const ScopedTestEnvironment&) = delete;
+    ScopedTestEnvironment& operator=(const ScopedTestEnvironment&) = delete;
+};
+
+struct OwnedBroadPhaseSnapshot {
+    std::vector<BpContact> contacts;
+    std::vector<std::size_t> adjacency_offsets;
+    std::vector<int> adjacency, colors, color_blocks, color_offsets;
+    int color_count = 0;
+};
+static OwnedBroadPhaseSnapshot own_broadphase(const BroadPhaseView& view, int blocks) {
+    OwnedBroadPhaseSnapshot out;
+    out.contacts = download(view.contacts, view.contact_count);
+    out.adjacency_offsets = download(view.adjacency_offsets, std::size_t(blocks) + 1);
+    out.adjacency = download(view.adjacency, view.directed_edge_count);
+    out.colors = download(view.block_colors, blocks);
+    out.color_blocks = download(view.color_blocks, blocks);
+    out.color_offsets = download(view.color_offsets, std::size_t(view.color_count) + 1);
+    out.color_count = view.color_count;
+    return out;
+}
+static bool same_contact_payload(const std::vector<BpContact>& a,
+    const std::vector<BpContact>& b) {
+    // All five fields are ints; assert the absence of padding before comparing
+    // the complete raw orientation/order payload, including the contact kind.
+    static_assert(sizeof(BpContact) == 5 * sizeof(int), "BpContact padding changed");
+    return a.size() == b.size() && (a.empty()
+        || std::memcmp(a.data(), b.data(), a.size() * sizeof(BpContact)) == 0);
+}
+static void require_same_broadphase(const OwnedBroadPhaseSnapshot& expected,
+    const OwnedBroadPhaseSnapshot& actual) {
+    require(same_contact_payload(expected.contacts, actual.contacts),
+        "warp dispatch changed complete contact payload/order");
+    require(expected.adjacency_offsets == actual.adjacency_offsets
+        && expected.adjacency == actual.adjacency,
+        "warp dispatch changed complete dependency CSR");
+    require(expected.colors == actual.colors && expected.color_count == actual.color_count,
+        "warp dispatch changed exact labels/palette");
+    require(expected.color_blocks == actual.color_blocks
+        && expected.color_offsets == actual.color_offsets,
+        "warp dispatch changed complete sequential color order/offsets");
+}
+static void warp_dispatch_test(const std::string& mode) {
+    require(mode == "degree" || mode == "spatial", "focused dispatch needs degree or spatial");
+    ScopedTestEnvironment coloring("IPC_GPU_COLORING"), flag("IPC_GPU_WARP_ORDERED_COLOR"),
+        spatial_dx("IPC_GPU_SPATIAL_COLOR_DX");
+    coloring.assign(mode.c_str()); spatial_dx.assign("0.05");
+    constexpr int count = 33; // Also exercises a partial last 32-color palette batch.
+    std::vector<BpAabb> boxes;
+    std::vector<int> owners;
+    for (int i = 0; i < count; ++i) {
+        boxes.push_back(point_box(.025 * (i % 6), .027 * (i / 6), .011 * (i % 3), .1));
+        owners.push_back((10 * i) % count); // A bijection, deliberately nonidentity.
+    }
+    std::vector<BpTriangle> triangles;
+    std::vector<BpEdge> edges;
+    for (int i = 0; i < count; i += 3) {
+        triangles.push_back({{i, i + 1, i + 2}});
+        edges.push_back({{i, i + 1}}); edges.push_back({{i + 1, i + 2}});
+        edges.push_back({{i + 2, i}});
+    }
+    const std::vector<unsigned char> surface(count, 1);
+    Device<BpAabb> db(boxes); Device<BpTriangle> dt(triangles); Device<BpEdge> de(edges);
+    Device<int> blocks(owners); Device<unsigned char> ds(surface);
+    BroadPhaseTopology topology;
+    topology.vertex_count = topology.block_count = count;
+    topology.triangle_count = int(triangles.size()); topology.edge_count = int(edges.size());
+    topology.triangles = dt.data; topology.edges = de.data;
+    topology.vertex_block = blocks.data; topology.surface_query = ds.data;
+    ResidentBroadPhase broadphase;
+    flag.assign("0");
+    const auto serial = own_broadphase(broadphase.rebuild(topology, db.data, .01), count);
+    require(!serial.contacts.empty() && serial.adjacency.size() == count * (count - 1)
+        && serial.color_count == count, "focused fixture did not exercise the full 33-color graph");
+    for (const char* value : {"1", static_cast<const char*>(nullptr)}) {
+        flag.assign(value);
+        require_same_broadphase(serial,
+            own_broadphase(broadphase.rebuild(topology, db.data, .01), count));
+    }
+    // A malformed selector is parsed only when ordered coloring is reached.
+    flag.assign("invalid");
+    const auto candidates = broadphase.rebuild(topology, db.data, .01, BroadPhaseMode::CandidatesOnly);
+    require(no_solver_data(candidates) && same_contact_payload(serial.contacts,
+        download(candidates.contacts, candidates.contact_count)),
+        "candidate-only rebuild parsed warp flag or changed contact payload");
+    bool rejected = false;
+    try { (void)broadphase.rebuild(topology, db.data, .01); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected && no_solver_data(broadphase.view()) && !broadphase.view().contacts
+        && !broadphase.view().contact_count, "invalid ordered warp flag did not invalidate view");
+    if (mode == "degree") {
+        coloring.assign("greedy");
+        const auto generic = own_broadphase(broadphase.rebuild(topology, db.data, .01), count);
+        require(same_contact_payload(serial.contacts, generic.contacts)
+            && serial.adjacency_offsets == generic.adjacency_offsets
+            && serial.adjacency == generic.adjacency && generic.color_count == count,
+            "generic coloring parsed warp flag or changed contact/graph payload");
+        coloring.assign(mode.c_str());
+    }
+    flag.assign("0");
+    require_same_broadphase(serial,
+        own_broadphase(broadphase.rebuild(topology, db.data, .01), count));
+}
+
+
+// Compare complete public payloads under independent defaults and rollbacks.
+// Every Tree owner is constructed after its bounds selector is set.
+static void broadphase_options_test(const std::string& mode) {
+    require(mode == "degree" || mode == "spatial", "broadphase options need degree or spatial");
+    ScopedTestEnvironment coloring("IPC_GPU_COLORING"), warp("IPC_GPU_WARP_ORDERED_COLOR"),
+        shared("IPC_GPU_WARP_SHARED_MARKS"), bounds("IPC_GPU_PARALLEL_SCENE_BOUNDS"),
+        spatial_dx("IPC_GPU_SPATIAL_COLOR_DX");
+    coloring.assign(mode.c_str()); spatial_dx.assign("0.05");
+    constexpr int count = 33;
+    std::vector<BpAabb> boxes;
+    std::vector<int> owners;
+    for (int i = 0; i < count; ++i) {
+        // Nonzero normal endpoints exercise the parallel reduction itself.
+        boxes.push_back(point_box(1.125 + .025 * (i % 6),
+            2.25 + .027 * (i / 6), 3.375 + .011 * (i % 3), .1));
+        owners.push_back((10 * i) % count);
+    }
+    std::vector<BpTriangle> triangles;
+    std::vector<BpEdge> edges;
+    for (int i = 0; i < count; i += 3) {
+        triangles.push_back({{i, i + 1, i + 2}});
+        edges.push_back({{i, i + 1}}); edges.push_back({{i + 1, i + 2}});
+        edges.push_back({{i + 2, i}});
+    }
+    Device<BpAabb> db(boxes); Device<BpTriangle> dt(triangles); Device<BpEdge> de(edges);
+    Device<int> blocks(owners); Device<unsigned char> surface(std::vector<unsigned char>(count, 1));
+    BroadPhaseTopology topology;
+    topology.vertex_count = topology.block_count = count;
+    topology.triangle_count = int(triangles.size()); topology.edge_count = int(edges.size());
+    topology.triangles = dt.data; topology.edges = de.data;
+    topology.vertex_block = blocks.data; topology.surface_query = surface.data;
+    const auto snapshot = [&](const char* s, const char* b, const char* w) {
+        shared.assign(s); bounds.assign(b); warp.assign(w);
+        ResidentBroadPhase owner;
+        return own_broadphase(owner.rebuild(topology, db.data, .01), count);
+    };
+    const auto serial = snapshot("0", "0", "0");
+    require(!serial.contacts.empty() && serial.color_count == count
+        && serial.adjacency.size() == count * (count - 1), "options fixture lost its full graph");
+    for (const char* s : {static_cast<const char*>(nullptr), "0", "1"})
+        for (const char* b : {static_cast<const char*>(nullptr), "0", "1"})
+            require_same_broadphase(serial, snapshot(s, b, "1"));
+    // Ordered-color rollback must bypass even an unused malformed shared flag.
+    require_same_broadphase(serial, snapshot("invalid", "0", "0"));
+    shared.assign("invalid"); bounds.assign("0"); warp.assign("1");
+    ResidentBroadPhase invalid_shared;
+    const auto candidates = invalid_shared.rebuild(topology, db.data, .01, BroadPhaseMode::CandidatesOnly);
+    require(no_solver_data(candidates) && same_contact_payload(serial.contacts,
+        download(candidates.contacts, candidates.contact_count)), "candidate-only path parsed shared selector");
+    bool rejected = false;
+    try { (void)invalid_shared.rebuild(topology, db.data, .01); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected && no_solver_data(invalid_shared.view()) && !invalid_shared.view().contacts
+        && !invalid_shared.view().contact_count,
+        "invalid shared selector did not fail closed");
+    shared.assign("0"); bounds.assign("invalid"); rejected = false;
+    try { ResidentBroadPhase invalid_bounds; }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "invalid bounds selector was silently accepted");
+    // Above the 48 KiB shared palette, default/on must retain the global Warp.
+    constexpr int large = 12289;
+    boxes.clear(); owners.clear();
+    for (int i = 0; i < large; ++i) {
+        boxes.push_back(point_box(1.125 + .25 * i, 2.25, 3.375, .001));
+        owners.push_back(i);
+    }
+    Device<BpAabb> large_boxes(boxes); Device<int> large_blocks(owners);
+    BroadPhaseTopology sparse; sparse.vertex_count = sparse.block_count = large;
+    sparse.vertex_block = large_blocks.data;
+    bounds.assign("1"); warp.assign("1"); shared.assign("0");
+    ResidentBroadPhase global;
+    const auto reference = own_broadphase(global.rebuild(sparse, large_boxes.data, .01), large);
+    require(reference.contacts.empty() && reference.color_count == 1
+        && std::all_of(reference.colors.begin(), reference.colors.end(), [](int c) { return c == 0; }),
+        "large sparse fallback fixture changed");
+    for (const char* s : {static_cast<const char*>(nullptr), "1"}) {
+        shared.assign(s); ResidentBroadPhase fallback;
+        require_same_broadphase(reference,
+            own_broadphase(fallback.rebuild(sparse, large_boxes.data, .01), large));
+    }
+}
+
+int main(int argc, char** argv) {
     try {
+        if (argc != 1) {
+            require(argc == 3, "unknown broadphase test selector");
+            if (std::string(argv[1]) == "--broadphase-options") {
+                broadphase_options_test(argv[2]);
+                std::cout << "Resident GPU broadphase options: " << argv[2]
+                          << " defaults/rollbacks/shared-budget fallback payloads PASS\n";
+            } else {
+                require(std::string(argv[1]) == "--warp-dispatch", "unknown broadphase test selector");
+                warp_dispatch_test(argv[2]);
+                std::cout << "Resident GPU focused warp dispatch: " << argv[2] << " serial/warp/default payloads PASS\n";
+            }
+            return 0;
+        }
         color_stage_test();
         motion_test();
         gap_padding_test();

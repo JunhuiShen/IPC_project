@@ -26,6 +26,28 @@ IPC_CONTACT_PREFETCH_DEVICE inline int contact_prefetch_roles(const BroadPhaseVi
     for(int role=0;role<4;++role)if(broad.contacts[pair].vertices[role]==node)roles|=1<<role;
     return roles;
 }
+// Private Phase2 candidate: producer friction arrays are literal positive zero
+// when the unchanged per-assembly friction parameter compares equal to zero.
+// Keep both original friction additions and weight multiplication order, so
+// signed zero and exceptional weight behavior are preserved. The complete
+// compact216/full1416 layouts and producer publication remain unchanged.
+template<class CompactOutput>
+IPC_CONTACT_PREFETCH_DEVICE inline double contact_prefetch_add_compact_component(
+    double value,const CompactOutput& out,int component,double normal_scale,
+    bool synthesize_zero_friction) {
+    if(!synthesize_zero_friction)
+        return contact_warp_add_compact_component(value,out,component,normal_scale);
+    const double weight=out.weight;
+    if(component<3) {
+        value+=normal_scale*out.gradient[component];
+        value+=weight*0.0;
+    } else {
+        const int entry=component-3;
+        value+=normal_scale*out.hessian[entry];
+        value+=(weight*0.0)*weight;
+    }
+    return value;
+}
 #undef IPC_CONTACT_PREFETCH_DEVICE
 
 #if defined(__CUDACC__)
@@ -90,7 +112,8 @@ __global__ void reduce_deformable_prefetch_warp(BroadPhaseView broad,DeformableS
                 const int selected=__shfl_sync(mask,local_roles,source);
                 if(lane<12) {
                     if(selected&16)
-                        value=contact_warp_add_compact_component(value,work.compact[pair],int(lane),normal_scale);
+                        value=contact_prefetch_add_compact_component(value,work.compact[pair],int(lane),normal_scale,
+                            params.friction==0.0);
                     else for(int role=0;role<4;++role)if(selected&(1<<role))
                         value=contact_warp_add_component(value,work.outputs[pair],role,int(lane),normal_scale);
                 }

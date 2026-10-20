@@ -139,12 +139,12 @@ SceneDescription describe_scene(const RefMesh& mesh,const DeformedState& state,
 }
 
 StepParameters describe_step(const SimParams& p) {
+    p.validate_ccd_exact_step_bound_parameters();
+    p.validate_colored_ccd_guess_parameters();
     // Never silently reroute an unported solver/initial-guess mode to CPU.
-    if(p.use_colored_ccd_guess_level_based)
-        throw std::invalid_argument("resident GPU: --use_colored_ccd_guess_level_based is not ported; use the CPU simulator for this initial guess");
     if(!p.fixed_iters || p.use_ogc || p.use_ogc_solver || p.use_cloth_grid)
         throw std::invalid_argument("resident GPU currently requires fixed iterations and conflict-graph coloring, with OGC/grid disabled");
-    if(!p.use_colored_ccd_guess && (p.use_verlet_guess || p.use_translation_guess))
+    if(!(p.use_colored_ccd_guess || p.use_colored_ccd_guess_level_based) && (p.use_verlet_guess || p.use_translation_guess))
         throw std::invalid_argument("resident GPU: Verlet and translation initial guesses are not ported");
     if(!p.exact_computation_fallback)
         throw std::invalid_argument("resident GPU requires the robust exact fallback enabled");
@@ -162,8 +162,11 @@ StepParameters describe_step(const SimParams& p) {
     out.damping=p.damping;out.box_radius_min=p.node_box_min;out.box_radius=p.node_box_max;
     out.rotation_radius=p.theta_box_max;
     out.iterations=p.max_global_iters;out.rebuild_interval=p.node_box_update_count;
-    out.colored_guess_sweeps=p.use_colored_ccd_guess?p.colored_ccd_guess_iters:0;
-    out.global_ccd_guess=p.use_ccd_guess&&!p.use_colored_ccd_guess;
+    const bool colored=p.use_colored_ccd_guess||p.use_colored_ccd_guess_level_based;
+    out.colored_guess_sweeps=colored?p.colored_ccd_guess_iters:0;
+    out.colored_guess_level_based=p.use_colored_ccd_guess_level_based;
+    out.ccd_exact_step_bound=p.ccd_exact_step_bound;
+    out.global_ccd_guess=p.use_ccd_guess&&!colored;
     out.collisions=p.use_ccd;
     return out;
 }

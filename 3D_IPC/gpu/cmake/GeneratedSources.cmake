@@ -148,6 +148,11 @@ set(resident_dispatch [=[        if (uses_general_solver) {
                 frame_index, pin_updater, substep_cb, outdir);
         }]=])
 replace_once(resident_driver "${resident_dispatch}" "${resident_step}")
+# The resident solver builds its incidence and conflict graph on the device.
+# These CPU workspaces served only the frame dispatch replaced above.
+replace_once(resident_driver
+    "    VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);\n" "")
+replace_once(resident_driver "    BroadPhase broad_phase;\n" "")
 replace_once(resident_driver "    using Clock = std::chrono::steady_clock;"
     "    ipc_gpu::resident::ResidentSolver resident_solver(ipc_gpu::resident::describe_scene(ref_mesh,state,pins,params));\n    using Clock = std::chrono::steady_clock;")
 replace_once(resident_driver "    const std::string& outdir = args.outdir;"

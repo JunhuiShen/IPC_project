@@ -18,6 +18,10 @@ target_compile_options(gpu_resident_elastic_worklist_test PRIVATE -ffp-contract=
 target_link_libraries(gpu_resident_elastic_worklist_test PRIVATE ipc_resident_components)
 add_test(NAME gpu_resident_elastic_worklist COMMAND gpu_resident_elastic_worklist_test)
 add_test(NAME gpu_resident_broadphase COMMAND gpu_resident_broadphase_test)
+add_test(NAME gpu_resident_warp_dispatch_degree COMMAND gpu_resident_broadphase_test --warp-dispatch degree)
+add_test(NAME gpu_resident_warp_dispatch_spatial COMMAND gpu_resident_broadphase_test --warp-dispatch spatial)
+add_test(NAME gpu_resident_broadphase_options_degree COMMAND gpu_resident_broadphase_test --broadphase-options degree)
+add_test(NAME gpu_resident_broadphase_options_spatial COMMAND gpu_resident_broadphase_test --broadphase-options spatial)
 add_test(NAME gpu_resident_contact COMMAND gpu_resident_contact_test)
 add_executable(gpu_resident_contact_rejection_test EXCLUDE_FROM_ALL
     resident_contact_rejection_test.cpp resident_contact_rejection_test_cuda.cu)
@@ -93,6 +97,11 @@ add_executable(gpu_resident_contact_worklist_test EXCLUDE_FROM_ALL resident_cont
 target_link_libraries(gpu_resident_contact_worklist_test PRIVATE ipc_resident_solver CUDA::cudart)
 target_compile_options(gpu_resident_contact_worklist_test PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false;-lineinfo>)
 add_test(NAME gpu_resident_contact_worklist COMMAND gpu_resident_contact_worklist_test)
+# Exercise the opt-in sole-self ordinary evaluator against the fixture's full
+# generic path. The fixture compares derivative bytes and exact/error routing.
+add_test(NAME gpu_resident_contact_selected_ordinary COMMAND gpu_resident_contact_worklist_test)
+set_tests_properties(gpu_resident_contact_selected_ordinary PROPERTIES
+    ENVIRONMENT "IPC_GPU_SELECTED_ORDINARY_GATHER=1;IPC_GPU_DEFER_CONTACT_INPUTS=1")
 add_executable(gpu_resident_contact_compact_test EXCLUDE_FROM_ALL resident_contact_compact_test.cpp)
 add_test(NAME gpu_resident_contact_compact COMMAND gpu_resident_contact_compact_test)
 add_executable(gpu_resident_box_certificate_test EXCLUDE_FROM_ALL resident_box_certificate_test.cpp resident_box_certificate_test.cu)

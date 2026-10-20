@@ -78,7 +78,7 @@ void check_worklist(ColorContactWorklist work,const std::vector<BpContact>& cont
 
 struct AssemblyResult {std::vector<Derivatives> snapshots;std::vector<int> statuses;};
 AssemblyResult assembly_fixture(int fixture,bool queues,bool warp,bool compact=false,bool cooperative=false,
-    bool selected=false,bool compact_warp=false,const char* cutoff="32",bool color_lists=true,const char* selected_threads="8") {
+    bool selected=false,bool compact_warp=false,const char* cutoff="32",bool color_lists=true,const char* selected_threads="8",double contact_friction=-1.) {
     Environment env;
     env.set("IPC_GPU_COLOR_PAIR_QUEUES",queues?"1":"0");
     env.set("IPC_GPU_WARP_CONTACT_REDUCE",warp?"1":"0");
@@ -107,6 +107,7 @@ AssemblyResult assembly_fixture(int fixture,bool queues,bool warp,bool compact=f
         previous[node][k]-=.001*(node+1)*(k+1);
         if(body_map[node]>=0)references[node][k]=positions[node][k]-(body_map[node]==0?V{{.3,.3,0}}:V{{2.5,0,0}})[k];
     }
+    if(fixture==9)previous[0][1]=std::numeric_limits<double>::quiet_NaN();
     std::vector<BpContact> contacts;
     for(int pair=0;pair<(fixture==0?0:fixture>=6?132:20);++pair) {
         // Three roles on one rigid block, three fixed (-1 color) roles,
@@ -117,6 +118,9 @@ AssemblyResult assembly_fixture(int fixture,bool queues,bool warp,bool compact=f
         // Two selected deformable roles in a valid PT require the full-output
         // fallback even while other pairs use compact records in this color.
         if(fixture==7&&pair%4==0)contacts.back()={{0,6,2,3},0};
+        // Repeated selected triangle IDs require the original role1/role2
+        // full fallback, even in a zero-friction compact assembly.
+        if(fixture==8&&pair%4==0)contacts.back()={{8,0,0,3},0};
     }
     Memory<V> x(positions),previous_x(previous),reference_x(references);
     Memory<int> blocks(vertex_blocks),d_colors(colors),d_color_blocks(color_blocks),d_color_offsets(color_offsets),
@@ -147,7 +151,7 @@ AssemblyResult assembly_fixture(int fixture,bool queues,bool warp,bool compact=f
     broad.color_count=3;broad.color_blocks=color_lists?d_color_blocks.data:nullptr;
     broad.color_offsets=color_lists?d_color_offsets.data:nullptr;
     SdfScene sdf{d_collider.data,fixture==6?0:1,sdf_parameters};
-    ContactParameters params{.8,370,.031,fixture==2?0.:.2,.1,1e-12};
+    ContactParameters params{.8,370,.031,contact_friction>=0?contact_friction:(fixture==2?0.:.2),.1,1e-12};
     ResidentContactPipeline pipeline;pipeline.rebuild(broad,int(colors.size()),blocks.data,d_surface.data);
     check_worklist(pipeline.incidence().color_pairs,contacts,vertex_blocks,colors,3,queues);
     AssemblyResult result;
@@ -165,7 +169,7 @@ AssemblyResult assembly_fixture(int fixture,bool queues,bool warp,bool compact=f
             const auto derivatives=pass==0?systems.read():rigid_systems.read();
             result.snapshots.insert(result.snapshots.end(),derivatives.begin(),derivatives.end());
             result.statuses.push_back(failed.read()[0]);
-            require(result.statuses.back()==(fixture==4?123:0),"unexpected contact fixture error");
+            require(result.statuses.back()==(fixture==4?123:fixture==9?20:0),"unexpected contact fixture error");
         }
     }
     return result;
@@ -174,7 +178,8 @@ AssemblyResult assembly_fixture(int fixture,bool queues,bool warp,bool compact=f
 struct CcdResult {std::vector<V> accepted;std::vector<int> errors;};
 
 AssemblyResult rebuild_lifecycle_fixture(bool queues,bool warp,bool compact=false,
-    bool selected=false,bool compact_warp=false,const char* cutoff="32",bool cooperative=false) {
+    bool selected=false,bool compact_warp=false,const char* cutoff="32",bool cooperative=false,
+    bool mixed_friction=false) {
     Environment env;env.set("IPC_GPU_COLOR_PAIR_QUEUES",queues?"1":"0");
     env.set("IPC_GPU_WARP_CONTACT_REDUCE",warp?"1":"0");
     env.set("IPC_GPU_COOPERATIVE_EXACT_CONTACT",cooperative?"1":"0");
@@ -235,9 +240,24 @@ AssemblyResult rebuild_lifecycle_fixture(bool queues,bool warp,bool compact=fals
         // active assembly, then the next rebuild enables it again. Stale pair
         // activity or old launch metadata must never survive these changes.
         ContactParameters params{.8,rebuild==4?0.:370.,.031,.1,.1,1e-12};
+        auto assemble=[&](int color) {
+            const double friction=params.friction;
+            const double sequence[]={0.,.2,-0.,.1,0.};
+            for(int pass=0;pass<(mixed_friction?5:1);++pass) {
+                params.friction=mixed_friction?sequence[pass]:friction;
+                pipeline.assemble_color(scene,state,elastic,rigid,rigid_state,rigid_workspace,sdf,params,color,ContactAssemblyPhase::Deformable);
+                if(mixed_friction) {
+                    const auto intermediate=systems.read();
+                    result.snapshots.insert(result.snapshots.end(),intermediate.begin(),intermediate.end());
+                    result.statuses.push_back(failed.read()[0]);
+                    require(result.statuses.back()==0,"mixed-friction intermediate assembly failed");
+                }
+            }
+            params.friction=friction;
+        };
         systems.write(initial);failed.write(std::vector<int>{0});
         for(int color=0;color<4;++color) {
-            pipeline.assemble_color(scene,state,elastic,rigid,rigid_state,rigid_workspace,sdf,params,color,ContactAssemblyPhase::Deformable);
+            assemble(color);
             const auto output=systems.read();result.snapshots.insert(result.snapshots.end(),output.begin(),output.end());
             result.statuses.push_back(failed.read()[0]);require(result.statuses.back()==0,"rebuild lifecycle assembly failed");
             if(color==2)require(std::memcmp(&output[3],&initial[3],sizeof(Derivatives))==0,"contactless-color node updated before its color");
@@ -257,7 +277,7 @@ AssemblyResult rebuild_lifecycle_fixture(bool queues,bool warp,bool compact=fals
             scene.deformable=pointer_pass==1?alternate_mask.data:deformable.data;
             systems.write(initial);failed.write(std::vector<int>{0});
             for(int color=0;color<4;++color) {
-                pipeline.assemble_color(scene,state,elastic,rigid,rigid_state,rigid_workspace,sdf,params,color,ContactAssemblyPhase::Deformable);
+                assemble(color);
                 const auto output=systems.read();result.snapshots.insert(result.snapshots.end(),output.begin(),output.end());
                 result.statuses.push_back(failed.read()[0]);require(result.statuses.back()==0,"pointer lifecycle assembly failed");
                 if(pointer_pass==1)require(std::memcmp(&output[1],&initial[1],sizeof(Derivatives))==0,"stale deformable mask mapping");
@@ -349,6 +369,7 @@ AssemblyResult reduction_failure_fixture(int failure,bool selected,bool compact_
 }
 } // namespace
 
+#ifndef IPC_CONTACT_WORKLIST_FIXTURE_ONLY
 int main() {
     try {
         for(int fixture=0;fixture<8;++fixture) {
@@ -438,3 +459,5 @@ int main() {
         std::cerr<<failure.what()<<'\n';return 1;
     }
 }
+
+#endif // IPC_CONTACT_WORKLIST_FIXTURE_ONLY

@@ -64,9 +64,23 @@ target_include_directories(Eigen3::Eigen SYSTEM INTERFACE
 
 FetchContent_MakeAvailable(tight_inclusion)
 
-# Exact rational predicates require Boost 1.70 or newer (header-only).
+# Standalone CPU builds require Boost 1.70 or newer; the GPU parent selects 1.92.0.
+set(_ipc_required_boost_version "1.70")
+set(_ipc_required_boost_macro 107000)
+set(_ipc_boost_version_comparison "<")
+set(_ipc_boost_header_check "IPC_BOOST_HEADERS_AT_LEAST_1_70")
+set(_ipc_boost_requirement "Boost 1.70 or newer")
 set(_ipc_requested_boost_dir "${Boost_DIR}")
-find_package(Boost 1.70 CONFIG QUIET)
+if(IPC_GPU_BOOST_POLICY_1_92 AND NOT PROJECT_IS_TOP_LEVEL)
+    set(_ipc_required_boost_version "1.92.0")
+    set(_ipc_required_boost_macro 109200)
+    set(_ipc_boost_version_comparison "!=")
+    set(_ipc_boost_header_check "IPC_BOOST_HEADERS_EXACTLY_109200")
+    set(_ipc_boost_requirement "Exactly Boost 1.92.0")
+    find_package(Boost 1.92.0 EXACT CONFIG QUIET)
+else()
+    find_package(Boost 1.70 CONFIG QUIET)
+endif()
 if(NOT Boost_FOUND)
     # Some system packages retain an older CMake package version after their
     # headers are upgraded. Verify the selected target's actual headers below.
@@ -83,25 +97,32 @@ include(CMakePushCheckState)
 include(CheckCXXSourceCompiles)
 cmake_push_check_state(RESET)
 set(CMAKE_REQUIRED_LIBRARIES Boost::headers)
-# Recheck on every configure, including when headers change in place.
+# Recheck the selected policy on every configure, including in-place changes.
 unset(IPC_BOOST_HEADERS_AT_LEAST_1_83 CACHE)
 unset(IPC_BOOST_HEADERS_AT_LEAST_1_83)
-unset(IPC_BOOST_HEADERS_AT_LEAST_1_70 CACHE)
-unset(IPC_BOOST_HEADERS_AT_LEAST_1_70)
+unset(IPC_BOOST_HEADERS_EXACTLY_1_83 CACHE)
+unset(IPC_BOOST_HEADERS_EXACTLY_1_83)
+unset(${_ipc_boost_header_check} CACHE)
+unset(${_ipc_boost_header_check})
 check_cxx_source_compiles("
     #include <boost/version.hpp>
-    #if !defined(BOOST_VERSION) || BOOST_VERSION < 107000
-    #error Boost headers must be version 1.70 or newer
+    #if !defined(BOOST_VERSION) || BOOST_VERSION ${_ipc_boost_version_comparison} ${_ipc_required_boost_macro}
+    #error Boost headers do not satisfy the requirement: ${_ipc_boost_requirement}
     #endif
     int main() { return 0; }
-" IPC_BOOST_HEADERS_AT_LEAST_1_70)
+" ${_ipc_boost_header_check})
 cmake_pop_check_state()
-if(NOT IPC_BOOST_HEADERS_AT_LEAST_1_70)
+if(NOT ${_ipc_boost_header_check})
     message(FATAL_ERROR
-        "Boost 1.70 or newer headers are required by Boost::headers. "
+        "${_ipc_boost_requirement} headers are required by Boost::headers. "
         "Select a compatible installation with Boost_DIR."
     )
 endif()
+unset(_ipc_required_boost_version)
+unset(_ipc_required_boost_macro)
+unset(_ipc_boost_version_comparison)
+unset(_ipc_boost_requirement)
+unset(_ipc_boost_header_check)
 
 # AppleClang needs Homebrew's libomp and a compiler-specific OpenMP flag. Feed
 # those paths to FindOpenMP instead of adding a global include directory.

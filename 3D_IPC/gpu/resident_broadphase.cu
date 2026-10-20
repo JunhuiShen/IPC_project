@@ -19,6 +19,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -237,8 +238,13 @@ __global__ void join_level(BpAabb* nodes, int first, int count) {
     }
 }
 
+
+#include "parallel_scene_bounds.cuh"
+
 struct TreeView { const BpAabb* nodes; const int* indices; int leaf_base, count; };
 struct Tree {
+    const bool parallel_bounds=parallel_scene_bounds_option();
+    Buffer<SceneBoundsPartial> bounds_partials;
     Buffer<BpAabb> nodes, bounds;
     Buffer<int> indices;
     Buffer<std::uint64_t> keys;
@@ -252,7 +258,14 @@ struct Tree {
         while (leaf_base < size) leaf_base *= 2;
         nodes.reserve(2 * static_cast<std::size_t>(leaf_base));
         bounds.reserve(1); indices.reserve(size); keys.reserve(size);
-        scene_bounds<<<1, 1>>>(source, size, bounds.data);
+        if(parallel_bounds) {
+            const int groups=std::min(blocks(size),256);
+            bounds_partials.reserve(groups);
+            scene_bounds_partials<<<groups,128>>>(source,size,bounds_partials.data);
+            launched("parallel BVH bounds partials");
+            scene_bounds_finish<<<1,128>>>(source,size,bounds_partials.data,groups,bounds.data);
+            launched("parallel BVH bounds finish");
+        } else scene_bounds<<<1, 1>>>(source, size, bounds.data);
         morton_keys<<<blocks(size), threads>>>(source, bounds.data, size, keys.data, indices.data);
         launched("GPU BVH Morton keys");
         thrust::sort_by_key(thrust::device, thrust::device_pointer_cast(keys.data),
@@ -381,6 +394,8 @@ __global__ void csr_rows(const std::uint64_t* keys, std::size_t count,
     }
 }
 #include "pbgs_coloring.cuh"
+#include "pbgs_warp_ordered_exact.cuh"
+#include "pbgs_warp_shared_forbidden_exact.cuh"
 #include "pbgs_label_compaction.cuh"
 
 __global__ void greedy_color(const std::size_t* offsets, const int* adjacency,
@@ -616,7 +631,13 @@ BroadPhaseView ResidentBroadPhase::rebuild(const BroadPhaseTopology& t,
         thrust::sequence(thrust::device,thrust::device_pointer_cast(p.coloring.order.data),thrust::device_pointer_cast(p.coloring.order.data+t.block_count));
         thrust::stable_sort_by_key(thrust::device,thrust::device_pointer_cast(p.coloring.keys.data),thrust::device_pointer_cast(p.coloring.keys.data+t.block_count),thrust::device_pointer_cast(p.coloring.order.data));
         check(cudaMemset(p.colors.data,0xff,t.block_count*sizeof(int)),"initialize ordered colors");
-        pbgs_ordered_greedy<<<1,1>>>(p.adjacency_offsets.data,p.adjacency.data,t.block_count,p.coloring.order.data,p.colors.data,p.forbidden.data,p.color_count.data);
+        if(pbgs_warp_ordered_enabled()) {
+            if(pbgs_warp_shared_marks_enabled())
+                pbgs_launch_warp_shared_marks_exact(p.adjacency_offsets.data,p.adjacency.data,t.block_count,p.coloring.order.data,p.colors.data,p.forbidden.data,p.color_count.data);
+            else
+                pbgs_ordered_greedy_warp_exact<<<1,32>>>(p.adjacency_offsets.data,p.adjacency.data,t.block_count,p.coloring.order.data,p.colors.data,p.forbidden.data,p.color_count.data);
+        } else
+            pbgs_ordered_greedy<<<1,1>>>(p.adjacency_offsets.data,p.adjacency.data,t.block_count,p.coloring.order.data,p.colors.data,p.forbidden.data,p.color_count.data);
         check(cudaMemcpy(&colors,p.color_count.data,sizeof(int),cudaMemcpyDeviceToHost),"ordered color count");
     } else {
         greedy_color<<<1, 1>>>(p.adjacency_offsets.data, p.adjacency.data, t.block_count,

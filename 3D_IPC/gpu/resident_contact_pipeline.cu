@@ -5,6 +5,7 @@
 #include "resident_contact_exact.cuh"
 #include "resident_contact_cooperative.h"
 #include "resident_contact_compact_point.h"
+#include "resident_contact_selected_ordinary.cuh"
 #include "cooperative_compact_point_study.h"
 #include "resident_contact_execution.h"
 #include "resident_contact_input_publication.cuh"
@@ -224,6 +225,122 @@ __global__ void gather_compute(BroadPhaseView broad,DeformableScene scene,Deform
     work.active[pair]=1;
     const auto result=evaluate_contact(in);
     store_contact_output(in,result,work.outputs+pair,work.compact?work.compact+pair:nullptr,
+        work.output_activity?work.output_activity+pair:nullptr);
+    const auto status=result.status;
+    if(publication.publish_if_queued(status)) {
+        const unsigned index=atomicAdd(work.exact_count,1u);work.exact_queue[index]=static_cast<int>(pair);
+    } else if(status!=ContactStatus::Ok)error(failed,code(status));
+}
+
+// Paired opt-in gather: general resets all; thin writes only its eligible partition.
+__device__ void store_selected_ordinary_result(const selected_ordinary::Output& out,int role,
+    CompactDeformableContact* compact,unsigned char* output_activity) {
+    // Same publication order/early returns as original store_contact_output.
+    if(output_activity) {
+        *output_activity=static_cast<unsigned char>(out.status!=ContactStatus::Ok||out.active!=0);
+        if(!*output_activity)return;
+    }
+    compact->status=out.status;compact->active=out.active;compact->role=role;
+    if(out.status!=ContactStatus::Ok||!out.active)return;
+    compact->weight=out.weights[role];
+    for(int k=0;k<3;++k) {
+        compact->gradient[k]=out.barrier_gradient[role][k];
+        compact->friction_gradient[k]=0.0;
+    }
+    for(int k=0;k<9;++k) {
+        compact->hessian[k]=out.selected_hessian[k];
+        compact->friction_hessian[k]=0.0;
+    }
+    return;
+}
+template<bool DeferredInput>
+__global__ void gather_general_complement(BroadPhaseView broad,DeformableScene scene,DeformableState state,
+    RigidScene rigid,ContactParameters params,Work work,int color,ContactAssemblyPhase phase,int* failed,
+    ColorContactWorklist color_pairs) {
+    const auto index=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
+    const auto begin=color_pairs.offsets?color_pairs.offsets[color]:0;
+    const auto end=color_pairs.offsets?color_pairs.offsets[color+1]:broad.contact_count;
+    if(index>=end-begin)return;
+    const auto pair=color_pairs.offsets?static_cast<std::size_t>(color_pairs.pair_indices[begin+index]):index;
+    work.active[pair]=0;
+    if(atomicAdd(failed,0)||params.k_barrier==0||params.d_hat<=0)return;
+    if(color_pairs.box_separated&&color_pairs.box_separated[pair])return;
+    const auto& contact=broad.contacts[pair];
+    bool selected[4]{},any_selected=false;
+    for(int role=0;role<4;++role) {
+        selected[role]=selected_node(scene,rigid,broad,contact.vertices[role],color,phase);
+        any_selected=any_selected||selected[role];
+    }
+    if(!any_selected)return;
+    unsigned hessian_blocks=0;
+    if(phase==ContactAssemblyPhase::RigidTranslation&&contact.kind==0) {
+        // Either rigid side of PT uses the point's H00 COM shortcut.
+        hessian_blocks=1u;
+    } else {
+        for(int i=0;i<4;++i)if(selected[i])for(int j=i;j<4;++j)if(selected[j]) {
+            if(phase==ContactAssemblyPhase::Deformable&&i!=j)continue;
+            hessian_blocks|=1u<<(4*i+j);
+        }
+    }
+    const int selected_role=compact_contact_role(hessian_blocks);
+    const bool selected_eligible=phase==ContactAssemblyPhase::Deformable
+        &&work.compact&&params.friction==0.0&&selected_role>=0;
+    // Transient partition marker, consumed/reset by the immediately following
+    // thin kernel on the same stream. No consumer observes these private tags.
+    if(selected_eligible){work.active[pair]=static_cast<unsigned char>(2+selected_role);return;}
+    ContactInputPublication<DeferredInput> publication(work.inputs+pair);
+    auto& in=publication.input;
+    in.kind=contact.kind==0?ContactKind::PointTriangle:ContactKind::EdgeEdge;
+    in.d_hat=params.d_hat;in.k_barrier=params.k_barrier;in.dt=params.dt;
+    in.friction=params.friction;in.eps_v=params.eps_v;in.eps=params.eps;
+    in.hessian_blocks=hessian_blocks;
+    for(int role=0;role<4;++role)for(int axis=0;axis<3;++axis) {
+        in.positions[role][axis]=state.positions[contact.vertices[role]][axis];
+        in.previous[role][axis]=state.previous[contact.vertices[role]][axis];
+    }
+    work.active[pair]=1;
+    const auto result=evaluate_contact(in);
+    store_contact_output(in,result,work.outputs+pair,work.compact?work.compact+pair:nullptr,
+        work.output_activity?work.output_activity+pair:nullptr);
+    const auto status=result.status;
+    if(publication.publish_if_queued(status)) {
+        const unsigned index=atomicAdd(work.exact_count,1u);work.exact_queue[index]=static_cast<int>(pair);
+    } else if(status!=ContactStatus::Ok)error(failed,code(status));
+}
+template<bool DeferredInput>
+__global__ void gather_selected_ordinary(BroadPhaseView broad,DeformableScene scene,DeformableState state,
+    RigidScene rigid,ContactParameters params,Work work,int color,ContactAssemblyPhase phase,int* failed,
+    ColorContactWorklist color_pairs) {
+    const auto index=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
+    const auto begin=color_pairs.offsets?color_pairs.offsets[color]:0;
+    const auto end=color_pairs.offsets?color_pairs.offsets[color+1]:broad.contact_count;
+    if(index>=end-begin)return;
+    const auto pair=color_pairs.offsets?static_cast<std::size_t>(color_pairs.pair_indices[begin+index]):index;
+    // Generic classification just established the current live sole-self role.
+    // Unsupported generic active1 and pruned/unselected active0 remain untouched.
+    const unsigned partition=work.active[pair];
+    if(partition<2||partition>5)return;
+    // Clear the transient tag even when a generic error stopped the assembly.
+    // This also clears output_activity when it aliases active in the pipeline.
+    work.active[pair]=0;
+    if(atomicAdd(failed,0)||params.k_barrier==0||params.d_hat<=0)return;
+    if(color_pairs.box_separated&&color_pairs.box_separated[pair])return;
+    const auto& contact=broad.contacts[pair];
+    const int selected_role=static_cast<int>(partition)-2;
+    const unsigned hessian_blocks=1u<<(5*selected_role);
+    ContactInputPublication<DeferredInput> publication(work.inputs+pair);
+    auto& in=publication.input;
+    in.kind=contact.kind==0?ContactKind::PointTriangle:ContactKind::EdgeEdge;
+    in.d_hat=params.d_hat;in.k_barrier=params.k_barrier;in.dt=params.dt;
+    in.friction=params.friction;in.eps_v=params.eps_v;in.eps=params.eps;
+    in.hessian_blocks=hessian_blocks;
+    for(int role=0;role<4;++role)for(int axis=0;axis<3;++axis) {
+        in.positions[role][axis]=state.positions[contact.vertices[role]][axis];
+        in.previous[role][axis]=state.previous[contact.vertices[role]][axis];
+    }
+    work.active[pair]=1;
+    const auto result=selected_ordinary::evaluate_eligible(in,selected_role);
+    store_selected_ordinary_result(result,selected_role,work.compact+pair,
         work.output_activity?work.output_activity+pair:nullptr);
     const auto status=result.status;
     if(publication.publish_if_queued(status)) {
@@ -493,6 +610,7 @@ struct ResidentContactPipeline::Impl {
         "IPC_GPU_COMPACT_WARP_REDUCE_MIN_DEGREE",32,INT_MAX);
     const bool use_cooperative_exact=contact_execution_option("IPC_GPU_COOPERATIVE_EXACT_CONTACT");
     const bool use_compact_point=contact_execution_option("IPC_GPU_COMPACT_POINT_FIRST_TIER",false);
+    const bool use_selected_ordinary=contact_execution_option("IPC_GPU_SELECTED_ORDINARY_GATHER",true);
     const bool use_cooperative_compact_point=contact_execution_option("IPC_GPU_COMPACT_POINT_COOPERATIVE",false);
     // Preserve the original scalar/disabled paths, including flag parsing.
     const bool compact_point_ratio=use_compact_point&&use_cooperative_exact
@@ -712,10 +830,20 @@ void ResidentContactPipeline::assemble_color(const DeformableScene& scene,const 
         checked(cudaMemsetAsync(p.exact_retry_count.data,0,sizeof(unsigned)),"clear exact retry queue");
         checked(cudaMemsetAsync(p.exact_next.data,0,sizeof(unsigned)),"clear exact cursor");
         if(gather_count) {
-            if(p.defer_inputs)
-                gather_compute<true><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist());
-            else
-                gather_compute<false><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist());
+            if(p.use_selected_ordinary&&compact_phase&&parameters.friction==0.0) {
+                if(p.defer_inputs) {
+                    gather_general_complement<true><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist());
+                    gather_selected_ordinary<true><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist());
+                } else {
+                    gather_general_complement<false><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist());
+                    gather_selected_ordinary<false><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist());
+                }
+            } else {
+                if(p.defer_inputs)
+                    gather_compute<true><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist());
+                else
+                    gather_compute<false><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist());
+            }
         }
         }
         Work exact_work=p.work(compact_phase);

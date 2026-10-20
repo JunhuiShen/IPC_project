@@ -5,6 +5,7 @@
 #include "resident_rigid_pipeline.h"
 #include "resident_adaptive_boxes.h"
 #include "resident_global_guess.h"
+#include "resident_level_schedule.h"
 #include "resident_profile.h"
 #include <algorithm>
 #include <cmath>
@@ -136,6 +137,9 @@ struct ResidentSolver::Impl {
     ResidentElasticWorklists elastic_worklists;
     ResidentAdaptiveBoxes adaptive_boxes;
     ResidentGlobalGuess global_guess;
+    std::unique_ptr<level_predictor::ResidentLevelSchedule> level_schedule;
+    ResidentBroadPhase level_broadphase;
+    DeviceArray<BpAabb> level_boxes;
     bool invalid=false,cloth_only=false;
 
     explicit Impl(const SceneDescription& h) {
@@ -221,12 +225,63 @@ struct ResidentSolver::Impl {
         if(broad.color_count)cuda_checked(cudaMemcpy(active_color_stages.data(),color_stages.data(),
             active_color_stages.size()*sizeof(unsigned int),cudaMemcpyDeviceToHost));
     }
-    void deformable_step(int color,bool use_ccd) {
+    void run_level_guess(const StepParameters& p) {
+        ResidentProfileScope profile("level_colored_guess");
+        if(!level_schedule)level_schedule=std::make_unique<level_predictor::ResidentLevelSchedule>();
+        // The trial does not touch adaptive-box history, previous positions,
+        // velocities or rigid state. Rigid predicted positions equal starts.
+        // Keep its boxes separate from the normal solver's blue regions.
+        level_boxes.resize(scene.nodes);
+        make_motion_boxes(reinterpret_cast<const double*>(positions.data()),
+            reinterpret_cast<const double*>(predicted.data()),topology.vertex_count,.2,1e-8,level_boxes.data());
+        auto graph=topology;graph.dependency_count=0;graph.include_triangle_dependencies=false;
+        // protect_linear_gap pads queries from the complete allowed boxes,
+        // including large-coordinate endpoint floors, entirely on the GPU.
+        const auto candidates=level_broadphase.rebuild(graph,level_boxes.data(),1e-8,BroadPhaseMode::CandidatesOnly);
+        level_schedule->prepare(topology.vertex_count,candidates.contacts,candidates.contact_count,
+            state.positions,state.predicted,level_boxes.data(),scene.deformable,1e-8,true,error.data());
+        const auto bind=[&](level_predictor::DeviceSchedule schedule) {
+            BroadPhaseView phase{};
+            phase.contacts=level_schedule->retained_contacts();
+            phase.contact_count=level_schedule->retained_contact_count();
+            phase.block_colors=level_schedule->project_blocks(scene.node_blocks,topology.block_count,error.data());
+            phase.color_count=schedule.groups;
+            // The retained array is EXACTLY the graph's pruning result.
+            // Disable secondary pruning and rebuild all compacted pair IDs.
+            contacts.rebuild(phase,topology.block_count,scene.node_blocks,surface.data());
+            return phase;
+        };
+        const auto sweep=[&](const BroadPhaseView& phase) {
+            for(int color=0;color<phase.color_count;++color) {
+                if(scene.nodes)predicted_targets<<<blocks(scene.nodes),128>>>(scene,state,elastic,phase.block_colors,color);
+                const auto incidence=contacts.incidence(color);
+                clipper.clip_deformable_color(scene,state,elastic,phase,
+                    incidence.block_offsets,incidence.pair_indices,level_boxes.data(),phase.block_colors,color,
+                    v3(accepted),error.data(),true,nullptr,incidence.color_pairs,p.ccd_exact_step_bound);
+                // Vertex trial colors can outnumber update blocks because
+                // rigid proxy vertices remain separate graph obstacles. The
+                // existing full-node commit avoids elastic worklist limits.
+                commit_deformable_endpoints(scene,state,elastic,phase.block_colors,color,v3(accepted));
+            }
+            check_status();
+        };
+        const auto trial_phase=bind(level_schedule->trial());
+        sweep(trial_phase); // Exactly one discarded original-color sweep.
+        const auto scheduled=level_schedule->finish_trial(state.positions,error.data());
+        if(scene.nodes)cuda_checked(cudaMemcpy(positions.data(),level_schedule->starts(),
+            scene.nodes*sizeof(Vector3),cudaMemcpyDeviceToDevice));
+        const auto actual_phase=bind(scheduled);
+        // The discarded sweep never consumes the requested actual budget or
+        // establishes convergence. Default-stream launch order joins every
+        // color group before the next one can inspect its positions.
+        for(int iteration=0;iteration<p.colored_guess_sweeps;++iteration)sweep(actual_phase);
+    }
+    void deformable_step(int color,bool use_ccd,bool exact_step_bound) {
         const auto incidence=contacts.incidence(color);
         {
         ResidentProfileScope ccd_profile("ccd");
         clipper.clip_deformable_color(scene,state,elastic,broad,incidence.block_offsets,incidence.pair_indices,
-            boxes.data(),broad.block_colors,color,v3(accepted),error.data(),use_ccd,nullptr,incidence.color_pairs);
+            boxes.data(),broad.block_colors,color,v3(accepted),error.data(),use_ccd,nullptr,incidence.color_pairs,exact_step_bound);
         }
         ResidentProfileScope commit_profile("commit");
         commit_deformable_endpoints(scene,state,elastic,broad.block_colors,color,v3(accepted),nullptr,elastic_worklists.color(color));
@@ -259,7 +314,9 @@ void ResidentSolver::advance_substep(const StepParameters& p,const std::vector<V
         ||!(p.box_radius>=p.box_radius_min)||!std::isfinite(p.box_radius)
         ||!std::isfinite(p.damping)||!std::isfinite(p.rotation_radius)||p.rotation_radius<0
         ||p.rotation_radius>3.141592653589793||p.iterations<0||p.rebuild_interval<=0||p.colored_guess_sweeps<0
-        ||(p.global_ccd_guess&&p.colored_guess_sweeps))
+        ||(p.global_ccd_guess&&(p.colored_guess_sweeps||p.colored_guess_level_based))
+        ||((p.colored_guess_level_based||p.colored_guess_sweeps)
+            &&(!std::isfinite(p.contact.d_hat)||p.contact.d_hat<0)))
         throw std::invalid_argument("resident GPU invalid step parameters");
     if(p.contact.dt!=p.dt || p.sdf.dt!=p.dt || p.elastic.dt2!=p.dt*p.dt
         ||!(p.elastic.dt2>0)||!std::isfinite(p.elastic.dt2))
@@ -284,7 +341,9 @@ void ResidentSolver::advance_substep(const StepParameters& p,const std::vector<V
         s.global_guess.apply(s.scene,s.state,s.topology,s.error.data());
         s.check_status();
     }
-    if(p.colored_guess_sweeps && (s.enabled_stages&DeformableColorStage)) {
+    if(p.colored_guess_level_based&&p.colored_guess_sweeps&&(s.enabled_stages&DeformableColorStage)) {
+        s.run_level_guess(p);
+    } else if(p.colored_guess_sweeps && (s.enabled_stages&DeformableColorStage)) {
         ResidentProfileScope guess_profile("colored_guess");
         s.rebuild(p,true);
         for(int iteration=0;iteration<p.colored_guess_sweeps;++iteration)
@@ -293,7 +352,7 @@ void ResidentSolver::advance_substep(const StepParameters& p,const std::vector<V
                 if(s.scene.nodes)predicted_targets<<<blocks(s.scene.nodes),128>>>(s.scene,s.state,s.elastic,s.broad.block_colors,color);
                 // A CCD initial guess must remain collision-safe even when
                 // subsequent particle solver updates explicitly disable CCD.
-                s.deformable_step(color,true);
+                s.deformable_step(color,true,p.ccd_exact_step_bound);
             }
         s.check_status();
     }
@@ -319,7 +378,7 @@ void ResidentSolver::advance_substep(const StepParameters& p,const std::vector<V
                 ResidentProfileScope proposal_profile("local_solve");
                 propose_deformable_color(s.scene,s.state,s.elastic,s.broad.block_colors,color,p.damping,nullptr,worklist);
                 }
-                s.deformable_step(color,p.collisions);
+                s.deformable_step(color,p.collisions,p.ccd_exact_step_bound);
             }
             if(stages&RigidTranslationColorStage) {
                 ResidentProfileScope rigid_profile("rigid_translation");

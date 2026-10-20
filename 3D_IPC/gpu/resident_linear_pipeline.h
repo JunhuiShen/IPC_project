@@ -37,7 +37,7 @@ public:
         const std::size_t* block_contact_offsets,const int* contact_indices,
         const BpAabb* blue_boxes,const int* block_colors,int color,
         double (*accepted_positions)[3],int* error,bool use_ccd=true,cudaStream_t stream=nullptr,
-        ColorContactWorklist color_pairs={});
+        ColorContactWorklist color_pairs={},bool exact_step_bound=false);
 
     void clip_rigid_translation_color(const RigidScene&,const RigidState&,
         const RigidWorkspace&,const DeformableState&,const BroadPhaseView&,

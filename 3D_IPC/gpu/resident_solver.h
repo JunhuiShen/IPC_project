@@ -48,6 +48,10 @@ struct StepParameters {
     int iterations = 10;
     int rebuild_interval = 10;
     int colored_guess_sweeps = 0;
+    // Optional contact-only trial/BFS level schedule for colored CCD guesses.
+    bool colored_guess_level_based = false;
+    // Optional exact separating-plane proposal; acceptance still uses CCD.
+    bool ccd_exact_step_bound = false;
     // Standard CPU cloth predictor: all vertices move simultaneously,
     // then one global 0.9 * earliest-TOI fraction is used for the whole mesh.
     // A configured colored guess takes precedence in describe_step(). The

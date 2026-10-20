@@ -86,6 +86,10 @@ file(READ "${CMAKE_CURRENT_BINARY_DIR}/simulation_resident.cpp" resident_driver)
 if(resident_driver MATCHES "advance_one_frame(_general|_rb)?[ \t\r\n]*\\(")
     message(FATAL_ERROR "Resident driver still contains a CPU frame dispatch")
 endif()
+if(resident_driver MATCHES "build_incident_triangle_map[ \t\r\n]*\\("
+   OR resident_driver MATCHES "BroadPhase[ \t]+broad_phase[ \t]*;")
+    message(FATAL_ERROR "Resident driver still constructs unused CPU solver workspaces")
+endif()
 
 set(expected_variables IPC_OVERLAY_EXPECTED_SOLVER_SHA256
     IPC_OVERLAY_EXPECTED_HYBRID_DRIVER_SHA256 IPC_OVERLAY_EXPECTED_RESIDENT_SHA256)
