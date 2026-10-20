@@ -15,7 +15,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -92,6 +94,42 @@ void expect_positions_identical(
         SCOPED_TRACE(vertex);
         EXPECT_EQ(std::memcmp(actual[vertex].data(), expected[vertex].data(),
                              3 * sizeof(double)), 0);
+    }
+}
+
+// The fraction's physical target is an algebraic oracle, not a promise about
+// contraction or intermediate rounding. Keep integration/reference equality
+// bitwise separately, and use only a few roundoff units for this formula.
+void expect_fraction_target_near(const std::vector<Vec3>& actual,
+    const std::vector<Vec3>& target, double& maximum_absolute_error) {
+    ASSERT_EQ(actual.size(), target.size());
+    for (std::size_t node = 0; node < actual.size(); ++node) {
+        for (int axis = 0; axis < 3; ++axis) {
+            const double value = actual[node][axis], expected = target[node][axis];
+            const double error = std::abs(value - expected);
+            maximum_absolute_error = std::max(maximum_absolute_error, error);
+            const double scale = std::max({1.0, std::abs(value), std::abs(expected)});
+            EXPECT_LE(error, 8.0 * std::numeric_limits<double>::epsilon() * scale)
+                << "node=" << node << " axis=" << axis << std::setprecision(17)
+                << " actual=" << value << " expected=" << expected << " absdiff=" << error
+                << std::hexfloat << " actual_hex=" << value << " expected_hex=" << expected;
+        }
+    }
+}
+
+void expect_fraction_reference_identical(const std::vector<Vec3>& actual,
+    const std::vector<Vec3>& reference) {
+    ASSERT_EQ(actual.size(), reference.size());
+    for (std::size_t node = 0; node < actual.size(); ++node) {
+        for (int axis = 0; axis < 3; ++axis) {
+            EXPECT_EQ(std::memcmp(actual[node].data() + axis,
+                reference[node].data() + axis, sizeof(double)), 0)
+                << "node=" << node << " axis=" << axis << std::setprecision(17)
+                << " actual=" << actual[node][axis] << " expected=" << reference[node][axis]
+                << " absdiff=" << std::abs(actual[node][axis] - reference[node][axis])
+                << std::hexfloat << " actual_hex=" << actual[node][axis]
+                << " expected_hex=" << reference[node][axis];
+        }
     }
 }
 
@@ -535,6 +573,58 @@ TEST(ColoredCCDGuessParameters, ValidatesEnabledSettingsWithoutChangingLegacyCon
     EXPECT_THROW(conflicting.validate_colored_ccd_guess_parameters(), std::invalid_argument);
 }
 
+TEST(ColoredCCDGuessParameters, FractionDefaultsAndCliAcceptUnitInterval) {
+    EXPECT_DOUBLE_EQ(SimParams::zeros().colored_ccd_guess_fraction, 1.0);
+    IPCArgs3D defaults;
+    EXPECT_DOUBLE_EQ(defaults.to_sim_params().colored_ccd_guess_fraction, 1.0);
+    for (const std::string option : {"--use_colored_ccd_guess",
+             "--use_colored_ccd_guess_level_based"}) {
+        for (const std::string fraction : {"0", "0.9", "1"}) {
+            SCOPED_TRACE(option + " fraction=" + fraction);
+            IPCArgs3D args;
+            ASSERT_TRUE(parse_initial_guess_arguments(args, {"3D_sim", option, "true",
+                "--colored_ccd_guess_fraction", fraction}));
+            EXPECT_DOUBLE_EQ(args.to_sim_params().colored_ccd_guess_fraction,
+                std::stod(fraction));
+        }
+    }
+    IPCArgs3D disabled;
+    ASSERT_TRUE(parse_initial_guess_arguments(disabled,
+        {"3D_sim", "--colored_ccd_guess_fraction", "0.9"}));
+    EXPECT_DOUBLE_EQ(disabled.to_sim_params().colored_ccd_guess_fraction, 0.9);
+    EXPECT_FALSE(disabled.to_sim_params().use_colored_ccd_guess);
+    EXPECT_FALSE(disabled.to_sim_params().use_colored_ccd_guess_level_based);
+}
+
+TEST(ColoredCCDGuessParameters, FractionRejectsInvalidValuesEvenWhenDisabled) {
+    for (int mode : {0, 1, 2}) {
+        auto params = SimParams::zeros();
+        params.use_colored_ccd_guess = mode == 1;
+        params.use_colored_ccd_guess_level_based = mode == 2;
+        for (double invalid : {-0.01, std::nextafter(1.0, 2.0),
+                 std::numeric_limits<double>::infinity(),
+                 -std::numeric_limits<double>::infinity(),
+                 std::numeric_limits<double>::quiet_NaN()}) {
+            SCOPED_TRACE(::testing::Message() << "mode=" << mode << " fraction=" << invalid);
+            params.colored_ccd_guess_fraction = invalid;
+            EXPECT_THROW(params.validate_colored_ccd_guess_parameters(), std::invalid_argument);
+        }
+        for (double valid : {0.0, 0.9, 1.0}) {
+            params.colored_ccd_guess_fraction = valid;
+            EXPECT_NO_THROW(params.validate_colored_ccd_guess_parameters());
+        }
+    }
+    for (const std::string invalid : {"-0.01", "1.01", "nan", "inf", "-inf"}) {
+        IPCArgs3D args;
+        SCOPED_TRACE(invalid);
+        // A numeric parser may reject nonfinite literals before SimParams.
+        // If it accepts them, conversion must still reject the value.
+        if (parse_initial_guess_arguments(args,
+                {"3D_sim", "--colored_ccd_guess_fraction", invalid}))
+            EXPECT_THROW(args.to_sim_params(), std::invalid_argument);
+    }
+}
+
 TEST_F(CollisionColoredCCDInitialGuess, ParallelSettingPreservesResults) {
     const auto x = point_above_triangle();
     const auto mesh = point_triangle_mesh();
@@ -560,6 +650,166 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, ClothInitialGuessUsesXhatWithoutAd
         scene.params.dt());
     ASSERT_TRUE(scene.advance().converged);
     expect_positions_identical(scene.state.deformed_positions, expected);
+}
+
+TEST_P(CollisionColoredCCDInitialGuessDriver, ClothFractionScalesTargetOnceAcrossSweepBudgets) {
+    for (bool parallel : {false, true}) {
+        for (int sweeps : {1, 2, 6}) {
+            SCOPED_TRACE(::testing::Message() << "parallel=" << parallel << " sweeps=" << sweeps);
+            InitialGuessClothScene scene;
+            select_guess(scene.params);
+            scene.params.use_parallel = parallel;
+            scene.params.colored_ccd_guess_fraction = 0.9;
+            scene.params.colored_ccd_guess_iters = sweeps;
+            scene.params.gravity = Vec3(0, -9.81, 0);
+            scene.state.velocities.assign(4, Vec3(0.25, 0.125, 0));
+            const auto before = scene.state.deformed_positions;
+            std::vector<Vec3> xhat, expected = before;
+            build_xhat(xhat, before, scene.state.velocities, scene.params.dt());
+            for (std::size_t node = 0; node < before.size(); ++node) {
+                Vec3 displacement = xhat[node] - before[node];
+                displacement *= 0.9;
+                expected[node] += displacement;
+            }
+            ASSERT_TRUE(scene.advance().converged);
+            // No collision restricts this translation. More sweeps must not
+            // multiply by 0.9 again or continue toward the unscaled xhat.
+            expect_positions_identical(scene.state.deformed_positions, expected);
+            EXPECT_GT((xhat[0] - expected[0]).norm(), 0.001);
+            for (std::size_t node = 0; node < before.size(); ++node)
+                expect_vec_near(scene.state.velocities[node],
+                    (expected[node] - before[node]) / scene.params.dt(), 0.0);
+        }
+    }
+}
+
+TEST_P(CollisionColoredCCDInitialGuessDriver, ClothFractionZeroAndOnePreserveEndpoints) {
+    for (double fraction : {0.0, 1.0}) {
+        for (int sweeps : {0, 1, 6}) {
+            SCOPED_TRACE(::testing::Message() << "fraction=" << fraction << " sweeps=" << sweeps);
+            InitialGuessClothScene scene;
+            select_guess(scene.params);
+            scene.params.colored_ccd_guess_fraction = fraction;
+            scene.params.colored_ccd_guess_iters = sweeps;
+            scene.state.velocities[0] = Vec3(0, 0, -4);
+            const auto before = scene.state.deformed_positions;
+            std::vector<Vec3> xhat, displacement(before.size());
+            build_xhat(xhat, before, scene.state.velocities, scene.params.dt());
+            for (std::size_t node = 0; node < before.size(); ++node)
+                displacement[node] = xhat[node] - before[node];
+            // Direct helpers retain their original contract: displacement is
+            // already prepared by the integration callsite, not rescaled.
+            auto default_params = scene.params;
+            default_params.colored_ccd_guess_fraction = 1.0;
+            const auto expected = fraction == 0.0 ? before
+                : expected_guess(before, displacement, scene.mesh, default_params, sweeps);
+            ASSERT_TRUE(scene.advance().converged);
+            expect_positions_identical(scene.state.deformed_positions, expected);
+        }
+    }
+}
+
+TEST_P(CollisionColoredCCDInitialGuessDriver, ClothFractionPreservesFullInertialTargetForSolver) {
+    for (bool v2 : {false, true}) {
+        SCOPED_TRACE(v2);
+        InitialGuessClothScene scene;
+        select_guess(scene.params);
+        scene.params.colored_ccd_guess_fraction = 0.9;
+        scene.params.colored_ccd_guess_iters = 2;
+        scene.params.max_global_iters = 1;
+        scene.params.use_basic_experimental_v2 = v2;
+        scene.params.use_simd = v2;
+        scene.params.use_parallel = true;
+        scene.state.velocities.assign(4, Vec3(0.004, 0, 0));
+        const auto before = scene.state.deformed_positions;
+        std::vector<Vec3> xhat, displacement(before.size());
+        build_xhat(xhat, before, scene.state.velocities, scene.params.dt());
+        const auto original_xhat = xhat;
+        for (std::size_t node = 0; node < before.size(); ++node) {
+            displacement[node] = xhat[node] - before[node];
+            displacement[node] *= 0.9;
+        }
+        BroadPhase reference_broad_phase;
+        const auto predictor = GetParam() ? collision_colored_ccd_initial_guess_level_based
+                                         : collision_colored_ccd_initial_guess;
+        auto expected = predictor(before, displacement, scene.mesh, scene.params, 2,
+            &reference_broad_phase, nullptr);
+        const auto reduced_start = expected;
+        const auto solver = v2 ? global_gauss_seidel_solver_basic_experimental_v2
+                               : global_gauss_seidel_solver_basic;
+        ASSERT_TRUE(solver(scene.mesh, scene.adjacency, scene.pins, scene.params,
+            expected, xhat, scene.state.velocities, reference_broad_phase, "", &before).converged);
+        // The inertial objective still pulls toward full xhat, not the reduced
+        // predictor target. A driver that rescales xhat would miss this update.
+        EXPECT_GT((expected[1] - reduced_start[1]).norm(), 1e-5);
+        expect_positions_identical(xhat, original_xhat);
+        ASSERT_TRUE(scene.advance().converged);
+        expect_positions_identical(scene.state.deformed_positions, expected);
+    }
+}
+
+TEST_P(CollisionColoredCCDInitialGuessDriver, ClothFractionRebuildsEachLiveSubstepTarget) {
+    InitialGuessClothScene scene;
+    select_guess(scene.params);
+    scene.params.substeps = 3;
+    scene.params.colored_ccd_guess_fraction = 0.9;
+    scene.params.colored_ccd_guess_iters = 6;
+    scene.state.velocities.assign(4, Vec3(0.25, 0.125, 0));
+    DeformedState expected = scene.state;
+    int observed = 0;
+    double maximum_target_error = 0.0;
+    ASSERT_TRUE(scene.advance([&](int global_sub, const std::vector<Vec3>& actual) {
+        EXPECT_EQ(global_sub, observed++);
+        const auto previous = expected.deformed_positions;
+        std::vector<Vec3> xhat, displacement(previous.size()), analytic_target = previous;
+        build_xhat(xhat, previous, expected.velocities, scene.params.dt());
+        for (std::size_t node = 0; node < previous.size(); ++node) {
+            displacement[node] = xhat[node] - previous[node];
+            displacement[node] *= 0.9;
+            analytic_target[node] += displacement[node];
+        }
+        auto reference_params = scene.params;
+        reference_params.colored_ccd_guess_fraction = 1.0;
+        expected.deformed_positions = expected_guess(previous, displacement,
+            scene.mesh, reference_params, scene.params.colored_ccd_guess_iters);
+        update_velocity(expected.velocities, expected.deformed_positions, previous,
+            scene.params.dt());
+        expect_fraction_reference_identical(actual, expected.deformed_positions);
+        expect_fraction_target_near(actual, analytic_target, maximum_target_error);
+    }).converged);
+    EXPECT_EQ(observed, 3);
+    expect_fraction_reference_identical(scene.state.velocities, expected.velocities);
+    std::ostringstream error_property;
+    error_property << std::setprecision(17) << maximum_target_error;
+    RecordProperty("max_analytic_target_abs_error", error_property.str());
+}
+
+TEST_P(CollisionColoredCCDInitialGuessDriver, FractionValidationPrecedesStateMutation) {
+    for (double invalid : {-0.1, 1.1, std::numeric_limits<double>::quiet_NaN()}) {
+        InitialGuessClothScene cloth;
+        InitialGuessSolidScene mixed(true);
+        select_guess(cloth.params);
+        select_guess(mixed.params);
+        cloth.params.colored_ccd_guess_fraction = invalid;
+        mixed.params.colored_ccd_guess_fraction = invalid;
+        const auto cloth_before = cloth.state.deformed_positions;
+        const auto cloth_velocity = cloth.state.velocities;
+        const auto mixed_before = mixed.state.deformed_positions;
+        const auto mixed_velocity = mixed.state.velocities;
+        const auto mixed_com = mixed.state.x_coms;
+        int pin_updates = 0, callbacks = 0;
+        const auto updater = [&](std::vector<Pin>&, double) { ++pin_updates; };
+        const auto callback = [&](int, const std::vector<Vec3>&) { ++callbacks; };
+        EXPECT_THROW(cloth.advance(callback, updater), std::invalid_argument);
+        EXPECT_THROW(mixed.advance(callback, updater), std::invalid_argument);
+        EXPECT_EQ(pin_updates, 0);
+        EXPECT_EQ(callbacks, 0);
+        expect_positions_identical(cloth.state.deformed_positions, cloth_before);
+        expect_positions_identical(cloth.state.velocities, cloth_velocity);
+        expect_positions_identical(mixed.state.deformed_positions, mixed_before);
+        expect_positions_identical(mixed.state.velocities, mixed_velocity);
+        expect_positions_identical(mixed.state.x_coms, mixed_com);
+    }
 }
 
 TEST_P(CollisionColoredCCDInitialGuessDriver, ClothInitialGuessUsesSelectedSweepsAndTakesPrecedence) {
@@ -880,6 +1130,82 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, GeneralInitialGuessUsesXhatForBoth
                         before_q[rb].data(), 4 * sizeof(double)), 0);
             }
         }
+    }
+}
+
+TEST_P(CollisionColoredCCDInitialGuessDriver, GeneralFractionScalesDeformablesAndKeepsRigidProxiesFixed) {
+    double maximum_target_error = 0.0;
+    for (bool v2 : {false, true}) {
+        for (bool mixed : {false, true}) {
+            for (double fraction : {0.0, 0.9, 1.0}) {
+                for (int sweeps : {1, 4}) {
+                    SCOPED_TRACE(::testing::Message() << "v2=" << v2 << " mixed=" << mixed
+                        << " fraction=" << fraction << " sweeps=" << sweeps);
+                    InitialGuessSolidScene scene(mixed);
+                    select_guess(scene.params);
+                    scene.params.use_basic_experimental_v2 = v2;
+                    scene.params.use_simd = v2;
+                    scene.params.use_parallel = true;
+                    scene.params.colored_ccd_guess_fraction = fraction;
+                    scene.params.colored_ccd_guess_iters = sweeps;
+                    scene.state.velocities.assign(scene.mesh.num_positions,
+                        Vec3(0.02, 0.04, -0.02));
+                    const auto before = scene.state.deformed_positions;
+                    const auto before_com = scene.state.x_coms;
+                    const auto before_q = scene.state.orientations;
+                    std::vector<Vec3> xhat, displacement(before.size(), Vec3::Zero());
+                    std::vector<Vec3> analytic_target = before;
+                    build_xhat(xhat, before, scene.state.velocities, scene.params.dt());
+                    for (int node = 0; node < scene.mesh.num_positions; ++node) {
+                        if (scene.mesh.node_to_rb[node] >= 0) continue;
+                        displacement[node] = xhat[node] - before[node];
+                        if (fraction != 1.0) displacement[node] *= fraction;
+                        analytic_target[node] += displacement[node];
+                    }
+                    auto reference_params = scene.params;
+                    reference_params.colored_ccd_guess_fraction = 1.0;
+                    const auto expected = expected_guess(before, displacement,
+                        scene.mesh, reference_params, sweeps);
+                    ASSERT_TRUE(scene.advance().converged);
+                    expect_fraction_reference_identical(scene.state.deformed_positions, expected);
+                    expect_fraction_target_near(scene.state.deformed_positions,
+                        analytic_target, maximum_target_error);
+                    if (fraction == 0.0 || fraction == 1.0)
+                        expect_positions_identical(scene.state.deformed_positions, analytic_target);
+                    expect_positions_identical(scene.state.x_coms, before_com);
+                    ASSERT_EQ(scene.state.orientations.size(), before_q.size());
+                    for (std::size_t rb = 0; rb < before_q.size(); ++rb)
+                        EXPECT_EQ(std::memcmp(scene.state.orientations[rb].data(),
+                            before_q[rb].data(), 4 * sizeof(double)), 0);
+                }
+            }
+        }
+    }
+    std::ostringstream error_property;
+    error_property << std::setprecision(17) << maximum_target_error;
+    RecordProperty("max_analytic_target_abs_error", error_property.str());
+}
+
+TEST_F(CollisionColoredCCDInitialGuess, DisabledColoredFractionDoesNotAlterLegacyPredictors) {
+    for (int mode : {1, 2, 3}) {
+        InitialGuessClothScene scene;
+        scene.params.use_colored_ccd_guess = false;
+        scene.params.use_colored_ccd_guess_level_based = false;
+        scene.params.colored_ccd_guess_fraction = 0.0;
+        scene.params.use_ccd_guess = mode == 1;
+        scene.params.use_verlet_guess = mode == 2;
+        scene.params.use_translation_guess = mode == 3;
+        scene.state.velocities.assign(4, Vec3(0.25, 0, 0));
+        const auto before = scene.state.deformed_positions;
+        std::vector<Vec3> xhat;
+        build_xhat(xhat, before, scene.state.velocities, scene.params.dt());
+        std::vector<Vec3> expected;
+        if (mode == 1) expected = ccd_initial_guess(before, xhat, scene.mesh);
+        if (mode == 2) expected = verlet_initial_guess(before, xhat, scene.mesh, scene.params);
+        if (mode == 3) expected = translation_initial_guess(before, xhat,
+            scene.mesh, scene.pins, scene.params);
+        ASSERT_TRUE(scene.advance().converged);
+        expect_positions_identical(scene.state.deformed_positions, expected);
     }
 }
 

@@ -153,6 +153,10 @@ mode; either suppresses the global guess and uses `--colored_ccd_guess_iters` ac
 To select level mode in the example above, replace `--use_colored_ccd_guess true`
 with `--use_colored_ccd_guess false --use_colored_ccd_guess_level_based true`;
 setting both colored-mode flags is rejected. Zero sweeps performs no trial.
+`--colored_ccd_guess_fraction` accepts finite values in `[0, 1]` (default `1`).
+Both colored modes use the fixed target `x^n + fraction * (x_hat - x^n)` for
+every sweep and the level trial. This changes only the initial guess; the
+solver keeps its full `x_hat`, and rigid bodies stay fixed during the guess.
 `--ccd_exact_step_bound true` proposes an exact
 partial step for rejected deformable endpoints. Every proposal still passes
 GPU CCD and rounded-endpoint checks; an inconclusive proposal retains the

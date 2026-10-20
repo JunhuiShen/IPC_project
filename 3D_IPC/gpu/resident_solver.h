@@ -48,6 +48,8 @@ struct StepParameters {
     int iterations = 10;
     int rebuild_interval = 10;
     int colored_guess_sweeps = 0;
+    // Fixed initial-guess target fraction; never changes the solver's xhat.
+    double colored_guess_fraction = 1.0;
     // Optional contact-only trial/BFS level schedule for colored CCD guesses.
     bool colored_guess_level_based = false;
     // Optional exact separating-plane proposal; acceptance still uses CCD.

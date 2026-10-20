@@ -164,6 +164,7 @@ StepParameters describe_step(const SimParams& p) {
     out.iterations=p.max_global_iters;out.rebuild_interval=p.node_box_update_count;
     const bool colored=p.use_colored_ccd_guess||p.use_colored_ccd_guess_level_based;
     out.colored_guess_sweeps=colored?p.colored_ccd_guess_iters:0;
+    out.colored_guess_fraction=p.colored_ccd_guess_fraction;
     out.colored_guess_level_based=p.use_colored_ccd_guess_level_based;
     out.ccd_exact_step_bound=p.ccd_exact_step_bound;
     out.global_ccd_guess=p.use_ccd_guess&&!colored;

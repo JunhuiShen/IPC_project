@@ -21,11 +21,27 @@ double (*v3(DeviceArray<Vector3>& a))[3] {return reinterpret_cast<double(*)[3]>(
 double (*q4(DeviceArray<Quaternion>& a))[4] {return reinterpret_cast<double(*)[4]>(a.data());}
 double (*m9(DeviceArray<Matrix3>& a))[9] {return reinterpret_cast<double(*)[9]>(a.data());}
 unsigned blocks(std::size_t n) {return static_cast<unsigned>((n+127)/128);}
-__global__ void predicted_targets(DeformableScene s,DeformableState x,ElasticWorkspace w,
+__global__ void colored_guess_targets(DeformableScene s,DeformableState x,double fraction,
+                                     double (*targets)[3],int* error) {
+    const auto n=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
+    if(n>=s.nodes || *error)return;
+    for(int a=0;a<3;++a) {
+        // Same subtract, scale, add order as the CPU predictor. Rigid proxies
+        // remain obstacles; the full inertial prediction is never overwritten.
+        double target=x.previous[n][a];
+        if(s.deformable[n]) {
+            const double displacement=(x.predicted[n][a]-x.previous[n][a])*fraction;
+            target+=displacement;
+        }
+        if(!isfinite(target)) {atomicCAS(error,0,2);return;}
+        targets[n][a]=target;
+    }
+}
+__global__ void predicted_targets(DeformableScene s,const double (*targets)[3],ElasticWorkspace w,
                                    const int* colors,int color) {
     const auto n=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
     if(n>=s.nodes || !s.deformable[n] || colors[s.node_blocks[n]]!=color || *w.error)return;
-    for(int a=0;a<3;++a)w.proposed[n][a]=x.predicted[n][a];
+    for(int a=0;a<3;++a)w.proposed[n][a]=targets[n][a];
 }
 void length(std::size_t actual,std::size_t expected,const char* what) {
     if(actual!=expected)throw std::invalid_argument(std::string("resident scene size: ")+what);
@@ -140,6 +156,7 @@ struct ResidentSolver::Impl {
     std::unique_ptr<level_predictor::ResidentLevelSchedule> level_schedule;
     ResidentBroadPhase level_broadphase;
     DeviceArray<BpAabb> level_boxes;
+    DeviceArray<Vector3> fraction_targets;
     bool invalid=false,cloth_only=false;
 
     explicit Impl(const SceneDescription& h) {
@@ -195,11 +212,20 @@ struct ResidentSolver::Impl {
         const auto code=error.download()[0];
         if(code) {invalid=true;throw std::runtime_error("resident GPU substep failed, device status "+std::to_string(code)+"; no CPU fallback and no frame output");}
     }
-    void rebuild(const StepParameters& p,bool guess) {
+    auto prepare_colored_targets(double fraction) -> const double (*)[3] {
+        // Preserve the old default's exact arithmetic and launch/allocation path.
+        if(fraction==1.)return state.predicted;
+        fraction_targets.resize(scene.nodes);
+        if(scene.nodes)colored_guess_targets<<<blocks(scene.nodes),128>>>(scene,state,fraction,v3(fraction_targets),error.data());
+        cuda_checked(cudaGetLastError());check_status();
+        return v3(fraction_targets);
+    }
+    void rebuild(const StepParameters& p,bool guess,const double (*guess_targets)[3]=nullptr) {
+        if(guess&&scene.nodes&&!guess_targets)throw std::logic_error("resident colored guess targets missing");
         ResidentProfileScope profile("rebuild");
         {
         ResidentProfileScope boxes_profile("adaptive_boxes");
-        if(guess)make_motion_boxes(reinterpret_cast<const double*>(positions.data()),reinterpret_cast<const double*>(predicted.data()),
+        if(guess)make_motion_boxes(reinterpret_cast<const double*>(positions.data()),reinterpret_cast<const double*>(guess_targets),
             topology.vertex_count,.2,1e-8,boxes.data());
         else adaptive_boxes.build(scene,state,boxes.data(),error.data());
         build_rigid_blue_boxes(rigid,rigid_state,scene.nodes,p.box_radius,body_boxes.data(),boxes.data(),error.data(),
@@ -225,7 +251,7 @@ struct ResidentSolver::Impl {
         if(broad.color_count)cuda_checked(cudaMemcpy(active_color_stages.data(),color_stages.data(),
             active_color_stages.size()*sizeof(unsigned int),cudaMemcpyDeviceToHost));
     }
-    void run_level_guess(const StepParameters& p) {
+    void run_level_guess(const StepParameters& p,const double (*targets)[3]) {
         ResidentProfileScope profile("level_colored_guess");
         if(!level_schedule)level_schedule=std::make_unique<level_predictor::ResidentLevelSchedule>();
         // The trial does not touch adaptive-box history, previous positions,
@@ -233,13 +259,13 @@ struct ResidentSolver::Impl {
         // Keep its boxes separate from the normal solver's blue regions.
         level_boxes.resize(scene.nodes);
         make_motion_boxes(reinterpret_cast<const double*>(positions.data()),
-            reinterpret_cast<const double*>(predicted.data()),topology.vertex_count,.2,1e-8,level_boxes.data());
+            reinterpret_cast<const double*>(targets),topology.vertex_count,.2,1e-8,level_boxes.data());
         auto graph=topology;graph.dependency_count=0;graph.include_triangle_dependencies=false;
         // protect_linear_gap pads queries from the complete allowed boxes,
         // including large-coordinate endpoint floors, entirely on the GPU.
         const auto candidates=level_broadphase.rebuild(graph,level_boxes.data(),1e-8,BroadPhaseMode::CandidatesOnly);
         level_schedule->prepare(topology.vertex_count,candidates.contacts,candidates.contact_count,
-            state.positions,state.predicted,level_boxes.data(),scene.deformable,1e-8,true,error.data());
+            state.positions,targets,level_boxes.data(),scene.deformable,1e-8,true,error.data());
         const auto bind=[&](level_predictor::DeviceSchedule schedule) {
             BroadPhaseView phase{};
             phase.contacts=level_schedule->retained_contacts();
@@ -253,7 +279,7 @@ struct ResidentSolver::Impl {
         };
         const auto sweep=[&](const BroadPhaseView& phase) {
             for(int color=0;color<phase.color_count;++color) {
-                if(scene.nodes)predicted_targets<<<blocks(scene.nodes),128>>>(scene,state,elastic,phase.block_colors,color);
+                if(scene.nodes)predicted_targets<<<blocks(scene.nodes),128>>>(scene,targets,elastic,phase.block_colors,color);
                 const auto incidence=contacts.incidence(color);
                 clipper.clip_deformable_color(scene,state,elastic,phase,
                     incidence.block_offsets,incidence.pair_indices,level_boxes.data(),phase.block_colors,color,
@@ -314,6 +340,7 @@ void ResidentSolver::advance_substep(const StepParameters& p,const std::vector<V
         ||!(p.box_radius>=p.box_radius_min)||!std::isfinite(p.box_radius)
         ||!std::isfinite(p.damping)||!std::isfinite(p.rotation_radius)||p.rotation_radius<0
         ||p.rotation_radius>3.141592653589793||p.iterations<0||p.rebuild_interval<=0||p.colored_guess_sweeps<0
+        ||!std::isfinite(p.colored_guess_fraction)||p.colored_guess_fraction<0||p.colored_guess_fraction>1
         ||(p.global_ccd_guess&&(p.colored_guess_sweeps||p.colored_guess_level_based))
         ||((p.colored_guess_level_based||p.colored_guess_sweeps)
             &&(!std::isfinite(p.contact.d_hat)||p.contact.d_hat<0)))
@@ -341,15 +368,17 @@ void ResidentSolver::advance_substep(const StepParameters& p,const std::vector<V
         s.global_guess.apply(s.scene,s.state,s.topology,s.error.data());
         s.check_status();
     }
+    const auto targets=p.colored_guess_sweeps&&(s.enabled_stages&DeformableColorStage)
+        ?s.prepare_colored_targets(p.colored_guess_fraction):s.state.predicted;
     if(p.colored_guess_level_based&&p.colored_guess_sweeps&&(s.enabled_stages&DeformableColorStage)) {
-        s.run_level_guess(p);
+        s.run_level_guess(p,targets);
     } else if(p.colored_guess_sweeps && (s.enabled_stages&DeformableColorStage)) {
         ResidentProfileScope guess_profile("colored_guess");
-        s.rebuild(p,true);
+        s.rebuild(p,true,targets);
         for(int iteration=0;iteration<p.colored_guess_sweeps;++iteration)
             for(int color=0;color<s.broad.color_count;++color) {
                 if(!(s.active_color_stages[color]&DeformableColorStage))continue;
-                if(s.scene.nodes)predicted_targets<<<blocks(s.scene.nodes),128>>>(s.scene,s.state,s.elastic,s.broad.block_colors,color);
+                if(s.scene.nodes)predicted_targets<<<blocks(s.scene.nodes),128>>>(s.scene,targets,s.elastic,s.broad.block_colors,color);
                 // A CCD initial guess must remain collision-safe even when
                 // subsequent particle solver updates explicitly disable CCD.
                 s.deformable_step(color,true,p.ccd_exact_step_bound);

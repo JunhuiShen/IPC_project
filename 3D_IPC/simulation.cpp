@@ -184,8 +184,13 @@ int main(int argc, char** argv) {
         else {
             std::cout << "Deformable initial guess: "
                       << (params.use_colored_ccd_guess_level_based
-                          ? "level-based collision-colored linear CCD" : "collision-colored linear CCD")
-                      << ", target=x_hat, sweeps=" << params.colored_ccd_guess_iters;
+                          ? "level-based collision-colored linear CCD" : "collision-colored linear CCD");
+            if (params.colored_ccd_guess_fraction == 1.0)
+                std::cout << ", target=x_hat";
+            else
+                std::cout << ", target=x^n+" << params.colored_ccd_guess_fraction
+                          << "*(x_hat-x^n)";
+            std::cout << ", sweeps=" << params.colored_ccd_guess_iters;
             if (params.use_colored_ccd_guess_level_based && params.colored_ccd_guess_iters > 0)
                 std::cout << " (plus one discarded trial sweep)";
             std::cout << (has_rigid ? " (rigid bodies unchanged during guess)" : "") << "\n";

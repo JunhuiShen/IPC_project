@@ -70,6 +70,12 @@ void readme_defaults_test() {
     const auto exact_params=exact_args.to_sim_params();
     require(exact_params.ccd_exact_step_bound&&describe_step(exact_params).ccd_exact_step_bound,
         "exact-step-bound CLI flag was not forwarded to the resident solver");
+    IPCArgs3D fraction_args;
+    values.insert(values.end(),{"--colored_ccd_guess_fraction","0.9"});
+    argv.clear();for(auto& value:values)argv.push_back(value.data());
+    require(fraction_args.parse(static_cast<int>(argv.size()),argv.data()),"colored fraction argument parsing failed");
+    require(describe_step(fraction_args.to_sim_params()).colored_guess_fraction==.9,
+        "colored fraction CLI flag was not forwarded to the resident solver");
 }
 void stage_skip_test() {
     using namespace ipc_gpu::resident;
@@ -178,6 +184,17 @@ void predictor_ports_test() {
         if(!direct)legacy_gap=gap;
         else require(gap<legacy_gap,"exact direct-bound fixture did not exercise accepted partial proposal");
     }
+    // A reduced fixed target must also govern the level trial and every later
+    // sweep, while the rigid triangle stays unchanged.
+    for(bool level:{false,true}) {
+        p.colored_guess_level_based=level;p.colored_guess_fraction=.25;p.colored_guess_sweeps=3;
+        ResidentSolver reduced(h);reduced.advance_substep(p,h.pin_targets,{});const auto actual=reduced.snapshot();
+        require(actual.positions[0][2]==.5,"colored fraction was ignored or compounded across sweeps");
+        for(std::size_t n=1;n<h.positions.size();++n)
+            require(actual.positions[n]==h.positions[n],"fractional guess moved a rigid proxy");
+        require(actual.com==h.com&&actual.orientation==h.orientation,"fractional guess moved rigid pose");
+    }
+    p.colored_guess_fraction=1.;
     // Zero requested sweeps performs no trial, even with both opt-ins set.
     p.colored_guess_sweeps=0;
     ResidentSolver zero(h);zero.advance_substep(p,h.pin_targets,{});
@@ -209,6 +226,58 @@ void predictor_ports_test() {
             "invalid manual level configuration changed state or bypassed zero-sweep validation");
     }
     std::cout<<"Resident CPU-feature ports: direct proposal, restored trial, rigid obstacles, four colors/two blocks, empty/isolated/zero sweeps PASS\n";
+}
+void colored_fraction_test() {
+    using namespace ipc_gpu::resident;
+    StepParameters p;p.dt=.125;p.elastic.dt2=p.dt*p.dt;p.contact.dt=p.dt;p.sdf.dt=p.dt;
+    for(double& g:p.elastic.gravity)g=0.;
+    p.contact.d_hat=.005;p.contact.eps=1e-12;p.contact.eps_v=.001;p.iterations=0;
+    auto h=point_scene(1);h.positions[0]={.25,.5,.75};h.velocities[0]={.03125,-.015625,.0078125};
+    h.pin_targets=h.positions;
+    for(bool level:{false,true}) {
+        p.colored_guess_level_based=level;
+        for(double fraction:{0.,.9,1.})for(int sweeps:{0,1,3}) {
+            p.colored_guess_fraction=fraction;p.colored_guess_sweeps=sweeps;
+            ResidentSolver solver(h);solver.advance_substep(p,h.pin_targets,{});const auto actual=solver.snapshot();
+            for(int a=0;a<3;++a) {
+                const double full=h.positions[0][a]+p.dt*h.velocities[0][a];
+                const double expected=sweeps==0?h.positions[0][a]:fraction==1.?full:
+                    h.positions[0][a]+fraction*(full-h.positions[0][a]);
+                require(std::abs(actual.positions[0][a]-expected)<1e-15,
+                    "colored fraction target changed with sweep count or trial");
+            }
+        }
+        // Reusing a solver must refresh the anchor and not retain a reduced
+        // target when the next substep returns to the default or zero.
+        ResidentSolver reused(h);p.colored_guess_sweeps=3;
+        for(double fraction:{.9,1.,0.}) {
+            const auto before=reused.snapshot();p.colored_guess_fraction=fraction;
+            reused.advance_substep(p,h.pin_targets,{});const auto actual=reused.snapshot();
+            for(int a=0;a<3;++a) {
+                const double full=before.positions[0][a]+p.dt*before.velocities[0][a];
+                const double expected=fraction==1.?full:before.positions[0][a]+fraction*(full-before.positions[0][a]);
+                require(std::abs(actual.positions[0][a]-expected)<1e-15,"colored fraction retained a stale substep target");
+            }
+        }
+        // Only the predictor is shortened: one unconstrained Newton update
+        // must still reach the full inertial target, not the fraction target.
+        p.iterations=1;p.colored_guess_fraction=.25;
+        ResidentSolver shortened(h);shortened.advance_substep(p,h.pin_targets,{});const auto actual=shortened.snapshot();
+        auto baseline=p;baseline.colored_guess_sweeps=0;baseline.colored_guess_level_based=false;
+        ResidentSolver full(h);full.advance_substep(baseline,h.pin_targets,{});const auto expected=full.snapshot();
+        for(int a=0;a<3;++a)require(std::abs(actual.positions[0][a]-expected.positions[0][a])<1e-15,
+            "colored fraction overwrote the solver's full inertial target");
+        p.iterations=0;
+    }
+    for(double fraction:{-.1,1.1,std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::infinity(),-std::numeric_limits<double>::infinity()}) {
+        p.colored_guess_level_based=false;p.colored_guess_sweeps=0;p.colored_guess_fraction=fraction;
+        ResidentSolver guarded(h);bool rejected=false;
+        try {guarded.advance_substep(p,h.pin_targets,{});}
+        catch(const std::invalid_argument&) {rejected=true;}
+        require(rejected&&guarded.snapshot().positions==h.positions,"invalid fraction bypassed pre-update validation");
+    }
+    std::cout<<"Resident colored fraction: both modes, fixed targets, repeated substeps, full inertia and validation PASS\n";
 }
 void check_contacts(const RefMesh& mesh,const DeformedState& state,const SimParams& p) {
     BroadPhase bp;std::vector<AABB> boxes;
@@ -334,6 +403,7 @@ int main() {
         stage_skip_test();
         pure_cloth_selected_ordinary_test();
         predictor_ports_test();
+        colored_fraction_test();
         run(0,false);run(.1,false);run(.1,true);
         run(0,true,RigidBodyUpdateMode::TranslationAndOrientation,true,false);
         run(.1,true,RigidBodyUpdateMode::TranslationAndOrientation,true,true);
