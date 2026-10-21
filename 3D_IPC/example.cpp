@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace {
 
@@ -18,7 +19,8 @@ constexpr double kPi    = 3.14159265358979323846;
 constexpr double kTwoPi = 6.28318530717958647692;
 
 std::filesystem::path wrecking_ball_asset_directory(
-    const std::string& data_directory, const bool require_ball = true) {
+    const std::string& data_directory, const bool require_ball = true,
+    const char* link_basename = "link.obj") {
     namespace fs = std::filesystem;
     std::vector<fs::path> candidates;
     if (!data_directory.empty()) {
@@ -32,7 +34,7 @@ std::filesystem::path wrecking_ball_asset_directory(
     std::error_code error;
     for (const fs::path& candidate : candidates) {
         const bool has_link = fs::is_regular_file(
-            candidate / "link.obj", error);
+            candidate / link_basename, error);
         error.clear();
         const bool has_ball = fs::is_regular_file(
             candidate / "ball.obj", error);
@@ -42,7 +44,7 @@ std::filesystem::path wrecking_ball_asset_directory(
     }
     if (!require_ball) {
         throw std::runtime_error(
-            "Example 16 could not find link.obj. Run from the repository "
+            std::string("Example 16 could not find ") + link_basename + ". Run from the repository "
             "root or pass --datadir example_obj (or the wrecking_ball "
             "asset directory).");
     }
@@ -2298,8 +2300,9 @@ void build_chain_net_ball_example(
     if (!gravity.allFinite())
         throw std::invalid_argument("Example 16 requires finite gravity");
 
+    const char* link_basename = args.chain_net_coarse_links ? "link_128.obj" : "link.obj";
     const std::string link_filename = (
-        wrecking_ball_asset_directory(args.datadir, false) / "link.obj").string();
+        wrecking_ball_asset_directory(args.datadir, false, link_basename) / link_basename).string();
     std::vector<Vec3> source_positions;
     std::vector<int> source_triangles;
     load_obj_mesh(link_filename, source_positions, source_triangles);
@@ -2663,6 +2666,248 @@ void build_chain_net_ball_example(
     // Fine gear teeth and small payloads can have shorter edges than the
     // links. Apply the same conservative half-edge contact-band bound used
     // by the existing small-scale examples, preserving smaller caller values.
+    double minimum_surface_edge = std::numeric_limits<double>::infinity();
+    for (std::size_t triangle = 0; triangle < ref_mesh.tris.size(); triangle += 3) {
+        for (int local = 0; local < 3; ++local) {
+            const Vec3& a = state.deformed_positions[ref_mesh.tris[triangle + local]];
+            const Vec3& b = state.deformed_positions[ref_mesh.tris[triangle + (local + 1) % 3]];
+            minimum_surface_edge = std::min(minimum_surface_edge, (b - a).norm());
+        }
+    }
+    if (params.d_hat > 0.0 && std::isfinite(minimum_surface_edge))
+        params.d_hat = std::min(params.d_hat, 0.45 * minimum_surface_edge);
+}
+
+// ---------------------------------------------------------------------------
+// Example 17: 300 mixed rigid objects dropping into a fixed rigid box
+// ---------------------------------------------------------------------------
+void build_rigid_objects_in_box_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params) {
+    const Vec3 gravity(args.gx, args.gy, args.gz);
+    if (!gravity.allFinite())
+        throw std::invalid_argument("Example 17 requires finite gravity");
+    if (!std::isfinite(args.rigid_density) || args.rigid_density <= 0.0)
+        throw std::invalid_argument("Example 17 requires positive finite rigid density");
+
+    const auto asset_filename = [&](const char* relative_filename) {
+        const std::filesystem::path relative(relative_filename);
+        std::vector<std::filesystem::path> candidates;
+        if (!args.datadir.empty()) {
+            const std::filesystem::path data(args.datadir);
+            candidates.push_back(data / relative);
+            candidates.push_back(data / "example_obj" / relative);
+            candidates.push_back(data / relative.filename());
+        }
+        candidates.push_back(std::filesystem::path("example_obj") / relative);
+        candidates.push_back(std::filesystem::path(__FILE__).parent_path()
+                             / "example_obj" / relative);
+        for (const auto& candidate : candidates) {
+            std::error_code error;
+            if (std::filesystem::is_regular_file(candidate, error))
+                return candidate.string();
+        }
+        throw std::runtime_error(
+            std::string("Example 17 could not find ") + relative_filename
+            + ". Run from the repository root or pass --datadir example_obj.");
+    };
+
+    // Cook the four imported surfaces only once, not once per object. The
+    // existing importer verifies that each is a closed, consistently oriented
+    // manifold and removes orphan vertices. Unit-density prototype masses are
+    // enclosed volumes; each rotated/scaled copy gets its own exact polyhedral
+    // center of mass and volume-integrated inertia below.
+    constexpr int cube_prototype = 0;
+    constexpr int first_prism_prototype = 1; // indices 1..6: 3..8 sides
+    constexpr int link_prototype = 7;
+    constexpr int bunny_prototype = 8;
+    constexpr int spot_prototype = 9;
+    constexpr int gear_prototype = 10;
+    constexpr int prototype_count = 11;
+    std::vector<std::vector<Vec3>> prototype_positions(prototype_count);
+    std::vector<std::vector<int>> prototype_triangles(prototype_count);
+    std::vector<double> prototype_volumes(prototype_count);
+    const char* imported_names[4] = {
+        "wrecking_ball/link_128.obj", "bunny_coarse/bunny_1000f.obj",
+        "spot/spot_500f.obj", "gear_z18_coarse.obj"};
+    for (int prototype = 0; prototype < prototype_count; ++prototype) {
+        RefMesh local_mesh;
+        DeformedState local_state;
+        int body = -1;
+        if (prototype == cube_prototype) {
+            body = append_rigid_cube(Vec3::Zero(), 1.0, 1.0, Vec3::Zero(),
+                                     local_mesh, local_state);
+        } else if (prototype < link_prototype) {
+            body = append_rigid_polygon(
+                3 + prototype - first_prism_prototype,
+                local_state, local_mesh, Vec3::Zero(), 0.5, 1.0, 0.55);
+        } else {
+            body = append_normalized_obj_rigid_body(
+                asset_filename(imported_names[prototype - link_prototype]),
+                local_state, local_mesh, Vec3::Zero(), 1.0, 1.0);
+        }
+        prototype_volumes[prototype] = local_mesh.total_mass[body];
+        prototype_positions[prototype] = std::move(local_state.deformed_positions);
+        prototype_triangles[prototype] = std::move(local_mesh.tris);
+    }
+
+    clear_model(ref_mesh, state, X, pins);
+    params.gravity = gravity;
+    params.rigid_density = args.rigid_density;
+    params.d_hat = args.d_hat;
+    params.k_barrier = args.k_barrier;
+    params.k_sdf = 0.0;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd_guess = false;
+    params.use_colored_ccd_guess = false;
+    params.use_colored_ccd_guess_level_based = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+    params.use_ogc = false;
+    params.use_ogc_solver = false;
+
+    constexpr double inside_half_x = 6.4;
+    constexpr double inside_half_z = 4.0;
+    constexpr double height = 3.0;
+    constexpr double wall = 0.2;
+    constexpr double outside_half_x = inside_half_x + wall;
+    constexpr double outside_half_z = inside_half_z + wall;
+
+    // One connected watertight solid, not five overlapping wall meshes. Four
+    // rectangular rings form outer bottom, outer rim, inner floor and inner
+    // rim. The rim strips close the wall volume while leaving the mouth open.
+    // Normals point out of the material, including inward into the cavity.
+    std::vector<Vec3> box_positions;
+    std::vector<int> box_triangles;
+    const auto append_ring = [&](double half_x, double y, double half_z) {
+        box_positions.emplace_back(-half_x, y, -half_z);
+        box_positions.emplace_back(half_x, y, -half_z);
+        box_positions.emplace_back(half_x, y, half_z);
+        box_positions.emplace_back(-half_x, y, half_z);
+    };
+    const auto append_quad = [&](int a, int b, int c, int d) {
+        box_triangles.insert(box_triangles.end(), {a, b, c, a, c, d});
+    };
+    append_ring(outside_half_x, -wall, outside_half_z);
+    append_ring(outside_half_x, height, outside_half_z);
+    append_ring(inside_half_x, 0.0, inside_half_z);
+    append_ring(inside_half_x, height, inside_half_z);
+    append_quad(0, 1, 2, 3);       // exterior bottom: normal -y
+    append_quad(8, 11, 10, 9);     // interior floor: normal +y
+    for (int i = 0; i < 4; ++i) {
+        const int next = (i + 1) % 4;
+        append_quad(i, i + 4, next + 4, next);
+        append_quad(i + 8, next + 8, next + 12, i + 12);
+        append_quad(i + 4, i + 12, next + 12, next + 4);
+    }
+    const double container_volume = 4.0 * (
+        outside_half_x * outside_half_z * (height + wall)
+        - inside_half_x * inside_half_z * height);
+    const int container = create_rigid_body(
+        box_positions, Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0), Vec3::Zero(),
+        args.rigid_density * container_volume, ref_mesh, state,
+        RigidBodyUpdateMode::None);
+    ref_mesh.tris = std::move(box_triangles);
+    use_closed_volume_rigid_mass_properties(
+        container, 0, ref_mesh.tris.size() / 3, ref_mesh, state);
+
+    // Body 0 is the fixed container. Bodies 1..300 are layer-major, then
+    // row-major in a 10-column by 6-row by 5-layer packing. The cyclic family
+    // order gives exactly 50 of each family with different ordering per layer:
+    // Cube, polygonal prism, chain link, Bunny, Spot, gear. Every object is
+    // rigid, including Bunny and Spot (surface meshes, not TetGen solids).
+    constexpr int columns = 10;
+    constexpr int rows = 6;
+    constexpr int layers = 5;
+    constexpr double spacing = 1.2;
+    constexpr double first_center_y = 4.0;
+    const int family_prototypes[6] = {
+        cube_prototype, first_prism_prototype, link_prototype,
+        bunny_prototype, spot_prototype, gear_prototype};
+    std::vector<Vec3> placed_lower;
+    std::vector<Vec3> placed_upper;
+    placed_lower.reserve(columns * rows * layers);
+    placed_upper.reserve(columns * rows * layers);
+    for (int layer = 0; layer < layers; ++layer) {
+        for (int row = 0; row < rows; ++row) {
+            for (int col = 0; col < columns; ++col) {
+                const int slot = row * columns + col;
+                const int object = layer * rows * columns + slot;
+                const int family = (col + row + layer) % 6;
+                const int prototype = family == 1
+                    ? first_prism_prototype + (slot / 6 + layer) % 6
+                    : family_prototypes[family];
+                const Vec3 center((col - 4.5) * spacing,
+                                  first_center_y + layer * spacing,
+                                  (row - 2.5) * spacing);
+                // Only the falling links in Example 17 are smaller; keep
+                // their proportions, density and packing centers unchanged.
+                const double size_multiplier = family == 2 ? 0.7 : 1.0;
+                const double target_extent = size_multiplier
+                    * (0.8 + 0.05 * ((slot + layer) % 5));
+                const Vec3 axis = Vec3(1.0 + 0.1 * family,
+                                       2.0 + 0.1 * row,
+                                       3.0 + 0.1 * col).normalized();
+                const double half_angle = 0.085 * (1 + (7 * object) % 31);
+                const Vec4 orientation(std::cos(half_angle),
+                    axis.x() * std::sin(half_angle),
+                    axis.y() * std::sin(half_angle),
+                    axis.z() * std::sin(half_angle));
+                std::vector<Vec3> positions = prototype_positions[prototype];
+                Vec3 lower = Vec3::Constant(std::numeric_limits<double>::infinity());
+                Vec3 upper = -lower;
+                for (Vec3& position : positions) {
+                    position = quaternion_rotate(orientation, position);
+                    lower = lower.cwiseMin(position);
+                    upper = upper.cwiseMax(position);
+                }
+                const double rotated_extent = (upper - lower).maxCoeff();
+                if (!std::isfinite(rotated_extent) || rotated_extent <= 0.0)
+                    throw std::invalid_argument("Example 17 has an invalid prototype extent");
+                const double scale = target_extent / rotated_extent;
+                const Vec3 rotated_center = 0.5 * (lower + upper);
+                for (Vec3& position : positions)
+                    position = center + scale * (position - rotated_center);
+                const Vec3 world_lower = center + scale * (lower - rotated_center);
+                const Vec3 world_upper = center + scale * (upper - rotated_center);
+                if (!world_lower.allFinite() || !world_upper.allFinite()
+                    || world_lower.x() <= -inside_half_x
+                    || world_upper.x() >= inside_half_x
+                    || world_lower.z() <= -inside_half_z
+                    || world_upper.z() >= inside_half_z
+                    || world_lower.y() <= height) {
+                    throw std::invalid_argument("Example 17 objects must start above and inside the box mouth");
+                }
+                for (std::size_t previous = 0; previous < placed_lower.size(); ++previous) {
+                    if ((world_lower.array() < placed_upper[previous].array()).all()
+                        && (placed_lower[previous].array() < world_upper.array()).all()) {
+                        throw std::invalid_argument("Example 17 initial object bounds overlap");
+                    }
+                }
+                placed_lower.push_back(world_lower);
+                placed_upper.push_back(world_upper);
+
+                const int node_base = static_cast<int>(state.deformed_positions.size());
+                const std::size_t triangle_begin = ref_mesh.tris.size() / 3;
+                const double mass = args.rigid_density * prototype_volumes[prototype]
+                    * scale * scale * scale;
+                if (!std::isfinite(mass) || mass <= 0.0)
+                    throw std::invalid_argument("Example 17 object mass must be positive and finite");
+                const int body = create_rigid_body(
+                    positions, Vec3::Zero(), orientation, Vec3::Zero(), mass,
+                    ref_mesh, state, RigidBodyUpdateMode::TranslationAndOrientation);
+                for (const int node : prototype_triangles[prototype])
+                    ref_mesh.tris.push_back(node_base + node);
+                use_closed_volume_rigid_mass_properties(
+                    body, triangle_begin, ref_mesh.tris.size() / 3, ref_mesh, state);
+            }
+        }
+    }
+    ref_mesh.build_deformable_nodes();
+
     double minimum_surface_edge = std::numeric_limits<double>::infinity();
     for (std::size_t triangle = 0; triangle < ref_mesh.tris.size(); triangle += 3) {
         for (int local = 0; local < 3; ++local) {

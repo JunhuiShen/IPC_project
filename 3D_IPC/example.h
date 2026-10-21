@@ -243,12 +243,22 @@ void build_cloth_cylinder_drop_example(
 // boundary base links fixed and 48 varied rigid payloads (or an optional
 // single sphere) above it. Link geometry and spacing share a uniform scale;
 // the default 21x21 net has smaller openings at the previous overall span.
+// Example 16 defaults to a 128-vertex link; the original 220-vertex asset
+// remains selectable and Example 13 continues to use it unchanged.
 // Gears retain their source-asset proportions and
 // prisms have thickened axial profiles;
 // automatic sizing respects the initial net interior but is not a dynamic
 // catching guarantee. Links interlock geometrically; no springs, joints,
 // cloth, or floor are used.
 void build_chain_net_ball_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params);
+
+// Example 17: 300 dynamic rigid objects (50 each of cubes, polygonal prisms,
+// chain links, Bunny, Spot and gears) fall into one fixed, closed-volume,
+// open-top rigid container. No cloth, deformable solids or SDFs are used.
+void build_rigid_objects_in_box_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);

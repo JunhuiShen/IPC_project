@@ -149,6 +149,7 @@ struct IPCArgs3D : ArgParser {
     int         chain_net_rows = 21;
     int         chain_net_cols = 21;
     double      chain_net_link_scale = 0.75; // scales both link geometry and center spacing
+    bool        chain_net_coarse_links = true; // 128-vertex links; false retains the 220-vertex asset
     bool        chain_net_mixed_objects = true;
     double      chain_net_object_size = 0.0; // 0: one eighth of the smaller net span, capped to fit
     double      chain_net_object_density = 1000.0;
@@ -224,7 +225,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("exact_computation_fallback", exact_computation_fallback, true, "Enable additional exact-arithmetic CCD/contact fallbacks, matching barrier/friction calculations, and colored-predictor path checks (default: true)");
         add_bool  ("ccd_exact_step_bound", ccd_exact_step_bound, false, "Experimental direct exact separating-plane gap bound before legacy backtracking; requires exact fallback with linear CCD and OGC disabled (default: false)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=twenty_polygon_stack, 8=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 9=dynamic_bolt_into_fixed_nut, 10=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 11=cloth_unrolling_down_fixed_ramp, 12=oscillating_cloth_layers, 13=wrecking_ball, 14=cloth_cylinder_drop, 15=200_sheet_cylinder_drop, 16=chain_net_ball");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=twenty_polygon_stack, 8=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 9=dynamic_bolt_into_fixed_nut, 10=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 11=cloth_unrolling_down_fixed_ramp, 12=oscillating_cloth_layers, 13=wrecking_ball, 14=cloth_cylinder_drop, 15=200_sheet_cylinder_drop, 16=chain_net_ball, 17=rigid_objects_in_box");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -294,6 +295,7 @@ struct IPCArgs3D : ArgParser {
         add_int("chain_net_rows", chain_net_rows, 21, "Example 16: net base-link rows (at least 3)");
         add_int("chain_net_cols", chain_net_cols, 21, "Example 16: net base-link columns (at least 3)");
         add_double("chain_net_link_scale", chain_net_link_scale, 0.75, "Example 16: positive uniform scale of link geometry and center spacing; 0.75 with 21x21 links retains the old 16x16 scale-1 net span");
+        add_bool("chain_net_coarse_links", chain_net_coarse_links, true, "Example 16: use the 128-vertex link mesh; false uses the original 220-vertex wrecking-ball link");
         add_bool("chain_net_mixed_objects", chain_net_mixed_objects, true, "Example 16: drop 12 gears, 12 cubes, 12 balls and 12 triangular/pentagonal/octagonal rigid prisms; false restores the single ball");
         add_double("chain_net_object_size", chain_net_object_size, 0.0, "Example 16 mixed drop: maximum object extent; 0 uses one eighth of the smaller net span, capped to fit the fixed net interior");
         add_double("chain_net_object_density", chain_net_object_density, 1000.0, "Example 16 mixed drop: volume density of all falling objects; rigid_density controls links");
@@ -368,6 +370,26 @@ struct IPCArgs3D : ArgParser {
             preset("--fixed_iters", fixed_iters, true);
             preset("--use_basic_experimental", use_basic_experimental, true);
             preset("--use_simd", use_simd, true);
+        }
+        if (example == 17) {
+            const auto preset = [&](const char* flag, auto& field, auto value) {
+                if (!supplied(flag)) field = value;
+            };
+            // Starting budget for the 300-object rigid drop; not a measured
+            // convergence guarantee. Explicit command-line values win.
+            preset("--fps", fps, 30.0);
+            preset("--num_frames", num_frames, 200);
+            preset("--substeps", substeps, 20);
+            preset("--max_substep_iters", max_substep_iters, 50);
+            preset("--fixed_iters", fixed_iters, true);
+            preset("--rigid_density", rigid_density, 1000.0);
+            preset("--d_hat", d_hat, 0.001);
+            preset("--k_barrier", k_barrier, 1.0e9);
+            preset("--friction_coefficient", friction_coefficient, 0.1);
+            preset("--use_parallel", use_parallel, true);
+            preset("--use_basic_experimental", use_basic_experimental, true);
+            preset("--use_simd", use_simd, true);
+            preset("--exact_computation_fallback", exact_computation_fallback, true);
         }
         return true;
     }

@@ -112,7 +112,7 @@ sources, with `-fno-lto` on those sources under GCC.
 
 ## Built-in scenes
 
-Select a scene with `--example N`; IDs run consecutively from 1 to 16.
+Select a scene with `--example N`; IDs run consecutively from 1 to 17.
 Categories describe the simulated material models: **cloth** uses shell
 meshes, **rigid body** uses rigid motion, and **solid** uses deformable
 tetrahedral meshes. **Mixed** scenes below contain cloth, rigid bodies, and
@@ -137,10 +137,11 @@ There is no solid-only scene among the categorized examples.
 | 14 | Cloth only | Fifty free cloth sheets falling over an off-center fixed cylinder toward the ground. |
 | 15 | Cloth only | Two hundred 141 × 141 free cloth sheets over an off-center cylinder; 3,976,200 vertices. |
 | 16 | Rigid body only | Gears, cubes, balls and polygonal prisms drop onto an interlocking net built from the wrecking-ball chain-link mesh, with fixed boundary links. |
+| 17 | Rigid body only | 300 mixed rigid objects (50 each of cubes, polygonal prisms, chain links, Bunny, Spot and gears) drop into one fixed open-top rigid box. |
 
 ### Scene assets
 
-Examples 8–10, 13 and 16 use the supplied `example_obj/` assets. Paths below are
+Examples 8–10, 13, 16 and 17 use the supplied `example_obj/` assets. Paths below are
 relative to **`3D_IPC/`**, so keep that working directory when running them.
 
 | Examples | Required files |
@@ -149,6 +150,7 @@ relative to **`3D_IPC/`**, so keep that working directory when running them.
 | 9 | `example_obj/bolt_and_nut/bolt_coarse_bolt.obj` and `bolt_coarse_nut.obj`. |
 | 13 | `example_obj/wrecking_ball/link.obj` and `ball.obj`; `--datadir` can point to `example_obj` or its `wrecking_ball` folder. |
 | 16 | `example_obj/wrecking_ball/link.obj` and `example_obj/gear_z18_coarse.obj`; cubes, plain spheres and polygonal prisms are generated procedurally. The optional single-ball mode needs only the link asset. |
+| 17 | `example_obj/wrecking_ball/link_128.obj`, `example_obj/bunny_coarse/bunny_1000f.obj`, `example_obj/spot/spot_500f.obj` and `example_obj/gear_z18_coarse.obj`; cubes, prisms and the container are procedural. `--datadir` may point to an alternative `example_obj` root with these relative paths. |
 
 Example 4 needs a directory supplied with `--datadir`, containing
 `body_0000.obj` and `dress_0000.obj`. Other scenes are generated procedurally.
@@ -162,13 +164,22 @@ Explicit command-line settings override the scene presets. The staged Example 15
 run below is being tested; full contact and spreading acceptance is pending.
 
 Example 16 is a **triangulated rigid-link adaptation**, not the 1D-edge model in
-rigid-IPC Figure 6. It reuses Example 13's closed link mesh and the volumetric
+rigid-IPC Figure 6. It uses a coarser version of Example 13's closed link mesh and the volumetric
 [chain-net layout](https://github.com/ipc-sim/rigid-ipc/blob/23b6ba6fbf8434056444ae106356fd2209136988/tools/fixtures/3D/chain_net.py).
 The default 21 × 21 grid contains 1,197 links (76 fixed boundary links) and
 48 falling rigid bodies: 12 gears, 12 cubes, 12 spheres, and four each of
 triangular, pentagonal and octagonal prisms. The objects form three staggered
 4 × 4 layers, with mixed ordering across rows and layers. With default sphere
-resolution this is 1,245 rigid bodies, 291,920 vertices and 583,696 triangles.
+resolution this is 1,245 rigid bodies, 181,796 vertices and 363,448 triangles.
+Each link now has 128 vertices and 256 triangles, instead of 220 and 440:
+37.7% fewer scene vertices without removing any links or changing the payloads.
+`--chain_net_coarse_links false` restores the original link mesh (291,920 scene
+vertices and 583,696 triangles). Example 13 still uses the original mesh.
+The coarser mesh preserves the outer dimensions and axis-aligned opening
+spans, but changes the faceting and local opening shape. At the same density,
+its enclosed volume and link mass are approximately 12.1% lower; mass and
+inertia are recomputed from the mesh. Contact normals and trajectories can
+therefore change; the vertex reduction is not a measured runtime speedup.
 Links are connected by their interlocking geometry and contact only, without
 springs or joints.
 There is no ground plane. The net is centered at x=z=0, initially at y=0.
@@ -178,12 +189,12 @@ There is no ground plane. The net is centered at x=z=0, initially at y=0.
 center spacings. Compared with the old 16 × 16, scale-1 net, each link and
 opening is 25% smaller, while the 21 × 21 grid preserves the 24.75 × 24 m
 net-center span. The maximum link extent is 1.125 m (previously 1.5 m).
-Scaling the repeating cell together preserves the original interlocking
-geometry rather than separating the shrunken links. The 48 payloads keep
+Scaling the repeating cell together preserves the interlocking arrangement
+rather than separating the shrunken links. The 48 payloads keep
 their existing sizes; their heights follow the smaller net's top surface
 to retain the specified initial clearance. Link density stays 1000 kg/m³,
 so each smaller link has less mass; mass and inertia are recomputed.
-Use `--chain_net_rows 16 --chain_net_cols 16 --chain_net_link_scale 1`
+Use `--chain_net_rows 16 --chain_net_cols 16 --chain_net_link_scale 1 --chain_net_coarse_links false`
 to restore the previous net geometry. More links also mean more simulation work.
 `chain_net_mixed_objects=true` enables the mixed drop by default.
 `chain_net_object_size=0` automatically uses one eighth of the smaller
@@ -223,9 +234,12 @@ The reference command below uses Example 13's wrecking-ball settings with eight
 threads and exact fallback disabled. These are starting settings, not a claim
 of matching the paper's trajectory or convergence.
 GEO/OBJ output and `--write_substeps true` use the existing surface exporters.
-Regression checks cover link scaling, the preserved net span and payload sizes,
-the gear asset's unmodified proportions, prism thickness, rigid mass/inertia,
-fixed-link preservation and initial packing.
+Regression checks cover link scaling, both link resolutions, the preserved net
+span and payload sizes, the gear asset's unmodified proportions, prism thickness,
+rigid mass/inertia, fixed-link preservation and initial packing. The 3 × 3
+repeating link arrangement is interlocked and initially intersection-free for
+both meshes; its minimum link-to-link clearance is approximately 30.8 mm with
+the coarser mesh versus 26.0 mm with the original at the default scale.
 No full dynamic run was launched for this revision; these are initial-geometry
 checks, not a proof that no object can pass through a moving gap or leave the net sideways.
 The full 200-frame, enlarged 48-object trajectory has not yet been validated.
@@ -543,7 +557,7 @@ exact fallback disabled, and a separate output directory
 OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 16 \
   --use_basic_experimental true --use_simd true \
-  --exact_computation_fallback false \
+  --exact_computation_fallback false --chain_net_coarse_links true \
   --num_frames 200 --fps 30 \
   --substeps 20 --max_substep_iters 150 --fixed_iters \
   --d_hat 0.001 --k_barrier 1e9 --k_sdf 1e8 --eps_sdf 0.002 \
@@ -554,12 +568,54 @@ OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread 
 For a smaller local test, add
 `--chain_net_rows 4 --chain_net_cols 4 --chain_net_ball_gap 0.2 --num_frames 25`
 and use a different output folder. Do not restart checkpoints made with a
-different link count, link scale or payload geometry; start a fresh simulation
+different link count, link mesh resolution, link scale or payload geometry; start a fresh simulation
 in a new output folder.
 `k_sdf` and `eps_sdf` are retained from the
 wrecking-ball command but have no effect here because the scene has no SDF.
 Colored CCD initial-guess flags are deformable-only and do not apply to this
 rigid-only scene. The scene does not modify the CCD, SIMD, friction or scheduling algorithms.
+
+### Example 17: 300 rigid objects falling into a rigid box
+
+The scene contains **300 dynamic bodies plus one fixed rigid container**.
+There are 50 of each family: cubes, triangular through octagonal prisms,
+chain links, Bunny, Spot and thin gears. Bunny and Spot use closed surface
+meshes here, **not deformable tetrahedral solids**. The assets are reused at
+coarse resolution; no changes to their source files are needed.
+
+The open-top box is one connected, closed solid boundary mesh (floor and
+four walls), not five independent panels or an SDF. Its interior measures
+12.8 × 8.0 × 3.0 m, with 0.2 m walls and floor. Its rigid-body update mode
+is fixed in both position and orientation. All bodies use `rigid_density`,
+1000 kg/m³ by default, and volume-integrated mass properties.
+
+Five separated 10 × 6 layers start above the opening, with deterministic
+mixed ordering and rotations. Chain links use 70% of their original linear
+size (0.56–0.70 m world-space maximum extents); the other objects retain
+their 0.8–1.0 m extents. Link density is unchanged, so their mass scales
+with the reduced volume. Other scenes' links are unaffected.
+Initial bounding boxes are checked for separation and containment within
+the opening's footprint. This is an initial packing check, not a guarantee
+that no body can bounce out during the simulation.
+
+Starting command for a local eight-thread run (not a converged/timed benchmark):
+
+```sh
+OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
+./build/3D_sim --example 17 --num_frames 200 --fps 30 \
+  --substeps 20 --max_substep_iters 50 --fixed_iters \
+  --rigid_density 1000 --d_hat 0.001 --k_barrier 1e9 \
+  --friction_coefficient 0.1 --use_ccd true \
+  --exact_computation_fallback true --node_box_update_count 10 \
+  --use_basic_experimental true --use_simd true --use_parallel true \
+  --write_substeps false --format geo --outdir example17_rigid_box_output
+```
+
+Explicit flags override the Example 17 presets. `d_hat` is additionally
+capped to 0.45 times the shortest surface edge, as in Example 16. There are
+no SDF colliders, cloth or deformable solids; deformable initial-guess flags
+do not apply. Use a fresh output directory rather than another scene's
+restart checkpoint. To export only the initial layout, use `--num_frames 0`.
 
 ## Build and test
 
