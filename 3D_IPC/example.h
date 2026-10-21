@@ -238,3 +238,17 @@ void build_cloth_cylinder_drop_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris);
+
+// Example 16: a hanging net of solid, triangulated rigid links, with its
+// boundary base links fixed and 48 varied rigid payloads (or an optional
+// single sphere) above it. Link geometry and spacing share a uniform scale;
+// the default 21x21 net has smaller openings at the previous overall span.
+// Gears retain their source-asset proportions and
+// prisms have thickened axial profiles;
+// automatic sizing respects the initial net interior but is not a dynamic
+// catching guarantee. Links interlock geometrically; no springs, joints,
+// cloth, or floor are used.
+void build_chain_net_ball_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params);

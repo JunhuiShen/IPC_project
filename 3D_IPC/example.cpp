@@ -18,7 +18,7 @@ constexpr double kPi    = 3.14159265358979323846;
 constexpr double kTwoPi = 6.28318530717958647692;
 
 std::filesystem::path wrecking_ball_asset_directory(
-    const std::string& data_directory) {
+    const std::string& data_directory, const bool require_ball = true) {
     namespace fs = std::filesystem;
     std::vector<fs::path> candidates;
     if (!data_directory.empty()) {
@@ -37,13 +37,41 @@ std::filesystem::path wrecking_ball_asset_directory(
         const bool has_ball = fs::is_regular_file(
             candidate / "ball.obj", error);
         error.clear();
-        if (has_link && has_ball)
+        if (has_link && (!require_ball || has_ball))
             return candidate;
+    }
+    if (!require_ball) {
+        throw std::runtime_error(
+            "Example 16 could not find link.obj. Run from the repository "
+            "root or pass --datadir example_obj (or the wrecking_ball "
+            "asset directory).");
     }
     throw std::runtime_error(
         "Example 13 could not find link.obj and ball.obj. Run from the "
         "repository root or pass --datadir example_obj (or the "
         "wrecking_ball asset directory).");
+}
+
+std::filesystem::path chain_net_gear_filename(const std::string& data_directory) {
+    namespace fs = std::filesystem;
+    std::vector<fs::path> candidates;
+    if (!data_directory.empty()) {
+        const fs::path data(data_directory);
+        candidates.push_back(data / "gear_z18_coarse.obj");
+        candidates.push_back(data / "example_obj" / "gear_z18_coarse.obj");
+        candidates.push_back(data.parent_path() / "gear_z18_coarse.obj");
+    }
+    candidates.push_back(fs::path("example_obj") / "gear_z18_coarse.obj");
+    candidates.push_back(fs::path(__FILE__).parent_path()
+                         / "example_obj" / "gear_z18_coarse.obj");
+    for (const fs::path& candidate : candidates) {
+        std::error_code error;
+        if (fs::is_regular_file(candidate, error))
+            return candidate;
+    }
+    throw std::runtime_error(
+        "Example 16 mixed objects could not find gear_z18_coarse.obj. "
+        "Run from the repository root or pass --datadir example_obj.");
 }
 
 void append_box_mesh(
@@ -2226,4 +2254,423 @@ void build_cloth_cylinder_drop_example(
     ref_mesh.initialize(X, state.deformed_positions);
     state.velocities.assign(state.deformed_positions.size(), Vec3::Zero());
     ref_mesh.build_deformable_nodes();
+}
+
+// Example 16: solid-link chain net with a falling all-rigid payload.
+// Layout adapted from the MIT-licensed Rigid IPC volumetric-link generator:
+// https://github.com/ipc-sim/rigid-ipc/blob/23b6ba6fbf8434056444ae106356fd2209136988/tools/fixtures/3D/chain_net.py
+// This uses the existing triangulated wrecking-ball link, NOT the paper's
+// later codimensional edge-only asset. Centering and the falling payload are
+// deliberate scene choices; this is not an exact reproduction of Figure 6.
+void build_chain_net_ball_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params) {
+    if (args.chain_net_rows < 3 || args.chain_net_cols < 3) {
+        throw std::invalid_argument(
+            "Example 16 requires chain_net_rows and chain_net_cols >= 3");
+    }
+    if (!std::isfinite(args.chain_net_link_scale) || args.chain_net_link_scale <= 0.0) {
+        throw std::invalid_argument(
+            "Example 16 requires a positive finite chain_net_link_scale");
+    }
+    const double payload_density = args.chain_net_mixed_objects
+        ? args.chain_net_object_density : args.chain_net_ball_density;
+    const double requested_size = args.chain_net_mixed_objects
+        ? args.chain_net_object_size : args.chain_net_ball_radius;
+    if (!std::isfinite(args.rigid_density) || args.rigid_density <= 0.0
+        || !std::isfinite(payload_density) || payload_density <= 0.0) {
+        throw std::invalid_argument(
+            "Example 16 requires positive finite link and payload densities");
+    }
+    if (!std::isfinite(requested_size) || requested_size < 0.0
+        || !std::isfinite(args.chain_net_ball_gap)
+        || args.chain_net_ball_gap <= 0.0) {
+        throw std::invalid_argument(
+            "Example 16 requires a finite payload size >= 0 (0 is automatic) "
+            "and a positive finite payload gap");
+    }
+    if (args.chain_net_ball_subdiv < 0 || args.chain_net_ball_subdiv > 7) {
+        throw std::invalid_argument(
+            "Example 16 requires chain_net_ball_subdiv in [0, 7]");
+    }
+    const Vec3 gravity(args.gx, args.gy, args.gz);
+    if (!gravity.allFinite())
+        throw std::invalid_argument("Example 16 requires finite gravity");
+
+    const std::string link_filename = (
+        wrecking_ball_asset_directory(args.datadir, false) / "link.obj").string();
+    std::vector<Vec3> source_positions;
+    std::vector<int> source_triangles;
+    load_obj_mesh(link_filename, source_positions, source_triangles);
+    if (source_positions.empty() || source_triangles.empty())
+        throw std::invalid_argument("Example 16 requires a triangulated link mesh");
+    Vec3 lower = source_positions.front();
+    Vec3 upper = lower;
+    for (const Vec3& position : source_positions) {
+        if (!position.allFinite())
+            throw std::invalid_argument("Example 16 link contains a non-finite vertex");
+        lower = lower.cwiseMin(position);
+        upper = upper.cwiseMax(position);
+    }
+    const double source_extent = (upper - lower).maxCoeff();
+    if (!std::isfinite(source_extent) || source_extent <= 0.0)
+        throw std::invalid_argument("Example 16 link has an invalid extent");
+    const double link_extent = 1.5 * args.chain_net_link_scale;
+    const Vec3 scaled_source_center =
+        (link_extent / source_extent) * 0.5 * (lower + upper);
+
+    const std::uint64_t rows = static_cast<std::uint64_t>(args.chain_net_rows);
+    const std::uint64_t cols = static_cast<std::uint64_t>(args.chain_net_cols);
+    const std::uint64_t link_count = 3 * rows * cols - 3 * rows - 3 * cols;
+    const std::uint64_t sphere_factor =
+        std::uint64_t{1} << (2 * args.chain_net_ball_subdiv);
+    const std::uint64_t sphere_nodes = 10 * sphere_factor + 2;
+    std::string gear_filename;
+    std::vector<Vec3> gear_positions;
+    std::vector<int> gear_triangles;
+    if (args.chain_net_mixed_objects) {
+        gear_filename = chain_net_gear_filename(args.datadir).string();
+        load_obj_mesh(gear_filename, gear_positions, gear_triangles);
+        if (gear_positions.empty() || gear_triangles.empty())
+            throw std::invalid_argument("Example 16 requires a triangulated gear mesh");
+        for (const Vec3& position : gear_positions) {
+            if (!position.allFinite())
+                throw std::invalid_argument("Example 16 gear contains a non-finite vertex");
+        }
+    }
+    const std::uint64_t payload_nodes = args.chain_net_mixed_objects
+        ? 4 * (3 * sphere_nodes + 3 * gear_positions.size() + 3 * 8 + 2 * (3 + 5 + 8))
+        : sphere_nodes;
+    constexpr std::uint64_t maximum_nodes = 1000000;
+    // Divide before multiplying so even extreme command-line grid counts
+    // cannot overflow the allocation estimate. No requested size is clamped.
+    if (payload_nodes >= maximum_nodes
+        || source_positions.size() > maximum_nodes
+        || link_count > (maximum_nodes - payload_nodes) / source_positions.size()) {
+        throw std::invalid_argument("Example 16 exceeds the 1,000,000-vertex limit");
+    }
+
+    // Shrink the complete repeating cell, not just the mesh: this preserves
+    // its interlocking geometry while reducing both kinds of openings.
+    // 21 rows/columns at scale 0.75 retain the old 16x16 center-line span.
+    const double column_spacing = 1.65 * args.chain_net_link_scale;
+    const double row_spacing = 1.6 * args.chain_net_link_scale;
+    const double width = (args.chain_net_cols - 1) * column_spacing;
+    const double depth = (args.chain_net_rows - 1) * row_spacing;
+    const double radius = args.chain_net_mixed_objects ? 0.0
+        : (requested_size == 0.0 ? 0.25 * std::min(width, depth) : requested_size);
+    const Vec3 net_translation(-0.5 * width, 0.0, -0.5 * depth);
+    const double half_sqrt_two = std::sqrt(0.5);
+    const Vec4 rotate_x(half_sqrt_two, half_sqrt_two, 0.0, 0.0);
+    const Vec4 rotate_y(half_sqrt_two, 0.0, half_sqrt_two, 0.0);
+    const Vec4 rotate_z(half_sqrt_two, 0.0, 0.0, half_sqrt_two);
+    // Active XYZ Euler rotations: R = Rz Ry Rx, as in the source loader.
+    const Vec4 base_orientation = quaternion_normalize(
+        quaternion_multiply(rotate_y, rotate_x));
+    const Vec4 vertical_orientation = quaternion_normalize(
+        quaternion_multiply(rotate_z, rotate_x));
+
+    clear_model(ref_mesh, state, X, pins);
+    params.gravity = gravity;
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.use_ccd_guess = false;
+    params.use_colored_ccd_guess = false;
+    params.use_colored_ccd_guess_level_based = false;
+    params.use_verlet_guess = false;
+    params.use_translation_guess = false;
+    params.use_ogc = false;
+    params.use_ogc_solver = false;
+
+    auto append_link = [&](const Vec3& position, const Vec4& orientation,
+                           const bool fixed) {
+        const std::size_t triangle_begin = ref_mesh.tris.size() / 3;
+        // Undo the normalized importer's AABB recentering to retain the
+        // authored model-origin transform, including sub-micrometre offsets.
+        const Vec3 importer_center = net_translation + position
+            + quaternion_rotate(orientation, scaled_source_center);
+        const int body = append_normalized_obj_rigid_body(
+            link_filename, state, ref_mesh, importer_center, link_extent,
+            args.rigid_density, Vec3::Zero(), orientation, Vec3::Zero(),
+            fixed ? RigidBodyUpdateMode::None
+                  : RigidBodyUpdateMode::TranslationAndOrientation);
+        use_closed_volume_rigid_mass_properties(
+            body, triangle_begin, ref_mesh.tris.size() / 3, ref_mesh, state);
+    };
+    for (int row = 0; row < args.chain_net_rows; ++row) {
+        for (int col = 0; col < args.chain_net_cols; ++col) {
+            const bool boundary_row = row == 0 || row == args.chain_net_rows - 1;
+            const bool boundary_col = col == 0 || col == args.chain_net_cols - 1;
+            if (boundary_row && boundary_col)
+                continue;
+            append_link(Vec3(col * column_spacing, 0.0, row * row_spacing),
+                        base_orientation, boundary_row || boundary_col);
+            if (!boundary_row && col < args.chain_net_cols - 1) {
+                append_link(Vec3((col + 0.5) * column_spacing, 0.0,
+                                 row * row_spacing), rotate_z, false);
+            }
+            // Use the column count here (the original square-grid script
+            // compares its column index to the row count).
+            if (!boundary_col && row < args.chain_net_rows - 1) {
+                append_link(Vec3(col * column_spacing, 0.0,
+                                 (row + 0.5) * row_spacing),
+                            vertical_orientation, false);
+            }
+        }
+    }
+    if (ref_mesh.total_mass.size() != link_count)
+        throw std::logic_error("Example 16 generated an unexpected link count");
+
+    double net_top = -std::numeric_limits<double>::infinity();
+    for (const Vec3& position : state.deformed_positions)
+        net_top = std::max(net_top, position.y());
+
+    if (args.chain_net_mixed_objects) {
+        struct Bounds { Vec3 lower; Vec3 upper; };
+        const auto body_bounds = [&](const int body) {
+            Bounds bounds{Vec3::Constant(std::numeric_limits<double>::infinity()),
+                          Vec3::Constant(-std::numeric_limits<double>::infinity())};
+            for (const int node : ref_mesh.rb_nodes[body]) {
+                const Vec3& p = state.deformed_positions[node];
+                if (!p.allFinite())
+                    throw std::invalid_argument("Example 16 payload has non-finite vertices");
+                bounds.lower = bounds.lower.cwiseMin(p);
+                bounds.upper = bounds.upper.cwiseMax(p);
+            }
+            return bounds;
+        };
+        const auto axis_rotation = [](const Vec3& axis, const double angle) {
+            const Vec3 imaginary = std::sin(0.5 * angle) * axis;
+            return Vec4(std::cos(0.5 * angle), imaginary.x(), imaginary.y(), imaginary.z());
+        };
+
+        // Stay inside the inner faces of the fixed boundary base links, not
+        // merely inside their center-line rectangle. Use the authored mesh.
+        Vec3 base_lower = Vec3::Constant(std::numeric_limits<double>::infinity());
+        Vec3 base_upper = -base_lower;
+        for (const Vec3& p : source_positions) {
+            const Vec3 rotated = quaternion_rotate(
+                base_orientation, (link_extent / source_extent) * p);
+            base_lower = base_lower.cwiseMin(rotated);
+            base_upper = base_upper.cwiseMax(rotated);
+        }
+        const Vec3 interior_lower(-0.5 * width + base_upper.x(), 0.0,
+                                  -0.5 * depth + base_upper.z());
+        const Vec3 interior_upper(0.5 * width + base_lower.x(), 0.0,
+                                  0.5 * depth + base_lower.z());
+        const double interior_half_x = std::min(-interior_lower.x(), interior_upper.x());
+        const double interior_half_z = std::min(-interior_lower.z(), interior_upper.z());
+        // Enlarge the default payload, but retain a conservative automatic
+        // footprint margin for small nets. Explicit sizes are never clamped;
+        // the actual transformed bounds below must still fit. This initial
+        // packing check does not guarantee that moving objects stay caught.
+        const double object_size = requested_size == 0.0
+            ? std::min(std::min(width, depth) / 8.0,
+                       0.9 * std::min(interior_half_x, interior_half_z) / 3.3)
+            : requested_size;
+        if (!std::isfinite(object_size) || object_size <= 0.0)
+            throw std::invalid_argument("Example 16 net has no usable payload interior");
+
+        Vec3 gear_lower = gear_positions.front();
+        Vec3 gear_upper = gear_lower;
+        for (const Vec3& p : gear_positions) {
+            gear_lower = gear_lower.cwiseMin(p);
+            gear_upper = gear_upper.cwiseMax(p);
+        }
+        const Vec3 gear_center = 0.5 * (gear_lower + gear_upper);
+        const double gear_extent = (gear_upper - gear_lower).maxCoeff();
+        if (!std::isfinite(gear_extent) || gear_extent <= 0.0)
+            throw std::invalid_argument("Example 16 gear has an invalid extent");
+
+        // This sphere is generated at the origin so its mass uses the actual
+        // tessellated volume rather than the analytic sphere approximation.
+        const auto append_payload_sphere = [&](const Vec3& center, const double diameter) {
+            RefMesh local_mesh;
+            DeformedState local_state;
+            std::vector<Vec2> local_material;
+            build_sphere_mesh(local_mesh, local_state, local_material,
+                              args.chain_net_ball_subdiv, 0.5 * diameter, Vec3::Zero());
+            double volume = 0.0;
+            for (std::size_t tri = 0; tri < local_mesh.tris.size(); tri += 3) {
+                const Vec3& a = local_state.deformed_positions[local_mesh.tris[tri]];
+                const Vec3& b = local_state.deformed_positions[local_mesh.tris[tri + 1]];
+                const Vec3& c = local_state.deformed_positions[local_mesh.tris[tri + 2]];
+                volume += a.dot(b.cross(c)) / 6.0;
+            }
+            for (Vec3& p : local_state.deformed_positions)
+                p += center;
+            const int base = static_cast<int>(state.deformed_positions.size());
+            for (const int node : local_mesh.tris)
+                ref_mesh.tris.push_back(base + node);
+            return create_rigid_body(
+                local_state.deformed_positions, Vec3::Zero(),
+                Vec4(1.0, 0.0, 0.0, 0.0), Vec3::Zero(),
+                std::abs(volume) * payload_density, ref_mesh, state);
+        };
+
+        // Layer-major append order, then row-major 4x4 slots from -z to +z
+        // and -x to +x. Shift the Gear/Cube/Sphere/Prism order per row/layer,
+        // giving four of each shape in every layer and 48 payloads in total.
+        const double layer_x_offsets[3] = {0.0, 0.06, -0.05};
+        const double layer_z_offsets[3] = {0.0, -0.05, 0.06};
+        const double gear_tilts[3] = {-0.12, 0.0, 0.14};
+        const int prism_sides[3] = {3, 5, 8};
+        std::vector<Bounds> placed_bounds;
+        double previous_upper = net_top;
+        for (int layer = 0; layer < 3; ++layer) {
+            int layer_bodies[16];
+            double layer_lower = std::numeric_limits<double>::infinity();
+            for (int slot = 0; slot < 16; ++slot) {
+                const int row = slot / 4;
+                const int col = slot % 4;
+                const int type = (slot + row + layer) % 4;
+                const Vec3 center(
+                    object_size * ((col - 1.5) * 1.8 + layer_x_offsets[layer]),
+                    0.0,
+                    object_size * ((row - 1.5) * 1.8 + layer_z_offsets[layer]));
+                const std::size_t triangle_begin = ref_mesh.tris.size() / 3;
+                int body = -1;
+                if (type == 0) {
+                    const Vec4 orientation = quaternion_normalize(quaternion_multiply(
+                        axis_rotation(Vec3::UnitY(), 0.15 + 0.35 * layer),
+                        axis_rotation(Vec3::UnitX(), 0.5 * kPi + gear_tilts[layer])));
+                    Vec3 planar_lower = Vec3::Constant(std::numeric_limits<double>::infinity());
+                    Vec3 planar_upper = -planar_lower;
+                    for (const Vec3& p : gear_positions) {
+                        Vec3 planar = p - gear_center;
+                        planar.z() = 0.0;
+                        const Vec3 rotated = quaternion_rotate(orientation, planar);
+                        planar_lower = planar_lower.cwiseMin(rotated);
+                        planar_upper = planar_upper.cwiseMax(rotated);
+                    }
+                    const double desired_extent = object_size * (0.90 + 0.04 * layer);
+                    // Preserve the existing enlarged gear's XY/tooth dimensions.
+                    // Its former thickened envelope is used only to recover the
+                    // same planar scale; the actual axial thickening is omitted.
+                    const double previous_axial_thickness = 0.60 * object_size;
+                    const Vec3 axial_direction = quaternion_rotate(orientation, Vec3::UnitZ());
+                    const Vec3 planar_span = planar_upper - planar_lower;
+                    double planar_scale = std::numeric_limits<double>::infinity();
+                    for (int axis = 0; axis < 3; ++axis) {
+                        if (planar_span[axis] > 64.0 * std::numeric_limits<double>::epsilon() * gear_extent) {
+                            planar_scale = std::min(planar_scale,
+                                (desired_extent - previous_axial_thickness * std::abs(axial_direction[axis]))
+                                    / planar_span[axis]);
+                        }
+                    }
+                    if (!std::isfinite(planar_scale) || planar_scale <= 0.0)
+                        throw std::invalid_argument("Example 16 gear scaling is invalid");
+                    body = append_normalized_obj_rigid_body(
+                        gear_filename, state, ref_mesh, center, gear_extent * planar_scale,
+                        payload_density, Vec3::Zero(), orientation, Vec3::Zero());
+                } else if (type == 1) {
+                    body = append_rigid_cube(center, object_size * (0.80 + 0.05 * layer),
+                                             payload_density, Vec3::Zero(), ref_mesh, state);
+                } else if (type == 2) {
+                    body = append_payload_sphere(center, object_size * (0.86 - 0.03 * layer));
+                } else {
+                    const double diameter = object_size * (0.92 - 0.04 * layer);
+                    const Vec4 orientation = quaternion_normalize(quaternion_multiply(
+                        axis_rotation(Vec3::UnitY(), 0.20 + 0.45 * layer), rotate_x));
+                    body = append_rigid_polygon(
+                        prism_sides[layer], state, ref_mesh, center, 0.5 * diameter,
+                        payload_density, 0.65 * diameter, Vec3::Zero(), orientation, Vec3::Zero());
+                }
+                use_closed_volume_rigid_mass_properties(
+                    body, triangle_begin, ref_mesh.tris.size() / 3, ref_mesh, state);
+                layer_bodies[slot] = body;
+                layer_lower = std::min(layer_lower, body_bounds(body).lower.y());
+            }
+            const double clearance = layer == 0 ? args.chain_net_ball_gap : 0.3 * object_size;
+            const double translation_y = previous_upper + clearance - layer_lower;
+            if (!std::isfinite(translation_y))
+                throw std::invalid_argument("Example 16 payload layer position is invalid");
+            double layer_upper = previous_upper;
+            for (const int body : layer_bodies) {
+                state.x_coms[body].y() += translation_y;
+                for (const int node : ref_mesh.rb_nodes[body])
+                    state.deformed_positions[node].y() += translation_y;
+                const Bounds bounds = body_bounds(body);
+                if (bounds.lower.y() <= previous_upper)
+                    throw std::invalid_argument("Example 16 payload clearance is not representable");
+                if (bounds.lower.x() <= interior_lower.x() || bounds.upper.x() >= interior_upper.x()
+                    || bounds.lower.z() <= interior_lower.z() || bounds.upper.z() >= interior_upper.z()) {
+                    throw std::invalid_argument(
+                        "Example 16 mixed payload footprint exceeds the fixed net interior; "
+                        "reduce chain_net_object_size or increase the net dimensions");
+                }
+                for (const Bounds& other : placed_bounds) {
+                    bool separated = false;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        separated = separated || bounds.upper[axis] < other.lower[axis]
+                            || other.upper[axis] < bounds.lower[axis];
+                    }
+                    if (!separated)
+                        throw std::invalid_argument("Example 16 mixed payload AABBs overlap");
+                }
+                placed_bounds.push_back(bounds);
+                layer_upper = std::max(layer_upper, bounds.upper.y());
+            }
+            previous_upper = layer_upper;
+        }
+    } else {
+        // Generate on temporary storage: the sphere's triangle rest data must
+        // not make it a deformable object in the actual all-rigid scene.
+        RefMesh sphere_mesh;
+        DeformedState sphere_state;
+        std::vector<Vec2> sphere_material;
+        build_sphere_mesh(sphere_mesh, sphere_state, sphere_material,
+                          args.chain_net_ball_subdiv, radius, Vec3::Zero());
+        double sphere_bottom = std::numeric_limits<double>::infinity();
+        for (const Vec3& position : sphere_state.deformed_positions) {
+            if (!position.allFinite())
+                throw std::invalid_argument("Example 16 sphere has non-finite vertices");
+            sphere_bottom = std::min(sphere_bottom, position.y());
+        }
+        double signed_volume = 0.0;
+        for (std::size_t triangle = 0; triangle < sphere_mesh.tris.size(); triangle += 3) {
+            const Vec3& a = sphere_state.deformed_positions[sphere_mesh.tris[triangle]];
+            const Vec3& b = sphere_state.deformed_positions[sphere_mesh.tris[triangle + 1]];
+            const Vec3& c = sphere_state.deformed_positions[sphere_mesh.tris[triangle + 2]];
+            signed_volume += a.dot(b.cross(c)) / 6.0;
+        }
+        const double ball_mass = std::abs(signed_volume) * args.chain_net_ball_density;
+        const double ball_y = net_top + args.chain_net_ball_gap - sphere_bottom;
+        if (!std::isfinite(ball_mass) || ball_mass <= 0.0 || !std::isfinite(ball_y))
+            throw std::invalid_argument("Example 16 sphere mass or position is invalid");
+        for (Vec3& position : sphere_state.deformed_positions)
+            position.y() += ball_y;
+        for (const Vec3& position : sphere_state.deformed_positions) {
+            if (!position.allFinite() || position.y() <= net_top)
+                throw std::invalid_argument(
+                    "Example 16 ball gap is not representable at this scene scale");
+        }
+
+        const int sphere_node_begin = static_cast<int>(state.deformed_positions.size());
+        const std::size_t sphere_triangle_begin = ref_mesh.tris.size() / 3;
+        for (const int node : sphere_mesh.tris)
+            ref_mesh.tris.push_back(sphere_node_begin + node);
+        const int ball = create_rigid_body(
+            sphere_state.deformed_positions, Vec3::Zero(),
+            Vec4(1.0, 0.0, 0.0, 0.0), Vec3::Zero(), ball_mass, ref_mesh, state);
+        use_closed_volume_rigid_mass_properties(
+            ball, sphere_triangle_begin, ref_mesh.tris.size() / 3, ref_mesh, state);
+    }
+    ref_mesh.build_deformable_nodes();
+
+    // Fine gear teeth and small payloads can have shorter edges than the
+    // links. Apply the same conservative half-edge contact-band bound used
+    // by the existing small-scale examples, preserving smaller caller values.
+    double minimum_surface_edge = std::numeric_limits<double>::infinity();
+    for (std::size_t triangle = 0; triangle < ref_mesh.tris.size(); triangle += 3) {
+        for (int local = 0; local < 3; ++local) {
+            const Vec3& a = state.deformed_positions[ref_mesh.tris[triangle + local]];
+            const Vec3& b = state.deformed_positions[ref_mesh.tris[triangle + (local + 1) % 3]];
+            minimum_surface_edge = std::min(minimum_surface_edge, (b - a).norm());
+        }
+    }
+    if (params.d_hat > 0.0 && std::isfinite(minimum_surface_edge))
+        params.d_hat = std::min(params.d_hat, 0.45 * minimum_surface_edge);
 }

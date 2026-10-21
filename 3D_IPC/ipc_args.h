@@ -145,6 +145,18 @@ struct IPCArgs3D : ArgParser {
     double      cyl_cy           = 0.60;
     double      cyl_cz           = 0.0;
 
+    // Example 16: interlocking rigid mesh links supporting a rigid-object drop.
+    int         chain_net_rows = 21;
+    int         chain_net_cols = 21;
+    double      chain_net_link_scale = 0.75; // scales both link geometry and center spacing
+    bool        chain_net_mixed_objects = true;
+    double      chain_net_object_size = 0.0; // 0: one eighth of the smaller net span, capped to fit
+    double      chain_net_object_density = 1000.0;
+    double      chain_net_ball_radius = 0.0; // 0: one quarter of the smaller net span
+    double      chain_net_ball_gap = 3.0;    // surface clearance above the highest link
+    double      chain_net_ball_density = 1000.0;
+    int         chain_net_ball_subdiv = 3;
+
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
     std::string format       = "geo";
@@ -212,7 +224,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("exact_computation_fallback", exact_computation_fallback, true, "Enable additional exact-arithmetic CCD/contact fallbacks, matching barrier/friction calculations, and colored-predictor path checks (default: true)");
         add_bool  ("ccd_exact_step_bound", ccd_exact_step_bound, false, "Experimental direct exact separating-plane gap bound before legacy backtracking; requires exact fallback with linear CCD and OGC disabled (default: false)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=twenty_polygon_stack, 8=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 9=dynamic_bolt_into_fixed_nut, 10=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 11=cloth_unrolling_down_fixed_ramp, 12=oscillating_cloth_layers, 13=wrecking_ball, 14=cloth_cylinder_drop, 15=200_sheet_cylinder_drop");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=twenty_polygon_stack, 8=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 9=dynamic_bolt_into_fixed_nut, 10=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 11=cloth_unrolling_down_fixed_ramp, 12=oscillating_cloth_layers, 13=wrecking_ball, 14=cloth_cylinder_drop, 15=200_sheet_cylinder_drop, 16=chain_net_ball");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -279,6 +291,17 @@ struct IPCArgs3D : ArgParser {
         add_double("cyl_cy",           cyl_cy,           0.60, "Cylinder center y (m) in examples 14 and 15");
         add_double("cyl_cz",           cyl_cz,           0.0,  "Cylinder center z (m) in examples 14 and 15");
 
+        add_int("chain_net_rows", chain_net_rows, 21, "Example 16: net base-link rows (at least 3)");
+        add_int("chain_net_cols", chain_net_cols, 21, "Example 16: net base-link columns (at least 3)");
+        add_double("chain_net_link_scale", chain_net_link_scale, 0.75, "Example 16: positive uniform scale of link geometry and center spacing; 0.75 with 21x21 links retains the old 16x16 scale-1 net span");
+        add_bool("chain_net_mixed_objects", chain_net_mixed_objects, true, "Example 16: drop 12 gears, 12 cubes, 12 balls and 12 triangular/pentagonal/octagonal rigid prisms; false restores the single ball");
+        add_double("chain_net_object_size", chain_net_object_size, 0.0, "Example 16 mixed drop: maximum object extent; 0 uses one eighth of the smaller net span, capped to fit the fixed net interior");
+        add_double("chain_net_object_density", chain_net_object_density, 1000.0, "Example 16 mixed drop: volume density of all falling objects; rigid_density controls links");
+        add_double("chain_net_ball_radius", chain_net_ball_radius, 0.0, "Example 16 single-ball mode: sphere radius; 0 uses one quarter of the smaller net span");
+        add_double("chain_net_ball_gap", chain_net_ball_gap, 3.0, "Example 16: positive initial surface gap from highest net vertex to lowest falling object");
+        add_double("chain_net_ball_density", chain_net_ball_density, 1000.0, "Example 16 single-ball mode: sphere volume density; rigid_density controls links");
+        add_int("chain_net_ball_subdiv", chain_net_ball_subdiv, 3, "Example 16: subdivision level for each falling sphere (0-7; subject to scene size limit)");
+
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
         add_int   ("restart_frame", restart_frame, -1,            "Frame to restart from (-1 = no restart)");
@@ -328,6 +351,23 @@ struct IPCArgs3D : ArgParser {
             // The general 5 mm contact band equals this scene's release gap.
             // Keep the default strictly smaller, while honoring explicit flags.
             if (!supplied("--d_hat")) d_hat = 0.0048;
+        }
+        if (example == 16) {
+            const auto preset = [&](const char* flag, auto& field, auto value) {
+                if (!supplied(flag)) field = value;
+            };
+            // Starting settings for the mesh-link adaptation, not the paper's
+            // codimensional model or its adaptive Newton solver settings.
+            preset("--fps", fps, 25.0);
+            preset("--substeps", substeps, 4);
+            preset("--num_frames", num_frames, 250);
+            preset("--rigid_density", rigid_density, 1000.0);
+            preset("--d_hat", d_hat, 0.005);
+            preset("--k_barrier", k_barrier, 1.0e9);
+            preset("--max_substep_iters", max_substep_iters, 100);
+            preset("--fixed_iters", fixed_iters, true);
+            preset("--use_basic_experimental", use_basic_experimental, true);
+            preset("--use_simd", use_simd, true);
         }
         return true;
     }
