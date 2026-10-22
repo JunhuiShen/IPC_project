@@ -146,17 +146,16 @@ struct IPCArgs3D : ArgParser {
     double      cyl_cz           = 0.0;
 
     // Example 16: interlocking rigid mesh links supporting a rigid-object drop.
-    int         chain_net_rows = 21;
-    int         chain_net_cols = 21;
-    double      chain_net_link_scale = 0.75; // scales both link geometry and center spacing
-    bool        chain_net_coarse_links = true; // 128-vertex links; false retains the 220-vertex asset
+    int         chain_net_rows = 17;
+    int         chain_net_cols = 17;
+    double      chain_net_link_scale = 0.9375; // 17x17 compact net retains the 24.75 x 24 m span
     bool        chain_net_mixed_objects = true;
     double      chain_net_object_size = 0.0; // 0: one eighth of the smaller net span, capped to fit
     double      chain_net_object_density = 1000.0;
     double      chain_net_ball_radius = 0.0; // 0: one quarter of the smaller net span
     double      chain_net_ball_gap = 3.0;    // surface clearance above the highest link
     double      chain_net_ball_density = 1000.0;
-    int         chain_net_ball_subdiv = 3;
+    int         chain_net_ball_subdiv = 2;
 
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
@@ -292,17 +291,16 @@ struct IPCArgs3D : ArgParser {
         add_double("cyl_cy",           cyl_cy,           0.60, "Cylinder center y (m) in examples 14 and 15");
         add_double("cyl_cz",           cyl_cz,           0.0,  "Cylinder center z (m) in examples 14 and 15");
 
-        add_int("chain_net_rows", chain_net_rows, 21, "Example 16: net base-link rows (at least 3)");
-        add_int("chain_net_cols", chain_net_cols, 21, "Example 16: net base-link columns (at least 3)");
-        add_double("chain_net_link_scale", chain_net_link_scale, 0.75, "Example 16: positive uniform scale of link geometry and center spacing; 0.75 with 21x21 links retains the old 16x16 scale-1 net span");
-        add_bool("chain_net_coarse_links", chain_net_coarse_links, true, "Example 16: use the 128-vertex link mesh; false uses the original 220-vertex wrecking-ball link");
+        add_int("chain_net_rows", chain_net_rows, 17, "Example 16: compact net base-link rows (at least 3; total scene limited to 30,000 vertices)");
+        add_int("chain_net_cols", chain_net_cols, 17, "Example 16: compact net base-link columns (at least 3; total scene limited to 30,000 vertices)");
+        add_double("chain_net_link_scale", chain_net_link_scale, 0.9375, "Example 16: positive uniform scale of link geometry and center spacing; the default 17x17 grid retains the 24.75 x 24 m net span");
         add_bool("chain_net_mixed_objects", chain_net_mixed_objects, true, "Example 16: drop 12 gears, 12 cubes, 12 balls and 12 triangular/pentagonal/octagonal rigid prisms; false restores the single ball");
         add_double("chain_net_object_size", chain_net_object_size, 0.0, "Example 16 mixed drop: maximum object extent; 0 uses one eighth of the smaller net span, capped to fit the fixed net interior");
         add_double("chain_net_object_density", chain_net_object_density, 1000.0, "Example 16 mixed drop: volume density of all falling objects; rigid_density controls links");
         add_double("chain_net_ball_radius", chain_net_ball_radius, 0.0, "Example 16 single-ball mode: sphere radius; 0 uses one quarter of the smaller net span");
         add_double("chain_net_ball_gap", chain_net_ball_gap, 3.0, "Example 16: positive initial surface gap from highest net vertex to lowest falling object");
         add_double("chain_net_ball_density", chain_net_ball_density, 1000.0, "Example 16 single-ball mode: sphere volume density; rigid_density controls links");
-        add_int("chain_net_ball_subdiv", chain_net_ball_subdiv, 3, "Example 16: subdivision level for each falling sphere (0-7; subject to scene size limit)");
+        add_int("chain_net_ball_subdiv", chain_net_ball_subdiv, 2, "Example 16: subdivision level for each falling sphere (0-7; subject to the 30,000-vertex scene limit)");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");

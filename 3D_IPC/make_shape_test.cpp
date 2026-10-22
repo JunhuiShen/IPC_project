@@ -41,11 +41,12 @@ void expect_sdf_material_motion_near(
         actual.current, expected.current, tolerance);
 }
 
-std::vector<Vec3> load_multiphysics_gear_reference_positions() {
+std::vector<Vec3> load_multiphysics_gear_reference_positions(
+    const char* basename = "gear_z18_coarse.obj") {
     std::vector<Vec3> positions;
     std::vector<int> triangles;
     load_obj_mesh((std::filesystem::path(__FILE__).parent_path()
-                   / "example_obj" / "gear_z18_coarse.obj").string(),
+                   / "example_obj" / basename).string(),
                   positions, triangles);
     return positions;
 }
@@ -4537,235 +4538,309 @@ TEST(WreckingBallExample,
 }
 
 TEST(ChainNetBallExample, SquareAndRectangularNetsHaveClosedOwnedRigidMeshes) {
-    for (const bool coarse_links : {false, true}) {
-        SCOPED_TRACE(::testing::Message() << "coarse_links=" << coarse_links);
-        for (const auto dimensions : {std::array<int, 2>{3, 3},
-                                      std::array<int, 2>{4, 5}}) {
-            SCOPED_TRACE(::testing::Message()
-                         << dimensions[0] << "x" << dimensions[1]);
-            IPCArgs3D args;
-            args.chain_net_coarse_links = coarse_links;
-            args.chain_net_mixed_objects = false;
-            args.chain_net_rows = dimensions[0];
-            args.chain_net_cols = dimensions[1];
-            args.rigid_density = 7680.0;
-            if (dimensions[0] == 4) {
-                args.chain_net_link_scale = 1.2;
-                args.chain_net_ball_radius = 1.15;
-                args.chain_net_ball_subdiv = 1;
-                args.chain_net_ball_gap = 0.75;
-            }
-            RefMesh mesh;
-            DeformedState state;
-            std::vector<Vec2> X;
-            std::vector<Pin> pins;
-            SimParams params = args.to_sim_params();
-            build_chain_net_ball_example(args, mesh, state, X, pins, params);
+    for (const auto dimensions : {std::array<int, 2>{3, 3},
+                                  std::array<int, 2>{4, 5}}) {
+        SCOPED_TRACE(::testing::Message()
+                     << dimensions[0] << "x" << dimensions[1]);
+        IPCArgs3D args;
+        args.chain_net_mixed_objects = false;
+        args.chain_net_rows = dimensions[0];
+        args.chain_net_cols = dimensions[1];
+        args.rigid_density = 7680.0;
+        if (dimensions[0] == 4) {
+            args.chain_net_link_scale = 1.2;
+            args.chain_net_ball_radius = 1.15;
+            args.chain_net_ball_subdiv = 1;
+            args.chain_net_ball_gap = 0.75;
+        }
+        RefMesh mesh;
+        DeformedState state;
+        std::vector<Vec2> X;
+        std::vector<Pin> pins;
+        SimParams params = args.to_sim_params();
+        build_chain_net_ball_example(args, mesh, state, X, pins, params);
 
-            const int rows = args.chain_net_rows, cols = args.chain_net_cols;
-            const int base_links = rows * cols - 4;
-            const int horizontal_links = (rows - 2) * (cols - 1);
-            const int vertical_links = (cols - 2) * (rows - 1);
-            const int links = base_links + horizontal_links + vertical_links;
-            const int bodies = links + 1;
-            const int sphere_factor = 1 << (2 * args.chain_net_ball_subdiv);
-            const int sphere_vertices = 10 * sphere_factor + 2;
-            const int sphere_triangles = 20 * sphere_factor;
-            const int link_vertices = coarse_links ? 128 : 220;
-            const int link_triangles = coarse_links ? 256 : 440;
-            const int nodes = links * link_vertices + sphere_vertices;
-            const int triangles = links * link_triangles + sphere_triangles;
-            ASSERT_EQ(mesh.rb_nodes.size(), bodies);
-            ASSERT_EQ(mesh.total_mass.size(), bodies);
-            ASSERT_EQ(mesh.I_hat.size(), bodies);
-            ASSERT_EQ(mesh.rb_update_modes.size(), bodies);
-            ASSERT_EQ(mesh.ref_positions.size(), bodies);
-            ASSERT_EQ(state.x_coms.size(), bodies);
-            ASSERT_EQ(state.v_coms.size(), bodies);
-            ASSERT_EQ(state.orientations.size(), bodies);
-            ASSERT_EQ(state.omega.size(), bodies);
-            ASSERT_EQ(state.deformed_positions.size(), nodes);
-            ASSERT_EQ(state.velocities.size(), nodes);
-            ASSERT_EQ(mesh.mass.size(), nodes);
-            ASSERT_EQ(mesh.node_to_rb.size(), nodes);
-            EXPECT_EQ(mesh.num_positions, nodes);
-            ASSERT_EQ(mesh.tris.size(), 3 * triangles);
-            EXPECT_TRUE(X.empty());
-            EXPECT_TRUE(pins.empty());
-            EXPECT_TRUE(mesh.Dm_inverse.empty());
-            EXPECT_TRUE(mesh.area.empty());
-            EXPECT_TRUE(mesh.hinges.empty());
-            EXPECT_TRUE(mesh.hinge_adj.empty());
-            EXPECT_TRUE(mesh.tets.empty());
-            EXPECT_TRUE(mesh.tet_nodes.empty());
-            EXPECT_TRUE(mesh.surface_nodes.empty());
-            EXPECT_TRUE(mesh.deformable_nodes.empty());
-            EXPECT_TRUE(params.sdf_planes.empty());
-            EXPECT_TRUE(params.sdf_cylinders.empty());
-            EXPECT_TRUE(params.sdf_spheres.empty());
-            EXPECT_TRUE(params.gravity.isApprox(Vec3(args.gx, args.gy, args.gz), 0.0));
+        const int rows = args.chain_net_rows, cols = args.chain_net_cols;
+        const int base_links = rows * cols - 4;
+        const int horizontal_links = (rows - 2) * (cols - 1);
+        const int vertical_links = (cols - 2) * (rows - 1);
+        const int links = base_links + horizontal_links + vertical_links;
+        const int bodies = links + 1;
+        const int sphere_factor = 1 << (2 * args.chain_net_ball_subdiv);
+        const int sphere_vertices = 10 * sphere_factor + 2;
+        const int sphere_triangles = 20 * sphere_factor;
+        const int link_vertices = 32;
+        const int link_triangles = 64;
+        const int nodes = links * link_vertices + sphere_vertices;
+        const int triangles = links * link_triangles + sphere_triangles;
+        ASSERT_EQ(mesh.rb_nodes.size(), bodies);
+        ASSERT_EQ(mesh.total_mass.size(), bodies);
+        ASSERT_EQ(mesh.I_hat.size(), bodies);
+        ASSERT_EQ(mesh.rb_update_modes.size(), bodies);
+        ASSERT_EQ(mesh.ref_positions.size(), bodies);
+        ASSERT_EQ(state.x_coms.size(), bodies);
+        ASSERT_EQ(state.v_coms.size(), bodies);
+        ASSERT_EQ(state.orientations.size(), bodies);
+        ASSERT_EQ(state.omega.size(), bodies);
+        ASSERT_EQ(state.deformed_positions.size(), nodes);
+        ASSERT_EQ(state.velocities.size(), nodes);
+        ASSERT_EQ(mesh.mass.size(), nodes);
+        ASSERT_EQ(mesh.node_to_rb.size(), nodes);
+        EXPECT_EQ(mesh.num_positions, nodes);
+        ASSERT_EQ(mesh.tris.size(), 3 * triangles);
+        EXPECT_TRUE(X.empty());
+        EXPECT_TRUE(pins.empty());
+        EXPECT_TRUE(mesh.Dm_inverse.empty());
+        EXPECT_TRUE(mesh.area.empty());
+        EXPECT_TRUE(mesh.hinges.empty());
+        EXPECT_TRUE(mesh.hinge_adj.empty());
+        EXPECT_TRUE(mesh.tets.empty());
+        EXPECT_TRUE(mesh.tet_nodes.empty());
+        EXPECT_TRUE(mesh.surface_nodes.empty());
+        EXPECT_TRUE(mesh.deformable_nodes.empty());
+        EXPECT_TRUE(params.sdf_planes.empty());
+        EXPECT_TRUE(params.sdf_cylinders.empty());
+        EXPECT_TRUE(params.sdf_spheres.empty());
+        EXPECT_TRUE(params.gravity.isApprox(Vec3(args.gx, args.gy, args.gz), 0.0));
 
-            std::vector<int> ownership(nodes, 0), body_triangles(bodies, 0);
-            std::vector<std::map<std::pair<int, int>, std::pair<int, int>>>
-                body_edges(bodies);
-            for (int body = 0; body < bodies; ++body) {
-                SCOPED_TRACE(body);
-                EXPECT_EQ(mesh.rb_nodes[body].size(), body == links ? sphere_vertices : link_vertices);
-                ASSERT_EQ(mesh.ref_positions[body].size(), mesh.rb_nodes[body].size());
-                EXPECT_TRUE(state.x_coms[body].allFinite());
-                EXPECT_TRUE(state.v_coms[body].isZero(0.0));
-                EXPECT_TRUE(state.omega[body].isZero(0.0));
-                EXPECT_NEAR(state.orientations[body].norm(), 1.0, 1.0e-14);
-                double proxy_mass = 0.0;
-                for (std::size_t local = 0; local < mesh.rb_nodes[body].size(); ++local) {
-                    const int node = mesh.rb_nodes[body][local];
-                    ASSERT_GE(node, 0);
-                    ASSERT_LT(node, nodes);
-                    ++ownership[node];
-                    EXPECT_EQ(mesh.node_to_rb[node], body);
-                    EXPECT_TRUE(state.deformed_positions[node].allFinite());
-                    EXPECT_TRUE(state.velocities[node].isZero(0.0));
-                    EXPECT_GT(mesh.mass[node], 0.0);
-                    proxy_mass += mesh.mass[node];
-                    const Vec3 reconstructed = state.x_coms[body]
-                        + quaternion_rotate(state.orientations[body],
-                                            mesh.ref_positions[body][local]);
-                    EXPECT_TRUE(reconstructed.isApprox(state.deformed_positions[node], 1.0e-12));
-                }
-                EXPECT_NEAR(proxy_mass, mesh.total_mass[body],
-                            1.0e-11 * mesh.total_mass[body]);
+        std::vector<int> ownership(nodes, 0), body_triangles(bodies, 0);
+        std::vector<std::map<std::pair<int, int>, std::pair<int, int>>>
+            body_edges(bodies);
+        for (int body = 0; body < bodies; ++body) {
+            SCOPED_TRACE(body);
+            EXPECT_EQ(mesh.rb_nodes[body].size(), body == links ? sphere_vertices : link_vertices);
+            ASSERT_EQ(mesh.ref_positions[body].size(), mesh.rb_nodes[body].size());
+            EXPECT_TRUE(state.x_coms[body].allFinite());
+            EXPECT_TRUE(state.v_coms[body].isZero(0.0));
+            EXPECT_TRUE(state.omega[body].isZero(0.0));
+            EXPECT_NEAR(state.orientations[body].norm(), 1.0, 1.0e-14);
+            double proxy_mass = 0.0;
+            for (std::size_t local = 0; local < mesh.rb_nodes[body].size(); ++local) {
+                const int node = mesh.rb_nodes[body][local];
+                ASSERT_GE(node, 0);
+                ASSERT_LT(node, nodes);
+                ++ownership[node];
+                EXPECT_EQ(mesh.node_to_rb[node], body);
+                EXPECT_TRUE(state.deformed_positions[node].allFinite());
+                EXPECT_TRUE(state.velocities[node].isZero(0.0));
+                EXPECT_GT(mesh.mass[node], 0.0);
+                proxy_mass += mesh.mass[node];
+                const Vec3 reconstructed = state.x_coms[body]
+                    + quaternion_rotate(state.orientations[body],
+                                        mesh.ref_positions[body][local]);
+                EXPECT_TRUE(reconstructed.isApprox(state.deformed_positions[node], 1.0e-12));
             }
-            for (const int count : ownership) EXPECT_EQ(count, 1);
-            std::set<std::array<int, 3>> faces;
-            for (std::size_t t = 0; t < mesh.tris.size(); t += 3) {
-                std::array<int, 3> face{mesh.tris[t], mesh.tris[t + 1], mesh.tris[t + 2]};
-                for (const int node : face) {
-                    ASSERT_GE(node, 0);
-                    ASSERT_LT(node, nodes);
-                }
-                const int body = mesh.node_to_rb[face[0]];
-                ASSERT_GE(body, 0);
-                ASSERT_LT(body, bodies);
-                EXPECT_EQ(mesh.node_to_rb[face[1]], body);
-                EXPECT_EQ(mesh.node_to_rb[face[2]], body);
-                ++body_triangles[body];
-                const Vec3 a = state.deformed_positions[face[0]];
-                const Vec3 b = state.deformed_positions[face[1]];
-                const Vec3 c = state.deformed_positions[face[2]];
-                EXPECT_GT((b - a).cross(c - a).squaredNorm(), 0.0);
-                for (int side = 0; side < 3; ++side) {
-                    const int first = face[side], second = face[(side + 1) % 3];
-                    auto& edge = body_edges[body][std::minmax(first, second)];
-                    ++edge.first;
-                    edge.second += first < second ? 1 : -1;
-                }
-                std::sort(face.begin(), face.end());
-                EXPECT_TRUE(faces.insert(face).second);
+            EXPECT_NEAR(proxy_mass, mesh.total_mass[body],
+                        1.0e-11 * mesh.total_mass[body]);
+        }
+        for (const int count : ownership) EXPECT_EQ(count, 1);
+        std::set<std::array<int, 3>> faces;
+        for (std::size_t t = 0; t < mesh.tris.size(); t += 3) {
+            std::array<int, 3> face{mesh.tris[t], mesh.tris[t + 1], mesh.tris[t + 2]};
+            for (const int node : face) {
+                ASSERT_GE(node, 0);
+                ASSERT_LT(node, nodes);
             }
-            for (int body = 0; body < bodies; ++body) {
-                EXPECT_EQ(body_triangles[body], body == links ? sphere_triangles : link_triangles);
-                for (const auto& edge : body_edges[body]) {
-                    EXPECT_EQ(edge.second.first, 2);
-                    EXPECT_EQ(edge.second.second, 0);
-                }
-                // Ring surfaces have genus one; the ball is a closed sphere.
-                EXPECT_EQ(static_cast<int>(mesh.rb_nodes[body].size())
-                              - static_cast<int>(body_edges[body].size())
-                              + body_triangles[body],
-                          body == links ? 2 : 0);
+            const int body = mesh.node_to_rb[face[0]];
+            ASSERT_GE(body, 0);
+            ASSERT_LT(body, bodies);
+            EXPECT_EQ(mesh.node_to_rb[face[1]], body);
+            EXPECT_EQ(mesh.node_to_rb[face[2]], body);
+            ++body_triangles[body];
+            const Vec3 a = state.deformed_positions[face[0]];
+            const Vec3 b = state.deformed_positions[face[1]];
+            const Vec3 c = state.deformed_positions[face[2]];
+            EXPECT_GT((b - a).cross(c - a).squaredNorm(), 0.0);
+            for (int side = 0; side < 3; ++side) {
+                const int first = face[side], second = face[(side + 1) % 3];
+                auto& edge = body_edges[body][std::minmax(first, second)];
+                ++edge.first;
+                edge.second += first < second ? 1 : -1;
             }
+            std::sort(face.begin(), face.end());
+            EXPECT_TRUE(faces.insert(face).second);
+        }
+        for (int body = 0; body < bodies; ++body) {
+            EXPECT_EQ(body_triangles[body], body == links ? sphere_triangles : link_triangles);
+            for (const auto& edge : body_edges[body]) {
+                EXPECT_EQ(edge.second.first, 2);
+                EXPECT_EQ(edge.second.second, 0);
+            }
+            // Ring surfaces have genus one; the ball is a closed sphere.
+            EXPECT_EQ(static_cast<int>(mesh.rb_nodes[body].size())
+                          - static_cast<int>(body_edges[body].size())
+                          + body_triangles[body],
+                      body == links ? 2 : 0);
+        }
 
-            // Fixed bodies must be precisely the outer base links, not connectors.
-            const double column_spacing = 1.65 * args.chain_net_link_scale;
-            const double row_spacing = 1.6 * args.chain_net_link_scale;
-            const double half_width = 0.5 * (cols - 1) * column_spacing;
-            const double half_depth = 0.5 * (rows - 1) * row_spacing;
-            std::set<std::pair<int, int>> fixed_locations;
-            for (int body = 0; body < links; ++body) {
-                const Vec3& center = state.x_coms[body];
-                const bool on_boundary = std::abs(std::abs(center.x()) - half_width) < 1.0e-5
-                    || std::abs(std::abs(center.z()) - half_depth) < 1.0e-5;
-                EXPECT_EQ(mesh.rb_update_modes[body], on_boundary
-                    ? RigidBodyUpdateMode::None
-                    : RigidBodyUpdateMode::TranslationAndOrientation);
-                if (on_boundary) {
-                    const int col = static_cast<int>(std::lround((center.x() + half_width) / column_spacing));
-                    const int row = static_cast<int>(std::lround((center.z() + half_depth) / row_spacing));
-                    EXPECT_TRUE(fixed_locations.insert({row, col}).second);
-                }
-            }
-            EXPECT_EQ(fixed_locations.size(), 2 * rows + 2 * cols - 8);
-            for (int row = 0; row < rows; ++row) for (int col = 0; col < cols; ++col) {
-                const bool boundary_row = row == 0 || row == rows - 1;
-                const bool boundary_col = col == 0 || col == cols - 1;
-                EXPECT_EQ(fixed_locations.count({row, col}),
-                          static_cast<std::size_t>(boundary_row != boundary_col));
-            }
-            EXPECT_EQ(mesh.rb_update_modes[links], RigidBodyUpdateMode::TranslationAndOrientation);
-            const double radius = args.chain_net_ball_radius == 0.0
-                ? 0.5 * std::min(half_width, half_depth) : args.chain_net_ball_radius;
-            double net_top = -std::numeric_limits<double>::infinity();
-            double ball_bottom = std::numeric_limits<double>::infinity();
-            for (int node = 0; node < nodes; ++node) {
-                const Vec3& position = state.deformed_positions[node];
-                if (mesh.node_to_rb[node] == links) {
-                    ball_bottom = std::min(ball_bottom, position.y());
-                    EXPECT_NEAR((position - state.x_coms[links]).norm(), radius, 1.0e-12);
-                } else {
-                    net_top = std::max(net_top, position.y());
-                }
-            }
-            EXPECT_NEAR(state.x_coms[links].x(), 0.0, 1.0e-12);
-            EXPECT_NEAR(state.x_coms[links].z(), 0.0, 1.0e-12);
-            EXPECT_NEAR(ball_bottom - net_top, args.chain_net_ball_gap, 1.0e-12);
-            EXPECT_GT(ball_bottom, net_top);
-
-            // Independent degree-two tetrahedral quadrature checks closed-volume
-            // mass, COM, and second moments (I_hat is not the classical inertia J).
-            std::vector<double> volume(bodies, 0.0);
-            std::vector<Vec3> first_moment(bodies, Vec3::Zero());
-            std::vector<Mat33> second_moment(bodies, Mat33::Zero());
-            const double alpha = (5.0 + 3.0 * std::sqrt(5.0)) / 20.0;
-            const double beta = (5.0 - std::sqrt(5.0)) / 20.0;
-            for (std::size_t t = 0; t < mesh.tris.size(); t += 3) {
-                const int body = mesh.node_to_rb[mesh.tris[t]];
-                const Vec3 a = state.deformed_positions[mesh.tris[t]] - state.x_coms[body];
-                const Vec3 b = state.deformed_positions[mesh.tris[t + 1]] - state.x_coms[body];
-                const Vec3 c = state.deformed_positions[mesh.tris[t + 2]] - state.x_coms[body];
-                const double tetra_volume = a.dot(b.cross(c)) / 6.0;
-                volume[body] += tetra_volume;
-                const std::array<Vec3, 4> corners{Vec3::Zero(), a, b, c};
-                for (const Vec3& corner : corners) {
-                    const Vec3 point = beta * (a + b + c) + (alpha - beta) * corner;
-                    first_moment[body] += (tetra_volume / 4.0) * point;
-                    second_moment[body] += (tetra_volume / 4.0) * point * point.transpose();
-                }
-            }
-            for (int body = 0; body < bodies; ++body) {
-                SCOPED_TRACE(body);
-                const double density = body == links
-                    ? args.chain_net_ball_density : args.rigid_density;
-                EXPECT_GT(volume[body], 0.0);
-                EXPECT_NEAR(mesh.total_mass[body], density * volume[body],
-                            1.0e-10 * mesh.total_mass[body]);
-                EXPECT_LE(first_moment[body].norm(), 1.0e-10 * volume[body]);
-                Mat33 rotation;
-                rotation.col(0) = quaternion_rotate(state.orientations[body], Vec3::UnitX());
-                rotation.col(1) = quaternion_rotate(state.orientations[body], Vec3::UnitY());
-                rotation.col(2) = quaternion_rotate(state.orientations[body], Vec3::UnitZ());
-                const Mat33 world_moment = rotation * mesh.I_hat[body] * rotation.transpose();
-                EXPECT_TRUE(mesh.I_hat[body].allFinite());
-                EXPECT_TRUE(world_moment.isApprox(density * second_moment[body], 1.0e-10));
-                EXPECT_TRUE(mesh.I_hat[body].isApprox(mesh.I_hat[body].transpose(), 1.0e-12));
-                EXPECT_GT(mesh.I_hat[body](0, 0), 0.0);
-                EXPECT_GT((mesh.I_hat[body].topLeftCorner<2, 2>().determinant()), 0.0);
-                EXPECT_GT(mesh.I_hat[body].determinant(), 0.0);
+        // Fixed bodies must be precisely the outer base links, not connectors.
+        const double column_spacing = 1.65 * args.chain_net_link_scale;
+        const double row_spacing = 1.6 * args.chain_net_link_scale;
+        const double half_width = 0.5 * (cols - 1) * column_spacing;
+        const double half_depth = 0.5 * (rows - 1) * row_spacing;
+        std::set<std::pair<int, int>> fixed_locations;
+        for (int body = 0; body < links; ++body) {
+            const Vec3& center = state.x_coms[body];
+            const bool on_boundary = std::abs(std::abs(center.x()) - half_width) < 1.0e-5
+                || std::abs(std::abs(center.z()) - half_depth) < 1.0e-5;
+            EXPECT_EQ(mesh.rb_update_modes[body], on_boundary
+                ? RigidBodyUpdateMode::None
+                : RigidBodyUpdateMode::TranslationAndOrientation);
+            if (on_boundary) {
+                const int col = static_cast<int>(std::lround((center.x() + half_width) / column_spacing));
+                const int row = static_cast<int>(std::lround((center.z() + half_depth) / row_spacing));
+                EXPECT_TRUE(fixed_locations.insert({row, col}).second);
             }
         }
+        EXPECT_EQ(fixed_locations.size(), 2 * rows + 2 * cols - 8);
+        for (int row = 0; row < rows; ++row) for (int col = 0; col < cols; ++col) {
+            const bool boundary_row = row == 0 || row == rows - 1;
+            const bool boundary_col = col == 0 || col == cols - 1;
+            EXPECT_EQ(fixed_locations.count({row, col}),
+                      static_cast<std::size_t>(boundary_row != boundary_col));
+        }
+        EXPECT_EQ(mesh.rb_update_modes[links], RigidBodyUpdateMode::TranslationAndOrientation);
+        const double radius = args.chain_net_ball_radius == 0.0
+            ? 0.5 * std::min(half_width, half_depth) : args.chain_net_ball_radius;
+        double net_top = -std::numeric_limits<double>::infinity();
+        double ball_bottom = std::numeric_limits<double>::infinity();
+        for (int node = 0; node < nodes; ++node) {
+            const Vec3& position = state.deformed_positions[node];
+            if (mesh.node_to_rb[node] == links) {
+                ball_bottom = std::min(ball_bottom, position.y());
+                EXPECT_NEAR((position - state.x_coms[links]).norm(), radius, 1.0e-12);
+            } else {
+                net_top = std::max(net_top, position.y());
+            }
+        }
+        EXPECT_NEAR(state.x_coms[links].x(), 0.0, 1.0e-12);
+        EXPECT_NEAR(state.x_coms[links].z(), 0.0, 1.0e-12);
+        EXPECT_NEAR(ball_bottom - net_top, args.chain_net_ball_gap, 1.0e-12);
+        EXPECT_GT(ball_bottom, net_top);
+
+        // Independent degree-two tetrahedral quadrature checks closed-volume
+        // mass, COM, and second moments (I_hat is not the classical inertia J).
+        std::vector<double> volume(bodies, 0.0);
+        std::vector<Vec3> first_moment(bodies, Vec3::Zero());
+        std::vector<Mat33> second_moment(bodies, Mat33::Zero());
+        const double alpha = (5.0 + 3.0 * std::sqrt(5.0)) / 20.0;
+        const double beta = (5.0 - std::sqrt(5.0)) / 20.0;
+        for (std::size_t t = 0; t < mesh.tris.size(); t += 3) {
+            const int body = mesh.node_to_rb[mesh.tris[t]];
+            const Vec3 a = state.deformed_positions[mesh.tris[t]] - state.x_coms[body];
+            const Vec3 b = state.deformed_positions[mesh.tris[t + 1]] - state.x_coms[body];
+            const Vec3 c = state.deformed_positions[mesh.tris[t + 2]] - state.x_coms[body];
+            const double tetra_volume = a.dot(b.cross(c)) / 6.0;
+            volume[body] += tetra_volume;
+            const std::array<Vec3, 4> corners{Vec3::Zero(), a, b, c};
+            for (const Vec3& corner : corners) {
+                const Vec3 point = beta * (a + b + c) + (alpha - beta) * corner;
+                first_moment[body] += (tetra_volume / 4.0) * point;
+                second_moment[body] += (tetra_volume / 4.0) * point * point.transpose();
+            }
+        }
+        for (int body = 0; body < bodies; ++body) {
+            SCOPED_TRACE(body);
+            const double density = body == links
+                ? args.chain_net_ball_density : args.rigid_density;
+            EXPECT_GT(volume[body], 0.0);
+            EXPECT_NEAR(mesh.total_mass[body], density * volume[body],
+                        1.0e-10 * mesh.total_mass[body]);
+            EXPECT_LE(first_moment[body].norm(), 1.0e-10 * volume[body]);
+            Mat33 rotation;
+            rotation.col(0) = quaternion_rotate(state.orientations[body], Vec3::UnitX());
+            rotation.col(1) = quaternion_rotate(state.orientations[body], Vec3::UnitY());
+            rotation.col(2) = quaternion_rotate(state.orientations[body], Vec3::UnitZ());
+            const Mat33 world_moment = rotation * mesh.I_hat[body] * rotation.transpose();
+            EXPECT_TRUE(mesh.I_hat[body].allFinite());
+            EXPECT_TRUE(world_moment.isApprox(density * second_moment[body], 1.0e-10));
+            EXPECT_TRUE(mesh.I_hat[body].isApprox(mesh.I_hat[body].transpose(), 1.0e-12));
+            EXPECT_GT(mesh.I_hat[body](0, 0), 0.0);
+            EXPECT_GT((mesh.I_hat[body].topLeftCorner<2, 2>().determinant()), 0.0);
+            EXPECT_GT(mesh.I_hat[body].determinant(), 0.0);
+        }
     }
+
 }
 
-TEST(ChainNetBallExample, BothLinkMeshesStartSeparatedAndInterlocked) {
+TEST(ChainNetBallExample, DefaultSceneStaysUnder30kWithClosedPhysicalBodies) {
+    IPCArgs3D args;
+    std::vector<std::string> values = {"3D_sim", "--example", "16"};
+    std::vector<char*> argv;
+    for (auto& value : values) argv.push_back(value.data());
+    ASSERT_TRUE(args.parse(static_cast<int>(argv.size()), argv.data()));
+    EXPECT_EQ(args.chain_net_rows, 17);
+    EXPECT_EQ(args.chain_net_cols, 17);
+    EXPECT_EQ(args.chain_net_ball_subdiv, 2);
+    // The same 24.75 x 24 m center-line span as the 21x21 GIF scene.
+    EXPECT_DOUBLE_EQ(16 * 1.65 * args.chain_net_link_scale, 20 * 1.65 * 0.75);
+    EXPECT_DOUBLE_EQ(16 * 1.6 * args.chain_net_link_scale, 20 * 1.6 * 0.75);
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    build_chain_net_ball_example(args, mesh, state, X, pins, params);
+    constexpr int links = 765;
+    ASSERT_EQ(mesh.rb_nodes.size(), links + 48);
+    ASSERT_EQ(state.deformed_positions.size(), 28808U);
+    ASSERT_EQ(mesh.tris.size() / 3, 57472U);
+    EXPECT_LE(state.deformed_positions.size(), 30000U);
+    EXPECT_EQ(std::count(mesh.rb_update_modes.begin(), mesh.rb_update_modes.end(),
+                         RigidBodyUpdateMode::None), 60);
+    std::array<int, 4> counts{};
+    for (int payload = 0; payload < 48; ++payload) {
+        const int type = (payload % 16 + (payload % 16) / 4 + payload / 16) % 4;
+        ++counts[type];
+        const int sides = std::array<int, 3>{3, 5, 8}[payload / 16];
+        EXPECT_EQ(mesh.rb_nodes[links + payload].size(),
+                  (std::array<int, 4>{180, 8, 162, 2 * sides}[type]));
+    }
+    EXPECT_EQ(counts, (std::array<int, 4>{12, 12, 12, 12}));
+    std::map<std::pair<int, int>, int> directed_edges;
+    std::vector<double> volumes(links + 48, 0.0);
+    for (std::size_t t = 0; t < mesh.tris.size(); t += 3) {
+        const int a = mesh.tris[t], b = mesh.tris[t + 1], c = mesh.tris[t + 2];
+        const int body = mesh.node_to_rb[a];
+        ASSERT_EQ(mesh.node_to_rb[b], body);
+        ASSERT_EQ(mesh.node_to_rb[c], body);
+        const Vec3 p = state.deformed_positions[a] - state.x_coms[body];
+        const Vec3 q = state.deformed_positions[b] - state.x_coms[body];
+        const Vec3 r = state.deformed_positions[c] - state.x_coms[body];
+        EXPECT_GT((q - p).cross(r - p).norm(), 1.0e-10);
+        volumes[body] += p.dot(q.cross(r)) / 6.0;
+        ++directed_edges[{a, b}];
+        ++directed_edges[{b, c}];
+        ++directed_edges[{c, a}];
+    }
+    for (const auto& [edge, count] : directed_edges) {
+        EXPECT_EQ(count, 1);
+        EXPECT_EQ(directed_edges.at({edge.second, edge.first}), 1);
+    }
+    for (int body = 0; body < links + 48; ++body) {
+        SCOPED_TRACE(body);
+        EXPECT_GT(volumes[body], 0.0);
+        const double density = body < links ? args.rigid_density : args.chain_net_object_density;
+        EXPECT_NEAR(mesh.total_mass[body], density * volumes[body],
+                    1.0e-9 * mesh.total_mass[body]);
+        EXPECT_TRUE(mesh.I_hat[body].allFinite());
+        EXPECT_GT(mesh.I_hat[body](0, 0), 0.0);
+        EXPECT_GT((mesh.I_hat[body].topLeftCorner<2, 2>().determinant()), 0.0);
+        EXPECT_GT(mesh.I_hat[body].determinant(), 0.0);
+    }
+    // Explicit caller overrides are honored and then checked against the cap.
+    values.insert(values.end(), {"--chain_net_rows", "21", "--chain_net_cols", "21"});
+    argv.clear();
+    for (auto& value : values) argv.push_back(value.data());
+    IPCArgs3D oversized;
+    ASSERT_TRUE(oversized.parse(static_cast<int>(argv.size()), argv.data()));
+    EXPECT_EQ(oversized.chain_net_rows, 21);
+    EXPECT_EQ(oversized.chain_net_cols, 21);
+    EXPECT_THROW(build_chain_net_ball_example(oversized, mesh, state, X, pins, params),
+                 std::invalid_argument);
+}
+
+TEST(ChainNetBallExample, CompactLinksStartSeparatedAndInterlocked) {
     // A 3x3 net contains one interior base link, its four connectors, and
     // four supported boundary links: the complete repeating contact motif.
     struct Triangle {
@@ -4792,124 +4867,121 @@ TEST(ChainNetBallExample, BothLinkMeshesStartSeparatedAndInterlocked) {
         // this check additionally detects transverse edge-face crossings.
         return node_triangle_distance(point, p[0], p[1], p[2]).distance < 1.0e-11;
     };
-    for (const bool coarse_links : {false, true}) {
-        SCOPED_TRACE(::testing::Message() << "coarse_links=" << coarse_links);
-        IPCArgs3D args;
-        args.chain_net_rows = args.chain_net_cols = 3;
-        args.chain_net_coarse_links = coarse_links;
-        args.chain_net_mixed_objects = false;
-        args.chain_net_ball_subdiv = 0;
-        RefMesh mesh;
-        DeformedState state;
-        std::vector<Vec2> X;
-        std::vector<Pin> pins;
-        SimParams params = args.to_sim_params();
-        build_chain_net_ball_example(args, mesh, state, X, pins, params);
-        constexpr int links = 9;
-        ASSERT_EQ(mesh.rb_nodes.size(), links + 1);
-        std::array<std::vector<Triangle>, links> faces;
-        for (std::size_t t = 0; t < mesh.tris.size(); t += 3) {
-            const int body = mesh.node_to_rb[mesh.tris[t]];
-            if (body >= links) continue;
-            Triangle triangle;
-            for (int corner = 0; corner < 3; ++corner)
-                triangle.vertices[corner] = state.deformed_positions[mesh.tris[t + corner]];
-            triangle.lower = triangle.vertices[0].cwiseMin(triangle.vertices[1])
-                .cwiseMin(triangle.vertices[2]);
-            triangle.upper = triangle.vertices[0].cwiseMax(triangle.vertices[1])
-                .cwiseMax(triangle.vertices[2]);
-            faces[body].push_back(triangle);
-        }
-        double minimum_gap = std::numeric_limits<double>::infinity();
-        for (int first = 0; first < links; ++first)
-            for (int second = first + 1; second < links; ++second)
-                for (const Triangle& a : faces[first])
-                    for (const Triangle& b : faces[second]) {
-                        const double box_gap = box_gap_squared(a.lower, a.upper, b.lower, b.upper);
-                        if (box_gap >= minimum_gap * minimum_gap) continue;
-                        if (box_gap == 0.0) {
-                            for (int edge = 0; edge < 3; ++edge) {
-                                ASSERT_FALSE(edge_crosses_triangle(
-                                    a.vertices[edge], a.vertices[(edge + 1) % 3], b));
-                                ASSERT_FALSE(edge_crosses_triangle(
-                                    b.vertices[edge], b.vertices[(edge + 1) % 3], a));
-                            }
-                        }
-                        for (int vertex = 0; vertex < 3; ++vertex) {
-                            minimum_gap = std::min(minimum_gap, node_triangle_distance(
-                                a.vertices[vertex], b.vertices[0], b.vertices[1], b.vertices[2]).distance);
-                            minimum_gap = std::min(minimum_gap, node_triangle_distance(
-                                b.vertices[vertex], a.vertices[0], a.vertices[1], a.vertices[2]).distance);
-                            for (int other_edge = 0; other_edge < 3; ++other_edge)
-                                minimum_gap = std::min(minimum_gap, segment_segment_distance(
-                                    a.vertices[vertex], a.vertices[(vertex + 1) % 3],
-                                    b.vertices[other_edge], b.vertices[(other_edge + 1) % 3],
-                                    1.0e-12, false).distance);
+    IPCArgs3D args;
+    args.chain_net_rows = args.chain_net_cols = 3;
+    args.chain_net_mixed_objects = false;
+    args.chain_net_ball_subdiv = 0;
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    build_chain_net_ball_example(args, mesh, state, X, pins, params);
+    constexpr int links = 9;
+    ASSERT_EQ(mesh.rb_nodes.size(), links + 1);
+    std::array<std::vector<Triangle>, links> faces;
+    for (std::size_t t = 0; t < mesh.tris.size(); t += 3) {
+        const int body = mesh.node_to_rb[mesh.tris[t]];
+        if (body >= links) continue;
+        Triangle triangle;
+        for (int corner = 0; corner < 3; ++corner)
+            triangle.vertices[corner] = state.deformed_positions[mesh.tris[t + corner]];
+        triangle.lower = triangle.vertices[0].cwiseMin(triangle.vertices[1])
+            .cwiseMin(triangle.vertices[2]);
+        triangle.upper = triangle.vertices[0].cwiseMax(triangle.vertices[1])
+            .cwiseMax(triangle.vertices[2]);
+        faces[body].push_back(triangle);
+    }
+    double minimum_gap = std::numeric_limits<double>::infinity();
+    for (int first = 0; first < links; ++first)
+        for (int second = first + 1; second < links; ++second)
+            for (const Triangle& a : faces[first])
+                for (const Triangle& b : faces[second]) {
+                    const double box_gap = box_gap_squared(a.lower, a.upper, b.lower, b.upper);
+                    if (box_gap >= minimum_gap * minimum_gap) continue;
+                    if (box_gap == 0.0) {
+                        for (int edge = 0; edge < 3; ++edge) {
+                            ASSERT_FALSE(edge_crosses_triangle(
+                                a.vertices[edge], a.vertices[(edge + 1) % 3], b));
+                            ASSERT_FALSE(edge_crosses_triangle(
+                                b.vertices[edge], b.vertices[(edge + 1) % 3], a));
                         }
                     }
-        EXPECT_TRUE(std::isfinite(minimum_gap));
-        EXPECT_GT(minimum_gap, 0.001);
-        RecordProperty(coarse_links ? "coarse_minimum_link_gap_m" : "original_minimum_link_gap_m",
-                       std::to_string(minimum_gap));
+                    for (int vertex = 0; vertex < 3; ++vertex) {
+                        minimum_gap = std::min(minimum_gap, node_triangle_distance(
+                            a.vertices[vertex], b.vertices[0], b.vertices[1], b.vertices[2]).distance);
+                        minimum_gap = std::min(minimum_gap, node_triangle_distance(
+                            b.vertices[vertex], a.vertices[0], a.vertices[1], a.vertices[2]).distance);
+                        for (int other_edge = 0; other_edge < 3; ++other_edge)
+                            minimum_gap = std::min(minimum_gap, segment_segment_distance(
+                                a.vertices[vertex], a.vertices[(vertex + 1) % 3],
+                                b.vertices[other_edge], b.vertices[(other_edge + 1) % 3],
+                                1.0e-12, false).distance);
+                    }
+                }
+    EXPECT_TRUE(std::isfinite(minimum_gap));
+    EXPECT_GT(minimum_gap, 0.001);
+    RecordProperty("compact_minimum_link_gap_m",
+                   std::to_string(minimum_gap));
 
-        // Both meshes wrap the same capsule-shaped core loop. Its signed
-        // crossings through another link's planar spanning disk distinguish
-        // genuine interlocking from merely overlapping bounding boxes.
-        std::array<Mat33, links> rotations;
-        std::array<Vec3, links> centers;
-        for (int body = 0; body < links; ++body) {
-            rotations[body].col(0) = quaternion_rotate(state.orientations[body], Vec3::UnitX());
-            rotations[body].col(1) = quaternion_rotate(state.orientations[body], Vec3::UnitY());
-            rotations[body].col(2) = quaternion_rotate(state.orientations[body], Vec3::UnitZ());
-            Vec3 lower = Vec3::Constant(std::numeric_limits<double>::infinity());
-            Vec3 upper = -lower;
-            for (const Vec3& point : mesh.ref_positions[body]) {
-                lower = lower.cwiseMin(point);
-                upper = upper.cwiseMax(point);
-            }
-            centers[body] = state.x_coms[body] + rotations[body] * (0.5 * (lower + upper));
+    // Links wrap a capsule-shaped core loop. Its signed
+    // crossings through another link's planar spanning disk distinguish
+    // genuine interlocking from merely overlapping bounding boxes.
+    std::array<Mat33, links> rotations;
+    std::array<Vec3, links> centers;
+    for (int body = 0; body < links; ++body) {
+        rotations[body].col(0) = quaternion_rotate(state.orientations[body], Vec3::UnitX());
+        rotations[body].col(1) = quaternion_rotate(state.orientations[body], Vec3::UnitY());
+        rotations[body].col(2) = quaternion_rotate(state.orientations[body], Vec3::UnitZ());
+        Vec3 lower = Vec3::Constant(std::numeric_limits<double>::infinity());
+        Vec3 upper = -lower;
+        for (const Vec3& point : mesh.ref_positions[body]) {
+            lower = lower.cwiseMin(point);
+            upper = upper.cwiseMax(point);
         }
-        constexpr int samples = 128;
-        constexpr double pi = 3.14159265358979323846;
-        std::array<Vec3, samples> core;
-        for (int sample = 0; sample < samples; ++sample) {
-            const double angle = 2.0 * pi * (sample + 0.173) / samples;
-            core[sample] = Vec3(0.4 * std::cos(angle),
-                0.4 * std::sin(angle) + (std::sin(angle) > 0.0 ? 0.25 : -0.25), 0.0);
-        }
-        int interlocked_pairs = 0;
-        std::array<int, links> neighbors{};
-        for (int first = 0; first < links; ++first)
-            for (int second = first + 1; second < links; ++second) {
-                std::array<Vec3, samples> loop;
-                for (int sample = 0; sample < samples; ++sample)
-                    loop[sample] = rotations[first].transpose()
-                        * (centers[second] - centers[first]
-                           + args.chain_net_link_scale * rotations[second] * core[sample])
-                        / args.chain_net_link_scale;
-                int signed_crossings = 0;
-                for (int sample = 0; sample < samples; ++sample) {
-                    const Vec3& a = loop[sample];
-                    const Vec3& b = loop[(sample + 1) % samples];
-                    if (!((a.z() < 0.0 && b.z() > 0.0)
-                          || (a.z() > 0.0 && b.z() < 0.0))) continue;
-                    const Vec3 crossing = a + (a.z() / (a.z() - b.z())) * (b - a);
-                    const double cap_distance = std::max(std::abs(crossing.y()) - 0.25, 0.0);
-                    if (crossing.x() * crossing.x() + cap_distance * cap_distance < 0.16)
-                        signed_crossings += b.z() > a.z() ? 1 : -1;
-                }
-                EXPECT_LE(std::abs(signed_crossings), 1);
-                if (std::abs(signed_crossings) == 1) {
-                    ++interlocked_pairs;
-                    ++neighbors[first];
-                    ++neighbors[second];
-                }
-            }
-        EXPECT_EQ(interlocked_pairs, 8);
-        EXPECT_EQ(std::count(neighbors.begin(), neighbors.end(), 1), 4);
-        EXPECT_EQ(std::count(neighbors.begin(), neighbors.end(), 2), 4);
-        EXPECT_EQ(std::count(neighbors.begin(), neighbors.end(), 4), 1);
+        centers[body] = state.x_coms[body] + rotations[body] * (0.5 * (lower + upper));
     }
+    constexpr int samples = 128;
+    constexpr double pi = 3.14159265358979323846;
+    std::array<Vec3, samples> core;
+    for (int sample = 0; sample < samples; ++sample) {
+        const double angle = 2.0 * pi * (sample + 0.173) / samples;
+        core[sample] = Vec3(0.4 * std::cos(angle),
+            0.4 * std::sin(angle) + (std::sin(angle) > 0.0 ? 0.25 : -0.25), 0.0);
+    }
+    int interlocked_pairs = 0;
+    std::array<int, links> neighbors{};
+    for (int first = 0; first < links; ++first)
+        for (int second = first + 1; second < links; ++second) {
+            std::array<Vec3, samples> loop;
+            for (int sample = 0; sample < samples; ++sample)
+                loop[sample] = rotations[first].transpose()
+                    * (centers[second] - centers[first]
+                       + args.chain_net_link_scale * rotations[second] * core[sample])
+                    / args.chain_net_link_scale;
+            int signed_crossings = 0;
+            for (int sample = 0; sample < samples; ++sample) {
+                const Vec3& a = loop[sample];
+                const Vec3& b = loop[(sample + 1) % samples];
+                if (!((a.z() < 0.0 && b.z() > 0.0)
+                      || (a.z() > 0.0 && b.z() < 0.0))) continue;
+                const Vec3 crossing = a + (a.z() / (a.z() - b.z())) * (b - a);
+                const double cap_distance = std::max(std::abs(crossing.y()) - 0.25, 0.0);
+                if (crossing.x() * crossing.x() + cap_distance * cap_distance < 0.16)
+                    signed_crossings += b.z() > a.z() ? 1 : -1;
+            }
+            EXPECT_LE(std::abs(signed_crossings), 1);
+            if (std::abs(signed_crossings) == 1) {
+                ++interlocked_pairs;
+                ++neighbors[first];
+                ++neighbors[second];
+            }
+        }
+    EXPECT_EQ(interlocked_pairs, 8);
+    EXPECT_EQ(std::count(neighbors.begin(), neighbors.end(), 1), 4);
+    EXPECT_EQ(std::count(neighbors.begin(), neighbors.end(), 2), 4);
+    EXPECT_EQ(std::count(neighbors.begin(), neighbors.end(), 4), 1);
+
 }
 
 TEST(ChainNetBallExample, RebuildClearsDeformableDataPinsAndAnalyticColliders) {
@@ -4932,8 +5004,8 @@ TEST(ChainNetBallExample, RebuildClearsDeformableDataPinsAndAnalyticColliders) {
     params.use_ogc = params.use_ogc_solver = true;
     build_chain_net_ball_example(args, mesh, state, X, pins, params);
     EXPECT_EQ(mesh.rb_nodes.size(), 10U);
-    EXPECT_EQ(state.deformed_positions.size(), 9U * 128 + 12);
-    EXPECT_EQ(mesh.tris.size(), 3U * (9 * 256 + 20));
+    EXPECT_EQ(state.deformed_positions.size(), 9U * 32 + 12);
+    EXPECT_EQ(mesh.tris.size(), 3U * (9 * 64 + 20));
     EXPECT_TRUE(X.empty());
     EXPECT_TRUE(pins.empty());
     EXPECT_TRUE(mesh.Dm_inverse.empty());
@@ -5003,17 +5075,16 @@ TEST(ChainNetBallExample, PresetsAreSceneSpecificAndExplicitFlagsOverrideThem) {
     char program[] = "3D_sim", example_flag[] = "--example", scene[] = "16";
     char* defaults[] = {program, example_flag, scene};
     ASSERT_TRUE(args.parse(3, defaults));
-    EXPECT_EQ(args.chain_net_rows, 21);
-    EXPECT_EQ(args.chain_net_cols, 21);
-    EXPECT_DOUBLE_EQ(args.chain_net_link_scale, 0.75);
-    EXPECT_TRUE(args.chain_net_coarse_links);
+    EXPECT_EQ(args.chain_net_rows, 17);
+    EXPECT_EQ(args.chain_net_cols, 17);
+    EXPECT_DOUBLE_EQ(args.chain_net_link_scale, 0.9375);
     EXPECT_TRUE(args.chain_net_mixed_objects);
     EXPECT_DOUBLE_EQ(args.chain_net_object_size, 0.0);
     EXPECT_DOUBLE_EQ(args.chain_net_object_density, 1000.0);
     EXPECT_DOUBLE_EQ(args.chain_net_ball_radius, 0.0);
     EXPECT_DOUBLE_EQ(args.chain_net_ball_gap, 3.0);
     EXPECT_DOUBLE_EQ(args.chain_net_ball_density, 1000.0);
-    EXPECT_EQ(args.chain_net_ball_subdiv, 3);
+    EXPECT_EQ(args.chain_net_ball_subdiv, 2);
     EXPECT_DOUBLE_EQ(args.fps, 25.0);
     EXPECT_EQ(args.substeps, 4);
     EXPECT_EQ(args.num_frames, 250);
@@ -5029,7 +5100,6 @@ TEST(ChainNetBallExample, PresetsAreSceneSpecificAndExplicitFlagsOverrideThem) {
     IPCArgs3D overridden;
     std::vector<std::string> values = {"3D_sim", "--example", "16",
         "--chain_net_rows", "4", "--chain_net_cols", "5", "--chain_net_link_scale", "1.2",
-        "--chain_net_coarse_links", "false",
         "--chain_net_mixed_objects", "false", "--chain_net_object_size", "0.6",
         "--chain_net_object_density", "1200",
         "--chain_net_ball_radius", "1.25", "--chain_net_ball_gap", "0.75",
@@ -5044,7 +5114,6 @@ TEST(ChainNetBallExample, PresetsAreSceneSpecificAndExplicitFlagsOverrideThem) {
     EXPECT_EQ(overridden.chain_net_rows, 4);
     EXPECT_EQ(overridden.chain_net_cols, 5);
     EXPECT_DOUBLE_EQ(overridden.chain_net_link_scale, 1.2);
-    EXPECT_FALSE(overridden.chain_net_coarse_links);
     EXPECT_FALSE(overridden.chain_net_mixed_objects);
     EXPECT_DOUBLE_EQ(overridden.chain_net_object_size, 0.6);
     EXPECT_DOUBLE_EQ(overridden.chain_net_object_density, 1200.0);
@@ -5072,8 +5141,8 @@ TEST(ChainNetBallExample, PresetsAreSceneSpecificAndExplicitFlagsOverrideThem) {
 }
 
 TEST(ChainNetBallExample, MixedPayloadHasFortyEightSeparateClosedRigidBodiesAboveUnchangedNet) {
-    const std::vector<Vec3> gear_source = load_multiphysics_gear_reference_positions();
-    ASSERT_EQ(gear_source.size(), 1721U);
+    const std::vector<Vec3> gear_source = load_multiphysics_gear_reference_positions("gear_z18_180.obj");
+    ASSERT_EQ(gear_source.size(), 180U);
     for (const auto dimensions : {std::array<int, 2>{3, 3},
                                   std::array<int, 2>{4, 4},
                                   std::array<int, 2>{4, 6}}) {
@@ -5108,9 +5177,9 @@ TEST(ChainNetBallExample, MixedPayloadHasFortyEightSeparateClosedRigidBodiesAbov
         constexpr int payload_count = layers * slots_per_layer;
         const int bodies = links + payload_count;
         constexpr int sphere_vertices = 42, sphere_triangles = 80;
-        const int expected_nodes = links * 128 + 12 * (1721 + 8 + sphere_vertices)
+        const int expected_nodes = links * 32 + 12 * (180 + 8 + sphere_vertices)
             + 4 * (6 + 10 + 16);
-        const int expected_triangles = links * 256 + 12 * (3442 + 12 + sphere_triangles)
+        const int expected_triangles = links * 64 + 12 * (360 + 12 + sphere_triangles)
             + 4 * (8 + 16 + 28);
         ASSERT_EQ(mesh.rb_nodes.size(), bodies);
         ASSERT_EQ(mesh.rb_update_modes.size(), bodies);
@@ -5127,11 +5196,11 @@ TEST(ChainNetBallExample, MixedPayloadHasFortyEightSeparateClosedRigidBodiesAbov
         ASSERT_EQ(mesh.mass.size(), expected_nodes);
         EXPECT_EQ(mesh.num_positions, expected_nodes);
         ASSERT_EQ(mesh.tris.size(), 3 * expected_triangles);
-        ASSERT_GE(single_mesh.tris.size(), 3 * links * 256);
-        ASSERT_GE(single_state.deformed_positions.size(), links * 128);
-        EXPECT_TRUE(std::equal(mesh.tris.begin(), mesh.tris.begin() + 3 * links * 256,
+        ASSERT_GE(single_mesh.tris.size(), 3 * links * 64);
+        ASSERT_GE(single_state.deformed_positions.size(), links * 32);
+        EXPECT_TRUE(std::equal(mesh.tris.begin(), mesh.tris.begin() + 3 * links * 64,
                                single_mesh.tris.begin()));
-        for (int node = 0; node < links * 128; ++node)
+        for (int node = 0; node < links * 32; ++node)
             EXPECT_TRUE((state.deformed_positions[node].array()
                          == single_state.deformed_positions[node].array()).all());
         for (int body = 0; body < links; ++body) {
@@ -5300,8 +5369,8 @@ TEST(ChainNetBallExample, MixedPayloadHasFortyEightSeparateClosedRigidBodiesAbov
             const int type = (slot + slot / 4 + layer) % 4;
             ++type_counts[type];
             const int sides = std::array<int, 3>{3, 5, 8}[layer];
-            const int expected_vertices = std::array<int, 4>{1721, 8, sphere_vertices, 2 * sides}[type];
-            const int expected_faces = std::array<int, 4>{3442, 12, sphere_triangles, 4 * sides - 4}[type];
+            const int expected_vertices = std::array<int, 4>{180, 8, sphere_vertices, 2 * sides}[type];
+            const int expected_faces = std::array<int, 4>{360, 12, sphere_triangles, 4 * sides - 4}[type];
             EXPECT_EQ(mesh.rb_nodes[body].size(), expected_vertices);
             EXPECT_EQ(triangle_counts[body], expected_faces);
             EXPECT_EQ(static_cast<int>(mesh.rb_nodes[body].size())
@@ -5384,18 +5453,17 @@ TEST(ChainNetBallExample, MixedPayloadHasFortyEightSeparateClosedRigidBodiesAbov
 }
 
 TEST(ChainNetBallExample, DefaultMixedPayloadKeepsLargeObjectsAndOriginalGearAspectRatio) {
-    const std::vector<Vec3> gear_source = load_multiphysics_gear_reference_positions();
-    ASSERT_EQ(gear_source.size(), 1721U);
+    const std::vector<Vec3> gear_source = load_multiphysics_gear_reference_positions("gear_z18_180.obj");
+    ASSERT_EQ(gear_source.size(), 180U);
     IPCArgs3D args;
     char program[] = "3D_sim", example_flag[] = "--example", scene[] = "16";
     char* argv[] = {program, example_flag, scene};
     ASSERT_TRUE(args.parse(3, argv));
-    ASSERT_EQ(args.chain_net_rows, 21);
-    ASSERT_EQ(args.chain_net_cols, 21);
-    ASSERT_DOUBLE_EQ(args.chain_net_link_scale, 0.75);
-    ASSERT_TRUE(args.chain_net_coarse_links);
+    ASSERT_EQ(args.chain_net_rows, 17);
+    ASSERT_EQ(args.chain_net_cols, 17);
+    ASSERT_DOUBLE_EQ(args.chain_net_link_scale, 0.9375);
     ASSERT_TRUE(args.chain_net_mixed_objects);
-    ASSERT_EQ(args.chain_net_ball_subdiv, 3);
+    ASSERT_EQ(args.chain_net_ball_subdiv, 2);
     ASSERT_DOUBLE_EQ(args.chain_net_object_size, 0.0);
     ASSERT_DOUBLE_EQ(args.rigid_density, 1000.0);
     ASSERT_DOUBLE_EQ(args.chain_net_object_density, 1000.0);
@@ -5406,23 +5474,23 @@ TEST(ChainNetBallExample, DefaultMixedPayloadKeepsLargeObjectsAndOriginalGearAsp
     SimParams params = args.to_sim_params();
     build_chain_net_ball_example(args, mesh, state, X, pins, params);
 
-    constexpr int links = (21 * 21 - 4) + 2 * (21 - 2) * (21 - 1);
+    constexpr int links = (17 * 17 - 4) + 2 * (17 - 2) * (17 - 1);
     constexpr int payloads = 3 * 16;
-    constexpr int payload_vertices = 12 * (1721 + 8 + 642) + 4 * (6 + 10 + 16);
-    constexpr int payload_triangles = 12 * (3442 + 12 + 1280) + 4 * (8 + 16 + 28);
-    static_assert(links == 1197 && payload_vertices == 28580 && payload_triangles == 57016);
+    constexpr int payload_vertices = 12 * (180 + 8 + 162) + 4 * (6 + 10 + 16);
+    constexpr int payload_triangles = 12 * (360 + 12 + 320) + 4 * (8 + 16 + 28);
+    static_assert(links == 765 && payload_vertices == 4328 && payload_triangles == 8512);
     ASSERT_EQ(mesh.rb_nodes.size(), links + payloads);
     ASSERT_EQ(mesh.rb_update_modes.size(), links + payloads);
     ASSERT_EQ(mesh.total_mass.size(), links + payloads);
     ASSERT_EQ(mesh.I_hat.size(), links + payloads);
     ASSERT_EQ(mesh.ref_positions.size(), links + payloads);
     ASSERT_EQ(state.x_coms.size(), links + payloads);
-    ASSERT_EQ(state.deformed_positions.size(), links * 128 + payload_vertices);
-    EXPECT_EQ(state.deformed_positions.size(), 181796U);
-    EXPECT_EQ(mesh.tris.size() / 3, links * 256 + payload_triangles);
-    EXPECT_EQ(mesh.tris.size() / 3, 363448U);
+    ASSERT_EQ(state.deformed_positions.size(), links * 32 + payload_vertices);
+    EXPECT_EQ(state.deformed_positions.size(), 28808U);
+    EXPECT_EQ(mesh.tris.size() / 3, links * 64 + payload_triangles);
+    EXPECT_EQ(mesh.tris.size() / 3, 57472U);
     EXPECT_EQ(std::count(mesh.rb_update_modes.begin(), mesh.rb_update_modes.end(),
-                         RigidBodyUpdateMode::None), 76);
+                         RigidBodyUpdateMode::None), 60);
     EXPECT_TRUE(X.empty());
     EXPECT_TRUE(pins.empty());
     EXPECT_TRUE(mesh.deformable_nodes.empty());
@@ -5443,7 +5511,7 @@ TEST(ChainNetBallExample, DefaultMixedPayloadKeepsLargeObjectsAndOriginalGearAsp
         const int body = links + payload, layer = payload / 16, slot = payload % 16;
         const int type = (slot + slot / 4 + layer) % 4;
         const int sides = std::array<int, 3>{3, 5, 8}[layer];
-        const int vertices = std::array<int, 4>{1721, 8, 642, 2 * sides}[type];
+        const int vertices = std::array<int, 4>{180, 8, 162, 2 * sides}[type];
         ++type_counts[type];
         if (type == 3) ++prism_counts[layer];
         EXPECT_EQ(mesh.rb_nodes[body].size(), vertices);
@@ -5500,17 +5568,17 @@ TEST(ChainNetBallExample, DefaultMixedPayloadKeepsLargeObjectsAndOriginalGearAsp
     EXPECT_NEAR(minimum_non_gear_axis_extent, 1.638, 1.0e-12);
 }
 
-TEST(ChainNetBallExample, CoarseLinksPreserveDimensionsSupportsAndPayloadGeometry) {
+TEST(ChainNetBallExample, CompactLinkPreservesOriginalAssetDimensions) {
     const auto asset_directory = std::filesystem::path(__FILE__).parent_path()
         / "example_obj" / "wrecking_ball";
     std::vector<Vec3> coarse_positions, original_positions;
     std::vector<int> coarse_triangles, original_triangles;
-    load_obj_mesh((asset_directory / "link_128.obj").string(),
+    load_obj_mesh((asset_directory / "link_32.obj").string(),
                   coarse_positions, coarse_triangles);
     load_obj_mesh((asset_directory / "link.obj").string(),
                   original_positions, original_triangles);
-    ASSERT_EQ(coarse_positions.size(), 128U);
-    ASSERT_EQ(coarse_triangles.size(), 3U * 256);
+    ASSERT_EQ(coarse_positions.size(), 32U);
+    ASSERT_EQ(coarse_triangles.size(), 3U * 64);
     ASSERT_EQ(original_positions.size(), 220U);
     ASSERT_EQ(original_triangles.size(), 3U * 440);
     const auto bounds = [](const std::vector<Vec3>& positions) {
@@ -5532,79 +5600,9 @@ TEST(ChainNetBallExample, CoarseLinksPreserveDimensionsSupportsAndPayloadGeometr
         EXPECT_NEAR(coarse_bounds[1][axis], original_bounds[1][axis], 1.0e-6);
     }
 
-    IPCArgs3D args;
-    char program[] = "3D_sim", example_flag[] = "--example", scene[] = "16";
-    char* argv[] = {program, example_flag, scene};
-    ASSERT_TRUE(args.parse(3, argv));
-    ASSERT_TRUE(args.chain_net_coarse_links);
-    IPCArgs3D original_args = args;
-    original_args.chain_net_coarse_links = false;
-    RefMesh mesh, original_mesh;
-    DeformedState state, original_state;
-    std::vector<Vec2> X, original_X;
-    std::vector<Pin> pins, original_pins;
-    SimParams params = args.to_sim_params(), original_params = original_args.to_sim_params();
-    build_chain_net_ball_example(args, mesh, state, X, pins, params);
-    build_chain_net_ball_example(original_args, original_mesh, original_state,
-                                 original_X, original_pins, original_params);
-    constexpr int links = 1197, payloads = 48;
-    ASSERT_EQ(mesh.rb_nodes.size(), links + payloads);
-    ASSERT_EQ(original_mesh.rb_nodes.size(), links + payloads);
-    EXPECT_EQ(state.deformed_positions.size(), 181796U);
-    EXPECT_EQ(original_state.deformed_positions.size(), 291920U);
-    EXPECT_EQ(mesh.tris.size() / 3, 363448U);
-    EXPECT_EQ(original_mesh.tris.size() / 3, 583696U);
-    EXPECT_EQ(mesh.rb_update_modes, original_mesh.rb_update_modes);
-    EXPECT_EQ(std::count(mesh.rb_update_modes.begin(), mesh.rb_update_modes.end(),
-                         RigidBodyUpdateMode::None), 76);
-    for (int body = 0; body < links; ++body) {
-        SCOPED_TRACE(body);
-        ASSERT_EQ(mesh.rb_nodes[body].size(), 128U);
-        ASSERT_EQ(original_mesh.rb_nodes[body].size(), 220U);
-        EXPECT_TRUE(state.orientations[body].isApprox(original_state.orientations[body], 1.0e-14));
-        const auto local_bounds = bounds(mesh.ref_positions[body]);
-        const auto original_local_bounds = bounds(original_mesh.ref_positions[body]);
-        // Changing tessellation changes the computed volume/COM slightly,
-        // but must not alter the link's dimensions or its lattice placement.
-        EXPECT_TRUE((local_bounds[1] - local_bounds[0]).isApprox(
-            original_local_bounds[1] - original_local_bounds[0], 1.0e-6));
-        const Vec3 midpoint = state.x_coms[body] + quaternion_rotate(
-            state.orientations[body], 0.5 * (local_bounds[0] + local_bounds[1]));
-        const Vec3 original_midpoint = original_state.x_coms[body] + quaternion_rotate(
-            original_state.orientations[body],
-            0.5 * (original_local_bounds[0] + original_local_bounds[1]));
-        EXPECT_LE((midpoint - original_midpoint).norm(), 1.0e-10);
-    }
-    const auto net_top = [](const RefMesh& data, const DeformedState& positions) {
-        double result = -std::numeric_limits<double>::infinity();
-        for (int body = 0; body < links; ++body)
-            for (const int node : data.rb_nodes[body])
-                result = std::max(result, positions.deformed_positions[node].y());
-        return result;
-    };
-    // The entire payload may translate vertically by the changed surface
-    // sampling's top extent, but no payload may change shape, mass or x/z.
-    const Vec3 payload_shift(0.0,
-        net_top(mesh, state) - net_top(original_mesh, original_state), 0.0);
-    for (int body = links; body < links + payloads; ++body) {
-        SCOPED_TRACE(body);
-        ASSERT_EQ(mesh.rb_nodes[body].size(), original_mesh.rb_nodes[body].size());
-        EXPECT_TRUE(state.orientations[body].isApprox(original_state.orientations[body], 1.0e-14));
-        EXPECT_TRUE(state.x_coms[body].isApprox(original_state.x_coms[body] + payload_shift, 1.0e-12));
-        EXPECT_NEAR(mesh.total_mass[body], original_mesh.total_mass[body],
-                    1.0e-10 * original_mesh.total_mass[body]);
-        EXPECT_TRUE(mesh.I_hat[body].isApprox(original_mesh.I_hat[body], 1.0e-10));
-        for (std::size_t local = 0; local < mesh.rb_nodes[body].size(); ++local) {
-            EXPECT_TRUE(mesh.ref_positions[body][local].isApprox(
-                original_mesh.ref_positions[body][local], 1.0e-11));
-            EXPECT_TRUE(state.deformed_positions[mesh.rb_nodes[body][local]].isApprox(
-                original_state.deformed_positions[original_mesh.rb_nodes[body][local]]
-                    + payload_shift, 1.0e-12));
-        }
-    }
 }
 
-TEST(ChainNetBallExample, DenserDefaultsPreserveNetSpanAndPayloadGeometry) {
+TEST(ChainNetBallExample, CompactDefaultsPreserveNetSpanAndPayloadGeometry) {
     IPCArgs3D args;
     char program[] = "3D_sim", example_flag[] = "--example", scene[] = "16";
     char* argv[] = {program, example_flag, scene};
@@ -5621,15 +5619,15 @@ TEST(ChainNetBallExample, DenserDefaultsPreserveNetSpanAndPayloadGeometry) {
     build_chain_net_ball_example(previous_args, previous_mesh, previous_state,
                                  previous_X, previous_pins, previous_params);
 
-    constexpr int links = 1197, previous_links = 672, payloads = 48;
+    constexpr int links = 765, previous_links = 672, payloads = 48;
     ASSERT_EQ(mesh.rb_nodes.size(), links + payloads);
     ASSERT_EQ(previous_mesh.rb_nodes.size(), previous_links + payloads);
     EXPECT_EQ(std::count(mesh.rb_update_modes.begin(), mesh.rb_update_modes.end(),
-                         RigidBodyUpdateMode::None), 76);
+                         RigidBodyUpdateMode::None), 60);
     EXPECT_EQ(std::count(previous_mesh.rb_update_modes.begin(), previous_mesh.rb_update_modes.end(),
                          RigidBodyUpdateMode::None), 56);
     // Link centers have the same footprint, but both lattice spacings and
-    // every link's geometry are 25% smaller. This preserves the normalized
+    // every link's geometry are scaled together. This preserves the normalized
     // interlocking arrangement while making each local aperture smaller.
     const auto center_span = [](const DeformedState& data, const int count) -> Vec3 {
         Vec3 lower = Vec3::Constant(std::numeric_limits<double>::infinity());
@@ -5667,21 +5665,21 @@ TEST(ChainNetBallExample, DenserDefaultsPreserveNetSpanAndPayloadGeometry) {
         }
         return indices;
     };
-    const auto current_indices = index_links(21, 21);
+    const auto current_indices = index_links(17, 17);
     const auto previous_indices = index_links(16, 16);
     ASSERT_EQ(current_indices.size(), links);
     ASSERT_EQ(previous_indices.size(), previous_links);
     const int current_origin = current_indices.at({1, 1, 0});
     const int previous_origin = previous_indices.at({1, 1, 0});
     EXPECT_NEAR(state.x_coms[current_indices.at({1, 2, 0})].x()
-                    - state.x_coms[current_origin].x(), 1.2375, 1.0e-12);
+                    - state.x_coms[current_origin].x(), 1.546875, 1.0e-12);
     EXPECT_NEAR(previous_state.x_coms[previous_indices.at({1, 2, 0})].x()
                     - previous_state.x_coms[previous_origin].x(), 1.65, 1.0e-12);
     EXPECT_NEAR(state.x_coms[current_indices.at({2, 1, 0})].z()
-                    - state.x_coms[current_origin].z(), 1.2, 1.0e-12);
+                    - state.x_coms[current_origin].z(), 1.5, 1.0e-12);
     EXPECT_NEAR(previous_state.x_coms[previous_indices.at({2, 1, 0})].z()
                     - previous_state.x_coms[previous_origin].z(), 1.6, 1.0e-12);
-    constexpr double scale = 0.75;
+    constexpr double scale = 0.9375;
     for (int kind = 0; kind < 3; ++kind) {
         SCOPED_TRACE(kind);
         const int body = current_indices.at({1, 1, kind});

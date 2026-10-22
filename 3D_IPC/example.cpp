@@ -57,22 +57,23 @@ std::filesystem::path wrecking_ball_asset_directory(
 std::filesystem::path chain_net_gear_filename(const std::string& data_directory) {
     namespace fs = std::filesystem;
     std::vector<fs::path> candidates;
+    constexpr const char* basename = "gear_z18_180.obj";
     if (!data_directory.empty()) {
         const fs::path data(data_directory);
-        candidates.push_back(data / "gear_z18_coarse.obj");
-        candidates.push_back(data / "example_obj" / "gear_z18_coarse.obj");
-        candidates.push_back(data.parent_path() / "gear_z18_coarse.obj");
+        candidates.push_back(data / basename);
+        candidates.push_back(data / "example_obj" / basename);
+        candidates.push_back(data.parent_path() / basename);
     }
-    candidates.push_back(fs::path("example_obj") / "gear_z18_coarse.obj");
+    candidates.push_back(fs::path("example_obj") / basename);
     candidates.push_back(fs::path(__FILE__).parent_path()
-                         / "example_obj" / "gear_z18_coarse.obj");
+                         / "example_obj" / basename);
     for (const fs::path& candidate : candidates) {
         std::error_code error;
         if (fs::is_regular_file(candidate, error))
             return candidate;
     }
     throw std::runtime_error(
-        "Example 16 mixed objects could not find gear_z18_coarse.obj. "
+        std::string("Example 16 mixed objects could not find ") + basename + ". "
         "Run from the repository root or pass --datadir example_obj.");
 }
 
@@ -2300,7 +2301,7 @@ void build_chain_net_ball_example(
     if (!gravity.allFinite())
         throw std::invalid_argument("Example 16 requires finite gravity");
 
-    const char* link_basename = args.chain_net_coarse_links ? "link_128.obj" : "link.obj";
+    constexpr const char* link_basename = "link_32.obj";
     const std::string link_filename = (
         wrecking_ball_asset_directory(args.datadir, false, link_basename) / link_basename).string();
     std::vector<Vec3> source_positions;
@@ -2345,18 +2346,18 @@ void build_chain_net_ball_example(
     const std::uint64_t payload_nodes = args.chain_net_mixed_objects
         ? 4 * (3 * sphere_nodes + 3 * gear_positions.size() + 3 * 8 + 2 * (3 + 5 + 8))
         : sphere_nodes;
-    constexpr std::uint64_t maximum_nodes = 1000000;
+    constexpr std::uint64_t maximum_nodes = 30000;
     // Divide before multiplying so even extreme command-line grid counts
     // cannot overflow the allocation estimate. No requested size is clamped.
     if (payload_nodes >= maximum_nodes
         || source_positions.size() > maximum_nodes
         || link_count > (maximum_nodes - payload_nodes) / source_positions.size()) {
-        throw std::invalid_argument("Example 16 exceeds the 1,000,000-vertex limit");
+        throw std::invalid_argument(
+            "Example 16 exceeds 30,000 vertices; reduce net dimensions or sphere subdivision");
     }
 
-    // Shrink the complete repeating cell, not just the mesh: this preserves
-    // its interlocking geometry while reducing both kinds of openings.
-    // 21 rows/columns at scale 0.75 retain the old 16x16 center-line span.
+    // Scale the complete repeating cell to preserve interlocking geometry.
+    // 17 rows/columns at scale 0.9375 retain the previous 24.75 x 24 m span.
     const double column_spacing = 1.65 * args.chain_net_link_scale;
     const double row_spacing = 1.6 * args.chain_net_link_scale;
     const double width = (args.chain_net_cols - 1) * column_spacing;

@@ -149,7 +149,7 @@ relative to **`3D_IPC/`**, so keep that working directory when running them.
 | 8, 10 | `example_obj/bunny_coarse/bunny_2000f.1.node` and `.ele`; `example_obj/spot/spot_2000f.1.node` and `.ele`; `example_obj/gear_z18_coarse.obj`. |
 | 9 | `example_obj/bolt_and_nut/bolt_coarse_bolt.obj` and `bolt_coarse_nut.obj`. |
 | 13 | `example_obj/wrecking_ball/link.obj` and `ball.obj`; `--datadir` can point to `example_obj` or its `wrecking_ball` folder. |
-| 16 | `example_obj/wrecking_ball/link.obj` and `example_obj/gear_z18_coarse.obj`; cubes, plain spheres and polygonal prisms are generated procedurally. The optional single-ball mode needs only the link asset. |
+| 16 | `example_obj/wrecking_ball/link_32.obj` and `example_obj/gear_z18_180.obj`; cubes, plain spheres and polygonal prisms are generated procedurally. The optional single-ball mode needs only the link asset. |
 | 17 | `example_obj/wrecking_ball/link_128.obj`, `example_obj/bunny_coarse/bunny_1000f.obj`, `example_obj/spot/spot_500f.obj` and `example_obj/gear_z18_coarse.obj`; cubes, prisms and the container are procedural. `--datadir` may point to an alternative `example_obj` root with these relative paths. |
 
 Example 4 needs a directory supplied with `--datadir`, containing
@@ -162,87 +162,6 @@ vertices. Example 15 uses 4.2 m square sheets with 3 cm edges and 5 mm gaps,
 at x=0.8 m; the cylinder has radius 0.55 m and center (-0.7, 0.65, 0) m.
 Explicit command-line settings override the scene presets. The staged Example 15
 run below is being tested; full contact and spreading acceptance is pending.
-
-Example 16 is a **triangulated rigid-link adaptation**, not the 1D-edge model in
-rigid-IPC Figure 6. It uses a coarser version of Example 13's closed link mesh and the volumetric
-[chain-net layout](https://github.com/ipc-sim/rigid-ipc/blob/23b6ba6fbf8434056444ae106356fd2209136988/tools/fixtures/3D/chain_net.py).
-The default 21 × 21 grid contains 1,197 links (76 fixed boundary links) and
-48 falling rigid bodies: 12 gears, 12 cubes, 12 spheres, and four each of
-triangular, pentagonal and octagonal prisms. The objects form three staggered
-4 × 4 layers, with mixed ordering across rows and layers. With default sphere
-resolution this is 1,245 rigid bodies, 181,796 vertices and 363,448 triangles.
-Each link now has 128 vertices and 256 triangles, instead of 220 and 440:
-37.7% fewer scene vertices without removing any links or changing the payloads.
-`--chain_net_coarse_links false` restores the original link mesh (291,920 scene
-vertices and 583,696 triangles). Example 13 still uses the original mesh.
-The coarser mesh preserves the outer dimensions and axis-aligned opening
-spans, but changes the faceting and local opening shape. At the same density,
-its enclosed volume and link mass are approximately 12.1% lower; mass and
-inertia are recomputed from the mesh. Contact normals and trajectories can
-therefore change; the vertex reduction is not a measured runtime speedup.
-Links are connected by their interlocking geometry and contact only, without
-springs or joints.
-There is no ground plane. The net is centered at x=z=0, initially at y=0.
-
-`chain_net_rows` and `chain_net_cols` control the net size (minimum 3 each).
-`chain_net_link_scale=0.75` uniformly scales both the link meshes and their
-center spacings. Compared with the old 16 × 16, scale-1 net, each link and
-opening is 25% smaller, while the 21 × 21 grid preserves the 24.75 × 24 m
-net-center span. The maximum link extent is 1.125 m (previously 1.5 m).
-Scaling the repeating cell together preserves the interlocking arrangement
-rather than separating the shrunken links. The 48 payloads keep
-their existing sizes; their heights follow the smaller net's top surface
-to retain the specified initial clearance. Link density stays 1000 kg/m³,
-so each smaller link has less mass; mass and inertia are recomputed.
-Use `--chain_net_rows 16 --chain_net_cols 16 --chain_net_link_scale 1 --chain_net_coarse_links false`
-to restore the previous net geometry. More links also mean more simulation work.
-`chain_net_mixed_objects=true` enables the mixed drop by default.
-`chain_net_object_size=0` automatically uses one eighth of the smaller
-net-center span (3 m for the default net) as the maximum object extent.
-This doubles the previous small 48-object layout's size. An additional
-footprint cap keeps automatic-size payloads inside smaller nets. Individual
-objects vary slightly in size, and an explicit nonzero size is still honored
-(or rejected if it cannot fit; it is not silently reduced).
-Gears use the same uniformly scaled asset and thickness-to-diameter ratio as
-the multiphysics Examples 8 and 10 (approximately 0.20), without extra axial
-thickening. Only their material-axis thickness is reduced; the enlarged
-gears' existing planar diameter and tooth outline are preserved. Prism thickness remains
-0.65 times its polygon diameter. In the initial net layout, the larger interior
-openings lie within approximately 1.09 × 1.06 m bounding rectangles. Default
-prism thickness is 1.638–1.794 m, and the smallest
-ball diameter or cube edge is 2.4 m. Initial-size checks alone do not guarantee
-retention as the links move; thinner gears have less edge-on clearance margin,
-and the full trajectory still needs validation.
-The smaller-net automatic fit cap can produce objects smaller than the link
-openings; those reduced scenes are geometry/smoke tests, not retention tests.
-`chain_net_object_density` controls
-all falling objects (default 1000 kg/m³), while `rigid_density` controls the
-links (preset 1000 kg/m³). `chain_net_ball_gap` is the clearance from the net's
-highest vertex to the lowest object (default 3 m). Consecutive layers have
-0.3 times the object-size setting of vertical clearance. Initialization checks
-that object bounding boxes are disjoint and inside the net's interior footprint.
-
-Use `--chain_net_mixed_objects false` to restore the single-ball scene.
-Only in that mode, `chain_net_ball_radius=0` chooses one quarter of the smaller
-net-center span (6 m by default), and `chain_net_ball_density` controls its density.
-`chain_net_ball_subdiv=3` gives each sphere 642 vertices in either mode.
-Mass and inertia use enclosed mesh volume, not a wire mass approximation.
-For very small objects, the effective `d_hat` is capped at 0.45 times the shortest
-surface edge, as in other small-scale scenes.
-
-The reference command below uses Example 13's wrecking-ball settings with eight
-threads and exact fallback disabled. These are starting settings, not a claim
-of matching the paper's trajectory or convergence.
-GEO/OBJ output and `--write_substeps true` use the existing surface exporters.
-Regression checks cover link scaling, both link resolutions, the preserved net
-span and payload sizes, the gear asset's unmodified proportions, prism thickness,
-rigid mass/inertia, fixed-link preservation and initial packing. The 3 × 3
-repeating link arrangement is interlocked and initially intersection-free for
-both meshes; its minimum link-to-link clearance is approximately 30.8 mm with
-the coarser mesh versus 26.0 mm with the original at the default scale.
-No full dynamic run was launched for this revision; these are initial-geometry
-checks, not a proof that no object can pass through a moving gap or leave the net sideways.
-The full 200-frame, enlarged 48-object trajectory has not yet been validated.
 
 ## Common settings
 
@@ -557,7 +476,7 @@ exact fallback disabled, and a separate output directory
 OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 16 \
   --use_basic_experimental true --use_simd true \
-  --exact_computation_fallback false --chain_net_coarse_links true \
+  --exact_computation_fallback false \
   --num_frames 200 --fps 30 \
   --substeps 20 --max_substep_iters 150 --fixed_iters \
   --d_hat 0.001 --k_barrier 1e9 --k_sdf 1e8 --eps_sdf 0.002 \
