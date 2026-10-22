@@ -4537,6 +4537,63 @@ TEST(WreckingBallExample,
         minimum_ground_distance, params.eps_sdf, 1.0e-14);
 }
 
+TEST(BikeChainExample, FrameZeroPreservesSeparateSourceBodiesAndSprocketOrigins) {
+    IPCArgs3D args;
+    char program[] = "3D_sim", flag[] = "--example", scene[] = "18";
+    char* argv[] = {program, flag, scene};
+    ASSERT_TRUE(args.parse(3, argv));
+    EXPECT_EQ(args.num_frames, 0);
+    EXPECT_DOUBLE_EQ(args.rigid_density, 1000.0);
+    EXPECT_DOUBLE_EQ(args.d_hat, 1.0e-5);
+    EXPECT_EQ(args.substeps, 1);
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    build_bike_chain_example(args, mesh, state, X, pins, params);
+    EXPECT_DOUBLE_EQ(params.d_hat, 1.0e-5);
+    ASSERT_EQ(mesh.rb_nodes.size(), 138U);
+    ASSERT_EQ(state.deformed_positions.size(), 47761U);
+    ASSERT_EQ(mesh.tris.size() / 3, 95658U);
+    EXPECT_TRUE(pins.empty()); EXPECT_TRUE(X.empty());
+    EXPECT_TRUE(mesh.deformable_nodes.empty());
+    EXPECT_TRUE(params.sdf_planes.empty());
+    EXPECT_NEAR(state.omega[136].z(),
+                -25.0 * 3.14159265358979323846 / 180.0, 1.0e-15);
+    // The authored tessellations have sub-micrometre COM asymmetry.
+    EXPECT_LT((state.x_coms[136] - Vec3::Zero()).norm(), 1.0e-6);
+    EXPECT_LT((state.x_coms[137] - Vec3(-0.4825, 0.0, 0.0)).norm(), 1.0e-6);
+    for (int body = 0; body < 138; ++body) {
+        SCOPED_TRACE(body);
+        const int nodes = body < 136 ? std::array<int, 4>{438, 438, 180, 302}[body % 4]
+                                    : body == 136 ? 1056 : 533;
+        EXPECT_EQ(mesh.rb_nodes[body].size(), nodes);
+        EXPECT_TRUE(state.x_coms[body].allFinite());
+        EXPECT_GT(mesh.total_mass[body], 0.0);
+        EXPECT_TRUE(mesh.I_hat[body].allFinite());
+        EXPECT_GT(mesh.I_hat[body].determinant(), 0.0);
+        EXPECT_TRUE(state.v_coms[body].isZero(0.0));
+        EXPECT_EQ(mesh.rb_update_modes[body], body < 136
+            ? RigidBodyUpdateMode::TranslationAndOrientation : RigidBodyUpdateMode::OrientationOnly);
+    }
+    std::map<std::pair<int, int>, int> edges;
+    for (std::size_t t = 0; t < mesh.tris.size(); t += 3) {
+        const int body = mesh.node_to_rb[mesh.tris[t]];
+        for (int k = 0; k < 3; ++k) {
+            EXPECT_EQ(mesh.node_to_rb[mesh.tris[t+k]], body);
+            ++edges[{mesh.tris[t+k], mesh.tris[t+(k+1)%3]}];
+        }
+    }
+    for (const auto& [edge, count] : edges) {
+        EXPECT_EQ(count, 1);
+        EXPECT_EQ(edges.at({edge.second, edge.first}), 1);
+    }
+    args.num_frames = 1;
+    EXPECT_THROW(build_bike_chain_example(args, mesh, state, X, pins, params),
+                 std::invalid_argument);
+}
+
 TEST(ChainNetBallExample, SquareAndRectangularNetsHaveClosedOwnedRigidMeshes) {
     for (const auto dimensions : {std::array<int, 2>{3, 3},
                                   std::array<int, 2>{4, 5}}) {

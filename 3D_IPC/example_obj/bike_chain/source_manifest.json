@@ -1,0 +1,56 @@
+{
+  "repository": "https://github.com/ipc-sim/rigid-ipc",
+  "ref": "23b6ba6fbf8434056444ae106356fd2209136988",
+  "files": [
+    {
+      "path": "tools/fixtures/3D/chain_pully.py",
+      "url": "https://github.com/ipc-sim/rigid-ipc/blob/23b6ba6fbf8434056444ae106356fd2209136988/tools/fixtures/3D/chain_pully.py",
+      "git_blob_sha": "b49583d990865ac3b84782fb91564529b2a73555"
+    },
+    {
+      "path": "fixtures/3D/mechanisms/507-movements/227-bike-chain.json",
+      "url": "https://github.com/ipc-sim/rigid-ipc/blob/23b6ba6fbf8434056444ae106356fd2209136988/fixtures/3D/mechanisms/507-movements/227-bike-chain.json",
+      "git_blob_sha": "df8db6a003ca5ee34c011ff7e69e32c8e2c90397"
+    },
+    {
+      "path": "meshes/507-movements/227-chain-pully/link.obj",
+      "url": "https://github.com/ipc-sim/rigid-ipc/blob/23b6ba6fbf8434056444ae106356fd2209136988/meshes/507-movements/227-chain-pully/link.obj",
+      "git_blob_sha": "e1c12882da289a573a6cc7ae74d7cd34c6bf5588"
+    },
+    {
+      "path": "meshes/507-movements/227-chain-pully/barring.obj",
+      "url": "https://github.com/ipc-sim/rigid-ipc/blob/23b6ba6fbf8434056444ae106356fd2209136988/meshes/507-movements/227-chain-pully/barring.obj",
+      "git_blob_sha": "a74330095516510d7ad2c3d75bd075341b1fde0f"
+    },
+    {
+      "path": "meshes/507-movements/227-chain-pully/pin.obj",
+      "url": "https://github.com/ipc-sim/rigid-ipc/blob/23b6ba6fbf8434056444ae106356fd2209136988/meshes/507-movements/227-chain-pully/pin.obj",
+      "git_blob_sha": "6f260cb5b42e2871cbea0501626f41ec6ba2b6aa"
+    },
+    {
+      "path": "meshes/507-movements/227-chain-pully/sprocket-20teeth.obj",
+      "url": "https://github.com/ipc-sim/rigid-ipc/blob/23b6ba6fbf8434056444ae106356fd2209136988/meshes/507-movements/227-chain-pully/sprocket-20teeth.obj",
+      "git_blob_sha": "e15900935e081f5f30e7f6fd7a8859865948ceb2"
+    },
+    {
+      "path": "meshes/507-movements/227-chain-pully/sprocket-8teeth.obj",
+      "url": "https://github.com/ipc-sim/rigid-ipc/blob/23b6ba6fbf8434056444ae106356fd2209136988/meshes/507-movements/227-chain-pully/sprocket-8teeth.obj",
+      "git_blob_sha": "1c6282aa28638a9683daa87ce695832e4bcdbfd4"
+    },
+    {
+      "path": "meshes/507-movements/227-chain-pully/LICENSE-chain.txt",
+      "url": "https://github.com/ipc-sim/rigid-ipc/blob/23b6ba6fbf8434056444ae106356fd2209136988/meshes/507-movements/227-chain-pully/LICENSE-chain.txt",
+      "git_blob_sha": "2f4ebeb7b9030b3d89474c35ab1ce41d8428a2c5"
+    },
+    {
+      "path": "meshes/507-movements/227-chain-pully/LICENSE-sprocket.txt",
+      "url": "https://github.com/ipc-sim/rigid-ipc/blob/23b6ba6fbf8434056444ae106356fd2209136988/meshes/507-movements/227-chain-pully/LICENSE-sprocket.txt",
+      "git_blob_sha": "3f214330385c02983e427a5d4e6b85aec05a4892"
+    },
+    {
+      "path": "LICENSE",
+      "url": "https://github.com/ipc-sim/rigid-ipc/blob/23b6ba6fbf8434056444ae106356fd2209136988/LICENSE",
+      "git_blob_sha": "b9f262de9dd5b61a602e9e1169dc18509373f7d7"
+    }
+  ]
+}

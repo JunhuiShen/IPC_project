@@ -536,6 +536,20 @@ no SDF colliders, cloth or deformable solids; deformable initial-guess flags
 do not apply. Use a fresh output directory rather than another scene's
 restart checkpoint. To export only the initial layout, use `--num_frames 0`.
 
+### Example 18: bike chain
+
+The scene imports Rigid IPC's Figure 2 chain as 138 separate rigid bodies,
+using the original OBJ meshes and fixture poses. Example 18 currently supports
+frame 0 export only; the mechanism's motion is not enabled.
+
+Export the initial geometry with:
+
+```sh
+./build/3D_sim --example 18 --num_frames 0 --format geo --outdir example18_frame0
+```
+
+Source meshes, fixture poses and license notices are in `example_obj/bike_chain`.
+
 ## Build and test
 
 The quick-start build skips tests and developer tools. To enable and run the

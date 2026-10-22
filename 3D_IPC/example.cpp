@@ -9,7 +9,9 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -2919,4 +2921,107 @@ void build_rigid_objects_in_box_example(
     }
     if (params.d_hat > 0.0 && std::isfinite(minimum_surface_edge))
         params.d_hat = std::min(params.d_hat, 0.45 * minimum_surface_edge);
+}
+
+// Example 18: Figure 2 bike chain, preserving every upstream rigid component.
+void build_bike_chain_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params) {
+    if (args.num_frames != 0 || args.restart_frame >= 0)
+        throw std::invalid_argument("Example 18 currently supports frame 0 export only");
+    const Vec3 gravity(args.gx, args.gy, args.gz);
+    if (!gravity.allFinite() || !std::isfinite(args.rigid_density) || args.rigid_density <= 0.0)
+        throw std::invalid_argument("Example 18 requires finite gravity and positive rigid density");
+    if (!std::isfinite(args.d_hat) || args.d_hat < 0.0)
+        throw std::invalid_argument("Example 18 requires a finite nonnegative barrier distance");
+    namespace fs = std::filesystem;
+    std::vector<fs::path> candidates;
+    if (!args.datadir.empty()) {
+        candidates.push_back(fs::path(args.datadir) / "bike_chain");
+        candidates.push_back(fs::path(args.datadir));
+    }
+    candidates.push_back(fs::path("example_obj") / "bike_chain");
+    candidates.push_back(fs::path(__FILE__).parent_path() / "example_obj" / "bike_chain");
+    fs::path directory;
+    for (const auto& path : candidates)
+        if (fs::is_regular_file(path / "initial_bodies.txt")) {
+            directory = path;
+            break;
+        }
+    if (directory.empty())
+        throw std::runtime_error("Example 18 requires example_obj/bike_chain/initial_bodies.txt and its OBJ assets");
+
+    struct Pose {
+        std::string mesh, role;
+        Vec3 position, degrees;
+        double scale, omega_z;
+    };
+    std::vector<Pose> poses;
+    std::ifstream input(directory / "initial_bodies.txt");
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        Pose pose;
+        std::istringstream row(line);
+        if (!(row >> pose.mesh >> pose.position.x() >> pose.position.y() >> pose.position.z()
+              >> pose.degrees.x() >> pose.degrees.y() >> pose.degrees.z()
+              >> pose.scale >> pose.omega_z >> pose.role)
+            || !pose.position.allFinite() || !pose.degrees.allFinite()
+            || !std::isfinite(pose.scale) || pose.scale <= 0.0 || !std::isfinite(pose.omega_z))
+            throw std::invalid_argument("Example 18 contains an invalid source body pose");
+        const std::size_t body = poses.size();
+        const std::string expected = body < 136
+            ? (body % 4 < 2 ? "link.obj" : body % 4 == 2 ? "barring.obj" : "pin.obj")
+            : body == 136 ? "sprocket-20teeth.obj" : "sprocket-8teeth.obj";
+        const std::string role = body < 136 ? "chain" : body == 136 ? "drive" : "driven";
+        if (body >= 138 || pose.mesh != expected || pose.role != role
+            || !fs::is_regular_file(directory / pose.mesh))
+            throw std::invalid_argument("Example 18 requires the 138-body source ordering and complete mesh assets");
+        poses.push_back(pose);
+    }
+    if (poses.size() != 138)
+        throw std::invalid_argument("Example 18 requires exactly 138 rigid body poses");
+
+    clear_model(ref_mesh, state, X, pins);
+    params.gravity = gravity;
+    params.d_hat = args.d_hat;
+    params.sdf_planes.clear(); params.sdf_cylinders.clear(); params.sdf_spheres.clear();
+    params.use_ccd_guess = params.use_colored_ccd_guess = params.use_colored_ccd_guess_level_based = false;
+    params.use_verlet_guess = params.use_translation_guess = false;
+    params.use_ogc = params.use_ogc_solver = false;
+    for (const auto& pose : poses) {
+        const std::string mesh = (directory / pose.mesh).string();
+        std::vector<Vec3> positions;
+        std::vector<int> triangles;
+        load_obj_mesh(mesh, positions, triangles);
+        if (positions.empty() || triangles.empty())
+            throw std::invalid_argument("Example 18 requires nonempty triangle meshes");
+        Vec3 lower = positions.front(), upper = positions.front();
+        for (const Vec3& p : positions) {
+            lower = lower.cwiseMin(p); upper = upper.cwiseMax(p);
+        }
+        const auto axis_rotation = [](const Vec3& axis, double degrees) {
+            const double half = degrees * kPi / 360.0;
+            return Vec4(std::cos(half), axis.x() * std::sin(half),
+                        axis.y() * std::sin(half), axis.z() * std::sin(half));
+        };
+        const Vec4 orientation = quaternion_normalize(quaternion_multiply(
+            axis_rotation(Vec3::UnitZ(), pose.degrees.z()), quaternion_multiply(
+            axis_rotation(Vec3::UnitY(), pose.degrees.y()), axis_rotation(Vec3::UnitX(), pose.degrees.x()))));
+        // The importer normalizes around the AABB center; undo that recentering
+        // so the fixture's authored model-origin transforms remain exact.
+        const Vec3 center = pose.position + quaternion_rotate(orientation,
+            0.5 * pose.scale * (lower + upper));
+        const auto mode = pose.role == "chain" ? RigidBodyUpdateMode::TranslationAndOrientation
+            : RigidBodyUpdateMode::OrientationOnly;
+        const Vec3 omega(0.0, 0.0, pose.omega_z * kPi / 180.0);
+        const std::size_t first_triangle = ref_mesh.tris.size() / 3;
+        const int body = append_normalized_obj_rigid_body(mesh, state, ref_mesh, center,
+            pose.scale * (upper - lower).maxCoeff(), args.rigid_density,
+            Vec3::Zero(), orientation, omega, mode);
+        use_closed_volume_rigid_mass_properties(body, first_triangle,
+            ref_mesh.tris.size() / 3, ref_mesh, state);
+    }
+    ref_mesh.build_deformable_nodes();
 }

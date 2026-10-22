@@ -262,3 +262,11 @@ void build_rigid_objects_in_box_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
+
+// Example 18: native import of the Rigid IPC Figure 2 bike chain.
+// Each plate, roller, pin and sprocket is a separate closed rigid body.
+// Initial geometry and source velocities are imported; motion is not enabled.
+void build_bike_chain_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params);
