@@ -262,19 +262,22 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
   --d_hat 0.005 --k_barrier 100 \
   --node_box_min 0.001 --node_box_max 0.01 \
-  --fixed_iters --substeps 5 --max_substep_iters 4 --node_box_update_count 10 \
+  --fixed_iters --substeps 3 --max_substep_iters 3 --node_box_update_count 10 \
   --use_basic_experimental true --use_simd true --use_parallel true \
+  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
+  --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 0.97 \
   --outdir example1_output --format geo
 
-# Example 1 alternative: colored initial guess
+# Example 1 alternative output directory: same level-based initial guess settings
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 1 --exact_computation_fallback false --num_frames 240 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
   --d_hat 0.005 --k_barrier 100 \
   --node_box_min 0.001 --node_box_max 0.01 \
-  --fixed_iters --substeps 4 --max_substep_iters 3 --node_box_update_count 10 \
+  --fixed_iters --substeps 3 --max_substep_iters 3 --node_box_update_count 10 \
   --use_basic_experimental true --use_simd true --use_parallel true \
-  --use_ccd_guess false --use_colored_ccd_guess true --colored_ccd_guess_iters 6 \
+  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
+  --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 0.97 \
   --outdir example1_colored_output --format geo
 
 # Example 2: two cylinders, 2.0 turns, twist then untwist
@@ -283,19 +286,22 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --E 115000 --nu 0.25 --kB 0.009 --kpin 5e6 \
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e5 --eps_sdf 0.002 \
   --node_box_min 0.001 --node_box_max 0.01 --tcyl_max_turn 2.0 \
-  --fixed_iters --substeps 3 --max_substep_iters 6 --node_box_update_count 10 \
+  --fixed_iters --substeps 4 --max_substep_iters 2 --node_box_update_count 10 \
   --use_basic_experimental true --use_simd true --use_parallel true \
+  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
+  --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 0.99 \
   --outdir example2_output --format geo
 
-# Example 2 alternative: colored initial guess
+# Example 2 alternative output directory: same level-based initial guess settings
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 2 --exact_computation_fallback false --num_frames 900 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 5e6 \
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e5 --eps_sdf 0.002 \
   --node_box_min 0.001 --node_box_max 0.01 --tcyl_max_turn 2.0 \
-  --fixed_iters --substeps 9 --max_substep_iters 2 --node_box_update_count 10 \
+  --fixed_iters --substeps 4 --max_substep_iters 2 --node_box_update_count 10 \
   --use_basic_experimental true --use_simd true --use_parallel true \
-  --use_ccd_guess false --use_colored_ccd_guess true --colored_ccd_guess_iters 2 \
+  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
+  --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 0.99 \
   --outdir example2_colored_output --format geo
 
 # Example 3: one yawing cylinder, 4.0 turns at 0.30 turns/s
@@ -305,20 +311,23 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 --eps_sdf 0.002 \
   --node_box_min 0.001 --node_box_max 0.01 \
   --tu_max_turn 4.0 --tu_twist_rate 0.30 \
-  --fixed_iters --substeps 5 --max_substep_iters 8 --node_box_update_count 10 \
+  --fixed_iters --substeps 6 --max_substep_iters 3 --node_box_update_count 10 \
   --use_basic_experimental true --use_simd true --use_parallel true \
+  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
+  --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 0.99 \
   --outdir example3_output --format geo
 
-# Example 3 alternative: colored initial guess
+# Example 3 alternative output directory: same level-based initial guess settings
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 3 --exact_computation_fallback false --num_frames 850 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e8 \
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 --eps_sdf 0.002 \
   --node_box_min 0.001 --node_box_max 0.01 \
   --tu_max_turn 4.0 --tu_twist_rate 0.30 \
-  --fixed_iters --substeps 20 --max_substep_iters 2 --node_box_update_count 10 \
+  --fixed_iters --substeps 6 --max_substep_iters 3 --node_box_update_count 10 \
   --use_basic_experimental true --use_simd true --use_parallel true \
-  --use_ccd_guess false --use_colored_ccd_guess true --colored_ccd_guess_iters 2 \
+  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
+  --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 0.99 \
   --outdir example3_colored_output --format geo
 
 # Example 4: avatar collider and dress loaded from a data directory
@@ -370,30 +379,35 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 # Example 10: four horizontal layers of differently ordered Bunny/Spot/cube/gear groups; Bunny and Spot lie on their sides
 # With friction coefficient 0.1, use 15 substeps and 40 max_substep_iters.
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 10 --num_frames 200 --fps 30 --substeps 15 --max_substep_iters 25 --fixed_iters \
+./build/3D_sim --example 10 --num_frames 200 --fps 30 --substeps 10 --max_substep_iters 25 --fixed_iters \
+  --exact_computation_fallback true --ccd_exact_step_bound true \
   --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 \
   --d_hat 0.019 --k_barrier 1000 --friction_coefficient 0 --use_ccd true \
   --node_box_update_count 10 --use_parallel true --use_basic_experimental true --use_simd true \
   --write_substeps false --format geo --outdir outputs/example10_general_v2 \
-  --use_colored_ccd_guess true --colored_ccd_guess_iters 10
+  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
+  --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 0.98
 
 # Example 11: rolled cloth unrolling down an SDF ramp
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 11 --num_frames 200 \
+  --exact_computation_fallback true --ccd_exact_step_bound true \
   --substeps 10 --max_substep_iters 2 --fixed_iters \
   --kB 0.0025 --friction_coefficient 0.1 \
   --use_parallel true --use_basic_experimental true --use_simd true \
-  --use_colored_ccd_guess true --colored_ccd_guess_iters 10 \
+  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
+  --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 1.0 \
   --outdir rolled_cloth_on_steep_ramp_output_new --format geo
 
 # Example 12: three cloth layers with one fixed edge and one oscillating edge
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 12 --exact_computation_fallback false --num_frames 200 \
-  --substeps 10 --max_substep_iters 2 --fixed_iters \
+./build/3D_sim --example 12 --exact_computation_fallback true --ccd_exact_step_bound true --num_frames 200 \
+  --substeps 6 --max_substep_iters 2 --fixed_iters \
   --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 \
   --kB 0.01 --osc_amplitude 0.01 --osc_frequency 6.0 --osc_length 1.0 --gy 0 \
   --use_parallel true --use_basic_experimental true --use_simd true \
-  --use_colored_ccd_guess true --colored_ccd_guess_iters 10 \
+  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
+  --colored_ccd_guess_iters 4 --colored_ccd_guess_fraction 1.0 \
   --outdir oscillating_cloth_layers_output --format geo
 
 # Example 13: a rigid wrecking ball swings into a wall of 560 cubes
@@ -406,39 +420,43 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 
 # Example 14: fifty free cloth sheets fall over the cylinder and spread onto the ground.
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 14 --exact_computation_fallback false --num_frames 10 \
-  --fps 30 --substeps 40 --max_substep_iters 3 --fixed_iters \
+./build/3D_sim --example 14 --exact_computation_fallback true --ccd_exact_step_bound true --num_frames 10 \
+  --fps 30 --substeps 24 --max_substep_iters 3 --fixed_iters \
   --use_basic_experimental --use_simd --use_parallel true --use_ccd true \
-  --use_colored_ccd_guess true --colored_ccd_guess_iters 10 \
+  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
+  --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 1.0 \
   --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 3 \
   --outdir results/example14_70x70/frames --format geo && \
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 14 --exact_computation_fallback false --restart_frame 10 --num_frames 120 \
-  --fps 30 --substeps 50 --max_substep_iters 2 --fixed_iters \
+./build/3D_sim --example 14 --exact_computation_fallback true --ccd_exact_step_bound true --restart_frame 10 --num_frames 120 \
+  --fps 30 --substeps 20 --max_substep_iters 2 --fixed_iters \
   --use_basic_experimental --use_simd --use_parallel true --use_ccd true \
-  --use_ccd_guess true --use_colored_ccd_guess false \
+  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
+  --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 1.0 \
   --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 2 \
   --outdir results/example14_70x70/frames --format geo
 
-# Example 14 alternative: colored initial guess throughout, with exact fallback enabled.
+# Example 14 alternative output directory: same level-based/direct-step settings throughout.
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 14 --exact_computation_fallback true --num_frames 10 \
-  --fps 30 --substeps 40 --max_substep_iters 3 --fixed_iters \
+./build/3D_sim --example 14 --exact_computation_fallback true --ccd_exact_step_bound true --num_frames 10 \
+  --fps 30 --substeps 24 --max_substep_iters 3 --fixed_iters \
   --use_basic_experimental true --use_simd true --use_parallel true --use_ccd true \
-  --use_ccd_guess false --use_colored_ccd_guess true --colored_ccd_guess_iters 10 \
+  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
+  --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 1.0 \
   --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 3 \
   --outdir results/example14_colored_30x2/frames --format geo && \
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 14 --exact_computation_fallback true --restart_frame 10 --num_frames 120 \
-  --fps 30 --substeps 30 --max_substep_iters 2 --fixed_iters \
+./build/3D_sim --example 14 --exact_computation_fallback true --ccd_exact_step_bound true --restart_frame 10 --num_frames 120 \
+  --fps 30 --substeps 20 --max_substep_iters 2 --fixed_iters \
   --use_basic_experimental true --use_simd true --use_parallel true --use_ccd true \
-  --use_ccd_guess false --use_colored_ccd_guess true --colored_ccd_guess_iters 10 \
+  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
+  --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 1.0 \
   --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 2 \
