@@ -75,6 +75,11 @@ SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, co
 
 SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 
+// OGC local Newton assembly with per-color Planar-DAT filtering. Reference
+// pairs within 1.5*d_hat use division planes; a query-radius isotropic cap
+// protects against unqueried pairs. Supports cloth/particle meshes only.
+SolverResult global_gauss_seidel_solver_dat(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
+
 namespace rb_solver {
 
 // Friction derivatives are already scaled for the incremental potential.

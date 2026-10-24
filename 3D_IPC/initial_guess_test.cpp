@@ -733,7 +733,7 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, ClothFractionPreservesFullInertial
         const auto predictor = GetParam() ? collision_colored_ccd_initial_guess_level_based
                                          : collision_colored_ccd_initial_guess;
         auto expected = predictor(before, displacement, scene.mesh, scene.params, 2,
-            &reference_broad_phase, nullptr);
+            &reference_broad_phase, nullptr, nullptr);
         const auto reduced_start = expected;
         const auto solver = v2 ? global_gauss_seidel_solver_basic_experimental_v2
                                : global_gauss_seidel_solver_basic;
@@ -2538,7 +2538,7 @@ TEST_F(CollisionColoredCCDInitialGuessNew, AlternatingPredictorsRebuildSharedWor
         const auto predictor = request.bfs ? collision_colored_ccd_initial_guess_level_based
                                           : collision_colored_ccd_initial_guess;
         return predictor(input.x, input.displacement, input.mesh,
-            params, request.cap, &scratch, &trace);
+            params, request.cap, &scratch, &trace, nullptr);
     };
     // Save clean-cache baselines before interleaving calls. Computing each
     // baseline just before its reused call could hide stale shared scheduling.

@@ -333,3 +333,70 @@ TEST(SimulationSnapshot, ExperimentalFrictionContactsAreBitwiseEqualAcrossAvaila
         }
     }
 }
+
+TEST(SimulationSnapshot, PredictorChangesAndNestedFramesPreserveTrajectory) {
+    struct RestoreThreads {
+        int count = omp_get_max_threads();
+        ~RestoreThreads() { omp_set_num_threads(count); }
+    } restore;
+    omp_set_num_threads(4);
+    RefMesh meshes[2];
+    DeformedState states[2];
+    for (int run = 0; run < 2; ++run) {
+        std::vector<Vec2> material;
+        std::vector<Pin> pins;
+        VertexTriangleMap adjacency;
+        SimParams params = SimParams::zeros();
+        build_scene(meshes[run], states[run], pins, adjacency, params, material);
+        clear_model(meshes[run], states[run], material, pins);
+        build_square_mesh(meshes[run], states[run], material, 8, 8, 1, 1, Vec3::Zero());
+        build_square_mesh(meshes[run], states[run], material, 8, 8, 1, 1, Vec3(0.003, 0.008, 0.001));
+        states[run].velocities.assign(states[run].deformed_positions.size(), Vec3(0.01, -0.02, 0.03));
+        meshes[run].build_lumped_mass(params.density, params.thickness);
+        adjacency = build_incident_triangle_map(meshes[run].tris);
+        params.use_parallel = true;
+        params.use_basic_experimental = true;
+        params.use_basic_experimental_v2 = true;
+        params.use_simd = true;
+        params.use_ccd = true;
+        params.exact_computation_fallback = false;
+        params.max_global_iters = 2;
+        params.substeps = 3;
+        params.node_box_update_count = 2;
+        params.d_hat = 0.005;
+        params.k_barrier = 1.0;
+        params.colored_ccd_guess_iters = 2;
+        params.node_box_min = params.node_box_max = 0.01;
+        BroadPhase phase;
+        RefMesh nested_mesh;
+        DeformedState nested_state;
+        std::vector<Vec2> nested_material;
+        std::vector<Pin> nested_pins;
+        VertexTriangleMap nested_adjacency;
+        SimParams nested_params = SimParams::zeros();
+        build_scene(nested_mesh, nested_state, nested_pins, nested_adjacency,
+            nested_params, nested_material);
+        nested_params.max_global_iters = 2;
+        BroadPhase nested_phase;
+        SubstepCallback nested_frame = nullptr;
+        if (run) {
+            nested_frame = [&](int, const std::vector<Vec3>&) {
+                ASSERT_TRUE(advance_one_frame(nested_state, nested_mesh, nested_adjacency,
+                    nested_pins, nested_params, nested_phase).converged);
+            };
+        }
+        for (int frame = 1; frame <= 4; ++frame) {
+            params.use_colored_ccd_guess = frame == 1;
+            params.use_colored_ccd_guess_level_based = frame == 2;
+            params.use_ccd_guess = frame == 3;
+            const auto result = advance_one_frame(states[run], meshes[run], adjacency,
+                pins, params, phase, frame, nullptr, nested_frame);
+            ASSERT_TRUE(result.converged);
+        }
+    }
+    ASSERT_EQ(states[0].deformed_positions.size(), states[1].deformed_positions.size());
+    for (std::size_t i = 0; i < states[0].deformed_positions.size(); ++i) {
+        EXPECT_EQ(std::memcmp(states[0].deformed_positions[i].data(), states[1].deformed_positions[i].data(), 3 * sizeof(double)), 0) << i;
+        EXPECT_EQ(std::memcmp(states[0].velocities[i].data(), states[1].velocities[i].data(), 3 * sizeof(double)), 0) << i;
+    }
+}

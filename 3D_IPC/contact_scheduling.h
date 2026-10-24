@@ -736,7 +736,6 @@ struct ColoredContactSweep {
         short_step.resize(cache.vertex_nt.size());
         cooperative_vertices.clear();
         assignments.assign(groups.size() * team, Assignment{});
-        reserve_contact_scratch(states, states_capacity, cache.vertex_nt.size());
         const int heavy_count = std::min(24, std::max(1, team * 24 / 64));
         const int heavy_budget = 48 * team / 64;
         split_count.assign(groups.size(), 0);
@@ -781,6 +780,7 @@ struct ColoredContactSweep {
             maximum = std::max(maximum, static_cast<std::size_t>(offset));
             maximum_masks = std::max(maximum_masks, static_cast<std::size_t>(mask_offset));
         }
+        reserve_contact_scratch(states, states_capacity, cooperative_vertices.size());
         resize_contact_scratch(values, maximum);
         masks.resize(maximum_masks);
     }
@@ -810,7 +810,7 @@ struct ColoredContactSweep {
     void commit_with_helpers(const Assignment& a, ContactContribution* result,
         const ContactMaskWord* mask, const Commit& commit, CommitFailure& failure) {
         auto& context = commit_contexts[a.commit_context];
-        State& state = states[a.vertex];
+        State& state = states[a.commit_context];
         if (a.lane == 0) {
             while (state.arrived.load(std::memory_order_acquire) != 2 * a.lanes)
                 contact_spin_hint();
@@ -856,9 +856,9 @@ struct ColoredContactSweep {
             next_whole[c].store(split_count[c], std::memory_order_relaxed);
         // Reset before entering the team, including after any runtime team-size
         // fallback. Do not assume that every preceding sweep used this path.
-        for (int v : cooperative_vertices) {
-            states[v].arrived.store(0, std::memory_order_relaxed);
-            states[v].ready.store(0, std::memory_order_relaxed);
+        for (std::size_t context = 0; context < cooperative_vertices.size(); ++context) {
+            states[context].arrived.store(0, std::memory_order_relaxed);
+            states[context].ready.store(0, std::memory_order_relaxed);
         }
 #pragma omp parallel
         {
@@ -875,7 +875,7 @@ struct ColoredContactSweep {
                     const Assignment a = assignments[c * team + omp_get_thread_num()];
                     if (a.vertex >= 0) {
                         auto *result = values.data() + a.offset;
-                        State &state = states[a.vertex];
+                        State &state = states[a.commit_context];
                         for (int start = a.lane * chunk; start < a.count;
                              start += a.lanes * chunk) {
                             unsigned bits = 0, clear = 0;
@@ -964,9 +964,9 @@ struct ColoredContactSweep {
             next_whole[c].store(split_count[c], std::memory_order_relaxed);
         // Reset before entering the team, including after any runtime team-size
         // fallback. Do not assume that every preceding sweep used this path.
-        for (int v : cooperative_vertices) {
-            states[v].arrived.store(0, std::memory_order_relaxed);
-            states[v].ready.store(0, std::memory_order_relaxed);
+        for (std::size_t context = 0; context < cooperative_vertices.size(); ++context) {
+            states[context].arrived.store(0, std::memory_order_relaxed);
+            states[context].ready.store(0, std::memory_order_relaxed);
         }
 #pragma omp parallel
         {
@@ -997,7 +997,7 @@ struct ColoredContactSweep {
                         const Assignment a = assignments[c * team + omp_get_thread_num()];
                         if (a.vertex >= 0) {
                             auto *result = values.data() + a.offset;
-                            State &state = states[a.vertex];
+                            State &state = states[a.commit_context];
                             if constexpr (!std::is_same_v<ComputeAssigned, std::nullptr_t>) {
                                 compute_assigned(a, result, masks.data() + a.mask_offset);
                             } else {

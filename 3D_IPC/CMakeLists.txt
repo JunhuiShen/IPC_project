@@ -250,6 +250,7 @@ set(IPC_SIMULATION_SOURCES
     make_shape.cpp
     mesh.cpp
     mesh_utils.cpp
+    ogc_contact.cpp
     output.cpp
     parallel_helper.cpp
     physics.cpp
@@ -342,6 +343,8 @@ if(BUILD_TESTING)
         ccd_test
         contact_scheduling_test
         cloth_grid_solver_test
+        dat_contact_test
+        dat_solver_test
         corotated_energy_test
         friction_energy_test
         grid_coloring_test
@@ -353,6 +356,7 @@ if(BUILD_TESTING)
         make_shape_test
         mesh_test
         node_triangle_distance_test
+        ogc_contact_test
         parallel_helper_test
         rigid_body_ipc_test
         sdf_penalty_energy_test

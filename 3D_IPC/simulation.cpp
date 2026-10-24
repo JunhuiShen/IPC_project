@@ -127,6 +127,10 @@ int main(int argc, char** argv) {
     const bool has_solid = !ref_mesh.tet_nodes.empty();
     const bool is_mixed = has_rigid && has_deformable;
     const bool uses_general_solver = is_mixed || has_solid;
+    if (params.use_dat_solver && (has_rigid || has_solid)) {
+        std::cerr << "Error: --use_dat_solver supports only cloth/deformable surface meshes; rigid, solid, and mixed scenes are unsupported\n";
+        return 1;
+    }
     if (params.use_cloth_grid && (has_rigid || has_solid)) {
         std::cerr << "Error: --use_cloth_grid is available only for the basic cloth solver; rigid, solid, and mixed scenes are unsupported\n";
         return 1;
@@ -186,6 +190,8 @@ int main(int argc, char** argv) {
     if (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based) {
         if (!has_deformable)
             std::cout << "Colored CCD initial guess: ignored for rigid-only scenes\n";
+        else if (params.use_dat_solver)
+            std::cout << "Deformable initial guess: previous positions (DAT overrides colored CCD guess)\n";
         else if (params.use_ogc || params.use_ogc_solver)
             std::cout << "Deformable initial guess: previous positions (OGC overrides colored CCD guess)\n";
         else {
@@ -204,13 +210,18 @@ int main(int argc, char** argv) {
         }
     }
     if ((params.use_basic_experimental || params.use_basic_experimental_v2) && !params.use_cloth_grid
-        && !params.use_ogc && !params.use_ogc_solver) {
+        && !params.use_ogc && !params.use_ogc_solver && !params.use_dat_solver) {
         if (params.use_basic_experimental_v2)
             std::cout << ((uses_general_solver || has_rigid)
                 ? "Experimental general solver: v2\n" : "Experimental cloth solver: v2\n");
         else
             std::cout << "Experimental cloth solver: v1 (scalar)\n";
     }
+    if (params.use_dat_solver)
+        std::cout << "Planar DAT solver: relaxation=" << params.dat_relaxation
+                  << ", query radius=" << 1.5 * params.d_hat
+                  << ", detection interval=" << params.dat_detection_interval
+                  << " color stages\n";
     if (num_rigid_bodies > 0)
         std::cout << "Rigid bodies: " << num_rigid_bodies << "\n";
 

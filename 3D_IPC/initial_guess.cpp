@@ -7,6 +7,7 @@
 #include "safe_step.h"
 #include "segment_segment_distance.h"
 #include "solver.h"
+#include "contact_scheduling.h"
 
 #include <algorithm>
 #include <cmath>
@@ -203,7 +204,8 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
     const std::vector<Vec3>& x,
     const std::vector<Vec3>& intended_displacement,
     const RefMesh& ref_mesh, const SimParams& params, int ccd_iterations,
-    BroadPhase* scratch_broad_phase, ColoredCCDGuessTrace* trace) {
+    BroadPhase* scratch_broad_phase, ColoredCCDGuessTrace* trace,
+    std::vector<Vec3>* recycled_result) {
     if (x.size() != intended_displacement.size())
         throw std::invalid_argument("collision_colored_ccd_initial_guess: position/displacement size mismatch");
     if (ccd_iterations < 0)
@@ -248,7 +250,9 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
         if (!targets[vertex].allFinite())
             throw std::invalid_argument("collision_colored_ccd_initial_guess: target overflow");
     }
-    std::vector<Vec3> xnew = x;
+    std::vector<Vec3> xnew;
+    if (recycled_result) xnew.swap(*recycled_result);
+    xnew = x;
     if (trace) initialize_colored_guess_trace(*trace, x, targets);
     if (ccd_iterations == 0 || nv == 0) return xnew;
 
@@ -396,7 +400,8 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
     const std::vector<Vec3>& x,
     const std::vector<Vec3>& intended_displacement,
     const RefMesh& ref_mesh, const SimParams& params, int ccd_iterations,
-    BroadPhase* scratch_broad_phase, ColoredCCDGuessTrace* trace) {
+    BroadPhase* scratch_broad_phase, ColoredCCDGuessTrace* trace,
+    std::vector<Vec3>* recycled_result) {
     // Scheduling only: preserve the level/color/within-group update order and
     // pass the exact-fallback setting unchanged to every CCD query. Per-group
     // tracing retains the original loop so each intermediate state is recorded.
@@ -410,7 +415,7 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
     // record trial positions as actual updates or rebuild contacts: boxes cover
     // every original start-to-target path.
     auto xnew = collision_colored_ccd_initial_guess(x, intended_displacement,
-        ref_mesh, params, std::min(ccd_iterations, 1), &broad_phase);
+        ref_mesh, params, std::min(ccd_iterations, 1), &broad_phase, nullptr, recycled_result);
 
     const int nv = static_cast<int>(x.size());
     const auto is_rigid = [&](int vertex) {
@@ -623,10 +628,13 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
     return xnew;
 }
 
-std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh, BroadPhase* scratch_broad_phase) {
+std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat,
+    const RefMesh& ref_mesh, BroadPhase* scratch_broad_phase, std::vector<Vec3>* recycled_result) {
     const int nv = static_cast<int>(x.size());
 
-    std::vector<Vec3> dx(nv);
+    solver_detail::BorrowedContactBuffer<Vec3, std::allocator<Vec3>> displacement;
+    displacement.resize(nv);
+    auto& dx = displacement.values();
     for (int i = 0; i < nv; ++i) dx[i] = xhat[i] - x[i];
 
     BroadPhase local_bp;
@@ -661,7 +669,9 @@ std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vecto
 
     const double omega = (toi_min >= 1.0) ? 1.0 : 0.9 * toi_min;
 
-    std::vector<Vec3> xnew(nv);
+    std::vector<Vec3> xnew;
+    if (recycled_result) xnew.swap(*recycled_result);
+    xnew.resize(nv);
     for (int i = 0; i < nv; ++i) xnew[i] = x[i] + omega * dx[i];
 
     return xnew;

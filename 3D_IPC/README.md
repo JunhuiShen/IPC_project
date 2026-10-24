@@ -268,18 +268,6 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 0.97 \
   --outdir example1_output --format geo
 
-# Example 1 alternative output directory: same level-based initial guess settings
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 1 --exact_computation_fallback false --num_frames 240 \
-  --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
-  --d_hat 0.005 --k_barrier 100 \
-  --node_box_min 0.001 --node_box_max 0.01 \
-  --fixed_iters --substeps 3 --max_substep_iters 3 --node_box_update_count 10 \
-  --use_basic_experimental true --use_simd true --use_parallel true \
-  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
-  --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 0.97 \
-  --outdir example1_colored_output --format geo
-
 # Example 2: two cylinders, 2.0 turns, twist then untwist
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 2 --exact_computation_fallback false --num_frames 900 \
@@ -291,18 +279,6 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
   --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 0.99 \
   --outdir example2_output --format geo
-
-# Example 2 alternative output directory: same level-based initial guess settings
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 2 --exact_computation_fallback false --num_frames 900 \
-  --E 115000 --nu 0.25 --kB 0.009 --kpin 5e6 \
-  --d_hat 0.005 --k_barrier 100 --k_sdf 1e5 --eps_sdf 0.002 \
-  --node_box_min 0.001 --node_box_max 0.01 --tcyl_max_turn 2.0 \
-  --fixed_iters --substeps 4 --max_substep_iters 2 --node_box_update_count 10 \
-  --use_basic_experimental true --use_simd true --use_parallel true \
-  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
-  --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 0.99 \
-  --outdir example2_colored_output --format geo
 
 # Example 3: one yawing cylinder, 4.0 turns at 0.30 turns/s
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
@@ -316,19 +292,6 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
   --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 0.99 \
   --outdir example3_output --format geo
-
-# Example 3 alternative output directory: same level-based initial guess settings
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 3 --exact_computation_fallback false --num_frames 850 \
-  --E 115000 --nu 0.25 --kB 0.009 --kpin 1e8 \
-  --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 --eps_sdf 0.002 \
-  --node_box_min 0.001 --node_box_max 0.01 \
-  --tu_max_turn 4.0 --tu_twist_rate 0.30 \
-  --fixed_iters --substeps 6 --max_substep_iters 3 --node_box_update_count 10 \
-  --use_basic_experimental true --use_simd true --use_parallel true \
-  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
-  --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 0.99 \
-  --outdir example3_colored_output --format geo
 
 # Example 4: avatar collider and dress loaded from a data directory
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
@@ -439,28 +402,6 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 2 \
   --outdir results/example14_70x70/frames --format geo
-
-# Example 14 alternative output directory: same level-based/direct-step settings throughout.
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 14 --exact_computation_fallback true --ccd_exact_step_bound true --num_frames 10 \
-  --fps 30 --substeps 24 --max_substep_iters 3 --fixed_iters \
-  --use_basic_experimental true --use_simd true --use_parallel true --use_ccd true \
-  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
-  --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 1.0 \
-  --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
-  --k_sdf 1e5 --eps_sdf 0.015 \
-  --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 3 \
-  --outdir results/example14_colored_30x2/frames --format geo && \
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 14 --exact_computation_fallback true --ccd_exact_step_bound true --restart_frame 10 --num_frames 120 \
-  --fps 30 --substeps 20 --max_substep_iters 2 --fixed_iters \
-  --use_basic_experimental true --use_simd true --use_parallel true --use_ccd true \
-  --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
-  --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 1.0 \
-  --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
-  --k_sdf 1e5 --eps_sdf 0.015 \
-  --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 2 \
-  --outdir results/example14_colored_30x2/frames --format geo
 
 # Example 15: two hundred free cloth sheets fall over the cylinder and spread onto the ground. (unsuccessful)
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
@@ -638,3 +579,10 @@ Our OGC narrow phase and `global_gauss_seidel_solver_ogc` implement:
 > Anka He Chen, Jerry Hsu, Ziheng Liu, Miles Macklin, Yin Yang, and Cem Yuksel.
 > *Offset Geometric Contact.* ACM Transactions on Graphics 44(4):160, 2025.
 > [doi:10.1145/3731205](https://doi.org/10.1145/3731205)
+
+Our `global_gauss_seidel_solver_dat` follows:
+
+> Anka H. Chen, Jerry Hsu, Youssef Ayman, and Miles Macklin.
+> *Divide and Truncate: A Penetration and Inversion Free Framework for Coupled Multi-physics System.*
+> ACM SIGGRAPH 2026 Conference Papers, Article 153, 10 pages.
+> [doi:10.1145/3799902.3811143](https://doi.org/10.1145/3799902.3811143)

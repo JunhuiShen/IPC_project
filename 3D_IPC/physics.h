@@ -68,6 +68,9 @@ struct SimParams {
     bool   use_translation_guess;        // if true, start GS from x^n + C
     bool   use_ogc;     // if true, use trust_region_initial_guess instead of CCD
     bool   use_ogc_solver;       // if true, route the substep through global_gauss_seidel_solver_ogc
+    bool   use_dat_solver;       // cloth-only planar Divide and Truncate solver
+    double dat_relaxation;       // conservative DAT ratio in (0, 1), separate from Newton damping
+    int    dat_detection_interval; // color stages between DAT collision detections
     double ogc_box_pad;          // OGC node-box / tri-edge union pad used by the per-iter BVH rebuild
     bool   fixed_iters;          // if true, run exactly max_global_iters sweeps with no tolerance / convergence check
     bool   verbose;              // print cache rebuilds and per-iteration residuals when available
@@ -130,6 +133,9 @@ struct SimParams {
         p.use_verlet_guess          = false;
         p.use_ogc          = false;
         p.use_ogc_solver            = false;
+        p.use_dat_solver            = false;
+        p.dat_relaxation            = 0.8;
+        p.dat_detection_interval    = 5;
         p.ogc_box_pad               = 0.0;
         p.fixed_iters               = false;
         p.verbose                   = false;
@@ -151,8 +157,22 @@ struct SimParams {
 
     void validate_ccd_exact_step_bound_parameters() const {
         if (!ccd_exact_step_bound) return;
-        if (!exact_computation_fallback || use_ticcd || use_ogc || use_ogc_solver)
-            throw std::invalid_argument("--ccd_exact_step_bound requires --exact_computation_fallback true, --use_ticcd false, and OGC disabled");
+        if (!exact_computation_fallback || use_ticcd || use_ogc || use_ogc_solver || use_dat_solver)
+            throw std::invalid_argument("--ccd_exact_step_bound requires --exact_computation_fallback true, --use_ticcd false, and OGC/DAT disabled");
+    }
+
+    void validate_dat_solver_parameters() const {
+        if (!use_dat_solver) return;
+        if (use_ogc || use_ogc_solver)
+            throw std::invalid_argument("--use_dat_solver cannot be combined with --use_ogc or --use_ogc_solver");
+        if (!fixed_iters)
+            throw std::invalid_argument("--use_dat_solver requires --fixed_iters");
+        if (!std::isfinite(d_hat) || d_hat <= 0.0 || !std::isfinite(1.5 * d_hat))
+            throw std::invalid_argument("DAT requires finite, positive --d_hat and query radius 1.5 * d_hat");
+        if (!std::isfinite(dat_relaxation) || dat_relaxation <= 0.0 || dat_relaxation >= 1.0)
+            throw std::invalid_argument("--dat_relaxation must be finite and in (0, 1)");
+        if (dat_detection_interval <= 0)
+            throw std::invalid_argument("--dat_detection_interval must be positive (counts color stages)");
     }
 
     void validate_colored_ccd_guess_parameters() const {
@@ -170,8 +190,8 @@ struct SimParams {
 
     void validate_cloth_grid_parameters() const {
         if (!use_cloth_grid) return;
-        if (use_ogc || use_ogc_solver)
-            throw std::invalid_argument("--use_cloth_grid supports only the basic cloth solver with OGC disabled");
+        if (use_ogc || use_ogc_solver || use_dat_solver)
+            throw std::invalid_argument("--use_cloth_grid supports only the basic cloth solver with OGC/DAT disabled");
         if (!std::isfinite(node_box_min) || !std::isfinite(node_box_max)
             || node_box_min <= 1e-10 || node_box_max < node_box_min)
             throw std::invalid_argument("cloth grid requires 1e-10 < node_box_min <= node_box_max, both finite");

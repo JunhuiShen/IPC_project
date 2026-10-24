@@ -156,7 +156,7 @@ replace_once(resident_driver "    BroadPhase broad_phase;\n" "")
 replace_once(resident_driver "    using Clock = std::chrono::steady_clock;"
     "    ipc_gpu::resident::ResidentSolver resident_solver(ipc_gpu::resident::describe_scene(ref_mesh,state,pins,params));\n    using Clock = std::chrono::steady_clock;")
 replace_once(resident_driver "    const std::string& outdir = args.outdir;"
-    "    (void)ipc_gpu::resident::describe_step(params); // reject unported modes before touching output\n    std::cout << \"GPU-resident numerical solver: cloth, solid, rigid; exact fallback on device\\n\";\n    const std::string& outdir = args.outdir;")
+    "    (void)ipc_gpu::resident::describe_step(params); // reject unported modes before touching output\n    std::cout << \"GPU-resident numerical solver\\n\";\n    const std::string& outdir = args.outdir;")
 replace_once(resident_driver "        if (fs::exists(outdir)) fs::remove_all(outdir);"
     "        if (fs::exists(outdir)) throw std::runtime_error(\"Resident GPU run requires a new output directory (or --restart_frame)\");")
 string(FIND "${resident_driver}" "    if ((params.use_basic_experimental" resident_print_begin)
@@ -168,4 +168,13 @@ string(SUBSTRING "${resident_driver}" 0 ${resident_print_begin} resident_before)
 string(SUBSTRING "${resident_driver}" ${resident_print_end} -1 resident_after)
 set(resident_driver "${resident_before}${resident_after}")
 ipc_gpu_write_generated_if_different("${CMAKE_CURRENT_BINARY_DIR}/simulation_resident.cpp" "#include \"resident_bridge.h\"\n${resident_driver}")
+endfunction()
+
+
+function(ipc_gpu_generate_dat_driver)
+file(READ "${CMAKE_CURRENT_BINARY_DIR}/simulation_resident.cpp" dat_driver)
+replace_once(dat_driver "#include \"resident_bridge.h\"" "#include \"resident_bridge.h\"\n#include \"resident_dat.h\"")
+replace_once(dat_driver "ipc_gpu::resident::ResidentSolver resident_solver(" "ipc_gpu::resident::ResidentDATSolver resident_solver(")
+replace_once(dat_driver "    if (!args.parse(argc, argv)) return 1;" "    if (!args.parse(argc, argv)) return 1;\n    args.use_dat_solver = true;")
+ipc_gpu_write_generated_if_different("${CMAKE_CURRENT_BINARY_DIR}/simulation_dat.cpp" "${dat_driver}")
 endfunction()

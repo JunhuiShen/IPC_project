@@ -1012,9 +1012,11 @@ void BroadPhase::build(
     c.excludes_tet_interior_nt_queries = exclude_tet_interior_nt_queries;
 
     if (!topology_valid_) set_mesh_topology(mesh, nv);
-    if (c.edges.empty()) c.edges = topo_.edges;
-    if (c.node_to_edges.empty()) c.node_to_edges = topo_.node_to_edges;
-    if (c.node_to_tris.empty()) c.node_to_tris = topo_.node_to_tris;
+    // Transfer staged topology into its single owning cache; subsequent rebuilds
+    // retain it there until explicit topology invalidation.
+    if (c.edges.empty()) c.edges = std::move(topo_.edges);
+    if (c.node_to_edges.empty()) c.node_to_edges = std::move(topo_.node_to_edges);
+    if (c.node_to_tris.empty()) c.node_to_tris = std::move(topo_.node_to_tris);
     const int ne = static_cast<int>(c.edges.size());
     const std::vector<int>* surface_query_nodes = exclude_tet_interior_nt_queries ? &surface_nt_query_nodes(mesh, nv) : nullptr;
 
@@ -1116,9 +1118,11 @@ void BroadPhase::initialize_from_vertex_boxes(const std::vector<AABB>& vertex_bo
     c.excludes_tet_interior_nt_queries = exclude_tet_interior_nt_queries;
 
     if (!topology_valid_) set_mesh_topology(mesh, nv);
-    if (c.edges.empty()) c.edges = topo_.edges;
-    if (c.node_to_edges.empty()) c.node_to_edges = topo_.node_to_edges;
-    if (c.node_to_tris.empty()) c.node_to_tris = topo_.node_to_tris;
+    // Transfer staged topology into its single owning cache; subsequent rebuilds
+    // retain it there until explicit topology invalidation.
+    if (c.edges.empty()) c.edges = std::move(topo_.edges);
+    if (c.node_to_edges.empty()) c.node_to_edges = std::move(topo_.node_to_edges);
+    if (c.node_to_tris.empty()) c.node_to_tris = std::move(topo_.node_to_tris);
     const int ne = static_cast<int>(c.edges.size());
     const std::vector<int>* surface_query_nodes = exclude_tet_interior_nt_queries ? &surface_nt_query_nodes(mesh, nv) : nullptr;
 

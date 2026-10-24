@@ -715,8 +715,8 @@ void build_all_block_adjacency_and_contact(const RefMesh& ref_mesh, const std::v
         const std::size_t elastic_size = (*elastic_row_sizes)[static_cast<std::size_t>(block)];
         // Contact rows store only lower-index neighbors; block zero has none.
         if (block == 0) continue;
-        thread_local std::vector<std::size_t> seen_generation;
-        thread_local std::size_t generation = 0;
+        thread_local std::vector<std::uint32_t> seen_generation;
+        thread_local std::uint32_t generation = 0;
         if (seen_generation.size() != static_cast<std::size_t>(num_blocks)) seen_generation.assign(static_cast<std::size_t>(num_blocks), 0);
         if (++generation == 0) {
             std::fill(seen_generation.begin(), seen_generation.end(), 0);
@@ -824,11 +824,11 @@ void build_contact_adj(const BroadPhase::Cache& bp_cache, int num_vertices, std:
     // Each thread owns one output row.
     #pragma omp parallel for schedule(dynamic, 64)
     for (int vertex = 0; vertex < num_vertices; ++vertex) {
-        std::vector<int>& neighbors = out[vertex];
+        std::vector<int>& output = out[vertex];
+        thread_local std::vector<int> neighbors;
         neighbors.clear();
-        neighbors.reserve(3 * (bp_cache.vertex_nt[vertex].size() + bp_cache.vertex_ss[vertex].size()));
-        thread_local std::vector<std::size_t> seen_generation;
-        thread_local std::size_t generation = 0;
+        thread_local std::vector<std::uint32_t> seen_generation;
+        thread_local std::uint32_t generation = 0;
         if (seen_generation.size() != static_cast<std::size_t>(num_vertices)) seen_generation.assign(static_cast<std::size_t>(num_vertices), 0);
         if (++generation == 0) {
             std::fill(seen_generation.begin(), seen_generation.end(), 0);
@@ -866,6 +866,7 @@ void build_contact_adj(const BroadPhase::Cache& bp_cache, int num_vertices, std:
         }
 
         std::sort(neighbors.begin(), neighbors.end());
+        output.assign(neighbors.begin(), neighbors.end());
     }
 }
 

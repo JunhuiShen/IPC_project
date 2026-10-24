@@ -5,6 +5,7 @@
 #include "initial_guess.h"
 #include "rigid_body_ipc.h"
 #include "time_integration.h"
+#include "contact_scheduling.h"
 #include <algorithm>
 #include <cstdio>
 #include <functional>
@@ -70,6 +71,8 @@ inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& st
 // every substep still rebuilds its current motion boxes and contact candidates.
 inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& ref_mesh, const SimParams& params,
     BroadPhase& broad_phase, int frame_index = 1, SubstepCallback on_substep = nullptr) {
+    if (params.use_dat_solver)
+        throw std::invalid_argument("advance_one_frame_rb: DAT supports only cloth/deformable surface meshes; rigid bodies are unsupported");
     SolverResult agg;
     const double dt = params.dt();
     broad_phase.invalidate_mesh_topology();
@@ -135,6 +138,8 @@ inline SolverResult advance_one_frame_general(
     int frame_index = 1, PinTargetUpdater pin_updater = nullptr,
     SubstepCallback on_substep = nullptr,
     const std::string& outdir = "") {
+    if (params.use_dat_solver)
+        throw std::invalid_argument("advance_one_frame_general: DAT supports only cloth/deformable surface meshes; solid and mixed scenes are unsupported");
     params.validate_colored_ccd_guess_parameters();
     if (ref_mesh.node_to_rb.size() != state.deformed_positions.size()
         || state.velocities.size() != state.deformed_positions.size()) {
@@ -182,7 +187,7 @@ inline SolverResult advance_one_frame_general(
                 ? collision_colored_ccd_initial_guess_level_based : collision_colored_ccd_initial_guess;
             xnew = colored_guess(state.deformed_positions,
                 intended_displacement, ref_mesh, params, params.colored_ccd_guess_iters,
-                &broad_phase, nullptr);
+                &broad_phase, nullptr, &xnew);
         }
         std::vector<Vec3> x_com_new = state.x_coms;
         std::vector<Vec4> q_new = state.orientations;
@@ -225,36 +230,51 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
     std::vector<Pin>& pins, const SimParams& params,
     BroadPhase& broad_phase, int frame_index = 1,
     PinTargetUpdater pin_updater = nullptr, SubstepCallback on_substep = nullptr, const std::string& outdir = "") {
+    params.validate_dat_solver_parameters();
     params.validate_cloth_grid_parameters();
     params.validate_colored_ccd_guess_parameters();
+    const bool has_noncloth_geometry = !ref_mesh.rb_nodes.empty() || !ref_mesh.tets.empty()
+        || !ref_mesh.tet_nodes.empty()
+        || std::any_of(ref_mesh.node_to_rb.begin(), ref_mesh.node_to_rb.end(),
+            [](int owner) { return owner >= 0; });
+    if (params.use_dat_solver && has_noncloth_geometry)
+        throw std::invalid_argument("advance_one_frame: DAT supports only cloth/deformable surface meshes; rigid and solid geometry is unsupported");
     if ((params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based)
-        && (!ref_mesh.rb_nodes.empty() || !ref_mesh.tets.empty()
-            || !ref_mesh.tet_nodes.empty()
-            || std::any_of(ref_mesh.node_to_rb.begin(), ref_mesh.node_to_rb.end(),
-                [](int owner) { return owner >= 0; }))) {
+        && has_noncloth_geometry) {
         throw std::invalid_argument("advance_one_frame is cloth-only; use advance_one_frame_general for solid or mixed scenes");
     }
     SolverResult agg;
     const double dt = params.dt();
-    BroadPhase predictor_broad_phase;
+    struct StepScratch {
+        std::vector<Vec3> xhat, xnew, intended_displacement;
+        BroadPhase predictor_broad_phase;
+    };
+    // Retain allocations between frames. A scoped loan keeps nested substep
+    // callbacks from overwriting the current frame's working arrays.
+    solver_detail::BorrowedContactBuffer<StepScratch, std::allocator<StepScratch>> storage;
+    storage.resize(1);
+    auto& workspace = storage.values()[0];
+    auto& predictor_broad_phase = workspace.predictor_broad_phase;
+    // Refresh topology at frame boundaries for callers which mutate their mesh.
+    predictor_broad_phase.invalidate_mesh_topology();
+    auto& xhat = workspace.xhat;
+    auto& xnew = workspace.xnew;
     for (int sub = 0; sub < params.substeps; ++sub) {
         if (pin_updater) {
             const double t_next = ((frame_index - 1) * params.substeps + (sub + 1)) * dt;
             pin_updater(pins, t_next);
         }
 
-        std::vector<Vec3> xhat;
         build_xhat(xhat, state.deformed_positions, state.velocities, dt);
 
-        std::vector<Vec3> xnew;
-
-        if (params.use_ogc || params.use_ogc_solver)
+        if (params.use_ogc || params.use_ogc_solver || params.use_dat_solver)
             xnew = state.deformed_positions;
         else if (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based) {
             // Only the predictor targets a fraction of the displacement to
             // xhat. Scale once here; every sweep (including the level trial)
             // retries toward that same target. Keep the solver's xhat intact.
-            std::vector<Vec3> intended_displacement(xhat.size());
+            auto& intended_displacement = workspace.intended_displacement;
+            intended_displacement.resize(xhat.size());
             for (std::size_t vertex = 0; vertex < xhat.size(); ++vertex) {
                 intended_displacement[vertex] = xhat[vertex] - state.deformed_positions[vertex];
                 if (params.colored_ccd_guess_fraction != 1.0)
@@ -264,12 +284,12 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
                 ? collision_colored_ccd_initial_guess_level_based : collision_colored_ccd_initial_guess;
             xnew = colored_guess(state.deformed_positions,
                 intended_displacement, ref_mesh, params, params.colored_ccd_guess_iters,
-                &broad_phase, nullptr);
+                &broad_phase, nullptr, &xnew);
         }
         else if (params.use_verlet_guess)
             xnew = verlet_initial_guess(state.deformed_positions, xhat, ref_mesh, params, &predictor_broad_phase);
         else if (params.use_ccd_guess)
-            xnew = ccd_initial_guess(state.deformed_positions, xhat, ref_mesh, &predictor_broad_phase);
+            xnew = ccd_initial_guess(state.deformed_positions, xhat, ref_mesh, &predictor_broad_phase, &xnew);
         else if (params.use_translation_guess){
             xnew = translation_initial_guess(state.deformed_positions, xhat, ref_mesh, pins, params);
         }
@@ -277,7 +297,9 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
             xnew = state.deformed_positions;
 
         SolverResult sub_result;
-        if (params.use_ogc_solver)
+        if (params.use_dat_solver)
+            sub_result = global_gauss_seidel_solver_dat(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir, &state.deformed_positions);
+        else if (params.use_ogc_solver)
             sub_result = global_gauss_seidel_solver_ogc(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir, &state.deformed_positions);
         else if (params.use_cloth_grid)
             sub_result = global_gauss_seidel_solver_ambient_grid(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);

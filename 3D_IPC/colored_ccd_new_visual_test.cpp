@@ -402,9 +402,9 @@ int main(int argc, char** argv) {
         for (int n = 0; n < count; ++n) targets[n] += intended[n];
         BroadPhase plain_scratch, traced_scratch;
         const auto guess = options.original ? collision_colored_ccd_initial_guess : collision_colored_ccd_initial_guess_level_based;
-        const auto plain = guess(x, displacement, mesh, params, options.iterations, &plain_scratch, nullptr);
+        const auto plain = guess(x, displacement, mesh, params, options.iterations, &plain_scratch, nullptr, nullptr);
         ColoredCCDGuessTrace trace;
-        const auto traced = guess(x, displacement, mesh, params, options.iterations, &traced_scratch, &trace);
+        const auto traced = guess(x, displacement, mesh, params, options.iterations, &traced_scratch, &trace, nullptr);
         if (!identical(plain, traced)) throw std::runtime_error("Plain/traced results differ bitwise");
         if (!identical(x, initial) || !identical(displacement, intended)) throw std::runtime_error("An input was modified");
         validate(options, trace, initial, targets, traced);

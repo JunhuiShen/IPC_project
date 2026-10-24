@@ -62,6 +62,9 @@ struct StepParameters {
     // Particle-update CCD only. Rigid updates and colored guesses always use
     // CCD, as in the production general solver. Does not disable barriers.
     bool collisions = true;
+    bool planar_dat = false;
+    double dat_relaxation = 0.8;
+    int dat_detection_interval = 5;
 };
 
 struct StateSnapshot {

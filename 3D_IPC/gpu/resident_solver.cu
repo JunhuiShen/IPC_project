@@ -7,6 +7,7 @@
 #include "resident_global_guess.h"
 #include "resident_level_schedule.h"
 #include "resident_profile.h"
+#include "resident_dat.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -153,6 +154,7 @@ struct ResidentSolver::Impl {
     ResidentElasticWorklists elastic_worklists;
     ResidentAdaptiveBoxes adaptive_boxes;
     ResidentGlobalGuess global_guess;
+    ResidentDAT dat;
     std::unique_ptr<level_predictor::ResidentLevelSchedule> level_schedule;
     ResidentBroadPhase level_broadphase;
     DeviceArray<BpAabb> level_boxes;
@@ -348,6 +350,11 @@ void ResidentSolver::advance_substep(const StepParameters& p,const std::vector<V
     if(p.contact.dt!=p.dt || p.sdf.dt!=p.dt || p.elastic.dt2!=p.dt*p.dt
         ||!(p.elastic.dt2>0)||!std::isfinite(p.elastic.dt2))
         throw std::invalid_argument("resident GPU inconsistent or unrepresentable timestep");
+    if(p.planar_dat&&(!s.cloth_only||p.iterations<=0||!(p.contact.d_hat>0)||!std::isfinite(1.5*p.contact.d_hat)
+        ||!std::isfinite(p.dat_relaxation)||!(p.dat_relaxation>0&&p.dat_relaxation<1)||p.dat_detection_interval<=0
+        ||!std::isfinite(p.contact.k_barrier)||p.contact.k_barrier<0||!std::isfinite(p.contact.friction)||p.contact.friction<0
+        ||!std::isfinite(p.contact.eps_v)||!(p.contact.eps_v>0)||!std::isfinite(p.contact.eps)||!(p.contact.eps>0)))
+        throw std::invalid_argument("resident DAT requires cloth, positive d_hat/iterations/interval and relaxation in (0,1)");
     if(colliders.size()>static_cast<std::size_t>(std::numeric_limits<int>::max()))
         throw std::invalid_argument("resident GPU too many SDF colliders");
     length(pins.size(),s.scene.nodes,"prescribed pins");
@@ -361,6 +368,10 @@ void ResidentSolver::advance_substep(const StepParameters& p,const std::vector<V
     begin_deformable_substep(s.scene,s.state,p.dt);
     begin_rigid_substep(s.rigid,s.rigid_state,s.error.data());
     }
+    if(p.planar_dat) {
+        const SdfScene sdf{s.colliders.data(),static_cast<int>(colliders.size()),p.sdf};
+        s.dat.solve(s.scene,s.state,s.elastic,s.topology,sdf,p);
+    } else {
     // The CPU general driver disables the legacy global particle guess for
     // solid/mixed scenes. Only its cloth driver honors this default flag.
     if(p.global_ccd_guess && s.cloth_only && (s.enabled_stages&DeformableColorStage)) {
@@ -452,9 +463,10 @@ void ResidentSolver::advance_substep(const StepParameters& p,const std::vector<V
         }
         s.check_status();
     }
+    }
     {
     ResidentProfileScope finish_profile("finish");
-    s.adaptive_boxes.finish_solver(s.scene,s.state,s.error.data());
+    if(!p.planar_dat)s.adaptive_boxes.finish_solver(s.scene,s.state,s.error.data());
     finish_deformable_substep(s.scene,s.state,p.dt);
     finish_rigid_substep(s.rigid,s.rigid_state,s.state,p.dt,s.error.data());
     cuda_checked(cudaDeviceSynchronize());s.check_status();
