@@ -330,6 +330,11 @@ struct IPCArgs3D : ArgParser {
                 if (std::string(argv[i]) == flag) return true;
             return false;
         };
+        if (example == 12) {
+            if (!supplied("--osc_amplitude")) osc_amplitude = 0.01;
+            if (!supplied("--osc_frequency")) osc_frequency = 6.0;
+            if (!supplied("--osc_length")) osc_length = 1.0;
+        }
         if (example == 15) {
             const auto preset = [&](const char* flag, auto& field, auto value) {
                 if (!supplied(flag)) field = value;

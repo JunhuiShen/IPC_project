@@ -275,7 +275,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 ./build/3D_sim --example 2 --exact_computation_fallback false --num_frames 900 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 5e6 \
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e5 --eps_sdf 0.002 \
-  --node_box_min 0.001 --node_box_max 0.01 --tcyl_max_turn 2.0 \
+  --node_box_min 0.00025 --node_box_max 0.01 --tcyl_max_turn 2.0 \
   --fixed_iters --substeps 4 --max_substep_iters 2 --node_box_update_count 10 \
   --use_basic_experimental true --use_simd true --use_parallel true \
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
@@ -287,7 +287,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 ./build/3D_sim --example 3 --exact_computation_fallback false --num_frames 850 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e8 \
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 --eps_sdf 0.002 \
-  --node_box_min 0.001 --node_box_max 0.01 \
+  --node_box_min 0.00025 --node_box_max 0.01 \
   --tu_max_turn 4.0 --tu_twist_rate 0.30 \
   --fixed_iters --substeps 6 --max_substep_iters 3 --node_box_update_count 10 \
   --use_basic_experimental true --use_simd true --use_parallel true \
@@ -338,6 +338,8 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 9 --exact_computation_fallback false --num_frames 150 \
   --substeps 10 --max_substep_iters 2 --fixed_iters \
+  --node_box_min 0.00025 --node_box_max 0.01 \
+  --theta_box_min 0.005 --theta_box_max 0.1 --node_box_update_count 10 \
   --use_parallel true --use_basic_experimental true --use_simd false \
   --outdir bolt_into_fixed_nut_output --format geo
 
@@ -369,7 +371,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 ./build/3D_sim --example 12 --exact_computation_fallback true --ccd_exact_step_bound true --num_frames 200 \
   --substeps 6 --max_substep_iters 2 --fixed_iters \
   --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 \
-  --kB 0.01 --osc_amplitude 0.01 --osc_frequency 6.0 --osc_length 1.0 --gy 0 \
+  --kB 0.01 --gy 0 \
   --use_parallel true --use_basic_experimental true --use_simd true \
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
   --colored_ccd_guess_iters 4 --colored_ccd_guess_fraction 1.0 \

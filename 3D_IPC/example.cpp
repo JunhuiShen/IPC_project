@@ -1837,7 +1837,7 @@ OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE \
 ./build/3D_sim --example 12 --num_frames 200 \
   --substeps 10 --max_substep_iters 2 --fixed_iters \
   --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 \
-  --kB 0.01 --osc_amplitude 0.01 --osc_frequency 6.0 --osc_length 1.0 --gy 0 \
+  --kB 0.01 --gy 0 \
   --use_parallel true --use_basic_experimental true --use_simd true \
   --use_colored_ccd_guess true --colored_ccd_guess_iters 10 \
   --outdir oscillating_cloth_layers_output --format geo
