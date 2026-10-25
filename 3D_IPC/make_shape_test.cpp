@@ -4,6 +4,7 @@
 #include "node_triangle_distance.h"
 #include "segment_segment_distance.h"
 #include <gtest/gtest.h>
+#include <Eigen/Geometry>
 
 #include <algorithm>
 #include <array>
@@ -16,6 +17,7 @@
 #include <map>
 #include <numeric>
 #include <set>
+#include <sstream>
 
 namespace {
 
@@ -4537,22 +4539,44 @@ TEST(WreckingBallExample,
         minimum_ground_distance, params.eps_sdf, 1.0e-14);
 }
 
-TEST(BikeChainExample, FrameZeroPreservesSeparateSourceBodiesAndSprocketOrigins) {
+TEST(BikeChainExample, OriginalFrameZeroKeepsAllSeparatePartsAndSprocketOrigins) {
     IPCArgs3D args;
     char program[] = "3D_sim", flag[] = "--example", scene[] = "18";
     char* argv[] = {program, flag, scene};
     ASSERT_TRUE(args.parse(3, argv));
-    EXPECT_EQ(args.num_frames, 0);
+    EXPECT_EQ(args.num_frames, 180);
+    EXPECT_DOUBLE_EQ(args.fps, 30.0);
+    EXPECT_DOUBLE_EQ(args.gy, 0.0);
+    EXPECT_DOUBLE_EQ(args.damping, 1.0);
     EXPECT_DOUBLE_EQ(args.rigid_density, 1000.0);
-    EXPECT_DOUBLE_EQ(args.d_hat, 1.0e-5);
-    EXPECT_EQ(args.substeps, 1);
+    EXPECT_DOUBLE_EQ(args.d_hat, 3.0e-5);
+    EXPECT_EQ(args.substeps, 19);
+    EXPECT_EQ(args.max_substep_iters, 200);
+    EXPECT_TRUE(args.fixed_iters);
+    EXPECT_TRUE(args.use_basic_experimental);
+    EXPECT_TRUE(args.use_simd);
+    EXPECT_TRUE(args.use_parallel);
+    EXPECT_TRUE(args.use_ccd);
+    EXPECT_TRUE(args.exact_computation_fallback);
+    EXPECT_DOUBLE_EQ(args.kpin, 1.0e4);
+    EXPECT_DOUBLE_EQ(args.k_sdf, 0.0);
+    EXPECT_DOUBLE_EQ(args.bike_chain_motor_radius, 0.03);
+    EXPECT_DOUBLE_EQ(args.bike_chain_shaft_span, 0.05);
+    EXPECT_DOUBLE_EQ(args.k_barrier, 4000.0);
+    EXPECT_DOUBLE_EQ(args.friction_coefficient, 0.0);
+    EXPECT_DOUBLE_EQ(args.node_box_min, 2.0e-5);
+    EXPECT_DOUBLE_EQ(args.node_box_max, 1.0e-4);
+    EXPECT_DOUBLE_EQ(args.theta_box_min, 4.0e-4);
+    EXPECT_DOUBLE_EQ(args.theta_box_max, 8.0e-3);
+    EXPECT_EQ(args.node_box_update_count, 25);
     RefMesh mesh;
     DeformedState state;
     std::vector<Vec2> X;
     std::vector<Pin> pins;
     SimParams params = args.to_sim_params();
     build_bike_chain_example(args, mesh, state, X, pins, params);
-    EXPECT_DOUBLE_EQ(params.d_hat, 1.0e-5);
+    EXPECT_DOUBLE_EQ(params.d_hat, 3.0e-5);
+    EXPECT_DOUBLE_EQ(params.k_sdf, 0.0);
     ASSERT_EQ(mesh.rb_nodes.size(), 138U);
     ASSERT_EQ(state.deformed_positions.size(), 47761U);
     ASSERT_EQ(mesh.tris.size() / 3, 95658U);
@@ -4574,6 +4598,7 @@ TEST(BikeChainExample, FrameZeroPreservesSeparateSourceBodiesAndSprocketOrigins)
         EXPECT_TRUE(mesh.I_hat[body].allFinite());
         EXPECT_GT(mesh.I_hat[body].determinant(), 0.0);
         EXPECT_TRUE(state.v_coms[body].isZero(0.0));
+        if (body != 136) EXPECT_TRUE(state.omega[body].isZero(0.0));
         EXPECT_EQ(mesh.rb_update_modes[body], body < 136
             ? RigidBodyUpdateMode::TranslationAndOrientation : RigidBodyUpdateMode::OrientationOnly);
     }
@@ -4589,9 +4614,186 @@ TEST(BikeChainExample, FrameZeroPreservesSeparateSourceBodiesAndSprocketOrigins)
         EXPECT_EQ(count, 1);
         EXPECT_EQ(edges.at({edge.second, edge.first}), 1);
     }
+    ASSERT_EQ(params.rigid_pins.size(), 8U);
+    for (int pin = 0; pin < 4; ++pin) {
+        EXPECT_EQ(params.rigid_pins[pin].body, 136);
+        EXPECT_NEAR(params.rigid_pins[pin].local_position.norm(), 0.03, 1.0e-15);
+        EXPECT_DOUBLE_EQ(params.rigid_pins[pin].local_position.z(), 0.0);
+        EXPECT_NEAR(params.rigid_pins[pin].angular_velocity_z,
+                    -25.0 * 3.14159265358979323846 / 180.0, 1.0e-15);
+    }
+    for (int pin = 4; pin < 8; ++pin) {
+        const auto& support = params.rigid_pins[pin];
+        EXPECT_EQ(support.body, pin < 6 ? 136 : 137);
+        EXPECT_DOUBLE_EQ(support.local_position.x(), 0.0);
+        EXPECT_DOUBLE_EQ(support.local_position.y(), 0.0);
+        EXPECT_DOUBLE_EQ(support.local_position.z(), pin % 2 ? 0.05 : -0.05);
+        EXPECT_DOUBLE_EQ(support.angular_velocity_z, 0.0);
+        EXPECT_TRUE(support.initial_target.isApprox(state.x_coms[support.body]
+            + quaternion_rotate(state.orientations[support.body], support.local_position), 1.0e-15));
+    }
     args.num_frames = 1;
+    EXPECT_NO_THROW(build_bike_chain_example(args, mesh, state, X, pins, params));
+}
+
+TEST(BikeChainExample, ExplicitFlagsOverrideMotionPresets) {
+    IPCArgs3D args;
+    std::vector<std::string> values = {"3D_sim", "--example", "18",
+        "--num_frames", "8", "--fps", "60", "--substeps", "4", "--gy", "-9.81",
+        "--max_substep_iters", "7", "--kpin", "2e6", "--k_sdf", "12345", "--d_hat", "3e-5",
+        "--k_barrier", "2e5", "--rigid_density", "2000",
+        "--friction_coefficient", "0.2", "--node_box_min", "2e-7",
+        "--node_box_max", "2e-4", "--theta_box_min", "2e-5",
+        "--theta_box_max", "2e-3", "--node_box_update_count", "3",
+        "--use_basic_experimental", "false", "--use_simd", "false",
+        "--use_parallel", "false", "--use_ccd", "false",
+        "--exact_computation_fallback", "false", "--fixed_iters", "false"};
+    std::vector<char*> argv;
+    for (auto& value : values) argv.push_back(value.data());
+    ASSERT_TRUE(args.parse(static_cast<int>(argv.size()), argv.data()));
+    EXPECT_EQ(args.num_frames, 8);
+    EXPECT_DOUBLE_EQ(args.fps, 60.0);
+    EXPECT_DOUBLE_EQ(args.gy, -9.81);
+    EXPECT_EQ(args.substeps, 4);
+    EXPECT_EQ(args.max_substep_iters, 7);
+    EXPECT_DOUBLE_EQ(args.kpin, 2.0e6);
+    EXPECT_DOUBLE_EQ(args.k_sdf, 12345.0);
+    EXPECT_DOUBLE_EQ(args.d_hat, 3.0e-5);
+    EXPECT_DOUBLE_EQ(args.k_barrier, 2.0e5);
+    EXPECT_DOUBLE_EQ(args.rigid_density, 2000.0);
+    EXPECT_DOUBLE_EQ(args.friction_coefficient, 0.2);
+    EXPECT_DOUBLE_EQ(args.node_box_min, 2.0e-7);
+    EXPECT_DOUBLE_EQ(args.node_box_max, 2.0e-4);
+    EXPECT_DOUBLE_EQ(args.theta_box_min, 2.0e-5);
+    EXPECT_DOUBLE_EQ(args.theta_box_max, 2.0e-3);
+    EXPECT_EQ(args.node_box_update_count, 3);
+    EXPECT_FALSE(args.use_basic_experimental);
+    EXPECT_FALSE(args.use_simd);
+    EXPECT_FALSE(args.use_parallel);
+    EXPECT_FALSE(args.use_ccd);
+    EXPECT_FALSE(args.exact_computation_fallback);
+    EXPECT_FALSE(args.fixed_iters);
+}
+
+TEST(BikeChainExample, MotorSettingsPreserveFixtureStartAndPlaceDrivePins) {
+    IPCArgs3D args;
+    std::vector<std::string> values = {"3D_sim", "--example", "18",
+        "--bike_chain_drive_speed", "-20", "--bike_chain_motor_radius", "0.06",
+        "--bike_chain_shaft_span", "0.10"};
+    std::vector<char*> argv;
+    for (auto& value : values) argv.push_back(value.data());
+    ASSERT_TRUE(args.parse(static_cast<int>(argv.size()), argv.data()));
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    build_bike_chain_example(args, mesh, state, X, pins, params);
+    const double expected = -20.0 * 3.14159265358979323846 / 180.0;
+    ASSERT_EQ(params.rigid_pins.size(), 8U);
+    EXPECT_DOUBLE_EQ(args.bike_chain_drive_speed, -20.0);
+    EXPECT_DOUBLE_EQ(args.bike_chain_motor_radius, 0.06);
+    EXPECT_DOUBLE_EQ(args.bike_chain_shaft_span, 0.10);
+    EXPECT_NEAR(state.omega[136].z(), expected, 1.0e-15);
+    for (int body = 0; body < 138; ++body) {
+        SCOPED_TRACE(body);
+        EXPECT_TRUE(state.v_coms[body].isZero(0.0));
+        const Vec3 expected_omega = body == 136 ? Vec3(0.0, 0.0, expected) : Vec3::Zero();
+        EXPECT_LT((state.omega[body] - expected_omega).norm(), 1.0e-15);
+        for (const int node : mesh.rb_nodes[body]) {
+            const Vec3 expected_velocity = state.v_coms[body]
+                + state.omega[body].cross(state.deformed_positions[node] - state.x_coms[body]);
+            EXPECT_LT((state.velocities[node] - expected_velocity).norm(), 1.0e-15);
+        }
+    }
+    for (int pin = 0; pin < 4; ++pin) {
+        EXPECT_NEAR(params.rigid_pins[pin].angular_velocity_z, expected, 1.0e-15);
+        EXPECT_NEAR(params.rigid_pins[pin].local_position.norm(), 0.06, 1.0e-15);
+        EXPECT_DOUBLE_EQ(params.rigid_pins[pin].local_position.z(), 0.0);
+        EXPECT_TRUE(params.rigid_pins[pin].initial_target.isApprox(state.x_coms[136]
+            + quaternion_rotate(state.orientations[136], params.rigid_pins[pin].local_position), 1.0e-15));
+    }
+    for (int pin = 4; pin < 8; ++pin) {
+        EXPECT_DOUBLE_EQ(params.rigid_pins[pin].angular_velocity_z, 0.0);
+        EXPECT_EQ(params.rigid_pins[pin].body, pin < 6 ? 136 : 137);
+        EXPECT_DOUBLE_EQ(params.rigid_pins[pin].local_position.z(), pin % 2 ? 0.10 : -0.10);
+        EXPECT_TRUE(params.rigid_pins[pin].initial_target.isApprox(
+            state.x_coms[params.rigid_pins[pin].body]
+            + quaternion_rotate(state.orientations[params.rigid_pins[pin].body],
+                                params.rigid_pins[pin].local_position), 1.0e-15));
+    }
+    args.bike_chain_drive_speed = std::numeric_limits<double>::quiet_NaN();
     EXPECT_THROW(build_bike_chain_example(args, mesh, state, X, pins, params),
                  std::invalid_argument);
+    args.bike_chain_drive_speed = -20.0;
+    args.bike_chain_motor_radius = 0.0;
+    EXPECT_THROW(build_bike_chain_example(args, mesh, state, X, pins, params),
+                 std::invalid_argument);
+    args.bike_chain_motor_radius = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(build_bike_chain_example(args, mesh, state, X, pins, params),
+                 std::invalid_argument);
+    args.bike_chain_motor_radius = 0.06;
+    args.bike_chain_shaft_span = 0.0;
+    EXPECT_THROW(build_bike_chain_example(args, mesh, state, X, pins, params),
+                 std::invalid_argument);
+    args.bike_chain_shaft_span = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(build_bike_chain_example(args, mesh, state, X, pins, params),
+                 std::invalid_argument);
+}
+
+TEST(BikeChainExample, OriginalPartsKeepAuthoredTransformsAndClosedVolumeMass) {
+    IPCArgs3D args;
+    char program[] = "3D_sim", flag[] = "--example", scene[] = "18";
+    char* argv[] = {program, flag, scene};
+    ASSERT_TRUE(args.parse(3, argv));
+    const auto directory = std::filesystem::path(__FILE__).parent_path()
+        / "example_obj" / "bike_chain";
+    args.datadir = directory.string();
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    build_bike_chain_example(args, mesh, state, X, pins, params);
+    std::ifstream poses(directory / "initial_bodies.txt");
+    ASSERT_TRUE(poses.good());
+    std::string line;
+    int body = 0;
+    while (std::getline(poses, line)) {
+        if (line.empty() || line.front() == '#') continue;
+        SCOPED_TRACE(body);
+        std::string name, role;
+        Vec3 position, degrees;
+        double scale, speed;
+        std::istringstream row(line);
+        ASSERT_TRUE(static_cast<bool>(row >> name >> position.x() >> position.y() >> position.z()
+            >> degrees.x() >> degrees.y() >> degrees.z() >> scale >> speed >> role));
+        const auto path = directory / name;
+        std::vector<Vec3> authored;
+        std::vector<int> triangles;
+        load_obj_mesh(path.string(), authored, triangles);
+        ASSERT_EQ(authored.size(), mesh.rb_nodes[body].size());
+        constexpr double radians = 3.14159265358979323846 / 180.0;
+        const Mat33 rotation = (Eigen::AngleAxisd(degrees.z() * radians, Vec3::UnitZ())
+            * Eigen::AngleAxisd(degrees.y() * radians, Vec3::UnitY())
+            * Eigen::AngleAxisd(degrees.x() * radians, Vec3::UnitX())).toRotationMatrix();
+        for (std::size_t local = 0; local < authored.size(); ++local) {
+            const Vec3 expected = position + rotation * (scale * authored[local]);
+            EXPECT_LT((state.deformed_positions[mesh.rb_nodes[body][local]] - expected).norm(), 2.0e-15);
+        }
+        // Independent surface integration confirms the original closed CAD
+        // surfaces determine physical mass at the authored dimensions.
+        double signed_volume = 0.0;
+        for (std::size_t tri = 0; tri < triangles.size(); tri += 3) {
+            const Vec3 a = scale * authored[triangles[tri]];
+            const Vec3 b = scale * authored[triangles[tri + 1]];
+            const Vec3 c = scale * authored[triangles[tri + 2]];
+            signed_volume += a.dot(b.cross(c)) / 6.0;
+        }
+        EXPECT_NEAR(mesh.total_mass[body], args.rigid_density * std::abs(signed_volume), 1.0e-11);
+        ++body;
+    }
+    EXPECT_EQ(body, 138);
 }
 
 TEST(ChainNetBallExample, SquareAndRectangularNetsHaveClosedOwnedRigidMeshes) {

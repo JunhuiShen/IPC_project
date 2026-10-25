@@ -105,8 +105,8 @@ IPC_DAT_HD inline double plane(const Geometry& g,const double q[4][3]) {
     double ap=0,an=0;
     for(int i=0;i<4;++i){const double p=dot(g.normal,q[i]);if(i<g.split)ap=fmax(ap,-p);else an=fmax(an,p);}
     const double largest=fmax(ap,an);double lambda=.5;
-    if(largest>0){const double p=ap/largest,n=an/largest;lambda=n/(p+n);}
-    // Printed Eqs. (11)-(12), using the positive primitive as plane origin.
+    if(largest>0){const double p=ap/largest,n=an/largest;lambda=p/(p+n);}
+    // Measured from the positive side: lambda * gap is that side's room.
     lambda=fmax(1e-8,fmin(1-1e-8,lambda));return g.positive-lambda*(g.positive-g.negative);
 }
 IPC_DAT_HD inline double pair_scale(const Geometry& g,int role,const double* q,double c,double gamma) {

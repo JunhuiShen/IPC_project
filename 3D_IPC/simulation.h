@@ -7,6 +7,7 @@
 #include "time_integration.h"
 #include "contact_scheduling.h"
 #include <algorithm>
+#include <optional>
 #include <cstdio>
 #include <functional>
 #include <omp.h>
@@ -77,7 +78,12 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
     const double dt = params.dt();
     broad_phase.invalidate_mesh_topology();
 
+    std::optional<SimParams> driven_params;
+    if (!params.rigid_pins.empty()) driven_params.emplace(params);
     for (int sub = 0; sub < params.substeps; ++sub) {
+        if (driven_params) driven_params->rigid_pin_time =
+            ((frame_index - 1) * params.substeps + sub + 1) * dt;
+        const SimParams& active_params = driven_params ? *driven_params : params;
         std::vector<Vec3> x_com_new = state.x_coms;
         std::vector<Vec4> q_new = state.orientations;
         std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
@@ -90,14 +96,14 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
             const std::vector<Pin> pins;
             // The rigid-only driver writes through on_substep. It has no
             // diagnostic outdir, so do not create general debug files in cwd.
-            SimParams solver_params = params;
+            SimParams solver_params = active_params;
             solver_params.write_substeps = false;
             sub_result = global_gauss_seidel_solver_general_experimental_v2(
                 ref_mesh, state, adjacency, pins, solver_params, xnew, xhat,
                 x_com_new, q_new, omega_new, broad_phase);
         } else {
             sub_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state,
-                params, x_com_new, q_new, omega_new);
+                active_params, x_com_new, q_new, omega_new);
         }
         accumulate_solver_result(agg, sub_result, sub == 0);
 

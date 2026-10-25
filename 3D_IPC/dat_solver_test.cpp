@@ -102,9 +102,9 @@ TEST(PlanarDATSolver, ApproachingPointStopsOnOriginalSide) {
     auto scene = point_triangle();
     scene.target[0].z() = -.4;
     const auto positions = scene.solve();
-    // Printed lambda is zero for a stationary triangle; the numerical clamp
-    // leaves only gamma * gap * 1e-8 of inward room for the point.
-    EXPECT_NEAR(positions[0].z(), .1 - 8e-10, 1e-13);
+    // A stationary triangle gives the point almost the full gap; gamma
+    // leaves 20% of the gap, plus the interior-plane numerical margin.
+    EXPECT_NEAR(positions[0].z(), .02 + 8e-10, 1e-13);
     EXPECT_GT(positions[0].z(), 0.0);
 }
 
@@ -114,7 +114,7 @@ TEST(PlanarDATSolver, MovingTriangleConstrainsEveryTriangleVertex) {
     const auto positions = scene.solve();
     expect_close(positions[0], scene.initial[0]);
     for(int i=1;i<4;++i) {
-        EXPECT_NEAR(positions[i].z(), 8e-10, 1e-13) << "vertex=" << i;
+        EXPECT_NEAR(positions[i].z(), .08 - 8e-10, 1e-13) << "vertex=" << i;
         EXPECT_LT(positions[i].z(), positions[0].z());
     }
 }
@@ -131,6 +131,19 @@ TEST(PlanarDATSolver, OpposingProposalsShareTheAvailableGap) {
     }
 }
 
+TEST(PlanarDATSolver, UnequalApproachesGetProportionalRoom) {
+    auto scene = point_triangle();
+    scene.target[0].z() -= .8;
+    for (int i = 1; i < 4; ++i) scene.target[i].z() += .2;
+    const auto positions = scene.solve();
+    EXPECT_NEAR(positions[0].z(), .036, 1e-12);
+    for (int i = 1; i < 4; ++i) {
+        EXPECT_NEAR(positions[i].z(), .016, 1e-12);
+        EXPECT_NEAR(scene.initial[0].z() - positions[0].z(), 4 * positions[i].z(), 1e-12);
+        EXPECT_NEAR(positions[0].z() - positions[i].z(), .02, 1e-12);
+    }
+}
+
 TEST(PlanarDATSolver, EdgeEdgePlanesConstrainAllFourEndpoints) {
     // The two long edges cross in projection. Every nonincident vertex is
     // farther than rq=.3 from the opposite triangle, isolating EE bounds.
@@ -141,7 +154,7 @@ TEST(PlanarDATSolver, EdgeEdgePlanesConstrainAllFourEndpoints) {
         scene.params.d_hat = .2;
         scene.target[moving].z() += moving < 3 ? .5 : -.5;
         const auto positions = scene.solve();
-        EXPECT_NEAR(std::abs(positions[moving].z()-initial[moving].z()), 8e-10, 1e-13);
+        EXPECT_NEAR(std::abs(positions[moving].z()-initial[moving].z()), .08 - 8e-10, 1e-13);
         for(int i=0;i<6;++i)
             if(i!=moving) expect_close(positions[i], initial[i]);
     }
@@ -192,7 +205,7 @@ TEST(PlanarDATSolver, DetectionRefreshAllowsFurtherProgress) {
 TEST(PlanarDATSolver, ZeroNewtonIncrementPreservesAcceptedAccumulatedMotion) {
     auto scene = point_triangle();
     scene.params.max_global_iters = 3;
-    scene.target[0].z() = .15;
+    scene.target[0].z() = .05;
     const auto positions = scene.solve();
     expect_close(positions[0], scene.target[0]);
 }
@@ -206,9 +219,9 @@ TEST(PlanarDATSolver, ObtuseTriangleUsesCorrectedDistanceAndSeparatingPlane) {
     ASSERT_TRUE(dat_detail::make_vertex_triangle_geometry(points, distance).valid_plane);
     scene.target[0] += Vec3(0,.02,-.2);
     const auto positions = scene.solve();
-    // This ray previously touched the triangle edge at its midpoint. With
-    // the printed lambda convention only the clamped inward room is allowed.
-    expect_close(positions[0], scene.initial[0] + 4e-9 * Vec3(0,.02,-.2), 1e-13);
+    // This ray would touch the triangle edge at its midpoint. The stationary
+    // triangle leaves the point room to approach, with a positive gap retained.
+    expect_close(positions[0], scene.initial[0] + .4 * (1.0 - 1e-8) * Vec3(0,.02,-.2), 1e-12);
     EXPECT_GT(positions[0].z(), 0.0);
 }
 
@@ -247,8 +260,8 @@ TEST(PlanarDATSolver, RoundedWorldCoordinatesStayStrictlyAboveThePlane) {
     scene.params.d_hat = .01;
     scene.target[0].z() = plane-.1;
     const auto positions = scene.solve();
-    // The printed one-sided allocation leaves less than one ULP of inward
-    // room, so the accepted represented position remains unchanged.
+    // The analytic bound allows most of one ULP, which would round onto the
+    // plane. The stored-endpoint guard must retain a representable safe gap.
     EXPECT_GT(positions[0].z(), plane);
     EXPECT_DOUBLE_EQ(positions[0].z(), next);
     expect_same(positions,scene.initial);
@@ -400,5 +413,6 @@ TEST(PlanarDATSolver, FrameDriverSelectsDATAndStartsFromPreviousPositions) {
     const auto result = advance_one_frame(state,scene.mesh,scene.adjacency, scene.pins,scene.params,broad_phase);
     ASSERT_TRUE(result.converged);
     expect_same(state.deformed_positions, expected);
-    EXPECT_NEAR(state.deformed_positions[0].z(), .01 - 8e-11, 1e-14);
+    // Allow the conservative rounding margin in the supporting projections.
+    EXPECT_NEAR(state.deformed_positions[0].z(), .002 + 8e-11, 1e-13);
 }

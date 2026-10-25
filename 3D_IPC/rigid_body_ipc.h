@@ -7,6 +7,17 @@
 
 struct DeformedState;
 struct RefMesh;
+struct SimParams;
+
+// Soft attachment at a body-local material point. The target may rotate around
+// a prescribed world-space Z axis; zero angular velocity makes it stationary.
+struct RigidPin {
+    int body = -1;
+    Vec3 local_position = Vec3::Zero();
+    Vec3 initial_target = Vec3::Zero();
+    Vec3 rotation_center = Vec3::Zero();
+    double angular_velocity_z = 0.0;
+};
 
 // Label controlling which generalized coordinates are solved for. Disabled
 // coordinates stay at their previous-step values and contribute reaction
@@ -132,6 +143,17 @@ Vec3 rigid_node_omega_gradient(const Vec3& gx, const Mat33& dx_domega);
 // Per-node translation and angular-velocity Hessian contributions.
 Mat33 rigid_node_translation_hessian(const Mat33& Hx);
 Mat33 rigid_node_omega_hessian(const Vec3& gx, const Mat33& Hx, const Mat33& dx_domega, const std::array<Mat33, 3>& d2x_domega2);
+
+Vec3 rigid_pin_target_position(const RigidPin& pin, double time);
+
+// Derivatives of dt^2 kpin/2 ||t + R(q(omega)) X - target||^2.
+// Springs act on generalized rigid coordinates, including virtual material
+// points which need not coincide with surface mesh vertices.
+RigidEnergyDerivatives rigid_pin_derivatives(
+    int body, const Vec3& center, const Vec4& q_n, const Vec3& omega,
+    const SimParams& params, double dt,
+    const QuaternionOmegaKinematics* supplied_kinematics = nullptr,
+    bool with_orientation_hessian = false);
 
 double gravitational_potential(const Vec3& x_com, const double total_mass, const double gravity, const double dt);
 

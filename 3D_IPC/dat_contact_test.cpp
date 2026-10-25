@@ -1,4 +1,5 @@
 #include "dat_contact.h"
+#include "gpu/resident_dat_math.cuh"
 
 #include <gtest/gtest.h>
 
@@ -32,7 +33,7 @@ TEST(DatContact, CollinearTriangleRetainsDegenerateMetadata) {
     EXPECT_TRUE(dat_detail::make_vertex_triangle_geometry(x, dr).valid_plane);
 }
 
-TEST(DatContact, PrintedAdaptivePlaneUsesOpposingApproach) {
+TEST(DatContact, AdaptivePlaneSharesRoomProportionalToApproach) {
     const auto geometry = vertex_triangle_geometry(vertex_triangle());
     ASSERT_TRUE(geometry.valid_plane);
     auto displacements = zero_displacements();
@@ -40,15 +41,14 @@ TEST(DatContact, PrintedAdaptivePlaneUsesOpposingApproach) {
     for (int role = 1; role < 4; ++role) displacements[role] = Vec3(0, 0, 0.2);
     std::array<double, 4> scales = {1, 1, 1, 1};
     dat_detail::accumulate_pair_scales(geometry, displacements, 0.8, scales);
-    EXPECT_NEAR(dat_detail::division_plane_offset(geometry, displacements), -0.2, 1e-12);
-    EXPECT_NEAR(scales[0], 0.2, 1e-12);
-    for (int role = 1; role < 4; ++role) EXPECT_EQ(scales[role], 1.0);
+    EXPECT_NEAR(dat_detail::division_plane_offset(geometry, displacements), -0.8, 1e-12);
+    for (double scale : scales) EXPECT_NEAR(scale, 0.8, 1e-12);
     auto reversed = zero_displacements();
     reversed[0].z() = -0.2;
     for (int role = 1; role < 4; ++role) reversed[role].z() = 0.8;
-    EXPECT_NEAR(dat_detail::division_plane_offset(geometry, reversed), -0.8, 1e-12);
+    EXPECT_NEAR(dat_detail::division_plane_offset(geometry, reversed), -0.2, 1e-12);
     EXPECT_NEAR(dat_detail::division_plane_offset(geometry, zero_displacements()), -0.5, 1e-12);
-    EXPECT_GT(1.0 - 0.8 * scales[0] - 0.2 * scales[1], 0.0);
+    EXPECT_NEAR(1.0 - 0.8 * scales[0] - 0.2 * scales[1], 0.2, 1e-12);
 }
 
 TEST(DatContact, TangentialAndSeparatingDisplacementsRemainUnrestricted) {
@@ -68,7 +68,7 @@ TEST(DatContact, SingleApproachingSideStillLeavesInteriorPlane) {
     displacements[0] = Vec3(0, 0, -2);
     std::array<double, 4> scales = {1, 1, 1, 1};
     dat_detail::accumulate_pair_scales(geometry, displacements, 0.8, scales);
-    EXPECT_NEAR(scales[0], 4e-9, 1e-16);
+    EXPECT_NEAR(scales[0], 0.4 * (1.0 - 1e-8), 1e-12);
     const double plane = dat_detail::division_plane_offset(geometry, displacements);
     EXPECT_GT(plane, geometry.negative_support);
     EXPECT_LT(plane, geometry.positive_support);
@@ -86,10 +86,41 @@ TEST(DatContact, EdgeEdgeConstrainsAllFourEndpointRoles) {
     const std::array<Vec3, 4> displacements = {Vec3(0, 0, -0.6), Vec3(0, 0, -0.6), Vec3(0, 0, 0.4), Vec3(0, 0, 0.4)};
     std::array<double, 4> scales = {1, 1, 1, 1};
     dat_detail::accumulate_pair_scales(geometry, displacements, 0.8, scales);
-    EXPECT_NEAR(scales[0], 0.8 * 0.4 / 0.6, 1e-12);
-    EXPECT_NEAR(scales[1], 0.8 * 0.4 / 0.6, 1e-12);
-    EXPECT_EQ(scales[2], 1.0);
-    EXPECT_EQ(scales[3], 1.0);
+    for (double scale : scales) EXPECT_NEAR(scale, 0.8, 1e-12);
+}
+
+TEST(DatContact, CPUAndGPUTruncationAgreeForAsymmetricAndStationarySides) {
+    const std::array<std::array<double, 2>, 7> approaches{{{{.8,.2}}, {{.2,.8}}, {{2,0}}, {{0,2}}, {{.25,0}}, {{0,.25}}, {{0,0}}}};
+    for (bool vertex_face : {true, false}) {
+        const auto x = vertex_face ? vertex_triangle() : std::array<Vec3, 4>{Vec3(-1,0,1), Vec3(1,0,1), Vec3(0,-1,0), Vec3(0,1,0)};
+        const auto cpu = vertex_face ? vertex_triangle_geometry(x) : dat_detail::make_edge_edge_geometry(x, segment_segment_distance(x[0], x[1], x[2], x[3], 1e-12, false));
+        double positions[4][3];
+        for (int role = 0; role < 4; ++role) for (int k = 0; k < 3; ++k) positions[role][k] = x[role][k];
+        const auto gpu = ipc_gpu::resident::dat::geometry(positions, vertex_face, 2.0);
+        ASSERT_TRUE(cpu.valid_plane);
+        ASSERT_TRUE(gpu.valid);
+        for (const auto& approach : approaches) {
+            SCOPED_TRACE(::testing::Message() << "VT=" << vertex_face << " approaches=" << approach[0] << "," << approach[1]);
+            auto proposed = zero_displacements();
+            double q[4][3]{};
+            for (int role = 0; role < 4; ++role) q[role][2] = proposed[role].z() = role < cpu.positive_count ? -approach[0] : approach[1];
+            const double cpu_plane = dat_detail::division_plane_offset(cpu, proposed);
+            const double gpu_plane = ipc_gpu::resident::dat::plane(gpu, q);
+            EXPECT_NEAR(gpu_plane, cpu_plane, 1e-12);
+            std::array<double, 4> scales{1,1,1,1};
+            dat_detail::accumulate_pair_scales(cpu, proposed, .8, scales);
+            for (int role = 0; role < 4; ++role) {
+                const double gpu_scale = ipc_gpu::resident::dat::pair_scale(gpu, role, q[role], gpu_plane, .8);
+                EXPECT_NEAR(gpu_scale, scales[role], 1e-12);
+                // For unit-gap normal translation, both approaching sides
+                // advance by the same fraction of the time to contact.
+                const double own_approach = role < cpu.positive_count ? approach[0] : approach[1];
+                const double expected = own_approach > 0 ? std::min(1.0, .8 / (approach[0] + approach[1])) : 1.0;
+                EXPECT_NEAR(scales[role], expected, 1e-8);
+            }
+            EXPECT_GE(1.0 - approach[0] * scales[0] - approach[1] * scales[cpu.positive_count], .2 - 1e-12);
+        }
+    }
 }
 
 TEST(DatContact, InvalidPlaneUsesIsotropicHalfGapAndZeroGapFreezes) {
@@ -137,7 +168,7 @@ TEST(DatContact, RoundedEndpointCannotConsumeOneUlpPlaneGap) {
     ASSERT_TRUE(geometry.valid_plane);
     auto displacements = zero_displacements();
     displacements[0].z() = -gap;
-    for (int role = 1; role < 4; ++role) displacements[role].z() = 4.0 * gap;
+    for (int role = 1; role < 4; ++role) displacements[role].z() = 0.25 * gap;
     const double plane = dat_detail::division_plane_offset(geometry, displacements);
     std::array<double, 4> scales = {1, 1, 1, 1};
     dat_detail::accumulate_pair_scales(geometry, displacements, 0.8, scales);

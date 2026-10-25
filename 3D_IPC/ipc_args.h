@@ -160,6 +160,11 @@ struct IPCArgs3D : ArgParser {
     double      chain_net_ball_density = 1000.0;
     int         chain_net_ball_subdiv = 2;
 
+    // Example 18: prescribed soft-pin motor speed about world Z (degrees/second).
+    double bike_chain_drive_speed = -25.0;
+    double bike_chain_motor_radius = 0.03; // Radius of the four moving motor pins (m).
+    double bike_chain_shaft_span = 0.05; // Distance from each gear center to its shaft support points (m).
+
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
     std::string format       = "geo";
@@ -230,7 +235,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("exact_computation_fallback", exact_computation_fallback, true, "Enable additional exact-arithmetic CCD/contact fallbacks, matching barrier/friction calculations, and colored-predictor path checks (default: true)");
         add_bool  ("ccd_exact_step_bound", ccd_exact_step_bound, false, "Experimental direct exact separating-plane gap bound before legacy backtracking; requires exact fallback with linear CCD and OGC disabled (default: false)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=twenty_polygon_stack, 8=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 9=dynamic_bolt_into_fixed_nut, 10=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 11=cloth_unrolling_down_fixed_ramp, 12=oscillating_cloth_layers, 13=wrecking_ball, 14=cloth_cylinder_drop, 15=200_sheet_cylinder_drop, 16=chain_net_ball, 17=rigid_objects_in_box, 18=bike_chain_frame0");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=twenty_polygon_stack, 8=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 9=dynamic_bolt_into_fixed_nut, 10=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 11=cloth_unrolling_down_fixed_ramp, 12=oscillating_cloth_layers, 13=wrecking_ball, 14=cloth_cylinder_drop, 15=200_sheet_cylinder_drop, 16=chain_net_ball, 17=rigid_objects_in_box, 18=bike_chain");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -307,6 +312,10 @@ struct IPCArgs3D : ArgParser {
         add_double("chain_net_ball_gap", chain_net_ball_gap, 3.0, "Example 16: positive initial surface gap from highest net vertex to lowest falling object");
         add_double("chain_net_ball_density", chain_net_ball_density, 1000.0, "Example 16 single-ball mode: sphere volume density; rigid_density controls links");
         add_int("chain_net_ball_subdiv", chain_net_ball_subdiv, 2, "Example 16: subdivision level for each falling sphere (0-7; subject to the 30,000-vertex scene limit)");
+
+        add_double("bike_chain_drive_speed", bike_chain_drive_speed, -25.0, "Example 18: soft-pin motor target speed about world z in degrees/second");
+        add_double("bike_chain_motor_radius", bike_chain_motor_radius, 0.03, "Example 18: positive radius of the four moving soft-pin motor points in metres");
+        add_double("bike_chain_shaft_span", bike_chain_shaft_span, 0.05, "Example 18: positive axial distance from each gear center to either stationary shaft support point in metres");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
@@ -396,11 +405,34 @@ struct IPCArgs3D : ArgParser {
             preset("--exact_computation_fallback", exact_computation_fallback, true);
         }
         if (example == 18) {
-            if (!supplied("--num_frames")) num_frames = 0;
-            if (!supplied("--fps")) fps = 100.0;
-            if (!supplied("--substeps")) substeps = 1;
-            if (!supplied("--rigid_density")) rigid_density = 1000.0;
-            if (!supplied("--d_hat")) d_hat = 1.0e-5;
+            const auto preset = [&](const char* flag, auto& field, auto value) {
+                if (!supplied(flag)) field = value;
+            };
+            preset("--num_frames", num_frames, 180);
+            preset("--fps", fps, 30.0);
+            preset("--gy", gy, 0.0);
+            preset("--substeps", substeps, 19);
+            preset("--max_substep_iters", max_substep_iters, 200);
+            preset("--fixed_iters", fixed_iters, true);
+            preset("--use_basic_experimental", use_basic_experimental, true);
+            preset("--use_simd", use_simd, true);
+            preset("--use_parallel", use_parallel, true);
+            preset("--use_ccd", use_ccd, true);
+            preset("--exact_computation_fallback", exact_computation_fallback, true);
+            preset("--rigid_density", rigid_density, 1000.0);
+            preset("--bike_chain_drive_speed", bike_chain_drive_speed, -25.0);
+            preset("--bike_chain_motor_radius", bike_chain_motor_radius, 0.03);
+            preset("--bike_chain_shaft_span", bike_chain_shaft_span, 0.05);
+            preset("--d_hat", d_hat, 3.0e-5);
+            preset("--k_barrier", k_barrier, 4000.0);
+            preset("--kpin", kpin, 1.0e4);
+            preset("--k_sdf", k_sdf, 0.0);
+            preset("--friction_coefficient", friction_coefficient, 0.0);
+            preset("--node_box_min", node_box_min, 2.0e-5);
+            preset("--node_box_max", node_box_max, 1.0e-4);
+            preset("--theta_box_min", theta_box_min, 4.0e-4);
+            preset("--theta_box_max", theta_box_max, 8.0e-3);
+            preset("--node_box_update_count", node_box_update_count, 25);
         }
         return true;
     }

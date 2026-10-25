@@ -56,10 +56,10 @@ std::vector<Vector3> solve(SceneDescription h,StepParameters p) {
 void point_tests() {
     auto p=parameters();
     for(int axis:{0,2}){auto h=point_triangle(.01);h.velocities[0][axis]=20;const auto x=solve(h,p);close(x[0][axis],h.positions[0][axis]+.2);}
-    auto h=point_triangle();h.velocities[0][2]=-50;auto x=solve(h,p);close(x[0][2],.1-8e-10,1e-13);require(x[0][2]>0,"point crossed plane");
-    h=point_triangle();for(int i=1;i<4;++i)h.velocities[i][2]=50;x=solve(h,p);for(int i=1;i<4;++i)close(x[i][2],8e-10,1e-13);
+    auto h=point_triangle();h.velocities[0][2]=-50;auto x=solve(h,p);close(x[0][2],.02+8e-10,1e-13);require(x[0][2]>0,"point crossed plane");
+    h=point_triangle();for(int i=1;i<4;++i)h.velocities[i][2]=50;x=solve(h,p);for(int i=1;i<4;++i)close(x[i][2],.08-8e-10,1e-13);
     h=point_triangle();h.velocities[0][2]=-50;for(int i=1;i<4;++i)h.velocities[i][2]=50;x=solve(h,p);close(x[0][2],.06);for(int i=1;i<4;++i)close(x[i][2],.04);
-    h=point_triangle();h.velocities[0][2]=-80;for(int i=1;i<4;++i)h.velocities[i][2]=20;x=solve(h,p);close(x[0][2],.084);for(int i=1;i<4;++i)close(x[i][2],.064);
+    h=point_triangle();h.velocities[0][2]=-80;for(int i=1;i<4;++i)h.velocities[i][2]=20;x=solve(h,p);close(x[0][2],.036);for(int i=1;i<4;++i)close(x[i][2],.016);
     h=point_triangle(.12);p.contact.d_hat=.1;h.velocities[0][2]=-50;for(int i=1;i<4;++i)h.velocities[i][2]=50;x=solve(h,p);close(x[0][2],.072);for(int i=1;i<4;++i)close(x[i][2],.048);
     h=point_triangle(.4);h.velocities[0][2]=-80;x=solve(h,p);close(x[0][2],.34);
 }
@@ -74,17 +74,17 @@ void refresh_tests() {
 }
 void distance_and_rounding_tests() {
     auto p=parameters();auto h=scene({Vector3{.5,-.01,.1},Vector3{0,0,0},Vector3{1,0,0},Vector3{-10,.1,0}});
-    h.velocities[0]={0,2,-20};auto x=solve(h,p);close(x[0][1],-.01+8e-11,1e-13);close(x[0][2],.1-8e-10,1e-13);require(x[0][2]>0,"obtuse-triangle ray crossed the edge");
+    h.velocities[0]={0,2,-20};auto x=solve(h,p);close(x[0][1],-.002-8e-11,1e-12);close(x[0][2],.02+8e-10,1e-12);require(x[0][2]>0,"obtuse-triangle ray crossed the edge");
     h=point_triangle();const double base=1e12,next=std::nextafter(base,INFINITY);h.positions[0][2]=next;for(int i=1;i<4;++i)h.positions[i][2]=base;
     h.velocities[0][2]=-10;p.contact.d_hat=.01;x=solve(h,p);require(x[0][2]==next,"rounded endpoint consumed plane gap");
-    const double gap=next-base;h.velocities[0][2]=-gap/p.dt;for(int i=1;i<4;++i)h.velocities[i][2]=4*gap/p.dt;
+    const double gap=next-base;h.velocities[0][2]=-gap/p.dt;for(int i=1;i<4;++i)h.velocities[i][2]=.25*gap/p.dt;
     x=solve(h,p);require(x[0][2]==next,"adaptive plane accepted a rounded crossing");for(int i=1;i<4;++i)require(x[i][2]==base,"rounded triangle motion crossed its plane");
 }
 void edge_tests() {
     auto h=scene({Vector3{-1,0,0},Vector3{1,0,0},Vector3{-1,-1,0},Vector3{0,-1,.1},Vector3{0,1,.1},Vector3{1,1,.1}},false);
     h.surface_triangles={BpTriangle{{0,1,2}},BpTriangle{{3,4,5}}};h.edges={BpEdge{{0,1}},BpEdge{{1,2}},BpEdge{{0,2}},BpEdge{{3,4}},BpEdge{{4,5}},BpEdge{{3,5}}};
     auto p=parameters();p.contact.d_hat=.2;
-    for(int node:{0,1,3,4}){auto copy=h;copy.velocities[node][2]=node<3?50:-50;const auto x=solve(copy,p);close(std::abs(x[node][2]-h.positions[node][2]),8e-10,1e-13);}
+    for(int node:{0,1,3,4}){auto copy=h;copy.velocities[node][2]=node<3?50:-50;const auto x=solve(copy,p);close(std::abs(x[node][2]-h.positions[node][2]),.08-8e-10,1e-13);}
 }
 void force_tests() {
     auto p=parameters();p.contact.d_hat=.2;p.contact.k_barrier=100;p.contact.friction=.3;

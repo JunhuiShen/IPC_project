@@ -1,4 +1,5 @@
 #pragma once
+#include "rigid_body_ipc.h"
 #include "corotated_energy.h"
 #include "volumetric_corotated_energy.h"
 #include "bending_energy.h"
@@ -28,6 +29,8 @@ struct Pin {
 // (safe-zero seed) or IPCArgs3D::to_sim_params() (production CLI defaults).
 // A bare `SimParams p;` is undefined for the fundamental-type members.
 struct SimParams {
+    std::vector<RigidPin> rigid_pins;
+    double rigid_pin_time = 0.0;
     double fps;
     int    substeps;
     // Thickness-scaled shell material and mass parameters.

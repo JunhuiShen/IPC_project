@@ -4043,6 +4043,11 @@ double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedS
             state.deformed_positions, x_com_new[rb],
             state.orientations[rb], omega_new[rb], params, dt,
             com_gradient, orientation_gradient, &kinematics);
+        const RigidEnergyDerivatives pin = rigid_pin_derivatives(rb,
+            x_com_new[rb], state.orientations[rb], omega_new[rb], params, dt,
+            &kinematics);
+        com_gradient += pin.translation_gradient;
+        orientation_gradient += pin.orientation_gradient;
         RigidEnergyDerivatives friction;
         const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, body_nt_pair_indices[rb], body_ss_pair_indices[rb], node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::Gradient, &kinematics, frozen_workspace, params.friction_coefficient != 0.0 ? &friction : nullptr);
         if (update_translation)
@@ -4103,6 +4108,11 @@ Vec3 compute_com_update(int rb, const DeformedState& state, const RefMesh& ref_m
             ref_mesh.ref_positions[rb], ref_mesh.rb_nodes[rb],
             state.deformed_positions, x_com_new[rb], state.orientations[rb],
             omega_new[rb], params, dt, gradient, hessian, kinematics);
+        const RigidEnergyDerivatives pin = rigid_pin_derivatives(rb,
+            x_com_new[rb], state.orientations[rb], omega_new[rb], params, dt,
+            kinematics);
+        gradient += pin.translation_gradient;
+        hessian += pin.translation_translation_hessian;
     };
     const bool overlap_inertia = cooperative && params.friction_coefficient == 0.0;
     if (!overlap_inertia) compute_noncontact();
@@ -4146,6 +4156,10 @@ Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref
             ref_mesh.ref_positions[rb], ref_mesh.rb_nodes[rb],
             state.deformed_positions, x_com_new[rb], q_n, omega_new[rb],
             params, dt, gradient, hessian, &kinematics);
+        const RigidEnergyDerivatives pin = rigid_pin_derivatives(rb,
+            x_com_new[rb], q_n, omega_new[rb], params, dt, &kinematics, true);
+        gradient += pin.orientation_gradient;
+        hessian += pin.orientation_orientation_hessian;
     };
     const bool overlap_inertia = cooperative && params.friction_coefficient == 0.0;
     if (!overlap_inertia) compute_noncontact();

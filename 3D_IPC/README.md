@@ -112,7 +112,7 @@ sources, with `-fno-lto` on those sources under GCC.
 
 ## Built-in scenes
 
-Select a scene with `--example N`; IDs run consecutively from 1 to 17.
+Select a scene with `--example N`; IDs run consecutively from 1 to 18.
 Categories describe the simulated material models: **cloth** uses shell
 meshes, **rigid body** uses rigid motion, and **solid** uses deformable
 tetrahedral meshes. **Mixed** scenes below contain cloth, rigid bodies, and
@@ -138,10 +138,11 @@ There is no solid-only scene among the categorized examples.
 | 15 | Cloth only | Two hundred 141 × 141 free cloth sheets over an off-center cylinder; 3,976,200 vertices. |
 | 16 | Rigid body only | Gears, cubes, balls and polygonal prisms drop onto an interlocking net built from the wrecking-ball chain-link mesh, with fixed boundary links. |
 | 17 | Rigid body only | 300 mixed rigid objects (50 each of cubes, polygonal prisms, chain links, Bunny, Spot and gears) drop into one fixed open-top rigid box. |
+| 18 | Rigid body only | Bike-chain assembly with 138 separate rigid bodies and 47,761 vertices, driven by moving spring pins on the large sprocket; both sprocket centers are fixed and gravity is disabled. |
 
 ### Scene assets
 
-Examples 8–10, 13, 16 and 17 use the supplied `example_obj/` assets. Paths below are
+Examples 8–10, 13 and 16–18 use the supplied `example_obj/` assets. Paths below are
 relative to **`3D_IPC/`**, so keep that working directory when running them.
 
 | Examples | Required files |
@@ -151,6 +152,7 @@ relative to **`3D_IPC/`**, so keep that working directory when running them.
 | 13 | `example_obj/wrecking_ball/link.obj` and `ball.obj`; `--datadir` can point to `example_obj` or its `wrecking_ball` folder. |
 | 16 | `example_obj/wrecking_ball/link_32.obj` and `example_obj/gear_z18_180.obj`; cubes, plain spheres and polygonal prisms are generated procedurally. The optional single-ball mode needs only the link asset. |
 | 17 | `example_obj/wrecking_ball/link_128.obj`, `example_obj/bunny_coarse/bunny_1000f.obj`, `example_obj/spot/spot_500f.obj` and `example_obj/gear_z18_coarse.obj`; cubes, prisms and the container are procedural. `--datadir` may point to an alternative `example_obj` root with these relative paths. |
+| 18 | `example_obj/bike_chain/initial_bodies.txt` and the original `link.obj`, `barring.obj`, `pin.obj`, `sprocket-20teeth.obj` and `sprocket-8teeth.obj` in the same folder. `--datadir` may point to `example_obj` or its `bike_chain` folder. See the [bike-chain asset notes](example_obj/bike_chain/README.md) for mesh counts, source licenses and motor settings. |
 
 Example 4 needs a directory supplied with `--datadir`, containing
 `body_0000.obj` and `dress_0000.obj`. Other scenes are generated procedurally.
@@ -497,17 +499,18 @@ restart checkpoint. To export only the initial layout, use `--num_frames 0`.
 
 ### Example 18: bike chain
 
-The scene imports Rigid IPC's Figure 2 chain as 138 separate rigid bodies,
-using the original OBJ meshes and fixture poses. Example 18 currently supports
-frame 0 export only; the mechanism's motion is not enabled.
-
-Export the initial geometry with:
-
 ```sh
-./build/3D_sim --example 18 --num_frames 0 --format geo --outdir example18_frame0
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 18 --num_frames 180 --fps 30 \
+  --substeps 19 --max_substep_iters 200 --fixed_iters \
+  --use_basic_experimental true --use_simd true --use_parallel true \
+  --use_ccd true --exact_computation_fallback true \
+  --kpin 1e4 --k_barrier 4000 --d_hat 0.00003 --k_sdf 0 \
+  --rigid_density 1000 --friction_coefficient 0 --gy 0 --damping 1 \
+  --node_box_min 0.00002 --node_box_max 0.0001 \
+  --theta_box_min 0.0004 --theta_box_max 0.008 --node_box_update_count 25 \
+  --format geo --outdir example18_pin_output
 ```
-
-Source meshes, fixture poses and license notices are in `example_obj/bike_chain`.
 
 ## Build and test
 

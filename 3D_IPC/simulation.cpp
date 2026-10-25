@@ -31,10 +31,6 @@ int main(int argc, char** argv) {
         return 1;
     }
     const int num_frames = args.num_frames;
-    if (args.example == 18 && (num_frames != 0 || args.restart_frame >= 0)) {
-        std::cerr << "Example 18 currently supports frame 0 export only (--num_frames 0).\n";
-        return 1;
-    }
 
     RefMesh ref_mesh;
     DeformedState state;

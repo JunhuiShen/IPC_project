@@ -627,6 +627,51 @@ Mat33 rigid_node_omega_hessian(const Vec3& gx, const Mat33& Hx, const Mat33& dx_
 }
 
 
+Vec3 rigid_pin_target_position(const RigidPin& pin, double time) {
+    const double theta = pin.angular_velocity_z * time;
+    const double c = std::cos(theta), s = std::sin(theta);
+    const Vec3 offset = pin.initial_target - pin.rotation_center;
+    return pin.rotation_center + Vec3(c * offset.x() - s * offset.y(),
+        s * offset.x() + c * offset.y(), offset.z());
+}
+
+// Derivatives of dt^2 kpin/2 ||t + R(q(omega)) X - target||^2.
+// Springs act on generalized rigid coordinates, including virtual material
+// points which need not coincide with surface mesh vertices.
+RigidEnergyDerivatives rigid_pin_derivatives(
+    int body, const Vec3& center, const Vec4& q_n, const Vec3& omega,
+    const SimParams& params, double dt,
+    const QuaternionOmegaKinematics* supplied_kinematics,
+    bool with_orientation_hessian) {
+    RigidEnergyDerivatives result;
+    if (params.kpin <= 0.0 || params.rigid_pins.empty()) return result;
+    bool has_pin = false;
+    for (const auto& pin : params.rigid_pins)
+        if (pin.body == body) { has_pin = true; break; }
+    if (!has_pin) return result;
+    const QuaternionOmegaKinematics owned = supplied_kinematics == nullptr
+        ? quaternion_omega_kinematics(q_n, omega, dt, with_orientation_hessian)
+        : QuaternionOmegaKinematics{};
+    const auto& kin = supplied_kinematics == nullptr ? owned : *supplied_kinematics;
+    const double scale = dt * dt * params.kpin;
+    for (const auto& pin : params.rigid_pins) {
+        if (pin.body != body) continue;
+        const Vec3 error = world_space_position(pin.local_position, center,
+            kin.orientation) - rigid_pin_target_position(pin, params.rigid_pin_time);
+        const Mat33 J = dx_domega(pin.local_position, kin);
+        result.translation_gradient += scale * error;
+        result.orientation_gradient += scale * J.transpose() * error;
+        result.translation_translation_hessian += scale * Mat33::Identity();
+        result.translation_orientation_hessian += scale * J;
+        if (with_orientation_hessian) {
+            result.orientation_orientation_hessian += scale
+                * rigid_node_omega_hessian(error, Mat33::Identity(), J,
+                    d2x_domega2(pin.local_position, kin));
+        }
+    }
+    return result;
+}
+
 double gravitational_potential(const Vec3& x_com, const double total_mass, const double gravity, const double dt){
     return dt * dt * total_mass * gravity * x_com[1];
 }

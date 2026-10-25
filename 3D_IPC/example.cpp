@@ -2923,18 +2923,23 @@ void build_rigid_objects_in_box_example(
         params.d_hat = std::min(params.d_hat, 0.45 * minimum_surface_edge);
 }
 
-// Example 18: Figure 2 bike chain, preserving every upstream rigid component.
+// Example 18: Figure 2 bike-chain layout with original closed source meshes.
+// Every plate, roller, pin and sprocket remains an independent rigid body.
 void build_bike_chain_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params) {
-    if (args.num_frames != 0 || args.restart_frame >= 0)
-        throw std::invalid_argument("Example 18 currently supports frame 0 export only");
     const Vec3 gravity(args.gx, args.gy, args.gz);
     if (!gravity.allFinite() || !std::isfinite(args.rigid_density) || args.rigid_density <= 0.0)
         throw std::invalid_argument("Example 18 requires finite gravity and positive rigid density");
     if (!std::isfinite(args.d_hat) || args.d_hat < 0.0)
         throw std::invalid_argument("Example 18 requires a finite nonnegative barrier distance");
+    if (!std::isfinite(args.bike_chain_drive_speed))
+        throw std::invalid_argument("Example 18 requires a finite motor target speed");
+    if (!std::isfinite(args.bike_chain_motor_radius) || args.bike_chain_motor_radius <= 0.0)
+        throw std::invalid_argument("Example 18 requires a finite positive motor pin radius");
+    if (!std::isfinite(args.bike_chain_shaft_span) || args.bike_chain_shaft_span <= 0.0)
+        throw std::invalid_argument("Example 18 requires a finite positive shaft support span");
     namespace fs = std::filesystem;
     std::vector<fs::path> candidates;
     if (!args.datadir.empty()) {
@@ -2977,7 +2982,7 @@ void build_bike_chain_example(
         const std::string role = body < 136 ? "chain" : body == 136 ? "drive" : "driven";
         if (body >= 138 || pose.mesh != expected || pose.role != role
             || !fs::is_regular_file(directory / pose.mesh))
-            throw std::invalid_argument("Example 18 requires the 138-body source ordering and complete mesh assets");
+            throw std::invalid_argument("Example 18 requires the 138-body source ordering and complete original mesh assets");
         poses.push_back(pose);
     }
     if (poses.size() != 138)
@@ -3015,13 +3020,34 @@ void build_bike_chain_example(
             0.5 * pose.scale * (lower + upper));
         const auto mode = pose.role == "chain" ? RigidBodyUpdateMode::TranslationAndOrientation
             : RigidBodyUpdateMode::OrientationOnly;
-        const Vec3 omega(0.0, 0.0, pose.omega_z * kPi / 180.0);
+        const double omega_z = pose.role == "drive" ? args.bike_chain_drive_speed : pose.omega_z;
+        const Vec3 omega(0.0, 0.0, omega_z * kPi / 180.0);
         const std::size_t first_triangle = ref_mesh.tris.size() / 3;
         const int body = append_normalized_obj_rigid_body(mesh, state, ref_mesh, center,
             pose.scale * (upper - lower).maxCoeff(), args.rigid_density,
             Vec3::Zero(), orientation, omega, mode);
         use_closed_volume_rigid_mass_properties(body, first_triangle,
             ref_mesh.tris.size() / 3, ref_mesh, state);
+    }
+    params.rigid_pin_time = 0.0;
+
+    // Four rotating material-point springs drive the large sprocket. A pair
+    // of stationary virtual points on each shaft restrains tilt without
+    // opposing world-z rotation. Centers use the existing OrientationOnly mode.
+    params.rigid_pins.clear();
+    for (int k = 0; k < 4; ++k) {
+        const double angle = 0.5 * kPi * k;
+        const Vec3 local(args.bike_chain_motor_radius * std::cos(angle),
+                         args.bike_chain_motor_radius * std::sin(angle), 0.0);
+        const Vec3 target = state.x_coms[136] + quaternion_rotate(state.orientations[136], local);
+        params.rigid_pins.push_back({136, local, target, state.x_coms[136], args.bike_chain_drive_speed * kPi / 180.0});
+    }
+    for (const int body : {136, 137}) {
+        for (const double z : {-args.bike_chain_shaft_span, args.bike_chain_shaft_span}) {
+            const Vec3 local(0.0, 0.0, z);
+            const Vec3 target = state.x_coms[body] + quaternion_rotate(state.orientations[body], local);
+            params.rigid_pins.push_back({body, local, target, state.x_coms[body], 0.0});
+        }
     }
     ref_mesh.build_deformable_nodes();
 }

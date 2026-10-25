@@ -91,11 +91,12 @@ inline double division_plane_offset(const PairGeometry& geometry, const std::arr
     if (largest_approach > 0.0) {
         const double positive = positive_approach / largest_approach;
         const double negative = negative_approach / largest_approach;
-        lambda = negative / (positive + negative);
+        lambda = positive / (positive + negative);
     }
     constexpr double minimum_fraction = 1.0e-8;
     lambda = std::clamp(lambda, minimum_fraction, 1.0 - minimum_fraction);
     const double gap = geometry.positive_support - geometry.negative_support;
+    // Measured from the positive side: lambda * gap is that side's room.
     return geometry.positive_support - lambda * gap;
 }
 
