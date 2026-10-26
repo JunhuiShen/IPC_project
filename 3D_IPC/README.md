@@ -368,8 +368,9 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 
 # Example 12: three cloth layers with one fixed edge and one oscillating edge
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 12 --exact_computation_fallback true --ccd_exact_step_bound true --num_frames 200 \
+./build/3D_sim --example 12 --exact_computation_fallback false --ccd_exact_step_bound false --num_frames 200 \
   --substeps 6 --max_substep_iters 2 --fixed_iters \
+  --node_box_min 0.0001 --node_box_max 0.01 --node_box_update_count 10 \
   --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 \
   --kB 0.01 --gy 0 \
   --use_parallel true --use_basic_experimental true --use_simd true \
@@ -387,14 +388,14 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 
 # Example 14: fifty free cloth sheets fall over the cylinder and spread onto the ground.
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 14 --exact_computation_fallback true --ccd_exact_step_bound true --num_frames 10 \
+./build/3D_sim --example 14 --exact_computation_fallback false --ccd_exact_step_bound false --num_frames 10 \
   --fps 30 --substeps 24 --max_substep_iters 3 --fixed_iters \
   --use_basic_experimental --use_simd --use_parallel true --use_ccd true \
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
   --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 1.0 \
   --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
   --k_sdf 1e5 --eps_sdf 0.015 \
-  --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 3 \
+  --node_box_min 0.0002 --node_box_max 0.0025 --node_box_update_count 3 \
   --outdir results/example14_70x70/frames --format geo && \
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 14 --exact_computation_fallback true --ccd_exact_step_bound true --restart_frame 10 --num_frames 120 \
@@ -404,7 +405,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 1.0 \
   --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
   --k_sdf 1e5 --eps_sdf 0.015 \
-  --node_box_min 0.0002 --node_box_max 0.005 --node_box_update_count 2 \
+  --node_box_min 0.0001 --node_box_max 0.0025 --node_box_update_count 2 \
   --outdir results/example14_70x70/frames --format geo
 
 # Example 15: two hundred free cloth sheets fall over the cylinder and spread onto the ground. (unsuccessful)
