@@ -152,7 +152,7 @@ relative to **`3D_IPC/`**, so keep that working directory when running them.
 | 13 | `example_obj/wrecking_ball/link.obj` and `ball.obj`; `--datadir` can point to `example_obj` or its `wrecking_ball` folder. |
 | 16 | `example_obj/wrecking_ball/link_32.obj` and `example_obj/gear_z18_180.obj`; cubes, plain spheres and polygonal prisms are generated procedurally. The optional single-ball mode needs only the link asset. |
 | 17 | `example_obj/wrecking_ball/link_128.obj`, `example_obj/bunny_coarse/bunny_1000f.obj`, `example_obj/spot/spot_500f.obj` and `example_obj/gear_z18_coarse.obj`; cubes, prisms and the container are procedural. `--datadir` may point to an alternative `example_obj` root with these relative paths. |
-| 18 | `example_obj/bike_chain/initial_bodies.txt` and the original `link.obj`, `barring.obj`, `pin.obj`, `sprocket-20teeth.obj` and `sprocket-8teeth.obj` in the same folder. `--datadir` may point to `example_obj` or its `bike_chain` folder. See the [bike-chain asset notes](example_obj/bike_chain/README.md) for mesh counts, source licenses and motor settings. |
+| 18 | `example_obj/bike_chain/initial_bodies.txt` and the original `link.obj`, `barring.obj`, `pin.obj`, `sprocket-20teeth.obj` and `sprocket-8teeth.obj` in the same folder. `--datadir` may point to `example_obj` or its `bike_chain` folder. |
 
 Example 4 needs a directory supplied with `--datadir`, containing
 `body_0000.obj` and `dress_0000.obj`. Other scenes are generated procedurally.
@@ -585,10 +585,3 @@ Our OGC narrow phase and `global_gauss_seidel_solver_ogc` implement:
 > Anka He Chen, Jerry Hsu, Ziheng Liu, Miles Macklin, Yin Yang, and Cem Yuksel.
 > *Offset Geometric Contact.* ACM Transactions on Graphics 44(4):160, 2025.
 > [doi:10.1145/3731205](https://doi.org/10.1145/3731205)
-
-Our `global_gauss_seidel_solver_dat` follows:
-
-> Anka H. Chen, Jerry Hsu, Youssef Ayman, and Miles Macklin.
-> *Divide and Truncate: A Penetration and Inversion Free Framework for Coupled Multi-physics System.*
-> ACM SIGGRAPH 2026 Conference Papers, Article 153, 10 pages.
-> [doi:10.1145/3799902.3811143](https://doi.org/10.1145/3799902.3811143)

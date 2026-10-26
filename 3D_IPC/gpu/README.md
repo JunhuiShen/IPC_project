@@ -42,7 +42,7 @@ GPU. It shares scene definitions, command-line options and output formats with
 | Scene records, SDFs and buffers | [resident_scene_types.h](resident_scene_types.h), [resident_sdf_types.h](resident_sdf_types.h), [resident_sdf.cuh](resident_sdf.cuh), [resident_scene.h](resident_scene.h), [resident_memory.h](resident_memory.h): public records, obstacle evaluation and device storage. |
 
 Most `.cuh` files contain device arithmetic; `.cu` files contain kernels and
-launch orchestration. The numerical libraries are `ipc_resident_solver`, `ipc_resident_dat`, and
+launch orchestration. The numerical libraries are `ipc_resident_solver` and
 `ipc_resident_components`; `ipc_resident_bridge` connects them to shared scene
 and IO support. `cooperative_compact_point_study.cu` is compiled into the solver
 despite its name; runtime options select its routes.
@@ -146,27 +146,6 @@ OMP_NUM_THREADS=1 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --format geo --outdir results/gpu_resident_smoke
 ```
 
-For cloth and particle scenes, add `--use_dat_solver true` to select planar
-DAT. It uses the previous positions as the initial guess, planar pairs within
-`1.5 * d_hat`, and an isotropic displacement cap on every vertex.
-`--dat_relaxation` defaults to `0.8`; `--dat_detection_interval` defaults to five
-color stages. DAT uses the corrected point–triangle boundary search from CPU
-OGC/DAT, including obtuse triangles and clamped endpoints. CCD predictor and
-backend flags are ignored in this mode. Rigid bodies and volumetric solids are
-rejected. The CUDA DAT implementation is in `resident_dat.cu`, `resident_dat_solver.cu`,
-and `resident_dat_math.cuh`; it calls no CPU numerical solver and also builds in the
-standalone numerical core. The `ipc_resident_dat` target links only the shared
-CUDA elasticity/BVH components and CUDA libraries. The simulator bridge only supplies scene/material
-records and handles output.
-
-The dedicated `3D_sim_gpu_dat` executable selects DAT automatically and avoids
-linking the ordinary GPU CCD/rigid solver. It uses the same scene/output bridge:
-
-```sh
-cmake --build gpu/build --target 3D_sim_gpu_dat -j 8
-./gpu/build/3D_sim_gpu_dat --example 1 --fixed_iters --substeps 4 --max_substep_iters 3 --num_frames 240 --outdir results/gpu_dat
-```
-
 Two optional CPU features also have resident GPU implementations. Both default
 to false. `--use_colored_ccd_guess_level_based true` selects a discarded colored
 CCD trial followed by component/BFS level and color groups. Choose one colored
@@ -191,7 +170,7 @@ settings. `--num_frames` specifies the final frame number.
 See [output and restart](../README.md#output-and-restart).
 
 The ordinary resident driver requires fixed iterations, conflict-graph coloring and
-exact fallback. DAT uses elastic-only coloring and its own displacement truncation. Use `--use_ticcd false`. Colors execute sequentially, with
+exact fallback. Use `--use_ticcd false`. Colors execute sequentially, with
 independent updates within each color running in parallel. Numerical fallback
 and CCD execute on the GPU; an unrecoverable device error stops the substep.
 
@@ -218,15 +197,7 @@ cmake -S gpu -B gpu/build-core -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_COMPILER=g++-11 -DCMAKE_CUDA_HOST_COMPILER=g++-11 \
   -DCMAKE_CUDA_ARCHITECTURES=89
 cmake --build gpu/build-core --target gpu_resident_core_validation -j 8
-ctest --test-dir gpu/build-core -R '^gpu_resident_(core_smoke|dat)$' --output-on-failure
-```
-
-To build and test only DAT and its shared CUDA components in this same
-CPU-independent configuration, use:
-
-```sh
-cmake --build gpu/build-core --target gpu_resident_dat_component_test -j 8
-ctest --test-dir gpu/build-core -R '^gpu_resident_dat_component$' --output-on-failure
+ctest --test-dir gpu/build-core -R '^gpu_resident_core_smoke$' --output-on-failure
 ```
 
 This builds `ipc_resident_solver`, `ipc_resident_components` and a public-API

@@ -57,9 +57,6 @@ struct IPCArgs3D : ArgParser {
     bool   use_translation_guess = false;
     bool   use_ogc = false;
     bool   use_ogc_solver = false;
-    bool   use_dat_solver = false;
-    double dat_relaxation = 0.8;
-    int    dat_detection_interval = 5;
     double ogc_box_pad = 0.005;
     bool   fixed_iters = false;
     bool   verbose = false;
@@ -209,18 +206,15 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("write_substeps", write_substeps, false, "Write an output file after every substep (useful for visual debugging)");
 
         add_bool  ("use_ccd",      use_ccd,      true,   "Run CCD step clamping in per_vertex_safe_step");
-        add_bool  ("use_ccd_guess",    use_ccd_guess,    true,  "Use ccd_initial_guess as the substep start point (ignored with OGC or DAT)");
-        add_bool  ("use_colored_ccd_guess", use_colored_ccd_guess, false, "Cloth/solid: original collision-colored linear CCD initial guess toward xhat; mutually exclusive with use_colored_ccd_guess_level_based; rigid bodies stay fixed; overrides CCD, Verlet, and translation guess flags, but is ignored with OGC or DAT");
-        add_bool  ("use_colored_ccd_guess_level_based", use_colored_ccd_guess_level_based, false, "Cloth/solid: level-based colored CCD toward xhat, with one discarded trial sweep to build levels; mutually exclusive with use_colored_ccd_guess; rigid bodies stay fixed; overrides CCD, Verlet, and translation guess flags, but is ignored with OGC or DAT");
+        add_bool  ("use_ccd_guess",    use_ccd_guess,    true,  "Use ccd_initial_guess as the substep start point (ignored with OGC)");
+        add_bool  ("use_colored_ccd_guess", use_colored_ccd_guess, false, "Cloth/solid: original collision-colored linear CCD initial guess toward xhat; mutually exclusive with use_colored_ccd_guess_level_based; rigid bodies stay fixed; overrides CCD, Verlet, and translation guess flags, but is ignored with OGC");
+        add_bool  ("use_colored_ccd_guess_level_based", use_colored_ccd_guess_level_based, false, "Cloth/solid: level-based colored CCD toward xhat, with one discarded trial sweep to build levels; mutually exclusive with use_colored_ccd_guess; rigid bodies stay fixed; overrides CCD, Verlet, and translation guess flags, but is ignored with OGC");
         add_int   ("colored_ccd_guess_iters", colored_ccd_guess_iters, 10, "Maximum actual updating sweeps for either colored CCD initial guess; excludes the level-based trial sweep (0 skips trial and updates)");
         add_double("colored_ccd_guess_fraction", colored_ccd_guess_fraction, 1.0, "Fixed target fraction of xhat minus current positions for either colored CCD initial guess, finite in [0, 1]; applied once before sweeps and the level trial; does not change the solver's xhat");
         add_bool  ("use_verlet_guess", use_verlet_guess, false, "Start GS from xhat + dt^2*gravity (Verlet predictor)");
         add_bool  ("use_translation_guess", use_translation_guess, false, "Start GS from x^n + C");
         add_bool  ("use_ogc", use_ogc, false, "Use trust-region narrow phase instead of CCD for step clamping");
         add_bool  ("use_ogc_solver", use_ogc_solver, false, "Use the serial OGC Gauss-Seidel solver (rebuilds BVH per iter; partial leaf refit per move)");
-        add_bool  ("use_dat_solver", use_dat_solver, false, "Cloth-only planar Divide and Truncate solver; requires fixed_iters and positive d_hat; overrides initial guesses and experimental solver flags");
-        add_double("dat_relaxation", dat_relaxation, 0.8, "DAT conservative ratio in (0, 1), separate from Newton damping; query radius = 1.5 * d_hat");
-        add_int   ("dat_detection_interval", dat_detection_interval, 5, "DAT collision detections every N color stages (not full sweeps); must be positive");
         add_double("ogc_box_pad", ogc_box_pad, 0.005, "Padding on OGC node boxes / tri-edge unions for the per-iter BVH rebuild (floored to d_hat at use)");
         add_bool  ("fixed_iters",      fixed_iters,      false, "Run exactly max_substep_iters sweeps per substep with no tolerance / convergence check");
         add_bool  ("verbose",          verbose,          false, "Print solver cache rebuilds and residuals after each GS iteration (residuals require fixed_iters=false)");
@@ -501,9 +495,6 @@ struct IPCArgs3D : ArgParser {
         p.use_verlet_guess = use_verlet_guess;
         p.use_ogc = use_ogc;
         p.use_ogc_solver = use_ogc_solver;
-        p.use_dat_solver = use_dat_solver;
-        p.dat_relaxation = dat_relaxation;
-        p.dat_detection_interval = dat_detection_interval;
         p.ogc_box_pad = ogc_box_pad;
         p.use_translation_guess = use_translation_guess;
         p.fixed_iters = fixed_iters;
@@ -520,7 +511,6 @@ struct IPCArgs3D : ArgParser {
         p.exact_computation_fallback_2 = exact_computation_fallback;
         p.ccd_exact_step_bound = ccd_exact_step_bound;
         p.validate_ccd_exact_step_bound_parameters();
-        p.validate_dat_solver_parameters();
         p.validate_colored_ccd_guess_parameters();
         p.validate_cloth_grid_parameters();
         return p;

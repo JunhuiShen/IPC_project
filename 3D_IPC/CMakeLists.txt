@@ -246,6 +246,7 @@ set(IPC_SIMULATION_SOURCES
     example.cpp
     grid_coloring.cpp
     initial_guess.cpp
+    jacobi_step.cpp
     io.cpp
     make_shape.cpp
     mesh.cpp
@@ -343,8 +344,6 @@ if(BUILD_TESTING)
         ccd_test
         contact_scheduling_test
         cloth_grid_solver_test
-        dat_contact_test
-        dat_solver_test
         corotated_energy_test
         friction_energy_test
         grid_coloring_test
@@ -353,6 +352,7 @@ if(BUILD_TESTING)
         exact_computation_fallback_test
         io_test
         ipc_math_test
+        jacobi_step_test
         make_shape_test
         mesh_test
         node_triangle_distance_test

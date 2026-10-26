@@ -1,8 +1,9 @@
 #include "ogc_contact.h"
 #include "friction_energy.h"
-#include "gpu/resident_dat_math.cuh"
+#include "solver.h"
 
 #include <gtest/gtest.h>
+#include <Eigen/Geometry>
 
 #include <algorithm>
 #include <array>
@@ -18,42 +19,6 @@ Points obtuse_triangle(const Vec3& point = Vec3(.5,-.01,.1)) {
 
 NodeTriangleDistanceResult corrected(const Points& x) {
     return ogc_detail::node_triangle_distance(x[0], x[1], x[2], x[3]);
-}
-
-void expect_gpu_contact_matches_cpu(const Points& x) {
-    namespace resident = ipc_gpu::resident;
-    resident::ContactInput input;
-    input.d_hat = 2.0;
-    input.k_barrier = 100.0;
-    input.dt = .01;
-    input.friction = .3;
-    input.eps_v = .001;
-    Points previous = x;
-    previous[0] -= Vec3(.01,.005,0);
-    for (int i = 0; i < 4; ++i) for (int k = 0; k < 3; ++k) {
-        input.positions[i][k] = x[i][k];
-        input.previous[i][k] = previous[i][k];
-    }
-    const auto gpu = resident::dat::evaluate(input);
-    ASSERT_EQ(gpu.status, resident::ContactStatus::Ok);
-    ASSERT_TRUE(gpu.active);
-    const auto dr = corrected(x);
-    const auto evaluation = make_node_triangle_contact_evaluation(x, input.d_hat, input.k_barrier, input.eps, &dr, false);
-    const auto friction = make_node_triangle_frozen_friction_contact(x, previous, evaluation, input.dt, input.eps_v);
-    const auto [fg, fH] = frozen_friction_relative_gradient_and_hessian(friction, input.friction, input.dt * input.dt);
-    EXPECT_NEAR(gpu.distance, dr.distance, 1e-12);
-    for (int i = 0; i < 4; ++i) {
-        EXPECT_NEAR(gpu.weights[i], friction.weights[i], 1e-12);
-        const auto [g, H] = node_triangle_barrier_self_gradient_and_hessian(x[0], x[1], x[2], x[3], i, evaluation);
-        for (int k = 0; k < 3; ++k) {
-            EXPECT_NEAR(gpu.barrier_gradient[i][k], g[k], 1e-8 * std::max(1.0, std::abs(g[k])));
-            EXPECT_NEAR(gpu.friction_relative_gradient[k], fg[k], 1e-10 * std::max(1.0, std::abs(fg[k])));
-            for (int l = 0; l < 3; ++l) {
-                EXPECT_NEAR(gpu.barrier_hessian[i][i][3*k+l], H(k,l), 1e-7 * std::max(1.0, std::abs(H(k,l))));
-                EXPECT_NEAR(gpu.friction_relative_hessian[3*k+l], fH(k,l), 1e-9 * std::max(1.0, std::abs(fH(k,l))));
-            }
-        }
-    }
 }
 
 } // namespace
@@ -82,7 +47,6 @@ TEST(OGCContact, ObtuseClosestEdgeIsIndependentOfVertexOrderAndOrientation) {
             EXPECT_LE((dr.closest_point - transform(Vec3(.5,0,0))).norm(), 1e-12);
             EXPECT_NEAR(dr.distance, std::sqrt(.0101), 1e-12);
             EXPECT_TRUE(dr.region == NodeTriangleRegion::Edge12 || dr.region == NodeTriangleRegion::Edge23 || dr.region == NodeTriangleRegion::Edge31);
-            expect_gpu_contact_matches_cpu(x);
         } while (std::next_permutation(order.begin(), order.end()));
     }
 }
@@ -108,7 +72,6 @@ TEST(OGCContact, ClampedEndpointsUseVertexDerivatives) {
             EXPECT_LE((H.col(k) - (gp-gm)/(2*step)).norm(), 1e-6);
         }
     }
-    expect_gpu_contact_matches_cpu(x);
 }
 
 TEST(OGCContact, FaceAndDegenerateMetadataArePreserved) {
@@ -124,17 +87,57 @@ TEST(OGCContact, FaceAndDegenerateMetadataArePreserved) {
         EXPECT_EQ(fixed.tilde_x, original.tilde_x);
         EXPECT_EQ(fixed.barycentric_tilde_x, original.barycentric_tilde_x);
     }
-    expect_gpu_contact_matches_cpu(cases[0]);
 }
 
-TEST(OGCContact, GPUPlanarGeometryUsesCorrectedClosestPoint) {
-    const auto x = obtuse_triangle();
-    double positions[4][3];
-    for (int i = 0; i < 4; ++i) for (int k = 0; k < 3; ++k) positions[i][k] = x[i][k];
-    const auto g = ipc_gpu::resident::dat::geometry(positions, true, .15);
-    ASSERT_TRUE(g.near);
-    ASSERT_TRUE(g.valid);
-    EXPECT_NEAR(g.distance, std::sqrt(.0101), 1e-14);
-    const Vec3 normal = Vec3(0,-.01,.1).normalized();
-    for (int k = 0; k < 3; ++k) EXPECT_NEAR(g.normal[k], normal[k], 1e-14);
+namespace {
+
+struct OgcSolverFixture {
+    RefMesh mesh;
+    SimParams params = SimParams::zeros();
+    std::vector<Vec3> initial{Vec3(.5,-.01,.1), Vec3::Zero(), Vec3(1,0,0), Vec3(-10,.1,0)};
+    std::vector<Vec3> target = initial;
+    std::vector<Vec3> velocity = std::vector<Vec3>(initial.size(), Vec3::Zero());
+
+    OgcSolverFixture() {
+        mesh.num_positions = initial.size();
+        mesh.mass.assign(initial.size(), 1.0);
+        mesh.node_to_rb.assign(initial.size(), -1);
+        mesh.tris = {1,2,3};
+        params.fixed_iters = true;
+        params.max_global_iters = 1;
+        params.damping = 1.0;
+        params.d_hat = 1.0;
+        params.k_barrier = 0.0;
+        params.node_box_min = params.node_box_max = 1.0;
+    }
+
+    std::vector<Vec3> solve() {
+        auto x = initial;
+        const auto result = global_gauss_seidel_solver_ogc(mesh, {}, {}, params, x, target, velocity, "", &initial);
+        EXPECT_TRUE(result.converged);
+        return x;
+    }
+};
+
+} // namespace
+
+TEST(OGCSolver, ObtuseTriangleUsesCorrectedDistanceForMotionBound) {
+    OgcSolverFixture scene;
+    const Vec3 proposal(0,.02,-.2);
+    scene.target[0] += proposal;
+    const auto x = scene.solve();
+    EXPECT_LE((x[0] - (scene.initial[0] + .2*proposal)).norm(), 1e-13);
+    EXPECT_NEAR((x[0]-scene.initial[0]).norm(), .4*std::sqrt(.0101), 1e-13);
+    for (int i = 1; i < 4; ++i) EXPECT_EQ(x[i], scene.initial[i]);
+}
+
+TEST(OGCSolver, CorrectedDistanceActivatesBarrierAndFrictionAssembly) {
+    for (double friction : {0.0,.3}) {
+        OgcSolverFixture scene;
+        scene.params.d_hat = .2;
+        scene.params.k_barrier = 100;
+        scene.params.friction_coefficient = friction;
+        const auto x = scene.solve();
+        EXPECT_GT(Vec3(0,-.01,.1).dot(x[0]-scene.initial[0]), 0.0);
+    }
 }

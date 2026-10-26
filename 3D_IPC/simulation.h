@@ -72,8 +72,6 @@ inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& st
 // every substep still rebuilds its current motion boxes and contact candidates.
 inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& ref_mesh, const SimParams& params,
     BroadPhase& broad_phase, int frame_index = 1, SubstepCallback on_substep = nullptr) {
-    if (params.use_dat_solver)
-        throw std::invalid_argument("advance_one_frame_rb: DAT supports only cloth/deformable surface meshes; rigid bodies are unsupported");
     SolverResult agg;
     const double dt = params.dt();
     broad_phase.invalidate_mesh_topology();
@@ -144,8 +142,6 @@ inline SolverResult advance_one_frame_general(
     int frame_index = 1, PinTargetUpdater pin_updater = nullptr,
     SubstepCallback on_substep = nullptr,
     const std::string& outdir = "") {
-    if (params.use_dat_solver)
-        throw std::invalid_argument("advance_one_frame_general: DAT supports only cloth/deformable surface meshes; solid and mixed scenes are unsupported");
     params.validate_colored_ccd_guess_parameters();
     if (ref_mesh.node_to_rb.size() != state.deformed_positions.size()
         || state.velocities.size() != state.deformed_positions.size()) {
@@ -236,15 +232,12 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
     std::vector<Pin>& pins, const SimParams& params,
     BroadPhase& broad_phase, int frame_index = 1,
     PinTargetUpdater pin_updater = nullptr, SubstepCallback on_substep = nullptr, const std::string& outdir = "") {
-    params.validate_dat_solver_parameters();
     params.validate_cloth_grid_parameters();
     params.validate_colored_ccd_guess_parameters();
     const bool has_noncloth_geometry = !ref_mesh.rb_nodes.empty() || !ref_mesh.tets.empty()
         || !ref_mesh.tet_nodes.empty()
         || std::any_of(ref_mesh.node_to_rb.begin(), ref_mesh.node_to_rb.end(),
             [](int owner) { return owner >= 0; });
-    if (params.use_dat_solver && has_noncloth_geometry)
-        throw std::invalid_argument("advance_one_frame: DAT supports only cloth/deformable surface meshes; rigid and solid geometry is unsupported");
     if ((params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based)
         && has_noncloth_geometry) {
         throw std::invalid_argument("advance_one_frame is cloth-only; use advance_one_frame_general for solid or mixed scenes");
@@ -273,7 +266,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
 
         build_xhat(xhat, state.deformed_positions, state.velocities, dt);
 
-        if (params.use_ogc || params.use_ogc_solver || params.use_dat_solver)
+        if (params.use_ogc || params.use_ogc_solver)
             xnew = state.deformed_positions;
         else if (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based) {
             // Only the predictor targets a fraction of the displacement to
@@ -303,9 +296,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
             xnew = state.deformed_positions;
 
         SolverResult sub_result;
-        if (params.use_dat_solver)
-            sub_result = global_gauss_seidel_solver_dat(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir, &state.deformed_positions);
-        else if (params.use_ogc_solver)
+        if (params.use_ogc_solver)
             sub_result = global_gauss_seidel_solver_ogc(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir, &state.deformed_positions);
         else if (params.use_cloth_grid)
             sub_result = global_gauss_seidel_solver_ambient_grid(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
