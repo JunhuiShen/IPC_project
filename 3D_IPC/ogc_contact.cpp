@@ -13,7 +13,7 @@ void ContactCache::evaluate(const BroadPhase& broad_phase, const std::vector<Vec
     #pragma omp parallel for schedule(static) if(parallel)
     for (std::size_t pair = 0; pair < cache.nt_pairs.size(); ++pair) {
         const auto points = pair_positions(cache.nt_pairs[pair], positions);
-        nt_distances[pair] = node_triangle_distance(points[0], points[1], points[2], points[3]);
+        nt_distances[pair] = ::node_triangle_distance(points[0], points[1], points[2], points[3]);
     }
     #pragma omp parallel for schedule(static) if(parallel)
     for (std::size_t pair = 0; pair < cache.ss_pairs.size(); ++pair) {

@@ -208,6 +208,20 @@ TEST(JacobiDATSolver, DATPreservesTheGapWhenBothSidesWouldCrossWithoutBarrier) {
     }
 }
 
+TEST(JacobiDATSolver, ObtuseTriangleBarrierUsesTheCorrectedSharedDistance) {
+    for (double d_hat : {.05, .2}) {
+        Scene s({Vec3(.5, -.01, .1), Vec3::Zero(), Vec3(1, 0, 0), Vec3(-10, .1, 0)}, {1, 2, 3});
+        const auto initial = s.x;
+        s.params.d_hat = d_hat;
+        s.params.k_barrier = .1;
+        BroadPhase phase;
+        solve(s, phase);
+        // sqrt(.0101) activates the barrier at .2; the old distance .51 did not.
+        if (d_hat == .2) EXPECT_GT(Vec3(0, -.01, .1).dot(s.x[0] - initial[0]), 0.0);
+        else expect_positions(s.x, initial, 0.0);
+    }
+}
+
 TEST(JacobiDATSolver, EquilibriumReturnsWithoutASweepWithZeroTolerances) {
     Scene s({Vec3(1, 2, 3)});
     s.params.fixed_iters = false;

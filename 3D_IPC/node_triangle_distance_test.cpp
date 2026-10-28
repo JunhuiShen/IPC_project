@@ -156,3 +156,92 @@ TEST(NodeTriangleDistance, DegenerateTriangle){
     EXPECT_TRUE(approx_vec(r.closest_point, Vec3(0.4, 0.0, 0.0))) << "Degenerate case: wrong closest_point";
     EXPECT_TRUE(approx(r.distance, 1.0)) << "Degenerate case: wrong distance";
 }
+
+#include <random>
+#include <algorithm>
+#include <Eigen/Geometry>
+
+TEST(NodeTriangleDistance, ObtuseTriangleUsesActualNearestEdge) {
+    const auto r = node_triangle_distance(Vec3(.5,-.01,.1), Vec3::Zero(),
+        Vec3(1,0,0), Vec3(-10,.1,0));
+    EXPECT_EQ(r.region, NodeTriangleRegion::Edge12);
+    EXPECT_LE((r.closest_point-Vec3(.5,0,0)).norm(), 1e-14);
+    EXPECT_NEAR(r.distance, std::sqrt(.0101), 1e-14);
+}
+
+TEST(NodeTriangleDistance, ClampedBoundaryPointUsesVertexFeature) {
+    const auto r = node_triangle_distance(Vec3(1.4,.1,.6), Vec3::Zero(),
+        Vec3(1,0,0), Vec3(0,1,0));
+    EXPECT_EQ(r.region, NodeTriangleRegion::Vertex2);
+    EXPECT_LE((r.closest_point-Vec3(1,0,0)).norm(), 1e-14);
+}
+
+TEST(NodeTriangleDistance, SmallTriangleOutsideIsNotAnInfinitePlane) {
+    const auto r = node_triangle_distance(Vec3(2e-4,2e-5,3e-5), Vec3::Zero(),
+        Vec3(1e-4,0,0), Vec3(0,1e-4,0));
+    EXPECT_EQ(r.region, NodeTriangleRegion::Vertex2);
+    EXPECT_LE((r.closest_point-Vec3(1e-4,0,0)).norm(), 1e-16);
+    EXPECT_NEAR(r.distance, std::sqrt(1e-8+4e-10+9e-10), 1e-16);
+}
+
+TEST(NodeTriangleDistance, SmallTriangleInteriorHasNonzeroBarycentrics) {
+    const auto r = node_triangle_distance(Vec3(2e-5,3e-5,4e-5), Vec3::Zero(),
+        Vec3(1e-4,0,0), Vec3(0,1e-4,0));
+    EXPECT_EQ(r.region, NodeTriangleRegion::FaceInterior);
+    EXPECT_NEAR(r.barycentric_tilde_x[0], .5, 1e-14);
+    EXPECT_NEAR(r.barycentric_tilde_x[1], .2, 1e-14);
+    EXPECT_NEAR(r.barycentric_tilde_x[2], .3, 1e-14);
+    EXPECT_NEAR(r.distance, 4e-5, 1e-16);
+}
+
+TEST(NodeTriangleDistance, ObtuseFeatureSurvivesPermutationsRotationAndScale) {
+    const Mat33 rotation = Eigen::AngleAxisd(.73, Vec3(1,2,3).normalized()).toRotationMatrix();
+    for (double scale : {1.0, .001, .0001}) {
+        const auto tr = [&](const Vec3& x) -> Vec3 { return scale*(rotation*x+Vec3(2,-3,4)); };
+        const std::array<Vec3,3> tri{{tr(Vec3::Zero()),tr(Vec3(1,0,0)),tr(Vec3(-10,.1,0))}};
+        std::array<int,3> order{{0,1,2}};
+        do {
+            const auto r=node_triangle_distance(tr(Vec3(.5,-.01,.1)),tri[order[0]],tri[order[1]],tri[order[2]]);
+            EXPECT_LE((r.closest_point-tr(Vec3(.5,0,0))).norm(), 2e-12*scale);
+            EXPECT_NEAR(r.distance, scale*std::sqrt(.0101), 2e-12*scale);
+        } while(std::next_permutation(order.begin(),order.end()));
+    }
+}
+
+namespace {
+// Independent dot-product Voronoi reference, evaluated in long double.
+using LVec = Eigen::Matrix<long double,3,1>;
+LVec voronoi_reference(const LVec& p,const LVec& a,const LVec& b,const LVec& c) {
+    const LVec ab=b-a,ac=c-a,ap=p-a;
+    const long double d1=ab.dot(ap),d2=ac.dot(ap);
+    if(d1<=0&&d2<=0)return a;
+    const LVec bp=p-b;
+    const long double d3=ab.dot(bp),d4=ac.dot(bp);
+    if(d3>=0&&d4<=d3)return b;
+    const long double vc=d1*d4-d3*d2;
+    if(vc<=0&&d1>=0&&d3<=0)return a+(d1/(d1-d3))*ab;
+    const LVec cp=p-c;
+    const long double d5=ab.dot(cp),d6=ac.dot(cp);
+    if(d6>=0&&d5<=d6)return c;
+    const long double vb=d5*d2-d1*d6;
+    if(vb<=0&&d2>=0&&d6<=0)return a+(d2/(d2-d6))*ac;
+    const long double va=d3*d6-d5*d4;
+    if(va<=0&&(d4-d3)>=0&&(d5-d6)>=0)return b+((d4-d3)/((d4-d3)+(d5-d6)))*(c-b);
+    const long double inv=1/(va+vb+vc);
+    return a+(vb*inv)*ab+(vc*inv)*ac;
+}
+}
+
+TEST(NodeTriangleDistance, RandomTrianglesAgreeWithIndependentVoronoiReference) {
+    std::mt19937_64 rng(20261027);
+    std::uniform_real_distribution<double> uniform(-2,2);
+    for(int i=0;i<2000;++i){
+        const auto sample=[&](){return Vec3(uniform(rng),uniform(rng),uniform(rng));};
+        const Vec3 p=sample(),a=sample(),b=sample(),c=sample();
+        if((b-a).cross(c-a).norm()<.001){--i;continue;}
+        const LVec q=voronoi_reference(p.cast<long double>(),a.cast<long double>(),b.cast<long double>(),c.cast<long double>());
+        const auto actual=node_triangle_distance(p,a,b,c);
+        EXPECT_LE((actual.closest_point-q.cast<double>()).norm(),3e-12)<<i;
+        EXPECT_NEAR(actual.distance,(p.cast<long double>()-q).norm(),3e-12)<<i;
+    }
+}

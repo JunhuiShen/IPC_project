@@ -128,6 +128,11 @@ struct IPCArgs3D : ArgParser {
     double      osc_amplitude   = 0.02;  // driven-edge sinusoid amplitude (m)
     double      osc_frequency   = 0.50;  // driven-edge frequency (Hz)
 
+    // Example 13: wall clearances and optional coherent chain launch.
+    double      wrecking_wall_gap = 0.05; // unit-cube surface separation (m)
+    double      wrecking_wall_ground_clearance = 0.05; // lowest cube clearance (m)
+    double      wrecking_ball_initial_speed = 0.0; // initial ball COM tangential speed (m/s)
+
     // examples 14/15: vertically separated cloth sheets falling onto a long cylinder
     int         drop_stack_count = 50;
     int         drop_cloth_nx    = 69;   // 70 vertices along x
@@ -284,6 +289,10 @@ struct IPCArgs3D : ArgParser {
         add_double("osc_amplitude", osc_amplitude, 0.02,   "Signed vertical sinusoid amplitude (m) of the driven edges in example 12");
         add_double("osc_frequency", osc_frequency, 0.50,   "Sinusoid frequency (Hz) of the driven edges in example 12");
 
+        add_double("wrecking_wall_gap", wrecking_wall_gap, 0.05, "Example 13 surface gap between unit wall cubes (m; positive)");
+        add_double("wrecking_wall_ground_clearance", wrecking_wall_ground_clearance, 0.05, "Example 13 initial clearance below the wall (m; nonnegative)");
+        add_double("wrecking_ball_initial_speed", wrecking_ball_initial_speed, 0.0, "Example 13 initial ball COM speed toward the wall (m/s); coherently launches the free chain about its fixed anchor");
+
         add_int   ("drop_stack_count", drop_stack_count, 50,   "Number of falling cloth sheets in examples 14 and 15");
         add_int   ("drop_cloth_nx",    drop_cloth_nx,    69,   "Grid subdivisions along x per sheet in examples 14 and 15 (vertices = subdivisions + 1)");
         add_int   ("drop_cloth_ny",    drop_cloth_ny,    69,   "Grid subdivisions along z per sheet in examples 14 and 15 (vertices = subdivisions + 1)");
@@ -336,6 +345,36 @@ struct IPCArgs3D : ArgParser {
             if (!supplied("--osc_amplitude")) osc_amplitude = 0.01;
             if (!supplied("--osc_frequency")) osc_frequency = 6.0;
             if (!supplied("--osc_length")) osc_length = 1.0;
+        }
+        if (example == 13) {
+            const auto preset = [&](const char* flag, auto& field, auto value) {
+                if (!supplied(flag)) field = value;
+            };
+            // Validated frictionless 300-frame wall impact.
+            // Explicit command-line values always take precedence.
+            preset("--fps", fps, 30.0);
+            preset("--num_frames", num_frames, 300);
+            preset("--substeps", substeps, 18);
+            preset("--max_substep_iters", max_substep_iters, 170);
+            preset("--fixed_iters", fixed_iters, true);
+            preset("--use_parallel", use_parallel, true);
+            preset("--use_basic_experimental", use_basic_experimental, true);
+            preset("--use_simd", use_simd, true);
+            preset("--d_hat", d_hat, 0.001);
+            preset("--k_barrier", k_barrier, 1.0e10);
+            preset("--k_sdf", k_sdf, 1.0e8);
+            preset("--eps_sdf", eps_sdf, 0.002);
+            preset("--friction_coefficient", friction_coefficient, 0.0);
+            preset("--gx", gx, 0.0);
+            preset("--gy", gy, -9.81);
+            preset("--gz", gz, 0.0);
+            preset("--exact_computation_fallback", exact_computation_fallback, false);
+            preset("--ccd_exact_step_bound", ccd_exact_step_bound, false);
+            preset("--node_box_min", node_box_min, 0.001);
+            preset("--node_box_max", node_box_max, 0.0075);
+            preset("--theta_box_min", theta_box_min, 0.002);
+            preset("--theta_box_max", theta_box_max, 0.03);
+            preset("--node_box_update_count", node_box_update_count, 20);
         }
         if (example == 15) {
             const auto preset = [&](const char* flag, auto& field, auto value) {

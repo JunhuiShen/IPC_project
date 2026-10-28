@@ -4274,7 +4274,7 @@ TEST(ClothCylinderDropExample, RebuildUsesIndependentClothAndCylinderLocations) 
 }
 
 TEST(WreckingBallExample,
-     BuildsTranslatedFigureEightCompositionAndTightlyPackedWall) {
+     BuildsTranslatedFigureEightCompositionAndReferenceWall) {
     IPCArgs3D args;
     args.d_hat = 0.01; // deliberately large, to exercise the mesh-edge clamp
     args.eps_sdf = 0.002;
@@ -4302,9 +4302,9 @@ TEST(WreckingBallExample,
     constexpr int cube_triangles = 12;
     constexpr double cube_edge = 1.0;
     constexpr double cube_density = 1000.0;
-    constexpr double cube_gap = 0.002;
+    constexpr double cube_gap = 0.05;
     constexpr double cube_spacing = cube_edge + cube_gap;
-    constexpr double cube_ground_clearance = 0.002;
+    constexpr double cube_ground_clearance = 0.05;
     constexpr int total_vertices =
         ordinary_links * link_vertices + ball_vertices
         + cubes * cube_vertices;
@@ -4501,9 +4501,9 @@ TEST(WreckingBallExample,
         visual_upper = visual_upper.cwiseMax(vertex);
     }
     EXPECT_TRUE(visual_lower.isApprox(
-        Vec3(fixed_link_x - 10.0, ground_y, -10.0), 1.0e-14));
+        Vec3(fixed_link_x - 150.0, ground_y, -150.0), 1.0e-14));
     EXPECT_TRUE(visual_upper.isApprox(
-        Vec3(fixed_link_x + 10.0, ground_y, 10.0), 1.0e-14));
+        Vec3(fixed_link_x + 150.0, ground_y, 150.0), 1.0e-14));
 
     double minimum_surface_edge = std::numeric_limits<double>::infinity();
     for (int triangle = 0; triangle < total_triangles; ++triangle) {
@@ -4524,7 +4524,7 @@ TEST(WreckingBallExample,
     EXPECT_LT(params.d_hat, args.d_hat);
 
     // Every body starts outside the SDF's active penalty band. The first cube
-    // layer has the same tight 2 mm clearance as adjacent cubes.
+    // layer has the same 5 cm clearance as adjacent cubes.
     double minimum_ground_distance = std::numeric_limits<double>::infinity();
     double minimum_world_y = std::numeric_limits<double>::infinity();
     for (const Vec3& position : state.deformed_positions) {
@@ -4535,8 +4535,138 @@ TEST(WreckingBallExample,
     EXPECT_NEAR(
         minimum_ground_distance, cube_ground_clearance, 1.0e-14);
     EXPECT_GT(minimum_world_y, 0.0);
-    EXPECT_NEAR(
-        minimum_ground_distance, params.eps_sdf, 1.0e-14);
+    EXPECT_GT(minimum_ground_distance, params.eps_sdf);
+}
+
+TEST(WreckingBallExample, SceneControlsPreserveMeshesAndLaunchChainCoherently) {
+    IPCArgs3D args;
+    EXPECT_DOUBLE_EQ(args.wrecking_wall_gap, 0.05);
+    EXPECT_DOUBLE_EQ(args.wrecking_wall_ground_clearance, 0.05);
+    EXPECT_DOUBLE_EQ(args.wrecking_ball_initial_speed, 0.0);
+    std::vector<std::string> values = {"3D_sim", "--example", "13",
+        "--wrecking_wall_gap", "0.03",
+        "--wrecking_wall_ground_clearance", "0.04",
+        "--wrecking_ball_initial_speed", "6"};
+    std::vector<char*> argv;
+    for (auto& value : values) argv.push_back(value.data());
+    ASSERT_TRUE(args.parse(static_cast<int>(argv.size()), argv.data()));
+    EXPECT_DOUBLE_EQ(args.wrecking_wall_gap, 0.03);
+    EXPECT_DOUBLE_EQ(args.wrecking_wall_ground_clearance, 0.04);
+    EXPECT_DOUBLE_EQ(args.wrecking_ball_initial_speed, 6.0);
+    args.d_hat = 0.1;
+
+    const auto build = [](const IPCArgs3D& input, RefMesh& mesh,
+                          DeformedState& state, SimParams& params) {
+        std::vector<Vec2> X;
+        std::vector<Pin> pins;
+        std::vector<Vec3> static_x;
+        std::vector<int> static_tris;
+        params = input.to_sim_params();
+        build_wrecking_ball_example(input, mesh, state, X, pins, params,
+            static_x, static_tris);
+    };
+    RefMesh mesh, resting_mesh;
+    DeformedState state, resting_state;
+    SimParams params, resting_params;
+    IPCArgs3D resting_args;
+    build(resting_args, resting_mesh, resting_state, resting_params);
+    build(args, mesh, state, params);
+    ASSERT_EQ(state.deformed_positions.size(), 7652u);
+    ASSERT_EQ(mesh.rb_nodes.size(), 574u);
+    EXPECT_EQ(mesh.tris, resting_mesh.tris);
+    EXPECT_EQ(mesh.rb_update_modes[0], RigidBodyUpdateMode::None);
+    EXPECT_TRUE(params.gravity.isApprox(Vec3(0.0, -9.81, 0.0), 0.0));
+
+    const Vec3 pivot = state.x_coms[0];
+    EXPECT_NEAR(state.v_coms[13].norm(), 6.0, 1.0e-13);
+    EXPECT_GT(state.v_coms[13].x(), 0.0);
+    EXPECT_GT(state.omega[13].z(), 0.0);
+    for (int body = 0; body < 574; ++body) {
+        SCOPED_TRACE(body);
+        EXPECT_DOUBLE_EQ(mesh.total_mass[body], resting_mesh.total_mass[body]);
+        EXPECT_TRUE(mesh.I_hat[body].isApprox(resting_mesh.I_hat[body], 1.0e-10));
+        if (body > 0 && body < 14) {
+            EXPECT_TRUE(state.omega[body].isApprox(state.omega[13], 0.0));
+            EXPECT_TRUE(state.v_coms[body].isApprox(
+                state.omega[13].cross(state.x_coms[body] - pivot), 1.0e-14));
+            EXPECT_NEAR(state.v_coms[body].dot(state.x_coms[body] - pivot),
+                0.0, 1.0e-12);
+        } else {
+            EXPECT_TRUE(state.v_coms[body].isZero(0.0));
+            EXPECT_TRUE(state.omega[body].isZero(0.0));
+        }
+        for (const int node : mesh.rb_nodes[body]) {
+            const Vec3 expected_velocity = state.v_coms[body]
+                + state.omega[body].cross(
+                    state.deformed_positions[node] - state.x_coms[body]);
+            EXPECT_TRUE(state.velocities[node].isApprox(expected_velocity, 1.0e-14));
+            if (body < 14) {
+                EXPECT_TRUE((state.deformed_positions[node].array()
+                    == resting_state.deformed_positions[node].array()).all());
+            }
+        }
+        if (body >= 14) {
+            const int cube = body - 14;
+            const int width = cube / 70;
+            const int height = (cube / 10) % 7;
+            const int depth = cube % 10;
+            const Vec3 expected_center = Vec3(
+                resting_state.x_coms[14].x(), 0.54, -4.5)
+                + 1.03 * Vec3(width, height, depth);
+            EXPECT_TRUE(state.x_coms[body].isApprox(expected_center, 1.0e-13));
+            Vec3 lower = state.deformed_positions[mesh.rb_nodes[body][0]];
+            Vec3 upper = lower;
+            for (const int node : mesh.rb_nodes[body]) {
+                lower = lower.cwiseMin(state.deformed_positions[node]);
+                upper = upper.cwiseMax(state.deformed_positions[node]);
+            }
+            EXPECT_TRUE((upper - lower).isApprox(Vec3::Ones(), 1.0e-14));
+        }
+    }
+    double minimum_edge = std::numeric_limits<double>::infinity();
+    for (std::size_t triangle = 0; triangle < mesh.tris.size() / 3; ++triangle) {
+        for (int local = 0; local < 3; ++local) {
+            minimum_edge = std::min(minimum_edge,
+                (state.deformed_positions[mesh.tris[3 * triangle + local]]
+                 - state.deformed_positions[mesh.tris[
+                     3 * triangle + (local + 1) % 3]]).norm());
+        }
+    }
+    EXPECT_NEAR(params.d_hat, std::min(0.45 * minimum_edge, 0.015), 1.0e-15);
+    EXPECT_NEAR(state.deformed_positions[mesh.rb_nodes[14][0]].y(), 0.04, 1.0e-14);
+}
+
+TEST(WreckingBallExample, RejectsInvalidSceneControls) {
+    IPCArgs3D args;
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    SimParams params = args.to_sim_params();
+    std::vector<Vec3> static_x;
+    std::vector<int> static_tris;
+    const std::array<double IPCArgs3D::*, 3> controls = {
+        &IPCArgs3D::wrecking_wall_gap,
+        &IPCArgs3D::wrecking_wall_ground_clearance,
+        &IPCArgs3D::wrecking_ball_initial_speed};
+    for (const auto control : controls) {
+        const double saved = args.*control;
+        for (const double invalid : {-1.0,
+                 std::numeric_limits<double>::infinity(),
+                 std::numeric_limits<double>::quiet_NaN()}) {
+            args.*control = invalid;
+            EXPECT_THROW(build_wrecking_ball_example(args, mesh, state, X,
+                pins, params, static_x, static_tris), std::invalid_argument);
+        }
+        args.*control = saved;
+    }
+    args.wrecking_wall_gap = 0.0;
+    EXPECT_THROW(build_wrecking_ball_example(args, mesh, state, X,
+        pins, params, static_x, static_tris), std::invalid_argument);
+    args.wrecking_wall_gap = 0.002;
+    args.wrecking_wall_ground_clearance = 0.0;
+    EXPECT_NO_THROW(build_wrecking_ball_example(args, mesh, state, X,
+        pins, params, static_x, static_tris));
 }
 
 TEST(BikeChainExample, OriginalFrameZeroKeepsAllSeparatePartsAndSprocketOrigins) {

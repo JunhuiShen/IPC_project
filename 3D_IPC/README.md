@@ -13,7 +13,7 @@ further processing; it does not open a viewer.
 - [Built-in scenes](#built-in-scenes)
 - [Common settings](#common-settings)
 - [Output and restart](#output-and-restart)
-- [Reference scene commands](#reference-scene-commands)
+- [Example scene commands](#example-scene-commands)
 - [Build and test](#build-and-test)
 - [Troubleshooting](#troubleshooting)
 - [Source guide](#source-guide)
@@ -25,7 +25,7 @@ further processing; it does not open a viewer.
 
 - A C++17 compiler and CMake 3.24+.
 - OpenMP. On macOS with AppleClang, CMake looks for Homebrew `libomp`.
-- Boost **1.83.0** with its CMake package configuration.
+- Boost **1.70 or newer** with its CMake package configuration.
 - Git and network access for the first configuration. CMake fetches Eigen
   3.4.0 and Tight-Inclusion CCD 1.0.6, plus their configured dependencies.
 - GoogleTest when building tests. It is optional for the simulator-only build
@@ -33,7 +33,7 @@ further processing; it does not open a viewer.
 
 ### Build and run a small scene
 
-The commands in this README use 64 OpenMP threads. From the repository root,
+Most commands in this README use 64 OpenMP threads. From the repository root,
 configure the build directory before building:
 
 ```sh
@@ -52,7 +52,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 ./build/3D_sim \
   --example 1 --twist_nx 9 --twist_ny 9 \
   --fps 30 --num_frames 30 --substeps 3 \
-  --max_substep_iters 20 --fixed_iters \
+  --max_substep_iters 3 --fixed_iters --node_box_update_count 3 \
   --use_basic_experimental true --use_simd true \
   --format geo --outdir results/quickstart
 ```
@@ -124,16 +124,16 @@ There is no solid-only scene among the categorized examples.
 | 1 | Cloth only | Square cloth clamped on two edges and twisted; the default scene. |
 | 2 | Cloth only | Four cloth strips wrapped around two cylinders that twist and untwist. |
 | 3 | Cloth only | Cloth wrapped around one cylinder that twists and untwists. |
-| 4 | — | Avatar collider and dress loaded from an external data directory. |
-| 5 | — | Freely rotating rigid tennis racket without gravity. |
-| 6 | — | Freely rotating space tool demonstrating the Dzhanibekov effect. |
-| 7 | — | Ten rigid hexagonal prisms stacked above a ground plane. |
+| 4 | Cloth only | Dress loaded from an external data directory above an SDF ground plane; avatar loading is currently disabled. |
+| 5 | Rigid body only | Freely rotating rigid tennis racket without gravity. |
+| 6 | Rigid body only | Freely rotating space tool demonstrating the Dzhanibekov effect. |
+| 7 | Rigid body only | Ten rigid hexagonal prisms stacked above a ground plane. |
 | 8 | Mixed | Two Bunny/Spot solid, rigid cube, and rigid gear cycles stacked above pinned cloth. |
 | 9 | Rigid body only | A dynamic threaded bolt falling through a nut with fixed position and orientation. |
 | 10 | Mixed | Four horizontal layers of side-lying Bunny/Spot solids, rigid cubes, and rigid gears dropping onto pinned cloth. |
 | 11 | Cloth only | A pinned cloth roll unrolling down an SDF ramp onto the ground. |
 | 12 | Cloth only | Three cloth layers with one fixed edge and one oscillating edge. |
-| 13 | Rigid body only | A linked wrecking ball swinging into a wall of 560 rigid cubes. |
+| 13 | Rigid body only | A frictionless linked wrecking ball smashing a wall of 560 rigid cubes. |
 | 14 | Cloth only | Fifty free cloth sheets falling over an off-center fixed cylinder toward the ground. |
 | 15 | Cloth only | Two hundred 141 × 141 free cloth sheets over an off-center cylinder; 3,976,200 vertices. |
 | 16 | Rigid body only | Gears, cubes, balls and polygonal prisms drop onto an interlocking net built from the wrecking-ball chain-link mesh, with fixed boundary links. |
@@ -155,7 +155,8 @@ relative to **`3D_IPC/`**, so keep that working directory when running them.
 | 18 | `example_obj/bike_chain/initial_bodies.txt` and the original `link.obj`, `barring.obj`, `pin.obj`, `sprocket-20teeth.obj` and `sprocket-8teeth.obj` in the same folder. `--datadir` may point to `example_obj` or its `bike_chain` folder. |
 
 Example 4 needs a directory supplied with `--datadir`, containing
-`body_0000.obj` and `dress_0000.obj`. Other scenes are generated procedurally.
+`dress_0000.obj`; the `body_0000.obj` loader is currently disabled. Other scenes
+are generated procedurally.
 Resolution flags are scene-specific: `twist_nx/ny` affect Example 1,
 `osc_nx/nz` affect Example 12, and `drop_stack_count` plus `drop_cloth_nx/ny`
 affect Examples 14 and 15. Example 14's default 50 sheets contain 245,000 cloth
@@ -178,6 +179,8 @@ and +y as the up direction.
 | `--num_frames N --fps F` | Simulated duration is `N/F` seconds; `fps` is output frequency, not measured solver speed. |
 | `--substeps S` | Substep duration is `1/(fps × substeps)`. More substeps increase work per frame. |
 | `--max_substep_iters K --fixed_iters` | Exactly K solver sweeps per substep. Without `fixed_iters`, residual tolerances allow early stopping. |
+| `--node_box_update_count N` | GS iterations between motion-box, collision-candidate, and color rebuilds. Setting N equal to `max_substep_iters` rebuilds once at the start of each substep. |
+| `--node_box_min --node_box_max` | Lower and upper bounds on motion-box half-extents. Vertex updates stay inside the current boxes until the next rebuild. |
 | `--E --nu --density --thickness --kB` | Cloth material and bending properties; `kB=0` disables bending. |
 | `--solid_E --solid_nu --solid_density` | Deformable-solid material properties, separate from cloth settings. |
 | `--rigid_density` | Density for density-based rigid scenes; Examples 5–6 use calibrated masses. |
@@ -230,7 +233,10 @@ Both flags default to `false`; enable only one (enabling both is an error).
 for either method (default `10`). The level-based trial is additional and does
 not count toward `N`; `N=0` skips both the trial and updates. Both methods stop
 early if all nodes reach their targets or a complete sweep makes no progress.
-The level-based mode is currently CPU-only; the resident GPU solver rejects it.
+`--colored_ccd_guess_fraction` scales the fixed predictor target displacement
+`xhat - x^n` (default `1.0`, finite in `[0, 1]`); it leaves the solver's `xhat`
+unchanged.
+Both colored-guess modes are supported by the resident GPU solver.
 Either colored guess overrides the CCD, Verlet, and translation guess flags
 and is ignored in OGC or Jacobi-DAT mode. Alternative OGC solving
 (`--use_ogc_solver`) requires `--fixed_iters`; mixed deformable/rigid scenes
@@ -247,7 +253,7 @@ presets in [example.cpp](example.cpp).
 | `frame_NNNN.*` | Simulated mesh at a completed frame; frame 0 is the initial state. |
 | `state_NNNN.bin` | Particle and rigid-body state for restarting. |
 | `static_colliders.*` | Prescribed obstacle geometry, when present. Load it alongside the simulated meshes. |
-| `collider_NNNN.*` | Per-frame prescribed collider geometry for Examples 2–4. |
+| `collider_NNNN.*` | Per-frame prescribed collider geometry for Examples 2–3. |
 
 Houdini can use GEO output. OBJ and PLY provide mesh exports for other viewers.
 `--write_substeps true` exports each substep and additional diagnostics; leave
@@ -260,7 +266,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 ./build/3D_sim \
   --example 1 --twist_nx 9 --twist_ny 9 \
   --fps 30 --num_frames 60 --substeps 3 \
-  --max_substep_iters 20 --fixed_iters \
+  --max_substep_iters 3 --fixed_iters --node_box_update_count 3 \
   --use_basic_experimental true --use_simd true \
   --format geo --outdir results/quickstart --restart_frame 30
 ```
@@ -283,7 +289,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
   --d_hat 0.005 --k_barrier 100 \
   --node_box_min 0.001 --node_box_max 0.01 \
-  --fixed_iters --substeps 3 --max_substep_iters 3 --node_box_update_count 10 \
+  --fixed_iters --substeps 3 --max_substep_iters 3 --node_box_update_count 3 \
   --use_basic_experimental true --use_simd true --use_parallel true \
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
   --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 0.97 \
@@ -295,10 +301,10 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --E 115000 --nu 0.25 --kB 0.009 --kpin 5e6 \
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e5 --eps_sdf 0.002 \
   --node_box_min 0.00025 --node_box_max 0.01 --tcyl_max_turn 2.0 \
-  --fixed_iters --substeps 4 --max_substep_iters 2 --node_box_update_count 10 \
+  --fixed_iters --substeps 4 --max_substep_iters 2 --node_box_update_count 2 \
   --use_basic_experimental true --use_simd true --use_parallel true \
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
-  --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 0.99 \
+  --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 0.98 \
   --outdir example2_output --format geo
 
 # Example 3: one yawing cylinder, 4.0 turns at 0.30 turns/s
@@ -308,13 +314,13 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 --eps_sdf 0.002 \
   --node_box_min 0.00025 --node_box_max 0.01 \
   --tu_max_turn 4.0 --tu_twist_rate 0.30 \
-  --fixed_iters --substeps 6 --max_substep_iters 3 --node_box_update_count 10 \
+  --fixed_iters --substeps 6 --max_substep_iters 3 --node_box_update_count 3 \
   --use_basic_experimental true --use_simd true --use_parallel true \
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
   --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 0.99 \
   --outdir example3_output --format geo
 
-# Example 4: avatar collider and dress loaded from a data directory
+# Example 4: dress loaded from a data directory above an SDF ground plane
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 4 --datadir /path/to/avatar_data \
   --use_basic_experimental true --use_simd true --format geo
@@ -340,7 +346,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 
 ```
 
-Examples 8–14 use the following scene commands:
+Examples 8–18 use the following scene commands:
 
 ```bash
 # Example 8: Bunny/Spot solids with rigid cubes and gears
@@ -348,7 +354,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
  ./build/3D_sim --example 8 --exact_computation_fallback false --datadir example_obj \
  --num_frames 200 --fps 30 --substeps 10 --max_substep_iters 150 \
  --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 \
- --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 \
+ --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.0013286863816456527 --k_barrier 1000 \
  --outdir multi_physics_output --format geo \
   --use_basic_experimental true --use_simd true \
   --use_colored_ccd_guess true --colored_ccd_guess_iters 10
@@ -356,21 +362,32 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 # Example 9: dynamic threaded bolt falling through a fixed nut
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 9 --exact_computation_fallback false --num_frames 150 \
-  --substeps 10 --max_substep_iters 2 --fixed_iters \
+  --substeps 10 --max_substep_iters 2 --fixed_iters --d_hat 0.00058 \
   --node_box_min 0.00025 --node_box_max 0.01 \
-  --theta_box_min 0.005 --theta_box_max 0.1 --node_box_update_count 10 \
+  --theta_box_min 0.005 --theta_box_max 0.1 --node_box_update_count 2 \
   --use_parallel true --use_basic_experimental true --use_simd false \
   --outdir bolt_into_fixed_nut_output --format geo
 
 # Example 10: four horizontal layers of differently ordered Bunny/Spot/cube/gear groups; Bunny and Spot lie on their sides
-# With friction coefficient 0.1, use 15 substeps and 40 max_substep_iters.
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 10 --num_frames 200 --fps 30 --substeps 10 --max_substep_iters 25 --fixed_iters \
-  --exact_computation_fallback true --ccd_exact_step_bound true \
+./build/3D_sim --example 10 --num_frames 20 --fps 30 --substeps 25 --max_substep_iters 23 --fixed_iters \
+  --exact_computation_fallback false --ccd_exact_step_bound false \
   --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 \
-  --d_hat 0.019 --k_barrier 1000 --friction_coefficient 0 --use_ccd true \
-  --node_box_update_count 10 --use_parallel true --use_basic_experimental true --use_simd true \
-  --write_substeps false --format geo --outdir outputs/example10_general_v2 \
+  --d_hat 0.00208 --k_barrier 1000 --friction_coefficient 0 --use_ccd true \
+  --node_box_min 0.00025 --node_box_max 0.01 --node_box_update_count 23 \
+  --use_parallel true --use_basic_experimental true --use_simd true \
+  --write_substeps false --outdir example10_output \
+  --use_ccd_guess false --use_colored_ccd_guess true --use_colored_ccd_guess_level_based false \
+  --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 1.0 \
+  --format geo && \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 10 --num_frames 200 --restart_frame 20 --fps 30 --substeps 10 --max_substep_iters 25 --fixed_iters \
+  --exact_computation_fallback false --ccd_exact_step_bound false \
+  --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 \
+  --d_hat 0.00208 --k_barrier 1000 --friction_coefficient 0 --use_ccd true \
+  --node_box_min 0.001 --node_box_max 0.01 \
+  --node_box_update_count 25 --use_parallel true --use_basic_experimental true --use_simd true \
+  --write_substeps false --format geo --outdir example10_output \
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
   --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 0.98
 
@@ -378,7 +395,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 11 --num_frames 200 \
   --exact_computation_fallback true --ccd_exact_step_bound true \
-  --substeps 10 --max_substep_iters 2 --fixed_iters \
+  --substeps 10 --max_substep_iters 2 --node_box_update_count 2 --fixed_iters \
   --kB 0.0025 --friction_coefficient 0.1 \
   --use_parallel true --use_basic_experimental true --use_simd true \
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
@@ -389,7 +406,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 12 --exact_computation_fallback false --ccd_exact_step_bound false --num_frames 200 \
   --substeps 6 --max_substep_iters 2 --fixed_iters \
-  --node_box_min 0.0001 --node_box_max 0.01 --node_box_update_count 10 \
+  --node_box_min 0.0001 --node_box_max 0.01 --node_box_update_count 2 \
   --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 \
   --kB 0.01 --gy 0 \
   --use_parallel true --use_basic_experimental true --use_simd true \
@@ -400,10 +417,13 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 # Example 13: a rigid wrecking ball swings into a wall of 560 cubes
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 13 \
-  --use_basic_experimental true --use_simd true \
-  --num_frames 200 --substeps 20 --max_substep_iters 150 --fixed_iters \
-  --d_hat 0.001 --k_barrier 1e9 --k_sdf 1e8 --eps_sdf 0.002 \
-  --friction_coefficient 0.1 --outdir wrecking_ball_tuned_output --format geo
+  --use_parallel true --use_basic_experimental true --use_simd true \
+  --num_frames 300 --fps 30 --substeps 18 --max_substep_iters 170 --fixed_iters \
+  --d_hat 0.001 --k_barrier 1e10 --k_sdf 1e8 --eps_sdf 0.002 \
+  --friction_coefficient 0 --exact_computation_fallback false --ccd_exact_step_bound false \
+  --node_box_min 0.001 --node_box_max 0.0075 \
+  --theta_box_min 0.002 --theta_box_max 0.03 --node_box_update_count 20 \
+  --outdir wrecking_ball_tuned_output --format geo
 
 # Example 14: fifty free cloth sheets fall over the cylinder and spread onto the ground.
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
@@ -447,15 +467,8 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0001 --node_box_max 0.003 --node_box_update_count 4 \
   --outdir example15_200x141x141/frames --format geo
-```
 
-### Example 16: rigid chain net and mixed rigid-object drop
-
-Example 13's wrecking-ball settings with Example 16 selected, eight threads,
-exact fallback disabled, and a separate output directory
-(a fresh run replaces `outdir`):
-
-```sh
+# Example 16: rigid chain net and mixed rigid-object drop
 OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 16 \
   --use_basic_experimental true --use_simd true \
@@ -465,44 +478,8 @@ OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread 
   --d_hat 0.001 --k_barrier 1e9 --k_sdf 1e8 --eps_sdf 0.002 \
   --friction_coefficient 0.1 \
   --outdir chain_net_rigid_objects_output --format geo
-```
 
-For a smaller local test, add
-`--chain_net_rows 4 --chain_net_cols 4 --chain_net_ball_gap 0.2 --num_frames 25`
-and use a different output folder. Do not restart checkpoints made with a
-different link count, link mesh resolution, link scale or payload geometry; start a fresh simulation
-in a new output folder.
-`k_sdf` and `eps_sdf` are retained from the
-wrecking-ball command but have no effect here because the scene has no SDF.
-Colored CCD initial-guess flags are deformable-only and do not apply to this
-rigid-only scene. The scene does not modify the CCD, SIMD, friction or scheduling algorithms.
-
-### Example 17: 300 rigid objects falling into a rigid box
-
-The scene contains **300 dynamic bodies plus one fixed rigid container**.
-There are 50 of each family: cubes, triangular through octagonal prisms,
-chain links, Bunny, Spot and thin gears. Bunny and Spot use closed surface
-meshes here, **not deformable tetrahedral solids**. The assets are reused at
-coarse resolution; no changes to their source files are needed.
-
-The open-top box is one connected, closed solid boundary mesh (floor and
-four walls), not five independent panels or an SDF. Its interior measures
-12.8 × 8.0 × 3.0 m, with 0.2 m walls and floor. Its rigid-body update mode
-is fixed in both position and orientation. All bodies use `rigid_density`,
-1000 kg/m³ by default, and volume-integrated mass properties.
-
-Five separated 10 × 6 layers start above the opening, with deterministic
-mixed ordering and rotations. Chain links use 70% of their original linear
-size (0.56–0.70 m world-space maximum extents); the other objects retain
-their 0.8–1.0 m extents. Link density is unchanged, so their mass scales
-with the reduced volume. Other scenes' links are unaffected.
-Initial bounding boxes are checked for separation and containment within
-the opening's footprint. This is an initial packing check, not a guarantee
-that no body can bounce out during the simulation.
-
-Starting command for a local eight-thread run (not a converged/timed benchmark):
-
-```sh
+# Example 17: 300 rigid objects falling into a rigid box
 OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
 ./build/3D_sim --example 17 --num_frames 200 --fps 30 \
   --substeps 20 --max_substep_iters 50 --fixed_iters \
@@ -511,19 +488,10 @@ OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --exact_computation_fallback true --node_box_update_count 10 \
   --use_basic_experimental true --use_simd true --use_parallel true \
   --write_substeps false --format geo --outdir example17_rigid_box_output
-```
 
-Explicit flags override the Example 17 presets. `d_hat` is additionally
-capped to 0.45 times the shortest surface edge, as in Example 16. There are
-no SDF colliders, cloth or deformable solids; deformable initial-guess flags
-do not apply. Use a fresh output directory rather than another scene's
-restart checkpoint. To export only the initial layout, use `--num_frames 0`.
-
-### Example 18: bike chain
-
-```sh
+# Example 18: bike chain
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 18 --num_frames 180 --fps 30 \
+./build/3D_sim --example 18 --num_frames 120 --fps 30 \
   --substeps 19 --max_substep_iters 200 --fixed_iters \
   --use_basic_experimental true --use_simd true --use_parallel true \
   --use_ccd true --exact_computation_fallback true \

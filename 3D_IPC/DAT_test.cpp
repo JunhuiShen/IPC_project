@@ -5,6 +5,7 @@
 #include <omp.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -269,6 +270,26 @@ TEST_F(PlanarDAT, SliverTriangleUsesFiniteTriangleDistanceForRadiusFiltering) {
     ASSERT_EQ(result.size(), 4u);
     for (int vertex = 0; vertex < 4; ++vertex) {
         expect_vector_near(result[vertex], scene.update[vertex]);
+    }
+}
+
+TEST_F(PlanarDAT, ObtuseTriangleTruncatesAgainstTheActualNearestEdge) {
+    for (double scale : {1.0, 1e-4}) {
+        const std::array<Vec3, 3> triangle{{Vec3::Zero(), Vec3(1, 0, 0), Vec3(-10, .1, 0)}};
+        std::array<int, 3> order{{0, 1, 2}};
+        do {
+            Scene scene;
+            scene.positions = {scale * Vec3(.5, -.01, .1), scale * triangle[order[0]], scale * triangle[order[1]], scale * triangle[order[2]]};
+            scene.update.assign(4, Vec3::Zero());
+            scene.update[0] = scale * Vec3(0, .02, -.2);
+            scene.mesh.num_positions = 4;
+            scene.mesh.tris = {1, 2, 3};
+            // The actual gap sqrt(.0101) is inside r_q=.3. The old
+            // barycentric classification returned .51 and missed this pair.
+            const auto result = planar_DAT(gamma, .3 * scale, scene.mesh, scene.update, scene.positions);
+            expect_vector_near(result[0] / scale, gamma * Vec3(0, .01, -.1));
+            for (int vertex = 1; vertex < 4; ++vertex) expect_vector_near(result[vertex], Vec3::Zero());
+        } while (std::next_permutation(order.begin(), order.end()));
     }
 }
 

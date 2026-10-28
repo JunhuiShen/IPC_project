@@ -1960,12 +1960,23 @@ void update_oscillating_cloth_layer_pins(
 // ---------------------------------------------------------------------------
 // Example 13: rigid IPC Figure 8 wrecking ball and 560-cube wall
 // ---------------------------------------------------------------------------
-// Command line: OMP_NUM_THREADS=10 OMP_DYNAMIC=FALSE ./build/3D_sim --example 13 --num_frames 200 --substeps 30 --max_substep_iters 200 --fixed_iters --d_hat 0.001 --k_barrier 1e9 --k_sdf 1e8 --eps_sdf 0.002 --friction_coefficient 0.1 --outdir wrecking_ball_tuned_output --format geo
+// See README.md for the Example 13 command line.
 void build_wrecking_ball_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris) {
+    if (!std::isfinite(args.wrecking_wall_gap)
+        || args.wrecking_wall_gap <= 0.0
+        || !std::isfinite(args.wrecking_wall_ground_clearance)
+        || args.wrecking_wall_ground_clearance < 0.0
+        || !std::isfinite(args.wrecking_ball_initial_speed)
+        || args.wrecking_ball_initial_speed < 0.0) {
+        throw std::invalid_argument(
+            "example 13 requires a positive finite wrecking_wall_gap and "
+            "nonnegative finite wrecking_wall_ground_clearance and "
+            "wrecking_ball_initial_speed");
+    }
     clear_model(ref_mesh, state, X, pins);
     static_x.clear();
     static_tris.clear();
@@ -2063,26 +2074,44 @@ void build_wrecking_ball_example(
             ref_mesh, state);
     }
 
-    // The original fixed plane is centered below the top link and spans
-    // 20 by 20 metres. After the uniform scene translation, use y=0 as an
-    // infinite upward-facing SDF plane; the finite quad preserves its footprint.
+    if (args.wrecking_ball_initial_speed > 0.0) {
+        // A single initial rotation field preserves the free links' relative
+        // contact velocities. Use the corrected volume COMs, including the
+        // asymmetric ball's COM, rather than kicking only the terminal body.
+        const Vec3& pivot = state.x_coms.front();
+        const Vec3 ball_offset = state.x_coms[ordinary_link_count] - pivot;
+        const double swing_radius = std::hypot(ball_offset.x(), ball_offset.y());
+        const Vec3 initial_omega(
+            0.0, 0.0, args.wrecking_ball_initial_speed / swing_radius);
+        for (int body = 1; body < chain_body_count; ++body) {
+            const Vec3& center = state.x_coms[body];
+            state.v_coms[body] = initial_omega.cross(center - pivot);
+            state.omega[body] = initial_omega;
+            for (const int node : ref_mesh.rb_nodes[body]) {
+                state.velocities[node] = state.v_coms[body]
+                    + initial_omega.cross(state.deformed_positions[node] - center);
+            }
+        }
+    }
+
+    // The original fixed plane is centered below the top link. After the
+    // uniform scene translation, collision uses an infinite upward-facing
+    // SDF plane at y=0; the exported quad below is only its visible surface.
     constexpr double ground_y = -1.0 + scene_y_translation;
     params.sdf_planes.push_back(PlaneSDF{
         Vec3(fixed_link_fixture_position.x(), ground_y, 0.0),
         Vec3::UnitY()});
 
-    // Tightly packed version of the paper wall: 8 x 7 x 10 unit cubes. A
-    // nonzero 2 mm separation avoids singular touching contact while removing
-    // the reference fixture's visibly falling 5 cm gaps. Use the same 2 mm
-    // clearance under the first row. itertools.product in the reference makes
-    // z the fastest-moving coordinate, which this loop order preserves.
+    // The paper wall has 8 x 7 x 10 unit cubes. Default 5 cm gaps and ground
+    // clearance reproduce the reference fixture's initial drop. itertools.product
+    // makes z the fastest-moving coordinate, which this loop order preserves.
     constexpr int wall_width = 8;
     constexpr int wall_height = 7;
     constexpr int wall_depth = 10;
     constexpr double cube_edge = 1.0;
-    constexpr double cube_gap = 0.002;
-    constexpr double cube_spacing = cube_edge + cube_gap;
-    constexpr double cube_ground_clearance = 0.002;
+    const double cube_gap = args.wrecking_wall_gap;
+    const double cube_spacing = cube_edge + cube_gap;
+    const double cube_ground_clearance = args.wrecking_wall_ground_clearance;
     const Vec3 first_cube_center = Vec3(
         fixed_link_fixture_position.x()
             + 0.5 - 0.5 * static_cast<double>(wall_width),
@@ -2107,7 +2136,9 @@ void build_wrecking_ball_example(
         }
     }
 
-    constexpr double ground_half_extent = 10.0;
+    // Cover frictionless debris and the reference-style camera without
+    // changing the infinite collision plane or any dynamic body geometry.
+    constexpr double ground_half_extent = 150.0;
     const double ground_center_x = fixed_link_fixture_position.x();
     static_x = {
         Vec3(ground_center_x - ground_half_extent, ground_y,
