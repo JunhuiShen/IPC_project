@@ -240,6 +240,7 @@ target_link_libraries(corotated_energy_lib
 # Mesh setup, broad phase, safe stepping, physics assembly, output, and nonlinear solvers.
 # Keeping these sources in a library prevents every test from recompiling them.
 set(IPC_SIMULATION_SOURCES
+    DAT.cpp
     general_simd_assembly.cpp
     general_simd_rigid.cpp
     broad_phase.cpp
@@ -331,6 +332,7 @@ if(BUILD_TESTING)
     endfunction()
 
     set(IPC_TEST_TARGETS
+        DAT_test
         SIMD_test
         general_simd_solid_test
         general_simd_rigid_test
@@ -353,6 +355,7 @@ if(BUILD_TESTING)
         io_test
         ipc_math_test
         jacobi_step_test
+        jacobi_dat_solver_test
         make_shape_test
         mesh_test
         node_triangle_distance_test

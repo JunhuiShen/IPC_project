@@ -141,7 +141,10 @@ SceneDescription describe_scene(const RefMesh& mesh,const DeformedState& state,
 StepParameters describe_step(const SimParams& p) {
     p.validate_ccd_exact_step_bound_parameters();
     p.validate_colored_ccd_guess_parameters();
+    p.validate_jacobi_dat_parameters();
     // Never silently reroute an unported solver/initial-guess mode to CPU.
+    if(p.use_jacobi_dat)
+        throw std::invalid_argument("resident GPU: --use_jacobi_dat is currently CPU-only");
     if(!p.fixed_iters || p.use_ogc || p.use_ogc_solver || p.use_cloth_grid)
         throw std::invalid_argument("resident GPU currently requires fixed iterations and conflict-graph coloring, with OGC/grid disabled");
     if(!(p.use_colored_ccd_guess || p.use_colored_ccd_guess_level_based) && (p.use_verlet_guess || p.use_translation_guess))

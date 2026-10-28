@@ -57,6 +57,10 @@ struct SimParams {
     bool   use_basic_experimental; // experimental cloth; with SIMD also selects general v2
     bool   use_basic_experimental_v2; // resolved from use_basic_experimental && use_simd
     bool   use_simd;             // select v2 SIMD cloth/general energy/contact assembly
+    bool   use_jacobi_dat = false; // deformable cloth/solid Jacobi updates filtered by planar DAT
+    double dat_gamma = 0.9;
+    double dat_query_radius = 0.0; // 0: 1.5*d_hat when positive, otherwise node_box_max
+    double dat_node_box_padding = 1.2;
     bool   use_cloth_grid;       // basic cloth only: serial vertices within parallel spatial cells
     bool   cloth_grid_auto_dx;   // enlarge dx from dependencies at each grid rebuild
     double cloth_grid_dx;        // fixed side (must exceed 2*node_box_max), or minimum in auto mode
@@ -119,6 +123,10 @@ struct SimParams {
         p.use_basic_experimental    = false;
         p.use_basic_experimental_v2 = false;
         p.use_simd                  = false;
+        p.use_jacobi_dat            = false;
+        p.dat_gamma                 = 0.9;
+        p.dat_query_radius          = 0.0;
+        p.dat_node_box_padding      = 1.2;
         p.use_cloth_grid            = false;
         p.cloth_grid_auto_dx        = false;
         p.cloth_grid_dx             = 0.05;
@@ -169,6 +177,28 @@ struct SimParams {
             throw std::invalid_argument("--colored_ccd_guess_iters must be nonnegative (0 keeps the current positions)");
         if (!std::isfinite(d_hat) || d_hat < 0.0)
             throw std::invalid_argument("Colored CCD initial guesses require finite, nonnegative --d_hat");
+    }
+
+    double resolved_dat_query_radius() const {
+        const double radius = dat_query_radius > 0.0 ? dat_query_radius
+            : (d_hat > 0.0 ? 1.5 * d_hat : node_box_max);
+        if (!std::isfinite(radius) || radius <= 0.0)
+            throw std::invalid_argument("DAT requires a finite positive query radius: set --dat_query_radius, positive --d_hat, or positive --node_box_max");
+        return radius;
+    }
+
+    // Explicit DAT entry points pass selected=true even when the driver flag is off.
+    void validate_jacobi_dat_parameters(bool selected = false) const {
+        if (!std::isfinite(dat_gamma) || dat_gamma <= 0.0 || dat_gamma >= 1.0)
+            throw std::invalid_argument("--dat_gamma must be finite and in (0, 1)");
+        if (!std::isfinite(dat_query_radius) || dat_query_radius < 0.0)
+            throw std::invalid_argument("--dat_query_radius must be finite and nonnegative (0 selects an automatic radius)");
+        if (!std::isfinite(dat_node_box_padding) || dat_node_box_padding < 1.0)
+            throw std::invalid_argument("--dat_node_box_padding must be finite and at least 1");
+        if (!use_jacobi_dat && !selected) return;
+        if (use_ogc || use_ogc_solver || use_cloth_grid)
+            throw std::invalid_argument("--use_jacobi_dat requires OGC and --use_cloth_grid to be disabled");
+        (void)resolved_dat_query_radius();
     }
 
     void validate_cloth_grid_parameters() const {

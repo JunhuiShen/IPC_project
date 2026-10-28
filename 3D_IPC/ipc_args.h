@@ -43,6 +43,10 @@ struct IPCArgs3D : ArgParser {
     bool   use_parallel  = true;
     bool   use_basic_experimental = false;
     bool   use_simd = false;
+    bool   use_jacobi_dat = false;
+    double dat_gamma = 0.9;
+    double dat_query_radius = 0.0;
+    double dat_node_box_padding = 1.2;
     bool   use_cloth_grid = false;
     bool   cloth_grid_auto_dx = false;
     double cloth_grid_dx = 0.05;
@@ -189,7 +193,7 @@ struct IPCArgs3D : ArgParser {
         add_double("gy",          gy,          -9.81,      "Gravity y-component");
         add_double("gz",          gz,          0.0,        "Gravity z-component");
 
-        add_int   ("max_substep_iters", max_substep_iters, 500, "Max Gauss-Seidel iterations per substep (per-frame total = max_substep_iters * substeps)");
+        add_int   ("max_substep_iters", max_substep_iters, 500, "Max solver iterations per substep (per-frame total = max_substep_iters * substeps)");
         add_double("tol_abs",     tol_abs,     1e-6,       "Absolute convergence tolerance (residual force)");
         add_double("tol_rel",     tol_rel,     1e-3,       "Relative tolerance: stop when residual < tol_rel * initial_residual (0 disables)");
         add_double("d_hat",       d_hat,       0.005,      "Barrier activation distance (0 = off)");
@@ -197,9 +201,13 @@ struct IPCArgs3D : ArgParser {
         add_double("friction_velocity_epsilon", friction_velocity_epsilon, 0.01, "Velocity threshold (m/s) that smooths contact friction near zero slip");
         add_double("k_sdf",       k_sdf,       1e5,        "SDF penalty stiffness (0 = off)");
         add_double("eps_sdf",     eps_sdf,     0.002,      "SDF soft-barrier range (m). Cloth's force-free rest is at phi=eps_sdf. 0 = hard quadratic at the surface.");
-        add_bool  ("use_parallel",   use_parallel,   true,  "Use parallel Gauss-Seidel (requires coloring)");
+        add_bool  ("use_parallel",   use_parallel,   true,  "Use parallel solver updates (Gauss-Seidel requires coloring)");
         add_bool  ("use_basic_experimental", use_basic_experimental, false, "Use experimental cloth solving; with use_simd also selects experimental general solving");
         add_bool  ("use_simd", use_simd, false, "With use_basic_experimental, select SIMD v2 for cloth or the general cloth/solid/rigid solver");
+        add_bool  ("use_jacobi_dat", use_jacobi_dat, false, "Deformable cloth/solid only: Jacobi updates filtered by planar DAT; overrides experimental/SIMD solvers and starts from previous positions, skipping initial guesses; incompatible with OGC/grid");
+        add_double("dat_gamma", dat_gamma, 0.9, "DAT relaxation factor, strictly between 0 and 1");
+        add_double("dat_query_radius", dat_query_radius, 0.0, "DAT query radius; 0 selects 1.5*d_hat when d_hat > 0, otherwise node_box_max");
+        add_double("dat_node_box_padding", dat_node_box_padding, 1.2, "DAT query-box padding multiplier, at least 1");
         add_bool  ("use_cloth_grid", use_cloth_grid, false, "Basic cloth only: parallel parity-colored grid cells, serial vertices inside each cell");
         add_bool  ("cloth_grid_auto_dx", cloth_grid_auto_dx, false, "Grid only: enlarge dx from dependency spans and node boxes at every rebuild for one batch per occupied parity color");
         add_double("cloth_grid_dx", cloth_grid_dx, 0.05, "Cloth grid side length, or minimum side with cloth_grid_auto_dx. Fixed mode requires > 2 * node_box_max and can split colors into batches");
@@ -482,6 +490,10 @@ struct IPCArgs3D : ArgParser {
         p.use_basic_experimental = use_basic_experimental;
         p.use_basic_experimental_v2 = use_basic_experimental && use_simd;
         p.use_simd         = use_simd;
+        p.use_jacobi_dat   = use_jacobi_dat;
+        p.dat_gamma        = dat_gamma;
+        p.dat_query_radius = dat_query_radius;
+        p.dat_node_box_padding = dat_node_box_padding;
         p.use_cloth_grid   = use_cloth_grid;
         p.cloth_grid_auto_dx = cloth_grid_auto_dx;
         p.cloth_grid_dx    = cloth_grid_dx;
@@ -510,6 +522,7 @@ struct IPCArgs3D : ArgParser {
         p.exact_computation_fallback = exact_computation_fallback;
         p.exact_computation_fallback_2 = exact_computation_fallback;
         p.ccd_exact_step_bound = ccd_exact_step_bound;
+        p.validate_jacobi_dat_parameters();
         p.validate_ccd_exact_step_bound_parameters();
         p.validate_colored_ccd_guess_parameters();
         p.validate_cloth_grid_parameters();

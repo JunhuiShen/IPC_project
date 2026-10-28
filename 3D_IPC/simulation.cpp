@@ -123,6 +123,12 @@ int main(int argc, char** argv) {
     const bool has_solid = !ref_mesh.tet_nodes.empty();
     const bool is_mixed = has_rigid && has_deformable;
     const bool uses_general_solver = is_mixed || has_solid;
+    try {
+        validate_jacobi_dat_scene(ref_mesh, params);
+    } catch (const std::invalid_argument& error) {
+        std::cerr << "Error: " << error.what() << "\n";
+        return 1;
+    }
     if (params.use_cloth_grid && (has_rigid || has_solid)) {
         std::cerr << "Error: --use_cloth_grid is available only for the basic cloth solver; rigid, solid, and mixed scenes are unsupported\n";
         return 1;
@@ -179,7 +185,15 @@ int main(int argc, char** argv) {
 
     std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
-    if (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based) {
+    if (params.use_jacobi_dat) {
+        std::cout << "Deformable solver: Jacobi with planar DAT"
+                  << " (gamma=" << params.dat_gamma
+                  << ", query_radius=" << params.resolved_dat_query_radius()
+                  << ", node_box_padding=" << params.dat_node_box_padding << ")\n"
+                  << "Deformable initial guess: previous positions (DAT skips initial guesses)\n";
+    }
+    if (!params.use_jacobi_dat
+        && (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based)) {
         if (!has_deformable)
             std::cout << "Colored CCD initial guess: ignored for rigid-only scenes\n";
         else if (params.use_ogc || params.use_ogc_solver)
@@ -199,7 +213,8 @@ int main(int argc, char** argv) {
             std::cout << (has_rigid ? " (rigid bodies unchanged during guess)" : "") << "\n";
         }
     }
-    if ((params.use_basic_experimental || params.use_basic_experimental_v2) && !params.use_cloth_grid
+    if (!params.use_jacobi_dat
+        && (params.use_basic_experimental || params.use_basic_experimental_v2) && !params.use_cloth_grid
         && !params.use_ogc && !params.use_ogc_solver) {
         if (params.use_basic_experimental_v2)
             std::cout << ((uses_general_solver || has_rigid)

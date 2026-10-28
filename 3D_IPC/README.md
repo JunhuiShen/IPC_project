@@ -197,6 +197,25 @@ and +y as the up direction.
 | Experimental SIMD v2 | `--use_basic_experimental true --use_simd true`; supports cloth, rigid, and mixed scenes. |
 | Experimental scalar cloth v1 | `--use_basic_experimental true --use_simd false`. |
 | Basic cloth grid | `--use_cloth_grid true`; cloth only, with OGC disabled. See `--help` for grid sizing flags. |
+| Jacobi with planar DAT | `--use_jacobi_dat true`; CPU cloth/solid scenes without rigid bodies, with OGC and cloth grid disabled. Takes precedence over experimental/SIMD solver flags. |
+
+Jacobi with DAT starts every substep from the previous positions and skips all
+initial-guess flags. Each simultaneous Jacobi update passes through planar
+Divide and Truncate (DAT). `--dat_gamma` defaults to `0.9` and must be strictly
+between 0 and 1; `--dat_node_box_padding` defaults to `1.2` and must be at least 1.
+`--dat_query_radius` defaults to `0` (automatic): it uses `1.5*d_hat` when
+`d_hat > 0`, otherwise `node_box_max`. The resolved radius must be finite and
+positive. Set an explicit positive radius to override this rule. DAT filters
+mesh surface contact; it does not prevent tetrahedron inversion or enforce SDF
+nonpenetration. SDF penalties remain part of the Jacobi update.
+
+Run a small deformable example with DAT:
+
+```sh
+./build/3D_sim --example 1 --twist_nx 9 --twist_ny 9 \
+  --num_frames 1 --substeps 3 --max_substep_iters 20 --fixed_iters \
+  --use_jacobi_dat --dat_gamma 0.9 --format geo --outdir results/jacobi_dat
+```
 
 Two separate flags select collision-colored initial guesses for cloth/solid
 vertices, keeping rigid bodies fixed during the guess:
@@ -213,7 +232,7 @@ not count toward `N`; `N=0` skips both the trial and updates. Both methods stop
 early if all nodes reach their targets or a complete sweep makes no progress.
 The level-based mode is currently CPU-only; the resident GPU solver rejects it.
 Either colored guess overrides the CCD, Verlet, and translation guess flags
-and is ignored in OGC mode. Alternative OGC solving
+and is ignored in OGC or Jacobi-DAT mode. Alternative OGC solving
 (`--use_ogc_solver`) requires `--fixed_iters`; mixed deformable/rigid scenes
 use the basic/general route. Some scenes enforce their own guess/contact
 presets in [example.cpp](example.cpp).

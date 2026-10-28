@@ -24,6 +24,17 @@ using PinTargetUpdater = std::function<void(std::vector<Pin>& pins, double t)>;
 // Called after each substep with the global substep index (0-based) and current positions.
 using SubstepCallback = std::function<void(int, const std::vector<Vec3>&)>;
 
+inline void validate_jacobi_dat_scene(const RefMesh& ref_mesh, const SimParams& params) {
+    params.validate_jacobi_dat_parameters();
+    if (params.use_jacobi_dat
+        && (!ref_mesh.rb_nodes.empty() || !ref_mesh.total_mass.empty()
+            || !ref_mesh.rb_update_modes.empty()
+            || std::any_of(ref_mesh.node_to_rb.begin(), ref_mesh.node_to_rb.end(),
+                [](int owner) { return owner >= 0; }))) {
+        throw std::invalid_argument("--use_jacobi_dat supports deformable cloth/solid scenes only; rigid bodies and rigid proxy nodes are unsupported");
+    }
+}
+
 inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& state) {
     if (ref_mesh.rb_nodes.empty())
         return;
@@ -72,6 +83,9 @@ inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& st
 // every substep still rebuilds its current motion boxes and contact candidates.
 inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& ref_mesh, const SimParams& params,
     BroadPhase& broad_phase, int frame_index = 1, SubstepCallback on_substep = nullptr) {
+    validate_jacobi_dat_scene(ref_mesh, params);
+    if (params.use_jacobi_dat)
+        throw std::invalid_argument("advance_one_frame_rb does not support --use_jacobi_dat; use a deformable frame driver");
     SolverResult agg;
     const double dt = params.dt();
     broad_phase.invalidate_mesh_topology();
@@ -142,6 +156,7 @@ inline SolverResult advance_one_frame_general(
     int frame_index = 1, PinTargetUpdater pin_updater = nullptr,
     SubstepCallback on_substep = nullptr,
     const std::string& outdir = "") {
+    validate_jacobi_dat_scene(ref_mesh, params);
     params.validate_colored_ccd_guess_parameters();
     if (ref_mesh.node_to_rb.size() != state.deformed_positions.size()
         || state.velocities.size() != state.deformed_positions.size()) {
@@ -174,7 +189,8 @@ inline SolverResult advance_one_frame_general(
         // COM/orientation are left to the general solver. Legacy particle
         // guesses remain disabled here because they do not preserve rigidity.
         std::vector<Vec3> xnew = state.deformed_positions;
-        if ((params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based)
+        if (!params.use_jacobi_dat
+            && (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based)
             && !params.use_ogc && !params.use_ogc_solver) {
             std::vector<Vec3> intended_displacement(nv, Vec3::Zero());
             for (int node = 0; node < nv; ++node) {
@@ -195,10 +211,16 @@ inline SolverResult advance_one_frame_general(
         std::vector<Vec4> q_new = state.orientations;
         std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
 
-        const SolverResult substep_result = params.use_basic_experimental_v2
-            ? global_gauss_seidel_solver_general_experimental_v2(ref_mesh, state,
-                adj, pins, params, xnew, xhat, x_com_new, q_new, omega_new, broad_phase, outdir)
-            : global_gauss_seidel_solver_basic_general(ref_mesh, state, adj, pins,
+        SolverResult substep_result;
+        if (params.use_jacobi_dat)
+            substep_result = global_jacobi_solver_dat(ref_mesh, adj, pins,
+                params, xnew, xhat, state.velocities, broad_phase, outdir,
+                &state.deformed_positions);
+        else if (params.use_basic_experimental_v2)
+            substep_result = global_gauss_seidel_solver_general_experimental_v2(ref_mesh, state,
+                adj, pins, params, xnew, xhat, x_com_new, q_new, omega_new, broad_phase, outdir);
+        else
+            substep_result = global_gauss_seidel_solver_basic_general(ref_mesh, state, adj, pins,
                 params, xnew, xhat, x_com_new, q_new, omega_new, broad_phase, outdir);
         accumulate_solver_result(aggregate, substep_result, substep == 0);
         if (!substep_result.converged)
@@ -232,13 +254,15 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
     std::vector<Pin>& pins, const SimParams& params,
     BroadPhase& broad_phase, int frame_index = 1,
     PinTargetUpdater pin_updater = nullptr, SubstepCallback on_substep = nullptr, const std::string& outdir = "") {
+    validate_jacobi_dat_scene(ref_mesh, params);
     params.validate_cloth_grid_parameters();
     params.validate_colored_ccd_guess_parameters();
     const bool has_noncloth_geometry = !ref_mesh.rb_nodes.empty() || !ref_mesh.tets.empty()
         || !ref_mesh.tet_nodes.empty()
         || std::any_of(ref_mesh.node_to_rb.begin(), ref_mesh.node_to_rb.end(),
             [](int owner) { return owner >= 0; });
-    if ((params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based)
+    if (!params.use_jacobi_dat
+        && (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based)
         && has_noncloth_geometry) {
         throw std::invalid_argument("advance_one_frame is cloth-only; use advance_one_frame_general for solid or mixed scenes");
     }
@@ -266,7 +290,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
 
         build_xhat(xhat, state.deformed_positions, state.velocities, dt);
 
-        if (params.use_ogc || params.use_ogc_solver)
+        if (params.use_jacobi_dat || params.use_ogc || params.use_ogc_solver)
             xnew = state.deformed_positions;
         else if (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based) {
             // Only the predictor targets a fraction of the displacement to
@@ -296,7 +320,9 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
             xnew = state.deformed_positions;
 
         SolverResult sub_result;
-        if (params.use_ogc_solver)
+        if (params.use_jacobi_dat)
+            sub_result = global_jacobi_solver_dat(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
+        else if (params.use_ogc_solver)
             sub_result = global_gauss_seidel_solver_ogc(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir, &state.deformed_positions);
         else if (params.use_cloth_grid)
             sub_result = global_gauss_seidel_solver_ambient_grid(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);

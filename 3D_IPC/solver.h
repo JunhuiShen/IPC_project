@@ -59,6 +59,12 @@ inline void accumulate_solver_result(SolverResult& agg, const SolverResult& sub,
 }
 
 // Explicit entry points select their named solver regardless of driver flags.
+// Synchronous cloth/solid Jacobi updates filtered by planar DAT. Each sweep
+// rebuilds current contact data; no coloring or per-vertex CCD sweep is used.
+// Requires a deformable-only mesh. DAT constrains surface contacts, not tet
+// inversion or analytic SDF boundaries (SDF forces remain in the local systems).
+SolverResult global_jacobi_solver_dat(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
+
 // Historical cloth basic implementation from 1da4c74, in solver.cpp.
 SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 
