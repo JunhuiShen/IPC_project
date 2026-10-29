@@ -438,7 +438,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --outdir results/example14_70x70/frames --format geo && \
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 14 --exact_computation_fallback true --ccd_exact_step_bound true --restart_frame 10 --num_frames 120 \
-  --fps 30 --substeps 20 --max_substep_iters 2 --fixed_iters \
+  --fps 30 --substeps 16 --max_substep_iters 2 --fixed_iters \
   --use_basic_experimental --use_simd --use_parallel true --use_ccd true \
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
   --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 1.0 \
