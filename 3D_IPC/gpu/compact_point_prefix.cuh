@@ -1,6 +1,6 @@
 #pragma once
 // Isolated ClassA mathematical prototype. No production kernel includes this.
-#include "resident_contact_cooperative.cuh"
+#include "contact_cooperative.cuh"
 #include "guard103_prefix.cuh"
 #include "vertex_voronoi_certificate.cuh"
 #if defined(IPC_GPU_TU_ACTIVE_POINT)
@@ -13,8 +13,8 @@ static_assert(__cplusplus>=201703L,"Compact-point pool proof requires C++17");
 #else
 #define IPC_COMPACT_POINT_HD
 #endif
-namespace ipc_gpu::resident::point_vertex_compact_prefix {
-namespace ex=resident_exact;
+namespace ipc_gpu::solver::point_vertex_compact_prefix {
+namespace ex=exact;
 namespace cp=contact_cooperative_detail;
 constexpr int compact_capacity=8;
 enum class Reason:unsigned { Eligible,UnsupportedMaskOrKind,NotOriginalGuard103,
@@ -133,5 +133,5 @@ IPC_COMPACT_POINT_HD inline bool prepare(const ContactInput& in,int role,const G
     if(!okay){out.status=ContactStatus::ExactCapacityExceeded;return false;}
     return cp::prepare_derivatives(in,role,owner,out,shared);
 }
-} // namespace ipc_gpu::resident::point_vertex_compact_prefix
+} // namespace ipc_gpu::solver::point_vertex_compact_prefix
 #undef IPC_COMPACT_POINT_HD

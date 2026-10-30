@@ -1,5 +1,5 @@
 // Normalize occupied vendor graph-color labels; validate full CSR before publication.
-// Include beside pbgs_coloring.cuh inside resident_broadphase.cu's anonymous
+// Include beside pbgs_coloring.cuh inside broadphase.cu's anonymous
 // namespace, after Buffer and CUDA/Thrust sort/unique headers are available.
 //
 // Required call contract:

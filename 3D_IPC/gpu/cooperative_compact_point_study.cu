@@ -8,11 +8,11 @@
 #include <stdexcept>
 #include <type_traits>
 
-namespace ipc_gpu::resident {
+namespace ipc_gpu::solver {
 namespace {
 namespace cp=contact_cooperative_detail;
 namespace pc=point_vertex_compact_prefix;
-namespace ex=resident_exact;
+namespace ex=exact;
 static_assert(cp::capacity==256&&cp::owner_slots==512&&cp::helper_slots==128);
 static_assert(cp::active_lanes==9&&cp::slots_per_worker==1536&&pc::compact_capacity==8);
 struct BlockState {
@@ -140,4 +140,4 @@ void launch_cooperative_compact_point_inplace_study(
     cooperative_compact_point_inplace_kernel<<<workers,32,0,stream>>>(inputs,outputs,
         queue,count,fallback_queue,fallback_count,next,cooperative_words,cooperative_slots,failed,compact_outputs,output_activity);
 }
-} // namespace ipc_gpu::resident
+} // namespace ipc_gpu::solver

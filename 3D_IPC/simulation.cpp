@@ -61,8 +61,10 @@ int main(int argc, char** argv) {
     else if (args.example == 16) build_chain_net_ball_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 17) build_rigid_objects_in_box_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 18) build_bike_chain_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 19) build_anchor_example(args, ref_mesh, state, X, pins, params);
+    else if (args.example == 20) build_arch_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1 through 20.\n";
         return 1;
     }
 

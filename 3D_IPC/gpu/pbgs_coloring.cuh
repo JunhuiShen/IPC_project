@@ -1,4 +1,4 @@
-// Included inside resident_broadphase.cu's anonymous namespace after Buffer.
+// Included inside broadphase.cu's anonymous namespace after Buffer.
 // Alternative color construction only. The full original conflict graph,
 // sequential color execution, numerical kernels and safety semantics remain.
 inline int pbgs_coloring_mode() {

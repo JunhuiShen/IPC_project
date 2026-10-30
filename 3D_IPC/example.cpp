@@ -272,6 +272,58 @@ void use_closed_volume_rigid_mass_properties(
     }
 }
 
+// Accept either the example_obj root or the scene folder as --datadir.
+std::filesystem::path paper_scene_asset_directory(
+    const std::string& data_directory, const char* scene,
+    const std::vector<std::filesystem::path>& required) {
+    namespace fs = std::filesystem;
+    std::vector<fs::path> candidates;
+    if (!data_directory.empty()) {
+        candidates.push_back(fs::path(data_directory) / scene);
+        candidates.push_back(fs::path(data_directory));
+    }
+    candidates.push_back(fs::path("example_obj") / scene);
+    candidates.push_back(fs::path(__FILE__).parent_path() / "example_obj" / scene);
+    for (const fs::path& candidate : candidates) {
+        const bool complete = std::all_of(required.begin(), required.end(),
+            [&](const fs::path& file) {
+                std::error_code error;
+                return fs::is_regular_file(candidate / file, error);
+            });
+        if (complete) return candidate;
+    }
+    throw std::runtime_error(std::string("Could not find complete ") + scene
+        + " assets. Run from the repository root or pass --datadir example_obj "
+          "(or the scene asset directory).");
+}
+
+// Preserve the OBJ's authored model origin and scale. The shared importer
+// normally centers and normalizes meshes, which would collapse the baked arch
+// layout and shift the anchor relative to its terminal chain link.
+void append_authored_obj_rigid_body(
+    const std::filesystem::path& filename, const Vec3& translation,
+    const Vec4& orientation, const double density,
+    const RigidBodyUpdateMode mode, RefMesh& ref_mesh, DeformedState& state) {
+    std::vector<Vec3> positions;
+    std::vector<int> triangles;
+    load_obj_mesh(filename.string(), positions, triangles);
+    if (positions.empty() || triangles.empty())
+        throw std::invalid_argument("Paper scene requires a nonempty OBJ mesh");
+    Vec3 lower = positions.front(), upper = positions.front();
+    for (const Vec3& p : positions) {
+        lower = lower.cwiseMin(p);
+        upper = upper.cwiseMax(p);
+    }
+    const Vec3 center = translation + quaternion_rotate(
+        orientation, 0.5 * (lower + upper));
+    const std::size_t first_triangle = ref_mesh.tris.size() / 3;
+    const int body = append_normalized_obj_rigid_body(
+        filename.string(), state, ref_mesh, center, (upper - lower).maxCoeff(),
+        density, Vec3::Zero(), orientation, Vec3::Zero(), mode);
+    use_closed_volume_rigid_mass_properties(
+        body, first_triangle, ref_mesh.tris.size() / 3, ref_mesh, state);
+}
+
 // Rotate `p` about the +x line through `axis_point` by `theta`.
 Vec3 rotate_about_x_axis(const Vec3& p, const Vec3& axis_point, double theta) {
     const double c = std::cos(theta);
@@ -3079,6 +3131,75 @@ void build_bike_chain_example(
             const Vec3 target = state.x_coms[body] + quaternion_rotate(state.orientations[body], local);
             params.rigid_pins.push_back({body, local, target, state.x_coms[body], 0.0});
         }
+    }
+    ref_mesh.build_deformable_nodes();
+}
+
+// Example 19: Figure 9's initial anchor, 21 interlinked rings and spool.
+// Only the initial scene is staged: the spool is held at its authored pose;
+// the paper's prescribed winding motion is intentionally not implemented.
+void build_anchor_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh, DeformedState& state,
+    std::vector<Vec2>& X, std::vector<Pin>& pins, SimParams& params) {
+    const auto directory = paper_scene_asset_directory(
+        args.datadir, "anchor",
+        {"anchor.obj", "spool.obj", "../wrecking_ball/link.obj"});
+    clear_model(ref_mesh, state, X, pins);
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.rigid_pins.clear();
+    const Vec4 identity(1.0, 0.0, 0.0, 0.0);
+    const Vec4 quarter_turn_y(std::cos(0.25 * kPi), 0.0,
+                             std::sin(0.25 * kPi), 0.0);
+    constexpr double link_spacing = 1.5 / 1.9;
+    append_authored_obj_rigid_body(
+        directory / "spool.obj", Vec3(0.0, link_spacing, 0.0), identity,
+        args.rigid_density, RigidBodyUpdateMode::None, ref_mesh, state);
+    for (int link = 0; link < 21; ++link) {
+        append_authored_obj_rigid_body(
+            directory / "../wrecking_ball/link.obj", Vec3(0.0, -link * link_spacing, 0.0),
+            link % 2 == 0 ? quarter_turn_y : identity,
+            args.rigid_density, RigidBodyUpdateMode::TranslationAndOrientation,
+            ref_mesh, state);
+    }
+    append_authored_obj_rigid_body(
+        directory / "anchor.obj", Vec3(0.0, -16.75, 0.0), identity,
+        args.rigid_density, RigidBodyUpdateMode::TranslationAndOrientation,
+        ref_mesh, state);
+    ref_mesh.build_deformable_nodes();
+}
+
+// Example 20: Figure 11's 101 stones already contain their world-space poses
+// in the original OBJ files. Keep their scale, spacing and 0.1 ground gap.
+void build_arch_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh, DeformedState& state,
+    std::vector<Vec2>& X, std::vector<Pin>& pins, SimParams& params,
+    std::vector<Vec3>& static_x, std::vector<int>& static_tris) {
+    const auto directory = paper_scene_asset_directory(
+        args.datadir, "arch", {"plane.obj", "num_stones=101/stone-01.obj"});
+    clear_model(ref_mesh, state, X, pins);
+    params.sdf_planes = {{Vec3::Zero(), Vec3::UnitY()}};
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.rigid_pins.clear();
+    static_x.clear();
+    static_tris.clear();
+    load_obj_mesh((directory / "plane.obj").string(), static_x, static_tris);
+    // Upstream plane.obj spans 10 units on x/z; its fixture supplies these
+    // final dimensions. The visual plane and analytic ground share y=0.
+    for (Vec3& p : static_x) {
+        p.x() *= 110.36124963927372 / 10.0;
+        p.z() *= 100.0 / 10.0;
+    }
+    for (int stone = 1; stone <= 101; ++stone) {
+        const auto filename = std::filesystem::path("num_stones=101")
+            / (std::string("stone-") + (stone < 10 ? "0" : "")
+               + std::to_string(stone) + ".obj");
+        append_authored_obj_rigid_body(
+            directory / filename, Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
+            args.rigid_density, RigidBodyUpdateMode::TranslationAndOrientation,
+            ref_mesh, state);
     }
     ref_mesh.build_deformable_nodes();
 }

@@ -17,10 +17,4 @@ struct SolidParameters {
     double mu, lambda;
 };
 
-// Outputs include rest measure, but exclude dt^2. hessian is the TGSL PSD
-// PBGS elasticity block, not the exact energy Hessian. The complete signed
-// polar decomposition and elasticity arithmetic execute on the device.
-// Zero count permits null pointers. Errors throw; there is no CPU fallback.
-void compute_solids(const Solid*, std::size_t, const SolidParameters&, Derivatives*);
-
 } // namespace ipc_gpu

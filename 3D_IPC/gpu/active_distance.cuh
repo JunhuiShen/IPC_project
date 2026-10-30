@@ -5,8 +5,8 @@
 #else
 #define IPC_POINT_ACTIVE_HD
 #endif
-namespace ipc_gpu::resident::strict_active_distance_study {
-namespace interval=ipc_gpu::resident_ccd::detail;
+namespace ipc_gpu::solver::strict_active_distance_study {
+namespace interval=ipc_gpu::ccd::detail;
 struct Certificate {interval::Interval squared,threshold;bool proven=false;};
 // Requires a separately certified strict vertex before interpreting proven as
 // primitive contact activity. Alone this proves only point-to-vertex distance.
@@ -26,5 +26,5 @@ IPC_POINT_ACTIVE_HD inline Certificate certify(const double positions[4][3],int 
  out.proven=bounded&&out.squared.hi>=0.0&&out.squared.hi<out.threshold.lo;
  return out;
 }
-} // namespace ipc_gpu::resident::strict_active_distance_study
+} // namespace ipc_gpu::solver::strict_active_distance_study
 #undef IPC_POINT_ACTIVE_HD

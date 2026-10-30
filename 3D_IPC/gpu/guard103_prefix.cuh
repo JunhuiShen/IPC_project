@@ -1,12 +1,12 @@
 #pragma once
 // Exact predicate extraction only; no ContactOutput, Hessian or friction body.
-#include "resident_contact.cuh"
+#include "contact.cuh"
 #if defined(__CUDACC__)
 #define IPC_GUARD103_HD __host__ __device__
 #else
 #define IPC_GUARD103_HD
 #endif
-namespace ipc_gpu::resident::point_vertex_guard103 {
+namespace ipc_gpu::solver::point_vertex_guard103 {
 using namespace contact_detail;
 IPC_GUARD103_HD inline unsigned geometry_reason(const ContactInput& in) {
     const auto& x = in.positions;
@@ -84,5 +84,5 @@ IPC_GUARD103_HD inline bool eligible_before_inactive(const ContactInput& in) {
     return true;
 }
 #endif
-} // namespace ipc_gpu::resident::point_vertex_guard103
+} // namespace ipc_gpu::solver::point_vertex_guard103
 #undef IPC_GUARD103_HD

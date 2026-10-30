@@ -5,8 +5,8 @@
 #else
 #define IPC_STRICT_SELECTOR_HD
 #endif
-namespace ipc_gpu::resident::strict_vertex_selector_study {
-namespace interval=ipc_gpu::resident_ccd::detail;
+namespace ipc_gpu::solver::strict_vertex_selector_study {
+namespace interval=ipc_gpu::ccd::detail;
 // Only the strict vertex is requested. This does not replace callers needing
 // every closed-mask/dot enclosure in the original Certificate descriptor.
 // Any accepted vertex has the same two original interval dot computations.
@@ -31,5 +31,5 @@ IPC_STRICT_SELECTOR_HD inline int select(const double positions[4][3],unsigned* 
  }
  return -1;
 }
-} // namespace ipc_gpu::resident::strict_vertex_selector_study
+} // namespace ipc_gpu::solver::strict_vertex_selector_study
 #undef IPC_STRICT_SELECTOR_HD

@@ -112,7 +112,7 @@ sources, with `-fno-lto` on those sources under GCC.
 
 ## Built-in scenes
 
-Select a scene with `--example N`; IDs run consecutively from 1 to 18.
+Select a scene with `--example N`; IDs run consecutively from 1 to 20.
 Categories describe the simulated material models: **cloth** uses shell
 meshes, **rigid body** uses rigid motion, and **solid** uses deformable
 tetrahedral meshes. **Mixed** scenes below contain cloth, rigid bodies, and
@@ -139,10 +139,12 @@ There is no solid-only scene among the categorized examples.
 | 16 | Rigid body only | Gears, cubes, balls and polygonal prisms drop onto an interlocking net built from the wrecking-ball chain-link mesh, with fixed boundary links. |
 | 17 | Rigid body only | 300 mixed rigid objects (50 each of cubes, polygonal prisms, chain links, Bunny, Spot and gears) drop into one fixed open-top rigid box. |
 | 18 | Rigid body only | Bike-chain assembly with 138 separate rigid bodies and 47,761 vertices, driven by moving spring pins on the large sprocket; both sprocket centers are fixed and gravity is disabled. |
+| 19 | Rigid body only | Initial anchor scene: 21 chain links, the anchor and a fixed spool. |
+| 20 | Rigid body only | Initial 101-stone arch above a fixed ground plane. |
 
 ### Scene assets
 
-Examples 8–10, 13 and 16–18 use the supplied `example_obj/` assets. Paths below are
+Examples 8–10, 13 and 16–20 use the supplied `example_obj/` assets. Paths below are
 relative to **`3D_IPC/`**, so keep that working directory when running them.
 
 | Examples | Required files |
@@ -153,6 +155,8 @@ relative to **`3D_IPC/`**, so keep that working directory when running them.
 | 16 | `example_obj/wrecking_ball/link_32.obj` and `example_obj/gear_z18_180.obj`; cubes, plain spheres and polygonal prisms are generated procedurally. The optional single-ball mode needs only the link asset. |
 | 17 | `example_obj/wrecking_ball/link_128.obj`, `example_obj/bunny_coarse/bunny_1000f.obj`, `example_obj/spot/spot_500f.obj` and `example_obj/gear_z18_coarse.obj`; cubes, prisms and the container are procedural. `--datadir` may point to an alternative `example_obj` root with these relative paths. |
 | 18 | `example_obj/bike_chain/initial_bodies.txt` and the original `link.obj`, `barring.obj`, `pin.obj`, `sprocket-20teeth.obj` and `sprocket-8teeth.obj` in the same folder. `--datadir` may point to `example_obj` or its `bike_chain` folder. |
+| 19 | `example_obj/anchor/anchor.obj`, `spool.obj` and `example_obj/wrecking_ball/link.obj`; `--datadir` accepts `example_obj` or its `anchor` folder. |
+| 20 | `example_obj/arch/num_stones=101/stone-01.obj` through `stone-101.obj` and `example_obj/arch/plane.obj`; `--datadir` accepts `example_obj` or its `arch` folder. |
 
 Example 4 needs a directory supplied with `--datadir`, containing
 `dress_0000.obj`; the `body_0000.obj` loader is currently disabled. Other scenes
@@ -236,7 +240,7 @@ early if all nodes reach their targets or a complete sweep makes no progress.
 `--colored_ccd_guess_fraction` scales the fixed predictor target displacement
 `xhat - x^n` (default `1.0`, finite in `[0, 1]`); it leaves the solver's `xhat`
 unchanged.
-Both colored-guess modes are supported by the resident GPU solver.
+Both colored-guess modes are supported by the GPU solver.
 Either colored guess overrides the CCD, Verlet, and translation guess flags
 and is ignored in OGC or Jacobi-DAT mode. Alternative OGC solving
 (`--use_ogc_solver`) requires `--fixed_iters`; mixed deformable/rigid scenes
@@ -346,7 +350,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 
 ```
 
-Examples 8–18 use the following scene commands:
+Examples 8–20 use the following scene commands:
 
 ```bash
 # Example 8: Bunny/Spot solids with rigid cubes and gears
@@ -500,7 +504,21 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --node_box_min 0.00002 --node_box_max 0.0001 \
   --theta_box_min 0.0004 --theta_box_max 0.008 --node_box_update_count 25 \
   --format geo --outdir example18_pin_output
+
+# Example 19: anchor, hanging chain and fixed spool (frame zero)
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 19 --datadir example_obj --num_frames 0 \
+  --format geo
+
+# Example 20: 101-stone arch above the ground plane (frame zero)
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 20 --datadir example_obj --num_frames 0 \
+  --format geo
 ```
+
+Examples 19 and 20 export frame zero to the normal `frames_sim3d/` directory;
+solver settings and spool winding motion are not configured. For Example 20,
+load `static_colliders.geo` alongside `frame_0000.geo` to include the ground.
 
 ## Build and test
 

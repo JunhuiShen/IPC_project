@@ -1,8 +1,8 @@
 #pragma once
 // Private initialization experiment: no arithmetic, gate, capacity or reset change.
-#include "resident_contact_cooperative.cuh"
-namespace ipc_gpu::resident::pool_initialization_study {
-namespace ex=resident_exact;
+#include "contact_cooperative.cuh"
+namespace ipc_gpu::solver::pool_initialization_study {
+namespace ex=exact;
 namespace cp=contact_cooperative_detail;
 static_assert(cp::capacity==256&&cp::owner_slots==512&&cp::helper_slots==128
               &&cp::active_lanes==9&&cp::slots_per_worker==1536);
@@ -35,4 +35,4 @@ __device__ inline void initialize(ex::DevicePool& pool,std::uint32_t* base_words
     if(lane<cp::active_lanes&&!pool.failed)ex::thread_pool_slot()=&pool;
     // No new barrier: original B0 publishes ALL identities and registrations.
 }
-} // namespace ipc_gpu::resident::pool_initialization_study
+} // namespace ipc_gpu::solver::pool_initialization_study

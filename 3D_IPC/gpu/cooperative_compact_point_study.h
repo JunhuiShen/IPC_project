@@ -1,8 +1,8 @@
 #pragma once
 // Isolated study API. No frozen production dispatcher calls this function.
-#include "resident_contact_cooperative.h"
+#include "contact_cooperative.h"
 
-namespace ipc_gpu::resident {
+namespace ipc_gpu::solver {
 // Hot inplace-ratio mode only. Exactly32 threads/block, one query owner and
 // nine entry lanes; workers reuses min(candidate_count,256), not a new policy.
 // The caller must provide the EXISTING cooperative arena shape returned by
@@ -25,4 +25,4 @@ void launch_cooperative_compact_point_inplace_study(
     std::uint32_t* cooperative_words,int* cooperative_slots,unsigned workers,
     int* failed,cudaStream_t stream,
     CompactDeformableContact* compact_outputs,unsigned char* output_activity);
-} // namespace ipc_gpu::resident
+} // namespace ipc_gpu::solver

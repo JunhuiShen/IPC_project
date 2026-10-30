@@ -1,13 +1,13 @@
 #pragma once
 // Read-only proof/coverage helper. No production ordinary or exact path calls it.
-#include "resident_ccd.cuh"
+#include "ccd.cuh"
 #if defined(__CUDACC__)
 #define IPC_VORONOI_HD __host__ __device__
 #else
 #define IPC_VORONOI_HD
 #endif
-namespace ipc_gpu::resident::voronoi_study {
-namespace interval=ipc_gpu::resident_ccd::detail;
+namespace ipc_gpu::solver::voronoi_study {
+namespace interval=ipc_gpu::ccd::detail;
 struct Certificate {
     interval::Interval products[3][2];
     unsigned closed_mask=0,strict_mask=0;
@@ -38,5 +38,5 @@ IPC_VORONOI_HD inline Certificate certify(const double positions[4][3]) {
     }
     return out;
 }
-} // namespace ipc_gpu::resident::voronoi_study
+} // namespace ipc_gpu::solver::voronoi_study
 #undef IPC_VORONOI_HD

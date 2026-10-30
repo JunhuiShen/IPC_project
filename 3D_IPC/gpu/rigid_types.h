@@ -62,9 +62,4 @@ static_assert(std::is_standard_layout<RigidPreparedContact>::value);
 static_assert(std::is_trivially_copyable<RigidResult>::value);
 static_assert(std::is_trivially_copyable<RigidInertia>::value);
 
-// One transfer/launch covers all admitted contacts of one body and phase.
-// CUDA errors are reported; these entry points never silently compute on CPU.
-void compute_rigid(const RigidPreparedContact*, std::size_t, RigidResult*);
-void compute_rigid_inertia(const RigidInertia*, std::size_t, Derivatives*);
-
 } // namespace ipc_gpu

@@ -1,7 +1,7 @@
 #pragma once
 // ISOLATED EXPERIMENT: no production call site includes this header.
 // Caller retains the complete original feature/conversion/derivative pipeline.
-#include "resident_contact_cooperative.cuh"
+#include "contact_cooperative.cuh"
 static_assert(__cplusplus >= 201703L,
               "Point canonicalization arena proof requires C++17 prvalue elision");
 
@@ -11,8 +11,8 @@ static_assert(__cplusplus >= 201703L,
 #define IPC_POINT_CANON_HD
 #endif
 
-namespace ipc_gpu::resident::point_hessian_canonical {
-namespace ex = resident_exact;
+namespace ipc_gpu::solver::point_hessian_canonical {
+namespace ex = exact;
 namespace cp = contact_cooperative_detail;
 enum class Rejection : unsigned {
     None, Unsupported, InvalidFeature, WeightPattern, CommonDenominator,
@@ -126,5 +126,5 @@ template<int C, bool InplaceRatio> IPC_POINT_CANON_HD cp::EntryResult entry(
 #endif
     return cp::compute_entry<C, InplaceRatio>(use ? canonical : original, index);
 }
-} // namespace ipc_gpu::resident::point_hessian_canonical
+} // namespace ipc_gpu::solver::point_hessian_canonical
 #undef IPC_POINT_CANON_HD

@@ -7,13 +7,13 @@
 #else
 #define IPC_NATIVE_UNUSED_HD
 #endif
-namespace ipc_gpu::resident::direct_native_point_study {
+namespace ipc_gpu::solver::direct_native_point_study {
 namespace cp=contact_cooperative_detail;namespace pc=point_vertex_compact_prefix;
 struct NativeValues {double residual[3],bp,bpp;};
 static_assert(std::is_trivial<NativeValues>::value&&sizeof(NativeValues)==5*sizeof(double));
 
 // This descriptor owns only floating values; it is not pe::EntryData and makes
-// no claim that41 resident Integers exist. Original pre-owner admission is the
+// no claim that41 GPU Integers exist. Original pre-owner admission is the
 // caller's collective proof, checked before try_evaluate reaches this code.
 struct FloatingCoefficients {double distance,bp,bpp;unsigned weight_squared;};
 IPC_NATIVE_UNUSED_HD inline double mul(double a,double b) {
@@ -143,5 +143,5 @@ IPC_NATIVE_UNUSED_HD inline bool try_evaluate(const ContactInput& in,int role,
  if(coefficient_witness)*coefficient_witness=coefficients;
  output=out;return true;
 }
-} // namespace ipc_gpu::resident::direct_native_point_study
+} // namespace ipc_gpu::solver::direct_native_point_study
 #undef IPC_NATIVE_UNUSED_HD
