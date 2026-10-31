@@ -1,5 +1,6 @@
 #include "rigid_body_ipc.h"
 #include "physics.h"
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <limits>
@@ -628,11 +629,56 @@ Mat33 rigid_node_omega_hessian(const Vec3& gx, const Mat33& Hx, const Mat33& dx_
 
 
 Vec3 rigid_pin_target_position(const RigidPin& pin, double time) {
+    if (!std::isfinite(time))
+        throw std::invalid_argument("rigid pin time must be finite");
+    if (!std::isfinite(pin.angular_velocity_z))
+        throw std::invalid_argument("rigid pin angular speed must be finite");
+    if (!pin.initial_target.allFinite())
+        throw std::invalid_argument("rigid pin initial target must be finite");
+    if (!pin.rotation_center.allFinite())
+        throw std::invalid_argument("rigid pin rotation center must be finite");
+
+    // Stationary pins return their authored target directly. In particular,
+    // the axis is irrelevant (and may be zero) when the angular speed is zero.
+    if (pin.angular_velocity_z == 0.0)
+        return pin.initial_target;
+
+    if (!pin.rotation_axis.allFinite())
+        throw std::invalid_argument("rigid pin rotation axis must be finite");
+    // Normalize robustly against overflow/underflow: a finite nonzero axis
+    // such as (1e200, 0, 0) or (1e-200, 0, 0) must be accepted, so scale by
+    // the largest absolute component before forming the norm. The scaled
+    // components lie in [-1, 1] and the scaled norm in [1, sqrt(3)].
+    const double max_abs_component = std::max(std::abs(pin.rotation_axis.x()),
+        std::max(std::abs(pin.rotation_axis.y()),
+            std::abs(pin.rotation_axis.z())));
+    if (!std::isfinite(max_abs_component) || max_abs_component <= 0.0)
+        throw std::invalid_argument("rigid pin rotation axis must be nonzero");
+    const Vec3 scaled_axis = pin.rotation_axis / max_abs_component;
+    const double scaled_norm = scaled_axis.norm();
+    if (!std::isfinite(scaled_norm) || scaled_norm <= 0.0)
+        throw std::invalid_argument("rigid pin rotation axis must be nonzero");
+    const Vec3 axis = scaled_axis / scaled_norm;
+
     const double theta = pin.angular_velocity_z * time;
+    if (!std::isfinite(theta))
+        throw std::invalid_argument("rigid pin rotation angle must be finite");
     const double c = std::cos(theta), s = std::sin(theta);
     const Vec3 offset = pin.initial_target - pin.rotation_center;
-    return pin.rotation_center + Vec3(c * offset.x() - s * offset.y(),
-        s * offset.x() + c * offset.y(), offset.z());
+    if (!offset.allFinite())
+        throw std::invalid_argument("rigid pin target offset must be finite");
+    // Keep the historical +Z expression verbatim for bit-identical legacy
+    // trajectories. Any positively scaled +Z axis takes this same branch.
+    if (pin.rotation_axis.x() == 0.0 && pin.rotation_axis.y() == 0.0
+        && pin.rotation_axis.z() > 0.0) {
+        return pin.rotation_center + Vec3(c * offset.x() - s * offset.y(),
+            s * offset.x() + c * offset.y(), offset.z());
+    }
+
+    // Rodrigues' rotation formula for an arbitrary normalized world axis.
+    const Vec3 rotated = c * offset + s * axis.cross(offset)
+        + (1.0 - c) * axis.dot(offset) * axis;
+    return pin.rotation_center + rotated;
 }
 
 // Derivatives of dt^2 kpin/2 ||t + R(q(omega)) X - target||^2.

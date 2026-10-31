@@ -333,6 +333,7 @@ if(BUILD_TESTING)
 
     set(IPC_TEST_TARGETS
         DAT_test
+        rigid_dat_solver_test
         SIMD_test
         general_simd_solid_test
         general_simd_rigid_test
@@ -372,6 +373,12 @@ if(BUILD_TESTING)
     foreach(test_target IN LISTS IPC_TEST_TARGETS)
         ipc_add_test("${test_target}")
     endforeach()
+
+    add_executable(rigid_dat_bounds_test rigid_dat_bounds_test.cpp)
+    target_compile_features(rigid_dat_bounds_test PRIVATE cxx_std_17)
+    target_compile_options(rigid_dat_bounds_test PRIVATE
+        "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-ffp-contract=off>")
+    add_test(NAME rigid_dat_bounds COMMAND rigid_dat_bounds_test)
 
     ipc_add_test(simulation_snapshot_test DEFINITIONS
         GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}"

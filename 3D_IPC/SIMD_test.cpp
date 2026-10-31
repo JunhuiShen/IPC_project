@@ -2337,20 +2337,81 @@ TEST(SIMDContact, EdgeBlocksCoverRotationsScalesFeatureMappingsAndRoles) {
     }
 }
 
-TEST(SIMDContact, ClampedEdgeFallbackRetainsLegacyZeroWeightEndpointHessianBits) {
+TEST(SIMDContact, VertexVoronoiContactKeepsNonparticipatingBlocksZero) {
     constexpr std::size_t width = ipc_simd::contact_tile_width;
     const std::array<Vec3,4> x{Vec3(-0.25,0.125,0.125), Vec3::Zero(),
                               Vec3::UnitX(), Vec3(1.0,1.0,0.0)};
-    ASSERT_EQ(node_triangle_distance(x[0],x[1],x[2],x[3]).region,
-              NodeTriangleRegion::Edge31);
+    // Both incident finite-edge projections clamp to vertex 1. An infinite
+    // supporting-line classification would select an incorrect edge feature.
+    const auto dr=node_triangle_distance(x[0],x[1],x[2],x[3]);
+    ASSERT_EQ(dr.region,NodeTriangleRegion::Vertex1);
+    EXPECT_TRUE(dr.closest_point.isZero(0));
+    const double distance=std::sqrt(3.0/32.0);
+    EXPECT_DOUBLE_EQ(dr.distance,distance);
+    const Vec3 unit=x[0]/distance;
+    const double bp=scalar_barrier_gradient(distance,1.0);
+    const Mat33 expected_hessian=scalar_barrier_hessian(distance,1.0)*(unit*unit.transpose())
+        +(bp/distance)*(Mat33::Identity()-unit*unit.transpose());
+    std::array<ipc_simd::MeshContactInput,width> inputs;
+    std::array<ipc_simd::MeshContactOutput,width> outputs;
+    for(std::size_t e=0;e<width;++e) {
+        inputs[e].positions=x;inputs[e].previous_positions=x;inputs[e].role=e%4;
+    }
+    for(bool general:{false,true})
+        for(std::size_t count:{std::size_t(1),std::size_t(3),std::size_t(5),width}) {
+            SCOPED_TRACE(::testing::Message()<<"general="<<general<<" count="<<count);
+            const auto tile=general?ipc_simd::general_mesh_contact_derivatives_tile
+                                   :ipc_simd::mesh_contact_derivatives_tile;
+            tile(inputs.data(),count,1.0,1.0,0.0,.02,.01,outputs.data(),nullptr);
+            for(std::size_t e=0;e<count;++e) {
+                const int role=inputs[e].role;
+                SCOPED_TRACE(role);
+                if(role<2) {
+                    const Vec3 gradient=(role==0?bp:-bp)*unit;
+                    EXPECT_LE((outputs[e].gradient-gradient).norm(),2e-13*(1+gradient.norm()));
+                    EXPECT_LE((outputs[e].hessian-expected_hessian).norm(),2e-13*(1+expected_hessian.norm()));
+                } else {
+                    EXPECT_TRUE(outputs[e].gradient.isZero(0));
+                    EXPECT_TRUE(outputs[e].hessian.isZero(0));
+                    const auto scalar=node_triangle_barrier_self_gradient_and_hessian(
+                        x[0],x[1],x[2],x[3],1.0,role);
+                    EXPECT_TRUE(scalar.first.isZero(0));
+                    EXPECT_TRUE(scalar.second.isZero(0));
+                }
+            }
+        }
+}
+
+TEST(SIMDContact, ClampedEdgeFallbackRetainsLegacyZeroWeightEndpointHessianBits) {
+    constexpr std::size_t width = ipc_simd::contact_tile_width;
+    const double origin=std::ldexp(1.0,27), tiny=std::ldexp(1.0,-50);
+    const std::array<Vec3,4> x{Vec3(origin+2,tiny,tiny),Vec3(origin+2,0,0),
+        Vec3(origin+2,-2,0),Vec3(origin,1,0)};
+    // The original edge parameter is interior, but storing the closest point
+    // rounds its x coordinate to vertex 1. Reconstructing the parameter then
+    // rounds to 1, giving endpoint 3 zero weight while retaining an edge region.
+    const auto dr=node_triangle_distance(x[0],x[1],x[2],x[3]);
+    ASSERT_EQ(dr.region,NodeTriangleRegion::Edge31);
+    const Vec3 edge=x[1]-x[3];
+    const double parameter=(x[0]-x[3]).dot(edge)/edge.squaredNorm();
+    ASSERT_GT(parameter,0.0);
+    ASSERT_LT(parameter,1.0);
+    const auto weights=node_triangle_contact_weights(x[0],x[1],x[2],x[3],1e-12,&dr);
+    ASSERT_DOUBLE_EQ(weights[3],0.0);
+    ASSERT_DOUBLE_EQ(dr.distance,5*std::ldexp(1.0,-52));
+    // A large stationarity residual forces the scalar Hessian fallback.
+    ASSERT_GT(std::abs((x[0]-dr.closest_point).dot(edge)),1e-6*dr.distance*edge.norm());
     std::array<ipc_simd::MeshContactInput,width> inputs;
     std::array<ipc_simd::MeshContactOutput,width> outputs;
     for (std::size_t e=0;e<width;++e) {
         inputs[e].positions=x;inputs[e].previous_positions=x;inputs[e].role=e%4;
     }
-    for (std::size_t count : {std::size_t(1),std::size_t(3),std::size_t(5),width}) {
-        ipc_simd::mesh_contact_derivatives_tile(inputs.data(),count,1.0,1.0,0.0,
-                                               0.02,0.01,outputs.data());
+    for(bool general:{false,true})
+      for (std::size_t count : {std::size_t(1),std::size_t(3),std::size_t(5),width}) {
+        SCOPED_TRACE(::testing::Message()<<"general="<<general<<" count="<<count);
+        const auto tile=general?ipc_simd::general_mesh_contact_derivatives_tile
+                               :ipc_simd::mesh_contact_derivatives_tile;
+        tile(inputs.data(),count,1.0,1.0,0.0,0.02,0.01,outputs.data(),nullptr);
         for (std::size_t e=0;e<count;++e) {
             const auto expected=node_triangle_barrier_self_gradient_and_hessian(
                 x[0],x[1],x[2],x[3],1.0,inputs[e].role);

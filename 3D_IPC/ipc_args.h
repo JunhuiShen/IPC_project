@@ -171,6 +171,11 @@ struct IPCArgs3D : ArgParser {
     double bike_chain_motor_radius = 0.03; // Radius of the four moving motor pins (m).
     double bike_chain_shaft_span = 0.05; // Distance from each gear center to its shaft support points (m).
 
+    // Example 19: rigid-point motor about the spool's world-X axle.
+    double anchor_drive_speed = -100.0; // degrees/second; zero holds the spool fixed
+    double anchor_motor_radius = 2.0;
+    double anchor_shaft_span = 3.0;
+
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
     std::string format       = "geo";
@@ -209,7 +214,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_parallel",   use_parallel,   true,  "Use parallel solver updates (Gauss-Seidel requires coloring)");
         add_bool  ("use_basic_experimental", use_basic_experimental, false, "Use experimental cloth solving; with use_simd also selects experimental general solving");
         add_bool  ("use_simd", use_simd, false, "With use_basic_experimental, select SIMD v2 for cloth or the general cloth/solid/rigid solver");
-        add_bool  ("use_jacobi_dat", use_jacobi_dat, false, "Deformable cloth/solid only: Jacobi updates filtered by planar DAT; overrides experimental/SIMD solvers and starts from previous positions, skipping initial guesses; incompatible with OGC/grid");
+        add_bool  ("use_jacobi_dat", use_jacobi_dat, false, "CPU cloth/solid/rigid: Jacobi updates filtered by planar DAT with curved rigid trajectories; overrides experimental/SIMD solvers and starts from previous positions/poses, skipping initial guesses; incompatible with OGC/grid");
         add_double("dat_gamma", dat_gamma, 0.9, "DAT relaxation factor, strictly between 0 and 1");
         add_double("dat_query_radius", dat_query_radius, 0.0, "DAT query radius; 0 selects 1.5*d_hat when d_hat > 0, otherwise node_box_max");
         add_double("dat_node_box_padding", dat_node_box_padding, 1.2, "DAT query-box padding multiplier, at least 1");
@@ -327,6 +332,9 @@ struct IPCArgs3D : ArgParser {
         add_double("bike_chain_drive_speed", bike_chain_drive_speed, -25.0, "Example 18: soft-pin motor target speed about world z in degrees/second");
         add_double("bike_chain_motor_radius", bike_chain_motor_radius, 0.03, "Example 18: positive radius of the four moving soft-pin motor points in metres");
         add_double("bike_chain_shaft_span", bike_chain_shaft_span, 0.05, "Example 18: positive axial distance from each gear center to either stationary shaft support point in metres");
+        add_double("anchor_drive_speed", anchor_drive_speed, -100.0, "Example 19: spool motor speed about world x in degrees/second; zero fixes the spool");
+        add_double("anchor_motor_radius", anchor_motor_radius, 2.0, "Example 19: positive radial lever arm of the spool's virtual motor points in metres");
+        add_double("anchor_shaft_span", anchor_shaft_span, 3.0, "Example 19: positive axial distance of the motor points from the spool center in metres");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
@@ -479,6 +487,53 @@ struct IPCArgs3D : ArgParser {
             preset("--theta_box_min", theta_box_min, 4.0e-4);
             preset("--theta_box_max", theta_box_max, 8.0e-3);
             preset("--node_box_update_count", node_box_update_count, 25);
+        }
+        if (example == 19) {
+            const auto preset = [&](const char* flag, auto& field, auto value) {
+                if (!supplied(flag)) field = value;
+            };
+            // One solver configuration for the complete winding and carry-over.
+            preset("--num_frames", num_frames, 600);
+            preset("--substeps", substeps, 20);
+            preset("--max_substep_iters", max_substep_iters, 20);
+            preset("--fixed_iters", fixed_iters, true);
+            preset("--use_basic_experimental", use_basic_experimental, true);
+            preset("--use_simd", use_simd, true);
+            preset("--friction_coefficient", friction_coefficient, 0.0);
+            preset("--d_hat", d_hat, 0.005);
+            preset("--k_barrier", k_barrier, 1.0e8);
+            preset("--kpin", kpin, 1.0e7);
+            preset("--node_box_min", node_box_min, 0.0005);
+            preset("--node_box_max", node_box_max, 0.1);
+            preset("--theta_box_min", theta_box_min, 0.001);
+            preset("--theta_box_max", theta_box_max, 0.01);
+            preset("--node_box_update_count", node_box_update_count, 10);
+            preset("--exact_computation_fallback", exact_computation_fallback, false);
+        }
+        if (example == 20) {
+            const auto preset = [&](const char* flag, auto& field, auto value) {
+                if (!supplied(flag)) field = value;
+            };
+            // Visually settled 120-frame arch at 30 FPS, with original release
+            // gaps and the common density. Explicit CLI settings take precedence.
+            preset("--num_frames", num_frames, 120);
+            preset("--substeps", substeps, 1);
+            preset("--max_substep_iters", max_substep_iters, 10);
+            preset("--fixed_iters", fixed_iters, true);
+            preset("--use_basic_experimental", use_basic_experimental, true);
+            preset("--use_simd", use_simd, true);
+            preset("--friction_coefficient", friction_coefficient, 0.5);
+            preset("--friction_velocity_epsilon", friction_velocity_epsilon, 0.001);
+            preset("--d_hat", d_hat, 0.05);
+            preset("--k_barrier", k_barrier, 1.0e7);
+            preset("--k_sdf", k_sdf, 1.0e10);
+            preset("--eps_sdf", eps_sdf, 0.002);
+            preset("--node_box_min", node_box_min, 0.01);
+            preset("--node_box_max", node_box_max, 0.2);
+            preset("--theta_box_min", theta_box_min, 0.001);
+            preset("--theta_box_max", theta_box_max, 0.05);
+            preset("--node_box_update_count", node_box_update_count, 5);
+            preset("--exact_computation_fallback", exact_computation_fallback, false);
         }
         return true;
     }

@@ -75,12 +75,14 @@ void add_mesh_contact(int node, const JacobiWorkspace& workspace, const SimParam
 
 } // namespace
 
-std::vector<Vec3> jacobi_step(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, const std::vector<Vec3>* previous_positions) {
+std::vector<Vec3> jacobi_step(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, const std::vector<Vec3>* previous_positions, bool hold_rigid_proxies) {
     const std::size_t count = xnew.size();
     if (xhat.size() != count || v.size() != count || ref_mesh.mass.size() != count)
         throw std::invalid_argument("jacobi_step: state arrays must have matching sizes");
-    if (!ref_mesh.rb_nodes.empty())
+    if (!ref_mesh.rb_nodes.empty() && !hold_rigid_proxies)
         throw std::invalid_argument("jacobi_step: rigid generalized coordinates require a separate block interface");
+    if (hold_rigid_proxies && ref_mesh.node_to_rb.size() != count)
+        throw std::invalid_argument("jacobi_step: missing rigid ownership");
     if (!std::isfinite(params.damping) || params.damping < 0)
         throw std::invalid_argument("jacobi_step: damping must be finite and nonnegative");
     if (!std::isfinite(params.friction_coefficient) || params.friction_coefficient < 0 || (params.friction_coefficient > 0 && (!std::isfinite(params.friction_velocity_epsilon) || params.friction_velocity_epsilon <= 0)))
@@ -114,7 +116,7 @@ std::vector<Vec3> jacobi_step(const RefMesh& ref_mesh, const VertexTriangleMap& 
     for (int node : ref_mesh.surface_nodes) workspace.surface_nodes[node] = 1;
     workspace.incident.assign(count, {});
     for (const auto& [node, row] : adj) {
-        if (workspace.solid_nodes[node]) continue;
+        if (workspace.solid_nodes[node] || (hold_rigid_proxies && ref_mesh.node_to_rb[node]>=0)) continue;
         workspace.incident[node] = row;
     }
     workspace.rest_gradients.resize(ref_mesh.Dm_inverse.size());
@@ -125,8 +127,9 @@ std::vector<Vec3> jacobi_step(const RefMesh& ref_mesh, const VertexTriangleMap& 
         workspace.boxes.resize(count);
         parallel_for(count, params.use_parallel, [&](std::size_t i) { workspace.boxes[i] = AABB(xnew[i], xnew[i]); });
         workspace.broad_phase.invalidate_mesh_topology();
-        if (ref_mesh.tets.empty()) workspace.broad_phase.initialize(workspace.boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::DeformableSolver);
-        else workspace.broad_phase.initialize_surface_nodes(workspace.boxes, ref_mesh, params.d_hat, BroadPhase::InitializationMode::DeformableSolver);
+        const auto mode=hold_rigid_proxies?BroadPhase::InitializationMode::GeneralSolver:BroadPhase::InitializationMode::DeformableSolver;
+        if (ref_mesh.tets.empty()) workspace.broad_phase.initialize(workspace.boxes, ref_mesh, params.d_hat, mode);
+        else workspace.broad_phase.initialize_surface_nodes(workspace.boxes, ref_mesh, params.d_hat, mode);
         const auto& cache = workspace.broad_phase.cache();
         workspace.nt.resize(cache.nt_pairs.size());
         workspace.ss.resize(cache.ss_pairs.size());
@@ -152,6 +155,10 @@ std::vector<Vec3> jacobi_step(const RefMesh& ref_mesh, const VertexTriangleMap& 
 
     std::vector<Vec3> displacement(count);
     parallel_for(count, params.use_parallel, [&](std::size_t i) {
+        if (hold_rigid_proxies && ref_mesh.node_to_rb[i]>=0) {
+            displacement[i].setZero();
+            return;
+        }
         auto [gradient, hessian] = [&] {
             if (workspace.solid_nodes[i]) return compute_solid_local_gradient_and_block(static_cast<int>(i), ref_mesh, pins, assembly_params, xnew, xhat, workspace.broad_phase, &workspace.solid_nodes, &workspace.surface_nodes, &pin_map, previous_positions);
             return physics_detail::compute_local_gradient_and_hessian_no_barrier_unchecked(static_cast<int>(i), ref_mesh, adj, pins, assembly_params, xnew, xhat, &pin_map, &workspace.incident[i], &workspace.rest_gradients, previous_positions);

@@ -65,6 +65,16 @@ inline void accumulate_solver_result(SolverResult& agg, const SolverResult& sub,
 // inversion or analytic SDF boundaries (SDF forces remain in the local systems).
 SolverResult global_jacobi_solver_dat(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 
+// Synchronous cloth/solid/rigid DAT. Previous physical state is immutable;
+// initialize centers/quaternions from state and nonlinear omega_new to zero.
+SolverResult global_jacobi_solver_dat_general(const RefMesh& ref_mesh,
+    const DeformedState& state, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params,
+    std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
+    std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new,
+    std::vector<Vec3>& omega_new, BroadPhase& broad_phase,
+    const std::string& outdir = "");
+
 // Historical cloth basic implementation from 1da4c74, in solver.cpp.
 SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 

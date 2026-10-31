@@ -26,13 +26,7 @@ using SubstepCallback = std::function<void(int, const std::vector<Vec3>&)>;
 
 inline void validate_jacobi_dat_scene(const RefMesh& ref_mesh, const SimParams& params) {
     params.validate_jacobi_dat_parameters();
-    if (params.use_jacobi_dat
-        && (!ref_mesh.rb_nodes.empty() || !ref_mesh.total_mass.empty()
-            || !ref_mesh.rb_update_modes.empty()
-            || std::any_of(ref_mesh.node_to_rb.begin(), ref_mesh.node_to_rb.end(),
-                [](int owner) { return owner >= 0; }))) {
-        throw std::invalid_argument("--use_jacobi_dat supports deformable cloth/solid scenes only; rigid bodies and rigid proxy nodes are unsupported");
-    }
+    (void)ref_mesh; // Solvers validate rigid ownership and topology.
 }
 
 inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& state) {
@@ -84,8 +78,6 @@ inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& st
 inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& ref_mesh, const SimParams& params,
     BroadPhase& broad_phase, int frame_index = 1, SubstepCallback on_substep = nullptr) {
     validate_jacobi_dat_scene(ref_mesh, params);
-    if (params.use_jacobi_dat)
-        throw std::invalid_argument("advance_one_frame_rb does not support --use_jacobi_dat; use a deformable frame driver");
     SolverResult agg;
     const double dt = params.dt();
     broad_phase.invalidate_mesh_topology();
@@ -101,7 +93,16 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
         std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
 
         SolverResult sub_result;
-        if (params.use_basic_experimental_v2) {
+        if (params.use_jacobi_dat) {
+            std::vector<Vec3> xnew=state.deformed_positions;
+            const std::vector<Vec3> xhat=state.deformed_positions;
+            const VertexTriangleMap adjacency;
+            const std::vector<Pin> pins;
+            SimParams solver_params=active_params;
+            solver_params.write_substeps=false;
+            sub_result=global_jacobi_solver_dat_general(ref_mesh,state,adjacency,pins,
+                solver_params,xnew,xhat,x_com_new,q_new,omega_new,broad_phase);
+        } else if (params.use_basic_experimental_v2) {
             std::vector<Vec3> xnew = state.deformed_positions;
             const std::vector<Vec3> xhat = state.deformed_positions;
             const VertexTriangleMap adjacency;
@@ -213,9 +214,8 @@ inline SolverResult advance_one_frame_general(
 
         SolverResult substep_result;
         if (params.use_jacobi_dat)
-            substep_result = global_jacobi_solver_dat(ref_mesh, adj, pins,
-                params, xnew, xhat, state.velocities, broad_phase, outdir,
-                &state.deformed_positions);
+            substep_result = global_jacobi_solver_dat_general(ref_mesh, state, adj, pins,
+                params, xnew, xhat, x_com_new, q_new, omega_new, broad_phase, outdir);
         else if (params.use_basic_experimental_v2)
             substep_result = global_gauss_seidel_solver_general_experimental_v2(ref_mesh, state,
                 adj, pins, params, xnew, xhat, x_com_new, q_new, omega_new, broad_phase, outdir);
@@ -255,6 +255,9 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
     BroadPhase& broad_phase, int frame_index = 1,
     PinTargetUpdater pin_updater = nullptr, SubstepCallback on_substep = nullptr, const std::string& outdir = "") {
     validate_jacobi_dat_scene(ref_mesh, params);
+    if(params.use_jacobi_dat && !ref_mesh.rb_nodes.empty())
+        return advance_one_frame_general(state,ref_mesh,adj,pins,params,broad_phase,
+            frame_index,pin_updater,on_substep,outdir);
     params.validate_cloth_grid_parameters();
     params.validate_colored_ccd_guess_parameters();
     const bool has_noncloth_geometry = !ref_mesh.rb_nodes.empty() || !ref_mesh.tets.empty()

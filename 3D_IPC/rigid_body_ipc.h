@@ -10,13 +10,17 @@ struct RefMesh;
 struct SimParams;
 
 // Soft attachment at a body-local material point. The target may rotate around
-// a prescribed world-space Z axis; zero angular velocity makes it stationary.
+// a prescribed world-space axis; zero angular velocity makes it stationary.
+// The historically named scalar angular_velocity_z is the angular speed in
+// radians per second about rotation_axis. rotation_axis defaults to +Z, so
+// legacy Z-only pins and Example18 are unchanged.
 struct RigidPin {
     int body = -1;
     Vec3 local_position = Vec3::Zero();
     Vec3 initial_target = Vec3::Zero();
     Vec3 rotation_center = Vec3::Zero();
     double angular_velocity_z = 0.0;
+    Vec3 rotation_axis = Vec3::UnitZ();
 };
 
 // Label controlling which generalized coordinates are solved for. Disabled

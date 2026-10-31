@@ -549,6 +549,264 @@ TEST(RigidBodyIPCPositionHelpers, OrientationOverloadsRoundTrip) {
     EXPECT_TRUE(recovered_X.isApprox(X, 1.0e-14));
 }
 
+TEST(RigidBodyIPCPinTarget, RotatesAroundWorldXAndYAxes) {
+    RigidPin pin;
+    pin.rotation_center = Vec3(3.0, -2.0, 1.0);
+    pin.angular_velocity_z = 0.5 * M_PI;
+
+    pin.initial_target = pin.rotation_center + Vec3(0.0, 1.0, 0.0);
+    pin.rotation_axis = Vec3::UnitX();
+    EXPECT_TRUE(rigid_pin_target_position(pin, 1.0).isApprox(
+        pin.rotation_center + Vec3(0.0, 0.0, 1.0), 1.0e-14));
+
+    pin.initial_target = pin.rotation_center + Vec3(0.0, 0.0, 2.0);
+    pin.rotation_axis = Vec3::UnitY();
+    EXPECT_TRUE(rigid_pin_target_position(pin, 1.0).isApprox(
+        pin.rotation_center + Vec3(2.0, 0.0, 0.0), 1.0e-14));
+}
+
+TEST(RigidBodyIPCPinTarget, RotatesAroundObliqueAxisBy120Degrees) {
+    RigidPin pin;
+    pin.rotation_center = Vec3(1.5, -0.5, 2.0);
+    pin.initial_target = pin.rotation_center + Vec3(1.0, 2.0, 3.0);
+    pin.angular_velocity_z = 2.0 * M_PI / 3.0;
+    pin.rotation_axis = Vec3(1.0, 1.0, 1.0);
+
+    EXPECT_TRUE(rigid_pin_target_position(pin, 1.0).isApprox(
+        pin.rotation_center + Vec3(3.0, 1.0, 2.0), 1.0e-13));
+
+    // A uniform scaling of the axis must not change the rotation.
+    pin.rotation_axis = Vec3(7.0, 7.0, 7.0);
+    EXPECT_TRUE(rigid_pin_target_position(pin, 1.0).isApprox(
+        pin.rotation_center + Vec3(3.0, 1.0, 2.0), 1.0e-13));
+}
+
+TEST(RigidBodyIPCPinTarget, NormalizesScaledAndNegativeAxes) {
+    RigidPin pin;
+    pin.rotation_center = Vec3(3.0, -2.0, 1.0);
+    pin.initial_target = pin.rotation_center + Vec3(0.0, 1.0, 0.0);
+    pin.angular_velocity_z = 0.5 * M_PI;
+
+    pin.rotation_axis = Vec3::UnitX();
+    const Vec3 positive_x = rigid_pin_target_position(pin, 1.0);
+    pin.rotation_axis = Vec3(4.0, 0.0, 0.0);
+    const Vec3 scaled_x = rigid_pin_target_position(pin, 1.0);
+    EXPECT_TRUE(scaled_x.isApprox(
+        pin.rotation_center + Vec3(0.0, 0.0, 1.0), 1.0e-14));
+    EXPECT_LT((scaled_x - positive_x).norm(), 1.0e-14);
+
+    pin.rotation_axis = -Vec3::UnitX();
+    const Vec3 negative_x = rigid_pin_target_position(pin, 1.0);
+    EXPECT_TRUE(negative_x.isApprox(
+        pin.rotation_center + Vec3(0.0, 0.0, -1.0), 1.0e-14));
+}
+
+TEST(RigidBodyIPCPinTarget, NormalizesExtremeFiniteScaledAxes) {
+    RigidPin pin;
+    pin.rotation_center = Vec3(3.0, -2.0, 1.0);
+    pin.initial_target = pin.rotation_center + Vec3(0.0, 1.0, 0.0);
+    pin.angular_velocity_z = 0.5 * M_PI;
+
+    const Vec3 expected_positive_x =
+        pin.rotation_center + Vec3(0.0, 0.0, 1.0);
+    const Vec3 expected_negative_x =
+        pin.rotation_center + Vec3(0.0, 0.0, -1.0);
+    const double extreme_scales[] = {1.0e200,
+        std::numeric_limits<double>::max(), 1.0e-200,
+        std::numeric_limits<double>::min(),
+        std::numeric_limits<double>::denorm_min()};
+    for (double scale : extreme_scales) {
+        // A finite nonzero axis must normalize whether its magnitude would
+        // overflow or underflow the raw dot-product norm.
+        pin.rotation_axis = Vec3(scale, 0.0, 0.0);
+        EXPECT_TRUE(rigid_pin_target_position(pin, 1.0)
+            .isApprox(expected_positive_x, 1.0e-14));
+        pin.rotation_axis = Vec3(-scale, 0.0, 0.0);
+        EXPECT_TRUE(rigid_pin_target_position(pin, 1.0)
+            .isApprox(expected_negative_x, 1.0e-14));
+    }
+
+    // Extreme oblique axes normalize to the same direction.
+    pin.rotation_axis = Vec3(1.0, -2.0, 0.5);
+    const Vec3 oblique_reference = rigid_pin_target_position(pin, 1.0);
+    pin.rotation_axis = Vec3(1.0e200, -2.0e200, 0.5e200);
+    EXPECT_TRUE(rigid_pin_target_position(pin, 1.0)
+        .isApprox(oblique_reference, 1.0e-14));
+    pin.rotation_axis = Vec3(1.0e-200, -2.0e-200, 0.5e-200);
+    EXPECT_TRUE(rigid_pin_target_position(pin, 1.0)
+        .isApprox(oblique_reference, 1.0e-14));
+
+    // Extreme +Z axes stay on the bit-identical legacy branch.
+    const double time = 0.231;
+    pin.angular_velocity_z = 0.7;
+    const double theta = pin.angular_velocity_z * time;
+    const double c = std::cos(theta), s = std::sin(theta);
+    const Vec3 d = pin.initial_target - pin.rotation_center;
+    const Vec3 expected = pin.rotation_center
+        + Vec3(c * d.x() - s * d.y(), s * d.x() + c * d.y(), d.z());
+    pin.rotation_axis = Vec3(0.0, 0.0, 1.0e200);
+    EXPECT_EQ(std::memcmp(
+                  rigid_pin_target_position(pin, time).data(),
+                  expected.data(), 3 * sizeof(double)),
+        0);
+    pin.rotation_axis = Vec3(0.0, 0.0, 1.0e-200);
+    EXPECT_EQ(std::memcmp(
+                  rigid_pin_target_position(pin, time).data(),
+                  expected.data(), 3 * sizeof(double)),
+        0);
+}
+
+TEST(RigidBodyIPCPinTarget, StationaryPinsReturnInitialTargetAndIgnoreAxis) {
+    RigidPin pin;
+    pin.initial_target = Vec3(-1.25, 4.5, 0.75);
+    pin.rotation_center = Vec3(9.0, -3.0, 2.0);
+    pin.angular_velocity_z = 0.0;
+    pin.rotation_axis = Vec3::Zero();
+
+    const Vec3 target = rigid_pin_target_position(pin, 12.3);
+    EXPECT_EQ(std::memcmp(target.data(), pin.initial_target.data(),
+                  3 * sizeof(double)), 0);
+
+    pin.angular_velocity_z = -0.0;
+    const Vec3 negative_zero_speed_target =
+        rigid_pin_target_position(pin, -4.0);
+    EXPECT_EQ(std::memcmp(negative_zero_speed_target.data(),
+                  pin.initial_target.data(), 3 * sizeof(double)), 0);
+}
+
+TEST(RigidBodyIPCPinTarget, RejectsInvalidMovingAxes) {
+    RigidPin pin;
+    pin.initial_target = Vec3(0.0, 1.0, 0.0);
+    pin.angular_velocity_z = 1.0;
+
+    pin.rotation_axis = Vec3::Zero();
+    EXPECT_THROW(rigid_pin_target_position(pin, 1.0), std::invalid_argument);
+
+    pin.rotation_axis = Vec3(std::numeric_limits<double>::quiet_NaN(),
+        0.0, 0.0);
+    EXPECT_THROW(rigid_pin_target_position(pin, 1.0), std::invalid_argument);
+
+    pin.rotation_axis = Vec3(std::numeric_limits<double>::infinity(),
+        0.0, 0.0);
+    EXPECT_THROW(rigid_pin_target_position(pin, 1.0), std::invalid_argument);
+}
+
+TEST(RigidBodyIPCPinTarget, RejectsNonfiniteTimeSpeedTargetAndCenter) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    RigidPin pin;
+    pin.initial_target = Vec3(0.0, 1.0, 0.0);
+    pin.rotation_center = Vec3(2.0, -1.0, 0.5);
+
+    EXPECT_THROW(rigid_pin_target_position(pin, nan),
+        std::invalid_argument);
+    EXPECT_THROW(rigid_pin_target_position(pin, inf),
+        std::invalid_argument);
+
+    pin.angular_velocity_z = inf;
+    EXPECT_THROW(rigid_pin_target_position(pin, 1.0),
+        std::invalid_argument);
+
+    pin.angular_velocity_z = 1.0;
+    pin.initial_target = Vec3(inf, 1.0, 0.0);
+    EXPECT_THROW(rigid_pin_target_position(pin, 1.0),
+        std::invalid_argument);
+
+    pin.initial_target = Vec3(0.0, 1.0, 0.0);
+    pin.rotation_center = Vec3(2.0, nan, 0.5);
+    EXPECT_THROW(rigid_pin_target_position(pin, 1.0),
+        std::invalid_argument);
+}
+
+TEST(RigidBodyIPCPinTarget, DefaultZAxisPreservesLegacyArithmeticBitwise) {
+    const RigidPin legacy{0, Vec3::Zero(), Vec3(11.234, 2.52, -3.7),
+        Vec3(10.0, 0.1, -2.0), 0.7};
+    EXPECT_TRUE(legacy.rotation_axis.isApprox(Vec3::UnitZ(), 1.0e-15));
+
+    const double time = 0.231;
+    const double theta = legacy.angular_velocity_z * time;
+    const double c = std::cos(theta), s = std::sin(theta);
+    const Vec3 d = legacy.initial_target - legacy.rotation_center;
+    const Vec3 expected = legacy.rotation_center
+        + Vec3(c * d.x() - s * d.y(), s * d.x() + c * d.y(), d.z());
+    const Vec3 actual = rigid_pin_target_position(legacy, time);
+    EXPECT_EQ(std::memcmp(actual.data(), expected.data(),
+                  3 * sizeof(double)), 0);
+
+    // A scaled +Z axis normalizes exactly onto the same legacy branch.
+    RigidPin scaled = legacy;
+    scaled.rotation_axis = Vec3(0.0, 0.0, 4.0);
+    const Vec3 scaled_actual = rigid_pin_target_position(scaled, time);
+    EXPECT_EQ(std::memcmp(scaled_actual.data(), expected.data(),
+                  3 * sizeof(double)), 0);
+}
+
+TEST(RigidBodyIPCPinTarget, GenericAxisPinDerivativesMatchFiniteDifferences) {
+    RigidPin pin;
+    pin.body = 0;
+    pin.local_position = Vec3(0.31, -0.22, 0.47);
+    pin.rotation_center = Vec3(-0.4, 0.2, 0.1);
+    pin.initial_target = pin.rotation_center + Vec3(0.7, -0.3, 0.5);
+    pin.angular_velocity_z = 0.83;
+    pin.rotation_axis = Vec3(1.0, -2.0, 0.5);
+
+    SimParams params = SimParams::zeros();
+    params.kpin = 13.0;
+    params.rigid_pin_time = 0.37;
+    params.rigid_pins = {pin};
+
+    const Vec4 q_n = quaternion_normalize(Vec4(0.9, -0.1, 0.2, 0.3));
+    const Vec3 center(0.2, -0.35, 0.15);
+    const Vec3 omega(0.4, -0.25, 0.6);
+    constexpr double dt = 0.03;
+    const RigidEnergyDerivatives derivatives = rigid_pin_derivatives(
+        0, center, q_n, omega, params, dt, nullptr, true);
+
+    const Vec3 target =
+        rigid_pin_target_position(pin, params.rigid_pin_time);
+    const auto energy = [&](const Vec3& candidate_center,
+                            const Vec3& candidate_omega) {
+        const Vec3 x = world_space_position(
+            pin.local_position, candidate_center, q_n, candidate_omega, dt);
+        return 0.5 * dt * dt * params.kpin
+            * (x - target).squaredNorm();
+    };
+
+    constexpr double h = 1.0e-6;
+    Vec3 translation_gradient = Vec3::Zero();
+    Vec3 omega_gradient = Vec3::Zero();
+    Mat33 omega_hessian = Mat33::Zero();
+    for (int axis = 0; axis < 3; ++axis) {
+        Vec3 step = Vec3::Zero();
+        step[axis] = h;
+        translation_gradient[axis] =
+            (energy(center + step, omega) - energy(center - step, omega))
+            / (2.0 * h);
+        omega_gradient[axis] =
+            (energy(center, omega + step) - energy(center, omega - step))
+            / (2.0 * h);
+        const Vec3 plus_gradient = rigid_pin_derivatives(
+            0, center, q_n, omega + step, params, dt).orientation_gradient;
+        const Vec3 minus_gradient = rigid_pin_derivatives(
+            0, center, q_n, omega - step, params, dt).orientation_gradient;
+        omega_hessian.col(axis) =
+            (plus_gradient - minus_gradient) / (2.0 * h);
+    }
+
+    EXPECT_LT(
+        (derivatives.translation_gradient - translation_gradient).norm(),
+        1.0e-9);
+    EXPECT_LT(
+        (derivatives.orientation_gradient - omega_gradient).norm(),
+        1.0e-9);
+    EXPECT_LT((derivatives.translation_translation_hessian
+                  - (dt * dt * params.kpin) * Mat33::Identity()).norm(),
+        1.0e-14);
+    EXPECT_LT((derivatives.orientation_orientation_hessian - omega_hessian)
+                  .norm(),
+        1.0e-8);
+}
+
 TEST(RigidBodyIPCQuaternionWrappers, MultiplyAndConjugateUseScalarFirstHamiltonConvention) {
     const Vec4 a(0.5, -0.2, 0.4, 0.1);
     const Vec4 b(-0.3, 0.6, -0.1, 0.2);

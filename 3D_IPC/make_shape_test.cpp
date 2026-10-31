@@ -6467,3 +6467,167 @@ TEST(RigidObjectsInBoxExample, PresetsAreSceneSpecificAndExplicitFlagsOverrideTh
     EXPECT_DOUBLE_EQ(unrelated.friction_coefficient, 0.0);
     EXPECT_FALSE(unrelated.fixed_iters);
 }
+
+TEST(ArchExample, FrictionalPresetKeepsDefaultDensityAndAllStonesDynamic) {
+    IPCArgs3D args;
+    char program[] = "3D_sim", example_flag[] = "--example", scene[] = "20";
+    char* argv[] = {program, example_flag, scene};
+    ASSERT_TRUE(args.parse(3, argv));
+    SimParams params = args.to_sim_params();
+    EXPECT_DOUBLE_EQ(params.rigid_density, 900.0);
+    EXPECT_DOUBLE_EQ(params.friction_coefficient, 0.5);
+    EXPECT_DOUBLE_EQ(params.d_hat, 0.05);
+    EXPECT_LT(params.gravity.y(), 0.0);
+    EXPECT_DOUBLE_EQ(args.fps, 30.0);
+    EXPECT_EQ(args.substeps, 1);
+    EXPECT_EQ(args.max_substep_iters, 10);
+    EXPECT_DOUBLE_EQ(params.dt(), 1.0 / 30.0);
+
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    std::vector<Vec3> ground;
+    std::vector<int> ground_tris;
+    build_arch_example(args, mesh, state, X, pins, params, ground, ground_tris);
+    ASSERT_EQ(mesh.rb_update_modes.size(), 101U);
+    for (const auto mode : mesh.rb_update_modes)
+        EXPECT_EQ(mode, RigidBodyUpdateMode::TranslationAndOrientation);
+    EXPECT_TRUE(pins.empty());
+    EXPECT_TRUE(params.rigid_pins.empty());
+    EXPECT_EQ(state.deformed_positions.size(), 808U);
+    EXPECT_EQ(ground.size(), 4U);
+    EXPECT_EQ(params.sdf_planes.size(), 1U);
+    // Solver tuning must preserve the source release geometry.
+    const auto directory = std::filesystem::path(__FILE__).parent_path()
+        / "example_obj" / "arch" / "num_stones=101";
+    for (const int body : {0, 50, 100}) {
+        const std::string name = "stone-" + std::string(body < 9 ? "0" : "")
+            + std::to_string(body + 1) + ".obj";
+        std::vector<Vec3> source;
+        std::vector<int> triangles;
+        load_obj_mesh((directory / name).string(), source, triangles);
+        ASSERT_EQ(source.size(), mesh.rb_nodes[body].size());
+        for (std::size_t i = 0; i < source.size(); ++i)
+            EXPECT_TRUE(state.deformed_positions[mesh.rb_nodes[body][i]]
+                            .isApprox(source[i], 1.0e-12));
+    }
+}
+
+TEST(ArchExample, ExplicitPhysicsAndSolverFlagsOverrideSettlingPreset) {
+    IPCArgs3D args;
+    std::vector<std::string> values = {"3D_sim", "--example", "20",
+        "--rigid_density", "1200", "--friction_coefficient", "0.2",
+        "--d_hat", "0.0005", "--substeps", "2", "--fixed_iters", "false"};
+    std::vector<char*> argv;
+    for (auto& value : values) argv.push_back(value.data());
+    ASSERT_TRUE(args.parse(static_cast<int>(argv.size()), argv.data()));
+    EXPECT_DOUBLE_EQ(args.rigid_density, 1200.0);
+    EXPECT_DOUBLE_EQ(args.friction_coefficient, 0.2);
+    EXPECT_DOUBLE_EQ(args.d_hat, 0.0005);
+    EXPECT_EQ(args.substeps, 2);
+    EXPECT_FALSE(args.fixed_iters);
+}
+
+TEST(AnchorExample, MovingXSpoolPreservesSourceGeometryAndFreeChain) {
+    IPCArgs3D args;
+    char program[] = "3D_sim", flag[] = "--example", scene[] = "19";
+    char* argv[] = {program, flag, scene};
+    ASSERT_TRUE(args.parse(3, argv));
+    EXPECT_DOUBLE_EQ(args.rigid_density, 900.0);
+    EXPECT_DOUBLE_EQ(args.anchor_drive_speed, -100.0);
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    auto params = args.to_sim_params();
+    EXPECT_DOUBLE_EQ(params.friction_coefficient, 0.0);
+    EXPECT_DOUBLE_EQ(params.damping, 1.0);
+    build_anchor_example(args, mesh, state, X, pins, params);
+    ASSERT_EQ(mesh.rb_nodes.size(), 23U);
+    ASSERT_EQ(state.deformed_positions.size(), 9156U);
+    ASSERT_EQ(mesh.tris.size() / 3, 18304U);
+    EXPECT_EQ(mesh.rb_update_modes[0], RigidBodyUpdateMode::OrientationOnly);
+    for (int body = 1; body < 23; ++body) {
+        EXPECT_EQ(mesh.rb_update_modes[body], RigidBodyUpdateMode::TranslationAndOrientation);
+        EXPECT_TRUE(state.v_coms[body].isZero());
+        EXPECT_TRUE(state.omega[body].isZero());
+    }
+    EXPECT_TRUE(pins.empty());
+    ASSERT_EQ(params.rigid_pins.size(), 4U);
+    const double omega = -100.0 * M_PI / 180.0;
+    EXPECT_TRUE(state.omega[0].isApprox(Vec3(omega, 0.0, 0.0), 1.0e-14));
+    for (const auto& motor : params.rigid_pins) {
+        EXPECT_EQ(motor.body, 0);
+        EXPECT_TRUE(motor.rotation_axis.isApprox(Vec3::UnitX(), 1.0e-14));
+        EXPECT_DOUBLE_EQ(motor.angular_velocity_z, omega);
+        const Vec3 expected = state.x_coms[0]
+            + Eigen::AngleAxisd(0.5 * omega, Vec3::UnitX()) * motor.local_position;
+        EXPECT_TRUE(rigid_pin_target_position(motor, 0.5).isApprox(expected, 1.0e-13));
+    }
+    const auto root = std::filesystem::path(__FILE__).parent_path() / "example_obj";
+    std::vector<Vec3> spool, link, anchor;
+    std::vector<int> triangles;
+    load_obj_mesh((root / "anchor/spool.obj").string(), spool, triangles);
+    triangles.clear();
+    load_obj_mesh((root / "wrecking_ball/link.obj").string(), link, triangles);
+    triangles.clear();
+    load_obj_mesh((root / "anchor/anchor.obj").string(), anchor, triangles);
+    for (int body = 0; body < 23; ++body) {
+        const auto& source = body == 0 ? spool : body == 22 ? anchor : link;
+        ASSERT_EQ(mesh.rb_nodes[body].size(), source.size());
+        const Vec3 translation(0.0, body == 0 ? 1.5 / 1.9
+            : body == 22 ? -16.75 : -(body - 1) * (1.5 / 1.9), 0.0);
+        for (std::size_t local = 0; local < source.size(); ++local) {
+            Vec3 expected = source[local];
+            if (body > 0 && body < 22 && (body - 1) % 2 == 0)
+                expected = Eigen::AngleAxisd(0.5 * M_PI, Vec3::UnitY()) * expected;
+            expected += translation;
+            EXPECT_TRUE(state.deformed_positions[mesh.rb_nodes[body][local]]
+                            .isApprox(expected, 1.0e-12));
+        }
+    }
+}
+
+TEST(AnchorExample, ZeroMotorSpeedFixesSpoolAndInvalidMotorInputsAreRejected) {
+    IPCArgs3D args;
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    args.anchor_drive_speed = 0.0;
+    auto params = args.to_sim_params();
+    build_anchor_example(args, mesh, state, X, pins, params);
+    EXPECT_EQ(mesh.rb_update_modes[0], RigidBodyUpdateMode::None);
+    EXPECT_TRUE(params.rigid_pins.empty());
+    EXPECT_TRUE(state.omega[0].isZero());
+    args.anchor_drive_speed = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(build_anchor_example(args, mesh, state, X, pins, params), std::invalid_argument);
+    args.anchor_drive_speed = -100.0;
+    args.anchor_motor_radius = 0.0;
+    EXPECT_THROW(build_anchor_example(args, mesh, state, X, pins, params), std::invalid_argument);
+    args.anchor_motor_radius = 2.0;
+    args.anchor_shaft_span = -1.0;
+    EXPECT_THROW(build_anchor_example(args, mesh, state, X, pins, params), std::invalid_argument);
+    args.anchor_shaft_span = 3.0;
+    params.kpin = 0.0;
+    EXPECT_THROW(build_anchor_example(args, mesh, state, X, pins, params), std::invalid_argument);
+}
+
+TEST(AnchorExample, ExplicitFlagsOverrideMotorAndSolverPresets) {
+    IPCArgs3D args;
+    std::vector<std::string> values = {"3D_sim", "--example", "19",
+        "--anchor_drive_speed", "-55", "--anchor_motor_radius", "1.5",
+        "--anchor_shaft_span", "2.5", "--rigid_density", "1100",
+        "--kpin", "12345", "--substeps", "1", "--max_substep_iters", "2"};
+    std::vector<char*> argv;
+    for (auto& value : values) argv.push_back(value.data());
+    ASSERT_TRUE(args.parse(static_cast<int>(argv.size()), argv.data()));
+    EXPECT_DOUBLE_EQ(args.anchor_drive_speed, -55.0);
+    EXPECT_DOUBLE_EQ(args.anchor_motor_radius, 1.5);
+    EXPECT_DOUBLE_EQ(args.anchor_shaft_span, 2.5);
+    EXPECT_DOUBLE_EQ(args.rigid_density, 1100.0);
+    EXPECT_DOUBLE_EQ(args.kpin, 12345.0);
+    EXPECT_EQ(args.substeps, 1);
+    EXPECT_EQ(args.max_substep_iters, 2);
+}

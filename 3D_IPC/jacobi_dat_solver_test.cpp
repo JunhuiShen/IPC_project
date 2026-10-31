@@ -342,7 +342,7 @@ TEST(JacobiDATSolver, PublicDriversMatchManualSubstepsAndSkipLegacyGuesses) {
     }
 }
 
-TEST(JacobiDATSolver, RigidBlocksAreRejectedBeforePositionsChange) {
+TEST(JacobiDATSolver, DeformableEntryRejectsRigidBlocksAndGeneralDriverAcceptsThem) {
     Scene s;
     DeformedState state;
     create_rigid_body({Vec3::Zero(), Vec3::UnitX(), Vec3::UnitY(), Vec3::UnitZ()},
@@ -355,7 +355,7 @@ TEST(JacobiDATSolver, RigidBlocksAreRejectedBeforePositionsChange) {
     BroadPhase phase;
     EXPECT_THROW(solve(s, phase), std::invalid_argument);
     expect_positions(s.x, original, 0.0);
-    EXPECT_THROW(advance_one_frame_general(state, s.mesh, s.adj, s.pins,
-        s.params, phase), std::invalid_argument);
+    EXPECT_TRUE(advance_one_frame_general(state, s.mesh, s.adj, s.pins,
+        s.params, phase).converged);
     expect_positions(state.deformed_positions, original, 0.0);
 }

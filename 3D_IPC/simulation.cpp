@@ -188,11 +188,11 @@ int main(int argc, char** argv) {
     std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
     if (params.use_jacobi_dat) {
-        std::cout << "Deformable solver: Jacobi with planar DAT"
+        std::cout << "Solver: Jacobi with planar DAT (including curved rigid motion)"
                   << " (gamma=" << params.dat_gamma
                   << ", query_radius=" << params.resolved_dat_query_radius()
                   << ", node_box_padding=" << params.dat_node_box_padding << ")\n"
-                  << "Deformable initial guess: previous positions (DAT skips initial guesses)\n";
+                  << "Initial guess: previous positions and rigid poses (DAT skips initial guesses)\n";
     }
     if (!params.use_jacobi_dat
         && (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based)) {

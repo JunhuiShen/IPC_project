@@ -57,7 +57,7 @@ struct SimParams {
     bool   use_basic_experimental; // experimental cloth; with SIMD also selects general v2
     bool   use_basic_experimental_v2; // resolved from use_basic_experimental && use_simd
     bool   use_simd;             // select v2 SIMD cloth/general energy/contact assembly
-    bool   use_jacobi_dat = false; // deformable cloth/solid Jacobi updates filtered by planar DAT
+    bool   use_jacobi_dat = false; // cloth/solid/rigid Jacobi updates filtered by planar DAT
     double dat_gamma = 0.9;
     double dat_query_radius = 0.0; // 0: 1.5*d_hat when positive, otherwise node_box_max
     double dat_node_box_padding = 1.2;

@@ -48,3 +48,4 @@ xyzrgb_dragon_full.obj
 /tools/test_deepseek_pilot.py
 /tools/test_deepseek_provider.py
 /tools/DEEPSEEK_AUDIT.md
+/tools/acceptance_anchor_axis.py

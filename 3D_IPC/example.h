@@ -272,15 +272,15 @@ void build_bike_chain_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
-// Example 19: original anchor scene at frame zero (23 rigid bodies).
-// Spool is fixed; prescribed winding motion is not configured.
+// Example 19: original 23-body anchor scene. A four-point motor winds the
+// spool about world X; zero anchor_drive_speed restores a fixed spool.
 void build_anchor_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params);
 
 // Example 20: 101 original rigid arch stones and the source-sized ground.
-// No solver/friction presets are applied for either initial-scene example.
+// All stones are dynamic; scene presets add frictional settling under gravity.
 void build_arch_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,

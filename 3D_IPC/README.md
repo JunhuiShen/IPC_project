@@ -81,6 +81,9 @@ Use `-DIPC_ENABLE_NATIVE_ARCH=OFF` when building for another CPU. SIMD v2
 uses the available backend or a scalar fallback; OpenMP controls parallel
 threads independently.
 
+A separate CUDA solver is built from [`gpu/`](gpu/). See the
+[GPU guide](gpu/README.md) for dependencies, build commands, and supported modes.
+
 ### Components and versions
 
 We use the following environment for the CPU simulator:
@@ -139,8 +142,8 @@ There is no solid-only scene among the categorized examples.
 | 16 | Rigid body only | Gears, cubes, balls and polygonal prisms drop onto an interlocking net built from the wrecking-ball chain-link mesh, with fixed boundary links. |
 | 17 | Rigid body only | 300 mixed rigid objects (50 each of cubes, polygonal prisms, chain links, Bunny, Spot and gears) drop into one fixed open-top rigid box. |
 | 18 | Rigid body only | Bike-chain assembly with 138 separate rigid bodies and 47,761 vertices, driven by moving spring pins on the large sprocket; both sprocket centers are fixed and gravity is disabled. |
-| 19 | Rigid body only | Initial anchor scene: 21 chain links, the anchor and a fixed spool. |
-| 20 | Rigid body only | Initial 101-stone arch above a fixed ground plane. |
+| 19 | Rigid body only | A world-X spool motor winds free chain links and lifts a rigid anchor. |
+| 20 | Rigid body only | Free rigid stones settle into a standing arch under gravity with friction. |
 
 ### Scene assets
 
@@ -204,17 +207,8 @@ and +y as the up direction.
 | Experimental SIMD v2 | `--use_basic_experimental true --use_simd true`; supports cloth, rigid, and mixed scenes. |
 | Experimental scalar cloth v1 | `--use_basic_experimental true --use_simd false`. |
 | Basic cloth grid | `--use_cloth_grid true`; cloth only, with OGC disabled. See `--help` for grid sizing flags. |
-| Jacobi with planar DAT | `--use_jacobi_dat true`; CPU cloth/solid scenes without rigid bodies, with OGC and cloth grid disabled. Takes precedence over experimental/SIMD solver flags. |
-
-Jacobi with DAT starts every substep from the previous positions and skips all
-initial-guess flags. Each simultaneous Jacobi update passes through planar
-Divide and Truncate (DAT). `--dat_gamma` defaults to `0.9` and must be strictly
-between 0 and 1; `--dat_node_box_padding` defaults to `1.2` and must be at least 1.
-`--dat_query_radius` defaults to `0` (automatic): it uses `1.5*d_hat` when
-`d_hat > 0`, otherwise `node_box_max`. The resolved radius must be finite and
-positive. Set an explicit positive radius to override this rule. DAT filters
-mesh surface contact; it does not prevent tetrahedron inversion or enforce SDF
-nonpenetration. SDF penalties remain part of the Jacobi update.
+| Jacobi with planar DAT | `--use_jacobi_dat true`; CPU cloth, solid, rigid, and mixed scenes, with OGC and cloth grid disabled. Takes precedence over experimental/SIMD solver flags. CUDA DAT remains deformable-only. |
+| CUDA solver | `gpu/build/3D_sim_gpu`; requires `--fixed_iters` and, for ordinary solving, `--use_ticcd false`. OGC and cloth grid are unsupported; see the [GPU guide](gpu/README.md) for mode restrictions. |
 
 Run a small deformable example with DAT:
 
@@ -505,20 +499,29 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --theta_box_min 0.0004 --theta_box_max 0.008 --node_box_update_count 25 \
   --format geo --outdir example18_pin_output
 
-# Example 19: anchor, hanging chain and fixed spool (frame zero)
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 19 --datadir example_obj --num_frames 0 \
-  --format geo
+# Example 19: chain winds onto the spool and lifts the anchor
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
+./build/3D_sim --example 19 --datadir example_obj --num_frames 600 \
+  --substeps 20 --max_substep_iters 20 --fixed_iters \
+  --kpin 1e7 --k_barrier 1e8 \
+  --node_box_min 0.0005 --node_box_max 0.1 \
+  --theta_box_min 0.001 --theta_box_max 0.01 \
+  --use_basic_experimental true --use_simd true \
+  --exact_computation_fallback false \
+  --outdir results/example19_anchor/frames
 
-# Example 20: 101-stone arch above the ground plane (frame zero)
-OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 20 --datadir example_obj --num_frames 0 \
-  --format geo
+# Example 20: frictional arch settling
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
+./build/3D_sim --example 20 --datadir example_obj --num_frames 120 \
+  --substeps 1 --max_substep_iters 10 --fixed_iters \
+  --friction_coefficient 0.5 --friction_velocity_epsilon 0.001 \
+  --d_hat 0.05 --k_barrier 1e7 --k_sdf 1e10 \
+  --node_box_min 0.01 --node_box_max 0.2 \
+  --theta_box_min 0.001 --theta_box_max 0.05 --node_box_update_count 5 \
+  --use_basic_experimental true --use_simd true \
+  --exact_computation_fallback false \
+  --outdir results/example20_arch_box_tuned/frames
 ```
-
-Examples 19 and 20 export frame zero to the normal `frames_sim3d/` directory;
-solver settings and spool winding motion are not configured. For Example 20,
-load `static_colliders.geo` alongside `frame_0000.geo` to include the ground.
 
 ## Build and test
 
@@ -569,12 +572,28 @@ fixtures; it is not needed to run simulations.
 
 ## Acknowledgments
 
+The core IPC contact formulation follows:
+
+> Minchen Li, Zachary Ferguson, Teseo Schneider, Timothy Langlois, Denis Zorin,
+> Daniele Panozzo, Chenfanfu Jiang, and Danny M. Kaufman. *Incremental Potential
+> Contact: Intersection- and Inversion-Free, Large-Deformation Dynamics.*
+> ACM Transactions on Graphics 39(4), Article 49, 2020.
+> [Project page](https://ipc-sim.github.io/)
+
+Rigid-body IPC background and reference scenes:
+
+> Zachary Ferguson, Minchen Li, Teseo Schneider, Francisca Gil-Ureta, Timothy
+> Langlois, Chenfanfu Jiang, Denis Zorin, Danny M. Kaufman, and Daniele Panozzo.
+> *Intersection-Free Rigid Body Dynamics.* ACM Transactions on Graphics 40(4),
+> Article 183, 2021. [Project page](https://ipc-sim.github.io/rigid-ipc/)
+
 Our general (multi-vertex motion) continuous collision detection is provided by
 [**Tight-Inclusion CCD**](https://github.com/Continuous-Collision-Detection/Tight-Inclusion):
 
 > Bolun Wang, Zachary Ferguson, Teseo Schneider, Xin Jiang, Marco Attene, and
-> Daniele Panozzo. *A Large-Scale Benchmark and an Inclusion-Based Algorithm
-> for Continuous Collision Detection.* ACM Transactions on Graphics, 2021.
+> Daniele Panozzo. *A Large Scale Benchmark and an Inclusion-Based Algorithm
+> for Continuous Collision Detection.* ACM Transactions on Graphics 40(5),
+> Article 188, 2021. [doi:10.1145/3460775](https://doi.org/10.1145/3460775)
 
 The library is fetched automatically at configure time via CMake's
 `FetchContent`. See its repository for license and citation details.
@@ -590,3 +609,29 @@ Our OGC narrow phase and `global_gauss_seidel_solver_ogc` implement:
 > Anka He Chen, Jerry Hsu, Ziheng Liu, Miles Macklin, Yin Yang, and Cem Yuksel.
 > *Offset Geometric Contact.* ACM Transactions on Graphics 44(4):160, 2025.
 > [doi:10.1145/3731205](https://doi.org/10.1145/3731205)
+
+The optional Jacobi-DAT path follows:
+
+> Anka He Chen, Jerry Hsu, Youssef Ayman, and Miles Macklin. *Divide and Truncate:
+> A Penetration and Inversion Free Framework for Coupled Multi-physics Systems.*
+> 2026. [arXiv:2604.15513](https://arxiv.org/abs/2604.15513)
+
+The discrete-shell bending model follows:
+
+> Eitan Grinspun, Anil N. Hirani, Mathieu Desbrun, and Peter Schröder.
+> *Discrete Shells.* ACM SIGGRAPH/Eurographics Symposium on Computer Animation,
+> 62–67, 2003. [Project page](https://multires.caltech.edu/pubs/DS-CDROM/)
+
+The corotated elasticity model is described in:
+
+> Alexey Stomakhin, Russell Howes, Craig Schroeder, and Joseph M. Teran.
+> *Energetically Consistent Invertible Elasticity.* ACM SIGGRAPH/Eurographics
+> Symposium on Computer Animation, 25–32, 2012.
+> [doi:10.2312/SCA/SCA12/025-032](https://doi.org/10.2312/SCA/SCA12/025-032)
+
+The SVD routine and its CPU/GPU adaptations follow:
+
+> Theodore Gast, Chuyuan Fu, Chenfanfu Jiang, and Joseph Teran. *Implicit-shifted
+> Symmetric QR Singular Value Decomposition of 3x3 Matrices.* UCLA Mathematics
+> Department Technical Report CAM16-19, 2016.
+> [Technical report](https://ww3.math.ucla.edu/camreport/cam16-19.pdf)

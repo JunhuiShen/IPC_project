@@ -3135,12 +3135,20 @@ void build_bike_chain_example(
     ref_mesh.build_deformable_nodes();
 }
 
-// Example 19: Figure 9's initial anchor, 21 interlinked rings and spool.
-// Only the initial scene is staged: the spool is held at its authored pose;
-// the paper's prescribed winding motion is intentionally not implemented.
+// Example 19: Figure 9's anchor and 21 interlinked rings, wound onto a spool.
+// A stiff four-point motor drives the spool about its fixed COM's world-X
+// axis. All chain links and the anchor remain unconstrained rigid bodies.
 void build_anchor_example(
     const IPCArgs3D& args, RefMesh& ref_mesh, DeformedState& state,
     std::vector<Vec2>& X, std::vector<Pin>& pins, SimParams& params) {
+    if (!std::isfinite(args.anchor_drive_speed)
+        || !std::isfinite(args.anchor_motor_radius) || args.anchor_motor_radius <= 0.0
+        || !std::isfinite(args.anchor_shaft_span) || args.anchor_shaft_span <= 0.0
+        || (args.anchor_drive_speed != 0.0
+            && (!std::isfinite(params.kpin) || params.kpin <= 0.0))) {
+        throw std::invalid_argument(
+            "Example 19 requires a finite motor speed, positive motor radius/shaft span, and positive kpin when driven");
+    }
     const auto directory = paper_scene_asset_directory(
         args.datadir, "anchor",
         {"anchor.obj", "spool.obj", "../wrecking_ball/link.obj"});
@@ -3149,13 +3157,32 @@ void build_anchor_example(
     params.sdf_cylinders.clear();
     params.sdf_spheres.clear();
     params.rigid_pins.clear();
+    params.rigid_pin_time = 0.0;
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
     const Vec4 quarter_turn_y(std::cos(0.25 * kPi), 0.0,
                              std::sin(0.25 * kPi), 0.0);
     constexpr double link_spacing = 1.5 / 1.9;
+    const bool driven = args.anchor_drive_speed != 0.0;
     append_authored_obj_rigid_body(
         directory / "spool.obj", Vec3(0.0, link_spacing, 0.0), identity,
-        args.rigid_density, RigidBodyUpdateMode::None, ref_mesh, state);
+        args.rigid_density, driven ? RigidBodyUpdateMode::OrientationOnly
+                                   : RigidBodyUpdateMode::None, ref_mesh, state);
+    if (driven) {
+        const double omega = args.anchor_drive_speed * kPi / 180.0;
+        state.omega[0] = Vec3(omega, 0.0, 0.0);
+        for (const int node : ref_mesh.rb_nodes[0])
+            state.velocities[node] = state.omega[0].cross(
+                state.deformed_positions[node] - state.x_coms[0]);
+        const double radius = args.anchor_motor_radius;
+        const double span = args.anchor_shaft_span;
+        const Vec3 points[4] = {Vec3(-span, radius, 0.0), Vec3(-span, -radius, 0.0),
+                                Vec3(span, 0.0, radius), Vec3(span, 0.0, -radius)};
+        for (const Vec3& local : points) {
+            RigidPin motor{0, local, state.x_coms[0] + local, state.x_coms[0], omega};
+            motor.rotation_axis = Vec3::UnitX();
+            params.rigid_pins.push_back(motor);
+        }
+    }
     for (int link = 0; link < 21; ++link) {
         append_authored_obj_rigid_body(
             directory / "../wrecking_ball/link.obj", Vec3(0.0, -link * link_spacing, 0.0),

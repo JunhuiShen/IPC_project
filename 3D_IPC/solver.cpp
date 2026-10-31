@@ -4140,6 +4140,175 @@ Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref
 
 } // namespace rb_solver
 
+SolverResult global_jacobi_solver_dat_general(const RefMesh& mesh,
+    const DeformedState& state, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params,
+    std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
+    std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new,
+    std::vector<Vec3>& omega_new, BroadPhase& broad_phase,
+    const std::string& outdir)
+{
+    params.validate_jacobi_dat_parameters(true);
+    validate_solver_friction_parameters(params,"global_jacobi_solver_dat_general");
+    if(mesh.rb_nodes.empty()) {
+        if(!x_com_new.empty()||!q_new.empty()||!omega_new.empty())
+            throw std::invalid_argument("Jacobi DAT: unexpected rigid coordinates");
+        return global_jacobi_solver_dat(mesh,adj,pins,params,xnew,xhat,
+            state.velocities,broad_phase,outdir,&state.deformed_positions);
+    }
+    rb_solver::validate_rigid_solver_state(mesh,state,x_com_new,q_new,omega_new);
+    const std::size_t n=xnew.size(),bodies=mesh.rb_nodes.size();
+    if(n>std::size_t(std::numeric_limits<int>::max())||xhat.size()!=n
+        ||state.deformed_positions.size()!=n||state.velocities.size()!=n
+        ||mesh.mass.size()!=n||mesh.node_to_rb.size()!=n)
+        throw std::invalid_argument("Jacobi DAT: inconsistent state extents");
+    if(params.max_global_iters<0||!std::isfinite(params.fps)||params.fps<=0
+        ||params.substeps<=0||!std::isfinite(params.damping)||params.damping<0
+        ||!std::isfinite(params.d_hat)||params.d_hat<0
+        ||!std::isfinite(params.tol_abs)||params.tol_abs<0
+        ||!std::isfinite(params.tol_rel)||params.tol_rel<0||!params.gravity.allFinite())
+        throw std::invalid_argument("Jacobi DAT: invalid solve parameters");
+    for(double value:{params.mu,params.lambda,params.solid_mu,params.solid_lambda,
+        params.kpin,params.kB,params.k_barrier,params.k_sdf,params.eps_sdf})
+        if(!std::isfinite(value))throw std::invalid_argument("Jacobi DAT: nonfinite energy parameter");
+    for(std::size_t v=0;v<n;++v) if(!xnew[v].allFinite()||!xhat[v].allFinite()
+        ||!state.deformed_positions[v].allFinite()||!state.velocities[v].allFinite()
+        ||!std::isfinite(mesh.mass[v])||mesh.mass[v]<0)
+        throw std::invalid_argument("Jacobi DAT: invalid particle state");
+    for(const auto& pin:pins) if(pin.vertex_index<0||std::size_t(pin.vertex_index)>=n
+        ||mesh.node_to_rb[pin.vertex_index]>=0||!pin.target_position.allFinite())
+        throw std::invalid_argument("Jacobi DAT: invalid pin or pin on rigid proxy");
+    for(const auto& entry:adj) if(entry.first<0||std::size_t(entry.first)>=n)
+        throw std::invalid_argument("Jacobi DAT: invalid adjacency node");
+    SimParams solve_params=params;
+    const double dt=solve_params.dt(),query_radius=solve_params.resolved_dat_query_radius();
+    (void)solve_params.dt2();
+    std::vector<Vec3> centers=x_com_new,angular=omega_new,positions=xnew;
+    std::vector<Vec4> orientations=q_new;
+    std::vector<int> local(n,-1);
+    std::vector<Mat33> predictors(bodies);
+    for(std::size_t b=0;b<bodies;++b) {
+        const auto mode=mesh.rb_update_modes[b];
+        if(mode!=RigidBodyUpdateMode::TranslationAndOrientation
+            &&mode!=RigidBodyUpdateMode::TranslationOnly
+            &&mode!=RigidBodyUpdateMode::OrientationOnly&&mode!=RigidBodyUpdateMode::None)
+            throw std::invalid_argument("Jacobi DAT: invalid rigid update mode");
+        if(!state.x_coms[b].allFinite()||!state.v_coms[b].allFinite()
+            ||!state.omega[b].allFinite()||!state.orientations[b].allFinite()
+            ||std::abs(state.orientations[b].squaredNorm()-1)>1e-10
+            ||!centers[b].allFinite()||!angular[b].allFinite()||!orientations[b].allFinite()
+            ||!std::isfinite(mesh.total_mass[b])||mesh.total_mass[b]<=0||!mesh.I_hat[b].allFinite()
+            ||mesh.rb_nodes[b].size()!=mesh.ref_positions[b].size())
+            throw std::invalid_argument("Jacobi DAT: invalid rigid state");
+        if(!updates_rigid_translation(mode))centers[b]=state.x_coms[b];
+        if(!updates_rigid_orientation(mode))angular[b].setZero();
+        orientations[b]=quaternion_from_angular_velocity(state.orientations[b],angular[b],dt);
+        predictors[b]=rigid_rotation_predictor(state.orientations[b],state.omega[b],dt);
+        for(std::size_t j=0;j<mesh.rb_nodes[b].size();++j) {
+            const int v=mesh.rb_nodes[b][j];
+            if(v<0||std::size_t(v)>=n||local[v]>=0||mesh.node_to_rb[v]!=int(b)
+                ||!mesh.ref_positions[b][j].allFinite())
+                throw std::invalid_argument("Jacobi DAT: invalid rigid ownership");
+            local[v]=int(j);
+            positions[v]=world_space_position(mesh.ref_positions[b][j],centers[b],orientations[b]);
+        }
+    }
+    std::vector<unsigned char> solid(n,0),surface(n,0),classified(n,0);
+    for(int v:mesh.tets) {
+        if(v<0||std::size_t(v)>=n||mesh.node_to_rb[v]>=0)throw std::invalid_argument("Jacobi DAT: invalid solid node");
+        solid[v]=1;
+    }
+    for(int v:mesh.tet_nodes) {
+        if(v<0||std::size_t(v)>=n)throw std::invalid_argument("Jacobi DAT: invalid solid classification");
+        classified[v]=1;
+    }
+    if(solid!=classified)throw std::invalid_argument("Jacobi DAT: inconsistent solid classification");
+    for(int v:mesh.surface_nodes) {
+        if(v<0||std::size_t(v)>=n)throw std::invalid_argument("Jacobi DAT: invalid surface node");
+        surface[v]=1;
+    }
+    std::vector<int> cloth;
+    std::vector<IncidentTriangles> incident(n);
+    for(std::size_t v=0;v<n;++v)if(mesh.node_to_rb[v]<0&&!solid[v])cloth.push_back(int(v));
+    for(const auto& entry:adj)if(mesh.node_to_rb[entry.first]<0&&!solid[entry.first])incident[entry.first]=entry.second;
+    const PinMap pin_map=build_pin_map(pins,int(n));
+    const std::vector<Vec3> zero_nodes(n,Vec3::Zero()),zero_bodies(bodies,Vec3::Zero());
+    // Validate all ownership/connectivity before assembly can index those arrays.
+    // No caller-owned numerical state is changed until the complete solve joins.
+    (void)general_planar_DAT(params.dat_gamma,query_radius,mesh,zero_nodes,
+        positions,centers,angular,state.orientations,zero_bodies,zero_bodies,dt,
+        params.dat_node_box_padding);
+    BroadPhase phase;
+    std::vector<AABB> boxes(n);
+    std::vector<std::vector<int>> body_nt,body_ss;
+    std::vector<double> body_residuals;
+    const auto rebuild=[&](double radius=0.0) {
+        for(std::size_t v=0;v<n;++v)boxes[v]=AABB(positions[v]-Vec3::Constant(radius),positions[v]+Vec3::Constant(radius));
+        if(!mesh.tets.empty())phase.initialize_surface_nodes(boxes,mesh,params.d_hat,BroadPhase::InitializationMode::GeneralSolver);
+        else phase.initialize(boxes,mesh,params.d_hat,BroadPhase::InitializationMode::GeneralSolver);
+        build_rb_contact_incidence(phase.cache(),mesh.node_to_rb,int(bodies),body_nt,body_ss);
+    };
+    SolverResult result;
+    const auto residual=[&]() {
+        rebuild();
+        result.final_cloth_residual=compute_global_deformable_residual(mesh,adj,pins,
+            solve_params,positions,xhat,phase,cloth,&pin_map,&incident,nullptr,nullptr,&state.deformed_positions);
+        result.final_solid_residual=mesh.tets.empty()?0:compute_global_solid_residual(
+            mesh,pins,solve_params,positions,xhat,phase,&pin_map,&solid,&surface,nullptr,&state.deformed_positions);
+        result.final_rigid_residual=rb_solver::rigid_body_unnormalized_residual(mesh,state,
+            phase.cache(),body_nt,body_ss,local,positions,solve_params,centers,angular,dt,
+            body_residuals,&predictors);
+        result.final_residual=result.final_cloth_residual+result.final_solid_residual+result.final_rigid_residual;
+        if(!std::isfinite(result.final_residual))throw std::runtime_error("Jacobi DAT: nonfinite residual");
+    };
+    const auto converged=[&]() {
+        const auto block=[&](double value,double initial){return value<=std::max(params.tol_abs,params.tol_rel*initial);};
+        return block(result.final_cloth_residual,result.initial_cloth_residual)
+            &&block(result.final_solid_residual,result.initial_solid_residual)
+            &&block(result.final_rigid_residual,result.initial_rigid_residual);
+    };
+    if(!params.fixed_iters) {
+        result.has_residual=result.has_residual_components=true;
+        residual();
+        result.initial_cloth_residual=result.final_cloth_residual;
+        result.initial_solid_residual=result.final_solid_residual;
+        result.initial_rigid_residual=result.final_rigid_residual;
+        result.initial_residual=result.final_residual;
+        result.converged=converged();
+    }
+    for(int iteration=0;iteration<params.max_global_iters&&!result.converged;++iteration) {
+        rebuild();
+        const auto particle_updates=jacobi_step(mesh,adj,pins,solve_params,
+            positions,xhat,state.velocities,&state.deformed_positions,true);
+        std::vector<Vec3> dc(bodies,Vec3::Zero()),dw(bodies,Vec3::Zero());
+        parallel_body_setup(int(bodies),params.use_parallel,[&](int b){
+            const auto mode=mesh.rb_update_modes[b];
+            const auto kinematics=quaternion_omega_kinematics(state.orientations[b],angular[b],dt,updates_rigid_orientation(mode));
+            if(updates_rigid_translation(mode)&&params.damping>0)
+                dc[b]=-params.damping*rb_solver::compute_com_update(b,state,mesh,phase.cache(),
+                    body_nt[b],body_ss[b],local,positions,centers,angular,solve_params,dt,&kinematics);
+            if(updates_rigid_orientation(mode)&&params.damping>0)
+                dw[b]=-params.damping*rb_solver::compute_omega_update(b,state,mesh,phase.cache(),
+                    body_nt[b],body_ss[b],local,positions,centers,angular,solve_params,dt,&kinematics,&predictors[b]);
+            if(!dc[b].allFinite()||!dw[b].allFinite())throw std::runtime_error("Jacobi DAT: nonfinite rigid proposal");
+        });
+        auto accepted=general_planar_DAT(params.dat_gamma,query_radius,mesh,
+            particle_updates,positions,centers,angular,state.orientations,dc,dw,dt,
+            params.dat_node_box_padding);
+        // Publish exactly the represented endpoints which the filter certified.
+        positions.swap(accepted.positions);centers.swap(accepted.centers);
+        angular.swap(accepted.omega);orientations.swap(accepted.orientations);
+        result.iterations=iteration+1;
+        if(!params.fixed_iters){residual();result.converged=converged();}
+    }
+    if(params.fixed_iters)result.converged=true;
+    rebuild(params.write_substeps?query_radius*params.dat_node_box_padding:0);
+    if(params.write_substeps)write_substep_data(params,phase,positions,outdir,&mesh);
+    xnew.swap(positions);x_com_new.swap(centers);omega_new.swap(angular);q_new.swap(orientations);
+    broad_phase=std::move(phase);
+    return result;
+}
+
 // -----------------------------------------------------------------------------
 // Rigid-body solver workspace
 // -----------------------------------------------------------------------------
