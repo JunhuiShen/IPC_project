@@ -58,6 +58,7 @@ struct SimParams {
     bool   use_basic_experimental_v2; // resolved from use_basic_experimental && use_simd
     bool   use_simd;             // select v2 SIMD cloth/general energy/contact assembly
     bool   use_jacobi_dat = false; // cloth/solid/rigid Jacobi updates filtered by planar DAT
+    bool   use_jacobi_level_based_ccd = false; // Jacobi proposals filtered by level/color-ordered linear CCD
     double dat_gamma = 0.9;
     double dat_query_radius = 0.0; // 0: 1.5*d_hat when positive, otherwise node_box_max
     double dat_node_box_padding = 1.2;
@@ -69,7 +70,7 @@ struct SimParams {
     bool   use_ccd_guess;        // if true, use ccd_initial_guess as the substep start point
     bool   use_colored_ccd_guess; // cloth/solid: collision-colored linear CCD toward xhat; rigid proxies fixed; OGC takes priority
     bool   use_colored_ccd_guess_level_based; // alternative: discarded trial sweep, then level/color-ordered CCD
-    int    colored_ccd_guess_iters; // actual updating sweeps for either colored guess; excludes level trial (0 keeps x^n)
+    int    colored_ccd_guess_iters; // colored predictor or inner Jacobi-CCD updating sweeps; excludes level trial (0 keeps positions)
     double colored_ccd_guess_fraction; // fraction of xhat-x^n used only for either colored predictor's fixed target
     bool   use_verlet_guess;     // if true, start GS from xhat + dt²*gravity (Verlet predictor)
     bool   use_translation_guess;        // if true, start GS from x^n + C
@@ -124,6 +125,7 @@ struct SimParams {
         p.use_basic_experimental_v2 = false;
         p.use_simd                  = false;
         p.use_jacobi_dat            = false;
+        p.use_jacobi_level_based_ccd = false;
         p.dat_gamma                 = 0.9;
         p.dat_query_radius          = 0.0;
         p.dat_node_box_padding      = 1.2;
@@ -189,6 +191,11 @@ struct SimParams {
 
     // Explicit DAT entry points pass selected=true even when the driver flag is off.
     void validate_jacobi_dat_parameters(bool selected = false) const {
+        if (use_jacobi_dat && use_jacobi_level_based_ccd)
+            throw std::invalid_argument("Choose only one of --use_jacobi_dat and --use_jacobi_level_based_ccd");
+        // The CCD solver does not use DAT's radius, padding or relaxation.
+        // Preserve legacy validation outside this independently selected mode.
+        if (use_jacobi_level_based_ccd && !selected) return;
         if (!std::isfinite(dat_gamma) || dat_gamma <= 0.0 || dat_gamma >= 1.0)
             throw std::invalid_argument("--dat_gamma must be finite and in (0, 1)");
         if (!std::isfinite(dat_query_radius) || dat_query_radius < 0.0)
@@ -199,6 +206,20 @@ struct SimParams {
         if (use_ogc || use_ogc_solver || use_cloth_grid)
             throw std::invalid_argument("--use_jacobi_dat requires OGC and --use_cloth_grid to be disabled");
         (void)resolved_dat_query_radius();
+    }
+
+    // Explicit solver calls validate their CCD filter even with the flag off.
+    void validate_jacobi_level_based_ccd_parameters(bool selected = false) const {
+        if (use_jacobi_dat && use_jacobi_level_based_ccd)
+            throw std::invalid_argument("Choose only one of --use_jacobi_dat and --use_jacobi_level_based_ccd");
+        if (!use_jacobi_level_based_ccd && !selected) return;
+        if (use_ogc || use_ogc_solver || use_cloth_grid)
+            throw std::invalid_argument("--use_jacobi_level_based_ccd requires OGC and --use_cloth_grid to be disabled");
+        if (colored_ccd_guess_iters < 0)
+            throw std::invalid_argument("--colored_ccd_guess_iters must be nonnegative (0 keeps the current positions)");
+        if (!std::isfinite(d_hat) || d_hat < 0.0)
+            throw std::invalid_argument("Jacobi level-based CCD requires finite, nonnegative --d_hat");
+        validate_ccd_exact_step_bound_parameters();
     }
 
     void validate_cloth_grid_parameters() const {

@@ -357,6 +357,7 @@ if(BUILD_TESTING)
         ipc_math_test
         jacobi_step_test
         jacobi_dat_solver_test
+        jacobi_level_based_ccd_solver_test
         make_shape_test
         mesh_test
         node_triangle_distance_test

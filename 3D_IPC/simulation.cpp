@@ -127,6 +127,7 @@ int main(int argc, char** argv) {
     const bool uses_general_solver = is_mixed || has_solid;
     try {
         validate_jacobi_dat_scene(ref_mesh, params);
+        validate_jacobi_level_based_ccd_scene(ref_mesh, params);
     } catch (const std::invalid_argument& error) {
         std::cerr << "Error: " << error.what() << "\n";
         return 1;
@@ -194,7 +195,14 @@ int main(int argc, char** argv) {
                   << ", node_box_padding=" << params.dat_node_box_padding << ")\n"
                   << "Initial guess: previous positions and rigid poses (DAT skips initial guesses)\n";
     }
-    if (!params.use_jacobi_dat
+    if (params.use_jacobi_level_based_ccd) {
+        std::cout << "Deformable solver: Jacobi with level-based colored linear CCD"
+                  << " (updating sweeps per Jacobi iteration=" << params.colored_ccd_guess_iters
+                  << ", plus one discarded probe when the cap is positive)\n"
+                  << "CCD target: current positions + full Jacobi displacement (colored target fraction is not applied)\n"
+                  << "Deformable initial guess: previous positions (Jacobi CCD skips initial guesses)\n";
+    }
+    if (!params.use_jacobi_dat && !params.use_jacobi_level_based_ccd
         && (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based)) {
         if (!has_deformable)
             std::cout << "Colored CCD initial guess: ignored for rigid-only scenes\n";
@@ -215,7 +223,7 @@ int main(int argc, char** argv) {
             std::cout << (has_rigid ? " (rigid bodies unchanged during guess)" : "") << "\n";
         }
     }
-    if (!params.use_jacobi_dat
+    if (!params.use_jacobi_dat && !params.use_jacobi_level_based_ccd
         && (params.use_basic_experimental || params.use_basic_experimental_v2) && !params.use_cloth_grid
         && !params.use_ogc && !params.use_ogc_solver) {
         if (params.use_basic_experimental_v2)

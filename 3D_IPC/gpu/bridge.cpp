@@ -182,7 +182,10 @@ StepParameters describe_step(const SimParams& p,int original_reference_threads) 
     p.validate_ccd_exact_step_bound_parameters();
     p.validate_colored_ccd_guess_parameters();
     p.validate_jacobi_dat_parameters();
+    p.validate_jacobi_level_based_ccd_parameters();
     // Never silently reroute an unported solver/initial-guess mode to CPU.
+    if(p.use_jacobi_level_based_ccd)
+        throw std::invalid_argument("GPU: --use_jacobi_level_based_ccd is currently CPU-only");
     if(!p.fixed_iters || p.use_ogc || p.use_ogc_solver || p.use_cloth_grid)
         throw std::invalid_argument("GPU currently requires fixed iterations and conflict-graph coloring, with OGC/grid disabled");
     if(!p.use_jacobi_dat&&!(p.use_colored_ccd_guess || p.use_colored_ccd_guess_level_based) && (p.use_verlet_guess || p.use_translation_guess))

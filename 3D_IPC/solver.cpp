@@ -2,6 +2,7 @@
 #include "solver.h"
 #include "DAT.h"
 #include "jacobi_step.h"
+#include "initial_guess.h"
 #include "SIMD.h"
 #include "general_simd_assembly.h"
 #include "general_simd_rigid.h"
@@ -1469,6 +1470,178 @@ SolverResult global_jacobi_solver_dat(
     if (params.fixed_iters) result.converged = true;
     if (params.write_substeps) {
         rebuild_contact_cache(query_radius * params.dat_node_box_padding);
+        write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh);
+    }
+    return result;
+}
+
+SolverResult global_jacobi_solver_level_based_ccd(
+    const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params,
+    std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
+    const std::vector<Vec3>& v, BroadPhase& broad_phase,
+    const std::string& outdir, const std::vector<Vec3>* previous_positions) {
+    params.validate_jacobi_level_based_ccd_parameters(true);
+    validate_solver_friction_parameters(params, "global_jacobi_solver_level_based_ccd");
+    if (!ref_mesh.rb_nodes.empty() || !ref_mesh.total_mass.empty()
+        || !ref_mesh.rb_update_modes.empty() || !ref_mesh.ref_positions.empty()
+        || std::any_of(ref_mesh.node_to_rb.begin(), ref_mesh.node_to_rb.end(),
+            [](int owner) { return owner >= 0; }))
+        throw std::invalid_argument("global_jacobi_solver_level_based_ccd supports cloth and solid, not rigid bodies");
+    const std::size_t count = xnew.size();
+    if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())
+        || xhat.size() != count || v.size() != count || ref_mesh.mass.size() != count
+        || (ref_mesh.num_positions != 0 && ref_mesh.num_positions != count))
+        throw std::invalid_argument("global_jacobi_solver_level_based_ccd: inconsistent state sizes");
+    if (params.max_global_iters < 0 || !std::isfinite(params.damping) || params.damping < 0
+        || !std::isfinite(params.d_hat) || params.d_hat < 0
+        || !std::isfinite(params.tol_abs) || params.tol_abs < 0
+        || !std::isfinite(params.tol_rel) || params.tol_rel < 0
+        || !std::isfinite(params.fps) || params.fps <= 0 || params.substeps <= 0)
+        throw std::invalid_argument("global_jacobi_solver_level_based_ccd: invalid iteration, time-step, damping or tolerance parameters");
+    if (!params.gravity.allFinite())
+        throw std::invalid_argument("global_jacobi_solver_level_based_ccd: nonfinite gravity");
+    for (double value : {params.mu, params.lambda, params.solid_mu,
+            params.solid_lambda, params.kpin, params.kB, params.k_barrier,
+            params.k_sdf, params.eps_sdf})
+        if (!std::isfinite(value))
+            throw std::invalid_argument("global_jacobi_solver_level_based_ccd: nonfinite energy parameter");
+    for (std::size_t node = 0; node < count; ++node) {
+        if (!xnew[node].allFinite() || !xhat[node].allFinite() || !v[node].allFinite()
+            || !std::isfinite(ref_mesh.mass[node]) || ref_mesh.mass[node] < 0)
+            throw std::invalid_argument("global_jacobi_solver_level_based_ccd: nonfinite state or invalid mass");
+    }
+    const auto valid_node = [count](int node) {
+        return node >= 0 && static_cast<std::size_t>(node) < count;
+    };
+    if (ref_mesh.tris.size() % 3 != 0 || ref_mesh.tets.size() % 4 != 0)
+        throw std::invalid_argument("global_jacobi_solver_level_based_ccd: incomplete element connectivity");
+    for (int node : ref_mesh.tris) if (!valid_node(node))
+        throw std::invalid_argument("global_jacobi_solver_level_based_ccd: invalid triangle node");
+    for (int node : ref_mesh.tets) if (!valid_node(node))
+        throw std::invalid_argument("global_jacobi_solver_level_based_ccd: invalid tet node");
+    for (const auto& [node, row] : adj) if (!valid_node(node))
+        throw std::invalid_argument("global_jacobi_solver_level_based_ccd: invalid adjacency node");
+    for (const auto& pin : pins)
+        if (!valid_node(pin.vertex_index) || !pin.target_position.allFinite())
+            throw std::invalid_argument("global_jacobi_solver_level_based_ccd: invalid pin node or target");
+
+    std::vector<unsigned char> solid_mask(count, 0), surface_mask(count, 0);
+    for (int node : ref_mesh.tets) solid_mask[node] = 1;
+    std::vector<unsigned char> classified_solid(count, 0);
+    for (int node : ref_mesh.tet_nodes) {
+        if (!valid_node(node))
+            throw std::invalid_argument("global_jacobi_solver_level_based_ccd: invalid solid classification");
+        classified_solid[node] = 1;
+    }
+    if (classified_solid != solid_mask)
+        throw std::invalid_argument("global_jacobi_solver_level_based_ccd: tet_nodes must match tetrahedral connectivity");
+    for (int node : ref_mesh.surface_nodes) {
+        if (!valid_node(node))
+            throw std::invalid_argument("global_jacobi_solver_level_based_ccd: invalid surface classification");
+        surface_mask[node] = 1;
+    }
+    for (int node : ref_mesh.tris) if (solid_mask[node] && !surface_mask[node])
+        throw std::invalid_argument("global_jacobi_solver_level_based_ccd: solid boundary node missing from surface_nodes");
+    std::vector<int> cloth_nodes;
+    for (int node = 0; node < static_cast<int>(count); ++node)
+        if (!solid_mask[node]) cloth_nodes.push_back(node);
+    std::vector<IncidentTriangles> incident(count);
+    for (const auto& [node, row] : adj)
+        if (!solid_mask[node]) incident[node] = row;
+    const bool has_solid = !ref_mesh.tets.empty();
+    const PinMap pin_map = build_pin_map(pins, static_cast<int>(count));
+
+    SimParams solve_params = params;
+    (void)solve_params.dt2(); // initialize lazy time-step caches before workers
+    std::vector<Vec3> reconstructed_previous;
+    previous_positions = resolve_friction_previous_positions(solve_params, xnew,
+        xhat, v, previous_positions, reconstructed_previous, "global_jacobi_solver_level_based_ccd");
+    if (previous_positions == &xnew) {
+        reconstructed_previous = xnew;
+        previous_positions = &reconstructed_previous;
+    }
+    if (previous_positions) for (const auto& p : *previous_positions)
+        if (!p.allFinite()) throw std::invalid_argument("global_jacobi_solver_level_based_ccd: nonfinite previous position");
+
+    // Jacobi assembly and the CCD filter own their BVHs. Refresh the
+    // caller's cache at the evaluated positions for residuals and substep output.
+    broad_phase.invalidate_mesh_topology();
+    std::vector<AABB> boxes(count);
+    const auto rebuild_contact_cache = [&](double radius) {
+        parallel_body_setup(static_cast<int>(count), params.use_parallel,
+            [&](int node) {
+                boxes[node] = AABB(xnew[node] - Vec3::Constant(radius),
+                                  xnew[node] + Vec3::Constant(radius));
+            });
+        if (has_solid)
+            broad_phase.initialize_surface_nodes(boxes, ref_mesh, params.d_hat,
+                BroadPhase::InitializationMode::DeformableSolver);
+        else
+            broad_phase.initialize(boxes, ref_mesh, params.d_hat,
+                BroadPhase::InitializationMode::DeformableSolver);
+    };
+    SolverResult result;
+    const auto evaluate_residual = [&]() {
+        rebuild_contact_cache(0.0);
+        result.final_cloth_residual = compute_global_deformable_residual(
+            ref_mesh, adj, pins, solve_params, xnew, xhat, broad_phase,
+            cloth_nodes, &pin_map, &incident, nullptr, nullptr, previous_positions);
+        result.final_solid_residual = has_solid ? compute_global_solid_residual(
+            ref_mesh, pins, solve_params, xnew, xhat, broad_phase, &pin_map,
+            &solid_mask, &surface_mask, nullptr, previous_positions) : 0.0;
+        result.final_residual = result.final_cloth_residual + result.final_solid_residual;
+        if (!std::isfinite(result.final_residual))
+            throw std::runtime_error("global_jacobi_solver_level_based_ccd: nonfinite residual");
+    };
+    const auto converged = [&]() {
+        return result.final_cloth_residual <= std::max(params.tol_abs,
+                   params.tol_rel * result.initial_cloth_residual)
+            && result.final_solid_residual <= std::max(params.tol_abs,
+                   params.tol_rel * result.initial_solid_residual);
+    };
+    if (!params.fixed_iters) {
+        result.has_residual = result.has_residual_components = true;
+        evaluate_residual();
+        result.initial_cloth_residual = result.final_cloth_residual;
+        result.initial_solid_residual = result.final_solid_residual;
+        result.initial_residual = result.final_residual;
+        result.converged = converged();
+    }
+    BroadPhase ccd_broad_phase;
+    std::vector<Vec3> next(count);
+    for (int iteration = 0; iteration < params.max_global_iters && !result.converged; ++iteration) {
+        // Assemble every proposal from the same frozen positions. The CCD
+        // filter then moves by level/color toward xnew + proposed, without
+        // recomputing forces between vertices. Damping is already in proposed;
+        // DAT limits and the predictor target-fraction setting do not apply.
+        const auto proposed = jacobi_step(ref_mesh, adj, pins, solve_params,
+            xnew, xhat, v, previous_positions);
+        // This helper returns absolute positions, not displacements. Its trial
+        // pass is discarded and does not consume an actual updating sweep.
+        next = collision_colored_ccd_initial_guess_level_based(
+            xnew, proposed, ref_mesh, solve_params, params.colored_ccd_guess_iters,
+            &ccd_broad_phase, nullptr, &next);
+        parallel_body_setup(static_cast<int>(count), params.use_parallel,
+            [&](int node) {
+                if (!next[node].allFinite())
+                    throw std::runtime_error("global_jacobi_solver_level_based_ccd: updated position overflow");
+            });
+        xnew.swap(next); // publish only after the complete CCD filtering pass
+        result.iterations = iteration + 1;
+        if (!params.fixed_iters) {
+            evaluate_residual();
+            result.converged = converged();
+            if (params.verbose)
+                std::fprintf(stderr, "  [Jacobi level-based CCD] iter %d residual = %.6e (cloth %.6e, solid %.6e)\n",
+                    result.iterations, result.final_residual,
+                    result.final_cloth_residual, result.final_solid_residual);
+        }
+    }
+    if (params.fixed_iters) result.converged = true;
+    if (params.write_substeps) {
+        // Diagnostics describe the committed geometry, independent of DAT settings.
+        rebuild_contact_cache(0.0);
         write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh);
     }
     return result;

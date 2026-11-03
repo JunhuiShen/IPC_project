@@ -208,6 +208,7 @@ and +y as the up direction.
 | Experimental scalar cloth v1 | `--use_basic_experimental true --use_simd false`. |
 | Basic cloth grid | `--use_cloth_grid true`; cloth only, with OGC disabled. See `--help` for grid sizing flags. |
 | Jacobi with planar DAT | `--use_jacobi_dat true`; CPU cloth, solid, rigid, and mixed scenes, with OGC and cloth grid disabled. Takes precedence over experimental/SIMD solver flags. CUDA DAT remains deformable-only. |
+| Jacobi with level-based colored CCD | `--use_jacobi_level_based_ccd true`; CPU cloth/solid scenes without rigid bodies, with OGC and cloth grid disabled. Takes precedence over experimental/SIMD solver flags; mutually exclusive with `--use_jacobi_dat`. |
 | CUDA solver | `gpu/build/3D_sim_gpu`; requires `--fixed_iters` and, for ordinary solving, `--use_ticcd false`. OGC and cloth grid are unsupported; see the [GPU guide](gpu/README.md) for mode restrictions. |
 
 Run a small deformable example with DAT:
@@ -216,6 +217,37 @@ Run a small deformable example with DAT:
 ./build/3D_sim --example 1 --twist_nx 9 --twist_ny 9 \
   --num_frames 1 --substeps 3 --max_substep_iters 20 --fixed_iters \
   --use_jacobi_dat --dat_gamma 0.9 --format geo --outdir results/jacobi_dat
+```
+
+Jacobi with level-based colored CCD uses the same Jacobi proposal, force-residual
+convergence checks, and previous-position substep start as the DAT solver. It
+replaces the DAT filter with `collision_colored_ccd_initial_guess_level_based`
+inside **every Jacobi iteration**: compute all proposed displacements from the
+same frozen positions, then use level/color-ordered linear CCD to move toward
+`current positions + proposed displacement`. Each filter call builds a new
+collision schedule and performs its own discarded probe before its updating
+sweeps. This is a separate solver, not a substep initial guess.
+
+`--max_substep_iters` caps the outer Jacobi iterations.
+`--colored_ccd_guess_iters` caps the inner CCD updating sweeps per Jacobi
+iteration (default `10`), excluding the additional discarded probe. A cap of
+`0` leaves the positions unchanged; the filter retains its existing early exits
+when all targets are reached or a sweep makes no progress. The proposed
+displacement already includes the solver's damping. It is not multiplied by
+`--colored_ccd_guess_fraction`, and no DAT radius, padding, or gamma is used.
+All external initial-guess flags are skipped. The CCD filter runs even when
+`--use_ccd false`; it retains the existing linear CCD exact-fallback and
+direct-step controls. Like DAT, it constrains mesh surface contact, not solid
+element inversion or analytic SDF penetration; SDF penalties remain in the
+Jacobi assembly.
+
+Run a small deformable example with this solver:
+
+```sh
+./build/3D_sim --example 1 --twist_nx 9 --twist_ny 9 \
+  --num_frames 1 --substeps 3 --max_substep_iters 20 --fixed_iters \
+  --use_jacobi_level_based_ccd --colored_ccd_guess_iters 1 \
+  --format geo --outdir results/jacobi_level_based_ccd
 ```
 
 Two separate flags select collision-colored initial guesses for cloth/solid
@@ -236,7 +268,7 @@ early if all nodes reach their targets or a complete sweep makes no progress.
 unchanged.
 Both colored-guess modes are supported by the GPU solver.
 Either colored guess overrides the CCD, Verlet, and translation guess flags
-and is ignored in OGC or Jacobi-DAT mode. Alternative OGC solving
+and is ignored in OGC or either Jacobi solver mode. Alternative OGC solving
 (`--use_ogc_solver`) requires `--fixed_iters`; mixed deformable/rigid scenes
 use the basic/general route. Some scenes enforce their own guess/contact
 presets in [example.cpp](example.cpp).

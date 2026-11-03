@@ -75,6 +75,15 @@ SolverResult global_jacobi_solver_dat_general(const RefMesh& ref_mesh,
     std::vector<Vec3>& omega_new, BroadPhase& broad_phase,
     const std::string& outdir = "");
 
+// Same frozen-state Jacobi assembly and convergence rules as the DAT solver,
+// with each proposal filtered by level-based collision-colored CCD instead.
+// colored_ccd_guess_iters caps updating CCD sweeps per Jacobi iteration, plus
+// one discarded probe; zero keeps the current positions. The filter's target
+// is xnew + the Jacobi proposal, not xhat. DAT parameters and the initial-guess
+// target fraction do not rescale it. Supports cloth/solid, not rigid bodies;
+// mesh surface CCD does not enforce tet inversion or analytic SDF boundaries.
+SolverResult global_jacobi_solver_level_based_ccd(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
+
 // Historical cloth basic implementation from 1da4c74, in solver.cpp.
 SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 

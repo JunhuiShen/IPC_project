@@ -44,6 +44,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_basic_experimental = false;
     bool   use_simd = false;
     bool   use_jacobi_dat = false;
+    bool   use_jacobi_level_based_ccd = false;
     double dat_gamma = 0.9;
     double dat_query_radius = 0.0;
     double dat_node_box_padding = 1.2;
@@ -215,6 +216,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_basic_experimental", use_basic_experimental, false, "Use experimental cloth solving; with use_simd also selects experimental general solving");
         add_bool  ("use_simd", use_simd, false, "With use_basic_experimental, select SIMD v2 for cloth or the general cloth/solid/rigid solver");
         add_bool  ("use_jacobi_dat", use_jacobi_dat, false, "CPU cloth/solid/rigid: Jacobi updates filtered by planar DAT with curved rigid trajectories; overrides experimental/SIMD solvers and starts from previous positions/poses, skipping initial guesses; incompatible with OGC/grid");
+        add_bool  ("use_jacobi_level_based_ccd", use_jacobi_level_based_ccd, false, "Deformable cloth/solid only: Jacobi proposals filtered by level-based colored linear CCD; uses colored_ccd_guess_iters per Jacobi iteration; skips initial guesses; incompatible with Jacobi DAT/OGC/grid");
         add_double("dat_gamma", dat_gamma, 0.9, "DAT relaxation factor, strictly between 0 and 1");
         add_double("dat_query_radius", dat_query_radius, 0.0, "DAT query radius; 0 selects 1.5*d_hat when d_hat > 0, otherwise node_box_max");
         add_double("dat_node_box_padding", dat_node_box_padding, 1.2, "DAT query-box padding multiplier, at least 1");
@@ -227,8 +229,8 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_ccd_guess",    use_ccd_guess,    true,  "Use ccd_initial_guess as the substep start point (ignored with OGC)");
         add_bool  ("use_colored_ccd_guess", use_colored_ccd_guess, false, "Cloth/solid: original collision-colored linear CCD initial guess toward xhat; mutually exclusive with use_colored_ccd_guess_level_based; rigid bodies stay fixed; overrides CCD, Verlet, and translation guess flags, but is ignored with OGC");
         add_bool  ("use_colored_ccd_guess_level_based", use_colored_ccd_guess_level_based, false, "Cloth/solid: level-based colored CCD toward xhat, with one discarded trial sweep to build levels; mutually exclusive with use_colored_ccd_guess; rigid bodies stay fixed; overrides CCD, Verlet, and translation guess flags, but is ignored with OGC");
-        add_int   ("colored_ccd_guess_iters", colored_ccd_guess_iters, 10, "Maximum actual updating sweeps for either colored CCD initial guess; excludes the level-based trial sweep (0 skips trial and updates)");
-        add_double("colored_ccd_guess_fraction", colored_ccd_guess_fraction, 1.0, "Fixed target fraction of xhat minus current positions for either colored CCD initial guess, finite in [0, 1]; applied once before sweeps and the level trial; does not change the solver's xhat");
+        add_int   ("colored_ccd_guess_iters", colored_ccd_guess_iters, 10, "Maximum actual updating sweeps for either colored CCD initial guess or each Jacobi level-based CCD filter; excludes the level-based trial sweep (0 skips trial and updates)");
+        add_double("colored_ccd_guess_fraction", colored_ccd_guess_fraction, 1.0, "Fixed target fraction of xhat minus current positions for either colored CCD initial guess, finite in [0, 1]; applied once before sweeps and the level trial; does not change the solver's xhat and is not applied by the Jacobi level-based CCD solver");
         add_bool  ("use_verlet_guess", use_verlet_guess, false, "Start GS from xhat + dt^2*gravity (Verlet predictor)");
         add_bool  ("use_translation_guess", use_translation_guess, false, "Start GS from x^n + C");
         add_bool  ("use_ogc", use_ogc, false, "Use trust-region narrow phase instead of CCD for step clamping");
@@ -585,6 +587,7 @@ struct IPCArgs3D : ArgParser {
         p.use_basic_experimental_v2 = use_basic_experimental && use_simd;
         p.use_simd         = use_simd;
         p.use_jacobi_dat   = use_jacobi_dat;
+        p.use_jacobi_level_based_ccd = use_jacobi_level_based_ccd;
         p.dat_gamma        = dat_gamma;
         p.dat_query_radius = dat_query_radius;
         p.dat_node_box_padding = dat_node_box_padding;
@@ -617,6 +620,7 @@ struct IPCArgs3D : ArgParser {
         p.exact_computation_fallback_2 = exact_computation_fallback;
         p.ccd_exact_step_bound = ccd_exact_step_bound;
         p.validate_jacobi_dat_parameters();
+        p.validate_jacobi_level_based_ccd_parameters();
         p.validate_ccd_exact_step_bound_parameters();
         p.validate_colored_ccd_guess_parameters();
         p.validate_cloth_grid_parameters();
