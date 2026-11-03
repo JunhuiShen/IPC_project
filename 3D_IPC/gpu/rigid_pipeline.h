@@ -40,6 +40,14 @@ void assemble_rigid_inertia_color(const RigidScene&, const RigidState&,
                                  int color, bool orientation_phase, double dt,
                                  double gravity_y, int* error,
                                  cudaStream_t stream = nullptr);
+// Jacobi/DAT proposal from an assembled frozen-state system. Write the raw
+// -damping * LDLT^{-1} gradient increment; disabled body phases write zero.
+// This does not change any pose or apply the colored solver's boxes/caps.
+void propose_rigid_displacements(const RigidScene&, const RigidWorkspace&,
+                                 const int* block_colors, int color,
+                                 bool orientation_phase, double damping,
+                                 double (*increments)[3], int* error,
+                                 cudaStream_t stream = nullptr);
 // Angular proposals are shortened on-device to max_rotation radians per
 // update, including huge finite Newton increments. This is an update cap,
 // If anchors are supplied, proposals also stay inside the angular cap fixed

@@ -86,13 +86,13 @@ __global__ void predictor_join_status(const unsigned* bits,int* done) {
     *done=level_predictor::predictor_sweep_finished(*bits)?1:0;
 }
 __global__ void frozen_position_boxes(DeformableScene scene,DeformableState state,
-                                      BpAabb* boxes,int* error) {
+                                      BpAabb* boxes,int* error,double radius=0) {
     const auto node=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
     if(node>=scene.nodes||atomicAdd(error,0))return;
     for(int a=0;a<3;++a) {
-        const double x=state.positions[node][a];
-        if(!isfinite(x)){atomicCAS(error,0,DatInvalidInput);return;}
-        boxes[node].lo[a]=boxes[node].hi[a]=x;
+        const double x=state.positions[node][a],lo=x-radius,hi=x+radius;
+        if(!isfinite(x)||!isfinite(lo)||!isfinite(hi)){atomicCAS(error,0,DatInvalidInput);return;}
+        boxes[node].lo[a]=lo;boxes[node].hi[a]=hi;
     }
 }
 // CPU ColoredContactSweep::prepare model. Marks exactly the cooperative
@@ -208,8 +208,17 @@ void validate(const SceneDescription& h) {
     for(std::size_t node=0;node<n;++node)
         if((h.node_body[node]>=0)!=bool(seen_body_nodes[node]))throw std::invalid_argument("GPU missing rigid node");
     const auto node_valid=[n](int node){if(node<0||static_cast<std::size_t>(node)>=n)throw std::invalid_argument("GPU topology node index");};
-    for(const auto& triangle:h.surface_triangles)for(int node:triangle.vertices)node_valid(node);
-    for(const auto& edge:h.edges)for(int node:edge.vertices)node_valid(node);
+    for(const auto& triangle:h.surface_triangles) {
+        for(int node:triangle.vertices)node_valid(node);
+        const int owner=h.node_body[triangle.vertices[0]];
+        if(owner!=h.node_body[triangle.vertices[1]]||owner!=h.node_body[triangle.vertices[2]])
+            throw std::invalid_argument("GPU triangle has mixed rigid ownership");
+    }
+    for(const auto& edge:h.edges) {
+        for(int node:edge.vertices)node_valid(node);
+        if(h.node_body[edge.vertices[0]]!=h.node_body[edge.vertices[1]])
+            throw std::invalid_argument("GPU edge has mixed rigid ownership");
+    }
     for(const auto& dep:h.dependencies) {
         if(dep.count<1||dep.count>4)throw std::invalid_argument("GPU dependency size");
         for(int k=0;k<dep.count;++k)node_valid(dep.vertices[k]);
@@ -270,15 +279,16 @@ struct GpuSolver::Impl {
     DeviceArray<unsigned> predictor_bits;
     DeviceArray<int> predictor_done;
     std::unique_ptr<GpuDatFilter> dat_filter;
-    GpuBroadPhase dat_broadphase,dat_force_broadphase;
+    GpuBroadPhase dat_broadphase;
     GpuContactPipeline dat_contacts;
     DeviceArray<int> dat_colors;
     DeviceArray<BpAabb> dat_force_boxes;
-    DeviceArray<Vector3> dat_increments,dat_accepted,dat_next;
-    bool invalid=false,cloth_only=false;
+    DeviceArray<Vector3> dat_increments,dat_accepted,dat_next,dat_delta_com,dat_delta_omega;
+    bool invalid=false,cloth_only=false,has_deformables=false;
 
     explicit Impl(const SceneDescription& h) {
         validate(h);const auto n=h.positions.size(),b=h.com.size();
+        has_deformables=std::any_of(h.deformable.begin(),h.deformable.end(),[](unsigned char value){return value!=0;});
         rigid_pins.upload(h.rigid_pins);
         rigid_pin_offsets.upload(h.rigid_pin_offsets.empty()?std::vector<std::size_t>(b+1,0):h.rigid_pin_offsets);
         pin_scene={b,h.rigid_pins.size(),rigid_pins.data(),rigid_pin_offsets.data()};
@@ -322,18 +332,33 @@ struct GpuSolver::Impl {
 
         scene={n,h.triangles.size(),h.solids.size(),h.hinges.size(),node_blocks.data(),deformable.data(),solid.data(),pinned.data(),
             mass.data(),v3(pin_targets),triangles.data(),solids.data(),hinges.data(),triangle_offsets.data(),solid_offsets.data(),hinge_offsets.data()};
-        state={v3(positions),v3(velocities),v3(previous),v3(predicted)};
         elastic={gathered_points.data(),gathered_triangles.data(),gathered_solids.data(),gathered_hinges.data(),point_outputs.data(),
             triangle_outputs.data(),solid_outputs.data(),hinge_outputs.data(),systems.data(),v3(proposed),error.data()};
         rigid={b,body_blocks.data(),node_body.data(),v3(reference),body_node_offsets.data(),body_nodes.data(),body_mass.data(),
             m9(second_moment),body_translate.data(),body_rotate.data()};
-        rigid_state={v3(com),v3(com_velocity),q4(orientation),v3(omega),v3(previous_com),v3(previous_com_velocity),q4(previous_orientation),v3(previous_omega)};
-        rigid_work={body_systems.data(),v3(proposed_com),v3(proposed_omega),q4(proposed_orientation),v3(accepted_com),q4(accepted_orientation),v3(accepted_omega)};
+        refresh_state_views();
         topology.vertex_count=static_cast<int>(n);topology.block_count=h.block_count;
         topology.triangle_count=static_cast<int>(h.surface_triangles.size());topology.edge_count=static_cast<int>(h.edges.size());
         topology.dependency_count=static_cast<int>(h.dependencies.size());topology.triangles=surface_triangles.data();
         topology.edges=edges.data();topology.dependencies=dependencies.data();topology.vertex_block=node_blocks.data();topology.surface_query=surface.data();
         topology.protect_linear_gap=true;
+    }
+    // These non-owning views follow the current owners after DAT publication.
+    void refresh_state_views() {
+        state={v3(positions),v3(velocities),v3(previous),v3(predicted)};
+        rigid_state={v3(com),v3(com_velocity),q4(orientation),v3(omega),v3(previous_com),v3(previous_com_velocity),q4(previous_orientation),v3(previous_omega)};
+        rigid_work={body_systems.data(),v3(proposed_com),v3(proposed_omega),q4(proposed_orientation),v3(accepted_com),q4(accepted_orientation),v3(accepted_omega)};
+    }
+    // Called only after device validation joins: publish certified storage
+    // without copying or recomputing any endpoint, then refresh its views.
+    void publish_dat_state() {
+        if(scene.nodes)positions.swap(dat_next);
+        if(rigid.bodies) {
+            com.swap(accepted_com);
+            omega.swap(accepted_omega);
+            orientation.swap(accepted_orientation);
+        }
+        refresh_state_views();
     }
     void check_status() {
         GpuProfileScope profile("status_wait");
@@ -392,12 +417,16 @@ struct GpuSolver::Impl {
         return p.colored_guess_enabled || p.colored_guess_sweeps>0
             || p.colored_guess_level_based;
     }
-    void run_dat(const StepParameters& p,const SdfScene& sdf) {
+    void run_dat(const StepParameters& p,const SdfScene& sdf,const RigidPinAssembly& pins) {
         GpuProfileScope profile("jacobi_dat");
         if(!dat_filter)dat_filter=std::make_unique<GpuDatFilter>();
         dat_colors.resize(static_cast<std::size_t>(topology.block_count));dat_colors.clear();
         dat_force_boxes.resize(scene.nodes);dat_increments.resize(scene.nodes);
         dat_accepted.resize(scene.nodes);dat_next.resize(scene.nodes);
+        dat_delta_com.resize(rigid.bodies);dat_delta_omega.resize(rigid.bodies);
+        // Particle proposal kernels intentionally skip rigid proxies. Their
+        // unused raw increments must still be initialized for input validation.
+        dat_increments.clear();
         auto graph=topology;
         graph.dependency_count=0;graph.include_triangle_dependencies=false;graph.protect_linear_gap=false;
         const double radius=p.dat_query_radius>0.0?p.dat_query_radius:
@@ -405,30 +434,53 @@ struct GpuSolver::Impl {
         const DatParameters parameters{p.dat_gamma,radius,p.dat_node_box_padding};
         for(int iteration=0;iteration<p.iterations;++iteration) {
             gpu_profile_counter(GpuProfileCounter::Iterations);
-            BroadPhaseView frozen{};
-            if(p.contact.d_hat>0.0&&p.contact.k_barrier>0.0) {
-                if(scene.nodes)frozen_position_boxes<<<blocks(scene.nodes),128>>>(scene,state,dat_force_boxes.data(),error.data());
-                cuda_checked(cudaGetLastError());check_status();
-                frozen=dat_force_broadphase.rebuild(graph,dat_force_boxes.data(),p.contact.d_hat,BroadPhaseMode::CandidatesOnly);
-            }
+            // Cover force and DAT neighborhoods at one immutable snapshot.
+            const double shared_radius=std::max(radius*p.dat_node_box_padding,p.contact.d_hat);
+            if(scene.nodes)frozen_position_boxes<<<blocks(scene.nodes),128>>>(scene,state,dat_force_boxes.data(),error.data(),shared_radius);
+            cuda_checked(cudaGetLastError());check_status();
+            auto frozen=dat_broadphase.rebuild(graph,dat_force_boxes.data(),0.0,BroadPhaseMode::CandidatesOnly);
             // One snapshot group is an assembly mask, not a conflict color:
             // every pair needs all four self blocks before any node moves.
             frozen.block_colors=dat_colors.data();frozen.color_count=topology.block_count?1:0;
             dat_contacts.rebuild(frozen,topology.block_count,node_blocks.data(),surface.data());
-            assemble_elastic_color(scene,state,elastic,dat_colors.data(),0,p.elastic,p.solid);
-            dat_contacts.assemble_color(scene,state,elastic,rigid,rigid_state,rigid_work,sdf,p.contact,0,
-                ContactAssemblyPhase::Deformable,ContactAssemblyMode::FrozenDeformableSnapshot,{},
-                p.exact_computation_fallback?ContactGeometryPolicy::Robust:ContactGeometryPolicy::Original);
-            propose_deformable_displacements(scene,elastic,p.damping,v3(dat_increments));
-            const auto* dat_boxes=dat_filter->prepare(scene.nodes,state.positions,v3(dat_increments),parameters,error.data());
+            if(has_deformables) {
+                assemble_elastic_color(scene,state,elastic,dat_colors.data(),0,p.elastic,p.solid);
+                dat_contacts.assemble_color(scene,state,elastic,rigid,rigid_state,rigid_work,sdf,p.contact,0,
+                    ContactAssemblyPhase::Deformable,ContactAssemblyMode::FrozenSnapshot,{},
+                    p.exact_computation_fallback?ContactGeometryPolicy::Robust:ContactGeometryPolicy::Original);
+                propose_deformable_displacements(scene,elastic,p.damping,v3(dat_increments));
+            }
+            if(rigid.bodies) {
+                // Both generalized systems read exactly the same COM/omega and
+                // node snapshot. A proposal never commits the preceding phase.
+                for(bool orientation_phase:{false,true}) {
+                    assemble_rigid_inertia_color(rigid,rigid_state,rigid_work,dat_colors.data(),0,
+                        orientation_phase,p.dt,p.elastic.gravity[1],error.data());
+                    dat_contacts.assemble_color(scene,state,elastic,rigid,rigid_state,rigid_work,sdf,p.contact,0,
+                        orientation_phase?ContactAssemblyPhase::RigidOrientation:ContactAssemblyPhase::RigidTranslation,
+                        ContactAssemblyMode::FrozenSnapshot,pins,
+                        p.exact_computation_fallback?ContactGeometryPolicy::Robust:ContactGeometryPolicy::Original);
+                    propose_rigid_displacements(rigid,rigid_work,dat_colors.data(),0,orientation_phase,p.damping,
+                        orientation_phase?v3(dat_delta_omega):v3(dat_delta_com),error.data());
+                }
+            }
+            (void)(rigid.bodies
+                ?dat_filter->prepare(scene.nodes,state.positions,v3(dat_increments),rigid,rigid_state,
+                    v3(dat_delta_com),v3(dat_delta_omega),p.dt,parameters,error.data())
+                :dat_filter->prepare(scene.nodes,state.positions,v3(dat_increments),parameters,error.data()));
             // Invalid proposals must never become BVH input. Only status,
             // never positions, derivatives or queue arrays, returns to host.
             check_status();
-            const auto candidates=dat_broadphase.rebuild(graph,dat_boxes,0.0,BroadPhaseMode::CandidatesOnly);
-            dat_filter->filter(candidates,v3(dat_accepted),error.data());
-            if(scene.nodes)dat_endpoints<<<blocks(scene.nodes),128>>>(scene,state,v3(dat_accepted),v3(dat_next),error.data());
+            const auto& candidates=frozen;
+            if(rigid.bodies)
+                dat_filter->filter(candidates,v3(dat_next),rigid_work.accepted_com,rigid_work.accepted_omega,
+                    rigid_work.accepted_orientation,error.data());
+            else {
+                dat_filter->filter(candidates,v3(dat_accepted),error.data());
+                if(scene.nodes)dat_endpoints<<<blocks(scene.nodes),128>>>(scene,state,v3(dat_accepted),v3(dat_next),error.data());
+            }
             cuda_checked(cudaGetLastError());check_status();
-            if(scene.nodes)cuda_checked(cudaMemcpy(positions.data(),dat_next.data(),scene.nodes*sizeof(Vector3),cudaMemcpyDeviceToDevice));
+            publish_dat_state();
         }
     }
     void rebuild(const StepParameters& p,bool guess,const double (*guess_targets)[3]=nullptr) {
@@ -680,12 +732,6 @@ void GpuSolver::advance_substep(const StepParameters& p,const std::vector<Vector
     const std::lock_guard<std::mutex> lock(gpu_mutex);
     auto& s=*impl_;
     if(s.invalid)throw std::runtime_error("GPU state invalidated by earlier failure");
-    // Original (non-exact) mode. Reject unsupported rigid translation or
-    // orientation BEFORE any state mutation or output, including direct API
-    // callers. The robust exact path remains the only rigid mode.
-    if(!p.exact_computation_fallback&&s.rigid.bodies)
-        throw std::invalid_argument(
-            "GPU original mode does not support rigid-body translation/orientation");
     // Direct GpuSolver API must reject the unqualified original+direct-bound
     // combination before any mutation, exactly like the CPU/bridge validation.
     if(!p.exact_computation_fallback&&p.ccd_exact_step_bound)
@@ -720,10 +766,10 @@ void GpuSolver::advance_substep(const StepParameters& p,const std::vector<Vector
     if(p.jacobi_dat) {
         const double radius=p.dat_query_radius>0.0?p.dat_query_radius:
             (p.contact.d_hat>0.0?1.5*p.contact.d_hat:p.box_radius);
-        if(s.rigid.bodies||p.damping<0.0||!std::isfinite(p.contact.d_hat)||p.contact.d_hat<0.0
+        if(p.damping<0.0||!std::isfinite(p.contact.d_hat)||p.contact.d_hat<0.0
             ||!std::isfinite(radius)||radius<=0.0||!std::isfinite(p.contact.friction)||p.contact.friction<0.0
             ||(p.contact.friction>0.0&&(!std::isfinite(p.contact.eps_v)||p.contact.eps_v<=0.0)))
-            throw std::invalid_argument("GPU invalid deformable-only Jacobi DAT parameters");
+            throw std::invalid_argument("GPU invalid Jacobi DAT parameters");
         for(double x:{p.elastic.mu,p.elastic.lambda,p.solid.mu,p.solid.lambda,p.elastic.kpin,
             p.elastic.bending_stiffness,p.contact.k_barrier,p.sdf.stiffness,p.sdf.epsilon})
             if(!std::isfinite(x))throw std::invalid_argument("GPU nonfinite DAT energy parameter");
@@ -751,7 +797,7 @@ void GpuSolver::advance_substep(const StepParameters& p,const std::vector<Vector
     const SdfScene sdf{s.colliders.data(),static_cast<int>(colliders.size()),p.sdf};
     const RigidPinAssembly rigid_pins{s.pin_scene,p.elastic.kpin,p.rigid_pin_time};
     if(p.jacobi_dat) {
-        s.run_dat(p,sdf);
+        s.run_dat(p,sdf,rigid_pins);
     } else {
     // The CPU general driver disables the legacy global particle guess for
     // solid/mixed scenes. Only its cloth driver honors this default flag.
@@ -854,7 +900,8 @@ void GpuSolver::advance_substep(const StepParameters& p,const std::vector<Vector
                 {
                 GpuProfileScope ccd_profile("ccd");
                 s.clipper.clip_rigid_translation_color(s.rigid,s.rigid_state,s.rigid_work,s.state,s.broad,
-                    incidence.block_offsets,incidence.pair_indices,s.boxes.data(),s.broad.block_colors,color,v3(s.accepted),s.error.data(),true);
+                    incidence.block_offsets,incidence.pair_indices,s.boxes.data(),s.broad.block_colors,color,v3(s.accepted),s.error.data(),true,nullptr,
+                    p.exact_computation_fallback?LinearClipMode::Robust:LinearClipMode::OriginalSolver);
                 }
                 GpuProfileScope commit_profile("commit");
                 commit_rigid_translation_color(s.rigid,s.rigid_state,s.rigid_work,s.state,s.broad.block_colors,color,v3(s.accepted),s.error.data());

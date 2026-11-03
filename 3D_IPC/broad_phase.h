@@ -170,11 +170,12 @@ public:
     // Pre-built-box counterpart used by the mixed cloth/solid/rigid solver.
     // Tet-interior nodes keep their boxes for elastic updates but do not issue
     // node-triangle contact queries.
-    void initialize_surface_nodes(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat = 0.0, InitializationMode mode = InitializationMode::Refittable);
+    void initialize_surface_nodes(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat = 0.0, InitializationMode mode = InitializationMode::Refittable, bool retain_solver_data = true);
 
     // Initialize from pre-built per-vertex AABBs. Triangle and edge boxes are
     // derived as the union of their vertex boxes (i.e. red boxes).
-    void initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat = 0.0, InitializationMode mode = InitializationMode::Refittable);
+    // Pair-only consumers may omit incidence without changing candidate order.
+    void initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat = 0.0, InitializationMode mode = InitializationMode::Refittable, bool retain_solver_data = true);
 
     // Install only the per-vertex motion boxes needed by node-box step
     // clipping. Contact pairs, contact-incidence arrays, primitive boxes, and
@@ -263,7 +264,7 @@ private:
     };
     Topology topo_;
 
-    void initialize_from_vertex_boxes(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat, bool exclude_tet_interior_nt_queries, InitializationMode mode);
+    void initialize_from_vertex_boxes(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, double d_hat, bool exclude_tet_interior_nt_queries, InitializationMode mode, bool retain_solver_data);
     const std::vector<int>& surface_nt_query_nodes(
         const RefMesh& mesh, int nv);
 

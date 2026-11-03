@@ -306,3 +306,71 @@ TEST(JacobiStep, FrictionValidatesPreviousPositions) {
     previous[0].x() = std::numeric_limits<double>::quiet_NaN();
     EXPECT_THROW(s.solve(&previous), std::invalid_argument);
 }
+
+TEST(JacobiStep, PreparedSweepsRefreshSolidContactAndFrictionGeometry) {
+    RestoreOpenMP restore;
+    omp_set_num_threads(4);
+    Scene s({});
+    DeformedState state;
+    create_solid({Vec3(0,0,.1),Vec3(1,0,.1),Vec3(0,1,.1),Vec3(0,0,1.1)},
+        {0,1,2,3},24,s.mesh,state);
+    s.x=state.deformed_positions;
+    s.x.insert(s.x.end(),{Vec3(-2,-2,0),Vec3(3,-2,0),Vec3(-2,3,0)});
+    s.mesh.tris.insert(s.mesh.tris.end(),{4,5,6});
+    s.mesh.mass.resize(s.x.size(),1);
+    s.mesh.node_to_rb.resize(s.x.size(),-1);
+    s.mesh.initialize(s.x);
+    s.adj=build_incident_triangle_map(s.mesh.tris);
+    s.xhat=s.x;s.velocity.assign(s.x.size(),Vec3::Zero());
+    s.params.d_hat=.2;s.params.k_barrier=100;s.params.damping=.5;
+    s.params.solid_mu=4;s.params.solid_lambda=6;
+    s.params.k_sdf=10;s.params.eps_sdf=.15;
+    s.params.sdf_planes.push_back({Vec3::Zero(),Vec3::UnitZ()});
+    s.x[1].x()+=.05;
+    auto previous=s.x;
+    for(auto& p:previous)p.x()-=.01;
+    for(double friction:{0.,.3}) for(bool exact:{false,true}) {
+        s.params.friction_coefficient=friction;s.params.exact_computation_fallback=exact;
+        JacobiStepWorkspace workspace;
+        workspace.prepare(s.mesh,s.adj,s.pins,s.params,s.x.size());
+        for(int sweep=0;sweep<3;++sweep) {
+            // Independent original nodal assembly, with its own tight BVH and
+            // fresh element/contact evaluations for every role.
+            BroadPhase tight;
+            std::vector<AABB> boxes;
+            for(const auto& p:s.x)boxes.emplace_back(p,p);
+            tight.initialize_surface_nodes(boxes,s.mesh,s.params.d_hat);
+            std::vector<Vec3> expected;
+            for(int node=0;node<4;++node) {
+                const auto [g,H]=compute_solid_local_gradient_and_block(node,s.mesh,s.pins,
+                    s.params,s.x,s.xhat,tight,nullptr,nullptr,nullptr,&previous);
+                expected.push_back(-s.params.damping*H.completeOrthogonalDecomposition().solve(g));
+            }
+            // A larger shared neighborhood must change neither contact forces
+            // nor the result when positions change between cached sweeps.
+            BroadPhase shared;
+            for(std::size_t i=0;i<boxes.size();++i)
+                boxes[i]=AABB(s.x[i]-Vec3::Ones(),s.x[i]+Vec3::Ones());
+            shared.initialize_surface_nodes(boxes,s.mesh,0,
+                BroadPhase::InitializationMode::DeformableSolver);
+            s.params.use_parallel=true;
+            const auto actual=workspace.step(s.mesh,s.adj,s.pins,s.params,s.x,s.xhat,
+                s.velocity,&previous,&shared);
+            for(int node=0;node<4;++node)EXPECT_LE((actual[node]-expected[node]).norm(),1e-11);
+            for(std::size_t node=0;node<s.x.size();++node)s.x[node]+=.1*actual[node];
+        }
+    }
+}
+
+TEST(JacobiStep, ReprepareObservesInPlaceRestAndPinEdits) {
+    auto s=cloth();
+    JacobiStepWorkspace workspace;
+    workspace.prepare(s.mesh,s.adj,s.pins,s.params,s.x.size());
+    (void)workspace.step(s.mesh,s.adj,s.pins,s.params,s.x,s.xhat,s.velocity);
+    s.mesh.Dm_inverse[0]*=1.1;
+    s.pins.push_back(Pin{0,Vec3(.2,.3,.4)});s.params.kpin=50;
+    workspace.prepare(s.mesh,s.adj,s.pins,s.params,s.x.size());
+    const auto actual=workspace.step(s.mesh,s.adj,s.pins,s.params,s.x,s.xhat,s.velocity);
+    const auto expected=reference(s);
+    for(std::size_t i=0;i<actual.size();++i)EXPECT_LE((actual[i]-expected[i]).norm(),1e-11);
+}

@@ -7,7 +7,11 @@
 namespace ipc_gpu::solver {
 
 enum class ContactAssemblyPhase { Deformable, RigidTranslation, RigidOrientation };
-enum class ContactAssemblyMode { ColorSweep, FrozenDeformableSnapshot };
+enum class ContactAssemblyMode {
+    ColorSweep,
+    FrozenSnapshot,
+    FrozenDeformableSnapshot = FrozenSnapshot, // existing caller compatibility
+};
 struct RigidPinAssembly {
     RigidPinScene scene{};
     double stiffness=0.0, time=0.0;

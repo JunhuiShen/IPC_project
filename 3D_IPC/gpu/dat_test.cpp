@@ -1,6 +1,7 @@
 #include "dat.h"
 #include "dat.cuh"
 #include "device_memory.h"
+#include "rigid.cuh"
 #include "../DAT.h"
 #include "../physics.h"
 
@@ -202,12 +203,207 @@ void component_cases() {
     filter.filter({},reinterpret_cast<double(*)[3]>(accepted.data()),status.data());cuda_checked(cudaDeviceSynchronize());
     require(status.download()[0]==42,"DAT cleared an existing nonzero status");
 }
+
+using Quat=std::array<double,4>;
+struct MixedScene {
+    std::vector<Value> positions,updates,reference,com,omega,dc,dw;
+    std::vector<Quat> q0;
+    std::vector<int> owner;
+    std::vector<unsigned char> translate,rotate;
+    std::vector<BpTriangle> triangles;
+};
+struct MixedOutput {
+    std::vector<Value> positions,com,omega;
+    std::vector<Quat> orientation;
+    int status=0;
+};
+MixedOutput mixed_filter(MixedScene scene,DatParameters parameters,bool duplicate=false,
+    int initial_status=0) {
+    const auto count=scene.positions.size(),bodies=scene.com.size();
+    require(scene.owner.size()==count&&scene.reference.size()==count,"invalid mixed test fixture");
+    if(scene.updates.empty())scene.updates.resize(count);
+    std::vector<int> nodes,blocks(count),body_blocks(bodies);
+    std::vector<std::size_t> offsets{0};int next=0;
+    for(std::size_t node=0;node<count;++node)if(scene.owner[node]<0)blocks[node]=next++;
+    for(std::size_t body=0;body<bodies;++body) {
+        body_blocks[body]=next++;
+        for(std::size_t node=0;node<count;++node)if(scene.owner[node]==int(body)) {
+            nodes.push_back(int(node));blocks[node]=body_blocks[body];
+        }
+        offsets.push_back(nodes.size());
+    }
+    if(duplicate&&nodes.size()>1)nodes[1]=nodes[0];
+    std::set<std::array<int,2>> unique_edges;
+    for(const auto& triangle:scene.triangles)for(int i=0;i<3;++i) {
+        int a=triangle.vertices[i],b=triangle.vertices[(i+1)%3];
+        if(a>b)std::swap(a,b);unique_edges.insert({a,b});
+    }
+    std::vector<BpEdge> edges;for(const auto& edge:unique_edges)edges.push_back({{edge[0],edge[1]}});
+    DeviceArray<Value> positions(scene.positions),raw(scene.updates),reference(scene.reference);
+    DeviceArray<Value> com(scene.com),omega(scene.omega),dc(scene.dc),dw(scene.dw);
+    DeviceArray<Quat> q0(scene.q0);
+    DeviceArray<int> owner(scene.owner),device_nodes(nodes),device_blocks(blocks),device_body_blocks(body_blocks);
+    DeviceArray<std::size_t> device_offsets(offsets);
+    DeviceArray<unsigned char> translate(scene.translate),rotate(scene.rotate);
+    DeviceArray<BpTriangle> triangles(scene.triangles);DeviceArray<BpEdge> device_edges(edges);
+    DeviceArray<Value> accepted(count),accepted_com(bodies),accepted_omega(bodies);
+    DeviceArray<Quat> accepted_q(bodies);DeviceArray<int> status(std::vector<int>{initial_status});
+    const RigidScene rigid{bodies,device_body_blocks.data(),owner.data(),
+        reinterpret_cast<const double(*)[3]>(reference.data()),device_offsets.data(),device_nodes.data(),
+        nullptr,nullptr,translate.data(),rotate.data()};
+    RigidState state{};state.com=reinterpret_cast<double(*)[3]>(com.data());
+    state.omega=reinterpret_cast<double(*)[3]>(omega.data());
+    state.orientation=state.previous_orientation=reinterpret_cast<double(*)[4]>(q0.data());
+    GpuDatFilter filter;GpuBroadPhase phase;
+    const auto* boxes=filter.prepare(count,reinterpret_cast<const double(*)[3]>(positions.data()),
+        reinterpret_cast<const double(*)[3]>(raw.data()),rigid,state,
+        reinterpret_cast<const double(*)[3]>(dc.data()),reinterpret_cast<const double(*)[3]>(dw.data()),
+        1,parameters,status.data());
+    cuda_checked(cudaDeviceSynchronize());
+    MixedOutput out;out.status=status.download()[0];
+    if(out.status)return out;
+    BroadPhaseTopology topology;topology.vertex_count=int(count);topology.block_count=next;
+    topology.vertex_block=device_blocks.data();topology.triangle_count=int(scene.triangles.size());
+    topology.triangles=triangles.data();topology.edge_count=int(edges.size());topology.edges=device_edges.data();
+    topology.include_triangle_dependencies=false;topology.protect_linear_gap=false;
+    const auto candidates=phase.rebuild(topology,boxes,0,BroadPhaseMode::CandidatesOnly);
+    invalid([&]{filter.filter(candidates,reinterpret_cast<double(*)[3]>(positions.data()),
+        reinterpret_cast<double(*)[3]>(accepted_com.data()),reinterpret_cast<double(*)[3]>(accepted_omega.data()),
+        reinterpret_cast<double(*)[4]>(accepted_q.data()),status.data());});
+    filter.filter(candidates,reinterpret_cast<double(*)[3]>(accepted.data()),
+        reinterpret_cast<double(*)[3]>(accepted_com.data()),reinterpret_cast<double(*)[3]>(accepted_omega.data()),
+        reinterpret_cast<double(*)[4]>(accepted_q.data()),status.data());
+    cuda_checked(cudaDeviceSynchronize());out.status=status.download()[0];
+    require(positions.download()==scene.positions&&raw.download()==scene.updates,
+        "mixed DAT modified frozen node input");
+    require(com.download()==scene.com&&omega.download()==scene.omega&&q0.download()==scene.q0
+        &&dc.download()==scene.dc&&dw.download()==scene.dw,"mixed DAT modified frozen rigid input");
+    if(!out.status) {
+        out.positions=accepted.download();out.com=accepted_com.download();
+        out.omega=accepted_omega.download();out.orientation=accepted_q.download();
+    }
+    return out;
+}
+void place_rigid_nodes(MixedScene& scene) {
+    for(std::size_t node=0;node<scene.positions.size();++node) {
+        const int body=scene.owner[node];if(body<0||std::size_t(body)>=scene.com.size())continue;
+        double q[4];rigid_orientation(scene.q0[body].data(),scene.omega[body].data(),1,q);
+        rigid_world_position(scene.reference[node].data(),scene.com[body].data(),q,scene.positions[node].data());
+    }
+}
+void mixed_component_cases() {
+    const DatParameters parameters{.9,10,1.2};
+    MixedScene curved;
+    curved.positions={{},{},{-3,-3,0},{3,-3,0},{0,3,0}};
+    curved.reference={{1,0,.3},{0,1,.3},{},{},{}};
+    curved.owner={0,0,-1,-1,-1};curved.com={{0,0,0}};curved.omega={{0,0,0}};
+    curved.dc={{.15,0,0}};curved.dw={{0,2*std::acos(-1.),0}};curved.q0={{1,0,0,0}};
+    curved.translate={1};curved.rotate={1};curved.triangles={{{2,3,4}}};place_rigid_nodes(curved);
+    // One full revolution has a safe endpoint but crosses the stationary face
+    // in between. A chord-only or endpoint-only rigid filter accepts it.
+    double full_q[4],full_point[3];rigid_orientation(curved.q0[0].data(),curved.dw[0].data(),1,full_q);
+    rigid_world_position(curved.reference[0].data(),curved.dc[0].data(),full_q,full_point);
+    require(full_point[2]>.29,"hidden rigid crossing fixture endpoint is not safe");
+    const auto result=mixed_filter(curved,parameters);require(result.status==0,"curved mixed DAT failed");
+    const double alpha=result.omega[0][1]/curved.dw[0][1];
+    require(alpha>0&&alpha<.1,"rigid DAT missed hidden full-turn plane crossing");
+    require(std::abs(result.com[0][0]/curved.dc[0][0]-alpha)<1e-12,
+        "rigid DAT used different COM and angular factors");
+    for(int sample=0;sample<=1000;++sample) {
+        const double t=alpha*sample/1000;double c[3],w[3],q[4],point[3];
+        for(int k=0;k<3;++k){c[k]=curved.com[0][k]+t*curved.dc[0][k];w[k]=t*curved.dw[0][k];}
+        rigid_orientation(curved.q0[0].data(),w,1,q);
+        for(int node:{0,1}) {
+            rigid_world_position(curved.reference[node].data(),c,q,point);
+            require(point[2]>0,"accepted rigid curve crosses stationary face");
+            double squared=0;for(int k=0;k<3;++k)squared+=std::pow(point[k]-curved.positions[node][k],2);
+            require(std::sqrt(squared)<=.5*parameters.gamma*parameters.query_radius,
+                "accepted rigid path exceeds DAT query sphere");
+        }
+    }
+    for(int node:{0,1}) {
+        double point[3];rigid_world_position(curved.reference[node].data(),result.com[0].data(),
+            result.orientation[0].data(),point);
+        for(int k=0;k<3;++k)require(std::abs(point[k]-result.positions[node][k])<2e-14,
+            "accepted rigid proxy disagrees with accepted pose");
+    }
+    // A far-pair radius limit must see the complete loop even without contacts.
+    auto loop=curved;loop.positions.resize(2);loop.reference.resize(2);loop.owner.resize(2);loop.triangles.clear();
+    loop.dc[0]={0,0,0};const DatParameters sphere{.9,1,1.2};
+    const auto radial=mixed_filter(loop,sphere);require(radial.status==0,"curved rigid radius DAT failed");
+    const double radial_alpha=radial.omega[0][1]/loop.dw[0][1];
+    require(radial_alpha>0&&radial_alpha<.2,"query sphere missed a hidden full loop");
+    // Two independently moving bodies must share the same division plane.
+    MixedScene bodies; bodies.positions={{},{},{},{},{},{}};
+    bodies.reference={{-.3,0,0},{-.3,1,0},{-.3,0,1},{.3,-2,-2},{.3,2,-2},{.3,0,2}};
+    bodies.owner={0,0,0,1,1,1};bodies.com={{0,0,0},{0,0,0}};
+    bodies.omega={{0,0,0},{0,0,0}};bodies.dc={{.5,0,0},{-.5,0,0}};bodies.dw={{0,0,0},{0,0,0}};
+    bodies.q0={{1,0,0,0},{1,0,0,0}};bodies.translate={1,1};bodies.rotate={0,0};
+    bodies.triangles={{{0,1,2}},{{3,4,5}}};place_rigid_nodes(bodies);
+    const auto body_result=mixed_filter(bodies,DatParameters{.9,2,1.2});
+    require(body_result.status==0,"body/body DAT failed");
+    require(body_result.com[0][0]>0&&body_result.com[1][0]<0
+        &&body_result.positions[0][0]<body_result.positions[3][0],"body/body DAT failed separation");
+    for(int node:{1,2})require(std::abs((body_result.positions[node][0]-bodies.positions[node][0])
+        -(body_result.positions[0][0]-bodies.positions[0][0]))<1e-14,"body vertices used independent factors");
+    // Full same-body primitives are culled, including zero-gap self contact.
+    MixedScene self;self.positions.resize(4);self.reference={{0,0,0},{-1,-1,0},{1,-1,0},{0,1,0}};
+    self.owner={0,0,0,0};self.com={{0,0,0}};self.omega={{0,0,0}};
+    self.dc={{.1,0,0}};self.dw={{0,0,.2}};self.q0={{1,0,0,0}};
+    self.translate={1};self.rotate={1};self.triangles={{{1,2,3}}};place_rigid_nodes(self);
+    const auto self_result=mixed_filter(self,parameters);require(self_result.status==0,"same-body candidates were not culled");
+    require(std::abs(self_result.com[0][0]-.1)<1e-14&&std::abs(self_result.omega[0][2]-.2)<1e-14,
+        "unconstrained rigid DAT unnecessarily damped a safe update");
+    auto pinned=self;pinned.translate[0]=0;pinned.rotate[0]=0;pinned.dc[0]={};pinned.dw[0]={};
+    const auto fixed=mixed_filter(pinned,parameters);require(fixed.status==0&&fixed.positions==pinned.positions,
+        "fixed rigid modes moved in DAT");
+    // The represented endpoint can move farther than its mathematical capped
+    // increment after adding it to a large position. The endpoint join must
+    // shorten the affected free vertex before publishing any part of the sweep.
+    auto rounded=pinned;rounded.positions.push_back({1e12,0,0});rounded.reference.push_back({});
+    rounded.owner.push_back(-1);rounded.updates.resize(5);rounded.updates.back()={.3,0,0};
+    const DatParameters narrow{.9,2./3,1.2};
+    require((rounded.positions.back()[0]+.3)-rounded.positions.back()[0]>.3,
+        "rounded-endpoint fixture must exceed its raw radius cap");
+    const auto rounded_result=mixed_filter(rounded,narrow);
+    require(rounded_result.status==0,"rounded represented endpoint did not backtrack");
+    const double represented=rounded_result.positions.back()[0]-rounded.positions.back()[0];
+    require(represented>0&&represented<=.5*narrow.gamma*narrow.query_radius,
+        "DAT published a represented endpoint outside its query sphere");
+    // Exercise retry striding past one block while every represented .3
+    // increment rounds outside its .3 sphere on the first parallel pass.
+    auto many_rounded=rounded;
+    for(int i=0;i<300;++i) {
+        many_rounded.positions.push_back({1e12+8*(i+1),0,0});
+        many_rounded.reference.push_back({});many_rounded.owner.push_back(-1);
+        many_rounded.updates.push_back({.3,0,0});
+    }
+    const auto retried=mixed_filter(many_rounded,narrow);
+    require(retried.status==0,"multi-block represented endpoint retry failed");
+    for(std::size_t i=4;i<many_rounded.positions.size();++i) {
+        const double delta=retried.positions[i][0]-many_rounded.positions[i][0];
+        require(delta>0&&delta<=.5*narrow.gamma*narrow.query_radius,
+            "strided retry published an endpoint outside its sphere");
+    }
+    require(mixed_filter(self,parameters,true).status==DatRigidOwnership,"duplicate rigid ownership was accepted");
+    auto bad=self;bad.owner[0]=17;
+    require(mixed_filter(bad,parameters).status==DatRigidOwnership,"out-of-range rigid owner was accepted");
+    bad=self;bad.translate[0]=0;
+    require(mixed_filter(bad,parameters).status==DatInvalidInput,"fixed translation accepted a nonzero increment");
+    bad=curved;bad.positions[0][0]+=.01;
+    require(mixed_filter(bad,parameters).status==DatInvalidInput,"inconsistent proxy pose was accepted");
+    bad=curved;bad.owner[2]=0;
+    require(mixed_filter(bad,parameters).status!=0,"mixed-owner rigid triangle was accepted");
+    require(mixed_filter(self,parameters,false,42).status==42,"mixed DAT cleared an existing error");
+    std::cout<<"GPU mixed DAT: hidden rotation crossings, full-path radius, shared body/body planes, represented endpoint backtracking, modes, ownership and immutable snapshots PASS\n";
+}
 } // namespace
 
 int main() {
     try {
         int count=0;cuda_checked(cudaGetDeviceCount(&count));require(count>0,"GPU DAT test requires a CUDA device");
         component_cases();
+        mixed_component_cases();
         std::cout<<"GPU DAT: "<<checked_cases<<" CPU-oracle cases; capped updates, NT/EE exact retries, obtuse/sliver/scale/translation, boundary/interior masks, permutation/rebuild/stream invariants, zero-gap and invalid-input rejection PASS\n";
         return 0;
     } catch(const std::exception& error) {std::cerr<<"GPU DAT test failed: "<<error.what()<<'\n';return 1;}

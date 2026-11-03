@@ -10,8 +10,44 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <utility>
+
+struct DATWorkspace::Impl {
+    BroadPhase broad_phase;
+    std::vector<AABB> boxes;
+    std::vector<std::atomic<double>> factors, body_factors;
+    std::vector<int> local, rigid_nodes;
+    std::vector<double> rigid_radius_factors;
+    std::vector<rigid_dat::Trajectory> paths;
+    std::vector<std::optional<rigid_dat::PreparedTrajectory>> prepared_paths;
+    std::vector<Vec3> updates;
+};
+DATWorkspace::DATWorkspace() : impl(std::make_unique<Impl>()) {}
+DATWorkspace::~DATWorkspace() = default;
+
+static void dat_reset_factors(std::vector<std::atomic<double>>& factors, std::size_t count) {
+    if (factors.size()!=count) factors=std::vector<std::atomic<double>>(count);
+}
+
+// An outward-rounded coordinate gap is a lower bound on Euclidean distance.
+// Reject only with that certificate; avoid squared norms and their overflow.
+static bool dat_aabb_separated(const std::array<int,4>& nodes, int split,
+    const std::vector<Vec3>& x, double radius) {
+    for (int k=0; k<3; ++k) {
+        double alo=INFINITY, ahi=-INFINITY, blo=INFINITY, bhi=-INFINITY;
+        for (int i=0; i<4; ++i) {
+            const double value=x[nodes[i]][k];
+            if (i<split) {alo=std::min(alo,value);ahi=std::max(ahi,value);}
+            else {blo=std::min(blo,value);bhi=std::max(bhi,value);}
+        }
+        const double gap=std::max(std::nextafter(blo-ahi,-INFINITY),
+                                  std::nextafter(alo-bhi,-INFINITY));
+        if (gap>=radius) return true;
+    }
+    return false;
+}
 
 static void dat_atomic_min(std::atomic<double>& destination, double value)
 {
@@ -31,6 +67,32 @@ static void dat_for_pairs(std::size_t count, const Function& function)
         } catch (...) {
             // Exceptions must not escape an OpenMP worker region.
             #pragma omp critical(dat_pair_error)
+            {
+                if (!error) error = std::current_exception();
+            }
+        }
+    }
+    if (error) std::rethrow_exception(error);
+}
+
+// Newly parallelized work is independent per item. Keep tiny fixtures on the
+// original direct serial path; large curved-trajectory batches use bounded
+// dynamic chunks because a fixed body's no-motion paths are much cheaper than
+// a moving body's interval scans. All workers join before any reduction/read.
+template<class Function>
+static void dat_for_independent(std::size_t count, const Function& function)
+{
+    if (count < 128) {
+        for (std::size_t item = 0; item < count; ++item) function(item);
+        return;
+    }
+    std::exception_ptr error;
+    #pragma omp parallel for schedule(dynamic,64)
+    for (std::size_t item = 0; item < count; ++item) {
+        try {
+            function(item);
+        } catch (...) {
+            #pragma omp critical(dat_independent_error)
             {
                 if (!error) error = std::current_exception();
             }
@@ -193,7 +255,8 @@ static void dat_constrain_pair(
 std::vector<Vec3> planar_DAT(
     double gamma, double query_radius, const RefMesh& mesh,
     const std::vector<Vec3>& incremental_update,
-    const std::vector<Vec3>& current_positions, double node_box_padding)
+    const std::vector<Vec3>& current_positions, double node_box_padding,
+    const BroadPhase* candidates, DATWorkspace* workspace)
 {
     const std::size_t count = current_positions.size();
     if (!std::isfinite(gamma) || gamma <= 0 || gamma >= 1
@@ -232,9 +295,12 @@ std::vector<Vec3> planar_DAT(
         throw std::invalid_argument("planar_DAT: displacement limit or box radius out of range");
 
     std::vector<Vec3> updates(count);
-    std::vector<AABB> boxes(count);
-    std::vector<std::atomic<double>> factors(count);
-    for (std::size_t i = 0; i < count; ++i) {
+    std::optional<DATWorkspace> local_workspace;
+    if(!workspace) {local_workspace.emplace(); workspace=&*local_workspace;}
+    auto& storage=*workspace->impl;
+    auto& boxes=storage.boxes; boxes.resize(count);
+    auto& factors=storage.factors; dat_reset_factors(factors,count);
+    dat_for_independent(count, [&](std::size_t i) {
         if (!current_positions[i].allFinite() || !incremental_update[i].allFinite())
             throw std::invalid_argument("planar_DAT: nonfinite position or update");
         updates[i] = dat_capped_update(incremental_update[i], limit);
@@ -243,24 +309,27 @@ std::vector<Vec3> planar_DAT(
         if (!boxes[i].min.allFinite() || !boxes[i].max.allFinite())
             throw std::invalid_argument("planar_DAT: node box overflow");
         factors[i].store(1.0, std::memory_order_relaxed);
-    }
+    });
     if (count == 0) return updates;
 
-    // Fresh topology per call. Green triangles and red edges are unions of
-    // these blue boxes. Zero additional d_hat padding: r_q already defines
+    // Reuse topology within a solve. Green triangles and red edges are unions
+    // of these blue boxes. Zero additional d_hat padding: r_q already defines
     // the query neighborhood; there is no barrier stiffness/energy here.
-    BroadPhase broad_phase;
-    if (!mesh.tets.empty() || !mesh.tet_nodes.empty())
-        broad_phase.initialize_surface_nodes(boxes, mesh, 0.0,
-            BroadPhase::InitializationMode::DeformableSolver);
-    else
-        broad_phase.initialize(boxes, mesh, 0.0,
-            BroadPhase::InitializationMode::DeformableSolver);
-    const auto& cache = broad_phase.cache();
+    auto& broad_phase=storage.broad_phase;
+    if (!candidates) {
+        if (!mesh.tets.empty() || !mesh.tet_nodes.empty())
+            broad_phase.initialize_surface_nodes(boxes, mesh, 0.0,
+                BroadPhase::InitializationMode::DeformableSolver, false);
+        else
+            broad_phase.initialize(boxes, mesh, 0.0,
+                BroadPhase::InitializationMode::DeformableSolver, false);
+    }
+    const auto& cache = candidates?candidates->cache():broad_phase.cache();
     dat_for_pairs(cache.nt_pairs.size(), [&](std::size_t i) {
         const auto& pair = cache.nt_pairs[i];
         const std::array<int, 4> nodes{
             pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+        if (dat_aabb_separated(nodes,1,current_positions,query_radius)) return;
         const Vec3 separation = dat_vertex_triangle_separation(
             current_positions[nodes[0]], current_positions[nodes[1]],
             current_positions[nodes[2]], current_positions[nodes[3]]);
@@ -270,6 +339,7 @@ std::vector<Vec3> planar_DAT(
     dat_for_pairs(cache.ss_pairs.size(), [&](std::size_t i) {
         const auto& pair = cache.ss_pairs[i];
         const std::array<int, 4> nodes{pair.v[0], pair.v[1], pair.v[2], pair.v[3]};
+        if (dat_aabb_separated(nodes,2,current_positions,query_radius)) return;
         const auto distance = segment_segment_distance(
             current_positions[nodes[0]], current_positions[nodes[1]],
             current_positions[nodes[2]], current_positions[nodes[3]]);
@@ -287,7 +357,8 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
     const std::vector<Vec3>& positions, const std::vector<Vec3>& centers,
     const std::vector<Vec3>& omega, const std::vector<Vec4>& previous_orientations,
     const std::vector<Vec3>& delta_centers, const std::vector<Vec3>& delta_omega,
-    double dt, double node_box_padding)
+    double dt, double node_box_padding,
+    const BroadPhase* candidates, DATWorkspace* workspace)
 {
     const std::size_t n = positions.size(), bodies = mesh.rb_nodes.size();
     if (bodies == 0) {
@@ -296,7 +367,7 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
             throw std::invalid_argument("general_DAT: unexpected rigid coordinates");
         GeneralDATResult result;
         const auto displacements=planar_DAT(gamma,query_radius,mesh,particle_updates,
-            positions,node_box_padding);
+            positions,node_box_padding,candidates,workspace);
         result.positions=positions;
         for(std::size_t v=0;v<n;++v) {
             result.positions[v]+=displacements[v];
@@ -319,10 +390,23 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
         || mesh.tris.size() % 3 || mesh.tets.size() % 4)
         throw std::invalid_argument("general_DAT: inconsistent mesh/coordinate sizes");
     const auto valid_node = [n](int v) { return v >= 0 && std::size_t(v) < n; };
-    std::vector<int> local(n, -1);
+    std::optional<DATWorkspace> local_workspace;
+    if(!workspace) {local_workspace.emplace(); workspace=&*local_workspace;}
+    auto& storage=*workspace->impl;
+    auto& local=storage.local; local.assign(n,-1);
+    std::vector<std::size_t> body_offsets(bodies+1,0);
+    for(std::size_t b=0;b<bodies;++b) {
+        if(mesh.rb_nodes[b].size()>n-body_offsets[b])
+            throw std::invalid_argument("general_DAT: too many rigid proxy nodes");
+        body_offsets[b+1]=body_offsets[b]+mesh.rb_nodes[b].size();
+    }
     const auto array = [](const Vec3& x) { return rigid_dat::Vector{x[0],x[1],x[2]}; };
-    std::vector<rigid_dat::Trajectory> paths(n);
-    std::vector<rigid_dat::Box> initial_boxes(n);
+    // Only rigid vertices need trajectories, including in large mixed scenes.
+    auto& paths=storage.paths; paths.resize(body_offsets.back());
+    auto& rigid_nodes=storage.rigid_nodes; rigid_nodes.resize(paths.size());
+    auto& radius_factors=storage.rigid_radius_factors; radius_factors.resize(paths.size());
+    auto& prepared_paths=storage.prepared_paths; prepared_paths.resize(paths.size());
+    const auto path_index=[&](int v) {return body_offsets[mesh.node_to_rb[v]]+std::size_t(local[v]);};
     for (std::size_t b = 0; b < bodies; ++b) {
         if (mesh.rb_nodes[b].empty() || mesh.rb_nodes[b].size() != mesh.ref_positions[b].size()
             || !centers[b].allFinite() || !omega[b].allFinite()
@@ -338,14 +422,10 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
                 || !mesh.ref_positions[b][j].allFinite())
                 throw std::invalid_argument("general_DAT: inconsistent rigid ownership");
             local[v] = int(j);
-            auto& path = paths[v];
-            path.center = array(centers[b]); path.delta_center = array(delta_centers[b]);
-            path.omega = array(omega[b]); path.delta_omega = array(delta_omega[b]);
-            path.reference = array(mesh.ref_positions[b][j]); path.dt = dt;
-            for (int k=0;k<4;++k) path.q0[k]=previous_orientations[b][k];
+            rigid_nodes[body_offsets[b]+j]=v;
         }
     }
-    for (std::size_t v=0;v<n;++v) {
+    dat_for_independent(n, [&](std::size_t v) {
         const int owner=mesh.node_to_rb[v];
         if (owner < -1 || owner >= int(bodies) || ((owner>=0) != (local[v]>=0))
             || !positions[v].allFinite() || !particle_updates[v].allFinite())
@@ -358,7 +438,7 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
             if (!expected.allFinite() || (expected-positions[v]).cwiseAbs().maxCoeff()>tolerance)
                 throw std::invalid_argument("general_DAT: rigid proxies disagree with pose");
         }
-    }
+    });
     for (std::size_t i=0;i<mesh.tris.size();i+=3) {
         const int a=mesh.tris[i],b=mesh.tris[i+1],c=mesh.tris[i+2];
         if (!valid_node(a)||!valid_node(b)||!valid_node(c)||a==b||b==c||a==c
@@ -385,26 +465,38 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
     GeneralDATResult result;
     result.body_factors.assign(bodies,1);
     // The far-pair bound is a full curved-path sphere, never endpoint distance.
+    dat_for_independent(rigid_nodes.size(), [&](std::size_t index) {
+        const int v=rigid_nodes[index],b=mesh.node_to_rb[v];
+        auto& path=paths[index];
+        path.center=array(centers[b]);path.delta_center=array(delta_centers[b]);
+        path.omega=array(omega[b]);path.delta_omega=array(delta_omega[b]);
+        path.reference=array(mesh.ref_positions[b][local[v]]);path.dt=dt;
+        for(int k=0;k<4;++k)path.q0[k]=previous_orientations[b][k];
+        prepared_paths[index].emplace(paths[index]);
+        const auto& initial_box=prepared_paths[index]->initial_box;
+        Vec3 initial_offset;
+        for(int k=0;k<3;++k) initial_offset[k]=std::max(
+            std::nextafter(std::abs(initial_box.lo[k]-positions[v][k]),INFINITY),
+            std::nextafter(std::abs(initial_box.hi[k]-positions[v][k]),INFINITY));
+        // Query neighborhoods are anchored at represented positions. The
+        // mathematical phi(0) enclosure can differ by evaluation roundoff;
+        // reserve that offset over the entire arc, not only at its endpoint.
+        const double offset=dat_norm_upper(initial_offset);
+        const double budget=offset<limit?std::nextafter(limit-offset,0.0):0;
+        if(!(budget>0))throw std::domain_error("general_DAT: unresolved query-anchor roundoff");
+        radius_factors[index]=rigid_dat::radius_step(*prepared_paths[index],budget);
+    });
+    // Deterministic reduction in the original mesh.rb_nodes traversal order.
+    // Later pair-plane allocations see the same completed per-body radius cap.
     for(std::size_t b=0;b<bodies;++b)
-        for(int v:mesh.rb_nodes[b]) {
-            initial_boxes[v]=rigid_dat::trajectory_bounds(paths[v],0,0);
-            Vec3 initial_offset;
-            for(int k=0;k<3;++k) initial_offset[k]=std::max(
-                std::nextafter(std::abs(initial_boxes[v].lo[k]-positions[v][k]),INFINITY),
-                std::nextafter(std::abs(initial_boxes[v].hi[k]-positions[v][k]),INFINITY));
-            // Query neighborhoods are anchored at represented positions. The
-            // mathematical phi(0) enclosure can differ by evaluation roundoff;
-            // reserve that offset over the entire arc, not only at its endpoint.
-            const double offset=dat_norm_upper(initial_offset);
-            const double budget=offset<limit?std::nextafter(limit-offset,0.0):0;
-            if(!(budget>0))throw std::domain_error("general_DAT: unresolved query-anchor roundoff");
-            result.body_factors[b]=std::min(result.body_factors[b],rigid_dat::radius_step(paths[v],budget));
-        }
-    std::vector<Vec3> updates(n);
-    std::vector<AABB> boxes(n);
-    std::vector<std::atomic<double>> factors(n),body_factors(bodies);
+        for(std::size_t j=0;j<mesh.rb_nodes[b].size();++j)
+            result.body_factors[b]=std::min(result.body_factors[b],radius_factors[body_offsets[b]+j]);
+    auto& updates=storage.updates; updates.resize(n);
+    auto& boxes=storage.boxes; boxes.resize(n);
+    auto& factors=storage.factors; dat_reset_factors(factors,n);
+    auto& body_factors=storage.body_factors; dat_reset_factors(body_factors,bodies);
     for(std::size_t b=0;b<bodies;++b) body_factors[b].store(result.body_factors[b]);
-    for(std::size_t v=0;v<n;++v) {
+    dat_for_independent(n, [&](std::size_t v) {
         const int b=mesh.node_to_rb[v];
         if(b<0) updates[v]=dat_capped_update(particle_updates[v],limit);
         else if(delta_omega[b].cwiseAbs().maxCoeff()==0)
@@ -412,21 +504,23 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
         else {
             // Plane allocation depends on local motion, not subtraction of two
             // rounded, potentially very large, world-space endpoints.
-            auto local_path=paths[v]; local_path.center={0,0,0};
-            const auto endpoint=rigid_dat::evaluate(local_path,result.body_factors[b]);
-            const auto start=rigid_dat::evaluate(local_path,0);
+            auto local_path=paths[path_index(v)]; local_path.center={0,0,0};
+            const auto endpoint=rigid_dat::detail::evaluate_core(local_path,result.body_factors[b],prepared_paths[path_index(v)]->u0);
+            const auto start=rigid_dat::detail::evaluate_core(local_path,0,prepared_paths[path_index(v)]->u0);
             updates[v]=Vec3(endpoint[0]-start[0],endpoint[1]-start[1],endpoint[2]-start[2]);
         }
         boxes[v]=AABB(positions[v]-Vec3::Constant(radius),positions[v]+Vec3::Constant(radius));
         if(!updates[v].allFinite()||!boxes[v].min.allFinite()||!boxes[v].max.allFinite())
             throw std::invalid_argument("general_DAT: node extent overflow");
         factors[v].store(1);
+    });
+    auto& phase=storage.broad_phase;
+    if (!candidates) {
+        if(!mesh.tets.empty()||!mesh.tet_nodes.empty()) phase.initialize_surface_nodes(
+            boxes,mesh,0,BroadPhase::InitializationMode::GeneralSolver, false);
+        else phase.initialize(boxes,mesh,0,BroadPhase::InitializationMode::GeneralSolver, false);
     }
-    BroadPhase phase;
-    if(!mesh.tets.empty()||!mesh.tet_nodes.empty()) phase.initialize_surface_nodes(
-        boxes,mesh,0,BroadPhase::InitializationMode::GeneralSolver);
-    else phase.initialize(boxes,mesh,0,BroadPhase::InitializationMode::GeneralSolver);
-    const auto& cache=phase.cache();
+    const auto& cache=candidates?candidates->cache():phase.cache();
     struct EndpointConstraint {
         std::array<int,4> nodes{};
         Vec3 normal=Vec3::Zero();
@@ -477,7 +571,7 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
                 certified_margins[i]=i<split?-hi:lo;
                 initial_side_safe[i]=1;
                 if(mesh.node_to_rb[nodes[i]]>=0) {
-                    const auto initial=dat_plane_projection(initial_boxes[nodes[i]],normal,plane_point);
+                    const auto initial=dat_plane_projection(prepared_paths[path_index(nodes[i])]->initial_box,normal,plane_point);
                     initial_side_safe[i]=i<split?initial[1]<0:initial[0]>0;
                     certified_margins[i]=std::min(certified_margins[i],i<split?-initial[1]:initial[0]);
                 }
@@ -489,7 +583,7 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
                 throw std::domain_error("general_DAT: initial rigid trajectory is not on its intended plane side");
             }
             if(owner>=0 && delta_omega[owner].cwiseAbs().maxCoeff()>0) {
-                const double alpha=rigid_dat::plane_step(paths[v],array(normal),array(plane_point),gamma);
+                const double alpha=rigid_dat::plane_step(*prepared_paths[path_index(v)],array(normal),array(plane_point),gamma);
                 dat_atomic_min(body_factors[owner],alpha);
             } else {
                 double approach=i<split?velocity[i]:-velocity[i];
@@ -523,51 +617,60 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
     };
     dat_for_pairs(cache.nt_pairs.size(),[&](std::size_t i){
         const auto& p=cache.nt_pairs[i]; const std::array<int,4> nodes{p.node,p.tri_v[0],p.tri_v[1],p.tri_v[2]};
+        if(dat_aabb_separated(nodes,1,positions,query_radius))return;
         constrain(nodes,1,dat_vertex_triangle_separation(positions[nodes[0]],positions[nodes[1]],positions[nodes[2]],positions[nodes[3]]),i);
     });
     dat_for_pairs(cache.ss_pairs.size(),[&](std::size_t i){
         const auto& p=cache.ss_pairs[i]; const std::array<int,4> nodes{p.v[0],p.v[1],p.v[2],p.v[3]};
+        if(dat_aabb_separated(nodes,2,positions,query_radius))return;
         constrain(nodes,2,-segment_segment_distance(positions[nodes[0]],positions[nodes[1]],positions[nodes[2]],positions[nodes[3]]).separation,cache.nt_pairs.size()+i);
     });
     std::vector<double> node_factors(n);
-    for(std::size_t v=0;v<n;++v)node_factors[v]=factors[v].load();
+    dat_for_independent(n, [&](std::size_t v) {node_factors[v]=factors[v].load();});
     for(std::size_t b=0;b<bodies;++b)result.body_factors[b]=body_factors[b].load();
     // Certify represented endpoints as well as the mathematical curved path.
     // COM addition and quaternion placement can otherwise round a positive gap
     // to zero. Backtracking only shortens already-certified trajectory prefixes.
     std::vector<Vec3> endpoints(n);
     result.centers.resize(bodies);result.omega.resize(bodies);result.orientations.resize(bodies);
+    std::vector<std::atomic<unsigned char>> bad_node(n),bad_body(bodies);
     constexpr int endpoint_backtracks=std::numeric_limits<double>::digits+2;
     for(int attempt=0;;++attempt) {
-        for(std::size_t v=0;v<n;++v)if(mesh.node_to_rb[v]<0) {
-            const Vec3 displacement=updates[v]*node_factors[v];
-            endpoints[v]=positions[v]+displacement;
-        }
-        for(std::size_t b=0;b<bodies;++b) {
+        dat_for_independent(n, [&](std::size_t v) {
+            if(mesh.node_to_rb[v]<0) {
+                const Vec3 displacement=updates[v]*node_factors[v];
+                endpoints[v]=positions[v]+displacement;
+            }
+        });
+        dat_for_independent(bodies, [&](std::size_t b) {
             const double alpha=result.body_factors[b];
             result.centers[b]=centers[b]+alpha*delta_centers[b];
             result.omega[b]=omega[b]+alpha*delta_omega[b];
             result.orientations[b]=quaternion_from_angular_velocity(previous_orientations[b],result.omega[b],dt);
-            for(std::size_t j=0;j<mesh.rb_nodes[b].size();++j)
-                endpoints[mesh.rb_nodes[b][j]]=world_space_position(mesh.ref_positions[b][j],result.centers[b],result.orientations[b]);
-        }
-        std::vector<unsigned char> bad_node(n,0),bad_body(bodies,0);
+        });
+        dat_for_independent(rigid_nodes.size(), [&](std::size_t index) {
+            const int v=rigid_nodes[index],b=mesh.node_to_rb[v];
+            endpoints[v]=world_space_position(mesh.ref_positions[b][local[v]],result.centers[b],result.orientations[b]);
+        });
+        for(std::size_t b=0;b<bodies;++b)bad_body[b].store(0,std::memory_order_relaxed);
         const auto mark=[&](int v){
-            if(mesh.node_to_rb[v]<0)bad_node[v]=1;
-            else bad_body[mesh.node_to_rb[v]]=1;
+            if(mesh.node_to_rb[v]<0)bad_node[v].store(1,std::memory_order_relaxed);
+            else bad_body[mesh.node_to_rb[v]].store(1,std::memory_order_relaxed);
         };
-        bool failed=false;
-        for(std::size_t v=0;v<n;++v) {
-            if(!endpoints[v].allFinite()) {failed=true;mark(int(v));continue;}
+        dat_for_independent(n, [&](std::size_t v) {
+            // No constraint worker runs until this per-node phase joins.
+            bad_node[v].store(0,std::memory_order_relaxed);
+            if(!endpoints[v].allFinite()) {mark(int(v));return;}
             Vec3 extent=Vec3::Zero();
             for(int k=0;k<3;++k) {
                 if(endpoints[v][k]!=positions[v][k])
                     extent[k]=std::nextafter(std::abs(endpoints[v][k]-positions[v][k]),INFINITY);
             }
-            if(dat_norm_upper(extent)>limit) {failed=true;mark(int(v));}
-        }
-        for(const auto& constraint:endpoint_constraints) {
-            if(!constraint.split)continue;
+            if(dat_norm_upper(extent)>limit) mark(int(v));
+        });
+        dat_for_independent(endpoint_constraints.size(), [&](std::size_t index) {
+            const auto& constraint=endpoint_constraints[index];
+            if(!constraint.split)return;
             double left=-INFINITY,right=INFINITY;
             const Vec3& origin=endpoints[constraint.nodes[0]];
             for(int i=0;i<4;++i) {
@@ -583,18 +686,24 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
                 else right=std::min(right,lo);
             }
             if(!(right>left)) {
-                failed=true;
                 for(int v:constraint.nodes)mark(v);
             }
-        }
+        });
+        // Failure flags may have many writers, but all writes are atomic and
+        // joined here. The decision/retry order remains body/node deterministic.
+        bool failed=false;
+        for(std::size_t v=0;v<n;++v)failed|=bad_node[v].load(std::memory_order_relaxed)!=0;
+        for(std::size_t b=0;b<bodies;++b)failed|=bad_body[b].load(std::memory_order_relaxed)!=0;
         if(!failed) {
             result.positions=std::move(endpoints);
             return result;
         }
         if(attempt==endpoint_backtracks)throw std::domain_error("general_DAT: cannot certify represented endpoints");
-        for(std::size_t b=0;b<bodies;++b)if(bad_body[b])
+        for(std::size_t b=0;b<bodies;++b)if(bad_body[b].load(std::memory_order_relaxed))
             result.body_factors[b]=attempt==endpoint_backtracks-1?0:.5*result.body_factors[b];
-        for(std::size_t v=0;v<n;++v)if(bad_node[v])
-            node_factors[v]=attempt==endpoint_backtracks-1?0:.5*node_factors[v];
+        dat_for_independent(n, [&](std::size_t v) {
+            if(bad_node[v].load(std::memory_order_relaxed))
+                node_factors[v]=attempt==endpoint_backtracks-1?0:.5*node_factors[v];
+        });
     }
 }

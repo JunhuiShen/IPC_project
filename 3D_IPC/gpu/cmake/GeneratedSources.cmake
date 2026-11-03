@@ -65,10 +65,10 @@ replace_once(gpu_driver "    BroadPhase broad_phase;\n" "")
 replace_once(gpu_driver "    using Clock = std::chrono::steady_clock;"
     "    ipc_gpu::solver::GpuSolver gpu_solver(ipc_gpu::solver::describe_scene(ref_mesh,state,pins,params));\n    using Clock = std::chrono::steady_clock;")
 replace_once(gpu_driver "    const std::string& outdir = args.outdir;"
-    "    (void)ipc_gpu::solver::describe_step(params); // reject unported modes before touching output\n    if (params.use_jacobi_dat && !ref_mesh.rb_nodes.empty()) {\n        throw std::invalid_argument(\"GPU Jacobi DAT is not supported on rigid-body scenes\");\n    }\n    if (!params.exact_computation_fallback && !ref_mesh.rb_nodes.empty()) {\n        throw std::invalid_argument(\"GPU original/exact fallback mode is not supported on rigid-body scenes\");\n    }\n    std::cout << \"GPU device solver backend\\n\";\n    const std::string& outdir = args.outdir;")
+    "    (void)ipc_gpu::solver::describe_step(params); // reject unported modes before touching output\n    std::cout << \"GPU device solver backend\\n\";\n    const std::string& outdir = args.outdir;")
 replace_once(gpu_driver "        if (fs::exists(outdir)) fs::remove_all(outdir);"
     "        if (fs::exists(outdir)) throw std::runtime_error(\"GPU run requires a new output directory (or --restart_frame)\");")
-string(FIND "${gpu_driver}" "    if (!params.use_jacobi_dat\n        && (params.use_basic_experimental" gpu_print_begin)
+string(FIND "${gpu_driver}" "    if (!params.use_jacobi_dat && !params.use_jacobi_level_based_ccd\n        && (params.use_basic_experimental" gpu_print_begin)
 string(FIND "${gpu_driver}" "    if (num_rigid_bodies > 0)" gpu_print_end)
 if(gpu_print_begin LESS 0 OR gpu_print_end LESS gpu_print_begin)
     message(FATAL_ERROR "GPU driver startup anchor missing")

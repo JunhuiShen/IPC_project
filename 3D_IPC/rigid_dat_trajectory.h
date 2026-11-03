@@ -92,6 +92,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 
@@ -334,17 +335,15 @@ inline const std::array<Interval, kTaylorOrder + 1>& taylor_coefficients() {
 
 // Enclose exp(skew(theta)) * v for all theta in the supplied 3-D interval box
 // and all v in the supplied 3-D interval box.
-inline std::array<Interval, 3> rotation_action_interval(
-    const std::array<Interval, 3>& theta,
-    const std::array<Interval, 3>& v) {
-
-    if (is_zero(v[0]) && is_zero(v[1]) && is_zero(v[2])) return v;
-
+// The matrix depends only on the angular interval, not the vertex reference
+// or center. A bounded per-thread memo shares exact outward-rounded matrices
+// across vertices and pair queries without locks or a mesh-lifetime key.
+inline IntervalMatrix rotation_matrix_interval(const std::array<Interval,3>& theta) {
     const double rho = rotation_norm_upper(theta);
     if (!std::isfinite(rho)) {
         throw std::overflow_error("rigid_dat: rotation angle is not representable");
     }
-    if (rho == 0.0) return v;
+    if (rho == 0.0) return identity_matrix();
 
     // Choose s with ||theta|| / 2^s <= 1/8 for every theta in the box.  The
     // power-of-two scaling is outward-rounded, so verify the bound on the
@@ -395,6 +394,29 @@ inline std::array<Interval, 3> rotation_action_interval(
     // member of the scaled family.
     for (int k = 0; k < scale; ++k) poly = matrix_multiply(poly, poly);
 
+    return poly;
+}
+
+inline const IntervalMatrix& cached_rotation_matrix(const std::array<Interval,3>& theta) {
+    struct Entry {std::array<Interval,3> theta{}; IntervalMatrix matrix{}; bool valid=false;};
+    struct Cache {std::array<Entry,32> entries{}; std::size_t next=0;};
+    static thread_local Cache cache;
+    for (const auto& entry:cache.entries)
+        if(entry.valid && std::memcmp(entry.theta.data(),theta.data(),sizeof(theta))==0)
+            return entry.matrix;
+    // Compute before publishing a key; exceptions leave every entry usable.
+    const auto matrix=rotation_matrix_interval(theta);
+    auto& entry=cache.entries[cache.next];
+    cache.next=(cache.next+1)%cache.entries.size();
+    entry.theta=theta;entry.matrix=matrix;entry.valid=true;
+    return entry.matrix;
+}
+
+inline std::array<Interval,3> rotation_action_interval(
+    const std::array<Interval,3>& theta, const std::array<Interval,3>& v) {
+    if(is_zero(v[0]) && is_zero(v[1]) && is_zero(v[2])) return v;
+    if(rotation_norm_upper(theta)==0.0) return v;
+    const auto& poly=cached_rotation_matrix(theta);
     std::array<Interval, 3> result{};
     for (int i = 0; i < 3; ++i) {
         Interval sum = make_interval(0.0);
@@ -734,6 +756,22 @@ struct RadiusPrefixScan {
 
 }  // namespace detail
 
+// Immutable preparation for repeated queries on one sweep trajectory. The
+// interval and point rotated references deliberately use their original,
+// separate arithmetic; neither substitutes for the other in a certificate.
+struct PreparedTrajectory {
+    Trajectory path;
+    Vector u0;
+    std::array<detail::Interval,3> v0;
+    Box initial_box;
+    explicit PreparedTrajectory(const Trajectory& input) : path(input) {
+        detail::validate_trajectory(path);
+        u0=detail::quaternion_apply(path.q0,path.reference);
+        v0=detail::quaternion_apply_interval(path.q0,path.reference);
+        initial_box=detail::bounds_core(path,0.0,0.0,v0);
+    }
+};
+
 // Point proposal only: see the numerical contract above.  This is not a
 // certificate of any represented endpoint or of the path between samples.
 inline Vector evaluate(const Trajectory& path, double t) {
@@ -760,10 +798,10 @@ inline Box trajectory_bounds(const Trajectory& path, double a, double b) {
     return detail::bounds_core(path, a, b, v0);
 }
 
-inline double plane_step(const Trajectory& path, const Vector& normal,
+inline double plane_step(const PreparedTrajectory& prepared, const Vector& normal,
                          const Vector& plane_point, double gamma,
                          int samples = 8, int iterations = 40) {
-    detail::validate_trajectory(path);
+    const auto& path=prepared.path;
     for (int i = 0; i < 3; ++i) {
         if (!std::isfinite(normal[i]) || !std::isfinite(plane_point[i])) {
             throw std::invalid_argument(
@@ -789,12 +827,11 @@ inline double plane_step(const Trajectory& path, const Vector& normal,
     }
     if (gamma == 0.0) return 0.0;
 
-    const std::array<detail::Interval, 3> v0 =
-        detail::quaternion_apply_interval(path.q0, path.reference);
+    const auto& v0=prepared.v0;
 
     // Orient the half-space using a certified enclosure of the initial signed
     // distance.  Boundary or uncertain initial contact fails closed.
-    const Box initial_box = detail::bounds_core(path, 0.0, 0.0, v0);
+    const Box& initial_box = prepared.initial_box;
     const detail::Interval initial_dot_point =
         detail::dot_scalar_interval(normal, plane_point);
     const detail::Interval initial_distance =
@@ -834,7 +871,7 @@ inline double plane_step(const Trajectory& path, const Vector& normal,
     // Paper-like sampling only proposes an upper time limit.  The scan below
     // still certifies the complete prefix; if the proposal turns out to be
     // causally wrong (roundoff), the remaining range is scanned as well.
-    const Vector u0 = detail::quaternion_apply(path.q0, path.reference);
+    const Vector& u0 = prepared.u0;
     double proposed_limit = 1.0;
     for (int i = 1; i <= samples; ++i) {
         const double sample_time =
@@ -867,9 +904,9 @@ inline double plane_step(const Trajectory& path, const Vector& normal,
     return relaxed;
 }
 
-inline double radius_step(const Trajectory& path, double radius,
+inline double radius_step(const PreparedTrajectory& prepared, double radius,
                           int iterations = 40) {
-    detail::validate_trajectory(path);
+    const auto& path=prepared.path;
     if (!std::isfinite(radius) || radius < 0.0) {
         throw std::invalid_argument(
             "rigid_dat: radius must be finite and nonnegative");
@@ -886,13 +923,12 @@ inline double radius_step(const Trajectory& path, double radius,
         return 1.0;
     }
 
-    const std::array<detail::Interval, 3> v0 =
-        detail::quaternion_apply_interval(path.q0, path.reference);
+    const auto& v0=prepared.v0;
 
     detail::RadiusPrefixScan scan{};
     scan.path = &path;
     scan.v0 = v0;
-    scan.reference_box = detail::bounds_core(path, 0.0, 0.0, v0);
+    scan.reference_box = prepared.initial_box;
     scan.radius = radius;
     scan.max_depth = iterations < detail::kMaxDepth
                          ? iterations
@@ -902,6 +938,29 @@ inline double radius_step(const Trajectory& path, double radius,
 
     if (scan.scan(0.0, 1.0, 0)) return 1.0;
     return scan.last_safe;
+}
+
+inline double plane_step(const Trajectory& path,const Vector& normal,
+    const Vector& point,double gamma,int samples=8,int iterations=40) {
+    // Preserve the stateless API's validation/zero-budget behavior before
+    // constructing bounds; preparation is eager only in the sweep interface.
+    detail::validate_trajectory(path);
+    for(int i=0;i<3;++i)if(!std::isfinite(normal[i])||!std::isfinite(point[i]))
+        throw std::invalid_argument("rigid_dat: plane data must be finite");
+    const double length=std::hypot(normal[0],std::hypot(normal[1],normal[2]));
+    if(!(length>0)||!std::isfinite(length)||!std::isfinite(gamma)||gamma<0||gamma>1
+        ||samples<1||samples>detail::kMaxSamples||iterations<1||iterations>detail::kMaxIterations)
+        throw std::invalid_argument("rigid_dat: invalid plane query parameters");
+    if(gamma==0)return 0;
+    return plane_step(PreparedTrajectory(path),normal,point,gamma,samples,iterations);
+}
+inline double radius_step(const Trajectory& path,double radius,int iterations=40) {
+    detail::validate_trajectory(path);
+    if(!std::isfinite(radius)||radius<0||iterations<1||iterations>detail::kMaxIterations)
+        throw std::invalid_argument("rigid_dat: invalid radius query parameters");
+    if(detail::all_zero(path.delta_center) && (path.dt==0
+        ||detail::all_zero(path.delta_omega)||detail::all_zero(path.reference)))return 1;
+    return radius_step(PreparedTrajectory(path),radius,iterations);
 }
 
 }  // namespace rigid_dat

@@ -14,6 +14,8 @@ struct RigidPinConstraint {
     double initial_target[3]{};
     double rotation_center[3]{};
     double angular_velocity_z = 0;
+    // World-space motor axis; appended to preserve existing aggregate callers.
+    double rotation_axis[3]{0,0,1};
 };
 
 // Device pointers. Pins are stably grouped by body; [offsets[b],offsets[b+1])

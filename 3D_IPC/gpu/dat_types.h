@@ -14,7 +14,10 @@ enum DatError : int {
     DatUnresolvedGeometry = 71,
     DatZeroGap = 72,
     DatExactCapacity = 73,
-    DatNonfiniteOutput = 74
+    DatNonfiniteOutput = 74,
+    DatRigidOwnership = 75,
+    DatRigidTrajectory = 76,
+    DatEndpointUnproved = 77
 };
 
 } // namespace ipc_gpu::solver

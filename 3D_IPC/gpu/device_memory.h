@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <limits>
+#include <utility>
 
 namespace ipc_gpu::solver {
 inline void cuda_checked(cudaError_t error) {
@@ -20,6 +21,11 @@ public:
     ~DeviceArray() { if(pointer_) cudaFree(pointer_); }
     DeviceArray(const DeviceArray&) = delete;
     DeviceArray& operator=(const DeviceArray&) = delete;
+    void swap(DeviceArray& other) noexcept {
+        using std::swap;
+        swap(pointer_,other.pointer_);
+        swap(size_,other.size_);
+    }
     void resize(std::size_t n) {
         if(n==size_) return;
         if(n > std::numeric_limits<std::size_t>::max()/sizeof(T))

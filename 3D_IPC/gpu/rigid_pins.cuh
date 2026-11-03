@@ -42,14 +42,36 @@ IPC_RIGID_PIN_HD inline bool valid_pin(const RigidPinConstraint& p) {
 IPC_RIGID_PIN_HD inline bool rigid_pin_target(const RigidPinConstraint& pin,
     double time, double* target) {
     if (!rigid_pin_detail::valid_pin(pin) || !rigid_pin_detail::finite(time)) return false;
+    if(pin.angular_velocity_z==0) {
+        for(int k=0;k<3;++k)target[k]=pin.initial_target[k];
+        return true;
+    }
+    if(!rigid_pin_detail::finite3(pin.rotation_axis))return false;
+    double scale=0;
+    for(int k=0;k<3;++k)scale=fmax(scale,fabs(pin.rotation_axis[k]));
+    if(!(scale>0))return false;
+    double axis[3],norm2=0;
+    for(int k=0;k<3;++k){axis[k]=pin.rotation_axis[k]/scale;norm2+=axis[k]*axis[k];}
+    const double norm=sqrt(norm2);
+    if(!(norm>0)||!rigid_pin_detail::finite(norm))return false;
+    for(int k=0;k<3;++k)axis[k]/=norm;
     const double theta = pin.angular_velocity_z*time;
     if (!rigid_pin_detail::finite(theta)) return false;
     const double c = cos(theta), s = sin(theta);
     double offset[3];
     for (int k=0;k<3;++k) offset[k] = pin.initial_target[k]-pin.rotation_center[k];
+    if(!rigid_pin_detail::finite3(offset))return false;
+    if(pin.rotation_axis[0]==0&&pin.rotation_axis[1]==0&&pin.rotation_axis[2]>0) {
     target[0] = pin.rotation_center[0]+(c*offset[0]-s*offset[1]);
     target[1] = pin.rotation_center[1]+(s*offset[0]+c*offset[1]);
     target[2] = pin.rotation_center[2]+offset[2];
+    } else {
+        const double dot=(axis[0]*offset[0]+axis[1]*offset[1])+axis[2]*offset[2];
+        const double cross[3]{axis[1]*offset[2]-axis[2]*offset[1],
+            axis[2]*offset[0]-axis[0]*offset[2],axis[0]*offset[1]-axis[1]*offset[0]};
+        for(int k=0;k<3;++k)
+            target[k]=pin.rotation_center[k]+(c*offset[k]+s*cross[k]+((1-c)*dot)*axis[k]);
+    }
     return rigid_pin_detail::finite3(target);
 }
 

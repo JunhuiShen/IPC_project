@@ -5,6 +5,7 @@
 #include "exact.cuh"
 #include "direct_bound.cuh"
 #include "original_ccd.cuh"
+#include "original_rigid.cuh"
 #include "original_guess.cuh"
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -662,6 +663,143 @@ __device__ cert::LinearQuery body_query(const BpContact&contact,RigidScene scene
     q.gap_floor=pair_floor(q.start);return q;
 }
 
+// Each contact primitive must belong to one body (or the deformable set),
+// and a color may update only one side. Same-body internal pairs are ignored.
+__device__ bool original_body_side(const BpContact& contact,RigidScene scene,
+    const int* colors,int color,int body,bool& first,bool& involved,int* error) {
+    int owner[4];
+    for(int i=0;i<4;++i)owner[i]=scene.node_body[contact.vertices[i]];
+    const int second=contact.kind==0?1:2;
+    if((contact.kind==0&&(owner[1]!=owner[2]||owner[1]!=owner[3]))
+        ||(contact.kind!=0&&(owner[0]!=owner[1]||owner[2]!=owner[3]))) {
+        fail(error,LinearClipError::UnsupportedMotion);return false;
+    }
+    first=owner[0]==body;
+    const bool other=owner[second]==body;
+    involved=first!=other;
+    if(!involved)return true;
+    const int fixed=first?owner[second]:owner[0];
+    if(fixed>=0&&(std::size_t(fixed)>=scene.bodies
+        ||(colors[scene.body_blocks[fixed]]==color
+            &&(scene.translate[fixed]||scene.rotate[fixed])))) {
+        fail(error,LinearClipError::UnsupportedMotion);return false;
+    }
+    return true;
+}
+
+__device__ bool original_body_trial(RigidScene scene,RigidState state,RigidWorkspace work,
+    DeformableState vertices,const BpAabb* boxes,int body,const double* raw,double step,
+    double(*accepted)[3],double* delta,int* error) {
+    for(int k=0;k<3;++k) {
+        // CPU COM and every proxy add the SAME stored step * raw. Rebuilding
+        // delta from a rounded accepted COM, or using FMA, changes this path.
+        delta[k]=step==0.0?0.0:__dmul_rn(step,raw[k]);
+        work.accepted_com[body][k]=step==0.0?state.com[body][k]
+            :__dadd_rn(state.com[body][k],delta[k]);
+        if(!finite(delta[k])||!finite(work.accepted_com[body][k])) {
+            fail(error,LinearClipError::InvalidInput);return false;
+        }
+    }
+    bool boxed=true;
+    for(std::size_t i=scene.node_offsets[body];i<scene.node_offsets[body+1];++i) {
+        const int node=scene.nodes[i];
+        for(int k=0;k<3;++k)accepted[node][k]=step==0.0?vertices.positions[node][k]
+            :__dadd_rn(vertices.positions[node][k],delta[k]);
+        boxed=boxed&&inside(vertices.positions[node],boxes[node])&&inside(accepted[node],boxes[node]);
+    }
+    return boxed;
+}
+
+__device__ bool original_result_failed(const occd::Result& result,int* error) {
+    if(result.status==occd::Status::Ok)return false;
+    fail(error,result.status==occd::Status::InvalidInput?LinearClipError::InvalidInput
+        :LinearClipError::ExactResources);
+    return true;
+}
+
+__global__ void resolve_bodies_original(RigidScene scene,RigidState state,RigidWorkspace work,
+    DeformableState vertices,BroadPhaseView bp,const std::size_t*offsets,const int*indices,
+    const BpAabb*boxes,const int*colors,int color,double(*accepted)[3],int*error,
+    std::uint32_t*words,int*slots,bool use_ccd) {
+    if(blockIdx.x||threadIdx.x||*error)return;
+    exact::DevicePool pool;exact::initialize_pool(pool,words,slots,arena_width,arena_slots);
+    for(std::size_t body=0;body<scene.bodies&&!*error;++body) {
+        const int block=scene.body_blocks[body];if(colors[block]!=color)continue;
+        for(int k=0;k<3;++k)work.accepted_com[body][k]=state.com[body][k];
+        for(std::size_t i=scene.node_offsets[body];i<scene.node_offsets[body+1];++i)
+            for(int k=0;k<3;++k)accepted[scene.nodes[i]][k]=vertices.positions[scene.nodes[i]][k];
+        if(!scene.translate[body])continue;
+        double raw[3];
+        for(int k=0;k<3;++k) {
+            raw[k]=__dsub_rn(work.proposed_com[body][k],state.com[body][k]);
+            if(!finite(raw[k])||!finite(state.com[body][k])) {
+                fail(error,LinearClipError::InvalidInput);break;
+            }
+        }
+        if(*error)break;
+        double toi=1.0;bool hit=false;
+        const bool cpu_tiny_step=ipc_gpu::original_rigid::skip_translation_toi(raw);
+        // The CPU's rigid squared-norm shortcut skips only TOI evaluation;
+        // a tiny finite stored displacement is still committed in full.
+        if(use_ccd&&!cpu_tiny_step)
+            for(std::size_t pair=offsets[block];pair<offsets[block+1];++pair) {
+                const auto& contact=bp.contacts[indices[pair]];
+                bool first=false,involved=false;
+                if(!original_body_side(contact,scene,colors,color,int(body),first,involved,error))break;
+                if(!involved)continue;
+                double positions[4][3];
+                for(int i=0;i<4;++i)for(int k=0;k<3;++k)
+                    positions[i][k]=vertices.positions[contact.vertices[i]][k];
+                if(!ipc_gpu::original_rigid::translation_boxes_overlap(positions,contact.kind==0,first,raw))continue;
+                const auto result=original_fast_exact(
+                    ipc_gpu::original_rigid::translation_query(positions,contact.kind==0,first,raw),pool);
+                if(original_result_failed(result,error))break;
+                if(result.collision) { hit=true;toi=fmin(toi,result.toi); }
+            }
+        if(*error)break;
+        double step=hit?0.9*toi:1.0;
+        bool complete=false;
+        for(int attempt=0;attempt<=64&&!*error;++attempt) {
+            if(attempt==64)step=0.0;
+            double delta[3];
+            bool safe=original_body_trial(scene,state,work,vertices,boxes,int(body),raw,step,accepted,delta,error);
+            if(*error)break;
+            if(safe&&use_ccd)
+                for(std::size_t pair=offsets[block];pair<offsets[block+1];++pair) {
+                    const auto& contact=bp.contacts[indices[pair]];
+                    bool first=false,involved=false;
+                    if(!original_body_side(contact,scene,colors,color,int(body),first,involved,error)) { safe=false;break; }
+                    if(!involved)continue;
+                    const auto q=body_query(contact,scene,vertices,int(body),accepted);
+                    // Independently recheck the represented common delta. Its
+                    // multiplication rounding must not inherit a certificate
+                    // for the unscaled raw proposal. A band hit is conservative.
+                    if(!cpu_tiny_step&&(delta[0]!=0.0||delta[1]!=0.0||delta[2]!=0.0)
+                        &&ipc_gpu::original_rigid::translation_boxes_overlap(q.start,q.vertex_face,first,delta)) {
+                        const auto result=original_fast_exact(
+                            ipc_gpu::original_rigid::translation_query(q.start,q.vertex_face,first,delta),pool);
+                        if(original_result_failed(result,error)) { safe=false;break; }
+                        if(result.collision) { safe=false;break; }
+                    }
+                    using Status=ipc_gpu::original_rigid::RepresentationStatus;
+                    auto status=ipc_gpu::original_rigid::represented_path<256>(q.start,q.end,q.vertex_face);
+                    if(status==Status::CapacityExceeded&&!pool.failed&&pool.available==pool.slot_count)
+                        status=ipc_gpu::original_rigid::represented_path<2048>(q.start,q.end,q.vertex_face);
+                    if(status==Status::InitialContact)fail(error,LinearClipError::InitialContact);
+                    else if(status==Status::CapacityExceeded)fail(error,LinearClipError::ExactResources);
+                    else if(status==Status::Invalid)fail(error,LinearClipError::InvalidInput);
+                    if(status!=Status::Safe) { safe=false;break; }
+                }
+            if(*error)break;
+            if(safe) { complete=true;break; }
+            step*=0.5;
+        }
+        if(!complete&&!*error)fail(error,LinearClipError::Unresolved);
+        if(pool.failed||pool.available!=pool.slot_count)fail(error,LinearClipError::ExactResources);
+    }
+    exact::release_pool();
+}
+
 __global__ void resolve_bodies(RigidScene scene,RigidState state,RigidWorkspace work,
     DeformableState vertices,BroadPhaseView bp,const std::size_t*offsets,const int*indices,
     const BpAabb*boxes,const int*colors,int color,double(*accepted)[3],int*error,
@@ -839,9 +977,16 @@ void GpuLinearClipper::clip_deformable_color(const DeformableScene&scene,
 void GpuLinearClipper::clip_rigid_translation_color(const RigidScene&scene,const RigidState&state,
     const RigidWorkspace&work,const DeformableState&vertices,const BroadPhaseView&bp,
     const std::size_t*offsets,const int*indices,const BpAabb*boxes,const int*colors,int color,
-    double(*accepted)[3],int*error,bool use_ccd,cudaStream_t stream) {
+    double(*accepted)[3],int*error,bool use_ccd,cudaStream_t stream,LinearClipMode mode) {
     GpuProfileScope resolve_profile("serial_resolve",stream);
     if(!scene.bodies)return;
+    if(mode==LinearClipMode::OriginalColoredGuess)
+        throw std::invalid_argument("Rigid translation is not an original deformable predictor");
+    if(mode==LinearClipMode::OriginalSolver) {
+        resolve_bodies_original<<<1,1,0,stream>>>(scene,state,work,vertices,bp,offsets,indices,boxes,colors,color,
+            accepted,error,impl_->words,impl_->slots,use_ccd);check(cudaGetLastError());
+        return;
+    }
     resolve_bodies<<<1,1,0,stream>>>(scene,state,work,vertices,bp,offsets,indices,boxes,colors,color,
         accepted,error,impl_->words,impl_->slots,use_ccd);check(cudaGetLastError());
 }

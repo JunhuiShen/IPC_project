@@ -10,6 +10,8 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 option(IPC_GPU_BUILD_DRIVER "Build the shared-scene GPU simulator" ON)
 option(IPC_GPU_BUILD_VALIDATION "Create shared CPU reference validation targets" ${IPC_GPU_BUILD_DRIVER})
+option(IPC_GPU_FAST_DEV_BUILD
+    "Reduce ptxas optimization for the large linear CCD translation unit" OFF)
 set(IPC_GPU_WITH_CPU_SUPPORT OFF)
 if(IPC_GPU_BUILD_DRIVER OR IPC_GPU_BUILD_VALIDATION)
     set(IPC_GPU_WITH_CPU_SUPPORT ON)
@@ -75,6 +77,17 @@ add_library(ipc_gpu_solver STATIC solver.cu contact_pipeline.cu
 target_include_directories(ipc_gpu_solver PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(ipc_gpu_solver PUBLIC ipc_gpu_components CUDA::cudart Threads::Threads)
 target_compile_options(ipc_gpu_solver PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false;-lineinfo>)
+# The large exact/linear CCD unit can spend most of a cold build in ptxas.
+# Keep qualification builds unchanged; this opt-in mode retains --fmad=false
+# but trades device-code optimization for shorter development rebuilds.
+if(IPC_GPU_FAST_DEV_BUILD)
+    if(NOT CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+        message(FATAL_ERROR "IPC_GPU_FAST_DEV_BUILD requires the NVIDIA CUDA compiler")
+    endif()
+    set_property(SOURCE linear_pipeline.cu APPEND PROPERTY COMPILE_OPTIONS
+        "$<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-O1>")
+    message(STATUS "IPC GPU: ptxas -O1 for linear_pipeline.cu (fast development build)")
+endif()
 if(IPC_GPU_BUILD_DRIVER OR IPC_GPU_BUILD_VALIDATION)
     add_library(ipc_gpu_bridge STATIC bridge.cpp)
     target_include_directories(ipc_gpu_bridge PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -118,6 +131,7 @@ if(IPC_GPU_BUILD_VALIDATION)
         gpu_ratio_host_test gpu_ratio_cuda_test
         gpu_exact_pool_test gpu_adaptive_boxes_test gpu_global_guess_test
         gpu_solver_test gpu_dat_test gpu_dat_geometry_test
+        gpu_rigid_dat_math_test gpu_original_rigid_math_test
         gpu_rigid_pins_test gpu_cpu_parity_test
         gpu_original_contact_test gpu_original_ccd_test gpu_original_mode_test)
     add_dependencies(gpu_validation gpu_contact_policy_host_test)

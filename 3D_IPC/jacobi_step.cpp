@@ -3,9 +3,11 @@
 #include "friction_energy.h"
 #include "solid_ipc.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <exception>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -38,19 +40,27 @@ std::array<Vec3, 4> pair_positions(const SegmentSegmentPair& pair, const std::ve
     return {x[pair.v[0]], x[pair.v[1]], x[pair.v[2]], x[pair.v[3]]};
 }
 
-struct JacobiWorkspace {
+
+} // namespace
+
+struct JacobiStepWorkspace::Impl {
     BroadPhase broad_phase;
+    const BroadPhase* candidates = nullptr;
     std::vector<AABB> boxes;
     std::vector<IncidentTriangles> incident;
     std::vector<ShapeGrads> rest_gradients;
     std::vector<unsigned char> solid_nodes, surface_nodes;
-    std::vector<NodeTriangleContactEvaluation> nt;
-    std::vector<SegmentSegmentContactEvaluation> ss;
-    std::vector<FrozenFrictionContact> nt_friction, ss_friction;
+    PinMap pin_map;
+    solid_ipc_detail::JacobiSnapshot snapshot;
+    std::size_t count = 0;
+    bool hold_rigid_proxies = false, has_particles = false, prepared = false;
 };
 
-void add_mesh_contact(int node, const JacobiWorkspace& workspace, const SimParams& params, const std::vector<Vec3>& x, Vec3& gradient, Mat33& hessian) {
-    const auto& cache = workspace.broad_phase.cache();
+namespace {
+
+template<class Workspace>
+void add_mesh_contact(int node, const Workspace& workspace, const SimParams& params, const std::vector<Vec3>& x, Vec3& gradient, Mat33& hessian) {
+    const auto& cache = workspace.candidates->cache();
     const double scale = params.dt2() * params.k_barrier;
     const auto accumulate = [&](const auto& evaluation, const auto& pair, int role, const FrozenFrictionContact* friction) {
         if (!evaluation.active) return;
@@ -69,13 +79,59 @@ void add_mesh_contact(int node, const JacobiWorkspace& workspace, const SimParam
             hessian += fH;
         }
     };
-    for (const auto& entry : cache.vertex_nt[node]) accumulate(workspace.nt[entry.pair_index], cache.nt_pairs[entry.pair_index], entry.dof, params.friction_coefficient > 0 ? &workspace.nt_friction[entry.pair_index] : nullptr);
-    for (const auto& entry : cache.vertex_ss[node]) accumulate(workspace.ss[entry.pair_index], cache.ss_pairs[entry.pair_index], entry.dof, params.friction_coefficient > 0 ? &workspace.ss_friction[entry.pair_index] : nullptr);
+    for (const auto& entry : cache.vertex_nt[node]) accumulate(workspace.snapshot.nt[entry.pair_index], cache.nt_pairs[entry.pair_index], entry.dof, params.friction_coefficient > 0 ? &workspace.snapshot.nt_friction[entry.pair_index] : nullptr);
+    for (const auto& entry : cache.vertex_ss[node]) accumulate(workspace.snapshot.ss[entry.pair_index], cache.ss_pairs[entry.pair_index], entry.dof, params.friction_coefficient > 0 ? &workspace.snapshot.ss_friction[entry.pair_index] : nullptr);
 }
 
 } // namespace
 
-std::vector<Vec3> jacobi_step(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, const std::vector<Vec3>* previous_positions, bool hold_rigid_proxies) {
+JacobiStepWorkspace::JacobiStepWorkspace() : impl_(std::make_unique<Impl>()) {}
+JacobiStepWorkspace::~JacobiStepWorkspace() = default;
+const std::vector<ShapeGrads>& JacobiStepWorkspace::rest_gradients() const {
+    return impl_->rest_gradients;
+}
+
+void JacobiStepWorkspace::prepare(const RefMesh& ref_mesh, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params, std::size_t count,
+    bool hold_rigid_proxies) {
+    auto& workspace = *impl_;
+    workspace.prepared = false;
+    if (count>static_cast<std::size_t>(std::numeric_limits<int>::max())
+        || (hold_rigid_proxies && ref_mesh.node_to_rb.size()!=count))
+        throw std::invalid_argument("Jacobi workspace: invalid node extent or ownership");
+    const auto valid = [count](int node) {return node>=0 && std::size_t(node)<count;};
+    for (int node:ref_mesh.tets) if(!valid(node))
+        throw std::out_of_range("Jacobi workspace: invalid tet node");
+    for (int node:ref_mesh.surface_nodes) if(!valid(node))
+        throw std::out_of_range("Jacobi workspace: invalid surface node");
+    for (const auto& entry:adj) if(!valid(entry.first))
+        throw std::out_of_range("Jacobi workspace: invalid adjacency node");
+    for (const auto& pin:pins) if(!valid(pin.vertex_index))
+        throw std::out_of_range("jacobi_step: pin vertex index");
+    workspace.count = count;
+    workspace.hold_rigid_proxies = hold_rigid_proxies;
+    workspace.solid_nodes.assign(count, 0);
+    workspace.surface_nodes.assign(count, 0);
+    for (int node : ref_mesh.tets) workspace.solid_nodes[node] = 1;
+    for (int node : ref_mesh.surface_nodes) workspace.surface_nodes[node] = 1;
+    workspace.incident.assign(count, {});
+    for (const auto& [node, row] : adj) {
+        if (workspace.solid_nodes[node] || (workspace.hold_rigid_proxies && ref_mesh.node_to_rb[node]>=0)) continue;
+        workspace.incident[node] = row;
+    }
+    workspace.rest_gradients.resize(ref_mesh.Dm_inverse.size());
+    parallel_for(workspace.rest_gradients.size(), params.use_parallel, [&](std::size_t i) { workspace.rest_gradients[i] = shape_function_gradients(ref_mesh.Dm_inverse[i]); });
+    workspace.pin_map = build_pin_map(pins, static_cast<int>(count));
+
+    workspace.has_particles = false;
+    for (std::size_t i=0; i<count; ++i)
+        workspace.has_particles |= !hold_rigid_proxies || ref_mesh.node_to_rb[i]<0;
+    workspace.broad_phase.invalidate_mesh_topology();
+    workspace.prepared = true;
+}
+
+std::vector<Vec3> JacobiStepWorkspace::step(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, const std::vector<Vec3>* previous_positions, const BroadPhase* candidates) {
+    const bool hold_rigid_proxies = impl_->hold_rigid_proxies;
     const std::size_t count = xnew.size();
     if (xhat.size() != count || v.size() != count || ref_mesh.mass.size() != count)
         throw std::invalid_argument("jacobi_step: state arrays must have matching sizes");
@@ -108,48 +164,58 @@ std::vector<Vec3> jacobi_step(const RefMesh& ref_mesh, const VertexTriangleMap& 
     } else previous_positions = nullptr;
     if (count == 0) return {};
 
-    static thread_local JacobiWorkspace storage;
-    auto& workspace = storage;
-    workspace.solid_nodes.assign(count, 0);
-    workspace.surface_nodes.assign(count, 0);
-    for (int node : ref_mesh.tets) workspace.solid_nodes[node] = 1;
-    for (int node : ref_mesh.surface_nodes) workspace.surface_nodes[node] = 1;
-    workspace.incident.assign(count, {});
-    for (const auto& [node, row] : adj) {
-        if (workspace.solid_nodes[node] || (hold_rigid_proxies && ref_mesh.node_to_rb[node]>=0)) continue;
-        workspace.incident[node] = row;
-    }
-    workspace.rest_gradients.resize(ref_mesh.Dm_inverse.size());
-    parallel_for(workspace.rest_gradients.size(), params.use_parallel, [&](std::size_t i) { workspace.rest_gradients[i] = shape_function_gradients(ref_mesh.Dm_inverse[i]); });
-    const auto pin_map = build_pin_map(pins, static_cast<int>(count));
+    auto& workspace = *impl_;
+    if (!workspace.prepared || workspace.count != count)
+        throw std::invalid_argument("Jacobi workspace requires preparation for this mesh");
+    if (!workspace.has_particles) return std::vector<Vec3>(count, Vec3::Zero());
+    const auto& pin_map = workspace.pin_map;
+    workspace.candidates = candidates ? candidates : &workspace.broad_phase;
+    workspace.snapshot.tet_derivatives.resize(ref_mesh.tet_rest_data.size());
+    parallel_for(ref_mesh.tet_rest_data.size(), params.use_parallel, [&](std::size_t e) {
+        const Mat33 F = ElementF(e, xnew, ref_mesh.tets, ref_mesh.tet_rest_data);
+        CorotatedCache cache;
+        cache.UpdateCache(F, CorotatedCacheMode::Lean);
+        for (int role=0; role<4; ++role)
+            workspace.snapshot.tet_derivatives[e][role] = EFEMElementNodeGradientAndPBGSBlock(
+                cache, F, ref_mesh.tet_rest_data[e], params.solid_mu, params.solid_lambda, role);
+    });
     const bool mesh_contact = params.d_hat > 0 && params.k_barrier > 0;
     if (mesh_contact) {
-        workspace.boxes.resize(count);
-        parallel_for(count, params.use_parallel, [&](std::size_t i) { workspace.boxes[i] = AABB(xnew[i], xnew[i]); });
-        workspace.broad_phase.invalidate_mesh_topology();
-        const auto mode=hold_rigid_proxies?BroadPhase::InitializationMode::GeneralSolver:BroadPhase::InitializationMode::DeformableSolver;
-        if (ref_mesh.tets.empty()) workspace.broad_phase.initialize(workspace.boxes, ref_mesh, params.d_hat, mode);
-        else workspace.broad_phase.initialize_surface_nodes(workspace.boxes, ref_mesh, params.d_hat, mode);
-        const auto& cache = workspace.broad_phase.cache();
-        workspace.nt.resize(cache.nt_pairs.size());
-        workspace.ss.resize(cache.ss_pairs.size());
+        if (!candidates) {
+            workspace.boxes.resize(count);
+            parallel_for(count, params.use_parallel, [&](std::size_t i) { workspace.boxes[i] = AABB(xnew[i], xnew[i]); });
+            const auto mode=hold_rigid_proxies?BroadPhase::InitializationMode::GeneralSolver:BroadPhase::InitializationMode::DeformableSolver;
+            if (ref_mesh.tets.empty()) workspace.broad_phase.initialize(workspace.boxes, ref_mesh, params.d_hat, mode);
+            else workspace.broad_phase.initialize_surface_nodes(workspace.boxes, ref_mesh, params.d_hat, mode);
+        }
+        const auto& cache = workspace.candidates->cache();
+        workspace.snapshot.nt.resize(cache.nt_pairs.size());
+        workspace.snapshot.ss.resize(cache.ss_pairs.size());
         if (params.friction_coefficient > 0) {
-            workspace.nt_friction.resize(cache.nt_pairs.size());
-            workspace.ss_friction.resize(cache.ss_pairs.size());
+            workspace.snapshot.nt_friction.resize(cache.nt_pairs.size());
+            workspace.snapshot.ss_friction.resize(cache.ss_pairs.size());
         }
         parallel_for(cache.nt_pairs.size(), params.use_parallel, [&](std::size_t i) {
-            workspace.nt[i] = NodeTriangleContactEvaluation{};
+            workspace.snapshot.nt[i] = NodeTriangleContactEvaluation{};
+            const auto& pair=cache.nt_pairs[i];
+            if (hold_rigid_proxies && ref_mesh.node_to_rb[pair.node]>=0
+                && ref_mesh.node_to_rb[pair.tri_v[0]]>=0
+                && ref_mesh.node_to_rb[pair.tri_v[1]]>=0
+                && ref_mesh.node_to_rb[pair.tri_v[2]]>=0) return;
             const auto points = pair_positions(cache.nt_pairs[i], xnew);
             if (!node_triangle_aabbs_within_distance(points[0], points[1], points[2], points[3], params.d_hat*params.d_hat)) return;
-            workspace.nt[i] = make_node_triangle_contact_evaluation(points, params.d_hat, params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
-            if (params.friction_coefficient > 0 && workspace.nt[i].active) workspace.nt_friction[i] = make_node_triangle_frozen_friction_contact(points, pair_positions(cache.nt_pairs[i], *previous_positions), workspace.nt[i], dt, params.friction_velocity_epsilon);
+            workspace.snapshot.nt[i] = make_node_triangle_contact_evaluation(points, params.d_hat, params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
+            if (params.friction_coefficient > 0 && workspace.snapshot.nt[i].active) workspace.snapshot.nt_friction[i] = make_node_triangle_frozen_friction_contact(points, pair_positions(cache.nt_pairs[i], *previous_positions), workspace.snapshot.nt[i], dt, params.friction_velocity_epsilon);
         });
         parallel_for(cache.ss_pairs.size(), params.use_parallel, [&](std::size_t i) {
-            workspace.ss[i] = SegmentSegmentContactEvaluation{};
+            workspace.snapshot.ss[i] = SegmentSegmentContactEvaluation{};
+            const auto& pair=cache.ss_pairs[i];
+            if (hold_rigid_proxies && std::all_of(pair.v,pair.v+4,
+                [&](int node) {return ref_mesh.node_to_rb[node]>=0;})) return;
             const auto points = pair_positions(cache.ss_pairs[i], xnew);
             if (!segment_aabbs_within_distance(points[0], points[1], points[2], points[3], params.d_hat*params.d_hat)) return;
-            workspace.ss[i] = make_segment_segment_contact_evaluation(points, params.d_hat, params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
-            if (params.friction_coefficient > 0 && workspace.ss[i].active) workspace.ss_friction[i] = make_segment_segment_frozen_friction_contact(points, pair_positions(cache.ss_pairs[i], *previous_positions), workspace.ss[i], dt, params.friction_velocity_epsilon);
+            workspace.snapshot.ss[i] = make_segment_segment_contact_evaluation(points, params.d_hat, params.k_barrier, 1e-12, nullptr, params.exact_computation_fallback);
+            if (params.friction_coefficient > 0 && workspace.snapshot.ss[i].active) workspace.snapshot.ss_friction[i] = make_segment_segment_frozen_friction_contact(points, pair_positions(cache.ss_pairs[i], *previous_positions), workspace.snapshot.ss[i], dt, params.friction_velocity_epsilon);
         });
     }
 
@@ -160,7 +226,7 @@ std::vector<Vec3> jacobi_step(const RefMesh& ref_mesh, const VertexTriangleMap& 
             return;
         }
         auto [gradient, hessian] = [&] {
-            if (workspace.solid_nodes[i]) return compute_solid_local_gradient_and_block(static_cast<int>(i), ref_mesh, pins, assembly_params, xnew, xhat, workspace.broad_phase, &workspace.solid_nodes, &workspace.surface_nodes, &pin_map, previous_positions);
+            if (workspace.solid_nodes[i]) return solid_ipc_detail::compute_solid_jacobi_local(static_cast<int>(i), ref_mesh, pins, assembly_params, xnew, xhat, *workspace.candidates, pin_map, workspace.surface_nodes, previous_positions, workspace.snapshot);
             return physics_detail::compute_local_gradient_and_hessian_no_barrier_unchecked(static_cast<int>(i), ref_mesh, adj, pins, assembly_params, xnew, xhat, &pin_map, &workspace.incident[i], &workspace.rest_gradients, previous_positions);
         }();
         if (mesh_contact && !workspace.solid_nodes[i]) add_mesh_contact(static_cast<int>(i), workspace, assembly_params, xnew, gradient, hessian);
@@ -172,3 +238,20 @@ std::vector<Vec3> jacobi_step(const RefMesh& ref_mesh, const VertexTriangleMap& 
     return displacement;
 }
 
+
+std::vector<Vec3> jacobi_step(const RefMesh& mesh, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params,
+    const std::vector<Vec3>& positions, const std::vector<Vec3>& target,
+    const std::vector<Vec3>& velocity, const std::vector<Vec3>* previous,
+    bool hold_rigid_proxies) {
+    // Preserve the stateless interface: prepare again even if the caller edits
+    // a mesh in place. Solvers own an explicit workspace across their sweeps.
+    static thread_local JacobiStepWorkspace workspace;
+    if (positions.size()!=target.size() || positions.size()!=velocity.size()
+        || positions.size()!=mesh.mass.size())
+        throw std::invalid_argument("jacobi_step: state arrays must have matching sizes");
+    if (hold_rigid_proxies && mesh.node_to_rb.size()!=positions.size())
+        throw std::invalid_argument("jacobi_step: missing rigid ownership");
+    workspace.prepare(mesh, adj, pins, params, positions.size(), hold_rigid_proxies);
+    return workspace.step(mesh, adj, pins, params, positions, target, velocity, previous);
+}

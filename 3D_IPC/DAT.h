@@ -3,8 +3,22 @@
 #include "IPC_math.h"
 
 #include <vector>
+#include <memory>
 
 struct RefMesh;
+class BroadPhase;
+
+// Scoped to one solve with fixed topology. Each call refreshes all numerical
+// data. Standalone calls without a workspace retain their stateless behavior.
+class DATWorkspace {
+public:
+    DATWorkspace();
+    ~DATWorkspace();
+    DATWorkspace(const DATWorkspace&) = delete;
+    DATWorkspace& operator=(const DATWorkspace&) = delete;
+    struct Impl;
+    std::unique_ptr<Impl> impl;
+};
 
 // Planar Divide and Truncate for simultaneous, straight-line vertex updates.
 // Returns displacements; neither input array nor the mesh is modified.
@@ -30,7 +44,8 @@ std::vector<Vec3> planar_DAT(
     const RefMesh& mesh,
     const std::vector<Vec3>& incremental_update,
     const std::vector<Vec3>& current_positions,
-    double node_box_padding = 1.2);
+    double node_box_padding = 1.2,
+    const BroadPhase* candidates = nullptr, DATWorkspace* workspace = nullptr);
 
 struct GeneralDATResult {
     std::vector<double> body_factors;
@@ -48,4 +63,9 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
     const std::vector<Vec3>& positions, const std::vector<Vec3>& centers,
     const std::vector<Vec3>& omega, const std::vector<Vec4>& previous_orientations,
     const std::vector<Vec3>& delta_centers, const std::vector<Vec3>& delta_omega,
-    double dt, double node_box_padding = 1.2);
+    double dt, double node_box_padding = 1.2,
+    const BroadPhase* candidates = nullptr, DATWorkspace* workspace = nullptr);
+
+// Optional candidates must be a conservative superset of the query-radius
+// neighborhood at the exact supplied positions, with the same ownership and
+// solid-surface policy. No geometric result is reused after positions change.

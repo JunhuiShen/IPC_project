@@ -38,14 +38,6 @@ xyzrgb_dragon_full.obj
 
 # Local DeepSeek delegation setup (credential is stored in macOS Keychain)
 /AGENTS.md
-/tools/DEEPSEEK_PILOT.md
-/tools/deepseek_pilot.py
-/tools/deepseek_models.json
-/tools/deepseek_auth.py
-/tools/deepseek_security.py
-/tools/deepseek_state.py
-/tools/deepseek_runner.py
-/tools/test_deepseek_pilot.py
-/tools/test_deepseek_provider.py
-/tools/DEEPSEEK_AUDIT.md
-/tools/acceptance_anchor_axis.py
+
+# Local tools and validation helpers
+/tools/

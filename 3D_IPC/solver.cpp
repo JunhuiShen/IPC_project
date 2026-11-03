@@ -1398,8 +1398,13 @@ SolverResult global_jacobi_solver_dat(
     if (previous_positions) for (const auto& p : *previous_positions)
         if (!p.allFinite()) throw std::invalid_argument("global_jacobi_solver_dat: nonfinite previous position");
 
-    // jacobi_step and planar_DAT own their assembly/query BVHs. Refresh the
-    // caller's cache at the evaluated positions for residuals and substep output.
+    // One conservative neighborhood serves proposal assembly, DAT and residuals
+    // at an identical snapshot. Each consumer retains its own distance cutoff.
+    JacobiStepWorkspace jacobi;
+    jacobi.prepare(ref_mesh, adj, pins, solve_params, count);
+    DATWorkspace dat;
+    bool contacts_ready = false;
+    const double shared_radius = std::max(query_radius * params.dat_node_box_padding, params.d_hat);
     broad_phase.invalidate_mesh_topology();
     std::vector<AABB> boxes(count);
     const auto rebuild_contact_cache = [&](double radius) {
@@ -1407,20 +1412,25 @@ SolverResult global_jacobi_solver_dat(
             [&](int node) {
                 boxes[node] = AABB(xnew[node] - Vec3::Constant(radius),
                                   xnew[node] + Vec3::Constant(radius));
+                if(!boxes[node].min.allFinite()||!boxes[node].max.allFinite())
+                    throw std::invalid_argument("Jacobi DAT: query box overflow");
             });
         if (has_solid)
-            broad_phase.initialize_surface_nodes(boxes, ref_mesh, params.d_hat,
+            broad_phase.initialize_surface_nodes(boxes, ref_mesh, 0.0,
                 BroadPhase::InitializationMode::DeformableSolver);
         else
-            broad_phase.initialize(boxes, ref_mesh, params.d_hat,
+            broad_phase.initialize(boxes, ref_mesh, 0.0,
                 BroadPhase::InitializationMode::DeformableSolver);
+    };
+    const auto ensure_contacts = [&]() {
+        if (!contacts_ready) { rebuild_contact_cache(shared_radius); contacts_ready = true; }
     };
     SolverResult result;
     const auto evaluate_residual = [&]() {
-        rebuild_contact_cache(0.0);
+        ensure_contacts();
         result.final_cloth_residual = compute_global_deformable_residual(
             ref_mesh, adj, pins, solve_params, xnew, xhat, broad_phase,
-            cloth_nodes, &pin_map, &incident, nullptr, nullptr, previous_positions);
+            cloth_nodes, &pin_map, &incident, &jacobi.rest_gradients(), nullptr, previous_positions);
         result.final_solid_residual = has_solid ? compute_global_solid_residual(
             ref_mesh, pins, solve_params, xnew, xhat, broad_phase, &pin_map,
             &solid_mask, &surface_mask, nullptr, previous_positions) : 0.0;
@@ -1446,16 +1456,18 @@ SolverResult global_jacobi_solver_dat(
     for (int iteration = 0; iteration < params.max_global_iters && !result.converged; ++iteration) {
         // Both calls read the same frozen positions. Damping is already part
         // of the Jacobi proposal; DAT supplies the only further step scaling.
-        const auto proposed = jacobi_step(ref_mesh, adj, pins, solve_params,
-            xnew, xhat, v, previous_positions);
+        ensure_contacts();
+        const auto proposed = jacobi.step(ref_mesh, adj, pins, solve_params,
+            xnew, xhat, v, previous_positions, &broad_phase);
         const auto accepted = planar_DAT(params.dat_gamma, query_radius,
-            ref_mesh, proposed, xnew, params.dat_node_box_padding);
+            ref_mesh, proposed, xnew, params.dat_node_box_padding, &broad_phase, &dat);
         parallel_body_setup(static_cast<int>(count), params.use_parallel,
             [&](int node) {
                 next[node] = xnew[node] + accepted[node];
                 if (!next[node].allFinite())
                     throw std::runtime_error("global_jacobi_solver_dat: updated position overflow");
             });
+        contacts_ready = false;
         xnew.swap(next); // barrier before publishing the entire Jacobi sweep
         result.iterations = iteration + 1;
         if (!params.fixed_iters) {
@@ -4134,14 +4146,14 @@ void validate_rigid_solver_state(const RefMesh& ref_mesh, const DeformedState& s
         throw std::invalid_argument("global_gauss_seidel_solver_basic_rb: inconsistent rigid-body array sizes");
 }
 
-double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedState& state, const BroadPhase::Cache& bp_cache, const std::vector<std::vector<int>>& body_nt_pair_indices, const std::vector<std::vector<int>>& body_ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const SimParams& params, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, double dt, std::vector<double>& body_residuals, const std::vector<Mat33>* rotation_predictors = nullptr, const FrozenResidualWorkspace* frozen_workspace = nullptr) {
+double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedState& state, const BroadPhase::Cache& bp_cache, const std::vector<std::vector<int>>& body_nt_pair_indices, const std::vector<std::vector<int>>& body_ss_pair_indices, const std::vector<int>& node_to_rb_local, const std::vector<Vec3>& positions, const SimParams& params, const std::vector<Vec3>& x_com_new, const std::vector<Vec3>& omega_new, double dt, std::vector<double>& body_residuals, const std::vector<Mat33>* rotation_predictors = nullptr, const FrozenResidualWorkspace* frozen_workspace = nullptr, bool cooperative_contacts = false) {
     const int num_rbs = static_cast<int>(ref_mesh.total_mass.size());
     const double barrier_scale = dt * dt * params.k_barrier;
     body_residuals.resize(static_cast<std::size_t>(num_rbs));
     // Bodies only read the frozen residual configuration. Compute their
     // contributions independently, then retain the original body-index sum
     // order so parallel execution does not change the residual value.
-    const auto evaluate_body = [&](int rb) {
+    const auto evaluate_body = [&](int rb, bool cooperative = false) {
         const RigidBodyUpdateMode update_mode =
             ref_mesh.rb_update_modes[rb];
         const bool update_translation =
@@ -4174,7 +4186,7 @@ double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedS
         com_gradient += pin.translation_gradient;
         orientation_gradient += pin.orientation_gradient;
         RigidEnergyDerivatives friction;
-        const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, body_nt_pair_indices[rb], body_ss_pair_indices[rb], node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::Gradient, &kinematics, frozen_workspace, params.friction_coefficient != 0.0 ? &friction : nullptr);
+        const RigidEnergyDerivatives barrier = rigid_barrier_derivatives(rb, ref_mesh, state, bp_cache, body_nt_pair_indices[rb], body_ss_pair_indices[rb], node_to_rb_local, positions, omega_new, params, dt, RigidDerivativeMode::Gradient, &kinematics, frozen_workspace, params.friction_coefficient != 0.0 ? &friction : nullptr, true, cooperative);
         if (update_translation)
             com_gradient += barrier_scale * barrier.translation_gradient;
         if (update_orientation)
@@ -4189,13 +4201,32 @@ double rigid_body_unnormalized_residual(const RefMesh& ref_mesh, const DeformedS
             (update_translation ? com_gradient.norm() : 0.0)
             + (update_orientation ? orientation_gradient.norm() : 0.0);
     };
-    if (params.use_parallel && num_rbs >= 8) {
+    // DAT may have one moving body with a large contact list. Let idle
+    // workers in the existing body loop execute its ordered contact tasks.
+    // Other solvers retain their original whole-body execution by default.
+    const bool parallel_bodies = params.use_parallel && (!cooperative_contacts
+        || (omp_get_max_threads()>1 && !omp_in_parallel()));
+    const auto heavy_contacts = [&](int rb) {
+        return params.d_hat>0 && params.k_barrier>0
+            && body_nt_pair_indices[rb].size()+body_ss_pair_indices[rb].size()>=128;
+    };
+    bool parallel_contacts = false;
+    if(cooperative_contacts && parallel_bodies) {
+        for(int rb=0;rb<num_rbs && !parallel_contacts;++rb) {
+            const auto mode=ref_mesh.rb_update_modes[rb];
+            parallel_contacts=(updates_rigid_translation(mode)||updates_rigid_orientation(mode))
+                && heavy_contacts(rb);
+        }
+    }
+    if (parallel_bodies && (num_rbs >= 8 || parallel_contacts)) {
         std::exception_ptr first_exception;
         int first_exception_body = num_rbs;
         #pragma omp parallel for schedule(static)
         for (int rb = 0; rb < num_rbs; ++rb) {
             try {
-                evaluate_body(rb);
+                const bool cooperative = cooperative_contacts
+                    && omp_get_num_threads()>1 && heavy_contacts(rb);
+                evaluate_body(rb,cooperative);
             } catch (...) {
                 #pragma omp critical(rigid_residual_exception)
                 {
@@ -4412,25 +4443,37 @@ SolverResult global_jacobi_solver_dat_general(const RefMesh& mesh,
         positions,centers,angular,state.orientations,zero_bodies,zero_bodies,dt,
         params.dat_node_box_padding);
     BroadPhase phase;
+    JacobiStepWorkspace jacobi;
+    jacobi.prepare(mesh, adj, pins, solve_params, n, true);
+    DATWorkspace dat;
+    bool contacts_ready=false;
+    const double shared_radius=std::max(query_radius*params.dat_node_box_padding,params.d_hat);
     std::vector<AABB> boxes(n);
     std::vector<std::vector<int>> body_nt,body_ss;
     std::vector<double> body_residuals;
-    const auto rebuild=[&](double radius=0.0) {
-        for(std::size_t v=0;v<n;++v)boxes[v]=AABB(positions[v]-Vec3::Constant(radius),positions[v]+Vec3::Constant(radius));
-        if(!mesh.tets.empty())phase.initialize_surface_nodes(boxes,mesh,params.d_hat,BroadPhase::InitializationMode::GeneralSolver);
-        else phase.initialize(boxes,mesh,params.d_hat,BroadPhase::InitializationMode::GeneralSolver);
+    const auto rebuild=[&](double radius) {
+        parallel_body_setup(int(n),params.use_parallel,[&](int v) {
+            boxes[v]=AABB(positions[v]-Vec3::Constant(radius),positions[v]+Vec3::Constant(radius));
+            if(!boxes[v].min.allFinite()||!boxes[v].max.allFinite())
+                throw std::invalid_argument("Jacobi DAT: query box overflow");
+        });
+        if(!mesh.tets.empty())phase.initialize_surface_nodes(boxes,mesh,0.0,BroadPhase::InitializationMode::GeneralSolver);
+        else phase.initialize(boxes,mesh,0.0,BroadPhase::InitializationMode::GeneralSolver);
         build_rb_contact_incidence(phase.cache(),mesh.node_to_rb,int(bodies),body_nt,body_ss);
+    };
+    const auto ensure_contacts=[&]() {
+        if(!contacts_ready) {rebuild(shared_radius);contacts_ready=true;}
     };
     SolverResult result;
     const auto residual=[&]() {
-        rebuild();
+        ensure_contacts();
         result.final_cloth_residual=compute_global_deformable_residual(mesh,adj,pins,
-            solve_params,positions,xhat,phase,cloth,&pin_map,&incident,nullptr,nullptr,&state.deformed_positions);
+            solve_params,positions,xhat,phase,cloth,&pin_map,&incident,&jacobi.rest_gradients(),nullptr,&state.deformed_positions);
         result.final_solid_residual=mesh.tets.empty()?0:compute_global_solid_residual(
             mesh,pins,solve_params,positions,xhat,phase,&pin_map,&solid,&surface,nullptr,&state.deformed_positions);
         result.final_rigid_residual=rb_solver::rigid_body_unnormalized_residual(mesh,state,
             phase.cache(),body_nt,body_ss,local,positions,solve_params,centers,angular,dt,
-            body_residuals,&predictors);
+            body_residuals,&predictors,nullptr,true);
         result.final_residual=result.final_cloth_residual+result.final_solid_residual+result.final_rigid_residual;
         if(!std::isfinite(result.final_residual))throw std::runtime_error("Jacobi DAT: nonfinite residual");
     };
@@ -4450,32 +4493,39 @@ SolverResult global_jacobi_solver_dat_general(const RefMesh& mesh,
         result.converged=converged();
     }
     for(int iteration=0;iteration<params.max_global_iters&&!result.converged;++iteration) {
-        rebuild();
-        const auto particle_updates=jacobi_step(mesh,adj,pins,solve_params,
-            positions,xhat,state.velocities,&state.deformed_positions,true);
+        ensure_contacts();
+        const auto particle_updates=jacobi.step(mesh,adj,pins,solve_params,
+            positions,xhat,state.velocities,&state.deformed_positions,&phase);
         std::vector<Vec3> dc(bodies,Vec3::Zero()),dw(bodies,Vec3::Zero());
-        parallel_body_setup(int(bodies),params.use_parallel,[&](int b){
+        const bool parallel_proposals=params.use_parallel
+            && omp_get_max_threads()>1 && !omp_in_parallel();
+        parallel_body_setup(int(bodies),parallel_proposals,[&](int b){
             const auto mode=mesh.rb_update_modes[b];
+            const bool cooperative=parallel_proposals && omp_get_num_threads()>1
+                && params.d_hat>0 && params.k_barrier>0
+                && body_nt[b].size()+body_ss[b].size()>=128;
             const auto kinematics=quaternion_omega_kinematics(state.orientations[b],angular[b],dt,updates_rigid_orientation(mode));
             if(updates_rigid_translation(mode)&&params.damping>0)
                 dc[b]=-params.damping*rb_solver::compute_com_update(b,state,mesh,phase.cache(),
-                    body_nt[b],body_ss[b],local,positions,centers,angular,solve_params,dt,&kinematics);
+                    body_nt[b],body_ss[b],local,positions,centers,angular,solve_params,dt,&kinematics,cooperative);
             if(updates_rigid_orientation(mode)&&params.damping>0)
                 dw[b]=-params.damping*rb_solver::compute_omega_update(b,state,mesh,phase.cache(),
-                    body_nt[b],body_ss[b],local,positions,centers,angular,solve_params,dt,&kinematics,&predictors[b]);
+                    body_nt[b],body_ss[b],local,positions,centers,angular,solve_params,dt,&kinematics,&predictors[b],cooperative);
             if(!dc[b].allFinite()||!dw[b].allFinite())throw std::runtime_error("Jacobi DAT: nonfinite rigid proposal");
         });
         auto accepted=general_planar_DAT(params.dat_gamma,query_radius,mesh,
             particle_updates,positions,centers,angular,state.orientations,dc,dw,dt,
-            params.dat_node_box_padding);
+            params.dat_node_box_padding,&phase,&dat);
         // Publish exactly the represented endpoints which the filter certified.
+        contacts_ready=false;
         positions.swap(accepted.positions);centers.swap(accepted.centers);
         angular.swap(accepted.omega);orientations.swap(accepted.orientations);
         result.iterations=iteration+1;
         if(!params.fixed_iters){residual();result.converged=converged();}
     }
     if(params.fixed_iters)result.converged=true;
-    rebuild(params.write_substeps?query_radius*params.dat_node_box_padding:0);
+    if(params.write_substeps) rebuild(query_radius*params.dat_node_box_padding);
+    else ensure_contacts();
     if(params.write_substeps)write_substep_data(params,phase,positions,outdir,&mesh);
     xnew.swap(positions);x_com_new.swap(centers);omega_new.swap(angular);q_new.swap(orientations);
     broad_phase=std::move(phase);

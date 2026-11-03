@@ -6,6 +6,7 @@
 #include "kernels.h"
 #include "linear_pipeline.h"
 #include "contact_pipeline.h"
+#include "rigid_pipeline.h"
 
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -430,6 +431,143 @@ int original_box_check() {
     return 0;
 }
 
+struct RigidClipOutcome {
+    int status=0;
+    V com{};
+    std::vector<V> accepted;
+};
+
+RigidClipOutcome run_rigid_clip(const std::array<V,4>& points,bool face,bool first,
+    const V& com,const V& raw,bool use_ccd=true,bool translate=true,bool split_primitive=false) {
+    std::vector<int> owner(4,-1),node_list;
+    for(int i=0;i<4;++i)if((i<(face?1:2))==first) { owner[i]=0;node_list.push_back(i); }
+    if(split_primitive)owner[2]=-1;
+    TestBuffer<V> x(std::vector<V>(points.begin(),points.end()));
+    TestBuffer<V> accepted(std::vector<V>(4,V{-91,-92,-93}));
+    TestBuffer<V> center(std::vector<V>{com}),target(std::vector<V>{V{com[0]+raw[0],com[1]+raw[1],com[2]+raw[2]}});
+    TestBuffer<V> accepted_com(std::vector<V>{V{-91,-92,-93}});
+    TestBuffer<int> owners(owner),nodes(node_list),blocks(std::vector<int>{0}),colors(std::vector<int>{0});
+    TestBuffer<unsigned char> translations(std::vector<unsigned char>{static_cast<unsigned char>(translate)});
+    TestBuffer<unsigned char> rotations(std::vector<unsigned char>{0});
+    TestBuffer<std::size_t> node_offsets(std::vector<std::size_t>{0,node_list.size()});
+    TestBuffer<std::size_t> contact_offsets(std::vector<std::size_t>{0,1});
+    TestBuffer<int> indices(std::vector<int>{0}),error(std::vector<int>{0});
+    TestBuffer<gpu::BpContact> contacts(std::vector<gpu::BpContact>{{{0,1,2,3},face?0:1}});
+    std::vector<gpu::BpAabb> bounds(4);
+    for(auto& box:bounds)for(int k=0;k<3;++k) { box.lo[k]=-1e20;box.hi[k]=1e20; }
+    TestBuffer<gpu::BpAabb> boxes(bounds);
+    gpu::RigidScene scene{};
+    scene.bodies=1;scene.body_blocks=blocks.pointer;scene.node_body=owners.pointer;
+    scene.node_offsets=node_offsets.pointer;scene.nodes=nodes.pointer;
+    scene.translate=translations.pointer;scene.rotate=rotations.pointer;
+    gpu::RigidState state{};state.com=xyz(center.pointer);
+    gpu::RigidWorkspace work{};work.proposed_com=xyz(target.pointer);work.accepted_com=xyz(accepted_com.pointer);
+    gpu::DeformableState particles{};particles.positions=xyz(x.pointer);
+    gpu::BroadPhaseView bp{};bp.contacts=contacts.pointer;bp.contact_count=1;
+    gpu::GpuLinearClipper clipper;
+    clipper.clip_rigid_translation_color(scene,state,work,particles,bp,
+        contact_offsets.pointer,indices.pointer,boxes.pointer,colors.pointer,0,
+        xyz(accepted.pointer),error.pointer,use_ccd,nullptr,gpu::LinearClipMode::OriginalSolver);
+    cuda_check(cudaDeviceSynchronize());
+    if(x.read()!=std::vector<V>(points.begin(),points.end())||center.read()[0]!=com)
+        throw std::runtime_error("original rigid clipper published physical state");
+    return {error.read()[0],accepted_com.read()[0],accepted.read()};
+}
+
+int original_rigid_clipper_check() {
+    const std::array<V,4> point{{V{.2,.2,1},V{0,0,0},V{1,0,0},V{0,1,0}}};
+    const std::array<V,4> edge{{V{-1,0,1},V{1,0,1},V{0,-1,0},V{0,1,0}}};
+    // All four ownership arrangements: moving point, triangle, first edge,
+    // second edge. Each must retain the CPU 90%-TOI step, not half-step CCD.
+    for(bool face:{true,false})for(bool first:{true,false}) {
+        auto positions=face?point:edge;
+        if(!first)for(int i=0;i<4;++i)positions[i][2]=1.0-positions[i][2];
+        const auto result=run_rigid_clip(positions,face,first,V{0,0,0},V{0,0,-2});
+        if(result.status!=0)throw std::runtime_error("original rigid translation CCD failed");
+        for(int i=0;i<4;++i) {
+            const bool moving=(i<(face?1:2))==first;
+            if(moving) {
+                if(std::abs(result.accepted[i][2]-.1)>2e-14)
+                    throw std::runtime_error("original rigid CCD missed translating primitive endpoint");
+            } else if(result.accepted[i]!=V{-91,-92,-93})
+                throw std::runtime_error("original rigid CCD wrote another object's proposal");
+        }
+        if(std::abs(result.com[2]+.9)>2e-14)
+            throw std::runtime_error("original rigid COM did not use 90 percent TOI");
+    }
+    // Rounded accepted COM can have zero stored change while the common raw
+    // displacement still moves every proxy. Reconstructing delta from COM
+    // would silently lose this entire accepted step.
+    const auto rounded=run_rigid_clip(point,true,true,V{0,0,1e16},V{0,0,-2});
+    if(rounded.status||rounded.com[2]!=1e16||std::abs(rounded.accepted[0][2]-.1)>2e-14)
+        throw std::runtime_error("original rigid step lost raw COM displacement");
+    auto near=point;near[0][2]=1e-12;
+    const auto band=run_rigid_clip(near,true,true,V{0,0,0},V{0,0,-2});
+    if(band.status||band.accepted[0]!=near[0])
+        throw std::runtime_error("original rigid positive-band t0 was not a healthy no-op");
+    near[0][2]=0;
+    const auto intersecting=run_rigid_clip(near,true,true,V{0,0,0},V{0,0,-2});
+    if(intersecting.status!=int(gpu::LinearClipError::InitialContact))
+        throw std::runtime_error("original rigid initial contact was not explicit");
+    const auto tiny=run_rigid_clip(point,true,true,V{0,0,0},V{0,0,1e-15});
+    if(tiny.status||tiny.accepted[0][2]!=point[0][2]+1e-15)
+        throw std::runtime_error("original rigid tiny translation was discarded");
+    auto tiny_near=point;tiny_near[0][2]=5e-11;
+    const auto band_tiny=run_rigid_clip(tiny_near,true,true,V{0,0,0},V{0,0,1e-15});
+    if(band_tiny.status||band_tiny.accepted[0][2]!=tiny_near[0][2]+1e-15)
+        throw std::runtime_error("CPU-approved tiny translation was frozen by an extra GPU positive-band check");
+    const std::array<V,4> angled_near{V{0,0,5e-11},V{-1,-1,1},V{1,-1,-1},V{0,1,0}};
+    const auto angled_tiny=run_rigid_clip(angled_near,true,true,V{0,0,0},V{0,0,1e-15});
+    if(angled_tiny.status||angled_tiny.accepted[0][2]!=angled_near[0][2]+1e-15)
+        throw std::runtime_error("tiny rigid step inside overlapping world boxes must match CPU bypass");
+    const auto away=run_rigid_clip(tiny_near,true,true,V{0,0,0},V{0,0,1e-8});
+    if(away.status||away.accepted[0][2]!=tiny_near[0][2]+1e-8)
+        throw std::runtime_error("CPU swept-box rejection failed for original rigid motion away from contact");
+    const auto fixed=run_rigid_clip(point,true,true,V{0,0,0},V{0,0,-2},true,false);
+    if(fixed.status||fixed.com!=V{0,0,0}||fixed.accepted[0]!=point[0])
+        throw std::runtime_error("original rigid fixed translation mode moved");
+    const auto no_ccd=run_rigid_clip(point,true,true,V{0,0,0},V{0,0,-2},false);
+    if(no_ccd.status||no_ccd.accepted[0][2]!=-1)
+        throw std::runtime_error("original rigid explicit no-CCD routing changed");
+    const auto mixed=run_rigid_clip(point,true,false,V{0,0,0},V{0,0,2},true,true,true);
+    if(mixed.status!=int(gpu::LinearClipError::UnsupportedMotion))
+        throw std::runtime_error("original rigid split primitive ownership was accepted");
+    return 0;
+}
+
+int rigid_raw_proposal_check() {
+    TestBuffer<int> blocks(std::vector<int>{0}),colors(std::vector<int>{0}),error(std::vector<int>{0});
+    TestBuffer<unsigned char> translate(std::vector<unsigned char>{1}),rotate(std::vector<unsigned char>{0});
+    ipc_gpu::Derivatives system{};system.gradient[0]=2;system.gradient[1]=.25;
+    for(int k=0;k<3;++k)system.hessian[3*k+k]=1;
+    TestBuffer<ipc_gpu::Derivatives> systems(std::vector<ipc_gpu::Derivatives>{system});
+    TestBuffer<V> center(std::vector<V>{V{0,0,0}}),proposal(std::vector<V>{V{0,0,0}}),raw(std::vector<V>{V{0,0,0}});
+    gpu::BpAabb box{};for(int k=0;k<3;++k) { box.lo[k]=-1;box.hi[k]=1; }
+    TestBuffer<gpu::BpAabb> bounds(std::vector<gpu::BpAabb>{box});
+    gpu::RigidScene scene{};scene.bodies=1;scene.body_blocks=blocks.pointer;
+    scene.translate=translate.pointer;scene.rotate=rotate.pointer;
+    gpu::RigidState state{};state.com=xyz(center.pointer);
+    gpu::RigidWorkspace work{};work.systems=systems.pointer;work.proposed_com=xyz(proposal.pointer);
+    gpu::propose_rigid_color(scene,state,work,colors.pointer,0,false,bounds.pointer,.01,1,error.pointer);
+    gpu::propose_rigid_displacements(scene,work,colors.pointer,0,false,1,xyz(raw.pointer),error.pointer);
+    cuda_check(cudaDeviceSynchronize());
+    if(error.read()[0]||proposal.read()[0]!=V{-1,-.25,0}||raw.read()[0]!=V{-2,-.25,0})
+        throw std::runtime_error("rigid componentwise COM clip or raw DAT proposal differs");
+    gpu::propose_rigid_displacements(scene,work,colors.pointer,0,true,1,xyz(raw.pointer),error.pointer);
+    cuda_check(cudaDeviceSynchronize());
+    if(error.read()[0]||raw.read()[0]!=V{0,0,0})
+        throw std::runtime_error("disabled rigid DAT orientation phase produced motion");
+    // Zero damping is a CPU no-solve shortcut. A finite singular system that
+    // LDLT would reject must not fail an explicitly stationary proposal.
+    system={};system.hessian[1]=system.hessian[3]=1;
+    cuda_check(cudaMemcpy(systems.pointer,&system,sizeof(system),cudaMemcpyHostToDevice));
+    gpu::propose_rigid_displacements(scene,work,colors.pointer,0,false,0,xyz(raw.pointer),error.pointer);
+    cuda_check(cudaDeviceSynchronize());
+    if(error.read()[0]||raw.read()[0]!=V{0,0,0})
+        throw std::runtime_error("zero damping rigid DAT proposal attempted a singular solve");
+    return 0;
+}
+
 int pipeline_route_check() {
     const double s = std::ldexp(1.0, -22);
     const std::array<V, 4> points{{V{{0, 0, 0}}, V{{0, s, 0}},
@@ -500,6 +638,8 @@ int gpu_original_integration_check() {
     if (parallel_worker_check() != 0) return 1;
     if (selected_cutoff_check() != 0) return 1;
     if (original_box_check() != 0) return 1;
+    if (original_rigid_clipper_check() != 0) return 1;
+    if (rigid_raw_proposal_check() != 0) return 1;
     if (pipeline_route_check() != 0) return 1;
     return 0;
 }

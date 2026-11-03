@@ -6,6 +6,9 @@
 #include "solver.h"
 #include "exact.cuh"
 #include "level_schedule.cuh"
+#include "../solver.h"
+#include "time_integration.h"
+#include "simulation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -445,6 +448,147 @@ void check_level_helper_schedule() {
     require(!saw_rigid, "rigid obstacle appeared in scheduled update order");
 }
 
+struct OriginalRigidFixture {
+    RefMesh mesh;
+    DeformedState state;
+    SimParams params=original_cloth_params();
+    OriginalRigidFixture() {
+        params.use_parallel=false;
+        params.use_basic_experimental=params.use_basic_experimental_v2=params.use_simd=false;
+        params.exact_computation_fallback_2=false;
+        params.fps=40;params.substeps=1;params.max_global_iters=2;
+        params.damping=1;params.gravity=Vec3(0,-.5,0);
+        params.node_box_min=params.node_box_max=.5;
+        params.theta_box_min=params.theta_box_max=.5;
+        params.node_box_update_count=2;
+        params.use_ccd_guess=false;params.d_hat=0;
+    }
+    int body(const std::vector<Vec3>& positions,const Vec3& velocity,
+        const Vec3& omega,RigidBodyUpdateMode mode) {
+        const int b=create_rigid_body(positions,velocity,Vec4(.8,.2,-.3,.4).normalized(),omega,1,mesh,state,mode);
+        const auto& nodes=mesh.rb_nodes[b];
+        mesh.tris.insert(mesh.tris.end(),nodes.begin(),nodes.begin()+3);
+        mesh.build_deformable_nodes();
+        return b;
+    }
+};
+
+void original_rigid_cpu_step(OriginalRigidFixture& fixture) {
+    auto centers=fixture.state.x_coms;
+    auto orientation=fixture.state.orientations;
+    std::vector<Vec3> omega(fixture.state.omega.size(),Vec3::Zero());
+    const auto result=global_gauss_seidel_solver_basic_rb(fixture.mesh,fixture.state,
+        fixture.params,centers,orientation,omega);
+    require(result.iterations==fixture.params.max_global_iters,"original rigid CPU iteration budget differs");
+    update_velocity(fixture.state.v_coms,centers,fixture.state.x_coms,fixture.params.dt());
+    fixture.state.x_coms=std::move(centers);
+    fixture.state.orientations=std::move(orientation);
+    fixture.state.omega=std::move(omega);
+    sync_rigid_body_particles(fixture.mesh,fixture.state);
+}
+
+void original_rigid_compare(const ipc_gpu::solver::StateSnapshot& gpu,const OriginalRigidFixture& cpu) {
+    const auto close=[](double a,double b,double tolerance,const char* label) {
+        require(std::isfinite(a)&&std::isfinite(b),std::string(label)+": nonfinite");
+        require(std::abs(a-b)<=tolerance,std::string(label)+": original rigid CPU/GPU mismatch");
+    };
+    require(gpu.positions.size()==cpu.state.deformed_positions.size(),"original rigid proxy count differs");
+    require(gpu.com.size()==cpu.state.x_coms.size(),"original rigid body count differs");
+    for(std::size_t i=0;i<gpu.positions.size();++i)for(int k=0;k<3;++k) {
+        close(gpu.positions[i][k],cpu.state.deformed_positions[i][k],5e-9,"proxy position");
+        close(gpu.velocities[i][k],cpu.state.velocities[i][k],5e-7,"proxy velocity");
+    }
+    for(std::size_t b=0;b<gpu.com.size();++b) {
+        for(int k=0;k<3;++k) {
+            close(gpu.com[b][k],cpu.state.x_coms[b][k],5e-9,"COM");
+            close(gpu.com_velocity[b][k],cpu.state.v_coms[b][k],5e-7,"COM velocity");
+            close(gpu.omega[b][k],cpu.state.omega[b][k],5e-7,"angular velocity");
+        }
+        for(int k=0;k<4;++k)close(gpu.orientation[b][k],cpu.state.orientations[b][k],5e-9,"orientation");
+    }
+}
+
+ipc_gpu::solver::StateSnapshot original_rigid_parity(OriginalRigidFixture fixture,int steps) {
+    using namespace ipc_gpu::solver;
+    GpuSolver gpu(describe_scene(fixture.mesh,fixture.state,{},fixture.params));
+    const auto targets=describe_pin_targets(fixture.state.deformed_positions.size(),{});
+    for(int substep=0;substep<steps;++substep) {
+        original_rigid_cpu_step(fixture);
+        gpu.advance_substep(describe_step(fixture.params),targets,{});
+        original_rigid_compare(gpu.snapshot(),fixture);
+        fixture.params.rigid_pin_time+=fixture.params.dt();
+    }
+    return gpu.snapshot();
+}
+
+void check_original_rigid_modes_and_pins() {
+    OriginalRigidFixture base;
+    const RigidBodyUpdateMode modes[]={RigidBodyUpdateMode::TranslationAndOrientation,
+        RigidBodyUpdateMode::TranslationOnly,RigidBodyUpdateMode::OrientationOnly,RigidBodyUpdateMode::None};
+    base.params.kpin=8;base.params.rigid_pin_time=.17;
+    for(int b=0;b<4;++b) {
+        const Vec3 offset(4*b,0,0);
+        base.body({offset+Vec3(0,0,0),offset+Vec3(.4,0,0),offset+Vec3(0,.3,.1)},
+            Vec3(.1,-.03,.04),Vec3(.2,-.1,.3),modes[b]);
+        RigidPin pin;pin.body=b;pin.local_position=base.mesh.ref_positions[b][0];
+        pin.initial_target=base.state.deformed_positions[base.mesh.rb_nodes[b][0]]+Vec3(.03,.04,-.02);
+        pin.rotation_center=base.state.x_coms[b];pin.angular_velocity_z=.7;
+        base.params.rigid_pins.push_back(pin);
+    }
+    const auto actual=original_rigid_parity(base,2);
+    for(int b=0;b<4;++b) {
+        if(!updates_rigid_translation(modes[b]))for(int k=0;k<3;++k)
+            require(actual.com[b][k]==base.state.x_coms[b][k],"original rigid disabled COM moved");
+        if(!updates_rigid_orientation(modes[b]))for(int k=0;k<4;++k)
+            require(actual.orientation[b][k]==base.state.orientations[b][k],"original rigid disabled orientation moved");
+    }
+    auto no_pin=base;no_pin.params.rigid_pins.clear();
+    const auto control=original_rigid_parity(no_pin,2);
+    double difference=0;
+    for(int k=0;k<3;++k)difference=std::max(difference,std::abs(actual.com[0][k]-control.com[0][k]));
+    require(difference>1e-8,"original rigid generalized pins had no observable effect");
+}
+
+OriginalRigidFixture original_rigid_contact_fixture(bool crossing) {
+    OriginalRigidFixture fixture;
+    fixture.params.max_global_iters=crossing?1:2;
+    fixture.params.gravity=Vec3::Zero();fixture.params.d_hat=.01;
+    fixture.params.k_barrier=crossing?0:100;
+    fixture.params.friction_coefficient=crossing?0:.2;
+    fixture.params.friction_velocity_epsilon=.001;
+    fixture.params.node_box_min=fixture.params.node_box_max=.05;
+    fixture.body({Vec3(.1,.1,.004),Vec3(.2,.1,.004),Vec3(.1,.2,.004)},
+        Vec3(.1,0,crossing?-1.0:-.02),Vec3(0,0,.1),
+        crossing?RigidBodyUpdateMode::TranslationOnly:RigidBodyUpdateMode::TranslationAndOrientation);
+    fixture.body({Vec3(-1,-1,0),Vec3(1,-1,0),Vec3(0,1,0)},Vec3::Zero(),Vec3::Zero(),RigidBodyUpdateMode::None);
+    fixture.body({Vec3(10,0,0),Vec3(10.4,0,0),Vec3(10,.3,.1)},
+        Vec3(.1,0,0),Vec3::Zero(),RigidBodyUpdateMode::TranslationOnly);
+    return fixture;
+}
+
+void check_original_rigid_contacts() {
+    for(bool crossing:{false,true}) {
+        const auto base=original_rigid_contact_fixture(crossing);
+        const auto actual=original_rigid_parity(base,1);
+        require(actual.com[2][0]>base.state.x_coms[2][0]+1e-5,
+            "original rigid contact handling froze an unrelated body");
+        for(int node:base.mesh.rb_nodes[0])
+            require(actual.positions[node][2]>0,"original rigid translation crossed the fixed triangle");
+        if(crossing) {
+            // The zero-stiffness crossing request isolates original linear
+            // CCD: 0.004 / 0.025 TOI, then exactly the CPU's 90% factor.
+            for(int node:base.mesh.rb_nodes[0])
+                require(std::abs(actual.positions[node][2]-.0004)<5e-12,
+                    "original rigid solver did not commit the 90 percent TOI step");
+        } else {
+            auto no_contact=base;no_contact.params.k_barrier=0;no_contact.params.friction_coefficient=0;
+            const auto control=original_rigid_parity(no_contact,1);
+            require(std::abs(actual.com[0][2]-control.com[0][2])>1e-8,
+                "original rigid contact force had no observable effect");
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -456,6 +600,8 @@ int main() {
         check_original_predictor_budgets();
         check_predictor_stop_control();
         check_level_helper_schedule();
+        check_original_rigid_modes_and_pins();
+        check_original_rigid_contacts();
         require(gpu_original_mode_device_check() == 0,
                 "device original contact/CCD smoke failed");
         require(gpu_original_integration_check() == 0,

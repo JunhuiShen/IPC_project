@@ -240,6 +240,22 @@ __global__ void propose(RigidScene s,RigidState x,RigidWorkspace w,const int* co
     }
 }
 
+__global__ void propose_displacements(RigidScene s,RigidWorkspace w,const int* colors,
+    int color,bool orientation,double damping,double (*increments)[3],int* error) {
+    const std::size_t b=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
+    if (b>=s.bodies || !active(s,colors,color,b) || failed(error)) return;
+    for (int k=0;k<3;++k) increments[b][k]=0.0;
+    if (!(orientation ? s.rotate[b] : s.translate[b]) || damping==0.0) return;
+    double delta[3];
+    if (!ldlt3(w.systems[b].hessian,w.systems[b].gradient,delta)) {
+        fail(error,RigidSolveFailed); return;
+    }
+    double proposal[3];
+    for (int k=0;k<3;++k) proposal[k]=-damping*delta[k];
+    if (!finite3(proposal)) { fail(error,RigidInvalidDerivative); return; }
+    for (int k=0;k<3;++k) increments[b][k]=proposal[k];
+}
+
 __global__ void validate_translation(RigidScene s,RigidWorkspace w,const int* colors,int color,
     const double (*accepted)[3],int* error) {
     const std::size_t b=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
@@ -392,6 +408,15 @@ void propose_rigid_color(const RigidScene& s,const RigidState& x,const RigidWork
     valid_dt(dt); if (!std::isfinite(damping)) throw std::invalid_argument("Nonfinite rigid damping");
     if (!(max_rotation>=0 && max_rotation<=rotation_detail::pi)) throw std::invalid_argument("Rigid rotation cap must be in [0, pi]");
     if (s.bodies) propose<<<blocks(s.bodies),width,0,stream>>>(s,x,w,colors,color,orientation,boxes,dt,damping,max_rotation,anchors,error); launched();
+}
+void propose_rigid_displacements(const RigidScene& s,const RigidWorkspace& w,
+    const int* colors,int color,bool orientation,double damping,double (*increments)[3],
+    int* error,cudaStream_t stream) {
+    if (!std::isfinite(damping)) throw std::invalid_argument("Nonfinite rigid damping");
+    if (s.bodies && (!colors || !increments || !error))
+        throw std::invalid_argument("Rigid displacement proposal requires device storage");
+    if (s.bodies) propose_displacements<<<blocks(s.bodies),width,0,stream>>>(s,w,colors,color,orientation,damping,increments,error);
+    launched();
 }
 void commit_rigid_translation_color(const RigidScene& s,const RigidState& x,const RigidWorkspace& w,
     const DeformableState& nodes,const int* colors,int color,const double (*accepted)[3],int* error,cudaStream_t stream) {

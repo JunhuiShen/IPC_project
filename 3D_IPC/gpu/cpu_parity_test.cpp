@@ -143,11 +143,18 @@ SolverResult cpu_substep(Fixture& fixture, bool require_completion = true) {
     std::vector<Vec3> target;
     const double dt = fixture.parameters.dt();
     build_xhat(target, previous, fixture.state.velocities, dt);
+    for(std::size_t node=0;node<target.size();++node)
+        if(fixture.mesh.node_to_rb[node]>=0)target[node]=previous[node];
     const auto frozen_target = target;
     BroadPhase phase;
-    const auto result = global_jacobi_solver_dat(fixture.mesh, fixture.adjacency,
-        fixture.pins, fixture.parameters, next, target, fixture.state.velocities,
-        phase, "", &previous);
+    auto centers=fixture.state.x_coms;
+    auto orientation=fixture.state.orientations;
+    std::vector<Vec3> angular(fixture.state.omega.size(),Vec3::Zero());
+    const auto result = fixture.mesh.rb_nodes.empty()
+        ?global_jacobi_solver_dat(fixture.mesh, fixture.adjacency,
+            fixture.pins, fixture.parameters, next, target, fixture.state.velocities,phase,"",&previous)
+        :global_jacobi_solver_dat_general(fixture.mesh,fixture.state,fixture.adjacency,
+            fixture.pins,fixture.parameters,next,target,centers,orientation,angular,phase);
     // The CPU solver contract keeps xhat frozen for the whole substep.
     require(same_vec3(target, frozen_target), "CPU DAT mutated the frozen xhat target");
     if (require_completion) {
@@ -158,6 +165,13 @@ SolverResult cpu_substep(Fixture& fixture, bool require_completion = true) {
     }
     update_velocity(fixture.state.velocities, next, previous, dt);
     fixture.state.deformed_positions = std::move(next);
+    if(!centers.empty()) {
+        update_velocity(fixture.state.v_coms,centers,fixture.state.x_coms,dt);
+        fixture.state.x_coms=std::move(centers);
+        fixture.state.orientations=std::move(orientation);
+        fixture.state.omega=std::move(angular);
+        sync_rigid_body_particles(fixture.mesh,fixture.state);
+    }
     return result;
 }
 
@@ -199,6 +213,25 @@ void compare_state(const StateSnapshot& gpu, const Fixture& cpu, double position
                 fail(tag(label, node, axis) + ": velocity " + std::to_string(actual_velocity)
                     + " differs from CPU " + std::to_string(expected_velocity));
         }
+    require(gpu.com.size()==cpu.state.x_coms.size()&&gpu.com_velocity.size()==cpu.state.v_coms.size()
+        &&gpu.omega.size()==cpu.state.omega.size()&&gpu.orientation.size()==cpu.state.orientations.size(),
+        label+": generalized state count mismatch");
+    for(std::size_t body=0;body<gpu.com.size();++body) {
+        for(int axis=0;axis<3;++axis) {
+            require(std::isfinite(gpu.com[body][axis])&&std::isfinite(gpu.com_velocity[body][axis])
+                &&std::isfinite(gpu.omega[body][axis]),label+": nonfinite generalized state");
+            require(std::abs(gpu.com[body][axis]-cpu.state.x_coms[body][axis])<=position_tolerance,
+                label+": COM mismatch");
+            require(std::abs(gpu.com_velocity[body][axis]-cpu.state.v_coms[body][axis])<=velocity_tolerance,
+                label+": COM velocity mismatch");
+            require(std::abs(gpu.omega[body][axis]-cpu.state.omega[body][axis])<=velocity_tolerance,
+                label+": angular velocity mismatch");
+        }
+        for(int axis=0;axis<4;++axis)
+            require(std::isfinite(gpu.orientation[body][axis])
+                &&std::abs(gpu.orientation[body][axis]-cpu.state.orientations[body][axis])<=position_tolerance,
+                label+": orientation mismatch");
+    }
 }
 
 void check_dat_parity(const Fixture& base, const std::string& label, int substeps) {
@@ -623,8 +656,8 @@ void check_invalid_pre_update_rejection() {
     std::cout << "DAT invalid requests rejected before update; solver remains usable PASS\n";
 }
 
-void check_rigid_dat_rejection() {
-    // describe_scene rejects a rigid-body Jacobi DAT scene outright.
+void check_rigid_dat_bridge() {
+    // The bridge now keeps rigid generalized blocks in a DAT scene.
     SimParams params = SimParams::zeros();
     params.fixed_iters = true;
     params.use_jacobi_dat = true;
@@ -634,10 +667,10 @@ void check_rigid_dat_rejection() {
     create_rigid_body({Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0)}, Vec3::Zero(),
         Vec4(1, 0, 0, 0), Vec3::Zero(), 1.0, mesh, state,
         RigidBodyUpdateMode::TranslationOnly);
-    bool rejected = false;
-    try { (void)describe_scene(mesh, state, {}, params); }
-    catch (const std::invalid_argument&) { rejected = true; }
-    require(rejected, "rigid-body Jacobi DAT scene was not rejected by the bridge");
+    const auto description=describe_scene(mesh,state,{},params);
+    require(description.com.size()==1&&description.body_translate[0]&&!description.body_rotate[0],
+        "rigid DAT bridge lost body/update-mode metadata");
+    require(describe_step(params).jacobi_dat,"rigid DAT bridge lost mode selection");
 }
 
 void check_bridge_mapping() {
@@ -944,37 +977,37 @@ void check_rigid_pins() {
     std::cout << "Rigid pins: interleaved stable grouping, time mapping, CPU parity and force effect PASS\n";
 }
 
-// The bridge rejects a rigid DAT scene at construction; the solver's own
-// advance_substep must also reject a well-formed DAT request on a rigid scene
-// before touching any state, and stay usable afterwards.
-void check_rigid_dat_advance_rejection() {
-    const Fixture base = rigid_pair();
-    require(base.parameters.use_jacobi_dat == false,
-        "rigid DAT advance fixture must start from a valid non-DAT rigid scene");
-    GpuRun gpu(base);
-    const auto before = gpu.snapshot();
-    SimParams dat_params = base.parameters;
-    dat_params.use_jacobi_dat = true;
-    const StepParameters dat_step = describe_step(dat_params);
-    require(dat_step.jacobi_dat, "rigid DAT step description lost the DAT request");
-    bool rejected = false;
-    try { gpu.advance(dat_step); }
-    catch (const std::invalid_argument&) { rejected = true; }
-    require(rejected, "advance_substep accepted Jacobi DAT on a rigid scene");
-    const auto after = gpu.snapshot();
-    require(same_doubles(after.positions, before.positions)
-        && same_doubles(after.velocities, before.velocities)
-        && same_doubles(after.com, before.com)
-        && same_doubles(after.com_velocity, before.com_velocity)
-        && same_doubles(after.omega, before.omega),
-        "rejected rigid DAT substep changed evolving state");
-    require(after.orientation.size() == before.orientation.size(),
-        "rejected rigid DAT substep changed the orientation count");
-    for (std::size_t body = 0; body < before.orientation.size(); ++body)
-        require(after.orientation[body] == before.orientation[body],
-            "rejected rigid DAT substep changed a rigid orientation");
-    gpu.advance(); // A rejected request must not poison the solver.
-    std::cout << "GpuSolver rigid+DAT substep rejected pre-update; state intact PASS\n";
+void check_rigid_dat_advance() {
+    for(bool exact:{false,true})for(auto mode:{RigidBodyUpdateMode::TranslationAndOrientation,
+        RigidBodyUpdateMode::TranslationOnly,RigidBodyUpdateMode::OrientationOnly,RigidBodyUpdateMode::None}) {
+        Fixture fixture=rigid_pair();
+        fixture.parameters.use_jacobi_dat=true;
+        fixture.parameters.exact_computation_fallback=exact;
+        fixture.parameters.dat_query_radius=10;
+        fixture.parameters.max_global_iters=3;
+        fixture.parameters.damping=.3;
+        fixture.mesh.rb_update_modes[0]=mode;
+        // Exercise the CPU world-X motor semantics as well as default +Z pins.
+        fixture.parameters.rigid_pins[0].angular_velocity_z=.7;
+        fixture.parameters.rigid_pins[0].rotation_axis=Vec3::UnitX();
+        check_dat_parity(fixture,"rigid modes/pins",2);
+    }
+    for(bool exact:{false,true}) {
+        Fixture fixture({Vec3(-.5,0,.12)},{});
+        fixture.state.velocities[0]=Vec3(.2,0,-.1);
+        fixture.parameters.exact_computation_fallback=exact;
+        fixture.parameters.d_hat=.2;fixture.parameters.k_barrier=20;
+        fixture.parameters.friction_coefficient=.15;fixture.parameters.damping=.2;
+        fixture.parameters.max_global_iters=2;fixture.parameters.dat_query_radius=10;
+        create_rigid_body({Vec3(.1,0,.1),Vec3(.2,0,.15),Vec3(.1,.1,.15),Vec3(0,-.1,.15)},
+            Vec3(.15,0,-.01),Vec4(1,0,0,0),Vec3(0,0,.1),4,fixture.mesh,fixture.state);
+        const int first=int(fixture.state.deformed_positions.size());
+        create_rigid_body({Vec3(-2,-2,0),Vec3(4,-2,0),Vec3(-2,4,0)},Vec3::Zero(),
+            Vec4(1,0,0,0),Vec3::Zero(),3,fixture.mesh,fixture.state,RigidBodyUpdateMode::None);
+        fixture.mesh.tris={first,first+1,first+2};refresh_topology(fixture);
+        check_dat_parity(fixture,"mixed rigid contact/friction",2);
+    }
+    std::cout<<"Rigid DAT generalized blocks, all modes, rotating pins and mixed contact PASS\n";
 }
 
 void check_runtime_failure_blocks_snapshot() {
@@ -1021,10 +1054,10 @@ int main() {
         check_zero_damping_skips_inverse();
         check_zero_sweeps();
         check_invalid_pre_update_rejection();
-        check_rigid_dat_rejection();
+        check_rigid_dat_bridge();
         check_bridge_mapping();
         check_rigid_pins();
-        check_rigid_dat_advance_rejection();
+        check_rigid_dat_advance();
         check_runtime_failure_blocks_snapshot();
         std::cout << "GPU CPU/GPU API parity fixture PASS\n";
         return 0;

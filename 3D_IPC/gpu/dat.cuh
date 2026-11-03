@@ -23,6 +23,20 @@ IPC_DAT_HD inline bool finite(Vec x) {
 }
 IPC_DAT_HD inline double maximum(double a,double b) { return a < b ? b : a; }
 IPC_DAT_HD inline double minimum(double a,double b) { return a < b ? a : b; }
+// Certified coordinate-gap rejection; subtraction is rounded down so a
+// boundary or uncertain gap still reaches the robust geometry kernel.
+IPC_DAT_HD inline bool aabb_separated(const Vec* x,int split,double radius) {
+    for(int k=0;k<3;++k) {
+        double alo=INFINITY,ahi=-INFINITY,blo=INFINITY,bhi=-INFINITY;
+        for(int i=0;i<4;++i) {
+            if(i<split){alo=minimum(alo,x[i].v[k]);ahi=maximum(ahi,x[i].v[k]);}
+            else{blo=minimum(blo,x[i].v[k]);bhi=maximum(bhi,x[i].v[k]);}
+        }
+        const double gap=maximum(::nextafter(blo-ahi,-double(INFINITY)),::nextafter(alo-bhi,-double(INFINITY)));
+        if(gap>=radius)return true;
+    }
+    return false;
+}
 IPC_DAT_HD inline Vec load(const double* x) { return {{x[0],x[1],x[2]}}; }
 IPC_DAT_HD inline Vec add(Vec a,Vec b) {
     return {{a.v[0]+b.v[0],a.v[1]+b.v[1],a.v[2]+b.v[2]}};

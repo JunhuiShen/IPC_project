@@ -207,7 +207,7 @@ and +y as the up direction.
 | Experimental SIMD v2 | `--use_basic_experimental true --use_simd true`; supports cloth, rigid, and mixed scenes. |
 | Experimental scalar cloth v1 | `--use_basic_experimental true --use_simd false`. |
 | Basic cloth grid | `--use_cloth_grid true`; cloth only, with OGC disabled. See `--help` for grid sizing flags. |
-| Jacobi with planar DAT | `--use_jacobi_dat true`; CPU cloth, solid, rigid, and mixed scenes, with OGC and cloth grid disabled. Takes precedence over experimental/SIMD solver flags. CUDA DAT remains deformable-only. |
+| Jacobi with planar DAT | `--use_jacobi_dat true`; cloth, solid, rigid, and mixed scenes, with OGC and cloth grid disabled. Takes precedence over experimental/SIMD solver flags. |
 | Jacobi with level-based colored CCD | `--use_jacobi_level_based_ccd true`; CPU cloth/solid scenes without rigid bodies, with OGC and cloth grid disabled. Takes precedence over experimental/SIMD solver flags; mutually exclusive with `--use_jacobi_dat`. |
 | CUDA solver | `gpu/build/3D_sim_gpu`; requires `--fixed_iters` and, for ordinary solving, `--use_ticcd false`. OGC and cloth grid are unsupported; see the [GPU guide](gpu/README.md) for mode restrictions. |
 

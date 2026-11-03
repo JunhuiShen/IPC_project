@@ -9,6 +9,7 @@
 #include <omp.h>
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -358,4 +359,14 @@ TEST(JacobiDATSolver, DeformableEntryRejectsRigidBlocksAndGeneralDriverAcceptsTh
     EXPECT_TRUE(advance_one_frame_general(state, s.mesh, s.adj, s.pins,
         s.params, phase).converged);
     expect_positions(state.deformed_positions, original, 0.0);
+}
+
+TEST(JacobiDATSolver, SharedQueryRejectsOverflowBeforeBuildingTheBVH) {
+    Scene s({Vec3(std::numeric_limits<double>::max(),0,0)});
+    s.params.dat_query_radius=1e308;s.params.dat_node_box_padding=1;
+    s.params.damping=1;s.params.use_parallel=true;
+    const auto initial=s.x;
+    BroadPhase phase;
+    EXPECT_THROW(solve(s,phase),std::invalid_argument);
+    expect_positions(s.x,initial,0);
 }

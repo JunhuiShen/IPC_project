@@ -6,7 +6,7 @@
 
 namespace ipc_gpu::solver {
 
-// Geometry selector for ordinary (non-DAT) contact assembly. Robust keeps the
+// Geometry selector for mesh contact assembly. Robust keeps the
 // qualified exact-fallback evaluator; Original selects the independent
 // evaluate_contact_original path used by the CPU exact_computation_fallback
 // == false mode. This is a routing option, not a second numerical model.

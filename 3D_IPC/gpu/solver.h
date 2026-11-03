@@ -66,8 +66,8 @@ struct StepParameters {
     // Particle-update CCD only. Rigid updates and colored guesses always use
     // CCD, as in the production general solver. Does not disable barriers.
     bool collisions = true;
-    // Optional frozen-state Jacobi updates followed by planar DAT. This
-    // deformable-only mode skips all initial guesses and PBGS/vertex CCD.
+    // Optional frozen-state particle/rigid Jacobi updates followed by DAT.
+    // This mode skips all initial guesses and PBGS/vertex CCD sweeps.
     bool jacobi_dat = false;
     double dat_gamma = 0.9;
     double dat_query_radius = 0.0; // 0 selects the CPU automatic-radius rule.

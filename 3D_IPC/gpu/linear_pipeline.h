@@ -26,7 +26,7 @@ enum class LinearClipError : int {
 // all instances must be serialized on the same CUDA stream (the GPU
 // solver uses the default stream). Concurrent exact calls are not supported.
 //
-// ORIGINAL modes (OriginalSolver/OriginalColoredGuess) run a BOUNDED parallel
+// Deformable ORIGINAL modes (OriginalSolver/OriginalColoredGuess) run a BOUNDED parallel
 // whole-node resolve: each of a small fixed pool of workers owns a disjoint
 // reusable exact arena slice and processes a stride of the active color's
 // nodes. Workers only read the immutable current positions, and the complete
@@ -59,11 +59,16 @@ public:
         OriginalUpdateConvention convention=OriginalUpdateConvention::StoredNoop,
         const unsigned char* original_cooperative_selected=nullptr);
 
+    // OriginalSolver retains raw componentwise-clipped COM displacement and
+    // the CPU original 90%-TOI schedule for either translating primitive.
+    // A separate zero-gap proof of rounded proxy paths may shorten that step.
+    // Rigid resolves reuse the serial device exact arena in either mode.
     void clip_rigid_translation_color(const RigidScene&,const RigidState&,
         const RigidWorkspace&,const DeformableState&,const BroadPhaseView&,
         const std::size_t* block_contact_offsets,const int* contact_indices,
         const BpAabb* blue_boxes,const int* block_colors,int color,
-        double (*accepted_proxy_positions)[3],int* error,bool use_ccd=true,cudaStream_t stream=nullptr);
+        double (*accepted_proxy_positions)[3],int* error,bool use_ccd=true,cudaStream_t stream=nullptr,
+        LinearClipMode mode=LinearClipMode::Robust);
 
 private:
     struct Impl;

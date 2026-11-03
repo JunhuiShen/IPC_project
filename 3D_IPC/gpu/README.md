@@ -131,6 +131,9 @@ cmake -S gpu -B gpu/build -DCMAKE_BUILD_TYPE=Release \
 cmake --build gpu/build --target 3D_sim_gpu -j 8
 ```
 
+Add `-DIPC_GPU_FAST_DEV_BUILD=ON` for shorter development builds. It uses
+PTXAS O1 for `linear_pipeline.cu`; standard builds retain PTXAS O3.
+
 `3D_sim_gpu` is built from the generated current GPU driver and links
 `ipc_gpu_bridge`, `ipc_gpu_solver` and `ipc_gpu_components`. The shared CPU
 source defaults to the parent directory. To use another compatible checkout,
@@ -186,8 +189,10 @@ See [output and restart](../README.md#output-and-restart).
 ### Optional Jacobi-with-DAT path
 
 `--use_jacobi_dat true` selects the GPU port of the simultaneous Jacobi update
-with planar Divide and Truncate. It is deformable-only: cloth and solid scenes
-without rigid bodies. It honours the CPU fixed budget (`--fixed_iters` with
+with planar Divide and Truncate for cloth, solid, rigid and mixed scenes.
+Rigid COM and angular increments are assembled from one frozen snapshot and
+share a body-wide factor with full curved-path plane and radius checks.
+It honours the CPU fixed budget (`--fixed_iters` with
 `--max_substep_iters`), starts every substep from the previous positions and
 therefore skips all initial-guess flags. `--dat_gamma` (default `0.9`),
 `--dat_node_box_padding` (default `1.2`) and `--dat_query_radius` (default `0`,
@@ -212,6 +217,13 @@ displacements are published once, at the sweep boundary, which is what makes
 the update simultaneous. The filter is surface-only: DAT rejects mesh surface
 contact only. It has no tetrahedron-inversion guard and no SDF collision
 filter; SDF penalties remain part of the Jacobi update.
+
+DAT and force assembly share one conservative candidate neighborhood per
+frozen sweep; each applies its own distance cutoff. Rigid nodes retain their
+initial trajectory bounds and rotated references for all plane queries.
+Represented endpoints use parallel validation and a parallel single-halving
+retry. Further failures enter a device-controlled retry loop with the same halving budget and final
+zero-step check; converged sweeps do not enqueue 56 validation rounds.
 
 ### Rigid pins and motor-driven motion
 
@@ -347,10 +359,11 @@ ported on the device:
   appended metadata, not a geometry toggle, and direct API callers that leave
   it `false` keep the old behaviour.
 
-Original mode supports deformable scenes. The direct `advance_substep` entry
-rejects rigid bodies before advancing state; the generated CLI driver also
-checks this scene restriction before creating output. Tight-Inclusion CCD,
-OGC and the cloth grid remain unsupported in both modes.
+Original mode also supports rigid and mixed scenes. Rigid translation uses
+the original CPU CCD and raw-displacement commit rule; represented-path checks
+may conservatively shorten a body's step. Rigid rotation retains curved-motion
+CCD. All numerical checks run on the device. Tight-Inclusion CCD, OGC and the
+cloth grid remain unsupported in both modes.
 
 The collision-only represented-path check is an extra physical safety layer,
 not part of the CPU TOI model. It accepts an unchanged healthy positive-gap
@@ -374,10 +387,15 @@ size.
 The ordinary device solver requires `--fixed_iters` and conflict-graph coloring;
 the driver rejects unported modes before it touches the output directory. OGC
 solving, the cloth grid and Tight-Inclusion CCD (`--use_ticcd true`) are not
-available for ordinary solving, so use `--use_ticcd false`. The DAT path adds
-its own restriction to deformable scenes. Colors execute sequentially, with
+available for ordinary solving, so use `--use_ticcd false`. Colors execute sequentially, with
 independent updates within each color running in parallel. Numerical fallback
 and CCD must stay on the GPU; an unrecoverable device error stops the substep.
+
+Rigid Jacobi-DAT and original-mode rigid support have native regression coverage
+on NVIDIA RTX 6000 Ada with CUDA 12.6, including CPU parity, rigid/mixed scenes,
+tiny motion, pins and collision checks.
+CUDA needs a host thread for launch orchestration and I/O. Use a positive
+`OMP_NUM_THREADS` (for example `1`); this does not move solver arithmetic to CPU.
 
 ## Runtime diagnostics
 

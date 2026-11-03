@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <type_traits>
 
 namespace {
 
@@ -1068,7 +1069,8 @@ compute_solid_local_gradient_and_pbgs_block_no_barrier_impl(
     const std::vector<unsigned char>* surface_node_mask,
     const std::vector<int>* pin_map,
     const bool include_sdf,
-    solid_ipc_detail::PreparedSolidWorkspace* prepared = nullptr) {
+    solid_ipc_detail::PreparedSolidWorkspace* prepared = nullptr,
+    const solid_ipc_detail::JacobiSnapshot* snapshot = nullptr) {
     const double dt2 = params.dt2();
     const double mass = ref_mesh.mass[static_cast<std::size_t>(node)];
     Vec3 gradient = mass
@@ -1100,7 +1102,9 @@ compute_solid_local_gradient_and_pbgs_block_no_barrier_impl(
         const std::size_t element =
             static_cast<std::size_t>(element_index);
         std::pair<Vec3, Mat33> derivatives;
-        if (prepared) {
+        if (snapshot) {
+            derivatives = snapshot->tet_derivatives[element][local_node];
+        } else if (prepared) {
             derivatives = prepared->evaluate(element, local_node, x, params);
         } else {
             const Mat33 F = ElementF(element, x, ref_mesh.tets, ref_mesh.tet_rest_data);
@@ -1534,6 +1538,69 @@ std::pair<Vec3, Mat33> compute_solid_local_gradient_and_block_unchecked(
     return compute_solid_local_gradient_and_block_impl(
         node, ref_mesh, pins, params, x, xhat, broad_phase,
         solid_node_mask, surface_node_mask, pin_map, previous_positions, false, cooperative, rejections, prepared);
+}
+
+std::pair<Vec3, Mat33> compute_solid_jacobi_local(int node,
+    const RefMesh& mesh, const std::vector<Pin>& pins, const SimParams& params,
+    const std::vector<Vec3>& x, const std::vector<Vec3>& target,
+    const BroadPhase& phase, const std::vector<int>& pin_map,
+    const std::vector<unsigned char>& surface_nodes,
+    const std::vector<Vec3>* previous, const JacobiSnapshot& snapshot) {
+    const bool friction = params.friction_coefficient>0;
+    auto local = compute_solid_local_gradient_and_pbgs_block_no_barrier_impl(
+        node, mesh, pins, params, x, target, &surface_nodes, &pin_map,
+        !friction, nullptr, &snapshot);
+    SolidLocalSDFDerivatives sdf;
+    if (friction) {
+        sdf = compute_solid_local_sdf_derivatives(node, params, x, surface_nodes, previous);
+        local.first += sdf.normal_gradient;
+        local.second += sdf.normal_hessian;
+    }
+    // Preserve the solid assembly's separate normal and friction sums and its
+    // NT-then-EE order, while sharing geometry with every other Jacobi role.
+    SolidLocalMeshContactDerivatives mesh_contact;
+    if (params.d_hat>0 && params.k_barrier>0) {
+        const double scale = params.dt2()*params.k_barrier;
+        const auto& cache = phase.cache();
+        const auto add = [&](const auto& pair, int role, const auto& evaluation,
+                             const FrozenFrictionContact* contact) {
+            if (!evaluation.active) return;
+            const auto derivatives = [&]() {
+                if constexpr (std::is_same_v<std::decay_t<decltype(evaluation)>, NodeTriangleContactEvaluation>) {
+                    const auto points = node_triangle_positions(pair, x);
+                    return node_triangle_barrier_self_gradient_and_hessian(
+                        points[0],points[1],points[2],points[3],role,evaluation);
+                } else {
+                    const auto points = segment_segment_positions(pair, x);
+                    return segment_segment_barrier_self_gradient_and_hessian(
+                        points[0],points[1],points[2],points[3],role,evaluation);
+                }
+            }();
+            mesh_contact.normal_gradient += scale*derivatives.first;
+            mesh_contact.normal_hessian += scale*derivatives.second;
+            if (contact) {
+                const auto f = frozen_friction_role_gradient_and_hessian(
+                    *contact,role,params.friction_coefficient,params.dt2());
+                mesh_contact.friction_gradient += f.first;
+                mesh_contact.friction_hessian += f.second;
+            }
+        };
+        for (const auto& e : cache.vertex_nt[node])
+            add(cache.nt_pairs[e.pair_index],e.dof,snapshot.nt[e.pair_index],
+                friction?&snapshot.nt_friction[e.pair_index]:nullptr);
+        for (const auto& e : cache.vertex_ss[node])
+            add(cache.ss_pairs[e.pair_index],e.dof,snapshot.ss[e.pair_index],
+                friction?&snapshot.ss_friction[e.pair_index]:nullptr);
+    }
+    local.first += mesh_contact.normal_gradient;
+    local.second += mesh_contact.normal_hessian;
+    if (friction) {
+        local.first += mesh_contact.friction_gradient;
+        local.second += mesh_contact.friction_hessian;
+        local.first += sdf.friction_gradient;
+        local.second += sdf.friction_hessian;
+    }
+    return local;
 }
 
 } // namespace solid_ipc_detail

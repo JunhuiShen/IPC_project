@@ -28,6 +28,7 @@ std::vector<Vec> evaluate(const Scene& s,const DatParameters& p) {
     else phase.initialize_surface_nodes(boxes,s.mesh,0,BroadPhase::InitializationMode::DeformableSolver);
     const auto pair=[&](const int nodes[4],int split) {
         Vec x[4],u[4],separation;for(int i=0;i<4;++i){x[i]=pack(s.positions[nodes[i]]);u[i]=updates[nodes[i]];}
+        if(dat_detail::aabb_separated(x,split,p.query_radius))return;
         int status=split==1?dat_detail::vertex_triangle(x,separation):dat_detail::edge_edge(x,separation);
         if(status==dat_detail::NeedsExact) {
             status=dat_detail::exact_edge_edge<256>(x,separation);

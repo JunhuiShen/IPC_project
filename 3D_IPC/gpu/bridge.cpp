@@ -40,8 +40,6 @@ SceneDescription describe_scene(const RefMesh& mesh,const DeformedState& state,
     const auto n=state.deformed_positions.size();
     if(state.velocities.size()!=n || mesh.mass.size()!=n)
         throw std::invalid_argument("GPU scene: inconsistent node arrays");
-    if(params.use_jacobi_dat&&!mesh.rb_nodes.empty())
-        throw std::invalid_argument("GPU Jacobi DAT supports deformable cloth/solid scenes, not rigid bodies");
     out.positions.reserve(n);out.velocities.reserve(n);
     for(const auto& p:state.deformed_positions)out.positions.push_back(vector3(p));
     for(const auto& v:state.velocities)out.velocities.push_back(vector3(v));
@@ -93,6 +91,9 @@ SceneDescription describe_scene(const RefMesh& mesh,const DeformedState& state,
             int a=node,b=mesh.tris[3*t+(j+1)%3];
             if(a>b)std::swap(a,b);edges.insert({a,b});
         }
+        if(out.node_body[tri.vertices[0]]!=out.node_body[tri.vertices[1]]
+            ||out.node_body[tri.vertices[0]]!=out.node_body[tri.vertices[2]])
+            throw std::invalid_argument("GPU: triangle vertices must have one rigid owner or all be deformable");
         out.surface_triangles.push_back(tri);
     }
     for(auto [a,b]:edges)out.edges.push_back({{a,b}});
@@ -133,6 +134,7 @@ SceneDescription describe_scene(const RefMesh& mesh,const DeformedState& state,
             value.local_position[a]=pin.local_position[a];
             value.initial_target[a]=pin.initial_target[a];
             value.rotation_center[a]=pin.rotation_center[a];
+            value.rotation_axis[a]=pin.rotation_axis[a];
         }
         value.angular_velocity_z=pin.angular_velocity_z;
         out.rigid_pins[next_pin[static_cast<std::size_t>(pin.body)]++]=value;

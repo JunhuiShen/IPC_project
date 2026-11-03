@@ -2,6 +2,8 @@
 
 #include "IPC_math.h"
 #include "volumetric_corotated_energy.h"
+#include "barrier_energy.h"
+#include "friction_energy.h"
 
 #include <optional>
 #include <utility>
@@ -123,6 +125,22 @@ std::pair<Vec3, Mat33> compute_solid_local_gradient_and_block(
     const std::vector<Vec3>* previous_positions = nullptr);
 
 namespace solid_ipc_detail {
+
+// Built element-by-element and pair-by-pair before parallel Jacobi gathering.
+// Every entry is read-only during gathering and replaced on the next sweep.
+struct JacobiSnapshot {
+    std::vector<std::array<std::pair<Vec3, Mat33>, 4>> tet_derivatives;
+    std::vector<NodeTriangleContactEvaluation> nt;
+    std::vector<SegmentSegmentContactEvaluation> ss;
+    std::vector<FrozenFrictionContact> nt_friction, ss_friction;
+};
+
+std::pair<Vec3, Mat33> compute_solid_jacobi_local(int node,
+    const RefMesh&, const std::vector<Pin>&, const SimParams&,
+    const std::vector<Vec3>& positions, const std::vector<Vec3>& target,
+    const BroadPhase&, const std::vector<int>& pin_map,
+    const std::vector<unsigned char>& surface_nodes,
+    const std::vector<Vec3>* previous, const JacobiSnapshot&);
 
 // Scalar general-solver workspace. Rebuilt once per solve, so in-place
 // rest/material changes cannot leave stale coefficients. Mutable geometry entries

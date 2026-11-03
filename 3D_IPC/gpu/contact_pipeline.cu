@@ -679,15 +679,17 @@ __device__ bool add_rigid_sdf(Derivatives& system,const DeformableState& deforma
 }
 __global__ void reduce_rigid(BroadPhaseView broad,DeformableState deformable,RigidScene scene,
     RigidState state,RigidWorkspace workspace,ElasticWorkspace elastic,SdfScene sdf,
-    ContactParameters params,Work work,int color,bool orientation,RigidPinAssembly pins) {
+    ContactParameters params,Work work,int color,bool orientation,RigidPinAssembly pins,
+    bool frozen_snapshot) {
     const auto body=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
     if(body>=scene.bodies||broad.block_colors[scene.body_blocks[body]]!=color||atomicAdd(elastic.error,0))return;
     if(orientation?!scene.rotate[body]:!scene.translate[body])return;
     Derivatives system=workspace.systems[body];
     // New pin forces follow the CPU noncontact order: inertia, SDF, then one
     // stable per-body pin sum. Preserve the old no-pin contact/SDF order.
-    if(pins.scene.count) {
+    if(pins.scene.count||frozen_snapshot)
         if(!add_rigid_sdf(system,deformable,scene,elastic,sdf,params,work,body,orientation))return;
+    if(pins.scene.count) {
         const auto kin=rigid_kinematics(state.previous_orientation[body],state.omega[body],params.dt);
         RigidDerivatives contribution{};
         const int status=evaluate_rigid_body_pins(pins.scene,body,state.com[body],kin,
@@ -709,7 +711,8 @@ __global__ void reduce_rigid(BroadPhaseView broad,DeformableState deformable,Rig
         if(out.status!=ContactStatus::Ok){error(elastic.error,code(out.status));return;}
         if(out.active)add_rigid_contact(system,out,broad.contacts[pair],static_cast<int>(body),scene,work.node_pullbacks,normal_scale,orientation);
     }
-    if(!pins.scene.count&&!add_rigid_sdf(system,deformable,scene,elastic,sdf,params,work,body,orientation))return;
+    if(!pins.scene.count&&!frozen_snapshot
+        &&!add_rigid_sdf(system,deformable,scene,elastic,sdf,params,work,body,orientation))return;
     if(!finite_system(system)){error(elastic.error,26);return;}
     workspace.systems[body]=system;
 }
@@ -940,9 +943,7 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
     if(p.queue_log.is_open())++p.assembly_index;
     if(!p.offsets.data||!elastic.error)throw std::logic_error("GPU contact assembly requires rebuild and device error pointer");
     if(color<0||(p.broad.color_count>0&&color>=p.broad.color_count))throw std::invalid_argument("GPU contact color out of range");
-    const bool frozen_snapshot=mode==ContactAssemblyMode::FrozenDeformableSnapshot;
-    if(frozen_snapshot&&(phase!=ContactAssemblyPhase::Deformable||rigid.bodies))
-        throw std::invalid_argument("GPU frozen contact assembly is deformable-only");
+    const bool frozen_snapshot=mode==ContactAssemblyMode::FrozenSnapshot;
     if(p.pruning_ready&&p.broad.contact_count) {
         const auto& q=parameters;
         if(!std::isfinite(q.d_hat)||q.d_hat>p.pruning_d_hat||q.d_hat<=0
@@ -1117,7 +1118,7 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
                 reduce_deformable_warp<<<std::min(p.block_count,256),32>>>(p.broad,scene,state,elastic,sdf,parameters,p.work(),color,p.block_to_deformable_node.data);
             else reduce_deformable<<<blocks(scene.nodes),threads>>>(p.broad,scene,state,elastic,sdf,parameters,p.work(compact_phase),color,frozen_snapshot);
         }
-    } else if(rigid.bodies)reduce_rigid<<<blocks(rigid.bodies),threads>>>(p.broad,state,rigid,rigid_state,rigid_workspace,elastic,sdf,parameters,p.work(),color,phase==ContactAssemblyPhase::RigidOrientation,pins);
+    } else if(rigid.bodies)reduce_rigid<<<blocks(rigid.bodies),threads>>>(p.broad,state,rigid,rigid_state,rigid_workspace,elastic,sdf,parameters,p.work(),color,phase==ContactAssemblyPhase::RigidOrientation,pins,frozen_snapshot);
     checked(cudaGetLastError(),"assembly kernels");
 }
 

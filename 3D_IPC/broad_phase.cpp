@@ -1079,12 +1079,12 @@ void BroadPhase::initialize_surface_nodes(
         /*exclude_tet_interior_nt_queries=*/true);
 }
 
-void BroadPhase::initialize_surface_nodes(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, const double d_hat, const InitializationMode mode) {
-    initialize_from_vertex_boxes(vertex_boxes, mesh, d_hat, /*exclude_tet_interior_nt_queries=*/true, mode);
+void BroadPhase::initialize_surface_nodes(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, const double d_hat, const InitializationMode mode, bool retain_solver_data) {
+    initialize_from_vertex_boxes(vertex_boxes, mesh, d_hat, /*exclude_tet_interior_nt_queries=*/true, mode, retain_solver_data);
 }
 
-void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, const double d_hat, const InitializationMode mode) {
-    initialize_from_vertex_boxes(vertex_boxes, mesh, d_hat, /*exclude_tet_interior_nt_queries=*/false, mode);
+void BroadPhase::initialize(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, const double d_hat, const InitializationMode mode, bool retain_solver_data) {
+    initialize_from_vertex_boxes(vertex_boxes, mesh, d_hat, /*exclude_tet_interior_nt_queries=*/false, mode, retain_solver_data);
 }
 
 void BroadPhase::initialize_node_boxes_only(const std::vector<AABB>& vertex_boxes) {
@@ -1109,12 +1109,12 @@ void BroadPhase::initialize_node_boxes_only(const std::vector<AABB>& vertex_boxe
     cache_ = std::move(c);
 }
 
-void BroadPhase::initialize_from_vertex_boxes(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, const double d_hat, const bool exclude_tet_interior_nt_queries, const InitializationMode mode) {
+void BroadPhase::initialize_from_vertex_boxes(const std::vector<AABB>& vertex_boxes, const RefMesh& mesh, const double d_hat, const bool exclude_tet_interior_nt_queries, const InitializationMode mode, bool retain_solver_data) {
     const int nv = static_cast<int>(vertex_boxes.size());
     const int nt = num_tris(mesh);
     exclude_tet_interior_nt_queries_ = exclude_tet_interior_nt_queries;
 
-    Cache c = take_reusable_cache(cache_, nv, mode);
+    Cache c = take_reusable_cache(cache_, nv, retain_solver_data ? mode : InitializationMode::RigidSolver);
     c.excludes_tet_interior_nt_queries = exclude_tet_interior_nt_queries;
 
     if (!topology_valid_) set_mesh_topology(mesh, nv);
@@ -1220,7 +1220,7 @@ void BroadPhase::initialize_from_vertex_boxes(const std::vector<AABB>& vertex_bo
             query_bvh_excluding_rigid_owner(c.edge_bvh_nodes, c.edge_bvh_rigid_owner, c.edge_root, c.edge_boxes[e], owner, edge_hits[e]);
         }
     }
-    materialize_solver_pairs(c, mesh, mode);
+    materialize_solver_pairs(c, mesh, mode, false, retain_solver_data);
 
     cache_ = std::move(c);
 }

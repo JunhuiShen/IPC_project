@@ -45,6 +45,7 @@ void compare(double a,double b,const char* label) {
     for(int k=0;k<3;++k) {
         result.local_position[k]=pin.local_position[k];result.initial_target[k]=pin.initial_target[k];
         result.rotation_center[k]=pin.rotation_center[k];
+        result.rotation_axis[k]=pin.rotation_axis[k];
     }
     result.angular_velocity_z=pin.angular_velocity_z;return result;
 }
@@ -80,6 +81,12 @@ std::vector<RigidPinOracleInput> fixtures() {
         auto p=out.back();p.dt=1.;p.kpin=3.;p.omega[0]=magnitude;p.omega[1]=p.omega[2]=0.;out.push_back(p);
     }
     auto p=out.back();p.pin.local_position[0]=p.pin.local_position[1]=p.pin.local_position[2]=0.;out.push_back(p);
+    for(const std::array<double,3> axis:{std::array<double,3>{1,0,0},{0,1,0},{1,2,-3},{1e200,0,0},{1e-200,0,0},{0,0,-2}}) {
+        auto p=out.front();p.dt=.031;p.kpin=3;p.time=.17;p.pin.angular_velocity_z=.7;
+        p.with_orientation_hessian=1;
+        for(int k=0;k<3;++k)p.pin.rotation_axis[k]=axis[k];
+        out.push_back(p);
+    }
     return out;
 }
 void oracle_test() {
