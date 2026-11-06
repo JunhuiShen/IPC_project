@@ -129,10 +129,13 @@ struct IPCArgs3D : ArgParser {
     double      osc_amplitude   = 0.02;  // driven-edge sinusoid amplitude (m)
     double      osc_frequency   = 0.50;  // driven-edge frequency (Hz)
 
-    // Example 13: wall clearances and optional coherent chain launch.
+    // Example 13: optional wall, wall clearances, and coherent chain launch.
+    bool        wrecking_wall = true;
     double      wrecking_wall_gap = 0.05; // unit-cube surface separation (m)
     double      wrecking_wall_ground_clearance = 0.05; // lowest cube clearance (m)
     double      wrecking_ball_initial_speed = 0.0; // initial ball COM tangential speed (m/s)
+    double      wrecking_chain_density = 7680.0; // shared by all chain links and the ball (kg/m^3)
+    double      wrecking_cube_density = 1000.0; // wall cubes (kg/m^3)
 
     // examples 14/15: vertically separated cloth sheets falling onto a long cylinder
     int         drop_stack_count = 50;
@@ -296,9 +299,12 @@ struct IPCArgs3D : ArgParser {
         add_double("osc_amplitude", osc_amplitude, 0.02,   "Signed vertical sinusoid amplitude (m) of the driven edges in example 12");
         add_double("osc_frequency", osc_frequency, 0.50,   "Sinusoid frequency (Hz) of the driven edges in example 12");
 
+        add_bool  ("wrecking_wall", wrecking_wall, true, "Include the wall cubes in example 13");
         add_double("wrecking_wall_gap", wrecking_wall_gap, 0.05, "Example 13 surface gap between unit wall cubes (m; positive)");
         add_double("wrecking_wall_ground_clearance", wrecking_wall_ground_clearance, 0.05, "Example 13 initial clearance below the wall (m; nonnegative)");
         add_double("wrecking_ball_initial_speed", wrecking_ball_initial_speed, 0.0, "Example 13 initial ball COM speed toward the wall (m/s); coherently launches the free chain about its fixed anchor");
+        add_double("wrecking_chain_density", wrecking_chain_density, 7680.0, "Example 13 shared density of all chain links including the fixed anchor and the ball (kg/m^3; positive)");
+        add_double("wrecking_cube_density", wrecking_cube_density, 1000.0, "Example 13 wall cube density (kg/m^3; positive)");
 
         add_int   ("drop_stack_count", drop_stack_count, 50,   "Number of falling cloth sheets in examples 14 and 15");
         add_int   ("drop_cloth_nx",    drop_cloth_nx,    69,   "Grid subdivisions along x per sheet in examples 14 and 15 (vertices = subdivisions + 1)");
@@ -365,8 +371,9 @@ struct IPCArgs3D : ArgParser {
             preset("--fps", fps, 30.0);
             preset("--num_frames", num_frames, 300);
             preset("--substeps", substeps, 18);
-            preset("--max_substep_iters", max_substep_iters, 170);
+            preset("--max_substep_iters", max_substep_iters, 213);
             preset("--fixed_iters", fixed_iters, true);
+            preset("--damping", damping, 0.8);
             preset("--use_parallel", use_parallel, true);
             preset("--use_basic_experimental", use_basic_experimental, true);
             preset("--use_simd", use_simd, true);
@@ -516,9 +523,9 @@ struct IPCArgs3D : ArgParser {
             const auto preset = [&](const char* flag, auto& field, auto value) {
                 if (!supplied(flag)) field = value;
             };
-            // Visually settled 120-frame arch at 30 FPS, with original release
+            // Visually settled 240-frame arch at 30 FPS, with original release
             // gaps and the common density. Explicit CLI settings take precedence.
-            preset("--num_frames", num_frames, 120);
+            preset("--num_frames", num_frames, 240);
             preset("--substeps", substeps, 1);
             preset("--max_substep_iters", max_substep_iters, 10);
             preset("--fixed_iters", fixed_iters, true);

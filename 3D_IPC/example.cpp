@@ -2029,6 +2029,15 @@ void build_wrecking_ball_example(
             "nonnegative finite wrecking_wall_ground_clearance and "
             "wrecking_ball_initial_speed");
     }
+    if (!std::isfinite(args.wrecking_chain_density)
+        || args.wrecking_chain_density <= 0.0
+        || !std::isfinite(args.wrecking_cube_density)
+        || args.wrecking_cube_density <= 0.0) {
+        throw std::invalid_argument(
+            "example 13 requires positive finite wrecking_chain_density "
+            "(shared by chain and ball) and "
+            "wrecking_cube_density");
+    }
     clear_model(ref_mesh, state, X, pins);
     static_x.clear();
     static_tris.clear();
@@ -2047,11 +2056,9 @@ void build_wrecking_ball_example(
     params.use_ogc = false;
     params.use_ogc_solver = false;
 
-    // Use the material densities from rigid-ipc's final paper fixture.
+    // Defaults use the material densities from rigid-ipc's final paper fixture.
     constexpr int chain_body_count = 14;
     constexpr int ordinary_link_count = chain_body_count - 1;
-    constexpr double link_density = 7680.0;
-    constexpr double cube_density = 1000.0;
     constexpr double link_height = 1.5;
     constexpr double padded_link_thickness = 0.3;
     constexpr double link_center_spacing =
@@ -2117,7 +2124,8 @@ void build_wrecking_ball_example(
             is_ball ? ball_filename : link_filename,
             state, ref_mesh, importer_center,
             is_ball ? ball_target_max_extent : link_target_max_extent,
-            link_density, Vec3::Zero(), orientation, Vec3::Zero(),
+            args.wrecking_chain_density,
+            Vec3::Zero(), orientation, Vec3::Zero(),
             link == 0
                 ? RigidBodyUpdateMode::None
                 : RigidBodyUpdateMode::TranslationAndOrientation);
@@ -2169,21 +2177,24 @@ void build_wrecking_ball_example(
             + 0.5 - 0.5 * static_cast<double>(wall_width),
         ground_y + 0.5 * cube_edge + cube_ground_clearance,
         0.5 - 0.5 * static_cast<double>(wall_depth));
-    for (int width = 0; width < wall_width; ++width) {
-        for (int height = 0; height < wall_height; ++height) {
-            for (int depth = 0; depth < wall_depth; ++depth) {
-                const Vec3 center = first_cube_center + cube_spacing * Vec3(
-                    static_cast<double>(width),
-                    static_cast<double>(height),
-                    static_cast<double>(depth));
-                const std::size_t triangle_begin =
-                    ref_mesh.tris.size() / 3;
-                const int rigid_body = append_rigid_cube(
-                    center, cube_edge, cube_density, Vec3::Zero(),
-                    ref_mesh, state);
-                use_closed_volume_rigid_mass_properties(
-                    rigid_body, triangle_begin,
-                    ref_mesh.tris.size() / 3, ref_mesh, state);
+    if (args.wrecking_wall) {
+        for (int width = 0; width < wall_width; ++width) {
+            for (int height = 0; height < wall_height; ++height) {
+                for (int depth = 0; depth < wall_depth; ++depth) {
+                    const Vec3 center = first_cube_center + cube_spacing * Vec3(
+                        static_cast<double>(width),
+                        static_cast<double>(height),
+                        static_cast<double>(depth));
+                    const std::size_t triangle_begin =
+                        ref_mesh.tris.size() / 3;
+                    const int rigid_body = append_rigid_cube(
+                        center, cube_edge, args.wrecking_cube_density,
+                        Vec3::Zero(),
+                        ref_mesh, state);
+                    use_closed_volume_rigid_mass_properties(
+                        rigid_body, triangle_begin,
+                        ref_mesh.tris.size() / 3, ref_mesh, state);
+                }
             }
         }
     }

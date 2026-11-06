@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <gtest/gtest.h>
 
@@ -3481,4 +3482,122 @@ TEST(CCDIntegration, ExperimentalExactBoundAdvancesClothThroughTheSolver) {
         total_vertical_displacement += state.deformed_positions[vertex].y() - initial[vertex].y();
     }
     EXPECT_LT(total_vertical_displacement, 0.0);
+}
+
+// One actual query, self-contained for ccd_test.cpp; no TMP includes.
+// Requires the normal ccd.h, <array>, <cmath>, <limits>, gtest headers.
+// Quaternion literals are the ACTUAL callee arguments exported after the
+// production caller repeated normalization; do not normalize them a third time.
+TEST(CCDTest, RotatingSegmentsActualFrame245AcceptedStepPrecedesContact) {
+    const std::array<Vec3,4> points = {{
+        Vec3(0x1.419226b948f29p+3, 0x1.1f1e78fb3f4d7p+4, -0x1.fa077b31bbc00p-4),
+        Vec3(0x1.41f5a7a328e14p+3, 0x1.1f788280b7aa6p+4, -0x1.b63b6c7b9dc76p-3),
+        Vec3(0x1.3f1eec1e1cfb7p+3, 0x1.1f769596b28cep+4, -0x1.6e6609bb69eb7p-4),
+        Vec3(0x1.41bcc79805a87p+3, 0x1.1f1dac9fc34a5p+4, -0x1.0a72dcb80e2ffp-3),
+    }};
+    const Vec3 center(0x1.49f110c7198d8p+3, 0x1.26cb954a6113bp+4, -0x1.f47b2a00f3064p-5);
+    const Vec4 current(0x1.6399e14040a32p-1, 0x1.b4b58c7f90ebfp-3, 0x1.58e581de887ffp-1, -0x1.15a9f306c6677p-3);
+    const Vec4 proposed(0x1.62b3f88b5e0b4p-1, 0x1.b55edec4a4a14p-3, 0x1.59d3965cb2d80p-1, -0x1.147de6b9f27d7p-3);
+    double toi = std::numeric_limits<double>::quiet_NaN();
+    ASSERT_TRUE(segment_segment_rb_rotation_ccd(points[0], points[1], center,
+        proposed, current, points[2], points[3], toi));
+    ASSERT_TRUE(std::isfinite(toi));
+    ASSERT_GT(toi, 0.0);
+    ASSERT_LE(toi, 1.0);
+    // The85-digit finite-contact witness comes from these exact binary64 inputs.
+    const double first_contact = 2.505511442023970287069885789088298082524785816353792442326697412476885054634755448391E-9;
+    EXPECT_LT(0.9 * toi, std::nextafter(first_contact, 0.0));
+}
+
+// Family-coverage regressions only. No general near-flat conditioning claim.
+namespace family_coverage_regression {
+static Vec3 point(double radius,double height,double angle) {
+    return Vec3(radius*std::cos(angle),radius*std::sin(angle),height);
+}
+static Vec3 reflection_point(double t,double angle) {
+    return Vec3(std::cos(angle)+t*std::sin(angle),
+                std::sin(angle)-t*std::cos(angle),t);
+}
+static void check(const Vec3&a,const Vec3&b,const Vec3&c,const Vec3&d,
+    bool expected_hit,double expected_first,double angle=.04) {
+    const Vec4 current(1,0,0,0),target(std::cos(angle/2),0,0,std::sin(angle/2));
+    double time=-1;
+    const bool hit=segment_segment_rb_rotation_ccd(a,b,Vec3::Zero(),target,current,c,d,time);
+    ASSERT_EQ(hit,expected_hit);
+    if(!hit)return;
+    ASSERT_TRUE(std::isfinite(time));EXPECT_GE(time,0);EXPECT_LE(time,1);
+    if(expected_first==0)EXPECT_LE(time,1e-12);
+    else {EXPECT_GT(time,0);EXPECT_LE(time,expected_first+2e-9);}
+}
+} // namespace family_coverage_regression
+
+TEST(SegmentSegmentRBRotationCCD, FamilyClipsBothOutsideStationaryEndpoints) {
+    using namespace family_coverage_regression;
+    // The cone r=z overlaps only for stationary u in[.25,.75].
+    check(Vec3(1,0,1),Vec3(2,0,2),point(.5,.5,.02),point(2.5,2.5,.02),true,.5);
+}
+TEST(SegmentSegmentRBRotationCCD, FamilyFiniteIntervalEndpointOrderInvariant) {
+    using namespace family_coverage_regression;
+    for(bool reverse_moving:{false,true})for(bool reverse_stationary:{false,true}) {
+        SCOPED_TRACE(::testing::Message()<<reverse_moving<<','<<reverse_stationary);
+        Vec3 a(1,0,1),b(2,0,2),c=point(.5,.5,.02),d=point(2.5,2.5,.02);
+        if(reverse_moving)std::swap(a,b);if(reverse_stationary)std::swap(c,d);
+        check(a,b,c,d,true,.5);
+    }
+}
+TEST(SegmentSegmentRBRotationCCD, FamilyReflectionUsesEarlierFiniteBoundary) {
+    using namespace family_coverage_regression;
+    // Required angle is pi/2+.02-2atan(t), minimized at moving t=1.
+    const double phase=std::acos(-1.)/2+.02;
+    check(Vec3(1,0,0),Vec3(1,1,1),reflection_point(-.5,phase),reflection_point(1.5,phase),true,.5);
+}
+TEST(SegmentSegmentRBRotationCCD, FamilyReflectionFindsInteriorInitialContact) {
+    using namespace family_coverage_regression;
+    const double phase=2*std::atan(.5);
+    check(Vec3(1,0,0),Vec3(1,1,1),reflection_point(-.5,phase),reflection_point(1.5,phase),true,0);
+}
+TEST(SegmentSegmentRBRotationCCD, FamilyRejectsGenuinelyNonzeroTinyRadialConstant) {
+    using namespace family_coverage_regression;
+    // C=4.4e-11 is below the old absolute threshold, but a2um radius gap
+    // remains throughout rotation. u=0 is axially valid, so it cannot hide it.
+    check(Vec3(1e-5,0,0),Vec3(1e-5,0,1),point(1.2e-5,0,.02),point(1.2e-5,1,.02),false,0);
+}
+TEST(SegmentSegmentRBRotationCCD, FamilyDoesNotTurnRadialGapIntoInitialContact) {
+    using namespace family_coverage_regression;
+    check(Vec3(1e-5,0,0),Vec3(1e-5,0,1),point(1.2e-5,0,0),point(1.2e-5,1,0),false,0);
+}
+TEST(SegmentSegmentRBRotationCCD, FamilyRespectsAngularArcAndDirection) {
+    using namespace family_coverage_regression;
+    const Vec3 a(1,0,1),b(2,0,2);
+    check(a,b,point(.5,.5,.08),point(2.5,2.5,.08),false,0);
+    check(a,b,point(.5,.5,-.02),point(2.5,2.5,-.02),true,.5,-.04);
+    check(a,b,point(.5,.5,.02),point(2.5,2.5,.02),false,0,-.04);
+}
+TEST(SegmentSegmentRBRotationCCD, FamilyRejectsDisjointFiniteAxialRanges) {
+    using namespace family_coverage_regression;
+    check(Vec3(1,0,1),Vec3(2,0,2),point(3,3,.02),point(4,4,.02),false,0);
+}
+
+
+// ONE permanent contract test for ccd_test.cpp; no TMP/helper include.
+// There is no exact mathematical intersection (the radii never match), but
+// the legacy conservative CCD contract may report a finite endpoint approach
+// within1e-10m. A false zero step at the initially100nm gap is forbidden.
+TEST(CCDTest, RotatingSegmentsNearAxisConservativeContactDoesNotStall) {
+    constexpr double y1=1e-7,y2=2e-7,theta=.04;
+    const Vec3 a(-1,y1,0),b(1,y1,1),c(-1,y2,0),d(1,y2,1);
+    const Vec4 initial(1,0,0,0),proposed(std::cos(theta/2),0,0,std::sin(theta/2));
+    double toi=-1;
+    const bool hit=segment_segment_rb_rotation_ccd(a,b,Vec3::Zero(),proposed,initial,c,d,toi);
+    if(!hit){SUCCEED();return;}
+    ASSERT_TRUE(std::isfinite(toi));
+    ASSERT_GT(toi,0.0);
+    ASSERT_LE(toi,1.0);
+    const double angle=theta*toi,cs=std::cos(angle),sn=std::sin(angle);
+    const Vec3 moved_a(cs*a.x()-sn*a.y(),sn*a.x()+cs*a.y(),a.z());
+    const Vec3 moved_b(cs*b.x()-sn*b.y(),sn*b.x()+cs*b.y(),b.z());
+    // Use actual FINITE endpoints, never infinite-line extrapolation.
+    const double finite_endpoint_gap=std::min({(moved_a-c).norm(),(moved_a-d).norm(),
+                                              (moved_b-c).norm(),(moved_b-d).norm()});
+    EXPECT_LE(finite_endpoint_gap,1e-10);
 }

@@ -33,7 +33,7 @@ further processing; it does not open a viewer.
 
 ### Build and run a small scene
 
-Most commands in this README use 64 OpenMP threads. From the repository root,
+All commands in this README use 64 OpenMP threads. From the repository root,
 configure the build directory before building:
 
 ```sh
@@ -214,6 +214,7 @@ and +y as the up direction.
 Run a small deformable example with DAT:
 
 ```sh
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 1 --twist_nx 9 --twist_ny 9 \
   --num_frames 1 --substeps 3 --max_substep_iters 20 --fixed_iters \
   --use_jacobi_dat --dat_gamma 0.9 --format geo --outdir results/jacobi_dat
@@ -244,6 +245,7 @@ Jacobi assembly.
 Run a small deformable example with this solver:
 
 ```sh
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 1 --twist_nx 9 --twist_ny 9 \
   --num_frames 1 --substeps 3 --max_substep_iters 20 --fixed_iters \
   --use_jacobi_level_based_ccd --colored_ccd_guess_iters 1 \
@@ -444,15 +446,26 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --colored_ccd_guess_iters 4 --colored_ccd_guess_fraction 1.0 \
   --outdir oscillating_cloth_layers_output --format geo
 
-# Example 13: a rigid wrecking ball swings into a wall of 560 cubes
+# Example 13: wrecking wall
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 13 \
+./build/3D_sim --example 13 --datadir example_obj --num_frames 45 --fps 30 \
+  --substeps 18 --max_substep_iters 160 --fixed_iters --damping 1 \
   --use_parallel true --use_basic_experimental true --use_simd true \
-  --num_frames 300 --fps 30 --substeps 18 --max_substep_iters 170 --fixed_iters \
-  --d_hat 0.001 --k_barrier 1e10 --k_sdf 1e8 --eps_sdf 0.002 \
+  --wrecking_chain_density 11000 --wrecking_cube_density 900 \
+  --d_hat 0.003 --k_barrier 6e9 --k_sdf 1e8 --eps_sdf 0.002 \
   --friction_coefficient 0 --exact_computation_fallback false --ccd_exact_step_bound false \
-  --node_box_min 0.001 --node_box_max 0.0075 \
-  --theta_box_min 0.002 --theta_box_max 0.03 --node_box_update_count 20 \
+  --node_box_min 0.004 --node_box_max 0.03 \
+  --theta_box_min 0.004 --theta_box_max 0.06 --node_box_update_count 20 \
+  --outdir wrecking_ball_tuned_output --format geo && \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 13 --datadir example_obj --restart_frame 45 --num_frames 300 --fps 30 \
+  --substeps 14 --max_substep_iters 280 --fixed_iters --damping 1 \
+  --use_parallel true --use_basic_experimental true --use_simd true \
+  --wrecking_chain_density 11000 --wrecking_cube_density 900 \
+  --d_hat 0.003 --k_barrier 6e9 --k_sdf 1e8 --eps_sdf 0.002 \
+  --friction_coefficient 0 --exact_computation_fallback false --ccd_exact_step_bound false \
+  --node_box_min 0.004 --node_box_max 0.025 \
+  --theta_box_min 0.004 --theta_box_max 0.04 --node_box_update_count 20 \
   --outdir wrecking_ball_tuned_output --format geo
 
 # Example 14: fifty free cloth sheets fall over the cylinder and spread onto the ground.
@@ -499,7 +512,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --outdir example15_200x141x141/frames --format geo
 
 # Example 16: rigid chain net and mixed rigid-object drop
-OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 16 \
   --use_basic_experimental true --use_simd true \
   --exact_computation_fallback false \
@@ -510,7 +523,7 @@ OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread 
   --outdir chain_net_rigid_objects_output --format geo
 
 # Example 17: 300 rigid objects falling into a rigid box
-OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
 ./build/3D_sim --example 17 --num_frames 200 --fps 30 \
   --substeps 20 --max_substep_iters 50 --fixed_iters \
   --rigid_density 1000 --d_hat 0.001 --k_barrier 1e9 \
@@ -544,7 +557,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
 
 # Example 20: frictional arch settling
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
-./build/3D_sim --example 20 --datadir example_obj --num_frames 120 \
+./build/3D_sim --example 20 --datadir example_obj --num_frames 240 \
   --substeps 1 --max_substep_iters 10 --fixed_iters \
   --friction_coefficient 0.5 --friction_velocity_epsilon 0.001 \
   --d_hat 0.05 --k_barrier 1e7 --k_sdf 1e10 \
@@ -553,6 +566,18 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --use_basic_experimental true --use_simd true \
   --exact_computation_fallback false \
   --outdir results/example20_arch_box_tuned/frames
+
+# Example 20: arch without friction
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
+./build/3D_sim --example 20 --datadir example_obj --num_frames 240 \
+  --substeps 1 --max_substep_iters 10 --fixed_iters \
+  --friction_coefficient 0 --friction_velocity_epsilon 0.001 \
+  --d_hat 0.05 --k_barrier 1e7 --k_sdf 1e10 \
+  --node_box_min 0.01 --node_box_max 0.2 \
+  --theta_box_min 0.001 --theta_box_max 0.05 --node_box_update_count 5 \
+  --use_basic_experimental true --use_simd true \
+  --exact_computation_fallback false \
+  --outdir results/example20_arch_no_friction/frames
 ```
 
 ## Build and test

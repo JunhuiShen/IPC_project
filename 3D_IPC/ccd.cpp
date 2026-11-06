@@ -2201,6 +2201,253 @@ bool ccd_detail::negligible_rigid_rotation(const Vec4& q_new, const Vec4& q_n) {
     return v_rel.norm() < rigid_rotation_epsilon;
 }
 
+namespace {
+struct CompensatedScalar { double high,low; };
+CompensatedScalar compensated_add(CompensatedScalar a,CompensatedScalar b) {
+    const double sum=a.high+b.high,back=sum-a.high;
+    const double error=(a.high-(sum-back))+(b.high-back)+a.low+b.low;
+    const double high=sum+error;return{high,error-(high-sum)};
+}
+CompensatedScalar compensated_product(double a,double b) {
+    const double high=a*b;return{high,std::fma(a,b,-high)};
+}
+CompensatedScalar compensated_multiply(CompensatedScalar a,double b) {
+    const double product=a.high*b,error=std::fma(a.high,b,-product)+a.low*b;
+    const double high=product+error;return{high,error-(high-product)};
+}
+double initial_coplanarity(const Vec3& a,const Vec3& b,const Vec3& c) {
+    CompensatedScalar value{0,0};
+    value=compensated_add(value,compensated_multiply(compensated_product(a.x(),b.y()),c.z()));
+    value=compensated_add(value,compensated_multiply(compensated_product(a.y(),b.z()),c.x()));
+    value=compensated_add(value,compensated_multiply(compensated_product(a.z(),b.x()),c.y()));
+    value=compensated_add(value,compensated_multiply(compensated_product(-a.x(),b.z()),c.y()));
+    value=compensated_add(value,compensated_multiply(compensated_product(-a.y(),b.x()),c.z()));
+    value=compensated_add(value,compensated_multiply(compensated_product(-a.z(),b.y()),c.x()));
+    return value.high+value.low;
+}
+// Only refine an already-found sub-time-resolution hit. Rotation coplanarity
+// is A*cos(theta)+B*sin(theta)+C=0. The half-angle quadratic uses the directly
+// compensated initial volume F0=A+C, avoiding cancellation in radius/angle
+// recovery. No sampling, iterative search or arithmetic-fallback flag is used.
+double refine_tiny_rotation_toi(const Vec3& x0,const Vec3& x1,const Vec3& center,
+    const Vec3& axis,double angle,const Vec3& x2,const Vec3& x3,double previous) {
+    const Vec3 p=x0-center,d=x1-x0,q=x2-center,e=x3-x2,r=x2-x0;
+    const Vec3 pd=p.cross(d),eq=e.cross(q);
+    const double A=(d-d.dot(axis)*axis).dot(eq)-e.dot(pd-pd.dot(axis)*axis);
+    const double B=axis.cross(d).dot(eq)-e.dot(axis.cross(pd));
+    const double F0=initial_coplanarity(d,e,r);
+    const double a=F0-2*A,b=2*B,c=F0;
+    const auto rotate=[&](const Vec3& v,double theta) -> Vec3 {
+        const Vec3 parallel=v.dot(axis)*axis,perp=v-parallel;
+        return parallel+std::cos(theta)*perp+std::sin(theta)*axis.cross(perp);
+    };
+    double best=previous;
+    const auto consider=[&](double half_tangent) {
+        if(!std::isfinite(half_tangent))return;
+        double theta=2*std::atan(half_tangent);
+        if(angle>0&&theta<0)theta+=2*M_PI;
+        if(angle<0&&theta>0)theta-=2*M_PI;
+        const double fraction=theta/angle;
+        if(fraction<0||fraction>best)return;
+        const Vec3 moving_d=rotate(d,theta),separation=rotate(p,theta)-q;
+        const double aa=moving_d.squaredNorm(),bb=moving_d.dot(e),cc=e.squaredNorm();
+        const double denominator=difference_of_products(aa,cc,bb,bb);
+        if(denominator<=kRoundoff*aa*cc)return; // retain old handling for parallel lines
+        const double dd=moving_d.dot(separation),ee=e.dot(separation);
+        const double moving_t=(bb*ee-cc*dd)/denominator;
+        const double stationary_u=(aa*ee-bb*dd)/denominator;
+        if(moving_t < -1e-10 || moving_t > 1+1e-10
+            || stationary_u < -1e-10 || stationary_u > 1+1e-10)return;
+        const double scale=std::max({x0.cwiseAbs().maxCoeff(),x1.cwiseAbs().maxCoeff(),
+            x2.cwiseAbs().maxCoeff(),x3.cwiseAbs().maxCoeff(),center.cwiseAbs().maxCoeff()});
+        const double distance=(separation+moving_t*moving_d-stationary_u*e).stableNorm();
+        if(distance>128*std::numeric_limits<double>::epsilon()*scale)return;
+        best=fraction;
+    };
+    if(a==0) { if(b!=0)consider(-c/b); }
+    else {
+        const double disc=difference_of_products(b,b,4*a,c);
+        if(disc>=0) {
+            const double root=-.5*(b+std::copysign(std::sqrt(disc),b));
+            if(root==0)consider(-b/(2*a));
+            else {consider(root/a);consider(c/root);}
+        }
+    }
+    return best;
+}
+} // namespace
+
+// Closed-form repair of the legacy A~B~C~0 rotational SS coverage case.
+// long double is a scalar type here, not an assumed precision guarantee.
+namespace ccd_rotation_family_detail {
+using Scalar=long double;
+using Vector=Eigen::Matrix<Scalar,3,1>;
+template<class Emit>
+void roots(Scalar a, Scalar b, Scalar c, const Emit& emit) {
+    if (a == 0) {
+        if (b != 0) emit(-c / b);
+        return;
+    }
+    const Scalar bb = b * b, ac4 = 4 * a * c;
+    Scalar disc = std::fma(-4 * a, c, bb);
+    const Scalar error = 32 * std::numeric_limits<Scalar>::epsilon()
+        * (std::abs(bb) + std::abs(ac4));
+    if (disc < -error) return;
+    disc = std::max(Scalar(0), disc);
+    const Scalar q = -Scalar(.5) * (b + std::copysign(std::sqrt(disc), b));
+    if (q == 0) emit(-b / (2 * a));
+    else {
+        emit(q / a);
+        emit(c / q);
+    }
+}
+
+bool earliest_range(const Vec3& moving0, const Vec3& moving_delta,
+    const Vec3& stationary0, const Vec3& stationary_delta,
+    const Vec3& axis, double h0, double h1, double h2, double en,
+    double coordinate_scale, double dtheta, Scalar lo, Scalar hi, double& s, int endpoint=-1) {
+    const Scalar dh = Scalar(h1) - Scalar(h0);
+    // Reparameterize the finite axial-overlap interval to w in [0,1], before
+    // rescaling. This avoids extrapolated vectors/large height ratios and
+    // makes the continuous-versus-nonzero test independent of length units.
+    const Vector m0 = moving0.cast<Scalar>();
+    const Vector md = moving_delta.cast<Scalar>();
+    const Vector q0 = stationary0.cast<Scalar>();
+    const Vector qd = stationary_delta.cast<Scalar>();
+    const auto moving_at = [&](Scalar u) -> Vector {
+        if(endpoint==0)return m0;
+        if(endpoint==1)return m0+md;
+        const Scalar t = std::clamp((Scalar(h2) + u * Scalar(en) - Scalar(h0)) / dh, Scalar(0), Scalar(1));
+        return m0 + t * md;
+    };
+    Vector p = moving_at(lo), v = moving_at(hi) - p;
+    Vector q = q0 + lo * qd, e = (hi - lo) * qd;
+    const Scalar scale = std::max({p.norm(), (p + v).norm(), q.norm(), (q + e).norm()});
+    if (scale == 0) { s = 0; return true; } // overlapping axis points already touch
+    p /= scale; v /= scale; q /= scale; e /= scale;
+    const Vector n = axis.cast<Scalar>().normalized();
+    // Projection starts with represented world positions minus the COM.
+    // Their absolute subtraction error must scale with world coordinates,
+    // not only with the much smaller projected radius (translated fixtures).
+    const Scalar roundoff = std::numeric_limits<double>::epsilon()
+        * (128 + 64 * Scalar(coordinate_scale) / scale);
+    const Scalar fa = e.squaredNorm() - v.squaredNorm();
+    const Scalar fb = 2 * (q.dot(e) - p.dot(v));
+    const Scalar fc = q.squaredNorm() - p.squaredNorm();
+    const Scalar ea = roundoff * (e.squaredNorm() + v.squaredNorm());
+    const Scalar eb = 2 * roundoff * (q.norm() * e.norm() + p.norm() * v.norm());
+    const Scalar ec = roundoff * (q.squaredNorm() + p.squaredNorm());
+    const bool family = std::abs(fa) <= ea && std::abs(fb) <= eb && std::abs(fc) <= ec;
+    const Scalar arc = std::abs(Scalar(dtheta));
+    const Scalar direction = dtheta < 0 ? -1 : 1;
+    const Scalar two_pi = 2 * std::acos(Scalar(-1));
+    Scalar best = std::numeric_limits<Scalar>::infinity();
+
+    const auto consider = [&](Scalar w, bool zero_event = false) {
+        const Scalar parameter_error = 64 * std::numeric_limits<Scalar>::epsilon();
+        if (!std::isfinite(w) || w < -parameter_error || w > 1 + parameter_error) return;
+        w = std::clamp(w, Scalar(0), Scalar(1));
+        const Vector a = p + w * v, b = q + w * e;
+        const Scalar ar2 = a.squaredNorm(), br2 = b.squaredNorm();
+        // Global near-family classification does not certify this point.
+        // Include affine cancellation error before comparing actual radii;
+        // a local-radius-only bound is too small near the rotation axis.
+        const Scalar a_error=roundoff*(p.norm()+std::abs(w)*v.norm());
+        const Scalar b_error=roundoff*(q.norm()+std::abs(w)*e.norm());
+        const Scalar radial_error=roundoff*(ar2+br2)
+            +2*(std::sqrt(ar2)*a_error+std::sqrt(br2)*b_error)
+            +a_error*a_error+b_error*b_error;
+        if(std::abs(br2-ar2)>radial_error)return;
+        if (ar2 == 0 && br2 == 0) { best = 0; return; }
+        if (ar2 == 0 || br2 == 0) return;
+        const Scalar x = a.dot(b), y = direction * n.dot(a.cross(b));
+        Scalar angle;
+        if (zero_event && x > 0 && std::abs(y) <= roundoff * std::sqrt(ar2 * br2)) angle = 0;
+        else {
+            angle = std::atan2(y, x);
+            if (angle < 0) angle += two_pi;
+        }
+        const Scalar fraction = angle / arc;
+        if (fraction <= 1 + Scalar(1e-10)) best = std::min(best, std::clamp(fraction, Scalar(0), Scalar(1)));
+    };
+    consider(0); consider(1);
+    if (!family) {
+        // A tiny but nonzero radial polynomial has only its actual roots.
+        // In particular, constant unequal radii are not a swept-surface family.
+        roots(fa, fb, fc, [&](Scalar w) { consider(w); });
+    } else {
+        // For a continuous family, angle extrema satisfy
+        // cross(q,e)|p+wv|^2 - cross(p,v)|q+we|^2 = 0.
+        // Endpoints plus these roots cover both rotation and reflection maps.
+        const Scalar kp = n.dot(p.cross(v)), kq = n.dot(q.cross(e));
+        roots(kq * v.squaredNorm() - kp * e.squaredNorm(),
+              2 * (kq * p.dot(v) - kp * q.dot(e)),
+              kq * p.squaredNorm() - kp * q.squaredNorm(),
+              [&](Scalar w) { consider(w); });
+        // Wrapped angle zero is an interior minimum even when neither axial
+        // boundary is in the requested arc. It includes initial intersections.
+        roots(n.dot(v.cross(e)), n.dot(p.cross(e) + v.cross(q)), n.dot(p.cross(q)),
+              [&](Scalar w) { consider(w, true); });
+        // Radial-axis events split angular branches; both curves are handled.
+        roots(v.squaredNorm(), 2 * p.dot(v), p.squaredNorm(), [&](Scalar w) { consider(w, true); });
+        roots(e.squaredNorm(), 2 * q.dot(e), q.squaredNorm(), [&](Scalar w) { consider(w, true); });
+    }
+    if (!std::isfinite(best)) return false;
+    s = static_cast<double>(best);
+    return true;
+}
+// Only the legacy near-zero-radius-polynomial branch enters this helper.
+// Keep the nominal finite interval. Representational endpoint seams are tested
+// separately using the actual finite endpoint, never an extrapolated edge.
+bool earliest(const Vec3& moving0, const Vec3& moving_delta,
+    const Vec3& stationary0, const Vec3& stationary_delta,
+    const Vec3& axis, double h0, double h1, double h2, double en,
+    double coordinate_scale, double dtheta, double& s) {
+    Scalar lo=0,hi=1;
+    const Scalar lower=std::min(Scalar(h0),Scalar(h1));
+    const Scalar upper=std::max(Scalar(h0),Scalar(h1));
+    bool nominal=true,found=false;
+    double best=std::numeric_limits<double>::infinity();
+    const auto solve=[&](Scalar begin,Scalar end,int endpoint=-1) {
+        double candidate=0;
+        if(earliest_range(moving0,moving_delta,stationary0,stationary_delta,
+                axis,h0,h1,h2,en,coordinate_scale,dtheta,begin,end,candidate,endpoint)) {
+            found=true;best=std::min(best,candidate);
+        }
+    };
+    if(en==0)nominal=Scalar(h2)>=lower&&Scalar(h2)<=upper;
+    else {
+        Scalar enter=(lower-Scalar(h2))/Scalar(en);
+        Scalar exit=(upper-Scalar(h2))/Scalar(en);
+        if(enter>exit)std::swap(enter,exit);
+        lo=std::max(lo,enter);hi=std::min(hi,exit);
+        nominal=lo<=hi;
+    }
+    if(nominal)solve(lo,hi);
+    // This bound is in physical height units, from represented coordinate
+    // subtraction/projection roundoff. It does not extend the moving edge.
+    const Scalar height_error=64*std::numeric_limits<double>::epsilon()
+        *(Scalar(coordinate_scale)+std::max({std::abs(Scalar(h0)),std::abs(Scalar(h1)),
+            std::abs(Scalar(h2)),std::abs(Scalar(h2)+Scalar(en))}));
+    for(int endpoint=0;endpoint<2;++endpoint) {
+        const Scalar height=endpoint==0?Scalar(h0):Scalar(h1);
+        Scalar begin=0,end=1;
+        if(en==0) {
+            if(std::abs(Scalar(h2)-height)>height_error)continue;
+        } else {
+            begin=(height-height_error-Scalar(h2))/Scalar(en);
+            end=(height+height_error-Scalar(h2))/Scalar(en);
+            if(begin>end)std::swap(begin,end);
+            begin=std::max(begin,Scalar(0));end=std::min(end,Scalar(1));
+            if(begin>end)continue;
+        }
+        solve(begin,end,endpoint);
+    }
+    if(found)s=best;
+    return found;
+}
+} // namespace ccd_rotation_family_detail
+
 bool segment_segment_rb_rotation_ccd(
     const Vec3& x0, const Vec3& x1, // moving segment world space posiitons
     const Vec3& x_com, // moving segment rigid body center of mass
@@ -2294,6 +2541,17 @@ bool segment_segment_rb_rotation_ccd(
         double B = 2.0 * (q2_perp.dot(e_perp) - beta * x0_perp_p.dot(dx_perp));
         double C = q2_perp.squaredNorm()  - x0_perp_p.squaredNorm();
 
+        if (std::abs(A) < eps && std::abs(B) < eps && std::abs(C) < eps) {
+            const double coordinate_scale = std::max({
+                x0.cwiseAbs().maxCoeff(), x1.cwiseAbs().maxCoeff(),
+                x2.cwiseAbs().maxCoeff(), x3.cwiseAbs().maxCoeff(),
+                x_com.cwiseAbs().maxCoeff()});
+            return ccd_rotation_family_detail::earliest(
+                x0_perp, dx_perp, q2_perp, e_perp, n_hat,
+                h0, h1, h2, en, coordinate_scale, dtheta, s);
+        }
+
+
         double disc = B * B - 4.0 * A * C;
         if (disc >= 0.0) {
             double sqrt_disc = std::sqrt(std::max(0.0, disc));
@@ -2333,13 +2591,14 @@ bool segment_segment_rb_rotation_ccd(
                 if (moving_perp.norm() < eps) continue; // on axis, degenerate
 
                 // contact point on stationary segment (perpendicular part)
-                Vec3 p_star      = (1.0 - u) * x2 + u * x3;
-                Vec3 p_star_perp = (p_star - x_com) - ((p_star - x_com).dot(n_hat)) * n_hat;
+                const Vec3 p_star_perp = q2_perp + u * e_perp;
 
-                // recover signed angle: from moving_perp to p_star_perp
-                double theta_ref  = std::atan2(moving_perp.dot(e2), moving_perp.dot(e1));
-                double theta_star = std::atan2(p_star_perp.dot(e2), p_star_perp.dot(e1));
-                double dangle     = theta_star - theta_ref;
+                // Recover the oriented angle directly in the local frame.
+                // Tiny TOIs must not subtract two world-scale angles.
+                const double dangle_local = std::atan2(
+                    n_hat.dot(moving_perp.cross(p_star_perp)),
+                    moving_perp.dot(p_star_perp));
+                double dangle = dangle_local;
 
                 // wrap dangle consistent with sign of dtheta
                 while (dtheta > 0 && dangle < -eps) dangle += 2.0 * M_PI;
@@ -2430,6 +2689,8 @@ bool segment_segment_rb_rotation_ccd(
     }
 
     if (!found) return false;
+    if (best_s > 0 && best_s < kLinearTimePrecision && std::abs(h1-h0) > eps)
+        best_s = refine_tiny_rotation_toi(x0,x1,x_com,n_hat,dtheta,x2,x3,best_s);
     s = best_s;
     return true;
 }
