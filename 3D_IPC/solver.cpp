@@ -44,6 +44,7 @@ namespace {
 // thread instead of letting them escape an OpenMP worker and terminate.
 template <typename Function>
 void parallel_body_setup(int count, bool parallel, const Function& function) {
+    if (count == 0) return;
     if (!parallel) {
         for (int i = 0; i < count; ++i) function(i);
         return;
@@ -58,6 +59,47 @@ void parallel_body_setup(int count, bool parallel, const Function& function) {
         }
     }
     if (failure) std::rethrow_exception(failure);
+}
+
+// Reused per calling thread. Resolve the TLS object to a local reference before
+// capturing it in OpenMP work, so workers share the caller's scratch buffers.
+struct DATProposalWorkspace {
+    std::vector<Vec3> positions, centers, angular;
+    std::vector<Vec4> orientations;
+    std::vector<Vec3> color_positions, color_centers, color_angular;
+    std::vector<Vec3> proposed, next, dc, dw, color_dc, color_dw;
+    std::vector<int> local, cloth, compact_counts, compact_offsets;
+    std::vector<std::size_t> body_offsets;
+    std::vector<std::atomic<int>> claims;
+    std::vector<Mat33> predictors;
+    std::vector<unsigned char> solid, surface;
+    std::vector<IncidentTriangles> incident;
+};
+
+template<class Predicate>
+void collect_dat_nodes(int count, bool parallel, const Predicate& selected,
+    std::vector<int>& nodes, std::vector<int>& counts, std::vector<int>& offsets) {
+    constexpr int chunk_size = 256;
+    const int chunks = count / chunk_size + (count % chunk_size != 0);
+    counts.resize(chunks);
+    offsets.resize(chunks + 1);
+    parallel_body_setup(chunks, parallel, [&](int chunk) {
+        int total = 0;
+        const int begin = chunk * chunk_size, end = begin + std::min(chunk_size, count - begin);
+        for (int node = begin; node < end; ++node)
+            total += selected(node);
+        counts[chunk] = total;
+    });
+    offsets[0] = 0;
+    for (int chunk = 0; chunk < chunks; ++chunk)
+        offsets[chunk + 1] = offsets[chunk] + counts[chunk];
+    nodes.resize(offsets.back());
+    parallel_body_setup(chunks, parallel, [&](int chunk) {
+        int output = offsets[chunk];
+        const int begin = chunk * chunk_size, end = begin + std::min(chunk_size, count - begin);
+        for (int node = begin; node < end; ++node)
+            if (selected(node)) nodes[output++] = node;
+    });
 }
 
 // Every dispatch joins proxy writes before the next dependent body phase.
@@ -1308,23 +1350,28 @@ Vec3 gs_solid_vertex_delta_live_barrier(
 // -----------------------------------------------------------------------------
 // Deformable solver entry points
 // -----------------------------------------------------------------------------
-SolverResult global_jacobi_solver_dat(
+static SolverResult solve_deformable_dat(
     const RefMesh& ref_mesh, const VertexTriangleMap& adj,
     const std::vector<Pin>& pins, const SimParams& params,
     std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
     const std::vector<Vec3>& v, BroadPhase& broad_phase,
-    const std::string& outdir, const std::vector<Vec3>* previous_positions) {
-    params.validate_jacobi_dat_parameters(true);
+    const std::string& outdir, const std::vector<Vec3>* previous_positions,
+    bool colored_sweep) {
+    params.validate_dat_parameters(true);
     validate_solver_friction_parameters(params, "global_jacobi_solver_dat");
     if (!ref_mesh.rb_nodes.empty() || !ref_mesh.total_mass.empty()
-        || !ref_mesh.rb_update_modes.empty() || !ref_mesh.ref_positions.empty()
-        || std::any_of(ref_mesh.node_to_rb.begin(), ref_mesh.node_to_rb.end(),
-            [](int owner) { return owner >= 0; }))
+        || !ref_mesh.rb_update_modes.empty() || !ref_mesh.ref_positions.empty())
         throw std::invalid_argument("global_jacobi_solver_dat supports cloth and solid, not rigid bodies");
     const std::size_t count = xnew.size();
     if (count > static_cast<std::size_t>(std::numeric_limits<int>::max())
         || xhat.size() != count || v.size() != count || ref_mesh.mass.size() != count
-        || (ref_mesh.num_positions != 0 && ref_mesh.num_positions != count))
+        || (ref_mesh.num_positions != 0 && ref_mesh.num_positions != count)
+        || ref_mesh.node_to_rb.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())
+        || ref_mesh.tris.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())
+        || ref_mesh.tets.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())
+        || ref_mesh.tet_nodes.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())
+        || ref_mesh.surface_nodes.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())
+        || pins.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
         throw std::invalid_argument("global_jacobi_solver_dat: inconsistent state sizes");
     if (params.max_global_iters < 0 || !std::isfinite(params.damping) || params.damping < 0
         || !std::isfinite(params.d_hat) || params.d_hat < 0
@@ -1339,49 +1386,84 @@ SolverResult global_jacobi_solver_dat(
             params.k_sdf, params.eps_sdf})
         if (!std::isfinite(value))
             throw std::invalid_argument("global_jacobi_solver_dat: nonfinite energy parameter");
-    for (std::size_t node = 0; node < count; ++node) {
+    static thread_local DATProposalWorkspace cached_proposals;
+    auto& proposal_workspace = cached_proposals;
+    auto& solid_mask = proposal_workspace.solid;
+    auto& surface_mask = proposal_workspace.surface;
+    auto& incident = proposal_workspace.incident;
+    solid_mask.resize(count); surface_mask.resize(count); incident.resize(count);
+    if (proposal_workspace.claims.size() != count)
+        proposal_workspace.claims = std::vector<std::atomic<int>>(count);
+    auto& claims = proposal_workspace.claims;
+    parallel_body_setup(static_cast<int>(ref_mesh.node_to_rb.size()), params.use_parallel,
+        [&](int node) {
+            if (ref_mesh.node_to_rb[node] >= 0)
+                throw std::invalid_argument("global_jacobi_solver_dat supports cloth and solid, not rigid bodies");
+        });
+    parallel_body_setup(static_cast<int>(count), params.use_parallel, [&](int node) {
         if (!xnew[node].allFinite() || !xhat[node].allFinite() || !v[node].allFinite()
             || !std::isfinite(ref_mesh.mass[node]) || ref_mesh.mass[node] < 0)
             throw std::invalid_argument("global_jacobi_solver_dat: nonfinite state or invalid mass");
-    }
+        claims[node].store(0, std::memory_order_relaxed);
+        incident[node].clear();
+    });
     const auto valid_node = [count](int node) {
         return node >= 0 && static_cast<std::size_t>(node) < count;
     };
     if (ref_mesh.tris.size() % 3 != 0 || ref_mesh.tets.size() % 4 != 0)
         throw std::invalid_argument("global_jacobi_solver_dat: incomplete element connectivity");
-    for (int node : ref_mesh.tris) if (!valid_node(node))
-        throw std::invalid_argument("global_jacobi_solver_dat: invalid triangle node");
-    for (int node : ref_mesh.tets) if (!valid_node(node))
-        throw std::invalid_argument("global_jacobi_solver_dat: invalid tet node");
+    parallel_body_setup(static_cast<int>(ref_mesh.tris.size()), params.use_parallel,
+        [&](int index) {
+            if (!valid_node(ref_mesh.tris[index]))
+                throw std::invalid_argument("global_jacobi_solver_dat: invalid triangle node");
+        });
+    parallel_body_setup(static_cast<int>(ref_mesh.tets.size()), params.use_parallel,
+        [&](int index) {
+            const int node = ref_mesh.tets[index];
+            if (!valid_node(node))
+                throw std::invalid_argument("global_jacobi_solver_dat: invalid tet node");
+            claims[node].fetch_or(1, std::memory_order_relaxed);
+        });
     for (const auto& [node, row] : adj) if (!valid_node(node))
         throw std::invalid_argument("global_jacobi_solver_dat: invalid adjacency node");
-    for (const auto& pin : pins)
+    parallel_body_setup(static_cast<int>(pins.size()), params.use_parallel, [&](int index) {
+        const auto& pin = pins[index];
         if (!valid_node(pin.vertex_index) || !pin.target_position.allFinite())
             throw std::invalid_argument("global_jacobi_solver_dat: invalid pin node or target");
-
-    std::vector<unsigned char> solid_mask(count, 0), surface_mask(count, 0);
-    for (int node : ref_mesh.tets) solid_mask[node] = 1;
-    std::vector<unsigned char> classified_solid(count, 0);
-    for (int node : ref_mesh.tet_nodes) {
-        if (!valid_node(node))
-            throw std::invalid_argument("global_jacobi_solver_dat: invalid solid classification");
-        classified_solid[node] = 1;
-    }
-    if (classified_solid != solid_mask)
-        throw std::invalid_argument("global_jacobi_solver_dat: tet_nodes must match tetrahedral connectivity");
-    for (int node : ref_mesh.surface_nodes) {
-        if (!valid_node(node))
-            throw std::invalid_argument("global_jacobi_solver_dat: invalid surface classification");
-        surface_mask[node] = 1;
-    }
-    for (int node : ref_mesh.tris) if (solid_mask[node] && !surface_mask[node])
-        throw std::invalid_argument("global_jacobi_solver_dat: solid boundary node missing from surface_nodes");
-    std::vector<int> cloth_nodes;
-    for (int node = 0; node < static_cast<int>(count); ++node)
-        if (!solid_mask[node]) cloth_nodes.push_back(node);
-    std::vector<IncidentTriangles> incident(count);
-    for (const auto& [node, row] : adj)
-        if (!solid_mask[node]) incident[node] = row;
+    });
+    parallel_body_setup(static_cast<int>(ref_mesh.tet_nodes.size()), params.use_parallel,
+        [&](int index) {
+            const int node = ref_mesh.tet_nodes[index];
+            if (!valid_node(node))
+                throw std::invalid_argument("global_jacobi_solver_dat: invalid solid classification");
+            claims[node].fetch_or(2, std::memory_order_relaxed);
+        });
+    parallel_body_setup(static_cast<int>(ref_mesh.surface_nodes.size()), params.use_parallel,
+        [&](int index) {
+            const int node = ref_mesh.surface_nodes[index];
+            if (!valid_node(node))
+                throw std::invalid_argument("global_jacobi_solver_dat: invalid surface classification");
+            claims[node].fetch_or(4, std::memory_order_relaxed);
+        });
+    parallel_body_setup(static_cast<int>(count), params.use_parallel, [&](int node) {
+        const int flags = claims[node].load(std::memory_order_relaxed);
+        if (bool(flags & 1) != bool(flags & 2))
+            throw std::invalid_argument("global_jacobi_solver_dat: tet_nodes must match tetrahedral connectivity");
+        solid_mask[node] = bool(flags & 1);
+        surface_mask[node] = bool(flags & 4);
+        const auto found = adj.find(node);
+        if (!solid_mask[node] && found != adj.end()) incident[node] = found->second;
+    });
+    parallel_body_setup(static_cast<int>(ref_mesh.tris.size()), params.use_parallel,
+        [&](int index) {
+            const int node = ref_mesh.tris[index];
+            if (solid_mask[node] && !surface_mask[node])
+                throw std::invalid_argument("global_jacobi_solver_dat: solid boundary node missing from surface_nodes");
+        });
+    auto& cloth_nodes = proposal_workspace.cloth;
+    collect_dat_nodes(static_cast<int>(count), params.use_parallel,
+        [&](int node) { return !solid_mask[node]; }, cloth_nodes,
+        proposal_workspace.compact_counts, proposal_workspace.compact_offsets);
     const bool has_solid = !ref_mesh.tets.empty();
     const PinMap pin_map = build_pin_map(pins, static_cast<int>(count));
 
@@ -1389,19 +1471,38 @@ SolverResult global_jacobi_solver_dat(
     (void)solve_params.dt2(); // initialize lazy time-step caches before workers
     const double query_radius = solve_params.resolved_dat_query_radius();
     std::vector<Vec3> reconstructed_previous;
+    if (solve_params.friction_coefficient != 0.0 && !previous_positions) {
+        reconstructed_previous.resize(count);
+        const double dt = solve_params.dt();
+        parallel_body_setup(static_cast<int>(count), params.use_parallel, [&](int node) {
+            reconstructed_previous[node] = xhat[node] - dt * v[node];
+        });
+        previous_positions = &reconstructed_previous;
+    }
     previous_positions = resolve_friction_previous_positions(solve_params, xnew,
         xhat, v, previous_positions, reconstructed_previous, "global_jacobi_solver_dat");
     if (previous_positions == &xnew) {
-        reconstructed_previous = xnew;
+        reconstructed_previous.resize(count);
+        parallel_body_setup(static_cast<int>(count), params.use_parallel, [&](int node) {
+            reconstructed_previous[node] = xnew[node];
+        });
         previous_positions = &reconstructed_previous;
     }
-    if (previous_positions) for (const auto& p : *previous_positions)
-        if (!p.allFinite()) throw std::invalid_argument("global_jacobi_solver_dat: nonfinite previous position");
+    if (previous_positions)
+        parallel_body_setup(static_cast<int>(count), params.use_parallel, [&](int node) {
+            if (!(*previous_positions)[node].allFinite())
+                throw std::invalid_argument("global_jacobi_solver_dat: nonfinite previous position");
+        });
 
-    // One conservative neighborhood serves proposal assembly, DAT and residuals
-    // at an identical snapshot. Each consumer retains its own distance cutoff.
+    // Match the OGC sweep: cache elastic colors and refresh a current contact
+    // snapshot for each color without adding contact conflicts to the graph.
+    static thread_local DATColoredStepWorkspace cached_colored;
+    // Capture this caller's workspace, not a worker thread's TLS instance.
+    DATColoredStepWorkspace& colored = cached_colored;
     JacobiStepWorkspace jacobi;
-    jacobi.prepare(ref_mesh, adj, pins, solve_params, count);
+    if (colored_sweep) colored.prepare(ref_mesh, adj, pins, solve_params, count);
+    else jacobi.prepare(ref_mesh, adj, pins, solve_params, count);
+    const auto& rest_gradients = colored_sweep ? colored.rest_gradients() : jacobi.rest_gradients();
     DATWorkspace dat;
     bool contacts_ready = false;
     const double shared_radius = std::max(query_radius * params.dat_node_box_padding, params.d_hat);
@@ -1430,7 +1531,7 @@ SolverResult global_jacobi_solver_dat(
         ensure_contacts();
         result.final_cloth_residual = compute_global_deformable_residual(
             ref_mesh, adj, pins, solve_params, xnew, xhat, broad_phase,
-            cloth_nodes, &pin_map, &incident, &jacobi.rest_gradients(), nullptr, previous_positions);
+            cloth_nodes, &pin_map, &incident, &rest_gradients, nullptr, previous_positions);
         result.final_solid_residual = has_solid ? compute_global_solid_residual(
             ref_mesh, pins, solve_params, xnew, xhat, broad_phase, &pin_map,
             &solid_mask, &surface_mask, nullptr, previous_positions) : 0.0;
@@ -1452,29 +1553,57 @@ SolverResult global_jacobi_solver_dat(
         result.initial_residual = result.final_residual;
         result.converged = converged();
     }
-    std::vector<Vec3> next(count);
+    auto& color_positions = proposal_workspace.color_positions;
+    auto& proposed = proposal_workspace.proposed;
+    auto& next = proposal_workspace.next;
+    color_positions.resize(count); proposed.resize(count); next.resize(count);
     for (int iteration = 0; iteration < params.max_global_iters && !result.converged; ++iteration) {
-        // Both calls read the same frozen positions. Damping is already part
-        // of the Jacobi proposal; DAT supplies the only further step scaling.
         ensure_contacts();
-        const auto proposed = jacobi.step(ref_mesh, adj, pins, solve_params,
-            xnew, xhat, v, previous_positions, &broad_phase);
-        const auto accepted = planar_DAT(params.dat_gamma, query_radius,
-            ref_mesh, proposed, xnew, params.dat_node_box_padding, &broad_phase, &dat);
-        parallel_body_setup(static_cast<int>(count), params.use_parallel,
-            [&](int node) {
-                next[node] = xnew[node] + accepted[node];
-                if (!next[node].allFinite())
-                    throw std::runtime_error("global_jacobi_solver_dat: updated position overflow");
-            });
+        if (!colored_sweep) {
+            proposed = jacobi.step(ref_mesh, adj, pins, solve_params,
+                xnew, xhat, v, previous_positions, &broad_phase);
+        }
+        const auto& colors = colored.colors();
+        const std::size_t color_count = colored_sweep ? colors.size() : 1;
+        for (std::size_t color_index = 0; color_index < color_count; ++color_index) {
+            if (colored_sweep) {
+                const auto& color = colors[color_index];
+                parallel_body_setup(static_cast<int>(count), params.use_parallel,
+                    [&](int node) {
+                        color_positions[node] = xnew[node];
+                        proposed[node].setZero();
+                    });
+                colored.freeze_contacts(solve_params, color_positions,
+                    previous_positions, broad_phase, &color);
+                parallel_body_setup(static_cast<int>(color.size()), params.use_parallel,
+                    [&](int index) {
+                        const int node = color[index];
+                        proposed[node] = colored.proposal(node, ref_mesh, adj, pins,
+                            solve_params, color_positions, xhat, previous_positions);
+                    });
+            }
+            // Reallocate the existing separating planes against the accepted
+            // live geometry, then commit this color before the next reads it.
+            // Every node moves only once per iteration, by at most R=gamma*q/2.
+            // A current q-neighbor was initially within q+2R<2q, so the initial
+            // per-node boxes of half-width >=q cover all color-filter queries.
+            const auto accepted = planar_DAT(params.dat_gamma, query_radius,
+                ref_mesh, proposed, xnew, params.dat_node_box_padding, &broad_phase, &dat);
+            parallel_body_setup(static_cast<int>(count), params.use_parallel,
+                [&](int node) {
+                    next[node] = xnew[node] + accepted[node];
+                    if (!next[node].allFinite())
+                        throw std::runtime_error("global_jacobi_solver_dat: updated position overflow");
+                });
+            xnew.swap(next);
+        }
         contacts_ready = false;
-        xnew.swap(next); // barrier before publishing the entire Jacobi sweep
         result.iterations = iteration + 1;
         if (!params.fixed_iters) {
             evaluate_residual();
             result.converged = converged();
             if (params.verbose)
-                std::fprintf(stderr, "  [Jacobi DAT] iter %d residual = %.6e (cloth %.6e, solid %.6e)\n",
+                std::fprintf(stderr, "  [DAT] iter %d residual = %.6e (cloth %.6e, solid %.6e)\n",
                     result.iterations, result.final_residual,
                     result.final_cloth_residual, result.final_solid_residual);
         }
@@ -1485,6 +1614,16 @@ SolverResult global_jacobi_solver_dat(
         write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh);
     }
     return result;
+}
+
+// Simultaneous Jacobi reference used by GPU parity tests.
+SolverResult global_jacobi_solver_dat(
+    const RefMesh& mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins,
+    const SimParams& params, std::vector<Vec3>& positions, const std::vector<Vec3>& target,
+    const std::vector<Vec3>& velocity, BroadPhase& phase, const std::string& outdir,
+    const std::vector<Vec3>* previous) {
+    return solve_deformable_dat(mesh, adj, pins, params, positions, target,
+        velocity, phase, outdir, previous, false);
 }
 
 SolverResult global_jacobi_solver_level_based_ccd(
@@ -4344,27 +4483,33 @@ Vec3 compute_omega_update(int rb, const DeformedState& state, const RefMesh& ref
 
 } // namespace rb_solver
 
-SolverResult global_jacobi_solver_dat_general(const RefMesh& mesh,
+static SolverResult solve_general_dat(const RefMesh& mesh,
     const DeformedState& state, const VertexTriangleMap& adj,
     const std::vector<Pin>& pins, const SimParams& params,
     std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
     std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new,
     std::vector<Vec3>& omega_new, BroadPhase& broad_phase,
-    const std::string& outdir)
+    const std::string& outdir, bool colored_sweep)
 {
-    params.validate_jacobi_dat_parameters(true);
+    params.validate_dat_parameters(true);
     validate_solver_friction_parameters(params,"global_jacobi_solver_dat_general");
     if(mesh.rb_nodes.empty()) {
         if(!x_com_new.empty()||!q_new.empty()||!omega_new.empty())
             throw std::invalid_argument("Jacobi DAT: unexpected rigid coordinates");
-        return global_jacobi_solver_dat(mesh,adj,pins,params,xnew,xhat,
-            state.velocities,broad_phase,outdir,&state.deformed_positions);
+        return solve_deformable_dat(mesh,adj,pins,params,xnew,xhat,
+            state.velocities,broad_phase,outdir,&state.deformed_positions,colored_sweep);
     }
     rb_solver::validate_rigid_solver_state(mesh,state,x_com_new,q_new,omega_new);
     const std::size_t n=xnew.size(),bodies=mesh.rb_nodes.size();
     if(n>std::size_t(std::numeric_limits<int>::max())||xhat.size()!=n
         ||state.deformed_positions.size()!=n||state.velocities.size()!=n
-        ||mesh.mass.size()!=n||mesh.node_to_rb.size()!=n)
+        ||mesh.mass.size()!=n||mesh.node_to_rb.size()!=n||bodies>n
+        ||(mesh.num_positions&&mesh.num_positions!=n)
+        ||mesh.tris.size()>std::size_t(std::numeric_limits<int>::max())
+        ||mesh.tets.size()>std::size_t(std::numeric_limits<int>::max())
+        ||mesh.tet_nodes.size()>std::size_t(std::numeric_limits<int>::max())
+        ||mesh.surface_nodes.size()>std::size_t(std::numeric_limits<int>::max())
+        ||mesh.tris.size()%3||mesh.tets.size()%4)
         throw std::invalid_argument("Jacobi DAT: inconsistent state extents");
     if(params.max_global_iters<0||!std::isfinite(params.fps)||params.fps<=0
         ||params.substeps<=0||!std::isfinite(params.damping)||params.damping<0
@@ -4375,10 +4520,12 @@ SolverResult global_jacobi_solver_dat_general(const RefMesh& mesh,
     for(double value:{params.mu,params.lambda,params.solid_mu,params.solid_lambda,
         params.kpin,params.kB,params.k_barrier,params.k_sdf,params.eps_sdf})
         if(!std::isfinite(value))throw std::invalid_argument("Jacobi DAT: nonfinite energy parameter");
-    for(std::size_t v=0;v<n;++v) if(!xnew[v].allFinite()||!xhat[v].allFinite()
-        ||!state.deformed_positions[v].allFinite()||!state.velocities[v].allFinite()
-        ||!std::isfinite(mesh.mass[v])||mesh.mass[v]<0)
-        throw std::invalid_argument("Jacobi DAT: invalid particle state");
+    parallel_body_setup(int(n),params.use_parallel,[&](int v) {
+        if(!xnew[v].allFinite()||!xhat[v].allFinite()
+            ||!state.deformed_positions[v].allFinite()||!state.velocities[v].allFinite()
+            ||!std::isfinite(mesh.mass[v])||mesh.mass[v]<0)
+            throw std::invalid_argument("Jacobi DAT: invalid particle state");
+    });
     for(const auto& pin:pins) if(pin.vertex_index<0||std::size_t(pin.vertex_index)>=n
         ||mesh.node_to_rb[pin.vertex_index]>=0||!pin.target_position.allFinite())
         throw std::invalid_argument("Jacobi DAT: invalid pin or pin on rigid proxy");
@@ -4387,11 +4534,31 @@ SolverResult global_jacobi_solver_dat_general(const RefMesh& mesh,
     SimParams solve_params=params;
     const double dt=solve_params.dt(),query_radius=solve_params.resolved_dat_query_radius();
     (void)solve_params.dt2();
-    std::vector<Vec3> centers=x_com_new,angular=omega_new,positions=xnew;
-    std::vector<Vec4> orientations=q_new;
-    std::vector<int> local(n,-1);
-    std::vector<Mat33> predictors(bodies);
+    if(!(dt>0)||!std::isfinite(dt)||!(dt*dt>0)||!std::isfinite(dt*dt)
+        ||!(.5*params.dat_gamma*query_radius>0)
+        ||!std::isfinite(query_radius*params.dat_node_box_padding))
+        throw std::invalid_argument("Jacobi DAT: invalid time step or query extent");
+    static thread_local DATProposalWorkspace cached_proposals;
+    auto& work=cached_proposals;
+    auto& centers=work.centers;auto& angular=work.angular;auto& positions=work.positions;
+    auto& orientations=work.orientations;auto& local=work.local;auto& predictors=work.predictors;
+    positions.resize(n);local.resize(n);centers.resize(bodies);angular.resize(bodies);
+    orientations.resize(bodies);predictors.resize(bodies);
+    if(work.claims.size()!=n)work.claims=std::vector<std::atomic<int>>(n);
+    auto& claims=work.claims;
+    parallel_body_setup(int(n),params.use_parallel,[&](int v) {
+        positions[v]=xnew[v];local[v]=-1;claims[v].store(-1,std::memory_order_relaxed);
+        if(std::size_t(v)<bodies) {
+            centers[v]=x_com_new[v];angular[v]=omega_new[v];orientations[v]=q_new[v];
+        }
+    });
+    auto& body_offsets=work.body_offsets;body_offsets.resize(bodies+1);body_offsets[0]=0;
     for(std::size_t b=0;b<bodies;++b) {
+        if(mesh.rb_nodes[b].empty()||mesh.rb_nodes[b].size()>n-body_offsets[b])
+            throw std::invalid_argument("Jacobi DAT: invalid rigid proxy extent");
+        body_offsets[b+1]=body_offsets[b]+mesh.rb_nodes[b].size();
+    }
+    parallel_body_setup(int(bodies),params.use_parallel,[&](int b) {
         const auto mode=mesh.rb_update_modes[b];
         if(mode!=RigidBodyUpdateMode::TranslationAndOrientation
             &&mode!=RigidBodyUpdateMode::TranslationOnly
@@ -4401,6 +4568,7 @@ SolverResult global_jacobi_solver_dat_general(const RefMesh& mesh,
             ||!state.omega[b].allFinite()||!state.orientations[b].allFinite()
             ||std::abs(state.orientations[b].squaredNorm()-1)>1e-10
             ||!centers[b].allFinite()||!angular[b].allFinite()||!orientations[b].allFinite()
+            ||angular[b].cwiseAbs().maxCoeff()>std::sqrt(std::numeric_limits<double>::max())/8
             ||!std::isfinite(mesh.total_mass[b])||mesh.total_mass[b]<=0||!mesh.I_hat[b].allFinite()
             ||mesh.rb_nodes[b].size()!=mesh.ref_positions[b].size())
             throw std::invalid_argument("Jacobi DAT: invalid rigid state");
@@ -4408,44 +4576,80 @@ SolverResult global_jacobi_solver_dat_general(const RefMesh& mesh,
         if(!updates_rigid_orientation(mode))angular[b].setZero();
         orientations[b]=quaternion_from_angular_velocity(state.orientations[b],angular[b],dt);
         predictors[b]=rigid_rotation_predictor(state.orientations[b],state.omega[b],dt);
-        for(std::size_t j=0;j<mesh.rb_nodes[b].size();++j) {
-            const int v=mesh.rb_nodes[b][j];
-            if(v<0||std::size_t(v)>=n||local[v]>=0||mesh.node_to_rb[v]!=int(b)
-                ||!mesh.ref_positions[b][j].allFinite())
-                throw std::invalid_argument("Jacobi DAT: invalid rigid ownership");
-            local[v]=int(j);
-            positions[v]=world_space_position(mesh.ref_positions[b][j],centers[b],orientations[b]);
-        }
-    }
-    std::vector<unsigned char> solid(n,0),surface(n,0),classified(n,0);
-    for(int v:mesh.tets) {
+    });
+    parallel_body_setup(int(body_offsets.back()),params.use_parallel,[&](int index) {
+        const auto b=std::size_t(std::upper_bound(body_offsets.begin(),body_offsets.end(),
+            std::size_t(index))-body_offsets.begin()-1);
+        const auto j=std::size_t(index)-body_offsets[b];
+        const int v=mesh.rb_nodes[b][j];
+        if(v<0||std::size_t(v)>=n||mesh.node_to_rb[v]!=int(b)||!mesh.ref_positions[b][j].allFinite())
+            throw std::invalid_argument("Jacobi DAT: invalid rigid ownership");
+        int unclaimed=-1;
+        if(!claims[v].compare_exchange_strong(unclaimed,int(j),std::memory_order_relaxed))
+            throw std::invalid_argument("Jacobi DAT: duplicate rigid proxy");
+        local[v]=int(j);
+        positions[v]=world_space_position(mesh.ref_positions[b][j],centers[b],orientations[b]);
+        if(!positions[v].allFinite())throw std::invalid_argument("Jacobi DAT: nonfinite rigid proxy");
+    });
+    auto& solid=work.solid;auto& surface=work.surface;solid.resize(n);surface.resize(n);
+    auto& incident=work.incident;incident.resize(n);
+    parallel_body_setup(int(n),params.use_parallel,[&](int v) {
+        const int owner=mesh.node_to_rb[v];
+        if(owner < -1||owner>=int(bodies)||((owner>=0)!=(local[v]>=0)))
+            throw std::invalid_argument("Jacobi DAT: incomplete rigid ownership");
+        claims[v].store(0,std::memory_order_relaxed);
+    });
+    parallel_body_setup(int(mesh.tris.size()/3),params.use_parallel,[&](int t) {
+        const int a=mesh.tris[3*t],b=mesh.tris[3*t+1],c=mesh.tris[3*t+2];
+        if(a<0||b<0||c<0||std::size_t(a)>=n||std::size_t(b)>=n||std::size_t(c)>=n
+            ||a==b||a==c||b==c||mesh.node_to_rb[a]!=mesh.node_to_rb[b]
+            ||mesh.node_to_rb[a]!=mesh.node_to_rb[c])
+            throw std::invalid_argument("Jacobi DAT: invalid triangle ownership/connectivity");
+    });
+    parallel_body_setup(int(mesh.tets.size()),params.use_parallel,[&](int index) {
+        const int v=mesh.tets[index];
         if(v<0||std::size_t(v)>=n||mesh.node_to_rb[v]>=0)throw std::invalid_argument("Jacobi DAT: invalid solid node");
-        solid[v]=1;
-    }
-    for(int v:mesh.tet_nodes) {
-        if(v<0||std::size_t(v)>=n)throw std::invalid_argument("Jacobi DAT: invalid solid classification");
-        classified[v]=1;
-    }
-    if(solid!=classified)throw std::invalid_argument("Jacobi DAT: inconsistent solid classification");
-    for(int v:mesh.surface_nodes) {
+        claims[v].fetch_or(1,std::memory_order_relaxed);
+    });
+    parallel_body_setup(int(mesh.tet_nodes.size()),params.use_parallel,[&](int index) {
+        const int v=mesh.tet_nodes[index];
+        if(v<0||std::size_t(v)>=n||mesh.node_to_rb[v]>=0)throw std::invalid_argument("Jacobi DAT: invalid solid classification");
+        claims[v].fetch_or(2,std::memory_order_relaxed);
+    });
+    parallel_body_setup(int(mesh.surface_nodes.size()),params.use_parallel,[&](int index) {
+        const int v=mesh.surface_nodes[index];
         if(v<0||std::size_t(v)>=n)throw std::invalid_argument("Jacobi DAT: invalid surface node");
-        surface[v]=1;
-    }
-    std::vector<int> cloth;
-    std::vector<IncidentTriangles> incident(n);
-    for(std::size_t v=0;v<n;++v)if(mesh.node_to_rb[v]<0&&!solid[v])cloth.push_back(int(v));
-    for(const auto& entry:adj)if(mesh.node_to_rb[entry.first]<0&&!solid[entry.first])incident[entry.first]=entry.second;
+        claims[v].fetch_or(4,std::memory_order_relaxed);
+    });
+    parallel_body_setup(int(n),params.use_parallel,[&](int v) {
+        const int flags=claims[v].load(std::memory_order_relaxed);
+        if(bool(flags&1)!=bool(flags&2))throw std::invalid_argument("Jacobi DAT: inconsistent solid classification");
+        solid[v]=bool(flags&1);surface[v]=bool(flags&4);
+        incident[v].clear();
+        const auto found=adj.find(v);
+        if(mesh.node_to_rb[v]<0&&!solid[v]&&found!=adj.end())incident[v]=found->second;
+    });
+    parallel_body_setup(int(mesh.tris.size()),params.use_parallel,[&](int index) {
+        const int v=mesh.tris[index];
+        if(solid[v]&&!surface[v])throw std::invalid_argument("Jacobi DAT: interior solid vertex on surface");
+    });
+    auto& cloth=work.cloth;
+    collect_dat_nodes(int(n),params.use_parallel,[&](int v) {
+        return mesh.node_to_rb[v]<0&&!solid[v];
+    },cloth,work.compact_counts,work.compact_offsets);
     const PinMap pin_map=build_pin_map(pins,int(n));
-    const std::vector<Vec3> zero_nodes(n,Vec3::Zero()),zero_bodies(bodies,Vec3::Zero());
-    // Validate all ownership/connectivity before assembly can index those arrays.
-    // No caller-owned numerical state is changed until the complete solve joins.
-    (void)general_planar_DAT(params.dat_gamma,query_radius,mesh,zero_nodes,
-        positions,centers,angular,state.orientations,zero_bodies,zero_bodies,dt,
-        params.dat_node_box_padding);
+    // Structural checks above make force assembly safe. The first real DAT
+    // pass certifies geometry before publishing any state, avoiding a redundant
+    // full broad-phase/filter pass for an all-zero displacement.
     BroadPhase phase;
+    static thread_local DATColoredStepWorkspace cached_colored;
+    DATColoredStepWorkspace& colored = cached_colored;
     JacobiStepWorkspace jacobi;
-    jacobi.prepare(mesh, adj, pins, solve_params, n, true);
+    if(colored_sweep)colored.prepare(mesh,adj,pins,solve_params,n,true);
+    else jacobi.prepare(mesh,adj,pins,solve_params,n,true);
+    const auto& rest_gradients=colored_sweep?colored.rest_gradients():jacobi.rest_gradients();
     DATWorkspace dat;
+    bool filter_called=false;
     bool contacts_ready=false;
     const double shared_radius=std::max(query_radius*params.dat_node_box_padding,params.d_hat);
     std::vector<AABB> boxes(n);
@@ -4468,7 +4672,7 @@ SolverResult global_jacobi_solver_dat_general(const RefMesh& mesh,
     const auto residual=[&]() {
         ensure_contacts();
         result.final_cloth_residual=compute_global_deformable_residual(mesh,adj,pins,
-            solve_params,positions,xhat,phase,cloth,&pin_map,&incident,&jacobi.rest_gradients(),nullptr,&state.deformed_positions);
+            solve_params,positions,xhat,phase,cloth,&pin_map,&incident,&rest_gradients,nullptr,&state.deformed_positions);
         result.final_solid_residual=mesh.tets.empty()?0:compute_global_solid_residual(
             mesh,pins,solve_params,positions,xhat,phase,&pin_map,&solid,&surface,nullptr,&state.deformed_positions);
         result.final_rigid_residual=rb_solver::rigid_body_unnormalized_residual(mesh,state,
@@ -4492,36 +4696,96 @@ SolverResult global_jacobi_solver_dat_general(const RefMesh& mesh,
         result.initial_residual=result.final_residual;
         result.converged=converged();
     }
+    auto& dc=work.dc;auto& dw=work.dw;
+    auto& particle_updates=work.proposed;auto& color_dc=work.color_dc;auto& color_dw=work.color_dw;
+    auto& color_positions=work.color_positions;auto& color_centers=work.color_centers;
+    auto& color_angular=work.color_angular;
+    dc.resize(bodies);dw.resize(bodies);particle_updates.resize(n);
+    color_dc.resize(bodies);color_dw.resize(bodies);
+    color_positions.resize(n);color_centers.resize(bodies);color_angular.resize(bodies);
     for(int iteration=0;iteration<params.max_global_iters&&!result.converged;++iteration) {
         ensure_contacts();
-        const auto particle_updates=jacobi.step(mesh,adj,pins,solve_params,
-            positions,xhat,state.velocities,&state.deformed_positions,&phase);
-        std::vector<Vec3> dc(bodies,Vec3::Zero()),dw(bodies,Vec3::Zero());
         const bool parallel_proposals=params.use_parallel
             && omp_get_max_threads()>1 && !omp_in_parallel();
-        parallel_body_setup(int(bodies),parallel_proposals,[&](int b){
+        const auto body_proposal=[&](int b,const std::vector<Vec3>& contact_positions,
+            const std::vector<Vec3>& contact_centers,const std::vector<Vec3>& contact_angular) {
+            dc[b].setZero();dw[b].setZero();
             const auto mode=mesh.rb_update_modes[b];
             const bool cooperative=parallel_proposals && omp_get_num_threads()>1
                 && params.d_hat>0 && params.k_barrier>0
                 && body_nt[b].size()+body_ss[b].size()>=128;
-            const auto kinematics=quaternion_omega_kinematics(state.orientations[b],angular[b],dt,updates_rigid_orientation(mode));
+            const auto kinematics=quaternion_omega_kinematics(state.orientations[b],contact_angular[b],dt,updates_rigid_orientation(mode));
             if(updates_rigid_translation(mode)&&params.damping>0)
                 dc[b]=-params.damping*rb_solver::compute_com_update(b,state,mesh,phase.cache(),
-                    body_nt[b],body_ss[b],local,positions,centers,angular,solve_params,dt,&kinematics,cooperative);
+                    body_nt[b],body_ss[b],local,contact_positions,contact_centers,contact_angular,solve_params,dt,&kinematics,cooperative);
             if(updates_rigid_orientation(mode)&&params.damping>0)
                 dw[b]=-params.damping*rb_solver::compute_omega_update(b,state,mesh,phase.cache(),
-                    body_nt[b],body_ss[b],local,positions,centers,angular,solve_params,dt,&kinematics,&predictors[b],cooperative);
+                    body_nt[b],body_ss[b],local,contact_positions,contact_centers,contact_angular,solve_params,dt,&kinematics,&predictors[b],cooperative);
             if(!dc[b].allFinite()||!dw[b].allFinite())throw std::runtime_error("Jacobi DAT: nonfinite rigid proposal");
-        });
-        auto accepted=general_planar_DAT(params.dat_gamma,query_radius,mesh,
-            particle_updates,positions,centers,angular,state.orientations,dc,dw,dt,
-            params.dat_node_box_padding,&phase,&dat);
-        // Publish exactly the represented endpoints which the filter certified.
+        };
+        if(!colored_sweep)
+            parallel_body_setup(int(bodies),parallel_proposals,[&](int b) {
+                body_proposal(b,positions,centers,angular);
+            });
+        if(!colored_sweep)particle_updates=jacobi.step(mesh,adj,pins,solve_params,
+            positions,xhat,state.velocities,&state.deformed_positions,&phase);
+        // Structural dependencies color particle and rigid blocks together;
+        // independent rigid bodies share the first color. Each color reads one
+        // fresh position/pose snapshot and publishes only after its proposals
+        // and DAT filter join. Each body consumes one simultaneous COM/angular
+        // proposal from that same pose.
+        const auto& colors=colored.colors();
+        const auto color_count=colored_sweep?colors.size():1;
+        for(std::size_t color=0;color<color_count;++color) {
+            if(colored_sweep) {
+                const auto& blocks=colors[color];
+                parallel_body_setup(int(n),params.use_parallel,[&](int v) {
+                    color_positions[v]=positions[v];particle_updates[v].setZero();
+                    if(std::size_t(v)<bodies) {
+                        color_centers[v]=centers[v];color_angular[v]=angular[v];
+                        color_dc[v].setZero();color_dw[v].setZero();
+                    }
+                });
+                colored.freeze_contacts(solve_params,color_positions,
+                    &state.deformed_positions,phase,&blocks);
+                parallel_body_setup(int(blocks.size()),params.use_parallel,[&](int index) {
+                    const int block=blocks[index];
+                    if(std::size_t(block)<n) {
+                        particle_updates[block]=colored.proposal(block,mesh,adj,pins,
+                            solve_params,color_positions,xhat,&state.deformed_positions);
+                    } else {
+                        const auto body=std::size_t(block)-n;
+                        body_proposal(int(body),color_positions,color_centers,color_angular);
+                        color_dc[body]=dc[body];
+                        color_dw[body]=dw[body];
+                    }
+                });
+            }
+            auto accepted=general_planar_DAT(params.dat_gamma,query_radius,mesh,
+                particle_updates,positions,centers,angular,state.orientations,
+                colored_sweep?color_dc:dc,colored_sweep?color_dw:dw,dt,
+                params.dat_node_box_padding,&phase,&dat);
+            filter_called=true;
+            // Every node/body moves in just one color, with a whole-path radius
+            // <=gamma*q/2. Initial +-q boxes therefore cover all later queries,
+            // as in the deformable sweep. Preserve the certified arithmetic.
+            positions.swap(accepted.positions);centers.swap(accepted.centers);
+            angular.swap(accepted.omega);orientations.swap(accepted.orientations);
+        }
         contacts_ready=false;
-        positions.swap(accepted.positions);centers.swap(accepted.centers);
-        angular.swap(accepted.omega);orientations.swap(accepted.orientations);
         result.iterations=iteration+1;
         if(!params.fixed_iters){residual();result.converged=converged();}
+    }
+    if(!filter_called) {
+        // Zero-iteration and initially converged solves still reject invalid
+        // initial contact geometry, even though they never propose a step.
+        parallel_body_setup(int(n),params.use_parallel,[&](int v) {
+            particle_updates[v].setZero();
+            if(std::size_t(v)<bodies){dc[v].setZero();dw[v].setZero();}
+        });
+        (void)general_planar_DAT(params.dat_gamma,query_radius,mesh,particle_updates,
+            positions,centers,angular,state.orientations,dc,dw,dt,
+            params.dat_node_box_padding,nullptr,&dat);
     }
     if(params.fixed_iters)result.converged=true;
     if(params.write_substeps) rebuild(query_radius*params.dat_node_box_padding);
@@ -4530,6 +4794,28 @@ SolverResult global_jacobi_solver_dat_general(const RefMesh& mesh,
     xnew.swap(positions);x_com_new.swap(centers);omega_new.swap(angular);q_new.swap(orientations);
     broad_phase=std::move(phase);
     return result;
+}
+
+// One production entry point for deformable, rigid, and mixed DAT solves.
+SolverResult global_gauss_seidel_solver_dat(const RefMesh& mesh,
+    const DeformedState& state, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params,
+    std::vector<Vec3>& positions, const std::vector<Vec3>& target,
+    std::vector<Vec3>& centers, std::vector<Vec4>& orientations,
+    std::vector<Vec3>& omega, BroadPhase& phase, const std::string& outdir) {
+    return solve_general_dat(mesh,state,adj,pins,params,positions,target,centers,
+        orientations,omega,phase,outdir,true);
+}
+
+// Simultaneous Jacobi reference used by GPU parity tests.
+SolverResult global_jacobi_solver_dat_general(const RefMesh& mesh,
+    const DeformedState& state, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params,
+    std::vector<Vec3>& positions, const std::vector<Vec3>& target,
+    std::vector<Vec3>& centers, std::vector<Vec4>& orientations,
+    std::vector<Vec3>& omega, BroadPhase& phase, const std::string& outdir) {
+    return solve_general_dat(mesh,state,adj,pins,params,positions,target,centers,
+        orientations,omega,phase,outdir,false);
 }
 
 // -----------------------------------------------------------------------------

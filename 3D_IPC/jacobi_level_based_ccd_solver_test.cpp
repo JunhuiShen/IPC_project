@@ -357,7 +357,7 @@ TEST(JacobiLevelBasedCCDSolver, RejectsConflictsAndInvalidCapBeforeChangingPosit
     for (int invalid = 0; invalid < 4; ++invalid) {
         auto s = cloth_scene();
         s.params.use_jacobi_level_based_ccd = true;
-        if (invalid == 0) s.params.use_jacobi_dat = true;
+        if (invalid == 0) s.params.use_dat = true;
         if (invalid == 1) s.params.use_ogc = true;
         if (invalid == 2) s.params.use_cloth_grid = true;
         if (invalid == 3) s.params.colored_ccd_guess_iters = -1;

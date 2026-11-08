@@ -278,12 +278,12 @@ __global__ void gather_compute(BroadPhaseView broad,DeformableScene scene,Deform
 
 // ORIGINAL (exact_computation_fallback == false) ordinary gather. It uses the
 // qualified evaluate_contact_original geometry and the generic gathered/masked
-// ContactOutput path. Non-Ok statuses abort; an original failure is NEVER sent
-// to the robust exact queue.
+// ContactOutput path. Only a frozen DAT EE packet's rounded zero distance may
+// enter the emergency exact queue. Ordinary Original GS failures still abort.
 template<bool DeferredInput>
 __global__ void gather_original(BroadPhaseView broad,DeformableScene scene,DeformableState state,
     RigidScene rigid,ContactParameters params,Work work,int color,ContactAssemblyPhase phase,int* failed,
-    ColorContactWorklist color_pairs) {
+    ColorContactWorklist color_pairs,bool frozen_snapshot) {
     const auto index=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
     const auto begin=color_pairs.offsets?color_pairs.offsets[color]:0;
     const auto end=color_pairs.offsets?color_pairs.offsets[color+1]:broad.contact_count;
@@ -321,7 +321,10 @@ __global__ void gather_original(BroadPhaseView broad,DeformableScene scene,Defor
     const auto result=evaluate_contact_original(in);
     store_contact_output(in,result,work.outputs+pair,work.compact?work.compact+pair:nullptr,
         work.output_activity?work.output_activity+pair:nullptr);
-    if(result.status!=ContactStatus::Ok)error(failed,code(result.status));
+    if(original_dat_zero_distance_retry(true,frozen_snapshot,in.kind,result.status)
+        &&publication.publish_if_queued(result.status)) {
+        const unsigned index=atomicAdd(work.exact_count,1u);work.exact_queue[index]=static_cast<int>(pair);
+    } else if(result.status!=ContactStatus::Ok)error(failed,code(result.status));
 }
 
 // Paired opt-in gather: general resets all; thin writes only its eligible partition.
@@ -995,9 +998,9 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
         if(gather_count) {
             if(original) {
                 if(p.defer_inputs)
-                    gather_original<true><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist());
+                    gather_original<true><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist(),frozen_snapshot);
                 else
-                    gather_original<false><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist());
+                    gather_original<false><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist(),frozen_snapshot);
             } else if(p.use_selected_ordinary&&compact_phase&&parameters.friction==0.0) {
                 if(p.defer_inputs) {
                     gather_general_complement<true><<<blocks(gather_count),threads>>>(p.broad,scene,state,rigid,parameters,p.work(compact_phase),color,phase,elastic.error,p.color_worklist());
@@ -1014,7 +1017,7 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
             }
         }
         }
-        if(!original) {
+        if(!original || frozen_snapshot) {
         Work exact_work=p.work(compact_phase);
         if(!original&&p.use_compact_point&&p.use_cooperative_exact) {
             GpuProfileScope compact_profile("exact_compact_point_first");
@@ -1047,7 +1050,7 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
         }
         {
         GpuProfileScope exact_profile("exact_small");
-        if(p.use_cooperative_exact)
+        if(!original&&p.use_cooperative_exact)
             launch_cooperative_exact_contacts(p.inputs.data,p.outputs.data,exact_work.exact_queue,exact_work.exact_count,
                 exact_work.exact_retry_queue,exact_work.exact_retry_count,p.exact_next.data,
                 p.cooperative_words.data,p.cooperative_slots.data,p.cooperative_workers,elastic.error,nullptr,

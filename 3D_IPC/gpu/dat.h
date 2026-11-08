@@ -33,7 +33,7 @@ namespace ipc_gpu::solver {
 // Keep positions, raw updates and candidate view alive and unchanged until
 // their consumers finish. Each prepared view is consumed once, on its stream.
 // Counts/status are orchestration only; no numerical arrays/queue counts are
-// copied to the host. Exact EE failures retry with a larger device arena.
+// copied to the host. Uncertain NT/EE geometry retries in device exact arenas.
 class GpuDatFilter {
 public:
     GpuDatFilter();

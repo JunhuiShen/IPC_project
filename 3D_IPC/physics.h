@@ -57,7 +57,7 @@ struct SimParams {
     bool   use_basic_experimental; // experimental cloth; with SIMD also selects general v2
     bool   use_basic_experimental_v2; // resolved from use_basic_experimental && use_simd
     bool   use_simd;             // select v2 SIMD cloth/general energy/contact assembly
-    bool   use_jacobi_dat = false; // cloth/solid/rigid Jacobi updates filtered by planar DAT
+    bool   use_dat = false; // OGC-style colored cloth/solid/rigid DAT
     bool   use_jacobi_level_based_ccd = false; // Jacobi proposals filtered by level/color-ordered linear CCD
     double dat_gamma = 0.9;
     double dat_query_radius = 0.0; // 0: 1.5*d_hat when positive, otherwise node_box_max
@@ -124,7 +124,7 @@ struct SimParams {
         p.use_basic_experimental    = false;
         p.use_basic_experimental_v2 = false;
         p.use_simd                  = false;
-        p.use_jacobi_dat            = false;
+        p.use_dat            = false;
         p.use_jacobi_level_based_ccd = false;
         p.dat_gamma                 = 0.9;
         p.dat_query_radius          = 0.0;
@@ -190,9 +190,9 @@ struct SimParams {
     }
 
     // Explicit DAT entry points pass selected=true even when the driver flag is off.
-    void validate_jacobi_dat_parameters(bool selected = false) const {
-        if (use_jacobi_dat && use_jacobi_level_based_ccd)
-            throw std::invalid_argument("Choose only one of --use_jacobi_dat and --use_jacobi_level_based_ccd");
+    void validate_dat_parameters(bool selected = false) const {
+        if (use_dat && use_jacobi_level_based_ccd)
+            throw std::invalid_argument("Choose only one of --use_dat and --use_jacobi_level_based_ccd");
         // The CCD solver does not use DAT's radius, padding or relaxation.
         // Preserve legacy validation outside this independently selected mode.
         if (use_jacobi_level_based_ccd && !selected) return;
@@ -202,16 +202,16 @@ struct SimParams {
             throw std::invalid_argument("--dat_query_radius must be finite and nonnegative (0 selects an automatic radius)");
         if (!std::isfinite(dat_node_box_padding) || dat_node_box_padding < 1.0)
             throw std::invalid_argument("--dat_node_box_padding must be finite and at least 1");
-        if (!use_jacobi_dat && !selected) return;
+        if (!use_dat && !selected) return;
         if (use_ogc || use_ogc_solver || use_cloth_grid)
-            throw std::invalid_argument("--use_jacobi_dat requires OGC and --use_cloth_grid to be disabled");
+            throw std::invalid_argument("--use_dat requires OGC and --use_cloth_grid to be disabled");
         (void)resolved_dat_query_radius();
     }
 
     // Explicit solver calls validate their CCD filter even with the flag off.
     void validate_jacobi_level_based_ccd_parameters(bool selected = false) const {
-        if (use_jacobi_dat && use_jacobi_level_based_ccd)
-            throw std::invalid_argument("Choose only one of --use_jacobi_dat and --use_jacobi_level_based_ccd");
+        if (use_dat && use_jacobi_level_based_ccd)
+            throw std::invalid_argument("Choose only one of --use_dat and --use_jacobi_level_based_ccd");
         if (!use_jacobi_level_based_ccd && !selected) return;
         if (use_ogc || use_ogc_solver || use_cloth_grid)
             throw std::invalid_argument("--use_jacobi_level_based_ccd requires OGC and --use_cloth_grid to be disabled");

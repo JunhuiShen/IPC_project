@@ -30,14 +30,15 @@ std::vector<Vec> evaluate(const Scene& s,const DatParameters& p) {
         Vec x[4],u[4],separation;for(int i=0;i<4;++i){x[i]=pack(s.positions[nodes[i]]);u[i]=updates[nodes[i]];}
         if(dat_detail::aabb_separated(x,split,p.query_radius))return;
         int status=split==1?dat_detail::vertex_triangle(x,separation):dat_detail::edge_edge(x,separation);
+        double limits[4];
+        if(status==0)status=dat_detail::plane_factors(x,u,split,separation,p,limits);
         if(status==dat_detail::NeedsExact) {
-            status=dat_detail::exact_edge_edge<256>(x,separation);
-            if(status==DatExactCapacity)status=dat_detail::exact_edge_edge<1600>(x,separation);
+            status=dat_detail::exact_pair_geometry<256>(x,split,separation);
+            if(status==DatExactCapacity)status=dat_detail::exact_pair_geometry<1600>(x,split,separation);
+            if(status==0)status=dat_detail::plane_factors(x,u,split,separation,p,limits);
         }
-        require(status==0,"host DAT geometry failed");
-        double limits[4];status=dat_detail::plane_factors(x,u,split,separation,p,limits);
         if(status==DatZeroGap)throw std::domain_error("host DAT zero gap");
-        require(status==0,"host DAT plane failed");
+        require(status==0,"host DAT geometry/plane certificate failed");
         for(int i=0;i<4;++i)factors[nodes[i]]=std::min(factors[nodes[i]],limits[i]);
     };
     for(const auto& candidate:phase.cache().nt_pairs) {
@@ -66,6 +67,98 @@ Scene crossed() {
     Scene s;s.positions={Vec3(-10,0,0),Vec3(10,0,0),Vec3(0,-10,-10),Vec3(0,-10,.4),Vec3(0,10,.4),Vec3(10,0,10.4)};
     s.updates={Vec3(0,0,.4),Vec3(0,0,.4),Vec3(0,0,.4),Vec3(0,0,-.1),Vec3(0,0,-.1),Vec3(0,0,-.1)};
     s.mesh.num_positions=6;s.mesh.tris={0,1,2,3,4,5};return s;
+}
+void supporting_plane_cases() {
+    const DatParameters p{.9,1,1.2};
+    auto s=point_triangle();
+    Vec x[4],u[4];
+    for(int i=0;i<4;++i) {x[i]=pack(s.positions[i]);u[i]=pack(s.updates[i]);}
+    dat_detail::PairPlane plane;
+    // Residual magnitude is not a lower bound on finite-primitive distance.
+    require(dat_detail::select_pair_plane(x,1,{{0,0,-100}},1,plane)==0,
+        "valid oversized supporting direction rejected");
+    require(!plane.outside_query,"raw residual norm incorrectly discarded an in-range pair");
+    double factors[4];
+    require(dat_detail::plane_factors(x,u,1,{{0,0,-100}},p,factors)==0,
+        "oversized residual plane allocation failed");
+    for(double factor:factors)require(std::abs(factor-.72)<1e-12,"proportional allocation changed");
+    double shared_factors[4];
+    require(dat_detail::plane_factors_from_plane(u,1,plane,p,shared_factors)==0,
+        "shared supporting-plane allocation failed");
+    for(int i=0;i<4;++i)require(shared_factors[i]==factors[i],"shared plane changed allocation arithmetic");
+    require(dat_detail::select_pair_plane(x,1,{{100,0,0}},1,plane)==dat_detail::NeedsExact,
+        "nonseparating normal bypassed exact retry via its large norm");
+    Vec exact;
+    require(dat_detail::exact_vertex_triangle<256>(x,exact)==0
+        &&dat_detail::select_pair_plane(x,1,exact,1,plane)==0&&!plane.outside_query,
+        "exact vertex/triangle retry did not recover the supporting plane");
+    x[0].v[2]=2;
+    require(dat_detail::select_pair_plane(x,1,{{0,0,-100}},1,plane)==0&&plane.outside_query,
+        "certified projected gap did not discard an out-of-range pair");
+
+    // Captured README Example 1 frame 126: the fast EE residual points into a
+    // primitive although the exact finite edges are separated by ~6.16e-10.
+    Scene captured;
+    captured.positions={
+        Vec3(-1.2499964352680171,.54358597764887895,-.43915608458931166),
+        Vec3(-1.2722323852803259,.53028835202992686,-.36137318480164726),
+        Vec3(-1.2499964600268660,.54358615217010631,-.43915583489559568),
+        Vec3(-1.2499995411271900,.50375014954939679,-.47291205323261482)};
+    const Vec3 normal(.95038202192690158,-.20115535389100869,.23729841128654272);
+    for(int i=0;i<4;++i)x[i]=pack(captured.positions[i]);
+    Vec ordinary;
+    require(dat_detail::edge_edge(x,ordinary)==0,"captured EE no longer exercises its ordinary proposal");
+    require(dat_detail::select_pair_plane(x,2,ordinary,.0075,plane)==dat_detail::NeedsExact,
+        "captured non-supporting EE normal was accepted");
+    require(dat_detail::exact_edge_edge<256>(x,exact)==0
+        &&dat_detail::select_pair_plane(x,2,exact,.0075,plane)==0,
+        "captured EE exact supporting plane was not certified");
+    require(plane.right>plane.left&&!plane.outside_query,"captured positive EE gap was discarded");
+    captured.positions.push_back(captured.positions[0]-.03*normal);
+    captured.positions.push_back(captured.positions[2]+.03*normal);
+    captured.mesh.num_positions=6;captured.mesh.tris={0,1,4,2,3,5};
+    captured.updates.assign(6,Vec3::Zero());
+    compare(captured,DatParameters{.9,.0075,1.2});
+    for(int i=0;i<4;++i)captured.updates[i]=(i<2?1e-4:-1e-4)*normal;
+    compare(captured,DatParameters{.9,.0075,1.2});
+    const auto accepted=evaluate(captured,DatParameters{.9,.0075,1.2});
+    std::vector<Vec3> endpoints=captured.positions;
+    for(int i=0;i<6;++i)endpoints[i]+=Vec3(accepted[i].v[0],accepted[i].v[1],accepted[i].v[2]);
+    const auto signed_gap=[&](const std::vector<Vec3>& points) {
+        const Vec3 origin=points[0];
+        return std::min((points[2]-origin).dot(normal),(points[3]-origin).dot(normal))
+            -std::max((points[0]-origin).dot(normal),(points[1]-origin).dot(normal));
+    };
+    require(signed_gap(endpoints)>0&&signed_gap(endpoints)<signed_gap(captured.positions),
+        "captured filtered EE approach did not preserve its original sides");
+
+    // Frame 215: rounded closest points coincide, but the original binary64
+    // finite segments have exact positive distance 1.67453456537080605e-17.
+    const Vec positive_gap[4]={
+        {{-1.2508422453585308,.30142330872441742,-.3441007037557508}},
+        {{-1.249271199389888,.43384953344448823,-.36383141911477945}},
+        {{-1.252873745189554,.35850525592266047,-.35936719358941788}},
+        {{-1.2435860863993213,.36377791656553377,-.33712447408743129}}};
+    require(dat_detail::edge_edge(positive_gap,ordinary)==dat_detail::NeedsExact
+        &&dat_detail::stable_norm(ordinary)==0,"positive-gap fixture did not exercise rounded zero distance");
+    require(dat_detail::exact_pair_geometry<256>(positive_gap,2,exact)==0,
+        "exact positive gap was misclassified as contact");
+    require(std::abs(dat_detail::stable_norm(exact)-1.67453456537080605e-17)<5e-31,
+        "exact retry changed the independently computed positive gap");
+    require(dat_detail::select_pair_plane(positive_gap,2,exact,.005,plane)==0&&!plane.outside_query,
+        "positive rounded-zero pair did not certify its exact plane");
+
+    for(int split:{1,2}) {
+        auto touching=split==1?point_triangle():crossed();
+        if(split==1)touching.positions[0].z()=0;
+        else for(int i=3;i<6;++i)touching.positions[i].z()-=.4;
+        const int nodes[4]={0,1,split==1?2:3,split==1?3:4};
+        for(int i=0;i<4;++i)x[i]=pack(touching.positions[nodes[i]]);
+        require(dat_detail::select_pair_plane(x,split,{},1,plane)==dat_detail::NeedsExact,
+            "ordinary zero residual declared contact without exact retry");
+        require(dat_detail::exact_pair_geometry<256>(x,split,exact)==DatZeroGap,
+            "true exact contact was artificially separated");
+    }
 }
 void run() {
     const DatParameters p{.9,1,1.2};compare({},p);
@@ -98,6 +191,11 @@ void run() {
     Scene obtuse;obtuse.positions={Vec3(.5,-.01,.1),Vec3::Zero(),Vec3(1,0,0),Vec3(-10,.1,0)};
     obtuse.updates.assign(4,Vec3::Zero());obtuse.updates[0]=Vec3(0,.05,-.2);obtuse.mesh.num_positions=4;obtuse.mesh.tris={1,2,3};compare(obtuse,DatParameters{.9,.3,1.2});
     for(double padding:{1.,1.2,3.}) {auto q=p;q.node_box_padding=padding;compare(point_triangle(),q);}
+    Scene sliver;sliver.positions={Vec3(.5,1e-3,1e-4),Vec3::Zero(),Vec3(1,0,0),Vec3(1,1e-9,0)};
+    sliver.updates.assign(4,Vec3::Zero());sliver.updates[0]=Vec3(0,0,-1e-4);
+    sliver.mesh.num_positions=4;sliver.mesh.tris={1,2,3};
+    compare(sliver,DatParameters{.9,5e-4,1.2});
+    supporting_plane_cases();
     for(int split:{1,2}) {
         auto s=split==1?point_triangle():crossed();
         if(split==1)s.positions[0].z()=0;

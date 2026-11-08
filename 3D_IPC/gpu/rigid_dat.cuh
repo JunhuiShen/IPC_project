@@ -3,6 +3,8 @@
 #include <cfloat>
 #include <cmath>
 
+#include "directed_rounding.cuh"
+
 #ifdef __CUDACC__
 #define IPC_RIGID_DAT_HD __host__ __device__
 #else
@@ -47,11 +49,11 @@ inline constexpr double kQuaternionTolerance=1e-8;
 IPC_RIGID_DAT_HD inline bool finite(double x) { return x<=DBL_MAX && x>=-DBL_MAX; }
 IPC_RIGID_DAT_HD inline double round_down(double x) {
     if(x==INFINITY)return DBL_MAX;
-    return ::nextafter(x,-double(INFINITY));
+    return ::ipc_gpu::directed_rounding::next_down(x);
 }
 IPC_RIGID_DAT_HD inline double round_up(double x) {
     if(x==-INFINITY)return -DBL_MAX;
-    return ::nextafter(x,double(INFINITY));
+    return ::ipc_gpu::directed_rounding::next_up(x);
 }
 IPC_RIGID_DAT_HD inline Interval make_interval(double x) { return {x,x}; }
 IPC_RIGID_DAT_HD inline bool is_zero(Interval x) { return x.lo==0 && x.hi==0; }
@@ -330,6 +332,7 @@ struct PrefixScan {
     double radius;
     int max_depth,budget;
     double last_safe=0;
+    double radius_cap=1;
     bool radial;
 
     IPC_RIGID_DAT_HD Status interval_safe(double a,double b,bool& safe) const {
@@ -354,7 +357,18 @@ struct PrefixScan {
             bool safe=false;
             const Status status=interval_safe(current.a,current.b,safe);
             if(status!=Status::Ok)return status;
-            if(safe){last_safe=current.b;continue;}
+            if(safe) {
+                last_safe=current.b;
+                // Retain the original [0,1] dyadic DFS and its accounting.
+                // A safe leaf extends a contiguous proven prefix; once that
+                // prefix reaches the known body minimum, later work cannot
+                // reduce the requested min(original factor, radius_cap).
+                if(radial && radius_cap<1 && last_safe>=radius_cap) {
+                    last_safe=radius_cap;
+                    return Status::Ok;
+                }
+                continue;
+            }
             if(current.depth>=max_depth)return Status::DepthExhausted;
             const double mid=current.a+.5*(current.b-current.a);
             if(!(mid>current.a&&mid<current.b))return Status::DepthExhausted;
@@ -413,7 +427,8 @@ IPC_RIGID_DAT_HD inline Result plane_step(const Trajectory& path,const double* n
     if(status==Status::Ok)return {status,1};
     if(!(scan.last_safe>0))return {status,0};
     double relaxed=gamma*scan.last_safe;
-    if(!(relaxed<scan.last_safe))relaxed=::nextafter(scan.last_safe,0.0);
+    if(!(relaxed<scan.last_safe))
+        relaxed=::ipc_gpu::directed_rounding::toward_positive_zero(scan.last_safe);
     return {status,relaxed>0 ? relaxed : 0};
 }
 
@@ -421,14 +436,20 @@ IPC_RIGID_DAT_HD inline Result plane_step(const Trajectory& path,const double* n
 // query, rather than a newly evaluated phi(0). This accounts for the complete
 // pose-rounding offset directly. Radius already contains DAT's gamma; this
 // routine never applies another relaxation.
-IPC_RIGID_DAT_HD inline Result radius_step(const Trajectory& path,const double* query_position,
-    double radius,int max_depth=40,int box_budget=4096,
+// A capped query returns min(the original factor, cap). Status::Ok means the
+// requested cap was fully certified, even if the remainder was not scanned.
+// If that proof was not reached, depth/budget statuses retain their original
+// certified prefix. The uncapped entry point below preserves its full contract.
+IPC_RIGID_DAT_HD inline Result radius_step_capped(const Trajectory& path,const double* query_position,
+    double radius,double cap,int max_depth=40,int box_budget=4096,
     const PreparedTrajectory* prepared=nullptr) {
     Status status=validate(path);
     if(status!=Status::Ok)return {status,0};
-    if(!finite(radius)||radius<0||!valid_budget(max_depth,box_budget))return {Status::InvalidInput,0};
+    if(!finite(radius)||radius<0||!finite(cap)||cap<0||cap>1
+        ||!valid_budget(max_depth,box_budget))return {Status::InvalidInput,0};
     PrefixScan scan{};
     scan.path=&path;scan.max_depth=max_depth;scan.budget=box_budget;scan.radius=radius;scan.radial=true;
+    scan.radius_cap=cap;
     for(int i=0;i<3;++i) {
         if(!finite(query_position[i]))return {Status::InvalidInput,0};
         scan.query[i]=query_position[i];
@@ -440,10 +461,17 @@ IPC_RIGID_DAT_HD inline Result radius_step(const Trajectory& path,const double* 
     else status=bounds_core(path,0,0,scan.v0,initial);
     if(status!=Status::Ok)return {status,0};
     if(!(norm_upper(initial,query_position)<=radius))return {Status::InitialRadiusUnproved,0};
-    if(no_motion(path))return {Status::Ok,1};
+    if(no_motion(path))return {Status::Ok,cap};
     status=scan.scan(0,1);
     if(is_fatal(status))return {status,0};
-    return {status,status==Status::Ok ? 1 : scan.last_safe};
+    const double factor=status==Status::Ok ? cap : scan.last_safe;
+    return {status,cap<factor ? cap : factor};
+}
+
+IPC_RIGID_DAT_HD inline Result radius_step(const Trajectory& path,const double* query_position,
+    double radius,int max_depth=40,int box_budget=4096,
+    const PreparedTrajectory* prepared=nullptr) {
+    return radius_step_capped(path,query_position,radius,1,max_depth,box_budget,prepared);
 }
 
 } // namespace ipc_gpu::solver::rigid_dat_detail

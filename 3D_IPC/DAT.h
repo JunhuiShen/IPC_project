@@ -1,12 +1,70 @@
 #pragma once
 
-#include "IPC_math.h"
+#include "physics.h"
 
-#include <vector>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <limits>
 #include <memory>
+#include <vector>
 
-struct RefMesh;
 class BroadPhase;
+
+// One representable binary64 step, with std::nextafter's exceptional behavior.
+// These functions do not change the rounding mode or combine arithmetic: callers
+// must still perform each operation before widening its result.
+namespace directed_rounding {
+namespace detail {
+
+static_assert(sizeof(double) == sizeof(std::uint64_t)
+    && std::numeric_limits<double>::is_iec559
+    && std::numeric_limits<double>::radix == 2
+    && std::numeric_limits<double>::digits == 53
+    && std::numeric_limits<double>::min_exponent == -1021
+    && std::numeric_limits<double>::max_exponent == 1024,
+    "directed_rounding requires IEEE-754 binary64");
+
+// Direction is +1 for +infinity, -1 for -infinity, and 0 for positive zero.
+template<int Direction>
+inline double step(double x) {
+    static_assert(Direction >= -1 && Direction <= 1, "invalid step direction");
+    std::uint64_t pattern;
+    std::memcpy(&pattern, &x, sizeof(pattern));
+    const std::uint64_t magnitude = pattern & UINT64_C(0x7fffffffffffffff);
+
+    // Keep both the input and output normal. Zeros,
+    // subnormals, the normal-range endpoints, infinities, and all NaNs retain
+    // the platform libm's result, errno, and floating-point exception behavior.
+    if (magnitude > UINT64_C(0x0010000000000000)
+        && magnitude < UINT64_C(0x7fefffffffffffff)) {
+        if constexpr (Direction == 0) {
+            --pattern;
+        } else {
+            const bool negative = (pattern >> 63) != 0;
+            if (negative == (Direction > 0)) --pattern;
+            else ++pattern;
+        }
+        double result;
+        std::memcpy(&result, &pattern, sizeof(result));
+        return result;
+    }
+
+    constexpr double target = Direction > 0 ? std::numeric_limits<double>::infinity()
+        : Direction < 0 ? -std::numeric_limits<double>::infinity() : 0.0;
+    return std::nextafter(x, target);
+}
+
+} // namespace detail
+
+inline double next_up(double x) { return detail::step<1>(x); }
+inline double next_down(double x) { return detail::step<-1>(x); }
+
+// The target is +0.0, including when x is -0.0. This intentionally matches
+// std::nextafter(x, 0.0), which returns positive zero for either zero input.
+inline double toward_positive_zero(double x) { return detail::step<0>(x); }
+
+} // namespace directed_rounding
 
 // Scoped to one solve with fixed topology. Each call refreshes all numerical
 // data. Standalone calls without a workspace retain their stateless behavior.
@@ -66,6 +124,50 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
     double dt, double node_box_padding = 1.2,
     const BroadPhase* candidates = nullptr, DATWorkspace* workspace = nullptr);
 
-// Optional candidates must be a conservative superset of the query-radius
-// neighborhood at the exact supplied positions, with the same ownership and
-// solid-surface policy. No geometric result is reused after positions change.
+// Optional candidates must conservatively cover the query-radius neighborhood
+// at the supplied positions, with the same ownership and solid-surface policy.
+// They may come from an earlier enclosing motion envelope. In particular, boxes
+// with half-width >= query_radius cover a colored sweep in which each node/body
+// moves once and its whole path is capped at gamma*query_radius/2: a current
+// query neighbor was initially within (1+gamma)*query_radius < 2*query_radius.
+// Pair geometry and separating planes are recomputed at the supplied positions.
+
+// Local particle assembly and block coloring for the OGC-style DAT sweep.
+// prepare() refreshes rest/pin/classification data and retains elasticity-only
+// colors when connectivity and ownership are unchanged. Contact pairs never
+// enter the coloring graph. Before every color, freeze_contacts() recomputes
+// numerical mesh-contact derivatives from the accepted current positions.
+// An optional selected color limits contact work to its particle blocks and
+// their incident pair union; generalized rigid blocks are assembled by the
+// enclosing general solver. Only selected particles may then call proposal().
+// proposal() reads that color's immutable derivatives together with LIVE
+// elastic/SDF positions, and never mutates the workspace. Physical previous
+// positions remain fixed throughout the substep.
+// Colors contain particle node ids and, in general mode, rigid blocks encoded
+// as count+body. All proxies of one body share that single block. The enclosing
+// general solver assembles rigid proposals and owns DAT truncation.
+class DATColoredStepWorkspace {
+public:
+    DATColoredStepWorkspace();
+    ~DATColoredStepWorkspace();
+    DATColoredStepWorkspace(const DATColoredStepWorkspace&) = delete;
+    DATColoredStepWorkspace& operator=(const DATColoredStepWorkspace&) = delete;
+
+    void prepare(const RefMesh&, const VertexTriangleMap&, const std::vector<Pin>&,
+        const SimParams&, std::size_t count, bool hold_rigid_proxies = false);
+    const std::vector<ShapeGrads>& rest_gradients() const;
+    // Cached elasticity-only colors, reused across solves with unchanged
+    // structural connectivity/ownership and independent of contact snapshots.
+    const std::vector<std::vector<int>>& colors() const;
+    void freeze_contacts(const SimParams&, const std::vector<Vec3>& snapshot,
+        const std::vector<Vec3>* previous, const BroadPhase& candidates,
+        const std::vector<int>* selected_blocks = nullptr);
+    Vec3 proposal(int node, const RefMesh&, const VertexTriangleMap&,
+        const std::vector<Pin>&, const SimParams&,
+        const std::vector<Vec3>& live, const std::vector<Vec3>& target,
+        const std::vector<Vec3>* previous) const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};

@@ -129,9 +129,9 @@ Rational segment_segment_distance_squared(const Points& p) {
                      point_segment_distance_squared(p[3], p[0], p[1])});
 }
 
-// Exact closest residuals used only by the opt-in direct-step proposal. Keep
-// all feature decisions and residual coordinates rational; the public distance
-// routines return rounded doubles and cannot provide this supporting plane.
+// Keep feature decisions and residual coordinates rational for cold-path
+// direction queries and the opt-in direct-step proposal. A rounded fast
+// closest point can otherwise lose the orthogonality of a tiny residual.
 Point point_segment_closest_residual(const Point& p, const Point& a, const Point& b) {
     const Point edge = subtract(b, a), offset = subtract(p, a);
     const Rational length_squared = dot(edge, edge), projection = dot(offset, edge);
@@ -1686,6 +1686,16 @@ int compare_contact_distance_exact(const std::array<Vec3, 4>& positions,
     const exact_linear::Rational threshold = exact_linear::Rational(distance)
         * exact_linear::Rational(distance);
     return distance_squared < threshold ? -1 : (distance_squared > threshold ? 1 : 0);
+}
+
+Vec3 contact_closest_residual_exact(const std::array<Vec3, 4>& positions,
+                                  bool vertex_face) {
+    const auto residual = exact_linear::contact_closest_residual(
+        exact_linear::from_positions(positions), vertex_face);
+    Vec3 result;
+    for (int axis = 0; axis < 3; ++axis)
+        result[axis] = residual[axis].convert_to<double>();
+    return result;
 }
 
 bool contact_preserves_separation_exact(const std::array<Vec3, 4>& start,

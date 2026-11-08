@@ -304,6 +304,13 @@ SegmentSegmentContactEvaluation make_segment_segment_contact_evaluation(
                     positions[0], positions[1], positions[2], positions[3],
                     eps, exact_computation_fallback);
     validate_contact_evaluation_distance(evaluation.dr.distance);
+    // A fast closest-point subtraction can erase a strictly positive gap.
+    // Retry only this singular case, including a supplied fast distance, so
+    // valid separated geometry does not reach the undefined zero-distance
+    // barrier. Exact contact still returns zero and is rejected below.
+    if (evaluation.dr.distance == 0.0 && k_barrier > 0 && !evaluation.dr.robust)
+        evaluation.dr = segment_segment_distance(positions[0], positions[1],
+            positions[2], positions[3], eps, true);
     initialize_contact_barrier_data(evaluation, k_barrier);
     return evaluation;
 }

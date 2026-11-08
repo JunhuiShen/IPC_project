@@ -29,6 +29,15 @@ CCDResult segment_segment_linear_ccd_v1(
 int compare_contact_distance_exact(const std::array<Vec3, 4>& positions,
                                    bool vertex_face, double distance);
 
+// Cold-path closest residual from primitive B to A: (point - triangle closest
+// point) for NT, or (first edge closest point - second edge closest point) for
+// SS. Convert the ORIGINAL binary64 coordinates before selecting a feature or
+// computing the residual. Only the final coordinates are rounded to binary64;
+// callers must still verify a represented separating direction before use.
+// A true intersection returns zero; all input coordinates must be finite.
+Vec3 contact_closest_residual_exact(const std::array<Vec3, 4>& positions,
+                                  bool vertex_face);
+
 // Check the actual rounded endpoint against gap_end >= min(gap_start, floor).
 // A true initial intersection returns false: this is not an overlap-repair or
 // contact-side inference policy. floor must be finite and strictly positive.

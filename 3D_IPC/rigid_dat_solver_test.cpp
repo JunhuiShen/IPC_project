@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 #include <omp.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <random>
@@ -39,7 +40,7 @@ struct RigidDATScene {
         params.fixed_iters = true;
         params.max_global_iters = 1;
         params.dat_query_radius = 10;
-        params.use_jacobi_dat = true;
+        params.use_dat = true;
         params.k_barrier = 0;
     }
 
@@ -101,9 +102,30 @@ struct SolveState {
     }
 };
 
+void expect_unchanged(const SolveState& actual,const SolveState& expected) {
+    expect_vectors(actual.positions,expected.positions,0);
+    expect_vectors(actual.target,expected.target,0);
+    expect_vectors(actual.centers,expected.centers,0);
+    expect_vectors(actual.omega,expected.omega,0);
+    ASSERT_EQ(actual.orientation.size(),expected.orientation.size());
+    for(std::size_t body=0;body<actual.orientation.size();++body)
+        EXPECT_TRUE(actual.orientation[body].isApprox(expected.orientation[body],0));
+}
+
+void expect_unchanged(const DeformedState& actual,const DeformedState& expected) {
+    expect_vectors(actual.deformed_positions,expected.deformed_positions,0);
+    expect_vectors(actual.velocities,expected.velocities,0);
+    expect_vectors(actual.x_coms,expected.x_coms,0);
+    expect_vectors(actual.v_coms,expected.v_coms,0);
+    expect_vectors(actual.omega,expected.omega,0);
+    ASSERT_EQ(actual.orientations.size(),expected.orientations.size());
+    for(std::size_t body=0;body<actual.orientations.size();++body)
+        EXPECT_TRUE(actual.orientations[body].isApprox(expected.orientations[body],0));
+}
+
 SolverResult solve(const RigidDATScene& scene, SolveState& iterate,
     BroadPhase& phase) {
-    return global_jacobi_solver_dat_general(scene.mesh, scene.state,
+    return global_gauss_seidel_solver_dat(scene.mesh, scene.state,
         scene.adjacency, scene.pins, scene.params, iterate.positions,
         iterate.target, iterate.centers, iterate.orientation, iterate.omega,
         phase);
@@ -237,6 +259,63 @@ TEST(RigidDATSolver, BothMovingRigidBodiesKeepAGapWithoutBarrierOrCCD) {
     EXPECT_LT(iterate.positions[0].z(), before[0].z());
     EXPECT_GT(iterate.positions[triangle_node].z(), before[triangle_node].z());
     expect_rigidity(scene.mesh, iterate.positions);
+}
+
+TEST(RigidDATColors, ContactingBodiesAndParticlesShareElasticColorsWithoutSplittingRigidProxies) {
+    for (bool has_particle : {false, true}) {
+        SCOPED_TRACE(has_particle);
+        const auto scene = approaching_scene(has_particle);
+        const int count = static_cast<int>(scene.state.deformed_positions.size());
+        std::vector<AABB> boxes;
+        for (const auto& position : scene.state.deformed_positions)
+            boxes.emplace_back(position - Vec3::Constant(1),
+                position + Vec3::Constant(1));
+        BroadPhase phase;
+        phase.initialize(boxes, scene.mesh, 0,
+            BroadPhase::InitializationMode::GeneralSolver);
+        ASSERT_FALSE(phase.cache().nt_pairs.empty());
+        DATColoredStepWorkspace workspace;
+        workspace.prepare(scene.mesh, scene.adjacency, scene.pins, scene.params,
+            scene.state.deformed_positions.size(), true);
+        std::vector<int> colors(count + scene.mesh.rb_nodes.size(), -1);
+        std::size_t visited = 0;
+        for (std::size_t color = 0; color < workspace.colors().size(); ++color) {
+            for (int block : workspace.colors()[color]) {
+                ASSERT_GE(block, 0);
+                ASSERT_LT(block, static_cast<int>(colors.size()));
+                EXPECT_EQ(colors[block], -1) << "A generalized block appears twice";
+                colors[block] = static_cast<int>(color);
+                if (block < count)
+                    EXPECT_LT(scene.mesh.node_to_rb[block], 0)
+                        << "Rigid proxies must collapse to one generalized body block";
+                ++visited;
+            }
+        }
+        EXPECT_EQ(visited, scene.mesh.rb_nodes.size() + (has_particle ? 1u : 0u));
+        for (std::size_t body = 0; body < scene.mesh.rb_nodes.size(); ++body)
+            EXPECT_GE(colors[count + body], 0);
+        const auto block_for = [&](int node) {
+            const int body = scene.mesh.node_to_rb[node];
+            return body < 0 ? node : count + body;
+        };
+        for (const auto& pair : phase.cache().nt_pairs) {
+            const int nodes[4] = {pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+            for (int a = 0; a < 4; ++a) for (int b = a + 1; b < 4; ++b) {
+                const int block_a = block_for(nodes[a]), block_b = block_for(nodes[b]);
+                if (block_a != block_b) EXPECT_EQ(colors[block_a], colors[block_b]);
+            }
+        }
+        // These fixtures have two elastically independent generalized blocks.
+        // Their contact does not split the color or create rigid proxy blocks.
+        EXPECT_EQ(workspace.colors().size(), 1u);
+        const auto elastic_colors = workspace.colors();
+        workspace.freeze_contacts(scene.params, scene.state.deformed_positions,
+            &scene.state.deformed_positions, phase);
+        EXPECT_EQ(workspace.colors(), elastic_colors);
+        workspace.prepare(scene.mesh, scene.adjacency, scene.pins, scene.params,
+            scene.state.deformed_positions.size(), true);
+        EXPECT_EQ(workspace.colors(), elastic_colors);
+    }
 }
 
 TEST(RigidDATSolver, RepeatedNearContactFramesNeverPublishARoundedIntersection) {
@@ -443,21 +522,81 @@ TEST(RigidDATSolver, FrictionUsesOnePhysicalHistoryAcrossSweepsAndThreads) {
 }
 
 TEST(RigidDATSolver, MalformedOwnershipIsRejectedBeforeAnyCandidateIsPublished) {
-    for (int corruption : {0, 1, 2}) {
-        SCOPED_TRACE(corruption);
+    RestoreOpenMP restore;
+    omp_set_dynamic(0);
+    for(int count:{4,260})for(int threads:{1,2,4,8})for(int corruption:{0,1,2}) {
+        SCOPED_TRACE(::testing::Message()<<"nodes="<<count<<" threads="<<threads
+            <<" corruption="<<corruption);
+        omp_set_num_threads(threads);
         RigidDATScene scene;
-        scene.add_body(tetrahedron(), Vec3(.5, 0, 0));
+        scene.params.use_parallel=true;
+        auto proxies=tetrahedron();
+        for(int node=4;node<count;++node)
+            proxies.emplace_back(.001*node,.03*(node%7),.02*(node%11));
+        scene.add_body(proxies,Vec3(.5,0,0));
         scene.finish();
         SolveState iterate(scene);
         const auto original = iterate;
+        const auto physical_state=scene.state;
         if (corruption == 0) scene.mesh.node_to_rb[0] = 4;
-        if (corruption == 1) scene.mesh.rb_nodes[0][1] = scene.mesh.rb_nodes[0][0];
+        if (corruption == 1)
+            scene.mesh.rb_nodes[0][count>128?192:1] = scene.mesh.rb_nodes[0][0];
         if (corruption == 2) scene.mesh.node_to_rb[0] = -1;
         BroadPhase phase;
         EXPECT_THROW(solve(scene, iterate, phase), std::invalid_argument);
-        expect_vectors(iterate.positions, original.positions, 0);
-        expect_vectors(iterate.centers, original.centers, 0);
-        expect_vectors(iterate.omega, original.omega, 0);
+        expect_unchanged(iterate,original);
+        expect_unchanged(scene.state,physical_state);
+    }
+}
+
+TEST(RigidDATSolver, NoProposalExitsStillRejectTouchingContactsBeforePublication) {
+    for(bool particle:{false,true})for(bool jacobi:{false,true})for(bool residual_exit:{false,true}) {
+        SCOPED_TRACE(::testing::Message()<<"particle="<<particle<<" jacobi="<<jacobi
+            <<" residual_exit="<<residual_exit);
+        RigidDATScene scene;
+        scene.params.fixed_iters=!residual_exit;
+        scene.params.max_global_iters=residual_exit?3:0;
+        scene.params.tol_abs=1e-10;
+        if(particle) {
+            scene.state.deformed_positions={Vec3::Zero()};
+            scene.state.velocities={Vec3::Zero()};
+            scene.mesh.mass={1};scene.mesh.node_to_rb={-1};
+        } else {
+            scene.add_body({Vec3::Zero()},Vec3::Zero(),Vec3::Zero(),
+                RigidBodyUpdateMode::TranslationOnly);
+        }
+        const int first=int(scene.state.deformed_positions.size());
+        scene.add_body({Vec3(-1,-1,0),Vec3(1,-1,0),Vec3(0,1,0)},
+            Vec3::Zero(),Vec3::Zero(),RigidBodyUpdateMode::None);
+        scene.mesh.tris={first,first+1,first+2};
+        scene.finish();
+        const auto physical_state=scene.state;
+        SolveState invalid(scene);
+        const auto original=invalid;
+        BroadPhase phase;
+        const auto run=[&](SolveState& iterate) {
+            return jacobi
+                ? global_jacobi_solver_dat_general(scene.mesh,scene.state,scene.adjacency,
+                    scene.pins,scene.params,iterate.positions,iterate.target,iterate.centers,
+                    iterate.orientation,iterate.omega,phase)
+                : solve(scene,iterate,phase);
+        };
+        // Zero barrier forces make the initial residual zero. Neither an
+        // already-converged solve nor a zero iteration budget may accept an
+        // invalid initial point/face contact just because no step is proposed.
+        EXPECT_THROW((void)run(invalid),std::domain_error);
+        expect_unchanged(invalid,original);
+        expect_unchanged(scene.state,physical_state);
+
+        // A separated control takes the same early exit without moving state.
+        scene.state.deformed_positions[0].z()=.1;
+        if(!particle)scene.state.x_coms[0].z()=.1;
+        SolveState valid(scene);
+        const auto separated=valid;
+        const auto result=run(valid);
+        EXPECT_TRUE(result.converged);EXPECT_EQ(result.iterations,0);
+        EXPECT_EQ(result.has_residual,residual_exit);
+        expect_unchanged(valid,separated);
     }
 }
 
@@ -589,4 +728,184 @@ TEST(RigidDATSolver, MixedSolidAndRigidGravityUsesIndependentPhysicalMasses) {
     EXPECT_LE((iterate.centers[0]-previous.x_coms[0]-dt*previous.v_coms[0]
         -dt*dt*scene.params.gravity).norm(),3e-13);
     expect_rigidity(scene.mesh,iterate.positions);
+}
+
+TEST(RigidDATSolver, MixedSolidColorsUseAcceptedElasticityWithoutRevisitingTheRigidBlock) {
+    RestoreOpenMP restore;
+    omp_set_dynamic(0);
+    RigidDATScene scene;
+    scene.params.damping = .5;
+    scene.params.solid_mu = 25;
+    scene.params.solid_lambda = 35;
+    scene.add_body(tetrahedron(Vec3(4, 0, 0)), Vec3(.3, -.1, .2),
+        Vec3(.1, -.2, .4));
+    auto rigid_only = scene;
+    rigid_only.finish();
+    SolveState rigid_expected(rigid_only);
+    BroadPhase rigid_phase;
+    ASSERT_TRUE(solve(rigid_only, rigid_expected, rigid_phase).converged);
+
+    const int first = static_cast<int>(scene.state.deformed_positions.size());
+    const Vec3 corner(-4, 0, 0);
+    create_solid({corner, corner + Vec3::UnitX(), corner + Vec3::UnitY(),
+        corner + Vec3::UnitZ()}, {0, 1, 2, 3}, 24, scene.mesh, scene.state);
+    scene.state.deformed_positions[first + 1].x() += .08;
+    scene.finish();
+    SolveState initial(scene);
+    auto expected = initial.positions;
+    auto frozen_elasticity = initial.positions;
+    BroadPhase unused;
+    // A single tet is K4: deterministic structural coloring visits its four
+    // index-ordered vertices in separate colors. The far-away rigid block and
+    // the query cap do not constrain these small nodal steps.
+    for (int node = first; node < first + 4; ++node) {
+        const auto live = compute_solid_local_gradient_and_block(node, scene.mesh,
+            scene.pins, scene.params, expected, initial.target, unused);
+        const Vec3 update = -scene.params.damping
+            * (matrix3d_inverse(live.second) * live.first);
+        ASSERT_LT(update.norm(), .01);
+        expected[node] += update;
+        const auto frozen = compute_solid_local_gradient_and_block(node,
+            scene.mesh, scene.pins, scene.params, initial.positions,
+            initial.target, unused);
+        frozen_elasticity[node] -= scene.params.damping
+            * (matrix3d_inverse(frozen.second) * frozen.first);
+    }
+    double propagation = 0;
+    for (int node = first; node < first + 4; ++node)
+        propagation = std::max(propagation,
+            (expected[node] - frozen_elasticity[node]).norm());
+    ASSERT_GT(propagation, 1e-7);
+
+    for (int threads : {1, 4}) {
+        SCOPED_TRACE(threads);
+        omp_set_num_threads(threads);
+        scene.params.use_parallel = threads > 1;
+        auto actual = initial;
+        BroadPhase phase;
+        ASSERT_TRUE(solve(scene, actual, phase).converged);
+        for (int node = first; node < first + 4; ++node)
+            EXPECT_LE((actual.positions[node] - expected[node]).norm(), 3e-13);
+        EXPECT_LE((actual.centers[0] - rigid_expected.centers[0]).norm(), 3e-13);
+        EXPECT_LE((actual.omega[0] - rigid_expected.omega[0]).norm(), 3e-13);
+        EXPECT_LE((actual.orientation[0] - rigid_expected.orientation[0]).norm(), 3e-13);
+        for (int node : scene.mesh.rb_nodes[0])
+            EXPECT_LE((actual.positions[node] - rigid_expected.positions[node]).norm(), 3e-13);
+        expect_rigidity(scene.mesh, actual.positions);
+    }
+}
+
+TEST(RigidDATSolver, LaterParticleColorsRefreshContactsAfterTheRigidColorMoves) {
+    RestoreOpenMP restore;
+    omp_set_dynamic(0);
+    RigidDATScene scene;
+    scene.state.deformed_positions = {Vec3(0, 0, .12), Vec3(.3, 0, .12),
+        Vec3(0, .3, .12)};
+    scene.state.velocities.assign(3, Vec3::Zero());
+    scene.state.velocities[0] = Vec3(.02, 0, -.01);
+    scene.mesh.mass.assign(3, 1);
+    scene.mesh.node_to_rb.assign(3, -1);
+    scene.mesh.tris = {0, 1, 2};
+    scene.add_body({Vec3(-1, -1, 0), Vec3(2, -1, 0), Vec3(-1, 2, 0),
+        Vec3(0, 0, -.5)}, Vec3(.04, 0, .02), Vec3::Zero(),
+        RigidBodyUpdateMode::TranslationOnly);
+    scene.mesh.tris.insert(scene.mesh.tris.end(), {3, 4, 5});
+    scene.params.damping = .3;
+    scene.params.mu = 20;
+    scene.params.lambda = 10;
+    scene.params.d_hat = .3;
+    scene.params.k_barrier = 2;
+    scene.params.dat_query_radius = 1;
+    scene.finish();
+    const auto physical_history = scene.state.deformed_positions;
+    const SolveState initial(scene);
+
+    // A body shares color zero with cloth node zero. Its initial system is
+    // identical to the preserved Jacobi API's system. Small separating motion
+    // is not truncated, so that API supplies an independent rigid first-color
+    // reference without requiring a duplicate generalized-coordinate assembler.
+    auto initial_rigid = initial;
+    BroadPhase jacobi_phase;
+    ASSERT_TRUE(global_jacobi_solver_dat_general(scene.mesh, scene.state,
+        scene.adjacency, scene.pins, scene.params, initial_rigid.positions,
+        initial_rigid.target, initial_rigid.centers, initial_rigid.orientation,
+        initial_rigid.omega, jacobi_phase).converged);
+    const Vec3 body_delta = initial_rigid.centers[0] - initial.centers[0];
+    ASSERT_GT(body_delta.norm(), 1e-5);
+    ASSERT_LT(body_delta.norm(), .01);
+
+    auto contact_mesh = scene.mesh;
+    contact_mesh.tet_adj.resize(initial.positions.size());
+    const std::vector<unsigned char> contact_nodes(initial.positions.size(), 1);
+    auto no_mesh = scene.params;
+    no_mesh.d_hat = 0;
+    const auto contact_at = [&](int node, const std::vector<Vec3>& positions) {
+        std::vector<AABB> boxes;
+        for (const auto& p : positions) boxes.emplace_back(p, p);
+        BroadPhase phase;
+        phase.initialize(boxes, scene.mesh, scene.params.d_hat,
+            BroadPhase::InitializationMode::GeneralSolver);
+        const auto full = compute_solid_local_gradient_and_block(node,
+            contact_mesh, scene.pins, scene.params, positions, initial.target,
+            phase, &contact_nodes, &contact_nodes, nullptr, &physical_history);
+        const auto without_mesh = compute_solid_local_gradient_and_block(node,
+            contact_mesh, scene.pins, no_mesh, positions, initial.target,
+            phase, &contact_nodes, &contact_nodes, nullptr, &physical_history);
+        return std::make_pair(Vec3(full.first - without_mesh.first),
+            Mat33(full.second - without_mesh.second));
+    };
+    const auto reference = [&](bool refresh_each_color) {
+        auto result = initial;
+        const std::array<std::pair<Vec3, Mat33>, 3> initial_contact{
+            contact_at(0, initial.positions), contact_at(1, initial.positions),
+            contact_at(2, initial.positions)};
+        for (int color = 0; color < 3; ++color) {
+            auto local = compute_local_gradient_and_hessian_no_barrier(color,
+                scene.mesh, scene.adjacency, scene.pins, no_mesh,
+                result.positions, initial.target, nullptr, nullptr, nullptr,
+                &physical_history);
+            const auto contact = refresh_each_color
+                ? contact_at(color, result.positions) : initial_contact[color];
+            local.first += contact.first;
+            local.second += contact.second;
+            std::vector<Vec3> proposal(result.positions.size(), Vec3::Zero());
+            proposal[color] = -scene.params.damping
+                * (matrix3d_inverse(local.second) * local.first);
+            EXPECT_LT(proposal[color].norm(), .02);
+            std::vector<Vec3> dc(1, Vec3::Zero()), dw(1, Vec3::Zero());
+            if (color == 0) dc[0] = body_delta;
+            const auto accepted = general_planar_DAT(scene.params.dat_gamma,
+                scene.params.dat_query_radius, scene.mesh, proposal,
+                result.positions, result.centers, result.omega,
+                scene.state.orientations, dc, dw, scene.params.dt(),
+                scene.params.dat_node_box_padding);
+            EXPECT_DOUBLE_EQ(accepted.body_factors[0], 1);
+            EXPECT_LE((accepted.positions[color] - result.positions[color]
+                - proposal[color]).norm(), 1e-13);
+            result.positions = accepted.positions;
+            result.centers = accepted.centers;
+            result.omega = accepted.omega;
+            result.orientation = accepted.orientations;
+        }
+        return result;
+    };
+    const auto expected = reference(true), iteration_contact = reference(false);
+    double refresh_effect = 0;
+    for (int node : {1, 2}) refresh_effect = std::max(refresh_effect,
+        (expected.positions[node] - iteration_contact.positions[node]).norm());
+    ASSERT_GT(refresh_effect, 1e-8);
+    for (int threads : {1, 4}) {
+        SCOPED_TRACE(threads);
+        omp_set_num_threads(threads);
+        scene.params.use_parallel = threads > 1;
+        auto actual = initial;
+        BroadPhase phase;
+        ASSERT_TRUE(solve(scene, actual, phase).converged);
+        expect_vectors(actual.positions, expected.positions);
+        expect_vectors(actual.centers, expected.centers);
+        expect_vectors(actual.omega, expected.omega);
+        EXPECT_LE((actual.orientation[0] - expected.orientation[0]).norm(), 1e-13);
+        expect_vectors(scene.state.deformed_positions, physical_history, 0);
+        expect_rigidity(scene.mesh, actual.positions);
+    }
 }

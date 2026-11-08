@@ -58,15 +58,18 @@ inline void accumulate_solver_result(SolverResult& agg, const SolverResult& sub,
     }
 }
 
-// Explicit entry points select their named solver regardless of driver flags.
-// Synchronous cloth/solid Jacobi updates filtered by planar DAT. Each sweep
-// rebuilds current contact data; no coloring or per-vertex CCD sweep is used.
-// Requires a deformable-only mesh. DAT constrains surface contacts, not tet
-// inversion or analytic SDF boundaries (SDF forces remain in the local systems).
-SolverResult global_jacobi_solver_dat(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
+// DAT for cloth, solid, rigid, and mixed scenes. Elastic colors;
+// contact geometry refreshes before each color.
+SolverResult global_gauss_seidel_solver_dat(const RefMesh& ref_mesh,
+    const DeformedState& state, const VertexTriangleMap& adj,
+    const std::vector<Pin>& pins, const SimParams& params,
+    std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
+    std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new,
+    std::vector<Vec3>& omega_new, BroadPhase& broad_phase,
+    const std::string& outdir = "");
 
-// Synchronous cloth/solid/rigid DAT. Previous physical state is immutable;
-// initialize centers/quaternions from state and nonlinear omega_new to zero.
+// Simultaneous Jacobi reference APIs retained for GPU parity.
+SolverResult global_jacobi_solver_dat(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 SolverResult global_jacobi_solver_dat_general(const RefMesh& ref_mesh,
     const DeformedState& state, const VertexTriangleMap& adj,
     const std::vector<Pin>& pins, const SimParams& params,
@@ -75,8 +78,8 @@ SolverResult global_jacobi_solver_dat_general(const RefMesh& ref_mesh,
     std::vector<Vec3>& omega_new, BroadPhase& broad_phase,
     const std::string& outdir = "");
 
-// Same frozen-state Jacobi assembly and convergence rules as the DAT solver,
-// with each proposal filtered by level-based collision-colored CCD instead.
+// Fully frozen-state Jacobi assembly with each proposal filtered by level-based
+// collision-colored CCD; this solver does not use DAT's elastic color sweep.
 // colored_ccd_guess_iters caps updating CCD sweeps per Jacobi iteration, plus
 // one discarded probe; zero keeps the current positions. The filter's target
 // is xnew + the Jacobi proposal, not xhat. DAT parameters and the initial-guess

@@ -2,10 +2,15 @@
 #include "barrier_energy.h"
 #include "friction_energy.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+
+void gpu_contact_original_frozen_test_gpu(const double (*)[3],const double (*)[3],
+    bool,ipc_gpu::Derivatives*,int&,int&);
+void gpu_dat_numerical_helpers_test_gpu();
 
 namespace {
 std::size_t components=0;double maximum_error=0;
@@ -112,9 +117,49 @@ void reference(const GpuPipelineTestInput& input,const GpuPipelineTestOutput& ou
         compare_system(orientation==2?out.rigid_omega_after[body]:orientation?out.rigid_omega[body]:out.rigid_com[body],g,H,"rigid "+std::to_string(body)+" phase "+std::to_string(orientation));
     }
 }
+
+void original_frozen_retry() {
+    const std::array<Vec3,4> captured{{
+        Vec3(-1.2508422453585308,.30142330872441742,-.3441007037557508),
+        Vec3(-1.249271199389888,.43384953344448823,-.36383141911477945),
+        Vec3(-1.252873745189554,.35850525592266047,-.35936719358941788),
+        Vec3(-1.2435860863993213,.36377791656553377,-.33712447408743129)}};
+    std::array<Vec3,4> previous;
+    double positions[4][3],history[4][3];
+    for(int i=0;i<4;++i)for(int k=0;k<3;++k) {
+        positions[i][k]=captured[i][k];
+        history[i][k]=previous[i][k]=captured[i][k]-.0001*(i+1)*(k+1);
+    }
+    const double dt=.031;
+    const auto packet=make_segment_segment_contact_evaluation(captured,.005,37,1e-12,nullptr,false);
+    require(packet.dr.robust&&packet.dr.distance>0&&packet.active,
+        "captured CPU Original EE must retry its rounded zero gap");
+    const auto frozen=make_segment_segment_frozen_friction_contact(captured,previous,packet,dt,.1);
+    ipc_gpu::Derivatives actual[4];int error=0,ordinary_status=0;
+    gpu_contact_original_frozen_test_gpu(positions,history,true,actual,error,ordinary_status);
+    require(ordinary_status==int(ipc_gpu::solver::ContactStatus::ZeroDistance),
+        "captured device Original EE must first report rounded zero");
+    require(error==0,"Original frozen EE exact pipeline retry failed "+std::to_string(error));
+    for(int role=0;role<4;++role) {
+        const auto normal=segment_segment_barrier_self_gradient_and_hessian(
+            captured[0],captured[1],captured[2],captured[3],role,packet);
+        const auto friction=frozen_friction_role_gradient_and_hessian(frozen,role,.2,dt*dt);
+        compare_system(actual[role],dt*dt*37*normal.first+friction.first,
+            dt*dt*37*normal.second+friction.second,"Original frozen EE role "+std::to_string(role));
+    }
+    gpu_contact_original_frozen_test_gpu(positions,history,false,actual,error,ordinary_status);
+    require(error==21,"Original color sweep unexpectedly enabled the DAT emergency retry");
+    const double crossing[4][3]={{0,0,0},{1,0,0},{.5,-1,0},{.5,1,0}};
+    gpu_contact_original_frozen_test_gpu(crossing,crossing,true,actual,error,ordinary_status);
+    require(error==21,"Original frozen exact retry accepted a true intersection");
+    for(const auto& system:actual)
+        compare_system(system,Vec3::Zero(),Mat33::Zero(),"true-contact publication guard");
+}
 }
 int main() {
     try {
+        gpu_dat_numerical_helpers_test_gpu();
+        original_frozen_retry();
         for(int kind=0;kind<6;++kind) {
             const auto input=fixture(kind);GpuPipelineTestOutput out;
             gpu_contact_pipeline_test_gpu(input,out);
@@ -129,6 +174,6 @@ int main() {
                 for(const auto& system:out.rigid_omega_after)compare_system(system,Vec3::Zero(),Mat33::Zero(),"error refreshed orientation guard");
             }
         }
-        std::cout<<"GPU contact pipeline: 6 mixed tests, "<<components<<" reference components, max scaled error "<<maximum_error<<" (CUDA)\n";
+        std::cout<<"GPU contact pipeline: 6 mixed tests, Original frozen EE exact retry/GS and true-contact controls, "<<components<<" reference components, max scaled error "<<maximum_error<<" (CUDA)\n";
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

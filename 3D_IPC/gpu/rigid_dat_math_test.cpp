@@ -2,8 +2,10 @@
 #include "rigid.cuh"
 #include "../rigid_dat_trajectory.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -29,6 +31,11 @@ rigid_dat::Trajectory cpu_path(const gpu::Trajectory& path) {
 }
 double distance(const double* a,const double* b) {
     return std::hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]);
+}
+bool same_bits(double a,double b) {
+    std::uint64_t first,second;
+    std::memcpy(&first,&a,sizeof(first));std::memcpy(&second,&b,sizeof(second));
+    return first==second;
 }
 void production_point(const gpu::Trajectory& path,double t,double* out) {
     double omega[3],center[3],q[4];
@@ -90,6 +97,44 @@ void verify_radius_prefix(const gpu::Trajectory& path,const double* query,double
         require(distance(x.data(),query)<=radius,"Accepted curved prefix escaped query sphere");
     }
 }
+// The GPU radius is query-point anchored; the CPU uses an initial interval box.
+// Compare those independent oracles only where their anchors are equivalent,
+// or with the existing curved-path tolerance for their outward-rounding offset.
+void verify_capped_radius(const gpu::Trajectory& path,const double* query,double radius,
+    int depth=40,int budget=4096,double cpu_tolerance=-1) {
+    const auto full=gpu::radius_step(path,query,radius,depth,budget);
+    require(!gpu::is_fatal(full.status),"Uncapped radius fixture failed");
+    gpu::PreparedTrajectory prepared;
+    require(gpu::prepare_trajectory(path,prepared)==gpu::Status::Ok,"Capped radius preparation failed");
+    const auto cpu=cpu_path(path);
+    const rigid_dat::PreparedTrajectory cpu_prepared(cpu);
+    const double caps[]={0.,-0.,1.,.01,.1,.5,.9,full.factor,
+        std::nextafter(full.factor,0.),std::nextafter(full.factor,1.)};
+    for(double cap:caps) {
+        const auto result=gpu::radius_step_capped(path,query,radius,cap,depth,budget);
+        const auto cached=gpu::radius_step_capped(path,query,radius,cap,depth,budget,&prepared);
+        require(!gpu::is_fatal(result.status),"Capped radius query failed");
+        require(same_bits(result.factor,std::min(full.factor,cap)),
+            "Capped radius changed the bitwise original minimum");
+        require(result.status==cached.status&&same_bits(result.factor,cached.factor),
+            "Prepared capped radius result changed");
+        if(cap==1||cap>full.factor)
+            require(result.status==full.status,"Unreached radius cap changed limiting status");
+        if(result.status==gpu::Status::Ok)
+            require(same_bits(result.factor,cap),"Successful capped radius did not certify requested cap");
+        else require(result.status==full.status,"Capped radius changed depth/budget failure kind");
+        if(cpu_tolerance>=0) {
+            const double oracle=rigid_dat::radius_step_capped(cpu_prepared,radius,cap,depth);
+            require(cpu_tolerance==0 ? same_bits(result.factor,oracle)
+                    : std::fabs(result.factor-oracle)<=cpu_tolerance,
+                "GPU capped radius disagrees with CPU certificate");
+        }
+        for(int i=0;i<=64;++i) {
+            const auto x=rigid_dat::evaluate(cpu,result.factor*double(i)/64);
+            require(distance(x.data(),query)<=radius,"Capped radius prefix escaped query sphere");
+        }
+    }
+}
 std::uint64_t random_state=0x1234bcdef9876543ULL;
 double random_signed() {
     random_state^=random_state<<13;random_state^=random_state>>7;random_state^=random_state<<17;
@@ -119,6 +164,7 @@ int main() {
         require(std::fabs(radial.factor-rigid_dat::radius_step(cpu_path(spin),.25))<1e-10,
             "GPU/CPU radius limits disagree");
         verify_radius_prefix(spin,start,.25,radial);
+        verify_capped_radius(spin,start,.25,40,4096,1e-10);
 
         // Eight complete turns hide every crossing from all eight proposals.
         auto turns=spin;turns.delta_omega[2]=16*pi;
@@ -128,6 +174,7 @@ int main() {
         const auto hidden_radius=gpu::radius_step(turns,start,.25);
         require(hidden_radius.factor>.0048&&hidden_radius.factor<.0051,"Hidden turns escaped radius cap");
         verify_radius_prefix(turns,start,.25,hidden_radius);
+        verify_capped_radius(turns,start,.25,40,4096,1e-10);
 
         auto away=spin;away.reference[0]=0;away.reference[1]=1;
         const double negative_x[3]={-1,0,0};
@@ -153,18 +200,36 @@ int main() {
         const auto offset=gpu::radius_step(translated,offset_query,.5);
         require(offset.factor>.19999999&&offset.factor<=.2,"Query anchor offset was omitted");
         verify_radius_prefix(translated,offset_query,.5,offset);
+        verify_capped_radius(translated,offset_query,.5);
         require(gpu::radius_step(translated,offset_query,.05).status==gpu::Status::InitialRadiusUnproved,
             "Initial represented pose outside query radius was accepted");
+        require(gpu::radius_step_capped(translated,offset_query,.05,0).status==gpu::Status::InitialRadiusUnproved,
+            "Zero cap bypassed initial radius validation");
+
+        gpu::Trajectory unit_translation;
+        unit_translation.delta_center[0]=1;
+        verify_capped_radius(unit_translation,origin,.75,40,4096,0);
+        verify_capped_radius(unit_translation,origin,.75,1,4096,0);
+        verify_capped_radius(unit_translation,origin,.75,40,1);
+        verify_capped_radius(unit_translation,origin,.75,40,2);
+        require(gpu::radius_step_capped(unit_translation,origin,.75,.25,1).status==gpu::Status::Ok,
+            "A proved capped prefix retained an irrelevant later depth limit");
+        const auto capped_budget=gpu::radius_step_capped(unit_translation,origin,.75,.75,40,2);
+        require(capped_budget.status==gpu::Status::BudgetExhausted&&capped_budget.factor==.5,
+            "Unproved radius cap lost the certified budget-exhausted prefix");
 
         gpu::Trajectory stationary;
         stationary.reference[0]=1;stationary.reference[1]=2;stationary.reference[2]=3;
         require(gpu::plane_step(stationary,nx,origin,.9).factor==1,"Stationary body was damped");
         require(gpu::radius_step(stationary,stationary.reference,.1).factor==1,"Stationary radius was damped");
+        verify_capped_radius(stationary,stationary.reference,.1,40,4096,0);
         require(gpu::radius_step(gpu::Trajectory{},origin,0).factor==1,
             "Exact stationary origin did not fit a zero-radius sphere");
+        verify_capped_radius(gpu::Trajectory{},origin,0,40,4096,0);
         auto safe=translated;safe.delta_center[2]=.01;
         require(gpu::plane_step(safe,negative_z,plane_z,.9).factor==1,"No-contact update was damped");
         require(gpu::radius_step(safe,safe.reference,.5).factor==1,"Unrestricted radius update was damped");
+        verify_capped_radius(safe,safe.reference,.5,40,4096,0);
         // The plane has a small represented gap at large world coordinates.
         // Subtract coordinates before the dot product so cancellation of two
         // large projections does not unnecessarily erase that strict gap.
@@ -236,7 +301,17 @@ int main() {
 
         auto invalid=spin;invalid.dt=std::numeric_limits<double>::quiet_NaN();
         require(gpu::plane_step(invalid,nx,px,.9).status==gpu::Status::InvalidInput,"NaN trajectory accepted");
+        require(gpu::radius_step_capped(invalid,start,.25,0).status==gpu::Status::InvalidInput,
+            "Zero radius cap bypassed trajectory validation");
         require(gpu::radius_step(spin,start,INFINITY).status==gpu::Status::InvalidInput,"Infinite radius accepted");
+        for(double cap:{-.1,1.1,std::numeric_limits<double>::infinity(),
+                std::numeric_limits<double>::quiet_NaN()})
+            require(gpu::radius_step_capped(spin,start,.25,cap).status==gpu::Status::InvalidInput,
+                "Invalid radius cap accepted");
+        require(gpu::radius_step_capped(spin,start,.25,0,65).status==gpu::Status::InvalidInput,
+            "Zero radius cap bypassed depth validation");
+        require(gpu::radius_step_capped(spin,start,.25,0,40,0).status==gpu::Status::InvalidInput,
+            "Zero radius cap bypassed budget validation");
         require(gpu::plane_step(spin,origin,px,.9).status==gpu::Status::InvalidInput,"Zero normal accepted");
         require(gpu::plane_step(spin,nx,px,1.1).status==gpu::Status::InvalidInput,"Invalid gamma accepted");
         require(gpu::plane_step(spin,nx,px,.9,65).status==gpu::Status::InvalidInput,"Oversized stack depth accepted");

@@ -375,7 +375,20 @@ if(BUILD_TESTING)
         ipc_add_test("${test_target}")
     endforeach()
 
+    # Compile only the rounding tests from DAT.cpp; production builds never
+    # include GTest or duplicate the DAT implementation in this executable.
+    add_executable(directed_rounding_test DAT.cpp)
+    target_compile_features(directed_rounding_test PRIVATE cxx_std_17)
+    target_compile_definitions(directed_rounding_test PRIVATE IPC_DAT_DIRECTED_ROUNDING_TEST=1)
+    target_link_libraries(directed_rounding_test PRIVATE Eigen3::Eigen GTest::gtest_main)
+    ipc_enable_ipo(directed_rounding_test)
+    gtest_discover_tests(directed_rounding_test
+        DISCOVERY_MODE PRE_TEST
+        DISCOVERY_TIMEOUT 60
+    )
+
     add_executable(rigid_dat_bounds_test rigid_dat_bounds_test.cpp)
+    target_link_libraries(rigid_dat_bounds_test PRIVATE Eigen3::Eigen)
     target_compile_features(rigid_dat_bounds_test PRIVATE cxx_std_17)
     target_compile_options(rigid_dat_bounds_test PRIVATE
         "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-ffp-contract=off>")

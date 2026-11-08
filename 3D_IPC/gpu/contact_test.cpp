@@ -1,6 +1,8 @@
 #include "contact.cuh"
 #include "contact_exact.cuh"
 #include "contact_selected_ordinary.cuh"
+#include "contact_input_publication.cuh"
+#include "original_contact.cuh"
 #include "barrier_energy.h"
 #include "friction_energy.h"
 
@@ -312,11 +314,77 @@ void current_point_triangle_parity_check() {
         <<" ordinary/selected/exact cases, "<<degenerate.size()
         <<" eps-degenerate exact cases; nearest features, ties, barrier/friction and zero-gap PASS\n";
 }
+
+void original_dat_zero_retry_check() {
+    using namespace ipc_gpu::solver;
+    const std::array<ContactStatus,6> statuses{{ContactStatus::Ok,ContactStatus::InvalidInput,
+        ContactStatus::NeedsExactGeometry,ContactStatus::ZeroDistance,
+        ContactStatus::NonFiniteDerivative,ContactStatus::ExactCapacityExceeded}};
+    for(bool original:{false,true})for(bool frozen:{false,true})
+        for(auto kind:{ContactKind::PointTriangle,ContactKind::EdgeEdge})for(auto status:statuses) {
+            const bool expected=original&&frozen&&kind==ContactKind::EdgeEdge&&status==ContactStatus::ZeroDistance;
+            require(original_dat_zero_distance_retry(original,frozen,kind,status)==expected,
+                "Original DAT emergency retry widened its policy");
+        }
+    const std::array<Vec3,4> captured{{
+        Vec3(-1.2508422453585308,.30142330872441742,-.3441007037557508),
+        Vec3(-1.249271199389888,.43384953344448823,-.36383141911477945),
+        Vec3(-1.252873745189554,.35850525592266047,-.35936719358941788),
+        Vec3(-1.2435860863993213,.36377791656553377,-.33712447408743129)}};
+    auto input=make_input(ContactKind::EdgeEdge,captured,1);
+    input.d_hat=.005;input.k_barrier=37;
+    const auto ordinary=evaluate_contact_original(input);
+    require(ordinary.status==ContactStatus::ZeroDistance&&ordinary.distance==0,
+        "captured Original EE did not exercise rounded zero distance");
+    require(original_dat_zero_distance_retry(true,true,input.kind,ordinary.status),
+        "captured Original DAT EE was not eligible for exact retry");
+    ContactInput direct_storage;
+    ContactInputPublication<false> direct(&direct_storage);direct.input=input;
+    require(direct.publish_if_queued(ordinary.status),"direct exact input was not published");
+    ContactInput deferred_storage;deferred_storage.dt=-1;
+    ContactInputPublication<true> deferred(&deferred_storage);deferred.input=input;
+    require(!deferred.publish_if_queued(ContactStatus::Ok)&&deferred_storage.dt==-1,
+        "ordinary nonqueued input changed deferred storage");
+    require(deferred.publish_if_queued(ordinary.status),"emergency exact input was not published before queueing");
+    require(std::memcmp(direct_storage.positions,deferred_storage.positions,sizeof(input.positions))==0
+        &&std::memcmp(direct_storage.previous,deferred_storage.previous,sizeof(input.previous))==0
+        &&deferred_storage.dt==input.dt&&deferred_storage.d_hat==input.d_hat
+        &&deferred_storage.k_barrier==input.k_barrier&&deferred_storage.kind==input.kind
+        &&deferred_storage.hessian_blocks==input.hessian_blocks,
+        "deferred emergency retry lost its current geometry or parameters");
+    const auto cpu=make_segment_segment_contact_evaluation(captured,input.d_hat,
+        input.k_barrier,input.eps,nullptr,false);
+    require(cpu.dr.robust&&cpu.active&&cpu.dr.distance>0,
+        "CPU Original DAT packet did not take its emergency exact retry");
+    const auto recovered=evaluate_exact({deferred_storage})[0];
+    require(recovered.status==ContactStatus::Ok&&recovered.active
+        &&std::abs(recovered.distance-1.67453456537080605e-17)<5e-31,
+        "emergency exact retry lost the independently computed positive gap");
+    reference_check(input,recovered,6000,true); // All four gradients/full Hessian and friction.
+
+    const std::array<Vec3,4> crossing{{Vec3::Zero(),Vec3::UnitX(),
+        Vec3(.5,-1,0),Vec3(.5,1,0)}};
+    const auto touch=make_input(ContactKind::EdgeEdge,crossing,0);
+    const auto zero=evaluate_contact_original(touch);
+    require(zero.status==ContactStatus::ZeroDistance
+        &&original_dat_zero_distance_retry(true,true,touch.kind,zero.status),
+        "true contact did not reach the distinguishing exact retry");
+    const auto exact_zero=evaluate_exact({touch})[0];
+    require(exact_zero.status==ContactStatus::ZeroDistance&&!exact_zero.active,
+        "emergency retry artificially separated a true intersection");
+    bool cpu_rejected=false;
+    try { (void)make_segment_segment_contact_evaluation(crossing,touch.d_hat,touch.k_barrier,
+        touch.eps,nullptr,false); }
+    catch(const std::runtime_error&) {cpu_rejected=true;}
+    require(cpu_rejected,"CPU Original true contact oracle did not reject");
+    std::cout<<"Original DAT EE zero-distance retry: policy, input publication and exact arithmetic PASS (host policy checks)\n";
+}
 }
 
 int main() {
     try {
         current_point_triangle_parity_check();
+        original_dat_zero_retry_check();
         const auto inputs=fixtures();
         const auto outputs=evaluate(inputs);
         for(std::size_t i=0;i<inputs.size();++i)reference_check(inputs[i],outputs[i],i);

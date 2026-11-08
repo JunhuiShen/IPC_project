@@ -207,8 +207,8 @@ and +y as the up direction.
 | Experimental SIMD v2 | `--use_basic_experimental true --use_simd true`; supports cloth, rigid, and mixed scenes. |
 | Experimental scalar cloth v1 | `--use_basic_experimental true --use_simd false`. |
 | Basic cloth grid | `--use_cloth_grid true`; cloth only, with OGC disabled. See `--help` for grid sizing flags. |
-| Jacobi with planar DAT | `--use_jacobi_dat true`; cloth, solid, rigid, and mixed scenes, with OGC and cloth grid disabled. Takes precedence over experimental/SIMD solver flags. |
-| Jacobi with level-based colored CCD | `--use_jacobi_level_based_ccd true`; CPU cloth/solid scenes without rigid bodies, with OGC and cloth grid disabled. Takes precedence over experimental/SIMD solver flags; mutually exclusive with `--use_jacobi_dat`. |
+| DAT solver | `--use_dat true`; cloth, solid, rigid, and mixed scenes, with OGC and cloth grid disabled. Takes precedence over experimental/SIMD solver flags. |
+| Jacobi with level-based colored CCD | `--use_jacobi_level_based_ccd true`; CPU cloth/solid scenes without rigid bodies, with OGC and cloth grid disabled. Takes precedence over experimental/SIMD solver flags; mutually exclusive with `--use_dat`. |
 | CUDA solver | `gpu/build/3D_sim_gpu`; requires `--fixed_iters` and, for ordinary solving, `--use_ticcd false`. OGC and cloth grid are unsupported; see the [GPU guide](gpu/README.md) for mode restrictions. |
 
 Run a small deformable example with DAT:
@@ -217,12 +217,16 @@ Run a small deformable example with DAT:
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 1 --twist_nx 9 --twist_ny 9 \
   --num_frames 1 --substeps 3 --max_substep_iters 20 --fixed_iters \
-  --use_jacobi_dat --dat_gamma 0.9 --format geo --outdir results/jacobi_dat
+  --use_dat --dat_gamma 0.9 --format geo --outdir results/jacobi_dat
 ```
 
-Jacobi with level-based colored CCD uses the same Jacobi proposal, force-residual
-convergence checks, and previous-position substep start as the DAT solver. It
-replaces the DAT filter with `collision_colored_ccd_initial_guess_level_based`
+DAT starts each substep from the previous positions and poses, skipping initial
+guesses. It supports fixed-iteration and residual-based stopping. See `--help`
+for DAT parameters.
+
+Jacobi with level-based colored CCD uses fully frozen Jacobi proposals, with
+force-residual convergence checks and a previous-position substep start. It
+applies `collision_colored_ccd_initial_guess_level_based`
 inside **every Jacobi iteration**: compute all proposed displacements from the
 same frozen positions, then use level/color-ordered linear CCD to move toward
 `current positions + proposed displacement`. Each filter call builds a new
@@ -270,7 +274,7 @@ early if all nodes reach their targets or a complete sweep makes no progress.
 unchanged.
 Both colored-guess modes are supported by the GPU solver.
 Either colored guess overrides the CCD, Verlet, and translation guess flags
-and is ignored in OGC or either Jacobi solver mode. Alternative OGC solving
+and is ignored in OGC, DAT, or the Jacobi CCD solver. Alternative OGC solving
 (`--use_ogc_solver`) requires `--fixed_iters`; mixed deformable/rigid scenes
 use the basic/general route. Some scenes enforce their own guess/contact
 presets in [example.cpp](example.cpp).

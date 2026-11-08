@@ -15,6 +15,15 @@ IPC_INPUT_PUBLICATION_HD inline bool contact_status_queues_exact(ContactStatus s
         || status == ContactStatus::NonFiniteDerivative;
 }
 
+// Match the CPU DAT packet's emergency retry of a rounded zero EE distance.
+// Ordinary Original GS and every nonzero Original calculation retain their
+// existing geometry policy; true contact is rejected by the exact result.
+IPC_INPUT_PUBLICATION_HD inline bool original_dat_zero_distance_retry(
+    bool original,bool frozen_snapshot,ContactKind kind,ContactStatus status) {
+    return original && frozen_snapshot && kind==ContactKind::EdgeEdge
+        && status==ContactStatus::ZeroDistance;
+}
+
 // Exact kernels are the only consumers of the persistent ContactInput array.
 // In the ordinary mode, gather writes that array directly, as before. In the
 // opt-in mode, gather evaluates an identical local input and publishes it only

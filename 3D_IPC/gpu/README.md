@@ -188,10 +188,16 @@ See [output and restart](../README.md#output-and-restart).
 
 ### Optional Jacobi-with-DAT path
 
-`--use_jacobi_dat true` selects the GPU port of the simultaneous Jacobi update
-with planar Divide and Truncate for cloth, solid, rigid and mixed scenes.
+`--use_dat true` selects the GPU port of the simultaneous Jacobi update
+with planar DAT for cloth, solid, rigid and mixed scenes.
+The CPU frame drivers use OGC-style colored DAT under the same flag;
+the GPU port retains simultaneous Jacobi updates and its explicit CPU Jacobi
+reference APIs for parity checks.
 Rigid COM and angular increments are assembled from one frozen snapshot and
 share a body-wide factor with full curved-path plane and radius checks.
+Radius searches stop once their certified prefix reaches the body's existing
+minimum. Pair directions and query cutoffs use supporting-plane certificates;
+uncertain NT/EE geometry retries through the device exact queues.
 It honours the CPU fixed budget (`--fixed_iters` with
 `--max_substep_iters`), starts every substep from the previous positions and
 therefore skips all initial-guess flags. `--dat_gamma` (default `0.9`),
@@ -201,7 +207,7 @@ automatic) keep their CPU meaning and validation.
 ```sh
 ./gpu/build/3D_sim_gpu --example 1 --twist_nx 9 --twist_ny 9 \
   --num_frames 1 --substeps 3 --max_substep_iters 20 --fixed_iters \
-  --use_jacobi_dat --dat_gamma 0.9 --format geo --outdir results/gpu_dat
+  --use_dat --dat_gamma 0.9 --format geo --outdir results/gpu_dat
 ```
 
 The public DAT parameters are exactly `--dat_gamma`, `--dat_query_radius` and
@@ -221,6 +227,8 @@ filter; SDF penalties remain part of the Jacobi update.
 DAT and force assembly share one conservative candidate neighborhood per
 frozen sweep; each applies its own distance cutoff. Rigid nodes retain their
 initial trajectory bounds and rotated references for all plane queries.
+With `--exact_computation_fallback false`, a frozen EE force packet whose
+distance rounds to zero retries in the exact queue; true contact still fails.
 Represented endpoints use parallel validation and a parallel single-halving
 retry. Further failures enter a device-controlled retry loop with the same halving budget and final
 zero-step check; converged sweeps do not enqueue 56 validation rounds.
@@ -265,6 +273,10 @@ These suites provide modern component regression coverage only; separate
 source-bound CPU/GPU numerical, caller, sanitizer and short physical validation
 remain independent acceptance steps. This launcher neither runs those checks nor
 claims that they have passed. No speedup is claimed.
+
+The rounding and rigid DAT math tests also compile as ordinary C++ without
+CUDA. These host checks cover numerical helpers; native CUDA compilation and
+device execution are still required to qualify the kernels.
 
 `python3 gpu/example1_comparison.py --self-test` checks the named Example 1
 comparison protocols offline. Comparisons bind one explicit protocol

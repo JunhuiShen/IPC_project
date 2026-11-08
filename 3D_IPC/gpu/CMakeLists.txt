@@ -131,7 +131,7 @@ if(IPC_GPU_BUILD_VALIDATION)
         gpu_ratio_host_test gpu_ratio_cuda_test
         gpu_exact_pool_test gpu_adaptive_boxes_test gpu_global_guess_test
         gpu_solver_test gpu_dat_test gpu_dat_geometry_test
-        gpu_rigid_dat_math_test gpu_original_rigid_math_test
+        gpu_rigid_dat_math_test gpu_directed_rounding_test gpu_original_rigid_math_test
         gpu_rigid_pins_test gpu_cpu_parity_test
         gpu_original_contact_test gpu_original_ccd_test gpu_original_mode_test)
     add_dependencies(gpu_validation gpu_contact_policy_host_test)

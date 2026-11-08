@@ -105,7 +105,7 @@ struct Fixture {
         parameters.substeps = 1;
         parameters.max_global_iters = 1;
         parameters.fixed_iters = true;
-        parameters.use_jacobi_dat = true;
+        parameters.use_dat = true;
         parameters.use_ticcd = false;
         parameters.use_ccd_guess = false;
         parameters.node_box_min = .001;
@@ -135,8 +135,8 @@ void uniform_velocity(Fixture& fixture, const Vec3& velocity) {
     for (auto& value : fixture.state.velocities) value = velocity;
 }
 
-// One genuine CPU DAT substep. The driver entry point is the same one the
-// production cloth/general drivers call for --use_jacobi_dat.
+// One CPU simultaneous-Jacobi DAT reference substep for the GPU port. CPU frame
+// drivers now use the separate OGC-style colored DAT entry points.
 SolverResult cpu_substep(Fixture& fixture, bool require_completion = true) {
     const auto previous = fixture.state.deformed_positions;
     auto next = previous;
@@ -660,7 +660,7 @@ void check_rigid_dat_bridge() {
     // The bridge now keeps rigid generalized blocks in a DAT scene.
     SimParams params = SimParams::zeros();
     params.fixed_iters = true;
-    params.use_jacobi_dat = true;
+    params.use_dat = true;
     params.dat_query_radius = .5;
     RefMesh mesh;
     DeformedState state;
@@ -676,7 +676,7 @@ void check_rigid_dat_bridge() {
 void check_bridge_mapping() {
     SimParams params = SimParams::zeros();
     params.fixed_iters = true;
-    params.use_jacobi_dat = true;
+    params.use_dat = true;
     params.dat_query_radius = 0.0;
     params.d_hat = .02;
     params.node_box_max = .1;
@@ -722,7 +722,7 @@ void check_bridge_mapping() {
         bad.use_colored_ccd_guess = false;
         bad.colored_ccd_guess_iters = 0;
         bad.use_verlet_guess = false;
-        bad.use_jacobi_dat = false;
+        bad.use_dat = false;
         if (variant == 0) bad.fixed_iters = false;
         if (variant == 1) bad.use_ogc = true;
         if (variant == 2) bad.use_ogc_solver = true;
@@ -755,7 +755,7 @@ RigidPin rigid_pin(int body, const Vec3& local, const Vec3& target) {
 
 Fixture rigid_pair() {
     Fixture fixture;
-    fixture.parameters.use_jacobi_dat = false;
+    fixture.parameters.use_dat = false;
     fixture.parameters.max_global_iters = 1;
     fixture.parameters.damping = 1.0;
     fixture.parameters.gravity = Vec3(0, -.5, 0);
@@ -981,7 +981,7 @@ void check_rigid_dat_advance() {
     for(bool exact:{false,true})for(auto mode:{RigidBodyUpdateMode::TranslationAndOrientation,
         RigidBodyUpdateMode::TranslationOnly,RigidBodyUpdateMode::OrientationOnly,RigidBodyUpdateMode::None}) {
         Fixture fixture=rigid_pair();
-        fixture.parameters.use_jacobi_dat=true;
+        fixture.parameters.use_dat=true;
         fixture.parameters.exact_computation_fallback=exact;
         fixture.parameters.dat_query_radius=10;
         fixture.parameters.max_global_iters=3;

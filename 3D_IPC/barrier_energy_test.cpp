@@ -1782,6 +1782,60 @@ TEST(BarrierEnergy, RobustSegmentGeometryHasFiniteOrderedDerivatives) {
     }
 }
 
+TEST(BarrierEnergy, CapturedSeparatedEdgesRetryAZeroFastDistanceBeforeBuildingBarrierPackets) {
+    // README Example 1, frame 215: both rounded closest points coincide even
+    // though these original binary64 edges have a strictly positive gap.
+    const std::array<Vec3,4> x{{
+        Vec3(-1.2508422453585308,.30142330872441742,-.3441007037557508),
+        Vec3(-1.249271199389888,.43384953344448823,-.36383141911477945),
+        Vec3(-1.252873745189554,.35850525592266047,-.35936719358941788),
+        Vec3(-1.2435860863993213,.36377791656553377,-.33712447408743129)}};
+    const auto fast=segment_segment_distance(x[0],x[1],x[2],x[3],1e-12,false);
+    ASSERT_DOUBLE_EQ(fast.distance,0);
+    ASSERT_TRUE(fast.closest_point_1.isApprox(fast.closest_point_2,0));
+    const auto robust=segment_segment_distance(x[0],x[1],x[2],x[3]);
+    ASSERT_TRUE(robust.robust);
+    ASSERT_EQ(robust.active_region,SegmentSegmentRegion::Interior);
+    ASSERT_GT(robust.distance,0);
+    // Independent exact-rational triple-product distance, with both closest
+    // parameters strictly interior: s=.44273796077128264, t=.29362206138816758.
+    constexpr double exact_gap=1.67453456537080605045e-17;
+    EXPECT_NEAR(robust.distance,exact_gap,5e-31);
+    constexpr double d_hat=.005;
+    for(bool exact_fallback:{false,true})for(bool precomputed:{false,true}) {
+        SCOPED_TRACE(::testing::Message()<<"exact_fallback="<<exact_fallback
+            <<" precomputed="<<precomputed);
+        const auto packet=make_segment_segment_contact_evaluation(x,d_hat,1,
+            1e-12,precomputed?&fast:nullptr,exact_fallback);
+        ASSERT_TRUE(packet.active);ASSERT_TRUE(packet.dr.robust);
+        EXPECT_DOUBLE_EQ(packet.dr.distance,robust.distance);
+        EXPECT_TRUE(std::isfinite(packet.b_prime));
+        EXPECT_TRUE(std::isfinite(packet.b_double_prime));
+        EXPECT_TRUE(std::isfinite(packet.normal_load));
+        EXPECT_GT(packet.normal_load,0);
+        for(int role=0;role<4;++role) {
+            SCOPED_TRACE(role);
+            const Vec3 gradient=segment_segment_barrier_gradient(
+                x[0],x[1],x[2],x[3],role,packet);
+            const Mat33 hessian=segment_segment_barrier_self_hessian(
+                x[0],x[1],x[2],x[3],role,packet);
+            const auto combined=segment_segment_barrier_self_gradient_and_hessian(
+                x[0],x[1],x[2],x[3],role,packet);
+            const auto reference=segment_segment_barrier_self_gradient_and_hessian(
+                x[0],x[1],x[2],x[3],d_hat,role,1e-12,&robust);
+            ASSERT_TRUE(gradient.allFinite());ASSERT_TRUE(hessian.allFinite());
+            ASSERT_TRUE(combined.first.allFinite());ASSERT_TRUE(combined.second.allFinite());
+            ASSERT_TRUE(reference.first.allFinite());ASSERT_TRUE(reference.second.allFinite());
+            EXPECT_GT(gradient.norm(),0);
+            EXPECT_GT(hessian.norm(),0);
+            EXPECT_LE((gradient-reference.first).norm(),2e-12*reference.first.norm());
+            EXPECT_LE((hessian-reference.second).norm(),2e-12*reference.second.norm());
+            EXPECT_LE((combined.first-gradient).norm(),2e-12*gradient.norm());
+            EXPECT_LE((combined.second-hessian).norm(),2e-12*hessian.norm());
+        }
+    }
+}
+
 TEST(BarrierEnergy, RobustNearParallelTranslationMatchesFiniteDifferences) {
     // Unlike the 1e-17 saved gap, this gap permits representable FD increments
     // that are small relative to its distance and preserve the active feature.
@@ -1830,6 +1884,11 @@ TEST(BarrierEnergy, RobustSegmentTrueIntersectionIsNotArtificiallySeparated) {
     EXPECT_TRUE(dr.separation.isZero(0.0));
     EXPECT_THROW(make_segment_segment_contact_evaluation(
         x, 0.5, 23.0, 1.0e-12, &dr), std::runtime_error);
+    // The emergency retry also applies with the ordinary fallback disabled;
+    // a true intersection must still fail rather than receive an artificial gap.
+    for(bool precomputed:{false,true})
+        EXPECT_THROW(make_segment_segment_contact_evaluation(
+            x,0.5,23.0,1.0e-12,precomputed?&dr:nullptr,false),std::runtime_error);
     for (int role = 0; role < 4; ++role)
         EXPECT_THROW(segment_segment_barrier_gradient(
             x[0], x[1], x[2], x[3], 0.5, role), std::runtime_error);

@@ -3,7 +3,7 @@
 // ===========================================================================
 // rigid_dat_trajectory.h
 //
-// Dependency-free (C++17, standard headers only) rigid-body Divide-and-Truncate
+// C++17 rigid-body Divide-and-Truncate
 // trajectory evaluation and *conservative* prefix certification.
 //
 // Mathematical model (all parameters are binary64):
@@ -35,7 +35,7 @@
 //   merely its endpoints.
 // * Every set computation in `trajectory_bounds`, `plane_step` and
 //   `radius_step` uses outward-rounded binary64 interval arithmetic
-//   (std::nextafter at every rounded operation).  The rotation enclosure is
+//   (one binary64 step after every rounded operation).  The rotation enclosure is
 //   obtained by scaling and squaring the matrix exponential of skew(theta):
 //   exp(skew(theta)) = exp(skew(theta)/2^s)^(2^s), with 2^s chosen by directed
 //   powers-of-two so that the spectral norm of the scaled argument is at most
@@ -92,9 +92,13 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+
+#include "DAT.h"
+
 
 namespace rigid_dat {
 
@@ -108,6 +112,7 @@ struct Trajectory {
 };
 
 struct Box { Vector lo{}, hi{}; };
+
 
 namespace detail {
 
@@ -144,7 +149,7 @@ inline double round_down(double value) {
     if (value == std::numeric_limits<double>::infinity())
         return std::numeric_limits<double>::max();
     if (value == -std::numeric_limits<double>::infinity()) return value;
-    return std::nextafter(value, -std::numeric_limits<double>::infinity());
+    return directed_rounding::next_down(value);
 }
 
 inline double round_up(double value) {
@@ -152,7 +157,7 @@ inline double round_up(double value) {
     if (value == -std::numeric_limits<double>::infinity())
         return -std::numeric_limits<double>::max();
     if (value == std::numeric_limits<double>::infinity()) return value;
-    return std::nextafter(value, std::numeric_limits<double>::infinity());
+    return directed_rounding::next_up(value);
 }
 
 inline Interval make_interval(double value) { return Interval{value, value}; }
@@ -398,17 +403,40 @@ inline IntervalMatrix rotation_matrix_interval(const std::array<Interval,3>& the
 }
 
 inline const IntervalMatrix& cached_rotation_matrix(const std::array<Interval,3>& theta) {
-    struct Entry {std::array<Interval,3> theta{}; IntervalMatrix matrix{}; bool valid=false;};
-    struct Cache {std::array<Entry,32> entries{}; std::size_t next=0;};
+    // A truncated depth-40 query can visit more than 32 different angular
+    // intervals, evicting the old linear memo before the next proxy reuses it.
+    // Retain a bounded larger working set without scanning it on every lookup.
+    // Keys preserve all six binary64 endpoints, including signed zeros; cache
+    // placement/replacement never substitutes a different interval enclosure.
+    using Key = std::array<std::uint64_t,6>;
+    constexpr std::size_t set_count=128, way_count=4;
+    struct Entry {Key key{}; IntervalMatrix matrix{}; bool valid=false;};
+    struct Set {std::array<Entry,way_count> entries{}; std::size_t next=0;};
+    struct Cache {std::array<Set,set_count> sets{};};
     static thread_local Cache cache;
-    for (const auto& entry:cache.entries)
-        if(entry.valid && std::memcmp(entry.theta.data(),theta.data(),sizeof(theta))==0)
+    Key key;
+    static_assert(sizeof(key)==sizeof(theta), "theta cache keys must retain every bit");
+    std::memcpy(key.data(),theta.data(),sizeof(key));
+    // Mix every endpoint before avalanching the complete key into the low
+    // index bits. Dyadic times often differ primarily in high mantissa bits.
+    std::uint64_t hash=UINT64_C(0xcbf29ce484222325);
+    for(const auto word:key) {
+        hash^=word;
+        hash*=UINT64_C(0x100000001b3);
+    }
+    hash^=hash>>33;hash*=UINT64_C(0xff51afd7ed558ccd);
+    hash^=hash>>33;hash*=UINT64_C(0xc4ceb9fe1a85ec53);
+    hash^=hash>>33;
+    auto& set=cache.sets[static_cast<std::size_t>(hash)&(set_count-1)];
+    for (const auto& entry:set.entries)
+        if(entry.valid && entry.key==key) {
             return entry.matrix;
+        }
     // Compute before publishing a key; exceptions leave every entry usable.
     const auto matrix=rotation_matrix_interval(theta);
-    auto& entry=cache.entries[cache.next];
-    cache.next=(cache.next+1)%cache.entries.size();
-    entry.theta=theta;entry.matrix=matrix;entry.valid=true;
+    auto& entry=set.entries[set.next];
+    set.next=(set.next+1)%set.entries.size();
+    entry.key=key;entry.matrix=matrix;entry.valid=true;
     return entry.matrix;
 }
 
@@ -701,6 +729,7 @@ struct RadiusPrefixScan {
     std::array<Interval, 3> v0{};
     Box reference_box{};
     double radius = 0.0;
+    double cap = 1.0;
     long long budget = 0;
     int max_depth = 1;
     double last_safe = 0.0;
@@ -738,6 +767,14 @@ struct RadiusPrefixScan {
         --budget;
         if (interval_is_safe(a, b)) {
             last_safe = b;
+            // Preserve the original [0,1] dyadic traversal. Once a SAFE leaf
+            // certifies the prefix through cap, any later last_safe is >=cap
+            // and cannot reduce the caller's already-known body minimum.
+            if (cap < 1.0 && last_safe >= cap) {
+                last_safe = cap;
+                stopped = true;
+                return false;
+            }
             return true;
         }
         if (depth >= max_depth) {
@@ -898,14 +935,19 @@ inline double plane_step(const PreparedTrajectory& prepared, const Vector& norma
     if (!(last_safe > 0.0)) return 0.0;
     double relaxed = gamma * last_safe;
     if (!(relaxed < last_safe)) {
-        relaxed = std::nextafter(last_safe, 0.0);
+        relaxed = directed_rounding::toward_positive_zero(last_safe);
     }
     if (!(relaxed > 0.0)) return 0.0;
     return relaxed;
 }
 
-inline double radius_step(const PreparedTrajectory& prepared, double radius,
-                          int iterations = 40) {
+// Internal min-preserving query for callers that already have a certified
+// body-wide cap. Every accepted prefix is still proved by the original scan;
+// the search stops only after a safe leaf reaches cap, never at a sample.
+inline double radius_step_capped(const PreparedTrajectory& prepared, double radius,
+                                 double cap, int iterations = 40) {
+    if (!std::isfinite(cap) || cap < 0.0 || cap > 1.0)
+        throw std::invalid_argument("rigid_dat: cap must be finite and in [0,1]");
     const auto& path=prepared.path;
     if (!std::isfinite(radius) || radius < 0.0) {
         throw std::invalid_argument(
@@ -920,7 +962,7 @@ inline double radius_step(const PreparedTrajectory& prepared, double radius,
     if (detail::all_zero(path.delta_center) &&
         (path.dt == 0.0 || detail::all_zero(path.delta_omega) ||
          detail::all_zero(path.reference))) {
-        return 1.0;
+        return cap;
     }
 
     const auto& v0=prepared.v0;
@@ -930,6 +972,7 @@ inline double radius_step(const PreparedTrajectory& prepared, double radius,
     scan.v0 = v0;
     scan.reference_box = prepared.initial_box;
     scan.radius = radius;
+    scan.cap = cap;
     scan.max_depth = iterations < detail::kMaxDepth
                          ? iterations
                          : detail::kMaxDepth;
@@ -938,6 +981,10 @@ inline double radius_step(const PreparedTrajectory& prepared, double radius,
 
     if (scan.scan(0.0, 1.0, 0)) return 1.0;
     return scan.last_safe;
+}
+inline double radius_step(const PreparedTrajectory& prepared, double radius,
+                          int iterations = 40) {
+    return radius_step_capped(prepared, radius, 1.0, iterations);
 }
 
 inline double plane_step(const Trajectory& path,const Vector& normal,

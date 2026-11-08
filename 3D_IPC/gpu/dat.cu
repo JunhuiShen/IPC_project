@@ -37,6 +37,10 @@ namespace rd=rigid_dat_detail;
 static_assert(sizeof(V)==3*sizeof(double));
 __device__ void fail(int* status,int value){atomicCAS(status,0,value);}
 __device__ int failed(int* status){return atomicAdd(status,0);}
+__device__ double load_factor(const double* address) {
+    auto* bits=reinterpret_cast<unsigned long long*>(const_cast<double*>(address));
+    return __longlong_as_double(static_cast<long long>(atomicCAS(bits,0ULL,0ULL)));
+}
 __device__ void atomic_min_factor(double* address,double value) {
     auto* bits=reinterpret_cast<unsigned long long*>(address);
     auto previous=atomicCAS(bits,0ULL,0ULL);
@@ -149,7 +153,8 @@ __global__ void prepare_mixed_nodes(std::size_t count,const double (*positions)[
     if(rd::prepare_trajectory(path,rigid.prepared[node])!=rd::Status::Ok) {
         fail(status,DatRigidTrajectory);return;
     }
-    const auto radius_factor=rd::radius_step(path,positions[node],limit,40,4096,rigid.prepared+node);
+    const double cap=load_factor(rigid.factors+body);
+    const auto radius_factor=rd::radius_step_capped(path,positions[node],limit,cap,40,4096,rigid.prepared+node);
     if(safe_result(radius_factor,status))atomic_min_factor(rigid.factors+body,radius_factor.factor);
 }
 // This second pass starts only after all vertices have reduced their body's
@@ -228,34 +233,34 @@ template<bool Mixed> __device__ bool gather(const Work& w,std::size_t index,V po
     }
     return true;
 }
-__device__ void constrain_mixed(const Work& w,std::size_t index,const V x[4],
+__device__ int constrain_mixed(const Work& w,std::size_t index,const V x[4],
     const V update[4],V separation,int* status) {
-    const double distance=dat_detail::stable_norm(separation);
-    if(!dat_detail::finite(separation)||!dat_detail::finite(distance)) {fail(status,DatUnresolvedGeometry);return;}
-    if(distance>=w.parameters.query_radius)return;
-    if(!(distance>0)){fail(status,DatZeroGap);return;}
     const int split=w.contacts[index].kind==0?1:2;
-    const V normal=dat_detail::divide(separation,distance),origin=x[0];
+    dat_detail::PairPlane selected;
+    const int selection=dat_detail::select_pair_plane(x,split,separation,w.parameters.query_radius,selected);
+    if(selection)return selection;
+    if(selected.outside_query)return 0;
+    const V normal=selected.normal,origin=x[0];
     bool rigid_pair=false;
     for(int i=0;i<4;++i)rigid_pair|=w.rigid.scene.node_body[w.contacts[index].vertices[i]]>=0;
     if(!rigid_pair) {
         double factors[4];
-        const int code=dat_detail::plane_factors(x,update,split,separation,w.parameters,factors);
-        if(code){fail(status,code);return;}
+        const int code=dat_detail::plane_factors_from_plane(update,split,selected,w.parameters,factors);
+        if(code)return code;
         w.constraints[index]={normal,split};
         for(int i=0;i<4;++i)atomic_min_factor(w.factors+w.contacts[index].vertices[i],factors[i]);
-        return;
+        return 0;
     }
-    double coordinate[4],velocity[4],left=-INFINITY,right=INFINITY,a=0,b=0;
+    const double left=selected.left,right=selected.right;
+    double velocity[4],a=0,b=0;
     for(int i=0;i<4;++i) {
-        coordinate[i]=dat_detail::dot(dat_detail::subtract(x[i],origin),normal);
         velocity[i]=dat_detail::dot(update[i],normal);
-        if(!dat_detail::finite(coordinate[i])||!dat_detail::finite(velocity[i])) {fail(status,DatUnresolvedGeometry);return;}
-        if(i<split){left=dat_detail::maximum(left,coordinate[i]);a=dat_detail::maximum(a,velocity[i]);}
-        else{right=dat_detail::minimum(right,coordinate[i]);b=dat_detail::maximum(b,-velocity[i]);}
+        if(!dat_detail::finite(velocity[i]))return DatUnresolvedGeometry;
+        if(i<split)a=dat_detail::maximum(a,velocity[i]);
+        else b=dat_detail::maximum(b,-velocity[i]);
     }
     const double gap=right-left;
-    if(!(gap>0)||!dat_detail::finite(gap)){fail(status,DatUnresolvedGeometry);return;}
+    if(!(gap>0)||!dat_detail::finite(gap))return DatUnresolvedGeometry;
     const double scale=dat_detail::maximum(a,b);
     a=scale>0?a/scale:1;b=scale>0?b/scale:1;
     // Every side receives a strict interior plane even when a rotating endpoint
@@ -263,7 +268,7 @@ __device__ void constrain_mixed(const Work& w,std::size_t index,const V x[4],
     a=dat_detail::maximum(a,1e-3);b=dat_detail::maximum(b,1e-3);
     const double budget=gap*(a/(a+b));
     const V plane=dat_detail::add(origin,dat_detail::multiply(normal,left+budget));
-    if(!dat_detail::finite(plane)){fail(status,DatUnresolvedGeometry);return;}
+    if(!dat_detail::finite(plane))return DatUnresolvedGeometry;
     w.constraints[index]={normal,split};
     for(int i=0;i<4;++i) {
         const int node=w.contacts[index].vertices[i],body=w.rigid.scene.node_body[node];
@@ -271,14 +276,14 @@ __device__ void constrain_mixed(const Work& w,std::size_t index,const V x[4],
         const auto stored=project(point_box(x[i]),normal,plane);
         const double margin=side_a?-stored.hi:stored.lo;
         if(!dat_detail::finite(stored.lo)||!dat_detail::finite(stored.hi)||!(margin>0)) {
-            fail(status,DatUnresolvedGeometry);return;
+            return DatUnresolvedGeometry;
         }
         if(body>=0) {
             const auto initial=project(w.rigid.prepared[node].initial_box,normal,plane);
-            if(side_a?!(initial.hi<0):!(initial.lo>0)) {fail(status,DatRigidTrajectory);return;}
+            if(side_a?!(initial.hi<0):!(initial.lo>0))return DatRigidTrajectory;
             const V safe_normal=side_a?dat_detail::multiply(normal,-1):normal;
             const auto result=rd::plane_step(trajectory(w.rigid,node),safe_normal.v,plane.v,w.parameters.gamma,40,4096,w.rigid.prepared+node);
-            if(!safe_result(result,status))return;
+            if(!safe_result(result,status))return DatRigidTrajectory;
             atomic_min_factor(w.rigid.factors+body,result.factor);
         } else {
             const V safe_normal=side_a?normal:dat_detail::multiply(normal,-1);
@@ -290,13 +295,15 @@ __device__ void constrain_mixed(const Work& w,std::size_t index,const V x[4],
                 dat_detail::clamp(rd::round_down(allowed/approach)));
         }
     }
+    return 0;
 }
-template<bool Mixed> __device__ void constrain(const Work& w,std::size_t index,const V x[4],const V update[4],V separation,int* status) {
-    if constexpr(Mixed){constrain_mixed(w,index,x,update,separation,status);return;}
+template<bool Mixed> __device__ int constrain(const Work& w,std::size_t index,const V x[4],const V update[4],V separation,int* status) {
+    if constexpr(Mixed)return constrain_mixed(w,index,x,update,separation,status);
     double factors[4];
     const int code=dat_detail::plane_factors(x,update,w.contacts[index].kind==0?1:2,separation,w.parameters,factors);
-    if(code){fail(status,code);return;}
+    if(code)return code;
     for(int i=0;i<4;++i)atomic_min_factor(w.factors+w.contacts[index].vertices[i],factors[i]);
+    return 0;
 }
 template<bool Mixed> __global__ void ordinary_pairs(Work work,int* status) {
     const auto index=std::size_t(blockIdx.x)*blockDim.x+threadIdx.x;
@@ -304,12 +311,12 @@ template<bool Mixed> __global__ void ordinary_pairs(Work work,int* status) {
     V positions[4],updates[4],separation;
     if(!gather<Mixed>(work,index,positions,updates,status))return;
     if(dat_detail::aabb_separated(positions,work.contacts[index].kind==0?1:2,work.parameters.query_radius))return;
-    const int code=work.contacts[index].kind==0
+    int code=work.contacts[index].kind==0
         ?dat_detail::vertex_triangle(positions,separation):dat_detail::edge_edge(positions,separation);
+    if(!code)code=constrain<Mixed>(work,index,positions,updates,separation,status);
     if(code==dat_detail::NeedsExact) {
         const unsigned next=atomicAdd(work.exact_count,1u);work.exact_queue[next]=static_cast<int>(index);
     } else if(code)fail(status,code);
-    else constrain<Mixed>(work,index,positions,updates,separation,status);
 }
 template<int Limbs,bool Retry,bool Mixed> __global__ void exact_pairs(Work work,unsigned workers,int* status) {
     const unsigned worker=blockIdx.x*blockDim.x+threadIdx.x;
@@ -323,14 +330,18 @@ template<int Limbs,bool Retry,bool Mixed> __global__ void exact_pairs(Work work,
         exact::DevicePool pool;
         exact::initialize_pool(pool,work.exact_words+std::size_t(worker)*Limbs*exact_slots,
             work.exact_free_slots+std::size_t(worker)*exact_slots,Limbs,exact_slots);
-        const int code=dat_detail::exact_edge_edge<Limbs>(positions,separation);
+        int code=dat_detail::exact_pair_geometry<Limbs>(positions,
+            work.contacts[index].kind==0?1:2,separation);
         const bool arena_failed=pool.failed||pool.available!=pool.slot_count;
         exact::release_pool();
         if(arena_failed){fail(status,DatExactCapacity);return;}
+        if(!code) {
+            code=constrain<Mixed>(work,std::size_t(index),positions,updates,separation,status);
+            if(code==dat_detail::NeedsExact)code=DatUnresolvedGeometry;
+        }
         if(code==DatExactCapacity&&!Retry) {
             const unsigned next=atomicAdd(work.retry_count,1u);work.retry_queue[next]=index;
         } else if(code){fail(status,code);return;}
-        else constrain<Mixed>(work,std::size_t(index),positions,updates,separation,status);
     }
 }
 __global__ void finish_kernel(std::size_t count,const double (*capped)[3],const double* factors,
