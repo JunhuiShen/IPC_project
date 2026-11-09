@@ -40,7 +40,8 @@ inline void validate_jacobi_level_based_ccd_scene(const RefMesh& ref_mesh, const
     }
 }
 
-inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& state) {
+inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& state,
+    const std::vector<Vec3>* accepted_positions = nullptr) {
     if (ref_mesh.rb_nodes.empty())
         return;
 
@@ -53,6 +54,10 @@ inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& st
         || state.omega.size() != num_rbs) {
         throw std::invalid_argument("sync_rigid_body_particles: inconsistent rigid-body array sizes");
     }
+
+    if (accepted_positions
+        && accepted_positions->size() != state.deformed_positions.size())
+        throw std::invalid_argument("sync_rigid_body_particles: accepted-position count differs");
 
     if (state.velocities.size() < state.deformed_positions.size())
         state.velocities.resize(state.deformed_positions.size(), Vec3::Zero());
@@ -76,8 +81,13 @@ inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& st
                 || node >= static_cast<int>(state.deformed_positions.size())) {
                 throw std::out_of_range("sync_rigid_body_particles: node index is out of range");
             }
-            const Vec3 world_offset = quaternion_rotate(state.orientations[rb], ref_positions[local]);
-            state.deformed_positions[node] = state.x_coms[rb] + world_offset;
+            // V2 publishes the positions it actually accepted. Reconstructing
+            // them again from a rounded pose can reintroduce an intersection.
+            const Vec3 world_offset = accepted_positions
+                ? (*accepted_positions)[node] - state.x_coms[rb]
+                : quaternion_rotate(state.orientations[rb], ref_positions[local]);
+            state.deformed_positions[node] = accepted_positions
+                ? (*accepted_positions)[node] : state.x_coms[rb] + world_offset;
             state.velocities[node] = state.v_coms[rb] + state.omega[rb].cross(world_offset);
         }
     }
@@ -108,6 +118,7 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
         std::vector<Vec4> q_new = state.orientations;
         std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
 
+        std::vector<Vec3> accepted_rigid_positions;
         SolverResult sub_result;
         if (params.use_dat) {
             std::vector<Vec3> xnew=state.deformed_positions;
@@ -119,7 +130,8 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
             sub_result=global_gauss_seidel_solver_dat(ref_mesh,state,adjacency,pins,
                 solver_params,xnew,xhat,x_com_new,q_new,omega_new,broad_phase);
         } else if (params.use_basic_experimental_v2) {
-            std::vector<Vec3> xnew = state.deformed_positions;
+            accepted_rigid_positions = state.deformed_positions;
+            std::vector<Vec3>& xnew = accepted_rigid_positions;
             const std::vector<Vec3> xhat = state.deformed_positions;
             const VertexTriangleMap adjacency;
             const std::vector<Pin> pins;
@@ -143,7 +155,9 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
         state.x_coms = x_com_new;
         state.orientations = q_new;
         state.omega = omega_new;
-        sync_rigid_body_particles(ref_mesh, state);
+        sync_rigid_body_particles(ref_mesh, state,
+            active_params.use_basic_experimental_v2 && !active_params.use_dat
+                ? &accepted_rigid_positions : nullptr);
 
         if (on_substep) {
             const int global_sub =
@@ -263,7 +277,9 @@ inline SolverResult advance_one_frame_general(
         state.x_coms = x_com_new;
         state.orientations = q_new;
         state.omega = omega_new;
-        sync_rigid_body_particles(ref_mesh, state);
+        sync_rigid_body_particles(ref_mesh, state,
+            params.use_basic_experimental_v2 && !params.use_dat
+                && !params.use_jacobi_level_based_ccd ? &xnew : nullptr);
 
         if (on_substep) {
             const int global_substep = (frame_index - 1) * params.substeps + substep;

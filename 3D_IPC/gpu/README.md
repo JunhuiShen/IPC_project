@@ -37,7 +37,7 @@ solver driver; the retired hybrid comparison targets are no longer built.
 | Elastic assembly | [elastic.h](elastic.h), [elastic.cu](elastic.cu): incident gathers, derivative evaluation, reduction, proposals and deformable commits. |
 | Elastic arithmetic | [cloth_math.cuh](cloth_math.cuh), [solid_math.cuh](solid_math.cuh), [rigid_math.cuh](rigid_math.cuh): material gradients, Hessians and rigid kinematics. |
 | Broad phase and coloring | [broadphase.cu](broadphase.cu), [pbgs_coloring.cuh](pbgs_coloring.cuh), [pbgs_warp_ordered_exact.cuh](pbgs_warp_ordered_exact.cuh), [pbgs_warp_shared_forbidden_exact.cuh](pbgs_warp_shared_forbidden_exact.cuh), [parallel_scene_bounds.cuh](parallel_scene_bounds.cuh), [pbgs_label_compaction.cuh](pbgs_label_compaction.cuh): boxes, parallel scene bounds, candidates, dependency graph, ordered coloring and compact labels. |
-| Contact pipeline | [contact_pipeline.cu](contact_pipeline.cu): gathers, ordinary evaluation, exact queues/retries and ordered assembly into local systems. |
+| Contact pipeline | [contact_pipeline.cu](contact_pipeline.cu), [contact_record_index.cuh](contact_record_index.cuh): gathers, bounded packet addressing, ordinary evaluation, exact queues/retries and ordered assembly into local systems. |
 | Contact arithmetic | [contact.cuh](contact.cuh), [contact_selected_ordinary.cuh](contact_selected_ordinary.cuh), [contact_exact.cuh](contact_exact.cuh), [contact_cooperative.cuh](contact_cooperative.cuh): ordinary derivatives and scalar/cooperative exact paths. [original_contact.cuh](original_contact.cuh): the qualified original (`exact_computation_fallback == false`) geometry/force evaluator. |
 | Compact point contacts | [contact_compact_point.cu](contact_compact_point.cu), [cooperative_compact_point_study.cu](cooperative_compact_point_study.cu), [compact_point_prefix.cuh](compact_point_prefix.cuh), [direct_native_point.cuh](direct_native_point.cuh): guarded point-contact routes and fallback queues. |
 | Local solve | [solve.cuh](solve.cuh): `solve3` and its rank-deficient fallback. |
@@ -123,7 +123,7 @@ configuration instead of silently mixing headers.
 Run from the `3D_IPC/` directory:
 
 ```sh
-cmake -S gpu -B gpu/build -DCMAKE_BUILD_TYPE=Release \
+cmake -S gpu -B gpu/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DBoost_DIR=/path/to/boost-1.92.0/lib/cmake/Boost-1.92.0 \
   -DCMAKE_CUDA_COMPILER=nvcc \
   -DCMAKE_CXX_COMPILER=g++-11 -DCMAKE_CUDA_HOST_COMPILER=g++-11 \
@@ -131,8 +131,18 @@ cmake -S gpu -B gpu/build -DCMAKE_BUILD_TYPE=Release \
 cmake --build gpu/build --target 3D_sim_gpu -j 8
 ```
 
-Add `-DIPC_GPU_FAST_DEV_BUILD=ON` for shorter development builds. It uses
-PTXAS O1 for `linear_pipeline.cu`; standard builds retain PTXAS O3.
+`IPC_GPU_FAST_DEV_BUILD` defaults to `ON`. It uses PTXAS O1 and explicitly
+outlines scalar comparisons in the two largest linear CCD units. Integer-valued
+operations retain their existing definitions; `--fmad=false` and exact-arithmetic
+budgets are unchanged. Other CUDA units retain inline comparisons and Release
+optimization. Set `-DIPC_GPU_FAST_DEV_BUILD=OFF` for inline comparisons and
+PTXAS O3 in the linear CCD units.
+
+The exact kernel families are compiled separately in `linear_resolve_*.cu`.
+Each kernel keeps its allocator and device helpers in the same compilation
+unit. Ninja compiles one GPU-target source at a time by default; the shared CPU
+support libraries can still build in parallel. This limits overlapping compiler
+working sets. A caller-supplied `CMAKE_JOB_POOL_COMPILE` overrides that default.
 
 `3D_sim_gpu` is built from the generated current GPU driver and links
 `ipc_gpu_bridge`, `ipc_gpu_solver` and `ipc_gpu_components`. The shared CPU
@@ -162,6 +172,12 @@ OMP_NUM_THREADS=1 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
 
 The driver prints `GPU device solver backend` after its preflight mode check
 accepts the options, so a log without that line is not a device solve.
+
+For full Examples 1 and 9, use the corresponding [scene command](../README.md#example-scene-commands)
+with `./gpu/build/3D_sim_gpu` in place of `./build/3D_sim`. Keep the documented
+physical settings, including `--exact_computation_fallback false` for both.
+No `IPC_GPU_*` overrides are needed for the selected execution defaults. The
+support and CPU/GPU numerical-policy constraints below still apply.
 
 Two optional CPU features also have GPU implementations. Both default to false.
 `--use_colored_ccd_guess_level_based true` selects a discarded colored CCD trial
@@ -253,6 +269,25 @@ ctest --test-dir gpu/build -L gpu_solver --output-on-failure
 
 Every test on the current backend carries the `gpu_solver` label, so the label
 selects only the current solver component suites.
+
+The integrated color-local/rigid-compaction routes passed the corrected
+236-check joint native test and combined memcheck, synccheck and initcheck
+with zero reported errors. The native binary used the explicit environment
+options listed below; the final local default literals were not rebuilt.
+
+The joint contact suite includes a Robust movement-box pruning fixture. CTest
+sets `IPC_GPU_BOX_CONTACT_PRUNING=1` for `gpu_contact_pipeline`, including through
+`gpu/validate.py`. For direct runs of the contact executable or Compute Sanitizer,
+set it before startup:
+
+```sh
+IPC_GPU_BOX_CONTACT_PRUNING=1 gpu/build/gpu_contact_pipeline_test
+IPC_GPU_BOX_CONTACT_PRUNING=1 compute-sanitizer --tool memcheck gpu/build/gpu_contact_pipeline_test
+```
+
+Use the same setting for direct synccheck/initcheck runs. This is a test-process
+setting; production `IPC_GPU_BOX_CONTACT_PRUNING` still defaults to `0`.
+
 `gpu_validation` builds the CPU-oracle parity targets (`gpu_dat`,
 `gpu_dat_geometry`, `gpu_rigid_pins`, `gpu_cpu_parity`) together with the
 component suites for elastic assembly, broad phase, coloring, contacts, local
@@ -272,11 +307,29 @@ solver or benchmark, and it makes no CPU/GPU trajectory or alignment claim.
 These suites provide modern component regression coverage only; separate
 source-bound CPU/GPU numerical, caller, sanitizer and short physical validation
 remain independent acceptance steps. This launcher neither runs those checks nor
-claims that they have passed. No speedup is claimed.
+claims that they have passed. The launcher itself makes no performance claim.
+
+The ordinary solver uses a reusable 262,144-pair workspace. Set
+`IPC_GPU_CONTACT_PACKET_CAPACITY` to a positive integer through 1,048,576 to
+trade packet memory for fewer launches; `65536` restores the previous capacity.
+The direct `GpuContactPipeline()` constructor and the separate DAT workspace
+retain their 65,536-pair defaults. All candidate pairs remain in the device
+lists; ordered accumulation and failure-before-publication checks are retained.
+Original GS allocates no unused exact-contact arenas.
 
 The rounding and rigid DAT math tests also compile as ordinary C++ without
 CUDA. These host checks cover numerical helpers; native CUDA compilation and
 device execution are still required to qualify the kernels.
+
+Maintained optimization tests join the explicit `gpu_validation` target. Their
+host oracles, genuine public Solver regressions, private-authority facades and
+CUDA evaluator checks have separate scopes. Run the complete registered suite
+on a supported CUDA device after changing source or defaults:
+
+```sh
+cmake --build gpu/build --target gpu_validation -j 8
+ctest --test-dir gpu/build -L gpu_solver --output-on-failure
+```
 
 `python3 gpu/example1_comparison.py --self-test` checks the named Example 1
 comparison protocols offline. Comparisons bind one explicit protocol
@@ -315,9 +368,10 @@ caller. The shared-scene simulator is built by the normal configuration.
 ported on the device:
 
 - contact assembly keeps `evaluate_contact_original` and its contribution
-  order while using the existing warp reduction by default. Optional compact,
-  selected-node, component and prefetch reductions remain available. The
-  robust selected-ordinary evaluator and cooperative exact queues retain their
+  order. Eligible deformable sweeps use compact packets and prefetched ordered
+  reduction by default; unsupported layouts retain the previous reduction.
+  Selected-node and component reductions remain available. The robust
+  selected-ordinary evaluator and cooperative exact queues retain their
   separate geometry requirements;
 - for the CPU SIMD energy path on a pure cloth scene with CCD enabled, main
   solver rebuilds can discard contacts proved inactive over all four movement
@@ -328,10 +382,11 @@ ported on the device:
 - ordinary deformable updates use the CPU componentwise blue-box clip and the
   stored raw displacement; a collision commits `0.9 * TOI`, otherwise weight
   one, and the actual represented endpoint/path is certified by a collision-only
-  check. That resolve runs as a bounded pool of whole-node workers (each with a
-  disjoint reusable exact arena slice) and only reads immutable current
-  positions, so independent same-color vertices still update in parallel; the
-  whole launch joins before any commit or the next color;
+  check. Ordinary pair queries run across active-node CTAs; uncertain queries
+  enter a bounded queue with independent exact-worker arenas. Per-node minima
+  and earliest CSR failures retain the original result. Queue overflow restores
+  the original proposals and replays the complete color with whole-node
+  workers. Current positions remain immutable until the joined color commits;
 - linear CCD uses the qualified `original_ccd` fast query plus its bounded
   exact resolver. An original failure is never sent to the robust exact queue;
 - the CPU original cooperative selected-node `1e-28` squared cutoff is modelled
@@ -391,8 +446,103 @@ certificate for a proved zero-gap separation; a proof accepts the path, and an
 inconclusive answer falls through to the unchanged exact predicate (no positive
 floor, no `DBL_MIN`/denormal fake gap). Exact capacity is retried once from 256
 to 2048 limbs only while the worker's arena is healthy. The bounded original
-resolve allocates at most 16 reusable arenas of 4 MiB, independent of the scene
-size.
+resolve defaults to 16 reusable arenas of 4 MiB. Its configurable limit is
+256; a larger rigid fallback CTA width can raise the shared reservation.
+The reservation is bounded independently of the scene size.
+
+## Original node CCD partitioning
+
+Original node CCD uses `IPC_GPU_NODE_CSR_PARTITION=1` by default. When an active
+color has fewer node rows than available CTAs, it distributes each row's fast
+queries across several CTAs in the existing grid, up to 1,024 CTAs of 128
+threads. Larger active sets retain the previous row mapping. Set
+`IPC_GPU_NODE_CSR_PARTITION=0` before creating a `GpuLinearClipper`, or in the
+driver's environment, to restore the previous mapping. The option is captured
+once per clipper.
+
+This changes execution distribution only. `--exact_computation_fallback false`
+continues to select the Original numerical path, including the full raw TOI
+minimum, `0.9 * TOI` step, stored-displacement endpoint and represented-path
+checks. Both raw and stored-path passes remain; no queries are skipped.
+Precision, tolerances, exact retries, queue bounds, overflow replay, existing
+backtracking budgets and commit order are unchanged. It adds no GPU allocation
+and preserves the existing launch count. It does not select Robust CCD.
+
+The native and independent integer-coverage tests exercise long/duplicated rows,
+late TOI minima, ordered faults, exact retry, overflow/reuse and predictor rules.
+Host tests do not establish CUDA correctness. Build and run the maintained checks:
+
+```sh
+cmake --build gpu/build --target gpu_node_csr_partition_native_test gpu_node_csr_partition_test -j 8
+ctest --test-dir gpu/build -R '^gpu_node_csr_partition_(native|host)$' --output-on-failure
+```
+
+## Cooperative Original node controller
+
+`IPC_GPU_NODE_CCD_COOPERATIVE` defaults to `1` for Original node batches. Set it
+to `0` before constructing a `GpuLinearClipper` to use the fixed host schedule.
+Owners capture the option once. Robust CCD and rigid clipping keep their routes.
+
+An eligible color runs the existing prepare, fast-query, exact-worker, gate and
+consume stages inside one cooperative grid. Every thread joins between stages;
+joined completion ends idle rounds. Raw and represented/stored-path passes,
+full TOI minima, `0.9 * TOI`, CSR failure ordering, exact arenas, retries,
+65 trial candidates, queue-overflow replay and publication remain unchanged.
+
+Eligibility uses actual kernel residency and node/worker coverage. Ineligible
+plans use the fixed schedule. `IPC_GPU_NODE_CCD_ONE_WAVE` defaults to `1` and
+bounds the grid while retaining those coverage requirements; `0` uses the full
+resident grid. CUDA errors propagate. Device stack limits are not changed, and
+no numerical arrays are downloaded for scheduling.
+
+The native test retains the complete Original node fixture and resource-fallback
+checks. Return code `77` reports fallback coverage only and is a CTest skip, not
+cooperative qualification. The separate host test checks stage order, joined
+completion and residency bounds. Both join `gpu_validation` and stay out of ALL.
+
+```sh
+cmake --build gpu/build --target gpu_node_cooperative_native_test gpu_node_controller_test -j 8
+ctest --test-dir gpu/build -R '^gpu_(node_cooperative_native|node_controller_host)$' --output-on-failure
+```
+
+## Rigid proxy execution
+
+`IPC_GPU_PARALLEL_RIGID_PROXIES` defaults on for owners constructed with
+validated, uniquely owned rigid topology. The
+solver uses that trusted path after scene validation. Set the option to `0`
+before owner construction to restore the previous proxy loops; `1` selects the
+parallel path explicitly. Owners capture the option once. Raw/default owners
+and free-function callers retain the legacy route, including alias and invalid
+input behaviour.
+
+This distributes rigid proxy endpoint copies, trusted translation-trial proxy
+writes, accepted rotation-position construction and final velocity updates
+across CSR slots. Scalar COM checks and ordered error handling remain in place. It retains the
+existing scalar formulas and copies the certified endpoints exactly. Original
+`0.9 * TOI`, every raw and represented/stored-path query, curved-motion CCD,
+precision and retry budgets are unchanged. It does not select Robust CCD or
+change rigid boxes, angular caps or the CPU/GPU policy differences below.
+Finite preflight precedes publication; finish/rotation faults replay the old
+ordered path rather than publishing a partial parallel result.
+
+No per-node scratch is added. The two owners lazily allocate one 4-byte fault
+flag each; the rotation clipper's existing 112-byte context is unchanged. Proxy
+launches use 128 threads and at most 65,535 CTAs, striding larger body sets.
+Untrusted topology stays on the prior path.
+
+The native proxy tests cover exact OFF/ON/public-oracle endpoints and status,
+large/tail/scrambled/empty rows, mode masks, ordered faults, captured options
+and a nondefault stream. The trusted-owner supplemental fixture and the
+existing raw rigid-pipeline fixture remain separate. The two host-only tests
+check integer slot coverage and proxy-value formulas against independent
+oracles; host checks do not establish CUDA correctness. All four targets
+join `gpu_validation`, stay out of ALL, and use the `gpu_solver` CTest label;
+the host tests also carry `host_math`.
+
+```sh
+cmake --build gpu/build --target gpu_rigid_proxy_parallel_test gpu_rigid_pipeline_proxy_trusted_test gpu_rigid_proxy_index_test gpu_rigid_proxy_values_test -j 8
+ctest --test-dir gpu/build -R '^gpu_(rigid_proxy_(parallel|index|values)|rigid_pipeline_proxy_trusted)$' --output-on-failure
+```
 
 ## Known constraints
 
@@ -409,7 +559,89 @@ tiny motion, pins and collision checks.
 CUDA needs a host thread for launch orchestration and I/O. Use a positive
 `OMP_NUM_THREADS` (for example `1`); this does not move solver arithmetic to CPU.
 
+Short CPU parity tests do not establish identical long trajectories. The CPU
+and GPU use different BVH traversal/contact accumulation orders, and these
+fixed-iteration contact examples can amplify roundoff-sized initial differences.
+The current rigid GPU path also retains maximum-radius boxes, stored-orientation
+anchors and an additional angular proposal cap. The supplied Example 9 command
+(`--use_simd false`) selects the CPU basic rigid solver, which uses history-based
+boxes and anchors regenerated from its angular state. It always reconstructs
+accepted rotation/proxy values. The tiny-angular-step publication rule belongs
+to the separate general-v2 CPU dispatch and does not apply to that command.
+In particular,
+`theta_box_min` does not currently select a rigid GPU minimum radius.
+Performance comparisons must state the numerical policy and distinguish a
+warm continuation from a checkpoint restart, which resets movement histories.
+The full current README Examples 1 and 9 failed the unchanged strict CPU
+trajectory bounds. GPU-to-GPU byte preservation, saved-endpoint intersection
+checks and seed-sensitivity controls have separate scopes and do not establish
+full CPU trajectory parity.
+
 ## Runtime diagnostics
+
+The execution options below default to `1`; set an option to `0` for its
+previous route. They preserve geometry formulas, precision, candidate membership
+and the original contact addition order.
+
+| Option | Execution path |
+| --- | --- |
+| `IPC_GPU_ORIGINAL_NODE_CCD_BATCH` | Parallel ordinary node CCD with bounded exact queries and complete-color overflow fallback. |
+| `IPC_GPU_NODE_CCD_COOPERATIVE` | Cooperative execution of the existing Original node stages when the actual resident grid covers nodes/workers; fixed scheduling otherwise. |
+| `IPC_GPU_RIGID_CCD_BATCH` | Grid-wide rigid translation queries for a unique active body; deterministic minima and earliest failure, with scalar/CTA fallback. |
+| `IPC_GPU_RIGID_ROTATION_BATCH` | Grid-wide curved-motion queries for a unique rotating body; other color layouts retain the previous clipper. |
+| `IPC_GPU_PARALLEL_RIGID_PROXIES` | Parallel copies and velocity updates for trusted rigid proxy topology; raw/default owners retain the legacy route. |
+| `IPC_GPU_RIGID_CONTACT_PULLBACK_CACHE` | Reuse per-node pullbacks and per-pair rigid terms within one assembly. |
+| `IPC_GPU_TWO_RIGID_COLOR_QUEUE_ELISION` | Omit redundant color-pair lists for validated two-body owners when complete rigid incidence is sufficient. |
+| `IPC_GPU_TWO_RIGID_DENSE_CSR` | Use complete two-row dense incidence after device validation; raw, pruned and unsupported inputs keep generic construction. |
+| `IPC_GPU_TWO_RIGID_KIND_PACKETS` | Omit wholly wrong-kind tiles after validated kind-prefix inspection; executed packet bounds and per-kind contribution order stay unchanged. |
+| `IPC_GPU_RIGID_ONE_SLOT_TERMS` | Store one rigid term record per packet pair for proven unique selected ownership; other layouts retain four slots. |
+| `IPC_GPU_ORIGINAL_RIGID_SPARSE_GATHER` | Evaluate geometry first for eligible zero-friction Original rigid pairs; full force evaluation retains every active/error pair and leaves raw/CSR/CCD membership intact. |
+| `IPC_GPU_RIGID_COMPACT_REDUCE` | Stable active-row compaction before ordered tiled rigid accumulation, with the previous scan above 64 bodies or unsupported row sizes. |
+| `IPC_GPU_CONTACT_OUTPUT_ACTIVITY` | Skip inactive output records. |
+| `IPC_GPU_COLOR_LOCAL_PACKETS` | Recover compact/selected/warp/prefetch routes when the global contact list exceeds the packet cap but the indexed current-color list fits; larger colors retain global tiling. |
+| `IPC_GPU_COMPACT_DEFORMABLE_CONTACTS` | Compact records for eligible untiled or color-local deformable sweeps; Frozen and other phases use full records. |
+| `IPC_GPU_CONTACT_PREFETCH_REDUCE` | Prefetch ordered CSR records for selected deformable owners in non-Frozen sweeps, in Original or Robust mode; unsupported layouts use the existing reduction. |
+| `IPC_GPU_SMALL_BLOCK_GRAPH` | Sorted bitset graph construction through 512 blocks; larger graphs retain the previous construction. |
+| `IPC_GPU_CANONICAL_WARP_COLOR` | Warp execution of ascending greedy coloring with identical canonical labels. |
+
+Color-local storage preserves the original global CSR/contact addition order
+and validates contact kinds across the global list. Missing mappings fail closed;
+unsupported colors retain the previous tiled path. Single force faults retain
+exact codes and seed/SDF/pin precedence. With multiple independent force faults,
+concurrent evaluation may select a different nonzero diagnostic than coarse
+tile/kind ordering; any error still prevents publication. Legacy OFF arbitration
+and CCD first-unsafe/error ordering are unchanged.
+
+`IPC_GPU_ORIGINAL_CCD_WORKERS` selects 1 through 256 exact workers (default 16).
+Each worker reserves 4 MiB of limbs plus allocator slots. Rigid fallback CTA
+widths can raise that shared arena reservation; their default remains one
+thread. Both batch queues default to 1,048,576 entries: 8 MiB for node/rank
+pairs and 4 MiB for rigid ranks. Queue overflow replays the previous resolver
+without dropping queries. These settings change execution and scratch memory,
+not arithmetic capacities or CCD tolerances.
+
+At the ordinary solver's default 262,144-pair capacity, full output records
+occupy at most 354 MiB. The rigid-term cache uses 48 MiB for eligible trusted
+two-body Original non-Frozen one-slot assembly, or up to 192 MiB for the complete four-owner layout.
+The sparse Original force queue adds `4 * capacity + 4` bytes when eligible
+(about 1 MiB at this cap). Stable rigid compaction adds about 2.016 MiB for two
+bodies, or 64.5 MiB at its 64-body limit. Buffers grow lazily and retain their
+high-water capacities. A 1,048,576-pair setting multiplies per-packet ceilings by
+four; it does not bound raw candidate, incidence or topology storage.
+Eligible compact deformable phases add 216 bytes per packet slot, at most
+54 MiB at this cap; those records are explicitly released for Frozen or other
+noncompact phases.
+
+The color-local global-pair-to-slot map costs `4 * N` bytes for its retained
+global contact capacity `N`, is included in `storage_bytes().packet_bytes`, and
+is **not bounded by the packet cap**. Its allocation and the rigid kept-index/
+count scratch survive fallback, empty and Frozen reuse. Lowering packet
+capacity reduces the numerical packet/cache ceilings, not this global map or
+existing incidence/topology memory.
+
+Rigid movement boxes still use the GPU's existing maximum-radius policy. The
+CPU's history-based radius shrink is a separate numerical policy; these
+execution changes do not claim CPU box-policy equivalence.
 
 `IPC_GPU_COLORING` selects `greedy` (default), `degree`, `spatial` or `cusparse`.
 The ordered `degree` and `spatial` modes use warp-cooperative coloring with

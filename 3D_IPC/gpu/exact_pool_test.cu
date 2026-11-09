@@ -19,7 +19,9 @@ constexpr int slots_per_worker=64;
 enum Failure : unsigned {
     Context=1u<<0, Copies=1u<<1, NarrowCapacity=1u<<2,
     FullCapacity=1u<<3, Restored=1u<<4, Exhaustion=1u<<5,
-    Recovered=1u<<6, InvalidInstall=1u<<7, Released=1u<<8
+    Recovered=1u<<6, InvalidInstall=1u<<7, Released=1u<<8,
+    FreeList=1u<<9, LiveOwnership=1u<<10, ArithmeticValues=1u<<11,
+    ArithmeticFailure=1u<<12
 };
 
 // Cross a non-inlined call boundary too: the accessor must refer to the same
@@ -27,6 +29,81 @@ enum Failure : unsigned {
 __device__ __noinline__ bool context_is(exact::DevicePool* expected) {
     exact::Arithmetic<capacity> arithmetic;
     return exact::current_pool()==expected
+        &&exact::verdict(arithmetic,exact::Status::Safe)==exact::Status::Safe;
+}
+
+// Balanced counts alone miss a live slot that was prematurely returned.
+__device__ bool unique_free_slots(const exact::DevicePool& pool) {
+    if(!pool.free_slots||pool.slot_count<=0||pool.available<0||pool.available>pool.slot_count)return false;
+    for(int i=0;i<pool.available;++i) {
+        if(pool.free_slots[i]<0||pool.free_slots[i]>=pool.slot_count)return false;
+        for(int j=0;j<i;++j)if(pool.free_slots[i]==pool.free_slots[j])return false;
+    }
+    return true;
+}
+template<int C> __device__ bool live_owners(const exact::DevicePool& pool,
+    const exact::Integer<C>*const* values,int count) {
+#if defined(__CUDA_ARCH__)
+    if(!unique_free_slots(pool))return false;
+    for(int i=0;i<count;++i) {
+        const auto& value=*values[i];
+        if(value.slot<0) {if(value.valid)return false;continue;}
+        // A failed arithmetic result may still own its allocated slot.
+        if(value.pool!=&pool||value.slot>=pool.slot_count
+            ||value.limb!=pool.words+std::size_t(value.slot)*pool.words_per_slot)return false;
+        for(int j=0;j<pool.available;++j)if(pool.free_slots[j]==value.slot)return false;
+        for(int j=0;j<i;++j)if(values[j]->slot>=0
+            &&(values[j]->slot==value.slot||values[j]->limb==value.limb))return false;
+    }
+    return true;
+#else
+    return true;
+#endif
+}
+template<int C> __device__ bool integer_is(const exact::Integer<C>& value,int expected) {
+    if(!value.valid)return false;
+    if(!expected)return value.sign==0&&value.used==0;
+    return value.used==1&&value.sign==(expected<0?-1:1)
+        &&value.limb[0]==std::uint32_t(expected<0?-expected:expected);
+}
+template<int C> __device__ bool point_is(const exact::Point<C>& point,int x,int y,int z) {
+    return integer_is(point.v[0],x)&&integer_is(point.v[1],y)&&integer_is(point.v[2],z);
+}
+template<int C> __device__ bool live_points(const exact::DevicePool& pool,
+    const exact::Point<C>*const* points,int count) {
+    const exact::Integer<C>* values[42];
+    if(count>14)return false;
+    int size=0;for(int i=0;i<count;++i)for(int axis=0;axis<3;++axis)values[size++]=&points[i]->v[axis];
+    return live_owners(pool,values,size);
+}
+
+__device__ bool arithmetic_point_lifetimes(exact::DevicePool& pool) {
+    using I=exact::Integer<128>;using P=exact::Point<128>;
+    exact::Arithmetic<128> arithmetic;
+    P a,b,c,ma,mb,mc;
+    a.v[0]=I(1);a.v[1]=I(2);b.v[0]=I(5);b.v[1]=I(7);c.v[0]=I(-2);c.v[1]=I(4);
+    ma.v[0]=I(-3);ma.v[1]=I(6);
+    const P* live[14]={&a,&b,&c,&ma,&mb,&mc};int count=6;
+    if(!live_points(pool,live,count))return false;
+    const auto edge=exact::difference(arithmetic,b,a),velocity=exact::difference(arithmetic,mb,ma);
+    live[count++]=&edge;live[count++]=&velocity;
+    if(!live_points(pool,live,count))return false;
+    const auto other=exact::difference(arithmetic,c,a),other_velocity=exact::difference(arithmetic,mc,ma);
+    live[count++]=&other;live[count++]=&other_velocity;
+    if(!live_points(pool,live,count))return false;
+    const auto value=exact::cross(arithmetic,edge,other);live[count++]=&value;
+    if(!live_points(pool,live,count))return false;
+    const auto first=exact::cross(arithmetic,velocity,other);live[count++]=&first;
+    if(!live_points(pool,live,count))return false;
+    const auto second=exact::cross(arithmetic,edge,other_velocity);live[count++]=&second;
+    if(!live_points(pool,live,count))return false;
+    P derivative;for(int axis=0;axis<3;++axis)derivative.v[axis]=arithmetic.sum(first.v[axis],second.v[axis]);
+    live[count++]=&derivative;
+    return live_points(pool,live,count)&&point_is(a,1,2,0)&&point_is(b,5,7,0)
+        &&point_is(c,-2,4,0)&&point_is(ma,-3,6,0)&&point_is(mb,0,0,0)&&point_is(mc,0,0,0)
+        &&point_is(edge,4,5,0)&&point_is(velocity,3,-6,0)&&point_is(other,-3,2,0)
+        &&point_is(other_velocity,3,-6,0)&&point_is(value,0,0,23)
+        &&point_is(first,0,0,-12)&&point_is(second,0,0,-39)&&point_is(derivative,0,0,-51)
         &&exact::verdict(arithmetic,exact::Status::Safe)==exact::Status::Safe;
 }
 
@@ -67,6 +144,28 @@ __global__ void exercise_pools(std::uint32_t* scratch,int* free_slots,
         }
     }
     if(pool.available!=slots_per_worker||pool.failed)failure|=Restored;
+    if(!arithmetic_point_lifetimes(pool))failure|=LiveOwnership;
+    if(pool.available!=slots_per_worker||pool.failed||!unique_free_slots(pool))failure|=FreeList;
+    {
+        using I=exact::Integer<2>;exact::Arithmetic<2> arithmetic;
+        const auto wide=exact::shift_left(I(1),62);const I multiplier(8);
+        const auto invalid=arithmetic.mul(wide,multiplier);
+        const I* live[]={&wide,&multiplier,&invalid};
+        if(invalid.valid||pool.failed||!live_owners(pool,live,3)
+            ||exact::verdict(arithmetic,exact::Status::Safe)!=exact::Status::CapacityExceeded)
+            failure|=ArithmeticFailure;
+#if defined(__CUDA_ARCH__)
+        if(invalid.slot<0)failure|=ArithmeticFailure;
+#endif
+    }
+    if(pool.available!=slots_per_worker||pool.failed||!unique_free_slots(pool))failure|=FreeList;
+    {
+        exact::Arithmetic<capacity> arithmetic;
+        const auto recovered=arithmetic.sum(exact::Integer<capacity>(17),exact::Integer<capacity>(19));
+        if(!integer_is(recovered,36)||exact::verdict(arithmetic,exact::Status::Safe)!=exact::Status::Safe)
+            failure|=ArithmeticFailure;
+    }
+    if(pool.available!=slots_per_worker||pool.failed||!unique_free_slots(pool))failure|=FreeList;
 
     // More records than CUDA workers exercise repeated ownership and scratch
     // reuse. Different seeds are used in overlapping nonblocking streams.
@@ -93,8 +192,19 @@ __global__ void exercise_pools(std::uint32_t* scratch,int* free_slots,
             if(!a.valid||!b.valid||!product.valid||!difference.valid||!restored.valid
                 ||!ok||result!=double(value)||exact::compare(a,restored)!=0
                 ||!context_is(&pool))failure|=FullCapacity;
+            exact::Arithmetic<capacity> arithmetic;
+            const auto actual_product=arithmetic.mul(a,b),actual_difference=arithmetic.sub(a,b);
+            const auto actual_restored=arithmetic.sum(actual_difference,b);
+            const exact::Integer<capacity>* live[]={&a,&b,&product,&difference,&restored,
+                &actual_product,&actual_difference,&actual_restored};
+            if(!live_owners(pool,live,8))failure|=LiveOwnership;
+            if(arithmetic.cmp(actual_product,product)!=0||arithmetic.cmp(actual_difference,difference)!=0
+                ||arithmetic.cmp(actual_restored,a)!=0
+                ||exact::verdict(arithmetic,exact::Status::Safe)!=exact::Status::Safe)
+                failure|=ArithmeticValues;
         }
         if(pool.available!=slots_per_worker||pool.failed)failure|=Restored;
+        if(!unique_free_slots(pool))failure|=FreeList;
     }
     peak=pool.peak;
     exact::release_pool();
@@ -114,8 +224,16 @@ __global__ void exercise_pools(std::uint32_t* scratch,int* free_slots,
             ||exact::current_pool()!=&pool
             ||status!=(exhaust?exact::Status::CapacityExceeded:exact::Status::Safe))
             failure|=Exhaustion;
+        const auto result=arithmetic.sum(a,b);
+        const exact::Integer<capacity>* live[]={&a,&b,&c,&result};
+        if(!live_owners(pool,live,4)||result.valid==exhaust
+            ||(!exhaust&&!integer_is(result,24))
+            ||exact::verdict(arithmetic,exact::Status::Safe)
+                !=(exhaust?exact::Status::CapacityExceeded:exact::Status::Safe))
+            failure|=ArithmeticFailure;
     }
     if(pool.available!=limit)failure|=Restored;
+    if(!unique_free_slots(pool))failure|=FreeList;
     exact::release_pool();
     if(exact::current_pool()!=nullptr)failure|=Released;
 
@@ -256,6 +374,7 @@ int main() {
         for(unsigned worker=0;worker<boundary_workers;++worker)
             if(boundary_result[worker])throw std::runtime_error("last-slot worker "
                 +std::to_string(worker)+", failure mask "+std::to_string(boundary_result[worker]));
+        std::puts("GPU exact Arithmetic live ownership, unique free slots, and failure cleanup passed");
         std::puts("GPU exact pool concurrency tests passed");
         return 0;
     } catch(const std::exception& error) {

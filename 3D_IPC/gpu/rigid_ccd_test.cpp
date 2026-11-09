@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -42,13 +43,27 @@ static void compare(double value,double reference,const std::string& label) {
     require(std::isfinite(value) && std::isfinite(reference),label+" nonfinite");
     const double error = std::abs(value-reference)/(1+std::abs(reference));
     maximum_error = std::max(maximum_error,error); ++comparisons;
-    require(error <= 2e-9,label+" mismatch "+std::to_string(error));
+    if (error > 2e-9) {
+        std::ostringstream message;
+        message << std::setprecision(17) << label << " mismatch: actual=" << value
+                << " CPU=" << reference << " normalized error=" << error;
+        throw std::runtime_error(message.str());
+    }
 }
 static Vec3 v3(const double* p) { return Vec3(p[0],p[1],p[2]); }
 static Vec4 v4(const double* p) { return Vec4(p[0],p[1],p[2],p[3]); }
 static Vec4 axis_angle(Vec3 axis,double angle) {
     axis.normalize(); const double s = std::sin(.5*angle);
     return Vec4(std::cos(.5*angle),s*axis[0],s*axis[1],s*axis[2]);
+}
+
+static std::string describe(const RigidRotationQuery& q) {
+    std::ostringstream message;
+    message << std::setprecision(17) << " kind=" << (q.vertex_face ? "NT" : "EE");
+    for (int i=0;i<4;++i)message << " x" << i << "=(" << v3(q.positions[i]).transpose() << ')';
+    message << " com=(" << v3(q.com).transpose() << ") current=("
+            << v4(q.current).transpose() << ") target=(" << v4(q.target).transpose() << ')';
+    return message.str();
 }
 
 static std::vector<RigidRotationQuery> fixtures() {
@@ -118,7 +133,13 @@ static void verify(const std::vector<RigidRotationQuery>& queries,std::size_t co
         const bool reference = q.vertex_face
             ? point_triangle_rb_rotation_ccd(v3(q.positions[0]),v3(q.com),v4(q.target),v4(q.current),v3(q.positions[1]),v3(q.positions[2]),v3(q.positions[3]),reference_time)
             : segment_segment_rb_rotation_ccd(v3(q.positions[0]),v3(q.positions[1]),v3(q.com),v4(q.target),v4(q.current),v3(q.positions[2]),v3(q.positions[3]),reference_time);
-        require(results[i].collision == reference,label+" collision classification mismatch");
+        if (results[i].collision != reference) {
+            std::ostringstream message;
+            message << std::setprecision(17) << label << " collision classification mismatch: actual="
+                    << results[i].collision << " TOI=" << results[i].time << " CPU=" << reference
+                    << " CPU TOI=" << reference_time << describe(q);
+            throw std::runtime_error(message.str());
+        }
         compare(results[i].time,reference_time,label+" TOI");
         hits += reference;
         for (int k = 0; k < 4; ++k) require(statuses[4*i+k] == RigidRotationStatus::Success,label+" helper status");
@@ -132,6 +153,111 @@ static void verify(const std::vector<RigidRotationQuery>& queries,std::size_t co
             compare(v[11+k],box.min[k],label+" cap lower"); compare(v[14+k],box.max[k],label+" cap upper");
         }
     }
+}
+
+static void tiny_rotation_cases() {
+    // Nonzero angular increments below the retired 1e-10 cutoff must retain
+    // initial NT contact and positive-time EE crossings. The latter also
+    // detects loss from subtracting two world-scale atan2 results.
+    for (double angle : {1e-11,1e-12})for (bool nt : {false,true}) {
+        RigidRotationQuery q{};q.vertex_face=nt;q.current[0]=1;
+        q.target[0]=std::cos(.5*angle);q.target[3]=std::sin(.5*angle);
+        const double y=nt ? 0.0 : .5*angle;
+        const std::array<Vec3,4> x = nt
+            ? std::array<Vec3,4>{{Vec3(1,0,0),Vec3(.5,y,-1),Vec3(1.5,y,-1),Vec3(1,y,1)}}
+            : std::array<Vec3,4>{{Vec3(1,0,-1),Vec3(1,0,1),Vec3(.9,y,0),Vec3(1.1,y,0)}};
+        for(int i=0;i<4;++i)for(int k=0;k<3;++k)q.positions[i][k]=x[i][k];
+        // Keep the existing strict CPU comparison and all helper checks.
+        verify({q},1);
+        const double p[10]={.37,.031,.8,.2,-.7,1.3,1,0,0,0};
+        RigidRotationResult result;double values[17]{};RigidRotationStatus statuses[4];
+        gpu_rigid_ccd_test_cuda(&q,p,1,&result,values,statuses);
+        require(result.status==RigidRotationStatus::Success&&result.collision,
+            "tiny rotation missed a known contact"+describe(q));
+        compare(result.time,std::asin(y)/angle,"tiny rotation analytic TOI"+describe(q));
+    }
+}
+
+static void swept_family_cases() {
+    // Permanent CPU family-coverage fixtures, plus independent known event
+    // times. A near-zero radial polynomial is not enough to claim a family.
+    struct Case {RigidRotationQuery query;bool hit;double first;};
+    std::vector<Case> cases;
+    const auto point=[](double radius,double height,double angle) {
+        return Vec3(radius*std::cos(angle),radius*std::sin(angle),height);
+    };
+    const auto reflection=[](double t,double angle) {
+        return Vec3(std::cos(angle)+t*std::sin(angle),std::sin(angle)-t*std::cos(angle),t);
+    };
+    const auto add=[&](const std::array<Vec3,4>& x,bool hit,double first,double angle=.04) {
+        Case c{};c.hit=hit;c.first=first;c.query.current[0]=1;
+        c.query.target[0]=std::cos(angle/2);c.query.target[3]=std::sin(angle/2);
+        for(int i=0;i<4;++i)for(int k=0;k<3;++k)c.query.positions[i][k]=x[i][k];
+        cases.push_back(c);
+    };
+    for(bool reverse_moving:{false,true})for(bool reverse_stationary:{false,true}) {
+        std::array<Vec3,4>x{{Vec3(1,0,1),Vec3(2,0,2),point(.5,.5,.02),point(2.5,2.5,.02)}};
+        if(reverse_moving)std::swap(x[0],x[1]);
+        if(reverse_stationary)std::swap(x[2],x[3]);
+        add(x,true,.5);
+    }
+    const double phase=rotation_detail::pi/2+.02;
+    add({{Vec3(1,0,0),Vec3(1,1,1),reflection(-.5,phase),reflection(1.5,phase)}},true,.5);
+    const double initial_phase=2*std::atan(.5);
+    add({{Vec3(1,0,0),Vec3(1,1,1),reflection(-.5,initial_phase),reflection(1.5,initial_phase)}},true,0);
+    for(double angle:{.02,0.})
+        add({{Vec3(1e-5,0,0),Vec3(1e-5,0,1),point(1.2e-5,0,angle),point(1.2e-5,1,angle)}},false,0);
+    add({{Vec3(1,0,1),Vec3(2,0,2),point(.5,.5,.08),point(2.5,2.5,.08)}},false,0);
+    add({{Vec3(1,0,1),Vec3(2,0,2),point(.5,.5,-.02),point(2.5,2.5,-.02)}},true,.5,-.04);
+    add({{Vec3(1,0,1),Vec3(2,0,2),point(.5,.5,.02),point(2.5,2.5,.02)}},false,0,-.04);
+    add({{Vec3(1,0,1),Vec3(2,0,2),point(3,3,.02),point(4,4,.02)}},false,0);
+    std::vector<RigidRotationQuery> queries;for(const auto& c:cases)queries.push_back(c.query);
+    verify(queries,queries.size());
+    std::vector<RigidRotationResult> results(cases.size());
+    std::vector<double> parameters(10*cases.size()),values(17*cases.size());
+    std::vector<RigidRotationStatus> statuses(4*cases.size());
+    for(std::size_t i=0;i<cases.size();++i) {
+        double* p=parameters.data()+10*i;
+        p[0]=.37;p[1]=.031;p[2]=.8;p[3]=.2;p[4]=-.7;p[5]=1.3;p[6]=1;
+    }
+    gpu_rigid_ccd_test_cuda(queries.data(),parameters.data(),queries.size(),results.data(),values.data(),statuses.data());
+    for(std::size_t i=0;i<cases.size();++i) {
+        const auto& c=cases[i];const auto& result=results[i];
+        const auto label="finite swept family "+std::to_string(i)+describe(c.query);
+        require(result.status==RigidRotationStatus::Success&&result.collision==c.hit,label+" classification");
+        if(c.hit)compare(result.time,c.first,label+" analytic first event");
+    }
+}
+
+static void recorded_near_start_contact() {
+    // Exact binary64 callee arguments from CPU frame245. Do not normalize the
+    // supplied quaternions again: the independent contact witness uses them.
+    const std::array<Vec3,4> points{{
+        Vec3(0x1.419226b948f29p+3,0x1.1f1e78fb3f4d7p+4,-0x1.fa077b31bbc00p-4),
+        Vec3(0x1.41f5a7a328e14p+3,0x1.1f788280b7aa6p+4,-0x1.b63b6c7b9dc76p-3),
+        Vec3(0x1.3f1eec1e1cfb7p+3,0x1.1f769596b28cep+4,-0x1.6e6609bb69eb7p-4),
+        Vec3(0x1.41bcc79805a87p+3,0x1.1f1dac9fc34a5p+4,-0x1.0a72dcb80e2ffp-3)}};
+    const Vec3 center(0x1.49f110c7198d8p+3,0x1.26cb954a6113bp+4,-0x1.f47b2a00f3064p-5);
+    const Vec4 current(0x1.6399e14040a32p-1,0x1.b4b58c7f90ebfp-3,0x1.58e581de887ffp-1,-0x1.15a9f306c6677p-3);
+    const Vec4 target(0x1.62b3f88b5e0b4p-1,0x1.b55edec4a4a14p-3,0x1.59d3965cb2d80p-1,-0x1.147de6b9f27d7p-3);
+    RigidRotationQuery query{};
+    for(int i=0;i<4;++i) {
+        query.current[i]=current[i];query.target[i]=target[i];
+        for(int k=0;k<3;++k)query.positions[i][k]=points[i][k];
+    }
+    for(int k=0;k<3;++k)query.com[k]=center[k];
+    verify({query},1);
+    const double p[10]={.37,.031,.8,.2,-.7,1.3,current[0],current[1],current[2],current[3]};
+    RigidRotationResult result;double values[17]{};RigidRotationStatus statuses[4];
+    gpu_rigid_ccd_test_cuda(&query,p,1,&result,values,statuses);
+    const double first_contact=2.505511442023970287069885789088298082524785816353792442326697412476885054634755448391E-9;
+    require(result.status==RigidRotationStatus::Success&&result.collision
+        &&std::isfinite(result.time)&&result.time>0&&result.time<=1,
+        "recorded near-start rigid contact was not found"+describe(query));
+    std::ostringstream message;message << std::setprecision(17)
+        << "recorded near-start accepted weight=" << .9*result.time
+        << " must precede independent first contact=" << first_contact << describe(query);
+    require(.9*result.time<std::nextafter(first_contact,0.0),message.str());
 }
 
 static void error_cases() {
@@ -155,6 +281,9 @@ int main() {
     try {
         const auto queries = fixtures();
         for (std::size_t count : {std::size_t(0),std::size_t(1),std::size_t(3),std::size_t(33),std::size_t(129),queries.size()}) verify(queries,count);
+        tiny_rotation_cases();
+        swept_family_cases();
+        recorded_near_start_contact();
         error_cases();
         require(hits > 10,"test coverage has insufficient actual impacts");
 #ifdef IPC_GPU_RIGID_CCD_HOST_REFERENCE

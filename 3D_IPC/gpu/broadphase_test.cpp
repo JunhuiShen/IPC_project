@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -356,6 +357,255 @@ static void require_same_broadphase(const OwnedBroadPhaseSnapshot& expected,
         && expected.color_offsets == actual.color_offsets,
         "warp dispatch changed complete sequential color order/offsets");
 }
+struct SmallGraphFixture {
+    std::vector<BpAabb> boxes;
+    std::vector<BpTriangle> triangles;
+    std::vector<BpEdge> edges;
+    std::vector<BpDependency> dependencies;
+    std::vector<int> owners;
+    std::vector<unsigned char> surface;
+    int blocks=0;
+    bool triangle_dependencies=true;
+};
+static void compare_small_graph_case(GpuBroadPhase& baseline,GpuBroadPhase& candidate,
+    const SmallGraphFixture& fixture) {
+    const auto& f=fixture;
+    Device<BpAabb> boxes(f.boxes);Device<BpTriangle> triangles(f.triangles);Device<BpEdge> edges(f.edges);
+    Device<BpDependency> dependencies(f.dependencies);Device<int> owners(f.owners);Device<unsigned char> surface(f.surface);
+    BroadPhaseTopology topology;
+    topology.vertex_count=int(f.boxes.size());topology.block_count=f.blocks;
+    topology.triangle_count=int(f.triangles.size());topology.edge_count=int(f.edges.size());
+    topology.dependency_count=int(f.dependencies.size());topology.triangles=triangles.data;
+    topology.edges=edges.data;topology.dependencies=dependencies.data;topology.vertex_block=owners.data;
+    topology.surface_query=surface.data;topology.include_triangle_dependencies=f.triangle_dependencies;
+    constexpr double d_hat=.015;
+    const auto expected=own_broadphase(baseline.rebuild(topology,boxes.data,d_hat),f.blocks);
+    const auto actual=own_broadphase(candidate.rebuild(topology,boxes.data,d_hat),f.blocks);
+    require_same_broadphase(expected,actual);
+    // Independent uncapped CPU geometry and set-based clique union, rather
+    // than relying solely on equality with the existing GPU implementation.
+    std::set<ContactKey> actual_contacts;
+    for(const auto& contact:actual.contacts)actual_contacts.insert(key(contact));
+    require(actual_contacts==reference_contacts(f.boxes,f.triangles,f.edges,f.owners,f.surface,d_hat),
+        "small-block graph candidate set differs from CPU reference");
+    const auto graph=reference_graph(f.triangle_dependencies?f.triangles:std::vector<BpTriangle>{},
+        f.dependencies,actual_contacts,f.owners);
+    std::vector<std::size_t> offsets(std::size_t(f.blocks)+1,0);
+    std::vector<int> adjacency;
+    for(const auto& edge:graph) {++offsets[std::size_t(edge.first)+1];adjacency.push_back(edge.second);}
+    for(int row=0;row<f.blocks;++row)offsets[row+1]+=offsets[row];
+    require(actual.adjacency_offsets==offsets&&actual.adjacency==adjacency,
+        "small-block graph did not emit the exact sorted unique CPU CSR");
+    // Reuse both owners through Solver -> CandidatesOnly -> Solver. No graph
+    // state may leak into the candidate-only API, and no stale bit may survive.
+    for(auto* owner:{&baseline,&candidate}) {
+        const auto only=owner->rebuild(topology,boxes.data,d_hat,BroadPhaseMode::CandidatesOnly);
+        require(no_solver_data(only)&&no_solver_data(owner->view()),
+            "small-block candidate-only rebuild exposed stale solver data");
+        require(same_contact_payload(expected.contacts,download(only.contacts,only.contact_count)),
+            "small-block candidate-only rebuild changed contact bytes/order");
+    }
+    require_same_broadphase(expected,own_broadphase(candidate.rebuild(topology,boxes.data,d_hat),f.blocks));
+    const auto unchanged=download(boxes.data,f.boxes.size());
+    require(unchanged.size()==f.boxes.size()&&(unchanged.empty()
+        ||std::memcmp(unchanged.data(),f.boxes.data(),unchanged.size()*sizeof(BpAabb))==0),
+        "small-block graph changed movement boxes");
+}
+static void small_block_graph_test(const std::string& mode) {
+    require(mode=="greedy"||mode=="degree"||mode=="spatial","small graph test needs deterministic coloring");
+    ScopedTestEnvironment flag("IPC_GPU_SMALL_BLOCK_GRAPH"),coloring("IPC_GPU_COLORING"),
+        spatial_dx("IPC_GPU_SPATIAL_COLOR_DX");
+    coloring.assign(mode.c_str());spatial_dx.assign("0.05");
+    flag.assign("0");GpuBroadPhase baseline;
+    flag.assign("1");GpuBroadPhase candidate;
+    SmallGraphFixture duplicate;
+    duplicate.blocks=2;
+    for(int n=0;n<12;++n) {
+        duplicate.boxes.push_back(point_box(1.125+.02*(n%4),2.25+.02*(n/4),3.375+.01*(n%3),.04));
+        duplicate.owners.push_back((n/3)%2);
+    }
+    for(int n=0;n<12;n+=3) {
+        duplicate.triangles.push_back({{n,n+1,n+2}});
+        duplicate.edges.push_back({{n,n+1}});duplicate.edges.push_back({{n+1,n+2}});duplicate.edges.push_back({{n+2,n}});
+    }
+    // The legacy path creates many duplicate directed keys for only two final
+    // graph edges; the direct route must preserve every original contact.
+    duplicate.dependencies.assign(8193,BpDependency{{0,3,6,9},4});
+    compare_small_graph_case(baseline,candidate,duplicate);
+    duplicate.triangle_dependencies=false;
+    compare_small_graph_case(baseline,candidate,duplicate);
+    compare_small_graph_case(baseline,candidate,{});
+    SmallGraphFixture isolates;isolates.blocks=35;
+    for(int n=0;n<12;++n){isolates.boxes.push_back(point_box(1.+n,2.,3.));isolates.owners.push_back(n);}
+    compare_small_graph_case(baseline,candidate,isolates);
+    // Partial words, the sign bit, the last supported row/word, and the first
+    // fallback size. Most block IDs deliberately have no owned vertex.
+    for(int count:{1,2,31,32,33,511,512,513}) {
+        SmallGraphFixture boundary;boundary.blocks=count;
+        boundary.boxes.assign(4,point_box(1.,2.,3.));
+        boundary.owners={0,count-1,count/2,count>1?1:0};
+        boundary.dependencies={{{0,1,2,3},4},{{3,2,1,0},4},{{0,0,0,0},4}};
+        compare_small_graph_case(baseline,candidate,boundary);
+    }
+    // Re-enter the direct route after the >512 fallback to catch stale rows.
+    compare_small_graph_case(baseline,candidate,duplicate);
+    std::mt19937 random(0x8b43e483u);
+    for(int trial=0;trial<20;++trial) {
+        SmallGraphFixture mixed;mixed.blocks=trial%3==0?67:trial%3==1?17:3;
+        mixed.triangle_dependencies=(trial&1)==0;
+        for(int n=0;n<24;++n) {
+            mixed.boxes.push_back(point_box(1.125+.04*(n%5),2.25+.03*(n/5),3.375+.01*(n%3),.035));
+            mixed.owners.push_back(int(random()%unsigned(mixed.blocks)));
+            mixed.surface.push_back(n%7!=0);
+        }
+        for(int n=0;n<24;n+=3) {
+            mixed.triangles.push_back({{n,n+1,n+2}});
+            mixed.edges.push_back({{n,n+1}});mixed.edges.push_back({{n+1,n+2}});mixed.edges.push_back({{n+2,n}});
+        }
+        for(int i=0;i<31;++i) {
+            BpDependency d{};d.count=2+int(random()%3);
+            for(int j=0;j<d.count;++j)d.vertices[j]=int(random()%24);
+            mixed.dependencies.push_back(d);
+        }
+        compare_small_graph_case(baseline,candidate,mixed);
+    }
+}
+
+static OwnedBroadPhaseSnapshot canonical_warp_case(GpuBroadPhase& owner,const SmallGraphFixture& f) {
+    ScopedTestEnvironment flag("IPC_GPU_CANONICAL_WARP_COLOR"),shared("IPC_GPU_WARP_SHARED_MARKS"),
+        ordered("IPC_GPU_WARP_ORDERED_COLOR");
+    Device<BpAabb> boxes(f.boxes);Device<BpTriangle> triangles(f.triangles);Device<BpEdge> edges(f.edges);
+    Device<BpDependency> dependencies(f.dependencies);Device<int> blocks(f.owners);Device<unsigned char> surface(f.surface);
+    BroadPhaseTopology t;
+    t.vertex_count=int(f.boxes.size());t.block_count=f.blocks;
+    t.triangle_count=int(f.triangles.size());t.edge_count=int(f.edges.size());t.dependency_count=int(f.dependencies.size());
+    t.triangles=triangles.data;t.edges=edges.data;t.dependencies=dependencies.data;
+    t.vertex_block=blocks.data;t.surface_query=surface.data;t.include_triangle_dependencies=f.triangle_dependencies;
+    // GREEDY historically ignores this degree/spatial-only selector. The new
+    // canonical selector is independent and leaves that existing contract intact.
+    ordered.assign("invalid");flag.assign("0");shared.assign("invalid");
+    const auto expected=own_broadphase(owner.rebuild(t,boxes.data,.015),f.blocks);
+    // Independent ascending-block greedy oracle, including isolated blocks.
+    std::vector<int> colors(f.blocks,-1),marks(f.blocks,-1);int largest=-1;
+    for(int v=0;v<f.blocks;++v) {
+        for(auto i=expected.adjacency_offsets[v];i<expected.adjacency_offsets[v+1];++i) {
+            const int other=expected.adjacency[i];
+            if(other<v)marks[colors[other]]=v;
+        }
+        int c=0;while(c<f.blocks&&marks[c]==v)++c;
+        colors[v]=c;largest=std::max(largest,c);
+    }
+    require(expected.colors==colors&&expected.color_count==largest+1,
+        "serial control does not match independent canonical greedy oracle");
+    shared.assign("1");
+    flag.assign(nullptr);
+    require_same_broadphase(expected,own_broadphase(owner.rebuild(t,boxes.data,.015),f.blocks));
+    for(const char* storage:{"0","1",static_cast<const char*>(nullptr)})for(int repeat=0;repeat<2;++repeat) {
+        flag.assign("1");shared.assign(storage);
+        require_same_broadphase(expected,own_broadphase(owner.rebuild(t,boxes.data,.015),f.blocks));
+    }
+    flag.assign("invalid");shared.assign("invalid");
+    const auto candidates=owner.rebuild(t,boxes.data,.015,BroadPhaseMode::CandidatesOnly);
+    require(no_solver_data(candidates)&&no_solver_data(owner.view())
+        &&same_contact_payload(expected.contacts,download(candidates.contacts,candidates.contact_count)),
+        "canonical selector affected candidate-only execution/payload");
+    if(f.blocks) {
+        bool rejected=false;
+        try {(void)owner.rebuild(t,boxes.data,.015);}
+        catch(const std::invalid_argument&){rejected=true;}
+        require(rejected&&no_solver_data(owner.view())&&!owner.view().contacts,
+            "invalid canonical selector did not invalidate the full view");
+        flag.assign("1");rejected=false;
+        try {(void)owner.rebuild(t,boxes.data,.015);}
+        catch(const std::invalid_argument&){rejected=true;}
+        require(rejected&&no_solver_data(owner.view())&&!owner.view().contacts,
+            "enabled canonical route ignored malformed shared selector");
+    }
+    flag.assign("1");shared.assign("1");
+    require_same_broadphase(expected,own_broadphase(owner.rebuild(t,boxes.data,.015),f.blocks));
+    return expected;
+}
+static void canonical_warp_test() {
+    ScopedTestEnvironment coloring("IPC_GPU_COLORING"),small("IPC_GPU_SMALL_BLOCK_GRAPH"),
+        flag("IPC_GPU_CANONICAL_WARP_COLOR"),shared("IPC_GPU_WARP_SHARED_MARKS"),
+        ordered("IPC_GPU_WARP_ORDERED_COLOR");
+    coloring.assign("greedy");
+    const auto sparse=[](int count) {
+        SmallGraphFixture f;f.blocks=count;
+        for(int v=0;v<count;++v) {
+            f.boxes.push_back(point_box(1.125+.25*v,2.25,3.375,.001));
+            f.owners.push_back((17*v)%count);
+        }
+        return f;
+    };
+    std::vector<SmallGraphFixture> fixtures;
+    fixtures.push_back({});fixtures.push_back(sparse(1));fixtures.push_back(sparse(67));
+    auto tied=sparse(67);
+    for(int v=0;v<67;++v) {
+        tied.dependencies.push_back({{v,(v+1)%67,0,0},2});
+        tied.dependencies.push_back({{v,(v+7)%67,0,0},2});
+    }
+    fixtures.push_back(tied);
+    auto dense=sparse(33);
+    for(int v=0;v<33;++v)for(int w=v+1;w<33;++w)
+        dense.dependencies.push_back({{v,w,0,0},2});
+    fixtures.push_back(dense);
+    auto random=sparse(97);std::mt19937 generator(0x394a849u);
+    for(int i=0;i<600;++i) {
+        BpDependency dependency{};dependency.count=2+int(generator()%3);
+        for(int j=0;j<dependency.count;++j)dependency.vertices[j]=int(generator()%97);
+        random.dependencies.push_back(dependency);
+    }
+    fixtures.push_back(random);
+    SmallGraphFixture mixed;mixed.blocks=17;
+    for(int v=0;v<24;++v) {
+        mixed.boxes.push_back(point_box(1.125+.04*(v%5),2.25+.03*(v/5),3.375+.01*(v%3),.035));
+        mixed.owners.push_back((7*v)%17);mixed.surface.push_back(v%7!=0);
+    }
+    for(int v=0;v<24;v+=3) {
+        mixed.triangles.push_back({{v,v+1,v+2}});
+        mixed.edges.push_back({{v,v+1}});mixed.edges.push_back({{v+1,v+2}});mixed.edges.push_back({{v+2,v}});
+    }
+    mixed.dependencies={{{0,7,13,23},4},{{1,6,13,17},4}};fixtures.push_back(mixed);
+    auto two=mixed;two.blocks=2;
+    for(std::size_t v=0;v<two.owners.size();++v)two.owners[v]=int(v/3)%2;
+    fixtures.push_back(two);
+    // Exact shared budget and the first global-mark fallback size, with real
+    // dependencies so marks are exercised rather than an empty-graph shortcut.
+    for(int count:{12288,12289}) {
+        auto boundary=sparse(count);
+        for(int v=1;v<count;++v)boundary.dependencies.push_back({{v-1,v,0,0},2});
+        fixtures.push_back(boundary);
+    }
+    fixtures.push_back(dense); // Large -> small storage reuse.
+    std::vector<OwnedBroadPhaseSnapshot> reference;
+    for(const char* graph:{"0","1"}) {
+        small.assign(graph);GpuBroadPhase owner;
+        for(std::size_t i=0;i<fixtures.size();++i) {
+            const auto snapshot=canonical_warp_case(owner,fixtures[i]);
+            if(graph[0]=='0')reference.push_back(snapshot);
+            else require_same_broadphase(reference[i],snapshot);
+            if(i==4)require(snapshot.color_count==33,"canonical fixture lost its partial 33-color palette");
+            if(i==6||i==7)require(!snapshot.contacts.empty(),"canonical mixed/contact shortcut fixture lost contact payload");
+        }
+    }
+    // A malformed unused canonical selector must not affect degree/spatial.
+    for(const char* mode:{"degree","spatial"}) {
+        coloring.assign(mode);shared.assign("1");ordered.assign("1");small.assign("1");
+        const auto& f=mixed;
+        Device<BpAabb> boxes(f.boxes);Device<BpTriangle> triangles(f.triangles);Device<BpEdge> edges(f.edges);
+        Device<BpDependency> dependencies(f.dependencies);Device<int> blocks(f.owners);Device<unsigned char> surface(f.surface);
+        BroadPhaseTopology t;t.vertex_count=int(f.boxes.size());t.block_count=f.blocks;
+        t.triangle_count=int(f.triangles.size());t.edge_count=int(f.edges.size());t.dependency_count=int(f.dependencies.size());
+        t.triangles=triangles.data;t.edges=edges.data;t.dependencies=dependencies.data;t.vertex_block=blocks.data;t.surface_query=surface.data;
+        GpuBroadPhase owner;flag.assign("0");const auto expected=own_broadphase(owner.rebuild(t,boxes.data,.015),f.blocks);
+        for(const char* choice:{"1","invalid"}) {
+            flag.assign(choice);require_same_broadphase(expected,own_broadphase(owner.rebuild(t,boxes.data,.015),f.blocks));
+        }
+    }
+    std::cout<<"GPU canonical greedy Warp: natural-order labels/palette/full execution bytes, mixed/random/dense, shared fallback and reuse PASS\n";
+}
+
 static void warp_dispatch_test(const std::string& mode) {
     require(mode == "degree" || mode == "spatial", "focused dispatch needs degree or spatial");
     ScopedTestEnvironment coloring("IPC_GPU_COLORING"), flag("IPC_GPU_WARP_ORDERED_COLOR"),
@@ -503,9 +753,17 @@ static void broadphase_options_test(const std::string& mode) {
 
 int main(int argc, char** argv) {
     try {
+        ScopedTestEnvironment canonical_default("IPC_GPU_CANONICAL_WARP_COLOR");canonical_default.assign("0");
         if (argc != 1) {
+            if(argc==2&&std::string(argv[1])=="--canonical-warp") {
+                canonical_warp_test();return 0;
+            }
             require(argc == 3, "unknown broadphase test selector");
-            if (std::string(argv[1]) == "--broadphase-options") {
+            if (std::string(argv[1]) == "--small-block-graph") {
+                small_block_graph_test(argv[2]);
+                std::cout << "GPU small-block graph: " << argv[2]
+                          << " exact CSR/colors, duplicates, boundary/fallback, mixed ownership and reuse PASS\n";
+            } else if (std::string(argv[1]) == "--broadphase-options") {
                 broadphase_options_test(argv[2]);
                 std::cout << "GPU broadphase options: " << argv[2]
                           << " defaults/rollbacks/shared-budget fallback payloads PASS\n";
@@ -516,6 +774,8 @@ int main(int argc, char** argv) {
             }
             return 0;
         }
+        canonical_warp_test();
+        small_block_graph_test("greedy");
         color_stage_test();
         motion_test();
         gap_padding_test();

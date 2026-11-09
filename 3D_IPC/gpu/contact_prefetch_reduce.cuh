@@ -1,4 +1,5 @@
 #pragma once
+#include "contact_record_index.cuh"
 
 // Include after contact_warp_reduce.cuh inside the pipeline's
 // anonymous namespace. All numerical expressions reuse its existing helpers.
@@ -11,15 +12,17 @@ template<class WorkType>
 IPC_CONTACT_PREFETCH_DEVICE inline int contact_prefetch_roles(const BroadPhaseView& broad,WorkType work,
     int pair,int node,int& failure) {
     failure=0;
-    if(!work.active[pair])return 0;
+    const int slot=contact_record_slot(work,pair);
+    if(slot<0){failure=20;return 0;}
+    if(!work.active[slot])return 0;
     if(work.compact) {
-        const auto& compact=work.compact[pair];
+        const auto& compact=work.compact[slot];
         if(compact.status!=ContactStatus::Ok){failure=code(compact.status);return 0;}
         if(!compact.active)return 0;
         if(compact.role>=0)
             return broad.contacts[pair].vertices[compact.role]==node?16|(1<<compact.role):0;
     }
-    const auto& out=work.outputs[pair];
+    const auto& out=work.outputs[slot];
     if(out.status!=ContactStatus::Ok){failure=code(out.status);return 0;}
     if(!out.active)return 0;
     int roles=0;
@@ -92,7 +95,7 @@ __global__ void reduce_deformable_prefetch_warp(BroadPhaseView broad,DeformableS
             const auto incident=chunk+lane;
             int local_pair=0,local_roles=0,local_failure=0;
             if(incident<incident_end) {
-                local_pair=work.incidents[incident].contact;
+                local_pair=contact_incident_pair(work,incident);
                 local_roles=contact_prefetch_roles(broad,work,local_pair,node,local_failure);
             }
             const unsigned failures=__ballot_sync(mask,local_failure!=0);
@@ -109,18 +112,19 @@ __global__ void reduce_deformable_prefetch_warp(BroadPhaseView broad,DeformableS
             while(survivors) {
                 const int source=__ffs(survivors)-1;
                 const int pair=__shfl_sync(mask,local_pair,source);
+                const int slot=contact_record_slot(work,pair);
                 const int selected=__shfl_sync(mask,local_roles,source);
                 if(lane<12) {
                     if(selected&16)
-                        value=contact_prefetch_add_compact_component(value,work.compact[pair],int(lane),normal_scale,
+                        value=contact_prefetch_add_compact_component(value,work.compact[slot],int(lane),normal_scale,
                             params.friction==0.0);
                     else for(int role=0;role<4;++role)if(selected&(1<<role))
-                        value=contact_warp_add_component(value,work.outputs[pair],role,int(lane),normal_scale);
+                        value=contact_warp_add_component(value,work.outputs[slot],role,int(lane),normal_scale);
                 }
                 survivors&=survivors-1;
             }
         }
-        if(!scene.solid[node]||!work.surface_query||work.surface_query[node]) {
+        if(!contact_pending(work)&&(!scene.solid[node]||!work.surface_query||work.surface_query[node])) {
             if(lane==0) {
                 const auto out=evaluate_sdf_contact(sdf.colliders,sdf.count,
                     state.positions[node],state.previous[node],sdf.parameters);
@@ -145,7 +149,7 @@ __global__ void reduce_deformable_prefetch_warp(BroadPhaseView broad,DeformableS
                 value+=sdf_components[12+lane];
             }
         }
-        if(__ballot_sync(mask,lane<12&&!contact_detail::finite(value))) {
+        if(!contact_pending(work)&&__ballot_sync(mask,lane<12&&!contact_detail::finite(value))) {
             if(lane==0)error(elastic.error,26);
             return;
         }

@@ -83,8 +83,14 @@ __global__ void cooperative_contacts(
             }
         }
         __syncthreads();
-        if (!state.work) break;
-        if (lane == 0 && !state.replay) {
+        // Drain every lane's shared predicate reads before lane zero can
+        // mutate replay during preparation. A join before the load alone
+        // does not protect speculated LDS instructions in inactive lanes.
+        const unsigned work_before_prepare = state.work;
+        const unsigned replay_before_prepare = state.replay;
+        __syncthreads();
+        if (!work_before_prepare) break;
+        if (lane == 0 && !replay_before_prepare) {
             owner = new (owner_storage) Owner();
             if constexpr (ParallelConversions) {
                 state.prepared = coop::prepare_feature(inputs[state.pair], *owner, *state.output);
@@ -107,8 +113,12 @@ __global__ void cooperative_contacts(
             // All borrowed adapters and conversion temporaries have died before
             // lane zero resumes preparation or eventually destroys the owner.
             __syncthreads();
-            if (lane == 0 && state.prepared) {
-                if (state.replay) state.prepared = 0;
+            const unsigned prepared_after_conversions = state.prepared;
+            const unsigned replay_after_conversions = state.replay;
+            // Lane zero's derivative preparation may change both flags.
+            __syncthreads();
+            if (lane == 0 && prepared_after_conversions) {
+                if (replay_after_conversions) state.prepared = 0;
                 else {
                     for (int k = 0; k < 3; ++k) owner->residual[k] = state.conversions.values[k];
                     for (int i = 0; i < 4; ++i) state.output->weights[i] = state.conversions.values[3+i];
@@ -129,8 +139,13 @@ __global__ void cooperative_contacts(
         // Helpers have destroyed every private adapter/temporary on return.
         // No source limb may be released until this barrier has completed.
         __syncthreads();
+        const unsigned prepared_before_finish = state.prepared;
+        const unsigned replay_before_finish = state.replay;
+        // Finish may set replay after a derivative-status failure. No lane
+        // may retain a shared predicate read concurrent with that write.
+        __syncthreads();
         if (lane == 0) {
-            if (state.prepared && !state.replay) {
+            if (prepared_before_finish && !replay_before_finish) {
                 finish(inputs[state.pair], *owner, *state.output);
                 if (state.output->status != ContactStatus::Ok) state.replay = 1;
             }
@@ -239,8 +254,14 @@ __global__ void canonical_point_contacts(
             }
         }
         __syncthreads();
-        if (!state.work) break;
-        if (lane == 0 && !state.replay) {
+        // Drain every lane's shared predicate reads before lane zero can
+        // mutate replay during preparation. A join before the load alone
+        // does not protect speculated LDS instructions in inactive lanes.
+        const unsigned work_before_prepare = state.work;
+        const unsigned replay_before_prepare = state.replay;
+        __syncthreads();
+        if (!work_before_prepare) break;
+        if (lane == 0 && !replay_before_prepare) {
             owner = new (owner_storage) Owner();
             if constexpr (ParallelConversions) {
                 state.prepared = coop::prepare_feature(inputs[state.pair], *owner, *state.output);
@@ -265,8 +286,12 @@ __global__ void canonical_point_contacts(
             // All borrowed adapters and conversion temporaries have died before
             // lane zero resumes preparation or eventually destroys the owner.
             __syncthreads();
-            if (lane == 0 && state.prepared) {
-                if (state.replay) state.prepared = 0;
+            const unsigned prepared_after_conversions = state.prepared;
+            const unsigned replay_after_conversions = state.replay;
+            // Lane zero's derivative preparation may change both flags.
+            __syncthreads();
+            if (lane == 0 && prepared_after_conversions) {
+                if (replay_after_conversions) state.prepared = 0;
                 else {
                     for (int k = 0; k < 3; ++k) owner->residual[k] = state.conversions.values[k];
                     for (int i = 0; i < 4; ++i) state.output->weights[i] = state.conversions.values[3+i];
@@ -290,8 +315,13 @@ __global__ void canonical_point_contacts(
         // Helpers have destroyed every private adapter/temporary on return.
         // No source limb may be released until this barrier has completed.
         __syncthreads();
+        const unsigned prepared_before_finish = state.prepared;
+        const unsigned replay_before_finish = state.replay;
+        // Finish may set replay after a derivative-status failure. No lane
+        // may retain a shared predicate read concurrent with that write.
+        __syncthreads();
         if (lane == 0) {
-            if (state.prepared && !state.replay) {
+            if (prepared_before_finish && !replay_before_finish) {
                 finish(inputs[state.pair], *owner, *state.output);
                 if (state.output->status != ContactStatus::Ok) state.replay = 1;
             }

@@ -301,15 +301,24 @@ template<int C> IPC_GPU_EXACT_HD inline Integer<C> from_double(double x,int unit
 
 // Context propagates capacity failures through EVERY comparison and
 // operation, even if an intermediate invalid value happens to look like zero.
+#if defined(__CUDA_ARCH__) && defined(IPC_GPU_OUTLINE_EXACT_COMPARE) \
+    && IPC_GPU_OUTLINE_EXACT_COMPARE
+#define IPC_GPU_EXACT_COMPARE_BOUNDARY __noinline__
+#else
+#define IPC_GPU_EXACT_COMPARE_BOUNDARY
+#endif
+
 template<int C> struct Arithmetic {
     using I=Integer<C>;
     bool ok=true;
     IPC_GPU_EXACT_HD I sum(const I&a,const I&b) { I r=add(a,b); ok=ok&&r.valid; return r; }
     IPC_GPU_EXACT_HD I sub(const I&a,const I&b) { I r=subtract(a,b); ok=ok&&r.valid; return r; }
     IPC_GPU_EXACT_HD I mul(const I&a,const I&b) { I r=multiply(a,b); ok=ok&&r.valid; return r; }
-    IPC_GPU_EXACT_HD int cmp(const I&a,const I&b) { ok=ok&&a.valid&&b.valid; return compare(a,b); }
+    IPC_GPU_EXACT_HD IPC_GPU_EXACT_COMPARE_BOUNDARY int cmp(const I&a,const I&b) { ok=ok&&a.valid&&b.valid; return compare(a,b); }
     IPC_GPU_EXACT_HD int sign(const I&a) { ok=ok&&a.valid; return a.sign; }
 };
+
+#undef IPC_GPU_EXACT_COMPARE_BOUNDARY
 
 template<int C> IPC_GPU_EXACT_HD inline Status verdict(const Arithmetic<C>& arithmetic,Status status) {
     if(!arithmetic.ok)return Status::CapacityExceeded;

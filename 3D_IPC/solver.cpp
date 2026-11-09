@@ -17,6 +17,7 @@
 #include "friction_energy.h"
 #include "output.h"
 #include "rigid_body_ipc.h"
+#include "ccd.h"
 #include "safe_step.h"
 #include "solid_ipc.h"
 #include "ogc_contact.h"
@@ -74,6 +75,7 @@ struct DATProposalWorkspace {
     std::vector<Mat33> predictors;
     std::vector<unsigned char> solid, surface;
     std::vector<IncidentTriangles> incident;
+    DATWorkspace dat;
 };
 
 template<class Predicate>
@@ -531,6 +533,7 @@ struct OGCSolverWorkspace {
     std::vector<std::vector<int>> color_groups;
     std::vector<Vec3> xnew_substep_start;
     std::vector<Vec3> xnew_copy;
+    std::vector<Vec3> xnew_next;
     std::vector<double> bounds;
     ogc_detail::ContactCache contacts;
     bool matches(const RefMesh& ref_mesh, int nv) const {
@@ -557,8 +560,8 @@ struct OGCSolverWorkspace {
         for (int ti = 0; ti < static_cast<int>(ref_mesh.Dm_inverse.size()); ++ti)
             rest_shape_grads[ti] = shape_function_gradients(ref_mesh.Dm_inverse[ti]);
 
-        // Contact terms read a frozen snapshot, so only the unchanged elastic
-        // topology constrains colors. Rebuild them with the topology cache.
+        // Contact reads a frozen snapshot. Only elastic dependencies constrain
+        // colors, which remain cached until the structural topology changes.
         greedy_color_conflict_graph(elastic_adjacency.get(ref_mesh, adj, nv), color_groups);
 
         mesh = &ref_mesh;
@@ -1503,7 +1506,7 @@ static SolverResult solve_deformable_dat(
     if (colored_sweep) colored.prepare(ref_mesh, adj, pins, solve_params, count);
     else jacobi.prepare(ref_mesh, adj, pins, solve_params, count);
     const auto& rest_gradients = colored_sweep ? colored.rest_gradients() : jacobi.rest_gradients();
-    DATWorkspace dat;
+    auto& dat = proposal_workspace.dat;
     bool contacts_ready = false;
     const double shared_radius = std::max(query_radius * params.dat_node_box_padding, params.d_hat);
     broad_phase.invalidate_mesh_topology();
@@ -3700,11 +3703,16 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
                                             const std::vector<Vec3>* previous_positions) {
     validate_solver_friction_parameters(
         params, "global_gauss_seidel_solver_ogc");
+    (void)params.dt2(); // Warm lazy time-step caches before parallel color work.
     std::vector<Vec3> reconstructed_previous_positions;
     previous_positions = resolve_experimental_friction_previous_positions(
         params, xnew, xhat, v, previous_positions,
         reconstructed_previous_positions,
         "global_gauss_seidel_solver_ogc");
+    if (previous_positions == &xnew) {
+        reconstructed_previous_positions = xnew;
+        previous_positions = &reconstructed_previous_positions;
+    }
     if (!params.fixed_iters) {
         fprintf(stderr, "global_gauss_seidel_solver_ogc: params.fixed_iters must be true\n");
         exit(1);
@@ -3739,14 +3747,18 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
     }
     broad_phase.initialize(bvh_node_boxes, ref_mesh, pad);
 
+    // Reuse structural colors even as contact pairs change. Every color reads
+    // its own current contact snapshot before publishing any of its updates.
     const std::vector<std::vector<int>>& color_groups = workspace.color_groups;
 
     if (params.write_substeps)
         write_substep_data(params, broad_phase, xnew, outdir, &ref_mesh, nullptr);
 
     std::vector<Vec3>& xnew_copy = workspace.xnew_copy;
+    std::vector<Vec3>& xnew_next = workspace.xnew_next;
     std::vector<double>& bounds = workspace.bounds;
     xnew_copy.resize(nv);
+    xnew_next.resize(nv);
     bounds.resize(nv);
 
     for (int iter = 1; iter <= params.max_global_iters; ++iter) {
@@ -3761,29 +3773,41 @@ SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const Verte
         }
 
         xnew_copy = xnew;
-        // Bounds and barrier assembly use exactly this iteration's frozen
-        // geometry. Evaluate each contact once, sharing it across its vertices.
-        workspace.contacts.evaluate(broad_phase, xnew_copy, true, params.exact_computation_fallback);
+        // Bounds stay anchored to detection-time geometry for the entire
+        // iteration. This evaluation also supplies the first color's contacts.
+        workspace.contacts.evaluate(broad_phase, xnew_copy, params.use_parallel, params.exact_computation_fallback);
         #pragma omp parallel for schedule(static)
         for (int vi = 0; vi < nv; ++vi)
-            bounds[vi] = workspace.contacts.isotropic_motion_bound(broad_phase, vi, node_box_size_fn(vi));
+            // A distant broad-phase false positive must not allow motion
+            // outside the boxes which cover later color contact evaluations.
+            bounds[vi] = std::min(node_box_size_fn(vi),
+                workspace.contacts.isotropic_motion_bound(broad_phase, vi, node_box_size_fn(vi)));
 
+        bool first_color = true;
         for (const auto& color : color_groups) {
+            if (!first_color) {
+                xnew_copy = xnew;
+                workspace.contacts.evaluate(broad_phase, xnew_copy, params.use_parallel, params.exact_computation_fallback);
+            }
+            first_color = false;
             const int csz = static_cast<int>(color.size());
             #pragma omp parallel for schedule(static)
             for (int idx = 0; idx < csz; ++idx) {
                 const int vi = color[idx];
-                // Elastic stencil reads live xnew (GS across colors); barrier
-                // stencil reads frozen xnew_copy (Jacobi).
-                const Vec3 dx = -params.damping * ogc_detail::frozen_contact_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew, xnew_copy, broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads, previous_positions, workspace.contacts);
+                // Fresh color-start positions include all earlier accepted
+                // colors; same-color contact roles read one immutable state.
+                const Vec3 dx = -params.damping * ogc_detail::frozen_contact_vertex_delta(vi, ref_mesh, adj, pins, params, xhat, xnew_copy, xnew_copy, broad_phase, &pm, &workspace.incident_triangles[vi], &workspace.rest_shape_grads, previous_positions, workspace.contacts);
                 if (dx.squaredNorm() < 1e-28) {
-                    xnew[vi] = xnew_copy[vi];
+                    xnew_next[vi] = xnew_copy[vi];
                     continue;
                 }
                 const double dx_norm = dx.norm();
                 const double toi = (dx_norm > 0.0) ? std::min(1.0, bounds[vi] / dx_norm) : 1.0;
-                xnew[vi] = xnew_copy[vi] + toi * dx;
+                xnew_next[vi] = xnew_copy[vi] + toi * dx;
             }
+            #pragma omp parallel for schedule(static)
+            for (int idx = 0; idx < csz; ++idx)
+                xnew[color[idx]] = xnew_next[color[idx]];
         }
 
         result.iterations = iter;
@@ -4648,7 +4672,7 @@ static SolverResult solve_general_dat(const RefMesh& mesh,
     if(colored_sweep)colored.prepare(mesh,adj,pins,solve_params,n,true);
     else jacobi.prepare(mesh,adj,pins,solve_params,n,true);
     const auto& rest_gradients=colored_sweep?colored.rest_gradients():jacobi.rest_gradients();
-    DATWorkspace dat;
+    auto& dat=work.dat;
     bool filter_called=false;
     bool contacts_ready=false;
     const double shared_radius=std::max(query_radius*params.dat_node_box_padding,params.d_hat);
@@ -4779,17 +4803,24 @@ static SolverResult solve_general_dat(const RefMesh& mesh,
     if(!filter_called) {
         // Zero-iteration and initially converged solves still reject invalid
         // initial contact geometry, even though they never propose a step.
+        // Use a fresh workspace: this is the only nullptr-candidate filter call,
+        // so it must rebuild standalone topology instead of reusing the cached
+        // internal broad phase.
+        DATWorkspace validation_dat;
         parallel_body_setup(int(n),params.use_parallel,[&](int v) {
             particle_updates[v].setZero();
             if(std::size_t(v)<bodies){dc[v].setZero();dw[v].setZero();}
         });
         (void)general_planar_DAT(params.dat_gamma,query_radius,mesh,particle_updates,
             positions,centers,angular,state.orientations,dc,dw,dt,
-            params.dat_node_box_padding,nullptr,&dat);
+            params.dat_node_box_padding,nullptr,&validation_dat);
     }
     if(params.fixed_iters)result.converged=true;
+    // Without substep export, the last-iteration cache still covers final
+    // q/d_hat neighbors (within max(q,d_hat)+gamma*q < 2*shared_radius at
+    // detection; live positions feed distances). Export/never-filtered rebuild.
     if(params.write_substeps) rebuild(query_radius*params.dat_node_box_padding);
-    else ensure_contacts();
+    else if(!filter_called) ensure_contacts();
     if(params.write_substeps)write_substep_data(params,phase,positions,outdir,&mesh);
     xnew.swap(positions);x_com_new.swap(centers);omega_new.swap(angular);q_new.swap(orientations);
     broad_phase=std::move(phase);
@@ -5734,6 +5765,8 @@ SolverResult global_gauss_seidel_solver_general_experimental_v2(
             if (update_mode == RigidBodyUpdateMode::None && rigid_workspace.fixed_body_placed[rb])
                 return;
             const QuaternionOmegaKinematics kinematics = quaternion_omega_kinematics(state.orientations[rb], omega_new[rb], dt, updates_rigid_orientation(update_mode));
+            // Preserve the original serial safe translation then safe rotation
+            // commits, including fresh proxy positions for rotation CCD.
             if (updates_rigid_translation(update_mode)) {
                 const Vec3 delta_com = params.damping * rb_solver::compute_com_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics, cooperative, true);
                 const Vec3 com_radius = Vec3::Constant(rigid_workspace.com_box_radii[rb]);
@@ -5746,6 +5779,7 @@ SolverResult global_gauss_seidel_solver_general_experimental_v2(
             }
 
             Vec4 q_accepted = q_new[rb];
+            bool preserve_rigid_proxy = false;
             if (updates_rigid_orientation(update_mode)) {
                 const Vec3 delta_omega = rb_solver::compute_omega_update(rb, state, ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], rigid_workspace.node_to_rb_local, xnew, x_com_new, omega_new, params, dt, &kinematics, &rigid_workspace.rotation_predictors[static_cast<std::size_t>(rb)], cooperative, true);
                 const Vec4 q_current = quaternion_normalize(kinematics.orientation);
@@ -5753,12 +5787,17 @@ SolverResult global_gauss_seidel_solver_general_experimental_v2(
                 const Vec4 q_target = quaternion_normalize(quaternion_from_angular_velocity(state.orientations[rb], omega_trial, dt));
                 const Vec4 q_bounded = bound_quaternion(rigid_workspace.orientation_box_anchors[rb], q_current,q_target, rigid_workspace.theta_box_radii[rb]);
                 const double rotation_safe_step = per_rigid_body_rotation_safe_step(ref_mesh, broad_phase.cache(), rigid_workspace.body_nt_pair_indices[rb], rigid_workspace.body_ss_pair_indices[rb], xnew, rb, x_com_new[rb], q_current, q_bounded, 0.9, cooperative);
-                q_accepted = interpolate_orientation_full_arc(q_current, q_bounded, rotation_safe_step);
-                q_new[rb] = q_accepted;
-                omega_new[rb] = angular_velocity_from_orientation_full_arc(q_accepted, state.orientations[rb], dt);
+                const auto accepted = rigid_pose_publication::accept_rotation(
+                    q_new[rb], omega_new[rb], q_current, q_bounded,
+                    rotation_safe_step, state.orientations[rb], dt);
+                q_accepted = accepted.orientation;
+                q_new[rb] = accepted.orientation;
+                omega_new[rb] = accepted.angular_velocity;
+                preserve_rigid_proxy = accepted.preserve_proxy;
             }
 
-            place_rigid_nodes(ref_mesh.rb_nodes[rb], ref_mesh.ref_positions[rb], x_com_new[rb], q_accepted, xnew, params.use_parallel);
+            if (!preserve_rigid_proxy)
+                place_rigid_nodes(ref_mesh.rb_nodes[rb], ref_mesh.ref_positions[rb], x_com_new[rb], q_accepted, xnew, params.use_parallel);
             if (update_mode == RigidBodyUpdateMode::None) rigid_workspace.fixed_body_placed[rb] = 1;
         };
 

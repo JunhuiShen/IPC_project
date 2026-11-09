@@ -633,15 +633,38 @@ Vec3 rigid_pin_target_position(const RigidPin& pin, double time) {
         throw std::invalid_argument("rigid pin time must be finite");
     if (!std::isfinite(pin.angular_velocity_z))
         throw std::invalid_argument("rigid pin angular speed must be finite");
+    if (!std::isfinite(pin.angular_velocity_ramp_duration)
+        || pin.angular_velocity_ramp_duration < 0.0)
+        throw std::invalid_argument("rigid pin angular ramp duration must be finite and nonnegative");
     if (!pin.initial_target.allFinite())
         throw std::invalid_argument("rigid pin initial target must be finite");
     if (!pin.rotation_center.allFinite())
         throw std::invalid_argument("rigid pin rotation center must be finite");
+    if (!pin.target_translation.allFinite()
+        || !std::isfinite(pin.translation_start_time)
+        || !std::isfinite(pin.translation_duration))
+        throw std::invalid_argument("rigid pin target translation and timing must be finite");
+    const bool translates = (pin.target_translation.array() != 0.0).any();
+    if (translates && pin.translation_duration <= 0.0)
+        throw std::invalid_argument("translated rigid pin targets require a positive duration");
+    const auto translated_target = [&](const Vec3& target) -> Vec3 {
+        // Avoid even adding zero for authored legacy pins.
+        if (!translates || time <= pin.translation_start_time) return target;
+        const double elapsed = time - pin.translation_start_time;
+        const double u = elapsed >= pin.translation_duration ? 1.0
+            : elapsed / pin.translation_duration;
+        // Quintic smoothstep has zero velocity and acceleration at both ends.
+        const double weight = u * u * u * (10.0 + u * (-15.0 + 6.0 * u));
+        const Vec3 result = target + weight * pin.target_translation;
+        if (!result.allFinite())
+            throw std::invalid_argument("rigid pin translated target must be finite");
+        return result;
+    };
 
     // Stationary pins return their authored target directly. In particular,
     // the axis is irrelevant (and may be zero) when the angular speed is zero.
     if (pin.angular_velocity_z == 0.0)
-        return pin.initial_target;
+        return translated_target(pin.initial_target);
 
     if (!pin.rotation_axis.allFinite())
         throw std::invalid_argument("rigid pin rotation axis must be finite");
@@ -659,8 +682,22 @@ Vec3 rigid_pin_target_position(const RigidPin& pin, double time) {
     if (!std::isfinite(scaled_norm) || scaled_norm <= 0.0)
         throw std::invalid_argument("rigid pin rotation axis must be nonzero");
     const Vec3 axis = scaled_axis / scaled_norm;
+    if (pin.angular_velocity_ramp_duration > 0.0 && time <= 0.0)
+        return translated_target(pin.initial_target);
 
-    const double theta = pin.angular_velocity_z * time;
+    // Preserve the existing constant-speed multiplication for zero duration.
+    double rotation_time = time;
+    if (pin.angular_velocity_ramp_duration > 0.0) {
+        const double duration = pin.angular_velocity_ramp_duration;
+        if (time >= duration) rotation_time = time - 0.5 * duration;
+        else {
+            const double u = time / duration;
+            // Integral of smoothstep5: speed = 10u^3 - 15u^4 + 6u^5.
+            rotation_time = duration * u * u * u * u
+                * (2.5 + u * (-3.0 + u));
+        }
+    }
+    const double theta = pin.angular_velocity_z * rotation_time;
     if (!std::isfinite(theta))
         throw std::invalid_argument("rigid pin rotation angle must be finite");
     const double c = std::cos(theta), s = std::sin(theta);
@@ -671,14 +708,14 @@ Vec3 rigid_pin_target_position(const RigidPin& pin, double time) {
     // trajectories. Any positively scaled +Z axis takes this same branch.
     if (pin.rotation_axis.x() == 0.0 && pin.rotation_axis.y() == 0.0
         && pin.rotation_axis.z() > 0.0) {
-        return pin.rotation_center + Vec3(c * offset.x() - s * offset.y(),
-            s * offset.x() + c * offset.y(), offset.z());
+        return translated_target(pin.rotation_center + Vec3(c * offset.x() - s * offset.y(),
+            s * offset.x() + c * offset.y(), offset.z()));
     }
 
     // Rodrigues' rotation formula for an arbitrary normalized world axis.
     const Vec3 rotated = c * offset + s * axis.cross(offset)
         + (1.0 - c) * axis.dot(offset) * axis;
-    return pin.rotation_center + rotated;
+    return translated_target(pin.rotation_center + rotated);
 }
 
 // Derivatives of dt^2 kpin/2 ||t + R(q(omega)) X - target||^2.

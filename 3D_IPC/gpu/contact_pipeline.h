@@ -6,11 +6,17 @@
 
 namespace ipc_gpu::solver {
 
+class GpuSolver;
+
 enum class ContactAssemblyPhase { Deformable, RigidTranslation, RigidOrientation };
 enum class ContactAssemblyMode {
     ColorSweep,
     FrozenSnapshot,
     FrozenDeformableSnapshot = FrozenSnapshot, // existing caller compatibility
+};
+struct ContactStorageBytes {
+    std::size_t packet_bytes=0;
+    std::size_t exact_bytes=0;
 };
 struct RigidPinAssembly {
     RigidPinScene scene{};
@@ -49,9 +55,14 @@ struct ContactBoxPruning {
 class GpuContactPipeline {
 public:
     GpuContactPipeline();
+    explicit GpuContactPipeline(std::size_t packet_capacity);
     ~GpuContactPipeline();
     GpuContactPipeline(const GpuContactPipeline&)=delete;
     GpuContactPipeline& operator=(const GpuContactPipeline&)=delete;
+    // Packet/queue allocations plus the optional global-pair slot map, and exact
+    // arenas. Other topology and nodal systems are excluded. The map retains
+    // its high-water capacity and adds sizeof(int) per allocated global pair.
+    ContactStorageBytes storage_bytes()const noexcept;
 
     // Call after every broad-phase rebuild. vertex_block and surface_query are
     // device arrays from that topology. A null surface_query means all nodes
@@ -78,6 +89,10 @@ public:
     // 23 exact bit capacity, 24 exact arena failure, 25 SDF failure,
     // 26 nonfinite accumulated system, 27 invalid deformable block mapping.
 private:
+    friend class GpuSolver;
+    // Constructor-time hint from a fully validated two-body/two-block owner.
+    // Raw pipelines and the separate DAT pipeline never receive this hint.
+    void bind_validated_two_rigid_blocks(std::size_t validated_nodes);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

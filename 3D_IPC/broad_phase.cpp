@@ -666,6 +666,23 @@ namespace {
             return;
 
         const std::size_t nv = cache.vertex_nt.size();
+        // General solves retain vertex-sized rows for mixed adjacency, but
+        // rigid-owned vertices never receive incidence entries. Avoid counting
+        // and scanning empty rows when every represented vertex is rigid.
+        // Clear stale rows from a previous mixed rebuild without discarding
+        // their shape or changing contact-pair ordering.
+        if (mode == BroadPhase::InitializationMode::GeneralSolver
+            && cache.vertex_ss.size() == nv
+            && mesh.node_to_rb.size() >= nv
+            && std::all_of(mesh.node_to_rb.begin(), mesh.node_to_rb.begin() + nv,
+                [](int owner) { return owner >= 0; })) {
+            #pragma omp parallel for schedule(static) if(nv >= 128)
+            for (std::size_t node = 0; node < nv; ++node) {
+                cache.vertex_nt[node].clear();
+                cache.vertex_ss[node].clear();
+            }
+            return;
+        }
         int num_workers = 1;
         #ifdef _OPENMP
         num_workers = std::max(1, omp_get_max_threads());

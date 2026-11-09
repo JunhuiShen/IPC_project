@@ -101,6 +101,10 @@ add_executable(gpu_exact_pool_test EXCLUDE_FROM_ALL exact_pool_test.cu)
 target_link_libraries(gpu_exact_pool_test PRIVATE CUDA::cudart)
 target_compile_options(gpu_exact_pool_test PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false;-lineinfo>)
+if(IPC_GPU_FAST_DEV_BUILD)
+    target_compile_definitions(ipc_gpu_ccd_test_kernel PRIVATE IPC_GPU_OUTLINE_EXACT_COMPARE=1)
+    target_compile_definitions(gpu_exact_pool_test PRIVATE IPC_GPU_OUTLINE_EXACT_COMPARE=1)
+endif()
 ipc_gpu_solver_test(gpu_exact_pool gpu_exact_pool_test)
 add_executable(gpu_ratio_host_test EXCLUDE_FROM_ALL ratio_differential_test.cpp)
 target_compile_options(gpu_ratio_host_test PRIVATE -ffp-contract=off)
@@ -130,6 +134,7 @@ target_compile_options(ipc_gpu_contact_pipeline_test_kernel PRIVATE $<$<COMPILE_
 add_executable(gpu_contact_pipeline_test EXCLUDE_FROM_ALL contact_pipeline_test.cpp)
 target_link_libraries(gpu_contact_pipeline_test PRIVATE IPC::core ipc_gpu_contact_pipeline_test_kernel)
 ipc_gpu_solver_test(gpu_contact_pipeline gpu_contact_pipeline_test)
+set_property(TEST gpu_contact_pipeline APPEND PROPERTY ENVIRONMENT "IPC_GPU_BOX_CONTACT_PRUNING=1")
 add_executable(gpu_contact_queue_test EXCLUDE_FROM_ALL contact_queue_test.cu)
 target_link_libraries(gpu_contact_queue_test PRIVATE ipc_gpu_solver CUDA::cudart)
 target_compile_options(gpu_contact_queue_test PRIVATE
@@ -186,9 +191,70 @@ ipc_gpu_solver_test(gpu_global_guess gpu_global_guess_test)
 add_executable(gpu_linear_pipeline_test EXCLUDE_FROM_ALL linear_pipeline_test.cpp)
 target_link_libraries(gpu_linear_pipeline_test PRIVATE ipc_gpu_solver)
 ipc_gpu_solver_test(gpu_linear_pipeline gpu_linear_pipeline_test)
+add_executable(gpu_node_ccd_batch_test EXCLUDE_FROM_ALL node_ccd_batch_test.cpp)
+target_compile_options(gpu_node_ccd_batch_test PRIVATE -ffp-contract=off)
+target_link_libraries(gpu_node_ccd_batch_test PRIVATE ipc_gpu_solver)
+ipc_gpu_solver_test(gpu_node_ccd_batch gpu_node_ccd_batch_test)
+# Original TOI-preserving CSR scheduling: real device endpoint/status fixtures
+# plus a separate integer-only host coverage oracle. Both stay out of ALL.
+add_executable(gpu_node_csr_partition_native_test EXCLUDE_FROM_ALL
+    node_csr_partition_native_test.cpp)
+target_include_directories(gpu_node_csr_partition_native_test BEFORE PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(gpu_node_csr_partition_native_test PRIVATE -ffp-contract=off)
+target_link_libraries(gpu_node_csr_partition_native_test PRIVATE ipc_gpu_solver)
+ipc_gpu_solver_test(gpu_node_csr_partition_native gpu_node_csr_partition_native_test)
+add_executable(gpu_node_csr_partition_test EXCLUDE_FROM_ALL node_csr_partition_test.cpp)
+target_compile_options(gpu_node_csr_partition_test PRIVATE -ffp-contract=off)
+ipc_gpu_solver_test(gpu_node_csr_partition_host gpu_node_csr_partition_test)
+set_tests_properties(gpu_node_csr_partition_host PROPERTIES LABELS "gpu_solver;host_math")
+
+# Cooperative Original node controller: retain the current CSR native fixture
+# through the wrapper include, plus an independent threaded host stage oracle.
+add_executable(gpu_node_cooperative_native_test EXCLUDE_FROM_ALL
+    node_cooperative_native_test.cpp)
+target_include_directories(gpu_node_cooperative_native_test BEFORE PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(gpu_node_cooperative_native_test PRIVATE -ffp-contract=off)
+target_link_libraries(gpu_node_cooperative_native_test PRIVATE ipc_gpu_solver)
+ipc_gpu_solver_test(gpu_node_cooperative_native gpu_node_cooperative_native_test)
+# Unsupported residency verifies rollback only; report SKIP, never qualification.
+set_tests_properties(gpu_node_cooperative_native PROPERTIES SKIP_RETURN_CODE 77)
+add_executable(gpu_node_controller_test EXCLUDE_FROM_ALL node_controller_test.cpp)
+target_compile_options(gpu_node_controller_test PRIVATE -ffp-contract=off)
+target_link_libraries(gpu_node_controller_test PRIVATE Threads::Threads)
+ipc_gpu_solver_test(gpu_node_controller_host gpu_node_controller_test)
+set_tests_properties(gpu_node_controller_host PROPERTIES LABELS "gpu_solver;host_math")
 add_executable(gpu_rigid_pipeline_test EXCLUDE_FROM_ALL rigid_pipeline_test.cpp)
 target_link_libraries(gpu_rigid_pipeline_test PRIVATE ipc_gpu_solver IPC::ipc)
 ipc_gpu_solver_test(gpu_rigid_pipeline gpu_rigid_pipeline_test)
+
+# Trusted rigid-proxy execution: exact native OFF/ON and public-API controls,
+# plus independent host-only CSR-index and proxy-value oracles.
+add_executable(gpu_rigid_proxy_parallel_test EXCLUDE_FROM_ALL
+    rigid_proxy_parallel_test.cpp)
+target_include_directories(gpu_rigid_proxy_parallel_test BEFORE PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(gpu_rigid_proxy_parallel_test PRIVATE -ffp-contract=off)
+target_link_libraries(gpu_rigid_proxy_parallel_test PRIVATE ipc_gpu_solver IPC::ipc)
+ipc_gpu_solver_test(gpu_rigid_proxy_parallel gpu_rigid_proxy_parallel_test)
+add_executable(gpu_rigid_pipeline_proxy_trusted_test EXCLUDE_FROM_ALL
+    rigid_pipeline_proxy_trusted_test.cpp)
+target_include_directories(gpu_rigid_pipeline_proxy_trusted_test BEFORE PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_options(gpu_rigid_pipeline_proxy_trusted_test PRIVATE -ffp-contract=off)
+target_link_libraries(gpu_rigid_pipeline_proxy_trusted_test PRIVATE
+    ipc_gpu_solver IPC::ipc)
+ipc_gpu_solver_test(gpu_rigid_pipeline_proxy_trusted gpu_rigid_pipeline_proxy_trusted_test)
+add_executable(gpu_rigid_proxy_index_test EXCLUDE_FROM_ALL rigid_proxy_index_test.cpp)
+target_compile_options(gpu_rigid_proxy_index_test PRIVATE -ffp-contract=off)
+ipc_gpu_solver_test(gpu_rigid_proxy_index gpu_rigid_proxy_index_test)
+set_tests_properties(gpu_rigid_proxy_index PROPERTIES LABELS "gpu_solver;host_math")
+add_executable(gpu_rigid_proxy_values_test EXCLUDE_FROM_ALL rigid_proxy_values_test.cpp)
+target_compile_options(gpu_rigid_proxy_values_test PRIVATE -ffp-contract=off)
+target_link_libraries(gpu_rigid_proxy_values_test PRIVATE Eigen3::Eigen)
+ipc_gpu_solver_test(gpu_rigid_proxy_values gpu_rigid_proxy_values_test)
+set_tests_properties(gpu_rigid_proxy_values PROPERTIES LABELS "gpu_solver;host_math")
 
 # Independent qualified ORIGINAL (exact_computation_fallback == false)
 # components. The component sources stay read-only; these targets only compile

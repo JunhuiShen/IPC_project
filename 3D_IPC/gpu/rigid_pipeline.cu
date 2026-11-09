@@ -1,15 +1,26 @@
 #include "rigid_pipeline.h"
 #include "rigid_ccd.cuh"
+#include "rigid_proxy_index.h"
+#include "rigid_proxy_values.cuh"
 
 #include <cuda_runtime.h>
 #include <cfloat>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
 namespace ipc_gpu::solver {
 namespace {
 constexpr unsigned width = 128;
+struct RotationBatchContext {
+    std::size_t body=0;
+    int mode=0,done=0;unsigned hit=0;
+    unsigned long long first_error=~0ull;
+    double current[4]{},reverse[4]{},angle=0.,fraction=1.;
+};
+static_assert(sizeof(RotationBatchContext)==112,"bounded rotation context layout");
 unsigned blocks(std::size_t n) { return static_cast<unsigned>((n+width-1)/width); }
 void launched() {
     const auto status = cudaGetLastError();
@@ -17,6 +28,20 @@ void launched() {
 }
 void valid_dt(double dt) {
     if (!(dt > 0) || !std::isfinite(dt)) throw std::invalid_argument("GPU rigid dt must be positive and finite");
+}
+unsigned rotation_pair_threads() {
+    const char* value=std::getenv("IPC_GPU_RIGID_ROTATION_PAIR_THREADS");
+    if(!value||!*value||std::strcmp(value,"1")==0)return 1;
+    for(const unsigned count:{32u,64u,128u})
+        if(std::strcmp(value,std::to_string(count).c_str())==0)return count;
+    throw std::invalid_argument("IPC_GPU_RIGID_ROTATION_PAIR_THREADS must be 1,32,64,128");
+}
+bool parallel_proxy_option() {
+    const char* value=std::getenv("IPC_GPU_PARALLEL_RIGID_PROXIES");
+    if(!value||!*value)return true;
+    if(std::strcmp(value,"0")==0)return false;
+    if(std::strcmp(value,"1")==0)return true;
+    throw std::invalid_argument("IPC_GPU_PARALLEL_RIGID_PROXIES must be 0 or 1");
 }
 __device__ bool active(const RigidScene& s,const int* colors,int color,std::size_t body) {
     return colors[s.body_blocks[body]] == color;
@@ -306,7 +331,8 @@ __device__ bool swept_candidate(const BpContact& contact,int body,RigidScene s,R
 
 __global__ void rotation_clip(RigidScene s,RigidState x,RigidWorkspace w,DeformableState state,
     BroadPhaseView broadphase,const int* colors,int color,double dt,double safety,bool use_ccd,
-    double (*accepted)[3],int* error) {
+    double (*accepted)[3],int* error,const RotationBatchContext* gate) {
+    if(gate&&gate->mode!=0)return;
     const std::size_t body=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
     if (body>=s.bodies || !active(s,colors,color,body) || !s.rotate[body] || failed(error)) return;
     double current[4],relative[4],reverse[4];
@@ -355,6 +381,205 @@ __global__ void rotation_clip(RigidScene s,RigidState x,RigidWorkspace w,Deforma
         if (!finite3(accepted[node])) { fail(error,RigidInvalidState); return; }
     }
 }
+// Prototype: the original scalar kernel above remains the differential oracle.
+// A block owns one body. Every lane evaluates one candidate from the current
+// chunk, and lane zero consumes all results in ORIGINAL candidate order.
+// There is no tree reduction, changed per-query arithmetic, or global scratch.
+__device__ int rotation_pair_result(const BpContact& c,std::size_t body,
+    RigidScene s,RigidState x,RigidWorkspace w,DeformableState state,
+    const double* current,const double* reverse,double angle,
+    bool& collision,double& time) {
+    collision=false;time=1.0;
+    int owner[4];bool involved=false;
+    for(int i=0;i<4;++i) {
+        owner[i]=s.node_body[c.vertices[i]];
+        involved=involved||owner[i]==static_cast<int>(body);
+    }
+    if(!involved)return 0;
+    const bool first=owner[0]==static_cast<int>(body);
+    bool second;
+    if(c.kind==0) {
+        second=owner[1]==static_cast<int>(body);
+        if((owner[2]==static_cast<int>(body))!=second
+            ||(owner[3]==static_cast<int>(body))!=second)return RigidContactOwnership;
+    } else {
+        second=owner[2]==static_cast<int>(body);
+        if((owner[1]==static_cast<int>(body))!=first
+            ||(owner[3]==static_cast<int>(body))!=second)return RigidContactOwnership;
+    }
+    if(first&&second)return 0;
+    // Same swept_candidate arithmetic, with a lane-local status instead of
+    // racing the global error. The ordered consumer publishes the first error.
+    BpAabb boxes[4];const double identity[4]={1,0,0,0};
+    for(int i=0;i<4;++i) {
+        const int node=c.vertices[i];
+        if(s.node_body[node]==static_cast<int>(body)) {
+            double offset[3];
+            for(int k=0;k<3;++k)offset[k]=state.positions[node][k]-x.com[body][k];
+            if(rigid_spherical_cap_box(x.com[body],identity,offset,angle,boxes[i])
+                !=RigidRotationStatus::Success)return RigidRotationFailure;
+            const double radius=rotation_detail::vec(offset).norm();
+            for(int k=0;k<3;++k) {
+                const double margin=64.0*DBL_EPSILON*(fabs(x.com[body][k])+radius+1.0);
+                boxes[i].lo[k]=outward_neighbor(boxes[i].lo[k]-margin,false);
+                boxes[i].hi[k]=outward_neighbor(boxes[i].hi[k]+margin,true);
+            }
+        } else for(int k=0;k<3;++k)boxes[i].lo[k]=boxes[i].hi[k]=state.positions[node][k];
+    }
+    const bool candidate=c.kind==0
+        ?intersects(boxes[0],joined(joined(boxes[1],boxes[2]),boxes[3]))
+        :intersects(joined(boxes[0],boxes[1]),joined(boxes[2],boxes[3]));
+    if(!candidate)return 0;
+    RigidRotationQuery query{};query.vertex_face=c.kind==0;
+    for(int k=0;k<3;++k)query.com[k]=x.com[body][k];
+    for(int i=0;i<4;++i) {
+        query.current[i]=first?current[i]:(i==0?1.0:0.0);
+        query.target[i]=first?w.proposed_orientation[body][i]:reverse[i];
+        for(int k=0;k<3;++k)query.positions[i][k]=state.positions[c.vertices[i]][k];
+    }
+    const auto result=rigid_rotation_ccd(query);
+    if(result.status!=RigidRotationStatus::Success)return RigidRotationFailure;
+    collision=result.collision;time=result.time;
+    return 0;
+}
+
+__global__ void rotation_clip_pair_parallel(RigidScene s,RigidState x,RigidWorkspace w,
+    DeformableState state,BroadPhaseView broadphase,const int* colors,int color,
+    double dt,double safety,bool use_ccd,double(*accepted)[3],int* error,const RotationBatchContext* gate) {
+    if(gate&&gate->mode!=0)return;
+    const std::size_t body=blockIdx.x;
+    const unsigned lane=threadIdx.x;
+    __shared__ double current[4],reverse[4],angle,fraction;
+    __shared__ int enabled,collision;
+    __shared__ double pair_times[128];
+    __shared__ int pair_status[128],pair_hits[128];
+    if(lane==0) {
+        enabled=body<s.bodies&&active(s,colors,color,body)&&s.rotate[body]&&!failed(error);
+        collision=0;fraction=1.0;
+        if(enabled) {
+            double relative[4];
+            rigid_orientation(x.previous_orientation[body],x.omega[body],dt,current);
+            if(!rotation_detail::normalize(current,current)) {
+                fail(error,RigidRotationFailure);enabled=0;
+            } else {
+                rotation_detail::relative(w.proposed_orientation[body],current,relative);
+                rotation_detail::relative(current,w.proposed_orientation[body],reverse);
+                if(!rotation_detail::normalize(relative,relative)
+                    ||!rotation_detail::normalize(reverse,reverse)) {
+                    fail(error,RigidRotationFailure);enabled=0;
+                } else angle=2.0*atan2(rotation_detail::vec(relative+1).norm(),relative[0]);
+            }
+        }
+    }
+    __syncthreads();
+    if(!enabled)return;
+    if(use_ccd)for(std::size_t first=0;first<broadphase.contact_count;first+=blockDim.x) {
+        const std::size_t index=first+lane;
+        bool hit=false;double time=1.0;int status=0;
+        if(index<broadphase.contact_count)
+            status=rotation_pair_result(broadphase.contacts[index],body,s,x,w,state,
+                current,reverse,angle,hit,time);
+        pair_times[lane]=time;pair_hits[lane]=hit;pair_status[lane]=status;
+        __syncthreads();
+        if(lane==0) {
+            for(unsigned item=0;item<blockDim.x&&first+item<broadphase.contact_count;++item) {
+                if(pair_status[item]) {
+                    fail(error,pair_status[item]);enabled=0;break;
+                }
+                if(pair_hits[item]) {collision=1;fraction=fmin(fraction,pair_times[item]);}
+            }
+        }
+        // All lanes observe the same error decision before leaving a chunk.
+        __syncthreads();
+        if(!enabled)return;
+    }
+    if(lane!=0)return;
+    if(collision)fraction*=safety;
+    if(interpolate_rigid_orientation(current,w.proposed_orientation[body],fraction,w.accepted_orientation[body])
+        !=RigidRotationStatus::Success
+        ||rigid_angular_velocity_from_orientation(w.accepted_orientation[body],x.previous_orientation[body],dt,w.accepted_omega[body])
+        !=RigidRotationStatus::Success) {fail(error,RigidRotationFailure);return;}
+    for(std::size_t i=s.node_offsets[body];i<s.node_offsets[body+1];++i) {
+        const int node=s.nodes[i];
+        rigid_world_position(s.reference[node],x.com[body],w.accepted_orientation[body],accepted[node]);
+        if(!finite3(accepted[node])) {fail(error,RigidInvalidState);return;}
+    }
+}
+
+__global__ void rotation_batch_prepare(RigidScene s,RigidState x,RigidWorkspace w,
+    BroadPhaseView bp,const int* colors,int color,double dt,int* error,RotationBatchContext* ctx) {
+    if(blockIdx.x||threadIdx.x)return;*ctx=RotationBatchContext{};
+    if(failed(error)){ctx->mode=1;ctx->done=1;return;}
+    if(bp.contact_count>0xffffffffull){return;}
+    std::size_t selected=0;bool found=false;
+    for(std::size_t body=0;body<s.bodies;++body)if(active(s,colors,color,body)&&s.rotate[body]) {
+        if(found){return;}
+        found=true;selected=body;
+    }
+    if(!found){return;}
+    ctx->mode=1;ctx->body=selected;
+    // Exactly the original scalar preparation, retaining all normalization
+    // and relative-quaternion operations in their original order.
+    double relative[4];
+    rigid_orientation(x.previous_orientation[selected],x.omega[selected],dt,ctx->current);
+    if(!rotation_detail::normalize(ctx->current,ctx->current)) {
+        fail(error,RigidRotationFailure);ctx->done=1;return;
+    }
+    rotation_detail::relative(w.proposed_orientation[selected],ctx->current,relative);
+    rotation_detail::relative(ctx->current,w.proposed_orientation[selected],ctx->reverse);
+    if(!rotation_detail::normalize(relative,relative)||!rotation_detail::normalize(ctx->reverse,ctx->reverse)) {
+        fail(error,RigidRotationFailure);ctx->done=1;return;
+    }
+    ctx->angle=2.0*atan2(rotation_detail::vec(relative+1).norm(),relative[0]);
+}
+__device__ void rotation_batch_min(double* destination,double value) {
+    auto* bits=reinterpret_cast<unsigned long long*>(destination);
+    auto observed=atomicCAS(bits,0ull,0ull);
+    while(true) {
+        const auto desired=static_cast<unsigned long long>(__double_as_longlong(
+            fmin(__longlong_as_double(static_cast<long long>(observed)),value)));
+        if(desired==observed)return;
+        const auto previous=atomicCAS(bits,observed,desired);
+        if(previous==observed)return;observed=previous;
+    }
+}
+__global__ void rotation_batch_pairs(RigidScene s,RigidState x,RigidWorkspace w,DeformableState state,
+    BroadPhaseView bp,bool use_ccd,RotationBatchContext* ctx) {
+    if(ctx->mode!=1||ctx->done||!use_ccd)return;
+    for(std::size_t index=std::size_t(blockIdx.x)*blockDim.x+threadIdx.x;index<bp.contact_count;
+        index+=std::size_t(gridDim.x)*blockDim.x) {
+        bool hit=false;double time=1.0;
+        const int status=rotation_pair_result(bp.contacts[index],ctx->body,s,x,w,state,
+            ctx->current,ctx->reverse,ctx->angle,hit,time);
+        if(status)atomicMin(&ctx->first_error,
+            (static_cast<unsigned long long>(index)<<32)|static_cast<unsigned>(status));
+        else if(hit){atomicOr(&ctx->hit,1u);rotation_batch_min(&ctx->fraction,time);}
+    }
+}
+__global__ void rotation_batch_finish(RigidScene s,RigidState x,RigidWorkspace w,
+    double dt,double safety,double(*accepted)[3],int* error,RotationBatchContext* ctx,
+    bool publish_proxies) {
+    if(blockIdx.x||threadIdx.x||ctx->mode!=1||ctx->done)return;
+    if(ctx->first_error!=~0ull) {
+        atomicCAS(error,0,static_cast<int>(static_cast<unsigned>(ctx->first_error)));ctx->done=1;return;
+    }
+    const auto body=ctx->body;double fraction=ctx->fraction;
+    if(ctx->hit)fraction*=safety;
+    if(interpolate_rigid_orientation(ctx->current,w.proposed_orientation[body],fraction,w.accepted_orientation[body])
+        !=RigidRotationStatus::Success
+        ||rigid_angular_velocity_from_orientation(w.accepted_orientation[body],x.previous_orientation[body],dt,w.accepted_omega[body])
+        !=RigidRotationStatus::Success) {fail(error,RigidRotationFailure);ctx->done=1;return;}
+    if(!publish_proxies) {ctx->done=1;return;}
+    // Keep proxy publication scalar and ordered, including partial private
+    // scratch writes on a late invalid reference. The commit remains separate.
+    for(std::size_t i=s.node_offsets[body];i<s.node_offsets[body+1];++i) {
+        const int node=s.nodes[i];
+        rigid_world_position(s.reference[node],x.com[body],w.accepted_orientation[body],accepted[node]);
+        if(!finite3(accepted[node])) {fail(error,RigidInvalidState);ctx->done=1;return;}
+    }
+    ctx->done=1;
+}
+
 __global__ void rotation_commit(RigidScene s,RigidState x,RigidWorkspace w,DeformableState nodes,
     const int* colors,int color,const double (*accepted)[3],int* error) {
     const std::size_t body=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
@@ -365,7 +590,9 @@ __global__ void rotation_commit(RigidScene s,RigidState x,RigidWorkspace w,Defor
         const int node=s.nodes[i]; for (int k=0;k<3;++k) nodes.positions[node][k]=accepted[node][k];
     }
 }
-__global__ void finish(RigidScene s,RigidState x,DeformableState nodes,double dt,int* error) {
+__global__ void finish(RigidScene s,RigidState x,DeformableState nodes,double dt,int* error,
+    const int* fallback_only) {
+    if(fallback_only&&!*fallback_only)return;
     const std::size_t b=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
     if (b>=s.bodies || failed(error)) return;
     for (int k=0;k<3;++k) {
@@ -381,6 +608,156 @@ __global__ void finish(RigidScene s,RigidState x,DeformableState nodes,double dt
         const double rotational[3]={tangent.x,tangent.y,tangent.z};
         for (int k=0;k<3;++k) nodes.velocities[node][k]=x.velocity[b][k]+rotational[k];
         if (!finite3(nodes.velocities[node])) { fail(error,RigidInvalidState); return; }
+    }
+}
+
+// These kernels distribute authoritative CSR slots. They never infer a body
+// from a node ID or assume contiguous node IDs, and only run for caller-checked
+// unique topology. Empty rows still have exactly one body-value writer.
+__global__ void validate_translation_body(RigidScene s,RigidWorkspace w,
+    const int* colors,int color,int* error) {
+    const std::size_t b=std::size_t(blockIdx.x)*blockDim.x+threadIdx.x;
+    if(b>=s.bodies||!active(s,colors,color,b)||!s.translate[b]||failed(error))return;
+    if(!finite3(w.accepted_com[b]))fail(error,RigidInvalidState);
+}
+__global__ void validate_translation_proxies(RigidScene s,const int* colors,int color,
+    const double(*accepted)[3],int* error,proxy_index::Plan plan) {
+    const unsigned tile=proxy_index::tile(blockIdx.x,plan);
+    for(auto b=proxy_index::first_body(blockIdx.x,plan);b<s.bodies;
+        b=proxy_index::next_body(b,s.bodies,plan)) {
+        if(!active(s,colors,color,b)||!s.translate[b]||failed(error))continue;
+        for(auto row=proxy_index::row_cursor(s.node_offsets[b],s.node_offsets[b+1],tile,threadIdx.x,plan);
+            row.valid();row.advance())
+            if(!finite3(accepted[s.nodes[row.slot()]]))fail(error,RigidInvalidState);
+    }
+}
+__global__ void publish_translation_proxies(RigidScene s,RigidState x,RigidWorkspace w,
+    DeformableState nodes,const int* colors,int color,const double(*accepted)[3],
+    int* error,proxy_index::Plan plan) {
+    const unsigned tile=proxy_index::tile(blockIdx.x,plan);
+    for(auto b=proxy_index::first_body(blockIdx.x,plan);b<s.bodies;
+        b=proxy_index::next_body(b,s.bodies,plan)) {
+        if(!active(s,colors,color,b)||!s.translate[b]||failed(error))continue;
+        if(tile==0&&threadIdx.x==0)
+            for(int k=0;k<3;++k)x.com[b][k]=w.accepted_com[b][k];
+        for(auto row=proxy_index::row_cursor(s.node_offsets[b],s.node_offsets[b+1],tile,threadIdx.x,plan);
+            row.valid();row.advance()) {
+            const int node=s.nodes[row.slot()];
+            for(int k=0;k<3;++k)nodes.positions[node][k]=accepted[node][k];
+        }
+    }
+}
+__global__ void publish_rotation_proxies(RigidScene s,RigidState x,RigidWorkspace w,
+    DeformableState nodes,const int* colors,int color,const double(*accepted)[3],
+    int* error,proxy_index::Plan plan) {
+    const unsigned tile=proxy_index::tile(blockIdx.x,plan);
+    for(auto b=proxy_index::first_body(blockIdx.x,plan);b<s.bodies;
+        b=proxy_index::next_body(b,s.bodies,plan)) {
+        if(!active(s,colors,color,b)||!s.rotate[b]||failed(error))continue;
+        if(tile==0&&threadIdx.x==0) {
+            for(int k=0;k<4;++k)x.orientation[b][k]=w.accepted_orientation[b][k];
+            for(int k=0;k<3;++k)x.omega[b][k]=w.accepted_omega[b][k];
+        }
+        for(auto row=proxy_index::row_cursor(s.node_offsets[b],s.node_offsets[b+1],tile,threadIdx.x,plan);
+            row.valid();row.advance()) {
+            const int node=s.nodes[row.slot()];
+            for(int k=0;k<3;++k)nodes.positions[node][k]=accepted[node][k];
+        }
+    }
+}
+
+// The prospective values below preserve finish's scalar component arithmetic.
+// Preflight writes only a Boolean fault. A fault routes the COMPLETE call to
+// the untouched ordered kernel, preserving even private/partial error writes.
+__device__ void finish_values(RigidScene s,RigidState x,std::size_t b,double dt,
+    double* velocity,double* omega) {
+    proxy_values::finish_body(x.com[b],x.previous_com[b],x.omega[b],s.translate[b],
+        s.rotate[b],dt,velocity,omega);
+}
+__device__ void finish_proxy_value(RigidScene s,RigidState x,std::size_t b,int node,
+    const double* velocity,const double* omega,double* result) {
+    proxy_values::finish_proxy(s.reference[node],x.orientation[b],velocity,omega,result);
+}
+__global__ void preflight_finish_bodies(RigidScene s,RigidState x,double dt,
+    int* error,int* fault) {
+    const auto b=std::size_t(blockIdx.x)*blockDim.x+threadIdx.x;
+    if(b>=s.bodies||failed(error))return;
+    double velocity[3],omega[3];finish_values(s,x,b,dt,velocity,omega);
+    if(!finite3(velocity)||!finite3(omega))atomicOr(fault,1);
+}
+__global__ void preflight_finish_proxies(RigidScene s,RigidState x,double dt,
+    int* error,int* fault,proxy_index::Plan plan) {
+    if(atomicAdd(fault,0)||failed(error))return;
+    const unsigned tile=proxy_index::tile(blockIdx.x,plan);
+    for(auto b=proxy_index::first_body(blockIdx.x,plan);b<s.bodies;
+        b=proxy_index::next_body(b,s.bodies,plan)) {
+        double velocity[3],omega[3];finish_values(s,x,b,dt,velocity,omega);
+        for(auto row=proxy_index::row_cursor(s.node_offsets[b],s.node_offsets[b+1],tile,threadIdx.x,plan);
+            row.valid();row.advance()) {
+            double value[3];finish_proxy_value(s,x,b,s.nodes[row.slot()],velocity,omega,value);
+            if(!finite3(value))atomicOr(fault,1);
+        }
+    }
+}
+__global__ void publish_finish_proxies(RigidScene s,RigidState x,DeformableState nodes,
+    double dt,int* error,const int* fault,proxy_index::Plan plan) {
+    if(*fault||failed(error))return;
+    const unsigned tile=proxy_index::tile(blockIdx.x,plan);
+    for(auto b=proxy_index::first_body(blockIdx.x,plan);b<s.bodies;
+        b=proxy_index::next_body(b,s.bodies,plan)) {
+        double velocity[3],omega[3];finish_values(s,x,b,dt,velocity,omega);
+        if(tile==0&&threadIdx.x==0)for(int k=0;k<3;++k) {
+            x.velocity[b][k]=velocity[k];
+            if(!s.rotate[b])x.omega[b][k]=0.0;
+        }
+        for(auto row=proxy_index::row_cursor(s.node_offsets[b],s.node_offsets[b+1],tile,threadIdx.x,plan);
+            row.valid();row.advance()) {
+            const int node=s.nodes[row.slot()];
+            finish_proxy_value(s,x,b,node,velocity,omega,nodes.velocities[node]);
+        }
+    }
+}
+
+// Batch rotation's accepted quaternion/omega are prepared by the SAME scalar
+// finish prefix. Finite preflight writes no accepted positions. Invalid data
+// replays only the old ordered proxy suffix, including its first-bad prefix.
+__global__ void preflight_batch_rotation_proxies(RigidScene s,RigidState x,
+    RigidWorkspace w,int* error,const RotationBatchContext* ctx,int* fault) {
+    if(ctx->mode!=1||!ctx->done||failed(error))return;
+    const auto b=ctx->body;
+    const auto count=s.node_offsets[b+1]>s.node_offsets[b]
+        ?s.node_offsets[b+1]-s.node_offsets[b]:0;
+    const auto stride=std::size_t(gridDim.x)*blockDim.x;
+    for(auto relative=std::size_t(blockIdx.x)*blockDim.x+threadIdx.x;relative<count;) {
+        const int node=s.nodes[s.node_offsets[b]+relative];double value[3];
+        rigid_world_position(s.reference[node],x.com[b],w.accepted_orientation[b],value);
+        if(!finite3(value))atomicOr(fault,1);
+        if(count-relative<=stride)break;relative+=stride;
+    }
+}
+__global__ void publish_batch_rotation_proxies(RigidScene s,RigidState x,
+    RigidWorkspace w,double(*accepted)[3],int* error,const RotationBatchContext* ctx,
+    const int* fault) {
+    if(ctx->mode!=1||!ctx->done||*fault||failed(error))return;
+    const auto b=ctx->body;
+    const auto count=s.node_offsets[b+1]>s.node_offsets[b]
+        ?s.node_offsets[b+1]-s.node_offsets[b]:0;
+    const auto stride=std::size_t(gridDim.x)*blockDim.x;
+    for(auto relative=std::size_t(blockIdx.x)*blockDim.x+threadIdx.x;relative<count;) {
+        const int node=s.nodes[s.node_offsets[b]+relative];
+        rigid_world_position(s.reference[node],x.com[b],w.accepted_orientation[b],accepted[node]);
+        if(count-relative<=stride)break;relative+=stride;
+    }
+}
+__global__ void fallback_batch_rotation_proxies(RigidScene s,RigidState x,
+    RigidWorkspace w,double(*accepted)[3],int* error,RotationBatchContext* ctx,
+    const int* fault) {
+    if(blockIdx.x||threadIdx.x||ctx->mode!=1||!ctx->done||!*fault||failed(error))return;
+    const auto body=ctx->body;
+    for(std::size_t i=s.node_offsets[body];i<s.node_offsets[body+1];++i) {
+        const int node=s.nodes[i];
+        rigid_world_position(s.reference[node],x.com[body],w.accepted_orientation[body],accepted[node]);
+        if(!finite3(accepted[node])) {fail(error,RigidInvalidState);ctx->done=1;return;}
     }
 }
 } // namespace
@@ -429,7 +806,60 @@ void clip_rigid_rotation_color(const RigidScene& s,const RigidState& x,const Rig
     const DeformableState& nodes,const BroadPhaseView& bp,const int* colors,int color,double dt,
     double safety,bool use_ccd,double (*accepted)[3],int* error,cudaStream_t stream) {
     valid_dt(dt); if (!(safety>=0 && safety<=1)) throw std::invalid_argument("Rigid CCD safety must be in [0,1]");
-    if (s.bodies) rotation_clip<<<blocks(s.bodies),width,0,stream>>>(s,x,w,nodes,bp,colors,color,dt,safety,use_ccd,accepted,error); launched();
+    const unsigned pair_threads=rotation_pair_threads();
+    if(s.bodies) {
+        if(pair_threads==1)
+            rotation_clip<<<blocks(s.bodies),width,0,stream>>>(s,x,w,nodes,bp,colors,color,dt,safety,use_ccd,accepted,error,nullptr);
+        else rotation_clip_pair_parallel<<<static_cast<unsigned>(s.bodies),pair_threads,0,stream>>>(s,x,w,nodes,bp,colors,color,dt,safety,use_ccd,accepted,error,nullptr);
+    }
+    launched();
+}
+struct GpuRigidRotationClipper::Impl {
+    RotationBatchContext* context=nullptr;
+    int* proxy_fault=nullptr;
+    const bool parallel_proxies;
+    explicit Impl(bool validated):parallel_proxies(validated&&parallel_proxy_option()){}
+    ~Impl(){if(context)cudaFree(context);if(proxy_fault)cudaFree(proxy_fault);}
+    void reserve() {
+        if(!context) {
+            RotationBatchContext* replacement=nullptr;
+            const auto status=cudaMalloc(&replacement,sizeof(*replacement));
+            if(status!=cudaSuccess)throw std::runtime_error(std::string("GPU rotation context allocation: ")+cudaGetErrorString(status));
+            context=replacement;
+        }
+        if(parallel_proxies&&!proxy_fault) {
+            const auto status=cudaMalloc(reinterpret_cast<void**>(&proxy_fault),sizeof(*proxy_fault));
+            if(status!=cudaSuccess)throw std::runtime_error(std::string("GPU rotation proxy flag allocation: ")+cudaGetErrorString(status));
+        }
+    }
+};
+GpuRigidRotationClipper::GpuRigidRotationClipper():impl_(std::make_unique<Impl>(false)){}
+GpuRigidRotationClipper::GpuRigidRotationClipper(bool validated):impl_(std::make_unique<Impl>(validated)){}
+GpuRigidRotationClipper::~GpuRigidRotationClipper()=default;
+void GpuRigidRotationClipper::clip_color(const RigidScene& s,const RigidState& x,const RigidWorkspace& w,
+    const DeformableState& nodes,const BroadPhaseView& bp,const int* colors,int color,double dt,
+    double safety,bool use_ccd,double(*accepted)[3],int* error,cudaStream_t stream) {
+    valid_dt(dt);if(!(safety>=0&&safety<=1))throw std::invalid_argument("Rigid CCD safety must be in [0,1]");
+    const unsigned pair_threads=rotation_pair_threads();if(!s.bodies){launched();return;}
+    impl_->reserve();auto* context=impl_->context;
+    const auto wanted=bp.contact_count/128+(bp.contact_count%128!=0);
+    const unsigned grid=static_cast<unsigned>(wanted==0?1:wanted>65535?65535:wanted);
+    rotation_batch_prepare<<<1,1,0,stream>>>(s,x,w,bp,colors,color,dt,error,context);launched();
+    rotation_batch_pairs<<<grid,128,0,stream>>>(s,x,w,nodes,bp,use_ccd,context);launched();
+    if(impl_->parallel_proxies) {
+        const auto status=cudaMemsetAsync(impl_->proxy_fault,0,sizeof(int),stream);
+        if(status!=cudaSuccess)throw std::runtime_error(std::string("GPU rotation proxy flag clear: ")+cudaGetErrorString(status));
+        rotation_batch_finish<<<1,1,0,stream>>>(s,x,w,dt,safety,accepted,error,context,false);launched();
+        preflight_batch_rotation_proxies<<<128,width,0,stream>>>(s,x,w,error,context,impl_->proxy_fault);launched();
+        publish_batch_rotation_proxies<<<128,width,0,stream>>>(s,x,w,accepted,error,context,impl_->proxy_fault);launched();
+        fallback_batch_rotation_proxies<<<1,1,0,stream>>>(s,x,w,accepted,error,context,impl_->proxy_fault);launched();
+    } else {
+        rotation_batch_finish<<<1,1,0,stream>>>(s,x,w,dt,safety,accepted,error,context,true);launched();
+    }
+    if(pair_threads==1)
+        rotation_clip<<<blocks(s.bodies),width,0,stream>>>(s,x,w,nodes,bp,colors,color,dt,safety,use_ccd,accepted,error,context);
+    else rotation_clip_pair_parallel<<<static_cast<unsigned>(s.bodies),pair_threads,0,stream>>>(s,x,w,nodes,bp,colors,color,dt,safety,use_ccd,accepted,error,context);
+    launched();
 }
 void commit_rigid_rotation_color(const RigidScene& s,const RigidState& x,const RigidWorkspace& w,
     const DeformableState& nodes,const int* colors,int color,const double (*accepted)[3],int* error,cudaStream_t stream) {
@@ -437,6 +867,62 @@ void commit_rigid_rotation_color(const RigidScene& s,const RigidState& x,const R
 }
 void finish_rigid_substep(const RigidScene& s,const RigidState& x,const DeformableState& nodes,
     double dt,int* error,cudaStream_t stream) {
-    valid_dt(dt); if (s.bodies) finish<<<blocks(s.bodies),width,0,stream>>>(s,x,nodes,dt,error); launched();
+    valid_dt(dt); if (s.bodies) finish<<<blocks(s.bodies),width,0,stream>>>(s,x,nodes,dt,error,nullptr); launched();
+}
+
+struct GpuRigidProxyPipeline::Impl {
+    const bool enabled;
+    int* fault=nullptr;
+    explicit Impl(bool validated):enabled(validated&&parallel_proxy_option()){}
+    ~Impl(){if(fault)cudaFree(fault);}
+    void reserve() {
+        if(fault)return;
+        const auto status=cudaMalloc(reinterpret_cast<void**>(&fault),sizeof(*fault));
+        if(status!=cudaSuccess)throw std::runtime_error(std::string("GPU rigid proxy flag allocation: ")+cudaGetErrorString(status));
+    }
+};
+GpuRigidProxyPipeline::GpuRigidProxyPipeline(bool validated):impl_(std::make_unique<Impl>(validated)){}
+GpuRigidProxyPipeline::~GpuRigidProxyPipeline()=default;
+void GpuRigidProxyPipeline::commit_translation_color(const RigidScene& s,const RigidState& x,
+    const RigidWorkspace& w,const DeformableState& nodes,const int* colors,int color,
+    const double(*accepted)[3],int* error,cudaStream_t stream) {
+    if(!impl_->enabled) {
+        commit_rigid_translation_color(s,x,w,nodes,colors,color,accepted,error,stream);return;
+    }
+    if(s.bodies) {
+        const auto plan=proxy_index::make_plan(s.bodies);
+        validate_translation_body<<<blocks(s.bodies),width,0,stream>>>(s,w,colors,color,error);launched();
+        validate_translation_proxies<<<plan.blocks,width,0,stream>>>(s,colors,color,accepted,error,plan);launched();
+        publish_translation_proxies<<<plan.blocks,width,0,stream>>>(s,x,w,nodes,colors,color,accepted,error,plan);
+    }
+    launched();
+}
+void GpuRigidProxyPipeline::commit_rotation_color(const RigidScene& s,const RigidState& x,
+    const RigidWorkspace& w,const DeformableState& nodes,const int* colors,int color,
+    const double(*accepted)[3],int* error,cudaStream_t stream) {
+    if(!impl_->enabled) {
+        commit_rigid_rotation_color(s,x,w,nodes,colors,color,accepted,error,stream);return;
+    }
+    if(s.bodies) {
+        const auto plan=proxy_index::make_plan(s.bodies);
+        publish_rotation_proxies<<<plan.blocks,width,0,stream>>>(s,x,w,nodes,colors,color,accepted,error,plan);
+    }
+    launched();
+}
+void GpuRigidProxyPipeline::finish_substep(const RigidScene& s,const RigidState& x,
+    const DeformableState& nodes,double dt,int* error,cudaStream_t stream) {
+    if(!impl_->enabled) {finish_rigid_substep(s,x,nodes,dt,error,stream);return;}
+    valid_dt(dt);
+    if(s.bodies) {
+        impl_->reserve();
+        const auto status=cudaMemsetAsync(impl_->fault,0,sizeof(int),stream);
+        if(status!=cudaSuccess)throw std::runtime_error(std::string("GPU rigid proxy flag clear: ")+cudaGetErrorString(status));
+        const auto plan=proxy_index::make_plan(s.bodies);
+        preflight_finish_bodies<<<blocks(s.bodies),width,0,stream>>>(s,x,dt,error,impl_->fault);launched();
+        preflight_finish_proxies<<<plan.blocks,width,0,stream>>>(s,x,dt,error,impl_->fault,plan);launched();
+        publish_finish_proxies<<<plan.blocks,width,0,stream>>>(s,x,nodes,dt,error,impl_->fault,plan);launched();
+        finish<<<blocks(s.bodies),width,0,stream>>>(s,x,nodes,dt,error,impl_->fault);
+    }
+    launched();
 }
 } // namespace ipc_gpu::solver

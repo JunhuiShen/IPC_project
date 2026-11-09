@@ -1,6 +1,7 @@
 #pragma once
 
 #include "scene.h"
+#include <memory>
 
 namespace ipc_gpu::solver {
 
@@ -80,6 +81,33 @@ void clip_rigid_rotation_color(const RigidScene&, const RigidState&,
                                int color, double dt, double safety,
                                bool use_ccd, double (*accepted_proxy_positions)[3],
                                int* error, cudaStream_t stream = nullptr);
+
+// Owner for the multi-SM rotation clipper. One tiny persistent
+// device context is reused; no positions or numerical results return to host.
+// A unique active rotating body uses the grid route. Other color layouts keep
+// the existing serial/CTA route and its environment-selected launch width.
+// Calls on one owner must be ordered; its context is not concurrent workspace.
+class GpuRigidRotationClipper {
+public:
+    GpuRigidRotationClipper();
+    // The parallel proxy route is available only after the caller has checked
+    // that body CSR slots name unique, in-range nodes and that mutable state,
+    // reference and accepted buffers use the disjoint storage owned by
+    // GpuSolver. Raw/aliased external storage must keep the default false gate.
+    // Validated proxy execution defaults on; set the environment option to 0
+    // before construction for rollback. Device finite checks remain.
+    explicit GpuRigidRotationClipper(bool unique_proxy_indices_validated);
+    ~GpuRigidRotationClipper();
+    GpuRigidRotationClipper(const GpuRigidRotationClipper&)=delete;
+    GpuRigidRotationClipper& operator=(const GpuRigidRotationClipper&)=delete;
+    void clip_color(const RigidScene&,const RigidState&,const RigidWorkspace&,
+                    const DeformableState&,const BroadPhaseView&,const int* block_colors,
+                    int color,double dt,double safety,bool use_ccd,
+                    double(*accepted_proxy_positions)[3],int* error,cudaStream_t stream=nullptr);
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 void commit_rigid_rotation_color(const RigidScene&, const RigidState&,
                                  const RigidWorkspace&, const DeformableState&,
                                  const int* block_colors, int color,
@@ -88,5 +116,33 @@ void commit_rigid_rotation_color(const RigidScene&, const RigidState&,
 void finish_rigid_substep(const RigidScene&, const RigidState&,
                          const DeformableState&, double dt, int* error,
                          cudaStream_t stream = nullptr);
+
+// Owner for parallel per-proxy publication. Existing entry points above
+// retain their behavior. Validated unique CSR and disjoint solver-owned
+// storage enable parallel execution by default. The environment option is
+// captured once; IPC_GPU_PARALLEL_RIGID_PROXIES=0 selects the legacy route.
+// Default/false ownership keeps raw API behavior regardless of the option.
+// Calls on one owner must be ordered, including when using a nondefault stream.
+// Scratch is one device int and contains no host numerical state/readback.
+class GpuRigidProxyPipeline {
+public:
+    explicit GpuRigidProxyPipeline(bool unique_proxy_indices_validated=false);
+    ~GpuRigidProxyPipeline();
+    GpuRigidProxyPipeline(const GpuRigidProxyPipeline&)=delete;
+    GpuRigidProxyPipeline& operator=(const GpuRigidProxyPipeline&)=delete;
+    void commit_translation_color(const RigidScene&,const RigidState&,
+        const RigidWorkspace&,const DeformableState&,const int* block_colors,
+        int color,const double (*accepted_proxy_positions)[3],int* error,
+        cudaStream_t stream=nullptr);
+    void commit_rotation_color(const RigidScene&,const RigidState&,
+        const RigidWorkspace&,const DeformableState&,const int* block_colors,
+        int color,const double (*accepted_proxy_positions)[3],int* error,
+        cudaStream_t stream=nullptr);
+    void finish_substep(const RigidScene&,const RigidState&,
+        const DeformableState&,double dt,int* error,cudaStream_t stream=nullptr);
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 } // namespace ipc_gpu::solver

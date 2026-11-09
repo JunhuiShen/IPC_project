@@ -2353,6 +2353,67 @@ TEST(BroadPhaseTest, CertifiedRigidAndMixedIncidencePreservesTranslationAndRotat
     }
 }
 
+TEST(BroadPhaseTest, GeneralIncidencePreservesRigidPairsAndClearsRowsAcrossOwnershipChanges) {
+    struct RestoreThreads {
+        int threads = omp_get_max_threads();
+        ~RestoreThreads() { omp_set_num_threads(threads); }
+    } restore;
+    std::vector<Vec3> x;
+    std::vector<std::array<int, 3>> triangles;
+    for (int body = 0; body < 3; ++body) {
+        const int first = static_cast<int>(x.size());
+        const double z = .03 * body;
+        x.insert(x.end(), {Vec3(0, 0, z), Vec3(1, 0, z), Vec3(0, 1, z), Vec3(1, 1, z)});
+        triangles.push_back({first, first + 1, first + 2});
+        triangles.push_back({first + 1, first + 3, first + 2});
+    }
+    const std::vector<AABB> boxes(x.size(), AABB(Vec3::Constant(-2), Vec3::Constant(2)));
+    for (int workers : {1, 8}) {
+        omp_set_num_threads(workers);
+        BroadPhase reused;
+        for (int ownership : {0, 1, 2, 0}) {
+            SCOPED_TRACE(::testing::Message() << "workers=" << workers << " ownership=" << ownership);
+            RefMesh mesh = make_mesh(x, triangles);
+            mesh.node_to_rb.resize(x.size());
+            mesh.rb_nodes = {{0, 1, 2, 3}, {4, 5, 6, 7}, {8, 9, 10, 11}};
+            for (std::size_t node = 0; node < x.size(); ++node)
+                mesh.node_to_rb[node] = ownership && node >= 8 ? -1 : static_cast<int>(node / 4);
+            RefMesh reference_mesh = mesh;
+            if (ownership == 2) mesh.node_to_rb.resize(8); // Missing owners mean non-rigid.
+            reused.invalidate_mesh_topology();
+            reused.initialize(boxes, mesh, .1, BroadPhase::InitializationMode::DeformableSolver);
+            ASSERT_TRUE(std::any_of(reused.cache().vertex_nt.begin(), reused.cache().vertex_nt.end(),
+                [](const auto& row) { return !row.empty(); }));
+            ASSERT_TRUE(std::any_of(reused.cache().vertex_ss.begin(), reused.cache().vertex_ss.end(),
+                [](const auto& row) { return !row.empty(); }));
+            reused.initialize(boxes, mesh, .1, BroadPhase::InitializationMode::GeneralSolver);
+            BroadPhase fresh;
+            fresh.initialize(boxes, reference_mesh, .1, BroadPhase::InitializationMode::GeneralSolver);
+            expect_cache_exact(reused.cache(), fresh.cache());
+            ASSERT_EQ(reused.cache().vertex_nt.size(), x.size());
+            ASSERT_EQ(reused.cache().vertex_ss.size(), x.size());
+            if (ownership == 0) {
+                BroadPhase rigid;
+                rigid.initialize(boxes, mesh, .1, BroadPhase::InitializationMode::RigidSolver);
+                ASSERT_FALSE(rigid.nt_pairs().empty());
+                ASSERT_FALSE(rigid.ss_pairs().empty());
+                EXPECT_EQ(reused.cache().nt_pair_tri, rigid.cache().nt_pair_tri);
+                EXPECT_EQ(reused.cache().ss_pair_edges, rigid.cache().ss_pair_edges);
+                ASSERT_EQ(reused.nt_pairs().size(), rigid.nt_pairs().size());
+                for (std::size_t i = 0; i < rigid.nt_pairs().size(); ++i)
+                    EXPECT_EQ(reused.nt_pairs()[i].node, rigid.nt_pairs()[i].node);
+                for (std::size_t node = 0; node < x.size(); ++node) {
+                    EXPECT_TRUE(reused.cache().vertex_nt[node].empty());
+                    EXPECT_TRUE(reused.cache().vertex_ss[node].empty());
+                }
+            } else {
+                EXPECT_FALSE(reused.cache().vertex_nt[8].empty());
+                EXPECT_FALSE(reused.cache().vertex_ss[8].empty());
+            }
+        }
+    }
+}
+
 TEST(BroadPhaseTest, RepeatedIncidenceRebuildsPreserveOrderAcrossSizesModesAnd64Threads) {
     struct RestoreThreads {
         int threads = omp_get_max_threads();

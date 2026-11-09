@@ -808,7 +808,9 @@ template <bool optimized_fallback>
 double per_rigid_body_translation_safe_step(const RefMesh& ref_mesh, const BroadPhase::Cache& bp_cache, const std::vector<int>& nt_pair_indices, const std::vector<int>& ss_pair_indices, const std::vector<Vec3>& x, int rb, const Vec3& dx, double safety, bool cooperative, bool original) {
     assert(rb >= 0);
     assert(safety >= 0.0 && safety <= 1.0);
-    if (dx.squaredNorm() < 1.0e-28)
+    // A nonzero represented translation can cross a still smaller gap.
+    // Skip only a componentwise zero displacement, not a length threshold.
+    if ((dx.array() == 0.0).all())
         return 1.0;
 
     double toi_min = 1.0;

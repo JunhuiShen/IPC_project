@@ -37,7 +37,8 @@ double ContactCache::isotropic_motion_bound(const BroadPhase& broad_phase, int n
     return std::isfinite(bound) ? bound : fallback;
 }
 
-// Elasticity reads the live color state; contact reads its frozen snapshot.
+// Elasticity reads the live color state; contact reads that color's immutable
+// snapshot, refreshed after the previous color's accepted updates.
 // Entry points validate friction inputs before this solver-only fast path.
 Vec3 frozen_contact_vertex_delta(int vi, const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, const std::vector<Vec3>& xhat, const std::vector<Vec3>& x_elastic, const std::vector<Vec3>& x_barrier, const BroadPhase& broad_phase, const PinMap* pin_map, const IncidentTriangles* incident_triangles, const std::vector<ShapeGrads>* rest_shape_grads, const std::vector<Vec3>* previous_positions, const ContactCache& contacts) {
     const auto& bp_cache = broad_phase.cache();

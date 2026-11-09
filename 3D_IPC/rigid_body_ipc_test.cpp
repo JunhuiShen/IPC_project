@@ -1,4 +1,5 @@
 #include "rigid_body_ipc.h"
+#include "example.h"
 #include <omp.h>
 
 #include "parallel_helper.h"
@@ -22,6 +23,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
@@ -2527,7 +2529,7 @@ TEST(RigidBodyRotationSafeStep, CooperativeSweptBoxesJoinBeforeCCDAndNextColor) 
     }
 }
 
-TEST(RigidBodyRotationSafeStep, NegligibleRotationKeepsValidationAndKernelThreshold) {
+TEST(RigidBodyRotationSafeStep, ZeroRotationKeepsValidationAndTinyDisjointArcsStayClear) {
     RefMesh mesh;
     mesh.tris = {1, 2, 3};
     mesh.node_to_rb = {0, -1, -1, -1};
@@ -2538,14 +2540,13 @@ TEST(RigidBodyRotationSafeStep, NegligibleRotationKeepsValidationAndKernelThresh
     const Vec4 identity(1.0, 0.0, 0.0, 0.0);
     for (double half_angle : {0.0, 0.5e-10, std::nextafter(1.0e-10, 0.0), 1.0e-10, 2.0e-10}) {
         const Vec4 target(std::cos(half_angle), 0.0, 0.0, std::sin(half_angle));
-        EXPECT_EQ(ccd_detail::negligible_rigid_rotation(target, identity), half_angle < 1.0e-10);
-        if (half_angle < 1.0e-10) {
-            double toi = -1.0;
-            EXPECT_FALSE(point_triangle_rb_rotation_ccd(x[0], Vec3::Zero(), target, identity, x[1], x[2], x[3], toi));
-            EXPECT_FALSE(segment_segment_rb_rotation_ccd(x[0], x[1], Vec3::Zero(), target, identity, x[2], x[3], toi));
-            EXPECT_DOUBLE_EQ(per_rigid_body_rotation_safe_step(mesh, candidates.cache,
-                candidates.body_nt_pair_indices[0], {}, x, 0, Vec3::Zero(), identity, target), 1.0);
-        }
+        EXPECT_EQ(ccd_detail::negligible_rigid_rotation(target, identity), half_angle == 0.0);
+        // All nonzero cases remain clear by geometry, not by skipping CCD.
+        double toi = -1.0;
+        EXPECT_FALSE(point_triangle_rb_rotation_ccd(x[0], Vec3::Zero(), target, identity, x[1], x[2], x[3], toi));
+        EXPECT_FALSE(segment_segment_rb_rotation_ccd(x[0], x[1], Vec3::Zero(), target, identity, x[2], x[3], toi));
+        EXPECT_DOUBLE_EQ(per_rigid_body_rotation_safe_step(mesh, candidates.cache,
+            candidates.body_nt_pair_indices[0], {}, x, 0, Vec3::Zero(), identity, target), 1.0);
     }
     x[0][0] = std::numeric_limits<double>::infinity();
     EXPECT_THROW(per_rigid_body_rotation_safe_step(mesh, candidates.cache,
@@ -3006,8 +3007,8 @@ TEST(DeformableFrictionSolver,
             << expected_basic[static_cast<std::size_t>(node)].transpose();
     }
 
-    // OGC evaluates every contact role from the same iteration-start
-    // snapshot, then applies the same 0.4*d trust-region bound as production.
+    // These uncoupled nodes share one color, so OGC evaluates every role from
+    // the same color-start snapshot and applies the iteration's 0.4*d bound.
     const double frozen_distance = node_triangle_distance(
         initial[0], initial[1], initial[2], initial[3]).distance;
     const double trust_region_bound = 0.4 * frozen_distance;
@@ -3354,3 +3355,289 @@ TEST(RigidBodyIPCSolver, EightBodySetupThresholdPreservesExactColoredResults) {
         }
     }
 }
+
+#include <boost/multiprecision/cpp_int.hpp>
+namespace WreckingChainRecordedTranslation {
+using R=boost::multiprecision::cpp_rational;using P=std::array<R,3>;
+inline P exact(const Vec3&v){return{{R(v[0]),R(v[1]),R(v[2])}};}
+inline P sub(const P&a,const P&b){return{{a[0]-b[0],a[1]-b[1],a[2]-b[2]}};}
+inline P add(const P&a,const P&b){return{{a[0]+b[0],a[1]+b[1],a[2]+b[2]}};}
+inline P mul(const P&a,const R&s){return{{a[0]*s,a[1]*s,a[2]*s}};}
+inline R dot(const P&a,const P&b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+inline P cross(const P&a,const P&b){return{{a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]}};}
+inline bool crosses(const std::vector<Vec3>&x){
+ const P p=exact(x[1]),q=exact(x[2]),a=exact(x[5]),b=exact(x[7]),c=exact(x[6]);
+ const P u=sub(b,a),v=sub(c,a),n=cross(u,v);const R s=dot(n,sub(p,a)),t=dot(n,sub(q,a));if(!(s*t<0))return false;
+ const P w=sub(add(p,mul(sub(q,p),R(s/(s-t)))),a);const R uu=dot(u,u),uv=dot(u,v),vv=dot(v,v),d=uu*vv-uv*uv;if(d<=0)return false;
+ const R wu=dot(w,u),wv=dot(w,v),b1=(wu*vv-wv*uv)/d,b2=(wv*uu-wu*uv)/d;return b1>0&&b2>0&&b1+b2<1;
+}
+inline std::vector<Vec3> before(){return {
+ Vec3(9.9707255599379607,17.978653705527897,0.10146165047426266),
+ Vec3(10.030491792010897,17.964913036467575,0.093792928183131966),
+ Vec3(10.020705943197308,17.953657306617945,0.0011249551689901912),
+ Vec3(10.072303178917334,17.919585787699909,0.097909657238430564),
+ Vec3(9.9448969705167247,18.006605463897053,-0.05696348731381376),
+ Vec3(10.026561868904322,17.951297641863267,0.0018769773956230358),
+ Vec3(9.9401507659162398,17.987943458041808,0.0017631749729969427),
+ Vec3(9.9446322005679839,18.006346602824564,0.060592929515806401)};}
+inline RefMesh mesh(){RefMesh m;m.node_to_rb={1,1,1,1,2,2,2,2};m.rb_nodes.resize(3);m.rb_nodes[1]={0,1,2,3};m.rb_nodes[2]={4,5,6,7};return m;}
+inline BroadPhase::Cache cache(){BroadPhase::Cache c;c.ss_pairs.push_back({{1,2,6,5}});return c;}
+}
+TEST(RigidBodyTranslationSafeStep, RecordedWreckingChainTinyTranslationRetainsClearance) {
+ using namespace WreckingChainRecordedTranslation;
+ // Actual server Example13 frame26, body2, sweep56. This critical SS pair
+ // [373,381]/[483,491] was retained in both the incident and full caches.
+ // The old 1e-14 length shortcut accepted the complete nonzero displacement.
+ const Vec3 dx(0.0,-7.1054273576010019e-15,0.0);
+ const auto x=before();auto old=x;for(int i=4;i<8;++i)old[i]+=dx;
+ ASSERT_FALSE(crosses(x));ASSERT_TRUE(crosses(old));ASSERT_LT(dx.norm(),1e-14);
+ const double alpha=per_rigid_body_translation_safe_step(mesh(),cache(),{}, {0},x,2,dx,0.9,false,true);
+ EXPECT_GE(alpha,0.0);EXPECT_LT(alpha,1.0);
+ EXPECT_LE(alpha,0.9*0.086711036317912); // Independent exact finite-segment TOI.
+ auto accepted=x;for(int i=4;i<8;++i)accepted[i]+=alpha*dx;
+ EXPECT_FALSE(crosses(accepted));
+}
+TEST(RigidBodyTranslationSafeStep, ZeroAndTinyDisjointTranslationsRemainFree) {
+ using namespace WreckingChainRecordedTranslation;auto x=before();const auto m=mesh();const auto c=cache();
+ EXPECT_DOUBLE_EQ(per_rigid_body_translation_safe_step(m,c,{}, {0},x,2,Vec3::Zero(),0.9,false,true),1.0);
+ for(int i=4;i<8;++i)x[i].z()+=1.0;
+ EXPECT_DOUBLE_EQ(per_rigid_body_translation_safe_step(m,c,{}, {0},x,2,Vec3(0.0,-7.1054273576010019e-15,0.0),0.9,false,true),1.0);
+}
+
+#include <boost/multiprecision/cpp_int.hpp>
+namespace WreckingChainRecordedPosePublication {
+using R=boost::multiprecision::cpp_rational;using P=std::array<R,3>;
+inline P exact(const Vec3&v){return{{R(v[0]),R(v[1]),R(v[2])}};}
+inline P sub(const P&a,const P&b){return{{a[0]-b[0],a[1]-b[1],a[2]-b[2]}};}
+inline P add(const P&a,const P&b){return{{a[0]+b[0],a[1]+b[1],a[2]+b[2]}};}
+inline P mul(const P&a,const R&s){return{{a[0]*s,a[1]*s,a[2]*s}};}
+inline R dot(const P&a,const P&b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+inline P cross(const P&a,const P&b){return{{a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]}};}
+inline bool crosses(const std::vector<Vec3>&x){
+ const P p=exact(x[1]),q=exact(x[2]),a=exact(x[5]),b=exact(x[7]),c=exact(x[6]);const P u=sub(b,a),v=sub(c,a),n=cross(u,v);const R s=dot(n,sub(p,a)),t=dot(n,sub(q,a));if(!(s*t<0))return false;
+ const P w=sub(add(p,mul(sub(q,p),R(s/(s-t)))),a);const R uu=dot(u,u),uv=dot(u,v),vv=dot(v,v),d=uu*vv-uv*uv;if(d<=0)return false;
+ const R wu=dot(w,u),wv=dot(w,v),b1=(wu*vv-wv*uv)/d,b2=(wv*uu-wu*uv)/d;return b1>0&&b2>0&&b1+b2<1;
+}
+}
+TEST(RigidPosePublication, RecordedWreckingChainCanonicalProjectionDoesNotReplaceClearProxy) {
+ using namespace WreckingChainRecordedPosePublication;
+ // Actual frame26/body2/sweep56 after the zero-only translation correction.
+ // The ideal accepted arc remains clear, but canonical rounded placement
+ // differs by about3.23e-15m and creates the following exact crossing.
+ const std::vector<Vec3> before={Vec3(9.970725559974035,17.978653705507693,0.10146165050098006),Vec3(10.030491792043962,17.96491303644874,0.09379292818394987),Vec3(10.02070594319481,17.953657306619395,0.0011249551710995139),Vec3(10.072303178951746,17.919585787679964,0.09790965721333056),Vec3(9.944896970535245,18.006605463885844,-0.056963487348164005),Vec3(10.026561868903837,17.951297641863555,0.0018769773984551156),Vec3(9.940150765915796,17.987943458042082,0.0017631749407633482),Vec3(9.944632200548549,18.006346602836338,0.06059292948142128)};
+ const std::vector<Vec3> canonical_after={Vec3(9.970725559974035,17.978653705507693,0.10146165050098006),Vec3(10.030491792043962,17.96491303644874,0.09379292818394987),Vec3(10.02070594319481,17.953657306619395,0.0011249551710995139),Vec3(10.072303178951746,17.919585787679964,0.09790965721333056),Vec3(9.94489697053179,18.006605463887926,-0.056963487341826),Vec3(10.026561868903832,17.951297641863558,0.001876977398051665),Vec3(9.940150765915776,17.987943458042075,0.001763174946713944),Vec3(9.944632200551961,18.006346602834235,0.0605929294877655)};
+ const Vec4 start=Vec4(0.9613060889577097,0.0013645401921393947,-0.0007780882824082345,-0.2754780135356008),target=Vec4(0.961306432254459,0.001664926954316109,0.0003142263170049521,-0.2754760835104599);
+ const Vec3 stored_omega(0.2,-0.3,0.1);
+ ASSERT_FALSE(crosses(before));ASSERT_TRUE(crosses(canonical_after));
+ const auto accepted=rigid_pose_publication::accept_rotation(start,stored_omega,start,target,3.020152726619763e-08,Vec4(1,0,0,0),1.0/540.0);
+ EXPECT_TRUE(accepted.preserve_proxy);
+ EXPECT_EQ(std::memcmp(accepted.orientation.data(),start.data(),4*sizeof(double)),0);
+ EXPECT_EQ(std::memcmp(accepted.angular_velocity.data(),stored_omega.data(),3*sizeof(double)),0);
+ const auto& published=accepted.preserve_proxy?before:canonical_after;
+ EXPECT_FALSE(crosses(published));
+}
+TEST(RigidPosePublication, FreeTinyRotationsAndOrdinaryCollisionLimitedStepsMatchExistingMotion) {
+ const Vec4 start=quaternion_normalize(Vec4(0.91,-0.13,0.21,0.32));const Vec3 stored_omega(0.2,-0.3,0.1);const double dt=0.003;
+ for(const auto& trial:std::array<std::pair<double,double>,2>{{{1e-11,1.0},{0.02,0.25}}}){
+  const Vec4 target=quaternion_from_angular_velocity(start,Vec3(0,0,trial.first/dt),dt);
+  const auto accepted=rigid_pose_publication::accept_rotation(start,stored_omega,start,target,trial.second,start,dt);
+  const Vec4 expected=interpolate_orientation_full_arc(start,target,trial.second);
+  const Vec3 expected_omega=angular_velocity_from_orientation_full_arc(expected,start,dt);
+  EXPECT_FALSE(accepted.preserve_proxy);
+  EXPECT_EQ(std::memcmp(accepted.orientation.data(),expected.data(),4*sizeof(double)),0);
+  EXPECT_EQ(std::memcmp(accepted.angular_velocity.data(),expected_omega.data(),3*sizeof(double)),0);
+ }
+}
+TEST(RigidPosePublication, RejectedRotationKeepsRawStoredPoseRatherThanKinematicRoundTrip) {
+ const Vec4 stored=1.0000000000000004*quaternion_normalize(Vec4(0.96130608895770986,0.0013645401921393947,-0.00077808828240823451,-0.27547801353560081));
+ const Vec4 kinematic=quaternion_normalize(stored);const Vec3 omega(0.2,-0.3,0.1);
+ ASSERT_NE(std::memcmp(stored.data(),kinematic.data(),4*sizeof(double)),0);
+ const auto accepted=rigid_pose_publication::accept_rotation(stored,omega,kinematic,Vec4(1,0,0,0),0.0,Vec4(1,0,0,0),0.001);
+ EXPECT_TRUE(accepted.preserve_proxy);
+ EXPECT_EQ(std::memcmp(accepted.orientation.data(),stored.data(),4*sizeof(double)),0);
+ EXPECT_EQ(std::memcmp(accepted.angular_velocity.data(),omega.data(),3*sizeof(double)),0);
+}
+TEST(RigidPosePublication, DriverPublishesAcceptedProxyBitsAndUsesTheirVelocityOffset) {
+ RefMesh mesh;DeformedState state;const Vec4 q=quaternion_normalize(Vec4(0.8,-0.2,0.3,0.4));
+ create_rigid_body({Vec3(-0.4,0.1,0.2),Vec3(0.2,-0.3,0.5),Vec3(0.1,0.5,-0.2)},Vec3(0.7,-0.1,0.2),q,Vec3(0.2,-0.4,0.6),2.0,mesh,state);
+ state.x_coms[0]+=Vec3(10,18,0);sync_rigid_body_particles(mesh,state);
+ auto accepted=state.deformed_positions;accepted[0].x()=std::nextafter(accepted[0].x(),-std::numeric_limits<double>::infinity());
+ const auto canonical=state.deformed_positions;
+ sync_rigid_body_particles(mesh,state,&accepted);
+ for(std::size_t i=0;i<accepted.size();++i){
+  EXPECT_EQ(std::memcmp(state.deformed_positions[i].data(),accepted[i].data(),3*sizeof(double)),0);
+  const Vec3 expected=state.v_coms[0]+state.omega[0].cross(accepted[i]-state.x_coms[0]);
+  EXPECT_EQ(std::memcmp(state.velocities[i].data(),expected.data(),3*sizeof(double)),0);
+ }
+ sync_rigid_body_particles(mesh,state);
+ for(std::size_t i=0;i<canonical.size();++i)EXPECT_EQ(std::memcmp(state.deformed_positions[i].data(),canonical[i].data(),3*sizeof(double)),0);
+}
+
+namespace {
+RigidPin translated_pin() {
+    RigidPin p;
+    p.initial_target = Vec3(1, 2, 3);
+    p.target_translation = Vec3(.004, -.002, .001);
+    p.translation_start_time = .25;
+    p.translation_duration = 1;
+    return p;
+}
+
+TEST(RigidPinTranslation, StartsSmoothlyReachesMidpointAndHolds) {
+    const auto p = translated_pin();
+    EXPECT_EQ(rigid_pin_target_position(p, 0), p.initial_target);
+    EXPECT_EQ(rigid_pin_target_position(p, .25), p.initial_target);
+    EXPECT_LT((rigid_pin_target_position(p, .75) - p.initial_target
+        - .5 * p.target_translation).norm(), 1e-15);
+    EXPECT_LT((rigid_pin_target_position(p, 1.25) - p.initial_target
+        - p.target_translation).norm(), 1e-15);
+    EXPECT_EQ(rigid_pin_target_position(p, 1.25), rigid_pin_target_position(p, 20));
+    double previous = p.initial_target.x();
+    for (int i = 1; i <= 40; ++i) {
+        const double x = rigid_pin_target_position(p, .25 + i / 40.).x();
+        EXPECT_GE(x, previous); previous = x;
+    }
+    for (double t : {.25, 1.25}) {
+        const double h = 1e-5;
+        const Vec3 a = rigid_pin_target_position(p, t-h);
+        const Vec3 b = rigid_pin_target_position(p, t);
+        const Vec3 c = rigid_pin_target_position(p, t+h);
+        EXPECT_LT((c-a).norm() / (2*h), 1e-8);
+        EXPECT_LT((c-2*b+a).norm() / (h*h), 1e-4);
+    }
+}
+
+TEST(RigidPinTranslation, DriftIsInWorldSpaceAfterArbitraryAxisRotation) {
+    auto p = translated_pin();
+    p.rotation_center = Vec3(.1, -.2, .3);
+    p.rotation_axis = Vec3(1, 2, 3);
+    p.angular_velocity_z = -.4;
+    auto stationary_mount = p; stationary_mount.target_translation.setZero();
+    EXPECT_LT((rigid_pin_target_position(p, .75)
+        - rigid_pin_target_position(stationary_mount, .75)
+        - .5 * p.target_translation).norm(), 1e-15);
+    RigidPin legacy;
+    legacy.initial_target = Vec3(-0.0, 2, 3);
+    legacy.rotation_axis.setZero(); // Irrelevant for a stationary legacy target.
+    const Vec3 target = rigid_pin_target_position(legacy, 17);
+    EXPECT_EQ(std::memcmp(target.data(), legacy.initial_target.data(), 3*sizeof(double)), 0);
+}
+
+TEST(RigidPinTranslation, RejectsInvalidMotionAndTiming) {
+    const auto p = translated_pin();
+    for (double duration : {0., -1., std::numeric_limits<double>::infinity()}) {
+        auto bad = p; bad.translation_duration = duration;
+        EXPECT_THROW(rigid_pin_target_position(bad, .75), std::invalid_argument);
+    }
+    auto bad = p; bad.translation_start_time = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(rigid_pin_target_position(bad, .75), std::invalid_argument);
+    bad = p; bad.target_translation.x() = std::numeric_limits<double>::infinity();
+    EXPECT_THROW(rigid_pin_target_position(bad, .75), std::invalid_argument);
+    EXPECT_THROW(rigid_pin_target_position(p, std::numeric_limits<double>::quiet_NaN()), std::invalid_argument);
+}
+
+TEST(RigidPinTranslation, MovingTargetIsUsedByFixedTimeEnergyGradient) {
+    auto p = translated_pin(); p.body = 0; p.local_position = Vec3(.03, -.02, .01);
+    SimParams params = SimParams::zeros(); params.kpin = 9000;
+    params.rigid_pin_time = .75; params.rigid_pins = {p};
+    const double dt = 1. / 570.;
+    const Vec3 center(.07, .02, -.1), omega(.1, -.2, .3);
+    const Vec4 q(1, 0, 0, 0);
+    const auto d = rigid_pin_derivatives(0, center, q, omega, params, dt);
+    // Midpoint target is known independently of the target implementation.
+    const Vec3 target = p.initial_target + .5 * p.target_translation;
+    const auto energy = [&](const Vec3& c) {
+        return .5 * dt*dt * params.kpin
+            * (world_space_position(p.local_position, c, q, omega, dt) - target).squaredNorm();
+    };
+    for (int axis = 0; axis < 3; ++axis) {
+        Vec3 plus = center, minus = center; plus[axis] += 1e-6; minus[axis] -= 1e-6;
+        EXPECT_NEAR(d.translation_gradient[axis], (energy(plus)-energy(minus))/2e-6, 1e-10);
+    }
+}
+
+struct BikeScene { RefMesh mesh; DeformedState state; SimParams params; int frames; double density; };
+BikeScene bike_scene(double distance, double duration = 1, double motor_ramp = 0) {
+    IPCArgs3D args;
+    std::vector<std::string> tokens = {"test", "--example", "18",
+        "--bike_chain_tension_distance", std::to_string(distance),
+        "--bike_chain_tension_duration", std::to_string(duration),
+        "--bike_chain_motor_ramp_duration", std::to_string(motor_ramp)};
+    std::vector<char*> argv; for (auto& token : tokens) argv.push_back(token.data());
+    if (!args.parse(static_cast<int>(argv.size()), argv.data())) throw std::runtime_error("CLI parse failed");
+    BikeScene scene; scene.params = args.to_sim_params();
+    scene.frames = args.num_frames; scene.density = args.rigid_density;
+    std::vector<Vec2> material; std::vector<Pin> pins;
+    build_bike_chain_example(args, scene.mesh, scene.state, material, pins, scene.params);
+    return scene;
+}
+
+TEST(RigidPinTranslation, RealBikeBuilderChangesOnlyLargeMountFreedomAndTargets) {
+    const auto base = bike_scene(0), moving = bike_scene(.004);
+    EXPECT_EQ(moving.frames, 120); EXPECT_DOUBLE_EQ(moving.density, 900);
+    ASSERT_EQ(moving.mesh.rb_nodes.size(), 138u);
+    EXPECT_EQ(base.mesh.rb_update_modes[136], RigidBodyUpdateMode::OrientationOnly);
+    EXPECT_EQ(moving.mesh.rb_update_modes[136], RigidBodyUpdateMode::TranslationAndOrientation);
+    EXPECT_EQ(moving.mesh.rb_update_modes[137], RigidBodyUpdateMode::OrientationOnly);
+    ASSERT_EQ(base.state.deformed_positions.size(), moving.state.deformed_positions.size());
+    for (std::size_t i = 0; i < base.state.deformed_positions.size(); ++i)
+        EXPECT_EQ(std::memcmp(base.state.deformed_positions[i].data(), moving.state.deformed_positions[i].data(), 3*sizeof(double)), 0);
+    for (std::size_t i = 0; i < 138; ++i) {
+        EXPECT_EQ(base.state.x_coms[i], moving.state.x_coms[i]);
+        EXPECT_EQ(base.state.orientations[i], moving.state.orientations[i]);
+        EXPECT_EQ(base.state.v_coms[i], moving.state.v_coms[i]);
+        EXPECT_EQ(base.state.omega[i], moving.state.omega[i]);
+    }
+    ASSERT_EQ(moving.params.rigid_pins.size(), base.params.rigid_pins.size());
+    int translated = 0;
+    for (std::size_t i = 0; i < moving.params.rigid_pins.size(); ++i) {
+        const auto& p = moving.params.rigid_pins[i];
+        EXPECT_EQ(p.initial_target, base.params.rigid_pins[i].initial_target);
+        if (p.body == 136) {
+            ++translated; EXPECT_EQ(p.target_translation, Vec3(.004, 0, 0));
+            EXPECT_DOUBLE_EQ(p.translation_start_time, 0); EXPECT_DOUBLE_EQ(p.translation_duration, 1);
+        } else EXPECT_EQ(p.target_translation, Vec3::Zero());
+    }
+    EXPECT_EQ(translated, 6);
+    EXPECT_THROW(bike_scene(-.004), std::invalid_argument);
+    EXPECT_THROW(bike_scene(.004, 0), std::invalid_argument);
+}
+TEST(RigidPinTranslation, MotorSpeedRampUsesIntegratedAngleAndSmoothEndpoints) {
+    RigidPin p;
+    p.initial_target = Vec3(1, 0, 0);
+    p.angular_velocity_z = -1;
+    p.angular_velocity_ramp_duration = 1;
+    const auto angle = [&](double t) {
+        const Vec3 target = rigid_pin_target_position(p, t);
+        return std::atan2(target.y(), target.x());
+    };
+    EXPECT_DOUBLE_EQ(angle(0), 0);
+    EXPECT_NEAR(angle(.5), -.078125, 1e-15);
+    EXPECT_NEAR(angle(1), -.5, 1e-15);
+    EXPECT_NEAR(angle(2), -1.5, 1e-15);
+    for (double t : {0., 1.}) {
+        const double h = 1e-5;
+        EXPECT_NEAR((angle(t+h)-angle(t-h))/(2*h), t == 0 ? 0 : -1, 1e-8);
+        EXPECT_NEAR((angle(t+h)-2*angle(t)+angle(t-h))/(h*h), 0, 1e-5);
+    }
+    p.angular_velocity_ramp_duration = -1;
+    EXPECT_THROW(rigid_pin_target_position(p, .5), std::invalid_argument);
+}
+
+TEST(RigidPinTranslation, RampedMotorStartsAtRestAndComposesWithSoftMount) {
+    const auto instant = bike_scene(.004), ramped = bike_scene(.004, 1, 1);
+    EXPECT_EQ(ramped.frames, 120);
+    ASSERT_EQ(ramped.state.deformed_positions.size(), instant.state.deformed_positions.size());
+    for (std::size_t i = 0; i < ramped.state.deformed_positions.size(); ++i)
+        EXPECT_EQ(ramped.state.deformed_positions[i], instant.state.deformed_positions[i]);
+    EXPECT_EQ(ramped.state.omega[136], Vec3::Zero());
+    EXPECT_GT(instant.state.omega[136].norm(), 0);
+    for (const auto& pin : ramped.params.rigid_pins) {
+        if (pin.body != 136) continue;
+        EXPECT_DOUBLE_EQ(pin.angular_velocity_ramp_duration, 1);
+        EXPECT_EQ(pin.target_translation, Vec3(.004, 0, 0));
+        EXPECT_EQ(rigid_pin_target_position(pin, 0), pin.initial_target);
+    }
+    EXPECT_THROW(bike_scene(.004, 1, -1), std::invalid_argument);
+}
+} // namespace

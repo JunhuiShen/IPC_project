@@ -8,6 +8,7 @@
 
 #include "ccd.h"
 #include "quaternion_math.h"
+#include "rigid_body_ipc.h"
 
 #include <tight_inclusion/ccd.hpp>
 #include <boost/multiprecision/cpp_int.hpp>
@@ -2115,6 +2116,24 @@ CCDResult segment_segment_same_displacement_linear_ccd(
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+namespace rigid_pose_publication {
+RotationAcceptance accept_rotation(const Vec4& stored_orientation,
+    const Vec3& stored_omega, const Vec4& ccd_start, const Vec4& target,
+    double alpha, const Vec4& previous_substep_orientation, double dt) {
+    if (alpha >= 0.0 && alpha <= 1.0e-6) {
+        const Vec4 relative = quaternion_normalize(quaternion_multiply(
+            quaternion_normalize(target),
+            quaternion_conjugate(quaternion_normalize(ccd_start))));
+        const double angle = 2.0 * std::atan2(relative.tail<3>().norm(), relative[0]);
+        if (alpha * angle <= 1.0e-9)
+            return {stored_orientation, stored_omega, true};
+    }
+    const Vec4 accepted = interpolate_orientation_full_arc(ccd_start, target, alpha);
+    return {accepted, angular_velocity_from_orientation_full_arc(
+        accepted, previous_substep_orientation, dt), false};
+}
+} // namespace rigid_pose_publication
+
 static bool point_segment_2d_rb_rotation(
     const Eigen::Vector2d& x, const Eigen::Vector2d& x_com, const double& theta_n,
     const double& theta_new, const Eigen::Vector2d& x0, const Eigen::Vector2d& x1,
@@ -2208,7 +2227,7 @@ static Vec2 project2D(const Vec3& p, const Vec3& x_com, const Vec3& e1, const Ve
 bool ccd_detail::negligible_rigid_rotation(const Vec4& q_new, const Vec4& q_n) {
     const Vec4 q_rel = quaternion_multiply(q_new, quaternion_conjugate(q_n));
     const Vec3 v_rel(q_rel[1], q_rel[2], q_rel[3]);
-    return v_rel.norm() < rigid_rotation_epsilon;
+    return v_rel.norm() <= rigid_rotation_epsilon;
 }
 
 namespace {
@@ -2235,8 +2254,9 @@ double initial_coplanarity(const Vec3& a,const Vec3& b,const Vec3& c) {
     value=compensated_add(value,compensated_multiply(compensated_product(-a.z(),b.y()),c.x()));
     return value.high+value.low;
 }
-// Only refine an already-found sub-time-resolution hit. Rotation coplanarity
-// is A*cos(theta)+B*sin(theta)+C=0. The half-angle quadratic uses the directly
+// Refine an already-found hit from its initial volume, including near-axis
+// contacts whose recovered angle loses a small gap at a non-tiny time.
+// Rotation coplanarity is A*cos(theta)+B*sin(theta)+C=0. The quadratic uses the directly
 // compensated initial volume F0=A+C, avoiding cancellation in radius/angle
 // recovery. No sampling, iterative search or arithmetic-fallback flag is used.
 double refine_tiny_rotation_toi(const Vec3& x0,const Vec3& x1,const Vec3& center,
@@ -2476,7 +2496,7 @@ bool segment_segment_rb_rotation_ccd(
 
     Vec3 v_rel(q_rel[1], q_rel[2], q_rel[3]);
     double v_rel_norm = v_rel.norm();
-    if (v_rel_norm < ccd_detail::rigid_rotation_epsilon) return false;
+    if (v_rel_norm <= ccd_detail::rigid_rotation_epsilon) return false;
 
     Vec3 n_hat = v_rel / v_rel_norm;
 
@@ -2496,7 +2516,7 @@ bool segment_segment_rb_rotation_ccd(
 
     double dtheta = 2.0 * std::atan2(v_rel_norm, q_rel[0]);
 
-    if (std::abs(dtheta) < eps) return false;
+    if (dtheta == 0.0) return false;
 
     // Larger-radius endpoint: well-conditioned reference for the 2D angle gauge
     const Vec3& ref_perp = (r0 >= r1) ? x0_perp : x1_perp;
@@ -2699,7 +2719,7 @@ bool segment_segment_rb_rotation_ccd(
     }
 
     if (!found) return false;
-    if (best_s > 0 && best_s < kLinearTimePrecision && std::abs(h1-h0) > eps)
+    if (best_s > 0 && std::abs(h1-h0) > eps)
         best_s = refine_tiny_rotation_toi(x0,x1,x_com,n_hat,dtheta,x2,x3,best_s);
     s = best_s;
     return true;
@@ -2725,7 +2745,7 @@ bool point_triangle_rb_rotation_ccd(
 
     Vec3 v_rel(q_rel[1], q_rel[2], q_rel[3]);
     double v_rel_norm = v_rel.norm();
-    if (v_rel_norm < ccd_detail::rigid_rotation_epsilon) return false; // no rotation
+    if (v_rel_norm <= ccd_detail::rigid_rotation_epsilon) return false; // no rotation
 
     Vec3 n_hat = v_rel / v_rel_norm;
 
@@ -2742,7 +2762,7 @@ bool point_triangle_rb_rotation_ccd(
 
     double dtheta = 2.0 * std::atan2(v_rel_norm, q_rel[0]);
 
-    if (std::abs(dtheta) < eps) return false; // no rotation
+    if (dtheta == 0.0) return false; // no rotation
 
     Vec3 n_cross_r_perp = n_hat.cross(r_perp);
 

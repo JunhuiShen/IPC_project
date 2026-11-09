@@ -1,4 +1,5 @@
 #pragma once
+#include "contact_record_index.cuh"
 
 // Include inside the contact pipeline's anonymous namespace, after the scalar
 // node reducer and contact_warp_reduce.cuh. Reuse their arithmetic.
@@ -67,13 +68,15 @@ __global__ void reduce_deformable_component_chains(BroadPhaseView broad,
         else if(component<12)value=elastic.systems[node].hessian[component-3];
         const double normal_scale=params.dt*params.dt*params.k_barrier;
         for(auto incident=work.offsets[block];incident<work.offsets[block+1];++incident) {
-            const int pair=work.incidents[incident].contact;
+            const int pair=contact_incident_pair(work,incident);
+            const int slot=contact_record_slot(work,pair);
             // Bits 0..3 retain role order; bit 4 selects the compact payload.
             int selected_roles=0;
-            if(lane==0&&work.active[pair]) {
+            if(lane==0&&slot<0){error(elastic.error,20);selected_roles=-1;}
+            else if(lane==0&&work.active[slot]) {
                 bool full_payload=true;
                 if(work.compact) {
-                    const auto& compact=work.compact[pair];
+                    const auto& compact=work.compact[slot];
                     if(compact.status!=ContactStatus::Ok) {
                         error(elastic.error,code(compact.status));selected_roles=-1;full_payload=false;
                     } else if(!compact.active)full_payload=false;
@@ -84,7 +87,7 @@ __global__ void reduce_deformable_component_chains(BroadPhaseView broad,
                     }
                 }
                 if(full_payload) {
-                    const auto& out=work.outputs[pair];
+                    const auto& out=work.outputs[slot];
                     if(out.status!=ContactStatus::Ok) {
                         error(elastic.error,code(out.status));selected_roles=-1;
                     } else if(out.active) {
@@ -97,9 +100,9 @@ __global__ void reduce_deformable_component_chains(BroadPhaseView broad,
             if(selected_roles<0)return;
             if(component<12) {
                 if(selected_roles&16)
-                    value=contact_warp_add_compact_component(value,work.compact[pair],int(component),normal_scale);
+                    value=contact_warp_add_compact_component(value,work.compact[slot],int(component),normal_scale);
                 else for(int role=0;role<4;++role)if(selected_roles&(1<<role))
-                    value=contact_warp_add_component(value,work.outputs[pair],role,int(component),normal_scale);
+                    value=contact_warp_add_component(value,work.outputs[slot],role,int(component),normal_scale);
             }
         }
         // Disjoint double slots: each component has exactly one group/lane
@@ -133,7 +136,7 @@ __global__ void finalize_deformable_component_chains(BroadPhaseView broad,
         return;
     }
     Derivatives system=pending[selected];
-    if(!scene.solid[node]||!work.surface_query||work.surface_query[node]) {
+    if(!contact_pending(work)&&(!scene.solid[node]||!work.surface_query||work.surface_query[node])) {
         // Exactly one unchanged SDF evaluation per selected node. Match the
         // original normal then friction addition order for every component.
         const auto out=evaluate_sdf_contact(sdf.colliders,sdf.count,state.positions[node],state.previous[node],sdf.parameters);
@@ -144,8 +147,8 @@ __global__ void finalize_deformable_component_chains(BroadPhaseView broad,
             for(int l=0;l<3;++l){system.hessian[3*k+l]+=dt2*out.hessian[3*k+l];system.hessian[3*k+l]+=out.friction_hessian[3*k+l];}
         }
     }
-    for(int k=0;k<3;++k)if(!contact_detail::finite(system.gradient[k])){error(elastic.error,26);return;}
-    for(int k=0;k<9;++k)if(!contact_detail::finite(system.hessian[k])){error(elastic.error,26);return;}
+    for(int k=0;!contact_pending(work)&&k<3;++k)if(!contact_detail::finite(system.gradient[k])){error(elastic.error,26);return;}
+    for(int k=0;!contact_pending(work)&&k<9;++k)if(!contact_detail::finite(system.hessian[k])){error(elastic.error,26);return;}
     // One writer publishes all twelve components after all checks. Failed
     // nodes never publish partial components to the subsequent local solve.
     elastic.systems[node]=system;

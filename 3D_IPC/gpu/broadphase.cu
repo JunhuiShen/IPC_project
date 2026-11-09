@@ -56,6 +56,21 @@ template<class T> struct Buffer {
 };
 
 constexpr int threads = 128;
+constexpr int small_block_graph_limit = 512;
+bool small_block_graph_option() {
+    const char* value=std::getenv("IPC_GPU_SMALL_BLOCK_GRAPH");
+    if(!value)return true;
+    if(std::strcmp(value,"0")==0)return false;
+    if(std::strcmp(value,"1")==0)return true;
+    throw std::invalid_argument("IPC_GPU_SMALL_BLOCK_GRAPH must be 0 or 1");
+}
+bool canonical_warp_color_option() {
+    const char* value=std::getenv("IPC_GPU_CANONICAL_WARP_COLOR");
+    if(!value)return true;
+    if(std::strcmp(value,"0")==0)return false;
+    if(std::strcmp(value,"1")==0)return true;
+    throw std::invalid_argument("IPC_GPU_CANONICAL_WARP_COLOR must be 0 or 1");
+}
 int blocks(std::size_t count) {
     return static_cast<int>(std::min<std::size_t>((count + threads - 1) / threads, 65535));
 }
@@ -412,6 +427,59 @@ __global__ void dependency_pass(BroadPhaseTopology topology, const BpContact* co
     }
 }
 
+// For a bounded small block palette, represent the UNIQUE graph directly.
+// Geometry, dependency membership and candidate order are unchanged. Within
+// each row, word/bit order emits exactly the sorted-key path's ascending IDs.
+__global__ void mark_small_graph(BroadPhaseTopology topology,const BpContact* contacts,
+    std::size_t count,unsigned int* rows,int words_per_row) {
+    for(std::size_t index=std::size_t(blockIdx.x)*blockDim.x+threadIdx.x;index<count;
+        index+=std::size_t(blockDim.x)*gridDim.x) {
+        const auto dependency=dependency_at(index,topology,contacts);
+        int owners[4],unique=0;
+        for(int i=0;i<dependency.count;++i) {
+            const int owner=topology.vertex_block[dependency.vertices[i]];
+            bool seen=false;
+            for(int prior=0;prior<unique;++prior)seen=seen||owners[prior]==owner;
+            if(!seen)owners[unique++]=owner;
+        }
+        for(int i=0;i<unique;++i)for(int j=i+1;j<unique;++j) {
+            const unsigned a=static_cast<unsigned>(owners[i]),b=static_cast<unsigned>(owners[j]);
+            atomicOr(rows+std::size_t(a)*words_per_row+b/32,1u<<(b%32));
+            atomicOr(rows+std::size_t(b)*words_per_row+a/32,1u<<(a%32));
+        }
+    }
+}
+// With two validated update blocks, every retained candidate spans both:
+// same_block already removed the homogeneous contacts. One candidate therefore
+// proves the complete two-vertex graph, including every possible static edge.
+__global__ void complete_two_block_graph(std::size_t* offsets,int* adjacency) {
+    if(blockIdx.x||threadIdx.x)return;
+    offsets[0]=0;offsets[1]=1;offsets[2]=2;
+    adjacency[0]=1;adjacency[1]=0;
+}
+__global__ void count_small_graph_rows(const unsigned int* rows,int count,
+    int words_per_row,std::size_t* offsets) {
+    for(int row=blockIdx.x*blockDim.x+threadIdx.x;row<count;row+=blockDim.x*gridDim.x) {
+        std::size_t degree=0;
+        for(int word=0;word<words_per_row;++word)
+            degree+=__popc(rows[std::size_t(row)*words_per_row+word]);
+        offsets[row]=degree;
+    }
+}
+__global__ void emit_small_graph_rows(const unsigned int* rows,int count,
+    int words_per_row,const std::size_t* offsets,int* adjacency) {
+    for(int row=blockIdx.x*blockDim.x+threadIdx.x;row<count;row+=blockDim.x*gridDim.x) {
+        auto next=offsets[row];
+        for(int word=0;word<words_per_row;++word) {
+            unsigned int bits=rows[std::size_t(row)*words_per_row+word];
+            while(bits) {
+                const int bit=__ffs(static_cast<int>(bits))-1;
+                adjacency[next++]=32*word+bit;
+                bits&=bits-1;
+            }
+        }
+    }
+}
 __global__ void csr_rows(const std::uint64_t* keys, std::size_t count,
                          std::size_t* offsets, int* columns) {
     for (std::size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < count;
@@ -477,6 +545,8 @@ void collect_color_stage_masks(const BroadPhaseView& view, int block_count,
 }
 
 struct GpuBroadPhase::Impl {
+    const bool use_small_block_graph=small_block_graph_option();
+    Buffer<unsigned int> graph_bits;
     Buffer<int> error;
     Buffer<unsigned long long> scene_scale;
     Buffer<double> query_padding;
@@ -617,26 +687,49 @@ BroadPhaseView GpuBroadPhase::rebuild(const BroadPhaseTopology& t,
     if (contacts > std::numeric_limits<std::size_t>::max() / 12 - static_dependencies)
         throw std::overflow_error("GPU graph incidence count overflow");
     const std::size_t dependencies = static_dependencies + contacts;
-    p.dependency_offsets.reserve(dependencies + 1);
-    if (dependencies) dependency_pass<false><<<blocks(dependencies), threads>>>(t, p.contacts.data,
-        dependencies, p.dependency_offsets.data, nullptr);
-    launched("GPU dependency count pass");
-    const std::size_t raw_edges = scan_counts(p.dependency_offsets, dependencies);
-    p.graph_keys.reserve(raw_edges);
-    if (raw_edges) {
-        dependency_pass<true><<<blocks(dependencies), threads>>>(t, p.contacts.data,
-            dependencies, p.dependency_offsets.data, p.graph_keys.data);
-        launched("GPU dependency fill pass");
-        auto first = thrust::device_pointer_cast(p.graph_keys.data);
-        thrust::sort(thrust::device, first, first + raw_edges);
-        graph_edges = thrust::unique(thrust::device, first, first + raw_edges) - first;
+    if(p.use_small_block_graph&&t.block_count==2&&contacts>0) {
+        graph_edges=2;p.adjacency_offsets.reserve(3);p.adjacency.reserve(2);
+        complete_two_block_graph<<<1,1>>>(p.adjacency_offsets.data,p.adjacency.data);
+        launched("GPU complete two-block graph");
+    } else if(p.use_small_block_graph&&t.block_count<=small_block_graph_limit) {
+        const int words_per_row=(t.block_count+31)/32;
+        const auto words=std::size_t(t.block_count)*words_per_row;
+        // At most 512*16 uint32 words (32 KiB), independent of candidates.
+        p.graph_bits.reserve(words);
+        if(words)check(cudaMemset(p.graph_bits.data,0,words*sizeof(unsigned int)),"clear GPU small graph bits");
+        if(dependencies)mark_small_graph<<<blocks(dependencies),threads>>>(t,p.contacts.data,
+            dependencies,p.graph_bits.data,words_per_row);
+        p.adjacency_offsets.reserve(static_cast<std::size_t>(t.block_count)+1);
+        if(t.block_count)count_small_graph_rows<<<blocks(t.block_count),threads>>>(p.graph_bits.data,
+            t.block_count,words_per_row,p.adjacency_offsets.data);
+        launched("GPU small graph marking/counts");
+        graph_edges=scan_counts(p.adjacency_offsets,t.block_count);
+        p.adjacency.reserve(graph_edges);
+        if(t.block_count)emit_small_graph_rows<<<blocks(t.block_count),threads>>>(p.graph_bits.data,
+            t.block_count,words_per_row,p.adjacency_offsets.data,p.adjacency.data);
+        launched("GPU small graph ordered CSR");
+    } else {
+        p.dependency_offsets.reserve(dependencies + 1);
+        if (dependencies) dependency_pass<false><<<blocks(dependencies), threads>>>(t, p.contacts.data,
+            dependencies, p.dependency_offsets.data, nullptr);
+        launched("GPU dependency count pass");
+        const std::size_t raw_edges = scan_counts(p.dependency_offsets, dependencies);
+        p.graph_keys.reserve(raw_edges);
+        if (raw_edges) {
+            dependency_pass<true><<<blocks(dependencies), threads>>>(t, p.contacts.data,
+                dependencies, p.dependency_offsets.data, p.graph_keys.data);
+            launched("GPU dependency fill pass");
+            auto first = thrust::device_pointer_cast(p.graph_keys.data);
+            thrust::sort(thrust::device, first, first + raw_edges);
+            graph_edges = thrust::unique(thrust::device, first, first + raw_edges) - first;
+        }
+        p.adjacency.reserve(graph_edges); p.adjacency_offsets.reserve(static_cast<std::size_t>(t.block_count) + 1);
+        check(cudaMemset(p.adjacency_offsets.data, 0, (static_cast<std::size_t>(t.block_count) + 1) * sizeof(std::size_t)), "clear GPU graph rows");
+        if (graph_edges) csr_rows<<<blocks(graph_edges), threads>>>(p.graph_keys.data, graph_edges,
+            p.adjacency_offsets.data, p.adjacency.data);
+        launched("GPU CSR rows");
+        scan_counts(p.adjacency_offsets, t.block_count);
     }
-    p.adjacency.reserve(graph_edges); p.adjacency_offsets.reserve(static_cast<std::size_t>(t.block_count) + 1);
-    check(cudaMemset(p.adjacency_offsets.data, 0, (static_cast<std::size_t>(t.block_count) + 1) * sizeof(std::size_t)), "clear GPU graph rows");
-    if (graph_edges) csr_rows<<<blocks(graph_edges), threads>>>(p.graph_keys.data, graph_edges,
-        p.adjacency_offsets.data, p.adjacency.data);
-    launched("GPU CSR rows");
-    scan_counts(p.adjacency_offsets, t.block_count);
     }
 
     int colors = 0;
@@ -686,6 +779,19 @@ BroadPhaseView GpuBroadPhase::rebuild(const BroadPhaseTopology& t,
         } else
             pbgs_ordered_greedy<<<1,1>>>(p.adjacency_offsets.data,p.adjacency.data,t.block_count,p.coloring.order.data,p.colors.data,p.forbidden.data,p.color_count.data);
         check(cudaMemcpy(&colors,p.color_count.data,sizeof(int),cudaMemcpyDeviceToHost),"ordered color count");
+    } else if(color_mode==0&&t.block_count&&canonical_warp_color_option()) {
+        // Natural order preserves the original greedy labels, palette and
+        // execution schedule. Only adjacency marking/palette search use lanes.
+        p.coloring.order.reserve(t.block_count);
+        thrust::sequence(thrust::device,thrust::device_pointer_cast(p.coloring.order.data),
+            thrust::device_pointer_cast(p.coloring.order.data+t.block_count));
+        check(cudaMemset(p.colors.data,0xff,t.block_count*sizeof(int)),"initialize canonical Warp colors");
+        if(pbgs_warp_shared_marks_enabled())
+            pbgs_launch_warp_shared_marks_exact(p.adjacency_offsets.data,p.adjacency.data,t.block_count,
+                p.coloring.order.data,p.colors.data,p.forbidden.data,p.color_count.data);
+        else pbgs_ordered_greedy_warp_exact<<<1,32>>>(p.adjacency_offsets.data,p.adjacency.data,t.block_count,
+                p.coloring.order.data,p.colors.data,p.forbidden.data,p.color_count.data);
+        check(cudaMemcpy(&colors,p.color_count.data,sizeof(int),cudaMemcpyDeviceToHost),"canonical Warp color count");
     } else {
         greedy_color<<<1, 1>>>(p.adjacency_offsets.data, p.adjacency.data, t.block_count,
             p.colors.data, p.forbidden.data, p.color_count.data);

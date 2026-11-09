@@ -6,6 +6,7 @@
 #include <cuda_runtime_api.h>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -28,12 +29,32 @@ template<class T> struct Device {
     ~Device(){if(p)cudaFree(p);}
     void set(const std::vector<T>& v) { require(v.size()==count,"wrong upload size");if(count)check(cudaMemcpy(p,v.data(),count*sizeof(T),cudaMemcpyHostToDevice)); }
     std::vector<T> get()const {std::vector<T> v(count);if(count)check(cudaMemcpy(v.data(),p,count*sizeof(T),cudaMemcpyDeviceToHost));return v;}
+    // Partial-color producers leave unrelated rows unwritten; download only the tested prefix.
+    std::vector<T> get_prefix(std::size_t n)const {
+        require(n<=count,"readback prefix exceeds device allocation");
+        std::vector<T> v(n);if(n)check(cudaMemcpy(v.data(),p,n*sizeof(T),cudaMemcpyDeviceToHost));return v;
+    }
 };
 template<std::size_t N> static auto ptr(Device<std::array<double,N>>& d)->double(*)[N] {
     return reinterpret_cast<double(*)[N]>(d.p);
 }
 static Vec3 vec(const D3& a){return Vec3(a[0],a[1],a[2]);}
 static D3 pod(const Vec3& a){return {a[0],a[1],a[2]};}
+
+template<class T>static void identical(const std::vector<T>& a,const std::vector<T>& b,
+    const std::string& label) {
+    require(a.size()==b.size()&&(a.empty()||std::memcmp(a.data(),b.data(),a.size()*sizeof(T))==0),label);
+}
+struct RotationEnvironment {
+    bool existed=false;std::string value;
+    RotationEnvironment() {
+        if(const char* old=std::getenv("IPC_GPU_RIGID_ROTATION_PAIR_THREADS")){existed=true;value=old;}
+    }
+    ~RotationEnvironment() {
+        if(existed)setenv("IPC_GPU_RIGID_ROTATION_PAIR_THREADS",value.c_str(),1);
+        else unsetenv("IPC_GPU_RIGID_ROTATION_PAIR_THREADS");
+    }
+};
 
 int main(){
     try{
@@ -73,7 +94,7 @@ int main(){
             close(zero_omega[b][k],0,"iteration omega not reset");
         }
         build_rigid_blue_boxes(scene,state,nn,2.0,body_boxes.p,node_boxes.p,error.p);success();
-        const auto nbounds=node_boxes.get();
+        const auto nbounds=node_boxes.get_prefix(12);
         for(int n=0;n<12;++n)for(int k=0;k<3;++k)
             require(nbounds[n].lo[k]<=positions[n][k]&&nbounds[n].hi[k]>=positions[n][k],"proxy missing from blue box");
         for(int color:{0,1}){
@@ -125,8 +146,8 @@ int main(){
         systems.set(enormous_systems);
         for(double cap:{0.0,.07,3.14159265358979323846}){
             propose_rigid_color(scene,state,work,d_colors.p,0,true,body_boxes.p,dt,1.0,error.p,cap);success();
-            const auto bounded_q=proposed_orientation.get()[0];
-            const auto bounded_omega=proposed_omega.get()[0];
+            const auto bounded_q=proposed_orientation.get_prefix(1)[0];
+            const auto bounded_omega=proposed_omega.get_prefix(1)[0];
             const Vec3 expected_capped_omega=axis*(cap/dt);
             const Vec4 expected_capped_q=quaternion_from_angular_velocity(Vec4(1,0,0,0),expected_capped_omega,dt);
             for(int k=0;k<4;++k)close(bounded_q[k],expected_capped_q[k],"bounded huge Newton orientation");
@@ -139,7 +160,7 @@ int main(){
         Device<D4> anchors(nb);
         constexpr double cap_radius=.07,com_radius=.02;
         build_rigid_blue_boxes(scene,state,nn,com_radius,body_boxes.p,node_boxes.p,error.p,cap_radius,ptr(anchors),ptr(d_positions));success();
-        const auto anchored_boxes=node_boxes.get();const auto anchor_values=anchors.get();
+        const auto anchored_boxes=node_boxes.get_prefix(12);const auto anchor_values=anchors.get();
         require(anchor_values==q,"blue-box quaternion anchor snapshot differs");
         for(int n=0;n<12;++n)for(int k=0;k<3;++k)
             require(anchored_boxes[n].lo[k]<=translated[n][k]&&anchored_boxes[n].hi[k]>=translated[n][k],"anchored cap misses represented position");
@@ -159,7 +180,7 @@ int main(){
         for(int k=0;k<4;++k)staged_q[0][k]=current_q[k];
         staged_omega[0]=pod(current_omega);orientation.set(staged_q);d_omega.set(staged_omega);
         propose_rigid_color(scene,state,work,d_colors.p,0,true,body_boxes.p,dt,1.0,error.p,cap_radius,ptr(anchors));success();
-        const auto anchor_limited=proposed_orientation.get()[0];
+        const auto anchor_limited=proposed_orientation.get_prefix(1)[0];
         const double anchor_angle=2*std::atan2(std::hypot(anchor_limited[1],std::hypot(anchor_limited[2],anchor_limited[3])),anchor_limited[0]);
         require(anchor_angle<=cap_radius+1e-12,"successive proposal escaped rebuild cap");
         require(anchor_angle>.069,"anchor cap unexpectedly suppressed valid progress");
@@ -167,6 +188,164 @@ int main(){
         build_rigid_blue_boxes(scene,state,nn,2.0,body_boxes.p,node_boxes.p,error.p);success();
         // A known point/triangle rotational hit, after the COM translation.
         auto target=q;target[0]={0,0,0,1};proposed_orientation.set(target);
+        {
+        // Differential acceptance checks compare the retained original kernel
+        // with every prototype block width. More than two largest-width chunks
+        // exercise shared-slot reuse and a partial final chunk.
+        RotationEnvironment restore_environment;
+        GpuRigidRotationClipper grid_clipper;
+        struct Result {
+            std::vector<D4> orientation;std::vector<D3> omega,proxy;int error;
+            std::vector<D4> physical_orientation;std::vector<D3> physical_omega,physical_proxy;
+        };
+        auto run=[&](unsigned pair_width,const std::vector<BpContact>& pairs,
+            bool use_ccd,int selected_color=0,int prior_error=0,bool grid=false,bool commit=false) {
+            if(pair_width==0)unsetenv("IPC_GPU_RIGID_ROTATION_PAIR_THREADS");
+            else setenv("IPC_GPU_RIGID_ROTATION_PAIR_THREADS",std::to_string(pair_width).c_str(),1);
+            accepted_orientation.set(std::vector<D4>(nb,D4{61,62,63,64}));
+            accepted_omega.set(std::vector<D3>(nb,D3{71,72,73}));
+            accepted_proxy.set(std::vector<D3>(nn,D3{81,82,83}));
+            error.set(std::vector<int>{prior_error});
+            const auto before_positions=d_positions.get(),before_omega=d_omega.get(),before_com=d_com.get();
+            const auto before_orientation=orientation.get();
+            Device<BpContact> test_contacts(pairs);BroadPhaseView view;
+            view.contacts=test_contacts.p;view.contact_count=pairs.size();
+            if(grid)grid_clipper.clip_color(scene,state,work,particles,view,d_colors.p,
+                selected_color,dt,.9,use_ccd,ptr(accepted_proxy),error.p);
+            else clip_rigid_rotation_color(scene,state,work,particles,view,d_colors.p,
+                selected_color,dt,.9,use_ccd,ptr(accepted_proxy),error.p);
+            check(cudaDeviceSynchronize());
+            identical(d_positions.get(),before_positions,"clip changed physical proxy positions");
+            identical(orientation.get(),before_orientation,"clip changed physical orientation");
+            identical(d_omega.get(),before_omega,"clip changed physical angular velocity");
+            identical(d_com.get(),before_com,"rotation clip changed physical COM");
+            if(commit)commit_rigid_rotation_color(scene,state,work,particles,d_colors.p,
+                selected_color,ptr(accepted_proxy),error.p);
+            check(cudaDeviceSynchronize());
+            Result result{accepted_orientation.get(),accepted_omega.get(),accepted_proxy.get(),error.get()[0],
+                orientation.get(),d_omega.get(),d_positions.get()};
+            if(result.error) {
+                identical(result.physical_orientation,before_orientation,"failed rotation committed orientation");
+                identical(result.physical_omega,before_omega,"failed rotation committed angular velocity");
+                identical(result.physical_proxy,before_positions,"failed rotation committed proxy positions");
+            }
+            orientation.set(before_orientation);d_omega.set(before_omega);d_positions.set(before_positions);
+            return result;
+        };
+        auto compare=[&](const std::vector<BpContact>& pairs,bool use_ccd,
+            const std::string& label,int expected_error=0,int selected_color=0,int prior_error=0,bool commit=false) {
+            const auto reference=run(1,pairs,use_ccd,selected_color,prior_error,false,commit);
+            require(reference.error==expected_error,label+" unexpected reference error "+std::to_string(reference.error));
+            for(bool grid:{false,true})for(unsigned pair_width:{0u,32u,64u,128u})for(int reuse=0;reuse<3;++reuse) {
+                const auto actual=run(pair_width,pairs,use_ccd,selected_color,prior_error,grid,commit);
+                const auto context=label+" grid "+std::to_string(grid)+" width "+std::to_string(pair_width)+" reuse "+std::to_string(reuse);
+                require(actual.error==reference.error,context+" error differs");
+                identical(actual.orientation,reference.orientation,context+" accepted quaternion differs");
+                identical(actual.omega,reference.omega,context+" accepted omega differs");
+                identical(actual.proxy,reference.proxy,context+" accepted proxy differs");
+                identical(actual.physical_orientation,reference.physical_orientation,context+" committed quaternion differs");
+                identical(actual.physical_omega,reference.physical_omega,context+" committed omega differs");
+                identical(actual.physical_proxy,reference.physical_proxy,context+" committed proxies differ");
+            }
+        };
+        const std::vector<BpContact> pattern{
+            {{0,12,13,14},0}, // PT: moving point against fixed triangle.
+            {{0,1,12,13},1}, // EE: first edge belongs to the active body.
+            {{12,0,1,2},0}, // PT: fixed point against moving triangle.
+            {{3,12,13,14},0}, // Unrelated inactive body.
+            {{0,0,1,2},0}, // Both primitives on this body: skip.
+            {{0,1,1,2},1}, // Both edges on this body: skip.
+            {{6,12,13,14},0}, // Another color's rotating body.
+        };
+        std::vector<BpContact> many;
+        for(std::size_t index=0;index<259;++index)many.push_back(pattern[index%pattern.size()]);
+        compare(many,true,"multi PT/EE/skips");
+        compare(many,true,"multi PT/EE clip+commit",0,0,0,true);
+        compare({},true,"empty contacts");
+        compare(many,false,"CCD disabled");
+        compare(many,true,"inactive color",0,99);
+        compare(many,true,"upstream failure",RigidInvalidDerivative,0,RigidInvalidDerivative);
+        const auto body_count=scene.bodies;scene.bodies=0;
+        compare(many,true,"empty rigid scene");
+        scene.bodies=body_count;
+        // Multiple independent rotating bodies in the same color must own
+        // disjoint accepted outputs. Restore canonical colors after this case.
+        auto two_active=colors;two_active[2]=0;d_colors.set(two_active);
+        auto two_targets=target;two_targets[2]={std::cos(.2),0,0,std::sin(.2)};
+        proposed_orientation.set(two_targets);
+        compare(many,true,"two active bodies");
+        compare(many,true,"two active bodies clip+commit",0,0,0,true);
+        // One body fails while a separate same-color body has a valid,
+        // nontrivial proposal. Scratch may be written speculatively, but the
+        // joined clip must leave a nonzero error and block EVERY commit.
+        const auto published_positions=d_positions.get();
+        const auto published_orientation=orientation.get();
+        const auto published_omega=d_omega.get();
+        auto failing_targets=two_targets;
+        failing_targets[0]={-1,0,0,0};
+        Device<BpContact> concurrent_contacts(many);BroadPhaseView concurrent_view;
+        concurrent_view.contacts=concurrent_contacts.p;concurrent_view.contact_count=many.size();
+        for(unsigned pair_width:{1u,32u,64u,128u}) {
+            proposed_orientation.set(two_targets);
+            const auto healthy=run(pair_width,many,true);
+            require(healthy.error==0,"concurrent rotation control unexpectedly failed");
+            require(std::memcmp(healthy.orientation[2].data(),published_orientation[2].data(),sizeof(D4))!=0,
+                "concurrent rotation control lost its independently moving valid body");
+            proposed_orientation.set(failing_targets);error.set(std::vector<int>{0});
+            clip_rigid_rotation_color(scene,state,work,particles,concurrent_view,d_colors.p,
+                0,dt,.9,true,ptr(accepted_proxy),error.p);
+            commit_rigid_rotation_color(scene,state,work,particles,d_colors.p,0,ptr(accepted_proxy),error.p);
+            check(cudaDeviceSynchronize());
+            const auto context="concurrent valid/failing rotation width "+std::to_string(pair_width);
+            require(error.get()[0]==RigidRotationFailure,context+" lost the failing body's error");
+            identical(d_positions.get(),published_positions,context+" published proxy positions");
+            identical(orientation.get(),published_orientation,context+" published quaternions");
+            identical(d_omega.get(),published_omega,context+" published angular velocity");
+        }
+        error.set(std::vector<int>{0});
+        d_colors.set(colors);proposed_orientation.set(target);
+        const BpContact malformed{{0,1,12,14},0};
+        compare({pattern[0],malformed,pattern[1]},true,"ordered ownership error",RigidContactOwnership);
+        compare({pattern[0],malformed,pattern[1]},true,"ownership blocks commit",RigidContactOwnership,0,0,true);
+        auto late_error=many;late_error.back()=malformed;
+        compare(late_error,true,"ownership error in partial final chunk",RigidContactOwnership);
+        compare({malformed},false,"disabled CCD ignores contacts");
+        // A later lane may discover a different error, but the earliest global
+        // pair must retain the scalar kernel's reported status.
+        auto invalid_positions=translated;invalid_positions[0][0]=INFINITY;
+        d_positions.set(invalid_positions);
+        compare({pattern[0],malformed},true,"geometry error precedes ownership",RigidRotationFailure);
+        compare({malformed,pattern[0]},true,"ownership error precedes geometry",RigidContactOwnership);
+        auto cross_block_errors=std::vector<BpContact>(259,pattern[3]);
+        cross_block_errors[129]=pattern[0];cross_block_errors[258]=malformed;
+        compare(cross_block_errors,true,"global-index geometry before ownership",RigidRotationFailure,0,0,true);
+        cross_block_errors[129]=malformed;cross_block_errors[258]=pattern[0];
+        compare(cross_block_errors,true,"global-index ownership before geometry",RigidContactOwnership,0,0,true);
+        d_positions.set(translated);
+        auto invalid_refs=refs;invalid_refs[1][0]=INFINITY;d_refs.set(invalid_refs);
+        compare({},false,"late invalid proxy blocks commit",RigidInvalidState,0,0,true);
+        d_refs.set(refs);
+        auto invalid_omega=d_omega.get();const auto healthy_omega=invalid_omega;invalid_omega[0][1]=NAN;
+        d_omega.set(invalid_omega);
+        compare({},true,"invalid current angular state",RigidRotationFailure,0,0,true);
+        d_omega.set(healthy_omega);
+        auto ambiguous_target=target;ambiguous_target[0]={-1,0,0,0};
+        proposed_orientation.set(ambiguous_target);
+        compare({pattern[0]},true,"ambiguous arc",RigidRotationFailure);
+        compare({pattern[0]},true,"ambiguous arc blocks commit",RigidRotationFailure,0,0,true);
+        proposed_orientation.set(target);
+        // The public environment parser fails before enqueuing invalid widths.
+        for(const char* bad:{"0","2","16","256","32x","-1"}) {
+            setenv("IPC_GPU_RIGID_ROTATION_PAIR_THREADS",bad,1);
+            bool rejected=false;
+            try {BroadPhaseView empty;clip_rigid_rotation_color(scene,state,work,particles,
+                empty,d_colors.p,0,dt,.9,true,ptr(accepted_proxy),error.p);}
+            catch(const std::invalid_argument&){rejected=true;}
+            require(rejected,std::string("invalid rotation pair width accepted: ")+bad);
+        }
+        error.set(std::vector<int>{0});
+        std::cout<<"CUDA rigid rotation prototype: serial/CTA/grid bitwise endpoints, global errors, fallback/reuse, clip+commit PASS\n";
+        }
         Device<BpContact>contacts(std::vector<BpContact>{{{0,12,13,14},0}});
         BroadPhaseView bp;bp.contacts=contacts.p;bp.contact_count=1;
         double toi=0;

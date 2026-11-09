@@ -122,14 +122,16 @@ IPC_GUESS_HD inline void tolerances(const Input& q,double* tol,double* error) {
 // Build this CUDA translation unit with --fmad=false, as the parent library.
 IPC_GUESS_HD inline bool overlaps(const Input& q,const Cell& c,const double* error,
                                  bool& contained,double* widths,int& status) {
+    double numerator[3][2],denominator[3][2];
+    for(int parameter=0;parameter<3;++parameter)for(int upper=0;upper<2;++upper)
+        endpoint(c,parameter,upper,numerator[parameter][upper],denominator[parameter][upper]);
     contained=true;
     for(int axis=0;axis<3;++axis) {
         double low=INFINITY,high=-INFINITY;
         for(int corner=0;corner<8;++corner) {
-            double tn,td,un,ud,vn,vd;
-            endpoint(c,0,(corner>>2)&1,tn,td);
-            endpoint(c,1,(corner>>1)&1,un,ud);
-            endpoint(c,2,corner&1,vn,vd);
+            const double tn=numerator[0][(corner>>2)&1],td=denominator[0][(corner>>2)&1];
+            const double un=numerator[1][(corner>>1)&1],ud=denominator[1][(corner>>1)&1];
+            const double vn=numerator[2][corner&1],vd=denominator[2][corner&1];
             double x[4];
             for(int v=0;v<4;++v)x[v]=(q.end[v][axis]-q.start[v][axis])*tn/td+q.start[v][axis];
             const double f=q.vertex_face

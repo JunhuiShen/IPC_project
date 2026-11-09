@@ -518,8 +518,12 @@ int original_rigid_clipper_check() {
         throw std::runtime_error("CPU-approved tiny translation was frozen by an extra GPU positive-band check");
     const std::array<V,4> angled_near{V{0,0,5e-11},V{-1,-1,1},V{1,-1,-1},V{0,1,0}};
     const auto angled_tiny=run_rigid_clip(angled_near,true,true,V{0,0,0},V{0,0,1e-15});
-    if(angled_tiny.status||angled_tiny.accepted[0][2]!=angled_near[0][2]+1e-15)
-        throw std::runtime_error("tiny rigid step inside overlapping world boxes must match CPU bypass");
+    if(angled_tiny.status||angled_tiny.accepted[0]!=angled_near[0])
+        throw std::runtime_error("tiny rigid step inside overlapping world boxes bypassed CPU CCD");
+    auto microscopic=point;microscopic[0][2]=1e-201;
+    const auto microscopic_crossing=run_rigid_clip(microscopic,true,true,V{0,0,0},V{0,0,-2e-201});
+    if(microscopic_crossing.status||microscopic_crossing.accepted[0]!=microscopic[0])
+        throw std::runtime_error("underflowed rigid squared step bypassed CPU CCD");
     const auto away=run_rigid_clip(tiny_near,true,true,V{0,0,0},V{0,0,1e-8});
     if(away.status||away.accepted[0][2]!=tiny_near[0][2]+1e-8)
         throw std::runtime_error("CPU swept-box rejection failed for original rigid motion away from contact");

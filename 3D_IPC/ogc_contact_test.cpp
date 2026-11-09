@@ -1,9 +1,13 @@
 #include "ogc_contact.h"
 #include "friction_energy.h"
+#include "mesh_utils.h"
+#include "parallel_helper.h"
+#include "simulation.h"
 #include "solver.h"
 
 #include <gtest/gtest.h>
 #include <Eigen/Geometry>
+#include <omp.h>
 
 #include <algorithm>
 #include <array>
@@ -161,5 +165,275 @@ TEST(OGCSolver, SharedDistanceControlsBarrierAndFrictionActivation) {
         scene.params.d_hat = .05;
         const auto inactive = scene.solve();
         for (std::size_t i = 0; i < inactive.size(); ++i) EXPECT_EQ(inactive[i], scene.initial[i]);
+    }
+}
+
+TEST(OGCSolver, BarrierPairsDoNotAlterTheElasticColoring) {
+    const std::vector<Vec3> rest{Vec3(0, 0, 0), Vec3(1, 0, 0),
+        Vec3(0, 1, 0), Vec3(1, 1, 0), Vec3(0, 2, 0)};
+    RefMesh mesh;
+    mesh.tris = {0, 1, 2, 1, 3, 2, 2, 3, 4};
+    mesh.initialize(rest);
+    mesh.mass.assign(rest.size(), 1);
+    mesh.node_to_rb.assign(rest.size(), -1);
+    const auto adjacency = build_incident_triangle_map(mesh.tris);
+    auto initial = rest;
+    initial[0] += Vec3(-.05, .02, .01);
+    initial[4] += Vec3(.08, -.03, .02);
+    const std::vector<Vec3> velocity(rest.size(), Vec3::Zero());
+    auto params = SimParams::zeros();
+    params.fps = 20;
+    params.substeps = 1;
+    params.fixed_iters = true;
+    params.max_global_iters = 2;
+    params.damping = .5;
+    params.mu = 30;
+    params.lambda = 20;
+    params.kB = .003;
+    params.d_hat = 2;
+    params.k_barrier = .1;
+    params.node_box_min = params.node_box_max = 1;
+    (void)params.dt2();
+    const double padding = std::max(params.ogc_box_pad, params.d_hat);
+    const auto phase_for = [&](const std::vector<Vec3>& positions) {
+        std::vector<AABB> boxes;
+        for (const auto& position : positions)
+            boxes.emplace_back(position - Vec3::Constant(1 + padding),
+                position + Vec3::Constant(1 + padding));
+        BroadPhase phase;
+        phase.initialize(boxes, mesh, padding);
+        return phase;
+    };
+    const auto reference = [&](bool include_initial_contacts,
+                               bool freeze_contact_per_iteration = false) {
+        auto positions = initial;
+        auto phase = phase_for(positions);
+        auto graph = build_elastic_adj(mesh, adjacency, static_cast<int>(rest.size()));
+        if (include_initial_contacts) {
+            const auto clique = [&](const std::array<int, 4>& nodes) {
+                for (int a = 0; a < 4; ++a) for (int b = a + 1; b < 4; ++b) {
+                    graph[nodes[a]].push_back(nodes[b]);
+                    graph[nodes[b]].push_back(nodes[a]);
+                }
+            };
+            for (const auto& pair : phase.cache().nt_pairs)
+                clique({pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]});
+            for (const auto& pair : phase.cache().ss_pairs)
+                clique({pair.v[0], pair.v[1], pair.v[2], pair.v[3]});
+        }
+        for (auto& row : graph) {
+            std::sort(row.begin(), row.end());
+            row.erase(std::unique(row.begin(), row.end()), row.end());
+        }
+        std::vector<std::vector<int>> colors;
+        greedy_color_conflict_graph(graph, colors);
+        EXPECT_EQ(colors.size(), include_initial_contacts ? 5u : 4u);
+        // Numerical pairs refresh each iteration; this initial graph does not.
+        for (int iteration = 0; iteration < params.max_global_iters; ++iteration) {
+            if (iteration > 0) phase = phase_for(positions);
+            const auto iteration_snapshot = positions;
+            ogc_detail::ContactCache contacts;
+            contacts.evaluate(phase, iteration_snapshot, false, params.exact_computation_fallback);
+            std::vector<double> bounds(positions.size());
+            for (std::size_t node = 0; node < positions.size(); ++node)
+                bounds[node] = std::min(1.0, contacts.isotropic_motion_bound(phase, node, 1));
+            for (const auto& color : colors) {
+                const auto snapshot = freeze_contact_per_iteration ? iteration_snapshot : positions;
+                if (!freeze_contact_per_iteration)
+                    contacts.evaluate(phase, snapshot, false, params.exact_computation_fallback);
+                std::vector<Vec3> steps(positions.size(), Vec3::Zero());
+                for (int node : color) {
+                    const Vec3 delta = -params.damping * ogc_detail::frozen_contact_vertex_delta(
+                        node, mesh, adjacency, {}, params, rest, positions, snapshot,
+                        phase, nullptr, nullptr, nullptr, &initial, contacts);
+                    const double factor = delta.norm() > 0 ? std::min(1.0, bounds[node] / delta.norm()) : 1;
+                    steps[node] = factor * delta;
+                }
+                for (int node : color) positions[node] += steps[node];
+            }
+        }
+        return positions;
+    };
+    const auto expected = reference(false), with_contact_colors = reference(true);
+    const auto iteration_contact = reference(false, true);
+    double coloring_effect = 0;
+    for (std::size_t node = 0; node < initial.size(); ++node)
+        coloring_effect = std::max(coloring_effect, (expected[node] - with_contact_colors[node]).norm());
+    ASSERT_GT(coloring_effect, 1e-8);
+    double refresh_effect = 0;
+    for (std::size_t node = 0; node < initial.size(); ++node)
+        refresh_effect = std::max(refresh_effect, (expected[node] - iteration_contact[node]).norm());
+    ASSERT_GT(refresh_effect, 1e-9);
+    auto actual = initial;
+    ASSERT_TRUE(global_gauss_seidel_solver_ogc(mesh, adjacency, {}, params,
+        actual, rest, velocity, "", &initial).converged);
+    for (std::size_t node = 0; node < actual.size(); ++node)
+        EXPECT_LE((actual[node] - expected[node]).norm(), 1e-13) << node;
+}
+
+TEST(OGCSolver, FarFalsePositiveCannotMoveBeyondTheDetectionEnvelope) {
+    OgcSolverFixture scene;
+    scene.initial = {Vec3(90, 90, .001), Vec3::Zero(),
+        Vec3(100, 0, 0), Vec3(0, 100, 0)};
+    scene.target = scene.initial;
+    scene.target[0] += Vec3(0, 2, 0);
+    scene.params.node_box_min = scene.params.node_box_max = .01;
+    scene.params.d_hat = .005;
+    std::vector<AABB> boxes;
+    for (const auto& position : scene.initial)
+        boxes.emplace_back(position - Vec3::Constant(.015),
+            position + Vec3::Constant(.015));
+    BroadPhase phase;
+    phase.initialize(boxes, scene.mesh, .005);
+    ASSERT_EQ(phase.cache().nt_pairs.size(), 1u);
+    ogc_detail::ContactCache contacts;
+    contacts.evaluate(phase, scene.initial, false, true);
+    ASSERT_GT(contacts.isotropic_motion_bound(phase, 0, .01), 1.0);
+
+    const auto actual = scene.solve();
+    EXPECT_LE((actual[0] - (scene.initial[0] + Vec3(0, .01, 0))).norm(), 1e-13);
+    for (int node = 1; node < 4; ++node) EXPECT_EQ(actual[node], scene.initial[node]);
+}
+
+TEST(OGCSolver, ColorDistanceRefreshDoesNotResetTheIterationMotionBudget) {
+    const std::vector<Vec3> initial{Vec3(0, 0, .1), Vec3(-1, -1, 0),
+        Vec3(2, -1, 0), Vec3(-1, 2, 0)};
+    RefMesh mesh;
+    mesh.tris = {1, 2, 3};
+    mesh.initialize(initial);
+    mesh.mass.assign(initial.size(), 1);
+    mesh.node_to_rb.assign(initial.size(), -1);
+    const auto adjacency = build_incident_triangle_map(mesh.tris);
+    auto target = initial;
+    target[0].z() -= .06;
+    target[2].z() += 1;
+    auto params = SimParams::zeros();
+    params.fixed_iters = true;
+    params.max_global_iters = 1;
+    params.damping = 1;
+    params.d_hat = .2;
+    // zeros() retains k_barrier=1. Disable its forces so only the inertial
+    // targets and iteration-start distance budget determine these updates.
+    params.k_barrier = 0;
+    params.node_box_min = params.node_box_max = 1;
+    auto actual = initial;
+    ASSERT_TRUE(global_gauss_seidel_solver_ogc(mesh, adjacency, {}, params,
+        actual, target, std::vector<Vec3>(initial.size(), Vec3::Zero()),
+        "", &initial).converged);
+    // The point moves in color zero, reducing the contact gap from .1 to .06.
+    // The later triangle vertex still owns its original .4*.1 displacement
+    // budget; a force-distance refresh must not replace it with .4*.06.
+    EXPECT_NEAR(actual[0].z(), .06, 1e-13);
+    EXPECT_NEAR(actual[2].z(), .04, 1e-13);
+    EXPECT_EQ(actual[1], initial[1]);
+    EXPECT_EQ(actual[3], initial[3]);
+}
+
+TEST(OGCSolver, AliasedFrictionHistoryMatchesAnImmutablePhysicalSnapshot) {
+    RefMesh mesh;
+    const std::vector<Vec3> initial{Vec3(0, 0, .1), Vec3(-1, -1, 0),
+        Vec3(2, -1, 0), Vec3(-1, 2, 0)};
+    mesh.tris = {1, 2, 3};
+    mesh.initialize(initial);
+    mesh.mass.assign(initial.size(), 1);
+    mesh.node_to_rb.assign(initial.size(), -1);
+    const auto adjacency = build_incident_triangle_map(mesh.tris);
+    auto target = initial;
+    target[0].x() += .05;
+    const std::vector<Vec3> velocity(initial.size(), Vec3::Zero());
+    auto params = SimParams::zeros();
+    params.fps = 20;
+    params.substeps = 1;
+    params.fixed_iters = true;
+    params.max_global_iters = 3;
+    params.damping = .5;
+    params.d_hat = .2;
+    params.k_barrier = 100;
+    params.friction_coefficient = .4;
+    params.node_box_min = params.node_box_max = 1;
+    auto immutable_history = initial, alias_history = initial;
+    ASSERT_TRUE(global_gauss_seidel_solver_ogc(mesh, adjacency, {}, params,
+        immutable_history, target, velocity, "", &initial).converged);
+    ASSERT_GT((immutable_history[0] - initial[0]).norm(), 1e-6);
+    ASSERT_TRUE(global_gauss_seidel_solver_ogc(mesh, adjacency, {}, params,
+        alias_history, target, velocity, "", &alias_history).converged);
+    for (std::size_t node = 0; node < initial.size(); ++node)
+        EXPECT_LE((alias_history[node] - immutable_history[node]).norm(), 1e-13) << node;
+}
+
+TEST(OGCSolver, PublicDriverStartsAtPreviousPositionsAndRetainsPhysicalInertialVelocity) {
+    struct RestoreOpenMP {
+        int threads=omp_get_max_threads();
+        ~RestoreOpenMP(){omp_set_num_threads(threads);}
+    } restore;
+    omp_set_num_threads(1);
+    const std::vector<Vec3> rest{Vec3::Zero(),Vec3::UnitX(),Vec3::UnitY()};
+    const Vec3 physical_velocity(1.2,-.7,.4);
+    RefMesh mesh;
+    mesh.tris={0,1,2};mesh.initialize(rest);
+    mesh.mass.assign(rest.size(),1);mesh.node_to_rb.assign(rest.size(),-1);
+    const auto adjacency=build_incident_triangle_map(mesh.tris);
+    std::vector<Pin> pins;
+    // Exercise each old predictor on its own, then a valid combination so its
+    // precedence cannot hide a predictor which still overrides the OGC start.
+    for(bool named_solver:{false,true})for(int predictor=0;predictor<6;++predictor) {
+        SCOPED_TRACE(::testing::Message()<<"named_solver="<<named_solver<<" predictor="<<predictor);
+        auto params=SimParams::zeros();
+        params.fps=20;params.substeps=2;
+        params.fixed_iters=true;params.max_global_iters=1;params.damping=.25;
+        params.k_barrier=0;params.node_box_min=params.node_box_max=1;
+        params.use_ogc=!named_solver;params.use_ogc_solver=named_solver;
+        params.use_ccd_guess=predictor==0||predictor==5;
+        params.use_verlet_guess=predictor==1||predictor==5;
+        params.use_translation_guess=predictor==2||predictor==5;
+        params.use_colored_ccd_guess=predictor==3||predictor==5;
+        params.use_colored_ccd_guess_level_based=predictor==4;
+        params.colored_ccd_guess_iters=1;
+        DeformedState actual;
+        actual.deformed_positions=rest;
+        actual.velocities.assign(rest.size(),physical_velocity);
+        auto expected=actual;
+        std::vector<std::vector<Vec3>> substep_positions;
+        BroadPhase manual_phase;
+        const double dt=params.dt();
+        for(int substep=0;substep<params.substeps;++substep) {
+            // The zero-velocity guess means zero displacement from x_n; the
+            // physical velocity must still appear in the separate xhat target.
+            auto positions=expected.deformed_positions;
+            std::vector<Vec3> target;
+            build_xhat(target,expected.deformed_positions,expected.velocities,dt);
+            ASSERT_GT((target[0]-positions[0]).norm(),0);
+            const auto result=named_solver
+                ? global_gauss_seidel_solver_ogc(mesh,adjacency,pins,params,
+                    positions,target,expected.velocities,"",&expected.deformed_positions)
+                : global_gauss_seidel_solver_basic(mesh,adjacency,pins,params,
+                    positions,target,expected.velocities,manual_phase,"",&expected.deformed_positions);
+            ASSERT_TRUE(result.converged);
+            update_velocity(expected.velocities,positions,expected.deformed_positions,dt);
+            expected.deformed_positions=positions;
+            substep_positions.push_back(positions);
+        }
+        // With only inertia, each one-sweep solve takes one damped Newton step.
+        // This oracle distinguishes preserving the real velocity from zeroing it.
+        const Vec3 displacement=dt*physical_velocity*params.damping*(1+params.damping);
+        for(std::size_t node=0;node<rest.size();++node) {
+            EXPECT_LE((expected.deformed_positions[node]-rest[node]-displacement).norm(),1e-13);
+            EXPECT_LE((expected.velocities[node]-params.damping*params.damping*physical_velocity).norm(),1e-12);
+        }
+        int callbacks=0;
+        const SubstepCallback callback=[&](int substep,const std::vector<Vec3>& positions) {
+            ASSERT_EQ(substep,callbacks++);
+            ASSERT_EQ(positions.size(),rest.size());
+            for(std::size_t node=0;node<positions.size();++node)
+                EXPECT_LE((positions[node]-substep_positions[substep][node]).norm(),1e-13);
+        };
+        BroadPhase phase;
+        const auto result=advance_one_frame(actual,mesh,adjacency,pins,params,
+            phase,1,nullptr,callback);
+        EXPECT_TRUE(result.converged);EXPECT_EQ(result.iterations,2);EXPECT_EQ(callbacks,2);
+        for(std::size_t node=0;node<rest.size();++node) {
+            EXPECT_LE((actual.deformed_positions[node]-expected.deformed_positions[node]).norm(),1e-13);
+            EXPECT_LE((actual.velocities[node]-expected.velocities[node]).norm(),1e-12);
+        }
     }
 }

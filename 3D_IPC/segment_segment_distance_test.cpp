@@ -3,8 +3,13 @@
 #include <gtest/gtest.h>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
+#include <limits>
+#include <new>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -408,4 +413,111 @@ TEST(SegmentSegmentDistance, RobustEndpointWeightsPrecedeParameterRounding) {
     EXPECT_NEAR(dr.distance, deficit * 2.0 / std::sqrt(5.0), deficit * 1.0e-14);
     const Vec3 expected(deficit * 4.0 / 5.0, -deficit * 2.0 / 5.0, 0.0);
     EXPECT_LE((dr.separation - expected).norm(), deficit * 1.0e-14);
+}
+
+namespace {
+
+std::uint64_t result_bits(double value) {
+    std::uint64_t result;
+    std::memcpy(&result, &value, sizeof(result));
+    return result;
+}
+
+struct ResultSnapshot {
+    std::array<double, 16> scalars{};
+    SegmentSegmentRegion region{};
+    SegmentSegmentRegion active_region{};
+    bool robust = false;
+    explicit ResultSnapshot(const SegmentSegmentDistanceResult& result)
+        : region(result.region), active_region(result.active_region),
+          robust(result.robust) {
+        for (int axis = 0; axis < 3; ++axis) {
+            scalars[axis] = result.closest_point_1[axis];
+            scalars[3 + axis] = result.closest_point_2[axis];
+            scalars[6 + axis] = result.separation[axis];
+        }
+        scalars[9] = result.s;
+        scalars[10] = result.t;
+        scalars[11] = result.distance;
+        for (int role = 0; role < 4; ++role) scalars[12 + role] = result.weights[role];
+    }
+    bool operator==(const ResultSnapshot& other) const {
+        return region == other.region && active_region == other.active_region
+            && robust == other.robust
+            && std::memcmp(scalars.data(), other.scalars.data(),
+                sizeof(scalars)) == 0;
+    }
+};
+
+// Collapsed segments force the exact finite-segment fallback, whose residual
+// equals the original finite vector exactly.
+SegmentSegmentDistanceResult* construct_result_at(
+    void* address, const Vec3& residual) {
+    const Vec3 origin = Vec3::Zero();
+    const Vec3 other = -residual;
+    return new (address) SegmentSegmentDistanceResult(
+        segment_segment_distance(origin, origin, other, other, 1e-12, true));
+}
+
+} // namespace
+
+TEST(SegmentSegmentDistance, ReturnedResultIsAddressPlacementInvariant) {
+    static_assert(alignof(SegmentSegmentDistanceResult) <= 8,
+        "placement offsets must satisfy result alignment");
+    constexpr std::array<std::size_t, 8> offsets{{0, 8, 16, 24, 32, 40, 48, 56}};
+    const double tiny = std::numeric_limits<double>::denorm_min();
+    const double minimum = std::numeric_limits<double>::min();
+    const Vec3 sensitive(0x1.e28f6320108f3p+10,
+        0x1.a6a22134e7c66p-1, 0x1.dd76710825405p-12);
+    const std::vector<Vec3> residuals{
+        sensitive, sensitive * 0x1p-600, sensitive * 0x1p+600,
+        Vec3(1.0, 2.0, 3.0), Vec3(-4.0, 5.0, -6.0),
+        Vec3(0x1p-1000, -0x1p+1000, 0x1p-500),
+        Vec3(tiny, 0.0, 0.0), Vec3(minimum, tiny, -minimum),
+        Vec3(0.1, -0.2, 0.3)
+    };
+    alignas(64) unsigned char memory[64 + sizeof(SegmentSegmentDistanceResult)];
+    for (const Vec3& residual : residuals) {
+        auto* first = construct_result_at(memory, residual);
+        ASSERT_TRUE(first->robust);
+        const ResultSnapshot expected(*first);
+        const double expected_distance = first->distance;
+        first->~SegmentSegmentDistanceResult();
+
+        const long double reference = std::hypot(std::hypot(
+            static_cast<long double>(residual[0]),
+            static_cast<long double>(residual[1])),
+            static_cast<long double>(residual[2]));
+        EXPECT_GT(expected_distance, 0.0);
+        const long double max_double = std::numeric_limits<double>::max();
+        const long double overflow_threshold =
+            std::ldexp(1.0L, 1024) - std::ldexp(1.0L, 970);
+        if (reference >= overflow_threshold) {
+            EXPECT_TRUE(std::isinf(expected_distance) && expected_distance > 0);
+        } else {
+            const double rounded_reference = reference > max_double
+                ? std::numeric_limits<double>::max()
+                : static_cast<double>(reference);
+            const auto result_pattern = result_bits(expected_distance);
+            const auto reference_pattern = result_bits(rounded_reference);
+            const auto ulps = result_pattern > reference_pattern
+                ? result_pattern - reference_pattern
+                : reference_pattern - result_pattern;
+            EXPECT_TRUE(ulps <= 4 || std::abs(
+                static_cast<long double>(expected_distance) - reference)
+                <= 8 * std::numeric_limits<double>::epsilon() * reference);
+        }
+
+        for (std::size_t offset : offsets) {
+            for (int repetition = 0; repetition < 2; ++repetition) {
+                auto* placed = construct_result_at(memory + offset, residual);
+                const ResultSnapshot observed(*placed);
+                const double distance = placed->distance;
+                placed->~SegmentSegmentDistanceResult();
+                EXPECT_TRUE(expected == observed)
+                    << "offset=" << offset << " repetition=" << repetition;
+                EXPECT_EQ(result_bits(distance), result_bits(expected_distance));
+            }
+        }
+    }
 }

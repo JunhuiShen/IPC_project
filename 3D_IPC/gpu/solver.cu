@@ -2,6 +2,7 @@
 #include "device_memory.h"
 #include "contact_pipeline.h"
 #include "linear_pipeline.h"
+#include "rigid_translation_proxy_owner.h"
 #include "rigid_pipeline.h"
 #include "adaptive_boxes.h"
 #include "global_guess.h"
@@ -9,6 +10,9 @@
 #include "level_schedule.cuh"
 #include "dat.h"
 #include "profile.h"
+#include "contact_execution.h"
+#include "contact_schedule.h"
+#include "two_rigid_color_queue_policy.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -264,7 +268,17 @@ struct GpuSolver::Impl {
     DeformableScene scene{};DeformableState state{};ElasticWorkspace elastic{};
     RigidScene rigid{};RigidState rigid_state{};RigidWorkspace rigid_work{};
     BroadPhaseTopology topology{};GpuBroadPhase broadphase;BroadPhaseView broad{};
-    GpuContactPipeline contacts;GpuLinearClipper clipper;
+    // Keep packet storage bounded while amortizing the large rigid scenes'
+    // gather/reduction launches. Direct pipeline and DAT capacities are unchanged.
+    GpuContactPipeline contacts{static_cast<std::size_t>(ExactContactSchedule::environment_integer(
+        "IPC_GPU_CONTACT_PACKET_CAPACITY",1<<18,1<<20))};
+    GpuLinearClipper clipper;
+    // validate(h) rejects duplicate/out-of-range CSR proxy nodes before these
+    // owners can launch; the DeviceArrays own disjoint storage. Reference
+    // values still retain device preflight checks.
+    GpuRigidRotationClipper rotation_clipper{true};
+    GpuRigidProxyPipeline proxy_pipeline{true};
+    const bool rotation_batch_enabled=contact_execution_option("IPC_GPU_RIGID_ROTATION_BATCH",true);
     GpuElasticWorklists elastic_worklists;
     GpuAdaptiveBoxes adaptive_boxes;
     GpuGlobalGuess global_guess;
@@ -289,6 +303,8 @@ struct GpuSolver::Impl {
     explicit Impl(const SceneDescription& h) {
         validate(h);const auto n=h.positions.size(),b=h.com.size();
         has_deformables=std::any_of(h.deformable.begin(),h.deformable.end(),[](unsigned char value){return value!=0;});
+        if(two_rigid_color_queue::eligible_validated_scene(h))
+            contacts.bind_validated_two_rigid_blocks(n);
         rigid_pins.upload(h.rigid_pins);
         rigid_pin_offsets.upload(h.rigid_pin_offsets.empty()?std::vector<std::size_t>(b+1,0):h.rigid_pin_offsets);
         pin_scene={b,h.rigid_pins.size(),rigid_pins.data(),rigid_pin_offsets.data()};
@@ -899,12 +915,25 @@ void GpuSolver::advance_substep(const StepParameters& p,const std::vector<Vector
                 const auto incidence=s.contacts.incidence();
                 {
                 GpuProfileScope ccd_profile("ccd");
+                // validate(h) established unique/disjoint rigid CSR ownership;
+                // these current DeviceArray views are bound for this one call.
+                rigid_proxy_owner::Storage proxy_owner;
+                proxy_owner.vertices=s.scene.nodes;proxy_owner.proxy_nodes=s.body_nodes.size();
+                proxy_owner.bodies=s.rigid.bodies;proxy_owner.blocks=static_cast<std::size_t>(s.topology.block_count);
+                proxy_owner.positions=s.state.positions;proxy_owner.com=s.rigid_state.com;
+                proxy_owner.proposed_com=s.rigid_work.proposed_com;proxy_owner.accepted_com=s.rigid_work.accepted_com;
+                proxy_owner.accepted=v3(s.accepted);proxy_owner.boxes=s.boxes.data();
+                proxy_owner.colors=s.broad.block_colors;proxy_owner.error=s.error.data();
+                proxy_owner.node_offsets=s.rigid.node_offsets;proxy_owner.nodes=s.rigid.nodes;
+                proxy_owner.node_body=s.rigid.node_body;proxy_owner.body_blocks=s.rigid.body_blocks;
+                proxy_owner.translate=s.rigid.translate;proxy_owner.rotate=s.rigid.rotate;
+                rigid_proxy_owner::Scope proxy_scope(&s.clipper,proxy_owner);
                 s.clipper.clip_rigid_translation_color(s.rigid,s.rigid_state,s.rigid_work,s.state,s.broad,
                     incidence.block_offsets,incidence.pair_indices,s.boxes.data(),s.broad.block_colors,color,v3(s.accepted),s.error.data(),true,nullptr,
                     p.exact_computation_fallback?LinearClipMode::Robust:LinearClipMode::OriginalSolver);
                 }
                 GpuProfileScope commit_profile("commit");
-                commit_rigid_translation_color(s.rigid,s.rigid_state,s.rigid_work,s.state,s.broad.block_colors,color,v3(s.accepted),s.error.data());
+                s.proxy_pipeline.commit_translation_color(s.rigid,s.rigid_state,s.rigid_work,s.state,s.broad.block_colors,color,v3(s.accepted),s.error.data());
             }
             if(stages&RigidOrientationColorStage) {
                 GpuProfileScope rigid_profile("rigid_orientation");
@@ -923,10 +952,13 @@ void GpuSolver::advance_substep(const StepParameters& p,const std::vector<Vector
                 // particle use_ccd switch.
                 {
                 GpuProfileScope ccd_profile("ccd");
+                if(s.rotation_batch_enabled)
+                    s.rotation_clipper.clip_color(s.rigid,s.rigid_state,s.rigid_work,s.state,s.broad,s.broad.block_colors,color,p.dt,.9,true,v3(s.accepted),s.error.data());
+                else
                 clip_rigid_rotation_color(s.rigid,s.rigid_state,s.rigid_work,s.state,s.broad,s.broad.block_colors,color,p.dt,.9,true,v3(s.accepted),s.error.data());
                 }
                 GpuProfileScope commit_profile("commit");
-                commit_rigid_rotation_color(s.rigid,s.rigid_state,s.rigid_work,s.state,s.broad.block_colors,color,v3(s.accepted),s.error.data());
+                s.proxy_pipeline.commit_rotation_color(s.rigid,s.rigid_state,s.rigid_work,s.state,s.broad.block_colors,color,v3(s.accepted),s.error.data());
             }
         }
         s.check_status();
@@ -936,7 +968,7 @@ void GpuSolver::advance_substep(const StepParameters& p,const std::vector<Vector
     GpuProfileScope finish_profile("finish");
     if(!p.jacobi_dat)s.adaptive_boxes.finish_solver(s.scene,s.state,s.error.data());
     finish_deformable_substep(s.scene,s.state,p.dt);
-    finish_rigid_substep(s.rigid,s.rigid_state,s.state,p.dt,s.error.data());
+    s.proxy_pipeline.finish_substep(s.rigid,s.rigid_state,s.state,p.dt,s.error.data());
     cuda_checked(cudaDeviceSynchronize());s.check_status();
     }
     }

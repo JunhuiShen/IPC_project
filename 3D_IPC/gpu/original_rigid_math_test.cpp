@@ -184,7 +184,7 @@ void represented_safety() {
         "nonfinite represented rigid endpoint was accepted");
 }
 
-void tiny_translation_cpu_rule() {
+void translation_noop_cpu_rule() {
     BroadPhase::Cache cache;cache.nt_pairs.push_back({0,{1,2,3}});
     const std::vector<int> nt{0},ss;
     for(bool angled:{false,true}) {
@@ -193,11 +193,11 @@ void tiny_translation_cpu_rule() {
             :std::vector<Vec3>{Vec3(.2,.2,5e-11),Vec3(0,0,0),Vec3(1,0,0),Vec3(0,1,0)};
         for(bool first:{true,false})for(bool toward:{false,true}) {
             RefMesh mesh;mesh.node_to_rb=first?std::vector<int>{0,-1,-1,-1}:std::vector<int>{-1,0,0,0};
-            for(double magnitude:{1e-15,std::nextafter(1e-14,0.0),1e-14,std::nextafter(1e-14,INFINITY),1e-9}) {
+            for(double magnitude:{1e-200,1e-15,std::nextafter(1e-14,0.0),1e-14,std::nextafter(1e-14,INFINITY),1e-9}) {
                 const double sign=(first!=toward)?1.0:-1.0;
                 const Vec3 delta(0,0,sign*magnitude);
                 const double raw[3]{delta[0],delta[1],delta[2]};
-                const bool tiny=original_rigid::skip_translation_toi(raw);
+                const bool noop=original_rigid::skip_translation_toi(raw);
                 double start[4][3],end[4][3];
                 for(int i=0;i<4;++i)for(int k=0;k<3;++k) {
                     start[i][k]=positions[i][k];
@@ -205,9 +205,10 @@ void tiny_translation_cpu_rule() {
                 }
                 const bool overlapping=original_rigid::translation_boxes_overlap(start,true,first,raw);
                 const double cpu=per_rigid_body_translation_safe_step(mesh,cache,nt,ss,positions,0,delta,.9,false,true);
-                require(tiny==(delta.squaredNorm()<1e-28),"GPU rigid tiny predicate differs from CPU cutoff");
-                const bool bypass=tiny||!overlapping;
-                close(cpu,bypass?1.0:0.0,"CPU original cutoff and swept-box rejection");
+                require(noop==(delta.array()==0.0).all(),"GPU rigid no-op predicate differs from CPU");
+                require(!noop,"nonzero rigid translation incorrectly skipped CCD");
+                const bool bypass=noop||!overlapping;
+                close(cpu,bypass?1.0:0.0,"CPU original no-op and swept-box rejection");
                 auto band=original_ccd::evaluate_fast(original_rigid::translation_query(start,true,first,raw));
                 if(band.status==original_ccd::Status::NeedsExact)
                     band=original_ccd::evaluate_exact<2048>(original_rigid::translation_query(start,true,first,raw));
@@ -217,13 +218,23 @@ void tiny_translation_cpu_rule() {
             }
         }
     }
+    const double zero[3]={0.,-0.,0.};
+    require(original_rigid::skip_translation_toi(zero),"signed zero rigid displacement was not a no-op");
+    // A step whose squared norm underflows still requires collision testing.
+    const std::vector<Vec3> near{Vec3(.2,.2,1e-201),Vec3(0,0,0),Vec3(1,0,0),Vec3(0,1,0)};
+    RefMesh mesh;mesh.node_to_rb={0,-1,-1,-1};
+    const Vec3 crossing(0,0,-2e-201);const double raw[3]={0,0,-2e-201};
+    require(crossing.squaredNorm()==0&&!original_rigid::skip_translation_toi(raw),
+        "underflowed squared norm bypassed rigid CCD");
+    close(per_rigid_body_translation_safe_step(mesh,cache,nt,ss,near,0,crossing,.9,false,true),
+        0,"subnormal-square crossing must reach the CPU positive-band check");
 }
 
 } // namespace
 
 int main() {
     try {
-        contacts();translation_ccd();represented_safety();tiny_translation_cpu_rule();
+        contacts();translation_ccd();represented_safety();translation_noop_cpu_rule();
         std::cout<<"HOST ARITHMETIC ONLY (not CUDA validation): original rigid contact/friction, "
             <<"translation CCD and rounded-path safety PASS; "<<comparisons
             <<" CPU components, max normalized error "<<worst_error<<'\n';

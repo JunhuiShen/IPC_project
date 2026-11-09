@@ -3601,3 +3601,124 @@ TEST(CCDTest, RotatingSegmentsNearAxisConservativeContactDoesNotStall) {
                                               (moved_b-c).norm(),(moved_b-d).norm()});
     EXPECT_LE(finite_endpoint_gap,1e-10);
 }
+
+namespace BikeChainTinyRotationRegression {
+// Derived from recorded density1200 frame12: roller46 and sprocket136.
+// SS uses edge15920--15950 and gear edge46646--46642 around the observed contact.
+// NT uses a material point on that roller edge at its recorded gear-face intersection, not an original mesh vertex.
+const Vec3 ss_hit_c=Vec3(-0.022573008134351657,0.15248596607058953,-0.0003603443725501124);
+const Vec4 ss_hit_q0=Vec4(0.6989202501022389,0.698514006933787,0.10729507414463803,0.10989282587423947);
+const Vec4 ss_hit_q1=Vec4(0.698920250102513,0.6985140069345952,0.10729507414106414,0.10989282587084852);
+const Vec3 ss_hit_a0=Vec3(-0.03432623776726235,0.14580377126826308,0.005803228197365766);
+const Vec3 ss_hit_a1=Vec3(-0.034280075760019596,0.14580372784414444,-0.006611105977434014);
+const Vec3 ss_hit_b0=Vec3(-0.035634664825106126,0.14854228454772803,-0.0059890292955250375);
+const Vec3 ss_hit_b1=Vec3(-0.03361540537050831,0.1444529947828284,-0.005989431420273089);
+const Vec3 ss_clear_c=Vec3(-0.022573008134351657,0.15248596607058953,-0.0003603443725501124);
+const Vec4 ss_clear_q0=Vec4(0.6989202501010054,0.6985140069301502,0.10729507416072065,0.10989282588949899);
+const Vec4 ss_clear_q1=Vec4(0.6989202501012794,0.6985140069309583,0.10729507415714674,0.10989282588610798);
+const Vec3 ss_clear_a0=Vec3(-0.034326237766958784,0.14580377126775826,0.005803228197397346);
+const Vec3 ss_clear_a1=Vec3(-0.034280075759723826,0.14580372784359671,-0.006611105977402462);
+const Vec3 ss_clear_b0=Vec3(-0.035634664825106126,0.14854228454772803,-0.0059890292955250375);
+const Vec3 ss_clear_b1=Vec3(-0.03361540537050831,0.1444529947828284,-0.005989431420273089);
+const Vec3 nt_hit_c=Vec3(-0.022573008134351657,0.15248596607058953,-0.0003603443725501124);
+const Vec4 nt_hit_q0=Vec4(0.7002179613419834,0.7029156600511528,0.0864812519223052,0.09014085940837088);
+const Vec4 nt_hit_q1=Vec4(0.7002179613408137,0.7029156600523003,0.08648125191896665,0.09014085941171282);
+const Vec3 nt_hit_p=Vec3(-0.03464444183271462,0.1465189255326117,-0.005989227408546729);
+const Vec3 nt_hit_t0=Vec3(-0.03361540537050831,0.1444529947828284,-0.005989431420273089);
+const Vec3 nt_hit_t1=Vec3(-0.05427949941653059,0.1408193977449995,-0.0059876274170962895);
+const Vec3 nt_hit_t2=Vec3(-0.035634664825106126,0.14854228454772803,-0.0059890292955250375);
+const Vec3 nt_clear_c=Vec3(-0.022573008134351657,0.15248596607058953,-0.0003603443725501124);
+const Vec4 nt_clear_q0=Vec4(0.7002179613472479,0.7029156600459887,0.08648125193732877,0.09014085939333219);
+const Vec4 nt_clear_q1=Vec4(0.7002179613460779,0.7029156600471363,0.08648125193399019,0.09014085939667411);
+const Vec3 nt_clear_p=Vec3(-0.03464444183294166,0.1465189255324994,-0.005989227407940772);
+const Vec3 nt_clear_t0=Vec3(-0.03361540537050831,0.1444529947828284,-0.005989431420273089);
+const Vec3 nt_clear_t1=Vec3(-0.05427949941653059,0.1408193977449995,-0.0059876274170962895);
+const Vec3 nt_clear_t2=Vec3(-0.035634664825106126,0.14854228454772803,-0.0059890292955250375);
+} // namespace BikeChainTinyRotationRegression
+
+TEST(SegmentSegmentRBRotationCCD, BikeChainNonzeroTinyArcIsNotNoMotion) {
+    using namespace BikeChainTinyRotationRegression;
+    double toi=-1;
+    ASSERT_TRUE(segment_segment_rb_rotation_ccd(ss_hit_a0,ss_hit_a1,ss_hit_c,
+        ss_hit_q1,ss_hit_q0,ss_hit_b0,ss_hit_b1,toi));
+    EXPECT_NEAR(toi,0.5,0.02);
+}
+TEST(PointTriangleRBRotationCCD, BikeChainMaterialPointTinyArcIsNotNoMotion) {
+    using namespace BikeChainTinyRotationRegression;
+    double toi=-1;
+    ASSERT_TRUE(point_triangle_rb_rotation_ccd(nt_hit_p,nt_hit_c,
+        nt_hit_q1,nt_hit_q0,nt_hit_t0,nt_hit_t1,nt_hit_t2,toi));
+    EXPECT_NEAR(toi,0.5,0.02);
+}
+TEST(SegmentSegmentRBRotationCCD, BikeChainNearbyTinyClearArcAndZeroMotionStayClear) {
+    using namespace BikeChainTinyRotationRegression;
+    double toi=-1;
+    EXPECT_FALSE(segment_segment_rb_rotation_ccd(ss_clear_a0,ss_clear_a1,ss_clear_c,
+        ss_clear_q1,ss_clear_q0,ss_clear_b0,ss_clear_b1,toi));
+    EXPECT_FALSE(segment_segment_rb_rotation_ccd(ss_hit_a0,ss_hit_a1,ss_hit_c,
+        ss_hit_q0,ss_hit_q0,ss_hit_b0,ss_hit_b1,toi));
+}
+TEST(PointTriangleRBRotationCCD, BikeChainNearbyTinyClearArcAndZeroMotionStayClear) {
+    using namespace BikeChainTinyRotationRegression;
+    double toi=-1;
+    EXPECT_FALSE(point_triangle_rb_rotation_ccd(nt_clear_p,nt_clear_c,
+        nt_clear_q1,nt_clear_q0,nt_clear_t0,nt_clear_t1,nt_clear_t2,toi));
+    EXPECT_FALSE(point_triangle_rb_rotation_ccd(nt_hit_p,nt_hit_c,
+        nt_hit_q0,nt_hit_q0,nt_hit_t0,nt_hit_t1,nt_hit_t2,toi));
+}
+
+
+namespace BikeChainRecordedSSRegression {
+// Exact predicate for this saved edge/face witness, independent of CCD roots.
+using R=boost::multiprecision::cpp_rational;
+using P=std::array<R,3>;
+P point(const Vec3&x){return{{R(x[0]),R(x[1]),R(x[2])}};}
+P sub(const P&a,const P&b){return{{a[0]-b[0],a[1]-b[1],a[2]-b[2]}};}
+P add(const P&a,const P&b){return{{a[0]+b[0],a[1]+b[1],a[2]+b[2]}};}
+P mul(const P&a,const R&s){return{{a[0]*s,a[1]*s,a[2]*s}};}
+R dot(const P&a,const P&b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+P cross(const P&a,const P&b){return{{a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]}};}
+bool crossed(const Vec3&p0,const Vec3&p1,const std::array<Vec3,3>&triangle){
+ const P p=point(p0),q=point(p1),a=point(triangle[0]),b=point(triangle[1]),c=point(triangle[2]);
+ const P u=sub(b,a),v=sub(c,a),n=cross(u,v);const R s=dot(n,sub(p,a)),t=dot(n,sub(q,a));if(!(s*t<0))return false;
+ const P w=sub(add(p,mul(sub(q,p),R(s/(s-t)))),a);
+ const R uu=dot(u,u),uv=dot(u,v),vv=dot(v,v),d=uu*vv-uv*uv;if(d<=0)return false;
+ const R wu=dot(w,u),wv=dot(w,v),b1=(wu*vv-wv*uv)/d,b2=(wv*uu-wu*uv)/d;
+ return b1>0&&b2>0&&b1+b2<1;
+}
+}
+TEST(SegmentSegmentRBRotationCCD, BikeChainRecordedReverseEventRetainsTheInitialGap) {
+    using namespace BikeChainRecordedSSRegression;
+    // Actual density1200, frame12/substep2, body136 rotation, GS sweep22.
+    // The SS incidence pair is roller46[15920,15950] / gear136[46642,46646].
+    const Vec3 center=Vec3(-1.0793345338647018e-07,3.24688157109915e-07,-7.518020671077173e-09);
+    const Vec4 current=Vec4(0.99677576855287,1.5638011633497215e-06,-4.813209462434291e-05,-0.0802375529704869);
+    const Vec4 target=Vec4(0.9967749656533847,-7.5765811935759e-05,0.0001838359681842562,-0.08024729472432318);
+    const Vec4 identity(1,0,0,0);
+    const Vec4 reverse=quaternion_normalize(quaternion_multiply(quaternion_normalize(current),quaternion_conjugate(quaternion_normalize(target))));
+    const Vec3 roller0=Vec3(-0.03591578728067617,0.14582980665902343,0.005964185840313538), roller1=Vec3(-0.03586882560427668,0.14580429178608922,-0.006450119115204872);
+    const std::array<Vec3,3> gear_before{{Vec3(-0.03501735815561194,0.14411895397009009,-0.0060040227343561865),Vec3(-0.055645140936421054,0.14028458478200895,-0.006005999562342936),Vec3(-0.03707628765344354,0.1481884144950179,-0.006004239559088224)}};
+    const std::array<Vec3,3> gear_recorded_after{{Vec3(-0.035017358236621665,0.1441189539271534,-0.006004023292521601),Vec3(-0.055645141206173386,0.14028458574140754,-0.006005974654015897),Vec3(-0.037076287536854595,0.14818841455212187,-0.006004238869664736)}};
+
+    EXPECT_FALSE(crossed(roller0,roller1,gear_before));
+    EXPECT_TRUE(crossed(roller0,roller1,gear_recorded_after));
+    const auto edge_at=[&](double weight){
+        const Vec4 q=interpolate_orientation_full_arc(identity,reverse,weight);
+        return std::array<Vec3,2>{{center+quaternion_rotate(q,roller0-center),
+                                  center+quaternion_rotate(q,roller1-center)}};
+    };
+    constexpr double recorded_allowed_weight=0.0024861203916886447;
+
+    const auto old_edge=edge_at(recorded_allowed_weight);
+    EXPECT_TRUE(crossed(old_edge[0],old_edge[1],gear_before));
+    double toi=-1;
+    ASSERT_TRUE(segment_segment_rb_rotation_ccd(roller0,roller1,center,
+        reverse,identity,gear_before[0],gear_before[2],toi));
+    // 80-digit Rodrigues reference: first event0.0018278419274764910426,
+    // finite segment parameters0.964073179537 and0.414368065501.
+    constexpr double reference=0.001827841927476491;
+    EXPECT_NEAR(toi,reference,5e-8);
+    EXPECT_LT(0.9*toi,reference);
+    const auto safe_edge=edge_at(0.9*toi);
+    EXPECT_FALSE(crossed(safe_edge[0],safe_edge[1],gear_before));
+}

@@ -172,8 +172,11 @@ struct IPCArgs3D : ArgParser {
 
     // Example 18: prescribed soft-pin motor speed about world Z (degrees/second).
     double bike_chain_drive_speed = -25.0;
+    double bike_chain_motor_ramp_duration = 0.0; // Smooth motor startup from rest (s); zero retains legacy startup.
     double bike_chain_motor_radius = 0.03; // Radius of the four moving motor pins (m).
     double bike_chain_shaft_span = 0.05; // Distance from each gear center to its shaft support points (m).
+    double bike_chain_tension_distance = 0.0; // World +X displacement of the large gear's soft mount (m).
+    double bike_chain_tension_duration = 1.0; // Smooth ramp duration, followed by a fixed target (s).
 
     // Example 19: rigid-point motor about the spool's world-X axle.
     double anchor_drive_speed = -100.0; // degrees/second; zero holds the spool fixed
@@ -338,8 +341,11 @@ struct IPCArgs3D : ArgParser {
         add_int("chain_net_ball_subdiv", chain_net_ball_subdiv, 2, "Example 16: subdivision level for each falling sphere (0-7; subject to the 30,000-vertex scene limit)");
 
         add_double("bike_chain_drive_speed", bike_chain_drive_speed, -25.0, "Example 18: soft-pin motor target speed about world z in degrees/second");
+        add_double("bike_chain_motor_ramp_duration", bike_chain_motor_ramp_duration, 0.0, "Example 18: nonnegative C2 motor speed ramp duration in seconds; zero keeps immediate constant-speed startup");
         add_double("bike_chain_motor_radius", bike_chain_motor_radius, 0.03, "Example 18: positive radius of the four moving soft-pin motor points in metres");
         add_double("bike_chain_shaft_span", bike_chain_shaft_span, 0.05, "Example 18: positive axial distance from each gear center to either stationary shaft support point in metres");
+        add_double("bike_chain_tension_distance", bike_chain_tension_distance, 0.0, "Example 18: nonnegative world +X displacement of the large gear's soft mount in metres; zero preserves fixed centers");
+        add_double("bike_chain_tension_duration", bike_chain_tension_duration, 1.0, "Example 18: positive smooth soft-mount translation duration in seconds when tensioning is enabled");
         add_double("anchor_drive_speed", anchor_drive_speed, -100.0, "Example 19: spool motor speed about world x in degrees/second; zero fixes the spool");
         add_double("anchor_motor_radius", anchor_motor_radius, 2.0, "Example 19: positive radial lever arm of the spool's virtual motor points in metres");
         add_double("anchor_shaft_span", anchor_shaft_span, 3.0, "Example 19: positive axial distance of the motor points from the spool center in metres");
@@ -471,7 +477,7 @@ struct IPCArgs3D : ArgParser {
             const auto preset = [&](const char* flag, auto& field, auto value) {
                 if (!supplied(flag)) field = value;
             };
-            preset("--num_frames", num_frames, 180);
+            preset("--num_frames", num_frames, 120);
             preset("--fps", fps, 30.0);
             preset("--gy", gy, 0.0);
             preset("--substeps", substeps, 19);
@@ -482,13 +488,18 @@ struct IPCArgs3D : ArgParser {
             preset("--use_parallel", use_parallel, true);
             preset("--use_ccd", use_ccd, true);
             preset("--exact_computation_fallback", exact_computation_fallback, true);
-            preset("--rigid_density", rigid_density, 1000.0);
+            // Density-900 configuration checked through all 120 frames.
+            // Pins and barriers are 90% of the density-1000 reference values.
+            preset("--rigid_density", rigid_density, 900.0);
             preset("--bike_chain_drive_speed", bike_chain_drive_speed, -25.0);
+            preset("--bike_chain_motor_ramp_duration", bike_chain_motor_ramp_duration, 0.0);
             preset("--bike_chain_motor_radius", bike_chain_motor_radius, 0.03);
             preset("--bike_chain_shaft_span", bike_chain_shaft_span, 0.05);
+            preset("--bike_chain_tension_distance", bike_chain_tension_distance, 0.0);
+            preset("--bike_chain_tension_duration", bike_chain_tension_duration, 1.0);
             preset("--d_hat", d_hat, 3.0e-5);
-            preset("--k_barrier", k_barrier, 4000.0);
-            preset("--kpin", kpin, 1.0e4);
+            preset("--k_barrier", k_barrier, 3600.0);
+            preset("--kpin", kpin, 9.0e3);
             preset("--k_sdf", k_sdf, 0.0);
             preset("--friction_coefficient", friction_coefficient, 0.0);
             preset("--node_box_min", node_box_min, 2.0e-5);
@@ -523,9 +534,9 @@ struct IPCArgs3D : ArgParser {
             const auto preset = [&](const char* flag, auto& field, auto value) {
                 if (!supplied(flag)) field = value;
             };
-            // Visually settled 240-frame arch at 30 FPS, with original release
+            // Visually settled 200-frame arch at 30 FPS, with original release
             // gaps and the common density. Explicit CLI settings take precedence.
-            preset("--num_frames", num_frames, 240);
+            preset("--num_frames", num_frames, 200);
             preset("--substeps", substeps, 1);
             preset("--max_substep_iters", max_substep_iters, 10);
             preset("--fixed_iters", fixed_iters, true);
@@ -555,6 +566,9 @@ struct IPCArgs3D : ArgParser {
     }
 
     SimParams to_sim_params() const {
+        if (!std::isfinite(bike_chain_motor_ramp_duration)
+            || bike_chain_motor_ramp_duration < 0.0)
+            throw std::invalid_argument("bike_chain_motor_ramp_duration must be finite and nonnegative");
         if (!std::isfinite(friction_coefficient)
             || friction_coefficient < 0.0) {
             throw std::invalid_argument(

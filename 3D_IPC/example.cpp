@@ -3030,10 +3030,18 @@ void build_bike_chain_example(
         throw std::invalid_argument("Example 18 requires a finite nonnegative barrier distance");
     if (!std::isfinite(args.bike_chain_drive_speed))
         throw std::invalid_argument("Example 18 requires a finite motor target speed");
+    if (!std::isfinite(args.bike_chain_motor_ramp_duration)
+        || args.bike_chain_motor_ramp_duration < 0.0)
+        throw std::invalid_argument("Example 18 requires a finite nonnegative motor ramp duration");
     if (!std::isfinite(args.bike_chain_motor_radius) || args.bike_chain_motor_radius <= 0.0)
         throw std::invalid_argument("Example 18 requires a finite positive motor pin radius");
     if (!std::isfinite(args.bike_chain_shaft_span) || args.bike_chain_shaft_span <= 0.0)
         throw std::invalid_argument("Example 18 requires a finite positive shaft support span");
+    if (!std::isfinite(args.bike_chain_tension_distance) || args.bike_chain_tension_distance < 0.0)
+        throw std::invalid_argument("Example 18 requires a finite nonnegative tension distance");
+    if (!std::isfinite(args.bike_chain_tension_duration)
+        || (args.bike_chain_tension_distance > 0.0 && args.bike_chain_tension_duration <= 0.0))
+        throw std::invalid_argument("Example 18 requires a finite positive tension duration when tensioning is enabled");
     namespace fs = std::filesystem;
     std::vector<fs::path> candidates;
     if (!args.datadir.empty()) {
@@ -3112,9 +3120,13 @@ void build_bike_chain_example(
         // so the fixture's authored model-origin transforms remain exact.
         const Vec3 center = pose.position + quaternion_rotate(orientation,
             0.5 * pose.scale * (lower + upper));
-        const auto mode = pose.role == "chain" ? RigidBodyUpdateMode::TranslationAndOrientation
+        const bool translates = pose.role == "chain"
+            || (pose.role == "drive" && args.bike_chain_tension_distance > 0.0);
+        const auto mode = translates ? RigidBodyUpdateMode::TranslationAndOrientation
             : RigidBodyUpdateMode::OrientationOnly;
-        const double omega_z = pose.role == "drive" ? args.bike_chain_drive_speed : pose.omega_z;
+        const double omega_z = pose.role == "drive"
+            ? (args.bike_chain_motor_ramp_duration > 0.0 ? 0.0 : args.bike_chain_drive_speed)
+            : pose.omega_z;
         const Vec3 omega(0.0, 0.0, omega_z * kPi / 180.0);
         const std::size_t first_triangle = ref_mesh.tris.size() / 3;
         const int body = append_normalized_obj_rigid_body(mesh, state, ref_mesh, center,
@@ -3127,7 +3139,8 @@ void build_bike_chain_example(
 
     // Four rotating material-point springs drive the large sprocket. A pair
     // of stationary virtual points on each shaft restrains tilt without
-    // opposing world-z rotation. Centers use the existing OrientationOnly mode.
+    // opposing world-z rotation. The optional large-gear tensioner moves its
+    // six spring targets together; the COM remains a solved coordinate.
     params.rigid_pins.clear();
     for (int k = 0; k < 4; ++k) {
         const double angle = 0.5 * kPi * k;
@@ -3141,6 +3154,18 @@ void build_bike_chain_example(
             const Vec3 local(0.0, 0.0, z);
             const Vec3 target = state.x_coms[body] + quaternion_rotate(state.orientations[body], local);
             params.rigid_pins.push_back({body, local, target, state.x_coms[body], 0.0});
+        }
+    }
+    // Prescribed targets remain finite-energy springs. The ramp changes no
+    // solved coordinate mode and composes with the optional soft mount below.
+    for (auto& pin : params.rigid_pins)
+        if (pin.body == 136)
+            pin.angular_velocity_ramp_duration = args.bike_chain_motor_ramp_duration;
+    if (args.bike_chain_tension_distance > 0.0) {
+        for (auto& pin : params.rigid_pins) if (pin.body == 136) {
+            pin.target_translation = Vec3(args.bike_chain_tension_distance, 0.0, 0.0);
+            pin.translation_start_time = 0.0;
+            pin.translation_duration = args.bike_chain_tension_duration;
         }
     }
     ref_mesh.build_deformable_nodes();

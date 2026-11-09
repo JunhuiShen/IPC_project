@@ -1,4 +1,5 @@
 #pragma once
+#include "contact_record_index.cuh"
 
 // Include INSIDE contact_pipeline.cu's anonymous namespace, after
 // Work, error(), code() and the serial reducer helpers have been declared.
@@ -80,10 +81,12 @@ __global__ void reduce_deformable_warp(BroadPhaseView broad,DeformableScene scen
         else if(lane<12)value=elastic.systems[node].hessian[lane-3];
         const double normal_scale=params.dt*params.dt*params.k_barrier;
         for(auto incident=work.offsets[block];incident<work.offsets[block+1];++incident) {
-            const int pair=work.incidents[incident].contact;
+            const int pair=contact_incident_pair(work,incident);
+            const int slot=contact_record_slot(work,pair);
             int roles=0;
-            if(lane==0&&work.active[pair]) {
-                const auto& out=work.outputs[pair];
+            if(lane==0&&slot<0){error(elastic.error,20);roles=-1;}
+            else if(lane==0&&work.active[slot]) {
+                const auto& out=work.outputs[slot];
                 if(out.status!=ContactStatus::Ok) {
                     error(elastic.error,code(out.status));roles=-1;
                 } else if(out.active) {
@@ -97,10 +100,10 @@ __global__ void reduce_deformable_warp(BroadPhaseView broad,DeformableScene scen
                 // Repeated occurrences of the same node, if present, retain
                 // the scalar reducer's role0,role1,role2,role3 order.
                 for(int role=0;role<4;++role)if(roles&(1<<role))
-                    value=contact_warp_add_component(value,work.outputs[pair],role,int(lane),normal_scale);
+                    value=contact_warp_add_component(value,work.outputs[slot],role,int(lane),normal_scale);
             }
         }
-        if(!scene.solid[node]||!work.surface_query||work.surface_query[node]) {
+        if(!contact_pending(work)&&(!scene.solid[node]||!work.surface_query||work.surface_query[node])) {
             if(lane==0) {
                 // The existing SDF routine runs once, with unchanged inputs
                 // and arithmetic. Only its final component additions spread
@@ -129,7 +132,7 @@ __global__ void reduce_deformable_warp(BroadPhaseView broad,DeformableScene scen
             }
         }
         // Commit nothing for this node if ANY of its12 components is invalid.
-        if(__ballot_sync(mask,lane<12&&!contact_detail::finite(value))) {
+        if(!contact_pending(work)&&__ballot_sync(mask,lane<12&&!contact_detail::finite(value))) {
             if(lane==0)error(elastic.error,26);
             return;
         }
@@ -181,18 +184,20 @@ __global__ void reduce_deformable_compact_warp(BroadPhaseView broad,DeformableSc
         else if(lane<12)value=elastic.systems[node].hessian[lane-3];
         const double normal_scale=params.dt*params.dt*params.k_barrier;
         for(auto incident=work.offsets[block];incident<work.offsets[block+1];++incident) {
-            const int pair=work.incidents[incident].contact;
+            const int pair=contact_incident_pair(work,incident);
+            const int slot=contact_record_slot(work,pair);
             // Bits0..3 retain role order; bit4 selects the compact payload.
             int selected=0;
-            if(lane==0&&work.active[pair]) {
-                const auto& compact=work.compact[pair];
+            if(lane==0&&slot<0){error(elastic.error,20);selected=-1;}
+            else if(lane==0&&work.active[slot]) {
+                const auto& compact=work.compact[slot];
                 if(compact.status!=ContactStatus::Ok) {
                     error(elastic.error,code(compact.status));selected=-1;
                 } else if(compact.active) {
                     if(compact.role>=0) {
                         if(broad.contacts[pair].vertices[compact.role]==node)selected=16|(1<<compact.role);
                     } else {
-                        const auto& out=work.outputs[pair];
+                        const auto& out=work.outputs[slot];
                         if(out.status!=ContactStatus::Ok) {
                             error(elastic.error,code(out.status));selected=-1;
                         } else if(out.active) {
@@ -206,12 +211,12 @@ __global__ void reduce_deformable_compact_warp(BroadPhaseView broad,DeformableSc
             if(selected<0)return;
             if(lane<12) {
                 if(selected&16)
-                    value=contact_warp_add_compact_component(value,work.compact[pair],int(lane),normal_scale);
+                    value=contact_warp_add_compact_component(value,work.compact[slot],int(lane),normal_scale);
                 else for(int role=0;role<4;++role)if(selected&(1<<role))
-                    value=contact_warp_add_component(value,work.outputs[pair],role,int(lane),normal_scale);
+                    value=contact_warp_add_component(value,work.outputs[slot],role,int(lane),normal_scale);
             }
         }
-        if(!scene.solid[node]||!work.surface_query||work.surface_query[node]) {
+        if(!contact_pending(work)&&(!scene.solid[node]||!work.surface_query||work.surface_query[node])) {
             if(lane==0) {
                 const auto out=evaluate_sdf_contact(sdf.colliders,sdf.count,
                     state.positions[node],state.previous[node],sdf.parameters);
@@ -237,7 +242,7 @@ __global__ void reduce_deformable_compact_warp(BroadPhaseView broad,DeformableSc
             }
         }
         // All12 components must pass before any component is committed.
-        if(__ballot_sync(mask,lane<12&&!contact_detail::finite(value))) {
+        if(!contact_pending(work)&&__ballot_sync(mask,lane<12&&!contact_detail::finite(value))) {
             if(lane==0)error(elastic.error,26);
             return;
         }

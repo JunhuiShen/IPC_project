@@ -283,7 +283,7 @@ static SegmentSegmentDistanceResult segment_segment_distance_exact(
     }
     // Do not square a tiny residual or floor its norm. A true intersection
     // remains zero, while a representable positive gap remains positive.
-    out.distance = out.separation.stableNorm();
+    out.distance = stable_norm3(out.separation);
     out.region = determinant == 0
         ? SegmentSegmentRegion::ParallelSegments
         : exact_region(best_s, best_t);

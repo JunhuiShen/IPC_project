@@ -1,16 +1,34 @@
 #include "contact_pipeline_test.h"
+#include "rigid_compact_index.cuh"
 #include "barrier_energy.h"
 #include "friction_energy.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <limits>
+
+static_assert(ipc_gpu::solver::rigid_compact::absolute_ids_fit(0),"empty compact incident range");
+static_assert(ipc_gpu::solver::rigid_compact::absolute_ids_fit(
+    std::size_t(std::numeric_limits<std::uint32_t>::max())),"UINT32_MAX exclusive end must fit");
+#if SIZE_MAX > UINT32_MAX
+static_assert(ipc_gpu::solver::rigid_compact::absolute_ids_fit(
+    std::size_t(std::numeric_limits<std::uint32_t>::max())+1),"UINT32_MAX is a valid absolute incident ID");
+static_assert(!ipc_gpu::solver::rigid_compact::absolute_ids_fit(
+    std::size_t(std::numeric_limits<std::uint32_t>::max())+2),"overflowing absolute incident ID must fall back");
+#endif
 
 void gpu_contact_original_frozen_test_gpu(const double (*)[3],const double (*)[3],
     bool,ipc_gpu::Derivatives*,int&,int&);
 void gpu_dat_numerical_helpers_test_gpu();
+void gpu_contact_original_frozen_tiled_test_gpu(const double (*)[3],const double (*)[3],const ipc_gpu::Derivatives*);
+void gpu_contact_packet_memory_test_gpu(const GpuPipelineTestInput*,std::size_t);
+void gpu_rigid_compact_reduce_test_gpu(const GpuPipelineTestInput*,std::size_t);
+void gpu_contact_color_local_packets_test_gpu(const GpuPipelineTestInput*,std::size_t);
+void gpu_color_compact_joint_test_gpu(const GpuPipelineTestInput*,std::size_t);
 
 namespace {
 std::size_t components=0;double maximum_error=0;
@@ -147,6 +165,7 @@ void original_frozen_retry() {
         compare_system(actual[role],dt*dt*37*normal.first+friction.first,
             dt*dt*37*normal.second+friction.second,"Original frozen EE role "+std::to_string(role));
     }
+    gpu_contact_original_frozen_tiled_test_gpu(positions,history,actual);
     gpu_contact_original_frozen_test_gpu(positions,history,false,actual,error,ordinary_status);
     require(error==21,"Original color sweep unexpectedly enabled the DAT emergency retry");
     const double crossing[4][3]={{0,0,0},{1,0,0},{.5,-1,0},{.5,1,0}};
@@ -158,6 +177,17 @@ void original_frozen_retry() {
 }
 int main() {
     try {
+        struct RestoreCompact {
+            bool present=false;std::string value;
+            RestoreCompact() {
+                if(const char* old=std::getenv("IPC_GPU_RIGID_COMPACT_REDUCE")){present=true;value=old;}
+                if(setenv("IPC_GPU_RIGID_COMPACT_REDUCE","0",1)!=0)throw std::runtime_error("cannot pin legacy compact route OFF");
+            }
+            ~RestoreCompact() {
+                if(present)setenv("IPC_GPU_RIGID_COMPACT_REDUCE",value.c_str(),1);
+                else unsetenv("IPC_GPU_RIGID_COMPACT_REDUCE");
+            }
+        } restore_compact;
         gpu_dat_numerical_helpers_test_gpu();
         original_frozen_retry();
         for(int kind=0;kind<6;++kind) {
@@ -174,6 +204,11 @@ int main() {
                 for(const auto& system:out.rigid_omega_after)compare_system(system,Vec3::Zero(),Mat33::Zero(),"error refreshed orientation guard");
             }
         }
+        const GpuPipelineTestInput memory_inputs[]={fixture(0),fixture(1),fixture(5)};
+        gpu_contact_packet_memory_test_gpu(memory_inputs,3);
+        gpu_rigid_compact_reduce_test_gpu(memory_inputs,3);
+        gpu_contact_color_local_packets_test_gpu(memory_inputs,3);
+        gpu_color_compact_joint_test_gpu(memory_inputs,3);
         std::cout<<"GPU contact pipeline: 6 mixed tests, Original frozen EE exact retry/GS and true-contact controls, "<<components<<" reference components, max scaled error "<<maximum_error<<" (CUDA)\n";
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

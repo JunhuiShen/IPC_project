@@ -137,12 +137,14 @@ IPC_RCCD_HD inline bool point_triangle(V3 x, V3 com, const double* target,
     s = 0.0;
     double qr[4]; relative(target,current,qr);
     const V3 v = vec(qr+1); const double norm = v.norm();
-    if (norm < eps) return false;
+    // The CPU rigid_rotation_epsilon is zero: a small nonzero rotation can
+    // still reach contact and must not be treated as an unchanged pose.
+    if (norm == 0.0) return false;
     const V3 n = v/norm, dx = x-com;
     const V3 parallel = n*dx.dot(n), perpendicular = dx-parallel;
     if (perpendicular.norm() < eps) return false;
     const double dtheta = 2.0*atan2(norm,qr[0]);
-    if (fabs(dtheta) < eps) return false;
+    if (dtheta == 0.0) return false;
     const V3 crossed = n.cross(perpendicular), e1 = b-a, e2 = c-a;
     const double a11 = e1.dot(e1), a12 = e1.dot(e2), a22 = e2.dot(e2);
     const V3 normal = e1.cross(e2); const double normal_length = normal.norm();
@@ -185,20 +187,152 @@ IPC_RCCD_HD inline bool point_triangle(V3 x, V3 com, const double* target,
     s = best; return true;
 }
 
+// Closed-form counterpart of ccd_rotation_family_detail. CUDA long double has
+// no extra precision, so all bounds explicitly use binary64 roundoff. Only the
+// legacy near-zero radial-polynomial branch enters this finite-primitive repair.
+struct FamilyRoots { double value[2]{}; int count=0; };
+IPC_RCCD_HD inline FamilyRoots family_roots(double a,double b,double c) {
+    FamilyRoots result;
+    if(a==0) {
+        if(b!=0)result.value[result.count++]=-c/b;
+        return result;
+    }
+    const double bb=b*b,ac4=4*a*c;
+    double disc=fma(-4*a,c,bb);
+    const double error=32*DBL_EPSILON*(fabs(bb)+fabs(ac4));
+    if(disc < -error)return result;
+    disc=maximum(0,disc);
+    const double q=-.5*(b+copysign(sqrt(disc),b));
+    if(q==0)result.value[result.count++]=-b/(2*a);
+    else {result.value[result.count++]=q/a;result.value[result.count++]=c/q;}
+    return result;
+}
+struct FamilyRange {
+    V3 p,v,q,e,n;
+    double roundoff,arc,direction,best=INFINITY;
+    IPC_RCCD_HD void consider(double w,bool zero_event=false) {
+        const double parameter_error=64*DBL_EPSILON;
+        if(!finite(w)||w < -parameter_error||w > 1+parameter_error)return;
+        w=clamp(w,0,1);
+        const V3 a=p+v*w,b=q+e*w;
+        const double ar2=a.squaredNorm(),br2=b.squaredNorm();
+        const double a_error=roundoff*(p.norm()+fabs(w)*v.norm());
+        const double b_error=roundoff*(q.norm()+fabs(w)*e.norm());
+        const double radial_error=roundoff*(ar2+br2)
+            +2*(sqrt(ar2)*a_error+sqrt(br2)*b_error)
+            +a_error*a_error+b_error*b_error;
+        if(fabs(br2-ar2)>radial_error)return;
+        if(ar2==0&&br2==0){best=0;return;}
+        if(ar2==0||br2==0)return;
+        const double x=a.dot(b),y=direction*n.dot(a.cross(b));
+        double angle;
+        if(zero_event&&x>0&&fabs(y)<=roundoff*sqrt(ar2*br2))angle=0;
+        else {angle=atan2(y,x);if(angle<0)angle+=two_pi;}
+        const double fraction=angle/arc;
+        if(fraction<=1+1e-10)best=minimum(best,clamp(fraction,0,1));
+    }
+    IPC_RCCD_HD void roots(double a,double b,double c,bool zero_event=false) {
+        const auto candidates=family_roots(a,b,c);
+        for(int i=0;i<candidates.count;++i)consider(candidates.value[i],zero_event);
+    }
+};
+IPC_RCCD_HD inline V3 family_moving_at(V3 p,V3 delta,double h0,double h2,
+    double en,double dh,double u,int endpoint) {
+    if(endpoint==0)return p;
+    if(endpoint==1)return p+delta;
+    return p+delta*clamp((h2+u*en-h0)/dh,0,1);
+}
+IPC_RCCD_HD inline bool family_range(V3 moving0,V3 moving_delta,V3 stationary0,
+    V3 stationary_delta,V3 axis,double h0,double h1,double h2,double en,
+    double coordinate_scale,double dtheta,double lo,double hi,double& s,int endpoint=-1) {
+    const double dh=h1-h0;
+    const V3 p=family_moving_at(moving0,moving_delta,h0,h2,en,dh,lo,endpoint);
+    const V3 v=family_moving_at(moving0,moving_delta,h0,h2,en,dh,hi,endpoint)-p;
+    const V3 q=stationary0+stationary_delta*lo,e=stationary_delta*(hi-lo);
+    const double scale=maximum(maximum(p.norm(),(p+v).norm()),maximum(q.norm(),(q+e).norm()));
+    if(scale==0){s=0;return true;}
+    FamilyRange range{p/scale,v/scale,q/scale,e/scale,axis/axis.norm(),
+        DBL_EPSILON*(128+64*coordinate_scale/scale),fabs(dtheta),dtheta<0 ? -1.0 : 1.0};
+    const double fa=range.e.squaredNorm()-range.v.squaredNorm();
+    const double fb=2*(range.q.dot(range.e)-range.p.dot(range.v));
+    const double fc=range.q.squaredNorm()-range.p.squaredNorm();
+    const double ea=range.roundoff*(range.e.squaredNorm()+range.v.squaredNorm());
+    const double eb=2*range.roundoff*(range.q.norm()*range.e.norm()+range.p.norm()*range.v.norm());
+    const double ec=range.roundoff*(range.q.squaredNorm()+range.p.squaredNorm());
+    const bool family=fabs(fa)<=ea&&fabs(fb)<=eb&&fabs(fc)<=ec;
+    range.consider(0);range.consider(1);
+    if(!family) {
+        // A small nonzero polynomial has only actual roots. In particular,
+        // constant unequal radii do not become a swept-surface family.
+        range.roots(fa,fb,fc);
+    } else {
+        const double kp=range.n.dot(range.p.cross(range.v));
+        const double kq=range.n.dot(range.q.cross(range.e));
+        range.roots(kq*range.v.squaredNorm()-kp*range.e.squaredNorm(),
+            2*(kq*range.p.dot(range.v)-kp*range.q.dot(range.e)),
+            kq*range.p.squaredNorm()-kp*range.q.squaredNorm());
+        // Interior angle-zero and radial-axis events split wrapped branches.
+        range.roots(range.n.dot(range.v.cross(range.e)),
+            range.n.dot(range.p.cross(range.e)+range.v.cross(range.q)),
+            range.n.dot(range.p.cross(range.q)),true);
+        range.roots(range.v.squaredNorm(),2*range.p.dot(range.v),range.p.squaredNorm(),true);
+        range.roots(range.e.squaredNorm(),2*range.q.dot(range.e),range.q.squaredNorm(),true);
+    }
+    if(!finite(range.best))return false;
+    s=range.best;return true;
+}
+IPC_RCCD_HD inline bool swept_family(V3 moving0,V3 moving_delta,V3 stationary0,
+    V3 stationary_delta,V3 axis,double h0,double h1,double h2,double en,
+    double coordinate_scale,double dtheta,double& s) {
+    double lo=0,hi=1,best=INFINITY,candidate=0;
+    const double lower=minimum(h0,h1),upper=maximum(h0,h1);
+    bool nominal=true,found=false;
+    if(en==0)nominal=h2>=lower&&h2<=upper;
+    else {
+        double enter=(lower-h2)/en,exit=(upper-h2)/en;
+        if(enter>exit){const double saved=enter;enter=exit;exit=saved;}
+        lo=maximum(lo,enter);hi=minimum(hi,exit);nominal=lo<=hi;
+    }
+    if(nominal&&family_range(moving0,moving_delta,stationary0,stationary_delta,
+            axis,h0,h1,h2,en,coordinate_scale,dtheta,lo,hi,candidate)) {
+        found=true;best=candidate;
+    }
+    // Roundoff seams use the actual finite moving endpoint. They never extend
+    // the moving edge or substitute an extrapolated infinite-line contact.
+    const double height_error=64*DBL_EPSILON*(coordinate_scale
+        +maximum(maximum(fabs(h0),fabs(h1)),maximum(fabs(h2),fabs(h2+en))));
+    for(int endpoint=0;endpoint<2;++endpoint) {
+        const double height=endpoint==0 ? h0 : h1;
+        double begin=0,end=1;
+        if(en==0) {if(fabs(h2-height)>height_error)continue;}
+        else {
+            begin=(height-height_error-h2)/en;end=(height+height_error-h2)/en;
+            if(begin>end){const double saved=begin;begin=end;end=saved;}
+            begin=maximum(begin,0);end=minimum(end,1);if(begin>end)continue;
+        }
+        if(family_range(moving0,moving_delta,stationary0,stationary_delta,
+                axis,h0,h1,h2,en,coordinate_scale,dtheta,begin,end,candidate,endpoint)) {
+            found=true;best=minimum(best,candidate);
+        }
+    }
+    if(found)s=best;
+    return found;
+}
+
 IPC_RCCD_HD inline bool segment_segment(V3 x0, V3 x1, V3 com,
     const double* target, const double* current, V3 x2, V3 x3, double& s) {
     constexpr double eps = 1e-10;
     s = 0.0;
     double qr[4]; relative(target,current,qr);
     const V3 v = vec(qr+1); const double norm = v.norm();
-    if (norm < eps) return false;
+    if (norm == 0.0) return false;
     const V3 n = v/norm;
     const double h0 = (x0-com).dot(n), h1 = (x1-com).dot(n);
     const V3 p0 = (x0-com)-n*h0, p1 = (x1-com)-n*h1;
     const double r0 = p0.norm(), r1 = p1.norm();
     if (maximum(r0,r1) < eps) return false;
     const double dtheta = 2.0*atan2(norm,qr[0]);
-    if (fabs(dtheta) < eps) return false;
+    if (dtheta == 0.0) return false;
     const V3 ref = r0 >= r1 ? p0 : p1, dp = p1-p0;
     const V3 q2 = x2-com, q3 = x3-com, e = q3-q2;
     const double h2 = q2.dot(n), en = e.dot(n);
@@ -212,6 +346,12 @@ IPC_RCCD_HD inline bool segment_segment(V3 x0, V3 x1, V3 com,
         const double A = ep.squaredNorm()-beta*beta*dp.squaredNorm();
         const double B = 2.0*(q2p.dot(ep)-beta*p0prime.dot(dp));
         const double C = q2p.squaredNorm()-p0prime.squaredNorm();
+        if(fabs(A)<eps&&fabs(B)<eps&&fabs(C)<eps) {
+            const V3 points[5]={x0,x1,x2,x3,com};double coordinate_scale=0;
+            for(int i=0;i<5;++i)coordinate_scale=maximum(coordinate_scale,
+                maximum(maximum(fabs(points[i].x),fabs(points[i].y)),fabs(points[i].z)));
+            return swept_family(p0,dp,q2p,ep,n,h0,h1,h2,en,coordinate_scale,dtheta,s);
+        }
         const double disc = B*B-4.0*A*C;
         if (disc >= 0.0) for (int sign = -1; sign <= 1; sign += 2) {
             double u;
@@ -228,9 +368,10 @@ IPC_RCCD_HD inline bool segment_segment(V3 x0, V3 x1, V3 com,
             t = clamp(t,0,1);
             const V3 moving = p0+dp*t;
             if (moving.norm() < eps) continue;
-            const V3 star = x2*(1.0-u)+x3*u;
-            const V3 star_p = (star-com)-n*(star-com).dot(n);
-            double angle = atan2(star_p.dot(e2),star_p.dot(e1))-atan2(moving.dot(e2),moving.dot(e1));
+            const V3 star_p = q2p+ep*u;
+            // Recover the relative angle directly, as on the CPU. Subtracting
+            // two world-scale angles loses near-start impacts.
+            double angle = atan2(n.dot(moving.cross(star_p)),moving.dot(star_p));
             while (dtheta > 0 && angle < -eps) angle += two_pi;
             while (dtheta < 0 && angle > eps) angle -= two_pi;
             double candidate = angle/dtheta;

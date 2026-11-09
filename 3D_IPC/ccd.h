@@ -148,10 +148,28 @@ double segment_segment_general_ccd(const Vec3& x1, const Vec3& dx1, const Vec3& 
 
 ///////////////////// Rigid Body CCD ////////////////////////////
 
+namespace rigid_pose_publication {
+struct RotationAcceptance {
+    Vec4 orientation;
+    Vec3 angular_velocity;
+    bool preserve_proxy;
+};
+
+// Tiny CCD fractions can leave less clearance than canonical pose projection
+// rounds away. Reject that iteration as a unit; do not normalize/reconstruct
+// the existing orientation or already safely translated particle proxy.
+// A free small rotation (alpha == 1) is unaffected. The discarded accepted
+// correction is at most one nanoradian, independent of the proposed full arc.
+RotationAcceptance accept_rotation(const Vec4& stored_orientation,
+    const Vec3& stored_omega, const Vec4& ccd_start, const Vec4& target,
+    double alpha, const Vec4& previous_substep_orientation, double dt);
+} // namespace rigid_pose_publication
+
 namespace ccd_detail {
-inline constexpr double rigid_rotation_epsilon = 1.0e-10;
-// The common first rejection in both rotation CCD kernels, evaluated using
-// their raw quaternion product (without an additional normalization).
+inline constexpr double rigid_rotation_epsilon = 0.0;
+// The shared rejection skips only a computed zero relative-vector norm.
+// No positive computed norm is ignored: a tiny arc can cross a smaller gap.
+// Evaluate the raw quaternion product without additional normalization.
 bool negligible_rigid_rotation(const Vec4& q_new, const Vec4& q_n);
 }
 

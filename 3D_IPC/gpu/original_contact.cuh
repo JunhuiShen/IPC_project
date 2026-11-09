@@ -1437,10 +1437,63 @@ IPC_ORIGINAL_CONTACT_HD inline void segment_segment_hessian(
 // input is never converted into an inactive contact. A zero-stiffness packet
 // (k_barrier == 0) is the CPU legacy no-force case and is inactive even when
 // the gap is exactly zero, matching initialize_contact_barrier_data.
-IPC_ORIGINAL_CONTACT_HD inline ContactOutput evaluate_contact_original(
-        const ContactInput& in) {
+namespace original_contact_storage {
+// Value storage only. All geometry and all twelve gradient checks are retained.
+struct SelfZeroOutput {
+    double distance=0.0,weights[4]{},normal[3]{},barrier_gradient[4][3]{},selected_hessian[9]{};
+    ContactStatus status=ContactStatus::Ok;
+    unsigned active=0;
+};
+static_assert(sizeof(SelfZeroOutput)==240);
+template<class Output> struct Access;
+template<> struct Access<ContactOutput> {
+    static constexpr bool stores_friction=true;
+    IPC_ORIGINAL_CONTACT_HD static bool valid(const ContactInput&,int){return true;}
+    IPC_ORIGINAL_CONTACT_HD static bool put_hessian(ContactOutput& out,int i,int j,int k,double value,int) {
+        out.barrier_hessian[i][j][k]=value;return true;
+    }
+    IPC_ORIGINAL_CONTACT_HD static double hessian(const ContactOutput& out,int i,int j,int k,int) {
+        return out.barrier_hessian[i][j][k];
+    }
+    IPC_ORIGINAL_CONTACT_HD static void put_friction_gradient(ContactOutput& out,int k,double value) {
+        out.friction_relative_gradient[k]=value;
+    }
+    IPC_ORIGINAL_CONTACT_HD static void put_friction_hessian(ContactOutput& out,int k,double value) {
+        out.friction_relative_hessian[k]=value;
+    }
+    IPC_ORIGINAL_CONTACT_HD static double friction_gradient(const ContactOutput& out,int k) {
+        return out.friction_relative_gradient[k];
+    }
+    IPC_ORIGINAL_CONTACT_HD static double friction_hessian(const ContactOutput& out,int k) {
+        return out.friction_relative_hessian[k];
+    }
+};
+template<> struct Access<SelfZeroOutput> {
+    static constexpr bool stores_friction=false;
+    IPC_ORIGINAL_CONTACT_HD static bool valid(const ContactInput& in,int role) {
+        return role>=0&&role<4&&in.hessian_blocks==(1u<<(5*role))&&in.friction==0.0;
+    }
+    IPC_ORIGINAL_CONTACT_HD static bool put_hessian(SelfZeroOutput& out,int i,int j,int k,double value,int role) {
+        if(role<0||role>=4||i!=role||j!=role||k<0||k>=9)return false;
+        out.selected_hessian[k]=value;return true;
+    }
+    IPC_ORIGINAL_CONTACT_HD static double hessian(const SelfZeroOutput& out,int i,int j,int k,int role) {
+        return i==role&&j==role?out.selected_hessian[k]:0.0;
+    }
+    IPC_ORIGINAL_CONTACT_HD static double friction_gradient(const SelfZeroOutput&,int){return 0.0;}
+    IPC_ORIGINAL_CONTACT_HD static double friction_hessian(const SelfZeroOutput&,int){return 0.0;}
+};
+} // namespace original_contact_storage
+
+template<class Output>
+IPC_ORIGINAL_CONTACT_HD inline Output evaluate_contact_original_storage(
+        const ContactInput& in,int selected_role) {
     using namespace original_contact_detail;
-    ContactOutput out{};
+    using Storage=original_contact_storage::Access<Output>;
+    Output out{};
+    if(!Storage::valid(in,selected_role)) {
+        out.status=ContactStatus::InvalidInput;return out;
+    }
 
     for (int i = 0; i < 4; ++i) {
         for (int k = 0; k < 3; ++k) {
@@ -1597,13 +1650,16 @@ IPC_ORIGINAL_CONTACT_HD inline ContactOutput evaluate_contact_original(
                 }
                 for (int k = 0; k < 3; ++k) {
                     for (int l = 0; l < 3; ++l) {
-                        out.barrier_hessian[i][j][3 * k + l] = block[k][l];
+                        if(!Storage::put_hessian(out,i,j,3*k+l,block[k][l],selected_role)) {
+                            out.status=ContactStatus::InvalidInput;out.active=0;return out;
+                        }
                     }
                 }
             }
         }
     }
 
+    if constexpr(Storage::stores_friction) {
     // Frozen friction uses the CPU false-path geometry convention: the
     // tangent frame normal is the rounded closest-point separation direction,
     // not the face barrier normal. In particular the CPU's robust face-normal
@@ -1675,24 +1731,24 @@ IPC_ORIGINAL_CONTACT_HD inline ContactOutput evaluate_contact_original(
             return out;
         }
         for (int k = 0; k < 3; ++k) {
-            out.friction_relative_gradient[k] = scale * tangential[k];
+            Storage::put_friction_gradient(out,k,scale * tangential[k]);
             for (int l = 0; l < 3; ++l) {
-                out.friction_relative_hessian[3 * k + l] =
-                        scale * projector[k][l];
+                Storage::put_friction_hessian(out,3*k+l,scale * projector[k][l]);
             }
         }
+    }
     }
 
     for (int i = 0; i < 4; ++i) {
         for (int k = 0; k < 3; ++k) {
             if (!finite(out.barrier_gradient[i][k])
-                    || !finite(out.friction_relative_gradient[k])) {
+                    || !finite(Storage::friction_gradient(out,k))) {
                 out.status = ContactStatus::NonFiniteDerivative;
             }
             for (int j = 0; j < 4; ++j) {
                 for (int l = 0; l < 3; ++l) {
-                    if (!finite(out.barrier_hessian[i][j][3 * k + l])
-                            || !finite(out.friction_relative_hessian[3 * k + l])) {
+                    if (!finite(Storage::hessian(out,i,j,3*k+l,selected_role))
+                            || !finite(Storage::friction_hessian(out,3*k+l))) {
                         out.status = ContactStatus::NonFiniteDerivative;
                     }
                 }
@@ -1705,6 +1761,17 @@ IPC_ORIGINAL_CONTACT_HD inline ContactOutput evaluate_contact_original(
     }
     return out;
 }
+
+// Public full evaluator and its ABI remain unchanged.
+IPC_ORIGINAL_CONTACT_HD inline ContactOutput evaluate_contact_original(const ContactInput& in) {
+    return evaluate_contact_original_storage<ContactOutput>(in,-1);
+}
+// Private sole-self/signed-zero-friction route. Invalid eligibility fails closed.
+IPC_ORIGINAL_CONTACT_HD inline original_contact_storage::SelfZeroOutput evaluate_contact_original_self_zero(
+        const ContactInput& in,int role) {
+    return evaluate_contact_original_storage<original_contact_storage::SelfZeroOutput>(in,role);
+}
+
 
 }  // namespace solver
 }  // namespace ipc_gpu

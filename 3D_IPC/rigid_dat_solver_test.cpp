@@ -9,9 +9,11 @@
 #include <omp.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <vector>
 
@@ -148,6 +150,197 @@ RigidDATScene approaching_scene(bool deformable_vertex) {
         Vec3(0, 0, -.5)}, Vec3(0, 0, 6), Vec3::Zero(),
         RigidBodyUpdateMode::TranslationOnly);
     scene.mesh.tris = {first, first + 1, first + 2};
+    scene.finish();
+    return scene;
+}
+
+// Independent floating-point distance oracles. They deliberately avoid the
+// solver's broad-phase helpers so candidate coverage is audited from first
+// principles; distances are not exact arithmetic.
+double point_triangle_gap(const Vec3& p, const Vec3& a, const Vec3& b,
+    const Vec3& c) {
+    const Vec3 ab = b - a, ac = c - a, ap = p - a;
+    const double d1 = ab.dot(ap), d2 = ac.dot(ap);
+    if (d1 <= 0 && d2 <= 0) return ap.norm();
+    const Vec3 bp = p - b;
+    const double d3 = ab.dot(bp), d4 = ac.dot(bp);
+    if (d3 >= 0 && d4 <= d3) return bp.norm();
+    const double vc = d1 * d4 - d3 * d2;
+    if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+        const double v = d1 / (d1 - d3);
+        return (p - (a + v * ab)).norm();
+    }
+    const Vec3 cp = p - c;
+    const double d5 = ab.dot(cp), d6 = ac.dot(cp);
+    if (d6 >= 0 && d5 <= d6) return cp.norm();
+    const double vb = d5 * d2 - d1 * d6;
+    if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+        const double w = d2 / (d2 - d6);
+        return (p - (a + w * ac)).norm();
+    }
+    const double va = d3 * d6 - d5 * d4;
+    if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+        const double w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return (p - (b + w * (c - b))).norm();
+    }
+    const double denom = 1.0 / (va + vb + vc);
+    const double v = vb * denom, w = vc * denom;
+    return (p - (a + v * ab + w * ac)).norm();
+}
+
+double segment_segment_gap(const Vec3& p1, const Vec3& q1, const Vec3& p2,
+    const Vec3& q2) {
+    const Vec3 d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2;
+    const double a = d1.squaredNorm(), e = d2.squaredNorm();
+    const double f = d2.dot(r), c = d1.dot(r), b = d1.dot(d2);
+    if (a <= 1e-30 && e <= 1e-30) return (p1 - p2).norm();
+    double s = 0, t = 0;
+    if (a <= 1e-30) {
+        t = std::clamp(f / e, 0.0, 1.0);
+    } else {
+        const double denom = a * e - b * b;
+        t = denom > 1e-30 ? std::clamp((a * f - b * c) / denom, 0.0, 1.0) : 0.0;
+        s = (b * t - c) / a;
+        if (s < 0) {
+            s = 0;
+            t = std::clamp(f / e, 0.0, 1.0);
+        } else if (s > 1) {
+            s = 1;
+            t = std::clamp((f + b) / e, 0.0, 1.0);
+        }
+    }
+    return ((p1 + s * d1) - (p2 + t * d2)).norm();
+}
+
+struct CandidateKeys {
+    std::set<std::array<int, 4>> nt, ss;
+};
+
+std::array<int, 4> candidate_key(const NodeTrianglePair& pair) {
+    std::array<int, 3> tri{pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
+    std::sort(tri.begin(), tri.end());
+    return {pair.node, tri[0], tri[1], tri[2]};
+}
+
+std::array<int, 4> candidate_key(const SegmentSegmentPair& pair) {
+    std::array<int, 2> first{std::min(pair.v[0], pair.v[1]),
+        std::max(pair.v[0], pair.v[1])};
+    std::array<int, 2> second{std::min(pair.v[2], pair.v[3]),
+        std::max(pair.v[2], pair.v[3])};
+    if (second < first) std::swap(first, second);
+    return {first[0], first[1], second[0], second[1]};
+}
+
+CandidateKeys candidate_keys(const BroadPhase& phase) {
+    CandidateKeys keys;
+    for (const auto& pair : phase.cache().nt_pairs)
+        keys.nt.insert(candidate_key(pair));
+    for (const auto& pair : phase.cache().ss_pairs)
+        keys.ss.insert(candidate_key(pair));
+    return keys;
+}
+
+// Independent fresh candidate build at the supplied positions. It uses the
+// public box-initialization path, not the solver's rebuild lambda.
+BroadPhase fresh_candidates(const RefMesh& mesh,
+    const std::vector<Vec3>& positions, double half_width) {
+    std::vector<AABB> boxes;
+    boxes.reserve(positions.size());
+    for (const auto& position : positions)
+        boxes.emplace_back(position - Vec3::Constant(half_width),
+            position + Vec3::Constant(half_width));
+    BroadPhase phase;
+    phase.initialize(boxes, mesh, 0.0,
+        BroadPhase::InitializationMode::GeneralSolver);
+    return phase;
+}
+
+// One small deformable triangle above a rigid triangle. Every cloth vertex and
+// edge starts at the supplied height; both bodies translate along z, so the
+// final gap is gap - dt*(rigid_speed - cloth_speed) when nothing truncates.
+RigidDATScene two_triangle_probe_scene(double gap, double cloth_speed,
+    double rigid_speed) {
+    RigidDATScene scene;
+    scene.params.dat_query_radius = 1;
+    scene.params.dat_node_box_padding = 1.2;
+    scene.params.d_hat = .2;
+    scene.params.k_barrier = 1;
+    scene.params.fixed_iters = true;
+    scene.params.max_global_iters = 1;
+    scene.state.deformed_positions = {Vec3(-.2, -1, gap),
+        Vec3(.2, -1, gap), Vec3(0, -.6, gap)};
+    scene.state.velocities.assign(3, Vec3(0, 0, cloth_speed));
+    scene.mesh.mass.assign(3, 1.0);
+    scene.mesh.node_to_rb.assign(3, -1);
+    const int first = 3;
+    scene.add_body({Vec3(-1, -1, 0), Vec3(1, -1, 0), Vec3(0, 1, 0),
+        Vec3(3, 3, -.5)}, Vec3(0, 0, rigid_speed), Vec3::Zero(),
+        RigidBodyUpdateMode::TranslationOnly);
+    scene.mesh.tris = {0, 1, 2, first, first + 1, first + 2};
+    scene.finish();
+    return scene;
+}
+
+double probe_shared_radius(const SimParams& params) {
+    return std::max(params.dat_query_radius * params.dat_node_box_padding,
+        params.d_hat);
+}
+
+// Every fresh-oracle pair inside the query radius or the barrier distance (a
+// candidate cache must cover the union of both) must be a candidate in the
+// supplied cache. Geometry is always evaluated at the supplied positions.
+void expect_current_pairs_covered(const SimParams& params,
+    const std::vector<Vec3>& positions, const BroadPhase& fresh,
+    const BroadPhase& cached) {
+    const CandidateKeys keys = candidate_keys(cached);
+    int nt_query = 0, ss_query = 0, nt_dhat = 0, ss_dhat = 0;
+    for (const auto& pair : fresh.cache().nt_pairs) {
+        const double gap = point_triangle_gap(positions[pair.node],
+            positions[pair.tri_v[0]], positions[pair.tri_v[1]],
+            positions[pair.tri_v[2]]);
+        const bool in_dhat = gap < params.d_hat;
+        const bool in_query = gap < params.dat_query_radius;
+        if (in_dhat) ++nt_dhat;
+        if (in_query) ++nt_query;
+        if (!in_query && !in_dhat) continue;
+        EXPECT_TRUE(keys.nt.count(candidate_key(pair)))
+            << "missing node " << pair.node << " / triangle pair, gap " << gap;
+    }
+    for (const auto& pair : fresh.cache().ss_pairs) {
+        const double gap = segment_segment_gap(positions[pair.v[0]],
+            positions[pair.v[1]], positions[pair.v[2]], positions[pair.v[3]]);
+        const bool in_dhat = gap < params.d_hat;
+        const bool in_query = gap < params.dat_query_radius;
+        if (in_dhat) ++ss_dhat;
+        if (in_query) ++ss_query;
+        if (!in_query && !in_dhat) continue;
+        EXPECT_TRUE(keys.ss.count(candidate_key(pair)))
+            << "missing edge-edge pair, gap " << gap;
+    }
+    EXPECT_GT(nt_query, 0);
+    EXPECT_GT(ss_query, 0);
+    EXPECT_GT(nt_dhat, 0);
+    EXPECT_GT(ss_dhat, 0);
+}
+
+std::vector<int> deformable_node_ids(const RefMesh& mesh) {
+    std::vector<int> nodes;
+    for (std::size_t node = 0; node < mesh.node_to_rb.size(); ++node)
+        if (mesh.node_to_rb[node] < 0) nodes.push_back(static_cast<int>(node));
+    return nodes;
+}
+
+// Cloth-only scene: solve_general_dat delegates this to solve_deformable_dat.
+RigidDATScene deformable_cloth_scene() {
+    RigidDATScene scene;
+    scene.params.dat_query_radius = 1;
+    scene.params.d_hat = 0;
+    scene.state.deformed_positions = {Vec3(-.2, -1, 1), Vec3(.2, -1, 1),
+        Vec3(0, -.6, 1)};
+    scene.state.velocities.assign(3, Vec3(0, 0, -1));
+    scene.mesh.mass.assign(3, 1.0);
+    scene.mesh.node_to_rb.assign(3, -1);
+    scene.mesh.tris = {0, 1, 2};
     scene.finish();
     return scene;
 }
@@ -908,4 +1101,220 @@ TEST(RigidDATSolver, LaterParticleColorsRefreshContactsAfterTheRigidColorMoves) 
         expect_vectors(scene.state.deformed_positions, physical_history, 0);
         expect_rigidity(scene.mesh, actual.positions);
     }
+}
+
+TEST(RigidDATSolver, ReturnedLastIterationCacheCoversCurrentContactNeighborhood) {
+    const double gap = .5;
+    auto scene = two_triangle_probe_scene(gap, -1.75, 1.75);
+    const auto initial = scene.state.deformed_positions;
+    SolveState iterate(scene);
+    BroadPhase phase;
+    const auto result = solve(scene, iterate, phase);
+    ASSERT_TRUE(result.converged);
+    ASSERT_EQ(result.iterations, 1);
+    ASSERT_FALSE(scene.params.write_substeps);
+
+    // The accepted motion is untruncated: the gap closes from .5 to .15,
+    // a relative approach well below the initial separation. The
+    // resulting barrier-active pair is therefore outside a d_hat-sized box at
+    // its pre-move position, yet inside the initial shared-radius envelope.
+    const double dt = scene.params.dt();
+    const Vec3 cloth_step = dt * Vec3(0, 0, -1.75);
+    const Vec3 rigid_step = dt * Vec3(0, 0, 1.75);
+    for (int node = 0; node < 3; ++node)
+        EXPECT_LE((iterate.positions[node] - initial[node] - cloth_step).norm(),
+            3e-13) << node;
+    for (int node : scene.mesh.rb_nodes[0])
+        EXPECT_LE((iterate.positions[node] - initial[node] - rigid_step).norm(),
+            3e-13) << node;
+    EXPECT_NEAR((iterate.positions[0]
+        - iterate.positions[scene.mesh.rb_nodes[0][0]]).z(), .15, 1e-12);
+
+    const double half_width = probe_shared_radius(scene.params);
+    const BroadPhase fresh = fresh_candidates(scene.mesh, iterate.positions,
+        half_width);
+    expect_current_pairs_covered(scene.params, iterate.positions, fresh, phase);
+
+    // The returned cache is the certified pre-move envelope, not a final
+    // rebuild: a rebuild would recenter every box on the accepted pose.
+    ASSERT_EQ(phase.cache().node_boxes.size(), iterate.positions.size());
+    for (std::size_t node = 0; node < iterate.positions.size(); ++node) {
+        EXPECT_LE((phase.cache().node_boxes[node].centroid()
+            - initial[node]).norm(), 1e-12) << node;
+        EXPECT_LE((phase.cache().node_boxes[node].extent()
+            - Vec3::Constant(2 * half_width)).norm(), 1e-12) << node;
+    }
+    EXPECT_GT((phase.cache().node_boxes[0].centroid()
+        - iterate.positions[0]).norm(), 1e-3);
+
+    // Derivatives read live geometry, so the stale pair set must reproduce the
+    // fresh oracle's current-position contact residual.
+    const auto deformable = deformable_node_ids(scene.mesh);
+    ASSERT_EQ(deformable.size(), 3u);
+    const double returned_residual = compute_global_deformable_residual(
+        scene.mesh, scene.adjacency, scene.pins, scene.params,
+        iterate.positions, iterate.target, phase, deformable);
+    const double fresh_residual = compute_global_deformable_residual(
+        scene.mesh, scene.adjacency, scene.pins, scene.params,
+        iterate.positions, iterate.target, fresh, deformable);
+    ASSERT_GT(fresh_residual, 1e-8);
+    EXPECT_LE(std::abs(returned_residual - fresh_residual),
+        1e-12 * std::max(1.0, fresh_residual));
+
+    // Sensitivity control: d_hat-sized boxes at the pre-move pose miss the
+    // newly active pair, so their current-geometry derivatives vanish. This is
+    // exactly the gap the shared-radius envelope must cover.
+    const BroadPhase stale_small = fresh_candidates(scene.mesh, initial,
+        scene.params.d_hat);
+    const double stale_residual = compute_global_deformable_residual(
+        scene.mesh, scene.adjacency, scene.pins, scene.params,
+        iterate.positions, iterate.target, stale_small, deformable);
+    EXPECT_LE(std::abs(stale_residual), 1e-14);
+    EXPECT_GT(std::abs(returned_residual - stale_residual), 1e-8);
+}
+
+TEST(RigidDATSolver, ZeroIterationCallStillReturnsAValidatedCurrentCache) {
+    auto scene = two_triangle_probe_scene(.1, 0, 0);
+    scene.params.max_global_iters = 0;
+    SolveState iterate(scene);
+    const auto unchanged = iterate;
+    BroadPhase phase;
+    const auto result = solve(scene, iterate, phase);
+    ASSERT_TRUE(result.converged);
+    EXPECT_EQ(result.iterations, 0);
+    expect_unchanged(iterate, unchanged);
+
+    // No filter pass ran, so the footer must still initialize (and thereby
+    // validate) the current-position candidate cache.
+    const double half_width = probe_shared_radius(scene.params);
+    const BroadPhase fresh = fresh_candidates(scene.mesh, iterate.positions,
+        half_width);
+    expect_current_pairs_covered(scene.params, iterate.positions, fresh, phase);
+    ASSERT_EQ(phase.cache().node_boxes.size(), iterate.positions.size());
+    for (std::size_t node = 0; node < iterate.positions.size(); ++node)
+        EXPECT_LE((phase.cache().node_boxes[node].centroid()
+            - iterate.positions[node]).norm(), 1e-12) << node;
+
+    const auto deformable = deformable_node_ids(scene.mesh);
+    const double returned_residual = compute_global_deformable_residual(
+        scene.mesh, scene.adjacency, scene.pins, scene.params,
+        iterate.positions, iterate.target, phase, deformable);
+    const double fresh_residual = compute_global_deformable_residual(
+        scene.mesh, scene.adjacency, scene.pins, scene.params,
+        iterate.positions, iterate.target, fresh, deformable);
+    ASSERT_GT(fresh_residual, 1e-8);
+    EXPECT_LE(std::abs(returned_residual - fresh_residual),
+        1e-12 * std::max(1.0, fresh_residual));
+}
+
+TEST(RigidDATSolver, WriteSubstepsStillRebuildsDiagnosticCacheAtFinalPositions) {
+    auto scene = two_triangle_probe_scene(.5, -1.75, 1.75);
+    scene.params.write_substeps = true;
+    SolveState iterate(scene);
+    const auto initial = scene.state.deformed_positions;
+    BroadPhase phase;
+    const auto result = global_gauss_seidel_solver_dat(scene.mesh, scene.state,
+        scene.adjacency, scene.pins, scene.params, iterate.positions,
+        iterate.target, iterate.centers, iterate.orientation, iterate.omega,
+        phase, ::testing::TempDir());
+    ASSERT_TRUE(result.converged);
+    EXPECT_EQ(result.iterations, 1);
+
+    // Substep export keeps its mandatory fresh diagnostic cache at the
+    // accepted positions, not the pre-move envelope.
+    const double radius = scene.params.dat_query_radius
+        * scene.params.dat_node_box_padding;
+    ASSERT_EQ(phase.cache().node_boxes.size(), iterate.positions.size());
+    for (std::size_t node = 0; node < iterate.positions.size(); ++node) {
+        EXPECT_LE((phase.cache().node_boxes[node].centroid()
+            - iterate.positions[node]).norm(), 1e-12) << node;
+        EXPECT_LE((phase.cache().node_boxes[node].extent()
+            - Vec3::Constant(2 * radius)).norm(), 1e-12) << node;
+    }
+    EXPECT_GT((phase.cache().node_boxes[0].centroid() - initial[0]).norm(),
+        1e-3);
+
+    const BroadPhase fresh = fresh_candidates(scene.mesh, iterate.positions,
+        radius);
+    expect_current_pairs_covered(scene.params, iterate.positions, fresh, phase);
+}
+
+TEST(RigidDATSolver, RepeatedPublicSolvesAcrossChangedMeshesMatchFirstSolves) {
+    // Three different meshes/body counts: two rigid bodies, one rigid body,
+    // and a cloth-only scene that exercises the deformable delegation path.
+    const RigidDATScene two_bodies = approaching_scene(false);
+    RigidDATScene one_body;
+    one_body.add_body(tetrahedron(Vec3(1, 2, 3)), Vec3(.4, -.2, .3),
+        Vec3::Zero(), RigidBodyUpdateMode::TranslationOnly);
+    one_body.finish();
+    const RigidDATScene cloth = deformable_cloth_scene();
+
+    const auto run = [](const RigidDATScene& scene) {
+        SolveState iterate(scene);
+        BroadPhase phase;
+        const auto result = solve(scene, iterate, phase);
+        EXPECT_TRUE(result.converged);
+        return iterate;
+    };
+
+    // First solve of each scene is the independent baseline.
+    const auto two_bodies_reference = run(two_bodies);
+    const auto one_body_reference = run(one_body);
+    const auto cloth_reference = run(cloth);
+
+    // Reuse the same caller-thread workspace in a different order.
+    expect_unchanged(run(cloth), cloth_reference);
+    expect_unchanged(run(two_bodies), two_bodies_reference);
+    expect_unchanged(run(one_body), one_body_reference);
+    expect_unchanged(run(two_bodies), two_bodies_reference);
+}
+
+TEST(RigidDATSolver, ZeroIterationValidationStaysFreshAcrossChangedMeshes) {
+    RigidDATScene single;
+    single.add_body(tetrahedron(Vec3(1, 2, 3)), Vec3(.4, -.2, .3),
+        Vec3::Zero(), RigidBodyUpdateMode::TranslationOnly);
+    single.finish();
+    const auto run = [](const RigidDATScene& scene) {
+        SolveState iterate(scene);
+        BroadPhase phase;
+        const auto result = solve(scene, iterate, phase);
+        EXPECT_TRUE(result.converged);
+        return iterate;
+    };
+    const auto reference = run(single);
+
+    // Warm the shared general workspace with a zero-iteration solve on this
+    // four-node mesh. Its internal candidate cache must not leak into a later
+    // zero-iteration validation of a different mesh.
+    RigidDATScene warm = single;
+    warm.params.max_global_iters = 0;
+    SolveState warm_iterate(warm);
+    const auto warm_before = warm_iterate;
+    BroadPhase warm_phase;
+    const auto warm_result = solve(warm, warm_iterate, warm_phase);
+    EXPECT_TRUE(warm_result.converged);
+    EXPECT_EQ(warm_result.iterations, 0);
+    expect_unchanged(warm_iterate, warm_before);
+
+    // A different, touching mesh must still be validated from fresh topology.
+    RigidDATScene invalid;
+    invalid.state.deformed_positions = {Vec3::Zero()};
+    invalid.state.velocities = {Vec3::Zero()};
+    invalid.mesh.mass = {1};
+    invalid.mesh.node_to_rb = {-1};
+    invalid.add_body({Vec3(-1, -1, 0), Vec3(1, -1, 0), Vec3(0, 1, 0)},
+        Vec3::Zero(), Vec3::Zero(), RigidBodyUpdateMode::None);
+    invalid.mesh.tris = {1, 2, 3};
+    invalid.params.max_global_iters = 0;
+    invalid.finish();
+    SolveState invalid_iterate(invalid);
+    const auto invalid_before = invalid_iterate;
+    BroadPhase invalid_phase;
+    EXPECT_THROW(solve(invalid, invalid_iterate, invalid_phase),
+        std::domain_error);
+    expect_unchanged(invalid_iterate, invalid_before);
+
+    // A valid solve after the rejected zero-iteration call recovers and matches
+    // the independent first solve bitwise.
+    expect_unchanged(run(single), reference);
 }

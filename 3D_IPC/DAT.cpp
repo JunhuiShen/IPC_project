@@ -362,10 +362,10 @@ static Vec3 dat_vertex_triangle_separation(
         throw std::domain_error("planar_DAT: relative geometry overflow");
     for (const auto& p : local) scale = std::max(scale, p.cwiseAbs().maxCoeff());
     if (scale == 0) return Vec3::Zero();
-    // Uniform scaling and stableNorm avoid underflow/overflow of face normals.
+    // Uniform scaling and stable_norm3 avoid underflow/overflow of face normals.
     for (auto& p : local) p /= scale;
     const Vec3 cross = (local[1] - local[0]).cross(local[2] - local[0]);
-    const double normal_length = cross.stableNorm();
+    const double normal_length = stable_norm3(cross);
     if (normal_length > 0) {
         const Vec3 normal = cross / normal_length;
         const Vec3 projection = local[0].dot(normal) * normal;
@@ -385,7 +385,7 @@ static Vec3 dat_vertex_triangle_separation(
         double parameter;
         const Vec3 candidate = segment_closest_point(
             Vec3::Zero(), local[edge], local[(edge + 1) % 3], parameter);
-        const double distance = candidate.stableNorm();
+        const double distance = stable_norm3(candidate);
         if (distance < minimum) {
             minimum = distance;
             closest = candidate;
@@ -415,7 +415,7 @@ static DATPairPlane dat_pair_plane(const std::array<int, 4>& nodes, int split,
     DATPairPlane plane;
     const Vec3& origin = positions[nodes[0]];
     const auto select = [&](const Vec3& separation) {
-        const double distance = separation.stableNorm();
+        const double distance = stable_norm3(separation);
         if (!separation.allFinite() || !(distance > 0) || !std::isfinite(distance))
             return false;
         plane.normal = separation / distance;

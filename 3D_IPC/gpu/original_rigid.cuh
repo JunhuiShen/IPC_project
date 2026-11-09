@@ -11,12 +11,9 @@
 
 namespace ipc_gpu::original_rigid {
 
-// Same rigid-only squared-step cutoff as per_rigid_body_translation_safe_step.
-// It skips TOI evaluation; the represented displacement is still committed.
+// Match per_rigid_body_translation_safe_step: only a zero displacement skips CCD.
 IPC_ORIGINAL_RIGID_HD inline bool skip_translation_toi(const double delta[3]) {
-    double squared=0;
-    for(int k=0;k<3;++k)squared+=delta[k]*delta[k];
-    return squared<1e-28;
+    return delta[0]==0.0&&delta[1]==0.0&&delta[2]==0.0;
 }
 
 // Match the CPU's unpadded world-space swept-AABB rejection BEFORE its

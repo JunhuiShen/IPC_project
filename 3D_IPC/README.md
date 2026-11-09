@@ -54,7 +54,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --fps 30 --num_frames 30 --substeps 3 \
   --max_substep_iters 3 --fixed_iters --node_box_update_count 3 \
   --use_basic_experimental true --use_simd true \
-  --format geo --outdir results/quickstart
+  --format geo --outdir twisting_cloth_output
 ```
 
 This simulates one second and writes `frame_0000.geo` through `frame_0030.geo`,
@@ -191,6 +191,8 @@ and +y as the up direction.
 | `--E --nu --density --thickness --kB` | Cloth material and bending properties; `kB=0` disables bending. |
 | `--solid_E --solid_nu --solid_density` | Deformable-solid material properties, separate from cloth settings. |
 | `--rigid_density` | Density for density-based rigid scenes; Examples 5–6 use calibrated masses. |
+| `--bike_chain_tension_distance D --bike_chain_tension_duration T` | For the bike-chain example: move the large gear's finite spring targets by D metres in world +X over a smooth T-second ramp, then hold. The gear's COM remains a solved coordinate; D=0 retains fixed centers. |
+| `--bike_chain_motor_ramp_duration T` | For the bike-chain example: start at rest and smoothly reach the requested motor speed over T seconds. The target angle integrates this speed ramp; T=0 retains immediate constant-speed startup. |
 | `--d_hat --k_barrier` | Mesh contact activation distance and barrier stiffness. `d_hat=0` disables mesh barriers. |
 | `--k_sdf --eps_sdf` | Prescribed-obstacle contact stiffness and soft contact range. |
 | `--friction_coefficient` | Mesh/SDF Coulomb friction; zero disables it. `friction_velocity_epsilon` smooths near-zero slip. |
@@ -217,7 +219,7 @@ Run a small deformable example with DAT:
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 1 --twist_nx 9 --twist_ny 9 \
   --num_frames 1 --substeps 3 --max_substep_iters 20 --fixed_iters \
-  --use_dat --dat_gamma 0.9 --format geo --outdir results/jacobi_dat
+  --use_dat --dat_gamma 0.9 --format geo --outdir twisting_cloth_output
 ```
 
 DAT starts each substep from the previous positions and poses, skipping initial
@@ -253,7 +255,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 ./build/3D_sim --example 1 --twist_nx 9 --twist_ny 9 \
   --num_frames 1 --substeps 3 --max_substep_iters 20 --fixed_iters \
   --use_jacobi_level_based_ccd --colored_ccd_guess_iters 1 \
-  --format geo --outdir results/jacobi_level_based_ccd
+  --format geo --outdir twisting_cloth_output
 ```
 
 Two separate flags select collision-colored initial guesses for cloth/solid
@@ -304,7 +306,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --fps 30 --num_frames 60 --substeps 3 \
   --max_substep_iters 3 --fixed_iters --node_box_update_count 3 \
   --use_basic_experimental true --use_simd true \
-  --format geo --outdir results/quickstart --restart_frame 30
+  --format geo --outdir twisting_cloth_output --restart_frame 30
 ```
 
 A restart preserves the folder and loads `state_0030.bin`. `num_frames` is the
@@ -329,7 +331,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --use_basic_experimental true --use_simd true --use_parallel true \
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
   --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 0.97 \
-  --outdir example1_output --format geo
+  --outdir twisting_cloth_output --format geo
 
 # Example 2: two cylinders, 2.0 turns, twist then untwist
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
@@ -341,7 +343,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --use_basic_experimental true --use_simd true --use_parallel true \
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
   --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 0.98 \
-  --outdir example2_output --format geo
+  --outdir two_cylinder_cloth_output --format geo
 
 # Example 3: one yawing cylinder, 4.0 turns at 0.30 turns/s
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
@@ -354,7 +356,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --use_basic_experimental true --use_simd true --use_parallel true \
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
   --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 0.99 \
-  --outdir example3_output --format geo
+  --outdir single_cylinder_cloth_output --format geo
 
 # Example 4: dress loaded from a data directory above an SDF ground plane
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
@@ -377,7 +379,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 
 # Example 7: stationary stack of ten rigid polygons
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 7 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --rigid_density 25 --gy 0 --outdir twenty_polygon_static_stack_output --format geo \
+./build/3D_sim --example 7 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --rigid_density 25 --gy 0 --outdir polygon_stack_output --format geo \
   --use_basic_experimental true --use_simd true
 
 ```
@@ -402,7 +404,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --node_box_min 0.00025 --node_box_max 0.01 \
   --theta_box_min 0.005 --theta_box_max 0.1 --node_box_update_count 2 \
   --use_parallel true --use_basic_experimental true --use_simd false \
-  --outdir bolt_into_fixed_nut_output --format geo
+  --outdir bolt_and_nut_output --format geo
 
 # Example 10: four horizontal layers of differently ordered Bunny/Spot/cube/gear groups; Bunny and Spot lie on their sides
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
@@ -412,7 +414,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --d_hat 0.00208 --k_barrier 1000 --friction_coefficient 0 --use_ccd true \
   --node_box_min 0.00025 --node_box_max 0.01 --node_box_update_count 23 \
   --use_parallel true --use_basic_experimental true --use_simd true \
-  --write_substeps false --outdir example10_output \
+  --write_substeps false --outdir layered_multi_physics_output \
   --use_ccd_guess false --use_colored_ccd_guess true --use_colored_ccd_guess_level_based false \
   --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 1.0 \
   --format geo && \
@@ -423,7 +425,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --d_hat 0.00208 --k_barrier 1000 --friction_coefficient 0 --use_ccd true \
   --node_box_min 0.001 --node_box_max 0.01 \
   --node_box_update_count 25 --use_parallel true --use_basic_experimental true --use_simd true \
-  --write_substeps false --format geo --outdir example10_output \
+  --write_substeps false --format geo --outdir layered_multi_physics_output \
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
   --colored_ccd_guess_iters 1 --colored_ccd_guess_fraction 0.98
 
@@ -436,7 +438,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --use_parallel true --use_basic_experimental true --use_simd true \
   --use_ccd_guess false --use_colored_ccd_guess false --use_colored_ccd_guess_level_based true \
   --colored_ccd_guess_iters 2 --colored_ccd_guess_fraction 1.0 \
-  --outdir rolled_cloth_on_steep_ramp_output_new --format geo
+  --outdir rolled_cloth_output --format geo
 
 # Example 12: three cloth layers with one fixed edge and one oscillating edge
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
@@ -460,17 +462,17 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --friction_coefficient 0 --exact_computation_fallback false --ccd_exact_step_bound false \
   --node_box_min 0.004 --node_box_max 0.03 \
   --theta_box_min 0.004 --theta_box_max 0.06 --node_box_update_count 20 \
-  --outdir wrecking_ball_tuned_output --format geo && \
+  --outdir wrecking_ball_output --format geo && \
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 13 --datadir example_obj --restart_frame 45 --num_frames 300 --fps 30 \
   --substeps 14 --max_substep_iters 280 --fixed_iters --damping 1 \
   --use_parallel true --use_basic_experimental true --use_simd true \
   --wrecking_chain_density 11000 --wrecking_cube_density 900 \
-  --d_hat 0.003 --k_barrier 6e9 --k_sdf 1e8 --eps_sdf 0.002 \
+  --d_hat 0.003 --k_barrier 6e9 --k_sdf 1e10 --eps_sdf 0.002 \
   --friction_coefficient 0 --exact_computation_fallback false --ccd_exact_step_bound false \
   --node_box_min 0.004 --node_box_max 0.025 \
   --theta_box_min 0.004 --theta_box_max 0.04 --node_box_update_count 20 \
-  --outdir wrecking_ball_tuned_output --format geo
+  --outdir wrecking_ball_output --format geo
 
 # Example 14: fifty free cloth sheets fall over the cylinder and spread onto the ground.
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
@@ -482,7 +484,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0002 --node_box_max 0.0025 --node_box_update_count 3 \
-  --outdir results/example14_70x70/frames --format geo && \
+  --outdir cloth_stack_output --format geo && \
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 14 --exact_computation_fallback true --ccd_exact_step_bound true --restart_frame 10 --num_frames 120 \
   --fps 30 --substeps 16 --max_substep_iters 2 --fixed_iters \
@@ -492,7 +494,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0001 --node_box_max 0.0025 --node_box_update_count 2 \
-  --outdir results/example14_70x70/frames --format geo
+  --outdir cloth_stack_output --format geo
 
 # Example 15: two hundred free cloth sheets fall over the cylinder and spread onto the ground. (unsuccessful)
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
@@ -503,7 +505,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --E 1e6 --nu 0.25 --kB 0.001 --d_hat 0.0025 --k_barrier 10000 \
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0001 --node_box_max 0.001 --node_box_update_count 3 \
-  --outdir example15_200x141x141/frames --format geo && \
+  --outdir large_cloth_stack_output --format geo && \
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 15 --exact_computation_fallback false \
   --restart_frame 9 --num_frames 120 \
@@ -513,7 +515,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --E 1e6 --nu 0.25 --kB 0.001 --d_hat 0.0048 --k_barrier 10000 \
   --k_sdf 1e5 --eps_sdf 0.015 \
   --node_box_min 0.0001 --node_box_max 0.003 --node_box_update_count 4 \
-  --outdir example15_200x141x141/frames --format geo
+  --outdir large_cloth_stack_output --format geo
 
 # Example 16: rigid chain net and mixed rigid-object drop
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
@@ -534,19 +536,23 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --friction_coefficient 0.1 --use_ccd true \
   --exact_computation_fallback true --node_box_update_count 10 \
   --use_basic_experimental true --use_simd true --use_parallel true \
-  --write_substeps false --format geo --outdir example17_rigid_box_output
+  --write_substeps false --format geo --outdir rigid_box_output
 
 # Example 18: bike chain
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 18 --num_frames 120 --fps 30 \
-  --substeps 19 --max_substep_iters 200 --fixed_iters \
+./build/3D_sim --example 18 --num_frames 200 --fps 30 \
+  --substeps 25 --max_substep_iters 120 --fixed_iters \
   --use_basic_experimental true --use_simd true --use_parallel true \
-  --use_ccd true --exact_computation_fallback true \
-  --kpin 1e4 --k_barrier 4000 --d_hat 0.00003 --k_sdf 0 \
-  --rigid_density 1000 --friction_coefficient 0 --gy 0 --damping 1 \
+  --use_ccd true \
+  --exact_computation_fallback false --ccd_exact_step_bound false \
+  --kpin 900 --k_barrier 3600 --d_hat 0.00003 --k_sdf 0 \
+  --rigid_density 900 --friction_coefficient 0 --gy 0 --damping 1 \
+  --bike_chain_motor_ramp_duration 2 \
+  --bike_chain_motor_radius 0.14907119849998599 --bike_chain_shaft_span 0.15811388300841897 \
+  --bike_chain_tension_distance 0.00541746139 --bike_chain_tension_duration 2 \
   --node_box_min 0.00002 --node_box_max 0.0001 \
   --theta_box_min 0.0004 --theta_box_max 0.008 --node_box_update_count 25 \
-  --format geo --outdir example18_pin_output
+  --format geo --outdir bike_chain_output
 
 # Example 19: chain winds onto the spool and lifts the anchor
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
@@ -557,11 +563,11 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --theta_box_min 0.001 --theta_box_max 0.01 \
   --use_basic_experimental true --use_simd true \
   --exact_computation_fallback false \
-  --outdir results/example19_anchor/frames
+  --outdir chain_anchor_output
 
 # Example 20: frictional arch settling
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
-./build/3D_sim --example 20 --datadir example_obj --num_frames 240 \
+./build/3D_sim --example 20 --datadir example_obj --num_frames 200 \
   --substeps 1 --max_substep_iters 10 --fixed_iters \
   --friction_coefficient 0.5 --friction_velocity_epsilon 0.001 \
   --d_hat 0.05 --k_barrier 1e7 --k_sdf 1e10 \
@@ -569,11 +575,11 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --theta_box_min 0.001 --theta_box_max 0.05 --node_box_update_count 5 \
   --use_basic_experimental true --use_simd true \
   --exact_computation_fallback false \
-  --outdir results/example20_arch_box_tuned/frames
+  --outdir arch_output
 
 # Example 20: arch without friction
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
-./build/3D_sim --example 20 --datadir example_obj --num_frames 240 \
+./build/3D_sim --example 20 --datadir example_obj --num_frames 200 \
   --substeps 1 --max_substep_iters 10 --fixed_iters \
   --friction_coefficient 0 --friction_velocity_epsilon 0.001 \
   --d_hat 0.05 --k_barrier 1e7 --k_sdf 1e10 \
@@ -581,7 +587,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --theta_box_min 0.001 --theta_box_max 0.05 --node_box_update_count 5 \
   --use_basic_experimental true --use_simd true \
   --exact_computation_fallback false \
-  --outdir results/example20_arch_no_friction/frames
+  --outdir arch_frictionless_output
 ```
 
 ## Build and test
@@ -665,17 +671,8 @@ Our friction model follows:
 > ACM Transactions on Graphics 43(4), Article 116, July 2024.
 > [doi:10.1145/3658179](https://doi.org/10.1145/3658179)
 
-Our OGC narrow phase and `global_gauss_seidel_solver_ogc` implement:
-
-> Anka He Chen, Jerry Hsu, Ziheng Liu, Miles Macklin, Yin Yang, and Cem Yuksel.
-> *Offset Geometric Contact.* ACM Transactions on Graphics 44(4):160, 2025.
-> [doi:10.1145/3731205](https://doi.org/10.1145/3731205)
-
-The optional Jacobi-DAT path follows:
-
-> Anka He Chen, Jerry Hsu, Youssef Ayman, and Miles Macklin. *Divide and Truncate:
-> A Penetration and Inversion Free Framework for Coupled Multi-physics Systems.*
-> 2026. [arXiv:2604.15513](https://arxiv.org/abs/2604.15513)
+Related solver references: [OGC (2025)](https://doi.org/10.1145/3731205) and
+[DAT (2026)](https://arxiv.org/abs/2604.15513).
 
 The discrete-shell bending model follows:
 

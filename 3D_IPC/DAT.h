@@ -66,8 +66,9 @@ inline double toward_positive_zero(double x) { return detail::step<0>(x); }
 
 } // namespace directed_rounding
 
-// Scoped to one solve with fixed topology. Each call refreshes all numerical
-// data. Standalone calls without a workspace retain their stateless behavior.
+// Reusable scratch: every call refreshes all numerical buffers, so a workspace
+// is safe across solves that supply external candidates. Its internal topology
+// cache assumes fixed topology within a solve. Null-workspace calls stay stateless.
 class DATWorkspace {
 public:
     DATWorkspace();

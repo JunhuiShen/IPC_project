@@ -49,3 +49,8 @@ Vec3 segment_closest_point(const Vec3& x, const Vec3& a, const Vec3& b, double& 
 std::array<double, 3> triangle_plane_barycentric_coordinates(const Vec3& x, const Vec3& x1, const Vec3& x2, const Vec3& x3, double eps = 1e-12);
 
 double cross_product_in_2d(const Vec2& a, const Vec2& b);
+
+// Fixed-order, address-independent Euclidean norm of a 3-vector.
+// Finite inputs are scaled by the scalar absolute maximum; nonfinite inputs
+// follow conventional hypot semantics (infinity dominates NaN).
+double stable_norm3(const Vec3& v);

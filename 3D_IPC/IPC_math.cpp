@@ -107,3 +107,24 @@ std::array<double, 3> triangle_plane_barycentric_coordinates(const Vec3& x, cons
 double cross_product_in_2d(const Vec2& a, const Vec2& b) {
     return a.x() * b.y() - a.y() * b.x();
 }
+
+double stable_norm3(const Vec3& v) {
+    const double x = v[0], y = v[1], z = v[2];
+    // Conventional hypot semantics: infinity dominates NaN, NaN otherwise.
+    if (std::isinf(x) || std::isinf(y) || std::isinf(z))
+        return std::numeric_limits<double>::infinity();
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+        return std::numeric_limits<double>::quiet_NaN();
+
+    const double m = std::max(std::fabs(x), std::max(std::fabs(y), std::fabs(z)));
+    if (m == 0.0) return 0.0; // all signed zeros -> positive zero
+
+    const double sx = x / m;
+    const double sy = y / m;
+    const double sz = z / m;
+    // Explicitly fixed left-to-right order; no Eigen reduction or packet path.
+    double sum = sx * sx;
+    sum = sum + sy * sy;
+    sum = sum + sz * sz;
+    return std::sqrt(sum) * m;
+}

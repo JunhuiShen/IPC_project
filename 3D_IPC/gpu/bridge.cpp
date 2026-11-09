@@ -118,6 +118,10 @@ SceneDescription describe_scene(const RefMesh& mesh,const DeformedState& state,
     // on the host. Target positions at the supplied time are evaluated on GPU.
     out.rigid_pin_offsets.assign(mesh.rb_nodes.size()+1,0);
     for(const auto& pin:params.rigid_pins) {
+        if(pin.angular_velocity_ramp_duration!=0.0)
+            throw std::invalid_argument("GPU: rigid pin angular startup ramps are currently CPU-only");
+        if((pin.target_translation.array()!=0.0).any())
+            throw std::invalid_argument("GPU: translated rigid pin targets are not supported; use the CPU solver");
         if(pin.body<0||static_cast<std::size_t>(pin.body)>=mesh.rb_nodes.size()
             ||!pin.local_position.allFinite()||!pin.initial_target.allFinite()
             ||!pin.rotation_center.allFinite()||!std::isfinite(pin.angular_velocity_z))
