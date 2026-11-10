@@ -1,6 +1,5 @@
 #define IPC_GPU_TU_FINITE_CCD 1
 #include "linear_pipeline_internal.cuh"
-#include "profile.h"
 #include "contact_schedule.h"
 #include "contact_execution.h"
 #include <cuda_runtime.h>
@@ -247,7 +246,6 @@ void GpuLinearClipper::clip_deformable_color(const DeformableScene&scene,
     bool exact_step_bound,LinearClipMode mode,OriginalUpdateConvention convention,
     const unsigned char*original_cooperative_selected) {
     {
-    GpuProfileScope prepare_profile("prepare",stream);
     impl_->reserve(scene.nodes,use_ccd?bp.contact_count:0);if(!scene.nodes)return;
     propose_nodes<<<unsigned((scene.nodes+127)/128),128,0,stream>>>(scene,state,work,
         boxes,colors,color,accepted,impl_->clip_raw,impl_->pending,error);check(cudaGetLastError());
@@ -303,13 +301,11 @@ void GpuLinearClipper::clip_deformable_color(const DeformableScene&scene,
     }
     if(!bp.contact_count)return;
     if(bp.contact_count) {
-        GpuProfileScope certify_profile("parallel_certify",stream);
         const auto count=color_pairs.offsets?color_pairs.max_color_pairs:bp.contact_count;
         const unsigned blocks=unsigned(std::max<std::size_t>(1,std::min<std::size_t>((count+127)/128,65535)));
         certify_node_contacts<<<blocks,128,0,stream>>>(scene,state,bp,colors,color,accepted,
             impl_->pending,impl_->initial_safe,error,color_pairs);check(cudaGetLastError());
     }
-    GpuProfileScope resolve_profile("serial_resolve",stream);
     if(exact_step_bound)
         launch_resolve_nodes_direct_bound(scene,state,bp,offsets,indices,boxes,impl_->pending,impl_->initial_safe,accepted,error,
             impl_->words,impl_->slots,stream);
@@ -323,7 +319,6 @@ void GpuLinearClipper::clip_rigid_translation_color(const RigidScene&scene,const
     const RigidWorkspace&work,const DeformableState&vertices,const BroadPhaseView&bp,
     const std::size_t*offsets,const int*indices,const BpAabb*boxes,const int*colors,int color,
     double(*accepted)[3],int*error,bool use_ccd,cudaStream_t stream,LinearClipMode mode) {
-    GpuProfileScope resolve_profile("serial_resolve",stream);
     rigid_proxy_owner::Permit proxy_permit;
     if(const auto* bound=rigid_proxy_owner::Scope::binding(this)) {
         auto current=*bound;

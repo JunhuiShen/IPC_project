@@ -23,7 +23,7 @@ static_assert(!ipc_gpu::solver::rigid_compact::absolute_ids_fit(
 
 void gpu_contact_original_frozen_test_gpu(const double (*)[3],const double (*)[3],
     bool,ipc_gpu::Derivatives*,int&,int&);
-void gpu_dat_numerical_helpers_test_gpu();
+void gpu_directed_rounding_helpers_test_gpu();
 void gpu_contact_original_frozen_tiled_test_gpu(const double (*)[3],const double (*)[3],const ipc_gpu::Derivatives*);
 void gpu_contact_packet_memory_test_gpu(const GpuPipelineTestInput*,std::size_t);
 void gpu_rigid_compact_reduce_test_gpu(const GpuPipelineTestInput*,std::size_t);
@@ -188,7 +188,7 @@ int main() {
                 else unsetenv("IPC_GPU_RIGID_COMPACT_REDUCE");
             }
         } restore_compact;
-        gpu_dat_numerical_helpers_test_gpu();
+        gpu_directed_rounding_helpers_test_gpu();
         original_frozen_retry();
         for(int kind=0;kind<6;++kind) {
             const auto input=fixture(kind);GpuPipelineTestOutput out;

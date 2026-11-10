@@ -487,9 +487,8 @@ TEST(ClothGridSolver, DirectGridEntryRejectsOgcBeforeMutatingState) {
     scene.params.use_cloth_grid = false;
     const auto reference = scene.state;
     const auto predictor = reference.deformed_positions;
-    for (const bool ogc_solver : {false, true}) {
-        scene.params.use_ogc = !ogc_solver;
-        scene.params.use_ogc_solver = ogc_solver;
+    {
+        scene.params.use_ogc = true;
         EXPECT_THROW(global_gauss_seidel_solver_ambient_grid(scene.mesh,
             scene.adjacency, scene.pins, scene.params,
             scene.state.deformed_positions, predictor, scene.state.velocities,
@@ -815,9 +814,6 @@ TEST(ClothGridParameters, RejectsInvalidEnabledConfiguration) {
     SimParams params = valid;
     params.use_ogc = true;
     EXPECT_THROW(params.validate_cloth_grid_parameters(), std::invalid_argument);
-    params = valid;
-    params.use_ogc_solver = true;
-    EXPECT_THROW(params.validate_cloth_grid_parameters(), std::invalid_argument);
 
     // Opting out leaves the pre-existing non-grid parameter contract intact.
     params = SimParams::zeros();
@@ -888,9 +884,6 @@ TEST(ClothGridParameters, AutomaticDxAllowsSmallMinimumButRetainsOtherValidation
     params.use_ogc = true;
     EXPECT_THROW(params.validate_cloth_grid_parameters(), std::invalid_argument);
     params.use_ogc = false;
-    params.use_ogc_solver = true;
-    EXPECT_THROW(params.validate_cloth_grid_parameters(), std::invalid_argument);
-    params.use_ogc_solver = false;
     params.cloth_grid_auto_dx = false;
     EXPECT_THROW(params.validate_cloth_grid_parameters(), std::invalid_argument);
 }
@@ -2010,23 +2003,17 @@ TEST(ClothGridSolver, AmbientGridEntryValidatesParametersRegardlessOfDispatchFla
         params.use_cloth_grid = enabled;
         params.use_ogc = true;
         EXPECT_THROW(solve(params), std::invalid_argument);
-        params = scene.params;
-        params.use_cloth_grid = enabled;
-        params.use_ogc_solver = true;
-        EXPECT_THROW(solve(params), std::invalid_argument);
     }
 }
 
-TEST(ClothGridSolver, FrameDispatchRejectsGridWithEitherOgcModeBeforeAdvancing) {
+TEST(ClothGridSolver, FrameDispatchRejectsGridWithOgcBeforeAdvancing) {
     ClothScene scene;
     build_contact_scene(scene, 0.0);
     scene.params.use_basic_experimental = true;
     scene.params.use_basic_experimental_v2 = true;
     const auto initial_positions = scene.state.deformed_positions;
-    for (const bool ogc_solver : {false, true}) {
-        SCOPED_TRACE(::testing::Message() << "use_ogc_solver=" << ogc_solver);
-        scene.params.use_ogc = !ogc_solver;
-        scene.params.use_ogc_solver = ogc_solver;
+    {
+        scene.params.use_ogc = true;
         bool pin_updater_called = false;
         bool substep_callback_called = false;
         EXPECT_THROW(advance_one_frame(scene.state, scene.mesh,

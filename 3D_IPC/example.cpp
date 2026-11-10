@@ -944,8 +944,6 @@ void build_rotating_tennis_racket_example(
     params.sdf_spheres.clear();
     params.use_ccd = false;
     params.use_ccd_guess = false;
-    params.use_verlet_guess = false;
-    params.use_translation_guess = false;
 
     std::vector<Vec3> x;
     std::vector<int> tris;
@@ -1062,8 +1060,6 @@ void build_rotating_space_tool_example(
     params.sdf_spheres.clear();
     params.use_ccd = false;
     params.use_ccd_guess = false;
-    params.use_verlet_guess = false;
-    params.use_translation_guess = false;
 
     // The rotational residual is small in physical units. These tolerances
     // ensure the torque-free angular-velocity update is not skipped.
@@ -1148,8 +1144,6 @@ void build_twenty_rigid_polygon_static_stack_example(
     params.sdf_planes.push_back(
         {Vec3::Zero(), Vec3::UnitY()});
     params.use_ccd_guess = false;
-    params.use_verlet_guess = false;
-    params.use_translation_guess = false;
 
     constexpr int polygon_count = 10;
     constexpr double radius = 0.28;
@@ -1216,10 +1210,6 @@ void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
     params.sdf_cylinders.clear();
     params.sdf_spheres.clear();
     params.use_ccd_guess = false;
-    params.use_verlet_guess = false;
-    params.use_translation_guess = false;
-    params.use_ogc = false;
-    params.use_ogc_solver = false;
 
     // Cloth must be initialized before solid and rigid collision triangles so
     // shell rest data remains the leading triangle prefix.
@@ -1356,10 +1346,6 @@ void build_dynamic_bolt_into_fixed_nut_example(
     params.sdf_cylinders.clear();
     params.sdf_spheres.clear();
     params.use_ccd_guess = false;
-    params.use_verlet_guess = false;
-    params.use_translation_guess = false;
-    params.use_ogc = false;
-    params.use_ogc_solver = false;
 
     constexpr const char* bolt_filename =
         "example_obj/bolt_and_nut/bolt_coarse_bolt.obj";
@@ -1471,10 +1457,6 @@ void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
     params.sdf_cylinders.clear();
     params.sdf_spheres.clear();
     params.use_ccd_guess = false;
-    params.use_verlet_guess = false;
-    params.use_translation_guess = false;
-    params.use_ogc = false;
-    params.use_ogc_solver = false;
 
     // Build and initialize the cloth before appending solid and rigid boundary
     // triangles, preserving the shell rest-data prefix used by the solver.
@@ -1657,10 +1639,6 @@ void build_cloth_unrolling_down_fixed_ramp_example(
     params.sdf_cylinders.clear();
     params.sdf_spheres.clear();
     params.use_ccd_guess = false;
-    params.use_verlet_guess = false;
-    params.use_translation_guess = false;
-    params.use_ogc = false;
-    params.use_ogc_solver = false;
 
     constexpr int cloth_nx = 24;
     // Keep enough samples around the enlarged roll that its piecewise-linear
@@ -2051,10 +2029,6 @@ void build_wrecking_ball_example(
     params.sdf_cylinders.clear();
     params.sdf_spheres.clear();
     params.use_ccd_guess = false;
-    params.use_verlet_guess = false;
-    params.use_translation_guess = false;
-    params.use_ogc = false;
-    params.use_ogc_solver = false;
 
     // Defaults use the material densities from rigid-ipc's final paper fixture.
     constexpr int chain_body_count = 14;
@@ -2479,10 +2453,6 @@ void build_chain_net_ball_example(
     params.use_ccd_guess = false;
     params.use_colored_ccd_guess = false;
     params.use_colored_ccd_guess_level_based = false;
-    params.use_verlet_guess = false;
-    params.use_translation_guess = false;
-    params.use_ogc = false;
-    params.use_ogc_solver = false;
 
     auto append_link = [&](const Vec3& position, const Vec4& orientation,
                            const bool fixed) {
@@ -2861,10 +2831,6 @@ void build_rigid_objects_in_box_example(
     params.use_ccd_guess = false;
     params.use_colored_ccd_guess = false;
     params.use_colored_ccd_guess_level_based = false;
-    params.use_verlet_guess = false;
-    params.use_translation_guess = false;
-    params.use_ogc = false;
-    params.use_ogc_solver = false;
 
     constexpr double inside_half_x = 6.4;
     constexpr double inside_half_z = 4.0;
@@ -3095,8 +3061,6 @@ void build_bike_chain_example(
     params.d_hat = args.d_hat;
     params.sdf_planes.clear(); params.sdf_cylinders.clear(); params.sdf_spheres.clear();
     params.use_ccd_guess = params.use_colored_ccd_guess = params.use_colored_ccd_guess_level_based = false;
-    params.use_verlet_guess = params.use_translation_guess = false;
-    params.use_ogc = params.use_ogc_solver = false;
     for (const auto& pose : poses) {
         const std::string mesh = (directory / pose.mesh).string();
         std::vector<Vec3> positions;

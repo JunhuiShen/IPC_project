@@ -1,5 +1,4 @@
 #include "contact_pipeline.h"
-#include "profile.h"
 #include "contact_schedule.h"
 #include "contact_color_launch.h"
 #include "contact_exact.cuh"
@@ -28,7 +27,6 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
-#include <fstream>
 #include <vector>
 
 namespace ipc_gpu::solver {
@@ -1357,8 +1355,6 @@ struct GpuContactPipeline::Impl {
     const bool use_compact=contact_execution_option("IPC_GPU_COMPACT_DEFORMABLE_CONTACTS",true);
     const bool use_output_activity=contact_execution_option("IPC_GPU_CONTACT_OUTPUT_ACTIVITY",true);
     const bool use_box_pruning=contact_execution_option("IPC_GPU_BOX_CONTACT_PRUNING",false);
-    std::ofstream queue_log;
-    unsigned long long rebuild_index=0,assembly_index=0;
     BroadPhaseView broad;
     int block_count=0;
     const int* vertex_block=nullptr;
@@ -1405,35 +1401,6 @@ struct GpuContactPipeline::Impl {
     explicit Impl(std::size_t capacity):packet_capacity(capacity) {
         if(!capacity||capacity>std::size_t(INT_MAX))
             throw std::invalid_argument("GPU contact packet capacity must be in [1,INT_MAX]");
-        // This explicitly separate diagnostic mode performs synchronous queue
-        // count readbacks. Never enable it for clean runtime measurements.
-        const char* path=std::getenv("IPC_GPU_CONTACT_QUEUE_CSV");
-        if(path&&*path) {
-            std::ifstream existing(path);
-            if(existing.good())throw std::runtime_error(std::string("contact queue diagnostic output already exists: ")+path);
-            queue_log.open(path);
-            if(!queue_log)throw std::runtime_error(std::string("cannot create contact queue diagnostic output: ")+path);
-            queue_log<<"rebuild,assembly,color,phase,candidates,exact_queries,retry_queries,device_status,small_workers,small_threads,large_workers,large_threads\n";
-        }
-    }
-    void record_queues(int color,ContactAssemblyPhase phase,const int* failed,
-        bool compact_queue_swap=false,unsigned original_exact_count=0) {
-        if(!queue_log.is_open())return;
-        unsigned count=original_exact_count,retries=0;int status=0;
-        // CSV exact_queries remains original M; retry_queries remains actual
-        // scalar256-to1600 W. B's compact-unresolved R is never mislabeled.
-        if(!compact_queue_swap)
-            checked(cudaMemcpy(&count,exact_count.data,sizeof(count),cudaMemcpyDeviceToHost),"diagnostic exact count");
-        if(broad.contact_count)
-            checked(cudaMemcpy(&retries,compact_queue_swap?exact_count.data:exact_retry_count.data,sizeof(retries),cudaMemcpyDeviceToHost),"diagnostic retry count");
-        checked(cudaMemcpy(&status,failed,sizeof(status),cudaMemcpyDeviceToHost),"diagnostic device status");
-        const char* phase_name=phase==ContactAssemblyPhase::Deformable?"deformable":
-            phase==ContactAssemblyPhase::RigidTranslation?"rigid_translation":"rigid_orientation";
-        queue_log<<rebuild_index<<','<<assembly_index<<','<<color<<','<<phase_name<<','<<broad.contact_count<<','
-            <<count<<','<<retries<<','<<status<<','<<schedule.small_workers<<','<<schedule.small_threads<<','
-            <<schedule.large_workers<<','<<schedule.large_threads<<'\n';
-        queue_log.flush();
-        if(!queue_log)throw std::runtime_error("failed writing contact queue diagnostic output");
     }
     Work work(bool compact_phase=false,bool one_slot_terms=false)const{return {inputs.data,outputs.data,compact_phase?compact.data:nullptr,active.data,use_output_activity?active.data:nullptr,exact_queue.data,exact_count.data,
         exact_retry_queue.data,exact_retry_count.data,exact_next.data,
@@ -1581,7 +1548,6 @@ void GpuContactPipeline::rebuild(const BroadPhaseView& broad,int block_count,con
         if(broad.contact_count)
             count_raw_incidents<<<blocks(broad.contact_count),threads>>>(broad,vertex_block,block_count,p.raw_block_counts.data);
     }
-    if(p.queue_log.is_open())++p.rebuild_index;
     bool dense=false;
     if(two_rigid_dense_csr::eligible(p.validated_two_rigid_blocks,
         p.use_two_rigid_dense_csr,p.pruning_ready,broad.contact_count,
@@ -1682,7 +1648,6 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
     const RigidWorkspace& rigid_workspace,const SdfScene& sdf,const ContactParameters& parameters,
     int color,ContactAssemblyPhase phase,ContactAssemblyMode mode,const RigidPinAssembly& pins,
     ContactGeometryPolicy geometry) {
-    GpuProfileScope profile("contact");
     auto& p=*impl_;
     p.active_record_slots=nullptr;p.pending_contacts=false;
     const bool original=geometry==ContactGeometryPolicy::Original;
@@ -1693,7 +1658,6 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
     if(p.pruning_ready&&original!=p.original_pruning_ready)
         throw std::invalid_argument(
             "GPU contact geometry requires a rebuild with the matching cache policy");
-    if(p.queue_log.is_open())++p.assembly_index;
     if(!p.offsets.data||!elastic.error)throw std::logic_error("GPU contact assembly requires rebuild and device error pointer");
     if(color<0||(p.broad.color_count>0&&color>=p.broad.color_count))throw std::invalid_argument("GPU contact color out of range");
     const bool frozen_snapshot=mode==ContactAssemblyMode::FrozenSnapshot;
@@ -1747,7 +1711,6 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
         p.rigid_terms.reserve(required);p.rigid_terms_one_slot_layout=one_slot_terms;
     }
     if(tiled) {
-        GpuProfileScope tiled_profile("bounded_packets");
         const bool orientation=phase==ContactAssemblyPhase::RigidOrientation;
         const auto system_count=phase==ContactAssemblyPhase::Deformable?scene.nodes:rigid.bodies;
         const bool compact_rigid=p.use_rigid_compact_reduce&&phase!=ContactAssemblyPhase::Deformable
@@ -1780,7 +1743,6 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
             else seed_pending_rigid<<<blocks(system_count),threads>>>(p.broad,state,rigid,rigid_state,
                 rigid_workspace,elastic,sdf,parameters,work,color,orientation,pins,frozen_snapshot,p.pending_systems.data);
         }
-        unsigned long long exact_total=0,retry_total=0;
         // CSR rows are ordered by contact kind, then global pair index.
         // Packet reuse never changes that order or publishes a partial assembly.
         for(int kind=0;kind<2;++kind) {
@@ -1819,12 +1781,6 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
                 evaluate_exact_queue<exact_small_limbs,false><<<p.schedule.small_workers/p.schedule.small_threads,p.schedule.small_threads>>>(work,elastic.error);
                 checked(cudaMemsetAsync(p.exact_next.data,0,sizeof(unsigned)),"clear tiled retry cursor");
                 evaluate_exact_queue<exact_large_limbs,true><<<p.schedule.large_workers/p.schedule.large_threads,p.schedule.large_threads>>>(work,elastic.error);
-            }
-            if(p.queue_log.is_open()) {
-                unsigned count=0,retries=0;
-                checked(cudaMemcpy(&count,p.exact_count.data,sizeof(count),cudaMemcpyDeviceToHost),"tiled diagnostic exact count");
-                checked(cudaMemcpy(&retries,p.exact_retry_count.data,sizeof(retries),cudaMemcpyDeviceToHost),"tiled diagnostic retry count");
-                exact_total+=count;retry_total+=retries;
             }
             if(orientation&&rigid.bodies&&scene.nodes) {
                 mark_tile_pullbacks<<<blocks(last-first),threads>>>(p.broad,scene,rigid,work,
@@ -1865,16 +1821,6 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
                 color,phase,p.pending_systems.data);
         }
         checked(cudaGetLastError(),"tiled assembly kernels");
-        if(p.queue_log.is_open()) {
-            int status=0;checked(cudaMemcpy(&status,elastic.error,sizeof(status),cudaMemcpyDeviceToHost),"tiled diagnostic status");
-            const char* phase_name=phase==ContactAssemblyPhase::Deformable?"deformable":
-                phase==ContactAssemblyPhase::RigidTranslation?"rigid_translation":"rigid_orientation";
-            p.queue_log<<p.rebuild_index<<','<<p.assembly_index<<','<<color<<','<<phase_name<<','<<p.broad.contact_count<<','
-                <<exact_total<<','<<retry_total<<','<<status<<','<<p.schedule.small_workers<<','<<p.schedule.small_threads<<','
-                <<p.schedule.large_workers<<','<<p.schedule.large_threads<<'\n';
-            p.queue_log.flush();
-            if(!p.queue_log)throw std::runtime_error("failed writing tiled contact diagnostic");
-        }
         return;
     }
     // Above-cap colors retain the original packet path's seed/contact/finish/
@@ -1927,15 +1873,11 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
         p.mapped_nodes=scene.nodes;p.mapped_node_blocks=scene.node_blocks;p.mapped_deformable=scene.deformable;
     }
     {
-    GpuProfileScope reset_profile("queue_reset");
     checked(cudaMemsetAsync(p.exact_count.data,0,sizeof(unsigned)),"clear exact queue");
     }
     const auto gather_count=p.color_worklist().offsets?p.host_color_offsets[color+1]-p.host_color_offsets[color]:p.broad.contact_count;
-    bool compact_queue_swap=false;
-    unsigned original_exact_count_for_diagnostic=0;
     if(p.broad.contact_count) {
         {
-        GpuProfileScope fast_profile("fused_gather_fast_compute");
         checked(cudaMemsetAsync(p.exact_retry_count.data,0,sizeof(unsigned)),"clear exact retry queue");
         checked(cudaMemsetAsync(p.exact_next.data,0,sizeof(unsigned)),"clear exact cursor");
         if(gather_count) {
@@ -1966,7 +1908,6 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
         if(!original || frozen_snapshot) {
         Work exact_work=p.work(compact_phase);
         if(!original&&p.use_compact_point&&p.use_cooperative_exact) {
-            GpuProfileScope compact_profile("exact_compact_point_first");
             // Both original arena reservations remain. Reuse cooperative
             // scratch only across whole ordered default-stream launches.
             if(p.use_cooperative_compact_point&&p.compact_point_ratio) {
@@ -1982,20 +1923,14 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
                     p.use_output_activity?p.active.data:nullptr,p.compact_point_ratio);
             }
             checked(cudaGetLastError(),"compact point first-tier kernel");
-            // This optional read belongs ONLY to the existing explicit queue
-            // diagnostic mode. Production does not read any per-color count.
-            if(p.queue_log.is_open())
-                checked(cudaMemcpy(&original_exact_count_for_diagnostic,p.exact_count.data,sizeof(unsigned),cudaMemcpyDeviceToHost),"diagnostic original compact-tier exact count");
             // A is dead after this ordered launch. B contains unresolved R;
             // cooperative256 consumes B and appends true wide retries to A.
             checked(cudaMemsetAsync(p.exact_count.data,0,sizeof(unsigned)),"clear compact-tier wide retry queue");
             checked(cudaMemsetAsync(p.exact_next.data,0,sizeof(unsigned)),"clear compact-tier fallback cursor");
             std::swap(exact_work.exact_queue,exact_work.exact_retry_queue);
             std::swap(exact_work.exact_count,exact_work.exact_retry_count);
-            compact_queue_swap=true;
         }
         {
-        GpuProfileScope exact_profile("exact_small");
         if(!original&&p.use_cooperative_exact)
             launch_cooperative_exact_contacts(p.inputs.data,p.outputs.data,exact_work.exact_queue,exact_work.exact_count,
                 exact_work.exact_retry_queue,exact_work.exact_retry_count,p.exact_next.data,
@@ -2004,17 +1939,11 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
                 p.use_output_activity?p.active.data:nullptr);
         else evaluate_exact_queue<exact_small_limbs,false><<<p.schedule.small_workers/p.schedule.small_threads,p.schedule.small_threads>>>(exact_work,elastic.error);
         }
-        GpuProfileScope retry_profile("exact_large_retry");
         checked(cudaMemsetAsync(p.exact_next.data,0,sizeof(unsigned)),"clear exact retry cursor");
         evaluate_exact_queue<exact_large_limbs,true><<<p.schedule.large_workers/p.schedule.large_threads,p.schedule.large_threads>>>(exact_work,elastic.error);
         }
     }
-    if(p.queue_log.is_open()) {
-        GpuProfileScope diagnostic_profile("queue_diagnostic_readback");
-        p.record_queues(color,phase,elastic.error,compact_queue_swap,original_exact_count_for_diagnostic);
-    }
     if(phase==ContactAssemblyPhase::RigidOrientation&&rigid.bodies) {
-        GpuProfileScope pullback_profile("rigid_pullback");
         // Scope reuse to this immutable orientation assembly. Recompute after
         // every COM/orientation update; never reuse another body's/time's J.
         p.body_kinematics.reserve(rigid.bodies);p.node_pullbacks.reserve(scene.nodes);p.pullback_needed.reserve(scene.nodes);
@@ -2036,7 +1965,6 @@ void GpuContactPipeline::assemble_color(const DeformableScene& scene,const Defor
         if(phase==ContactAssemblyPhase::Deformable)contact_elastic.systems=p.pending_systems.data;
         else contact_rigid.systems=p.pending_systems.data;
     }
-    GpuProfileScope reduce_profile("reduce_sdf");
     if(phase==ContactAssemblyPhase::Deformable) {
         if(scene.nodes) {
             if(prefetch_ready) {

@@ -9,6 +9,7 @@
 #include "broad_phase.h"
 
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <future>
 #include <iomanip>
@@ -126,7 +127,7 @@ int main(int argc, char** argv) {
     const bool is_mixed = has_rigid && has_deformable;
     const bool uses_general_solver = is_mixed || has_solid;
     try {
-        validate_dat_scene(ref_mesh, params);
+        validate_dat_scene(ref_mesh, params, &state);
         validate_jacobi_level_based_ccd_scene(ref_mesh, params);
     } catch (const std::invalid_argument& error) {
         std::cerr << "Error: " << error.what() << "\n";
@@ -136,7 +137,7 @@ int main(int argc, char** argv) {
         std::cerr << "Error: --use_cloth_grid is available only for the basic cloth solver; rigid, solid, and mixed scenes are unsupported\n";
         return 1;
     }
-    if (is_mixed && (params.use_ogc || params.use_ogc_solver)) {
+    if (is_mixed && params.use_ogc) {
         throw std::invalid_argument("mixed deformable-rigid scenes do not support OGC mode");
     }
     if (is_mixed) {
@@ -188,12 +189,14 @@ int main(int argc, char** argv) {
 
     std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
-    if (params.use_dat) {
-        std::cout << "Solver: OGC-style colored planar DAT (including curved rigid motion)"
+    if (params.use_dat || params.use_ogc) {
+        std::cout << "Solver: checkpoint "
+                  << (params.use_ogc ? "isotropic OGC" : "planar DAT")
                   << " (gamma=" << params.dat_gamma
                   << ", query_radius=" << params.resolved_dat_query_radius()
                   << ", node_box_padding=" << params.dat_node_box_padding << ")\n"
-                  << "Initial guess: previous positions and rigid poses (DAT skips initial guesses)\n";
+                  << (params.dat_inertial_predictor
+                      ? "Initial guess: filtered inertial predictor\n" : "Initial guess: previous positions and rigid poses\n");
     }
     if (params.use_jacobi_level_based_ccd) {
         std::cout << "Deformable solver: Jacobi with level-based colored linear CCD"
@@ -202,12 +205,10 @@ int main(int argc, char** argv) {
                   << "CCD target: current positions + full Jacobi displacement (colored target fraction is not applied)\n"
                   << "Deformable initial guess: previous positions (Jacobi CCD skips initial guesses)\n";
     }
-    if (!params.use_dat && !params.use_jacobi_level_based_ccd
+    if (!params.use_dat && !params.use_ogc && !params.use_jacobi_level_based_ccd
         && (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based)) {
         if (!has_deformable)
             std::cout << "Colored CCD initial guess: ignored for rigid-only scenes\n";
-        else if (params.use_ogc || params.use_ogc_solver)
-            std::cout << "Deformable initial guess: previous positions (OGC overrides colored CCD guess)\n";
         else {
             std::cout << "Deformable initial guess: "
                       << (params.use_colored_ccd_guess_level_based
@@ -225,7 +226,7 @@ int main(int argc, char** argv) {
     }
     if (!params.use_dat && !params.use_jacobi_level_based_ccd
         && (params.use_basic_experimental || params.use_basic_experimental_v2) && !params.use_cloth_grid
-        && !params.use_ogc && !params.use_ogc_solver) {
+        && !params.use_ogc) {
         if (params.use_basic_experimental_v2)
             std::cout << ((uses_general_solver || has_rigid)
                 ? "Experimental general solver: v2\n" : "Experimental cloth solver: v2\n");
@@ -424,6 +425,5 @@ int main(int argc, char** argv) {
     std::cout << "Total simulation time: " << std::fixed << std::setprecision(3) << total_sim_ms << " ms\n";
     std::cout << "Total solver time:     " << total_solver_ms << " ms\n";
     std::cout << "Average solver time:   " << (total_solver_ms / std::max(1, num_frames - start_frame + 1)) << " ms/frame\n";
-
     return 0;
 }

@@ -66,12 +66,6 @@ struct StepParameters {
     // Particle-update CCD only. Rigid updates and colored guesses always use
     // CCD, as in the production general solver. Does not disable barriers.
     bool collisions = true;
-    // Optional frozen-state particle/rigid Jacobi updates followed by DAT.
-    // This mode skips all initial guesses and PBGS/vertex CCD sweeps.
-    bool jacobi_dat = false;
-    double dat_gamma = 0.9;
-    double dat_query_radius = 0.0; // 0 selects the CPU automatic-radius rule.
-    double dat_node_box_padding = 1.2;
     double rigid_pin_time = 0.0;
     // Authoritative geometry/CCD mode for the ordinary solver. true keeps the
     // robust exact-fallback path; false selects the original non-exact CPU
@@ -121,10 +115,6 @@ public:
     void advance_substep(const StepParameters&, const std::vector<Vector3>& pin_targets,
                          const std::vector<SdfCollider>& colliders);
     StateSnapshot snapshot() const;
-    // Optional diagnostics, enabled only by IPC_GPU_PROFILE_CSV. They do not
-    // change simulation parameters or the numerical update path.
-    void begin_profile_frame(int frame);
-    void end_profile_frame();
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

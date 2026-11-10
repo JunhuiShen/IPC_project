@@ -65,7 +65,7 @@ SceneDescription kind_fixture(int mode,std::size_t points=4) {
     return h;
 }
 Run kind_run(int mode,const char* feature,int capacity,bool exact=false,
-    bool dat=false,bool force=true,std::size_t points=4) {
+    bool force=true,std::size_t points=4) {
     Environment kind("IPC_GPU_TWO_RIGID_KIND_PACKETS"),
         dense("IPC_GPU_TWO_RIGID_DENSE_CSR"),cap("IPC_GPU_CONTACT_PACKET_CAPACITY"),
         prune("IPC_GPU_BOX_CONTACT_PRUNING");
@@ -79,7 +79,7 @@ Run kind_run(int mode,const char* feature,int capacity,bool exact=false,
     {
         GpuSolver solver(h);
         for(double dhat:dhats) {
-            auto p=parameters(exact,dat);p.contact.d_hat=dhat;
+            auto p=parameters(exact);p.contact.d_hat=dhat;
             p.box_radius_min=p.box_radius=1e-5;p.rotation_radius=1e-5;p.damping=.001;
             if(!force){p.contact.k_barrier=0.;p.contact.friction=0.;}
             solver.advance_substep(p,h.pin_targets,{});
@@ -120,7 +120,7 @@ void kind_lifecycle() {
             require(allocation_unset.resident[epoch]==allocation_on.resident[epoch],label+" unset did not select defaultON storage");
         }
         if(capacity==1)require(witnessed_metadata,label+" dense metadata witness is vacuous");
-        const auto no_force=kind_run(mode,"0",capacity,false,false,false);
+        const auto no_force=kind_run(mode,"0",capacity,false,false);
         require(!equal_bytes(off.states.front().com,no_force.states.front().com)
             ||!equal_bytes(off.states.front().omega,no_force.states.front().omega),
             label+" active contact-force witness is vacuous");
@@ -129,15 +129,15 @@ void kind_lifecycle() {
     // Mixed→pure PT→empty→mixed occurs on one owner in every run.
     for(std::size_t points:{127u,128u,129u,257u})for(int capacity:{128,129})
         for(int mode:{0,2}) {
-            kind_compare_runs(kind_run(mode,"0",capacity,false,false,true,points),
-                kind_run(mode,"1",capacity,false,false,true,points),
+            kind_compare_runs(kind_run(mode,"0",capacity,false,true,points),
+                kind_run(mode,"1",capacity,false,true,points),
                 "kind device tails points="+std::to_string(points)+" cap="+std::to_string(capacity));
         }
     // The optional Robust empty-exact-queue/health protocol is deliberately
-    // unchanged. DAT/raw owners receive no dense kind-range capability.
-    for(bool dat:{false,true})for(bool exact:{false,true}) {
-        kind_compare_runs(kind_run(2,"0",3,exact,dat),kind_run(2,"1",3,exact,dat),
-            "kind Robust/DAT complete route");
+    // unchanged. Raw owners receive no dense kind-range capability.
+    for(bool exact:{false,true}) {
+        kind_compare_runs(kind_run(2,"0",3,exact),kind_run(2,"1",3,exact),
+            "kind Robust complete route");
     }
     Environment feature("IPC_GPU_TWO_RIGID_KIND_PACKETS");
     feature.set("1");raw_pipeline_gates();
@@ -154,7 +154,7 @@ int main() {
         require(resident_bytes()==0&&!tracking_failed,"kind packet allocation ledger not empty");
         tracking=false;
         std::cout<<"Kind packets: public six-array bytes, PT/EE/mixed, aligned/misaligned and above/below-cap epochs, "
-            <<"empty/reentry, active forces, exact4B metadata, Robust/DAT/raw and rollback PASS\n";
+            <<"empty/reentry, active forces, exact4B metadata, Robust/raw and rollback PASS\n";
         return 0;
     }catch(const std::exception& e){std::cerr<<"kind packet test: "<<e.what()<<'\n';return 1;}
 }

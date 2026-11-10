@@ -1,5 +1,4 @@
 #include "elastic.h"
-#include "profile.h"
 #include "cloth_math.cuh"
 #include "solid_math.cuh"
 #include "solve.cuh"
@@ -112,22 +111,6 @@ __global__ void propose(DeformableScene s,DeformableState x,ElasticWorkspace w,c
         const double value=x.positions[n][a]-damping*delta[a];
         if(!isfinite(value)) atomicCAS(w.error,0,2);
         w.proposed[n][a]=value;
-    }
-}
-__global__ void propose_displacements(DeformableScene s,ElasticWorkspace w,
-                                     double damping,double (*increments)[3]) {
-    const auto n=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
-    if(n>=s.nodes||!s.deformable[n]||atomicAdd(w.error,0))return;
-    const auto& system=w.systems[n];
-    if(!finite(system)){atomicCAS(w.error,0,1);return;}
-    double delta[3]{};
-    if(damping!=0.0&&!solve3(system.hessian,system.gradient,delta)) {
-        atomicCAS(w.error,0,2);return;
-    }
-    for(int a=0;a<3;++a) {
-        const double value=damping==0.0?0.0:-damping*delta[a];
-        if(!isfinite(value)){atomicCAS(w.error,0,2);return;}
-        increments[n][a]=value;
     }
 }
 __global__ void validate_fractions(DeformableScene s,ElasticWorkspace w,const int* colors,int color,const double* fractions,ElasticIndexRange range) {
@@ -244,7 +227,6 @@ void GpuElasticWorklists::rebuild(const DeformableScene& scene,const int* colors
     int block_count,int color_count,cudaStream_t stream) {
     auto& p=*impl_;p.ready=false;p.colors=nullptr;p.color_count=0;
     if(!p.enabled)return;
-    GpuProfileScope profile("elastic_worklists",stream);
     if(block_count<0||color_count<0||color_count>block_count||(block_count&&!colors)
         ||(scene.nodes&&(!scene.node_blocks||!scene.deformable))
         ||(scene.triangle_count&&!scene.triangles)||(scene.solid_count&&!scene.solids)
@@ -301,7 +283,6 @@ void begin_deformable_substep(const DeformableScene& s,const DeformableState& x,
 }
 void assemble_elastic_color(const DeformableScene& s,const DeformableState& x,const ElasticWorkspace& w,
     const int* colors,int color,const Parameters& p,const SolidParameters& sp,cudaStream_t stream,ElasticColorWorklist worklist) {
-    GpuProfileScope profile("elastic",stream);
     validate_worklist(worklist,colors,color);
     const auto nodes=worklist.enabled?worklist.nodes:ElasticIndexRange{nullptr,s.nodes};
     const auto triangles=worklist.enabled?worklist.triangles:ElasticIndexRange{nullptr,s.triangle_count};
@@ -309,7 +290,6 @@ void assemble_elastic_color(const DeformableScene& s,const DeformableState& x,co
     const auto hinges=worklist.enabled?worklist.hinges:ElasticIndexRange{nullptr,s.hinge_count};
     const unsigned nt=worklist.enabled?worklist.node_threads:width,et=worklist.enabled?worklist.element_threads:width;
     {
-    GpuProfileScope gather_profile("gather",stream);
     if(nodes.count) gather_points<<<list_blocks(nodes.count,nt),nt,0,stream>>>(s,x,w,colors,color,nodes);
     if(triangles.count) gather_elements<TriangleIncident,Triangle,3><<<list_blocks(triangles.count,et),et,0,stream>>>(s.triangles,s.triangle_count,w.triangles,s,x,colors,color,triangles);
     if(solids.count) gather_elements<SolidIncident,Solid,4><<<list_blocks(solids.count,et),et,0,stream>>>(s.solids,s.solid_count,w.solids,s,x,colors,color,solids);
@@ -317,14 +297,12 @@ void assemble_elastic_color(const DeformableScene& s,const DeformableState& x,co
     checked_launch();
     }
     {
-    GpuProfileScope compute_profile("compute",stream);
     if(nodes.count) compute_points<<<list_blocks(nodes.count,nt),nt,0,stream>>>(s,w,colors,color,p,nodes);
     if(triangles.count) compute_elements<<<list_blocks(triangles.count,et),et,0,stream>>>(s.triangles,s.triangle_count,w.triangles,w.triangle_outputs,s,colors,color,p,w.error,triangles);
     if(solids.count) compute_elements<<<list_blocks(solids.count,et),et,0,stream>>>(s.solids,s.solid_count,w.solids,w.solid_outputs,s,colors,color,sp,w.error,solids);
     if(hinges.count && p.bending_stiffness>0.0) compute_elements<<<list_blocks(hinges.count,et),et,0,stream>>>(s.hinges,s.hinge_count,w.hinges,w.hinge_outputs,s,colors,color,p,w.error,hinges);
     checked_launch();
     }
-    GpuProfileScope reduce_profile("reduce",stream);
     if(nodes.count) reduce<<<list_blocks(nodes.count,nt),nt,0,stream>>>(s,w,colors,color,p.dt2,p.bending_stiffness>0.0,nodes);
     checked_launch();
 }
@@ -347,13 +325,6 @@ void commit_deformable_color(const DeformableScene& s,const DeformableState& x,c
         checked_launch();
         commit<<<list_blocks(nodes.count,nt),nt,0,stream>>>(s,x,w,colors,color,fractions,nodes);
     }
-    checked_launch();
-}
-void propose_deformable_displacements(const DeformableScene& s,const ElasticWorkspace& w,
-    double damping,double (*increments)[3],cudaStream_t stream) {
-    if(!std::isfinite(damping)||damping<0.0||(s.nodes&&(!increments||!w.systems||!w.error)))
-        throw std::invalid_argument("Invalid GPU Jacobi displacement proposal");
-    if(s.nodes)propose_displacements<<<blocks(s.nodes),width,0,stream>>>(s,w,damping,increments);
     checked_launch();
 }
 void finish_deformable_substep(const DeformableScene& s,const DeformableState& x,double dt,cudaStream_t stream) {

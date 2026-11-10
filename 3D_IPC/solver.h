@@ -58,19 +58,10 @@ inline void accumulate_solver_result(SolverResult& agg, const SolverResult& sub,
     }
 }
 
-// DAT for cloth, solid, rigid, and mixed scenes. Elastic colors;
-// contact geometry refreshes before each color.
+// DAT for cloth, solid, rigid, and mixed scenes. Uses the checkpointed planar
+// DAT geometry: elastic colors with contact geometry refreshed before each
+// color and total motion measured from the last detection checkpoint.
 SolverResult global_gauss_seidel_solver_dat(const RefMesh& ref_mesh,
-    const DeformedState& state, const VertexTriangleMap& adj,
-    const std::vector<Pin>& pins, const SimParams& params,
-    std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,
-    std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new,
-    std::vector<Vec3>& omega_new, BroadPhase& broad_phase,
-    const std::string& outdir = "");
-
-// Simultaneous Jacobi reference APIs retained for GPU parity.
-SolverResult global_jacobi_solver_dat(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
-SolverResult global_jacobi_solver_dat_general(const RefMesh& ref_mesh,
     const DeformedState& state, const VertexTriangleMap& adj,
     const std::vector<Pin>& pins, const SimParams& params,
     std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat,

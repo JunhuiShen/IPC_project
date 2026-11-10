@@ -170,14 +170,14 @@ affect Examples 14 and 15. Example 14's default 50 sheets contain 245,000 cloth
 vertices. Example 15 uses 4.2 m square sheets with 3 cm edges and 5 mm gaps,
 `E=1e6`, `nu=0.25`, and `kB=0.001`. Its lowest sheet starts at 1.8 m, centered
 at x=0.8 m; the cylinder has radius 0.55 m and center (-0.7, 0.65, 0) m.
-Explicit command-line settings override the scene presets. The staged Example 15
+For Example 15, explicit command-line settings override these presets. The staged
 run below is being tested; full contact and spreading acceptance is pending.
 
 ## Common settings
 
 Arguments use `--key value`. Boolean flags accept `true`/`false` or `1`/`0`;
-a bare boolean flag enables it. Scenes can set their own presets, so use the
-reference commands as the starting point for a particular example.
+a bare boolean flag enables it. Use the example commands below for
+geometry-specific settings.
 Scenes use meters and seconds, Young's moduli in pascals, densities in kg/m³,
 and +y as the up direction.
 
@@ -186,7 +186,7 @@ and +y as the up direction.
 | `--num_frames N --fps F` | Simulated duration is `N/F` seconds; `fps` is output frequency, not measured solver speed. |
 | `--substeps S` | Substep duration is `1/(fps × substeps)`. More substeps increase work per frame. |
 | `--max_substep_iters K --fixed_iters` | Exactly K solver sweeps per substep. Without `fixed_iters`, residual tolerances allow early stopping. |
-| `--node_box_update_count N` | GS iterations between motion-box, collision-candidate, and color rebuilds. Setting N equal to `max_substep_iters` rebuilds once at the start of each substep. |
+| `--node_box_update_count N` | Basic GS iterations between motion-box, collision-candidate, and color rebuilds. Setting N equal to `max_substep_iters` rebuilds once at the start of each substep. DAT/OGC use their checkpoint controls instead. |
 | `--node_box_min --node_box_max` | Lower and upper bounds on motion-box half-extents. Vertex updates stay inside the current boxes until the next rebuild. |
 | `--E --nu --density --thickness --kB` | Cloth material and bending properties; `kB=0` disables bending. |
 | `--solid_E --solid_nu --solid_density` | Deformable-solid material properties, separate from cloth settings. |
@@ -209,9 +209,10 @@ and +y as the up direction.
 | Experimental SIMD v2 | `--use_basic_experimental true --use_simd true`; supports cloth, rigid, and mixed scenes. |
 | Experimental scalar cloth v1 | `--use_basic_experimental true --use_simd false`. |
 | Basic cloth grid | `--use_cloth_grid true`; cloth only, with OGC disabled. See `--help` for grid sizing flags. |
-| DAT solver | `--use_dat true`; cloth, solid, rigid, and mixed scenes, with OGC and cloth grid disabled. Takes precedence over experimental/SIMD solver flags. |
+| Planar DAT | `--use_dat true`; the native port for cloth, solid, rigid, and mixed scenes, including certified curved rigid trajectories. OGC and cloth grid must be disabled. Takes precedence over experimental/SIMD solver flags. |
+| Isotropic OGC | `--use_ogc true`; the dedicated native isotropic solver for cloth and solids. Select it separately from DAT and cloth grid. |
 | Jacobi with level-based colored CCD | `--use_jacobi_level_based_ccd true`; CPU cloth/solid scenes without rigid bodies, with OGC and cloth grid disabled. Takes precedence over experimental/SIMD solver flags; mutually exclusive with `--use_dat`. |
-| CUDA solver | `gpu/build/3D_sim_gpu`; requires `--fixed_iters` and, for ordinary solving, `--use_ticcd false`. OGC and cloth grid are unsupported; see the [GPU guide](gpu/README.md) for mode restrictions. |
+| CUDA solver | `gpu/build/3D_sim_gpu`; requires `--fixed_iters` and `--use_ticcd false`. DAT and OGC are CPU-only; the GPU driver rejects `--use_dat`, and OGC/cloth grid are unsupported. See the [GPU guide](gpu/README.md) for the remaining modes. |
 
 Run a small deformable example with DAT:
 
@@ -222,9 +223,15 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
   --use_dat --dat_gamma 0.9 --format geo --outdir twisting_cloth_output
 ```
 
-DAT starts each substep from the previous positions and poses, skipping initial
-guesses. It supports fixed-iteration and residual-based stopping. See `--help`
-for DAT parameters.
+DAT and OGC use collision-detection checkpoints, a filtered inertial predictor,
+and elasticity-only color sweeps; inertia targets and friction history stay
+fixed. Both support fixed-iteration and residual-based stopping; see `--help`
+for controls. The native APIs are `global_gauss_seidel_solver_dat` and
+`global_gauss_seidel_solver_ogc` in `solver.h`/`solver.cpp`, based on
+[Newton DAT](https://github.com/newton-physics/newton/blob/2134db9cd0354019061d36a2762f886d59e88306/newton/_src/solvers/vbd/particle_vbd_kernels.py),
+[Gaia](https://github.com/AnkaChan/Gaia/blob/c229692045465a76233f9fba9197fb22bbfb3694/Simulator/Modules/VBDCloth/VBDClothPhysics.cpp)
+and the [Divide and Truncate authors' project](https://ankachan.github.io/Projects/DAT/).
+License notices are in [third_party/licenses](third_party/licenses).
 
 Jacobi with level-based colored CCD uses fully frozen Jacobi proposals, with
 force-residual convergence checks and a previous-position substep start. It
@@ -275,11 +282,13 @@ early if all nodes reach their targets or a complete sweep makes no progress.
 `xhat - x^n` (default `1.0`, finite in `[0, 1]`); it leaves the solver's `xhat`
 unchanged.
 Both colored-guess modes are supported by the GPU solver.
-Either colored guess overrides the CCD, Verlet, and translation guess flags
-and is ignored in OGC, DAT, or the Jacobi CCD solver. Alternative OGC solving
-(`--use_ogc_solver`) requires `--fixed_iters`; mixed deformable/rigid scenes
-use the basic/general route. Some scenes enforce their own guess/contact
-presets in [example.cpp](example.cpp).
+Either colored guess overrides `--use_ccd_guess` and is ignored in OGC, DAT,
+or the Jacobi CCD solver. `--use_ogc` selects the
+dedicated cloth/solid solver; rigid and rigid/deformable mixed scenes are
+rejected.
+In [example.cpp](example.cpp), Example 12 caps `d_hat` at 2 mm (or 45% of the
+nominal shortest edge, if smaller); rigid-only Examples 16–18 disable cloth
+initial guesses.
 
 ## Output and restart
 

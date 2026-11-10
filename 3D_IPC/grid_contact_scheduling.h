@@ -38,20 +38,11 @@ struct ClothGridContactSweep {
         std::atomic<std::uint64_t> failed_phase{0};
         std::atomic<std::uint64_t> commit_ready{0};
     };
-    struct BatchStats {
-        double wall_seconds = 0.0;
-        double worker_busy_seconds = 0.0;
-        double group_wait_seconds = 0.0;
-        double barrier_wait_seconds = 0.0;
-        double max_cell_seconds = 0.0;
-        int cooperative_cells = 0;
-    };
 
     int prepared_team = 0;
     std::vector<int> cooperative_cells;
     std::vector<Assignment> assignments;
     std::vector<int> split_count;
-    std::vector<BatchStats> batch_stats;
 
     void prepare(const ClothGridSchedule& schedule, const BroadPhase::Cache& cache) {
         prepared_team = std::max(1, omp_get_max_threads());
@@ -59,7 +50,6 @@ struct ClothGridContactSweep {
         assignments.assign(batch_count * prepared_team, Assignment{});
         split_count.assign(batch_count, 0);
         cooperative_cells.clear();
-        batch_stats.clear();
         reserve_contact_scratch(states, states_capacity, schedule.cells.size());
         reserve_contact_scratch(next_whole, queue_capacity, batch_count);
         vertex_counts.resize(cache.vertex_nt.size());
@@ -152,9 +142,8 @@ struct ClothGridContactSweep {
     template <class Compute, class Apply, class Baseline, class CCD, class Commit>
     void run(const ClothGridSchedule& schedule, const Compute& compute,
              const Apply& apply, const Baseline& baseline, const CCD& ccd,
-             const Commit& commit, bool profile = false, bool cooperative_commit = false) {
-        if (profile) run_impl<true>(schedule, compute, apply, baseline, ccd, commit, cooperative_commit);
-        else run_impl<false>(schedule, compute, apply, baseline, ccd, commit, cooperative_commit);
+             const Commit& commit, bool cooperative_commit = false) {
+        run_impl(schedule, compute, apply, baseline, ccd, commit, cooperative_commit);
     }
 
 private:
@@ -168,12 +157,11 @@ private:
     std::size_t states_capacity = 0, queue_capacity = 0;
     std::size_t commit_context_capacity = 0;
 
-    template <bool Profile, class Compute, class Apply, class Baseline, class CCD, class Commit>
+    template <class Compute, class Apply, class Baseline, class CCD, class Commit>
     void run_impl(const ClothGridSchedule& schedule, const Compute& compute,
                   const Apply& apply, const Baseline& baseline, const CCD& ccd,
                   const Commit& commit, bool cooperative_commit) {
         const std::size_t batch_count = schedule.batches.size();
-        batch_stats.clear();
         if (batch_count == 0) return;
         if (cooperative_commit)
             reserve_contact_scratch(commit_contexts, commit_context_capacity, schedule.cells.size());
@@ -187,19 +175,11 @@ private:
                 states[cell].commit_ready.store(0, std::memory_order_relaxed);
         }
         std::vector<std::exception_ptr> errors(batch_count);
-        std::vector<BatchStats> worker_stats;
-        // Dynamic teams can be smaller or larger than the team used by prepare.
-        // The latter takes the whole-cell fallback, but still needs stats slots.
-        const int stats_team = std::max(prepared_team, omp_get_max_threads());
-        if constexpr (Profile) worker_stats.resize(batch_count * stats_team);
-#pragma omp parallel shared(errors, worker_stats)
+#pragma omp parallel shared(errors)
         {
             const int worker = omp_get_thread_num();
             for (std::size_t b = 0; b < batch_count; ++b) {
                 const auto& batch = schedule.batches[b];
-                double begin = 0.0, group_wait = 0.0, max_cell = 0.0;
-                int cooperative_count = 0;
-                if constexpr (Profile) begin = omp_get_wtime();
                 const auto record_error = [&](State* state, std::uint64_t phase = 0) {
                     if (state) {
                         std::uint64_t unset = 0;
@@ -210,15 +190,11 @@ private:
                     { if (!errors[b]) errors[b] = std::current_exception(); }
                 };
                 const auto process_whole = [&](int cell) {
-                    double start = 0.0;
-                    if constexpr (Profile) start = omp_get_wtime();
                     try {
                         for (int v : schedule.cells[cell].vertices) baseline(v);
                     } catch (...) {
                         record_error(nullptr);
                     }
-                    if constexpr (Profile)
-                        max_cell = std::max(max_cell, omp_get_wtime() - start);
                 };
                 if (split_count[b] == 0 || omp_get_num_threads() != prepared_team) {
 #pragma omp for schedule(dynamic, 1) nowait
@@ -229,19 +205,10 @@ private:
                     if (a.cell >= 0 && a.lanes == 1) {
                         process_whole(a.cell);
                     } else if (a.cell >= 0) {
-                        double cell_start = 0.0;
-                        if constexpr (Profile) {
-                            if (a.lane == 0) {
-                                cell_start = omp_get_wtime();
-                                ++cooperative_count;
-                            }
-                        }
                         State& state = states[a.cell];
                         auto* result = values.data() + a.offset;
                         auto* mask = masks.data() + a.mask_offset;
                         const auto wait_until = [&](const auto& ready) {
-                            double start = 0.0;
-                            if constexpr (Profile) start = omp_get_wtime();
                             unsigned spins = 0, yields = 0;
                             while (!ready()) {
                                 if (++spins < 65536) {
@@ -260,7 +227,6 @@ private:
                                     }
                                 }
                             }
-                            if constexpr (Profile) group_wait += omp_get_wtime() - start;
                         };
                         std::uint64_t phase = 0;
                         for (int v : schedule.cells[a.cell].vertices) {
@@ -376,9 +342,6 @@ private:
                             const auto failed = state.failed_phase.load(std::memory_order_acquire);
                             if (failed != 0 && failed <= phase) break;
                         }
-                        if constexpr (Profile)
-                            if (a.lane == 0)
-                                max_cell = std::max(max_cell, omp_get_wtime() - cell_start);
                     }
                     // Finished groups can also drain remaining independent cells.
                     if (split_count[b] < static_cast<int>(batch.size())) {
@@ -389,35 +352,8 @@ private:
                         }
                     }
                 }
-                double work_end = 0.0;
-                if constexpr (Profile) work_end = omp_get_wtime();
                 #pragma omp barrier
-                if constexpr (Profile) {
-                    const double end = omp_get_wtime();
-                    auto& stats = worker_stats[b * stats_team + worker];
-                    stats.wall_seconds = end - begin;
-                    stats.worker_busy_seconds = std::max(0.0, work_end - begin - group_wait);
-                    stats.group_wait_seconds = group_wait;
-                    stats.barrier_wait_seconds = end - work_end;
-                    stats.max_cell_seconds = max_cell;
-                    stats.cooperative_cells = cooperative_count;
-                }
                 if (errors[b]) break;
-            }
-        }
-        if constexpr (Profile) {
-            batch_stats.resize(batch_count);
-            for (std::size_t b = 0; b < batch_count; ++b) {
-                auto& batch = batch_stats[b];
-                for (int worker = 0; worker < stats_team; ++worker) {
-                    const auto& stats = worker_stats[b * stats_team + worker];
-                    batch.wall_seconds = std::max(batch.wall_seconds, stats.wall_seconds);
-                    batch.worker_busy_seconds += stats.worker_busy_seconds;
-                    batch.group_wait_seconds += stats.group_wait_seconds;
-                    batch.barrier_wait_seconds += stats.barrier_wait_seconds;
-                    batch.max_cell_seconds = std::max(batch.max_cell_seconds, stats.max_cell_seconds);
-                    batch.cooperative_cells += stats.cooperative_cells;
-                }
             }
         }
         for (const auto& error : errors)

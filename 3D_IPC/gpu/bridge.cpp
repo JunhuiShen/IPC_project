@@ -26,6 +26,12 @@ void copy_vectors(const std::vector<Vector3>& source,std::vector<Vec3>& target) 
     for(std::size_t i=0;i<source.size();++i)
         for(int a=0;a<3;++a) target[i][a]=source[i][a];
 }
+void reject_cpu_only_solver(const SimParams& params) {
+    if(params.use_dat)
+        throw std::invalid_argument("GPU: --use_dat selects the CPU planar DAT solver; CUDA Jacobi-DAT has been retired");
+    if(params.use_ogc)
+        throw std::invalid_argument("GPU: --use_ogc selects the CPU isotropic OGC solver");
+}
 }
 
 std::vector<Vector3> describe_pin_targets(std::size_t nodes,const std::vector<Pin>& pins) {
@@ -36,6 +42,7 @@ std::vector<Vector3> describe_pin_targets(std::size_t nodes,const std::vector<Pi
 
 SceneDescription describe_scene(const RefMesh& mesh,const DeformedState& state,
     const std::vector<Pin>& pins,const SimParams& params) {
+    reject_cpu_only_solver(params);
     SceneDescription out;
     const auto n=state.deformed_positions.size();
     if(state.velocities.size()!=n || mesh.mass.size()!=n)
@@ -105,15 +112,6 @@ SceneDescription describe_scene(const RefMesh& mesh,const DeformedState& state,
     for(std::size_t node=0;node<n;++node)if(!out.solid[node])out.surface[node]=1;
     for(int node:mesh.surface_nodes)out.surface.at(node)=1;
 
-    if(params.use_dat) {
-        std::vector<unsigned char> connected_solid(n,0),boundary(n,0);
-        for(int node:mesh.tets)connected_solid.at(node)=1;
-        if(connected_solid!=out.solid)
-            throw std::invalid_argument("GPU DAT: tet_nodes must match tetrahedral connectivity");
-        for(int node:mesh.surface_nodes)boundary.at(node)=1;
-        for(int node:mesh.tris)if(out.solid.at(node)&&!boundary.at(node))
-            throw std::invalid_argument("GPU DAT: solid boundary node missing from surface_nodes");
-    }
     // Keep each body's parameter-list order; only static metadata is grouped
     // on the host. Target positions at the supplied time are evaluated on GPU.
     out.rigid_pin_offsets.assign(mesh.rb_nodes.size()+1,0);
@@ -185,6 +183,7 @@ SceneDescription describe_scene(const RefMesh& mesh,const DeformedState& state,
 }
 
 StepParameters describe_step(const SimParams& p,int original_reference_threads) {
+    reject_cpu_only_solver(p);
     p.validate_ccd_exact_step_bound_parameters();
     p.validate_colored_ccd_guess_parameters();
     p.validate_dat_parameters();
@@ -192,13 +191,11 @@ StepParameters describe_step(const SimParams& p,int original_reference_threads) 
     // Never silently reroute an unported solver/initial-guess mode to CPU.
     if(p.use_jacobi_level_based_ccd)
         throw std::invalid_argument("GPU: --use_jacobi_level_based_ccd is currently CPU-only");
-    if(!p.fixed_iters || p.use_ogc || p.use_ogc_solver || p.use_cloth_grid)
+    if(!p.fixed_iters || p.use_cloth_grid)
         throw std::invalid_argument("GPU currently requires fixed iterations and conflict-graph coloring, with OGC/grid disabled");
-    if(!p.use_dat&&!(p.use_colored_ccd_guess || p.use_colored_ccd_guess_level_based) && (p.use_verlet_guess || p.use_translation_guess))
-        throw std::invalid_argument("GPU: Verlet and translation initial guesses are not ported");
     if(original_reference_threads<=0||original_reference_threads>4096)
         throw std::invalid_argument("GPU original_reference_threads must be a positive bounded logical count");
-    if(p.use_ticcd&&!p.use_dat)
+    if(p.use_ticcd)
         throw std::invalid_argument("GPU uses device interval/exact linear CCD; the Tight-Inclusion backend is not ported (use --use_ticcd false)");
     StepParameters out;
     out.dt=p.dt();out.elastic.dt2=p.dt2();out.elastic.kpin=p.kpin;
@@ -212,7 +209,7 @@ StepParameters describe_step(const SimParams& p,int original_reference_threads) 
     out.damping=p.damping;out.box_radius_min=p.node_box_min;out.box_radius=p.node_box_max;
     out.rotation_radius=p.theta_box_max;
     out.iterations=p.max_global_iters;out.rebuild_interval=p.node_box_update_count;
-    const bool colored=!p.use_dat&&(p.use_colored_ccd_guess||p.use_colored_ccd_guess_level_based);
+    const bool colored=p.use_colored_ccd_guess||p.use_colored_ccd_guess_level_based;
     out.colored_guess_sweeps=colored?p.colored_ccd_guess_iters:0;
     // Enabled-with-zero-sweeps is a real CPU request: collision_colored_ccd_
     // initial_guess validates positions and targets before its zero-budget
@@ -222,19 +219,15 @@ StepParameters describe_step(const SimParams& p,int original_reference_threads) 
     out.colored_guess_fraction=p.colored_ccd_guess_fraction;
     out.colored_guess_level_based=colored&&p.use_colored_ccd_guess_level_based;
     out.ccd_exact_step_bound=p.ccd_exact_step_bound;
-    out.global_ccd_guess=p.use_ccd_guess&&!colored&&!p.use_dat;
+    out.global_ccd_guess=p.use_ccd_guess&&!colored;
     out.collisions=p.use_ccd;
-    out.jacobi_dat=p.use_dat;
-    out.dat_gamma=p.dat_gamma;
-    out.dat_query_radius=p.use_dat?p.resolved_dat_query_radius():p.dat_query_radius;
-    out.dat_node_box_padding=p.dat_node_box_padding;
     out.rigid_pin_time=p.rigid_pin_time;
     out.exact_computation_fallback=p.exact_computation_fallback;
     out.original_reference_threads=original_reference_threads;
     // Exactly physics_detail::energy_simd_enabled, without linking the CPU
     // physics/solver library into the device bridge for a settings predicate.
     out.cpu_energy_simd=p.use_basic_experimental_v2&&p.use_simd
-        &&!p.use_cloth_grid&&!p.use_ogc_solver;
+        &&!p.use_cloth_grid;
     // Scheduler-FAMILY metadata from the ACTUAL CPU dispatch, never from the
     // host OpenMP team. The cloth experimental v1/v2 ColoredContactSweep::
     // prepare predicate is `use_contact_sweep` = parallel && team>1 &&
@@ -248,8 +241,8 @@ StepParameters describe_step(const SimParams& p,int original_reference_threads) 
     // ColoredContactSweep) down to StoredNoop using its scene metadata.
     const bool cloth_experimental =
         p.use_basic_experimental || p.use_basic_experimental_v2;
-    const bool cooperative_cpu = !p.use_dat && p.use_parallel
-        && cloth_experimental && !p.use_ogc
+    const bool cooperative_cpu = p.use_parallel
+        && cloth_experimental
         && p.friction_coefficient==0.0 && p.d_hat>0.0
         && original_reference_threads>1;
     out.original_update_convention = cooperative_cpu

@@ -24,9 +24,32 @@ using PinTargetUpdater = std::function<void(std::vector<Pin>& pins, double t)>;
 // Called after each substep with the global substep index (0-based) and current positions.
 using SubstepCallback = std::function<void(int, const std::vector<Vec3>&)>;
 
-inline void validate_dat_scene(const RefMesh& ref_mesh, const SimParams& params) {
+inline void apply_prescribed_pins(DeformedState& state, const std::vector<Pin>& pins) {
+    if (state.velocities.size() != state.deformed_positions.size())
+        throw std::invalid_argument("prescribed pins require consistent particle arrays");
+    for (const auto& pin : pins) if (pin.prescribed) {
+        if (pin.vertex_index < 0 || std::size_t(pin.vertex_index) >= state.deformed_positions.size()
+            || !pin.target_position.allFinite())
+            throw std::invalid_argument("invalid prescribed pin");
+    }
+    for (const auto& pin : pins) if (pin.prescribed) {
+        state.deformed_positions[pin.vertex_index] = pin.target_position;
+        state.velocities[pin.vertex_index].setZero();
+    }
+}
+
+
+inline void validate_dat_scene(const RefMesh& ref_mesh, const SimParams& params,
+    const DeformedState* state = nullptr) {
     params.validate_dat_parameters();
-    (void)ref_mesh; // Solvers validate rigid ownership and topology.
+    if (params.use_ogc
+        && (!ref_mesh.rb_nodes.empty() || !ref_mesh.total_mass.empty()
+            || !ref_mesh.rb_update_modes.empty() || !ref_mesh.ref_positions.empty()
+            || std::any_of(ref_mesh.node_to_rb.begin(), ref_mesh.node_to_rb.end(),
+                [](int owner) { return owner >= 0; })
+            || (state && (!state->x_coms.empty() || !state->v_coms.empty()
+                || !state->orientations.empty() || !state->omega.empty()))))
+        throw std::invalid_argument("--use_ogc supports cloth/solid particles only; rigid bodies and rigid proxy nodes are unsupported");
 }
 
 inline void validate_jacobi_level_based_ccd_scene(const RefMesh& ref_mesh, const SimParams& params) {
@@ -93,12 +116,27 @@ inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& st
     }
 }
 
+// Publish one solver's generalized coordinates and particle proxies together.
+// General v2 and DAT return the collision configuration they actually accepted;
+// callers must pass that array rather than project its rounded pose again. The
+// published positions also become the next substep's friction history.
+inline void commit_rigid_body_solver_state(const RefMesh& ref_mesh,
+    DeformedState& state, const std::vector<Vec3>& centers,
+    const std::vector<Vec4>& orientations, const std::vector<Vec3>& angular_velocities,
+    double dt, const std::vector<Vec3>* accepted_positions = nullptr) {
+    update_velocity(state.v_coms, centers, state.x_coms, dt);
+    state.x_coms = centers;
+    state.orientations = orientations;
+    state.omega = angular_velocities;
+    sync_rigid_body_particles(ref_mesh, state, accepted_positions);
+}
+
 // The caller owns storage for this simulation and joins each frame before reuse.
 // Refresh topology at the frame boundary just as the fresh-workspace entry does;
 // every substep still rebuilds its current motion boxes and contact candidates.
 inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& ref_mesh, const SimParams& params,
     BroadPhase& broad_phase, int frame_index = 1, SubstepCallback on_substep = nullptr) {
-    validate_dat_scene(ref_mesh, params);
+    validate_dat_scene(ref_mesh, params, &state);
     validate_jacobi_level_based_ccd_scene(ref_mesh, params);
     if (params.use_jacobi_level_based_ccd)
         throw std::invalid_argument("advance_one_frame_rb does not support Jacobi level-based CCD; use a deformable frame driver");
@@ -127,8 +165,9 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
             const std::vector<Pin> pins;
             SimParams solver_params=active_params;
             solver_params.write_substeps=false;
-            sub_result=global_gauss_seidel_solver_dat(ref_mesh,state,adjacency,pins,
+            sub_result = global_gauss_seidel_solver_dat(ref_mesh,state,adjacency,pins,
                 solver_params,xnew,xhat,x_com_new,q_new,omega_new,broad_phase);
+            accepted_rigid_positions = std::move(xnew);
         } else if (params.use_basic_experimental_v2) {
             accepted_rigid_positions = state.deformed_positions;
             std::vector<Vec3>& xnew = accepted_rigid_positions;
@@ -151,12 +190,8 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
         if (!sub_result.converged)
             return agg;
 
-        update_velocity(state.v_coms, x_com_new, state.x_coms, dt);
-        state.x_coms = x_com_new;
-        state.orientations = q_new;
-        state.omega = omega_new;
-        sync_rigid_body_particles(ref_mesh, state,
-            active_params.use_basic_experimental_v2 && !active_params.use_dat
+        commit_rigid_body_solver_state(ref_mesh, state, x_com_new, q_new, omega_new, dt,
+            (active_params.use_dat || active_params.use_basic_experimental_v2)
                 ? &accepted_rigid_positions : nullptr);
 
         if (on_substep) {
@@ -187,7 +222,7 @@ inline SolverResult advance_one_frame_general(
     int frame_index = 1, PinTargetUpdater pin_updater = nullptr,
     SubstepCallback on_substep = nullptr,
     const std::string& outdir = "") {
-    validate_dat_scene(ref_mesh, params);
+    validate_dat_scene(ref_mesh, params, &state);
     validate_jacobi_level_based_ccd_scene(ref_mesh, params);
     params.validate_colored_ccd_guess_parameters();
     if (ref_mesh.node_to_rb.size() != state.deformed_positions.size()
@@ -206,6 +241,8 @@ inline SolverResult advance_one_frame_general(
                 ((frame_index - 1) * params.substeps + substep + 1) * dt;
             pin_updater(pins, t_next);
         }
+        if (params.use_dat || params.use_ogc)
+            apply_prescribed_pins(state, pins);
 
         std::vector<Vec3> xhat;
         build_xhat(xhat, state.deformed_positions, state.velocities, dt);
@@ -216,8 +253,8 @@ inline SolverResult advance_one_frame_general(
                 xhat[node] = state.deformed_positions[node];
         }
 
-        // OGC/DAT start at the previous configuration. This zero-velocity
-        // initial guess leaves the physical velocities in xhat and rigid inertia.
+        // DAT/OGC filter their inertial predictors internally. Start their
+        // input iterate at the physical previous configuration and retain xhat.
         // The opt-in guess moves cloth/solid nodes only. Rigid proxies remain
         // at their previous positions and participate as fixed CCD obstacles;
         // COM/orientation are left to the general solver. Legacy particle
@@ -225,7 +262,7 @@ inline SolverResult advance_one_frame_general(
         std::vector<Vec3> xnew = state.deformed_positions;
         if (!params.use_dat && !params.use_jacobi_level_based_ccd
             && (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based)
-            && !params.use_ogc && !params.use_ogc_solver) {
+            && !params.use_ogc) {
             std::vector<Vec3> intended_displacement(nv, Vec3::Zero());
             for (int node = 0; node < nv; ++node) {
                 if (ref_mesh.node_to_rb[node] < 0) {
@@ -249,6 +286,9 @@ inline SolverResult advance_one_frame_general(
         if (params.use_dat)
             substep_result = global_gauss_seidel_solver_dat(ref_mesh, state, adj, pins,
                 params, xnew, xhat, x_com_new, q_new, omega_new, broad_phase, outdir);
+        else if (params.use_ogc)
+            substep_result = global_gauss_seidel_solver_ogc(ref_mesh, adj, pins,
+                params, xnew, xhat, state.velocities, outdir, &state.deformed_positions);
         else if (params.use_jacobi_level_based_ccd)
             substep_result = global_jacobi_solver_level_based_ccd(ref_mesh, adj, pins,
                 params, xnew, xhat, state.velocities, broad_phase, outdir,
@@ -273,13 +313,9 @@ inline SolverResult advance_one_frame_general(
             state.deformed_positions[node] = xnew[node];
         }
 
-        update_velocity(state.v_coms, x_com_new, state.x_coms, dt);
-        state.x_coms = x_com_new;
-        state.orientations = q_new;
-        state.omega = omega_new;
-        sync_rigid_body_particles(ref_mesh, state,
-            params.use_basic_experimental_v2 && !params.use_dat
-                && !params.use_jacobi_level_based_ccd ? &xnew : nullptr);
+        commit_rigid_body_solver_state(ref_mesh, state, x_com_new, q_new, omega_new, dt,
+            (params.use_dat || (params.use_basic_experimental_v2
+                && !params.use_ogc && !params.use_jacobi_level_based_ccd)) ? &xnew : nullptr);
 
         if (on_substep) {
             const int global_substep = (frame_index - 1) * params.substeps + substep;
@@ -293,7 +329,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
     std::vector<Pin>& pins, const SimParams& params,
     BroadPhase& broad_phase, int frame_index = 1,
     PinTargetUpdater pin_updater = nullptr, SubstepCallback on_substep = nullptr, const std::string& outdir = "") {
-    validate_dat_scene(ref_mesh, params);
+    validate_dat_scene(ref_mesh, params, &state);
     validate_jacobi_level_based_ccd_scene(ref_mesh, params);
     if(params.use_dat && !ref_mesh.rb_nodes.empty())
         return advance_one_frame_general(state,ref_mesh,adj,pins,params,broad_phase,
@@ -304,7 +340,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         || !ref_mesh.tet_nodes.empty()
         || std::any_of(ref_mesh.node_to_rb.begin(), ref_mesh.node_to_rb.end(),
             [](int owner) { return owner >= 0; });
-    if (!params.use_dat && !params.use_jacobi_level_based_ccd
+    if (!params.use_dat && !params.use_ogc && !params.use_jacobi_level_based_ccd
         && (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based)
         && has_noncloth_geometry) {
         throw std::invalid_argument("advance_one_frame is cloth-only; use advance_one_frame_general for solid or mixed scenes");
@@ -330,13 +366,15 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
             const double t_next = ((frame_index - 1) * params.substeps + (sub + 1)) * dt;
             pin_updater(pins, t_next);
         }
+        if (params.use_dat || params.use_ogc)
+            apply_prescribed_pins(state, pins);
 
         build_xhat(xhat, state.deformed_positions, state.velocities, dt);
 
-        // OGC/DAT use a zero-displacement initial iterate; xhat above retains
-        // physical velocity, so this does not reset the simulated momentum.
+        // DAT/OGC perform their own filtered predictor. Keep physical velocity
+        // in xhat and pass the previous configuration as their input iterate.
         if (params.use_dat || params.use_jacobi_level_based_ccd
-            || params.use_ogc || params.use_ogc_solver)
+            || params.use_ogc)
             xnew = state.deformed_positions;
         else if (params.use_colored_ccd_guess || params.use_colored_ccd_guess_level_based) {
             // Only the predictor targets a fraction of the displacement to
@@ -355,13 +393,8 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
                 intended_displacement, ref_mesh, params, params.colored_ccd_guess_iters,
                 &broad_phase, nullptr, &xnew);
         }
-        else if (params.use_verlet_guess)
-            xnew = verlet_initial_guess(state.deformed_positions, xhat, ref_mesh, params, &predictor_broad_phase);
         else if (params.use_ccd_guess)
             xnew = ccd_initial_guess(state.deformed_positions, xhat, ref_mesh, &predictor_broad_phase, &xnew);
-        else if (params.use_translation_guess){
-            xnew = translation_initial_guess(state.deformed_positions, xhat, ref_mesh, pins, params);
-        }
         else
             xnew = state.deformed_positions;
 
@@ -374,7 +407,7 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
         }
         else if (params.use_jacobi_level_based_ccd)
             sub_result = global_jacobi_solver_level_based_ccd(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
-        else if (params.use_ogc_solver)
+        else if (params.use_ogc)
             sub_result = global_gauss_seidel_solver_ogc(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir, &state.deformed_positions);
         else if (params.use_cloth_grid)
             sub_result = global_gauss_seidel_solver_ambient_grid(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);

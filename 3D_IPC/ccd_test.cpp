@@ -214,14 +214,12 @@ void expect_safe_step_matches_exact(const std::array<Vec3, 4>& points,
     }
     if (compare_contact_distance_exact(points, !segment, 0.0) == 0
         && (target.array() != points[role].array()).any()) {
-        EXPECT_THROW(per_vertex_safe_step(phase, actual, role, target, .9, true, false,
-            false, false, rejections), std::runtime_error);
+        EXPECT_THROW(per_vertex_safe_step(phase, actual, role, target, .9, true, false, false, rejections), std::runtime_error);
         for (int i = 0; i < 4; ++i) EXPECT_TRUE((actual[i].array() == points[i].array()).all());
         return;
     }
     const double reference_step = reference_single_contact_safe_step(phase, expected, role, target, segment);
-    const double actual_step = per_vertex_safe_step(phase, actual, role, target, .9, true, false,
-        false, false, rejections);
+    const double actual_step = per_vertex_safe_step(phase, actual, role, target, .9, true, false, false, rejections);
     const auto bits = [](double value) {
         std::uint64_t result;
         std::memcpy(&result, &value, sizeof(result));
@@ -2711,13 +2709,13 @@ TEST(CCDSafeStepMargin, CooperativeEndpointChecksMatchSerialBitsAcrossModesAndBa
             for(double dz:{0.,1e-4,-1e-4,1e-16,-1e-16}) {
                 Vec3 target=initial[role];target[2]+=dz;
                 auto expected=initial;
-                const double reference=per_vertex_safe_step(phase,expected,role,target,.9,true,false,false,false,nullptr,fallback);
+                const double reference=per_vertex_safe_step(phase,expected,role,target,.9,true,false,false,nullptr,fallback);
                 for(int threads:{1,4,8}) {
                     omp_set_num_threads(threads);
                     auto actual=initial;double step=-1.;
                     solver_detail::for_each_colored_block({{0}},[](int){return std::size_t(4096);},
                         [&](int,bool cooperative) {
-                            step=per_vertex_safe_step(phase,actual,role,target,.9,true,false,false,cooperative,nullptr,fallback,optimized);
+                            step=per_vertex_safe_step(phase,actual,role,target,.9,true,false,cooperative,nullptr,fallback,optimized);
                         });
                     EXPECT_EQ(0,std::memcmp(&step,&reference,sizeof(double)))<<"fixture="<<fixture<<" role="<<role<<" dz="<<dz;
                     for(std::size_t i=0;i<actual.size();++i)
@@ -2843,7 +2841,7 @@ TEST(CCDSafeStepMargin, RepeatedObliqueBacktrackingMatchesIndependentReferenceBi
                 const double reference_step = reference_single_contact_safe_step(
                     phase, expected, role, target, segment);
                 const double actual_step = per_vertex_safe_step(
-                    phase, actual, role, target, .9, true, false, false, false, nullptr, true, optimized);
+                    phase, actual, role, target, .9, true, false, false, nullptr, true, optimized);
                 EXPECT_EQ(0, std::memcmp(&actual_step, &reference_step, sizeof(double)));
                 for (std::size_t vertex = 0; vertex < actual.size(); ++vertex)
                     EXPECT_EQ(0, std::memcmp(actual[vertex].data(), expected[vertex].data(),
@@ -3110,7 +3108,7 @@ TEST(CCDSafeStepMargin, ExperimentalExactBoundCertifiesAllRolesAndMatchesCoopera
             const std::array<Vec3, 4> start{{initial[0], initial[1], initial[2], initial[3]}};
             auto serial = initial;
             const double serial_step = per_vertex_safe_step(phase, serial, role, target,
-                .9, true, false, false, false, nullptr, true, true, true);
+                .9, true, false, false, nullptr, true, true, true);
             EXPECT_GT(serial_step, 0.0);
             EXPECT_LE(serial_step, 1.0);
             const std::array<Vec3, 4> end{{serial[0], serial[1], serial[2], serial[3]}};
@@ -3121,7 +3119,7 @@ TEST(CCDSafeStepMargin, ExperimentalExactBoundCertifiesAllRolesAndMatchesCoopera
             solver_detail::for_each_colored_block({{0}}, [](int) { return std::size_t(4096); },
                 [&](int, bool enabled) {
                     cooperative_step = per_vertex_safe_step(phase, cooperative, role, target,
-                        .9, true, false, false, enabled, nullptr, true, true, true);
+                        .9, true, false, enabled, nullptr, true, true, true);
                 });
             EXPECT_EQ(0, std::memcmp(&serial_step, &cooperative_step, sizeof(double)));
             for (int index = 0; index < 4; ++index) {
@@ -3150,7 +3148,7 @@ TEST(CCDSafeStepMargin, ExperimentalExactBoundCombinesEveryContactRegardlessOfOr
         cache.vertex_nt[0].push_back({reverse ? 0u : 1u, 0});
         auto actual = initial;
         const double step = per_vertex_safe_step(phase, actual, 0, Vec3(.25, .25, -1e-6),
-            .9, true, false, false, false, nullptr, true, true, true);
+            .9, true, false, false, nullptr, true, true, true);
         EXPECT_GT(step, 0.0);
         EXPECT_LT(step, 1.0);
         for (int base : {1, 4}) {
@@ -3181,11 +3179,11 @@ TEST(CCDSafeStepMargin, ExperimentalExactBoundRetainsSubFloorRoundedAndInitialCo
                 Vec3 target = initial[role];
                 target.z() = plane - .5;
                 EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, actual, role, target,
-                    .9, true, false, false, false, nullptr, true, true, true), 0.0);
+                    .9, true, false, false, nullptr, true, true, true), 0.0);
                 EXPECT_TRUE((actual[role].array() == initial[role].array()).all());
                 target.z() = plane + 1e-4;
                 EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, actual, role, target,
-                    .9, true, false, false, false, nullptr, true, true, true), 1.0);
+                    .9, true, false, false, nullptr, true, true, true), 1.0);
                 EXPECT_TRUE((actual[role].array() == target.array()).all());
             }
             auto touching = planar_contact(segment);
@@ -3193,7 +3191,7 @@ TEST(CCDSafeStepMargin, ExperimentalExactBoundRetainsSubFloorRoundedAndInitialCo
             BroadPhase phase;
             prepare_single_vertex_contact(phase, touching, segment, role);
             EXPECT_THROW(per_vertex_safe_step(phase, touching, role, touching[role] + Vec3(0, 0, .1),
-                .9, true, false, false, false, nullptr, true, true, true), std::runtime_error);
+                .9, true, false, false, nullptr, true, true, true), std::runtime_error);
             for (int index = 0; index < 4; ++index)
                 EXPECT_TRUE((touching[index].array() == before[index].array()).all());
         }
@@ -3257,7 +3255,7 @@ TEST(CCDSafeStepMargin, PostCcdCommitMatchesOrdinaryStepAcrossContactRolesAndMod
                                 << " direct_bound=" << direct_bound);
                             auto expected = initial, actual = initial;
                             const double ordinary = per_vertex_safe_step(phase, expected, role, target,
-                                .9, true, false, false, false, nullptr, true, optimized, direct_bound);
+                                .9, true, false, false, nullptr, true, optimized, direct_bound);
                             const double finalized = safe_step_detail::commit_vertex_ccd_step(
                                 phase, actual, role, displacement, approved, false, nullptr,
                                 optimized, direct_bound);
@@ -3288,7 +3286,7 @@ TEST(CCDSafeStepMargin, DisabledExactModeKeepsItsOrdinaryCcdEndpoint) {
     for (bool optimized : {false, true}) {
         auto actual = initial;
         const double step = per_vertex_safe_step(phase, actual, 0, target,
-            .9, true, false, false, false, nullptr, false, optimized, false);
+            .9, true, false, false, nullptr, false, optimized, false);
         EXPECT_DOUBLE_EQ(step, 1.0);
         EXPECT_EQ(0, std::memcmp(actual[0].data(), expected.data(), 3 * sizeof(double)));
         EXPECT_LT(actual[0].z(), 1e-8);
@@ -3343,9 +3341,9 @@ TEST(CCDSafeStepMargin, ExperimentalExactBoundRechecksPreviouslySafeContactsBefo
         auto original = initial;
         auto experimental = initial;
         const double original_step = per_vertex_safe_step(phase, original, 0, target,
-            1.0, true, false, false, false, nullptr, true, optimized, false);
+            1.0, true, false, false, nullptr, true, optimized, false);
         const double experimental_step = per_vertex_safe_step(phase, experimental, 0, target,
-            1.0, true, false, false, false, nullptr, true, optimized, true);
+            1.0, true, false, false, nullptr, true, optimized, true);
         auto finalized = initial;
         const double finalized_step = safe_step_detail::commit_vertex_ccd_step(
             phase, finalized, 0, displacement, 1.0, false, nullptr, optimized, true);
@@ -3602,10 +3600,10 @@ TEST(CCDTest, RotatingSegmentsNearAxisConservativeContactDoesNotStall) {
     EXPECT_LE(finite_endpoint_gap,1e-10);
 }
 
-namespace BikeChainTinyRotationRegression {
-// Derived from recorded density1200 frame12: roller46 and sprocket136.
-// SS uses edge15920--15950 and gear edge46646--46642 around the observed contact.
-// NT uses a material point on that roller edge at its recorded gear-face intersection, not an original mesh vertex.
+namespace CCDRecordedTinyArcRegression {
+// Fixed near-contact rotational CCD fixtures; no scene assets are loaded.
+// SS uses two finite edges. NT uses a material point on one finite edge
+// against a finite triangle, rather than an original mesh vertex.
 const Vec3 ss_hit_c=Vec3(-0.022573008134351657,0.15248596607058953,-0.0003603443725501124);
 const Vec4 ss_hit_q0=Vec4(0.6989202501022389,0.698514006933787,0.10729507414463803,0.10989282587423947);
 const Vec4 ss_hit_q1=Vec4(0.698920250102513,0.6985140069345952,0.10729507414106414,0.10989282587084852);
@@ -3634,32 +3632,32 @@ const Vec3 nt_clear_p=Vec3(-0.03464444183294166,0.1465189255324994,-0.0059892274
 const Vec3 nt_clear_t0=Vec3(-0.03361540537050831,0.1444529947828284,-0.005989431420273089);
 const Vec3 nt_clear_t1=Vec3(-0.05427949941653059,0.1408193977449995,-0.0059876274170962895);
 const Vec3 nt_clear_t2=Vec3(-0.035634664825106126,0.14854228454772803,-0.0059890292955250375);
-} // namespace BikeChainTinyRotationRegression
+} // namespace CCDRecordedTinyArcRegression
 
-TEST(SegmentSegmentRBRotationCCD, BikeChainNonzeroTinyArcIsNotNoMotion) {
-    using namespace BikeChainTinyRotationRegression;
+TEST(SegmentSegmentRBRotationCCD, RecordedNonzeroTinyArcIsNotNoMotion) {
+    using namespace CCDRecordedTinyArcRegression;
     double toi=-1;
     ASSERT_TRUE(segment_segment_rb_rotation_ccd(ss_hit_a0,ss_hit_a1,ss_hit_c,
         ss_hit_q1,ss_hit_q0,ss_hit_b0,ss_hit_b1,toi));
     EXPECT_NEAR(toi,0.5,0.02);
 }
-TEST(PointTriangleRBRotationCCD, BikeChainMaterialPointTinyArcIsNotNoMotion) {
-    using namespace BikeChainTinyRotationRegression;
+TEST(PointTriangleRBRotationCCD, RecordedMaterialPointTinyArcIsNotNoMotion) {
+    using namespace CCDRecordedTinyArcRegression;
     double toi=-1;
     ASSERT_TRUE(point_triangle_rb_rotation_ccd(nt_hit_p,nt_hit_c,
         nt_hit_q1,nt_hit_q0,nt_hit_t0,nt_hit_t1,nt_hit_t2,toi));
     EXPECT_NEAR(toi,0.5,0.02);
 }
-TEST(SegmentSegmentRBRotationCCD, BikeChainNearbyTinyClearArcAndZeroMotionStayClear) {
-    using namespace BikeChainTinyRotationRegression;
+TEST(SegmentSegmentRBRotationCCD, RecordedNearbyTinyClearArcAndZeroMotionStayClear) {
+    using namespace CCDRecordedTinyArcRegression;
     double toi=-1;
     EXPECT_FALSE(segment_segment_rb_rotation_ccd(ss_clear_a0,ss_clear_a1,ss_clear_c,
         ss_clear_q1,ss_clear_q0,ss_clear_b0,ss_clear_b1,toi));
     EXPECT_FALSE(segment_segment_rb_rotation_ccd(ss_hit_a0,ss_hit_a1,ss_hit_c,
         ss_hit_q0,ss_hit_q0,ss_hit_b0,ss_hit_b1,toi));
 }
-TEST(PointTriangleRBRotationCCD, BikeChainNearbyTinyClearArcAndZeroMotionStayClear) {
-    using namespace BikeChainTinyRotationRegression;
+TEST(PointTriangleRBRotationCCD, RecordedNearbyTinyClearArcAndZeroMotionStayClear) {
+    using namespace CCDRecordedTinyArcRegression;
     double toi=-1;
     EXPECT_FALSE(point_triangle_rb_rotation_ccd(nt_clear_p,nt_clear_c,
         nt_clear_q1,nt_clear_q0,nt_clear_t0,nt_clear_t1,nt_clear_t2,toi));
@@ -3668,7 +3666,7 @@ TEST(PointTriangleRBRotationCCD, BikeChainNearbyTinyClearArcAndZeroMotionStayCle
 }
 
 
-namespace BikeChainRecordedSSRegression {
+namespace CCDRecordedSegmentEventRegression {
 // Exact predicate for this saved edge/face witness, independent of CCD roots.
 using R=boost::multiprecision::cpp_rational;
 using P=std::array<R,3>;
@@ -3687,10 +3685,10 @@ bool crossed(const Vec3&p0,const Vec3&p1,const std::array<Vec3,3>&triangle){
  return b1>0&&b2>0&&b1+b2<1;
 }
 }
-TEST(SegmentSegmentRBRotationCCD, BikeChainRecordedReverseEventRetainsTheInitialGap) {
-    using namespace BikeChainRecordedSSRegression;
-    // Actual density1200, frame12/substep2, body136 rotation, GS sweep22.
-    // The SS incidence pair is roller46[15920,15950] / gear136[46642,46646].
+TEST(SegmentSegmentRBRotationCCD, RecordedReverseEventRetainsTheInitialGap) {
+    using namespace CCDRecordedSegmentEventRegression;
+    // Recorded rigid-body rotation with an independent exact edge/face
+    // witness. This numerical regression does not construct a scene.
     const Vec3 center=Vec3(-1.0793345338647018e-07,3.24688157109915e-07,-7.518020671077173e-09);
     const Vec4 current=Vec4(0.99677576855287,1.5638011633497215e-06,-4.813209462434291e-05,-0.0802375529704869);
     const Vec4 target=Vec4(0.9967749656533847,-7.5765811935759e-05,0.0001838359681842562,-0.08024729472432318);

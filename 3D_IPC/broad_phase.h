@@ -239,7 +239,7 @@ public:
         std::vector<std::vector<int>>* body_nt = nullptr,
         std::vector<std::vector<int>>* body_ss = nullptr);
 
-    // Used by global_gauss_seidel_solver_ogc for partial leaf refit; other callers should use cache().
+    // Explicit cache updates and test fixtures; read-only callers use cache().
     Cache& mutable_cache() { return cache_; }
 
 private:

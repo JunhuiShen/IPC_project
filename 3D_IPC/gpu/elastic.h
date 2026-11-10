@@ -103,13 +103,6 @@ void propose_deformable_color(const DeformableScene&, const DeformableState&,
                              const ElasticWorkspace&, const int* block_colors,
                              int color, double damping, cudaStream_t stream = nullptr,
                              ElasticColorWorklist worklist = {});
-// Frozen Jacobi proposals are displacements, not rounded endpoints. In
-// particular, zero damping must skip the inverse and large coordinates must
-// not erase a small displacement before DAT has filtered it.
-void propose_deformable_displacements(const DeformableScene&,
-                                     const ElasticWorkspace&, double damping,
-                                     double (*increments)[3],
-                                     cudaStream_t stream = nullptr);
 // Fractions are device CCD/box-clip outputs. This entry point is not a CCD
 // implementation and is deliberately not exposed as a complete solver.
 void commit_deformable_color(const DeformableScene&, const DeformableState&,

@@ -110,14 +110,13 @@ TEST(ExactComputationFallback, BothModesKeepTinyRepresentableVertexMoves) {
     for (bool fallback:{false,true}) {
         std::vector<Vec3> x{Vec3::Zero()};
         const Vec3 target(1e-15,0,0);
-        const double step=per_vertex_safe_step(broad_phase,x,0,target,.9,true,false,
-                                              false,false,nullptr,fallback);
+        const double step=per_vertex_safe_step(broad_phase,x,0,target,.9,true,false,false,nullptr,fallback);
         EXPECT_DOUBLE_EQ(step,1.0);
         EXPECT_DOUBLE_EQ(x[0].x(),target.x());
     }
 }
 
-TEST(ExactComputationFallback, OGCTrustRadiusUsesTheSelectedDistancePolicy) {
+TEST(ExactComputationFallback, TrustRadiusUtilityUsesTheSelectedDistancePolicy) {
     // The legacy absolute determinant threshold selects a boundary feature
     // for these short crossing edges; exact fallback resolves the interior gap.
     constexpr double length=1e-7, gap=1e-9;
@@ -136,14 +135,7 @@ TEST(ExactComputationFallback, OGCTrustRadiusUsesTheSelectedDistancePolicy) {
     for(bool fallback:{false,true}) {
         const double expected=.4*(fallback ? gap : std::hypot(length/2,gap));
         EXPECT_NEAR(compute_trust_region_bound_for_vertex(0,initial,phase,.4,fallback),expected,1e-20);
-        for(bool ticcd:{false,true}) {
-            auto x=initial;
-            const Vec3 target=x[0]+Vec3(0,0,length);
-            const double step=per_vertex_safe_step(phase,x,0,target,.9,false,ticcd,
-                                                  true,false,nullptr,fallback);
-            EXPECT_NEAR(step,expected/length,1e-13);
-            EXPECT_NEAR(x[0].z(),expected,1e-20);
-        }
+
     }
 }
 
@@ -249,11 +241,10 @@ TEST(CCDExactStepBoundCLI, ExplicitOnSelectsTheExperiment) {
     EXPECT_TRUE(params.exact_computation_fallback_2);
     EXPECT_FALSE(params.use_ticcd);
     EXPECT_FALSE(params.use_ogc);
-    EXPECT_FALSE(params.use_ogc_solver);
 }
 
 TEST(CCDExactStepBoundCLI, ExplicitOffPreservesOtherModes) {
-    for (const auto* flag : {"--exact_computation_fallback", "--use_ticcd", "--use_ogc", "--use_ogc_solver"}) {
+    for (const auto* flag : {"--exact_computation_fallback", "--use_ticcd", "--use_ogc"}) {
         SCOPED_TRACE(flag);
         IPCArgs3D args;
         ASSERT_TRUE(parse_flags(args, {"3D_sim", "--ccd_exact_step_bound", "false",
@@ -263,7 +254,7 @@ TEST(CCDExactStepBoundCLI, ExplicitOffPreservesOtherModes) {
 }
 
 TEST(CCDExactStepBoundCLI, RejectsIncompatibleModes) {
-    for (const auto* flag : {"--exact_computation_fallback", "--use_ticcd", "--use_ogc", "--use_ogc_solver"}) {
+    for (const auto* flag : {"--exact_computation_fallback", "--use_ticcd", "--use_ogc"}) {
         SCOPED_TRACE(flag);
         IPCArgs3D args;
         ASSERT_TRUE(parse_flags(args, {"3D_sim", "--ccd_exact_step_bound", "true",

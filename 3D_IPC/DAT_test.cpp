@@ -22,6 +22,9 @@ namespace {
 constexpr double gamma = 0.9;
 constexpr double query_radius = 1.0;
 constexpr double tolerance = 1e-12;
+// point_triangle uses world coordinates of magnitude 3. Newton reserves this
+// float32-scale half-band even when the native filter uses binary64 geometry.
+constexpr double point_triangle_epsilon = 12.0 * std::numeric_limits<float>::epsilon();
 
 struct Scene {
     RefMesh mesh;
@@ -119,7 +122,7 @@ void expect_vectors_identical(const std::vector<Vec3>& actual,
     }
 }
 
-class PlanarDAT : public testing::Test {
+class StandalonePlanarDAT : public testing::Test {
 protected:
     int previous_threads = omp_get_max_threads();
     int previous_dynamic = omp_get_dynamic();
@@ -135,7 +138,7 @@ protected:
     }
 };
 
-TEST_F(PlanarDAT, CapsEachUnconstrainedUpdateWithoutGlobalDamping) {
+TEST_F(StandalonePlanarDAT, CapsEachUnconstrainedUpdateWithoutGlobalDamping) {
     Scene scene;
     scene.positions = {Vec3::Zero(), Vec3(1, 0, 0), Vec3(2, 0, 0)};
     scene.update = {Vec3(3, 4, 0), Vec3(0.1, -0.2, 0.1), Vec3::Zero()};
@@ -149,7 +152,7 @@ TEST_F(PlanarDAT, CapsEachUnconstrainedUpdateWithoutGlobalDamping) {
     EXPECT_NEAR(result[0].norm(), 0.5 * gamma * query_radius, tolerance);
 }
 
-TEST_F(PlanarDAT, CapturedSeparatedEdgePairWithNoMotionDoesNotAbort) {
+TEST_F(StandalonePlanarDAT, CapturedSeparatedEdgePairWithNoMotionDoesNotAbort) {
     const auto scene = benchmark_edge_plane_case();
     const std::array<Vec3, 4> edges{{scene.positions[0], scene.positions[1],
         scene.positions[2], scene.positions[3]}};
@@ -160,7 +163,7 @@ TEST_F(PlanarDAT, CapturedSeparatedEdgePairWithNoMotionDoesNotAbort) {
     expect_vectors_identical(accepted, scene.update);
 }
 
-TEST_F(PlanarDAT, CapturedEdgePairApproachStaysOnItsOriginalPlaneSidesAcrossThreads) {
+TEST_F(StandalonePlanarDAT, CapturedEdgePairApproachStaysOnItsOriginalPlaneSidesAcrossThreads) {
     const auto unit = benchmark_edge_plane_case();
     const Vec3 normal(.95038202192690158, -.20115535389100869, .23729841128654272);
     Scene scene;
@@ -188,26 +191,29 @@ TEST_F(PlanarDAT, CapturedEdgePairApproachStaysOnItsOriginalPlaneSidesAcrossThre
             SCOPED_TRACE(copy);
             const int offset = 6 * copy;
             EXPECT_GT(benchmark_edge_signed_gap(endpoints, offset), 0);
-            EXPECT_LT(benchmark_edge_signed_gap(endpoints, offset),
+            // This captured gap is below Newton's world-scale clearance band.
+            // Approaching motion must freeze, rather than consume that band.
+            EXPECT_DOUBLE_EQ(benchmark_edge_signed_gap(endpoints, offset),
                 benchmark_edge_signed_gap(scene.positions, offset));
-            EXPECT_GT(parallel[offset].norm(), 0);
-            EXPECT_LT(parallel[offset].norm(), 1e-7);
-            EXPECT_TRUE(parallel[offset + 4].isZero(0));
-            EXPECT_TRUE(parallel[offset + 5].isZero(0));
+            for (int node = 0; node < 6; ++node)
+                EXPECT_TRUE(parallel[offset + node].isZero(0));
         }
     }
 }
 
-TEST_F(PlanarDAT, CapturedEdgePairOutsideTheQueryRadiusKeepsItsSmallUpdate) {
+TEST_F(StandalonePlanarDAT, CapturedEdgePairOutsideTheQueryRadiusKeepsItsSmallUpdate) {
     auto scene = benchmark_edge_plane_case();
     const Vec3 normal(.95038202192690158, -.20115535389100869, .23729841128654272);
     for (int node = 0; node < 4; ++node)
         scene.update[node] = (node < 2 ? 1e-12 : -1e-12) * normal;
     const auto accepted = planar_DAT(.9, 1e-11, scene.mesh, scene.update, scene.positions);
-    expect_vectors_identical(accepted, scene.update);
+    auto represented = scene.update;
+    for (std::size_t node = 0; node < represented.size(); ++node)
+        represented[node] = (scene.positions[node] + scene.update[node]) - scene.positions[node];
+    expect_vectors_identical(accepted, represented);
 }
 
-TEST_F(PlanarDAT, GeneralFilterUsesTheSameRepairForCapturedRigidEdgePairs) {
+TEST_F(StandalonePlanarDAT, GeneralFilterUsesTheSameRepairForCapturedRigidEdgePairs) {
     auto scene = benchmark_edge_plane_case();
     scene.mesh.rb_nodes = {{0, 1, 4}, {2, 3, 5}};
     scene.mesh.ref_positions = {{scene.positions[0], scene.positions[1], scene.positions[4]},
@@ -224,8 +230,9 @@ TEST_F(PlanarDAT, GeneralFilterUsesTheSameRepairForCapturedRigidEdgePairs) {
         scene.positions, zeros, zeros, identity, approaching, zeros, .01);
     EXPECT_GT(benchmark_edge_signed_gap(accepted.positions), 0);
     for (int body = 0; body < 2; ++body) {
-        EXPECT_GT(accepted.body_factors[body], 0);
-        EXPECT_LT(accepted.body_factors[body], 1);
+        // Both starts are inside the clearance band and the requested motion
+        // approaches the other primitive, so the reference policy freezes it.
+        EXPECT_DOUBLE_EQ(accepted.body_factors[body], 0);
         const auto& nodes = scene.mesh.rb_nodes[body];
         for (std::size_t a = 0; a < nodes.size(); ++a)
             for (std::size_t b = 0; b < a; ++b)
@@ -234,7 +241,7 @@ TEST_F(PlanarDAT, GeneralFilterUsesTheSameRepairForCapturedRigidEdgePairs) {
     }
 }
 
-TEST_F(PlanarDAT, IgnoresIncidentPrimitivesOfASingleTriangle) {
+TEST_F(StandalonePlanarDAT, IgnoresIncidentPrimitivesOfASingleTriangle) {
     Scene scene;
     scene.positions = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0)};
     scene.update.assign(3, Vec3(0.1, 0.2, 0.1));
@@ -247,7 +254,7 @@ TEST_F(PlanarDAT, IgnoresIncidentPrimitivesOfASingleTriangle) {
     }
 }
 
-TEST_F(PlanarDAT, ProportionalVertexTrianglePlaneRelaxesExactlyOnce) {
+TEST_F(StandalonePlanarDAT, ProportionalVertexTrianglePlaneRelaxesExactlyOnce) {
     Scene scene = point_triangle();
     scene.update[0] = Vec3(0, 0, -0.4);
     for (int vertex = 1; vertex < 4; ++vertex) {
@@ -258,18 +265,19 @@ TEST_F(PlanarDAT, ProportionalVertexTrianglePlaneRelaxesExactlyOnce) {
     const auto update_before = scene.update;
     const auto result = filter(scene);
     ASSERT_EQ(result.size(), 4u);
-    // The gap is 0.4 and the closing speed 0.5: alpha=0.9*0.4/0.5.
-    for (int vertex = 0; vertex < 4; ++vertex) {
-        expect_vector_near(result[vertex], 0.72 * scene.update[vertex]);
-    }
+    // Raw approaching speeds .4 and .1 allocate .32 and .08 of the gap.
+    // Each side stops gamma times its own clearance-adjusted plane distance.
+    expect_vector_near(result[0], Vec3(0, 0, -gamma * (.32 - point_triangle_epsilon)));
+    for (int vertex = 1; vertex < 4; ++vertex)
+        expect_vector_near(result[vertex], Vec3(0, 0, gamma * (.08 - point_triangle_epsilon)));
     const double final_gap = scene.positions[0].z() + result[0].z()
         - scene.positions[1].z() - result[1].z();
-    EXPECT_NEAR(final_gap, 0.04, tolerance);
+    EXPECT_NEAR(final_gap, 0.04 + 2 * gamma * point_triangle_epsilon, tolerance);
     expect_vectors_identical(scene.positions, positions_before);
     expect_vectors_identical(scene.update, update_before);
 }
 
-TEST_F(PlanarDAT, VertexTriangleTruncationIsInvariantUnderUniformScaling) {
+TEST_F(StandalonePlanarDAT, WorldScaleClearancePreservesSeparationAcrossUniformScaling) {
     Scene unscaled = point_triangle();
     unscaled.update[0] = Vec3(0, 0, -0.4);
     for (int vertex = 1; vertex < 4; ++vertex) {
@@ -283,16 +291,20 @@ TEST_F(PlanarDAT, VertexTriangleTruncationIsInvariantUnderUniformScaling) {
         const auto result = planar_DAT(gamma, query_radius * scale, scene.mesh,
             scene.update, scene.positions);
         ASSERT_EQ(result.size(), 4u);
+        auto endpoints = scene.positions;
         for (int vertex = 0; vertex < 4; ++vertex) {
-            // Compare in the original units so a tiny-scale zero result
-            // cannot pass an absolute world-space tolerance accidentally.
-            expect_vector_near(result[vertex] / scale,
-                0.72 * unscaled.update[vertex]);
+            EXPECT_TRUE(result[vertex].allFinite());
+            EXPECT_LE((result[vertex] / scale).norm(), .5 * gamma * query_radius + tolerance);
+            endpoints[vertex] += result[vertex];
         }
+        // Absolute epsilon and its float32 world-scale floor intentionally
+        // break scale invariance; strict separation must still be maintained.
+        const std::array<Vec3, 4> pair{endpoints[0], endpoints[1], endpoints[2], endpoints[3]};
+        EXPECT_GT(compare_contact_distance_exact(pair, true, 0), 0);
     }
 }
 
-TEST_F(PlanarDAT, OneSidedApproachReceivesTheWholeAvailableGap) {
+TEST_F(StandalonePlanarDAT, OneSidedApproachReservesFivePercentForTheStationarySide) {
     for (bool triangle_moves : {false, true}) {
         SCOPED_TRACE(triangle_moves);
         Scene scene = point_triangle();
@@ -306,12 +318,13 @@ TEST_F(PlanarDAT, OneSidedApproachReceivesTheWholeAvailableGap) {
         const auto result = filter(scene);
         ASSERT_EQ(result.size(), 4u);
         for (int vertex = 0; vertex < 4; ++vertex) {
-            expect_vector_near(result[vertex], gamma * scene.update[vertex]);
+            const double factor = gamma * (.95 * .4 - point_triangle_epsilon) / .4;
+            expect_vector_near(result[vertex], factor * scene.update[vertex]);
         }
     }
 }
 
-TEST_F(PlanarDAT, TangentialAndSeparatingMotionRemainUnchanged) {
+TEST_F(StandalonePlanarDAT, TangentialAndSeparatingMotionRemainUnchanged) {
     for (bool separating : {false, true}) {
         SCOPED_TRACE(separating);
         Scene scene = point_triangle();
@@ -327,20 +340,20 @@ TEST_F(PlanarDAT, TangentialAndSeparatingMotionRemainUnchanged) {
     }
 }
 
-TEST_F(PlanarDAT, TriangleUsesMaximumCornerApproach) {
+TEST_F(StandalonePlanarDAT, TriangleUsesMaximumCornerApproach) {
     Scene scene = point_triangle();
     scene.update[0] = Vec3(0, 0, -0.2);
     scene.update[1] = Vec3(0, 0, 0.4);
     const auto result = filter(scene);
     ASSERT_EQ(result.size(), 4u);
     // A nearest-point barycentric velocity would underestimate this corner.
-    expect_vector_near(result[0], Vec3(0, 0, -0.12));
-    expect_vector_near(result[1], Vec3(0, 0, 0.24));
+    expect_vector_near(result[0], Vec3(0, 0, -0.12 + gamma * point_triangle_epsilon));
+    expect_vector_near(result[1], Vec3(0, 0, 0.24 - gamma * point_triangle_epsilon));
     expect_vector_near(result[2], Vec3::Zero());
     expect_vector_near(result[3], Vec3::Zero());
 }
 
-TEST_F(PlanarDAT, ConstructsAdaptivePlanesFromAlreadyCappedUpdates) {
+TEST_F(StandalonePlanarDAT, ConstructsAdaptivePlanesFromRawUpdatesBeforeMagnitudeCap) {
     Scene scene = point_triangle();
     scene.update[0] = Vec3(0, 0, -4);
     for (int vertex = 1; vertex < 4; ++vertex) {
@@ -348,15 +361,17 @@ TEST_F(PlanarDAT, ConstructsAdaptivePlanesFromAlreadyCappedUpdates) {
     }
     const auto result = filter(scene);
     ASSERT_EQ(result.size(), 4u);
-    const double alpha = gamma * 0.4 / (0.45 + 0.1);
-    expect_vector_near(result[0], Vec3(0, 0, -0.45 * alpha));
+    // The raw 40:1 ratio hits the 95:5 allocation clamp. Applying a cap before
+    // constructing the plane would instead allocate a very different ratio.
+    expect_vector_near(result[0], Vec3(0, 0, -gamma * (.38 - point_triangle_epsilon)));
     for (int vertex = 1; vertex < 4; ++vertex) {
-        expect_vector_near(result[vertex], Vec3(0, 0, 0.1 * alpha));
+        expect_vector_near(result[vertex], Vec3(0, 0, gamma * (.02 - point_triangle_epsilon)));
     }
-    EXPECT_NEAR(0.4 + result[0].z() - result[1].z(), 0.04, tolerance);
+    EXPECT_NEAR(0.4 + result[0].z() - result[1].z(),
+        0.04 + 2 * gamma * point_triangle_epsilon, tolerance);
 }
 
-TEST_F(PlanarDAT, QueryBoundaryAndFarPairsNeedOnlyTheDisplacementCap) {
+TEST_F(StandalonePlanarDAT, QueryBoundaryAndFarPairsNeedOnlyTheDisplacementCap) {
     for (double gap : {1.0, 1.01, 3.0}) {
         SCOPED_TRACE(gap);
         Scene scene = point_triangle(gap);
@@ -374,7 +389,7 @@ TEST_F(PlanarDAT, QueryBoundaryAndFarPairsNeedOnlyTheDisplacementCap) {
     }
 }
 
-TEST_F(PlanarDAT, SliverTriangleUsesFiniteTriangleDistanceForRadiusFiltering) {
+TEST_F(StandalonePlanarDAT, SliverTriangleUsesFiniteTriangleDistanceForRadiusFiltering) {
     Scene scene;
     scene.positions = {Vec3(0.5, 1e-3, 1e-4), Vec3(0, 0, 0),
         Vec3(1, 0, 0), Vec3(1, 1e-9, 0)};
@@ -393,7 +408,7 @@ TEST_F(PlanarDAT, SliverTriangleUsesFiniteTriangleDistanceForRadiusFiltering) {
     }
 }
 
-TEST_F(PlanarDAT, ObtuseTriangleTruncatesAgainstTheActualNearestEdge) {
+TEST_F(StandalonePlanarDAT, ObtuseTriangleTruncatesAgainstTheActualNearestEdge) {
     for (double scale : {1.0, 1e-4}) {
         const std::array<Vec3, 3> triangle{{Vec3::Zero(), Vec3(1, 0, 0), Vec3(-10, .1, 0)}};
         std::array<int, 3> order{{0, 1, 2}};
@@ -407,31 +422,38 @@ TEST_F(PlanarDAT, ObtuseTriangleTruncatesAgainstTheActualNearestEdge) {
             // The actual gap sqrt(.0101) is inside r_q=.3. The old
             // barycentric classification returned .51 and missed this pair.
             const auto result = planar_DAT(gamma, .3 * scale, scene.mesh, scene.update, scene.positions);
-            expect_vector_near(result[0] / scale, gamma * Vec3(0, .01, -.1));
+            const double gap = scale * std::sqrt(.0101);
+            const double epsilon = std::max(1e-6,
+                4 * std::numeric_limits<float>::epsilon() * std::max(1.0, 10.0 * scale));
+            const double fraction = std::max(.05, epsilon / gap);
+            const double factor = gamma * ((1 - fraction) * gap - epsilon) / (2 * gap);
+            expect_vector_near(result[0] / scale, factor * Vec3(0, .02, -.2));
             for (int vertex = 1; vertex < 4; ++vertex) expect_vector_near(result[vertex], Vec3::Zero());
         } while (std::next_permutation(order.begin(), order.end()));
     }
 }
 
-TEST_F(PlanarDAT, EdgeEdgeContactTruncatesItsFourEndpointsOnly) {
+TEST_F(StandalonePlanarDAT, EdgeEdgeContactTruncatesItsFourEndpointsOnly) {
     const Scene scene = crossed_edges();
     const auto result = filter(scene);
     ASSERT_EQ(result.size(), 6u);
-    for (int vertex : {0, 1, 3, 4}) {
-        expect_vector_near(result[vertex], 0.72 * scene.update[vertex]);
-    }
+    constexpr double epsilon = 40.0 * std::numeric_limits<float>::epsilon();
+    for (int vertex : {0, 1})
+        expect_vector_near(result[vertex], Vec3(0, 0, gamma * (.32 - epsilon)));
+    for (int vertex : {3, 4})
+        expect_vector_near(result[vertex], Vec3(0, 0, -gamma * (.08 - epsilon)));
     for (int vertex : {2, 5}) {
         expect_vector_near(result[vertex], scene.update[vertex]);
     }
-    EXPECT_NEAR(0.4 + result[3].z() - result[0].z(), 0.04, tolerance);
+    EXPECT_NEAR(0.4 + result[3].z() - result[0].z(), 0.04 + 2 * gamma * epsilon, tolerance);
 }
 
-TEST_F(PlanarDAT, SharedVertexTakesMinimumIndependentOfTriangleOrder) {
+TEST_F(StandalonePlanarDAT, SharedVertexTakesMinimumIndependentOfTriangleOrder) {
     Scene scene = point_two_triangles();
     const auto result = filter(scene);
     ASSERT_EQ(result.size(), scene.positions.size());
-    // The two independent limits are 0.45 and 0.675.
-    expect_vector_near(result[0], Vec3(0, 0, -0.18));
+    // The nearer stationary triangle supplies .95*.2 of usable normal room.
+    expect_vector_near(result[0], Vec3(0, 0, -gamma * (.19 - point_triangle_epsilon)));
     for (std::size_t vertex = 1; vertex < result.size(); ++vertex) {
         expect_vector_near(result[vertex], Vec3::Zero());
     }
@@ -439,16 +461,16 @@ TEST_F(PlanarDAT, SharedVertexTakesMinimumIndependentOfTriangleOrder) {
     expect_vectors_identical(filter(scene), result);
 }
 
-TEST_F(PlanarDAT, PaddingDoesNotChangeTheFilteredResult) {
+TEST_F(StandalonePlanarDAT, PaddingDoesNotChangeTheFilteredResult) {
     Scene scene = point_triangle();
     scene.update[0] = Vec3(0, 0, -0.4);
     const auto result = filter(scene, 1.0);
-    expect_vector_near(result[0], Vec3(0, 0, -0.36));
+    expect_vector_near(result[0], Vec3(0, 0, -gamma * (.38 - point_triangle_epsilon)));
     expect_vectors_identical(filter(scene, 1.2), result);
     expect_vectors_identical(filter(scene, 3.0), result);
 }
 
-TEST_F(PlanarDAT, SerialAndOpenMPResultsAreBitwiseIdentical) {
+TEST_F(StandalonePlanarDAT, SerialAndOpenMPResultsAreBitwiseIdentical) {
     Scene scene;
     for (int copy = 0; copy < 48; ++copy) {
         const Scene component = copy % 2 ? crossed_edges() : point_two_triangles();
@@ -475,7 +497,7 @@ TEST_F(PlanarDAT, SerialAndOpenMPResultsAreBitwiseIdentical) {
     }
 }
 
-TEST_F(PlanarDAT, SolidBoundaryContactsExcludeInteriorTetVertices) {
+TEST_F(StandalonePlanarDAT, SolidBoundaryContactsExcludeInteriorTetVertices) {
     Scene scene;
     // Four tetrahedra share interior node 4; node 5 approaches the outer
     // bottom face. The interior update stays inside the solid throughout.
@@ -496,15 +518,15 @@ TEST_F(PlanarDAT, SolidBoundaryContactsExcludeInteriorTetVertices) {
         expect_vector_near(result[vertex], Vec3::Zero());
     }
     expect_vector_near(result[4], scene.update[4]);
-    expect_vector_near(result[5], Vec3(0, 0, 0.18));
+    expect_vector_near(result[5], Vec3(0, 0, gamma * (.19 - point_triangle_epsilon)));
 }
 
-TEST_F(PlanarDAT, RejectsInitiallyTouchingVertexTriangleAndEdgeEdgePairs) {
+TEST_F(StandalonePlanarDAT, RejectsInitiallyTouchingVertexTriangleAndEdgeEdgePairs) {
     EXPECT_THROW(filter(point_triangle(0.0)), std::domain_error);
     EXPECT_THROW(filter(crossed_edges(0.0)), std::domain_error);
 }
 
-TEST_F(PlanarDAT, RejectsInvalidScalarParameters) {
+TEST_F(StandalonePlanarDAT, RejectsInvalidScalarParameters) {
     const Scene scene = point_triangle();
     const double nan = std::numeric_limits<double>::quiet_NaN();
     const double inf = std::numeric_limits<double>::infinity();
@@ -524,7 +546,7 @@ TEST_F(PlanarDAT, RejectsInvalidScalarParameters) {
     }
 }
 
-TEST_F(PlanarDAT, RejectsMismatchedSizesAndMalformedTriangleIndices) {
+TEST_F(StandalonePlanarDAT, RejectsMismatchedSizesAndMalformedTriangleIndices) {
     const Scene valid = point_triangle();
     Scene scene = valid;
     scene.mesh.num_positions += 1;
@@ -545,7 +567,7 @@ TEST_F(PlanarDAT, RejectsMismatchedSizesAndMalformedTriangleIndices) {
     }
 }
 
-TEST_F(PlanarDAT, RejectsNonfinitePositionsAndUpdates) {
+TEST_F(StandalonePlanarDAT, RejectsNonfinitePositionsAndUpdates) {
     const double nan = std::numeric_limits<double>::quiet_NaN();
     const double inf = std::numeric_limits<double>::infinity();
     for (double invalid : {nan, inf, -inf}) {
@@ -559,11 +581,11 @@ TEST_F(PlanarDAT, RejectsNonfinitePositionsAndUpdates) {
     }
 }
 
-TEST_F(PlanarDAT, EmptyMeshProducesAnEmptyUpdate) {
+TEST_F(StandalonePlanarDAT, EmptyMeshProducesAnEmptyUpdate) {
     EXPECT_TRUE(filter(Scene{}).empty());
 }
 
-TEST_F(PlanarDAT, PairOnlyBroadPhaseAndReusableScratchMatchStandaloneAfterMotion) {
+TEST_F(StandalonePlanarDAT, PairOnlyBroadPhaseAndReusableScratchMatchStandaloneAfterMotion) {
     auto scene=point_triangle(.4);
     scene.update[0]=Vec3(0,0,-.8);
     DATWorkspace workspace;
@@ -595,7 +617,7 @@ BroadPhase iteration_candidates(const RefMesh& mesh,
     return phase;
 }
 
-TEST_F(PlanarDAT, IterationCandidatesCoverVertexTrianglePairsAcrossColorUpdates) {
+TEST_F(StandalonePlanarDAT, IterationCandidatesCoverVertexTrianglePairsAcrossColorUpdates) {
     constexpr double relaxation = .999, radius = .8;
     auto scene = point_triangle(.55);
     scene.positions.emplace_back(0, 0, 1.0);
@@ -642,7 +664,7 @@ TEST_F(PlanarDAT, IterationCandidatesCoverVertexTrianglePairsAcrossColorUpdates)
     EXPECT_GT(signed_gap(4), 0);
 }
 
-TEST_F(PlanarDAT, IterationCandidatesCoverEdgePairsAcrossColorUpdates) {
+TEST_F(StandalonePlanarDAT, IterationCandidatesCoverEdgePairsAcrossColorUpdates) {
     constexpr double relaxation = .999, radius = .8;
     for (double gap : {.55, 1.0}) {
         SCOPED_TRACE(gap);
@@ -684,7 +706,7 @@ TEST_F(PlanarDAT, IterationCandidatesCoverEdgePairsAcrossColorUpdates) {
     }
 }
 
-TEST_F(PlanarDAT, IterationCandidatesCoverParticlesAfterARigidColorRotates) {
+TEST_F(StandalonePlanarDAT, IterationCandidatesCoverParticlesAfterARigidColorRotates) {
     constexpr double relaxation = .999, radius = .8, dt = 1.0;
     RefMesh mesh;
     DeformedState state;
@@ -774,6 +796,7 @@ struct ContactCloud {
         params.fps=100;params.substeps=1;params.fixed_iters=true;params.max_global_iters=3;
         params.damping=.5;params.d_hat=.05;params.k_barrier=30;
         params.dat_query_radius=.1;params.use_dat=true;params.friction_coefficient=friction;
+        params.dat_inertial_predictor=false;
     }
 };
 struct Result {
@@ -787,7 +810,7 @@ Result solve(ContactCloud& scene,int threads,bool parallel) {
     Result out{scene.state.deformed_positions,scene.state.x_coms,
         std::vector<Vec3>(scene.state.omega.size(),Vec3::Zero()),scene.state.orientations};
     BroadPhase broad;
-    const auto result=global_jacobi_solver_dat_general(scene.mesh,scene.state,scene.adjacency,
+    const auto result=global_gauss_seidel_solver_dat(scene.mesh,scene.state,scene.adjacency,
         scene.pins,params,out.positions,scene.state.deformed_positions,out.centers,
         out.orientations,out.omega,broad);
     if(params.fixed_iters)EXPECT_TRUE(result.converged);
@@ -974,7 +997,7 @@ TEST(DATParallel, ReusedEndpointConstraintsClearBeforePairRejectionAndAfterConta
     }
 }
 
-TEST(DATParallel, EndpointBacktrackingKeepsRepresentedParticleStepsInsideTheCap) {
+TEST(DATParallel, EndpointCertificationKeepsTheLargestSafeRepresentedParticleStep) {
     OpenMPRestore restore;omp_set_dynamic(0);
     RefMesh mesh;DeformedState state;
     create_rigid_body({Vec3(-.125,-.125,-.125),Vec3(.125,.125,-.125),
@@ -1000,7 +1023,11 @@ TEST(DATParallel, EndpointBacktrackingKeepsRepresentedParticleStepsInsideTheCap)
         for(std::size_t i=4;i<positions.size();++i) {
             const double displacement=parallel.positions[i].x()-positions[i].x();
             EXPECT_GT(displacement,0);
-            EXPECT_LT(displacement,.25); // A real shortened retry, not a zero update.
+            // The original rounded endpoint exceeds .3. The world-ULP-aware
+            // cap should keep the nearest representable endpoint below it,
+            // preserving progress instead of unnecessarily halving the step.
+            EXPECT_DOUBLE_EQ(parallel.positions[i].x(),
+                std::nextafter(positions[i].x()+.3,positions[i].x()));
             EXPECT_LE(displacement,.3);
         }
     }

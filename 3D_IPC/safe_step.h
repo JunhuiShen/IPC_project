@@ -45,7 +45,7 @@ double compute_trust_region_bound_for_vertex(int vi, const std::vector<Vec3>& x,
 double per_vertex_safe_step(
     const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi,
     const Vec3& raw_proposed_position, double safety = 0.9, bool clip_ccd = true,
-    bool use_ticcd = true, bool use_ogc = false, bool cooperative = false,
+    bool use_ticcd = true, bool cooperative = false,
     const safe_step_detail::VertexAabbRejections* rejections = nullptr,
     bool exact_computation_fallback = true, bool exact_computation_fallback_2 = true,
     bool ccd_exact_step_bound = false);

@@ -393,7 +393,7 @@ int main() {
             if(invalid==4)bad.use_colored_ccd_guess=true; // conflicts with the level mode
             if(invalid==5)bad.use_ticcd=true;
             if(invalid==6)bad.use_ogc=true;
-            if(invalid==7)bad.use_ogc_solver=true;
+            if(invalid==7)bad.use_dat=true; // CPU planar DAT is not a CUDA route.
             rejected=false;
             try {(void)ipc_gpu::solver::describe_step(bad);}
             catch(const std::invalid_argument&) {rejected=true;}

@@ -153,11 +153,10 @@ SolverResult solve_and_commit(GeneralScene& scene, bool simd) {
             / scene.params.dt();
         state.deformed_positions[node] = positions[node];
     }
-    update_velocity(state.v_coms, centers, state.x_coms, scene.params.dt());
-    state.x_coms = centers;
-    state.orientations = orientations;
-    state.omega = omega;
-    sync_rigid_body_particles(scene.mesh, state);
+    // The named v2 entry returns authoritative accepted proxy positions even
+    // when the caller did not set its frame-dispatch selector flags.
+    commit_rigid_body_solver_state(scene.mesh, state, centers, orientations,
+        omega, scene.params.dt(), simd ? &positions : nullptr);
     return result;
 }
 
@@ -570,6 +569,52 @@ TEST(GeneralSIMDSolver, PureRigidContactAndFrameDispatchMatchExplicitEntryPoints
             x[lower[1]], x[lower[2]]).distance;
         EXPECT_GT(distance, 0.0);
         EXPECT_LT(distance, scenes[1].params.d_hat);
+    }
+}
+
+TEST(GeneralSIMDSolver, SolverCommitPreservesAcceptedProxyAndFrictionHistoryBits) {
+    GeneralScene scene;
+    build_scene(scene, false, false, true);
+    scene.params.friction_coefficient = 0.2;
+    const auto previous_centers = scene.state.x_coms;
+    auto centers = previous_centers;
+    auto orientations = scene.state.orientations;
+    auto angular_velocities = scene.state.omega;
+    auto accepted = scene.state.deformed_positions;
+    for (std::size_t rb = 0; rb < centers.size(); ++rb) {
+        centers[rb] += Vec3(0.01, -0.02, 0.03);
+        angular_velocities[rb] = Vec3(0.2, -0.4, 0.6);
+        for (std::size_t local = 0; local < scene.mesh.rb_nodes[rb].size(); ++local)
+            accepted[scene.mesh.rb_nodes[rb][local]] = world_space_position(
+                scene.mesh.ref_positions[rb][local], centers[rb], orientations[rb]);
+    }
+    const int perturbed = scene.mesh.rb_nodes[0][0];
+    const Vec3 canonical = accepted[perturbed];
+    accepted[perturbed].x() = std::nextafter(canonical.x(),
+        -std::numeric_limits<double>::infinity());
+    ASSERT_NE(0, std::memcmp(accepted[perturbed].data(), canonical.data(),
+        3 * sizeof(double)));
+
+    commit_rigid_body_solver_state(scene.mesh, scene.state, centers, orientations,
+        angular_velocities, scene.params.dt(), &accepted);
+
+    // These exact positions, rather than a pose reconstruction, are the
+    // physical previous positions used by friction at the next substep.
+    expect_vectors_bitwise_equal(scene.state.deformed_positions, accepted);
+    expect_vectors_bitwise_equal(scene.state.x_coms, centers);
+    expect_vectors_bitwise_equal(scene.state.orientations, orientations);
+    expect_vectors_bitwise_equal(scene.state.omega, angular_velocities);
+    for (std::size_t rb = 0; rb < centers.size(); ++rb) {
+        const Vec3 expected_com_velocity =
+            (centers[rb] - previous_centers[rb]) / scene.params.dt();
+        EXPECT_EQ(0, std::memcmp(scene.state.v_coms[rb].data(),
+            expected_com_velocity.data(), 3 * sizeof(double)));
+        for (int node : scene.mesh.rb_nodes[rb]) {
+            const Vec3 expected_velocity = expected_com_velocity
+                + angular_velocities[rb].cross(accepted[node] - centers[rb]);
+            EXPECT_EQ(0, std::memcmp(scene.state.velocities[node].data(),
+                expected_velocity.data(), 3 * sizeof(double))) << "node=" << node;
+        }
     }
 }
 

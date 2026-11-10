@@ -252,7 +252,6 @@ set(IPC_SIMULATION_SOURCES
     make_shape.cpp
     mesh.cpp
     mesh_utils.cpp
-    ogc_contact.cpp
     output.cpp
     parallel_helper.cpp
     physics.cpp
@@ -332,8 +331,11 @@ if(BUILD_TESTING)
     endfunction()
 
     set(IPC_TEST_TARGETS
+        dat_checkpoint_test
+        dat_solver_test
         DAT_test
         rigid_dat_solver_test
+        ogc_solver_test
         SIMD_test
         general_simd_solid_test
         general_simd_rigid_test
@@ -356,12 +358,10 @@ if(BUILD_TESTING)
         io_test
         ipc_math_test
         jacobi_step_test
-        jacobi_dat_solver_test
         jacobi_level_based_ccd_solver_test
         make_shape_test
         mesh_test
         node_triangle_distance_test
-        ogc_contact_test
         parallel_helper_test
         rigid_body_ipc_test
         sdf_penalty_energy_test

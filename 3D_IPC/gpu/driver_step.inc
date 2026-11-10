@@ -1,6 +1,5 @@
         // Prescribed boundary inputs and file output stay on the host. All
         // evolving simulation state remains GPU between these launches.
-        gpu_solver.begin_profile_frame(frame_index);
         for (int substep=0; substep<params.substeps; ++substep) {
             const double t_next=((frame_index-1)*params.substeps+substep+1)*params.dt();
             if (pin_updater) pin_updater(pins,t_next);
@@ -19,5 +18,4 @@
         }
         if (!params.write_substeps)
             ipc_gpu::solver::copy_snapshot(gpu_solver.snapshot(),state);
-        gpu_solver.end_profile_frame();
         result.converged=true; // completed the requested fixed sweeps

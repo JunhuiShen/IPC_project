@@ -1188,7 +1188,7 @@ TEST(BroadPhaseTest, PairOrderMatchesFirstQueryHitOrder) {
     broad.initialize(boxes, mesh, 0.07);
     expect_pair_order_matches_query_hits(broad.cache(), mesh);
 
-    // Exercise the OGC refresh path, whose edge BVH leaves are incrementally
+    // Exercise partial refitting, whose edge BVH leaves are incrementally
     // refitted red boxes while edge_boxes remain the padded green queries.
     x[0] += Vec3(0.01, -0.005, 0.002);
     incremental_refresh_vertex(broad.mutable_cache(), 0, x, mesh,
@@ -1628,7 +1628,7 @@ TEST(BroadPhaseTest, SolverModesPreserveFilteredPairAndIncidenceOrderWithoutRefi
     EXPECT_TRUE(rigid.cache().edge_leaf_to_node.empty());
 }
 
-TEST(BroadPhaseTest, PerVertexSafeStepClampsCCDAndOGC) {
+TEST(BroadPhaseTest, PerVertexSafeStepClampsCCD) {
     std::vector<Vec3> x = {
         Vec3(1.5, 0.25, 0.0),
         Vec3(0.0, 0.0, 0.0),
@@ -1653,38 +1653,13 @@ TEST(BroadPhaseTest, PerVertexSafeStepClampsCCDAndOGC) {
     cache.nt_pairs.push_back(pair);
     cache.vertex_nt[0].push_back({/*pair_index=*/0, /*dof=*/0});
 
-    const double ccd_weight = per_vertex_safe_step(bp, x, 0, target[0], /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false, /*use_ogc=*/false);
+    const double ccd_weight = per_vertex_safe_step(bp, x, 0, target[0], /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false);
 
     const Vec3 expected(0.825, 0.25, 0.0);
     EXPECT_DOUBLE_EQ(ccd_weight, 0.9);
     EXPECT_TRUE(x[0].isApprox(expected, 1.0e-12));
 
-    // Exercise the production OGC path with an incident pair initially 0.5
-    // apart. Its trust radius is 0.4 * 0.5 = 0.2, so a 0.25 displacement is
-    // scaled to 0.8 even though CCD clipping is disabled.
-    std::vector<Vec3> x_ogc = {
-        Vec3(0.0, 0.5, 0.0),
-        Vec3(0.0, 0.0, 0.0),
-        Vec3(1.0, 0.0, 0.0),
-        Vec3(0.0, 0.0, 1.0),
-    };
-    const std::vector<Vec3> target_ogc = {
-        Vec3(0.0, 0.25, 0.0),
-        x_ogc[1], x_ogc[2], x_ogc[3],
-    };
 
-    BroadPhase ogc_bp;
-    auto& ogc_cache = ogc_bp.mutable_cache();
-    ogc_cache.node_boxes.assign(x_ogc.size(), AABB(Vec3::Constant(-2.0), Vec3::Constant(2.0)));
-    ogc_cache.vertex_nt.resize(x_ogc.size());
-    ogc_cache.vertex_ss.resize(x_ogc.size());
-    ogc_cache.nt_pairs.push_back(pair);
-    ogc_cache.vertex_nt[0].push_back({/*pair_index=*/0, /*dof=*/0});
-
-    const double ogc_weight = per_vertex_safe_step(ogc_bp, x_ogc, 0, target_ogc[0], /*safety=*/0.9, /*clip_ccd=*/false, /*use_ticcd=*/false, /*use_ogc=*/true);
-
-    EXPECT_DOUBLE_EQ(ogc_weight, 0.8);
-    EXPECT_TRUE(x_ogc[0].isApprox(Vec3(0.0, 0.3, 0.0), 1.0e-12));
 }
 
 TEST(BroadPhaseTest, PerVertexSafeStepUpdatesOnlySelectedVertex) {
@@ -1716,7 +1691,7 @@ TEST(BroadPhaseTest, PerVertexSafeStepUpdatesOnlySelectedVertex) {
     cache.vertex_nt[0].push_back(
         {/*pair_index=*/0, /*dof=*/0});
 
-    const double safe_weight = per_vertex_safe_step(broad_phase, x, 0, target[0], /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false, /*use_ogc=*/false);
+    const double safe_weight = per_vertex_safe_step(broad_phase, x, 0, target[0], /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false);
 
     const Vec3 expected(0.825, 0.25, 0.0);
     EXPECT_DOUBLE_EQ(safe_weight, 0.9);
@@ -2041,7 +2016,7 @@ TEST(BroadPhase, ReusedVertexAabbRejectionsPreserveSafeSteps) {
                     if (mode == 2) bounds.distance = 0;
                     if (mode == 3) bounds.distance = std::numeric_limits<double>::infinity();
                     auto actual = initial;
-                    const double weight = per_vertex_safe_step(phase, actual, role, target, .9, true, false, false, false, &bounds);
+                    const double weight = per_vertex_safe_step(phase, actual, role, target, .9, true, false, false, &bounds);
                     ASSERT_EQ(weight, expected_weight);
                     for (int node = 0; node < 4; ++node)
                         for (int axis = 0; axis < 3; ++axis)

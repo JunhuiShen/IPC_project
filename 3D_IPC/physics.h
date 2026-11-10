@@ -23,6 +23,7 @@ struct Tri { int v[3]; };
 struct Pin {
     int vertex_index = -1;
     Vec3 target_position = Vec3::Zero();
+    bool prescribed = false; // DAT/OGC solvers only; ordinary pins stay finite springs
 };
 
 // Fields are left uninitialised on purpose. Construct via SimParams::zeros()
@@ -57,11 +58,13 @@ struct SimParams {
     bool   use_basic_experimental; // experimental cloth; with SIMD also selects general v2
     bool   use_basic_experimental_v2; // resolved from use_basic_experimental && use_simd
     bool   use_simd;             // select v2 SIMD cloth/general energy/contact assembly
-    bool   use_dat = false; // OGC-style colored cloth/solid/rigid DAT
+    bool   use_dat = false; // checkpoint planar DAT for cloth/solid/rigid scenes
     bool   use_jacobi_level_based_ccd = false; // Jacobi proposals filtered by level/color-ordered linear CCD
     double dat_gamma = 0.9;
     double dat_query_radius = 0.0; // 0: 1.5*d_hat when positive, otherwise node_box_max
     double dat_node_box_padding = 1.2;
+    int dat_collision_detection_interval = 0; // 0: detection before/after initialization
+    bool dat_inertial_predictor = true; // DAT/OGC filtered inertial initialization
     bool   use_cloth_grid;       // basic cloth only: serial vertices within parallel spatial cells
     bool   cloth_grid_auto_dx;   // enlarge dx from dependencies at each grid rebuild
     double cloth_grid_dx;        // fixed side (must exceed 2*node_box_max), or minimum in auto mode
@@ -72,11 +75,7 @@ struct SimParams {
     bool   use_colored_ccd_guess_level_based; // alternative: discarded trial sweep, then level/color-ordered CCD
     int    colored_ccd_guess_iters; // colored predictor or inner Jacobi-CCD updating sweeps; excludes level trial (0 keeps positions)
     double colored_ccd_guess_fraction; // fraction of xhat-x^n used only for either colored predictor's fixed target
-    bool   use_verlet_guess;     // if true, start GS from xhat + dt²*gravity (Verlet predictor)
-    bool   use_translation_guess;        // if true, start GS from x^n + C
-    bool   use_ogc;     // if true, use trust_region_initial_guess instead of CCD
-    bool   use_ogc_solver;       // if true, route the substep through global_gauss_seidel_solver_ogc
-    double ogc_box_pad;          // OGC node-box / tri-edge union pad used by the per-iter BVH rebuild
+    bool   use_ogc; // dedicated checkpoint isotropic solver for cloth/solid
     bool   fixed_iters;          // if true, run exactly max_global_iters sweeps with no tolerance / convergence check
     bool   verbose;              // print cache rebuilds and per-iteration residuals when available
 
@@ -139,11 +138,7 @@ struct SimParams {
         p.use_colored_ccd_guess_level_based = false;
         p.colored_ccd_guess_iters   = 10;
         p.colored_ccd_guess_fraction = 1.0;
-        p.use_translation_guess             = false;
-        p.use_verlet_guess          = false;
-        p.use_ogc          = false;
-        p.use_ogc_solver            = false;
-        p.ogc_box_pad               = 0.0;
+        p.use_ogc            = false;
         p.fixed_iters               = false;
         p.verbose                   = false;
         p.node_box_max              = 0.0;
@@ -164,7 +159,7 @@ struct SimParams {
 
     void validate_ccd_exact_step_bound_parameters() const {
         if (!ccd_exact_step_bound) return;
-        if (!exact_computation_fallback || use_ticcd || use_ogc || use_ogc_solver)
+        if (!exact_computation_fallback || use_ticcd || use_ogc)
             throw std::invalid_argument("--ccd_exact_step_bound requires --exact_computation_fallback true, --use_ticcd false, and OGC disabled");
     }
 
@@ -189,10 +184,12 @@ struct SimParams {
         return radius;
     }
 
-    // Explicit DAT entry points pass selected=true even when the driver flag is off.
+    // Explicit DAT/OGC entry points pass selected=true even with the flags off.
     void validate_dat_parameters(bool selected = false) const {
-        if (use_dat && use_jacobi_level_based_ccd)
-            throw std::invalid_argument("Choose only one of --use_dat and --use_jacobi_level_based_ccd");
+        if (use_dat && use_ogc)
+            throw std::invalid_argument("Choose only one of --use_dat and --use_ogc");
+        if ((use_dat || use_ogc) && use_jacobi_level_based_ccd)
+            throw std::invalid_argument("DAT/OGC cannot be combined with --use_jacobi_level_based_ccd");
         // The CCD solver does not use DAT's radius, padding or relaxation.
         // Preserve legacy validation outside this independently selected mode.
         if (use_jacobi_level_based_ccd && !selected) return;
@@ -202,10 +199,13 @@ struct SimParams {
             throw std::invalid_argument("--dat_query_radius must be finite and nonnegative (0 selects an automatic radius)");
         if (!std::isfinite(dat_node_box_padding) || dat_node_box_padding < 1.0)
             throw std::invalid_argument("--dat_node_box_padding must be finite and at least 1");
-        if (!use_dat && !selected) return;
-        if (use_ogc || use_ogc_solver || use_cloth_grid)
-            throw std::invalid_argument("--use_dat requires OGC and --use_cloth_grid to be disabled");
-        (void)resolved_dat_query_radius();
+        if (!use_dat && !use_ogc && !selected) return;
+        if (use_cloth_grid || use_jacobi_level_based_ccd)
+            throw std::invalid_argument("DAT/OGC solvers require --use_cloth_grid and --use_jacobi_level_based_ccd to be disabled");
+        if (dat_collision_detection_interval < 0)
+            throw std::invalid_argument("--dat_collision_detection_interval must be nonnegative");
+        if (!std::isfinite(resolved_dat_query_radius() * dat_node_box_padding))
+            throw std::invalid_argument("DAT query radius times padding must be finite");
     }
 
     // Explicit solver calls validate their CCD filter even with the flag off.
@@ -213,7 +213,7 @@ struct SimParams {
         if (use_dat && use_jacobi_level_based_ccd)
             throw std::invalid_argument("Choose only one of --use_dat and --use_jacobi_level_based_ccd");
         if (!use_jacobi_level_based_ccd && !selected) return;
-        if (use_ogc || use_ogc_solver || use_cloth_grid)
+        if (use_ogc || use_cloth_grid)
             throw std::invalid_argument("--use_jacobi_level_based_ccd requires OGC and --use_cloth_grid to be disabled");
         if (colored_ccd_guess_iters < 0)
             throw std::invalid_argument("--colored_ccd_guess_iters must be nonnegative (0 keeps the current positions)");
@@ -224,7 +224,7 @@ struct SimParams {
 
     void validate_cloth_grid_parameters() const {
         if (!use_cloth_grid) return;
-        if (use_ogc || use_ogc_solver)
+        if (use_ogc)
             throw std::invalid_argument("--use_cloth_grid supports only the basic cloth solver with OGC disabled");
         if (!std::isfinite(node_box_min) || !std::isfinite(node_box_max)
             || node_box_min <= 1e-10 || node_box_max < node_box_min)
@@ -281,6 +281,7 @@ struct RefMesh {
     // tetrahedral solid, this contains only the extracted boundary faces.
     std::vector<int> tris;
     std::vector<double> mass;
+    std::vector<std::vector<int>> dat_color_groups; // optional prescribed elastic partition
     size_t num_positions = 0;
 
     // Cloth

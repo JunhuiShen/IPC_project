@@ -253,7 +253,7 @@ BfsGuessReference replay_bfs_guess(const std::vector<Vec3>& x,
                     if (rigid(node) || reference.levels[node] != level) continue;
                     const Vec3 before = reference.result[node];
                     per_vertex_safe_step(scratch, reference.result, node, targets[node],
-                        0.9, true, false, false, false, nullptr, true);
+                        0.9, true, false, false, nullptr, true);
                     moved |= (reference.result[node].array() != before.array()).any();
                     remaining |= !((targets[node] - reference.result[node]).squaredNorm() < 1e-28);
                 }
@@ -642,7 +642,6 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, ClothInitialGuessUsesXhatWithoutAd
     InitialGuessClothScene scene;
     select_guess(scene.params);
     scene.params.gravity = Vec3(0, -9.81, 0);
-    scene.params.use_verlet_guess = true;
     scene.params.use_ccd_guess = true;
     for (auto& velocity : scene.state.velocities) velocity = Vec3(0.25, 0, 0);
     std::vector<Vec3> expected;
@@ -820,11 +819,9 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, ClothInitialGuessUsesSelectedSweep
             select_guess(scene.params);
             scene.params.use_parallel = parallel;
             scene.params.colored_ccd_guess_iters = sweeps;
-            // All legacy options remain on deliberately: the opt-in colored
-            // guess must win, including the meaningful zero-sweep case.
+            // Keep the global CCD guess on: the opt-in colored guess must
+            // win, including the meaningful zero-sweep case.
             scene.params.use_ccd_guess = true;
-            scene.params.use_verlet_guess = true;
-            scene.params.use_translation_guess = true;
             scene.params.gravity = Vec3(0, -9.81, 0);
             scene.state.velocities[0] = Vec3(0, 0, -4);
             for (std::size_t i = 1; i < 4; ++i)
@@ -895,14 +892,12 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, ClothSweepBudgetCountsOnlyCommitte
 }
 
 TEST_F(CollisionColoredCCDInitialGuess, DisablingClothOptionPreservesLegacyGuessSelection) {
-    for (int mode : {0, 1, 2, 3}) {
+    for (int mode : {0, 1}) {
         SCOPED_TRACE(mode);
         InitialGuessClothScene scene;
         scene.params.use_colored_ccd_guess = false;
         scene.params.colored_ccd_guess_iters = -1;
         scene.params.use_ccd_guess = mode == 1;
-        scene.params.use_verlet_guess = mode == 2;
-        scene.params.use_translation_guess = mode == 3;
         scene.params.gravity = Vec3(0, -9.81, 0);
         for (auto& velocity : scene.state.velocities) velocity = Vec3(0.25, 0, 0);
         const auto before = scene.state.deformed_positions;
@@ -910,9 +905,6 @@ TEST_F(CollisionColoredCCDInitialGuess, DisablingClothOptionPreservesLegacyGuess
         build_xhat(xhat, before, scene.state.velocities, scene.params.dt());
         std::vector<Vec3> expected = before;
         if (mode == 1) expected = ccd_initial_guess(before, xhat, scene.mesh);
-        if (mode == 2) expected = verlet_initial_guess(before, xhat, scene.mesh, scene.params);
-        if (mode == 3) expected = translation_initial_guess(before, xhat,
-            scene.mesh, scene.pins, scene.params);
         ASSERT_TRUE(scene.advance().converged);
         expect_positions_identical(scene.state.deformed_positions, expected);
     }
@@ -923,12 +915,25 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, OgcRetainsPrecedenceOverTheClothOp
         SCOPED_TRACE(solver_ogc);
         InitialGuessClothScene scene;
         select_guess(scene.params);
-        scene.params.use_ogc = !solver_ogc;
-        scene.params.use_ogc_solver = solver_ogc;
+        scene.params.use_ogc = solver_ogc;
         scene.state.velocities.assign(4, Vec3(0.25, 0, 0));
+        // Make the competing colored predictor a no-op. The dedicated OGC
+        // predictor must still consume the full physical inertial target;
+        // the basic route still honors its zero-sweep colored predictor.
+        scene.params.colored_ccd_guess_iters = 0;
+        scene.params.dat_query_radius = 1.0;
         const auto before = scene.state.deformed_positions;
+        const auto physical_velocity = scene.state.velocities;
+        auto expected = before;
+        if (solver_ogc)
+            build_xhat(expected, before, physical_velocity, scene.params.dt());
+        // The whole sheet/tet translates uniformly by less than gamma*q/2;
+        // this is a hand kinematic target with no crossing or radius clipping.
         ASSERT_TRUE(scene.advance().converged);
-        expect_positions_identical(scene.state.deformed_positions, before);
+        expect_positions_identical(scene.state.deformed_positions, expected);
+        std::vector<Vec3> expected_velocity;
+        update_velocity(expected_velocity, expected, before, scene.params.dt());
+        expect_positions_identical(scene.state.velocities, expected_velocity);
     }
 }
 
@@ -1108,8 +1113,6 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, GeneralInitialGuessUsesXhatForBoth
                 scene.params.use_simd = v2;
                 scene.params.use_parallel = true;
                 scene.params.use_ccd_guess = true;
-                scene.params.use_verlet_guess = true;
-                scene.params.use_translation_guess = true;
                 scene.params.gravity = Vec3(0, -9.81, 0);
                 scene.params.colored_ccd_guess_iters = sweeps;
                 scene.state.velocities.assign(scene.mesh.num_positions, Vec3(0.02, 0.04, -0.02));
@@ -1186,24 +1189,19 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, GeneralFractionScalesDeformablesAn
     RecordProperty("max_analytic_target_abs_error", error_property.str());
 }
 
-TEST_F(CollisionColoredCCDInitialGuess, DisabledColoredFractionDoesNotAlterLegacyPredictors) {
-    for (int mode : {1, 2, 3}) {
+TEST_F(CollisionColoredCCDInitialGuess, DisabledColoredFractionDoesNotAlterCcdOrPreviousPositionStarts) {
+    for (int mode : {0, 1}) {
         InitialGuessClothScene scene;
         scene.params.use_colored_ccd_guess = false;
         scene.params.use_colored_ccd_guess_level_based = false;
         scene.params.colored_ccd_guess_fraction = 0.0;
         scene.params.use_ccd_guess = mode == 1;
-        scene.params.use_verlet_guess = mode == 2;
-        scene.params.use_translation_guess = mode == 3;
         scene.state.velocities.assign(4, Vec3(0.25, 0, 0));
         const auto before = scene.state.deformed_positions;
         std::vector<Vec3> xhat;
         build_xhat(xhat, before, scene.state.velocities, scene.params.dt());
-        std::vector<Vec3> expected;
+        std::vector<Vec3> expected = before;
         if (mode == 1) expected = ccd_initial_guess(before, xhat, scene.mesh);
-        if (mode == 2) expected = verlet_initial_guess(before, xhat, scene.mesh, scene.params);
-        if (mode == 3) expected = translation_initial_guess(before, xhat,
-            scene.mesh, scene.pins, scene.params);
         ASSERT_TRUE(scene.advance().converged);
         expect_positions_identical(scene.state.deformed_positions, expected);
     }
@@ -1284,8 +1282,6 @@ TEST_F(CollisionColoredCCDInitialGuess, DisabledGeneralOptionPreservesLegacyStar
         scene.params.use_colored_ccd_guess = false;
         scene.params.colored_ccd_guess_iters = -1;
         scene.params.use_ccd_guess = true;
-        scene.params.use_verlet_guess = true;
-        scene.params.use_translation_guess = true;
         scene.state.velocities.assign(scene.mesh.num_positions, Vec3(0.02, 0.04, 0));
         const auto before = scene.state.deformed_positions;
         ASSERT_TRUE(scene.advance().converged);
@@ -1297,12 +1293,25 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, OgcRetainsPrecedenceInGeneralDrive
     for (bool solver_ogc : {false, true}) {
         InitialGuessSolidScene scene;
         select_guess(scene.params);
-        scene.params.use_ogc = !solver_ogc;
-        scene.params.use_ogc_solver = solver_ogc;
+        scene.params.use_ogc = solver_ogc;
         scene.state.velocities.assign(5, Vec3(0.02, 0.04, 0));
+        // Make the competing colored predictor a no-op. The dedicated OGC
+        // predictor must still consume the full physical inertial target;
+        // the basic route still honors its zero-sweep colored predictor.
+        scene.params.colored_ccd_guess_iters = 0;
+        scene.params.dat_query_radius = 1.0;
         const auto before = scene.state.deformed_positions;
+        const auto physical_velocity = scene.state.velocities;
+        auto expected = before;
+        if (solver_ogc)
+            build_xhat(expected, before, physical_velocity, scene.params.dt());
+        // The whole sheet/tet translates uniformly by less than gamma*q/2;
+        // this is a hand kinematic target with no crossing or radius clipping.
         ASSERT_TRUE(scene.advance().converged);
-        expect_positions_identical(scene.state.deformed_positions, before);
+        expect_positions_identical(scene.state.deformed_positions, expected);
+        std::vector<Vec3> expected_velocity;
+        update_velocity(expected_velocity, expected, before, scene.params.dt());
+        expect_positions_identical(scene.state.velocities, expected_velocity);
     }
 }
 
@@ -2681,113 +2690,5 @@ TEST(CCDInitialGuess, ReturnsTargetWhenNoCollisionCandidates) {
     ASSERT_EQ(guess.size(), xhat.size());
     for (int i = 0; i < static_cast<int>(xhat.size()); ++i) {
         expect_vec_near(guess[i], xhat[i], 1e-12);
-    }
-}
-
-TEST(VerletInitialGuess, AddsGravityAndReturnsCollisionFreeTarget) {
-    SimParams params = base_params();
-    params.gravity = Vec3(0.0, -4.0, 2.0);
-
-    RefMesh ref_mesh = ref_mesh_with_masses({1.0, 1.0});
-    ref_mesh.tris.clear();
-
-    const std::vector<Vec3> x = {
-        Vec3(0.0, 0.0, 0.0),
-        Vec3(1.0, 2.0, 3.0),
-    };
-    const std::vector<Vec3> xhat = {
-        Vec3(0.5, 1.0, -0.5),
-        Vec3(1.5, 3.0, 2.5),
-    };
-
-    const std::vector<Vec3> guess = verlet_initial_guess(x, xhat, ref_mesh, params);
-    const Vec3 dt2g = params.dt2() * params.gravity;
-
-    ASSERT_EQ(guess.size(), xhat.size());
-    for (int i = 0; i < static_cast<int>(xhat.size()); ++i) {
-        expect_vec_near(guess[i], xhat[i] + dt2g, 1e-12);
-    }
-}
-
-TEST(TranslationInitialGuess, MatchesMassWeightedInertiaAndGravityClosedForm) {
-    SimParams params = base_params();
-    params.gravity = Vec3(0.0, -4.0, 2.0);
-
-    RefMesh ref_mesh = ref_mesh_with_masses({2.0, 1.0, 3.0});
-    std::vector<Vec3> x = {
-        Vec3(0.0, 0.0, 0.0),
-        Vec3(1.0, 2.0, 0.0),
-        Vec3(-1.0, 0.5, 3.0),
-    };
-    std::vector<Vec3> xhat = {
-        x[0] + Vec3(1.0, 0.0, 0.0),
-        x[1] + Vec3(0.0, 2.0, 0.0),
-        x[2] + Vec3(0.0, 0.0, -1.0),
-    };
-
-    const std::vector<Vec3> guess = translation_initial_guess(x, xhat, ref_mesh, {}, params);
-
-    // Inertia gives (2, 2, -3) / 6 = (1/3, 1/3, -1/2).
-    // With dt = 1/2, gravity contributes dt^2 * g = (0, -1, 1/2).
-    const Vec3 expected_C(1.0 / 3.0, -2.0 / 3.0, 0.0);
-
-    ASSERT_EQ(guess.size(), x.size());
-    for (int i = 0; i < static_cast<int>(x.size()); ++i) {
-        expect_vec_near(guess[i], x[i] + expected_C, 1e-12);
-    }
-}
-
-TEST(TranslationInitialGuess, IncludesPinSpringsInClosedFormTranslation) {
-    SimParams params = base_params();
-    params.kpin = 20.0;
-
-    RefMesh ref_mesh = ref_mesh_with_masses({2.0, 3.0});
-    std::vector<Vec3> x = {
-        Vec3(0.0, 0.0, 0.0),
-        Vec3(1.0, 0.0, 0.0),
-    };
-    std::vector<Vec3> xhat = {
-        x[0] + Vec3(2.0, 0.0, 0.0),
-        x[1] + Vec3(2.0, 0.0, 0.0),
-    };
-    std::vector<Pin> pins = {
-        Pin{1, x[1] + Vec3(0.0, 4.0, 0.0)},
-    };
-
-    const std::vector<Vec3> guess = translation_initial_guess(x, xhat, ref_mesh, pins, params);
-
-    const Vec3 expected_C(1.0, 2.0, 0.0);
-    ASSERT_EQ(guess.size(), x.size());
-    for (int i = 0; i < static_cast<int>(x.size()); ++i) {
-        expect_vec_near(guess[i], x[i] + expected_C, 1e-12);
-    }
-}
-
-TEST(TranslationInitialGuess, AppliesOneNewtonCorrectionForPlaneSDF) {
-    SimParams params = SimParams::zeros();
-    params.fps = 1.0;
-    params.substeps = 1;
-    params.k_sdf = 10.0;
-    params.eps_sdf = 0.0;
-    params.gravity = Vec3::Zero();
-    params.sdf_planes.push_back({Vec3::Zero(), Vec3::UnitY()});
-
-    RefMesh ref_mesh = ref_mesh_with_masses({1.0, 1.0, 1.0});
-    std::vector<Vec3> x = {
-        Vec3(0.0, -0.1, 0.0),
-        Vec3(1.0, -0.3, 0.0),
-        Vec3(2.0,  0.2, 0.0),
-    };
-    std::vector<Vec3> xhat = x;
-
-    const std::vector<Vec3> guess = translation_initial_guess(x, xhat, ref_mesh, {}, params);
-
-    // Two active vertices have total penetration 0.4. With dt = 1 and k = 10:
-    // C_y = 10 * 0.4 / (3 + 10 * 2) = 4/23.
-    const Vec3 expected_C(0.0, 4.0 / 23.0, 0.0);
-
-    ASSERT_EQ(guess.size(), x.size());
-    for (int i = 0; i < static_cast<int>(x.size()); ++i) {
-        expect_vec_near(guess[i], x[i] + expected_C, 1e-12);
     }
 }

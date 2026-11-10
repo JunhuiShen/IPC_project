@@ -44,6 +44,9 @@ struct RigidDATScene {
         params.dat_query_radius = 10;
         params.use_dat = true;
         params.k_barrier = 0;
+        // These tests isolate generalized colored Newton proposals; physical
+        // predictor initialization has its own production integration tests.
+        params.dat_inertial_predictor = false;
     }
 
     int add_body(const std::vector<Vec3>& points,
@@ -330,7 +333,7 @@ std::vector<int> deformable_node_ids(const RefMesh& mesh) {
     return nodes;
 }
 
-// Cloth-only scene: solve_general_dat delegates this to solve_deformable_dat.
+// The canonical DAT entry delegates this cloth-only scene to its checkpoint engine.
 RigidDATScene deformable_cloth_scene() {
     RigidDATScene scene;
     scene.params.dat_query_radius = 1;
@@ -369,6 +372,28 @@ TEST(RigidDATSolver, FreeTranslationMatchesTheDiscreteEquationInOneSweep) {
             - expected_displacement).norm(), 3e-13);
     EXPECT_TRUE(iterate.omega[0].isZero(0));
     EXPECT_LE((iterate.orientation[0] - scene.state.orientations[0]).norm(), 1e-15);
+    expect_rigidity(scene.mesh, iterate.positions);
+}
+
+TEST(RigidDATSolver, InertialPredictorAdvancesPhysicalVelocityBeforeZeroIterationExit) {
+    RigidDATScene scene;
+    scene.params.dat_inertial_predictor = true;
+    scene.params.max_global_iters = 0;
+    const Vec3 velocity(.4, -.2, .3);
+    scene.add_body(tetrahedron(Vec3(1, 2, 3)), velocity, Vec3::Zero(),
+        RigidBodyUpdateMode::TranslationOnly);
+    scene.finish();
+    const auto physical = scene.state;
+    SolveState iterate(scene);
+    BroadPhase phase;
+    const auto result = solve(scene, iterate, phase);
+    ASSERT_TRUE(result.converged);
+    EXPECT_EQ(result.iterations, 0);
+    const Vec3 displacement = scene.params.dt() * velocity;
+    expect_vectors(iterate.centers, {scene.state.x_coms[0] + displacement});
+    for (std::size_t node = 0; node < iterate.positions.size(); ++node)
+        expect_vectors({iterate.positions[node]}, {physical.deformed_positions[node] + displacement});
+    expect_unchanged(scene.state, physical);
     expect_rigidity(scene.mesh, iterate.positions);
 }
 
@@ -590,8 +615,6 @@ TEST(RigidDATSolver, PureRigidFrameDriverUsesDATAndThePhysicalSubstepState) {
     scene.params.substeps = 2;
     scene.params.gravity = Vec3(0, -3, 0);
     // All predictor flags are ignored by the DAT path.
-    scene.params.use_verlet_guess = true;
-    scene.params.use_translation_guess = true;
     const Vec3 initial_velocity(.4, .2, -.1);
     scene.add_body(tetrahedron(Vec3(1, 2, 3)), initial_velocity, Vec3::Zero(),
         RigidBodyUpdateMode::TranslationOnly);
@@ -743,8 +766,8 @@ TEST(RigidDATSolver, MalformedOwnershipIsRejectedBeforeAnyCandidateIsPublished) 
 }
 
 TEST(RigidDATSolver, NoProposalExitsStillRejectTouchingContactsBeforePublication) {
-    for(bool particle:{false,true})for(bool jacobi:{false,true})for(bool residual_exit:{false,true}) {
-        SCOPED_TRACE(::testing::Message()<<"particle="<<particle<<" jacobi="<<jacobi
+    for(bool particle:{false,true})for(bool residual_exit:{false,true}) {
+        SCOPED_TRACE(::testing::Message()<<"particle="<<particle
             <<" residual_exit="<<residual_exit);
         RigidDATScene scene;
         scene.params.fixed_iters=!residual_exit;
@@ -768,11 +791,7 @@ TEST(RigidDATSolver, NoProposalExitsStillRejectTouchingContactsBeforePublication
         const auto original=invalid;
         BroadPhase phase;
         const auto run=[&](SolveState& iterate) {
-            return jacobi
-                ? global_jacobi_solver_dat_general(scene.mesh,scene.state,scene.adjacency,
-                    scene.pins,scene.params,iterate.positions,iterate.target,iterate.centers,
-                    iterate.orientation,iterate.omega,phase)
-                : solve(scene,iterate,phase);
+            return solve(scene,iterate,phase);
         };
         // Zero barrier forces make the initial residual zero. Neither an
         // already-converged solve nor a zero iteration budget may accept an
@@ -1013,16 +1032,13 @@ TEST(RigidDATSolver, LaterParticleColorsRefreshContactsAfterTheRigidColorMoves) 
     const auto physical_history = scene.state.deformed_positions;
     const SolveState initial(scene);
 
-    // A body shares color zero with cloth node zero. Its initial system is
-    // identical to the preserved Jacobi API's system. Small separating motion
-    // is not truncated, so that API supplies an independent rigid first-color
-    // reference without requiring a duplicate generalized-coordinate assembler.
+    // A body shares color zero with cloth node zero and moves only in that
+    // structural color. This fixture's small separating body proposal stays
+    // untruncated (asserted below), so its final COM supplies that first-color
+    // increment; cloth/contact contributions are assembled independently.
     auto initial_rigid = initial;
-    BroadPhase jacobi_phase;
-    ASSERT_TRUE(global_jacobi_solver_dat_general(scene.mesh, scene.state,
-        scene.adjacency, scene.pins, scene.params, initial_rigid.positions,
-        initial_rigid.target, initial_rigid.centers, initial_rigid.orientation,
-        initial_rigid.omega, jacobi_phase).converged);
+    BroadPhase body_phase;
+    ASSERT_TRUE(solve(scene, initial_rigid, body_phase).converged);
     const Vec3 body_delta = initial_rigid.centers[0] - initial.centers[0];
     ASSERT_GT(body_delta.norm(), 1e-5);
     ASSERT_LT(body_delta.norm(), .01);

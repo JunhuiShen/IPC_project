@@ -33,7 +33,7 @@ Run dense_run(const char* dense_flag,const char* queue_flag,const char* forced_p
     {
         GpuSolver solver(h);
         for(std::size_t epoch=0;epoch<dhats.size();++epoch) {
-            auto p=parameters(modes[epoch],false);p.contact.d_hat=dhats[epoch];
+            auto p=parameters(modes[epoch]);p.contact.d_hat=dhats[epoch];
             if(graded){p.box_radius_min=p.box_radius=1e-5;p.rotation_radius=1e-5;p.damping=.001;}
             solver.advance_substep(p,h.pin_targets,{});auto snapshot=solver.snapshot();finite(snapshot);
             result.states.push_back(std::move(snapshot));result.resident.push_back(resident_bytes()-before);
@@ -91,7 +91,7 @@ void dense_lifetimes() {
     require(on.resident[1]==off.resident[1]+sizeof(unsigned),
         "pruned mode failed complete generic fallback or lost retained preflight");
 }
-void dense_raw_dat_error_gates() {
+void dense_raw_error_gates() {
     Environment dense_env("IPC_GPU_TWO_RIGID_DENSE_CSR");
     dense_env.set("1");raw_pipeline_gates();
     {
@@ -116,10 +116,6 @@ void dense_raw_dat_error_gates() {
             "raw nonmonotone contacts bypassed complete generic sorting");
     }
     for(bool exact:{false,true}) {
-        dense_env.set("0");const auto off=run("1",nullptr,exact,true);
-        dense_env.set("1");const auto on=run("1",nullptr,exact,true);
-        compare_runs(off,on,"dense DAT unchanged");
-        require(off.resident==on.resident,"DAT received dense hint/control allocation");
         dense_env.set("0");const auto error_off=force_error("1",exact);
         dense_env.set("1");const auto error_on=force_error("1",exact);
         require(error_off==error_on,"dense single zero-gap code/invalidation changed");
@@ -130,8 +126,8 @@ int main() {
     try {
         Environment dense_env("IPC_GPU_TWO_RIGID_DENSE_CSR");dense_env.set("0");
         require(queue_elision_reference_main()==0,"all sealed queue-elision assertions must still pass");
-        tracking=true;dense_lifetimes();dense_raw_dat_error_gates();
+        tracking=true;dense_lifetimes();dense_raw_error_gates();
         require(resident_bytes()==0&&!tracking_failed,"dense allocation ledger not empty");tracking=false;
-        std::cout<<"Two-rigid dense CSR: independent queue flags, six-array bytes, dense highwater/generic/pruned/empty reuse, raw/DAT/errors PASS\n";return 0;
+        std::cout<<"Two-rigid dense CSR: independent queue flags, six-array bytes, dense highwater/generic/pruned/empty reuse, raw/errors PASS\n";return 0;
     }catch(const std::exception& e){std::cerr<<"two-rigid dense test: "<<e.what()<<'\n';return 1;}
 }

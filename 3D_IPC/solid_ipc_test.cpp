@@ -1687,7 +1687,7 @@ TEST(SolidBarrierAssembly, CcdRejectionsPreserveAssemblyAndRejectOnlyAabbGaps) {
                 const double plain_step = per_vertex_safe_step(broad_phase, plain_x, node,
                     proposal, 0.9, true, false);
                 const double cached_step = per_vertex_safe_step(broad_phase, cached_x, node,
-                    proposal, 0.9, true, false, false, false, &rejections);
+                    proposal, 0.9, true, false, false, &rejections);
                 EXPECT_EQ(plain_step, cached_step);
                 EXPECT_EQ(0, std::memcmp(plain_x[node].data(), cached_x[node].data(), 3 * sizeof(double)));
 

@@ -82,7 +82,6 @@ Results run(bool prune,bool queues,bool compact,bool cooperative) {
     env.set("IPC_GPU_COLOR_PAIR_QUEUES",queues?"1":"0");env.set("IPC_GPU_WARP_CONTACT_REDUCE","0");
     env.set("IPC_GPU_COMPACT_DEFORMABLE_CONTACTS",compact?"1":"0");
     env.set("IPC_GPU_COOPERATIVE_EXACT_CONTACT",cooperative?"1":"0");
-    env.set("IPC_GPU_PROFILE_CSV",nullptr);env.set("IPC_GPU_CONTACT_QUEUE_CSV",nullptr);
     std::vector<V> positions{{.25,.25,.05},{0,0,0},{1,0,0},{0,1,0},
                             {2.25,.25,.5},{2,0,0},{3,0,0},{2,1,0},
                             {4,0,0},{5,0,0},{4,.5,0},{5,.5,0},

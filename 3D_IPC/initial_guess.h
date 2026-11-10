@@ -67,9 +67,3 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
     const RefMesh& ref_mesh, const SimParams& params, int ccd_iterations,
     BroadPhase* scratch_broad_phase = nullptr, ColoredCCDGuessTrace* trace = nullptr,
     std::vector<Vec3>* recycled_result = nullptr);
-
-// Add dt^2 * gravity to xhat, then apply the global CCD guess.
-std::vector<Vec3> verlet_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh, const SimParams& params, BroadPhase* scratch_broad_phase = nullptr);
-
-// Apply a uniform translation driven by inertia, gravity, pins, and SDF penalties.
-std::vector<Vec3> translation_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh, const std::vector<Pin>& pins, const SimParams& params);

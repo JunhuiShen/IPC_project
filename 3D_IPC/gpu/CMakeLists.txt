@@ -84,7 +84,6 @@ add_library(ipc_gpu_solver STATIC solver.cu contact_pipeline.cu
     contact_cooperative.cu
     ${IPC_GPU_LINEAR_CCD_SOURCES} rigid_pipeline.cu
     adaptive_boxes.cu global_guess.cu level_schedule.cu
-    dat.cu
     contact_compact_point.cu cooperative_compact_point_study.cu)
 target_include_directories(ipc_gpu_solver PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(ipc_gpu_solver PUBLIC ipc_gpu_components CUDA::cudart Threads::Threads)
@@ -148,9 +147,8 @@ if(IPC_GPU_BUILD_VALIDATION)
         gpu_contact_cooperative_test gpu_contact_schedule_test
         gpu_ratio_host_test gpu_ratio_cuda_test
         gpu_exact_pool_test gpu_adaptive_boxes_test gpu_global_guess_test
-        gpu_solver_test gpu_dat_test gpu_dat_geometry_test
-        gpu_rigid_dat_math_test gpu_directed_rounding_test gpu_original_rigid_math_test
-        gpu_rigid_pins_test gpu_cpu_parity_test
+        gpu_solver_test gpu_directed_rounding_test gpu_original_rigid_math_test
+        gpu_rigid_pins_test gpu_rigid_pin_api_test gpu_bridge_mode_host_test
         gpu_original_contact_test gpu_original_ccd_test gpu_original_mode_test)
     add_dependencies(gpu_validation gpu_contact_policy_host_test)
     if(IPC_GPU_BUILD_DRIVER)

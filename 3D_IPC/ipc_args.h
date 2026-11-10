@@ -44,6 +44,8 @@ struct IPCArgs3D : ArgParser {
     bool   use_basic_experimental = false;
     bool   use_simd = false;
     bool   use_dat = false;
+    int dat_collision_detection_interval = 0;
+    bool dat_inertial_predictor = true;
     bool   use_jacobi_level_based_ccd = false;
     double dat_gamma = 0.9;
     double dat_query_radius = 0.0;
@@ -58,11 +60,7 @@ struct IPCArgs3D : ArgParser {
     bool   use_colored_ccd_guess_level_based = false;
     int    colored_ccd_guess_iters = 10;
     double colored_ccd_guess_fraction = 1.0;
-    bool   use_verlet_guess = false;
-    bool   use_translation_guess = false;
     bool   use_ogc = false;
-    bool   use_ogc_solver = false;
-    double ogc_box_pad = 0.005;
     bool   fixed_iters = false;
     bool   verbose = false;
     double node_box_max            = 0.01;
@@ -221,8 +219,10 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_parallel",   use_parallel,   true,  "Use parallel solver updates (Gauss-Seidel requires coloring)");
         add_bool  ("use_basic_experimental", use_basic_experimental, false, "Use experimental cloth solving; with use_simd also selects experimental general solving");
         add_bool  ("use_simd", use_simd, false, "With use_basic_experimental, select SIMD v2 for cloth or the general cloth/solid/rigid solver");
-        add_bool  ("use_dat", use_dat, false, "CPU cloth/solid/rigid: cached elasticity-only coloring; mesh contacts refreshed before each color and planar DAT per color; certifies curved rigid trajectories; overrides experimental/SIMD solvers and skips initial guesses; incompatible with OGC/grid");
-        add_bool  ("use_jacobi_level_based_ccd", use_jacobi_level_based_ccd, false, "Deformable cloth/solid only: Jacobi proposals filtered by level-based colored linear CCD; uses colored_ccd_guess_iters per Jacobi iteration; skips initial guesses; incompatible with Jacobi DAT/OGC/grid");
+        add_bool  ("use_dat", use_dat, false, "CPU cloth/solid/rigid: checkpoint planar DAT with cached elastic colors and a filtered inertial predictor; overrides experimental/SIMD solvers; incompatible with isotropic OGC/grid/Jacobi CCD");
+        add_bool  ("use_jacobi_level_based_ccd", use_jacobi_level_based_ccd, false, "Deformable cloth/solid only: Jacobi proposals filtered by level-based colored linear CCD; uses colored_ccd_guess_iters per Jacobi iteration; skips initial guesses; incompatible with DAT/OGC/grid");
+        add_int("dat_collision_detection_interval", dat_collision_detection_interval, 0, "DAT/OGC: 0 uses pre/post-initialization detection; positive N adds checkpoints every N colors");
+        add_bool("dat_inertial_predictor", dat_inertial_predictor, true, "DAT/OGC: filter the inertial predictor before the post-initialization checkpoint");
         add_double("dat_gamma", dat_gamma, 0.9, "DAT relaxation factor, strictly between 0 and 1");
         add_double("dat_query_radius", dat_query_radius, 0.0, "DAT query radius; 0 selects 1.5*d_hat when d_hat > 0, otherwise node_box_max");
         add_double("dat_node_box_padding", dat_node_box_padding, 1.2, "DAT query-box padding multiplier, at least 1");
@@ -233,15 +233,11 @@ struct IPCArgs3D : ArgParser {
 
         add_bool  ("use_ccd",      use_ccd,      true,   "Run CCD step clamping in per_vertex_safe_step");
         add_bool  ("use_ccd_guess",    use_ccd_guess,    true,  "Use ccd_initial_guess as the substep start point (ignored with OGC)");
-        add_bool  ("use_colored_ccd_guess", use_colored_ccd_guess, false, "Cloth/solid: original collision-colored linear CCD initial guess toward xhat; mutually exclusive with use_colored_ccd_guess_level_based; rigid bodies stay fixed; overrides CCD, Verlet, and translation guess flags, but is ignored with OGC");
-        add_bool  ("use_colored_ccd_guess_level_based", use_colored_ccd_guess_level_based, false, "Cloth/solid: level-based colored CCD toward xhat, with one discarded trial sweep to build levels; mutually exclusive with use_colored_ccd_guess; rigid bodies stay fixed; overrides CCD, Verlet, and translation guess flags, but is ignored with OGC");
+        add_bool  ("use_colored_ccd_guess", use_colored_ccd_guess, false, "Cloth/solid: original collision-colored linear CCD initial guess toward xhat; mutually exclusive with use_colored_ccd_guess_level_based; rigid bodies stay fixed; overrides the global CCD guess, but is ignored with OGC");
+        add_bool  ("use_colored_ccd_guess_level_based", use_colored_ccd_guess_level_based, false, "Cloth/solid: level-based colored CCD toward xhat, with one discarded trial sweep to build levels; mutually exclusive with use_colored_ccd_guess; rigid bodies stay fixed; overrides the global CCD guess, but is ignored with OGC");
         add_int   ("colored_ccd_guess_iters", colored_ccd_guess_iters, 10, "Maximum actual updating sweeps for either colored CCD initial guess or each Jacobi level-based CCD filter; excludes the level-based trial sweep (0 skips trial and updates)");
         add_double("colored_ccd_guess_fraction", colored_ccd_guess_fraction, 1.0, "Fixed target fraction of xhat minus current positions for either colored CCD initial guess, finite in [0, 1]; applied once before sweeps and the level trial; does not change the solver's xhat and is not applied by the Jacobi level-based CCD solver");
-        add_bool  ("use_verlet_guess", use_verlet_guess, false, "Start GS from xhat + dt^2*gravity (Verlet predictor)");
-        add_bool  ("use_translation_guess", use_translation_guess, false, "Start GS from x^n + C");
-        add_bool  ("use_ogc", use_ogc, false, "Use trust-region narrow phase instead of CCD for step clamping");
-        add_bool  ("use_ogc_solver", use_ogc_solver, false, "Use the serial OGC Gauss-Seidel solver (rebuilds BVH per iter; partial leaf refit per move)");
-        add_double("ogc_box_pad", ogc_box_pad, 0.005, "Padding on OGC node boxes / tri-edge unions for the per-iter BVH rebuild (floored to d_hat at use)");
+        add_bool  ("use_ogc", use_ogc, false, "CPU cloth/solid: checkpoint isotropic OGC with elastic coloring and a filtered inertial predictor; rigid bodies and DAT/grid/Jacobi CCD combinations are unsupported");
         add_bool  ("fixed_iters",      fixed_iters,      false, "Run exactly max_substep_iters sweeps per substep with no tolerance / convergence check");
         add_bool  ("verbose",          verbose,          false, "Print solver cache rebuilds and residuals after each GS iteration (residuals require fixed_iters=false)");
         add_double("node_box_max",         node_box_max,         0.01,  "Upper bound on node box half-extent used by the basic solver");
@@ -358,6 +354,10 @@ struct IPCArgs3D : ArgParser {
 
     bool parse(int argc, char** argv) {
         if (!ArgParser::parse(argc, argv)) return false;
+        if (example < 1 || example > 20) {
+            std::cerr << "Error: --example must be between 1 and 20\n";
+            return false;
+        }
         const auto supplied = [&](const char* flag) {
             for (int i = 1; i < argc; ++i)
                 if (std::string(argv[i]) == flag) return true;
@@ -477,7 +477,7 @@ struct IPCArgs3D : ArgParser {
             const auto preset = [&](const char* flag, auto& field, auto value) {
                 if (!supplied(flag)) field = value;
             };
-            preset("--num_frames", num_frames, 120);
+            preset("--num_frames", num_frames, 230);
             preset("--fps", fps, 30.0);
             preset("--gy", gy, 0.0);
             preset("--substeps", substeps, 19);
@@ -608,6 +608,8 @@ struct IPCArgs3D : ArgParser {
         p.use_basic_experimental_v2 = use_basic_experimental && use_simd;
         p.use_simd         = use_simd;
         p.use_dat   = use_dat;
+        p.dat_collision_detection_interval = dat_collision_detection_interval;
+        p.dat_inertial_predictor = dat_inertial_predictor;
         p.use_jacobi_level_based_ccd = use_jacobi_level_based_ccd;
         p.dat_gamma        = dat_gamma;
         p.dat_query_radius = dat_query_radius;
@@ -622,11 +624,7 @@ struct IPCArgs3D : ArgParser {
         p.use_colored_ccd_guess_level_based = use_colored_ccd_guess_level_based;
         p.colored_ccd_guess_iters = colored_ccd_guess_iters;
         p.colored_ccd_guess_fraction = colored_ccd_guess_fraction;
-        p.use_verlet_guess = use_verlet_guess;
         p.use_ogc = use_ogc;
-        p.use_ogc_solver = use_ogc_solver;
-        p.ogc_box_pad = ogc_box_pad;
-        p.use_translation_guess = use_translation_guess;
         p.fixed_iters = fixed_iters;
         p.verbose = verbose;
         p.node_box_max            = node_box_max;

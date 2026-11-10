@@ -10,7 +10,7 @@ Run sparse_public_run(const char* flag,bool contact=true) {
     {
         GpuSolver solver(h);
         for(double activation:{.2,.11,.2}) {
-            auto p=parameters(false,false);p.contact.d_hat=activation;p.contact.friction=0.;
+            auto p=parameters(false);p.contact.d_hat=activation;p.contact.friction=0.;
             if(!contact)p.contact.k_barrier=0.;
             solver.advance_substep(p,h.pin_targets,{});auto state=solver.snapshot();finite(state);
             result.states.push_back(std::move(state));result.resident.push_back(resident_bytes()-before);
@@ -20,7 +20,7 @@ Run sparse_public_run(const char* flag,bool contact=true) {
 }
 std::string sparse_public_error(const char* flag) {
     Environment sparse("IPC_GPU_ORIGINAL_RIGID_SPARSE_GATHER"),cap("IPC_GPU_CONTACT_PACKET_CAPACITY");
-    sparse.set(flag);cap.set("3");const auto h=fixture(0.);auto p=parameters(false,false);p.contact.friction=0.;
+    sparse.set(flag);cap.set("3");const auto h=fixture(0.);auto p=parameters(false);p.contact.friction=0.;
     const auto before=resident_bytes();std::string message;
     {
         GpuSolver solver(h);finite(solver.snapshot());

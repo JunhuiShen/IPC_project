@@ -12,6 +12,7 @@ void clear_model(RefMesh& ref_mesh, DeformedState& state, std::vector<Vec2>& X, 
     X.clear();
     ref_mesh.tris.clear();
     ref_mesh.mass.clear();
+    ref_mesh.dat_color_groups.clear();
     ref_mesh.Dm_inverse.clear();
     ref_mesh.area.clear();
     ref_mesh.hinges.clear();

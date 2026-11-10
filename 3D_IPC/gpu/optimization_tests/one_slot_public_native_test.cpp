@@ -3,11 +3,11 @@
 #undef main
 
 namespace {
-Run one_slot_run(const char* slot_flag,bool exact,bool dat=false,bool dense=true,
+Run one_slot_run(const char* slot_flag,bool exact,bool dense=true,
                  bool contact=true) {
     Environment one("IPC_GPU_RIGID_ONE_SLOT_TERMS"),csr("IPC_GPU_TWO_RIGID_DENSE_CSR");
     one.set(slot_flag);csr.set(dense?"1":"0");
-    return run("1",nullptr,exact,dat,contact);
+    return run("1",nullptr,exact,contact);
 }
 void slot_public_checks() {
     // Known source arrays/capacity from the independent qualified public fixture.
@@ -30,12 +30,12 @@ void slot_public_checks() {
         equal(true_on.states[i],true_unset.states[i],"one-slot true-default UNSET/ON six-array bytes");
         require(true_on.resident[i]==true_unset.resident[i],"one-slot true-default UNSET/ON resources");
     }
-    for(bool exact:{false,true})for(bool dat:{false,true})for(bool dense:{false,true}) {
-        const auto a=one_slot_run("0",exact,dat,dense),b=one_slot_run("1",exact,dat,dense);
+    for(bool exact:{false,true})for(bool dense:{false,true}) {
+        const auto a=one_slot_run("0",exact,dense),b=one_slot_run("1",exact,dense);
         for(std::size_t epoch=0;epoch<a.states.size();++epoch)
-            equal(a.states[epoch],b.states[epoch],"one-slot policy/frozen/generic fallback bytes");
+            equal(a.states[epoch],b.states[epoch],"one-slot policy/generic fallback bytes");
     }
-    const auto no_force=one_slot_run("0",false,false,true,false);
+    const auto no_force=one_slot_run("0",false,true,false);
     require(!equal_bytes(off.states[0].com,no_force.states[0].com)
         ||!equal_bytes(off.states[0].omega,no_force.states[0].omega),"one-slot active-force fixture is vacuous");
     for(bool exact:{false,true}) {

@@ -30,8 +30,7 @@ function(ipc_gpu_write_generated_if_different output content)
 endfunction()
 
 # Generated copies live in the build tree, where the GPU headers shadow same-named
-# CPU headers: gpu/solver.h shadows the CPU solver.h and gpu/dat.h shadows DAT.h
-# on case-insensitive filesystems. Every generated copy rewrites those quoted
+# CPU headers: gpu/solver.h shadows the CPU solver.h. Every generated copy rewrites those quoted
 # includes to the read-only CPU tree by absolute path; the CPU originals are
 # never edited.
 #

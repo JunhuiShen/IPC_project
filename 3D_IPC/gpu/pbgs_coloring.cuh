@@ -19,7 +19,6 @@ struct PbgsColoringStorage {
     cusparseHandle_t handle=nullptr;
     cusparseMatDescr_t descriptor=nullptr;
     cusparseColorInfo_t info=nullptr;
-    std::ofstream diagnostics;
     ~PbgsColoringStorage() {
         if(info)cusparseDestroyColorInfo(info);
         if(descriptor)cusparseDestroyMatDescr(descriptor);

@@ -82,12 +82,14 @@ public:
 // Planar Divide and Truncate for simultaneous, straight-line vertex updates.
 // Returns displacements; neither input array nor the mesh is modified.
 //
-// 1. Cap each update's Euclidean norm at 0.5 * gamma * query_radius.
-// 2. Build the existing BVH from blue boxes centered at current_positions,
+// 1. Build the existing BVH from blue boxes centered at current_positions,
 //    with half-extent query_radius * node_box_padding (default padding: 1.2).
-// 3. Keep nonincident vertex/triangle and edge/edge pairs at distance < r_q.
-// 4. Allocate their separating planes in proportion to approaching motion,
-//    then apply the minimum relaxed plane-intersection factor per vertex.
+// 2. Keep nonincident vertex/triangle and edge/edge pairs at distance < r_q.
+// 3. Allocate their separating planes from the RAW incremental motion using
+//    Newton's proportional rule, a 5% interior floor, and crossing-only
+//    relaxation; then apply the minimum plane-intersection factor per vertex.
+// 4. Apply the radius cap AFTER the planes, then certify the represented
+//    endpoints with outward-rounded projections.
 //
 // Requires 0 < gamma < 1, finite positive query_radius, padding >= 1, and
 // initially separated nonincident primitives. Invalid inputs throw
@@ -96,7 +98,6 @@ public:
 // boundary nodes consistently, as required by BroadPhase::initialize_surface_nodes.
 // This is a surface-contact filter: it does not prevent tetrahedron inversion,
 // enforce rigid-body motion, handle curved rotational paths, or query SDFs.
-// No existing solver is switched to DAT by this standalone function.
 std::vector<Vec3> planar_DAT(
     double gamma,
     double query_radius,
@@ -172,3 +173,68 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// Checkpointed straight-deformable DAT geometry shared by the canonical DAT
+// (planar) and OGC (isotropic) solvers. The supplied candidates must cover
+// every nonincident VT/EE pair closer than query_radius at reference_positions.
+// Ownership/surface exclusions belong to BroadPhase. Reset again whenever
+// detection runs; do not reset the reference while reusing old candidates.
+// The filter consumes TOTAL displacement from that immutable reference,
+// including all accepted colors since detection.
+//
+// Planar follows Newton's proportional plane placement, 5% interior floor,
+// crossing-only relaxation, and a final isotropic radius cap. The per-pair
+// plane half-band is max(separation_epsilon, 4*FLT_EPSILON*max(1,abs(world
+// coordinates))). Isotropic uses gamma/2 times the minimum reference VT/FV/EE
+// distance incident on each vertex (query_radius when no closer pair exists).
+//
+// Both modes require strictly separated initial nonincident primitives and
+// throw for an uncertifiable pair instead of silently skipping it. They do
+// not repair intersections, prevent tet inversion, query SDFs, or certify
+// curved rigid trajectories. Rigid meshes are rejected. A checkpoint is not
+// safe for simultaneous filter calls because scratch storage is reused.
+namespace dat {
+
+enum class Mode { Planar, Isotropic };
+
+struct Options {
+    Mode mode = Mode::Planar;
+    double gamma = 0.85;
+    double query_radius = 0.0; // A finite, strictly positive detection radius.
+    double separation_epsilon = 1.0e-6;
+    double minimum_plane_fraction = 0.05;
+    bool use_parallel = false;
+};
+
+struct Result {
+    // Publish positions directly: these are the represented endpoints checked
+    // by the filter. Displacements are measured from the checkpoint positions.
+    std::vector<Vec3> positions;
+    std::vector<Vec3> displacements;
+    std::vector<double> factors;
+};
+
+class Checkpoint {
+public:
+    Checkpoint();
+    ~Checkpoint();
+    Checkpoint(Checkpoint&&) noexcept;
+    Checkpoint& operator=(Checkpoint&&) noexcept;
+    Checkpoint(const Checkpoint&) = delete;
+    Checkpoint& operator=(const Checkpoint&) = delete;
+
+    void reset(const RefMesh& mesh, const std::vector<Vec3>& reference_positions,
+        const BroadPhase& candidates, const Options& options);
+    Result filter(const std::vector<Vec3>& accumulated_displacements) const;
+    void filter_into(const std::vector<Vec3>& accumulated_displacements,
+        Result& output) const;
+
+    const std::vector<Vec3>& reference_positions() const;
+    const std::vector<double>& isotropic_bounds() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+} // namespace dat

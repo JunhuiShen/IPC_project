@@ -199,7 +199,7 @@ void run_scalar(const solver_detail::ClothGridSchedule& schedule, SyntheticModel
 
 void run_sweep(solver_detail::ClothGridContactSweep& sweep,
                const solver_detail::ClothGridSchedule& schedule,
-               SyntheticModel& model, bool profile = false) {
+               SyntheticModel& model) {
     sweep.run(schedule,
         [&](int v, int j, solver_detail::ContactContribution& value) {
             return model.compute(v, j, value);
@@ -211,7 +211,7 @@ void run_sweep(solver_detail::ClothGridContactSweep& sweep,
             return model.ccd(v, j, value, certified);
         },
         [&](int v, const solver_detail::ContactContribution* values,
-            const solver_detail::ContactMaskWord* mask) { model.commit(v, values, mask); }, profile);
+            const solver_detail::ContactMaskWord* mask) { model.commit(v, values, mask); });
 }
 
 void expect_bitwise_equal(const std::vector<double>& expected,
@@ -369,7 +369,7 @@ TEST(ClothGridContactSweep, MatchesScalarOrderAcrossTeamsAndPreparedTeamMismatch
     }
 }
 
-TEST(ClothGridContactSweep, TwelveWorkersAlternateLeaderOnlyAndSharedVerticesWithProfiling) {
+TEST(ClothGridContactSweep, TwelveWorkersAlternateLeaderOnlyAndSharedVertices) {
     RestoreOpenMP restore;
     omp_set_dynamic(0);
     omp_set_num_threads(12);
@@ -387,24 +387,10 @@ TEST(ClothGridContactSweep, TwelveWorkersAlternateLeaderOnlyAndSharedVerticesWit
         expected.reset_sweep();
         actual.reset_sweep();
         run_scalar(schedule, expected);
-        const bool profile = (iteration % 2) == 0;
-        run_sweep(sweep, schedule, actual, profile);
+        run_sweep(sweep, schedule, actual);
         expect_bitwise_equal(expected.x, actual.x);
         EXPECT_EQ(actual.dependency_violations.load(), 0);
         EXPECT_EQ(actual.certificate_mismatches.load(), 0);
-        if (profile) {
-            ASSERT_EQ(sweep.batch_stats.size(), 1u);
-            const auto& stats = sweep.batch_stats[0];
-            EXPECT_EQ(stats.cooperative_cells, 1);
-            EXPECT_GT(stats.wall_seconds, 0.0);
-            EXPECT_GE(stats.worker_busy_seconds, 0.0);
-            EXPECT_GE(stats.group_wait_seconds, 0.0);
-            EXPECT_GE(stats.barrier_wait_seconds, 0.0);
-            EXPECT_GT(stats.max_cell_seconds, 0.0);
-            EXPECT_LE(stats.max_cell_seconds, stats.wall_seconds);
-        } else {
-            EXPECT_TRUE(sweep.batch_stats.empty());
-        }
     }
 }
 
@@ -438,7 +424,7 @@ TEST(ClothGridContactSweep, LeaderOnlyFailureInsideCooperativeCellJoinsAllTwelve
                 [&](int v, const solver_detail::ContactContribution*,
                     const solver_detail::ContactMaskWord*) {
                     committed[v].fetch_add(1, std::memory_order_relaxed);
-                }, true);
+                });
         };
         EXPECT_THROW(invoke(), std::runtime_error);
         for (int v = 0; v < failed_vertex; ++v) EXPECT_EQ(committed[v].load(), 1);
@@ -561,7 +547,7 @@ TEST(ClothGridContactSweep, CommitHelpersAreOptInAndReusableAcrossVerticesAndBat
                 actual.commit(v, values, mask);
             };
             if (cooperative_commit)
-                sweep.run(schedule, compute, apply, baseline, ccd, commit, true, true);
+                sweep.run(schedule, compute, apply, baseline, ccd, commit, true);
             else
                 sweep.run(schedule, compute, apply, baseline, ccd, commit);
             expect_bitwise_equal(expected.x, actual.x);
@@ -621,7 +607,7 @@ TEST(ClothGridContactSweep, CooperativeCommitFailuresJoinHelpersAndAllowReuse) {
                     if (fail && v == 1 && failure == Failure::AfterDispatch)
                         throw std::runtime_error("commit after dispatch");
                     ++committed[v];
-                }, false, true);
+                }, true);
         };
         EXPECT_THROW(run(), std::runtime_error);
         EXPECT_EQ(active.load(), 0);

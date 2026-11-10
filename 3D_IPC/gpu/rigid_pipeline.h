@@ -41,7 +41,7 @@ void assemble_rigid_inertia_color(const RigidScene&, const RigidState&,
                                  int color, bool orientation_phase, double dt,
                                  double gravity_y, int* error,
                                  cudaStream_t stream = nullptr);
-// Jacobi/DAT proposal from an assembled frozen-state system. Write the raw
+// Raw proposal from an assembled rigid system. Write the raw
 // -damping * LDLT^{-1} gradient increment; disabled body phases write zero.
 // This does not change any pose or apply the colored solver's boxes/caps.
 void propose_rigid_displacements(const RigidScene&, const RigidWorkspace&,

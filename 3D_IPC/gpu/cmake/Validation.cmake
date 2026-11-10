@@ -1,10 +1,9 @@
 # Explicit current-backend qualification targets and support kernels; none join
-# ALL. Test names, inputs, precision settings and assertions are retained; only
-# the retired naming changed.
+# ALL. Jacobi-DAT-only suites are retired with that optional solver mode.
+# Remaining component assertions retain their original precision requirements.
 
-# Every test registered in this file exercises the current device solver, so it
-# carries the gpu_solver label. `ctest -L gpu_solver` stays away from the
-# legacy hybrid tests that are only built on request.
+# The gpu_solver label groups CUDA components and explicitly labelled host
+# checks; it does not imply that a host-only check executed a CUDA kernel.
 macro(ipc_gpu_solver_test name)
     add_test(NAME ${name} COMMAND ${ARGN})
     set_tests_properties(${name} PROPERTIES LABELS gpu_solver)
@@ -33,21 +32,8 @@ ipc_gpu_solver_test(gpu_broadphase_options_degree gpu_broadphase_test --broadpha
 ipc_gpu_solver_test(gpu_broadphase_options_spatial gpu_broadphase_test --broadphase-options spatial)
 ipc_gpu_solver_test(gpu_contact gpu_contact_test)
 
-# CPU-oracle parity for the optional simultaneous Jacobi/DAT path and the
-# rigid material-point springs. Native tests invoke the production kernels.
-add_executable(gpu_dat_test EXCLUDE_FROM_ALL dat_test.cpp)
-target_compile_options(gpu_dat_test PRIVATE -ffp-contract=off)
-target_link_libraries(gpu_dat_test PRIVATE IPC::ipc ipc_gpu_solver)
-ipc_gpu_solver_test(gpu_dat gpu_dat_test)
-add_executable(gpu_dat_geometry_test EXCLUDE_FROM_ALL dat_geometry_test.cpp)
-target_compile_options(gpu_dat_geometry_test PRIVATE -ffp-contract=off)
-target_link_libraries(gpu_dat_geometry_test PRIVATE IPC::ipc ipc_gpu_solver)
-ipc_gpu_solver_test(gpu_dat_geometry gpu_dat_geometry_test)
-add_executable(gpu_rigid_dat_math_test EXCLUDE_FROM_ALL rigid_dat_math_test.cpp)
-target_link_libraries(gpu_rigid_dat_math_test PRIVATE Eigen3::Eigen)
-target_compile_options(gpu_rigid_dat_math_test PRIVATE -ffp-contract=off)
-ipc_gpu_solver_test(gpu_rigid_dat_math gpu_rigid_dat_math_test)
-set_tests_properties(gpu_rigid_dat_math PROPERTIES LABELS "gpu_solver;host_math")
+# Shared numerical helpers and ordinary rigid material-point springs.
+# Native tests invoke the retained production kernels.
 add_executable(gpu_directed_rounding_test EXCLUDE_FROM_ALL directed_rounding_test.cpp)
 target_link_libraries(gpu_directed_rounding_test PRIVATE Eigen3::Eigen)
 target_compile_options(gpu_directed_rounding_test PRIVATE -ffp-contract=off)
@@ -65,10 +51,14 @@ target_compile_options(gpu_rigid_pins_test PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false;-lineinfo>)
 target_link_libraries(gpu_rigid_pins_test PRIVATE IPC::ipc ipc_gpu_solver)
 ipc_gpu_solver_test(gpu_rigid_pins gpu_rigid_pins_test)
-add_executable(gpu_cpu_parity_test EXCLUDE_FROM_ALL cpu_parity_test.cpp)
-target_compile_options(gpu_cpu_parity_test PRIVATE -ffp-contract=off)
-target_link_libraries(gpu_cpu_parity_test PRIVATE IPC::ipc ipc_gpu_bridge)
-ipc_gpu_solver_test(gpu_cpu_parity gpu_cpu_parity_test)
+add_executable(gpu_rigid_pin_api_test EXCLUDE_FROM_ALL rigid_pin_api_test.cpp)
+target_compile_options(gpu_rigid_pin_api_test PRIVATE -ffp-contract=off)
+target_link_libraries(gpu_rigid_pin_api_test PRIVATE IPC::ipc ipc_gpu_bridge)
+ipc_gpu_solver_test(gpu_rigid_pin_api gpu_rigid_pin_api_test)
+add_executable(gpu_bridge_mode_host_test EXCLUDE_FROM_ALL bridge_mode_host_test.cpp)
+target_link_libraries(gpu_bridge_mode_host_test PRIVATE ipc_gpu_bridge)
+ipc_gpu_solver_test(gpu_bridge_mode_host gpu_bridge_mode_host_test)
+set_tests_properties(gpu_bridge_mode_host PROPERTIES LABELS "gpu_solver;host_math")
 add_executable(gpu_contact_rejection_test EXCLUDE_FROM_ALL
     contact_rejection_test.cpp contact_rejection_test_cuda.cu)
 target_compile_definitions(gpu_contact_rejection_test PRIVATE IPC_GPU_CONTACT_REJECTION_CUDA_TEST=1)

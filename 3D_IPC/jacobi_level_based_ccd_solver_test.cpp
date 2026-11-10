@@ -313,8 +313,6 @@ TEST(JacobiLevelBasedCCDSolver, DriversUseThisSolverAndSkipExternalInitialGuesse
         s.params.use_basic_experimental = s.params.use_basic_experimental_v2 = true;
         s.params.use_simd = true;
         s.params.use_ccd_guess = true;
-        s.params.use_verlet_guess = true;
-        s.params.use_translation_guess = true;
         s.params.use_colored_ccd_guess = guess == 1;
         s.params.use_colored_ccd_guess_level_based = guess == 2;
         s.params.colored_ccd_guess_fraction = 0.0;

@@ -56,7 +56,7 @@ void finite(const StateSnapshot& a) {
     }
 }
 SceneDescription fixture(double first_z=.1) {
-    // Public-API counterpart of cpu_parity_test.cpp's rigid DAT contact case:
+    // Public-API rigid contact fixture for the ordinary colored solver:
     // a four-proxy translating/rotating body above one fixed rigid triangle.
     SceneDescription h;
     h.positions={Vector3{.1,0,first_z},Vector3{.2,0,.15},Vector3{.1,.1,.15},Vector3{0,-.1,.15},
@@ -94,18 +94,17 @@ SceneDescription fixture(double first_z=.1) {
     return h;
 }
 
-StepParameters parameters(bool exact,bool dat) {
+StepParameters parameters(bool exact) {
     StepParameters p;p.dt=.025;p.elastic.dt2=p.dt*p.dt;p.contact.dt=p.dt;p.sdf.dt=p.dt;
     p.iterations=2;p.rebuild_interval=1;p.damping=.02;p.box_radius_min=.001;p.box_radius=.001;
     p.rotation_radius=.01;p.contact.d_hat=.2;p.contact.k_barrier=20.;p.contact.friction=.15;
     p.contact.eps_v=.001;p.contact.eps=1e-12;p.exact_computation_fallback=exact;
-    p.jacobi_dat=dat;p.dat_gamma=.9;p.dat_query_radius=10.;p.dat_node_box_padding=1.2;
     p.global_ccd_guess=false;p.colored_guess_sweeps=0;return p;
 }
 struct Run {std::vector<StateSnapshot> states;std::vector<std::size_t> resident;};
-Run run(const char* flag,const char* pairs,bool exact,bool dat=false,bool contact=true) {
+Run run(const char* flag,const char* pairs,bool exact,bool contact=true) {
     Environment feature("IPC_GPU_TWO_RIGID_COLOR_QUEUE_ELISION"),queues("IPC_GPU_COLOR_PAIR_QUEUES"),cap("IPC_GPU_CONTACT_PACKET_CAPACITY");
-    feature.set(flag);queues.set(pairs);cap.set("3");const auto h=fixture();auto p=parameters(exact,dat);
+    feature.set(flag);queues.set(pairs);cap.set("3");const auto h=fixture();auto p=parameters(exact);
     require(two_rigid_color_queue::eligible_validated_scene(h),"valid fixture not eligible");
     const auto before=resident_bytes();Run result;
     {
@@ -150,20 +149,14 @@ void pairs_and_solver_gates() {
         storage_delta(1,(16-4)*sizeof(int),"one-PT small queue construction");
         storage_delta(2,large_difference,"large return releases small color buffers");
         require(on.resident[0]==disabled.resident[0]&&on.resident[2]==disabled.resident[2],"trusted large route differs from existing PAIR0 storage");
-        const auto no_contact=run("0",nullptr,exact,false,false);
+        const auto no_contact=run("0",nullptr,exact,false);
         require(!equal_bytes(off.states[0].com,no_contact.states[0].com)
             ||!equal_bytes(off.states[0].omega,no_contact.states[0].omega),"active contact force witness is vacuous");
-        // The separate DAT contact owner receives no trusted hint at all.
-        const auto dat_off=run("0",nullptr,exact,true),dat_on=run("1",nullptr,exact,true);
-        for(std::size_t epoch=0;epoch<dat_off.states.size();++epoch) {
-            equal(dat_off.states[epoch],dat_on.states[epoch],"DAT unaffected");
-            require(dat_off.resident[epoch]==dat_on.resident[epoch],"DAT storage changed");
-        }
     }
 }
 std::string force_error(const char* flag,bool exact) {
     Environment feature("IPC_GPU_TWO_RIGID_COLOR_QUEUE_ELISION"),queues("IPC_GPU_COLOR_PAIR_QUEUES"),cap("IPC_GPU_CONTACT_PACKET_CAPACITY");
-    feature.set(flag);queues.set(nullptr);cap.set("3");const auto h=fixture(0.);const auto p=parameters(exact,false);
+    feature.set(flag);queues.set(nullptr);cap.set("3");const auto h=fixture(0.);const auto p=parameters(exact);
     const auto before=resident_bytes();std::string message;
     {
         GpuSolver solver(h);const auto initial=solver.snapshot();finite(initial);
@@ -222,7 +215,7 @@ int main() {
         tracking=true;pairs_and_solver_gates();raw_pipeline_gates();
         for(bool exact:{false,true})require(force_error("0",exact)==force_error("1",exact),"force error diagnostic changed");
         require(resident_bytes()==0&&!tracking_failed,"owned allocation ledger not empty");tracking=false;
-        std::cout<<"Two-rigid queue elision: Original/Robust six-array parity, forced/default/raw/DAT rollback, active forces, same-owner large-small-large exact storage PASS\n";
+        std::cout<<"Two-rigid queue elision: Original/Robust six-array parity, forced/default/raw rollback, active forces, same-owner large-small-large exact storage PASS\n";
         return 0;
     }catch(const std::exception& e){std::cerr<<"two-rigid queue test: "<<e.what()<<'\n';return 1;}
 }

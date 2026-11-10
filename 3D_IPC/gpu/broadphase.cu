@@ -1,11 +1,9 @@
 #include "broadphase.h"
-#include "profile.h"
 
 #include <cuda_runtime.h>
 #include <cusparse.h>
 #include <cstdlib>
 #include <climits>
-#include <fstream>
 #include <thrust/fill.h>
 #include <math_constants.h>
 #include <thrust/device_ptr.h>
@@ -607,7 +605,6 @@ BroadPhaseView GpuBroadPhase::view() const { return impl_->result; }
 BroadPhaseView GpuBroadPhase::rebuild(const BroadPhaseTopology& t,
                                            const BpAabb* blue_boxes, double d_hat,
                                            BroadPhaseMode mode) {
-    GpuProfileScope profile("broadphase");
     static_assert(sizeof(std::size_t) == sizeof(unsigned long long), "GPU CSR requires 64-bit size_t");
     Impl& p = *impl_;
     // A failed rebuild invalidates the old view: stale candidates must not be
@@ -627,7 +624,6 @@ BroadPhaseView GpuBroadPhase::rebuild(const BroadPhaseTopology& t,
     if (static_cast<std::size_t>(t.vertex_count) + t.edge_count > static_cast<std::size_t>(std::numeric_limits<int>::max()))
         throw std::overflow_error("too many GPU broadphase queries");
     {
-    GpuProfileScope validate_profile("validate");
     const int count = std::max({t.vertex_count, t.triangle_count, t.edge_count, t.dependency_count});
     p.error.reserve(1);
     check(cudaMemset(p.error.data, 0, sizeof(int)), "clear GPU topology status");
@@ -638,7 +634,6 @@ BroadPhaseView GpuBroadPhase::rebuild(const BroadPhaseTopology& t,
     }
     }
     {
-    GpuProfileScope bounds_profile("bounds_bvh");
     p.scene_scale.reserve(1);p.query_padding.reserve(1);
     check(cudaMemset(p.scene_scale.data,0,sizeof(unsigned long long)),"clear GPU broadphase scale");
     if (t.protect_linear_gap && t.vertex_count)
@@ -656,7 +651,6 @@ BroadPhaseView GpuBroadPhase::rebuild(const BroadPhaseTopology& t,
     }
     std::size_t contacts=0;
     {
-    GpuProfileScope candidate_profile("candidates");
     const std::size_t queries = static_cast<std::size_t>(t.vertex_count) + t.edge_count;
     p.query_offsets.reserve(queries + 1);
     if (queries) contact_pass<false><<<blocks(queries), threads>>>(t, blue_boxes, p.edges.data,
@@ -676,13 +670,11 @@ BroadPhaseView GpuBroadPhase::rebuild(const BroadPhaseTopology& t,
         p.result = {};
         p.result.contacts = p.contacts.data;
         p.result.contact_count = contacts;
-        gpu_profile_broadphase(contacts, 0, 0);
         return p.result;
     }
 
     std::size_t graph_edges = 0;
     {
-    GpuProfileScope graph_profile("dependency_graph");
     const std::size_t static_dependencies = static_cast<std::size_t>(t.include_triangle_dependencies ? t.triangle_count : 0) + t.dependency_count;
     if (contacts > std::numeric_limits<std::size_t>::max() / 12 - static_dependencies)
         throw std::overflow_error("GPU graph incidence count overflow");
@@ -733,10 +725,9 @@ BroadPhaseView GpuBroadPhase::rebuild(const BroadPhaseTopology& t,
     }
 
     int colors = 0;
-    int vendor_palette_extent = -1; // Diagnostic only; never an allocation/index bound.
+    int vendor_palette_extent = -1; // cuSPARSE output; never an allocation/index bound.
     const int color_mode=pbgs_coloring_mode();
     {
-    GpuProfileScope coloring_profile("coloring");
     p.colors.reserve(t.block_count); p.forbidden.reserve(t.block_count); p.color_count.reserve(1);
     if (t.block_count) check(cudaMemset(p.forbidden.data, 0xff, t.block_count * sizeof(int)), "clear GPU greedy color marks");
     if(color_mode==1&&t.block_count&&graph_edges) {
@@ -816,18 +807,8 @@ BroadPhaseView GpuBroadPhase::rebuild(const BroadPhaseTopology& t,
     thrust::exclusive_scan(thrust::device, color_offsets, color_offsets + colors + 1, color_offsets);
     check(cudaDeviceSynchronize(), "GPU broadphase completion");
     }
-    if(const char* path=std::getenv("IPC_GPU_COLORING_CSV")) {
-        if(!p.coloring.diagnostics.is_open())p.coloring.diagnostics.open(path,std::ios::app);
-        if(!p.coloring.diagnostics)throw std::runtime_error("cannot open coloring diagnostics");
-        std::vector<int> offsets(colors+1);check(cudaMemcpy(offsets.data(),p.color_offsets.data,offsets.size()*sizeof(int),cudaMemcpyDeviceToHost),"color distribution diagnostic");
-        p.coloring.diagnostics<<(t.include_triangle_dependencies?"solver":"guess")<<','<<color_mode<<','<<t.block_count<<','<<graph_edges<<','<<colors<<',';
-        for(int c=0;c<colors;++c){if(c)p.coloring.diagnostics<<';';p.coloring.diagnostics<<offsets[c+1]-offsets[c];}
-        p.coloring.diagnostics<<','<<vendor_palette_extent<<'\n';p.coloring.diagnostics.flush();
-        if(!p.coloring.diagnostics)throw std::runtime_error("cannot write coloring diagnostics");
-    }
     p.result = {p.contacts.data, contacts, p.adjacency_offsets.data, p.adjacency.data, graph_edges,
                 p.colors.data, p.color_blocks.data, p.color_offsets.data, colors};
-    gpu_profile_broadphase(contacts,colors,graph_edges);
     return p.result;
 }
 

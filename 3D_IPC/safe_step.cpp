@@ -701,7 +701,7 @@ template <bool optimized_fallback>
 [[gnu::noinline]] static double per_vertex_safe_step_impl(
     const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi,
     double dx0, double dx1, double dx2, double safety, bool clip_ccd,
-    bool use_ticcd, bool use_ogc, bool cooperative,
+    bool use_ticcd, bool cooperative,
     const safe_step_detail::VertexAabbRejections* rejections, bool exact_computation_fallback,
     bool ccd_exact_step_bound) {
     const bool original = !exact_computation_fallback && !use_ticcd;
@@ -710,19 +710,6 @@ template <bool optimized_fallback>
 
     double toi_min = 1.0;
     bool has_collision = false;
-
-    if (use_ogc) {
-        double bound = compute_trust_region_bound_for_vertex(
-            vi, x, broad_phase, 0.4, exact_computation_fallback);
-        if (!std::isfinite(bound)) {
-            // No-pair fallback: half min-extent of the cubic node box.
-            const Vec3 e = bp_cache.node_boxes[vi].extent();
-            bound = 0.5 * std::min({e.x(), e.y(), e.z()});
-        }
-        const double dx_norm = dx.norm();
-        if (dx_norm > 0.0)
-            toi_min = std::min(1.0, bound / dx_norm);
-    }
 
     if (clip_ccd) {
         const auto& nt = bp_cache.vertex_nt[vi];
@@ -757,16 +744,14 @@ template <bool optimized_fallback>
             });
     }
 
-    double step = use_ogc
-        ? toi_min
-        : (has_collision ? safety * toi_min : 1.0);
-    if (clip_ccd && !use_ticcd && !use_ogc && !original)
+    double step = has_collision ? safety * toi_min : 1.0;
+    if (clip_ccd && !use_ticcd && !original)
         return commit_vertex_ccd_step_impl<optimized_fallback>(
             bp_cache, x, vi, dx, step, cooperative, rejections, ccd_exact_step_bound);
     const Vec3 before = x[vi];
     const Vec3 accepted = before + step * dx;
     x[vi] = accepted;
-    if (original && clip_ccd && !use_ticcd && !use_ogc) return step;
+    if (original && clip_ccd && !use_ticcd) return step;
     if ((accepted.array() == before.array()).all()) return 0.0;
     return step;
 }
@@ -775,7 +760,7 @@ template <bool optimized_fallback>
 [[gnu::noinline]] double per_vertex_safe_step(
     const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi,
     const Vec3& raw_proposed_position, double safety, bool clip_ccd,
-    bool use_ticcd, bool use_ogc, bool cooperative,
+    bool use_ticcd, bool cooperative,
     const safe_step_detail::VertexAabbRejections* rejections, bool exact_computation_fallback,
     bool exact_computation_fallback_2, bool ccd_exact_step_bound) {
     const BroadPhase::Cache& bp_cache = broad_phase.cache();
@@ -798,10 +783,10 @@ template <bool optimized_fallback>
     if ((x_new.array() == x[vi].array()).all()) return 0.0;
     if (exact_computation_fallback && exact_computation_fallback_2)
         return per_vertex_safe_step_impl<true>(broad_phase, x, vi,
-            dx[0], dx[1], dx[2], safety, clip_ccd, use_ticcd, use_ogc,
+            dx[0], dx[1], dx[2], safety, clip_ccd, use_ticcd,
             cooperative, rejections, exact_computation_fallback, ccd_exact_step_bound);
     return per_vertex_safe_step_impl<false>(broad_phase, x, vi,
-        dx[0], dx[1], dx[2], safety, clip_ccd, use_ticcd, use_ogc,
+        dx[0], dx[1], dx[2], safety, clip_ccd, use_ticcd,
         cooperative, rejections, exact_computation_fallback, ccd_exact_step_bound);
 }
 

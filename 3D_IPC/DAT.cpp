@@ -201,6 +201,447 @@ TEST(DirectedRounding, RandomResultsAndEnvironmentMatchInEveryRoundingMode) {
 #include <type_traits>
 #include <utility>
 
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 The Newton Developers
+// Copyright (c) 2023 Anka He Chen
+//
+// Algorithmic adaptations of Newton's particle planar DAT kernels and Gaia's
+// spherical conservative bounds, distributed under Apache-2.0:
+// https://github.com/newton-physics/newton/blob/2134db9cd0354019061d36a2762f886d59e88306/newton/_src/solvers/vbd/particle_vbd_kernels.py
+// https://github.com/newton-physics/newton/blob/2134db9cd0354019061d36a2762f886d59e88306/newton/_src/solvers/vbd/rigid_vbd_kernels.py
+// https://github.com/AnkaChan/Gaia
+// This implementation uses local binary64 geometry and rejects uncertifiable
+// initial pairs. In particular it does not copy Newton's unsafe-pair skip.
+
+namespace dat {
+namespace {
+
+double up(double x) { return directed_rounding::next_up(x); }
+double down(double x) { return directed_rounding::next_down(x); }
+
+template<class Function>
+void for_each(std::size_t count, bool parallel, const Function& function) {
+    std::exception_ptr error;
+    #pragma omp parallel for schedule(static) if(parallel && count >= 128)
+    for (std::size_t index = 0; index < count; ++index) {
+        try { function(index); }
+        catch (...) {
+            #pragma omp critical(dat_filter_error)
+            { if (!error) error = std::current_exception(); }
+        }
+    }
+    if (error) std::rethrow_exception(error);
+}
+
+void atomic_min(std::atomic<double>& value, double candidate) {
+    double old = value.load(std::memory_order_relaxed);
+    while (candidate < old && !value.compare_exchange_weak(
+        old, candidate, std::memory_order_relaxed)) {}
+}
+
+struct Projection {
+    double lo = 0.0, hi = 0.0;
+};
+
+Projection project(const Vec3& point, const Vec3& normal, const Vec3& origin) {
+    Projection result;
+    for (int k = 0; k < 3; ++k) {
+        if (normal[k] == 0.0) continue;
+        const double difference = point[k] - origin[k];
+        if (!std::isfinite(difference))
+            throw std::domain_error("DAT: relative coordinate overflow");
+        const double lo = down(difference), hi = up(difference);
+        const double a = normal[k] * (normal[k] >= 0.0 ? lo : hi);
+        const double b = normal[k] * (normal[k] >= 0.0 ? hi : lo);
+        result.lo = down(result.lo + down(a));
+        result.hi = up(result.hi + up(b));
+    }
+    return result;
+}
+
+double norm_upper(const Vec3& components) {
+    const double scale = components.cwiseAbs().maxCoeff();
+    if (scale == 0.0) return 0.0;
+    if (!std::isfinite(scale)) return INFINITY;
+    double sum = 0.0;
+    for (int k = 0; k < 3; ++k) {
+        if (components[k] == 0.0) continue;
+        const double ratio = up(std::abs(components[k]) / scale);
+        sum = up(sum + up(ratio * ratio));
+    }
+    return up(scale * up(std::sqrt(sum)));
+}
+
+// Keep the closest residual in a local frame so rounded absolute closest
+// points cannot erase a positive gap. Search every edge for exterior VT cases.
+Vec3 vertex_triangle_separation(const std::array<Vec3, 4>& points) {
+    std::array<Vec3, 3> local{{points[1] - points[0],
+        points[2] - points[0], points[3] - points[0]}};
+    double scale = 0.0;
+    for (const auto& p : local) {
+        if (!p.allFinite())
+            throw std::domain_error("DAT: relative geometry overflow");
+        scale = std::max(scale, p.cwiseAbs().maxCoeff());
+    }
+    if (scale == 0.0) return Vec3::Zero();
+    for (auto& p : local) p /= scale;
+    const Vec3 cross = (local[1] - local[0]).cross(local[2] - local[0]);
+    const double length = stable_norm3(cross);
+    if (length > 0.0) {
+        const Vec3 normal = cross / length;
+        const Vec3 projection = local[0].dot(normal) * normal;
+        bool interior = true;
+        for (int edge = 0; edge < 3; ++edge) {
+            if ((local[(edge + 1) % 3] - local[edge])
+                    .cross(projection - local[edge]).dot(normal) < 0.0)
+                interior = false;
+        }
+        if (interior) return projection * scale;
+    }
+    Vec3 closest = Vec3::Zero();
+    double best = INFINITY;
+    for (int edge = 0; edge < 3; ++edge) {
+        double parameter;
+        const Vec3 candidate = segment_closest_point(Vec3::Zero(), local[edge],
+            local[(edge + 1) % 3], parameter);
+        const double distance = stable_norm3(candidate);
+        if (distance < best) { best = distance; closest = candidate; }
+    }
+    return closest * scale;
+}
+
+struct Pair {
+    std::array<int, 4> nodes{};
+    int split = 1;
+    Vec3 normal = Vec3::Zero(); // primitive A -> primitive B
+    std::array<double, 4> coordinates{};
+    double left = 0.0, right = 0.0, distance_lower = 0.0, epsilon = 0.0;
+};
+
+Pair prepare_pair(const std::array<int, 4>& nodes, int split,
+    const std::vector<Vec3>& reference, const Options& options) {
+    Pair pair;
+    pair.nodes = nodes;
+    pair.split = split;
+    std::array<Vec3, 4> points;
+    double coordinate_scale = 1.0;
+    for (int i = 0; i < 4; ++i) {
+        if (nodes[i] < 0 || std::size_t(nodes[i]) >= reference.size())
+            throw std::invalid_argument("DAT: invalid candidate vertex");
+        for (int j = 0; j < i; ++j)
+            if (nodes[i] == nodes[j])
+                throw std::invalid_argument("DAT: incident or degenerate candidate");
+        points[i] = reference[nodes[i]];
+        coordinate_scale = std::max(coordinate_scale, points[i].cwiseAbs().maxCoeff());
+    }
+    // Broad-phase envelopes can contain far pairs. An outward-rounded axis
+    // gap certifies they lie outside the query neighborhood before any
+    // closest-feature or separating-normal work is necessary.
+    for (int axis = 0; axis < 3; ++axis) {
+        double alo = INFINITY, ahi = -INFINITY, blo = INFINITY, bhi = -INFINITY;
+        for (int i = 0; i < 4; ++i) {
+            if (i < split) {
+                alo = std::min(alo, points[i][axis]);
+                ahi = std::max(ahi, points[i][axis]);
+            } else {
+                blo = std::min(blo, points[i][axis]);
+                bhi = std::max(bhi, points[i][axis]);
+            }
+        }
+        const double gap = std::max(down(blo - ahi), down(alo - bhi));
+        if (gap >= options.query_radius) {
+            pair.distance_lower = gap;
+            return pair;
+        }
+    }
+    pair.epsilon = std::max(options.separation_epsilon,
+        (4.0 * std::numeric_limits<float>::epsilon()) * coordinate_scale);
+    const auto certify = [&](const Vec3& residual) {
+        const double length = stable_norm3(residual);
+        if (!(length > 0.0) || !std::isfinite(length)) return false;
+        pair.normal = residual / length;
+        pair.left = -INFINITY;
+        pair.right = INFINITY;
+        for (int i = 0; i < 4; ++i) {
+            const auto projection = project(points[i], pair.normal, points[0]);
+            pair.coordinates[i] = (points[i] - points[0]).dot(pair.normal);
+            if (!std::isfinite(projection.lo) || !std::isfinite(projection.hi)
+                || !std::isfinite(pair.coordinates[i])) return false;
+            if (i < split) pair.left = std::max(pair.left, projection.hi);
+            else pair.right = std::min(pair.right, projection.lo);
+        }
+        const double gap = down(pair.right - pair.left);
+        if (!(gap > 0.0) || !std::isfinite(gap)) return false;
+        pair.distance_lower = std::max(0.0, down(gap / norm_upper(pair.normal)));
+        return pair.distance_lower > 0.0;
+    };
+    const Vec3 candidate = split == 1 ? vertex_triangle_separation(points)
+        : (-segment_segment_distance(points[0], points[1], points[2], points[3]).separation).eval();
+    const auto resolve_query_boundary = [&](const Vec3& residual) {
+        // A conservative projected lower bound can straddle an exact rq
+        // boundary solely because it was rounded outward. The query policy is
+        // distance < rq; use the cold exact predicate only for that ambiguity
+        // instead of imposing plane epsilon on a pair outside the query.
+        if (pair.distance_lower < options.query_radius
+            && norm_upper(residual) >= options.query_radius
+            && compare_contact_distance_exact(points, split == 1, options.query_radius) >= 0)
+            pair.distance_lower = options.query_radius;
+    };
+    if (certify(candidate)) { resolve_query_boundary(candidate); return pair; }
+    const Vec3 exact = -contact_closest_residual_exact(points, split == 1);
+    if (certify(exact)) { resolve_query_boundary(exact); return pair; }
+    throw std::domain_error("DAT: initial pair has no certifiable strict separation");
+}
+
+double crossing_factor(double signed_start, double normal_displacement, double gamma) {
+    const double signed_end = signed_start + normal_displacement;
+    if (!std::isfinite(signed_start) || !std::isfinite(normal_displacement)
+        || !std::isfinite(signed_end))
+        throw std::domain_error("DAT: plane projection overflow");
+    // Match Newton: a start inside the numerical clearance band may recover,
+    // but must never move farther toward the other primitive.
+    if (signed_start < 0.0) return signed_end >= signed_start ? 1.0 : 0.0;
+    if (signed_end >= 0.0) return 1.0;
+    return std::clamp(gamma * (signed_start / (signed_start - signed_end)), 0.0, 1.0);
+}
+
+void cap_factor(const Vec3& reference, const Vec3& update, double radius, double& factor) {
+    const double largest = update.cwiseAbs().maxCoeff();
+    if (largest == 0.0) return;
+    const Vec3 candidate = factor * update;
+    const Vec3 endpoint = reference + candidate;
+    Vec3 represented_extent;
+    for (int k = 0; k < 3; ++k) {
+        const double delta = endpoint[k] - reference[k];
+        represented_extent[k] = delta == 0.0 ? 0.0 : up(std::abs(delta));
+    }
+    // Keep an already-safe proposal exactly. Only a motion that needs radius
+    // correction reserves room for the world-coordinate addition roundoff.
+    if (endpoint.allFinite() && norm_upper(candidate) <= radius
+        && norm_upper(represented_extent) <= radius) return;
+    const double scaled_length = (update / largest).norm();
+    Vec3 addition_error = Vec3::Zero();
+    for (int k = 0; k < 3; ++k) {
+        if (candidate[k] == 0.0) continue;
+        // Every accepted endpoint lies in reference +/- radius. A full ULP at
+        // either end conservatively bounds its rounded coordinate addition.
+        // Using ULP(radius) alone fails when the world origin is much larger.
+        const double lo = reference[k] - radius, hi = reference[k] + radius;
+        const double low_ulp = up(std::abs(lo - down(lo)));
+        const double high_ulp = up(std::abs(up(hi) - hi));
+        addition_error[k] = std::max(low_ulp, high_ulp);
+    }
+    double inward_radius = std::max(0.0, down(radius - norm_upper(addition_error)));
+    for (int i = 0; i < 16; ++i) inward_radius = std::max(0.0, down(inward_radius));
+    if (largest > inward_radius / scaled_length)
+        factor = std::min(factor, (inward_radius / largest) / scaled_length);
+}
+
+} // namespace
+
+struct Checkpoint::Impl {
+    Options options;
+    std::vector<Vec3> reference;
+    std::vector<Pair> pairs;
+    std::vector<double> bounds;
+    mutable std::vector<std::atomic<double>> factors;
+    mutable std::vector<unsigned char> bad;
+    mutable std::vector<unsigned char> bad_pairs;
+    bool ready = false;
+};
+
+Checkpoint::Checkpoint() : impl_(std::make_unique<Impl>()) {}
+Checkpoint::~Checkpoint() = default;
+Checkpoint::Checkpoint(Checkpoint&&) noexcept = default;
+Checkpoint& Checkpoint::operator=(Checkpoint&&) noexcept = default;
+
+void Checkpoint::reset(const RefMesh& mesh, const std::vector<Vec3>& reference,
+    const BroadPhase& candidates, const Options& options) {
+    if (!std::isfinite(options.gamma) || !(options.gamma > 0.0 && options.gamma < 1.0)
+        || !std::isfinite(options.query_radius) || !(options.query_radius > 0.0)
+        || !std::isfinite(options.separation_epsilon) || options.separation_epsilon < 0.0
+        || !std::isfinite(options.minimum_plane_fraction)
+        || !(options.minimum_plane_fraction > 0.0 && options.minimum_plane_fraction <= 0.5)
+        || (options.mode != Mode::Planar && options.mode != Mode::Isotropic))
+        throw std::invalid_argument("DAT: invalid options");
+    if (!mesh.rb_nodes.empty() || std::any_of(mesh.node_to_rb.begin(), mesh.node_to_rb.end(),
+            [](int owner) { return owner >= 0; }))
+        throw std::invalid_argument("DAT supports straight deformable motion only");
+    if (mesh.num_positions != 0 && mesh.num_positions != reference.size())
+        throw std::invalid_argument("DAT: inconsistent vertex count");
+    for (const auto& x : reference)
+        if (!x.allFinite()) throw std::invalid_argument("DAT: nonfinite reference position");
+
+    auto next = std::make_unique<Impl>();
+    next->options = options;
+    next->reference = reference;
+    const double base_radius = std::max(0.0,
+        down(down(0.5 * options.gamma) * options.query_radius));
+    if (!(base_radius > 0.0) || !std::isfinite(base_radius))
+        throw std::invalid_argument("DAT: unrepresentable motion budget");
+    next->bounds.assign(reference.size(), base_radius);
+    const std::size_t nt_count = candidates.nt_pairs().size();
+    next->pairs.resize(nt_count + candidates.ss_pairs().size());
+    for_each(next->pairs.size(), options.use_parallel, [&](std::size_t index) {
+        if (index < nt_count) {
+            const auto& pair = candidates.nt_pairs()[index];
+            next->pairs[index] = prepare_pair(
+                {{pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]}}, 1, reference, options);
+        } else {
+            const auto& pair = candidates.ss_pairs()[index - nt_count];
+            next->pairs[index] = prepare_pair(
+                {{pair.v[0], pair.v[1], pair.v[2], pair.v[3]}}, 2, reference, options);
+        }
+    });
+    std::size_t active = 0;
+    for (std::size_t index = 0; index < next->pairs.size(); ++index) {
+        const Pair& pair = next->pairs[index];
+        // The certified support gap is a conservative distance bound. Keeping
+        // an occasional extra far pair is safe and avoids a rounded rejection.
+        if (pair.distance_lower >= options.query_radius) continue;
+        if (options.mode == Mode::Isotropic) {
+            const double bound = std::max(0.0,
+                down((0.5 * options.gamma) * pair.distance_lower));
+            for (int node : pair.nodes) next->bounds[node] = std::min(next->bounds[node], bound);
+        }
+        if (active != index) next->pairs[active] = pair;
+        ++active;
+    }
+    next->pairs.resize(active);
+    next->ready = true;
+    impl_.swap(next);
+}
+
+Result Checkpoint::filter(const std::vector<Vec3>& accumulated) const {
+    Result result;
+    filter_into(accumulated, result);
+    return result;
+}
+
+void Checkpoint::filter_into(const std::vector<Vec3>& accumulated, Result& output) const {
+    if (!impl_ || !impl_->ready)
+        throw std::logic_error("DAT: reset must precede filtering");
+    const auto& data = *impl_;
+    if (accumulated.size() != data.reference.size())
+        throw std::invalid_argument("DAT: inconsistent displacement count");
+    // Aliasing the input with an output would destroy immutable proposals when
+    // output buffers resize. Callers retain their candidate vector separately.
+    if (&accumulated == &output.positions || &accumulated == &output.displacements)
+        throw std::invalid_argument("DAT: aliased filter input and output");
+    output.factors.assign(accumulated.size(), 1.0);
+    output.positions.resize(accumulated.size());
+    output.displacements.resize(accumulated.size());
+    if (data.factors.size() != accumulated.size())
+        data.factors = std::vector<std::atomic<double>>(accumulated.size());
+    for_each(accumulated.size(), data.options.use_parallel, [&](std::size_t node) {
+        if (!accumulated[node].allFinite())
+            throw std::invalid_argument("DAT: nonfinite displacement");
+        data.factors[node].store(1.0, std::memory_order_relaxed);
+    });
+    if (data.options.mode == Mode::Planar) {
+        for_each(data.pairs.size(), data.options.use_parallel, [&](std::size_t index) {
+            const auto& pair = data.pairs[index];
+            std::array<double, 4> velocity{};
+            double approach_a = 0.0, approach_b = 0.0;
+            for (int i = 0; i < 4; ++i) {
+                velocity[i] = pair.normal.dot(accumulated[pair.nodes[i]]);
+                if (!std::isfinite(velocity[i]))
+                    throw std::domain_error("DAT: displacement projection overflow");
+                if (i < pair.split) approach_a = std::max(approach_a, velocity[i]);
+                else approach_b = std::max(approach_b, -velocity[i]);
+            }
+            const double gap = pair.right - pair.left;
+            double fraction = 0.5;
+            if (gap >= 2.0 * pair.epsilon) {
+                const double scale = std::max(approach_a, approach_b);
+                if (scale > 0.0) {
+                    const double a = approach_a / scale, b = approach_b / scale;
+                    fraction = a / (a + b);
+                }
+                const double floor = std::max(data.options.minimum_plane_fraction, pair.epsilon / gap);
+                fraction = std::clamp(fraction, floor, 1.0 - floor);
+            }
+            const double division = pair.left + fraction * gap;
+            if (!(division > pair.left && division < pair.right))
+                throw std::domain_error("DAT: division plane is not representable");
+            for (int i = 0; i < 4; ++i) {
+                const bool side_a = i < pair.split;
+                const double signed_start = (side_a ? division - pair.coordinates[i]
+                    : pair.coordinates[i] - division) - pair.epsilon;
+                const double factor = crossing_factor(signed_start,
+                    side_a ? -velocity[i] : velocity[i], data.options.gamma);
+                atomic_min(data.factors[pair.nodes[i]], factor);
+            }
+        });
+    }
+    // Apply the radius cap AFTER plane factors. Reducing each scalar preserves
+    // its reference halfspaces; isotropic mode uses its incident-distance cap.
+    for_each(accumulated.size(), data.options.use_parallel, [&](std::size_t i) {
+        output.factors[i] = data.factors[i].load(std::memory_order_relaxed);
+        cap_factor(data.reference[i], accumulated[i], data.bounds[i], output.factors[i]);
+    });
+
+    // Certify the actual represented endpoints, including addition rounding.
+    // A separating normal at both endpoints certifies their entire straight
+    // interpolation. Backtracking is exceptional, and never expands a proposal.
+    data.bad.resize(accumulated.size());
+    data.bad_pairs.resize(data.pairs.size());
+    constexpr int backtracks = 64;
+    for (int attempt = 0; attempt <= backtracks; ++attempt) {
+        for_each(accumulated.size(), data.options.use_parallel, [&](std::size_t i) {
+            data.bad[i] = 0;
+            output.positions[i] = data.reference[i] + output.factors[i] * accumulated[i];
+            output.displacements[i] = output.positions[i] - data.reference[i];
+            Vec3 extent;
+            for (int k = 0; k < 3; ++k)
+                extent[k] = output.displacements[i][k] == 0.0 ? 0.0 : up(std::abs(output.displacements[i][k]));
+            if (!output.positions[i].allFinite() || norm_upper(extent) > data.bounds[i]) {
+                data.bad[i] = 1;
+            }
+        });
+        for_each(data.pairs.size(), data.options.use_parallel, [&](std::size_t index) {
+            const auto& pair = data.pairs[index];
+            data.bad_pairs[index] = 0;
+            bool finite = true;
+            for (int node : pair.nodes)
+                finite = finite && output.positions[node].allFinite();
+            if (!finite) {
+                data.bad_pairs[index] = 1;
+                return;
+            }
+            double left = -INFINITY, right = INFINITY;
+            const Vec3& origin = data.reference[pair.nodes[0]];
+            for (int i = 0; i < 4; ++i) {
+                const auto projection = project(output.positions[pair.nodes[i]], pair.normal, origin);
+                if (i < pair.split) left = std::max(left, projection.hi);
+                else right = std::min(right, projection.lo);
+            }
+            if (!(right > left)) {
+                data.bad_pairs[index] = 1;
+            }
+        });
+        // Only the uncommon failed constraints need a shared-node scatter.
+        for (std::size_t pair = 0; pair < data.pairs.size(); ++pair) {
+            if (data.bad_pairs[pair])
+                for (int node : data.pairs[pair].nodes) data.bad[node] = 1;
+        }
+        const bool failed = std::any_of(data.bad.begin(), data.bad.end(),
+            [](unsigned char bad) { return bad != 0; });
+        if (!failed) return;
+        if (attempt == backtracks)
+            throw std::domain_error("DAT: represented endpoints cannot be certified");
+        for_each(accumulated.size(), data.options.use_parallel, [&](std::size_t i) {
+            if (data.bad[i]) output.factors[i] = attempt == backtracks - 1
+                ? 0.0 : 0.5 * output.factors[i];
+        });
+    }
+}
+
+const std::vector<Vec3>& Checkpoint::reference_positions() const { return impl_->reference; }
+const std::vector<double>& Checkpoint::isotropic_bounds() const { return impl_->bounds; }
+
+} // namespace dat
+
 struct DATEndpointConstraint {
     std::array<int,4> nodes{};
     Vec3 normal=Vec3::Zero();
@@ -221,6 +662,8 @@ struct DATWorkspace::Impl {
     std::vector<std::size_t> body_offsets, radius_chunk_offsets;
     std::vector<double> radius_chunk_minima, node_factors;
     std::vector<DATEndpointConstraint> endpoint_constraints;
+    dat::Checkpoint reference_checkpoint;
+    dat::Result reference_result;
 };
 DATWorkspace::DATWorkspace() : impl(std::make_unique<Impl>()) {}
 DATWorkspace::~DATWorkspace() = default;
@@ -309,10 +752,28 @@ static void dat_for_independent(std::size_t count, const Function& function,
     if (error) std::rethrow_exception(error);
 }
 
-static Vec3 dat_capped_update(const Vec3& update, double limit)
+static double dat_norm_upper(const Vec3& component_bounds);
+
+static Vec3 dat_capped_update(const Vec3& update, double limit, const Vec3& origin)
 {
     const double largest = update.cwiseAbs().maxCoeff();
     if (largest == 0) return update;
+    const Vec3 endpoint=origin+update;
+    Vec3 extent=Vec3::Zero();
+    for(int k=0;k<3;++k) {
+        const double displacement=endpoint[k]-origin[k];
+        if(displacement!=0)extent[k]=directed_rounding::next_up(std::abs(displacement));
+    }
+    if(endpoint.allFinite()&&dat_norm_upper(update.cwiseAbs())<=limit
+        &&dat_norm_upper(extent)<=limit)return update;
+    Vec3 addition_error=Vec3::Zero();
+    for(int k=0;k<3;++k)if(update[k]!=0) {
+        const double lo=origin[k]-limit,hi=origin[k]+limit;
+        addition_error[k]=std::max(
+            directed_rounding::next_up(std::abs(lo-directed_rounding::next_down(lo))),
+            directed_rounding::next_up(std::abs(directed_rounding::next_up(hi)-hi)));
+    }
+    limit=std::max(0.0,directed_rounding::next_down(limit-dat_norm_upper(addition_error)));
     // Avoid overflow even when the finite input's norm exceeds DBL_MAX.
     const Vec3 scaled = update / largest;
     const double length = scaled.norm();
@@ -451,184 +912,95 @@ static DATPairPlane dat_pair_plane(const std::array<int, 4>& nodes, int split,
         plane.outside_query = certified_gap >= threshold;
         return true;
     };
-    if (select(candidate)) return plane;
-
     const std::array<Vec3, 4> points{{positions[nodes[0]], positions[nodes[1]],
         positions[nodes[2]], positions[nodes[3]]}};
+    const auto resolve_query_boundary=[&](const Vec3& residual) {
+        if(!plane.outside_query&&dat_norm_upper(residual.cwiseAbs())>=query_radius
+            &&compare_contact_distance_exact(points,split==1,query_radius)>=0)
+            plane.outside_query=true;
+    };
+    if (select(candidate)) {resolve_query_boundary(candidate);return plane;}
+
     const Vec3 exact = -contact_closest_residual_exact(points, split == 1);
-    if (select(exact)) return plane;
+    if (select(exact)) {resolve_query_boundary(exact);return plane;}
     if (exact.isZero(0) && compare_contact_distance_exact(points, split == 1, 0) == 0)
         throw std::domain_error("DAT: zero-gap pair has no separating plane");
     throw std::domain_error("DAT: cannot certify a separating closest-point normal");
 }
 
-// The first side_size entries form primitive A; the remainder form B.
-// separation points from A to B. Every corner of both primitives contributes,
-// not just the closest points, so the whole deforming primitive stays on its side.
-static void dat_constrain_pair(
-    const std::array<int, 4>& nodes, int side_size, const Vec3& separation,
-    double gamma, double query_radius, const std::vector<Vec3>& positions,
-    const std::vector<Vec3>& updates, std::vector<std::atomic<double>>& factors)
-{
-    const auto plane = dat_pair_plane(nodes, side_size, separation, positions, query_radius);
-    if (plane.outside_query) return;
-    const auto& coordinate = plane.coordinate;
-    const double left = plane.left, right = plane.right;
-    std::array<double, 4> velocity{};
-    double approach_a = 0, approach_b = 0;
-    for (int i = 0; i < 4; ++i) {
-        velocity[i] = updates[nodes[i]].dot(plane.normal);
-        if (!std::isfinite(velocity[i]))
-            throw std::domain_error("planar_DAT: plane projection overflow");
-        if (i < side_size) {
-            approach_a = std::max(approach_a, velocity[i]);
-        } else {
-            approach_b = std::max(approach_b, -velocity[i]);
-        }
-    }
-    const double gap = right - left;
-
-    // Use the paper's proportional-gap rule (Sec. 3.3), expressed without its
-    // inconsistent printed lambda/sign conventions. For A -> B normal:
-    // plane = q_A + a/(a+b) * (q_B-q_A). Side A gets a/(a+b) of the gap.
-    // When one side is stationary/retreating its share may be zero; that side
-    // is not truncated. This avoids freezing motion toward a stationary face.
-    const double largest = std::max(approach_a, approach_b);
-    const double a = largest > 0 ? approach_a / largest : 1;
-    const double b = largest > 0 ? approach_b / largest : 1;
-    const double budget_a = gap * (a / (a + b));
-    const double budget_b = gap * (b / (a + b));
-    for (int i = 0; i < 4; ++i) {
-        const bool side_a = i < side_size;
-        const double approach = side_a ? velocity[i] : -velocity[i];
-        if (approach <= 0) continue; // parallel or moving away from the plane
-        const double margin = side_a
-            ? (left - coordinate[i]) + budget_a
-            : (coordinate[i] - right) + budget_b;
-        // Eq. 16: min(1, gamma*t_hit), applying relaxation exactly once.
-        // Compare first to avoid overflow for an almost tangential update.
-        const double allowed = gamma * margin;
-        if (approach > allowed) {
-            const double factor = allowed / approach;
-            dat_atomic_min(factors[nodes[i]], std::clamp(factor, 0.0, 1.0));
-        }
-    }
-}
-
+// Reference particle DAT delegates to the isolated checkpoint implementation.
+// This entry returns accepted displacements without changing the original DAT APIs.
 std::vector<Vec3> planar_DAT(
     double gamma, double query_radius, const RefMesh& mesh,
     const std::vector<Vec3>& incremental_update,
     const std::vector<Vec3>& current_positions, double node_box_padding,
     const BroadPhase* candidates, DATWorkspace* workspace)
 {
-    const std::size_t count = current_positions.size();
-    if (!std::isfinite(gamma) || gamma <= 0 || gamma >= 1
-        || !std::isfinite(query_radius) || query_radius <= 0
-        || !std::isfinite(node_box_padding) || node_box_padding < 1)
-        throw std::invalid_argument("planar_DAT: require 0 < gamma < 1, r_q > 0, and padding >= 1");
-    if (incremental_update.size() != count
-        || count > static_cast<std::size_t>(std::numeric_limits<int>::max())
-        || (mesh.num_positions != 0 && mesh.num_positions != count)
-        || mesh.tris.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())
-        || mesh.tris.size() % 3 != 0)
-        throw std::invalid_argument("planar_DAT: inconsistent vertex or triangle counts");
-    const auto valid_node = [count](int node) {
-        return node >= 0 && static_cast<std::size_t>(node) < count;
-    };
+    const std::size_t count=current_positions.size();
+    if (!(gamma>0&&gamma<1) || !std::isfinite(gamma)
+        || !(query_radius>0) || !std::isfinite(query_radius)
+        || !(node_box_padding>=1) || !std::isfinite(node_box_padding)
+        || incremental_update.size()!=count || mesh.tris.size()%3
+        || mesh.tets.size()%4 || count>std::size_t(std::numeric_limits<int>::max()))
+        throw std::invalid_argument("planar_DAT: invalid extents, topology or padding");
+    // Keep the public query-envelope validation even when candidates are
+    // supplied externally. The compatibility API promises a representable
+    // full query_radius*padding envelope, although discovery uses half boxes.
+    const double query_extent=query_radius*node_box_padding;
+    if(!std::isfinite(query_extent))
+        throw std::invalid_argument("planar_DAT: query extent overflow");
+    dat_for_independent(count,[&](std::size_t v){
+        if(!current_positions[v].allFinite()
+            ||!(current_positions[v]-Vec3::Constant(query_extent)).allFinite()
+            ||!(current_positions[v]+Vec3::Constant(query_extent)).allFinite())
+            throw std::invalid_argument("planar_DAT: query extent overflow");
+    });
     std::optional<DATWorkspace> local_workspace;
-    if(!workspace) {local_workspace.emplace(); workspace=&*local_workspace;}
+    if(!workspace) {local_workspace.emplace();workspace=&*local_workspace;}
     auto& storage=*workspace->impl;
-    dat_for_independent(mesh.tris.size()/3, [&](std::size_t triangle) {
-        const std::size_t i=3*triangle;
-        const int a = mesh.tris[i], b = mesh.tris[i + 1], c = mesh.tris[i + 2];
-        if (!valid_node(a) || !valid_node(b) || !valid_node(c)
-            || a == b || b == c || a == c)
-            throw std::invalid_argument("planar_DAT: invalid triangle connectivity");
+    const auto valid=[&](int v){return v>=0&&std::size_t(v)<count;};
+    auto& interior=storage.interior;dat_resize_atomic(interior,count);
+    dat_for_independent(count,[&](std::size_t v){interior[v].store(0,std::memory_order_relaxed);});
+    dat_for_independent(mesh.tet_nodes.size(),[&](std::size_t i){
+        const int v=mesh.tet_nodes[i];
+        if(!valid(v))throw std::invalid_argument("planar_DAT: invalid solid classification");
+        interior[v].store(1,std::memory_order_relaxed);
     });
-    auto& interior=storage.interior;
-    if (!mesh.tet_nodes.empty()) {
-        dat_resize_atomic(interior,count);
-        dat_for_independent(count, [&](std::size_t v) {interior[v].store(0,std::memory_order_relaxed);});
-    }
-    dat_for_independent(mesh.tet_nodes.size(), [&](std::size_t i) {
-        const int node=mesh.tet_nodes[i];
-        if (!valid_node(node))
-            throw std::invalid_argument("planar_DAT: invalid tet-node classification");
-        // Classification lists may contain duplicates. Atomic stores avoid
-        // races without changing the ordered solid-then-surface precedence.
-        interior[node].store(1,std::memory_order_relaxed);
+    dat_for_independent(mesh.surface_nodes.size(),[&](std::size_t i){
+        const int v=mesh.surface_nodes[i];
+        if(!valid(v))throw std::invalid_argument("planar_DAT: invalid surface classification");
+        interior[v].store(0,std::memory_order_relaxed);
     });
-    dat_for_independent(mesh.surface_nodes.size(), [&](std::size_t i) {
-        const int node=mesh.surface_nodes[i];
-        if (!valid_node(node))
-            throw std::invalid_argument("planar_DAT: invalid surface-node classification");
-        if (!mesh.tet_nodes.empty())interior[node].store(0,std::memory_order_relaxed);
+    dat_for_independent(mesh.tris.size()/3,[&](std::size_t t){
+        const int a=mesh.tris[3*t],b=mesh.tris[3*t+1],c=mesh.tris[3*t+2];
+        if(!valid(a)||!valid(b)||!valid(c)||a==b||b==c||a==c
+            ||interior[a].load(std::memory_order_relaxed)
+            ||interior[b].load(std::memory_order_relaxed)
+            ||interior[c].load(std::memory_order_relaxed))
+            throw std::invalid_argument("planar_DAT: invalid triangle connectivity/surface classification");
     });
-    if (!mesh.tet_nodes.empty()) {
-        dat_for_independent(mesh.tris.size(), [&](std::size_t i) {
-            if (interior[mesh.tris[i]].load(std::memory_order_relaxed))
-                throw std::invalid_argument("planar_DAT: triangle vertex classified as solid interior");
+    dat::Options options;
+    options.gamma=gamma;options.query_radius=query_radius;options.use_parallel=true;
+    auto& phase=storage.broad_phase;
+    if(!candidates) {
+        const double radius=.5*query_radius*node_box_padding;
+        if(!(radius>0)||!std::isfinite(radius))
+            throw std::invalid_argument("planar_DAT: invalid query extent");
+        auto& boxes=storage.boxes;boxes.resize(count);
+        dat_for_independent(count,[&](std::size_t v){
+            boxes[v]=AABB(current_positions[v]-Vec3::Constant(radius),
+                current_positions[v]+Vec3::Constant(radius));
+            if(!boxes[v].min.allFinite()||!boxes[v].max.allFinite())
+                throw std::invalid_argument("planar_DAT: query extent overflow");
         });
+        if(!mesh.tets.empty()||!mesh.tet_nodes.empty())
+            phase.initialize_surface_nodes(boxes,mesh,0,BroadPhase::InitializationMode::DeformableSolver,false);
+        else phase.initialize(boxes,mesh,0,BroadPhase::InitializationMode::DeformableSolver,false);
+        candidates=&phase;
     }
-    const double limit = (0.5 * gamma) * query_radius;
-    const double radius = query_radius * node_box_padding;
-    if (!(limit > 0) || !std::isfinite(radius))
-        throw std::invalid_argument("planar_DAT: displacement limit or box radius out of range");
-
-    std::vector<Vec3> updates(count);
-    auto& boxes=storage.boxes; boxes.resize(count);
-    auto& factors=storage.factors; dat_resize_atomic(factors,count);
-    dat_for_independent(count, [&](std::size_t i) {
-        if (!current_positions[i].allFinite() || !incremental_update[i].allFinite())
-            throw std::invalid_argument("planar_DAT: nonfinite position or update");
-        updates[i] = dat_capped_update(incremental_update[i], limit);
-        boxes[i] = AABB(current_positions[i] - Vec3::Constant(radius),
-                        current_positions[i] + Vec3::Constant(radius));
-        if (!boxes[i].min.allFinite() || !boxes[i].max.allFinite())
-            throw std::invalid_argument("planar_DAT: node box overflow");
-        factors[i].store(1.0, std::memory_order_relaxed);
-    });
-    if (count == 0) return updates;
-
-    // Reuse topology within a solve. Green triangles and red edges are unions
-    // of these blue boxes. Zero additional d_hat padding: r_q already defines
-    // the query neighborhood; there is no barrier stiffness/energy here.
-    auto& broad_phase=storage.broad_phase;
-    if (!candidates) {
-        if (!mesh.tets.empty() || !mesh.tet_nodes.empty())
-            broad_phase.initialize_surface_nodes(boxes, mesh, 0.0,
-                BroadPhase::InitializationMode::DeformableSolver, false);
-        else
-            broad_phase.initialize(boxes, mesh, 0.0,
-                BroadPhase::InitializationMode::DeformableSolver, false);
-    }
-    const auto& cache = candidates?candidates->cache():broad_phase.cache();
-    dat_for_pairs(cache.nt_pairs.size()+cache.ss_pairs.size(), [&](std::size_t i) {
-        if (i<cache.nt_pairs.size()) {
-            const auto& pair = cache.nt_pairs[i];
-            const std::array<int, 4> nodes{
-                pair.node, pair.tri_v[0], pair.tri_v[1], pair.tri_v[2]};
-            if (dat_aabb_separated(nodes,1,current_positions,query_radius)) return;
-            const Vec3 separation = dat_vertex_triangle_separation(
-                current_positions[nodes[0]], current_positions[nodes[1]],
-                current_positions[nodes[2]], current_positions[nodes[3]]);
-            dat_constrain_pair(nodes, 1, separation, gamma, query_radius,
-                current_positions, updates, factors);
-        } else {
-            const auto& pair = cache.ss_pairs[i-cache.nt_pairs.size()];
-            const std::array<int, 4> nodes{pair.v[0], pair.v[1], pair.v[2], pair.v[3]};
-            if (dat_aabb_separated(nodes,2,current_positions,query_radius)) return;
-            const auto distance = segment_segment_distance(
-                current_positions[nodes[0]], current_positions[nodes[1]],
-                current_positions[nodes[2]], current_positions[nodes[3]]);
-            dat_constrain_pair(nodes, 2, -distance.separation, gamma, query_radius,
-                current_positions, updates, factors);
-        }
-    });
-    #pragma omp parallel for schedule(static) if(count >= 128)
-    for (std::size_t i = 0; i < count; ++i)
-        updates[i] *= factors[i].load(std::memory_order_relaxed);
-    return updates;
+    storage.reference_checkpoint.reset(mesh,current_positions,*candidates,options);
+    storage.reference_checkpoint.filter_into(incremental_update,storage.reference_result);
+    return storage.reference_result.displacements;
 }
 
 GeneralDATResult general_planar_DAT(double gamma, double query_radius,
@@ -640,25 +1012,23 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
     const BroadPhase* candidates, DATWorkspace* workspace)
 {
     const std::size_t n = positions.size(), bodies = mesh.rb_nodes.size();
+    std::optional<DATWorkspace> local_workspace;
+    if(!workspace) {local_workspace.emplace(); workspace=&*local_workspace;}
     if (bodies == 0) {
         if (!centers.empty() || !omega.empty() || !previous_orientations.empty()
             || !delta_centers.empty() || !delta_omega.empty())
-            throw std::invalid_argument("general_DAT: unexpected rigid coordinates");
+            throw std::invalid_argument("general_planar_DAT: unexpected rigid coordinates");
         GeneralDATResult result;
-        const auto displacements=planar_DAT(gamma,query_radius,mesh,particle_updates,
+        (void)planar_DAT(gamma,query_radius,mesh,particle_updates,
             positions,node_box_padding,candidates,workspace);
-        result.positions.resize(n);
-        dat_for_independent(n, [&](std::size_t v) {
-            result.positions[v]=positions[v]+displacements[v];
-            if(!result.positions[v].allFinite())throw std::domain_error("general_DAT: endpoint overflow");
-        });
+        result.positions=workspace->impl->reference_result.positions;
         return result;
     }
     if (!(gamma > 0 && gamma < 1) || !std::isfinite(gamma)
         || !(query_radius > 0) || !std::isfinite(query_radius)
         || !(node_box_padding >= 1) || !std::isfinite(node_box_padding)
         || !(dt > 0) || !std::isfinite(dt) || !(dt*dt>0) || !std::isfinite(dt*dt))
-        throw std::invalid_argument("general_DAT: invalid filter parameters");
+        throw std::invalid_argument("general_planar_DAT: invalid filter parameters");
     if (particle_updates.size() != n || mesh.node_to_rb.size() != n
         || (mesh.num_positions && mesh.num_positions != n)
         || n > static_cast<std::size_t>(std::numeric_limits<int>::max()) || bodies>n
@@ -667,10 +1037,8 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
         || previous_orientations.size() != bodies || delta_centers.size() != bodies
         || delta_omega.size() != bodies || mesh.ref_positions.size() != bodies
         || mesh.tris.size() % 3 || mesh.tets.size() % 4)
-        throw std::invalid_argument("general_DAT: inconsistent mesh/coordinate sizes");
+        throw std::invalid_argument("general_planar_DAT: inconsistent mesh/coordinate sizes");
     const auto valid_node = [n](int v) { return v >= 0 && std::size_t(v) < n; };
-    std::optional<DATWorkspace> local_workspace;
-    if(!workspace) {local_workspace.emplace(); workspace=&*local_workspace;}
     auto& storage=*workspace->impl;
     auto& local=storage.local; local.resize(n);
     auto& ownership_claims=storage.ownership_claims; dat_resize_atomic(ownership_claims,n);
@@ -684,7 +1052,7 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
     body_offsets[0]=0;
     for(std::size_t b=0;b<bodies;++b) {
         if(mesh.rb_nodes[b].size()>n-body_offsets[b])
-            throw std::invalid_argument("general_DAT: too many rigid proxy nodes");
+            throw std::invalid_argument("general_planar_DAT: too many rigid proxy nodes");
         body_offsets[b+1]=body_offsets[b]+mesh.rb_nodes[b].size();
     }
     const auto array = [](const Vec3& x) { return rigid_dat::Vector{x[0],x[1],x[2]}; };
@@ -702,7 +1070,7 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
             || delta_omega[b].cwiseAbs().maxCoeff()>std::sqrt(std::numeric_limits<double>::max())/8
             || !previous_orientations[b].allFinite()
             || std::abs(previous_orientations[b].squaredNorm()-1) > 1e-10)
-            throw std::invalid_argument("general_DAT: invalid rigid body");
+            throw std::invalid_argument("general_planar_DAT: invalid rigid body");
     });
     dat_for_independent(rigid_nodes.size(), [&](std::size_t index) {
         const std::size_t b=std::size_t(std::upper_bound(body_offsets.begin(),body_offsets.end(),index)
@@ -711,13 +1079,13 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
         const int v=mesh.rb_nodes[b][j];
         if (!valid_node(v) || mesh.node_to_rb[v] != int(b)
             || !mesh.ref_positions[b][j].allFinite())
-            throw std::invalid_argument("general_DAT: inconsistent rigid ownership");
+            throw std::invalid_argument("general_planar_DAT: inconsistent rigid ownership");
         int unclaimed=-1;
         // Even malformed duplicate entries must not race on local[v]. Only
         // the successful claim writes it; every other writer reports an error
         // before the joined validation phase can read an incomplete mapping.
         if(!ownership_claims[v].compare_exchange_strong(unclaimed,int(j),std::memory_order_relaxed))
-            throw std::invalid_argument("general_DAT: inconsistent rigid ownership");
+            throw std::invalid_argument("general_planar_DAT: inconsistent rigid ownership");
         local[v]=int(j);
         rigid_nodes[index]=v;
     });
@@ -725,14 +1093,14 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
         const int owner=mesh.node_to_rb[v];
         if (owner < -1 || owner >= int(bodies) || ((owner>=0) != (local[v]>=0))
             || !positions[v].allFinite() || !particle_updates[v].allFinite())
-            throw std::invalid_argument("general_DAT: invalid node ownership/state");
+            throw std::invalid_argument("general_planar_DAT: invalid node ownership/state");
         if (owner>=0) {
             const Vec3 expected=world_space_position(mesh.ref_positions[owner][local[v]],
                 centers[owner],previous_orientations[owner],omega[owner],dt);
             const double tolerance=128*std::numeric_limits<double>::epsilon()
                 *std::max({1.0,expected.cwiseAbs().maxCoeff(),positions[v].cwiseAbs().maxCoeff()});
             if (!expected.allFinite() || (expected-positions[v]).cwiseAbs().maxCoeff()>tolerance)
-                throw std::invalid_argument("general_DAT: rigid proxies disagree with pose");
+                throw std::invalid_argument("general_planar_DAT: rigid proxies disagree with pose");
         }
     });
     dat_for_independent(mesh.tris.size()/3, [&](std::size_t triangle) {
@@ -740,31 +1108,33 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
         const int a=mesh.tris[i],b=mesh.tris[i+1],c=mesh.tris[i+2];
         if (!valid_node(a)||!valid_node(b)||!valid_node(c)||a==b||b==c||a==c
             || mesh.node_to_rb[a]!=mesh.node_to_rb[b] || mesh.node_to_rb[a]!=mesh.node_to_rb[c])
-            throw std::invalid_argument("general_DAT: invalid or mixed-owner triangle");
+            throw std::invalid_argument("general_planar_DAT: invalid or mixed-owner triangle");
     });
     dat_for_independent(mesh.tets.size(), [&](std::size_t i) {
         const int v=mesh.tets[i];
         if(!valid_node(v)||mesh.node_to_rb[v]>=0)
-            throw std::invalid_argument("general_DAT: invalid or rigid tetrahedron");
+            throw std::invalid_argument("general_planar_DAT: invalid or rigid tetrahedron");
     });
     dat_for_independent(mesh.tet_nodes.size(), [&](std::size_t i) {
         const int v=mesh.tet_nodes[i];
-        if(!valid_node(v)||mesh.node_to_rb[v]>=0) throw std::invalid_argument("general_DAT: invalid solid classification");
+        if(!valid_node(v)||mesh.node_to_rb[v]>=0) throw std::invalid_argument("general_planar_DAT: invalid solid classification");
         interior[v].store(1,std::memory_order_relaxed);
     });
     dat_for_independent(mesh.surface_nodes.size(), [&](std::size_t i) {
         const int v=mesh.surface_nodes[i];
-        if(!valid_node(v)) throw std::invalid_argument("general_DAT: invalid surface classification");
+        if(!valid_node(v)) throw std::invalid_argument("general_planar_DAT: invalid surface classification");
         interior[v].store(0,std::memory_order_relaxed);
     });
     dat_for_independent(mesh.tris.size(), [&](std::size_t i) {
         if(interior[mesh.tris[i]].load(std::memory_order_relaxed))
-            throw std::invalid_argument("general_DAT: interior node on surface");
+            throw std::invalid_argument("general_planar_DAT: interior node on surface");
     });
 
-    const double limit=.5*gamma*query_radius, radius=query_radius*node_box_padding;
+    const double limit=directed_rounding::next_down(
+        directed_rounding::next_down(.5*gamma)*query_radius);
+    const double radius=query_radius*node_box_padding;
     if (!(limit>0)||!std::isfinite(radius))
-        throw std::invalid_argument("general_DAT: invalid query extent");
+        throw std::invalid_argument("general_planar_DAT: invalid query extent");
     GeneralDATResult result;
     result.body_factors.resize(bodies);
     auto& radius_caps=storage.radius_caps; dat_resize_atomic(radius_caps,bodies);
@@ -790,7 +1160,7 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
         // reserve that offset over the entire arc, not only at its endpoint.
         const double offset=dat_norm_upper(initial_offset);
         const double budget=offset<limit?directed_rounding::toward_positive_zero(limit-offset):0;
-        if(!(budget>0))throw std::domain_error("general_DAT: unresolved query-anchor roundoff");
+        if(!(budget>0))throw std::domain_error("general_planar_DAT: unresolved query-anchor roundoff");
         const double cap=radius_caps[b].load(std::memory_order_relaxed);
         radius_factors[index]=rigid_dat::radius_step_capped(*prepared_paths[index],budget,cap);
         // Every observed cap is a minimum of already-certified factors. A
@@ -829,23 +1199,26 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
     auto& boxes=storage.boxes; boxes.resize(n);
     auto& factors=storage.factors; dat_resize_atomic(factors,n);
     auto& body_factors=storage.body_factors; dat_resize_atomic(body_factors,bodies);
-    dat_for_independent(bodies, [&](std::size_t b) {body_factors[b].store(result.body_factors[b]);});
+    // Radius prefixes were certified above, but remain separate from plane
+    // allocation. Newton allocates from RAW endpoint motion and caps only the
+    // already plane-truncated accepted path.
+    dat_for_independent(bodies, [&](std::size_t b) {body_factors[b].store(1.0);});
     dat_for_independent(n, [&](std::size_t v) {
         const int b=mesh.node_to_rb[v];
-        if(b<0) updates[v]=dat_capped_update(particle_updates[v],limit);
+        if(b<0) updates[v]=particle_updates[v];
         else if(delta_omega[b].cwiseAbs().maxCoeff()==0)
-            updates[v]=result.body_factors[b]*delta_centers[b];
+            updates[v]=delta_centers[b];
         else {
             // Plane allocation depends on local motion, not subtraction of two
             // rounded, potentially very large, world-space endpoints.
             auto local_path=paths[path_index(v)]; local_path.center={0,0,0};
-            const auto endpoint=rigid_dat::detail::evaluate_core(local_path,result.body_factors[b],prepared_paths[path_index(v)]->u0);
+            const auto endpoint=rigid_dat::detail::evaluate_core(local_path,1.0,prepared_paths[path_index(v)]->u0);
             const auto start=rigid_dat::detail::evaluate_core(local_path,0,prepared_paths[path_index(v)]->u0);
             updates[v]=Vec3(endpoint[0]-start[0],endpoint[1]-start[1],endpoint[2]-start[2]);
         }
         boxes[v]=AABB(positions[v]-Vec3::Constant(radius),positions[v]+Vec3::Constant(radius));
         if(!updates[v].allFinite()||!boxes[v].min.allFinite()||!boxes[v].max.allFinite())
-            throw std::invalid_argument("general_DAT: node extent overflow");
+            throw std::invalid_argument("general_planar_DAT: node extent overflow");
         factors[v].store(1);
     });
     auto& phase=storage.broad_phase;
@@ -873,17 +1246,23 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
             velocity[i]=updates[v].dot(normal);
             rigid_pair|=owner>=0;
             if(!std::isfinite(velocity[i]))
-                throw std::domain_error("general_DAT: plane overflow");
+                throw std::domain_error("general_planar_DAT: plane overflow");
             if(i<split)a=std::max(a,velocity[i]);
             else b=std::max(b,-velocity[i]);
         }
         const double gap=right-left;
-        const double scale=std::max(a,b);
-        a=scale>0?a/scale:1; b=scale>0?b/scale:1;
-        // A curved vertex can return toward a plane despite retreating endpoint
-        // motion. Give every rotating side an interior plane, then certify it.
-        if(rigid_pair) {a=std::max(a,1e-3);b=std::max(b,1e-3);}
-        const double budget_a=gap*(a/(a+b)),budget_b=gap*(b/(a+b));
+        double coordinate_scale=1;
+        for(int v:nodes)coordinate_scale=std::max(coordinate_scale,positions[v].cwiseAbs().maxCoeff());
+        const double epsilon=std::max(1e-6,
+            4.0*std::numeric_limits<float>::epsilon()*coordinate_scale);
+        double fraction=.5;
+        if(gap>=2*epsilon) {
+            const double scale=std::max(a,b);
+            if(scale>0) {a/=scale;b/=scale;fraction=a/(a+b);}
+            const double floor=std::max(.05,epsilon/gap);
+            fraction=std::clamp(fraction,floor,1-floor);
+        }
+        const double budget_a=gap*fraction,budget_b=gap*(1-fraction);
         const Vec3 plane_point=origin+normal*(left+budget_a);
         std::array<double,4> certified_margins{};
         std::array<unsigned char,4> initial_side_safe{};
@@ -896,7 +1275,7 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
                 const auto projection=dat_plane_projection({x,x},normal,plane_point);
                 const double lo=projection[0],hi=projection[1];
                 if(!std::isfinite(lo)||!std::isfinite(hi)||(i<split?!(hi<0):!(lo>0)))
-                    throw std::domain_error("general_DAT: rounded division plane is not separating");
+                    throw std::domain_error("general_planar_DAT: rounded division plane is not separating");
                 certified_margins[i]=i<split?-hi:lo;
                 initial_side_safe[i]=1;
                 if(mesh.node_to_rb[nodes[i]]>=0) {
@@ -909,37 +1288,56 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
         for(int i=0;i<4;++i) {
             const int v=nodes[i],owner=mesh.node_to_rb[v];
             if(owner>=0&&!initial_side_safe[i]) {
-                throw std::domain_error("general_DAT: initial rigid trajectory is not on its intended plane side");
+                throw std::domain_error("general_planar_DAT: initial rigid trajectory is not on its intended plane side");
             }
             if(owner>=0 && delta_omega[owner].cwiseAbs().maxCoeff()>0) {
-                const double alpha=rigid_dat::plane_step(*prepared_paths[path_index(v)],array(normal),array(plane_point),gamma);
+                // Reserve the same numerical clearance band as straight DAT.
+                // A curved path starting inside that band is frozen rather
+                // than allowing plane_step to infer the opposite half-space.
+                if(!(certified_margins[i]>epsilon)) {
+                    dat_atomic_min(body_factors[owner],0);
+                    continue;
+                }
+                const Vec3 boundary=plane_point+(i<split?-epsilon:epsilon)
+                    *normal/normal.squaredNorm();
+                const auto initial=dat_plane_projection(
+                    prepared_paths[path_index(v)]->initial_box,normal,boundary);
+                if(i<split?!(initial[1]<0):!(initial[0]>0)) {
+                    dat_atomic_min(body_factors[owner],0);
+                    continue;
+                }
+                const double alpha=rigid_dat::plane_step(*prepared_paths[path_index(v)],array(normal),array(boundary),gamma);
                 dat_atomic_min(body_factors[owner],alpha);
             } else {
                 double approach=i<split?velocity[i]:-velocity[i];
                 if(rigid_pair) {
                     // Both sides must use the same represented division plane.
-                    // Bound the normal speed upwards, including a rigid body's
-                    // radius cap, rather than trusting a rounded dot product.
+                    // Bound the RAW normal speed upwards. The radius cap is
+                    // deliberately absent from both plane allocation and this
+                    // crossing test; it is combined after all pair factors.
                     double upper=0;
                     for(int k=0;k<3;++k) {
                         const double speed=owner<0?updates[v][k]:delta_centers[owner][k];
                         const double coefficient=i<split?normal[k]:-normal[k];
+                        if(speed==0||coefficient==0)continue;
                         const double product=directed_rounding::next_up(coefficient*speed);
                         upper=directed_rounding::next_up(upper+product);
                     }
-                    approach=owner<0?upper:directed_rounding::next_up(upper*result.body_factors[owner]);
+                    approach=upper;
                 }
                 if(approach<=0)continue;
                 const double margin=rigid_pair?certified_margins[i]
                     :(i<split?left-coordinate[i]+budget_a:coordinate[i]-right+budget_b);
-                const double allowed=rigid_pair
-                    ?directed_rounding::toward_positive_zero(gamma*margin):gamma*margin;
-                if(approach>allowed) {
+                const double clearance=margin-epsilon;
+                // Crossing-only relaxation: a feasible endpoint keeps t=1;
+                // a start inside the epsilon band cannot approach further.
+                if(approach>clearance) {
+                    const double allowed=clearance>0
+                        ?directed_rounding::toward_positive_zero(gamma*clearance):0;
                     double factor=std::clamp(allowed/approach,0.0,1.0);
                     if(rigid_pair)factor=directed_rounding::toward_positive_zero(factor);
                     if(owner<0)dat_atomic_min(factors[v],factor);
-                    else dat_atomic_min(body_factors[owner],
-                        directed_rounding::toward_positive_zero(result.body_factors[owner]*factor));
+                    else dat_atomic_min(body_factors[owner],factor);
                 }
             }
         }
@@ -959,8 +1357,16 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
         }
     });
     auto& node_factors=storage.node_factors; node_factors.resize(n);
-    dat_for_independent(n, [&](std::size_t v) {node_factors[v]=factors[v].load();});
-    dat_for_independent(bodies, [&](std::size_t b) {result.body_factors[b]=body_factors[b].load();});
+    double inward_limit=limit;
+    for(int i=0;i<16;++i)inward_limit=std::max(0.0,directed_rounding::next_down(inward_limit));
+    dat_for_independent(n, [&](std::size_t v) {
+        node_factors[v]=1;
+        if(mesh.node_to_rb[v]<0)
+            updates[v]=dat_capped_update(updates[v]*factors[v].load(),inward_limit,positions[v]);
+    });
+    dat_for_independent(bodies, [&](std::size_t b) {
+        result.body_factors[b]=std::min(result.body_factors[b],body_factors[b].load());
+    });
     // Certify represented endpoints as well as the mathematical curved path.
     // COM addition and quaternion placement can otherwise round a positive gap
     // to zero. Backtracking only shortens already-certified trajectory prefixes.
@@ -1036,7 +1442,7 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
         if(!failed.load(std::memory_order_relaxed)) {
             return result;
         }
-        if(attempt==endpoint_backtracks)throw std::domain_error("general_DAT: cannot certify represented endpoints");
+        if(attempt==endpoint_backtracks)throw std::domain_error("general_planar_DAT: cannot certify represented endpoints");
         dat_for_independent(bodies, [&](std::size_t b) {
             if(bad_body[b].load(std::memory_order_relaxed))
                 result.body_factors[b]=attempt==endpoint_backtracks-1?0:.5*result.body_factors[b];
@@ -1047,6 +1453,8 @@ GeneralDATResult general_planar_DAT(double gamma, double query_radius,
         });
     }
 }
+
+
 
 namespace {
 

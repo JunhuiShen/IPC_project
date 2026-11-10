@@ -5,7 +5,6 @@
 #include "contact_exact.cuh"
 #include "contact_compact.cuh"
 #include "directed_rounding.cuh"
-#include "rigid_dat.cuh"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <array>
@@ -256,32 +255,10 @@ __global__ void directed_rounding_check(const std::uint64_t* patterns,int count,
         ||rounding::detail::bits(rounding::toward_positive_zero(x))!=rounding::detail::bits(::nextafter(x,0.)))
         atomicCAS(failure,0,1);
 }
-__global__ void capped_radius_check(int* failure) {
-    namespace rd=ipc_gpu::solver::rigid_dat_detail;
-    const int i=threadIdx.x;if(i>=18)return;
-    rd::Trajectory path;path.reference[0]=1;path.delta_omega[2]=6.28318530717958647692;
-    const double query[3]={1,0,0};const double caps[6]={0.,-0.,.01,.1,.5,1.};
-    const int depth=i>=6&&i<12?1:40,budget=i<12?4096:1;
-    const auto full=rd::radius_step(path,query,.4,depth,budget);
-    rd::PreparedTrajectory prepared;const auto status=rd::prepare_trajectory(path,prepared);
-    const double cap=caps[i%6];
-    const auto actual=rd::radius_step_capped(path,query,.4,cap,depth,budget);
-    const auto cached=rd::radius_step_capped(path,query,.4,cap,depth,budget,&prepared);
-    // Retain signed zero from the requested cap as the production minimum does.
-    const double expected=cap<full.factor?cap:full.factor;
-    if(status!=rd::Status::Ok||rd::is_fatal(full.status)||rd::is_fatal(actual.status)
-        ||ipc_gpu::directed_rounding::detail::bits(actual.factor)!=ipc_gpu::directed_rounding::detail::bits(expected)
-        ||ipc_gpu::directed_rounding::detail::bits(actual.factor)!=ipc_gpu::directed_rounding::detail::bits(cached.factor)
-        ||actual.status!=cached.status
-        ||(actual.status==rd::Status::Ok&&actual.factor!=cap)
-        ||((cap==1||cap>full.factor)&&actual.status!=full.status))atomicCAS(failure,0,2);
-    const double invalid_query[3]={INFINITY,0,0};
-    if(rd::radius_step_capped(path,invalid_query,.4,0).status!=rd::Status::InvalidInput)
-        atomicCAS(failure,0,3);
-}
+
 }
 
-void gpu_dat_numerical_helpers_test_gpu() {
+void gpu_directed_rounding_helpers_test_gpu() {
     std::vector<std::uint64_t> patterns{0,UINT64_C(0x8000000000000000),1,
         UINT64_C(0x000fffffffffffff),UINT64_C(0x0010000000000000),
         UINT64_C(0x7fefffffffffffff),UINT64_C(0x7ff0000000000000),
@@ -295,9 +272,9 @@ void gpu_dat_numerical_helpers_test_gpu() {
     }
     Memory<std::uint64_t> inputs(patterns.size(),patterns.data());Memory<int> failed(1);
     directed_rounding_check<<<unsigned((patterns.size()+127)/128),128>>>(inputs.data,int(patterns.size()),failed.data);
-    check(cudaGetLastError());capped_radius_check<<<1,32>>>(failed.data);check(cudaGetLastError());
+    check(cudaGetLastError());
     int failure=0;failed.download(&failure);
-    if(failure)throw std::runtime_error("device DAT rounding/capped-radius helper mismatch "+std::to_string(failure));
+    if(failure)throw std::runtime_error("device directed-rounding helper mismatch "+std::to_string(failure));
 }
 
 void gpu_contact_original_frozen_test_gpu(const double (*positions)[3],const double (*previous)[3],

@@ -1,5 +1,4 @@
 #include "rigid_body_ipc.h"
-#include "example.h"
 #include <omp.h>
 
 #include "parallel_helper.h"
@@ -2921,7 +2920,7 @@ TEST(DeformableFrictionSolver,
 }
 
 TEST(DeformableFrictionSolver,
-     BasicAndOgcMeshContactsMatchLegacyLocalAssembly) {
+     BasicAndOgcMeshContactsMatchIndependentLocalAssembly) {
     RefMesh ref_mesh;
     ref_mesh.num_positions = 4;
     ref_mesh.tris = {1, 2, 3};
@@ -3007,25 +3006,49 @@ TEST(DeformableFrictionSolver,
             << expected_basic[static_cast<std::size_t>(node)].transpose();
     }
 
-    // These uncoupled nodes share one color, so OGC evaluates every role from
-    // the same color-start snapshot and applies the iteration's 0.4*d bound.
-    const double frozen_distance = node_triangle_distance(
+    // The collision triangle contributes structural edges even with zero
+    // material stiffness: ascending greedy colors are {0,1}, {2}, {3}.
+    // Each color reads fresh contact geometry, while friction history and the
+    // isotropic checkpoint distances remain fixed for the entire solve.
+    SimParams ogc_params = params;
+    ogc_params.dat_inertial_predictor = false; // isolate local force assembly
+    const double checkpoint_distance = node_triangle_distance(
         initial[0], initial[1], initial[2], initial[3]).distance;
-    const double trust_region_bound = 0.4 * frozen_distance;
+    const double trust_region_bound = 0.5 * params.dat_gamma
+        * std::min(params.resolved_dat_query_radius(), checkpoint_distance);
+    const std::array<std::vector<int>, 3> colors{{{0, 1}, {2}, {3}}};
     std::vector<Vec3> expected_ogc = initial;
-    for (int role = 0; role < 4; ++role) {
-        const Vec3 raw_step =
-            -params.damping * legacy_delta(initial, role);
-        const double step_norm = raw_step.norm();
-        const double alpha = step_norm > 0.0
-            ? std::min(1.0, trust_region_bound / step_norm)
-            : 1.0;
-        expected_ogc[static_cast<std::size_t>(role)] =
-            initial[static_cast<std::size_t>(role)] + alpha * raw_step;
+    std::vector<Vec3> accumulated(4, Vec3::Zero());
+    for (const auto& color : colors) {
+        const auto snapshot = expected_ogc;
+        const std::array<Vec3, 4> current{
+            snapshot[0], snapshot[1], snapshot[2], snapshot[3]};
+        const std::array<Vec3, 4> prior{
+            previous[0], previous[1], previous[2], previous[3]};
+        const auto friction_contact = make_node_triangle_frozen_friction_contact(
+            current, prior, params.d_hat, params.k_barrier,
+            params.dt(), params.friction_velocity_epsilon);
+        for (int role : color) {
+            const auto normal = node_triangle_barrier_self_gradient_and_hessian(
+                current[0], current[1], current[2], current[3], params.d_hat, role);
+            const auto friction = frozen_friction_role_gradient_and_hessian(
+                friction_contact, role, params.friction_coefficient, params.dt2());
+            const Vec3 gradient = snapshot[role] - initial[role]
+                + params.dt2() * params.k_barrier * normal.first + friction.first;
+            const Mat33 hessian = Mat33::Identity()
+                + params.dt2() * params.k_barrier * normal.second + friction.second;
+            accumulated[role] -= params.damping * (matrix3d_inverse(hessian) * gradient);
+        }
+        for (int role = 0; role < 4; ++role) {
+            const double norm = accumulated[role].norm();
+            if (norm > trust_region_bound)
+                accumulated[role] *= trust_region_bound / norm;
+            expected_ogc[role] = initial[role] + accumulated[role];
+        }
     }
     std::vector<Vec3> actual_ogc = initial;
     const SolverResult ogc_result = global_gauss_seidel_solver_ogc(
-        ref_mesh, adjacency, {}, params, actual_ogc, initial, velocities,
+        ref_mesh, adjacency, {}, ogc_params, actual_ogc, initial, velocities,
         "", &previous);
     ASSERT_TRUE(ogc_result.converged);
     for (int node = 0; node < 4; ++node) {
@@ -3144,7 +3167,7 @@ TEST(GeneralSolverFriction,
 TEST(DeformableSDFFrictionSolver,
      BasicAndOgcReduceTangentialSlipOnPlane) {
     const auto run = [](const double friction_coefficient,
-                        const bool use_ogc_solver) {
+                        const bool use_ogc) {
         RefMesh ref_mesh;
         ref_mesh.mass = {1.0};
         ref_mesh.num_positions = 1;
@@ -3175,7 +3198,7 @@ TEST(DeformableSDFFrictionSolver,
             previous[0] + params.dt() * velocity[0]};
         std::vector<Vec3> current = previous;
         BroadPhase broad_phase;
-        if (use_ogc_solver) {
+        if (use_ogc) {
             global_gauss_seidel_solver_ogc(
                 ref_mesh, adjacency, {}, params, current, xhat, velocity,
                 "", &previous);
@@ -3187,10 +3210,10 @@ TEST(DeformableSDFFrictionSolver,
         return current[0];
     };
 
-    for (const bool use_ogc_solver : {false, true}) {
-        SCOPED_TRACE(use_ogc_solver ? "OGC" : "basic");
-        const Vec3 frictionless = run(0.0, use_ogc_solver);
-        const Vec3 frictional = run(0.6, use_ogc_solver);
+    for (const bool use_ogc : {false, true}) {
+        SCOPED_TRACE(use_ogc ? "OGC" : "basic");
+        const Vec3 frictionless = run(0.0, use_ogc);
+        const Vec3 frictional = run(0.6, use_ogc);
         EXPECT_GT(frictionless.x(), 1.0e-3);
         EXPECT_GT(frictional.x(), 0.0);
         EXPECT_LT(frictional.x(), frictionless.x() - 1.0e-4);
@@ -3556,52 +3579,6 @@ TEST(RigidPinTranslation, MovingTargetIsUsedByFixedTimeEnergyGradient) {
     }
 }
 
-struct BikeScene { RefMesh mesh; DeformedState state; SimParams params; int frames; double density; };
-BikeScene bike_scene(double distance, double duration = 1, double motor_ramp = 0) {
-    IPCArgs3D args;
-    std::vector<std::string> tokens = {"test", "--example", "18",
-        "--bike_chain_tension_distance", std::to_string(distance),
-        "--bike_chain_tension_duration", std::to_string(duration),
-        "--bike_chain_motor_ramp_duration", std::to_string(motor_ramp)};
-    std::vector<char*> argv; for (auto& token : tokens) argv.push_back(token.data());
-    if (!args.parse(static_cast<int>(argv.size()), argv.data())) throw std::runtime_error("CLI parse failed");
-    BikeScene scene; scene.params = args.to_sim_params();
-    scene.frames = args.num_frames; scene.density = args.rigid_density;
-    std::vector<Vec2> material; std::vector<Pin> pins;
-    build_bike_chain_example(args, scene.mesh, scene.state, material, pins, scene.params);
-    return scene;
-}
-
-TEST(RigidPinTranslation, RealBikeBuilderChangesOnlyLargeMountFreedomAndTargets) {
-    const auto base = bike_scene(0), moving = bike_scene(.004);
-    EXPECT_EQ(moving.frames, 120); EXPECT_DOUBLE_EQ(moving.density, 900);
-    ASSERT_EQ(moving.mesh.rb_nodes.size(), 138u);
-    EXPECT_EQ(base.mesh.rb_update_modes[136], RigidBodyUpdateMode::OrientationOnly);
-    EXPECT_EQ(moving.mesh.rb_update_modes[136], RigidBodyUpdateMode::TranslationAndOrientation);
-    EXPECT_EQ(moving.mesh.rb_update_modes[137], RigidBodyUpdateMode::OrientationOnly);
-    ASSERT_EQ(base.state.deformed_positions.size(), moving.state.deformed_positions.size());
-    for (std::size_t i = 0; i < base.state.deformed_positions.size(); ++i)
-        EXPECT_EQ(std::memcmp(base.state.deformed_positions[i].data(), moving.state.deformed_positions[i].data(), 3*sizeof(double)), 0);
-    for (std::size_t i = 0; i < 138; ++i) {
-        EXPECT_EQ(base.state.x_coms[i], moving.state.x_coms[i]);
-        EXPECT_EQ(base.state.orientations[i], moving.state.orientations[i]);
-        EXPECT_EQ(base.state.v_coms[i], moving.state.v_coms[i]);
-        EXPECT_EQ(base.state.omega[i], moving.state.omega[i]);
-    }
-    ASSERT_EQ(moving.params.rigid_pins.size(), base.params.rigid_pins.size());
-    int translated = 0;
-    for (std::size_t i = 0; i < moving.params.rigid_pins.size(); ++i) {
-        const auto& p = moving.params.rigid_pins[i];
-        EXPECT_EQ(p.initial_target, base.params.rigid_pins[i].initial_target);
-        if (p.body == 136) {
-            ++translated; EXPECT_EQ(p.target_translation, Vec3(.004, 0, 0));
-            EXPECT_DOUBLE_EQ(p.translation_start_time, 0); EXPECT_DOUBLE_EQ(p.translation_duration, 1);
-        } else EXPECT_EQ(p.target_translation, Vec3::Zero());
-    }
-    EXPECT_EQ(translated, 6);
-    EXPECT_THROW(bike_scene(-.004), std::invalid_argument);
-    EXPECT_THROW(bike_scene(.004, 0), std::invalid_argument);
-}
 TEST(RigidPinTranslation, MotorSpeedRampUsesIntegratedAngleAndSmoothEndpoints) {
     RigidPin p;
     p.initial_target = Vec3(1, 0, 0);
@@ -3624,20 +3601,4 @@ TEST(RigidPinTranslation, MotorSpeedRampUsesIntegratedAngleAndSmoothEndpoints) {
     EXPECT_THROW(rigid_pin_target_position(p, .5), std::invalid_argument);
 }
 
-TEST(RigidPinTranslation, RampedMotorStartsAtRestAndComposesWithSoftMount) {
-    const auto instant = bike_scene(.004), ramped = bike_scene(.004, 1, 1);
-    EXPECT_EQ(ramped.frames, 120);
-    ASSERT_EQ(ramped.state.deformed_positions.size(), instant.state.deformed_positions.size());
-    for (std::size_t i = 0; i < ramped.state.deformed_positions.size(); ++i)
-        EXPECT_EQ(ramped.state.deformed_positions[i], instant.state.deformed_positions[i]);
-    EXPECT_EQ(ramped.state.omega[136], Vec3::Zero());
-    EXPECT_GT(instant.state.omega[136].norm(), 0);
-    for (const auto& pin : ramped.params.rigid_pins) {
-        if (pin.body != 136) continue;
-        EXPECT_DOUBLE_EQ(pin.angular_velocity_ramp_duration, 1);
-        EXPECT_EQ(pin.target_translation, Vec3(.004, 0, 0));
-        EXPECT_EQ(rigid_pin_target_position(pin, 0), pin.initial_target);
-    }
-    EXPECT_THROW(bike_scene(.004, 1, -1), std::invalid_argument);
-}
 } // namespace

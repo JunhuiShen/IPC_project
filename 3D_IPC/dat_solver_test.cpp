@@ -48,6 +48,9 @@ struct Scene {
         params.max_global_iters = 1;
         params.fixed_iters = true;
         params.dat_query_radius = 1.0;
+        // Assembly tests isolate colored updates from the separately tested
+        // physical inertial predictor used by the production default.
+        params.dat_inertial_predictor = false;
     }
 };
 
@@ -193,9 +196,33 @@ std::vector<Vec3> composed_sweeps(const Scene& s, int count,
             reconstructed[node] = s.xhat[node] - s.params.dt() * s.velocity[node];
         previous = &reconstructed;
     }
+    dat::Options options;
+    options.gamma = s.params.dat_gamma;
+    options.query_radius = s.params.resolved_dat_query_radius();
+    dat::Checkpoint checkpoint;
+    std::vector<Vec3> accumulated(positions.size(), Vec3::Zero());
+    int color_passes = 0;
+    const auto reset_checkpoint = [&]() {
+        std::vector<AABB> boxes;
+        for (const Vec3& position : positions)
+            boxes.emplace_back(position - Vec3::Constant(options.query_radius),
+                position + Vec3::Constant(options.query_radius));
+        BroadPhase phase;
+        if (s.mesh.tets.empty())
+            phase.initialize(boxes, s.mesh, 0.0, BroadPhase::InitializationMode::DeformableSolver);
+        else
+            phase.initialize_surface_nodes(boxes, s.mesh, 0.0, BroadPhase::InitializationMode::DeformableSolver);
+        checkpoint.reset(s.mesh, positions, phase, options);
+        std::fill(accumulated.begin(), accumulated.end(), Vec3::Zero());
+        color_passes = 0;
+    };
+    reset_checkpoint();
     for (int iteration = 0; iteration < count; ++iteration) {
         auto contact = mesh_contact_systems(s, positions, previous);
         for (const auto& color : colors) {
+            if (s.params.dat_collision_detection_interval > 0
+                && color_passes >= s.params.dat_collision_detection_interval)
+                reset_checkpoint();
             if (!freeze_contact) contact = mesh_contact_systems(s, positions, previous);
             std::vector<Vec3> raw(positions.size(), Vec3::Zero());
             BroadPhase unused;
@@ -212,14 +239,12 @@ std::vector<Vec3> composed_sweeps(const Scene& s, int count,
                 raw[node] = -s.params.damping
                     * (matrix3d_inverse(local.second) * local.first);
             }
-            // Rebuild discovery independently at the current accepted geometry.
-            // This also checks that the solver's iteration-start pair superset
-            // remains sufficient as earlier colors move.
-            const auto safe = planar_DAT(s.params.dat_gamma,
-                s.params.resolved_dat_query_radius(), s.mesh, raw, positions,
-                s.params.dat_node_box_padding);
             for (std::size_t node = 0; node < positions.size(); ++node)
-                positions[node] += safe[node];
+                accumulated[node] += raw[node];
+            const auto safe = checkpoint.filter(accumulated);
+            positions = safe.positions;
+            accumulated = safe.displacements;
+            ++color_passes;
         }
     }
     return positions;
@@ -367,31 +392,7 @@ TEST(ColoredDATStructure, EdgeContactPairsDoNotAddElasticColorConflicts) {
     EXPECT_EQ(workspace.colors(), before_contact);
 }
 
-TEST(JacobiDATLegacyAPI, FrozenCompositionRemainsAvailableForClothSolidAndMixed) {
-    for (int kind = 0; kind < 3; ++kind) {
-        SCOPED_TRACE(kind);
-        auto s = scene_for_kind(kind);
-        s.params.max_global_iters = 2;
-        auto expected = s.x;
-        for (int sweep = 0; sweep < s.params.max_global_iters; ++sweep) {
-            const auto proposed = jacobi_step(s.mesh, s.adj, s.pins, s.params,
-                expected, s.xhat, s.velocity);
-            const auto accepted = planar_DAT(s.params.dat_gamma,
-                s.params.resolved_dat_query_radius(), s.mesh, proposed, expected,
-                s.params.dat_node_box_padding);
-            for (std::size_t node = 0; node < expected.size(); ++node)
-                expected[node] += accepted[node];
-        }
-        BroadPhase phase;
-        const auto result = global_jacobi_solver_dat(s.mesh, s.adj, s.pins,
-            s.params, s.x, s.xhat, s.velocity, phase);
-        ASSERT_TRUE(result.converged);
-        EXPECT_EQ(result.iterations, 2);
-        expect_positions(s.x, expected);
-    }
-}
-
-TEST(JacobiDATSolver, OneSweepMatchesColoredLiveElasticityForClothSolidAndMixed) {
+TEST(DATGaussSeidel, OneSweepMatchesColoredLiveElasticityForClothSolidAndMixed) {
     for (int kind = 0; kind < 3; ++kind) {
         SCOPED_TRACE(kind);
         auto s = scene_for_kind(kind);
@@ -421,7 +422,7 @@ TEST(JacobiDATSolver, OneSweepMatchesColoredLiveElasticityForClothSolidAndMixed)
     }
 }
 
-TEST(JacobiDATSolver, RepeatedParallelSweepsKeepTheTargetAndFrictionHistoryFrozen) {
+TEST(DATGaussSeidel, RepeatedParallelSweepsKeepTheTargetAndFrictionHistoryFrozen) {
     RestoreOpenMP restore;
     omp_set_dynamic(0);
     Scene contact({Vec3(0, 0, 0.1), Vec3(-1, -1, 0),
@@ -453,7 +454,7 @@ TEST(JacobiDATSolver, RepeatedParallelSweepsKeepTheTargetAndFrictionHistoryFroze
     }
 }
 
-TEST(JacobiDATSolver, LaterColorsRefreshContactGeometryAndFriction) {
+TEST(DATGaussSeidel, LaterColorsRefreshContactGeometryAndFriction) {
     Scene s({Vec3(0, 0, .1), Vec3(-1, -1, 0),
         Vec3(2, -1, 0), Vec3(-1, 2, 0)}, {1, 2, 3});
     s.params.d_hat = .2;
@@ -608,7 +609,7 @@ TEST(ColoredDATContacts, SelectedSnapshotsClearDisappearingContactsAndRejectUnse
     EXPECT_THROW((void)proposal(selected,target),std::invalid_argument);
 }
 
-TEST(JacobiDATSolver, SoftPinConvergesToTheInertialGravitySpringEquilibrium) {
+TEST(DATGaussSeidel, SoftPinConvergesToTheInertialGravitySpringEquilibrium) {
     Scene s({Vec3::Zero()});
     s.mesh.mass[0] = 2.0;
     s.xhat[0] = Vec3(0.1, 0.2, 0.3);
@@ -634,7 +635,7 @@ TEST(JacobiDATSolver, SoftPinConvergesToTheInertialGravitySpringEquilibrium) {
     EXPECT_GT((s.x[0] - s.pins[0].target_position).norm(), 0.1);
 }
 
-TEST(JacobiDATSolver, DATPreservesTheGapWhenBothSidesWouldCrossWithoutBarrier) {
+TEST(DATGaussSeidel, DATPreservesTheGapWhenBothSidesWouldCrossWithoutBarrier) {
     Scene s({Vec3(0, 0, 0.2), Vec3(-1, -1, 0),
         Vec3(2, -1, 0), Vec3(-1, 2, 0)}, {1, 2, 3});
     s.xhat[0].z() = -0.8;
@@ -653,7 +654,7 @@ TEST(JacobiDATSolver, DATPreservesTheGapWhenBothSidesWouldCrossWithoutBarrier) {
     }
 }
 
-TEST(JacobiDATSolver, ObtuseTriangleBarrierUsesTheCorrectedSharedDistance) {
+TEST(DATGaussSeidel, ObtuseTriangleBarrierUsesTheCorrectedSharedDistance) {
     for (double d_hat : {.05, .2}) {
         Scene s({Vec3(.5, -.01, .1), Vec3::Zero(), Vec3(1, 0, 0), Vec3(-10, .1, 0)}, {1, 2, 3});
         const auto initial = s.x;
@@ -667,7 +668,7 @@ TEST(JacobiDATSolver, ObtuseTriangleBarrierUsesTheCorrectedSharedDistance) {
     }
 }
 
-TEST(JacobiDATSolver, EquilibriumReturnsWithoutASweepWithZeroTolerances) {
+TEST(DATGaussSeidel, EquilibriumReturnsWithoutASweepWithZeroTolerances) {
     Scene s({Vec3(1, 2, 3)});
     s.params.fixed_iters = false;
     s.params.max_global_iters = 4;
@@ -681,7 +682,7 @@ TEST(JacobiDATSolver, EquilibriumReturnsWithoutASweepWithZeroTolerances) {
     expect_positions(s.x, s.xhat, 0.0);
 }
 
-TEST(JacobiDATSolver, FinalResidualIncludesContactsActivatedByTheLastSweep) {
+TEST(DATGaussSeidel, FinalResidualIncludesContactsActivatedByTheLastSweep) {
     Scene s({Vec3(0, 0, 0.3), Vec3(-1, -1, 0),
         Vec3(2, -1, 0), Vec3(-1, 2, 0)}, {1, 2, 3});
     s.xhat[0].z() = 0.1;
@@ -707,7 +708,7 @@ TEST(JacobiDATSolver, FinalResidualIncludesContactsActivatedByTheLastSweep) {
     EXPECT_NEAR(result.final_residual, reference_residual, 1e-13);
 }
 
-TEST(JacobiDATSolver, ZeroDampingDoesNotHideClothOrSolidForceResiduals) {
+TEST(DATGaussSeidel, ZeroDampingDoesNotHideClothOrSolidForceResiduals) {
     auto s = scene_for_kind(2);
     s.params.damping = 0.0;
     s.params.fixed_iters = false;
@@ -742,7 +743,7 @@ TEST(JacobiDATSolver, ZeroDampingDoesNotHideClothOrSolidForceResiduals) {
     expect_positions(s.x, original, 0.0);
 }
 
-TEST(JacobiDATSolver, PublicDriversMatchManualSubstepsAndSkipLegacyGuesses) {
+TEST(DATGaussSeidel, PublicDriversMatchManualSubstepsAndIgnoreOtherInitialGuessFlags) {
     for (int kind = 0; kind < 3; ++kind) for (bool colored_guess : {false, true}) {
         SCOPED_TRACE(::testing::Message() << "kind=" << kind
             << " colored_guess=" << colored_guess);
@@ -750,7 +751,6 @@ TEST(JacobiDATSolver, PublicDriversMatchManualSubstepsAndSkipLegacyGuesses) {
         s.params.use_dat = true;
         s.params.substeps = 2;
         s.params.max_global_iters = 2;
-        s.params.use_verlet_guess = true;
         s.params.use_colored_ccd_guess = colored_guess;
         s.params.colored_ccd_guess_iters = 1;
         for (std::size_t node = 0; node < s.x.size(); ++node)
@@ -787,7 +787,7 @@ TEST(JacobiDATSolver, PublicDriversMatchManualSubstepsAndSkipLegacyGuesses) {
     }
 }
 
-TEST(JacobiDATSolver, UnifiedEntryRejectsIncompleteRigidStateAndDriverAcceptsValidState) {
+TEST(DATGaussSeidel, UnifiedEntryRejectsIncompleteRigidStateAndDriverAcceptsValidState) {
     Scene s;
     DeformedState state;
     create_rigid_body({Vec3::Zero(), Vec3::UnitX(), Vec3::UnitY(), Vec3::UnitZ()},
@@ -805,7 +805,7 @@ TEST(JacobiDATSolver, UnifiedEntryRejectsIncompleteRigidStateAndDriverAcceptsVal
     expect_positions(state.deformed_positions, original, 0.0);
 }
 
-TEST(JacobiDATSolver, SharedQueryRejectsOverflowBeforeBuildingTheBVH) {
+TEST(DATGaussSeidel, SharedQueryRejectsOverflowBeforeBuildingTheBVH) {
     Scene s({Vec3(std::numeric_limits<double>::max(),0,0)});
     s.params.dat_query_radius=1e308;s.params.dat_node_box_padding=1;
     s.params.damping=1;s.params.use_parallel=true;
@@ -813,4 +813,25 @@ TEST(JacobiDATSolver, SharedQueryRejectsOverflowBeforeBuildingTheBVH) {
     BroadPhase phase;
     EXPECT_THROW(solve(s,phase),std::invalid_argument);
     expect_positions(s.x,initial,0);
+}
+
+TEST(DATGaussSeidel, DirectIsotropicRejectsOrphanRigidMetadataBeforePinMutation) {
+    for (int marker = 0; marker < 5; ++marker) {
+        SCOPED_TRACE(marker);
+        Scene s({Vec3::Zero()});
+        Pin pin;
+        pin.vertex_index = 0;
+        pin.target_position = Vec3(3, 4, 5);
+        pin.prescribed = true;
+        s.pins.push_back(pin);
+        if (marker == 0) s.mesh.rb_nodes = {{0}};
+        if (marker == 1) s.mesh.total_mass = {1.0};
+        if (marker == 2) s.mesh.ref_positions = {{Vec3::Zero()}};
+        if (marker == 3) s.mesh.rb_update_modes = {RigidBodyUpdateMode::None};
+        if (marker == 4) s.mesh.node_to_rb = {0};
+        const auto initial = s.x;
+        EXPECT_THROW(global_gauss_seidel_solver_ogc(s.mesh, s.adj, s.pins,
+            s.params, s.x, s.xhat, s.velocity), std::invalid_argument);
+        expect_positions(s.x, initial, 0.0);
+    }
 }

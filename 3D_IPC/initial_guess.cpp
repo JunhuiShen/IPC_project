@@ -354,8 +354,7 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
                     if (is_rigid(vertex)) continue;
                     const Vec3 before = xnew[vertex];
                     const double step = per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
-                        /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false,
-                        /*use_ogc=*/false, /*cooperative=*/false, nullptr,
+                        /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false, /*cooperative=*/false, nullptr,
                         params.exact_computation_fallback, params.exact_computation_fallback_2,
                         params.ccd_exact_step_bound);
                     if (!params.exact_computation_fallback && step > 0.0)
@@ -568,8 +567,7 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
                             const int vertex = ordered_vertices[index];
                             const Vec3 before = xnew[vertex];
                             const double step = per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
-                                /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false,
-                                /*use_ogc=*/false, /*cooperative=*/false, nullptr,
+                                /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false, /*cooperative=*/false, nullptr,
                                 params.exact_computation_fallback, params.exact_computation_fallback_2,
                                 params.ccd_exact_step_bound);
                             if (!params.exact_computation_fallback && step > 0.0)
@@ -592,8 +590,7 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
                     const int vertex = ordered_vertices[index];
                     const Vec3 before = xnew[vertex];
                     const double step = per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
-                        /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false,
-                        /*use_ogc=*/false, /*cooperative=*/false, nullptr,
+                        /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false, /*cooperative=*/false, nullptr,
                         params.exact_computation_fallback, params.exact_computation_fallback_2,
                         params.ccd_exact_step_bound);
                     if (!params.exact_computation_fallback && step > 0.0)
@@ -674,78 +671,5 @@ std::vector<Vec3> ccd_initial_guess(const std::vector<Vec3>& x, const std::vecto
     xnew.resize(nv);
     for (int i = 0; i < nv; ++i) xnew[i] = x[i] + omega * dx[i];
 
-    return xnew;
-}
-
-std::vector<Vec3> verlet_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh, const SimParams& params, BroadPhase* scratch_broad_phase) {
-    const Vec3 dt2g = params.dt2() * params.gravity;
-    std::vector<Vec3> xverlet(xhat.size());
-    for (int i = 0; i < static_cast<int>(xhat.size()); ++i) xverlet[i] = xhat[i] + dt2g;
-    return ccd_initial_guess(x, xverlet, ref_mesh, scratch_broad_phase);
-}
-
-namespace {
-
-bool translation_guess_sdf_min_evaluation(const SimParams& params, const Vec3& xi, SDFEvaluation& out) {
-    bool any = false;
-    out.phi = std::numeric_limits<double>::infinity();
-    for (const PlaneSDF& p : params.sdf_planes) {
-        const SDFEvaluation s = evaluate_sdf(p, xi);
-        if (!any || s.phi < out.phi) { out = s; any = true; }
-    }
-    for (const CylinderSDF& c : params.sdf_cylinders) {
-        const SDFEvaluation s = evaluate_sdf(c, xi);
-        if (!any || s.phi < out.phi) { out = s; any = true; }
-    }
-    for (const SphereSDF& sp : params.sdf_spheres) {
-        const SDFEvaluation s = evaluate_sdf(sp, xi);
-        if (!any || s.phi < out.phi) { out = s; any = true; }
-    }
-    return any;
-}
-
-}  // namespace
-
-std::vector<Vec3> translation_initial_guess(const std::vector<Vec3>& x, const std::vector<Vec3>& xhat, const RefMesh& ref_mesh, const std::vector<Pin>& pins, const SimParams& params) {
-    std::vector<Vec3> xnew(xhat.size());
-    const double dt2 = params.dt2();
-    double total_mass = 0.0;
-    for (double m: ref_mesh.mass) total_mass += m;
-
-    Vec3 rhs = Vec3::Zero();
-    for(int i = 0; i < (int)xhat.size(); ++i){
-        rhs += ref_mesh.mass[i] * (xhat[i] - x[i]);
-    }
-    rhs += dt2 * total_mass * params.gravity;
-
-    double denom = total_mass;
-    if (params.kpin > 0.0) {
-        for (const Pin& pin : pins) {
-            rhs += dt2 * params.kpin * (pin.target_position - x[pin.vertex_index]);
-            denom += dt2 * params.kpin;
-        }
-    }
-
-    Vec3 C = Vec3::Zero();
-    if (denom > 0.0) C = rhs / denom;
-
-    if (params.k_sdf > 0.0) {
-        Vec3 G = Vec3::Zero();
-        Mat33 H = denom * Mat33::Identity();
-
-        for(int i = 0; i < (int)xhat.size(); ++i){
-            SDFEvaluation s;
-            if (translation_guess_sdf_min_evaluation(params, x[i] + C, s)) {
-                G += dt2 * sdf_penalty_gradient(s, params.k_sdf, params.eps_sdf);
-                H += dt2 * sdf_penalty_hessian(s, params.k_sdf, params.eps_sdf, false);
-            }
-        }
-
-        C -= H.ldlt().solve(G);
-    }
-
-    for(int i = 0; i < (int)xhat.size(); ++i){
-        xnew[i] = x[i] + C;
-    }
     return xnew;
 }

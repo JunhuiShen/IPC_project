@@ -88,7 +88,6 @@ AssemblyResult assembly_fixture(int fixture,bool queues,bool warp,bool compact=f
     env.set("IPC_GPU_CONTACT_SELECTED_NODE_THREADS",selected_threads);
     env.set("IPC_GPU_COMPACT_WARP_REDUCE",compact_warp?"1":"0");
     env.set("IPC_GPU_COMPACT_WARP_REDUCE_MIN_DEGREE",cutoff);
-    env.set("IPC_GPU_PROFILE_CSV",nullptr);env.set("IPC_GPU_CONTACT_QUEUE_CSV",nullptr);
     const std::vector<int> vertex_blocks{0,8,8,8,9,9,6,7,1,2,3};
     const std::vector<int> colors{0,-1,-1,-1,-1,-1,fixture==7?0:1,2,1,0};
     const std::vector<int> color_blocks=fixture==7?std::vector<int>{0,6,9,8,7}:std::vector<int>{0,9,6,8,7};
@@ -188,7 +187,6 @@ AssemblyResult rebuild_lifecycle_fixture(bool queues,bool warp,bool compact=fals
     env.set("IPC_GPU_CONTACT_SELECTED_NODE_THREADS","8");
     env.set("IPC_GPU_COMPACT_WARP_REDUCE",compact_warp?"1":"0");
     env.set("IPC_GPU_COMPACT_WARP_REDUCE_MIN_DEGREE",cutoff);
-    env.set("IPC_GPU_PROFILE_CSV",nullptr);env.set("IPC_GPU_CONTACT_QUEUE_CSV",nullptr);
     const std::vector<V> positions{{.15,.10,.13},{.25,.12,.15},{.35,.14,.17},{.4,.04,.19},
                                  {0,0,0},{1,0,0},{0,1,0},{2,2,2}};
     auto previous=positions;
@@ -340,7 +338,6 @@ AssemblyResult reduction_failure_fixture(int failure,bool selected,bool compact_
     env.set("IPC_GPU_CONTACT_SELECTED_NODE_THREADS","8");
     env.set("IPC_GPU_COMPACT_WARP_REDUCE",compact_warp?"1":"0");
     env.set("IPC_GPU_COMPACT_WARP_REDUCE_MIN_DEGREE","1");
-    env.set("IPC_GPU_PROFILE_CSV",nullptr);env.set("IPC_GPU_CONTACT_QUEUE_CSV",nullptr);
     Memory<V> positions(std::vector<V>{{.2,.2,failure==4?0.:.1},{0,0,0},{1,0,0},{0,1,0}});
     Memory<int> blocks(std::vector<int>{0,1,2,3}),colors(std::vector<int>{0,-1,-1,-1}),
         color_blocks(std::vector<int>{0}),color_offsets(std::vector<int>{0,1});

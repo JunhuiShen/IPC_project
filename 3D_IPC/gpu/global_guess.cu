@@ -1,7 +1,6 @@
 #include "global_guess.h"
 #include "global_guess.cuh"
 #include "device_memory.h"
-#include "profile.h"
 #include <algorithm>
 #include <array>
 #include <climits>
@@ -134,7 +133,6 @@ GpuGlobalGuess::~GpuGlobalGuess()=default;
 
 void GpuGlobalGuess::query(const double (*start)[3],const double (*end)[3],int nodes,
                                const BpContact* contacts,std::size_t count,double* tois,int* error) {
-    GpuProfileScope profile("query");
     if(!error||nodes<0||(!start&&nodes)||(!end&&nodes)||(!contacts&&count)||(!tois&&count))
         throw std::invalid_argument("GPU global guess query pointers/extent");
     if(count==0)return;
@@ -144,16 +142,10 @@ void GpuGlobalGuess::query(const double (*start)[3],const double (*end)[3],int n
     std::size_t pending=count;
     int destination=0;
     for(int capacity=256;pending;capacity*=2) {
-        GpuProfileScope batch_profile(capacity==256?"initial_capacity":"capacity_retry");
         if(capacity>maximum_capacity)throw std::runtime_error("GPU global guess exceeded BFS queue proof bound");
         const int workers=static_cast<int>(std::min({pending,std::size_t(p.schedule.workers),
             std::max(std::size_t(1),scratch_budget/(std::size_t(capacity)*sizeof(Cell)))}));
         const auto required=static_cast<std::size_t>(workers)*capacity;
-        gpu_profile_counter(GpuProfileCounter::GlobalQueryBatches);
-        gpu_profile_counter(GpuProfileCounter::GlobalQueryJobs,pending);
-        if(capacity>256)gpu_profile_counter(GpuProfileCounter::GlobalRetryJobs,pending);
-        gpu_profile_counter(GpuProfileCounter::GlobalQueueCapacityMax,capacity,true);
-        gpu_profile_counter(GpuProfileCounter::GlobalWorkersMax,workers,true);
         if(p.heaps.size()<required)p.heaps.resize(required);
         p.cursor.clear();p.retry_count.clear();
         query_kernel<<<(workers+p.schedule.threads-1)/p.schedule.threads,p.schedule.threads>>>(start,end,nodes,contacts,pending,indices,tois,
@@ -177,7 +169,6 @@ void GpuGlobalGuess::apply(const DeformableScene& scene,const DeformableState& s
     auto ends=reinterpret_cast<double(*)[3]>(p.ends.data());
     int status=0;
     {
-    GpuProfileScope prepare_profile("prepare");
     prepare<<<blocks(scene.nodes),128>>>(scene,state,ends,p.boxes.data(),error);
     cuda_checked(cudaGetLastError());
     // A failed preparation cannot feed invalid boxes into sorting/BVH. Only
@@ -194,7 +185,6 @@ void GpuGlobalGuess::apply(const DeformableScene& scene,const DeformableState& s
         p.schedule.candidates_only?BroadPhaseMode::CandidatesOnly:BroadPhaseMode::Solver);
     p.tois.resize(broad.contact_count);
     query(state.previous,ends,static_cast<int>(scene.nodes),broad.contacts,broad.contact_count,p.tois.data(),error);
-    GpuProfileScope reduce_profile("reduce_commit");
     initialize_minimum<<<1,1>>>(p.minimum.data());
     if(broad.contact_count)reduce_minimum<<<blocks(broad.contact_count),128>>>(p.tois.data(),broad.contact_count,p.minimum.data(),error);
     commit<<<blocks(scene.nodes),128>>>(scene,state,p.minimum.data(),error);

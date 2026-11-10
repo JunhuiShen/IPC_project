@@ -18,8 +18,8 @@ solver driver; the retired hybrid comparison targets are no longer built.
    scene data, prescribed motion and timestep settings reach the GPU solver.
    The generator copies the shared example driver into the build tree as
    `simulation_gpu.cpp`, replaces its frame dispatch with that fragment, and
-   rewrites the copied quoted `solver.h`/`DAT.h` includes to the read-only CPU
-   tree so the GPU `solver.h`/`dat.h` headers cannot shadow them.
+   rewrites the copied quoted `solver.h` include to the read-only CPU
+   tree so the GPU `solver.h` header cannot shadow it.
 4. [solver.h](solver.h) defines `SceneDescription`, `StepParameters` and the
    public solver API. Read `GpuSolver::advance_substep` in
    [solver.cu](solver.cu) for the update order described below.
@@ -44,7 +44,6 @@ solver driver; the retired hybrid comparison targets are no longer built.
 | Linear CCD | [linear_pipeline.cu](linear_pipeline.cu), [ccd.cuh](ccd.cuh), [exact.cuh](exact.cuh), [direct_bound.cuh](direct_bound.cuh), [original_ccd.cuh](original_ccd.cuh): conservative clipping, exact predicates, the qualified original TOI resolver and optional exact step proposals. |
 | Rigid updates | [rigid_pipeline.cu](rigid_pipeline.cu), [rigid_pins.cuh](rigid_pins.cuh), [rigid_ccd.cuh](rigid_ccd.cuh): translation/orientation proposals, material-point pins, curved-motion CCD and commits. |
 | Initial guesses and movement boxes | [global_guess.cu](global_guess.cu), [adaptive_boxes.cu](adaptive_boxes.cu), [level_schedule.cu](level_schedule.cu), [original_guess.cuh](original_guess.cuh): predictor CCD, movement limits, optional trial/BFS level scheduling and the CPU false predictor certificate/floor helpers. |
-| Simultaneous DAT path | [dat.h](dat.h), [dat.cu](dat.cu): the optional Jacobi-with-DAT route, its budget checks and per-sweep publishing. |
 | Scene records, SDFs and buffers | [scene_types.h](scene_types.h), [sdf_types.h](sdf_types.h), [sdf.cuh](sdf.cuh), [scene.h](scene.h), [device_memory.h](device_memory.h): public records, obstacle evaluation and device storage. |
 
 Most `.cuh` files contain device arithmetic; `.cu` files contain kernels and
@@ -202,52 +201,15 @@ directory with `--restart_frame N`, preserving the original scene and solver
 settings. `--num_frames` specifies the final frame number.
 See [output and restart](../README.md#output-and-restart).
 
-### Optional Jacobi-with-DAT path
+### CPU-only DAT and OGC modes
 
-`--use_dat true` selects the GPU port of the simultaneous Jacobi update
-with planar DAT for cloth, solid, rigid and mixed scenes.
-The CPU frame drivers use OGC-style colored DAT under the same flag;
-the GPU port retains simultaneous Jacobi updates and its explicit CPU Jacobi
-reference APIs for parity checks.
-Rigid COM and angular increments are assembled from one frozen snapshot and
-share a body-wide factor with full curved-path plane and radius checks.
-Radius searches stop once their certified prefix reaches the body's existing
-minimum. Pair directions and query cutoffs use supporting-plane certificates;
-uncertain NT/EE geometry retries through the device exact queues.
-It honours the CPU fixed budget (`--fixed_iters` with
-`--max_substep_iters`), starts every substep from the previous positions and
-therefore skips all initial-guess flags. `--dat_gamma` (default `0.9`),
-`--dat_node_box_padding` (default `1.2`) and `--dat_query_radius` (default `0`,
-automatic) keep their CPU meaning and validation.
+The optional CUDA Jacobi-DAT path has been retired. The shared `--use_dat`
+selector now requests the CPU planar DAT solver, so both GPU scene setup and
+step conversion reject it before any update. `--use_ogc` is CPU-only
+as well. The GPU driver never substitutes a CPU solve for either request.
 
-```sh
-./gpu/build/3D_sim_gpu --example 1 --twist_nx 9 --twist_ny 9 \
-  --num_frames 1 --substeps 3 --max_substep_iters 20 --fixed_iters \
-  --use_dat --dat_gamma 0.9 --format geo --outdir results/gpu_dat
-```
-
-The public DAT parameters are exactly `--dat_gamma`, `--dat_query_radius` and
-`--dat_node_box_padding`. DAT truncates raw displacements, not candidate lists:
-each sweep limits the displacement by its Euclidean norm against
-`0.5 * gamma * rq`, where `rq` is the query radius (`--dat_query_radius`,
-automatic when 0), and then applies the plane factors.
-`--dat_node_box_padding` scales only the BVH box half-extent used to find
-candidates; it must not change the displacement cap `0.5 * gamma * rq`.
-Candidate lists stay uncapped; exceeding the device work budget
-is an error, never a silent truncation, so the path fails closed. Accepted
-displacements are published once, at the sweep boundary, which is what makes
-the update simultaneous. The filter is surface-only: DAT rejects mesh surface
-contact only. It has no tetrahedron-inversion guard and no SDF collision
-filter; SDF penalties remain part of the Jacobi update.
-
-DAT and force assembly share one conservative candidate neighborhood per
-frozen sweep; each applies its own distance cutoff. Rigid nodes retain their
-initial trajectory bounds and rotated references for all plane queries.
-With `--exact_computation_fallback false`, a frozen EE force packet whose
-distance rounds to zero retries in the exact queue; true contact still fails.
-Represented endpoints use parallel validation and a parallel single-halving
-retry. Further failures enter a device-controlled retry loop with the same halving budget and final
-zero-step check; converged sweeps do not enqueue 56 validation rounds.
+The ordinary GPU colored solver, its CCD paths, and rigid material-point pins
+remain available.
 
 ### Rigid pins and motor-driven motion
 
@@ -288,14 +250,16 @@ IPC_GPU_BOX_CONTACT_PRUNING=1 compute-sanitizer --tool memcheck gpu/build/gpu_co
 Use the same setting for direct synccheck/initcheck runs. This is a test-process
 setting; production `IPC_GPU_BOX_CONTACT_PRUNING` still defaults to `0`.
 
-`gpu_validation` builds the CPU-oracle parity targets (`gpu_dat`,
-`gpu_dat_geometry`, `gpu_rigid_pins`, `gpu_cpu_parity`) together with the
+`gpu_validation` builds the ordinary rigid-pin parity targets (`gpu_rigid_pins`,
+`gpu_rigid_pin_api`) together with the
 component suites for elastic assembly, broad phase, coloring, contacts, local
 solves, CCD, SDFs and exact arithmetic. The independent original-mode targets
 `gpu_original_contact_test`, `gpu_original_ccd_test` and
 `gpu_original_mode_test` compile the qualified original components and the
 mode-routing/collision-only integration checks; they are registered with
 CTest but stay out of the default ALL build.
+`gpu_bridge_mode_host` checks ordinary settings conversion and rejection of the
+CPU-only DAT selector without executing device code.
 
 `python3 gpu/validate.py --build gpu/build` is a small modern component-only
 CTest launcher: it runs `ctest --test-dir <build> --output-on-failure
@@ -312,12 +276,11 @@ claims that they have passed. The launcher itself makes no performance claim.
 The ordinary solver uses a reusable 262,144-pair workspace. Set
 `IPC_GPU_CONTACT_PACKET_CAPACITY` to a positive integer through 1,048,576 to
 trade packet memory for fewer launches; `65536` restores the previous capacity.
-The direct `GpuContactPipeline()` constructor and the separate DAT workspace
-retain their 65,536-pair defaults. All candidate pairs remain in the device
+The direct `GpuContactPipeline()` constructor retains its 65,536-pair default. All candidate pairs remain in the device
 lists; ordered accumulation and failure-before-publication checks are retained.
 Original GS allocates no unused exact-contact arenas.
 
-The rounding and rigid DAT math tests also compile as ordinary C++ without
+The rounding and ordinary rigid math tests also compile as ordinary C++ without
 CUDA. These host checks cover numerical helpers; native CUDA compilation and
 device execution are still required to qualify the kernels.
 
@@ -418,8 +381,6 @@ ported on the device:
   predictor applies its per-pair `min(start gap, 1e-8)` + fixed 48
   tested-endpoint refinement; that floor is not applied to ordinary
   `OriginalSolver`, which has no positive separation floor;
-- DAT false uses original contact assembly but keeps its own Jacobi increments,
-  budgets and plane/cap/filter model.
 - an original predictor request with a zero sweep budget is still a request:
   `StepParameters::colored_guess_enabled` (default `false`) lets a caller ask
   for the CPU validation of forced positions/targets without sweeps. It is
@@ -553,9 +514,10 @@ available for ordinary solving, so use `--use_ticcd false`. Colors execute seque
 independent updates within each color running in parallel. Numerical fallback
 and CCD must stay on the GPU; an unrecoverable device error stops the substep.
 
-Rigid Jacobi-DAT and original-mode rigid support have native regression coverage
-on NVIDIA RTX 6000 Ada with CUDA 12.6, including CPU parity, rigid/mixed scenes,
-tiny motion, pins and collision checks.
+Original-mode rigid support has native regression coverage on NVIDIA RTX 6000
+Ada with CUDA 12.6, including basic CPU parity, rigid/mixed scenes, tiny motion,
+pins and collision checks. Those historical checks do not qualify the current
+feature-retirement edits without a fresh CUDA build and device run.
 CUDA needs a host thread for launch orchestration and I/O. Use a positive
 `OMP_NUM_THREADS` (for example `1`); this does not move solver arithmetic to CPU.
 
@@ -652,13 +614,8 @@ execution order. Scene bounds use parallel reduction, with the original serial
 scan for exceptional coordinates. `IPC_GPU_PARALLEL_SCENE_BOUNDS=0` selects the
 serial scan for all coordinates.
 
-- `IPC_GPU_PROFILE_CSV=/new/path/profile.csv` enables per-frame stage timings.
-- `IPC_GPU_CONTACT_QUEUE_CSV=/new/path/queues.csv` enables contact queue counts.
-
-Set environment options before launching the executable. CUDA stage timings
-measure stream intervals, which can include gaps while the host submits work;
-they are not kernel-active totals. Instrumentation adds overhead, so use
-uninstrumented runs for performance comparisons. Options for contact routing and worklists are parsed in
+Set environment options before launching the executable. Options for contact
+routing and worklists are parsed in
 [contact_pipeline.cu](contact_pipeline.cu),
 [contact_schedule.h](contact_schedule.h) and
 [elastic.h](elastic.h).
