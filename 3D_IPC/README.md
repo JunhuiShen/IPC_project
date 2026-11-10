@@ -332,7 +332,7 @@ cloth, solid, and rigid residuals separately.
 ```bash
 # Example 1: square cloth twisted in place, 240 frames at 0.5 turns/s
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 1 --exact_computation_fallback false --num_frames 240 \
+./build/3D_sim --example 1 --fps 30 --exact_computation_fallback false --num_frames 240 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
   --d_hat 0.005 --k_barrier 100 \
   --node_box_min 0.001 --node_box_max 0.01 \
@@ -344,7 +344,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 
 # Example 2: two cylinders, 2.0 turns, twist then untwist
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 2 --exact_computation_fallback false --num_frames 900 \
+./build/3D_sim --example 2 --fps 30 --exact_computation_fallback false --num_frames 900 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 5e6 \
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e5 --eps_sdf 0.002 \
   --node_box_min 0.00025 --node_box_max 0.01 --tcyl_max_turn 2.0 \
@@ -356,7 +356,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 
 # Example 3: one yawing cylinder, 4.0 turns at 0.30 turns/s
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 3 --exact_computation_fallback false --num_frames 850 \
+./build/3D_sim --example 3 --fps 30 --exact_computation_fallback false --num_frames 850 \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e8 \
   --d_hat 0.005 --k_barrier 100 --k_sdf 1e9 --eps_sdf 0.002 \
   --node_box_min 0.00025 --node_box_max 0.01 \
@@ -369,7 +369,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 
 # Example 4: dress loaded from a data directory above an SDF ground plane
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 4 --datadir /path/to/avatar_data \
+./build/3D_sim --example 4 --fps 30 --datadir /path/to/avatar_data \
   --use_basic_experimental true --use_simd true --format geo
 ```
 
@@ -378,17 +378,17 @@ Examples 5, 6, and 7 use the corresponding scene presets from `example.cpp`:
 ```bash
 # Example 5: freely rotating tennis racket
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
- ./build/3D_sim --example 5 --num_frames 500 --substeps 30 --rigid_density 25 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output \
+ ./build/3D_sim --example 5 --fps 30 --num_frames 500 --substeps 30 --rigid_density 25 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output \
   --use_basic_experimental true --use_simd true --format geo
 
 # Example 6: freely rotating space tool
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 6 --num_frames 2000 --substeps 30 --rigid_density 25 --tol_abs 1e-12 --tol_rel 1e-10 --outdir space_tool_output \
+./build/3D_sim --example 6 --fps 30 --num_frames 2000 --substeps 30 --rigid_density 25 --tol_abs 1e-12 --tol_rel 1e-10 --outdir space_tool_output \
   --use_basic_experimental true --use_simd true --format geo
 
 # Example 7: stationary stack of ten rigid polygons
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 7 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --rigid_density 25 --gy 0 --outdir polygon_stack_output --format geo \
+./build/3D_sim --example 7 --fps 30 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --rigid_density 25 --gy 0 --outdir polygon_stack_output --format geo \
   --use_basic_experimental true --use_simd true
 
 ```
@@ -408,7 +408,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 
 # Example 9: dynamic threaded bolt falling through a fixed nut
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 9 --exact_computation_fallback false --num_frames 150 \
+./build/3D_sim --example 9 --fps 30 --exact_computation_fallback false --num_frames 150 \
   --substeps 10 --max_substep_iters 2 --fixed_iters --d_hat 0.00058 \
   --node_box_min 0.00025 --node_box_max 0.01 \
   --theta_box_min 0.005 --theta_box_max 0.1 --node_box_update_count 2 \
@@ -440,7 +440,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 
 # Example 11: rolled cloth unrolling down an SDF ramp
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 11 --num_frames 200 \
+./build/3D_sim --example 11 --fps 30 --num_frames 200 \
   --exact_computation_fallback true --ccd_exact_step_bound true \
   --substeps 10 --max_substep_iters 2 --node_box_update_count 2 --fixed_iters \
   --kB 0.0025 --friction_coefficient 0.1 \
@@ -451,7 +451,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 
 # Example 12: three cloth layers with one fixed edge and one oscillating edge
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 12 --exact_computation_fallback false --ccd_exact_step_bound false --num_frames 200 \
+./build/3D_sim --example 12 --fps 30 --exact_computation_fallback false --ccd_exact_step_bound false --num_frames 200 \
   --substeps 6 --max_substep_iters 2 --fixed_iters \
   --node_box_min 0.0001 --node_box_max 0.01 --node_box_update_count 2 \
   --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 \
@@ -549,7 +549,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
 
 # Example 18: bike chain
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
-./build/3D_sim --example 18 --num_frames 200 --fps 30 \
+./build/3D_sim --example 18 --num_frames 230 --fps 30 \
   --substeps 25 --max_substep_iters 120 --fixed_iters \
   --use_basic_experimental true --use_simd true --use_parallel true \
   --use_ccd true \
@@ -565,7 +565,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 
 # Example 19: chain winds onto the spool and lifts the anchor
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
-./build/3D_sim --example 19 --datadir example_obj --num_frames 600 \
+./build/3D_sim --example 19 --fps 30 --datadir example_obj --num_frames 600 \
   --substeps 20 --max_substep_iters 20 --fixed_iters \
   --kpin 1e7 --k_barrier 1e8 \
   --node_box_min 0.0005 --node_box_max 0.1 \
@@ -576,7 +576,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
 
 # Example 20: frictional arch settling
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
-./build/3D_sim --example 20 --datadir example_obj --num_frames 200 \
+./build/3D_sim --example 20 --fps 30 --datadir example_obj --num_frames 200 \
   --substeps 1 --max_substep_iters 10 --fixed_iters \
   --friction_coefficient 0.5 --friction_velocity_epsilon 0.001 \
   --d_hat 0.05 --k_barrier 1e7 --k_sdf 1e10 \
@@ -588,7 +588,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
 
 # Example 20: arch without friction
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
-./build/3D_sim --example 20 --datadir example_obj --num_frames 200 \
+./build/3D_sim --example 20 --fps 30 --datadir example_obj --num_frames 200 \
   --substeps 1 --max_substep_iters 10 --fixed_iters \
   --friction_coefficient 0 --friction_velocity_epsilon 0.001 \
   --d_hat 0.05 --k_barrier 1e7 --k_sdf 1e10 \
