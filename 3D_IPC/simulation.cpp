@@ -190,7 +190,7 @@ int main(int argc, char** argv) {
     std::cout << "Vertices:  " << state.deformed_positions.size() << "\n";
     std::cout << "Triangles: " << ref_mesh.tris.size() / 3 << "\n";
     if (params.use_dat || params.use_ogc) {
-        std::cout << "Solver: checkpoint "
+        std::cout << "Solver: "
                   << (params.use_ogc ? "isotropic OGC" : "planar DAT")
                   << " (gamma=" << params.dat_gamma
                   << ", query_radius=" << params.resolved_dat_query_radius()
@@ -225,13 +225,10 @@ int main(int argc, char** argv) {
         }
     }
     if (!params.use_dat && !params.use_jacobi_level_based_ccd
-        && (params.use_basic_experimental || params.use_basic_experimental_v2) && !params.use_cloth_grid
-        && !params.use_ogc) {
-        if (params.use_basic_experimental_v2)
-            std::cout << ((uses_general_solver || has_rigid)
-                ? "Experimental general solver: v2\n" : "Experimental cloth solver: v2\n");
-        else
-            std::cout << "Experimental cloth solver: v1 (scalar)\n";
+        && !params.use_cloth_grid && !params.use_ogc) {
+        std::cout << "Gauss-Seidel solver: "
+                  << (uses_general_solver ? "general" : has_rigid ? "rb" : "cloth")
+                  << (params.use_simd ? " (SIMD)\n" : " (scalar)\n");
     }
     if (num_rigid_bodies > 0)
         std::cout << "Rigid bodies: " << num_rigid_bodies << "\n";

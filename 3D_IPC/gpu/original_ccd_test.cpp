@@ -264,11 +264,11 @@ CpuOutcome cpu_original(const orig::Query& q) {
         }
     CCDResult result;
     if (q.vertex_face) {
-        result = node_triangle_only_one_node_moves(
+        result = node_triangle_linear_ccd(
             p[0], d[0], p[1], d[1], p[2], d[2], p[3], d[3],
-            q.eps, false, true);
+            q.eps, true);
     } else if (is_translation(q)) {
-        result = segment_segment_same_displacement_linear_ccd(
+        result = segment_segment_linear_ccd(
             p[0], d[0], p[1], d[1], p[2], p[3], q.eps, true);
     } else {
         int order[4] = {0, 1, 2, 3};
@@ -280,9 +280,9 @@ CpuOutcome cpu_original(const orig::Query& q) {
         } else if (moving == 3) {
             order[0] = 3; order[1] = 2; order[2] = 0; order[3] = 1;
         }
-        result = segment_segment_only_one_node_moves(
-            p[order[0]], d[order[0]], p[order[1]],
-            p[order[2]], p[order[3]], q.eps, false, true);
+        result = segment_segment_linear_ccd(
+            p[order[0]], d[order[0]], p[order[1]], Vec3::Zero(),
+            p[order[2]], p[order[3]], q.eps, true);
     }
     CpuOutcome outcome;
     outcome.collision = result.collision;

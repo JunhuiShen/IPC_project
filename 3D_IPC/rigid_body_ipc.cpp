@@ -755,10 +755,6 @@ RigidEnergyDerivatives rigid_pin_derivatives(
     return result;
 }
 
-double gravitational_potential(const Vec3& x_com, const double total_mass, const double gravity, const double dt){
-    return dt * dt * total_mass * gravity * x_com[1];
-}
-
 Vec3 gravitational_potential_gradient(const double total_mass, const double gravity, const double dt){
     return {double(0),dt*dt*total_mass*gravity,double(0)};
 }

@@ -372,10 +372,9 @@ struct GpuSolver::Impl {
                 ==OriginalUpdateConvention::CooperativeSquaredNorm
             && p.original_reference_threads>1;
     }
-    // CPU validate_cooperative_step = exact && use_ccd && !ticcd && !ogc.
+    // CPU validate_cooperative_step = exact && use_ccd (outside OGC solving).
     // It selects the exact stored-change test for selected vertices instead of
-    // the 1e-28 squared cutoff. Tight-Inclusion CCD is unported here, so the
-    // GPU equivalent is `collisions`.
+    // the 1e-28 squared cutoff. The GPU equivalent of use_ccd is `collisions`.
     bool cooperative_exact_change(const StepParameters& p) const {
         return p.exact_computation_fallback && p.collisions;
     }

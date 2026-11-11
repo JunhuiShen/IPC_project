@@ -1685,9 +1685,9 @@ TEST(SolidBarrierAssembly, CcdRejectionsPreserveAssemblyAndRejectOnlyAabbGaps) {
                 auto plain_x = x, cached_x = x;
                 const Vec3 proposal = x[node] + Vec3(0.002, -0.001, 0.003);
                 const double plain_step = per_vertex_safe_step(broad_phase, plain_x, node,
-                    proposal, 0.9, true, false);
+                    proposal, 0.9, true);
                 const double cached_step = per_vertex_safe_step(broad_phase, cached_x, node,
-                    proposal, 0.9, true, false, false, &rejections);
+                    proposal, 0.9, true, false, &rejections);
                 EXPECT_EQ(plain_step, cached_step);
                 EXPECT_EQ(0, std::memcmp(plain_x[node].data(), cached_x[node].data(), 3 * sizeof(double)));
 
@@ -2532,8 +2532,6 @@ TEST(SolidGeneralSolver, CooperativeMixedContactsPreserveEveryStateComponent) {
                 SimParams params = SimParams::zeros();
                 params.fps = 30; params.substeps = 1;
                 params.max_global_iters = 7; params.fixed_iters = true;
-                params.use_basic_experimental = mode != 0;
-                params.use_basic_experimental_v2 = mode == 2;
                 params.use_simd = mode != 1;
                 params.node_box_update_count = 3;
                 params.node_box_min = 0.25; params.node_box_max = 0.25;

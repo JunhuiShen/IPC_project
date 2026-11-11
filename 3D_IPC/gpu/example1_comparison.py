@@ -100,14 +100,14 @@ README_PROTOCOL = Protocol(
          "gpu": {"OMP_NUM_THREADS": "1", "OMP_THREAD_LIMIT": "1",
                  "OMP_DYNAMIC": "FALSE", "OMP_PROC_BIND": "spread",
                  "OMP_PLACES": "cores", "OMP_WAIT_POLICY": "ACTIVE"}},
-    argv=("{executable}", "--example", "1", "--exact_computation_fallback", "false",
+    argv=("{executable}", "--example", "1", "--fps", "30", "--exact_computation_fallback", "false",
           "--num_frames", "{frames}",
           "--E", "115000", "--nu", "0.25", "--kB", "0.009", "--kpin", "1e9", "--twist_rate", "0.5",
           "--d_hat", "0.005", "--k_barrier", "100",
           "--node_box_min", "0.001", "--node_box_max", "0.01",
           "--fixed_iters", "--substeps", "3", "--max_substep_iters", "3",
           "--node_box_update_count", "3",
-          "--use_basic_experimental", "true", "--use_simd", "true", "--use_parallel", "true",
+          "--use_simd", "true", "--use_parallel", "true",
           "--use_ccd_guess", "false", "--use_colored_ccd_guess", "false",
           "--use_colored_ccd_guess_level_based", "true",
           "--colored_ccd_guess_iters", "1", "--colored_ccd_guess_fraction", "0.97",
@@ -136,7 +136,7 @@ HISTORICAL_PROTOCOL = Protocol(
           "--node_box_min", "0.001", "--node_box_max", "0.01",
           "--fixed_iters", "--substeps", "5", "--max_substep_iters", "4",
           "--node_box_update_count", "10",
-          "--use_basic_experimental", "true", "--use_simd", "true", "--use_parallel", "true",
+          "--use_simd", "true", "--use_parallel", "true",
           "--outdir", "{outdir}", "--format", "geo"),
     gpu_rejection=None,
     # Recorded historical evidence for this exact protocol, kept separate from
@@ -167,11 +167,11 @@ LEGACY_PROTOCOL = Protocol(
           "--density", "900", "--thickness", "0.001",
           "--d_hat", "0.005", "--k_barrier", "100",
           "--friction_coefficient", "0", "--use_ccd", "true",
-          "--use_ticcd", "false", "--exact_computation_fallback", "true",
+          "--exact_computation_fallback", "true",
           "--node_box_min", "0.001", "--node_box_max", "0.01",
           "--fixed_iters", "--substeps", "5",
           "--max_substep_iters", "4", "--node_box_update_count", "10",
-          "--use_basic_experimental", "true", "--use_simd", "true",
+          "--use_simd", "true",
           "--use_parallel", "true", "--use_cloth_grid", "false",
           "--use_ogc", "false",
           "--use_ccd_guess", "false", "--use_colored_ccd_guess", "true",
@@ -712,7 +712,8 @@ def _self_test() -> None:
             self.assertEqual(cpu[cpu.index("--max_substep_iters") + 1], "3")
             self.assertEqual(cpu[cpu.index("--exact_computation_fallback") + 1], "false")
             self.assertEqual(cpu[cpu.index("--use_colored_ccd_guess_level_based") + 1], "true")
-            for flag in ("--fps", "--density", "--damping", "--write_substeps",
+            self.assertEqual(cpu[cpu.index("--fps") + 1], "30")
+            for flag in ("--density", "--damping", "--write_substeps",
                          "--friction_coefficient"):
                 self.assertNotIn(flag, cpu)
             # The documented environment binds both modes to the README policy.
@@ -749,7 +750,7 @@ def _self_test() -> None:
                     "OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=close OMP_PLACES=cores \\",
                     "./build/3D_sim --example 1 --num_frames 240 \\",
                     "  --fixed_iters --substeps 5 --max_substep_iters 4 --node_box_update_count 10 \\",
-                    "  --use_basic_experimental true --use_simd true --use_parallel true \\",
+                    "  --use_simd true --use_parallel true \\",
                     "  --outdir example1_output --format geo",
                     "# Example 2:"])
                 (root / "README.md").write_text(old)

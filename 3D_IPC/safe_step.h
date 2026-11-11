@@ -12,7 +12,7 @@ namespace safe_step_detail {
 // order: AABB distance, or a verified gap between finite-primitive projections.
 // Positions and incidence lists must remain fixed until safe-step evaluation.
 // Raw supporting-plane rejections do not qualify; projected certificates are
-// supplied only for linear CCD, preserving tight-inclusion tolerance behavior.
+// used by the built-in linear CCD path.
 struct VertexAabbRejections {
     std::vector<unsigned char> clear;
     double distance = 0.0;
@@ -44,8 +44,7 @@ double compute_trust_region_bound_for_vertex(int vi, const std::vector<Vec3>& x,
 // backtracking, with the same exact checks for the rounded endpoint and path.
 double per_vertex_safe_step(
     const BroadPhase& broad_phase, std::vector<Vec3>& x, int vi,
-    const Vec3& raw_proposed_position, double safety = 0.9, bool clip_ccd = true,
-    bool use_ticcd = true, bool cooperative = false,
+    const Vec3& raw_proposed_position, double safety = 0.9, bool clip_ccd = true, bool cooperative = false,
     const safe_step_detail::VertexAabbRejections* rejections = nullptr,
     bool exact_computation_fallback = true, bool exact_computation_fallback_2 = true,
     bool ccd_exact_step_bound = false);
@@ -65,9 +64,9 @@ namespace safe_step_detail {
 // Read-only single-contact tests, including the original swept-AABB rejection.
 // The caller must hold all four pair positions fixed until the test finishes.
 CCDResult node_triangle_vertex_ccd(const NodeTrianglePair& pair, int dof, int vertex,
-    const std::vector<Vec3>& positions, const Vec3& displacement, bool use_ticcd,
+    const std::vector<Vec3>& positions, const Vec3& displacement,
     bool original = false);
 CCDResult segment_segment_vertex_ccd(const SegmentSegmentPair& pair, int dof, int vertex,
-    const std::vector<Vec3>& positions, const Vec3& displacement, bool use_ticcd,
+    const std::vector<Vec3>& positions, const Vec3& displacement,
     bool original = false);
 } // namespace safe_step_detail

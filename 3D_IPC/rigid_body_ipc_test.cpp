@@ -517,7 +517,7 @@ TEST(RigidBodyIPCUpdateModes, FixedProxyPlacementMatchesRepeatedReferenceAcrossC
                     const auto xhat = state.deformed_positions;
                     std::vector<Vec3> coms(1, Vec3(9, 8, 7)), omega(1, Vec3(3, 2, 1));
                     std::vector<Vec4> orientations(1, Vec4(1, 0, 0, 0));
-                    const SolverResult result = global_gauss_seidel_solver_basic_general(
+                    const SolverResult result = global_gauss_seidel_solver_general(
                         mesh, state, adjacency, {}, params, xnew, xhat,
                         coms, orientations, omega, broad_phase);
                     EXPECT_TRUE(result.converged);
@@ -1601,7 +1601,7 @@ TEST(RigidBodyIPCSolver, AddsNaiveRigidBarrierTranslationAndOrientationTerms) {
         std::vector<Vec4> residual_q_new = state.orientations;
         std::vector<Vec3> residual_omega_new(
             state.omega.size(), Vec3::Zero());
-        const SolverResult residual_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, residual_params, residual_x_com_new, residual_q_new, residual_omega_new);
+        const SolverResult residual_result = global_gauss_seidel_solver_rb(ref_mesh, state, residual_params, residual_x_com_new, residual_q_new, residual_omega_new);
         EXPECT_TRUE(residual_result.has_residual);
         EXPECT_GT(residual_result.initial_residual, 1.0e-8);
     }
@@ -1643,7 +1643,7 @@ TEST(RigidBodyIPCSolver, AddsNaiveRigidBarrierTranslationAndOrientationTerms) {
     std::vector<Vec3> x_com_new = state.x_coms;
     std::vector<Vec4> q_new = state.orientations;
     std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
-    const SolverResult result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, x_com_new, q_new, omega_new);
+    const SolverResult result = global_gauss_seidel_solver_rb(ref_mesh, state, params, x_com_new, q_new, omega_new);
 
     EXPECT_TRUE(result.converged);
     EXPECT_EQ(result.iterations, 1);
@@ -1730,7 +1730,7 @@ TEST(GeneralSolver, AdvancesDeformableAndRigidInertiaInOneSweep) {
         + dt * dt * params.gravity;
 
     const SolverResult result =
-        global_gauss_seidel_solver_basic_general(
+        global_gauss_seidel_solver_general(
             ref_mesh, state, adj, {}, params, xnew, xhat,
             x_com_new, q_new, omega_new, broad_phase);
 
@@ -1936,7 +1936,7 @@ TEST(GeneralSolver, ClothRigidBarrierMovesBothSidesApart) {
         xnew[contact_node], xnew[0], xnew[1], xnew[2]).distance;
 
     const SolverResult result =
-        global_gauss_seidel_solver_basic_general(
+        global_gauss_seidel_solver_general(
             ref_mesh, state, adj, {}, params, xnew, xhat,
             x_com_new, q_new, omega_new, broad_phase);
 
@@ -2308,7 +2308,7 @@ TEST(RigidBodyIPCSolver, ParallelBodiesStayInsideCachedBlueBoxes) {
     std::vector<Vec3> parallel_coms = state.x_coms;
     std::vector<Vec4> parallel_orientations = state.orientations;
     std::vector<Vec3> parallel_omega(state.omega.size(), Vec3::Zero());
-    const SolverResult parallel_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, parallel_coms, parallel_orientations, parallel_omega);
+    const SolverResult parallel_result = global_gauss_seidel_solver_rb(ref_mesh, state, params, parallel_coms, parallel_orientations, parallel_omega);
     EXPECT_TRUE(parallel_result.converged);
 
     for (int rb = 0; rb < 2; ++rb) {
@@ -2324,7 +2324,7 @@ TEST(RigidBodyIPCSolver, ParallelBodiesStayInsideCachedBlueBoxes) {
     std::vector<Vec3> serial_coms = state.x_coms;
     std::vector<Vec4> serial_orientations = state.orientations;
     std::vector<Vec3> serial_omega(state.omega.size(), Vec3::Zero());
-    const SolverResult serial_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, serial_coms, serial_orientations, serial_omega);
+    const SolverResult serial_result = global_gauss_seidel_solver_rb(ref_mesh, state, params, serial_coms, serial_orientations, serial_omega);
     EXPECT_TRUE(serial_result.converged);
     for (int rb = 0; rb < 2; ++rb) {
         EXPECT_TRUE(parallel_coms[rb].isApprox(serial_coms[rb], 1.0e-13));
@@ -2337,7 +2337,7 @@ TEST(RigidBodyIPCSolver, ParallelBodiesStayInsideCachedBlueBoxes) {
     std::vector<Vec3> rebuilt_coms = state.x_coms;
     std::vector<Vec4> rebuilt_orientations = state.orientations;
     std::vector<Vec3> rebuilt_omega(state.omega.size(), Vec3::Zero());
-    global_gauss_seidel_solver_basic_rb(ref_mesh, state, params, rebuilt_coms, rebuilt_orientations, rebuilt_omega);
+    global_gauss_seidel_solver_rb(ref_mesh, state, params, rebuilt_coms, rebuilt_orientations, rebuilt_omega);
     for (int rb = 0; rb < 2; ++rb) {
         EXPECT_GT((rebuilt_coms[rb] - state.x_coms[rb]).cwiseAbs().maxCoeff(), params.node_box_max);
         EXPECT_LE((rebuilt_coms[rb] - state.x_coms[rb]).cwiseAbs().maxCoeff(), 3.0 * params.node_box_max + 1.0e-14);
@@ -2885,10 +2885,10 @@ TEST(DeformableFrictionSolver,
     std::vector<Vec3> reconstructed_result = start;
     BroadPhase explicit_broad_phase;
     BroadPhase reconstructed_broad_phase;
-    global_gauss_seidel_solver_basic(
+    global_gauss_seidel_solver_cloth(
         ref_mesh, adjacency, {}, params, explicit_result, xhat, velocity,
         explicit_broad_phase, "", &previous);
-    global_gauss_seidel_solver_basic(
+    global_gauss_seidel_solver_cloth(
         ref_mesh, adjacency, {}, params, reconstructed_result, xhat,
         velocity, reconstructed_broad_phase);
     EXPECT_EQ(std::memcmp(explicit_result[0].data(),
@@ -2899,12 +2899,12 @@ TEST(DeformableFrictionSolver,
     std::vector<Vec3> rejected_result = start;
     BroadPhase rejected_broad_phase;
     EXPECT_THROW(
-        global_gauss_seidel_solver_basic(
+        global_gauss_seidel_solver_cloth(
             ref_mesh, adjacency, {}, params, rejected_result, xhat,
             velocity, rejected_broad_phase, "", &wrong_size_previous),
         std::invalid_argument);
     EXPECT_THROW(
-        global_gauss_seidel_solver_basic(
+        global_gauss_seidel_solver_cloth(
             ref_mesh, adjacency, {}, params, rejected_result, xhat, {},
             rejected_broad_phase),
         std::invalid_argument);
@@ -2914,7 +2914,7 @@ TEST(DeformableFrictionSolver,
         std::numeric_limits<double>::quiet_NaN();
     std::vector<Vec3> legacy_result = start;
     BroadPhase legacy_broad_phase;
-    EXPECT_NO_THROW(global_gauss_seidel_solver_basic(
+    EXPECT_NO_THROW(global_gauss_seidel_solver_cloth(
         ref_mesh, adjacency, {}, params, legacy_result, xhat, velocity,
         legacy_broad_phase, "", &wrong_size_previous));
 }
@@ -2990,7 +2990,7 @@ TEST(DeformableFrictionSolver,
     }
     std::vector<Vec3> actual_basic = initial;
     BroadPhase basic_broad_phase;
-    const SolverResult basic_result = global_gauss_seidel_solver_basic(
+    const SolverResult basic_result = global_gauss_seidel_solver_cloth(
         ref_mesh, adjacency, {}, params, actual_basic, initial, velocities,
         basic_broad_phase, "", &previous);
     ASSERT_TRUE(basic_result.converged);
@@ -3131,7 +3131,7 @@ TEST(GeneralSolverFriction,
         std::vector<Vec3> omega_new(state.omega.size(), Vec3::Zero());
         BroadPhase broad_phase;
         const SolverResult result =
-            global_gauss_seidel_solver_basic_general(
+            global_gauss_seidel_solver_general(
                 ref_mesh, state, adjacency, {}, params, xnew, xhat,
                 x_com_new, q_new, omega_new, broad_phase);
         EXPECT_TRUE(result.converged);
@@ -3203,7 +3203,7 @@ TEST(DeformableSDFFrictionSolver,
                 ref_mesh, adjacency, {}, params, current, xhat, velocity,
                 "", &previous);
         } else {
-            global_gauss_seidel_solver_basic(
+            global_gauss_seidel_solver_cloth(
                 ref_mesh, adjacency, {}, params, current, xhat, velocity,
                 broad_phase, "", &previous);
         }
@@ -3273,7 +3273,7 @@ TEST(RigidBodySDFFrictionSolver,
         std::vector<Vec3> centers = state.x_coms;
         std::vector<Vec4> orientations = state.orientations;
         std::vector<Vec3> omega(state.omega.size(), Vec3::Zero());
-        const SolverResult result = global_gauss_seidel_solver_basic_rb(
+        const SolverResult result = global_gauss_seidel_solver_rb(
             ref_mesh, state, params, centers, orientations, omega);
         EXPECT_TRUE(result.converged);
         return Outcome{centers[0], omega[0]};
@@ -3358,7 +3358,7 @@ TEST(RigidBodyIPCSolver, EightBodySetupThresholdPreservesExactColoredResults) {
                     orientations[run] = states[run].orientations;
                     omega[run].assign(bodies, Vec3::Zero());
                     omp_set_num_threads(run == 0 ? 1 : std::min(64, omp_get_num_procs()));
-                    results[run] = global_gauss_seidel_solver_basic_rb(meshes[run], states[run], params,
+                    results[run] = global_gauss_seidel_solver_rb(meshes[run], states[run], params,
                         coms[run], orientations[run], omega[run]);
                 }
                 if (fixed) {

@@ -195,8 +195,6 @@ StepParameters describe_step(const SimParams& p,int original_reference_threads) 
         throw std::invalid_argument("GPU currently requires fixed iterations and conflict-graph coloring, with OGC/grid disabled");
     if(original_reference_threads<=0||original_reference_threads>4096)
         throw std::invalid_argument("GPU original_reference_threads must be a positive bounded logical count");
-    if(p.use_ticcd)
-        throw std::invalid_argument("GPU uses device interval/exact linear CCD; the Tight-Inclusion backend is not ported (use --use_ticcd false)");
     StepParameters out;
     out.dt=p.dt();out.elastic.dt2=p.dt2();out.elastic.kpin=p.kpin;
     for(int a=0;a<3;++a)out.elastic.gravity[a]=p.gravity[a];
@@ -226,23 +224,21 @@ StepParameters describe_step(const SimParams& p,int original_reference_threads) 
     out.original_reference_threads=original_reference_threads;
     // Exactly physics_detail::energy_simd_enabled, without linking the CPU
     // physics/solver library into the device bridge for a settings predicate.
-    out.cpu_energy_simd=p.use_basic_experimental_v2&&p.use_simd
+    out.cpu_energy_simd=p.use_simd
         &&!p.use_cloth_grid;
     // Scheduler-FAMILY metadata from the ACTUAL CPU dispatch, never from the
-    // host OpenMP team. The cloth experimental v1/v2 ColoredContactSweep::
+    // host OpenMP team. The modern cloth ColoredContactSweep::
     // prepare predicate is `use_contact_sweep` = parallel && team>1 &&
     // frictionless && d_hat>0 && !OGC. It deliberately does NOT depend on
     // exact_computation_fallback or use_ccd: the SAME selected vertex set is
     // built for both geometry flags, and the CPU's validate_cooperative_step
-    // (exact && use_ccd && !ticcd && !ogc) only chooses between the exact
+    // (exact && use_ccd && !ogc) only chooses between the exact
     // stored-change test and the selected-vertex 1e-28 squared cutoff. The
-    // plain basic dispatch stays scalar. describe_step only sees SimParams, so
+    // cloth solver uses this schedule with scalar or SIMD assembly.
+    // describe_step only sees SimParams, so
     // the solver resolves a general/solid/rigid scene (which has no cloth
     // ColoredContactSweep) down to StoredNoop using its scene metadata.
-    const bool cloth_experimental =
-        p.use_basic_experimental || p.use_basic_experimental_v2;
     const bool cooperative_cpu = p.use_parallel
-        && cloth_experimental
         && p.friction_coefficient==0.0 && p.d_hat>0.0
         && original_reference_threads>1;
     out.original_update_convention = cooperative_cpu

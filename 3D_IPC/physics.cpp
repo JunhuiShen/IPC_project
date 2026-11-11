@@ -10,7 +10,7 @@
 #include <string>
 
 bool physics_detail::energy_simd_enabled(const SimParams& params) {
-    return params.use_basic_experimental_v2 && params.use_simd
+    return params.use_simd
         && !params.use_cloth_grid && !params.use_ogc;
 }
 

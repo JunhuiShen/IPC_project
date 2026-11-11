@@ -183,16 +183,6 @@ const char* backend_name() {
 #endif
 }
 
-// V2 receives gathered AoS tiles, transposes locally, and returns per-entry
-// AoS derivatives. Regular elasticity and bending arithmetic use element lanes.
-const char* tile_backend_name() {
-#if defined(__AVX512F__)
-    return "AVX-512 (8 doubles)";
-#else
-    return backend_name();
-#endif
-}
-
 void point_derivatives_tile(const PointInput* inputs, std::size_t entry_count,
     const Vec3& gravity, double kpin, double dt2,
     Vec3* gradients, Mat33* hessians) {

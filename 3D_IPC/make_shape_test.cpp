@@ -3915,24 +3915,17 @@ TEST(ClothCylinderDropExample, ContactDefaultIsSceneSpecificAndFlagsOverrideIt) 
     EXPECT_DOUBLE_EQ(other_scene.d_hat, 0.005);
 }
 
-TEST(IPCArgsCCD, ExactFallbackFlagKeepsTightInclusionIndependent) {
-    IPCArgs3D args;
-    std::vector<std::string> values = {"3D_sim", "--use_ticcd", "true",
-        "--exact_computation_fallback"};
-    std::vector<char*> argv;
-    for (auto& value : values) argv.push_back(value.data());
-    ASSERT_TRUE(args.parse(static_cast<int>(argv.size()), argv.data()));
-    EXPECT_TRUE(args.exact_computation_fallback);
-    EXPECT_TRUE(args.to_sim_params().use_ticcd);
-    EXPECT_FALSE(args.to_sim_params().use_original_linear_ccd());
-
-    IPCArgs3D tight_inclusion;
-    values = {"3D_sim", "--use_ticcd", "true", "--exact_computation_fallback", "false"};
-    argv.clear();
-    for (auto& value : values) argv.push_back(value.data());
-    ASSERT_TRUE(tight_inclusion.parse(static_cast<int>(argv.size()), argv.data()));
-    EXPECT_FALSE(tight_inclusion.exact_computation_fallback);
-    EXPECT_TRUE(tight_inclusion.to_sim_params().use_ticcd);
+TEST(IPCArgsCCD, ExactFallbackFlagSelectsTheBuiltinLinearPolicy) {
+    for (bool exact : {false, true}) {
+        IPCArgs3D args;
+        std::vector<std::string> values = {"3D_sim", "--exact_computation_fallback",
+            exact ? "true" : "false"};
+        std::vector<char*> argv;
+        for (auto& value : values) argv.push_back(value.data());
+        ASSERT_TRUE(args.parse(static_cast<int>(argv.size()), argv.data()));
+        EXPECT_EQ(args.exact_computation_fallback, exact);
+        EXPECT_EQ(args.to_sim_params().use_original_linear_ccd(), !exact);
+    }
 }
 
 TEST(ClothCylinderDropExample, Example15PresetPreservesScaleAndRequestedBudget) {
@@ -5208,7 +5201,6 @@ TEST(ChainNetBallExample, PresetsAreSceneSpecificAndExplicitFlagsOverrideThem) {
     EXPECT_DOUBLE_EQ(args.k_barrier, 1.0e9);
     EXPECT_EQ(args.max_substep_iters, 100);
     EXPECT_TRUE(args.fixed_iters);
-    EXPECT_TRUE(args.use_basic_experimental);
     EXPECT_TRUE(args.use_simd);
 
     IPCArgs3D overridden;
@@ -5221,7 +5213,7 @@ TEST(ChainNetBallExample, PresetsAreSceneSpecificAndExplicitFlagsOverrideThem) {
         "--fps", "30", "--substeps", "2", "--num_frames", "7",
         "--rigid_density", "100", "--d_hat", "0.001", "--k_barrier", "1234",
         "--max_substep_iters", "3", "--fixed_iters", "false",
-        "--use_basic_experimental", "false", "--use_simd", "false"};
+        "--use_simd", "false"};
     std::vector<char*> argv;
     for (auto& value : values) argv.push_back(value.data());
     ASSERT_TRUE(overridden.parse(static_cast<int>(argv.size()), argv.data()));
@@ -5243,7 +5235,6 @@ TEST(ChainNetBallExample, PresetsAreSceneSpecificAndExplicitFlagsOverrideThem) {
     EXPECT_DOUBLE_EQ(overridden.k_barrier, 1234.0);
     EXPECT_EQ(overridden.max_substep_iters, 3);
     EXPECT_FALSE(overridden.fixed_iters);
-    EXPECT_FALSE(overridden.use_basic_experimental);
     EXPECT_FALSE(overridden.use_simd);
 
     IPCArgs3D unrelated;
@@ -6157,7 +6148,6 @@ TEST(RigidObjectsInBoxExample, PresetsAreSceneSpecificAndExplicitFlagsOverrideTh
     EXPECT_EQ(args.max_substep_iters, 50);
     EXPECT_TRUE(args.fixed_iters);
     EXPECT_TRUE(args.use_parallel);
-    EXPECT_TRUE(args.use_basic_experimental);
     EXPECT_TRUE(args.use_simd);
     EXPECT_TRUE(args.exact_computation_fallback);
     EXPECT_DOUBLE_EQ(args.rigid_density, 1000.0);
@@ -6172,7 +6162,7 @@ TEST(RigidObjectsInBoxExample, PresetsAreSceneSpecificAndExplicitFlagsOverrideTh
         "--rigid_density", "1250", "--d_hat", "0.002", "--k_barrier", "1234",
         "--friction_coefficient", "0.2", "--max_substep_iters", "3",
         "--fixed_iters", "false", "--use_parallel", "false",
-        "--use_basic_experimental", "false", "--use_simd", "false",
+        "--use_simd", "false",
         "--exact_computation_fallback", "false"};
     std::vector<char*> argv;
     for (auto& value : values) argv.push_back(value.data());
@@ -6187,7 +6177,6 @@ TEST(RigidObjectsInBoxExample, PresetsAreSceneSpecificAndExplicitFlagsOverrideTh
     EXPECT_EQ(overridden.max_substep_iters, 3);
     EXPECT_FALSE(overridden.fixed_iters);
     EXPECT_FALSE(overridden.use_parallel);
-    EXPECT_FALSE(overridden.use_basic_experimental);
     EXPECT_FALSE(overridden.use_simd);
     EXPECT_FALSE(overridden.exact_computation_fallback);
 

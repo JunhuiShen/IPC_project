@@ -41,7 +41,6 @@ struct IPCArgs3D : ArgParser {
     double k_sdf         = 1e5;   // SDF penalty stiffness; 0 disables the SDF term
     double eps_sdf       = 0.002; // SDF soft-barrier range (m); cloth rest at phi=eps_sdf. 0 = hard quadratic at the surface.
     bool   use_parallel  = true;
-    bool   use_basic_experimental = false;
     bool   use_simd = false;
     bool   use_dat = false;
     int dat_collision_detection_interval = 0;
@@ -70,7 +69,6 @@ struct IPCArgs3D : ArgParser {
     int    node_box_update_count   = 10;
     double k_barrier                   = 100.0;
     double damping                     = 1.0;    
-    bool   use_ticcd                   = false;    // true: Tight-Inclusion library | false: self-written linear CCD
     bool   exact_computation_fallback  = true;
     bool   ccd_exact_step_bound        = false;
 
@@ -217,9 +215,8 @@ struct IPCArgs3D : ArgParser {
         add_double("k_sdf",       k_sdf,       1e5,        "SDF penalty stiffness (0 = off)");
         add_double("eps_sdf",     eps_sdf,     0.002,      "SDF soft-barrier range (m). Cloth's force-free rest is at phi=eps_sdf. 0 = hard quadratic at the surface.");
         add_bool  ("use_parallel",   use_parallel,   true,  "Use parallel solver updates (Gauss-Seidel requires coloring)");
-        add_bool  ("use_basic_experimental", use_basic_experimental, false, "Use experimental cloth solving; with use_simd also selects experimental general solving");
-        add_bool  ("use_simd", use_simd, false, "With use_basic_experimental, select SIMD v2 for cloth or the general cloth/solid/rigid solver");
-        add_bool  ("use_dat", use_dat, false, "CPU cloth/solid/rigid: checkpoint planar DAT with cached elastic colors and a filtered inertial predictor; overrides experimental/SIMD solvers; incompatible with isotropic OGC/grid/Jacobi CCD");
+        add_bool  ("use_simd", use_simd, false, "Use SIMD assembly in cloth, rigid, and general solvers; false selects scalar assembly");
+        add_bool  ("use_dat", use_dat, false, "CPU cloth/solid/rigid: planar DAT with cached elastic colors and a filtered inertial predictor; overrides ordinary Gauss-Seidel solving; incompatible with isotropic OGC/grid/Jacobi CCD");
         add_bool  ("use_jacobi_level_based_ccd", use_jacobi_level_based_ccd, false, "Deformable cloth/solid only: Jacobi proposals filtered by level-based colored linear CCD; uses colored_ccd_guess_iters per Jacobi iteration; skips initial guesses; incompatible with DAT/OGC/grid");
         add_int("dat_collision_detection_interval", dat_collision_detection_interval, 0, "DAT/OGC: 0 uses pre/post-initialization detection; positive N adds checkpoints every N colors");
         add_bool("dat_inertial_predictor", dat_inertial_predictor, true, "DAT/OGC: filter the inertial predictor before the post-initialization checkpoint");
@@ -237,7 +234,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("use_colored_ccd_guess_level_based", use_colored_ccd_guess_level_based, false, "Cloth/solid: level-based colored CCD toward xhat, with one discarded trial sweep to build levels; mutually exclusive with use_colored_ccd_guess; rigid bodies stay fixed; overrides the global CCD guess, but is ignored with OGC");
         add_int   ("colored_ccd_guess_iters", colored_ccd_guess_iters, 10, "Maximum actual updating sweeps for either colored CCD initial guess or each Jacobi level-based CCD filter; excludes the level-based trial sweep (0 skips trial and updates)");
         add_double("colored_ccd_guess_fraction", colored_ccd_guess_fraction, 1.0, "Fixed target fraction of xhat minus current positions for either colored CCD initial guess, finite in [0, 1]; applied once before sweeps and the level trial; does not change the solver's xhat and is not applied by the Jacobi level-based CCD solver");
-        add_bool  ("use_ogc", use_ogc, false, "CPU cloth/solid: checkpoint isotropic OGC with elastic coloring and a filtered inertial predictor; rigid bodies and DAT/grid/Jacobi CCD combinations are unsupported");
+        add_bool  ("use_ogc", use_ogc, false, "CPU cloth/solid: isotropic OGC with elastic coloring and a filtered inertial predictor; rigid bodies and DAT/grid/Jacobi CCD combinations are unsupported");
         add_bool  ("fixed_iters",      fixed_iters,      false, "Run exactly max_substep_iters sweeps per substep with no tolerance / convergence check");
         add_bool  ("verbose",          verbose,          false, "Print solver cache rebuilds and residuals after each GS iteration (residuals require fixed_iters=false)");
         add_double("node_box_max",         node_box_max,         0.01,  "Upper bound on node box half-extent used by the basic solver");
@@ -247,7 +244,6 @@ struct IPCArgs3D : ArgParser {
         add_int   ("node_box_update_count", node_box_update_count, 10,  "GS iterations between node-box/contact-color rebuilds; set to max_substep_iters to rebuild once per substep");
         add_double("k_barrier",                k_barrier,                100.0, "Barrier stiffness multiplier");
         add_double("damping",                  damping,                  1.0,   "Newton-step damping used by deformable and rigid solvers; <1 can stabilize an update");
-        add_bool  ("use_ticcd",                use_ticcd,                false, "CCD backend for *_only_one_node_moves: true=Tight-Inclusion library, false=self-written linear (default)");
         add_bool  ("exact_computation_fallback", exact_computation_fallback, true, "Enable additional exact-arithmetic CCD/contact fallbacks, matching barrier/friction calculations, and colored-predictor path checks (default: true)");
         add_bool  ("ccd_exact_step_bound", ccd_exact_step_bound, false, "Experimental direct exact separating-plane gap bound before legacy backtracking; requires exact fallback with linear CCD and OGC disabled (default: false)");
 
@@ -381,7 +377,6 @@ struct IPCArgs3D : ArgParser {
             preset("--fixed_iters", fixed_iters, true);
             preset("--damping", damping, 0.8);
             preset("--use_parallel", use_parallel, true);
-            preset("--use_basic_experimental", use_basic_experimental, true);
             preset("--use_simd", use_simd, true);
             preset("--d_hat", d_hat, 0.001);
             preset("--k_barrier", k_barrier, 1.0e10);
@@ -423,7 +418,6 @@ struct IPCArgs3D : ArgParser {
             preset("--max_substep_iters", max_substep_iters, 4);
             preset("--node_box_update_count", node_box_update_count, max_substep_iters);
             preset("--fixed_iters", fixed_iters, true);
-            preset("--use_basic_experimental", use_basic_experimental, true);
             preset("--use_simd", use_simd, true);
             preset("--eps_sdf", eps_sdf, 0.015);
             preset("--k_barrier", k_barrier, 10000.0);
@@ -450,7 +444,6 @@ struct IPCArgs3D : ArgParser {
             preset("--k_barrier", k_barrier, 1.0e9);
             preset("--max_substep_iters", max_substep_iters, 100);
             preset("--fixed_iters", fixed_iters, true);
-            preset("--use_basic_experimental", use_basic_experimental, true);
             preset("--use_simd", use_simd, true);
         }
         if (example == 17) {
@@ -469,7 +462,6 @@ struct IPCArgs3D : ArgParser {
             preset("--k_barrier", k_barrier, 1.0e9);
             preset("--friction_coefficient", friction_coefficient, 0.1);
             preset("--use_parallel", use_parallel, true);
-            preset("--use_basic_experimental", use_basic_experimental, true);
             preset("--use_simd", use_simd, true);
             preset("--exact_computation_fallback", exact_computation_fallback, true);
         }
@@ -483,7 +475,6 @@ struct IPCArgs3D : ArgParser {
             preset("--substeps", substeps, 19);
             preset("--max_substep_iters", max_substep_iters, 200);
             preset("--fixed_iters", fixed_iters, true);
-            preset("--use_basic_experimental", use_basic_experimental, true);
             preset("--use_simd", use_simd, true);
             preset("--use_parallel", use_parallel, true);
             preset("--use_ccd", use_ccd, true);
@@ -517,7 +508,6 @@ struct IPCArgs3D : ArgParser {
             preset("--substeps", substeps, 20);
             preset("--max_substep_iters", max_substep_iters, 20);
             preset("--fixed_iters", fixed_iters, true);
-            preset("--use_basic_experimental", use_basic_experimental, true);
             preset("--use_simd", use_simd, true);
             preset("--friction_coefficient", friction_coefficient, 0.0);
             preset("--d_hat", d_hat, 0.005);
@@ -540,7 +530,6 @@ struct IPCArgs3D : ArgParser {
             preset("--substeps", substeps, 1);
             preset("--max_substep_iters", max_substep_iters, 10);
             preset("--fixed_iters", fixed_iters, true);
-            preset("--use_basic_experimental", use_basic_experimental, true);
             preset("--use_simd", use_simd, true);
             preset("--friction_coefficient", friction_coefficient, 0.5);
             preset("--friction_velocity_epsilon", friction_velocity_epsilon, 0.001);
@@ -604,8 +593,6 @@ struct IPCArgs3D : ArgParser {
         p.k_sdf            = k_sdf;
         p.eps_sdf          = eps_sdf;
         p.use_parallel     = use_parallel;
-        p.use_basic_experimental = use_basic_experimental;
-        p.use_basic_experimental_v2 = use_basic_experimental && use_simd;
         p.use_simd         = use_simd;
         p.use_dat   = use_dat;
         p.dat_collision_detection_interval = dat_collision_detection_interval;
@@ -634,7 +621,6 @@ struct IPCArgs3D : ArgParser {
         p.node_box_update_count   = node_box_update_count;
         p.k_barrier                   = k_barrier;
         p.damping                     = damping;
-        p.use_ticcd = use_ticcd;
         p.exact_computation_fallback = exact_computation_fallback;
         p.exact_computation_fallback_2 = exact_computation_fallback;
         p.ccd_exact_step_bound = ccd_exact_step_bound;

@@ -168,6 +168,4 @@ RigidEnergyDerivatives rigid_pin_derivatives(
     const QuaternionOmegaKinematics* supplied_kinematics = nullptr,
     bool with_orientation_hessian = false);
 
-double gravitational_potential(const Vec3& x_com, const double total_mass, const double gravity, const double dt);
-
 Vec3 gravitational_potential_gradient(const double total_mass, const double gravity, const double dt);

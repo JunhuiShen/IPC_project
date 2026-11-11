@@ -84,9 +84,3 @@ int load_obj_mesh(const std::string& path, RefMesh& ref_mesh, DeformedState& sta
 
 // Flat-array overload of the same OBJ transform and triangulation.
 void load_obj_mesh(const std::string& path, std::vector<Vec3>& verts, std::vector<int>& tris, double scale = 1.0, const Vec3& origin = Vec3::Zero());
-
-// Sets Dm from an edge-length-preserving 2D flattening and A = |det(Dm)|/2.
-void rebuild_triangle_rest_isometric(RefMesh& ref_mesh, const std::vector<Vec3>& x_rest, int t_begin, int t_end);
-
-// Sets c_e = |edge|^2 / (A_left + A_right) within the vertex range.
-void rebuild_hinge_c_e_3d(RefMesh& ref_mesh, const std::vector<Vec3>& x_rest, int v_begin, int v_end);

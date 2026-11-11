@@ -26,11 +26,6 @@ void export_cloth_grid_vertices_geo(const std::string& filename, const std::vect
 
 void export_frame(const std::string& outdir, int frame, const std::vector<Vec3>& x, const std::vector<int>& tris, ExportFormat fmt, const std::vector<std::vector<int>>* color_groups = nullptr);
 
-// Writes all broad phase AABBs (node, triangle, edge) as a wireframe OBJ.
-// Three named groups are written: node_boxes, tri_boxes, edge_boxes.
-// Load in Houdini and toggle groups to inspect each type independently.
-void export_broad_phase_boxes(const std::string& filename, const BroadPhase& bp);
-
 // Writes a flat list of AABBs as a wireframe OBJ.
 void export_aabb_list(const std::string& filename, const std::vector<AABB>& boxes);
 
@@ -38,7 +33,3 @@ void export_aabb_list(const std::string& filename, const std::vector<AABB>& boxe
 // Leaf nodes shallower than depth are included since they cannot split further.
 // Returns the number of boxes written (0 means the depth is beyond the tree).
 int export_bvh_level(const std::string& filename, const std::vector<BVHNode>& nodes, int root, int depth);
-
-// Writes the full BVH hierarchy for all three trees (tri, edge, node) as a
-// series of per-level OBJ files: <prefix>_tri_level_N.obj, etc.
-void export_broad_phase_hierarchy(const std::string& prefix, const BroadPhase& bp);

@@ -465,41 +465,6 @@ namespace {
         return static_cast<int>(boxes.size());
     }
 
-    void export_broad_phase_boxes(const std::string& filename, const BroadPhase& bp) {
-        std::ofstream out(filename);
-        if (!out) {
-            std::cerr << "Error: cannot write " << filename << "\n";
-            return;
-        }
-
-        out << std::setprecision(10);
-
-        const BroadPhase::Cache& c = bp.cache();
-        int v_offset = 0;
-
-        out << "g node_boxes\n";
-        for (const AABB& box : c.node_boxes)
-            write_aabb_wireframe(out, box, v_offset);
-
-        out << "g tri_boxes\n";
-        for (const AABB& box : c.tri_boxes)
-            write_aabb_wireframe(out, box, v_offset);
-
-        out << "g edge_boxes\n";
-        for (const AABB& box : c.edge_boxes)
-            write_aabb_wireframe(out, box, v_offset);
-    }
-
-    void export_broad_phase_hierarchy(const std::string& prefix, const BroadPhase& bp) {
-        const auto& cache = bp.cache();
-        for (int depth = 0; ; ++depth) {
-            const int nt = export_bvh_level(prefix + "_tri_level_"  + std::to_string(depth) + ".obj", cache.tri_bvh_nodes,  cache.tri_root,  depth);
-            const int ne = export_bvh_level(prefix + "_edge_level_" + std::to_string(depth) + ".obj", cache.edge_bvh_nodes, cache.edge_root, depth);
-            const int nn = export_bvh_level(prefix + "_node_level_" + std::to_string(depth) + ".obj", cache.node_bvh_nodes, cache.node_root, depth);
-            if (nt == 0 && ne == 0 && nn == 0) break;
-        }
-    }
-
     void export_frame(const std::string& outdir, int frame, const std::vector<Vec3>& x, const std::vector<int>& tris, ExportFormat fmt, const std::vector<std::vector<int>>* color_groups) {
         std::ostringstream ss;
         const char* ext = (fmt == ExportFormat::GEO) ? ".geo"

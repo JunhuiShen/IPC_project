@@ -1,10 +1,6 @@
-// Two CCD backends behind the public dispatchers in ccd.h:
-//   - Linear   : closed-form for one moving vertex (Gauss-Seidel safe-step
-//                query), with independent exact arithmetic for ambiguous cases.
-//   - TICCD    : Tight-Inclusion CCD library [Wang et al. 2021] for the
-//                general case where multiple vertices move.
-// `node_triangle_general_ccd` / `segment_segment_general_ccd` are TICCD-only.
-// `*_only_one_node_moves` route to one of the two via the `use_ticcd` arg.
+// Built-in linear CCD for one-moving-vertex Gauss-Seidel queries, with exact
+// arithmetic for ambiguous cases. General all-vertex motion uses Tight-Inclusion
+// through node_triangle_general_ccd / segment_segment_general_ccd.
 
 #include "ccd.h"
 #include "quaternion_math.h"
@@ -698,7 +694,6 @@ CCDResult resolve_exact(const std::array<Vec3, 4>& positions,
 } // namespace exact_linear
 
 
-
 // FMA recovers the rounding error of the second product. This matters for
 // almost parallel edges; a Gram determinant squares their condition number.
 double difference_of_products(double a, double b, double c, double d) {
@@ -1064,7 +1059,7 @@ CCDResult first_coplanar_contact(std::array<double, N>& roots, std::size_t count
 // One-moving-vertex linear CCD
 // -----------------------------------------------------------------------------
 
-CCDResult node_triangle_linear_ccd(const Vec3& x,  const Vec3& dx, const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2,
+CCDResult node_triangle_linear_ccd_kernel(const Vec3& x,  const Vec3& dx, const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2,
                                    const Vec3& x3, const Vec3& dx3, double eps, LinearCCDGuard& guard) {
     CCDResult result;
     const double geometry_relative_eps = std::max(eps, kRoundoff);
@@ -1188,7 +1183,7 @@ CCDResult node_triangle_linear_ccd(const Vec3& x,  const Vec3& dx, const Vec3& x
     return first_coplanar_contact(roots, root_count, point_in_triangle_at, guard);
 }
 
-CCDResult segment_segment_linear_ccd(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double eps, LinearCCDGuard& guard) {
+CCDResult segment_segment_linear_ccd_kernel(const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& x3, const Vec3& x4, double eps, LinearCCDGuard& guard) {
     CCDResult result;
     const double geometry_relative_eps = std::max(eps, kRoundoff);
 
@@ -1511,7 +1506,7 @@ CCDResult node_triangle_original(const Vec3& x, const Vec3& dx,
         return exact_linear::resolve_original(positions, motion, true);
     }
     LinearCCDGuard guard{false, q.validation_distance};
-    const auto result = node_triangle_linear_ccd(q.x[0], q.dx[0], q.x[1], q.dx[1],
+    const auto result = node_triangle_linear_ccd_kernel(q.x[0], q.dx[0], q.x[1], q.dx[1],
         q.x[2], q.dx[2], q.x[3], q.dx[3], eps, guard);
     if (guard.uncertain && swept_hulls_separated(q, true, guard.separation)) return {};
     return guard.uncertain ? exact_linear::resolve_original(positions, motion, true) : result;
@@ -1527,7 +1522,7 @@ CCDResult segment_segment_original(const Vec3& x1, const Vec3& dx1, const Vec3& 
         return exact_linear::resolve_original(positions, motion, false);
     }
     LinearCCDGuard guard{false, q.validation_distance};
-    const auto result = segment_segment_linear_ccd(q.x[0], q.dx[0], q.x[1], q.x[2], q.x[3], eps, guard);
+    const auto result = segment_segment_linear_ccd_kernel(q.x[0], q.dx[0], q.x[1], q.x[2], q.x[3], eps, guard);
     if (guard.uncertain && swept_hulls_separated(q, false, guard.separation)) return {};
     return guard.uncertain ? exact_linear::resolve_original(positions, motion, false) : result;
 }
@@ -1561,7 +1556,7 @@ CCDResult node_triangle(const Vec3& x, const Vec3& dx,
         return exact_linear::resolve_exact(positions, motion, true);
     }
     LinearCCDGuard guard{false, q.validation_distance};
-    const auto result = node_triangle_linear_ccd(q.x[0], q.dx[0], q.x[1], q.dx[1],
+    const auto result = node_triangle_linear_ccd_kernel(q.x[0], q.dx[0], q.x[1], q.dx[1],
         q.x[2], q.dx[2], q.x[3], q.dx[3], eps, guard);
     const bool needs_exact = guard.uncertain || (result.collision && result.t == 0.0);
     if (needs_exact && swept_hulls_separated(q, true, guard.separation)) return {};
@@ -1579,7 +1574,7 @@ CCDResult segment_segment(const Vec3& x1, const Vec3& dx1, const Vec3& x2,
         return exact_linear::resolve_exact(positions, motion, false);
     }
     LinearCCDGuard guard{false, q.validation_distance};
-    const auto result = segment_segment_linear_ccd(q.x[0], q.dx[0], q.x[1], q.x[2], q.x[3], eps, guard);
+    const auto result = segment_segment_linear_ccd_kernel(q.x[0], q.dx[0], q.x[1], q.x[2], q.x[3], eps, guard);
     const bool needs_exact = guard.uncertain || (result.collision && result.t == 0.0);
     if (needs_exact && swept_hulls_separated(q, false, guard.separation)) return {};
     return needs_exact ? exact_linear::resolve_exact(positions, motion, false) : result;
@@ -2059,53 +2054,28 @@ double segment_segment_general_ccd(const Vec3& x1, const Vec3& dx1,
 }
 
 // -----------------------------------------------------------------------------
-// Public one-moving-node dispatchers. `use_ticcd` selects the backend:
-//   true  (default) -> TICCD library (conservative, robust)
-//   false           -> independent closed-form linear backend
+// Public built-in linear CCD queries. The original flag selects the existing
+// non-exact-fallback policy; general-motion queries above remain TICCD-only.
 // -----------------------------------------------------------------------------
 
-CCDResult node_triangle_linear_ccd_v1(const Vec3& x, const Vec3& dx,
-    const Vec3& a, const Vec3& da, const Vec3& b, const Vec3& db,
-    const Vec3& c, const Vec3& dc, double eps) {
-    return linear_ccd_detail::node_triangle(x, dx, a, da, b, db, c, dc, eps, true);
-}
-
-CCDResult node_triangle_linear_ccd_v2(const Vec3& x, const Vec3& dx,
-    const Vec3& a, const Vec3& da, const Vec3& b, const Vec3& db,
-    const Vec3& c, const Vec3& dc, double eps) {
-    return linear_ccd_detail::node_triangle(x, dx, a, da, b, db, c, dc, eps, false);
-}
-
-CCDResult segment_segment_linear_ccd_v1(const Vec3& a, const Vec3& da,
-    const Vec3& b, const Vec3& c, const Vec3& d, double eps) {
-    return linear_ccd_detail::segment_segment(a, da, b, c, d, eps, true);
-}
-
-CCDResult node_triangle_only_one_node_moves(const Vec3& x,  const Vec3& dx,
-                                            const Vec3& x1, const Vec3& dx1,
-                                            const Vec3& x2, const Vec3& dx2,
-                                            const Vec3& x3, const Vec3& dx3,
-                                            double eps, bool use_ticcd, bool original) {
-    if (use_ticcd) {
-        return inclusion_ccd({{x, x1, x2, x3}}, {{dx, dx1, dx2, dx3}}, true);
-    }
+CCDResult node_triangle_linear_ccd(
+    const Vec3& x, const Vec3& dx, const Vec3& x1, const Vec3& dx1,
+    const Vec3& x2, const Vec3& dx2, const Vec3& x3, const Vec3& dx3,
+    double eps, bool original) {
     return linear_ccd_detail::node_triangle(x, dx, x1, dx1, x2, dx2, x3, dx3, eps, original);
 }
 
-CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1,
-                                              const Vec3& x2, const Vec3& x3, const Vec3& x4,
-                                              double eps, bool use_ticcd, bool original) {
-    if (use_ticcd) {
-        const Vec3 zero = Vec3::Zero();
-        return inclusion_ccd({{x1, x2, x3, x4}}, {{dx1, zero, zero, zero}}, false);
-    }
-    return linear_ccd_detail::segment_segment(x1, dx1, x2, x3, x4, eps, original);
-}
-
-CCDResult segment_segment_same_displacement_linear_ccd(
-        const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2,
-        const Vec3& x3, const Vec3& x4, double eps, bool original) {
-    return linear_ccd_detail::translating_segment(x1, dx1, x2, dx2, x3, x4, eps, original);
+CCDResult segment_segment_linear_ccd(
+    const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2,
+    const Vec3& x3, const Vec3& x4, double eps, bool original) {
+    if ((dx2.array() == 0.0).all())
+        return linear_ccd_detail::segment_segment(x1, dx1, x2, x3, x4, eps, original);
+    if ((dx1.array() == 0.0).all())
+        return linear_ccd_detail::segment_segment(x2, dx2, x1, x3, x4, eps, original);
+    if ((dx1.array() == dx2.array()).all())
+        return linear_ccd_detail::translating_segment(x1, dx1, x2, dx2, x3, x4, eps, original);
+    throw std::invalid_argument(
+        "segment_segment_linear_ccd requires one stationary endpoint or equal endpoint displacements; use general CCD for independent endpoint motion");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

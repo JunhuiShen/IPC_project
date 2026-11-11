@@ -354,7 +354,7 @@ std::vector<Vec3> collision_colored_ccd_initial_guess(
                     if (is_rigid(vertex)) continue;
                     const Vec3 before = xnew[vertex];
                     const double step = per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
-                        /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false, /*cooperative=*/false, nullptr,
+                        /*safety=*/0.9, /*clip_ccd=*/true, /*cooperative=*/false, nullptr,
                         params.exact_computation_fallback, params.exact_computation_fallback_2,
                         params.ccd_exact_step_bound);
                     if (!params.exact_computation_fallback && step > 0.0)
@@ -567,7 +567,7 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
                             const int vertex = ordered_vertices[index];
                             const Vec3 before = xnew[vertex];
                             const double step = per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
-                                /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false, /*cooperative=*/false, nullptr,
+                                /*safety=*/0.9, /*clip_ccd=*/true, /*cooperative=*/false, nullptr,
                                 params.exact_computation_fallback, params.exact_computation_fallback_2,
                                 params.ccd_exact_step_bound);
                             if (!params.exact_computation_fallback && step > 0.0)
@@ -590,7 +590,7 @@ std::vector<Vec3> collision_colored_ccd_initial_guess_level_based(
                     const int vertex = ordered_vertices[index];
                     const Vec3 before = xnew[vertex];
                     const double step = per_vertex_safe_step(broad_phase, xnew, vertex, targets[vertex],
-                        /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false, /*cooperative=*/false, nullptr,
+                        /*safety=*/0.9, /*clip_ccd=*/true, /*cooperative=*/false, nullptr,
                         params.exact_computation_fallback, params.exact_computation_fallback_2,
                         params.ccd_exact_step_bound);
                     if (!params.exact_computation_fallback && step > 0.0)

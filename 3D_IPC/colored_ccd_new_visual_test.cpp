@@ -395,7 +395,7 @@ int main(int argc, char** argv) {
             Vec3(-.5,upper,-.5), Vec3(.5,upper,-.5), Vec3(.5,upper,.5), Vec3(-.5,upper,.5)};
         SimParams params = SimParams::zeros();
         params.fps = 1.0/dt; params.substeps = 1; params.gravity = Vec3(0,-9.81,0);
-        params.d_hat = .005; params.use_parallel = true; params.use_ticcd = false;
+        params.d_hat = .005; params.use_parallel = true;
         params.exact_computation_fallback = options.exact;
         const std::vector<Vec3> intended(count, dt*dt*params.gravity);
         auto x = initial, displacement = intended, targets = initial;

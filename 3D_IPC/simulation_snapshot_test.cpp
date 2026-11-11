@@ -61,6 +61,7 @@ static void build_scene(RefMesh& ref_mesh, DeformedState& state, std::vector<Pin
     params.max_global_iters = 100;
     params.tol_abs      = 1e-6;
     params.use_parallel = false;
+    params.use_simd        = false;
     params.fixed_iters  = true;
     params.node_box_min = 0.001;
     params.node_box_max = 0.01;
@@ -260,10 +261,9 @@ TEST(SimulationSnapshot, ExperimentalFrictionContactsAreBitwiseEqualAcrossAvaila
         append_pin(pins[run], sheet_vertices, states[run].deformed_positions);
         auto& params = parameters[run];
         params.use_parallel = true;
-        params.use_basic_experimental = true;
         params.fixed_iters = true;
         params.use_ccd = true;
-        params.use_ticcd = false;
+
         params.substeps = 2;
         // Each substep must execute batches of 3 + 3 + 1 sweeps. The last
         // partial batch checks both rebuilding and final iteration accounting.
@@ -355,8 +355,6 @@ TEST(SimulationSnapshot, PredictorChangesAndNestedFramesPreserveTrajectory) {
         meshes[run].build_lumped_mass(params.density, params.thickness);
         adjacency = build_incident_triangle_map(meshes[run].tris);
         params.use_parallel = true;
-        params.use_basic_experimental = true;
-        params.use_basic_experimental_v2 = true;
         params.use_simd = true;
         params.use_ccd = true;
         params.exact_computation_fallback = false;

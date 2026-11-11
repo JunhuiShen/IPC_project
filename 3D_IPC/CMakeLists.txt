@@ -311,6 +311,8 @@ if(BUILD_TESTING)
         if(target STREQUAL "ccd_test")
             # Select the oracle's Boost headers before GTest's system include root.
             target_link_libraries("${target}" PRIVATE Boost::headers)
+            # Independent Tight-Inclusion comparisons live only in test support.
+            target_link_libraries("${target}" PRIVATE tight_inclusion::tight_inclusion)
         endif()
         target_link_libraries("${target}" PRIVATE IPC::ipc GTest::gtest_main)
         if(IPC_TEST_DEFINITIONS)

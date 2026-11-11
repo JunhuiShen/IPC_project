@@ -11,59 +11,43 @@ static bool parse_flags(IPCArgs3D& args, std::vector<std::string> values) {
     return args.parse(static_cast<int>(argv.size()), argv.data());
 }
 
-TEST(LinearCCDVersions, FallbackDefaultsToModifiedAndOffSelectsOriginal) {
+TEST(LinearCCDPolicy, FallbackDefaultsToModifiedAndOffSelectsOriginal) {
     IPCArgs3D args;
     ASSERT_TRUE(parse_flags(args, {"3D_sim"}));
     EXPECT_TRUE(args.exact_computation_fallback);
     EXPECT_FALSE(args.to_sim_params().use_original_linear_ccd());
-    EXPECT_FALSE(args.to_sim_params().use_ticcd);
+
     IPCArgs3D v1;
     ASSERT_TRUE(parse_flags(v1, {"3D_sim", "--exact_computation_fallback", "false"}));
     EXPECT_TRUE(v1.to_sim_params().use_original_linear_ccd());
 }
 
-TEST(LinearCCDVersions, TightInclusionRemainsIndependentOfFallbackFlag) {
-    IPCArgs3D args;
-    ASSERT_TRUE(parse_flags(args, {"3D_sim", "--use_ticcd", "true",
-                                  "--exact_computation_fallback", "true"}));
-    EXPECT_TRUE(args.to_sim_params().use_ticcd);
-    EXPECT_FALSE(args.to_sim_params().use_original_linear_ccd());
-    IPCArgs3D conflict;
-    EXPECT_TRUE(parse_flags(conflict, {"3D_sim", "--use_ticcd", "true",
-                                       "--exact_computation_fallback", "false"}));
-    EXPECT_TRUE(conflict.to_sim_params().use_ticcd);
-    EXPECT_FALSE(conflict.to_sim_params().use_original_linear_ccd());
+TEST(LinearCCDPolicy, RemovedTightInclusionSelectorIsRejected) {
+    for (const auto* value : {"false", "true"}) {
+        IPCArgs3D args;
+        EXPECT_FALSE(parse_flags(args, {"3D_sim", "--use_ticcd", value}));
+    }
 }
 
-TEST(LinearCCDVersions, OriginalVersionRetainsItsNearContactBehavior) {
+TEST(LinearCCDPolicy, OriginalPolicyRetainsItsNearContactBehavior) {
     const Vec3 a(0,0,0), b(1,0,0), c(0,1,0), zero=Vec3::Zero();
     const Vec3 x(.2,.2,1e-12), away(0,0,1);
-    const auto v1=node_triangle_linear_ccd_v1(x,away,a,zero,b,zero,c,zero);
-    const auto v2=node_triangle_only_one_node_moves(x,away,a,zero,b,zero,c,zero,1e-12,false);
-    EXPECT_TRUE(v1.collision);
-    EXPECT_DOUBLE_EQ(v1.t,0.0);
-    EXPECT_FALSE(v2.collision);
+    const auto original=node_triangle_linear_ccd(x,away,a,zero,b,zero,c,zero,1e-12,true);
+    const auto exact=node_triangle_linear_ccd(x, away, a, zero, b, zero, c, zero, 1e-12);
+    EXPECT_TRUE(original.collision);
+    EXPECT_DOUBLE_EQ(original.t,0.0);
+    EXPECT_FALSE(exact.collision);
 }
 
-TEST(LinearCCDVersions, BothVersionsResolveAnOrdinaryCrossing) {
+TEST(LinearCCDPolicy, BothPoliciesResolveAnOrdinaryCrossing) {
     const Vec3 a(0,0,0), b(1,0,0), c(0,1,0), zero=Vec3::Zero();
     const Vec3 x(.2,.2,1), down(0,0,-2);
-    const auto v1=node_triangle_linear_ccd_v1(x,down,a,zero,b,zero,c,zero);
-    const auto v2=node_triangle_only_one_node_moves(x,down,a,zero,b,zero,c,zero,1e-12,false);
-    ASSERT_TRUE(v1.collision);
-    ASSERT_TRUE(v2.collision);
-    EXPECT_NEAR(v1.t,.5,1e-12);
-    EXPECT_DOUBLE_EQ(v1.t,v2.t);
-}
-
-TEST(LinearCCDVersions, TightInclusionQueryIgnoresLinearVersion) {
-    const Vec3 a(0,0,0), b(1,0,0), c(0,1,0), zero=Vec3::Zero();
-    const Vec3 x(.2,.2,1), down(0,0,-2);
-    const auto first=node_triangle_only_one_node_moves(x,down,a,zero,b,zero,c,zero,1e-12,true,true);
-    const auto second=node_triangle_only_one_node_moves(x,down,a,zero,b,zero,c,zero,1e-12,true,false);
-    ASSERT_TRUE(first.collision);
-    EXPECT_EQ(first.collision,second.collision);
-    EXPECT_DOUBLE_EQ(first.t,second.t);
+    const auto original=node_triangle_linear_ccd(x,down,a,zero,b,zero,c,zero,1e-12,true);
+    const auto exact=node_triangle_linear_ccd(x, down, a, zero, b, zero, c, zero, 1e-12);
+    ASSERT_TRUE(original.collision);
+    ASSERT_TRUE(exact.collision);
+    EXPECT_NEAR(original.t,.5,1e-12);
+    EXPECT_DOUBLE_EQ(original.t,exact.t);
 }
 
 TEST(ExactComputationFallback, DefaultsOnAndPreservesColoredGuessSettings) {
@@ -110,7 +94,7 @@ TEST(ExactComputationFallback, BothModesKeepTinyRepresentableVertexMoves) {
     for (bool fallback:{false,true}) {
         std::vector<Vec3> x{Vec3::Zero()};
         const Vec3 target(1e-15,0,0);
-        const double step=per_vertex_safe_step(broad_phase,x,0,target,.9,true,false,false,nullptr,fallback);
+        const double step=per_vertex_safe_step(broad_phase, x, 0, target, .9, true, false, nullptr, fallback);
         EXPECT_DOUBLE_EQ(step,1.0);
         EXPECT_DOUBLE_EQ(x[0].x(),target.x());
     }
@@ -181,7 +165,7 @@ TEST(ExactComputationFallbackCLI, DefaultsSelectOptimizedExactMode) {
     EXPECT_TRUE(params.exact_computation_fallback_2);
     EXPECT_TRUE(params.exact_computation_fallback);
     EXPECT_FALSE(params.use_original_linear_ccd());
-    EXPECT_FALSE(params.use_ticcd);
+
 }
 
 TEST(ExactComputationFallbackCLI, ExplicitOnSelectsOptimizedExactMode) {
@@ -191,7 +175,7 @@ TEST(ExactComputationFallbackCLI, ExplicitOnSelectsOptimizedExactMode) {
     EXPECT_TRUE(params.exact_computation_fallback_2);
     EXPECT_TRUE(params.exact_computation_fallback);
     EXPECT_FALSE(params.use_original_linear_ccd());
-    EXPECT_FALSE(params.use_ticcd);
+
 }
 
 TEST(ExactComputationFallbackCLI, ExplicitOffKeepsOriginalMode) {
@@ -201,7 +185,7 @@ TEST(ExactComputationFallbackCLI, ExplicitOffKeepsOriginalMode) {
     EXPECT_FALSE(params.exact_computation_fallback);
     EXPECT_FALSE(params.exact_computation_fallback_2);
     EXPECT_TRUE(params.use_original_linear_ccd());
-    EXPECT_FALSE(params.use_ticcd);
+
 }
 
 TEST(ExactComputationFallbackCLI, ObsoleteSecondPublicFlagIsRejected) {
@@ -211,16 +195,15 @@ TEST(ExactComputationFallbackCLI, ObsoleteSecondPublicFlagIsRejected) {
     }
 }
 
-TEST(ExactComputationFallbackCLI, TightInclusionRemainsIndependent) {
+TEST(ExactComputationFallbackCLI, LinearPolicyFollowsExactFallbackFlag) {
     for (bool exact : {false, true}) {
         IPCArgs3D args;
         ASSERT_TRUE(parse_flags(args, {"3D_sim", "--exact_computation_fallback",
-            exact ? "true" : "false", "--use_ticcd", "true"}));
+            exact ? "true" : "false"}));
         const auto params = args.to_sim_params();
         EXPECT_EQ(params.exact_computation_fallback, exact);
         EXPECT_EQ(params.exact_computation_fallback_2, exact);
-        EXPECT_TRUE(params.use_ticcd);
-        EXPECT_FALSE(params.use_original_linear_ccd());
+        EXPECT_EQ(params.use_original_linear_ccd(), !exact);
     }
 }
 
@@ -239,12 +222,12 @@ TEST(CCDExactStepBoundCLI, ExplicitOnSelectsTheExperiment) {
     EXPECT_TRUE(params.ccd_exact_step_bound);
     EXPECT_TRUE(params.exact_computation_fallback);
     EXPECT_TRUE(params.exact_computation_fallback_2);
-    EXPECT_FALSE(params.use_ticcd);
+
     EXPECT_FALSE(params.use_ogc);
 }
 
 TEST(CCDExactStepBoundCLI, ExplicitOffPreservesOtherModes) {
-    for (const auto* flag : {"--exact_computation_fallback", "--use_ticcd", "--use_ogc"}) {
+    for (const auto* flag : {"--exact_computation_fallback", "--use_ogc"}) {
         SCOPED_TRACE(flag);
         IPCArgs3D args;
         ASSERT_TRUE(parse_flags(args, {"3D_sim", "--ccd_exact_step_bound", "false",
@@ -254,7 +237,7 @@ TEST(CCDExactStepBoundCLI, ExplicitOffPreservesOtherModes) {
 }
 
 TEST(CCDExactStepBoundCLI, RejectsIncompatibleModes) {
-    for (const auto* flag : {"--exact_computation_fallback", "--use_ticcd", "--use_ogc"}) {
+    for (const auto* flag : {"--exact_computation_fallback", "--use_ogc"}) {
         SCOPED_TRACE(flag);
         IPCArgs3D args;
         ASSERT_TRUE(parse_flags(args, {"3D_sim", "--ccd_exact_step_bound", "true",

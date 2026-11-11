@@ -66,7 +66,7 @@ void build_scene(GeneralScene& scene, bool cloth = true, bool solid = true,
     params.damping = 0.1;
     params.use_parallel = true;
     params.use_ccd = true;
-    params.use_ticcd = false;
+
     params.use_ccd_guess = false;
     params.d_hat = 0.03;
     params.k_barrier = 1.0;
@@ -130,6 +130,7 @@ void build_scene(GeneralScene& scene, bool cloth = true, bool solid = true,
 // Call the public solver explicitly, then use the same state commit as the
 // frame driver so comparisons include velocities and all rigid coordinates.
 SolverResult solve_and_commit(GeneralScene& scene, bool simd) {
+    scene.params.use_simd = simd;
     auto& state = scene.state;
     std::vector<Vec3> xhat;
     build_xhat(xhat, state.deformed_positions, state.velocities, scene.params.dt());
@@ -140,8 +141,7 @@ SolverResult solve_and_commit(GeneralScene& scene, bool simd) {
     auto centers = state.x_coms;
     auto orientations = state.orientations;
     std::vector<Vec3> omega(state.omega.size(), Vec3::Zero());
-    const auto solve = simd ? global_gauss_seidel_solver_general_experimental_v2
-                           : global_gauss_seidel_solver_basic_general;
+    const auto solve = global_gauss_seidel_solver_general;
     const SolverResult result = solve(scene.mesh, state, scene.adjacency,
         scene.pins, scene.params, positions, xhat, centers, orientations,
         omega, scene.broad_phase, "");
@@ -153,19 +153,18 @@ SolverResult solve_and_commit(GeneralScene& scene, bool simd) {
             / scene.params.dt();
         state.deformed_positions[node] = positions[node];
     }
-    // The named v2 entry returns authoritative accepted proxy positions even
-    // when the caller did not set its frame-dispatch selector flags.
+    // Both assembly backends return the authoritative accepted proxy positions.
     commit_rigid_body_solver_state(scene.mesh, state, centers, orientations,
-        omega, scene.params.dt(), simd ? &positions : nullptr);
+        omega, scene.params.dt(), &positions);
     return result;
 }
 
-SolverResult solve_basic_v2_and_commit(GeneralScene& scene) {
+SolverResult solve_cloth_and_commit(GeneralScene& scene) {
     auto& state = scene.state;
     std::vector<Vec3> predicted;
     build_xhat(predicted, state.deformed_positions, state.velocities, scene.params.dt());
     auto positions = state.deformed_positions;
-    const auto result = global_gauss_seidel_solver_basic_experimental_v2(scene.mesh,
+    const auto result = global_gauss_seidel_solver_cloth(scene.mesh,
         scene.adjacency, scene.pins, scene.params, positions, predicted,
         state.velocities, scene.broad_phase, "", &state.deformed_positions);
     update_velocity(state.velocities, positions, state.deformed_positions, scene.params.dt());
@@ -173,9 +172,7 @@ SolverResult solve_basic_v2_and_commit(GeneralScene& scene) {
     return result;
 }
 
-void enable_v2_flags(GeneralScene& scene) {
-    scene.params.use_basic_experimental = true;
-    scene.params.use_basic_experimental_v2 = true;
+void enable_simd_backend(GeneralScene& scene) {
     scene.params.use_simd = true;
 }
 
@@ -193,7 +190,7 @@ void build_two_cloth_layers(GeneralScene& scene) {
     scene.mesh.node_to_rb.assign(scene.state.deformed_positions.size(), -1);
     scene.mesh.build_deformable_nodes();
     scene.adjacency = build_incident_triangle_map(scene.mesh.tris);
-    enable_v2_flags(scene);
+    enable_simd_backend(scene);
 }
 
 struct SparseContacts {
@@ -324,7 +321,7 @@ TEST(GeneralSIMDSolver, CoupledClothSolidRigidMatchesScalarWithAndWithoutFrictio
     }
 }
 
-TEST(GeneralSIMDSolver, ScalarAndV2PruneSeparatedMixedIncidenceAndRestoreForTiccd) {
+TEST(GeneralSIMDSolver, ScalarAndSimdPruneSeparatedMixedIncidenceAndRestoreWithoutCcd) {
     RestoreOpenMP restore;
     omp_set_dynamic(0);
     omp_set_num_threads(4);
@@ -344,9 +341,9 @@ TEST(GeneralSIMDSolver, ScalarAndV2PruneSeparatedMixedIncidenceAndRestoreForTicc
         for (auto& w : state.omega) w = quaternion_rotate(rotation,w);
         for (auto& q : state.orientations) q = quaternion_multiply(rotation,q);
         for (auto& pin : scene.pins) pin.target_position = quaternion_rotate(rotation,pin.target_position);
-        for (bool ticcd : {false,true,false}) {
-            SCOPED_TRACE(::testing::Message() << "simd=" << simd << " ticcd=" << ticcd);
-            scene.params.use_ticcd = ticcd;
+        for (bool ccd : {true,false,true}) {
+            SCOPED_TRACE(::testing::Message() << "simd=" << simd << " ccd=" << ccd);
+            scene.params.use_ccd = ccd;
             ASSERT_TRUE(solve_and_commit(scene,simd).converged);
             const auto& actual = scene.broad_phase.cache();
             BroadPhase unpruned;
@@ -362,13 +359,13 @@ TEST(GeneralSIMDSolver, ScalarAndV2PruneSeparatedMixedIncidenceAndRestoreForTicc
                 for (const Vec3& direction : {Vec3(.004,0,0),Vec3(0,-.004,0),Vec3(0,0,.004)}) {
                     auto expected = state.deformed_positions, result = expected;
                     const Vec3 target = expected[node]+direction;
-                    const double a = per_vertex_safe_step(unpruned,expected,node,target,.9,true,ticcd);
-                    const double b = per_vertex_safe_step(scene.broad_phase,result,node,target,.9,true,ticcd);
+                    const double a = per_vertex_safe_step(unpruned, expected, node, target, .9, ccd);
+                    const double b = per_vertex_safe_step(scene.broad_phase, result, node, target, .9, ccd);
                     EXPECT_DOUBLE_EQ(a,b);
                     EXPECT_TRUE((expected[node].array()==result[node].array()).all());
                 }
             }
-            if (ticcd) EXPECT_EQ(removed,0u);
+            if (!ccd) EXPECT_EQ(removed,0u);
             else EXPECT_GT(removed,0u);
             expect_active_coupling(scene);
         }
@@ -434,83 +431,87 @@ TEST(GeneralSIMDSolver, RigidUpdateModesKeepDisabledCoordinatesFixed) {
 TEST(GeneralSIMDSolver, FixedProxyPlacementTracksPrescribedPoseAcrossRepeatedCalls) {
     RestoreOpenMP restore;
     omp_set_dynamic(0);
-    for (bool mixed : {false, true}) {
-        for (int nodes : {3, 131}) {
-            for (int threads : {1, 4}) {
-                SCOPED_TRACE(::testing::Message() << "mixed=" << mixed
-                    << " nodes=" << nodes << " threads=" << threads);
-                omp_set_num_threads(threads);
-                GeneralScene scene;
-                auto& mesh = scene.mesh;
-                auto& state = scene.state;
-                auto& params = scene.params;
-                if (mixed) {
-                    state.deformed_positions = {
-                        Vec3(-1, -1, 0), Vec3(3, -1, 0), Vec3(-1, 3, 0)};
-                    state.velocities.assign(3, Vec3::Zero());
-                    mesh.tris = {0, 1, 2};
-                    mesh.initialize({Vec2(-1, -1), Vec2(3, -1), Vec2(-1, 3)},
-                        state.deformed_positions);
-                    mesh.mass.assign(3, 10.0);
-                    mesh.node_to_rb.assign(3, -1);
-                }
-                std::vector<Vec3> points{Vec3(0, 0, 0.2)};
-                for (int local = 1; local < nodes; ++local)
-                    points.emplace_back(5 + 0.1 * local,
-                        3 + 0.02 * (local % 7), 1 + 0.003 * local);
-                const int rb = create_rigid_body(points, Vec3::Zero(),
-                    Vec4(0.8, -0.2, 0.3, 0.4), Vec3::Zero(), nodes,
-                    mesh, state, RigidBodyUpdateMode::None);
-                mesh.build_deformable_nodes();
-                scene.adjacency = build_incident_triangle_map(mesh.tris);
-                params.fps = 10.0;
-                params.substeps = 1;
-                params.max_global_iters = 8;
-                params.fixed_iters = true;
-                params.damping = 0.25;
-                params.d_hat = mixed ? 0.5 : 0.0;
-                params.k_barrier = mixed ? 100.0 : 0.0;
-                params.node_box_min = params.node_box_max = 1.0;
-                params.theta_box_min = params.theta_box_max = 3.141592653589793;
-                params.node_box_update_count = 3;
-                params.use_parallel = true;
+    for (const bool simd : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "simd=" << simd);
+        for (bool mixed : {false, true}) {
+            for (int nodes : {3, 131}) {
+                for (int threads : {1, 4}) {
+                    SCOPED_TRACE(::testing::Message() << "mixed=" << mixed
+                        << " nodes=" << nodes << " threads=" << threads);
+                    omp_set_num_threads(threads);
+                    GeneralScene scene;
+                    auto& mesh = scene.mesh;
+                    auto& state = scene.state;
+                    auto& params = scene.params;
+                    if (mixed) {
+                        state.deformed_positions = {
+                            Vec3(-1, -1, 0), Vec3(3, -1, 0), Vec3(-1, 3, 0)};
+                        state.velocities.assign(3, Vec3::Zero());
+                        mesh.tris = {0, 1, 2};
+                        mesh.initialize({Vec2(-1, -1), Vec2(3, -1), Vec2(-1, 3)},
+                            state.deformed_positions);
+                        mesh.mass.assign(3, 10.0);
+                        mesh.node_to_rb.assign(3, -1);
+                    }
+                    std::vector<Vec3> points{Vec3(0, 0, 0.2)};
+                    for (int local = 1; local < nodes; ++local)
+                        points.emplace_back(5 + 0.1 * local,
+                            3 + 0.02 * (local % 7), 1 + 0.003 * local);
+                    const int rb = create_rigid_body(points, Vec3::Zero(),
+                        Vec4(0.8, -0.2, 0.3, 0.4), Vec3::Zero(), nodes,
+                        mesh, state, RigidBodyUpdateMode::None);
+                    mesh.build_deformable_nodes();
+                    scene.adjacency = build_incident_triangle_map(mesh.tris);
+                    params.fps = 10.0;
+                    params.substeps = 1;
+                    params.max_global_iters = 8;
+                    params.fixed_iters = true;
+                    params.damping = 0.25;
+                    params.d_hat = mixed ? 0.5 : 0.0;
+                    params.k_barrier = mixed ? 100.0 : 0.0;
+                    params.node_box_min = params.node_box_max = 1.0;
+                    params.theta_box_min = params.theta_box_max = 3.141592653589793;
+                    params.node_box_update_count = 3;
+                    params.use_parallel = true;
+                    params.use_simd = simd;
 
-                for (int call = 0; call < 3; ++call) {
-                    SCOPED_TRACE(call);
-                    // Reuse the exact mesh/cache allocations with a changed
-                    // externally prescribed fixed pose. Stale particle and
-                    // caller candidate coordinates must not survive the call.
-                    if (call != 0) {
-                        state.x_coms[rb] += Vec3(0.013, -0.009, 0.011);
-                        state.orientations[rb] = quaternion_normalize(
-                            Vec4(0.8, -0.2 + 0.01 * call, 0.3, 0.4));
+                    for (int call = 0; call < 3; ++call) {
+                        SCOPED_TRACE(call);
+                        // Reuse the exact mesh/cache allocations with a changed
+                        // externally prescribed fixed pose. Stale particle and
+                        // caller candidate coordinates must not survive the call.
+                        if (call != 0) {
+                            state.x_coms[rb] += Vec3(0.013, -0.009, 0.011);
+                            state.orientations[rb] = quaternion_normalize(
+                                Vec4(0.8, -0.2 + 0.01 * call, 0.3, 0.4));
+                        }
+                        auto positions = state.deformed_positions;
+                        for (int node : mesh.rb_nodes[rb])
+                            positions[node] = Vec3(-7, 8, -9);
+                        const auto predicted = state.deformed_positions;
+                        std::vector<Vec3> centers(1, Vec3(9, 8, 7));
+                        std::vector<Vec3> omega(1, Vec3(3, 2, 1));
+                        std::vector<Vec4> orientations(1, Vec4(1, 0, 0, 0));
+                        const auto result = global_gauss_seidel_solver_general(
+                            mesh, state, scene.adjacency, {}, params, positions,
+                            predicted, centers, orientations, omega, scene.broad_phase);
+                        ASSERT_TRUE(result.converged);
+                        EXPECT_EQ(result.iterations, params.max_global_iters);
+                        expect_vectors_bitwise_equal(centers, state.x_coms);
+                        expect_vectors_bitwise_equal(orientations, state.orientations);
+                        EXPECT_TRUE(omega[rb].isZero(0.0));
+                        for (int local = 0; local < nodes; ++local) {
+                            const Vec3 expected = world_space_position(
+                                mesh.ref_positions[rb][local], state.x_coms[rb],
+                                state.orientations[rb]);
+                            EXPECT_EQ(0, std::memcmp(
+                                positions[mesh.rb_nodes[rb][local]].data(),
+                                expected.data(), 3 * sizeof(double))) << "local=" << local;
+                        }
+                        if (mixed && call == 0)
+                            EXPECT_LT((positions[0].z() + positions[1].z()
+                                + positions[2].z()) / 3.0, -1e-5);
                     }
-                    auto positions = state.deformed_positions;
-                    for (int node : mesh.rb_nodes[rb])
-                        positions[node] = Vec3(-7, 8, -9);
-                    const auto predicted = state.deformed_positions;
-                    std::vector<Vec3> centers(1, Vec3(9, 8, 7));
-                    std::vector<Vec3> omega(1, Vec3(3, 2, 1));
-                    std::vector<Vec4> orientations(1, Vec4(1, 0, 0, 0));
-                    const auto result = global_gauss_seidel_solver_general_experimental_v2(
-                        mesh, state, scene.adjacency, {}, params, positions,
-                        predicted, centers, orientations, omega, scene.broad_phase);
-                    ASSERT_TRUE(result.converged);
-                    EXPECT_EQ(result.iterations, params.max_global_iters);
-                    expect_vectors_bitwise_equal(centers, state.x_coms);
-                    expect_vectors_bitwise_equal(orientations, state.orientations);
-                    EXPECT_TRUE(omega[rb].isZero(0.0));
-                    for (int local = 0; local < nodes; ++local) {
-                        const Vec3 expected = world_space_position(
-                            mesh.ref_positions[rb][local], state.x_coms[rb],
-                            state.orientations[rb]);
-                        EXPECT_EQ(0, std::memcmp(
-                            positions[mesh.rb_nodes[rb][local]].data(),
-                            expected.data(), 3 * sizeof(double))) << "local=" << local;
-                    }
-                    if (mixed && call == 0)
-                        EXPECT_LT((positions[0].z() + positions[1].z()
-                            + positions[2].z()) / 3.0, -1e-5);
                 }
             }
         }
@@ -551,8 +552,6 @@ TEST(GeneralSIMDSolver, PureRigidContactAndFrameDispatchMatchExplicitEntryPoints
             scene.params.friction_coefficient = friction;
         }
         auto& driven = scenes[2];
-        driven.params.use_basic_experimental = true;
-        driven.params.use_basic_experimental_v2 = true;
         driven.params.use_simd = true;
         for (int frame = 1; frame <= 2; ++frame) {
             ASSERT_TRUE(solve_and_commit(scenes[0], false).converged);
@@ -627,8 +626,6 @@ TEST(GeneralSIMDSolver, RigidFrameStorageReuseIsBitwiseEqualToFreshFrames) {
         std::array<GeneralScene, 2> scenes;
         for (auto& scene : scenes) {
             build_scene(scene, false, false, true);
-            scene.params.use_basic_experimental = true;
-            scene.params.use_basic_experimental_v2 = true;
             scene.params.use_simd = true;
             scene.params.friction_coefficient = friction;
         }
@@ -657,7 +654,6 @@ TEST(GeneralSIMDSolver, FreshRigidFrameEntryPreservesCallbackCopyCount) {
     };
     GeneralScene scene;
     build_scene(scene, false, false, true);
-    scene.params.use_basic_experimental_v2 = true;
     scene.params.use_simd = true;
     scene.params.d_hat = 0.0;
     scene.params.use_ccd = false;
@@ -722,15 +718,13 @@ TEST(GeneralSIMDSolver, ResidualComponentsMatchScalarAfterUnconvergedSweeps) {
         + results[1].final_solid_residual + results[1].final_rigid_residual);
 }
 
-TEST(GeneralSIMDSolver, GeneralFrameDispatchMatchesExplicitV2EntryPoint) {
+TEST(GeneralSIMDSolver, GeneralFrameDispatchMatchesExplicitEntryPoint) {
     RestoreOpenMP restore;
     omp_set_dynamic(0);
     omp_set_num_threads(4);
     std::array<GeneralScene, 2> scenes;
     for (auto& scene : scenes) {
         build_scene(scene);
-        scene.params.use_basic_experimental = true;
-        scene.params.use_basic_experimental_v2 = true;
         scene.params.use_simd = true;
         scene.params.friction_coefficient = 0.2;
     }
@@ -743,7 +737,7 @@ TEST(GeneralSIMDSolver, GeneralFrameDispatchMatchesExplicitV2EntryPoint) {
     }
 }
 
-TEST(GeneralSIMDSolver, PureClothEntryMatchesBasicV2AcrossContactAndFrictionModes) {
+TEST(GeneralSIMDSolver, PureClothEntryMatchesClothSolverAcrossContactAndFrictionModes) {
     RestoreOpenMP restore;
     omp_set_dynamic(0);
     for (int execution : {0, 1, 2}) {
@@ -763,7 +757,7 @@ TEST(GeneralSIMDSolver, PureClothEntryMatchesBasicV2AcrossContactAndFrictionMode
                 }
             }
             for (int frame = 0; frame < 2; ++frame) {
-                const auto basic = solve_basic_v2_and_commit(scenes[0]);
+                const auto basic = solve_cloth_and_commit(scenes[0]);
                 const auto general = solve_and_commit(scenes[1], true);
                 ASSERT_TRUE(basic.converged);
                 ASSERT_TRUE(general.converged);
@@ -785,7 +779,7 @@ TEST(GeneralSIMDSolver, PureClothEntryMatchesBasicV2AcrossContactAndFrictionMode
     }
 }
 
-TEST(GeneralSIMDSolver, MixedSceneClothSweepMatchesBasicV2WithoutCrossTypeCoupling) {
+TEST(GeneralSIMDSolver, MixedSceneClothSweepMatchesClothWithoutCrossTypeCoupling) {
     RestoreOpenMP restore;
     omp_set_dynamic(0);
     omp_set_num_threads(4);
@@ -795,7 +789,7 @@ TEST(GeneralSIMDSolver, MixedSceneClothSweepMatchesBasicV2WithoutCrossTypeCoupli
         build_scene(basic, true, false, false);
         build_scene(general);
         for (auto* scene : {&basic, &general}) {
-            enable_v2_flags(*scene);
+            enable_simd_backend(*scene);
             scene->params.use_parallel = false;
             scene->params.max_global_iters = 1;
             scene->params.d_hat = 0.0;
@@ -812,7 +806,7 @@ TEST(GeneralSIMDSolver, MixedSceneClothSweepMatchesBasicV2WithoutCrossTypeCoupli
             general.state.deformed_positions[node].x() += 5.0;
         general.state.x_coms[0].x() += 10.0;
         sync_rigid_body_particles(general.mesh, general.state);
-        ASSERT_TRUE(solve_basic_v2_and_commit(basic).converged);
+        ASSERT_TRUE(solve_cloth_and_commit(basic).converged);
         ASSERT_TRUE(solve_and_commit(general, true).converged);
         const auto count = basic.state.deformed_positions.size();
         expect_vectors_near(std::vector<Vec3>(general.state.deformed_positions.begin(),
@@ -825,50 +819,54 @@ TEST(GeneralSIMDSolver, MixedSceneClothSweepMatchesBasicV2WithoutCrossTypeCoupli
 TEST(GeneralSIMDSolver, FailedFirstColorRestoresParticlesAndRigidCoordinates) {
     RestoreOpenMP restore;
     omp_set_dynamic(0);
-    for (int threads : {1, 4}) {
-        SCOPED_TRACE(threads);
-        omp_set_num_threads(threads);
-        GeneralScene scene;
-        build_scene(scene);
-        scene.params.d_hat = 0.0;
-        scene.params.k_barrier = 0.0;
-        scene.params.use_ccd = false;
-        // Separate components so the first color contains cloth, solid, and
-        // rigid blocks. A cloth failure must undo other blocks in that color.
-        for (int node : scene.mesh.tet_nodes)
-            scene.state.deformed_positions[node].x() += 5.0;
-        scene.state.x_coms[0].x() += 10.0;
-        sync_rigid_body_particles(scene.mesh, scene.state);
-        std::vector<Mat22> healthy_rest = scene.mesh.Dm_inverse;
-        for (auto& dm : scene.mesh.Dm_inverse)
-            dm.setConstant(std::numeric_limits<double>::quiet_NaN());
+    for (const bool simd : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "simd=" << simd);
+        for (int threads : {1, 4}) {
+            SCOPED_TRACE(threads);
+            omp_set_num_threads(threads);
+            GeneralScene scene;
+            build_scene(scene);
+            scene.params.use_simd = simd;
+            scene.params.d_hat = 0.0;
+            scene.params.k_barrier = 0.0;
+            scene.params.use_ccd = false;
+            // Separate components so the first color contains cloth, solid, and
+            // rigid blocks. A cloth failure must undo other blocks in that color.
+            for (int node : scene.mesh.tet_nodes)
+                scene.state.deformed_positions[node].x() += 5.0;
+            scene.state.x_coms[0].x() += 10.0;
+            sync_rigid_body_particles(scene.mesh, scene.state);
+            std::vector<Mat22> healthy_rest = scene.mesh.Dm_inverse;
+            for (auto& dm : scene.mesh.Dm_inverse)
+                dm.setConstant(std::numeric_limits<double>::quiet_NaN());
 
-        auto positions = scene.state.deformed_positions;
-        auto centers = scene.state.x_coms;
-        auto orientations = scene.state.orientations;
-        std::vector<Vec3> omega(scene.state.omega.size(), Vec3::Zero());
-        const auto initial_positions = positions;
-        const auto initial_centers = centers;
-        const auto initial_orientations = orientations;
-        const auto initial_omega = omega;
-        std::vector<Vec3> predicted;
-        build_xhat(predicted, positions, scene.state.velocities, scene.params.dt());
-        for (std::size_t node = 0; node < predicted.size(); ++node)
-            if (scene.mesh.node_to_rb[node] >= 0) predicted[node] = positions[node];
-        const auto solve = [&] {
-            return global_gauss_seidel_solver_general_experimental_v2(scene.mesh,
-                scene.state, scene.adjacency, scene.pins, scene.params, positions,
-                predicted, centers, orientations, omega, scene.broad_phase);
-        };
-        EXPECT_THROW(solve(), std::runtime_error);
-        expect_vectors_bitwise_equal(positions, initial_positions);
-        expect_vectors_bitwise_equal(centers, initial_centers);
-        expect_vectors_bitwise_equal(orientations, initial_orientations);
-        expect_vectors_bitwise_equal(omega, initial_omega);
-        // A fresh rest-data allocation also refreshes the general solver's
-        // existing topology cache, isolating recovery from cache invalidation.
-        scene.mesh.Dm_inverse.swap(healthy_rest);
-        EXPECT_TRUE(solve().converged);
+            auto positions = scene.state.deformed_positions;
+            auto centers = scene.state.x_coms;
+            auto orientations = scene.state.orientations;
+            std::vector<Vec3> omega(scene.state.omega.size(), Vec3::Zero());
+            const auto initial_positions = positions;
+            const auto initial_centers = centers;
+            const auto initial_orientations = orientations;
+            const auto initial_omega = omega;
+            std::vector<Vec3> predicted;
+            build_xhat(predicted, positions, scene.state.velocities, scene.params.dt());
+            for (std::size_t node = 0; node < predicted.size(); ++node)
+                if (scene.mesh.node_to_rb[node] >= 0) predicted[node] = positions[node];
+            const auto solve = [&] {
+                return global_gauss_seidel_solver_general(scene.mesh,
+                    scene.state, scene.adjacency, scene.pins, scene.params, positions,
+                    predicted, centers, orientations, omega, scene.broad_phase);
+            };
+            EXPECT_THROW(solve(), std::runtime_error);
+            expect_vectors_bitwise_equal(positions, initial_positions);
+            expect_vectors_bitwise_equal(centers, initial_centers);
+            expect_vectors_bitwise_equal(orientations, initial_orientations);
+            expect_vectors_bitwise_equal(omega, initial_omega);
+            // A fresh rest-data allocation also refreshes the general solver's
+            // existing topology cache, isolating recovery from cache invalidation.
+            scene.mesh.Dm_inverse.swap(healthy_rest);
+            EXPECT_TRUE(solve().converged);
+        }
     }
 }
 

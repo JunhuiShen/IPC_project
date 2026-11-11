@@ -23,10 +23,6 @@ using Mat12  = Eigen::Matrix<double, 12, 12>;
 using Mat16 = Eigen::Matrix<double,16,16>;
 
 // Triangle definitions
-struct TriangleRest {
-    Vec2 X[3];
-};
-
 struct TriangleDef {
     Vec3 x[3];
 };

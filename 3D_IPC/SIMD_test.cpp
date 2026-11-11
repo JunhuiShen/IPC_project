@@ -548,7 +548,6 @@ void build_scene(ClothScene& scene) {
     params.node_box_update_count = 3;
     params.max_global_iters = 6;
     params.fixed_iters = true;
-    params.use_basic_experimental = true;
     params.use_parallel = true;
     params.use_ccd = false;
     params.use_ccd_guess = false;
@@ -618,8 +617,6 @@ TEST(SIMDSolver, AllFiveEnergyTermsMatchCompleteScalarLocalAssembly) {
     ClothScene scene;
     build_scene(scene);
     scene.params.use_simd = true;
-    scene.params.use_basic_experimental = false;
-    scene.params.use_basic_experimental_v2 = true;
     scene.params.gravity = Vec3(.7, -9.81, -.4);
     // Nonzero rest angles exercise the bending energy residual independently
     // of the reference fixture's initially flat material configuration.
@@ -639,7 +636,7 @@ TEST(SIMDSolver, AllFiveEnergyTermsMatchCompleteScalarLocalAssembly) {
     for (std::size_t node = 0; node < scene.state.deformed_positions.size(); ++node) {
         SCOPED_TRACE(::testing::Message() << "node=" << node);
         // The public checked assembly is the scalar reference even when the
-        // experimental opt-in flag is set. Check both cached and uncached
+        // SIMD backend flag is set. Check both cached and uncached
         // adjacency/shape-gradient/pin lookup paths against the same inputs.
         const auto expected = compute_local_gradient_and_hessian_no_barrier(
             static_cast<int>(node), scene.mesh, scene.adjacency, scene.pins,
@@ -664,8 +661,6 @@ TEST(SIMDSolver, AllFiveEnergyTermsMatchCompleteScalarLocalAssembly) {
 
 TEST(SIMDSolver, NoncontactSimdRemainsEnabledWithContactSdfAndFriction) {
     auto params = SimParams::zeros();
-    params.use_basic_experimental = true;
-    params.use_basic_experimental_v2 = true;
     params.use_simd = true;
     params.d_hat = 0.02;
     params.k_barrier = 3.0;
@@ -673,9 +668,12 @@ TEST(SIMDSolver, NoncontactSimdRemainsEnabledWithContactSdfAndFriction) {
     params.k_sdf = 100.0;
     params.friction_coefficient = 0.4;
     EXPECT_TRUE(physics_detail::energy_simd_enabled(params));
-    params.use_basic_experimental_v2 = false;
+    params.use_cloth_grid = true;
     EXPECT_FALSE(physics_detail::energy_simd_enabled(params));
-    params.use_basic_experimental_v2 = true;
+    params.use_cloth_grid = false;
+    params.use_ogc = true;
+    EXPECT_FALSE(physics_detail::energy_simd_enabled(params));
+    params.use_ogc = false;
     params.use_simd = false;
     EXPECT_FALSE(physics_detail::energy_simd_enabled(params));
 }
@@ -684,7 +682,6 @@ TEST(SIMDSolver, SimdEnergyAssemblyPreservesActiveSdfAndFrictionTerms) {
     ClothScene scene;
     build_scene(scene);
     auto& params = scene.params;
-    params.use_basic_experimental_v2 = true;
     params.use_simd = true;
     params.d_hat = 0.02;
     params.k_barrier = 1.0;
@@ -722,7 +719,7 @@ TEST(SIMDSolver, SimdEnergyAssemblyPreservesActiveSdfAndFrictionTerms) {
     EXPECT_GT(sdf_contribution, 1e-8);
 }
 
-TEST(SIMDSolver, V1RemainsScalarRegardlessOfSimdOrV2Flags) {
+TEST(SIMDSolver, ClothEntrySupportsBothBackendsAndRepeatableSimd) {
     RestoreOpenMPSettings restore;
     omp_set_dynamic(0);
     omp_set_num_threads(4);
@@ -731,14 +728,14 @@ TEST(SIMDSolver, V1RemainsScalarRegardlessOfSimdOrV2Flags) {
     for (std::size_t run = 0; run < scenes.size(); ++run) {
         auto& scene = scenes[run];
         scene.params.use_simd = run != 0;
-        scene.params.use_basic_experimental_v2 = run == 2;
         std::vector<Vec3> predictor;
         build_xhat(predictor, scene.state.deformed_positions,
             scene.state.velocities, scene.params.dt());
-        ASSERT_TRUE(global_gauss_seidel_solver_basic_experimental(scene.mesh,
+        ASSERT_TRUE(global_gauss_seidel_solver_cloth(scene.mesh,
             scene.adjacency, scene.pins, scene.params, scene.state.deformed_positions,
             predictor, scene.state.velocities, scene.broad_phase).converged);
-        if (run != 0) expect_state_bitwise_equal(scene.state, scenes[0].state);
+        if (run == 1) expect_state_near(scene.state, scenes[0].state);
+        if (run == 2) expect_state_bitwise_equal(scene.state, scenes[1].state);
     }
 }
 
@@ -754,13 +751,11 @@ TEST(SIMDSolver, MixedClothRigidSceneMatchesScalarWithContactAndFriction) {
             0.035, 1000.0, 0.015, Vec3(0.02, -0.1, 0.01));
         scene.mesh.build_deformable_nodes();
         scene.adjacency = build_incident_triangle_map(scene.mesh.tris);
-        scene.params.use_basic_experimental = true;
-        scene.params.use_basic_experimental_v2 = mode == 1;
         scene.params.use_simd = mode == 1;
         scene.params.d_hat = 0.02;
         scene.params.k_barrier = 1.0;
         scene.params.use_ccd = true;
-        scene.params.use_ticcd = false;
+
         scene.params.friction_coefficient = 0.2;
         scene.params.theta_box_min = 0.001;
         scene.params.theta_box_max = 0.02;
@@ -930,8 +925,6 @@ TEST(SIMDSolver, CollisionOffFixedFramesMatchScalarAndAreThreadDeterministic) {
                 << " run=" << run << " threads=" << thread_counts[run]);
             auto& scene = scenes[configuration][run];
             scene.params.use_simd = run != 0;
-            scene.params.use_basic_experimental = run == 0;
-            scene.params.use_basic_experimental_v2 = run != 0;
             scene.params.node_box_update_count = rebuild_interval;
             scene.params.max_global_iters = iteration_limits[configuration];
             omp_set_num_threads(thread_counts[run]);
@@ -995,8 +988,6 @@ TEST(SIMDSolver, SerialVertexOrderMatchesScalarWithSimdEnabled) {
     for (std::size_t run = 0; run < scenes.size(); ++run) {
         auto& scene = scenes[run];
         scene.params.use_simd = run != 0;
-        scene.params.use_basic_experimental = run == 0;
-        scene.params.use_basic_experimental_v2 = run != 0;
         const auto result = advance_one_frame(scene.state, scene.mesh,
             scene.adjacency, scene.pins, scene.params, scene.broad_phase);
         ASSERT_TRUE(result.converged);
@@ -1028,14 +1019,11 @@ TEST(SIMDSolver, ResidualStoppingMatchesScalarAcrossThreadCounts) {
         SCOPED_TRACE(::testing::Message() << "run=" << run);
         auto& scene = scenes[run];
         scene.params.use_simd = run != 0;
-        scene.params.use_basic_experimental = run == 0;
-        scene.params.use_basic_experimental_v2 = run != 0;
         omp_set_num_threads(run == 2 ? 4 : 1);
         positions[run] = scene.state.deformed_positions;
         std::vector<Vec3> predictor;
         build_xhat(predictor, positions[run], scene.state.velocities, scene.params.dt());
-        const auto solve = run == 0 ? global_gauss_seidel_solver_basic_experimental
-            : global_gauss_seidel_solver_basic_experimental_v2;
+        const auto solve = global_gauss_seidel_solver_cloth;
         results[run] = solve(
             scene.mesh, scene.adjacency, scene.pins, scene.params,
             positions[run], predictor, scene.state.velocities, scene.broad_phase,
@@ -1195,14 +1183,12 @@ TEST(SIMDV2Kernel, AoSHingeTilesMatchScalarAccumulation) {
     }
 }
 
-TEST(SIMDV2Solver, SimdFailureRestoresTheWholeColorAndJoinsWorkers) {
+TEST(SIMDClothSolver, SimdFailureRestoresTheWholeColorAndJoinsWorkers) {
     RestoreOpenMPSettings restore;
     omp_set_dynamic(0);
     omp_set_num_threads(4);
     ClothScene scene;
     build_scene(scene);
-    scene.params.use_basic_experimental = false;
-    scene.params.use_basic_experimental_v2 = true;
     scene.params.use_simd = true;
     scene.params.use_parallel = true;
     scene.params.fixed_iters = true;
@@ -1210,7 +1196,7 @@ TEST(SIMDV2Solver, SimdFailureRestoresTheWholeColorAndJoinsWorkers) {
     const auto initial = scene.state.deformed_positions;
     std::vector<Vec3> predictor;
     build_xhat(predictor, initial, scene.state.velocities, scene.params.dt());
-    EXPECT_THROW(global_gauss_seidel_solver_basic_experimental_v2(scene.mesh,
+    EXPECT_THROW(global_gauss_seidel_solver_cloth(scene.mesh,
         scene.adjacency, scene.pins, scene.params, scene.state.deformed_positions,
         predictor, scene.state.velocities, scene.broad_phase), std::runtime_error);
     for (std::size_t i = 0; i < initial.size(); ++i)
@@ -1254,7 +1240,7 @@ TEST(SIMDV2Kernel, DegenerateHingesPreserveScalarZeroOutputsInMixedTiles) {
     }
 }
 
-TEST(SIMDV2Solver, WorkerBuffersTrackScalarResultsAcrossFramesAndTeamSizes) {
+TEST(SIMDClothSolver, WorkerBuffersTrackScalarResultsAcrossFramesAndTeamSizes) {
     RestoreOpenMPSettings restore;
     omp_set_dynamic(0);
     std::vector<DeformedState> reference;
@@ -1266,8 +1252,6 @@ TEST(SIMDV2Solver, WorkerBuffersTrackScalarResultsAcrossFramesAndTeamSizes) {
     }
     for (int run = 0; run < 3; ++run) {
         auto& scene = scenes[run];
-        scene.params.use_basic_experimental = run == 0;
-        scene.params.use_basic_experimental_v2 = run != 0;
         scene.params.use_simd = run != 0;
         omp_set_num_threads(run == 1 ? 1 : 4);
         for (int frame = 1; frame <= 48; ++frame) {
@@ -1281,7 +1265,7 @@ TEST(SIMDV2Solver, WorkerBuffersTrackScalarResultsAcrossFramesAndTeamSizes) {
     }
 }
 
-TEST(SIMDV2Solver, CachedAoSLayoutRefreshesChangedHingePropertiesAndBendingMode) {
+TEST(SIMDClothSolver, CachedAoSLayoutRefreshesChangedHingePropertiesAndBendingMode) {
     RestoreOpenMPSettings restore;
     omp_set_dynamic(0);
     omp_set_num_threads(4);
@@ -1289,8 +1273,6 @@ TEST(SIMDV2Solver, CachedAoSLayoutRefreshesChangedHingePropertiesAndBendingMode)
     for (int method = 0; method < 2; ++method) {
         auto& scene = scenes[method];
         build_scene(scene);
-        scene.params.use_basic_experimental = method == 0;
-        scene.params.use_basic_experimental_v2 = method == 1;
         scene.params.use_simd = method == 1;
         scene.params.use_parallel = true;
         scene.params.fixed_iters = true;
@@ -1312,14 +1294,12 @@ TEST(SIMDV2Solver, CachedAoSLayoutRefreshesChangedHingePropertiesAndBendingMode)
     }
 }
 
-TEST(SIMDV2Solver, LaterColorFailurePreservesCompletedColorsAndJoinsWorkers) {
+TEST(SIMDClothSolver, LaterColorFailurePreservesCompletedColorsAndJoinsWorkers) {
     RestoreOpenMPSettings restore;
     omp_set_dynamic(0);
     omp_set_num_threads(4);
     ClothScene scene;
     build_scene(scene);
-    scene.params.use_basic_experimental = false;
-    scene.params.use_basic_experimental_v2 = true;
     scene.params.use_simd = true;
     scene.params.use_parallel = true;
     scene.params.fixed_iters = true;
@@ -1344,7 +1324,7 @@ TEST(SIMDV2Solver, LaterColorFailurePreservesCompletedColorsAndJoinsWorkers) {
     const auto initial = scene.state.deformed_positions;
     std::vector<Vec3> predictor;
     build_xhat(predictor, initial, scene.state.velocities, scene.params.dt());
-    EXPECT_THROW(global_gauss_seidel_solver_basic_experimental_v2(scene.mesh,
+    EXPECT_THROW(global_gauss_seidel_solver_cloth(scene.mesh,
         scene.adjacency, scene.pins, scene.params, scene.state.deformed_positions,
         predictor, scene.state.velocities, scene.broad_phase), std::runtime_error);
     double completed_movement = 0.0;
@@ -1764,7 +1744,6 @@ TEST(SIMDContact, ColoredSdfAndFrictionAssemblyTracksScalarAcrossFrames) {
         auto& scenes = cases[run];
         for(std::size_t mode=0;mode<scenes.size();++mode) {
             auto& scene=scenes[mode];build_scene(scene);
-            scene.params.use_basic_experimental_v2=mode==1;
             scene.params.use_simd=mode==1;
             scene.params.k_sdf=37.0;scene.params.eps_sdf=.003;
             scene.params.friction_coefficient=.2;

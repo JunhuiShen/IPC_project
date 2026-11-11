@@ -78,18 +78,12 @@ SolverResult global_gauss_seidel_solver_dat(const RefMesh& ref_mesh,
 // mesh surface CCD does not enforce tet inversion or analytic SDF boundaries.
 SolverResult global_jacobi_solver_level_based_ccd(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 
-// Historical cloth basic implementation from 1da4c74, in solver.cpp.
-SolverResult global_gauss_seidel_solver_basic(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
-
-// Scalar v1; selected by --use_basic_experimental true --use_simd false.
-SolverResult global_gauss_seidel_solver_basic_experimental(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
-
-// SIMD v2; selected by --use_basic_experimental true --use_simd true.
-// Gathered AoS inputs feed local energy/contact tiles and ordered accumulation.
+// Cloth Gauss-Seidel with scalar or SIMD local assembly, selected by use_simd.
+// Gathered inputs feed private energy/contact tiles with ordered accumulation.
 // Parallel batches preserve color barriers; serial updates keep vertex order.
-SolverResult global_gauss_seidel_solver_basic_experimental_v2(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
+SolverResult global_gauss_seidel_solver_cloth(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 
-// Basic cloth only: serial vertices within dependency-safe parallel grid cells.
+// Cloth grid scheduling: serial vertices within dependency-safe parallel grid cells.
 SolverResult global_gauss_seidel_solver_ambient_grid(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, BroadPhase& broad_phase, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
 
 SolverResult global_gauss_seidel_solver_ogc(const RefMesh& ref_mesh, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, const std::vector<Vec3>& v, const std::string& outdir = "", const std::vector<Vec3>* previous_positions = nullptr);
@@ -115,16 +109,11 @@ RigidEnergyDerivatives rigid_friction_derivatives(
 
 // Rigid-body solver implemented in solver.cpp. To start from the previous
 // collision-free state, initialize x_com_new and q_new from state and
-// initialize omega_new to zero.
-SolverResult global_gauss_seidel_solver_basic_rb(const RefMesh& ref_mesh, const DeformedState& state, const SimParams& params, std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new);
+// initialize omega_new to zero. Optional accepted_positions preserves the
+// exact CCD-approved proxies; scratch lends a broad phase to the SIMD backend.
+SolverResult global_gauss_seidel_solver_rb(const RefMesh& ref_mesh, const DeformedState& state, const SimParams& params, std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new, std::vector<Vec3>* accepted_positions = nullptr, BroadPhase* scratch = nullptr);
 
-// General basic solver. Cloth vertices and tetrahedral solid vertices are
-// advanced as distinct particle-block types, while every rigid body is
-// advanced through its COM and angular-velocity block. All blocks share one
-// live position array, contact cache, conflict graph, and coloring.
-SolverResult global_gauss_seidel_solver_basic_general(const RefMesh& ref_mesh, const DeformedState& state, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new, BroadPhase& broad_phase, const std::string& outdir = "");
-
-// Experimental v2 for the general cloth/solid/rigid system. Independent
-// particle batches gather AoS inputs, use local SIMD tiles, and accumulate
-// privately in incident order. Rigid contacts retain all coupled blocks.
-SolverResult global_gauss_seidel_solver_general_experimental_v2(const RefMesh& ref_mesh, const DeformedState& state, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new, BroadPhase& broad_phase, const std::string& outdir = "");
+// General cloth/solid/rigid Gauss-Seidel. All block types share live positions,
+// contact candidates, coloring, and scalar/SIMD selection through use_simd.
+// xnew returns the exact accepted rigid proxy positions for state publication.
+SolverResult global_gauss_seidel_solver_general(const RefMesh& ref_mesh, const DeformedState& state, const VertexTriangleMap& adj, const std::vector<Pin>& pins, const SimParams& params, std::vector<Vec3>& xnew, const std::vector<Vec3>& xhat, std::vector<Vec3>& x_com_new, std::vector<Vec4>& q_new, std::vector<Vec3>& omega_new, BroadPhase& broad_phase, const std::string& outdir = "");

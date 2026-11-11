@@ -67,7 +67,7 @@ replace_once(gpu_driver "    const std::string& outdir = args.outdir;"
     "    (void)ipc_gpu::solver::describe_step(params); // reject unported modes before touching output\n    std::cout << \"GPU device solver backend\\n\";\n    const std::string& outdir = args.outdir;")
 replace_once(gpu_driver "        if (fs::exists(outdir)) fs::remove_all(outdir);"
     "        if (fs::exists(outdir)) throw std::runtime_error(\"GPU run requires a new output directory (or --restart_frame)\");")
-string(FIND "${gpu_driver}" "    if (!params.use_dat && !params.use_jacobi_level_based_ccd\n        && (params.use_basic_experimental" gpu_print_begin)
+string(FIND "${gpu_driver}" "    if (!params.use_dat && !params.use_jacobi_level_based_ccd\n        && !params.use_cloth_grid" gpu_print_begin)
 string(FIND "${gpu_driver}" "    if (num_rigid_bodies > 0)" gpu_print_end)
 if(gpu_print_begin LESS 0 OR gpu_print_end LESS gpu_print_begin)
     message(FATAL_ERROR "GPU driver startup anchor missing")

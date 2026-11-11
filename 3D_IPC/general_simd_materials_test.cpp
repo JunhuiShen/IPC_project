@@ -150,7 +150,7 @@ TEST(GeneralSimdMaterials, CachedAndLiveGatherAgreeForSingletonAndMixedBatches) 
     }
 }
 
-TEST(GeneralSimdMaterials, ClothMembraneUsesBasicV2KernelAndIncidentOrder) {
+TEST(GeneralSimdMaterials, ClothMembraneUsesSharedSimdKernelAndIncidentOrder) {
     MaterialFixture fixture;
     fixture.mesh = RefMesh{};
     fixture.params = SimParams::zeros();
@@ -192,7 +192,7 @@ TEST(GeneralSimdMaterials, ClothMembraneUsesBasicV2KernelAndIncidentOrder) {
     fixture.solid.assign(node_count, 0);
     fixture.surface.assign(node_count, 0);
     // Zero mass/gravity, no pins/hinges/SDF/contact: only membrane remains.
-    // Compare to basic v2, not to scalar arithmetic that may round differently.
+    // Compare to the cloth SIMD backend; scalar arithmetic may round differently.
     const auto basic_membrane = [&](int node) {
         solver_detail::GeneralSimdVertexSystem result;
         for (const auto& [triangle, role] : fixture.incident[node]) {

@@ -33,7 +33,7 @@ void readme_defaults_test() {
         "--E", "115000", "--nu", "0.25", "--kB", "0.009", "--kpin", "1e9", "--twist_rate", "0.5",
         "--d_hat", "0.005", "--k_barrier", "100", "--node_box_min", "0.001", "--node_box_max", "0.01",
         "--fixed_iters", "--substeps", "5", "--max_substep_iters", "4", "--node_box_update_count", "10",
-        "--use_basic_experimental", "true", "--use_simd", "true", "--use_parallel", "true",
+        "--use_simd", "true", "--use_parallel", "true",
         "--outdir", "example1_output", "--format", "geo"};
     std::vector<char*> argv;for(auto& value:values)argv.push_back(value.data());
     require(args.parse(static_cast<int>(argv.size()),argv.data()),"README argument parsing failed");
@@ -64,7 +64,7 @@ void readme_defaults_test() {
     require(!describe_step(params).global_ccd_guess,"explicit no-guess selection ignored");
     // Forward the exact-bound CLI opt-in into the GPU device backend.
     IPCArgs3D exact_args;
-    values.insert(values.end(),{"--use_ticcd","false","--ccd_exact_step_bound","true"});
+    values.insert(values.end(),{"--ccd_exact_step_bound","true"});
     argv.clear();for(auto& value:values)argv.push_back(value.data());
     require(exact_args.parse(static_cast<int>(argv.size()),argv.data()),"exact-step-bound argument parsing failed");
     const auto exact_params=exact_args.to_sim_params();
@@ -306,7 +306,7 @@ void run(double friction,bool guess,RigidBodyUpdateMode mode=RigidBodyUpdateMode
     p.solid_mu=2;p.solid_lambda=3;p.gravity=Vec3(0,-.1,0);p.node_box_min=p.node_box_max=.01;
     p.node_box_update_count=2;p.max_global_iters=3;p.fixed_iters=true;p.damping=.1;
     p.theta_box_min=p.theta_box_max=.1;
-    p.use_ccd=true;p.use_ticcd=false;p.use_ccd_guess=false;p.use_colored_ccd_guess=guess&&!levels;p.colored_ccd_guess_iters=2;
+    p.use_ccd=true;p.use_ccd_guess=false;p.use_colored_ccd_guess=guess&&!levels;p.colored_ccd_guess_iters=2;
     p.use_colored_ccd_guess_level_based=levels;p.ccd_exact_step_bound=direct;
     p.d_hat=.03;p.k_barrier=1;p.friction_coefficient=friction;p.friction_velocity_epsilon=.01;
     p.k_sdf=.1;p.eps_sdf=.03;p.sdf_planes.push_back({Vec3(0,-.02,0),Vec3::UnitY()});
@@ -354,12 +354,7 @@ int main() {
     try {
         SimParams unsupported=SimParams::zeros();
         unsupported.fixed_iters=true;unsupported.use_ccd_guess=false;
-        unsupported.use_ticcd=true;
         bool rejected=false;
-        try {(void)ipc_gpu::solver::describe_step(unsupported);}
-        catch(const std::invalid_argument&){rejected=true;}
-        require(rejected,"GPU solver must not silently replace Tight-Inclusion");
-        unsupported.use_ticcd=false;
         for(bool collisions:{false,true})for(bool direct:{false,true}) {
             unsupported.use_ccd=collisions;unsupported.ccd_exact_step_bound=direct;
             const auto mapped=ipc_gpu::solver::describe_step(unsupported);
@@ -382,8 +377,8 @@ int main() {
                     "level colored predictor did not suppress global guess or preserve zero sweeps");
             }
         }
-        for(int invalid=0;invalid<8;++invalid) {
-            SimParams bad=SimParams::zeros();bad.fixed_iters=true;bad.use_ticcd=false;
+        for(int invalid=0;invalid<7;++invalid) {
+            SimParams bad=SimParams::zeros();bad.fixed_iters=true;
             bad.use_ccd_guess=false;bad.use_colored_ccd_guess_level_based=true;bad.colored_ccd_guess_iters=0;
             if(invalid==0)bad.colored_ccd_guess_iters=-1;
             if(invalid==1)bad.d_hat=-1;
@@ -391,9 +386,8 @@ int main() {
             if(invalid==3)bad.d_hat=std::numeric_limits<double>::infinity();
             if(invalid>=4)bad.ccd_exact_step_bound=true;
             if(invalid==4)bad.use_colored_ccd_guess=true; // conflicts with the level mode
-            if(invalid==5)bad.use_ticcd=true;
-            if(invalid==6)bad.use_ogc=true;
-            if(invalid==7)bad.use_dat=true; // CPU planar DAT is not a CUDA route.
+            if(invalid==5)bad.use_ogc=true;
+            if(invalid==6)bad.use_dat=true; // CPU planar DAT is not a CUDA route.
             rejected=false;
             try {(void)ipc_gpu::solver::describe_step(bad);}
             catch(const std::invalid_argument&) {rejected=true;}

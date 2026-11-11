@@ -19,7 +19,6 @@ namespace ipc_simd {
 // outputs include rest area/coefficient; dt^2 is applied during accumulation.
 inline constexpr std::size_t tile_width = 8;
 inline constexpr std::size_t contact_tile_width = 32;
-const char* tile_backend_name();
 void corotated_derivatives_tile(
     const Vec3* positions, const Mat22* dm_inverse, const double* areas,
     const Vec2* shape_gradients, std::size_t count, double mu, double lambda,

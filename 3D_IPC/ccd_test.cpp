@@ -10,6 +10,7 @@
 #include "safe_step.h"
 #include "segment_segment_distance.h"
 
+#include <tight_inclusion/ccd.hpp>
 #include <boost/multiprecision/cpp_int.hpp>
 #include <algorithm>
 #include <array>
@@ -24,6 +25,35 @@
 constexpr double kTol = 1.0e-6;
 
 namespace {
+// Independent Tight-Inclusion oracle for differential tests. Production local
+// updates use only the built-in linear kernels; the global predictor retains TI.
+namespace ccd_test_reference {
+inline CCDResult tight_inclusion(const std::array<Vec3, 4>& x,
+    const std::array<Vec3, 4>& dx, bool vertex_face) {
+    const ticcd::Array3 error = ticcd::Array3::Constant(-1.0);
+    constexpr double tolerance = 1e-6;
+    double toi = std::numeric_limits<double>::infinity();
+    double output_tolerance = tolerance;
+    const auto ccd = vertex_face ? ticcd::vertexFaceCCD : ticcd::edgeEdgeCCD;
+    const bool collision = ccd(x[0], x[1], x[2], x[3],
+        x[0] + dx[0], x[1] + dx[1], x[2] + dx[2], x[3] + dx[3],
+        error, 1e-10, toi, tolerance, 1.0, 1000000, output_tolerance,
+        ticcd::DEFAULT_NO_ZERO_TOI, ticcd::CCDRootFindingMethod::BREADTH_FIRST_SEARCH);
+    if (!collision) return {};
+    return {true, std::isfinite(toi) ? std::clamp(toi, 0.0, 1.0) : 1.0};
+}
+inline CCDResult node_triangle(const Vec3& x, const Vec3& dx,
+    const Vec3& a, const Vec3& da, const Vec3& b, const Vec3& db,
+    const Vec3& c, const Vec3& dc, double = 1e-12) {
+    return tight_inclusion({{x, a, b, c}}, {{dx, da, db, dc}}, true);
+}
+inline CCDResult segment_segment(const Vec3& a, const Vec3& da,
+    const Vec3& b, const Vec3& c, const Vec3& d, double = 1e-12) {
+    const Vec3 zero = Vec3::Zero();
+    return tight_inclusion({{a, b, c, d}}, {{da, zero, zero, zero}}, false);
+}
+} // namespace ccd_test_reference
+
 const Vec3 ZERO_DX(0.0, 0.0, 0.0);
 
 void prepare_single_vertex_contact(BroadPhase& phase, const std::vector<Vec3>& x,
@@ -166,8 +196,8 @@ double reference_single_contact_safe_step(const BroadPhase& phase, std::vector<V
     const Vec3 before = x[role], dx = clipped - before;
     if ((clipped.array() == before.array()).all()) return 0.0;
     const CCDResult collision = segment
-        ? safe_step_detail::segment_segment_vertex_ccd(phase.cache().ss_pairs[0], role, role, x, dx, false)
-        : safe_step_detail::node_triangle_vertex_ccd(phase.cache().nt_pairs[0], role, role, x, dx, false);
+        ? safe_step_detail::segment_segment_vertex_ccd(phase.cache().ss_pairs[0], role, role, x, dx)
+        : safe_step_detail::node_triangle_vertex_ccd(phase.cache().nt_pairs[0], role, role, x, dx);
     double step = collision.collision ? .9 * collision.t : 1.0;
     const std::array<Vec3, 4> start{{x[0], x[1], x[2], x[3]}};
     double magnitude = 0.0;
@@ -214,12 +244,12 @@ void expect_safe_step_matches_exact(const std::array<Vec3, 4>& points,
     }
     if (compare_contact_distance_exact(points, !segment, 0.0) == 0
         && (target.array() != points[role].array()).any()) {
-        EXPECT_THROW(per_vertex_safe_step(phase, actual, role, target, .9, true, false, false, rejections), std::runtime_error);
+        EXPECT_THROW(per_vertex_safe_step(phase, actual, role, target, .9, true, false, rejections), std::runtime_error);
         for (int i = 0; i < 4; ++i) EXPECT_TRUE((actual[i].array() == points[i].array()).all());
         return;
     }
     const double reference_step = reference_single_contact_safe_step(phase, expected, role, target, segment);
-    const double actual_step = per_vertex_safe_step(phase, actual, role, target, .9, true, false, false, rejections);
+    const double actual_step = per_vertex_safe_step(phase, actual, role, target, .9, true, false, rejections);
     const auto bits = [](double value) {
         std::uint64_t result;
         std::memcpy(&result, &value, sizeof(result));
@@ -253,10 +283,7 @@ safe_step_detail::VertexAabbRejections single_contact_aabb_rejection(
 TEST(CCDLinearRobustness, ThinTriangleInteriorHit) {
     for (double height : {2e-7, 1e-9, 1e-13}) {
         SCOPED_TRACE(height);
-        const auto r = node_triangle_only_one_node_moves(
-            Vec3(0.75, height * 0.25, 1), Vec3(0, 0, -2),
-            Vec3::Zero(), ZERO_DX, Vec3(1, 0, 0), ZERO_DX,
-            Vec3(1, height, 0), ZERO_DX, 1e-12, false);
+        const auto r = node_triangle_linear_ccd(Vec3(0.75, height * 0.25, 1), Vec3(0, 0, -2), Vec3::Zero(), ZERO_DX, Vec3(1, 0, 0), ZERO_DX, Vec3(1, height, 0), ZERO_DX, 1e-12);
         ASSERT_TRUE(r.collision);
         EXPECT_NEAR(r.t, 0.5, height < 1e-10 ? 2e-5 : 1e-12);
     }
@@ -264,10 +291,7 @@ TEST(CCDLinearRobustness, ThinTriangleInteriorHit) {
 
 TEST(CCDLinearRobustness, LargeTranslationDoesNotRoundAwayMotion) {
     const Vec3 shift = Vec3::Constant(std::ldexp(1.0, 50));
-    const auto r = node_triangle_only_one_node_moves(
-        shift + Vec3(0.25, 0.25, 0.25), Vec3(0, 0, -0.75),
-        shift, ZERO_DX, shift + Vec3(1, 0, 0), ZERO_DX,
-        shift + Vec3(0, 1, 0), ZERO_DX, 1e-12, false);
+    const auto r = node_triangle_linear_ccd(shift + Vec3(0.25, 0.25, 0.25), Vec3(0, 0, -0.75), shift, ZERO_DX, shift + Vec3(1, 0, 0), ZERO_DX, shift + Vec3(0, 1, 0), ZERO_DX, 1e-12);
     ASSERT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 1.0 / 3.0, 1e-12);
 }
@@ -276,14 +300,9 @@ TEST(CCDLinearRobustness, ScaleDoesNotOverflowOrUnderflow) {
     for (int exponent : {-500, -250, 0, 250, 500}) {
         SCOPED_TRACE(exponent);
         const double s = std::ldexp(1.0, exponent);
-        const auto nt = node_triangle_only_one_node_moves(
-            s * Vec3(0.25, 0.25, 1), s * Vec3(0, 0, -2),
-            Vec3::Zero(), ZERO_DX, s * Vec3(1, 0, 0), ZERO_DX,
-            s * Vec3(0, 1, 0), ZERO_DX, 1e-12, false);
-        const auto ss = segment_segment_only_one_node_moves(
-            s * Vec3(0, 0, 1), s * Vec3(0, 0, -2), s * Vec3(1, 0, 0),
-            s * Vec3(0.5, -1, 0), s * Vec3(0.5, 1, 0), 1e-12, false);
-        const auto translation = segment_segment_same_displacement_linear_ccd(
+        const auto nt = node_triangle_linear_ccd(s * Vec3(0.25, 0.25, 1), s * Vec3(0, 0, -2), Vec3::Zero(), ZERO_DX, s * Vec3(1, 0, 0), ZERO_DX, s * Vec3(0, 1, 0), ZERO_DX, 1e-12);
+        const auto ss = segment_segment_linear_ccd(s * Vec3(0, 0, 1), s * Vec3(0, 0, -2), s * Vec3(1, 0, 0), Vec3::Zero(), s * Vec3(0.5, -1, 0), s * Vec3(0.5, 1, 0), 1e-12);
+        const auto translation = segment_segment_linear_ccd(
             s * Vec3(0, 0, 1), s * Vec3(0, 0, -2), s * Vec3(1, 0, 1),
             s * Vec3(0, 0, -2), s * Vec3(0.5, -1, 0), s * Vec3(0.5, 1, 0));
         for (const auto& r : {nt, ss, translation}) {
@@ -296,13 +315,8 @@ TEST(CCDLinearRobustness, ScaleDoesNotOverflowOrUnderflow) {
 }
 
 TEST(CCDLinearRobustness, SmallInitialGapIsNotInitialContact) {
-    const auto nt = node_triangle_only_one_node_moves(
-        Vec3(0.25, 0.25, 5e-9), Vec3(0, 0, -1e-8),
-        Vec3::Zero(), ZERO_DX, Vec3(1, 0, 0), ZERO_DX,
-        Vec3(0, 1, 0), ZERO_DX, 1e-12, false);
-    const auto ss = segment_segment_only_one_node_moves(
-        Vec3(0, 0, 5e-9), Vec3(0, 0, -1e-8), Vec3(1, 0, 5e-9),
-        Vec3(0.5, -1, 0), Vec3(0.5, 1, 0), 1e-12, false);
+    const auto nt = node_triangle_linear_ccd(Vec3(0.25, 0.25, 5e-9), Vec3(0, 0, -1e-8), Vec3::Zero(), ZERO_DX, Vec3(1, 0, 0), ZERO_DX, Vec3(0, 1, 0), ZERO_DX, 1e-12);
+    const auto ss = segment_segment_linear_ccd(Vec3(0, 0, 5e-9), Vec3(0, 0, -1e-8), Vec3(1, 0, 5e-9), Vec3::Zero(), Vec3(0.5, -1, 0), Vec3(0.5, 1, 0), 1e-12);
     ASSERT_TRUE(nt.collision);
     EXPECT_NEAR(nt.t, 0.5, 1e-12);
     ASSERT_TRUE(ss.collision);
@@ -312,21 +326,19 @@ TEST(CCDLinearRobustness, SmallInitialGapIsNotInitialContact) {
 TEST(CCDLinearRobustness, DegeneratePrimitivesAgreeWithTICCD) {
     for (const Vec3& b : {Vec3(1, 0, 0), Vec3::Zero().eval()}) {
         const Vec3 p(0, 0, 1), dp(0, 0, -2), a = Vec3::Zero();
-        const auto linear = node_triangle_only_one_node_moves(
-            p, dp, a, ZERO_DX, b, ZERO_DX, a, ZERO_DX, 1e-12, false);
-        const auto reference = node_triangle_only_one_node_moves(
-            p, dp, a, ZERO_DX, b, ZERO_DX, a, ZERO_DX, 1e-12, true);
+        const auto linear = node_triangle_linear_ccd(p, dp, a, ZERO_DX, b, ZERO_DX, a, ZERO_DX, 1e-12);
+        const auto reference = ccd_test_reference::node_triangle(p, dp, a, ZERO_DX, b, ZERO_DX, a, ZERO_DX, 1e-12);
         ASSERT_TRUE(reference.collision);
         ASSERT_TRUE(linear.collision);
         EXPECT_NEAR(linear.t, reference.t, 2e-6);
     }
     const Vec3 p(0, 0, 1), dp(0, 0, -2), a = Vec3::Zero();
-    const auto linear = segment_segment_only_one_node_moves(p, dp, Vec3(1, 0, 0), a, a, 1e-12, false);
-    const auto reference = segment_segment_only_one_node_moves(p, dp, Vec3(1, 0, 0), a, a, 1e-12, true);
+    const auto linear = segment_segment_linear_ccd(p, dp, Vec3(1, 0, 0), Vec3::Zero(), a, a, 1e-12);
+    const auto reference = ccd_test_reference::segment_segment(p, dp, Vec3(1, 0, 0), a, a, 1e-12);
     ASSERT_TRUE(reference.collision);
     ASSERT_TRUE(linear.collision);
     EXPECT_NEAR(linear.t, reference.t, 2e-6);
-    const auto translated = segment_segment_same_displacement_linear_ccd(p, dp, p, dp, a, Vec3(1, 0, 0));
+    const auto translated = segment_segment_linear_ccd(p, dp, p, dp, a, Vec3(1, 0, 0));
     ASSERT_TRUE(translated.collision);
     EXPECT_NEAR(translated.t, 0.5, 2e-6);
 }
@@ -356,8 +368,8 @@ TEST(CCDLinearRobustness, SeededTOIAgreementWithTICCD) {
             std::array<Vec3, 4> dx{{ZERO_DX, ZERO_DX, ZERO_DX, ZERO_DX}};
             x[role] -= expected * motion;
             dx[role] = motion;
-            check(node_triangle_only_one_node_moves(x[0], dx[0], x[1], dx[1], x[2], dx[2], x[3], dx[3], 1e-12, false),
-                  node_triangle_only_one_node_moves(x[0], dx[0], x[1], dx[1], x[2], dx[2], x[3], dx[3], 1e-12, true));
+            check(node_triangle_linear_ccd(x[0], dx[0], x[1], dx[1], x[2], dx[2], x[3], dx[3], 1e-12),
+                  ccd_test_reference::node_triangle(x[0], dx[0], x[1], dx[1], x[2], dx[2], x[3], dx[3], 1e-12));
         }
         for (int reversed = 0; reversed < 2; ++reversed) {
             SCOPED_TRACE(::testing::Message() << "sample=" << sample << " SS reversed=" << reversed);
@@ -365,10 +377,10 @@ TEST(CCDLinearRobustness, SeededTOIAgreementWithTICCD) {
             const Vec3 c = transform(Vec3(0, reversed ? 1 : -1, 0));
             const Vec3 d = transform(Vec3(0, reversed ? -1 : 1, 0));
             const Vec3 start = a - expected * motion;
-            check(segment_segment_only_one_node_moves(start, motion, b, c, d, 1e-12, false),
-                  segment_segment_only_one_node_moves(start, motion, b, c, d, 1e-12, true));
+            check(segment_segment_linear_ccd(start, motion, b, Vec3::Zero(), c, d, 1e-12),
+                  ccd_test_reference::segment_segment(start, motion, b, c, d, 1e-12));
             const Vec3 end = b - expected * motion;
-            check(segment_segment_same_displacement_linear_ccd(start, motion, end, motion, c, d),
+            check(segment_segment_linear_ccd(start, motion, end, motion, c, d),
                   CCDResult{true, segment_segment_general_ccd(start, motion, end, motion, c, ZERO_DX, d, ZERO_DX)});
         }
     }
@@ -383,12 +395,10 @@ TEST(CCDLinearRobustness, SeededSeparatedQueriesAgreeWithTICCD) {
         const Eigen::Matrix3d rotation = Eigen::AngleAxisd(unit(random), axis).toRotationMatrix();
         const auto p = [&](const Vec3& x) -> Vec3 { return rotation * x; };
         for (bool reference : {false, true}) {
-            const auto nt = node_triangle_only_one_node_moves(p(Vec3(2, 2, 1)), p(Vec3(0, 0, -2)),
-                Vec3::Zero(), ZERO_DX, p(Vec3(1, 0, 0)), ZERO_DX, p(Vec3(0, 1, 0)), ZERO_DX, 1e-12, reference);
+            const auto nt = (reference ? ccd_test_reference::node_triangle(p(Vec3(2, 2, 1)), p(Vec3(0, 0, -2)), Vec3::Zero(), ZERO_DX, p(Vec3(1, 0, 0)), ZERO_DX, p(Vec3(0, 1, 0)), ZERO_DX, 1e-12) : node_triangle_linear_ccd(p(Vec3(2, 2, 1)), p(Vec3(0, 0, -2)), Vec3::Zero(), ZERO_DX, p(Vec3(1, 0, 0)), ZERO_DX, p(Vec3(0, 1, 0)), ZERO_DX, 1e-12));
             EXPECT_FALSE(nt.collision);
             EXPECT_TRUE(std::isnan(nt.t));
-            const auto ss = segment_segment_only_one_node_moves(p(Vec3(0, 0, 1)), p(Vec3(0, 0, -2)),
-                p(Vec3(1, 0, 0)), p(Vec3(2, -1, 0)), p(Vec3(2, 1, 0)), 1e-12, reference);
+            const auto ss = (reference ? ccd_test_reference::segment_segment(p(Vec3(0, 0, 1)), p(Vec3(0, 0, -2)), p(Vec3(1, 0, 0)), p(Vec3(2, -1, 0)), p(Vec3(2, 1, 0)), 1e-12) : segment_segment_linear_ccd(p(Vec3(0, 0, 1)), p(Vec3(0, 0, -2)), p(Vec3(1, 0, 0)), Vec3::Zero(), p(Vec3(2, -1, 0)), p(Vec3(2, 1, 0)), 1e-12));
             EXPECT_FALSE(ss.collision);
             EXPECT_TRUE(std::isnan(ss.t));
         }
@@ -399,8 +409,8 @@ TEST(CCDLinearRobustness, NearParallelCrossingsAgreeWithTICCD) {
     for (double angle : {1e-4, 1e-7, 1e-10, 1e-13}) {
         SCOPED_TRACE(angle);
         const Vec3 a(-1, -angle, 1), b(1, angle, 0), c(-1, 0, 0), d(1, 0, 0), dx(0, 0, -2);
-        const auto linear = segment_segment_only_one_node_moves(a, dx, b, c, d, 1e-12, false);
-        const auto reference = segment_segment_only_one_node_moves(a, dx, b, c, d, 1e-12, true);
+        const auto linear = segment_segment_linear_ccd(a, dx, b, Vec3::Zero(), c, d, 1e-12);
+        const auto reference = ccd_test_reference::segment_segment(a, dx, b, c, d, 1e-12);
         ASSERT_TRUE(linear.collision);
         ASSERT_TRUE(reference.collision);
         // Initially the exact finite-segment gap is angle/sqrt(1+4*angle^2),
@@ -420,10 +430,8 @@ TEST(CCDLinearRobustness, NearParallelCrossingsAgreeWithTICCD) {
 TEST(CCDLinearRobustness, ContactsNearTimeBoundaries) {
     for (double t : {0.0, 1e-12, 1.0 - 1e-12, 1.0}) {
         SCOPED_TRACE(t);
-        const auto nt = node_triangle_only_one_node_moves(Vec3(0.25, 0.25, t), Vec3(0, 0, -1),
-            Vec3::Zero(), ZERO_DX, Vec3(1, 0, 0), ZERO_DX, Vec3(0, 1, 0), ZERO_DX, 1e-12, false);
-        const auto ss = segment_segment_only_one_node_moves(Vec3(0, 0, t), Vec3(0, 0, -1),
-            Vec3(1, 0, 0), Vec3(0.5, -1, 0), Vec3(0.5, 1, 0), 1e-12, false);
+        const auto nt = node_triangle_linear_ccd(Vec3(0.25, 0.25, t), Vec3(0, 0, -1), Vec3::Zero(), ZERO_DX, Vec3(1, 0, 0), ZERO_DX, Vec3(0, 1, 0), ZERO_DX, 1e-12);
+        const auto ss = segment_segment_linear_ccd(Vec3(0, 0, t), Vec3(0, 0, -1), Vec3(1, 0, 0), Vec3::Zero(), Vec3(0.5, -1, 0), Vec3(0.5, 1, 0), 1e-12);
         ASSERT_TRUE(nt.collision);
         ASSERT_TRUE(ss.collision);
         EXPECT_NEAR(nt.t, t, 2e-12);
@@ -440,8 +448,8 @@ TEST(CCDLinearRobustness, RotatedThinTriangleBoundariesAgreeWithTICCD) {
                 const Vec3 p = rotation * (contact + Vec3(0, 0, 0.7));
                 const Vec3 dp = rotation * Vec3(0, 0, -2);
                 const Vec3 a = Vec3::Zero(), b = rotation * Vec3(1, 0, 0), c = rotation * Vec3(1, width, 0);
-                const auto linear = node_triangle_only_one_node_moves(p, dp, a, ZERO_DX, b, ZERO_DX, c, ZERO_DX, 1e-12, false);
-                const auto reference = node_triangle_only_one_node_moves(p, dp, a, ZERO_DX, b, ZERO_DX, c, ZERO_DX, 1e-12, true);
+                const auto linear = node_triangle_linear_ccd(p, dp, a, ZERO_DX, b, ZERO_DX, c, ZERO_DX, 1e-12);
+                const auto reference = ccd_test_reference::node_triangle(p, dp, a, ZERO_DX, b, ZERO_DX, c, ZERO_DX, 1e-12);
                 ASSERT_TRUE(reference.collision);
                 ASSERT_TRUE(linear.collision);
                 EXPECT_NEAR(linear.t, reference.t, 2e-5);
@@ -457,8 +465,8 @@ TEST(CCDLinearRobustness, CoplanarMovingTriangleAndCollapseAgreeWithTICCD) {
         const Vec3 p(px, -0.25, 0), a(-1, 0, 0), b(1, 0, 0), c(0, -1, 0), dc(0, 2, 0);
         // Reverse the motion so the point is initially outside the triangle.
         const Vec3 start = c + dc;
-        const auto linear = node_triangle_only_one_node_moves(p, ZERO_DX, a, ZERO_DX, b, ZERO_DX, start, -dc, 1e-12, false);
-        const auto reference = node_triangle_only_one_node_moves(p, ZERO_DX, a, ZERO_DX, b, ZERO_DX, start, -dc, 1e-12, true);
+        const auto linear = node_triangle_linear_ccd(p, ZERO_DX, a, ZERO_DX, b, ZERO_DX, start, -dc, 1e-12);
+        const auto reference = ccd_test_reference::node_triangle(p, ZERO_DX, a, ZERO_DX, b, ZERO_DX, start, -dc, 1e-12);
         ASSERT_TRUE(linear.collision);
         ASSERT_TRUE(reference.collision);
         EXPECT_NEAR(linear.t, px == 0.0 ? 0.625 : 0.75, 1e-12);
@@ -466,8 +474,7 @@ TEST(CCDLinearRobustness, CoplanarMovingTriangleAndCollapseAgreeWithTICCD) {
         // budget and return a wider conservative bracket.
         EXPECT_NEAR(linear.t, reference.t, 5e-5);
     }
-    const auto linear = segment_segment_only_one_node_moves(Vec3(0, 0, 1), Vec3(0, 0, -2), Vec3::Zero(),
-        Vec3(-1, 0, 0), Vec3(1, 0, 0), 1e-12, false);
+    const auto linear = segment_segment_linear_ccd(Vec3(0, 0, 1), Vec3(0, 0, -2), Vec3::Zero(), Vec3::Zero(), Vec3(-1, 0, 0), Vec3(1, 0, 0), 1e-12);
     ASSERT_TRUE(linear.collision);
     EXPECT_DOUBLE_EQ(linear.t, 0.0); // The stationary endpoint is already in contact.
 }
@@ -476,27 +483,25 @@ TEST(CCDLinearRobustness, CoplanarAndParallelNearMissesStaySeparated) {
     for (double gap : {1e-5, 1e-7, 1e-9}) {
         SCOPED_TRACE(gap);
         for (bool reference : {false, true}) {
-            EXPECT_FALSE(node_triangle_only_one_node_moves(Vec3(0.25, 0.25, gap), Vec3(0.1, 0, 0),
-                Vec3::Zero(), ZERO_DX, Vec3(1, 0, 0), ZERO_DX, Vec3(0, 1, 0), ZERO_DX, 1e-12, reference).collision);
-            EXPECT_FALSE(segment_segment_only_one_node_moves(Vec3(0, gap, 0), Vec3(0.1, 0, 0),
-                Vec3(1, gap, 0), Vec3(0, 0, 0), Vec3(1, 0, 0), 1e-12, reference).collision);
+            EXPECT_FALSE((reference ? ccd_test_reference::node_triangle(Vec3(0.25, 0.25, gap), Vec3(0.1, 0, 0), Vec3::Zero(), ZERO_DX, Vec3(1, 0, 0), ZERO_DX, Vec3(0, 1, 0), ZERO_DX, 1e-12) : node_triangle_linear_ccd(Vec3(0.25, 0.25, gap), Vec3(0.1, 0, 0), Vec3::Zero(), ZERO_DX, Vec3(1, 0, 0), ZERO_DX, Vec3(0, 1, 0), ZERO_DX, 1e-12)).collision);
+            EXPECT_FALSE((reference ? ccd_test_reference::segment_segment(Vec3(0, gap, 0), Vec3(0.1, 0, 0), Vec3(1, gap, 0), Vec3(0, 0, 0), Vec3(1, 0, 0), 1e-12) : segment_segment_linear_ccd(Vec3(0, gap, 0), Vec3(0.1, 0, 0), Vec3(1, gap, 0), Vec3::Zero(), Vec3(0, 0, 0), Vec3(1, 0, 0), 1e-12)).collision);
         }
-        EXPECT_FALSE(segment_segment_same_displacement_linear_ccd(Vec3(0, gap, 0), Vec3(0.1, 0, 0),
+        EXPECT_FALSE(segment_segment_linear_ccd(Vec3(0, gap, 0), Vec3(0.1, 0, 0),
             Vec3(1, gap, 0), Vec3(0.1, 0, 0), Vec3::Zero(), Vec3(1, 0, 0)).collision);
     }
 }
 
 TEST(CCDLinearRobustness, NearbyClothMovingAwayDoesNotFreezeSafeStep) {
     // Tilted cloth patches have overlapping swept AABBs while separated.
-    // The old 1e-8 geometric padding reported contact at t=0; TICCD correctly
-    // permits the entire step. Exercise the production vertex update path.
+    // The old 1e-8 geometric padding reported contact at t=0. Both built-in
+    // numerical policies must permit the full production vertex update.
     const Eigen::Matrix3d rotation = Eigen::AngleAxisd(0.6, Vec3(1, 0, 1).normalized()).toRotationMatrix();
     const Vec3 normal = rotation * Vec3::UnitY();
     const Vec3 fall(0, -0.001, 0);
     for (double scale : {100.0, 10000.0}) {
         const double gap = 5e-9 * scale;
         for (bool reference : {false, true}) {
-            SCOPED_TRACE(::testing::Message() << "scale=" << scale << " TICCD=" << reference);
+            SCOPED_TRACE(::testing::Message() << "scale=" << scale << " original=" << reference);
             std::vector<Vec3> x = {scale * rotation * Vec3(0.25, 0, 0.25) - gap * normal,
                 Vec3::Zero(), scale * rotation * Vec3(1, 0, 0), scale * rotation * Vec3(0, 0, 1)};
             BroadPhase bp;
@@ -510,7 +515,7 @@ TEST(CCDLinearRobustness, NearbyClothMovingAwayDoesNotFreezeSafeStep) {
             cache.nt_pairs.push_back(pair);
             cache.vertex_nt[0].push_back({0, 0});
             const Vec3 target = x[0] + fall;
-            const double step = per_vertex_safe_step(bp, x, 0, target, 0.9, true, reference);
+            const double step = per_vertex_safe_step(bp, x, 0, target, 0.9, true, false, nullptr, !reference);
             EXPECT_DOUBLE_EQ(step, 1.0);
             EXPECT_TRUE(x[0].isApprox(target, 1e-14));
         }
@@ -522,8 +527,7 @@ TEST(CCDLinearRobustness, SkinnyTriangleDoesNotFreezeAnExteriorNode) {
     // inside the triangle at t=0, although TICCD reports no contact.
     const Vec3 p(5000, 0.0002 * 0.501, 0), dx(0, 0.0002, 0);
     for (bool reference : {false, true}) {
-        const auto r = node_triangle_only_one_node_moves(p, dx, Vec3::Zero(), ZERO_DX,
-            Vec3(10000, 0, 0), ZERO_DX, Vec3(10000, 0.0002, 0), ZERO_DX, 1e-12, reference);
+        const auto r = (reference ? ccd_test_reference::node_triangle(p, dx, Vec3::Zero(), ZERO_DX, Vec3(10000, 0, 0), ZERO_DX, Vec3(10000, 0.0002, 0), ZERO_DX, 1e-12) : node_triangle_linear_ccd(p, dx, Vec3::Zero(), ZERO_DX, Vec3(10000, 0, 0), ZERO_DX, Vec3(10000, 0.0002, 0), ZERO_DX, 1e-12));
         EXPECT_FALSE(r.collision);
         EXPECT_TRUE(std::isnan(r.t));
     }
@@ -532,7 +536,7 @@ TEST(CCDLinearRobustness, SkinnyTriangleDoesNotFreezeAnExteriorNode) {
 TEST(CCDLinearRobustness, NearbyClothApproachingStillStopsBeforeContact) {
     const Vec3 a(0, 0, 0), b(1, 0, 0), c(0, 0, 1);
     const Vec3 p(0.25, 5e-9, 0.25), dx(0, -1e-8, 0);
-    const auto r = node_triangle_only_one_node_moves(p, dx, a, ZERO_DX, b, ZERO_DX, c, ZERO_DX, 1e-12, false);
+    const auto r = node_triangle_linear_ccd(p, dx, a, ZERO_DX, b, ZERO_DX, c, ZERO_DX, 1e-12);
     ASSERT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, 1e-12);
     EXPECT_GT((p + 0.9 * r.t * dx).y(), 0.0);
@@ -544,8 +548,8 @@ TEST(CCDLinearRobustness, ThinTriangleVertexHitSurvivesInterpolationRoundoff) {
     do {
         const Vec3 a = corners[permutation[0]], b = corners[permutation[1]], c = corners[permutation[2]];
         const Vec3 p(1, -0.7, -0.7), dx(0, 1, 1);
-        const auto linear = node_triangle_only_one_node_moves(p, dx, a, ZERO_DX, b, ZERO_DX, c, ZERO_DX, 1e-12, false);
-        const auto reference = node_triangle_only_one_node_moves(p, dx, a, ZERO_DX, b, ZERO_DX, c, ZERO_DX, 1e-12, true);
+        const auto linear = node_triangle_linear_ccd(p, dx, a, ZERO_DX, b, ZERO_DX, c, ZERO_DX, 1e-12);
+        const auto reference = ccd_test_reference::node_triangle(p, dx, a, ZERO_DX, b, ZERO_DX, c, ZERO_DX, 1e-12);
         ASSERT_TRUE(reference.collision);
         ASSERT_TRUE(linear.collision);
         EXPECT_NEAR(linear.t, reference.t, 2e-5);
@@ -554,7 +558,7 @@ TEST(CCDLinearRobustness, ThinTriangleVertexHitSurvivesInterpolationRoundoff) {
 
 TEST(CCDLinearRobustness, LongParallelEdgesDoNotLoseTransverseMotion) {
     const Vec3 a(0, 0, 1), b(1e170, 0, 1), c(0, 0, 0), d(1e170, 0, 0), dx(0, 0, -2);
-    const auto r = segment_segment_same_displacement_linear_ccd(a, dx, b, dx, c, d);
+    const auto r = segment_segment_linear_ccd(a, dx, b, dx, c, d);
     ASSERT_TRUE(r.collision);
     EXPECT_DOUBLE_EQ(r.t, 0.5);
 }
@@ -562,10 +566,8 @@ TEST(CCDLinearRobustness, LongParallelEdgesDoNotLoseTransverseMotion) {
 TEST(CCDLinearRobustness, PositiveInitialGapDoesNotInheritTICCDMinimumSeparation) {
     for (double direction : {-1.0, 1.0}) {
         const Vec3 p(0.25, 0.25, 5e-11), dx(0, 0, direction * 1e-10);
-        const auto linear = node_triangle_only_one_node_moves(p, dx, Vec3::Zero(), ZERO_DX,
-            Vec3(1, 0, 0), ZERO_DX, Vec3(0, 1, 0), ZERO_DX, 1e-12, false);
-        const auto reference = node_triangle_only_one_node_moves(p, dx, Vec3::Zero(), ZERO_DX,
-            Vec3(1, 0, 0), ZERO_DX, Vec3(0, 1, 0), ZERO_DX, 1e-12, true);
+        const auto linear = node_triangle_linear_ccd(p, dx, Vec3::Zero(), ZERO_DX, Vec3(1, 0, 0), ZERO_DX, Vec3(0, 1, 0), ZERO_DX, 1e-12);
+        const auto reference = ccd_test_reference::node_triangle(p, dx, Vec3::Zero(), ZERO_DX, Vec3(1, 0, 0), ZERO_DX, Vec3(0, 1, 0), ZERO_DX, 1e-12);
         // TICCD retains its existing minimum-separation behavior. The linear
         // path must permit escape and still detect a genuine future crossing.
         ASSERT_TRUE(reference.collision);
@@ -589,13 +591,11 @@ TEST(CCDLinearRobustness, PositiveSubToleranceNodeTriangleGapsAcrossMovingRoles)
             x[role].z() = gap;
             std::array<Vec3, 4> dx{{ZERO_DX, ZERO_DX, ZERO_DX, ZERO_DX}};
             dx[role] = Vec3(0.0, 0.0, 1.0e-6);
-            const auto away = node_triangle_only_one_node_moves(
-                x[0], dx[0], x[1], dx[1], x[2], dx[2], x[3], dx[3], 1e-12, false);
+            const auto away = node_triangle_linear_ccd(x[0], dx[0], x[1], dx[1], x[2], dx[2], x[3], dx[3], 1e-12);
             EXPECT_FALSE(away.collision);
             EXPECT_TRUE(std::isnan(away.t));
             dx[role] = Vec3(0.0, 0.0, -2.0 * gap);
-            const auto toward = node_triangle_only_one_node_moves(
-                x[0], dx[0], x[1], dx[1], x[2], dx[2], x[3], dx[3], 1e-12, false);
+            const auto toward = node_triangle_linear_ccd(x[0], dx[0], x[1], dx[1], x[2], dx[2], x[3], dx[3], 1e-12);
             ASSERT_TRUE(toward.collision);
             EXPECT_NEAR(toward.t, 0.5, 1e-12);
         }
@@ -611,23 +611,19 @@ TEST(CCDLinearRobustness, PositiveSubToleranceEdgeGapsAcrossMovingRoles) {
             x[role].z() = gap;
             const int partner = role ^ 1;
             const int other = role < 2 ? 2 : 0;
-            const auto away = segment_segment_only_one_node_moves(
-                x[role], Vec3(0.0, 0.0, 1.0e-6), x[partner], x[other], x[other + 1],
-                1e-12, false);
+            const auto away = segment_segment_linear_ccd(x[role], Vec3(0.0, 0.0, 1.0e-6), x[partner], Vec3::Zero(), x[other], x[other + 1], 1e-12);
             EXPECT_FALSE(away.collision);
             EXPECT_TRUE(std::isnan(away.t));
-            const auto toward = segment_segment_only_one_node_moves(
-                x[role], Vec3(0.0, 0.0, -2.0 * gap), x[partner], x[other], x[other + 1],
-                1e-12, false);
+            const auto toward = segment_segment_linear_ccd(x[role], Vec3(0.0, 0.0, -2.0 * gap), x[partner], Vec3::Zero(), x[other], x[other + 1], 1e-12);
             ASSERT_TRUE(toward.collision);
             EXPECT_NEAR(toward.t, 0.5, 1e-12);
         }
         const Vec3 a(-1.0, 0.0, gap), b(1.0, 0.0, gap);
         const Vec3 c(0.0, -1.0, 0.0), d(0.0, 1.0, 0.0);
         const Vec3 away_motion(0.0, 0.0, 1.0e-6), toward_motion(0.0, 0.0, -2.0 * gap);
-        EXPECT_FALSE(segment_segment_same_displacement_linear_ccd(
+        EXPECT_FALSE(segment_segment_linear_ccd(
             a, away_motion, b, away_motion, c, d).collision);
-        const auto toward = segment_segment_same_displacement_linear_ccd(
+        const auto toward = segment_segment_linear_ccd(
             a, toward_motion, b, toward_motion, c, d);
         ASSERT_TRUE(toward.collision);
         EXPECT_NEAR(toward.t, 0.5, 1e-12);
@@ -644,20 +640,16 @@ TEST(CCDLinearRobustness, SubFloorSafeStepPreservesGapAndAllowsSubsequentEscape)
     cache.vertex_ss.resize(4);
     cache.nt_pairs.push_back(NodeTrianglePair{0, {1, 2, 3}});
     cache.vertex_nt[0].push_back({0, 0});
-    const double approach_step = per_vertex_safe_step(
-        bp, x, 0, x[0] + Vec3(0.0, 0.0, -1.0e-6), 0.9, true, false);
+    const double approach_step = per_vertex_safe_step(bp, x, 0, x[0] + Vec3(0.0, 0.0, -1.0e-6), 0.9, true);
     EXPECT_DOUBLE_EQ(approach_step, 0.0);
     EXPECT_DOUBLE_EQ(x[0].z(), 1.1e-10);
     // Bypass the swept-AABB prefilter too: the axis-aligned triangle's AABB
     // alone can reject an outward move, concealing a broken CCD t=0 result.
-    const auto direct_escape = node_triangle_only_one_node_moves(
-        x[0], Vec3(0.0, 0.0, 1.0e-6), x[1], ZERO_DX,
-        x[2], ZERO_DX, x[3], ZERO_DX, 1e-12, false);
+    const auto direct_escape = node_triangle_linear_ccd(x[0], Vec3(0.0, 0.0, 1.0e-6), x[1], ZERO_DX, x[2], ZERO_DX, x[3], ZERO_DX, 1e-12);
     EXPECT_FALSE(direct_escape.collision);
     EXPECT_TRUE(std::isnan(direct_escape.t));
     const Vec3 escape_target = x[0] + Vec3(0.0, 0.0, 1.0e-6);
-    const double escape_step = per_vertex_safe_step(
-        bp, x, 0, escape_target, 0.9, true, false);
+    const double escape_step = per_vertex_safe_step(bp, x, 0, escape_target, 0.9, true);
     EXPECT_DOUBLE_EQ(escape_step, 1.0);
     EXPECT_TRUE(x[0].isApprox(escape_target, 1.0e-15));
 }
@@ -674,7 +666,7 @@ TEST(CCDSafeStepMargin, RepeatedInwardStepsPreserveFloorForEveryContactRole) {
             Vec3 target = x[role];
             target.z() = -.1;
             for (int attempt = 0; attempt < 30; ++attempt) {
-                const double step = per_vertex_safe_step(phase, x, role, target, .9, true, false);
+                const double step = per_vertex_safe_step(phase, x, role, target, .9, true);
                 EXPECT_GE(step, 0.0);
                 EXPECT_LE(step, 1.0);
                 EXPECT_GT(x[role].z(), 0.0);
@@ -700,10 +692,10 @@ TEST(CCDSafeStepMargin, SubFloorInwardMotionIsRejectedAndOutwardMotionIsAccepted
                 prepare_single_vertex_contact(phase, x, segment, role);
                 Vec3 target = before;
                 target.z() = .5 * gap;
-                EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, x, role, target, .9, true, false), 0.0);
+                EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, x, role, target, .9, true), 0.0);
                 EXPECT_TRUE((x[role].array() == before.array()).all());
                 target.z() = 2.0 * gap;
-                EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, x, role, target, .9, true, false), 1.0);
+                EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, x, role, target, .9, true), 1.0);
                 EXPECT_TRUE((x[role].array() == target.array()).all());
             }
         }
@@ -725,14 +717,14 @@ TEST(CCDSafeStepMargin, RoundedCommitCannotEraseOneUlpGapOrChangeSides) {
                 prepare_single_vertex_contact(phase, x, segment, role);
                 Vec3 target = before;
                 target.z() = plane_height - .5;
-                per_vertex_safe_step(phase, x, role, target, .9, true, false);
+                per_vertex_safe_step(phase, x, role, target, .9, true);
                 // The next inward representable height is exactly the contact
                 // plane. An abstract positive TOI is insufficient to approve it.
                 EXPECT_TRUE((x[role].array() == before.array()).all());
                 EXPECT_GT(x[role].z(), plane_height);
                 EXPECT_GE(contact_distance(x, segment), initial_distance);
                 target.z() = plane_height + 1e-4;
-                EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, x, role, target, .9, true, false), 1.0);
+                EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, x, role, target, .9, true), 1.0);
                 EXPECT_TRUE((x[role].array() == target.array()).all());
             }
         }
@@ -747,7 +739,7 @@ TEST(CCDSafeStepMargin, RepresentableSmallSeparatingMoveIsNotDiscarded) {
     prepare_single_vertex_contact(phase, x, false, 0);
     const Vec3 target = x[0] + Vec3(0, 0, 1e-15);
     ASSERT_GT(target.z(), before[0].z());
-    EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, x, 0, target, .9, true, false), 1.0);
+    EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, x, 0, target, .9, true), 1.0);
     EXPECT_TRUE((x[0].array() == target.array()).all());
     for (int role = 1; role < 4; ++role)
         EXPECT_TRUE((x[role].array() == before[role].array()).all());
@@ -784,8 +776,7 @@ TEST(CCDSafeStepMargin, ObliquePlaneCertificatesPreserveExactEndpointAndPathSafe
                         box.min -= Vec3::Constant(4 * scale);
                         box.max += Vec3::Constant(4 * scale);
                     }
-                    const double step = per_vertex_safe_step(
-                        phase, x, role, target, 0.9, true, false);
+                    const double step = per_vertex_safe_step(phase, x, role, target, 0.9, true);
                     EXPECT_GT(step, 0.0);
                     EXPECT_LE(step, 1.0);
                     const std::array<Vec3, 4> end{{x[0], x[1], x[2], x[3]}};
@@ -925,8 +916,7 @@ TEST(CCDSafeStepMargin, TrueInitialTouchThrowsWithoutChangingTheVertex) {
                 const Vec3 before = x[role];
                 BroadPhase phase;
                 prepare_single_vertex_contact(phase, x, segment, role);
-                EXPECT_THROW(per_vertex_safe_step(phase, x, role,
-                    before + Vec3(0, 0, direction * 1e-4), .9, true, false), std::runtime_error);
+                EXPECT_THROW(per_vertex_safe_step(phase, x, role, before + Vec3(0, 0, direction * 1e-4), .9, true), std::runtime_error);
                 EXPECT_TRUE((x[role].array() == before.array()).all());
             }
         }
@@ -946,7 +936,7 @@ TEST(CCDSafeStepMargin, IllConditionedTriangleCannotBypassTheExistingGapFloor) {
     target.z() = 5e-12;
     // The exact projection is inside (y < 1e-7*x), while a cancellation-prone
     // Gram solve can select an edge and substantially overestimate the gap.
-    EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, x, 0, target, .9, true, false), 0.0);
+    EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, x, 0, target, .9, true), 0.0);
     EXPECT_TRUE((x[0].array() == before.array()).all());
 }
 
@@ -1598,13 +1588,9 @@ TEST(CCDLinearRobustness, SavedExample20FrozenSpotNodesCanSeparate) {
             EXPECT_EQ(prepared.test(endpoint), exact_contact_step_result(original, end, true, 1e-8));
             EXPECT_EQ(prepared.test(endpoint), reference_exact_contact_step(original, end, true, 1e-8));
         }
-        const auto away = node_triangle_only_one_node_moves(
-            original[0], outward, original[1], ZERO_DX,
-            original[2], ZERO_DX, original[3], ZERO_DX, 1e-12, false);
+        const auto away = node_triangle_linear_ccd(original[0], outward, original[1], ZERO_DX, original[2], ZERO_DX, original[3], ZERO_DX, 1e-12);
         EXPECT_FALSE(away.collision);
-        const auto toward = node_triangle_only_one_node_moves(
-            original[0], -outward, original[1], ZERO_DX,
-            original[2], ZERO_DX, original[3], ZERO_DX, 1e-12, false);
+        const auto toward = node_triangle_linear_ccd(original[0], -outward, original[1], ZERO_DX, original[2], ZERO_DX, original[3], ZERO_DX, 1e-12);
         ASSERT_TRUE(toward.collision);
         EXPECT_GT(toward.t, 0.0);
         EXPECT_LT(toward.t, 1.0e-3);
@@ -1619,7 +1605,7 @@ TEST(CCDLinearRobustness, SavedExample20FrozenSpotNodesCanSeparate) {
         cache.nt_pairs.push_back(NodeTrianglePair{0, {1, 2, 3}});
         cache.vertex_nt[0].push_back({0, 0});
         const Vec3 target = x[0] + outward;
-        EXPECT_DOUBLE_EQ(per_vertex_safe_step(bp, x, 0, target, 0.9, true, false), 1.0);
+        EXPECT_DOUBLE_EQ(per_vertex_safe_step(bp, x, 0, target, 0.9, true), 1.0);
         EXPECT_TRUE(x[0].isApprox(target, 1.0e-15));
     }
 }
@@ -1627,10 +1613,7 @@ TEST(CCDLinearRobustness, SavedExample20FrozenSpotNodesCanSeparate) {
 TEST(CCDLinearRobustness, CoplanarPositiveGapRejectsUnrelatedNearZeroEvent) {
     // Crossing y=0 at t=1e-20 is not contact: x remains strictly negative.
     // Reusing the far-query membership tolerance would invent a tiny TOI.
-    const auto miss = node_triangle_only_one_node_moves(
-        Vec3(-1.0e-11, 1.0e-20, 0.0), Vec3(-1.0, -1.0, 0.0),
-        Vec3::Zero(), ZERO_DX, Vec3::UnitX(), ZERO_DX, Vec3::UnitY(), ZERO_DX,
-        1e-12, false);
+    const auto miss = node_triangle_linear_ccd(Vec3(-1.0e-11, 1.0e-20, 0.0), Vec3(-1.0, -1.0, 0.0), Vec3::Zero(), ZERO_DX, Vec3::UnitX(), ZERO_DX, Vec3::UnitY(), ZERO_DX, 1e-12);
     EXPECT_FALSE(miss.collision);
     EXPECT_TRUE(std::isnan(miss.t));
 }
@@ -1639,32 +1622,22 @@ TEST(CCDLinearRobustness, CoplanarAndDegenerateSubToleranceMotionKeepsTrueEvents
     constexpr double gap = 1.0e-11;
     const Vec3 away(-1.0e-6, 0.0, 0.0), toward(2.0 * gap, 0.0, 0.0);
     const Vec3 point(-gap, 0.25, 0.0);
-    EXPECT_FALSE(node_triangle_only_one_node_moves(point, away,
-        Vec3::Zero(), ZERO_DX, Vec3::UnitX(), ZERO_DX, Vec3::UnitY(), ZERO_DX,
-        1e-12, false).collision);
-    const auto triangle_hit = node_triangle_only_one_node_moves(point, toward,
-        Vec3::Zero(), ZERO_DX, Vec3::UnitX(), ZERO_DX, Vec3::UnitY(), ZERO_DX,
-        1e-12, false);
+    EXPECT_FALSE(node_triangle_linear_ccd(point, away, Vec3::Zero(), ZERO_DX, Vec3::UnitX(), ZERO_DX, Vec3::UnitY(), ZERO_DX, 1e-12).collision);
+    const auto triangle_hit = node_triangle_linear_ccd(point, toward, Vec3::Zero(), ZERO_DX, Vec3::UnitX(), ZERO_DX, Vec3::UnitY(), ZERO_DX, 1e-12);
     ASSERT_TRUE(triangle_hit.collision);
     EXPECT_NEAR(triangle_hit.t, 0.5, 1e-12);
     const Vec3 endpoint(-gap, 0.0, 0.0);
-    EXPECT_FALSE(node_triangle_only_one_node_moves(endpoint, away,
-        Vec3::Zero(), ZERO_DX, Vec3::Zero(), ZERO_DX, Vec3::Zero(), ZERO_DX,
-        1e-12, false).collision);
-    const auto degenerate_hit = node_triangle_only_one_node_moves(endpoint, toward,
-        Vec3::Zero(), ZERO_DX, Vec3::Zero(), ZERO_DX, Vec3::Zero(), ZERO_DX,
-        1e-12, false);
+    EXPECT_FALSE(node_triangle_linear_ccd(endpoint, away, Vec3::Zero(), ZERO_DX, Vec3::Zero(), ZERO_DX, Vec3::Zero(), ZERO_DX, 1e-12).collision);
+    const auto degenerate_hit = node_triangle_linear_ccd(endpoint, toward, Vec3::Zero(), ZERO_DX, Vec3::Zero(), ZERO_DX, Vec3::Zero(), ZERO_DX, 1e-12);
     ASSERT_TRUE(degenerate_hit.collision);
     EXPECT_NEAR(degenerate_hit.t, 0.5, 1e-12);
-    EXPECT_FALSE(segment_segment_only_one_node_moves(endpoint, away,
-        Vec3(-1.0, 0.0, 0.0), Vec3::Zero(), Vec3::Zero(), 1e-12, false).collision);
-    const auto edge_hit = segment_segment_only_one_node_moves(endpoint, toward,
-        Vec3(-1.0, 0.0, 0.0), Vec3::Zero(), Vec3::Zero(), 1e-12, false);
+    EXPECT_FALSE(segment_segment_linear_ccd(endpoint, away, Vec3(-1.0, 0.0, 0.0), Vec3::Zero(), Vec3::Zero(), Vec3::Zero(), 1e-12).collision);
+    const auto edge_hit = segment_segment_linear_ccd(endpoint, toward, Vec3(-1.0, 0.0, 0.0), Vec3::Zero(), Vec3::Zero(), Vec3::Zero(), 1e-12);
     ASSERT_TRUE(edge_hit.collision);
     EXPECT_NEAR(edge_hit.t, 0.5, 1e-12);
-    EXPECT_FALSE(segment_segment_same_displacement_linear_ccd(
+    EXPECT_FALSE(segment_segment_linear_ccd(
         endpoint, away, endpoint, away, Vec3::Zero(), Vec3::Zero()).collision);
-    const auto point_hit = segment_segment_same_displacement_linear_ccd(
+    const auto point_hit = segment_segment_linear_ccd(
         endpoint, toward, endpoint, toward, Vec3::Zero(), Vec3::Zero());
     ASSERT_TRUE(point_hit.collision);
     EXPECT_NEAR(point_hit.t, 0.5, 1e-12);
@@ -1680,19 +1653,17 @@ TEST(CCDLinearRobustness, TrueInitialIntersectionsStillReturnZeroAcrossMovingRol
             SCOPED_TRACE(::testing::Message() << "role=" << role << " sign=" << sign);
             std::array<Vec3, 4> dx{{ZERO_DX, ZERO_DX, ZERO_DX, ZERO_DX}};
             dx[role] = Vec3(0.0, 0.0, sign * 1.0e-6);
-            const auto nt_hit = node_triangle_only_one_node_moves(
-                nt[0], dx[0], nt[1], dx[1], nt[2], dx[2], nt[3], dx[3], 1e-12, false);
+            const auto nt_hit = node_triangle_linear_ccd(nt[0], dx[0], nt[1], dx[1], nt[2], dx[2], nt[3], dx[3], 1e-12);
             ASSERT_TRUE(nt_hit.collision);
             EXPECT_DOUBLE_EQ(nt_hit.t, 0.0);
             const int other = role < 2 ? 2 : 0;
-            const auto ss_hit = segment_segment_only_one_node_moves(
-                ss[role], dx[role], ss[role ^ 1], ss[other], ss[other + 1], 1e-12, false);
+            const auto ss_hit = segment_segment_linear_ccd(ss[role], dx[role], ss[role ^ 1], Vec3::Zero(), ss[other], ss[other + 1], 1e-12);
             ASSERT_TRUE(ss_hit.collision);
             EXPECT_DOUBLE_EQ(ss_hit.t, 0.0);
         }
     }
     const Vec3 motion(0.0, 0.0, 1.0e-6);
-    const auto translation = segment_segment_same_displacement_linear_ccd(
+    const auto translation = segment_segment_linear_ccd(
         ss[0], motion, ss[1], motion, ss[2], ss[3]);
     ASSERT_TRUE(translation.collision);
     EXPECT_DOUBLE_EQ(translation.t, 0.0);
@@ -1706,13 +1677,10 @@ TEST(CCDLinearRobustness, RootJustOutsideStepDoesNotCreateFalseEndpointContact) 
         const double height = after_step ? 1e9 + 1e-4 : 1e-4;
         const Vec3 dx(0, 0, after_step ? -1e9 : 1e9);
         for (bool reference : {false, true}) {
-            EXPECT_FALSE(node_triangle_only_one_node_moves(Vec3(0.25, 0.25, height), dx,
-                Vec3::Zero(), ZERO_DX, Vec3(1, 0, 0), ZERO_DX, Vec3(0, 1, 0), ZERO_DX,
-                1e-12, reference).collision);
-            EXPECT_FALSE(segment_segment_only_one_node_moves(Vec3(0, 0, height), dx, Vec3(1, 0, 0),
-                Vec3(0.5, -1, 0), Vec3(0.5, 1, 0), 1e-12, reference).collision);
+            EXPECT_FALSE((reference ? ccd_test_reference::node_triangle(Vec3(0.25, 0.25, height), dx, Vec3::Zero(), ZERO_DX, Vec3(1, 0, 0), ZERO_DX, Vec3(0, 1, 0), ZERO_DX, 1e-12) : node_triangle_linear_ccd(Vec3(0.25, 0.25, height), dx, Vec3::Zero(), ZERO_DX, Vec3(1, 0, 0), ZERO_DX, Vec3(0, 1, 0), ZERO_DX, 1e-12)).collision);
+            EXPECT_FALSE((reference ? ccd_test_reference::segment_segment(Vec3(0, 0, height), dx, Vec3(1, 0, 0), Vec3(0.5, -1, 0), Vec3(0.5, 1, 0), 1e-12) : segment_segment_linear_ccd(Vec3(0, 0, height), dx, Vec3(1, 0, 0), Vec3::Zero(), Vec3(0.5, -1, 0), Vec3(0.5, 1, 0), 1e-12)).collision);
         }
-        EXPECT_FALSE(segment_segment_same_displacement_linear_ccd(Vec3(0, 0, height), dx,
+        EXPECT_FALSE(segment_segment_linear_ccd(Vec3(0, 0, height), dx,
             Vec3(1, 0, height), dx, Vec3(0.5, -1, 0), Vec3(0.5, 1, 0)).collision);
     }
 }
@@ -1721,17 +1689,16 @@ TEST(CCDLinearRobustness, BarycentricPaddingDoesNotCreateInitialContact) {
     const Vec3 a = Vec3::Zero(), b(1e9, 0, 0), c(0, 1e9, 0);
     const Vec3 p(0.5e9, (0.5 + 5e-13) * 1e9, 0), dp(0, 1e9, 0);
     for (bool reference : {false, true}) {
-        const auto r = node_triangle_only_one_node_moves(p, dp, a, ZERO_DX, b, ZERO_DX, c, ZERO_DX, 1e-12, reference);
+        const auto r = (reference ? ccd_test_reference::node_triangle(p, dp, a, ZERO_DX, b, ZERO_DX, c, ZERO_DX, 1e-12) : node_triangle_linear_ccd(p, dp, a, ZERO_DX, b, ZERO_DX, c, ZERO_DX, 1e-12));
         EXPECT_FALSE(r.collision);
-        const auto ss = segment_segment_only_one_node_moves(Vec3(0, 0, 0), Vec3(-1, 0, 0),
-            Vec3(1e9, 0, 0), Vec3(1e9 + 5e-4, 0, 0), Vec3(2e9, 0, 0), 1e-12, reference);
+        const auto ss = (reference ? ccd_test_reference::segment_segment(Vec3(0, 0, 0), Vec3(-1, 0, 0), Vec3(1e9, 0, 0), Vec3(1e9 + 5e-4, 0, 0), Vec3(2e9, 0, 0), 1e-12) : segment_segment_linear_ccd(Vec3(0, 0, 0), Vec3(-1, 0, 0), Vec3(1e9, 0, 0), Vec3::Zero(), Vec3(1e9 + 5e-4, 0, 0), Vec3(2e9, 0, 0), 1e-12));
         EXPECT_FALSE(ss.collision);
     }
 }
 
 TEST(CCDLinearRobustness, FastTangentialMotionDoesNotHideTransverseSeparation) {
     const Vec3 a(0, 1e-4, 1), b(1e12, 1e-4, 1), c = Vec3::Zero(), d(1e12, 0, 0), dx(1e12, 0, -2);
-    const auto linear = segment_segment_same_displacement_linear_ccd(a, dx, b, dx, c, d);
+    const auto linear = segment_segment_linear_ccd(a, dx, b, dx, c, d);
     EXPECT_FALSE(linear.collision);
     EXPECT_DOUBLE_EQ(segment_segment_general_ccd(a, dx, b, dx, c, ZERO_DX, d, ZERO_DX), 1.0);
 }
@@ -1743,9 +1710,7 @@ TEST(CCDNodeTriangleSingleMovingNode, InteriorHit) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(
-        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX,
-        /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = node_triangle_linear_ccd(x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX, /*eps=*/1.0e-12);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
 }
@@ -1757,9 +1722,7 @@ TEST(CCDNodeTriangleSingleMovingNode, ParallelNoCrossing) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(
-        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX,
-        /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = node_triangle_linear_ccd(x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX, /*eps=*/1.0e-12);
     EXPECT_FALSE(r.collision);
 }
 
@@ -1770,9 +1733,7 @@ TEST(CCDNodeTriangleSingleMovingNode, CoplanarEntireStep) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(
-        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX,
-        /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = node_triangle_linear_ccd(x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX, /*eps=*/1.0e-12);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.0, kTol);
 }
@@ -1786,9 +1747,7 @@ TEST(CCDNodeTriangleSingleMovingNode, CoplanarForEntireStepEndpointHit) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(
-        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX,
-        /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = node_triangle_linear_ccd(x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX, /*eps=*/1.0e-12);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 1.0, 1.0e-12);
 }
@@ -1804,9 +1763,7 @@ TEST(CCDNodeTriangleSingleMovingNode, CoplanarCloseDistinctRootsUseTrueEntry) {
     const Vec3 x3(0.0, 1.0, 0.0);
     const double expected_t = 5.0e-8 / 90.0;
 
-    const CCDResult r = node_triangle_only_one_node_moves(
-        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX,
-        /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = node_triangle_linear_ccd(x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX, /*eps=*/1.0e-12);
 
     ASSERT_TRUE(r.collision);
     EXPECT_NEAR(r.t, expected_t, 1.0e-15);
@@ -1819,9 +1776,7 @@ TEST(CCDNodeTriangleSingleMovingNode, CandidateOutsideStepInterval) {
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(
-        x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX,
-        /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = node_triangle_linear_ccd(x, dx, x1, ZERO_DX, x2, ZERO_DX, x3, ZERO_DX, /*eps=*/1.0e-12);
     EXPECT_FALSE(r.collision);
 }
 
@@ -1840,9 +1795,7 @@ TEST(CCDNodeTriangleSingleMovingTriVertex, V0HitsStaticNode) {
     const Vec3 x2(2.0, 0.0, 0.0);
     const Vec3 x3(0.0, 2.0, 0.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(
-        x, ZERO_DX, x1, dx1, x2, ZERO_DX, x3, ZERO_DX,
-        /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = node_triangle_linear_ccd(x, ZERO_DX, x1, dx1, x2, ZERO_DX, x3, ZERO_DX, /*eps=*/1.0e-12);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
 }
@@ -1853,9 +1806,7 @@ TEST(CCDNodeTriangleSingleMovingTriVertex, V1HitsStaticNode) {
     const Vec3 x2(2.0, 0.0, 0.0), dx2(0.0, 0.0, 2.0);
     const Vec3 x3(0.0, 2.0, 0.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(
-        x, ZERO_DX, x1, ZERO_DX, x2, dx2, x3, ZERO_DX,
-        /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = node_triangle_linear_ccd(x, ZERO_DX, x1, ZERO_DX, x2, dx2, x3, ZERO_DX, /*eps=*/1.0e-12);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
 }
@@ -1866,9 +1817,7 @@ TEST(CCDNodeTriangleSingleMovingTriVertex, V2HitsStaticNode) {
     const Vec3 x2(2.0, 0.0, 0.0);
     const Vec3 x3(0.0, 2.0, 0.0), dx3(0.0, 0.0, 2.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(
-        x, ZERO_DX, x1, ZERO_DX, x2, ZERO_DX, x3, dx3,
-        /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = node_triangle_linear_ccd(x, ZERO_DX, x1, ZERO_DX, x2, ZERO_DX, x3, dx3, /*eps=*/1.0e-12);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
 }
@@ -1880,9 +1829,7 @@ TEST(CCDNodeTriangleSingleMovingTriVertex, MovingVertexCoincidesWithStaticNode) 
     const Vec3 x2(1.0, 0.0, 0.0);
     const Vec3 x3(0.0, 1.0, 0.0);
 
-    const CCDResult r = node_triangle_only_one_node_moves(
-        x, ZERO_DX, x1, dx1, x2, ZERO_DX, x3, ZERO_DX,
-        /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = node_triangle_linear_ccd(x, ZERO_DX, x1, dx1, x2, ZERO_DX, x3, ZERO_DX, /*eps=*/1.0e-12);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
 }
@@ -1894,8 +1841,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, InteriorHit) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_only_one_node_moves(
-        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = segment_segment_linear_ccd(x1, dx1, x2, Vec3::Zero(), x3, x4, /*eps=*/1.0e-12);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
 }
@@ -1907,8 +1853,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, ParallelNoCrossing) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_only_one_node_moves(
-        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = segment_segment_linear_ccd(x1, dx1, x2, Vec3::Zero(), x3, x4, /*eps=*/1.0e-12);
     EXPECT_FALSE(r.collision);
 }
 
@@ -1919,8 +1864,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, CoplanarEntireStep) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_only_one_node_moves(
-        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = segment_segment_linear_ccd(x1, dx1, x2, Vec3::Zero(), x3, x4, /*eps=*/1.0e-12);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.0, kTol);
 }
@@ -1934,8 +1878,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, CollinearForEntireStepEndpointHit) {
     const Vec3 x3(2.0, 0.0, 0.0);
     const Vec3 x4(3.0, 0.0, 0.0);
 
-    const CCDResult r = segment_segment_only_one_node_moves(
-        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = segment_segment_linear_ccd(x1, dx1, x2, Vec3::Zero(), x3, x4, /*eps=*/1.0e-12);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 1.0, 1.0e-12);
 }
@@ -1949,8 +1892,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, CoplanarForEntireStepEndpointHit) {
     const Vec3 x3(0.0, 0.0, 0.0);
     const Vec3 x4(0.0, 1.0, 0.0);
 
-    const CCDResult r = segment_segment_only_one_node_moves(
-        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = segment_segment_linear_ccd(x1, dx1, x2, Vec3::Zero(), x3, x4, /*eps=*/1.0e-12);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 1.0, 1.0e-12);
 }
@@ -1966,8 +1908,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, CoplanarCloseDistinctRootsUseTrueEntry) 
     const Vec3 x4(0.0, 4.0, 0.0);
     const double expected_t = 5.0e-10;
 
-    const CCDResult r = segment_segment_only_one_node_moves(
-        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = segment_segment_linear_ccd(x1, dx1, x2, Vec3::Zero(), x3, x4, /*eps=*/1.0e-12);
 
     ASSERT_TRUE(r.collision);
     EXPECT_NEAR(r.t, expected_t, 1.0e-15);
@@ -1980,8 +1921,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, CandidateOutsideStepInterval) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_only_one_node_moves(
-        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = segment_segment_linear_ccd(x1, dx1, x2, Vec3::Zero(), x3, x4, /*eps=*/1.0e-12);
     EXPECT_FALSE(r.collision);
 }
 
@@ -1995,8 +1935,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, NearParallelHitAtNonSampledTime) {
     const Vec3 x3(0.0, 0.0, 0.0);
     const Vec3 x4(1.0, 0.0, 0.0);
 
-    const CCDResult r = segment_segment_only_one_node_moves(
-        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = segment_segment_linear_ccd(x1, dx1, x2, Vec3::Zero(), x3, x4, /*eps=*/1.0e-12);
     EXPECT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.3, 1.0e-12);
 }
@@ -2010,8 +1949,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, NearParallelCoplanarityWithoutOverlap) {
     const Vec3 x3(2.0, 0.0, 0.0);
     const Vec3 x4(3.0, 0.0, 0.0);
 
-    const CCDResult r = segment_segment_only_one_node_moves(
-        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = segment_segment_linear_ccd(x1, dx1, x2, Vec3::Zero(), x3, x4, /*eps=*/1.0e-12);
     EXPECT_FALSE(r.collision);
 }
 
@@ -2038,8 +1976,7 @@ TEST(CCDSegmentSegmentSingleMovingNode, RepoExample4Frame9Sub6Iter5) {
         d_prev = d.distance;
     }
 
-    const CCDResult r = segment_segment_only_one_node_moves(
-        x1, dx1, x2, x3, x4, /*eps=*/1.0e-12, /*use_ticcd=*/false);
+    const CCDResult r = segment_segment_linear_ccd(x1, dx1, x2, Vec3::Zero(), x3, x4, /*eps=*/1.0e-12);
     EXPECT_FALSE(r.collision);
     EXPECT_NEAR(d_min, 4.36963887902074195e-04, 1e-15);
     EXPECT_DOUBLE_EQ(t_at_min, 0.0);
@@ -2052,7 +1989,7 @@ TEST(CCDSegmentSegmentSameDisplacement, InteriorHit) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+    const CCDResult r = segment_segment_linear_ccd(
         x1, dx, x2, dx, x3, x4);
     ASSERT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
@@ -2065,7 +2002,7 @@ TEST(CCDSegmentSegmentSameDisplacement, CoplanarityWithoutFiniteOverlap) {
     const Vec3 x3(2.0, -1.0, 0.0);
     const Vec3 x4(2.0,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+    const CCDResult r = segment_segment_linear_ccd(
         x1, dx, x2, dx, x3, x4);
     EXPECT_FALSE(r.collision);
 }
@@ -2077,7 +2014,7 @@ TEST(CCDSegmentSegmentSameDisplacement, SpatialEndpointHit) {
     const Vec3 x3(1.0, 0.0, 0.0);
     const Vec3 x4(1.0, 1.0, 0.0);
 
-    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+    const CCDResult r = segment_segment_linear_ccd(
         x1, dx, x2, dx, x3, x4);
     ASSERT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
@@ -2090,7 +2027,7 @@ TEST(CCDSegmentSegmentSameDisplacement, StepEndpointHit) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+    const CCDResult r = segment_segment_linear_ccd(
         x1, dx, x2, dx, x3, x4);
     ASSERT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 1.0, kTol);
@@ -2103,7 +2040,7 @@ TEST(CCDSegmentSegmentSameDisplacement, CZeroDNonzero) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+    const CCDResult r = segment_segment_linear_ccd(
         x1, dx, x2, dx, x3, x4);
     EXPECT_FALSE(r.collision);
 }
@@ -2115,7 +2052,7 @@ TEST(CCDSegmentSegmentSameDisplacement, CandidateOutsideStepInterval) {
     const Vec3 x3(0.5, -1.0, 0.0);
     const Vec3 x4(0.5,  1.0, 0.0);
 
-    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+    const CCDResult r = segment_segment_linear_ccd(
         x1, dx, x2, dx, x3, x4);
     EXPECT_FALSE(r.collision);
 }
@@ -2127,7 +2064,7 @@ TEST(CCDSegmentSegmentSameDisplacement, CoplanarSweep) {
     const Vec3 x3(0.5, -0.25, 0.0);
     const Vec3 x4(0.5,  0.25, 0.0);
 
-    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+    const CCDResult r = segment_segment_linear_ccd(
         x1, dx, x2, dx, x3, x4);
     ASSERT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.375, kTol);
@@ -2140,7 +2077,7 @@ TEST(CCDSegmentSegmentSameDisplacement, CoplanarSweepWithoutFiniteOverlap) {
     const Vec3 x3(0.0, 0.0, 0.0);
     const Vec3 x4(0.0, 1.0, 0.0);
 
-    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+    const CCDResult r = segment_segment_linear_ccd(
         x1, dx, x2, dx, x3, x4);
     EXPECT_FALSE(r.collision);
 }
@@ -2152,7 +2089,7 @@ TEST(CCDSegmentSegmentSameDisplacement, ParallelCollinearSweep) {
     const Vec3 x3(2.0, 0.0, 0.0);
     const Vec3 x4(3.0, 0.0, 0.0);
 
-    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+    const CCDResult r = segment_segment_linear_ccd(
         x1, dx, x2, dx, x3, x4);
     ASSERT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
@@ -2165,7 +2102,7 @@ TEST(CCDSegmentSegmentSameDisplacement, ParallelTransverseSweep) {
     const Vec3 x3(0.5, 0.0, 0.0);
     const Vec3 x4(1.5, 0.0, 0.0);
 
-    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+    const CCDResult r = segment_segment_linear_ccd(
         x1, dx, x2, dx, x3, x4);
     ASSERT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
@@ -2178,7 +2115,7 @@ TEST(CCDSegmentSegmentSameDisplacement, ParallelTransverseSweepWithoutFiniteOver
     const Vec3 x3(2.0, 0.0, 0.0);
     const Vec3 x4(3.0, 0.0, 0.0);
 
-    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+    const CCDResult r = segment_segment_linear_ccd(
         x1, dx, x2, dx, x3, x4);
     EXPECT_FALSE(r.collision);
 }
@@ -2192,7 +2129,7 @@ TEST(CCDSegmentSegmentSameDisplacement, SmallTransverseVelocityStillFindsContact
     const Vec3 x3(5.0, 0.0, 0.0);
     const Vec3 x4(6.0, 0.0, 0.0);
 
-    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+    const CCDResult r = segment_segment_linear_ccd(
         x1, dx, x2, dx, x3, x4);
     ASSERT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.6, 1.0e-12);
@@ -2208,7 +2145,7 @@ TEST(CCDSegmentSegmentSameDisplacement, NearParallelCoplanarSweepUsesTrueEntry) 
     const Vec3 x3(0.0, 0.0, 0.0);
     const Vec3 x4(1.0e8, 1.0, 0.0);
 
-    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+    const CCDResult r = segment_segment_linear_ccd(
         x1, dx, x2, dx, x3, x4);
     ASSERT_TRUE(r.collision);
     EXPECT_NEAR(r.t, 0.5, kTol);
@@ -2224,7 +2161,7 @@ TEST(CCDSegmentSegmentSameDisplacement, TinyAngleStillUsesNonparallelRoot) {
     const Vec3 x4(1.0e8, 9.0e-5, 0.0);
     const double expected_t = (2.0 - 9.0e-5) / 2.0;
 
-    const CCDResult r = segment_segment_same_displacement_linear_ccd(
+    const CCDResult r = segment_segment_linear_ccd(
         x1, dx, x2, dx, x3, x4);
     ASSERT_TRUE(r.collision);
     EXPECT_NEAR(r.t, expected_t, 1.0e-12);
@@ -2566,18 +2503,15 @@ TEST(CCDLinearRobustness, ExtremeAspectRatiosDoNotUnderflowIntoInitialContact) {
     for (double length : {1e165, 1e300}) {
         SCOPED_TRACE(length);
         const Vec3 p(0.25 * length, 0.25, 1), b(length, 0, 0), c(0, 1, 0);
-        const auto away = node_triangle_only_one_node_moves(p, Vec3(0, 0, 1),
-            zero, zero, b, zero, c, zero, 1e-12, false);
+        const auto away = node_triangle_linear_ccd(p, Vec3(0, 0, 1), zero, zero, b, zero, c, zero, 1e-12);
         EXPECT_FALSE(away.collision);
-        const auto toward = node_triangle_only_one_node_moves(p, Vec3(0, 0, -2),
-            zero, zero, b, zero, c, zero, 1e-12, false);
+        const auto toward = node_triangle_linear_ccd(p, Vec3(0, 0, -2), zero, zero, b, zero, c, zero, 1e-12);
         ASSERT_TRUE(toward.collision);
         EXPECT_DOUBLE_EQ(toward.t, 0.5);
     }
     // Translating by a far corner must not merge the two distinct vertices
     // (0,0,0) and (1,0,0) before an ambiguous query is resolved.
-    const auto thin = node_triangle_only_one_node_moves(Vec3(0.25, 0.25, 1), Vec3(0, 0, -2),
-        zero, zero, Vec3(1, 0, 0), zero, Vec3(1e18, 1e18, 0), zero, 1e-12, false);
+    const auto thin = node_triangle_linear_ccd(Vec3(0.25, 0.25, 1), Vec3(0, 0, -2), zero, zero, Vec3(1, 0, 0), zero, Vec3(1e18, 1e18, 0), zero, 1e-12);
     ASSERT_TRUE(thin.collision);
     EXPECT_DOUBLE_EQ(thin.t, 0.5);
 }
@@ -2588,29 +2522,23 @@ TEST(CCDLinearRobustness, SweptSeparationPreservesContactsAfterNormalizationLoss
     const Vec3 a = zero, b(0.5, 1, 0), c(1, 0, 0);
     // Subtracting c.x() rounds tiny to the same local coordinate as zero.
     // A clear separation is safe to reject, but a real contact must survive.
-    const auto miss = node_triangle_only_one_node_moves(Vec3(tiny, 2, 1), down,
-        a, zero, b, zero, c, zero, 1e-12, false);
+    const auto miss = node_triangle_linear_ccd(Vec3(tiny, 2, 1), down, a, zero, b, zero, c, zero, 1e-12);
     EXPECT_FALSE(miss.collision);
     for (double y : {tiny, -5e-11}) {
-        const auto hit = node_triangle_only_one_node_moves(Vec3(tiny, y, 1), down,
-            a, zero, b, zero, c, zero, 1e-12, false);
+        const auto hit = node_triangle_linear_ccd(Vec3(tiny, y, 1), down, a, zero, b, zero, c, zero, 1e-12);
         ASSERT_TRUE(hit.collision); // Includes the fixed boundary tolerance.
         EXPECT_DOUBLE_EQ(hit.t, 0.5);
     }
     const double large = std::numeric_limits<double>::max() * 0.75;
     for (double y : {-large, 0.0}) {
-        const auto r = node_triangle_only_one_node_moves(Vec3(0, y, 1), down,
-            Vec3(large, 0, 0), zero, Vec3(0, large, 0), zero,
-            Vec3(-large, 0, 0), zero, 1e-12, false);
+        const auto r = node_triangle_linear_ccd(Vec3(0, y, 1), down, Vec3(large, 0, 0), zero, Vec3(0, large, 0), zero, Vec3(-large, 0, 0), zero, 1e-12);
         EXPECT_EQ(r.collision, y == 0.0);
         if (r.collision) EXPECT_DOUBLE_EQ(r.t, 0.5);
     }
     // A positive gap remains separated even when both the entire primitive
     // and an outward displacement are much smaller than the old contact band.
     const double scale = std::ldexp(1.0, -800);
-    const auto near = node_triangle_only_one_node_moves(scale * Vec3(0.25, 0.25, 1),
-        Vec3(0, 0, std::numeric_limits<double>::denorm_min()), zero, zero,
-        scale * Vec3(1, 0, 0), zero, scale * Vec3(0, 1, 0), zero, 1e-12, false);
+    const auto near = node_triangle_linear_ccd(scale * Vec3(0.25, 0.25, 1), Vec3(0, 0, std::numeric_limits<double>::denorm_min()), zero, zero, scale * Vec3(1, 0, 0), zero, scale * Vec3(0, 1, 0), zero, 1e-12);
     EXPECT_FALSE(near.collision);
     EXPECT_TRUE(std::isnan(near.t));
 }
@@ -2635,7 +2563,7 @@ TEST(CCDIntegration, TenSeparatedClothsFollowGravityAtTenFixedIterations) {
     constexpr int subdivisions = 8;
     std::array<ClothScene, 4> scenes;
     for (int mode = 0; mode < 4; ++mode) {
-        SCOPED_TRACE(mode); // CCD off, original exact, optimized exact, TICCD.
+        SCOPED_TRACE(mode); // CCD off, unoptimized exact, optimized exact, original linear.
         auto& scene = scenes[mode];
         IPCArgs3D args;
         args.substeps = 5;
@@ -2643,8 +2571,9 @@ TEST(CCDIntegration, TenSeparatedClothsFollowGravityAtTenFixedIterations) {
         args.fixed_iters = true;
         args.gy = -9.8;
         args.use_ccd = mode != 0;
-        args.use_ticcd = mode == 3;
+
         scene.params = args.to_sim_params();
+        scene.params.exact_computation_fallback = mode != 3;
         scene.params.exact_computation_fallback_2 = mode == 2;
         const auto& params = scene.params;
         std::vector<Vec2> material;
@@ -2709,13 +2638,13 @@ TEST(CCDSafeStepMargin, CooperativeEndpointChecksMatchSerialBitsAcrossModesAndBa
             for(double dz:{0.,1e-4,-1e-4,1e-16,-1e-16}) {
                 Vec3 target=initial[role];target[2]+=dz;
                 auto expected=initial;
-                const double reference=per_vertex_safe_step(phase,expected,role,target,.9,true,false,false,nullptr,fallback);
+                const double reference=per_vertex_safe_step(phase, expected, role, target, .9, true, false, nullptr, fallback);
                 for(int threads:{1,4,8}) {
                     omp_set_num_threads(threads);
                     auto actual=initial;double step=-1.;
                     solver_detail::for_each_colored_block({{0}},[](int){return std::size_t(4096);},
                         [&](int,bool cooperative) {
-                            step=per_vertex_safe_step(phase,actual,role,target,.9,true,false,cooperative,nullptr,fallback,optimized);
+                            step=per_vertex_safe_step(phase, actual, role, target, .9, true, cooperative, nullptr, fallback, optimized);
                         });
                     EXPECT_EQ(0,std::memcmp(&step,&reference,sizeof(double)))<<"fixture="<<fixture<<" role="<<role<<" dz="<<dz;
                     for(std::size_t i=0;i<actual.size();++i)
@@ -2840,8 +2769,7 @@ TEST(CCDSafeStepMargin, RepeatedObliqueBacktrackingMatchesIndependentReferenceBi
                 target = transform * target + Vec3::Constant(shift);
                 const double reference_step = reference_single_contact_safe_step(
                     phase, expected, role, target, segment);
-                const double actual_step = per_vertex_safe_step(
-                    phase, actual, role, target, .9, true, false, false, nullptr, true, optimized);
+                const double actual_step = per_vertex_safe_step(phase, actual, role, target, .9, true, false, nullptr, true, optimized);
                 EXPECT_EQ(0, std::memcmp(&actual_step, &reference_step, sizeof(double)));
                 for (std::size_t vertex = 0; vertex < actual.size(); ++vertex)
                     EXPECT_EQ(0, std::memcmp(actual[vertex].data(), expected[vertex].data(),
@@ -3107,8 +3035,7 @@ TEST(CCDSafeStepMargin, ExperimentalExactBoundCertifiesAllRolesAndMatchesCoopera
             target.z() += role < split ? -2e-6 : 2e-6;
             const std::array<Vec3, 4> start{{initial[0], initial[1], initial[2], initial[3]}};
             auto serial = initial;
-            const double serial_step = per_vertex_safe_step(phase, serial, role, target,
-                .9, true, false, false, nullptr, true, true, true);
+            const double serial_step = per_vertex_safe_step(phase, serial, role, target, .9, true, false, nullptr, true, true, true);
             EXPECT_GT(serial_step, 0.0);
             EXPECT_LE(serial_step, 1.0);
             const std::array<Vec3, 4> end{{serial[0], serial[1], serial[2], serial[3]}};
@@ -3118,8 +3045,7 @@ TEST(CCDSafeStepMargin, ExperimentalExactBoundCertifiesAllRolesAndMatchesCoopera
             double cooperative_step = -1;
             solver_detail::for_each_colored_block({{0}}, [](int) { return std::size_t(4096); },
                 [&](int, bool enabled) {
-                    cooperative_step = per_vertex_safe_step(phase, cooperative, role, target,
-                        .9, true, false, enabled, nullptr, true, true, true);
+                    cooperative_step = per_vertex_safe_step(phase, cooperative, role, target, .9, true, enabled, nullptr, true, true, true);
                 });
             EXPECT_EQ(0, std::memcmp(&serial_step, &cooperative_step, sizeof(double)));
             for (int index = 0; index < 4; ++index) {
@@ -3147,8 +3073,7 @@ TEST(CCDSafeStepMargin, ExperimentalExactBoundCombinesEveryContactRegardlessOfOr
         cache.vertex_nt[0].push_back({reverse ? 1u : 0u, 0});
         cache.vertex_nt[0].push_back({reverse ? 0u : 1u, 0});
         auto actual = initial;
-        const double step = per_vertex_safe_step(phase, actual, 0, Vec3(.25, .25, -1e-6),
-            .9, true, false, false, nullptr, true, true, true);
+        const double step = per_vertex_safe_step(phase, actual, 0, Vec3(.25, .25, -1e-6), .9, true, false, nullptr, true, true, true);
         EXPECT_GT(step, 0.0);
         EXPECT_LT(step, 1.0);
         for (int base : {1, 4}) {
@@ -3178,20 +3103,17 @@ TEST(CCDSafeStepMargin, ExperimentalExactBoundRetainsSubFloorRoundedAndInitialCo
                 auto actual = initial;
                 Vec3 target = initial[role];
                 target.z() = plane - .5;
-                EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, actual, role, target,
-                    .9, true, false, false, nullptr, true, true, true), 0.0);
+                EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, actual, role, target, .9, true, false, nullptr, true, true, true), 0.0);
                 EXPECT_TRUE((actual[role].array() == initial[role].array()).all());
                 target.z() = plane + 1e-4;
-                EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, actual, role, target,
-                    .9, true, false, false, nullptr, true, true, true), 1.0);
+                EXPECT_DOUBLE_EQ(per_vertex_safe_step(phase, actual, role, target, .9, true, false, nullptr, true, true, true), 1.0);
                 EXPECT_TRUE((actual[role].array() == target.array()).all());
             }
             auto touching = planar_contact(segment);
             const auto before = touching;
             BroadPhase phase;
             prepare_single_vertex_contact(phase, touching, segment, role);
-            EXPECT_THROW(per_vertex_safe_step(phase, touching, role, touching[role] + Vec3(0, 0, .1),
-                .9, true, false, false, nullptr, true, true, true), std::runtime_error);
+            EXPECT_THROW(per_vertex_safe_step(phase, touching, role, touching[role] + Vec3(0, 0, .1), .9, true, false, nullptr, true, true, true), std::runtime_error);
             for (int index = 0; index < 4; ++index)
                 EXPECT_TRUE((touching[index].array() == before[index].array()).all());
         }
@@ -3204,8 +3126,7 @@ TEST(CCDSafeStepMargin, PostCcdCommitRetainsTheApprovedFraction) {
     BroadPhase phase;
     prepare_single_vertex_contact(phase, initial, false, 0);
     const Vec3 displacement(0, 0, -2);
-    const auto collision = safe_step_detail::node_triangle_vertex_ccd(
-        phase.cache().nt_pairs[0], 0, 0, initial, displacement, false);
+    const auto collision = safe_step_detail::node_triangle_vertex_ccd(phase.cache().nt_pairs[0], 0, 0, initial, displacement);
     ASSERT_TRUE(collision.collision);
     ASSERT_DOUBLE_EQ(collision.t, .5);
     // The caller can supply a more conservative prefix than .9 * TOI. The
@@ -3242,10 +3163,8 @@ TEST(CCDSafeStepMargin, PostCcdCommitMatchesOrdinaryStepAcrossContactRolesAndMod
                     target.z() += (role < split ? 1 : -1) * (approaching ? -2e-6 : 2e-6);
                     const Vec3 displacement = target - initial[role];
                     const auto collision = segment
-                        ? safe_step_detail::segment_segment_vertex_ccd(
-                            phase.cache().ss_pairs[0], role, role, initial, displacement, false)
-                        : safe_step_detail::node_triangle_vertex_ccd(
-                            phase.cache().nt_pairs[0], role, role, initial, displacement, false);
+                        ? safe_step_detail::segment_segment_vertex_ccd(phase.cache().ss_pairs[0], role, role, initial, displacement)
+                        : safe_step_detail::node_triangle_vertex_ccd(phase.cache().nt_pairs[0], role, role, initial, displacement);
                     const double approved = collision.collision ? .9 * collision.t : 1.0;
                     for (bool optimized : {false, true}) {
                         for (bool direct_bound : {false, true}) {
@@ -3254,8 +3173,7 @@ TEST(CCDSafeStepMargin, PostCcdCommitMatchesOrdinaryStepAcrossContactRolesAndMod
                                 << " approaching=" << approaching << " optimized=" << optimized
                                 << " direct_bound=" << direct_bound);
                             auto expected = initial, actual = initial;
-                            const double ordinary = per_vertex_safe_step(phase, expected, role, target,
-                                .9, true, false, false, nullptr, true, optimized, direct_bound);
+                            const double ordinary = per_vertex_safe_step(phase, expected, role, target, .9, true, false, nullptr, true, optimized, direct_bound);
                             const double finalized = safe_step_detail::commit_vertex_ccd_step(
                                 phase, actual, role, displacement, approved, false, nullptr,
                                 optimized, direct_bound);
@@ -3285,8 +3203,7 @@ TEST(CCDSafeStepMargin, DisabledExactModeKeepsItsOrdinaryCcdEndpoint) {
     const Vec3 expected = initial[0] + (target - initial[0]);
     for (bool optimized : {false, true}) {
         auto actual = initial;
-        const double step = per_vertex_safe_step(phase, actual, 0, target,
-            .9, true, false, false, nullptr, false, optimized, false);
+        const double step = per_vertex_safe_step(phase, actual, 0, target, .9, true, false, nullptr, false, optimized, false);
         EXPECT_DOUBLE_EQ(step, 1.0);
         EXPECT_EQ(0, std::memcmp(actual[0].data(), expected.data(), 3 * sizeof(double)));
         EXPECT_LT(actual[0].z(), 1e-8);
@@ -3332,18 +3249,14 @@ TEST(CCDSafeStepMargin, ExperimentalExactBoundRechecksPreviouslySafeContactsBefo
         cache.nt_pairs = {NodeTrianglePair{0, {1, 2, 3}}, NodeTrianglePair{0, {4, 5, 6}}};
         cache.vertex_nt[0] = {{0, 0}, {1, 0}};
         const Vec3 displacement = target - initial[0];
-        const auto wall_collision = safe_step_detail::node_triangle_vertex_ccd(
-            cache.nt_pairs[0], 0, 0, initial, displacement, false);
+        const auto wall_collision = safe_step_detail::node_triangle_vertex_ccd(cache.nt_pairs[0], 0, 0, initial, displacement);
         ASSERT_TRUE(wall_collision.collision);
         ASSERT_DOUBLE_EQ(wall_collision.t, 1.0);
-        ASSERT_FALSE(safe_step_detail::node_triangle_vertex_ccd(
-            cache.nt_pairs[1], 0, 0, initial, displacement, false).collision);
+        ASSERT_FALSE(safe_step_detail::node_triangle_vertex_ccd(cache.nt_pairs[1], 0, 0, initial, displacement).collision);
         auto original = initial;
         auto experimental = initial;
-        const double original_step = per_vertex_safe_step(phase, original, 0, target,
-            1.0, true, false, false, nullptr, true, optimized, false);
-        const double experimental_step = per_vertex_safe_step(phase, experimental, 0, target,
-            1.0, true, false, false, nullptr, true, optimized, true);
+        const double original_step = per_vertex_safe_step(phase, original, 0, target, 1.0, true, false, nullptr, true, optimized, false);
+        const double experimental_step = per_vertex_safe_step(phase, experimental, 0, target, 1.0, true, false, nullptr, true, optimized, true);
         auto finalized = initial;
         const double finalized_step = safe_step_detail::commit_vertex_ccd_step(
             phase, finalized, 0, displacement, 1.0, false, nullptr, optimized, true);
@@ -3362,7 +3275,7 @@ TEST(CCDSafeStepMargin, ExperimentalExactBoundRechecksPreviouslySafeContactsBefo
     }
 }
 
-TEST(CCDIntegration, BasicV2SplitCommitPreservesTheExactFloorAcrossRepeatedSweeps) {
+TEST(CCDIntegration, ClothSplitCommitPreservesTheExactFloorAcrossRepeatedSweeps) {
     struct RestoreOpenMPSettings {
         const int threads = omp_get_max_threads(), dynamic = omp_get_dynamic();
         ~RestoreOpenMPSettings() { omp_set_num_threads(threads); omp_set_dynamic(dynamic); }
@@ -3396,11 +3309,9 @@ TEST(CCDIntegration, BasicV2SplitCommitPreservesTheExactFloorAcrossRepeatedSweep
                 omp_set_num_threads(threads);
                 SimParams params = SimParams::zeros();
                 params.use_parallel = true;
-                params.use_basic_experimental = true;
-                params.use_basic_experimental_v2 = true;
                 params.use_simd = simd;
                 params.use_ccd = true;
-                params.use_ticcd = false;
+
                 params.use_ccd_guess = false;
                 params.exact_computation_fallback = mode != 0;
                 params.ccd_exact_step_bound = mode == 2;
@@ -3411,7 +3322,7 @@ TEST(CCDIntegration, BasicV2SplitCommitPreservesTheExactFloorAcrossRepeatedSweep
                 params.fixed_iters = true;
                 auto actual = initial;
                 BroadPhase phase;
-                const auto result = global_gauss_seidel_solver_basic_experimental_v2(
+                const auto result = global_gauss_seidel_solver_cloth(
                     mesh, adjacency, pins, params, actual, predicted, velocities, phase);
                 ASSERT_TRUE(result.converged);
                 EXPECT_EQ(result.iterations, 2);
@@ -3453,7 +3364,7 @@ TEST(CCDIntegration, ExperimentalExactBoundAdvancesClothThroughTheSolver) {
     args.fixed_iters = true;
     args.use_parallel = false;
     args.use_ccd = true;
-    args.use_ticcd = false;
+
     args.use_ccd_guess = false;
     args.ccd_exact_step_bound = true;
     const SimParams params = args.to_sim_params();
@@ -3719,4 +3630,47 @@ TEST(SegmentSegmentRBRotationCCD, RecordedReverseEventRetainsTheInitialGap) {
     EXPECT_LT(0.9*toi,reference);
     const auto safe_edge=edge_at(0.9*toi);
     EXPECT_FALSE(crossed(safe_edge[0],safe_edge[1],gear_before));
+}
+
+TEST(CCDLinearAPI, SupportsEitherEndpointAndCommonEdgeTranslation) {
+    const Vec3 a(0,0,1), b(1,0,1), down(0,0,-2), zero=Vec3::Zero();
+    for (bool original : {false,true}) {
+        SCOPED_TRACE(original);
+        const auto first=segment_segment_linear_ccd(a,down,b,zero,
+            Vec3(0,-1,0),Vec3(0,1,0),1e-12,original);
+        const auto second=segment_segment_linear_ccd(a,zero,b,down,
+            Vec3(1,-1,0),Vec3(1,1,0),1e-12,original);
+        const auto translated=segment_segment_linear_ccd(a,down,b,down,
+            Vec3(.5,-1,0),Vec3(.5,1,0),1e-12,original);
+        for (const auto& result : {first,second,translated}) {
+            ASSERT_TRUE(result.collision);
+            EXPECT_NEAR(result.t,.5,1e-12);
+        }
+        const auto stationary=segment_segment_linear_ccd(a,zero,b,zero,
+            Vec3(.5,-1,0),Vec3(.5,1,0),1e-12,original);
+        EXPECT_FALSE(stationary.collision);
+        EXPECT_TRUE(std::isnan(stationary.t));
+    }
+}
+
+TEST(CCDLinearAPI, RejectsUnequalNonzeroEndpointDisplacements) {
+    const Vec3 a(0,0,1), b(1,0,1), c(.5,-1,0), d(.5,1,0);
+    for (bool original : {false,true})
+        EXPECT_THROW(segment_segment_linear_ccd(a,Vec3(0,0,-2),b,
+            Vec3(0,0,-1),c,d,1e-12,original),std::invalid_argument);
+}
+
+TEST(LinearCCDPolicy, GlobalTightInclusionMatchesIndependentReference) {
+    const Vec3 a(0,0,0), b(1,0,0), c(0,1,0), zero=Vec3::Zero();
+    const Vec3 x(.2,.2,1), down(0,0,-2);
+    const auto reference=ccd_test_reference::node_triangle(x,down,a,zero,b,zero,c,zero);
+    ASSERT_TRUE(reference.collision);
+    EXPECT_DOUBLE_EQ(node_triangle_general_ccd(x,down,a,zero,b,zero,c,zero),reference.t);
+}
+
+TEST(LinearCCDPolicy, GlobalPredictorKeepsTightInclusionNearContactBehavior) {
+    const Vec3 a(0,0,0), b(1,0,0), c(0,1,0), zero=Vec3::Zero();
+    const Vec3 x(.2,.2,1e-12), away(0,0,1);
+    EXPECT_DOUBLE_EQ(node_triangle_general_ccd(x,away,a,zero,b,zero,c,zero),0.0);
+    EXPECT_FALSE(node_triangle_linear_ccd(x,away,a,zero,b,zero,c,zero).collision);
 }

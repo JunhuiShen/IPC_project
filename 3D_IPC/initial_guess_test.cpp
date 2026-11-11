@@ -253,7 +253,7 @@ BfsGuessReference replay_bfs_guess(const std::vector<Vec3>& x,
                     if (rigid(node) || reference.levels[node] != level) continue;
                     const Vec3 before = reference.result[node];
                     per_vertex_safe_step(scratch, reference.result, node, targets[node],
-                        0.9, true, false, false, nullptr, true);
+                        0.9, true, false, nullptr, true);
                     moved |= (reference.result[node].array() != before.array()).any();
                     remaining |= !((targets[node] - reference.result[node]).squaredNorm() < 1e-28);
                 }
@@ -709,15 +709,14 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, ClothFractionZeroAndOnePreserveEnd
 }
 
 TEST_P(CollisionColoredCCDInitialGuessDriver, ClothFractionPreservesFullInertialTargetForSolver) {
-    for (bool v2 : {false, true}) {
-        SCOPED_TRACE(v2);
+    for (bool simd : {false, true}) {
+        SCOPED_TRACE(simd);
         InitialGuessClothScene scene;
         select_guess(scene.params);
         scene.params.colored_ccd_guess_fraction = 0.9;
         scene.params.colored_ccd_guess_iters = 2;
         scene.params.max_global_iters = 1;
-        scene.params.use_basic_experimental_v2 = v2;
-        scene.params.use_simd = v2;
+        scene.params.use_simd = simd;
         scene.params.use_parallel = true;
         scene.state.velocities.assign(4, Vec3(0.004, 0, 0));
         const auto before = scene.state.deformed_positions;
@@ -734,8 +733,7 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, ClothFractionPreservesFullInertial
         auto expected = predictor(before, displacement, scene.mesh, scene.params, 2,
             &reference_broad_phase, nullptr, nullptr);
         const auto reduced_start = expected;
-        const auto solver = v2 ? global_gauss_seidel_solver_basic_experimental_v2
-                               : global_gauss_seidel_solver_basic;
+        const auto solver = global_gauss_seidel_solver_cloth;
         ASSERT_TRUE(solver(scene.mesh, scene.adjacency, scene.pins, scene.params,
             expected, xhat, scene.state.velocities, reference_broad_phase, "", &before).converged);
         // The inertial objective still pulls toward full xhat, not the reduced
@@ -984,10 +982,8 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, ClothOptionIsSharedByEveryClothSol
         scene.params.mu = 10.0;
         scene.params.lambda = 10.0;
         scene.params.colored_ccd_guess_iters = 1;
-        scene.params.use_basic_experimental = variant == 1;
-        scene.params.use_basic_experimental_v2 = variant == 2;
-        scene.params.use_simd = variant == 2;
-        scene.params.use_cloth_grid = variant == 3;
+        scene.params.use_simd = (variant & 1) != 0;
+        scene.params.use_cloth_grid = (variant & 2) != 0;
         scene.state.velocities[0] = Vec3(0, 0, -4);
         const auto before = scene.state.deformed_positions;
         std::vector<Vec3> xhat, displacement(before.size());
@@ -1102,15 +1098,14 @@ TEST_F(CollisionColoredCCDInitialGuess, RejectsAmbiguousRigidOwnership) {
 }
 
 TEST_P(CollisionColoredCCDInitialGuessDriver, GeneralInitialGuessUsesXhatForBothSolverVariants) {
-    for (bool v2 : {false, true}) {
+    for (bool simd : {false, true}) {
         for (bool mixed : {false, true}) {
             for (int sweeps : {0, 2}) {
-                SCOPED_TRACE(::testing::Message() << "v2=" << v2
+                SCOPED_TRACE(::testing::Message() << "simd=" << simd
                     << " mixed=" << mixed << " sweeps=" << sweeps);
                 InitialGuessSolidScene scene(mixed);
                 select_guess(scene.params);
-                scene.params.use_basic_experimental_v2 = v2;
-                scene.params.use_simd = v2;
+                scene.params.use_simd = simd;
                 scene.params.use_parallel = true;
                 scene.params.use_ccd_guess = true;
                 scene.params.gravity = Vec3(0, -9.81, 0);
@@ -1138,16 +1133,15 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, GeneralInitialGuessUsesXhatForBoth
 
 TEST_P(CollisionColoredCCDInitialGuessDriver, GeneralFractionScalesDeformablesAndKeepsRigidProxiesFixed) {
     double maximum_target_error = 0.0;
-    for (bool v2 : {false, true}) {
+    for (bool simd : {false, true}) {
         for (bool mixed : {false, true}) {
             for (double fraction : {0.0, 0.9, 1.0}) {
                 for (int sweeps : {1, 4}) {
-                    SCOPED_TRACE(::testing::Message() << "v2=" << v2 << " mixed=" << mixed
+                    SCOPED_TRACE(::testing::Message() << "simd=" << simd << " mixed=" << mixed
                         << " fraction=" << fraction << " sweeps=" << sweeps);
                     InitialGuessSolidScene scene(mixed);
                     select_guess(scene.params);
-                    scene.params.use_basic_experimental_v2 = v2;
-                    scene.params.use_simd = v2;
+                    scene.params.use_simd = simd;
                     scene.params.use_parallel = true;
                     scene.params.colored_ccd_guess_fraction = fraction;
                     scene.params.colored_ccd_guess_iters = sweeps;
@@ -1208,11 +1202,10 @@ TEST_F(CollisionColoredCCDInitialGuess, DisabledColoredFractionDoesNotAlterCcdOr
 }
 
 TEST_P(CollisionColoredCCDInitialGuessDriver, GeneralInitialGuessRebuildsLiveSubstepTargets) {
-    for (bool v2 : {false, true}) {
+    for (bool simd : {false, true}) {
         InitialGuessSolidScene scene;
         select_guess(scene.params);
-        scene.params.use_basic_experimental_v2 = v2;
-        scene.params.use_simd = v2;
+        scene.params.use_simd = simd;
         scene.params.substeps = 3;
         scene.params.colored_ccd_guess_iters = 1;
         scene.state.velocities.assign(5, Vec3(0.02, 0.04, -0.02));
@@ -1238,8 +1231,8 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, GeneralInitialGuessRebuildsLiveSub
 
 TEST_P(CollisionColoredCCDInitialGuessDriver, GeneralDriverSelectsTheRequestedCollisionPredictor) {
     for (bool with_solid : {false, true}) {
-        for (bool v2 : {false, true}) {
-            SCOPED_TRACE(::testing::Message() << "solid=" << with_solid << " v2=" << v2);
+        for (bool simd : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "solid=" << with_solid << " simd=" << simd);
             InitialGuessClothScene scene;
             select_guess(scene.params);
             if (with_solid) {
@@ -1250,8 +1243,7 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, GeneralDriverSelectsTheRequestedCo
             scene.mesh.node_to_rb.assign(scene.mesh.num_positions, -1);
             scene.mesh.build_deformable_nodes();
             scene.adjacency = build_incident_triangle_map(scene.mesh.tris);
-            scene.params.use_basic_experimental_v2 = v2;
-            scene.params.use_simd = v2;
+            scene.params.use_simd = simd;
             scene.params.colored_ccd_guess_iters = 1;
             scene.state.velocities[0] = Vec3(0, 0, -4);
             for (int node = 1; node < 4; ++node)
@@ -1275,10 +1267,9 @@ TEST_P(CollisionColoredCCDInitialGuessDriver, GeneralDriverSelectsTheRequestedCo
 }
 
 TEST_F(CollisionColoredCCDInitialGuess, DisabledGeneralOptionPreservesLegacyStart) {
-    for (bool v2 : {false, true}) {
+    for (bool simd : {false, true}) {
         InitialGuessSolidScene scene(true);
-        scene.params.use_basic_experimental_v2 = v2;
-        scene.params.use_simd = v2;
+        scene.params.use_simd = simd;
         scene.params.use_colored_ccd_guess = false;
         scene.params.colored_ccd_guess_iters = -1;
         scene.params.use_ccd_guess = true;
@@ -1509,7 +1500,7 @@ TEST_F(CollisionColoredCCDInitialGuess, MovingTriangleVertexKeepsTheSurfaceGap) 
 }
 
 TEST_F(CollisionColoredCCDInitialGuess, OriginalCCDStillPreservesTheColoredGuessGap) {
-    params.use_ticcd = false;
+
     params.exact_computation_fallback = false;
     const auto x = point_above_triangle();
     const auto mesh = point_triangle_mesh();

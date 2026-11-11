@@ -11,16 +11,6 @@ struct CCDResult {
     double t = std::numeric_limits<double>::quiet_NaN();
 };
 
-// Versioned linear kernels. Tight-Inclusion dispatch below is independent.
-CCDResult node_triangle_linear_ccd_v1(
-    const Vec3&, const Vec3&, const Vec3&, const Vec3&,
-    const Vec3&, const Vec3&, const Vec3&, const Vec3&, double eps = 1e-12);
-CCDResult node_triangle_linear_ccd_v2(
-    const Vec3&, const Vec3&, const Vec3&, const Vec3&,
-    const Vec3&, const Vec3&, const Vec3&, const Vec3&, double eps = 1e-12);
-CCDResult segment_segment_linear_ccd_v1(
-    const Vec3&, const Vec3&, const Vec3&, const Vec3&, const Vec3&, double eps = 1e-12);
-
 // Cold-path checks for a represented NT (point, a, b, c; vertex_face=true) or
 // SS (a, b, c, d; false) configuration. Original binary64 coordinates are
 // converted before arithmetic; no positive gap is clamped to a tolerance.
@@ -105,35 +95,27 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// One-moving-node NT CCD. Dispatches based on `use_ticcd`:
-//   true  (default) -> Tight-Inclusion CCD library (conservative, robust)
-//   false           -> closed-form linear CCD in a scaled local frame;
-//                       ambiguous/degenerate cases use exact rational arithmetic.
-// Linear mode never calls TICCD.
-// At most one of the four displacements may be nonzero in linear mode.
+// Built-in one-moving-node NT CCD in a scaled local frame. Ambiguous and
+// degenerate cases use exact rational arithmetic. No Tight-Inclusion dispatch.
+// At most one of the four displacements may be nonzero.
 // eps sets dimensionless time/membership ambiguity tolerances, not a distance pad.
 // A true initial intersection returns t=0. Positive initial gaps, even below
 // 1e-10, are not initial contact. Far-start future events retain a fixed 1e-10
 // world-space boundary tolerance; starts within that band use exact membership
 // throughout the motion so separating near-contact queries can escape.
-CCDResult node_triangle_only_one_node_moves(
+CCDResult node_triangle_linear_ccd(
         const Vec3& x,  const Vec3& dx,
         const Vec3& x1, const Vec3& dx1,
         const Vec3& x2, const Vec3& dx2,
         const Vec3& x3, const Vec3& dx3,
         double eps = 1.0e-12,
-        bool use_ticcd = true, bool original = false);
+        bool original = false);
 
-// One-moving-node SS CCD. Same dispatch semantics as above.
-CCDResult segment_segment_only_one_node_moves(const Vec3& x1, const Vec3& dx1,
-        const Vec3& x2, const Vec3& x3, const Vec3& x4,
-        double eps = 1.0e-12, bool use_ticcd = true, bool original = false);
-
-// Translating-edge SS CCD. Both endpoints of [x1, x2] must have the same
-// displacement (`dx1 == dx2`), while [x3, x4] remains fixed.
-// Uses the same independent local-frame and exact predicates as above.
-CCDResult segment_segment_same_displacement_linear_ccd(const Vec3& x1, const Vec3& dx1,
-        const Vec3& x2, const Vec3& dx2,
+// Built-in SS CCD: [x3, x4] stays fixed while one endpoint of [x1, x2]
+// moves, or both endpoints translate together (dx1 == dx2). Independent
+// nonzero endpoint displacements require the general-motion CCD below.
+CCDResult segment_segment_linear_ccd(
+        const Vec3& x1, const Vec3& dx1, const Vec3& x2, const Vec3& dx2,
         const Vec3& x3, const Vec3& x4,
         double eps = 1.0e-12, bool original = false);
 

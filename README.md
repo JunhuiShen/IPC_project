@@ -13,8 +13,8 @@ and reduced-coordinate rigid-body dynamics.
 | IPC pairs | Node--segment | Node--triangle and segment--segment |
 | Elasticity | Axial springs | Corotated membrane, discrete-shell bending, and volumetric corotated energy |
 | Static contact | Analytic 2D SDFs | Plane, cylinder, and sphere SDFs |
-| Solver | Per-node or reduced rigid-body nonlinear Gauss--Seidel | Cloth, solid, rigid, or combined nonlinear Gauss--Seidel; SIMD v2 and optional Jacobi-DAT |
-| Safe steps | Linear CCD or a distance-based trust region | Linear and curved rigid-motion CCD, Tight-Inclusion, OGC, or DAT |
+| Solver | Per-node or reduced rigid-body nonlinear Gauss--Seidel | Cloth, rigid, and general nonlinear Gauss--Seidel with scalar/SIMD assembly; planar DAT, isotropic OGC, and Jacobi with level-based CCD |
+| Safe steps | Linear and rigid-rotation CCD, or a distance-based trust region | Built-in linear and curved rigid-motion CCD; Tight-Inclusion global prediction, isotropic OGC, or planar DAT |
 | Parallelism | Conflict-colored OpenMP updates in the basic deformable and rigid-body solvers | OpenMP and SIMD on CPU; a separate CUDA device solver |
 | Output | Houdini `.geo`, Wavefront `.obj`, binary checkpoints | Houdini `.geo`, Wavefront `.obj`, `.ply`, ASCII USD `.usda`, binary checkpoints |
 
@@ -27,7 +27,7 @@ conventions, and source maps:
 
 ## How the solvers fit together
 
-The Gauss--Seidel paths in both simulators follow the same broad loop:
+The basic Gauss--Seidel paths in both simulators follow the same broad loop:
 
 1. Construct a substep predictor from the current positions and velocities.
 2. Minimize an incremental potential containing inertia, elasticity or rigid
@@ -35,14 +35,19 @@ The Gauss--Seidel paths in both simulators follow the same broad loop:
 3. Build conservative contact candidates with AABB/BVH broad phases.
 4. Color the elastic/contact conflict graph and apply local Newton updates in
    nonlinear Gauss--Seidel sweeps.
-5. Clamp each update with CCD or an Offset Geometric Contact (OGC) trust region
-   so intermediate iterates remain collision-safe.
+5. Clip local updates to their motion boxes and apply CCD step filtering when
+   enabled. The 2D solver also supports distance-based trust-region filtering.
 6. Update velocities, export the frame, and write a restart checkpoint.
+
+The 3D planar DAT and isotropic OGC paths are separate solvers with elastic
+coloring and contact-motion truncation between collision-detection passes.
 
 The 2D project is the smaller testbed for spring networks and planar rigid
 bodies. The 3D project is the full simulator: it adds shell membrane and bending
-energies, node--triangle and edge--edge contact, quaternion rigid-body motion, tetrahedral deformable solids, combined solving,
-alternative OGC and Jacobi-DAT solvers, a CUDA backend, richer output, and regression fixtures.
+energies, node--triangle and edge--edge contact, quaternion rigid-body motion,
+tetrahedral deformable solids, combined solving, planar DAT and
+isotropic OGC solvers, Jacobi with level-based CCD, a CUDA backend, richer
+output, and regression fixtures.
 
 ## Requirements
 
@@ -54,7 +59,7 @@ alternative OGC and Jacobi-DAT solvers, a CUDA backend, richer output, and regre
 - Boost 1.70+ with its CMake package configuration for 3D
 - Git for the fetched 3D dependencies
 - CUDA Toolkit, an NVIDIA GPU, and exactly Boost 1.92.0 for the optional
-  [3D CUDA build](3D_IPC/gpu/README.md#build)
+  [3D CUDA simulator build](3D_IPC/gpu/README.md#build)
 - OpenMP (optional in 2D and required in 3D; on macOS, install Homebrew
   `libomp`)
 - Network access during the first configure so CMake can fetch Eigen 3.4.0;
@@ -147,13 +152,13 @@ The friction model follows:
 > ACM Transactions on Graphics 43(4), Article 116, 2024.
 > [doi:10.1145/3658179](https://doi.org/10.1145/3658179)
 
-The optional Jacobi-DAT path follows:
+The planar DAT path follows:
 
 > Anka He Chen, Jerry Hsu, Youssef Ayman, and Miles Macklin. *Divide and Truncate:
 > A Penetration and Inversion Free Framework for Coupled Multi-physics Systems.*
 > 2026. [arXiv:2604.15513](https://arxiv.org/abs/2604.15513)
 
-General-motion 3D CCD uses
+The global CCD initial guess for simultaneous vertex motion uses
 [Tight-Inclusion CCD](https://github.com/Continuous-Collision-Detection/Tight-Inclusion):
 
 > Bolun Wang, Zachary Ferguson, Teseo Schneider, Xin Jiang, Marco Attene, and

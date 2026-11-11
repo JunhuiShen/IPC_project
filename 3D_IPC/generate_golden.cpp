@@ -24,6 +24,7 @@ int main() {
     params.max_global_iters = 100;
     params.tol_abs         = 1e-6;
     params.use_parallel    = false;
+    params.use_simd        = false;
     params.fixed_iters     = true;
     params.node_box_min    = 0.001;
     params.node_box_max    = 0.01;

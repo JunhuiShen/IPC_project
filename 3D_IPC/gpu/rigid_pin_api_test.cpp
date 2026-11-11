@@ -1,7 +1,7 @@
 // Ordinary GPU bridge and rigid material-point pin regression.
 // The optional CPU/CUDA Jacobi-DAT feature and its parity cases were retired.
 // These retained cases compare the ordinary device rigid solver with the
-// unchanged CPU basic rigid solver, including force, stiffness and time controls.
+// CPU scalar rigid solver, including force, stiffness and time controls.
 #include "bridge.h"
 #include "mesh_utils.h"
 #include "../solver.h"
@@ -48,7 +48,6 @@ struct Fixture {
         parameters.max_global_iters = 1;
         parameters.fixed_iters = true;
         parameters.use_dat = false;
-        parameters.use_ticcd = false;
         parameters.use_ccd_guess = false;
         parameters.node_box_min = .001;
         parameters.node_box_max = .1;
@@ -133,7 +132,7 @@ CpuRbState cpu_rigid_reference(const Fixture& fixture) {
     reference.com = fixture.state.x_coms;
     reference.orientation = fixture.state.orientations;
     reference.omega.assign(fixture.state.omega.size(), Vec3::Zero());
-    const auto result = global_gauss_seidel_solver_basic_rb(fixture.mesh, fixture.state,
+    const auto result = global_gauss_seidel_solver_rb(fixture.mesh, fixture.state,
         fixture.parameters, reference.com, reference.orientation, reference.omega);
     require(result.iterations == fixture.parameters.max_global_iters,
         "CPU rigid reference used a different sweep count");
@@ -318,7 +317,7 @@ void check_rigid_pins() {
 
 void check_bridge_mapping_and_retired_mode_rejection() {
     SimParams params=SimParams::zeros();
-    params.fixed_iters=true;params.use_ticcd=false;
+    params.fixed_iters=true;
     params.rigid_pin_time=.375;params.kpin=2.5;params.max_global_iters=4;
     params.damping=.25;params.node_box_min=.002;params.node_box_max=.1;
     params.node_box_update_count=3;params.theta_box_max=.07;
@@ -331,15 +330,14 @@ void check_bridge_mapping_and_retired_mode_rejection() {
         "adaptive box radius mapping changed");
     require(step.rebuild_interval==params.node_box_update_count&&step.rotation_radius==params.theta_box_max,
         "rebuild/rotation mapping changed");
-    for(int variant=0;variant<7;++variant) {
+    for(int variant=0;variant<6;++variant) {
         SimParams bad=params;
         if(variant==0)bad.fixed_iters=false;
         if(variant==1)bad.use_ogc=true;
         if(variant==2)bad.use_cloth_grid=true;
-        if(variant==3)bad.use_ticcd=true;
-        if(variant==4){bad.use_colored_ccd_guess=true;bad.use_colored_ccd_guess_level_based=true;}
-        if(variant==5)bad.use_dat=true;
-        if(variant==6)bad.use_jacobi_level_based_ccd=true;
+        if(variant==3){bad.use_colored_ccd_guess=true;bad.use_colored_ccd_guess_level_based=true;}
+        if(variant==4)bad.use_dat=true;
+        if(variant==5)bad.use_jacobi_level_based_ccd=true;
         bool rejected=false;
         try{(void)describe_step(bad);}catch(const std::invalid_argument&){rejected=true;}
         require(rejected,"unsupported solver/guess mode did not fail closed");

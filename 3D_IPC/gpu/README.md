@@ -163,7 +163,7 @@ OMP_NUM_THREADS=1 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
   --fixed_iters --substeps 5 --max_substep_iters 2 \
   --node_box_update_count 1 --d_hat 0.005 --k_barrier 100 \
-  --use_ccd true --use_ticcd false --exact_computation_fallback true \
+  --use_ccd true --exact_computation_fallback true \
   --use_ccd_guess false --use_colored_ccd_guess true \
   --colored_ccd_guess_iters 2 --write_substeps false \
   --format geo --outdir results/gpu_smoke
@@ -357,7 +357,7 @@ ported on the device:
   is scheduler-FAMILY metadata, not a geometry toggle: the cloth
   `ColoredContactSweep` family builds the same selected set for both
   `exact_computation_fallback` values, and the CPU
-  `validate_cooperative_step` rule (`exact && use_ccd && !ticcd && !ogc`) only
+  `validate_cooperative_step` rule (`exact && use_ccd && !ogc`) only
   chooses between the exact stored-change test and the squared cutoff. The GPU
   therefore applies the cutoff to selected vertices in original mode with CCD
   on or off, and in robust exact mode with CCD disabled; exact + CCD on keeps
@@ -390,8 +390,9 @@ ported on the device:
 Original mode also supports rigid and mixed scenes. Rigid translation uses
 the original CPU CCD and raw-displacement commit rule; represented-path checks
 may conservatively shorten a body's step. Rigid rotation retains curved-motion
-CCD. All numerical checks run on the device. Tight-Inclusion CCD, OGC and the
-cloth grid remain unsupported in both modes.
+CCD. All numerical checks run on the device. Per-vertex CCD uses the built-in
+linear backend; the global predictor retains its Tight-Inclusion-compatible
+device implementation. OGC and the cloth grid remain unsupported in both modes.
 
 The collision-only represented-path check is an extra physical safety layer,
 not part of the CPU TOI model. It accepts an unchanged healthy positive-gap
@@ -509,10 +510,9 @@ ctest --test-dir gpu/build -R '^gpu_(rigid_proxy_(parallel|index|values)|rigid_p
 
 The ordinary device solver requires `--fixed_iters` and conflict-graph coloring;
 the driver rejects unported modes before it touches the output directory. OGC
-solving, the cloth grid and Tight-Inclusion CCD (`--use_ticcd true`) are not
-available for ordinary solving, so use `--use_ticcd false`. Colors execute sequentially, with
-independent updates within each color running in parallel. Numerical fallback
-and CCD must stay on the GPU; an unrecoverable device error stops the substep.
+solving and the cloth grid are not available for ordinary solving. Colors execute
+sequentially, with independent updates within each color running in parallel.
+Numerical fallback and CCD must stay on the GPU; an unrecoverable device error stops the substep.
 
 Original-mode rigid support has native regression coverage on NVIDIA RTX 6000
 Ada with CUDA 12.6, including basic CPU parity, rigid/mixed scenes, tiny motion,
@@ -526,10 +526,10 @@ and GPU use different BVH traversal/contact accumulation orders, and these
 fixed-iteration contact examples can amplify roundoff-sized initial differences.
 The current rigid GPU path also retains maximum-radius boxes, stored-orientation
 anchors and an additional angular proposal cap. The supplied Example 9 command
-(`--use_simd false`) selects the CPU basic rigid solver, which uses history-based
+(`--use_simd false`) selects the scalar CPU rigid solver, which uses history-based
 boxes and anchors regenerated from its angular state. It always reconstructs
 accepted rotation/proxy values. The tiny-angular-step publication rule belongs
-to the separate general-v2 CPU dispatch and does not apply to that command.
+to the SIMD CPU rigid/general backend and does not apply to that command.
 In particular,
 `theta_box_min` does not currently select a rigid GPU minimum radius.
 Performance comparisons must state the numerical policy and distinguish a

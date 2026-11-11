@@ -31,10 +31,7 @@ void require(bool ok, const std::string& message) {
 SimParams original_cloth_params() {
     SimParams p = SimParams::zeros();
     p.fixed_iters = true;
-    p.use_ticcd = false;
     p.use_parallel = true;
-    p.use_basic_experimental = true;
-    p.use_basic_experimental_v2 = true;
     p.use_simd = true;
     p.use_ccd = true;
     p.use_ogc = false;
@@ -52,7 +49,7 @@ void check_step_mapping() {
         "default CPU64 reference team changed");
     require(original.original_update_convention
             == ipc_gpu::solver::OriginalUpdateConvention::CooperativeSquaredNorm,
-        "experimental-v2 original dispatch did not select the cooperative family");
+        "SIMD cloth original dispatch did not select the cooperative family");
     require(!original.colored_guess_enabled,
         "predictor-intent metadata must default to false");
 
@@ -81,14 +78,19 @@ void check_step_mapping() {
             == ipc_gpu::solver::OriginalUpdateConvention::StoredNoop,
         "zero d_hat dispatch must stay StoredNoop");
 
-    // Basic and experimental-v1 dispatches remain the noncooperative CPU rule.
-    SimParams basic = original_cloth_params();
-    basic.use_basic_experimental = false;
-    basic.use_basic_experimental_v2 = false;
-    basic.use_simd = false;
-    require(ipc_gpu::solver::describe_step(basic).original_update_convention
+    // Scalar and SIMD assembly share the modern cloth contact scheduler.
+    SimParams scalar = original_cloth_params();
+    scalar.use_simd = false;
+    const auto scalar_step = ipc_gpu::solver::describe_step(scalar);
+    require(!scalar_step.cpu_energy_simd,
+        "scalar assembly was incorrectly marked as SIMD");
+    require(scalar_step.original_update_convention
+            == ipc_gpu::solver::OriginalUpdateConvention::CooperativeSquaredNorm,
+        "scalar cloth assembly lost the cooperative family metadata");
+    scalar.use_parallel = false;
+    require(ipc_gpu::solver::describe_step(scalar).original_update_convention
             == ipc_gpu::solver::OriginalUpdateConvention::StoredNoop,
-        "basic CPU dispatch must stay StoredNoop");
+        "serial cloth dispatch must stay StoredNoop");
 
     require(ipc_gpu::solver::describe_step(original_cloth_params(), 1)
             .original_update_convention
@@ -228,9 +230,8 @@ void check_solver_cooperative_route() {
     SimParams p = SimParams::zeros();
     p.fps = 40; p.substeps = 1;
     p.fixed_iters = true; p.max_global_iters = 1;
-    p.use_basic_experimental = true; p.use_basic_experimental_v2 = true;
     p.use_simd = true; p.use_parallel = true;
-    p.use_ticcd = false; p.use_ccd = true;
+    p.use_ccd = true;
     p.use_ccd_guess = false;
     p.use_colored_ccd_guess = false;
     p.use_colored_ccd_guess_level_based = false;
@@ -333,11 +334,8 @@ void check_original_predictor_budgets() {
     p.substeps = 1;
     p.fixed_iters = true;
     p.max_global_iters = 0;
-    p.use_basic_experimental = true;
-    p.use_basic_experimental_v2 = true;
     p.use_simd = true;
     p.use_parallel = true;
-    p.use_ticcd = false;
     p.use_ccd = true;
     p.d_hat = 0.005;
     p.k_barrier = 0.0;
@@ -454,7 +452,7 @@ struct OriginalRigidFixture {
     SimParams params=original_cloth_params();
     OriginalRigidFixture() {
         params.use_parallel=false;
-        params.use_basic_experimental=params.use_basic_experimental_v2=params.use_simd=false;
+        params.use_simd=false;
         params.exact_computation_fallback_2=false;
         params.fps=40;params.substeps=1;params.max_global_iters=2;
         params.damping=1;params.gravity=Vec3(0,-.5,0);
@@ -477,7 +475,7 @@ void original_rigid_cpu_step(OriginalRigidFixture& fixture) {
     auto centers=fixture.state.x_coms;
     auto orientation=fixture.state.orientations;
     std::vector<Vec3> omega(fixture.state.omega.size(),Vec3::Zero());
-    const auto result=global_gauss_seidel_solver_basic_rb(fixture.mesh,fixture.state,
+    const auto result=global_gauss_seidel_solver_rb(fixture.mesh,fixture.state,
         fixture.params,centers,orientation,omega);
     require(result.iterations==fixture.params.max_global_iters,"original rigid CPU iteration budget differs");
     update_velocity(fixture.state.v_coms,centers,fixture.state.x_coms,fixture.params.dt());

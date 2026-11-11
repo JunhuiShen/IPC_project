@@ -364,19 +364,6 @@ SDFMaterialPose material_pose_about_y_axis(
     return pose;
 }
 
-// Rotate `p` about the +z line through `axis_point` by `theta`.
-// Positive theta lifts +x toward +y; in example 3 we pass a negative theta so
-// the +x edge of the catcher drops toward the sphere.
-Vec3 rotate_about_z_axis(const Vec3& p, const Vec3& axis_point, double theta) {
-    const double c = std::cos(theta);
-    const double s = std::sin(theta);
-    const double dx = p.x() - axis_point.x();
-    const double dy = p.y() - axis_point.y();
-    return Vec3(axis_point.x() + c * dx - s * dy,
-                axis_point.y() + s * dx + c * dy,
-                p.z());
-}
-
 // Trapezoidal phase: ramp-up over t_ramp, hold at omega for t_steady, ramp-down.
 double trapezoid_theta(double s, double omega, double t_ramp, double t_steady) {
     if (s <= 0.0)        return 0.0;
@@ -929,7 +916,6 @@ void update_twist_untwist_visual(std::vector<Vec3>& static_x,
 // ---------------------------------------------------------------------------
 // Example 5: freely rotating rigid tennis racket
 // ---------------------------------------------------------------------------
-// Command line: ./build/3D_sim --example 5 --num_frames 500 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir racket_output 
 void build_rotating_tennis_racket_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1045,7 +1031,6 @@ void build_rotating_tennis_racket_example(
 // ---------------------------------------------------------------------------
 // Example 6: freely rotating space tool
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 6 --num_frames 2000 --substeps 30 --tol_abs 1e-12 --tol_rel 1e-10 --outdir space_tool_output 
 void build_rotating_space_tool_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1123,7 +1108,6 @@ void build_rotating_space_tool_example(
 // ---------------------------------------------------------------------------
 // Example 7: twenty rigid polygonal prisms initialized in a static vertical stack
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 7 --num_frames 100 --substeps 10 --d_hat 0.001 --eps_sdf 0.0002 --rigid_density 25 --gy 0 --outdir twenty_polygon_static_stack_output --format obj
 void build_twenty_rigid_polygon_static_stack_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1195,7 +1179,6 @@ void build_twenty_rigid_polygon_static_stack_example(
 // Example 8: Bunny-solid / Spot-solid / rigid-cube / rigid-gear cycles,
 // repeated twice in one vertical stack above a pinned cloth
 // ---------------------------------------------------------------------------
-// command line: ./build/3D_sim --example 8 --datadir example_obj --num_frames 200 --fps 30 --substeps 20 --max_substep_iters 600 --fixed_iters --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 --d_hat 0.019 --k_barrier 1000 --outdir multi_physics_output --format obj
 void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1325,13 +1308,6 @@ void build_two_bunny_spot_cube_gear_cycles_on_pinned_cloth_example(
 // ---------------------------------------------------------------------------
 // Example 9: a dynamic threaded bolt falling into a fixed threaded nut
 // ---------------------------------------------------------------------------
-/* Command line (use OMP_NUM_THREADS=64 on the server):
-OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
-./build/3D_sim --example 9 --num_frames 150 \
-  --substeps 10 --max_substep_iters 2 --fixed_iters \
-  --use_parallel true --use_basic_experimental true --use_simd true \
-  --outdir bolt_into_fixed_nut_output --format obj
-*/
 void build_dynamic_bolt_into_fixed_nut_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1426,22 +1402,6 @@ void build_dynamic_bolt_into_fixed_nut_example(
 // falling onto a pinned cloth with a different ordering in each layer
 // ---------------------------------------------------------------------------
 // Smaller substep/iteration budgets can suppress the cubes' bounce.
-/* command line:
-OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
-./build/3D_sim \
-  --example 10 --num_frames 200 --fps 30 \
-  --substeps 15 --max_substep_iters 25 --fixed_iters \
-  --E 1.25e9 --nu 0.25 --thickness 0.001 \
-  --solid_E 1.25e5 --solid_nu 0.25 \
-  --d_hat 0.019 --k_barrier 1000 \
-  --friction_coefficient 0 --use_ccd true \
-  --node_box_update_count 10 \
-  --use_parallel true \
-  --use_basic_experimental true --use_simd true \
-  --write_substeps false --format obj \
-  --outdir outputs/example10_general_v2 \
-  --use_colored_ccd_guess true --colored_ccd_guess_iters 10
-*/
 // With friction coefficient 0.1, need to use 15 substeps and 40 max_substep_iters.
 void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
@@ -1612,15 +1572,6 @@ void build_four_bunny_spot_cube_gear_rows_on_pinned_cloth_example(
 // ---------------------------------------------------------------------------
 // Example 11: a pinned cloth roll unrolling down an SDF ramp
 // ---------------------------------------------------------------------------
-/* Command line:
-OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
-./build/3D_sim --example 11 --num_frames 200 \
-  --substeps 10 --max_substep_iters 2 --fixed_iters \
-  --kB 0.0025 --friction_coefficient 0.1 \
-  --use_parallel true --use_basic_experimental true --use_simd true \
-  --use_colored_ccd_guess true --colored_ccd_guess_iters 10 \
-  --outdir rolled_cloth_on_steep_ramp_output_new --format geo
-*/
 void build_cloth_unrolling_down_fixed_ramp_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,
@@ -1862,16 +1813,6 @@ void build_cloth_unrolling_down_fixed_ramp_example(
 // ---------------------------------------------------------------------------
 // Example 12: three stacked cloth layers between fixed and oscillating edges
 // ---------------------------------------------------------------------------
-/* Command line:
-OMP_NUM_THREADS=8 OMP_DYNAMIC=FALSE \
-./build/3D_sim --example 12 --num_frames 200 \
-  --substeps 10 --max_substep_iters 2 --fixed_iters \
-  --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 \
-  --kB 0.01 --gy 0 \
-  --use_parallel true --use_basic_experimental true --use_simd true \
-  --use_colored_ccd_guess true --colored_ccd_guess_iters 10 \
-  --outdir oscillating_cloth_layers_output --format geo
-*/
 void build_oscillating_cloth_layers_example(
     const IPCArgs3D& args, RefMesh& ref_mesh,
     DeformedState& state, std::vector<Vec2>& X,

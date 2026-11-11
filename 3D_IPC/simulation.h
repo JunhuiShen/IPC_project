@@ -104,8 +104,8 @@ inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& st
                 || node >= static_cast<int>(state.deformed_positions.size())) {
                 throw std::out_of_range("sync_rigid_body_particles: node index is out of range");
             }
-            // V2 publishes the positions it actually accepted. Reconstructing
-            // them again from a rounded pose can reintroduce an intersection.
+            // The modern solver publishes the positions it actually accepted.
+            // Reconstructing them from a rounded pose can reintroduce an intersection.
             const Vec3 world_offset = accepted_positions
                 ? (*accepted_positions)[node] - state.x_coms[rb]
                 : quaternion_rotate(state.orientations[rb], ref_positions[local]);
@@ -117,7 +117,7 @@ inline void sync_rigid_body_particles(const RefMesh& ref_mesh, DeformedState& st
 }
 
 // Publish one solver's generalized coordinates and particle proxies together.
-// General v2 and DAT return the collision configuration they actually accepted;
+// General and DAT return the collision configuration they actually accepted;
 // callers must pass that array rather than project its rounded pose again. The
 // published positions also become the next substep's friction history.
 inline void commit_rigid_body_solver_state(const RefMesh& ref_mesh,
@@ -168,22 +168,11 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
             sub_result = global_gauss_seidel_solver_dat(ref_mesh,state,adjacency,pins,
                 solver_params,xnew,xhat,x_com_new,q_new,omega_new,broad_phase);
             accepted_rigid_positions = std::move(xnew);
-        } else if (params.use_basic_experimental_v2) {
-            accepted_rigid_positions = state.deformed_positions;
-            std::vector<Vec3>& xnew = accepted_rigid_positions;
-            const std::vector<Vec3> xhat = state.deformed_positions;
-            const VertexTriangleMap adjacency;
-            const std::vector<Pin> pins;
-            // The rigid-only driver writes through on_substep. It has no
-            // diagnostic outdir, so do not create general debug files in cwd.
-            SimParams solver_params = active_params;
-            solver_params.write_substeps = false;
-            sub_result = global_gauss_seidel_solver_general_experimental_v2(
-                ref_mesh, state, adjacency, pins, solver_params, xnew, xhat,
-                x_com_new, q_new, omega_new, broad_phase);
         } else {
-            sub_result = global_gauss_seidel_solver_basic_rb(ref_mesh, state,
-                active_params, x_com_new, q_new, omega_new);
+            sub_result = global_gauss_seidel_solver_rb(ref_mesh, state,
+                active_params, x_com_new, q_new, omega_new,
+                active_params.use_simd ? &accepted_rigid_positions : nullptr,
+                &broad_phase);
         }
         accumulate_solver_result(agg, sub_result, sub == 0);
 
@@ -191,7 +180,7 @@ inline SolverResult advance_one_frame_rb(DeformedState& state, const RefMesh& re
             return agg;
 
         commit_rigid_body_solver_state(ref_mesh, state, x_com_new, q_new, omega_new, dt,
-            (active_params.use_dat || active_params.use_basic_experimental_v2)
+            (active_params.use_dat || active_params.use_simd)
                 ? &accepted_rigid_positions : nullptr);
 
         if (on_substep) {
@@ -293,11 +282,8 @@ inline SolverResult advance_one_frame_general(
             substep_result = global_jacobi_solver_level_based_ccd(ref_mesh, adj, pins,
                 params, xnew, xhat, state.velocities, broad_phase, outdir,
                 &state.deformed_positions);
-        else if (params.use_basic_experimental_v2)
-            substep_result = global_gauss_seidel_solver_general_experimental_v2(ref_mesh, state,
-                adj, pins, params, xnew, xhat, x_com_new, q_new, omega_new, broad_phase, outdir);
         else
-            substep_result = global_gauss_seidel_solver_basic_general(ref_mesh, state, adj, pins,
+            substep_result = global_gauss_seidel_solver_general(ref_mesh, state, adj, pins,
                 params, xnew, xhat, x_com_new, q_new, omega_new, broad_phase, outdir);
         accumulate_solver_result(aggregate, substep_result, substep == 0);
         if (!substep_result.converged)
@@ -314,8 +300,7 @@ inline SolverResult advance_one_frame_general(
         }
 
         commit_rigid_body_solver_state(ref_mesh, state, x_com_new, q_new, omega_new, dt,
-            (params.use_dat || (params.use_basic_experimental_v2
-                && !params.use_ogc && !params.use_jacobi_level_based_ccd)) ? &xnew : nullptr);
+            (!params.use_ogc && !params.use_jacobi_level_based_ccd) ? &xnew : nullptr);
 
         if (on_substep) {
             const int global_substep = (frame_index - 1) * params.substeps + substep;
@@ -411,12 +396,8 @@ inline SolverResult advance_one_frame(DeformedState& state, const RefMesh& ref_m
             sub_result = global_gauss_seidel_solver_ogc(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, outdir, &state.deformed_positions);
         else if (params.use_cloth_grid)
             sub_result = global_gauss_seidel_solver_ambient_grid(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
-        else if (params.use_basic_experimental_v2)
-            sub_result = global_gauss_seidel_solver_basic_experimental_v2(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
-        else if (params.use_basic_experimental)
-            sub_result = global_gauss_seidel_solver_basic_experimental(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
         else
-            sub_result = global_gauss_seidel_solver_basic(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
+            sub_result = global_gauss_seidel_solver_cloth(ref_mesh, adj, pins, params, xnew, xhat, state.velocities, broad_phase, outdir, &state.deformed_positions);
         
         accumulate_solver_result(agg, sub_result, sub == 0);
 

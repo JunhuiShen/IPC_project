@@ -157,9 +157,9 @@ void translation_ccd() {
         require(actual.status==Status::Ok,"original rigid CCD resource/input error");
         CCDResult expected;
         const Vec3 d(0,0,dz),zero=Vec3::Zero();
-        if(face)expected=node_triangle_only_one_node_moves(x[0],first?d:-d,x[1],zero,x[2],zero,x[3],zero,1e-12,false,true);
-        else if(first)expected=segment_segment_same_displacement_linear_ccd(x[0],d,x[1],d,x[2],x[3],1e-12,true);
-        else expected=segment_segment_same_displacement_linear_ccd(x[2],d,x[3],d,x[0],x[1],1e-12,true);
+        if(face)expected=node_triangle_linear_ccd(x[0],first?d:-d,x[1],zero,x[2],zero,x[3],zero,1e-12,true);
+        else if(first)expected=segment_segment_linear_ccd(x[0],d,x[1],d,x[2],x[3],1e-12,true);
+        else expected=segment_segment_linear_ccd(x[2],d,x[3],d,x[0],x[1],1e-12,true);
         require(actual.collision==expected.collision,"original rigid CCD hit differs from CPU");
         if(expected.collision)close(actual.toi,expected.t,"original rigid TOI");
     }

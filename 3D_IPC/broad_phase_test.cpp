@@ -1653,7 +1653,7 @@ TEST(BroadPhaseTest, PerVertexSafeStepClampsCCD) {
     cache.nt_pairs.push_back(pair);
     cache.vertex_nt[0].push_back({/*pair_index=*/0, /*dof=*/0});
 
-    const double ccd_weight = per_vertex_safe_step(bp, x, 0, target[0], /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false);
+    const double ccd_weight = per_vertex_safe_step(bp, x, 0, target[0], /*safety=*/0.9, /*clip_ccd=*/true);
 
     const Vec3 expected(0.825, 0.25, 0.0);
     EXPECT_DOUBLE_EQ(ccd_weight, 0.9);
@@ -1691,7 +1691,7 @@ TEST(BroadPhaseTest, PerVertexSafeStepUpdatesOnlySelectedVertex) {
     cache.vertex_nt[0].push_back(
         {/*pair_index=*/0, /*dof=*/0});
 
-    const double safe_weight = per_vertex_safe_step(broad_phase, x, 0, target[0], /*safety=*/0.9, /*clip_ccd=*/true, /*use_ticcd=*/false);
+    const double safe_weight = per_vertex_safe_step(broad_phase, x, 0, target[0], /*safety=*/0.9, /*clip_ccd=*/true);
 
     const Vec3 expected(0.825, 0.25, 0.0);
     EXPECT_DOUBLE_EQ(safe_weight, 0.9);
@@ -1890,8 +1890,8 @@ TEST(BroadPhase, CachedAabbRejectionCertifiesShortSingleVertexSweeps) {
                     box.expand(x[j]);if(j==role)box.expand(x[j]+dx);
                 }
                 EXPECT_FALSE(aabb_intersects(first,second));
-                for(bool ticcd:{false,true}) {
-                    auto result=is_nt?safe_step_detail::node_triangle_vertex_ccd(nt,role,role,x,dx,ticcd):safe_step_detail::segment_segment_vertex_ccd(ss,role,role,x,dx,ticcd);
+                for(bool original:{false,true}) {
+                    auto result=is_nt?safe_step_detail::node_triangle_vertex_ccd(nt,role,role,x,dx,original):safe_step_detail::segment_segment_vertex_ccd(ss,role,role,x,dx,original);
                     EXPECT_FALSE(result.collision);
                 }
             }
@@ -2006,7 +2006,7 @@ TEST(BroadPhase, ReusedVertexAabbRejectionsPreserveSafeSteps) {
                      Vec3(-2, 0, 0), Vec3(2, 0, 0), Vec3::Zero().eval()}) {
                 const Vec3 target = initial[role] + step;
                 auto expected = initial;
-                const double expected_weight = per_vertex_safe_step(phase, expected, role, target, .9, true, false);
+                const double expected_weight = per_vertex_safe_step(phase, expected, role, target, .9, true);
                 if (expected_weight > 0 && expected_weight < 1) ++clipped;
                 for (int mode = 0; mode < 4; ++mode) {
                     safe_step_detail::VertexAabbRejections bounds;
@@ -2016,7 +2016,7 @@ TEST(BroadPhase, ReusedVertexAabbRejectionsPreserveSafeSteps) {
                     if (mode == 2) bounds.distance = 0;
                     if (mode == 3) bounds.distance = std::numeric_limits<double>::infinity();
                     auto actual = initial;
-                    const double weight = per_vertex_safe_step(phase, actual, role, target, .9, true, false, false, &bounds);
+                    const double weight = per_vertex_safe_step(phase, actual, role, target, .9, true, false, &bounds);
                     ASSERT_EQ(weight, expected_weight);
                     for (int node = 0; node < 4; ++node)
                         for (int axis = 0; axis < 3; ++axis)
@@ -2223,8 +2223,8 @@ TEST(BroadPhaseTest, CertifiedIncidencePruningPreservesCcdAndRebuilds) {
                 for (int dz = -1; dz <= 1; ++dz) {
                     auto a = x, b = x;
                     const Vec3 target = x[node] + .12 * Vec3(dx, dy, dz);
-                    const double alpha = per_vertex_safe_step(reference, a, node, target, .9, true, false);
-                    const double beta = per_vertex_safe_step(pruned, b, node, target, .9, true, false);
+                    const double alpha = per_vertex_safe_step(reference, a, node, target, .9, true);
+                    const double beta = per_vertex_safe_step(pruned, b, node, target, .9, true);
                     EXPECT_DOUBLE_EQ(alpha, beta);
                     EXPECT_TRUE((a[node].array() == b[node].array()).all());
                     observed_collision = observed_collision || (alpha > 0.0 && alpha < .99);

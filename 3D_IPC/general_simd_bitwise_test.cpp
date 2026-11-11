@@ -102,8 +102,6 @@ struct ClothFixture {
         params.gravity = Vec3(.03, -9.81, -.017);
         params.mu = 115000 / 2.5; params.lambda = 115000 * .25 / (1.25 * .5);
         params.kB = .009; params.kpin = 1e9;
-        params.use_basic_experimental = false;
-        params.use_basic_experimental_v2 = false;
         params.use_simd = false;
     }
 
@@ -128,7 +126,7 @@ struct ClothFixture {
         const auto found = mesh.hinge_adj.find(node);
         if (found == mesh.hinge_adj.end()) return result;
         // Point/membrane keep their exact scalar-reference contract. Bending
-        // must instead match the same SIMD entry used by basic experimental v2.
+        // must instead match the same SIMD entry used by the cloth SIMD backend.
         for (const auto& [hinge, role] : found->second) {
             const auto& value = mesh.hinges[hinge];
             std::array<Vec3, 4> corners;
@@ -263,7 +261,7 @@ TEST(GeneralSimdBitwise, MixedSolidClothPointRoundingPinsAndBatchTails) {
                         Vec3 gradient; Mat33 hessian;
                         ipc_simd::point_derivatives_tile(&input, 1, params.gravity,
                             params.kpin, params.dt2(), &gradient, &hessian);
-                        // The solid fix must not change basic-v2 cloth arithmetic.
+                        // The solid fix must not change cloth SIMD arithmetic.
                         expect_bitwise(output[lane].gradient, gradient, "cloth_gradient");
                         expect_bitwise(output[lane].hessian, hessian, "cloth_hessian");
                     }

@@ -18,8 +18,6 @@
 
 class BroadPhase;
 
-struct Tri { int v[3]; };
-
 struct Pin {
     int vertex_index = -1;
     Vec3 target_position = Vec3::Zero();
@@ -55,10 +53,8 @@ struct SimParams {
     int    max_global_iters;
 
     bool   use_parallel;
-    bool   use_basic_experimental; // experimental cloth; with SIMD also selects general v2
-    bool   use_basic_experimental_v2; // resolved from use_basic_experimental && use_simd
-    bool   use_simd;             // select v2 SIMD cloth/general energy/contact assembly
-    bool   use_dat = false; // checkpoint planar DAT for cloth/solid/rigid scenes
+    bool   use_simd;             // select SIMD cloth/general energy/contact assembly
+    bool   use_dat = false; // planar DAT for cloth/solid/rigid scenes
     bool   use_jacobi_level_based_ccd = false; // Jacobi proposals filtered by level/color-ordered linear CCD
     double dat_gamma = 0.9;
     double dat_query_radius = 0.0; // 0: 1.5*d_hat when positive, otherwise node_box_max
@@ -75,7 +71,7 @@ struct SimParams {
     bool   use_colored_ccd_guess_level_based; // alternative: discarded trial sweep, then level/color-ordered CCD
     int    colored_ccd_guess_iters; // colored predictor or inner Jacobi-CCD updating sweeps; excludes level trial (0 keeps positions)
     double colored_ccd_guess_fraction; // fraction of xhat-x^n used only for either colored predictor's fixed target
-    bool   use_ogc; // dedicated checkpoint isotropic solver for cloth/solid
+    bool   use_ogc; // dedicated isotropic OGC solver for cloth/solid
     bool   fixed_iters;          // if true, run exactly max_global_iters sweeps with no tolerance / convergence check
     bool   verbose;              // print cache rebuilds and per-iteration residuals when available
 
@@ -86,12 +82,11 @@ struct SimParams {
     int    node_box_update_count;
     double k_barrier;              // barrier stiffness multiplier
     double damping;                // Newton-step damping used by deformable and rigid solvers
-    bool   use_ticcd;              // true (default) -> Tight-Inclusion CCD library; false -> self-written linear CCD
     bool   exact_computation_fallback = true; // modified linear CCD and exact contact calculations
     bool   exact_computation_fallback_2 = true; // internal selector retained for exact-mode comparisons
     bool   ccd_exact_step_bound = false; // experimental direct exact gap bound before backtracking
 
-    bool use_original_linear_ccd() const { return !exact_computation_fallback && !use_ticcd; }
+    bool use_original_linear_ccd() const { return !exact_computation_fallback; }
 
     static SimParams zeros() {
         SimParams p;
@@ -120,8 +115,6 @@ struct SimParams {
         p.gravity                   = Vec3::Zero();
         p.max_global_iters          = 0;
         p.use_parallel              = false;
-        p.use_basic_experimental    = false;
-        p.use_basic_experimental_v2 = false;
         p.use_simd                  = false;
         p.use_dat            = false;
         p.use_jacobi_level_based_ccd = false;
@@ -148,7 +141,6 @@ struct SimParams {
         p.node_box_update_count     = 250;
         p.k_barrier                     = 1.0;
         p.damping                       = 1.0;
-        p.use_ticcd                     = true;
         p.exact_computation_fallback    = true;
         p.exact_computation_fallback_2  = true;
         p.ccd_exact_step_bound          = false;
@@ -159,8 +151,8 @@ struct SimParams {
 
     void validate_ccd_exact_step_bound_parameters() const {
         if (!ccd_exact_step_bound) return;
-        if (!exact_computation_fallback || use_ticcd || use_ogc)
-            throw std::invalid_argument("--ccd_exact_step_bound requires --exact_computation_fallback true, --use_ticcd false, and OGC disabled");
+        if (!exact_computation_fallback || use_ogc)
+            throw std::invalid_argument("--ccd_exact_step_bound requires --exact_computation_fallback true and OGC disabled");
     }
 
     void validate_colored_ccd_guess_parameters() const {
