@@ -131,6 +131,38 @@ configure_module(accumulate_prepared)
 
 
 @cache
+def make_dynamic_accumulate(prepared):
+    """Keep the checked/prepared evaluator and replay policy with a device color."""
+    @wp.kernel(module="unique", enable_backward=False)
+    def dynamic(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3], flags: wp.array[int],
+                colors: wp.array[int], current_color: wp.array[int], solid: wp.array[int], surface: wp.array[int],
+                colliders: wp.array[sdf.Collider], params: sdf.Parameters,
+                forces: wp.array[wp.vec3], hessians: wp.array[wp.mat33], ctx: Context):
+        i = wp.tid()
+        if ctx.error[0] == 0 and (flags[i] & 1) != 0 and colors[i] == current_color[0] and (solid[i] == 0 or surface[i] != 0):
+            packet = Result()
+            if wp.static(prepared):
+                packet = _evaluate_prepared(positions[i], previous[i], colliders, params)
+            else:
+                packet = evaluate(positions[i], previous[i], colliders, params)
+            status = int(packet[12])
+            if status == 6:
+                at = wp.atomic_add(ctx.count, 0, 1)
+                if at < ctx.pending.shape[0]:
+                    ctx.pending[at] = i
+                else:
+                    wp.atomic_max(ctx.error, 0, 49)
+            elif status != 0:
+                wp.atomic_max(ctx.error, 0, 49)
+            else:
+                force, hessian = _terms(packet)
+                forces[i] += force
+                hessians[i] += hessian
+    configure_module(dynamic)
+    return dynamic
+
+
+@cache
 def make_replay():
     @wp.kernel(module="unique", enable_backward=False)
     def replay(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3],

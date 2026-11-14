@@ -22,6 +22,7 @@ import warp as wp
 from newton._src.geometry.tri_mesh_collision import TriMeshCollisionInfo
 
 from .warp_build import configure_module as _configure
+from .movement_box_queries import build_nodes as _build_box_nodes
 
 
 HEADERS = ("contact.cuh", "contact_exact.cuh", "original_contact.cuh", "exact.cuh")
@@ -486,6 +487,49 @@ def _evaluate_fast(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3],
                     scatter_self(result, nodes, colors, flags, mass, color, forces, hessians)
 
 
+@wp.kernel
+def _evaluate_grouped(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3],
+                      triangles: wp.array2d[int], edges: wp.array2d[int], info: TriMeshCollisionInfo,
+                      ids: wp.array[int], count: wp.array[int], colors: wp.array[int], flags: wp.array[int],
+                      mass: wp.array[float], current_color: wp.array[int], offsets: wp.array[int], use_view: int,
+                      view_epoch: wp.array[wp.uint64], query_epoch: wp.array[wp.uint64],
+                      params: Parameters, workers: int, pending: wp.array[int], pending_count: wp.array[int],
+                      forces: wp.array[wp.vec3], hessians: wp.array[wp.mat33], error: wp.array[int]):
+    worker = wp.tid()
+    color = current_color[0]
+    valid = color >= 0 and color < colors.shape[0]
+    begin = int(0)
+    end = count[0]
+    if use_view != 0 and valid:
+        valid = view_epoch[0] == query_epoch[0]
+        begin = offsets[color]
+        end = offsets[color + 1]
+    valid = valid and begin >= 0 and end >= begin and end <= ids.shape[0]
+    if not valid:
+        wp.atomic_max(error, 0, 11)
+    if error[0] == 0 and valid:
+        for at in range(begin + worker, end, workers):
+            nodes, kind = decode_candidate(ids[at], triangles, edges, info)
+            touches = False
+            for role in range(4):
+                node = nodes[role]
+                if colors[node] == color and flags[node] & 1 != 0 and mass[node] > 0.0:
+                    touches = True
+            if touches:
+                result = evaluate_self(positions, previous, nodes, kind, params)
+                status = int(result[48])
+                if status == 2 and params.exact_geometry != 0:
+                    slot = wp.atomic_add(pending_count, 0, 1)
+                    if slot < pending.shape[0]:
+                        pending[slot] = at
+                    else:
+                        wp.atomic_max(error, 0, 12)
+                elif status != 0:
+                    wp.atomic_max(error, 0, 100 + status)
+                elif result[49] != 0.0:
+                    scatter_self(result, nodes, colors, flags, mass, color, forces, hessians)
+
+
 class ContactBackend:
     """Persistent graph-safe IPC assembly consuming Newton's actual BVH rows."""
 
@@ -524,12 +568,19 @@ class ContactBackend:
         self.fast_workers = max(128, self.device.sm_count * 128) if self.device.is_cuda else 128
         self.swept_lower = wp.empty(model.particle_count, wp.vec3, device=self.device)
         self.swept_upper = wp.empty(model.particle_count, wp.vec3, device=self.device)
+        # Swept and movement-box detection execute at distinct checkpoints.
+        # Reuse their unexpanded node bounds; retain separate expanded query
+        # bounds so the BVH stores unions of the complete blue boxes.
+        self.box_query_lower = wp.empty(model.particle_count, wp.vec3, device=self.device)
+        self.box_query_upper = wp.empty(model.particle_count, wp.vec3, device=self.device)
         self._has_rigid_bodies = getattr(model, "body_count", 0) > 0
         self.rigid_coordinate_margin = wp.zeros(1, float, device=self.device)
         # Keep the large exact fallback out of every fast/detection module
         # block-size variant. The cold module has one block-size-one kernel.
         from .contact_exact import resolve
         self._resolve = resolve
+        from .contact_grouped_exact import resolve as resolve_grouped
+        self._resolve_grouped = resolve_grouped
         parameters(dt=1.0, **self.options)
 
     def refresh(self, info=None):
@@ -600,6 +651,55 @@ class ContactBackend:
             self.info.edge_colliding_edges_count.zero_()
         self.refresh()
 
+    def detect_boxes(self, detector, centers, radii, d_hat):
+        """Record every deformable pair reachable within its checkpoint boxes.
+
+        Primitive BVHs contain unions of the outward-rounded vertex boxes.
+        Queries expand only one side by ``d_hat``: blue vertex/edge boxes
+        against triangle/edge unions. This is the CPU GS red/green-box
+        construction with the expansion moved to the query side for NT.
+        All storage and BVHs already exist before CUDA graph capture.
+        """
+        if self._has_rigid_bodies:
+            raise ValueError("Rigid trajectories require the scalar conservative detector")
+        if isinstance(d_hat, bool) or not math.isfinite(d_hat) or d_hat < 0:
+            raise ValueError("Movement-box contact reach must be finite and nonnegative")
+        count = self.model.particle_count
+        if centers.dtype != wp.vec3 or centers.shape != (count,) or centers.device != self.device:
+            raise TypeError("Movement-box centers must match the model float32 particle array")
+        if radii.dtype != wp.float64 or radii.shape != (count,) or radii.device != self.device:
+            raise TypeError("Movement-box radii must match the model binary64 particle array")
+        reverse = self.info.triangle_colliding_vertices_count
+        if reverse is not None:
+            reverse.zero_()
+        if count:
+            wp.launch(_build_box_nodes, count,
+                [centers, radii, float(d_hat), self.swept_lower, self.swept_upper,
+                 self.box_query_lower, self.box_query_upper, self.error], device=self.device)
+        if self.model.tri_count:
+            wp.launch(_swept_triangles, self.model.tri_count,
+                [self.model.tri_indices, self.swept_lower, self.swept_upper,
+                 detector.lower_bounds_tris, detector.upper_bounds_tris], device=self.device)
+            detector.bvh_tris.refit()
+            wp.launch(_detect_swept_vertices, count,
+                [detector.bvh_tris.id, self.box_query_lower, self.box_query_upper,
+                 self.model.tri_indices, self.model.particle_world, self.node_body,
+                 self.surface, self.info, self.error], device=self.device, block_dim=16)
+        else:
+            self.info.vertex_colliding_triangles_count.zero_()
+        if self.model.edge_count and detector.bvh_edges is not None:
+            wp.launch(_swept_edges, self.model.edge_count,
+                [self.model.edge_indices, self.swept_lower, self.swept_upper,
+                 detector.lower_bounds_edges, detector.upper_bounds_edges], device=self.device)
+            detector.bvh_edges.refit()
+            wp.launch(_detect_swept_edges, self.model.edge_count,
+                [detector.bvh_edges.id, self.box_query_lower, self.box_query_upper,
+                 self.model.particle_world, self.node_body, self.model.edge_indices,
+                 self.info, self.error], device=self.device, block_dim=16)
+        else:
+            self.info.edge_colliding_edges_count.zero_()
+        self.refresh()
+
     def detect_swept(self, detector, start, end, reach=1.0e-8):
         """Reuse the same upstream BVHs with whole initial-guess motion boxes.
 
@@ -635,7 +735,13 @@ class ContactBackend:
             self.info.edge_colliding_edges_count.zero_()
         self.refresh()
 
-    def accumulate(self, positions, previous, color, forces, hessians, dt):
+    def accumulate(self, positions, previous, color, forces, hessians, dt, *,
+                   colors=None, current_color=None, query_view=None):
+        if current_color is not None:
+            return self.accumulate_grouped(positions, previous, color, forces, hessians, dt,
+                colors=colors, current_color=current_color, query_view=query_view)
+        if colors is not None or query_view is not None:
+            raise TypeError("Dynamic contact colors require a device current_color")
         p = parameters(dt=float(dt), **self.options)
         self.pending_count.zero_()
         if self.capacity:
@@ -649,6 +755,46 @@ class ContactBackend:
                  self.candidate_ids, self.model.particle_colors, self.model.particle_flags, self.model.particle_mass,
                  int(color), p, self.words, self.slots, self.workers, self.pending, self.pending_count,
                  forces, hessians, self.error], device=self.device, block_dim=1)
+
+    def accumulate_grouped(self, positions, previous, color, forces, hessians, dt, *,
+                           colors, current_color, query_view=None):
+        """Assemble one device-selected GS color from its complete pair span.
+
+        ``query_view`` owns an immutable snapshot of the coloring used to
+        construct its spans. Its snapshot also controls scatter, keeping
+        evaluation and candidate ownership in the same epoch. Without a view
+        the kernel scans the original complete candidate bank.
+        """
+        count = self.model.particle_count
+        if colors is None or colors.dtype != wp.int32 or colors.shape != (count,) or colors.device != self.device:
+            raise TypeError("Dynamic contact colors must match the model device int array")
+        if (current_color is None or current_color.dtype != wp.int32 or current_color.shape != (1,)
+                or current_color.device != self.device):
+            raise TypeError("Dynamic contact selection requires one device int")
+        if not self.track_query_epoch:
+            raise ValueError("Dynamic GS contact assembly requires tracked query epochs")
+        ids, offsets, epoch = self.candidate_ids, self.candidate_count, self.query_epoch
+        selected_colors = colors
+        if query_view is not None:
+            query_view.validate(self)
+            if query_view.current_group is not current_color:
+                raise ValueError("Contact query span and current_color must share their device selector")
+            ids, offsets, epoch = query_view.ids, query_view.offsets, query_view.epoch
+            selected_colors = query_view.node_groups
+        p = parameters(dt=float(dt), **self.options)
+        self.pending_count.zero_()
+        if self.capacity:
+            wp.launch(_evaluate_grouped, self.fast_workers,
+                [positions, previous, self.model.tri_indices, self.model.edge_indices, self.info,
+                 ids, self.candidate_count, selected_colors, self.model.particle_flags,
+                 self.model.particle_mass, current_color, offsets, int(query_view is not None),
+                 epoch, self.query_epoch, p, self.fast_workers, self.pending, self.pending_count,
+                 forces, hessians, self.error], device=self.device)
+            wp.launch(self._resolve_grouped, self.workers,
+                [positions, previous, self.model.tri_indices, self.model.edge_indices, self.info,
+                 ids, selected_colors, self.model.particle_flags, self.model.particle_mass,
+                 current_color, p, self.words, self.slots, self.workers, self.pending,
+                 self.pending_count, forces, hessians, self.error], device=self.device, block_dim=1)
 
     def reset_status(self):
         """Call outside captured frames, after the preceding check succeeded."""

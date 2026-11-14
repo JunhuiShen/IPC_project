@@ -42,6 +42,27 @@ def fixture(device):
     return q, model, contacts
 
 
+def independent_predictor_fixture(device):
+    points = np.asarray([[0, 0, .1], [-1, -1, 0], [1, -1, 0], [0, 1, 0], [3, 2, .2]], np.float32)
+    q = wp.array(points, wp.vec3, device=device)
+    model = SimpleNamespace(device=device, particle_count=5, tri_count=1, edge_count=0,
+        body_count=0, tet_count=0, particle_q=q, tri_indices=wp.array([[1, 2, 3]], int, device=device),
+        edge_indices=wp.empty((0, 4), int, device=device), particle_colors=wp.zeros(5, int, device=device),
+        particle_flags=wp.array([1, 0, 0, 0, 1], int, device=device),
+        particle_mass=wp.array([1, 0, 0, 0, 1], float, device=device),
+        particle_world=wp.zeros(5, int, device=device))
+    info = build_tri_mesh_collision_info(5, 1, 0, vertex_collision_buffer_pre_alloc=4, device=device)
+    contacts = ContactBackend(model, info, d_hat=.005, k_barrier=100, track_query_epoch=True)
+    lower = wp.array([[-1, -1, 0]], wp.vec3, device=device)
+    upper = wp.array([[1, 1, 0]], wp.vec3, device=device)
+    detector = SimpleNamespace(bvh_tris=wp.Bvh(lower, upper), bvh_edges=None,
+        lower_bounds_tris=lower, upper_bounds_tris=upper,
+        lower_bounds_edges=wp.empty(0, wp.vec3, device=device),
+        upper_bounds_edges=wp.empty(0, wp.vec3, device=device))
+    velocity = wp.array([[0, 0, -20], [0, 0, 0], [0, 0, 0], [0, 0, 0], [30, -10, 20]], wp.vec3, device=device)
+    return q, model, contacts, detector, velocity
+
+
 @wp.kernel
 def _advance_device_epoch(epoch: wp.array[wp.uint64]):
     epoch[0] += wp.uint64(1)
@@ -204,7 +225,7 @@ class GroupQueryTests(unittest.TestCase):
             backend.accept(short, short, -1, .01, query_view=bank.view(wp.zeros(1, int, device="cpu")))
 
     def test_legacy_dat_keeps_original_default_dispatch_allocation_and_no_epoch(self):
-        from gpu.ccd_exact import resolve as original_resolve
+        from gpu.ccd import resolve_original as original_resolve
         payload = point_over_triangle(height=.1, velocity=(.1, 0, 0), iterations=0)
         payload["params"].update(use_colored_ccd_guess_level_based=True,
                                   colored_ccd_guess_iters=1, colored_ccd_guess_fraction=.97)
@@ -217,6 +238,7 @@ class GroupQueryTests(unittest.TestCase):
             self.assertFalse(contacts.track_query_epoch)
             self.assertIsNone(contacts.query_epoch)
             self.assertIsNone(policy.query_groups)
+            self.assertFalse(policy.independent_colors)
             self.assertEqual(policy.graph.adjacency.shape[0], 12 * contacts.capacity)
             self.assertIsNone(policy.graph._parallel_levels)
             self.assertIsNone(policy.graph._parallel_colors)
@@ -340,6 +362,90 @@ class GroupQueryTests(unittest.TestCase):
             wp.capture_launch(capture.graph)
             backend.check()
             np.testing.assert_array_equal(q.numpy(), expected)
+
+    def test_independent_colored_predictor_keeps_unrelated_vertices_full_target(self):
+        params = {"use_colored_ccd_guess": True, "colored_ccd_guess_iters": 1,
+                  "colored_ccd_guess_fraction": 1.0}
+        for device in self.devices:
+            results = []
+            for independent in (None, False, True):
+                q, model, contacts, detector, velocity = independent_predictor_fixture(device)
+                ccd = CcdBackend(contacts, node_box_radius=1)
+                options = {} if independent is None else {"independent_colors": independent}
+                policy = InitialGuess(ccd, detector, params=params, use_group_queries=True, **options)
+                self.assertEqual(policy.independent_colors, independent is True)
+                initial = q.numpy().copy()
+                policy.apply(q, wp.clone(q), velocity, wp.empty_like(q), .01, params)
+                ccd.check()
+                colors = policy.graph.colors.numpy()
+                self.assertEqual(colors[0], colors[4], "Fixture must share a predictor color")
+                actual, target = q.numpy(), policy.targets.numpy()
+                self.assertGreater(float(actual[0, 2]), 0)
+                self.assertLess(float(actual[0, 2]), float(initial[0, 2]))
+                np.testing.assert_array_equal(actual[1:4], initial[1:4])
+                if independent:
+                    # x^n + dt*v is the exact represented target, unaffected
+                    # by the unrelated point's collision with the fixed face.
+                    np.testing.assert_array_equal(actual[4], target[4])
+                    np.testing.assert_allclose(actual[4], initial[4] + np.float32(.01) * velocity.numpy()[4], rtol=0, atol=0)
+                else:
+                    self.assertFalse(np.array_equal(actual[4], target[4]))
+                results.append(actual)
+            np.testing.assert_array_equal(results[0], results[1], "Generic default dispatch must stay unchanged")
+
+    def test_independent_predictor_requires_grouped_original_mode_and_solver_opt_in(self):
+        params = {"use_colored_ccd_guess": True, "colored_ccd_guess_iters": 1,
+                  "colored_ccd_guess_fraction": 1.0}
+        for device in self.devices:
+            q, model, contacts, detector, velocity = independent_predictor_fixture(device)
+            ccd = CcdBackend(contacts, node_box_radius=1)
+            with self.assertRaisesRegex(ValueError, "complete grouped"):
+                InitialGuess(ccd, detector, params=params, independent_colors=True)
+            policy = InitialGuess(ccd, detector, params=params, use_group_queries=True, independent_colors=True)
+            initial = q.numpy().copy()
+            for mode in ({"use_ccd_guess": True}, {"use_colored_ccd_guess_level_based": True}):
+                wrong = {**mode, "colored_ccd_guess_iters": 1, "colored_ccd_guess_fraction": 1.0}
+                with self.assertRaisesRegex(ValueError, "original colored CCD mode"):
+                    policy.apply(q, wp.clone(q), velocity, wp.empty_like(q), .01, wrong)
+                np.testing.assert_array_equal(q.numpy(), initial)
+            for mode in ("colored", "level", "global"):
+                payload = point_over_triangle(height=.1, velocity=(.1, 0, 0), iterations=0)
+                payload["params"].update(use_ccd_guess=mode == "global", use_colored_ccd_guess=mode == "colored",
+                    use_colored_ccd_guess_level_based=mode == "level", colored_ccd_guess_iters=1,
+                    colored_ccd_guess_fraction=1.0)
+                solver = SolverIPC(create_model(payload, device), allow_cpu=True)
+                self.assertEqual(solver.ccd_backend._initial_guess.independent_colors, mode == "colored")
+
+    def test_independent_predictor_capture_replay_matches_eager_and_full_free_target(self):
+        devices = wp.get_cuda_devices()
+        if not devices:
+            self.skipTest("No CUDA device")
+        params = {"use_colored_ccd_guess": True, "colored_ccd_guess_iters": 1,
+                  "colored_ccd_guess_fraction": 1.0}
+        for device in devices:
+            q, model, contacts, detector, velocity = independent_predictor_fixture(device)
+            ccd = CcdBackend(contacts, node_box_radius=1)
+            policy = InitialGuess(ccd, detector, params=params, use_group_queries=True, independent_colors=True)
+            start, previous, inertia = wp.clone(q), wp.clone(q), wp.empty_like(q)
+
+            def run():
+                wp.copy(q, start)
+                policy.apply(q, previous, velocity, inertia, .01, params)
+
+            run()
+            with wp.ScopedCapture(device=device) as capture:
+                run()
+            for free_velocity in ([30, -10, 20], [-40, 15, -5]):
+                values = velocity.numpy(); values[4] = free_velocity; velocity.assign(values)
+                run()
+                ccd.check()
+                expected = q.numpy().copy()
+                wp.capture_launch(capture.graph)
+                ccd.check()
+                actual = q.numpy()
+                np.testing.assert_array_equal(actual, expected)
+                np.testing.assert_array_equal(actual[4], policy.targets.numpy()[4])
+                self.assertGreater(float(actual[0, 2]), 0)
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ import warp as wp
 from newton._src.solvers.vbd import particle_vbd_kernels as stock
 
 from . import contact
-from . import dat_contact_fast
+from . import dat_contact_reference
 
 
 STOCK_SOURCE_SHA256 = "d79a0cdaf257f5dfd20992afd25904f33421f924da661a57ec74d14463cf79f7"
@@ -94,7 +94,7 @@ def _evaluate_float32(pos: wp.array[wp.vec3], previous: wp.array[wp.vec3], nodes
         if p.d_hat != wp.float64(collision_radius) or p.friction != wp.float64(friction) or p.eps_v != wp.float64(epsilon) or p.dt != wp.float64(dt):
             wp.atomic_max(ctx.error, 0, 101)
         else:
-            result = dat_contact_fast.evaluate_self(pos, previous, nodes, kind, p)
+            result = dat_contact_reference.evaluate_self(pos, previous, nodes, kind, p)
             status = int(result[48])
             if status == 6:
                 at = wp.atomic_add(ctx.pending_count, 0, 1)
@@ -248,7 +248,7 @@ def make_accumulate_self_contact_force_and_hessian(precision="float64"):
     kernel = namespace["accumulate_dat_contact_energy"]
     contact.configure_module(kernel)
     if precision == "float32":
-        dat_contact_fast.configure_module(kernel)
+        dat_contact_reference.configure_module(kernel)
     return kernel
 
 

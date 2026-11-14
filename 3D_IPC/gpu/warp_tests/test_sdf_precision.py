@@ -266,6 +266,64 @@ class SdfPrecisionTests(unittest.TestCase):
                 expected[~mask] = 0
                 self.assert_norm(h, expected)
 
+    def test_device_color_selector_preserves_physics_and_capture_replay(self):
+        groups = [0, 1, 0, 1, 0, 0]
+        for device in self.devices:
+            for precision in ("float32", "float64"):
+                for friction in (0.0, .2):
+                    with self.subTest(device=str(device), precision=precision, friction=friction):
+                        data = self.fixture(device, [[.2, .02, .1]] * 6, [_record("plane")],
+                            previous=[[.19, .02, .1]] * 6, friction=friction,
+                            colors=[7] * 6, flags=[1, 1, 0, 1, 1, 1],
+                            solid=[0, 0, 0, 0, 1, 1], surface=[1, 1, 1, 1, 0, 1])
+                        data.backend = sdf.SdfBackend(data.model, data.error,
+                            include_curvature=True, precision=precision)
+                        data.backend.prepare(float(data.backend.params.dt))
+                        _, expected_f, expected_h, _ = self.evaluate(data)
+                        colors = wp.array(groups, int, device=device)
+                        current = wp.zeros(1, int, device=device)
+                        f = wp.zeros(6, wp.vec3, device=device)
+                        h = wp.zeros(6, wp.mat33, device=device)
+
+                        def launch():
+                            data.backend.accumulate(data.q, data.previous, -1, f, h,
+                                float(data.backend.params.dt), colors=colors, current_color=current)
+
+                        graph = None
+                        if device.is_cuda:
+                            launch()  # Compile before capture.
+                            with wp.ScopedCapture(device=device) as capture:
+                                launch()
+                            graph = capture.graph
+                        for color, active in ((0, [0, 5]), (1, [1, 3])):
+                            f.zero_()
+                            h.zero_()
+                            current.fill_(color)
+                            if graph is None:
+                                launch()
+                            else:
+                                wp.capture_launch(graph)
+                            mask = np.zeros(6, bool)
+                            mask[active] = True
+                            self.assertEqual(int(data.error.numpy()[0]), 0)
+                            self.assert_norm(f.numpy(), np.where(mask[:, None], expected_f, 0))
+                            self.assert_norm(h.numpy(), np.where(mask[:, None, None], expected_h, 0))
+
+    def test_device_color_checked_path_still_validates_unprepared_material_pose(self):
+        invalid_pose = {"rotation": [[2, 0, 0], [0, 1, 0], [0, 0, 1]]}
+        for device in self.devices:
+            data = self.fixture(device, [[.2, .02, .1]],
+                [_record("plane", current_pose=invalid_pose)], friction=0.0)
+            data.backend.params.friction = .2
+            current = wp.zeros(1, int, device=device)
+            f = wp.zeros(1, wp.vec3, device=device)
+            h = wp.zeros(1, wp.mat33, device=device)
+            data.backend.accumulate(data.q, data.previous, -1, f, h,
+                float(data.backend.params.dt), current_color=current)
+            self.assertNotEqual(int(data.error.numpy()[0]), 0)
+            self.assertFalse(np.any(f.numpy()))
+            self.assertFalse(np.any(h.numpy()))
+
     def test_large_translation_tiny_geometry_and_cutoff_neighbors_match_oracle(self):
         fixtures = [
             ([[4097.02, 8192, -4096]], [_record("sphere", point=(4096, 8192, -4096))], .05),

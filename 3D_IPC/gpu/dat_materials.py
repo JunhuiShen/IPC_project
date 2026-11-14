@@ -8,6 +8,7 @@ the stock local solve and DAT controller remain the caller's responsibility.
 from dataclasses import dataclass
 import numpy as np
 import warp as wp
+from newton._src.solvers.vbd import particle_vbd_kernels as stock
 from . import energy
 
 
@@ -21,16 +22,45 @@ def evaluate_own_membrane_force_hessian(face:int,role:int,pos:wp.array[wp.vec3],
 
 
 @wp.func
-def evaluate_own_bending_force_hessian(edge:int,role:int,pos:wp.array[wp.vec3],pos_anchor:wp.array[wp.vec3],
-    edges:wp.array2d[int],rest_angles:wp.array[float],rest_lengths:wp.array[float],stiffness:float,
-    viscous_damping:float,dt:float,coefficients:wp.array[float],own_stiffness:wp.array[float]):
-    if edges[edge,0]<0 or edges[edge,1]<0 or own_stiffness[edge]<=0.0 or coefficients[edge]<=0.0:
-        return wp.vec3(0.0),wp.mat33(0.0)
+def _evaluate_bending_compatibility(edge:int,role:int,pos:wp.array[wp.vec3],
+    edges:wp.array2d[int],rest_angles:wp.array[float],coefficients:wp.array[float],own_stiffness:wp.array[float]):
+    """Retain our response where the native degeneracy/conversion guards differ."""
     native_role=role+2
     if role>=2:native_role=role-2
     value=energy.hinge(pos[edges[edge,2]],pos[edges[edge,3]],pos[edges[edge,0]],pos[edges[edge,1]],
         coefficients[edge],rest_angles[edge],own_stiffness[edge],native_role)
     return energy.unpack(value)
+
+
+@wp.func
+def evaluate_own_bending_force_hessian(edge:int,role:int,pos:wp.array[wp.vec3],pos_anchor:wp.array[wp.vec3],
+    edges:wp.array2d[int],rest_angles:wp.array[float],rest_lengths:wp.array[float],stiffness:float,
+    viscous_damping:float,dt:float,coefficients:wp.array[float],own_stiffness:wp.array[float]):
+    if edges[edge,0]<0 or edges[edge,1]<0 or own_stiffness[edge]<=0.0 or coefficients[edge]<=0.0:
+        return wp.vec3(0.0),wp.mat33(0.0)
+    a=pos[edges[edge,0]];b=pos[edges[edge,1]]
+    e0=pos[edges[edge,2]];e1=pos[edges[edge,3]]
+    length=wp.length(e1-e0)
+    area_limit=0.01*length*length
+    rest_length=rest_lengths[edge]
+    scale=(2.0*own_stiffness[edge])*coefficients[edge]
+    # Reference DAT intentionally skips tiny or very thin hinges. Our law
+    # retains them, so preserve that behavior rather than changing the energy.
+    if (length<1.0e-6
+        or wp.length(wp.cross(e0-a,e1-a))<area_limit
+        or wp.length(wp.cross(e1-b,e0-b))<area_limit
+        or not wp.isfinite(rest_length) or rest_length<=0.0):
+        return _evaluate_bending_compatibility(edge,role,pos,edges,rest_angles,coefficients,own_stiffness)
+    mapped_stiffness=scale/rest_length
+    recovered=mapped_stiffness*rest_length
+    if (not wp.isfinite(mapped_stiffness) or not wp.isfinite(recovered)
+        or (scale!=0.0 and recovered==0.0)
+        or wp.abs(recovered-scale)>0.00000095367431640625*wp.abs(scale)):
+        return _evaluate_bending_compatibility(edge,role,pos,edges,rest_angles,coefficients,own_stiffness)
+    # Native E=(ke*L0/2)*delta_theta^2; ours E=kB*c_e*delta_theta^2.
+    # Use native roles directly and suppress only its optional viscous term.
+    return stock.evaluate_dihedral_angle_based_bending_force_hessian(
+        edge,role,pos,pos_anchor,edges,rest_angles,rest_lengths,mapped_stiffness,0.0,dt)
 
 
 @wp.func

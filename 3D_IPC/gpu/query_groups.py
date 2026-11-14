@@ -75,8 +75,9 @@ def compact_rows_epoch(info: TriMeshCollisionInfo, triangles: wp.array2d[int], e
 
 @wp.kernel
 def prepare_grouped(q: wp.array[wp.vec3], proposed: wp.array[wp.vec3], center: wp.array[wp.vec3],
-              radius: wp.float64, bounded: int, colors: wp.array[int], flags: wp.array[int], mass: wp.array[float],
-              color: int, view_groups: wp.array[int], current_group: wp.array[int], use_view: int,
+              radius: wp.float64, radii: wp.array[wp.float64], use_radii: int,
+              bounded: int, colors: wp.array[int], flags: wp.array[int], mass: wp.array[float],
+              color: int, view_groups: wp.array[int], current_group: wp.array[int], use_view: int, select_group: int,
               view_epoch: wp.array[wp.uint64], current_epoch: wp.array[wp.uint64],
               candidate: wp.array[wp.vec3], error: wp.array[int]):
     i = wp.tid()
@@ -85,11 +86,17 @@ def prepare_grouped(q: wp.array[wp.vec3], proposed: wp.array[wp.vec3], center: w
             wp.atomic_max(error, 0, 11)
     if error[0] == 0:
         point = q[i]
-        if flags[i] & 1 != 0 and mass[i] > 0.0 and (color < 0 or colors[i] == color):
+        selected = color < 0 or colors[i] == color
+        if select_group != 0:
+            selected = selected and view_groups[i] == current_group[0]
+        if flags[i] & 1 != 0 and mass[i] > 0.0 and selected:
             point = proposed[i]
         changed = point[0] != q[i][0] or point[1] != q[i][1] or point[2] != q[i][2]
         if bounded != 0 and changed:
-            point = round_inside(q[i], point, center[i], radius)
+            budget = radius
+            if use_radii != 0:
+                budget = radii[i]
+            point = round_inside(q[i], point, center[i], budget)
         for k in range(3):
             if not wp.isfinite(q[i][k]) or not wp.isfinite(point[k]):
                 wp.atomic_max(error, 0, 202)

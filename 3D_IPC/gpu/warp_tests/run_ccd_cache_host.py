@@ -22,7 +22,7 @@ def run_checks(*, source=None, compiler=None):
     compiler=compiler or shutil.which('c++') or shutil.which('g++') or shutil.which('clang++')
     if not compiler:
         raise FileNotFoundError('The CCD invariant proof needs a C++17 compiler')
-    headers=[source/'gpu'/name for name in ['ccd.cuh','exact.cuh','original_ccd.cuh','original_rigid.cuh','ccd_cache.cuh']]
+    headers=[source/'gpu'/name for name in ['ccd.cuh','exact.cuh','original_ccd.cuh','original_rigid.cuh','separation.cuh']]
     def hashes():return {p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in headers}
     before=hashes()
     text=(source/'gpu/ccd.cuh').read_text()

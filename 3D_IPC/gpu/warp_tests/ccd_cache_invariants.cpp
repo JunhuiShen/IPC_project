@@ -1,4 +1,5 @@
-#include "ccd_cache.cuh"
+#include "ccd.cuh"
+#include "original_rigid.cuh"
 #include "reference_projection.cuh"
 
 #include <array>

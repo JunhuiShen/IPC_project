@@ -67,7 +67,7 @@ class ParallelLevelTests(unittest.TestCase):
         from gpu.solver import SolverIPC
         from gpu.parallel_colors import ParallelColors
         from gpu.contact_original import ContactBackendIPC
-        from gpu.ccd_cached import resolve as resolve_cached
+        from gpu.ccd import resolve_cached
         from .test_solver_dat import point_over_triangle
         payload=point_over_triangle(height=.1,velocity=(.1,0,0),iterations=0)
         payload['params'].update(use_colored_ccd_guess_level_based=True,

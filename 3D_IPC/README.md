@@ -14,6 +14,7 @@ further processing; it does not open a viewer.
 - [Common settings](#common-settings)
 - [Output and restart](#output-and-restart)
 - [Example scene commands](#example-scene-commands)
+- [DAT scene commands](#dat-scene-commands)
 - [Build and test](#build-and-test)
 - [Troubleshooting](#troubleshooting)
 - [Source guide](#source-guide)
@@ -620,6 +621,90 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --outdir arch_frictionless_output
 ```
 
+### DAT scene commands
+
+These commands run the native CPU DAT solver with `--use_dat`. The budgets
+below are **substeps per frame × iterations per substep**; `--fixed_iters`
+keeps the requested iteration count. Material, contact, and motion settings
+match the corresponding examples above. DAT uses its filtered inertial
+predictor and collision-detection checkpoints instead of the GS initial-guess
+and motion-box controls.
+
+| Example | Substeps × iterations |
+|---|---|
+| 1 | 10 × 10 |
+| 10, phase 1 (frames 1–20) | 64 × 32 |
+| 10, phase 2 (frames 21–200) | 20 × 10 |
+| 11 | 10 × 10 |
+| 12 | 10 × 10 |
+| 14 | 20 × 10 |
+| 19 | 48 × 40 |
+
+Each example uses a separate DAT output folder. Example 10's second command
+continues from the first command's frame-20 checkpoint in the same folder.
+
+```bash
+# Example 1: twisting cloth, DAT 10 × 10
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 1 --fps 30 --num_frames 240 \
+  --use_dat --fixed_iters --substeps 10 --max_substep_iters 10 \
+  --E 115000 --nu 0.25 --kB 0.009 --kpin 1e9 --twist_rate 0.5 \
+  --d_hat 0.005 --k_barrier 100 \
+  --use_simd true --use_parallel true \
+  --outdir twisting_cloth_dat_output --format geo
+
+# Example 10, phase 1: layered mixed scene, DAT 64 × 32 through frame 20
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 10 --datadir example_obj --fps 30 --num_frames 20 \
+  --use_dat --fixed_iters --substeps 64 --max_substep_iters 32 \
+  --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 \
+  --d_hat 0.00208 --k_barrier 1000 --friction_coefficient 0 \
+  --use_simd true --use_parallel true \
+  --outdir layered_multi_physics_dat_output --format geo && \
+# Example 10, phase 2: restart at frame 20, DAT 20 × 10 through frame 200
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 10 --datadir example_obj --fps 30 --num_frames 200 --restart_frame 20 \
+  --use_dat --fixed_iters --substeps 20 --max_substep_iters 10 \
+  --E 1.25e9 --nu 0.25 --thickness 0.001 --solid_E 1.25e5 --solid_nu 0.25 \
+  --d_hat 0.00208 --k_barrier 1000 --friction_coefficient 0 \
+  --use_simd true --use_parallel true \
+  --outdir layered_multi_physics_dat_output --format geo
+
+# Example 11: rolled cloth, DAT 10 × 10
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 11 --fps 30 --num_frames 200 \
+  --use_dat --fixed_iters --substeps 10 --max_substep_iters 10 \
+  --kB 0.0025 --friction_coefficient 0.1 \
+  --use_simd true --use_parallel true \
+  --outdir rolled_cloth_dat_output --format geo
+
+# Example 12: oscillating cloth layers, DAT 10 × 10
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 12 --fps 30 --num_frames 200 \
+  --use_dat --fixed_iters --substeps 10 --max_substep_iters 10 \
+  --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 \
+  --kB 0.01 --gy 0 \
+  --use_simd true --use_parallel true \
+  --outdir oscillating_cloth_layers_dat_output --format geo
+
+# Example 14: fifty falling cloth sheets, DAT 20 × 10
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 14 --fps 30 --num_frames 120 \
+  --use_dat --fixed_iters --substeps 20 --max_substep_iters 10 \
+  --E 1e6 --nu 0.3 --kB 0.001 --d_hat 0.0048 --k_barrier 1000 \
+  --k_sdf 1e5 --eps_sdf 0.015 \
+  --use_simd true --use_parallel true \
+  --outdir cloth_stack_dat_output --format geo
+
+# Example 19: chain and anchor, DAT 48 × 40
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
+./build/3D_sim --example 19 --datadir example_obj --fps 30 --num_frames 600 \
+  --use_dat --fixed_iters --substeps 48 --max_substep_iters 40 \
+  --kpin 1e7 --k_barrier 1e8 \
+  --use_simd true --use_parallel true \
+  --outdir chain_anchor_dat_output --format geo
+```
+
 ## Build and test
 
 The quick-start build skips tests and developer tools. To enable and run the
@@ -681,6 +766,10 @@ The core IPC contact formulation follows:
 > Contact: Intersection- and Inversion-Free, Large-Deformation Dynamics.*
 > ACM Transactions on Graphics 39(4), Article 49, 2020.
 > [Project page](https://ipc-sim.github.io/)
+
+We thank the authors of Incremental Potential Contact for their foundational
+work and for making the original
+[IPC reference implementation](https://github.com/ipc-sim/IPC) publicly available.
 
 Rigid-body IPC background and reference scenes:
 
