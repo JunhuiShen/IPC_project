@@ -15,6 +15,7 @@ endif()
 
 option(IPC_BUILD_SIMULATOR "Build the 3D simulator" ON)
 option(IPC_BUILD_TOOLS "Build developer tools" ON)
+option(IPC_BUILD_NEWTON_EXPORTER "Build host-only scene exporter for the Newton IPC GPU solver" OFF)
 option(IPC_ENABLE_IPO "Enable interprocedural optimization in Release builds" ON)
 option(IPC_ENABLE_NATIVE_ARCH "Enable host CPU instructions on supported x86 compilers (disable for portable binaries)" ON)
 
@@ -274,6 +275,12 @@ target_link_libraries(ipc
 # -----------------------------------------------------------------------------
 # Applications and tools
 # -----------------------------------------------------------------------------
+
+if(IPC_BUILD_NEWTON_EXPORTER)
+    add_executable(3D_export_newton_scene gpu/export_scene.cpp)
+    target_link_libraries(3D_export_newton_scene PRIVATE IPC::ipc)
+    ipc_enable_ipo(3D_export_newton_scene)
+endif()
 
 if(IPC_BUILD_SIMULATOR)
     find_package(Threads REQUIRED)

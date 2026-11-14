@@ -1,0 +1,1571 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Tests for frame-to-frame contact matching."""
+
+import unittest
+from functools import partial
+
+import numpy as np
+import warp as wp
+
+import newton
+from newton._src.geometry.contact_data import CONTACT_SORT_CONVEX_SUB_KEY_BITS, CONTACT_SORT_SUB_KEY_BITS
+from newton._src.geometry.contact_match import _CLAIM_SENTINEL, MATCH_BROKEN, MATCH_NOT_FOUND, ContactMatcher
+from newton._src.geometry.contact_sort import ContactSorter
+from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
+
+
+class TestContactMatching(unittest.TestCase):
+    pass
+
+
+class TestContactMatchingSticky(unittest.TestCase):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_simple_scene(device):
+    """Build a scene with 3 spheres resting on a ground plane.
+
+    Returns (model, state).  Spheres at x = -0.5, 0.0, 0.5, all at z = radius
+    so they touch the plane.
+    """
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+
+    for x in (-0.5, 0.0, 0.5):
+        b = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, 0.1)))
+        builder.add_shape_sphere(body=b, radius=0.1)
+
+    model = builder.finalize(device=device)
+    state = model.state()
+    return model, state
+
+
+def _collide_once(pipeline, state, contacts):
+    """Clear and collide, returning the contact count on host."""
+    contacts.clear()
+    pipeline.collide(state, contacts)
+    return contacts.rigid_contact_count.numpy()[0]
+
+
+def _build_two_world_contact_scene(device):
+    """Build two local sphere-plane contacts sharing one global ground."""
+    world = newton.ModelBuilder()
+    body = world.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.1)))
+    world.add_shape_sphere(body=body, radius=0.1)
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    builder.add_world(world, xform=wp.transform(wp.vec3(-0.5, 0.0, 0.0)))
+    builder.add_world(world, xform=wp.transform(wp.vec3(0.5, 0.0, 0.0)))
+    model = builder.finalize(device=device)
+    state = model.state()
+    pipeline = newton.CollisionPipeline(
+        model,
+        broad_phase="nxn",
+        contact_matching="latest",
+        contact_report=True,
+    )
+    return model, state, pipeline, pipeline.contacts()
+
+
+# ---------------------------------------------------------------------------
+# Test functions
+# ---------------------------------------------------------------------------
+
+
+def test_first_frame_all_not_found(test, device):
+    """First frame: prev_count is 0, so every contact must get MATCH_NOT_FOUND."""
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        contacts = pipeline.contacts()
+
+        count = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count, 0, "Expected contacts between spheres and ground plane")
+
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count]
+        test.assertTrue(
+            np.all(match_idx == MATCH_NOT_FOUND),
+            f"First frame should have all MATCH_NOT_FOUND, got unique values: {np.unique(match_idx)}",
+        )
+
+
+def test_stable_scene_identity_match(test, device):
+    """Stable scene: deterministic sort + identical state means match_index[i] == i.
+
+    This is the strongest possible invariant: each sorted contact maps to the
+    same sorted position in the previous frame.  It verifies binary search,
+    position/normal threshold acceptance, matching on the sorted stream,
+    and the save-then-match round-trip through the matcher's owned history.
+    """
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        contacts = pipeline.contacts()
+
+        # Frame 1: populate previous-frame data.
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0)
+
+        # Frame 2: identical state.
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertEqual(count1, count2, "Contact count must be stable between identical frames")
+
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
+        expected = np.arange(count2, dtype=np.int32)
+        np.testing.assert_array_equal(
+            match_idx,
+            expected,
+            err_msg="Stable scene: match_index[i] must be i (identity mapping)",
+        )
+
+
+def test_stable_scene_identity_across_three_frames(test, device):
+    """Identity match must hold across 3+ frames, not just the first pair."""
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        contacts = pipeline.contacts()
+
+        _collide_once(pipeline, state, contacts)  # frame 1
+        for frame in range(2, 5):
+            count = _collide_once(pipeline, state, contacts)
+            match_idx = contacts.rigid_contact_match_index.numpy()[:count]
+            expected = np.arange(count, dtype=np.int32)
+            np.testing.assert_array_equal(
+                match_idx,
+                expected,
+                err_msg=f"Frame {frame}: match_index must be identity",
+            )
+
+
+def test_save_initializes_next_frame_claims(test, device):
+    """Initialize saved claim slots for the next matching frame."""
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        contacts = pipeline.contacts()
+        matcher = pipeline._contact_matcher
+        test.assertIsNotNone(matcher)
+
+        matcher._prev_claim.fill_(wp.int64(0))
+        count = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count, 0)
+        np.testing.assert_array_equal(
+            matcher._prev_claim.numpy()[:count],
+            np.full(count, int(_CLAIM_SENTINEL), dtype=np.int64),
+        )
+
+        test.assertEqual(_collide_once(pipeline, state, contacts), count)
+
+
+def test_masked_reset_restarts_only_selected_contact_history(test, device):
+    """Restart local or global contact pairs while preserving other matches."""
+    with wp.ScopedDevice(device):
+        model, state, pipeline, contacts = _build_two_world_contact_scene(device)
+
+        count = _collide_once(pipeline, state, contacts)
+        test.assertEqual(_collide_once(pipeline, state, contacts), count)
+        np.testing.assert_array_equal(
+            contacts.rigid_contact_match_index.numpy()[:count],
+            np.arange(count, dtype=np.int32),
+        )
+
+        pipeline.reset_contact_matching(wp.array((False, False, False), dtype=wp.bool, device=device))
+        _collide_once(pipeline, state, contacts)
+        test.assertTrue(np.all(contacts.rigid_contact_match_index.numpy()[:count] >= 0))
+
+        pipeline.reset_contact_matching(wp.array((True, False, False), dtype=wp.bool, device=device))
+        _collide_once(pipeline, state, contacts)
+        shape_world = model.shape_world.numpy()
+        shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+        shape1 = contacts.rigid_contact_shape1.numpy()[:count]
+        world0 = shape_world[shape0]
+        world1 = shape_world[shape1]
+        contact_world = np.where(world0 >= 0, world0, world1)
+        matches = contacts.rigid_contact_match_index.numpy()[:count]
+        np.testing.assert_array_equal(matches[contact_world == 0], MATCH_NOT_FOUND)
+        test.assertTrue(np.all(matches[contact_world == 1] >= 0))
+        test.assertEqual(int(contacts.rigid_contact_broken_count.numpy()[0]), 0)
+
+        _collide_once(pipeline, state, contacts)
+        pipeline.reset_contact_matching(wp.array((False, False, True), dtype=wp.bool, device=device))
+        _collide_once(pipeline, state, contacts)
+        np.testing.assert_array_equal(contacts.rigid_contact_match_index.numpy()[:count], MATCH_NOT_FOUND)
+        test.assertEqual(int(contacts.rigid_contact_broken_count.numpy()[0]), 0)
+
+
+def test_reset_rejects_invalid_world_masks(test, device):
+    """Reject malformed contact reset masks through the shared contract."""
+    with wp.ScopedDevice(device):
+        _model, _state, pipeline, _contacts = _build_two_world_contact_scene(device)
+        invalid_masks = (
+            ((False, False, False), TypeError),
+            (wp.zeros(3, dtype=wp.int32, device=device), TypeError),
+            (wp.zeros((1, 3), dtype=wp.bool, device=device), ValueError),
+            (wp.zeros(2, dtype=wp.bool, device=device), ValueError),
+            (wp.zeros(4, dtype=wp.bool, device=device), ValueError),
+        )
+        for world_mask, error in invalid_masks:
+            with test.subTest(world_mask=world_mask), test.assertRaises(error):
+                pipeline.reset_contact_matching(world_mask)
+
+        if device.is_cuda:
+            with test.assertRaises(ValueError):
+                pipeline.reset_contact_matching(wp.zeros(3, dtype=wp.bool, device="cpu"))
+
+
+def test_reset_accumulates_live_mask_during_cuda_graph_replay(test, device):
+    """Accumulate the current device mask each time a reset graph is replayed."""
+    with wp.ScopedDevice(device):
+        _model, _state, pipeline, _contacts = _build_two_world_contact_scene(device)
+        matcher = pipeline._contact_matcher
+        test.assertIsNotNone(matcher)
+
+        # Materialize the reset kernel before capture, then clear its pending state.
+        pipeline.reset_contact_matching(wp.array((True, False, False), dtype=wp.bool, device=device))
+        pipeline.reset_contact_matching()
+        world_mask = wp.zeros(3, dtype=wp.bool, device=device)
+        with wp.ScopedCapture(device=device) as capture:
+            pipeline.reset_contact_matching(world_mask)
+
+        world_mask.assign((True, False, False))
+        wp.capture_launch(capture.graph)
+        np.testing.assert_array_equal(matcher._reset_world_mask.numpy(), (True, False, False))
+
+        world_mask.assign((False, True, True))
+        wp.capture_launch(capture.graph)
+        np.testing.assert_array_equal(matcher._reset_world_mask.numpy(), (True, True, True))
+
+
+def test_new_contact_detection(test, device):
+    """A new sphere that enters the scene produces MATCH_NOT_FOUND,
+    while existing contacts keep their identity match.
+    """
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        for x in (-0.5, 0.5):
+            b = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, 0.1)))
+            builder.add_shape_sphere(body=b, radius=0.1)
+        # Third sphere far away — no contacts in frame 1.
+        b3 = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 10.0)))
+        builder.add_shape_sphere(body=b3, radius=0.1)
+
+        model = builder.finalize(device=device)
+        state = model.state()
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        contacts = pipeline.contacts()
+
+        # Frame 1: 2 sphere-plane contacts.
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0)
+
+        # Move third sphere to ground for frame 2.
+        q = state.body_q.numpy()
+        q[2][0:3] = [0.0, 0.0, 0.1]
+        state.body_q = wp.array(q, dtype=wp.transform, device=device)
+
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count2, count1, "More contacts expected with third sphere on ground")
+
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
+
+        n_new = np.sum(match_idx == -1)
+        n_matched = np.sum(match_idx >= 0)
+        test.assertGreater(n_new, 0, "New sphere should produce MATCH_NOT_FOUND contacts")
+        test.assertEqual(n_matched, count1, f"All {count1} old contacts should still match, got {n_matched}")
+
+        # Matched indices must be unique (no two new contacts claim the same old).
+        matched_vals = match_idx[match_idx >= 0]
+        test.assertEqual(len(np.unique(matched_vals)), len(matched_vals), "Matched indices must be unique")
+
+
+def test_broken_pos_threshold_all_contacts(test, device):
+    """Moving all spheres beyond pos_threshold must break ALL contacts (not just some).
+
+    Uses the default :attr:`CollisionPipeline.contact_matching_pos_threshold` so
+    the test follows any future retune of the default.  ``contact_report=True``
+    lets us close the loop and verify each broken new contact has a matching
+    entry in ``rigid_contact_broken_indices`` (the old contact was also
+    reported as broken — broken-on-both-sides).
+    """
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            contact_matching="latest",
+            contact_report=True,
+        )
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0)
+
+        # Shift all dynamic bodies along x by 0.2 m — well above the default
+        # (0.0005 m) pos_threshold but small enough to keep them on the plane.
+        q = state.body_q.numpy()
+        for i in range(len(q)):
+            q[i][0] += 0.2
+        state.body_q = wp.array(q, dtype=wp.transform, device=device)
+
+        count2 = _collide_once(pipeline, state, contacts)
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
+
+        # Every new contact should be MATCH_BROKEN: key matches but position
+        # drifted beyond threshold.
+        test.assertTrue(
+            np.all(match_idx == MATCH_BROKEN),
+            f"All contacts should be MATCH_BROKEN. Unique values: {np.unique(match_idx)}",
+        )
+
+        # And every old contact should appear in broken_contact_indices:
+        # if the new side is broken, the old side must also be broken
+        # (nothing matched it).
+        broken_count = contacts.rigid_contact_broken_count.numpy()[0]
+        test.assertEqual(
+            broken_count,
+            count1,
+            f"All {count1} old contacts should be reported as broken, got {broken_count}",
+        )
+        broken_indices = contacts.rigid_contact_broken_indices.numpy()[:broken_count]
+        np.testing.assert_array_equal(
+            np.sort(broken_indices),
+            np.arange(count1, dtype=np.int32),
+            err_msg="broken_contact_indices must enumerate every old contact",
+        )
+
+
+def test_within_pos_threshold_still_matches(test, device):
+    """Moving spheres less than pos_threshold must still produce matches.
+
+    Uses the default :attr:`CollisionPipeline.contact_matching_pos_threshold`
+    (0.0005 m) so the test follows any future retune of the default.
+    """
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            contact_matching="latest",
+        )
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0)
+
+        # Shift all dynamic bodies along x by 0.0002 m — below the default
+        # (0.0005 m) pos_threshold.
+        q = state.body_q.numpy()
+        for i in range(len(q)):
+            q[i][0] += 0.0002
+        state.body_q = wp.array(q, dtype=wp.transform, device=device)
+
+        count2 = _collide_once(pipeline, state, contacts)
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
+
+        test.assertTrue(
+            np.all(match_idx >= 0),
+            f"All contacts should match within default threshold. Unique: {np.unique(match_idx)}",
+        )
+
+
+def test_broken_normal_threshold(test, device):
+    """Moving a sphere so the contact normal direction changes beyond threshold
+    produces MATCH_BROKEN.
+
+    Two spheres (radius 0.1) overlap in frame 1 along x-axis (normal ≈ (1,0,0)).
+    In frame 2, sphere B moves so they overlap along y-axis (normal ≈ (0,1,0)).
+    Same shape pair / sub_key, generous pos_threshold, but dot((1,0,0), (0,1,0)) = 0
+    which is below any reasonable normal_dot_threshold → MATCH_BROKEN.
+    """
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder()
+        # Two spheres overlapping along x-axis.
+        ba = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0)))
+        builder.add_shape_sphere(body=ba, radius=0.1)
+        bb = builder.add_body(xform=wp.transform(wp.vec3(0.19, 0.0, 0.0)))
+        builder.add_shape_sphere(body=bb, radius=0.1)
+
+        model = builder.finalize(device=device)
+        state = model.state()
+
+        pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            contact_matching="latest",
+            contact_matching_pos_threshold=10.0,  # very generous — ignore position
+            contact_matching_normal_dot_threshold=0.5,  # cos(60°) — perpendicular normals break
+        )
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0, "Overlapping spheres must produce contacts")
+
+        # Move sphere B so they overlap along y-axis instead.
+        q = state.body_q.numpy()
+        q[1][0:3] = [0.0, 0.19, 0.0]
+        state.body_q = wp.array(q, dtype=wp.transform, device=device)
+
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count2, 0, "Repositioned spheres must still produce contacts")
+
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
+        test.assertTrue(
+            np.all(match_idx == -2),
+            f"Normal changed ~90°, all should be MATCH_BROKEN. Unique: {np.unique(match_idx)}",
+        )
+
+
+def test_contact_report_indices_correct(test, device):
+    """Contact report indices must be consistent with match_index values."""
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest", contact_report=True)
+        contacts = pipeline.contacts()
+
+        # Frame 1: all contacts are new.
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0)
+
+        new_count1 = contacts.rigid_contact_new_count.numpy()[0]
+        test.assertEqual(new_count1, count1, "First frame: all contacts should be new")
+
+        # Verify new_contact_indices point to valid sorted positions.
+        new_indices1 = contacts.rigid_contact_new_indices.numpy()[:new_count1]
+        test.assertTrue(np.all(new_indices1 >= 0) and np.all(new_indices1 < count1))
+
+        # Verify new_contact_indices match the actual -1 positions in match_index.
+        match_idx1 = contacts.rigid_contact_match_index.numpy()[:count1]
+        expected_new = np.where(match_idx1 < 0)[0].astype(np.int32)
+        np.testing.assert_array_equal(
+            np.sort(new_indices1),
+            np.sort(expected_new),
+            err_msg="rigid_contact_new_indices must match positions where match_index < 0",
+        )
+
+        # Frame 2: stable scene — no new, no broken.
+        _collide_once(pipeline, state, contacts)
+        test.assertEqual(contacts.rigid_contact_new_count.numpy()[0], 0)
+        test.assertEqual(contacts.rigid_contact_broken_count.numpy()[0], 0)
+
+
+def test_save_empty_history_with_more_worlds_than_capacity(test, device):
+    """Clear every reset mask entry and save empty history even at zero capacity."""
+    with wp.ScopedDevice(device):
+        for capacity in (0, 1):
+            sorter = ContactSorter(capacity)
+            matcher = ContactMatcher(
+                capacity,
+                sorter=sorter,
+                shape_world=wp.zeros(1, dtype=wp.int32),
+                world_count=4,
+                shape_index_bits=1,
+                sub_key_bits=1,
+                device=device,
+            )
+            count = wp.zeros(1, dtype=wp.int32)
+            keys = wp.zeros(capacity, dtype=wp.int64)
+            generation = wp.full(1, 9, dtype=wp.int32)
+            points = wp.zeros(capacity, dtype=wp.vec3)
+            shapes = wp.zeros(capacity, dtype=wp.int32)
+            body_q = wp.zeros(0, dtype=wp.transform)
+            shape_body = wp.full(1, -1, dtype=wp.int32)
+
+            save = partial(
+                matcher.save_sorted_state,
+                keys,
+                count,
+                points,
+                points,
+                shapes,
+                shapes,
+                points,
+                body_q,
+                shape_body,
+                buffer_id=17,
+                contact_generation=generation,
+                device=device,
+            )
+
+            save()
+            if wp.get_device(device).is_cuda:
+                with wp.ScopedCapture(device=device) as capture:
+                    save()
+            for raw_count in (0, capacity + 1):
+                count.fill_(raw_count)
+                matcher._reset_world_mask.fill_(True)
+                matcher._prev_count.fill_(7)
+                if wp.get_device(device).is_cuda:
+                    wp.capture_launch(capture.graph)
+                else:
+                    save()
+                test.assertEqual(int(matcher.prev_contact_count.numpy()[0]), min(raw_count, capacity))
+                np.testing.assert_array_equal(matcher._prev_frame.numpy(), (17, 9))
+                test.assertFalse(matcher._reset_world_mask.numpy().any())
+
+
+def test_save_resets_next_frame_report_flags(test, device):
+    """Reset saved report flags before the next matching frame."""
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            contact_matching="latest",
+            contact_report=True,
+        )
+        contacts = pipeline.contacts()
+        matcher = pipeline._contact_matcher
+        test.assertIsNotNone(matcher)
+
+        count = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count, 0)
+        matcher._prev_was_matched.fill_(wp.int32(1))
+        matcher.save_sorted_state(
+            sorted_keys=pipeline._contact_sorter.sorted_keys_view,
+            contact_count=contacts.rigid_contact_count,
+            sorted_point0=contacts.rigid_contact_point0,
+            sorted_point1=contacts.rigid_contact_point1,
+            sorted_shape0=contacts.rigid_contact_shape0,
+            sorted_shape1=contacts.rigid_contact_shape1,
+            sorted_normal=contacts.rigid_contact_normal,
+            body_q=state.body_q,
+            shape_body=model.shape_body,
+            buffer_id=matcher.buffer_id(contacts),
+            contact_generation=contacts.contact_generation,
+            device=device,
+        )
+        np.testing.assert_array_equal(matcher._prev_was_matched.numpy()[:count], np.zeros(count, dtype=np.int32))
+
+        test.assertEqual(_collide_once(pipeline, state, contacts), count)
+        test.assertEqual(int(contacts.rigid_contact_new_count.numpy()[0]), 0)
+        test.assertEqual(int(contacts.rigid_contact_broken_count.numpy()[0]), 0)
+
+
+def test_contact_report_broken_indices(test, device):
+    """Broken contact report must list old contacts that disappeared."""
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        for x in (-0.5, 0.5):
+            b = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, 0.1)))
+            builder.add_shape_sphere(body=b, radius=0.1)
+
+        model = builder.finalize(device=device)
+        state = model.state()
+
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest", contact_report=True)
+        contacts = pipeline.contacts()
+
+        # Frame 1: 2 sphere-plane contacts.
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0)
+
+        # Frame 2: move one sphere far away so its contact disappears.
+        q = state.body_q.numpy()
+        q[1][0:3] = [0.5, 0.0, 10.0]  # second sphere flies away
+        state.body_q = wp.array(q, dtype=wp.transform, device=device)
+
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertLess(count2, count1, "Fewer contacts after removing a sphere")
+
+        broken_count = contacts.rigid_contact_broken_count.numpy()[0]
+        test.assertGreater(broken_count, 0, "Should have broken contacts from the removed sphere")
+
+        # Broken indices must be valid positions in the OLD sorted buffer.
+        broken_indices = contacts.rigid_contact_broken_indices.numpy()[:broken_count]
+        test.assertTrue(
+            np.all(broken_indices >= 0) and np.all(broken_indices < count1),
+            f"Broken indices must be in [0, {count1}), got: {broken_indices}",
+        )
+
+
+def test_deterministic_implied(test, device):
+    """Any non-disabled contact_matching mode should imply deterministic=True."""
+    with wp.ScopedDevice(device):
+        model, _state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        test.assertTrue(pipeline.deterministic)
+        test.assertEqual(pipeline.contact_matching, "latest")
+        test.assertEqual(pipeline._contact_sort_sub_key_bits, CONTACT_SORT_CONVEX_SUB_KEY_BITS)
+
+
+def test_matching_sort_width_follows_contact_family(test, device):
+    """Use compact persistent keys only for bounded manifold sub-keys."""
+    with wp.ScopedDevice(device):
+        model, _state = _build_simple_scene(device)
+        primitive_pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        test.assertEqual(primitive_pipeline._contact_sort_sub_key_bits, CONTACT_SORT_CONVEX_SUB_KEY_BITS)
+
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.5)))
+        builder.add_shape_mesh(body, mesh=newton.Mesh.create_box(0.5, compute_inertia=False))
+        mesh_model = builder.finalize(device=device)
+        mesh_pipeline = newton.CollisionPipeline(mesh_model, broad_phase="nxn", contact_matching="latest")
+        test.assertEqual(mesh_pipeline._contact_sort_sub_key_bits, CONTACT_SORT_SUB_KEY_BITS)
+
+
+def test_contacts_exposes_matching_mode(test, device):
+    """Expose the associated or most recent contact matching mode."""
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        test.assertEqual(newton.Contacts(0, 0, device=device).contact_matching_mode, "disabled")
+
+        latest_pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        contacts = latest_pipeline.contacts()
+
+        test.assertEqual(contacts.contact_matching_mode, "latest")
+        with test.assertRaises(AttributeError):
+            contacts.contact_matching_mode = "sticky"
+
+        incompatible_pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            rigid_contact_max=contacts.rigid_contact_max + 1,
+            contact_matching="sticky",
+        )
+        with test.assertRaisesRegex(ValueError, "capacity"):
+            incompatible_pipeline.collide(state, contacts)
+        test.assertEqual(contacts.contact_matching_mode, "latest")
+
+        for mode in ("sticky", "disabled"):
+            pipeline = newton.CollisionPipeline(
+                model,
+                broad_phase="nxn",
+                rigid_contact_max=contacts.rigid_contact_max,
+                contact_matching=mode,
+            )
+            pipeline.collide(state, contacts)
+            test.assertEqual(contacts.contact_matching_mode, mode)
+
+
+def test_matching_disabled_no_allocation(test, device):
+    """DISABLED mode: match_index and report arrays should be None."""
+    with wp.ScopedDevice(device):
+        model, _state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", deterministic=True)
+        contacts = pipeline.contacts()
+        test.assertIsNone(contacts.rigid_contact_match_index)
+        test.assertIsNone(contacts.rigid_contact_new_indices)
+        test.assertIsNone(contacts.rigid_contact_broken_indices)
+        test.assertEqual(pipeline.contact_matching, "disabled")
+
+
+def test_match_index_valid_after_sort(test, device):
+    """After sorting, match indices must be in valid range and unique."""
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        contacts = pipeline.contacts()
+
+        _collide_once(pipeline, state, contacts)  # frame 1
+        count = _collide_once(pipeline, state, contacts)  # frame 2
+
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count]
+        matched = match_idx[match_idx >= 0]
+
+        test.assertTrue(np.all(matched < count), f"Indices must be < {count}, max: {matched.max()}")
+        test.assertEqual(len(np.unique(matched)), len(matched), "Matched indices must be unique")
+
+
+def test_dynamic_body_world_transform(test, device):
+    """Two dynamic spheres (no ground plane) must produce identity match.
+
+    This exercises the ``body_q[bid]`` world-space transform path in both the
+    match and save kernels (bid != -1), which the ground-plane tests skip.
+    """
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder()
+        ba = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.0)))
+        builder.add_shape_sphere(body=ba, radius=0.1)
+        bb = builder.add_body(xform=wp.transform(wp.vec3(0.19, 0.0, 0.0)))
+        builder.add_shape_sphere(body=bb, radius=0.1)
+
+        model = builder.finalize(device=device)
+        state = model.state()
+
+        # Verify shape0 is a dynamic body (not ground).
+        sb = model.shape_body.numpy()
+        test.assertNotEqual(sb[0], -1, "shape0 should be a dynamic body in this test")
+
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0)
+
+        # Frame 2: identical state → identity match.
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertEqual(count1, count2)
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
+        np.testing.assert_array_equal(
+            match_idx,
+            np.arange(count2, dtype=np.int32),
+            err_msg="Dynamic-body stable scene must produce identity match",
+        )
+
+
+def test_box_on_plane_multiple_contacts(test, device):
+    """A box on a plane produces multiple contacts per shape pair (sub_keys 0-3).
+
+    This verifies matching works when a single shape pair generates several
+    contacts with distinct sort sub-keys, and that the identity invariant
+    holds for all of them.
+    """
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        b = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.15)))
+        builder.add_shape_box(body=b, hx=0.1, hy=0.1, hz=0.1)
+
+        model = builder.finalize(device=device)
+        state = model.state()
+
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 1, "Box on plane should produce multiple contacts")
+
+        # Frame 2: identical state → identity match for all contacts.
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertEqual(count1, count2)
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
+        np.testing.assert_array_equal(
+            match_idx,
+            np.arange(count2, dtype=np.int32),
+            err_msg="Box multi-contact stable scene must produce identity match",
+        )
+
+
+def test_history_survives_sorter_scratch_reuse(test, device):
+    """Keep previous-frame history intact when sorter scratch is overwritten between frames.
+
+    The sorter's scratch is transient: any stage that runs between sorting
+    and matching may reuse it.  Matching must not depend on its contents.
+    """
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0)
+
+        sorter = pipeline._contact_sorter
+        sorter.scratch_pos_world.fill_(wp.vec3(1.0e3, -1.0e3, 1.0e3))
+        sorter.scratch_normal.fill_(wp.vec3(0.0, 0.0, -1.0))
+
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertEqual(count1, count2)
+        np.testing.assert_array_equal(
+            contacts.rigid_contact_match_index.numpy()[:count2],
+            np.arange(count2, dtype=np.int32),
+            err_msg="Overwriting sorter scratch must not break matching of an unchanged scene",
+        )
+
+
+def test_match_index_reset_without_matcher(test, device):
+    """Fill match_index with -1 when a non-matching pipeline writes a matching buffer."""
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        matching = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        contacts = matching.contacts()
+        _collide_once(matching, state, contacts)
+        count = _collide_once(matching, state, contacts)
+        test.assertTrue(np.all(contacts.rigid_contact_match_index.numpy()[:count] >= 0))
+
+        plain = newton.CollisionPipeline(model, broad_phase="nxn", deterministic=True)
+        count = _collide_once(plain, state, contacts)
+        test.assertGreater(count, 0)
+        test.assertEqual(contacts.contact_matching_mode, "disabled")
+        np.testing.assert_array_equal(
+            contacts.rigid_contact_match_index.numpy(),
+            np.full(contacts.rigid_contact_max, MATCH_NOT_FOUND, dtype=np.int32),
+            err_msg="A non-matching producer must not leave stale match indices",
+        )
+        test.assertEqual(int(contacts.rigid_contact_match_generation.numpy()[0]), -1)
+
+
+def _match_generation(contacts):
+    return int(contacts.rigid_contact_match_generation.numpy()[0])
+
+
+def _generation(contacts):
+    return int(contacts.contact_generation.numpy()[0])
+
+
+def test_match_generation_names_the_matched_buffer(test, device):
+    """Report which contact set of the written buffer the match indices refer to.
+
+    The matcher keeps one previous frame per pipeline. After a pass into another
+    buffer, the indices of the next pass into the first buffer refer to the other
+    buffer's contacts, so they must not be attributed to the first buffer's history.
+    """
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        first, second = pipeline.contacts(), pipeline.contacts()
+
+        pipeline.collide(state, first)
+        test.assertEqual(_match_generation(first), -1, "no previous frame")
+        saved = _generation(first)
+        pipeline.collide(state, first)
+        test.assertEqual(_match_generation(first), saved)
+
+        pipeline.collide(state, second)
+        test.assertEqual(_match_generation(second), -1, "the previous frame came from the first buffer")
+        pipeline.collide(state, first)
+        test.assertEqual(_match_generation(first), -1, "the previous frame came from the second buffer")
+        count = int(first.rigid_contact_count.numpy()[0])
+        np.testing.assert_array_equal(first.rigid_contact_match_index.numpy()[:count], np.arange(count))
+
+        saved = _generation(first)
+        first.clear()
+        pipeline.collide(state, first)
+        test.assertNotEqual(_generation(first), saved + 1)
+        test.assertEqual(_match_generation(first), saved, "a clear between passes keeps the matched set")
+
+        pipeline.reset_contact_matching()
+        pipeline.collide(state, first)
+        test.assertEqual(_match_generation(first), -1, "a full reset drops the previous frame")
+
+
+def test_match_generation_follows_cuda_graph_replay(test, device):
+    """Keep the matched-set report on the device, so alternating captured passes stay correct."""
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        first, second = pipeline.contacts(), pipeline.contacts()
+        pipeline.collide(state, first)
+        pipeline.collide(state, second)
+        graphs = {}
+        for name, contacts in (("first", first), ("second", second)):
+            with wp.ScopedCapture(device) as capture:
+                pipeline.collide(state, contacts)
+            graphs[name] = capture.graph
+
+        wp.capture_launch(graphs["first"])
+        saved = _generation(first)
+        wp.capture_launch(graphs["first"])
+        test.assertEqual(_match_generation(first), saved)
+        wp.capture_launch(graphs["second"])
+        test.assertEqual(_match_generation(second), -1)
+        wp.capture_launch(graphs["first"])
+        test.assertEqual(_match_generation(first), -1)
+
+
+def test_prev_count_clamped_on_overflow(test, device):
+    """Clamp the saved previous-frame count to capacity when the contact buffer overflows.
+
+    The narrow phase keeps counting contacts it cannot store, so the raw
+    count can exceed capacity.  Saving it unclamped makes the next match
+    search past the end of the history buffers.
+    """
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        for i in range(6):
+            body = builder.add_body(xform=wp.transform(wp.vec3(0.5 * i, 0.0, 0.1)))
+            builder.add_shape_box(body=body, hx=0.1, hy=0.1, hz=0.1)
+        model = builder.finalize(device=device)
+        state = model.state()
+
+        capacity = 8
+        pipeline = newton.CollisionPipeline(
+            model, broad_phase="nxn", contact_matching="latest", rigid_contact_max=capacity
+        )
+        contacts = pipeline.contacts()
+        test.assertEqual(contacts.rigid_contact_max, capacity)
+
+        for _ in range(2):
+            raw_count = _collide_once(pipeline, state, contacts)
+            test.assertGreater(raw_count, capacity, "Scene must overflow the contact buffer")
+            test.assertEqual(pipeline._contact_matcher.prev_contact_count.numpy()[0], capacity)
+
+        match_idx = contacts.rigid_contact_match_index.numpy()
+        test.assertTrue(np.all(match_idx < capacity), f"Match indices must address stored rows: {match_idx}")
+        test.assertTrue(np.all(match_idx >= MATCH_BROKEN))
+        # Drain the expected device printf here, not into the next test's output check.
+        wp.synchronize_device(device)
+
+
+def test_pipeline_sorter_omits_unused_simple_scratch(test, device):
+    """Avoid simple-layout scratch while preserving full-layout sorting and matching."""
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        for mode in ("disabled", "latest", "sticky"):
+            pipeline = newton.CollisionPipeline(
+                model, broad_phase="nxn", deterministic=True, contact_matching=mode, rigid_contact_max=64
+            )
+            sorter = pipeline._contact_sorter
+            unused_scratch = (
+                sorter._simple_pair_buf,
+                sorter._simple_position_buf,
+                sorter._simple_normal_buf,
+                sorter._simple_penetration_buf,
+                sorter._simple_tangent_buf,
+            )
+            test.assertEqual(sum(array.capacity for array in unused_scratch), 0)
+            contacts = pipeline.contacts()
+            count = _collide_once(pipeline, state, contacts)
+            test.assertGreater(count, 0)
+            test.assertEqual(_collide_once(pipeline, state, contacts), count)
+            if mode != "disabled":
+                np.testing.assert_array_equal(
+                    contacts.rigid_contact_match_index.numpy()[:count], np.arange(count, dtype=np.int32)
+                )
+
+
+def test_sorter_simple_layout_remains_available(test, device):
+    """Keep default simple sorting available and reject a full-only sorter safely."""
+    with wp.ScopedDevice(device):
+        capacity = 8
+        keys = wp.array((3, 1, 2, 0, 0, 0, 0, 0), dtype=wp.int64)
+        count = wp.array((3,), dtype=wp.int32)
+        pairs = wp.array(((3, 4), (1, 2), (2, 3)) + ((0, 0),) * 5, dtype=wp.vec2i)
+        positions = wp.array(
+            ((3.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0)) + ((0.0, 0.0, 0.0),) * 5, dtype=wp.vec3
+        )
+        normals = wp.zeros(capacity, dtype=wp.vec3)
+        penetration = wp.array((3.0, 1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0), dtype=float)
+        kwargs = {
+            "contact_pair": pairs,
+            "contact_position": positions,
+            "contact_normal": normals,
+            "contact_penetration": penetration,
+        }
+        full_only = ContactSorter(capacity, allocate_simple_scratch=False)
+        with test.assertRaisesRegex(ValueError, "allocate_simple_scratch=True"):
+            full_only.sort_simple(keys, count, **kwargs)
+        sorter = ContactSorter(capacity)
+        sorter.sort_simple(keys, count, **kwargs)
+        np.testing.assert_array_equal(pairs.numpy()[:3], ((1, 2), (2, 3), (3, 4)))
+        np.testing.assert_array_equal(positions.numpy()[:3, 0], (1.0, 2.0, 3.0))
+        np.testing.assert_array_equal(penetration.numpy()[:3], (1.0, 2.0, 3.0))
+
+
+def test_invalid_mode_raises(test, device):
+    """Invalid contact_matching values must raise ValueError."""
+    with wp.ScopedDevice(device):
+        model, _state = _build_simple_scene(device)
+
+        with test.assertRaises(ValueError):
+            newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="bogus")
+
+        with test.assertRaises(ValueError):
+            # Booleans no longer accepted.
+            newton.CollisionPipeline(model, broad_phase="nxn", contact_matching=True)
+
+
+def test_contact_report_requires_matching(test, device):
+    """contact_report=True requires a non-disabled matching mode."""
+    with wp.ScopedDevice(device):
+        model, _state = _build_simple_scene(device)
+        with test.assertRaises(ValueError):
+            newton.CollisionPipeline(
+                model,
+                broad_phase="nxn",
+                contact_matching="disabled",
+                contact_report=True,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Sticky mode tests
+# ---------------------------------------------------------------------------
+
+
+def test_sticky_common_translation(test, device, use_capture=False):
+    """Preserve body-local contact history during shared translation."""
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder()
+        for z in (0.0, 0.198):
+            body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, z)))
+            builder.add_shape_sphere(body=body, radius=0.1)
+        model = builder.finalize(device=device)
+        state = model.state()
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="sticky")
+        contacts = pipeline.contacts()
+        test.assertEqual(_collide_once(pipeline, state, contacts), 1)
+        points = [getattr(contacts, f"rigid_contact_point{i}").numpy()[0].copy() for i in (0, 1)]
+        if use_capture:
+            with wp.ScopedCapture(device=device) as capture:
+                pipeline.collide(state, contacts)
+        for _ in range(3):
+            q = state.body_q.numpy()
+            q[:, 0] += 0.01
+            q[:, 1] -= 0.02
+            state.body_q.assign(q)
+            if use_capture:
+                wp.capture_launch(capture.graph)
+            else:
+                pipeline.collide(state, contacts)
+            test.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 1)
+            test.assertEqual(int(contacts.rigid_contact_match_index.numpy()[0]), 0)
+            for i in (0, 1):
+                np.testing.assert_array_equal(getattr(contacts, f"rigid_contact_point{i}").numpy()[0], points[i])
+
+
+def test_sticky_drift_uses_body_witnesses(test, device):
+    """Verify sticky drift follows each witness in its own body's frame."""
+    threshold = 0.0005
+
+    def match(*, body_x=0.0, body_z=0.0, point1=(0.0, 0.0, 0.0)):
+        """Match a ground-to-body contact saved with zero body-local witnesses."""
+        matcher = ContactMatcher(
+            capacity=1,
+            sorter=ContactSorter(1),
+            shape_world=wp.full(2, -1, dtype=wp.int32, device=device),
+            world_count=0,
+            shape_index_bits=1,
+            sub_key_bits=1,
+            pos_threshold=threshold,
+            sticky=True,
+            device=device,
+        )
+        matcher._prev_sorted_keys.assign(np.array([0], dtype=np.int64))
+        matcher._prev_pos_world.assign(np.zeros((1, 3), dtype=np.float32))
+        matcher._prev_point0.assign(np.zeros((1, 3), dtype=np.float32))
+        matcher._prev_point1.assign(np.zeros((1, 3), dtype=np.float32))
+        matcher._prev_normal.assign(np.array([[0.0, 0.0, 1.0]], dtype=np.float32))
+        matcher._prev_count.assign(np.array([1], dtype=np.int32))
+        match_index = wp.full(1, MATCH_NOT_FOUND, dtype=wp.int32, device=device)
+        matcher.match(
+            sort_keys=wp.zeros(1, dtype=wp.int64, device=device),
+            contact_count=wp.array([1], dtype=wp.int32, device=device),
+            point0=wp.zeros(1, dtype=wp.vec3, device=device),
+            point1=wp.array([point1], dtype=wp.vec3, device=device),
+            shape0=wp.zeros(1, dtype=wp.int32, device=device),
+            shape1=wp.ones(1, dtype=wp.int32, device=device),
+            normal=wp.array([[0.0, 0.0, 1.0]], dtype=wp.vec3, device=device),
+            body_q=wp.array(
+                [wp.transform((body_x, 0.0, body_z), wp.quat_identity())], dtype=wp.transform, device=device
+            ),
+            shape_body=wp.array([-1, 0], dtype=wp.int32, device=device),
+            match_index_out=match_index,
+            buffer_id=1,
+            match_generation_out=wp.zeros(1, dtype=wp.int32, device=device),
+            device=device,
+        )
+        return int(match_index.numpy()[0])
+
+    with wp.ScopedDevice(device):
+        # Compression moves the body, not its witness on the body: 2 mm of
+        # normal approach keeps the anchor although the midpoint moves 1 mm.
+        test.assertEqual(match(body_z=-0.002), 0)
+        # A witness that jumps to another feature of its body, such as the
+        # opposite face of a 0.6 mm plate, expires the anchor although the
+        # midpoint moves only 0.3 mm.
+        test.assertEqual(match(point1=(0.0, 0.0, -0.0006)), MATCH_BROKEN)
+        # World-space rounding must not hide local drift far from the origin.
+        test.assertEqual(match(body_x=1.0e6, point1=(0.0006, 0.0, 0.0)), MATCH_BROKEN)
+
+
+def test_sticky_matched_rows_replayed(test, device):
+    """STICKY mode: matched rows carry exact previous-frame geometry even when
+    the narrow phase's fresh output differs on a perturbed second frame.
+
+    Frame 2 perturbs the bodies slightly (less than the match threshold) so
+    the narrow phase produces a different-but-close contact record.  Sticky
+    replay must overwrite ``point0``/``point1``/``offset0``/``offset1`` with
+    the previous frame's values, so after frame 2 those columns equal the
+    frame-1 snapshot even though the narrow phase would have produced
+    something slightly different.
+    """
+    with wp.ScopedDevice(device):
+        model, state = _build_simple_scene(device)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="sticky")
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0)
+        snap_point0 = contacts.rigid_contact_point0.numpy()[:count1].copy()
+        snap_point1 = contacts.rigid_contact_point1.numpy()[:count1].copy()
+        snap_offset0 = contacts.rigid_contact_offset0.numpy()[:count1].copy()
+        snap_offset1 = contacts.rigid_contact_offset1.numpy()[:count1].copy()
+        snap_normal = contacts.rigid_contact_normal.numpy()[:count1].copy()
+
+        # Perturb every body by 0.1 mm in x -- well below the 0.5 mm default
+        # pos threshold so every contact still matches, but enough for the
+        # narrow phase to produce a detectably different fresh record.
+        q = state.body_q.numpy()
+        for i in range(len(q)):
+            q[i][0] += 0.0001
+        state.body_q = wp.array(q, dtype=wp.transform, device=device)
+
+        # Also run the narrow phase on a fresh (non-sticky) pipeline with
+        # the same state, so we can confirm the fresh contact values really
+        # differ from frame 1 -- otherwise the sticky assertion below would
+        # pass trivially.
+        pipeline_fresh = newton.CollisionPipeline(model, broad_phase="nxn")
+        contacts_fresh = pipeline_fresh.contacts()
+        _collide_once(pipeline_fresh, state, contacts_fresh)
+        fresh_point0 = contacts_fresh.rigid_contact_point0.numpy()[:count1]
+
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertEqual(count1, count2)
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
+        test.assertTrue(
+            np.all(match_idx >= 0),
+            f"All perturbed contacts should still match. Unique: {np.unique(match_idx)}",
+        )
+
+        # Sanity: fresh narrow phase really did produce different point0 values
+        # on the perturbed frame, so the sticky assertion below is non-trivial.
+        test.assertFalse(
+            np.array_equal(fresh_point0, snap_point0),
+            "Precondition: perturbation must change fresh narrow-phase point0",
+        )
+
+        # Sticky contract: replayed fields equal the frame-1 snapshot.
+        for field, prev in (
+            ("point0", snap_point0),
+            ("point1", snap_point1),
+            ("offset0", snap_offset0),
+            ("offset1", snap_offset1),
+            ("normal", snap_normal),
+        ):
+            current = getattr(contacts, f"rigid_contact_{field}").numpy()[:count2]
+            np.testing.assert_array_equal(
+                current,
+                prev,
+                err_msg=f"Sticky mode: matched rows must carry prev-frame {field} byte-for-byte",
+            )
+
+
+def _build_rolling_cylinder_scene(device, *, plane_first):
+    """Build a penetrating cylinder-plane contact with either shape ordering."""
+    builder = newton.ModelBuilder()
+    if plane_first:
+        builder.add_ground_plane()
+    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.099), wp.quat_identity()))
+    builder.add_shape_cylinder(
+        body=body,
+        radius=0.1,
+        half_height=0.1,
+        xform=wp.transform(wp.vec3(0.0), wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), wp.pi / 2.0)),
+    )
+    if not plane_first:
+        builder.add_ground_plane()
+    model = builder.finalize(device=device)
+    return model, model.state()
+
+
+def _check_sticky_rotated_witness(test, device, *, plane_first, threshold, use_capture, expect_replay):
+    """Check rotated witnesses, matching identity, reports, and next-frame history."""
+    with wp.ScopedDevice(device):
+        model, state = _build_rolling_cylinder_scene(device, plane_first=plane_first)
+        pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            rigid_contact_max=64,
+            contact_matching="sticky",
+            contact_matching_pos_threshold=threshold,
+            contact_report=True,
+        )
+        contacts = pipeline.contacts()
+        count = int(_collide_once(pipeline, state, contacts))
+        test.assertGreater(count, 0)
+        fields = ("point0", "point1", "offset0", "offset1", "normal")
+        previous = {field: getattr(contacts, f"rigid_contact_{field}").numpy()[:count].copy() for field in fields}
+
+        # The cylinder's geometry stays put while its material witnesses rotate.
+        pose = state.body_q.numpy()
+        pose[0, 3:] = np.asarray(wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.1))
+        state.body_q.assign(pose)
+        reference = newton.CollisionPipeline(model, broad_phase="nxn", rigid_contact_max=64, deterministic=True)
+        reference_contacts = reference.contacts()
+        test.assertEqual(count, int(_collide_once(reference, state, reference_contacts)))
+        fresh = {
+            field: getattr(reference_contacts, f"rigid_contact_{field}").numpy()[:count].copy() for field in fields
+        }
+        world_points = []
+        shape_body = model.shape_body.numpy()
+        for side in (0, 1):
+            points = fresh[f"point{side}"].copy()
+            shapes = getattr(reference_contacts, f"rigid_contact_shape{side}").numpy()[:count]
+            for row, shape in enumerate(shapes):
+                body = int(shape_body[shape])
+                if body >= 0:
+                    transform = wp.transform(wp.vec3(*pose[body, :3]), wp.quat(*pose[body, 3:]))
+                    points[row] = np.asarray(wp.transform_point(transform, wp.vec3(*points[row])))
+            world_points.append(points)
+        gap = np.sum((world_points[1] - world_points[0]) * fresh["normal"], axis=1)
+        gap -= reference_contacts.rigid_contact_margin0.numpy()[:count]
+        gap -= reference_contacts.rigid_contact_margin1.numpy()[:count]
+        penetrating = gap < -1.0e-5
+        separated = gap > 1.0e-5
+        test.assertTrue(np.any(penetrating), "The scene must contain an unambiguously penetrating contact")
+        drift = max(
+            np.linalg.norm(previous[field][penetrating] - fresh[field][penetrating], axis=1).max()
+            for field in ("point0", "point1")
+        )
+        test.assertGreater(drift, 0.005, "Rotation must move a saved witness by more than 5 mm")
+        if expect_replay:
+            test.assertLess(drift, threshold)
+        else:
+            test.assertGreater(drift, threshold)
+
+        if use_capture:
+            # The initial collision warmed every kernel while retaining the old witnesses.
+            with wp.ScopedCapture(device=device) as capture:
+                pipeline.collide(state, contacts)
+            wp.capture_launch(capture.graph)
+        else:
+            pipeline.collide(state, contacts)
+        test.assertEqual(count, int(contacts.rigid_contact_count.numpy()[0]))
+        match_index = contacts.rigid_contact_match_index.numpy()[:count]
+        # Rotation moves the saved material witnesses even when the geometric
+        # surface stays put. Match only while each transported witness remains
+        # inside the configured radius; otherwise report the contact as broken.
+        if expect_replay:
+            test.assertTrue(np.all(match_index >= 0))
+        else:
+            np.testing.assert_array_equal(match_index, MATCH_BROKEN)
+        unmatched = int(np.count_nonzero(match_index < 0))
+        test.assertEqual(int(contacts.rigid_contact_new_count.numpy()[0]), unmatched)
+        test.assertEqual(int(contacts.rigid_contact_broken_count.numpy()[0]), unmatched)
+        for field in fields:
+            current = getattr(contacts, f"rigid_contact_{field}").numpy()[:count]
+            if expect_replay:
+                np.testing.assert_array_equal(current[penetrating], previous[field][match_index[penetrating]])
+                np.testing.assert_array_equal(current[separated], fresh[field][separated])
+            else:
+                np.testing.assert_allclose(current, fresh[field], rtol=0.0, atol=1.0e-6)
+
+        # Replaying again must use the geometry actually retained on the previous frame.
+        retained = {field: getattr(contacts, f"rigid_contact_{field}").numpy()[:count].copy() for field in fields}
+        if use_capture:
+            wp.capture_launch(capture.graph)
+        else:
+            pipeline.collide(state, contacts)
+        test.assertEqual(count, int(contacts.rigid_contact_count.numpy()[0]))
+        match_index = contacts.rigid_contact_match_index.numpy()[:count]
+        test.assertTrue(np.all(match_index >= 0))
+        for field in fields:
+            np.testing.assert_array_equal(
+                getattr(contacts, f"rigid_contact_{field}").numpy()[:count], retained[field][match_index]
+            )
+
+
+def test_sticky_rotated_witness_falls_back_to_fresh(test, device):
+    """Keep fresh contacts when either saved witness moves beyond the sticky threshold."""
+    for plane_first in (True, False):
+        with test.subTest(plane_first=plane_first):
+            _check_sticky_rotated_witness(
+                test, device, plane_first=plane_first, threshold=0.0005, use_capture=False, expect_replay=False
+            )
+
+
+def test_sticky_rotated_witness_within_threshold_replayed(test, device):
+    """Replay rotated witnesses that remain within a caller-specified sticky threshold."""
+    for plane_first in (True, False):
+        with test.subTest(plane_first=plane_first):
+            _check_sticky_rotated_witness(
+                test, device, plane_first=plane_first, threshold=0.02, use_capture=False, expect_replay=True
+            )
+
+
+def test_sticky_rotated_witness_cuda_graph(test, device):
+    """Reject stale witnesses during graph replay and retain fresh geometry for the next replay."""
+    for plane_first in (True, False):
+        with test.subTest(plane_first=plane_first):
+            _check_sticky_rotated_witness(
+                test, device, plane_first=plane_first, threshold=0.0005, use_capture=True, expect_replay=False
+            )
+
+
+def test_sticky_unmatched_rows_pass_through(test, device):
+    """STICKY mode: unmatched rows keep the current frame's narrow-phase data.
+
+    Add a new sphere to the scene in frame 2.  Its contacts have
+    match_index < 0, so sticky replay must NOT overwrite them — their
+    shape indices must reflect the newly added shape.
+    """
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        for x in (-0.5, 0.5):
+            b = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, 0.1)))
+            builder.add_shape_sphere(body=b, radius=0.1)
+        # Third sphere parked out of the way for frame 1.
+        b3 = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 10.0)))
+        new_shape = builder.add_shape_sphere(body=b3, radius=0.1)
+
+        model = builder.finalize(device=device)
+        state = model.state()
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="sticky")
+        contacts = pipeline.contacts()
+
+        count1 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count1, 0)
+
+        # Bring the third sphere down onto the ground.
+        q = state.body_q.numpy()
+        q[2][0:3] = [0.0, 0.0, 0.1]
+        state.body_q = wp.array(q, dtype=wp.transform, device=device)
+
+        count2 = _collide_once(pipeline, state, contacts)
+        test.assertGreater(count2, count1)
+
+        match_idx = contacts.rigid_contact_match_index.numpy()[:count2]
+        shape0 = contacts.rigid_contact_shape0.numpy()[:count2]
+        shape1 = contacts.rigid_contact_shape1.numpy()[:count2]
+
+        unmatched = match_idx < 0
+        test.assertTrue(unmatched.any(), "Frame 2 must introduce at least one unmatched contact")
+
+        # At least one unmatched row must reference the newly added shape,
+        # proving sticky replay did not overwrite new contacts with stale data.
+        involves_new = (shape0 == new_shape) | (shape1 == new_shape)
+        test.assertTrue(
+            (involves_new & unmatched).any(),
+            "Unmatched rows must pass through the new narrow-phase contacts for the new shape",
+        )
+
+        # Sanity: matched rows still carry valid shape indices (not -1 from
+        # the default-fill sentinel).
+        matched_mask = match_idx >= 0
+        test.assertTrue(
+            np.all(shape0[matched_mask] >= 0) and np.all(shape1[matched_mask] >= 0),
+            "Matched rows must have non-sentinel shape indices after replay",
+        )
+
+
+def test_sticky_disabled_no_sticky_buffers(test, device):
+    """LATEST and DISABLED modes must not allocate sticky buffers."""
+    with wp.ScopedDevice(device):
+        model, _state = _build_simple_scene(device)
+
+        p_latest = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="latest")
+        test.assertIsNotNone(p_latest._contact_matcher)
+        test.assertFalse(p_latest._contact_matcher.is_sticky)
+        test.assertIsNone(p_latest._contact_matcher._prev_point0)
+        test.assertIsNone(p_latest._contact_matcher._prev_point1)
+        test.assertIsNone(p_latest._contact_matcher._prev_offset0)
+        test.assertIsNone(p_latest._contact_matcher._prev_offset1)
+
+        p_off = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="disabled")
+        test.assertIsNone(p_off._contact_matcher)
+
+        p_sticky = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="sticky")
+        test.assertTrue(p_sticky._contact_matcher.is_sticky)
+        test.assertIsNotNone(p_sticky._contact_matcher._prev_point0)
+        test.assertIsNotNone(p_sticky._contact_matcher._prev_point1)
+        test.assertIsNotNone(p_sticky._contact_matcher._prev_offset0)
+        test.assertIsNotNone(p_sticky._contact_matcher._prev_offset1)
+
+
+# ---------------------------------------------------------------------------
+# Register tests
+# ---------------------------------------------------------------------------
+
+devices = get_test_devices()
+cuda_devices = get_cuda_test_devices()
+
+add_function_test(
+    TestContactMatching, "test_first_frame_all_not_found", test_first_frame_all_not_found, devices=devices
+)
+add_function_test(
+    TestContactMatching, "test_stable_scene_identity_match", test_stable_scene_identity_match, devices=devices
+)
+add_function_test(
+    TestContactMatching,
+    "test_stable_scene_identity_across_three_frames",
+    test_stable_scene_identity_across_three_frames,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_save_initializes_next_frame_claims",
+    test_save_initializes_next_frame_claims,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_masked_reset_restarts_only_selected_contact_history",
+    test_masked_reset_restarts_only_selected_contact_history,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_reset_rejects_invalid_world_masks",
+    test_reset_rejects_invalid_world_masks,
+    devices=get_test_devices(mode="basic"),
+)
+add_function_test(
+    TestContactMatching,
+    "test_reset_accumulates_live_mask_during_cuda_graph_replay",
+    test_reset_accumulates_live_mask_during_cuda_graph_replay,
+    devices=cuda_devices,
+)
+add_function_test(TestContactMatching, "test_new_contact_detection", test_new_contact_detection, devices=devices)
+add_function_test(
+    TestContactMatching,
+    "test_broken_pos_threshold_all_contacts",
+    test_broken_pos_threshold_all_contacts,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_within_pos_threshold_still_matches",
+    test_within_pos_threshold_still_matches,
+    devices=devices,
+)
+add_function_test(TestContactMatching, "test_broken_normal_threshold", test_broken_normal_threshold, devices=devices)
+add_function_test(
+    TestContactMatching, "test_contact_report_indices_correct", test_contact_report_indices_correct, devices=devices
+)
+add_function_test(
+    TestContactMatching,
+    "test_save_resets_next_frame_report_flags",
+    test_save_resets_next_frame_report_flags,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_save_empty_history_with_more_worlds_than_capacity",
+    test_save_empty_history_with_more_worlds_than_capacity,
+    devices=get_test_devices(mode="basic"),
+)
+add_function_test(
+    TestContactMatching, "test_contact_report_broken_indices", test_contact_report_broken_indices, devices=devices
+)
+add_function_test(TestContactMatching, "test_deterministic_implied", test_deterministic_implied, devices=devices)
+add_function_test(
+    TestContactMatching,
+    "test_matching_sort_width_follows_contact_family",
+    test_matching_sort_width_follows_contact_family,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching, "test_contacts_exposes_matching_mode", test_contacts_exposes_matching_mode, devices=devices
+)
+add_function_test(
+    TestContactMatching, "test_matching_disabled_no_allocation", test_matching_disabled_no_allocation, devices=devices
+)
+add_function_test(
+    TestContactMatching, "test_match_index_valid_after_sort", test_match_index_valid_after_sort, devices=devices
+)
+add_function_test(
+    TestContactMatching, "test_dynamic_body_world_transform", test_dynamic_body_world_transform, devices=devices
+)
+add_function_test(
+    TestContactMatching, "test_box_on_plane_multiple_contacts", test_box_on_plane_multiple_contacts, devices=devices
+)
+add_function_test(
+    TestContactMatching,
+    "test_history_survives_sorter_scratch_reuse",
+    test_history_survives_sorter_scratch_reuse,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_match_index_reset_without_matcher",
+    test_match_index_reset_without_matcher,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_match_generation_names_the_matched_buffer",
+    test_match_generation_names_the_matched_buffer,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_match_generation_follows_cuda_graph_replay",
+    test_match_generation_follows_cuda_graph_replay,
+    devices=cuda_devices,
+)
+# The narrow phase prints an expected overflow warning.
+add_function_test(
+    TestContactMatching,
+    "test_prev_count_clamped_on_overflow",
+    test_prev_count_clamped_on_overflow,
+    devices=devices,
+    check_output=False,
+)
+add_function_test(TestContactMatching, "test_invalid_mode_raises", test_invalid_mode_raises, devices=devices)
+add_function_test(
+    TestContactMatching,
+    "test_pipeline_sorter_omits_unused_simple_scratch",
+    test_pipeline_sorter_omits_unused_simple_scratch,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching,
+    "test_sorter_simple_layout_remains_available",
+    test_sorter_simple_layout_remains_available,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatching, "test_contact_report_requires_matching", test_contact_report_requires_matching, devices=devices
+)
+
+add_function_test(
+    TestContactMatchingSticky, "test_sticky_matched_rows_replayed", test_sticky_matched_rows_replayed, devices=devices
+)
+add_function_test(
+    TestContactMatchingSticky,
+    "test_sticky_unmatched_rows_pass_through",
+    test_sticky_unmatched_rows_pass_through,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatchingSticky,
+    "test_sticky_disabled_no_sticky_buffers",
+    test_sticky_disabled_no_sticky_buffers,
+    devices=devices,
+)
+
+add_function_test(
+    TestContactMatchingSticky,
+    "test_sticky_rotated_witness_falls_back_to_fresh",
+    test_sticky_rotated_witness_falls_back_to_fresh,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatchingSticky,
+    "test_sticky_rotated_witness_within_threshold_replayed",
+    test_sticky_rotated_witness_within_threshold_replayed,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatchingSticky,
+    "test_sticky_rotated_witness_cuda_graph",
+    test_sticky_rotated_witness_cuda_graph,
+    devices=cuda_devices,
+)
+
+add_function_test(
+    TestContactMatchingSticky,
+    "test_sticky_common_translation",
+    test_sticky_common_translation,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatchingSticky,
+    "test_sticky_common_translation_cuda_graph",
+    partial(test_sticky_common_translation, use_capture=True),
+    devices=cuda_devices,
+)
+add_function_test(
+    TestContactMatchingSticky,
+    "test_sticky_drift_uses_body_witnesses",
+    test_sticky_drift_uses_body_witnesses,
+    devices=devices,
+)
+
+if __name__ == "__main__":
+    wp.clear_kernel_cache()
+    unittest.main(verbosity=2)

@@ -20,7 +20,7 @@ struct SdfCollider {
 };
 struct SdfParameters {
     double stiffness=0,epsilon=0,dt=1.0/300.0,friction=0,eps_v=.001;
-    // Production solver uses false for both deformables and rigid bodies.
+    // Deformable DAT requests full curvature; legacy/rigid callers may disable it.
     unsigned include_curvature=0;
 };
 struct SdfOutput {

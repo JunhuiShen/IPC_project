@@ -1,0 +1,462 @@
+--- a/newton/_src/solvers/vbd/solver_vbd.py
++++ b/newton/_src/solvers/vbd/solver_vbd.py
+@@ -4305,7 +4305,25 @@
+         self._refresh_body_particle_contact_state(contacts, refresh)
+ 
+     def _solve_particle_iteration(self, state_in: State, state_out: State, contacts: Contacts | None, dt: float):
+-        """Solve one VBD iteration for particles."""
++        """Run the upstream color schedule through replaceable physics hooks.
++
++        The default hooks preserve VBD behavior. Project solvers replace the
++        equations and accepted-step filter while retaining this GPU schedule.
++        """
++        if self.model.particle_count == 0:
++            return
++        self.particle_forces.zero_()
++        self.particle_hessians.zero_()
++        for color in range(len(self.model.particle_color_groups)):
++            self._accumulate_particle_contact_terms(state_in, state_out, contacts, dt, color)
++            self._solve_particle_elasticity_color(state_in, state_out, contacts, dt, color)
++            self._finish_particle_color(state_in, state_out, contacts, dt, color)
++        wp.copy(state_out.particle_q, state_in.particle_q)
++
++    def _accumulate_particle_contact_terms(
++        self, state_in: State, state_out: State, contacts: Contacts | None, dt: float, color: int
++    ):
++        """Assemble the original VBD contact, attachment and spring terms."""
+         model = self.model
+ 
+         # Select rigid-body poses for particle-rigid contact evaluation
+@@ -4331,228 +4349,231 @@
+             else None
+         )
+ 
+-        # Zero out forces and hessians
+-        self.particle_forces.zero_()
+-        self.particle_hessians.zero_()
+-
+-        # Iterate over color groups
+-        for color in range(len(self.model.particle_color_groups)):
+-            if model.attachment_particle_body_count > 0:
++        if model.attachment_particle_body_count > 0:
++            wp.launch(
++                kernel=accumulate_body_particle_attachment_force_and_hessian,
++                dim=model.attachment_particle_body_count,
++                inputs=[
++                    dt,
++                    color,
++                    self.particle_q_prev,
++                    state_in.particle_q,
++                    model.particle_colors,
++                    body_q_for_particles,
++                    body_q_prev_for_particles,
++                    model.attachment_particle_body_body,
++                    model.attachment_particle_body_particle,
++                    model.attachment_particle_body_body_point,
++                    model.attachment_particle_body_stiffness,
++                    model.attachment_particle_body_damping,
++                    model.attachment_particle_body_enabled,
++                    self._attachment_particle_body_rho,
++                    self._attachment_particle_body_lambda,
++                ],
++                outputs=[self.particle_forces, self.particle_hessians],
++                device=self.device,
++            )
++
++        if contacts is not None and contacts.soft_contact_max > 0:
++            contact_material_and_body_inputs = [
++                self.body_particle_contact_penalty_k,
++                self.body_particle_contact_material_kd,
++                self.body_particle_contact_material_mu,
++                model.shape_body,
++                body_q_for_particles,
++                body_q_prev_for_particles,
++                body_qd_for_particles,
++                model.body_com,
++                contacts.soft_contact_shape,
++                contacts.soft_contact_body_pos,
++                contacts.soft_contact_body_vel,
++                contacts.soft_contact_normal,
++                model.shape_margin,
++                contacts.soft_contact_barycentric,
++            ]
++            if self._particle_contact_use_gather:
++                # Deterministic modes: one thread per colored particle, no output atomics.
+                 wp.launch(
+-                    kernel=accumulate_body_particle_attachment_force_and_hessian,
+-                    dim=model.attachment_particle_body_count,
++                    kernel=gather_particle_body_contact_force_and_hessian,
++                    dim=self.model.particle_color_groups[color].size,
++                    block_dim=_PARTICLE_CONTACT_GATHER_BLOCK_DIM,
+                     inputs=[
+                         dt,
+-                        color,
++                        self.model.particle_color_groups[color],
+                         self.particle_q_prev,
+                         state_in.particle_q,
+-                        model.particle_colors,
+-                        body_q_for_particles,
+-                        body_q_prev_for_particles,
+-                        model.attachment_particle_body_body,
+-                        model.attachment_particle_body_particle,
+-                        model.attachment_particle_body_body_point,
+-                        model.attachment_particle_body_stiffness,
+-                        model.attachment_particle_body_damping,
+-                        model.attachment_particle_body_enabled,
+-                        self._attachment_particle_body_rho,
+-                        self._attachment_particle_body_lambda,
++                        self.friction_epsilon,
++                        self.rigid_soft_contact_use_log_barrier,
++                        self.soft_contact_damping_bidirectional,
++                        model.particle_radius,
++                        contacts.soft_contact_indices,
++                        self._particle_contact_head,
++                        self._particle_contact_next,
++                        *contact_material_and_body_inputs,
++                        contact_filter,
+                     ],
+-                    outputs=[self.particle_forces, self.particle_hessians],
++                    outputs=[
++                        self.particle_forces,
++                        self.particle_hessians,
++                    ],
+                     device=self.device,
+                 )
+-
+-            if contacts is not None and contacts.soft_contact_max > 0:
+-                contact_material_and_body_inputs = [
+-                    self.body_particle_contact_penalty_k,
+-                    self.body_particle_contact_material_kd,
+-                    self.body_particle_contact_material_mu,
+-                    model.shape_body,
+-                    body_q_for_particles,
+-                    body_q_prev_for_particles,
+-                    body_qd_for_particles,
+-                    model.body_com,
+-                    contacts.soft_contact_shape,
+-                    contacts.soft_contact_body_pos,
+-                    contacts.soft_contact_body_vel,
+-                    contacts.soft_contact_normal,
+-                    model.shape_margin,
+-                    contacts.soft_contact_barycentric,
+-                ]
+-                if self._particle_contact_use_gather:
+-                    # Deterministic modes: one thread per colored particle, no output atomics.
+-                    wp.launch(
+-                        kernel=gather_particle_body_contact_force_and_hessian,
+-                        dim=self.model.particle_color_groups[color].size,
+-                        block_dim=_PARTICLE_CONTACT_GATHER_BLOCK_DIM,
+-                        inputs=[
+-                            dt,
+-                            self.model.particle_color_groups[color],
+-                            self.particle_q_prev,
+-                            state_in.particle_q,
+-                            self.friction_epsilon,
+-                            self.rigid_soft_contact_use_log_barrier,
+-                            self.soft_contact_damping_bidirectional,
+-                            model.particle_radius,
+-                            contacts.soft_contact_indices,
+-                            self._particle_contact_head,
+-                            self._particle_contact_next,
+-                            *contact_material_and_body_inputs,
+-                            contact_filter,
+-                        ],
+-                        outputs=[
+-                            self.particle_forces,
+-                            self.particle_hessians,
+-                        ],
+-                        device=self.device,
+-                    )
+-                else:
+-                    # Default: one record per thread over the active prefix, atomics into the
+-                    # active color's corners. The worker grid is host-static (graph-safe).
+-                    wp.launch(
+-                        kernel=scatter_particle_body_contact_force_and_hessian,
+-                        dim=self._particle_contact_worker_count,
+-                        inputs=[
+-                            dt,
+-                            color,
+-                            self.particle_q_prev,
+-                            state_in.particle_q,
+-                            self.model.particle_colors,
+-                            self.friction_epsilon,
+-                            self.rigid_soft_contact_use_log_barrier,
+-                            self.soft_contact_damping_bidirectional,
+-                            model.particle_radius,
+-                            contacts.soft_contact_indices,
+-                            contacts.soft_contact_count,
+-                            contact_filter,
+-                            contacts.soft_contact_max,
+-                            self._particle_contact_worker_count,
+-                            *contact_material_and_body_inputs,
+-                        ],
+-                        outputs=[
+-                            self.particle_forces,
+-                            self.particle_hessians,
+-                        ],
+-                        device=self.device,
+-                    )
+-
+-            if model.spring_count:
++            else:
++                # Default: one record per thread over the active prefix, atomics into the
++                # active color's corners. The worker grid is host-static (graph-safe).
+                 wp.launch(
+-                    kernel=accumulate_spring_force_and_hessian,
++                    kernel=scatter_particle_body_contact_force_and_hessian,
++                    dim=self._particle_contact_worker_count,
+                     inputs=[
+                         dt,
+                         color,
+                         self.particle_q_prev,
+                         state_in.particle_q,
+                         self.model.particle_colors,
+-                        model.spring_count,
+-                        self.model.spring_indices,
+-                        self.model.spring_rest_length,
+-                        self.model.spring_stiffness,
+-                        self.model.spring_damping,
++                        self.friction_epsilon,
++                        self.rigid_soft_contact_use_log_barrier,
++                        self.soft_contact_damping_bidirectional,
++                        model.particle_radius,
++                        contacts.soft_contact_indices,
++                        contacts.soft_contact_count,
++                        contact_filter,
++                        contacts.soft_contact_max,
++                        self._particle_contact_worker_count,
++                        *contact_material_and_body_inputs,
+                     ],
+-                    outputs=[self.particle_forces, self.particle_hessians],
+-                    dim=model.spring_count,
+-                    device=self.device,
+-                )
+-
+-            if self.particle_enable_self_contact:
+-                wp.launch(
+-                    kernel=accumulate_self_contact_force_and_hessian,
+-                    dim=self.particle_self_contact_evaluation_kernel_launch_size,
+-                    inputs=[
+-                        dt,
+-                        color,
+-                        self.particle_q_prev,
+-                        state_in.particle_q,
+-                        self.model.particle_colors,
+-                        self.model.tri_indices,
+-                        self.model.edge_indices,
+-                        # self-contact
+-                        self.trimesh_collision_info,
+-                        self.particle_self_contact_margin,
+-                        self.model.soft_contact_ke,
+-                        self.model.soft_contact_kd,
+-                        self.model.soft_contact_mu,
+-                        self.friction_epsilon,
+-                        self.soft_contact_damping_bidirectional,
+-                        self._self_contact_edge_edge_parallel_epsilon,
+-                    ],
+-                    outputs=[self.particle_forces, self.particle_hessians],
+-                    device=self.device,
+-                    max_blocks=self.model.device.sm_count,
+-                )
+-            if self.use_particle_tile_solve:
+-                particle_count_in_color = self.model.particle_color_groups[color].size
+-                per_block = self._tiled_elasticity_particles_per_block
+-                blocks = (particle_count_in_color + per_block - 1) // per_block
+-                wp.launch(
+-                    kernel=self._tiled_elasticity_kernel,
+-                    dim=blocks * per_block * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+-                    block_dim=per_block * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
+-                    inputs=[
+-                        dt,
+-                        self.model.particle_color_groups[color],
+-                        self.particle_q_prev,
+-                        state_in.particle_q,
+-                        self.model.particle_mass,
+-                        self.inertia,
+-                        self.model.particle_flags,
+-                        self.model.tri_indices,
+-                        self.model.tri_poses,
+-                        self.model.tri_materials,
+-                        self.model.tri_areas,
+-                        self.model.edge_indices,
+-                        self.model.edge_rest_angle,
+-                        self.model.edge_rest_length,
+-                        self.model.edge_bending_properties,
+-                        self.model.tet_indices,
+-                        self.model.tet_poses,
+-                        self.model.tet_materials,
+-                        self.particle_adjacency,
++                    outputs=[
+                         self.particle_forces,
+                         self.particle_hessians,
+                     ],
+-                    outputs=[
+-                        self.particle_displacements,
+-                    ],
+                     device=self.device,
+                 )
+-            else:
+-                wp.launch(
+-                    kernel=solve_elasticity,
+-                    dim=self.model.particle_color_groups[color].size,
+-                    inputs=[
+-                        dt,
+-                        self.model.particle_color_groups[color],
+-                        self.particle_q_prev,
+-                        state_in.particle_q,
+-                        self.model.particle_mass,
+-                        self.inertia,
+-                        self.model.particle_flags,
+-                        self.model.tri_indices,
+-                        self.model.tri_poses,
+-                        self.model.tri_materials,
+-                        self.model.tri_areas,
+-                        self.model.edge_indices,
+-                        self.model.edge_rest_angle,
+-                        self.model.edge_rest_length,
+-                        self.model.edge_bending_properties,
+-                        self.model.tet_indices,
+-                        self.model.tet_poses,
+-                        self.model.tet_materials,
+-                        self.particle_adjacency,
+-                        self.particle_forces,
+-                        self.particle_hessians,
+-                    ],
+-                    outputs=[
+-                        self.particle_displacements,
+-                    ],
+-                    device=self.device,
+-                )
+-            self._penetration_free_truncation(state_in, contacts)
+-
+-        wp.copy(state_out.particle_q, state_in.particle_q)
++
++        if model.spring_count:
++            wp.launch(
++                kernel=accumulate_spring_force_and_hessian,
++                inputs=[
++                    dt,
++                    color,
++                    self.particle_q_prev,
++                    state_in.particle_q,
++                    self.model.particle_colors,
++                    model.spring_count,
++                    self.model.spring_indices,
++                    self.model.spring_rest_length,
++                    self.model.spring_stiffness,
++                    self.model.spring_damping,
++                ],
++                outputs=[self.particle_forces, self.particle_hessians],
++                dim=model.spring_count,
++                device=self.device,
++            )
++
++        if self.particle_enable_self_contact:
++            wp.launch(
++                kernel=accumulate_self_contact_force_and_hessian,
++                dim=self.particle_self_contact_evaluation_kernel_launch_size,
++                inputs=[
++                    dt,
++                    color,
++                    self.particle_q_prev,
++                    state_in.particle_q,
++                    self.model.particle_colors,
++                    self.model.tri_indices,
++                    self.model.edge_indices,
++                    # self-contact
++                    self.trimesh_collision_info,
++                    self.particle_self_contact_margin,
++                    self.model.soft_contact_ke,
++                    self.model.soft_contact_kd,
++                    self.model.soft_contact_mu,
++                    self.friction_epsilon,
++                    self.soft_contact_damping_bidirectional,
++                    self._self_contact_edge_edge_parallel_epsilon,
++                ],
++                outputs=[self.particle_forces, self.particle_hessians],
++                device=self.device,
++                max_blocks=self.model.device.sm_count,
++            )
++
++    def _solve_particle_elasticity_color(
++        self, state_in: State, state_out: State, contacts: Contacts | None, dt: float, color: int
++    ):
++        """Launch the original scalar or tiled VBD elasticity kernel."""
++        if self.use_particle_tile_solve:
++            particle_count_in_color = self.model.particle_color_groups[color].size
++            per_block = self._tiled_elasticity_particles_per_block
++            blocks = (particle_count_in_color + per_block - 1) // per_block
++            wp.launch(
++                kernel=self._tiled_elasticity_kernel,
++                dim=blocks * per_block * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
++                block_dim=per_block * TILE_SIZE_TRI_MESH_ELASTICITY_SOLVE,
++                inputs=[
++                    dt,
++                    self.model.particle_color_groups[color],
++                    self.particle_q_prev,
++                    state_in.particle_q,
++                    self.model.particle_mass,
++                    self.inertia,
++                    self.model.particle_flags,
++                    self.model.tri_indices,
++                    self.model.tri_poses,
++                    self.model.tri_materials,
++                    self.model.tri_areas,
++                    self.model.edge_indices,
++                    self.model.edge_rest_angle,
++                    self.model.edge_rest_length,
++                    self.model.edge_bending_properties,
++                    self.model.tet_indices,
++                    self.model.tet_poses,
++                    self.model.tet_materials,
++                    self.particle_adjacency,
++                    self.particle_forces,
++                    self.particle_hessians,
++                ],
++                outputs=[
++                    self.particle_displacements,
++                ],
++                device=self.device,
++            )
++        else:
++            wp.launch(
++                kernel=solve_elasticity,
++                dim=self.model.particle_color_groups[color].size,
++                inputs=[
++                    dt,
++                    self.model.particle_color_groups[color],
++                    self.particle_q_prev,
++                    state_in.particle_q,
++                    self.model.particle_mass,
++                    self.inertia,
++                    self.model.particle_flags,
++                    self.model.tri_indices,
++                    self.model.tri_poses,
++                    self.model.tri_materials,
++                    self.model.tri_areas,
++                    self.model.edge_indices,
++                    self.model.edge_rest_angle,
++                    self.model.edge_rest_length,
++                    self.model.edge_bending_properties,
++                    self.model.tet_indices,
++                    self.model.tet_poses,
++                    self.model.tet_materials,
++                    self.particle_adjacency,
++                    self.particle_forces,
++                    self.particle_hessians,
++                ],
++                outputs=[
++                    self.particle_displacements,
++                ],
++                device=self.device,
++            )
++
++    def _finish_particle_color(
++        self, state_in: State, state_out: State, contacts: Contacts | None, dt: float, color: int
++    ):
++        """Apply the original DAT update filter after one upstream color."""
++        self._penetration_free_truncation(state_in, contacts)
++
+ 
+     def _update_tendon_routing(self, state_in: State, dt: float, report_diagnostics: bool) -> None:
+         """Update VBD routed-tendon geometry and rolling rest transfer for this iteration."""

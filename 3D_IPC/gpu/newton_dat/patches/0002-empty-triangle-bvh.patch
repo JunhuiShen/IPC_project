@@ -1,0 +1,106 @@
+--- a/newton/_src/geometry/tri_mesh_collision.py
++++ b/newton/_src/geometry/tri_mesh_collision.py
+@@ -464,14 +464,20 @@
+             device=model.device,
+         )
+ 
+-        self.bvh_tris = wp.Bvh(self.lower_bounds_tris, self.upper_bounds_tris, groups=self.tri_groups)
+-        self.bvh_tris_group_roots = wp.zeros(model.world_count + 1, dtype=wp.int32, device=model.device)
+-        wp.launch(
+-            kernel=compute_bvh_group_roots,
+-            dim=model.world_count + 1,
+-            inputs=[self.bvh_tris.id, self.bvh_tris_group_roots],
+-            device=model.device,
+-        )
++        # As with edges, an empty grouped BVH is unsupported on some devices.
++        self.bvh_tris = (
++            wp.Bvh(self.lower_bounds_tris, self.upper_bounds_tris, groups=self.tri_groups)
++            if model.tri_count
++            else None
++        )
++        self.bvh_tris_group_roots = wp.full(model.world_count + 1, -1, dtype=wp.int32, device=model.device)
++        if self.bvh_tris is not None:
++            wp.launch(
++                kernel=compute_bvh_group_roots,
++                dim=model.world_count + 1,
++                inputs=[self.bvh_tris.id, self.bvh_tris_group_roots],
++                device=model.device,
++            )
+ 
+         # Collision detection results live in a TriMeshCollisionInfo owned outside
+         # the detector. Explicitly one of: injected (collision_info=...), self-built
+@@ -859,23 +865,24 @@
+         if new_pos is not None:
+             self.vertex_positions = new_pos
+ 
+-        wp.launch(
+-            kernel=compute_tri_aabbs,
+-            inputs=[
+-                self.vertex_positions,
+-                self.model.tri_indices,
+-            ],
+-            outputs=[self.lower_bounds_tris, self.upper_bounds_tris],
+-            dim=self.model.tri_count,
+-            device=self.model.device,
+-        )
+-        self.bvh_tris.rebuild()
+-        wp.launch(
+-            kernel=compute_bvh_group_roots,
+-            dim=self.model.world_count + 1,
+-            inputs=[self.bvh_tris.id, self.bvh_tris_group_roots],
+-            device=self.model.device,
+-        )
++        if self.bvh_tris is not None:
++            wp.launch(
++                kernel=compute_tri_aabbs,
++                inputs=[
++                    self.vertex_positions,
++                    self.model.tri_indices,
++                ],
++                outputs=[self.lower_bounds_tris, self.upper_bounds_tris],
++                dim=self.model.tri_count,
++                device=self.model.device,
++            )
++            self.bvh_tris.rebuild()
++            wp.launch(
++                kernel=compute_bvh_group_roots,
++                dim=self.model.world_count + 1,
++                inputs=[self.bvh_tris.id, self.bvh_tris_group_roots],
++                device=self.model.device,
++            )
+ 
+         wp.launch(
+             kernel=compute_edge_aabbs,
+@@ -902,6 +909,8 @@
+         self.refit_edges()
+ 
+     def refit_triangles(self):
++        if self.bvh_tris is None:
++            return
+         wp.launch(
+             kernel=compute_tri_aabbs,
+             inputs=[self.vertex_positions, self.model.tri_indices, self.lower_bounds_tris, self.upper_bounds_tris],
+@@ -926,6 +935,13 @@
+     ):
+         self._require_collision_info()
+         self.vertex_colliding_triangles.fill_(-1)
++        if self.bvh_tris is None:
++            self.vertex_colliding_triangles_count.zero_()
++            self.vertex_colliding_triangles_min_dist.fill_(max_query_radius)
++            if self.record_triangle_contacting_vertices:
++                self.triangle_colliding_vertices_count.zero_()
++            self.triangle_colliding_vertices_min_dist.fill_(max_query_radius)
++            return
+ 
+         if self.record_triangle_contacting_vertices:
+             wp.launch(
+@@ -1050,6 +1066,9 @@
+ 
+             self.triangle_intersecting_triangles_offsets = wp.array(offsets, dtype=wp.int32, device=self.device)
+ 
++        if self.bvh_tris is None:
++            return
++
+         wp.launch(
+             kernel=triangle_triangle_collision_detection_kernel,
+             inputs=[

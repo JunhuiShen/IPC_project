@@ -1,0 +1,4 @@
+# Exact headless benchmark environment. Standard Warp wheel uses CUDA 13.
+warp-lang==1.19.0
+numpy==2.4.6
+usd-core==26.8

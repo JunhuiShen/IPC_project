@@ -1,0 +1,4 @@
+# Exact Python 3.11 / Linux x86-64 environment validated on biot.
+numpy==2.4.6
+usd-core==26.8
+warp-lang @ https://github.com/NVIDIA/warp/releases/download/v1.19.0/warp_lang-1.19.0%2Bcu12-py3-none-manylinux_2_28_x86_64.whl#sha256=f95d9581ed12663df272e45a50101b171e143fde1ef7b2433a8bfc9fba096598

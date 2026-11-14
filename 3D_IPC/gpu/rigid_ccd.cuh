@@ -1,7 +1,7 @@
 #pragma once
 
 #include "rigid.cuh"
-#include "broadphase.h"
+#include "broadphase_types.h"
 #include <cfloat>
 #include <cmath>
 

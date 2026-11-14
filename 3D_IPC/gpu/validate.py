@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Run the modern component-only GPU CTest suite.
+"""Run the primary Newton/Warp GPU validation suite through CTest.
 
-This is a thin launcher: it forwards directly to CTest for the ``gpu_solver``
-label and returns the child exit status. It does not configure or build, delete
-directories, run a solver or benchmark, and it makes no CPU/GPU trajectory or
-alignment claim. Native numerical, caller and physical qualification is a
-separate supervisor task.
+Forward the ``gpu_solver`` label and return CTest's status. Configure and build
+the primary gpu/ project first. Its tests cover equations, model/scene mapping,
+captured execution and the requirement for a real CUDA runtime.
 """
 import argparse
 from pathlib import Path

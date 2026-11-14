@@ -85,8 +85,17 @@ Use `-DIPC_ENABLE_NATIVE_ARCH=OFF` when building for another CPU. SIMD assembly
 uses the available backend or a scalar fallback; OpenMP controls parallel
 threads independently.
 
-A separate CUDA solver is built from [`gpu/`](gpu/). See the
-[GPU guide](gpu/README.md) for dependencies, build commands, and supported modes.
+The GPU driver in [`gpu/`](gpu/) provides three solvers:
+
+- **Reference DAT** (`--solver dat-reference`): Newton's original solver and
+  energies on the shared twisting-cloth example.
+- **DAT with our energies** (`--solver dat`): the same DAT algorithm with our
+  material and IPC/friction energies, for cloth and deformable solids.
+- **Our Gauss–Seidel solver** (`--solver ipc`, the default): our local updates
+  and CCD, for cloth, solids, rigid bodies and mixed scenes.
+
+All three use Newton/Warp GPU infrastructure. See the [GPU guide](gpu/README.md)
+for their differences, source files, build instructions and run commands.
 
 ### Components and versions
 
@@ -153,6 +162,7 @@ There is no solid-only scene among the categorized examples.
 
 Examples 8–10, 13 and 16–20 use the supplied `example_obj/` assets. Paths below are
 relative to **`3D_IPC/`**, so keep that working directory when running them.
+See the [asset README](example_obj/README.md) for mesh credits and license references.
 
 | Examples | Required files |
 |---|---|
@@ -216,7 +226,7 @@ and +y as the up direction.
 | Planar DAT | `--use_dat true`; the native port for cloth, solid, rigid, and mixed scenes, including certified curved rigid trajectories. OGC and cloth grid must be disabled. Takes precedence over ordinary Gauss--Seidel solving. |
 | Isotropic OGC | `--use_ogc true`; the dedicated native isotropic solver for cloth and solids. Select it separately from DAT and cloth grid. |
 | Jacobi with level-based colored CCD | `--use_jacobi_level_based_ccd true`; CPU cloth/solid scenes without rigid bodies, with OGC and cloth grid disabled. Takes precedence over ordinary Gauss--Seidel solving; mutually exclusive with `--use_dat`. |
-| CUDA solver | `gpu/build/3D_sim_gpu`; requires `--fixed_iters`. DAT, OGC, and Jacobi with level-based colored CCD are CPU-only and rejected by the GPU driver; cloth grid is unsupported. See the [GPU guide](gpu/README.md) for the remaining modes. |
+| CUDA solvers | Reference DAT, DAT with our energies, and our GS/CCD solver. See the [GPU guide](gpu/README.md#the-three-solvers) for selection and commands. |
 
 The three ordinary Gauss--Seidel solvers are selected automatically from scene
 geometry. Scene presets can enable SIMD assembly; `--use_simd` selects the

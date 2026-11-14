@@ -1,0 +1,7 @@
+#!@Python3_EXECUTABLE@
+import runpy
+import sys
+
+sys.path.insert(0, r"@_ipc_project_root@")
+sys.argv[1:1] = ["--scene-exporter", r"@_ipc_exporter@"]
+runpy.run_module("gpu.run", run_name="__main__")

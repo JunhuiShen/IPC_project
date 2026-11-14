@@ -1,0 +1,871 @@
+# Licensed under the MIT License
+# https://github.com/craigahobbs/unittest-parallel/blob/main/LICENSE
+
+# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+unittest-parallel command-line script main module
+"""
+
+import argparse
+import concurrent.futures  # NVIDIA Modification
+import importlib.metadata
+import multiprocessing
+import os
+import re
+import sys
+import tempfile
+import time
+import unittest
+import warnings
+from contextlib import contextmanager
+from io import StringIO
+
+# Work around a known OpenUSD thread-safety crash in the native physics parser for
+# collider-dense assets: concurrent descriptor appends could race when several colliders
+# shared one rigid body. Fixed in OpenUSD 26.08, so only older runtimes are constrained.
+#
+# OpenUSD reads this once when pxr initializes, so it must be set before test modules import
+# pxr. That rules out reading Usd.GetVersion(), and also rules out importing any newton USD
+# module, since newton_usd_schemas imports pxr at module scope. Distribution metadata gives
+# the runtime version without initializing OpenUSD: usd-core is versioned directly, while
+# usd-exchange bundles its own OpenUSD build and advertises it as a `usd<major><minor>` extra
+# (e.g. `usd2608`). A runtime that cannot be identified is treated as affected, and any
+# caller-provided override is preserved.
+try:
+    _USD_VERSION = tuple(int(part) for part in importlib.metadata.version("usd-core").split(".")[:2])
+except (importlib.metadata.PackageNotFoundError, ValueError):
+    try:
+        _USD_VERSION = next(
+            (int(match.group(1)), int(match.group(2)))
+            for match in (
+                re.fullmatch(r"usd(\d{2})(\d{2})", extra)
+                for extra in importlib.metadata.metadata("usd-exchange").get_all("Provides-Extra") or []
+            )
+            if match
+        )
+    except (importlib.metadata.PackageNotFoundError, StopIteration):
+        _USD_VERSION = (0, 0)
+
+if _USD_VERSION < (26, 8):
+    os.environ.setdefault("PXR_WORK_THREAD_LIMIT", "1")
+
+from newton.tests.unittest_utils import (  # NVIDIA modification
+    AllocationCleanupTestResultMixin,
+    ParallelJunitTestResult,
+    write_junit_results,
+)
+
+try:
+    import coverage
+
+    COVERAGE_AVAILABLE = True  # NVIDIA Modification
+except ImportError:
+    COVERAGE_AVAILABLE = False  # NVIDIA Modification
+
+
+# The following variables are NVIDIA Modifications
+START_DIRECTORY = os.path.dirname(__file__)  # The directory to start test discovery
+
+_TEST_MODULE_PREFIX = r"(?:.*\.)?"
+_STRICT_WARNING_TEST_MODULE = rf"{_TEST_MODULE_PREFIX}test_.*$"
+
+# Keep each exception narrow so warning-cleanup PRs can remove debt without
+# leaving an entire test module permissive.
+_KNOWN_WARNING_DEBT = (
+    {
+        "message": (
+            r"Inertia validation corrected \d+ bodies\. Set validate_inertia_detailed=True for detailed per-body "
+            r"warnings\."
+        ),
+        "category": UserWarning,
+        "module": (
+            rf"{_TEST_MODULE_PREFIX}"
+            r"(?:test_collision_cloth|test_collision_pipeline|test_controllers_joint_impedance|"
+            r"test_controllers_joint_selection|test_controllers_operational_space|test_convex_support|"
+            r"test_coupled_solver|test_custom_attributes|test_ik|test_ik_lbfgs|"
+            r"test_import_mjcf|test_jacobian_mass_matrix|test_kinematic_links|test_model|test_mujoco_solver|"
+            r"test_off_origin_convex_hull_contacts|test_rigid_contact)$"
+        ),
+    },
+)
+
+
+def _read_deprecation_allowlist(path):
+    """Read literal deprecation-message prefixes from a line-oriented file."""
+    with open(path, encoding="utf-8") as allowlist_file:
+        entries = []
+        for line_number, raw_line in enumerate(allowlist_file, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if ":" in line:
+                raise ValueError(
+                    f"line {line_number} contains ':'; use a unique message prefix ending before the colon"
+                )
+            entries.append(line)
+        return tuple(entries)
+
+
+def _enable_strict_warnings(allowed_deprecation_warnings=()):
+    """Escalate actionable and caller-attributed cleaned-test warnings to errors.
+
+    Installed before discovery and in each worker initializer so import-time
+    warnings from test modules are escalated too, not just runtime ones.
+    """
+    warnings.filterwarnings("error", category=DeprecationWarning)
+    warnings.filterwarnings("error", module=r"newton(\.|$)")
+    warnings.filterwarnings("error", module=_STRICT_WARNING_TEST_MODULE)
+    for warning_filter in _KNOWN_WARNING_DEBT:
+        warnings.filterwarnings("default", **warning_filter)
+    for message in allowed_deprecation_warnings:
+        warnings.filterwarnings("default", message=re.escape(message), category=DeprecationWarning)
+
+
+def main(argv=None):
+    """
+    unittest-parallel command-line script main entry point
+    """
+
+    # Command line arguments
+    parser = argparse.ArgumentParser(
+        prog="unittest-parallel",
+        # NVIDIA Modifications follow:
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog="""Example usage:
+        python -m newton.tests -p 'test_c*.py'
+        python -m newton.tests -k 'mgpu' -k 'cuda'
+        """,
+    )
+    parser.add_argument("-v", "--verbose", action="store_const", const=2, default=1, help="Verbose output")
+    parser.add_argument("-q", "--quiet", dest="verbose", action="store_const", const=0, default=1, help="Quiet output")
+    parser.add_argument("-f", "--failfast", action="store_true", default=False, help="Stop on first fail or error")
+    parser.add_argument(
+        "-b", "--buffer", action="store_true", default=False, help="Buffer stdout and stderr during tests"
+    )
+    parser.add_argument(
+        "-k",
+        dest="testNamePatterns",
+        action="append",
+        type=_convert_select_pattern,
+        help="Only run tests which match the given substring",
+    )
+    parser.add_argument(
+        "-s",
+        "--start-directory",
+        metavar="START",
+        default=os.path.join(os.path.dirname(__file__), ".."),
+        help="Directory to start discovery ('.' default)",
+    )
+    parser.add_argument(
+        "-p",
+        "--pattern",
+        metavar="PATTERN",
+        default="test*.py",
+        help="'autodetect' suite only: Pattern to match tests ('test*.py' default)",  # NVIDIA Modification
+    )
+    parser.add_argument(
+        "-t",
+        "--top-level-directory",
+        metavar="TOP",
+        help="Top level directory of project (defaults to start directory)",
+    )
+    parser.add_argument(
+        "--junit-report-xml", metavar="FILE", help="Generate JUnit report format XML file"
+    )  # NVIDIA Modification
+    parser.add_argument(
+        "--strict-warnings",
+        action="store_true",
+        default=False,
+        help="Treat all non-allowlisted DeprecationWarnings and warnings attributed to newton.* or test_* modules "
+        "as errors, except narrowly tracked known debt. Off by default so verifying an installation does not fail "
+        "on warnings the user cannot act on; enabled in CI to surface warning debt.",
+    )  # NVIDIA Modification
+    parser.add_argument(
+        "--deprecation-allowlist",
+        metavar="FILE",
+        help="Keep listed DeprecationWarning message prefixes non-fatal under --strict-warnings. "
+        "The file accepts one literal prefix without ':' per line, blank lines, and comments beginning with '#'.",
+    )  # NVIDIA Modification
+    group_parallel = parser.add_argument_group("parallelization options")
+    group_parallel.add_argument(
+        "-j",
+        "--jobs",
+        metavar="COUNT",
+        type=int,
+        default=0,
+        help="The number of test processes (default is 0, all cores)",
+    )
+    group_parallel.add_argument(
+        "-m",
+        "--maxjobs",
+        metavar="MAXCOUNT",
+        type=int,
+        default=8,
+        help="The maximum number of test processes (default is 8)",
+    )  # NVIDIA Modification
+    group_parallel.add_argument(
+        "--level",
+        choices=["module", "class", "test"],
+        default="class",
+        help="Set the test parallelism level (default is 'class')",
+    )
+    group_parallel.add_argument(
+        "--shard-count",
+        metavar="COUNT",
+        type=int,
+        default=1,
+        help="Split the discovered test suites into COUNT deterministic shards (default is 1). "
+        "Shards are disjoint and complete only when every shard runs the same revision with the same "
+        "filters and discovery options (--start-directory, --pattern, -k, --level), dependencies, "
+        "and visible devices, which determine the device-specific tests that are registered",
+    )  # NVIDIA Modification
+    group_parallel.add_argument(
+        "--shard-index",
+        metavar="INDEX",
+        type=int,
+        default=0,
+        help="Run only shard INDEX, in [0, COUNT), of the --shard-count shards (default is 0)",
+    )  # NVIDIA Modification
+    group_parallel.add_argument(
+        "--disable-process-pooling",
+        action="store_true",
+        default=False,
+        help="Do not reuse processes used to run test suites (max_tasks_per_child=1). "
+        "For the concurrent.futures backend, this is also enabled automatically when "
+        "multiple CUDA devices are detected.",
+    )
+    group_parallel.add_argument(
+        "--max-tasks-per-child",
+        type=int,
+        default=None,
+        metavar="COUNT",
+        help="Replace each test process after it has run COUNT test suites, bounding memory "
+        "growth while keeping most of the benefit of process reuse (default: reuse indefinitely)",
+    )  # NVIDIA Modification
+    group_parallel.add_argument(
+        "--disable-concurrent-futures",
+        action="store_true",
+        default=False,
+        help="Use multiprocessing instead of concurrent.futures.",
+    )  # NVIDIA Modification
+    group_parallel.add_argument(
+        "--parallel-timeout",
+        metavar="SECONDS",
+        type=int,
+        default=3600,
+        help="Timeout in seconds for collecting all parallel test results (default is 3600)",
+    )  # NVIDIA Modification
+    group_parallel.add_argument(
+        "--serial-fallback",
+        action="store_true",
+        default=False,
+        help="Run in a single-process (no spawning) mode without multiprocessing or concurrent.futures.",
+    )  # NVIDIA Modification
+    group_coverage = parser.add_argument_group("coverage options")
+    group_coverage.add_argument("--coverage", action="store_true", help="Run tests with coverage")
+    group_coverage.add_argument("--coverage-branch", action="store_true", help="Run tests with branch coverage")
+    group_coverage.add_argument(
+        "--coverage-html",
+        metavar="DIR",
+        help="Generate coverage HTML report",
+        default=os.path.join(START_DIRECTORY, "..", "..", "htmlcov"),
+    )
+    group_coverage.add_argument("--coverage-xml", metavar="FILE", help="Generate coverage XML report")
+    group_coverage.add_argument(
+        "--coverage-fail-under", metavar="MIN", type=float, help="Fail if coverage percentage under min"
+    )
+    group_warp = parser.add_argument_group("NVIDIA Warp options")  # NVIDIA Modification
+    group_warp.add_argument(
+        "--no-shared-cache", action="store_true", help="Use a separate kernel cache per test process."
+    )
+    group_warp.add_argument(
+        "--no-cache-clear",
+        action="store_true",
+        help="Skip clearing the Warp kernel cache before running tests. "
+        "Useful for faster iteration and avoiding interference with parallel sessions.",
+    )
+    group_warp.add_argument(
+        "--warp-config",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Forward a warp.config override to example subprocesses (repeatable).",
+    )
+    args = parser.parse_args(args=argv)
+    if args.parallel_timeout <= 0:
+        parser.error("--parallel-timeout must be greater than 0")
+    if args.shard_count <= 0:
+        parser.error("--shard-count must be greater than 0")
+    if not 0 <= args.shard_index < args.shard_count:
+        parser.error("--shard-index must be in the range [0, --shard-count)")
+    if args.max_tasks_per_child is not None and args.max_tasks_per_child < 1:
+        parser.error("--max-tasks-per-child must be at least 1")
+    if args.deprecation_allowlist and not args.strict_warnings:
+        parser.error("--deprecation-allowlist requires --strict-warnings")
+    try:
+        args.allowed_deprecation_warnings = (
+            _read_deprecation_allowlist(args.deprecation_allowlist) if args.deprecation_allowlist else ()
+        )
+    except (OSError, ValueError) as error:
+        parser.error(f"cannot read --deprecation-allowlist: {error}")
+
+    if args.coverage_branch:
+        args.coverage = args.coverage_branch
+
+    if args.coverage and not COVERAGE_AVAILABLE:
+        parser.exit(
+            status=2, message="--coverage was used, but coverage was not found. Is it installed?\n"
+        )  # NVIDIA Modification
+
+    process_count = max(0, args.jobs)
+    if process_count == 0:
+        process_count = multiprocessing.cpu_count()
+    process_count = min(process_count, args.maxjobs)  # NVIDIA Modification
+
+    import warp as wp  # noqa: PLC0415 NVIDIA Modification
+
+    # Honor WARP_CACHE_ROOT so concurrent worktrees do not wipe each other's
+    # default cache.  init_kernel_cache appends the version segment.
+    if "WARP_CACHE_ROOT" in os.environ:
+        wp.config.kernel_cache_dir = os.environ["WARP_CACHE_ROOT"]
+
+    if not args.no_cache_clear:
+        wp.clear_lto_cache()
+        wp.clear_kernel_cache()
+        print(f"Cleared Warp kernel cache: {wp.config.kernel_cache_dir}")
+
+    # Create the temporary directory (for coverage files)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Apply before discovery so import-time warnings are caught; also covers
+        # the serial-fallback path, which runs here.
+        if args.strict_warnings:
+            _enable_strict_warnings(args.allowed_deprecation_warnings)
+
+        # Discover tests
+        with _coverage(args, temp_dir):
+            test_loader = unittest.TestLoader()
+            if args.testNamePatterns:
+                test_loader.testNamePatterns = args.testNamePatterns
+            discover_suite = test_loader.discover(
+                args.start_directory, pattern=args.pattern, top_level_dir=args.top_level_directory
+            )
+
+        # Get the parallelizable test suites
+        if args.level == "test":
+            test_suites = list(_iter_test_cases(discover_suite))
+        elif args.level == "class":
+            test_suites = list(_iter_class_suites(discover_suite))
+        else:  # args.level == 'module'
+            test_suites = list(_iter_module_suites(discover_suite))
+
+        if args.shard_count > 1:  # NVIDIA Modification
+            total_suite_count = len(test_suites)
+            # Round-robin over the deterministic discovery order: shards are disjoint and complete.
+            test_suites = test_suites[args.shard_index :: args.shard_count]
+            # The serial fallback runs discover_suite directly, so restrict it to the shard too.
+            discover_suite = unittest.TestSuite(test_suites)
+            print(
+                f"Selected shard {args.shard_index} of {args.shard_count}: "
+                f"{len(test_suites)} of {total_suite_count} test suites",
+                file=sys.stderr,
+            )
+
+        test_suites = _spread_by_module(test_suites)  # NVIDIA Modification
+
+        # Don't use more processes than test suites
+        process_count = max(1, min(len(test_suites), process_count))
+
+        if not args.serial_fallback:
+            # Report test suites and processes
+            print(
+                f"Running {len(test_suites)} test suites ({discover_suite.countTestCases()} total tests) across {process_count} processes",
+                file=sys.stderr,
+            )
+            if args.verbose > 1:
+                print(file=sys.stderr)
+
+            # Create the shared index object used in Warp caches (NVIDIA Modification)
+            with multiprocessing.Manager() as manager:
+                shared_index = manager.Value("i", -1)
+
+                # Run the tests in parallel
+                start_time = time.perf_counter()
+
+                max_tasks_per_child = 1 if args.disable_process_pooling else args.max_tasks_per_child
+                if args.disable_concurrent_futures:
+                    multiprocessing_context = multiprocessing.get_context(method="spawn")
+                    with multiprocessing_context.Pool(
+                        process_count,
+                        maxtasksperchild=max_tasks_per_child,
+                        initializer=initialize_test_process,
+                        initargs=(manager.Lock(), shared_index, args, temp_dir),
+                    ) as pool:
+                        test_manager = ParallelTestManager(manager, args, temp_dir)
+                        try:
+                            # One suite per task so maxtasksperchild counts suites.
+                            results = pool.map_async(test_manager.run_tests, test_suites, chunksize=1).get(
+                                timeout=args.parallel_timeout
+                            )
+                        except multiprocessing.TimeoutError:
+                            pool.terminate()
+                            results = [_parallel_timeout_result(args.parallel_timeout)]
+                else:
+                    # NVIDIA Modification added concurrent.futures
+                    executor_kwargs = {
+                        "max_workers": process_count,
+                        "mp_context": multiprocessing.get_context(method="spawn"),
+                        "initializer": initialize_test_process,
+                        "initargs": (manager.Lock(), shared_index, args, temp_dir),
+                    }
+                    if wp.get_cuda_device_count() > 1:
+                        max_tasks_per_child = 1
+                    # ProcessPoolExecutor deadlocks with max_tasks_per_child > 1 (Python 3.12-3.14),
+                    # so hand each single-use worker a chunk of that many suites instead.
+                    chunksize = 1
+                    if max_tasks_per_child is not None:
+                        executor_kwargs["max_tasks_per_child"] = 1
+                        chunksize = max_tasks_per_child
+                    executor = concurrent.futures.ProcessPoolExecutor(**executor_kwargs)
+                    try:
+                        test_manager = ParallelTestManager(manager, args, temp_dir)
+                        results = list(
+                            executor.map(
+                                test_manager.run_tests, test_suites, timeout=args.parallel_timeout, chunksize=chunksize
+                            )
+                        )
+                    except concurrent.futures.TimeoutError:
+                        _shutdown_executor_after_timeout(executor)
+                        executor = None
+                        results = [_parallel_timeout_result(args.parallel_timeout)]
+                    except Exception:
+                        _shutdown_executor_after_timeout(executor)
+                        executor = None
+                        raise
+                    finally:
+                        if executor is not None:
+                            executor.shutdown()
+        else:
+            # This entire path is an NVIDIA Modification
+
+            # Report test suites and processes
+            print(f"Running {discover_suite.countTestCases()} total tests (serial fallback)", file=sys.stderr)
+            if args.verbose > 1:
+                print(file=sys.stderr)
+
+            # Initialize here so the init banner never lands in a test's captured output.
+            wp.init()
+
+            # Run the tests in serial
+            start_time = time.perf_counter()
+
+            with multiprocessing.Manager() as manager:
+                test_manager = ParallelTestManager(manager, args, temp_dir)
+                results = [test_manager.run_tests(discover_suite)]
+
+        stop_time = time.perf_counter()
+        test_duration = stop_time - start_time
+
+        # Aggregate parallel test run results
+        tests_run = 0
+        errors = []
+        failures = []
+        skipped = 0
+        expected_failures = 0
+        unexpected_successes = 0
+        test_records = []  # NVIDIA Modification
+        cleanup_count = 0
+        cleanup_seconds = 0.0
+        for result in results:
+            tests_run += result[0]
+            errors.extend(result[1])
+            failures.extend(result[2])
+            skipped += result[3]
+            expected_failures += result[4]
+            unexpected_successes += result[5]
+            test_records += result[6]  # NVIDIA Modification
+            cleanup_count += result[7]
+            cleanup_seconds += result[8]
+        is_success = not (errors or failures or unexpected_successes)
+
+        # Compute test info
+        infos = []
+        if failures:
+            infos.append(f"failures={len(failures)}")
+        if errors:
+            infos.append(f"errors={len(errors)}")
+        if skipped:
+            infos.append(f"skipped={skipped}")
+        if expected_failures:
+            infos.append(f"expected failures={expected_failures}")
+        if unexpected_successes:
+            infos.append(f"unexpected successes={unexpected_successes}")
+
+        # Report test errors
+        if errors or failures:
+            print(file=sys.stderr)
+            for error in errors:
+                print(error, file=sys.stderr)
+            for failure in failures:
+                print(failure, file=sys.stderr)
+        elif args.verbose > 0:
+            print(file=sys.stderr)
+
+        # Test report
+        print(unittest.TextTestResult.separator2, file=sys.stderr)
+        print(f"Ran {tests_run} {'tests' if tests_run > 1 else 'test'} in {test_duration:.3f}s", file=sys.stderr)
+        print(
+            f"Allocation cleanup: {cleanup_count} collections, {cleanup_seconds:.3f}s total worker time",
+            file=sys.stderr,
+        )
+        print(file=sys.stderr)
+        print(f"{'OK' if is_success else 'FAILED'}{' (' + ', '.join(infos) + ')' if infos else ''}", file=sys.stderr)
+
+        if args.junit_report_xml:
+            # NVIDIA modification to report results in Junit XML format
+            write_junit_results(
+                args.junit_report_xml,
+                test_records,
+                tests_run,
+                len(failures) + unexpected_successes,
+                len(errors),
+                skipped,
+                test_duration,
+            )
+
+        # Return an error status on failure
+        if not is_success:
+            parser.exit(status=len(errors) + len(failures) + unexpected_successes)
+
+        # Coverage?
+        if args.coverage:
+            # Combine the coverage files
+            cov_options = {}
+            cov_options["config_file"] = True  # Grab configuration from pyproject.toml (must install coverage[toml])
+            cov = coverage.Coverage(**cov_options)
+            cov.combine(data_paths=[os.path.join(temp_dir, x) for x in os.listdir(temp_dir)])
+
+            # Coverage report
+            print(file=sys.stderr)
+            percent_covered = cov.report(ignore_errors=True, file=sys.stderr)
+            print(f"Total coverage is {percent_covered:.2f}%", file=sys.stderr)
+
+            # HTML coverage report
+            if args.coverage_html:
+                cov.html_report(directory=args.coverage_html, ignore_errors=True)
+
+            # XML coverage report
+            if args.coverage_xml:
+                cov.xml_report(outfile=args.coverage_xml, ignore_errors=True)
+
+            # Fail under
+            if args.coverage_fail_under and percent_covered < args.coverage_fail_under:
+                parser.exit(status=2)
+
+
+def _convert_select_pattern(pattern):
+    if "*" not in pattern:
+        return f"*{pattern}*"
+    return pattern
+
+
+def _parallel_timeout_result(timeout_seconds):
+    message = f"Parallel test run exceeded timeout of {timeout_seconds} seconds"
+    details = f"{message} while waiting for worker results. Increase --parallel-timeout or reduce the test workload."
+    return (
+        1,
+        [message],
+        [],
+        0,
+        0,
+        0,
+        [("unittest_parallel", "parallel_timeout", float(timeout_seconds), "ERROR", message, details)],
+        0,
+        0.0,
+    )
+
+
+def _shutdown_executor_after_timeout(executor):
+    terminate_workers = getattr(executor, "terminate_workers", None)
+    if terminate_workers is not None:
+        terminate_workers()
+        return
+
+    # ProcessPoolExecutor has no public process-termination API before Python 3.14.
+    processes = list((getattr(executor, "_processes", None) or {}).values())
+    executor.shutdown(wait=False, cancel_futures=True)
+    for process in processes:
+        process.terminate()
+    for process in processes:
+        process.join(timeout=5)
+
+
+@contextmanager
+def _coverage(args, temp_dir):
+    # Running tests with coverage?
+    if args.coverage:
+        # Generate a random coverage data file name - file is deleted along with containing directory
+        with tempfile.NamedTemporaryFile(dir=temp_dir, delete=False) as coverage_file:
+            pass
+
+        # Create the coverage object
+        cov_options = {
+            "branch": args.coverage_branch,
+            "data_file": coverage_file.name,
+            # NVIDIA Modification removed unneeded options
+        }
+        cov_options["config_file"] = True  # Grab configuration from pyproject.toml (must install coverage[toml])
+        cov = coverage.Coverage(**cov_options)
+        try:
+            # Start measuring code coverage
+            cov.start()
+
+            # Yield for unit test running
+            yield cov
+        finally:
+            # Stop measuring code coverage
+            cov.stop()
+
+            # Save the collected coverage data to the data file
+            cov.save()
+    else:
+        # Not running tests with coverage - yield for unit test running
+        yield None
+
+
+# Iterate module-level test suites - all top-level test suites returned from TestLoader.discover
+def _iter_module_suites(test_suite):
+    for module_suite in test_suite:
+        if module_suite.countTestCases():
+            yield module_suite
+
+
+# Iterate class-level test suites - test suites that contains test cases
+def _iter_class_suites(test_suite):
+    has_cases = any(isinstance(suite, unittest.TestCase) for suite in test_suite)
+    if has_cases:
+        yield test_suite
+    else:
+        for suite in test_suite:
+            yield from _iter_class_suites(suite)
+
+
+def _spread_by_module(test_suites, depth=0):
+    """Order suites so each package, and each module within it, is spread evenly over the run.
+
+    Concurrent suites of one module or package can each compile the same uncached kernels.
+    NVIDIA Modification
+    """
+    groups = {}
+    for suite in test_suites:
+        case = next(_iter_test_cases(suite), None)
+        path = type(case).__module__.split(".") if case is not None else []
+        groups.setdefault(path[depth] if depth < len(path) else None, []).append(suite)
+    keyed = []
+    for index, (key, group) in enumerate(groups.items()):
+        ordered = group if key is None else _spread_by_module(group, depth + 1)
+        keyed += [((i + 0.5) / len(ordered), index, suite) for i, suite in enumerate(ordered)]
+    return [suite for *_, suite in sorted(keyed, key=lambda item: item[:2])]
+
+
+# Iterate test cases (methods)
+def _iter_test_cases(test_suite):
+    if isinstance(test_suite, unittest.TestCase):
+        yield test_suite
+    else:
+        for suite in test_suite:
+            yield from _iter_test_cases(suite)
+
+
+class ParallelTestManager:
+    # Manager proxy calls can fail with ConnectionError, TypeError, or OSError
+    # due to a TOCTOU race in Connection.send() where GC can close the
+    # connection handle between the closed-check and the write call
+    # (see https://github.com/python/cpython/issues/84582). Since failfast
+    # is a best-effort optimization, we log a warning and continue.
+    _PROXY_ERRORS = (ConnectionError, TypeError, OSError)
+
+    def __init__(self, manager, args, temp_dir):
+        self.args = args
+        self.temp_dir = temp_dir
+        self.failfast = manager.Event()
+
+    def run_tests(self, test_suite):
+        # Fail fast?
+        try:
+            if self.failfast.is_set():
+                return [0, [], [], 0, 0, 0, [], 0, 0.0]  # NVIDIA Modification
+        except self._PROXY_ERRORS as exc:
+            print(
+                f"Warning: failfast proxy is_set() failed ({type(exc).__name__}), continuing test execution",
+                file=sys.stderr,
+            )
+
+        # NVIDIA Modification for GitLab
+        import newton.tests.unittest_utils  # noqa: PLC0415
+
+        newton.tests.unittest_utils.coverage_enabled = self.args.coverage
+        newton.tests.unittest_utils.coverage_temp_dir = self.temp_dir
+        newton.tests.unittest_utils.coverage_branch = self.args.coverage_branch
+        newton.tests.unittest_utils.warp_config_overrides = self.args.warp_config
+
+        # Publish the flag for subprocess-based tests (e.g. test_examples.py).
+        # Filters are applied earlier (pre-discovery and in the worker
+        # initializer); re-applying here is idempotent.
+        newton.tests.unittest_utils.strict_warnings = self.args.strict_warnings
+        newton.tests.unittest_utils.allowed_deprecation_warnings = self.args.allowed_deprecation_warnings
+        if self.args.strict_warnings:
+            _enable_strict_warnings(self.args.allowed_deprecation_warnings)
+
+        if self.args.junit_report_xml:
+            resultclass = ParallelJunitTestResult
+        else:
+            resultclass = ParallelTextTestResult
+
+        # Run unit tests
+        with _coverage(self.args, self.temp_dir):
+            runner = unittest.TextTestRunner(
+                stream=StringIO(),
+                resultclass=resultclass,  # NVIDIA Modification
+                verbosity=self.args.verbose,
+                failfast=self.args.failfast,
+                buffer=self.args.buffer,
+            )
+            result = runner.run(test_suite)
+
+            # Set failfast, if necessary
+            if result.shouldStop:
+                try:
+                    self.failfast.set()
+                except self._PROXY_ERRORS as exc:
+                    print(
+                        f"Warning: failfast proxy set() failed ({type(exc).__name__}), "
+                        "other workers may not stop early",
+                        file=sys.stderr,
+                    )
+
+            return (
+                result.testsRun,
+                [self._format_error(result, error) for error in result.errors],
+                [self._format_error(result, failure) for failure in result.failures],
+                len(result.skipped),
+                len(result.expectedFailures),
+                len(result.unexpectedSuccesses),
+                result.test_record,  # NVIDIA modification
+                result.cleanup_count,
+                result.cleanup_seconds,
+            )
+
+    @staticmethod
+    def _format_error(result, error):
+        return "\n".join(
+            [
+                unittest.TextTestResult.separator1,
+                result.getDescription(error[0]),
+                unittest.TextTestResult.separator2,
+                error[1],
+            ]
+        )
+
+
+class ParallelTextTestResult(AllocationCleanupTestResultMixin, unittest.TextTestResult):
+    def __init__(self, stream, descriptions, verbosity):
+        stream = type(stream)(sys.stderr)
+        super().__init__(stream, descriptions, verbosity)
+        self.test_record = []  # NVIDIA modification
+
+    def startTest(self, test):
+        if self.showAll:
+            self.stream.writeln(f"{self.getDescription(test)} ...")
+            self.stream.flush()
+        elif self.dots:
+            self.stream.writeln(f"{test} ...")
+            self.stream.flush()
+        super(unittest.TextTestResult, self).startTest(test)
+
+    def _add_helper(self, test, show_all_message):
+        if self.showAll:
+            self.stream.writeln(f"{self.getDescription(test)} ... {show_all_message}")
+        elif self.dots:
+            self.stream.writeln(f"{test} ... {show_all_message}")
+        self.stream.flush()
+
+    def addSuccess(self, test):
+        super(unittest.TextTestResult, self).addSuccess(test)
+        self._add_helper(test, "ok")
+
+    def addError(self, test, err):
+        super(unittest.TextTestResult, self).addError(test, err)
+        self._add_helper(test, "ERROR")
+
+    def addFailure(self, test, err):
+        super(unittest.TextTestResult, self).addFailure(test, err)
+        self._add_helper(test, "FAIL")
+
+    def addSkip(self, test, reason):
+        super(unittest.TextTestResult, self).addSkip(test, reason)
+        self._add_helper(test, f"skipped {reason!r}")
+
+    def addExpectedFailure(self, test, err):
+        super(unittest.TextTestResult, self).addExpectedFailure(test, err)
+        self._add_helper(test, "expected failure")
+
+    def addUnexpectedSuccess(self, test):
+        super(unittest.TextTestResult, self).addUnexpectedSuccess(test)
+        self._add_helper(test, "unexpected success")
+
+    def printErrors(self):
+        pass
+
+
+def initialize_test_process(lock, shared_index, args, temp_dir):
+    """Necessary operations to be executed at the start of every test process.
+
+    Currently this function can be used to set a separate Warp cache. (NVIDIA modification)
+    If the environment variable `WARP_CACHE_ROOT` is detected, the cache will be placed in the provided path.
+
+    It also ensures that Warp is initialized prior to running any tests.
+    """
+
+    AllocationCleanupTestResultMixin._start_worker()
+
+    # Apply before the worker imports any test module (suites are imported on
+    # unpickle, before run_tests).
+    if args.strict_warnings:
+        _enable_strict_warnings(args.allowed_deprecation_warnings)
+
+    with lock:
+        shared_index.value += 1
+        worker_index = shared_index.value
+
+    with _coverage(args, temp_dir):
+        import warp as wp  # noqa: PLC0415
+
+        if args.no_shared_cache:
+            from warp._src.thirdparty import appdirs  # noqa: PLC0415
+
+            # init_kernel_cache appends the version below the worker suffix.
+            if "WARP_CACHE_ROOT" in os.environ:
+                cache_root_dir = os.path.join(os.getenv("WARP_CACHE_ROOT"), f"worker-{worker_index:03d}")
+            else:
+                cache_root_dir = appdirs.user_cache_dir(
+                    appname="warp", appauthor="NVIDIA", version=f"worker-{worker_index:03d}"
+                )
+
+            wp.config.kernel_cache_dir = cache_root_dir
+            os.makedirs(cache_root_dir, exist_ok=True)
+
+            if not args.no_cache_clear:
+                wp.clear_lto_cache()
+                wp.clear_kernel_cache()
+        elif "WARP_CACHE_ROOT" in os.environ:
+            # Using a shared cache for all test processes
+            wp.config.kernel_cache_dir = os.getenv("WARP_CACHE_ROOT")
+
+        # Initialize here so the init banner never lands in a test's captured output.
+        wp.init()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

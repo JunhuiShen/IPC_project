@@ -1,0 +1,16 @@
+{
+  "base_commit": "f89e82fed043fe78d1844b26d3f289a25db03810",
+  "purpose": "Retain the actual SolverVBD timestep and particle color schedule with hooks for our IPC equations/CCD; safely support models with no triangles by avoiding empty grouped BVHs. Default nonempty-mesh VBD/DAT equations are unchanged.",
+  "files": {
+    "newton/_src/solvers/vbd/solver_vbd.py": {
+      "upstream_sha256": "20ed9e41c1fdbd630dc27df6be22d471ca83692d0805d48ddbe4ba5ca78b39f9",
+      "sha256": "a765335a0ece0d43368ebb11ff698d8de2a8c91169f65e18c06beed9611b615c",
+      "patch": "gpu/newton_dat/patches/0001-particle-physics-hooks.patch"
+    },
+    "newton/_src/geometry/tri_mesh_collision.py": {
+      "upstream_sha256": "671fbdcc4d389e86e66c35e11cab24c9c893b21e36cda8eadf9794fa4c28b3b9",
+      "sha256": "5aeb22993b37a97e3b8a524e7263bd692eee76af6df6b7b390b83112f4c71862",
+      "patch": "gpu/newton_dat/patches/0002-empty-triangle-bvh.patch"
+    }
+  }
+}

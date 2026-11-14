@@ -1,0 +1,363 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Unit tests for the base classes in linalg/core.py"""
+
+import logging
+import unittest
+
+import numpy as np
+import warp as wp
+
+from newton._src.solvers.kamino._src.linalg.core import (
+    DenseRectangularMultiLinearInfo,
+    DenseSquareMultiLinearInfo,
+    make_dtype_tolerance,
+    prefix_offsets,
+    segment_local_indices,
+)
+from newton._src.solvers.kamino._src.utils.logger import reset_log_level, set_log_level
+from newton.tests.kamino import setup_tests, test_context
+
+logger = logging.getLogger(__name__)
+
+###
+# Tests
+###
+
+
+class TestLinAlgCorePrefixOffsets(unittest.TestCase):
+    def test_prefix_offsets_of_list(self):
+        """Return the offset of each block followed by the total size."""
+        offsets = prefix_offsets([6, 0, 4, 3], validate_dtype=np.int16)
+        self.assertEqual(offsets.dtype, np.int64)
+        np.testing.assert_array_equal(offsets, [0, 6, 6, 10, 13])
+
+    def test_prefix_offsets_of_empty_sizes(self):
+        """Return a single zero offset when there are no blocks."""
+        np.testing.assert_array_equal(prefix_offsets([]), [0])
+
+    def test_prefix_offsets_of_int32_sizes(self):
+        """Accumulate int32 block sizes in 64-bit integers."""
+        size = 2**30 + 1
+        offsets = prefix_offsets(np.full(3, size, dtype=np.int32))
+        np.testing.assert_array_equal(offsets, [0, size, 2 * size, 3 * size])
+
+    def test_segment_local_indices(self):
+        """Restart local indices after each nonempty segment."""
+        for sizes, expected in (([], []), ([0, 0], []), ([2, 0, 3], [0, 1, 0, 1, 2])):
+            counts = np.asarray(sizes, dtype=np.int32)
+            with self.subTest(counts=counts):
+                np.testing.assert_array_equal(segment_local_indices(counts), expected)
+                np.testing.assert_array_equal(segment_local_indices(counts, prefix_offsets(counts)), expected)
+
+    def test_dense_offset_overflow(self):
+        """Reject overflowing dense offsets for rectangular and square systems."""
+        cases = (
+            (DenseRectangularMultiLinearInfo, [(46341, 46341), (1, 1)], [(1, 1), (182, 182)]),
+            (DenseSquareMultiLinearInfo, [46341, 1], [1, 182]),
+        )
+        for info_type, dims, int16_dims in cases:
+            with self.subTest(info_type=info_type.__name__):
+                with self.assertRaisesRegex(OverflowError, "Total block size .* does not fit"):
+                    info_type().finalize(dimensions=dims, itype=wp.int32)
+                # Every block starts within the index range, but the last one ends past it
+                with self.assertRaisesRegex(OverflowError, "Total block size .* does not fit"):
+                    info_type().finalize(dimensions=dims[::-1], itype=wp.int32)
+                with self.assertRaisesRegex(OverflowError, "Total block size .* does not fit"):
+                    info_type().finalize(dimensions=int16_dims, itype=wp.int16)
+                info = info_type()
+                info.finalize(dimensions=dims, itype=wp.int64)
+                self.assertEqual(info.mio.numpy()[1], 46341 * 46341)
+
+
+class TestLinAlgCoreMakeTolerance(unittest.TestCase):
+    def setUp(self):
+        # Configs
+        if not test_context.setup_done:
+            setup_tests(clear_cache=False)
+        self.seed = 42
+        self.default_device = wp.get_device(test_context.device)
+        self.verbose = test_context.verbose  # Set to True for verbose output
+
+        # Set debug-level logging to print verbose test output to console
+        if self.verbose:
+            set_log_level(logging.DEBUG)
+            logger.debug("\n")  # Add newline before test output for better readability
+        else:
+            reset_log_level()
+
+    def tearDown(self):
+        self.default_device = None
+        if self.verbose:
+            reset_log_level()
+
+    def test_00_make_tolerance_from_defaults(self):
+        tol = make_dtype_tolerance()
+        logger.debug("tol = %s (type: %s)", tol, type(tol))
+        self.assertIsInstance(tol, wp.float32)
+        self.assertAlmostEqual(tol, wp.float32(np.finfo(np.float32).eps), places=7)
+
+    def test_01_make_tolerance_default_for_wp_float64(self):
+        tol = make_dtype_tolerance(dtype=wp.float64)
+        logger.debug("tol = %s (type: %s)", tol, type(tol))
+        self.assertIsInstance(tol, wp.float64)
+        self.assertAlmostEqual(tol, wp.float64(np.finfo(np.float64).eps), places=23)
+
+    def test_02_make_tolerance_default_for_wp_float32(self):
+        tol = make_dtype_tolerance(dtype=wp.float32)
+        logger.debug("tol = %s (type: %s)", tol, type(tol))
+        self.assertIsInstance(tol, wp.float32)
+        self.assertAlmostEqual(tol, wp.float32(np.finfo(np.float32).eps), places=7)
+
+    def test_03_make_tolerance_from_np_float64_to_wp_float64(self):
+        tol = make_dtype_tolerance(tol=np.float64(1e-5), dtype=wp.float64)
+        logger.debug("tol = %s (type: %s)", tol, type(tol))
+        self.assertIsInstance(tol, wp.float64)
+        self.assertAlmostEqual(tol, wp.float64(np.float64(1e-5)), places=23)
+
+    def test_04_make_tolerance_from_np_float64_to_wp_float32(self):
+        tol = make_dtype_tolerance(tol=np.float64(1e-5), dtype=wp.float32)
+        logger.debug("tol = %s (type: %s)", tol, type(tol))
+        self.assertIsInstance(tol, wp.float32)
+        self.assertAlmostEqual(tol, wp.float32(np.float64(1e-5)), places=7)
+
+    def test_05_make_tolerance_from_float_to_wp_float32(self):
+        tol = make_dtype_tolerance(tol=1e-6, dtype=wp.float32)
+        logger.debug("tol = %s (type: %s)", tol, type(tol))
+        self.assertIsInstance(tol, wp.float32)
+        self.assertAlmostEqual(tol, wp.float32(1e-6), places=7)
+
+    def test_06_make_tolerance_smaller_than_eps(self):
+        with self.assertLogs(level="WARNING") as logs:
+            tol = make_dtype_tolerance(tol=1e-10, dtype=wp.float32)
+        logger.debug("tol = %s (type: %s)", tol, type(tol))
+        self.assertTrue(any("is smaller than machine epsilon" in message for message in logs.output))
+        self.assertIsInstance(tol, wp.float32)
+        self.assertAlmostEqual(tol, wp.float32(np.finfo(np.float32).eps), places=7)
+
+
+class TestLinAlgCoreDenseMultiLinearRectangularInfo(unittest.TestCase):
+    def setUp(self):
+        # Configs
+        if not test_context.setup_done:
+            setup_tests(clear_cache=False)
+        self.seed = 42
+        self.default_device = wp.get_device(test_context.device)
+        self.verbose = test_context.verbose  # Set to True for verbose output
+
+        # Set debug-level logging to print verbose test output to console
+        if self.verbose:
+            set_log_level(logging.DEBUG)
+            logger.debug("\n")  # Add newline before test output for better readability
+        else:
+            reset_log_level()
+
+    def tearDown(self):
+        self.default_device = None
+        if self.verbose:
+            reset_log_level()
+
+    def test_00_make_single_rectangular_default(self):
+        dims = (3, 4)
+        info = DenseRectangularMultiLinearInfo()
+        info.finalize(dimensions=dims)
+        logger.debug("info:\n%s", info)
+        logger.debug("info.maxdim: %s", info.maxdim)
+        logger.debug("info.dim: %s", info.dim)
+        logger.debug("info.mio: %s", info.mio)
+        logger.debug("info.rvio: %s", info.rvio)
+        logger.debug("info.ivio: %s", info.ivio)
+        self.assertEqual(info.num_blocks, 1)
+        self.assertEqual(info.dimensions[0], dims)
+        self.assertEqual(info.max_dimensions, dims)
+        self.assertEqual(info.total_mat_size, dims[0] * dims[1])
+        self.assertEqual(info.total_rhs_size, dims[0])
+        self.assertEqual(info.total_inp_size, dims[1])
+        self.assertEqual(info.dtype, wp.float32)
+        self.assertEqual(info.itype, wp.int32)
+        self.assertEqual(info.maxdim.shape, (1,))
+        self.assertEqual(info.dim.shape, (1,))
+        self.assertEqual(info.mio.shape, (1,))
+        self.assertEqual(info.rvio.shape, (1,))
+        self.assertEqual(info.ivio.shape, (1,))
+        self.assertEqual(info.maxdim.numpy()[0][0], 3)
+        self.assertEqual(info.maxdim.numpy()[0][1], 4)
+        self.assertEqual(info.dim.numpy()[0][0], 3)
+        self.assertEqual(info.dim.numpy()[0][1], 4)
+        self.assertEqual(info.mio.numpy()[0], 0)
+        self.assertEqual(info.rvio.numpy()[0], 0)
+        self.assertEqual(info.ivio.numpy()[0], 0)
+
+    def test_01_make_single_rectangular_wp_float64_int64(self):
+        dims = (3, 4)
+        info = DenseRectangularMultiLinearInfo()
+        info.finalize(dimensions=dims, dtype=wp.float64, itype=wp.int64)
+        logger.debug("info:\n%s", info)
+        logger.debug("info.maxdim: %s", info.maxdim)
+        logger.debug("info.dim: %s", info.dim)
+        logger.debug("info.mio: %s", info.mio)
+        logger.debug("info.rvio: %s", info.rvio)
+        logger.debug("info.ivio: %s", info.ivio)
+        self.assertEqual(info.num_blocks, 1)
+        self.assertEqual(info.dimensions[0], dims)
+        self.assertEqual(info.max_dimensions, dims)
+        self.assertEqual(info.total_mat_size, dims[0] * dims[1])
+        self.assertEqual(info.total_rhs_size, dims[0])
+        self.assertEqual(info.total_inp_size, dims[1])
+        self.assertEqual(info.dtype, wp.float64)
+        self.assertEqual(info.itype, wp.int64)
+        self.assertEqual(info.maxdim.shape, (1,))
+        self.assertEqual(info.dim.shape, (1,))
+        self.assertEqual(info.mio.shape, (1,))
+        self.assertEqual(info.rvio.shape, (1,))
+        self.assertEqual(info.ivio.shape, (1,))
+        self.assertEqual(info.maxdim.numpy()[0][0], 3)
+        self.assertEqual(info.maxdim.numpy()[0][1], 4)
+        self.assertEqual(info.dim.numpy()[0][0], 3)
+        self.assertEqual(info.dim.numpy()[0][1], 4)
+        self.assertEqual(info.mio.numpy()[0], 0)
+        self.assertEqual(info.rvio.numpy()[0], 0)
+        self.assertEqual(info.ivio.numpy()[0], 0)
+
+    def test_02_make_multiple_rectangular(self):
+        dims = [(3, 4), (2, 5), (4, 3)]
+        info = DenseRectangularMultiLinearInfo()
+        info.finalize(dimensions=dims)
+        logger.debug("info:\n%s", info)
+        logger.debug("info.maxdim: %s", info.maxdim)
+        logger.debug("info.dim: %s", info.dim)
+        logger.debug("info.mio: %s", info.mio)
+        logger.debug("info.rvio: %s", info.rvio)
+        logger.debug("info.ivio: %s", info.ivio)
+        self.assertEqual(info.num_blocks, len(dims))
+        self.assertEqual(info.dimensions, dims)
+        self.assertEqual(info.max_dimensions, (4, 5))
+        self.assertEqual(info.total_mat_size, sum(m * n for m, n in dims))
+        self.assertEqual(info.total_rhs_size, sum(m for m, _ in dims))
+        self.assertEqual(info.total_inp_size, sum(n for _, n in dims))
+        self.assertEqual(info.dtype, wp.float32)
+        self.assertEqual(info.itype, wp.int32)
+        self.assertEqual(info.maxdim.shape, (len(dims),))
+        self.assertEqual(info.dim.shape, (len(dims),))
+        self.assertEqual(info.mio.shape, (len(dims),))
+        self.assertEqual(info.rvio.shape, (len(dims),))
+        self.assertEqual(info.ivio.shape, (len(dims),))
+        for i, (m, n) in enumerate(dims):
+            self.assertEqual(info.maxdim.numpy()[i][0], m)
+            self.assertEqual(info.maxdim.numpy()[i][1], n)
+            self.assertEqual(info.dim.numpy()[i][0], m)
+            self.assertEqual(info.dim.numpy()[i][1], n)
+            self.assertEqual(info.mio.numpy()[i], sum(d[0] * d[1] for d in dims[:i]))
+            self.assertEqual(info.rvio.numpy()[i], sum(d[0] for d in dims[:i]))
+            self.assertEqual(info.ivio.numpy()[i], sum(d[1] for d in dims[:i]))
+
+
+class TestLinAlgCoreDenseMultiLinearSquareInfo(unittest.TestCase):
+    def setUp(self):
+        # Configs
+        if not test_context.setup_done:
+            setup_tests(clear_cache=False)
+        self.seed = 42
+        self.default_device = wp.get_device(test_context.device)
+        self.verbose = test_context.verbose  # Set to True for verbose output
+
+        # Set debug-level logging to print verbose test output to console
+        if self.verbose:
+            set_log_level(logging.DEBUG)
+            logger.debug("\n")  # Add newline before test output for better readability
+        else:
+            reset_log_level()
+
+    def tearDown(self):
+        self.default_device = None
+        if self.verbose:
+            reset_log_level()
+
+    def test_00_make_single_square_default(self):
+        dims = 4
+        info = DenseSquareMultiLinearInfo()
+        info.finalize(dimensions=dims)
+        logger.debug("info:\n%s", info)
+        logger.debug("info.maxdim: %s", info.maxdim)
+        logger.debug("info.dim: %s", info.dim)
+        logger.debug("info.mio: %s", info.mio)
+        logger.debug("info.vio: %s", info.vio)
+        self.assertEqual(info.num_blocks, 1)
+        self.assertEqual(info.dimensions[0], dims)
+        self.assertEqual(info.max_dimension, dims)
+        self.assertEqual(info.total_mat_size, dims * dims)
+        self.assertEqual(info.total_vec_size, dims)
+        self.assertEqual(info.dtype, wp.float32)
+        self.assertEqual(info.itype, wp.int32)
+        self.assertEqual(info.maxdim.shape, (1,))
+        self.assertEqual(info.dim.shape, (1,))
+        self.assertEqual(info.mio.shape, (1,))
+        self.assertEqual(info.vio.shape, (1,))
+        self.assertEqual(info.maxdim.numpy()[0], dims)
+        self.assertEqual(info.dim.numpy()[0], dims)
+        self.assertEqual(info.mio.numpy()[0], 0)
+        self.assertEqual(info.vio.numpy()[0], 0)
+
+    def test_01_make_single_square_wp_float64_int64(self):
+        dims = 13
+        info = DenseSquareMultiLinearInfo()
+        info.finalize(dimensions=dims, dtype=wp.float64, itype=wp.int64)
+        logger.debug("info:\n%s", info)
+        logger.debug("info.maxdim: %s", info.maxdim)
+        logger.debug("info.dim: %s", info.dim)
+        logger.debug("info.mio: %s", info.mio)
+        logger.debug("info.vio: %s", info.vio)
+        self.assertEqual(info.num_blocks, 1)
+        self.assertEqual(info.dimensions[0], dims)
+        self.assertEqual(info.max_dimension, dims)
+        self.assertEqual(info.total_mat_size, dims * dims)
+        self.assertEqual(info.total_vec_size, dims)
+        self.assertEqual(info.dtype, wp.float64)
+        self.assertEqual(info.itype, wp.int64)
+        self.assertEqual(info.maxdim.shape, (1,))
+        self.assertEqual(info.dim.shape, (1,))
+        self.assertEqual(info.mio.shape, (1,))
+        self.assertEqual(info.vio.shape, (1,))
+        self.assertEqual(info.maxdim.numpy()[0], dims)
+        self.assertEqual(info.dim.numpy()[0], dims)
+        self.assertEqual(info.mio.numpy()[0], 0)
+        self.assertEqual(info.vio.numpy()[0], 0)
+
+    def test_02_make_multiple_square(self):
+        dims = [4, 10, 5, 12]
+        info = DenseSquareMultiLinearInfo()
+        info.finalize(dimensions=dims)
+        logger.debug("info:\n%s", info)
+        logger.debug("info.maxdim: %s", info.maxdim)
+        logger.debug("info.dim: %s", info.dim)
+        logger.debug("info.mio: %s", info.mio)
+        logger.debug("info.vio: %s", info.vio)
+        self.assertEqual(info.num_blocks, len(dims))
+        self.assertEqual(info.dimensions, dims)
+        self.assertEqual(info.max_dimension, max(dims))
+        self.assertEqual(info.total_mat_size, sum(n * n for n in dims))
+        self.assertEqual(info.total_vec_size, sum(n for n in dims))
+        self.assertEqual(info.dtype, wp.float32)
+        self.assertEqual(info.itype, wp.int32)
+        self.assertEqual(info.maxdim.shape, (len(dims),))
+        self.assertEqual(info.dim.shape, (len(dims),))
+        self.assertEqual(info.mio.shape, (len(dims),))
+        self.assertEqual(info.vio.shape, (len(dims),))
+        for i, n in enumerate(dims):
+            self.assertEqual(info.maxdim.numpy()[i], n)
+            self.assertEqual(info.dim.numpy()[i], n)
+            self.assertEqual(info.mio.numpy()[i], sum(d * d for d in dims[:i]))
+            self.assertEqual(info.vio.numpy()[i], sum(d for d in dims[:i]))
+
+
+###
+# Test execution
+###
+
+if __name__ == "__main__":
+    # Test setup
+    setup_tests()
+
+    # Run all tests
+    unittest.main(verbosity=2)
