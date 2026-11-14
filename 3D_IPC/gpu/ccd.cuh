@@ -1,4 +1,6 @@
 #pragma once
+#ifndef IPC_GPU_CCD_CORE_H
+#define IPC_GPU_CCD_CORE_H
 
 // Device-only, fail-closed CCD building block. This is a CERTIFICATE, not the
 // CPU exact-rational CCD port: Uncertain must never be interpreted as no hit.
@@ -289,3 +291,265 @@ IPC_GPU_CCD_HD inline ClipResult clip_linear(const LinearQuery& q,
 } // namespace ipc_gpu
 
 #undef IPC_GPU_CCD_HD
+
+#endif // IPC_GPU_CCD_CORE_H
+
+// IPC_CCD_SECTION_BEGIN cache
+#ifndef IPC_GPU_CCD_CACHE_H
+#define IPC_GPU_CCD_CACHE_H
+// GS execution cache. Shared original predicates remain the source of truth.
+#include "exact.cuh"
+
+// original_rigid.cuh includes the core CCD header. Delay use of its status
+// members until template instantiation instead of creating an include cycle.
+namespace ipc_gpu::original_rigid { enum class RepresentationStatus : unsigned; }
+
+#if defined(__CUDACC__)
+#define IPC_GS_CACHE_HD __host__ __device__
+#else
+#define IPC_GS_CACHE_HD
+#endif
+
+namespace ipc_gpu::gs_ccd_cache {
+
+struct Axis {
+    ccd::detail::Vec direction{};
+    double norm=0.0;
+    double threshold=0.0;
+    bool usable=false;
+};
+
+struct PreparedPath {
+    ccd::detail::Interval base[4][3]{};
+    ccd::detail::Interval motion[4][3]{};
+    Axis axes[17]{};
+    int count=0;
+    int split=0;
+};
+
+// Optional proof-only trace. A null pointer removes these stores in normal use.
+struct ProjectionTrace {
+    double first_lo=0.0,first_hi=0.0,second_lo=0.0,second_hi=0.0;
+    double ab=0.0,ba=0.0;
+};
+
+IPC_GS_CACHE_HD inline Axis prepare_axis(ccd::detail::Vec axis) {
+    using namespace ccd::detail;
+    Axis result;
+    result.direction=axis;
+    // Identical order and operations to the original projection preamble.
+    double scale=0.0;
+    for(int k=0;k<3;++k)scale=maximum(scale,::fabs(axis.v[k]));
+    if(!(scale>0.0)||!finite(scale))return result;
+    for(int k=0;k<3;++k)axis.v[k]/=scale;
+    result.direction=axis;
+    Interval norm2=point(0.0);
+    for(int k=0;k<3;++k)
+        norm2=add(norm2,multiply(point(axis.v[k]),point(axis.v[k])));
+    result.norm=sqrt_upper(norm2.hi);
+    result.threshold=multiply(point(0.0),point(result.norm)).hi;
+    result.usable=finite(result.threshold);
+    return result;
+}
+
+IPC_GS_CACHE_HD inline void append_axis(PreparedPath& prepared,ccd::detail::Vec axis) {
+    prepared.axes[prepared.count++]=prepare_axis(axis);
+}
+
+IPC_GS_CACHE_HD inline PreparedPath prepare(const ccd::LinearQuery& q) {
+    using namespace ccd::detail;
+    PreparedPath prepared;
+    prepared.split=q.vertex_face?1:2;
+    for(int i=0;i<4;++i)for(int k=0;k<3;++k) {
+        prepared.base[i][k]=subtract(point(q.start[i][k]),point(q.start[3][k]));
+        prepared.motion[i][k]=subtract(point(q.end[i][k]),point(q.start[i][k]));
+    }
+    // Exactly the original separated() axis order. Preparing later axes early
+    // has no predicate/pool side effects; all cached inputs are immutable.
+    for(int k=0;k<3;++k) {
+        Vec axis{{0.0,0.0,0.0}};axis.v[k]=1.0;
+        append_axis(prepared,axis);
+    }
+    for(int endpoint=0;endpoint<2;++endpoint) {
+        const double (*p)[3]=endpoint?q.end:q.start;
+        if(q.vertex_face) {
+            const Vec a=difference(p[2],p[1]),b=difference(p[3],p[1]);
+            const Vec normal=cross(a,b);
+            append_axis(prepared,normal);
+            for(int i=1;i<4;++i) {
+                const Vec edge=difference(p[i==3?1:i+1],p[i]);
+                append_axis(prepared,cross(normal,edge));
+            }
+        } else {
+            const Vec a=difference(p[1],p[0]),b=difference(p[3],p[2]);
+            const Vec w=difference(p[2],p[0]);
+            append_axis(prepared,cross(a,b));
+            append_axis(prepared,cross(cross(a,w),a));
+            append_axis(prepared,cross(cross(b,w),b));
+        }
+        const int split=q.vertex_face?1:2;
+        for(int i=0;i<split;++i)for(int j=split;j<4;++j)
+            append_axis(prepared,difference(p[i],p[j]));
+    }
+    return prepared;
+}
+
+IPC_GS_CACHE_HD inline bool projection_zero_gap(const PreparedPath& prepared,const Axis& axis,
+    double time_lo,double time_hi,ProjectionTrace* trace=nullptr) {
+    using namespace ccd::detail;
+    if(!axis.usable)return false;
+    double first_lo=INFINITY,first_hi=-INFINITY;
+    double second_lo=INFINITY,second_hi=-INFINITY;
+    for(int i=0;i<4;++i) {
+        Interval projected=point(0.0);
+        for(int k=0;k<3;++k) {
+            // Do not distribute dot products over time, change interval
+            // expressions, or reassociate these original operations.
+            const Interval base=prepared.base[i][k];
+            const Interval motion=prepared.motion[i][k];
+            const Interval position=add(base,multiply({time_lo,time_hi},motion));
+            projected=add(projected,multiply(point(axis.direction.v[k]),position));
+        }
+        if(i<prepared.split) {
+            first_lo=minimum(first_lo,projected.lo);
+            first_hi=maximum(first_hi,projected.hi);
+        } else {
+            second_lo=minimum(second_lo,projected.lo);
+            second_hi=maximum(second_hi,projected.hi);
+        }
+    }
+    const double ab=subtract(point(first_lo),point(second_hi)).lo;
+    const double ba=subtract(point(second_lo),point(first_hi)).lo;
+    if(trace) {
+        trace->first_lo=first_lo;trace->first_hi=first_hi;
+        trace->second_lo=second_lo;trace->second_hi=second_hi;
+        trace->ab=ab;trace->ba=ba;
+    }
+    return maximum(ab,ba)>axis.threshold;
+}
+
+IPC_GS_CACHE_HD inline bool separated_zero_gap(const PreparedPath& prepared,
+    double time_lo,double time_hi) {
+    for(int i=0;i<prepared.count;++i)
+        if(projection_zero_gap(prepared,prepared.axes[i],time_lo,time_hi))return true;
+    return false;
+}
+
+// Original wrapper decisions and statuses are unchanged. Cache only after
+// the original whole-step rejection and exact initial-membership check.
+template<int Capacity, class RepresentationStatus=original_rigid::RepresentationStatus>
+IPC_GS_CACHE_HD inline RepresentationStatus represented_path(
+    const double start[4][3],const double end[4][3],bool face) {
+    ccd::LinearQuery q;
+    q.vertex_face=face;
+    int moving=0;
+    for(int i=0;i<4;++i) {
+        bool moved=false;
+        for(int k=0;k<3;++k) {
+            if(!ccd::detail::finite(start[i][k])||!ccd::detail::finite(end[i][k]))
+                return RepresentationStatus::Invalid;
+            q.start[i][k]=start[i][k];q.end[i][k]=end[i][k];
+            moved=moved||start[i][k]!=end[i][k];
+        }
+        moving+=moved?1:0;
+    }
+    if(ccd::detail::separated(q,0.0,1.0,0.0))return RepresentationStatus::Safe;
+    const auto convert=[](exact::Status status) {
+        return status==exact::Status::Safe?RepresentationStatus::Safe
+            :status==exact::Status::InitialContact?RepresentationStatus::InitialContact
+            :status==exact::Status::CapacityExceeded?RepresentationStatus::CapacityExceeded
+            :status==exact::Status::Invalid?RepresentationStatus::Invalid
+            :RepresentationStatus::Uncertain;
+    };
+    if(moving<=1)return convert(exact::validate_collision_step<Capacity>(start,end,face));
+    const auto initial=exact::validate_collision_step<Capacity>(start,start,face);
+    if(initial!=exact::Status::Safe)return convert(initial);
+    const PreparedPath prepared=prepare(q);
+    constexpr int intervals=256;
+    for(int i=0;i<intervals;++i)
+        if(!separated_zero_gap(prepared,double(i)/intervals,double(i+1)/intervals))
+            return RepresentationStatus::Uncertain;
+    return RepresentationStatus::Safe;
+}
+
+} // namespace ipc_gpu::gs_ccd_cache
+
+#undef IPC_GS_CACHE_HD
+#endif // IPC_GPU_CCD_CACHE_H
+// IPC_CCD_SECTION_END cache
+
+// IPC_CCD_SECTION_BEGIN single_vertex
+#ifndef IPC_GPU_CCD_SINGLE_VERTEX_H
+#define IPC_GPU_CCD_SINGLE_VERTEX_H
+// Sufficient represented-endpoint proof for one-moving-vertex GS only.
+// Uncertain results retain the existing exact CCD path; this returns no TOI
+// and never authorizes a shortened endpoint that has not itself been checked.
+#include "separation.cuh"
+
+#if defined(__CUDACC__)
+#define IPC_GS_CCD_FILTER_HD __host__ __device__
+#else
+#define IPC_GS_CCD_FILTER_HD
+#endif
+
+namespace ipc_gpu::gs_ccd_filter {
+
+// Enclose det(p1-p0,p2-p0,p3-p0), including every subtraction error.
+// The existing interval helpers use directed CUDA FP64 operations; overflow,
+// underflow uncertainty and cancellation can only erase a usable sign.
+IPC_GS_CCD_FILTER_HD inline int determinant_sign(const double p[4][3]) {
+    using namespace ccd::detail;
+    Interval a[3], b[3], c[3];
+    for(int k=0;k<3;++k) {
+        a[k]=subtract(point(p[1][k]),point(p[0][k]));
+        b[k]=subtract(point(p[2][k]),point(p[0][k]));
+        c[k]=subtract(point(p[3][k]),point(p[0][k]));
+    }
+    Interval value=point(0.0);
+    for(int k=0;k<3;++k) {
+        const int j=(k+1)%3,l=(k+2)%3;
+        const Interval cross=subtract(multiply(a[j],b[l]),multiply(a[l],b[j]));
+        value=add(value,multiply(cross,c[k]));
+    }
+    if(!finite(value.lo)||!finite(value.hi))return 0;
+    return value.lo>0.0?1:(value.hi<0.0?-1:0);
+}
+
+IPC_GS_CCD_FILTER_HD inline bool safe(const double start[4][3],const double end[4][3],
+                                    bool face,double gap_floor) {
+    using ccd::detail::finite;
+    if(!(gap_floor>0.0)||!finite(gap_floor))return false;
+    int moved=0;
+    for(int i=0;i<4;++i) {
+        bool changed=false;
+        for(int k=0;k<3;++k) {
+            if(!finite(start[i][k])||!finite(end[i][k]))return false;
+            changed=changed||start[i][k]!=end[i][k];
+        }
+        moved+=changed?1:0;
+    }
+    if(moved!=1)return false;
+
+    // This deliberately leaves all near-start cases to the original policy.
+    // It excludes exact initial contact and the original finite-primitive
+    // 1e-10 membership band. separation::safe's double overload additionally
+    // rejects any coordinate that is not exactly represented by float32.
+    const double start_gap=ccd::detail::maximum(gap_floor,1e-10);
+    if(!separation::safe(start,start,face,start_gap))return false;
+    const int initial=determinant_sign(start);
+    if(initial==0||determinant_sign(end)!=initial)return false;
+
+    // With one moving corner the determinant is affine along the ACTUAL
+    // represented segment. Equal nonzero endpoint signs exclude all possible
+    // coplanar PT/EE contact events, including initial contact. The final
+    // strict distance proof gives d(end)>floor>=min(d(start),floor), exactly
+    // the extra endpoint condition required by exact::validate_step.
+    // Failed/degenerate/near-floor proofs return false rather than guessing.
+    return separation::safe(end,end,face,gap_floor);
+}
+
+} // namespace ipc_gpu::gs_ccd_filter
+
+#undef IPC_GS_CCD_FILTER_HD
+#endif // IPC_GPU_CCD_SINGLE_VERTEX_H
+// IPC_CCD_SECTION_END single_vertex

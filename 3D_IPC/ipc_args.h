@@ -54,8 +54,8 @@ struct IPCArgs3D : ArgParser {
     double cloth_grid_dx = 0.05;
     bool   write_substeps = false;
     bool   use_ccd       = true;
-    bool   use_ccd_guess = true;
-    bool   use_colored_ccd_guess = false;
+    bool   use_ccd_guess = false;
+    bool   use_colored_ccd_guess = true;
     bool   use_colored_ccd_guess_level_based = false;
     int    colored_ccd_guess_iters = 10;
     double colored_ccd_guess_fraction = 1.0;
@@ -229,8 +229,9 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("write_substeps", write_substeps, false, "Write an output file after every substep (useful for visual debugging)");
 
         add_bool  ("use_ccd",      use_ccd,      true,   "Run CCD step clamping in per_vertex_safe_step");
-        add_bool  ("use_ccd_guess",    use_ccd_guess,    true,  "Use ccd_initial_guess as the substep start point (ignored with OGC)");
-        add_bool  ("use_colored_ccd_guess", use_colored_ccd_guess, false, "Cloth/solid: original collision-colored linear CCD initial guess toward xhat; mutually exclusive with use_colored_ccd_guess_level_based; rigid bodies stay fixed; overrides the global CCD guess, but is ignored with OGC");
+        add_bool  ("use_ccd_guess",    use_ccd_guess,    false, "Use ccd_initial_guess as the substep start point (ignored with OGC)");
+        add_bool  ("use_colored_ccd_guess", use_colored_ccd_guess, true, "Cloth/solid: original collision-colored linear CCD initial guess toward xhat; mutually exclusive with use_colored_ccd_guess_level_based; rigid bodies stay fixed; overrides the global CCD guess, but is ignored with OGC");
+        add_bool  ("colored_ccd_guess", use_colored_ccd_guess, true, "Alias for --use_colored_ccd_guess");
         add_bool  ("use_colored_ccd_guess_level_based", use_colored_ccd_guess_level_based, false, "Cloth/solid: level-based colored CCD toward xhat, with one discarded trial sweep to build levels; mutually exclusive with use_colored_ccd_guess; rigid bodies stay fixed; overrides the global CCD guess, but is ignored with OGC");
         add_int   ("colored_ccd_guess_iters", colored_ccd_guess_iters, 10, "Maximum actual updating sweeps for either colored CCD initial guess or each Jacobi level-based CCD filter; excludes the level-based trial sweep (0 skips trial and updates)");
         add_double("colored_ccd_guess_fraction", colored_ccd_guess_fraction, 1.0, "Fixed target fraction of xhat minus current positions for either colored CCD initial guess, finite in [0, 1]; applied once before sweeps and the level trial; does not change the solver's xhat and is not applied by the Jacobi level-based CCD solver");

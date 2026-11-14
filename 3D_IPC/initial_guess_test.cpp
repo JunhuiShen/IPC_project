@@ -502,13 +502,19 @@ struct InitialGuessSolidScene {
 INSTANTIATE_TEST_SUITE_P(OriginalAndLevelBased, CollisionColoredCCDInitialGuessDriver,
     testing::Bool());
 
-TEST(ColoredCCDGuessParameters, DefaultsAndCliExposeAnOptInIterationCount) {
+TEST(ColoredCCDGuessParameters, CliDefaultsToColoredWhileNeutralParametersStayUnselected) {
     const auto zero = SimParams::zeros();
+    EXPECT_FALSE(zero.use_ccd);
     EXPECT_FALSE(zero.use_colored_ccd_guess);
     EXPECT_FALSE(zero.use_colored_ccd_guess_level_based);
     EXPECT_EQ(zero.colored_ccd_guess_iters, 10);
     IPCArgs3D defaults;
-    EXPECT_FALSE(defaults.to_sim_params().use_colored_ccd_guess);
+    ASSERT_TRUE(parse_initial_guess_arguments(defaults, {"3D_sim"}));
+    EXPECT_TRUE(defaults.use_colored_ccd_guess);
+    EXPECT_FALSE(defaults.use_ccd_guess);
+    EXPECT_TRUE(defaults.to_sim_params().use_ccd);
+    EXPECT_TRUE(defaults.to_sim_params().use_colored_ccd_guess);
+    EXPECT_FALSE(defaults.to_sim_params().use_ccd_guess);
     EXPECT_FALSE(defaults.to_sim_params().use_colored_ccd_guess_level_based);
     EXPECT_EQ(defaults.to_sim_params().colored_ccd_guess_iters, 10);
 
@@ -518,7 +524,7 @@ TEST(ColoredCCDGuessParameters, DefaultsAndCliExposeAnOptInIterationCount) {
         SCOPED_TRACE(option);
         for (int sweeps : {0, 3}) {
             IPCArgs3D selected;
-            std::vector<std::string> words = {"3D_sim", option};
+            std::vector<std::string> words = {"3D_sim", "--use_colored_ccd_guess", "false", option};
             if (sweeps != 0) words.push_back("true");
             words.insert(words.end(), {"--colored_ccd_guess_iters", std::to_string(sweeps)});
             ASSERT_TRUE(parse_initial_guess_arguments(selected, words));
@@ -526,15 +532,16 @@ TEST(ColoredCCDGuessParameters, DefaultsAndCliExposeAnOptInIterationCount) {
             EXPECT_EQ(params.use_colored_ccd_guess, !level_based);
             EXPECT_EQ(params.use_colored_ccd_guess_level_based, level_based);
             EXPECT_EQ(params.colored_ccd_guess_iters, sweeps);
-            EXPECT_TRUE(params.use_ccd_guess);
+            EXPECT_FALSE(params.use_ccd_guess);
         }
         IPCArgs3D disabled;
-        ASSERT_TRUE(parse_initial_guess_arguments(disabled, {"3D_sim", option, "false"}));
+        ASSERT_TRUE(parse_initial_guess_arguments(disabled,
+            {"3D_sim", "--use_colored_ccd_guess", "false", option, "false"}));
         EXPECT_FALSE(disabled.to_sim_params().use_colored_ccd_guess);
         EXPECT_FALSE(disabled.to_sim_params().use_colored_ccd_guess_level_based);
 
         IPCArgs3D invalid;
-        ASSERT_TRUE(parse_initial_guess_arguments(invalid, {"3D_sim", option,
+        ASSERT_TRUE(parse_initial_guess_arguments(invalid, {"3D_sim", "--use_colored_ccd_guess", "false", option,
             "true", "--colored_ccd_guess_iters", "-1"}));
         EXPECT_THROW(invalid.to_sim_params(), std::invalid_argument);
     }
@@ -543,6 +550,40 @@ TEST(ColoredCCDGuessParameters, DefaultsAndCliExposeAnOptInIterationCount) {
     ASSERT_TRUE(parse_initial_guess_arguments(conflicting, {"3D_sim",
         "--use_colored_ccd_guess", "true", "--use_colored_ccd_guess_level_based", "true"}));
     EXPECT_THROW(conflicting.to_sim_params(), std::invalid_argument);
+}
+
+TEST(ColoredCCDGuessParameters, ShortAliasSharesCanonicalSettingAndExplicitModesRemainAvailable) {
+    for (const std::string option : {"--colored_ccd_guess", "--use_colored_ccd_guess"}) {
+        for (const std::string value : {"false", "0", "true", "1"}) {
+            IPCArgs3D args;
+            ASSERT_TRUE(parse_initial_guess_arguments(args, {"3D_sim", option, value}));
+            const bool enabled = value == "true" || value == "1";
+            EXPECT_EQ(args.use_colored_ccd_guess, enabled);
+            EXPECT_EQ(args.to_sim_params().use_colored_ccd_guess, enabled);
+        }
+        IPCArgs3D bare;
+        ASSERT_TRUE(parse_initial_guess_arguments(bare,
+            {"3D_sim", "--use_colored_ccd_guess", "false", option}));
+        EXPECT_TRUE(bare.to_sim_params().use_colored_ccd_guess);
+    }
+    IPCArgs3D last_canonical;
+    ASSERT_TRUE(parse_initial_guess_arguments(last_canonical, {"3D_sim",
+        "--colored_ccd_guess", "true", "--use_colored_ccd_guess", "false"}));
+    EXPECT_FALSE(last_canonical.to_sim_params().use_colored_ccd_guess);
+    IPCArgs3D last_alias;
+    ASSERT_TRUE(parse_initial_guess_arguments(last_alias, {"3D_sim",
+        "--use_colored_ccd_guess", "false", "--colored_ccd_guess", "true"}));
+    EXPECT_TRUE(last_alias.to_sim_params().use_colored_ccd_guess);
+    IPCArgs3D global;
+    ASSERT_TRUE(parse_initial_guess_arguments(global, {"3D_sim",
+        "--colored_ccd_guess", "false", "--use_ccd_guess", "true"}));
+    EXPECT_TRUE(global.to_sim_params().use_ccd_guess);
+    EXPECT_FALSE(global.to_sim_params().use_colored_ccd_guess);
+    IPCArgs3D level;
+    ASSERT_TRUE(parse_initial_guess_arguments(level, {"3D_sim",
+        "--colored_ccd_guess", "false", "--use_colored_ccd_guess_level_based", "true"}));
+    EXPECT_TRUE(level.to_sim_params().use_colored_ccd_guess_level_based);
+    EXPECT_FALSE(level.to_sim_params().use_colored_ccd_guess);
 }
 
 TEST(ColoredCCDGuessParameters, ValidatesEnabledSettingsWithoutChangingLegacyContract) {
@@ -582,7 +623,7 @@ TEST(ColoredCCDGuessParameters, FractionDefaultsAndCliAcceptUnitInterval) {
         for (const std::string fraction : {"0", "0.9", "1"}) {
             SCOPED_TRACE(option + " fraction=" + fraction);
             IPCArgs3D args;
-            ASSERT_TRUE(parse_initial_guess_arguments(args, {"3D_sim", option, "true",
+            ASSERT_TRUE(parse_initial_guess_arguments(args, {"3D_sim", "--use_colored_ccd_guess", "false", option, "true",
                 "--colored_ccd_guess_fraction", fraction}));
             EXPECT_DOUBLE_EQ(args.to_sim_params().colored_ccd_guess_fraction,
                 std::stod(fraction));
@@ -590,7 +631,7 @@ TEST(ColoredCCDGuessParameters, FractionDefaultsAndCliAcceptUnitInterval) {
     }
     IPCArgs3D disabled;
     ASSERT_TRUE(parse_initial_guess_arguments(disabled,
-        {"3D_sim", "--colored_ccd_guess_fraction", "0.9"}));
+        {"3D_sim", "--use_colored_ccd_guess", "false", "--colored_ccd_guess_fraction", "0.9"}));
     EXPECT_DOUBLE_EQ(disabled.to_sim_params().colored_ccd_guess_fraction, 0.9);
     EXPECT_FALSE(disabled.to_sim_params().use_colored_ccd_guess);
     EXPECT_FALSE(disabled.to_sim_params().use_colored_ccd_guess_level_based);

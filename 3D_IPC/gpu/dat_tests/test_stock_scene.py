@@ -15,6 +15,13 @@ def model():
 
 
 class BridgeTests(unittest.TestCase):
+ def test_default_colored_predictor_and_explicit_alternatives(self):
+  expected={'colored':(False,True,False),'global':(True,False,False),'level':(False,False,True),'none':(False,False,False)}
+  default=model();attach_stock_ipc(default)
+  self.assertEqual(tuple(default.ipc.params[k] for k in ('use_ccd_guess','use_colored_ccd_guess','use_colored_ccd_guess_level_based')),expected['colored'])
+  for predictor,flags in expected.items():
+   m=model();attach_stock_ipc(m,gs_predictor=predictor)
+   self.assertEqual(tuple(m.ipc.params[k] for k in ('use_ccd_guess','use_colored_ccd_guess','use_colored_ccd_guess_level_based')),flags)
  def test_metadata_only_hard_flags_materials_rest_and_colors_unchanged(self):
   m=model();before=model_array_snapshot(m);receipt=attach_stock_ipc(m,gs_predictor='none');self.assertEqual(before,model_array_snapshot(m));self.assertTrue(receipt['existing_arrays_unchanged'])
   self.assertEqual(m.particle_flags.numpy()[0]&1,0);self.assertFalse(np.any(m.ipc.pinned.numpy()));self.assertEqual(m.ipc.params['kpin'],0)

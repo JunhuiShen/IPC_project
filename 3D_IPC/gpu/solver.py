@@ -1,9 +1,8 @@
-"""Our equations and CCD in the actual imported VBD GPU timestep.
+"""CPU-style GS dependencies and our equations in the imported GPU timestep.
 
-SolverIPC deliberately inherits SolverVBD.step and its particle-color loop.
-Newton owns the float32 Model/State, adjacency, BVHs, color groups and velocity
-publication. Only the model-specific physics and accepted-step hooks differ.
-The production particle solve retains the upstream cooperative 16-lane layout.
+Newton owns the float32 Model/State, material adjacency, BVHs and velocity
+publication. Deformable GS rebuilds contact-aware colors at box checkpoints;
+the local material solve retains the cooperative 16-lane GPU layout.
 """
 
 from __future__ import annotations
@@ -24,16 +23,17 @@ from newton._src.solvers.vbd.particle_vbd_kernels import forward_step
 
 from . import kernels
 from .ccd import CcdBackend
+from .gs import MovementBoxes
 from .sdf import SdfBackend
 
 
 class SolverIPC(SolverVBD):
     """Our GS/IPC/CCD model plugged into the authors' concrete GPU solver.
 
-    Float32 state and tree-reduced color updates follow the upstream execution
-    model. Contact-coupled vertices of one structural color update together;
-    CCD certifies their combined represented motion before it is committed.
-    This is not a promise of a bit-identical serial CPU GS trajectory.
+    Adaptive movement boxes and contact-independent colors follow CPU GS.
+    Float32 state and tree reductions can change the numeric trajectory. Mixed
+    rigid scenes retain the inherited particle schedule and separate rigid
+    block order until a unified mixed dependency graph is implemented.
     """
 
     def __init__(self, model: Model, *, iterations=None, vertex_contact_capacity=128,
@@ -58,7 +58,10 @@ class SolverIPC(SolverVBD):
         self.error = wp.zeros(1, int, device=model.device)
         self._failed = False
         self.params = p
+        self._contact_aware_gs = bool(p.get("contact_aware_gs", True)) and model.body_count == 0 and model.particle_count > 0
         self._box_radius = float(p["node_box_max"])
+        self._adaptive_node_boxes = bool(p.get("adaptive_node_boxes", True))
+        self.movement_boxes = MovementBoxes(model, p["node_box_min"], p["node_box_max"])
         # The detector queries current geometry. Cover both primitives' full
         # coordinatewise blue-box budgets until the next detection checkpoint.
         self._query_radius = max(float(p["d_hat"]), 1e-8) + 2.0 * self._box_radius
@@ -82,15 +85,17 @@ class SolverIPC(SolverVBD):
         self.proposals = wp.empty_like(model.particle_q)
         from .contact_original import ContactBackendIPC
         self.contact_backend = ContactBackendIPC(model, self.trimesh_collision_info,
+            grouped_precision=p.get("gs_contact_precision", "float32") if self._contact_aware_gs else "float64",
             d_hat=float(p["d_hat"]), k_barrier=float(p["k_barrier"]),
             friction=float(p["friction_coefficient"]), eps_v=float(p["friction_velocity_epsilon"]),
             exact_geometry=bool(p["exact_computation_fallback"]), node_body=model.ipc.node_body, error=self.error,
-            track_query_epoch=bool(p.get("use_colored_ccd_guess", False) or
+            track_query_epoch=bool(self._contact_aware_gs or p.get("use_colored_ccd_guess", False) or
                                    p.get("use_colored_ccd_guess_level_based", False)))
         self.ccd_backend = CcdBackend(self.contact_backend, node_box_radius=self._box_radius,
             exact_geometry=bool(p["exact_computation_fallback"]), error=self.error, group_query_block_dim=64)
+        self.ccd_backend.single_vertex_filter = bool(p.get("gs_ccd_filter", True))
         if not self.ccd_backend.exact_step_bound:
-            from .ccd_cached import resolve as resolve_cached
+            from .ccd import resolve_cached
             self.ccd_backend._resolve = resolve_cached
         flags = model.particle_flags.numpy()
         has_dynamic_particles = bool(np.any((flags & 1) & (model.particle_mass.numpy() > 0)))
@@ -98,7 +103,9 @@ class SolverIPC(SolverVBD):
             p.get("use_colored_ccd_guess_level_based", False) or
             (p.get("use_ccd_guess", False) and not model.ipc.payload.get("uses_general_solver", False) and model.body_count == 0))
         if self._guess_requested:
-            self.ccd_backend.prepare_initial_guess(self.trimesh_collision_detector, self.params, use_group_queries=True)
+            self.ccd_backend.prepare_initial_guess(self.trimesh_collision_detector, self.params, use_group_queries=True,
+                independent_colors=bool(p.get("use_colored_ccd_guess", False))
+                    and not p.get("use_colored_ccd_guess_level_based", False) and model.body_count == 0)
             graph = self.ccd_backend._initial_guess.graph
             if graph is not None:
                 from .parallel_colors import ParallelColors
@@ -116,14 +123,21 @@ class SolverIPC(SolverVBD):
         for group in model.particle_color_groups:
             ids = group.numpy()
             self._active_color_counts.append(int(np.count_nonzero(flags[ids] & 1)))
+        self._gs_schedule = None
+        self._box_filter = None
+        if self._contact_aware_gs:
+            from .gs import GsSchedule
+            self._gs_schedule = GsSchedule(self.contact_backend)
+            if self._adaptive_node_boxes and p.get("gs_prune_box_contacts", True):
+                from .movement_box_queries import GsBoxEpochFilter
+                self._box_filter = GsBoxEpochFilter(self.contact_backend)
         self._rigid = None
         if model.body_count:
             from .body_solver import BodySolver
             self._rigid = BodySolver(self)
             self._query_radius = max(self._query_radius, self._rigid.query_radius)
 
-    # The public timestep and particle color schedule are inherited unchanged.
-    # The hooks below are the necessary substitutions for our physical model.
+    # The public timestep is inherited; these hooks supply our model and GS order.
     def _pre_initialization_detection(self, state_in, dt):
         # Upstream needs a checkpoint before its DAT-limited prediction. Our
         # predictor queries its own complete swept bounds, and initialization
@@ -135,6 +149,8 @@ class SolverIPC(SolverVBD):
         m = self.model
         if not m.particle_count:
             return
+        if self._adaptive_node_boxes:
+            self.movement_boxes.begin(state_in.particle_qd, dt)
         wp.launch(forward_step, dim=m.particle_count,
             inputs=[dt, m.gravity, m.particle_world, self.particle_q_prev,
                     state_in.particle_q, state_in.particle_qd, m.particle_inv_mass,
@@ -145,6 +161,8 @@ class SolverIPC(SolverVBD):
         if self._guess_requested:
             self.ccd_backend.initial_guess(state_in.particle_q, self.particle_q_prev,
                 state_in.particle_qd, self.inertia, dt, self.params, detector=self.trimesh_collision_detector)
+        if self._adaptive_node_boxes:
+            self.movement_boxes.anchor(state_in.particle_q)
         self._collision_detection_penetration_free(state_in, reset_reference=True)
         if self.iterations == 0:
             # Ordinarily the inherited color loop publishes the final iterate.
@@ -154,13 +172,52 @@ class SolverIPC(SolverVBD):
         if reset_reference:
             self.pos_prev_collision_detection.assign(current_state.particle_q)
             self.particle_displacements.zero_()
-        self.contact_backend.detect(self.trimesh_collision_detector, current_state.particle_q,
-                                    self._query_radius, refit=True)
+        if self._adaptive_node_boxes and self._rigid is None:
+            self.contact_backend.detect_boxes(self.trimesh_collision_detector,
+                current_state.particle_q, self.movement_boxes.radii, float(self.params["d_hat"]))
+        else:
+            # Rigid analytic motion retains its own conservative scalar reach.
+            self.contact_backend.detect(self.trimesh_collision_detector, current_state.particle_q,
+                                        self._query_radius, refit=True)
         if self._rigid is not None:
             self._rigid.refresh(current_state)
+        if self._box_filter is not None:
+            from .contact import parameters
+            # A whole-box proof removes only interactions that stay inactive
+            # throughout this epoch. All uncertain pairs remain dependencies.
+            self._box_filter.apply(current_state.particle_q, self.particle_q_prev,
+                self.contact_backend.swept_lower, self.contact_backend.swept_upper,
+                parameters(dt=float(self.params["dt"]), **self.contact_backend.options))
+        if self._gs_schedule is not None:
+            self._gs_schedule.rebuild()
 
     def _self_contact_is_due(self, iter_num):
         return iter_num > 0 and iter_num % int(self.params["node_box_update_count"]) == 0
+
+    def _solve_particle_iteration(self, state_in, state_out, contacts, dt):
+        gs = self._gs_schedule
+        if gs is None:
+            return super()._solve_particle_iteration(state_in, state_out, contacts, dt)
+        self.particle_forces.zero_()
+        self.particle_hessians.zero_()
+
+        def color_body():
+            self.contact_backend.accumulate(state_in.particle_q, self.particle_q_prev, -1,
+                self.particle_forces, self.particle_hessians, dt,
+                colors=gs.colors, current_color=gs.current_color, query_view=gs.query_view)
+            if self.model.ipc.collider_data.shape[0]:
+                self.sdf_backend.accumulate(state_in.particle_q, self.particle_q_prev, -1,
+                    self.particle_forces, self.particle_hessians, dt,
+                    colors=gs.colors, current_color=gs.current_color)
+            gs.solve_elasticity(self, state_in, dt)
+            self.ccd_backend.accept(state_in.particle_q, self.proposals, -1, dt,
+                center=self.pos_prev_collision_detection, radius=self._box_radius,
+                radii=self.movement_boxes.radii if self._adaptive_node_boxes else None,
+                colors=gs.colors, current_color=gs.current_color, query_view=gs.query_view,
+                independent=True, bounded=True, clip_ccd=bool(self.params["use_ccd"]))
+
+        gs.sweep(color_body)
+        wp.copy(state_out.particle_q, state_in.particle_q)
 
     def _accumulate_particle_contact_terms(self, state_in, state_out, contacts, dt, color):
         if not self._active_color_counts[color]:
@@ -178,7 +235,10 @@ class SolverIPC(SolverVBD):
         arguments = [dt, m.particle_color_groups[color], self.particle_q_prev,
             state_in.particle_q, m.particle_mass, self.inertia, m.particle_flags,
             m.tri_indices, m.tri_poses, m.tri_materials, m.tri_areas,
-            m.edge_indices, m.edge_rest_angle, m.edge_rest_length, m.edge_bending_properties,
+            # The stock-scene bridge supplies own-energy bending coefficients
+            # mapped to the imported DAT scene's physical hinge stiffness.
+            m.edge_indices, m.edge_rest_angle, m.edge_rest_length,
+            getattr(ipc, "stock_energy_edge_properties", m.edge_bending_properties),
             m.tet_indices, m.tet_poses, m.tet_materials, self.particle_adjacency,
             self.particle_forces, self.particle_hessians,
             ipc.pin_targets, ipc.pinned, float(self.params["kpin"]), ipc.edge_coefficient,
@@ -198,7 +258,17 @@ class SolverIPC(SolverVBD):
             return
         self.ccd_backend.accept(state_in.particle_q, self.proposals, color, dt,
                                 center=self.pos_prev_collision_detection, radius=self._box_radius,
+                                radii=self.movement_boxes.radii if self._adaptive_node_boxes else None,
                                 bounded=True, clip_ccd=bool(self.params["use_ccd"]))
+
+    def _finalize_particles(self, state_out: State, dt):
+        if self._adaptive_node_boxes:
+            self.movement_boxes.finish(state_out.particle_q)
+        super()._finalize_particles(state_out, dt)
+
+    def reset(self, state, world_mask=None, flags=None):
+        super().reset(state, world_mask=world_mask, flags=flags)
+        self.movement_boxes.reset(self._normalize_reset_world_mask(world_mask))
 
     def _initialize_rigid_bodies(self, state_in, control, contacts, dt, update_rigid):
         if self._rigid is not None:
@@ -239,4 +309,3 @@ class SolverIPC(SolverVBD):
 
 
 assert SolverIPC.step is SolverVBD.step
-assert SolverIPC._solve_particle_iteration is SolverVBD._solve_particle_iteration

@@ -158,7 +158,7 @@ def make_base(trajectory):
     image = Image.new("RGB", (WIDTH, HEIGHT), BACKGROUND)
     draw = ImageDraw.Draw(image)
     variant = trajectory.metadata["variant"]
-    label = "Reference DAT" if variant == "reference" else "Our energies DAT"
+    label = {"reference": "Reference DAT", "own": "Our energies DAT", "gs": "Our energies GS"}[variant]
     draw.text((32, 16), f"Newton cloth_twist | {label} | CUDA", fill=TEXT, font=_font(30, True))
     draw.text((32, 62), "2,500 vertices  |  4,802 triangles  |  10 substeps × 4 iterations",
               fill=TEXT, font=_font(21))
@@ -173,6 +173,7 @@ def make_base(trajectory):
     draw.text((32, 721), f"Simulation runtime: {elapsed:.3f} s  |  {1000 * elapsed / 480:.3f} ms/frame (480 frames)",
               fill=TEXT, font=_font(19))
     footer = ("Original Newton energies" if variant == "reference" else
+              "Our energies + colored CCD guess" if variant == "gs" else
               "Our energies + full curvature Hessian")
     draw.text((32, 759), f"{footer}  |  fixed view", fill=TEXT, font=_font(18))
     return image

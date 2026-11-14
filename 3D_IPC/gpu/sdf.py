@@ -180,6 +180,27 @@ def accumulate(positions: wp.array[wp.vec3],previous: wp.array[wp.vec3],flags: w
             else:wp.atomic_max(error,0,49)
 
 
+@wp.kernel
+def accumulate_dynamic(positions: wp.array[wp.vec3],previous: wp.array[wp.vec3],flags: wp.array[int],
+                       colors: wp.array[int],current_color: wp.array[int],solid: wp.array[int],surface: wp.array[int],
+                       colliders: wp.array[Collider],params: Parameters,forces: wp.array[wp.vec3],
+                       hessians: wp.array[wp.mat33],error: wp.array[int]):
+    i=wp.tid()
+    if error[0]==0 and (flags[i]&1)!=0 and colors[i]==current_color[0] and (solid[i]==0 or surface[i]!=0):
+        packet=evaluate(positions[i],previous[i],colliders,params)
+        if packet[41]!=wp.float64(0.0):wp.atomic_max(error,0,49)
+        else:
+            f,h=vertex_terms(packet,wp.float32(params.dt))
+            valid=True
+            for a in range(3):
+                valid=valid and wp.isfinite(f[a])
+                for b in range(3):valid=valid and wp.isfinite(h[a,b])
+            if valid:
+                forces[i]+=f
+                hessians[i]+=h
+            else:wp.atomic_max(error,0,49)
+
+
 class SdfBackend:
     """Persistent prepared collider bank and graph-safe color accumulation."""
     def __init__(self,model,error,*,include_curvature=None,precision=None):
@@ -200,6 +221,7 @@ class SdfBackend:
         self.fast_context=None
         self._fast_accumulate=self._replay=None
         self._checked_accumulate=self._prepared_accumulate=None
+        self._checked_dynamic=self._prepared_dynamic=None
         # Small scenes otherwise launch too few 256-thread blocks to use this
         # GPU's SMs. Recorded-input timing favors one-warp blocks in that range.
         self.block_dim=(32 if self.device.is_cuda and model.particle_count<=32*self.device.sm_count else 256)
@@ -217,6 +239,8 @@ class SdfBackend:
             self._fast_accumulate=sdf_fast.accumulate
             self._checked_accumulate=sdf_fast.accumulate
             self._prepared_accumulate=sdf_fast.accumulate_prepared
+            self._checked_dynamic=sdf_fast.make_dynamic_accumulate(False)
+            self._prepared_dynamic=sdf_fast.make_dynamic_accumulate(True)
             self._replay=sdf_fast.make_replay()
 
     def prepare(self,dt):
@@ -230,16 +254,27 @@ class SdfBackend:
             # invalid pose latches error 48, which both fast kernels check.
             self._poses_validated=bool(check_material)
 
-    def accumulate(self,q,previous,color,forces,hessians,dt):
+    def accumulate(self,q,previous,color,forces,hessians,dt,*,colors=None,current_color=None):
         if self.enabled:
             self.params.dt=dt
-            common=[q,previous,self.model.particle_flags,self.model.particle_colors,color,
+            selected_colors=self.model.particle_colors if colors is None else colors
+            if selected_colors.dtype!=wp.int32 or selected_colors.shape!=(self.model.particle_count,) or selected_colors.device!=self.device:
+                raise TypeError("SDF colors must match the particle device int layout")
+            if current_color is not None and (current_color.dtype!=wp.int32 or current_color.shape!=(1,) or current_color.device!=self.device):
+                raise TypeError("SDF current color must be a device int scalar")
+            selector=color if current_color is None else current_color
+            common=[q,previous,self.model.particle_flags,selected_colors,selector,
                     self.model.ipc.solid,self.model.ipc.surface,self.colliders,self.params,forces,hessians]
             if self.fast_context is None:
-                wp.launch(accumulate,dim=self.model.particle_count,inputs=[*common,self.error],device=self.device)
+                kernel=accumulate if current_color is None else accumulate_dynamic
+                wp.launch(kernel,dim=self.model.particle_count,inputs=[*common,self.error],device=self.device)
             else:
-                self._fast_accumulate=(self._prepared_accumulate if self._poses_validated
-                                       else self._checked_accumulate)
+                if current_color is None:
+                    self._fast_accumulate=(self._prepared_accumulate if self._poses_validated
+                                           else self._checked_accumulate)
+                else:
+                    self._fast_accumulate=(self._prepared_dynamic if self._poses_validated
+                                           else self._checked_dynamic)
                 self.fast_context.count.zero_()
                 wp.launch(self._fast_accumulate,dim=self.model.particle_count,
                     inputs=[*common,self.fast_context],device=self.device,block_dim=self.block_dim)

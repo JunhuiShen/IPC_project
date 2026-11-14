@@ -90,9 +90,25 @@ template<> struct numeric_limits<float> {
 """
 
 
-def flatten_headers(headers):
-    """Expand arithmetic headers in memory, retaining include guards and licenses."""
+def flatten_headers(headers, *, source_overrides=None):
+    """Expand headers, optionally selecting virtual text from a shared source.
+
+    Overrides replace contents only: project path, include and cycle checks
+    still apply. The expanded replacement text enters the normal preamble
+    hash, so selecting a source section adds no checkout-specific cache key.
+    """
     dependencies = []
+    overrides = {}
+    for value, source in (source_overrides or {}).items():
+        path = Path(value)
+        if not path.is_absolute():
+            path = GPU_ROOT / path
+        path = path.resolve()
+        if not path.is_relative_to(GPU_ROOT) or not path.is_file():
+            raise ValueError(f"Not a project device arithmetic header: {path}")
+        if not isinstance(source, str):
+            raise TypeError("Virtual header contents must be text")
+        overrides[path] = source
 
     def expand(value, stack=()):
         path = Path(value)
@@ -108,7 +124,8 @@ def flatten_headers(headers):
         relative = path.relative_to(GPU_ROOT).as_posix()
         guard = "IPC_WARP_HEADER_" + re.sub(r"[^A-Za-z0-9]", "_", relative).upper()
         lines = [f"#ifndef {guard}", f"#define {guard}", f"// Source: gpu/{relative}"]
-        for line in path.read_text(encoding="utf-8").splitlines():
+        source = overrides[path] if path in overrides else path.read_text(encoding="utf-8")
+        for line in source.splitlines():
             match = _INCLUDE.match(line)
             if match:
                 style, name = match.groups()

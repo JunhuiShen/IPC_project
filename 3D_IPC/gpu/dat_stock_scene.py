@@ -69,12 +69,12 @@ def rest_edge_coefficients(triangles,areas,edges,rest_lengths):
 
 
 def attach_stock_ipc(model,*,fps=60,substeps=10,iterations=4,d_hat=.002,k_barrier=100.,
-                     friction=.2,eps_v=.01,exact_geometry=True,gs_predictor='global',bending_mapping='matched-effective'):
+                     friction=.2,eps_v=.01,exact_geometry=True,gs_predictor='colored',bending_mapping='matched-effective'):
     """Add only model.ipc; stock material/flags/colors/rest/state arrays stay intact."""
     import warp as wp
     if hasattr(model,'ipc'):raise ValueError('Bridge requires an unmodified stock model')
     if model.body_count or model.tet_count:raise ValueError('This bridge is for the official cloth twist model')
-    if gs_predictor not in ('none','global','level'):raise ValueError('Unknown explicit GS predictor')
+    if gs_predictor not in ('none','global','colored','level'):raise ValueError('Unknown explicit GS predictor')
     before=model_array_snapshot(model)
     q=model.particle_q.numpy();mass=model.particle_mass.numpy();flags=model.particle_flags.numpy()
     triangles=model.tri_indices.numpy();areas=model.tri_areas.numpy();edges=model.edge_indices.numpy()
@@ -104,7 +104,7 @@ def attach_stock_ipc(model,*,fps=60,substeps=10,iterations=4,d_hat=.002,k_barrie
        'exact_computation_fallback_2':bool(exact_geometry),'ccd_exact_step_bound':False,
        'node_box_max':budget,'node_box_min':min(.001,budget),'node_box_update_count':int(iterations),
        'theta_box_min':.01,'theta_box_max':.1,'use_ccd':True,'use_ccd_guess':gs_predictor=='global',
-       'use_colored_ccd_guess':False,'use_colored_ccd_guess_level_based':gs_predictor=='level',
+       'use_colored_ccd_guess':gs_predictor=='colored','use_colored_ccd_guess_level_based':gs_predictor=='level',
        'colored_ccd_guess_iters':1,'colored_ccd_guess_fraction':1.,'use_jacobi_level_based_ccd':False,
        'use_dat':False,'use_ogc':False,'use_cloth_grid':False,'use_parallel':True,'use_simd':False,
        'dat_gamma':gamma,'dat_query_radius':stock_radius,'dat_node_box_padding':1.,'dat_collision_detection_interval':0,

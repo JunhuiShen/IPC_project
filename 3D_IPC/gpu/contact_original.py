@@ -124,8 +124,15 @@ def make_original_kernel():
 
 class ContactBackendIPC(ContactBackend):
     """Our GS backend; DAT and shared ContactBackend retain their defaults."""
-    def __init__(self,*args,**kwargs):
+    def __init__(self,*args,grouped_precision="float64",**kwargs):
+        if grouped_precision not in ("float32","float64"):
+            raise ValueError("Grouped GS contact precision must be float32 or float64")
         super().__init__(*args,**kwargs)
+        self.grouped_precision=grouped_precision
+        self._grouped_fast=None
+        if grouped_precision=="float32":
+            from .gs_contact_fast import GsContactFast
+            self._grouped_fast=GsContactFast(self)
         self._original_zero_friction=(not self.options['exact_geometry'] and self.options['friction']==0.0)
         if self._original_zero_friction:
             # These private launch settings were measured on frozen real GS
@@ -135,7 +142,17 @@ class ContactBackendIPC(ContactBackend):
             self._filter_original=make_filter_kernel()
             self._evaluate_original=make_original_kernel()
 
-    def accumulate(self,positions,previous,color,forces,hessians,dt):
+    def accumulate_grouped(self,positions,previous,color,forces,hessians,dt,*,colors,current_color,query_view=None):
+        if self._grouped_fast is not None:
+            return self._grouped_fast.accumulate_grouped(positions,previous,color,forces,hessians,dt,
+                colors=colors,current_color=current_color,query_view=query_view)
+        return super().accumulate_grouped(positions,previous,color,forces,hessians,dt,
+            colors=colors,current_color=current_color,query_view=query_view)
+
+    def accumulate(self,positions,previous,color,forces,hessians,dt,*,colors=None,current_color=None,query_view=None):
+        if current_color is not None or colors is not None or query_view is not None:
+            return super().accumulate(positions,previous,color,forces,hessians,dt,
+                colors=colors,current_color=current_color,query_view=query_view)
         if not self._original_zero_friction or self.options['exact_geometry'] or self.options['friction']!=0.0:
             return super().accumulate(positions,previous,color,forces,hessians,dt)
         p=parameters(dt=float(dt),**self.options)

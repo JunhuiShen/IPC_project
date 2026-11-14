@@ -24,6 +24,21 @@ def point_payload(substeps=1):
     return payload
 
 
+def checkpoint_payload(prune):
+    """A warm movement history brings a point within one box of a fixed face."""
+    payload = body_payload()
+    points = [[.25, .25, .108], [0, 0, 0], [1, 0, 0], [0, 1, 0]]
+    payload.update(positions=points, velocities=[[0, 0, 0]] * 4, mass=[1, 0, 0, 0],
+        node_to_rb=[-1] * 4, tris=[[1, 2, 3]], bodies=[], surface_nodes=list(range(4)),
+        pins=[{"node": 0, "target": [.25, .25, -.5], "prescribed": False}],
+        pin_targets=[[.25, .25, -.5], *points[1:]])
+    payload["params"].update(gravity=[0, 0, 0], kpin=1e6, k_barrier=0,
+        node_box_max=.1, node_box_min=.001, node_box_update_count=1,
+        max_global_iters=5, gs_prune_box_contacts=prune,
+        use_ccd_guess=False, use_colored_ccd_guess=False, use_colored_ccd_guess_level_based=False)
+    return payload
+
+
 class SolverIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -32,12 +47,12 @@ class SolverIntegrationTests(unittest.TestCase):
 
     def test_inherited_timestep_solves_our_finite_pin_potential(self):
         self.assertIs(SolverIPC.step, SolverVBD.step)
-        self.assertIs(SolverIPC._solve_particle_iteration, SolverVBD._solve_particle_iteration)
         for device in self.devices:
             with self.subTest(device=str(device)):
                 payload = point_payload()
                 model = create_model(payload, device)
                 solver = SolverIPC(model, allow_cpu=True)
+                self.assertIsNotNone(solver._gs_schedule)
                 before, after = model.state(), model.state()
                 dt = payload["params"]["dt"]
                 x = np.asarray(payload["positions"])
@@ -120,6 +135,90 @@ class SolverIntegrationTests(unittest.TestCase):
             solver.check_status()
             np.testing.assert_array_equal(after.particle_q.numpy(), before.particle_q.numpy())
             np.testing.assert_array_equal(after.particle_qd.numpy(), 0.0)
+
+    def test_upstream_mid_checkpoint_uses_new_centers_and_finds_reachable_contact(self):
+        from .test_movement_box_queries import pairs
+
+        self.assertIs(SolverIPC._refresh_collision_sets, SolverVBD._refresh_collision_sets)
+        for device in self.devices:
+            for prune in (False, True):
+                with self.subTest(device=str(device), prune=prune):
+                    payload = checkpoint_payload(prune)
+                    model = create_model(payload, device)
+                    solver = SolverIPC(model, allow_cpu=True)
+                    # Mimic a later substep: only the moving point needs the
+                    # large budget; the stationary triangle has minimum boxes.
+                    solver.movement_boxes.previous_displacement.assign([.1, 0, 0, 0])
+                    before, after = model.state(), model.state()
+                    dt = payload["params"]["dt"]
+                    solver._initialize_particles(before, after, None, dt)
+                    solver.check_status()
+                    self.assertEqual(pairs(solver.contact_backend)[0], set())
+                    old_reference = solver.pos_prev_collision_detection.numpy().copy()
+                    proposal = before.particle_q.numpy().copy()
+                    proposal[0, 2] = .0085
+                    gs = solver._gs_schedule
+                    solver.ccd_backend.accept(before.particle_q,
+                        wp.array(proposal, wp.vec3, device=device), -1, dt,
+                        center=solver.pos_prev_collision_detection, radii=solver.movement_boxes.radii,
+                        colors=gs.colors, current_color=gs.current_color, query_view=gs.query_view,
+                        independent=True)
+                    solver.check_status()
+                    checkpoint = before.particle_q.numpy().copy()
+                    self.assertGreater(float(old_reference[0, 2] - checkpoint[0, 2]), .09)
+
+                    # This inherited method invokes our detection hook with
+                    # reset_reference=False, then updates the CCD reference.
+                    solver._refresh_collision_sets(before, dt,
+                        run_rigid_collision=False, run_soft_self_collision=True)
+                    solver.check_status()
+                    np.testing.assert_array_equal(solver.pos_prev_collision_detection.numpy(), checkpoint)
+                    radii = solver.movement_boxes.radii.numpy()[:, None]
+                    np.testing.assert_allclose(solver.contact_backend.swept_lower.numpy(),
+                        checkpoint.astype(np.float64) - radii, rtol=0, atol=8e-8)
+                    np.testing.assert_allclose(solver.contact_backend.swept_upper.numpy(),
+                        checkpoint.astype(np.float64) + radii, rtol=0, atol=8e-8)
+                    # The old boxes excluded this pair. The new point box
+                    # crosses the plane, so it must be in the next CCD bank.
+                    self.assertEqual(pairs(solver.contact_backend)[0], {(0, 0)})
+                    proposal = checkpoint.copy(); proposal[0, 2] = -.05
+                    solver.ccd_backend.accept(before.particle_q,
+                        wp.array(proposal, wp.vec3, device=device), -1, dt,
+                        center=solver.pos_prev_collision_detection, radii=solver.movement_boxes.radii,
+                        colors=gs.colors, current_color=gs.current_color, query_view=gs.query_view,
+                        independent=True)
+                    solver.check_status()
+                    accepted = before.particle_q.numpy()
+                    self.assertGreater(float(accepted[0, 2]), 0)
+                    self.assertLess(float(accepted[0, 2]), float(checkpoint[0, 2]))
+                    np.testing.assert_array_equal(accepted[1:], checkpoint[1:])
+
+    def test_multiple_box_checkpoints_stay_safe_in_eager_and_captured_frames(self):
+        for device in self.devices:
+            for prune in (False, True):
+                results = []
+                for graphs in (False, True):
+                    with self.subTest(device=str(device), prune=prune, graphs=graphs):
+                        payload = checkpoint_payload(prune)
+                        self.assertGreater(payload["params"]["max_global_iters"], payload["params"]["node_box_update_count"])
+                        model = create_model(payload, device)
+                        solver = SolverIPC(model, allow_cpu=True)
+                        solver.movement_boxes.previous_displacement.assign([.1, 0, 0, 0])
+                        frames = FrameGraph(model, solver, graphs=graphs)
+                        for _ in range(2):
+                            frames.advance()
+                            q = frames.state.particle_q.numpy()
+                            self.assertGreater(float(q[0, 2]), 0)
+                            np.testing.assert_array_equal(q[1:], np.asarray(payload["positions"], np.float32)[1:])
+                            reference = solver.pos_prev_collision_detection.numpy().astype(np.float64)
+                            radius = solver.movement_boxes.radii.numpy()[:, None]
+                            np.testing.assert_allclose(solver.contact_backend.swept_lower.numpy(),
+                                reference - radius, rtol=0, atol=8e-8)
+                            np.testing.assert_allclose(solver.contact_backend.swept_upper.numpy(),
+                                reference + radius, rtol=0, atol=8e-8)
+                        results.append((frames.state.particle_q.numpy(), frames.state.particle_qd.numpy()))
+                for eager, captured in zip(*results):
+                    np.testing.assert_array_equal(captured, eager)
 
 
 if __name__ == "__main__":

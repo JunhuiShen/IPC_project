@@ -2,14 +2,88 @@
 import unittest
 from types import SimpleNamespace
 import shutil
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
+import tempfile
+import hashlib
+from unittest.mock import patch
 import numpy as np
 import warp as wp
 
-from gpu.ccd_exact import pair_clip as original_clip
-from gpu.ccd_cached import pair_clip as cached_clip, configure_module
+from gpu.ccd import pair_clip as original_clip
+from gpu.ccd import pair_clip_cached as cached_clip, configure_module
 from .ccd_cache_cases import synthetic_cases
 from .ccd_cache_fixture import SingleQueryResolver
 from .run_ccd_cache_host import run_checks
+
+
+class CcdCompilationIsolationTests(unittest.TestCase):
+    def test_virtual_header_sections_keep_validation_and_portable_content_hashing(self):
+        from gpu import warp_build
+        with tempfile.TemporaryDirectory(prefix='ccd-virtual-header-') as temporary:
+            root = Path(temporary)
+            (root / 'core.h').write_text('#pragma once\n#include "wrapper.h"\n')
+            (root / 'wrapper.h').write_text('#pragma once\n#include "core.h"\n')
+            with patch.object(warp_build, 'GPU_ROOT', root):
+                with self.assertRaisesRegex(ValueError, 'Recursive project include'):
+                    warp_build.flatten_headers(('wrapper.h',))
+                first, dependencies = warp_build.flatten_headers(('wrapper.h',),
+                    source_overrides={'core.h': '#pragma once\nconstexpr int selected_core=1;\n'})
+                second, _ = warp_build.flatten_headers(('wrapper.h',),
+                    source_overrides={'core.h': '#pragma once\nconstexpr int selected_core=2;\n'})
+                self.assertIn('constexpr int selected_core=1;', first)
+                self.assertNotIn(str(root), first)
+                self.assertEqual(set(dependencies), {root/'core.h', root/'wrapper.h'})
+                self.assertNotEqual(hashlib.sha256(first.encode()).digest(),
+                                    hashlib.sha256(second.encode()).digest())
+                with self.assertRaisesRegex(ValueError, 'Unsupported system header'):
+                    warp_build.flatten_headers(('wrapper.h',),
+                        source_overrides={'core.h': '#include <filesystem>\n'})
+                with self.assertRaisesRegex(ValueError, 'Not a project device arithmetic header'):
+                    warp_build.flatten_headers(('wrapper.h',),
+                        source_overrides={root.parent/'outside.h': 'int outside;\n'})
+
+    def test_cold_factory_construction_preserves_fast_hashes_and_preambles(self):
+        # A fresh interpreter makes this check independent of test discovery
+        # order. Hashing resolves dependencies without compiling CUDA kernels.
+        script = textwrap.dedent('''
+            import warp as wp
+            from gpu import ccd
+            wp.init()
+            fast = [ccd._prepare, ccd._begin, ccd._begin_round,
+                    ccd._certify, ccd._shorten, ccd._next, ccd._commit,
+                    ccd.get_independent_certifier(), ccd.get_independent_shortener()]
+            def snapshot(kernel):
+                options = wp.get_module_options(kernel.module)
+                extra = options['extra_build_options']
+                source = extra.extra_cuda_preamble
+                assert 'struct DevicePool' not in source
+                assert 'resolve_original_exact' not in source
+                assert 'namespace ipc_gpu::gs_ccd_cache' not in source
+                assert options['fast_math'] is False
+                assert options['fuse_fp'] is False
+                return (kernel.module.get_module_hash(block_dim=64),
+                        source, extra.extra_cpu_preamble)
+            before = [snapshot(kernel) for kernel in fast]
+            cold = [ccd.get_resolver(mode) for mode in ('original', 'cached', 'bound')]
+            cold += [ccd.get_independent_resolver(bound) for bound in (False, True)]
+            assert len({id(kernel.module) for kernel in cold + fast}) == len(cold + fast)
+            assert [snapshot(kernel) for kernel in fast] == before
+            for mode, kernel in zip(('original', 'cached', 'bound'), cold):
+                assert ccd.get_resolver(mode) is kernel
+                source = wp.get_module_options(kernel.module)['extra_build_options'].extra_cuda_preamble
+                assert 'struct DevicePool' in source
+            assert ccd.resolve_original is ccd.get_resolver('original')
+            assert ccd.resolve_cached is ccd.get_resolver('cached')
+            assert ccd.resolve_bound is ccd.get_resolver('bound')
+            print('CCD factory isolation passed')
+        ''')
+        result = subprocess.run([sys.executable, '-c', script],
+            cwd=Path(__file__).resolve().parents[2], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('CCD factory isolation passed', result.stdout)
 
 
 @wp.kernel
@@ -55,8 +129,8 @@ class CachedClipTests(unittest.TestCase):
                 np.testing.assert_array_equal(packet.view(np.uint64),result.view(np.uint64))
 
     def test_opt_in_applies_only_to_our_original_solver_instance(self):
-        from gpu.ccd_cached import install_our_instance, resolve
-        from gpu.ccd_exact import resolve as original_resolve
+        from gpu.ccd import install_our_instance, resolve_cached as resolve
+        from gpu.ccd import resolve_original as original_resolve
         from gpu.solver import SolverIPC
         from gpu.reference.legacy_dat_adapter import SolverDAT
         ours=object.__new__(SolverIPC)
@@ -116,6 +190,6 @@ class CachedClipCudaTests(unittest.TestCase):
                         np.testing.assert_array_equal(reference[case['name']].view(np.uint64),resolver.packet().view(np.uint64))
 
 
-configure_module(__name__)
+configure_module(__name__, mode="cached")
 
 if __name__=='__main__':unittest.main()

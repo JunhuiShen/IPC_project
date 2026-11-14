@@ -2,8 +2,8 @@
 import numpy as np
 import warp as wp
 from newton._src.geometry.tri_mesh_collision import TriMeshCollisionInfo
-from ..ccd_exact import resolve as original_resolve
-from ..ccd_cached import resolve as cached_resolve
+from ..ccd import resolve_original as original_resolve
+from ..ccd import resolve_cached as cached_resolve
 
 
 class SingleQueryResolver:

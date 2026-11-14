@@ -1,4 +1,4 @@
-r"""Export the actual shared DAT twist trajectory for matched GIF rendering.
+r"""Export the actual shared DAT/GS twist trajectory for matched GIF rendering.
 
 Run each solver in a fresh CUDA Python process::
 
@@ -7,7 +7,7 @@ Run each solver in a fresh CUDA Python process::
     python gpu/newton_dat/export_twist_trajectory.py \
         --variant own --output /tmp/own_twist.npz
 
-Both runs use the shared 480-frame, 60 Hz, 2,500-vertex cloth testcase, ten
+All variants use the shared 480-frame, 60 Hz, 2,500-vertex cloth testcase, ten
 substeps and four iterations, with opposing endpoint speeds of pi/2 rad/s.
 The original graph is stepped 480 times. Host synchronization brackets each
 measured step; construction, compilation, capture, downloads, validation and
@@ -36,6 +36,13 @@ def _source_hashes(root):
         "gpu/dat_contacts.py", "gpu/dat_contact_fast.py", "gpu/dat_contact_fast.cuh",
         "gpu/dat_material_kernels.py", "gpu/dat_materials.py", "gpu/dat_stock_scene.py",
         "gpu/contact.py", "gpu/contact.cuh", "gpu/contact_exact.py", "gpu/contact_exact.cuh",
+        "gpu/solver.py", "gpu/gs.py", "gpu/kernels.py",
+        "gpu/ccd.py", "gpu/ccd.cuh", "gpu/query_groups.py", "gpu/warp_build.py",
+        "gpu/exact.cuh", "gpu/original_ccd.cuh", "gpu/original_rigid.cuh", "gpu/direct_bound.cuh",
+        "gpu/separation.cuh", "gpu/global_guess.cuh", "gpu/newton_dat/export_twist_trajectory.py",
+        "gpu/movement_box_queries.py", "gpu/contact_grouped_exact.py", "gpu/policies.py",
+        "gpu/gs_contact_fast.py", "gpu/contact_original.py", "gpu/sdf.py", "gpu/sdf_fast.py",
+        "gpu/energy.py", "gpu/cloth_math.cuh", "gpu/solid_math.cuh", "gpu/solve.cuh",
         "gpu/third_party/newton_reference/newton/_src/solvers/vbd/solver_vbd.py",
         "gpu/third_party/newton_reference/newton/_src/solvers/vbd/particle_vbd_kernels.py",
         "gpu/third_party/newton_reference/newton/examples/cloth/example_cloth_twist.py",
@@ -48,7 +55,7 @@ def _source_hashes(root):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--variant", choices=("reference", "own"), required=True)
+    parser.add_argument("--variant", choices=("reference", "own", "gs"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--frames", type=int, choices=(480,), default=480,
@@ -60,7 +67,7 @@ def main(argv=None):
     sys.path.insert(0, str(root))
     import gpu
 
-    gpu.select_newton_runtime("reference")
+    gpu.select_newton_runtime("project" if args.variant == "gs" else "reference")
     import numpy as np
     import warp as wp
     import newton.examples
@@ -76,7 +83,8 @@ def main(argv=None):
         raise RuntimeError("Trajectory export requires a CUDA device")
     source_hashes = _source_hashes(root)
     native_solver = newton.solvers.SolverVBD
-    own_module = importlib.import_module("gpu.solver_dat") if args.variant == "own" else None
+    own_module = (importlib.import_module("gpu.solver") if args.variant == "gs" else
+                  importlib.import_module("gpu.solver_dat") if args.variant == "own" else None)
     bridge_receipts = []
 
     def solver_factory(model, **stock_options):
@@ -84,7 +92,10 @@ def main(argv=None):
             return native_solver(model, **stock_options)
         from gpu.dat_stock_scene import attach_stock_ipc
 
-        bridge_receipts.append(attach_stock_ipc(model, gs_predictor="none"))
+        bridge_receipts.append(attach_stock_ipc(model, gs_predictor="colored" if args.variant == "gs" else "none"))
+        if args.variant == "gs":
+            return own_module.SolverIPC(model, iterations=ITERATIONS,
+                vertex_contact_capacity=512, edge_contact_capacity=1024)
         return own_module.SolverDAT(model, **stock_options)
 
     old_argv, old_solver = sys.argv, newton.solvers.SolverVBD
@@ -107,7 +118,7 @@ def main(argv=None):
         frame_indices = np.arange(2, 481, 2, dtype=np.int32)
         print(json.dumps({"variant": args.variant, "frames": 480, "samples": 240,
                           "gpu": device.name, "angular_velocity": example.rot_angular_velocity,
-                          "contact_precision": getattr(getattr(example.solver, "_energy_contacts", None), "precision", "upstream float32")}), flush=True)
+                          "contact_precision": getattr(example.solver.contact_backend, "grouped_precision", "float64") if args.variant == "gs" else getattr(getattr(example.solver, "_energy_contacts", None), "precision", "upstream float32")}), flush=True)
         sample = 0
         for index in range(480):
             wp.synchronize_device(device)
@@ -167,7 +178,9 @@ def main(argv=None):
             "timer": "host perf_counter immediately before example.step through following CUDA synchronization; preceding CUDA synchronization is outside the timer",
             "timer_excludes": ["setup", "compilation", "graph capture", "all position downloads", "rendering", "validation", "file output"],
             "solver_configuration": getattr(example.solver, "configuration", None),
-            "contact_precision": getattr(getattr(example.solver, "_energy_contacts", None), "precision", "upstream float32"),
+            "gs_initial_guess": "colored" if args.variant == "gs" else None,
+            "gs_parameters": dict(example.model.ipc.params) if args.variant == "gs" else None,
+            "contact_precision": getattr(example.solver.contact_backend, "grouped_precision", "float64") if args.variant == "gs" else getattr(getattr(example.solver, "_energy_contacts", None), "precision", "upstream float32"),
             "energy_formulas": ("project corotated/hinge and IPC barrier/friction, full geometric diagonal Hessian"
                                 if own_module else "pinned upstream DAT energy laws and native contact Hessian"),
             "native_triangle_material_values": np.unique(material, axis=0).tolist(),

@@ -416,8 +416,13 @@ class PredictorGraph:
 
 
 class InitialGuess:
-    def __init__(self, ccd, detector, params=None, *, use_group_queries=False):
+    def __init__(self, ccd, detector, params=None, *, use_group_queries=False, independent_colors=False):
+        if not isinstance(independent_colors, bool):
+            raise TypeError("Independent predictor colors must be a boolean")
+        if independent_colors and not use_group_queries:
+            raise ValueError("Independent predictor colors require complete grouped queries")
         self.ccd, self.contacts, self.detector = ccd, ccd.contacts, detector
+        self.independent_colors = independent_colors
         self.device, self.model = ccd.device, ccd.model
         n = self.model.particle_count
         self.start = wp.empty(n, wp.vec3, device=self.device)
@@ -446,8 +451,10 @@ class InitialGuess:
         if colored and use_group_queries:
             from .query_groups import QueryGroups
             self.query_groups = QueryGroups(self.contacts)
+        if independent_colors and (self.query_groups is None or not self.query_groups.enabled):
+            raise ValueError("Independent predictor colors require complete grouped queries")
 
-    def _sweep(self, q, colors, dt):
+    def _sweep(self, q, colors, dt, *, independent=False):
         g, c = self.graph, self.contacts
         wp.copy(self.sweep_start, q)
         wp.launch(_color_begin, 1, [self.color, self.color_condition, g.metadata, c.error], device=self.device)
@@ -456,7 +463,14 @@ class InitialGuess:
         def color_body():
             wp.launch(_color_proposal, self.model.particle_count,
                 [q, self.targets, self.model.particle_flags, colors, self.color, self.proposal], device=self.device)
-            self.ccd.accept(q, self.proposal, -1, dt, bounded=False, preserve_gap=True, query_view=query_view)
+            if independent:
+                # Each swept contact contributes a clique, so at most one
+                # corner moves per pair. Keep unrelated vertices' full steps,
+                # as CPU colored prediction does, with unchanged gap checks.
+                self.ccd.accept(q, self.proposal, -1, dt, bounded=False, preserve_gap=True,
+                    colors=colors, current_color=self.color, query_view=query_view, independent=True)
+            else:
+                self.ccd.accept(q, self.proposal, -1, dt, bounded=False, preserve_gap=True, query_view=query_view)
             wp.launch(_color_next, 1, [self.color, self.color_condition, g.metadata, c.error], device=self.device)
 
         wp.capture_while(self.color_condition, color_body)
@@ -469,6 +483,8 @@ class InitialGuess:
         level = bool(params.get("use_colored_ccd_guess_level_based", False))
         if legacy and level:
             raise ValueError("Choose one colored CCD predictor")
+        if self.independent_colors and (not legacy or level):
+            raise ValueError("Independent predictor colors require the original colored CCD mode")
         sweeps = params.get("colored_ccd_guess_iters", 0)
         fraction = params.get("colored_ccd_guess_fraction", 1.0)
         if isinstance(sweeps, bool) or not isinstance(sweeps, int) or sweeps < 0:
@@ -520,7 +536,7 @@ class InitialGuess:
         wp.launch(_sweep_begin, 1, [self.sweep, self.sweep_condition, c.error], device=self.device)
 
         def sweep_body():
-            self._sweep(q, colors, dt)
+            self._sweep(q, colors, dt, independent=self.independent_colors and legacy and not level)
             wp.launch(_sweep_next, 1,
                 [self.sweep, self.sweep_condition, sweeps, self.bits, c.error], device=self.device)
 
