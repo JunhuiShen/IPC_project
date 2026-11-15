@@ -63,6 +63,26 @@ def _membrane_energy(x,inverse,area,mu,lam):
     return area*(mu*np.sum((f-r)**2)+.5*lam*(np.prod(s)-1)**2)
 
 
+def _dat_membrane_hessian(x, inverse, area, mu, lam, role):
+    """Independent NumPy native PSD block; force still differentiates corotation."""
+    f = np.column_stack((x[1] - x[0], x[2] - x[0])).astype(np.float64) @ inverse
+    f0, f1 = f[:, 0], f[:, 1]
+    cross = np.cross(f0, f1)
+    ratio = max(np.linalg.norm(cross), 1e-10)
+    normal = cross / ratio
+    g0, g1 = np.cross(f1, normal), np.cross(normal, f0)
+    shape = np.vstack((-inverse.sum(axis=0), inverse))[role]
+    a, b = shape
+    gradient = a * g0 + b * g1
+    w = a * f1 - b * f0
+    native_lam = lam + mu
+    safe_lam = np.sign(native_lam) * max(abs(native_lam), 1e-6)
+    alpha = 1.0 + mu / safe_lam
+    r = max(0.0, native_lam * (ratio - alpha)) / ratio
+    return area * ((mu * (a*a + b*b) + r * np.dot(w, w)) * np.eye(3)
+                   + (native_lam - r) * np.outer(gradient, gradient) - r * np.outer(w, w))
+
+
 def _hinge_angle(x):
     e=x[1]-x[0];a=x[2]-x[0];b=x[3]-x[0]
     na=np.cross(e,a);nb=np.cross(b,e)
@@ -182,11 +202,12 @@ class Float32MaterialTests(unittest.TestCase):
         mass=model.particle_mass.numpy();inverse=model.tri_poses.numpy();areas=model.tri_areas.numpy()
         for p in (0,3,6):
             ti=p//3
-            packets,refs=self.packet_arrays(3,"cpu")
-            wp.launch(_triangle,3,[wp.array(x[p:p+3],wp.vec3,device="cpu"),wp.mat22(inverse[ti]),float(areas[ti]),17.3,23.1,packets,refs],device="cpu")
-            value=refs.numpy()[0]
-            f=value[:3]+mass[p]/.01**2*(inertia[p]-x[p])+forces[p]
-            h=value[3:].reshape(3,3)+np.eye(3)*mass[p]/.01**2+extra_h[p]
+            # Corotated energy force and DAT's deliberate PSD approximation
+            # are checked independently of either GPU evaluator.
+            force=-_gradient(lambda q:_membrane_energy(q,inverse[ti],float(areas[ti]),17.3,23.1),x[p:p+3])[0]
+            block=_dat_membrane_hessian(x[p:p+3],inverse[ti],float(areas[ti]),17.3,23.1,0)
+            f=force+mass[p]/.01**2*(inertia[p]-x[p])+forces[p]
+            h=block+np.eye(3)*mass[p]/.01**2+extra_h[p]
             if pins[p]:f-=7*(x[p]-targets[p]);h+=np.eye(3)*7
             expected=x[p]+.6*np.linalg.solve(h,f)
             np.testing.assert_allclose(result[p],expected,rtol=3e-6,atol=3e-6)

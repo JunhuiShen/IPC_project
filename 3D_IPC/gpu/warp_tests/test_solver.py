@@ -152,11 +152,16 @@ class SolverIntegrationTests(unittest.TestCase):
                 model = create_model(payload, device)
                 solver = SolverIPC(model)
                 solver.skip_empty_mesh_contacts = skip
-                backend, counts = solver.contact_backend, wp.zeros(3, int, device=device)
+                backend = solver.contact_backend
                 fast = backend._grouped_fast
+                # DAT energy assembly is one fused native stage; the project
+                # evaluator has fast, ordinary and exact replay stages.
+                targets = ((backend._dat_energy.kernel,) if backend._dat_energy is not None
+                           else (fast._fast, fast._ordinary, backend._resolve_grouped))
+                counts = wp.zeros(len(targets), int, device=device)
                 launch = wp.launch
                 def counted(kernel, *args, **kwargs):
-                    for stage, target in enumerate((fast._fast, fast._ordinary, backend._resolve_grouped)):
+                    for stage, target in enumerate(targets):
                         if kernel is target:launch(_mark_mesh_stage, 1, [counts, stage], device=device)
                     return launch(kernel, *args, **kwargs)
                 with patch.object(wp, "launch", side_effect=counted):
@@ -169,14 +174,15 @@ class SolverIntegrationTests(unittest.TestCase):
                         state.particle_qd.zero_()
                     counts.zero_()
                     # The empty branch must clear counts left by earlier work.
-                    fast.ordinary_count.fill_(7); backend.pending_count.fill_(9)
+                    if fast is not None:fast.ordinary_count.fill_(7)
+                    backend.pending_count.fill_(9)
                     controller.advance()
                     executed = counts.numpy()
                     if skip and height == .5:
                         np.testing.assert_array_equal(executed, 0)
                     else:
                         self.assertTrue(np.all(executed > 0))
-                    self.assertEqual(int(fast.ordinary_count.numpy()[0]), 0)
+                    if fast is not None:self.assertEqual(int(fast.ordinary_count.numpy()[0]), 0)
                     self.assertEqual(int(backend.pending_count.numpy()[0]), 0)
                     outputs.append((controller.state.particle_q.numpy(), controller.state.particle_qd.numpy()))
                 modes.append(outputs)

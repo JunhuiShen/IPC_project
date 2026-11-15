@@ -140,6 +140,7 @@ class SolverDAT(SolverVBD):
             collision_frequency_type={SolverBase.CollisionSlot.SOFT_SELF_CONTACT: SolverBase.CollisionFrequencyType.ITERATIONS},
             collision_frequency={SolverBase.CollisionSlot.SOFT_SELF_CONTACT: interval},
             enable_fast_math=False)
+        self._prepare_material_banks()
         self.proposals = wp.empty_like(model.particle_q)
         self.contact_backend = ContactBackend(model, self.trimesh_collision_info,
             d_hat=float(p["d_hat"]), k_barrier=float(p["k_barrier"]),
@@ -170,11 +171,19 @@ class SolverDAT(SolverVBD):
             "accepted_update": "upstream planar DAT", "contact_capacities": self.contact_capacities}
 
     # Reuse equations, without reusing the IPC acceptance or initialization.
-    _accumulate_particle_contact_terms = SolverIPC._accumulate_particle_contact_terms
+    _prepare_material_banks = SolverIPC._prepare_material_banks
+    _refresh_material_banks = SolverIPC._refresh_material_banks
     _solve_particle_elasticity_color = SolverIPC._solve_particle_elasticity_color
     prepare_capture = SolverIPC.prepare_capture
     reset_status = SolverIPC.reset_status
     check_status = SolverIPC.check_status
+
+    def _accumulate_particle_contact_terms(self, state_in, state_out, contacts, dt, color):
+        # Preserve the inherited iteration body while refreshing separately
+        # supplied energy banks once before its structural color sweep.
+        if color == 0:
+            self._refresh_material_banks()
+        SolverIPC._accumulate_particle_contact_terms(self, state_in, state_out, contacts, dt, color)
 
     def _collision_detection_penetration_free(self, current_state: State, *, reset_reference=True):
         if reset_reference:

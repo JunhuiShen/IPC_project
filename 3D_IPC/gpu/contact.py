@@ -1221,15 +1221,30 @@ def make_original_kernel():
 
 class ContactBackendIPC(ContactBackend):
     """Our GS backend; DAT and shared ContactBackend retain their defaults."""
-    def __init__(self,*args,grouped_precision="float64",**kwargs):
+    def __init__(self,*args,grouped_precision="float64",energy_model="project",**kwargs):
         if grouped_precision not in ("float32","float64"):
             raise ValueError("Grouped GS contact precision must be float32 or float64")
+        if energy_model not in ("project", "dat"):
+            raise ValueError("GS contact energy_model must be 'project' or 'dat'")
         super().__init__(*args,**kwargs)
         self.grouped_precision=grouped_precision
+        self.energy_model=energy_model
+        self._dat_energy=None
         self._grouped_fast=None
-        if grouped_precision=="float32":
+        if energy_model=="dat":
+            # dat_energies imports this module for the parameter type. Delay
+            # its import until construction to keep both runtimes independent.
+            from .gs_contact_energies import GsDatContact
+            self._dat_energy=GsDatContact(self,grouped_precision)
+        elif grouped_precision=="float32":
             self._grouped_fast=GsContactFast(self)
-        self._original_zero_friction=(not self.options['exact_geometry'] and self.options['friction']==0.0)
+        self.configuration={"energy_model":energy_model,
+            "geometry":"native float32 closest points" if energy_model=="dat" else "project filtered/exact geometry",
+            "normal_hessian":"frozen normal rank-one PSD" if energy_model=="dat" else "full geometric diagonal blocks",
+            "friction":"native frozen tangent PSD" if energy_model=="dat" else "project IPC friction",
+            "scalar_precision":grouped_precision,
+            "uncertain_native_geometry":"latched error" if energy_model=="dat" else "filtered/exact replay"}
+        self._original_zero_friction=(energy_model=="project" and not self.options['exact_geometry'] and self.options['friction']==0.0)
         if self._original_zero_friction:
             # These private launch settings were measured on frozen real GS
             # inputs. Shared fast_workers and cold exact arenas stay intact.
@@ -1239,6 +1254,9 @@ class ContactBackendIPC(ContactBackend):
             self._evaluate_original=make_original_kernel()
 
     def accumulate_grouped(self,positions,previous,color,forces,hessians,dt,*,colors,current_color,query_view=None):
+        if self._dat_energy is not None:
+            return self._dat_energy.accumulate(positions,previous,color,forces,hessians,dt,
+                colors=colors,current_color=current_color,query_view=query_view)
         if self._grouped_fast is not None:
             return self._grouped_fast.accumulate_grouped(positions,previous,color,forces,hessians,dt,
                 colors=colors,current_color=current_color,query_view=query_view)
@@ -1246,6 +1264,9 @@ class ContactBackendIPC(ContactBackend):
             colors=colors,current_color=current_color,query_view=query_view)
 
     def accumulate(self,positions,previous,color,forces,hessians,dt,*,colors=None,current_color=None,query_view=None):
+        if self._dat_energy is not None:
+            return self._dat_energy.accumulate(positions,previous,color,forces,hessians,dt,
+                colors=colors,current_color=current_color,query_view=query_view)
         if current_color is not None or colors is not None or query_view is not None:
             return super().accumulate(positions,previous,color,forces,hessians,dt,
                 colors=colors,current_color=current_color,query_view=query_view)

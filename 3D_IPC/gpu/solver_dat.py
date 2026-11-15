@@ -3,7 +3,10 @@
 The upstream step, prediction, detection, clipping, local inverse and velocity
 publication are inherited. The original particle-iteration AST is changed only
 at energy kernel bindings and their extra energy inputs.
-No global upstream function or kernel is modified.
+No global upstream function or kernel is modified. For the explicit
+``enable_planar_dat=False`` ablation, all collision processing is disabled:
+mesh/SDF contact energies, detection, external/owned contacts and DAT limits.
+Native inertial prediction, material/pin energies and publication remain.
 """
 from __future__ import annotations
 import ast,copy,hashlib,importlib,inspect
@@ -15,6 +18,7 @@ from . import select_newton_runtime
 select_newton_runtime('reference')
 
 from newton.solvers import SolverVBD
+from newton._src.solvers.solver import SolverBase
 from . import dat_energies as energies
 
 _ORIGINAL = Path(__file__).resolve().parent / 'third_party/newton_reference/newton/_src/solvers/vbd/solver_vbd.py'
@@ -97,12 +101,46 @@ def _energy_iteration():
     return globals_['_solve_particle_iteration'],counts
 
 
+@wp.kernel(module="unique", enable_backward=False)
+def _publish_collision_free_motion(reference: wp.array[wp.vec3], displacement: wp.array[wp.vec3],
+                                    positions: wp.array[wp.vec3]):
+    vertex=wp.tid()
+    positions[vertex]=reference[vertex]+displacement[vertex]
+
+
+def _publish_without_collisions(self,state,contacts):
+    if self.model.particle_count:
+        wp.launch(_publish_collision_free_motion,self.model.particle_count,
+            [self.pos_prev_collision_detection,self.particle_displacements,state.particle_q],device=self.device)
+
+
+def _step_without_collisions(self,state_in,state_out,control,contacts,dt,*,observables=None):
+    # Ignore externally supplied contacts and any pipeline attached after
+    # construction. These host assignments are outside the captured GPU work.
+    self.collision_pipeline=None
+    self._pipeline_contacts=None
+    self.particle_enable_self_contact=False
+    self.rigid_soft_enable_dat=False
+    self.sdf_backend=None
+    return SolverVBD.step(self,state_in,state_out,control,None,dt,observables=observables)
+
+
+def _initialize_without_collisions_zero_iterations(self,state_in,state_out,contacts,dt):
+    # Normally the first color sweep publishes state_out. Without any sweeps,
+    # explicitly publish the unrestricted predictor before velocity finalization.
+    SolverVBD._initialize_particles(self,state_in,state_out,None,dt)
+    if self.model.particle_count:
+        wp.copy(state_out.particle_q,state_in.particle_q)
+
+
 class SolverDAT(SolverVBD):
     """Original DAT controller/local solve with our material and IPC energies."""
     solver_mode='dat'
     def __init__(self,model,*,iterations=None,allow_cpu=False,energy_overrides=None,
                  vertex_contact_capacity=None,edge_contact_capacity=None,
-                 contact_precision='float32',**stock_options):
+                 contact_precision='float32',enable_planar_dat=True,**stock_options):
+        if not isinstance(enable_planar_dat,bool):
+            raise TypeError('enable_planar_dat must be a bool')
         if contact_precision not in ('float32','float64'):
             raise ValueError("contact_precision must be 'float32' or 'float64'")
         if hashlib.sha256(Path(inspect.getfile(SolverVBD)).read_bytes()).hexdigest()!=_ORIGINAL_SHA:
@@ -116,9 +154,27 @@ class SolverDAT(SolverVBD):
         if not p.get('dat_inertial_predictor',True):raise ValueError('Energy-only DAT preserves the native inertial predictor')
         if vertex_contact_capacity is not None:stock_options.setdefault('particle_vertex_contact_buffer_size',vertex_contact_capacity)
         if edge_contact_capacity is not None:stock_options.setdefault('particle_edge_contact_buffer_size',edge_contact_capacity)
+        if not enable_planar_dat:
+            # The ablation disables collision work rather than only clipping.
+            # Override caller-provided native flags before any detector/contact
+            # buffers or owned pipeline state can be initialized.
+            stock_options['particle_enable_self_contact']=False
+            stock_options['rigid_soft_enable_dat']=False
+            stock_options['collision_pipeline']=None
+            stock_options['collision_frequency_type']={slot:SolverBase.CollisionFrequencyType.NONE
+                for slot in SolverBase.CollisionSlot}
+            stock_options.pop('particle_collision_detection_interval',None)
         self.params=p;self.error=wp.zeros(1,int,device=model.device);self._failed=False
         self.ccd_backend=None;self._guess_requested=False
         super().__init__(model,iterations=iterations,**stock_options)
+        self.enable_planar_dat=enable_planar_dat
+        if not enable_planar_dat:
+            # Bind only this instance; default class lifecycle identities and
+            # energy-only substitutions remain unchanged.
+            self.step=_step_without_collisions.__get__(self,type(self))
+            self._penetration_free_truncation=_publish_without_collisions.__get__(self,type(self))
+            if self.iterations==0:
+                self._initialize_particles=_initialize_without_collisions_zero_iterations.__get__(self,type(self))
         self._energy_materials=energies.prepare(model)
         overrides={} if energy_overrides is None else dict(energy_overrides)
         self._energy_dhat=float(overrides.get('d_hat',p.get('d_hat',getattr(self,'particle_self_contact_margin',.002))))
@@ -141,10 +197,9 @@ class SolverDAT(SolverVBD):
             options=wp.get_module_options(native.make_solve_elasticity_tile(include_triangles,include_tets,two).module)
             self._set_module_options({k:options[k] for k in ('fast_math','fuse_fp') if k in options},module=self._tiled_elasticity_kernel.module)
         self.sdf_backend=None
-        if getattr(model.ipc,'collider_data',None) is not None and model.ipc.collider_data.shape[0]:
+        if enable_planar_dat and getattr(model.ipc,'collider_data',None) is not None and model.ipc.collider_data.shape[0]:
             from .sdf import SdfBackend
-            self.sdf_backend=SdfBackend(model,self.error,
-                include_curvature=bool(p.get('sdf_include_curvature',True)))
+            self.sdf_backend=SdfBackend(model,self.error)
         self.configuration={'algorithm':'unmodified native DAT execution; energy-only substitutions',
             'predictor':'native forward_step','local_solve':'native determinant/inverse',
             'source_commit':'f89e82fed043fe78d1844b26d3f289a25db03810',
@@ -158,12 +213,23 @@ class SolverDAT(SolverVBD):
                               'normal_hessian':'native rank-one approximation',
                               'friction_evaluator':'native reference routine',
                               'precision_replay':'none'}}
+        self.configuration['enable_planar_dat']=enable_planar_dat
+        self.configuration['collision_processing']=enable_planar_dat
+        self.configuration['mesh_collision_detection']=bool(self.particle_enable_self_contact)
+        self.configuration['energy_contact']['enabled']=self._energy_contacts is not None
+        self.configuration['motion_acceptance']=('native planar DAT and epoch radius cap' if enable_planar_dat
+            else 'unrestricted publication; all collision processing and DAT limits disabled')
+        if not enable_planar_dat:
+            self.configuration['algorithm']='native VBD with collision processing disabled; own material/pin energies'
+            self.configuration['energy_sdf']={'enabled':False,'reason':'all collision processing disabled'}
         if self.sdf_backend is not None:
             self.configuration['energy_sdf']={
                 'precision':self.sdf_backend.precision,
                 'include_curvature':bool(self.sdf_backend.params.include_curvature),
-                'geometry_and_material_transport':'float64',
-                'friction_hessian':'existing frozen PSD approximation'}
+                'normal_hessian':'full spatial curvature' if self.sdf_backend.params.include_curvature else 'PSD normal outer product',
+                'geometry':'float32 with binary64 replay' if self.sdf_backend.precision=='float32' else 'binary64',
+                'material_transport':'binary64',
+                'friction_hessian':'frozen tangent PSD; zero at zero slip'}
     def _accumulate_own_sdf(self,state,dt,color):
         if self.sdf_backend is not None:
             self.sdf_backend.prepare(dt)

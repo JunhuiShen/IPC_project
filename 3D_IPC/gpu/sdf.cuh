@@ -24,7 +24,8 @@ struct SdfCollider {
 };
 struct SdfParameters {
     double stiffness=0,epsilon=0,dt=1.0/300.0,friction=0,eps_v=.001;
-    // Deformable DAT requests full curvature; legacy/rigid callers may disable it.
+    // Both GPU solvers default to the PSD normal approximation E'' grad(phi)
+    // grad(phi)^T. Full spatial curvature is an explicit diagnostic option.
     unsigned include_curvature=0;
 };
 struct SdfOutput {
@@ -177,11 +178,15 @@ IPC_RES_SDF_HD inline SdfOutput evaluate_sdf_contact(const SdfCollider* collider
                 u[k]+=P[3*k+l]*displacement[l];
             }
             const double slip=norm(u),eps_u=parameters.dt*parameters.eps_v;
-            const double mollifier=slip<eps_u?2/eps_u-slip/(eps_u*eps_u):1/slip;
-            const double scale=parameters.dt*parameters.dt*parameters.friction*normal_force*mollifier;
-            for(int k=0;k<3;++k) {
-                out.friction_gradient[k]=scale*u[k];
-                for(int l=0;l<3;++l)out.friction_hessian[3*k+l]=scale*P[3*k+l];
+            // Match DAT compute_friction: freeze the contact frame and slip
+            // scalar in the PSD tangent matrix, with zero matrix at zero slip.
+            if(slip>0) {
+                const double mollifier=slip<eps_u?2/eps_u-slip/(eps_u*eps_u):1/slip;
+                const double scale=parameters.dt*parameters.dt*parameters.friction*normal_force*mollifier;
+                for(int k=0;k<3;++k) {
+                    out.friction_gradient[k]=scale*u[k];
+                    for(int l=0;l<3;++l)out.friction_hessian[3*k+l]=scale*P[3*k+l];
+                }
             }
         }
     }
@@ -399,9 +404,15 @@ IPC_SDF_FAST_HD inline int evaluate(const Input& in,const double* bank,int strid
             const float length=sqrtf((slip[0]*slip[0]+slip[1]*slip[1])+slip[2]*slip[2]);
             const float eps_u=dt*eps_v;
             if(!finite32(length)||!finite32(eps_u)||eps_u<FLT_MIN)return 6;
-            const float mollifier=length<eps_u?(2.0f-length/eps_u)/eps_u:1.0f/length;
-            friction_scale=mu*normal_force*mollifier;
-            if(!finite32(friction_scale)||(friction_scale==0&&length>0))return 6;
+            if(length>0) {
+                const float mollifier=length<eps_u?(2.0f-length/eps_u)/eps_u:1.0f/length;
+                friction_scale=mu*normal_force*mollifier;
+                if(!finite32(friction_scale)||friction_scale==0)return 6;
+            } else {
+                // A nonzero represented slip can underflow in the float32
+                // norm. Replay before taking DAT's exact-zero-slip branch.
+                if(slip[0]!=0||slip[1]!=0||slip[2]!=0)return 6;
+            }
         }
     }
     for(int a=0;a<3;++a) {

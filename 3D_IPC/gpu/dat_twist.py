@@ -171,9 +171,26 @@ def attach_stock_ipc(model,*,fps=60,substeps=10,iterations=4,d_hat=.002,k_barrie
     return receipt
 
 
-def make_example_type(original_example, angular_velocity=ANGULAR_VELOCITY):
+class _DisabledCollisionPipeline:
+    """Keep stock-scene metadata available without executing its pipeline."""
+    def __init__(self, original):
+        self.original = original
+
+    def collide(self, *args, **kwargs):
+        return None
+
+    def contacts(self):
+        return None
+
+    def __getattr__(self, name):
+        return getattr(self.original, name)
+
+
+def make_example_type(original_example, angular_velocity=ANGULAR_VELOCITY, *, enable_collision_pipeline=True):
     if not math.isfinite(angular_velocity) or angular_velocity <= 0:
         raise ValueError("Twist angular velocity must be finite and positive")
+    if not isinstance(enable_collision_pipeline, bool):
+        raise TypeError("enable_collision_pipeline must be a bool")
 
     class DatClothTwist(original_example):
         def capture(self):
@@ -185,12 +202,18 @@ def make_example_type(original_example, angular_velocity=ANGULAR_VELOCITY):
             # The original scene assigns opposite rotation axes to its edges.
             # Set their common speed before simulate() captures kernel inputs.
             self.rot_angular_velocity = float(angular_velocity)
+            if not enable_collision_pipeline:
+                if self.model.shape_count != 0:
+                    raise RuntimeError("The shared cloth benchmark must have no collision shapes")
+                if not isinstance(self.collision_pipeline, _DisabledCollisionPipeline):
+                    self.collision_pipeline = _DisabledCollisionPipeline(self.collision_pipeline)
+                self.contacts = None
             return super().capture()
 
     return DatClothTwist
 
 
-def run(arguments):
+def run(arguments, *, enable_collision_pipeline=True):
     import newton.examples
     from newton.examples.cloth.example_cloth_twist import Example
 
@@ -200,7 +223,7 @@ def run(arguments):
         parser = newton.examples.create_parser()
         parser.set_defaults(num_frames=DEFAULT_FRAMES)
         viewer, args = newton.examples.init(parser)
-        example = make_example_type(Example)(viewer, args)
+        example = make_example_type(Example, enable_collision_pipeline=enable_collision_pipeline)(viewer, args)
         newton.examples.run(example, args)
         return 0
     except SystemExit as result:
@@ -209,7 +232,7 @@ def run(arguments):
         sys.argv = original_arguments
 
 
-def run_own(arguments):
+def run_own(arguments, *, enable_planar_dat=True):
     from .solver_dat import SolverDAT
     import newton.solvers
 
@@ -218,13 +241,13 @@ def run_own(arguments):
 
     def energy_solver(model, **stock_options):
         attach_stock_ipc(model, gs_predictor="none")
-        solver = SolverDAT(model, **stock_options)
+        solver = SolverDAT(model, enable_planar_dat=enable_planar_dat, **stock_options)
         solvers.append(solver)
         return solver
 
     try:
         newton.solvers.SolverVBD = energy_solver
-        result = run(arguments)
+        result = run(arguments, enable_collision_pipeline=enable_planar_dat)
         if result:
             return result
         # Check our latched numerical errors outside the official timer.

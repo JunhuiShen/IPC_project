@@ -59,9 +59,21 @@ def main(argv=None):
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--frames", type=int, choices=(480,), default=480,
                         help="the requested comparison is fixed at 480 simulation frames")
+    parser.add_argument("--no-planar-dat", action="store_true",
+                        help="for --variant own, disable all collision processing, contact energies and DAT motion limits")
+    parser.add_argument("--vertex-contact-capacity", type=int,
+                        help="override the per-vertex triangle-contact capacity")
+    parser.add_argument("--edge-contact-capacity", type=int,
+                        help="override the per-edge contact capacity")
     args = parser.parse_args(argv)
     if args.output.suffix != ".npz":
         parser.error("output must have an .npz suffix")
+    if args.no_planar_dat and args.variant != "own":
+        parser.error("--no-planar-dat requires --variant own")
+    if any(value is not None and value <= 0 for value in
+           (args.vertex_contact_capacity, args.edge_contact_capacity)):
+        parser.error("contact capacities must be positive integers")
+    collision_processing_enabled = not (args.variant == "own" and args.no_planar_dat)
     root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(root))
     import gpu
@@ -87,6 +99,10 @@ def main(argv=None):
     bridge_receipts = []
 
     def solver_factory(model, **stock_options):
+        if args.vertex_contact_capacity is not None:
+            stock_options["particle_vertex_contact_buffer_size"] = args.vertex_contact_capacity
+        if args.edge_contact_capacity is not None:
+            stock_options["particle_edge_contact_buffer_size"] = args.edge_contact_capacity
         if own_module is None:
             return native_solver(model, **stock_options)
         from gpu.dat_twist import attach_stock_ipc
@@ -94,8 +110,9 @@ def main(argv=None):
         bridge_receipts.append(attach_stock_ipc(model, gs_predictor="colored" if args.variant == "gs" else "none"))
         if args.variant == "gs":
             return own_module.SolverIPC(model, iterations=ITERATIONS,
-                vertex_contact_capacity=512, edge_contact_capacity=1024)
-        return own_module.SolverDAT(model, **stock_options)
+                vertex_contact_capacity=args.vertex_contact_capacity or 512,
+                edge_contact_capacity=args.edge_contact_capacity or 1024)
+        return own_module.SolverDAT(model, enable_planar_dat=not args.no_planar_dat, **stock_options)
 
     old_argv, old_solver = sys.argv, newton.solvers.SolverVBD
     try:
@@ -104,7 +121,8 @@ def main(argv=None):
         viewer, example_args = newton.examples.init(newton.examples.create_parser())
         module = importlib.import_module("newton.examples.cloth.example_cloth_twist")
         newton.solvers.SolverVBD = solver_factory
-        example = make_example_type(module.Example)(viewer, example_args)
+        example = make_example_type(module.Example,
+            enable_collision_pipeline=collision_processing_enabled)(viewer, example_args)
         wp.synchronize_device(device)
         faces = np.asarray(example.faces, np.int32).reshape(-1, 3)
         initial_positions = example.model.particle_q.numpy().astype(np.float32, copy=False)
@@ -115,9 +133,14 @@ def main(argv=None):
         positions = np.empty((240, 2500, 3), np.float32)
         step_seconds = np.empty(480, np.float64)
         frame_indices = np.arange(2, 481, 2, dtype=np.int32)
+        contact_precision = (None if not collision_processing_enabled else
+            getattr(example.solver.contact_backend, "grouped_precision", "float64") if args.variant == "gs" else
+            getattr(getattr(example.solver, "_energy_contacts", None), "precision", "upstream float32"))
         print(json.dumps({"variant": args.variant, "frames": 480, "samples": 240,
                           "gpu": device.name, "angular_velocity": example.rot_angular_velocity,
-                          "contact_precision": getattr(example.solver.contact_backend, "grouped_precision", "float64") if args.variant == "gs" else getattr(getattr(example.solver, "_energy_contacts", None), "precision", "upstream float32")}), flush=True)
+                          "planar_dat_enabled": None if args.variant == "gs" else not args.no_planar_dat,
+                          "collision_processing_enabled": collision_processing_enabled,
+                          "contact_precision": contact_precision}), flush=True)
         sample = 0
         for index in range(480):
             wp.synchronize_device(device)
@@ -142,14 +165,18 @@ def main(argv=None):
         velocity = example.state_0.particle_qd.numpy()
         if not np.isfinite(velocity).all() or not np.isfinite(step_seconds).all():
             raise RuntimeError("Nonfinite final velocities or timing results")
-        collision_info = example.solver.trimesh_collision_info
-        final_rows = {"scope": "final stored collision rows only; earlier frame peaks are not measured"}
-        for name, counts, capacities in (
-            ("point_triangle", collision_info.vertex_colliding_triangles_count,
-             collision_info.vertex_colliding_triangles_buffer_sizes),
-            ("directed_edge_edge", collision_info.edge_colliding_edges_count,
-             collision_info.edge_colliding_edges_buffer_sizes),
-        ):
+        collision_info = getattr(example.solver, "trimesh_collision_info", None)
+        final_rows = {"enabled": collision_info is not None,
+                      "scope": "final stored collision rows only; earlier frame peaks are not measured"}
+        collision_rows = ()
+        if collision_info is not None:
+            collision_rows = (
+                ("point_triangle", collision_info.vertex_colliding_triangles_count,
+                 collision_info.vertex_colliding_triangles_buffer_sizes),
+                ("directed_edge_edge", collision_info.edge_colliding_edges_count,
+                 collision_info.edge_colliding_edges_buffer_sizes),
+            )
+        for name, counts, capacities in collision_rows:
             raw, capacity = counts.numpy(), capacities.numpy()
             final_rows[name] = {"rows": int(raw.size), "max_raw_count": int(raw.max()) if raw.size else 0,
                                 "min_capacity": int(capacity.min()) if capacity.size else 0,
@@ -161,6 +188,11 @@ def main(argv=None):
         elapsed = float(step_seconds.sum())
         metadata = {
             "schema": 1, "variant": args.variant, "device": device.alias, "gpu": device.name,
+            "planar_dat_enabled": None if args.variant == "gs" else not args.no_planar_dat,
+            "collision_processing_enabled": collision_processing_enabled,
+            "mesh_collision_energies_enabled": collision_processing_enabled,
+            "requested_contact_capacities": {"vertex": args.vertex_contact_capacity,
+                                             "edge": args.edge_contact_capacity},
             "warp_version": wp.__version__, "frames": 480, "simulation_fps": 60,
             "simulation_seconds": 8.0, "substeps": 10, "iterations_per_substep": 4,
             "particles": 2500, "triangles": 4802, "edges": example.model.edge_count,
@@ -179,9 +211,11 @@ def main(argv=None):
             "solver_configuration": getattr(example.solver, "configuration", None),
             "gs_initial_guess": "colored" if args.variant == "gs" else None,
             "gs_parameters": dict(example.model.ipc.params) if args.variant == "gs" else None,
-            "contact_precision": getattr(example.solver.contact_backend, "grouped_precision", "float64") if args.variant == "gs" else getattr(getattr(example.solver, "_energy_contacts", None), "precision", "upstream float32"),
+            "contact_precision": contact_precision,
             "energy_formulas": (
-                "project corotated/hinge and IPC barrier/friction, full geometric diagonal Hessian"
+                "project corotated/hinge and pins; all collision processing and energies disabled"
+                if not collision_processing_enabled else
+                "project corotated/hinge and IPC barrier; native PSD material Hessian, rank-one contact Hessian and native friction"
                 if args.variant == "gs" else
                 "project corotated/hinge and IPC barrier; native PSD material Hessian, rank-one contact Hessian and native friction"
                 if args.variant == "own" else

@@ -17,12 +17,16 @@ from newton._src.geometry.tri_mesh_collision import TriMeshCollisionInfo
 
 from . import contact, sdf
 from .contact import FullPacket, decode_candidate
+from .gs_contact_energies import make_full_evaluator
 from .ccd import round_inside
 from .warp_build import configure_module as _configure
 
 
 HEADERS=("rigid.cuh",)
 BODY_HEADERS=("rigid.cuh", "original_rigid.cuh")
+
+_dat_contact_full = make_full_evaluator()
+_dat_contact_full64 = make_full_evaluator("float64")
 
 _HELPERS=r"""
 #ifndef IPC_WARP_RIGID_F32_BOUNDARY
@@ -163,7 +167,10 @@ def rotation_inertia(previous_q: wp.quat,previous_omega: wp.vec3,omega: wp.vec3,
         p.friction_weights[i]=packet[1+i];
         for(int k=0;k<3;++k)p.gradients[i][k]=packet[8+3*i+k];
         if(rotational){double x[3];ipc_warp_rigid::vec(references.data[vertex],x);
-            ipc_gpu::solver::rigid_reference_derivatives(x,kin,p.jacobians[i],p.curvature[i]);}
+            ipc_gpu::solver::rigid_reference_derivatives(x,kin,p.jacobians[i],p.curvature[i]);
+            // The DAT contact matrix freezes contact geometry. Its rigid
+            // pullback uses J^T H J, preserving that PSD approximation.
+            if(approximate)for(int axis=0;axis<3;++axis)for(int k=0;k<9;++k)p.curvature[i][axis][k]=0;}
     }
     for(int k=0;k<3;++k)p.friction_gradient[k]=packet[164+k];
     for(int k=0;k<9;++k)p.friction_hessian[k]=packet[167+k];
@@ -183,14 +190,16 @@ def rotation_inertia(previous_q: wp.quat,previous_omega: wp.vec3,omega: wp.vec3,
 """)
 def _contact(packet: FullPacket,nodes: wp.vec4i,owners: wp.array[int],references: wp.array[wp.vec3],
               body: int,previous_q: wp.quat,omega: wp.vec3,dt: float,kind: int,rotational: int,normal_scale: float,
+              approximate: int,
               gradient: wp.ref[wp.vec3],hessian: wp.ref[wp.mat33]): ...
 
 
 @wp.func
 def contact_terms(packet: FullPacket,nodes: wp.vec4i,owners: wp.array[int],references: wp.array[wp.vec3],
-                  body: int,previous_q: wp.quat,omega: wp.vec3,dt: float,kind: int,rotational: int,normal_scale: float):
+                  body: int,previous_q: wp.quat,omega: wp.vec3,dt: float,kind: int,rotational: int,normal_scale: float,
+                  approximate: int = 0):
     g=wp.vec3();h=wp.mat33()
-    _contact(packet,nodes,owners,references,body,previous_q,omega,dt,kind,rotational,normal_scale,g,h)
+    _contact(packet,nodes,owners,references,body,previous_q,omega,dt,kind,rotational,normal_scale,approximate,g,h)
     return g,h
 
 
@@ -450,6 +459,7 @@ class BodyData:
     use_ccd: int
     use_sdf: int
     exact_geometry: int
+    use_dat_energies: int
 
 
 @wp.func_native(r"""
@@ -640,18 +650,26 @@ def _system(data: BodyData, body: int, rotational: int, worker: int):
     for slot in range(data.offsets[body], data.offsets[body + 1]):
         candidate = data.candidates[data.incidence[slot]]
         nodes, kind = contact.decode_candidate(candidate, data.triangles, data.edges, data.info)
-        packet = contact.evaluate_full(data.q, data.previous, nodes, kind, data.contact_parameters)
+        if (kind == 1
+                and data.owners[nodes[0]] != body and data.owners[nodes[2]] == body):
+            # Native EE rows evaluate each side in its own direction. With
+            # parallel overlapping edges those directions can select different
+            # minimizers. Put this body's edge first, then use one coherent
+            # frozen frame for its gradient and PSD local pullback.
+            nodes = wp.vec4i(nodes[2], nodes[3], nodes[0], nodes[1])
+        packet = FullPacket()
+        if data.use_dat_energies == 2:
+            packet = _dat_contact_full64(data.q, data.previous, nodes, kind, data.contact_parameters)
+        else:
+            packet = _dat_contact_full(data.q, data.previous, nodes, kind, data.contact_parameters)
         status = int(packet[176])
-        if status == 2 and data.exact_geometry != 0:
-            packet = contact.evaluate_full_exact(data.q, data.previous, nodes, kind, data.contact_parameters,
-                data.words, data.slots, worker)
-            status = int(packet[176])
         if status != 0:
             wp.atomic_max(data.error, 0, 100 + status)
         else:
             g, h = contact_terms(packet, nodes, data.owners, data.reference, body,
                 old_q, data.omega[body], data.dt, kind, rotational,
-                wp.float32(data.contact_parameters.k_barrier) * data.dt * data.dt)
+                wp.float32(data.contact_parameters.k_barrier) * data.dt * data.dt,
+                1)
             gradient += g
             hessian += h
     for pin in range(data.pin_bodies.shape[0]):
@@ -839,6 +857,8 @@ class BodySolver:
 
     def _data(self, state, dt):
         m, ipc, c, p, s = self.model, self.model.ipc, self.solver.contact_backend, self.solver.params, self.solver.sdf_backend
+        if c.energy_model != "dat":
+            raise ValueError("Rigid GS requires the shared DAT energy model")
         data = BodyData()
         data.q, data.previous = state.particle_q, self.solver.particle_q_prev
         data.poses, data.previous_pose, data.previous_velocity = state.body_q, self.previous_pose, self.previous_velocity
@@ -852,11 +872,15 @@ class BodySolver:
         data.candidates, data.incidence, data.offsets = c.candidate_ids, self.incidence, self.offsets
         data.colors, data.color = self.colors, self.color
         data.contact_parameters = contact.parameters(dt=dt, **c.options)
+        # Native DAT's stiffness is a float32 material field for both
+        # scalar-precision choices. Match it before the rigid pullback.
+        data.contact_parameters.k_barrier = float(np.float32(c.options["k_barrier"]))
         data.colliders, data.sdf_parameters = s.colliders, s.params
         data.words, data.slots, data.error = c.words, c.slots, self.solver.error
         data.dt, data.damping, data.gravity_y = dt, p["damping"], 0.0
         data.kpin, data.radius, data.angle = p["kpin"], self.radius, self.angle
         data.use_ccd, data.use_sdf, data.exact_geometry = int(p["use_ccd"]), int(s.enabled), int(p["exact_computation_fallback"])
+        data.use_dat_energies = 2 if c.grouped_precision == "float64" else 1
         return data
 
     def iterate(self, state, dt):

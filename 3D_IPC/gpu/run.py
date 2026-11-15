@@ -237,6 +237,8 @@ def main(argv=None):
                         help="our GS/CCD, DAT with our energies, or exact upstream DAT")
     parser.add_argument("--stock-cloth-twist", action="store_true",
                         help="for DAT, run the original 2,500-vertex cloth example with our energy terms")
+    parser.add_argument("--no-planar-dat", action="store_true",
+                        help="for our-energy DAT, disable collision processing, contact energies and DAT motion limits")
     parser.add_argument("--vertex-contact-capacity", type=_positive, default=128,
                         help="persistent triangle-contact row capacity per mesh vertex")
     parser.add_argument("--edge-contact-capacity", type=_positive, default=256,
@@ -251,6 +253,8 @@ def main(argv=None):
     parser.add_argument("--check", action="store_true")
     options, native = parser.parse_known_args(argv)
     try:
+        if options.no_planar_dat and options.solver != "dat":
+            raise ValueError("--no-planar-dat requires --solver dat")
         if options.solver in ("dat", "dat-reference"):
             from gpu import select_newton_runtime
             select_newton_runtime("reference")
@@ -277,21 +281,27 @@ def main(argv=None):
                 forwarded.append("--test")
             if options.stock_cloth_twist:
                 from .dat_twist import run_own as run
-                return run(forwarded)
+                return run(forwarded, enable_planar_dat=not options.no_planar_dat)
             from .dat_twist import run as run_twist
             return run_twist(forwarded)
         scene = importlib.import_module("gpu.scene")
         solver_module = importlib.import_module("gpu.solver" if options.solver == "ipc" else "gpu.solver_dat")
         with scene.SceneExporter(scene.find_exporter(options.scene_exporter), native) as exporter:
+            if options.no_planar_dat:
+                # Include the acceptance ablation in restart signatures while
+                # leaving existing default-run checkpoint signatures unchanged.
+                exporter.scene["params"]["enable_planar_dat"] = False
+                exporter.scene["params"]["collision_processing"] = False
             model = scene.create_model(exporter.scene, device)
             solver_class = solver_module.SolverIPC if options.solver == "ipc" else solver_module.SolverDAT
             # Native scenes supply their interaction distance. Use the same
             # margin/gap ratio as the official twist; do not inherit Newton's
             # generic 0.2-unit margin or translate GS movement boxes into DAT.
             dhat = float(model.ipc.params["d_hat"])
-            solver_options = {"particle_enable_self_contact": True,
+            solver_options = {"particle_enable_self_contact": not options.no_planar_dat,
                               "particle_self_contact_margin": dhat,
-                              "particle_self_contact_gap": 0.75 * dhat} if options.solver == "dat" else {}
+                              "particle_self_contact_gap": 0.75 * dhat,
+                              "enable_planar_dat": not options.no_planar_dat} if options.solver == "dat" else {}
             solver = solver_class(model, iterations=int(model.ipc.params["max_global_iters"]),
                                   vertex_contact_capacity=options.vertex_contact_capacity,
                                   edge_contact_capacity=options.edge_contact_capacity, **solver_options)

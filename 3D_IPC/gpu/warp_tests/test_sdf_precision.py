@@ -1,8 +1,9 @@
-"""Independent full-curvature SDF checks for the compact physical evaluator.
+"""Independent PSD and full-curvature checks for the shared SDF evaluator.
 
-The unchanged 42-double diagnostic evaluator is an oracle. Friction-free
+The binary64 diagnostic evaluator is an arithmetic oracle. Friction-free
 forces and Hessians are also checked against finite differences of a separate
-NumPy penalty energy, including the tangential curvature of curved obstacles.
+NumPy penalty energy; PSD normal matrices and frozen tangent friction are
+checked separately, including against DAT's native friction callback.
 """
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ if _gpu_path not in gpu.__path__:
     gpu.__path__.append(_gpu_path)
 
 from gpu import sdf
+from newton._src.solvers.vbd import particle_vbd_kernels as stock
 
 
 @wp.kernel(module="unique", enable_backward=False)
@@ -49,6 +51,19 @@ sdf.configure_module(_oracle)
 sdf.configure_fast_module(_compact)
 
 
+@wp.kernel(module="unique", enable_backward=False)
+def _native_friction(normals: wp.array[wp.vec3], motion: wp.array[wp.vec3],
+                     normal_force: wp.array[float], friction: float, eps_u: float,
+                     forces: wp.array[wp.vec3], hessians: wp.array[wp.mat33]):
+    i = wp.tid()
+    first, second = stock.orthonormal_basis(normals[i])
+    tangent = stock.mat32(first[0], second[0], first[1], second[1], first[2], second[2])
+    slip = wp.transpose(tangent) * motion[i]
+    f, h = stock.compute_friction(friction, normal_force[i], tangent, slip, eps_u)
+    forces[i] = f
+    hessians[i] = h
+
+
 def _record(kind, *, point=(0, 0, 0), axis=(0, 1, 0), radius=1.0,
             previous_pose=None, current_pose=None):
     result = {"kind": kind, "point": list(point), "axis": list(axis), "radius": radius}
@@ -67,7 +82,8 @@ class SdfPrecisionTests(unittest.TestCase):
 
     def fixture(self, device, points, records, *, previous=None, friction=0.0,
                 epsilon=.05, stiffness=370.0, dt=.031, eps_v=.1,
-                colors=None, flags=None, solid=None, surface=None):
+                colors=None, flags=None, solid=None, surface=None,
+                include_curvature=True):
         points = np.asarray(points, np.float32).reshape(-1, 3)
         n = len(points)
         if previous is None:
@@ -90,7 +106,7 @@ class SdfPrecisionTests(unittest.TestCase):
                                  int, device=device)),
         )
         error = wp.zeros(1, int, device=device)
-        backend = sdf.SdfBackend(model, error, include_curvature=True)
+        backend = sdf.SdfBackend(model, error, include_curvature=include_curvature)
         q = wp.array(points, wp.vec3, device=device)
         old = wp.array(np.asarray(previous, np.float32), wp.vec3, device=device)
         backend.prepare(dt)
@@ -203,6 +219,70 @@ class SdfPrecisionTests(unittest.TestCase):
                         self.assertGreater(abs(tangent @ hessian @ tangent), 1.0)
                         np.testing.assert_allclose(tangent @ h[0] @ tangent,
                                                    tangent @ hessian @ tangent, rtol=5e-4, atol=2e-4)
+
+    def test_default_normal_approximation_preserves_force_and_is_psd_on_curved_obstacles(self):
+        # Differentiating E(phi) once fixes the force. Its PSD approximation
+        # keeps E'' grad(phi) grad(phi)^T and omits E' Hessian(phi), which is
+        # negative in obstacle tangent directions in the active region.
+        for device in self.devices:
+            for kind in ("plane", "sphere", "cylinder"):
+                for epsilon, gap in ((.05, .02), (.05, -.03), (0., -.03)):
+                    point = ([.2, gap, .1] if kind == "plane" else
+                             [1. + gap, .0 if kind == "sphere" else .2, 0.])
+                    data = self.fixture(device, [point], [_record(kind)], epsilon=epsilon,
+                                        include_curvature=None)
+                    self.assertEqual(int(data.backend.params.include_curvature), 0)
+                    f, h, _ = self.assert_oracle(data)
+                    packets, _, _, _ = self.evaluate(data)
+                    phi = float(packets[0, 0])
+                    normal = packets[0, 1:4]
+                    second = 370. if epsilon <= 0 or phi <= 0 else 3. * 370. * (epsilon - phi) / epsilon
+                    expected = second * np.outer(normal, normal)
+                    self.assert_norm(h[0], expected)
+                    self.assertGreaterEqual(float(np.linalg.eigvalsh(h[0]).min()), -2e-5)
+                    data.backend.params.include_curvature = 1
+                    full_f, full_h, _ = self.assert_oracle(data)
+                    self.assert_norm(f, full_f)
+                    if kind != "plane":
+                        self.assertLess(float(np.linalg.eigvalsh(full_h[0]).min()), -1.)
+
+    def test_sdf_friction_matches_native_frozen_tangent_psd_and_zero_slip(self):
+        for device in self.devices:
+            for dt in (.01, .031):
+                for kind in ("plane", "sphere", "cylinder"):
+                    point = ([.2, .02, .1] if kind == "plane" else
+                             [1.02, .0 if kind == "sphere" else .2, 0.])
+                    for slip in (0., dt * .1 * .3, dt * .1 * 2.):
+                        previous = np.asarray([point], np.float32)
+                        previous[:, 2] -= slip
+                        data = self.fixture(device, [point], [_record(kind)], previous=previous,
+                                            dt=dt, friction=.2, include_curvature=None)
+                        packets, _, _, _ = self.evaluate(data)
+                        actual_f, actual_h, _ = self.assert_oracle(data)
+                        normal = packets[:, 1:4].copy()
+                        normal /= np.linalg.norm(normal, axis=1)[:, None]
+                        load = -np.sum(packets[:, 16:19] * normal, axis=1)
+                        motion = data.q.numpy() - data.previous.numpy()
+                        nf = wp.empty(1, wp.vec3, device=device)
+                        nh = wp.empty(1, wp.mat33, device=device)
+                        wp.launch(_native_friction, 1,
+                                  [wp.array(normal.astype(np.float32), wp.vec3, device=device),
+                                   wp.array(motion, wp.vec3, device=device),
+                                   wp.array(load.astype(np.float32), float, device=device),
+                                   .2, dt * .1, nf, nh], device=device)
+                        expected_f, expected_h = nf.numpy(), nh.numpy()
+                        # Packet friction is dt^2 weighted; physical assembly
+                        # removes exactly that factor for both solver paths.
+                        self.assert_norm(-packets[:, 28:31] / (dt * dt), expected_f)
+                        self.assert_norm(packets[:, 31:40].reshape(-1, 3, 3) / (dt * dt), expected_h)
+                        data.backend.params.friction = 0.
+                        base_f, base_h = self.accumulate(data)
+                        self.assert_norm(actual_f - base_f, expected_f)
+                        self.assert_norm(actual_h - base_h, expected_h)
+                        self.assertGreaterEqual(float(np.linalg.eigvalsh(expected_h[0]).min()), -2e-5)
+                        if slip == 0.:
+                            self.assertFalse(np.any(expected_f))
+                            self.assertFalse(np.any(expected_h))
 
     def test_active_penetrated_transition_and_inactive_friction_regimes(self):
         for device in self.devices:

@@ -1,4 +1,4 @@
-"""Full-curvature SDF integration through the unchanged DAT controller."""
+"""Shared PSD SDF integration through the unchanged DAT controller."""
 import unittest
 
 import numpy as np
@@ -34,10 +34,10 @@ class DatSdfIntegrationTests(unittest.TestCase):
     def setUpClass(cls):
         wp.init()
 
-    def test_dat_defaults_to_full_curvature_and_resolves_sphere_contact(self):
+    def test_dat_defaults_to_psd_normal_hessian_and_resolves_sphere_contact(self):
         for device in [wp.get_device('cpu'), *wp.get_cuda_devices()]:
             model, solver = fixture(device)
-            self.assertEqual(solver.sdf_backend.params.include_curvature, 1)
+            self.assertEqual(solver.sdf_backend.params.include_curvature, 0)
             self.assertEqual(solver.sdf_backend.precision, 'float32')
             before, after = model.state(), model.state()
             initial = before.particle_q.numpy().copy()

@@ -1,4 +1,8 @@
-"""Our SDF union/penalty/friction law on Newton float32 particle/pose data."""
+"""Shared GS/DAT SDF penalty with PSD normal and frozen-tangent friction matrices.
+
+The penalty force and moving-material slip are unchanged by the normal Hessian
+approximation. Full spatial curvature remains an explicit diagnostic option.
+"""
 
 from functools import cache
 import math
@@ -396,7 +400,11 @@ def make_replay_fast():
 
 
 class SdfBackend:
-    """Persistent prepared collider bank and graph-safe color accumulation."""
+    """Prepared collider bank and graph-safe shared GS/DAT SDF assembly.
+
+    By default the normal Hessian omits spatial curvature and friction uses
+    the native DAT frozen tangent matrix, including its zero-slip zero matrix.
+    """
     def __init__(self,model,error,*,include_curvature=None,precision=None):
         self.model,self.error=model,error
         self.device=model.device

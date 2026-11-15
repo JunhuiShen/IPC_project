@@ -3,7 +3,8 @@
 Newton provides the project Model/State, adjacency, BVHs and timestep. This
 module owns movement budgets, contact-independent colors, level schedules,
 local material proposals and the GS hooks. Shared material equations remain
-in energy.py so DAT can import them without loading the project runtime.
+in energy.py and dat_energies.py; GS and DAT share the material laws and
+PSD approximations without importing either runtime-dependent controller.
 """
 from __future__ import annotations
 
@@ -38,6 +39,7 @@ from .ccd import CcdBackend
 from .contact import decode_candidate
 from .query_groups import QueryGroups
 from .sdf import SdfBackend
+from . import dat_energies as material_energy
 
 
 # Cooperative material reductions and proposals.
@@ -52,6 +54,54 @@ from .sdf import SdfBackend
 
 
 TILE_SIZE = 16
+
+
+@wp.func
+def _membrane_terms(face: int, role: int, pos: wp.array[wp.vec3], previous: wp.array[wp.vec3],
+                    triangles: wp.array2d[int], inverse: wp.mat22, area: float,
+                    mu: float, lam: float, dt: float):
+    # Share DAT's corotated force, native PSD quasi-Newton Hessian and
+    # degeneracy guards. Material damping is omitted by both energy adapters.
+    return material_energy.evaluate_corotated_force_native_hessian(
+        face, role, pos, previous, triangles, inverse, area, mu, lam, 0.0, dt)
+
+
+@wp.func
+def _bending_terms(edge: int, role: int, pos: wp.array[wp.vec3], previous: wp.array[wp.vec3],
+                   edges: wp.array2d[int], rest_angles: wp.array[float], rest_lengths: wp.array[float],
+                   properties: wp.array2d[float], coefficients: wp.array[float], dt: float):
+    # The GS bank stores our unweighted kB, just like DAT's own_stiffness.
+    # Native E=(ke*L0/2)*delta_theta^2; ours E=kB*c_e*delta_theta^2.
+    if edges[edge, 0] < 0 or edges[edge, 1] < 0 or properties[edge, 0] <= 0.0 or coefficients[edge] <= 0.0:
+        return wp.vec3(0.0), wp.mat33(0.0)
+    length = rest_lengths[edge]
+    if not wp.isfinite(length) or length <= 0.0:
+        return wp.vec3(0.0), wp.mat33(0.0)
+    stiffness = ((2.0 * properties[edge, 0]) * coefficients[edge]) / length
+    if not wp.isfinite(stiffness) or stiffness <= 0.0:
+        return wp.vec3(0.0), wp.mat33(0.0)
+    return material_energy.stock.evaluate_dihedral_angle_based_bending_force_hessian(
+        edge, role, pos, previous, edges, rest_angles, rest_lengths, stiffness, 0.0, dt)
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def _mask_material_banks(original_triangles: wp.array2d[float], original_bending: wp.array2d[float],
+                         own_triangles: wp.array2d[float], own_bending: wp.array[float],
+                         mask_triangles: int, mask_bending: int,
+                         effective_triangles: wp.array2d[float], effective_bending: wp.array[float]):
+    element = wp.tid()
+    if mask_triangles != 0 and element < own_triangles.shape[0]:
+        active = original_triangles[element, 0] > 0.0 or original_triangles[element, 1] > 0.0
+        for parameter in range(2):
+            value = float(0.0)
+            if active:
+                value = own_triangles[element, parameter]
+            effective_triangles[element, parameter] = value
+    if mask_bending != 0 and element < own_bending.shape[0]:
+        value = float(0.0)
+        if original_bending[element, 0] > 0.0:
+            value = own_bending[element]
+        effective_bending[element] = value
 
 
 @wp.func_native("""
@@ -183,9 +233,8 @@ def make_solve_elasticity_tile(include_triangles: bool, include_tets: bool, two_
                 while at<face_count:
                     face,role=get_vertex_adjacent_face_id_order(particle_adjacency,particle,at)
                     if tri_materials[face,0]>0.0 or tri_materials[face,1]>0.0:
-                        value=energy.triangle(pos[tri_indices[face,0]],pos[tri_indices[face,1]],pos[tri_indices[face,2]],
-                            tri_poses[face],tri_areas[face],tri_materials[face,0],tri_materials[face,1],role)
-                        ef,eh=energy.unpack(value)
+                        ef,eh=_membrane_terms(face,role,pos,pos_prev,tri_indices,
+                            tri_poses[face],tri_areas[face],tri_materials[face,0],tri_materials[face,1],dt)
                         f+=ef
                         h+=eh
                     at+=TILE_SIZE
@@ -196,13 +245,8 @@ def make_solve_elasticity_tile(include_triangles: bool, include_tets: bool, two_
                 while edge_at<edge_count:
                     edge,edge_role=get_vertex_adjacent_edge_id_order(particle_adjacency,particle,edge_at)
                     if bending_coefficients[edge]>0.0 and edge_bending_properties[edge,0]>0.0:
-                        native_role=edge_role+2
-                        if edge_role>=2:
-                            native_role=edge_role-2
-                        bend=energy.hinge(pos[edge_indices[edge,2]],pos[edge_indices[edge,3]],
-                            pos[edge_indices[edge,0]],pos[edge_indices[edge,1]],bending_coefficients[edge],
-                            edge_rest_angles[edge],edge_bending_properties[edge,0],native_role)
-                        bf,bh=energy.unpack(bend)
+                        bf,bh=_bending_terms(edge,edge_role,pos,pos_prev,edge_indices,
+                            edge_rest_angles,edge_rest_length,edge_bending_properties,bending_coefficients,dt)
                         f+=bf
                         h+=bh
                     edge_at+=TILE_SIZE
@@ -265,8 +309,8 @@ def solve_elasticity_scalar(
     for at in range(face_count):
         face,role=get_vertex_adjacent_face_id_order(particle_adjacency,particle,at)
         if tri_materials[face,0]>0.0 or tri_materials[face,1]>0.0:
-            ef,eh=energy.unpack(energy.triangle(pos[tri_indices[face,0]],pos[tri_indices[face,1]],pos[tri_indices[face,2]],
-                tri_poses[face],tri_areas[face],tri_materials[face,0],tri_materials[face,1],role))
+            ef,eh=_membrane_terms(face,role,pos,pos_prev,tri_indices,
+                tri_poses[face],tri_areas[face],tri_materials[face,0],tri_materials[face,1],dt)
             f+=ef
             h+=eh
     edge_count=wp.int32(0)
@@ -275,11 +319,8 @@ def solve_elasticity_scalar(
     for edge_at in range(edge_count):
         edge,edge_role=get_vertex_adjacent_edge_id_order(particle_adjacency,particle,edge_at)
         if bending_coefficients[edge]>0.0 and edge_bending_properties[edge,0]>0.0:
-            native_role=edge_role+2
-            if edge_role>=2:native_role=edge_role-2
-            bf,bh=energy.unpack(energy.hinge(pos[edge_indices[edge,2]],pos[edge_indices[edge,3]],
-                pos[edge_indices[edge,0]],pos[edge_indices[edge,1]],bending_coefficients[edge],edge_rest_angles[edge],
-                edge_bending_properties[edge,0],native_role))
+            bf,bh=_bending_terms(edge,edge_role,pos,pos_prev,edge_indices,
+                edge_rest_angles,edge_rest_length,edge_bending_properties,bending_coefficients,dt)
             f+=bf
             h+=bh
     tet_count=wp.int32(0)
@@ -1011,9 +1052,8 @@ def make_dynamic_elasticity(include_triangles: bool, include_tets: bool, tiled: 
                     while face_at < face_count:
                         face, role = get_vertex_adjacent_face_id_order(adjacency, particle, face_at)
                         if tri_materials[face, 0] > 0.0 or tri_materials[face, 1] > 0.0:
-                            value = energy.triangle(pos[triangles[face, 0]], pos[triangles[face, 1]], pos[triangles[face, 2]],
-                                tri_poses[face], tri_areas[face], tri_materials[face, 0], tri_materials[face, 1], role)
-                            f, h = energy.unpack(value)
+                            f, h = _membrane_terms(face, role, pos, pos_prev, triangles,
+                                tri_poses[face], tri_areas[face], tri_materials[face, 0], tri_materials[face, 1], dt)
                             force += f
                             hessian += h
                         face_at += step
@@ -1024,12 +1064,8 @@ def make_dynamic_elasticity(include_triangles: bool, include_tets: bool, tiled: 
                     while edge_at < edge_count:
                         edge, role = get_vertex_adjacent_edge_id_order(adjacency, particle, edge_at)
                         if bending_coefficients[edge] > 0.0 and bending[edge, 0] > 0.0:
-                            native_role = role + 2
-                            if role >= 2:
-                                native_role = role - 2
-                            value = energy.hinge(pos[edges[edge, 2]], pos[edges[edge, 3]], pos[edges[edge, 0]], pos[edges[edge, 1]],
-                                bending_coefficients[edge], rest_angles[edge], bending[edge, 0], native_role)
-                            f, h = energy.unpack(value)
+                            f, h = _bending_terms(edge, role, pos, pos_prev, edges,
+                                rest_angles, rest_lengths, bending, bending_coefficients, dt)
                             force += f
                             hessian += h
                         edge_at += step
@@ -1164,16 +1200,14 @@ class GsSchedule:
         wp.capture_while(self.condition, color_body)
 
     def solve_elasticity(self, solver, state_in, dt):
-        m, ipc = self.model, self.model.ipc
-        # Match the mapped stock-scene bending bank used by DAT + our energies.
-        bending = getattr(ipc, "stock_energy_edge_properties", m.edge_bending_properties)
+        m, materials = self.model, solver._energy_materials
         arguments = [dt, self.order, self.offsets, self.current_color, solver.particle_q_prev,
             state_in.particle_q, m.particle_mass, solver.inertia, m.particle_flags,
-            m.tri_indices, m.tri_poses, m.tri_materials, m.tri_areas,
-            m.edge_indices, m.edge_rest_angle, m.edge_rest_length, bending,
+            m.tri_indices, m.tri_poses, solver._energy_triangle_materials, m.tri_areas,
+            m.edge_indices, m.edge_rest_angle, m.edge_rest_length, solver._energy_bending,
             m.tet_indices, m.tet_poses, m.tet_materials, solver.particle_adjacency,
-            solver.particle_forces, solver.particle_hessians, ipc.pin_targets, ipc.pinned,
-            float(solver.params["kpin"]), ipc.edge_coefficient, ipc.tet_grad_N, ipc.tet_measure,
+            solver.particle_forces, solver.particle_hessians, materials.pin_targets, materials.pin_mask,
+            materials.pin_stiffness, materials.edge_coefficients, materials.tet_gradients, materials.tet_measures,
             float(solver.params["damping"]), self.material_slot_budget]
         # The fixed-size pool reads the active count on device. No launch
         # dimension or color count is copied to the host during a timestep.
@@ -1243,10 +1277,11 @@ class SolverIPC(SolverVBD):
             collision_frequency_type={SolverBase.CollisionSlot.SOFT_SELF_CONTACT: SolverBase.CollisionFrequencyType.ITERATIONS},
             collision_frequency={SolverBase.CollisionSlot.SOFT_SELF_CONTACT: int(p["node_box_update_count"])},
             enable_fast_math=False)
+        self._prepare_material_banks()
         self.proposals = wp.empty_like(model.particle_q)
         from .contact import ContactBackendIPC
         self.contact_backend = ContactBackendIPC(model, self.trimesh_collision_info,
-            grouped_precision=p.get("gs_contact_precision", "float32") if self._contact_aware_gs else "float64",
+            grouped_precision=p.get("gs_contact_precision", "float32"), energy_model="dat",
             d_hat=float(p["d_hat"]), k_barrier=float(p["k_barrier"]),
             friction=float(p["friction_coefficient"]), eps_v=float(p["friction_velocity_epsilon"]),
             exact_geometry=bool(p["exact_computation_fallback"]), node_body=model.ipc.node_body, error=self.error,
@@ -1273,6 +1308,22 @@ class SolverIPC(SolverVBD):
                 if p.get("use_colored_ccd_guess_level_based", False):
                     graph.prepare_parallel_levels(ParallelLevels(graph))
         self.sdf_backend = SdfBackend(model, self.error)
+        self.configuration = {
+            "algorithm": "project GS schedule and CCD acceptance",
+            "energy_membrane": {"force": "corotated", "hessian": "native PSD approximation",
+                                "singular_geometry": "native area-ratio floor"},
+            "energy_bending": {"evaluator": "native with stiffness mapping", "degeneracy": "native guards"},
+            "energy_solid": "shared corotated force and frozen-rotation PSD Hessian",
+            "energy_contact": dict(self.contact_backend.configuration),
+            "energy_sdf": {"precision": self.sdf_backend.precision,
+                           "include_curvature": bool(self.sdf_backend.params.include_curvature),
+                           "normal_hessian": "full spatial curvature" if self.sdf_backend.params.include_curvature else "PSD normal outer product",
+                           "geometry": "float32 with binary64 replay" if self.sdf_backend.precision == "float32" else "binary64",
+                           "material_transport": "binary64",
+                           "friction_hessian": "frozen tangent PSD; zero at zero slip"},
+            "rigid_contact_hessian": "frozen contact geometry and Jacobian PSD pullback",
+            "local_solve": "project rank-revealing solve and configured damping",
+        }
         include_tets = model.tet_count > 0
         include_triangles = bool(np.any(model.ipc.tri_active.numpy())) or bool(np.any(model.ipc.edge_active.numpy()))
         self._ipc_particles_per_block = 1 if include_tets else 2
@@ -1295,6 +1346,42 @@ class SolverIPC(SolverVBD):
             from .rigid import BodySolver
             self._rigid = BodySolver(self)
             self._query_radius = max(self._query_radius, self._rigid.query_radius)
+
+    def _prepare_material_banks(self):
+        model = self.model
+        # Read the same immutable material banks as DAT. The reshape aliases
+        # the stiffness array, so GPU-authored material updates remain visible.
+        self._energy_materials = material_energy.prepare(model)
+        materials = self._energy_materials
+        # DAT guards activity with original model slots before reading separate
+        # energy banks. Model materials/topology are immutable scene inputs;
+        # separately supplied own banks may be updated on the GPU between sweeps.
+        self._mask_triangle_materials = False
+        if hasattr(model.ipc, "dat_triangle_materials") and model.tri_count:
+            original_triangles = model.tri_materials.numpy()
+            self._mask_triangle_materials = bool(np.any(
+                (original_triangles[:, 0] <= 0.0) & (original_triangles[:, 1] <= 0.0)))
+        self._mask_bending_materials = False
+        if hasattr(model.ipc, "dat_bending_stiffness") and model.edge_count:
+            # Zero rest coefficients already suppress boundary/non-hinge rows
+            # in both adapters, regardless of future own-stiffness updates.
+            self._mask_bending_materials = bool(np.any(
+                (model.edge_bending_properties.numpy()[:, 0] <= 0.0) &
+                (materials.edge_coefficients.numpy() > 0.0)))
+        self._energy_triangle_materials = (wp.empty_like(materials.triangle_materials)
+            if self._mask_triangle_materials else materials.triangle_materials)
+        self._energy_bending_stiffness = (wp.empty_like(materials.bending_stiffness)
+            if self._mask_bending_materials else materials.bending_stiffness)
+        self._energy_bending = self._energy_bending_stiffness.reshape((model.edge_count, 1))
+        self._refresh_material_banks()
+
+    def _refresh_material_banks(self):
+        if self._mask_triangle_materials or self._mask_bending_materials:
+            m, materials = self.model, self._energy_materials
+            wp.launch(_mask_material_banks, max(m.tri_count, m.edge_count),
+                [m.tri_materials, m.edge_bending_properties, materials.triangle_materials,
+                 materials.bending_stiffness, int(self._mask_triangle_materials), int(self._mask_bending_materials),
+                 self._energy_triangle_materials, self._energy_bending_stiffness], device=self.device)
 
     # The public timestep is inherited; these hooks supply our model and GS order.
     def _pre_initialization_detection(self, state_in, dt):
@@ -1354,6 +1441,7 @@ class SolverIPC(SolverVBD):
         return iter_num > 0 and iter_num % int(self.params["node_box_update_count"]) == 0
 
     def _solve_particle_iteration(self, state_in, state_out, contacts, dt):
+        self._refresh_material_banks()
         gs = self._gs_schedule
         if gs is None:
             return super()._solve_particle_iteration(state_in, state_out, contacts, dt)
@@ -1409,18 +1497,15 @@ class SolverIPC(SolverVBD):
     def _solve_particle_elasticity_color(self, state_in, state_out, contacts, dt, color):
         if not self._active_color_counts[color]:
             return
-        m, ipc = self.model, self.model.ipc
+        m, materials = self.model, self._energy_materials
         arguments = [dt, m.particle_color_groups[color], self.particle_q_prev,
             state_in.particle_q, m.particle_mass, self.inertia, m.particle_flags,
-            m.tri_indices, m.tri_poses, m.tri_materials, m.tri_areas,
-            # The stock-scene bridge supplies own-energy bending coefficients
-            # mapped to the imported DAT scene's physical hinge stiffness.
-            m.edge_indices, m.edge_rest_angle, m.edge_rest_length,
-            getattr(ipc, "stock_energy_edge_properties", m.edge_bending_properties),
+            m.tri_indices, m.tri_poses, self._energy_triangle_materials, m.tri_areas,
+            m.edge_indices, m.edge_rest_angle, m.edge_rest_length, self._energy_bending,
             m.tet_indices, m.tet_poses, m.tet_materials, self.particle_adjacency,
             self.particle_forces, self.particle_hessians,
-            ipc.pin_targets, ipc.pinned, float(self.params["kpin"]), ipc.edge_coefficient,
-            ipc.tet_grad_N, ipc.tet_measure, float(self.params["damping"])]
+            materials.pin_targets, materials.pin_mask, materials.pin_stiffness, materials.edge_coefficients,
+            materials.tet_gradients, materials.tet_measures, float(self.params["damping"])]
         count = m.particle_color_groups[color].size
         if self.device.is_cuda:
             per_block = self._ipc_particles_per_block
